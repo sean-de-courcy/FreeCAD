@@ -222,6 +222,12 @@ SketchObject::SketchObject() : geoLastId(0)
                       "Sketch",
                       (App::PropertyType)(App::Prop_None | App::Prop_Hidden),
                       "Sketch external geometry type: 0 = projection, 1 = intersection, 2 = both.");
+    ADD_PROPERTY_TYPE(ExternalFrames,
+                      (),
+                      "Sketch",
+                      (App::PropertyType)(App::Prop_Output | App::Prop_ReadOnly | App::Prop_Hidden),
+                      "The frames of the external geometry's sources, where any is in another "
+                      "container (FreeCAD-CH ops#331)");
     ADD_PROPERTY_TYPE(FullyConstrained,
                       (false),
                       "Sketch",
@@ -316,6 +322,11 @@ short SketchObject::mustExecute() const
     if (ExternalGeometry.isTouched())
         return 1;
     if (ExternalGeo.isTouched())
+        return 1;
+    // Moving a source's container, or moving the source or this sketch into another one, touches
+    // neither this sketch nor its links: run when a link's frame has changed since (ops#331, as
+    // ops#318's attachments). A moved container is itself touched, so the next recompute asks
+    if (externalFramesChanged())
         return 1;
     return Part2DObject::mustExecute();
 }
@@ -1608,6 +1619,12 @@ void SketchObject::onDocumentRestored()
     try {
         onSketchRestore();
         Part::Part2DObject::onDocumentRestored();
+        // Built in other frames: saved before ops#331 (the source in another container read as
+        // if in this one), or a source moved without a recompute. Queued, so the GUI asks for a
+        // recompute (a touch would be purged when the restore ends)
+        if (externalFramesChanged(/*restored*/ true)) {
+            getDocument()->addRecomputeObject(this);
+        }
     }
     catch (...) {
     }

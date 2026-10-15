@@ -814,3 +814,203 @@ class TestStudio(unittest.TestCase):
         only = sketch(sketchy, "Only", xyPlane(sketchy), (0, 0, 1, 1))
         sketchy.Tip = only
         self.assertFalse(PartDesign.isStudioProfile(sketchy, padL, top))
+
+    # ---------------------------------------------------------------- D-t4: a moved Body (1b-1)
+
+    def movedSibling(self):
+        """D-t4's model at the top level, at one origin: B, a 40x40x10 pad; A uses it four ways:
+        a pad of B's sketch, a pattern along B's front bottom edge, a sketch attached to B's top
+        face, and a sketch on A's XZ plane taking B's top front edge as external geometry."""
+        a = self.doc.addObject("PartDesign::Body", "A")
+        b = self.doc.addObject("PartDesign::Body", "B")
+        sb = sketch(b, "SB", xyPlane(b), (0, 0, 40, 40))
+        padB = pad(b, "PadB", sb, 10)
+        sa = sketch(a, "SA", xyPlane(a), (0, 50, 10, 60))
+        padA = pad(a, "PadA", sa, 10)
+        self.doc.recompute()
+        across = pad(a, "Across", sb, 2)  # a pad of B's sketch
+        pattern = a.newObject("PartDesign::LinearPattern", "Pattern")
+        pattern.Originals = [padA]
+        pattern.Direction = (padB, [edgeAt(padB, (0, 0, 0), (40, 0, 0))])
+        pattern.Length = 20
+        pattern.Occurrences = 2
+        a.Tip = pattern
+        attached = a.newObject("Sketcher::SketchObject", "Attached")
+        attached.AttachmentSupport = [(padB, faceAt(padB, 10))]
+        attached.MapMode = "FlatFace"
+        ext = a.newObject("Sketcher::SketchObject", "Ext")
+        ext.AttachmentSupport = [(a.Origin.OriginFeatures[4], "")]  # XZ_Plane
+        ext.MapMode = "FlatFace"
+        self.doc.recompute()
+        ext.addExternal(padB.Name, edgeAt(padB, (0, 0, 10), (40, 0, 10)))
+        self.assertSettled()
+        return a, b, padB, across, pattern, attached, ext
+
+    def externalEnds(self, ext):
+        """The global end points of ext's first external edge (after the H and V axes)."""
+        line = ext.ExternalGeo[2]
+        placement = ext.getGlobalPlacement()
+        return sorted(
+            tuple(round(c, 6) + 0.0 for c in placement.multVec(p))
+            for p in (line.StartPoint, line.EndPoint)
+        )
+
+    def assertFollows(self, b, across, pattern, attached, ext, offset):
+        """At one origin with B offset by `offset` from A, or apart (a failing pad and pattern)."""
+        apart = offset != V(0, 0, 0)
+        for feature in (across, pattern):
+            self.assertEqual(feature.isValid(), not apart, feature.Name)
+            if apart:
+                self.assertIn("placed elsewhere", feature.getStatusString(), feature.Name)
+        self.assertTrue(attached.isValid(), attached.getStatusString())
+        self.assertTrue(ext.isValid(), ext.getStatusString())
+        base = attached.getGlobalPlacement().Base
+        self.assertEqual(
+            tuple(round(c, 6) + 0.0 for c in base), tuple(V(0, 0, 10) + offset), "attached"
+        )
+        start, end = V(0, 0, 10) + offset, V(40, 0, 10) + offset
+        self.assertEqual(
+            self.externalEnds(ext),
+            sorted(tuple(round(c, 6) + 0.0 for c in p) for p in (start, end)),
+            "external edge",
+        )
+
+    def testMovedSiblingFailsOrFollows(self):
+        """D-t4 (revised for 1b, ops#325): B moved by (10, 0, 0) after A linked it, then a plain
+        doc.recompute(), no touch: A's pad of B's sketch and its pattern along B's edge fail
+        loudly (they read B's geometry as if it were in A); the sketch attached to B's face and
+        the external edge of B follow B (ops#318's linkFrame; the external edge was left at its
+        old place, ops#331). Set back, all recover."""
+        a, b, padB, across, pattern, attached, ext = self.movedSibling()
+        self.assertFollows(b, across, pattern, attached, ext, V(0, 0, 0))
+        b.Placement = App.Placement(V(10, 0, 0), App.Rotation())
+        self.doc.recompute()
+        self.assertFollows(b, across, pattern, attached, ext, V(10, 0, 0))
+        b.Placement = App.Placement()
+        self.doc.recompute()
+        self.assertFollows(b, across, pattern, attached, ext, V(0, 0, 0))
+        self.assertSettled()
+
+    def testSiblingMovedIntoAPlacedPart(self):
+        """D-t4's variant (Opus M1, p4): B moved into an App::Part placed (0, 0, 5)."""
+        a, b, padB, across, pattern, attached, ext = self.movedSibling()
+        part = self.doc.addObject("App::Part", "Part")
+        part.Placement = App.Placement(V(0, 0, 5), App.Rotation())
+        part.addObject(b)
+        self.doc.recompute()
+        self.assertFollows(b, across, pattern, attached, ext, V(0, 0, 5))
+        part.removeObject(b)
+        self.doc.recompute()
+        self.assertFollows(b, across, pattern, attached, ext, V(0, 0, 0))
+
+    def testMovedSiblingAcrossAReopen(self):
+        """The failure and the external edge's frames are saved: after a reopen, B set back
+        recovers the pattern, and B moved again moves the external edge."""
+        a, b, padB, across, pattern, attached, ext = self.movedSibling()
+        b.Placement = App.Placement(V(10, 0, 0), App.Rotation())
+        self.doc.recompute()
+        path = os.path.join(tempfile.mkdtemp(), "moved.FCStd")
+        self.doc.saveAs(path)
+        App.closeDocument(self.doc.Name)
+        self.doc = App.openDocument(path)
+        get = self.doc.getObject
+        objects = [get(n) for n in ("B", "Across", "Pattern", "Attached", "Ext")]
+        b = objects[0]
+        self.doc.recompute()
+        self.assertFollows(*objects, V(10, 0, 0))
+        b.Placement = App.Placement(V(0, 0, 0), App.Rotation())
+        self.doc.recompute()
+        self.assertFollows(*objects, V(0, 0, 0))
+        b.Placement = App.Placement(V(0, 0, 3), App.Rotation())
+        self.doc.recompute()
+        self.assertFollows(*objects, V(0, 0, 3))
+
+    def testOtherPlacersInABodyPlacedElsewhereFail(self):
+        """1b-1 (b): every PartDesign link read as if in the feature's Body fails loudly when its
+        Body is placed elsewhere: a polar pattern's axis, a mirror plane, a draft's neutral plane
+        and pull direction, a MultiTransform step's direction (probe_b, B turned 90 degrees: each
+        kept its result, read in B's own frame). Set back, all recover."""
+        a = self.doc.addObject("PartDesign::Body", "A")
+        b = self.doc.addObject("PartDesign::Body", "B")
+        padB = pad(b, "PadB", sketch(b, "SB", xyPlane(b), (20, 0, 40, 5)), 5)
+        padA = pad(a, "PadA", sketch(a, "SA", xyPlane(a), (0, 0, 10, 10)), 10)
+        self.doc.recompute()
+        zEdge = edgeAt(padB, (20, 0, 0), (20, 0, 5))
+        xEdge = edgeAt(padB, (20, 0, 0), (40, 0, 0))
+        top = faceAt(padB, 5)
+        polar = a.newObject("PartDesign::PolarPattern", "Polar")
+        polar.Originals = [padA]
+        polar.Axis = (padB, [zEdge])
+        polar.Angle = 90
+        polar.Occurrences = 2
+        a.Tip = polar
+        mirror = a.newObject("PartDesign::Mirrored", "Mirror")
+        mirror.Originals = [padA]
+        mirror.MirrorPlane = (padB, [top])
+        a.Tip = mirror
+        self.doc.recompute()
+        draft = a.newObject("PartDesign::Draft", "Draft")
+        side = next(
+            f"Face{i}"
+            for i, f in enumerate(mirror.Shape.Faces, 1)
+            if abs(f.normalAt(0, 0).x + 1) < 1e-9
+        )
+        draft.Base = (mirror, [side])
+        draft.Angle = 5
+        draft.NeutralPlane = (padB, [top])
+        draft.PullDirection = (padB, [zEdge])
+        a.Tip = draft
+        multi = a.newObject("PartDesign::MultiTransform", "Multi")
+        multi.Originals = [padA]
+        step = a.newObject("PartDesign::LinearPattern", "Step")
+        step.Direction = (padB, [xEdge])
+        step.Length = 30
+        step.Occurrences = 2
+        multi.Transformations = [step]
+        a.Tip = multi
+        self.assertSettled()
+        features = (polar, mirror, draft, multi)
+        b.Placement = App.Placement(V(0, 0, 0), App.Rotation(V(0, 1, 0), 90))
+        self.doc.recompute()
+        for feature in features:
+            self.assertFalse(feature.isValid(), feature.Name)
+            self.assertIn("placed elsewhere", feature.getStatusString(), feature.Name)
+        b.Placement = App.Placement()
+        self.doc.recompute()
+        for feature in features:
+            self.assertTrue(feature.isValid(), feature.Name + ": " + feature.getStatusString())
+        self.assertSettled()
+
+    def testBodylessSketchFollowsAMovedBody(self):
+        """ops#324: a sketch in no Body, in an App::Part placed (0, 0, 5) beside Body B, takes
+        B's top front edge as external geometry. B moved by (10, 0, 0) in the Part: the edge
+        follows (it stayed, read in B's frame); set back, it returns. The Part's own placement
+        changes nothing."""
+        part = self.doc.addObject("App::Part", "Part")
+        part.Placement = App.Placement(V(0, 0, 5), App.Rotation())
+        b = self.doc.addObject("PartDesign::Body", "B")
+        part.addObject(b)
+        padB = pad(b, "PadB", sketch(b, "SB", xyPlane(b), (0, 0, 40, 40)), 10)
+        ext = self.doc.addObject("Sketcher::SketchObject", "Ext")
+        part.addObject(ext)
+        ext.Placement = App.Placement(V(0, 0, 0), App.Rotation(V(1, 0, 0), 90))  # the XZ plane
+        self.doc.recompute()
+        ext.addExternal(padB.Name, edgeAt(padB, (0, 0, 10), (40, 0, 10)))
+        self.assertSettled()
+
+        def ends(offset):
+            points = (V(0, 0, 15) + offset, V(40, 0, 15) + offset)
+            return sorted(tuple(round(c, 6) + 0.0 for c in p) for p in points)
+
+        self.assertEqual(self.externalEnds(ext), ends(V(0, 0, 0)))
+        b.Placement = App.Placement(V(10, 0, 0), App.Rotation())
+        self.doc.recompute()
+        self.assertTrue(ext.isValid(), ext.getStatusString())
+        self.assertEqual(self.externalEnds(ext), ends(V(10, 0, 0)))
+        part.Placement = App.Placement(V(0, 0, 8), App.Rotation())
+        self.doc.recompute()
+        self.assertEqual(self.externalEnds(ext), ends(V(10, 0, 3)))
+        b.Placement = App.Placement()
+        self.doc.recompute()
+        self.assertEqual(self.externalEnds(ext), ends(V(0, 0, 3)))
+        self.assertSettled()

@@ -79,9 +79,11 @@
 #include <App/ObjectIdentifier.h>
 #include <App/Datums.h>
 #include <App/Part.h>
+#include <App/RecomputeThread.h>
 #include <Base/Console.h>
 #include <Base/Tools.h>
 #include <Base/Vector3D.h>
+#include <Mod/Part/App/Attacher.h>
 #include <Mod/Part/App/BodyBase.h>
 #include <Mod/Part/App/DatumFeature.h>
 
@@ -268,6 +270,85 @@ int SketchObject::toggleExternalGeometryFlag(
         rebuildExternalGeometry();
     }
     return 0;
+}
+
+namespace
+{
+bool isIdentityFrame(const Base::Placement& frame)
+{
+    return frame.isIdentity(Precision::Confusion());
+}
+}  // namespace
+
+// What a link reads is in its source's container: a feature's shape and a datum's placement in the
+// group holding it, an element of a coordinate system with that system's placement applied
+// (DatumElement::getBasePoint, getDirection), so in the system's container. Mapped into this
+// sketch's container as an attachment's links are (ops#318, Attacher::linkFrame); before, it was
+// read as if it were there (ops#331: another Body's edge left behind when that Body moved;
+// ops#324: a sketch outside any Body). Within one container: the identity.
+Base::Placement SketchObject::externalFrame(const App::DocumentObject* obj,
+                                            const std::string& sub) const
+{
+    if (!obj) {
+        return {};
+    }
+    if (auto lcs = dynamic_cast<const App::LocalCoordinateSystem*>(obj); lcs && !sub.empty()) {
+        if (auto element = lcs->getDatumElement(sub.c_str())) {
+            obj = element;
+        }
+    }
+    if (auto element = dynamic_cast<const App::DatumElement*>(obj)) {
+        if (auto lcs = element->getLCS()) {
+            obj = lcs;
+        }
+    }
+    return Attacher::AttachEngine::linkFrame(this, obj);
+}
+
+std::vector<Base::Placement> SketchObject::externalFrames() const
+{
+    const auto& objs = ExternalGeometry.getValues();
+    const auto& subs = ExternalGeometry.getSubValues();
+    std::vector<Base::Placement> frames;
+    frames.reserve(objs.size());
+    bool across = false;
+    for (std::size_t i = 0; i < objs.size(); ++i) {
+        frames.push_back(externalFrame(objs[i], i < subs.size() ? subs[i] : std::string()));
+        across = across || !isIdentityFrame(frames.back());
+    }
+    if (!across) {
+        frames.clear();
+    }
+    return frames;
+}
+
+bool SketchObject::externalFramesChanged(bool restored) const
+{
+    if (ExternalGeometry.getSize() == 0 && ExternalFrames.getSize() == 0) {
+        return false;
+    }
+    // While it recomputes its geometry is built anew. Asked beside a recompute on another thread
+    // (the GUI's poll while the worker recomputes): the walk would read in-lists and groups the
+    // recompute changes; the recompute asks again itself, on its own thread (as
+    // AttachExtension::linkFramesChanged)
+    auto doc = getDocument();
+    if (!restored
+        && (isRecomputing() || !doc || doc->testStatus(App::Document::Restoring)
+            || (doc->testStatus(App::Document::Recomputing)
+                && !App::isRecomputingOnThisThread(doc)))) {
+        return false;
+    }
+    const auto current = externalFrames();
+    const auto& built = ExternalFrames.getValues();
+    if (current.size() != built.size()) {
+        return true;
+    }
+    for (std::size_t i = 0; i < current.size(); ++i) {
+        if (!current[i].isSame(built[i], Precision::Confusion())) {
+            return true;
+        }
+    }
+    return false;
 }
 // clang-format off
 
@@ -1249,6 +1330,11 @@ int SketchObject::addExternal(App::DocumentObject* Obj, const char* SubName, boo
                 gp_Dir(dX.x, dX.y, dX.z)
             );
             sketchPlane.SetPosition(sketchAx3);
+            // the sub-shapes are in Obj's container (FreeCAD-CH ops#331)
+            const Base::Placement frame = externalFrame(Obj, SubName ? SubName : "");
+            if (!isIdentityFrame(frame)) {
+                sketchPlane.Transform(Part::TopoShape::convert(frame.inverse().toMatrix()));
+            }
         }
         for (const auto& subShape : shape.getSubShapes(shapeType)) {
             int idx = wholeShape.findShape(subShape);
@@ -3544,6 +3630,15 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
                     "Datum feature type is not yet supported as external geometry for a sketch");
             }
 
+            // read in its source's container: into this sketch's (FreeCAD-CH ops#331)
+            if (!refSubShape.IsNull()) {
+                const Base::Placement frame = externalFrame(Obj, SubElement);
+                if (!isIdentityFrame(frame)) {
+                    refSubShape = refSubShape.Moved(
+                        TopLoc_Location(Part::TopoShape::convert(frame.toMatrix())));
+                }
+            }
+
             if (projection && !refSubShape.IsNull()) {
                 switch (refSubShape.ShapeType()) {
                 case TopAbs_FACE: {
@@ -4320,6 +4415,14 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
             auto pending = pendingTypeRepair();
             newTypes.insert(newTypes.end(), pending.begin(), pending.end());
             ExternalTypes.setValues(newTypes);
+        }
+    }
+
+    // the frames the geometry was built with, for mustExecute() (ops#331)
+    {
+        auto frames = externalFrames();
+        if (frames != ExternalFrames.getValues()) {
+            ExternalFrames.setValues(std::move(frames));
         }
     }
 

@@ -101,6 +101,10 @@ public:
     Sketcher::PropertyConstraintList Constraints;
     App::PropertyLinkSubList ExternalGeometry;
     App::PropertyIntegerList ExternalTypes;
+    /// The frames the external geometry was built with: per link, the placement that maps its
+    /// source's container into this sketch's (Attacher::linkFrame); empty when every source is
+    /// in this sketch's container (FreeCAD-CH ops#331)
+    App::PropertyPlacementList ExternalFrames;
     App::PropertyLinkListHidden Exports;
     Part::PropertyGeometryList ExternalGeo;
     App::PropertyBool FullyConstrained;
@@ -369,6 +373,15 @@ public:
     // and leaves the geometry as it is: on open only, since it compares with the saved geometry.
     void rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd = std::nullopt,
                                  bool typesOnly = false);
+    /// The placement that maps what the external link (obj, sub) reads into this sketch's
+    /// container, the identity within it (FreeCAD-CH ops#331)
+    Base::Placement externalFrame(const App::DocumentObject* obj, const std::string& sub) const;
+    /// externalFrame() of every link, empty when all are the identity (as ExternalFrames)
+    std::vector<Base::Placement> externalFrames() const;
+    /// Whether a link's frame differs from the one its geometry was built with (ExternalFrames);
+    /// restored: asked from onDocumentRestored(), else never during a restore or a recompute on
+    /// another thread
+    bool externalFramesChanged(bool restored = false) const;
     /// returns the number of external Geometry entities
     int getExternalGeometryCount() const
     {
