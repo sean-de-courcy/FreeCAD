@@ -77,6 +77,21 @@ public:
 
     short mustExecute() const override;
 
+    /**
+     * The properties whose links place this feature's result: each is read in its own Body's
+     * coordinates as if they were this feature's (FreeCAD-CH ops#308 T4, ops#325). None by
+     * default. What a feature is attached to isn't one: the attacher maps it (ops#318).
+     */
+    virtual std::vector<const char*> placerProperties() const
+    {
+        return {};
+    }
+    /**
+     * The first placer link (placerProperties()) in another Body placed elsewhere than this
+     * feature's, as that Body, and the property in `property`; nullptr if there is none
+     */
+    virtual const Body* placerBodyElsewhere(const char** property = nullptr) const;
+
     /// Check whether the given feature is a datum feature
     static bool isDatum(const App::DocumentObject* feature);
 
@@ -124,6 +139,7 @@ public:
     }
 
     void onChanged(const App::Property* prop) override;
+    void onDocumentRestored() override;
 
     /// Called by Body::removeObject() when this feature's BaseFeature is
     /// rerouted around a deleted feature. Subclasses may reroute only the
@@ -190,6 +206,12 @@ protected:
     // TODO: Toponaming April 2024 Deprecated in favor of TopoShape method.  Remove when possible.
     static TopoDS_Shape makeShapeFromPlane(const App::DocumentObject* obj);
     static TopoShape makeTopoShapeFromPlane(const App::DocumentObject* obj);
+
+private:
+    // The last recompute failed because a placer is in a Body placed elsewhere (ops#308 R2-2).
+    // Not read from the error text in mustExecute(): a recompute sets the texts aside while it
+    // runs (ops#126)
+    bool failedElsewhere = false;
 };
 
 using FeaturePython = App::FeaturePythonT<Feature>;

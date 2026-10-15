@@ -59,6 +59,11 @@ public:
     /// recalculate the feature
     App::DocumentObjectExecReturn* execute() override;
     short mustExecute() const override;
+    /// The neutral plane and pull direction, read in this feature's Body (FreeCAD-CH ops#325)
+    std::vector<const char*> placerProperties() const override
+    {
+        return {"NeutralPlane", "PullDirection"};
+    }
     /// returns the type name of the view provider
     const char* getViewProviderName() const override
     {

@@ -139,8 +139,48 @@ Feature::Feature()
     Part::PreviewExtension::initExtension(this);
 }
 
+namespace
+{
+// The words that mark the failure of Feature::recompute() below
+constexpr const char* placedElsewhere = "placed elsewhere than this feature's Body";
+}  // namespace
+
+// A placer in another Body is read in its own Body's coordinates, as if it were in the feature's,
+// by every path that uses it (its shape, its sketch's placement, its support face): in a Body
+// placed elsewhere the feature comes out where the placer isn't (FreeCAD-CH ops#308 T4: a hole
+// through two stacked Bodies cut in the wrong place; ops#325: a pattern along another Body's
+// edge, a mirror plane, a draft's neutral plane). A binder carries them over.
+const Body* Feature::placerBodyElsewhere(const char** property) const
+{
+    auto body = getFeatureBody();
+    if (!body) {
+        return nullptr;
+    }
+    std::vector<App::DocumentObject*> placers;
+    for (const char* name : placerProperties()) {
+        auto prop = freecad_cast<App::PropertyLinkBase*>(getPropertyByName(name));
+        if (!prop) {
+            continue;
+        }
+        placers.clear();
+        prop->getLinks(placers);
+        for (auto obj : placers) {
+            auto other = obj ? Body::findBodyOf(obj) : nullptr;
+            if (other && other != body
+                && !other->globalPlacement().isSame(body->globalPlacement(), Precision::Confusion())) {
+                if (property) {
+                    *property = name;
+                }
+                return other;
+            }
+        }
+    }
+    return nullptr;
+}
+
 App::DocumentObjectExecReturn* Feature::recompute()
 {
+    failedElsewhere = false;
     // Held by the Body's roll-back bar (ops#127): not run on any path (also obj.recompute()); it
     // stays touched and runs when the bar passes it
     if (auto body = getFeatureBody(); body && body->holds(this)) {
@@ -159,6 +199,16 @@ App::DocumentObjectExecReturn* Feature::recompute()
     }
 
     SuppressedShape.setValue(TopoShape());
+
+    const char* placer = nullptr;
+    if (auto other = placerBodyElsewhere(&placer)) {
+        failedElsewhere = true;
+        return new App::DocumentObjectExecReturn(
+            std::string(placer) + " of this feature is in Body " + other->Label.getValue() + ", "
+                + placedElsewhere + ": bind it with a Sub-Shape Binder",
+            this
+        );
+    }
 
     // In a Body, an input in error fails the feature before it runs; the recompute's continuation
     // rule then passes its base shape through (ops#126). getFeatureBody() is the rule's own
@@ -218,7 +268,28 @@ short Feature::mustExecute() const
     if (BaseFeature.isTouched()) {
         return 1;
     }
+    // Moving another Body touches neither what this feature reads of it nor this feature: run
+    // when the Bodies come apart, and again after that failure once they agree, also in a
+    // reopened file (the error is saved with it), so the error clears (ops#308 F5). Only on that
+    // failure: any other reran on every recompute (R2-2), and so did this one while the Bodies
+    // stayed apart. Not when suppressed or held: then recompute() doesn't fail, and nothing
+    // would ever settle (F6). No Body::onChanged(Placement) hook: a moved Body is itself touched,
+    // so the next recompute asks here (ops#325)
+    auto body = getFeatureBody();
+    if (body && !Suppressed.getValue() && !body->holds(this) && !placerProperties().empty()) {
+        if ((placerBodyElsewhere() != nullptr) != (failedElsewhere && isError())) {
+            return 1;
+        }
+    }
     return Part::Feature::mustExecute();
+}
+
+void Feature::onDocumentRestored()
+{
+    // The error and its text are restored with the document, before this
+    const char* why = isError() ? getDocument()->getErrorDescription(this) : nullptr;
+    failedElsewhere = why && std::strstr(why, placedElsewhere);
+    Part::Feature::onDocumentRestored();
 }
 
 TopoShape Feature::makeResultShape(const TopoShape& base) const
