@@ -317,6 +317,35 @@ class TestBoolean(unittest.TestCase):
         self.assertAlmostEqual(self.Body.Shape.BoundBox.XMin, 20)
         self.assertAlmostEqual(self.Body.Shape.BoundBox.XMax, 30)
 
+    def testBooleanWithoutToolsFails(self):
+        """FreeCAD-CH ops#314: a Boolean whose tool Body is deleted fails ("no tools") and passes
+        its base through, instead of keeping the fused shape silently. Model: Tool, a 10 mm box
+        at the origin; in Body001 a 10 mm box at x = -5, the Boolean fusing Tool (V = 1500), then
+        a 10 x 10 x 1 slab on top of the base box (z = 10..11, x = -5..5). Tool deleted: Body001
+        is the base box and the slab, V = 1100 (the stale fuse would give 1600)."""
+        tool = self.Doc.addObject("PartDesign::Body", "Tool")
+        box = tool.newObject("PartDesign::AdditiveBox", "Box")
+        body = self.Doc.addObject("PartDesign::Body", "Body001")
+        base = body.newObject("PartDesign::AdditiveBox", "Base")
+        base.Placement.Base = App.Vector(-5, 0, 0)
+        boolean = body.newObject("PartDesign::Boolean", "Fuse")
+        self.Doc.recompute()
+        self.assertTrue(boolean.isValid(), "a new Boolean without tools computes nothing")
+        boolean.setObjects([tool])
+        slab = body.newObject("PartDesign::AdditiveBox", "Slab")
+        slab.Height = 1
+        slab.Placement.Base = App.Vector(-5, 0, 10)
+        self.Doc.recompute()
+        self.assertAlmostEqual(body.Shape.Volume, 1600)
+
+        self.Doc.removeObject(box.Name)
+        self.Doc.removeObject(tool.Name)
+        self.assertEqual(boolean.Group, [])
+        self.Doc.recompute()
+        self.assertFalse(boolean.isValid())
+        self.assertIn("no tools", boolean.getStatusString())
+        self.assertAlmostEqual(body.Shape.Volume, 1100)
+
     def testBooleanSelectUI(self):
         if not App.GuiUp:
             return

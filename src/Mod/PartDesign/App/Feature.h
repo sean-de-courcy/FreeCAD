@@ -87,10 +87,19 @@ public:
         return {};
     }
     /**
-     * The first placer link (placerProperties()) in another Body placed elsewhere than this
-     * feature's, as that Body, and the property in `property`; nullptr if there is none
+     * Whether a placer link (placerProperties()) is in a container placed elsewhere than this
+     * feature's Body: another Body or, outside every Body, an App::Part or the document. The
+     * first such property goes to `property`, and where it is ("Body B") to `where`
      */
-    virtual const Body* placerBodyElsewhere(const char** property = nullptr) const;
+    virtual bool placerElsewhere(const char** property = nullptr, std::string* where = nullptr) const;
+    /**
+     * Copies made for this feature's Body that join it only after the edit's commit (the Pipe
+     * panel's, ops#180): until cleared, placerElsewhere() reads them as in the Body
+     */
+    void setPendingMembers(std::vector<const App::DocumentObject*> objs)
+    {
+        pendingMembers = std::move(objs);
+    }
 
     /// Check whether the given feature is a datum feature
     static bool isDatum(const App::DocumentObject* feature);
@@ -212,6 +221,7 @@ private:
     // Not read from the error text in mustExecute(): a recompute sets the texts aside while it
     // runs (ops#126)
     bool failedElsewhere = false;
+    std::vector<const App::DocumentObject*> pendingMembers;
 };
 
 using FeaturePython = App::FeaturePythonT<Feature>;

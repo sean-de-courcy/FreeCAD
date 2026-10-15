@@ -327,7 +327,8 @@ names it.
 | `fix/293-upto-face-crossed-twice` | fix | ops#293, ops#296 | - | `fix/289-upto-face-through-profile` `6e560b613d` (stacked on fork PR 273) | `647778546a` (fork PR 279), 2026-10-14 | never (fork fix) |
 | `fix/338-revolution-followups` | fix | ops#338 | - | `integration` `647778546a` | `b8a85593d7` (fork PR 299), 2026-10-14 | never (fork fix) |
 | `feat/305-studio-gates` | feat | ops#325 | - | `integration` `9351e7c1c6` | `6a842fd644` (fork PR 294), 2026-10-14 | never (fork feature) |
-| `feat/325-placement-follow` | feat | ops#325, ops#331, ops#324 | - | `feat/305-studio-gates` `e2c718b08a` (stacked on fork PR 294) | (fork PR 300) | never (fork feature) |
+| `feat/325-placement-follow` | feat | ops#325, ops#331, ops#324 | - | `feat/305-studio-gates` `e2c718b08a` (stacked on fork PR 294) | `d2f792a682` (fork PR 300), 2026-10-14 | never (fork feature) |
+| `feat/325-1b2` | feat | ops#325, ops#314 | - | `integration` `d2f792a682` | (fork PR 301) | never (fork feature) |
 
 ## Fork-only commits in carried topics
 

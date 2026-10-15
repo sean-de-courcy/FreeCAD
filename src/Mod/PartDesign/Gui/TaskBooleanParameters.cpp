@@ -410,9 +410,21 @@ TaskDlgBooleanParameters::TaskDlgBooleanParameters(ViewProviderBoolean* BooleanV
 
     Content.push_back(parameter);
     Content.push_back(preview);
+
+    // While open, an empty tool list computes nothing instead of failing (ops#314)
+    if (auto boolean = BooleanView->getObject<PartDesign::Boolean>()) {
+        boolean->setSettingUp(true);
+        booleanT = App::DocumentObjectT(boolean);
+    }
 }
 
-TaskDlgBooleanParameters::~TaskDlgBooleanParameters() = default;
+TaskDlgBooleanParameters::~TaskDlgBooleanParameters()
+{
+    // Gone when Cancel undid its creation
+    if (auto boolean = booleanT.getObjectAs<PartDesign::Boolean>()) {
+        boolean->setSettingUp(false);
+    }
+}
 
 //==== calls from the TaskView ===============================================================
 

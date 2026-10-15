@@ -1014,3 +1014,57 @@ class TestStudio(unittest.TestCase):
         self.doc.recompute()
         self.assertEqual(self.externalEnds(ext), ends(V(0, 0, 3)))
         self.assertSettled()
+
+    def testPlacerOutsideEveryBody(self):
+        """ops#325 (1b-2, PR 300 review low 1): a pattern's Direction on an edge of a sketch
+        outside every Body was read in the pattern's Body frame: with the Body turned 90 degrees
+        about Z the copies went along the Body's X, global Y, instead of the sketch's line along
+        global X. Such a placer is placed by its container (the document's root, an App::Part):
+        the pattern fails while that container is placed elsewhere than its Body, and not at one
+        origin. Model: A, a 10 mm cube at the origin, patterned twice 20 along the edge (0,0,0)-
+        (10,0,0) of Dir, a sketch at the document's root."""
+        a = self.doc.addObject("PartDesign::Body", "A")
+        cube = pad(a, "Cube", sketch(a, "SA", xyPlane(a), (0, 0, 10, 10)), 10)
+        line = self.doc.addObject("Sketcher::SketchObject", "Dir")
+        line.addGeometry(Part.LineSegment(V(0, 0, 0), V(10, 0, 0)))
+        self.doc.recompute()
+        pattern = a.newObject("PartDesign::LinearPattern", "Pattern")
+        pattern.Originals = [cube]
+        pattern.Direction = (line, ["Edge1"])
+        pattern.Length = 20
+        pattern.Occurrences = 2
+        a.Tip = pattern
+        self.assertSettled()
+
+        def assertApart(where):
+            self.assertFalse(pattern.isValid())
+            status = pattern.getStatusString()
+            self.assertIn("placed elsewhere", status)
+            self.assertIn("Direction of this feature is in " + where, status)
+
+        def assertAlong():
+            self.assertTrue(pattern.isValid(), pattern.getStatusString())
+            self.assertAlmostEqual(pattern.Shape.Volume, 2000, places=6)
+            box = globalBox(pattern)
+            self.assertAlmostEqual(box[3] - box[0], 30, places=6)  # along global X
+            self.assertAlmostEqual(box[4] - box[1], 10, places=6)
+
+        assertAlong()
+        a.Placement = App.Placement(V(0, 0, 0), App.Rotation(V(0, 0, 1), 90))
+        self.doc.recompute()
+        assertApart("the document's root")
+        a.Placement = App.Placement()
+        self.doc.recompute()
+        assertAlong()
+
+        holder = self.doc.addObject("App::Part", "Holder")
+        holder.addObject(line)
+        self.doc.recompute()
+        assertAlong()
+        holder.Placement = App.Placement(V(0, 0, 5), App.Rotation())
+        self.doc.recompute()
+        assertApart(holder.Label)
+        holder.addObject(a)  # one origin again
+        self.doc.recompute()
+        assertAlong()
+        self.assertSettled()

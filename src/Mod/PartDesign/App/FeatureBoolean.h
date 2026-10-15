@@ -72,6 +72,12 @@ public:
     void onChanged(const App::Property* prop) override;
     //@}
 
+    /// Set while its panel edits the tools: an empty list then computes nothing instead of failing
+    void setSettingUp(bool on)
+    {
+        settingUp = on;
+    }
+
 protected:
     void handleChangedPropertyName(
         Base::XMLReader& reader,
@@ -84,6 +90,7 @@ private:
     Part::TopoShape getBooleanTopoShape(const App::DocumentObject* object) const;
 
     static const char* TypeEnums[];
+    bool settingUp = false;
 };
 
 }  // namespace PartDesign
