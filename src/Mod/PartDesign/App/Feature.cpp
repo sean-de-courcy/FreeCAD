@@ -149,13 +149,16 @@ constexpr const char* placedElsewhere = "placed elsewhere than this feature's Bo
 // by every path that uses it (its shape, its sketch's placement, its support face): in a Body
 // placed elsewhere the feature comes out where the placer isn't (FreeCAD-CH ops#308 T4: a hole
 // through two stacked Bodies cut in the wrong place; ops#325: a pattern along another Body's
-// edge, a mirror plane, a draft's neutral plane). A binder carries them over.
-const Body* Feature::placerBodyElsewhere(const char** property) const
+// edge, a mirror plane, a draft's neutral plane). Outside every Body the same holds for its
+// container, an App::Part or the document (ops#325: a pattern along an edge of a sketch at the
+// document's root, in a placed Body). A binder carries them over.
+bool Feature::placerElsewhere(const char** property, std::string* where) const
 {
     auto body = getFeatureBody();
     if (!body) {
-        return nullptr;
+        return false;
     }
+    const auto here = body->globalPlacement();
     std::vector<App::DocumentObject*> placers;
     for (const char* name : placerProperties()) {
         auto prop = freecad_cast<App::PropertyLinkBase*>(getPropertyByName(name));
@@ -165,17 +168,41 @@ const Body* Feature::placerBodyElsewhere(const char** property) const
         placers.clear();
         prop->getLinks(placers);
         for (auto obj : placers) {
-            auto other = obj ? Body::findBodyOf(obj) : nullptr;
-            if (other && other != body
-                && !other->globalPlacement().isSame(body->globalPlacement(), Precision::Confusion())) {
-                if (property) {
-                    *property = name;
-                }
-                return other;
+            if (!obj) {
+                continue;
             }
+            // Its Body; else the container that places it (an origin element's is its origin's
+            // container), or the document's root (none)
+            const App::DocumentObject* container = Body::findBodyOf(obj);
+            if (!container) {
+                container = App::GeoFeatureGroupExtension::getGroupOfObject(obj);
+            }
+            if (container == body) {
+                continue;
+            }
+            auto geo = freecad_cast<const App::GeoFeature*>(container);
+            const auto there = geo ? geo->globalPlacement() : Base::Placement();
+            if (there.isSame(here, Precision::Confusion())) {
+                continue;
+            }
+            if (property) {
+                *property = name;
+            }
+            if (where) {
+                if (!container) {
+                    *where = "the document's root";
+                }
+                else if (container->isDerivedFrom<Body>()) {
+                    *where = std::string("Body ") + container->Label.getValue();
+                }
+                else {
+                    *where = container->Label.getValue();
+                }
+            }
+            return true;
         }
     }
-    return nullptr;
+    return false;
 }
 
 App::DocumentObjectExecReturn* Feature::recompute()
@@ -201,11 +228,12 @@ App::DocumentObjectExecReturn* Feature::recompute()
     SuppressedShape.setValue(TopoShape());
 
     const char* placer = nullptr;
-    if (auto other = placerBodyElsewhere(&placer)) {
+    std::string where;
+    if (placerElsewhere(&placer, &where)) {
         failedElsewhere = true;
         return new App::DocumentObjectExecReturn(
-            std::string(placer) + " of this feature is in Body " + other->Label.getValue() + ", "
-                + placedElsewhere + ": bind it with a Sub-Shape Binder",
+            std::string(placer) + " of this feature is in " + where + ", " + placedElsewhere
+                + ": bind it with a Sub-Shape Binder",
             this
         );
     }
@@ -277,7 +305,7 @@ short Feature::mustExecute() const
     // so the next recompute asks here (ops#325)
     auto body = getFeatureBody();
     if (body && !Suppressed.getValue() && !body->holds(this) && !placerProperties().empty()) {
-        if ((placerBodyElsewhere() != nullptr) != (failedElsewhere && isError())) {
+        if (placerElsewhere() != (failedElsewhere && isError())) {
             return 1;
         }
     }

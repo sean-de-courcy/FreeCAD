@@ -87,10 +87,11 @@ public:
         return {};
     }
     /**
-     * The first placer link (placerProperties()) in another Body placed elsewhere than this
-     * feature's, as that Body, and the property in `property`; nullptr if there is none
+     * Whether a placer link (placerProperties()) is in a container placed elsewhere than this
+     * feature's Body: another Body or, outside every Body, an App::Part or the document. The
+     * first such property goes to `property`, and where it is ("Body B") to `where`
      */
-    virtual const Body* placerBodyElsewhere(const char** property = nullptr) const;
+    virtual bool placerElsewhere(const char** property = nullptr, std::string* where = nullptr) const;
 
     /// Check whether the given feature is a datum feature
     static bool isDatum(const App::DocumentObject* feature);
