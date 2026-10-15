@@ -469,6 +469,45 @@ class BodyReorderBase:
         self.assertValid(sketch, b)
         self.assertBody(BLOCK + 2 * BOSS - HOLE)
 
+    def testOutsideUserOfACarriedSketchStaysRight(self):
+        """ops#325 (1b-2): B's sketch is also the profile of a pad in another Body. Moving B below
+        C carries the sketch (the carry ignores users outside the Body); the other Body's pad
+        stays valid and in place, 4 x 4 x 5 at (15, 15, 10). Rolled back to A and B moved below
+        C again, the carried sketch is behind the bar but not held while the other Body uses it
+        (B1x): touched, it recomputes."""
+        block, a, b, c = self.chain()
+        sketch = b.Profile[0]
+        other = self.doc.addObject("PartDesign::Body", "Other")
+        outside = models.pad(other, sketch, 5, "OutsidePad")
+        self.recompute()
+
+        def assertOutside():
+            self.assertValid(outside)
+            self.assertAlmostEqual(other.Shape.Volume, BOSS, delta=1e-4)
+            box = other.Shape.BoundBox
+            for got, want in ((box.XMin, 15), (box.YMin, 15), (box.ZMin, 10), (box.ZMax, 15)):
+                self.assertAlmostEqual(got, want, delta=TOL)
+
+        assertOutside()
+        self.body.reorderObject([b], c, True)
+        self.assertChain(block, a, c, b)
+        self.assertEqual(list(self.body.Group)[-2:], [sketch, b])
+        self.recompute()
+        assertOutside()
+        self.assertBody(BLOCK + 2 * BOSS - HOLE)
+
+        self.body.reorderObject([b], a, True)
+        self.assertChain(block, a, b, c)
+        self.body.rollTo(a)
+        self.body.reorderObject([b], c, True)
+        self.assertChain(block, a, c, b)
+        self.assertTrue(self.body.holds(b))
+        self.assertFalse(self.body.holds(sketch))
+        sketch.touch()
+        self.recompute()
+        self.assertNotTouched(sketch)
+        assertOutside()
+
     def testTipOutsideTheGroupIsTheEnd(self):
         """A Tip that isn't a member (set from Python, or a stale file), or a sketch after the last
         solid: nothing comes after it, so nothing is held, the Body included (review M1)."""
