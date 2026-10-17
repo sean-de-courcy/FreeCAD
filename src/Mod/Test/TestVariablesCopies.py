@@ -309,6 +309,21 @@ class TestVariablesCopies(unittest.TestCase):
         self.assertAlmostEqual(result.copies[0].Gap.Value, 3)
         self.assertEqual(variables.InList, [])
 
+    def test_skip_and_bind(self):
+        """Skip the file's Gap and bind #Gap to Variables.Gap: Width uses the document's Gap,
+        and Bindings records it (the name is no longer defined once skipped)."""
+        self.documentVariables()
+        a = self.export("Studio A", [entry(variable("LENGTH", "Gap", "3 mm"),
+                                           variable("LENGTH", "Width", "#Gap * 2"))])
+        result = copies.import_studios(self.doc, [a], skip=["Gap"],
+                                       bindings={"Gap": "Variables.Gap"})
+        copy = result.copies[0]
+        self.assertNotIn("Gap", copy.PropertiesList)
+        self.assertAlmostEqual(copy.Width.Value, 14)
+        self.assertEqual(copy.Bindings, {"Gap": "Variables.Gap"})
+        self.assertEqual(copy.Skipped, ["Gap"])
+        self.assertFalse(any("Gap" in w for w in result.plan.warnings), result.plan.warnings)
+
     def test_bad_choices(self):
         a = self.export("Studio A", STUDIO_A)
         for choices, fragment in [

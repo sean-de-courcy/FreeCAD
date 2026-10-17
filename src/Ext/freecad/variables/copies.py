@@ -116,6 +116,8 @@ class Plan:
     skipped: List[Tuple[int, str, str]] = field(default_factory=list)
     # the `skip` choices, kept per copy in Skipped so Refresh can tell them from new variables
     skip: frozenset = frozenset()
+    # the names the imported entries define, once the skipped variables are left out
+    defined: frozenset = frozenset()
     # unresolved name -> Binding (path and value), from `bindings` and `values`
     bindings: Dict[str, Binding] = field(default_factory=dict)
     # unresolved name -> (Onshape type, FreeCAD name, property type, translation) of the input
@@ -248,9 +250,16 @@ def plan_import(doc, paths: Sequence[str], *,
                                      f"in {source.label}")
             fc_names[fc_name] = v.name
 
+    # Skipped variables leave the entries; what needs them waits on their name, which is skipped
+    # unless a choice binds it.
+    entries = [onshape.StudioEntry(s.entry.reference,
+                                   tuple(v for v in s.entry.variables if v.name not in skip))
+               for s in plan.sources]
+    plan.defined = frozenset(v.name for e in entries for v in e.variables)
+
     # The choices for names nothing defines (section 2.6). One for a name the files define isn't
     # used: dropped before anything checks or makes it (an input variable nobody uses).
-    for name in sorted((set(bindings) | set(values)) & defined):
+    for name in sorted((set(bindings) | set(values)) & plan.defined):
         plan.warnings.append(f"#{name} is defined by the imported files; its choice isn't used")
         bindings.pop(name, None)
         values.pop(name, None)
@@ -264,10 +273,6 @@ def plan_import(doc, paths: Sequence[str], *,
     if values:
         _plan_inputs(doc, plan, values, default_units)
 
-    # Skipped variables leave the entries; what needs them waits on their name, which is skipped.
-    entries = [onshape.StudioEntry(s.entry.reference,
-                                   tuple(v for v in s.entry.variables if v.name not in skip))
-               for s in plan.sources]
     for i, source in enumerate(plan.sources):
         for v in source.entry.variables:
             if v.name in skip:
@@ -543,8 +548,9 @@ def _skipped(plan: Plan, source: Source) -> List[str]:
 
 
 def _defined(plan: Plan, name: str) -> bool:
-    """Whether @a name comes from one of the imported entries, not from a binding."""
-    return any(v.name == name for s in plan.sources for v in s.entry.variables)
+    """Whether @a name comes from one of the imported entries, not from a binding (a skipped
+    variable's name can be bound)."""
+    return name in plan.defined
 
 
 def _portable(path: str) -> str:
