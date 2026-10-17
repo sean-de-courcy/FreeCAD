@@ -206,30 +206,89 @@ set(PartDesign_Compat
     PartDesignTests/Compat/__init__.py
     PartDesignTests/Compat/make_generation.py
     PartDesignTests/Compat/models.py
+    PartDesignTests/Compat/models_assembly.py
+    PartDesignTests/Compat/models_part.py
+    PartDesignTests/Compat/models_partdesign.py
+    PartDesignTests/Compat/models_sketcher.py
+    PartDesignTests/Compat/models_studio.py
     PartDesignTests/Compat/TestCompatCorpus.py
 )
 
 set(PartDesign_CompatGen0
     PartDesignTests/Compat/gen0/MANIFEST
+    PartDesignTests/Compat/gen0/AsmEdited.FCStd
+    PartDesignTests/Compat/gen0/AsmEditedPart.oracle.json
+    PartDesignTests/Compat/gen0/AsmEditedParts.FCStd
+    PartDesignTests/Compat/gen0/AsmFastened.FCStd
+    PartDesignTests/Compat/gen0/AsmFastened.oracle.json
+    PartDesignTests/Compat/gen0/AsmFastenedParts.FCStd
+    PartDesignTests/Compat/gen0/AsmMotion.FCStd
+    PartDesignTests/Compat/gen0/AsmMotion.oracle.json
+    PartDesignTests/Compat/gen0/AsmSubAssembly.FCStd
+    PartDesignTests/Compat/gen0/AsmSubAssembly.oracle.json
+    PartDesignTests/Compat/gen0/Binders.FCStd
+    PartDesignTests/Compat/gen0/Binders.oracle.json
+    PartDesignTests/Compat/gen0/BodyFromFeature.FCStd
+    PartDesignTests/Compat/gen0/BodyFromFeature.oracle.json
     PartDesignTests/Compat/gen0/DatumPlane.FCStd
     PartDesignTests/Compat/gen0/DatumPlane.oracle.json
+    PartDesignTests/Compat/gen0/DraftThickness.FCStd
+    PartDesignTests/Compat/gen0/DraftThickness.oracle.json
     PartDesignTests/Compat/gen0/ExternalGeometry.FCStd
     PartDesignTests/Compat/gen0/ExternalGeometry.oracle.json
     PartDesignTests/Compat/gen0/FilletChamfer.FCStd
     PartDesignTests/Compat/gen0/FilletChamfer.oracle.json
     PartDesignTests/Compat/gen0/GuessRecord.FCStd
     PartDesignTests/Compat/gen0/GuessRecord.oracle.json
+    PartDesignTests/Compat/gen0/HoleFeature.FCStd
+    PartDesignTests/Compat/gen0/HoleFeature.oracle.json
+    PartDesignTests/Compat/gen0/LoftPipe.FCStd
+    PartDesignTests/Compat/gen0/LoftPipe.oracle.json
+    PartDesignTests/Compat/gen0/MergeAccepted.FCStd
+    PartDesignTests/Compat/gen0/MergeAccepted.oracle.json
+    PartDesignTests/Compat/gen0/MirroredMultiTransform.FCStd
+    PartDesignTests/Compat/gen0/MirroredMultiTransform.oracle.json
     PartDesignTests/Compat/gen0/PadPocket.FCStd
     PartDesignTests/Compat/gen0/PadPocket.oracle.json
+    PartDesignTests/Compat/gen0/PartBooleans.FCStd
+    PartDesignTests/Compat/gen0/PartBooleans.oracle.json
+    PartDesignTests/Compat/gen0/PartFilletChamfer.FCStd
+    PartDesignTests/Compat/gen0/PartFilletChamfer.oracle.json
+    PartDesignTests/Compat/gen0/PartLoftSweep.FCStd
+    PartDesignTests/Compat/gen0/PartLoftSweep.oracle.json
+    PartDesignTests/Compat/gen0/PartPrimitives.FCStd
+    PartDesignTests/Compat/gen0/PartPrimitives.oracle.json
+    PartDesignTests/Compat/gen0/PartProfiles.FCStd
+    PartDesignTests/Compat/gen0/PartProfiles.oracle.json
     PartDesignTests/Compat/gen0/Patterns.FCStd
     PartDesignTests/Compat/gen0/Patterns.oracle.json
     PartDesignTests/Compat/gen0/ReorderBar.FCStd
     PartDesignTests/Compat/gen0/ReorderBar.oracle.json
+    PartDesignTests/Compat/gen0/RevolutionGroove.FCStd
+    PartDesignTests/Compat/gen0/RevolutionGroove.oracle.json
+    PartDesignTests/Compat/gen0/SiblingCuts.FCStd
+    PartDesignTests/Compat/gen0/SiblingCuts.oracle.json
+    PartDesignTests/Compat/gen0/SidedVariants.FCStd
+    PartDesignTests/Compat/gen0/SidedVariants.oracle.json
+    PartDesignTests/Compat/gen0/SketchCarbonCopy.FCStd
+    PartDesignTests/Compat/gen0/SketchCarbonCopy.oracle.json
+    PartDesignTests/Compat/gen0/SketchConstraints.FCStd
+    PartDesignTests/Compat/gen0/SketchConstraints.oracle.json
+    PartDesignTests/Compat/gen0/SketchCurves.FCStd
+    PartDesignTests/Compat/gen0/SketchCurves.oracle.json
+    PartDesignTests/Compat/gen0/SketchUnderConstrained.FCStd
+    PartDesignTests/Compat/gen0/SketchUnderConstrained.oracle.json
+    PartDesignTests/Compat/gen0/SplitHalves.FCStd
+    PartDesignTests/Compat/gen0/SplitHalves.oracle.json
+    PartDesignTests/Compat/gen0/StudioNewPart.FCStd
+    PartDesignTests/Compat/gen0/StudioNewPart.oracle.json
     PartDesignTests/Compat/gen0/SubShapeBinder.FCStd
     PartDesignTests/Compat/gen0/SubShapeBinder.oracle.json
     PartDesignTests/Compat/gen0/TwoDocuments.FCStd
     PartDesignTests/Compat/gen0/TwoDocuments.oracle.json
     PartDesignTests/Compat/gen0/TwoDocumentsPart.FCStd
+    PartDesignTests/Compat/gen0/UpToFace.FCStd
+    PartDesignTests/Compat/gen0/UpToFace.oracle.json
     PartDesignTests/Compat/gen0/VarSetDriven.FCStd
     PartDesignTests/Compat/gen0/VarSetDriven.oracle.json
 )
