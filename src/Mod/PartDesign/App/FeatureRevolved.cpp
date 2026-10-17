@@ -3008,13 +3008,15 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
     // tolerances of what it splits: the face's edges and vertices, the base feature's stored
     // shape's when the face is the base's. Up to a face, the revolution runs on copies of the
     // base and the chosen faces, made together, so that the tool's face parts are still the
-    // base's for the fuse or cut with it (ops#347)
+    // base's for the fuse or cut with it (ops#347). The sweep adds curves on surfaces to the
+    // profile's edges too, which are the sketch's stored shape's: the profile is copied as well
     if (revolvesUpToFace(method, revolMode) || (twoSides && revolvesUpToFace(method2, revolMode))) {
         const std::vector<TopoShape> copies =
-            Part::FilletFallback::makerInputs({base, chosenFace, chosenFace2});
+            Part::FilletFallback::makerInputs({base, chosenFace, chosenFace2, sketchshape});
         base = copies[0];
         chosenFace = copies[1];
         chosenFace2 = copies[2];
+        sketchshape = copies[3];
     }
 
     const gp_Ax1 revolutionAxis(pnt, dir);

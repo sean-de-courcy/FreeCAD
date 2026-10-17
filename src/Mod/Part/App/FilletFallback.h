@@ -91,7 +91,8 @@ PartExport TopoShape makerInput(const TopoShape& base, std::vector<TopoShape>& e
  *
  * Used by Pad and Pocket up to a face, the first or last face or a shape
  * (TopoShape::makeElementPrismUntil(): the base, the profile, the support face, the up-to shape)
- * and by Revolution and Groove up to a face (FeatureRevolved: the base and the chosen faces).
+ * and by Revolution and Groove up to a face (FeatureRevolved: the base, the chosen faces and the
+ * profile).
  * Pad and Pocket make their fuse or cut with the original base: the contact with the prism is
  * found by geometry, not by shared TShapes. Revolution and Groove make theirs with the base's
  * copy, whose faces are the ones their tool's face parts share.

@@ -3150,6 +3150,9 @@ class TestRevolve(unittest.TestCase):
             sketch.addGeometry(Part.LineSegment(corners[i], corners[(i + 1) % 4]))
         for i in range(4):
             sketch.addConstraint(Sketcher.Constraint("Coincident", i, 2, (i + 1) % 4, 1))
+        # The sweep added curves on surfaces to the profile's edges, the sketch's stored shape's
+        self.Doc.recompute()
+        held += holdBases(sketch)
         feature = body.newObject("PartDesign::" + kind, kind)
         feature.Profile = sketch
         feature.ReferenceAxis = (sketch, ["V_Axis"])
