@@ -3565,6 +3565,24 @@ class TestPanelFixesGui(unittest.TestCase):
         self.repickInPanel(plane, cylinder, top)
         self.assertOnTopWithTheBodyOrigin(plane, cylinder, top)
 
+    def testPanelRecordsMapOriginInTheMacro(self):
+        """The same re-pick: the commands OK writes (to the Python console, as to a macro) set
+        MapOrigin to Body after the support, so a replay gives the same frame."""
+        cylinder, plane, top = self.legacyOnCylinder("PartDesign::Plane", "Legacy")
+        consoles = [
+            w
+            for w in Gui.getMainWindow().findChildren(QtWidgets.QPlainTextEdit)
+            if w.metaObject().className() == "Gui::PythonConsole"
+        ]
+        self.assertEqual(len(consoles), 1, "no Python console")
+        App.ParamGet("User parameter:BaseApp/Preferences/Macro").SetBool("ScriptToPyConsole", True)
+        before = len(consoles[0].toPlainText())
+        self.repickInPanel(plane, cylinder, top)
+        written = consoles[0].toPlainText()[before:]
+        support = written.find(".AttachmentSupport = ")
+        self.assertGreaterEqual(support, 0, written)
+        self.assertIn(".MapOrigin = 'Body'", written[support:])
+
     def testPythonAttachmentEditorRepickTakesTheBodyOrigin(self):
         """A legacy datum plane in the Python attachment editor (Part_EditAttachment): the top face
         picked as its first reference shows and gives "Body", at (0, 0, 20); it kept "Feature",

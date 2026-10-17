@@ -1638,6 +1638,12 @@ bool TaskDlgAttacher::accept()
                 "AttachmentSupport = %s",
                 pcAttach->AttachmentSupport.getPyReprString().c_str()
             );
+            // set with the support (ops#311), so the macro replays it
+            Gui::cmdAppObjectArgs(
+                obj,
+                "MapOrigin = '%s'",
+                pcAttach->MapOrigin.getValueAsString()
+            );
         }
 
         Gui::cmdAppObjectArgs(obj, "MapPathParameter = %f", pcAttach->MapPathParameter.getValue());
