@@ -553,12 +553,15 @@ namespace
 
 // Whether a solid of the shape has a shell that doesn't close up. BRepCheck accepts such a solid:
 // a dress-up at the limit on the fin cube (ops#12) keeps the fin as a second shell of its solid,
-// and a later Boolean then gives a wrong volume (ops#303)
+// and a later Boolean then gives a wrong volume (ops#303). A shell oriented INTERNAL holds faces
+// inside the solid on purpose, and is no defect
 bool hasOpenShellInASolid(const TopoDS_Shape& shape)
 {
     for (TopExp_Explorer solid(shape, TopAbs_SOLID); solid.More(); solid.Next()) {
         for (TopoDS_Iterator it(solid.Current()); it.More(); it.Next()) {
-            if (it.Value().ShapeType() == TopAbs_SHELL && !closesUp(it.Value())) {
+            const TopoDS_Shape& shell = it.Value();
+            if (shell.ShapeType() == TopAbs_SHELL && shell.Orientation() != TopAbs_INTERNAL
+                && !closesUp(shell)) {
                 return true;
             }
         }
