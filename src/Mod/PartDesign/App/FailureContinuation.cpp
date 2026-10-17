@@ -238,6 +238,10 @@ bool inputInError(const App::DocumentObject* owner, std::string& why)
         if (!prop->isDerivedFrom<App::PropertyLinkBase>() || prop == &owner->ExpressionEngine) {
             continue;
         }
+        // No dependency: a sibling's SiblingOf, whose primary may fail alone (ops#325)
+        if (static_cast<App::PropertyLinkBase*>(prop)->getScope() == App::LinkScope::Hidden) {
+            continue;
+        }
         if (isFeature) {
             auto feature = static_cast<const Feature*>(owner);
             if (prop == &feature->_Body) {

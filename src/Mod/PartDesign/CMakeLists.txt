@@ -74,6 +74,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestBodyReorder.py
     PartDesignTests/TestInvoluteGear.py
     PartDesignTests/TestNewPart.py
+    PartDesignTests/TestSiblings.py
     PartDesignTests/TestSketch.py
     PartDesignTests/TestStudio.py
 )

@@ -71,6 +71,25 @@ public:
             "same container. Returns the new Body; no recompute."
         );
         add_varargs_method(
+            "makeSiblings",
+            &Module::makeSiblings,
+            "makeSiblings(feature, bodies) -- Makes the siblings of the subtractive feature the "
+            "ones in bodies, other parts of its studio: one feature of its type per Body, on its "
+            "profile, its parameters bound to it by expression and its links copied. Adds the "
+            "missing ones, deletes the others, copies the links again. Returns them; no recompute."
+        );
+        add_varargs_method(
+            "siblingsOf",
+            &Module::siblingsOf,
+            "siblingsOf(feature) -- The siblings that follow feature."
+        );
+        add_varargs_method(
+            "unlinkSibling",
+            &Module::unlinkSibling,
+            "unlinkSibling(sibling) -- Makes the sibling independent: its expressions on its "
+            "primary and its SiblingOf are cleared, its values stay."
+        );
+        add_varargs_method(
             "studioOriginFeature",
             &Module::studioOriginFeature,
             "studioOriginFeature(owner, feature) -- owner's own origin feature standing for "
@@ -147,6 +166,72 @@ private:
             e.setPyException();
             throw Py::Exception();
         }
+    }
+
+    // FreeCAD-CH (ops#325 3a): one cut through several parts
+    static FeatureAddSub* addSubArg(PyObject* obj)
+    {
+        auto feature = freecad_cast<FeatureAddSub*>(objectArg(obj));
+        if (!feature) {
+            PyErr_SetString(PyExc_TypeError, "Expected an additive or subtractive feature");
+            throw Py::Exception();
+        }
+        return feature;
+    }
+
+    static Py::List objectList(const auto& objects)
+    {
+        Py::List list;
+        for (auto obj : objects) {
+            list.append(Py::asObject(obj->getPyObject()));
+        }
+        return list;
+    }
+
+    Py::Object makeSiblings(const Py::Tuple& args)
+    {
+        PyObject* pObj;
+        PyObject* pBodies;
+        if (!PyArg_ParseTuple(args.ptr(), "O!O", &(App::DocumentObjectPy::Type), &pObj, &pBodies)) {
+            throw Py::Exception();
+        }
+        FeatureAddSub* feature = addSubArg(pObj);
+        std::vector<App::DocumentObject*> bodies;
+        Py::Sequence sequence(pBodies);
+        for (Py::Sequence::iterator it = sequence.begin(); it != sequence.end(); ++it) {
+            PyObject* item = (*it).ptr();
+            if (!PyObject_TypeCheck(item, &(App::DocumentObjectPy::Type))) {
+                PyErr_SetString(PyExc_TypeError, "Expected a sequence of bodies");
+                throw Py::Exception();
+            }
+            bodies.push_back(objectArg(item));
+        }
+        try {
+            return objectList(FeatureAddSub::makeSiblings(feature, bodies));
+        }
+        catch (const Base::Exception& e) {
+            e.setPyException();
+            throw Py::Exception();
+        }
+    }
+
+    Py::Object siblingsOf(const Py::Tuple& args)
+    {
+        PyObject* pObj;
+        if (!PyArg_ParseTuple(args.ptr(), "O!", &(App::DocumentObjectPy::Type), &pObj)) {
+            throw Py::Exception();
+        }
+        return objectList(addSubArg(pObj)->getSiblings());
+    }
+
+    Py::Object unlinkSibling(const Py::Tuple& args)
+    {
+        PyObject* pObj;
+        if (!PyArg_ParseTuple(args.ptr(), "O!", &(App::DocumentObjectPy::Type), &pObj)) {
+            throw Py::Exception();
+        }
+        addSubArg(pObj)->unlinkSibling();
+        return Py::None();
     }
 
     Py::Object isStudioProfile(const Py::Tuple& args)

@@ -8,7 +8,7 @@ the low-level PartDesign extension module.
 
 from __future__ import annotations
 
-from typing import TypeAlias
+from typing import Sequence, TypeAlias
 
 from App.Document import Document
 from App.DocumentObject import DocumentObject
@@ -42,6 +42,25 @@ def isStudioProfile(owner: DocumentObject, obj: DocumentObject, subname: str = "
 
 def studioOriginFeature(owner: DocumentObject, feature: DocumentObject, /) -> DocumentObject | None:
     """Return owner's own origin feature standing for another Body's in the studio, or None."""
+    ...
+
+def makeSiblings(
+    feature: DocumentObject, bodies: Sequence[DocumentObject], /
+) -> list[DocumentObject]:
+    """Make the subtractive feature's siblings the ones in bodies, other parts of its studio.
+
+    One feature of its type per Body, on its profile: its parameters bound to it by expression,
+    its links copied. Adds the missing ones, deletes the others, copies the links again. No
+    recompute; returns the siblings in the order of bodies.
+    """
+    ...
+
+def siblingsOf(feature: DocumentObject, /) -> list[DocumentObject]:
+    """Return the siblings that follow feature."""
+    ...
+
+def unlinkSibling(sibling: DocumentObject, /) -> None:
+    """Make the sibling independent: its expressions on its primary and SiblingOf are cleared."""
     ...
 
 def newPartFrom(feature: DocumentObject, /) -> DocumentObject:
