@@ -36,6 +36,16 @@ foreach (it ${EXT_FILES})
     configure_file(${it} ${NAMESPACE_DIR}/${it})
 endforeach()
 
+# FreeCAD-CH (ops#317): freecad.variables, variables brought in from outside a document
+set(EXT_VARIABLES_FILES
+    variables/__init__.py
+    variables/onshape.py
+)
+
+foreach (it ${EXT_VARIABLES_FILES})
+    configure_file(${it} ${NAMESPACE_DIR}/${it} COPYONLY)
+endforeach()
+
 if (INSTALL_TO_SITEPACKAGES)
     SET(SITE_PACKAGE_DIR ${PYTHON_MAIN_DIR}/freecad)
 else ()
@@ -48,4 +58,11 @@ INSTALL(
         ${EXT_FILES}
     DESTINATION
         ${SITE_PACKAGE_DIR}
+)
+
+INSTALL(
+    FILES
+        ${EXT_VARIABLES_FILES}
+    DESTINATION
+        ${SITE_PACKAGE_DIR}/variables
 )
