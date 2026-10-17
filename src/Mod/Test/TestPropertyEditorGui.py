@@ -38,7 +38,10 @@ def findRow(model, parent, name, leaf=True):
         index = model.index(row, 0, parent)
         # a group can have a property's name: take a leaf, or a property with rows (a Vector)
         hasRows = model.rowCount(index) != 0
-        if str(model.data(index)) == name and (not hasRows if leaf else hasRows and parent.isValid()):
+        # A property is never a top-level row: those are groups, which the model keeps, empty,
+        # once made (an App::VarSetCopy's "Source" group after testCopiedVariableLocked).
+        matches = not hasRows if leaf else hasRows
+        if str(model.data(index)) == name and parent.isValid() and matches:
             return index
         found = findRow(model, index, name, leaf)
         if found is not None:
