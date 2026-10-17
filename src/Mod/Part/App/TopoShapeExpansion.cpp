@@ -5926,6 +5926,8 @@ TopoShape& TopoShape::makeElementFillet(
     }
     std::exception_ptr occtError;
     FilletFallback::Request request;
+    // Before the maker raises the base's tolerances in place
+    request.faceTolerances = FilletFallback::faceTolerances(shape.getShape());
     const bool failed = buildDressUpFailed(mkFillet, occtError, request.contour);
     const bool thin = !failed && builtThinFace(mkFillet, shape);
     if (failed || thin || builtInvalid(mkFillet)) {
@@ -6009,6 +6011,8 @@ TopoShape& TopoShape::makeElementChamfer(
     Part::SignalException sig;
     std::exception_ptr occtError;
     FilletFallback::Request request;
+    // Before the maker raises the base's tolerances in place
+    request.faceTolerances = FilletFallback::faceTolerances(shape.getShape());
     const bool failed = buildDressUpFailed(mkChamfer, occtError, request.contour);
     const bool thin = !failed && builtThinFace(mkChamfer, shape);
     if (failed || thin || builtInvalid(mkChamfer)) {

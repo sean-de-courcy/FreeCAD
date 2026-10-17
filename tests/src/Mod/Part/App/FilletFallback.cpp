@@ -35,6 +35,7 @@
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
+#include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <GC_MakeArcOfCircle.hxx>
 #include <GProp_GProps.hxx>
@@ -753,6 +754,96 @@ TEST_F(FilletFallbackTest, refusesAFaceMergedAwayJustUnderTheLimit)
     TopoShape built = forced(base, edges, below);
     EXPECT_TRUE(exact(built, 2400 - d * d * 30));
     EXPECT_EQ(built.countSubElements("Face"), 8);
+}
+
+// The same merge on a base with a larger tolerance away from the rib's top (an imported part's
+// edge, an earlier rounded corner): the grown edge is compared with the faces next to it, not with
+// the base's largest tolerance (ops#315; PR 288 review, finding 1)
+TEST_F(FilletFallbackTest, refusesAFaceMergedAwayBesideALargerToleranceElsewhere)
+{
+    TopoShape base(box(30, 4, 20), 1L);
+    TopoShape bottom = edgeBetween(base, {0, 0, 0}, {30, 0, 0});
+    BRep_Builder builder;
+    builder.UpdateEdge(TopoDS::Edge(bottom.getShape()), 1e-6);
+    for (TopExp_Explorer it(bottom.getShape(), TopAbs_VERTEX); it.More(); it.Next()) {
+        builder.UpdateVertex(TopoDS::Vertex(it.Current()), 1e-6);
+    }
+    std::vector<TopoShape> edges {
+        edgeBetween(base, {0, 0, 20}, {30, 0, 20}),
+        edgeBetween(base, {0, 4, 20}, {30, 4, 20})
+    };
+    for (double d : {2 - 1e-7, 2 - 2e-7}) {
+        FF::Request request = chamfer(d);
+        request.limitOnly = false;
+        std::string reason;
+        EXPECT_TRUE(forced(base, edges, request, &reason).isNull()) << d;
+        EXPECT_NE(reason.find("tolerance grew"), std::string::npos) << d << ": " << reason;
+    }
+    double d = 2 - 3e-7;
+    FF::Request below = chamfer(d);
+    below.limitOnly = false;
+    TopoShape built = forced(base, edges, below);
+    EXPECT_TRUE(exact(built, 2400 - d * d * 30));
+    EXPECT_EQ(built.countSubElements("Face"), 8);
+}
+
+// OCCT's maker raises the base's tolerances in place: chamfers of a rib's top edges ending
+// against a wall as high as the rib leave the base's vertices there at 1e-4, and with them the
+// rib's sides. The check for merged faces compares with the tolerances from before the maker
+// (Request::faceTolerances, as makeElementChamfer takes them), so the strip that one edge's
+// chamfer merges away into the far side just under the limit is still refused after OCCT ran
+// (PR 314 review, item 2)
+TEST_F(FilletFallbackTest, refusesAFaceMergedAwayAfterOcctRaisedTheTolerances)
+{
+    BRepAlgoAPI_Fuse fuse(box(30, 4, 20), box(5, 24, 20, gp_Pnt(-5, -10, 0)));
+    ShapeUpgrade_UnifySameDomain unify(fuse.Shape());
+    unify.Build();
+    TopoShape base(unify.Shape(), 1L);
+    std::vector<TopoShape> edges {edgeBetween(base, {0, 0, 20}, {30, 0, 20})};
+    const auto largest = [&]() {
+        double tolerance = 0;
+        for (TopExp_Explorer it(base.getShape(), TopAbs_FACE); it.More(); it.Next()) {
+            tolerance = std::max(tolerance, FF::faceTolerances(it.Current()).Find(it.Current()));
+        }
+        return tolerance;
+    };
+    const auto before = FF::faceTolerances(base.getShape());
+    ASSERT_LT(largest(), 1e-6);
+    std::vector<TopoShape> both {edges.front(), edgeBetween(base, {0, 4, 20}, {30, 4, 20})};
+    EXPECT_FALSE(dressUp(base, both, chamfer(2 - 1e-5)).isNull());
+    ASSERT_GT(largest(), 1e-5);
+    FF::Request request = chamfer(4 - 2e-7);
+    request.limitOnly = false;
+    request.faceTolerances = before;
+    std::string reason;
+    EXPECT_TRUE(forced(base, edges, request, &reason).isNull());
+    EXPECT_NE(reason.find("tolerance grew"), std::string::npos) << reason;
+}
+
+// The tube's top ring between its rims chamfered just under the limit, 2 (2 - d) wide, merges
+// into the edge between the two cones: an exact section like a line between planes (ops#315; PR
+// 288 review, finding 2). Further below the ring is a face
+TEST_F(FilletFallbackTest, refusesARingMergedAwayBetweenCones)
+{
+    TopoShape ring(tube(), 1L);
+    auto circles = edgesWhere(ring, atHeight(10), true);
+    ASSERT_EQ(circles.size(), 2U);
+    // Each rim's chamfer removes the triangle d x d / 2 about the axis (Pappus), its centroid at
+    // 10 - d / 3 and 6 + d / 3
+    const auto removed = [](double d) {
+        return 16 * pi * d * d;
+    };
+    FF::Request request = chamfer(2 - 1e-7);
+    request.limitOnly = false;
+    std::string reason;
+    EXPECT_TRUE(forced(ring, circles, request, &reason).isNull());
+    EXPECT_NE(reason.find("tolerance grew"), std::string::npos) << reason;
+    double d = 2 - 3e-7;
+    FF::Request below = chamfer(d);
+    below.limitOnly = false;
+    TopoShape built = forced(ring, circles, below);
+    EXPECT_TRUE(exact(built, pi * 64 * 10 - removed(d)));
+    EXPECT_EQ(built.countSubElements("Face"), 6);
 }
 
 TEST_F(FilletFallbackTest, slantedFreeEnds)

@@ -5,17 +5,25 @@
 
 #include <gtest/gtest.h>
 
+#include "src/App/InitApplication.h"
+#include <Mod/Part/App/TopoShape.h>
 #include <Mod/Part/App/TopoShapeRepair.h>
 
 #include <BRep_Builder.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
+#include <BRepBuilderAPI_Transform.hxx>
+#include <BRep_Tool.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeSphere.hxx>
 #include <gp_Pnt.hxx>
+#include <gp_Trsf.hxx>
+#include <gp_Vec.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Compound.hxx>
+#include <TopoDS_Shell.hxx>
+#include <TopoDS_Solid.hxx>
 
 namespace
 {
@@ -97,4 +105,46 @@ TEST(TopoShapeRepair, closedFacesBesideAnOpenFaceEnclose)
     const auto sphere = BRepPrimAPI_MakeSphere(gp_Pnt(60, 0, 0), 5).Shape();
     const auto sphereFace = TopExp_Explorer(sphere, TopAbs_FACE).Current();
     EXPECT_TRUE(Part::enclosesOutsideSolids(compound({box(0), sphereFace, square(40)})));
+}
+
+class CheckDressUpTest: public ::testing::Test
+{
+protected:
+    static void SetUpTestSuite()
+    {
+        tests::initApplication();
+    }
+};
+
+TEST_F(CheckDressUpTest, internalFacesOfAValidResultOnAnInvalidBaseStay)
+{
+    // A box holding a square inside it on purpose, in a shell oriented INTERNAL: an open shell
+    // that is no defect. On an invalid base (a vertex 0.01 off its edges) the valid result is
+    // kept as it is; the repair would drop the square with the shell (PR 314 review, item 5)
+    gp_Trsf halfway;
+    halfway.SetTranslation(gp_Vec(0, 0, 5));
+    TopoDS_Shape inside = BRepBuilderAPI_Transform(square(0), halfway, true).Shape();
+    BRep_Builder builder;
+    TopoDS_Shell internal;
+    builder.MakeShell(internal);
+    builder.Add(internal, inside);
+    internal.Orientation(TopAbs_INTERNAL);
+    TopoDS_Solid solid;
+    builder.MakeSolid(solid);
+    builder.Add(solid, shellOf(box(0)));
+    builder.Add(solid, internal);
+    Part::TopoShape result(solid, 1L);
+    ASSERT_TRUE(result.isValid());
+    ASSERT_EQ(result.countSubShapes(TopAbs_FACE), 7U);
+
+    TopoDS_Shape base = box(0);
+    TopoDS_Vertex corner = TopoDS::Vertex(TopExp_Explorer(base, TopAbs_VERTEX).Current());
+    gp_Pnt off = BRep_Tool::Pnt(corner).Translated(gp_Vec(0.01, 0, 0));
+    builder.UpdateVertex(corner, off, 1e-7);
+    Part::TopoShape invalidBase(base, 1L);
+    ASSERT_FALSE(invalidBase.isValid());
+
+    EXPECT_TRUE(Part::checkDressUp(result, invalidBase));
+    EXPECT_EQ(result.countSubShapes(TopAbs_FACE), 7U);
+    EXPECT_EQ(result.countSubShapes(TopAbs_SHELL), 2U);
 }

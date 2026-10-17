@@ -41,6 +41,7 @@
 #include <TopLoc_Location.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopTools_DataMapOfShapeReal.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopTools_ListOfShape.hxx>
@@ -1771,41 +1772,84 @@ TopoDS_Shape applyTools(
     return result;
 }
 
-/// A new edge between two planes whose tolerance grew past twice the base's largest, or null. A
-/// Boolean that merges a strip narrower than its fuzzy reach away (a chamfer's top strip just
-/// under the limit, 2 (2 - d) wide) raises the tolerance of the edge the strip collapses into, and
-/// the result is then off by the strip's volume (ops#300, PR 286 verification, finding 1). Two
-/// planes meet in an exact line, so a grown tolerance there is such a merge; the sections of
-/// spheres and tori with other faces are approximated and grow legitimately (3e-7 to 4e-7 on the
-/// stadium and the hexagon's corners)
-TopoDS_Edge grownEdge(const TopoDS_Shape& result, const TopoDS_Shape& base)
+/// The largest tolerance of the shape and its sub-shapes, at least linearTolerance
+double largestTolerance(const TopoDS_Shape& shape)
 {
-    double baseTolerance = linearTolerance;
-    for (TopExp_Explorer it(base, TopAbs_FACE); it.More(); it.Next()) {
-        baseTolerance = std::max(baseTolerance, BRep_Tool::Tolerance(TopoDS::Face(it.Current())));
+    double tolerance = linearTolerance;
+    for (TopExp_Explorer it(shape, TopAbs_FACE); it.More(); it.Next()) {
+        tolerance = std::max(tolerance, BRep_Tool::Tolerance(TopoDS::Face(it.Current())));
     }
-    for (TopExp_Explorer it(base, TopAbs_EDGE); it.More(); it.Next()) {
-        baseTolerance = std::max(baseTolerance, BRep_Tool::Tolerance(TopoDS::Edge(it.Current())));
+    for (TopExp_Explorer it(shape, TopAbs_EDGE); it.More(); it.Next()) {
+        tolerance = std::max(tolerance, BRep_Tool::Tolerance(TopoDS::Edge(it.Current())));
     }
-    for (TopExp_Explorer it(base, TopAbs_VERTEX); it.More(); it.Next()) {
-        double tolerance = BRep_Tool::Tolerance(TopoDS::Vertex(it.Current()));
-        baseTolerance = std::max(baseTolerance, tolerance);
+    for (TopExp_Explorer it(shape, TopAbs_VERTEX); it.More(); it.Next()) {
+        tolerance = std::max(tolerance, BRep_Tool::Tolerance(TopoDS::Vertex(it.Current())));
     }
+    return tolerance;
+}
+
+/// Whether the edge is an exact section of its two faces: a line, circle or ellipse between
+/// planes, cylinders and cones, which OCCT intersects analytically
+bool exactSection(const TopoDS_Edge& edge, const TopTools_ListOfShape& faces)
+{
+    if (faces.Extent() != 2) {
+        return false;
+    }
+    switch (BRepAdaptor_Curve(edge).GetType()) {
+        case GeomAbs_Line:
+        case GeomAbs_Circle:
+        case GeomAbs_Ellipse:
+            break;
+        default:
+            return false;
+    }
+    return std::all_of(faces.begin(), faces.end(), [](const TopoDS_Shape& face) {
+        switch (BRepAdaptor_Surface(TopoDS::Face(face)).GetType()) {
+            case GeomAbs_Plane:
+            case GeomAbs_Cylinder:
+            case GeomAbs_Cone:
+                return true;
+            default:
+                return false;
+        }
+    });
+}
+
+/// A new edge, an exact section of its faces, whose tolerance grew past twice that of the faces
+/// next to it, or null. A Boolean that merges a strip narrower than its fuzzy reach away (a
+/// chamfer's top strip just under the limit, 2 (2 - d) wide; the tube's top ring between its
+/// chamfered rims, two cones) raises the tolerance of the edge the strip collapses into, and the
+/// result is then off by the strip's volume (ops#300, PR 286 verification, finding 1; ops#315).
+/// An exact section keeps its faces' tolerance, so a grown one there is such a merge; the
+/// sections of spheres and tori with other faces are approximated and grow legitimately (3e-7 to
+/// 4e-7 on the stadium and the hexagon's corners). The faces' tolerance is that of each base or
+/// tool face the face is an image of, with its edges and vertices, before the Booleans: a tolerance
+/// elsewhere in the base (an earlier rounded corner, an imported part's edge) doesn't hide a merge,
+/// nor does the merge's own raising of its faces'
+TopoDS_Edge grownEdge(
+    const TopoDS_Shape& result,
+    const TopoDS_Shape& base,
+    const TopTools_DataMapOfShapeReal& faceTolerances
+)
+{
     TopTools_IndexedMapOfShape baseEdges;
     TopExp::MapShapes(base, TopAbs_EDGE, baseEdges);
     TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
     TopExp::MapShapesAndAncestors(result, TopAbs_EDGE, TopAbs_FACE, edgeFaces);
     for (int i = 1; i <= edgeFaces.Extent(); ++i) {
         const TopoDS_Edge& edge = TopoDS::Edge(edgeFaces.FindKey(i));
-        if (baseEdges.Contains(edge) || BRep_Tool::Tolerance(edge) <= 2 * baseTolerance) {
+        if (baseEdges.Contains(edge) || !exactSection(edge, edgeFaces(i))) {
             continue;
         }
-        bool betweenPlanes = edgeFaces(i).Extent() == 2;
+        double faceTolerance = linearTolerance;
         for (const auto& face : edgeFaces(i)) {
-            betweenPlanes = betweenPlanes
-                && BRepAdaptor_Surface(TopoDS::Face(face)).GetType() == GeomAbs_Plane;
+            const double* tolerance = faceTolerances.Seek(face);
+            faceTolerance = std::max(
+                faceTolerance,
+                tolerance ? *tolerance : BRep_Tool::Tolerance(TopoDS::Face(face))
+            );
         }
-        if (betweenPlanes) {
+        if (BRep_Tool::Tolerance(edge) > 2 * faceTolerance) {
             return edge;
         }
     }
@@ -2022,6 +2066,15 @@ TopoDS_Shape construct(
     }
     checkStrips(tools, overlaps, request.limitOnly);
 
+    // The tools' faces' tolerances before the Booleans, for the check for merged faces: a merge
+    // raises those of its images
+    std::vector<std::vector<std::pair<TopoDS_Shape, double>>> toolFaceTolerances(tools.size());
+    for (size_t i = 0; i < tools.size(); ++i) {
+        for (TopExp_Explorer it(tools[i].solid, TopAbs_FACE); it.More(); it.Next()) {
+            toolFaceTolerances[i].emplace_back(it.Current(), largestTolerance(it.Current()));
+        }
+    }
+
     std::vector<Stage> stages;
     std::vector<size_t> toolStage(tools.size(), 0);
     TopoDS_Shape shape = base.getShape();
@@ -2098,7 +2151,29 @@ TopoDS_Shape construct(
     if (!thinFace(shape, base.getShape()).IsNull()) {
         refuse("the result has a face of zero width");
     }
-    if (TopoDS_Edge grown = grownEdge(shape, base.getShape()); !grown.IsNull()) {
+    TopTools_DataMapOfShapeReal faceTolerances;
+    auto bindImages = [&](size_t from, const TopoDS_Shape& face, double tolerance) {
+        for (const auto& image : imagesThrough(stages, from, face)) {
+            if (double* known = faceTolerances.ChangeSeek(image)) {
+                *known = std::max(*known, tolerance);
+            }
+            else {
+                faceTolerances.Bind(image, tolerance);
+            }
+        }
+    };
+    // The base's as before OCCT's maker, which raises them in place
+    for (TopExp_Explorer it(base.getShape(), TopAbs_FACE); it.More(); it.Next()) {
+        const double* before = request.faceTolerances.Seek(it.Current());
+        bindImages(0, it.Current(), before ? *before : largestTolerance(it.Current()));
+    }
+    for (size_t i = 0; i < tools.size(); ++i) {
+        for (const auto& [face, tolerance] : toolFaceTolerances[i]) {
+            bindImages(toolStage[i], face, tolerance);
+        }
+    }
+    if (TopoDS_Edge grown = grownEdge(shape, base.getShape(), faceTolerances);
+        !grown.IsNull()) {
         refuse("an edge's tolerance grew to " + describe(BRep_Tool::Tolerance(grown))
                + ": a face was merged away");
     }
@@ -2174,6 +2249,17 @@ TopoDS_Shape construct(
 thread_local Recorder* innermostRecorder = nullptr;
 
 }  // namespace
+
+TopTools_DataMapOfShapeReal faceTolerances(const TopoDS_Shape& shape)
+{
+    TopTools_DataMapOfShapeReal tolerances;
+    for (TopExp_Explorer it(shape, TopAbs_FACE); it.More(); it.Next()) {
+        if (!tolerances.IsBound(it.Current())) {
+            tolerances.Bind(it.Current(), largestTolerance(it.Current()));
+        }
+    }
+    return tolerances;
+}
 
 TopoDS_Face thinFace(const TopoDS_Shape& result, const TopoDS_Shape& base)
 {
