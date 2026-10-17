@@ -149,7 +149,7 @@ def _object(obj, doc, masker, names):
     shape = _shapeOf(obj)
     if shape is not None:
         entry["shape"] = _shapeEntry(shape)
-        if names and not shape.isNull():
+        if names and not shape.isNull() and not _infinite(shape):
             entry["names"] = _names(shape, masker)
     guesses = _guesses(obj)
     if guesses:
@@ -413,6 +413,15 @@ def elementKey(shape):
     if kind == "Vertex":
         key["point"] = _vector(shape.Point)
         return key
+    if _infinite(shape):
+        # a datum plane's face: its plane, by normal and distance from the origin
+        key["infinite"] = True
+        faces = shape.Faces
+        if len(faces) == 1 and isinstance(faces[0].Surface, Part.Plane):
+            normal = faces[0].Surface.Axis
+            key["normal"] = _vector(normal)
+            key["offset"] = float(normal.dot(faces[0].Surface.Position))
+        return key
     centre = _centre(shape)
     if centre is not None:
         key["centre"] = centre
@@ -433,16 +442,34 @@ def elementKey(shape):
     return key
 
 
+# Beyond this a bounding box coordinate is OCCT's stand-in for infinity (1e100).
+_INFINITE = 1e50
+
+
+def _infinite(shape):
+    """Whether the shape is unbounded (a datum plane's face): its area and centre are then noise
+    at the scale of infinity, not values."""
+    box = shape.BoundBox
+    return max(abs(v) for v in (box.XMin, box.YMin, box.ZMin, box.XMax, box.YMax, box.ZMax)) > (
+        _INFINITE
+    )
+
+
 def _shapeEntry(shape):
+    """The shape's type, volume, area, exact bounding box, element counts and centre; an
+    unbounded shape only by its type and counts (its placement is a property)."""
     if shape.isNull():
         return None
+    counts = [len(shape.Solids), len(shape.Faces), len(shape.Edges), len(shape.Vertexes)]
+    if _infinite(shape):
+        return {"type": shape.ShapeType, "infinite": True, "counts": counts}
     box = shape.optimalBoundingBox(False, False)
     return {
         "type": shape.ShapeType,
         "volume": float(shape.Volume) if shape.Solids else 0.0,
         "area": float(shape.Area),
         "box": [box.XMin, box.YMin, box.ZMin, box.XMax, box.YMax, box.ZMax],
-        "counts": [len(shape.Solids), len(shape.Faces), len(shape.Edges), len(shape.Vertexes)],
+        "counts": counts,
         "centre": _centre(shape),
     }
 
