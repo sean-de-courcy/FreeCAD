@@ -335,28 +335,51 @@ class TestNewPart(unittest.TestCase):
         self.assertLid(part, lid, 8000)
         self.assertAlmostEqual(body.Shape.Volume, 16000, places=3)
 
+    def placedLid(self, body, base, lidSk, on):
+        """The lid of testNewPartFromAPlacedBodyStaysWhereItWas, 30 x 30 x 3 from z = 10, made
+        `on`: the enclosure's top face, its XY plane 10 up, its XZ plane (the sketch's y is z,
+        10 up; padded along y), the sketch unattached at z = 10, or an additive box on the XY
+        plane 10 up (lidSk unused). Returns the lid and what the new Body should hold."""
+        up = App.Placement(V(0, 0, 10), App.Rotation())
+        if on == "box":
+            lid = body.newObject("PartDesign::AdditiveBox", "Lid")
+            lid.Length, lid.Width, lid.Height = 30, 30, 3
+            lid.AttachmentSupport = xyPlane(body)
+            lid.MapMode = "FlatFace"
+            lid.AttachmentOffset = up
+            return lid, [lid]
+        if on == "origin":
+            lidSk.AttachmentSupport = xyPlane(body)
+            lidSk.AttachmentOffset = up
+        elif on == "xz":
+            lidSk.AttachmentSupport = [(body.Origin.OriginFeatures[4], "")]
+            lidSk.AttachmentOffset = App.Placement(V(0, 10, 0), App.Rotation())
+        elif on == "unattached":
+            lidSk.MapMode = "Deactivated"
+            lidSk.AttachmentSupport = []
+            lidSk.Placement = up
+        return pad(body, "Lid", lidSk, 3), [lidSk]
+
     def testNewPartFromAPlacedBodyStaysWhereItWas(self):
         """A placed enclosure (at (100, 0, 0), turned 20 deg about Z; at the top level and in an
-        App::Part): a lid on its XY plane 10 up, and one on its top face, each 30 x 30 x 3. New
-        part puts the new Body where the enclosure is and keeps each lid's global bounding box
-        (with the new Body at identity, the origin-plane lid went to (0, 0, 10)-(30, 30, 13))."""
+        App::Part), and a lid 30 x 30 x 3 from z = 10: on its top face, its XY plane, its XZ
+        plane, an unattached sketch, or an additive box (placedLid). New part puts the new Body
+        where the enclosure is and keeps each lid's global bounding box (with the new Body at
+        identity, the origin-plane lid went to (0, 0, 10)-(30, 30, 13))."""
         placement = App.Placement(V(100, 0, 0), App.Rotation(V(0, 0, 1), 20))
         for container in (None, self.doc.addObject("App::Part", "Studio")):
-            for on in ("origin", "face"):
+            for on in ("origin", "face", "xz", "unattached", "box"):
                 with self.subTest(container=container and container.Name, on=on):
                     body, base, lidSk = self.enclosure(container)
                     body.Placement = placement
-                    if on == "origin":
-                        lidSk.AttachmentSupport = xyPlane(body)
-                        lidSk.AttachmentOffset = App.Placement(V(0, 0, 10), App.Rotation())
-                    lid = pad(body, "Lid", lidSk, 3)
+                    lid, held = self.placedLid(body, base, lidSk, on)
                     self.doc.recompute()
                     before = globalBox(lid)
                     self.assertAlmostEqual(before.ZMin, 10, places=6)
                     self.assertGreater(before.XMin, 80)  # the enclosure's placement counts
                     part = PartDesign.newPartFrom(lid)
                     self.doc.recompute()
-                    self.assertEqual(part.Group, [lidSk, lid])
+                    self.assertEqual(part.Group, held + [lid] if on != "box" else held)
                     after = globalBox(lid)
                     for corner in ("XMin", "YMin", "ZMin", "XMax", "YMax", "ZMax"):
                         self.assertAlmostEqual(

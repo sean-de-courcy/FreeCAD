@@ -1686,7 +1686,8 @@ class TestPanelFixesGui(unittest.TestCase):
         guiDoc = Gui.getDocument(self.doc.Name)
         self.runNewSketchOnCopiedFace(box, top)
         self.assertTrue(
-            waitFor(lambda: guiDoc.getInEdit() is not None, 10.0), f"no sketch in edit; {self.modals}"
+            waitFor(lambda: guiDoc.getInEdit() is not None, 10.0),
+            f"no sketch in edit; {self.modals}",
         )
         pump(0.3)
         self.answering = False
@@ -1719,7 +1720,8 @@ class TestPanelFixesGui(unittest.TestCase):
         guiDoc = Gui.getDocument(self.doc.Name)
         self.runNewSketchOnCopiedFace(other, top)
         self.assertTrue(
-            waitFor(lambda: guiDoc.getInEdit() is not None, 10.0), f"no sketch in edit; {self.modals}"
+            waitFor(lambda: guiDoc.getInEdit() is not None, 10.0),
+            f"no sketch in edit; {self.modals}",
         )
         pump(0.3)
         self.answering = False
@@ -1786,6 +1788,7 @@ class TestPanelFixesGui(unittest.TestCase):
 
     def assertSameShape(self, copy, original):
         """copy's shape is original's, globally: the same volume, faces and bounding box."""
+
         def placed(obj):
             shape = obj.Shape.copy()
             shape.Placement = obj.getGlobalPlacement()
@@ -3575,10 +3578,20 @@ class TestPanelFixesGui(unittest.TestCase):
             if w.metaObject().className() == "Gui::PythonConsole"
         ]
         self.assertEqual(len(consoles), 1, "no Python console")
-        App.ParamGet("User parameter:BaseApp/Preferences/Macro").SetBool("ScriptToPyConsole", True)
-        before = len(consoles[0].toPlainText())
-        self.repickInPanel(plane, cylinder, top)
-        written = consoles[0].toPlainText()[before:]
+        macro = App.ParamGet("User parameter:BaseApp/Preferences/Macro")
+        had = "ScriptToPyConsole" in macro.GetBools()
+        old = macro.GetBool("ScriptToPyConsole", True)
+        macro.SetBool("ScriptToPyConsole", True)
+        try:
+            before = len(consoles[0].toPlainText())
+            self.repickInPanel(plane, cylinder, top)
+            written = consoles[0].toPlainText()[before:]
+        finally:
+            # the user's setting back: the GUI tests also run in a real profile
+            if had:
+                macro.SetBool("ScriptToPyConsole", old)
+            else:
+                macro.RemBool("ScriptToPyConsole")
         support = written.find(".AttachmentSupport = ")
         self.assertGreaterEqual(support, 0, written)
         self.assertIn(".MapOrigin = 'Body'", written[support:])
