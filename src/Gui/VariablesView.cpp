@@ -1573,6 +1573,11 @@ bool VariablesView::addFromDialog(
     catch (const Base::Exception& e) {
         return fail(QString::fromUtf8(e.what()));
     }
+    catch (...) {
+        // Not left open or booked: the next edit would join it, with a half-made VarSet.
+        fail({});
+        throw;
+    }
     Gui::PropertyEditor::closePropertyTransaction(tid);
     return true;
 }
