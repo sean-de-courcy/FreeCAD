@@ -378,11 +378,17 @@ def _unique_name(doc, label: str, taken: Iterable[str]) -> str:
 
 def _document_value(doc, path: str) -> Quantity:
     """The value of the document variable `Object.Property` (internal names), in SI units: the
-    property's own value (its bare name as an expression would read `H` or `m` as a unit)."""
+    property's own value (its bare name as an expression would read `H` or `m` as a unit). The
+    path must work in an expression: a variable named like a unit (made from Python) doesn't,
+    even qualified."""
     obj_name, _, prop = path.partition(".")
     obj = doc.getObject(obj_name)
     if obj is None or not prop or prop not in obj.PropertiesList:
         raise ValueError(f"{path} isn't a variable of this document")
+    try:
+        obj.evalExpression(path)
+    except Exception as e:  # noqa: BLE001 (the parser's and the evaluation's errors alike)
+        raise ValueError(f"{path} can't be used in an expression: {e}") from None
     return to_quantity(getattr(obj, prop), path)
 
 
