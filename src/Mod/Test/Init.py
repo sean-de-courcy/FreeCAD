@@ -36,5 +36,6 @@ FreeCAD.__unit_test__ += [
     "TestPythonSyntax",
     "TestVariables",
     "TestVariablesOnshape",
+    "TestVariablesCopies",
     "TestExpressionUnits",
 ]

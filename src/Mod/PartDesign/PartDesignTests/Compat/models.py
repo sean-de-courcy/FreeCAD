@@ -35,6 +35,7 @@ B1's list (3.6, "about ten, the core") is here; B2's are in the `models_*` modul
 """
 
 import math
+import os
 
 import FreeCAD as App
 import Part
@@ -307,6 +308,52 @@ def VarSetDriven(make):
     return {"volumes": {"LinearPattern": 25 * 20 * 12 - 3 * math.pi * 4 * 12}}
 
 
+def VarSetCopyDriven(make):
+    """Two copies of made-up Onshape exports (`App::VarSetCopy`, ops#317 PR E1) driving a Box.
+
+    Studio A: t `3 mm` (a unit name in FreeCAD, so NameMap t -> t_), Width `40 mm`, Depth
+    `#t * 6 + #Gap` with #Gap bound to the document's Variables.Gap (2 mm): 20 mm. Studio B:
+    Height `#Width / 4 + 2 mm`, Width from Studio A's copy: 12 mm. The exports are written to a
+    temporary folder, removed after the import; the copies then get a fixed neutral source path
+    and refresh time, so the committed model holds no machine path and is the same every run.
+    A Box whose Length, Width and Height are A's Width and Depth and B's Height."""
+    import json
+    import shutil
+    import tempfile
+
+    from freecad.variables import copies
+
+    doc = make("VarSetCopyDriven")
+    variables = doc.addObject("App::VarSet", "Variables")
+    variables.addProperty("App::PropertyLength", "Gap")
+    variables.Gap = "2 mm"
+    exports = {
+        "Studio A": [("t", "3 mm"), ("Width", "40 mm"), ("Depth", "#t * 6 + #Gap")],
+        "Studio B": [("Height", "#Width / 4 + 2 mm")],
+    }
+    folder = tempfile.mkdtemp(prefix="VarSetCopyDriven")
+    try:
+        paths = []
+        for stem, variables_ in exports.items():
+            paths.append(os.path.join(folder, stem + ".json"))
+            with open(paths[-1], "w", encoding="utf-8") as f:
+                json.dump([{"variableStudioReference": None, "variables": [
+                    {"type": "LENGTH", "name": name, "value": None, "description": "",
+                     "expression": text} for name, text in variables_]}], f)
+        a, b = copies.import_studios(doc, paths, bindings={"Gap": "Variables.Gap"}).copies
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+    for copy in (a, b):
+        copy.SourcePath = f"/Exports/{copy.Label}.json"
+        copy.SourceRefreshed = "2026-10-17T00:00:00Z"
+    box = m.box(doc, "Box", (1, 1, 1))
+    box.setExpression("Length", f"{a.Name}.Width")
+    box.setExpression("Width", f"{a.Name}.Depth")
+    box.setExpression("Height", f"{b.Name}.Height")
+    doc.recompute()
+    return {"volumes": {"Box": 40 * 20 * 12}}
+
+
 def SubShapeBinder(make):
     """A SubShapeBinder of a feature's face in a second Body, with a sketch and a Pad on it.
 
@@ -481,3 +528,6 @@ from PartDesignTests.Compat import models_studio  # noqa: E402
 
 for _group in (models_partdesign, models_part, models_sketcher, models_assembly, models_studio):
     MODELS.update((f.__name__, f) for f in _group.MODELS)
+
+# ops#317 PR E1: a variables copy, for the next generation.
+MODELS[VarSetCopyDriven.__name__] = VarSetCopyDriven

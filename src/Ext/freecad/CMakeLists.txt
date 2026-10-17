@@ -40,6 +40,7 @@ endforeach()
 set(EXT_VARIABLES_FILES
     variables/__init__.py
     variables/onshape.py
+    variables/copies.py
 )
 
 foreach (it ${EXT_VARIABLES_FILES})

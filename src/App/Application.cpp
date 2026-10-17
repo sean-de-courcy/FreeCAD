@@ -136,6 +136,7 @@
 #include "Link.h"
 #include "LinkBaseExtensionPy.h"
 #include "VarSet.h"
+#include "VarSetCopy.h"
 #include "MaterialObject.h"
 #include "MeasureManagerPy.h"
 #include "Origin.h"
@@ -2359,6 +2360,7 @@ void Application::initTypes()
     App::LinkGroup                 ::init();
     App::LinkGroupPython           ::init();
     App::VarSet                    ::init();
+    App::VarSetCopy                ::init();
 
     // Expression classes
     App::Expression                ::init();
