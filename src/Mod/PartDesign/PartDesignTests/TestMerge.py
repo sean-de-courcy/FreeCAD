@@ -341,6 +341,42 @@ class TestMerge(unittest.TestCase):
         self.assertFalse(inside(self.bracket.Shape, V(65, 15, 5)))
         self.assertNotIn("Touched", self.doc.getObject("Merge").State)
 
+    def testPartMovedByAnExpression(self):
+        """A merged part's container moved by a cell (ops#342): the panel, merged, is then put in
+        an App::Part whose x is a cell; no Body's Placement changes. dx 10 and one recompute: the
+        bracket is 25000, solid at (65, 15, 5). Then the bracket's Part instead: the bracket in a
+        second Part whose x is another cell, the panel's Part back at 0: bx 10 puts the panel at
+        x 10..50 in the bracket's frame (Body.Shape leaves the Part's placement out): 19000, solid
+        at x 45 and nothing at x 55 (a stale Merge would reach x 60)."""
+        self.model()
+        merge = self.merge()
+        sheet = self.sheet(dx=0, bx=0)
+        panelPart = self.doc.addObject("App::Part", "PanelPart")
+        panelPart.addObject(self.panel)
+        panelPart.setExpression(".Placement.Base.x", "Sheet.dx")
+        self.doc.recompute()
+        self.assertAlmostEqual(self.bracket.Shape.Volume, UNION, places=6)
+
+        sheet.set("dx", "10")
+        self.doc.recompute()
+        self.assertTrue(merge.isValid(), merge.getStatusString())
+        self.assertAlmostEqual(self.bracket.Shape.Volume, 16000 + 12000 - 3000, places=6)
+        self.assertTrue(inside(self.bracket.Shape, V(65, 15, 5)))
+        self.assertNotIn("Touched", merge.State)
+
+        bracketPart = self.doc.addObject("App::Part", "BracketPart")
+        bracketPart.addObject(self.bracket)
+        bracketPart.setExpression(".Placement.Base.x", "Sheet.bx")
+        sheet.set("dx", "0")
+        self.doc.recompute()
+        self.assertAlmostEqual(self.bracket.Shape.Volume, UNION, places=6)
+        sheet.set("bx", "10")
+        self.doc.recompute()
+        self.assertAlmostEqual(self.bracket.Shape.Volume, 16000 + 12000 - 9000, places=6)
+        self.assertTrue(inside(self.bracket.Shape, V(45, 15, 5)))
+        self.assertFalse(inside(self.bracket.Shape, V(55, 15, 5)))
+        self.assertNotIn("Touched", merge.State)
+
     def testStaleMergeReopened(self):
         """A Merge saved stale (its part moved, the Merge left untouched, as an expression could
         leave it before round 1) runs on the first recompute after reopening: the frames it last

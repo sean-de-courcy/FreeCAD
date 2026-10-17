@@ -61,6 +61,7 @@
 #include "ShapeBinder.h"
 #include "FailureContinuation.h"
 #include "Retarget.h"
+#include "ContainerMoves.h"
 
 
 namespace PartDesign
@@ -89,6 +90,8 @@ PyMOD_INIT_FUNC(_PartDesign)
     PartDesign::registerParkedReferenceProvider();
     // Parked lines follow their objects through import, merge and paste (ops#158)
     PartDesign::registerParkedImport();
+    // A container moved by an expression mid-recompute reruns its readers then (ops#342)
+    PartDesign::registerContainerMoves();
     Base::Console().log("Loading Part Design module… done\n");
 
 

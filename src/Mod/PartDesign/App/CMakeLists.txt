@@ -28,6 +28,8 @@ SET(Features_SRCS
     FeatureSolid.h
     Body.cpp
     Body.h
+    ContainerMoves.cpp
+    ContainerMoves.h
     FeatureBase.h
     FeatureBase.cpp
 )

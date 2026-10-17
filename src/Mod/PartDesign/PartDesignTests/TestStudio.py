@@ -925,6 +925,40 @@ class TestStudio(unittest.TestCase):
         self.doc.recompute()
         self.assertFollows(*objects, V(0, 0, 3))
 
+    def movedByACell(self, inAPart):
+        """B's x, or that of an App::Part holding B, follows a spreadsheet cell; dx 10 and one
+        plain recompute, then dx 0 and one recompute (ops#342): the move lands in the same
+        recompute, though it happens in the middle of it, after A's readers may have run (made
+        last, the Part comes after them in the recompute's order; made first, before them)."""
+        a, b, padB, across, pattern, attached, ext = self.movedSibling()
+        sheet = self.doc.addObject("Spreadsheet::Sheet", "Sheet")
+        sheet.set("A1", "0")
+        sheet.setAlias("A1", "dx")
+        container = b
+        if inAPart:
+            container = self.doc.addObject("App::Part", "Part")
+            container.addObject(b)
+        container.setExpression(".Placement.Base.x", "Sheet.dx")
+        self.doc.recompute()
+        self.assertFollows(b, across, pattern, attached, ext, V(0, 0, 0))
+        sheet.set("dx", "10")
+        self.doc.recompute()
+        self.assertFollows(b, across, pattern, attached, ext, V(10, 0, 0))
+        sheet.set("dx", "0")
+        self.doc.recompute()
+        self.assertFollows(b, across, pattern, attached, ext, V(0, 0, 0))
+        self.assertSettled()
+
+    def testSiblingMovedByAnExpression(self):
+        """D-t4 with B's Placement from a cell (ops#342): A's pad and pattern fail, and recover,
+        in the same recompute; the attached sketch and the external edge follow."""
+        self.movedByACell(False)
+
+    def testSiblingInAPartMovedByAnExpression(self):
+        """D-t4 with B in an App::Part whose Placement follows a cell (ops#342): no Body's
+        Placement changes, and the same holds."""
+        self.movedByACell(True)
+
     def testOtherPlacersInABodyPlacedElsewhereFail(self):
         """1b-1 (b): every PartDesign link read as if in the feature's Body fails loudly when its
         Body is placed elsewhere: a polar pattern's axis, a mirror plane, a draft's neutral plane
