@@ -310,6 +310,17 @@ class TestVariablesCopies(unittest.TestCase):
         self.assertAlmostEqual(result.copies[0].Gap.Value, 3)
         self.assertEqual(variables.InList, [])
 
+    def test_bind_to_unit_named_variable(self):
+        """A document variable named like a unit (Variables.H, made from Python): the binding
+        reads its value, not `H` as henry."""
+        variables = self.doc.addObject("App::VarSet", "Variables")
+        variables.addProperty("App::PropertyLength", "H")
+        variables.H = "5 mm"
+        self.doc.recompute()
+        a = self.export("Studio A", STUDIO_A)
+        copy = copies.import_studios(self.doc, [a], bindings={"Gap": "Variables.H"}).copies[0]
+        self.assertAlmostEqual(copy.Width.Value, 10)
+
     def test_skip_and_bind(self):
         """Skip the file's Gap and bind #Gap to Variables.Gap: Width uses the document's Gap,
         and Bindings records it (the name is no longer defined once skipped)."""

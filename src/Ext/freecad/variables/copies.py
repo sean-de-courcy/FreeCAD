@@ -268,7 +268,7 @@ def plan_import(doc, paths: Sequence[str], *,
     for name, path in bindings.items():
         try:
             plan.bindings[name] = Binding(path, _document_value(doc, path))
-        except ValueError as e:
+        except Exception as e:  # noqa: BLE001 (any failure to read it is a problem to show)
             plan.problems.append(f"#{name}: {e}")
     if values:
         _plan_inputs(doc, plan, values, default_units)
@@ -377,12 +377,13 @@ def _unique_name(doc, label: str, taken: Iterable[str]) -> str:
 
 
 def _document_value(doc, path: str) -> Quantity:
-    """The value of the document variable `Object.Property` (internal names), in SI units."""
+    """The value of the document variable `Object.Property` (internal names), in SI units: the
+    property's own value (its bare name as an expression would read `H` or `m` as a unit)."""
     obj_name, _, prop = path.partition(".")
     obj = doc.getObject(obj_name)
     if obj is None or not prop or prop not in obj.PropertiesList:
         raise ValueError(f"{path} isn't a variable of this document")
-    return to_quantity(obj.evalExpression(prop), path)
+    return to_quantity(getattr(obj, prop), path)
 
 
 def to_quantity(value, what: str) -> Quantity:
