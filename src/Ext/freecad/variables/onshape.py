@@ -234,6 +234,13 @@ class WithUnit:
 
 
 @dataclass(frozen=True)
+class BareUnit:
+    """A unit name after `/`, standing for one of it: `#a/mm` is #a counted in millimetres."""
+
+    unit: str
+
+
+@dataclass(frozen=True)
 class Ref:
     name: str
 
@@ -350,8 +357,21 @@ class _Parser:
         ops = []
         while self.at_op("*", "/", "%"):
             ops.append(self.take().text)
-            factors.append(self.unary())
+            token = self.peek()
+            if ops[-1] == "/" and token.kind == "name" and token.text in UNITS:
+                factors.append(self.bare_unit())
+            else:
+                factors.append(self.unary())
         return _fold_term(factors, ops)
+
+    def bare_unit(self):
+        """`#a/mm`: Onshape's floor(#Len_frac/mm) is 69 for 2.75 in (the reference studio,
+        row 26). Only after `/`, as a factor of its own."""
+        unit = self.take().text
+        token = self.peek()
+        if (token.kind == "op" and token.text in ("^", "(")) or token.kind in ("name", "number"):
+            raise Refused(f"a unit name after / followed by {token.text!r}: {UNDOCUMENTED}")
+        return BareUnit(unit)
 
     def unary(self):
         if self.at_op("-", "+"):
@@ -548,6 +568,8 @@ def write(node, resolve_text: Callable[[str], str], top: bool = True) -> str:
                 f"* 1 {UNITS[node.unit][2]})")
     if isinstance(node, WithUnit):
         return f"({w(node.node)} * 1 {UNITS[node.unit][2]})"
+    if isinstance(node, BareUnit):
+        return f"(1 {UNITS[node.unit][2]})"
     if isinstance(node, Ref):
         return resolve_text(node.name)
     if isinstance(node, Const):
@@ -628,6 +650,9 @@ def _evaluate(node, resolve_value: Callable[[str], Quantity]) -> Value:
             raise Refused(f"a unit ({node.unit}) after a value that has one already")
         factor, dims, _symbol = UNITS[node.unit]
         return Quantity(inner.value * factor, dims)
+    if isinstance(node, BareUnit):
+        factor, dims, _symbol = UNITS[node.unit]
+        return Quantity(factor, dims)
     if isinstance(node, Ref):
         return resolve_value(node.name)
     if isinstance(node, Const):
@@ -745,8 +770,10 @@ def _call(name: str, args: List[Value]) -> Quantity:
         count(1)
         x = values[0]
         if x.dims != NONE:
-            raise Refused(f"{name}() of a value with a unit depends on the unit it is counted in: "
-                          f"{UNDOCUMENTED}")
+            # the reference studio: Onshape takes only a number in floor() (row 26)
+            why = "Onshape rejects it" if name == "floor" else UNDOCUMENTED
+            raise Refused(f"{name}() of a value with a unit: {why}; count it in a unit first, as "
+                          f"in {name}(#a / mm) * 1 mm")
         if name == "round":
             return Quantity(float(math.floor(x.value + 0.5)))  # halves up, as written
         return Quantity(float(getattr(math, name)(x.value)))
@@ -824,7 +851,7 @@ def translate(expression: str, onshape_type: str,
 def _has_units(node, resolve_value: Callable[[str], Quantity]) -> bool:
     """Whether a unit takes part anywhere: a literal one, a reference to a value with one, or an
     inverse trig function (an angle). Only an expression without any takes the default unit."""
-    if isinstance(node, (Qty, UnitPower, Frac, WithUnit)):
+    if isinstance(node, (Qty, UnitPower, Frac, WithUnit, BareUnit)):
         return True
     if isinstance(node, Ref):
         return resolve_value(node.name).dims != NONE
