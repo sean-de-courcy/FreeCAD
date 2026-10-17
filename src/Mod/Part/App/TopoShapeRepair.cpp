@@ -572,8 +572,9 @@ bool checkDressUp(TopoShape& shape, const TopoShape& base)
 {
     // An invalid base passes its defects on, also into a result BRepCheck accepts: there it is
     // repaired as an invalid one. A valid base keeps the check as before, since a solid may hold an
-    // open shell on purpose (internal faces)
-    if (shape.isValid() && (base.isValid() || !hasOpenShellInASolid(shape.getShape()))) {
+    // open shell on purpose (internal faces). The base's check is a full BRepCheck, so it runs
+    // only for a result that has such a shell
+    if (shape.isValid() && (!hasOpenShellInASolid(shape.getShape()) || base.isValid())) {
         return true;
     }
     const auto solids = base.countSubShapes(TopAbs_SOLID);
