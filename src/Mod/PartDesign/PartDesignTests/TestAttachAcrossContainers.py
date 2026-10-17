@@ -1030,6 +1030,65 @@ class TestAttachAcrossContainers(unittest.TestCase):
         self.assertEqual([o.Name for o in doc.Objects if "Touched" in o.State], [])
         self.assertTrue(doc.getObject("Sk2").getGlobalPlacement().isSame(frame, 1e-9))
 
+    # ops#332 ---------------------------------------------------------------------------------
+
+    # Body2's rotations: each turned the axes OCCT found on the mapped face one way or the other
+    # (probe on the build before the change: z reversed for (1, 0, 0) 180, (0, 1, 0) 90, (1, 2, 3) 70; x
+    # reversed for (0, 0, 1) 180, (1, 0, 0) 90)
+    INERTIAL_ROTATIONS = [R(), R(V(0, 0, 1), 180), R(V(1, 0, 0), 180), R(V(0, 1, 0), 90),
+                          R(V(1, 0, 0), 90), R(V(1, 2, 3), 70), R(V(3, -1, 2), 160)]
+
+    def inertialFrames(self, mode, kind):
+        """In Body1's coordinates, the frame of a `kind` attached by `mode` to the top of Body1's
+        pad, made in Body1 itself, and made in Body2 for each of INERTIAL_ROTATIONS."""
+        def frame(container):
+            obj = container.newObject(kind, "Inertial")
+            obj.AttachmentSupport = [(pad, topFace(pad, 5))]
+            obj.MapMode = mode
+            doc.recompute()
+            self.assertTrue(obj.isValid(), obj.getStatusString())
+            return source[0].Placement.inverse().multiply(obj.getGlobalPlacement())
+
+        frames = []
+        for rotation in [None] + self.INERTIAL_ROTATIONS:
+            doc = self.newDocument()
+            source = self.source(doc, PAIRS["BothRotated"][0])
+            pad = source[1]
+            if rotation is None:
+                frames.append(frame(source[0]))
+            else:
+                body = doc.addObject("PartDesign::Body", "Body2")
+                body.Placement = P(V(30, 0, 7), rotation)
+                frames.append(frame(body))
+            FreeCAD.closeDocument(doc.Name)
+        return frames
+
+    def testInertialCSFollowsTheSupport(self):
+        """O2: InertialCS of the top of Body1's pad (20 x 10 at height 5), from a coordinate
+        system in Body2. The principal axes' signs came from the face as mapped into Body2's
+        frame, so z or x turned over with Body2's rotation. In Body1's coordinates the frame is
+        now one and the same for every rotation, the one a coordinate system in Body1 gets: its
+        origin the face's centre, z along the normal, x along the short side."""
+        same, *across = self.inertialFrames("InertialCS", "PartDesign::CoordinateSystem")
+        self.assertLess((same.Base - V(10, 5, 5)).Length, 1e-9, same)
+        self.assertLess(axis(same).cross(V(0, 0, 1)).Length, 1e-9, same)
+        self.assertLess(same.Rotation.multVec(V(1, 0, 0)).cross(V(0, 1, 0)).Length, 1e-9, same)
+        for rotation, frame in zip(self.INERTIAL_ROTATIONS, across):
+            with self.subTest(rotation=rotation):
+                self.assertTrue(frame.isSame(same, 1e-9), (frame, same))
+
+    def testAxisOfInertiaFollowsTheSupport(self):
+        """O2, the datum line's AxisOfInertia1 (the face's normal): its direction in Body1's
+        coordinates is the one a line in Body1 gets, for every rotation of Body2."""
+        same, *across = self.inertialFrames("AxisOfInertia1", "PartDesign::Line")
+        self.assertLess(axis(same).cross(V(0, 0, 1)).Length, 1e-9, same)
+        for rotation, frame in zip(self.INERTIAL_ROTATIONS, across):
+            with self.subTest(rotation=rotation):
+                self.assertLess((axis(frame) - axis(same)).Length, 1e-9, (frame, same))
+                # On the line through the face's centre
+                offset = frame.Base - V(10, 5, 5)
+                self.assertLess(offset.cross(axis(same)).Length, 1e-9, frame)
+
 
 def runChild(folder, script):
     """The output lines of `script` run by FreeCADCmd in `folder`."""

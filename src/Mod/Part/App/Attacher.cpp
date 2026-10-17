@@ -96,6 +96,57 @@ Base::Placement coordinateSystemOf(const App::DocumentObject* obj)
     return lcs ? lcs->Placement.getValue() : Base::Placement();
 }
 
+// OCCT takes the signs of the principal axes of inertia from the tensor's entries, which turn
+// with the frame the shapes are given in: on links mapped into the attached object's frame from
+// another container, an axis could come out reversed or not depending on the containers'
+// placements (FreeCAD-CH ops#332 O2). The axes are found in the first link's own frame instead
+// (its frame without the mapping across containers) and carried over, so they follow the
+// support. With the first link in the attached object's container nothing is moved.
+class InertialReading
+{
+public:
+    InertialReading(
+        const App::DocumentObject* first,
+        const Base::Placement& frame,
+        const std::vector<const TopoShape*>& shapes
+    )
+        : read(shapes)
+    {
+        const Base::Placement own = coordinateSystemOf(first);
+        if (frame == own) {
+            return;
+        }
+        toResult = Tools::fromPlacement(frame * own.inverse()).Transformation();
+        const gp_Trsf back = toResult.Inverted();
+        storage.reserve(shapes.size());
+        for (std::size_t i = 0; i < shapes.size(); ++i) {
+            storage.push_back(shapes[i]->isNull() ? *shapes[i] : shapes[i]->moved(back));
+            read[i] = &storage.back();
+        }
+        mapped = true;
+    }
+    InertialReading(const InertialReading&) = delete;
+    InertialReading& operator=(const InertialReading&) = delete;
+
+    /// The shapes in the first link's own frame
+    const std::vector<const TopoShape*>& shapes() const
+    {
+        return read;
+    }
+    /// A point or direction found on shapes(), in the attached object's frame
+    template<typename T>
+    T toResultFrame(const T& value) const
+    {
+        return mapped ? value.Transformed(toResult) : value;
+    }
+
+private:
+    std::vector<const TopoShape*> read;
+    std::vector<TopoShape> storage;
+    gp_Trsf toResult;
+    bool mapped = false;
+};
+
 // A solid feature of a Body (FreeCAD-CH ops#311): in a Body, and not a datum, a sketch or a
 // binder (a Part::Feature with a Support link), whose Placement is the user's own. Its Placement
 // is inherited along the chain: a PartDesign feature carries an earlier primitive's
@@ -1855,7 +1906,8 @@ Base::Placement AttachEngine3D::_calculateAttachedPlacement(
 
         } break;
         case mmInertialCS: {
-            GProp_GProps gpr = AttachEngine::getInertialPropsOfShape(shapes);
+            const InertialReading reading(objs[0], frames[0], shapes);
+            GProp_GProps gpr = AttachEngine::getInertialPropsOfShape(reading.shapes());
             GProp_PrincipalProps pr = gpr.PrincipalProperties();
             if (pr.HasSymmetryPoint()) {
                 throw Base::ValueError(
@@ -1893,7 +1945,9 @@ Base::Placement AttachEngine3D::_calculateAttachedPlacement(
                 SketchNormal = pr.FirstAxisOfInertia();
                 SketchXAxis = pr.SecondAxisOfInertia();
             }
-            SketchBasePoint = gpr.CentreOfMass();
+            SketchNormal = reading.toResultFrame(SketchNormal);
+            SketchXAxis = reading.toResultFrame(SketchXAxis);
+            SketchBasePoint = reading.toResultFrame(gpr.CentreOfMass());
         } break;
         case mmFlatFace: {
             if (shapes.empty()) {
@@ -2862,8 +2916,9 @@ Base::Placement AttachEngineLine::_calculateAttachedPlacement(
             case mm1AxisInertia1:
             case mm1AxisInertia2:
             case mm1AxisInertia3: {
-                GProp_GProps gpr = AttachEngine::getInertialPropsOfShape(shapes);
-                LineBasePoint = gpr.CentreOfMass();
+                const InertialReading reading(objs[0], frames[0], shapes);
+                GProp_GProps gpr = AttachEngine::getInertialPropsOfShape(reading.shapes());
+                LineBasePoint = reading.toResultFrame(gpr.CentreOfMass());
                 GProp_PrincipalProps pr = gpr.PrincipalProperties();
                 if (pr.HasSymmetryPoint()) {
                     throw Base::ValueError(
@@ -2909,6 +2964,7 @@ Base::Placement AttachEngineLine::_calculateAttachedPlacement(
                         );
                     }
                 }
+                LineDir = reading.toResultFrame(LineDir);
             } break;
             case mm1TwoPoints: {
                 std::vector<gp_Pnt> points;
