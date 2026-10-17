@@ -156,6 +156,10 @@ class TestSplit(unittest.TestCase):
         for body in (self.body, part):
             body.Placement = App.Placement(V(0, 0, 7), App.Rotation())
         self.doc.recompute()
+        # Both Splits rerun after the move, so the frames are read, not just kept
+        self.original.touch()
+        self.half.touch()
+        self.doc.recompute()
         self.assertHalves(FRONT, BACK)
         self.assertAlmostEqual(box(self.half.Shape).ZMin, 5, places=6)
         self.assertAlmostEqual(box(part.Shape).ZMin, 12, places=6)
@@ -252,9 +256,13 @@ class TestSplit(unittest.TestCase):
         self.assertIs(self.body.Tip, fillet)
         cut = 0.25 * (1 - math.pi / 4)
         self.assertAlmostEqual(fillet.Shape.Volume, WHOLE - 10 * cut, places=4)
-        # Rolled back: both wait
+        # Rolled back: both wait, the new half also when it runs on its own touch
         self.assertAlmostEqual(self.half.Shape.Volume, BACK, places=6)
         self.assertAlmostEqual(part.Shape.Volume, BACK, places=6)
+        self.half.touch()
+        self.doc.recompute()
+        self.assertTrue(self.half.isValid(), self.half.getStatusString())
+        self.assertAlmostEqual(self.half.Shape.Volume, BACK, places=6)
 
         self.body.Tip = self.original
         self.doc.recompute()
@@ -349,6 +357,47 @@ class TestSplit(unittest.TestCase):
         self.assertAlmostEqual(self.body.Shape.Volume + part.Shape.Volume, WHOLE, places=6)
         self.assertAlmostEqual(self.body.Shape.common(part.Shape).Volume, 0, places=6)
         self.assertHalves(FRONT, BACK)
+
+    def testPartnerFailedByItsTool(self):
+        """The partner failing for a reason of its own, its tool (the slab's box) broken: the new
+        half shows the partner's reason, not "Partner links to 'Split', which has an error"."""
+        self.testOriginPlaneAndFace()
+        slabBox = self.original.Tool[0]
+        # Below the box's minimum: an error when it recomputes
+        slabBox.setExpression("Length", "0 mm")
+        self.doc.recompute()
+        self.assertFalse(self.original.isValid())
+        self.assertFalse(self.half.isValid())
+        why = self.original.getStatusString()
+        self.assertTrue(why)
+        self.assertEqual(self.half.getStatusString(), why)
+        self.assertNotIn("Partner links to", self.half.getStatusString())
+
+    def testSaveAndReopen(self):
+        """Saved and reopened: both Splits valid with no rerun, 364 and 228; then the shroud moved
+        alone, the new half follows (its partner's frame restored, S-t3)."""
+        import os
+        import tempfile
+
+        self.shroud()
+        self.split()
+        path = os.path.join(tempfile.mkdtemp(), "TestSplit.FCStd")
+        self.doc.saveAs(path)
+        names = [o.Name for o in (self.original, self.half, self.body)]
+        App.closeDocument(self.doc.Name)
+        self.doc = App.openDocument(path)
+        self.original, self.half, self.body = (self.doc.getObject(n) for n in names)
+        for split in (self.original, self.half):
+            self.assertFalse(split.MustExecute, split.Name)
+        self.doc.recompute()
+        for split in (self.original, self.half):
+            self.assertTrue(split.isValid(), split.getStatusString())
+        self.assertHalves(FRONT, BACK)
+        part = self.half.getParentGeoFeatureGroup()
+        self.body.Placement = App.Placement(V(0, 0, 7), App.Rotation())
+        self.doc.recompute()
+        self.assertAlmostEqual(self.half.Shape.Volume, BACK, places=6)
+        self.assertAlmostEqual(box(part.Shape).ZMin, 7, places=6)
 
     def testOwnBodyFaceIsItsTips(self):
         """A face of the part's own Body as the tool, from Python as from Split Part: the Split
