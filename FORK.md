@@ -338,6 +338,7 @@ names it.
 | `fix/293-q4-tolbase` | fix | ops#293 | - | `integration` `35fbb72308` | `fc14bb9328` (fork PR 307), 2026-10-17 | never (fork fix) |
 | `feat/317-describe` | feat | ops#317 | - | `integration` `9439811c0a` | `7e427b347f` (fork PR 310), 2026-10-17 | never (fork feature) |
 | `feat/317-onshape-translate` | feat | ops#317 | - | `integration` `9439811c0a` | (fork PR 309) | never (fork feature) |
+| `infra/323-compat-b2` | infra | ops#323 | - | `integration` `d2d57cc48f` | (this PR) | never |
 
 ## Fork-only commits in carried topics
 
