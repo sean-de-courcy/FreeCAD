@@ -102,6 +102,8 @@ SET(FeaturesSketchBased_SRCS
     FeatureHole.cpp
     FeatureBoolean.h
     FeatureBoolean.cpp
+    FeatureSplit.h
+    FeatureSplit.cpp
     FeaturePrimitive.h
     FeaturePrimitive.cpp
     FeaturePipe.h
