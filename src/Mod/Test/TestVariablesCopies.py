@@ -290,6 +290,25 @@ class TestVariablesCopies(unittest.TestCase):
         self.assertEqual(copyA.SourceExpressions, {})
         self.assertEqual(copyB.SourceExpressions, {})
 
+    def test_choices_for_defined_names(self):
+        """A choice for a name the files define only warns: no input variable, no "Variables"
+        set, and neither a taken name nor a bad path stops the import."""
+        b = self.export("Studio B", STUDIO_B)
+        for choices in ({"values": {"Gap": ("LENGTH", "7 mm")}},
+                        {"bindings": {"Gap": "Nothing.Gap"}}):
+            with self.subTest(choices=choices):
+                result = copies.import_studios(self.doc, [b], **choices)
+                self.assertTrue(any("#Gap is defined by the imported files" in w
+                                    for w in result.plan.warnings), result.plan.warnings)
+                self.assertEqual(result.inputs, [])
+                self.assertEqual(result.copies[0].Bindings, {})
+                self.assertIsNone(self.doc.getObject("Variables"))
+                self.doc.undo()
+        variables = self.documentVariables()  # Variables.Gap exists: a value would clash
+        result = copies.import_studios(self.doc, [b], values={"Gap": ("LENGTH", "7 mm")})
+        self.assertAlmostEqual(result.copies[0].Gap.Value, 3)
+        self.assertEqual(variables.InList, [])
+
     def test_bad_choices(self):
         a = self.export("Studio A", STUDIO_A)
         for choices, fragment in [

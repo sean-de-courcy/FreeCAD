@@ -248,7 +248,12 @@ def plan_import(doc, paths: Sequence[str], *,
                                      f"in {source.label}")
             fc_names[fc_name] = v.name
 
-    # The choices for names nothing defines (section 2.6).
+    # The choices for names nothing defines (section 2.6). One for a name the files define isn't
+    # used: dropped before anything checks or makes it (an input variable nobody uses).
+    for name in sorted((set(bindings) | set(values)) & defined):
+        plan.warnings.append(f"#{name} is defined by the imported files; its choice isn't used")
+        bindings.pop(name, None)
+        values.pop(name, None)
     for name in set(bindings) & set(values):
         plan.problems.append(f"#{name} has two choices: a document variable and a value")
     for name, path in bindings.items():
@@ -258,8 +263,6 @@ def plan_import(doc, paths: Sequence[str], *,
             plan.problems.append(f"#{name}: {e}")
     if values:
         _plan_inputs(doc, plan, values, default_units)
-    for name in (set(bindings) | set(values)) & defined:
-        plan.warnings.append(f"#{name} is defined by the imported files; its choice isn't used")
 
     # Skipped variables leave the entries; what needs them waits on their name, which is skipped.
     entries = [onshape.StudioEntry(s.entry.reference,
