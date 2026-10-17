@@ -24,14 +24,18 @@
 
 #include <algorithm>
 #include <cmath>
+#include <deque>
+#include <map>
 #include <vector>
 
 #include <QApplication>
 #include <QComboBox>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QListWidget>
 #include <QMessageBox>
 #include <QPointer>
+#include <QPushButton>
 #include <QSignalBlocker>
 #include <QStandardItemModel>
 #include <QTimer>
@@ -482,6 +486,14 @@ TaskResultParameters::TaskResultParameters(PartDesignGui::ViewProvider* vp, QWid
         bool common = feature->getBooleanOperation()
             == PartDesign::FeatureAddSub::BooleanOperation::Common;
         combo->setCurrentIndex(common ? 1 : 0);
+        if (App::DocumentObject* primary = primaryOf(feature)) {
+            combo->setEnabled(false);  // bound to the primary's
+            addFollowsNote(primary);
+        }
+        else if (feature->isDerivedFrom<PartDesign::ProfileBased>() && body
+                 && hasStudioSiblings(body)) {
+            addPartsList();
+        }
     }
     connect(
         combo,
@@ -514,6 +526,185 @@ bool TaskResultParameters::hasRows(App::DocumentObject* feature)
         return newPartRefusal(addSub).isEmpty();
     }
     return addSub->getBooleanOperation() == PartDesign::FeatureAddSub::BooleanOperation::Common;
+}
+
+App::DocumentObject* TaskResultParameters::primaryOf(App::DocumentObject* feature)
+{
+    auto addSub = freecad_cast<PartDesign::FeatureAddSub*>(feature);
+    return addSub ? addSub->SiblingOf.getValue() : nullptr;
+}
+
+struct TaskResultParameters::TouchCache
+{
+    struct Entry
+    {
+        TopoDS_Shape tool;  // held, so a freed shape's address can't stand for another
+        TopoDS_Shape part;
+        bool touches;
+    };
+    std::deque<Entry> entries;
+};
+
+namespace
+{
+// Whether the feature's tool touches the part, both placed globally (design 2.3)
+bool toolTouches(
+    PartDesign::FeatureAddSub* feature,
+    PartDesign::Body* part,
+    TaskResultParameters::TouchCache& cache
+)
+{
+    Part::TopoShape tool = feature->AddSubShape.getShape();
+    Part::TopoShape shape = part->Shape.getShape();
+    if (tool.isNull() || shape.isNull()) {
+        return false;
+    }
+    tool.setPlacement(feature->globalPlacement());
+    shape.setPlacement(part->globalPlacement());
+    // IsEqual: the same TShape at the same place
+    for (const auto& entry : cache.entries) {
+        if (entry.tool.IsEqual(tool.getShape()) && entry.part.IsEqual(shape.getShape())) {
+            return entry.touches;
+        }
+    }
+    bool touches = PartDesign::FeatureAddSub::shapesTouch(tool.getShape(), shape.getShape());
+    cache.entries.push_back({tool.getShape(), shape.getShape(), touches});
+    if (cache.entries.size() > 32) {
+        cache.entries.pop_front();
+    }
+    return touches;
+}
+
+QString touchText(const PartDesign::Body* part, bool touches)
+{
+    return touches ? partLabel(part)
+                   : QObject::tr("%1 (doesn't touch)").arg(partLabel(part));
+}
+}  // namespace
+
+void TaskResultParameters::addPartsList()
+{
+    auto feature = getObject<PartDesign::FeatureAddSub>();
+    PartDesign::Body* body = PartDesign::Body::findBodyOf(feature);
+    touchCache = std::make_shared<TouchCache>();
+    std::map<App::DocumentObject*, PartDesign::FeatureAddSub*> siblings;
+    for (PartDesign::FeatureAddSub* sibling : feature->getSiblings()) {
+        siblings[PartDesign::Body::findBodyOf(sibling)] = sibling;
+    }
+    // The studio's other parts, those the tool touches first (design 2.3)
+    std::vector<std::pair<PartDesign::Body*, bool>> others;
+    for (auto obj : feature->getDocument()->getObjectsOfType(PartDesign::Body::getClassTypeId())) {
+        auto other = static_cast<PartDesign::Body*>(obj);
+        if (other != body && Part::BodyBase::areStudioSiblings(body, other)) {
+            others.emplace_back(other, toolTouches(feature, other, *touchCache));
+        }
+    }
+    std::ranges::stable_partition(others, [](const auto& other) { return other.second; });
+
+    groupLayout()->addWidget(new QLabel(tr("Parts:"), this));
+    parts = new QListWidget(this);
+    parts->setObjectName(QStringLiteral("partsList"));
+    // its own part, always cut
+    auto own = new QListWidgetItem(partLabel(body), parts);
+    own->setFlags(Qt::ItemIsUserCheckable);
+    own->setCheckState(Qt::Checked);
+    own->setToolTip(tr("The part this feature is in"));
+    for (const auto& [other, touches] : others) {
+        auto item = new QListWidgetItem(touchText(other, touches), parts);
+        item->setData(Qt::UserRole, QString::fromLatin1(other->getNameInDocument()));
+        Qt::ItemFlags flags = Qt::ItemIsUserCheckable | Qt::ItemIsEnabled;
+        auto found = siblings.find(other);
+        PartDesign::FeatureAddSub* sibling = found != siblings.end() ? found->second : nullptr;
+        item->setCheckState(sibling ? Qt::Checked : Qt::Unchecked);
+        if (sibling) {
+            if (App::DocumentObject* user = PartDesign::FeatureAddSub::siblingUser(sibling)) {
+                flags &= ~Qt::ItemIsEnabled;
+                item->setToolTip(tr("Its cut %1 is used by %2")
+                                     .arg(partLabel(sibling), partLabel(user)));
+            }
+        }
+        else if (other->isRolledBack()) {
+            // a sibling would land mid-history (the design's critic, point 10)
+            flags &= ~Qt::ItemIsEnabled;
+            item->setToolTip(tr("Roll %1 to the end first").arg(partLabel(other)));
+        }
+        item->setFlags(flags);
+    }
+    groupLayout()->addWidget(parts);
+
+    touchTimer = new QTimer(this);
+    touchTimer->setSingleShot(true);
+    touchTimer->setInterval(300);
+    connect(touchTimer, &QTimer::timeout, this, &TaskResultParameters::updateTouches);
+}
+
+void TaskResultParameters::updateTouches()
+{
+    auto feature = freecad_cast<PartDesign::FeatureAddSub*>(featureT.getObject());
+    if (!feature || !parts) {
+        return;
+    }
+    for (int i = 1; i < parts->count(); ++i) {
+        QListWidgetItem* item = parts->item(i);
+        auto other = freecad_cast<PartDesign::Body*>(
+            feature->getDocument()->getObject(item->data(Qt::UserRole).toString().toLatin1())
+        );
+        if (other) {
+            item->setText(touchText(other, toolTouches(feature, other, *touchCache)));
+        }
+    }
+}
+
+void TaskResultParameters::slotChangedObject(
+    const Gui::ViewProviderDocumentObject& Obj,
+    const App::Property& Prop
+)
+{
+    auto feature = freecad_cast<PartDesign::FeatureAddSub*>(featureT.getObject());
+    if (touchTimer && feature && Obj.getObject() == feature && &Prop == &feature->AddSubShape) {
+        touchTimer->start();  // debounced: once the preview settles
+    }
+}
+
+void TaskResultParameters::addFollowsNote(App::DocumentObject* primary)
+{
+    auto* row = new QWidget(this);
+    auto* layout = new QHBoxLayout(row);
+    layout->setContentsMargins(0, 0, 0, 0);
+    auto* note =
+        new QLabel(tr("Follows %1: edit it there, or Unlink").arg(partLabel(primary)), row);
+    note->setObjectName(QStringLiteral("followsNote"));
+    note->setWordWrap(true);
+    layout->addWidget(note, 1);
+    auto* unlink = new QPushButton(tr("Unlink"), row);
+    unlink->setObjectName(QStringLiteral("unlinkButton"));
+    unlink->setToolTip(tr("Make this cut independent of %1").arg(partLabel(primary)));
+    layout->addWidget(unlink);
+    groupLayout()->addWidget(row);
+    connect(unlink, &QPushButton::clicked, this, &TaskResultParameters::onUnlink);
+}
+
+void TaskResultParameters::onUnlink()
+{
+    if (auto button = qobject_cast<QPushButton*>(sender())) {
+        button->setEnabled(false);
+    }
+    // The edit restarts, so the other boxes are editable again: after the signal, as a move
+    App::DocumentObjectT target = featureT;
+    QPointer<TaskResultParameters> box(this);
+    QTimer::singleShot(0, qApp, [box, target]() {
+        if (!isEditing(box.data(), target)) {
+            return;
+        }
+        restartEdit(target, [&target]() {
+            Gui::Command::doCommand(Gui::Command::Doc, "import PartDesign");
+            Gui::Command::doCommand(
+                Gui::Command::Doc,
+                "PartDesign.unlinkSibling(%s)",
+                Gui::Command::getObjectCmd(target.getObject()).c_str()
+            );
+        });
+    });
 }
 
 App::DocumentObject* TaskResultParameters::movedFrom(const App::DocumentObject* feature)
@@ -565,10 +756,37 @@ void TaskResultParameters::onResultChanged(int index)
 void TaskResultParameters::apply()
 {
     auto feature = getObject<PartDesign::FeatureAddSub>();
-    // New part is done (PartDesign.newPartFrom, in the macro too)
-    if (feature && feature->getAddSubType() == PartDesign::FeatureAddSub::Type::Subtractive) {
+    // New part is done (PartDesign.newPartFrom, in the macro too); a sibling's Operation is bound
+    if (feature && feature->getAddSubType() == PartDesign::FeatureAddSub::Type::Subtractive
+        && !primaryOf(feature)) {
         FCMD_OBJ_CMD(feature, "Operation = '" << feature->Operation.getValueAsString() << "'");
     }
+    if (!feature || !parts) {
+        return;
+    }
+    // The ticked parts' siblings; with none before and none ticked, nothing to do. Otherwise
+    // every sibling copies the links again (design 2.4)
+    App::Document* doc = feature->getDocument();
+    std::string ticked;
+    for (int i = 1; i < parts->count(); ++i) {
+        QListWidgetItem* item = parts->item(i);
+        App::DocumentObject* other = doc->getObject(item->data(Qt::UserRole).toString().toLatin1());
+        if (other && item->checkState() == Qt::Checked) {
+            ticked += (ticked.empty() ? "" : ", ") + Gui::Command::getObjectCmd(other);
+        }
+    }
+    if (ticked.empty() && feature->getSiblings().empty()) {
+        return;
+    }
+    Gui::Command::doCommand(Gui::Command::Doc, "import PartDesign");
+    Gui::Command::doCommand(
+        Gui::Command::Doc,
+        "PartDesign.makeSiblings(%s, [%s])",
+        Gui::Command::getObjectCmd(feature).c_str(),
+        ticked.c_str()
+    );
+    // The siblings compute now: OK purges the document's touched objects (accept())
+    Gui::cmdAppDocument(feature, "recompute()");
 }
 
 /*********************************************************************
@@ -614,6 +832,14 @@ void TaskDlgFeatureParameters::open()
         });
     }
     fieldGroup->armFirstEmpty();
+    // A sibling follows its primary: only the Result box, with Unlink, is editable (ops#325)
+    if (TaskResultParameters::primaryOf(getObject())) {
+        forEachParameters([](TaskFeatureParameters* param) {
+            if (!qobject_cast<TaskResultParameters*>(param)) {
+                param->setEnabled(false);
+            }
+        });
+    }
 }
 
 std::vector<ReferenceField*> TaskDlgFeatureParameters::panelFields()
