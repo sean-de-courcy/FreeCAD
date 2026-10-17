@@ -72,6 +72,14 @@ bool isCopiedVariable(const App::Property* prop)
         && freecad_cast<App::VarSetCopy*>(prop->getContainer()) != nullptr;
 }
 
+// FreeCAD-CH (ops#348): nothing is added to a copy still attached to its source; Refresh rewrites
+// the copy's variables from the source. The Variables panel refuses Add on it as well.
+bool isAttachedCopy(const App::PropertyContainer* container)
+{
+    auto copy = freecad_cast<const App::VarSetCopy*>(container);
+    return copy && copy->isAttached();
+}
+
 // FreeCAD-CH (ops#231): the property editors' "Edit" bookings, which openPropertyTransaction()
 // doesn't join (a dialog of its own, e.g. Add Property from the Variables panel, can't know them).
 // An editor erases its ID when it closes its booking; an ID no document has booked any more (its
@@ -1334,7 +1342,7 @@ void PropertyEditor::contextMenuEvent(QContextMenuEvent*)
     }
 
     // add property
-    if (getSelectedPropertyContainer()) {
+    if (auto container = getSelectedPropertyContainer(); container && !isAttachedCopy(container)) {
         menu.addAction(tr("Add Property"))->setData(QVariant(MA_AddProp));
     }
 
@@ -1537,7 +1545,7 @@ void PropertyEditor::contextMenuEvent(QContextMenuEvent*)
             break;
         case MA_AddProp: {
             App::PropertyContainer* container = getSelectedPropertyContainer();
-            if (!container) {
+            if (!container || isAttachedCopy(container)) {
                 return;
             }
             // FreeCAD-CH (ops#231): the dialog opens a transaction for each property it adds, or
