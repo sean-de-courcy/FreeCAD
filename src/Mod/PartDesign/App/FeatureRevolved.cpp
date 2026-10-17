@@ -108,6 +108,7 @@
 #include <Base/Exception.h>
 #include <Base/Tools.h>
 #include <Base/Translation.h>
+#include <Mod/Part/App/FilletFallback.h>
 #include <Mod/Part/App/Tools.h>
 #include <Mod/Part/App/TopoShapeOpCode.h>
 
@@ -2991,6 +2992,31 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
         dir.Reverse();
     }
 
+    // The faces chosen to revolve up to (ToFace), when set; one not set fails where it is used
+    const bool twoSides = sideType == "Two sides";
+    TopoShape chosenFace = makeTopoShape(false);
+    TopoShape chosenFace2 = makeTopoShape(false);
+    if (method == RevolMethod::ToFace && UpToFace.getValue()) {
+        getUpToFaceFromLinkSub(chosenFace, UpToFace);
+        chosenFace.move(invObjLoc);
+    }
+    if (twoSides && method2 == RevolMethod::ToFace && UpToFace2.getValue()) {
+        getUpToFaceFromLinkSub(chosenFace2, UpToFace2);
+        chosenFace2.move(invObjLoc);
+    }
+    // The sweep up to a face is split by the face (sweepUpToFace()), and OCCT raises in place the
+    // tolerances of what it splits: the face's edges and vertices, the base feature's stored
+    // shape's when the face is the base's. Up to a face, the revolution runs on copies of the
+    // base and the chosen faces, made together, so that the tool's face parts are still the
+    // base's for the fuse or cut with it (ops#347)
+    if (revolvesUpToFace(method, revolMode) || (twoSides && revolvesUpToFace(method2, revolMode))) {
+        const std::vector<TopoShape> copies =
+            Part::FilletFallback::makerInputs({base, chosenFace, chosenFace2});
+        base = copies[0];
+        chosenFace = copies[1];
+        chosenFace2 = copies[2];
+    }
+
     const gp_Ax1 revolutionAxis(pnt, dir);
     const char* startType = StartType.getValueAsString();
     const double startAngle = std::strcmp(startType, "Profile plane") == 0 ? 0.0
@@ -3068,12 +3094,11 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
             addRevolution(generateSingleRevolutionSide(
                 isThroughAll ? RevolMethod::ThroughAll : RevolMethod::Angle,
                 fullRevolution,
-                UpToFace,
+                chosenFace,
                 sketchshape.makeElementCopy(),
                 base,
                 pnt,
                 dir,
-                invObjLoc,
                 revolMode
             ));
         }
@@ -3108,12 +3133,11 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
             addRevolution(generateSingleRevolutionSide(
                 method,
                 angle,
-                UpToFace,
+                chosenFace,
                 sketchshape.makeElementCopy(),
                 base,
                 pnt,
                 dir,
-                invObjLoc,
                 revolMode,
                 true
             ));
@@ -3123,12 +3147,11 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
             addRevolution(generateSingleRevolutionSide(
                 method2,
                 angle2,
-                UpToFace2,
+                chosenFace2,
                 secondSideProfile(),
                 base,
                 pnt,
                 dir2,
-                invObjLoc,
                 revolMode
             ));
         }
@@ -3165,7 +3188,7 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
             };
             for (std::size_t i = 0; i < faces.size(); ++i) {
                 TopoShape upToFace
-                    = getRevolutionUpToFace(method, UpToFace, base, faces[i], invObjLoc, axis);
+                    = getRevolutionUpToFace(method, chosenFace, base, faces[i], axis);
                 TopoShape side = tryToRevolveToFace(upToFace, axis, faces[i].makeElementCopy());
                 if (side.isNull() || side.getShape().IsNull()) {
                     continue;
@@ -3190,12 +3213,11 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
         addRevolution(generateSingleRevolutionSide(
             method,
             angle,
-            UpToFace,
+            chosenFace,
             sketchshape,
             base,
             pnt,
             dir,
-            invObjLoc,
             revolMode
         ));
     }
@@ -3432,12 +3454,11 @@ TopoShape Revolved::tryToRevolveToFace(
 TopoShape Revolved::generateSingleRevolutionSide(
     RevolMethod method,
     double angle,
-    App::PropertyLinkSub& upToFaceProp,
+    const TopoShape& chosenFace,
     const TopoShape& sketchshape,
     const TopoShape& base,
     const gp_Pnt& pnt,
     const gp_Dir& dir,
-    const TopLoc_Location& invObjLoc,
     Part::RevolMode revolMode,
     bool markSeam
 )
@@ -3468,8 +3489,7 @@ TopoShape Revolved::generateSingleRevolutionSide(
             && getSelectedHistoryAlgorithm() == App::HistoryAlgorithm::V2;
         std::vector<TopoShape> tools;
         for (const TopoShape& face : faces) {
-            TopoShape upToFace
-                = getRevolutionUpToFace(method, upToFaceProp, base, face, invObjLoc, axis);
+            TopoShape upToFace = getRevolutionUpToFace(method, chosenFace, base, face, axis);
             TopoShape tool = tryToRevolveToFace(upToFace, axis, face);
             if (tool.isNull() || tool.getShape().IsNull()) {
                 continue;
@@ -3498,17 +3518,18 @@ TopoShape Revolved::generateSingleRevolutionSide(
 
 TopoShape Revolved::getRevolutionUpToFace(
     RevolMethod method,
-    const App::PropertyLinkSub& upToFaceProp,
+    const TopoShape& chosenFace,
     const TopoShape& base,
     const TopoShape& sketchshape,
-    const TopLoc_Location& invObjLoc,
     const gp_Ax1& axis
 ) const
 {
     TopoShape upToFace;
     if (method == RevolMethod::ToFace) {
-        getUpToFaceFromLinkSub(upToFace, upToFaceProp);
-        upToFace.move(invObjLoc);
+        if (chosenFace.isNull()) {
+            throw Base::ValueError("SketchBased: No face selected");
+        }
+        upToFace = chosenFace;
     }
     else {
         getUpToFace(

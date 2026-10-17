@@ -3093,6 +3093,62 @@ class TestRevolve(unittest.TestCase):
                         self.assertFalse(revolution.isValid())
                         self.assertIn("names several faces", revolution.getStatusString())
 
+    def revolveUpToTheCylinderSide(self, kind):
+        # ops#347: a cylinder r 10 h 15 as the Body's BaseFeature, the profile x 20..24, z 12..15
+        # (its top flush with the cylinder's), revolved about the vertical at x = 14 up to the
+        # cylinder's side. Unfixed, the sweep's split by the face raised a vertex of the base's
+        # by an ULP (Revolution) and added a curve on a surface to its edges (Groove), in the
+        # base feature's stored shape and the Part::Feature's
+        from PartDesignTests.TestPad import toleranceState
+
+        V = FreeCAD.Vector
+        base = self.Doc.addObject("Part::Feature", "Cylinder")
+        base.Shape = Part.makeCylinder(10, 15)
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        baseFeature = body.newObject("PartDesign::FeatureBase", "BaseFeature")
+        baseFeature.BaseFeature = base
+        self.Doc.recompute()
+        side = next(
+            "Face%d" % i
+            for i, f in enumerate(baseFeature.Shape.Faces, 1)
+            if f.Surface.TypeId == "Part::GeomCylinder"
+        )
+        held = [(o.Name, o.Shape, toleranceState(o.Shape)) for o in (base, baseFeature)]
+        sketch = body.newObject("Sketcher::SketchObject", "Profile")
+        # Sketch x is world x, y is z; its V axis the vertical at x = 14
+        sketch.Placement = FreeCAD.Placement(V(14, 0, 0), FreeCAD.Rotation(V(1, 0, 0), 90))
+        corners = [V(6, 12, 0), V(10, 12, 0), V(10, 15, 0), V(6, 15, 0)]
+        for i in range(4):
+            sketch.addGeometry(Part.LineSegment(corners[i], corners[(i + 1) % 4]))
+        for i in range(4):
+            sketch.addConstraint(Sketcher.Constraint("Coincident", i, 2, (i + 1) % 4, 1))
+        feature = body.newObject("PartDesign::" + kind, kind)
+        feature.Profile = sketch
+        feature.ReferenceAxis = (sketch, ["V_Axis"])
+        feature.Type = "UpToFace"
+        feature.UpToFace = (baseFeature, [side])
+        self.Doc.recompute()
+        self.assertTrue(feature.isValid(), feature.getStatusString())
+        for name, shape, before in held:
+            self.assertEqual(toleranceState(shape), before, name)
+        self.assertTrue(feature.Shape.isValid())
+        # The tool as the unfixed build swept it
+        self.assertAlmostEqual(feature.AddSubShape.Volume, 228.05374, places=4)
+        return baseFeature, feature
+
+    def testRevolutionUpToFaceLeavesTheBaseAlone(self):
+        base, revolution = self.revolveUpToTheCylinderSide("Revolution")
+        self.assertAlmostEqual(
+            revolution.Shape.Volume,
+            base.Shape.Volume + revolution.AddSubShape.Volume,
+            places=6,
+        )
+
+    def testGrooveUpToFaceLeavesTheBaseAlone(self):
+        # The tool is outside the cylinder: the groove removes nothing
+        base, groove = self.revolveUpToTheCylinderSide("Groove")
+        self.assertAlmostEqual(groove.Shape.Volume, base.Shape.Volume, places=6)
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("PartDesignTestRevolve")

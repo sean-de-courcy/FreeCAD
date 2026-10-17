@@ -102,12 +102,12 @@ protected:
 private:
     App::DocumentObjectExecReturn* tryExecuteRevolved(Part::RevolMode revolMode);
     TopoShape tryGetBaseShape() const;
+    // The face up to the first or last face of the base, or the chosen face (ToFace)
     TopoShape getRevolutionUpToFace(
         RevolMethod method,
-        const App::PropertyLinkSub& upToFaceProp,
+        const TopoShape& chosenFace,
         const TopoShape& base,
         const TopoShape& sketchshape,
-        const TopLoc_Location& invObjLoc,
         const gp_Ax1& axis
     ) const;
     TopoShape tryToRevolveToFace(
@@ -118,12 +118,11 @@ private:
     TopoShape generateSingleRevolutionSide(
         RevolMethod method,
         double angle,
-        App::PropertyLinkSub& upToFaceProp,
+        const TopoShape& chosenFace,
         const TopoShape& sketchshape,
         const TopoShape& base,
         const gp_Pnt& pnt,
         const gp_Dir& dir,
-        const TopLoc_Location& invObjLoc,
         Part::RevolMode revolMode,
         bool markSeam = false
     );
