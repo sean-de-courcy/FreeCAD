@@ -26,7 +26,9 @@
 
 #include <QAction>
 #include <QApplication>
+#include <QLabel>
 #include <QMessageBox>
+#include <QPushButton>
 
 
 #include <App/Document.h>
@@ -34,6 +36,7 @@
 #include <Gui/Application.h>
 #include <Gui/BitmapFactory.h>
 #include <Gui/Command.h>
+#include <Gui/CommandT.h>
 #include <Gui/Selection/Selection.h>
 #include <Gui/Tools.h>
 #include <Gui/ViewProvider.h>
@@ -137,6 +140,38 @@ TaskBooleanParameters::TaskBooleanParameters(ViewProviderBoolean* BooleanView, Q
 
     int index = pcBoolean->Type.getValue();
     ui->comboType->setCurrentIndex(index);
+
+    // A Merge (FreeCAD-CH ops#325, design 2.6): its tool is the merged part's feature, which a
+    // pick here would replace by a Body; Accept clears its warning, in this dialog's transaction
+    if (pcBoolean->isMerge()) {
+        ui->buttonBodyAdd->setEnabled(false);
+        ui->buttonBodyRemove->setEnabled(false);
+        ui->comboType->setEnabled(false);
+        QStringList merged;
+        for (auto body : pcBoolean->mergedBodies()) {
+            merged << QString::fromUtf8(body->Label.getValue());
+        }
+        auto note = new QLabel(
+            tr("A Merge of %1: delete it to unmerge").arg(merged.join(QStringLiteral(", "))),
+            this
+        );
+        note->setObjectName(QStringLiteral("mergeNote"));
+        note->setWordWrap(true);
+        groupLayout()->addWidget(note);
+        auto accepted = freecad_cast<App::PropertyBool*>(pcBoolean->getPropertyByName("MergeAccepted"));
+        if (accepted && !accepted->getValue()) {
+            auto accept = new QPushButton(tr("Accept Merge"), this);
+            accept->setObjectName(QStringLiteral("acceptMergeButton"));
+            accept->setToolTip(tr("The merge is meant: its warning goes"));
+            groupLayout()->addWidget(accept);
+            connect(accept, &QPushButton::clicked, this, [this, accept]() {
+                auto merge = this->BooleanView->getObject<PartDesign::Boolean>();
+                FCMD_OBJ_CMD(merge, "MergeAccepted = True");
+                Gui::cmdAppDocument(merge, "recompute()");
+                accept->setEnabled(false);
+            });
+        }
+    }
 }
 
 void TaskBooleanParameters::onSelectionChanged(const Gui::SelectionChanges& msg)

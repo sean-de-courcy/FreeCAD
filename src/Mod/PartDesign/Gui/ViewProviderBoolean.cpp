@@ -43,6 +43,8 @@
 #include <App/GroupExtension.h>
 #include <Gui/ActiveObjectList.h>
 #include <Gui/Application.h>
+#include <Gui/BitmapFactory.h>
+#include <Gui/CommandT.h>
 #include <Gui/Control.h>
 #include <Gui/Command.h>
 #include <Gui/Document.h>
@@ -350,7 +352,45 @@ void ViewProviderBoolean::setupContextMenu(QMenu* menu, QObject* receiver, const
 {
     addDefaultAction(menu, QObject::tr("Edit Boolean"));
 
+    auto feature = getObject<PartDesign::Boolean>();
+    auto accepted = feature
+        ? freecad_cast<App::PropertyBool*>(feature->getPropertyByName("MergeAccepted"))
+        : nullptr;
+    if (accepted && !accepted->getValue()) {
+        QAction* act = menu->addAction(QObject::tr("Accept Merge"));
+        act->setObjectName(QStringLiteral("acceptMerge"));
+        QObject::connect(act, &QAction::triggered, [this]() { acceptMerge(); });
+    }
+
     ViewProvider::setupContextMenu(menu, receiver, member);
+}
+
+void ViewProviderBoolean::acceptMerge()
+{
+    auto feature = getObject<PartDesign::Boolean>();
+    if (!feature || !feature->isMerge()) {
+        return;
+    }
+    Gui::Document* doc = Gui::Application::Instance->getDocument(feature->getDocument());
+    doc->openCommand(QT_TRANSLATE_NOOP("Command", "Accept Merge"));
+    FCMD_OBJ_CMD(feature, "MergeAccepted = True");
+    Gui::cmdAppDocument(feature, "recompute()");
+    doc->commitCommand();
+}
+
+QIcon ViewProviderBoolean::mergeColorfulOverlayIcons(const QIcon& orig) const
+{
+    QIcon merged = orig;
+    auto feature = getObject<PartDesign::Boolean>();
+    auto accepted = feature
+        ? freecad_cast<App::PropertyBool*>(feature->getPropertyByName("MergeAccepted"))
+        : nullptr;
+    // While it computes, the document's warning marks it (the tree's own overlay)
+    if (accepted && !accepted->getValue() && !feature->isWarning()) {
+        static QPixmap warning(Gui::BitmapFactory().pixmapFromSvg("Warning", QSize(10, 10)));
+        merged = Gui::BitmapFactoryInst::mergePixmap(merged, warning, Gui::BitmapFactoryInst::TopRight);
+    }
+    return ViewProvider::mergeColorfulOverlayIcons(merged);
 }
 
 bool ViewProviderBoolean::onDelete(const std::vector<std::string>& s)
@@ -453,6 +493,10 @@ void ViewProviderBoolean::updateData(const App::Property* prop)
 
     ViewProvider::updateData(prop);
     updateToolsDisplay();
+
+    if (std::strcmp(prop->getName() ? prop->getName() : "", "MergeAccepted") == 0) {
+        signalChangeIcon();  // the tree's mark (FreeCAD-CH ops#325)
+    }
 
     if (prop == &feature->Group) {
         syncActiveBodyVisibility();

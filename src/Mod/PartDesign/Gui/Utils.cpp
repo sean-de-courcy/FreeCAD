@@ -40,6 +40,7 @@
 #include <Gui/Selection/Selection.h>
 #include <Mod/PartDesign/App/Body.h>
 #include <Mod/PartDesign/App/Feature.h>
+#include <Mod/PartDesign/App/FeatureBoolean.h>
 #include <Mod/PartDesign/App/FeatureSketchBased.h>
 #include <Mod/PartDesign/App/PartDesignParameter.h>
 #include <Mod/Sketcher/App/SketchObject.h>
@@ -114,6 +115,37 @@ bool setEdit(App::DocumentObject* obj, PartDesign::Body* body)
     return true;
 }
 
+namespace
+{
+// Why a command can't add to `body`: it is merged into another part, and not rolled back before
+// its merged feature (FreeCAD-CH ops#325), or empty
+QString mergedBodyRefusal(const PartDesign::Body* body)
+{
+    PartDesign::Boolean* merge = PartDesign::Boolean::mergeOf(body);
+    PartDesign::Body* survivor = merge ? PartDesign::Body::findBodyOf(merge) : nullptr;
+    if (!survivor) {
+        return {};
+    }
+    const std::vector<App::DocumentObject*> group = body->Group.getValues();
+    const auto tip = std::ranges::find(group, body->Tip.getValue());
+    for (auto merged : merge->Group.getValues()) {
+        const auto at = std::ranges::find(group, merged);
+        if (at != group.end() && tip != group.end() && tip >= at) {
+            return QObject::tr(
+                       "%1 is merged into %2 at %3; a feature added after it doesn't reach the "
+                       "merge. Roll %1 back before %3 to insert there, or delete the Merge."
+            )
+                .arg(
+                    QString::fromUtf8(body->Label.getValue()),
+                    QString::fromUtf8(survivor->Label.getValue()),
+                    QString::fromUtf8(merged->Label.getValue())
+                );
+        }
+    }
+    return {};
+}
+}  // namespace
+
 /*!
  * \brief Return active body or show a warning message.
  * If \a autoActivate is true (the default) then if there is
@@ -162,6 +194,15 @@ PartDesign::Body* getBody(
                     activeBody = dia.getActiveBody();
                 }
             }
+        }
+    }
+
+    // A part merged into another, not rolled back before its merged feature: what a command
+    // adds would fail (FreeCAD-CH ops#325, design 2.6). A courtesy: the rule is the recompute's
+    if (activeBody && messageIfNot) {
+        if (QString why = mergedBodyRefusal(activeBody); !why.isEmpty()) {
+            QMessageBox::warning(Gui::getMainWindow(), QObject::tr("Merged part"), why);
+            return nullptr;
         }
     }
 
