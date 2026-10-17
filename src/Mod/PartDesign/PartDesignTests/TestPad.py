@@ -472,6 +472,26 @@ class TestPad(unittest.TestCase):
         self.Doc.recompute()
         return pad
 
+    def testPadUpToLinkOfTwoFaces(self):
+        """ops#304: an up-to link naming two faces (the planes z = 3 and z = 5 of one box) is an
+        error. The Pad went up to the first face named alone, with no error: z = 5 for
+        [Face6, Face5], past the nearer face z = 3. One face still works."""
+        box = self.Doc.addObject("Part::Box", "Faces")
+        box.Placement.Base = FreeCAD.Vector(-5, -5, 3)
+        box.Length, box.Width, box.Height = 10, 10, 2
+        self.Doc.recompute()
+        pad = self._twoSidedUpToPad(
+            ("UpToFace", (box, "Face5")), ("Length", 0.0), sideType="One side"
+        )
+        self.assertTrue(pad.isValid(), pad.getStatusString())
+        self.assertAlmostEqual(pad.Shape.Volume, 25 * 3, places=6)
+        for faces in (["Face6", "Face5"], ["Face5", "Face6"]):
+            with self.subTest(faces=faces):
+                pad.UpToFace = (box, faces)
+                self.Doc.recompute()
+                self.assertFalse(pad.isValid())
+                self.assertIn("names several faces", pad.getStatusString())
+
     def testTwoSidedPadFarCapMarkedWithoutWarning(self):
         """PR 243 follow-up F2: side 1 by length, side 2 up to a face is one prism from side 1's
         end, whose far cap (side 2's end) is marked as side 2's (CPY;2). The Pad warns only when

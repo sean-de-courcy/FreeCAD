@@ -71,6 +71,7 @@
 #include <Base/Converter.h>
 #include <Base/Reader.h>
 #include <Base/Tools.h>
+#include <Base/Translation.h>
 #include <Mod/Part/App/AttachExtension.h>
 #include <Mod/Part/App/FaceMakerCheese.h>
 #include <Mod/Part/App/Tools.h>
@@ -910,6 +911,14 @@ void ProfileBased::getUpToFaceFromLinkSub(TopoShape& upToFace, const App::Proper
     }
 
     const auto& subs = refFace.getSubValues();
+    // Only one face is used: a link naming several went up to the first alone, past a nearer
+    // one, with no error (ops#304). The task panel's face field names one.
+    if (subs.size() > 1) {
+        throw Base::ValueError(QT_TRANSLATE_NOOP(
+            "Exception",
+            "The face link names several faces; select a single face"
+        ));
+    }
     upToFace = Part::Feature::getTopoShape(
         ref,
         Part::ShapeOption::NeedSubElement | Part::ShapeOption::ResolveLink

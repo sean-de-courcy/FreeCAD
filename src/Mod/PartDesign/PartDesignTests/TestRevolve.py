@@ -3054,6 +3054,45 @@ class TestRevolve(unittest.TestCase):
                     self.assertFalse(revolution.isValid())
                     self.assertIn("come back to the profile's plane", revolution.getStatusString())
 
+    def testRevolutionUpToLinkOfTwoFaces(self):
+        """Walls y = 0.5 and y = 1, x in [0, 4], z in [-1, 3], in one Part::Feature, and the
+        profile x in [1, 3], z in [0, 2] turned about Z: each point at radius r meets the nearer
+        wall first, at asin(0.5 / r). An up-to link naming both faces went up to the first one
+        named alone: up to y = 1, through the wall y = 0.5, with no error (ops#304). It fails
+        now, either order, Revolution and Groove; one face still works."""
+
+        def wall(y):
+            corners = [FreeCAD.Vector(x, y, z) for x, z in ((0, -1), (4, -1), (4, 3), (0, 3))]
+            return Part.Face(Part.makePolygon(corners + corners[:1]))
+
+        walls = self.Doc.addObject("Part::Feature", "Walls")
+        walls.Shape = Part.makeCompound([wall(0.5), wall(1)])
+        self.Doc.recompute()
+        names = {
+            round(f.BoundBox.Center.y, 6): "Face%d" % (i + 1)
+            for i, f in enumerate(walls.Shape.Faces)
+        }
+        near, far = names[0.5], names[1]
+        nearTool = self.midpointIntegral(lambda r: 2 * r * math.asin(0.5 / r), 1, 3)
+        for kind in ("Revolution", "Groove"):
+            for faces in ([near], [far, near], [near, far]):
+                with self.subTest(kind=kind, faces=faces):
+                    body = self.Doc.addObject("PartDesign::Body", "Body")
+                    base = 0
+                    if kind == "Groove":
+                        self.boxUpTo(body, (-4, 4), (-4, 4), (0, 2), -4)
+                        base = 128
+                    sketch = self.rectProfile(body, 1, 3, 0, 2)
+                    revolution = self.revolveUpTo(body, kind, sketch, (walls, faces))
+                    if len(faces) == 1:
+                        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+                        self.assertAlmostEqual(
+                            abs(revolution.Shape.Volume - base), nearTool, places=4
+                        )
+                    else:
+                        self.assertFalse(revolution.isValid())
+                        self.assertIn("names several faces", revolution.getStatusString())
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("PartDesignTestRevolve")
