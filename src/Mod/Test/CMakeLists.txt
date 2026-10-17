@@ -36,6 +36,7 @@ SET(Test_SRCS
     TestCornerAxisCrossVisual.py
     TestViewProviderLink.py
     TestVariables.py
+    TestVariablesOnshape.py
     TestExpressionUnits.py
     TestPropertyEditorGui.py
     TestVariablesGui.py
