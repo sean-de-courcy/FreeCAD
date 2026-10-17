@@ -231,6 +231,19 @@ class TestMerge(unittest.TestCase):
         self.doc.recompute()
         self.assertTrue(merge.isValid(), merge.getStatusString())
 
+    def testMergedFeatureDeleted(self):
+        """PanelPad, the merged feature, deleted while the panel stays (PR 305 round 1): the
+        Merge is red, saying nothing of the panel is merged, not that the part is gone."""
+        self.model()
+        merge = self.merge()
+        self.panel.removeObject(self.panelPad)
+        self.doc.removeObject(self.panelPad.Name)
+        self.doc.recompute()
+        self.assertFalse(merge.isValid())
+        self.assertIn("nothing of Panel is merged", merge.getStatusString())
+        self.assertNotIn("gone", merge.getStatusString())
+        self.assertAlmostEqual(self.bracket.Shape.Volume, 16000, places=6)
+
     def testRefusedWhileRolledBack(self):
         """M-t5: the panel rolled back above PanelPad: the merge is refused, and nothing
         changes."""

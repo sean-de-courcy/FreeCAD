@@ -588,7 +588,9 @@ std::string Boolean::mergeProblem() const
     const std::vector<App::DocumentObject*> bodies = mergedBodies();
     const std::vector<App::DocumentObject*> tools = Group.getValues();
     const std::string fix = "; re-pick the part, or delete the Merge";
-    if (bodies.empty() || tools.empty()) {
+    // No tools while the part is still here (its merged feature deleted) is said below: nothing
+    // of it is merged (PR 305 round 1)
+    if (bodies.empty()) {
         return label(this) + ": the merged part is gone" + fix;
     }
     for (auto tool : tools) {
