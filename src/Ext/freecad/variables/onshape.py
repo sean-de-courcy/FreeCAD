@@ -148,7 +148,7 @@ class Token:
 
 _TOKEN = re.compile(r"""
     (?P<space>\s+)
-  | (?P<number>\d+\.?\d*|\.\d+)
+  | (?P<number>[0-9]+\.?[0-9]*|\.[0-9]+)
   | (?P<ref>\#[A-Za-z_][A-Za-z0-9_]*)
   | (?P<name>[A-Za-z_][A-Za-z0-9_]*)
   | (?P<op>==|!=|<=|>=|&&|\|\||[-+*/^%(),?:<>!])
@@ -184,7 +184,7 @@ def tokenize(text: str) -> List[Token]:
             raise Refused(f"FreeCAD has no {value} ({word}) operator")
         if kind == "number":
             rest = text[match.end():]
-            if re.match(r"[eE][-+]?\d", rest):
+            if re.match(r"[eE][-+]?[0-9]", rest):
                 raise Refused(f"exponent notation ({value}{rest[:3]}...): {UNDOCUMENTED}")
         tokens.append(Token(kind, value, pos))
     tokens.append(Token("end", "", len(text)))

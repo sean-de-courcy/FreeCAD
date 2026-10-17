@@ -119,6 +119,8 @@ REFUSED = [
     ("1.1 in > 27.94 mm ? 1 mm : 2 mm", "LENGTH", "equal within rounding"),
     ("#Width <= 10 mm ? 1 mm : 2 mm", "LENGTH", "equal within rounding"),
     ("#Count != 3 ? 1 mm : 2 mm", "LENGTH", "equal within rounding"),
+    ("٣ mm", "LENGTH", "unexpected character"),  # an Arabic-Indic 3
+    ("1٣ mm", "LENGTH", "unexpected character"),
     ("2 mm^2 / 1 mm", "LENGTH", "a unit before ^"),
     ("sqrt(4) mm^2 / 1 mm", "LENGTH", "a unit before ^"),
     ("#Width/2 in", "LENGTH", "units cancel"),
