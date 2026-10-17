@@ -367,6 +367,56 @@ class TestResultBoxGui(unittest.TestCase):
         self.assertAlmostEqual(part.Shape.Volume, 1000, places=3)
         self.assertAlmostEqual(self.body.Shape.Volume, 16000, places=3)
 
+    def activate(self, doc):
+        App.setActiveDocument(doc.Name)
+        Gui.setActiveDocument(doc.Name)
+        pump(0.3)
+        self.doc = doc
+
+    def testTwoDocumentsKeepTheirOwnMoves(self):
+        """PR 303 round 1: New part in document A's panel, then in document B's. Back in A, Add
+        to Enclosure moves A's pad back, and B's stays in its new Body. One record for the open
+        move was shared: B's replaced A's, so A's Add to did nothing while the box read Add to,
+        and OK left the pad in the new Body."""
+        self.enclosure()
+        docA, bodyA = self.doc, self.body
+        lidA = self.lidPad()
+        self.choose("New part")
+        docB = models.newDocument("ResultBoxGuiB")
+        docB.UndoMode = 1
+        try:
+            self.activate(docB)
+            self.enclosure()
+            bodyB = self.body
+            lidB = self.lidPad()
+            self.choose("New part")
+            partB = lidB.getParentGeoFeatureGroup()
+            self.assertNotEqual(partB, bodyB)
+            self.activate(docA)
+            self.body = bodyA
+            self.assertEqual(self.combo().currentText(), "New part")
+            self.choose("Add to Enclosure")
+            self.assertIs(lidA.getParentGeoFeatureGroup(), bodyA)
+            self.assertEqual(self.bodies(), ["Enclosure"])
+            self.close(ok=True)
+            self.assertIs(lidA.getParentGeoFeatureGroup(), bodyA)
+            self.assertAlmostEqual(bodyA.Shape.Volume, 25000, places=3)
+            self.activate(docB)
+            self.assertIs(lidB.getParentGeoFeatureGroup(), partB)
+            self.assertEqual(self.combo().currentText(), "New part")
+            self.close(ok=True)
+            self.assertIs(lidB.getParentGeoFeatureGroup(), partB)
+            self.assertAlmostEqual(partB.Shape.Volume, 9000, places=3)
+            self.assertAlmostEqual(bodyB.Shape.Volume, 16000, places=3)
+        finally:
+            self.activate(docB)
+            if Gui.Control.activeDialog():
+                Gui.Control.closeDialog()
+                pump()
+            App.closeDocument(docB.Name)
+            pump()
+            self.activate(docA)
+
 
 if __name__ == "__main__":
     unittest.main()

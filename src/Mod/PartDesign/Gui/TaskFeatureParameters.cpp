@@ -24,7 +24,7 @@
 
 #include <algorithm>
 #include <cmath>
-#include <optional>
+#include <vector>
 
 #include <QApplication>
 #include <QComboBox>
@@ -217,7 +217,7 @@ void TaskFeatureParameters::recomputeFeature()
 
 namespace
 {
-// The New part move the open dialog made: what Add to moves back
+// A New part move an open dialog made: what Add to moves back
 struct NewPartMove
 {
     App::DocumentObjectT feature;
@@ -226,13 +226,32 @@ struct NewPartMove
     App::DocumentObjectT sketch;  // its profile, when that moved too
     App::DocumentObjectT sketchAfter;  // the member before the sketch in `from`, if any
 };
-std::optional<NewPartMove> newPartMove;
+// One per feature: each document can have its dialog open (PR 303 round 1)
+std::vector<NewPartMove> newPartMoves;
 // The edit restarts: the box that goes keeps the move for the box that comes
 bool restartingEdit = false;
 
+NewPartMove* findMove(const App::DocumentObject* feature)
+{
+    if (!feature) {
+        return nullptr;
+    }
+    auto it = std::ranges::find_if(newPartMoves, [feature](const NewPartMove& move) {
+        return move.feature.getObject() == feature;
+    });
+    return it != newPartMoves.end() ? &*it : nullptr;
+}
+
+void forgetMove(const App::DocumentObjectT& featureT)
+{
+    std::erase_if(newPartMoves, [&featureT](const NewPartMove& move) {
+        return move.feature == featureT;
+    });
+}
+
 bool isMoved(const App::DocumentObject* feature)
 {
-    return feature && newPartMove && newPartMove->feature.getObject() == feature;
+    return findMove(feature) != nullptr;
 }
 
 // Other parts in the Body's studio: Bodies of one container placed alike (ops#325)
@@ -335,7 +354,8 @@ void moveToNewPart(const App::DocumentObjectT& featureT)
             move.sketch = sketch;
             move.sketchAfter = sketchAfter;
         }
-        newPartMove = move;
+        forgetMove(featureT);
+        newPartMoves.push_back(move);
         // The part it left shows its own result now; OK purges the document's touched objects
         // (accept()), so the part would keep the feature's solid until its next recompute
         from->recomputeFeature(/*recursive=*/true);
@@ -345,11 +365,12 @@ void moveToNewPart(const App::DocumentObjectT& featureT)
 void moveBack(const App::DocumentObjectT& featureT)
 {
     restartEdit(featureT, [&featureT]() {
-        if (!isMoved(featureT.getObject())) {
+        NewPartMove* found = findMove(featureT.getObject());
+        if (!found) {
             return;
         }
-        NewPartMove move = *newPartMove;
-        newPartMove.reset();
+        NewPartMove move = *found;
+        forgetMove(featureT);
         App::DocumentObject* feature = move.feature.getObject();
         auto from = freecad_cast<PartDesign::Body*>(move.from.getObject());
         auto part = freecad_cast<PartDesign::Body*>(move.part.getObject());
@@ -436,8 +457,8 @@ TaskResultParameters::TaskResultParameters(PartDesignGui::ViewProvider* vp, QWid
 TaskResultParameters::~TaskResultParameters()
 {
     // OK, Cancel or another close: the move is final, or aborted with the transaction
-    if (!restartingEdit && newPartMove && newPartMove->feature == featureT) {
-        newPartMove.reset();
+    if (!restartingEdit) {
+        forgetMove(featureT);
     }
 }
 
@@ -460,7 +481,8 @@ bool TaskResultParameters::hasRows(App::DocumentObject* feature)
 
 App::DocumentObject* TaskResultParameters::movedFrom(const App::DocumentObject* feature)
 {
-    return isMoved(feature) ? newPartMove->from.getObject() : nullptr;
+    NewPartMove* move = findMove(feature);
+    return move ? move->from.getObject() : nullptr;
 }
 
 void TaskResultParameters::onResultChanged(int index)
