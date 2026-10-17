@@ -1632,6 +1632,10 @@ PyObject* ApplicationPy::sCheckVariableName(PyObject* /*self*/, PyObject* args)
         }
         if (PyObject_TypeCheck(pyHolder, &DocumentObjectPy::Type)) {
             auto holder = static_cast<DocumentObjectPy*>(pyHolder)->getDocumentObjectPtr();
+            if (!holder) {  // a deleted object: its checks can't be made
+                PyErr_SetString(PyExc_ReferenceError, "the holder object was deleted");
+                return nullptr;
+            }
             return Py::new_reference_to(Py::String(VariableLookup::checkVariableName(holder, name)));
         }
         if (PyUnicode_Check(pyHolder)) {

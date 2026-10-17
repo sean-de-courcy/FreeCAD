@@ -473,6 +473,9 @@ class TestVariablesCopies(unittest.TestCase):
         self.assertIn("property of every", App.checkVariableName("SourcePath", "App::VarSetCopy"))
         variables = self.documentVariables()
         self.assertIn("already", App.checkVariableName("Gap", variables))
+        self.doc.removeObject(variables.Name)
+        with self.assertRaises(ReferenceError):  # a deleted holder: no checks to make
+            App.checkVariableName("Gap", variables)
         with self.assertRaises(ValueError):
             App.checkVariableName("x", "App::NoSuchType")
         with self.assertRaises(UnicodeEncodeError):  # a lone surrogate isn't UTF-8
