@@ -207,6 +207,8 @@
 namespace Part
 {
 extern PyObject* initModule();
+// AttachExtension.cpp: every document's recomputes, for containers moved mid-recompute (ops#342)
+void registerContainerWatch();
 }
 
 using namespace Part;
@@ -448,6 +450,7 @@ PyMOD_INIT_FUNC(Part)
 
     Part::AttachExtension       ::init();
     Part::AttachExtensionPython ::init();
+    Part::registerContainerWatch();
     Part::PreviewExtension      ::init();
     Part::PreviewExtensionPython::init();
     Part::PrismExtension        ::init();

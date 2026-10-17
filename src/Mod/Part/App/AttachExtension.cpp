@@ -254,47 +254,51 @@ void watchContainers(App::DocumentObject* obj)
     if (!doc || !obj->getNameInDocument()) {
         return;
     }
-    static auto deleted = App::GetApplication().signalDeleteDocument.connect(
-        [](const App::Document& gone) {
-            std::lock_guard lock(watchedMutex);
-            auto it = watchedByDocument.find(&gone);
-            if (it != watchedByDocument.end()) {
-                it->second.recomputed.disconnect();
-                watchedByDocument.erase(it);
-            }
-            std::erase_if(containerPlacements, [&gone](const auto& entry) {
-                return entry.first.first == &gone;
-            });
-        }
-    );
-    static auto deletedObject = App::GetApplication().signalDeletedObject.connect(
-        [](const App::DocumentObject& gone) {
-            std::lock_guard lock(watchedMutex);
-            containerPlacements.erase(std::make_pair(gone.getDocument(), gone.getID()));
-        }
-    );
-    static auto created = App::GetApplication().signalNewDocument.connect(
-        [](const App::Document& document, bool) {
-            std::lock_guard lock(watchedMutex);
-            watchRecomputes(const_cast<App::Document*>(&document));
-        }
-    );
-    (void)deleted;
-    (void)deletedObject;
-    (void)created;
     std::lock_guard lock(watchedMutex);
-    // Every document: a container recomputed by another document's recompute is reported there
-    static bool all = [] {
-        for (auto document : App::GetApplication().getDocuments()) {
-            watchRecomputes(document);
-        }
-        return true;
-    }();
-    (void)all;
+    // Already watched since the module loaded, or since the document was made
     watchRecomputes(doc);
     watchedByDocument[doc].names.emplace(obj->getNameInDocument());
 }
 }  // namespace
+
+namespace Part
+{
+// Every document's recomputes are watched, from the module's load on the main thread: a container
+// recomputed by another document's recompute is reported there. Not from watchContainers(), which
+// positionBySupport() calls on the recompute's worker while documents may open or close (fork PR
+// 306 review round 2). Called by AppPart.cpp's module init
+void registerContainerWatch()
+{
+    static bool registered = false;
+    if (registered) {
+        return;
+    }
+    registered = true;
+    App::GetApplication().signalNewDocument.connect([](const App::Document& document, bool) {
+        std::lock_guard lock(watchedMutex);
+        watchRecomputes(const_cast<App::Document*>(&document));
+    });
+    App::GetApplication().signalDeleteDocument.connect([](const App::Document& gone) {
+        std::lock_guard lock(watchedMutex);
+        auto it = watchedByDocument.find(&gone);
+        if (it != watchedByDocument.end()) {
+            it->second.recomputed.disconnect();
+            watchedByDocument.erase(it);
+        }
+        std::erase_if(containerPlacements, [&gone](const auto& entry) {
+            return entry.first.first == &gone;
+        });
+    });
+    App::GetApplication().signalDeletedObject.connect([](const App::DocumentObject& gone) {
+        std::lock_guard lock(watchedMutex);
+        containerPlacements.erase(std::make_pair(gone.getDocument(), gone.getID()));
+    });
+    std::lock_guard lock(watchedMutex);
+    for (auto document : App::GetApplication().getDocuments()) {
+        watchRecomputes(document);
+    }
+}
+}  // namespace Part
 
 EXTENSION_PROPERTY_SOURCE(Part::AttachExtension, App::DocumentObjectExtension)
 
