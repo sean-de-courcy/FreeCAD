@@ -561,8 +561,20 @@ def _quantity(value: Value, what: str) -> Quantity:
 
 
 def evaluate(node, resolve_value: Callable[[str], Quantity]) -> Value:
-    """The value of a tree by Onshape's rules as this module reads them; raises Refused."""
+    """The value of a tree by Onshape's rules as this module reads them; raises Refused.
 
+    Every step's value must be finite: an overflow, a zero to a negative power or an infinity
+    on the way (`10^300 * 10^300 > 1`) is refused, not passed on as an exception or a value."""
+    try:
+        value = _evaluate(node, resolve_value)
+    except (ArithmeticError, ValueError) as e:
+        raise Refused(f"the value can't be computed ({e})") from None
+    if isinstance(value, Quantity) and not math.isfinite(value.value):
+        raise Refused(f"the value can't be computed (it is {value.value})")
+    return value
+
+
+def _evaluate(node, resolve_value: Callable[[str], Quantity]) -> Value:
     def ev(n):
         return evaluate(n, resolve_value)
 
@@ -760,6 +772,8 @@ def translate(expression: str, onshape_type: str,
             raise Refused(f"the default unit {unit} isn't {describe_dims(dims)}")
         text = f"{text} * 1 {symbol}" if isinstance(tree, Num) else f"({text}) * 1 {symbol}"
         value = Quantity(value.value * factor, dims)
+        if not math.isfinite(value.value):
+            raise Refused(f"the value can't be computed (it is {value.value})")
     if value.dims != dims:
         raise Refused(f"the expression is {describe_dims(value.dims)}, but the variable is "
                       f"{describe_dims(dims)} ({onshape_type})")
@@ -1039,11 +1053,16 @@ def translate_export(entries: Sequence[StudioEntry], *,
 
 
 def _exported_value(var: Variable) -> Optional[Quantity]:
-    """The export's `value` as a quantity, when it holds one (null in every export seen)."""
+    """The export's `value` as a quantity, when it holds a finite one (null in every export
+    seen)."""
     if var.value is None or isinstance(var.value, bool):
         return None
     if isinstance(var.value, (int, float)):
-        return Quantity(float(var.value))
+        try:
+            number = float(var.value)
+        except OverflowError:  # a whole number beyond any float
+            return None
+        return Quantity(number) if math.isfinite(number) else None
     if not isinstance(var.value, str):
         return None
     try:

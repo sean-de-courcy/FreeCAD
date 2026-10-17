@@ -107,6 +107,12 @@ REFUSED = [
     ("1.5/2 in", "LENGTH", "fraction of decimals"),
     ("-2^2", "NUMBER", "minus before ^"),
     ("2^3^2", "NUMBER", "chained ^"),
+    ("0^-1", "NUMBER", "can't be computed"),
+    ("(0 mm)^-1", "NUMBER", "can't be computed"),
+    ("10^400", "NUMBER", "can't be computed"),
+    ("exp(1000)", "NUMBER", "can't be computed"),
+    ("cosh(1000)", "NUMBER", "can't be computed"),
+    ("10^300 * 10^300 > 1 ? 1 : 2", "NUMBER", "can't be computed"),
     ("2 mm^2 / 1 mm", "LENGTH", "a unit before ^"),
     ("sqrt(4) mm^2 / 1 mm", "LENGTH", "a unit before ^"),
     ("#Width/2 in", "LENGTH", "units cancel"),
@@ -320,6 +326,18 @@ class TestExport(unittest.TestCase):
         result = onshape.translate_export(onshape.parse_export(json.dumps(data)))
         self.assertIsNotNone(result.result("A").translation)
         self.assertIn("disagrees", result.result("B").refusal)
+
+    def test_a_value_that_cant_be_computed_refuses_only_its_variable(self):
+        data = json.loads(export([("NUMBER", "Huge", "10^400"), ("LENGTH", "A", "1 in"),
+                                  ("LENGTH", "B", "2 in"), ("LENGTH", "C", "3 in")]))
+        data[0]["variables"][2]["value"] = "0^-1"
+        data[0]["variables"][3]["value"] = 1e400  # JSON reads it as infinity
+        result = onshape.translate_export(onshape.parse_export(json.dumps(data)))
+        self.assertIn("can't be computed", result.result("Huge").refusal)
+        self.assertIsNotNone(result.result("A").translation)
+        # an exported value that can't be read is no value, as before
+        self.assertIsNotNone(result.result("B").translation)
+        self.assertIsNotNone(result.result("C").translation)
 
 
 try:
