@@ -693,10 +693,12 @@ class BaseToleranceTest(unittest.TestCase):
     def tearDown(self):
         FreeCAD.closeDocument(self.doc.Name)
 
-    def base(self):
+    def base(self, placement=None):
         rib, _ = rib_against_wall()
         base = self.doc.addObject("Part::Feature", "Base")
         base.Shape = rib
+        if placement:
+            base.Placement = placement
         self.doc.recompute()
         self.assertLess(max(tolerances(base.Shape)), 1e-6)
         return base
@@ -704,9 +706,12 @@ class BaseToleranceTest(unittest.TestCase):
     def dressUp(self, kind, base, sizes):
         feature = self.doc.addObject("Part::" + kind, kind)
         feature.Base = base
+        # The rib's top edges found where it was built, a placed Base's included
+        unplaced = base.Shape.copy()
+        unplaced.Placement = FreeCAD.Placement()
         indices = [
-            next(i for i, e in enumerate(base.Shape.Edges, 1) if e.isSame(edge))
-            for edge in top_edges(base.Shape)
+            next(i for i, e in enumerate(unplaced.Edges, 1) if e.isSame(edge))
+            for edge in top_edges(unplaced)
         ]
         feature.Edges = [(i, s, s) for i, s in zip(indices, sizes)]
         self.doc.recompute()
@@ -724,6 +729,27 @@ class BaseToleranceTest(unittest.TestCase):
                     feature = self.dressUp(kind, base, sizes)
                     self.assertEqual(tolerances(base.Shape), before)
                     self.assertGreater(max(tolerances(feature.Shape)), 1e-5)
+
+    def testPlacedBaseKeepsItsTolerances(self):
+        # A Base with a placement: the selected edges are found in the copy of the placed shape,
+        # and the result lies where the base does (PR 318 review, low 3)
+        placement = FreeCAD.Placement(
+            FreeCAD.Vector(7, -3, 2), FreeCAD.Rotation(FreeCAD.Vector(1, 2, 3), 35)
+        )
+        for kind in ("Chamfer", "Fillet"):
+            for sizes in ([2 - 1e-5] * 2, [2 - 1e-5, 2 - 2e-5]):
+                with self.subTest(kind=kind, sizes=sizes):
+                    base = self.base(placement)
+                    before = tolerances(base.Shape)
+                    feature = self.dressUp(kind, base, sizes)
+                    self.assertEqual(tolerances(base.Shape), before)
+                    unplaced = self.dressUp(kind, self.base(), sizes)
+                    self.assertAlmostEqual(feature.Shape.Volume, unplaced.Shape.Volume, places=9)
+                    moved = unplaced.Shape.copy()
+                    moved.Placement = placement.multiply(moved.Placement)
+                    self.assertAlmostEqual(
+                        feature.Shape.CenterOfMass.distanceToPoint(moved.CenterOfMass), 0, places=7
+                    )
 
     def testSecondDressUpOnTheSameBase(self):
         # A second chamfer on the same base starts from the base's own tolerances, as the first
