@@ -193,8 +193,9 @@ def upToTheLoftSide(test, doc, kind):
     assertBasesKept(test, held)
     # The prism reaches the side (ops#353: BRepFeat gave an empty prism up to the lofted
     # B-spline face, and the feature stayed valid)
+    expected = loftSideReach(22, -2, 2, 11 - 1e-6, 15 - 1e-6)
     test.assertAlmostEqual(
-        feature.AddSubShape.Volume, loftSideReach(22, -2, 2, 11 - 1e-6, 15 - 1e-6), places=4
+        feature.AddSubShape.Volume, expected, delta=PRISM_VOLUME_RELATIVE * expected
     )
     return baseFeature, feature
 
@@ -203,6 +204,10 @@ def upToTheLoftSide(test, doc, kind):
 # it) is off by up to 1.1e-3 in GProp's integration, while the pieces' areas add up to the side's
 # within 1e-4 and the prism's volume is the computed one within 1e-5 (ops#353)
 LOFT_VOLUME_DELTA = 5e-3
+# A prism up to that side (an AddSubShape, about 170 to 180) is the computed volume within 1e-5:
+# compared relative to its size, well above GProp's error and well below any wrong prism (ops#353
+# review L6)
+PRISM_VOLUME_RELATIVE = 1e-6
 
 
 def loftSideReach(x0, y0, y1, z0, z1):
@@ -232,10 +237,10 @@ def loftSideReach(x0, y0, y1, z0, z1):
     return total * h / 3
 
 
-def squareUpToTheLoft(doc, kind, x0, z0, z1, reversed=True):
+def squareUpToTheLoft(doc, kind, x0, z0, z1, reversed=True, direction=None):
     """ops#353: ops#347's loft as a Body's BaseFeature, a 4 x 4 square y -2..2, z z0..z1 in the
     plane x = x0 (sketch normal +x), and a Pad or Pocket from it up to the loft's B-spline side
-    face. Recomputed, not checked."""
+    face, along `direction` when given (a custom vector). Recomputed, not checked."""
     import Sketcher
 
     V = FreeCAD.Vector
@@ -269,8 +274,91 @@ def squareUpToTheLoft(doc, kind, x0, z0, z1, reversed=True):
     feature.Type = "UpToFace"
     feature.UpToFace = (baseFeature, [side])
     feature.Reversed = reversed
+    if direction is not None:
+        feature.UseCustomVector = True
+        feature.Direction = direction
     doc.recompute()
     return baseFeature, feature
+
+
+def nurbsPlate(x, hole=None):
+    """ops#353 review H1: the rectangle y -10..10, z 0..14 of the plane x = `x` as a B-spline face
+    (not elementary, so a prism up to it is built by the split), with a hole of radius
+    `hole[1]` around (x, hole[0][0], hole[0][1]) when given."""
+    V = FreeCAD.Vector
+    corners = [V(x, -10, 0), V(x, 10, 0), V(x, 10, 14), V(x, -10, 14)]
+    face = Part.Face(Part.makePolygon(corners + corners[:1])).toNurbs().Faces[0]
+    if hole:
+        (y, z), radius = hole
+        face = face.cut(Part.makeCylinder(radius, 4, V(x - 2, y, z), V(1, 0, 0))).Faces[0]
+    return face
+
+
+def squareUpToPlates(doc, holed):
+    """ops#353 review H1: a Pad from the 4 x 4 square y -2..2, z 5..9 in the plane x = 22, along -x,
+    up to the shape of three B-spline plates at x = 15, 5 and -5 (UpToShape, which leaves out the
+    farthest one). With `holed`, the front plate has a hole of radius 1 around (15, 0, 7), inside
+    the square's way. Recomputed, not checked."""
+    import Sketcher
+
+    V = FreeCAD.Vector
+    plates = doc.addObject("Part::Feature", "Plates")
+    plates.Shape = Part.Compound(
+        [nurbsPlate(15, ((0, 7), 1) if holed else None), nurbsPlate(5), nurbsPlate(-5)]
+    )
+    body = doc.addObject("PartDesign::Body", "Body")
+    sketch = body.newObject("Sketcher::SketchObject", "Square")
+    # Sketch x is world -z, y is y, the normal +x
+    sketch.Placement = FreeCAD.Placement(V(22, 0, 0), FreeCAD.Rotation(V(0, 1, 0), 90))
+    corners = [V(-9, -2, 0), V(-5, -2, 0), V(-5, 2, 0), V(-9, 2, 0)]
+    for i in range(4):
+        sketch.addGeometry(Part.LineSegment(corners[i], corners[(i + 1) % 4]))
+    for i in range(4):
+        sketch.addConstraint(Sketcher.Constraint("Coincident", i, 2, (i + 1) % 4, 1))
+    pad = body.newObject("PartDesign::Pad", "Pad")
+    pad.Profile = sketch
+    pad.Type = "UpToShape"
+    pad.UpToShape = [(plates, [""])]
+    pad.Reversed = True
+    doc.recompute()
+    return pad
+
+
+def padUpToABoxBesideALoft(doc, withLoft):
+    """ops#353 review M2: the box x 10..35, y -5..5, z 0..10 as a Body's BaseFeature, fused with
+    ops#347's loft when `withLoft` (its B-spline side is away from the Pad), and a Pad from the
+    4 x 4 square x 25..29, y -2..2 at z = -5, along +z, up to the base (UpToShape, nothing
+    selected). Recomputed, not checked."""
+    import Sketcher
+
+    V = FreeCAD.Vector
+    shape = Part.makeBox(25, 10, 10, V(10, -5, 0))
+    if withLoft:
+        loft = Part.makeLoft(
+            [
+                Part.Wire(Part.Circle(V(0, 0, 0), V(0, 0, 1), 10).toShape()),
+                Part.Wire(Part.Ellipse(V(0, 0, 15), 12, 6).toShape()),
+            ],
+            True,
+        )
+        shape = shape.fuse(loft).removeSplitter()
+    base = doc.addObject("Part::Feature", "Base")
+    base.Shape = shape
+    body = doc.addObject("PartDesign::Body", "Body")
+    baseFeature = body.newObject("PartDesign::FeatureBase", "BaseFeature")
+    baseFeature.BaseFeature = base
+    sketch = body.newObject("Sketcher::SketchObject", "Square")
+    sketch.Placement = FreeCAD.Placement(V(0, 0, -5), FreeCAD.Rotation())
+    corners = [V(25, -2, 0), V(29, -2, 0), V(29, 2, 0), V(25, 2, 0)]
+    for i in range(4):
+        sketch.addGeometry(Part.LineSegment(corners[i], corners[(i + 1) % 4]))
+    for i in range(4):
+        sketch.addConstraint(Sketcher.Constraint("Coincident", i, 2, (i + 1) % 4, 1))
+    pad = body.newObject("PartDesign::Pad", "Pad")
+    pad.Profile = sketch
+    pad.Type = "UpToShape"
+    doc.recompute()
+    return pad
 
 
 def holdBases(*objects):
@@ -1038,7 +1126,9 @@ class TestPad(unittest.TestCase):
                     self.assertTrue(pad.isValid(), pad.getStatusString())
                     self.assertTrue(pad.Shape.isValid())
                     self.assertEqual(len(pad.Shape.Solids), 1)
-                    self.assertAlmostEqual(pad.AddSubShape.Volume, expected, places=4)
+                    self.assertAlmostEqual(
+                        pad.AddSubShape.Volume, expected, delta=PRISM_VOLUME_RELATIVE * expected
+                    )
                     self.assertAlmostEqual(
                         pad.Shape.Volume, base.Shape.Volume + expected, delta=LOFT_VOLUME_DELTA
                     )
@@ -1051,6 +1141,62 @@ class TestPad(unittest.TestCase):
         base, pad = squareUpToTheLoft(self.Doc, "Pad", 22, 11, 17)
         self.assertFalse(pad.isValid())
         self.assertIn("doesn't meet", pad.getStatusString())
+
+    def testPadUpToALoftedFaceWhoseRimIsInTheWay(self):
+        # ops#353 review H1: the 4 x 3 rectangle at x = 22, z 14.5..17.5, along (-1, 0, -0.15).
+        # At the near side (x about 12) its z is 13..16, and the loft's top rim (z 15) crosses
+        # it: the lower part meets the side there, the upper part passes over the rim to the far
+        # side (z about 9.4..12.4). The split left the near patch inside one solid reaching the
+        # far side: a valid Pad through the loft (AddSubShape about 400, two internal faces). It
+        # fails, saying why
+        base, pad = squareUpToTheLoft(
+            self.Doc, "Pad", 22, 14.5, 17.5, False, FreeCAD.Vector(-1, 0, -0.15)
+        )
+        self.assertFalse(pad.isValid())
+        self.assertIn("lies in the profile's way", pad.getStatusString())
+
+    def testPadUpToAShapeThroughAHole(self):
+        # ops#353 review H1: the front plate stops the square except where its hole lies in the
+        # square's way. The split left the holed plate inside one solid reaching the middle
+        # plate: a valid Pad of 4 x 4 x 17 = 272 through the front plate. It fails, saying why
+        for holed in (False, True):
+            with self.subTest(holed=holed):
+                doc = FreeCAD.newDocument("PadUpToAShapeThroughAHole")
+                try:
+                    pad = squareUpToPlates(doc, holed)
+                    if holed:
+                        self.assertFalse(pad.isValid())
+                        self.assertIn("lies in the profile's way", pad.getStatusString())
+                    else:
+                        # The front plate stops all of it: 4 x 4 x 7
+                        self.assertTrue(pad.isValid(), pad.getStatusString())
+                        self.assertAlmostEqual(pad.AddSubShape.Volume, 112, places=6)
+                finally:
+                    FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToAShapeWithAnUnrelatedFreeformFace(self):
+        # ops#353 review M2: up to a whole base, a freeform face the Pad can't meet doesn't change
+        # how the Pad is built. With the loft's side in the base, the Pad went to the split, and
+        # its top face was named from the far ends of the profile's edges (LOW), not projected
+        # from the profile's face (PRJ) as BRepFeat names it
+        import re
+
+        def masked(shape):
+            count = len(shape.Faces)
+            names = (shape.getElementMappedName("Face%d" % i) for i in range(1, count + 1))
+            return sorted(re.sub(r";\d+;", ";#;", re.sub(r"~[0-9a-z]+", "~", n)) for n in names)
+
+        results = []
+        for withLoft in (False, True):
+            doc = FreeCAD.newDocument("PadUpToAShapeWithAnUnrelatedFreeformFace")
+            try:
+                pad = padUpToABoxBesideALoft(doc, withLoft)
+                self.assertTrue(pad.isValid(), pad.getStatusString())
+                self.assertAlmostEqual(pad.AddSubShape.Volume, 80, places=6)
+                results.append(masked(pad.AddSubShape))
+            finally:
+                FreeCAD.closeDocument(doc.Name)
+        self.assertEqual(results[1], results[0])
 
     def testPadUpToABaseWithNames(self):
         """ops#347, review of fork PR 321: a Pad up to the base keeps the base's names and has

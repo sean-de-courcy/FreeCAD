@@ -295,17 +295,36 @@ class TestPocket(unittest.TestCase):
         # was valid and removed nothing. The square is inside the loft, in the plane x = 0: the
         # Pocket removes what lies between it and the side (the loft is symmetric about x = 0,
         # so the same either way)
-        from PartDesignTests.TestPad import LOFT_VOLUME_DELTA, loftSideReach, squareUpToTheLoft
+        from PartDesignTests.TestPad import (
+            LOFT_VOLUME_DELTA,
+            PRISM_VOLUME_RELATIVE,
+            loftSideReach,
+            squareUpToTheLoft,
+        )
 
         expected = loftSideReach(0, -2, 2, 5, 9)
         base, pocket = squareUpToTheLoft(self.Doc, "Pocket", 0, 5, 9, False)
         self.assertTrue(pocket.isValid(), pocket.getStatusString())
         self.assertTrue(pocket.Shape.isValid())
         self.assertEqual(len(pocket.Shape.Solids), 1)
-        self.assertAlmostEqual(pocket.AddSubShape.Volume, expected, places=4)
+        self.assertAlmostEqual(
+            pocket.AddSubShape.Volume, expected, delta=PRISM_VOLUME_RELATIVE * expected
+        )
         self.assertAlmostEqual(
             pocket.Shape.Volume, base.Shape.Volume - expected, delta=LOFT_VOLUME_DELTA
         )
+
+    def testPocketUpToALoftedFaceWhoseRimIsInTheWay(self):
+        # ops#353 review H1: TestPad's tilted rectangle as a Pocket. The split's solid ran from
+        # the rectangle through the near side's patch to the far side, and the Pocket cut the
+        # loft's inside between its two sides. It fails, saying why
+        from PartDesignTests.TestPad import squareUpToTheLoft
+
+        base, pocket = squareUpToTheLoft(
+            self.Doc, "Pocket", 22, 14.5, 17.5, False, FreeCAD.Vector(-1, 0, -0.15)
+        )
+        self.assertFalse(pocket.isValid())
+        self.assertIn("lies in the profile's way", pocket.getStatusString())
 
     def testPocketUpToABaseWithNames(self):
         """ops#347, review of fork PR 321: a Pocket that cuts through the base, up to its far
