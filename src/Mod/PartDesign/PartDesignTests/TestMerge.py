@@ -212,6 +212,25 @@ class TestMerge(unittest.TestCase):
         self.assertIn("the merged part is gone", merge.getStatusString())
         self.assertAlmostEqual(self.bracket.Shape.Volume, 16000, places=6)
 
+    def testSurvivorDeletedAlone(self):
+        """The bracket deleted from Python without its features (PR 305 round 1): the Merge is
+        left in no part, so the panel is no longer merged. A later panel feature computes, and
+        the panel can be merged again."""
+        self.model()
+        self.merge()
+        self.doc.removeObject(self.bracket.Name)
+        self.doc.recompute()
+        later = self.later()
+        self.doc.recompute()
+        self.assertTrue(later.isValid(), later.getStatusString())
+        self.assertAlmostEqual(self.panel.Shape.Volume, 12000 + 500, places=6)
+        other = self.doc.addObject("PartDesign::Body", "Other")
+        pad(other, "OtherPad", sketch(other, "OtherSk", xyPlane(other), (0, 0, 10, 10)), 10)
+        self.doc.recompute()
+        merge = PartDesign.makeMerge(other, [self.panel])
+        self.doc.recompute()
+        self.assertTrue(merge.isValid(), merge.getStatusString())
+
     def testRefusedWhileRolledBack(self):
         """M-t5: the panel rolled back above PanelPad: the merge is refused, and nothing
         changes."""

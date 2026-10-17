@@ -441,7 +441,8 @@ Boolean* Boolean::mergeOf(const App::DocumentObject* body)
     auto link = body ? freecad_cast<App::PropertyLinkHidden*>(body->getPropertyByName(mergedInto))
                      : nullptr;
     auto merge = link ? freecad_cast<Boolean*>(link->getValue()) : nullptr;
-    return merge && merge->isMerge() ? merge : nullptr;
+    // A Merge left in no part (its Body deleted alone) merges nothing (PR 305 round 1)
+    return merge && merge->isMerge() && Body::findBodyOf(merge) ? merge : nullptr;
 }
 
 std::vector<App::DocumentObject*> Boolean::mergedBodies() const
