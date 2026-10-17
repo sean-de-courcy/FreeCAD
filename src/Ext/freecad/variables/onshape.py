@@ -28,19 +28,24 @@ writes the FreeCAD expression and evaluates the expression itself, so the import
 check FreeCAD's value against the translator's. It needs no document.
 
 **It never guesses.** A form whose meaning in Onshape isn't pinned down, or that FreeCAD can't
-express, is refused with the reason (`Refused`). Until a reference studio built in Onshape
-settles them (decision 68, D3), these are refused: a fraction with a unit next to `*`, `/` or
-`^` (`#a*3/4 in`, `1/3/4 in`), a unary minus before `^` on anything but a number (`-#a^2`;
-`-2^2` is `(-2)^2`), a unit before `^` after a group or a call (`sqrt(4) mm^2`; `2 mm^2` is
-2 mm²), `%` with units or by a negative number.
+express, is refused with the reason (`Refused`). The reference studio the user built in Onshape
+(decision 68, D3; notes/variables-studio.md 5.1) settled these readings: `2 * 3/4 in` is 1.5 in,
+`-2^2` is (-2)^2, `2 mm^2` is 2 mm², `round` takes halves up, `-7 % 3` is 2, `#a/mm` is #a
+counted in mm, `2^3^2` is 2^9, `1.5e2` is 150. Their neighbours it doesn't settle stay refused: a
+fraction with a unit next to `/` or `^` or before `*` (`1/3/4 in`, `3/4 in * 2`), a minus before
+`^` on anything but a number (`-#a^2`), a unit before `^` after a group or a call
+(`sqrt(4) mm^2`), `%` with units or by a negative number, and `floor`, `ceil`, `round` of a
+value with a unit (Onshape rejects `floor` of one).
 
 The writer's rules (section 2.4):
 - every unit is written as a factor: `10mm` becomes `(10 * 1 mm)`;
 - an integer fraction followed by a unit, as a term of its own (bounded by `+`, `-`, a
-  comparison, `?`, `:`, `,`, parentheses or the ends), is a fraction literal: `3/4 in` becomes
-  `(3 / 4 * 1 in)`; FreeCAD reads `3/4in` as `3/(4 in)`, an inverse length, without an error;
+  comparison, `?`, `:`, `,`, parentheses or the ends) or the last factor after `*`, is a
+  fraction literal: `3/4 in` becomes `(3 / 4 * 1 in)`; FreeCAD reads `3/4in` as `3/(4 in)`, an inverse length, without an error;
 - a unit after `)` or a function call applies to that group: `sqrt(16) m` is `(sqrt(16) * 1 m)`;
 - unit words become FreeCAD's symbols, `PI` and `Pi` become `pi`;
+- `round(x)` is written `floor(x + 0.5)`, and `a % b` with a dividend other than a plain number
+  `a - b * floor(a / b)`, Onshape's readings;
 - a `#name` becomes the text the caller gives for it (a sibling's bare name, another copy's
   `Copy.Name`, a document variable's path), never `#name`: FreeCAD's `#name` searches the whole
   document, a silent binding (section 2.6).
@@ -491,16 +496,20 @@ def _number_literal(node) -> Optional[Tuple[bool, Num]]:
 
 
 def _fold_term(factors: list, ops: list):
-    """A product of factors, with the fraction-literal rule (section 2.4)."""
-    if len(factors) == 2 and ops[0] == "/" and isinstance(factors[1], Qty):
-        literal = _number_literal(factors[0])
+    """A product of factors, with the fraction-literal rule (section 2.4): a fraction with a unit
+    is one value standing alone or as the last factor after `*`, as Onshape's 2 * 3/4 in is
+    38.1 mm (the reference studio, row 21)."""
+    if (ops and ops[-1] == "/" and isinstance(factors[-1], Qty)
+            and (len(ops) == 1 or ops[-2] == "*")):
+        literal = _number_literal(factors[-2])
         if literal is not None:
             negative, num = literal
-            den = factors[1].num
-            if num.is_int and den.is_int:
-                return Frac(negative, num, den, factors[1].unit)
-            raise Refused(f"a fraction of decimals with a unit ({num.text}/{den.text} "
-                          f"{factors[1].unit}): {UNDOCUMENTED}")
+            den = factors[-1].num
+            if not (num.is_int and den.is_int):
+                raise Refused(f"a fraction of decimals with a unit ({num.text}/{den.text} "
+                              f"{factors[-1].unit}): {UNDOCUMENTED}")
+            factors = factors[:-2] + [Frac(negative, num, den, factors[-1].unit)]
+            ops = ops[:-1]
     for i, op in enumerate(ops, start=1):
         if (op == "/" and _number_literal(factors[i - 1]) is not None
                 and isinstance(factors[i], (Qty, UnitPower))):
