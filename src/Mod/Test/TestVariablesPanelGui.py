@@ -600,6 +600,7 @@ class TestVariablesPanelGui(unittest.TestCase):
                 self.assertIn(fragment, error.text())
                 self.assertIsNone(doc.getObject("Variables"))
                 self.assertEqual(doc.UndoCount, undoCount)
+                self.assertEqual(doc.getBookedTransactionID(), 0)
         dialog.reject()
 
     def test_add_dialog_unitless_expression(self):
@@ -618,6 +619,37 @@ class TestVariablesPanelGui(unittest.TestCase):
                 doc.recompute()
                 self.assertAlmostEqual(getattr(self.varSet, name).Value, expected)
                 self.assertEqual(doc.UndoNames[0], "Add " + name)
+
+    def test_add_dialog_refuses_in_booked_transaction(self):
+        """With another transaction booked (a task dialog's), a refused Add takes back what it
+        made, by hand: no VarSet or variable is left, the booking stays open, and aborting it
+        leaves nothing (PR 313 round 1)."""
+        doc = self.standardDocument()
+        undoCount = doc.UndoCount
+        doc.openTransaction("Task")
+        booked = doc.getBookedTransactionID()
+        self.assertNotEqual(booked, 0)
+        self.tree.setCurrentIndex(QtCore.QModelIndex())
+        dialog = self.openPanelAddDialog()
+        self.assertGreaterEqual(
+            dialog.findChild(QtWidgets.QComboBox, "set").findText("Variables (new)"), 0
+        )
+        error = dialog.findChild(QtWidgets.QLabel, "error")
+        for varSet in ["Variables (new)", "VarSet"]:
+            with self.subTest(varSet=varSet):
+                self.fillAddDialog(dialog, "Size", "Length", "#Width * #Height", varSet=varSet)
+                self.pressOk(dialog)
+                self.assertTrue(self.addDialogOpen())
+                self.assertIn("the type of Size is Length", error.text())
+                self.assertEqual([o.Name for o in doc.findObjects("App::VarSet")], ["VarSet"])
+                self.assertNotIn("Size", self.varSet.PropertiesList)
+                self.assertEqual(doc.getBookedTransactionID(), booked)
+        dialog.reject()
+        doc.abortTransaction()
+        self.assertEqual(doc.getBookedTransactionID(), 0)
+        self.assertEqual(doc.UndoCount, undoCount)
+        self.assertEqual([o.Name for o in doc.findObjects("App::VarSet")], ["VarSet"])
+        self.assertNotIn("Size", self.varSet.PropertiesList)
 
     def test_describe(self):
         """G-3. A description typed in its cell is one undo step, "Describe Width"; Edit
