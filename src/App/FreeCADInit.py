@@ -430,6 +430,8 @@ App.__cmake__ = globals().get("cmake", [])
 App.__unit_test__ = []
 
 App.addImportType("FreeCAD document (*.FCStd)", "FreeCAD")
+# FreeCAD-CH ops#317: variable studio exports, as copies (freecad.variables.importgui)
+App.addImportType("Onshape variables (*.json)", "freecad.variables.importer")
 
 # set to no gui, is overwritten by InitGui
 App.GuiUp = 0
