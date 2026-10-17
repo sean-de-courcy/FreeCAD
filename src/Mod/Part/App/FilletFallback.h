@@ -89,6 +89,13 @@ PartExport TopoShape makerInput(const TopoShape& base, std::vector<TopoShape>& e
  * the shapes share (an up-to face of the base, the faces of a shell of the base's faces) is one
  * sub-shape of the copies too. Each copy keeps its shape's element map and Tag.
  *
+ * Used by Pad and Pocket up to a face, the first or last face or a shape
+ * (TopoShape::makeElementPrismUntil(): the base, the profile, the support face, the up-to shape)
+ * and by Revolution and Groove up to a face (FeatureRevolved: the base and the chosen faces).
+ * Pad and Pocket make their fuse or cut with the original base: the contact with the prism is
+ * found by geometry, not by shared TShapes. Revolution and Groove make theirs with the base's
+ * copy, whose faces are the ones their tool's face parts share.
+ *
  * @param shapes The maker's inputs; a null one stays null
  * @return The copies, in the order of the shapes
  */

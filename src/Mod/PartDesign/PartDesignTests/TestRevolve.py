@@ -3093,6 +3093,24 @@ class TestRevolve(unittest.TestCase):
                         self.assertFalse(revolution.isValid())
                         self.assertIn("names several faces", revolution.getStatusString())
 
+    @staticmethod
+    def sweptByTheProfile(sides=1):
+        """The volume swept by the profile of revolveUpToTheCylinderSide() until the cylinder's
+        wall, per side: the profile is x 6..10 from the axis (x = 14) and 3 high, and at distance
+        rho from the axis it turns by phi(rho) before it is at distance 10 from the cylinder's
+        axis, (14 + rho cos phi)^2 + (rho sin phi)^2 = 100, that is cos phi =
+        -(96 + rho^2) / (28 rho). The volume is 3 * integral of rho phi(rho) d rho from 6 to 10
+        (Simpson's rule); 228.05374 for one side."""
+        n = 200
+        h = (10 - 6) / n
+
+        def f(rho):
+            return 3 * rho * math.acos(-(96 + rho**2) / (28 * rho))
+
+        total = f(6) + f(10)
+        total += sum((4 if i % 2 else 2) * f(6 + i * h) for i in range(1, n))
+        return sides * total * h / 3
+
     def revolveUpToTheCylinderSide(self, kind, sideType="One side", named=False):
         # ops#347: a cylinder r 10 h 15 as the Body's BaseFeature (a Part::Feature, or with
         # named a Pad of a circle, which has an element map), the profile x 20..24,
@@ -3147,7 +3165,8 @@ class TestRevolve(unittest.TestCase):
         self.assertTrue(feature.Shape.isValid())
         # The tool as the unfixed build swept it
         sides = 2 if sideType == "Two sides" else 1
-        self.assertAlmostEqual(feature.AddSubShape.Volume, 228.05374 * sides, places=4)
+        self.assertAlmostEqual(feature.AddSubShape.Volume, self.sweptByTheProfile(sides), places=4)
+        self.assertAlmostEqual(self.sweptByTheProfile(), 228.05374, places=5)
         if named:
             from PartDesignTests.TestPad import (
                 assertFacesAllNamed,
