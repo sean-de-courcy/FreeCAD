@@ -32,6 +32,7 @@
 
 #include "Transactions.h"
 #include "Document.h"
+#include "private/DocumentP.h"
 #include "DocumentObject.h"
 #include "Property.h"
 
@@ -222,6 +223,30 @@ void Transaction::addOrRemoveProperty(TransactionalObject* Obj, const Property* 
     }
     changeProperty(Obj, [pcProp, add](TransactionObject* to) {
         to->addOrRemoveProperty(pcProp, add);
+    });
+}
+
+void Transaction::changeDocOrGroup(TransactionalObject* Obj, const Property* pcProp)
+{
+    // a moved property: recorded with its move entry, given back once the move is taken back
+    if (auto [to, key] = movedHere(pcProp); to) {
+        if (!to->_DocOrGroupMap.count(key)) {
+            const auto& data = to->_PropChangeMap[key];
+            to->_DocOrGroupMap[key] = {data.nameOrig.empty() ? data.name : data.nameOrig,
+                                       data.group,
+                                       data.doc};
+        }
+        return;
+    }
+    changeProperty(Obj, [pcProp](TransactionObject* to) {
+        to->changeDocOrGroup(pcProp);
+    });
+}
+
+void Transaction::recordDocOrGroup(Document& doc, TransactionalObject* Obj, const Property* pcProp)
+{
+    doc.changePropertyOfObject(Obj, pcProp, [&doc, Obj, pcProp]() {
+        doc.d->activeUndoTransaction->changeDocOrGroup(Obj, pcProp);
     });
 }
 
@@ -731,7 +756,29 @@ void TransactionObject::applyChnPass(TransactionalObject* pcObj, ChnPass pass)
                     prop->Paste(*data.property);
                 });
             }
+            applyDocOrGroup(pcObj);
             break;
+    }
+}
+
+void TransactionObject::applyDocOrGroup(TransactionalObject* pcObj)
+{
+    for (auto& [key, record] : _DocOrGroupMap) {
+        auto entry = _PropChangeMap.find(key);
+        if (entry != _PropChangeMap.end()) {
+            const auto& data = entry->second;
+            if ((data.propertyOrig && !data.property && !data.target) || data.added) {
+                continue;  // added in the transaction, and removed again
+            }
+        }
+        applyEntry(pcObj, record.name, [&]() {
+            Property* prop = pcObj->getDynamicPropertyByName(record.name.c_str());
+            if (!prop) {
+                return;
+            }
+            // (recorded again in the transaction being applied's counterpart, for redo or undo)
+            pcObj->changeDynamicProperty(prop, record.group.c_str(), record.doc.c_str());
+        });
     }
 }
 
@@ -1028,6 +1075,31 @@ void TransactionObject::addOrRemoveProperty(const Property* pcProp, bool add)
         data.propertyType = pcProp->getTypeId();
         data.property->setStatusValue(pcProp->getStatus());
     }
+}
+
+void TransactionObject::changeDocOrGroup(const Property* pcProp)
+{
+    if (!pcProp || !pcProp->getContainer()) {
+        return;
+    }
+    const auto key = pcProp->getID();
+    if (_DocOrGroupMap.count(key)) {
+        return;
+    }
+    // the name from before the transaction: a rename entry can go (renamed back)
+    std::string name = pcProp->getName();
+    auto entry = _PropChangeMap.find(key);
+    if (entry != _PropChangeMap.end()) {
+        const auto& data = entry->second;
+        if (data.propertyOrig && !data.property && !data.target) {
+            return;  // added in the transaction
+        }
+        if (!data.nameOrig.empty()) {
+            name = data.nameOrig;
+        }
+    }
+    auto dynamic = pcProp->getContainer()->getDynamicPropertyData(pcProp);
+    _DocOrGroupMap[key] = {name, dynamic.group, dynamic.doc};
 }
 
 unsigned int TransactionObject::getMemSize() const

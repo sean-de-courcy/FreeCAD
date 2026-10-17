@@ -127,6 +127,50 @@ TEST_F(VariableLookupTest, listVariablesOfVarSets)
     EXPECT_FALSE(App::VariableLookup::isVariable(owner, "Label"));
 }
 
+// FreeCAD-CH (ops#317, N-1): the name rules of notes/variables-studio.md section 1.3. A refused name
+// is one that stock FreeCAD accepts as a property but no expression can then use, or one taken.
+TEST_F(VariableLookupTest, checkVariableNameRefusesWhatNoExpressionCanUse)
+{
+    auto reason = [this](const std::string& name) {
+        return App::VariableLookup::checkVariableName(varSet, name);
+    };
+    for (const char* unit : {"t", "h", "H", "W", "m", "A"}) {
+        EXPECT_EQ(reason(unit),
+                  std::string("'") + unit
+                      + "' is a unit in expressions, so no expression could use the variable.");
+        // why: stock FreeCAD takes the property, and then no expression reads it
+        varSet->addDynamicProperty("App::PropertyLength", unit);
+        EXPECT_NE(parseError(owner, std::string("VarSet.") + unit + " * 2"), "") << unit;
+        varSet->removeDynamicProperty(unit);
+    }
+    for (const char* constant : {"pi", "e"}) {
+        EXPECT_EQ(reason(constant),
+                  std::string("'") + constant
+                      + "' is a constant in expressions, so no expression could use the variable.");
+    }
+    EXPECT_EQ(reason("cos"), "'cos' is a function in expressions; choose another name.");
+    EXPECT_EQ(reason("Label"), "'Label' is a property of every App::VarSet; choose another name.");
+    EXPECT_EQ(reason("Width"), "VarSet has a variable named 'Width' already.");
+    for (const char* malformed : {"1a", "a-b", "a b", ""}) {
+        EXPECT_NE(reason(malformed), "") << malformed;
+    }
+    EXPECT_EQ(reason("1a"),
+              "'1a' isn't a name: use letters, digits and _, and start with a letter or _.");
+}
+
+TEST_F(VariableLookupTest, checkVariableNameAcceptsWhatExpressionsCanUse)
+{
+    for (const char* name : {"Width_2", "L"}) {
+        EXPECT_EQ(App::VariableLookup::checkVariableName(varSet, name), "") << name;
+        // and an expression reads it
+        varSet->addDynamicProperty("App::PropertyLength", name);
+        EXPECT_EQ(parseError(owner, std::string("VarSet.") + name + " * 2"), "") << name;
+    }
+    // without a holder only the name counts: "Width" is free
+    EXPECT_EQ(App::VariableLookup::checkVariableName(nullptr, "Width"), "");
+    EXPECT_NE(App::VariableLookup::checkVariableName(nullptr, "mm"), "");
+}
+
 }  // namespace
 
 // NOLINTEND(readability-magic-numbers)

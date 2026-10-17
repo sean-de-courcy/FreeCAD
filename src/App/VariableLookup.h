@@ -92,6 +92,17 @@ public:
     /// Whether @a obj holds a variable named @a name.
     static bool isVariable(const DocumentObject* obj, const std::string& name);
 
+    /** Why @a name can't name a new variable of @a holder, or "" if it can (FreeCAD-CH, ops#317).
+     *
+     * One rule for adding, renaming, importing and converting (notes/variables-studio.md section
+     * 1.3): letters, digits and `_`, not starting with a digit, and read as a name by expressions,
+     * so not a unit (`mm`, `t`, `W`), a constant (`pi`, `e`) or a function (`cos`); a property
+     * stock FreeCAD accepts under such a name can't be used by any expression. Nor may @a holder
+     * have a property of that name (a static one such as `Label`, or a variable): a rename checks
+     * only a changed name. Without @a holder, only the name is checked.
+     */
+    static std::string checkVariableName(const DocumentObject* holder, const std::string& name);
+
     /// Every expression that uses @a prop: properties' expressions and Spreadsheet cells alike
     /// (DocumentObject::getPropertyUses misses the cells), of its object and its InList, other
     /// documents included. A use through an App::Link to the holder isn't found: the Link, not

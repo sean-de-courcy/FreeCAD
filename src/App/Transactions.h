@@ -172,6 +172,20 @@ public:
      */
     void addObjectChange(const TransactionalObject* Obj, const Property* Prop);
 
+    /**
+     * @brief Record the documentation and group of a dynamic property before they change.
+     *
+     * FreeCAD-CH (ops#317): undo and redo restore both, after the property's other changes.
+     *
+     * @param[in] Obj The object of the property.
+     * @param[in] pcProp The property, with its documentation and group still unchanged.
+     */
+    void changeDocOrGroup(TransactionalObject* Obj, const Property* pcProp);
+
+    /// FreeCAD-CH (ops#317): changeDocOrGroup() in @a doc's active transaction, opened as for a
+    /// rename (Document::changePropertyOfObject); nothing while it is aborted
+    static void recordDocOrGroup(Document& doc, TransactionalObject* Obj, const Property* pcProp);
+
 private:
     void changeProperty(TransactionalObject* Obj,
                         std::function<void(TransactionObject* to)> changeFunc);
@@ -293,6 +307,16 @@ public:
      */
     void addOrRemoveProperty(const Property* prop, bool add);
 
+    /**
+     * @brief Record a property's documentation and group from before the transaction.
+     *
+     * FreeCAD-CH (ops#317): only the first change of either is recorded; nothing for a property
+     * added in the transaction (its removal undoes it).
+     *
+     * @param[in] pcProp The property, with its documentation and group still unchanged.
+     */
+    void changeDocOrGroup(const Property* pcProp);
+
     unsigned int getMemSize() const override;
     void Save(Base::Writer& writer) const override;
     void Restore(Base::XMLReader& reader) override;
@@ -356,6 +380,23 @@ protected:
 
     /// A map to maintain the properties of the object.
     std::unordered_map<int64_t, PropData> _PropChangeMap;
+
+    /// FreeCAD-CH (ops#317): a property's documentation and group from before the transaction,
+    /// with its name from before the transaction
+    struct DocOrGroup
+    {
+        std::string name;
+        std::string group;
+        std::string doc;
+    };
+    /// FreeCAD-CH (ops#317): by property ID, as _PropChangeMap; a property moved here in the
+    /// transaction is recorded with its move entry, on its source
+    std::unordered_map<int64_t, DocOrGroup> _DocOrGroupMap;
+
+    /// FreeCAD-CH (ops#317): gives back the recorded documentation and group (the end of the
+    /// Values pass), to the property by its name from before the transaction, which the other
+    /// passes gave it back
+    void applyDocOrGroup(TransactionalObject* obj);
 
     /// The name of the object in the document.
     std::string _NameInDocument;

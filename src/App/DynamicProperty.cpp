@@ -39,8 +39,11 @@
 
 #include "DynamicProperty.h"
 #include "Application.h"
+#include "Document.h"
+#include "DocumentObject.h"
 #include "Property.h"
 #include "PropertyContainer.h"
+#include "Transactions.h"
 
 
 FC_LOG_LEVEL_INIT("Property", true, true)
@@ -449,11 +452,24 @@ bool DynamicProperty::changeDynamicProperty(const Property* prop,
     if (it == index.end()) {
         return false;
     }
+    // FreeCAD-CH (ops#317): a change is recorded for undo, as a rename is, and shown in the
+    // property editors (the Gui document is marked modified); it was neither
+    if ((!group || it->group == group) && (!doc || it->doc == doc)) {
+        return true;
+    }
+    auto* obj = freecad_cast<DocumentObject*>(prop->getContainer());
+    Document* owner = obj && obj->isAttachedToDocument() ? obj->getDocument() : nullptr;
+    if (owner) {
+        Transaction::recordDocOrGroup(*owner, obj, prop);
+    }
     if (group) {
         it->group = group;
     }
     if (doc) {
         it->doc = doc;
+    }
+    if (owner && !Document::isAnyRestoring()) {
+        owner->signalChangePropertyEditor(*owner, *prop);
     }
     return true;
 }

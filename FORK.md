@@ -335,7 +335,8 @@ names it.
 | `feat/325-3b` | feat | ops#325 | - | `feat/325-3a` `0be7f310ec` (fork PR 304) | `ae33af5c9c` (fork PR 305), 2026-10-17 | never (fork feature) |
 | `fix/342-container-moves` | fix | ops#342 | - | `feat/325-3b` `add23ca198` (fork PR 305) | `9439811c0a` (fork PR 306), 2026-10-17 | never (fork feature) |
 | `feat/325-4-split` | feat | ops#325 | - | `integration` `ae33af5c9c` | `f16dbf43bc` (fork PR 308), 2026-10-17 | never (fork feature) |
-| `fix/293-q4-tolbase` | fix | ops#293 | - | `integration` `35fbb72308` | (fork PR 307) | never (fork fix) |
+| `fix/293-q4-tolbase` | fix | ops#293 | - | `integration` `35fbb72308` | `fc14bb9328` (fork PR 307), 2026-10-17 | never (fork fix) |
+| `feat/317-describe` | feat | ops#317 | - | `integration` `9439811c0a` | (fork PR 310) | never (fork feature) |
 
 ## Fork-only commits in carried topics
 
