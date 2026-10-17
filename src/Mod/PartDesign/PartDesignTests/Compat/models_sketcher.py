@@ -47,15 +47,15 @@ def line(a, b):
 def SketchConstraints(make):
     """Every common constraint kind on lines, arcs and circles, in one sketch outside a Body.
 
-    0-4, a closed outline: A (0, 0)-(30, 0) horizontal, its start on the origin, 30 long (X);
-    B (30, 0)-(30, 10) vertical, 10 long (Y); C an arc, radius 5, centre (25, 10), from B's end
+    0-4, a closed outline: A (0, 0)-(30, 0) horizontal, its start on the origin, 30 long (X); B
+    (30, 0)-(30, 10) vertical, 10 long (Y); C an arc, radius 5, centre (25, 10), from B's end
     (tangent at the endpoint) round to (20, 10); D (20, 10)-(0, 10) parallel to A; E (0, 10)-
     (0, 0) perpendicular to A, 10 long (Y). 5, F: a circle at (10, 5), diameter 4 (its centre
-    placed by X and Y distances). 6, G: a circle equal to F, symmetric to it about 7, H: a construction line
-    x = 15 from A to D (its ends on A and D, point-on-object). 8, I: a line from (2, 2), 4 long,
-    at 30 degrees. 9, J: a blocked line (24, 2)-(28, 2). 10, K: a circle, radius 3, at y 4,
-    tangent to B (edge to edge): centre (27, 4). A reference (non-driving) distance: A's
-    length again."""
+    placed by X and Y distances). 6, G: a circle equal to F, symmetric to it about 7, H: a
+    construction line x = 15 from A to D (its ends on A and D, point-on-object). 8, I: a line
+    from (2, 2), 4 long, at 30 degrees. 9, J: a blocked line (24, 2)-(28, 2). 10, K: a circle,
+    radius 3, at y 4, tangent to B (edge to edge): centre (27, 4). A reference (non-driving)
+    distance: A's length again."""
     doc = make("SketchConstraints")
     end = (2 + 4 * math.cos(math.radians(30)), 2 + 4 * math.sin(math.radians(30)))
     sketch = freeSketch(
