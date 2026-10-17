@@ -148,7 +148,12 @@ TEST_F(VariableLookupTest, checkVariableNameRefusesWhatNoExpressionCanUse)
                   std::string("'") + constant
                       + "' is a constant in expressions, so no expression could use the variable.");
     }
-    EXPECT_EQ(reason("cos"), "'cos' is a function in expressions; choose another name.");
+    // whatever their number of arguments (PR 310 review: `name(1)` failed for pow and atan2)
+    for (const char* function : {"cos", "pow", "atan2", "vector", "mod", "hypot", "sum"}) {
+        EXPECT_EQ(reason(function),
+                  std::string("'") + function
+                      + "' is a function in expressions; choose another name.");
+    }
     EXPECT_EQ(reason("Label"), "'Label' is a property of every App::VarSet; choose another name.");
     EXPECT_EQ(reason("Width"), "VarSet has a variable named 'Width' already.");
     for (const char* malformed : {"1a", "a-b", "a b", ""}) {
@@ -160,7 +165,8 @@ TEST_F(VariableLookupTest, checkVariableNameRefusesWhatNoExpressionCanUse)
 
 TEST_F(VariableLookupTest, checkVariableNameAcceptsWhatExpressionsCanUse)
 {
-    for (const char* name : {"Width_2", "L"}) {
+    // `Rail(1)` and `_pow(1)` don't parse either, but neither is a function
+    for (const char* name : {"Width_2", "L", "Rail", "_pow", "power"}) {
         EXPECT_EQ(App::VariableLookup::checkVariableName(varSet, name), "") << name;
         // and an expression reads it
         varSet->addDynamicProperty("App::PropertyLength", name);
