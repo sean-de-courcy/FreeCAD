@@ -236,6 +236,96 @@ class TestMerge(unittest.TestCase):
         self.assertAlmostEqual(self.bracket.Shape.Volume, 16000 + 12000 - 3000, places=6)
         self.assertTrue(inside(self.bracket.Shape, V(65, 15, 5)))
 
+    def sheet(self, **cells):
+        """A spreadsheet with one aliased cell per keyword, in A1, A2, ..."""
+        sheet = self.doc.addObject("Spreadsheet::Sheet", "Sheet")
+        for row, (alias, value) in enumerate(cells.items(), 1):
+            sheet.set(f"A{row}", str(value))
+            sheet.setAlias(f"A{row}", alias)
+        self.doc.recompute()
+        return sheet
+
+    def testAbsorbedBodyMovedByAnExpression(self):
+        """M-t6, the Placement driven by a spreadsheet (PR 305 round 1): the panel's x and its
+        angle about z come from cells, so the panel moves in the middle of the recompute, after
+        the Merge may have run. One plain recompute after each cell change is enough: dx 10 gives
+        25000 (solid at (65, 15, 5)); then 90 degrees about the origin puts the panel at x -30..0,
+        y 20..60, clear of the bracket: 28000, solid at (-15, 40, 5)."""
+        self.model()
+        sheet = self.sheet(dx=0, angle=0)
+        self.panel.Placement = App.Placement(V(0, 0, 0), App.Rotation(V(0, 0, 1), 0))
+        self.panel.setExpression(".Placement.Base.x", "Sheet.dx")
+        self.panel.setExpression(".Placement.Rotation.Angle", "Sheet.angle * 1 deg")
+        self.doc.recompute()
+        merge = self.merge()
+        self.assertAlmostEqual(self.bracket.Shape.Volume, UNION, places=6)
+
+        sheet.set("dx", "10")
+        self.doc.recompute()
+        self.assertAlmostEqual(self.panel.Placement.Base.x, 10)
+        self.assertTrue(merge.isValid(), merge.getStatusString())
+        self.assertAlmostEqual(self.bracket.Shape.Volume, 16000 + 12000 - 3000, places=6)
+        self.assertTrue(inside(self.bracket.Shape, V(65, 15, 5)))
+
+        sheet.set("dx", "0")
+        sheet.set("angle", "90")
+        self.doc.recompute()
+        self.assertAlmostEqual(self.bracket.Shape.Volume, 16000 + 12000, places=6)
+        self.assertTrue(inside(self.bracket.Shape, V(-15, 40, 5)))
+        self.assertNotIn("Touched", self.doc.getObject("Merge").State)
+
+    def testMovedByAnExpressionInAPart(self):
+        """M-t6 in a rotated App::Part (PR 305 round 1): both parts in it, the panel's x from a
+        cell. dx 10 and one recompute: 25000, solid at (65, 15, 5) in the Part."""
+        self.model()
+        part = self.doc.addObject("App::Part", "Part")
+        part.Placement = App.Placement(V(-30, 7, 4), App.Rotation(V(0, 1, 1), 50))
+        part.addObject(self.bracket)
+        part.addObject(self.panel)
+        sheet = self.sheet(dx=0)
+        self.panel.setExpression(".Placement.Base.x", "Sheet.dx")
+        self.doc.recompute()
+        self.merge()
+        self.assertAlmostEqual(self.bracket.Shape.Volume, UNION, places=6)
+        sheet.set("dx", "10")
+        self.doc.recompute()
+        self.assertAlmostEqual(self.bracket.Shape.Volume, 16000 + 12000 - 3000, places=6)
+        self.assertTrue(inside(self.bracket.Shape, V(65, 15, 5)))
+
+    def testSurvivorMovedByAnExpression(self):
+        """The surviving part moved by a cell (PR 305 round 1): the Merge, in the bracket, runs
+        in the same recompute. Bracket x 10: the panel sits at -10..30 in the bracket's frame,
+        overlapping 30 x 30 x 10: 19000, solid to x 60 and no further (a Merge left at the old
+        frames would reach x 70)."""
+        self.model()
+        sheet = self.sheet(dx=0)
+        self.bracket.setExpression(".Placement.Base.x", "Sheet.dx")
+        self.doc.recompute()
+        self.merge()
+        sheet.set("dx", "10")
+        self.doc.recompute()
+        self.assertAlmostEqual(self.bracket.Shape.Volume, 16000 + 12000 - 9000, places=6)
+        self.assertTrue(inside(self.bracket.Shape, V(55, 15, 5)))
+        self.assertFalse(inside(self.bracket.Shape, V(65, 15, 5)))
+        self.assertNotIn("Touched", self.doc.getObject("Merge").State)
+
+    def testStaleMergeReopened(self):
+        """A Merge saved stale (its part moved, the Merge left untouched, as an expression could
+        leave it before round 1) runs on the first recompute after reopening: the frames it last
+        computed with are saved (PR 305 round 1)."""
+        self.model()
+        merge = self.merge()
+        self.panel.Placement = App.Placement(V(10, 0, 0), App.Rotation())
+        merge.purgeTouched()
+        path = os.path.join(tempfile.mkdtemp(prefix="TestMerge"), "stale.FCStd")
+        self.doc.saveAs(path)
+        App.closeDocument(self.doc.Name)
+        self.doc = App.openDocument(path)
+        self.doc.recompute()
+        bracket = self.doc.getObject("Bracket")
+        self.assertAlmostEqual(bracket.Shape.Volume, 16000 + 12000 - 3000, places=6)
+        self.assertTrue(inside(bracket.Shape, V(65, 15, 5)))
+
     def testRefusedCycle(self):
         """M-t7: the panel's sketch sits on a bracket pad that comes after the Merge's place
         (Top, on BracketPad): merging at BracketPad would feed Top from PanelPad, which depends

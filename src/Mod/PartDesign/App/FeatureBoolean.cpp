@@ -72,6 +72,12 @@ Boolean::Boolean()
     Group.setScope(App::LinkScope::Global);
 }
 
+namespace
+{
+// A Merge's saved toolFrames() from its last compute (FreeCAD-CH ops#325, PR 305 round 1)
+constexpr const char* mergeFrames = "MergeFrames";
+}  // namespace
+
 short Boolean::mustExecute() const
 {
     if (Group.isTouched() || UseLegacyBodyPlacement.isTouched()) {
@@ -191,6 +197,10 @@ App::DocumentObjectExecReturn* Boolean::execute()
     // A Merge's tools are its absorbed parts' merged features (FreeCAD-CH ops#325)
     if (isMerge()) {
         lastToolFrames = toolFrames();
+        auto saved = freecad_cast<App::PropertyPlacementList*>(getPropertyByName(mergeFrames));
+        if (saved && saved->getValues() != lastToolFrames) {
+            saved->setValues(lastToolFrames);
+        }
         if (std::string why = mergeProblem(); !why.empty()) {
             return new App::DocumentObjectExecReturn(why, this);
         }
@@ -547,6 +557,13 @@ Boolean* Boolean::makeMerge(App::DocumentObject* at, const std::vector<App::Docu
         App::Prop_Hidden
     ));
     accepted->setValue(false);
+    merge->addDynamicProperty(
+        "App::PropertyPlacementList",
+        mergeFrames,
+        "Merge",
+        "Where the merged parts were, in this part's frame, when the Merge last computed",
+        App::Prop_Output | App::Prop_Hidden
+    );
     merge->setObjects(tools);
     for (Body* body : absorbed) {
         auto link = freecad_cast<App::PropertyLinkHidden*>(body->getPropertyByName(mergedInto));
@@ -604,8 +621,10 @@ std::vector<Base::Placement> Boolean::toolFrames() const
 
 void Boolean::onDocumentRestored()
 {
-    if (isMerge()) {
-        lastToolFrames = toolFrames();
+    // The frames it last computed with, as saved: a Merge saved stale (its part moved after it
+    // ran) runs on the next recompute. One saved without them runs once (PR 305 round 1)
+    if (auto saved = freecad_cast<App::PropertyPlacementList*>(getPropertyByName(mergeFrames))) {
+        lastToolFrames = saved->getValues();
     }
     FeatureRefine::onDocumentRestored();
 }
