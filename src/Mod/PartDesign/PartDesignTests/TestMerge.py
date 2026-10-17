@@ -383,6 +383,44 @@ class TestMerge(unittest.TestCase):
         self.assertIsNone(getattr(self.panel, "MergedInto", None))
         self.assertAlmostEqual(self.bracket.Shape.Volume, 16000, places=6)
 
+    def testUndoOfTheUnmerge(self):
+        """Undo and redo of deleting the Merge (PR 305 round 1): a later panel feature, locked,
+        computes once the Merge is deleted; undo brings the Merge back and locks it again (red,
+        not in the union); redo frees it again."""
+        self.model()
+        self.doc.openTransaction("Merge")
+        merge = PartDesign.makeMerge(self.bracket, [self.panel])
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        self.doc.openTransaction("Later")
+        later = self.later()
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        self.assertLocked(later)
+
+        self.doc.openTransaction("Unmerge")
+        self.bracket.removeObject(merge)
+        self.doc.removeObject(merge.Name)
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        self.assertTrue(later.isValid(), later.getStatusString())
+        self.assertAlmostEqual(self.panel.Shape.Volume, 12000 + 500, places=6)
+
+        self.doc.undo()
+        self.doc.recompute()
+        merge = self.doc.getObject("Merge")
+        self.assertIs(self.panel.MergedInto, merge)
+        self.assertFalse(self.panel.Visibility)
+        self.assertLocked(later)
+        self.assertAlmostEqual(self.bracket.Shape.Volume, UNION, places=6)
+
+        self.doc.redo()
+        self.doc.recompute()
+        self.assertIsNone(self.panel.MergedInto)
+        self.assertTrue(self.panel.Visibility)
+        self.assertTrue(later.isValid(), later.getStatusString())
+        self.assertAlmostEqual(self.panel.Shape.Volume, 12000 + 500, places=6)
+
 
 if __name__ == "__main__":
     unittest.main()

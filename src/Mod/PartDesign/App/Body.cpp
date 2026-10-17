@@ -858,6 +858,22 @@ void Body::onChanged(const App::Property* prop)
             touchMoved(freecad_cast<Boolean*>(feature));
         }
     }
+    if (prop->getName() && std::strcmp(prop->getName(), "MergedInto") == 0 && !isRestoring()
+        && getDocument()) {
+        // Merged into another part, or unmerged by deleting the Merge, by undo and redo too
+        // (FreeCAD-CH ops#325, design 2.6, PR 305 round 1): its solids after the merged feature
+        // fail, or compute again, and nothing else runs them. Unmerged, it shows again (undo
+        // and redo put Visibility back themselves)
+        for (auto feature : Group.getValues()) {
+            if (isSolidFeature(feature)) {
+                feature->touch();
+            }
+        }
+        if (!getDocument()->isPerformingTransaction()
+            && !static_cast<const App::PropertyLinkHidden*>(prop)->getValue()) {
+            Visibility.setValue(true);
+        }
+    }
     if (prop == &Tip && !isRestoring() && getDocument() && !isRolledBack()) {
         // Tip has Output status (ops#127, R7): a bar move touches the Body only when rolling to
         // the end gives a shape the Body hasn't copied (also on undo)
@@ -919,19 +935,6 @@ void Body::onChanged(const App::Property* prop)
                 && (Group.getValues().empty()
                     || !Group.getValues().front()->isDerivedFrom<FeatureBase>())) {
                 BaseFeature.setValue(nullptr);
-            }
-        }
-        else if (prop->getName() && std::strcmp(prop->getName(), "MergedInto") == 0) {
-            // Merged into another part, or unmerged by deleting the Merge (FreeCAD-CH ops#325,
-            // design 2.6): its solids after the merged feature fail, or compute again, and
-            // nothing else runs them. Unmerged, it shows again
-            for (auto feature : Group.getValues()) {
-                if (isSolidFeature(feature)) {
-                    feature->touch();
-                }
-            }
-            if (!static_cast<const App::PropertyLinkHidden*>(prop)->getValue()) {
-                Visibility.setValue(true);
             }
         }
         else if (prop == &AllowCompound) {
