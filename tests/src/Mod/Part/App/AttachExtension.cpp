@@ -7,6 +7,7 @@
 #include <numbers>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <boost/scope_exit.hpp>
@@ -415,9 +416,12 @@ void checkPollBesideTheWorker(
     EXPECT_FALSE(App::runWhileRecomputeWorkerIdle([] {}));
 
     App::FeatureTestAsyncBlocker::releaseBlocker();
-    // Waits until the worker has finished the request
-    app.cancelRecomputeRequestsForDocument(request.documentName);
-    EXPECT_TRUE(App::runWhileRecomputeWorkerIdle([] {}));
+    // Until the worker has finished the request
+    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!App::runWhileRecomputeWorkerIdle([] {}) && std::chrono::steady_clock::now() < until) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    ASSERT_TRUE(App::runWhileRecomputeWorkerIdle([] {}));
     EXPECT_TRUE(polledFramesChanged(plane));
 
     plane->getDocument()->recompute();
