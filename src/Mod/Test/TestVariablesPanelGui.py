@@ -1290,6 +1290,32 @@ class TestVariablesImportGui(unittest.TestCase):
 
     # PR 317 round 1
 
+    def clickImport(self):
+        QtCore.QTimer.singleShot(0, self.find(QtWidgets.QPushButton, "import").click)
+
+    def test_failure_shown(self):
+        """A failed check (the test hook moves Width's value), then any other error during the
+        import (the hook raises): each is shown in a message box, nothing is left, no "Import"
+        step is on the undo stack, and the dialog stays open (review 317, 4 and 10)."""
+        from freecad.variables import copies
+
+        b = writeExport(self.folder, "Studio B", [("LENGTH", "Gap", "3 mm")])
+        shown = []
+        with mock.patch.object(QtWidgets.QMessageBox, "critical",
+                               lambda *args: shown.append(args[2])):
+            for hook in (lambda var, value: copies.Quantity(value.value * 2, value.dims),
+                         lambda var, value: 1 / 0):
+                copies._check_hook = hook
+                self.open([self.a, b])
+                self.clickImport()
+                self.assertTrue(waitFor(lambda: len(shown) == 1), "no message box")
+                self.assertEqual(self.doc.Objects, [])
+                self.assertFalse([n for n in self.doc.UndoNames if n.startswith("Import")])
+                self.assertTrue(shiboken6.isValid(self.dialog) and self.dialog.isVisible())
+                self.assertIsNone(self.dialog.result)
+                shown.clear()
+                self.closeDialog()
+
     def test_same_named_providers(self):
         """Two exports of the same name in different folders both define #Gap: the provider's
         entries can be told apart (review 317, 3)."""

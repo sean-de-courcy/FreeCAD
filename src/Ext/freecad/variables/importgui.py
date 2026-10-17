@@ -280,7 +280,7 @@ class ImportDialog(QtWidgets.QDialog):
     def accept(self):
         try:
             self.result = copies.import_studios(self.doc, self.paths, **self.choices())
-        except (copies.ImportBlocked, copies.ImportCheckFailed) as e:
+        except Exception as e:  # noqa: BLE001 (import_studios undid it; any failure is shown)
             QtWidgets.QMessageBox.critical(
                 self, translate("Variables", "Import Onshape variables"), str(e))
             self.update()
