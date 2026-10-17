@@ -2361,6 +2361,15 @@ class TestRevolve(unittest.TestCase):
         )
         return feature, ring
 
+    def meshVolume(self, shape):
+        """The volume of a fine mesh of `shape`. With a base of tolerance 0.3, Shape.Volume's
+        fixed integration read a right fuse (487.09, adaptively and meshed) as 487.37 (ops#293)."""
+        import MeshPart
+
+        return MeshPart.meshFromShape(
+            Shape=shape, LinearDeflection=0.01, AngularDeflection=0.05
+        ).Volume
+
     def testRevolutionUpToTorusWithMinorRangeFromMinusPi(self):
         """The torus of revolveUpToTorusBase() from -180 to 180 degrees: its face's minor range
         is [-pi, pi], where BRepBuilderAPI_NurbsConvert fails ("Knots interval values too close"),
@@ -2401,16 +2410,7 @@ class TestRevolve(unittest.TestCase):
         Split by a copy of the face with its seams' tolerance reset, the sweep's face parts no
         longer matched the base's loose face, and the fuse gave the base's volume alone, with
         no error (ops#293, q4, option A). One side both ways and Two sides fail or give the
-        tool that first contact gives. The fuse is measured on a mesh: with the base's tolerance
-        0.3, Shape.Volume's fixed integration read the right result (487.09, adaptively and
-        meshed) as 487.37."""
-        import MeshPart
-
-        def meshVolume(shape):
-            return MeshPart.meshFromShape(
-                Shape=shape, LinearDeflection=0.01, AngularDeflection=0.05
-            ).Volume
-
+        tool that first contact gives. The fuse is measured on a mesh (meshVolume())."""
         tools = self.torusFirstContactTools()
         del tools[("Symmetric", False)]
         for fromMinusPi in (False, True):
@@ -2429,8 +2429,33 @@ class TestRevolve(unittest.TestCase):
                             continue
                         self.assertAlmostEqual(feature.AddSubShape.Volume, tool, delta=1e-3)
                         self.assertAlmostEqual(
-                            meshVolume(feature.Shape), meshVolume(ring) + tool, delta=0.02
+                            self.meshVolume(feature.Shape),
+                            self.meshVolume(ring) + tool,
+                            delta=0.02,
                         )
+
+    def testRevolutionUpToTorusWithSeamMergedInTheFuseNeverSilentlyWrong(self):
+        """revolveUpToTorusBase() from -180 to 180 degrees, turned 326 degrees with the base's
+        tolerance raised to 0.3, or 327 degrees with 0.2. The tool was right, but the fuse made
+        the torus's loose seam meridian the edge between its face and the tool's outer cylinder
+        (tolerance 0.916 and 0.676), and the result held 0.06 to 0.09 more than the base and
+        the tool, with no error (ops#293, PR 307 review). One side Reversed and Two sides fail
+        or give the tool that first contact gives, fused with the base. Volumes are measured on
+        meshes (meshVolume())."""
+        tools = self.torusFirstContactTools()
+        for turned, tolerance in ((326, 0.3), (327, 0.2)):
+            for sideType, reversed_ in (("One side", True), ("Two sides", False)):
+                with self.subTest(turned=turned, tolerance=tolerance, sideType=sideType):
+                    feature, ring = self.revolveUpToTorusBase(
+                        sideType, reversed_, tolerance, True, turned=turned
+                    )
+                    if not feature.isValid():
+                        continue
+                    tool = tools[(sideType, reversed_)]
+                    self.assertAlmostEqual(self.meshVolume(feature.AddSubShape), tool, delta=0.01)
+                    self.assertAlmostEqual(
+                        self.meshVolume(feature.Shape), self.meshVolume(ring) + tool, delta=0.02
+                    )
 
     def revolveSketchUpToWall(self, wallShape, geometry, placement=None):
         """A Revolution about V_Axis (Z) of a sketch on XZ holding `geometry`, up to the face of

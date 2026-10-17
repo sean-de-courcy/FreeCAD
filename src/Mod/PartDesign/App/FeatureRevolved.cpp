@@ -1928,6 +1928,42 @@ bool toleranceHolds(const TopoDS_Shape& tool, std::initializer_list<TopoDS_Shape
     return largestTolerance(tool) <= limit;
 }
 
+double largestEdgeTolerance(const TopoDS_Shape& shape)
+{
+    double largest = 0.0;
+    for (TopExp_Explorer edges(shape, TopAbs_EDGE); edges.More(); edges.Next()) {
+        largest = std::max(largest, BRep_Tool::Tolerance(TopoDS::Edge(edges.Current())));
+    }
+    return largest;
+}
+
+// Whether a fuse or cut of a tool up to a face with the base is built to the precision of the
+// two: no edge tolerance above 1e-3 of the tool's size, or 1.5 times the largest edge tolerance
+// of the base and the tool. Up to a torus whose seam meridian, loosened to 0.3, runs nearly along
+// the tool's outer cylinder, the fuse made that meridian the edge between them, at tolerance 0.916
+// (0.676 at 0.2), and the result held 0.06 to 0.09 more than base and tool, with a right tool and
+// no other error (ops#293, PR 307 review). Over 235 accepted cases (turns 320 to 334 and 0, base
+// tolerance 0.02 to 0.3) the right results' edges kept the inputs' largest tolerance, and the four
+// wrong ones rose 3.05 to 3.38 times. Vertices are left out: the fuse widens them to cover the
+// edges ending there, up to 4.1 times in right results (0.0821 on a base of 0.02).
+bool combinedWithinTolerance(
+    const TopoDS_Shape& result,
+    const TopoDS_Shape& base,
+    const TopoDS_Shape& tool
+)
+{
+    Bnd_Box box;
+    BRepBndLib::Add(tool, box);
+    if (box.IsVoid()) {
+        return false;
+    }
+    const double limit = std::max(
+        1e-3 * std::sqrt(box.SquareExtent()),
+        1.5 * std::max(largestEdgeTolerance(base), largestEdgeTolerance(tool))
+    );
+    return largestEdgeTolerance(result) <= limit;
+}
+
 // The certificate that the sweep up to the face is what first contact gives (ops#293 round 5;
 // notes\revolution-upto-first-contact.md, sections 2 and 3). The sweep U is right exactly when
 // first contact doesn't jump inside the profile, and then (i) no edge of the up-to face lies inside
@@ -3226,6 +3262,13 @@ void Revolved::setResult(const TopoShape& base, const TopoShape& revolved, bool 
                 throw Base::RuntimeError(QT_TRANSLATE_NOOP(
                     "Exception",
                     "Could not combine the revolution with the base: the result's volume is wrong"
+                ));
+            }
+            if (!combinedWithinTolerance(result.getShape(), base.getShape(), tool.getShape())) {
+                throw Base::RuntimeError(QT_TRANSLATE_NOOP(
+                    "Exception",
+                    "Could not combine the revolution with the base: the result's edges don't meet "
+                    "within the precision of the base and the revolution"
                 ));
             }
         }
