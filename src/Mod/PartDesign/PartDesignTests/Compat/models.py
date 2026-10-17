@@ -309,32 +309,49 @@ def VarSetDriven(make):
 
 
 def VarSetCopyDriven(make):
-    """A copy of a made-up Onshape export (`App::VarSetCopy`, ops#317 PR E1) driving a Box.
+    """Two copies of made-up Onshape exports (`App::VarSetCopy`, ops#317 PR E1) driving a Box.
 
-    The export: Width `40 mm`, Depth `3/4 in` (19.05 mm), Height `#Width / 4 + 2 mm` (12 mm),
-    written to a temporary folder and imported with `freecad.variables.copies` (the copy keeps
-    that folder as its source path; a reopen doesn't read it). A Box whose Length, Width and
-    Height are the copy's Width, Depth and Height."""
+    Studio A: t `3 mm` (a unit name in FreeCAD, so NameMap t -> t_), Width `40 mm`, Depth
+    `#t * 6 + #Gap` with #Gap bound to the document's Variables.Gap (2 mm): 20 mm. Studio B:
+    Height `#Width / 4 + 2 mm`, Width from Studio A's copy: 12 mm. The exports are written to a
+    temporary folder, removed after the import; the copies then get a fixed neutral source path
+    and refresh time, so the committed model holds no machine path and is the same every run.
+    A Box whose Length, Width and Height are A's Width and Depth and B's Height."""
     import json
+    import shutil
     import tempfile
 
     from freecad.variables import copies
 
     doc = make("VarSetCopyDriven")
+    variables = doc.addObject("App::VarSet", "Variables")
+    variables.addProperty("App::PropertyLength", "Gap")
+    variables.Gap = "2 mm"
+    exports = {
+        "Studio A": [("t", "3 mm"), ("Width", "40 mm"), ("Depth", "#t * 6 + #Gap")],
+        "Studio B": [("Height", "#Width / 4 + 2 mm")],
+    }
     folder = tempfile.mkdtemp(prefix="VarSetCopyDriven")
-    path = os.path.join(folder, "Studio.json")
-    variables = [("Width", "40 mm"), ("Depth", "3/4 in"), ("Height", "#Width / 4 + 2 mm")]
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump([{"variableStudioReference": None, "variables": [
-            {"type": "LENGTH", "name": name, "value": None, "description": "",
-             "expression": text} for name, text in variables]}], f)
-    copy = copies.import_studios(doc, [path]).copies[0]
+    try:
+        paths = []
+        for stem, variables_ in exports.items():
+            paths.append(os.path.join(folder, stem + ".json"))
+            with open(paths[-1], "w", encoding="utf-8") as f:
+                json.dump([{"variableStudioReference": None, "variables": [
+                    {"type": "LENGTH", "name": name, "value": None, "description": "",
+                     "expression": text} for name, text in variables_]}], f)
+        a, b = copies.import_studios(doc, paths, bindings={"Gap": "Variables.Gap"}).copies
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+    for copy in (a, b):
+        copy.SourcePath = f"/Exports/{copy.Label}.json"
+        copy.SourceRefreshed = "2026-10-17T00:00:00Z"
     box = m.box(doc, "Box", (1, 1, 1))
-    box.setExpression("Length", f"{copy.Name}.Width")
-    box.setExpression("Width", f"{copy.Name}.Depth")
-    box.setExpression("Height", f"{copy.Name}.Height")
+    box.setExpression("Length", f"{a.Name}.Width")
+    box.setExpression("Width", f"{a.Name}.Depth")
+    box.setExpression("Height", f"{b.Name}.Height")
     doc.recompute()
-    return {"volumes": {"Box": 40 * 19.05 * 12}}
+    return {"volumes": {"Box": 40 * 20 * 12}}
 
 
 def SubShapeBinder(make):
