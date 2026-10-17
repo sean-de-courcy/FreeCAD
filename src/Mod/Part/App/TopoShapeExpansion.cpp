@@ -6551,9 +6551,9 @@ bool onClosedSurface(const TopoShape& face)
         || surface.IsVPeriodic();
 }
 
-// How far along `direction` `shape` reaches (the highest coordinate along it), or nothing for an
-// infinite shape
-std::optional<double> reachAlong(
+// How far `shape` reaches both ways along `direction` (its lowest and highest coordinates along
+// it), or nothing for an infinite shape
+std::optional<std::pair<double, double>> extentAlong(
     const TopoDS_Shape& shape,
     const gp_Dir& direction,
     bool tolerances
@@ -6568,13 +6568,14 @@ std::optional<double> reachAlong(
     }
     double xMin, yMin, zMin, xMax, yMax, zMax;
     box.Get(xMin, yMin, zMin, xMax, yMax, zMax);
-    return zMax;
+    return std::make_pair(zMin, zMax);
 }
 
 // Whether a prism of `profile` along `direction` up to the finite `upTo` reaches past both: its
 // far end lies on `upTo`, so it can't. BRepFeat_MakePrism up to a shell that stops only part of
 // the profile (UpToShape of a whole base with the profile overhanging it) extruded all of the
-// profile far past the shell, and said it was done (ops#356)
+// profile far past the shell, and said it was done (ops#356). BRepFeat chooses its own sense, so
+// past both backwards counts too (PR 326 review)
 bool reachesPast(
     const TopoDS_Shape& prism,
     const TopoDS_Shape& profile,
@@ -6582,13 +6583,14 @@ bool reachesPast(
     const gp_Dir& direction
 )
 {
-    const std::optional<double> limit = reachAlong(upTo, direction, true);
-    const std::optional<double> start = reachAlong(profile, direction, true);
-    const std::optional<double> reach = reachAlong(prism, direction, false);
+    const auto limit = extentAlong(upTo, direction, true);
+    const auto start = extentAlong(profile, direction, true);
+    const auto reach = extentAlong(prism, direction, false);
     if (!limit || !start || !reach) {
         return false;
     }
-    return *reach > std::max(*limit, *start) + Precision::Confusion();
+    return reach->second > std::max(limit->second, start->second) + Precision::Confusion()
+        || reach->first < std::min(limit->first, start->first) - Precision::Confusion();
 }
 
 // The history of the prism up to a shape (prismUpToBySplit()), for the kept solids only, as

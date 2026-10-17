@@ -544,6 +544,50 @@ def padUpToARevolvedFace(doc, y0, y1):
     return pad
 
 
+def revolvedFaceReach(y0, y1, z0, z1):
+    """The volume of padUpToARevolvedFace()'s prism over the rectangle y y0..y1, z z0..z1 of the
+    plane x = 40, when all of it meets the face: from each point (40, y, z) along the unit d of
+    (-1, -0.1, -0.1) to the surface, at the first t where the point's distance from the z axis is
+    the arc's x where its z is the point's (the arc's z rises along it). Both by bisection; the
+    volume is the integral of t |d.x| over the rectangle, by Simpson's rule with 16 intervals in y
+    and 8 in z (within 6e-8 relative of 64 and 32; PR 326 review)."""
+    import math
+
+    V = FreeCAD.Vector
+    arc = Part.BSplineCurve()
+    arc.interpolate([V(20, 0, 0), V(21, 0, 5), V(20, 0, 10)])
+
+    def bisect(above, low, high):  # the last value in low..high where above() holds
+        for _ in range(50):
+            middle = (low + high) / 2
+            if above(middle):
+                low = middle
+            else:
+                high = middle
+        return (low + high) / 2
+
+    def radius(z):
+        v = bisect(lambda v: arc.value(v).z < z, arc.FirstParameter, arc.LastParameter)
+        return arc.value(v).x
+
+    d = V(-1, -0.1, -0.1)
+    d.normalize()
+
+    def outside(y, z, t):
+        p = V(40, y, z) + d * t
+        return math.hypot(p.x, p.y) > radius(p.z)
+
+    def reach(y, z):
+        return bisect(lambda t: outside(y, z, t), 10, 30)
+
+    def simpson(f, a, b, n):
+        h = (b - a) / n
+        weights = (1 if i in (0, n) else 4 if i % 2 else 2 for i in range(n + 1))
+        return h / 3 * sum(w * f(a + i * h) for i, w in enumerate(weights))
+
+    return abs(d.x) * simpson(lambda z: simpson(lambda y: reach(y, z), y0, y1, 16), z0, z1, 8)
+
+
 def holdBases(*objects):
     """The shapes the objects hold now, with their toleranceState(). A shape shares its TShapes
     with the object's stored one: a maker that raised them in place changes the held state."""
@@ -1472,7 +1516,7 @@ class TestPad(unittest.TestCase):
         # meets it). The retry without the face's limits went up to the whole surface of
         # revolution, which stopped the part beside the face on the surface past its edge: a
         # valid Pad. It fails now, with the first try's error. The rectangle y -6..6 lies all in
-        # front of the face and is built as before
+        # front of the face and is built as before, up to the face (revolvedFaceReach())
         for y0, y1 in ((-6, 6), (-8, 14)):
             with self.subTest(y0=y0, y1=y1):
                 doc = FreeCAD.newDocument("PadUpToARevolvedFaceItOverhangs")
@@ -1481,6 +1525,12 @@ class TestPad(unittest.TestCase):
                     if y1 == 6:
                         self.assertTrue(pad.isValid(), pad.getStatusString())
                         self.assertTrue(pad.AddSubShape.isValid())
+                        expected = revolvedFaceReach(y0, y1, 4, 8)
+                        self.assertAlmostEqual(
+                            pad.AddSubShape.Volume,
+                            expected,
+                            delta=PRISM_VOLUME_RELATIVE * expected,
+                        )
                     else:
                         self.assertFalse(pad.isValid())
                         self.assertIn("doesn't meet", pad.getStatusString())
