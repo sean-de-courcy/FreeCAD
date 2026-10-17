@@ -241,6 +241,8 @@ private:
         QString& error
     );
     void editDescription();
+    /// The import dialog for Onshape exports, several files at once (ops#317 PR G1).
+    void importVariables();
     void deleteVariable();
     void showUses();
     QString usesText(const QModelIndex& index, int* count) const;
@@ -260,6 +262,7 @@ private:
     QAction* deleteAction;
     QAction* usesAction;
     QAction* describeAction;
+    QAction* importAction;
     std::string documentName;
     /// The collapsed headers, as "document/object".
     std::set<std::string> collapsed;

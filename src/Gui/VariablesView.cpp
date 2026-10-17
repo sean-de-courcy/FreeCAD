@@ -58,6 +58,7 @@
 #include <App/PropertyUnits.h>
 #include <App/Range.h>
 #include <App/VarSet.h>
+#include <App/VarSetCopy.h>
 #include <App/VariableLookup.h>
 #include <Base/Interpreter.h>
 #include <Base/Quantity.h>
@@ -502,6 +503,13 @@ void VariablesModel::addHolderRows(
 Qt::ItemFlags VariablesModel::flags(const QModelIndex& index) const
 {
     Qt::ItemFlags result = QStandardItemModel::flags(index) & ~Qt::ItemIsEditable;
+    if (kind(index) == VarSetKind) {
+        // ops#317: a copy's variables are read-only while it is attached (the ReadOnly bit)
+        App::Property* prop = property(index);
+        if (prop && prop->testStatus(App::Property::ReadOnly)) {
+            return result;
+        }
+    }
     if (kind(index) != HeaderKind
         && (index.column() == NameColumn || index.column() == ExpressionColumn)) {
         result |= Qt::ItemIsEditable;
@@ -963,6 +971,15 @@ VariablesView::VariablesView(Gui::Document* doc, QWidget* parent)
     usesAction = toolBar->addAction(tr("Show uses"), this, &VariablesView::showUses);
     usesAction->setObjectName(QStringLiteral("showUses"));
     usesAction->setToolTip(tr("List the expressions that use the selected variable"));
+    importAction = toolBar->addAction(
+        tr("Import variables..."),
+        this,
+        &VariablesView::importVariables
+    );
+    importAction->setObjectName(QStringLiteral("importVariables"));
+    importAction->setToolTip(
+        tr("Import Onshape variable studio exports (.json) as read-only copies")
+    );
     layout->addWidget(toolBar);
     // In the context menu only
     describeAction = new QAction(tr("Edit description..."), this);
@@ -988,6 +1005,7 @@ VariablesView::VariablesView(Gui::Document* doc, QWidget* parent)
     tree->addAction(deleteAction);
     tree->addAction(usesAction);
     tree->addAction(describeAction);
+    tree->addAction(importAction);
     layout->addWidget(tree);
 
     hint = new QLabel(tr("Add a variable, or type #name in any expression."), this);
@@ -1224,6 +1242,7 @@ void VariablesView::updateActions()
     bool variable = current.isValid()
         && VariablesModel::kind(current) != VariablesModel::HeaderKind;
     addAction->setEnabled(currentDocument() != nullptr);
+    importAction->setEnabled(currentDocument() != nullptr);
     deleteAction->setEnabled(variable);
     usesAction->setEnabled(variable);
     describeAction->setEnabled(
@@ -1277,18 +1296,23 @@ App::DocumentObject* VariablesView::addTarget() const
     if (!doc) {
         return nullptr;
     }
-    // The selected row's VarSet, else the document's "Variables" VarSet.
+    // The selected row's VarSet, else the document's "Variables" VarSet; never a copy that is
+    // still attached to its source (ops#317: its variables are read-only).
+    auto editable = [](App::DocumentObject* obj) {
+        auto copy = freecad_cast<App::VarSetCopy*>(obj);
+        return obj && obj->isDerivedFrom<App::VarSet>() && !(copy && copy->isAttached());
+    };
     if (App::DocumentObject* obj = VariablesModel::holder(tree->currentIndex())) {
-        if (obj->isDerivedFrom<App::VarSet>()) {
+        if (editable(obj)) {
             return obj;
         }
     }
     App::DocumentObject* obj = doc->getObject("Variables");
-    if (obj && obj->isDerivedFrom<App::VarSet>()) {
+    if (editable(obj)) {
         return obj;
     }
     for (auto obj : doc->getObjectsOfType(App::VarSet::getClassTypeId())) {
-        if (std::string(obj->Label.getValue()) == "Variables") {
+        if (std::string(obj->Label.getValue()) == "Variables" && editable(obj)) {
             return obj;
         }
     }
@@ -1787,6 +1811,25 @@ void VariablesView::deleteVariable()
         return;
     }
     showMessage(QString(), false);
+}
+
+void VariablesView::importVariables()
+{
+    // ops#317 PR G1: freecad.variables.importgui asks for the files, then shows its dialog (not
+    // waited for). A document's internal name is an identifier, safe in the string.
+    App::Document* doc = currentDocument();
+    if (!doc) {
+        return;
+    }
+    std::string code = "from freecad.variables import importgui\n"
+                       "importgui.run(FreeCAD.getDocument(\""
+        + std::string(doc->getName()) + "\"))\n";
+    try {
+        Base::Interpreter().runString(code.c_str());
+    }
+    catch (const Base::Exception& e) {
+        showMessage(QString::fromUtf8(e.what()), true);
+    }
 }
 
 void VariablesView::showUses()
