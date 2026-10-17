@@ -1415,9 +1415,17 @@ void VariablesView::addVariable()
             if (!view || !doc || doc != view->currentDocument()) {
                 return;
             }
-            view->addOtherVariable(
-                holderName.empty() ? nullptr : doc->getObject(holderName.c_str())
-            );
+            App::DocumentObject* holder = holderName.empty() ? nullptr
+                                                             : doc->getObject(holderName.c_str());
+            // A chosen set deleted meanwhile: never a new "Variables" set in its place.
+            if (!holderName.empty() && !holder) {
+                view->showMessage(
+                    tr("The set '%1' is gone.").arg(QString::fromStdString(holderName)),
+                    true
+                );
+                return;
+            }
+            view->addOtherVariable(holder);
         });
     });
 

@@ -677,6 +677,31 @@ class TestVariablesPanelGui(unittest.TestCase):
         self.assertIsNotNone(doc.getObject("Extra"))
         self.assertAlmostEqual(varSet.Depth2.Value, 5)
 
+    def test_add_other_set_gone(self):
+        """Other... with a set chosen that is deleted before the stock dialog opens: a message,
+        and never a new "Variables" set in its place (PR 313 round 1)."""
+        doc = self.standardDocument()
+        dialog = self.openPanelAddDialog()
+        setBox = dialog.findChild(QtWidgets.QComboBox, "set")
+        setBox.setCurrentIndex(setBox.findText("VarSet"))
+        other = dialog.findChild(QtWidgets.QPushButton, "other")
+
+        def clickThenDelete():
+            other.click()
+            doc.removeObject("VarSet")
+
+        QtCore.QTimer.singleShot(0, clickThenDelete)
+        pump(0.5)
+        self.assertEqual(doc.findObjects("App::VarSet"), [])
+        self.assertFalse(
+            any(
+                w.metaObject().className() == "Gui::Dialog::DlgAddProperty" and w.isVisible()
+                for w in QtWidgets.QApplication.topLevelWidgets()
+            )
+        )
+        self.assertTrue(self.message.isVisible())
+        self.assertIn("VarSet", self.message.text())
+
     def test_describe(self):
         """G-3. A description typed in its cell is one undo step, "Describe Width"; Edit
         description... edits several lines, and a cell of several lines opens that dialog rather
