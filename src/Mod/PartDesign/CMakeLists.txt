@@ -212,6 +212,7 @@ set(PartDesign_Compat
     PartDesignTests/Compat/models_sketcher.py
     PartDesignTests/Compat/models_studio.py
     PartDesignTests/Compat/TestCompatCorpus.py
+    PartDesignTests/Compat/TestCompatRecord.py
 )
 
 set(PartDesign_CompatGen0

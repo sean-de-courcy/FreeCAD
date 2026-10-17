@@ -165,10 +165,14 @@ def _object(obj, doc, masker, names):
 def _pythonObject(value):
     """A Python feature's proxy (an Assembly joint's, a VarSet-free FeaturePython's): its class,
     as the file names it (module and class), which a restore needs to find; its state too, when
-    the class saves one in a plain form."""
+    the class saves one in a plain form. Plain data (a dict, a list) by its content."""
     if value is None:
         return None
     kind = type(value)
+    if kind.__module__ == "builtins":
+        # plain data (a dict, a list, a string), compared by its content: a dict's __getstate__()
+        # is None on Python 3.11+
+        return _plainState(value)
     entry = {"proxy": f"{kind.__module__}.{kind.__qualname__}"}
     dumps = getattr(value, "dumps", None) or getattr(value, "__getstate__", None)
     if dumps is not None:
@@ -414,13 +418,14 @@ def elementKey(shape):
         key["point"] = _vector(shape.Point)
         return key
     if _infinite(shape):
-        # a datum plane's face: its plane, by normal and distance from the origin
+        # a datum plane's face: its surface's type, and a plane by normal and distance from the
+        # origin
         key["infinite"] = True
-        faces = shape.Faces
-        if len(faces) == 1 and isinstance(faces[0].Surface, Part.Plane):
-            normal = faces[0].Surface.Axis
-            key["normal"] = _vector(normal)
-            key["offset"] = float(normal.dot(faces[0].Surface.Position))
+        if len(shape.Faces) == 1:
+            key["surface"] = type(shape.Faces[0].Surface).__name__
+        elif len(shape.Edges) == 1:
+            key["curve"] = type(shape.Edges[0].Curve).__name__
+        key.update(_plane(shape) or {})
         return key
     centre = _centre(shape)
     if centre is not None:
@@ -446,32 +451,89 @@ def elementKey(shape):
 _INFINITE = 1e50
 
 
-def _infinite(shape):
-    """Whether the shape is unbounded (a datum plane's face): its area and centre are then noise
-    at the scale of infinity, not values."""
+def _unbounded(shape):
+    """Whether the shape reaches OCCT's stand-in for infinity somewhere (a datum plane's face, or
+    a compound holding one)."""
     box = shape.BoundBox
     return max(abs(v) for v in (box.XMin, box.YMin, box.ZMin, box.XMax, box.YMax, box.ZMax)) > (
         _INFINITE
     )
 
 
+def _infinite(shape):
+    """Whether the shape is unbounded as a whole (a datum plane's face, a binder of one): no
+    solid, and every face (with no faces, every edge) unbounded. Its area and centre are then
+    noise at the scale of infinity, not values."""
+    if shape.isNull() or shape.Solids or not _unbounded(shape):
+        return False
+    elements = shape.Faces or shape.Edges
+    return bool(elements) and all(_unbounded(e) for e in elements)
+
+
+def _bounded(shape):
+    """The shape's bounded part, or None, and how many unbounded parts it holds beside it: a
+    compound of a solid and a datum plane's face is the solid and one."""
+    if not _unbounded(shape):
+        return shape, 0
+    children = [] if _infinite(shape) else shape.childShapes()
+    if not children:
+        return None, 1
+    parts = []
+    count = 0
+    for child in children:
+        part, n = _bounded(child)
+        count += n
+        if part is not None:
+            parts.append(part)
+    if not parts:
+        return None, count
+    if len(parts) == 1:
+        return parts[0], count
+    import Part
+
+    return Part.Compound(parts), count
+
+
+def _plane(shape):
+    """A single planar face's plane: its normal and its distance from the origin."""
+    import Part
+
+    faces = shape.Faces
+    if len(faces) != 1 or not isinstance(faces[0].Surface, Part.Plane):
+        return None
+    normal = faces[0].Surface.Axis
+    return {"normal": _vector(normal), "offset": float(normal.dot(faces[0].Surface.Position))}
+
+
 def _shapeEntry(shape):
-    """The shape's type, volume, area, exact bounding box, element counts and centre; an
-    unbounded shape only by its type and counts (its placement is a property)."""
+    """The shape's type, volume, area, exact bounding box, element counts and centre. An unbounded
+    shape by its type, counts and, for a plane, the plane (a binder of a datum plane: its placement
+    is another object's). A shape holding unbounded parts beside bounded ones (a compound of a
+    solid and a datum plane) records the bounded ones in full and counts the others."""
     if shape.isNull():
         return None
     counts = [len(shape.Solids), len(shape.Faces), len(shape.Edges), len(shape.Vertexes)]
     if _infinite(shape):
+        entry = {"type": shape.ShapeType, "infinite": True, "counts": counts}
+        plane = _plane(shape)
+        if plane:
+            entry["plane"] = plane
+        return entry
+    bounded, unbounded = _bounded(shape)
+    if bounded is None:
         return {"type": shape.ShapeType, "infinite": True, "counts": counts}
-    box = shape.optimalBoundingBox(False, False)
-    return {
+    box = bounded.optimalBoundingBox(False, False)
+    entry = {
         "type": shape.ShapeType,
-        "volume": float(shape.Volume) if shape.Solids else 0.0,
-        "area": float(shape.Area),
+        "volume": float(bounded.Volume) if bounded.Solids else 0.0,
+        "area": float(bounded.Area),
         "box": [box.XMin, box.YMin, box.ZMin, box.XMax, box.YMax, box.ZMax],
         "counts": counts,
-        "centre": _centre(shape),
+        "centre": _centre(bounded),
     }
+    if unbounded:
+        entry["unbounded"] = unbounded
+    return entry
 
 
 def _sketchGeometry(sketch, geometry):
@@ -540,6 +602,13 @@ def _format(value):
 
 
 def _nameKey(kind, element):
+    if kind != "Vertex" and _unbounded(element):
+        # a datum plane's face beside a solid: its centre and area are noise
+        plane = _plane(element)
+        if plane is None:
+            return f"{kind} infinite"
+        normal = ",".join(_format(c) for c in plane["normal"])
+        return f"{kind} infinite n=({normal}) d={_format(plane['offset'])}"
     if kind == "Vertex":
         point, mass = element.Point, 0.0
     else:
@@ -558,7 +627,19 @@ class _Masker:
     Connected Names (sorted again after masking), as the NamingGolden dumps do."""
 
     def __init__(self, doc):
-        self.names = {str(obj.ID): obj.Name for obj in doc.Objects}
+        import os
+
+        # A link or binder across documents names its elements with the other document's tags:
+        # those as `{stem#Name}`. Each document starts its ids at a random offset, so ids can
+        # collide: the document's own win
+        self.names = {}
+        for other in doc.getDependentDocuments():
+            if other is doc:
+                continue
+            stem = os.path.splitext(os.path.basename(other.FileName))[0] or other.Name
+            for obj in other.Objects:
+                self.names.setdefault(str(obj.ID), f"{stem}#{obj.Name}")
+        self.names.update({str(obj.ID): obj.Name for obj in doc.Objects})
 
     def tag(self, tag):
         if tag in ("", "0"):
