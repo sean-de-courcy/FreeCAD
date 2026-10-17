@@ -1290,6 +1290,22 @@ class TestVariablesImportGui(unittest.TestCase):
 
     # PR 317 round 1
 
+    def test_same_named_providers(self):
+        """Two exports of the same name in different folders both define #Gap: the provider's
+        entries can be told apart (review 317, 3)."""
+        paths = []
+        for folder in ("one", "two"):
+            os.mkdir(os.path.join(self.folder, folder))
+            paths.append(writeExport(os.path.join(self.folder, folder), "Studio B",
+                                     [("LENGTH", "Gap", "3 mm")]))
+        self.open([self.a] + paths)
+        combo = self.find(QtWidgets.QComboBox, "provider_Gap")
+        texts = [combo.itemText(i) for i in range(1, combo.count())]
+        self.assertEqual(len(texts), 2)
+        self.assertNotEqual(texts[0], texts[1])
+        for text, folder in zip(texts, ("one", "two")):
+            self.assertIn("/" + folder + "/", text)
+
     def panelWithCopy(self):
         """The panel on a document with an attached copy of Studio B (Gap), its row current."""
         b = writeExport(self.folder, "Studio B", [("LENGTH", "Gap", "3 mm")])

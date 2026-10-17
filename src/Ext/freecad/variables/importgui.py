@@ -191,8 +191,14 @@ class ImportDialog(QtWidgets.QDialog):
             combo = QtWidgets.QComboBox(self.ambiguousBox)
             combo.setObjectName(f"provider_{name}")
             combo.addItem(translate("Variables", "Choose..."), None)
-            for index in indexes:
-                combo.addItem(self.base.sources[index].label, index)
+            labels = [self.base.sources[index].label for index in indexes]
+            for index, text in zip(indexes, labels):
+                source = self.base.sources[index]
+                # two files of the same name in different folders: the path tells them apart
+                if labels.count(text) > 1:
+                    text = f"{text} ({source.path})"
+                combo.addItem(text, index)
+                combo.setItemData(combo.count() - 1, source.path, QtCore.Qt.ToolTipRole)
             combo.currentIndexChanged.connect(lambda _i: self.update())
             self.ambiguousGrid.addWidget(label, row, 0)
             self.ambiguousGrid.addWidget(combo, row, 1)
