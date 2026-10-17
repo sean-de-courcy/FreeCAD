@@ -32,7 +32,7 @@ express, is refused with the reason (`Refused`). Until a reference studio built 
 settles them (decision 68, D3), these are refused: a fraction with a unit next to `*`, `/` or
 `^` (`#a*3/4 in`, `1/3/4 in`), a unary minus before `^` on anything but a number (`-#a^2`;
 `-2^2` is `(-2)^2`), a unit before `^` after a group or a call (`sqrt(4) mm^2`; `2 mm^2` is
-2 mm²), `%` with units or negative operands.
+2 mm²), `%` with units or by a negative number.
 
 The writer's rules (section 2.4):
 - every unit is written as a factor: `10mm` becomes `(10 * 1 mm)`;
@@ -560,6 +560,12 @@ def write(node, resolve_text: Callable[[str], str], top: bool = True) -> str:
         inner = w(node.node)
         return inner if node.op == "+" else f"(-{inner})"
     if isinstance(node, Bin):
+        if node.op == "%" and not isinstance(node.left, Num):
+            # Onshape's % takes the sign of the divisor (the reference studio, row 25: -7 % 3
+            # is 2), FreeCAD's that of the dividend: a dividend that may be negative is written
+            # a - b * floor(a / b)
+            floored = Call("floor", (Bin("/", node.left, node.right),))
+            return write(Bin("-", node.left, Bin("*", node.right, floored)), resolve_text, top)
         text = f"{w(node.left)} {node.op} {w(node.right)}"
         return text if top else f"({text})"
     if isinstance(node, Call):
@@ -680,9 +686,9 @@ def _binary(op: str, left: Value, right: Value) -> Value:
     if op == "%":
         if a.dims != NONE or b.dims != NONE:
             raise Refused(f"% with units: {UNDOCUMENTED}")
-        if a.value < 0 or b.value <= 0:
-            raise Refused(f"% of a negative number: {UNDOCUMENTED}")
-        return Quantity(math.fmod(a.value, b.value))
+        if b.value <= 0:
+            raise Refused(f"% by a negative number or zero: {UNDOCUMENTED}")
+        return Quantity(a.value - b.value * math.floor(a.value / b.value))  # as written
     if op == "^":
         if b.dims != NONE:
             raise Refused("an exponent can't have a unit")
