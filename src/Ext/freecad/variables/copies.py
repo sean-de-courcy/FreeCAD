@@ -90,7 +90,7 @@ class ImportCheckFailed(Exception):
 class Source:
     """One studio entry of one file: one copy."""
 
-    path: str  # absolute
+    path: str  # absolute, with "/" (saved so, section 3.1)
     index: int  # the entry's index in its file, from 0
     entries_in_file: int
     entry: onshape.StudioEntry
@@ -202,7 +202,7 @@ def plan_import(doc, paths: Sequence[str], *,
     # The files, one copy per studio entry.
     taken = set()
     for path in paths:
-        path = os.path.abspath(path)
+        path = _portable(os.path.abspath(path))
         try:
             entries = onshape.read_export(path)
         except (OSError, onshape.ExportError) as e:
@@ -482,11 +482,17 @@ def _defined(plan: Plan, name: str) -> bool:
     return any(v.name == name for s in plan.sources for v in s.entry.variables)
 
 
+def _portable(path: str) -> str:
+    """@a path with "/" as the separator, as the copy saves it: a document saved on Windows
+    still finds a relative path on macOS (Windows reads "/" as well)."""
+    return path.replace(os.sep, "/")
+
+
 def _relative(doc, path: str) -> str:
     if not doc.FileName:
         return ""
     try:
-        return os.path.relpath(path, os.path.dirname(doc.FileName))
+        return _portable(os.path.relpath(path, os.path.dirname(doc.FileName)))
     except ValueError:  # another drive
         return ""
 

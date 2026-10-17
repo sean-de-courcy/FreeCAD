@@ -167,7 +167,7 @@ class TestVariablesCopies(unittest.TestCase):
         self.assertEqual(copy.SourceExpressions,
                          {v["name"]: v["expression"] for v in STUDIO[0]["variables"]})
         self.assertEqual(copy.SourceKind, "Onshape JSON")
-        self.assertEqual(copy.SourcePath, os.path.abspath(path))
+        self.assertEqual(copy.SourcePath, os.path.abspath(path).replace(os.sep, "/"))
         self.assertEqual(copy.SourceObject, "0")
         self.assertEqual(copy.SourceEntries, 1)
         self.assertEqual(copy.NameMap, {})
@@ -198,6 +198,19 @@ class TestVariablesCopies(unittest.TestCase):
         second = copies.import_studios(self.doc, [path]).copies[0]
         self.assertNotEqual(second.Name, "Studio_A")
         self.assertEqual(len(self.doc.findObjects("App::VarSetCopy")), 2)
+
+    def test_paths_portable(self):
+        """Paths are saved with "/" (section 3.1), so a document saved on Windows finds its
+        sources on macOS: the absolute one and the one relative to the document's file."""
+        os.mkdir(os.path.join(self.folder, "exports"))
+        path = self.export(os.path.join("exports", "Studio A"), STUDIO)
+        self.doc.saveAs(os.path.join(self.folder, "model.FCStd"))
+        copy = copies.import_studios(self.doc, [path]).copies[0]
+        self.assertNotIn("\\", copy.SourcePath)
+        self.assertEqual(copy.SourceRelativePath, "exports/Studio A.json")
+        # the same file, given with the other separator, is the same source
+        plan = copies.plan_import(self.doc, [path.replace(os.sep, "/")])
+        self.assertTrue(any("already a copy" in w for w in plan.warnings), plan.warnings)
 
     # I-2
 
@@ -442,7 +455,7 @@ class TestVariablesCopies(unittest.TestCase):
         self.assertNotIn("ReadOnly", copy.getPropertyStatus("Width"))
         self.doc.undo()
         self.assertEqual(copy.SourceKind, "Onshape JSON")
-        self.assertEqual(copy.SourcePath, os.path.abspath(path))
+        self.assertEqual(copy.SourcePath, os.path.abspath(path).replace(os.sep, "/"))
         self.assertIn("ReadOnly", copy.getPropertyStatus("Width"))
         self.doc.redo()
 
