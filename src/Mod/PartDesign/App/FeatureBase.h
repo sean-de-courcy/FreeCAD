@@ -45,7 +45,7 @@ public:
      * object's placement being applied inside FeatureBase.
      */
     App::PropertyBool UseLegacyBaseFeaturePlacement;
-    /// The source's frame (sourceFrame()) when the copy was last computed: one entry, none until
+    /// The source's side (sourceSides()) when the copy was last computed: one entry, none until
     /// the first recompute after BaseFeature is set (FreeCAD-CH ops#322)
     App::PropertyPlacementList SourceFrame;
 
@@ -73,6 +73,13 @@ private:
     void trySetBaseFeatureOfBody();
     /// Whether the copy follows its source's frame now (not legacy, not suppressed or held)
     bool followsSource() const;
+    /**
+     * The frames of both sides in the lowest container that holds the source and this copy, from
+     * raw placements: `source`, the source's frame (as sourceFrame()); `owner`, this copy's
+     * container. Only the source's side moves the copy (PLAN decision 82). False when
+     * sourceFrame() has none.
+     */
+    bool sourceSides(Base::Placement& source, Base::Placement& owner) const;
 };
 
 }  // namespace PartDesign

@@ -680,13 +680,30 @@ class TestCrossBody(unittest.TestCase):
         self.assertBox(b.Shape, 15, 5, 5, 25, 15, 15)
         self.assertEqual(self.doc.recompute(), 0)
 
-    def testBaseFeatureCopyStaysOnItsSourceWhenItsOwnBodyMoves(self):
-        """ops#322: B moved by +10 in x: the copy stays on the box, at x 35..45, as a binder's
-        shape stays on its support."""
+    def testBaseFeatureCopyMovesWithItsOwnBody(self):
+        """ops#322, PLAN decision 82: B holds a 10 mm AdditiveBox at (-60, 10, 10) on the copy (x
+        40..50, y 10..20, z 10..20). B moved by +50 in x, then turned 90 degrees about z there: the
+        copy and the box move with B as one piece. Then A moved by +10 in y: the copy follows A's
+        move, by +10 in y."""
         a, box, b = self.basedOnBox()
-        b.Placement.Base = V(110, 0, 0)
+        extra = b.newObject("PartDesign::AdditiveBox", "Extra")
+        extra.Length = extra.Width = extra.Height = 10
+        extra.Placement.Base = V(-60, 10, 10)
         self.doc.recompute()
-        self.assertBox(b.Shape, 35, 5, 5, 45, 15, 15)
+        copy = lambda: b.Group[0].Shape.transformed(b.Placement.toMatrix())
+        self.assertBox(b.Shape, 35, 5, 5, 50, 20, 20)
+        b.Placement.Base = V(150, 0, 0)
+        self.doc.recompute()
+        self.assertBox(copy(), 85, 5, 5, 95, 15, 15)
+        self.assertBox(b.Shape, 85, 5, 5, 100, 20, 20)
+        b.Placement = FreeCAD.Placement(V(150, 0, 0), FreeCAD.Rotation(V(0, 0, 1), 90))
+        self.doc.recompute()
+        self.assertBox(copy(), 135, -65, 5, 145, -55, 15)
+        self.assertBox(b.Shape, 130, -65, 5, 145, -50, 20)
+        a.Placement.Base = V(30, 10, 0)
+        self.doc.recompute()
+        self.assertBox(copy(), 135, -55, 5, 145, -45, 15)
+        self.assertBox(b.Shape, 130, -60, 5, 145, -45, 20)
         self.assertEqual(self.doc.recompute(), 0)
 
     def testBaseFeatureCopyFollowsAMoveByAnExpression(self):
@@ -779,8 +796,9 @@ class TestCrossBody(unittest.TestCase):
         self.assertSameVertices(b.Shape, box.Shape.transformed(a.Placement.toMatrix()))
 
     def testBaseFeatureCopyFollowsMovedParts(self):
-        """ops#322 review round 1: A in App::Part PA, B in App::Part PB at (0, 50, 0). PA moved by
-        +10 in x: the copy follows, x 45..55. PB moved by +10 in x: the copy stays on the box."""
+        """ops#322 review round 1, PLAN decision 82: A in App::Part PA, B put in App::Part PB at
+        (0, 50, 0), which moves B and the copy by +50 in y. PA moved by +10 in x: the copy follows,
+        x 45..55. PB moved by +10 in x: the copy moves with B, x 55..65."""
         a, box, b = self.basedOnBox()
         partA = self.doc.addObject("App::Part", "PA")
         partA.addObject(a)
@@ -789,14 +807,25 @@ class TestCrossBody(unittest.TestCase):
         partB.addObject(b)
         self.doc.recompute()
         copy = lambda: b.Shape.transformed(partB.Placement.toMatrix())
-        # B kept its own placement: putting it in PB moved it, and the copy stays on the box
-        self.assertBox(copy(), 35, 5, 5, 45, 15, 15)
+        self.assertBox(copy(), 35, 55, 5, 45, 65, 15)
         partA.Placement.Base = V(10, 0, 0)
         self.doc.recompute()
-        self.assertBox(copy(), 45, 5, 5, 55, 15, 15)
+        self.assertBox(copy(), 45, 55, 5, 55, 65, 15)
         partB.Placement.Base = V(10, 50, 0)
         self.doc.recompute()
-        self.assertBox(copy(), 45, 5, 5, 55, 15, 15)
+        self.assertBox(copy(), 55, 55, 5, 65, 65, 15)
+        self.assertEqual(self.doc.recompute(), 0)
+
+    def testBaseFeatureCopyStaysWithAPartHoldingBoth(self):
+        """ops#322, PLAN decision 82: A and B in one App::Part, turned 90 degrees about z: both
+        Bodies turn, and the copy stays on the box (box and copy at x -15..-5, y 35..45)."""
+        a, box, b = self.basedOnBox()
+        part = self.doc.addObject("App::Part", "Both")
+        part.addObject(a)
+        part.addObject(b)
+        part.Placement.Rotation = FreeCAD.Rotation(V(0, 0, 1), 90)
+        self.doc.recompute()
+        self.assertBox(b.Shape.transformed(part.Placement.toMatrix()), -15, 35, 5, -5, 45, 15)
         self.assertEqual(self.doc.recompute(), 0)
 
     def testBaseFeatureCopyOfABodyFollowsIt(self):
@@ -847,9 +876,9 @@ class TestCrossBody(unittest.TestCase):
         self.assertEqual(self.doc.recompute(), 0)
         self.assertSameVertices(b.Shape, expected, 1e-9)
 
-    def testBaseFeatureCopyStaysWhenItsOwnBodyMovesByAnExpression(self):
-        """ops#322 review round 1: B's x set by an expression on a VarSet; changing it leaves the
-        copy on the box, x 35..45, after one recompute, with nothing touched."""
+    def testBaseFeatureCopyMovesWithItsOwnBodyByAnExpression(self):
+        """ops#322, PLAN decision 82: B's x set by an expression on a VarSet; changed from 100 to
+        130, one recompute moves the copy with B, to x 65..75, with nothing touched."""
         a, box, b = self.basedOnBox()
         variables = self.doc.addObject("App::VarSet", "Variables")
         variables.addProperty("App::PropertyDistance", "X")
@@ -858,9 +887,8 @@ class TestCrossBody(unittest.TestCase):
         self.doc.recompute()
         variables.X = 130
         self.doc.recompute()
-        self.assertBox(b.Shape, 35, 5, 5, 45, 15, 15)
+        self.assertBox(b.Shape, 65, 5, 5, 75, 15, 15)
         self.assertEqual(self.touched(), [])
-
 
 if __name__ == "__main__":
     unittest.main()
