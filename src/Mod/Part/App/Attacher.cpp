@@ -23,6 +23,10 @@
  ***************************************************************************/
 
 #include <algorithm>
+#include <mutex>
+#include <set>
+#include <string>
+#include <utility>
 
 #include <BRep_Tool.hxx>
 #include <BRepAdaptor_Curve.hxx>
@@ -94,6 +98,16 @@ Base::Placement coordinateSystemOf(const App::DocumentObject* obj)
     auto element = dynamic_cast<const App::DatumElement*>(obj);
     auto lcs = element ? element->getLCS() : nullptr;
     return lcs ? lcs->Placement.getValue() : Base::Placement();
+}
+
+// Whether a gone owner is warned about for the first time: a calculation asks once per link, and
+// a Python engine read from a deleted feature asks on every calculation (ops#332 r2-5)
+bool firstWarningForGoneOwner(const App::DocumentObjectT& owner)
+{
+    static std::mutex mutex;
+    static std::set<std::pair<std::string, std::string>> warned;
+    std::lock_guard lock(mutex);
+    return warned.emplace(owner.getDocumentName(), owner.getObjectName()).second;
 }
 
 // OCCT takes the signs of the principal axes of inertia from the tensor's entries, which turn
@@ -648,7 +662,7 @@ void AttachEngine::setOwner(const App::DocumentObject* obj)
 App::DocumentObject* AttachEngine::getOwner() const
 {
     auto owner = ownerObject.getObject();
-    if (!owner && !ownerObject.getObjectName().empty()) {
+    if (!owner && !ownerObject.getObjectName().empty() && firstWarningForGoneOwner(ownerObject)) {
         Base::Console().warning(
             "Attacher: the attached object %s#%s is gone: its links are read as if in its "
             "container, which is wrong where they are in another one (ops#318)\n",

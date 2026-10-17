@@ -809,11 +809,16 @@ class TestAttachAcrossContainers(unittest.TestCase):
                 "engine.readParametersFromFeature(plane)\n"
                 "doc.removeObject('Attached')\n"
                 "z = engine.calculateAttachedPlacement(FreeCAD.Placement()).Base.z\n"
-                "print('RESULT %.9f' % z)\n")
+                "print('RESULT %.9f' % z)\n"
+                "z = engine.calculateAttachedPlacement(FreeCAD.Placement()).Base.z\n"
+                "print('AGAIN %.9f' % z)\n")
         lines = runChild(tempfile.mkdtemp(), script)
         # Read unmapped: the face's z in the document, not in PA (-40)
         self.assertIn("RESULT 10.000000000", lines, lines)
-        self.assertTrue(any("is gone" in line and "Attached" in line for line in lines), lines)
+        self.assertIn("AGAIN 10.000000000", lines, lines)
+        # Once, not on every calculation (ops#332 r2-5)
+        gone = [line for line in lines if "is gone" in line and "Attached" in line]
+        self.assertEqual(len(gone), 1, lines)
 
     # Review round 2 --------------------------------------------------------------------------
 
