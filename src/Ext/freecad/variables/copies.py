@@ -147,12 +147,19 @@ class Plan:
         return "\n".join(lines) if lines else "Nothing stands in the way."
 
 
+# The stamp's prefix: the hash and the canonical form's version (section 3.2). A later change to
+# the canonical form takes a new version, so a stamp of the old form reads as "can't compare"
+# rather than "out of date".
+STAMP_JSON = "sha256:json1:"
+
+
 def stamp(entry: onshape.StudioEntry) -> str:
-    """SHA-256 of an Onshape entry's canonical form (section 3.2): per variable, in the file's
-    order, its name, type, expression, description and value. Formatting doesn't count."""
+    """`sha256:json1:` and the SHA-256 of an Onshape entry's canonical form (section 3.2): per
+    variable, in the file's order, its name, type, expression, description and value.
+    Formatting doesn't count."""
     data = [[v.name, v.type, v.expression, v.description, v.value] for v in entry.variables]
     text = json.dumps(data, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return STAMP_JSON + hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def check_name(name: str, holder=COPY_TYPE) -> str:

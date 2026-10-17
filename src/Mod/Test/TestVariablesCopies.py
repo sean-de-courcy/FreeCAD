@@ -175,11 +175,12 @@ class TestVariablesCopies(unittest.TestCase):
         self.assertEqual(copy.Skipped, [])
         self.assertEqual(copy.Orphans, [])
         self.assertTrue(copy.SourceRefreshed.endswith("Z"))
-        # the stamp: SHA-256 of the canonical form (section 3.2), here by hand
+        # the stamp: the version and the SHA-256 of the canonical form (section 3.2), by hand
         canonical = [[v["name"], v["type"], v["expression"], v["description"], v["value"]]
                      for v in STUDIO[0]["variables"]]
         text = json.dumps(canonical, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-        self.assertEqual(copy.SourceStamp, hashlib.sha256(text.encode("utf-8")).hexdigest())
+        self.assertEqual(copy.SourceStamp,
+                         "sha256:json1:" + hashlib.sha256(text.encode("utf-8")).hexdigest())
         # the read-only variables still follow their expressions
         copy.touch()
         self.doc.recompute()
