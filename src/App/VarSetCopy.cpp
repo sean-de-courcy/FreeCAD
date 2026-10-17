@@ -31,6 +31,7 @@ PROPERTY_SOURCE(App::VarSetCopy, App::VarSet)
 
 namespace
 {
+// Saved as an index: append new kinds at the end, never reorder or remove one (a format change).
 const char* SourceKinds[] = {"FreeCAD document", "Onshape JSON", "None", nullptr};
 }
 
