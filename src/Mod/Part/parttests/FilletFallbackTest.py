@@ -747,8 +747,13 @@ class BaseToleranceTest(unittest.TestCase):
                     self.assertAlmostEqual(feature.Shape.Volume, unplaced.Shape.Volume, places=9)
                     moved = unplaced.Shape.copy()
                     moved.Placement = placement.multiply(moved.Placement)
+                    # A dress-up's shape is a compound of the one solid
                     self.assertAlmostEqual(
-                        feature.Shape.CenterOfMass.distanceToPoint(moved.CenterOfMass), 0, places=7
+                        feature.Shape.Solids[0].CenterOfMass.distanceToPoint(
+                            moved.Solids[0].CenterOfMass
+                        ),
+                        0,
+                        places=7,
                     )
 
     def testSecondDressUpOnTheSameBase(self):
