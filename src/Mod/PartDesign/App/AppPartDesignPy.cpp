@@ -67,8 +67,8 @@ public:
             "newPartFrom",
             &Module::newPartFrom,
             "newPartFrom(feature) -- Moves feature, its Body's Tip that nothing else uses, and its "
-            "Profile sketch if nothing else uses it, into a new Body at identity in the same "
-            "container. Returns the new Body; no recompute."
+            "Profile sketch if nothing else uses it, into a new Body placed as the old one, in the "
+            "same container. Returns the new Body; no recompute."
         );
         add_varargs_method(
             "studioOriginFeature",

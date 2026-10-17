@@ -24,6 +24,12 @@ def assertVector(test, got, expected, msg=None):
     test.assertLess((got - V(*expected)).Length, 1e-6, msg or f"{got} != {expected}")
 
 
+def globalBox(feature):
+    """The bounding box of an additive feature's own solid (its AddSubShape, in the feature's
+    frame) in the document's frame"""
+    return feature.AddSubShape.transformed(feature.getGlobalPlacement().toMatrix()).BoundBox
+
+
 class TestMapOrigin(unittest.TestCase):
     def setUp(self):
         self.doc = App.newDocument("TestMapOrigin")
@@ -328,6 +334,38 @@ class TestNewPart(unittest.TestCase):
         self.doc.recompute()
         self.assertLid(part, lid, 8000)
         self.assertAlmostEqual(body.Shape.Volume, 16000, places=3)
+
+    def testNewPartFromAPlacedBodyStaysWhereItWas(self):
+        """A placed enclosure (at (100, 0, 0), turned 20 deg about Z; at the top level and in an
+        App::Part): a lid on its XY plane 10 up, and one on its top face, each 30 x 30 x 3. New
+        part puts the new Body where the enclosure is and keeps each lid's global bounding box
+        (with the new Body at identity, the origin-plane lid went to (0, 0, 10)-(30, 30, 13))."""
+        placement = App.Placement(V(100, 0, 0), App.Rotation(V(0, 0, 1), 20))
+        for container in (None, self.doc.addObject("App::Part", "Studio")):
+            for on in ("origin", "face"):
+                with self.subTest(container=container and container.Name, on=on):
+                    body, base, lidSk = self.enclosure(container)
+                    body.Placement = placement
+                    if on == "origin":
+                        lidSk.AttachmentSupport = xyPlane(body)
+                        lidSk.AttachmentOffset = App.Placement(V(0, 0, 10), App.Rotation())
+                    lid = pad(body, "Lid", lidSk, 3)
+                    self.doc.recompute()
+                    before = globalBox(lid)
+                    self.assertAlmostEqual(before.ZMin, 10, places=6)
+                    self.assertGreater(before.XMin, 80)  # the enclosure's placement counts
+                    part = PartDesign.newPartFrom(lid)
+                    self.doc.recompute()
+                    self.assertEqual(part.Group, [lidSk, lid])
+                    after = globalBox(lid)
+                    for corner in ("XMin", "YMin", "ZMin", "XMax", "YMax", "ZMax"):
+                        self.assertAlmostEqual(
+                            getattr(after, corner), getattr(before, corner), places=6, msg=corner
+                        )
+                    self.assertTrue(part.Placement.isSame(placement, 1e-9))
+                    self.assertTrue(lid.isValid(), lid.getStatusString())
+                    self.assertAlmostEqual(part.Shape.Volume, 2700, places=3)
+                    self.assertAlmostEqual(body.Shape.Volume, 16000, places=3)
 
     def testOnlyAnUnusedTipMoves(self):
         """A feature that something uses, or that isn't the Tip, is refused, and nothing

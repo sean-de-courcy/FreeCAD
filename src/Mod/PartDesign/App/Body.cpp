@@ -505,6 +505,10 @@ Body* Body::newPartFrom(App::DocumentObject* feature)
 
     App::Document* doc = feature->getDocument();
     auto part = static_cast<Body*>(doc->addObject("PartDesign::Body", "Body"));
+    // Where the old Body is (identity in a studio, by the one-origin rule): a sketch on the old
+    // Body's origin plane is relinked to the new one's, and at identity a placed old Body's lid
+    // moved with no error (PR 302 review)
+    part->Placement.setValue(body->Placement.getValue());
     // in the studio: the old Body's App::Part (SketchWorkflow.cpp does the same for a new Body)
     if (auto container = App::GeoFeatureGroupExtension::getGroupOfObject(body)) {
         if (auto group = container->getExtensionByType<App::GroupExtension>(true)) {
