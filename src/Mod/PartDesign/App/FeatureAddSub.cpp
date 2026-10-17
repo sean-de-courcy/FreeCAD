@@ -23,6 +23,12 @@
  ***************************************************************************/
 
 
+#include <map>
+#include <memory>
+#include <set>
+
+#include <BRepExtrema_DistShapeShape.hxx>
+#include <Precision.hxx>
 #include <Standard_Failure.hxx>
 
 
@@ -35,10 +41,14 @@
 #include <BRepBndLib.hxx>
 #include <Bnd_Box.hxx>
 #include <App/Document.h>
+#include <App/Expression.h>
+#include <App/ExpressionParser.h>
+#include <App/ObjectIdentifier.h>
 
 #include "Body.h"
 #include "FeatureAddSub.h"
 #include "FeaturePy.h"
+#include "FeatureSketchBased.h"
 
 #include <Mod/Part/App/Tools.h>
 
@@ -50,6 +60,12 @@ namespace PartDesign
 
 extern bool getPDRefineModelParameter();
 
+namespace
+{
+bool isOwn(const App::DocumentObject* obj, const App::Property* prop);
+bool isCopied(const App::Property* prop);
+}  // namespace
+
 PROPERTY_SOURCE(PartDesign::FeatureAddSub, PartDesign::FeatureRefine)
 
 FeatureAddSub::FeatureAddSub()
@@ -57,6 +73,13 @@ FeatureAddSub::FeatureAddSub()
     ADD_PROPERTY(AddSubShape, (TopoDS_Shape()));
     ADD_PROPERTY_TYPE(Operation, (false), "Part Design", App::Prop_None, "Boolean operation to compute");
     Operation.setEnums({"Union", "Subtraction", "Common"});
+    ADD_PROPERTY_TYPE(
+        SiblingOf,
+        (nullptr),
+        "Part Design",
+        App::Prop_None,
+        "The cut this one follows: its parameters by expression, its links by copy (ops#325)"
+    );
 }
 
 
@@ -115,6 +138,13 @@ void FeatureAddSub::onChanged(const App::Property* property)
             addSubType = Type::Additive;
         }
     }
+    // A sibling checks its links against this one's when it recomputes, and no expression reads
+    // a link, so no dependency runs it: a link changed here does (ops#325)
+    if (isCopied(property) && !isRestoring() && getDocument() && !isOwn(this, property)) {
+        for (FeatureAddSub* sibling : getSiblings()) {
+            sibling->touch();
+        }
+    }
 
     Feature::onChanged(property);
 }
@@ -127,10 +157,28 @@ short FeatureAddSub::mustExecute() const
     return PartDesign::Feature::mustExecute();
 }
 
+namespace
+{
+void syncSiblings(FeatureAddSub* feature);
+}
+
 App::DocumentObjectExecReturn* FeatureAddSub::recompute()
 {
-    App::DocumentObjectExecReturn* result = FeatureRefine::recompute();
     auto body = getFeatureBody();
+    // A primary gives its siblings its values before their expressions run: those run in their
+    // own order, which a value that rewrites others (Hole's ThreadType) defeats (ops#325)
+    syncSiblings(this);
+    // A sibling whose links aren't its primary's fails until the primary is edited (ops#325)
+    const bool runs = !Suppressed.getValue() && !(body && body->holds(this));
+    if (runs) {
+        if (std::string why = outOfStep(); !why.empty()) {
+            return new App::DocumentObjectExecReturn(why, this);
+        }
+    }
+    App::DocumentObjectExecReturn* result = FeatureRefine::recompute();
+    if (result == StdReturn && runs) {
+        warnIfMissing();
+    }
     // A subtractive feature with nothing before it cut nothing and returned its tool as material
     // (FreeCAD-CH ops#308 F8: a Body's first Pocket, e.g. on another Body's face, which T1 no
     // longer takes as a base). Checked after the run, so an input's error is reported first; the
@@ -278,6 +326,400 @@ void FeatureAddSub::updatePreviewShape()
     }
 
     PreviewShape.setValue(AddSubShape.getShape());
+}
+
+// ------------------------------------------------------------------------------------------------
+// Siblings (FreeCAD-CH ops#325, B+ Stage 1 3a)
+
+namespace
+{
+// A property that is the feature's own, not shared with its siblings: its name, its place in its
+// Body, its shapes and state, and whatever the user doesn't set
+bool isOwn(const App::DocumentObject* obj, const App::Property* prop)
+{
+    static const std::set<std::string> own {
+        "Label",
+        "Label2",
+        "ExpressionEngine",
+        "Visibility",
+        "Placement",
+        "BaseFeature",
+        "_Body",
+        "SiblingOf",
+        "Shape",
+        "AddSubShape",
+        "SuppressedShape",
+        "Suppressed",
+    };
+    if (own.contains(prop->getName())) {
+        return true;
+    }
+    // The type's flags only: a feature makes some read-only for a while (Pocket's UpToFace and
+    // Length, by Type), and those must follow too, or switching the primary's Type later would
+    // leave the sibling's unbound
+    const short type = obj->getPropertyType(prop);
+    return (type & (App::Prop_ReadOnly | App::Prop_Output | App::Prop_Transient | App::Prop_Hidden))
+        || prop->testStatus(App::Property::Output) || prop->testStatus(App::Property::Transient);
+}
+
+// A link, copied to each sibling: expressions can't drive links
+bool isCopied(const App::Property* prop)
+{
+    return prop->isDerivedFrom<App::PropertyLinkBase>();
+}
+
+// A value, bound to the primary's by expression (enumerations too)
+bool isBound(const App::Property* prop)
+{
+    return prop->isDerivedFrom<App::PropertyBool>() || prop->isDerivedFrom<App::PropertyInteger>()
+        || prop->isDerivedFrom<App::PropertyFloat>()
+        || prop->isDerivedFrom<App::PropertyEnumeration>()
+        || prop->isDerivedFrom<App::PropertyVector>();
+}
+
+// Whether two links name the same objects and elements. Not Property::isSame: for two links,
+// PropertyLinkBase::isSame is always false
+bool sameLinks(const App::Property* one, const App::Property* other)
+{
+    std::vector<App::DocumentObject*> objects;
+    std::vector<App::DocumentObject*> otherObjects;
+    std::vector<std::string> subs;
+    std::vector<std::string> otherSubs;
+    static_cast<const App::PropertyLinkBase*>(one)->getLinks(objects, true, &subs, false);
+    static_cast<const App::PropertyLinkBase*>(other)
+        ->getLinks(otherObjects, true, &otherSubs, false);
+    return objects == otherObjects && subs == otherSubs;
+}
+
+// The properties of `obj` that its siblings share
+std::vector<App::Property*> sharedProperties(const App::DocumentObject* obj)
+{
+    std::vector<App::Property*> props;
+    obj->getPropertyList(props);
+    std::erase_if(props, [obj](const App::Property* prop) {
+        return isOwn(obj, prop) || !(isCopied(prop) || isBound(prop));
+    });
+    return props;
+}
+
+std::string label(const App::DocumentObject* obj)
+{
+    return obj->Label.getValue();
+}
+
+// Gives `sibling` the bound values of `primary`, in the primary's property order, until nothing
+// changes. A value can rewrite others as it changes (Hole's ThreadType rewrites ThreadSize's list
+// and value, and Diameter), and the expression engine sets them in its own order (ThreadSize
+// before ThreadType), so a sibling left to its expressions could end on another size, or fail on
+// one out of its list (ops#325, PR 304 round 1). An enumeration is pasted with its list.
+void pasteBoundValues(const FeatureAddSub* primary, FeatureAddSub* sibling)
+{
+    const std::vector<App::Property*> shared = sharedProperties(primary);
+    for (int pass = 0; pass < 4; ++pass) {
+        bool changed = false;
+        for (App::Property* prop : shared) {
+            if (isCopied(prop)) {
+                continue;
+            }
+            App::Property* mine = sibling->getPropertyByName(prop->getName());
+            if (!mine || mine->getTypeId() != prop->getTypeId() || mine->isSame(*prop)) {
+                continue;
+            }
+            std::unique_ptr<App::Property> copy(prop->Copy());
+            mine->Paste(*copy);
+            changed = true;
+        }
+        if (!changed) {
+            return;
+        }
+    }
+}
+
+// The expression that binds a sibling's `prop` to the primary's, or an error: a primary whose
+// name reads as something else (a unit, as "H") can't be named in an expression, and the file
+// would keep the text
+std::string boundExpression(const FeatureAddSub* primary, const App::Property* prop)
+{
+    const std::string text = std::string(primary->getNameInDocument()) + "." + prop->getName();
+    try {
+        App::ExpressionPtr expr(App::Expression::parse(primary, text));
+        auto var = freecad_cast<App::VariableExpression*>(expr.get());
+        if (var && var->getPath().getProperty() == prop) {
+            return text;
+        }
+    }
+    catch (const Base::Exception&) {
+    }
+    throw Base::ValueError(
+        "Siblings: " + label(primary) + "'s name, " + primary->getNameInDocument()
+        + ", can't be read in an expression; make the cut in a feature of another name"
+    );
+}
+
+// The links of `user` besides those of its place in a Body's chain
+bool linksBesidesChain(App::DocumentObject* user, const App::DocumentObject* target)
+{
+    auto feature = freecad_cast<Feature*>(user);
+    std::vector<App::Property*> props;
+    user->getPropertyList(props);
+    std::vector<App::DocumentObject*> links;
+    for (auto prop : props) {
+        if (!isCopied(prop)
+            || (feature && (prop == &feature->BaseFeature || prop == &feature->_Body))) {
+            continue;
+        }
+        links.clear();
+        static_cast<App::PropertyLinkBase*>(prop)->getLinks(links, /*all=*/true);
+        if (std::ranges::find(links, target) != links.end()) {
+            return true;
+        }
+    }
+    return false;
+}
+}  // namespace
+
+std::vector<FeatureAddSub*> FeatureAddSub::getSiblings() const
+{
+    std::vector<FeatureAddSub*> found;
+    if (App::Document* doc = getDocument()) {
+        for (auto obj : doc->getObjectsOfType(FeatureAddSub::getClassTypeId())) {
+            auto feature = static_cast<FeatureAddSub*>(obj);
+            if (feature->SiblingOf.getValue() == this) {
+                found.push_back(feature);
+            }
+        }
+    }
+    return found;
+}
+
+App::DocumentObject* FeatureAddSub::siblingUser(const FeatureAddSub* sibling)
+{
+    Body* body = Body::findBodyOf(sibling);
+    for (auto user : sibling->getInList()) {
+        if (user != body && linksBesidesChain(user, sibling)) {
+            return user;
+        }
+    }
+    return nullptr;
+}
+
+std::vector<FeatureAddSub*> FeatureAddSub::makeSiblings(
+    FeatureAddSub* primary,
+    const std::vector<App::DocumentObject*>& bodies
+)
+{
+    Body* body = primary ? Body::findBodyOf(primary) : nullptr;
+    if (!body || primary->getAddSubType() != Type::Subtractive
+        || !primary->isDerivedFrom<ProfileBased>()) {
+        throw Base::ValueError(
+            "Siblings: the primary must be a subtractive sketch-based feature in a body"
+        );
+    }
+    if (primary->SiblingOf.getValue()) {
+        throw Base::ValueError(
+            "Siblings: " + label(primary) + " follows "
+            + label(primary->SiblingOf.getValue()) + "; edit that one, or Unlink this one"
+        );
+    }
+    std::vector<Body*> targets;
+    for (auto obj : bodies) {
+        auto target = freecad_cast<Body*>(obj);
+        if (!target) {
+            throw Base::ValueError(
+                "Siblings: " + (obj ? label(obj) : std::string("None")) + " isn't a body"
+            );
+        }
+        if (target == body) {
+            throw Base::ValueError(
+                "Siblings: " + label(target) + " is " + label(primary) + "'s own body"
+            );
+        }
+        if (!Part::BodyBase::areStudioSiblings(body, target)) {
+            throw Base::ValueError(
+                "Siblings: " + label(target) + " isn't a part of " + label(body)
+                + "'s studio (one container, placed alike)"
+            );
+        }
+        if (std::ranges::find(targets, target) == targets.end()) {
+            targets.push_back(target);
+        }
+    }
+
+    // Refused before anything changes: a sibling to delete that something uses, and a new one in a
+    // rolled-back part, which would land mid-history (the design's critic, point 10)
+    std::map<Body*, FeatureAddSub*> existing;
+    for (FeatureAddSub* sibling : primary->getSiblings()) {
+        existing[Body::findBodyOf(sibling)] = sibling;
+    }
+    for (const auto& [part, sibling] : existing) {
+        if (std::ranges::find(targets, part) != targets.end()) {
+            continue;
+        }
+        if (App::DocumentObject* user = siblingUser(sibling)) {
+            throw Base::ValueError(
+                "Siblings: " + label(sibling) + " is used by " + label(user)
+                + "; it stays until that changes"
+            );
+        }
+    }
+    for (Body* target : targets) {
+        if (!existing.contains(target) && target->isRolledBack()) {
+            throw Base::ValueError("Siblings: Roll " + label(target) + " to the end first");
+        }
+    }
+    const std::vector<App::Property*> shared = sharedProperties(primary);
+    std::map<const App::Property*, std::string> expressions;
+    if (!targets.empty()) {
+        for (App::Property* prop : shared) {
+            if (!isCopied(prop)) {
+                expressions[prop] = boundExpression(primary, prop);
+            }
+        }
+    }
+
+    App::Document* doc = primary->getDocument();
+    for (const auto& [part, sibling] : existing) {
+        if (std::ranges::find(targets, part) != targets.end()) {
+            continue;
+        }
+        if (part) {
+            part->removeObject(sibling);  // the next solid takes its base (Body::removeObject)
+        }
+        doc->removeObject(sibling->getNameInDocument());
+    }
+
+    std::vector<FeatureAddSub*> result;
+    for (Body* target : targets) {
+        FeatureAddSub* sibling = existing.contains(target) ? existing[target] : nullptr;
+        if (!sibling) {
+            sibling = static_cast<FeatureAddSub*>(
+                doc->addObject(primary->getTypeId().getName(), primary->getNameInDocument())
+            );
+            target->addObject(sibling);
+            sibling->Label.setValue(label(primary) + " (" + label(target) + ")");
+            sibling->SiblingOf.setValue(primary);
+        }
+        pasteBoundValues(primary, sibling);
+        for (App::Property* prop : shared) {
+            App::Property* mine = sibling->getPropertyByName(prop->getName());
+            if (!mine || mine->getTypeId() != prop->getTypeId()) {
+                continue;
+            }
+            if (isCopied(prop)) {
+                if (!sameLinks(mine, prop)) {
+                    std::unique_ptr<App::Property> copy(prop->Copy());
+                    mine->Paste(*copy);
+                }
+                continue;
+            }
+            App::ObjectIdentifier path(*mine);
+            const std::string& text = expressions[prop];
+            auto bound = sibling->getExpression(path).expression;
+            if (!bound || bound->toString() != text) {
+                sibling->setExpression(path, App::Expression::parse(sibling, text));
+            }
+        }
+        result.push_back(sibling);
+    }
+    return result;
+}
+
+void FeatureAddSub::unlinkSibling()
+{
+    std::vector<App::Property*> props;
+    getPropertyList(props);
+    for (App::Property* prop : props) {
+        if (isOwn(this, prop) || !isBound(prop)) {
+            continue;
+        }
+        App::ObjectIdentifier path(*prop);
+        if (getExpression(path).expression) {
+            setExpression(path, nullptr);
+        }
+    }
+    SiblingOf.setValue(nullptr);
+}
+
+namespace
+{
+// A sibling takes its primary's bound values; a primary gives them to its siblings
+void syncSiblings(FeatureAddSub* feature)
+{
+    if (auto primary = freecad_cast<FeatureAddSub*>(feature->SiblingOf.getValue())) {
+        pasteBoundValues(primary, feature);
+        return;
+    }
+    for (FeatureAddSub* sibling : feature->getSiblings()) {
+        pasteBoundValues(feature, sibling);
+    }
+}
+}  // namespace
+
+std::string FeatureAddSub::outOfStep() const
+{
+    auto primary = freecad_cast<FeatureAddSub*>(SiblingOf.getValue());
+    if (!primary) {
+        return {};
+    }
+    // A link changed from the property editor or Python, not through the primary's panel (the
+    // design's critic, point 3); a value only if re-pasting it didn't settle (syncSiblings)
+    for (App::Property* prop : sharedProperties(primary)) {
+        App::Property* mine = getPropertyByName(prop->getName());
+        if (!mine || mine->getTypeId() != prop->getTypeId()) {
+            continue;
+        }
+        if (isCopied(prop) ? !sameLinks(mine, prop) : !mine->isSame(*prop)) {
+            return std::string(prop->getName()) + " is out of step with " + label(primary)
+                + ": edit " + label(primary) + " to re-sync, or Unlink this one";
+        }
+    }
+    return {};
+}
+
+void FeatureAddSub::warnIfMissing()
+{
+    Body* body = getFeatureBody();
+    if (!SiblingOf.getValue() || !body) {
+        return;
+    }
+    try {
+        // Both in the Body's frame: the tool is built in the feature's own
+        const TopoShape base = getBaseTopoShape(true);
+        TopoShape tool = AddSubShape.getShape();
+        tool.setPlacement(Placement.getValue());
+        if (base.isNull() || tool.isNull() || shapesTouch(tool.getShape(), base.getShape())) {
+            return;
+        }
+        const std::string text = "doesn't touch " + label(body) + ": its cut misses the part";
+        if (auto doc = getDocument()) {
+            const char* previous = doc->getWarningDescription(this);
+            doc->setWarning(
+                this,
+                previous && *previous ? std::string(previous) + "\n" + text : text
+            );
+        }
+    }
+    catch (const Standard_Failure&) {
+    }
+    catch (const Base::Exception&) {
+    }
+}
+
+bool FeatureAddSub::shapesTouch(const TopoDS_Shape& tool, const TopoDS_Shape& part)
+{
+    if (tool.IsNull() || part.IsNull()) {
+        return false;
+    }
+    Bnd_Box toolBox;
+    Bnd_Box partBox;
+    BRepBndLib::Add(tool, toolBox, /*useTriangulation=*/false);
+    BRepBndLib::Add(part, partBox, /*useTriangulation=*/false);
+    toolBox.Enlarge(Precision::Confusion());
+    if (toolBox.IsOut(partBox)) {
+        return false;
+    }
+    BRepExtrema_DistShapeShape distance(tool, part);
+    return distance.IsDone() && distance.Value() <= Precision::Confusion();
 }
 
 }  // namespace PartDesign

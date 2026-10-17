@@ -68,15 +68,48 @@ public:
 
     void updatePreviewShape() override;
 
+    /** @name Siblings (FreeCAD-CH ops#325, B+ Stage 1 3a)
+     * One cut through several parts of a studio: the primary in the active part, and in each
+     * other part a sibling of the same type on the same profile. A sibling's parameters follow
+     * the primary by expression, its links are copies, and SiblingOf names the primary without a
+     * dependency, so a failed primary doesn't fail it (notes/bplus-stage1-design.md 2.4).
+     */
+    //@{
+    /// Makes @p primary's siblings the ones in @p bodies: adds the missing ones, deletes the
+    /// others (refused while something else uses one), and copies the links to every one again.
+    /// Returns the siblings in the order of @p bodies; no recompute.
+    static std::vector<FeatureAddSub*> makeSiblings(
+        FeatureAddSub* primary,
+        const std::vector<App::DocumentObject*>& bodies
+    );
+    /// The siblings of this feature, in document order
+    std::vector<FeatureAddSub*> getSiblings() const;
+    /// Ends this sibling's following: its expressions on the primary and SiblingOf are cleared
+    void unlinkSibling();
+    /// What keeps @p sibling's sibling from being deleted (a user besides its Body's chain), or
+    /// null
+    static App::DocumentObject* siblingUser(const FeatureAddSub* sibling);
+    /// Whether @p tool and @p part touch: bounding boxes, then the distance (FreeCAD-CH ops#325)
+    static bool shapesTouch(const TopoDS_Shape& tool, const TopoDS_Shape& part);
+    //@}
+
     Part::PropertyPartShape AddSubShape;
 
     App::PropertyEnumeration Operation;
+    /// The primary this feature follows (Hidden scope: no dependency); empty unless a sibling
+    App::PropertyLinkHidden SiblingOf;
 
 protected:
     Type addSubType {Type::Additive};
     BooleanOperation booleanOperation {BooleanOperation::Union};
     void defineAdditive();
     void defineSubtractive();
+
+private:
+    /// Why this sibling's copied links or bound values aren't its primary's, or empty
+    std::string outOfStep() const;
+    /// Warns when this sibling's tool doesn't touch its part
+    void warnIfMissing();
 };
 
 using FeatureAddSubPython = App::FeaturePythonT<FeatureAddSub>;

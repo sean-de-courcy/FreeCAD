@@ -26,6 +26,7 @@
 
 
 #include <functional>
+#include <memory>
 #include <type_traits>
 #include <App/DocumentObserver.h>
 #include <Gui/TaskView/TaskDialog.h>
@@ -35,6 +36,8 @@
 #include "ViewProvider.h"
 
 class QComboBox;
+class QListWidget;
+class QTimer;
 
 namespace PartDesignGui
 {
@@ -175,7 +178,10 @@ private:
  *   preview is the real result; the edit restarts on the moved feature. Choosing Add to again
  *   moves it back and deletes the new Body. Cancel aborts it all with the transaction.
  * - Subtractive: Remove from, or Intersect with (Operation Common), in a studio with other parts.
- * The parts lists of row 2 (2.4, 2.5) come with sessions 3a and 3b.
+ *   Row 2 lists the studio's other parts, those the tool touches first, one tick each; OK makes
+ *   the ticked ones' siblings (PartDesign.makeSiblings, 2.4, session 3a). In a sibling's panel
+ *   the box says whom it follows, offers Unlink, and the other boxes are read-only.
+ * The merge scope of row 2 for an additive feature (2.5) comes with session 3b.
  */
 class TaskResultParameters: public TaskFeatureParameters
 {
@@ -193,10 +199,27 @@ public:
     /// The Body @p feature was in before this dialog moved it to a new part, or null
     static App::DocumentObject* movedFrom(const App::DocumentObject* feature);
 
+    /// The primary that @p feature follows, or null (ops#325 3a)
+    static App::DocumentObject* primaryOf(App::DocumentObject* feature);
+
+    /// The touch tests done, by the two shapes: the distance is slow on B-splines (design 2.3)
+    struct TouchCache;
+
 private:
     void onResultChanged(int index);
+    void addPartsList();
+    void addFollowsNote(App::DocumentObject* primary);
+    void onUnlink();
+    /// Marks the parts the tool doesn't touch (debounced; the distance is cached per shape)
+    void updateTouches();
+    void slotChangedObject(const Gui::ViewProviderDocumentObject& Obj, const App::Property& Prop)
+        override;
 
     QComboBox* combo;
+    /// Row 2 of a subtractive primary: the studio's other parts, one tick each
+    QListWidget* parts = nullptr;
+    QTimer* touchTimer = nullptr;
+    std::shared_ptr<TouchCache> touchCache;
     /// The feature, still named when it is deleted (Cancel of a new one)
     App::DocumentObjectT featureT;
 };

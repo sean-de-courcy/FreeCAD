@@ -8,6 +8,7 @@ import unittest
 
 import FreeCAD as App
 import FreeCADGui as Gui
+import PartDesign
 from PySide import QtCore, QtWidgets
 
 from PartDesignTests.Scenarios import models
@@ -101,11 +102,9 @@ def globalBox(feature):
     return feature.AddSubShape.transformed(feature.getGlobalPlacement().toMatrix()).BoundBox
 
 
-class TestResultBoxGui(unittest.TestCase):
-    """The panel's Result box (ops#325, B+ Stage 1 session 2b; notes/bplus-stage1-design.md 2.3):
-    New part moves the feature to a new Body while the panel is open, and the edit goes on there;
-    Add to moves it back; Cancel aborts it all. Designed geometry, A1's: the enclosure 40 x 40 x 10
-    (16000) and a lid sketch 30 x 30 on its top face; the pad's default length is 10 (9000)."""
+class ResultBoxGuiCase(unittest.TestCase):
+    """The fixture and helpers of the Result box tests: a document with undo, the PartDesign
+    workbench, the panel's widgets."""
 
     def setUp(self):
         self.doc = models.newDocument("ResultBoxGui")
@@ -209,6 +208,50 @@ class TestResultBoxGui(unittest.TestCase):
             o for o in self.doc.Objects if o.Name not in before and o.TypeId == "PartDesign::Pad"
         ]
         return lid
+
+    def featurePanel(self, command):
+        """The command on the lid sketch; returns the feature it made, with its panel open."""
+        before = {o.Name for o in self.doc.Objects}
+        self.runCommand(command, self.lidSk)
+        [feature] = [
+            o
+            for o in self.doc.Objects
+            if o.Name not in before and o.isDerivedFrom("PartDesign::FeatureAddSub")
+        ]
+        return feature
+
+    def otherPart(self):
+        """A second part beside the enclosure, so the box shows for a subtractive feature."""
+        other = self.doc.addObject("PartDesign::Body", "Other")
+        pad(other, "Cube", sketch(other, "CubeSk", xyPlane(other), (50, 0, 60, 10)), 10)
+        self.doc.recompute()
+
+    def assertAdditiveBox(self, command):
+        self.enclosure()
+        feature = self.featurePanel(command)
+        self.assertEqual(self.items(self.combo()), ["Add to Enclosure", "New part"])
+        return feature
+
+    def assertSubtractiveBox(self, command):
+        self.enclosure()
+        self.otherPart()
+        self.featurePanel(command)
+        self.assertEqual(
+            self.items(self.combo()), ["Remove from Enclosure", "Intersect with Enclosure"]
+        )
+
+    def activate(self, doc):
+        App.setActiveDocument(doc.Name)
+        Gui.setActiveDocument(doc.Name)
+        pump(0.3)
+        self.doc = doc
+
+
+class TestResultBoxGui(ResultBoxGuiCase):
+    """The panel's Result box (ops#325, B+ Stage 1 session 2b; notes/bplus-stage1-design.md 2.3):
+    New part moves the feature to a new Body while the panel is open, and the edit goes on there;
+    Add to moves it back; Cancel aborts it all. Designed geometry, A1's: the enclosure 40 x 40 x 10
+    (16000) and a lid sketch 30 x 30 on its top face; the pad's default length is 10 (9000)."""
 
     def testNewPartFromTheResultBox(self):
         """N-t1 in the panel: Pad on the lid sketch offers Add to Enclosure and New part. New
@@ -389,37 +432,6 @@ class TestResultBoxGui(unittest.TestCase):
         self.assertAlmostEqual(part.Shape.Volume, 9000, places=3)
         self.assertAlmostEqual(self.body.Shape.Volume, 16000, places=3)
 
-    def featurePanel(self, command):
-        """The command on the lid sketch; returns the feature it made, with its panel open."""
-        before = {o.Name for o in self.doc.Objects}
-        self.runCommand(command, self.lidSk)
-        [feature] = [
-            o
-            for o in self.doc.Objects
-            if o.Name not in before and o.isDerivedFrom("PartDesign::FeatureAddSub")
-        ]
-        return feature
-
-    def otherPart(self):
-        """A second part beside the enclosure, so the box shows for a subtractive feature."""
-        other = self.doc.addObject("PartDesign::Body", "Other")
-        pad(other, "Cube", sketch(other, "CubeSk", xyPlane(other), (50, 0, 60, 10)), 10)
-        self.doc.recompute()
-
-    def assertAdditiveBox(self, command):
-        self.enclosure()
-        feature = self.featurePanel(command)
-        self.assertEqual(self.items(self.combo()), ["Add to Enclosure", "New part"])
-        return feature
-
-    def assertSubtractiveBox(self, command):
-        self.enclosure()
-        self.otherPart()
-        self.featurePanel(command)
-        self.assertEqual(
-            self.items(self.combo()), ["Remove from Enclosure", "Intersect with Enclosure"]
-        )
-
     def testRevolutionPanelNewPart(self):
         """PR 303 round 1, the panels the 2b tests didn't open: Revolution shows the box, and New
         part works there. The lid square (sketch x 0 to 30) turned about the sketch's V axis is a
@@ -447,12 +459,6 @@ class TestResultBoxGui(unittest.TestCase):
 
     def testHolePanelHasTheBox(self):
         self.assertSubtractiveBox("PartDesign_Hole")
-
-    def activate(self, doc):
-        App.setActiveDocument(doc.Name)
-        Gui.setActiveDocument(doc.Name)
-        pump(0.3)
-        self.doc = doc
 
     def testTwoDocumentsKeepTheirOwnMoves(self):
         """PR 303 round 1: New part in document A's panel, then in document B's. Back in A, Add
@@ -518,6 +524,155 @@ class TestResultBoxGui(unittest.TestCase):
         self.doc.undo()
         self.doc.recompute()
         self.assertEqual(sorted(o.Name for o in self.doc.Objects), before)
+
+
+class TestSiblingsGui(ResultBoxGuiCase):
+    """Remove from several parts in the panel (ops#325, B+ Stage 1 session 3a;
+    notes/bplus-stage1-design.md 2.4): the Result box of a subtractive feature lists the studio's
+    other parts, those its tool touches first; OK makes the ticked parts' siblings. A sibling's
+    panel is read-only, says whom it follows and offers Unlink. Designed geometry: the enclosure
+    with its lid sketch (30 x 30 on its top), a part "Below" (40 x 40 x 10 under the enclosure)
+    and a part "Far" (100 away)."""
+
+    def part(self, name, rect, z):
+        body = self.doc.addObject("PartDesign::Body", name)
+        body.Label = name
+        pad(body, name + "Pad", sketch(body, name + "Sk", xyPlane(body), rect, z=z), 10)
+        self.doc.recompute()
+        return body
+
+    def parts(self):
+        self.enclosure()
+        self.below = self.part("Below", (0, 0, 40, 40), -10)
+        self.far = self.part("Far", (100, 0, 140, 40), 0)
+
+    def partsList(self):
+        QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+        found = [
+            w
+            for w in Gui.getMainWindow().findChildren(QtWidgets.QListWidget, "partsList")
+            if w.isVisible()
+        ]
+        return found[0] if found else None
+
+    def partItems(self):
+        """(text, ticked, enabled) of each row of the parts list"""
+        rows = self.partsList()
+        self.assertIsNotNone(rows, "no parts list")
+        return [
+            (
+                rows.item(i).text(),
+                rows.item(i).checkState() == QtCore.Qt.Checked,
+                bool(rows.item(i).flags() & QtCore.Qt.ItemIsEnabled),
+            )
+            for i in range(rows.count())
+        ]
+
+    def visible(self, cls, name):
+        found = [w for w in Gui.getMainWindow().findChildren(cls, name) if w.isVisible()]
+        return found[0] if found else None
+
+    def throughAll(self):
+        """A pocket of the lid sketch through all, and its sibling in Below, from Python."""
+        pocket = self.body.newObject("PartDesign::Pocket", "Pocket")
+        pocket.Profile = self.lidSk
+        pocket.Type = "ThroughAll"
+        self.doc.recompute()
+        [sibling] = PartDesign.makeSiblings(pocket, [self.below])
+        self.doc.recompute()
+        self.assertTrue(sibling.isValid(), sibling.getStatusString())
+        return pocket, sibling
+
+    def edit(self, obj):
+        self.doc.openTransaction("Edit " + obj.Name)
+        Gui.getDocument(self.doc.Name).setEdit(obj.Name)
+        self.waitForPanel()
+
+    def testSiblingFromThePartsList(self):
+        """R-t1 in the panel: a pocket of the lid sketch, 5 deep, lists Enclosure (ticked, fixed),
+        then Below and Far, which it doesn't touch. Its length set to 20 in the panel: once the
+        preview settles, Below is touched. Below ticked, OK: Below holds a pocket that follows
+        this one (length 20), and both parts lose the 30 x 30 x 10 they share with the tool
+        (7000 each). One undo step removes both."""
+        self.parts()
+        before = sorted(o.Name for o in self.doc.Objects)
+        pocket = self.featurePanel("PartDesign_Pocket")
+        self.assertEqual(
+            self.partItems(),
+            [
+                ("Enclosure", True, False),
+                ("Below (doesn't touch)", False, True),
+                ("Far (doesn't touch)", False, True),
+            ],
+        )
+        self.visible(QtWidgets.QWidget, "lengthEdit").setProperty("rawValue", 20.0)
+        self.assertTrue(
+            waitFor(lambda: self.partsList().item(1).text() == "Below"), self.partItems()
+        )
+        self.assertEqual(self.partsList().item(2).text(), "Far (doesn't touch)")
+        self.partsList().item(1).setCheckState(QtCore.Qt.Checked)
+        self.close(ok=True)
+        [sibling] = PartDesign.siblingsOf(pocket)
+        self.assertIn(sibling, self.below.Group)
+        self.assertIs(self.below.Tip, sibling)
+        self.assertEqual(sibling.Length.Value, 20)
+        self.assertTrue(sibling.isValid(), sibling.getStatusString())
+        self.assertAlmostEqual(self.body.Shape.Volume, 7000, places=3)
+        self.assertAlmostEqual(self.below.Shape.Volume, 7000, places=3)
+        self.assertAlmostEqual(self.far.Shape.Volume, 16000, places=3)
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertEqual(sorted(o.Name for o in self.doc.Objects), before)
+
+    def testSiblingPanelIsReadOnlyUntilUnlink(self):
+        """A sibling's panel: the box says it follows Pocket and offers Unlink; Remove from and
+        the pocket's own fields are read-only. Unlink: the panel opens again editable, and OK
+        keeps the sibling independent (no SiblingOf, no expressions), its cut as it was."""
+        self.parts()
+        pocket, sibling = self.throughAll()
+        self.edit(sibling)
+        note = self.visible(QtWidgets.QLabel, "followsNote")
+        self.assertIsNotNone(note, "no note")
+        self.assertIn("Follows Pocket", note.text())
+        self.assertFalse(self.combo().isEnabled())
+        self.assertFalse(self.visible(QtWidgets.QComboBox, "sidesMode").isEnabled())
+        self.visible(QtWidgets.QPushButton, "unlinkButton").click()
+        self.assertTrue(
+            waitFor(
+                lambda: self.visible(QtWidgets.QLabel, "followsNote") is None
+                and self.visible(QtWidgets.QComboBox, "sidesMode") is not None
+                and self.visible(QtWidgets.QComboBox, "sidesMode").isEnabled()
+            ),
+            "the panel stays read-only",
+        )
+        self.assertIsNone(sibling.SiblingOf)
+        self.assertTrue(self.doc.HasPendingTransaction)
+        self.close(ok=True)
+        self.assertIsNone(sibling.SiblingOf)
+        self.assertEqual(sibling.ExpressionEngine, [])
+        self.assertEqual(PartDesign.siblingsOf(pocket), [])
+        self.assertAlmostEqual(self.below.Shape.Volume, 7000, places=3)
+
+    def testPrimaryPanelShowsItsSiblings(self):
+        """Editing the primary shows Below ticked again. Unticked, OK: the sibling is gone and
+        Below is whole (16000)."""
+        self.parts()
+        pocket, sibling = self.throughAll()
+        name = sibling.Name
+        self.edit(pocket)
+        self.assertEqual(
+            self.partItems(),
+            [
+                ("Enclosure", True, False),
+                ("Below", True, True),
+                ("Far (doesn't touch)", False, True),
+            ],
+        )
+        self.partsList().item(1).setCheckState(QtCore.Qt.Unchecked)
+        self.close(ok=True)
+        self.assertEqual(PartDesign.siblingsOf(pocket), [])
+        self.assertIsNone(self.doc.getObject(name))
+        self.assertAlmostEqual(self.below.Shape.Volume, 16000, places=3)
 
 
 if __name__ == "__main__":
