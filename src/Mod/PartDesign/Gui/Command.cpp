@@ -3093,30 +3093,31 @@ CmdPartDesignSplit::CmdPartDesignSplit()
 void CmdPartDesignSplit::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
-    // The plane: an origin or datum plane, or a planar face; the part: the other pick, or the
-    // face's own part
+    // The plane: an origin or datum plane, in any order, else a planar face (a Body's face is
+    // its Tip's, PartDesign.split); the part: another pick, or the face's own part
+    std::vector<Gui::SelectionObject> picks = Gui::Selection().getSelectionEx();
     App::DocumentObject* part = nullptr;
     App::DocumentObject* tool = nullptr;
     std::string sub;
-    for (auto& sel : Gui::Selection().getSelectionEx()) {
-        App::DocumentObject* obj = sel.getObject();
-        const std::vector<std::string>& subs = sel.getSubNames();
-        const bool plane = obj->isDerivedFrom<App::Plane>()
-            || obj->isDerivedFrom<PartDesign::Plane>();
-        if (!tool && plane) {
+    std::size_t toolPick = picks.size();
+    for (std::size_t i = 0; i < picks.size() && !tool; ++i) {
+        App::DocumentObject* obj = picks[i].getObject();
+        if (obj->isDerivedFrom<App::Plane>() || obj->isDerivedFrom<PartDesign::Plane>()) {
             tool = obj;
+            toolPick = i;
         }
-        else if (!tool && !subs.empty() && subs.front().starts_with("Face")) {
-            tool = obj;
+    }
+    for (std::size_t i = 0; i < picks.size() && !tool; ++i) {
+        const std::vector<std::string>& subs = picks[i].getSubNames();
+        if (!subs.empty() && subs.front().starts_with("Face")) {
+            tool = picks[i].getObject();
             sub = subs.front();
-            // A Body's face is its Tip's: the Split goes after the Tip, which a link to the Body
-            // would make a cycle
-            if (auto body = freecad_cast<PartDesign::Body*>(obj); body && body->Tip.getValue()) {
-                tool = body->Tip.getValue();
-            }
+            toolPick = i;
         }
-        else if (!part) {
-            part = obj;
+    }
+    for (std::size_t i = 0; i < picks.size() && !part; ++i) {
+        if (i != toolPick) {
+            part = picks[i].getObject();
         }
     }
     if (!part && tool && !sub.empty()) {

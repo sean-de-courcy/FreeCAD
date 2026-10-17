@@ -887,6 +887,27 @@ class TestSplitGui(ResultBoxGuiCase):
         self.assertFalse([o for o in self.doc.Objects if o.TypeId == "PartDesign::Split"])
         self.assertAlmostEqual(self.body.Shape.Volume, 592, places=6)
 
+    def testPlanePickedAfterAFace(self):
+        """A face of the shroud picked first, then the plane: the plane is the tool, in any order
+        (the face, the cavity's wall at y = 1, would give 432 and 160)."""
+        self.shroud()
+        face = None
+        for i, f in enumerate(self.body.Shape.Faces, 1):
+            if abs(f.CenterOfMass.y - 1) < 1e-9 and abs(f.normalAt(0, 0).y - 1) < 1e-9:
+                face = f"Face{i}"
+        self.assertIsNotNone(face)
+        Gui.getDocument(self.doc.Name).ActiveView.setActiveObject("pdbody", self.body)
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.doc.Name, self.body.Name, face)
+        Gui.Selection.addSelection(self.doc.Name, self.plane.Name)
+        Gui.runCommand("PartDesign_Split")
+        self.waitForPanel()
+        self.assertIs(self.body.Tip.Tool[0], self.plane)
+        [part] = self.newParts()
+        self.assertAlmostEqual(self.body.Shape.Volume, 364, places=6)
+        self.assertAlmostEqual(part.Shape.Volume, 228, places=6)
+        self.close(ok=True)
+
     def testNewHalfPanelFollows(self):
         """The new half's Split, edited: its panel names the Split it follows, and its Flip is
         the original's to make (disabled)."""
