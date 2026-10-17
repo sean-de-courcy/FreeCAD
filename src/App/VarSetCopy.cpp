@@ -152,6 +152,15 @@ void VarSetCopy::onChanged(const Property* prop)
 void VarSetCopy::onDocumentRestored()
 {
     VarSet::onDocumentRestored();
+    // A variable added to an attached copy afterwards (from Python) got no ReadOnly bit: every
+    // variable of an attached copy is read-only once it is opened again.
+    if (isAttached()) {
+        for (const auto& name : getDynamicPropertyNames()) {
+            if (Property* variable = getPropertyByName(name.c_str())) {
+                variable->setStatus(Property::ReadOnly, true);
+            }
+        }
+    }
     if (CopyFormat.getValue() > Format) {
         // Saved by a newer FreeCAD-CH: the document's notice and its save guard say so.
         noteNewerFormat(getDocument(), "CopyFormat " + std::to_string(CopyFormat.getValue()));

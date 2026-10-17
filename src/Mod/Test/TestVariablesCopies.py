@@ -562,6 +562,8 @@ class TestVariablesCopies(unittest.TestCase):
         path = self.export("Studio A", STUDIO)
         copy = copies.import_studios(self.doc, [path]).copies[0]
         stamp = copy.SourceStamp
+        copy.addProperty("App::PropertyLength", "Later")  # from Python: no ReadOnly bit yet
+        self.assertNotIn("ReadOnly", copy.getPropertyStatus("Later"))
         saved = os.path.join(self.folder, "attached.FCStd")
         self.doc.saveAs(saved)
         name = copy.Name
@@ -572,6 +574,7 @@ class TestVariablesCopies(unittest.TestCase):
         self.assertEqual(copy.SourceStamp, stamp)
         self.assertEqual(copy.SourceRelativePath, "")  # the document had no file at the import
         self.assertIn("ReadOnly", copy.getPropertyStatus("Total"))
+        self.assertIn("ReadOnly", copy.getPropertyStatus("Later"))
         self.assertAlmostEqual(copy.Total.Value, STUDIO_VALUES["Total"], places=9)
 
 
