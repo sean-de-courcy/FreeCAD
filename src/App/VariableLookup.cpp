@@ -140,13 +140,21 @@ std::string VariableLookup::checkVariableName(const DocumentObject* holder, cons
     if (ExpressionParser::isTokenAConstant(name)) {
         return quoted + " is a constant in expressions, so no expression could use the variable.";
     }
+    // The lexer reads any `letter...(` as a call, and only an unknown name fails with "Unknown
+    // function"; a known one with another number of arguments (pow, atan2, vector) fails with an
+    // argument error, and is a function all the same. A name starting with _ is never one.
     bool isFunction = false;
-    try {
-        ExpressionPtr call(ExpressionParser::parse(nullptr, (name + "(1)").c_str()));
-        isFunction = dynamic_cast<FunctionExpression*>(call.get()) != nullptr;
-    }
-    catch (...) {
-        // not a function call
+    if (name.front() != '_') {
+        try {
+            ExpressionPtr call(ExpressionParser::parse(nullptr, (name + "(1)").c_str()));
+            isFunction = dynamic_cast<FunctionExpression*>(call.get()) != nullptr;
+        }
+        catch (const Base::Exception& e) {
+            isFunction = std::string(e.what()).find("Unknown function") == std::string::npos;
+        }
+        catch (...) {
+            // not a function call
+        }
     }
     if (isFunction) {
         return quoted + " is a function in expressions; choose another name.";

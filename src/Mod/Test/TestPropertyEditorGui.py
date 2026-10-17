@@ -69,6 +69,12 @@ class TestPropertyEditorGui(unittest.TestCase):
                 return editor
         self.fail("no propertyEditorData")
 
+    def viewEditor(self):
+        for editor in Gui.getMainWindow().findChildren(QtWidgets.QTreeView):
+            if editor.objectName() == "propertyEditorView":
+                return editor
+        self.fail("no propertyEditorView")
+
     def answerSoon(self, find, answer, tries=60):
         """Polls every 50 ms for a widget find() returns, records its class in self.seen and
         answers it. Gives up after tries * 50 ms."""
@@ -148,16 +154,18 @@ class TestPropertyEditorGui(unittest.TestCase):
         self.throughMenu(name, "Rename Property", nameDialog, answer, before)
         self.assertEqual(self.seen, ["QMenu", "QInputDialog"])
 
-    def throughMenu(self, name, action, findDialog=None, answer=None, before=None, objects=None):
-        """Picks action in the Data tab's context menu on row name, as a user does, with objects
-        (default: the VarSet) selected, and answers the dialog findDialog() returns with
-        answer(dialog); before() runs once the row is selected."""
+    def throughMenu(
+        self, name, action, findDialog=None, answer=None, before=None, objects=None, view=False
+    ):
+        """Picks action in the Data tab's context menu on row name (the View tab's if view), as a
+        user does, with objects (default: the VarSet) selected, and answers the dialog
+        findDialog() returns with answer(dialog); before() runs once the row is selected."""
         self.seen = []
         Gui.Selection.clearSelection()
         for obj in objects or [self.obj]:
             Gui.Selection.addSelection(obj.Document.Name, obj.Name)
         pump(1.0)
-        editor = self.dataEditor()
+        editor = self.viewEditor() if view else self.dataEditor()
         index = findRow(editor.model(), QtCore.QModelIndex(), name)
         self.assertIsNotNone(index, "no %s row in the property view" % name)
         editor.setCurrentIndex(index)
@@ -248,6 +256,69 @@ class TestPropertyEditorGui(unittest.TestCase):
         self.doc.undo()
         self.assertEqual(self.obj.getPropertyByName("Width"), 5)
         self.assertNotIn("Wide", self.obj.PropertiesList)
+
+    # ops#317 PR B (PR 310 review, 2): Edit Property Tooltip and Rename Property Group record
+    # only a DocumentObject's change: a view provider's opened an empty undo step, which also
+    # cleared the redo stack; a group renamed in two documents was recorded in the first only.
+
+    def inputDialog(self):
+        widget = QtWidgets.QApplication.activeModalWidget()
+        return widget if isinstance(widget, QtWidgets.QInputDialog) else None
+
+    def testViewProviderTooltipLeavesNoUndoStep(self):
+        """A view provider's dynamic property gets a new tooltip; no undo step is added and the
+        redo stack stays."""
+        self.obj.ViewObject.addProperty("App::PropertyString", "Note", "Notes")
+        self.doc.openTransaction("Set Width")
+        self.obj.Width = 6
+        self.doc.commitTransaction()
+        self.doc.undo()
+        undos, redos = self.doc.UndoCount, self.doc.RedoCount
+        self.assertEqual(redos, 1)
+
+        def answer(dialog):
+            dialog.setTextValue("a note on the view")
+            dialog.accept()
+
+        self.throughMenu("Note", "Edit Property Tooltip", self.inputDialog, answer, view=True)
+        self.assertEqual(self.seen, ["QMenu", "QInputDialog"])
+        self.assertEqual(
+            self.obj.ViewObject.getDocumentationOfProperty("Note"), "a note on the view"
+        )
+        self.assertEqual(self.doc.UndoCount, undos)
+        self.assertEqual(self.doc.RedoCount, redos)
+        self.assertEqual(self.doc.RedoNames, ["Set Width"])
+
+    def testGroupRenameInTwoDocuments(self):
+        """Width selected in two documents and its group renamed: each document has the step,
+        and undo in each gives its group back."""
+        other = self.otherDocument()
+        try:
+            other.openTransaction("Make VarSet")
+            second = other.addObject("App::VarSet", "VarSet")
+            second.addProperty("App::PropertyInteger", "Width", "Variables")
+            other.commitTransaction()
+
+            def answer(dialog):
+                dialog.setTextValue("Sizes")
+                dialog.accept()
+
+            self.throughMenu(
+                "Width",
+                "Rename Property Group",
+                self.inputDialog,
+                answer,
+                objects=[self.obj, second],
+            )
+            self.assertEqual(self.seen, ["QMenu", "QInputDialog"])
+            for doc, obj in ((self.doc, self.obj), (other, second)):
+                self.assertEqual(obj.getGroupOfProperty("Width"), "Sizes", doc.Name)
+                self.assertEqual(doc.getBookedTransactionID(), 0, doc.Name)
+                self.assertEqual(doc.UndoNames[0], "Rename property group", doc.Name)
+                doc.undo()
+                self.assertEqual(obj.getGroupOfProperty("Width"), "Variables", doc.Name)
+        finally:
+            App.closeDocument(other.Name)
 
     def testRefusedRenameKeepsExpression(self):
         """Width = Depth * 2 (an expression), inside a booked transaction: a rename to a name in use

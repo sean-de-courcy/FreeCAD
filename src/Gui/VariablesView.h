@@ -56,10 +56,12 @@ namespace DockWnd
 /** The rows of the Variables panel: one header row per VarSet or Sheet, and under it one row per
  * variable (FreeCAD-CH, ops#152, notes/variables-design.md section 3.6).
  *
- * Columns: Name, Expression, Value, Source. Committing a Name renames the variable; committing an
- * Expression sets the value or the expression. Each edit is one transaction on the variable's
- * document, sent through Python commands with the stored text, so macros and the console stay
- * stock syntax. setData() returns false and sets lastError() when nothing was changed.
+ * Columns: Name, Type, Expression, Value, Description, Source (ops#317, notes/variables-studio.md
+ * section 1.2). Committing a Name renames the variable; committing an Expression sets the value or
+ * the expression; committing a Description sets a VarSet variable's description. Each edit is one
+ * transaction on the variable's document, sent through Python commands with the stored text, so
+ * macros and the console stay stock syntax. setData() returns false and sets lastError() when
+ * nothing was changed.
  */
 class VariablesModel: public QStandardItemModel
 {
@@ -69,8 +71,10 @@ public:
     enum Column
     {
         NameColumn,
+        TypeColumn,
         ExpressionColumn,
         ValueColumn,
+        DescriptionColumn,
         SourceColumn,
         ColumnCount
     };
@@ -115,6 +119,32 @@ public:
     static App::Property* property(const QModelIndex& index);
     static Kind kind(const QModelIndex& index);
 
+    /// Sets the description of @a obj's variable @a name to @a text, as one transaction
+    /// ("Describe Width"); false and @a error when nothing was changed.
+    static bool describe(
+        App::DocumentObject* obj,
+        const std::string& name,
+        const QString& text,
+        QString& error
+    );
+    /** The commands that set @a obj's variable @a name, or its alias at @a address, to @a text, as
+     * the Expression column does: a plain value, a text, or an expression. False and @a error when
+     * the text can't be set; @a isExpression tells which it is.
+     */
+    static bool editCommands(
+        App::DocumentObject* obj,
+        App::Property* prop,
+        const std::string& address,
+        const std::string& name,
+        const QString& text,
+        std::vector<std::string>& commands,
+        QString& error,
+        bool* isExpression = nullptr
+    );
+    /// Why the value of @a prop's expression doesn't fit its type (a Length takes a length, a
+    /// Number no unit), or empty.
+    static QString unitMismatch(App::DocumentObject* obj, App::Property* prop);
+
 private:
     void addHolderRows(const App::DocumentObject* holder, const std::vector<std::string>& names);
     bool rename(const QModelIndex& index, const QString& newName);
@@ -151,6 +181,8 @@ Q_SIGNALS:
     /// A commit changed nothing: @a text is what was typed, to edit again.
     void commitFailed(const QModelIndex& index, const QString& text) const;
     void committed() const;
+    /// A description of several lines is edited in its dialog, not in the cell.
+    void multiLineEdit(const QModelIndex& index) const;
 
 private:
     mutable QPersistentModelIndex retryIndex;
@@ -194,12 +226,29 @@ private:
     void showMessage(const QString& text, bool isError);
 
     void addVariable();
+    /// The stock Add Property dialog on @a target, a VarSet, or on "Variables", created for it.
+    void addOtherVariable(App::DocumentObject* target);
+    /** Adds the variable the Add dialog describes as one transaction ("Add Width"), creating the
+     * "Variables" VarSet when @a holderName is empty; false and @a error when nothing is left.
+     */
+    bool addFromDialog(
+        const std::string& docName,
+        const std::string& holderName,
+        const QString& name,
+        const char* type,
+        const QString& text,
+        const QString& description,
+        QString& error
+    );
+    void editDescription();
     void deleteVariable();
     void showUses();
     QString usesText(const QModelIndex& index, int* count) const;
 
     App::Document* currentDocument() const;
     bool isRelevant(const App::DocumentObject* obj) const;
+    /// The VarSet Add puts a variable in: the selected row's, else "Variables"; nullptr if none.
+    App::DocumentObject* addTarget() const;
 
     QTreeView* tree;
     VariablesModel* model;
@@ -210,6 +259,7 @@ private:
     QAction* addAction;
     QAction* deleteAction;
     QAction* usesAction;
+    QAction* describeAction;
     std::string documentName;
     /// The collapsed headers, as "document/object".
     std::set<std::string> collapsed;

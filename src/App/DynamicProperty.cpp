@@ -461,6 +461,12 @@ bool DynamicProperty::changeDynamicProperty(const Property* prop,
     Document* owner = obj && obj->isAttachedToDocument() ? obj->getDocument() : nullptr;
     if (owner) {
         Transaction::recordDocOrGroup(*owner, obj, prop);
+        // Recording can open the booked transaction, whose observers (Python too) may remove
+        // the property: look it up again
+        it = index.find(const_cast<Property*>(prop));
+        if (it == index.end()) {
+            return false;
+        }
     }
     if (group) {
         it->group = group;

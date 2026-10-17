@@ -5,7 +5,8 @@
 A dock window lists the active document's VarSet variables and sheet aliases under one header row
 per source. Editing a row's Name renames the variable and editing its Expression sets the value or
 the expression, each as one undo step; Add and Delete work from its toolbar. G1-G7, G9, G17 and G18
-of the design note. Each test builds its own document."""
+of the design note; since ops#317 PR B the Type and Description columns and the panel's own Add
+dialog (G-1 to G-3 of notes/variables-studio.md). Each test builds its own document."""
 
 import time
 import unittest
@@ -20,7 +21,7 @@ from PySide6.QtTest import QTest
 KindRole = QtCore.Qt.UserRole + 1
 VariableRole = QtCore.Qt.UserRole + 4
 EditTextRole = QtCore.Qt.UserRole + 6
-NAME, EXPRESSION, VALUE, SOURCE = range(4)
+NAME, TYPE, EXPRESSION, VALUE, DESCRIPTION, SOURCE = range(6)
 
 
 def pump(seconds=0.3):
@@ -344,8 +345,25 @@ class TestVariablesPanelGui(unittest.TestCase):
         self.assertNotIn("Invalid", self.box.State)
         self.assertAlmostEqual(self.box.Length.Value, 40)
 
-    def openAddDialog(self):
+    def openPanelAddDialog(self):
+        """The panel's own Add dialog (ops#317, design section 1.3)."""
         self.action("addVariable").trigger()
+        dialog = waitFor(
+            lambda: [
+                w
+                for w in QtWidgets.QApplication.topLevelWidgets()
+                if w.objectName() == "addVariableDialog" and w.isVisible()
+            ]
+        )
+        self.assertTrue(dialog, "no Add variable dialog")
+        return dialog[0]
+
+    def openAddDialog(self):
+        """The stock Add Property dialog, through the Add dialog's "Other..."."""
+        panelDialog = self.openPanelAddDialog()
+        other = panelDialog.findChild(QtWidgets.QPushButton, "other")
+        self.assertIsNotNone(other, "no Other... button")
+        QtCore.QTimer.singleShot(0, other.click)
         dialog = waitFor(
             lambda: [
                 w
@@ -374,8 +392,9 @@ class TestVariablesPanelGui(unittest.TestCase):
         self.assertIn(("Variables", "Height"), self.rows())
 
     def test_add(self):
-        """G6. In an empty document, Add creates the "Variables" VarSet in its own undo step, and
-        the dialog adds Height = 12 mm (Length, the default type) in a second one."""
+        """G6. In an empty document, Add > Other... creates the "Variables" VarSet in its own undo
+        step, and the stock dialog adds Height = 12 mm (Length, the default type) in a second
+        one."""
         doc = self.newDocument()
         self.showPanel()
         dialog = self.openAddDialog()
@@ -424,6 +443,300 @@ class TestVariablesPanelGui(unittest.TestCase):
         self.assertEqual(self.rows(), {})
         # Taken out by Undo, so Redo would bring the empty VarSet back (design note 3.6).
         self.assertEqual(doc.RedoNames, ["Add variable"])
+
+    # ops#317 PR B: the Type and Description columns and the Add dialog (G-1 to G-3 of
+    # notes/variables-studio.md section 6)
+
+    def editable(self, index):
+        return bool(self.model().flags(index) & QtCore.Qt.ItemFlag.ItemIsEditable)
+
+    def fillAddDialog(self, dialog, name, kind, value="", description="", varSet=None):
+        dialog.findChild(QtWidgets.QLineEdit, "name").setText(name)
+        typeBox = dialog.findChild(QtWidgets.QComboBox, "type")
+        self.assertGreaterEqual(typeBox.findText(kind), 0, kind)
+        typeBox.setCurrentIndex(typeBox.findText(kind))
+        dialog.findChild(QtWidgets.QLineEdit, "value").setText(value)
+        dialog.findChild(QtWidgets.QPlainTextEdit, "description").setPlainText(description)
+        if varSet is not None:
+            setBox = dialog.findChild(QtWidgets.QComboBox, "set")
+            setBox.setCurrentIndex(setBox.findText(varSet))
+
+    def pressOk(self, dialog):
+        box = dialog.findChild(QtWidgets.QDialogButtonBox)
+        box.button(QtWidgets.QDialogButtonBox.Ok).click()
+        pump(0.3)
+
+    def addDialogOpen(self):
+        return any(
+            w.objectName() == "addVariableDialog" and w.isVisible()
+            for w in QtWidgets.QApplication.topLevelWidgets()
+        )
+
+    def answerDescription(self, text):
+        """Answers the next description dialog with text."""
+
+        def answer():
+            for widget in QtWidgets.QApplication.topLevelWidgets():
+                if (
+                    isinstance(widget, QtWidgets.QInputDialog)
+                    and widget.objectName() == "descriptionDialog"
+                    and widget.isVisible()
+                ):
+                    widget.setTextValue(text)
+                    widget.accept()
+                    return
+            QtCore.QTimer.singleShot(50, answer)
+
+        QtCore.QTimer.singleShot(50, answer)
+
+    def test_type_and_description_columns(self):
+        """G-1. Type names each kind of variable; Description shows a VarSet variable's
+        description, its first line in the cell and all of it in the tooltip. An alias's
+        Description is empty and can't be edited; Type can't be edited."""
+        doc = self.newDocument()
+        varSet = doc.addObject("App::VarSet", "VarSet")
+        types = [
+            ("App::PropertyLength", "Width", "Length"),
+            ("App::PropertyDistance", "Offset", "Length"),
+            ("App::PropertyAngle", "Tilt", "Angle"),
+            ("App::PropertyFloat", "Ratio", "Number"),
+            ("App::PropertyInteger", "Count", "Integer"),
+            ("App::PropertyBool", "Flag", "Yes/No"),
+            ("App::PropertyString", "Note", "Text"),
+            ("App::PropertyArea", "Face", "Area"),
+        ]
+        for propertyType, name, _shown in types:
+            varSet.addProperty(propertyType, name)
+        varSet.setDocumentationOfProperty("Width", "the width")
+        varSet.setDocumentationOfProperty("Tilt", "first line\nsecond <&> line")
+        sheet = doc.addObject("Spreadsheet::Sheet", "Sheet")
+        sheet.set("A1", "30 mm")
+        sheet.setAlias("A1", "Depth")
+        doc.recompute()
+        self.showPanel()
+
+        for _propertyType, name, shown in types:
+            self.assertEqual(self.text("VarSet", name, TYPE), shown, name)
+        self.assertEqual(self.text("Sheet", "Depth", TYPE), "Length")
+        self.assertEqual(self.text("VarSet", "Width", DESCRIPTION), "the width")
+        self.assertEqual(self.text("VarSet", "Tilt", DESCRIPTION), "first line …")
+        tilt = self.cell("VarSet", "Tilt", DESCRIPTION)
+        self.assertEqual(tilt.data(QtCore.Qt.ToolTipRole), "first line\nsecond <&> line")
+        self.assertEqual(self.text("VarSet", "Ratio", DESCRIPTION), "")
+        self.assertTrue(self.editable(self.cell("VarSet", "Ratio", DESCRIPTION)))
+        self.assertFalse(self.editable(self.cell("VarSet", "Width", TYPE)))
+        depth = self.cell("Sheet", "Depth", DESCRIPTION)
+        self.assertEqual(self.model().data(depth), "")
+        self.assertFalse(self.editable(depth))
+
+    def test_add_dialog(self):
+        """G-2. Add with the type Angle, a value and a description in a new document: one undo
+        step makes the "Variables" VarSet and the variable, and one undo removes both."""
+        doc = self.newDocument()
+        self.showPanel()
+        dialog = self.openPanelAddDialog()
+        setBox = dialog.findChild(QtWidgets.QComboBox, "set")
+        self.assertEqual(setBox.currentText(), "Variables (new)")
+        self.fillAddDialog(dialog, "Tilt", "Angle", "30 deg", "the tilt\nof the roof")
+        self.pressOk(dialog)
+        self.assertFalse(self.addDialogOpen())
+
+        varSet = doc.getObject("Variables")
+        self.assertIsNotNone(varSet)
+        self.assertEqual(varSet.TypeId, "App::VarSet")
+        self.assertEqual(varSet.getTypeIdOfProperty("Tilt"), "App::PropertyAngle")
+        self.assertAlmostEqual(varSet.Tilt.Value, 30)
+        self.assertEqual(varSet.getDocumentationOfProperty("Tilt"), "the tilt\nof the roof")
+        self.assertEqual(doc.UndoNames, ["Add Tilt"])
+        self.assertEqual(self.text("Variables", "Tilt", TYPE), "Angle")
+        self.assertEqual(self.text("Variables", "Tilt", DESCRIPTION), "the tilt …")
+
+        doc.undo()
+        self.assertIsNone(doc.getObject("Variables"))
+        self.assertEqual(doc.UndoCount, 0)
+        self.assertEqual(self.rows(), {})
+
+    def test_add_dialog_expression_in_a_set(self):
+        """Add to the selected row's VarSet: "Length" makes a Distance (a negative value stays),
+        and the expression is stored as the Expression column stores it."""
+        doc = self.standardDocument()
+        self.tree.setCurrentIndex(self.cell("VarSet", "Width", NAME))
+        dialog = self.openPanelAddDialog()
+        self.assertEqual(dialog.findChild(QtWidgets.QComboBox, "set").currentText(), "VarSet")
+        self.fillAddDialog(dialog, "Gap", "Length", "#Width / 4 - #Height")
+        self.pressOk(dialog)
+        self.assertFalse(self.addDialogOpen())
+        self.assertEqual(self.varSet.getTypeIdOfProperty("Gap"), "App::PropertyDistance")
+        self.assertNotIn("#", expressionText(self.varSet, "Gap"))
+        doc.recompute()
+        self.assertAlmostEqual(self.varSet.Gap.Value, -5)
+        self.assertEqual(doc.UndoNames[0], "Add Gap")
+        self.assertIsNone(doc.getObject("Variables"))
+
+    def test_add_dialog_refuses(self):
+        """Nothing is made, and the dialog says why and stays open: a unit or function name, a
+        value whose unit doesn't fit the type, an expression whose unit doesn't fit (made in the
+        transaction, then taken back with it)."""
+        doc = self.standardDocument()
+        undoCount = doc.UndoCount
+        dialog = self.openPanelAddDialog()
+        error = dialog.findChild(QtWidgets.QLabel, "error")
+        cases = [
+            ("t", "Length", "2 mm", "is a unit"),
+            ("pow", "Number", "2", "is a function"),
+            ("Label", "Number", "2", "property of every"),
+            ("Ratio", "Number", "2 mm", "no unit"),
+            ("Tilt", "Angle", "5 mm", "wrong unit"),
+            ("Tilt", "Angle", "#Width * 2", "the type of Tilt is Angle"),
+            ("Ratio", "Number", "#Width", "the type of Ratio is Number"),
+            ("Size", "Length", "#Width * #Height", "the type of Size is Length"),
+        ]
+        for name, kind, value, fragment in cases:
+            with self.subTest(name=name, value=value):
+                self.fillAddDialog(dialog, name, kind, value)
+                self.pressOk(dialog)
+                self.assertTrue(self.addDialogOpen())
+                self.assertTrue(error.isVisible())
+                self.assertIn(fragment, error.text())
+                self.assertIsNone(doc.getObject("Variables"))
+                self.assertEqual(doc.UndoCount, undoCount)
+                self.assertEqual(doc.getBookedTransactionID(), 0)
+        dialog.reject()
+
+    def test_add_dialog_unitless_expression(self):
+        """An expression without a unit takes a Length's or an Angle's default unit, as App's
+        checkPathUnit and the Expression column take it (PR 313 round 1)."""
+        doc = self.standardDocument()
+        for name, kind, value, expected in [
+            ("Size", "Length", "#Width / #Height", 2),
+            ("Turn", "Angle", "=15", 15),
+        ]:
+            with self.subTest(name=name):
+                dialog = self.openPanelAddDialog()
+                self.fillAddDialog(dialog, name, kind, value, varSet="VarSet")
+                self.pressOk(dialog)
+                self.assertFalse(self.addDialogOpen(), name)
+                doc.recompute()
+                self.assertAlmostEqual(getattr(self.varSet, name).Value, expected)
+                self.assertEqual(doc.UndoNames[0], "Add " + name)
+
+    def test_add_dialog_refuses_in_booked_transaction(self):
+        """With another transaction booked (a task dialog's), a refused Add takes back what it
+        made, by hand: no VarSet or variable is left, the booking stays open, and aborting it
+        leaves nothing (PR 313 round 1)."""
+        doc = self.standardDocument()
+        undoCount = doc.UndoCount
+        doc.openTransaction("Task")
+        booked = doc.getBookedTransactionID()
+        self.assertNotEqual(booked, 0)
+        self.tree.setCurrentIndex(QtCore.QModelIndex())
+        dialog = self.openPanelAddDialog()
+        self.assertGreaterEqual(
+            dialog.findChild(QtWidgets.QComboBox, "set").findText("Variables (new)"), 0
+        )
+        error = dialog.findChild(QtWidgets.QLabel, "error")
+        for varSet in ["Variables (new)", "VarSet"]:
+            with self.subTest(varSet=varSet):
+                self.fillAddDialog(dialog, "Size", "Length", "#Width * #Height", varSet=varSet)
+                self.pressOk(dialog)
+                self.assertTrue(self.addDialogOpen())
+                self.assertIn("the type of Size is Length", error.text())
+                self.assertEqual([o.Name for o in doc.findObjects("App::VarSet")], ["VarSet"])
+                self.assertNotIn("Size", self.varSet.PropertiesList)
+                self.assertEqual(doc.getBookedTransactionID(), booked)
+        dialog.reject()
+        doc.abortTransaction()
+        self.assertEqual(doc.getBookedTransactionID(), 0)
+        self.assertEqual(doc.UndoCount, undoCount)
+        self.assertEqual([o.Name for o in doc.findObjects("App::VarSet")], ["VarSet"])
+        self.assertNotIn("Size", self.varSet.PropertiesList)
+
+    def test_add_dialog_new_set_not_last(self):
+        """The new "Variables" set is found by its name, not as the document's last object: an
+        observer that adds an object as the set is made doesn't take the variable (PR 313
+        round 1)."""
+        doc = self.standardDocument()
+
+        class AddsOne:
+            def slotCreatedObject(self, obj):
+                if obj.Document == doc and obj.TypeId == "App::VarSet":
+                    doc.addObject("App::DocumentObjectGroup", "Extra")
+
+        observer = AddsOne()
+        App.addDocumentObserver(observer)
+        try:
+            self.tree.setCurrentIndex(QtCore.QModelIndex())
+            dialog = self.openPanelAddDialog()
+            self.fillAddDialog(dialog, "Depth2", "Length", "5 mm", varSet="Variables (new)")
+            self.pressOk(dialog)
+        finally:
+            App.removeDocumentObserver(observer)
+        self.assertFalse(self.addDialogOpen())
+        varSet = doc.getObject("Variables")
+        self.assertIsNotNone(varSet)
+        self.assertIsNotNone(doc.getObject("Extra"))
+        self.assertAlmostEqual(varSet.Depth2.Value, 5)
+
+    def test_add_other_set_gone(self):
+        """Other... with a set chosen that is deleted before the stock dialog opens: a message,
+        and never a new "Variables" set in its place (PR 313 round 1)."""
+        doc = self.standardDocument()
+        dialog = self.openPanelAddDialog()
+        setBox = dialog.findChild(QtWidgets.QComboBox, "set")
+        setBox.setCurrentIndex(setBox.findText("VarSet"))
+        other = dialog.findChild(QtWidgets.QPushButton, "other")
+
+        def clickThenDelete():
+            other.click()
+            doc.removeObject("VarSet")
+
+        QtCore.QTimer.singleShot(0, clickThenDelete)
+        pump(0.5)
+        self.assertEqual(doc.findObjects("App::VarSet"), [])
+        self.assertFalse(
+            any(
+                w.metaObject().className() == "Gui::Dialog::DlgAddProperty" and w.isVisible()
+                for w in QtWidgets.QApplication.topLevelWidgets()
+            )
+        )
+        self.assertTrue(self.message.isVisible())
+        self.assertIn("VarSet", self.message.text())
+
+    def test_describe(self):
+        """G-3. A description typed in its cell is one undo step, "Describe Width"; Edit
+        description... edits several lines, and a cell of several lines opens that dialog rather
+        than a line editor. Undo gives each old text back."""
+        doc = self.standardDocument()
+        self.commit("VarSet", "Width", DESCRIPTION, "the width")
+        self.assertEqual(self.varSet.getDocumentationOfProperty("Width"), "the width")
+        self.assertEqual(doc.UndoNames[0], "Describe Width")
+        self.assertEqual(self.text("VarSet", "Width", DESCRIPTION), "the width")
+
+        self.tree.setCurrentIndex(self.cell("VarSet", "Width", NAME))
+        self.answerDescription("the width\nof the frame")
+        self.action("editDescription").trigger()
+        pump(0.3)
+        self.assertEqual(
+            self.varSet.getDocumentationOfProperty("Width"), "the width\nof the frame"
+        )
+        self.assertEqual(self.text("VarSet", "Width", DESCRIPTION), "the width …")
+
+        index = self.cell("VarSet", "Width", DESCRIPTION)
+        self.answerDescription("short")
+        self.tree.setCurrentIndex(index)
+        self.tree.edit(index)
+        waitFor(lambda: self.varSet.getDocumentationOfProperty("Width") == "short")
+        self.assertEqual(self.varSet.getDocumentationOfProperty("Width"), "short")
+        self.assertEqual(doc.UndoNames[:3], ["Describe Width"] * 3)
+
+        doc.undo()
+        self.assertEqual(
+            self.varSet.getDocumentationOfProperty("Width"), "the width\nof the frame"
+        )
+        doc.undo()
+        doc.undo()
+        self.assertEqual(self.varSet.getDocumentationOfProperty("Width"), "")
+        self.assertEqual(self.text("VarSet", "Width", DESCRIPTION), "")
 
     def test_live_update(self):
         """G7. Python changes show at once: addProperty adds a row, setExpression updates the
