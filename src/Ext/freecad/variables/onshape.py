@@ -30,7 +30,8 @@ check FreeCAD's value against the translator's. It needs no document.
 **It never guesses.** A form whose meaning in Onshape isn't pinned down, or that FreeCAD can't
 express, is refused with the reason (`Refused`). Until a reference studio built in Onshape
 settles them (decision 68, D3), these are refused: a fraction with a unit next to `*`, `/` or
-`^` (`#a*3/4 in`, `1/3/4 in`), a unary minus before `^` (`-2^2`), a unit before `^`
+`^` (`#a*3/4 in`, `1/3/4 in`), a unary minus before `^` on anything but a number (`-#a^2`;
+`-2^2` is `(-2)^2`), a unit before `^`
 (`2 mm^2`; `(2 mm)^2` is clear), `%` with units or negative operands and `round`.
 
 The writer's rules (section 2.4):
@@ -348,7 +349,12 @@ class _Parser:
             op = self.take().text
             operand = self.unary()
             if op == "-" and isinstance(operand, Bin) and operand.op == "^":
-                raise Refused(f"a minus before ^ (-2^2): {UNDOCUMENTED}")
+                if isinstance(operand.left, Num):
+                    # Onshape's -2^2 is (-2)^2 = 4 (the reference studio, row 22)
+                    return Bin("^", Unary(op, operand.left), operand.right)
+                # -(2^2) or (-#a)^2: the studio only settles a number
+                raise Refused(f"a minus before ^ on something other than a number (-#a^2): "
+                              f"{UNDOCUMENTED}")
             return Unary(op, operand)
         return self.power()
 
