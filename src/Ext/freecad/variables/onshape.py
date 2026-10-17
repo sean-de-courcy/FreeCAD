@@ -636,6 +636,12 @@ def _binary(op: str, left: Value, right: Value) -> Value:
             return Quantity(a.value + b.value, a.dims)
         if op == "-":
             return Quantity(a.value - b.value, a.dims)
+        if values_agree(a.value, b.value):
+            # 1.1 in == 27.94 mm is false in metres and true in millimetres: which way it
+            # goes depends on rounding, in Onshape and in FreeCAD alike
+            raise Refused(f"the two sides of {op} are equal within rounding ({a.value:g} and "
+                          f"{b.value:g} in SI units), so the result depends on the unit each "
+                          "program computes in")
         return {"==": a.value == b.value, "!=": a.value != b.value, "<": a.value < b.value,
                 ">": a.value > b.value, "<=": a.value <= b.value, ">=": a.value >= b.value}[op]
     if op == "*":

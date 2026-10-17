@@ -72,6 +72,8 @@ ACCEPTED = [
     ("90 deg - atan(1)", "ANGLE", 45, None),
     ("#Rail > 3 in ? 1 mm : 2 mm", "LENGTH", 1, "(Rail > (3 * 1 in)) ? (1 * 1 mm) : (2 * 1 mm)"),
     ("#Rail < 3 in ? 1 mm : 2 mm", "LENGTH", 2, None),
+    ("#Count != 4 ? 1 mm : 2 mm", "LENGTH", 1, None),
+    ("1.1 in == 27.95 mm ? 1 mm : 2 mm", "LENGTH", 2, None),
     ("PI * 2 mm", "LENGTH", 2 * math.pi, "pi * (2 * 1 mm)"),
     ("Pi * 2 mm", "LENGTH", 2 * math.pi, None),
     ("max(#Width, 1 cm, 3/4 in)", "LENGTH", 19.05, None),
@@ -113,6 +115,10 @@ REFUSED = [
     ("exp(1000)", "NUMBER", "can't be computed"),
     ("cosh(1000)", "NUMBER", "can't be computed"),
     ("10^300 * 10^300 > 1 ? 1 : 2", "NUMBER", "can't be computed"),
+    ("1.1 in == 27.94 mm ? 1 mm : 2 mm", "LENGTH", "equal within rounding"),
+    ("1.1 in > 27.94 mm ? 1 mm : 2 mm", "LENGTH", "equal within rounding"),
+    ("#Width <= 10 mm ? 1 mm : 2 mm", "LENGTH", "equal within rounding"),
+    ("#Count != 3 ? 1 mm : 2 mm", "LENGTH", "equal within rounding"),
     ("2 mm^2 / 1 mm", "LENGTH", "a unit before ^"),
     ("sqrt(4) mm^2 / 1 mm", "LENGTH", "a unit before ^"),
     ("#Width/2 in", "LENGTH", "units cancel"),
@@ -182,8 +188,9 @@ class TestTranslation(unittest.TestCase):
     def test_text_never_holds_what_freecad_misreads(self):
         for text, kind, _expected, _freecad in ACCEPTED:
             written = translate(text, kind).text
-            for bad in ("#", "!", "&&", "||"):
+            for bad in ("#", "&&", "||"):
                 self.assertNotIn(bad, written, text)
+            self.assertNotRegex(written, "!(?!=)", text)  # != is FreeCAD's too
 
     def test_references_are_written_as_the_caller_says(self):
         result = onshape.translate("#Gap * 2", "LENGTH",
