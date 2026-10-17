@@ -27,11 +27,14 @@
 
 #include <functional>
 #include <type_traits>
+#include <App/DocumentObserver.h>
 #include <Gui/TaskView/TaskDialog.h>
 #include <Gui/TaskView/TaskView.h>
 #include <Gui/DocumentObserver.h>
 
 #include "ViewProvider.h"
+
+class QComboBox;
 
 namespace PartDesignGui
 {
@@ -165,6 +168,39 @@ private:
     bool blockUpdate;
 };
 
+/** The Result box (ops#325, B+ Stage 1, notes/bplus-stage1-design.md 2.3): where the solid of an
+ * additive or subtractive feature goes.
+ * - Additive: Add to <its part>, or New part. New part moves the feature (and a sketch only it
+ *   uses) to a new Body at once, inside the dialog's transaction (PartDesign.newPartFrom), so the
+ *   preview is the real result; the edit restarts on the moved feature. Choosing Add to again
+ *   moves it back and deletes the new Body. Cancel aborts it all with the transaction.
+ * - Subtractive: Remove from, or Intersect with (Operation Common), in a studio with other parts.
+ * The parts lists of row 2 (2.4, 2.5) come with sessions 3a and 3b.
+ */
+class TaskResultParameters: public TaskFeatureParameters
+{
+    Q_OBJECT
+
+public:
+    explicit TaskResultParameters(PartDesignGui::ViewProvider* vp, QWidget* parent = nullptr);
+    ~TaskResultParameters() override;
+
+    void apply() override;
+
+    /// Whether the dialog of @p feature shows the box: New part can be offered (or was chosen),
+    /// its Body is in a studio with other parts, or a subtractive feature intersects already
+    static bool hasRows(App::DocumentObject* feature);
+    /// The Body @p feature was in before this dialog moved it to a new part, or null
+    static App::DocumentObject* movedFrom(const App::DocumentObject* feature);
+
+private:
+    void onResultChanged(int index);
+
+    QComboBox* combo;
+    /// The feature, still named when it is deleted (Cancel of a new one)
+    App::DocumentObjectT featureT;
+};
+
 /// A common base for sketch based, dressup and other solid parameters dialogs
 class TaskDlgFeatureParameters: public Gui::TaskView::TaskDialog
 {
@@ -209,6 +245,9 @@ protected:
     /// The reference fields of the dialog's panels (TaskFeatureParameters::referenceFields). A
     /// dialog whose panels aren't TaskFeatureParameters adds theirs.
     virtual std::vector<ReferenceField*> panelFields();
+    /// The Result box (ops#325), when the feature has one: the dialogs of additive and
+    /// subtractive features add it before the preview box
+    void addResultBox();
 
     PartDesignGui::TaskPreviewParameters* preview;
     /// The feature's guessed, partly resolved or broken references, at the top; null if none

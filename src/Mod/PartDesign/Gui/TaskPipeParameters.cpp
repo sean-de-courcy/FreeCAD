@@ -1192,6 +1192,7 @@ TaskDlgPipeParameters::TaskDlgPipeParameters(ViewProviderPipe* PipeView, bool ne
     Content.push_back(parameter);
     Content.push_back(orientation);
     Content.push_back(scaling);
+    addResultBox();
     Content.push_back(preview);
     // The fields of the three panels share the dialog's group: one armed at a time (ops#150 W8)
 }

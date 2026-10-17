@@ -148,6 +148,7 @@ TaskDlgPocketParameters::TaskDlgPocketParameters(ViewProviderPocket* PocketView)
     , parameters(new TaskPocketParameters(PocketView))
 {
     Content.push_back(parameters);
+    addResultBox();
     Content.push_back(preview);
 }
 

@@ -691,6 +691,7 @@ TaskDlgHelixParameters::TaskDlgHelixParameters(ViewProviderHelix* HelixView)
 {
     assert(HelixView);
     Content.push_back(new TaskHelixParameters(HelixView));
+    addResultBox();
     Content.push_back(preview);
 }
 
