@@ -107,6 +107,8 @@ REFUSED = [
     ("1.5/2 in", "LENGTH", "fraction of decimals"),
     ("-2^2", "NUMBER", "minus before ^"),
     ("2^3^2", "NUMBER", "chained ^"),
+    ("2 mm^2 / 1 mm", "LENGTH", "a unit before ^"),
+    ("sqrt(4) mm^2 / 1 mm", "LENGTH", "a unit before ^"),
     ("#Width/2 in", "LENGTH", "units cancel"),
     ("3in*3in", "LENGTH", "length^2"),
     ("10 mm", "ANGLE", "is a length, but the variable is an angle"),
