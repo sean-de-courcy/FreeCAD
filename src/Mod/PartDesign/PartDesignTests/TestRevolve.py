@@ -2289,25 +2289,7 @@ class TestRevolve(unittest.TestCase):
         piece from where the circles leave the torus round to the profile too (497.90 instead of
         484.97 and 487.09); not turned and Reversed, its tool had a vertex of tolerance 0.995 and
         a volume of 14.20, with no error."""
-        steps = 200
-        step = 2.0 / steps
-        phase = math.atan2(2, 15)
-        expected = 0.0
-        other = 0.0
-        for i in range(steps):
-            r = 1 + (i + 0.5) * step
-            for j in range(steps):
-                z = (j + 0.5) * step
-                minor = math.sqrt(4 - (z - 1) ** 2)
-                cosine = ((6 + minor) ** 2 - r * r - 57.25) / (r * math.sqrt(229))
-                expected += r * (math.acos(cosine) - phase) * step * step
-                other += r * (math.acos(cosine) + phase) * step * step
-        tools = {
-            ("One side", False): expected,
-            ("One side", True): other,
-            ("Two sides", False): expected + other,
-            ("Symmetric", False): 2 * expected,
-        }
+        tools = self.torusFirstContactTools()
         for turned in (0, 10, 330, 350):
             for kind in ("Revolution", "Groove"):
                 for (sideType, reversed_), tool in tools.items():
@@ -2331,6 +2313,64 @@ class TestRevolve(unittest.TestCase):
                             continue
                         change = tool if kind == "Revolution" else 0
                         self.assertAlmostEqual(feature.Shape.Volume, base + change, delta=1e-3)
+
+    def torusFirstContactTools(self):
+        """The volumes first contact gives profileAcross() revolved up to the torus of radii 6
+        and 2 about (-7.5, 1, 1), per (SideType, Reversed): about 11.2277 forward and 13.3486
+        backward."""
+        steps = 200
+        step = 2.0 / steps
+        phase = math.atan2(2, 15)
+        expected = 0.0
+        other = 0.0
+        for i in range(steps):
+            r = 1 + (i + 0.5) * step
+            for j in range(steps):
+                z = (j + 0.5) * step
+                minor = math.sqrt(4 - (z - 1) ** 2)
+                cosine = ((6 + minor) ** 2 - r * r - 57.25) / (r * math.sqrt(229))
+                expected += r * (math.acos(cosine) - phase) * step * step
+                other += r * (math.acos(cosine) + phase) * step * step
+        return {
+            ("One side", False): expected,
+            ("One side", True): other,
+            ("Two sides", False): expected + other,
+            ("Symmetric", False): 2 * expected,
+        }
+
+    def testRevolutionUpToTorusWithMinorRangeFromMinusPi(self):
+        """The torus of testRevolutionUpToTorusNeverSilentlyWrong made by Part.makeTorus from
+        -180 to 180 degrees, turned 330 degrees about its axis, as the body's base: its face's
+        minor range is [-pi, pi], where BRepBuilderAPI_NurbsConvert fails ("Knots interval values
+        too close"), and every Revolution up to it failed as "Could not check the revolution up
+        to the face" (ops#293, q4). With the base's tolerance 0 and 1e-3, One side both ways and
+        Two sides give the tool that first contact gives."""
+        tools = self.torusFirstContactTools()
+        del tools[("Symmetric", False)]
+        for tolerance in (0, 1e-3):
+            for (sideType, reversed_), tool in tools.items():
+                with self.subTest(tolerance=tolerance, sideType=sideType, reversed_=reversed_):
+                    ring = Part.makeTorus(
+                        6, 2, FreeCAD.Vector(), FreeCAD.Vector(0, 0, 1), -180, 180, 360
+                    )
+                    ring.Placement = FreeCAD.Placement(
+                        FreeCAD.Vector(-7.5, 1, 1),
+                        FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), 330),
+                    )
+                    self.assertAlmostEqual(ring.Faces[0].ParameterRange[2], -math.pi)
+                    if tolerance:
+                        ring.fixTolerance(tolerance)
+                    base = self.Doc.addObject("Part::Feature", "Ring")
+                    base.Shape = ring
+                    body = self.Doc.addObject("PartDesign::Body", "Body")
+                    body.BaseFeature = base
+                    feature = self.revolveProfileUpTo(
+                        body, "Revolution", sideType, (base, ["Face1"]), reversed_=reversed_
+                    )
+                    self.assertTrue(feature.isValid(), feature.getStatusString())
+                    self.assertAlmostEqual(
+                        feature.Shape.Volume, ring.Volume + tool, delta=1e-3
+                    )
 
     def revolveSketchUpToWall(self, wallShape, geometry, placement=None):
         """A Revolution about V_Axis (Z) of a sketch on XZ holding `geometry`, up to the face of

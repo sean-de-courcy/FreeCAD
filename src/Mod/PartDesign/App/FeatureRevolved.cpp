@@ -72,6 +72,7 @@
 #include <GeomAPI_IntCS.hxx>
 #include <GeomAPI_ProjectPointOnSurf.hxx>
 #include <GeomAdaptor_Surface.hxx>
+#include <GeomConvert.hxx>
 #include <GeomConvert_BSplineSurfaceToBezierSurface.hxx>
 #include <GProp_GProps.hxx>
 #include <GCPnts_AbscissaPoint.hxx>
@@ -2278,39 +2279,61 @@ std::optional<gp_Pnt> silhouetteOn(
         ));
     }
     Handle(Geom_BSplineSurface) surface;
+    TopoDS_Face nurbs;
     try {
         BRepBuilderAPI_NurbsConvert convert(face, Standard_True);
         TopExp_Explorer converted(convert.Shape(), TopAbs_FACE);
-        if (!converted.More()) {
-            throw checkFailed();
+        if (converted.More()) {
+            nurbs = TopoDS::Face(converted.Current());
+            surface = Handle(Geom_BSplineSurface)::DownCast(BRep_Tool::Surface(nurbs));
         }
-        const TopoDS_Face nurbs = TopoDS::Face(converted.Current());
-        surface = Handle(Geom_BSplineSurface)::DownCast(BRep_Tool::Surface(nurbs));
-        if (surface.IsNull()) {
-            throw checkFailed();
-        }
-        surface = Handle(Geom_BSplineSurface)::DownCast(surface->Copy());
-        // Only the face's range: a whole cylinder or torus for a part of it costs patches
+    }
+    catch (const Standard_Failure&) {
+        surface.Nullify();
+    }
+    try {
         Standard_Real uLow = 0.0;
         Standard_Real uHigh = 0.0;
         Standard_Real vLow = 0.0;
         Standard_Real vHigh = 0.0;
-        BRepTools::UVBounds(nurbs, uLow, uHigh, vLow, vHigh);
-        Standard_Real uFirst = 0.0;
-        Standard_Real uLast = 0.0;
-        Standard_Real vFirst = 0.0;
-        Standard_Real vLast = 0.0;
-        surface->Bounds(uFirst, uLast, vFirst, vLast);
-        if (!surface->IsUPeriodic()) {
-            uLow = std::max(uLow, uFirst);
-            uHigh = std::min(uHigh, uLast);
+        if (surface.IsNull()) {
+            // The face's surface alone, trimmed to the face's range, is all the check needs. The
+            // face's conversion failed on a whole torus face whose minor range is [-pi, pi]
+            // ("Knots interval values too close"; Part.makeTorus from -180 to 180 degrees), and
+            // every Revolution up to it failed as unchecked (ops#293, q4).
+            BRepTools::UVBounds(face, uLow, uHigh, vLow, vHigh);
+            surface = GeomConvert::SurfaceToBSplineSurface(new Geom_RectangularTrimmedSurface(
+                BRep_Tool::Surface(face),
+                uLow,
+                uHigh,
+                vLow,
+                vHigh
+            ));
+            if (surface.IsNull()) {
+                throw checkFailed();
+            }
         }
-        if (!surface->IsVPeriodic()) {
-            vLow = std::max(vLow, vFirst);
-            vHigh = std::min(vHigh, vLast);
-        }
-        if (uHigh - uLow > Precision::PConfusion() && vHigh - vLow > Precision::PConfusion()) {
-            surface->Segment(uLow, uHigh, vLow, vHigh);
+        else {
+            surface = Handle(Geom_BSplineSurface)::DownCast(surface->Copy());
+            // Only the face's range: a whole cylinder or torus for a part of it costs patches
+            BRepTools::UVBounds(nurbs, uLow, uHigh, vLow, vHigh);
+            Standard_Real uFirst = 0.0;
+            Standard_Real uLast = 0.0;
+            Standard_Real vFirst = 0.0;
+            Standard_Real vLast = 0.0;
+            surface->Bounds(uFirst, uLast, vFirst, vLast);
+            if (!surface->IsUPeriodic()) {
+                uLow = std::max(uLow, uFirst);
+                uHigh = std::min(uHigh, uLast);
+            }
+            if (!surface->IsVPeriodic()) {
+                vLow = std::max(vLow, vFirst);
+                vHigh = std::min(vHigh, vLast);
+            }
+            if (uHigh - uLow > Precision::PConfusion()
+                && vHigh - vLow > Precision::PConfusion()) {
+                surface->Segment(uLow, uHigh, vLow, vHigh);
+            }
         }
         if (surface->IsUPeriodic()) {
             surface->SetUNotPeriodic();
