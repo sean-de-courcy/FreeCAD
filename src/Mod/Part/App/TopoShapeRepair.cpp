@@ -548,9 +548,32 @@ bool enclosesOutsideSolids(const TopoDS_Shape& shape)
     });
 }
 
+namespace
+{
+
+// Whether a solid of the shape has a shell that doesn't close up. BRepCheck accepts such a solid:
+// a dress-up at the limit on the fin cube (ops#12) keeps the fin as a second shell of its solid,
+// and a later Boolean then gives a wrong volume (ops#303)
+bool hasOpenShellInASolid(const TopoDS_Shape& shape)
+{
+    for (TopExp_Explorer solid(shape, TopAbs_SOLID); solid.More(); solid.Next()) {
+        for (TopoDS_Iterator it(solid.Current()); it.More(); it.Next()) {
+            if (it.Value().ShapeType() == TopAbs_SHELL && !closesUp(it.Value())) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+}  // namespace
+
 bool checkDressUp(TopoShape& shape, const TopoShape& base)
 {
-    if (shape.isValid()) {
+    // An invalid base passes its defects on, also into a result BRepCheck accepts: there it is
+    // repaired as an invalid one. A valid base keeps the check as before, since a solid may hold an
+    // open shell on purpose (internal faces)
+    if (shape.isValid() && (base.isValid() || !hasOpenShellInASolid(shape.getShape()))) {
         return true;
     }
     const auto solids = base.countSubShapes(TopAbs_SOLID);
