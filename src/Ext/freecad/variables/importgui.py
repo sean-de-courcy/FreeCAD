@@ -380,19 +380,34 @@ def _clear(layout):
             widget.deleteLater()
 
 
-def run(doc=None, paths=None):
+def run(doc=None, paths=None, close_on_cancel=False):
     """Opens the import dialog for @a doc (the active document, or a new one) with @a paths; with
-    none, asks for the files first. Returns the dialog (shown, not waited for), or None."""
+    none, asks for the files first. Returns the dialog (shown, not waited for), or None. A new document, or @a doc with @a close_on_cancel (File > Open's), is
+    closed when the dialog is cancelled."""
     if paths is None:
         paths, _filter = QtWidgets.QFileDialog.getOpenFileNames(
             Gui.getMainWindow(), translate("Variables", "Onshape variable studio exports"), "",
             FILTER)
         if not paths:
+            if close_on_cancel and doc is not None:
+                App.closeDocument(doc.Name)
             return None
     if doc is None:
-        doc = App.ActiveDocument or App.newDocument()
+        doc = App.ActiveDocument
+        if doc is None:
+            doc = App.newDocument()
+            close_on_cancel = True
     dialog = ImportDialog(doc, paths)
     _open.append(dialog)
-    dialog.finished.connect(lambda _r: _open.remove(dialog) if dialog in _open else None)
+    name = doc.Name
+
+    def finished(result):
+        if dialog in _open:
+            _open.remove(dialog)
+        cancelled = result != QtWidgets.QDialog.Accepted
+        if close_on_cancel and cancelled and name in App.listDocuments():
+            App.closeDocument(name)
+
+    dialog.finished.connect(finished)
     dialog.open()
     return dialog

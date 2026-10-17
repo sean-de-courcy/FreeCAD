@@ -1392,6 +1392,21 @@ class TestVariablesImportGui(unittest.TestCase):
         self.assertEqual(copy.Bindings, {"t": "Variables.Thick"})
         self.assertAlmostEqual(copy.Width.Value, 6)
 
+    def test_open_cancelled(self):
+        """File > Open of an export makes a document for it; cancelling the dialog closes that
+        document again (review 317, 7)."""
+        from freecad.variables import importer, importgui
+
+        before = set(App.listDocuments())
+        importer.open(self.a)
+        pump(0.1)
+        new = set(App.listDocuments()) - before
+        self.assertEqual(len(new), 1)
+        self.dialog = importgui._open[-1]
+        self.closeDialog()
+        self.assertTrue(waitFor(lambda: not (new & set(App.listDocuments()))),
+                        "the new document is still open")
+
     def panelWithCopy(self):
         """The panel on a document with an attached copy of Studio B (Gap), its row current."""
         b = writeExport(self.folder, "Studio B", [("LENGTH", "Gap", "3 mm")])

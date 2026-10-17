@@ -430,8 +430,6 @@ App.__cmake__ = globals().get("cmake", [])
 App.__unit_test__ = []
 
 App.addImportType("FreeCAD document (*.FCStd)", "FreeCAD")
-# FreeCAD-CH ops#317: variable studio exports, as copies (freecad.variables.importgui)
-App.addImportType("Onshape variables (*.json)", "freecad.variables.importer")
 
 # set to no gui, is overwritten by InitGui
 App.GuiUp = 0
@@ -1652,6 +1650,13 @@ def init_applications() -> None:
         Err(utils.HLine)
         Err(traceback.format_exc())
         Err(utils.HLine)
+
+
+# FreeCAD-CH ops#317: variable studio exports, as copies (freecad.variables.importgui).
+# After the modules: FEM also claims *.json, and FreeCAD picks the first module registered
+# for an extension when no filter or module says which (command line, open() and insert()
+# without a module).
+App.addImportType("Onshape variables (*.json)", "freecad.variables.importer")
 
 
 # ┌────────────────────────────────────────────────┐

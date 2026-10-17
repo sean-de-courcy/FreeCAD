@@ -23,7 +23,8 @@
 
 With the GUI, the import dialog opens with the file (freecad.variables.importgui); without it,
 the file is imported with no choices, and anything that stands in the way raises
-copies.ImportBlocked.
+copies.ImportBlocked. The type is registered after the modules (FreeCADInit.py), so FEM's
+`*.json` mesh import stays the one FreeCAD picks when no filter or module says which.
 """
 
 import os
@@ -33,16 +34,22 @@ import FreeCAD as App
 from freecad.variables import copies
 
 
-def insert(filename, docname):
+def insert(filename, docname, close_on_cancel=False):
     doc = App.getDocument(docname)
     if App.GuiUp:
         from freecad.variables import importgui
 
-        importgui.run(doc, [filename])
+        importgui.run(doc, [filename], close_on_cancel)
     else:
-        copies.import_studios(doc, [filename])
+        try:
+            copies.import_studios(doc, [filename])
+        except Exception:
+            if close_on_cancel:
+                App.closeDocument(doc.Name)
+            raise
 
 
 def open(filename):  # noqa: A001 (the name FreeCAD's File > Open calls)
+    # The new document goes again if the import is cancelled or fails: nothing was opened.
     doc = App.newDocument(os.path.splitext(os.path.basename(filename))[0])
-    insert(filename, doc.Name)
+    insert(filename, doc.Name, close_on_cancel=True)

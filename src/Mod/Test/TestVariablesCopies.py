@@ -296,6 +296,30 @@ class TestVariablesCopies(unittest.TestCase):
             copies.import_studios(self.doc, [a], values=values, name_map={"t": "pi"})
         self.assertIn("#t can't be the input variable pi", str(blocked.exception))
 
+    def test_fem_json_opens_through_fem(self):
+        """A FEM mesh .json still opens through FEM when nothing says which module reads it:
+        the Onshape type is registered after the modules (review 317, 7)."""
+        modules = App.getImportType("json")
+        self.assertIn("freecad.variables.importer", modules)
+        try:
+            import Fem
+            from feminout import importYamlJsonMesh
+        except ImportError:
+            self.skipTest("no FEM")
+        self.assertLess(modules.index("feminout.importYamlJsonMesh"),
+                        modules.index("freecad.variables.importer"))
+        mesh = Fem.FemMesh()
+        for node, xyz in enumerate(((0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1)), 1):
+            mesh.addNode(*xyz, node)
+        mesh.addVolume([1, 2, 3, 4])
+        path = os.path.join(self.folder, "TestVariablesCopiesMesh.json")
+        importYamlJsonMesh.write(path, mesh)
+        App.loadFile(path)
+        doc = App.getDocument("TestVariablesCopiesMesh")
+        meshes = [o for o in doc.Objects if o.isDerivedFrom("Fem::FemMeshObject")]
+        self.assertEqual(len(meshes), 1)
+        self.assertEqual(meshes[0].FemMesh.NodeCount, 4)
+
     def test_missing_studio_skip(self):
         """Skip #Gap: Width, which needs it, isn't imported; Height is. Skipped keeps the choice,
         so Refresh can tell Width from a variable added at the source."""
