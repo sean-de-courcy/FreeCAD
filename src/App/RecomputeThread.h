@@ -19,6 +19,8 @@
 
 #pragma once
 
+#include <functional>
+
 #include <FCGlobal.h>
 
 namespace App
@@ -35,5 +37,22 @@ class Document;
  * Recomputing, and this is false.
  */
 AppExport bool isRecomputingOnThisThread(const Document* doc);
+
+/// Whether the calling thread is inside any document's Document::recompute() (ops#337).
+AppExport bool isRecomputingOnThisThread();
+
+/// Whether the calling thread is the async recompute worker (Application::recomputeWorker).
+AppExport bool isRecomputeWorkerThread();
+
+/**
+ * Runs fn while the async recompute worker processes no request, for any document, and keeps it
+ * from starting one until fn returns (ops#337). For a question asked beside the worker, such as
+ * the GUI's Refresh poll of mustExecute(), that reads objects a worker recompute could change.
+ *
+ * Returns false without running fn when the worker is inside a request, or while another caller
+ * runs one (a try-lock: the caller never waits). fn must not queue, cancel or wait for
+ * recomputes.
+ */
+AppExport bool runWhileRecomputeWorkerIdle(const std::function<void()>& fn);
 
 }  // namespace App

@@ -2,17 +2,24 @@
 
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <cmath>
 #include <numbers>
 #include <sstream>
 #include <string>
 #include <vector>
 
+#include <boost/scope_exit.hpp>
+
 #include <src/App/InitApplication.h>
 #include <Base/Reader.h>
 #include <Base/Writer.h>
+#include <App/Application.h>
 #include <App/Document.h>
+#include <App/FeatureTest.h>
+#include <App/Part.h>
 #include <App/PropertyLinks.h>
+#include <App/RecomputeThread.h>
 #include <Mod/Part/App/FeaturePartBox.h>
 #include <Mod/Part/App/PrimitiveFeature.h>
 
@@ -353,4 +360,104 @@ TEST_F(AttachExtensionTest, testNonEmptyLegacySupportReplacesAttachmentSupport)
     ASSERT_EQ(object->AttachmentSupport.getSubValues().size(), 1);
     EXPECT_EQ(object->AttachmentSupport.getSubValues().front(), "Face2");
     EXPECT_STREQ(object->MapMode.getValueAsString(), "Deactivated");
+}
+
+// The GUI's Refresh poll beside an async recompute (FreeCAD-CH ops#337) ------------------------
+
+namespace
+{
+
+/// A plane at the document's root on the top face of a box in an App::Part at z = 50, recomputed,
+/// then the App::Part moved to z = 80: the plane's link frame differs from the one it was placed in
+Part::Plane* planeOnAMovedPart(App::Document* doc)
+{
+    auto part = doc->addObject<App::Part>("PA");
+    part->Placement.setValue(Base::Placement(Base::Vector3d(0, 0, 50), Base::Rotation()));
+    auto box = doc->addObject<Part::Box>("Inside");
+    part->addObject(box);
+    auto plane = doc->addObject<Part::Plane>("Attached");
+    plane->AttachmentSupport.setValue(box, std::vector<std::string> {"Face6"});
+    plane->MapMode.setValue("FlatFace");
+    doc->recompute();
+    EXPECT_NEAR(plane->Placement.getValue().getPosition().z, 60, 1e-9);
+    part->Placement.setValue(Base::Placement(Base::Vector3d(0, 0, 80), Base::Rotation()));
+    return plane;
+}
+
+bool polledFramesChanged(Part::Plane* plane)
+{
+    return plane->getExtensionByType<Part::AttachExtension>()->linkFramesChanged();
+}
+
+/// Queues `request` with a blocking feature in it, and checks the poll while the worker holds it:
+/// no walk, so no; after the worker is done, yes; after a recompute, placed anew and no
+void checkPollBesideTheWorker(
+    Part::Plane* plane,
+    App::DocumentObject* blocker,
+    const App::RecomputeRequest& request
+)
+{
+    auto& app = App::GetApplication();
+    EXPECT_TRUE(polledFramesChanged(plane));
+
+    App::FeatureTestAsyncBlocker::resetBlocker();
+    BOOST_SCOPE_EXIT_ALL(&)
+    {
+        App::FeatureTestAsyncBlocker::releaseBlocker();
+    };
+    blocker->touch();
+    ASSERT_TRUE(app.canRecomputeRequestOnWorker(request));
+    app.queueRecomputeRequest(request);
+    ASSERT_TRUE(App::FeatureTestAsyncBlocker::waitUntilStarted(std::chrono::seconds(2)));
+
+    // The worker is inside the request: the poll from this thread doesn't walk
+    EXPECT_FALSE(polledFramesChanged(plane));
+    EXPECT_FALSE(App::runWhileRecomputeWorkerIdle([] {}));
+
+    App::FeatureTestAsyncBlocker::releaseBlocker();
+    // Waits until the worker has finished the request
+    app.cancelRecomputeRequestsForDocument(request.documentName);
+    EXPECT_TRUE(App::runWhileRecomputeWorkerIdle([] {}));
+    EXPECT_TRUE(polledFramesChanged(plane));
+
+    plane->getDocument()->recompute();
+    EXPECT_NEAR(plane->Placement.getValue().getPosition().z, 90, 1e-9);
+    EXPECT_FALSE(polledFramesChanged(plane));
+}
+
+}  // namespace
+
+TEST_F(AttachExtensionTest, testPollBesideAWorkerRecomputeOfOneObject)
+{
+    // A single-object request (recomputeFeature) sets neither the document's Recomputing status
+    // nor the recompute's thread marker: the old guard let the poll walk beside it
+    auto plane = planeOnAMovedPart(getDocument());
+    auto blocker = getDocument()->addObject("App::FeatureTestAsyncBlocker", "Blocker");
+    ASSERT_TRUE(blocker);
+    checkPollBesideTheWorker(plane, blocker, App::RecomputeRequest::fromDocumentObject(*blocker));
+}
+
+TEST_F(AttachExtensionTest, testPollBesideAWorkerRecomputeOfAnotherDocument)
+{
+    // The walk reads objects of other documents too, but the old guard tested only the plane's
+    auto plane = planeOnAMovedPart(getDocument());
+    auto& app = App::GetApplication();
+    const std::string otherName = app.getUniqueDocumentName("other");
+    auto other = app.newDocument(otherName.c_str(), "testUser");
+    BOOST_SCOPE_EXIT_ALL(&)
+    {
+        app.closeDocument(otherName.c_str());
+    };
+    auto blocker = other->addObject("App::FeatureTestAsyncBlocker", "Blocker");
+    ASSERT_TRUE(blocker);
+    checkPollBesideTheWorker(plane, blocker, App::RecomputeRequest::fromDocument(*other, true));
+}
+
+TEST_F(AttachExtensionTest, testPollWithTheWorkerIdleComparesFrames)
+{
+    auto plane = planeOnAMovedPart(getDocument());
+    EXPECT_TRUE(polledFramesChanged(plane));
+    getDocument()->recompute();
+    EXPECT_NEAR(plane->Placement.getValue().getPosition().z, 90, 1e-9);
+    EXPECT_FALSE(polledFramesChanged(plane));
 }
