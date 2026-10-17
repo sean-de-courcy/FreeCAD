@@ -368,6 +368,27 @@ class TestResultBoxGui(unittest.TestCase):
         self.assertAlmostEqual(part.Shape.Volume, 1000, places=3)
         self.assertAlmostEqual(self.body.Shape.Volume, 16000, places=3)
 
+    def testNewPartWhenEditingAnUnusedTip(self):
+        """PR 303 round 2: an existing lid pad, the enclosure's tip that nothing uses, edited by
+        a double click. New part is offered and, chosen at once, moves the pad; OK leaves the lid
+        alone in the new Body (9000) and the enclosure 16000. The move's guard asks for an open
+        transaction, booked or pending (the panel's opening writes, so it is pending here)."""
+        self.enclosure()
+        lid = pad(self.body, "Lid", self.lidSk, 10)
+        self.doc.recompute()
+        lid.ViewObject.doubleClicked()
+        self.waitForPanel()
+        combo = self.combo()
+        model = combo.model()
+        self.assertTrue(model.flags(model.index(1, 0)) & QtCore.Qt.ItemIsEnabled)
+        self.choose("New part")
+        part = lid.getParentGeoFeatureGroup()
+        self.assertNotEqual(part, self.body)
+        self.close(ok=True)
+        self.assertIs(lid.getParentGeoFeatureGroup(), part)
+        self.assertAlmostEqual(part.Shape.Volume, 9000, places=3)
+        self.assertAlmostEqual(self.body.Shape.Volume, 16000, places=3)
+
     def featurePanel(self, command):
         """The command on the lid sketch; returns the feature it made, with its panel open."""
         before = {o.Name for o in self.doc.Objects}

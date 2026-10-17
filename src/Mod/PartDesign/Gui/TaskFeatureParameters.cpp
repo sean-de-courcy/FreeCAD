@@ -32,6 +32,7 @@
 #include <QLabel>
 #include <QMessageBox>
 #include <QPointer>
+#include <QSignalBlocker>
 #include <QStandardItemModel>
 #include <QTimer>
 
@@ -257,6 +258,13 @@ bool isMoved(const App::DocumentObject* feature)
     return findMove(feature) != nullptr;
 }
 
+// A transaction Cancel can abort: opened (a command books one until something is written), or
+// pending (PR 303 round 2)
+bool hasOpenTransaction(const App::Document* doc)
+{
+    return doc && (doc->getBookedTransactionID() != 0 || doc->hasPendingTransaction());
+}
+
 // Other parts in the Body's studio: Bodies of one container placed alike (ops#325)
 bool hasStudioSiblings(const PartDesign::Body* body)
 {
@@ -278,7 +286,7 @@ QString newPartRefusal(PartDesign::FeatureAddSub* feature)
     if (!body) {
         return QObject::tr("New part needs a feature in a body");
     }
-    if (!feature->getDocument()->hasPendingTransaction()) {
+    if (!hasOpenTransaction(feature->getDocument())) {
         return QObject::tr("New part needs a dialog that Cancel can undo");
     }
     bool used = std::ranges::any_of(feature->getInList(), [body](App::DocumentObject* user) {
@@ -315,7 +323,16 @@ void restartEdit(const App::DocumentObjectT& featureT, const std::function<void(
         e.reportException();
     }
     if (App::DocumentObject* feature = featureT.getObject()) {
-        PartDesignGui::setEdit(feature, PartDesign::Body::findBodyOf(feature));
+        try {
+            PartDesignGui::setEdit(feature, PartDesign::Body::findBodyOf(feature));
+        }
+        catch (const Base::Exception& e) {
+            e.reportException();
+        }
+    }
+    // No panel came back, so no box takes the move over (PR 303 round 2)
+    if (!Gui::Control().activeDialog(doc)) {
+        forgetMove(featureT);
     }
 }
 
@@ -412,7 +429,7 @@ void moveBack(const App::DocumentObjectT& featureT)
 bool isEditing(const QWidget* box, const App::DocumentObjectT& featureT)
 {
     App::Document* doc = featureT.getDocument();
-    if (!box || !doc || !doc->hasPendingTransaction()) {
+    if (!box || !hasOpenTransaction(doc)) {
         return false;
     }
     Gui::TaskView::TaskDialog* dialog = Gui::Control().activeDialog(doc);
@@ -527,8 +544,13 @@ void TaskResultParameters::onResultChanged(int index)
     QPointer<TaskResultParameters> box(this);
     QTimer::singleShot(0, qApp, [box, target, toNewPart]() {
         // OK or Cancel came first: the dialog's transaction is closed, and a move now would be
-        // outside any undo step (PR 303 round 1)
+        // outside any undo step (PR 303 round 1). A box still there shows what is
         if (!isEditing(box.data(), target)) {
+            if (box) {
+                QSignalBlocker block(box->combo);
+                box->combo->setCurrentIndex(toNewPart ? 0 : 1);
+                box->combo->setEnabled(true);
+            }
             return;
         }
         if (toNewPart) {
