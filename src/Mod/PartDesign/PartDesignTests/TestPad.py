@@ -184,12 +184,16 @@ def upToTheLoftSide(test, doc, kind):
     feature.Type = "UpToFace"
     feature.UpToFace = (baseFeature, [side])
     feature.Reversed = True
+    # The maker is what this model tests. Refined, a Pocket whose cut removes nothing but splits
+    # the side adds a curve on surface to the base's edges in place, one more at each recompute
+    # (ops#354), once there is a prism
+    feature.Refine = False
     doc.recompute()
     test.assertTrue(feature.isValid(), feature.getStatusString())
     assertBasesKept(test, held)
-    # The prism up to the loft's side is empty, on the unfixed build too (BRepFeat finds no
-    # prism up to the lofted B-spline face; the feature stays valid and adds nothing). The
-    # tolerances are what this model tests
+    # The tolerances and curves are what this model tests. Whether BRepFeat builds the prism up
+    # to the lofted B-spline face depends on the platform (empty on Windows, a prism that
+    # overlaps on macOS): no check here depends on it (ops#353)
     return baseFeature, feature
 
 
@@ -941,9 +945,6 @@ class TestPad(unittest.TestCase):
         # ops#347: BRepFeat runs on copies of the base and the up-to face
         base, pad = upToTheLoftSide(self, self.Doc, "Pad")
         self.assertTrue(pad.Shape.isValid())
-        self.assertAlmostEqual(
-            pad.Shape.Volume, base.Shape.Volume + pad.AddSubShape.Volume, places=4
-        )
 
     def testPadUpToABaseWithNames(self):
         """ops#347, review of fork PR 321: a Pad up to the base keeps the base's names and has
