@@ -3,6 +3,7 @@
 feature, not the Body. Designed geometry. Off screen: QT_QPA_PLATFORM=offscreen, a fresh
 FREECAD_USER_HOME (notes/build.md)."""
 
+import math
 import unittest
 
 import FreeCAD as App
@@ -366,6 +367,65 @@ class TestResultBoxGui(unittest.TestCase):
         self.assertEqual(part.Group, [box])
         self.assertAlmostEqual(part.Shape.Volume, 1000, places=3)
         self.assertAlmostEqual(self.body.Shape.Volume, 16000, places=3)
+
+    def featurePanel(self, command):
+        """The command on the lid sketch; returns the feature it made, with its panel open."""
+        before = {o.Name for o in self.doc.Objects}
+        self.runCommand(command, self.lidSk)
+        [feature] = [
+            o
+            for o in self.doc.Objects
+            if o.Name not in before and o.isDerivedFrom("PartDesign::FeatureAddSub")
+        ]
+        return feature
+
+    def otherPart(self):
+        """A second part beside the enclosure, so the box shows for a subtractive feature."""
+        other = self.doc.addObject("PartDesign::Body", "Other")
+        pad(other, "Cube", sketch(other, "CubeSk", xyPlane(other), (50, 0, 60, 10)), 10)
+        self.doc.recompute()
+
+    def assertAdditiveBox(self, command):
+        self.enclosure()
+        feature = self.featurePanel(command)
+        self.assertEqual(self.items(self.combo()), ["Add to Enclosure", "New part"])
+        return feature
+
+    def assertSubtractiveBox(self, command):
+        self.enclosure()
+        self.otherPart()
+        self.featurePanel(command)
+        self.assertEqual(
+            self.items(self.combo()), ["Remove from Enclosure", "Intersect with Enclosure"]
+        )
+
+    def testRevolutionPanelNewPart(self):
+        """PR 303 round 1, the panels the 2b tests didn't open: Revolution shows the box, and New
+        part works there. The lid square (sketch x 0 to 30) turned about the sketch's V axis is a
+        cylinder of radius 30 and height 30, alone in the new Body; the enclosure is 16000."""
+        revolution = self.assertAdditiveBox("PartDesign_Revolution")
+        self.choose("New part")
+        self.close(ok=True)
+        part = revolution.getParentGeoFeatureGroup()
+        self.assertNotEqual(part, self.body)
+        self.assertEqual(part.Group, [self.lidSk, revolution])
+        self.assertAlmostEqual(part.Shape.Volume, math.pi * 30**2 * 30, places=3)
+        self.assertAlmostEqual(self.body.Shape.Volume, 16000, places=3)
+
+    def testLoftPanelHasTheBox(self):
+        self.assertAdditiveBox("PartDesign_AdditiveLoft")
+
+    def testPipePanelHasTheBox(self):
+        self.assertAdditiveBox("PartDesign_AdditivePipe")
+
+    def testHelixPanelHasTheBox(self):
+        self.assertAdditiveBox("PartDesign_AdditiveHelix")
+
+    def testGroovePanelHasTheBox(self):
+        self.assertSubtractiveBox("PartDesign_Groove")
+
+    def testHolePanelHasTheBox(self):
+        self.assertSubtractiveBox("PartDesign_Hole")
 
     def activate(self, doc):
         App.setActiveDocument(doc.Name)
