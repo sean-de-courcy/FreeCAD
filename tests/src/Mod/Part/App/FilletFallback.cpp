@@ -1050,6 +1050,28 @@ TEST_F(FilletFallbackTest, theCopyNamesAsTheBaseWithItsElementMap)
     EXPECT_NE(elementNames(result), elementNames(plainResult));
 }
 
+// The maker's copy has the base's tolerances, sub-shape by sub-shape, in new TShapes: the checks
+// that read them (Request::faceTolerances) see the base's own (PR 318 review, low 2)
+TEST_F(FilletFallbackTest, theCopyHasTheBaseTolerances)
+{
+    std::vector<TopoShape> edges;
+    TopoShape base = ribAgainstWall(edges);
+    // Tolerances that differ between the sub-shapes, as a base built by other features has them
+    BRep_Builder builder;
+    const auto& edge = TopoDS::Edge(edges[0].getShape());
+    builder.UpdateEdge(edge, 3e-6);
+    builder.UpdateVertex(TopExp::FirstVertex(edge), 5e-6);
+    std::vector<TopoShape> inputEdges = edges;
+    const TopoShape input = FF::makerInput(base, inputEdges);
+    EXPECT_EQ(tolerancesByIndex(input.getShape()), tolerancesByIndex(base.getShape()));
+    EXPECT_FALSE(sharesTopology(input.getShape(), base.getShape()));
+    EXPECT_EQ(input.Tag, base.Tag);
+    ASSERT_EQ(inputEdges.size(), edges.size());
+    for (std::size_t i = 0; i < edges.size(); ++i) {
+        EXPECT_EQ(input.findShape(inputEdges[i].getShape()), base.findShape(edges[i].getShape()));
+    }
+}
+
 // makerInputs() copies several inputs together: an up-to face of the base is a face of the base's
 // copy, a face of another shape gets its own copy, and each copy keeps its shape's tolerances,
 // element map and Tag (ops#347)
