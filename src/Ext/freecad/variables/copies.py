@@ -625,24 +625,26 @@ def detach(copy):
         raise TypeError(f"{copy.Label} isn't a copy")
     doc = copy.Document
     own = doc.getBookedTransactionID() == 0
+    # SourceKind last: until it changes, the copy is still attached and read-only.
+    cleared = {"SourcePath": "", "SourceRelativePath": "", "SourceObject": "",
+               "SourceEntries": 0, "SourceStamp": "", "SourceRefreshed": "",
+               "SourceExpressions": {}, "NameMap": {}, "Bindings": {}, "Skipped": [],
+               "Orphans": [], "SourceKind": DETACHED}
+    before = {name: getattr(copy, name) for name in cleared}
     if own:
         doc.openTransaction(f"Detach {copy.Label}")
     try:
-        copy.SourceKind = DETACHED  # the variables become editable
-        copy.SourcePath = ""
-        copy.SourceRelativePath = ""
-        copy.SourceObject = ""
-        copy.SourceEntries = 0
-        copy.SourceStamp = ""
-        copy.SourceRefreshed = ""
-        copy.SourceExpressions = {}
-        copy.NameMap = {}
-        copy.Bindings = {}
-        copy.Skipped = []
-        copy.Orphans = []
+        for name, value in cleared.items():
+            setattr(copy, name, value)
     except BaseException:
         if own:
             doc.abortTransaction()
+        else:  # someone else's transaction, or none: put back what was set
+            for name in reversed(list(cleared)):
+                try:
+                    setattr(copy, name, before[name])
+                except Exception as e:  # noqa: BLE001 (Detach's own error is the one to raise)
+                    App.Console.PrintWarning(f"Detach: couldn't restore {name}: {e}\n")
         raise
     if own:
         doc.commitTransaction()
