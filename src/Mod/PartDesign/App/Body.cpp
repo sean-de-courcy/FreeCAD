@@ -904,6 +904,19 @@ void Body::onChanged(const App::Property* prop)
                 BaseFeature.setValue(nullptr);
             }
         }
+        else if (prop->getName() && std::strcmp(prop->getName(), "MergedInto") == 0) {
+            // Merged into another part, or unmerged by deleting the Merge (FreeCAD-CH ops#325,
+            // design 2.6): its solids after the merged feature fail, or compute again, and
+            // nothing else runs them. Unmerged, it shows again
+            for (auto feature : Group.getValues()) {
+                if (isSolidFeature(feature)) {
+                    feature->touch();
+                }
+            }
+            if (!static_cast<const App::PropertyLinkHidden*>(prop)->getValue()) {
+                Visibility.setValue(true);
+            }
+        }
         else if (prop == &AllowCompound) {
             // As disallowing compounds can break the model we need to recompute the whole tree.
             // This will inform user about first place where there is more than one solid.

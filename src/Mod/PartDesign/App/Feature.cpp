@@ -57,6 +57,7 @@
 #include "FailureContinuation.h"
 #include "FeaturePy.h"
 #include "Body.h"
+#include "FeatureBoolean.h"
 #include "ShapeBinder.h"
 
 #include <BRep_Builder.hxx>
@@ -230,6 +231,13 @@ App::DocumentObjectExecReturn* Feature::recompute()
     }
 
     SuppressedShape.setValue(TopoShape());
+
+    // Its Body is merged into another part, at an earlier feature (FreeCAD-CH ops#325, design
+    // 2.6): it doesn't reach the Merge. Checked here, as every path that adds or moves a solid
+    // (a command, Python, a reorder, undo) ends here
+    if (std::string why = Boolean::mergeLock(this); !why.empty()) {
+        return new App::DocumentObjectExecReturn(why, this);
+    }
 
     const char* placer = nullptr;
     std::string where;
