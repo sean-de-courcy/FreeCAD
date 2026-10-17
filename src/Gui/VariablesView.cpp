@@ -1513,14 +1513,14 @@ bool VariablesView::addFromDialog(
     };
     try {
         if (!target) {
+            // The name addObject gives it: "Variables001" if another object is named "Variables".
+            // Not the document's last object: an observer may add one as it is made.
+            std::string varSetName = doc->getUniqueObjectName("Variables");
             Gui::Command::runCommand(
                 Gui::Command::Doc,
                 ("App.getDocument('" + docName + "').addObject('App::VarSet', 'Variables')").c_str()
             );
-            // The new object is the document's last; its name may be "Variables001" if another
-            // object is named "Variables".
-            const auto& objects = doc->getObjects();
-            target = objects.empty() ? nullptr : objects.back();
+            target = doc->getObject(varSetName.c_str());
             if (!target || !target->isDerivedFrom<App::VarSet>()) {
                 target = nullptr;
                 return fail(tr("The \"Variables\" set could not be made."));
@@ -1598,6 +1598,9 @@ void VariablesView::addOtherVariable(App::DocumentObject* target)
         QString error;
         std::string command = std::string("App.getDocument('") + doc->getName()
             + "').addObject('App::VarSet', 'Variables')";
+        // The name addObject gives it: "Variables001" if another object is named "Variables".
+        // Not the document's last object: an observer may add one as it is made.
+        std::string varSetName = doc->getUniqueObjectName("Variables");
         if (!runEdit(doc, "Add variable", {command}, error)) {
             showMessage(error, true);
             return;
@@ -1605,10 +1608,7 @@ void VariablesView::addOtherVariable(App::DocumentObject* target)
         if (own) {
             createdID = doc->getTransactionID(true, 0);
         }
-        // The new object is the document's last; its name may be "Variables001" if another
-        // object is named "Variables".
-        const auto& objects = doc->getObjects();
-        target = objects.empty() ? nullptr : objects.back();
+        target = doc->getObject(varSetName.c_str());
         if (!target || !target->isDerivedFrom<App::VarSet>()) {
             return;
         }

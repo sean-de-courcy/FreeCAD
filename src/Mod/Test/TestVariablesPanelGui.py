@@ -651,6 +651,32 @@ class TestVariablesPanelGui(unittest.TestCase):
         self.assertEqual([o.Name for o in doc.findObjects("App::VarSet")], ["VarSet"])
         self.assertNotIn("Size", self.varSet.PropertiesList)
 
+    def test_add_dialog_new_set_not_last(self):
+        """The new "Variables" set is found by its name, not as the document's last object: an
+        observer that adds an object as the set is made doesn't take the variable (PR 313
+        round 1)."""
+        doc = self.standardDocument()
+
+        class AddsOne:
+            def slotCreatedObject(self, obj):
+                if obj.Document == doc and obj.TypeId == "App::VarSet":
+                    doc.addObject("App::DocumentObjectGroup", "Extra")
+
+        observer = AddsOne()
+        App.addDocumentObserver(observer)
+        try:
+            self.tree.setCurrentIndex(QtCore.QModelIndex())
+            dialog = self.openPanelAddDialog()
+            self.fillAddDialog(dialog, "Depth2", "Length", "5 mm", varSet="Variables (new)")
+            self.pressOk(dialog)
+        finally:
+            App.removeDocumentObserver(observer)
+        self.assertFalse(self.addDialogOpen())
+        varSet = doc.getObject("Variables")
+        self.assertIsNotNone(varSet)
+        self.assertIsNotNone(doc.getObject("Extra"))
+        self.assertAlmostEqual(varSet.Depth2.Value, 5)
+
     def test_describe(self):
         """G-3. A description typed in its cell is one undo step, "Describe Width"; Edit
         description... edits several lines, and a cell of several lines opens that dialog rather
