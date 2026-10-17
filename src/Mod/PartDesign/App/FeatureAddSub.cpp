@@ -42,6 +42,7 @@
 #include <Bnd_Box.hxx>
 #include <App/Document.h>
 #include <App/Expression.h>
+#include <App/ExpressionParser.h>
 #include <App/ObjectIdentifier.h>
 
 #include "Body.h"
@@ -434,6 +435,27 @@ void pasteBoundValues(const FeatureAddSub* primary, FeatureAddSub* sibling)
     }
 }
 
+// The expression that binds a sibling's `prop` to the primary's, or an error: a primary whose
+// name reads as something else (a unit, as "H") can't be named in an expression, and the file
+// would keep the text
+std::string boundExpression(const FeatureAddSub* primary, const App::Property* prop)
+{
+    const std::string text = std::string(primary->getNameInDocument()) + "." + prop->getName();
+    try {
+        App::ExpressionPtr expr(App::Expression::parse(primary, text));
+        auto var = freecad_cast<App::VariableExpression*>(expr.get());
+        if (var && var->getPath().getProperty() == prop) {
+            return text;
+        }
+    }
+    catch (const Base::Exception&) {
+    }
+    throw Base::ValueError(
+        "Siblings: " + label(primary) + "'s name, " + primary->getNameInDocument()
+        + ", can't be read in an expression; make the cut in a feature of another name"
+    );
+}
+
 // The links of `user` besides those of its place in a Body's chain
 bool linksBesidesChain(App::DocumentObject* user, const App::DocumentObject* target)
 {
@@ -545,6 +567,15 @@ std::vector<FeatureAddSub*> FeatureAddSub::makeSiblings(
             throw Base::ValueError("Siblings: Roll " + label(target) + " to the end first");
         }
     }
+    const std::vector<App::Property*> shared = sharedProperties(primary);
+    std::map<const App::Property*, std::string> expressions;
+    if (!targets.empty()) {
+        for (App::Property* prop : shared) {
+            if (!isCopied(prop)) {
+                expressions[prop] = boundExpression(primary, prop);
+            }
+        }
+    }
 
     App::Document* doc = primary->getDocument();
     for (const auto& [part, sibling] : existing) {
@@ -557,7 +588,6 @@ std::vector<FeatureAddSub*> FeatureAddSub::makeSiblings(
         doc->removeObject(sibling->getNameInDocument());
     }
 
-    const std::vector<App::Property*> shared = sharedProperties(primary);
     std::vector<FeatureAddSub*> result;
     for (Body* target : targets) {
         FeatureAddSub* sibling = existing.contains(target) ? existing[target] : nullptr;
@@ -583,8 +613,7 @@ std::vector<FeatureAddSub*> FeatureAddSub::makeSiblings(
                 continue;
             }
             App::ObjectIdentifier path(*mine);
-            const std::string text = std::string(primary->getNameInDocument()) + "."
-                + prop->getName();
+            const std::string& text = expressions[prop];
             auto bound = sibling->getExpression(path).expression;
             if (!bound || bound->toString() != text) {
                 sibling->setExpression(path, App::Expression::parse(sibling, text));

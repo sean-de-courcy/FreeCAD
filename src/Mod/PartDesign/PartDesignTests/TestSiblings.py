@@ -273,6 +273,25 @@ class TestSiblings(unittest.TestCase):
             self.assertAlmostEqual(self.lid.Shape.Volume, 8000 - area * 5, places=4)
             self.assertAlmostEqual(self.enclosure.Shape.Volume, 16000 - area * 10, places=4)
 
+    def testPrimaryNamedLikeAUnit(self):
+        """PR 304 round 1: a primary named "H" (made from Python) can't be named in an
+        expression, "H" being a unit: makeSiblings refuses before it adds anything."""
+        self.model(type="Length", length=5)
+        named = self.lid.newObject("PartDesign::Pocket", "H")
+        named.Profile = self.holeSk
+        named.Type = "Length"
+        named.Length = 5
+        self.lid.removeObject(self.pocket)
+        self.doc.removeObject(self.pocket.Name)
+        self.doc.recompute()
+        self.assertEqual(named.Name, "H")
+        self.assertTrue(named.isValid(), named.getStatusString())
+        before = sorted(o.Name for o in self.doc.Objects)
+        with self.assertRaisesRegex(Exception, "can't be read in an expression"):
+            PartDesign.makeSiblings(named, [self.enclosure])
+        self.assertEqual(sorted(o.Name for o in self.doc.Objects), before)
+        self.assertIs(self.enclosure.Tip, self.base)
+
     def testUntickRemovesASibling(self):
         """The ticks again: makeSiblings with the enclosure unticked deletes its sibling, and
         the enclosure is whole. A sibling that something else uses (a sketch on it) is kept,
