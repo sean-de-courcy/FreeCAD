@@ -281,6 +281,7 @@ TaskDlgLoftParameters::TaskDlgLoftParameters(ViewProviderLoft* LoftView, bool ne
     parameter = new TaskLoftParameters(LoftView, newObj);
 
     Content.push_back(parameter);
+    addResultBox();
     Content.push_back(preview);
 }
 

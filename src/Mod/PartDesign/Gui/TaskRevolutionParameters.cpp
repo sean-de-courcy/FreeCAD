@@ -880,6 +880,7 @@ TaskDlgRevolutionParameters::TaskDlgRevolutionParameters(ViewProviderRevolution*
     Content.push_back(
         new TaskRevolutionParameters(RevolutionView, "PartDesign_Revolution", tr("Revolution Parameters"))
     );
+    addResultBox();
     Content.push_back(preview);
 }
 
@@ -890,6 +891,7 @@ TaskDlgGrooveParameters::TaskDlgGrooveParameters(ViewProviderGroove* GrooveView)
     Content.push_back(
         new TaskRevolutionParameters(GrooveView, "PartDesign_Groove", tr("Groove Parameters"))
     );
+    addResultBox();
     Content.push_back(preview);
 }
 

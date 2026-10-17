@@ -1179,6 +1179,7 @@ TaskDlgPrimitiveParameters::TaskDlgPrimitiveParameters(ViewProviderPrimitive* Pr
     Content.push_back(primitive);
     parameter = new PartGui::TaskAttacher(PrimitiveView, nullptr, QString(), tr("Attachment"));
     Content.push_back(parameter);
+    addResultBox();
     Content.push_back(preview);
 
     connect(
@@ -1196,6 +1197,12 @@ bool TaskDlgPrimitiveParameters::accept()
     bool primitiveOK = primitive->setPrimitive(vp_prm->getObject());
     if (!primitiveOK) {
         return primitiveOK;
+    }
+    // The Result box writes what it shows (ops#325); TaskDlgFeatureParameters::accept isn't run
+    for (QWidget* widget : Content) {
+        if (auto result = qobject_cast<TaskResultParameters*>(widget)) {
+            result->apply();
+        }
     }
     Gui::Command::doCommand(Gui::Command::Doc, "App.ActiveDocument.recompute()");
     Gui::Command::doCommand(Gui::Command::Gui, "Gui.activeDocument().resetEdit()");

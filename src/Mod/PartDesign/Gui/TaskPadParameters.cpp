@@ -140,6 +140,7 @@ TaskDlgPadParameters::TaskDlgPadParameters(ViewProviderPad* PadView, bool /*newO
     , parameters(new TaskPadParameters(PadView))
 {
     Content.push_back(parameters);
+    addResultBox();
     Content.push_back(preview);
 }
 

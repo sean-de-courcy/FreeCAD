@@ -1769,6 +1769,7 @@ TaskDlgHoleParameters::TaskDlgHoleParameters(ViewProviderHole* HoleView)
     parameter = new TaskHoleParameters(HoleView);
 
     Content.push_back(parameter);
+    addResultBox();
     Content.push_back(preview);
 }
 
