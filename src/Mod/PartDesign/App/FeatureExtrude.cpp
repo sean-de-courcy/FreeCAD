@@ -1222,6 +1222,9 @@ TopoShape FeatureExtrude::generateSingleExtrusionSide(
                     "Extrude: Unable to reach the selected shape, please select faces"
                 );
             }
+            // Not an empty prism: one side gave a null result, and a side of two was left out
+            // with no error (ops#353)
+            throw;
         }
     }
     else if (method == "Length" || method == "ThroughAll") {

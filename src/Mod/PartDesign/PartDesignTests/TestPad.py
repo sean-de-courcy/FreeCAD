@@ -191,9 +191,85 @@ def upToTheLoftSide(test, doc, kind):
     doc.recompute()
     test.assertTrue(feature.isValid(), feature.getStatusString())
     assertBasesKept(test, held)
-    # The tolerances and curves are what this model tests. Whether BRepFeat builds the prism up
-    # to the lofted B-spline face depends on the platform (empty on Windows, a prism that
-    # overlaps on macOS): no check here depends on it (ops#353)
+    # The prism reaches the side (ops#353: BRepFeat gave an empty prism up to the lofted
+    # B-spline face, and the feature stayed valid)
+    test.assertAlmostEqual(
+        feature.AddSubShape.Volume, loftSideReach(22, -2, 2, 11 - 1e-6, 15 - 1e-6), places=4
+    )
+    return baseFeature, feature
+
+
+# The volume of a solid whose side is ops#347's loft side cut into pieces (a Pad or Pocket up to
+# it) is off by up to 1.1e-3 in GProp's integration, while the pieces' areas add up to the side's
+# within 1e-4 and the prism's volume is the computed one within 1e-5 (ops#353)
+LOFT_VOLUME_DELTA = 5e-3
+
+
+def loftSideReach(x0, y0, y1, z0, z1):
+    """The volume between the plane x = x0 and the +x side of ops#347's loft (the circle r 10 at
+    z 0 to the ellipse 12 x 6 at z 15) over the rectangle y0..y1, z0..z1 of that plane: from
+    x0 >= 12 to the side, or from x0 = 0 inside the loft to the side. The ruled loft's section
+    at height z is the ellipse with semi-axes a = 10 + 2z/15 along x and b = 10 - 4z/15 along y
+    (its two curves have the same parameterisation), so the side is at x = a sqrt(1 - y^2/b^2).
+    The y integral is exact, the z integral Simpson's rule with 1000 intervals (ops#353)."""
+    import math
+
+    def reach(z):
+        a = 10 + 2 * z / 15
+        b = 10 - 4 * z / 15
+
+        def area(y):  # twice the integral of sqrt(1 - y^2/b^2)
+            return y * math.sqrt(1 - y * y / (b * b)) + b * math.asin(y / b)
+
+        side = a * (area(y1) - area(y0)) / 2
+        return abs(x0 * (y1 - y0) - side)
+
+    n = 1000
+    h = (z1 - z0) / n
+    total = reach(z0) + reach(z1)
+    for i in range(1, n):
+        total += (4 if i % 2 else 2) * reach(z0 + i * h)
+    return total * h / 3
+
+
+def squareUpToTheLoft(doc, kind, x0, z0, z1, reversed=True):
+    """ops#353: ops#347's loft as a Body's BaseFeature, a 4 x 4 square y -2..2, z z0..z1 in the
+    plane x = x0 (sketch normal +x), and a Pad or Pocket from it up to the loft's B-spline side
+    face. Recomputed, not checked."""
+    import Sketcher
+
+    V = FreeCAD.Vector
+    base = doc.addObject("Part::Feature", "Loft")
+    base.Shape = Part.makeLoft(
+        [
+            Part.Wire(Part.Circle(V(0, 0, 0), V(0, 0, 1), 10).toShape()),
+            Part.Wire(Part.Ellipse(V(0, 0, 15), 12, 6).toShape()),
+        ],
+        True,
+    )
+    body = doc.addObject("PartDesign::Body", "Body")
+    baseFeature = body.newObject("PartDesign::FeatureBase", "BaseFeature")
+    baseFeature.BaseFeature = base
+    doc.recompute()
+    side = next(
+        "Face%d" % i
+        for i, f in enumerate(baseFeature.Shape.Faces, 1)
+        if f.Surface.TypeId != "Part::GeomPlane"
+    )
+    sketch = body.newObject("Sketcher::SketchObject", "Square")
+    # Sketch x is world -z, y is y, the normal +x
+    sketch.Placement = FreeCAD.Placement(V(x0, 0, 0), FreeCAD.Rotation(V(0, 1, 0), 90))
+    corners = [V(-z1, -2, 0), V(-z0, -2, 0), V(-z0, 2, 0), V(-z1, 2, 0)]
+    for i in range(4):
+        sketch.addGeometry(Part.LineSegment(corners[i], corners[(i + 1) % 4]))
+    for i in range(4):
+        sketch.addConstraint(Sketcher.Constraint("Coincident", i, 2, (i + 1) % 4, 1))
+    feature = body.newObject("PartDesign::" + kind, kind)
+    feature.Profile = sketch
+    feature.Type = "UpToFace"
+    feature.UpToFace = (baseFeature, [side])
+    feature.Reversed = reversed
+    doc.recompute()
     return baseFeature, feature
 
 
@@ -945,6 +1021,36 @@ class TestPad(unittest.TestCase):
         # ops#347: BRepFeat runs on copies of the base and the up-to face
         base, pad = upToTheLoftSide(self, self.Doc, "Pad")
         self.assertTrue(pad.Shape.isValid())
+        self.assertAlmostEqual(
+            pad.Shape.Volume, base.Shape.Volume + pad.AddSubShape.Volume, delta=LOFT_VOLUME_DELTA
+        )
+
+    def testPadUpToALoftedFace(self):
+        # ops#353: BRepFeat gave an empty prism up to the loft's B-spline side, and the Pad was
+        # valid and added nothing. Either way the square faces the side: not reversed, the
+        # extrusion is turned towards the face it doesn't find ahead
+        expected = loftSideReach(22, -2, 2, 5, 9)
+        for reversed in (True, False):
+            with self.subTest(reversed=reversed):
+                doc = FreeCAD.newDocument("PadUpToALoftedFace")
+                try:
+                    base, pad = squareUpToTheLoft(doc, "Pad", 22, 5, 9, reversed)
+                    self.assertTrue(pad.isValid(), pad.getStatusString())
+                    self.assertTrue(pad.Shape.isValid())
+                    self.assertEqual(len(pad.Shape.Solids), 1)
+                    self.assertAlmostEqual(pad.AddSubShape.Volume, expected, places=4)
+                    self.assertAlmostEqual(
+                        pad.Shape.Volume, base.Shape.Volume + expected, delta=LOFT_VOLUME_DELTA
+                    )
+                finally:
+                    FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToALoftedFaceThatMissesPartOfIt(self):
+        # ops#353: the square's top 2 mm pass over the loft (z 11..17, the loft ends at 15), and
+        # the side face can't be extended: the Pad fails, saying so, not an empty or cut-down Pad
+        base, pad = squareUpToTheLoft(self.Doc, "Pad", 22, 11, 17)
+        self.assertFalse(pad.isValid())
+        self.assertIn("doesn't meet", pad.getStatusString())
 
     def testPadUpToABaseWithNames(self):
         """ops#347, review of fork PR 321: a Pad up to the base keeps the base's names and has
