@@ -139,6 +139,8 @@ def _object(obj, doc, masker, names):
             props[name] = [kind, len(value)]
             if name == "Geometry":
                 entry["geometry"] = _sketchGeometry(obj, value)
+        elif kind == "App::PropertyPythonObject":
+            props[name] = [kind, _pythonObject(value)]
         else:
             props[name] = [kind, _plain(value, doc)]
     entry["props"] = props
@@ -158,6 +160,37 @@ def _object(obj, doc, masker, names):
         except Exception:
             pass
     return entry
+
+
+def _pythonObject(value):
+    """A Python feature's proxy (an Assembly joint's, a VarSet-free FeaturePython's): its class,
+    as the file names it (module and class), which a restore needs to find; its state too, when
+    the class saves one in a plain form."""
+    if value is None:
+        return None
+    kind = type(value)
+    entry = {"proxy": f"{kind.__module__}.{kind.__qualname__}"}
+    dumps = getattr(value, "dumps", None) or getattr(value, "__getstate__", None)
+    if dumps is not None:
+        try:
+            state = dumps()
+        except Exception as e:
+            state = {"error": type(e).__name__}
+        if state is not None:
+            entry["state"] = _plainState(state)
+    return entry
+
+
+def _plainState(value, depth=0):
+    if depth > 20:
+        return {"py": "deep"}
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, (list, tuple)):
+        return [_plainState(v, depth + 1) for v in value]
+    if isinstance(value, dict):
+        return {str(k): _plainState(v, depth + 1) for k, v in sorted(value.items())}
+    return {"py": type(value).__name__}
 
 
 def _shapeOf(obj):
