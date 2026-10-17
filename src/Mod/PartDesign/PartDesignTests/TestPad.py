@@ -472,10 +472,10 @@ def padUpToAPlateWithABulb(doc, half):
     return pad
 
 
-def padUpToABoxBesideALoft(doc, withLoft):
+def padUpToABoxBesideALoft(doc, withLoft, x0=25):
     """ops#353 review M2: the box x 10..35, y -5..5, z 0..10 as a Body's BaseFeature, fused with
     ops#347's loft when `withLoft` (its B-spline side is away from the Pad), and a Pad from the
-    4 x 4 square x 25..29, y -2..2 at z = -5, along +z, up to the base (UpToShape, nothing
+    4 x 4 square x `x0`..`x0` + 4, y -2..2 at z = -5, along +z, up to the base (UpToShape, nothing
     selected). Recomputed, not checked."""
     import Sketcher
 
@@ -497,7 +497,7 @@ def padUpToABoxBesideALoft(doc, withLoft):
     baseFeature.BaseFeature = base
     sketch = body.newObject("Sketcher::SketchObject", "Square")
     sketch.Placement = FreeCAD.Placement(V(0, 0, -5), FreeCAD.Rotation())
-    corners = [V(25, -2, 0), V(29, -2, 0), V(29, 2, 0), V(25, 2, 0)]
+    corners = [V(x0, -2, 0), V(x0 + 4, -2, 0), V(x0 + 4, 2, 0), V(x0, 2, 0)]
     for i in range(4):
         sketch.addGeometry(Part.LineSegment(corners[i], corners[(i + 1) % 4]))
     for i in range(4):
@@ -505,6 +505,41 @@ def padUpToABoxBesideALoft(doc, withLoft):
     pad = body.newObject("PartDesign::Pad", "Pad")
     pad.Profile = sketch
     pad.Type = "UpToShape"
+    doc.recompute()
+    return pad
+
+
+def padUpToARevolvedFace(doc, y0, y1):
+    """ops#353 review M1: the face of the surface of revolution of a B-spline arc (r 20..21..20
+    over z 0..10) about the z axis, 60 degrees about z, centred on the +x axis (y about -10..10 at r = 20,
+    not elementary, so the Pad goes by the split), and a Pad from the rectangle y `y0`..`y1`,
+    z 4..8 in the plane x = 40, along (-1, -0.1, -0.1), up to that face. The direction is oblique
+    so that Part::Tools::isConcave() doesn't keep the face's limits. Recomputed, not checked."""
+    import Sketcher
+
+    V = FreeCAD.Vector
+    arc = Part.BSplineCurve()
+    arc.interpolate([V(20, 0, 0), V(21, 0, 5), V(20, 0, 10)])
+    face = arc.toShape().revolve(V(0, 0, 0), V(0, 0, 1), 60)
+    face.rotate(V(0, 0, 0), V(0, 0, 1), -30)
+    wall = doc.addObject("Part::Feature", "Wall")
+    wall.Shape = face
+    body = doc.addObject("PartDesign::Body", "Body")
+    sketch = body.newObject("Sketcher::SketchObject", "Rectangle")
+    # Sketch x is world -z, y is y, the normal +x
+    sketch.Placement = FreeCAD.Placement(V(40, 0, 0), FreeCAD.Rotation(V(0, 1, 0), 90))
+    corners = [V(-8, y0, 0), V(-4, y0, 0), V(-4, y1, 0), V(-8, y1, 0)]
+    for i in range(4):
+        sketch.addGeometry(Part.LineSegment(corners[i], corners[(i + 1) % 4]))
+    for i in range(4):
+        sketch.addConstraint(Sketcher.Constraint("Coincident", i, 2, (i + 1) % 4, 1))
+    pad = body.newObject("PartDesign::Pad", "Pad")
+    pad.Profile = sketch
+    pad.Type = "UpToFace"
+    pad.UpToFace = (wall, ["Face1"])
+    pad.UseCustomVector = True
+    pad.AlongSketchNormal = False
+    pad.Direction = V(-1, -0.1, -0.1)
     doc.recompute()
     return pad
 
@@ -1410,6 +1445,47 @@ class TestPad(unittest.TestCase):
             finally:
                 FreeCAD.closeDocument(doc.Name)
         self.assertEqual(results[1], results[0])
+
+    def testPadUpToABaseItOverhangs(self):
+        # ops#356: the square x 33..37 under the box x 10..35, half of it beside the box, up to
+        # the base. BRepFeat (the base's faces are planar) extruded all of the square to
+        # z = 155, through the box: a valid Pad, AddSubShape 2480. It fails as the split fails
+        # (the base with the loft's side), saying why. The square x 25..29, all under the box,
+        # stops at its bottom as before (4 x 4 x 5)
+        for withLoft in (False, True):
+            for x0 in (25, 33):
+                with self.subTest(withLoft=withLoft, x0=x0):
+                    doc = FreeCAD.newDocument("PadUpToABaseItOverhangs")
+                    try:
+                        pad = padUpToABoxBesideALoft(doc, withLoft, x0)
+                        if x0 == 25:
+                            self.assertTrue(pad.isValid(), pad.getStatusString())
+                            self.assertAlmostEqual(pad.AddSubShape.Volume, 80, places=6)
+                        else:
+                            self.assertFalse(pad.isValid())
+                            self.assertIn("doesn't meet", pad.getStatusString())
+                    finally:
+                        FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToARevolvedFaceItOverhangs(self):
+        # ops#353 review M1: the rectangle y -8..14 passes the face's edge (y about 11 where it
+        # meets it). The retry without the face's limits went up to the whole surface of
+        # revolution, which stopped the part beside the face on the surface past its edge: a
+        # valid Pad. It fails now, with the first try's error. The rectangle y -6..6 lies all in
+        # front of the face and is built as before
+        for y0, y1 in ((-6, 6), (-8, 14)):
+            with self.subTest(y0=y0, y1=y1):
+                doc = FreeCAD.newDocument("PadUpToARevolvedFaceItOverhangs")
+                try:
+                    pad = padUpToARevolvedFace(doc, y0, y1)
+                    if y1 == 6:
+                        self.assertTrue(pad.isValid(), pad.getStatusString())
+                        self.assertTrue(pad.AddSubShape.isValid())
+                    else:
+                        self.assertFalse(pad.isValid())
+                        self.assertIn("doesn't meet", pad.getStatusString())
+                finally:
+                    FreeCAD.closeDocument(doc.Name)
 
     def testPadUpToABaseWithNames(self):
         """ops#347, review of fork PR 321: a Pad up to the base keeps the base's names and has

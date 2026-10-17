@@ -30,6 +30,7 @@
 #include <exception>
 #include <limits>
 #include <numeric>
+#include <optional>
 #include <sstream>
 #include <tuple>
 #include <unordered_set>
@@ -106,6 +107,8 @@
 #include <TopTools_HSequenceOfShape.hxx>
 #include <ShapeFix_Shape.hxx>
 #include <ShapeFix_ShapeTolerance.hxx>
+#include <gp.hxx>
+#include <gp_Ax3.hxx>
 #include <gp_Pln.hxx>
 #include <BRepFill_CompatibleWires.hxx>
 
@@ -6535,6 +6538,59 @@ bool brepFeatReaches(const TopoDS_Shape& profile, const TopoDS_Shape& upTo, cons
     return true;
 }
 
+// Whether `face` lies on a closed or periodic surface (a full revolution, a closed B-spline
+// patch): without its limits, a prism up to it can stop at a part of the surface far from the
+// face (ops#353 review M1)
+bool onClosedSurface(const TopoShape& face)
+{
+    if (face.shapeType(true) != TopAbs_FACE) {
+        return false;
+    }
+    const BRepAdaptor_Surface surface(TopoDS::Face(face.getShape()), Standard_False);
+    return surface.IsUClosed() || surface.IsVClosed() || surface.IsUPeriodic()
+        || surface.IsVPeriodic();
+}
+
+// How far along `direction` `shape` reaches (the highest coordinate along it), or nothing for an
+// infinite shape
+std::optional<double> reachAlong(
+    const TopoDS_Shape& shape,
+    const gp_Dir& direction,
+    bool tolerances
+)
+{
+    gp_Trsf toFrame;
+    toFrame.SetTransformation(gp_Ax3(gp::Origin(), direction));
+    Bnd_Box box;
+    BRepBndLib::AddOptimal(shape.Moved(TopLoc_Location(toFrame)), box, Standard_False, tolerances);
+    if (box.IsVoid() || box.IsOpen()) {
+        return std::nullopt;
+    }
+    double xMin, yMin, zMin, xMax, yMax, zMax;
+    box.Get(xMin, yMin, zMin, xMax, yMax, zMax);
+    return zMax;
+}
+
+// Whether a prism of `profile` along `direction` up to the finite `upTo` reaches past both: its
+// far end lies on `upTo`, so it can't. BRepFeat_MakePrism up to a shell that stops only part of
+// the profile (UpToShape of a whole base with the profile overhanging it) extruded all of the
+// profile far past the shell, and said it was done (ops#356)
+bool reachesPast(
+    const TopoDS_Shape& prism,
+    const TopoDS_Shape& profile,
+    const TopoDS_Shape& upTo,
+    const gp_Dir& direction
+)
+{
+    const std::optional<double> limit = reachAlong(upTo, direction, true);
+    const std::optional<double> start = reachAlong(profile, direction, true);
+    const std::optional<double> reach = reachAlong(prism, direction, false);
+    if (!limit || !start || !reach) {
+        return false;
+    }
+    return *reach > std::max(*limit, *start) + Precision::Confusion();
+}
+
 // The history of the prism up to a shape (prismUpToBySplit()), for the kept solids only, as
 // FeatureRevolved.cpp's UpToFaceSweepMapper names a Revolution's sweep up to a face (ops#293,
 // ops#334): pieces in the solids left out don't count, and the far end's edges and vertices,
@@ -6985,9 +7041,12 @@ TopoShape& TopoShape::makeElementPrismUntil(
             result = split(_uptoface);
         }
         catch (const Base::Exception&) {
+            // Not without the limits of a closed or periodic surface, which can stop the profile
+            // at a part of it far from the face: the first try's error stands (ops#353 review M1)
             Bnd_Box box;
             BRepBndLib::Add(uptoface.getShape(), box);
-            if (uptoface.isSame(_uptoface) || box.IsVoid() || box.IsOpen()) {
+            if (uptoface.isSame(_uptoface) || box.IsVoid() || box.IsOpen()
+                || onClosedSurface(_uptoface)) {
                 throw;
             }
             // When the face without its limits fails too, the face as it is says why
@@ -7080,6 +7139,15 @@ TopoShape& TopoShape::makeElementPrismUntil(
                 throw;
             }
         }
+    }
+    // As the split refuses it (ops#356). `result` is the profile's prisms alone here: the first
+    // face's prism is made with mode None
+    if (!bySplit
+        && reachesPast(result.getShape(), profile.getShape(), uptoface.getShape(), direction)) {
+        throw Base::RuntimeError(QT_TRANSLATE_NOOP(
+            "Exception",
+            "Could not extrude up to the face: part of the profile doesn't meet it"
+        ));
     }
 
     if (!_base.isNull() && Mode != PrismMode::None) {
