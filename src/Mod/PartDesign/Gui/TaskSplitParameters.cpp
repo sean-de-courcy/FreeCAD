@@ -75,6 +75,19 @@ void TaskSplitParameters::onFlip(bool flipped)
     split->Side.setValue(flipped ? 1L : 0L);
     updateText();
     recomputeFeature();
+    // The new half flips with it now, not on OK: nothing it links changed (it reads the Side),
+    // and recomputeFeature() computes only this Body
+    auto half = newHalfOf(split);
+    auto body = half ? PartDesign::Body::findBodyOf(half) : nullptr;
+    if (body && !isUpdateBlocked()) {
+        half->touch();
+        try {
+            split->getDocument()->recompute({body});
+        }
+        catch (const Base::Exception& e) {
+            e.reportException();
+        }
+    }
 }
 
 void TaskSplitParameters::updateText()
