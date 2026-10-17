@@ -631,6 +631,122 @@ class TestCrossBody(unittest.TestCase):
             self.assertTrue(body.Group[0].isValid(), body.Group[0].getStatusString())
             self.assertBox(body.Shape, *expected)
 
+    # ops#322: the copy follows its source ----------------------------------------------------
+
+    def touched(self):
+        return [o.Name for o in self.doc.Objects if "Touched" in o.State]
+
+    def basedOnBox(self):
+        """placedFeatures(), and Body B at (100, 0, 0) based on its box: the copy at x 35..45."""
+        a, box, pad = self.placedFeatures()
+        b = self.body("B", V(100, 0, 0))
+        b.BaseFeature = box
+        self.doc.recompute()
+        self.assertBox(b.Shape, 35, 5, 5, 45, 15, 15)
+        return a, box, b
+
+    def testBaseFeatureCopyFollowsItsSourceBody(self):
+        """ops#322: Body A moved by +10 in x, then put back at (30, 0, 0) turned 90 degrees about
+        z: each plain recompute moves the copy with the box (turned, the box's x 5..15 and y 5..15
+        go to x 30-15..30-5, y 5..15). Nothing is left to recompute."""
+        a, box, b = self.basedOnBox()
+        a.Placement.Base = V(40, 0, 0)
+        self.doc.recompute()
+        self.assertBox(b.Shape, 45, 5, 5, 55, 15, 15)
+        self.assertEqual(self.touched(), [])
+        a.Placement = FreeCAD.Placement(V(30, 0, 0), FreeCAD.Rotation(V(0, 0, 1), 90))
+        self.doc.recompute()
+        self.assertBox(b.Shape, 15, 5, 5, 25, 15, 15)
+        self.assertEqual(self.doc.recompute(), 0)
+
+    def testBaseFeatureCopyStaysOnItsSourceWhenItsOwnBodyMoves(self):
+        """ops#322: B moved by +10 in x: the copy stays on the box, at x 35..45, as a binder's
+        shape stays on its support."""
+        a, box, b = self.basedOnBox()
+        b.Placement.Base = V(110, 0, 0)
+        self.doc.recompute()
+        self.assertBox(b.Shape, 35, 5, 5, 45, 15, 15)
+        self.assertEqual(self.doc.recompute(), 0)
+
+    def testBaseFeatureCopyFollowsAMoveByAnExpression(self):
+        """ops#322 with ops#342's container moves: A's x set by an expression on a VarSet; after
+        each change of the variable one recompute moves the copy and leaves nothing touched."""
+        a, box, b = self.basedOnBox()
+        variables = self.doc.addObject("App::VarSet", "Variables")
+        variables.addProperty("App::PropertyDistance", "X")
+        variables.X = 30
+        a.setExpression(".Placement.Base.x", "Variables.X")
+        self.doc.recompute()
+        self.assertBox(b.Shape, 35, 5, 5, 45, 15, 15)
+        for x in (50, -20):
+            with self.subTest(x=x):
+                variables.X = x
+                self.doc.recompute()
+                self.assertBox(b.Shape, x + 5, 5, 5, x + 15, 15, 15)
+                self.assertEqual(self.touched(), [])
+
+    def testBaseFeatureCopyFollowsUndoAndRedo(self):
+        """ops#322: a move of A by +10 in x, undone and redone, each followed by a recompute: the
+        copy is at x 35..45, then 45..55."""
+        self.doc.UndoMode = 1
+        a, box, b = self.basedOnBox()
+        self.doc.openTransaction("move")
+        a.Placement.Base = V(40, 0, 0)
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        self.assertBox(b.Shape, 45, 5, 5, 55, 15, 15)
+        for step, x in ((self.doc.undo, 35), (self.doc.redo, 45)):
+            with self.subTest(step=step.__name__):
+                step()
+                self.doc.recompute()
+                self.assertBox(b.Shape, x, 5, 5, x + 10, 15, 15)
+                self.assertEqual(self.doc.recompute(), 0)
+
+    def testBaseFeatureCopyFollowsAfterAReopen(self):
+        """ops#322: A moved by +10 in x, saved and reopened: the copy is at x 45..55 and nothing
+        needs a recompute. A moved back by -20 after the reopen: the copy follows, to 25..35."""
+        import os
+        import tempfile
+
+        a, box, b = self.basedOnBox()
+        a.Placement.Base = V(40, 0, 0)
+        self.doc.recompute()
+        path = os.path.join(tempfile.mkdtemp(), "CrossBodyBaseFeature.FCStd")
+        self.doc.saveAs(path)
+        FreeCAD.closeDocument(self.doc.Name)
+        self.doc = FreeCAD.openDocument(path)
+        a, b = self.doc.getObject("A"), self.doc.getObject("B")
+        self.assertBox(b.Shape, 45, 5, 5, 55, 15, 15)
+        self.assertFalse(self.doc.mustExecute())
+        self.assertEqual(self.doc.recompute(), 0)
+        a.Placement.Base = V(20, 0, 0)
+        self.doc.recompute()
+        self.assertBox(b.Shape, 25, 5, 5, 35, 15, 15)
+
+    def testHandPlacedBaseFeatureKeepsItsOffsetToTheSource(self):
+        """ops#322: a FeatureBase added by hand, Placement (5, 0, 0), copies a 10 mm Part box at
+        x 20 to x 5..15 (the box's own placement left out). The box moved to x 30: the copy keeps
+        its offset, at 15..25. Then based on a second box at x 60: the copy doesn't jump."""
+        box = self.doc.addObject("Part::Box", "Box")
+        box.Length = box.Width = box.Height = 10
+        box.Placement.Base = V(20, 0, 0)
+        b = self.body("B")
+        base = self.doc.addObject("PartDesign::FeatureBase", "BaseFeature")
+        b.addObject(base)
+        base.BaseFeature = box
+        base.Placement.Base = V(5, 0, 0)
+        self.doc.recompute()
+        self.assertBox(b.Shape, 5, 0, 0, 15, 10, 10)
+        box.Placement.Base = V(30, 0, 0)
+        self.doc.recompute()
+        self.assertBox(b.Shape, 15, 0, 0, 25, 10, 10)
+        other = self.doc.addObject("Part::Box", "Other")
+        other.Length = other.Width = other.Height = 10
+        other.Placement.Base = V(60, 0, 0)
+        base.BaseFeature = other
+        self.doc.recompute()
+        self.assertBox(b.Shape, 15, 0, 0, 25, 10, 10)
+
 
 if __name__ == "__main__":
     unittest.main()

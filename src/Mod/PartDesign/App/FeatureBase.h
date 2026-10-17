@@ -25,6 +25,8 @@
 
 #pragma once
 
+#include <optional>
+
 #include "Feature.h"
 
 /// Base class of all additive features in PartDesign
@@ -43,6 +45,16 @@ public:
      * object's placement being applied inside FeatureBase.
      */
     App::PropertyBool UseLegacyBaseFeaturePlacement;
+    /// The source's frame (sourceFrame()) when the copy was last computed: one entry, none until
+    /// the first recompute after BaseFeature is set (FreeCAD-CH ops#322)
+    App::PropertyPlacementList SourceFrame;
+
+    /**
+     * Where the shape execute() takes from BaseFeature lies in this feature's container: its
+     * Body's frame for a feature of a Body, else its own placement. None for a source that isn't
+     * a GeoFeature (an App::Link), which then doesn't move the copy.
+     */
+    std::optional<Base::Placement> sourceFrame() const;
 
     short int mustExecute() const override;
 
@@ -59,6 +71,8 @@ public:
 
 private:
     void trySetBaseFeatureOfBody();
+    /// Whether the copy follows its source's frame now (not legacy, not suppressed or held)
+    bool followsSource() const;
 };
 
 }  // namespace PartDesign

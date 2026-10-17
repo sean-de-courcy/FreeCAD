@@ -23,12 +23,15 @@
  ***************************************************************************/
 
 
+#include <Precision.hxx>
 #include <Standard_Failure.hxx>
 
 
 #include <App/Application.h>
+#include <App/Document.h>
 #include <App/FeaturePythonPyImp.h>
 #include <App/GeoFeature.h>
+#include <Mod/Part/App/Attacher.h>
 #include <Mod/Part/App/PropertyTopoShape.h>
 #include "Body.h"
 #include "FeatureBase.h"
@@ -36,6 +39,16 @@
 
 namespace PartDesign
 {
+
+namespace
+{
+// A feature of a Body: execute() takes its shape in that Body's coordinates, with the feature's
+// own placement applied
+bool isBodyLocalFeature(const App::DocumentObject* base)
+{
+    return base->isDerivedFrom<PartDesign::Feature>() && Body::findBodyOf(base);
+}
+}  // namespace
 
 PROPERTY_SOURCE(PartDesign::FeatureBase, PartDesign::Feature)
 
@@ -53,6 +66,37 @@ FeatureBase::FeatureBase()
         App::Prop_Hidden,
         "Use legacy FeatureBase source placement handling"
     );
+    ADD_PROPERTY_TYPE(
+        SourceFrame,
+        (),
+        "Base",
+        (App::PropertyType)(App::Prop_Output | App::Prop_ReadOnly | App::Prop_Hidden),
+        "The source's frame when the copy was last computed (FreeCAD-CH ops#322)"
+    );
+}
+
+std::optional<Base::Placement> FeatureBase::sourceFrame() const
+{
+    auto* base = freecad_cast<App::GeoFeature*>(BaseFeature.getValue());
+    if (!base) {
+        return std::nullopt;
+    }
+    // Raw placements through the containers: a global placement throws while a container
+    // recomputes (Attacher.cpp, linkFrame)
+    auto frame = Attacher::AttachEngine::linkFrame(this, base);
+    if (!isBodyLocalFeature(base)) {
+        frame = frame * base->Placement.getValue();
+    }
+    return frame;
+}
+
+bool FeatureBase::followsSource() const
+{
+    if (UseLegacyBaseFeaturePlacement.getValue() || Suppressed.getValue()) {
+        return false;
+    }
+    auto body = getFeatureBody();
+    return !body || !body->holds(this);
 }
 
 Part::Feature* FeatureBase::getBaseObject(bool) const
@@ -66,6 +110,15 @@ short int FeatureBase::mustExecute() const
 
     if (BaseFeature.isTouched() || UseLegacyBaseFeaturePlacement.isTouched()) {
         return 1;
+    }
+    // The source moved: its Body, a container, or itself. Moving a Body touches neither its
+    // features nor this, so it is polled here; a container moved by an expression in the middle
+    // of a recompute touches this when it asks to run (ContainerMoves.h)
+    if (SourceFrame.getSize() == 1 && followsSource()) {
+        auto frame = sourceFrame();
+        if (frame && !frame->isSame(SourceFrame[0], Precision::Confusion())) {
+            return 1;
+        }
     }
 
     return PartDesign::Feature::mustExecute();
@@ -105,11 +158,10 @@ App::DocumentObjectExecReturn* FeatureBase::execute()
         return StdReturn;
     }
 
-    const bool isBodyLocalFeature = base->isDerivedFrom<PartDesign::Feature>()
-        && Body::findBodyOf(base);
+    const bool isBodyLocal = isBodyLocalFeature(base);
     const bool isPartDesignBody = base->isDerivedFrom<PartDesign::Body>();
 
-    auto shape = isBodyLocalFeature
+    auto shape = isBodyLocal
         ? static_cast<Part::Feature*>(base)->Shape.getShape()
         : Part::Feature::getTopoShape(base, Part::ShapeOption::ResolveLink);
     if (shape.isNull()) {
@@ -126,8 +178,23 @@ App::DocumentObjectExecReturn* FeatureBase::execute()
         );
     }
 
-    if (isBodyLocalFeature || isPartDesignBody) {
+    if (isBodyLocal || isPartDesignBody) {
         shape.transformShape(shape.getTransform(), true);
+    }
+
+    // The copy follows its source (FreeCAD-CH ops#322, PLAN decision 79), as a binder does: when
+    // the source's frame moved since the last recompute, the Placement moves by as much, so the
+    // copy keeps its place relative to the source, also when that place was set by hand
+    if (auto frame = sourceFrame()) {
+        if (SourceFrame.getSize() != 1 || !frame->isSame(SourceFrame[0], Precision::Confusion())) {
+            if (SourceFrame.getSize() == 1) {
+                Placement.setValue(*frame * SourceFrame[0].inverse() * Placement.getValue());
+            }
+            SourceFrame.setValues({*frame});
+        }
+    }
+    else if (SourceFrame.getSize() != 0) {
+        SourceFrame.setValues({});
     }
 
     Shape.setValue(shape);
@@ -151,6 +218,11 @@ void FeatureBase::onChanged(const App::Property* prop)
     // the BaseFeature property should track the Body BaseFeature and vice-versa
     if (prop == &BaseFeature) {
         trySetBaseFeatureOfBody();
+        // Another source: the next recompute takes its frame as it is (ops#322)
+        if (!isRestoring() && getDocument() && !getDocument()->isPerformingTransaction()
+            && SourceFrame.getSize() != 0) {
+            SourceFrame.setValues({});
+        }
     }
 
     PartDesign::Feature::onChanged(prop);
