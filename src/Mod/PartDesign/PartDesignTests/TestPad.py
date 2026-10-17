@@ -326,6 +326,61 @@ def tabOnNamedBase(test, doc, kind, upTo):
     return base, feature
 
 
+def postInTheGap(test, doc, upTo):
+    """ops#347 (review of fork PR 321, round 1): a Pad from a sketch on a face of the base (a
+    support face is given), up to the face across a gap. The base is a C: the polygon (0,0), (10,0),
+    (10,3), (4,3), (4,7), (10,7), (10,10), (0,10) on the XY plane, 10 high. The sketch is on the top
+    of the lower arm (y = 3, the first face of the gap), a 2 x 2 square, and the Pad goes up to the
+    underside of the upper arm (y = 7) as a face, as the first face, or as the last face (y = 10).
+    The post joins the arms: the result is the C and the 2 x 2 x 4 post."""
+    V = FreeCAD.Vector
+    body = doc.addObject("PartDesign::Body", "Body")
+    baseSketch = body.newObject("Sketcher::SketchObject", "BaseSketch")
+    points = [V(0, 0), V(10, 0), V(10, 3), V(4, 3), V(4, 7), V(10, 7), V(10, 10), V(0, 10)]
+    for start, end in zip(points, points[1:] + points[:1]):
+        baseSketch.addGeometry(Part.LineSegment(start, end), False)
+    base = body.newObject("PartDesign::Pad", "Base")
+    base.Profile = baseSketch
+    base.Length = 10
+    doc.recompute()
+    test.assertTrue(base.isValid(), base.getStatusString())
+    held = holdBases(base)
+    sketch = body.newObject("Sketcher::SketchObject", "Post")
+    sketch.AttachmentSupport = [(base, [planarFaceAt(base.Shape, 1, 3)])]
+    sketch.MapMode = "FlatFace"
+    # The sketch's x is the world's -x and its y is z, its origin (0, 3, 0): the square x 6..8, z 4..6
+    TestSketcherApp.CreateRectangleSketch(sketch, (-8, 4), (2, 2))
+    doc.recompute()
+    # Where the sketch landed on the lower arm's top: a 2 x 2 square inside the face
+    square = Part.Face(sketch.Shape.Wires[0])
+    test.assertAlmostEqual(square.Area, 4, places=6)
+    test.assertAlmostEqual(square.BoundBox.YMin, 3, places=6)
+    test.assertAlmostEqual(square.BoundBox.YMax, 3, places=6)
+    test.assertTrue(
+        4 <= square.BoundBox.XMin and square.BoundBox.XMax <= 10, "the square is on the face"
+    )
+    test.assertTrue(0 <= square.BoundBox.ZMin and square.BoundBox.ZMax <= 10)
+    feature = body.newObject("PartDesign::Pad", "Pad")
+    feature.Profile = sketch
+    feature.Type = upTo
+    if upTo == "UpToFace":
+        feature.UpToFace = (base, [planarFaceAt(base.Shape, 1, 7)])
+    doc.recompute()
+    test.assertTrue(feature.isValid(), feature.getStatusString())
+    assertBasesKept(test, held)
+    expected = base.Shape.fuse(square.extrude(V(0, 4, 0)))
+    test.assertAlmostEqual(feature.Shape.Volume, base.Shape.Volume + 4 * 4, places=6)
+    test.assertAlmostEqual(feature.Shape.Volume, expected.Volume, places=6)
+    test.assertEqual(topologyCounts(feature.Shape), topologyCounts(expected))
+    test.assertEqual(len(feature.Shape.Solids), 1)
+    assertFacesAllNamed(test, feature.Shape)
+    # The C's faces away from the post: 8 of its 10 faces (the post meets y = 3 and y = 7, and
+    # y = 10 up to the last face)
+    apart = [(1, 3), (1, 7)] + ([(1, 10)] if upTo == "UpToLast" else [])
+    assertNamesSurvive(test, base.Shape, feature.Shape, 10 - len(apart), apart)
+    return base, feature
+
+
 class TestPad(unittest.TestCase):
     def setUp(self):
         self.Doc = FreeCAD.newDocument("PartDesignTestPad")
@@ -891,6 +946,17 @@ class TestPad(unittest.TestCase):
                 doc = FreeCAD.newDocument("PartDesignTestPadTab")
                 try:
                     tabOnNamedBase(self, doc, "Pad", upTo)
+                finally:
+                    FreeCAD.closeDocument(doc.Name)
+
+    def testPadFromAFaceOfTheBaseUpToTheFaceAcrossAGap(self):
+        """ops#347, review of fork PR 321: a support face of the base, up to a face and the last
+        face."""
+        for upTo in ("UpToFace", "UpToLast"):
+            with self.subTest(upTo=upTo):
+                doc = FreeCAD.newDocument("PartDesignTestPadPost")
+                try:
+                    postInTheGap(self, doc, upTo)
                 finally:
                     FreeCAD.closeDocument(doc.Name)
 

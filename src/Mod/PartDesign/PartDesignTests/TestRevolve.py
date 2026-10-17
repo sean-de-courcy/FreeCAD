@@ -3093,27 +3093,37 @@ class TestRevolve(unittest.TestCase):
                         self.assertFalse(revolution.isValid())
                         self.assertIn("names several faces", revolution.getStatusString())
 
-    def revolveUpToTheCylinderSide(self, kind):
-        # ops#347: a cylinder r 10 h 15 as the Body's BaseFeature, the profile x 20..24, z 12..15
-        # (its top flush with the cylinder's), revolved about the vertical at x = 14 up to the
-        # cylinder's side. Unfixed, the sweep's split by the face raised a vertex of the base's
-        # by an ULP (Revolution) and added a curve on a surface to its edges (Groove), in the
-        # base feature's stored shape and the Part::Feature's
-        from PartDesignTests.TestPad import toleranceState
+    def revolveUpToTheCylinderSide(self, kind, sideType="One side", named=False):
+        # ops#347: a cylinder r 10 h 15 as the Body's BaseFeature (a Part::Feature, or with
+        # named a Pad of a circle, which has an element map), the profile x 20..24,
+        # z 12..15 (its top flush with the cylinder's), revolved about the vertical at x = 14 up to
+        # the cylinder's side (Two sides: on both, the sides mirror each other in the plane y = 0).
+        # Unfixed, the sweep's split by the face raised a vertex of the base's by an ULP
+        # (Revolution) and added a curve on a surface to its edges (Groove), in the base feature's
+        # stored shape and the Part::Feature's
+        from PartDesignTests.TestPad import assertBasesKept, holdBases, toleranceState
 
         V = FreeCAD.Vector
-        base = self.Doc.addObject("Part::Feature", "Cylinder")
-        base.Shape = Part.makeCylinder(10, 15)
         body = self.Doc.addObject("PartDesign::Body", "Body")
-        baseFeature = body.newObject("PartDesign::FeatureBase", "BaseFeature")
-        baseFeature.BaseFeature = base
+        if named:
+            circle = body.newObject("Sketcher::SketchObject", "CylinderSketch")
+            circle.addGeometry(Part.Circle(V(0, 0, 0), V(0, 0, 1), 10), False)
+            baseFeature = body.newObject("PartDesign::Pad", "Cylinder")
+            baseFeature.Profile = circle
+            baseFeature.Length = 15
+            base = baseFeature
+        else:
+            base = self.Doc.addObject("Part::Feature", "Cylinder")
+            base.Shape = Part.makeCylinder(10, 15)
+            baseFeature = body.newObject("PartDesign::FeatureBase", "BaseFeature")
+            baseFeature.BaseFeature = base
         self.Doc.recompute()
         side = next(
             "Face%d" % i
             for i, f in enumerate(baseFeature.Shape.Faces, 1)
             if f.Surface.TypeId == "Part::GeomCylinder"
         )
-        held = [(o.Name, o.Shape, toleranceState(o.Shape)) for o in (base, baseFeature)]
+        held = holdBases(base, baseFeature) if base is not baseFeature else holdBases(base)
         sketch = body.newObject("Sketcher::SketchObject", "Profile")
         # Sketch x is world x, y is z; its V axis the vertical at x = 14
         sketch.Placement = FreeCAD.Placement(V(14, 0, 0), FreeCAD.Rotation(V(1, 0, 0), 90))
@@ -3125,15 +3135,37 @@ class TestRevolve(unittest.TestCase):
         feature = body.newObject("PartDesign::" + kind, kind)
         feature.Profile = sketch
         feature.ReferenceAxis = (sketch, ["V_Axis"])
+        feature.SideType = sideType
         feature.Type = "UpToFace"
         feature.UpToFace = (baseFeature, [side])
+        if sideType == "Two sides":
+            feature.Type2 = "UpToFace"
+            feature.UpToFace2 = (baseFeature, [side])
         self.Doc.recompute()
         self.assertTrue(feature.isValid(), feature.getStatusString())
-        for name, shape, before in held:
-            self.assertEqual(toleranceState(shape), before, name)
+        assertBasesKept(self, held)
         self.assertTrue(feature.Shape.isValid())
         # The tool as the unfixed build swept it
-        self.assertAlmostEqual(feature.AddSubShape.Volume, 228.05374, places=4)
+        sides = 2 if sideType == "Two sides" else 1
+        self.assertAlmostEqual(feature.AddSubShape.Volume, 228.05374 * sides, places=4)
+        if named:
+            from PartDesignTests.TestPad import (
+                assertFacesAllNamed,
+                assertNamesSurvive,
+                topologyCounts,
+            )
+
+            # The tool's top is flush with the cylinder's: the refined result has one top face
+            expected = baseFeature.Shape.fuse(feature.AddSubShape)
+            if feature.Refine:
+                expected = expected.removeSplitter()
+            if kind == "Groove":
+                expected = baseFeature.Shape
+            self.assertEqual(topologyCounts(feature.Shape), topologyCounts(expected))
+            assertFacesAllNamed(self, feature.Shape)
+            # The cylinder's bottom face is the one the tool does not meet; the wall and the
+            # top are touched by it
+            assertNamesSurvive(self, baseFeature.Shape, feature.Shape, 1, [(2, 15)])
         return baseFeature, feature
 
     def testRevolutionUpToFaceLeavesTheBaseAlone(self):
@@ -3148,6 +3180,31 @@ class TestRevolve(unittest.TestCase):
         # The tool is outside the cylinder: the groove removes nothing
         base, groove = self.revolveUpToTheCylinderSide("Groove")
         self.assertAlmostEqual(groove.Shape.Volume, base.Shape.Volume, places=6)
+
+    def testRevolutionUpToFaceOnBothSidesLeavesTheBaseAlone(self):
+        """ops#347, review of fork PR 321, round 1: Two sides, each up to the face (UpToFace2),
+        on a named base (a Pad of a circle): both sweeps run on the copies."""
+        for named in (False, True):
+            with self.subTest(named=named):
+                self.tearDown()
+                self.Doc = FreeCAD.newDocument("PartDesignTestRevolve")
+                base, revolution = self.revolveUpToTheCylinderSide(
+                    "Revolution", "Two sides", named
+                )
+                self.assertAlmostEqual(
+                    revolution.Shape.Volume,
+                    base.Shape.Volume + revolution.AddSubShape.Volume,
+                    places=6,
+                )
+
+    def testRevolutionUpToFaceKeepsTheNamedBaseNames(self):
+        """ops#347, review of fork PR 321, round 1: the same on a named base, one side."""
+        base, revolution = self.revolveUpToTheCylinderSide("Revolution", named=True)
+        self.assertAlmostEqual(
+            revolution.Shape.Volume,
+            base.Shape.Volume + revolution.AddSubShape.Volume,
+            places=6,
+        )
 
     def tearDown(self):
         # closing doc
