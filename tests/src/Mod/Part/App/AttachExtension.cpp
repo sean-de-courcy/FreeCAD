@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <functional>
 #include <cmath>
 #include <numbers>
 #include <sstream>
@@ -431,20 +432,13 @@ void checkPollBesideTheWorker(
 
 }  // namespace
 
-TEST_F(AttachExtensionTest, testPollBesideAWorkerRecomputeOfOneObject)
+// The blocking feature in a second document: a request in the plane's own document recomputes
+// the plane first, on the worker, so the poll beside it would find no difference either way
+void checkPollBesideAnotherDocument(
+    Part::Plane* plane,
+    const std::function<App::RecomputeRequest(App::Document&, App::DocumentObject&)>& request
+)
 {
-    // A single-object request (recomputeFeature) sets neither the document's Recomputing status
-    // nor the recompute's thread marker: the old guard let the poll walk beside it
-    auto plane = planeOnAMovedPart(getDocument());
-    auto blocker = getDocument()->addObject("App::FeatureTestAsyncBlocker", "Blocker");
-    ASSERT_TRUE(blocker);
-    checkPollBesideTheWorker(plane, blocker, App::RecomputeRequest::fromDocumentObject(*blocker));
-}
-
-TEST_F(AttachExtensionTest, testPollBesideAWorkerRecomputeOfAnotherDocument)
-{
-    // The walk reads objects of other documents too, but the old guard tested only the plane's
-    auto plane = planeOnAMovedPart(getDocument());
     auto& app = App::GetApplication();
     const std::string otherName = app.getUniqueDocumentName("other");
     auto other = app.newDocument(otherName.c_str(), "testUser");
@@ -454,7 +448,30 @@ TEST_F(AttachExtensionTest, testPollBesideAWorkerRecomputeOfAnotherDocument)
     };
     auto blocker = other->addObject("App::FeatureTestAsyncBlocker", "Blocker");
     ASSERT_TRUE(blocker);
-    checkPollBesideTheWorker(plane, blocker, App::RecomputeRequest::fromDocument(*other, true));
+    checkPollBesideTheWorker(plane, blocker, request(*other, *blocker));
+}
+
+TEST_F(AttachExtensionTest, testPollBesideAWorkerRecomputeOfOneObject)
+{
+    // A single-object request (recomputeFeature) sets neither a document's Recomputing status
+    // nor the recompute's thread marker: the old guard let the poll walk beside it
+    checkPollBesideAnotherDocument(
+        planeOnAMovedPart(getDocument()),
+        [](App::Document&, App::DocumentObject& blocker) {
+            return App::RecomputeRequest::fromDocumentObject(blocker);
+        }
+    );
+}
+
+TEST_F(AttachExtensionTest, testPollBesideAWorkerRecomputeOfAnotherDocument)
+{
+    // The walk reads objects of other documents too, but the old guard tested only the plane's
+    checkPollBesideAnotherDocument(
+        planeOnAMovedPart(getDocument()),
+        [](App::Document& other, App::DocumentObject&) {
+            return App::RecomputeRequest::fromDocument(other, true);
+        }
+    );
 }
 
 TEST_F(AttachExtensionTest, testPollWithTheWorkerIdleComparesFrames)
