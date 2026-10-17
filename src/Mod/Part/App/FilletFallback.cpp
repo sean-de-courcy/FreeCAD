@@ -1822,13 +1822,14 @@ bool exactSection(const TopoDS_Edge& edge, const TopTools_ListOfShape& faces)
 /// result is then off by the strip's volume (ops#300, PR 286 verification, finding 1; ops#315).
 /// An exact section keeps its faces' tolerance, so a grown one there is such a merge; the
 /// sections of spheres and tori with other faces are approximated and grow legitimately (3e-7 to
-/// 4e-7 on the stadium and the hexagon's corners). The faces' tolerance is that of each base face
-/// the face is an image of, with its edges and vertices, and a tool face's own: a tolerance
-/// elsewhere in the base (an earlier rounded corner, an imported part's edge) doesn't hide a merge
+/// 4e-7 on the stadium and the hexagon's corners). The faces' tolerance is that of each base or
+/// tool face the face is an image of, with its edges and vertices, before the Booleans: a tolerance
+/// elsewhere in the base (an earlier rounded corner, an imported part's edge) doesn't hide a merge,
+/// nor does the merge's own raising of its faces'
 TopoDS_Edge grownEdge(
     const TopoDS_Shape& result,
     const TopoDS_Shape& base,
-    const TopTools_DataMapOfShapeReal& baseFaceTolerances
+    const TopTools_DataMapOfShapeReal& faceTolerances
 )
 {
     TopTools_IndexedMapOfShape baseEdges;
@@ -1842,7 +1843,7 @@ TopoDS_Edge grownEdge(
         }
         double faceTolerance = linearTolerance;
         for (const auto& face : edgeFaces(i)) {
-            const double* tolerance = baseFaceTolerances.Seek(face);
+            const double* tolerance = faceTolerances.Seek(face);
             faceTolerance = std::max(
                 faceTolerance,
                 tolerance ? *tolerance : BRep_Tool::Tolerance(TopoDS::Face(face))
@@ -2065,6 +2066,15 @@ TopoDS_Shape construct(
     }
     checkStrips(tools, overlaps, request.limitOnly);
 
+    // The tools' faces' tolerances before the Booleans, for the check for merged faces: a merge
+    // raises those of its images
+    std::vector<std::vector<std::pair<TopoDS_Shape, double>>> toolFaceTolerances(tools.size());
+    for (size_t i = 0; i < tools.size(); ++i) {
+        for (TopExp_Explorer it(tools[i].solid, TopAbs_FACE); it.More(); it.Next()) {
+            toolFaceTolerances[i].emplace_back(it.Current(), largestTolerance(it.Current()));
+        }
+    }
+
     std::vector<Stage> stages;
     std::vector<size_t> toolStage(tools.size(), 0);
     TopoDS_Shape shape = base.getShape();
@@ -2141,19 +2151,26 @@ TopoDS_Shape construct(
     if (!thinFace(shape, base.getShape()).IsNull()) {
         refuse("the result has a face of zero width");
     }
-    TopTools_DataMapOfShapeReal baseFaceTolerances;
-    for (TopExp_Explorer it(base.getShape(), TopAbs_FACE); it.More(); it.Next()) {
-        const double tolerance = largestTolerance(it.Current());
-        for (const auto& image : imagesThrough(stages, 0, it.Current())) {
-            if (double* known = baseFaceTolerances.ChangeSeek(image)) {
+    TopTools_DataMapOfShapeReal faceTolerances;
+    auto bindImages = [&](size_t from, const TopoDS_Shape& face, double tolerance) {
+        for (const auto& image : imagesThrough(stages, from, face)) {
+            if (double* known = faceTolerances.ChangeSeek(image)) {
                 *known = std::max(*known, tolerance);
             }
             else {
-                baseFaceTolerances.Bind(image, tolerance);
+                faceTolerances.Bind(image, tolerance);
             }
         }
+    };
+    for (TopExp_Explorer it(base.getShape(), TopAbs_FACE); it.More(); it.Next()) {
+        bindImages(0, it.Current(), largestTolerance(it.Current()));
     }
-    if (TopoDS_Edge grown = grownEdge(shape, base.getShape(), baseFaceTolerances);
+    for (size_t i = 0; i < tools.size(); ++i) {
+        for (const auto& [face, tolerance] : toolFaceTolerances[i]) {
+            bindImages(toolStage[i], face, tolerance);
+        }
+    }
+    if (TopoDS_Edge grown = grownEdge(shape, base.getShape(), faceTolerances);
         !grown.IsNull()) {
         refuse("an edge's tolerance grew to " + describe(BRep_Tool::Tolerance(grown))
                + ": a face was merged away");
