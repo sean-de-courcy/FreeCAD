@@ -382,7 +382,8 @@ def _clear(layout):
 
 def run(doc=None, paths=None, close_on_cancel=False):
     """Opens the import dialog for @a doc (the active document, or a new one) with @a paths; with
-    none, asks for the files first. Returns the dialog (shown, not waited for), or None. A new document, or @a doc with @a close_on_cancel (File > Open's), is
+    none, asks for the files first. Returns the dialog (shown, not waited for, deleted once
+    closed), or None. A new document, or @a doc with @a close_on_cancel (File > Open's), is
     closed when the dialog is cancelled."""
     if paths is None:
         paths, _filter = QtWidgets.QFileDialog.getOpenFileNames(
@@ -398,6 +399,7 @@ def run(doc=None, paths=None, close_on_cancel=False):
             doc = App.newDocument()
             close_on_cancel = True
     dialog = ImportDialog(doc, paths)
+    dialog.setAttribute(QtCore.Qt.WA_DeleteOnClose)
     _open.append(dialog)
     name = doc.Name
 

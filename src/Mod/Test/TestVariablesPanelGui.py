@@ -1392,6 +1392,17 @@ class TestVariablesImportGui(unittest.TestCase):
         self.assertEqual(copy.Bindings, {"t": "Variables.Thick"})
         self.assertAlmostEqual(copy.Width.Value, 6)
 
+    def test_dialog_freed(self):
+        """A closed dialog is deleted and forgotten (review 317, 8)."""
+        from freecad.variables import importgui
+
+        dialog = self.open([self.a])
+        self.assertIn(dialog, importgui._open)
+        dialog.reject()
+        self.assertTrue(waitFor(lambda: not shiboken6.isValid(dialog)), "not deleted")
+        self.assertNotIn(dialog, importgui._open)
+        self.dialog = None
+
     def test_open_cancelled(self):
         """File > Open of an export makes a document for it; cancelling the dialog closes that
         document again (review 317, 7)."""
