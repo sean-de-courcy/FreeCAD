@@ -224,15 +224,12 @@ void containerRecomputed(const App::Document* doc, const App::DocumentObject& re
             }
             last->second = placement->getValue();
         }
-        // The recomputing document's objects, and those of the container's own document: they
-        // may have run before it moved in its own document's recompute, and they would wait for
-        // the next one to be seen in another's
-        std::set<const App::Document*> documents {doc, recomputed.getDocument()};
-        for (auto document : documents) {
-            auto it = watchedByDocument.find(document);
-            if (document && it != watchedByDocument.end()) {
-                collectMoved(document, it->second, moved);
-            }
+        // Every document's objects, not only the recomputing one's: those in the container's own
+        // document may have run before it moved in their recompute, and would wait for the next
+        // one to be seen in another's. Supports are in the attached object's document, so no other
+        // document's frames run through the container today; walking them all costs only on a move
+        for (auto& [document, watched] : watchedByDocument) {
+            collectMoved(document, watched, moved);
         }
     }
     for (auto obj : moved) {
