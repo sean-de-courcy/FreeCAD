@@ -38,6 +38,7 @@
 
 #include <App/AutoTransaction.h>
 #include <App/DocumentObserver.h>
+#include <Base/Tools.h>
 #include <Gui/Application.h>
 #include <Gui/CommandT.h>
 #include <Gui/Control.h>
@@ -303,9 +304,10 @@ void restartEdit(const App::DocumentObjectT& featureT, const std::function<void(
         return;
     }
     App::TransactionLocker lock(doc);
-    restartingEdit = true;
-    guiDoc->resetEdit();
-    restartingEdit = false;
+    {
+        Base::FlagToggler<> restarting(restartingEdit, false);
+        guiDoc->resetEdit();
+    }
     try {
         change();
     }
