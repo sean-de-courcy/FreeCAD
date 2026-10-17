@@ -45,6 +45,7 @@
 #include <BRepAlgoAPI_Section.hxx>
 #include <BRepAlgoAPI_Splitter.hxx>
 #include <BRepBndLib.hxx>
+#include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
@@ -54,6 +55,7 @@
 #include <BRepClass3d_SolidClassifier.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepGProp.hxx>
+#include <BRepLib.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeRevol.hxx>
 #include <BRepTools.hxx>
@@ -351,6 +353,35 @@ TopoDS_Face reachableUpToFace(
         );
     }
     return maker.Face();
+}
+
+// A copy of the up-to face with its seams' tolerance cut back to what their curves need, or a null
+// face when that changes no seam's tolerance. A seam isn't a boundary: the face goes on across it,
+// so its tolerance says nothing about where the face is. Raised with the rest of the face's
+// (fixTolerance, a tolerant import), it let the splitter merge the seam with a face of the sweep
+// that it runs nearly along: up to a torus turned so that its seam meridian dips 0.1 inside the
+// profile's outer cylinder, with the base's tolerance 0.02 the sweep went on into the torus (39.04
+// instead of 13.35), and with 0.03 it came out 1.25 short, with no error, whichever way the torus
+// was parametrized (ops#293, q4). The face's other edges keep theirs: a face flush with the
+// profile within its tolerance relies on it (ops#338).
+TopoDS_Face withExactSeams(const TopoDS_Face& face)
+{
+    BRepBuilderAPI_Copy copy(face);
+    const TopoDS_Face result = TopoDS::Face(copy.Shape());
+    BRep_Builder builder;
+    bool changed = false;
+    for (TopExp_Explorer explorer(result, TopAbs_EDGE); explorer.More(); explorer.Next()) {
+        const TopoDS_Edge& edge = TopoDS::Edge(explorer.Current());
+        if (BRep_Tool::Degenerated(edge) || !BRep_Tool::IsClosed(edge, result)) {
+            continue;
+        }
+        const double before = BRep_Tool::Tolerance(edge);
+        builder.UpdateEdge(edge, Precision::Confusion());
+        builder.SameParameter(edge, Standard_False);
+        BRepLib::SameParameter(edge, Precision::Confusion());
+        changed = changed || BRep_Tool::Tolerance(edge) < before - Precision::Confusion();
+    }
+    return changed ? result : TopoDS_Face();
 }
 
 // The tolerance of the checks of the profile against the up-to face, ten times the largest of
@@ -3281,36 +3312,78 @@ TopoShape Revolved::tryToRevolveToFace(
     // in. Where a profile edge lies on the face and leaves it tangentially, the same sweep came out
     // with an edge of tolerance 0.54 in the sketch's frame and 1.5e-4 in the body's (ops#338); a
     // turn of 1 or 2 radians gave 8e-5 to 1.5e-4 in every case. Each try faces the same checks.
-    bool built = false;
-    for (const double turn : {0.0, 1.0, 2.0}) {
-        gp_Trsf rotation;
-        rotation.SetRotation(axis, turn);
-        const TopLoc_Location there(rotation);
-        const TopoShape profile = sketchshape.moved(there);
-        const TopoDS_Face face = TopoDS::Face(reachable.Moved(there));
-        TopTools_IndexedMapOfShape faceParts;
-        TopoShape sweep;
+    const auto sweepToFirstContact = [&](const TopoDS_Face& upTo) {
+        bool built = false;
+        for (const double turn : {0.0, 1.0, 2.0}) {
+            gp_Trsf rotation;
+            rotation.SetRotation(axis, turn);
+            const TopLoc_Location there(rotation);
+            const TopoShape profile = sketchshape.moved(there);
+            const TopoDS_Face face = TopoDS::Face(upTo.Moved(there));
+            TopTools_IndexedMapOfShape faceParts;
+            TopoShape sweep;
+            try {
+                sweep = sweepUpToFace(makeTopoShape(), profile, face, axis, tolerance, faceParts);
+            }
+            catch (const Standard_Failure&) {
+                continue;
+            }
+            built = true;
+            if (!sweep.isValid()
+                || !toleranceHolds(sweep.getShape(), {profile.getShape(), face})) {
+                continue;
+            }
+            certifyFirstContact(
+                sweep.getShape(),
+                faceParts,
+                face,
+                profile.getShape(),
+                axis,
+                tolerance
+            );
+            return sweep.moved(there.Inverted());
+        }
+        if (!built) {
+            throw Base::RuntimeError(
+                QT_TRANSLATE_NOOP("Exception", "Could not revolve up to the face")
+            );
+        }
+        throw Base::RuntimeError(QT_TRANSLATE_NOOP(
+            "Exception",
+            "Could not revolve up to the face: the result's edges don't meet within the precision "
+            "of the profile and the face"
+        ));
+    };
+    // The sweep is split by the face as it is, so that its face parts are the base's. When the
+    // face's seams are looser than their curves need (withExactSeams()), the split is made again
+    // with the seams exact, and the two sweeps must agree. A seam merged with a sweep face it runs
+    // nearly along passes the certificate, which takes a seam for no boundary (ops#293, q4: 39.04
+    // instead of 13.35, or 0.036 short). Split by the exact copy alone, the tool's face parts no
+    // longer matched the base's face, and the fuse with the base gave the base's volume alone.
+    TopoShape sweep = sweepToFirstContact(reachable);
+    const TopoDS_Face exactSeams = withExactSeams(reachable);
+    if (!exactSeams.IsNull()) {
+        bool agree = false;
         try {
-            sweep = sweepUpToFace(makeTopoShape(), profile, face, axis, tolerance, faceParts);
+            const auto [volume, error] = solidVolume(sweep.getShape());
+            const auto [exactVolume, exactError] =
+                solidVolume(sweepToFirstContact(exactSeams).getShape());
+            agree = std::fabs(volume - exactVolume)
+                <= 1e-6 * (volume + exactVolume) + error + exactError + Precision::Confusion();
+        }
+        catch (const Base::Exception&) {
         }
         catch (const Standard_Failure&) {
-            continue;
         }
-        built = true;
-        if (!sweep.isValid() || !toleranceHolds(sweep.getShape(), {profile.getShape(), face})) {
-            continue;
+        if (!agree) {
+            throw Base::RuntimeError(QT_TRANSLATE_NOOP(
+                "Exception",
+                "Could not revolve up to the face: the result's edges don't meet within the "
+                "precision of the profile and the face"
+            ));
         }
-        certifyFirstContact(sweep.getShape(), faceParts, face, profile.getShape(), axis, tolerance);
-        return sweep.moved(there.Inverted());
     }
-    if (!built) {
-        throw Base::RuntimeError(QT_TRANSLATE_NOOP("Exception", "Could not revolve up to the face"));
-    }
-    throw Base::RuntimeError(QT_TRANSLATE_NOOP(
-        "Exception",
-        "Could not revolve up to the face: the result's edges don't meet within the precision of "
-        "the profile and the face"
-    ));
+    return sweep;
 }
 
 TopoShape Revolved::generateSingleRevolutionSide(

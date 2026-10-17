@@ -2338,39 +2338,99 @@ class TestRevolve(unittest.TestCase):
             ("Symmetric", False): 2 * expected,
         }
 
+    def revolveUpToTorusBase(self, sideType, reversed_, tolerance, fromMinusPi, turned=330):
+        """profileAcross() revolved up to the torus of testRevolutionUpToTorusNeverSilentlyWrong
+        turned `turned` degrees about its axis, made by Part.makeTorus (from -180 to 180 degrees
+        if `fromMinusPi`) with its tolerance raised to `tolerance`, as the body's base: the
+        Revolution and the torus."""
+        if fromMinusPi:
+            ring = Part.makeTorus(6, 2, FreeCAD.Vector(), FreeCAD.Vector(0, 0, 1), -180, 180, 360)
+        else:
+            ring = Part.makeTorus(6, 2)
+        ring.Placement = FreeCAD.Placement(
+            FreeCAD.Vector(-7.5, 1, 1), FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), turned)
+        )
+        if tolerance:
+            ring.fixTolerance(tolerance)
+        base = self.Doc.addObject("Part::Feature", "Ring")
+        base.Shape = ring
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        body.BaseFeature = base
+        feature = self.revolveProfileUpTo(
+            body, "Revolution", sideType, (base, ["Face1"]), reversed_=reversed_
+        )
+        return feature, ring
+
     def testRevolutionUpToTorusWithMinorRangeFromMinusPi(self):
-        """The torus of testRevolutionUpToTorusNeverSilentlyWrong made by Part.makeTorus from
-        -180 to 180 degrees, turned 330 degrees about its axis, as the body's base: its face's
-        minor range is [-pi, pi], where BRepBuilderAPI_NurbsConvert fails ("Knots interval values
-        too close"), and every Revolution up to it failed as "Could not check the revolution up
-        to the face" (ops#293, q4). With the base's tolerance 0 and 1e-3, One side both ways and
-        Two sides give the tool that first contact gives."""
+        """The torus of revolveUpToTorusBase() from -180 to 180 degrees: its face's minor range
+        is [-pi, pi], where BRepBuilderAPI_NurbsConvert fails ("Knots interval values too close"),
+        and every Revolution up to it failed as "Could not check the revolution up to the face"
+        (ops#293, q4). With the base's tolerance 0 and 1e-3, One side both ways and Two sides
+        give the tool that first contact gives."""
         tools = self.torusFirstContactTools()
         del tools[("Symmetric", False)]
         for tolerance in (0, 1e-3):
             for (sideType, reversed_), tool in tools.items():
                 with self.subTest(tolerance=tolerance, sideType=sideType, reversed_=reversed_):
-                    ring = Part.makeTorus(
-                        6, 2, FreeCAD.Vector(), FreeCAD.Vector(0, 0, 1), -180, 180, 360
-                    )
-                    ring.Placement = FreeCAD.Placement(
-                        FreeCAD.Vector(-7.5, 1, 1),
-                        FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), 330),
-                    )
+                    feature, ring = self.revolveUpToTorusBase(sideType, reversed_, tolerance, True)
                     self.assertAlmostEqual(ring.Faces[0].ParameterRange[2], -math.pi)
-                    if tolerance:
-                        ring.fixTolerance(tolerance)
-                    base = self.Doc.addObject("Part::Feature", "Ring")
-                    base.Shape = ring
-                    body = self.Doc.addObject("PartDesign::Body", "Body")
-                    body.BaseFeature = base
-                    feature = self.revolveProfileUpTo(
-                        body, "Revolution", sideType, (base, ["Face1"]), reversed_=reversed_
-                    )
                     self.assertTrue(feature.isValid(), feature.getStatusString())
-                    self.assertAlmostEqual(
-                        feature.Shape.Volume, ring.Volume + tool, delta=1e-3
+                    self.assertAlmostEqual(feature.Shape.Volume, ring.Volume + tool, delta=1e-3)
+
+    def testRevolutionUpToTorusWithLooseSeamNeverSilentlyWrong(self):
+        """revolveUpToTorusBase() Reversed, with the base's tolerance raised to 0.02 to 0.3: the
+        torus's seam meridian dips 0.1 inside the profile's outer cylinder, and the splitter
+        merged the loose seam with it. The tool went on into the torus (39.04 instead of 13.35,
+        the fuse hiding most of it) or came out 1.25 short, with no error, whichever way the
+        torus was parametrized (ops#293, q4). Now the Revolution fails or gives the tool that
+        first contact gives."""
+        tool = self.torusFirstContactTools()[("One side", True)]
+        for fromMinusPi in (False, True):
+            for tolerance in (0.02, 0.03, 0.04, 0.3):
+                with self.subTest(fromMinusPi=fromMinusPi, tolerance=tolerance):
+                    feature, ring = self.revolveUpToTorusBase(
+                        "One side", True, tolerance, fromMinusPi
                     )
+                    if not feature.isValid():
+                        continue
+                    self.assertAlmostEqual(feature.AddSubShape.Volume, tool, delta=1e-3)
+                    self.assertAlmostEqual(feature.Shape.Volume, ring.Volume + tool, delta=1e-3)
+
+    def testRevolutionUpToLooseTorusNotTurnedNeverSilentlyWrong(self):
+        """revolveUpToTorusBase() not turned, with the base's tolerance raised to 0.05 and 0.3.
+        Split by a copy of the face with its seams' tolerance reset, the sweep's face parts no
+        longer matched the base's loose face, and the fuse gave the base's volume alone, with
+        no error (ops#293, q4, option A). One side both ways and Two sides fail or give the
+        tool that first contact gives. The fuse is measured on a mesh: with the base's tolerance
+        0.3, Shape.Volume's fixed integration read the right result (487.09, adaptively and
+        meshed) as 487.37."""
+        import MeshPart
+
+        def meshVolume(shape):
+            return MeshPart.meshFromShape(
+                Shape=shape, LinearDeflection=0.01, AngularDeflection=0.05
+            ).Volume
+
+        tools = self.torusFirstContactTools()
+        del tools[("Symmetric", False)]
+        for fromMinusPi in (False, True):
+            for tolerance in (0.05, 0.3):
+                for (sideType, reversed_), tool in tools.items():
+                    with self.subTest(
+                        fromMinusPi=fromMinusPi,
+                        tolerance=tolerance,
+                        sideType=sideType,
+                        reversed_=reversed_,
+                    ):
+                        feature, ring = self.revolveUpToTorusBase(
+                            sideType, reversed_, tolerance, fromMinusPi, turned=0
+                        )
+                        if not feature.isValid():
+                            continue
+                        self.assertAlmostEqual(feature.AddSubShape.Volume, tool, delta=1e-3)
+                        self.assertAlmostEqual(
+                            meshVolume(feature.Shape), meshVolume(ring) + tool, delta=0.02
+                        )
 
     def revolveSketchUpToWall(self, wallShape, geometry, placement=None):
         """A Revolution about V_Axis (Z) of a sketch on XZ holding `geometry`, up to the face of
