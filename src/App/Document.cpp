@@ -218,6 +218,11 @@ bool App::isRecomputingOnThisThread(const Document* doc)
     return std::ranges::find(recomputingHere, doc) != recomputingHere.end();
 }
 
+bool App::isRecomputingOnThisThread()
+{
+    return !recomputingHere.empty();
+}
+
 std::optional<ImportedSource> App::importedSource(const DocumentObject* obj)
 {
     auto doc = obj ? obj->getDocument() : nullptr;

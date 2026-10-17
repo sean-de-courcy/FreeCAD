@@ -144,6 +144,7 @@
 #include "OriginGroupExtension.h"
 #include "OriginGroupExtensionPy.h"
 #include "ProgramInformation.h"
+#include "RecomputeThread.h"
 #include "SuppressibleExtension.h"
 #include "Part.h"
 #include "GeoFeaturePy.h"
@@ -215,6 +216,19 @@ namespace fs = std::filesystem;
 
 namespace
 {
+
+// The worker's side of runWhileRecomputeWorkerIdle (ops#337): workerInRequest is set, under
+// workerIdleMutex, before the worker processes a request and cleared after its callback. A caller
+// holding the mutex with it clear keeps the worker from starting the next one
+std::mutex workerIdleMutex;
+bool workerInRequest = false;
+thread_local bool onRecomputeWorker = false;
+
+void setWorkerInRequest(bool inRequest)
+{
+    std::lock_guard<std::mutex> lock(workerIdleMutex);
+    workerInRequest = inRequest;
+}
 
 RecomputeRequest takeNextRecomputeRequest(std::deque<RecomputeRequest>& requests)
 {
@@ -866,6 +880,21 @@ void Application::queueRecomputeRequest(RecomputeRequest req)
         _recomputeRequests.push_back(std::move(req));
     }
     notifyRecomputeWorker();
+}
+
+bool App::isRecomputeWorkerThread()
+{
+    return onRecomputeWorker;
+}
+
+bool App::runWhileRecomputeWorkerIdle(const std::function<void()>& fn)
+{
+    std::unique_lock<std::mutex> lock(workerIdleMutex, std::try_to_lock);
+    if (!lock.owns_lock() || workerInRequest) {
+        return false;
+    }
+    fn();
+    return true;
 }
 
 void Application::cancelRecomputeRequestsForDocument(const std::string& documentName)
@@ -3244,6 +3273,7 @@ void Application::notifyRecomputeWorker()
 
 void Application::recomputeWorker()
 {
+    onRecomputeWorker = true;
     while (!_stopRecomputeThread) {
         std::unique_lock<std::mutex> lock(_recomputeMutex);
         // Wait until either stop is signaled or there is at least one pending request.
@@ -3263,6 +3293,7 @@ void Application::recomputeWorker()
 
             // Unlock while processing to allow other threads to add new requests.
             lock.unlock();
+            setWorkerInRequest(true);
 
             RecomputeResult result = processRecomputeRequest(request);
 
@@ -3270,6 +3301,7 @@ void Application::recomputeWorker()
                 request.callback(request, result);
             }
 
+            setWorkerInRequest(false);
             lock.lock();
             if (!request.documentName.empty()) {
                 _recomputeDocumentsInProgress.erase(request.documentName);

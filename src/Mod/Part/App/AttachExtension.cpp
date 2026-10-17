@@ -727,15 +727,26 @@ bool AttachExtension::linkFramesChanged() const
     if (getExtendedObject()->isRecomputing()) {
         return false;
     }
-    // Asked beside a recompute on another thread (the GUI's poll while the worker recomputes):
-    // the walk would read in-lists, groups and links the recompute changes. The recompute asks
-    // again itself, on its own thread
+    // Asked beside a recompute on another thread: the walk would read in-lists, groups and links
+    // the recompute changes. The recompute asks again itself, on its own thread
     auto doc = getExtendedObject()->getDocument();
     if (doc && doc->testStatus(App::Document::Recomputing)
         && !App::isRecomputingOnThisThread(doc)) {
         return false;
     }
-    return linkFramesDiffer();
+    // Asked by a recompute running on this thread, for any document, or by the worker (its
+    // single-object recompute sets no status): its own question
+    if (App::isRecomputingOnThisThread() || App::isRecomputeWorkerThread()) {
+        return linkFramesDiffer();
+    }
+    // Otherwise (the GUI's Refresh poll), walk only while the async worker recomputes nothing,
+    // in no document, and hold it off meanwhile: the status above is read once, set late, not
+    // set for a single object, and only this document's (ops#337)
+    bool differ = false;
+    if (!App::runWhileRecomputeWorkerIdle([&] { differ = linkFramesDiffer(); })) {
+        return false;
+    }
+    return differ;
 }
 
 bool AttachExtension::linkFramesDiffer() const
