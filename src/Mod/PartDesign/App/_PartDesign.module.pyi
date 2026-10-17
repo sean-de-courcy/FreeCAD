@@ -72,6 +72,16 @@ def makeMerge(at: DocumentObject, bodies: Sequence[DocumentObject], /) -> Docume
     """
     ...
 
+def split(body: DocumentObject, tool: object, side: str = "Front", /) -> DocumentObject:
+    """Split the part body by the plane tool, in two parts.
+
+    tool is an origin plane, a datum plane, or (feature, "FaceN") for a planar face. A Split at
+    body's end keeps side ("Front": where the plane's normal points, or "Back"); a new part placed
+    as body gets the other side, from a Split that reads the first one's base, plane and side. No
+    recompute; returns the new Body.
+    """
+    ...
+
 def newPartFrom(feature: DocumentObject, /) -> DocumentObject:
     """Move feature, its Body's Tip that nothing else uses, into a new Body in the same container.
 

@@ -3069,6 +3069,101 @@ bool CmdPartDesignMergeParts::isActive()
     return getActiveGuiDocument() && Gui::Selection().size() >= 2;
 }
 
+//===========================================================================
+// PartDesign_Split (FreeCAD-CH ops#325, B+ Stage 1 4, design 2.7)
+//===========================================================================
+
+DEF_STD_CMD_A(CmdPartDesignSplit)
+
+CmdPartDesignSplit::CmdPartDesignSplit()
+    : Command("PartDesign_Split")
+{
+    sAppModule = "PartDesign";
+    sGroup = QT_TR_NOOP("PartDesign");
+    sMenuText = QT_TR_NOOP("Split Part");
+    sToolTipText = QT_TR_NOOP(
+        "Splits a part in two by a plane: select the part and an origin plane, a datum plane or "
+        "a planar face. The part keeps one side, a new part the other"
+    );
+    sWhatsThis = "PartDesign_Split";
+    sStatusTip = sToolTipText;
+    sPixmap = "PartDesign_Boolean";
+}
+
+void CmdPartDesignSplit::activated(int iMsg)
+{
+    Q_UNUSED(iMsg);
+    // The plane: an origin or datum plane, in any order, else a planar face (a Body's face is
+    // its Tip's, PartDesign.split); the part: another pick, or the face's own part
+    std::vector<Gui::SelectionObject> picks = Gui::Selection().getSelectionEx();
+    App::DocumentObject* part = nullptr;
+    App::DocumentObject* tool = nullptr;
+    std::string sub;
+    std::size_t toolPick = picks.size();
+    for (std::size_t i = 0; i < picks.size() && !tool; ++i) {
+        App::DocumentObject* obj = picks[i].getObject();
+        if (obj->isDerivedFrom<App::Plane>() || obj->isDerivedFrom<PartDesign::Plane>()) {
+            tool = obj;
+            toolPick = i;
+        }
+    }
+    for (std::size_t i = 0; i < picks.size() && !tool; ++i) {
+        const std::vector<std::string>& subs = picks[i].getSubNames();
+        if (!subs.empty() && subs.front().starts_with("Face")) {
+            tool = picks[i].getObject();
+            sub = subs.front();
+            toolPick = i;
+        }
+    }
+    for (std::size_t i = 0; i < picks.size() && !part; ++i) {
+        if (i != toolPick) {
+            part = picks[i].getObject();
+        }
+    }
+    if (!part && tool && !sub.empty()) {
+        part = tool;
+    }
+    PartDesign::Body* body = freecad_cast<PartDesign::Body*>(part);
+    if (!body) {
+        body = PartDesign::Body::findBodyOf(part);
+    }
+    if (!body || !tool) {
+        QMessageBox::information(
+            Gui::getMainWindow(),
+            QObject::tr("Split Part"),
+            QObject::tr("Select the part to split and a plane: an origin plane, a datum plane or "
+                        "a planar face.")
+        );
+        return;
+    }
+    std::string toolArg = getObjectCmd(tool);
+    if (!sub.empty()) {
+        toolArg = "(" + toolArg + ", '" + sub + "')";
+    }
+    // The panel's OK commits it, its Cancel takes both halves away
+    openCommand(QT_TRANSLATE_NOOP("Command", "Split part"));
+    try {
+        doCommand(Doc, "import PartDesign");
+        doCommand(Doc, "PartDesign.split(%s, %s)", getObjectCmd(body).c_str(), toolArg.c_str());
+        updateActive();
+    }
+    catch (const Base::Exception& e) {
+        abortCommand();
+        QMessageBox::warning(
+            Gui::getMainWindow(),
+            QObject::tr("Split Part"),
+            QString::fromUtf8(e.what())
+        );
+        return;
+    }
+    PartDesignGui::setEdit(body->Tip.getValue(), body);
+}
+
+bool CmdPartDesignSplit::isActive()
+{
+    return getActiveGuiDocument() && Gui::Selection().size() >= 1;
+}
+
 // Command group for datums =============================================
 
 class CmdPartDesignCompDatums: public Gui::GroupCommand
@@ -3312,6 +3407,7 @@ void CreatePartDesignCommands()
 
     rcCmdMgr.addCommand(new CmdPartDesignBoolean());
     rcCmdMgr.addCommand(new CmdPartDesignMergeParts());
+    rcCmdMgr.addCommand(new CmdPartDesignSplit());
     rcCmdMgr.addCommand(new CmdPartDesignCompDatums());
     rcCmdMgr.addCommand(new CmdPartDesignCompSketches());
     rcCmdMgr.addCommand(new CmdPartDesignToggleSketches());

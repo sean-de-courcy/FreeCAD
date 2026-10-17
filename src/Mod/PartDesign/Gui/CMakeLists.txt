@@ -112,6 +112,8 @@ SET(PartDesignGuiViewProvider_SRCS
     ViewProviderShapeBinder.cpp
     ViewProviderBoolean.cpp
     ViewProviderBoolean.h
+    ViewProviderSplit.cpp
+    ViewProviderSplit.h
     ViewProviderPrimitive.h
     ViewProviderPrimitive.cpp
     ViewProviderPipe.h
@@ -196,6 +198,8 @@ SET(PartDesignGuiTaskDlgs_SRCS
     TaskBooleanParameters.ui
     TaskBooleanParameters.cpp
     TaskBooleanParameters.h
+    TaskSplitParameters.cpp
+    TaskSplitParameters.h
     TaskPrimitiveParameters.h
     TaskPrimitiveParameters.cpp
     TaskPipeParameters.ui

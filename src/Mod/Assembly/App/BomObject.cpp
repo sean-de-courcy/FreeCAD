@@ -41,6 +41,7 @@
 
 #include <Mod/Part/App/PartFeature.h>
 #include <Mod/PartDesign/App/Body.h>
+#include <Mod/PartDesign/App/FeatureBoolean.h>
 #include <Mod/Spreadsheet/App/Cell.h>
 
 #include "AssemblyObject.h"
@@ -209,6 +210,11 @@ void BomObject::addObjectChildrenToBom(
 
         if (!child->isDerivedFrom<AssemblyObject>() && !child->isDerivedFrom<App::Part>()
             && !(child->isDerivedFrom<Part::Feature>() && !onlyParts.getValue())) {
+            continue;
+        }
+
+        // A part merged into another is in that one (FreeCAD-CH ops#325, design 2.6)
+        if (PartDesign::Boolean::mergeOf(child)) {
             continue;
         }
 

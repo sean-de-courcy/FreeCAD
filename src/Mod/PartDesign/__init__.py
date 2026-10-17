@@ -12,3 +12,4 @@ makeSiblings = _PartDesign.makeSiblings
 siblingsOf = _PartDesign.siblingsOf
 unlinkSibling = _PartDesign.unlinkSibling
 makeMerge = _PartDesign.makeMerge
+split = _PartDesign.split

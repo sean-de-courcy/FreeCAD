@@ -333,7 +333,8 @@ names it.
 | `feat/325-2b` | feat | ops#325 | - | `feat/325-2a` `a44ed1dddf` (fork PR 302, merged) | `bf94ac043f` (fork PR 303), 2026-10-17 | never (fork feature) |
 | `feat/325-3a` | feat | ops#325 | - | `feat/325-2b` `dca26b0787` (fork PR 303) | `0c1a444ea5` (fork PR 304), 2026-10-17 | never (fork feature) |
 | `feat/325-3b` | feat | ops#325 | - | `feat/325-3a` `0be7f310ec` (fork PR 304) | `ae33af5c9c` (fork PR 305), 2026-10-17 | never (fork feature) |
-| `fix/342-container-moves` | fix | ops#342 | - | `feat/325-3b` `add23ca198` (fork PR 305) | (fork PR 306) | never (fork feature) |
+| `fix/342-container-moves` | fix | ops#342 | - | `feat/325-3b` `add23ca198` (fork PR 305) | `9439811c0a` (fork PR 306), 2026-10-17 | never (fork feature) |
+| `feat/325-4-split` | feat | ops#325 | - | `integration` `ae33af5c9c` | (fork PR 308) | never (fork feature) |
 
 ## Fork-only commits in carried topics
 

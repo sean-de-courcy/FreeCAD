@@ -247,6 +247,9 @@ class TaskAssemblyInsertLink(QtCore.QObject):
                     if not obj.ViewObject.ShowInTree and not self.showHidden:
                         continue
 
+                    if UtilsAssembly.isMergedPart(obj):
+                        continue  # FreeCAD-CH (ops#325): a part merged into another is in that one
+
                     if (
                         obj.isDerivedFrom("Part::Feature")
                         or obj.isDerivedFrom("App::Part")

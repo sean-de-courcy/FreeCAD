@@ -35,6 +35,7 @@
 #include "Body.h"
 #include "FeatureBoolean.h"
 #include "FeatureSketchBased.h"
+#include "FeatureSplit.h"
 
 
 namespace PartDesign
@@ -97,6 +98,15 @@ public:
             "of at: a solid feature (the Merge goes right after it) or a Body (at its Tip). The "
             "Merge is a Fuse of their last solid features; each merged Body gets MergedInto and is "
             "hidden. Returns the Merge; no recompute."
+        );
+        add_varargs_method(
+            "split",
+            &Module::split,
+            "split(body, tool, side='Front') -- Splits the part body by the plane tool: an origin "
+            "plane, a datum plane, or (feature, 'FaceN') for a planar face. A Split at its end "
+            "keeps side (Front: where the plane's normal points, or Back); a new part placed as "
+            "body gets the other side, from a Split that follows the first. Returns the new "
+            "Body; no recompute."
         );
         add_varargs_method(
             "studioOriginFeature",
@@ -242,6 +252,58 @@ private:
         std::vector<App::DocumentObject*> bodies = objectsArg(pBodies);
         try {
             return Py::asObject(Boolean::makeMerge(at, bodies)->getPyObject());
+        }
+        catch (const Base::Exception& e) {
+            e.setPyException();
+            throw Py::Exception();
+        }
+    }
+
+    // FreeCAD-CH (ops#325 4): Split
+    Py::Object split(const Py::Tuple& args)
+    {
+        PyObject* pObj;
+        PyObject* pTool;
+        const char* side = "Front";
+        if (!PyArg_ParseTuple(
+                args.ptr(),
+                "O!O|s",
+                &(App::DocumentObjectPy::Type),
+                &pObj,
+                &pTool,
+                &side
+            )) {
+            throw Py::Exception();
+        }
+        App::DocumentObject* body = objectArg(pObj);
+        App::DocumentObject* tool = nullptr;
+        std::vector<std::string> subs;
+        if (PyObject_TypeCheck(pTool, &(App::DocumentObjectPy::Type))) {
+            tool = objectArg(pTool);
+        }
+        else if (PyTuple_Check(pTool) && PyTuple_Size(pTool) == 2
+                 && PyObject_TypeCheck(
+                     PyTuple_GetItem(pTool, 0),
+                     &(App::DocumentObjectPy::Type)
+                 )) {
+            tool = objectArg(PyTuple_GetItem(pTool, 0));
+            Py::Object sub(PyTuple_GetItem(pTool, 1));
+            if (sub.isString()) {
+                subs.push_back(Py::String(sub).as_std_string());
+            }
+            else {
+                Py::Sequence sequence(sub);
+                for (Py::Sequence::iterator it = sequence.begin(); it != sequence.end(); ++it) {
+                    subs.push_back(Py::String(*it).as_std_string());
+                }
+            }
+        }
+        else {
+            PyErr_SetString(PyExc_TypeError, "Expected a plane, or (feature, 'FaceN')");
+            throw Py::Exception();
+        }
+        try {
+            return Py::asObject(Split::makeSplit(body, tool, subs, side)->getPyObject());
         }
         catch (const Base::Exception& e) {
             e.setPyException();
