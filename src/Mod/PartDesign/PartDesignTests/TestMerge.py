@@ -131,6 +131,11 @@ class TestMerge(unittest.TestCase):
         self.assertEqual(self.bomNames(bom), ["Bracket"])
         self.assertTrue(UtilsAssembly.isMergedPart(self.panel))
         self.assertFalse(UtilsAssembly.isMergedPart(self.bracket))
+        # A link to the panel is the panel, as in the BOM
+        link = self.doc.addObject("App::Link", "PanelLink")
+        link.LinkedObject = self.panel
+        self.assertTrue(UtilsAssembly.isMergedPart(link))
+        self.doc.removeObject(link.Name)
 
         self.bracket.removeObject(merge)
         self.doc.removeObject(merge.Name)
