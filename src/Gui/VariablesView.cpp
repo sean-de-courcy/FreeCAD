@@ -58,6 +58,7 @@
 #include <App/PropertyUnits.h>
 #include <App/Range.h>
 #include <App/VarSet.h>
+#include <App/VarSetCopy.h>
 #include <App/VariableLookup.h>
 #include <Base/Interpreter.h>
 #include <Base/Quantity.h>
@@ -367,6 +368,14 @@ bool isValidName(const std::string& name)
         && !App::stringToAddress(name.c_str(), true).isValid();
 }
 
+/// Whether variables may be added to @a obj: a VarSet, but not a copy still attached to its
+/// source (ops#317: its variables are the source's, read-only).
+bool isEditableSet(const App::DocumentObject* obj)
+{
+    auto copy = freecad_cast<const App::VarSetCopy*>(obj);
+    return obj && obj->isDerivedFrom<App::VarSet>() && !(copy && copy->isAttached());
+}
+
 }  // namespace
 
 /* TRANSLATOR Gui::DockWnd::VariablesView */
@@ -502,6 +511,9 @@ void VariablesModel::addHolderRows(
 Qt::ItemFlags VariablesModel::flags(const QModelIndex& index) const
 {
     Qt::ItemFlags result = QStandardItemModel::flags(index) & ~Qt::ItemIsEditable;
+    if (isReadOnly(index)) {
+        return result;
+    }
     if (kind(index) != HeaderKind
         && (index.column() == NameColumn || index.column() == ExpressionColumn)) {
         result |= Qt::ItemIsEditable;
@@ -539,6 +551,15 @@ App::Property* VariablesModel::property(const QModelIndex& index)
         return nullptr;
     }
     return obj->getPropertyByName(index.data(VariableRole).toString().toStdString().c_str());
+}
+
+bool VariablesModel::isReadOnly(const QModelIndex& index)
+{
+    if (kind(index) != VarSetKind) {
+        return false;
+    }
+    App::Property* prop = property(index);
+    return prop && prop->testStatus(App::Property::ReadOnly);
 }
 
 bool VariablesModel::setData(const QModelIndex& index, const QVariant& value, int role)
@@ -963,6 +984,15 @@ VariablesView::VariablesView(Gui::Document* doc, QWidget* parent)
     usesAction = toolBar->addAction(tr("Show uses"), this, &VariablesView::showUses);
     usesAction->setObjectName(QStringLiteral("showUses"));
     usesAction->setToolTip(tr("List the expressions that use the selected variable"));
+    importAction = toolBar->addAction(
+        tr("Import variables..."),
+        this,
+        &VariablesView::importVariables
+    );
+    importAction->setObjectName(QStringLiteral("importVariables"));
+    importAction->setToolTip(
+        tr("Import Onshape variable studio exports (.json) as read-only copies")
+    );
     layout->addWidget(toolBar);
     // In the context menu only
     describeAction = new QAction(tr("Edit description..."), this);
@@ -988,6 +1018,7 @@ VariablesView::VariablesView(Gui::Document* doc, QWidget* parent)
     tree->addAction(deleteAction);
     tree->addAction(usesAction);
     tree->addAction(describeAction);
+    tree->addAction(importAction);
     layout->addWidget(tree);
 
     hint = new QLabel(tr("Add a variable, or type #name in any expression."), this);
@@ -1224,10 +1255,14 @@ void VariablesView::updateActions()
     bool variable = current.isValid()
         && VariablesModel::kind(current) != VariablesModel::HeaderKind;
     addAction->setEnabled(currentDocument() != nullptr);
-    deleteAction->setEnabled(variable);
+    importAction->setEnabled(currentDocument() != nullptr);
+    // A copy's variable can't be deleted or described while the copy is attached (ops#317).
+    bool readOnly = VariablesModel::isReadOnly(current);
+    deleteAction->setEnabled(variable && !readOnly);
     usesAction->setEnabled(variable);
     describeAction->setEnabled(
         current.isValid() && VariablesModel::kind(current) == VariablesModel::VarSetKind
+        && !readOnly
     );
 }
 
@@ -1277,18 +1312,19 @@ App::DocumentObject* VariablesView::addTarget() const
     if (!doc) {
         return nullptr;
     }
-    // The selected row's VarSet, else the document's "Variables" VarSet.
+    // The selected row's VarSet, else the document's "Variables" VarSet; never a copy that is
+    // still attached to its source (ops#317: its variables are read-only).
     if (App::DocumentObject* obj = VariablesModel::holder(tree->currentIndex())) {
-        if (obj->isDerivedFrom<App::VarSet>()) {
+        if (isEditableSet(obj)) {
             return obj;
         }
     }
     App::DocumentObject* obj = doc->getObject("Variables");
-    if (obj && obj->isDerivedFrom<App::VarSet>()) {
+    if (isEditableSet(obj)) {
         return obj;
     }
     for (auto obj : doc->getObjectsOfType(App::VarSet::getClassTypeId())) {
-        if (std::string(obj->Label.getValue()) == "Variables") {
+        if (std::string(obj->Label.getValue()) == "Variables" && isEditableSet(obj)) {
             return obj;
         }
     }
@@ -1334,6 +1370,9 @@ void VariablesView::addVariable()
     auto setBox = new QComboBox(dialog);
     setBox->setObjectName(QStringLiteral("set"));
     for (auto obj : doc->getObjectsOfType(App::VarSet::getClassTypeId())) {
+        if (!isEditableSet(obj)) {
+            continue;  // an attached copy (ops#317)
+        }
         setBox->addItem(
             QString::fromUtf8(obj->Label.getValue()),
             QString::fromLatin1(obj->getNameInDocument())
@@ -1454,6 +1493,11 @@ bool VariablesView::addFromDialog(
                                                      : doc->getObject(holderName.c_str());
     if (!holderName.empty() && !target) {
         error = tr("The set '%1' is gone.").arg(QString::fromStdString(holderName));
+        return false;
+    }
+    if (target && !isEditableSet(target)) {
+        error = tr("'%1' is a copy of its source: its variables can't be changed here.")
+                    .arg(QString::fromUtf8(target->Label.getValue()));
         return false;
     }
     std::string varName = name.toStdString();
@@ -1596,6 +1640,14 @@ void VariablesView::addOtherVariable(App::DocumentObject* target)
     if (!doc) {
         return;
     }
+    if (target && !isEditableSet(target)) {
+        showMessage(
+            tr("'%1' is a copy of its source: its variables can't be changed here.")
+                .arg(QString::fromUtf8(target->Label.getValue())),
+            true
+        );
+        return;
+    }
     bool created = false;
     int createdID = 0;  // the "Add variable" undo step, when the panel made one
     if (!target) {
@@ -1662,7 +1714,8 @@ void VariablesView::editDescription()
 {
     QModelIndex current = tree->currentIndex();
     App::DocumentObject* obj = VariablesModel::holder(current);
-    if (!obj || VariablesModel::kind(current) != VariablesModel::VarSetKind) {
+    if (!obj || VariablesModel::kind(current) != VariablesModel::VarSetKind
+        || VariablesModel::isReadOnly(current)) {
         return;
     }
     // Everything is read from the row before the dialog: the panel may rebuild while it is open,
@@ -1724,7 +1777,8 @@ void VariablesView::deleteVariable()
 {
     QModelIndex current = tree->currentIndex();
     App::DocumentObject* obj = VariablesModel::holder(current);
-    if (!obj || VariablesModel::kind(current) == VariablesModel::HeaderKind) {
+    if (!obj || VariablesModel::kind(current) == VariablesModel::HeaderKind
+        || VariablesModel::isReadOnly(current)) {
         return;
     }
     // Everything is read from the row before the message box: the panel may rebuild while it is
@@ -1787,6 +1841,25 @@ void VariablesView::deleteVariable()
         return;
     }
     showMessage(QString(), false);
+}
+
+void VariablesView::importVariables()
+{
+    // ops#317 PR G1: freecad.variables.importgui asks for the files, then shows its dialog (not
+    // waited for). A document's internal name is an identifier, safe in the string.
+    App::Document* doc = currentDocument();
+    if (!doc) {
+        return;
+    }
+    std::string code = "from freecad.variables import importgui\n"
+                       "importgui.run(FreeCAD.getDocument(\""
+        + std::string(doc->getName()) + "\"))\n";
+    try {
+        Base::Interpreter().runString(code.c_str());
+    }
+    catch (const Base::Exception& e) {
+        showMessage(QString::fromUtf8(e.what()), true);
+    }
 }
 
 void VariablesView::showUses()

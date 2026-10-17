@@ -267,6 +267,58 @@ class TestVariablesCopies(unittest.TestCase):
         self.doc.undo()
         self.assertEqual(self.doc.Objects, [])
 
+    def test_missing_studio_value_names(self):
+        """A value for a name FreeCAD can't use as a variable (#t, a unit; #Gap, which
+        "Variables" has already) gets a proposal, as a copy's variable does (review 317, 6), and
+        name_map gives another name."""
+        self.documentVariables()
+        a = self.export("Studio A", [entry(variable("LENGTH", "Width", "#t * 2"),
+                                           variable("LENGTH", "Depth", "#Gap * 3"))])
+        values = {"t": ("LENGTH", "3 mm"), "Gap": ("LENGTH", "4 mm")}
+        plan = copies.plan_import(self.doc, [a], values=values)
+        self.assertTrue(plan.ok, plan.report())
+        self.assertEqual(plan.input_renames, {"Gap": "Gap_", "t": "t_"})
+        self.assertIn("The value of #t becomes Variables.t_", plan.report())
+        copy = copies.import_studios(self.doc, [a], values=values,
+                                     name_map={"t": "Thick"}).copies[0]
+        variables = self.doc.getObject("Variables")
+        self.assertAlmostEqual(variables.Thick.Value, 3)
+        self.assertAlmostEqual(variables.Gap_.Value, 4)
+        self.assertAlmostEqual(variables.Gap.Value, 7)  # the document's own, untouched
+        self.assertEqual(copy.Bindings, {"t": "Variables.Thick", "Gap": "Variables.Gap_"})
+        self.assertAlmostEqual(copy.Width.Value, 6)
+        self.assertAlmostEqual(copy.Depth.Value, 12)
+        self.doc.undo()
+        self.assertNotIn("Thick", variables.PropertiesList)
+        self.assertNotIn("Gap_", variables.PropertiesList)
+        # a name given that FreeCAD can't use either is a problem, nothing made
+        with self.assertRaises(ImportBlocked) as blocked:
+            copies.import_studios(self.doc, [a], values=values, name_map={"t": "pi"})
+        self.assertIn("#t can't be the input variable pi", str(blocked.exception))
+
+    def test_fem_json_opens_through_fem(self):
+        """A FEM mesh .json still opens through FEM when nothing says which module reads it:
+        the Onshape type is registered after the modules (review 317, 7)."""
+        modules = App.getImportType("json")
+        self.assertIn("freecad.variables.importer", modules)
+        try:
+            import Fem
+            from feminout import importYamlJsonMesh
+        except ImportError:
+            self.skipTest("no FEM")
+        self.assertLess(modules.index("feminout.importYamlJsonMesh"),
+                        modules.index("freecad.variables.importer"))
+        mesh = Fem.FemMesh()
+        for node, xyz in enumerate(((0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1)), 1):
+            mesh.addNode(*xyz, node)
+        mesh.addVolume([1, 2, 3, 4])
+        path = os.path.join(self.folder, "Mesh.json")
+        importYamlJsonMesh.write(path, mesh)
+        App.loadFile(path, self.doc.Name)  # the first module's insert(), as File > Import's
+        meshes = [o for o in self.doc.Objects if o.isDerivedFrom("Fem::FemMeshObject")]
+        self.assertEqual(len(meshes), 1)
+        self.assertEqual(meshes[0].FemMesh.NodeCount, 4)
+
     def test_missing_studio_skip(self):
         """Skip #Gap: Width, which needs it, isn't imported; Height is. Skipped keeps the choice,
         so Refresh can tell Width from a variable added at the source."""

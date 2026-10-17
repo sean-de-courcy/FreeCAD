@@ -38,7 +38,10 @@ def findRow(model, parent, name, leaf=True):
         index = model.index(row, 0, parent)
         # a group can have a property's name: take a leaf, or a property with rows (a Vector)
         hasRows = model.rowCount(index) != 0
-        if str(model.data(index)) == name and (not hasRows if leaf else hasRows and parent.isValid()):
+        # A property is never a top-level row: those are groups, which the model keeps, empty,
+        # once made (an App::VarSetCopy's "Source" group after testCopiedVariableLocked).
+        matches = not hasRows if leaf else hasRows
+        if str(model.data(index)) == name and parent.isValid() and matches:
             return index
         found = findRow(model, index, name, leaf)
         if found is not None:
@@ -1055,3 +1058,59 @@ class TestPropertyEditorGui(unittest.TestCase):
         QtTest.QTest.keyClick(combo, QtCore.Qt.Key_Escape)
         pump(0.3)
         self.assertEqual(self.obj.Mode, "Medium", "Esc undid the pick")
+
+    # ops#317 (PR 317 review, 2): a copy's variables are read-only while it is attached
+
+    def menuTexts(self, name):
+        """The texts of the Data tab's context menu on self.obj's row name; the menu is closed."""
+        texts = []
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.doc.Name, self.obj.Name)
+        pump(1.0)
+        editor = self.dataEditor()
+        index = findRow(editor.model(), QtCore.QModelIndex(), name)
+        self.assertIsNotNone(index, "no %s row in the property view" % name)
+        editor.setCurrentIndex(index)
+        editor.selectionModel().select(
+            index,
+            QtCore.QItemSelectionModel.ClearAndSelect | QtCore.QItemSelectionModel.Rows,
+        )
+
+        def record(menu):
+            texts.extend(a.text() for a in menu.actions())
+            menu.close()
+
+        self.answerSoon(QtWidgets.QApplication.activePopupWidget, record)
+        viewport = editor.viewport()
+        pos = editor.visualRect(index).center()
+        event = QtGui.QContextMenuEvent(
+            QtGui.QContextMenuEvent.Mouse, pos, viewport.mapToGlobal(pos)
+        )
+        QtWidgets.QApplication.sendEvent(viewport, event)
+        pump()
+        self.assertTrue(texts, "no context menu")
+        return texts
+
+    def testCopiedVariableLocked(self):
+        """A copy's variable (ReadOnly while the copy is attached) offers no Rename, Delete,
+        Tooltip, group Rename or Move, and the Delete key leaves it; a plain VarSet's still
+        does."""
+        locked = ["Rename Property", "Delete Property", "Edit Property Tooltip",
+                  "Rename Property Group", "Move Property"]
+        texts = self.menuTexts("Width")
+        for text in locked:
+            self.assertIn(text, texts)
+        self.doc.openTransaction("Make copy")
+        copy = self.doc.addObject("App::VarSetCopy", "Copy")
+        copy.addProperty("App::PropertyDistance", "Gap", "Base")
+        copy.Gap = 3
+        copy.SourceKind = "Onshape JSON"  # attached: its variables become read-only
+        self.doc.commitTransaction()
+        self.assertIn("ReadOnly", copy.getPropertyStatus("Gap"))
+        self.obj = copy
+        texts = self.menuTexts("Gap")
+        self.assertIn("Property Uses", texts)
+        for text in locked:
+            self.assertNotIn(text, texts)
+        self.deleteRow("Gap")
+        self.assertIn("Gap", copy.PropertiesList)

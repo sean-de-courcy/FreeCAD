@@ -118,6 +118,9 @@ public:
     /// sheet's first recompute).
     static App::Property* property(const QModelIndex& index);
     static Kind kind(const QModelIndex& index);
+    /// Whether the row's variable is a copy's, read-only while the copy is attached (ops#317:
+    /// the ReadOnly bit): not renamed, edited, described or deleted from the panel.
+    static bool isReadOnly(const QModelIndex& index);
 
     /// Sets the description of @a obj's variable @a name to @a text, as one transaction
     /// ("Describe Width"); false and @a error when nothing was changed.
@@ -241,6 +244,8 @@ private:
         QString& error
     );
     void editDescription();
+    /// The import dialog for Onshape exports, several files at once (ops#317 PR G1).
+    void importVariables();
     void deleteVariable();
     void showUses();
     QString usesText(const QModelIndex& index, int* count) const;
@@ -260,6 +265,7 @@ private:
     QAction* deleteAction;
     QAction* usesAction;
     QAction* describeAction;
+    QAction* importAction;
     std::string documentName;
     /// The collapsed headers, as "document/object".
     std::set<std::string> collapsed;

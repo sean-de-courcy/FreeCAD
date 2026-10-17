@@ -1652,6 +1652,13 @@ def init_applications() -> None:
         Err(utils.HLine)
 
 
+# FreeCAD-CH ops#317: variable studio exports, as copies (freecad.variables.importgui).
+# After the modules: FEM also claims *.json, and FreeCAD picks the first module registered
+# for an extension when no filter or module says which (command line, open() and insert()
+# without a module).
+App.addImportType("Onshape variables (*.json)", "freecad.variables.importer")
+
+
 # ┌────────────────────────────────────────────────┐
 # │ Cleanup for next scripts                       │
 # └────────────────────────────────────────────────┘

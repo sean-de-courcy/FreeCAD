@@ -8,13 +8,20 @@ the expression, each as one undo step; Add and Delete work from its toolbar. G1-
 of the design note; since ops#317 PR B the Type and Description columns and the panel's own Add
 dialog (G-1 to G-3 of notes/variables-studio.md). Each test builds its own document."""
 
+import json
+import os
+import shutil
+import tempfile
 import time
 import unittest
+from unittest import mock
+
+import shiboken6
 
 import FreeCAD as App
 import FreeCADGui as Gui
 
-from PySide import QtCore, QtWidgets
+from PySide import QtCore, QtGui, QtWidgets
 from PySide6.QtTest import QTest
 
 # VariablesModel's roles and columns (src/Gui/VariablesView.h)
@@ -1080,3 +1087,394 @@ class TestVariablesPanelGui(unittest.TestCase):
         self.rows()
         header = [h for h in self.headers() if self.model().data(h) == "VarSet"][0]
         self.assertFalse(self.tree.isExpanded(header))
+
+
+def writeExport(folder, name, variables):
+    """A made-up Onshape export (notes/variables-studio.md section 0) of one studio entry:
+    @a variables is a list of (type, name, expression)."""
+    path = os.path.join(folder, name + ".json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump([{"variableStudioReference": None, "variables": [
+            {"type": kind, "name": var, "value": None, "description": "", "expression": text}
+            for kind, var, text in variables]}], f)
+    return path
+
+
+class TestVariablesImportGui(unittest.TestCase):
+    """The import dialog and the panel's "Import variables..." (ops#317 PR G1), with made-up
+    exports: A uses #Gap, which only B defines (section 6, I-2, through the dialog)."""
+
+    def setUp(self):
+        self.folder = tempfile.mkdtemp(prefix="TestVariablesImportGui")
+        self.doc = App.newDocument("TestVariablesImport")
+        self.doc.UndoMode = 1
+        self.a = writeExport(self.folder, "Studio A", [("LENGTH", "Width", "#Gap * 2"),
+                                                        ("LENGTH", "Height", "5 mm")])
+        self.dialog = None
+
+    def tearDown(self):
+        from freecad.variables import copies
+
+        copies._check_hook = None
+        self.closeDialog()
+        for widget in QtWidgets.QApplication.topLevelWidgets():
+            if isinstance(widget, QtWidgets.QDialog) and widget.isVisible():
+                widget.reject()
+        pump(0.1)
+        if self.doc.Name in App.listDocuments():
+            App.closeDocument(self.doc.Name)
+        shutil.rmtree(self.folder, ignore_errors=True)
+
+    def closeDialog(self):
+        """Cancels the dialog if it is still there (it is deleted once closed)."""
+        if self.dialog is not None and shiboken6.isValid(self.dialog):
+            self.dialog.reject()
+        self.dialog = None
+        pump(0.1)
+
+    def documentGap(self):
+        variables = self.doc.addObject("App::VarSet", "Variables")
+        variables.addProperty("App::PropertyDistance", "Gap")
+        variables.Gap = "7 mm"
+        other = self.doc.addObject("App::VarSet", "Other")
+        other.addProperty("App::PropertyDistance", "Alpha")
+        self.doc.recompute()
+
+    def open(self, paths):
+        from freecad.variables import importgui
+
+        self.dialog = importgui.run(self.doc, paths)
+        self.assertIsNotNone(self.dialog)
+        pump(0.1)
+        return self.dialog
+
+    def find(self, cls, name):
+        widget = self.dialog.findChild(cls, name)
+        self.assertIsNotNone(widget, name)
+        return widget
+
+    def choose(self, combo, data):
+        index = combo.findData(data)
+        self.assertGreaterEqual(index, 0, data)
+        combo.setCurrentIndex(index)
+        pump(0.05)
+
+    def importNow(self):
+        button = self.find(QtWidgets.QPushButton, "import")
+        self.assertTrue(button.isEnabled(), self.find(QtWidgets.QPlainTextEdit, "report")
+                        .toPlainText())
+        QtCore.QTimer.singleShot(0, button.click)
+        self.assertTrue(waitFor(lambda: self.dialog.result is not None))
+        pump(0.1)
+        return self.dialog.result
+
+    def test_use_document_variable(self):
+        """A alone: Import is disabled and the report names #Gap and its user. The document
+        variables are offered, Variables.Gap first, none preselected. Choosing it imports, and
+        Bindings records it; one undo removes the copy."""
+        self.documentGap()
+        self.open([self.a])
+        button = self.find(QtWidgets.QPushButton, "import")
+        self.assertFalse(button.isEnabled())
+        report = self.find(QtWidgets.QPlainTextEdit, "report").toPlainText()
+        self.assertIn("#Gap is used by Width", report)
+        choice = self.find(QtWidgets.QComboBox, "choice_Gap")
+        self.assertIsNone(choice.currentData())
+        variable = self.find(QtWidgets.QComboBox, "variable_Gap")
+        offered = [variable.itemData(i) for i in range(variable.count())]
+        self.assertEqual(offered, [None, "Variables.Gap", "Other.Alpha"])
+        self.assertIsNone(variable.currentData())
+        self.choose(choice, "use")
+        self.assertFalse(button.isEnabled())  # chosen how, but not which
+        self.choose(variable, "Variables.Gap")
+        copy = self.importNow().copies[0]
+        self.assertEqual(copy.Bindings, {"Gap": "Variables.Gap"})
+        self.assertAlmostEqual(copy.Width.Value, 14)
+        name = copy.Name
+        self.doc.undo()
+        self.assertIsNone(self.doc.getObject(name))
+
+    def test_value_and_skip(self):
+        """Enter a value: an input variable in a new "Variables" set. Skip: Width isn't
+        imported, Height is."""
+        self.open([self.a])
+        self.choose(self.find(QtWidgets.QComboBox, "choice_Gap"), "value")
+        self.choose(self.find(QtWidgets.QComboBox, "type_Gap"), "LENGTH")
+        self.find(QtWidgets.QLineEdit, "value_Gap").setText("3 mm")
+        pump(0.05)
+        copy = self.importNow().copies[0]
+        self.assertAlmostEqual(self.doc.getObject("Variables").Gap.Value, 3)
+        self.assertAlmostEqual(copy.Width.Value, 6)
+        self.doc.undo()
+        self.assertEqual(self.doc.Objects, [])
+
+        self.closeDialog()
+        self.open([self.a])
+        self.choose(self.find(QtWidgets.QComboBox, "choice_Gap"), "skip")
+        copy = self.importNow().copies[0]
+        self.assertNotIn("Width", copy.PropertiesList)
+        self.assertAlmostEqual(copy.Height.Value, 5)
+        self.assertEqual(copy.Skipped, ["Gap"])
+
+    def test_several_files(self):
+        """A and B together: no choice needed, A's Width uses B's Gap."""
+        b = writeExport(self.folder, "Studio B", [("LENGTH", "Gap", "3 mm")])
+        self.open([self.a, b])
+        copyA, copyB = self.importNow().copies
+        self.assertAlmostEqual(copyA.Width.Value, 6)
+        self.assertIn(copyB.Name + ".Gap", expressionText(copyA, "Width").replace(" ", ""))
+
+    def test_provider(self):
+        """A name two files define: Import waits for the file that provides it."""
+        b = writeExport(self.folder, "Studio B", [("LENGTH", "Gap", "3 mm")])
+        c = writeExport(self.folder, "Studio C", [("LENGTH", "Gap", "4 mm")])
+        self.open([self.a, b, c])
+        self.assertFalse(self.find(QtWidgets.QPushButton, "import").isEnabled())
+        self.choose(self.find(QtWidgets.QComboBox, "provider_Gap"), 2)
+        copyA = self.importNow().copies[0]
+        self.assertAlmostEqual(copyA.Width.Value, 8)
+
+    def test_names(self):
+        """Names FreeCAD can't use are listed with their proposals, editable: t -> tt by hand,
+        H -> H_ as proposed; a name FreeCAD refuses (pi) disables Import."""
+        path = writeExport(self.folder, "Units", [("LENGTH", "t", "2 mm"),
+                                                   ("LENGTH", "H", "#t * 3")])
+        self.open([path])
+        names = self.find(QtWidgets.QTableWidget, "names")
+        table = {names.item(r, 0).text(): names.item(r, 1) for r in range(names.rowCount())}
+        self.assertEqual({k: v.text() for k, v in table.items()}, {"H": "H_", "t": "t_"})
+        table["t"].setText("pi")
+        pump(0.05)
+        self.assertFalse(self.find(QtWidgets.QPushButton, "import").isEnabled())
+        table["t"].setText("tt")
+        copy = self.importNow().copies[0]
+        self.assertEqual(copy.NameMap, {"t": "tt", "H": "H_"})
+        self.assertAlmostEqual(copy.H_.Value, 6)
+
+    def test_file_import_type(self):
+        """File > Import knows "Onshape variables (*.json)"; its module opens the dialog."""
+        self.assertIn("freecad.variables.importer", App.getImportType("json"))
+        from freecad.variables import importer, importgui
+
+        importer.insert(self.a, self.doc.Name)
+        pump(0.1)
+        self.dialog = importgui._open[-1]
+        self.assertEqual(self.dialog.paths, [os.path.abspath(self.a)])
+        self.assertTrue(self.dialog.isVisible())
+
+    def test_panel(self):
+        """The panel's "Import variables..." is enabled with a document; a copied variable's
+        cells aren't editable, and Add doesn't put a variable in a copy."""
+        b = writeExport(self.folder, "Studio B", [("LENGTH", "Gap", "3 mm")])
+        from freecad.variables import copies
+
+        copies.import_studios(self.doc, [b])
+        view = panel()
+        dock = dockOf(view)
+        dock.show()
+        Gui.setActiveDocument(self.doc.Name)
+        pump(0.3)
+        action = view.findChild(QtGui.QAction, "importVariables")
+        self.assertIsNotNone(action)
+        self.assertTrue(action.isEnabled())
+        tree = view.findChild(QtWidgets.QTreeView, "variablesTree")
+        model = tree.model()
+        self.assertTrue(waitFor(lambda: model.rowCount() == 1))
+        header = model.index(0, 0)
+        row = model.index(0, NAME, header)
+        self.assertEqual(model.data(row), "Gap")
+        for column in (NAME, EXPRESSION, DESCRIPTION):
+            flags = model.flags(row.sibling(0, column))
+            self.assertFalse(flags & QtCore.Qt.ItemIsEditable, column)
+        dock.hide()
+
+    # PR 317 round 1
+
+    def clickImport(self):
+        QtCore.QTimer.singleShot(0, self.find(QtWidgets.QPushButton, "import").click)
+
+    def test_failure_shown(self):
+        """A failed check (the test hook moves Width's value), then any other error during the
+        import (the hook raises): each is shown in a message box, nothing is left, no "Import"
+        step is on the undo stack, and the dialog stays open (review 317, 4 and 10)."""
+        from freecad.variables import copies
+
+        b = writeExport(self.folder, "Studio B", [("LENGTH", "Gap", "3 mm")])
+        shown = []
+        with mock.patch.object(QtWidgets.QMessageBox, "critical",
+                               lambda *args: shown.append(args[2])):
+            for hook in (lambda var, value: copies.Quantity(value.value * 2, value.dims),
+                         lambda var, value: 1 / 0):
+                copies._check_hook = hook
+                self.open([self.a, b])
+                self.clickImport()
+                self.assertTrue(waitFor(lambda: len(shown) == 1), "no message box")
+                self.assertEqual(self.doc.Objects, [])
+                self.assertFalse([n for n in self.doc.UndoNames if n.startswith("Import")])
+                self.assertTrue(shiboken6.isValid(self.dialog) and self.dialog.isVisible())
+                self.assertIsNone(self.dialog.result)
+                shown.clear()
+                self.closeDialog()
+
+    def test_same_named_providers(self):
+        """Two exports of the same name in different folders both define #Gap: the provider's
+        entries can be told apart (review 317, 3)."""
+        paths = []
+        for folder in ("one", "two"):
+            os.mkdir(os.path.join(self.folder, folder))
+            paths.append(writeExport(os.path.join(self.folder, folder), "Studio B",
+                                     [("LENGTH", "Gap", "3 mm")]))
+        self.open([self.a] + paths)
+        combo = self.find(QtWidgets.QComboBox, "provider_Gap")
+        texts = [combo.itemText(i) for i in range(1, combo.count())]
+        self.assertEqual(len(texts), 2)
+        self.assertNotEqual(texts[0], texts[1])
+        for text, folder in zip(texts, ("one", "two")):
+            self.assertIn("/" + folder + "/", text)
+
+    def test_default_unit(self):
+        """A Length without a unit waits for the Onshape document's default unit; choosing
+        inches imports 5 as 127 mm (review 317, 5)."""
+        path = writeExport(self.folder, "Plain", [("LENGTH", "Size", "5")])
+        self.open([path])
+        self.assertFalse(self.find(QtWidgets.QPushButton, "import").isEnabled())
+        self.assertIn("default unit", self.find(QtWidgets.QPlainTextEdit, "report").toPlainText())
+        self.choose(self.find(QtWidgets.QComboBox, "defaultUnit_LENGTH"), "in")
+        copy = self.importNow().copies[0]
+        self.assertAlmostEqual(copy.Size.Value, 127)
+
+    def test_skip_refused(self):
+        """A refused variable gets a Skip box; skipping it imports the rest (review 317, 5)."""
+        path = writeExport(self.folder, "Mixed", [("NUMBER", "Bad", "round(2.5)"),
+                                                  ("LENGTH", "Good", "5 mm")])
+        self.open([path])
+        self.assertFalse(self.find(QtWidgets.QPushButton, "import").isEnabled())
+        self.find(QtWidgets.QCheckBox, "skip_Bad").setChecked(True)
+        pump(0.05)
+        copy = self.importNow().copies[0]
+        self.assertNotIn("Bad", copy.PropertiesList)
+        self.assertAlmostEqual(copy.Good.Value, 5)
+        self.assertEqual(copy.Skipped, ["Bad"])
+
+    def test_skip_cycle(self):
+        """A.x uses B.y and B.z uses A.w: x and z get Skip boxes; skipping z imports both
+        copies (review 317, 5)."""
+        a = writeExport(self.folder, "Cycle A", [("LENGTH", "x", "#y + 1 mm"),
+                                                 ("LENGTH", "w", "2 mm")])
+        b = writeExport(self.folder, "Cycle B", [("LENGTH", "y", "3 mm"),
+                                                 ("LENGTH", "z", "#w * 2")])
+        self.open([a, b])
+        self.assertFalse(self.find(QtWidgets.QPushButton, "import").isEnabled())
+        self.find(QtWidgets.QCheckBox, "skip_x")
+        self.find(QtWidgets.QCheckBox, "skip_z").setChecked(True)
+        pump(0.05)
+        copyA, copyB = self.importNow().copies
+        self.assertAlmostEqual(copyA.x.Value, 4)
+        self.assertNotIn("z", copyB.PropertiesList)
+
+    def test_value_for_unit_name(self):
+        """A value for #t, a name FreeCAD can't use: the names table proposes t_, editable, as
+        for a copy's variable (review 317, 6)."""
+        path = writeExport(self.folder, "Thin", [("LENGTH", "Width", "#t * 2")])
+        self.open([path])
+        self.choose(self.find(QtWidgets.QComboBox, "choice_t"), "value")
+        self.choose(self.find(QtWidgets.QComboBox, "type_t"), "LENGTH")
+        self.find(QtWidgets.QLineEdit, "value_t").setText("3 mm")
+        pump(0.05)
+        names = self.find(QtWidgets.QTableWidget, "names")
+        self.assertTrue(names.isVisibleTo(self.dialog))
+        table = {names.item(r, 0).text(): names.item(r, 1) for r in range(names.rowCount())}
+        self.assertEqual({k: v.text() for k, v in table.items()}, {"t": "t_"})
+        table["t"].setText("Thick")
+        pump(0.05)
+        copy = self.importNow().copies[0]
+        self.assertAlmostEqual(self.doc.getObject("Variables").Thick.Value, 3)
+        self.assertEqual(copy.Bindings, {"t": "Variables.Thick"})
+        self.assertAlmostEqual(copy.Width.Value, 6)
+
+    def test_dialog_freed(self):
+        """A closed dialog is deleted and forgotten (review 317, 8)."""
+        from freecad.variables import importgui
+
+        dialog = self.open([self.a])
+        self.assertIn(dialog, importgui._open)
+        dialog.reject()
+        self.assertTrue(waitFor(lambda: not shiboken6.isValid(dialog)), "not deleted")
+        self.assertNotIn(dialog, importgui._open)
+        self.dialog = None
+
+    def test_open_cancelled(self):
+        """File > Open of an export makes a document for it; cancelling the dialog closes that
+        document again (review 317, 7)."""
+        from freecad.variables import importer, importgui
+
+        before = set(App.listDocuments())
+        importer.open(self.a)
+        pump(0.1)
+        new = set(App.listDocuments()) - before
+        self.assertEqual(len(new), 1)
+        self.dialog = importgui._open[-1]
+        self.closeDialog()
+        self.assertTrue(waitFor(lambda: not (new & set(App.listDocuments()))),
+                        "the new document is still open")
+
+    def panelWithCopy(self):
+        """The panel on a document with an attached copy of Studio B (Gap), its row current."""
+        b = writeExport(self.folder, "Studio B", [("LENGTH", "Gap", "3 mm")])
+        from freecad.variables import copies
+
+        copy = copies.import_studios(self.doc, [b]).copies[0]
+        view = panel()
+        dock = dockOf(view)
+        dock.show()
+        Gui.setActiveDocument(self.doc.Name)
+        pump(0.3)
+        tree = view.findChild(QtWidgets.QTreeView, "variablesTree")
+        model = tree.model()
+        self.assertTrue(waitFor(lambda: model.rowCount() == 1))
+        tree.setCurrentIndex(model.index(0, NAME, model.index(0, 0)))
+        pump(0.1)
+
+        def action(name):
+            found = [a for a in view.findChildren(QtGui.QAction, name)]
+            self.assertTrue(found, name)
+            return found[0]
+
+        return view, tree, copy, action
+
+    def test_panel_copy_rows_locked(self):
+        """Delete and Edit description are disabled on an attached copy's variable; Show uses
+        isn't (review 317, 2)."""
+        view, _tree, _copy, action = self.panelWithCopy()
+        self.assertFalse(action("deleteVariable").isEnabled())
+        self.assertFalse(action("editDescription").isEnabled())
+        self.assertTrue(action("showUses").isEnabled())
+        dockOf(view).hide()
+
+    def test_panel_add_refuses_copy(self):
+        """An attached copy is no Add target: not among the Add dialog's sets, and refused if
+        named anyway (review 317, 1)."""
+        view, _tree, copy, action = self.panelWithCopy()
+        action("addVariable").trigger()
+        dialog = waitFor(lambda: [w for w in QtWidgets.QApplication.topLevelWidgets()
+                                  if w.objectName() == "addVariableDialog" and w.isVisible()])
+        self.assertTrue(dialog, "no Add variable dialog")
+        dialog = dialog[0]
+        setBox = dialog.findChild(QtWidgets.QComboBox, "set")
+        self.assertEqual([setBox.itemText(i) for i in range(setBox.count())],
+                         ["Variables (new)"])
+        # named anyway (as a stale entry would): refused, nothing added
+        setBox.addItem(copy.Label, copy.Name)
+        setBox.setCurrentIndex(setBox.count() - 1)
+        dialog.findChild(QtWidgets.QLineEdit, "name").setText("Extra")
+        dialog.findChild(QtWidgets.QLineEdit, "value").setText("1 mm")
+        dialog.findChild(QtWidgets.QDialogButtonBox).button(
+            QtWidgets.QDialogButtonBox.Ok).click()
+        pump(0.2)
+        self.assertNotIn("Extra", copy.PropertiesList)
+        self.assertIsNone(self.doc.getObject("Variables"))
+        error = dialog.findChild(QtWidgets.QLabel, "error")
+        self.assertTrue(error.isVisible())
+        self.assertIn("copy", error.text())
+        dialog.reject()
+        dockOf(view).hide()

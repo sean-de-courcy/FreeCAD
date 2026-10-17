@@ -125,6 +125,11 @@ class Plan:
     inputs: Dict[str, Tuple[str, str, str, onshape.Translation]] = field(default_factory=dict)
     inputs_set: Optional[str] = None  # the internal name of the set the inputs go in
     inputs_set_new: bool = False
+    # name of a value FreeCAD can't use for its input variable -> the proposal (a name_map entry
+    # gives another)
+    input_renames: Dict[str, str] = field(default_factory=dict)
+    # the edges of a cycle between the copies: (user source, provider source, variable, name)
+    cycle: List[Tuple[int, int, str, str]] = field(default_factory=list)
     problems: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
 
@@ -143,6 +148,9 @@ class Plan:
         lines = list(self.problems)
         for name, fc_name in self.renames.items():
             lines.append(f"{name} becomes {fc_name}")
+        for name, (_kind, fc_name, _type, _translation) in self.inputs.items():
+            if fc_name != name:
+                lines.append(f"The value of #{name} becomes {self.inputs_set}.{fc_name}")
         for source, name, why in self.skipped:
             lines.append(f"{name} ({self.sources[source].label}) is skipped: {why}")
         lines.extend(self.warnings)
@@ -271,7 +279,7 @@ def plan_import(doc, paths: Sequence[str], *,
         except Exception as e:  # noqa: BLE001 (any failure to read it is a problem to show)
             plan.problems.append(f"#{name}: {e}")
     if values:
-        _plan_inputs(doc, plan, values, default_units)
+        _plan_inputs(doc, plan, values, default_units, name_map)
 
     for i, source in enumerate(plan.sources):
         for v in source.entry.variables:
@@ -307,6 +315,7 @@ def plan_import(doc, paths: Sequence[str], *,
     for source, name, reason in plan.refused:
         plan.problems.append(f"{name} ({plan.sources[source].label}): {reason}")
     cycle = _copy_cycle(plan, entries, providers or {})
+    plan.cycle = cycle
     if cycle:
         uses = ", ".join(f"{plan.sources[i].label}.{name} uses #{ref} of "
                          f"{plan.sources[j].label}" for i, j, name, ref in cycle)
@@ -420,31 +429,45 @@ def _variables_set(doc):
     return None
 
 
-def _plan_inputs(doc, plan: Plan, values, default_units):
-    """Input variables for `values`, in the document's "Variables" set (made if missing)."""
+def _plan_inputs(doc, plan: Plan, values, default_units, name_map):
+    """Input variables for `values`, in the document's "Variables" set (made if missing). A
+    name FreeCAD can't use there (`t`, or one the set has) gets a proposal, as the copies'
+    variables do, and `name_map` can give another."""
     holder = _variables_set(doc)
     if holder is not None:
         plan.inputs_set = holder.Name
     else:
         plan.inputs_set = _unique_name(doc, VARIABLES, {s.name for s in plan.sources})
         plan.inputs_set_new = True
+    rules = holder if holder is not None else "App::VarSet"
+    taken = set()
+    for name in sorted(values):
+        if check_name(name, rules):
+            plan.input_renames[name] = propose_name(name, taken | set(values), rules)
+            taken.add(plan.input_renames[name])
+    taken = set()
     for name, choice in values.items():
         try:
             kind, text = choice
         except (TypeError, ValueError):
             plan.problems.append(f"#{name}: a value is (Onshape type, text)")
             continue
-        reason = check_name(name, holder if holder is not None else "App::VarSet")
+        fc_name = name_map.get(name) or plan.input_renames.get(name, name)
+        reason = check_name(fc_name, rules)
+        if not reason and fc_name in taken:
+            reason = f"another value is named {fc_name!r} too"
         if reason:
-            plan.problems.append(f"#{name} can't be an input variable in {VARIABLES}: {reason}")
+            plan.problems.append(
+                f"#{name} can't be the input variable {fc_name} in {VARIABLES}: {reason}")
             continue
+        taken.add(fc_name)
         try:
             translation = onshape.translate(text, kind, _no_reference, default_units)
         except onshape.Refused as e:
             plan.problems.append(f"#{name}: the value {text!r}: {e}")
             continue
-        plan.inputs[name] = (kind, name, translation.property_type, translation)
-        plan.bindings[name] = Binding(f"{plan.inputs_set}.{name}", translation.value)
+        plan.inputs[name] = (kind, fc_name, translation.property_type, translation)
+        plan.bindings[name] = Binding(f"{plan.inputs_set}.{fc_name}", translation.value)
 
 
 def _no_reference(name):

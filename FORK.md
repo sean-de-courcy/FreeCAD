@@ -344,7 +344,8 @@ names it.
 | `fix/303-fillet-limits` | fix | ops#303, ops#315 | - | `integration` `aa54e80f1e` | `035baf1bc5` (fork PR 314), 2026-10-17 | never (fork fix) |
 | `infra/343-compat-record` | infra | ops#343 | - | `integration` `aa54e80f1e` | `e9c2084ad6` (fork PR 316), 2026-10-17 | never |
 | `feat/317-copy-import` | feat | ops#317 | - | `integration` `aa54e80f1e` | `fe5cda1980` (fork PR 315), 2026-10-17 | never (fork feature) |
-| `fix/345-dressup-base-tolerances` | fix | ops#345 | - | `integration` `e9c2084ad6` | (fork PR 318) | never (fork fix) |
+| `fix/345-dressup-base-tolerances` | fix | ops#345 | - | `integration` `e9c2084ad6` | `8f31aaece8` (fork PR 318), 2026-10-17 | never (fork fix) |
+| `feat/317-import-gui` | feat | ops#317 | - | `feat/317-copy-import` `afd57d50cc` (stacked on fork PR 315) + `integration` `e9c2084ad6` | (fork PR 317) | never (fork feature) |
 
 ## Fork-only commits in carried topics
 
