@@ -287,7 +287,14 @@ class TestExport(unittest.TestCase):
         c = onshape.parse_export(export([("LENGTH", "Use", "#Gap * 2")]))
         result = onshape.translate_export(a + b + c)
         self.assertEqual(result.ambiguous, {"Gap": [0, 1]})
+        self.assertEqual(result.unresolved, {})  # defined, only not yet chosen
         self.assertEqual(result.result("Use").needs, ["Gap"])
+        # a binding doesn't pick between two definitions: only a provider does
+        bound = onshape.translate_export(
+            a + b + c, bindings={"Gap": Binding("Variables.Gap", Quantity(0.007, LENGTH))})
+        self.assertEqual(bound.ambiguous, {"Gap": [0, 1]})
+        self.assertEqual(bound.result("Use").needs, ["Gap"])
+        self.assertIsNone(bound.result("Use").translation)
         # a sibling definition is the one its own entry means
         self.assertAlmostEqual(result.result("W").translation.value.to("mm"), 7, places=9)
         chosen = onshape.translate_export(a + b + c, providers={"Gap": 1})

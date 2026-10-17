@@ -977,7 +977,9 @@ def translate_export(entries: Sequence[StudioEntry], *,
             result.refusal = str(e)
             continue
         for name in references(trees[id(result)]):
-            if provider(name, result.entry) is None and name not in bindings:
+            # a name several entries define is in `ambiguous`, not here
+            if (provider(name, result.entry) is None and name not in bindings
+                    and name not in defined):
                 unresolved.setdefault(name, [])
                 if result.name not in unresolved[name]:
                     unresolved[name].append(result.name)
@@ -1005,7 +1007,8 @@ def translate_export(entries: Sequence[StudioEntry], *,
         for name in references(tree):
             source = provider(name, result.entry)
             if source is None:
-                if name not in bindings:
+                # an ambiguous name waits for a provider: a binding doesn't pick one
+                if name not in bindings or name in defined:
                     needs.append(name)
                 continue
             try:
