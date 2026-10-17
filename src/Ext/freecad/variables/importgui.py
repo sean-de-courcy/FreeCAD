@@ -163,6 +163,7 @@ class ImportDialog(QtWidgets.QDialog):
         self.unresolved = {}  # name -> (choice, variable, type, value) widgets
         self.ambiguous = {}  # name -> provider combo
         self.skips = {}  # variable name -> its Skip check box
+        self.nameRows = {}  # Onshape name -> its proposal: the names table's rows
         self.resize(640, 560)
         self.filesChanged()
 
@@ -195,15 +196,9 @@ class ImportDialog(QtWidgets.QDialog):
 
         self.names.blockSignals(True)
         self.names.setRowCount(0)
-        for name, proposal in sorted(self.base.renames.items()):
-            row = self.names.rowCount()
-            self.names.insertRow(row)
-            item = QtWidgets.QTableWidgetItem(name)
-            item.setFlags(item.flags() & ~QtCore.Qt.ItemIsEditable)
-            self.names.setItem(row, 0, item)
-            self.names.setItem(row, 1, QtWidgets.QTableWidgetItem(proposal))
         self.names.blockSignals(False)
-        self.namesBox.setVisible(bool(self.base.renames))
+        self.nameRows = {}
+        self.syncNames(self.base.renames)
         _clear(self.skipsLayout)
         self.skips = {}
 
@@ -299,6 +294,26 @@ class ImportDialog(QtWidgets.QDialog):
         return {"name_map": name_map, "bindings": bindings, "values": values, "skip": skip,
                 "providers": providers, "default_units": default_units}
 
+    def syncNames(self, renames):
+        """Makes the names table's rows the names of @a renames (Onshape name -> proposal),
+        keeping what was typed in the rows that stay."""
+        self.namesBox.setVisible(bool(renames))
+        if set(renames) == set(self.nameRows):
+            return
+        typed = {self.names.item(r, 0).text(): self.names.item(r, 1).text()
+                 for r in range(self.names.rowCount())}
+        self.names.blockSignals(True)
+        self.names.setRowCount(0)
+        for name, proposal in sorted(renames.items()):
+            row = self.names.rowCount()
+            self.names.insertRow(row)
+            item = QtWidgets.QTableWidgetItem(name)
+            item.setFlags(item.flags() & ~QtCore.Qt.ItemIsEditable)
+            self.names.setItem(row, 0, item)
+            self.names.setItem(row, 1, QtWidgets.QTableWidgetItem(typed.get(name, proposal)))
+        self.names.blockSignals(False)
+        self.nameRows = dict(renames)
+
     def syncSkips(self):
         """A Skip box for each variable the plan refuses or finds in a cycle between the copies,
         and for each one skipped so far (plan_import's `skip` takes variable names)."""
@@ -329,6 +344,8 @@ class ImportDialog(QtWidgets.QDialog):
 
     def update(self):
         self.plan = copies.plan_import(self.doc, self.paths, **self.choices())
+        # a value for a name FreeCAD can't use gets a row in the names table, as a variable does
+        self.syncNames({**self.base.renames, **self.plan.input_renames})
         self.syncSkips()
         if not self.paths:
             text = translate("Variables", "Add the Onshape exports to import.")

@@ -1372,6 +1372,26 @@ class TestVariablesImportGui(unittest.TestCase):
         self.assertAlmostEqual(copyA.x.Value, 4)
         self.assertNotIn("z", copyB.PropertiesList)
 
+    def test_value_for_unit_name(self):
+        """A value for #t, a name FreeCAD can't use: the names table proposes t_, editable, as
+        for a copy's variable (review 317, 6)."""
+        path = writeExport(self.folder, "Thin", [("LENGTH", "Width", "#t * 2")])
+        self.open([path])
+        self.choose(self.find(QtWidgets.QComboBox, "choice_t"), "value")
+        self.choose(self.find(QtWidgets.QComboBox, "type_t"), "LENGTH")
+        self.find(QtWidgets.QLineEdit, "value_t").setText("3 mm")
+        pump(0.05)
+        names = self.find(QtWidgets.QTableWidget, "names")
+        self.assertTrue(names.isVisibleTo(self.dialog))
+        table = {names.item(r, 0).text(): names.item(r, 1) for r in range(names.rowCount())}
+        self.assertEqual({k: v.text() for k, v in table.items()}, {"t": "t_"})
+        table["t"].setText("Thick")
+        pump(0.05)
+        copy = self.importNow().copies[0]
+        self.assertAlmostEqual(self.doc.getObject("Variables").Thick.Value, 3)
+        self.assertEqual(copy.Bindings, {"t": "Variables.Thick"})
+        self.assertAlmostEqual(copy.Width.Value, 6)
+
     def panelWithCopy(self):
         """The panel on a document with an attached copy of Studio B (Gap), its row current."""
         b = writeExport(self.folder, "Studio B", [("LENGTH", "Gap", "3 mm")])
