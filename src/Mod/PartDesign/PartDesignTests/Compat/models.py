@@ -31,7 +31,7 @@ model of several documents: volume}; and every object valid), so a model that bu
 never enters a generation. `make` sets new documents up as a beta user's are: V2 naming,
 InternNames and the reference solver on, set explicitly so a preference can't change them.
 
-B1's list (3.6, "about ten, the core"); B2 adds the rest.
+B1's list (3.6, "about ten, the core") is here; B2's are in the `models_*` modules, by group.
 """
 
 import math
@@ -471,3 +471,9 @@ MODELS = {
         TwoDocuments,
     )
 }
+
+# B2's models (3.6), by group: each module lists its builders in generation order.
+from PartDesignTests.Compat import models_partdesign  # noqa: E402 (uses this module's helpers)
+
+for _group in (models_partdesign,):
+    MODELS.update((f.__name__, f) for f in _group.MODELS)
