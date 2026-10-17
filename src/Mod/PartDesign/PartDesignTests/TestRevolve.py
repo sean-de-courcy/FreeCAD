@@ -1919,6 +1919,36 @@ class TestRevolve(unittest.TestCase):
         self.assertTrue(revolution.isValid(), revolution.getStatusString())
         self.assertSameSolid(revolution.Shape, cut.Shape.fuse(self.ringSector(0, 90)))
 
+    def testRevolutionUpToTorusWithPinholeInReach(self):
+        """A whole torus about the X direction through (0, 5, 0), major radius 2, minor 1.98, as
+        the up-to face of the profile x in [4, 6], z in [-0.9, 1.1]. The circles about Z of
+        radius about 4.98 to 5.02 near z = 0 pass through the torus's hole and never meet it.
+        That region lies inside the profile, away from its edges, and between the check's
+        samples, which all meet the face; the sweep up to the face then goes all the way round
+        there, and the feature fails, both ways (ops#299: the never-meets check was sampled, and
+        a gap in the face's reach between the samples went unnoticed)."""
+        torus = self.Doc.addObject("Part::Feature", "Torus")
+        torus.Shape = Part.makeTorus(
+            2, 1.98, FreeCAD.Vector(0, 5, 0), FreeCAD.Vector(1, 0, 0)
+        ).Faces[0]
+        # The miss region holds the circle r = 5, z = 0, and lies within r in [4.9, 5.1]
+        missing = Part.makeCircle(5, FreeCAD.Vector(), FreeCAD.Vector(0, 0, 1))
+        self.assertGreater(missing.distToShape(torus.Shape)[0], 1e-3)
+        for radius in (4.9, 5.1):
+            meeting = Part.makeCircle(radius, FreeCAD.Vector(), FreeCAD.Vector(0, 0, 1))
+            self.assertLess(meeting.distToShape(torus.Shape)[0], 1e-7)
+        for reversed_ in (False, True):
+            with self.subTest(reversed_=reversed_):
+                body = self.Doc.addObject("PartDesign::Body", "Body")
+                sketch = self.rectProfile(body, 4, 6, -0.9, 1.1)
+                revolution = self.revolveUpTo(
+                    body, "Revolution", sketch, (torus, ["Face1"]), reversed_=reversed_
+                )
+                self.assertFalse(revolution.isValid())
+                self.assertIn(
+                    "goes all the way round without meeting it", revolution.getStatusString()
+                )
+
     def revolveUpToLocatedCylinderWall(self, holeY):
         """profileAcross() revolved One side up to a quarter of the cylinder of radius 4 about
         the vertical line through (-4.5, 0), z in [-1, 3], from its +X side, with a hole of
@@ -3023,6 +3053,45 @@ class TestRevolve(unittest.TestCase):
                 else:
                     self.assertFalse(revolution.isValid())
                     self.assertIn("come back to the profile's plane", revolution.getStatusString())
+
+    def testRevolutionUpToLinkOfTwoFaces(self):
+        """Walls y = 0.5 and y = 1, x in [0, 4], z in [-1, 3], in one Part::Feature, and the
+        profile x in [1, 3], z in [0, 2] turned about Z: each point at radius r meets the nearer
+        wall first, at asin(0.5 / r). An up-to link naming both faces went up to the first one
+        named alone: up to y = 1, through the wall y = 0.5, with no error (ops#304). It fails
+        now, either order, Revolution and Groove; one face still works."""
+
+        def wall(y):
+            corners = [FreeCAD.Vector(x, y, z) for x, z in ((0, -1), (4, -1), (4, 3), (0, 3))]
+            return Part.Face(Part.makePolygon(corners + corners[:1]))
+
+        walls = self.Doc.addObject("Part::Feature", "Walls")
+        walls.Shape = Part.makeCompound([wall(0.5), wall(1)])
+        self.Doc.recompute()
+        names = {
+            round(f.BoundBox.Center.y, 6): "Face%d" % (i + 1)
+            for i, f in enumerate(walls.Shape.Faces)
+        }
+        near, far = names[0.5], names[1]
+        nearTool = self.midpointIntegral(lambda r: 2 * r * math.asin(0.5 / r), 1, 3)
+        for kind in ("Revolution", "Groove"):
+            for faces in ([near], [far, near], [near, far]):
+                with self.subTest(kind=kind, faces=faces):
+                    body = self.Doc.addObject("PartDesign::Body", "Body")
+                    base = 0
+                    if kind == "Groove":
+                        self.boxUpTo(body, (-4, 4), (-4, 4), (0, 2), -4)
+                        base = 128
+                    sketch = self.rectProfile(body, 1, 3, 0, 2)
+                    revolution = self.revolveUpTo(body, kind, sketch, (walls, faces))
+                    if len(faces) == 1:
+                        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+                        self.assertAlmostEqual(
+                            abs(revolution.Shape.Volume - base), nearTool, places=4
+                        )
+                    else:
+                        self.assertFalse(revolution.isValid())
+                        self.assertIn("names several faces", revolution.getStatusString())
 
     def tearDown(self):
         # closing doc

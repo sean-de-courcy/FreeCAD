@@ -249,6 +249,37 @@ class TestPocket(unittest.TestCase):
                 self.assertFalse(feature.isValid())
                 self.assertIn("Side 2 can't reach its face", feature.getStatusString())
 
+    def testPocketUpToLinkOfTwoFaces(self):
+        """ops#304: an up-to link naming two faces (the planes z = -5 and z = -8 of one box) is
+        an error. The Pocket went down to the first face named alone, with no error: z = -8 for
+        [Face5, Face6], past the nearer face z = -5. One face still works."""
+        faces = self.Doc.addObject("Part::Box", "Faces")
+        faces.Placement.Base = FreeCAD.Vector(-5, -5, -8)
+        faces.Length, faces.Width, faces.Height = 10, 10, 3
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        block = self.Doc.addObject("PartDesign::AdditiveBox", "Block")
+        body.addObject(block)
+        block.Length = block.Width = block.Height = 20
+        block.Placement.Base = FreeCAD.Vector(-10, -10, -10)
+        sketch = self.Doc.addObject("Sketcher::SketchObject", "Sketch")
+        body.addObject(sketch)
+        TestSketcherApp.CreateRectangleSketch(sketch, (-2.5, -2.5), (5, 5))
+        self.Doc.recompute()
+        pocket = self.Doc.addObject("PartDesign::Pocket", "Pocket")
+        body.addObject(pocket)
+        pocket.Profile = sketch
+        pocket.Type = "UpToFace"
+        pocket.UpToFace = (faces, ["Face6"])
+        self.Doc.recompute()
+        self.assertTrue(pocket.isValid(), pocket.getStatusString())
+        self.assertAlmostEqual(pocket.Shape.Volume, 8000 - 25 * 5, places=6)
+        for names in (["Face5", "Face6"], ["Face6", "Face5"]):
+            with self.subTest(faces=names):
+                pocket.UpToFace = (faces, names)
+                self.Doc.recompute()
+                self.assertFalse(pocket.isValid())
+                self.assertIn("names several faces", pocket.getStatusString())
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("PartDesignTestPocket")
