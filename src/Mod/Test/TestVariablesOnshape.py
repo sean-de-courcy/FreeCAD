@@ -364,8 +364,10 @@ except ImportError:  # the translator's own tests run without FreeCAD too
 
 @unittest.skipIf(FreeCAD is None, "needs FreeCAD")
 class TestFreeCADAgrees(unittest.TestCase):
-    """The written text computes in FreeCAD to the translator's own value (section 2.5's check,
-    here over the whole table)."""
+    """The written text computes in FreeCAD to the translator's own value and unit (section
+    2.5's check, here over the whole table). The text is evaluated, not read back from a
+    property: a Distance turns a unitless result into millimetres and a Float drops a unit
+    (section 2.3)."""
 
     def setUp(self):
         self.doc = FreeCAD.newDocument("TestVariablesOnshape")
@@ -380,23 +382,42 @@ class TestFreeCADAgrees(unittest.TestCase):
     def tearDown(self):
         FreeCAD.closeDocument(self.doc.Name)
 
+    def freecad_value(self, text):
+        """FreeCAD's value of @a text with the VarSet as owner, in SI units with its dimensions."""
+        value = self.varSet.evalExpression(text)
+        if not isinstance(value, FreeCAD.Units.Quantity):
+            return Quantity(float(value))
+        if value.Unit == FreeCAD.Units.Length:
+            return Quantity(value.Value / 1000, LENGTH)  # mm
+        if value.Unit == FreeCAD.Units.Angle:
+            return Quantity(math.radians(value.Value), ANGLE)  # deg
+        if value.Unit == FreeCAD.Units.Unit():
+            return Quantity(value.Value)
+        self.fail(f"{text}: FreeCAD gives the unit {value.Unit}")
+
+    def test_the_oracle_sees_units(self):
+        self.assertEqual(self.freecad_value("2").dims, NONE)
+        self.assertEqual(self.freecad_value("Width / (1 mm)").dims, NONE)
+        self.assertEqual(self.freecad_value("Count * (1 mm)").dims, LENGTH)
+        self.assertEqual(self.freecad_value("atan2(1, 1)").dims, ANGLE)
+        self.assertAlmostEqual(self.freecad_value("Rail").value, 0.1016, places=12)
+
     def test_freecad_computes_the_same_value(self):
         for i, (text, kind, _expected, _freecad) in enumerate(ACCEPTED):
             with self.subTest(text=text):
                 result = translate(text, kind)
+                actual = self.freecad_value(result.text)
+                self.assertEqual(actual.dims, result.value.dims, f"{result.text}: FreeCAD gives "
+                                 f"{onshape.describe_dims(actual.dims)}")
+                self.assertTrue(onshape.values_agree(actual.value, result.value.value),
+                                f"{result.text}: FreeCAD {actual.value}, translator "
+                                f"{result.value.value}")
+                # and the text sets the variable's property without an error
                 name = f"Result{i}"
                 self.varSet.addProperty(result.property_type, name)
                 self.varSet.setExpression(name, result.text)
                 self.doc.recompute()
-                prop = getattr(self.varSet, name)
-                if result.value.dims == LENGTH:
-                    actual = prop.Value / 1000  # mm
-                elif result.value.dims == ANGLE:
-                    actual = math.radians(prop.Value)  # deg
-                else:
-                    actual = prop
-                self.assertTrue(onshape.values_agree(actual, result.value.value),
-                                f"{result.text}: FreeCAD {actual}, translator {result.value.value}")
+                self.assertNotIn("Invalid", self.varSet.State, result.text)
 
 
 if __name__ == "__main__":
