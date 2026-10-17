@@ -141,3 +141,23 @@ class TestCompatRecord(unittest.TestCase):
         tube = refs["Refs[1]"]["key"]
         self.assertTrue(tube["infinite"])
         self.assertEqual(tube["surface"], "Cylinder")
+
+    def testOtherDocumentsTagsAreMasked(self):
+        # A link across documents names its elements with the other document's object ids: masked
+        # as `{stem#Name}`, as the document's own are as `{Name}`, so a regeneration (new ids)
+        # doesn't rewrite them
+        self.folder = tempfile.mkdtemp(prefix="CompatRecord")
+        part = self.newDocument("CompatRecordPart")
+        box = part.addObject("Part::Box", "Box")
+        part.recompute()
+        part.saveAs(os.path.join(self.folder, "PartFile.FCStd"))
+        assembly = self.newDocument("CompatRecordAssembly")
+        assembly.saveAs(os.path.join(self.folder, "AssemblyFile.FCStd"))
+        link = assembly.addObject("App::Link", "Link")
+        link.LinkedObject = box
+        assembly.recompute()
+        masker = CompatRecord._Masker(assembly)
+        if str(box.ID) not in {str(obj.ID) for obj in assembly.Objects}:
+            self.assertEqual(masker.tag(str(box.ID)), "{PartFile#Box}")
+            self.assertEqual(masker.tag("-" + str(box.ID)), "{-PartFile#Box}")
+        self.assertEqual(masker.tag(str(link.ID)), "{Link}")

@@ -627,7 +627,19 @@ class _Masker:
     Connected Names (sorted again after masking), as the NamingGolden dumps do."""
 
     def __init__(self, doc):
-        self.names = {str(obj.ID): obj.Name for obj in doc.Objects}
+        import os
+
+        # A link or binder across documents names its elements with the other document's tags:
+        # those as `{stem#Name}`. Each document starts its ids at a random offset, so ids can
+        # collide: the document's own win
+        self.names = {}
+        for other in doc.getDependentDocuments():
+            if other is doc:
+                continue
+            stem = os.path.splitext(os.path.basename(other.FileName))[0] or other.Name
+            for obj in other.Objects:
+                self.names.setdefault(str(obj.ID), f"{stem}#{obj.Name}")
+        self.names.update({str(obj.ID): obj.Name for obj in doc.Objects})
 
     def tag(self, tag):
         if tag in ("", "0"):
