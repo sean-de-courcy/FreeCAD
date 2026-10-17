@@ -2261,6 +2261,22 @@ TopTools_DataMapOfShapeReal faceTolerances(const TopoDS_Shape& shape)
     return tolerances;
 }
 
+TopoShape makerInput(const TopoShape& base, std::vector<TopoShape>& edges)
+{
+    TopoShape input(base.Tag, base.Hasher, base.getHistoryAlgorithm());
+    // The topology alone: tolerances and curve representations live in the TShapes, and the
+    // maker leaves the geometry alone
+    input.makeElementCopy(base, nullptr, false);
+    for (auto& edge : edges) {
+        const int index = base.findShape(edge.getShape());
+        if (index <= 0 || edge.getShape().ShapeType() != TopAbs_EDGE) {
+            FC_THROWM(Base::CADKernelError, "edge does not belong to the shape");
+        }
+        edge = input.getSubTopoShape(TopAbs_EDGE, index);
+    }
+    return input;
+}
+
 TopoDS_Face thinFace(const TopoDS_Shape& result, const TopoDS_Shape& base)
 {
     TopTools_IndexedMapOfShape baseFaces;

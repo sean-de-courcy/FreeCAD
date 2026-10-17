@@ -70,6 +70,19 @@ struct Request
 /// Each face's largest tolerance, with its edges and vertices: Request::faceTolerances
 PartExport TopTools_DataMapOfShapeReal faceTolerances(const TopoDS_Shape& shape);
 
+/** A copy of a dress-up's base for OCCT's fillet or chamfer maker, which raises its input's
+ * tolerances in place (to 1e-4 at the vertices where a round or chamfer ends against a wall): the
+ * base shares its TShapes with the base feature's stored Shape, which would keep them (ops#345).
+ * The copy has new TShapes with the base's tolerances, shares its geometry, and keeps its element
+ * map and Tag, so the result is named as from the base. The result's own sub-shapes keep what the
+ * maker raised.
+ *
+ * @param base The shape being dressed up
+ * @param edges The selected edges of the base: replaced by the same edges of the copy, in order
+ * @return The copy, for the maker and the exact construction
+ */
+PartExport TopoShape makerInput(const TopoShape& base, std::vector<TopoShape>& edges);
+
 /** Builds the dress-up by the exact construction.
  *
  * @param result Receives the shape and its element map (named with op, as through the fillet's

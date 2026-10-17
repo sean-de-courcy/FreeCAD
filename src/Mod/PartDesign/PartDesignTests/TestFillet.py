@@ -199,9 +199,10 @@ class TestFillet(unittest.TestCase):
         self.assertAlmostEqual(shape.Volume, volume, places=3)
 
     def _assertBaseKept(self, base, tolerances):
+        # Neither lowered by a repair (ops#12) nor raised by OCCT's maker, which runs on a copy
+        # (ops#345)
         self.assertTrue(base.Shape.isValid())
-        for after, before in zip(self._tolerances(base.Shape), tolerances, strict=True):
-            self.assertGreaterEqual(after, before)
+        self.assertEqual(self._tolerances(base.Shape), tolerances)
 
     def testFilletEndingAgainstFace(self):
         # A step: the lower block's front top edge ends against the riser at x = 20
@@ -358,6 +359,18 @@ class TestFillet(unittest.TestCase):
     def _assertFails(self, fillet):
         self.assertFalse(fillet.isValid())
         self.assertEqual(fillet.getStatusString(), "Resulting shape is invalid")
+
+    def testFilletLeavesTheBaseTolerancesAlone(self):
+        # The rib's top edges rounded, ending against the wall: OCCT's maker raises its input's
+        # vertices there to 1e-4, and the base feature's stored shape shares them. The maker runs
+        # on a copy; the result keeps what it raised (ops#345)
+        rib, _ = models.rib_against_wall()
+        tolerances = self._tolerances(rib)
+        self.assertLess(max(tolerances), 1e-6)
+        fillet = self._fillet_on_base(rib, models.top_edges(rib), 1.5)
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        self._assertBaseKept(self.Doc.getObject("Base"), tolerances)
+        self.assertGreater(max(self._tolerances(fillet.Shape)), 1e-5)
 
     def testFilletInvalidOcctResultAtLimit(self):
         # A round as wide as a rib's top, against a wall: OCCT's result is invalid; the exact

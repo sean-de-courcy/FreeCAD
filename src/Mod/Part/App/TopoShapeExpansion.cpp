@@ -5913,30 +5913,34 @@ TopoShape& TopoShape::makeElementFillet(
     if (edges.empty()) {
         FC_THROWM(NullShapeException, "Null input shape");
     }
-    BRepFilletAPI_MakeFillet mkFillet(shape.getShape());
     for (auto& e : edges) {
         if (e.isNull()) {
             FC_THROWM(NullShapeException, "Null input shape");
         }
-        const auto& edge = e.getShape();
-        if (!shape.findShape(edge)) {
+        if (!shape.findShape(e.getShape())) {
             FC_THROWM(Base::CADKernelError, "edge does not belong to the shape");
         }
-        mkFillet.Add(radius1, radius2, TopoDS::Edge(edge));
+    }
+    // The maker raises its input's tolerances in place: it runs on a copy (ops#345)
+    std::vector<TopoShape> inputEdges = edges;
+    const TopoShape input = FilletFallback::makerInput(shape, inputEdges);
+    BRepFilletAPI_MakeFillet mkFillet(input.getShape());
+    for (auto& e : inputEdges) {
+        mkFillet.Add(radius1, radius2, TopoDS::Edge(e.getShape()));
     }
     std::exception_ptr occtError;
     FilletFallback::Request request;
-    // Before the maker raises the base's tolerances in place
-    request.faceTolerances = FilletFallback::faceTolerances(shape.getShape());
+    // Before the maker raises the copy's tolerances in place
+    request.faceTolerances = FilletFallback::faceTolerances(input.getShape());
     const bool failed = buildDressUpFailed(mkFillet, occtError, request.contour);
-    const bool thin = !failed && builtThinFace(mkFillet, shape);
+    const bool thin = !failed && builtThinFace(mkFillet, input);
     if (failed || thin || builtInvalid(mkFillet)) {
         Part::SignalException sig;
         request.kind = FilletFallback::Kind::Fillet;
         request.size1 = radius1;
         request.size2 = radius2;
         std::string reason;
-        if (FilletFallback::build(*this, shape, edges, request, op, &reason)) {
+        if (FilletFallback::build(*this, input, inputEdges, request, op, &reason)) {
             return *this;
         }
         if (failed) {
@@ -5946,7 +5950,7 @@ TopoShape& TopoShape::makeElementFillet(
             raiseThinFaceError("The fillet", reason);
         }
     }
-    return makeElementShape(mkFillet, shape, op);
+    return makeElementShape(mkFillet, input, op);
 }
 
 TopoShape& TopoShape::makeElementChamfer(
@@ -5968,29 +5972,34 @@ TopoShape& TopoShape::makeElementChamfer(
     if (edges.empty()) {
         FC_THROWM(NullShapeException, "Null input shape");
     }
-    BRepFilletAPI_MakeChamfer mkChamfer(shape.getShape());
     for (auto& e : edges) {
-        const auto& edge = e.getShape();
         if (e.isNull()) {
             FC_THROWM(NullShapeException, "Null input shape");
         }
-        if (!shape.findShape(edge)) {
+        if (!shape.findShape(e.getShape())) {
             FC_THROWM(Base::CADKernelError, "edge does not belong to the shape");
         }
+    }
+    // The maker raises its input's tolerances in place: it runs on a copy (ops#345)
+    std::vector<TopoShape> inputEdges = edges;
+    const TopoShape input = FilletFallback::makerInput(shape, inputEdges);
+    BRepFilletAPI_MakeChamfer mkChamfer(input.getShape());
+    for (auto& e : inputEdges) {
+        const auto& edge = e.getShape();
         if (BRep_Tool::Degenerated(TopoDS::Edge(edge))) {
             FC_THROWM(Base::CADKernelError, "chamfer edge is degenerated");
         }
         // Add edge to fillet algorithm
         TopoDS_Shape face;
         if (flipDirection == Flip::flip) {
-            const auto faces = shape.findAncestorsShapes(edge, TopAbs_FACE);
+            const auto faces = input.findAncestorsShapes(edge, TopAbs_FACE);
             if (faces.empty()) {
                 FC_THROWM(Base::CADKernelError, "chamfer edge has no adjacent face");
             }
             face = faces.back();
         }
         else {
-            face = shape.findAncestorShape(edge, TopAbs_FACE);
+            face = input.findAncestorShape(edge, TopAbs_FACE);
         }
         if (face.IsNull()) {
             FC_THROWM(Base::CADKernelError, "chamfer edge has no adjacent face");
@@ -6011,10 +6020,10 @@ TopoShape& TopoShape::makeElementChamfer(
     Part::SignalException sig;
     std::exception_ptr occtError;
     FilletFallback::Request request;
-    // Before the maker raises the base's tolerances in place
-    request.faceTolerances = FilletFallback::faceTolerances(shape.getShape());
+    // Before the maker raises the copy's tolerances in place
+    request.faceTolerances = FilletFallback::faceTolerances(input.getShape());
     const bool failed = buildDressUpFailed(mkChamfer, occtError, request.contour);
-    const bool thin = !failed && builtThinFace(mkChamfer, shape);
+    const bool thin = !failed && builtThinFace(mkChamfer, input);
     if (failed || thin || builtInvalid(mkChamfer)) {
         request.kind = FilletFallback::Kind::Chamfer;
         request.size1 = radius1;
@@ -6022,7 +6031,7 @@ TopoShape& TopoShape::makeElementChamfer(
         request.chamferType = chamferType;
         request.flipDirection = flipDirection;
         std::string reason;
-        if (FilletFallback::build(*this, shape, edges, request, op, &reason)) {
+        if (FilletFallback::build(*this, input, inputEdges, request, op, &reason)) {
             return *this;
         }
         if (failed) {
@@ -6032,7 +6041,7 @@ TopoShape& TopoShape::makeElementChamfer(
             raiseThinFaceError("The chamfer", reason);
         }
     }
-    return makeElementShape(mkChamfer, shape, op);
+    return makeElementShape(mkChamfer, input, op);
 }
 
 TopoShape& TopoShape::makeElementDefeaturing(

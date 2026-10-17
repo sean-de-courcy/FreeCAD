@@ -135,18 +135,21 @@ App::DocumentObjectExecReturn* Fillet::execute()
             );
         }
         else {
-            BRepFilletAPI_MakeFillet mkFillet(baseShape);
-            for (size_t k = 0; k < edgeShapes.size(); ++k) {
-                const auto& edge = TopoDS::Edge(edgeShapes[k].getShape());
+            // OCCT's maker raises its input's tolerances in place: it runs on a copy (ops#345)
+            std::vector<TopoShape> inputEdges = edgeShapes;
+            const TopoShape input = FilletFallback::makerInput(baseTopoShape, inputEdges);
+            BRepFilletAPI_MakeFillet mkFillet(input.getShape());
+            for (size_t k = 0; k < inputEdges.size(); ++k) {
+                const auto& edge = TopoDS::Edge(inputEdges[k].getShape());
                 mkFillet.Add(radii[k].first, radii[k].second, edge);
             }
             if (mkFillet.Shape().IsNull()) {
                 return new App::DocumentObjectExecReturn("Resulting shape is null");
             }
-            res.makeElementShape(mkFillet, baseTopoShape, Part::OpCodes::Fillet);
+            res.makeElementShape(mkFillet, input, Part::OpCodes::Fillet);
             // makeElementFillet sends a face of zero width to the exact construction; OCCT's
             // own maker leaves it (ops#298)
-            if (!FilletFallback::thinFace(res.getShape(), baseShape).IsNull()) {
+            if (!FilletFallback::thinFace(res.getShape(), input.getShape()).IsNull()) {
                 return new App::DocumentObjectExecReturn(
                     "The fillet would leave a face of zero width (a face it consumes whole, or a "
                     "sliver narrower than its tolerance)"

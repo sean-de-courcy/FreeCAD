@@ -674,3 +674,64 @@ class InvalidDressUpTest(unittest.TestCase):
         self.assertIn("face of zero width", fillet.getStatusString())
         fillet = self.dressUp("Fillet", box, top_edges(box), [(2 - 1e-5,) * 2, (2 - 2e-5,) * 2])
         self.assertTrue(fillet.isValid(), fillet.getStatusString())
+
+
+def tolerances(shape):
+    return [s.Tolerance for s in shape.Vertexes + shape.Edges + shape.Faces]
+
+
+class BaseToleranceTest(unittest.TestCase):
+    """OCCT's fillet and chamfer maker raises its input's tolerances in place, to 1e-4 at the
+    vertices where a round or chamfer ends against a wall, and a Part::Fillet's or Part::Chamfer's
+    input shares its TShapes with the base feature's stored Shape. The maker runs on a copy: the
+    base keeps its own tolerances, and the result those the maker raised (ops#345).
+    """
+
+    def setUp(self):
+        self.doc = FreeCAD.newDocument("BaseToleranceTest")
+
+    def tearDown(self):
+        FreeCAD.closeDocument(self.doc.Name)
+
+    def base(self):
+        rib, _ = rib_against_wall()
+        base = self.doc.addObject("Part::Feature", "Base")
+        base.Shape = rib
+        self.doc.recompute()
+        self.assertLess(max(tolerances(base.Shape)), 1e-6)
+        return base
+
+    def dressUp(self, kind, base, sizes):
+        feature = self.doc.addObject("Part::" + kind, kind)
+        feature.Base = base
+        indices = [
+            next(i for i, e in enumerate(base.Shape.Edges, 1) if e.isSame(edge))
+            for edge in top_edges(base.Shape)
+        ]
+        feature.Edges = [(i, s, s) for i, s in zip(indices, sizes)]
+        self.doc.recompute()
+        self.assertTrue(feature.isValid(), feature.getStatusString())
+        return feature
+
+    def testBaseKeepsItsTolerances(self):
+        # The rib's two top edges just under the limit and below it, with one size (makeFillet's
+        # and makeChamfer's path) and a size per edge (OCCT's maker in the feature)
+        for kind in ("Chamfer", "Fillet"):
+            for sizes in ([2 - 1e-5] * 2, [1.5] * 2, [2 - 1e-5, 2 - 2e-5]):
+                with self.subTest(kind=kind, sizes=sizes):
+                    base = self.base()
+                    before = tolerances(base.Shape)
+                    feature = self.dressUp(kind, base, sizes)
+                    self.assertEqual(tolerances(base.Shape), before)
+                    self.assertGreater(max(tolerances(feature.Shape)), 1e-5)
+
+    def testSecondDressUpOnTheSameBase(self):
+        # A second chamfer on the same base starts from the base's own tolerances, as the first
+        # did: the check for merged faces takes its thresholds from them (PR 314 review, item 2)
+        base = self.base()
+        before = tolerances(base.Shape)
+        first = self.dressUp("Chamfer", base, [2 - 1e-5] * 2)
+        self.assertEqual(tolerances(base.Shape), before)
+        second = self.dressUp("Chamfer", base, [2 - 1e-5] * 2)
+        self.assertEqual(tolerances(base.Shape), before)
+        self.assertEqual(tolerances(second.Shape), tolerances(first.Shape))
