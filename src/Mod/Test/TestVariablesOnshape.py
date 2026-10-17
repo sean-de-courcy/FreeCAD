@@ -92,7 +92,8 @@ ACCEPTED = [
     ("-2^2", "NUMBER", 4, "(-2) ^ 2"),
     ("3 - 2^2", "NUMBER", -1, None),
     ("-2^3 * 1 mm", "LENGTH", -8, None),
-    ("2^-1^2 * 1 mm", "LENGTH", 2, None),
+    ("(-2^2) * 1 mm", "LENGTH", 4, None),
+    ("max(1, -2^2)", "NUMBER", 4, None),
     # ^ binds to the unit, as Onshape (the reference studio, row 23)
     ("2 mm^2 / (1 mm)", "LENGTH", 2, "(2 * ((1 mm) ^ 2)) / (1 * 1 mm)"),
     ("sqrt(3 in^2 + 1 in^2)", "LENGTH", 50.8, None),
@@ -156,6 +157,13 @@ REFUSED = [
     ("1.5/2 in", "LENGTH", "fraction of decimals"),
     ("-#Count^2", "NUMBER", "minus before ^"),
     ("-(2)^2", "NUMBER", "minus before ^"),
+    # the studio shows -2^2 only as a whole expression (review 320, finding 2)
+    ("2^-1^2 * 1 mm", "LENGTH", "a minus on a number before ^ after an operator"),
+    ("2^-3^2", "NUMBER", "a minus on a number before ^ after an operator"),
+    ("2 * -2^2", "NUMBER", "a minus on a number before ^ after an operator"),
+    ("1 - -2^2", "NUMBER", "a minus on a number before ^ after an operator"),
+    ("-+2^2", "NUMBER", "two signs before ^"),
+    ("+-2^2", "NUMBER", "a minus on a number before ^ after an operator"),
     ("0^-1", "NUMBER", "can't be computed"),
     ("(0 mm)^-1", "NUMBER", "can't be computed"),
     ("10^400", "NUMBER", "can't be computed"),

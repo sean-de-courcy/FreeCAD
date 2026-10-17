@@ -33,15 +33,16 @@ express, is refused with the reason (`Refused`). The reference studio the user b
 `-2^2` is (-2)^2, `2 mm^2` is 2 mm², `round` takes halves up, `-7 % 3` is 2, `#a/mm` is #a
 counted in mm, `2^3^2` is 2^9, `1.5e2` is 150. Their neighbours it doesn't settle stay refused: a
 fraction with a unit next to `/` or `^` or before `*` (`1/3/4 in`, `3/4 in * 2`), a minus before
-`^` on anything but a number (`-#a^2`), a unit before `^` after a group or a call
-(`sqrt(4) mm^2`), `%` with units or by a negative number, and `floor`, `ceil`, `round` of a
-value with a unit (Onshape rejects `floor` of one).
+`^` on anything but a number (`-#a^2`) or after `^` or an operator (`2^-1^2`, `2 * -2^2`), a
+unit before `^` after a group or a call (`sqrt(4) mm^2`), `%` with units or by a negative
+number, and `floor`, `ceil`, `round` of a value with a unit (Onshape rejects `floor` of one).
 
 The writer's rules (section 2.4):
 - every unit is written as a factor: `10mm` becomes `(10 * 1 mm)`;
 - an integer fraction followed by a unit, as a term of its own (bounded by `+`, `-`, a
   comparison, `?`, `:`, `,`, parentheses or the ends) or the last factor after `*`, is a
-  fraction literal: `3/4 in` becomes `(3 / 4 * 1 in)`; FreeCAD reads `3/4in` as `3/(4 in)`, an inverse length, without an error;
+  fraction literal: `3/4 in` becomes `(3 / 4 * 1 in)`; FreeCAD reads `3/4in` as `3/(4 in)`, an
+  inverse length, without an error;
 - a unit after `)` or a function call applies to that group: `sqrt(16) m` is `(sqrt(16) * 1 m)`;
 - unit words become FreeCAD's symbols, `PI` and `Pi` become `pi`;
 - `round(x)` is written `floor(x + 0.5)`, Onshape's reading (FreeCAD's `round` goes away from
@@ -380,15 +381,26 @@ class _Parser:
 
     def unary(self):
         if self.at_op("-", "+"):
+            # a sign where an expression starts: the whole text, after `(`, `,`, `?` or `:`
+            previous = self.tokens[self.index - 1] if self.index else None
+            starts = previous is None or previous.text in ("(", ",", "?", ":")
             op = self.take().text
             operand = self.unary()
+            if (isinstance(operand, Unary) and isinstance(operand.node, Bin)
+                    and operand.node.op == "^"):
+                raise Refused(f"two signs before ^ (-+2^2): {UNDOCUMENTED}")
             if op == "-" and isinstance(operand, Bin) and operand.op == "^":
-                if isinstance(operand.left, Num):
-                    # Onshape's -2^2 is (-2)^2 = 4 (the reference studio, row 22)
-                    return Bin("^", Unary(op, operand.left), operand.right)
-                # -(2^2) or (-#a)^2: the studio only settles a number
-                raise Refused(f"a minus before ^ on something other than a number (-#a^2): "
-                              f"{UNDOCUMENTED}")
+                if not isinstance(operand.left, Num):
+                    # -(2^2) or (-#a)^2: the studio only settles a number
+                    raise Refused(f"a minus before ^ on something other than a number (-#a^2): "
+                                  f"{UNDOCUMENTED}")
+                if not starts:
+                    # the studio shows -2^2 as a whole expression only: after ^ or an operator
+                    # (2^-1^2, 2 * -2^2) the minus may bind otherwise
+                    raise Refused(f"a minus on a number before ^ after an operator (2^-1^2, "
+                                  f"2 * -2^2): {UNDOCUMENTED}")
+                # Onshape's -2^2 is (-2)^2 = 4 (the reference studio, row 22)
+                return Bin("^", Unary(op, operand.left), operand.right)
             return Unary(op, operand)
         return self.power()
 
