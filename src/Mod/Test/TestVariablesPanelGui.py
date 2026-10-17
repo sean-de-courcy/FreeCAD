@@ -14,6 +14,9 @@ import shutil
 import tempfile
 import time
 import unittest
+from unittest import mock
+
+import shiboken6
 
 import FreeCAD as App
 import FreeCADGui as Gui
@@ -1110,11 +1113,24 @@ class TestVariablesImportGui(unittest.TestCase):
         self.dialog = None
 
     def tearDown(self):
-        if self.dialog is not None:
-            self.dialog.reject()
+        from freecad.variables import copies
+
+        copies._check_hook = None
+        self.closeDialog()
+        for widget in QtWidgets.QApplication.topLevelWidgets():
+            if isinstance(widget, QtWidgets.QDialog) and widget.isVisible():
+                widget.reject()
         pump(0.1)
-        App.closeDocument(self.doc.Name)
+        if self.doc.Name in App.listDocuments():
+            App.closeDocument(self.doc.Name)
         shutil.rmtree(self.folder, ignore_errors=True)
+
+    def closeDialog(self):
+        """Cancels the dialog if it is still there (it is deleted once closed)."""
+        if self.dialog is not None and shiboken6.isValid(self.dialog):
+            self.dialog.reject()
+        self.dialog = None
+        pump(0.1)
 
     def documentGap(self):
         variables = self.doc.addObject("App::VarSet", "Variables")
@@ -1192,7 +1208,7 @@ class TestVariablesImportGui(unittest.TestCase):
         self.doc.undo()
         self.assertEqual(self.doc.Objects, [])
 
-        self.dialog.close()
+        self.closeDialog()
         self.open([self.a])
         self.choose(self.find(QtWidgets.QComboBox, "choice_Gap"), "skip")
         copy = self.importNow().copies[0]
@@ -1271,3 +1287,57 @@ class TestVariablesImportGui(unittest.TestCase):
             flags = model.flags(row.sibling(0, column))
             self.assertFalse(flags & QtCore.Qt.ItemIsEditable, column)
         dock.hide()
+
+    # PR 317 round 1
+
+    def panelWithCopy(self):
+        """The panel on a document with an attached copy of Studio B (Gap), its row current."""
+        b = writeExport(self.folder, "Studio B", [("LENGTH", "Gap", "3 mm")])
+        from freecad.variables import copies
+
+        copy = copies.import_studios(self.doc, [b]).copies[0]
+        view = panel()
+        dock = dockOf(view)
+        dock.show()
+        Gui.setActiveDocument(self.doc.Name)
+        pump(0.3)
+        tree = view.findChild(QtWidgets.QTreeView, "variablesTree")
+        model = tree.model()
+        self.assertTrue(waitFor(lambda: model.rowCount() == 1))
+        tree.setCurrentIndex(model.index(0, NAME, model.index(0, 0)))
+        pump(0.1)
+
+        def action(name):
+            found = [a for a in view.findChildren(QtGui.QAction, name)]
+            self.assertTrue(found, name)
+            return found[0]
+
+        return view, tree, copy, action
+
+    def test_panel_add_refuses_copy(self):
+        """An attached copy is no Add target: not among the Add dialog's sets, and refused if
+        named anyway (review 317, 1)."""
+        view, _tree, copy, action = self.panelWithCopy()
+        action("addVariable").trigger()
+        dialog = waitFor(lambda: [w for w in QtWidgets.QApplication.topLevelWidgets()
+                                  if w.objectName() == "addVariableDialog" and w.isVisible()])
+        self.assertTrue(dialog, "no Add variable dialog")
+        dialog = dialog[0]
+        setBox = dialog.findChild(QtWidgets.QComboBox, "set")
+        self.assertEqual([setBox.itemText(i) for i in range(setBox.count())],
+                         ["Variables (new)"])
+        # named anyway (as a stale entry would): refused, nothing added
+        setBox.addItem(copy.Label, copy.Name)
+        setBox.setCurrentIndex(setBox.count() - 1)
+        dialog.findChild(QtWidgets.QLineEdit, "name").setText("Extra")
+        dialog.findChild(QtWidgets.QLineEdit, "value").setText("1 mm")
+        dialog.findChild(QtWidgets.QDialogButtonBox).button(
+            QtWidgets.QDialogButtonBox.Ok).click()
+        pump(0.2)
+        self.assertNotIn("Extra", copy.PropertiesList)
+        self.assertIsNone(self.doc.getObject("Variables"))
+        error = dialog.findChild(QtWidgets.QLabel, "error")
+        self.assertTrue(error.isVisible())
+        self.assertIn("copy", error.text())
+        dialog.reject()
+        dockOf(view).hide()

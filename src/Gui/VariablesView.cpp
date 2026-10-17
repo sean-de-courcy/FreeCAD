@@ -368,6 +368,14 @@ bool isValidName(const std::string& name)
         && !App::stringToAddress(name.c_str(), true).isValid();
 }
 
+/// Whether variables may be added to @a obj: a VarSet, but not a copy still attached to its
+/// source (ops#317: its variables are the source's, read-only).
+bool isEditableSet(const App::DocumentObject* obj)
+{
+    auto copy = freecad_cast<const App::VarSetCopy*>(obj);
+    return obj && obj->isDerivedFrom<App::VarSet>() && !(copy && copy->isAttached());
+}
+
 }  // namespace
 
 /* TRANSLATOR Gui::DockWnd::VariablesView */
@@ -1298,21 +1306,17 @@ App::DocumentObject* VariablesView::addTarget() const
     }
     // The selected row's VarSet, else the document's "Variables" VarSet; never a copy that is
     // still attached to its source (ops#317: its variables are read-only).
-    auto editable = [](App::DocumentObject* obj) {
-        auto copy = freecad_cast<App::VarSetCopy*>(obj);
-        return obj && obj->isDerivedFrom<App::VarSet>() && !(copy && copy->isAttached());
-    };
     if (App::DocumentObject* obj = VariablesModel::holder(tree->currentIndex())) {
-        if (editable(obj)) {
+        if (isEditableSet(obj)) {
             return obj;
         }
     }
     App::DocumentObject* obj = doc->getObject("Variables");
-    if (editable(obj)) {
+    if (isEditableSet(obj)) {
         return obj;
     }
     for (auto obj : doc->getObjectsOfType(App::VarSet::getClassTypeId())) {
-        if (std::string(obj->Label.getValue()) == "Variables" && editable(obj)) {
+        if (std::string(obj->Label.getValue()) == "Variables" && isEditableSet(obj)) {
             return obj;
         }
     }
@@ -1358,6 +1362,9 @@ void VariablesView::addVariable()
     auto setBox = new QComboBox(dialog);
     setBox->setObjectName(QStringLiteral("set"));
     for (auto obj : doc->getObjectsOfType(App::VarSet::getClassTypeId())) {
+        if (!isEditableSet(obj)) {
+            continue;  // an attached copy (ops#317)
+        }
         setBox->addItem(
             QString::fromUtf8(obj->Label.getValue()),
             QString::fromLatin1(obj->getNameInDocument())
@@ -1478,6 +1485,11 @@ bool VariablesView::addFromDialog(
                                                      : doc->getObject(holderName.c_str());
     if (!holderName.empty() && !target) {
         error = tr("The set '%1' is gone.").arg(QString::fromStdString(holderName));
+        return false;
+    }
+    if (target && !isEditableSet(target)) {
+        error = tr("'%1' is a copy of its source: its variables can't be changed here.")
+                    .arg(QString::fromUtf8(target->Label.getValue()));
         return false;
     }
     std::string varName = name.toStdString();
@@ -1618,6 +1630,14 @@ void VariablesView::addOtherVariable(App::DocumentObject* target)
 {
     App::Document* doc = currentDocument();
     if (!doc) {
+        return;
+    }
+    if (target && !isEditableSet(target)) {
+        showMessage(
+            tr("'%1' is a copy of its source: its variables can't be changed here.")
+                .arg(QString::fromUtf8(target->Label.getValue())),
+            true
+        );
         return;
     }
     bool created = false;
