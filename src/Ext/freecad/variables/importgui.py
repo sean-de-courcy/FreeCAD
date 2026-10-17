@@ -24,7 +24,9 @@
 notes/variables-studio.md sections 2.5 and 2.6. The dialog lists the files, the names FreeCAD
 can't use with their proposals (editable), each name the files use but don't define with its
 three choices (a document variable, never preselected; a value; skip), each name several files
-define with the file that provides it, and the report of `copies.plan_import()`. Import is
+define with the file that provides it, the Onshape document's default units, a Skip box for each
+variable refused or caught in a cycle between the copies, and the report of
+`copies.plan_import()`. Import is
 enabled only when nothing stands in the way; it runs `copies.import_studios()` with the choices,
 as one undo step. File > Import ("Onshape variables (.json)", `freecad.variables.importer`) and
 the Variables panel's "Import variables..." open it.
@@ -43,6 +45,9 @@ translate = App.Qt.translate
 FILTER = "Onshape variables (*.json)"
 USE, VALUE, SKIP = "use", "value", "skip"
 TYPES = (("LENGTH", "Length"), ("ANGLE", "Angle"), ("NUMBER", "Number"))
+# The units a unitless Length or Angle can take (the Onshape document's default unit, which the
+# export doesn't record): onshape.UNITS' symbols.
+DEFAULT_UNITS = (("LENGTH", ("mm", "cm", "m", "in", "ft", "yd")), ("ANGLE", ("deg", "rad")))
 
 _open = []  # the dialogs shown with run(), kept until they close
 
@@ -118,6 +123,29 @@ class ImportDialog(QtWidgets.QDialog):
         self.ambiguousGrid = QtWidgets.QGridLayout(self.ambiguousBox)
         layout.addWidget(self.ambiguousBox)
 
+        self.skipsBox = QtWidgets.QGroupBox(
+            translate("Variables", "Variables that can't be imported as they are"), self)
+        self.skipsLayout = QtWidgets.QVBoxLayout(self.skipsBox)
+        layout.addWidget(self.skipsBox)
+
+        units = QtWidgets.QHBoxLayout()
+        units.addWidget(QtWidgets.QLabel(
+            translate("Variables", "Default units of the Onshape document (for values without "
+                      "a unit):"), self))
+        self.defaultUnits = {}  # Onshape type -> its unit combo
+        for onshape_type, symbols in DEFAULT_UNITS:
+            combo = QtWidgets.QComboBox(self)
+            combo.setObjectName(f"defaultUnit_{onshape_type}")
+            combo.addItem(translate("Variables", "{}: not set").format(
+                translate("Variables", dict(TYPES)[onshape_type])), None)
+            for symbol in symbols:
+                combo.addItem(symbol, symbol)
+            combo.currentIndexChanged.connect(lambda _i: self.update())
+            units.addWidget(combo)
+            self.defaultUnits[onshape_type] = combo
+        units.addStretch()
+        layout.addLayout(units)
+
         self.report = QtWidgets.QPlainTextEdit(self)
         self.report.setObjectName("report")
         self.report.setReadOnly(True)
@@ -134,6 +162,7 @@ class ImportDialog(QtWidgets.QDialog):
 
         self.unresolved = {}  # name -> (choice, variable, type, value) widgets
         self.ambiguous = {}  # name -> provider combo
+        self.skips = {}  # variable name -> its Skip check box
         self.resize(640, 560)
         self.filesChanged()
 
@@ -175,6 +204,8 @@ class ImportDialog(QtWidgets.QDialog):
             self.names.setItem(row, 1, QtWidgets.QTableWidgetItem(proposal))
         self.names.blockSignals(False)
         self.namesBox.setVisible(bool(self.base.renames))
+        _clear(self.skipsLayout)
+        self.skips = {}
 
         _clear(self.unresolvedGrid)
         self.unresolved = {}
@@ -260,11 +291,45 @@ class ImportDialog(QtWidgets.QDialog):
         for name, combo in self.ambiguous.items():
             if combo.currentData() is not None:
                 providers[name] = combo.currentData()
+        for name, box in self.skips.items():
+            if box.isChecked():
+                skip.append(name)
+        default_units = {kind: combo.currentData() for kind, combo in self.defaultUnits.items()
+                         if combo.currentData()}
         return {"name_map": name_map, "bindings": bindings, "values": values, "skip": skip,
-                "providers": providers}
+                "providers": providers, "default_units": default_units}
+
+    def syncSkips(self):
+        """A Skip box for each variable the plan refuses or finds in a cycle between the copies,
+        and for each one skipped so far (plan_import's `skip` takes variable names)."""
+        wanted = {}
+        for source, name, why in self.plan.refused:
+            wanted.setdefault(name, f"{self.plan.sources[source].label}: {why}")
+        for user, provider, name, ref in self.plan.cycle:
+            wanted.setdefault(name, translate(
+                "Variables", "{}: uses #{} of {}, which depends on it").format(
+                    self.plan.sources[user].label, ref, self.plan.sources[provider].label))
+        for name, box in self.skips.items():
+            if box.isChecked():
+                wanted.setdefault(name, box.toolTip())
+        if set(wanted) != set(self.skips):
+            checked = {name for name, box in self.skips.items() if box.isChecked()}
+            _clear(self.skipsLayout)
+            self.skips = {}
+            for name, why in sorted(wanted.items()):
+                box = QtWidgets.QCheckBox(
+                    translate("Variables", "Skip {} ({})").format(name, why), self.skipsBox)
+                box.setObjectName(f"skip_{name}")
+                box.setToolTip(why)
+                box.setChecked(name in checked)
+                box.toggled.connect(lambda _on: self.update())
+                self.skipsLayout.addWidget(box)
+                self.skips[name] = box
+        self.skipsBox.setVisible(bool(self.skips))
 
     def update(self):
         self.plan = copies.plan_import(self.doc, self.paths, **self.choices())
+        self.syncSkips()
         if not self.paths:
             text = translate("Variables", "Add the Onshape exports to import.")
         else:
@@ -291,9 +356,9 @@ class ImportDialog(QtWidgets.QDialog):
         super().accept()
 
 
-def _clear(grid):
-    while grid.count():
-        widget = grid.takeAt(0).widget()
+def _clear(layout):
+    while layout.count():
+        widget = layout.takeAt(0).widget()
         if widget is not None:
             widget.deleteLater()
 

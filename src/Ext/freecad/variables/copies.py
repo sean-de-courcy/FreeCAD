@@ -125,6 +125,8 @@ class Plan:
     inputs: Dict[str, Tuple[str, str, str, onshape.Translation]] = field(default_factory=dict)
     inputs_set: Optional[str] = None  # the internal name of the set the inputs go in
     inputs_set_new: bool = False
+    # the edges of a cycle between the copies: (user source, provider source, variable, name)
+    cycle: List[Tuple[int, int, str, str]] = field(default_factory=list)
     problems: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
 
@@ -307,6 +309,7 @@ def plan_import(doc, paths: Sequence[str], *,
     for source, name, reason in plan.refused:
         plan.problems.append(f"{name} ({plan.sources[source].label}): {reason}")
     cycle = _copy_cycle(plan, entries, providers or {})
+    plan.cycle = cycle
     if cycle:
         uses = ", ".join(f"{plan.sources[i].label}.{name} uses #{ref} of "
                          f"{plan.sources[j].label}" for i, j, name, ref in cycle)

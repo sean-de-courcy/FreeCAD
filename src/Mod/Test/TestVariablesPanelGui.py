@@ -1332,6 +1332,46 @@ class TestVariablesImportGui(unittest.TestCase):
         for text, folder in zip(texts, ("one", "two")):
             self.assertIn("/" + folder + "/", text)
 
+    def test_default_unit(self):
+        """A Length without a unit waits for the Onshape document's default unit; choosing
+        inches imports 5 as 127 mm (review 317, 5)."""
+        path = writeExport(self.folder, "Plain", [("LENGTH", "Size", "5")])
+        self.open([path])
+        self.assertFalse(self.find(QtWidgets.QPushButton, "import").isEnabled())
+        self.assertIn("default unit", self.find(QtWidgets.QPlainTextEdit, "report").toPlainText())
+        self.choose(self.find(QtWidgets.QComboBox, "defaultUnit_LENGTH"), "in")
+        copy = self.importNow().copies[0]
+        self.assertAlmostEqual(copy.Size.Value, 127)
+
+    def test_skip_refused(self):
+        """A refused variable gets a Skip box; skipping it imports the rest (review 317, 5)."""
+        path = writeExport(self.folder, "Mixed", [("NUMBER", "Bad", "round(2.5)"),
+                                                  ("LENGTH", "Good", "5 mm")])
+        self.open([path])
+        self.assertFalse(self.find(QtWidgets.QPushButton, "import").isEnabled())
+        self.find(QtWidgets.QCheckBox, "skip_Bad").setChecked(True)
+        pump(0.05)
+        copy = self.importNow().copies[0]
+        self.assertNotIn("Bad", copy.PropertiesList)
+        self.assertAlmostEqual(copy.Good.Value, 5)
+        self.assertEqual(copy.Skipped, ["Bad"])
+
+    def test_skip_cycle(self):
+        """A.x uses B.y and B.z uses A.w: x and z get Skip boxes; skipping z imports both
+        copies (review 317, 5)."""
+        a = writeExport(self.folder, "Cycle A", [("LENGTH", "x", "#y + 1 mm"),
+                                                 ("LENGTH", "w", "2 mm")])
+        b = writeExport(self.folder, "Cycle B", [("LENGTH", "y", "3 mm"),
+                                                 ("LENGTH", "z", "#w * 2")])
+        self.open([a, b])
+        self.assertFalse(self.find(QtWidgets.QPushButton, "import").isEnabled())
+        self.find(QtWidgets.QCheckBox, "skip_x")
+        self.find(QtWidgets.QCheckBox, "skip_z").setChecked(True)
+        pump(0.05)
+        copyA, copyB = self.importNow().copies
+        self.assertAlmostEqual(copyA.x.Value, 4)
+        self.assertNotIn("z", copyB.PropertiesList)
+
     def panelWithCopy(self):
         """The panel on a document with an attached copy of Studio B (Gap), its row current."""
         b = writeExport(self.folder, "Studio B", [("LENGTH", "Gap", "3 mm")])
