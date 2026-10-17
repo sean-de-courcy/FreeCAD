@@ -879,6 +879,9 @@ void CmdSketcherMapSketch::activated(int iMsg)
             Gui::cmdAppObjectArgs(
                 sketch, "MapMode = \"%s\"", AttachEngine::getModeName(suggMapMode).c_str());
             Gui::cmdAppObjectArgs(sketch, "AttachmentSupport = %s", supportString.c_str());
+            // FreeCAD-CH (ops#311): a support picked here takes the Body's origin, as in
+            // TaskAttacher
+            Gui::cmdAppObjectArgs(sketch, "MapOrigin = 'Body'");
             // commitCommand();
             commitCommand();
             doCommand(Gui, "App.activeDocument().recompute()");

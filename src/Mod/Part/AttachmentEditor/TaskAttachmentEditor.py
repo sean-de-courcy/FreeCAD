@@ -362,6 +362,8 @@ class AttachmentEditorTaskPanel(FrozenClass):
                 if sel[i][0] is obj_to_attach:
                     sel.pop(i)
             self.attacher.References = sel
+            if sel:
+                self.attacher.MapOrigin = "Body"
             # need to update textboxes
             self.fillAllRefLines()
 
@@ -524,6 +526,8 @@ class AttachmentEditorTaskPanel(FrozenClass):
     def lineRefChanged(self, index, value):
         if self.block:
             return
+        # FreeCAD-CH (ops#311): a support picked here takes the Body's origin, as in TaskAttacher
+        self.attacher.MapOrigin = "Body"
         # not parsing links here, because doing it in updatePreview will display error message
         self.updatePreview()
 
@@ -549,6 +553,8 @@ class AttachmentEditorTaskPanel(FrozenClass):
     def writeParameters(self):
         "Transfer from the dialog to the object"
         self.attacher.writeParametersToFeature(self.obj)
+        # which writeParametersToFeature leaves as it is
+        self.obj.MapOrigin = self.attacher.MapOrigin
 
     def readParameters(self):
         "Transfer from the object to the dialog"

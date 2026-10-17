@@ -38,6 +38,11 @@ class AttachEngine(BaseClass):
     Reverse: bool = False
     """If True, Z axis of attached placement is flipped. X axis is flipped in addition (CS has to remain right-handed)."""
 
+    MapOrigin: str = "Feature"
+    """The origin of a FlatFace attachment on a face of a solid feature: "Feature" (the feature's)
+    or "Body" (the Body's origin, projected). Like the MapOrigin property; writeParametersToFeature
+    doesn't write it."""
+
     Parameter: float = 0.0
     """Value of parameter for some curve attachment modes. Range of 0..1 spans the length of the edge (parameter value can be outside of the range for curves that allow extrapolation."""
 
