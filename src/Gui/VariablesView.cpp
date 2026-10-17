@@ -1674,20 +1674,28 @@ void VariablesView::editDescription()
                        .data(VariablesModel::EditTextRole)
                        .toString();
 
-    QInputDialog dialog(this);
-    dialog.setObjectName(QStringLiteral("descriptionDialog"));
-    dialog.setWindowTitle(tr("Describe %1").arg(qName));
-    dialog.setLabelText(tr("Description of %1:").arg(qName));
-    dialog.setOption(QInputDialog::UsePlainTextEditForTextInput);
-    dialog.setTextValue(text);
-    if (dialog.exec() != QDialog::Accepted) {
+    // On the heap, guarded: the panel, and its child dialog with it, may be deleted during exec().
+    QPointer<VariablesView> self(this);
+    QPointer<QInputDialog> dialog = new QInputDialog(this);
+    dialog->setObjectName(QStringLiteral("descriptionDialog"));
+    dialog->setWindowTitle(tr("Describe %1").arg(qName));
+    dialog->setLabelText(tr("Description of %1:").arg(qName));
+    dialog->setOption(QInputDialog::UsePlainTextEditForTextInput);
+    dialog->setTextValue(text);
+    int result = dialog->exec();
+    if (!self || !dialog) {
+        return;
+    }
+    QString value = dialog->textValue();
+    delete dialog;
+    if (result != QDialog::Accepted) {
         return;
     }
     // Looked up again: the document may have changed while the dialog was open.
     App::Document* doc = App::GetApplication().getDocument(docName.c_str());
     obj = doc ? doc->getObject(holderName.c_str()) : nullptr;
     QString error;
-    if (!VariablesModel::describe(obj, qName.toStdString(), dialog.textValue(), error)) {
+    if (!VariablesModel::describe(obj, qName.toStdString(), value, error)) {
         showMessage(error, true);
         return;
     }
