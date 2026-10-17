@@ -476,6 +476,7 @@ MODELS = {
 from PartDesignTests.Compat import models_partdesign  # noqa: E402 (uses this module's helpers)
 from PartDesignTests.Compat import models_part  # noqa: E402
 from PartDesignTests.Compat import models_sketcher  # noqa: E402
+from PartDesignTests.Compat import models_assembly  # noqa: E402
 
-for _group in (models_partdesign, models_part, models_sketcher):
+for _group in (models_partdesign, models_part, models_sketcher, models_assembly):
     MODELS.update((f.__name__, f) for f in _group.MODELS)
