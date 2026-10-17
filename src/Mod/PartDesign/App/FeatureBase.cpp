@@ -23,6 +23,8 @@
  ***************************************************************************/
 
 
+#include <cmath>
+
 #include <Precision.hxx>
 #include <Standard_Failure.hxx>
 
@@ -47,6 +49,32 @@ namespace
 bool isBodyLocalFeature(const App::DocumentObject* base)
 {
     return base->isDerivedFrom<PartDesign::Feature>() && Body::findBodyOf(base);
+}
+
+// Whether the source's frame is where it was: positions within Precision::Confusion(), rotations
+// by their quaternions' components within 1e-12, either sign. Placement::isSame takes a rotation
+// as the same while |q1.q2| >= 1 - tol/2, so at Precision::Confusion() a turn below 6e-4 rad
+// went unseen: the copy stayed 0.6 mm off at 1 m from the turn's axis (ops#322 review round 1).
+// A reopened frame, saved with 16 digits, still compares the same
+bool sameFrame(const Base::Placement& a, const Base::Placement& b)
+{
+    if ((a.getPosition() - b.getPosition()).Length() > Precision::Confusion()) {
+        return false;
+    }
+    double p[4];
+    double q[4];
+    a.getRotation().getValue(p[0], p[1], p[2], p[3]);
+    b.getRotation().getValue(q[0], q[1], q[2], q[3]);
+    constexpr double tolerance = 1e-12;
+    auto within = [&](double sign) {
+        for (int i = 0; i < 4; ++i) {
+            if (std::abs(p[i] - sign * q[i]) > tolerance) {
+                return false;
+            }
+        }
+        return true;
+    };
+    return within(1.0) || within(-1.0);
 }
 }  // namespace
 
@@ -116,7 +144,7 @@ short int FeatureBase::mustExecute() const
     // of a recompute touches this when it asks to run (ContainerMoves.h)
     if (SourceFrame.getSize() == 1 && followsSource()) {
         auto frame = sourceFrame();
-        if (frame && !frame->isSame(SourceFrame[0], Precision::Confusion())) {
+        if (frame && !sameFrame(*frame, SourceFrame[0])) {
             return 1;
         }
     }
@@ -186,7 +214,7 @@ App::DocumentObjectExecReturn* FeatureBase::execute()
     // the source's frame moved since the last recompute, the Placement moves by as much, so the
     // copy keeps its place relative to the source, also when that place was set by hand
     if (auto frame = sourceFrame()) {
-        if (SourceFrame.getSize() != 1 || !frame->isSame(SourceFrame[0], Precision::Confusion())) {
+        if (SourceFrame.getSize() != 1 || !sameFrame(*frame, SourceFrame[0])) {
             if (SourceFrame.getSize() == 1) {
                 Placement.setValue(*frame * SourceFrame[0].inverse() * Placement.getValue());
             }
