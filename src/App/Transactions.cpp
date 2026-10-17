@@ -774,6 +774,11 @@ void TransactionObject::applyDocOrGroup(TransactionalObject* pcObj)
         applyEntry(pcObj, record.name, [&]() {
             Property* prop = pcObj->getDynamicPropertyByName(record.name.c_str());
             if (!prop) {
+                // e.g. after a rename that failed to apply: say so rather than drop it silently
+                auto* obj = freecad_cast<DocumentObject*>(pcObj);
+                FC_WARN("property " << (obj ? obj->getFullName() : std::string("?")) << '.'
+                                    << record.name
+                                    << " not found: its description and group not restored");
                 return;
             }
             // (recorded again in the transaction being applied's counterpart, for redo or undo)
