@@ -95,6 +95,10 @@ public:
     App::PropertyLinkSubList AttachmentSupport;
     App::PropertyEnumeration MapMode;  // see AttachEngine::eMapMode
     App::PropertyBool MapReversed;     // inverts Z and X internal axes
+    /// Where FlatFace on a solid feature of a Body takes its origin: the feature's Placement
+    /// ("Feature", as upstream and files without it) or the Body's ("Body", new objects;
+    /// FreeCAD-CH ops#311)
+    App::PropertyEnumeration MapOrigin;
     App::PropertyPlacement AttachmentOffset;
 
     /**

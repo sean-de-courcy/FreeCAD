@@ -98,7 +98,7 @@ bool acceptProfile(const App::DocumentObject* feature,
         if (PartDesign::ProfileBased::isStudioProfile(feature, obj, sub)) {
             return true;
         }
-        why = QT_TR_NOOP("A face of another part can't be the profile of a body's first feature.");
+        why = QT_TR_NOOP("Pick a face of another part directly, not through a link.");
         return false;
     }
     if (!obj->isDerivedFrom<Part::Part2DObject>()) {

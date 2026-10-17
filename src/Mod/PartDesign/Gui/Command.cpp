@@ -1103,7 +1103,6 @@ void prepareProfileBased(
     std::vector<Gui::SelectionObject> selection = cmd->getSelection().getSelectionEx();
     if (!selection.empty()) {
         bool onlyAllowed = true;
-        QString firstFeatureElement;
         for (const auto& it : selection) {
             const App::DocumentObject* obj = it.getObject();
             if (PartDesign::Body::findBodyOf(obj) == pcActiveBody) {
@@ -1115,39 +1114,17 @@ void prepareProfileBased(
                 onlyAllowed = false;
                 break;
             }
-            // the first pick is the profile: another part's face or edge can't be a first
-            // feature's (T1's second path); the others are sections or a spine
+            // the first pick is the profile (another part's face may be a first feature's too,
+            // ops#325 2a); the others are sections or a spine
             const std::vector<std::string>& subs = it.getSubNames();
             const char* sub = subs.empty() ? "" : subs.front().c_str();
             if (&it == &selection.front()
                 && !PartDesign::ProfileBased::isStudioProfile(pcActiveBody, obj, sub)) {
-                const std::string element(sub);
-                if (obj->isDerivedFrom<Part::Feature>() && !obj->isDerivedFrom<Part::Datum>()) {
-                    if (element.rfind("Face", 0) == 0) {
-                        firstFeatureElement = QObject::tr(
-                            "A face of another part can't be the profile of a body's first "
-                            "feature."
-                        );
-                    }
-                    else if (element.rfind("Edge", 0) == 0) {
-                        firstFeatureElement = QObject::tr(
-                            "An edge of another part can't be the profile of a body's first "
-                            "feature."
-                        );
-                    }
-                }
                 onlyAllowed = false;
                 break;
             }
         }
-        if (!firstFeatureElement.isEmpty()) {
-            QMessageBox::warning(
-                Gui::getMainWindow(),
-                QObject::tr("Cannot use selected object"),
-                firstFeatureElement
-            );
-        }
-        else if (!onlyAllowed) {
+        if (!onlyAllowed) {
             QMessageBox msgBox(Gui::getMainWindow());
             msgBox.setText(
                 QObject::tr("Cannot use selected object. Selected object must belong to the active body")

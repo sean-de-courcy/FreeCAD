@@ -209,6 +209,30 @@ void AttachEnginePy::setReverse(Py::Boolean arg)
     ATTACHERPY_STDCATCH_ATTR;
 }
 
+// FreeCAD-CH (ops#311): the origin rule, for previews made with an engine (the Python attachment
+// editor)
+Py::String AttachEnginePy::getMapOrigin() const
+{
+    try {
+        AttachEngine& attacher = *(this->getAttachEnginePtr());
+        return {attacher.mapOriginBody ? "Body" : "Feature"};
+    }
+    ATTACHERPY_STDCATCH_ATTR;
+}
+
+void AttachEnginePy::setMapOrigin(Py::String arg)
+{
+    try {
+        AttachEngine& attacher = *(this->getAttachEnginePtr());
+        auto value = static_cast<std::string>(arg);
+        if (value != "Body" && value != "Feature") {
+            throw Py::ValueError("MapOrigin must be 'Feature' or 'Body'");
+        }
+        attacher.mapOriginBody = value == "Body";
+    }
+    ATTACHERPY_STDCATCH_ATTR;
+}
+
 Py::Float AttachEnginePy::getParameter() const
 {
     try {
@@ -598,6 +622,8 @@ PyObject* AttachEnginePy::readParametersFromFeature(PyObject* args)
         );
         // Links are read in the feature's container, as the feature reads them (ops#318)
         attacher.setOwner(dobj);
+        // its origin rule (ops#311); writeParametersToFeature leaves the feature's as it is
+        attacher.mapOriginBody = feat->MapOrigin.getValue() == 1;
         return Py::new_reference_to(Py::None());
     }
     ATTACHERPY_STDCATCH_METH;

@@ -154,7 +154,11 @@ constexpr const char* placedElsewhere = "placed elsewhere than this feature's Bo
 // document's root, in a placed Body). A binder carries them over.
 bool Feature::placerElsewhere(const char** property, std::string* where) const
 {
-    auto body = getFeatureBody();
+    return placerElsewhereThan(getFeatureBody(), property, where);
+}
+
+bool Feature::placerElsewhereThan(const Body* body, const char** property, std::string* where) const
+{
     if (!body) {
         return false;
     }

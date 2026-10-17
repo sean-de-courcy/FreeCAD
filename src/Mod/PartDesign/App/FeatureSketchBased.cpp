@@ -838,7 +838,14 @@ bool ProfileBased::isStudioProfile(
     if (target->isDerivedFrom<Part::Part2DObject>()) {
         return true;
     }
-    // A face of a solid: not for a first solid feature (T1's second path)
+    // A face or edge of another Body's solid: getBaseObject() takes no base from it (ops#308 T1,
+    // extended to non-2D Profiles), so a first feature may use it too (ops#325 2a)
+    auto ownerBody = owner->isDerivedFrom<Body>() ? static_cast<const Body*>(owner)
+                                                  : Body::findBodyOf(owner);
+    if (Body::findBodyOf(target) != ownerBody) {
+        return true;
+    }
+    // A face of the owner's own Body: not for a first solid feature, which has none before it
     if (auto feature = freecad_cast<const PartDesign::Feature*>(owner)) {
         return feature->BaseFeature.getValue() != nullptr;
     }

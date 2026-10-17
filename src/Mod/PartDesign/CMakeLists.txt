@@ -73,6 +73,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestFailurePassThrough.py
     PartDesignTests/TestBodyReorder.py
     PartDesignTests/TestInvoluteGear.py
+    PartDesignTests/TestNewPart.py
     PartDesignTests/TestSketch.py
     PartDesignTests/TestStudio.py
 )

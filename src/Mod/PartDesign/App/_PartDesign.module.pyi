@@ -43,3 +43,10 @@ def isStudioProfile(owner: DocumentObject, obj: DocumentObject, subname: str = "
 def studioOriginFeature(owner: DocumentObject, feature: DocumentObject, /) -> DocumentObject | None:
     """Return owner's own origin feature standing for another Body's in the studio, or None."""
     ...
+
+def newPartFrom(feature: DocumentObject, /) -> DocumentObject:
+    """Move feature, its Body's Tip that nothing else uses, into a new Body in the same container.
+
+    Its Profile sketch moves along when nothing else uses it. No recompute; returns the new Body.
+    """
+    ...

@@ -3514,3 +3514,120 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertFalse(boolean.isValid())
         self.assertIn("no tools", boolean.getStatusString())
         self.assertAlmostEqual(self.body.Shape.Volume, 1000)
+
+    # -- ops#311: a support picked in the attachment panel takes the Body's origin --------------
+
+    def legacyOnCylinder(self, typeId, name):
+        """ops#311's model (a box 100 x 60 x 20, then a cylinder at (80, 40)) and a typeId object
+        on the cylinder feature's bottom face, MapOrigin "Feature" as a legacy object, at
+        (80, 40, 0). Returns the cylinder, the object and the cylinder's top face."""
+        from PartDesignTests.TestStudio import faceAt
+
+        self.body = models.body(self.doc)
+        box = self.body.newObject("PartDesign::AdditiveBox", "Box")
+        box.Length, box.Width, box.Height = 100, 60, 20
+        cylinder = self.body.newObject("PartDesign::AdditiveCylinder", "Cylinder")
+        cylinder.Radius, cylinder.Height = 5, 20
+        cylinder.Placement.Base = V(80, 40, 0)
+        self.doc.recompute()
+        obj = self.body.newObject(typeId, name)
+        obj.AttachmentSupport = [(cylinder, faceAt(cylinder, 0, -1))]
+        obj.MapMode = "FlatFace"
+        obj.MapOrigin = "Feature"
+        self.doc.recompute()
+        self.assertLess((obj.Placement.Base - V(80, 40, 0)).Length, 1e-6, obj.Placement)
+        Gui.activateWorkbench("PartDesignWorkbench")
+        App.setActiveDocument(self.doc.Name)
+        Gui.setActiveDocument(self.doc.Name)
+        pump(0.2)
+        return cylinder, obj, faceAt(cylinder, 20)
+
+    def assertOnTopWithTheBodyOrigin(self, obj, cylinder, top):
+        self.doc.recompute()
+        self.assertEqual(obj.AttachmentSupport, [(cylinder, (top,))])
+        self.assertEqual(obj.MapOrigin, "Body")
+        self.assertLess((obj.Placement.Base - V(0, 0, 20)).Length, 1e-6, obj.Placement)
+
+    def repickInPanel(self, obj, cylinder, top):
+        """obj's attachment panel open, the top face picked as its first reference, OK."""
+        self.edit(obj)
+        self.widget(QtWidgets.QPushButton, "buttonRef1").click()
+        pump(0.2)
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.doc.Name, cylinder.Name, top)
+        pump(0.3)
+        self.close(ok=True)
+
+    def testRepickedSupportTakesTheBodyOrigin(self):
+        """A legacy datum plane (legacyOnCylinder). Its panel open, the top face picked as its
+        support: "Body", at (0, 0, 20)."""
+        cylinder, plane, top = self.legacyOnCylinder("PartDesign::Plane", "Legacy")
+        self.repickInPanel(plane, cylinder, top)
+        self.assertOnTopWithTheBodyOrigin(plane, cylinder, top)
+
+    def testPanelRecordsMapOriginInTheMacro(self):
+        """The same re-pick: the commands OK writes (to the Python console, as to a macro) set
+        MapOrigin to Body after the support, so a replay gives the same frame."""
+        cylinder, plane, top = self.legacyOnCylinder("PartDesign::Plane", "Legacy")
+        consoles = [
+            w
+            for w in Gui.getMainWindow().findChildren(QtWidgets.QPlainTextEdit)
+            if w.metaObject().className() == "Gui::PythonConsole"
+        ]
+        self.assertEqual(len(consoles), 1, "no Python console")
+        App.ParamGet("User parameter:BaseApp/Preferences/Macro").SetBool("ScriptToPyConsole", True)
+        before = len(consoles[0].toPlainText())
+        self.repickInPanel(plane, cylinder, top)
+        written = consoles[0].toPlainText()[before:]
+        support = written.find(".AttachmentSupport = ")
+        self.assertGreaterEqual(support, 0, written)
+        self.assertIn(".MapOrigin = 'Body'", written[support:])
+
+    def testPythonAttachmentEditorRepickTakesTheBodyOrigin(self):
+        """A legacy datum plane in the Python attachment editor (Part_EditAttachment): the top face
+        picked as its first reference shows and gives "Body", at (0, 0, 20); it kept "Feature",
+        at (80, 40, 20)."""
+        import AttachmentEditor.Commands as Commands
+
+        cylinder, plane, top = self.legacyOnCylinder("PartDesign::Plane", "Legacy")
+        Commands.editAttachment(plane)
+        self.assertTrue(waitFor(lambda: Gui.Control.activeDialog()), "no task dialog")
+        pump(0.3)
+        Gui.Control.showTaskView()
+        Commands.taskd.refButtons[0].click()
+        pump(0.2)
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.doc.Name, cylinder.Name, top)
+        pump(0.3)
+        # the preview
+        self.assertLess((plane.Placement.Base - V(0, 0, 20)).Length, 1e-6, plane.Placement)
+        self.close(ok=True)
+        self.assertOnTopWithTheBodyOrigin(plane, cylinder, top)
+
+    def testMapSketchTakesTheBodyOrigin(self):
+        """A legacy sketch, re-mapped to the top face with Sketcher's Map sketch (the face
+        selected; the sketch, then its mode as it is, chosen in two list dialogs): "Body", at
+        (0, 0, 20); it kept "Feature", at (80, 40, 20)."""
+        cylinder, sketch, top = self.legacyOnCylinder("Sketcher::SketchObject", "Legacy")
+        self.answering = True
+
+        def poll():
+            if not self.answering:
+                return
+            widget = QtWidgets.QApplication.activeModalWidget()
+            if isinstance(widget, QtWidgets.QInputDialog) and not widget.property("answered"):
+                widget.setProperty("answered", True)
+                self.modals.append(widget.textValue())
+                widget.accept()
+            QtCore.QTimer.singleShot(50, poll)
+
+        QtCore.QTimer.singleShot(50, poll)
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.doc.Name, cylinder.Name, top)
+        Gui.runCommand("Sketcher_MapSketch")
+        pump(0.3)
+        self.answering = False
+        self.assertEqual(len(self.modals), 2, self.modals)
+        self.assertTrue(self.modals[0].startswith("Legacy"), self.modals)
+        self.assertEqual(sketch.MapMode, "FlatFace")
+        self.assertOnTopWithTheBodyOrigin(sketch, cylinder, top)

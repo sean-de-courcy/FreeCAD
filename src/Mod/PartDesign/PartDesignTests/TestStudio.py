@@ -792,20 +792,20 @@ class TestStudio(unittest.TestCase):
 
     # ---------------------------------------------------------------- D-t7: T1's second path
 
-    def testFaceProfileOfAFirstFeatureIsRefused(self):
-        """D-t7: another part's face as the Profile of a Body's first feature would make the
-        whole part its base (ProfileBased::getBaseObject, T1's second path, ops#308). Until T1
-        covers it, the predicate refuses it; a later feature, or a sketch, is fine."""
+    def testFaceProfileOfAFirstFeatureIsAllowed(self):
+        """D-t7: another part's face may be the Profile of a Body's first feature too (2a):
+        ProfileBased::getBaseObject takes no base from it (T1's second path, ops#308; N-t6 checks
+        the volume)."""
         part = self.doc.addObject("App::Part", "Part")
         lower, upper, padL, padU = self.twoBodies(part)
         top = faceAt(padL, 10)
         empty = self.doc.addObject("PartDesign::Body", "Empty")
         part.addObject(empty)
-        self.assertFalse(PartDesign.isStudioProfile(empty, padL, top))
+        self.assertTrue(PartDesign.isStudioProfile(empty, padL, top))
         self.assertTrue(PartDesign.isStudioProfile(upper, padL, top))
         self.assertTrue(PartDesign.isStudioProfile(empty, lower.getObject("LowSk")))
         first = empty.newObject("PartDesign::Pad", "First")
-        self.assertFalse(PartDesign.isStudioProfile(first, padL, top))
+        self.assertTrue(PartDesign.isStudioProfile(first, padL, top))
         later = upper.newObject("PartDesign::Pocket", "Later")
         self.assertTrue(PartDesign.isStudioProfile(later, padL, top))
         # a Body that only has a sketch so far: its next feature is still its first
@@ -813,7 +813,7 @@ class TestStudio(unittest.TestCase):
         part.addObject(sketchy)
         only = sketch(sketchy, "Only", xyPlane(sketchy), (0, 0, 1, 1))
         sketchy.Tip = only
-        self.assertFalse(PartDesign.isStudioProfile(sketchy, padL, top))
+        self.assertTrue(PartDesign.isStudioProfile(sketchy, padL, top))
 
     # ---------------------------------------------------------------- D-t4: a moved Body (1b-1)
 
@@ -980,6 +980,40 @@ class TestStudio(unittest.TestCase):
         for feature in features:
             self.assertTrue(feature.isValid(), feature.Name + ": " + feature.getStatusString())
         self.assertSettled()
+
+    def testMultiTransformJudgesAStepOutsideEveryBodyInItsOwnBody(self):
+        """PR 301 review low 2: a MultiTransform step made by script at the document's root (in
+        no Body), its direction a root sketch's line along X. Body A at identity: valid, the
+        4 mm cube and its copy 20 along X. A turned 90 degrees about Z: the MultiTransform fails,
+        naming the root (it stayed valid, its copies along A's own X, global Y). Set back, it
+        recovers."""
+        a = self.doc.addObject("PartDesign::Body", "A")
+        cube = pad(a, "Cube", sketch(a, "SA", xyPlane(a), (0, 0, 4, 4)), 4)
+        line = self.doc.addObject("Sketcher::SketchObject", "Dir")
+        line.addGeometry(Part.LineSegment(V(0, 0, 0), V(10, 0, 0)))
+        self.doc.recompute()
+        multi = a.newObject("PartDesign::MultiTransform", "Multi")
+        multi.Originals = [cube]
+        step = self.doc.addObject("PartDesign::LinearPattern", "Step")
+        step.Direction = (line, ["Edge1"])
+        step.Length = 20
+        step.Occurrences = 2
+        multi.Transformations = [step]
+        a.Tip = multi
+        self.doc.recompute()
+        self.assertIsNone(step.getParentGeoFeatureGroup())
+        self.assertTrue(multi.isValid(), multi.getStatusString())
+        self.assertAlmostEqual(multi.Shape.Volume, 128)
+        self.assertAlmostEqual(multi.Shape.BoundBox.XMax, 24)
+        a.Placement = App.Placement(V(0, 0, 0), App.Rotation(V(0, 0, 1), 90))
+        self.doc.recompute()
+        self.assertFalse(multi.isValid())
+        self.assertIn("placed elsewhere", multi.getStatusString())
+        self.assertIn("the document's root", multi.getStatusString())
+        a.Placement = App.Placement()
+        self.doc.recompute()
+        self.assertTrue(multi.isValid(), multi.getStatusString())
+        self.assertAlmostEqual(multi.Shape.BoundBox.XMax, 24)
 
     def testBodylessSketchFollowsAMovedBody(self):
         """ops#324: a sketch in no Body, in an App::Part placed (0, 0, 5) beside Body B, takes

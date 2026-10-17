@@ -33,6 +33,7 @@
 
 #include <App/Document.h>
 #include <App/GeoFeature.h>
+#include <App/GeoFeatureGroupExtension.h>
 #include <App/VarSet.h>
 #include <App/Origin.h>
 #include <Base/Placement.h>
@@ -462,6 +463,69 @@ Body* Body::findBodyOf(const App::DocumentObject* feature)
     }
 
     return static_cast<Body*>(BodyBase::findBodyOf(feature));
+}
+
+namespace
+{
+// Whether nothing but `self`'s Body and the objects in `allowed` links to `self`
+bool usedOnlyBy(
+    const App::DocumentObject* self,
+    const Body* body,
+    std::initializer_list<const App::DocumentObject*> allowed
+)
+{
+    return std::ranges::all_of(self->getInList(), [&](const App::DocumentObject* user) {
+        return user == body || std::ranges::find(allowed, user) != allowed.end();
+    });
+}
+}  // namespace
+
+Body* Body::newPartFrom(App::DocumentObject* feature)
+{
+    Body* body = findBodyOf(feature);
+    if (!body || !isSolidFeature(feature)) {
+        throw Base::ValueError("New part: the object isn't a solid feature of a body");
+    }
+    // A feature that something uses would reroute the next solid, or make the links into it
+    // cross-part without a word (the design's critic, point 9)
+    if (body->Tip.getValue() != feature || !usedOnlyBy(feature, body, {})) {
+        throw Base::ValueError(
+            "New part: only the feature being created, or a tip that nothing uses, can be moved "
+            "to a new part"
+        );
+    }
+    App::DocumentObject* sketch = nullptr;
+    if (auto profileBased = freecad_cast<ProfileBased*>(feature)) {
+        App::DocumentObject* profile = profileBased->Profile.getValue();
+        if (profile && profile->isDerivedFrom<Part::Part2DObject>() && body->hasObject(profile)
+            && usedOnlyBy(profile, body, {feature})) {
+            sketch = profile;
+        }
+    }
+
+    App::Document* doc = feature->getDocument();
+    auto part = static_cast<Body*>(doc->addObject("PartDesign::Body", "Body"));
+    // Where the old Body is (identity in a studio, by the one-origin rule): a sketch on the old
+    // Body's origin plane is relinked to the new one's, and at identity a placed old Body's lid
+    // moved with no error (PR 302 review)
+    part->Placement.setValue(body->Placement.getValue());
+    // in the studio: the old Body's App::Part (SketchWorkflow.cpp does the same for a new Body)
+    if (auto container = App::GeoFeatureGroupExtension::getGroupOfObject(body)) {
+        if (auto group = container->getExtensionByType<App::GroupExtension>(true)) {
+            group->addObject(part);
+        }
+    }
+    // Out of the old Body first (Body::removeObject: the Tip goes back), then the sketch into
+    // the new one before the feature, so the feature lands after it as the first solid. A sketch
+    // on the old Body's origin is relinked to the new one's (insertObject); one on a face of the
+    // old part keeps it, a direct reference
+    body->removeObject(feature);
+    if (sketch) {
+        body->removeObject(sketch);
+        part->addObject(sketch);
+    }
+    part->addObject(feature);
+    return part;
 }
 
 

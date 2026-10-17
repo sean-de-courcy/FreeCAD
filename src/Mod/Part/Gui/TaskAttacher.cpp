@@ -653,6 +653,8 @@ void TaskAttacher::addToReference(const std::vector<SubAndObjName>& pairs)
         }
 
         pcAttach->AttachmentSupport.setValues(refs, refnames);
+        // FreeCAD-CH (ops#311): a support picked here takes the Body's origin
+        pcAttach->MapOrigin.setValue(1L);
         supportEdited = true;
 
         QLineEdit* line = getLine(iActiveRef);
@@ -869,6 +871,8 @@ void TaskAttacher::onRefName(const QString& text, unsigned idx)
             }
         }
         pcAttach->AttachmentSupport.setValues(newrefs, newrefnames);
+        // FreeCAD-CH (ops#311): a support picked here takes the Body's origin
+        pcAttach->MapOrigin.setValue(1L);
         supportEdited = true;
         userSelectedMode = false;
         updateListOfModes();
@@ -975,6 +979,8 @@ void TaskAttacher::onRefName(const QString& text, unsigned idx)
         refnames.emplace_back(subElement);
     }
     pcAttach->AttachmentSupport.setValues(refs, refnames);
+    // FreeCAD-CH (ops#311): a support picked here takes the Body's origin
+    pcAttach->MapOrigin.setValue(1L);
     supportEdited = true;
     userSelectedMode = false;
     updateListOfModes();
@@ -1631,6 +1637,12 @@ bool TaskDlgAttacher::accept()
                 obj,
                 "AttachmentSupport = %s",
                 pcAttach->AttachmentSupport.getPyReprString().c_str()
+            );
+            // set with the support (ops#311), so the macro replays it
+            Gui::cmdAppObjectArgs(
+                obj,
+                "MapOrigin = '%s'",
+                pcAttach->MapOrigin.getValueAsString()
             );
         }
 

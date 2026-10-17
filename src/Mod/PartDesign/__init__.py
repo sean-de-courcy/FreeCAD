@@ -7,3 +7,4 @@ studioOf = _PartDesign.studioOf
 isStudioPick = _PartDesign.isStudioPick
 isStudioProfile = _PartDesign.isStudioProfile
 studioOriginFeature = _PartDesign.studioOriginFeature
+newPartFrom = _PartDesign.newPartFrom

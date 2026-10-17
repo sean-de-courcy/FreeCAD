@@ -159,6 +159,16 @@ public:
      */
     static Body* findBodyOf(const App::DocumentObject* feature);
 
+    /**
+     * New part (FreeCAD-CH ops#325, B+ Stage 1 2.3): moves `feature`, its Body's Tip that nothing
+     * else uses (the feature being created), into a new Body at identity placement, in the
+     * container of its Body (its App::Part, or the document's root). Its Profile sketch moves
+     * along when nothing else uses it; otherwise the feature keeps linking it where it is. Runs
+     * in the caller's transaction and doesn't recompute. Returns the new Body; throws
+     * Base::ValueError for any other feature.
+     */
+    static Body* newPartFrom(App::DocumentObject* feature);
+
     PyObject* getPyObject() override;
 
     std::vector<std::string> getSubObjects(int reason = 0) const override;
