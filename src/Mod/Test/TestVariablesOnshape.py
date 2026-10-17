@@ -86,6 +86,11 @@ ACCEPTED = [
     (".5 mm", "LENGTH", 0.5, "(0.5 * 1 mm)"),
     ("#Count * 2", "NUMBER", 6, "Count * 2"),
     ("1.5 rad", "ANGLE", math.degrees(1.5), None),
+    # exponent notation: Onshape's 1.5e2 is 150 (the reference studio, row 28)
+    ("1.5e2", "NUMBER", 150, "1.5e2"),
+    ("1e3 * 1 mm", "LENGTH", 1000, "1e3 * (1 * 1 mm)"),
+    ("2.5E-1 in", "LENGTH", 6.35, "(2.5E-1 * 1 in)"),
+    ("5.e1 mm", "LENGTH", 50, "(5.0e1 * 1 mm)"),
 ]
 
 # (Onshape text, type, a fragment of the reason)
@@ -129,7 +134,6 @@ REFUSED = [
     ("7 mm % 4 mm", "LENGTH", "% with units"),
     ("-7 % 4", "NUMBER", "% of a negative"),
     ("floor(2.5 mm)", "LENGTH", "floor()"),
-    ("1e3 * 1 mm", "LENGTH", "exponent notation"),
     ("#Width in", "LENGTH", "a unit after #Width"),
     ("10 mm mm", "LENGTH", "two units"),
     ("mm", "LENGTH", "needs a number"),

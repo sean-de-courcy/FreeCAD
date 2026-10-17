@@ -31,8 +31,7 @@ check FreeCAD's value against the translator's. It needs no document.
 express, is refused with the reason (`Refused`). Until a reference studio built in Onshape
 settles them (decision 68, D3), these are refused: a fraction with a unit next to `*`, `/` or
 `^` (`#a*3/4 in`, `1/3/4 in`), a unary minus before `^` (`-2^2`), a unit before `^`
-(`2 mm^2`; `(2 mm)^2` is clear), `%` with units or negative operands, `round`, chained `^` and
-exponent notation.
+(`2 mm^2`; `(2 mm)^2` is clear), `%` with units or negative operands, `round` and chained `^`.
 
 The writer's rules (section 2.4):
 - every unit is written as a factor: `10mm` becomes `(10 * 1 mm)`;
@@ -148,7 +147,7 @@ class Token:
 
 _TOKEN = re.compile(r"""
     (?P<space>\s+)
-  | (?P<number>[0-9]+\.?[0-9]*|\.[0-9]+)
+  | (?P<number>(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][-+]?[0-9]+)?)
   | (?P<ref>\#[A-Za-z_][A-Za-z0-9_]*)
   | (?P<name>[A-Za-z_][A-Za-z0-9_]*)
   | (?P<op>==|!=|<=|>=|&&|\|\||[-+*/^%(),?:<>!])
@@ -182,10 +181,6 @@ def tokenize(text: str) -> List[Token]:
         if kind == "op" and value in ("&&", "||", "!"):
             word = {"&&": "and", "||": "or", "!": "not"}[value]
             raise Refused(f"FreeCAD has no {value} ({word}) operator")
-        if kind == "number":
-            rest = text[match.end():]
-            if re.match(r"[eE][-+]?[0-9]", rest):
-                raise Refused(f"exponent notation ({value}{rest[:3]}...): {UNDOCUMENTED}")
         tokens.append(Token(kind, value, pos))
     tokens.append(Token("end", "", len(text)))
     return tokens
@@ -506,9 +501,7 @@ def _number_text(num: Num) -> str:
     text = num.text
     if text.startswith("."):
         text = "0" + text
-    if text.endswith("."):
-        text += "0"
-    return text
+    return re.sub(r"\.(?![0-9])", ".0", text)  # `5.` and `5.e2`
 
 
 def write(node, resolve_text: Callable[[str], str], top: bool = True) -> str:
