@@ -155,6 +155,7 @@ class TestVariablesCopies(unittest.TestCase):
         copy = result.copies[0]
         self.assertEqual(copy.TypeId, "App::VarSetCopy")
         self.assertEqual(copy.Label, "Studio A")
+        self.assertNotIn("Touched", copy.State)  # recorded the source after the recompute
         for name, expected in STUDIO_VALUES.items():
             with self.subTest(name=name):
                 self.assertEqual(copy.getTypeIdOfProperty(name), STUDIO_TYPES[name])
@@ -506,6 +507,7 @@ class TestVariablesCopies(unittest.TestCase):
         undoCount = self.doc.UndoCount
         copies.detach(copy)
         self.assertEqual(self.doc.UndoCount, undoCount + 1)
+        self.assertNotIn("Touched", copy.State)
         self.assertNotIn("ReadOnly", copy.getPropertyStatus("Width"))
         self.doc.undo()
         self.assertEqual(copy.SourceKind, "Onshape JSON")

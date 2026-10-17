@@ -37,80 +37,83 @@ const char* SourceKinds[] = {"FreeCAD document", "Onshape JSON", "None", nullptr
 VarSetCopy::VarSetCopy()
 {
     // FreeCAD-CH ops#317: notes/variables-studio.md section 3.1. Shown read-only: only the
-    // import, Refresh and Detach change them.
+    // import, Refresh and Detach change them. Output: they say where the variables came from,
+    // and setting them (the import's SourceKind after the recompute, Detach) doesn't touch the
+    // copy.
     const char* group = "Source";
+    const auto type = static_cast<PropertyType>(Prop_ReadOnly | Prop_Output);
     ADD_PROPERTY_TYPE(
         CopyFormat,
         (Format),
         group,
-        Prop_ReadOnly,
+        type,
         "The format of this copy's properties"
     );
-    ADD_PROPERTY_TYPE(SourceKind, (0L), group, Prop_ReadOnly, "What the variables were copied from");
+    ADD_PROPERTY_TYPE(SourceKind, (0L), group, type, "What the variables were copied from");
     SourceKind.setEnums(SourceKinds);
     SourceKind.setValue("None");
-    ADD_PROPERTY_TYPE(SourcePath, (""), group, Prop_ReadOnly, "The absolute path of the source file");
+    ADD_PROPERTY_TYPE(SourcePath, (""), group, type, "The absolute path of the source file");
     ADD_PROPERTY_TYPE(
         SourceRelativePath,
         (""),
         group,
-        Prop_ReadOnly,
+        type,
         "The source file's path relative to this document's file"
     );
     ADD_PROPERTY_TYPE(
         SourceObject,
         (""),
         group,
-        Prop_ReadOnly,
+        type,
         "The source VarSet's internal name, or the studio entry's index in the JSON file (from 0)"
     );
     ADD_PROPERTY_TYPE(
         SourceEntries,
         (0L),
         group,
-        Prop_ReadOnly,
+        type,
         "JSON: the number of studio entries in the file when it was read"
     );
     ADD_PROPERTY_TYPE(
         SourceStamp,
         (""),
         group,
-        Prop_ReadOnly,
+        type,
         "SHA-256 of the source's variables as last read"
     );
     ADD_PROPERTY_TYPE(
         SourceRefreshed,
         (""),
         group,
-        Prop_ReadOnly,
+        type,
         "When the source was last read (UTC)"
     );
     ADD_PROPERTY_TYPE(
         SourceExpressions,
         (),
         group,
-        Prop_ReadOnly,
+        type,
         "Each source variable's expression as the source writes it"
     );
     ADD_PROPERTY_TYPE(
         NameMap,
         (),
         group,
-        Prop_ReadOnly,
+        type,
         "Source names whose variable here has another name"
     );
     ADD_PROPERTY_TYPE(
         Bindings,
         (),
         group,
-        Prop_ReadOnly,
+        type,
         "Names the source uses but doesn't define, and the FreeCAD paths chosen for them"
     );
     ADD_PROPERTY_TYPE(
         Skipped,
         (),
         group,
-        Prop_ReadOnly,
+        type,
         "Source names chosen to be skipped: the source's variables not copied, and the names "
         "whose users weren't copied"
     );
@@ -118,7 +121,7 @@ VarSetCopy::VarSetCopy()
         Orphans,
         (),
         group,
-        Prop_ReadOnly,
+        type,
         "Variables removed at the source but still used here"
     );
 }
