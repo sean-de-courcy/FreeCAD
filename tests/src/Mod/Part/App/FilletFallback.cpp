@@ -10,6 +10,7 @@
 #include <functional>
 #include <limits>
 #include <numbers>
+#include <set>
 #include <sstream>
 #include <gtest/gtest.h>
 
@@ -809,8 +810,12 @@ TEST_F(FilletFallbackTest, refusesAFaceMergedAwayAfterOcctRaisedTheTolerances)
     };
     const auto before = FF::faceTolerances(base.getShape());
     ASSERT_LT(largest(), 1e-6);
-    std::vector<TopoShape> both {edges.front(), edgeBetween(base, {0, 4, 20}, {30, 4, 20})};
-    EXPECT_FALSE(dressUp(base, both, chamfer(2 - 1e-5)).isNull());
+    // OCCT's own maker, on the base: makeElementChamfer runs it on a copy (ops#345)
+    BRepFilletAPI_MakeChamfer occt(base.getShape());
+    occt.Add(2 - 1e-5, TopoDS::Edge(edges.front().getShape()));
+    occt.Add(2 - 1e-5, TopoDS::Edge(edgeBetween(base, {0, 4, 20}, {30, 4, 20}).getShape()));
+    occt.Build();
+    ASSERT_TRUE(occt.IsDone());
     ASSERT_GT(largest(), 1e-5);
     FF::Request request = chamfer(4 - 2e-7);
     request.limitOnly = false;
@@ -818,6 +823,111 @@ TEST_F(FilletFallbackTest, refusesAFaceMergedAwayAfterOcctRaisedTheTolerances)
     std::string reason;
     EXPECT_TRUE(forced(base, edges, request, &reason).isNull());
     EXPECT_NE(reason.find("tolerance grew"), std::string::npos) << reason;
+}
+
+namespace
+{
+/// The rib 30 x 4 x 20 against a wall 5 x 24 x 20 as high as it, with its two top edges
+TopoShape ribAgainstWall(std::vector<TopoShape>& topEdges)
+{
+    BRepAlgoAPI_Fuse fuse(box(30, 4, 20), box(5, 24, 20, gp_Pnt(-5, -10, 0)));
+    ShapeUpgrade_UnifySameDomain unify(fuse.Shape());
+    unify.Build();
+    TopoShape rib(unify.Shape(), 1L);
+    topEdges = {edgeBetween(rib, {0, 0, 20}, {30, 0, 20}), edgeBetween(rib, {0, 4, 20}, {30, 4, 20})};
+    return rib;
+}
+
+/// The largest tolerance of the shape's faces, edges and vertices
+double largestTolerance(const TopoDS_Shape& shape)
+{
+    double tolerance = 0;
+    for (TopExp_Explorer it(shape, TopAbs_FACE); it.More(); it.Next()) {
+        tolerance = std::max(tolerance, BRep_Tool::Tolerance(TopoDS::Face(it.Current())));
+    }
+    for (TopExp_Explorer it(shape, TopAbs_EDGE); it.More(); it.Next()) {
+        tolerance = std::max(tolerance, BRep_Tool::Tolerance(TopoDS::Edge(it.Current())));
+    }
+    for (TopExp_Explorer it(shape, TopAbs_VERTEX); it.More(); it.Next()) {
+        tolerance = std::max(tolerance, BRep_Tool::Tolerance(TopoDS::Vertex(it.Current())));
+    }
+    return tolerance;
+}
+
+/// The shape's element map as (indexed name, mapped name) pairs
+std::set<std::pair<std::string, std::string>> elementNames(const TopoShape& shape)
+{
+    std::set<std::pair<std::string, std::string>> names;
+    for (const auto& element : shape.getElementMap()) {
+        names.emplace(element.index.toString(), element.name.toString());
+    }
+    return names;
+}
+}  // namespace
+
+// OCCT's maker raises its input's tolerances in place, to 1e-4 at the vertices where the rib's
+// chamfers or rounds end against the wall, and a dress-up's base shares its TShapes with the
+// base feature's stored Shape. The maker runs on a copy (makerInput()): the base keeps its
+// tolerances, and the result keeps those the maker raised (ops#345)
+TEST_F(FilletFallbackTest, leavesTheBaseTolerancesAlone)
+{
+    for (const auto& request : {chamfer(2 - 1e-5), chamfer(1.5), fillet(2 - 1e-5), fillet(1.5)}) {
+        std::vector<TopoShape> edges;
+        TopoShape base = ribAgainstWall(edges);
+        const double before = largestTolerance(base.getShape());
+        ASSERT_LT(before, 1e-6);
+        TopoShape result = dressUp(base, edges, request);
+        ASSERT_FALSE(result.isNull());
+        EXPECT_TRUE(result.isValid());
+        EXPECT_EQ(largestTolerance(base.getShape()), before) << request.size1;
+        EXPECT_GT(largestTolerance(result.getShape()), 1e-5) << request.size1;
+    }
+}
+
+// A second dress-up on the same base sees the base's own tolerances: the check for merged faces
+// takes its thresholds (Request::faceTolerances) from them, not from what the first maker raised
+// (ops#345; PR 314 review, item 2)
+TEST_F(FilletFallbackTest, aSecondDressUpSeesTheBaseTolerances)
+{
+    std::vector<TopoShape> edges;
+    TopoShape base = ribAgainstWall(edges);
+    const auto before = FF::faceTolerances(base.getShape());
+    TopoShape first = dressUp(base, edges, chamfer(2 - 1e-5));
+    ASSERT_FALSE(first.isNull());
+    const auto after = FF::faceTolerances(base.getShape());
+    ASSERT_EQ(after.Extent(), before.Extent());
+    for (TopTools_DataMapOfShapeReal::Iterator it(before); it.More(); it.Next()) {
+        ASSERT_TRUE(after.IsBound(it.Key()));
+        EXPECT_EQ(after.Find(it.Key()), it.Value());
+    }
+    TopoShape second = dressUp(base, edges, chamfer(2 - 1e-5));
+    ASSERT_FALSE(second.isNull());
+    EXPECT_EQ(largestTolerance(second.getShape()), largestTolerance(first.getShape()));
+}
+
+// The copy keeps the base's element map and Tag: the result is named as by OCCT's maker on the
+// base itself
+TEST_F(FilletFallbackTest, theCopyNamesAsTheBase)
+{
+    std::vector<TopoShape> edges;
+    TopoShape base = ribAgainstWall(edges);
+    TopoShape result(2L);
+    result.makeElementChamfer(base, edges, ChamferType::equalDistance, 1.5, 1.5);
+
+    std::vector<TopoShape> otherEdges;
+    TopoShape other = ribAgainstWall(otherEdges);
+    BRepFilletAPI_MakeChamfer occt(other.getShape());
+    for (const auto& edge : otherEdges) {
+        const auto& e = TopoDS::Edge(edge.getShape());
+        occt.Add(1.5, 1.5, e, TopoDS::Face(other.findAncestorShape(e, TopAbs_FACE)));
+    }
+    occt.Build();
+    ASSERT_TRUE(occt.IsDone());
+    TopoShape expected(2L);
+    expected.makeElementShape(occt, other, OpCodes::Chamfer);
+
+    EXPECT_FALSE(elementNames(result).empty());
+    EXPECT_EQ(elementNames(result), elementNames(expected));
 }
 
 // The tube's top ring between its rims chamfered just under the limit, 2 (2 - d) wide, merges

@@ -59,8 +59,6 @@ App::DocumentObjectExecReturn* Chamfer::execute()
         TopoShape baseTopoShape
             = Feature::getTopoShape(link, ShapeOption::ResolveLink | ShapeOption::Transform);
         const auto& baseShape = baseTopoShape.getShape();
-        TopTools_IndexedDataMapOfShapeListOfShape mapEdgeFace;
-        TopExp::MapShapesAndAncestors(baseShape, TopAbs_EDGE, TopAbs_FACE, mapEdgeFace);
         TopTools_IndexedMapOfShape mapOfEdges;
         std::vector<Part::FilletElement> edges = Edges.getValues();
         TopExp::MapShapes(baseShape, TopAbs_EDGE, mapOfEdges);
@@ -127,9 +125,14 @@ App::DocumentObjectExecReturn* Chamfer::execute()
             );
         }
         else {
-            BRepFilletAPI_MakeChamfer mkChamfer(baseShape);
-            for (size_t k = 0; k < edgeShapes.size(); ++k) {
-                const auto& edge = TopoDS::Edge(edgeShapes[k].getShape());
+            // OCCT's maker raises its input's tolerances in place: it runs on a copy (ops#345)
+            std::vector<TopoShape> inputEdges = edgeShapes;
+            const TopoShape input = FilletFallback::makerInput(baseTopoShape, inputEdges);
+            TopTools_IndexedDataMapOfShapeListOfShape mapEdgeFace;
+            TopExp::MapShapesAndAncestors(input.getShape(), TopAbs_EDGE, TopAbs_FACE, mapEdgeFace);
+            BRepFilletAPI_MakeChamfer mkChamfer(input.getShape());
+            for (size_t k = 0; k < inputEdges.size(); ++k) {
+                const auto& edge = TopoDS::Edge(inputEdges[k].getShape());
                 const TopoDS_Face& face = TopoDS::Face(mapEdgeFace.FindFromKey(edge).First());
                 mkChamfer.Add(sizes[k].first, sizes[k].second, edge, face);
             }
@@ -137,10 +140,10 @@ App::DocumentObjectExecReturn* Chamfer::execute()
             if (mkChamfer.Shape().IsNull()) {
                 return new App::DocumentObjectExecReturn("Resulting shape is null");
             }
-            res.makeElementShape(mkChamfer, baseTopoShape, Part::OpCodes::Chamfer);
+            res.makeElementShape(mkChamfer, input, Part::OpCodes::Chamfer);
             // makeElementChamfer sends a face of zero width to the exact construction; OCCT's
             // own maker leaves it (ops#298)
-            if (!FilletFallback::thinFace(res.getShape(), baseShape).IsNull()) {
+            if (!FilletFallback::thinFace(res.getShape(), input.getShape()).IsNull()) {
                 return new App::DocumentObjectExecReturn(
                     "The chamfer would leave a face of zero width (a face it consumes whole, or a "
                     "sliver narrower than its tolerance)"
