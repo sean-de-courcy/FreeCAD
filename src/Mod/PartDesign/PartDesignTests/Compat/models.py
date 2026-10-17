@@ -474,6 +474,8 @@ MODELS = {
 
 # B2's models (3.6), by group: each module lists its builders in generation order.
 from PartDesignTests.Compat import models_partdesign  # noqa: E402 (uses this module's helpers)
+from PartDesignTests.Compat import models_part  # noqa: E402
+from PartDesignTests.Compat import models_sketcher  # noqa: E402
 
-for _group in (models_partdesign,):
+for _group in (models_partdesign, models_part, models_sketcher):
     MODELS.update((f.__name__, f) for f in _group.MODELS)
