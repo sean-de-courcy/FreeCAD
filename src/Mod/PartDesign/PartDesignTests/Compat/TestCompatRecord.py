@@ -95,3 +95,28 @@ class TestCompatRecord(unittest.TestCase):
         self.assertEqual(shape["plane"], {"normal": [0.0, 0.0, 1.0], "offset": 5.0})
         moved = self.recordOf(Part.Face(Part.Plane(V(0, 0, 6), V(0, 0, 1))))
         self.assertTrue(self.differences(rec, moved))
+
+    def testReferenceToAnInfiniteFace(self):
+        # A reference to a datum plane's face (DatumPlane:Face1), and to an infinite cylinder:
+        # keyed by the surface's type, and a plane by its normal and offset
+        doc = self.newDocument("CompatRecordRefs")
+        body = doc.addObject("PartDesign::Body", "Body")
+        datum = body.newObject("PartDesign::Plane", "DatumPlane")
+        datum.MapMode = "Deactivated"
+        datum.Placement = App.Placement(V(0, 0, 7), App.Rotation())
+        cylinder = doc.addObject("Part::Feature", "Cylinder")
+        cylinder.Shape = Part.Face(Part.Cylinder())
+        holder = doc.addObject("App::FeaturePython", "Holder")
+        holder.addProperty("App::PropertyLinkSubList", "Refs")
+        holder.Refs = [(datum, ["Face1"]), (cylinder, ["Face1"])]
+        doc.recompute()
+        refs = CompatRecord.record(doc)["objects"]["Holder"]["refs"]
+        plane = refs["Refs[0]"]["key"]
+        self.assertEqual(plane["kind"], "Face")
+        self.assertTrue(plane["infinite"])
+        self.assertEqual(plane["surface"], "Plane")
+        self.assertAlmostEqual(abs(plane["normal"][2]), 1.0)
+        self.assertAlmostEqual(abs(plane["offset"]), 7.0)
+        tube = refs["Refs[1]"]["key"]
+        self.assertTrue(tube["infinite"])
+        self.assertEqual(tube["surface"], "Cylinder")

@@ -414,13 +414,14 @@ def elementKey(shape):
         key["point"] = _vector(shape.Point)
         return key
     if _infinite(shape):
-        # a datum plane's face: its plane, by normal and distance from the origin
+        # a datum plane's face: its surface's type, and a plane by normal and distance from the
+        # origin
         key["infinite"] = True
-        faces = shape.Faces
-        if len(faces) == 1 and isinstance(faces[0].Surface, Part.Plane):
-            normal = faces[0].Surface.Axis
-            key["normal"] = _vector(normal)
-            key["offset"] = float(normal.dot(faces[0].Surface.Position))
+        if len(shape.Faces) == 1:
+            key["surface"] = type(shape.Faces[0].Surface).__name__
+        elif len(shape.Edges) == 1:
+            key["curve"] = type(shape.Edges[0].Curve).__name__
+        key.update(_plane(shape) or {})
         return key
     centre = _centre(shape)
     if centre is not None:
