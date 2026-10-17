@@ -35,6 +35,7 @@ B1's list (3.6, "about ten, the core") is here; B2's are in the `models_*` modul
 """
 
 import math
+import os
 
 import FreeCAD as App
 import Part
@@ -307,6 +308,35 @@ def VarSetDriven(make):
     return {"volumes": {"LinearPattern": 25 * 20 * 12 - 3 * math.pi * 4 * 12}}
 
 
+def VarSetCopyDriven(make):
+    """A copy of a made-up Onshape export (`App::VarSetCopy`, ops#317 PR E1) driving a Box.
+
+    The export: Width `40 mm`, Depth `3/4 in` (19.05 mm), Height `#Width / 4 + 2 mm` (12 mm),
+    written to a temporary folder and imported with `freecad.variables.copies` (the copy keeps
+    that folder as its source path; a reopen doesn't read it). A Box whose Length, Width and
+    Height are the copy's Width, Depth and Height."""
+    import json
+    import tempfile
+
+    from freecad.variables import copies
+
+    doc = make("VarSetCopyDriven")
+    folder = tempfile.mkdtemp(prefix="VarSetCopyDriven")
+    path = os.path.join(folder, "Studio.json")
+    variables = [("Width", "40 mm"), ("Depth", "3/4 in"), ("Height", "#Width / 4 + 2 mm")]
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump([{"variableStudioReference": None, "variables": [
+            {"type": "LENGTH", "name": name, "value": None, "description": "",
+             "expression": text} for name, text in variables]}], f)
+    copy = copies.import_studios(doc, [path]).copies[0]
+    box = m.box(doc, "Box", (1, 1, 1))
+    box.setExpression("Length", f"{copy.Name}.Width")
+    box.setExpression("Width", f"{copy.Name}.Depth")
+    box.setExpression("Height", f"{copy.Name}.Height")
+    doc.recompute()
+    return {"volumes": {"Box": 40 * 19.05 * 12}}
+
+
 def SubShapeBinder(make):
     """A SubShapeBinder of a feature's face in a second Body, with a sketch and a Pad on it.
 
@@ -481,3 +511,6 @@ from PartDesignTests.Compat import models_studio  # noqa: E402
 
 for _group in (models_partdesign, models_part, models_sketcher, models_assembly, models_studio):
     MODELS.update((f.__name__, f) for f in _group.MODELS)
+
+# ops#317 PR E1: a variables copy, for the next generation.
+MODELS[VarSetCopyDriven.__name__] = VarSetCopyDriven
