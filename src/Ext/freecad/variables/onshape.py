@@ -44,8 +44,8 @@ The writer's rules (section 2.4):
   fraction literal: `3/4 in` becomes `(3 / 4 * 1 in)`; FreeCAD reads `3/4in` as `3/(4 in)`, an inverse length, without an error;
 - a unit after `)` or a function call applies to that group: `sqrt(16) m` is `(sqrt(16) * 1 m)`;
 - unit words become FreeCAD's symbols, `PI` and `Pi` become `pi`;
-- `round(x)` is written `floor(x + 0.5)`, and `a % b` with a dividend other than a plain number
-  `a - b * floor(a / b)`, Onshape's readings;
+- `round(x)` is written `floor(x + 0.5)`, Onshape's reading (FreeCAD's `round` goes away from
+  zero); `%` stays `%`: FreeCAD's takes the divisor's sign, as Onshape's;
 - a `#name` becomes the text the caller gives for it (a sibling's bare name, another copy's
   `Copy.Name`, a document variable's path), never `#name`: FreeCAD's `#name` searches the whole
   document, a silent binding (section 2.6).
@@ -591,12 +591,6 @@ def write(node, resolve_text: Callable[[str], str], top: bool = True) -> str:
         inner = w(node.node)
         return inner if node.op == "+" else f"(-{inner})"
     if isinstance(node, Bin):
-        if node.op == "%" and not isinstance(node.left, Num):
-            # Onshape's % takes the sign of the divisor (the reference studio, row 25: -7 % 3
-            # is 2), FreeCAD's that of the dividend: a dividend that may be negative is written
-            # a - b * floor(a / b)
-            floored = Call("floor", (Bin("/", node.left, node.right),))
-            return write(Bin("-", node.left, Bin("*", node.right, floored)), resolve_text, top)
         text = f"{w(node.left)} {node.op} {w(node.right)}"
         return text if top else f"({text})"
     if isinstance(node, Call):
@@ -722,7 +716,9 @@ def _binary(op: str, left: Value, right: Value) -> Value:
             raise Refused(f"% with units: {UNDOCUMENTED}")
         if b.value <= 0:
             raise Refused(f"% by a negative number or zero: {UNDOCUMENTED}")
-        return Quantity(a.value - b.value * math.floor(a.value / b.value))  # as written
+        # the sign of the divisor, in Onshape (the reference studio, row 25: -7 % 3 is 2), in
+        # FreeCAD's % (Python's remainder) and here alike
+        return Quantity(a.value % b.value)
     if op == "^":
         if b.dims != NONE:
             raise Refused("an exponent can't have a unit")

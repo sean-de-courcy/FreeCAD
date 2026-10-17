@@ -103,10 +103,14 @@ ACCEPTED = [
     ("round(-2.6)", "NUMBER", -3, None),
     ("round(#Count / 2) * 1 mm", "LENGTH", 2, None),
     # the sign of the divisor, as Onshape (the reference studio, row 25)
-    ("-7 % 3", "NUMBER", 2, "(-7) - (3 * floor(((-7) / 3)))"),
-    ("#Count % 2", "NUMBER", 1, "Count - (2 * floor((Count / 2)))"),
+    ("-7 % 3", "NUMBER", 2, "(-7) % 3"),
+    ("#Count % 2", "NUMBER", 1, "Count % 2"),
     ("(0 - #Count) % 2", "NUMBER", 1, None),
     ("7.5 % 2", "NUMBER", 1.5, "7.5 % 2"),
+    ("-7.5 % 2", "NUMBER", 0.5, None),
+    # not a whole number: Python's remainder, as FreeCAD's % (3 % 0.1 is 0.0999..., not 0)
+    ("#Count % 0.1", "NUMBER", 3 % 0.1, "Count % 0.1"),
+    ("(#Count * 0 + 1) % 0.2", "NUMBER", 1 % 0.2, None),
     # a unit name after / is one of it, as Onshape (the reference studio, row 26)
     ("(floor(#Rail/mm)) mm", "LENGTH", 101, "(floor((Rail / (1 mm))) * 1 mm)"),
     ("#Rail / in", "NUMBER", 4, "Rail / (1 in)"),
