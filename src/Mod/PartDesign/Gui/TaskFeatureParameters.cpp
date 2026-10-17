@@ -31,6 +31,7 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMessageBox>
+#include <QPointer>
 #include <QStandardItemModel>
 #include <QTimer>
 
@@ -39,6 +40,7 @@
 #include <App/DocumentObserver.h>
 #include <Gui/Application.h>
 #include <Gui/CommandT.h>
+#include <Gui/Control.h>
 #include <Gui/Document.h>
 #include <Gui/InputHint.h>
 #include <Gui/Inventor/Draggers/Gizmo.h>
@@ -403,6 +405,22 @@ void moveBack(const App::DocumentObjectT& featureT)
     });
 }
 
+// Whether `box` is still in the open dialog of the feature's document, under the dialog's
+// transaction
+bool isEditing(const QWidget* box, const App::DocumentObjectT& featureT)
+{
+    App::Document* doc = featureT.getDocument();
+    if (!box || !doc || !doc->hasPendingTransaction()) {
+        return false;
+    }
+    Gui::TaskView::TaskDialog* dialog = Gui::Control().activeDialog(doc);
+    if (!dialog) {
+        return false;
+    }
+    const auto& content = dialog->getDialogContent();
+    return std::ranges::find(content, box) != content.end();
+}
+
 QString partLabel(const App::DocumentObject* body)
 {
     return body ? QString::fromUtf8(body->Label.getValue()) : QString();
@@ -504,7 +522,13 @@ void TaskResultParameters::onResultChanged(int index)
     // The edit restarts, which closes this dialog: after the signal, from the event loop
     combo->setEnabled(false);
     App::DocumentObjectT target(feature);
-    QTimer::singleShot(0, qApp, [target, toNewPart]() {
+    QPointer<TaskResultParameters> box(this);
+    QTimer::singleShot(0, qApp, [box, target, toNewPart]() {
+        // OK or Cancel came first: the dialog's transaction is closed, and a move now would be
+        // outside any undo step (PR 303 round 1)
+        if (!isEditing(box.data(), target)) {
+            return;
+        }
         if (toNewPart) {
             moveToNewPart(target);
         }

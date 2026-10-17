@@ -417,6 +417,27 @@ class TestResultBoxGui(unittest.TestCase):
             pump()
             self.activate(docA)
 
+    def testOkBeforeTheMoveRuns(self):
+        """PR 303 round 1: New part is chosen and OK is clicked before the queued move runs. OK
+        commits the pad where it is, in the enclosure (25000), and the move then does nothing:
+        it ran outside any transaction, so the pad sat in a new Body that no undo covered, and a
+        panel opened again. One undo step removes the pad."""
+        self.enclosure()
+        before = sorted(o.Name for o in self.doc.Objects)
+        lid = self.lidPad()
+        self.combo().setCurrentIndex(1)
+        taskButton(QtWidgets.QDialogButtonBox.Ok).click()
+        pump(1.0)
+        self.assertFalse(Gui.Control.activeDialog())
+        self.assertIs(lid.getParentGeoFeatureGroup(), self.body)
+        self.assertEqual(self.bodies(), ["Enclosure"])
+        self.assertAlmostEqual(self.body.Shape.Volume, 25000, places=3)
+        self.assertFalse(self.doc.HasPendingTransaction)
+        self.assertEqual(len(self.doc.UndoNames), 1, self.doc.UndoNames)
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertEqual(sorted(o.Name for o in self.doc.Objects), before)
+
 
 if __name__ == "__main__":
     unittest.main()
