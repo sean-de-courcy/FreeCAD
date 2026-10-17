@@ -715,6 +715,74 @@ class DocumentBasicCases(unittest.TestCase):
         self.Doc = FreeCAD.open(SaveName)
         self.assertEqual(self.Doc.ActiveObject.Label, "abc_ef")
 
+    def testLinkCycleRefused(self):
+        """ops#333: assigning a Link's LinkedObject so that the links form a cycle raises and
+        leaves the value as it was. Box <- C1 <- C2, then C1 -> C2 closes the cycle; following it
+        in mustExecute overflowed the stack."""
+        box = self.Doc.addObject("App::FeatureTest", "Box")
+        c1 = self.Doc.addObject("App::Link", "C1")
+        c2 = self.Doc.addObject("App::Link", "C2")
+        c1.LinkedObject = box
+        c2.LinkedObject = c1
+        self.Doc.recompute()
+        with self.assertRaises(ValueError):
+            c1.LinkedObject = c2
+        self.assertEqual(c1.LinkedObject, box)
+        self.assertEqual(c2.LinkedObject, c1)
+        self.assertIn(c1, c2.OutList)
+        self.assertNotIn(c2, c1.OutList)
+        with self.assertRaises(ValueError):
+            c1.LinkedObject = c1
+        self.assertFalse(c1.MustExecute)
+        # a chain is still fine
+        c3 = self.Doc.addObject("App::Link", "C3")
+        c3.LinkedObject = c2
+        self.assertEqual(c3.LinkedObject, c2)
+
+    def testLinkCycleFromFileNoCrash(self):
+        """ops#333: a cycle of links written into a file opens, and reading MustExecute or
+        recomputing reports the cycle instead of overflowing the stack."""
+        box = self.Doc.addObject("App::FeatureTest", "Box")
+        c1 = self.Doc.addObject("App::Link", "C1")
+        c2 = self.Doc.addObject("App::Link", "C2")
+        c1.LinkedObject = box
+        c2.LinkedObject = c1
+        self.Doc.recompute()
+        SaveName = tempfile.gettempdir() + os.sep + "CreateTest.FCStd"
+        self.Doc.saveAs(SaveName)
+        FreeCAD.closeDocument("CreateTest")
+
+        # In Document.xml, point C1's LinkedObject at C2 instead of Box.
+        with zipfile.ZipFile(SaveName) as zin:
+            entries = [(info, zin.read(info.filename)) for info in zin.infolist()]
+        with zipfile.ZipFile(SaveName, "w", zipfile.ZIP_DEFLATED) as zout:
+            for info, data in entries:
+                if info.filename == "Document.xml":
+                    text = data.decode("utf-8")
+                    start = text.index('<Object name="C1"', text.index("<ObjectData"))
+                    begin = text.index('name="LinkedObject"', start)
+                    end = text.index("</Property>", begin)
+                    self.assertIn('"Box"', text[begin:end])
+                    text = text[:begin] + text[begin:end].replace('"Box"', '"C2"') + text[end:]
+                    data = text.encode("utf-8")
+                zout.writestr(info, data)
+
+        self.Doc = FreeCAD.open(SaveName)
+        c1 = self.Doc.getObject("C1")
+        c2 = self.Doc.getObject("C2")
+        self.assertEqual(c1.LinkedObject, c2)
+        self.assertEqual(c2.LinkedObject, c1)
+        self.assertIsNotNone(c1.MustExecute)
+        self.assertIsNotNone(c2.MustExecute)
+        c1.touch()
+        c2.touch()
+        self.Doc.recompute()
+        # the open document still refuses a new cycle
+        c3 = self.Doc.addObject("App::Link", "C3")
+        c3.LinkedObject = c2
+        with self.assertRaises(ValueError):
+            c2.LinkedObject = c3
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("CreateTest")

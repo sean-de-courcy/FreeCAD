@@ -869,11 +869,23 @@ int ConstraintPy::PyInit(PyObject* args, PyObject* /*kwd*/)
             }
         }
     }
+    // The last failed attempt leaves its error set. Clear it, and build the message without
+    // PyCXX: a PyCXX call that sees a pending error, or an argument whose repr raises, throws a
+    // C++ exception, and nothing catches it on the way out of tp_init (ops#329).
+    PyErr_Clear();
 
     std::stringstream str;
     str << "Invalid parameters: ";
-    Py::Tuple tuple(args);
-    str << tuple.as_string() << std::endl;
+    PyObject* argsRepr = PyObject_Repr(args);
+    const char* argsText = argsRepr ? PyUnicode_AsUTF8(argsRepr) : nullptr;
+    if (argsText) {
+        str << argsText << std::endl;
+    }
+    else {
+        PyErr_Clear();
+        str << "(unprintable arguments)" << std::endl;
+    }
+    Py_XDECREF(argsRepr);
     str << "Constraint constructor accepts:" << std::endl
         << "-- empty parameter list" << std::endl
         << "-- Constraint type and index" << std::endl;

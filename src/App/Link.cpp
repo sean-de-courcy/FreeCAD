@@ -22,6 +22,7 @@
  *                                                                          *
  ****************************************************************************/
 
+#include <algorithm>
 #include <limits>
 
 #include <boost/algorithm/string/predicate.hpp>
@@ -483,7 +484,28 @@ short LinkBaseExtension::extensionMustExecute()
     if (!link) {
         return 0;
     }
-    return link->mustExecute();
+    // Assignments refuse a cycle of links, but a file can still hold one, and following it here
+    // overflowed the stack (ops#333). The chain of links being asked stops at the first repeat.
+    thread_local std::vector<const DocumentObject*> asking;
+    auto owner = getContainer();
+    if (std::find(asking.begin(), asking.end(), owner) != asking.end()) {
+        std::string chain;
+        for (auto it = std::find(asking.begin(), asking.end(), owner); it != asking.end(); ++it) {
+            chain += (*it)->getFullName() + " -> ";
+        }
+        FC_ERR("Cyclic link: " << chain << owner->getFullName());
+        return 0;
+    }
+    asking.push_back(owner);
+    try {
+        short res = link->mustExecute();
+        asking.pop_back();
+        return res;
+    }
+    catch (...) {
+        asking.pop_back();
+        throw;
+    }
 }
 
 std::vector<App::DocumentObject*>

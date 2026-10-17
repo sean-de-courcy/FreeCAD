@@ -23,7 +23,7 @@
 # **************************************************************************
 
 
-import os, re, tempfile, unittest, zipfile
+import os, re, tempfile, threading, unittest, zipfile
 import FreeCAD, Part, Sketcher
 from Part import Precision
 
@@ -1194,6 +1194,40 @@ class TestSketcherSolver(unittest.TestCase):
         self.assertNotIn((0, 1), dependent)
         self.assertIn((1, 3), dependent)
         self.assertNotIn((1, 1), dependent)
+
+    def testConstraintInvalidArgsRaises(self):
+        """ops#329: a constructor call that matches no form raises TypeError. The last failed
+        parse left its error set, and the message's PyCXX repr then threw a C++ exception out of
+        tp_init, which killed the process. A fresh thread has no repr list yet, where the stale
+        error always made the repr fail; an argument whose repr raises did the same anywhere."""
+
+        class BadRepr:
+            def __index__(self):
+                return 0
+
+            def __repr__(self):
+                raise RuntimeError("no repr")
+
+        calls = [("Fixed", 0, 1), ("Horizontal", "x"), ("Coincident", 0, BadRepr())]
+        messages = []
+
+        def run():
+            for args in calls:
+                try:
+                    Sketcher.Constraint(*args)
+                except TypeError as e:
+                    messages.append(str(e))
+                else:
+                    messages.append(None)
+
+        thread = threading.Thread(target=run)
+        thread.start()
+        thread.join()
+        self.assertEqual(len(messages), len(calls))
+        for message in messages:
+            self.assertIsNotNone(message)
+            self.assertTrue(message.startswith("Invalid parameters"), message)
+        self.assertIn("'Fixed', 0, 1", messages[0])
 
     def tearDown(self):
         # closing doc
