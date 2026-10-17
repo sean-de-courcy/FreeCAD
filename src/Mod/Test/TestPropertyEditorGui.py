@@ -1114,3 +1114,20 @@ class TestPropertyEditorGui(unittest.TestCase):
             self.assertNotIn(text, texts)
         self.deleteRow("Gap")
         self.assertIn("Gap", copy.PropertiesList)
+
+    def testAddPropertyNotOfferedOnAttachedCopy(self):
+        """Add Property is offered on a plain VarSet and on a detached copy, not on a copy still
+        attached to its source (Refresh would rewrite what is added there; ops#348)."""
+        self.assertIn("Add Property", self.menuTexts("Width"))
+        self.doc.openTransaction("Make copy")
+        copy = self.doc.addObject("App::VarSetCopy", "Copy")
+        copy.addProperty("App::PropertyDistance", "Gap", "Base")
+        copy.Gap = 3
+        copy.SourceKind = "Onshape JSON"
+        self.doc.commitTransaction()
+        self.obj = copy
+        texts = self.menuTexts("Gap")
+        self.assertIn("Property Uses", texts)
+        self.assertNotIn("Add Property", texts)
+        copy.SourceKind = "None"  # Detach: its variables are editable again
+        self.assertIn("Add Property", self.menuTexts("Gap"))
