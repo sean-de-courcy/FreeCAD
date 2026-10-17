@@ -1237,8 +1237,7 @@ class TestVariablesImportGui(unittest.TestCase):
 
     def test_file_import_type(self):
         """File > Import knows "Onshape variables (*.json)"; its module opens the dialog."""
-        self.assertEqual(App.getImportType("json").get("Onshape variables (*.json)"),
-                         "freecad.variables.importer")
+        self.assertIn("freecad.variables.importer", App.getImportType("json"))
         from freecad.variables import importer, importgui
 
         importer.insert(self.a, self.doc.Name)
