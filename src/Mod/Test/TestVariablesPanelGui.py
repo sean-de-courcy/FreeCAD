@@ -589,7 +589,7 @@ class TestVariablesPanelGui(unittest.TestCase):
             ("Tilt", "Angle", "5 mm", "wrong unit"),
             ("Tilt", "Angle", "#Width * 2", "the type of Tilt is Angle"),
             ("Ratio", "Number", "#Width", "the type of Ratio is Number"),
-            ("Size", "Length", "#Width / #Height", "a number without a unit"),
+            ("Size", "Length", "#Width * #Height", "the type of Size is Length"),
         ]
         for name, kind, value, fragment in cases:
             with self.subTest(name=name, value=value):
@@ -601,6 +601,23 @@ class TestVariablesPanelGui(unittest.TestCase):
                 self.assertIsNone(doc.getObject("Variables"))
                 self.assertEqual(doc.UndoCount, undoCount)
         dialog.reject()
+
+    def test_add_dialog_unitless_expression(self):
+        """An expression without a unit takes a Length's or an Angle's default unit, as App's
+        checkPathUnit and the Expression column take it (PR 313 round 1)."""
+        doc = self.standardDocument()
+        for name, kind, value, expected in [
+            ("Size", "Length", "#Width / #Height", 2),
+            ("Turn", "Angle", "=15", 15),
+        ]:
+            with self.subTest(name=name):
+                dialog = self.openPanelAddDialog()
+                self.fillAddDialog(dialog, name, kind, value, varSet="VarSet")
+                self.pressOk(dialog)
+                self.assertFalse(self.addDialogOpen(), name)
+                doc.recompute()
+                self.assertAlmostEqual(getattr(self.varSet, name).Value, expected)
+                self.assertEqual(doc.UndoNames[0], "Add " + name)
 
     def test_describe(self):
         """G-3. A description typed in its cell is one undo step, "Describe Width"; Edit

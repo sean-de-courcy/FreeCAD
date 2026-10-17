@@ -835,7 +835,9 @@ QString VariablesModel::unitMismatch(App::DocumentObject* obj, App::Property* pr
     }
     const Base::Unit& unit = value->getQuantity().getUnit();
     const Base::Unit& wanted = quantity ? quantity->getUnit() : Base::Unit::One;
-    if (unit == wanted) {
+    // A unitless result takes a quantity's default unit, as App's checkPathUnit and the
+    // Expression column take it.
+    if (unit == wanted || (quantity && unit == Base::Unit::One)) {
         return {};
     }
     QString name = QString::fromUtf8(prop->getName());
