@@ -936,6 +936,9 @@ class TestStudio(unittest.TestCase):
         sheet.setAlias("A1", "dx")
         container = b
         if inAPart:
+            # Made after the model on purpose: the recompute's order breaks ties by creation
+            # order, and a Part made first moves before A's readers run (the test would pass
+            # without the watch)
             container = self.doc.addObject("App::Part", "Part")
             container.addObject(b)
         container.setExpression(".Placement.Base.x", "Sheet.dx")

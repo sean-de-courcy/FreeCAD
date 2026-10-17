@@ -348,6 +348,9 @@ class TestMerge(unittest.TestCase):
         second Part whose x is another cell, the panel's Part back at 0: bx 10 puts the panel at
         x 10..50 in the bracket's frame (Body.Shape leaves the Part's placement out): 19000, solid
         at x 45 and nothing at x 55 (a stale Merge would reach x 60)."""
+        # The Merge runs before the Part only because the Part is made after the model: the
+        # recompute's order breaks ties by creation order. A Part made first moves before the
+        # Merge reads it, and this test, like the ones below, would pass without the watch
         self.model()
         merge = self.merge()
         sheet = self.sheet(dx=0, bx=0)
