@@ -23,15 +23,13 @@ namespace PartDesign
 
 namespace
 {
-struct Watch
-{
-    fastsignals::connection recomputed;
-    // Each container's Placement when it last recomputed, by its document and ID: the signal
-    // also reports other documents' objects, and an ID is never reused after a delete. One that
-    // recomputes in place moves nothing, and the walk is skipped
-    std::map<std::pair<const App::Document*, long>, Base::Placement> placements;
-};
-std::map<const App::Document*, Watch> watches;
+std::map<const App::Document*, fastsignals::connection> watches;
+// Each container's Placement when it last recomputed, by its document and ID; one that recomputes
+// in place moves nothing, and the walk is skipped. One map for every watch: a document's recompute
+// also reports the objects of other documents it recomputes, and a map per watching document kept
+// a move seen in one document's recompute from the next one's (review round 1). A deleted
+// document's entries go, so a new document at its address starts with none
+std::map<std::pair<const App::Document*, long>, Base::Placement> placements;
 
 // What the container places: its members, theirs, and its origin's elements
 void collectMembers(App::DocumentObject* container, std::set<App::DocumentObject*>& members)
@@ -62,11 +60,10 @@ void containerRecomputed(const App::Document* doc, const App::DocumentObject& re
     }
     auto placement
         = freecad_cast<App::PropertyPlacement*>(recomputed.getPropertyByName("Placement"));
-    auto it = watches.find(doc);
-    if (!placement || it == watches.end()) {
+    if (!placement) {
         return;
     }
-    auto [last, added] = it->second.placements.try_emplace(
+    auto [last, added] = placements.try_emplace(
         std::make_pair(recomputed.getDocument(), recomputed.getID()),
         placement->getValue()
     );
@@ -102,8 +99,8 @@ void watch(const App::Document& doc)
 {
     auto document = &doc;
     auto& watched = watches[document];
-    if (!watched.recomputed.connected()) {
-        watched.recomputed = const_cast<App::Document&>(doc).signalRecomputedObject.connect(
+    if (!watched.connected()) {
+        watched = const_cast<App::Document&>(doc).signalRecomputedObject.connect(
             [document](const App::DocumentObject& recomputed) {
                 containerRecomputed(document, recomputed);
             }
@@ -125,9 +122,13 @@ void registerContainerMoves()
     App::GetApplication().signalDeleteDocument.connect([](const App::Document& gone) {
         auto it = watches.find(&gone);
         if (it != watches.end()) {
-            it->second.recomputed.disconnect();
+            it->second.disconnect();
             watches.erase(it);
         }
+        std::erase_if(placements, [&gone](const auto& entry) { return entry.first.first == &gone; });
+    });
+    App::GetApplication().signalDeletedObject.connect([](const App::DocumentObject& gone) {
+        placements.erase(std::make_pair(gone.getDocument(), gone.getID()));
     });
     for (auto doc : App::GetApplication().getDocuments()) {
         watch(*doc);
