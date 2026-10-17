@@ -131,6 +131,17 @@ def isLinkGroup(obj):
     return obj.TypeId == "App::Link" and obj.ElementCount > 0
 
 
+def isMergedPart(obj):
+    """FreeCAD-CH (ops#325, design 2.6): whether obj is a part merged into another, a Body whose
+    MergedInto names a Merge in a part (as PartDesign's Boolean.mergeOf)."""
+    merge = getattr(obj, "MergedInto", None)
+    if merge is None or not hasattr(merge, "MergeAccepted"):
+        return False
+    return any(
+        user.isDerivedFrom("PartDesign::Body") and merge in user.Group for user in merge.InList
+    )
+
+
 def getObject(ref):
     if len(ref) != 2 or ref[0] is None:
         return None

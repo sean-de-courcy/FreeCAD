@@ -219,7 +219,12 @@ void Workbench::activated()
         "PartDesign_Body"
     ));
 
-    const char* Body2[] = {"PartDesign_Boolean", "PartDesign_MergeParts", nullptr};
+    const char* Body2[] = {
+        "PartDesign_Boolean",
+        "PartDesign_MergeParts",
+        "PartDesign_Split",
+        nullptr
+    };
     Watcher.push_back(new Gui::TaskView::TaskWatcherCommands(
         "SELECT PartDesign::Body COUNT 1..",
         Body2,
@@ -472,6 +477,7 @@ Gui::MenuItem* Workbench::setupMenuBar() const
           << "Separator" << dressups << "Separator" << transformations << "Separator"
           << "PartDesign_Boolean"
           << "PartDesign_MergeParts"
+          << "PartDesign_Split"
           << "Separator"
           << "Materials_InspectAppearance"
           << "Materials_InspectMaterial"
