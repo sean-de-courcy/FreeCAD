@@ -22,12 +22,14 @@
  ****************************************************************************/
 
 #include <algorithm>
+#include <regex>
 
 #include "VariableLookup.h"
 
 #include "Document.h"
 #include "DocumentObject.h"
 #include "Expression.h"
+#include "ExpressionParser.h"
 #include "ObjectIdentifier.h"
 #include "PropertyExpressionEngine.h"
 #include "VarSet.h"
@@ -118,6 +120,51 @@ bool VariableLookup::isVariable(const DocumentObject* obj, const std::string& na
         }
     }
     return false;
+}
+
+std::string VariableLookup::checkVariableName(const DocumentObject* holder, const std::string& name)
+{
+    if (name.empty()) {
+        return "A variable needs a name.";
+    }
+    const std::string quoted = "'" + name + "'";
+    static const std::regex identifier("[A-Za-z_][A-Za-z0-9_]*");
+    if (!std::regex_match(name, identifier)) {
+        return quoted
+            + " isn't a name: use letters, digits and _, and start with a letter or _.";
+    }
+    // the parser's own lists, as PropertySheet::isValidAlias uses
+    if (ExpressionParser::isTokenAUnit(name)) {
+        return quoted + " is a unit in expressions, so no expression could use the variable.";
+    }
+    if (ExpressionParser::isTokenAConstant(name)) {
+        return quoted + " is a constant in expressions, so no expression could use the variable.";
+    }
+    bool isFunction = false;
+    try {
+        ExpressionPtr call(ExpressionParser::parse(nullptr, (name + "(1)").c_str()));
+        isFunction = dynamic_cast<FunctionExpression*>(call.get()) != nullptr;
+    }
+    catch (...) {
+        // not a function call
+    }
+    if (isFunction) {
+        return quoted + " is a function in expressions; choose another name.";
+    }
+    if (!ExpressionParser::isTokenAnIndentifier(name)) {
+        return quoted + " isn't read as a name in expressions; choose another name.";
+    }
+    if (holder) {
+        if (const Property* prop = holder->getPropertyByName(name.c_str())) {
+            const std::string label = holder->Label.getValue();
+            if (prop->testStatus(Property::PropDynamic)) {
+                return label + " has a variable named " + quoted + " already.";
+            }
+            return quoted + " is a property of every "
+                + std::string(holder->getTypeId().getName()) + "; choose another name.";
+        }
+    }
+    return {};
 }
 
 std::vector<VariableUse> VariableLookup::uses(const Property* prop)

@@ -639,3 +639,178 @@ class TestSaveAndRename(VariablesBase):
 
         self.doc.undo()
         self.checkRestoredSheet("=Target.W2")
+
+
+class TestDescriptions(VariablesBase):
+    """ops#317, D-1 and D-2 (notes/variables-studio.md sections 1.1 and 6): a variable's
+    description is its property's documentation. A change of it, or of its group, is undoable and
+    announced (signalChangePropertyEditor), as a rename is; it was neither."""
+
+    TEXT = 'Gap to the "rail" <&>\nsecond line'
+    NAMES = ("Width", "Gap", "Depth", "Extra")
+
+    def setUp(self):
+        super().setUp()
+        self.build()
+
+    def build(self):
+        """VarSet: Width (group Sizes, described) and Depth; Target: an empty VarSet."""
+        if self.doc.Name in FreeCAD.listDocuments():
+            FreeCAD.closeDocument(self.doc.Name)
+        self.doc = FreeCAD.newDocument("TestDescriptions")
+        self.doc.UndoMode = 1
+        self.varSet = self.doc.addObject("App::VarSet", "VarSet")
+        self.varSet.addProperty("App::PropertyLength", "Width", "Sizes", "old text")
+        self.varSet.Width = 20
+        self.varSet.addProperty("App::PropertyLength", "Depth", "Sizes")
+        self.varSet.Depth = 5
+        self.target = self.doc.addObject("App::VarSet", "Target")
+
+    def state(self):
+        """Per VarSet: name -> (group, description, value) of its variables."""
+        return {
+            obj.Name: {
+                name: (obj.getGroupOfProperty(name), obj.getDocumentationOfProperty(name),
+                       getattr(obj, name).Value)
+                for name in self.NAMES if name in obj.PropertiesList
+            }
+            for obj in (self.varSet, self.target)
+        }
+
+    def describe(self, obj, name, text):
+        self.doc.openTransaction("Describe")
+        obj.setDocumentationOfProperty(name, text)
+        self.doc.commitTransaction()
+
+    def test_description_survives_save_rename_delete_copy(self):
+        """D-1: a text with a newline and <&>" survives save and reopen, a rename and its undo and
+        redo, a delete and its undo, and copyObject; and a later description change undoes to it."""
+        self.describe(self.varSet, "Width", self.TEXT)
+        self.assertEqual(self.varSet.getDocumentationOfProperty("Width"), self.TEXT)
+
+        self.tempDir = tempfile.mkdtemp(prefix="TestVariables")
+        path = os.path.join(self.tempDir, "described.FCStd")
+        self.doc.saveAs(path)
+        FreeCAD.closeDocument(self.doc.Name)
+        self.doc = FreeCAD.openDocument(path)
+        self.doc.UndoMode = 1
+        varSet = self.doc.getObject("VarSet")
+        self.assertEqual(varSet.getDocumentationOfProperty("Width"), self.TEXT)
+
+        self.doc.openTransaction("Rename")
+        varSet.renameProperty("Width", "Gap")
+        self.doc.commitTransaction()
+        self.assertEqual(varSet.getDocumentationOfProperty("Gap"), self.TEXT)
+        self.doc.undo()
+        self.assertEqual(varSet.getDocumentationOfProperty("Width"), self.TEXT)
+        self.doc.redo()
+        self.assertEqual(varSet.getDocumentationOfProperty("Gap"), self.TEXT)
+
+        self.doc.openTransaction("Remove")
+        varSet.removeProperty("Gap")
+        self.doc.commitTransaction()
+        self.assertNotIn("Gap", varSet.PropertiesList)
+        self.doc.undo()
+        self.assertEqual(varSet.getDocumentationOfProperty("Gap"), self.TEXT)
+
+        copy = self.doc.copyObject(varSet)
+        self.assertEqual(copy.getDocumentationOfProperty("Gap"), self.TEXT)
+
+        self.describe(varSet, "Gap", "changed")
+        self.doc.undo()
+        self.assertEqual(varSet.getDocumentationOfProperty("Gap"), self.TEXT)
+        self.doc.redo()
+        self.assertEqual(varSet.getDocumentationOfProperty("Gap"), "changed")
+
+    def test_undo_redo_abort_of_description_and_group(self):
+        """D-2: a description or group change, alone or with the property's other changes in the
+        same transaction; undo and abort give the state from before, redo the one after."""
+
+        def doc(name, text, obj=None):
+            return lambda: (obj or self.varSet).setDocumentationOfProperty(name, text)
+
+        def group(name, text):
+            return lambda: self.varSet.setGroupOfProperty(name, text)
+
+        def value(name, length):
+            return lambda: setattr(self.varSet, name, length)
+
+        def rename(old, new):
+            return lambda: self.varSet.renameProperty(old, new)
+
+        def remove(name):
+            return lambda: self.varSet.removeProperty(name)
+
+        def add(name):
+            return lambda: self.varSet.addProperty("App::PropertyLength", name, "Sizes", "added")
+
+        def move(name):
+            return lambda: self.varSet.moveProperty(name, self.target)
+
+        cases = [
+            ("description", [doc("Width", self.TEXT)]),
+            ("group", [group("Width", "Other")]),
+            ("description and group", [doc("Width", "new"), group("Width", "Other")]),
+            ("description twice", [doc("Width", "a"), doc("Width", "b")]),
+            ("two properties", [doc("Width", "w"), doc("Depth", "d")]),
+            ("value, description", [value("Width", 30), doc("Width", "new")]),
+            ("description, value", [doc("Width", "new"), value("Width", 30)]),
+            ("description, rename", [doc("Width", "new"), rename("Width", "Gap")]),
+            ("rename, description", [rename("Width", "Gap"), doc("Gap", "new")]),
+            ("rename, group, rename back",
+             [rename("Width", "Gap"), group("Gap", "Other"), rename("Gap", "Width")]),
+            ("description, remove", [doc("Width", "new"), remove("Width")]),
+            ("add, description", [add("Extra"), doc("Extra", "new")]),
+            ("description, move", [doc("Width", "new"), move("Width")]),
+            ("move, description", [move("Width"), lambda: doc("Width", "new", self.target)()]),
+        ]
+        for label, steps in cases:
+            for close in ("undo", "abort"):
+                with self.subTest(case=label, close=close):
+                    self.build()
+                    before = self.state()
+                    self.doc.openTransaction(label)
+                    for step in steps:
+                        step()
+                    after = self.state()
+                    self.assertNotEqual(after, before)
+                    if close == "abort":
+                        self.doc.abortTransaction()
+                        self.assertEqual(self.state(), before)
+                        continue
+                    self.doc.commitTransaction()
+                    self.doc.undo()
+                    self.assertEqual(self.state(), before)
+                    self.doc.redo()
+                    self.assertEqual(self.state(), after)
+                    self.doc.undo()
+                    self.assertEqual(self.state(), before)
+
+    def test_change_is_announced(self):
+        """D-2: each change announces the property to the property editors (the Gui marks its
+        document modified on it); setting the same text announces nothing."""
+
+        class Observer:
+            def __init__(self):
+                self.seen = []
+
+            def slotChangePropertyEditor(self, obj, name):
+                self.seen.append((obj.Name, name))
+
+        observer = Observer()
+        FreeCAD.addDocumentObserver(observer)
+        try:
+            self.describe(self.varSet, "Width", "new")
+            self.assertEqual(observer.seen, [("VarSet", "Width")])
+            self.varSet.setGroupOfProperty("Depth", "Other")
+            self.assertEqual(observer.seen[-1], ("VarSet", "Depth"))
+            count = len(observer.seen)
+            self.varSet.setDocumentationOfProperty("Width", "new")
+            self.varSet.setGroupOfProperty("Depth", "Other")
+            self.assertEqual(len(observer.seen), count)
+            # the group change, outside any transaction, isn't recorded: undo takes back "Describe"
+            self.doc.undo()
+            self.assertEqual(self.varSet.getDocumentationOfProperty("Width"), "old text")
+            self.assertEqual(observer.seen[-1], ("VarSet", "Width"))
+        finally:
+            FreeCAD.removeDocumentObserver(observer)

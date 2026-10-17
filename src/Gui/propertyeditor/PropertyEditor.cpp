@@ -1562,8 +1562,19 @@ void PropertyEditor::contextMenuEvent(QContextMenuEvent*)
                 break;
             }
 
-            prop->getContainer()
-                ->changeDynamicProperty(prop, prop->getGroup(), newTooltip.toUtf8().constData());
+            // FreeCAD-CH (ops#317): undoable, in its own transaction as a rename
+            int tid = openPropertyTransaction(prop->getContainer(),
+                                              "Edit property tooltip",
+                                              transactionID);
+            try {
+                prop->getContainer()
+                    ->changeDynamicProperty(prop, prop->getGroup(), newTooltip.toUtf8().constData());
+            }
+            catch (...) {
+                closePropertyTransaction(tid, false);
+                throw;
+            }
+            closePropertyTransaction(tid);
             break;
         }
         case MA_RenameProp: {
@@ -1614,7 +1625,6 @@ void PropertyEditor::contextMenuEvent(QContextMenuEvent*)
             break;
         }
         case MA_EditPropGroup: {
-            // This operation is not undoable yet.
             const char* groupName = (*props.begin())->getGroup();
             if (!groupName) {
                 groupName = "Base";
@@ -1663,9 +1673,20 @@ void PropertyEditor::contextMenuEvent(QContextMenuEvent*)
                     return;
                 }
                 std::string group = res.toUtf8().constData();
-                for (auto prop : props) {
-                    prop->getContainer()->changeDynamicProperty(prop, group.c_str(), nullptr);
+                // FreeCAD-CH (ops#317): undoable, in its own transaction as a rename
+                int tid = openPropertyTransaction((*props.begin())->getContainer(),
+                                                  "Rename property group",
+                                                  transactionID);
+                try {
+                    for (auto prop : props) {
+                        prop->getContainer()->changeDynamicProperty(prop, group.c_str(), nullptr);
+                    }
                 }
+                catch (...) {
+                    closePropertyTransaction(tid, false);
+                    throw;
+                }
+                closePropertyTransaction(tid);
                 buildUp(PropertyModel::PropertyList(propList), checkDocument);
             }
             return;

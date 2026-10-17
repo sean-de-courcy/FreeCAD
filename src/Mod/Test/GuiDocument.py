@@ -114,6 +114,18 @@ class TestGuiDocument(unittest.TestCase):
             self.assertIn("Document.xml", target.namelist())
             self.assertNotIn("GuiDocument.xml", target.namelist())
 
+    def testPropertyDescriptionMarksModified(self):
+        # FreeCAD-CH (ops#317, D-2): a dynamic property's new documentation or group marks the
+        # Gui document modified, as a rename does; it didn't, so closing lost it without a prompt
+        varSet = self.doc.addObject("App::VarSet", "VarSet")
+        varSet.addProperty("App::PropertyLength", "Width", "Sizes", "old text")
+        guiDoc = FreeCADGui.getDocument(self.doc.Name)
+        for change in (lambda: varSet.setDocumentationOfProperty("Width", "new text"),
+                       lambda: varSet.setGroupOfProperty("Width", "Other")):
+            guiDoc.Modified = False
+            change()
+            self.assertTrue(guiDoc.Modified)
+
     def testGetTreeRootObject(self):
         # Create objects at the root level
         group1 = self.doc.addObject("App::DocumentObjectGroup", "Group1")
