@@ -29,6 +29,7 @@
 #include <vector>
 
 #include <TopoDS_Face.hxx>
+#include <TopTools_DataMapOfShapeReal.hxx>
 
 #include <Mod/Part/PartGlobal.h>
 #include "TopoShape.h"
@@ -59,7 +60,15 @@ struct Request
     /// Build only at the limit, where a new edge lands on an existing one or a face vanishes:
     /// the failures the construction is for. Off only to compare with OCCT below the limit
     bool limitOnly = true;
+    /// Each base face's largest tolerance, with its edges and vertices (faceTolerances()), taken
+    /// before OCCT's maker ran: the maker raises the base's tolerances in place (to 1e-4 where a
+    /// round ends against a wall), and the check for merged faces compares with these. Empty:
+    /// read from the base when the construction runs
+    TopTools_DataMapOfShapeReal faceTolerances;
 };
+
+/// Each face's largest tolerance, with its edges and vertices: Request::faceTolerances
+PartExport TopTools_DataMapOfShapeReal faceTolerances(const TopoDS_Shape& shape);
 
 /** Builds the dress-up by the exact construction.
  *

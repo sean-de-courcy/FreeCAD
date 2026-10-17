@@ -164,9 +164,9 @@ class FilletLimit(Scenario):
             point.AttachmentSupport = [(target, self.names(target, element))]
             point.MapMode = "Vertex" if element.kind == "Vertex" else "CenterOfMass"
             if name in consumed:
-                expect = lambda p=predicate: Missing() if self.consumed() else Settled(p())
+                expect = lambda p=predicate: Missing() if self.consumed() else Exact(p())
             elif name in limitOnly:
-                expect = lambda p=predicate: Settled(p()) if self.consumed() else Missing()
+                expect = lambda p=predicate: Exact(p()) if self.consumed() else Missing()
             else:
                 expect = lambda p=predicate: Exact(p())
             self.ref(name, point, "AttachmentSupport", expect, Attached())

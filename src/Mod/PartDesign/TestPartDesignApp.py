@@ -116,3 +116,4 @@ from PartDesignTests.TestSplit import TestSplit  # FreeCAD-CH, ops#325
 
 # The CI reopen gate (FreeCAD-CH, ops#323)
 from PartDesignTests.Compat.TestCompatCorpus import TestCompatCorpus
+from PartDesignTests.Compat.TestCompatRecord import TestCompatRecord  # ops#343

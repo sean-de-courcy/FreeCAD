@@ -536,6 +536,45 @@ class InvalidDressUpTest(unittest.TestCase):
                 self.assertEqual(len(shape.Faces), 7)
                 self.assertExact(shape, 1000 - removed[kind])
 
+    def testRepairDropsTheFinOfAnInvalidBaseAtTheLimit(self):
+        # At the limit (a fillet of 10, a chamfer within 1e-6 of 10) OCCT's result keeps the fin
+        # as a second, open shell of its solid, which BRepCheck accepts, and a later cut through
+        # the fin gave 500.0001 for 496 (ops#303). The feature repairs it as an invalid result:
+        # the solid without the fin, and a cut through the fin as on the plain cube
+        base = cube_with_fin()
+        cube = Part.makeBox(10, 10, 10)
+        d = 10 - 1e-6
+        ends = (
+            ((0, 0, 10), (10, 0, 10)),
+            ((0, 10, 10), (10, 10, 10)),
+            ((0, 10, 0), (10, 10, 0)),
+        )
+        cases = (
+            ("Fillet", 10, fillet_section(10) * 10, 5),
+            ("Chamfer", d, d * d / 2 * 10, 7),
+        )
+        through_fin = Part.makeBox(2, 2, 2, V(2, 1, 1))
+        for kind, size, removed, faces in cases:
+            for end in ends:
+                feature = self.dressUp(kind, base, [edge_between(base, *end)], [(size, size)])
+                self.assertTrue(feature.isValid(), feature.getStatusString())
+                shape = feature.Shape
+                self.assertEqual(shape.ShapeType, "Solid")
+                self.assertEqual(len(shape.Shells), 1)
+                self.assertEqual(len(shape.Faces), faces)
+                self.assertExact(shape, 1000 - removed)
+                tool = self.doc.addObject("Part::Feature", "Tool")
+                tool.Shape = through_fin
+                cut = self.doc.addObject("Part::Cut", "Cut")
+                cut.Base, cut.Tool = feature, tool
+                self.doc.recompute()
+                self.assertTrue(cut.isValid(), cut.getStatusString())
+                plain = self.dressUpShape(kind, cube, size, [edge_between(cube, *end)])
+                self.assertExact(cut.Shape, plain.cut(through_fin).Volume)
+        # The issue's case, the chamfer on the back bottom edge in the fin's plane: the box's half
+        # z >= y - 1e-6 remains
+        self.assertAlmostEqual(cut.Shape.Volume, 1000 - d * d / 2 * 10 - 4, delta=1e-4)
+
     def testRepairDropsTheFinOfABaseWithALooseFace(self):
         # The fin cube beside a loose square face: OCCT's result drops the face, a solid with the
         # fin, and its repair is the same compound with the fin outside the solid

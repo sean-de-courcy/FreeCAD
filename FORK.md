@@ -339,7 +339,10 @@ names it.
 | `feat/317-describe` | feat | ops#317 | - | `integration` `9439811c0a` | `7e427b347f` (fork PR 310), 2026-10-17 | never (fork feature) |
 | `feat/317-onshape-translate` | feat | ops#317 | - | `integration` `9439811c0a` | `d2d57cc48f` (fork PR 309), 2026-10-17 | never (fork feature) |
 | `fix/296-upto-face` | fix | ops#304, ops#299 | - | `integration` `d2d57cc48f` | `242c9698d0` (fork PR 311), 2026-10-17 | never (fork fix) |
-| `infra/323-compat-b2` | infra | ops#323 | - | `integration` `d2d57cc48f` | (fork PR 312) | never |
+| `infra/323-compat-b2` | infra | ops#323 | - | `integration` `d2d57cc48f` | `aa54e80f1e` (fork PR 312), 2026-10-17 | never |
+| `feat/317-panel-types` | feat | ops#317 | - | `integration` `7e427b347f` | `3dee143ed4` (fork PR 313), 2026-10-17 | never (fork feature) |
+| `fix/303-fillet-limits` | fix | ops#303, ops#315 | - | `integration` `aa54e80f1e` | `035baf1bc5` (fork PR 314), 2026-10-17 | never (fork fix) |
+| `infra/343-compat-record` | infra | ops#343 | - | `integration` `aa54e80f1e` | (fork PR 316) | never |
 
 ## Fork-only commits in carried topics
 
