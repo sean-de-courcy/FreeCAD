@@ -32,7 +32,7 @@ express, is refused with the reason (`Refused`). Until a reference studio built 
 settles them (decision 68, D3), these are refused: a fraction with a unit next to `*`, `/` or
 `^` (`#a*3/4 in`, `1/3/4 in`), a unary minus before `^` on anything but a number (`-#a^2`;
 `-2^2` is `(-2)^2`), a unit before `^` after a group or a call (`sqrt(4) mm^2`; `2 mm^2` is
-2 mm²), `%` with units or negative operands and `round`.
+2 mm²), `%` with units or negative operands.
 
 The writer's rules (section 2.4):
 - every unit is written as a factor: `10mm` becomes `(10 * 1 mm)`;
@@ -115,12 +115,12 @@ _units("rad", 1.0, ANGLE, "radian", "radians")
 
 CONSTANTS = {"pi": math.pi, "PI": math.pi, "Pi": math.pi}
 
-# Functions both languages have with the same meaning; the unit rules are in _call().
+# Functions both languages have, with the same meaning except round(): Onshape rounds halves
+# up (the reference studio, row 24), FreeCAD away from zero, so it is written floor(x + 0.5).
+# The unit rules are in _call().
 FUNCTIONS = {"abs", "acos", "asin", "atan", "atan2", "ceil", "cos", "cosh", "exp", "floor",
-             "log", "log10", "max", "min", "sin", "sinh", "sqrt", "tan", "tanh"}
+             "log", "log10", "max", "min", "round", "sin", "sinh", "sqrt", "tan", "tanh"}
 REFUSED_FUNCTIONS = {
-    "round": "round() is refused until the reference studio shows how Onshape rounds halves "
-             "(FreeCAD rounds them away from zero)",
     "asinh": "FreeCAD has no asinh()",
     "acosh": "FreeCAD has no acosh()",
     "atanh": "FreeCAD has no atanh()",
@@ -563,6 +563,8 @@ def write(node, resolve_text: Callable[[str], str], top: bool = True) -> str:
         text = f"{w(node.left)} {node.op} {w(node.right)}"
         return text if top else f"({text})"
     if isinstance(node, Call):
+        if node.name == "round":
+            return f"floor({w(node.args[0])} + 0.5)"
         return f"{node.name}({', '.join(w(arg) for arg in node.args)})"
     if isinstance(node, Cond):
         text = f"{w(node.cond)} ? {w(node.then)} : {w(node.other)}"
@@ -733,12 +735,14 @@ def _call(name: str, args: List[Value]) -> Quantity:
         if name in ("log", "log10") and x.value <= 0:
             raise Refused(f"{name}({x.value:g}) is undefined")
         return Quantity(getattr(math, name)(x.value))
-    if name in ("floor", "ceil"):
+    if name in ("floor", "ceil", "round"):
         count(1)
         x = values[0]
         if x.dims != NONE:
             raise Refused(f"{name}() of a value with a unit depends on the unit it is counted in: "
                           f"{UNDOCUMENTED}")
+        if name == "round":
+            return Quantity(float(math.floor(x.value + 0.5)))  # halves up, as written
         return Quantity(float(getattr(math, name)(x.value)))
     if name == "sqrt":
         count(1)
