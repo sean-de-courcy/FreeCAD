@@ -320,6 +320,25 @@ class TestVariablesCopies(unittest.TestCase):
         self.assertIn(copyB.Name + ".Gap", expression(copyC, "Width").replace(" ", ""))
         self.assertAlmostEqual(copyC.Width.Value, 8)
 
+    def test_copies_cycle(self):
+        """A.x uses B.y and B.z uses A.w: no variable refers to itself, but the copies would
+        depend on each other, which FreeCAD can't recompute. The plan says so and names both
+        uses; nothing is made. Skipping z breaks the cycle."""
+        a = self.export("Studio A", [entry(variable("LENGTH", "x", "#y + 1 mm"),
+                                           variable("LENGTH", "w", "2 mm"))])
+        b = self.export("Studio B", [entry(variable("LENGTH", "y", "3 mm"),
+                                           variable("LENGTH", "z", "#w * 2"))])
+        with self.assertRaises(ImportBlocked) as blocked:
+            copies.import_studios(self.doc, [a, b])
+        message = str(blocked.exception)
+        self.assertIn("depend on each other", message)
+        self.assertIn("Studio A.x uses #y of Studio B", message)
+        self.assertIn("Studio B.z uses #w of Studio A", message)
+        self.assertEqual(self.doc.Objects, [])
+        copyA, copyB = copies.import_studios(self.doc, [a, b], skip=["z"]).copies
+        self.assertAlmostEqual(copyA.x.Value, 4)
+        self.assertNotIn("z", copyB.PropertiesList)
+
     # I-4
 
     def test_check_failure_undoes(self):

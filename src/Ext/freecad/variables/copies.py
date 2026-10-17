@@ -298,7 +298,62 @@ def plan_import(doc, paths: Sequence[str], *,
         plan.problems.append(f"#{name} is defined in {where}: choose which provides it")
     for source, name, reason in plan.refused:
         plan.problems.append(f"{name} ({plan.sources[source].label}): {reason}")
+    cycle = _copy_cycle(plan, entries, providers or {})
+    if cycle:
+        uses = ", ".join(f"{plan.sources[i].label}.{name} uses #{ref} of "
+                         f"{plan.sources[j].label}" for i, j, name, ref in cycle)
+        plan.problems.append(
+            f"The copies would depend on each other ({uses}): a FreeCAD object can't depend on "
+            "one that depends on it. Skip one of these variables.")
     return plan
+
+
+def _copy_cycle(plan: Plan, entries, providers) -> List[Tuple[int, int, str, str]]:
+    """A cycle between the copies, which FreeCAD can't recompute although no variable refers to
+    itself (A.x uses B.y, B.z uses A.w): its edges (user entry, provider entry, variable, name),
+    or []."""
+    defined: Dict[str, List[int]] = {}
+    for i, entry in enumerate(entries):
+        for v in entry.variables:
+            defined.setdefault(v.name, [])
+            if i not in defined[v.name]:
+                defined[v.name].append(i)
+    edges: Dict[int, Dict[int, Tuple[str, str]]] = {}
+    for result in plan.translation.variables:
+        if result.translation is None:
+            continue
+        i = result.entry
+        for ref in onshape.references(onshape.parse(result.variable.expression)):
+            idx = defined.get(ref, [])
+            if i in idx:
+                continue
+            j = idx[0] if len(idx) == 1 else providers.get(ref)
+            if j is not None and j in idx:
+                edges.setdefault(i, {}).setdefault(j, (result.name, ref))
+    state: Dict[int, str] = {}
+    path: List[int] = []
+
+    def visit(i):
+        state[i] = "busy"
+        path.append(i)
+        for j in sorted(edges.get(i, {})):
+            if state.get(j) == "busy":
+                loop = path[path.index(j):] + [j]
+                return [(a, b) + edges[a][b] for a, b in zip(loop, loop[1:])]
+            if j not in state:
+                found = visit(j)
+                if found:
+                    return found
+        path.pop()
+        state[i] = "done"
+        return []
+
+    for i in sorted(edges):
+        if i not in state:
+            found = visit(i)
+            if found:
+                return found
+    return []
 
 
 def _unique_name(doc, label: str, taken: Iterable[str]) -> str:
