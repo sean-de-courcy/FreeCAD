@@ -512,6 +512,37 @@ class TestVariablesCopies(unittest.TestCase):
         self.assertTrue(copy.isDerivedFrom("App::VarSet"))
         self.assertEqual(copy.ViewObject, None)  # no GUI here; VarSet's view provider in the GUI
 
+    def test_format_round_trip(self):
+        """Every source property, non-empty and with the characters XML and maps must escape,
+        saves and reopens unchanged."""
+        copy = self.doc.addObject("App::VarSetCopy", "Copy")
+        values = {
+            "SourceKind": "Onshape JSON",
+            "SourcePath": 'D:/Exports/Studio <&> "A".json',
+            "SourceRelativePath": '../Exports/Studio <&> "A".json',
+            "SourceObject": "1",
+            "SourceEntries": 3,
+            "SourceStamp": "sha256:json1:" + "0" * 64,
+            "SourceRefreshed": "2026-10-17T12:00:00Z",
+            "SourceExpressions": {"t": "2 mm", "Odd": 'first <&> "line"\nsecond line',
+                                  "Width": "#Gap * 2"},
+            "NameMap": {"t": "t_"},
+            "Bindings": {"Gap": "Variables.Gap", "Lit": "12 mm"},
+            "Skipped": ["Unused", "Z"],
+            "Orphans": ["Old", "Older"],
+        }
+        for name, value in values.items():
+            setattr(copy, name, value)
+        saved = os.path.join(self.folder, "roundtrip.FCStd")
+        self.doc.saveAs(saved)
+        App.closeDocument(self.doc.Name)
+        self.doc = App.openDocument(saved)
+        copy = self.doc.getObject("Copy")
+        for name, value in values.items():
+            with self.subTest(name=name):
+                self.assertEqual(getattr(copy, name), value)
+        self.assertEqual(copy.CopyFormat, 1)
+
     def test_newer_format(self):
         """A copy saved with a higher CopyFormat marks the reopened document as newer: the
         notice and the save guard of decision 65 see it."""
