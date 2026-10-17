@@ -100,6 +100,45 @@ class TestMerge(unittest.TestCase):
         self.assertAlmostEqual(self.panel.Shape.Volume, 14400 + 300, places=6)
         self.assertAlmostEqual(self.bracket.Shape.Volume, 16000, places=6)
 
+    @staticmethod
+    def bomNames(bom):
+        names = []
+        row = 2
+        while bom.getContents(f"B{row}"):
+            # The BOM writes the names as text: "'Bracket"
+            names.append(bom.getContents(f"B{row}").lstrip("'"))
+            row += 1
+        return names
+
+    def testMergedPartLeftOutOfBomAndInsertList(self):
+        """The merged-part filters (design 2.6, session 4): a BOM of the document lists the
+        bracket, not the panel merged into it, and the Assembly insert panel's test
+        (UtilsAssembly.isMergedPart) says the same. Before the Merge, and after it is deleted,
+        both parts are listed."""
+        import AssemblyApp  # noqa: F401, registers Assembly::BomObject
+        import UtilsAssembly
+
+        self.model()
+        bom = self.doc.addObject("Assembly::BomObject", "Bom")
+        bom.columnsNames = ["Index", "Name"]
+        self.doc.recompute()
+        self.assertEqual(self.bomNames(bom), ["Bracket", "Panel"])
+        self.assertFalse(UtilsAssembly.isMergedPart(self.panel))
+
+        merge = self.merge()
+        bom.touch()
+        self.doc.recompute()
+        self.assertEqual(self.bomNames(bom), ["Bracket"])
+        self.assertTrue(UtilsAssembly.isMergedPart(self.panel))
+        self.assertFalse(UtilsAssembly.isMergedPart(self.bracket))
+
+        self.bracket.removeObject(merge)
+        self.doc.removeObject(merge.Name)
+        bom.touch()
+        self.doc.recompute()
+        self.assertEqual(self.bomNames(bom), ["Bracket", "Panel"])
+        self.assertFalse(UtilsAssembly.isMergedPart(self.panel))
+
     def testLockByAGroupEdit(self):
         """M-t1: a pad put after the merged feature by an edit of the panel's Group (and made
         its Tip) fails red with the lock's message; the bracket is unchanged."""

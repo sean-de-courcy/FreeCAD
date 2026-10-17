@@ -814,5 +814,93 @@ class TestMergeGui(ResultBoxGuiCase):
         self.assertAlmostEqual(self.body.Shape.Volume, 16000, places=3)
 
 
+class TestSplitGui(ResultBoxGuiCase):
+    """Split Part (ops#325, B+ Stage 1 session 4; notes/bplus-stage1-design.md 2.7): the part and a
+    plane picked, the command splits it and opens the original's Split, whose panel says which
+    side stays and offers a Flip; OK keeps both halves in one undo step, Cancel takes both away.
+    Designed geometry: S4's shroud, a box 20 x 10 x 8 hollowed by 18 x 8 x 7 from (1, 1, 1)
+    (592), and a datum plane at y = 3, normal +Y: front 364, back 228."""
+
+    def shroud(self):
+        body = self.doc.addObject("PartDesign::Body", "Shroud")
+        body.Label = "Shroud"
+        outer = body.newObject("PartDesign::AdditiveBox", "Outer")
+        outer.Length, outer.Width, outer.Height = 20, 10, 8
+        inner = body.newObject("PartDesign::SubtractiveBox", "Inner")
+        inner.Length, inner.Width, inner.Height = 18, 8, 7
+        inner.Placement = App.Placement(V(1, 1, 1), App.Rotation())
+        plane = body.newObject("PartDesign::Plane", "SplitPlane")
+        plane.Label = "SplitPlane"
+        plane.MapMode = "Deactivated"
+        plane.Placement = App.Placement(V(0, 3, 0), App.Rotation(V(0, 0, 1), V(0, 1, 0)))
+        self.doc.recompute()
+        self.assertAlmostEqual(body.Shape.Volume, 592, places=6)
+        self.body, self.plane = body, plane
+
+    def visible(self, cls, name):
+        QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+        found = [w for w in Gui.getMainWindow().findChildren(cls, name) if w.isVisible()]
+        return found[0] if found else None
+
+    def newParts(self):
+        return [o for o in self.doc.Objects if o.TypeId == "PartDesign::Body" and o != self.body]
+
+    def testSplitPartFlipAndOk(self):
+        """The shroud and the plane picked: the panel says Shroud keeps the front and Shroud001
+        gets the back (364 and 228); Flip swaps them; OK keeps them, and one undo takes the
+        split away."""
+        self.shroud()
+        self.runCommand("PartDesign_Split", self.body, self.plane)
+        split = self.body.Tip
+        self.assertEqual(split.TypeId, "PartDesign::Split")
+        [part] = self.newParts()
+        self.assertEqual(part.Label, "Shroud001")
+        sides = self.visible(QtWidgets.QLabel, "labelSides")
+        self.assertIsNotNone(sides, "no Split panel")
+        self.assertIn("Shroud keeps the front side", sides.text())
+        self.assertIn("Shroud001 gets the back side", sides.text())
+        self.assertAlmostEqual(self.body.Shape.Volume, 364, places=6)
+        self.assertAlmostEqual(part.Shape.Volume, 228, places=6)
+
+        self.visible(QtWidgets.QCheckBox, "checkBoxFlip").setChecked(True)
+        self.assertTrue(waitFor(lambda: abs(part.Shape.Volume - 364) < 1e-6), "no flip")
+        self.assertEqual(split.Side, "Back")
+        self.assertIn("Shroud keeps the back side", sides.text())
+        self.close(ok=True)
+        self.assertAlmostEqual(self.body.Shape.Volume, 228, places=6)
+        self.assertAlmostEqual(part.Shape.Volume, 364, places=6)
+
+        name = part.Name
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertIsNone(self.doc.getObject(name))
+        self.assertEqual(self.body.Tip.Name, "Inner")
+        self.assertAlmostEqual(self.body.Shape.Volume, 592, places=6)
+
+    def testCancelLeavesNoSplit(self):
+        """Cancel: neither the Split nor the new part stays, and the shroud is whole."""
+        self.shroud()
+        self.runCommand("PartDesign_Split", self.body, self.plane)
+        self.assertEqual(len(self.newParts()), 1)
+        self.close(ok=False)
+        self.assertEqual(self.newParts(), [])
+        self.assertFalse([o for o in self.doc.Objects if o.TypeId == "PartDesign::Split"])
+        self.assertAlmostEqual(self.body.Shape.Volume, 592, places=6)
+
+    def testNewHalfPanelFollows(self):
+        """The new half's Split, edited: its panel names the Split it follows, and its Flip is
+        the original's to make (disabled)."""
+        self.shroud()
+        self.runCommand("PartDesign_Split", self.body, self.plane)
+        self.close(ok=True)
+        [part] = self.newParts()
+        Gui.getDocument(self.doc.Name).setEdit(part.Tip.Name, 0)
+        self.waitForPanel()
+        self.assertFalse(self.visible(QtWidgets.QCheckBox, "checkBoxFlip").isEnabled())
+        sides = self.visible(QtWidgets.QLabel, "labelSides")
+        self.assertIn("Flip it in Shroud's Split", sides.text())
+        self.close(ok=True)
+
+
 if __name__ == "__main__":
     unittest.main()
