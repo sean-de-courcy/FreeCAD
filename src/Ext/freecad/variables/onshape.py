@@ -28,19 +28,25 @@ writes the FreeCAD expression and evaluates the expression itself, so the import
 check FreeCAD's value against the translator's. It needs no document.
 
 **It never guesses.** A form whose meaning in Onshape isn't pinned down, or that FreeCAD can't
-express, is refused with the reason (`Refused`). Until a reference studio built in Onshape
-settles them (decision 68, D3), these are refused: a fraction with a unit next to `*`, `/` or
-`^` (`#a*3/4 in`, `1/3/4 in`), a unary minus before `^` (`-2^2`), a unit before `^`
-(`2 mm^2`; `(2 mm)^2` is clear), `%` with units or negative operands, `round`, chained `^` and
-exponent notation.
+express, is refused with the reason (`Refused`). The reference studio the user built in Onshape
+(decision 68, D3; notes/variables-studio.md 5.1) settled these readings: `2 * 3/4 in` is 1.5 in,
+`-2^2` is (-2)^2, `2 mm^2` is 2 mm², `round` takes halves up, `-7 % 3` is 2, `#a/mm` is #a
+counted in mm, `2^3^2` is 2^9, `1.5e2` is 150. Their neighbours it doesn't settle stay refused: a
+fraction with a unit next to `/` or `^` or before `*` (`1/3/4 in`, `3/4 in * 2`), a minus before
+`^` on anything but a number (`-#a^2`) or after `^` or an operator (`2^-1^2`, `2 * -2^2`), a
+unit before `^` after a group or a call (`sqrt(4) mm^2`), `%` with units or by a negative
+number, and `floor`, `ceil`, `round` of a value with a unit (Onshape rejects `floor` of one).
 
 The writer's rules (section 2.4):
 - every unit is written as a factor: `10mm` becomes `(10 * 1 mm)`;
 - an integer fraction followed by a unit, as a term of its own (bounded by `+`, `-`, a
-  comparison, `?`, `:`, `,`, parentheses or the ends), is a fraction literal: `3/4 in` becomes
-  `(3 / 4 * 1 in)`; FreeCAD reads `3/4in` as `3/(4 in)`, an inverse length, without an error;
+  comparison, `?`, `:`, `,`, parentheses or the ends) or the last factor after `*`, is a
+  fraction literal: `3/4 in` becomes `(3 / 4 * 1 in)`; FreeCAD reads `3/4in` as `3/(4 in)`, an
+  inverse length, without an error;
 - a unit after `)` or a function call applies to that group: `sqrt(16) m` is `(sqrt(16) * 1 m)`;
 - unit words become FreeCAD's symbols, `PI` and `Pi` become `pi`;
+- `round(x)` is written `floor(x + 0.5)`, Onshape's reading (FreeCAD's `round` goes away from
+  zero); `%` stays `%`: FreeCAD's takes the divisor's sign, as Onshape's;
 - a `#name` becomes the text the caller gives for it (a sibling's bare name, another copy's
   `Copy.Name`, a document variable's path), never `#name`: FreeCAD's `#name` searches the whole
   document, a silent binding (section 2.6).
@@ -115,12 +121,12 @@ _units("rad", 1.0, ANGLE, "radian", "radians")
 
 CONSTANTS = {"pi": math.pi, "PI": math.pi, "Pi": math.pi}
 
-# Functions both languages have with the same meaning; the unit rules are in _call().
+# Functions both languages have, with the same meaning except round(): Onshape rounds halves
+# up (the reference studio, row 24), FreeCAD away from zero, so it is written floor(x + 0.5).
+# The unit rules are in _call().
 FUNCTIONS = {"abs", "acos", "asin", "atan", "atan2", "ceil", "cos", "cosh", "exp", "floor",
-             "log", "log10", "max", "min", "sin", "sinh", "sqrt", "tan", "tanh"}
+             "log", "log10", "max", "min", "round", "sin", "sinh", "sqrt", "tan", "tanh"}
 REFUSED_FUNCTIONS = {
-    "round": "round() is refused until the reference studio shows how Onshape rounds halves "
-             "(FreeCAD rounds them away from zero)",
     "asinh": "FreeCAD has no asinh()",
     "acosh": "FreeCAD has no acosh()",
     "atanh": "FreeCAD has no atanh()",
@@ -132,6 +138,10 @@ TYPES = {
     "ANGLE": ("App::PropertyAngle", ANGLE),
     "NUMBER": ("App::PropertyFloat", NONE),
 }
+
+# The highest power of a unit written after a number (`2 mm^3`); more is no length a
+# variable needs, and underflows in SI units.
+MAX_UNIT_POWER = 6
 
 UNDOCUMENTED = ("Onshape's reading of it isn't documented; refused until the reference studio "
                 "settles it")
@@ -148,7 +158,7 @@ class Token:
 
 _TOKEN = re.compile(r"""
     (?P<space>\s+)
-  | (?P<number>[0-9]+\.?[0-9]*|\.[0-9]+)
+  | (?P<number>(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][-+]?[0-9]+)?)
   | (?P<ref>\#[A-Za-z_][A-Za-z0-9_]*)
   | (?P<name>[A-Za-z_][A-Za-z0-9_]*)
   | (?P<op>==|!=|<=|>=|&&|\|\||[-+*/^%(),?:<>!])
@@ -182,10 +192,6 @@ def tokenize(text: str) -> List[Token]:
         if kind == "op" and value in ("&&", "||", "!"):
             word = {"&&": "and", "||": "or", "!": "not"}[value]
             raise Refused(f"FreeCAD has no {value} ({word}) operator")
-        if kind == "number":
-            rest = text[match.end():]
-            if re.match(r"[eE][-+]?[0-9]", rest):
-                raise Refused(f"exponent notation ({value}{rest[:3]}...): {UNDOCUMENTED}")
         tokens.append(Token(kind, value, pos))
     tokens.append(Token("end", "", len(text)))
     return tokens
@@ -211,6 +217,15 @@ class Qty:
 
 
 @dataclass(frozen=True)
+class UnitPower:
+    """A number followed by a unit to a whole power: `2 mm^2` is 2 mm²."""
+
+    num: Num
+    unit: str
+    power: Num
+
+
+@dataclass(frozen=True)
 class Frac:
     """An integer fraction followed by a unit, as a term of its own: `3/4 in`, `-3/4 in`."""
 
@@ -225,6 +240,13 @@ class WithUnit:
     """A unit after a group or a call: `(3/4) in`, `sqrt(16) m`."""
 
     node: object
+    unit: str
+
+
+@dataclass(frozen=True)
+class BareUnit:
+    """A unit name after `/`, standing for one of it: `#a/mm` is #a counted in millimetres."""
+
     unit: str
 
 
@@ -345,15 +367,44 @@ class _Parser:
         ops = []
         while self.at_op("*", "/", "%"):
             ops.append(self.take().text)
-            factors.append(self.unary())
+            token = self.peek()
+            if ops[-1] == "/" and token.kind == "name" and token.text in UNITS:
+                factors.append(self.bare_unit())
+            else:
+                factors.append(self.unary())
         return _fold_term(factors, ops)
+
+    def bare_unit(self):
+        """`#a/mm`: Onshape's floor(#Len_frac/mm) is 69 for 2.75 in (the reference studio,
+        row 26). Only after `/`, as a factor of its own."""
+        unit = self.take().text
+        token = self.peek()
+        if (token.kind == "op" and token.text in ("^", "(")) or token.kind in ("name", "number"):
+            raise Refused(f"a unit name after / followed by {token.text!r}: {UNDOCUMENTED}")
+        return BareUnit(unit)
 
     def unary(self):
         if self.at_op("-", "+"):
+            # a sign where an expression starts: the whole text, after `(`, `,`, `?` or `:`
+            previous = self.tokens[self.index - 1] if self.index else None
+            starts = previous is None or previous.text in ("(", ",", "?", ":")
             op = self.take().text
             operand = self.unary()
+            if (isinstance(operand, Unary) and isinstance(operand.node, Bin)
+                    and operand.node.op == "^"):
+                raise Refused(f"two signs before ^ (-+2^2): {UNDOCUMENTED}")
             if op == "-" and isinstance(operand, Bin) and operand.op == "^":
-                raise Refused(f"a minus before ^ (-2^2): {UNDOCUMENTED}")
+                if not isinstance(operand.left, Num):
+                    # -(2^2) or (-#a)^2: the studio only settles a number
+                    raise Refused(f"a minus before ^ on something other than a number (-#a^2): "
+                                  f"{UNDOCUMENTED}")
+                if not starts:
+                    # the studio shows -2^2 as a whole expression only: after ^ or an operator
+                    # (2^-1^2, 2 * -2^2) the minus may bind otherwise
+                    raise Refused(f"a minus on a number before ^ after an operator (2^-1^2, "
+                                  f"2 * -2^2): {UNDOCUMENTED}")
+                # Onshape's -2^2 is (-2)^2 = 4 (the reference studio, row 22)
+                return Bin("^", Unary(op, operand.left), operand.right)
             return Unary(op, operand)
         return self.power()
 
@@ -361,16 +412,31 @@ class _Parser:
         base = self.postfix()
         if not self.at_op("^"):
             return base
-        if isinstance(base, (Qty, WithUnit)):
-            # `2 mm^2` is (2 mm)^2 or 2 (mm^2), and Onshape's docs don't say which
+        if isinstance(base, Qty):
+            # ^ binds to the unit: Onshape's 2 mm^2 / (1 mm) is 2 mm (the reference studio,
+            # row 23)
+            self.take()
+            power = self.peek()
+            if power.kind != "number" or not power.text.isdigit():
+                raise Refused(f"a unit to a power other than a whole number ({base.unit}^"
+                              f"{power.text}): {UNDOCUMENTED}")
+            if int(power.text) > MAX_UNIT_POWER:
+                # 2 mm^400 is 0 in SI units, and FreeCAD's unit exponents are small
+                raise Refused(f"a unit to a power above {MAX_UNIT_POWER} ({base.unit}^"
+                              f"{power.text})")
+            self.take()
+            if self.at_op("^"):
+                raise Refused(f"chained ^ after a unit ({base.unit}^{power.text}^): "
+                              f"{UNDOCUMENTED}")
+            return UnitPower(base.num, base.unit, Num(power.text))
+        if isinstance(base, WithUnit):
+            # the studio settles a number before the unit, not a group or a call
             unit = base.unit
-            raise Refused(f"a unit before ^ ({unit}^): {UNDOCUMENTED}; write (2 {unit})^2 for "
-                          "a squared value")
+            raise Refused(f"a unit before ^ after a group or a call ({unit}^): {UNDOCUMENTED}; "
+                          f"write (sqrt(4) * 1 {unit})^2 or sqrt(4) * (1 {unit})^2")
         self.take()
-        exponent = self.unary()
-        if isinstance(exponent, Bin) and exponent.op == "^":
-            raise Refused(f"chained ^ (a^b^c): {UNDOCUMENTED}")
-        return Bin("^", base, exponent)
+        # chained ^ goes right to left: Onshape's 2^3^2 is 512 (the reference studio, row 27)
+        return Bin("^", base, self.unary())
 
     def postfix(self):
         node = self.primary()
@@ -450,19 +516,23 @@ def _number_literal(node) -> Optional[Tuple[bool, Num]]:
 
 
 def _fold_term(factors: list, ops: list):
-    """A product of factors, with the fraction-literal rule (section 2.4)."""
-    if len(factors) == 2 and ops[0] == "/" and isinstance(factors[1], Qty):
-        literal = _number_literal(factors[0])
+    """A product of factors, with the fraction-literal rule (section 2.4): a fraction with a unit
+    is one value standing alone or as the last factor after `*`, as Onshape's 2 * 3/4 in is
+    38.1 mm (the reference studio, row 21)."""
+    if (ops and ops[-1] == "/" and isinstance(factors[-1], Qty)
+            and (len(ops) == 1 or ops[-2] == "*")):
+        literal = _number_literal(factors[-2])
         if literal is not None:
             negative, num = literal
-            den = factors[1].num
-            if num.is_int and den.is_int:
-                return Frac(negative, num, den, factors[1].unit)
-            raise Refused(f"a fraction of decimals with a unit ({num.text}/{den.text} "
-                          f"{factors[1].unit}): {UNDOCUMENTED}")
+            den = factors[-1].num
+            if not (num.is_int and den.is_int):
+                raise Refused(f"a fraction of decimals with a unit ({num.text}/{den.text} "
+                              f"{factors[-1].unit}): {UNDOCUMENTED}")
+            factors = factors[:-2] + [Frac(negative, num, den, factors[-1].unit)]
+            ops = ops[:-1]
     for i, op in enumerate(ops, start=1):
         if (op == "/" and _number_literal(factors[i - 1]) is not None
-                and isinstance(factors[i], Qty)):
+                and isinstance(factors[i], (Qty, UnitPower))):
             raise Refused(f"a fraction with a unit next to *, / or ^: {UNDOCUMENTED}")
     node = factors[0]
     for op, factor in zip(ops, factors[1:]):
@@ -506,9 +576,7 @@ def _number_text(num: Num) -> str:
     text = num.text
     if text.startswith("."):
         text = "0" + text
-    if text.endswith("."):
-        text += "0"
-    return text
+    return re.sub(r"\.(?![0-9])", ".0", text)  # `5.` and `5.e2`
 
 
 def write(node, resolve_text: Callable[[str], str], top: bool = True) -> str:
@@ -521,12 +589,16 @@ def write(node, resolve_text: Callable[[str], str], top: bool = True) -> str:
         return _number_text(node)
     if isinstance(node, Qty):
         return f"({_number_text(node.num)} * 1 {UNITS[node.unit][2]})"
+    if isinstance(node, UnitPower):
+        return f"({_number_text(node.num)} * ((1 {UNITS[node.unit][2]}) ^ {node.power.text}))"
     if isinstance(node, Frac):
         sign = "-" if node.negative else ""
         return (f"({sign}{_number_text(node.num)} / {_number_text(node.den)} "
                 f"* 1 {UNITS[node.unit][2]})")
     if isinstance(node, WithUnit):
         return f"({w(node.node)} * 1 {UNITS[node.unit][2]})"
+    if isinstance(node, BareUnit):
+        return f"(1 {UNITS[node.unit][2]})"
     if isinstance(node, Ref):
         return resolve_text(node.name)
     if isinstance(node, Const):
@@ -542,6 +614,8 @@ def write(node, resolve_text: Callable[[str], str], top: bool = True) -> str:
         text = f"{w(node.left)} {node.op} {w(node.right)}"
         return text if top else f"({text})"
     if isinstance(node, Call):
+        if node.name == "round":
+            return f"floor({w(node.args[0])} + 0.5)"
         return f"{node.name}({', '.join(w(arg) for arg in node.args)})"
     if isinstance(node, Cond):
         text = f"{w(node.cond)} ? {w(node.then)} : {w(node.other)}"
@@ -583,6 +657,10 @@ def _evaluate(node, resolve_value: Callable[[str], Quantity]) -> Value:
     if isinstance(node, Qty):
         factor, dims, _symbol = UNITS[node.unit]
         return Quantity(float(node.num.text) * factor, dims)
+    if isinstance(node, UnitPower):
+        factor, dims, _symbol = UNITS[node.unit]
+        n = int(node.power.text)
+        return Quantity(float(node.num.text) * factor ** n, (dims[0] * n, dims[1] * n))
     if isinstance(node, Frac):
         factor, dims, _symbol = UNITS[node.unit]
         if int(node.den.text) == 0:
@@ -595,6 +673,9 @@ def _evaluate(node, resolve_value: Callable[[str], Quantity]) -> Value:
             raise Refused(f"a unit ({node.unit}) after a value that has one already")
         factor, dims, _symbol = UNITS[node.unit]
         return Quantity(inner.value * factor, dims)
+    if isinstance(node, BareUnit):
+        factor, dims, _symbol = UNITS[node.unit]
+        return Quantity(factor, dims)
     if isinstance(node, Ref):
         return resolve_value(node.name)
     if isinstance(node, Const):
@@ -653,9 +734,11 @@ def _binary(op: str, left: Value, right: Value) -> Value:
     if op == "%":
         if a.dims != NONE or b.dims != NONE:
             raise Refused(f"% with units: {UNDOCUMENTED}")
-        if a.value < 0 or b.value <= 0:
-            raise Refused(f"% of a negative number: {UNDOCUMENTED}")
-        return Quantity(math.fmod(a.value, b.value))
+        if b.value <= 0:
+            raise Refused(f"% by a negative number or zero: {UNDOCUMENTED}")
+        # the sign of the divisor, in Onshape (the reference studio, row 25: -7 % 3 is 2), in
+        # FreeCAD's % (Python's remainder) and here alike
+        return Quantity(a.value % b.value)
     if op == "^":
         if b.dims != NONE:
             raise Refused("an exponent can't have a unit")
@@ -708,12 +791,16 @@ def _call(name: str, args: List[Value]) -> Quantity:
         if name in ("log", "log10") and x.value <= 0:
             raise Refused(f"{name}({x.value:g}) is undefined")
         return Quantity(getattr(math, name)(x.value))
-    if name in ("floor", "ceil"):
+    if name in ("floor", "ceil", "round"):
         count(1)
         x = values[0]
         if x.dims != NONE:
-            raise Refused(f"{name}() of a value with a unit depends on the unit it is counted in: "
-                          f"{UNDOCUMENTED}")
+            # the reference studio: Onshape takes only a number in floor() (row 26)
+            why = "Onshape rejects it" if name == "floor" else UNDOCUMENTED
+            raise Refused(f"{name}() of a value with a unit: {why}; count it in a unit first, as "
+                          f"in {name}(#a / mm) * 1 mm")
+        if name == "round":
+            return Quantity(float(math.floor(x.value + 0.5)))  # halves up, as written
         return Quantity(float(getattr(math, name)(x.value)))
     if name == "sqrt":
         count(1)
@@ -789,7 +876,7 @@ def translate(expression: str, onshape_type: str,
 def _has_units(node, resolve_value: Callable[[str], Quantity]) -> bool:
     """Whether a unit takes part anywhere: a literal one, a reference to a value with one, or an
     inverse trig function (an angle). Only an expression without any takes the default unit."""
-    if isinstance(node, (Qty, Frac, WithUnit)):
+    if isinstance(node, (Qty, UnitPower, Frac, WithUnit, BareUnit)):
         return True
     if isinstance(node, Ref):
         return resolve_value(node.name).dims != NONE

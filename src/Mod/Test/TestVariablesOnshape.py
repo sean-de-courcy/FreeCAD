@@ -23,12 +23,17 @@
 
 notes/variables-studio.md section 6, "Translator". Every variable and export here is made up, in
 the structure of an Onshape variable studio export (section 0). Expected values are worked out by
-hand from the made-up inputs (1 in = 25.4 mm); the last class checks that FreeCAD computes the
-written text to the translator's own value.
+hand from the made-up inputs (1 in = 25.4 mm); TestFreeCADAgrees checks that FreeCAD computes the
+written text to the translator's own value. The reference studio (TestReferenceStudio and
+TestReferenceStudioImport) is the oracle from Onshape itself: made-up variables the user built
+in Onshape for this test, with the values Onshape shows (decision 68, D3).
 """
 
 import json
 import math
+import os
+import shutil
+import tempfile
 import unittest
 
 from freecad.variables import onshape
@@ -81,11 +86,52 @@ ACCEPTED = [
     ("sqrt(#Width * #Width)", "LENGTH", 10, None),
     ("(2 mm)^2 / 1 mm", "LENGTH", 4, None),
     ("2^3 * 1 mm", "LENGTH", 8, None),
+    # right to left, as Onshape (the reference studio, row 27)
+    ("2^3^2", "NUMBER", 512, "2 ^ (3 ^ 2)"),
+    # a minus on a number goes first, as Onshape (the reference studio, row 22)
+    ("-2^2", "NUMBER", 4, "(-2) ^ 2"),
+    ("3 - 2^2", "NUMBER", -1, None),
+    ("-2^3 * 1 mm", "LENGTH", -8, None),
+    ("(-2^2) * 1 mm", "LENGTH", 4, None),
+    ("max(1, -2^2)", "NUMBER", 4, None),
+    # ^ binds to the unit, as Onshape (the reference studio, row 23)
+    ("2 mm^2 / (1 mm)", "LENGTH", 2, "(2 * ((1 mm) ^ 2)) / (1 * 1 mm)"),
+    ("sqrt(3 in^2 + 1 in^2)", "LENGTH", 50.8, None),
+    ("-2 mm^2 / 1 mm", "LENGTH", -2, None),
+    ("2 mm^6 / (1 mm)^5", "LENGTH", 2, None),
+    # halves up, as Onshape (the reference studio, row 24); FreeCAD's round() goes away from 0
+    ("round(2.5) * 10 + round(-2.5)", "NUMBER", 28,
+     "(floor(2.5 + 0.5) * 10) + floor((-2.5) + 0.5)"),
+    ("round(-2.6)", "NUMBER", -3, None),
+    ("round(#Count / 2) * 1 mm", "LENGTH", 2, None),
+    # the sign of the divisor, as Onshape (the reference studio, row 25)
+    ("-7 % 3", "NUMBER", 2, "(-7) % 3"),
+    ("#Count % 2", "NUMBER", 1, "Count % 2"),
+    ("(0 - #Count) % 2", "NUMBER", 1, None),
+    ("7.5 % 2", "NUMBER", 1.5, "7.5 % 2"),
+    ("-7.5 % 2", "NUMBER", 0.5, None),
+    # not a whole number: Python's remainder, as FreeCAD's % (3 % 0.1 is 0.0999..., not 0)
+    ("#Count % 0.1", "NUMBER", 3 % 0.1, "Count % 0.1"),
+    ("(#Count * 0 + 1) % 0.2", "NUMBER", 1 % 0.2, None),
+    # a unit name after / is one of it, as Onshape (the reference studio, row 26)
+    ("(floor(#Rail/mm)) mm", "LENGTH", 101, "(floor((Rail / (1 mm))) * 1 mm)"),
+    ("#Rail / in", "NUMBER", 4, "Rail / (1 in)"),
+    ("#Rail / inches * 2", "NUMBER", 8, None),
+    ("90 deg / rad", "NUMBER", math.pi / 2, None),
+    # a fraction with a unit after *, as Onshape (the reference studio, row 21)
+    ("2 * 3/4 in", "LENGTH", 38.1, "2 * (3 / 4 * 1 in)"),
+    ("#Count*3/4 in", "LENGTH", 57.15, "Count * (3 / 4 * 1 in)"),
+    ("2 / 4 * -1/2 in", "LENGTH", -6.35, "(2 / 4) * (-1 / 2 * 1 in)"),
     ("7 % 4", "NUMBER", 3, None),
     ("floor(2.5) * 1 mm", "LENGTH", 2, None),
     (".5 mm", "LENGTH", 0.5, "(0.5 * 1 mm)"),
     ("#Count * 2", "NUMBER", 6, "Count * 2"),
     ("1.5 rad", "ANGLE", math.degrees(1.5), None),
+    # exponent notation: Onshape's 1.5e2 is 150 (the reference studio, row 28)
+    ("1.5e2", "NUMBER", 150, "1.5e2"),
+    ("1e3 * 1 mm", "LENGTH", 1000, "1e3 * (1 * 1 mm)"),
+    ("2.5E-1 in", "LENGTH", 6.35, "(2.5E-1 * 1 in)"),
+    ("5.e1 mm", "LENGTH", 50, "(5.0e1 * 1 mm)"),
 ]
 
 # (Onshape text, type, a fragment of the reason)
@@ -95,7 +141,8 @@ REFUSED = [
     ("!x", "NUMBER", "no ! (not)"),
     ("[1,2][0]", "NUMBER", "arrays"),
     ('"text"', "NUMBER", "strings"),
-    ("round(2.5)", "NUMBER", "round()"),
+    ("round(2.5 mm)", "LENGTH", "round() of a value with a unit"),
+    ("round(2.5, 1)", "NUMBER", "round() takes 1 argument, not 2"),
     ("asinh(1)", "NUMBER", "asinh"),
     ("5 furlong", "LENGTH", "unknown unit 'furlong'"),
     ("foo + 1", "NUMBER", "unknown name 'foo'"),
@@ -103,12 +150,21 @@ REFUSED = [
     ("", "LENGTH", "empty"),
     ("5", "LENGTH", "default unit"),
     ("#Count * 2", "LENGTH", "default unit"),
-    ("#Width*3/4 in", "LENGTH", "next to *, / or ^"),
+    ("#Width*3/4 in", "LENGTH", "length^2"),
+    ("6 / 3/4 in", "LENGTH", "next to *, / or ^"),
+    ("2 * 1.5/2 in", "LENGTH", "fraction of decimals"),
     ("1/3/4 in", "LENGTH", "next to *, / or ^"),
     ("3/4 in * 2", "LENGTH", "next to *, / or ^"),
     ("1.5/2 in", "LENGTH", "fraction of decimals"),
-    ("-2^2", "NUMBER", "minus before ^"),
-    ("2^3^2", "NUMBER", "chained ^"),
+    ("-#Count^2", "NUMBER", "minus before ^"),
+    ("-(2)^2", "NUMBER", "minus before ^"),
+    # the studio shows -2^2 only as a whole expression (review 320, finding 2)
+    ("2^-1^2 * 1 mm", "LENGTH", "a minus on a number before ^ after an operator"),
+    ("2^-3^2", "NUMBER", "a minus on a number before ^ after an operator"),
+    ("2 * -2^2", "NUMBER", "a minus on a number before ^ after an operator"),
+    ("1 - -2^2", "NUMBER", "a minus on a number before ^ after an operator"),
+    ("-+2^2", "NUMBER", "two signs before ^"),
+    ("+-2^2", "NUMBER", "a minus on a number before ^ after an operator"),
     ("0^-1", "NUMBER", "can't be computed"),
     ("(0 mm)^-1", "NUMBER", "can't be computed"),
     ("10^400", "NUMBER", "can't be computed"),
@@ -121,15 +177,25 @@ REFUSED = [
     ("#Count != 3 ? 1 mm : 2 mm", "LENGTH", "equal within rounding"),
     ("٣ mm", "LENGTH", "unexpected character"),  # an Arabic-Indic 3
     ("1٣ mm", "LENGTH", "unexpected character"),
-    ("2 mm^2 / 1 mm", "LENGTH", "a unit before ^"),
-    ("sqrt(4) mm^2 / 1 mm", "LENGTH", "a unit before ^"),
+    ("sqrt(4) mm^2 / 1 mm", "LENGTH", "a unit before ^ after a group or a call"),
+    ("2 mm^-1", "NUMBER", "a unit to a power other than a whole number"),
+    ("2 mm^1.5", "NUMBER", "a unit to a power other than a whole number"),
+    ("2 mm^2^2", "NUMBER", "chained ^ after a unit"),
+    ("2 mm^400 / (1 mm)^399", "LENGTH", "a unit to a power above 6"),
+    ("2 mm^7 / (1 mm)^6", "LENGTH", "a unit to a power above 6"),
+    ("1/2 mm^2 / 1 mm", "LENGTH", "next to *, / or ^"),
+    ("2 mm^2", "LENGTH", "length^2"),
     ("#Width/2 in", "LENGTH", "units cancel"),
     ("3in*3in", "LENGTH", "length^2"),
     ("10 mm", "ANGLE", "is a length, but the variable is an angle"),
     ("7 mm % 4 mm", "LENGTH", "% with units"),
-    ("-7 % 4", "NUMBER", "% of a negative"),
-    ("floor(2.5 mm)", "LENGTH", "floor()"),
-    ("1e3 * 1 mm", "LENGTH", "exponent notation"),
+    ("7 % -4", "NUMBER", "% by a negative number or zero"),
+    ("7 % 0", "NUMBER", "% by a negative number or zero"),
+    ("floor(2.5 mm)", "LENGTH", "floor() of a value with a unit: Onshape rejects it"),
+    ("ceil(2.5 mm)", "LENGTH", "ceil() of a value with a unit"),
+    ("#Width / mm^2", "NUMBER", "a unit name after / followed by '^'"),
+    ("#Width / mm mm", "NUMBER", "a unit name after / followed by 'mm'"),
+    ("#Width * mm", "NUMBER", "needs a number"),
     ("#Width in", "LENGTH", "a unit after #Width"),
     ("10 mm mm", "LENGTH", "two units"),
     ("mm", "LENGTH", "needs a number"),
@@ -356,6 +422,84 @@ class TestExport(unittest.TestCase):
         self.assertIsNotNone(result.result("C").translation)
 
 
+# The reference studio the user built in Onshape for this test (decision 68, D3; made-up values,
+# notes/variables-studio.md 5.1): each variable as the studio's export has it, in its order, and
+# the value Onshape shows for it. Rows 1-19 are forms the translator accepted before; rows 20-28
+# were refused until this studio settled them. The document's default units were mm and deg.
+REFERENCE_STUDIO = [
+    # (type, name, expression as exported, Onshape's value as shown)
+    ("LENGTH", "Len_mm", "10mm", "10 mm"),
+    ("LENGTH", "Len_frac", "2 in + 3/4 in", "69.85 mm"),
+    ("LENGTH", "Len_ft", "1ft + 2in", "355.6 mm"),
+    ("LENGTH", "Len_mixed", "1 m - 25 cm + 3in", "826.2 mm"),
+    ("LENGTH", "Len_words", "(3/4) inches + 1 foot", "323.85 mm"),
+    ("LENGTH", "Chain1", "#Len_mm * 2 + 1 cm", "30 mm"),
+    ("LENGTH", "Chain2", "#Chain1 + #Len_mm", "40 mm"),
+    ("NUMBER", "Chain3", "#Chain2 / #Len_mm", "4"),
+    ("NUMBER", "Prec", "2 + 3 * 2^2 - 8 / 4 / 2", "13"),
+    ("LENGTH", "Pow_len", "sqrt((3 mm)^2 + (4 mm)^2)", "5 mm"),
+    ("LENGTH", "Sqrt_area", "sqrt(#Len_mm * #Chain1)", "17.321 mm"),
+    ("ANGLE", "Ang_mixed", "30 deg + 0.5 rad", "58.648 deg"),
+    ("NUMBER", "Trig", "sin(30 deg) + cos(#Ang_mixed - 0.5 rad + 30 deg) + tan(45 deg)", "2"),
+    ("ANGLE", "Inv_trig", "atan2(1 in, 25.4 mm) + asin(0.5)", "75 deg"),
+    ("NUMBER", "Floor_ceil", "floor(7.6) + ceil(-2.1)", "5"),
+    ("LENGTH", "Floor_qty", "floor(#Len_frac / (1 in)) * 1 in + ceil(#Len_ft / (1 ft)) * 1 ft",
+     "660.4 mm"),
+    ("LENGTH", "Min_max", "min(#Len_ft, 1 ft) - max(#Len_mm, max(1/2in, 12.5mm))", "292.1 mm"),
+    ("LENGTH", "Cond", "#Chain2 > 4 in ? 1 in : 2 in", "50.8 mm"),
+    ("NUMBER", "Mod", "17 % 5", "2"),
+    ("LENGTH", "Unitless_len", "25 mm", "25 mm"),
+    ("LENGTH", "R_frac_prod", "2 * 3/4 in", "38.1 mm"),
+    ("NUMBER", "R_neg_pow", "-2^2", "4"),
+    ("LENGTH", "R_unit_pow", "2 mm^2 / (1 mm)", "2 mm"),
+    ("NUMBER", "R_round", "round(2.5) * 10 + round(-2.5)", "28"),
+    ("NUMBER", "R_mod_neg", "-7 % 3", "2"),
+    ("LENGTH", "R_floor_qty", "(floor(#Len_frac/mm)) mm", "69 mm"),
+    ("NUMBER", "R_chain_pow", "2^3^2", "512"),
+    ("NUMBER", "R_exp", "1.5e2", "150"),
+]
+REFERENCE_UNITS = {"LENGTH": "mm", "ANGLE": "deg"}
+# Onshape shows at most three decimals and drops trailing zeros (17.321 mm, 58.648 deg), so a
+# shown value is the true one to within half of 0.001.
+SHOWN_TOLERANCE = 0.0005
+
+
+def shown_value(shown):
+    """(number, unit or None) of a value as Onshape shows it: "17.321 mm", "4"."""
+    number, _, unit = shown.partition(" ")
+    return float(number), unit or None
+
+
+class TestReferenceStudio(unittest.TestCase):
+    """The translator against the values Onshape shows for the reference studio (the oracle,
+    decision 68 D3 A). A disagreement is a translator bug."""
+
+    def assertShown(self, value, shown, what):
+        number, unit = shown_value(shown)
+        expected_dims = {"mm": LENGTH, "deg": ANGLE, None: NONE}[unit]
+        self.assertEqual(value.dims, expected_dims, f"{what}: {onshape.describe_dims(value.dims)}")
+        actual = value.to(unit) if unit else value.value
+        self.assertLessEqual(abs(actual - number), SHOWN_TOLERANCE,
+                             f"{what}: Onshape shows {shown}, the translator {actual}")
+
+    def test_every_variable_has_onshape_s_value(self):
+        entries = onshape.parse_export(export([v[:3] for v in REFERENCE_STUDIO]))
+        result = onshape.translate_export(entries, default_units=REFERENCE_UNITS)
+        self.assertEqual(result.unresolved, {})
+        for kind, name, _expression, shown in REFERENCE_STUDIO:
+            with self.subTest(name=name):
+                variable = result.result(name)
+                self.assertIsNone(variable.refusal)
+                self.assertEqual(variable.translation.property_type, onshape.TYPES[kind][0])
+                self.assertShown(variable.translation.value, shown, name)
+
+    def test_the_forms_onshape_rejects_stay_refused(self):
+        # the user, building the studio: Onshape takes only a number in floor() (row 26)
+        with self.assertRaises(Refused) as cm:
+            translate("floor(#Rail)", "LENGTH")
+        self.assertIn("Onshape rejects it", str(cm.exception))
+
+
 try:
     import FreeCAD
 except ImportError:  # the translator's own tests run without FreeCAD too
@@ -418,6 +562,39 @@ class TestFreeCADAgrees(unittest.TestCase):
                 self.varSet.setExpression(name, result.text)
                 self.doc.recompute()
                 self.assertNotIn("Invalid", self.varSet.State, result.text)
+
+
+@unittest.skipIf(FreeCAD is None, "needs FreeCAD")
+class TestReferenceStudioImport(unittest.TestCase):
+    """The reference studio imported as a copy (PR E1): the import's own check (section 2.5)
+    computes every written text in FreeCAD against the translator, and each variable keeps the
+    value Onshape shows."""
+
+    def setUp(self):
+        self.folder = tempfile.mkdtemp(prefix="TestVariablesOnshape")
+        self.doc = FreeCAD.newDocument("TestReferenceStudio")
+
+    def tearDown(self):
+        FreeCAD.closeDocument(self.doc.Name)
+        shutil.rmtree(self.folder, ignore_errors=True)
+
+    def test_the_copy_holds_onshape_s_values(self):
+        from freecad.variables import copies
+
+        path = os.path.join(self.folder, "Onshape Reference Studio.json")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(export([v[:3] for v in REFERENCE_STUDIO]))
+        copy = copies.import_studios(self.doc, [path], default_units=REFERENCE_UNITS).copies[0]
+        units = {"mm": FreeCAD.Units.Length, "deg": FreeCAD.Units.Angle}
+        for _kind, name, _expression, shown in REFERENCE_STUDIO:
+            with self.subTest(name=name):
+                value = getattr(copy, name)
+                number, unit = shown_value(shown)
+                if unit:
+                    self.assertEqual(value.Unit, units[unit])
+                    value = value.Value  # mm or deg, FreeCAD's internal units
+                self.assertLessEqual(abs(value - number), SHOWN_TOLERANCE,
+                                     f"{name}: Onshape shows {shown}, the copy {value}")
 
 
 if __name__ == "__main__":
