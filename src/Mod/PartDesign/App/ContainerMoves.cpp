@@ -54,9 +54,16 @@ void collectMembers(App::DocumentObject* container, std::set<App::DocumentObject
 void containerRecomputed(const App::Document* doc, const App::DocumentObject& recomputed)
 {
     if (!recomputed.hasExtension(App::GeoFeatureGroupExtension::getExtensionClassTypeId())
-        || !recomputed.getNameInDocument() || doc->testStatus(App::Document::Restoring)
-        || doc->isPerformingTransaction()) {
+        || !recomputed.getNameInDocument()) {
         return;
+    }
+    // Neither the recomputing document nor the container's own restoring or undoing
+    for (auto document : {doc, static_cast<const App::Document*>(recomputed.getDocument())}) {
+        if (document
+            && (document->testStatus(App::Document::Restoring)
+                || document->isPerformingTransaction())) {
+            return;
+        }
     }
     auto placement
         = freecad_cast<App::PropertyPlacement*>(recomputed.getPropertyByName("Placement"));
