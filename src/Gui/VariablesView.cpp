@@ -511,12 +511,8 @@ void VariablesModel::addHolderRows(
 Qt::ItemFlags VariablesModel::flags(const QModelIndex& index) const
 {
     Qt::ItemFlags result = QStandardItemModel::flags(index) & ~Qt::ItemIsEditable;
-    if (kind(index) == VarSetKind) {
-        // ops#317: a copy's variables are read-only while it is attached (the ReadOnly bit)
-        App::Property* prop = property(index);
-        if (prop && prop->testStatus(App::Property::ReadOnly)) {
-            return result;
-        }
+    if (isReadOnly(index)) {
+        return result;
     }
     if (kind(index) != HeaderKind
         && (index.column() == NameColumn || index.column() == ExpressionColumn)) {
@@ -555,6 +551,15 @@ App::Property* VariablesModel::property(const QModelIndex& index)
         return nullptr;
     }
     return obj->getPropertyByName(index.data(VariableRole).toString().toStdString().c_str());
+}
+
+bool VariablesModel::isReadOnly(const QModelIndex& index)
+{
+    if (kind(index) != VarSetKind) {
+        return false;
+    }
+    App::Property* prop = property(index);
+    return prop && prop->testStatus(App::Property::ReadOnly);
 }
 
 bool VariablesModel::setData(const QModelIndex& index, const QVariant& value, int role)
@@ -1251,10 +1256,13 @@ void VariablesView::updateActions()
         && VariablesModel::kind(current) != VariablesModel::HeaderKind;
     addAction->setEnabled(currentDocument() != nullptr);
     importAction->setEnabled(currentDocument() != nullptr);
-    deleteAction->setEnabled(variable);
+    // A copy's variable can't be deleted or described while the copy is attached (ops#317).
+    bool readOnly = VariablesModel::isReadOnly(current);
+    deleteAction->setEnabled(variable && !readOnly);
     usesAction->setEnabled(variable);
     describeAction->setEnabled(
         current.isValid() && VariablesModel::kind(current) == VariablesModel::VarSetKind
+        && !readOnly
     );
 }
 
@@ -1706,7 +1714,8 @@ void VariablesView::editDescription()
 {
     QModelIndex current = tree->currentIndex();
     App::DocumentObject* obj = VariablesModel::holder(current);
-    if (!obj || VariablesModel::kind(current) != VariablesModel::VarSetKind) {
+    if (!obj || VariablesModel::kind(current) != VariablesModel::VarSetKind
+        || VariablesModel::isReadOnly(current)) {
         return;
     }
     // Everything is read from the row before the dialog: the panel may rebuild while it is open,
@@ -1768,7 +1777,8 @@ void VariablesView::deleteVariable()
 {
     QModelIndex current = tree->currentIndex();
     App::DocumentObject* obj = VariablesModel::holder(current);
-    if (!obj || VariablesModel::kind(current) == VariablesModel::HeaderKind) {
+    if (!obj || VariablesModel::kind(current) == VariablesModel::HeaderKind
+        || VariablesModel::isReadOnly(current)) {
         return;
     }
     // Everything is read from the row before the message box: the panel may rebuild while it is

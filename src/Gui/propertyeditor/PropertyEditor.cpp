@@ -41,6 +41,7 @@
 #include <App/Document.h>
 #include <App/DocumentObject.h>  // FreeCAD-CH (ops#146)
 #include <App/Expression.h>      // FreeCAD-CH (ops#146)
+#include <App/VarSetCopy.h>      // FreeCAD-CH (ops#317)
 #include <Base/Console.h>
 #include <Base/Tools.h>
 #include <Gui/Command.h>
@@ -62,6 +63,15 @@ FC_LOG_LEVEL_INIT("PropertyView", true, true)
 
 namespace
 {
+// FreeCAD-CH (ops#317): a variable of a copy (App::VarSetCopy) is read-only while the copy is
+// attached (the ReadOnly bit). Renaming, deleting, moving it or changing its tooltip or group
+// would break what the copy records of its source (NameMap, SourceExpressions).
+bool isCopiedVariable(const App::Property* prop)
+{
+    return prop->testStatus(App::Property::ReadOnly)
+        && freecad_cast<App::VarSetCopy*>(prop->getContainer()) != nullptr;
+}
+
 // FreeCAD-CH (ops#231): the property editors' "Edit" bookings, which openPropertyTransaction()
 // doesn't join (a dialog of its own, e.g. Add Property from the Variables panel, can't know them).
 // An editor erases its ID when it closes its booking; an ID no document has booked any more (its
@@ -258,7 +268,7 @@ bool PropertyEditor::removeSelectedDynamicProperties()
 
     bool canRemove = std::ranges::all_of(props, [](auto prop) {
         return prop->testStatus(App::Property::PropDynamic)
-            && !prop->testStatus(App::Property::LockDynamic);
+            && !prop->testStatus(App::Property::LockDynamic) && !isCopiedVariable(prop);
     });
     if (!canRemove) {
         return false;
@@ -1330,7 +1340,7 @@ void PropertyEditor::contextMenuEvent(QContextMenuEvent*)
 
     // rename property group
     if (!props.empty() && std::all_of(props.begin(), props.end(), [](auto prop) {
-            return prop->testStatus(App::Property::PropDynamic);
+            return prop->testStatus(App::Property::PropDynamic) && !isCopiedVariable(prop);
         })) {
         QAction* renameGroupAction = menu.addAction(tr("Rename Property Group"));
         renameGroupAction->setData(QVariant(MA_EditPropGroup));
@@ -1351,7 +1361,7 @@ void PropertyEditor::contextMenuEvent(QContextMenuEvent*)
     if (props.size() == 1) {
         auto prop = *props.begin();
         if (prop->testStatus(App::Property::PropDynamic)
-            && !prop->testStatus(App::Property::LockDynamic)) {
+            && !prop->testStatus(App::Property::LockDynamic) && !isCopiedVariable(prop)) {
             menu.addAction(tr("Rename Property"))->setData(QVariant(MA_RenameProp));
             menu.addAction(tr("Edit Property Tooltip"))->setData(QVariant(MA_EditPropTooltip));
         }
@@ -1365,7 +1375,7 @@ void PropertyEditor::contextMenuEvent(QContextMenuEvent*)
         propType |= prop->getType();
         propStatus &= prop->getStatus();
         if (!prop->testStatus(App::Property::PropDynamic)
-            || prop->testStatus(App::Property::LockDynamic)) {
+            || prop->testStatus(App::Property::LockDynamic) || isCopiedVariable(prop)) {
             canRemove = false;
         }
     }
@@ -1381,7 +1391,7 @@ void PropertyEditor::contextMenuEvent(QContextMenuEvent*)
     auto canBeMoved = [](const App::Property* prop) {
         auto* obj = freecad_cast<App::DocumentObject*>(prop->getContainer());
         return obj && prop->testStatus(App::Property::PropDynamic)
-            && !prop->testStatus(App::Property::LockDynamic);
+            && !prop->testStatus(App::Property::LockDynamic) && !isCopiedVariable(prop);
     };
 
     if (props.size() > 0 && std::ranges::all_of(props, canBeMoved)) {

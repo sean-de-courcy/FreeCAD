@@ -1314,6 +1314,15 @@ class TestVariablesImportGui(unittest.TestCase):
 
         return view, tree, copy, action
 
+    def test_panel_copy_rows_locked(self):
+        """Delete and Edit description are disabled on an attached copy's variable; Show uses
+        isn't (review 317, 2)."""
+        view, _tree, _copy, action = self.panelWithCopy()
+        self.assertFalse(action("deleteVariable").isEnabled())
+        self.assertFalse(action("editDescription").isEnabled())
+        self.assertTrue(action("showUses").isEnabled())
+        dockOf(view).hide()
+
     def test_panel_add_refuses_copy(self):
         """An attached copy is no Add target: not among the Add dialog's sets, and refused if
         named anyway (review 317, 1)."""
