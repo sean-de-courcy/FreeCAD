@@ -81,6 +81,8 @@ ACCEPTED = [
     ("sqrt(#Width * #Width)", "LENGTH", 10, None),
     ("(2 mm)^2 / 1 mm", "LENGTH", 4, None),
     ("2^3 * 1 mm", "LENGTH", 8, None),
+    # right to left, as Onshape (the reference studio, row 27)
+    ("2^3^2", "NUMBER", 512, "2 ^ (3 ^ 2)"),
     ("7 % 4", "NUMBER", 3, None),
     ("floor(2.5) * 1 mm", "LENGTH", 2, None),
     (".5 mm", "LENGTH", 0.5, "(0.5 * 1 mm)"),
@@ -113,7 +115,6 @@ REFUSED = [
     ("3/4 in * 2", "LENGTH", "next to *, / or ^"),
     ("1.5/2 in", "LENGTH", "fraction of decimals"),
     ("-2^2", "NUMBER", "minus before ^"),
-    ("2^3^2", "NUMBER", "chained ^"),
     ("0^-1", "NUMBER", "can't be computed"),
     ("(0 mm)^-1", "NUMBER", "can't be computed"),
     ("10^400", "NUMBER", "can't be computed"),

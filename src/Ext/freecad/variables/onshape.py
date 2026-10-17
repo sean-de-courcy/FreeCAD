@@ -31,7 +31,7 @@ check FreeCAD's value against the translator's. It needs no document.
 express, is refused with the reason (`Refused`). Until a reference studio built in Onshape
 settles them (decision 68, D3), these are refused: a fraction with a unit next to `*`, `/` or
 `^` (`#a*3/4 in`, `1/3/4 in`), a unary minus before `^` (`-2^2`), a unit before `^`
-(`2 mm^2`; `(2 mm)^2` is clear), `%` with units or negative operands, `round` and chained `^`.
+(`2 mm^2`; `(2 mm)^2` is clear), `%` with units or negative operands and `round`.
 
 The writer's rules (section 2.4):
 - every unit is written as a factor: `10mm` becomes `(10 * 1 mm)`;
@@ -362,10 +362,8 @@ class _Parser:
             raise Refused(f"a unit before ^ ({unit}^): {UNDOCUMENTED}; write (2 {unit})^2 for "
                           "a squared value")
         self.take()
-        exponent = self.unary()
-        if isinstance(exponent, Bin) and exponent.op == "^":
-            raise Refused(f"chained ^ (a^b^c): {UNDOCUMENTED}")
-        return Bin("^", base, exponent)
+        # chained ^ goes right to left: Onshape's 2^3^2 is 512 (the reference studio, row 27)
+        return Bin("^", base, self.unary())
 
     def postfix(self):
         node = self.primary()
