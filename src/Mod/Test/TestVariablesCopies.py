@@ -312,11 +312,10 @@ class TestVariablesCopies(unittest.TestCase):
         for node, xyz in enumerate(((0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1)), 1):
             mesh.addNode(*xyz, node)
         mesh.addVolume([1, 2, 3, 4])
-        path = os.path.join(self.folder, "TestVariablesCopiesMesh.json")
+        path = os.path.join(self.folder, "Mesh.json")
         importYamlJsonMesh.write(path, mesh)
-        App.loadFile(path)
-        doc = App.getDocument("TestVariablesCopiesMesh")
-        meshes = [o for o in doc.Objects if o.isDerivedFrom("Fem::FemMeshObject")]
+        App.loadFile(path, self.doc.Name)  # the first module's insert(), as File > Import's
+        meshes = [o for o in self.doc.Objects if o.isDerivedFrom("Fem::FemMeshObject")]
         self.assertEqual(len(meshes), 1)
         self.assertEqual(meshes[0].FemMesh.NodeCount, 4)
 
