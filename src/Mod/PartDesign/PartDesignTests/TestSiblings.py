@@ -34,17 +34,27 @@ class TestSiblings(unittest.TestCase):
     def tearDown(self):
         App.closeDocument(self.doc.Name)
 
-    def model(self, profile=None, type="ThroughAll", length=5):
+    def model(self, profile=None, type="ThroughAll", length=5, container=None, placement=None):
         """The enclosure and the lid, and a pocket in the lid from the hole sketch (or from
         `profile`, a function of the lid Body that makes the sketch). The sketch sits on the
-        lid's XY plane at z 15, not on the lid's plate, so the plate can fail without it."""
+        lid's XY plane at z 15, not on the lid's plate, so the plate can fail without it. Both
+        Bodies go in `container` if given, both with `placement` (a studio's parts are placed
+        alike)."""
         doc = self.doc
-        self.enclosure = doc.addObject("PartDesign::Body", "Enclosure")
-        self.enclosure.Label = "Enclosure"
+
+        def body(name):
+            made = doc.addObject("PartDesign::Body", name)
+            made.Label = name
+            if container:
+                container.addObject(made)
+            if placement:
+                made.Placement = placement
+            return made
+
+        self.enclosure = body("Enclosure")
         self.baseSk = sketch(self.enclosure, "BaseSk", xyPlane(self.enclosure), (0, 0, 40, 40))
         self.base = pad(self.enclosure, "Base", self.baseSk, 10)
-        self.lid = doc.addObject("PartDesign::Body", "Lid")
-        self.lid.Label = "Lid"
+        self.lid = body("Lid")
         plateSk = sketch(self.lid, "PlateSk", xyPlane(self.lid), (0, 0, 40, 40), z=10)
         self.plate = pad(self.lid, "Plate", plateSk, 5)
         if profile:
@@ -291,6 +301,62 @@ class TestSiblings(unittest.TestCase):
             PartDesign.makeSiblings(named, [self.enclosure])
         self.assertEqual(sorted(o.Name for o in self.doc.Objects), before)
         self.assertIs(self.enclosure.Tip, self.base)
+
+    def testRedrawRebindsSubElementProfiles(self):
+        """R-t4 with a sub-element Profile, per owner: two squares, 10 x 10 at (5, 5) and at
+        (25, 25); the pocket's Profile is the second's four edges (Edge5 to Edge8). The first
+        square deleted renumbers them Edge1 to Edge4: the primary and its sibling re-bind alike
+        and keep cutting the second square only (the lid 7500, the enclosure 15000)."""
+
+        def squares(lid):
+            return sketch(lid, "SquaresSk", xyPlane(lid), (5, 5, 15, 15), (25, 25, 35, 35), z=15)
+
+        self.model(profile=squares)
+        self.pocket.Profile = (self.holeSk, ["Edge5", "Edge6", "Edge7", "Edge8"])
+        self.doc.recompute()
+        sibling = self.sibling()
+        self.assertEqual(sibling.Profile[1], ["Edge5", "Edge6", "Edge7", "Edge8"])
+        self.assertAlmostEqual(self.lid.Shape.Volume, 7500, places=6)
+        self.assertAlmostEqual(self.enclosure.Shape.Volume, 15000, places=6)
+        for i in range(3, -1, -1):
+            self.holeSk.delGeometry(i)
+        self.doc.recompute()
+        for feature in (self.pocket, sibling):
+            self.assertTrue(feature.isValid(), feature.getStatusString())
+            self.assertEqual(feature.Profile[1], ["Edge1", "Edge2", "Edge3", "Edge4"])
+        self.assertAlmostEqual(self.lid.Shape.Volume, 7500, places=6)
+        self.assertAlmostEqual(self.enclosure.Shape.Volume, 15000, places=6)
+        self.assertFalse(inside(self.lid.Shape, V(30, 30, 12.5)))
+        self.assertFalse(inside(self.enclosure.Shape, V(30, 30, 5)))
+        self.assertTrue(inside(self.lid.Shape, V(10, 10, 12.5)))
+        self.assertTrue(inside(self.enclosure.Shape, V(10, 10, 5)))
+
+    def testSiblingsInAPlacedPart(self):
+        """R-t1 off the origin: the lid and the enclosure in an App::Part placed (-50, 3, 7),
+        turned 70 degrees, each Body placed alike (17, -9, 4), turned 33 degrees. The sibling
+        computes, both parts lose the four holes, and the holes line up in the document's frame
+        (point membership through both global shapes)."""
+        part = self.doc.addObject("App::Part", "Studio")
+        part.Placement = App.Placement(V(-50, 3, 7), App.Rotation(V(0, 1, 1), 70))
+        placement = App.Placement(V(17, -9, 4), App.Rotation(V(1, 2, 3), 33))
+        self.model(container=part, placement=placement)
+        sibling = self.sibling()
+        self.assertAlmostEqual(self.lid.Shape.Volume, 8000 - HOLES * 5, places=4)
+        self.assertAlmostEqual(self.enclosure.Shape.Volume, 16000 - HOLES * 10, places=4)
+        frame = part.Placement.multiply(placement)
+
+        def placed(body):
+            shape = body.Shape.copy()
+            shape.Placement = body.getGlobalPlacement()
+            return shape
+
+        lid, enclosure = placed(self.lid), placed(self.enclosure)
+        for x, y in CENTERS:
+            self.assertFalse(inside(lid, frame.multVec(V(x, y, 12.5))), (x, y))
+            self.assertFalse(inside(enclosure, frame.multVec(V(x, y, 5))), (x, y))
+        self.assertTrue(inside(lid, frame.multVec(V(20, 20, 12.5))))
+        self.assertTrue(inside(enclosure, frame.multVec(V(20, 20, 5))))
+        self.assertNotIn("Warning", sibling.State)
 
     def testUntickRemovesASibling(self):
         """The ticks again: makeSiblings with the enclosure unticked deletes its sibling, and
