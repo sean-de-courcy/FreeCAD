@@ -289,6 +289,13 @@ class TestPocket(unittest.TestCase):
         self.assertTrue(pocket.Shape.isValid())
         self.assertAlmostEqual(pocket.Shape.Volume, base.Shape.Volume, places=6)
 
+    def testPocketUpToABaseWithNames(self):
+        """ops#347, review of fork PR 321: a Pocket that cuts through the base, up to its far
+        face, keeps the base's names and has the topology of the box less the hole."""
+        from PartDesignTests.TestPad import tabOnNamedBase
+
+        tabOnNamedBase(self, self.Doc, "Pocket", "UpToFace")
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("PartDesignTestPocket")
