@@ -501,6 +501,17 @@ class TestVariablesCopies(unittest.TestCase):
         self.assertTrue(copy.isDerivedFrom("App::VarSet"))
         self.assertEqual(copy.ViewObject, None)  # no GUI here; VarSet's view provider in the GUI
 
+    def test_newer_format(self):
+        """A copy saved with a higher CopyFormat marks the reopened document as newer: the
+        notice and the save guard of decision 65 see it."""
+        copy = self.doc.addObject("App::VarSetCopy", "Copy")
+        copy.CopyFormat = 2
+        saved = os.path.join(self.folder, "newer.FCStd")
+        self.doc.saveAs(saved)
+        App.closeDocument(self.doc.Name)
+        self.doc = App.openDocument(saved)
+        self.assertIn("CopyFormat 2", App.getNewerFormat(self.doc))
+
     # R-9
 
     def test_detach(self):

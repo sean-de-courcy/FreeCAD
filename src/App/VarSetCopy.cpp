@@ -21,8 +21,9 @@
  *                                                                          *
  ****************************************************************************/
 
-#include <Base/Console.h>
+#include <string>
 
+#include "ForkRelease.h"
 #include "VarSetCopy.h"
 
 using namespace App;
@@ -152,11 +153,7 @@ void VarSetCopy::onDocumentRestored()
 {
     VarSet::onDocumentRestored();
     if (CopyFormat.getValue() > Format) {
-        Base::Console().warning(
-            "%s: saved by a newer FreeCAD-CH (copy format %ld; this build reads %ld)\n",
-            getFullName().c_str(),
-            CopyFormat.getValue(),
-            Format
-        );
+        // Saved by a newer FreeCAD-CH: the document's notice and its save guard say so.
+        noteNewerFormat(getDocument(), "CopyFormat " + std::to_string(CopyFormat.getValue()));
     }
 }
