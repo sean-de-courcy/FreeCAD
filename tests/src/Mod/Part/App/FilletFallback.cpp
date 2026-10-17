@@ -1019,6 +1019,37 @@ TEST_F(FilletFallbackTest, theCopyNamesAsTheBase)
     EXPECT_EQ(elementNames(result), elementNames(expected));
 }
 
+// The same with a base named as a feature's shape is: the result's names come from the base's
+// element map through the copy, as OCCT's maker on the base itself gives them (PR 318 review, low 1)
+TEST_F(FilletFallbackTest, theCopyNamesAsTheBaseWithItsElementMap)
+{
+    std::vector<TopoShape> edges;
+    TopoShape base = namedRibAgainstWall(edges);
+    ASSERT_FALSE(base.getElementMap().empty());
+    TopoShape result(4L);
+    result.makeElementChamfer(base, edges, ChamferType::equalDistance, 1.5, 1.5);
+
+    std::vector<TopoShape> otherEdges;
+    TopoShape other = namedRibAgainstWall(otherEdges);
+    BRepFilletAPI_MakeChamfer occt(other.getShape());
+    for (const auto& edge : otherEdges) {
+        const auto& e = TopoDS::Edge(edge.getShape());
+        occt.Add(1.5, 1.5, e, TopoDS::Face(other.findAncestorShape(e, TopAbs_FACE)));
+    }
+    occt.Build();
+    ASSERT_TRUE(occt.IsDone());
+    TopoShape expected(4L);
+    expected.makeElementShape(occt, other, OpCodes::Chamfer);
+    EXPECT_EQ(elementNames(result), elementNames(expected));
+
+    // Not the names an unnamed base gives: the base's own names reach the result
+    std::vector<TopoShape> plainEdges;
+    TopoShape plain = ribAgainstWall(plainEdges);
+    TopoShape plainResult(4L);
+    plainResult.makeElementChamfer(plain, plainEdges, ChamferType::equalDistance, 1.5, 1.5);
+    EXPECT_NE(elementNames(result), elementNames(plainResult));
+}
+
 // makerInputs() copies several inputs together: an up-to face of the base is a face of the base's
 // copy, a face of another shape gets its own copy, and each copy keeps its shape's tolerances,
 // element map and Tag (ops#347)
