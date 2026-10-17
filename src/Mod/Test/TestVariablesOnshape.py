@@ -98,6 +98,7 @@ ACCEPTED = [
     ("2 mm^2 / (1 mm)", "LENGTH", 2, "(2 * ((1 mm) ^ 2)) / (1 * 1 mm)"),
     ("sqrt(3 in^2 + 1 in^2)", "LENGTH", 50.8, None),
     ("-2 mm^2 / 1 mm", "LENGTH", -2, None),
+    ("2 mm^6 / (1 mm)^5", "LENGTH", 2, None),
     # halves up, as Onshape (the reference studio, row 24); FreeCAD's round() goes away from 0
     ("round(2.5) * 10 + round(-2.5)", "NUMBER", 28,
      "(floor(2.5 + 0.5) * 10) + floor((-2.5) + 0.5)"),
@@ -180,6 +181,8 @@ REFUSED = [
     ("2 mm^-1", "NUMBER", "a unit to a power other than a whole number"),
     ("2 mm^1.5", "NUMBER", "a unit to a power other than a whole number"),
     ("2 mm^2^2", "NUMBER", "chained ^ after a unit"),
+    ("2 mm^400 / (1 mm)^399", "LENGTH", "a unit to a power above 6"),
+    ("2 mm^7 / (1 mm)^6", "LENGTH", "a unit to a power above 6"),
     ("1/2 mm^2 / 1 mm", "LENGTH", "next to *, / or ^"),
     ("2 mm^2", "LENGTH", "length^2"),
     ("#Width/2 in", "LENGTH", "units cancel"),

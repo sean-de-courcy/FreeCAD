@@ -139,6 +139,10 @@ TYPES = {
     "NUMBER": ("App::PropertyFloat", NONE),
 }
 
+# The highest power of a unit written after a number (`2 mm^3`); more is no length a
+# variable needs, and underflows in SI units.
+MAX_UNIT_POWER = 6
+
 UNDOCUMENTED = ("Onshape's reading of it isn't documented; refused until the reference studio "
                 "settles it")
 
@@ -416,6 +420,10 @@ class _Parser:
             if power.kind != "number" or not power.text.isdigit():
                 raise Refused(f"a unit to a power other than a whole number ({base.unit}^"
                               f"{power.text}): {UNDOCUMENTED}")
+            if int(power.text) > MAX_UNIT_POWER:
+                # 2 mm^400 is 0 in SI units, and FreeCAD's unit exponents are small
+                raise Refused(f"a unit to a power above {MAX_UNIT_POWER} ({base.unit}^"
+                              f"{power.text})")
             self.take()
             if self.at_op("^"):
                 raise Refused(f"chained ^ after a unit ({base.unit}^{power.text}^): "
