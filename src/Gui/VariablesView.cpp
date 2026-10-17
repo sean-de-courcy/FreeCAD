@@ -30,11 +30,20 @@
 #include <vector>
 
 #include <QAction>
+#include <QComboBox>
+#include <QCoreApplication>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QFormLayout>
 #include <QHeaderView>
+#include <QInputDialog>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
+#include <QPlainTextEdit>
+#include <QPointer>
+#include <QPushButton>
 #include <QTimer>
 #include <QToolBar>
 #include <QTreeView>
@@ -165,6 +174,47 @@ QString valueText(const App::Property* prop)
         PyErr_Clear();
     }
     return {};
+}
+
+/// The variable's type as the Type column names it (ops#317, design section 1.2): Length (a
+/// Length or a Distance), Angle, Number, Integer, Yes/No, Text, another quantity's dimension
+/// (Area), else the property type.
+QString variableType(const App::Property* prop)
+{
+    if (!prop) {
+        return {};
+    }
+    if (auto quantity = freecad_cast<const App::PropertyQuantity*>(prop)) {
+        const Base::Unit& unit = quantity->getUnit();
+        if (unit == Base::Unit::Length) {
+            return QCoreApplication::translate("Gui::DockWnd::VariablesModel", "Length");
+        }
+        if (unit == Base::Unit::Angle) {
+            return QCoreApplication::translate("Gui::DockWnd::VariablesModel", "Angle");
+        }
+        std::string dimension = unit.getTypeString();
+        return dimension.empty() ? typeName(prop) : QString::fromStdString(dimension);
+    }
+    if (freecad_cast<const App::PropertyFloat*>(prop)) {
+        return QCoreApplication::translate("Gui::DockWnd::VariablesModel", "Number");
+    }
+    if (freecad_cast<const App::PropertyInteger*>(prop)) {
+        return QCoreApplication::translate("Gui::DockWnd::VariablesModel", "Integer");
+    }
+    if (freecad_cast<const App::PropertyBool*>(prop)) {
+        return QCoreApplication::translate("Gui::DockWnd::VariablesModel", "Yes/No");
+    }
+    if (freecad_cast<const App::PropertyString*>(prop)) {
+        return QCoreApplication::translate("Gui::DockWnd::VariablesModel", "Text");
+    }
+    return typeName(prop);
+}
+
+/// A description as one table line: its first line, and an ellipsis when more follow.
+QString descriptionLine(const QString& text)
+{
+    qsizetype end = text.indexOf(u'\n');
+    return end < 0 ? text : text.left(end).trimmed() + QStringLiteral(" …");
 }
 
 bool isNumeric(const App::Property* prop)
@@ -327,7 +377,9 @@ VariablesModel::VariablesModel(QObject* parent)
     : QStandardItemModel(parent)
 {
     setColumnCount(ColumnCount);
-    setHorizontalHeaderLabels({tr("Name"), tr("Expression"), tr("Value"), tr("Source")});
+    setHorizontalHeaderLabels(
+        {tr("Name"), tr("Type"), tr("Expression"), tr("Value"), tr("Description"), tr("Source")}
+    );
 }
 
 void VariablesModel::rebuild(const App::Document* doc)
@@ -383,6 +435,7 @@ void VariablesModel::addHolderRows(
         QString expression;
         App::Property* prop = holder->getPropertyByName(name.c_str());
         QString tip;
+        QString description;  // a VarSet variable's; an alias has none
 
         if (sheet) {
             address = QString::fromStdString(callString(holder, "getCellFromAlias", {name}));
@@ -405,16 +458,28 @@ void VariablesModel::addHolderRows(
                 ? QString::fromStdString(App::toDisplayString(info.expression.get()))
                 : valueText(prop);
             tip = tr("%1 (%2)").arg(varName, typeName(prop));
+            const char* doc = holder->getPropertyDocumentation(prop);
+            description = QString::fromUtf8(doc ? doc : "");
         }
 
         auto nameItem = new QStandardItem(varName);
+        auto typeItem = new QStandardItem(variableType(prop));
         auto exprItem = new QStandardItem(expression);
         exprItem->setData(expression, EditTextRole);
         auto valueItem = new QStandardItem(valueText(prop));
+        auto descriptionItem = new QStandardItem(descriptionLine(description));
+        descriptionItem->setData(description, EditTextRole);
         auto sourceItem = new QStandardItem(
             sheet ? QStringLiteral("%1 %2").arg(label, address) : label
         );
-        QList<QStandardItem*> row {nameItem, exprItem, valueItem, sourceItem};
+        QList<QStandardItem*> row {
+            nameItem,
+            typeItem,
+            exprItem,
+            valueItem,
+            descriptionItem,
+            sourceItem
+        };
         for (auto item : row) {
             item->setData(sheet ? AliasKind : VarSetKind, KindRole);
             item->setData(docName, DocumentRole);
@@ -422,6 +487,9 @@ void VariablesModel::addHolderRows(
             item->setData(varName, VariableRole);
             item->setData(address, AddressRole);
             item->setToolTip(tip);
+        }
+        if (!description.isEmpty()) {
+            descriptionItem->setToolTip(description);
         }
         if (holder->isError() && !expression.isEmpty()) {
             valueItem->setForeground(Qt::red);
@@ -437,6 +505,9 @@ Qt::ItemFlags VariablesModel::flags(const QModelIndex& index) const
     if (kind(index) != HeaderKind
         && (index.column() == NameColumn || index.column() == ExpressionColumn)) {
         result |= Qt::ItemIsEditable;
+    }
+    if (kind(index) == VarSetKind && index.column() == DescriptionColumn) {
+        result |= Qt::ItemIsEditable;  // an alias has no description
     }
     return result;
 }
@@ -483,7 +554,44 @@ bool VariablesModel::setData(const QModelIndex& index, const QVariant& value, in
     if (index.column() == ExpressionColumn) {
         return setExpression(index, value.toString().trimmed());
     }
+    if (index.column() == DescriptionColumn && kind(index) == VarSetKind) {
+        if (value.toString() == index.data(EditTextRole).toString()) {
+            return true;
+        }
+        return describe(
+            holder(index),
+            index.data(VariableRole).toString().toStdString(),
+            value.toString(),
+            error
+        );
+    }
     return false;
+}
+
+bool VariablesModel::describe(
+    App::DocumentObject* obj,
+    const std::string& name,
+    const QString& text,
+    QString& error
+)
+{
+    App::Property* prop = obj ? obj->getPropertyByName(name.c_str()) : nullptr;
+    if (!prop || !prop->testStatus(App::Property::PropDynamic)) {
+        error = tr("The variable '%1' is gone.").arg(QString::fromStdString(name));
+        return false;
+    }
+    std::string description = text.trimmed().toStdString();
+    const char* old = obj->getPropertyDocumentation(prop);
+    if (description == (old ? old : "")) {
+        return true;
+    }
+    return runEdit(
+        obj->getDocument(),
+        "Describe " + name,
+        {pyObject(obj) + ".setDocumentationOfProperty(" + pyString(name) + ", "
+         + pyString(description) + ")"},
+        error
+    );
 }
 
 bool VariablesModel::rename(const QModelIndex& index, const QString& newName)
@@ -542,13 +650,40 @@ bool VariablesModel::setExpression(const QModelIndex& index, const QString& text
         return true;  // Unchanged: a value shown rounded isn't rounded by committing it.
     }
     std::string name = index.data(VariableRole).toString().toStdString();
-    std::string typed = text.toStdString();
     bool alias = kind(index) == AliasKind;
     App::Property* prop = alias ? nullptr : obj->getPropertyByName(name.c_str());
     if (!alias && !prop) {
         error = tr("The variable '%1' is gone.").arg(QString::fromStdString(name));
         return false;
     }
+    std::vector<std::string> commands;
+    if (!editCommands(
+            obj,
+            prop,
+            index.data(AddressRole).toString().toStdString(),
+            name,
+            text,
+            commands,
+            error
+        )) {
+        return false;
+    }
+    return runEdit(obj->getDocument(), "Set " + name, commands, error);
+}
+
+bool VariablesModel::editCommands(
+    App::DocumentObject* obj,
+    App::Property* prop,
+    const std::string& address,
+    const std::string& name,
+    const QString& text,
+    std::vector<std::string>& commands,
+    QString& error,
+    bool* isExpression
+)
+{
+    std::string typed = text.toStdString();
+    bool alias = prop == nullptr;
     if (typed.empty()) {
         error = tr("Enter a value or an expression.");
         return false;
@@ -586,14 +721,13 @@ bool VariablesModel::setExpression(const QModelIndex& index, const QString& text
         as = As::Text;
     }
 
-    std::vector<std::string> commands;
+    if (isExpression) {
+        *isExpression = as == As::Expression;
+    }
     std::string target = pyObject(obj);
     if (as != As::Expression) {
         if (alias) {
-            commands.push_back(
-                target + ".set('" + index.data(AddressRole).toString().toStdString() + "', "
-                + pyString(typed) + ")"
-            );
+            commands.push_back(target + ".set('" + address + "', " + pyString(typed) + ")");
         }
         else {
             if (obj->getExpression(App::ObjectIdentifier(*prop)).expression) {
@@ -658,10 +792,7 @@ bool VariablesModel::setExpression(const QModelIndex& index, const QString& text
         }
         std::string stored = expr->toString();
         if (alias) {
-            commands.push_back(
-                target + ".set('" + index.data(AddressRole).toString().toStdString() + "', "
-                + pyString("=" + stored) + ")"
-            );
+            commands.push_back(target + ".set('" + address + "', " + pyString("=" + stored) + ")");
         }
         else {
             std::string invalid = obj->ExpressionEngine.validateExpression(
@@ -677,7 +808,42 @@ bool VariablesModel::setExpression(const QModelIndex& index, const QString& text
             );
         }
     }
-    return runEdit(obj->getDocument(), "Set " + name, commands, error);
+    return true;
+}
+
+QString VariablesModel::unitMismatch(App::DocumentObject* obj, App::Property* prop)
+{
+    auto quantity = freecad_cast<App::PropertyQuantity*>(prop);
+    bool number = !quantity && freecad_cast<App::PropertyFloat*>(prop);
+    if (!obj || (!quantity && !number)) {
+        return {};
+    }
+    auto info = obj->getExpression(App::ObjectIdentifier(*prop));
+    if (!info.expression) {
+        return {};
+    }
+    App::ExpressionPtr result;
+    try {
+        result = info.expression->eval();
+    }
+    catch (const Base::Exception& e) {
+        return QString::fromUtf8(e.what());
+    }
+    auto value = freecad_cast<App::NumberExpression*>(result.get());
+    if (!value) {
+        return {};  // not a number: the property says what it takes
+    }
+    const Base::Unit& unit = value->getQuantity().getUnit();
+    const Base::Unit& wanted = quantity ? quantity->getUnit() : Base::Unit::One;
+    if (unit == wanted) {
+        return {};
+    }
+    QString name = QString::fromUtf8(prop->getName());
+    QString gives = unit == Base::Unit::One
+        ? tr("a number without a unit")
+        : QString::fromStdString(value->getQuantity().getUserString());
+    return tr("The expression gives %1, but the type of %2 is %3.")
+        .arg(gives, name, variableType(prop));
 }
 
 // ----------------------------------------------------------------------------------------------
@@ -693,6 +859,17 @@ QWidget* VariablesDelegate::createEditor(
 ) const
 {
     committedByKey = false;
+    if (index.column() == VariablesModel::DescriptionColumn
+        && index.data(VariablesModel::EditTextRole).toString().contains(u'\n')) {
+        // One line in the cell would lose the others: the dialog edits them all.
+        QPersistentModelIndex persistent(index);
+        QTimer::singleShot(0, const_cast<VariablesDelegate*>(this), [this, persistent] {
+            if (persistent.isValid()) {
+                Q_EMIT multiLineEdit(persistent);
+            }
+        });
+        return nullptr;
+    }
     if (index.column() != VariablesModel::ExpressionColumn) {
         return QStyledItemDelegate::createEditor(parent, option, index);
     }
@@ -785,6 +962,11 @@ VariablesView::VariablesView(Gui::Document* doc, QWidget* parent)
     usesAction->setObjectName(QStringLiteral("showUses"));
     usesAction->setToolTip(tr("List the expressions that use the selected variable"));
     layout->addWidget(toolBar);
+    // In the context menu only
+    describeAction = new QAction(tr("Edit description..."), this);
+    describeAction->setObjectName(QStringLiteral("editDescription"));
+    describeAction->setToolTip(tr("Edit the selected variable's description, in several lines"));
+    connect(describeAction, &QAction::triggered, this, &VariablesView::editDescription);
 
     model = new VariablesModel(this);
     delegate = new VariablesDelegate(this);
@@ -803,6 +985,7 @@ VariablesView::VariablesView(Gui::Document* doc, QWidget* parent)
     tree->addAction(addAction);
     tree->addAction(deleteAction);
     tree->addAction(usesAction);
+    tree->addAction(describeAction);
     layout->addWidget(tree);
 
     hint = new QLabel(tr("Add a variable, or type #name in any expression."), this);
@@ -827,6 +1010,10 @@ VariablesView::VariablesView(Gui::Document* doc, QWidget* parent)
     connect(delegate, &VariablesDelegate::committed, this, [this] {
         const QString& warning = model->lastWarning();
         showMessage(warning, false);
+    });
+    connect(delegate, &VariablesDelegate::multiLineEdit, this, [this](const QModelIndex& index) {
+        tree->setCurrentIndex(index);
+        editDescription();
     });
     connect(tree, &QTreeView::doubleClicked, this, &VariablesView::onDoubleClicked);
     connect(tree->selectionModel(), &QItemSelectionModel::currentChanged, this, [this] {
@@ -855,6 +1042,10 @@ VariablesView::VariablesView(Gui::Document* doc, QWidget* parent)
     connections.emplace_back(
         app.signalRenameDynamicProperty.connect(std::bind(&VariablesView::onProperty, this, sp::_1))
     );
+    // A description or group change (ops#317 PR A)
+    connections.emplace_back(app.signalChangePropertyEditor.connect(
+        [this](const App::Document&, const App::Property& prop) { onProperty(prop); }
+    ));
     connections.emplace_back(app.signalUndoDocument.connect([this](const App::Document&) {
         scheduleRebuild();
     }));
@@ -1033,6 +1224,9 @@ void VariablesView::updateActions()
     addAction->setEnabled(currentDocument() != nullptr);
     deleteAction->setEnabled(variable);
     usesAction->setEnabled(variable);
+    describeAction->setEnabled(
+        current.isValid() && VariablesModel::kind(current) == VariablesModel::VarSetKind
+    );
 }
 
 void VariablesView::showMessage(const QString& text, bool isError)
@@ -1075,35 +1269,318 @@ void VariablesView::onDoubleClicked(const QModelIndex& index)
     Gui::Selection().addSelection(obj->getDocument()->getName(), obj->getNameInDocument());
 }
 
+App::DocumentObject* VariablesView::addTarget() const
+{
+    App::Document* doc = currentDocument();
+    if (!doc) {
+        return nullptr;
+    }
+    // The selected row's VarSet, else the document's "Variables" VarSet.
+    if (App::DocumentObject* obj = VariablesModel::holder(tree->currentIndex())) {
+        if (obj->isDerivedFrom<App::VarSet>()) {
+            return obj;
+        }
+    }
+    App::DocumentObject* obj = doc->getObject("Variables");
+    if (obj && obj->isDerivedFrom<App::VarSet>()) {
+        return obj;
+    }
+    for (auto obj : doc->getObjectsOfType(App::VarSet::getClassTypeId())) {
+        if (std::string(obj->Label.getValue()) == "Variables") {
+            return obj;
+        }
+    }
+    return nullptr;
+}
+
 void VariablesView::addVariable()
+{
+    // The panel's own Add dialog (ops#317, design section 1.3): Name, Type, Value or expression,
+    // Description and Set, added as one undo step; "Other..." opens the stock dialog.
+    App::Document* doc = currentDocument();
+    if (!doc) {
+        return;
+    }
+    App::DocumentObject* target = addTarget();
+    std::string docName = doc->getName();
+
+    auto dialog = new QDialog(getMainWindow());
+    dialog->setObjectName(QStringLiteral("addVariableDialog"));
+    dialog->setWindowTitle(tr("Add variable"));
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->setWindowModality(Qt::ApplicationModal);
+
+    auto nameEdit = new QLineEdit(dialog);
+    nameEdit->setObjectName(QStringLiteral("name"));
+    auto typeBox = new QComboBox(dialog);
+    typeBox->setObjectName(QStringLiteral("type"));
+    // A Length is a Distance: a Length clamps a negative value to 0 without a word (ops#319). No
+    // Integer: it rounds what an expression gives and drops its unit; "Other..." has it.
+    typeBox->addItem(tr("Length"), QByteArray("App::PropertyDistance"));
+    typeBox->addItem(tr("Angle"), QByteArray("App::PropertyAngle"));
+    typeBox->addItem(tr("Number"), QByteArray("App::PropertyFloat"));
+    typeBox->addItem(tr("Yes/No"), QByteArray("App::PropertyBool"));
+    typeBox->addItem(tr("Text"), QByteArray("App::PropertyString"));
+    auto valueEdit = new ExpressionLineEdit(dialog);
+    valueEdit->setObjectName(QStringLiteral("value"));
+    valueEdit->setValidator(nullptr);  // as in the Expression column: '=' starts an expression
+    valueEdit->setPlaceholderText(tr("A value, or an expression with #name"));
+    auto descriptionEdit = new QPlainTextEdit(dialog);
+    descriptionEdit->setObjectName(QStringLiteral("description"));
+    descriptionEdit->setTabChangesFocus(true);
+    descriptionEdit->setFixedHeight(descriptionEdit->fontMetrics().lineSpacing() * 4);
+    auto setBox = new QComboBox(dialog);
+    setBox->setObjectName(QStringLiteral("set"));
+    for (auto obj : doc->getObjectsOfType(App::VarSet::getClassTypeId())) {
+        setBox->addItem(
+            QString::fromUtf8(obj->Label.getValue()),
+            QString::fromLatin1(obj->getNameInDocument())
+        );
+    }
+    if (!target) {
+        setBox->insertItem(0, tr("Variables (new)"), QString());
+    }
+    setBox->setCurrentIndex(
+        target ? setBox->findData(QString::fromLatin1(target->getNameInDocument())) : 0
+    );
+    // `#` completion: from the set's VarSet, else from any object of the document.
+    if (target) {
+        valueEdit->setDocumentObject(target);
+    }
+    else if (!doc->getObjects().empty()) {
+        valueEdit->setDocumentObject(doc->getObjects().front());
+    }
+
+    auto errorLabel = new QLabel(dialog);
+    errorLabel->setObjectName(QStringLiteral("error"));
+    errorLabel->setWordWrap(true);
+    errorLabel->setStyleSheet(QStringLiteral("color: red;"));
+    errorLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    errorLabel->hide();
+
+    auto buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, dialog);
+    QPushButton* other = buttons->addButton(tr("Other..."), QDialogButtonBox::ActionRole);
+    other->setObjectName(QStringLiteral("other"));
+    other->setToolTip(tr("Add a property of any type with the Add Property dialog"));
+
+    auto form = new QFormLayout();
+    form->addRow(tr("Name:"), nameEdit);
+    form->addRow(tr("Type:"), typeBox);
+    form->addRow(tr("Value:"), valueEdit);
+    form->addRow(tr("Description:"), descriptionEdit);
+    form->addRow(tr("Set:"), setBox);
+    auto layout = new QVBoxLayout(dialog);
+    layout->addLayout(form);
+    layout->addWidget(errorLabel);
+    layout->addWidget(buttons);
+
+    QPointer<VariablesView> view(this);
+    connect(buttons, &QDialogButtonBox::accepted, dialog, [=] {
+        if (!view) {
+            dialog->reject();
+            return;
+        }
+        QByteArray type = typeBox->currentData().toByteArray();
+        QString error;
+        if (view->addFromDialog(
+                docName,
+                setBox->currentData().toString().toStdString(),
+                nameEdit->text().trimmed(),
+                type.constData(),
+                valueEdit->text().trimmed(),
+                descriptionEdit->toPlainText(),
+                error
+            )) {
+            view->showMessage(QString(), false);
+            dialog->accept();
+            return;
+        }
+        // Nothing was added: say why, and keep what was typed.
+        errorLabel->setText(error);
+        errorLabel->show();
+    });
+    connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
+    connect(other, &QPushButton::clicked, dialog, [=] {
+        std::string holderName = setBox->currentData().toString().toStdString();
+        dialog->reject();
+        if (!view) {
+            return;
+        }
+        // After the click: the stock flow processes events, which would delete this dialog and
+        // its button under their own handler.
+        QTimer::singleShot(0, view, [view, docName, holderName] {
+            App::Document* doc = App::GetApplication().getDocument(docName.c_str());
+            if (!view || !doc || doc != view->currentDocument()) {
+                return;
+            }
+            view->addOtherVariable(
+                holderName.empty() ? nullptr : doc->getObject(holderName.c_str())
+            );
+        });
+    });
+
+    dialog->show();
+    dialog->raise();
+    dialog->activateWindow();
+    nameEdit->setFocus();
+}
+
+bool VariablesView::addFromDialog(
+    const std::string& docName,
+    const std::string& holderName,
+    const QString& name,
+    const char* type,
+    const QString& text,
+    const QString& description,
+    QString& error
+)
+{
+    App::Document* doc = App::GetApplication().getDocument(docName.c_str());
+    if (!doc) {
+        error = tr("The document is gone.");
+        return false;
+    }
+    App::DocumentObject* target = holderName.empty() ? nullptr
+                                                     : doc->getObject(holderName.c_str());
+    if (!holderName.empty() && !target) {
+        error = tr("The set '%1' is gone.").arg(QString::fromStdString(holderName));
+        return false;
+    }
+    std::string varName = name.toStdString();
+
+    // Checked before anything is made: the name, and a plain value's unit against the type.
+    std::string reason = App::VariableLookup::checkVariableName(target, varName);
+    if (!reason.empty()) {
+        error = QString::fromStdString(reason);
+        return false;
+    }
+    std::string typeName(type);
+    if (!text.isEmpty()
+        && (typeName == "App::PropertyDistance" || typeName == "App::PropertyAngle"
+            || typeName == "App::PropertyFloat")) {
+        try {
+            Base::Quantity quantity = Base::Quantity::parse(text.toStdString());
+            const Base::Unit& wanted = typeName == "App::PropertyDistance" ? Base::Unit::Length
+                : typeName == "App::PropertyAngle"                         ? Base::Unit::Angle
+                                                                           : Base::Unit::One;
+            // A number without a unit takes the type's default unit, as in the Expression column.
+            if (quantity.getUnit() != wanted && !quantity.isDimensionless()) {
+                error = wanted == Base::Unit::One
+                    ? tr("A Number has no unit, and %1 has one.").arg(text)
+                    : tr("%1 has the wrong unit for this type.").arg(text);
+                return false;
+            }
+        }
+        catch (const Base::Exception&) {
+            // not a plain value: an expression, checked once it is set
+        }
+    }
+
+    // One transaction for the whole add, the "Variables" VarSet included. A transaction already
+    // booked (a task dialog's) takes it instead, and what was made is taken back on a failure.
+    int tid = Gui::PropertyEditor::openPropertyTransaction(doc, ("Add " + varName).c_str());
+    bool created = false;
+    bool added = false;
+    auto fail = [&](const QString& message) {
+        if (tid != 0) {
+            Gui::PropertyEditor::closePropertyTransaction(tid, false);
+        }
+        else {
+            try {
+                if (created) {
+                    Gui::Command::runCommand(
+                        Gui::Command::Doc,
+                        ("App.getDocument('" + docName + "').removeObject('"
+                         + target->getNameInDocument() + "')")
+                            .c_str()
+                    );
+                }
+                else if (added) {
+                    Gui::Command::runCommand(
+                        Gui::Command::Doc,
+                        (pyObject(target) + ".removeProperty(" + pyString(varName) + ")").c_str()
+                    );
+                }
+            }
+            catch (const Base::Exception& e) {
+                e.reportException();
+            }
+        }
+        error = message;
+        return false;
+    };
+    try {
+        if (!target) {
+            Gui::Command::runCommand(
+                Gui::Command::Doc,
+                ("App.getDocument('" + docName + "').addObject('App::VarSet', 'Variables')").c_str()
+            );
+            // The new object is the document's last; its name may be "Variables001" if another
+            // object is named "Variables".
+            const auto& objects = doc->getObjects();
+            target = objects.empty() ? nullptr : objects.back();
+            if (!target || !target->isDerivedFrom<App::VarSet>()) {
+                target = nullptr;
+                return fail(tr("The \"Variables\" set could not be made."));
+            }
+            created = true;
+            // Its own properties (Label) count now.
+            reason = App::VariableLookup::checkVariableName(target, varName);
+            if (!reason.empty()) {
+                return fail(QString::fromStdString(reason));
+            }
+        }
+        Gui::Command::runCommand(
+            Gui::Command::Doc,
+            (pyObject(target) + ".addProperty('" + typeName + "', " + pyString(varName)
+             + ", 'Base', " + pyString(description.trimmed().toStdString()) + ")")
+                .c_str()
+        );
+        added = true;
+        App::Property* prop = target->getPropertyByName(varName.c_str());
+        if (!prop) {
+            return fail(tr("The variable '%1' could not be made.").arg(name));
+        }
+        if (!text.isEmpty()) {
+            std::vector<std::string> commands;
+            bool isExpression = false;
+            QString message;
+            if (!VariablesModel::editCommands(
+                    target,
+                    prop,
+                    {},
+                    varName,
+                    text,
+                    commands,
+                    message,
+                    &isExpression
+                )) {
+                return fail(message);
+            }
+            for (const auto& command : commands) {
+                Gui::Command::runCommand(Gui::Command::Doc, command.c_str());
+            }
+            if (isExpression) {
+                QString mismatch = VariablesModel::unitMismatch(target, prop);
+                if (!mismatch.isEmpty()) {
+                    return fail(mismatch);
+                }
+            }
+        }
+    }
+    catch (const Base::Exception& e) {
+        return fail(QString::fromUtf8(e.what()));
+    }
+    Gui::PropertyEditor::closePropertyTransaction(tid);
+    return true;
+}
+
+void VariablesView::addOtherVariable(App::DocumentObject* target)
 {
     App::Document* doc = currentDocument();
     if (!doc) {
         return;
     }
-    // The selected row's VarSet, else the document's "Variables" VarSet, created on first use.
-    App::DocumentObject* target = nullptr;
-    QModelIndex current = tree->currentIndex();
-    if (App::DocumentObject* obj = VariablesModel::holder(current)) {
-        if (obj->isDerivedFrom<App::VarSet>()) {
-            target = obj;
-        }
-    }
-    if (!target) {
-        App::DocumentObject* obj = doc->getObject("Variables");
-        if (obj && obj->isDerivedFrom<App::VarSet>()) {
-            target = obj;
-        }
-    }
-    if (!target) {
-        for (auto obj : doc->getObjectsOfType(App::VarSet::getClassTypeId())) {
-            if (std::string(obj->Label.getValue()) == "Variables") {
-                target = obj;
-                break;
-            }
-        }
-    }
-
     bool created = false;
     int createdID = 0;  // the "Add variable" undo step, when the panel made one
     if (!target) {
@@ -1164,6 +1641,42 @@ void VariablesView::addVariable()
     dialog->show();
     dialog->raise();
     dialog->activateWindow();
+}
+
+void VariablesView::editDescription()
+{
+    QModelIndex current = tree->currentIndex();
+    App::DocumentObject* obj = VariablesModel::holder(current);
+    if (!obj || VariablesModel::kind(current) != VariablesModel::VarSetKind) {
+        return;
+    }
+    // Everything is read from the row before the dialog: the panel may rebuild while it is open,
+    // which frees the row.
+    std::string docName = obj->getDocument()->getName();
+    std::string holderName = obj->getNameInDocument();
+    QString qName = current.data(VariablesModel::VariableRole).toString();
+    QString text = current.sibling(current.row(), VariablesModel::DescriptionColumn)
+                       .data(VariablesModel::EditTextRole)
+                       .toString();
+
+    QInputDialog dialog(this);
+    dialog.setObjectName(QStringLiteral("descriptionDialog"));
+    dialog.setWindowTitle(tr("Describe %1").arg(qName));
+    dialog.setLabelText(tr("Description of %1:").arg(qName));
+    dialog.setOption(QInputDialog::UsePlainTextEditForTextInput);
+    dialog.setTextValue(text);
+    if (dialog.exec() != QDialog::Accepted) {
+        return;
+    }
+    // Looked up again: the document may have changed while the dialog was open.
+    App::Document* doc = App::GetApplication().getDocument(docName.c_str());
+    obj = doc ? doc->getObject(holderName.c_str()) : nullptr;
+    QString error;
+    if (!VariablesModel::describe(obj, qName.toStdString(), dialog.textValue(), error)) {
+        showMessage(error, true);
+        return;
+    }
+    showMessage(QString(), false);
 }
 
 QString VariablesView::usesText(const QModelIndex& index, int* count) const
