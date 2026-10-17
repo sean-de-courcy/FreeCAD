@@ -2162,8 +2162,10 @@ TopoDS_Shape construct(
             }
         }
     };
+    // The base's as before OCCT's maker, which raises them in place
     for (TopExp_Explorer it(base.getShape(), TopAbs_FACE); it.More(); it.Next()) {
-        bindImages(0, it.Current(), largestTolerance(it.Current()));
+        const double* before = request.faceTolerances.Seek(it.Current());
+        bindImages(0, it.Current(), before ? *before : largestTolerance(it.Current()));
     }
     for (size_t i = 0; i < tools.size(); ++i) {
         for (const auto& [face, tolerance] : toolFaceTolerances[i]) {
@@ -2247,6 +2249,17 @@ TopoDS_Shape construct(
 thread_local Recorder* innermostRecorder = nullptr;
 
 }  // namespace
+
+TopTools_DataMapOfShapeReal faceTolerances(const TopoDS_Shape& shape)
+{
+    TopTools_DataMapOfShapeReal tolerances;
+    for (TopExp_Explorer it(shape, TopAbs_FACE); it.More(); it.Next()) {
+        if (!tolerances.IsBound(it.Current())) {
+            tolerances.Bind(it.Current(), largestTolerance(it.Current()));
+        }
+    }
+    return tolerances;
+}
 
 TopoDS_Face thinFace(const TopoDS_Shape& result, const TopoDS_Shape& base)
 {
