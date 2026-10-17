@@ -280,6 +280,21 @@ class TestPocket(unittest.TestCase):
                 self.assertFalse(pocket.isValid())
                 self.assertIn("names several faces", pocket.getStatusString())
 
+    def testPocketUpToFaceLeavesTheBaseAlone(self):
+        # ops#347: the up-to face is the base's, and BRepFeat raised it in place. The volume isn't
+        # checked: what BRepFeat makes up to the lofted face depends on the platform (ops#353)
+        from PartDesignTests.TestPad import upToTheLoftSide
+
+        base, pocket = upToTheLoftSide(self, self.Doc, "Pocket")
+        self.assertTrue(pocket.Shape.isValid())
+
+    def testPocketUpToABaseWithNames(self):
+        """ops#347, review of fork PR 321: a Pocket that cuts through the base, up to its far
+        face, keeps the base's names and has the topology of the box less the hole."""
+        from PartDesignTests.TestPad import tabOnNamedBase
+
+        tabOnNamedBase(self, self.Doc, "Pocket", "UpToFace")
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("PartDesignTestPocket")

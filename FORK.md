@@ -348,7 +348,8 @@ names it.
 | `feat/317-import-gui` | feat | ops#317 | - | `feat/317-copy-import` `afd57d50cc` (stacked on fork PR 315) + `integration` `e9c2084ad6` | `b363563e2f` (fork PR 317), 2026-10-17 | never (fork feature) |
 | `fix/crash-triage` | fix | ops#333, ops#329 | - | `integration` `e9c2084ad6` | `33628cc4d3` (fork PR 319), 2026-10-17 | never (fork fix) |
 | `feat/317-oracle-test` | feat | ops#317 | - | `integration` `8f31aaece8` | `33bae7bd4e` (fork PR 320), 2026-10-17 | never (fork feature) |
-| `fix/337-attach-poll` | fix | ops#337, ops#332 | - | `integration` `8f31aaece8` | (fork PR 323) | never (fork fix) |
+| `fix/337-attach-poll` | fix | ops#337, ops#332 | - | `integration` `8f31aaece8` | `855d0c0932` (fork PR 323), 2026-10-17 | never (fork fix) |
+| `fix/347-upto-tolerances` | fix | ops#347 | - | `integration` `33628cc4d3` | (fork PR 321) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 

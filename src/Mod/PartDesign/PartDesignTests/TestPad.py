@@ -119,6 +119,279 @@ def bossCentres(shape):
     )
 
 
+def toleranceState(shape):
+    """Each face's, edge's and vertex's tolerance and each edge's number of curves on surfaces: what
+    a maker can change in place in the TShapes a feature's stored shape shares (ops#347)"""
+
+    def pcurves(edge):
+        n = 0
+        while n < 50:
+            try:
+                if edge.curveOnSurface(n) is None:
+                    break
+            except Exception:  # noqa: BLE001  (past the last one)
+                break
+            n += 1
+        return n
+
+    return (
+        [f.Tolerance for f in shape.Faces],
+        [e.Tolerance for e in shape.Edges],
+        [v.Tolerance for v in shape.Vertexes],
+        [pcurves(e) for e in shape.Edges],
+    )
+
+
+def upToTheLoftSide(test, doc, kind):
+    """ops#347's P5: the loft from the circle r 10 at z 0 to the ellipse 12 x 6 at z 15 as a Body's
+    BaseFeature, a 4 x 4 square in the plane x = 22 whose top is 1e-6 under z 15, and a Pad or
+    Pocket from it up to the loft's side face. BRepFeat raised the loft's top edge and its vertex
+    in place, from 1e-7 to 5e-6, in the base feature's stored shape and the Part::Feature's. The
+    base keeps its tolerances and curves; the feature is valid."""
+    import Sketcher
+
+    V = FreeCAD.Vector
+    loft = Part.makeLoft(
+        [
+            Part.Wire(Part.Circle(V(0, 0, 0), V(0, 0, 1), 10).toShape()),
+            Part.Wire(Part.Ellipse(V(0, 0, 15), 12, 6).toShape()),
+        ],
+        True,
+    )
+    base = doc.addObject("Part::Feature", "Loft")
+    base.Shape = loft
+    body = doc.addObject("PartDesign::Body", "Body")
+    baseFeature = body.newObject("PartDesign::FeatureBase", "BaseFeature")
+    baseFeature.BaseFeature = base
+    doc.recompute()
+    side = next(
+        "Face%d" % i
+        for i, f in enumerate(baseFeature.Shape.Faces, 1)
+        if f.Surface.TypeId != "Part::GeomPlane"
+    )
+    held = [(o.Name, o.Shape, toleranceState(o.Shape)) for o in (base, baseFeature)]
+    sketch = body.newObject("Sketcher::SketchObject", "Square")
+    # Sketch x is world -z, y is y, the normal +x
+    sketch.Placement = FreeCAD.Placement(V(22, 0, 0), FreeCAD.Rotation(V(0, 1, 0), 90))
+    top = -(15 - 1e-6)
+    corners = [V(top, -2, 0), V(top + 4, -2, 0), V(top + 4, 2, 0), V(top, 2, 0)]
+    for i in range(4):
+        sketch.addGeometry(Part.LineSegment(corners[i], corners[(i + 1) % 4]))
+    for i in range(4):
+        sketch.addConstraint(Sketcher.Constraint("Coincident", i, 2, (i + 1) % 4, 1))
+    feature = body.newObject("PartDesign::" + kind, kind)
+    feature.Profile = sketch
+    feature.Type = "UpToFace"
+    feature.UpToFace = (baseFeature, [side])
+    feature.Reversed = True
+    # The maker is what this model tests. Refined, a Pocket whose cut removes nothing but splits
+    # the side adds a curve on surface to the base's edges in place, one more at each recompute
+    # (ops#354), once there is a prism
+    feature.Refine = False
+    doc.recompute()
+    test.assertTrue(feature.isValid(), feature.getStatusString())
+    assertBasesKept(test, held)
+    # The tolerances and curves are what this model tests. Whether BRepFeat builds the prism up
+    # to the lofted B-spline face depends on the platform (empty on Windows, a prism that
+    # overlaps on macOS): no check here depends on it (ops#353)
+    return baseFeature, feature
+
+
+def holdBases(*objects):
+    """The shapes the objects hold now, with their toleranceState(). A shape shares its TShapes
+    with the object's stored one: a maker that raised them in place changes the held state."""
+    return [(o.Name, o.Shape, toleranceState(o.Shape)) for o in objects]
+
+
+def assertBasesKept(test, held):
+    """The held shapes are as they were: the same tolerances and curves on surfaces. A tolerance
+    may differ by an ULP (1e-23 at 1e-7): a boolean's refinement moves the tolerance of an edge
+    or vertex the result shares with the base that much (a Pad up to the last face), and a raise
+    that matters is orders of magnitude more (1e-7 to 5e-6, or 1.8e-15 in the research)."""
+    for name, shape, before in held:
+        after = toleranceState(shape)
+        for kept, was in zip(after[:3], before[:3]):
+            test.assertEqual(len(kept), len(was), name)
+            for x, y in zip(kept, was):
+                test.assertAlmostEqual(x, y, delta=1e-18, msg=name)
+        test.assertEqual(after[3], before[3], name)
+
+
+def planarFaceAt(shape, axis, value):
+    """The name of the face of shape that lies in the plane at value on the axis (0 x, 1 y, 2 z)"""
+    for i, f in enumerate(shape.Faces, 1):
+        if f.Surface.TypeId != "Part::GeomPlane":
+            continue
+        normal = f.normalAt(0, 0)
+        if abs(tuple(normal)[axis]) > 1 - 1e-9 and abs(tuple(f.CenterOfMass)[axis] - value) < 1e-6:
+            return "Face%d" % i
+    raise AssertionError("no planar face at %d = %g" % (axis, value))
+
+
+def topologyCounts(shape):
+    return {
+        kind: len(getattr(shape, kind))
+        for kind in ("Solids", "Shells", "Faces", "Edges", "Vertexes")
+    }
+
+
+def namedFaces(shape):
+    """The area, centre of mass and mapped names of each face of shape that has a mapped name"""
+    names = {}
+    for mapped, indexed in shape.ElementMap.items():
+        if indexed.startswith("Face"):
+            names.setdefault(indexed, set()).add(mapped)
+    return [
+        (shape.getElement(i).Area, shape.getElement(i).CenterOfMass, ns) for i, ns in names.items()
+    ]
+
+
+def assertNamesSurvive(test, source, result, atLeast, apart=()):
+    """Each face of source that is a face of result too (the same area and centre of mass) keeps
+    its mapped names, and there are atLeast of them: the names of what a feature leaves alone do
+    not change with the copies its makers run on (ops#347). The planes (axis, value) in apart
+    are the ones the feature meets: its tool's cap on such a face renames it."""
+    after = namedFaces(result)
+    kept = 0
+    for area, centre, names in namedFaces(source):
+        if any(abs(tuple(centre)[axis] - value) < 1e-6 for axis, value in apart):
+            continue
+        for area2, centre2, names2 in after:
+            if abs(area - area2) < 1e-6 and (centre - centre2).Length < 1e-6:
+                test.assertLessEqual(names, names2, "face at %s" % (tuple(centre),))
+                kept += 1
+                break
+    test.assertGreaterEqual(kept, atLeast)
+
+
+def assertFacesAllNamed(test, shape):
+    mapped = set(shape.ElementMap.values())
+    for i in range(1, len(shape.Faces) + 1):
+        test.assertIn("Face%d" % i, mapped)
+
+
+def tabOnNamedBase(test, doc, kind, upTo):
+    """ops#347 (review of fork PR 321, round 1): a Pad or Pocket from a sketch outside a base that
+    has a real element map (a Pad), up to the base. The base is the box x 0..10, y 5..15, z 0..10;
+    the sketch the square x 2..6, z 2..6 on the XZ plane (y = 0). Pad: a 4 x 4 x 5 tab reaching
+    the face y = 5 (up to a face, the first or last face, or the base itself as the shape).
+    Pocket: the 4 x 4 x 10 hole through the box (up to the face y = 15).
+    Checks the result against the box fused with the tab or cut by the hole, made with plain
+    Part operations: volume, counts of solids, shells, faces, edges and vertices (an
+    uncovered contact would leave the face y = 5 whole, or a second shell), the names of the
+    faces and the tolerances of the base."""
+    V = FreeCAD.Vector
+    body = doc.addObject("PartDesign::Body", "Body")
+    baseSketch = body.newObject("Sketcher::SketchObject", "BaseSketch")
+    TestSketcherApp.CreateRectangleSketch(baseSketch, (0, 5), (10, 10))
+    base = body.newObject("PartDesign::Pad", "Base")
+    base.Profile = baseSketch
+    base.Length = 10
+    doc.recompute()
+    test.assertTrue(base.isValid(), base.getStatusString())
+    held = holdBases(base)
+    xz = [f for f in body.Origin.OriginFeatures if f.Role == "XZ_Plane"][0]
+    sketch = body.newObject("Sketcher::SketchObject", "Tab")
+    sketch.AttachmentSupport = [(xz, "")]
+    sketch.MapMode = "FlatFace"
+    TestSketcherApp.CreateRectangleSketch(sketch, (2, 2), (4, 4))
+    feature = body.newObject("PartDesign::" + kind, kind)
+    feature.Profile = sketch
+    feature.Type = upTo
+    if upTo == "UpToFace":
+        feature.UpToFace = (base, [planarFaceAt(base.Shape, 1, 5 if kind == "Pad" else 15)])
+    feature.Reversed = kind == "Pad"
+    doc.recompute()
+    test.assertTrue(feature.isValid(), feature.getStatusString())
+    assertBasesKept(test, held)
+    box = Part.makeBox(10, 10, 10, V(0, 5, 0))
+    if kind == "Pad":
+        expected = box.fuse(Part.makeBox(4, 5, 4, V(2, 0, 2)))
+    else:
+        expected = box.cut(Part.makeBox(4, 20, 4, V(2, 0, 2)))
+    test.assertAlmostEqual(feature.Shape.Volume, expected.Volume, places=6)
+    test.assertEqual(topologyCounts(feature.Shape), topologyCounts(expected))
+    # The box with the tab: 11 faces (the face y = 5 has the tab's square for a hole), 24 edges,
+    # 16 vertexes. With the hole through it: 10 faces, 24 edges, 16 vertexes
+    test.assertEqual(
+        topologyCounts(feature.Shape),
+        {
+            "Solids": 1,
+            "Shells": 1,
+            "Faces": 11 if kind == "Pad" else 10,
+            "Edges": 24,
+            "Vertexes": 16,
+        },
+    )
+    assertFacesAllNamed(test, feature.Shape)
+    # The box's faces that the tool does not meet (those but y = 5 for the Pad, and y = 15 too up
+    # to the last face, where the tool's cap lies in it; the 4 sides for the Pocket) and, for the
+    # Pad, the tab's 4 sides keep the names the base and the feature's own tool gave them
+    if kind == "Pad":
+        apart = [(1, 5)] + ([(1, 15)] if upTo == "UpToLast" else [])
+        assertNamesSurvive(test, base.Shape, feature.Shape, 6 - len(apart), apart)
+        if upTo != "UpToLast":  # the tool to the last face goes on inside the box
+            assertNamesSurvive(test, feature.AddSubShape, feature.Shape, 4)
+    else:
+        assertNamesSurvive(test, base.Shape, feature.Shape, 4)
+    return base, feature
+
+
+def postInTheGap(test, doc, upTo):
+    """ops#347 (review of fork PR 321, round 1): a Pad from a sketch on a face of the base (a
+    support face is given), up to the face across a gap. The base is a C: the polygon (0,0), (10,0),
+    (10,3), (4,3), (4,7), (10,7), (10,10), (0,10) on the XY plane, 10 high. The sketch is on the top
+    of the lower arm (y = 3, the first face of the gap), a 2 x 2 square, and the Pad goes up to the
+    underside of the upper arm (y = 7) as a face, as the first face, or as the last face (y = 10).
+    The post joins the arms: the result is the C and the 2 x 2 x 4 post."""
+    V = FreeCAD.Vector
+    body = doc.addObject("PartDesign::Body", "Body")
+    baseSketch = body.newObject("Sketcher::SketchObject", "BaseSketch")
+    points = [V(0, 0), V(10, 0), V(10, 3), V(4, 3), V(4, 7), V(10, 7), V(10, 10), V(0, 10)]
+    for start, end in zip(points, points[1:] + points[:1]):
+        baseSketch.addGeometry(Part.LineSegment(start, end), False)
+    base = body.newObject("PartDesign::Pad", "Base")
+    base.Profile = baseSketch
+    base.Length = 10
+    doc.recompute()
+    test.assertTrue(base.isValid(), base.getStatusString())
+    held = holdBases(base)
+    sketch = body.newObject("Sketcher::SketchObject", "Post")
+    sketch.AttachmentSupport = [(base, [planarFaceAt(base.Shape, 1, 3)])]
+    sketch.MapMode = "FlatFace"
+    # The sketch's x is the world's -x and its y is z, its origin (0, 3, 0): the square x 6..8, z 4..6
+    TestSketcherApp.CreateRectangleSketch(sketch, (-8, 4), (2, 2))
+    doc.recompute()
+    # Where the sketch landed on the lower arm's top: a 2 x 2 square inside the face
+    square = Part.Face(sketch.Shape.Wires[0])
+    test.assertAlmostEqual(square.Area, 4, places=6)
+    test.assertAlmostEqual(square.BoundBox.YMin, 3, places=6)
+    test.assertAlmostEqual(square.BoundBox.YMax, 3, places=6)
+    test.assertTrue(
+        4 <= square.BoundBox.XMin and square.BoundBox.XMax <= 10, "the square is on the face"
+    )
+    test.assertTrue(0 <= square.BoundBox.ZMin and square.BoundBox.ZMax <= 10)
+    feature = body.newObject("PartDesign::Pad", "Pad")
+    feature.Profile = sketch
+    feature.Type = upTo
+    if upTo == "UpToFace":
+        feature.UpToFace = (base, [planarFaceAt(base.Shape, 1, 7)])
+    doc.recompute()
+    test.assertTrue(feature.isValid(), feature.getStatusString())
+    assertBasesKept(test, held)
+    expected = base.Shape.fuse(square.extrude(V(0, 4, 0)))
+    test.assertAlmostEqual(feature.Shape.Volume, base.Shape.Volume + 4 * 4, places=6)
+    test.assertAlmostEqual(feature.Shape.Volume, expected.Volume, places=6)
+    test.assertEqual(topologyCounts(feature.Shape), topologyCounts(expected))
+    test.assertEqual(len(feature.Shape.Solids), 1)
+    assertFacesAllNamed(test, feature.Shape)
+    # The C's faces away from the post: 8 of its 10 faces (the post meets y = 3 and y = 7, and
+    # y = 10 up to the last face)
+    apart = [(1, 3), (1, 7)] + ([(1, 10)] if upTo == "UpToLast" else [])
+    assertNamesSurvive(test, base.Shape, feature.Shape, 10 - len(apart), apart)
+    return base, feature
+
+
 class TestPad(unittest.TestCase):
     def setUp(self):
         self.Doc = FreeCAD.newDocument("PartDesignTestPad")
@@ -665,6 +938,33 @@ class TestPad(unittest.TestCase):
                     self.assertEqual(bossCentres(pad.Shape), [(0.0, -5.0), (0.0, 5.0)])
                     self.assertFalse(fillet.isValid())
                     self.assertIn("Edge", fillet.getStatusString())
+                finally:
+                    FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToFaceLeavesTheBaseAlone(self):
+        # ops#347: BRepFeat runs on copies of the base and the up-to face
+        base, pad = upToTheLoftSide(self, self.Doc, "Pad")
+        self.assertTrue(pad.Shape.isValid())
+
+    def testPadUpToABaseWithNames(self):
+        """ops#347, review of fork PR 321: a Pad up to the base keeps the base's names and has
+        the topology of the box fused with the tab, whichever way it is given."""
+        for upTo in ("UpToFace", "UpToFirst", "UpToLast", "UpToShape"):
+            with self.subTest(upTo=upTo):
+                doc = FreeCAD.newDocument("PartDesignTestPadTab")
+                try:
+                    tabOnNamedBase(self, doc, "Pad", upTo)
+                finally:
+                    FreeCAD.closeDocument(doc.Name)
+
+    def testPadFromAFaceOfTheBaseUpToTheFaceAcrossAGap(self):
+        """ops#347, review of fork PR 321: a support face of the base, up to a face and the last
+        face."""
+        for upTo in ("UpToFace", "UpToLast"):
+            with self.subTest(upTo=upTo):
+                doc = FreeCAD.newDocument("PartDesignTestPadPost")
+                try:
+                    postInTheGap(self, doc, upTo)
                 finally:
                     FreeCAD.closeDocument(doc.Name)
 

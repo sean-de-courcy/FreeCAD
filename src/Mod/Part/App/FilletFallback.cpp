@@ -14,6 +14,7 @@
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
+#include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
@@ -26,6 +27,7 @@
 #include <BRepPrimAPI_MakeSphere.hxx>
 #include <BRepPrimAPI_MakeTorus.hxx>
 #include <BRepTools_History.hxx>
+#include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <Bnd_Box.hxx>
 #include <BRepBndLib.hxx>
@@ -47,6 +49,8 @@
 #include <TopTools_ListOfShape.hxx>
 #include <TopTools_ShapeMapHasher.hxx>
 #include <TopoDS.hxx>
+#include <TopoDS_Compound.hxx>
+#include <TopoDS_Iterator.hxx>
 #include <gp.hxx>
 #include <gp_Ax2.hxx>
 #include <gp_Circ.hxx>
@@ -2275,6 +2279,32 @@ TopoShape makerInput(const TopoShape& base, std::vector<TopoShape>& edges)
         edge = input.getSubTopoShape(TopAbs_EDGE, index);
     }
     return input;
+}
+
+std::vector<TopoShape> makerInputs(const std::vector<TopoShape>& shapes)
+{
+    TopoDS_Compound compound;
+    BRep_Builder builder;
+    builder.MakeCompound(compound);
+    for (const auto& shape : shapes) {
+        if (!shape.isNull()) {
+            builder.Add(compound, shape.getShape());
+        }
+    }
+    // The topology alone, as makerInput()'s: one copy of them all keeps what they share shared
+    const TopoDS_Shape copied = BRepBuilderAPI_Copy(compound, false).Shape();
+    std::vector<TopoShape> copies;
+    TopoDS_Iterator it(copied);
+    for (const auto& shape : shapes) {
+        TopoShape copy(shape);
+        if (!shape.isNull()) {
+            // As makeElementCopy() keeps a copy's names: its sub-shapes come in the same order
+            copy.setShape(it.Value(), false);
+            it.Next();
+        }
+        copies.push_back(copy);
+    }
+    return copies;
 }
 
 TopoDS_Face thinFace(const TopoDS_Shape& result, const TopoDS_Shape& base)

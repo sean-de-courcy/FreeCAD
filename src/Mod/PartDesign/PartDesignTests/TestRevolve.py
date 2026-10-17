@@ -3093,6 +3093,141 @@ class TestRevolve(unittest.TestCase):
                         self.assertFalse(revolution.isValid())
                         self.assertIn("names several faces", revolution.getStatusString())
 
+    @staticmethod
+    def sweptByTheProfile(sides=1):
+        """The volume swept by the profile of revolveUpToTheCylinderSide() until the cylinder's
+        wall, per side: the profile is x 6..10 from the axis (x = 14) and 3 high, and at distance
+        rho from the axis it turns by phi(rho) before it is at distance 10 from the cylinder's
+        axis, (14 + rho cos phi)^2 + (rho sin phi)^2 = 100, that is cos phi =
+        -(96 + rho^2) / (28 rho). The volume is 3 * integral of rho phi(rho) d rho from 6 to 10
+        (Simpson's rule); 228.05374 for one side."""
+        n = 200
+        h = (10 - 6) / n
+
+        def f(rho):
+            return 3 * rho * math.acos(-(96 + rho**2) / (28 * rho))
+
+        total = f(6) + f(10)
+        total += sum((4 if i % 2 else 2) * f(6 + i * h) for i in range(1, n))
+        return sides * total * h / 3
+
+    def revolveUpToTheCylinderSide(self, kind, sideType="One side", named=False):
+        # ops#347: a cylinder r 10 h 15 as the Body's BaseFeature (a Part::Feature, or with
+        # named a Pad of a circle, which has an element map), the profile x 20..24,
+        # z 12..15 (its top flush with the cylinder's), revolved about the vertical at x = 14 up to
+        # the cylinder's side (Two sides: on both, the sides mirror each other in the plane y = 0).
+        # Unfixed, the sweep's split by the face raised a vertex of the base's by an ULP
+        # (Revolution) and added a curve on a surface to its edges (Groove), in the base feature's
+        # stored shape and the Part::Feature's
+        from PartDesignTests.TestPad import assertBasesKept, holdBases, toleranceState
+
+        V = FreeCAD.Vector
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        if named:
+            circle = body.newObject("Sketcher::SketchObject", "CylinderSketch")
+            circle.addGeometry(Part.Circle(V(0, 0, 0), V(0, 0, 1), 10), False)
+            baseFeature = body.newObject("PartDesign::Pad", "Cylinder")
+            baseFeature.Profile = circle
+            baseFeature.Length = 15
+            base = baseFeature
+        else:
+            base = self.Doc.addObject("Part::Feature", "Cylinder")
+            base.Shape = Part.makeCylinder(10, 15)
+            baseFeature = body.newObject("PartDesign::FeatureBase", "BaseFeature")
+            baseFeature.BaseFeature = base
+        self.Doc.recompute()
+        side = next(
+            "Face%d" % i
+            for i, f in enumerate(baseFeature.Shape.Faces, 1)
+            if f.Surface.TypeId == "Part::GeomCylinder"
+        )
+        held = holdBases(base, baseFeature) if base is not baseFeature else holdBases(base)
+        sketch = body.newObject("Sketcher::SketchObject", "Profile")
+        # Sketch x is world x, y is z; its V axis the vertical at x = 14
+        sketch.Placement = FreeCAD.Placement(V(14, 0, 0), FreeCAD.Rotation(V(1, 0, 0), 90))
+        corners = [V(6, 12, 0), V(10, 12, 0), V(10, 15, 0), V(6, 15, 0)]
+        for i in range(4):
+            sketch.addGeometry(Part.LineSegment(corners[i], corners[(i + 1) % 4]))
+        for i in range(4):
+            sketch.addConstraint(Sketcher.Constraint("Coincident", i, 2, (i + 1) % 4, 1))
+        # The sweep added curves on surfaces to the profile's edges, the sketch's stored shape's
+        self.Doc.recompute()
+        held += holdBases(sketch)
+        feature = body.newObject("PartDesign::" + kind, kind)
+        feature.Profile = sketch
+        feature.ReferenceAxis = (sketch, ["V_Axis"])
+        feature.SideType = sideType
+        feature.Type = "UpToFace"
+        feature.UpToFace = (baseFeature, [side])
+        if sideType == "Two sides":
+            feature.Type2 = "UpToFace"
+            feature.UpToFace2 = (baseFeature, [side])
+        self.Doc.recompute()
+        self.assertTrue(feature.isValid(), feature.getStatusString())
+        assertBasesKept(self, held)
+        self.assertTrue(feature.Shape.isValid())
+        # The tool as the unfixed build swept it
+        sides = 2 if sideType == "Two sides" else 1
+        self.assertAlmostEqual(feature.AddSubShape.Volume, self.sweptByTheProfile(sides), places=4)
+        self.assertAlmostEqual(self.sweptByTheProfile(), 228.05374, places=5)
+        if named:
+            from PartDesignTests.TestPad import (
+                assertFacesAllNamed,
+                assertNamesSurvive,
+                topologyCounts,
+            )
+
+            # The tool's top is flush with the cylinder's: the refined result has one top face
+            expected = baseFeature.Shape.fuse(feature.AddSubShape)
+            if feature.Refine:
+                expected = expected.removeSplitter()
+            if kind == "Groove":
+                expected = baseFeature.Shape
+            self.assertEqual(topologyCounts(feature.Shape), topologyCounts(expected))
+            assertFacesAllNamed(self, feature.Shape)
+            # The cylinder's bottom face is the one the tool does not meet; the wall and the
+            # top are touched by it
+            assertNamesSurvive(self, baseFeature.Shape, feature.Shape, 1, [(2, 15)])
+        return baseFeature, feature
+
+    def testRevolutionUpToFaceLeavesTheBaseAlone(self):
+        base, revolution = self.revolveUpToTheCylinderSide("Revolution")
+        self.assertAlmostEqual(
+            revolution.Shape.Volume,
+            base.Shape.Volume + revolution.AddSubShape.Volume,
+            places=6,
+        )
+
+    def testGrooveUpToFaceLeavesTheBaseAlone(self):
+        # The tool is outside the cylinder: the groove removes nothing
+        base, groove = self.revolveUpToTheCylinderSide("Groove")
+        self.assertAlmostEqual(groove.Shape.Volume, base.Shape.Volume, places=6)
+
+    def testRevolutionUpToFaceOnBothSidesLeavesTheBaseAlone(self):
+        """ops#347, review of fork PR 321, round 1: Two sides, each up to the face (UpToFace2),
+        on a named base (a Pad of a circle): both sweeps run on the copies."""
+        for named in (False, True):
+            with self.subTest(named=named):
+                self.tearDown()
+                self.Doc = FreeCAD.newDocument("PartDesignTestRevolve")
+                base, revolution = self.revolveUpToTheCylinderSide(
+                    "Revolution", "Two sides", named
+                )
+                self.assertAlmostEqual(
+                    revolution.Shape.Volume,
+                    base.Shape.Volume + revolution.AddSubShape.Volume,
+                    places=6,
+                )
+
+    def testRevolutionUpToFaceKeepsTheNamedBaseNames(self):
+        """ops#347, review of fork PR 321, round 1: the same on a named base, one side."""
+        base, revolution = self.revolveUpToTheCylinderSide("Revolution", named=True)
+        self.assertAlmostEqual(
+            revolution.Shape.Volume,
+            base.Shape.Volume + revolution.AddSubShape.Volume,
+            places=6,
+        )
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("PartDesignTestRevolve")
