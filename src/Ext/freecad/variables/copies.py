@@ -586,7 +586,8 @@ def _show(value: Quantity) -> str:
 
 def _check(doc, plan: Plan, result: ImportResult):
     """Section 2.5, step 3: each variable's text, evaluated by FreeCAD with its copy as owner,
-    has the variable's unit and the translator's value."""
+    has the variable's unit and the translator's value, and so has the value the variable
+    stores (what its users read)."""
     for i, copy in enumerate(result.copies):
         if "Invalid" in copy.State:
             raise ImportCheckFailed(f"{copy.Label} doesn't recompute: {copy.State}")
@@ -598,6 +599,7 @@ def _check(doc, plan: Plan, result: ImportResult):
             where = f"{copy.Label}.{var.freecad_name}"
             try:
                 got = to_quantity(copy.evalExpression(text), where)
+                stored = to_quantity(getattr(copy, var.freecad_name), where)
             except Exception as e:  # noqa: BLE001 (any failure is the check's)
                 raise ImportCheckFailed(f"{where}: FreeCAD can't evaluate {text!r} "
                                         f"(from {var.variable.expression!r}): {e}") from None
@@ -605,6 +607,10 @@ def _check(doc, plan: Plan, result: ImportResult):
                 raise ImportCheckFailed(
                     f"{where}: FreeCAD computes {_show(got)} for {text!r}, the translator "
                     f"{_show(expected)} for {var.variable.expression!r}")
+            if stored.dims != got.dims or not onshape.values_agree(stored.value, got.value):
+                raise ImportCheckFailed(
+                    f"{where}: the variable holds {_show(stored)}, its expression {text!r} "
+                    f"computes {_show(got)}")
 
 
 def detach(copy):
