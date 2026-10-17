@@ -45,6 +45,7 @@
 #include <BRepAlgoAPI_Section.hxx>
 #include <BRepAlgoAPI_Splitter.hxx>
 #include <BRepBndLib.hxx>
+#include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
@@ -54,6 +55,7 @@
 #include <BRepClass3d_SolidClassifier.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepGProp.hxx>
+#include <BRepLib.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeRevol.hxx>
 #include <BRepTools.hxx>
@@ -72,6 +74,7 @@
 #include <GeomAPI_IntCS.hxx>
 #include <GeomAPI_ProjectPointOnSurf.hxx>
 #include <GeomAdaptor_Surface.hxx>
+#include <GeomConvert.hxx>
 #include <GeomConvert_BSplineSurfaceToBezierSurface.hxx>
 #include <GProp_GProps.hxx>
 #include <GCPnts_AbscissaPoint.hxx>
@@ -350,6 +353,35 @@ TopoDS_Face reachableUpToFace(
         );
     }
     return maker.Face();
+}
+
+// A copy of the up-to face with its seams' tolerance cut back to what their curves need, or a null
+// face when that changes no seam's tolerance. A seam isn't a boundary: the face goes on across it,
+// so its tolerance says nothing about where the face is. Raised with the rest of the face's
+// (fixTolerance, a tolerant import), it let the splitter merge the seam with a face of the sweep
+// that it runs nearly along: up to a torus turned so that its seam meridian dips 0.1 inside the
+// profile's outer cylinder, with the base's tolerance 0.02 the sweep went on into the torus (39.04
+// instead of 13.35), and with 0.03 it came out 1.25 short, with no error, whichever way the torus
+// was parametrized (ops#293, q4). The face's other edges keep theirs: a face flush with the
+// profile within its tolerance relies on it (ops#338).
+TopoDS_Face withExactSeams(const TopoDS_Face& face)
+{
+    BRepBuilderAPI_Copy copy(face);
+    const TopoDS_Face result = TopoDS::Face(copy.Shape());
+    BRep_Builder builder;
+    bool changed = false;
+    for (TopExp_Explorer explorer(result, TopAbs_EDGE); explorer.More(); explorer.Next()) {
+        const TopoDS_Edge& edge = TopoDS::Edge(explorer.Current());
+        if (BRep_Tool::Degenerated(edge) || !BRep_Tool::IsClosed(edge, result)) {
+            continue;
+        }
+        const double before = BRep_Tool::Tolerance(edge);
+        builder.UpdateEdge(edge, Precision::Confusion());
+        builder.SameParameter(edge, Standard_False);
+        BRepLib::SameParameter(edge, Precision::Confusion());
+        changed = changed || BRep_Tool::Tolerance(edge) < before - Precision::Confusion();
+    }
+    return changed ? result : TopoDS_Face();
 }
 
 // The tolerance of the checks of the profile against the up-to face, ten times the largest of
@@ -1896,6 +1928,42 @@ bool toleranceHolds(const TopoDS_Shape& tool, std::initializer_list<TopoDS_Shape
     return largestTolerance(tool) <= limit;
 }
 
+double largestEdgeTolerance(const TopoDS_Shape& shape)
+{
+    double largest = 0.0;
+    for (TopExp_Explorer edges(shape, TopAbs_EDGE); edges.More(); edges.Next()) {
+        largest = std::max(largest, BRep_Tool::Tolerance(TopoDS::Edge(edges.Current())));
+    }
+    return largest;
+}
+
+// Whether a fuse or cut of a tool up to a face with the base is built to the precision of the
+// two: no edge tolerance above 1e-3 of the tool's size, or 1.5 times the largest edge tolerance
+// of the base and the tool. Up to a torus whose seam meridian, loosened to 0.3, runs nearly along
+// the tool's outer cylinder, the fuse made that meridian the edge between them, at tolerance 0.916
+// (0.676 at 0.2), and the result held 0.06 to 0.09 more than base and tool, with a right tool and
+// no other error (ops#293, PR 307 review). Over 235 accepted cases (turns 320 to 334 and 0, base
+// tolerance 0.02 to 0.3) the right results' edges kept the inputs' largest tolerance, and the four
+// wrong ones rose 3.05 to 3.38 times. Vertices are left out: the fuse widens them to cover the
+// edges ending there, up to 4.1 times in right results (0.0821 on a base of 0.02).
+bool combinedWithinTolerance(
+    const TopoDS_Shape& result,
+    const TopoDS_Shape& base,
+    const TopoDS_Shape& tool
+)
+{
+    Bnd_Box box;
+    BRepBndLib::Add(tool, box);
+    if (box.IsVoid()) {
+        return false;
+    }
+    const double limit = std::max(
+        1e-3 * std::sqrt(box.SquareExtent()),
+        1.5 * std::max(largestEdgeTolerance(base), largestEdgeTolerance(tool))
+    );
+    return largestEdgeTolerance(result) <= limit;
+}
+
 // The certificate that the sweep up to the face is what first contact gives (ops#293 round 5;
 // notes\revolution-upto-first-contact.md, sections 2 and 3). The sweep U is right exactly when
 // first contact doesn't jump inside the profile, and then (i) no edge of the up-to face lies inside
@@ -2278,39 +2346,61 @@ std::optional<gp_Pnt> silhouetteOn(
         ));
     }
     Handle(Geom_BSplineSurface) surface;
+    TopoDS_Face nurbs;
     try {
         BRepBuilderAPI_NurbsConvert convert(face, Standard_True);
         TopExp_Explorer converted(convert.Shape(), TopAbs_FACE);
-        if (!converted.More()) {
-            throw checkFailed();
+        if (converted.More()) {
+            nurbs = TopoDS::Face(converted.Current());
+            surface = Handle(Geom_BSplineSurface)::DownCast(BRep_Tool::Surface(nurbs));
         }
-        const TopoDS_Face nurbs = TopoDS::Face(converted.Current());
-        surface = Handle(Geom_BSplineSurface)::DownCast(BRep_Tool::Surface(nurbs));
-        if (surface.IsNull()) {
-            throw checkFailed();
-        }
-        surface = Handle(Geom_BSplineSurface)::DownCast(surface->Copy());
-        // Only the face's range: a whole cylinder or torus for a part of it costs patches
+    }
+    catch (const Standard_Failure&) {
+        surface.Nullify();
+    }
+    try {
         Standard_Real uLow = 0.0;
         Standard_Real uHigh = 0.0;
         Standard_Real vLow = 0.0;
         Standard_Real vHigh = 0.0;
-        BRepTools::UVBounds(nurbs, uLow, uHigh, vLow, vHigh);
-        Standard_Real uFirst = 0.0;
-        Standard_Real uLast = 0.0;
-        Standard_Real vFirst = 0.0;
-        Standard_Real vLast = 0.0;
-        surface->Bounds(uFirst, uLast, vFirst, vLast);
-        if (!surface->IsUPeriodic()) {
-            uLow = std::max(uLow, uFirst);
-            uHigh = std::min(uHigh, uLast);
+        if (surface.IsNull()) {
+            // The face's surface alone, trimmed to the face's range, is all the check needs. The
+            // face's conversion failed on a whole torus face whose minor range is [-pi, pi]
+            // ("Knots interval values too close"; Part.makeTorus from -180 to 180 degrees), and
+            // every Revolution up to it failed as unchecked (ops#293, q4).
+            BRepTools::UVBounds(face, uLow, uHigh, vLow, vHigh);
+            surface = GeomConvert::SurfaceToBSplineSurface(new Geom_RectangularTrimmedSurface(
+                BRep_Tool::Surface(face),
+                uLow,
+                uHigh,
+                vLow,
+                vHigh
+            ));
+            if (surface.IsNull()) {
+                throw checkFailed();
+            }
         }
-        if (!surface->IsVPeriodic()) {
-            vLow = std::max(vLow, vFirst);
-            vHigh = std::min(vHigh, vLast);
-        }
-        if (uHigh - uLow > Precision::PConfusion() && vHigh - vLow > Precision::PConfusion()) {
-            surface->Segment(uLow, uHigh, vLow, vHigh);
+        else {
+            surface = Handle(Geom_BSplineSurface)::DownCast(surface->Copy());
+            // Only the face's range: a whole cylinder or torus for a part of it costs patches
+            BRepTools::UVBounds(nurbs, uLow, uHigh, vLow, vHigh);
+            Standard_Real uFirst = 0.0;
+            Standard_Real uLast = 0.0;
+            Standard_Real vFirst = 0.0;
+            Standard_Real vLast = 0.0;
+            surface->Bounds(uFirst, uLast, vFirst, vLast);
+            if (!surface->IsUPeriodic()) {
+                uLow = std::max(uLow, uFirst);
+                uHigh = std::min(uHigh, uLast);
+            }
+            if (!surface->IsVPeriodic()) {
+                vLow = std::max(vLow, vFirst);
+                vHigh = std::min(vHigh, vLast);
+            }
+            if (uHigh - uLow > Precision::PConfusion()
+                && vHigh - vLow > Precision::PConfusion()) {
+                surface->Segment(uLow, uHigh, vLow, vHigh);
+            }
         }
         if (surface->IsUPeriodic()) {
             surface->SetUNotPeriodic();
@@ -3174,6 +3264,13 @@ void Revolved::setResult(const TopoShape& base, const TopoShape& revolved, bool 
                     "Could not combine the revolution with the base: the result's volume is wrong"
                 ));
             }
+            if (!combinedWithinTolerance(result.getShape(), base.getShape(), tool.getShape())) {
+                throw Base::RuntimeError(QT_TRANSLATE_NOOP(
+                    "Exception",
+                    "Could not combine the revolution with the base: the result's edges don't meet "
+                    "within the precision of the base and the revolution"
+                ));
+            }
         }
         // store shape before refinement
         this->rawShape = result;
@@ -3258,36 +3355,78 @@ TopoShape Revolved::tryToRevolveToFace(
     // in. Where a profile edge lies on the face and leaves it tangentially, the same sweep came out
     // with an edge of tolerance 0.54 in the sketch's frame and 1.5e-4 in the body's (ops#338); a
     // turn of 1 or 2 radians gave 8e-5 to 1.5e-4 in every case. Each try faces the same checks.
-    bool built = false;
-    for (const double turn : {0.0, 1.0, 2.0}) {
-        gp_Trsf rotation;
-        rotation.SetRotation(axis, turn);
-        const TopLoc_Location there(rotation);
-        const TopoShape profile = sketchshape.moved(there);
-        const TopoDS_Face face = TopoDS::Face(reachable.Moved(there));
-        TopTools_IndexedMapOfShape faceParts;
-        TopoShape sweep;
+    const auto sweepToFirstContact = [&](const TopoDS_Face& upTo) {
+        bool built = false;
+        for (const double turn : {0.0, 1.0, 2.0}) {
+            gp_Trsf rotation;
+            rotation.SetRotation(axis, turn);
+            const TopLoc_Location there(rotation);
+            const TopoShape profile = sketchshape.moved(there);
+            const TopoDS_Face face = TopoDS::Face(upTo.Moved(there));
+            TopTools_IndexedMapOfShape faceParts;
+            TopoShape sweep;
+            try {
+                sweep = sweepUpToFace(makeTopoShape(), profile, face, axis, tolerance, faceParts);
+            }
+            catch (const Standard_Failure&) {
+                continue;
+            }
+            built = true;
+            if (!sweep.isValid()
+                || !toleranceHolds(sweep.getShape(), {profile.getShape(), face})) {
+                continue;
+            }
+            certifyFirstContact(
+                sweep.getShape(),
+                faceParts,
+                face,
+                profile.getShape(),
+                axis,
+                tolerance
+            );
+            return sweep.moved(there.Inverted());
+        }
+        if (!built) {
+            throw Base::RuntimeError(
+                QT_TRANSLATE_NOOP("Exception", "Could not revolve up to the face")
+            );
+        }
+        throw Base::RuntimeError(QT_TRANSLATE_NOOP(
+            "Exception",
+            "Could not revolve up to the face: the result's edges don't meet within the precision "
+            "of the profile and the face"
+        ));
+    };
+    // The sweep is split by the face as it is, so that its face parts are the base's. When the
+    // face's seams are looser than their curves need (withExactSeams()), the split is made again
+    // with the seams exact, and the two sweeps must agree. A seam merged with a sweep face it runs
+    // nearly along passes the certificate, which takes a seam for no boundary (ops#293, q4: 39.04
+    // instead of 13.35, or 0.036 short). Split by the exact copy alone, the tool's face parts no
+    // longer matched the base's face, and the fuse with the base gave the base's volume alone.
+    TopoShape sweep = sweepToFirstContact(reachable);
+    const TopoDS_Face exactSeams = withExactSeams(reachable);
+    if (!exactSeams.IsNull()) {
+        bool agree = false;
         try {
-            sweep = sweepUpToFace(makeTopoShape(), profile, face, axis, tolerance, faceParts);
+            const auto [volume, error] = solidVolume(sweep.getShape());
+            const auto [exactVolume, exactError] =
+                solidVolume(sweepToFirstContact(exactSeams).getShape());
+            agree = std::fabs(volume - exactVolume)
+                <= 1e-6 * (volume + exactVolume) + error + exactError + Precision::Confusion();
+        }
+        catch (const Base::Exception&) {
         }
         catch (const Standard_Failure&) {
-            continue;
         }
-        built = true;
-        if (!sweep.isValid() || !toleranceHolds(sweep.getShape(), {profile.getShape(), face})) {
-            continue;
+        if (!agree) {
+            throw Base::RuntimeError(QT_TRANSLATE_NOOP(
+                "Exception",
+                "Could not revolve up to the face: the result's edges don't meet within the "
+                "precision of the profile and the face"
+            ));
         }
-        certifyFirstContact(sweep.getShape(), faceParts, face, profile.getShape(), axis, tolerance);
-        return sweep.moved(there.Inverted());
     }
-    if (!built) {
-        throw Base::RuntimeError(QT_TRANSLATE_NOOP("Exception", "Could not revolve up to the face"));
-    }
-    throw Base::RuntimeError(QT_TRANSLATE_NOOP(
-        "Exception",
-        "Could not revolve up to the face: the result's edges don't meet within the precision of "
-        "the profile and the face"
-    ));
+    return sweep;
 }
 
 TopoShape Revolved::generateSingleRevolutionSide(
