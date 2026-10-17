@@ -171,32 +171,58 @@ struct Watched
 {
     fastsignals::connection recomputed;
     std::set<std::string> names;
-    // Each container's Placement when it last recomputed: one that recomputes in place moves
-    // nothing, and the walk over the names is skipped. Keyed by the container's document and ID:
-    // the document's recompute signal also reports other documents' objects, whose names may be
-    // the same, and an ID is never reused after a delete
-    std::map<std::pair<const App::Document*, long>, Base::Placement> placements;
 };
 std::map<const App::Document*, Watched> watchedByDocument;
+// Each container's Placement when it last recomputed: one that recomputes in place moves nothing,
+// and the walk over the names is skipped. Keyed by the container's document and ID: a document's
+// recompute also reports the objects of other documents it recomputes, whose names may be the
+// same, and an ID is never reused after a delete. One map for every document, each document
+// watched once there is anything to watch: a map per watching document kept a move seen in
+// another document's recompute from the next one's (fork PR 306 review round 1). A deleted
+// document's entries go, so a new document at its address starts with none
+std::map<std::pair<const App::Document*, long>, Base::Placement> containerPlacements;
 std::mutex watchedMutex;
+
+// The objects of `watched` whose link frames the move changed
+void collectMoved(const App::Document* doc, Watched& watched, std::vector<App::DocumentObject*>& moved)
+{
+    auto& names = watched.names;
+    for (auto name = names.begin(); name != names.end();) {
+        auto obj = doc->getObject(name->c_str());
+        auto attached = obj ? obj->getExtensionByType<AttachExtension>(true) : nullptr;
+        if (!attached || !attached->linkFramesAcross()) {
+            name = names.erase(name);
+            continue;
+        }
+        // On the main thread with the worker blocked, or on the recompute's own thread: the
+        // check for a recompute beside it doesn't apply
+        if (!obj->isTouched() && attached->linkFramesDiffer()) {
+            moved.push_back(obj);
+        }
+        ++name;
+    }
+}
 
 void containerRecomputed(const App::Document* doc, const App::DocumentObject& recomputed)
 {
-    if (!recomputed.hasExtension(App::GeoFeatureGroupExtension::getExtensionClassTypeId())
-        || doc->testStatus(App::Document::Restoring) || doc->isPerformingTransaction()) {
+    if (!recomputed.hasExtension(App::GeoFeatureGroupExtension::getExtensionClassTypeId())) {
         return;
+    }
+    // Neither the recomputing document nor the container's own restoring or undoing
+    for (auto document : {doc, static_cast<const App::Document*>(recomputed.getDocument())}) {
+        if (document
+            && (document->testStatus(App::Document::Restoring)
+                || document->isPerformingTransaction())) {
+            return;
+        }
     }
     auto placement
         = freecad_cast<App::PropertyPlacement*>(recomputed.getPropertyByName("Placement"));
     std::vector<App::DocumentObject*> moved;
     {
         std::lock_guard lock(watchedMutex);
-        auto it = watchedByDocument.find(doc);
-        if (it == watchedByDocument.end()) {
-            return;
-        }
         if (placement && recomputed.getNameInDocument()) {
-            auto [last, added] = it->second.placements.try_emplace(
+            auto [last, added] = containerPlacements.try_emplace(
                 std::make_pair(recomputed.getDocument(), recomputed.getID()),
                 placement->getValue()
             );
@@ -205,24 +231,27 @@ void containerRecomputed(const App::Document* doc, const App::DocumentObject& re
             }
             last->second = placement->getValue();
         }
-        auto& names = it->second.names;
-        for (auto name = names.begin(); name != names.end();) {
-            auto obj = doc->getObject(name->c_str());
-            auto attached = obj ? obj->getExtensionByType<AttachExtension>(true) : nullptr;
-            if (!attached || !attached->linkFramesAcross()) {
-                name = names.erase(name);
-                continue;
-            }
-            // On the main thread with the worker blocked, or on the recompute's own thread: the
-            // check for a recompute beside it doesn't apply
-            if (!obj->isTouched() && attached->linkFramesDiffer()) {
-                moved.push_back(obj);
-            }
-            ++name;
+        // Every document's objects, not only the recomputing one's: those in the container's own
+        // document may have run before it moved in their recompute, and would wait for the next
+        // one to be seen in another's. Supports are in the attached object's document, so no other
+        // document's frames run through the container today; walking them all costs only on a move
+        for (auto& [document, watched] : watchedByDocument) {
+            collectMoved(document, watched, moved);
         }
     }
     for (auto obj : moved) {
         obj->touch();
+    }
+}
+
+// Under watchedMutex
+void watchRecomputes(App::Document* doc)
+{
+    auto& watched = watchedByDocument[doc];
+    if (!watched.recomputed.connected()) {
+        watched.recomputed = doc->signalRecomputedObject.connect(
+            [doc](const App::DocumentObject& recomputed) { containerRecomputed(doc, recomputed); }
+        );
     }
 }
 
@@ -232,27 +261,51 @@ void watchContainers(App::DocumentObject* obj)
     if (!doc || !obj->getNameInDocument()) {
         return;
     }
-    static auto deleted = App::GetApplication().signalDeleteDocument.connect(
-        [](const App::Document& gone) {
-            std::lock_guard lock(watchedMutex);
-            auto it = watchedByDocument.find(&gone);
-            if (it != watchedByDocument.end()) {
-                it->second.recomputed.disconnect();
-                watchedByDocument.erase(it);
-            }
-        }
-    );
-    (void)deleted;
     std::lock_guard lock(watchedMutex);
-    auto& watched = watchedByDocument[doc];
-    if (!watched.recomputed.connected()) {
-        watched.recomputed = doc->signalRecomputedObject.connect(
-            [doc](const App::DocumentObject& recomputed) { containerRecomputed(doc, recomputed); }
-        );
-    }
-    watched.names.emplace(obj->getNameInDocument());
+    // Already watched since the module loaded, or since the document was made
+    watchRecomputes(doc);
+    watchedByDocument[doc].names.emplace(obj->getNameInDocument());
 }
 }  // namespace
+
+namespace Part
+{
+// Every document's recomputes are watched, from the module's load on the main thread: a container
+// recomputed by another document's recompute is reported there. Not from watchContainers(), which
+// positionBySupport() calls on the recompute's worker while documents may open or close (fork PR
+// 306 review round 2). Called by AppPart.cpp's module init
+void registerContainerWatch()
+{
+    static bool registered = false;
+    if (registered) {
+        return;
+    }
+    registered = true;
+    App::GetApplication().signalNewDocument.connect([](const App::Document& document, bool) {
+        std::lock_guard lock(watchedMutex);
+        watchRecomputes(const_cast<App::Document*>(&document));
+    });
+    App::GetApplication().signalDeleteDocument.connect([](const App::Document& gone) {
+        std::lock_guard lock(watchedMutex);
+        auto it = watchedByDocument.find(&gone);
+        if (it != watchedByDocument.end()) {
+            it->second.recomputed.disconnect();
+            watchedByDocument.erase(it);
+        }
+        std::erase_if(containerPlacements, [&gone](const auto& entry) {
+            return entry.first.first == &gone;
+        });
+    });
+    App::GetApplication().signalDeletedObject.connect([](const App::DocumentObject& gone) {
+        std::lock_guard lock(watchedMutex);
+        containerPlacements.erase(std::make_pair(gone.getDocument(), gone.getID()));
+    });
+    std::lock_guard lock(watchedMutex);
+    for (auto document : App::GetApplication().getDocuments()) {
+        watchRecomputes(document);
+    }
+}
+}  // namespace Part
 
 EXTENSION_PROPERTY_SOURCE(Part::AttachExtension, App::DocumentObjectExtension)
 

@@ -118,3 +118,45 @@ class AttachAcrossContainersTest(unittest.TestCase):
                 datum.MapMode = "FlatFace"
                 self.doc.recompute()
                 self.assertOnFace(datum, globalElement(box, top))
+
+    def testPartMovedInAnotherDocumentsRecompute(self):
+        """Review round 1 of fork PR 306 (ops#342): a top-level datum plane on the top of a box
+        in PA, PA made after the plane, its z from a VarSet, and PA linked from a second document,
+        whose recompute recomputes PA. Height 35 and the other document's recompute move PA (the
+        plane isn't in that recompute); Height 10 again and this document's recompute: the plane,
+        whose frames differ, runs before PA moves back. A watch that knew only its own document's
+        recomputes still had 10 for PA: the plane stayed at z 45, untouched. Run alone: once
+        PartDesign is loaded, its own container watch touches the plane too."""
+        import os
+        import tempfile
+
+        variables = self.doc.addObject("App::VarSet", "Variables")
+        variables.addProperty("App::PropertyDistance", "Height")
+        variables.Height = 10
+        box = self.doc.addObject("Part::Box", "BoxA")
+        datum = self.doc.addObject("Part::DatumPlane", "Datum")
+        datum.AttachmentSupport = [(box, "Face6")]
+        datum.MapMode = "FlatFace"
+        partA = self.doc.addObject("App::Part", "PA")
+        partA.addObject(box)
+        partA.setExpression(".Placement.Base.z", "Variables.Height")
+        self.doc.recompute()
+        self.assertOnFace(datum, globalElement(box, "Face6"))
+        folder = tempfile.mkdtemp(prefix="PartTestAttachAcross")
+        self.doc.saveAs(os.path.join(folder, "linked.FCStd"))
+        other = FreeCAD.newDocument("PartTestAttachAcrossLinking")
+        try:
+            other.saveAs(os.path.join(folder, "linking.FCStd"))
+            link = other.addObject("App::Link", "Link")
+            link.LinkedObject = partA
+            other.recompute()
+            variables.Height = 35
+            other.recompute()
+            self.assertAlmostEqual(partA.Placement.Base.z, 35, places=9)
+            variables.Height = 10
+            self.doc.recompute()
+        finally:
+            FreeCAD.closeDocument(other.Name)
+        self.assertAlmostEqual(partA.Placement.Base.z, 10, places=9)
+        self.assertEqual([o.Name for o in self.doc.Objects if "Touched" in o.State], [])
+        self.assertOnFace(datum, globalElement(box, "Face6"))

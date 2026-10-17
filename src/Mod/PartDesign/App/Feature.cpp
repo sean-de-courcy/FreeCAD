@@ -314,7 +314,8 @@ short Feature::mustExecute() const
     // failure: any other reran on every recompute (R2-2), and so did this one while the Bodies
     // stayed apart. Not when suppressed or held: then recompute() doesn't fail, and nothing
     // would ever settle (F6). No Body::onChanged(Placement) hook: a moved Body is itself touched,
-    // so the next recompute asks here (ops#325)
+    // so the next recompute asks here (ops#325); a container moved by an expression in the
+    // middle of a recompute touches this when it asks to run (ContainerMoves.h, ops#342)
     auto body = getFeatureBody();
     if (body && !Suppressed.getValue() && !body->holds(this) && !placerProperties().empty()) {
         if (placerElsewhere() != (failedElsewhere && isError())) {

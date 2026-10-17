@@ -915,6 +915,38 @@ class TestAttachAcrossContainers(unittest.TestCase):
         first, so it held without the slot too."""
         self.checkPlacedByAnExpression(lambda source: source[0])
 
+    def testPartMovedInAnotherDocumentsRecompute(self):
+        """Review round 1 of fork PR 306: B-t2's PA, made after the sketch, is linked from a
+        second document, so that document's recompute recomputes PA. Height 35 and the other
+        document's recompute move PA; the sketch isn't in that recompute. Height 10 again and
+        this document's recompute: the sketch, whose frames differ, runs before PA moves back,
+        so the move has to be seen here too. A watch that knew only its own document's
+        recomputes still had 10 for PA and left the sketch on the face at 35, untouched."""
+        variables = self.doc.addObject("App::VarSet", "Variables")
+        variables.addProperty("App::PropertyDistance", "Height")
+        variables.Height = 10
+        source, body, sketch, pad = self.attachedSketch(self.doc, *PAIRS["BothRotated"])
+        part = self.doc.addObject("App::Part", "PA")
+        part.addObject(source[0])
+        part.setExpression(".Placement.Base.z", "Variables.Height")
+        self.doc.recompute()
+        self.assertAllOnFace(source, sketch, pad)
+        folder = tempfile.mkdtemp(prefix="TestAttachAcross")
+        self.doc.saveAs(os.path.join(folder, "linked.FCStd"))
+        other = self.newDocument()
+        other.saveAs(os.path.join(folder, "linking.FCStd"))
+        link = other.addObject("App::Link", "Link")
+        link.LinkedObject = part
+        other.recompute()
+        variables.Height = 35
+        other.recompute()
+        self.assertAlmostEqual(part.Placement.Base.z, 35, places=9)
+        variables.Height = 10
+        self.doc.recompute()
+        self.assertAlmostEqual(part.Placement.Base.z, 10, places=9)
+        self.assertEqual(self.touched(), [])
+        self.assertAllOnFace(source, sketch, pad)
+
     def testContainerPlacedByWhatStandsOnIt(self):
         """B-t3: Body1's height is Pad2's length, and Pad2 stands on Sk2 on Body1's face. One
         recompute after a change of the length converges: nothing touched, Sk2 on the face."""

@@ -341,6 +341,105 @@ class TestMerge(unittest.TestCase):
         self.assertFalse(inside(self.bracket.Shape, V(65, 15, 5)))
         self.assertNotIn("Touched", self.doc.getObject("Merge").State)
 
+    def testPartMovedByAnExpression(self):
+        """A merged part's container moved by a cell (ops#342): the panel, merged, is then put in
+        an App::Part whose x is a cell; no Body's Placement changes. dx 10 and one recompute: the
+        bracket is 25000, solid at (65, 15, 5). Then the bracket's Part instead: the bracket in a
+        second Part whose x is another cell, the panel's Part back at 0: bx 10 puts the panel at
+        x 10..50 in the bracket's frame (Body.Shape leaves the Part's placement out): 19000, solid
+        at x 45 and nothing at x 55 (a stale Merge would reach x 60)."""
+        # The Merge runs before the Part only because the Part is made after the model: the
+        # recompute's order breaks ties by creation order. A Part made first moves before the
+        # Merge reads it, and this test, like the ones below, would pass without the watch
+        self.model()
+        merge = self.merge()
+        sheet = self.sheet(dx=0, bx=0)
+        panelPart = self.doc.addObject("App::Part", "PanelPart")
+        panelPart.addObject(self.panel)
+        panelPart.setExpression(".Placement.Base.x", "Sheet.dx")
+        self.doc.recompute()
+        self.assertAlmostEqual(self.bracket.Shape.Volume, UNION, places=6)
+
+        sheet.set("dx", "10")
+        self.doc.recompute()
+        self.assertTrue(merge.isValid(), merge.getStatusString())
+        self.assertAlmostEqual(self.bracket.Shape.Volume, 16000 + 12000 - 3000, places=6)
+        self.assertTrue(inside(self.bracket.Shape, V(65, 15, 5)))
+        self.assertNotIn("Touched", merge.State)
+
+        bracketPart = self.doc.addObject("App::Part", "BracketPart")
+        bracketPart.addObject(self.bracket)
+        bracketPart.setExpression(".Placement.Base.x", "Sheet.bx")
+        sheet.set("dx", "0")
+        self.doc.recompute()
+        self.assertAlmostEqual(self.bracket.Shape.Volume, UNION, places=6)
+        sheet.set("bx", "10")
+        self.doc.recompute()
+        self.assertAlmostEqual(self.bracket.Shape.Volume, 16000 + 12000 - 9000, places=6)
+        self.assertTrue(inside(self.bracket.Shape, V(45, 15, 5)))
+        self.assertFalse(inside(self.bracket.Shape, V(55, 15, 5)))
+        self.assertNotIn("Touched", merge.State)
+
+    def testPartMovedInAnotherDocumentsRecompute(self):
+        """Review round 1 of fork PR 306: another document links the panel's App::Part, whose x
+        is a cell, so that document's recompute recomputes the Part. dx 10 and the other
+        document's recompute move the Part to 10; dx 0 and this document's recompute: the Merge,
+        touched, runs before the Part moves back (made after the model), so the move has to be
+        seen here too. A watch that knew only its own document's recomputes still had x 0 for
+        the Part and left the bracket at 25000 for 22000, the Merge up to date."""
+        self.model()
+        merge = self.merge()
+        sheet = self.sheet(dx=0)
+        panelPart = self.doc.addObject("App::Part", "PanelPart")
+        panelPart.addObject(self.panel)
+        panelPart.setExpression(".Placement.Base.x", "Sheet.dx")
+        self.doc.recompute()
+        folder = tempfile.mkdtemp(prefix="TestMerge")
+        self.doc.saveAs(os.path.join(folder, "linked.FCStd"))
+        other = App.newDocument("TestMergeLinking")
+        try:
+            other.saveAs(os.path.join(folder, "linking.FCStd"))
+            link = other.addObject("App::Link", "Link")
+            link.LinkedObject = panelPart
+            other.recompute()
+            sheet.set("dx", "10")
+            other.recompute()
+            self.assertAlmostEqual(panelPart.Placement.Base.x, 10)
+            sheet.set("dx", "0")
+            self.doc.recompute()
+        finally:
+            App.closeDocument(other.Name)
+        self.assertAlmostEqual(panelPart.Placement.Base.x, 0)
+        self.assertTrue(merge.isValid(), merge.getStatusString())
+        self.assertAlmostEqual(self.bracket.Shape.Volume, UNION, places=6)
+        self.assertFalse(inside(self.bracket.Shape, V(65, 15, 5)))
+        self.assertNotIn("Touched", merge.State)
+
+    def testNestedPartsMovedByExpressions(self):
+        """Review round 1 of fork PR 306: the panel in an App::Part Inner in a Part Outer, each
+        x from a cell, both made after the model. Outer dx 10, then dx 0 with Inner ix 10, each
+        with one recompute: 25000, solid at (65, 15, 5); then ix 0: 22000 again. The Merge is up
+        to date after each."""
+        self.model()
+        merge = self.merge()
+        sheet = self.sheet(dx=0, ix=0)
+        inner = self.doc.addObject("App::Part", "Inner")
+        inner.addObject(self.panel)
+        outer = self.doc.addObject("App::Part", "Outer")
+        outer.addObject(inner)
+        outer.setExpression(".Placement.Base.x", "Sheet.dx")
+        inner.setExpression(".Placement.Base.x", "Sheet.ix")
+        self.doc.recompute()
+        self.assertAlmostEqual(self.bracket.Shape.Volume, UNION, places=6)
+        for dx, ix, volume in ((10, 0, 25000), (0, 10, 25000), (0, 0, UNION)):
+            with self.subTest(dx=dx, ix=ix):
+                sheet.set("dx", str(dx))
+                sheet.set("ix", str(ix))
+                self.doc.recompute()
+                self.assertAlmostEqual(self.bracket.Shape.Volume, volume, places=6)
+                self.assertEqual(inside(self.bracket.Shape, V(65, 15, 5)), volume != UNION)
+                self.assertNotIn("Touched", merge.State)
+
     def testStaleMergeReopened(self):
         """A Merge saved stale (its part moved, the Merge left untouched, as an expression could
         leave it before round 1) runs on the first recompute after reopening: the frames it last
