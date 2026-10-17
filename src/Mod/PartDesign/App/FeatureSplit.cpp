@@ -399,6 +399,14 @@ Body* Split::makeSplit(
     if (!tool) {
         throw Base::ValueError("Split: no plane");
     }
+    // A Body's face is its Tip's: the Split goes after the Tip, and a link to its own Body would
+    // be a cycle. Here, so that Split Part and Python share it
+    if (auto toolBody = freecad_cast<Body*>(tool)) {
+        tool = toolBody->Tip.getValue();
+        if (!tool) {
+            throw Base::ValueError("Split: " + label(toolBody) + " has no face to cut by");
+        }
+    }
     if (!Part::BodyBase::isInOneStudio(last, tool)) {
         throw Base::ValueError(
             "Split: " + label(tool) + " isn't in " + label(body) + " or a part of its studio"

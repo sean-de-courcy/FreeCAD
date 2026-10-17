@@ -350,6 +350,21 @@ class TestSplit(unittest.TestCase):
         self.assertAlmostEqual(self.body.Shape.common(part.Shape).Volume, 0, places=6)
         self.assertHalves(FRONT, BACK)
 
+    def testOwnBodyFaceIsItsTips(self):
+        """A face of the part's own Body as the tool, from Python as from Split Part: the Split
+        goes after the Tip, so the Tool links the old Tip (a link to the Body would be a cycle).
+        The cavity's wall at y = 1, its normal +Y: front 592 - 20 x 1 x 8 = 432, back 160."""
+        self.shroud()
+        face = None
+        for i, f in enumerate(self.body.Shape.Faces, 1):
+            if abs(f.CenterOfMass.y - 1) < 1e-9 and abs(f.normalAt(0, 0).y - 1) < 1e-9:
+                face = f"Face{i}"
+        self.assertIsNotNone(face)
+        tip = self.body.Tip
+        self.split(tool=(self.body, face))
+        self.assertIs(self.original.Tool[0], tip)
+        self.assertHalves(432, 160)
+
     def testProbeHalfSpace(self):
         """S-t8, the probe as a test: a half-space Common, at shape level, through
         makeElementBoolean and refine, on the shroud and on a sphere with B-spline faces: valid

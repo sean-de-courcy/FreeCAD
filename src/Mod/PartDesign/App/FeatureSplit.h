@@ -65,7 +65,8 @@ public:
 
     /// Splits @p body by @p tool (its @p subs, empty for a plane): a Split at its end keeping
     /// @p side, and a new Body, placed as @p body in its container, whose first feature is a
-    /// Split keeping the other side. Refused, with the reason, before anything changes. Returns
+    /// Split keeping the other side. A Body as @p tool stands for its Tip. Refused, with the
+    /// reason, before anything changes. Returns
     /// the new Body; no recompute.
     static Body* makeSplit(
         App::DocumentObject* body,
