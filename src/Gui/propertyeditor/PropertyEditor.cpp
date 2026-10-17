@@ -22,6 +22,8 @@
  ***************************************************************************/
 
 #include <algorithm>
+#include <set>
+#include <vector>
 #include <boost/algorithm/string/predicate.hpp>
 #include <QApplication>
 #include <QClipboard>
@@ -1562,10 +1564,12 @@ void PropertyEditor::contextMenuEvent(QContextMenuEvent*)
                 break;
             }
 
-            // FreeCAD-CH (ops#317): undoable, in its own transaction as a rename
-            int tid = openPropertyTransaction(prop->getContainer(),
-                                              "Edit property tooltip",
-                                              transactionID);
+            // FreeCAD-CH (ops#317): undoable, in its own transaction as a rename; only a
+            // DocumentObject's change is recorded, so a view provider's opens none (it would be
+            // an empty undo step, and clear the redo stack)
+            int tid = freecad_cast<App::DocumentObject*>(prop->getContainer())
+                ? openPropertyTransaction(prop->getContainer(), "Edit property tooltip", transactionID)
+                : 0;
             try {
                 prop->getContainer()
                     ->changeDynamicProperty(prop, prop->getGroup(), newTooltip.toUtf8().constData());
@@ -1673,20 +1677,34 @@ void PropertyEditor::contextMenuEvent(QContextMenuEvent*)
                     return;
                 }
                 std::string group = res.toUtf8().constData();
-                // FreeCAD-CH (ops#317): undoable, in its own transaction as a rename
-                int tid = openPropertyTransaction((*props.begin())->getContainer(),
-                                                  "Rename property group",
-                                                  transactionID);
+                // FreeCAD-CH (ops#317): undoable, one transaction per document (as Move
+                // Property), and none for a view provider's properties, which aren't recorded
+                std::vector<int> tids;
+                std::set<App::Document*> documents;
+                auto closeAll = [&tids](bool commit) {
+                    for (int tid : tids) {
+                        closePropertyTransaction(tid, commit);
+                    }
+                };
                 try {
                     for (auto prop : props) {
+                        auto* obj = freecad_cast<App::DocumentObject*>(prop->getContainer());
+                        if (obj && obj->getDocument()
+                            && documents.insert(obj->getDocument()).second) {
+                            if (int tid = openPropertyTransaction(obj,
+                                                                  "Rename property group",
+                                                                  transactionID)) {
+                                tids.push_back(tid);
+                            }
+                        }
                         prop->getContainer()->changeDynamicProperty(prop, group.c_str(), nullptr);
                     }
                 }
                 catch (...) {
-                    closePropertyTransaction(tid, false);
+                    closeAll(false);
                     throw;
                 }
-                closePropertyTransaction(tid);
+                closeAll(true);
                 buildUp(PropertyModel::PropertyList(propList), checkDocument);
             }
             return;
