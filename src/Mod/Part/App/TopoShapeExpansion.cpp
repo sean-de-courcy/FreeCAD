@@ -6467,10 +6467,10 @@ TopoShape& TopoShape::makeElementPrism(const TopoShape& base, const gp_Vec& vec,
 }
 
 TopoShape& TopoShape::makeElementPrismUntil(
-    const TopoShape& _base,
-    const TopoShape& profile,
-    const TopoShape& supportFace,
-    const TopoShape& __uptoface,
+    const TopoShape& baseShape,
+    const TopoShape& profileShape,
+    const TopoShape& supportShape,
+    const TopoShape& upToShape,
     const gp_Dir& direction,
     PrismMode Mode,
     Standard_Boolean checkLimits,
@@ -6478,6 +6478,16 @@ TopoShape& TopoShape::makeElementPrismUntil(
 )
 {
     const App::HistoryAlgorithm& historyAlgorithm = getHistoryAlgorithm();
+
+    // BRepFeat raises in place the tolerances of what the prism meets: the up-to face's edges and
+    // vertices, and the base's, often the base feature's stored shape (1e-7 -> 5e-6 with the
+    // profile's top 1e-6 under the face's edge). It runs on copies of its inputs (ops#347)
+    const std::vector<TopoShape> inputs =
+        FilletFallback::makerInputs({baseShape, profileShape, supportShape, upToShape});
+    const TopoShape& _base = inputs[0];
+    const TopoShape& profile = inputs[1];
+    const TopoShape& supportFace = inputs[2];
+    const TopoShape& __uptoface = inputs[3];
 
     if (!op) {
         if (historyAlgorithm == App::HistoryAlgorithm::V1) {

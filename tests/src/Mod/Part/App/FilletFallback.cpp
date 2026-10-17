@@ -30,6 +30,7 @@
 #include <BRepFilletAPI_MakeChamfer.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
 #include <BRepGProp.hxx>
+#include <BRepOffsetAPI_ThruSections.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCone.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
@@ -48,6 +49,8 @@
 #include <TopoDS.hxx>
 #include <gp.hxx>
 #include <gp_Ax2.hxx>
+#include <gp_Circ.hxx>
+#include <gp_Elips.hxx>
 #include <gp_Pln.hxx>
 #include <gp_XY.hxx>
 
@@ -863,6 +866,92 @@ std::set<std::pair<std::string, std::string>> elementNames(const TopoShape& shap
     }
     return names;
 }
+
+/// The rib against the wall named as a feature's shape is: the fuse's and refine's element map
+TopoShape namedRibAgainstWall(std::vector<TopoShape>& topEdges)
+{
+    TopoShape rib(1L);
+    rib.makeElementFuse(
+        {TopoShape(box(30, 4, 20), 2L), TopoShape(box(5, 24, 20, gp_Pnt(-5, -10, 0)), 3L)}
+    );
+    rib = rib.makeElementRefine();
+    topEdges = {edgeBetween(rib, {0, 0, 20}, {30, 0, 20}), edgeBetween(rib, {0, 4, 20}, {30, 4, 20})};
+    return rib;
+}
+
+/// Each face's, edge's and vertex's tolerance, in the order of the shape's indexed names
+std::vector<double> tolerancesByIndex(const TopoDS_Shape& shape)
+{
+    std::vector<double> tolerances;
+    for (const TopAbs_ShapeEnum type : {TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX}) {
+        TopTools_IndexedMapOfShape map;
+        TopExp::MapShapes(shape, type, map);
+        for (int i = 1; i <= map.Extent(); ++i) {
+            const TopoDS_Shape& sub = map(i);
+            tolerances.push_back(
+                type == TopAbs_FACE ? BRep_Tool::Tolerance(TopoDS::Face(sub))
+                    : type == TopAbs_EDGE ? BRep_Tool::Tolerance(TopoDS::Edge(sub))
+                                          : BRep_Tool::Tolerance(TopoDS::Vertex(sub))
+            );
+        }
+    }
+    return tolerances;
+}
+
+/// Whether any face, edge or vertex of the one shape is one of the other's (the same TShape)
+bool sharesTopology(const TopoDS_Shape& shape, const TopoDS_Shape& other)
+{
+    for (const TopAbs_ShapeEnum type : {TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX}) {
+        TopTools_IndexedMapOfShape map;
+        TopExp::MapShapes(other, type, map);
+        for (TopExp_Explorer it(shape, type); it.More(); it.Next()) {
+            for (int i = 1; i <= map.Extent(); ++i) {
+                if (it.Current().IsPartner(map(i))) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+/// The loft from the circle r 10 at z 0 to the ellipse 12 x 6 at z 15 (a B-spline side face)
+TopoShape loftedSolid()
+{
+    BRepOffsetAPI_ThruSections loft(Standard_True);
+    const gp_Ax2 bottom(gp_Pnt(0, 0, 0), gp::DZ(), gp::DX());
+    const gp_Ax2 top(gp_Pnt(0, 0, 15), gp::DZ(), gp::DX());
+    loft.AddWire(BRepBuilderAPI_MakeWire(BRepBuilderAPI_MakeEdge(gp_Circ(bottom, 10)).Edge()).Wire());
+    loft.AddWire(BRepBuilderAPI_MakeWire(BRepBuilderAPI_MakeEdge(gp_Elips(top, 12, 6)).Edge()).Wire());
+    loft.Build();
+    return TopoShape(loft.Shape(), 1L);
+}
+
+/// The loft's side face
+TopoShape loftSide(const TopoShape& loft)
+{
+    for (const auto& face : loft.getSubTopoShapes(TopAbs_FACE)) {
+        if (BRepAdaptor_Surface(TopoDS::Face(face.getShape())).GetType() != GeomAbs_Plane) {
+            return face;
+        }
+    }
+    ADD_FAILURE() << "no side face";
+    return {};
+}
+
+/// The square 4 x 4 in the plane x = 22, beside the loft's +x side, its top `gap` under z = 15
+TopoShape squareBesideTheLoft(double gap)
+{
+    const double z1 = 15 - gap;
+    BRepBuilderAPI_MakePolygon square(
+        gp_Pnt(22, -2, z1 - 4),
+        gp_Pnt(22, 2, z1 - 4),
+        gp_Pnt(22, 2, z1),
+        gp_Pnt(22, -2, z1),
+        Standard_True
+    );
+    return TopoShape(BRepBuilderAPI_MakeFace(square.Wire(), Standard_True).Face(), 2L);
+}
 }  // namespace
 
 // OCCT's maker raises its input's tolerances in place, to 1e-4 at the vertices where the rib's
@@ -928,6 +1017,73 @@ TEST_F(FilletFallbackTest, theCopyNamesAsTheBase)
 
     EXPECT_FALSE(elementNames(result).empty());
     EXPECT_EQ(elementNames(result), elementNames(expected));
+}
+
+// makerInputs() copies several inputs together: an up-to face of the base is a face of the base's
+// copy, a face of another shape gets its own copy, and each copy keeps its shape's tolerances,
+// element map and Tag (ops#347)
+TEST_F(FilletFallbackTest, theInputsAreCopiedTogether)
+{
+    std::vector<TopoShape> edges;
+    TopoShape base = namedRibAgainstWall(edges);
+    const TopoShape top = TopoShape(base.findAncestorShape(edges[0].getShape(), TopAbs_FACE), 5L);
+    const TopoShape other(
+        BRepBuilderAPI_MakeFace(gp_Pln(gp_Pnt(0, 0, 40), gp::DZ()), 0, 1, 0, 1).Face(),
+        6L
+    );
+    const auto copies = FF::makerInputs({base, TopoShape(), top, other});
+    ASSERT_EQ(copies.size(), 4U);
+    EXPECT_TRUE(copies[1].isNull());
+    EXPECT_EQ(tolerancesByIndex(copies[0].getShape()), tolerancesByIndex(base.getShape()));
+    EXPECT_EQ(elementNames(copies[0]), elementNames(base));
+    EXPECT_EQ(copies[0].Tag, base.Tag);
+    EXPECT_EQ(copies[2].Tag, 5L);
+    EXPECT_EQ(copies[3].Tag, 6L);
+    for (const auto& copy : {copies[0], copies[2], copies[3]}) {
+        EXPECT_FALSE(sharesTopology(copy.getShape(), base.getShape()));
+        EXPECT_FALSE(sharesTopology(copy.getShape(), other.getShape()));
+    }
+    // The base's face is the copy's face of the same index
+    EXPECT_EQ(copies[0].findShape(copies[2].getShape()), base.findShape(top.getShape()));
+    EXPECT_GT(copies[0].findShape(copies[2].getShape()), 0);
+    EXPECT_EQ(copies[0].findShape(copies[3].getShape()), 0);
+}
+
+// BRepFeat up to a face raises the tolerances of what the prism meets in place: with the square's
+// top 1e-6 under the loft's top edge, that edge and its vertex went from 1e-7 to 5e-6, and the
+// loft is a Pad's base, shared with the base feature's stored shape. The prism is built from
+// copies: the base and the up-to face keep their tolerances (ops#347)
+TEST_F(FilletFallbackTest, prismUpToAFaceLeavesItsInputsAlone)
+{
+    // A Pad's call (the base given), a Pocket's (no base: the up-to face alone is the loft's), and
+    // the fuse with the base done here
+    for (const auto& [additive, mode] : std::vector<std::pair<bool, TopoShape::PrismMode>> {
+             {true, TopoShape::PrismMode::None},
+             {false, TopoShape::PrismMode::None},
+             {true, TopoShape::PrismMode::FuseWithBase}
+         }) {
+        const TopoShape loft = loftedSolid();
+        const TopoShape side = loftSide(loft);
+        const TopoShape square = squareBesideTheLoft(1e-6);
+        const auto loftBefore = tolerancesByIndex(loft.getShape());
+        const auto squareBefore = tolerancesByIndex(square.getShape());
+        TopoShape prism(3L);
+        prism.makeElementPrismUntil(
+            additive ? loft : TopoShape(),
+            square,
+            TopoShape(),
+            side,
+            gp_Dir(-1, 0, 0),
+            mode,
+            Standard_True
+        );
+        ASSERT_FALSE(prism.isNull());
+        EXPECT_TRUE(prism.isValid());
+        EXPECT_EQ(tolerancesByIndex(loft.getShape()), loftBefore) << additive << mode;
+        EXPECT_EQ(tolerancesByIndex(square.getShape()), squareBefore) << additive << mode;
+        // Nothing the prism holds is the inputs': a later maker can't reach them through it
+        EXPECT_FALSE(sharesTopology(prism.getShape(), loft.getShape())) << additive << mode;
+    }
 }
 
 // The tube's top ring between its rims chamfered just under the limit, 2 (2 - d) wide, merges

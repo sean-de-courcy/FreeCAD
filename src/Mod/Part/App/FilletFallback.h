@@ -83,6 +83,17 @@ PartExport TopTools_DataMapOfShapeReal faceTolerances(const TopoDS_Shape& shape)
  */
 PartExport TopoShape makerInput(const TopoShape& base, std::vector<TopoShape>& edges);
 
+/** Copies of the shapes handed to one OCCT maker that raises its inputs' tolerances in place, as
+ * makerInput() makes the base's: BRepFeat up to a face raises the face's edges and vertices and
+ * the base's where the prism meets them (ops#347). The copies are made together, so a sub-shape
+ * the shapes share (an up-to face of the base, the faces of a shell of the base's faces) is one
+ * sub-shape of the copies too. Each copy keeps its shape's element map and Tag.
+ *
+ * @param shapes The maker's inputs; a null one stays null
+ * @return The copies, in the order of the shapes
+ */
+PartExport std::vector<TopoShape> makerInputs(const std::vector<TopoShape>& shapes);
+
 /** Builds the dress-up by the exact construction.
  *
  * @param result Receives the shape and its element map (named with op, as through the fillet's

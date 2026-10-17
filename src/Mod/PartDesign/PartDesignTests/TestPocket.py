@@ -280,6 +280,15 @@ class TestPocket(unittest.TestCase):
                 self.assertFalse(pocket.isValid())
                 self.assertIn("names several faces", pocket.getStatusString())
 
+    def testPocketUpToFaceLeavesTheBaseAlone(self):
+        # ops#347: the up-to face is the base's, and BRepFeat raised it in place. The square is
+        # outside the loft, so the pocket removes nothing
+        from PartDesignTests.TestPad import upToTheLoftSide
+
+        base, pocket = upToTheLoftSide(self, self.Doc, "Pocket")
+        self.assertTrue(pocket.Shape.isValid())
+        self.assertAlmostEqual(pocket.Shape.Volume, base.Shape.Volume, places=6)
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("PartDesignTestPocket")

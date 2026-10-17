@@ -119,6 +119,82 @@ def bossCentres(shape):
     )
 
 
+def toleranceState(shape):
+    """Each face's, edge's and vertex's tolerance and each edge's number of curves on surfaces: what
+    a maker can change in place in the TShapes a feature's stored shape shares (ops#347)"""
+
+    def pcurves(edge):
+        n = 0
+        while n < 50:
+            try:
+                if edge.curveOnSurface(n) is None:
+                    break
+            except Exception:  # noqa: BLE001  (past the last one)
+                break
+            n += 1
+        return n
+
+    return (
+        [f.Tolerance for f in shape.Faces],
+        [e.Tolerance for e in shape.Edges],
+        [v.Tolerance for v in shape.Vertexes],
+        [pcurves(e) for e in shape.Edges],
+    )
+
+
+def upToTheLoftSide(test, doc, kind):
+    """ops#347's P5: the loft from the circle r 10 at z 0 to the ellipse 12 x 6 at z 15 as a Body's
+    BaseFeature, a 4 x 4 square in the plane x = 22 whose top is 1e-6 under z 15, and a Pad or
+    Pocket from it up to the loft's side face. BRepFeat raised the loft's top edge and its vertex
+    in place, from 1e-7 to 5e-6, in the base feature's stored shape and the Part::Feature's. The
+    base keeps its tolerances and curves; the feature, the prism up to the face."""
+    import Sketcher
+
+    V = FreeCAD.Vector
+    loft = Part.makeLoft(
+        [
+            Part.Wire(Part.Circle(V(0, 0, 0), V(0, 0, 1), 10).toShape()),
+            Part.Wire(Part.Ellipse(V(0, 0, 15), 12, 6).toShape()),
+        ],
+        True,
+    )
+    base = doc.addObject("Part::Feature", "Loft")
+    base.Shape = loft
+    body = doc.addObject("PartDesign::Body", "Body")
+    baseFeature = body.newObject("PartDesign::FeatureBase", "BaseFeature")
+    baseFeature.BaseFeature = base
+    doc.recompute()
+    side = next(
+        "Face%d" % i
+        for i, f in enumerate(baseFeature.Shape.Faces, 1)
+        if f.Surface.TypeId != "Part::GeomPlane"
+    )
+    held = [(o.Name, o.Shape, toleranceState(o.Shape)) for o in (base, baseFeature)]
+    sketch = body.newObject("Sketcher::SketchObject", "Square")
+    # Sketch x is world -z, y is y, the normal +x
+    sketch.Placement = FreeCAD.Placement(V(22, 0, 0), FreeCAD.Rotation(V(0, 1, 0), 90))
+    top = -(15 - 1e-6)
+    corners = [V(top, -2, 0), V(top + 4, -2, 0), V(top + 4, 2, 0), V(top, 2, 0)]
+    for i in range(4):
+        sketch.addGeometry(Part.LineSegment(corners[i], corners[(i + 1) % 4]))
+    for i in range(4):
+        sketch.addConstraint(Sketcher.Constraint("Coincident", i, 2, (i + 1) % 4, 1))
+    feature = body.newObject("PartDesign::" + kind, kind)
+    feature.Profile = sketch
+    feature.Type = "UpToFace"
+    feature.UpToFace = (baseFeature, [side])
+    feature.Reversed = True
+    doc.recompute()
+    test.assertTrue(feature.isValid(), feature.getStatusString())
+    for name, shape, before in held:
+        test.assertEqual(toleranceState(shape), before, name)
+    # The prism up to the face: the square's long prism less the loft, the piece on its side
+    square = Part.Face(Part.makePolygon([V(22, p.y, -p.x) for p in corners + corners[:1]]))
+    near = max(square.extrude(V(-40, 0, 0)).cut(loft).Solids, key=lambda s: s.BoundBox.XMax)
+    test.assertAlmostEqual(feature.AddSubShape.Volume, near.Volume, places=4)
+    return baseFeature, feature
+
+
 class TestPad(unittest.TestCase):
     def setUp(self):
         self.Doc = FreeCAD.newDocument("PartDesignTestPad")
@@ -667,6 +743,14 @@ class TestPad(unittest.TestCase):
                     self.assertIn("Edge", fillet.getStatusString())
                 finally:
                     FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToFaceLeavesTheBaseAlone(self):
+        # ops#347: BRepFeat runs on copies of the base and the up-to face
+        base, pad = upToTheLoftSide(self, self.Doc, "Pad")
+        self.assertTrue(pad.Shape.isValid())
+        self.assertAlmostEqual(
+            pad.Shape.Volume, base.Shape.Volume + pad.AddSubShape.Volume, places=4
+        )
 
     def tearDown(self):
         # closing doc
