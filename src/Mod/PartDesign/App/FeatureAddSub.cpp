@@ -156,9 +156,17 @@ short FeatureAddSub::mustExecute() const
     return PartDesign::Feature::mustExecute();
 }
 
+namespace
+{
+void syncSiblings(FeatureAddSub* feature);
+}
+
 App::DocumentObjectExecReturn* FeatureAddSub::recompute()
 {
     auto body = getFeatureBody();
+    // A primary gives its siblings its values before their expressions run: those run in their
+    // own order, which a value that rewrites others (Hole's ThreadType) defeats (ops#325)
+    syncSiblings(this);
     // A sibling whose links aren't its primary's fails until the primary is edited (ops#325)
     const bool runs = !Suppressed.getValue() && !(body && body->holds(this));
     if (runs) {
@@ -398,6 +406,34 @@ std::string label(const App::DocumentObject* obj)
     return obj->Label.getValue();
 }
 
+// Gives `sibling` the bound values of `primary`, in the primary's property order, until nothing
+// changes. A value can rewrite others as it changes (Hole's ThreadType rewrites ThreadSize's list
+// and value, and Diameter), and the expression engine sets them in its own order (ThreadSize
+// before ThreadType), so a sibling left to its expressions could end on another size, or fail on
+// one out of its list (ops#325, PR 304 round 1). An enumeration is pasted with its list.
+void pasteBoundValues(const FeatureAddSub* primary, FeatureAddSub* sibling)
+{
+    const std::vector<App::Property*> shared = sharedProperties(primary);
+    for (int pass = 0; pass < 4; ++pass) {
+        bool changed = false;
+        for (App::Property* prop : shared) {
+            if (isCopied(prop)) {
+                continue;
+            }
+            App::Property* mine = sibling->getPropertyByName(prop->getName());
+            if (!mine || mine->getTypeId() != prop->getTypeId() || mine->isSame(*prop)) {
+                continue;
+            }
+            std::unique_ptr<App::Property> copy(prop->Copy());
+            mine->Paste(*copy);
+            changed = true;
+        }
+        if (!changed) {
+            return;
+        }
+    }
+}
+
 // The links of `user` besides those of its place in a Body's chain
 bool linksBesidesChain(App::DocumentObject* user, const App::DocumentObject* target)
 {
@@ -533,16 +569,17 @@ std::vector<FeatureAddSub*> FeatureAddSub::makeSiblings(
             sibling->Label.setValue(label(primary) + " (" + label(target) + ")");
             sibling->SiblingOf.setValue(primary);
         }
+        pasteBoundValues(primary, sibling);
         for (App::Property* prop : shared) {
             App::Property* mine = sibling->getPropertyByName(prop->getName());
             if (!mine || mine->getTypeId() != prop->getTypeId()) {
                 continue;
             }
-            if (isCopied(prop) ? !sameLinks(mine, prop) : !mine->isSame(*prop)) {
-                std::unique_ptr<App::Property> copy(prop->Copy());
-                mine->Paste(*copy);
-            }
             if (isCopied(prop)) {
+                if (!sameLinks(mine, prop)) {
+                    std::unique_ptr<App::Property> copy(prop->Copy());
+                    mine->Paste(*copy);
+                }
                 continue;
             }
             App::ObjectIdentifier path(*mine);
@@ -574,6 +611,21 @@ void FeatureAddSub::unlinkSibling()
     SiblingOf.setValue(nullptr);
 }
 
+namespace
+{
+// A sibling takes its primary's bound values; a primary gives them to its siblings
+void syncSiblings(FeatureAddSub* feature)
+{
+    if (auto primary = freecad_cast<FeatureAddSub*>(feature->SiblingOf.getValue())) {
+        pasteBoundValues(primary, feature);
+        return;
+    }
+    for (FeatureAddSub* sibling : feature->getSiblings()) {
+        pasteBoundValues(feature, sibling);
+    }
+}
+}  // namespace
+
 std::string FeatureAddSub::outOfStep() const
 {
     auto primary = freecad_cast<FeatureAddSub*>(SiblingOf.getValue());
@@ -581,13 +633,13 @@ std::string FeatureAddSub::outOfStep() const
         return {};
     }
     // A link changed from the property editor or Python, not through the primary's panel (the
-    // design's critic, point 3)
+    // design's critic, point 3); a value only if re-pasting it didn't settle (syncSiblings)
     for (App::Property* prop : sharedProperties(primary)) {
-        if (!isCopied(prop)) {
+        App::Property* mine = getPropertyByName(prop->getName());
+        if (!mine || mine->getTypeId() != prop->getTypeId()) {
             continue;
         }
-        App::Property* mine = getPropertyByName(prop->getName());
-        if (mine && !sameLinks(mine, prop)) {
+        if (isCopied(prop) ? !sameLinks(mine, prop) : !mine->isSame(*prop)) {
             return std::string(prop->getName()) + " is out of step with " + label(primary)
                 + ": edit " + label(primary) + " to re-sync, or Unlink this one";
         }

@@ -106,7 +106,7 @@ protected:
     void defineSubtractive();
 
 private:
-    /// Why this sibling's copied links aren't its primary's, or empty
+    /// Why this sibling's copied links or bound values aren't its primary's, or empty
     std::string outOfStep() const;
     /// Warns when this sibling's tool doesn't touch its part
     void warnIfMissing();

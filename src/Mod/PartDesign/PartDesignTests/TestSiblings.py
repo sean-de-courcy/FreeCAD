@@ -244,6 +244,35 @@ class TestSiblings(unittest.TestCase):
         self.assertAlmostEqual(self.enclosure.Shape.Volume, 16000 - HOLES * 10, places=4)
         self.assertHolesAt(CENTERS)
 
+    def testHoleSiblingFollowsAThreadTypeChange(self):
+        """PR 304 round 1: a Hole's ThreadType rewrites its ThreadSize list and value and its
+        Diameter, and the sibling's expressions set ThreadSize before ThreadType. The primary's
+        ThreadType to UNC, then back to ISO metric: after each, the sibling has the primary's
+        type, size and diameter, and computes. Each part loses the four holes at the primary's
+        diameter, through its own thickness (the lid 5, the enclosure 10)."""
+        self.model()
+        hole = self.lid.newObject("PartDesign::Hole", "Clearance")
+        hole.Profile = self.holeSk
+        hole.Diameter = 2 * R
+        hole.DepthType = "ThroughAll"
+        self.lid.removeObject(self.pocket)
+        self.doc.removeObject(self.pocket.Name)
+        self.doc.recompute()
+        [sibling] = PartDesign.makeSiblings(hole, [self.enclosure])
+        self.doc.recompute()
+        for threadType in ("UNC", "ISOMetricProfile"):
+            hole.ThreadType = threadType
+            self.doc.recompute()
+            self.assertTrue(hole.isValid(), hole.getStatusString())
+            self.assertTrue(sibling.isValid(), sibling.getStatusString())
+            self.assertEqual(
+                (sibling.ThreadType, sibling.ThreadSize, sibling.Diameter.Value),
+                (hole.ThreadType, hole.ThreadSize, hole.Diameter.Value),
+            )
+            area = len(CENTERS) * math.pi * (hole.Diameter.Value / 2) ** 2
+            self.assertAlmostEqual(self.lid.Shape.Volume, 8000 - area * 5, places=4)
+            self.assertAlmostEqual(self.enclosure.Shape.Volume, 16000 - area * 10, places=4)
+
     def testUntickRemovesASibling(self):
         """The ticks again: makeSiblings with the enclosure unticked deletes its sibling, and
         the enclosure is whole. A sibling that something else uses (a sketch on it) is kept,
