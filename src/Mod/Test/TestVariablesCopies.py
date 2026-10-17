@@ -53,6 +53,7 @@ FORMAT = {
     "SourceExpressions": "App::PropertyMap",
     "NameMap": "App::PropertyMap",
     "Bindings": "App::PropertyMap",
+    "Skipped": "App::PropertyStringList",
     "Orphans": "App::PropertyStringList",
 }
 
@@ -171,6 +172,7 @@ class TestVariablesCopies(unittest.TestCase):
         self.assertEqual(copy.SourceEntries, 1)
         self.assertEqual(copy.NameMap, {})
         self.assertEqual(copy.Bindings, {})
+        self.assertEqual(copy.Skipped, [])
         self.assertEqual(copy.Orphans, [])
         self.assertTrue(copy.SourceRefreshed.endswith("Z"))
         # the stamp: SHA-256 of the canonical form (section 3.2), here by hand
@@ -251,7 +253,8 @@ class TestVariablesCopies(unittest.TestCase):
         self.assertEqual(self.doc.Objects, [])
 
     def test_missing_studio_skip(self):
-        """Skip #Gap: Width, which needs it, isn't imported; Height is."""
+        """Skip #Gap: Width, which needs it, isn't imported; Height is. Skipped keeps the choice,
+        so Refresh can tell Width from a variable added at the source."""
         a = self.export("Studio A", STUDIO_A)
         result = copies.import_studios(self.doc, [a], skip=["Gap"])
         copy = result.copies[0]
@@ -259,6 +262,19 @@ class TestVariablesCopies(unittest.TestCase):
         self.assertAlmostEqual(copy.Height.Value, 5)
         self.assertEqual([(s[1]) for s in result.plan.skipped], ["Width"])
         self.assertEqual(copy.SourceExpressions, {"Height": "5 mm"})
+        self.assertEqual(copy.Skipped, ["Gap"])
+
+    def test_skip_variable(self):
+        """Skip a variable the file defines: Skipped names it, in the copy of the file that
+        defines it and in the copy that uses it; a skip that concerns neither isn't kept."""
+        a = self.export("Studio A", STUDIO_A)
+        b = self.export("Studio B", STUDIO_B)
+        result = copies.import_studios(self.doc, [a, b], skip=["Height", "Gap", "Nothing"])
+        copyA, copyB = result.copies
+        self.assertEqual(copyA.Skipped, ["Gap", "Height"])
+        self.assertEqual(copyB.Skipped, ["Gap"])
+        self.assertEqual(copyA.SourceExpressions, {})
+        self.assertEqual(copyB.SourceExpressions, {})
 
     def test_bad_choices(self):
         a = self.export("Studio A", STUDIO_A)
@@ -445,6 +461,7 @@ class TestVariablesCopies(unittest.TestCase):
         self.assertEqual(copy.SourceExpressions, {})
         self.assertEqual(copy.NameMap, {})
         self.assertEqual(copy.Bindings, {})
+        self.assertEqual(copy.Skipped, [])
         self.assertEqual(copy.Orphans, [])
         for name, expected in STUDIO_VALUES.items():
             with self.subTest(name=name):

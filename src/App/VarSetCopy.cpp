@@ -107,6 +107,14 @@ VarSetCopy::VarSetCopy()
         "Names the source uses but doesn't define, and the FreeCAD paths chosen for them"
     );
     ADD_PROPERTY_TYPE(
+        Skipped,
+        (),
+        group,
+        Prop_ReadOnly,
+        "Source names chosen to be skipped: the source's variables not copied, and the names "
+        "whose users weren't copied"
+    );
+    ADD_PROPERTY_TYPE(
         Orphans,
         (),
         group,

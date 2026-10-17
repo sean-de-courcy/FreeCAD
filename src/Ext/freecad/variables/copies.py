@@ -66,7 +66,7 @@ VARIABLES = "Variables"  # the document's own set, as the panel finds it
 # The copy's static properties (section 3.1); a variable can't take one of these names.
 SOURCE_PROPERTIES = ("CopyFormat", "SourceKind", "SourcePath", "SourceRelativePath",
                      "SourceObject", "SourceEntries", "SourceStamp", "SourceRefreshed",
-                     "SourceExpressions", "NameMap", "Bindings", "Orphans")
+                     "SourceExpressions", "NameMap", "Bindings", "Skipped", "Orphans")
 
 # A test hook (I-4): called as hook(result, value) for each variable checked, its return value
 # replaces the translator's in the check.
@@ -114,6 +114,8 @@ class Plan:
     refused: List[Tuple[int, str, str]] = field(default_factory=list)
     # (source index, Onshape name, why): left out by the choices
     skipped: List[Tuple[int, str, str]] = field(default_factory=list)
+    # the `skip` choices, kept per copy in Skipped so Refresh can tell them from new variables
+    skip: frozenset = frozenset()
     # unresolved name -> Binding (path and value), from `bindings` and `values`
     bindings: Dict[str, Binding] = field(default_factory=dict)
     # unresolved name -> (Onshape type, FreeCAD name, property type, translation) of the input
@@ -195,7 +197,7 @@ def plan_import(doc, paths: Sequence[str], *,
     bindings = dict(bindings or {})
     values = dict(values or {})
     skip = set(skip)
-    plan = Plan([])
+    plan = Plan([], skip=frozenset(skip))
 
     # The files, one copy per studio entry.
     taken = set()
@@ -458,8 +460,21 @@ def _make(doc, plan: Plan, created: list) -> ImportResult:
         copy.SourceExpressions = expressions
         copy.NameMap = name_map
         copy.Bindings = bindings
+        copy.Skipped = _skipped(plan, source)
     doc.recompute([obj for obj in result.copies] + [h for h, _n in result.inputs[:1]])
     return result
+
+
+def _skipped(plan: Plan, source: Source) -> List[str]:
+    """The `skip` choices that concern @a source: names it defines or uses."""
+    names = set()
+    for v in source.entry.variables:
+        names.add(v.name)
+        try:
+            names.update(onshape.references(onshape.parse(v.expression)))
+        except onshape.Refused:
+            pass
+    return sorted(plan.skip & names)
 
 
 def _defined(plan: Plan, name: str) -> bool:
@@ -535,6 +550,7 @@ def detach(copy):
         copy.SourceExpressions = {}
         copy.NameMap = {}
         copy.Bindings = {}
+        copy.Skipped = []
         copy.Orphans = []
     except BaseException:
         if own:

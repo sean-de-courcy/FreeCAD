@@ -61,6 +61,7 @@ public:
     PropertyMap SourceExpressions;
     PropertyMap NameMap;
     PropertyMap Bindings;
+    PropertyStringList Skipped;
     PropertyStringList Orphans;
 
     /// Whether the copy still has a source (SourceKind isn't "None").
