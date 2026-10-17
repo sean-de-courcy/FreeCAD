@@ -353,6 +353,88 @@ def squareUpToABallBeforePlates(doc):
     return pad
 
 
+def postInTheGapOfACWithABump(doc):
+    """PR 324 round 2 verification: postInTheGap()'s C (the polygon (0,0), (10,0), (10,3), (4,3),
+    (4,7), (10,7), (10,10), (0,10) on the XY plane, 10 high) as a Body's BaseFeature, fused with a
+    bump on the upper arm's outer face y = 10: the loft from the circle of radius 1 around
+    (7, 10, 5) to the ellipse 1.2 x 0.6 around (7, 12, 5), whose B-spline side lies in the way of
+    the post's square, so that the Pad goes by the split. A Pad from the 2 x 2 square x 6..8,
+    z 4..6 on the lower arm's top (y = 3), up to the base (UpToShape, nothing selected).
+    Recomputed, not checked. Returns the base feature and the Pad."""
+    V = FreeCAD.Vector
+    points = [V(0, 0), V(10, 0), V(10, 3), V(4, 3), V(4, 7), V(10, 7), V(10, 10), V(0, 10)]
+    shape = Part.Face(Part.makePolygon(points + points[:1])).extrude(V(0, 0, 10))
+    bump = Part.makeLoft(
+        [
+            Part.Wire(Part.Circle(V(0, 0, 0), V(0, 0, 1), 1).toShape()),
+            Part.Wire(Part.Ellipse(V(0, 0, 2), 1.2, 0.6).toShape()),
+        ],
+        True,
+    )
+    bump.rotate(V(0, 0, 0), V(1, 0, 0), -90)  # along +y
+    bump.translate(V(7, 10, 5))
+    base = doc.addObject("Part::Feature", "Base")
+    base.Shape = shape.fuse(bump).removeSplitter()
+    body = doc.addObject("PartDesign::Body", "Body")
+    baseFeature = body.newObject("PartDesign::FeatureBase", "BaseFeature")
+    baseFeature.BaseFeature = base
+    doc.recompute()
+    sketch = body.newObject("Sketcher::SketchObject", "Post")
+    sketch.AttachmentSupport = [(baseFeature, [planarFaceAt(baseFeature.Shape, 1, 3)])]
+    sketch.MapMode = "FlatFace"
+    # The sketch's x is the world's -x and its y is z, its origin (0, 3, 0): the square x 6..8, z 4..6
+    TestSketcherApp.CreateRectangleSketch(sketch, (-8, 4), (2, 2))
+    pad = body.newObject("PartDesign::Pad", "Pad")
+    pad.Profile = sketch
+    pad.Type = "UpToShape"
+    doc.recompute()
+    return baseFeature, pad
+
+
+def padUpToAPlateWithALippedBoss(doc, half):
+    """PR 324 round 2 verification: a Body whose BaseFeature is the plate x, y -8..8, z 0..2 with a
+    boss hanging under it, revolved about the z axis from one degree-1 B-spline in the XZ plane:
+    from (2, -10) widening to (4, -0.1), then a lip narrowing to (3.9, 0) at the plate. The lip,
+    an undercut, is the last 1.4 % of the B-spline's parameter range (chord length). A Pad from
+    the square x, y -`half`..`half` at z = -15, along +z, up to the base (UpToShape, nothing
+    selected). Recomputed, not checked."""
+    import Sketcher
+
+    V = FreeCAD.Vector
+    poles = [V(2, 0, -10), V(4, 0, -0.1), V(3.9, 0, 0)]
+    first = (poles[1] - poles[0]).Length
+    side = Part.BSplineCurve()
+    side.buildFromPolesMultsKnots(
+        poles, [2, 1, 2], [0, first, first + (poles[2] - poles[1]).Length], False, 1
+    )
+    outline = Part.Wire(
+        [
+            Part.LineSegment(V(0, 0, -10), poles[0]).toShape(),
+            side.toShape(),
+            Part.LineSegment(poles[2], V(0, 0, 0)).toShape(),
+            Part.LineSegment(V(0, 0, 0), V(0, 0, -10)).toShape(),
+        ]
+    )
+    boss = Part.Face(outline).revolve(V(0, 0, 0), V(0, 0, 1), 360)
+    base = doc.addObject("Part::Feature", "Base")
+    base.Shape = Part.makeBox(16, 16, 2, V(-8, -8, 0)).fuse(boss).removeSplitter()
+    body = doc.addObject("PartDesign::Body", "Body")
+    baseFeature = body.newObject("PartDesign::FeatureBase", "BaseFeature")
+    baseFeature.BaseFeature = base
+    sketch = body.newObject("Sketcher::SketchObject", "Square")
+    sketch.Placement = FreeCAD.Placement(V(0, 0, -15), FreeCAD.Rotation())
+    corners = [V(-half, -half, 0), V(half, -half, 0), V(half, half, 0), V(-half, half, 0)]
+    for i in range(4):
+        sketch.addGeometry(Part.LineSegment(corners[i], corners[(i + 1) % 4]))
+    for i in range(4):
+        sketch.addConstraint(Sketcher.Constraint("Coincident", i, 2, (i + 1) % 4, 1))
+    pad = body.newObject("PartDesign::Pad", "Pad")
+    pad.Profile = sketch
+    pad.Type = "UpToShape"
+    doc.recompute()
+    return pad
+
+
 def padUpToAPlateWithABulb(doc, half):
     """PR 324 round 1 verification: a Body whose BaseFeature is the plate x -10..10, y -10..10,
     z 10..12 with a bulb hanging under it, the smooth loft (one B-spline side) of the circles
@@ -1268,6 +1350,42 @@ class TestPad(unittest.TestCase):
                         self.assertIn("meets the face from behind", pad.getStatusString())
                 finally:
                     FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToABaseWithANarrowUndercut(self):
+        # PR 324 round 2 verification: the square x, y -6..6 passes the boss's widest point
+        # (radius 4 at z = -0.1); lines at radius 3.9..4 first meet its side below that, and the
+        # lip above it faces the plate. Sampled evenly (16 x 16 over the face's range), the lip
+        # was missed: the split kept one solid up to the plate, filling the undercut (1866.15).
+        # It fails, saying why. The square x, y -1..1 meets only the boss's bottom and stops
+        # there: 2 x 2 x 5
+        for half in (1, 6):
+            with self.subTest(half=half):
+                doc = FreeCAD.newDocument("PadUpToABaseWithANarrowUndercut")
+                try:
+                    pad = padUpToAPlateWithALippedBoss(doc, half)
+                    if half == 1:
+                        self.assertTrue(pad.isValid(), pad.getStatusString())
+                        self.assertAlmostEqual(pad.AddSubShape.Volume, 20, places=6)
+                    else:
+                        self.assertFalse(pad.isValid())
+                        self.assertIn("meets the face from behind", pad.getStatusString())
+                finally:
+                    FreeCAD.closeDocument(doc.Name)
+
+    def testPadFromAFaceOfTheBaseUpToTheBaseWithAFreeformFace(self):
+        # PR 324 round 2 verification: the square on the lower arm's top is a piece of the base,
+        # and the splitter made it one face with the extrusion's start, facing against the
+        # direction: the Pad failed, "meets the face from behind". The post joins the arms: the
+        # result is the base and the 2 x 2 x 4 post
+        V = FreeCAD.Vector
+        base, pad = postInTheGapOfACWithABump(self.Doc)
+        self.assertTrue(pad.isValid(), pad.getStatusString())
+        self.assertEqual(len(pad.Shape.Solids), 1)
+        self.assertAlmostEqual(pad.AddSubShape.Volume, 16, places=6)
+        # GProp's volume of the base with the bump's B-spline side varies by 5e-7
+        self.assertAlmostEqual(pad.Shape.Volume, base.Shape.Volume + 16, delta=1e-5)
+        post = Part.makeBox(2, 4, 2, V(6, 3, 4))
+        self.assertAlmostEqual(pad.Shape.common(post).Volume, 16, places=6)
 
     def testPadUpToAShapeWithAnUnrelatedFreeformFace(self):
         # ops#353 review M2: up to a whole base, a freeform face the Pad can't meet doesn't change

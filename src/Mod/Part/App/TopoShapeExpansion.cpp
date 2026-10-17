@@ -92,6 +92,7 @@
 #include <GeomFill_BezierCurves.hxx>
 #include <GeomFill_BSplineCurves.hxx>
 #include <Precision.hxx>
+#include <TColStd_Array1OfReal.hxx>
 #include <BRepGProp.hxx>
 #include <GProp_GProps.hxx>
 #include <TopExp_Explorer.hxx>
@@ -6609,9 +6610,11 @@ private:
 };
 
 // Whether, somewhere on `piece` (a face of a solid, oriented as in it), the solid's outward normal
-// points against `direction`. Sampled: a grid of 16 x 16 points over the piece's parameter range,
-// those inside it, or one point inside it when none of the grid's is; a fold narrower than the
-// grid's step can be missed. Throws when no point inside the piece is found.
+// points against `direction`. Sampled: a grid over the piece's parameter range with a few points
+// in each knot span of its surface each way (16 at least, 256 at most), those inside it, and one
+// point inside it; a fold narrower than a span's step can be missed. Evenly spread, a band near a
+// rim under 3 % of the range was (PR 324 round 2 verification). Throws when no point inside the
+// piece is found.
 bool facesAgainst(const TopoDS_Face& piece, const gp_Dir& direction)
 {
     const BRepAdaptor_Surface surface(piece);
@@ -6628,39 +6631,65 @@ bool facesAgainst(const TopoDS_Face& piece, const gp_Dir& direction)
         const double size = outward.Magnitude();
         return size > gp::Resolution() && outward.Dot(along) < -1e-9 * size;
     };
-    Standard_Real uLow = 0.0;
-    Standard_Real uHigh = 0.0;
-    Standard_Real vLow = 0.0;
-    Standard_Real vHigh = 0.0;
-    BRepTools::UVBounds(piece, uLow, uHigh, vLow, vHigh);
-    constexpr int steps = 16;
-    bool sampled = false;
-    for (int i = 0; i < steps; ++i) {
-        const double u = uLow + (i + 0.5) / steps * (uHigh - uLow);
-        for (int j = 0; j < steps; ++j) {
-            const double v = vLow + (j + 0.5) / steps * (vHigh - vLow);
-            BRepClass_FaceClassifier classifier(piece, gp_Pnt2d(u, v), Precision::PConfusion());
-            if (classifier.State() != TopAbs_IN) {
-                continue;
+    auto inside = [&](double u, double v) {
+        BRepClass_FaceClassifier classifier(piece, gp_Pnt2d(u, v), Precision::PConfusion());
+        return classifier.State() == TopAbs_IN;
+    };
+    // The parameters to sample one way, from the bounds of the surface's knot spans over the
+    // piece's range (one span for a surface without knots)
+    auto spread = [](const TColStd_Array1OfReal& bounds) {
+        constexpr int least = 16;
+        constexpr int perSpan = 4;
+        constexpr int most = 256;
+        int spans = bounds.Length() - 1;
+        int each = std::max(perSpan, (least + spans - 1) / spans);
+        double low = bounds.First();
+        double high = bounds.Last();
+        if (spans * each > most) {
+            each = most / spans;
+            if (each == 0) {
+                spans = 1;
+                each = most;
             }
-            sampled = true;
-            if (against(u, v)) {
+        }
+        std::vector<double> values;
+        for (int s = 0; s < spans; ++s) {
+            const double from = spans == 1 ? low : bounds(bounds.Lower() + s);
+            const double to = spans == 1 ? high : bounds(bounds.Lower() + s + 1);
+            for (int i = 0; i < each; ++i) {
+                values.push_back(from + (i + 0.5) / each * (to - from));
+            }
+        }
+        return values;
+    };
+    TColStd_Array1OfReal uBounds(1, surface.NbUIntervals(GeomAbs_CN) + 1);
+    surface.UIntervals(uBounds, GeomAbs_CN);
+    TColStd_Array1OfReal vBounds(1, surface.NbVIntervals(GeomAbs_CN) + 1);
+    surface.VIntervals(vBounds, GeomAbs_CN);
+    const std::vector<double> us = spread(uBounds);
+    const std::vector<double> vs = spread(vBounds);
+    // The normal first: classifying each point costs more
+    for (double u : us) {
+        for (double v : vs) {
+            if (against(u, v) && inside(u, v)) {
                 return true;
             }
         }
     }
-    if (!sampled) {
-        gp_Pnt point;
-        gp_Pnt2d uv;
-        Handle(IntTools_Context) context = new IntTools_Context;
-        if (BOPTools_AlgoTools3D::PointInFace(piece, point, uv, context) != 0) {
-            throw Base::CADKernelError(
-                QT_TRANSLATE_NOOP("Exception", "Could not extrude up to the face")
-            );
-        }
+    gp_Pnt point;
+    gp_Pnt2d uv;
+    Handle(IntTools_Context) context = new IntTools_Context;
+    if (BOPTools_AlgoTools3D::PointInFace(piece, point, uv, context) == 0) {
         return against(uv.X(), uv.Y());
     }
-    return false;
+    for (double u : us) {
+        for (double v : vs) {
+            if (inside(u, v)) {
+                return false;
+            }
+        }
+    }
+    throw Base::CADKernelError(QT_TRANSLATE_NOOP("Exception", "Could not extrude up to the face"));
 }
 
 // The prism of `profile` along `direction` up to `upTo` (a face or a shell), built without
@@ -6762,9 +6791,12 @@ TopoShape prismUpToBySplit(
         // there, through a closed obstacle's far side or an undercut, and the solid fills what
         // lies behind (PR 324 round 1 verification; the Revolution's certifyFirstContact()
         // checks (ii) and (iii)). With no such piece, a line enters the solid only through the
-        // profile, so the solid is what first contact gives
+        // profile, so the solid is what first contact gives. A piece of the start cap is left
+        // out: where the profile lies on a face of `upTo` (a sketch on the base, up to the base)
+        // the splitter makes the two one face, whose outward normal is against the direction
+        // (PR 324 round 2 verification)
         for (TopExp_Explorer faces(solids.Current(), TopAbs_FACE); faces.More(); faces.Next()) {
-            if (upToPieces.Contains(faces.Current())
+            if (upToPieces.Contains(faces.Current()) && !start.Contains(faces.Current())
                 && facesAgainst(TopoDS::Face(faces.Current()), direction)) {
                 throw Base::RuntimeError(QT_TRANSLATE_NOOP(
                     "Exception",
