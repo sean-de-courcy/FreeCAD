@@ -473,13 +473,17 @@ def import_studios(doc, paths: Sequence[str], **choices) -> ImportResult:
         if own:
             doc.abortTransaction()
         for obj_name, prop in reversed(created):
-            obj = doc.getObject(obj_name)
-            if obj is None:
-                continue
-            if prop is None:
-                doc.removeObject(obj_name)
-            elif prop in obj.PropertiesList:
-                obj.removeProperty(prop)
+            try:
+                obj = doc.getObject(obj_name)
+                if obj is None:
+                    continue
+                if prop is None:
+                    doc.removeObject(obj_name)
+                elif prop in obj.PropertiesList:
+                    obj.removeProperty(prop)
+            except Exception as e:  # noqa: BLE001 (the import's own error is the one to raise)
+                App.Console.PrintWarning(
+                    f"Import: couldn't remove {obj_name} {prop or ''}: {e}\n")
         raise
     if own:
         doc.commitTransaction()
