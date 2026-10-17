@@ -2392,18 +2392,22 @@ class TestRevolve(unittest.TestCase):
         merged the loose seam with it. The tool went on into the torus (39.04 instead of 13.35,
         the fuse hiding most of it) or came out 1.25 short, with no error, whichever way the
         torus was parametrized (ops#293, q4). Now the Revolution fails or gives the tool that
-        first contact gives."""
+        first contact gives. Turned 328 degrees with tolerance 0.1, the tool is right (13.349 on
+        a mesh), but Shape.Volume reads 14.05, so volumes are measured on meshes (meshVolume())."""
         tool = self.torusFirstContactTools()[("One side", True)]
+        cases = [(330, tolerance) for tolerance in (0.02, 0.03, 0.04, 0.3)] + [(328, 0.1)]
         for fromMinusPi in (False, True):
-            for tolerance in (0.02, 0.03, 0.04, 0.3):
-                with self.subTest(fromMinusPi=fromMinusPi, tolerance=tolerance):
+            for turned, tolerance in cases:
+                with self.subTest(fromMinusPi=fromMinusPi, turned=turned, tolerance=tolerance):
                     feature, ring = self.revolveUpToTorusBase(
-                        "One side", True, tolerance, fromMinusPi
+                        "One side", True, tolerance, fromMinusPi, turned=turned
                     )
                     if not feature.isValid():
                         continue
-                    self.assertAlmostEqual(feature.AddSubShape.Volume, tool, delta=1e-3)
-                    self.assertAlmostEqual(feature.Shape.Volume, ring.Volume + tool, delta=1e-3)
+                    self.assertAlmostEqual(self.meshVolume(feature.AddSubShape), tool, delta=0.01)
+                    self.assertAlmostEqual(
+                        self.meshVolume(feature.Shape), self.meshVolume(ring) + tool, delta=0.02
+                    )
 
     def testRevolutionUpToLooseTorusNotTurnedNeverSilentlyWrong(self):
         """revolveUpToTorusBase() not turned, with the base's tolerance raised to 0.05 and 0.3.
@@ -2427,7 +2431,9 @@ class TestRevolve(unittest.TestCase):
                         )
                         if not feature.isValid():
                             continue
-                        self.assertAlmostEqual(feature.AddSubShape.Volume, tool, delta=1e-3)
+                        self.assertAlmostEqual(
+                            self.meshVolume(feature.AddSubShape), tool, delta=0.01
+                        )
                         self.assertAlmostEqual(
                             self.meshVolume(feature.Shape),
                             self.meshVolume(ring) + tool,
