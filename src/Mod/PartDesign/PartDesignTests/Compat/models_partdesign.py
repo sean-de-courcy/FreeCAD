@@ -84,7 +84,9 @@ def RevolutionGroove(make):
     groove.SideType = "Symmetric"
     groove.Angle = 90
     body2 = newBody(doc, "Body001")
-    profile2 = attachedSketch(body2, "Sketch001", plane(body2, "XZ_Plane"), m.rectangle(5, 0, 10, 4))
+    profile2 = attachedSketch(
+        body2, "Sketch001", plane(body2, "XZ_Plane"), m.rectangle(5, 0, 10, 4)
+    )
     revolution2 = body2.newObject("PartDesign::Revolution", "Revolution001")
     revolution2.Profile = profile2
     revolution2.ReferenceAxis = (profile2, ["V_Axis"])
@@ -329,7 +331,8 @@ def UpToFace(make):
     doc.recompute()
     wallTop2 = faceWhere(
         post.Shape,
-        lambda f: planeFacing(TOP, V(0, 0, 25))(f) and (f.CenterOfMass - V(35, 10, 25)).Length < 1e-6,
+        lambda f: planeFacing(TOP, V(0, 0, 25))(f)
+        and (f.CenterOfMass - V(35, 10, 25)).Length < 1e-6,
     )
     blockTop2 = faceWhere(post.Shape, planeFacing(TOP, V(0, 0, 10)))
     pocket = body.newObject("PartDesign::Pocket", "Pocket")
