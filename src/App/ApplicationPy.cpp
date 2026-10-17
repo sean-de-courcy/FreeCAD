@@ -1637,6 +1637,9 @@ PyObject* ApplicationPy::sCheckVariableName(PyObject* /*self*/, PyObject* args)
         if (PyUnicode_Check(pyHolder)) {
             // A type name: an object not made yet, checked against that type's own properties.
             const char* typeName = PyUnicode_AsUTF8(pyHolder);
+            if (!typeName) {  // not encodable (a lone surrogate): the error is set
+                return nullptr;
+            }
             Base::Type type = Base::Type::fromName(typeName);
             if (type.isBad() || !type.isDerivedFrom(DocumentObject::getClassTypeId())
                 || !type.canInstantiate()) {

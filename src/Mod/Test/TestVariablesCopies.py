@@ -475,6 +475,8 @@ class TestVariablesCopies(unittest.TestCase):
         self.assertIn("already", App.checkVariableName("Gap", variables))
         with self.assertRaises(ValueError):
             App.checkVariableName("x", "App::NoSuchType")
+        with self.assertRaises(UnicodeEncodeError):  # a lone surrogate isn't UTF-8
+            App.checkVariableName("x", "App::VarSet" + chr(0xDCFF))
 
     # I-6
 
