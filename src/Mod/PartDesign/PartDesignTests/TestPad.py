@@ -324,6 +324,72 @@ def squareUpToPlates(doc, holed):
     return pad
 
 
+def squareUpToABallBeforePlates(doc):
+    """PR 324 round 1 verification: the Pad of squareUpToPlates() (the square y -2..2, z 5..9 at
+    x = 22, along -x), up to a ball of radius 1 around (15, 0, 7), inside the square's way, and the
+    B-spline plates at x = 5 and -5 (UpToShape, which leaves out the farthest one). Recomputed, not
+    checked."""
+    import Sketcher
+
+    V = FreeCAD.Vector
+    ball = doc.addObject("Part::Feature", "Ball")
+    ball.Shape = Part.makeSphere(1, V(15, 0, 7))
+    plates = doc.addObject("Part::Feature", "Plates")
+    plates.Shape = Part.Compound([nurbsPlate(5), nurbsPlate(-5)])
+    body = doc.addObject("PartDesign::Body", "Body")
+    sketch = body.newObject("Sketcher::SketchObject", "Square")
+    sketch.Placement = FreeCAD.Placement(V(22, 0, 0), FreeCAD.Rotation(V(0, 1, 0), 90))
+    corners = [V(-9, -2, 0), V(-5, -2, 0), V(-5, 2, 0), V(-9, 2, 0)]
+    for i in range(4):
+        sketch.addGeometry(Part.LineSegment(corners[i], corners[(i + 1) % 4]))
+    for i in range(4):
+        sketch.addConstraint(Sketcher.Constraint("Coincident", i, 2, (i + 1) % 4, 1))
+    pad = body.newObject("PartDesign::Pad", "Pad")
+    pad.Profile = sketch
+    pad.Type = "UpToShape"
+    pad.UpToShape = [(ball, [""]), (plates, [""])]
+    pad.Reversed = True
+    doc.recompute()
+    return pad
+
+
+def padUpToAPlateWithABulb(doc, half):
+    """PR 324 round 1 verification: a Body whose BaseFeature is the plate x -10..10, y -10..10,
+    z 10..12 with a bulb hanging under it, the smooth loft (one B-spline side) of the circles
+    about the z axis of radius 2 at z = 10, 4 at z = 6 and 2 at z = 2. A Pad from the square
+    x, y -`half`..`half` at z = -5, along +z, up to the base (UpToShape, nothing selected).
+    Recomputed, not checked."""
+    import Sketcher
+
+    V = FreeCAD.Vector
+    bulb = Part.makeLoft(
+        [
+            Part.Wire(Part.Circle(V(0, 0, 10), V(0, 0, 1), 2).toShape()),
+            Part.Wire(Part.Circle(V(0, 0, 6), V(0, 0, 1), 4).toShape()),
+            Part.Wire(Part.Circle(V(0, 0, 2), V(0, 0, 1), 2).toShape()),
+        ],
+        True,
+        False,
+    )
+    base = doc.addObject("Part::Feature", "Base")
+    base.Shape = Part.makeBox(20, 20, 2, V(-10, -10, 10)).fuse(bulb).removeSplitter()
+    body = doc.addObject("PartDesign::Body", "Body")
+    baseFeature = body.newObject("PartDesign::FeatureBase", "BaseFeature")
+    baseFeature.BaseFeature = base
+    sketch = body.newObject("Sketcher::SketchObject", "Square")
+    sketch.Placement = FreeCAD.Placement(V(0, 0, -5), FreeCAD.Rotation())
+    corners = [V(-half, -half, 0), V(half, -half, 0), V(half, half, 0), V(-half, half, 0)]
+    for i in range(4):
+        sketch.addGeometry(Part.LineSegment(corners[i], corners[(i + 1) % 4]))
+    for i in range(4):
+        sketch.addConstraint(Sketcher.Constraint("Coincident", i, 2, (i + 1) % 4, 1))
+    pad = body.newObject("PartDesign::Pad", "Pad")
+    pad.Profile = sketch
+    pad.Type = "UpToShape"
+    doc.recompute()
+    return pad
+
+
 def padUpToABoxBesideALoft(doc, withLoft):
     """ops#353 review M2: the box x 10..35, y -5..5, z 0..10 as a Body's BaseFeature, fused with
     ops#347's loft when `withLoft` (its B-spline side is away from the Pad), and a Pad from the
@@ -1171,6 +1237,35 @@ class TestPad(unittest.TestCase):
                         # The front plate stops all of it: 4 x 4 x 7
                         self.assertTrue(pad.isValid(), pad.getStatusString())
                         self.assertAlmostEqual(pad.AddSubShape.Volume, 112, places=6)
+                finally:
+                    FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToABallBeforePlates(self):
+        # PR 324 round 1 verification: the ball stops the square's middle, whose lines first meet
+        # its near side. The split kept one solid up to the middle plate with the ball as a
+        # cavity: a valid Pad of 4 x 4 x 17 less the ball (267.81), filling the ball's shadow,
+        # with no internal face. It fails, saying why
+        pad = squareUpToABallBeforePlates(self.Doc)
+        self.assertFalse(pad.isValid())
+        self.assertIn("meets the face from behind", pad.getStatusString())
+
+    def testPadUpToABaseWithAnUndercut(self):
+        # PR 324 round 1 verification: the square x, y -6..6 passes the bulb's widest point
+        # (radius 4 at z = 6); lines at radius 2..4 first meet its lower half. The split kept one
+        # solid up to the plate around the bulb, filling the undercut above its widest point
+        # (1871.8). It fails, saying why. The square x, y -1..1 meets only the bulb's bottom and
+        # stops there: 2 x 2 x 7
+        for half in (1, 6):
+            with self.subTest(half=half):
+                doc = FreeCAD.newDocument("PadUpToABaseWithAnUndercut")
+                try:
+                    pad = padUpToAPlateWithABulb(doc, half)
+                    if half == 1:
+                        self.assertTrue(pad.isValid(), pad.getStatusString())
+                        self.assertAlmostEqual(pad.AddSubShape.Volume, 28, places=6)
+                    else:
+                        self.assertFalse(pad.isValid())
+                        self.assertIn("meets the face from behind", pad.getStatusString())
                 finally:
                     FreeCAD.closeDocument(doc.Name)
 
