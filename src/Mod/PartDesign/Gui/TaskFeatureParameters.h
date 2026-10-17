@@ -36,6 +36,7 @@
 #include "ViewProvider.h"
 
 class QComboBox;
+class QLabel;
 class QListWidget;
 class QTimer;
 
@@ -181,7 +182,10 @@ private:
  *   Row 2 lists the studio's other parts, those the tool touches first, one tick each; OK makes
  *   the ticked ones' siblings (PartDesign.makeSiblings, 2.4, session 3a). In a sibling's panel
  *   the box says whom it follows, offers Unlink, and the other boxes are read-only.
- * The merge scope of row 2 for an additive feature (2.5) comes with session 3b.
+ * - Additive, in a studio with other parts: Merge with lists them, those the tool touches first,
+ *   unticked (decision 59). A touching part left unticked gets a plain line; a ticked one the
+ *   yellow banner of what merging does. OK merges the ticked ones (PartDesign.makeMerge, 2.5 and
+ *   2.6, session 3b).
  */
 class TaskResultParameters: public TaskFeatureParameters
 {
@@ -208,6 +212,9 @@ public:
 private:
     void onResultChanged(int index);
     void addPartsList();
+    void addMergeList();
+    /// The plain line for touching parts left out and the banner for the ticked ones
+    void updateMergeNotes();
     void addFollowsNote(App::DocumentObject* primary);
     void onUnlink();
     /// Marks the parts the tool doesn't touch (debounced; the distance is cached per shape)
@@ -218,6 +225,10 @@ private:
     QComboBox* combo;
     /// Row 2 of a subtractive primary: the studio's other parts, one tick each
     QListWidget* parts = nullptr;
+    /// Row 2 of an additive feature: the studio's other parts to merge, one tick each (3b)
+    QListWidget* mergeParts = nullptr;
+    QLabel* mergeNote = nullptr;
+    QLabel* mergeBanner = nullptr;
     QTimer* touchTimer = nullptr;
     std::shared_ptr<TouchCache> touchCache;
     /// The feature, still named when it is deleted (Cancel of a new one)

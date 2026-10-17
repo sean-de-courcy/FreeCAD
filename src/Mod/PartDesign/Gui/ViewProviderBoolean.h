@@ -64,6 +64,11 @@ public:
     void onChanged(const App::Property* prop) override;
     void update(const App::Property* prop) override;
     void updatePreviewOpacity() override;
+    /// A Merge not yet accepted is marked while held or failed too, when the document has
+    /// cleared its warning (FreeCAD-CH ops#325, design 2.5)
+    QIcon mergeColorfulOverlayIcons(const QIcon& orig) const override;
+    /// Accepts the Merge: its warning goes (FreeCAD-CH ops#325)
+    void acceptMerge();
 
 protected:
     void updateData(const App::Property* prop) override;

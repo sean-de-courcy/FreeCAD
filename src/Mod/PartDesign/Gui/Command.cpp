@@ -2993,6 +2993,82 @@ bool CmdPartDesignBoolean::isActive()
     }
 }
 
+//===========================================================================
+// PartDesign_MergeParts (FreeCAD-CH ops#325, B+ Stage 1 3b, design 2.5)
+//===========================================================================
+
+DEF_STD_CMD_A(CmdPartDesignMergeParts)
+
+CmdPartDesignMergeParts::CmdPartDesignMergeParts()
+    : Command("PartDesign_MergeParts")
+{
+    sAppModule = "PartDesign";
+    sGroup = QT_TR_NOOP("PartDesign");
+    sMenuText = QT_TR_NOOP("Merge Parts");
+    sToolTipText = QT_TR_NOOP(
+        "Merges parts into one: select the part to keep (or its feature to merge after), then "
+        "the parts it absorbs"
+    );
+    sWhatsThis = "PartDesign_MergeParts";
+    sStatusTip = sToolTipText;
+    sPixmap = "PartDesign_Boolean";
+}
+
+void CmdPartDesignMergeParts::activated(int iMsg)
+{
+    Q_UNUSED(iMsg);
+    // In the order picked: the first is the part that stays
+    std::vector<App::DocumentObject*> picked;
+    for (auto& sel : Gui::Selection().getSelectionEx()) {
+        App::DocumentObject* obj = sel.getObject();
+        if (obj && std::ranges::find(picked, obj) == picked.end()) {
+            picked.push_back(obj);
+        }
+    }
+    if (picked.size() < 2) {
+        QMessageBox::information(
+            Gui::getMainWindow(),
+            QObject::tr("Merge Parts"),
+            QObject::tr("Select the part to keep (or its feature to merge after), then the parts "
+                        "to merge into it.")
+        );
+        return;
+    }
+    std::string bodies;
+    for (auto it = picked.begin() + 1; it != picked.end(); ++it) {
+        App::DocumentObject* body = PartDesign::Body::findBodyOf(*it);
+        if ((*it)->isDerivedFrom<PartDesign::Body>()) {
+            body = *it;
+        }
+        bodies += (bodies.empty() ? "" : ", ") + (body ? getObjectCmd(body) : getObjectCmd(*it));
+    }
+    openCommand(QT_TRANSLATE_NOOP("Command", "Merge parts"));
+    try {
+        doCommand(Doc, "import PartDesign");
+        doCommand(
+            Doc,
+            "PartDesign.makeMerge(%s, [%s])",
+            getObjectCmd(picked.front()).c_str(),
+            bodies.c_str()
+        );
+        updateActive();
+        commitCommand();
+    }
+    catch (const Base::Exception& e) {
+        abortCommand();
+        QMessageBox::warning(
+            Gui::getMainWindow(),
+            QObject::tr("Merge Parts"),
+            QString::fromUtf8(e.what())
+        );
+    }
+}
+
+bool CmdPartDesignMergeParts::isActive()
+{
+    return getActiveGuiDocument() && Gui::Selection().size() >= 2;
+}
+
 // Command group for datums =============================================
 
 class CmdPartDesignCompDatums: public Gui::GroupCommand
@@ -3235,6 +3311,7 @@ void CreatePartDesignCommands()
     rcCmdMgr.addCommand(new CmdPartDesignMultiTransform());
 
     rcCmdMgr.addCommand(new CmdPartDesignBoolean());
+    rcCmdMgr.addCommand(new CmdPartDesignMergeParts());
     rcCmdMgr.addCommand(new CmdPartDesignCompDatums());
     rcCmdMgr.addCommand(new CmdPartDesignCompSketches());
     rcCmdMgr.addCommand(new CmdPartDesignToggleSketches());

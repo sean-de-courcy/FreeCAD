@@ -63,6 +63,15 @@ def unlinkSibling(sibling: DocumentObject, /) -> None:
     """Make the sibling independent: its expressions on its primary and SiblingOf are cleared."""
     ...
 
+def makeMerge(at: DocumentObject, bodies: Sequence[DocumentObject], /) -> DocumentObject:
+    """Merge bodies, other parts of the studio, into the part of at.
+
+    at is a solid feature (the Merge goes right after it) or a Body (the Merge goes at its Tip).
+    The Merge is a Fuse of the bodies' last solid features; each merged Body gets MergedInto and
+    is hidden. No recompute; returns the Merge.
+    """
+    ...
+
 def newPartFrom(feature: DocumentObject, /) -> DocumentObject:
     """Move feature, its Body's Tip that nothing else uses, into a new Body in the same container.
 

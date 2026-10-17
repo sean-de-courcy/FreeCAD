@@ -70,6 +70,7 @@ public:
         return "PartDesignGui::ViewProviderBoolean";
     }
     void onChanged(const App::Property* prop) override;
+    void onDocumentRestored() override;
     //@}
 
     /// Set while its panel edits the tools: an empty list then computes nothing instead of failing
@@ -77,6 +78,27 @@ public:
     {
         settingUp = on;
     }
+
+    /** @name Merge (FreeCAD-CH ops#325, B+ Stage 1 3b, notes/bplus-stage1-design.md 2.6)
+     * A Merge is a Fuse in the surviving part whose tools are other parts' last solid features.
+     * Each absorbed Body names it in a hidden MergedInto link (Hidden scope: no dependency) and
+     * is hidden; a solid added to it after its merged feature fails at recompute. Only a Merge
+     * has MergeAccepted: until it is set, the Merge warns "Merged <part> into <part>".
+     */
+    //@{
+    /// Merges @p bodies into the part of @p at: a solid feature, the Merge going right after it,
+    /// or a Body, the Merge going at its Tip. Refused, with the reason, before anything changes.
+    /// No recompute.
+    static Boolean* makeMerge(App::DocumentObject* at, const std::vector<App::DocumentObject*>& bodies);
+    /// Whether this Boolean is a Merge
+    bool isMerge() const;
+    /// The Merge @p body is merged into, or null
+    static Boolean* mergeOf(const App::DocumentObject* body);
+    /// The Bodies merged into this Merge, in document order
+    std::vector<App::DocumentObject*> mergedBodies() const;
+    /// Why @p feature fails: a solid after its merged Body's merged feature, or empty
+    static std::string mergeLock(const App::DocumentObject* feature);
+    //@}
 
 protected:
     void handleChangedPropertyName(
@@ -88,6 +110,15 @@ protected:
 
 private:
     Part::TopoShape getBooleanTopoShape(const App::DocumentObject* object) const;
+    /// Why this Merge can't compute: its tools aren't its absorbed parts' features
+    std::string mergeProblem() const;
+    /// Warns "Merged <part> into <part>" until accepted
+    void warnMerged();
+    /// Where the tools' Bodies are in this one's frame
+    std::vector<Base::Placement> toolFrames() const;
+    /// toolFrames() at the last compute: a Merge whose part moved runs again (polled, as the
+    /// other readers of a moved Body, ops#325 1b-1)
+    std::vector<Base::Placement> lastToolFrames;
 
     static const char* TypeEnums[];
     bool settingUp = false;

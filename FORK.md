@@ -331,7 +331,8 @@ names it.
 | `feat/325-1b2` | feat | ops#325, ops#314 | - | `integration` `d2f792a682` | `35fbb72308` (fork PR 301), 2026-10-14 | never (fork feature) |
 | `feat/325-2a` | feat | ops#325, ops#311 | - | `feat/325-1b2` `5e4ebf2999` (fork PR 301, merged) | `a31fd26aee` (fork PR 302), 2026-10-16 | never (fork feature) |
 | `feat/325-2b` | feat | ops#325 | - | `feat/325-2a` `a44ed1dddf` (fork PR 302, merged) | `bf94ac043f` (fork PR 303), 2026-10-17 | never (fork feature) |
-| `feat/325-3a` | feat | ops#325 | - | `feat/325-2b` `dca26b0787` (fork PR 303) | (fork PR 304) | never (fork feature) |
+| `feat/325-3a` | feat | ops#325 | - | `feat/325-2b` `dca26b0787` (fork PR 303) | `0c1a444ea5` (fork PR 304), 2026-10-17 | never (fork feature) |
+| `feat/325-3b` | feat | ops#325 | - | `feat/325-3a` `0be7f310ec` (fork PR 304) | (fork PR 305) | never (fork feature) |
 
 ## Fork-only commits in carried topics
 

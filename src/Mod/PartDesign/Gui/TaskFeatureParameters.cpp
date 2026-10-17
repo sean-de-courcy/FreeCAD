@@ -54,6 +54,7 @@
 #include <Gui/BitmapFactory.h>
 #include <Mod/PartDesign/App/Feature.h>
 #include <Mod/PartDesign/App/FeatureAddSub.h>
+#include <Mod/PartDesign/App/FeatureBoolean.h>
 #include <Mod/PartDesign/App/FeatureSketchBased.h>
 #include <Mod/PartDesign/App/Body.h>
 
@@ -479,6 +480,10 @@ TaskResultParameters::TaskResultParameters(PartDesignGui::ViewProvider* vp, QWid
             }
             combo->setItemData(1, why, Qt::ToolTipRole);
         }
+        // Merge with (design 2.5): for a feature in its own part, not one moved to a new part
+        if (!from && body && hasStudioSiblings(body) && !PartDesign::Boolean::mergeOf(body)) {
+            addMergeList();
+        }
     }
     else {
         combo->addItem(tr("Remove from %1").arg(partLabel(body)), QStringLiteral("Subtraction"));
@@ -638,21 +643,132 @@ void TaskResultParameters::addPartsList()
     connect(touchTimer, &QTimer::timeout, this, &TaskResultParameters::updateTouches);
 }
 
+void TaskResultParameters::addMergeList()
+{
+    auto feature = getObject<PartDesign::FeatureAddSub>();
+    PartDesign::Body* body = PartDesign::Body::findBodyOf(feature);
+    touchCache = std::make_shared<TouchCache>();
+    // The studio's other parts, those the tool touches first; a part merged already isn't one
+    std::vector<std::pair<PartDesign::Body*, bool>> others;
+    for (auto obj : feature->getDocument()->getObjectsOfType(PartDesign::Body::getClassTypeId())) {
+        auto other = static_cast<PartDesign::Body*>(obj);
+        if (other != body && Part::BodyBase::areStudioSiblings(body, other)
+            && !PartDesign::Boolean::mergeOf(other)) {
+            others.emplace_back(other, toolTouches(feature, other, *touchCache));
+        }
+    }
+    if (others.empty()) {
+        return;
+    }
+    std::ranges::stable_partition(others, [](const auto& other) { return other.second; });
+
+    groupLayout()->addWidget(new QLabel(tr("Merge with:"), this));
+    mergeParts = new QListWidget(this);
+    mergeParts->setObjectName(QStringLiteral("mergeList"));
+    for (const auto& [other, touches] : others) {
+        auto item = new QListWidgetItem(touchText(other, touches), mergeParts);
+        item->setData(Qt::UserRole, QString::fromLatin1(other->getNameInDocument()));
+        item->setData(Qt::UserRole + 1, touches);
+        item->setCheckState(Qt::Unchecked);  // two overlapping parts by default (decision 59)
+        Qt::ItemFlags flags = Qt::ItemIsUserCheckable | Qt::ItemIsEnabled;
+        if (other->isRolledBack()) {
+            flags &= ~Qt::ItemIsEnabled;  // a held feature would merge a frozen shape (2.6)
+            item->setToolTip(tr("Roll %1 to the end first").arg(partLabel(other)));
+        }
+        item->setFlags(flags);
+    }
+    groupLayout()->addWidget(mergeParts);
+    mergeNote = new QLabel(this);
+    mergeNote->setObjectName(QStringLiteral("mergeNote"));
+    mergeNote->setWordWrap(true);
+    groupLayout()->addWidget(mergeNote);
+    mergeBanner = new QLabel(this);
+    mergeBanner->setObjectName(QStringLiteral("mergeBanner"));
+    mergeBanner->setWordWrap(true);
+    // The look of the task view's warning banner (Gui/TaskView/TaskView.cpp)
+    mergeBanner->setStyleSheet(QStringLiteral(
+        "QLabel#mergeBanner { background-color: rgba(230, 160, 0, 45);"
+        " border: 1px solid rgba(200, 140, 0, 170); border-radius: 3px; padding: 2px; }"
+    ));
+    groupLayout()->addWidget(mergeBanner);
+    connect(mergeParts, &QListWidget::itemChanged, this, [this]() { updateMergeNotes(); });
+    updateMergeNotes();
+
+    if (!touchTimer) {
+        touchTimer = new QTimer(this);
+        touchTimer->setSingleShot(true);
+        touchTimer->setInterval(300);
+        connect(touchTimer, &QTimer::timeout, this, &TaskResultParameters::updateTouches);
+    }
+}
+
+void TaskResultParameters::updateMergeNotes()
+{
+    if (!mergeParts) {
+        return;
+    }
+    QStringList ticked;
+    QStringList touching;
+    for (int i = 0; i < mergeParts->count(); ++i) {
+        QListWidgetItem* item = mergeParts->item(i);
+        App::DocumentObject* other =
+            getObject()->getDocument()->getObject(item->data(Qt::UserRole).toString().toLatin1());
+        if (!other) {
+            continue;
+        }
+        if (item->checkState() == Qt::Checked) {
+            ticked << partLabel(other);
+        }
+        else if (item->data(Qt::UserRole + 1).toBool()) {
+            touching << partLabel(other);
+        }
+    }
+    const QString comma = QStringLiteral(", ");
+    // Overlapping parts are a normal state while modelling: a plain line, no warning (2.5)
+    mergeNote->setText(
+        touching.isEmpty() ? QString() : tr("Touches %1 (not merged)").arg(touching.join(comma))
+    );
+    mergeNote->setVisible(!touching.isEmpty());
+    const QString into = partLabel(PartDesign::Body::findBodyOf(getObject()));
+    if (ticked.size() == 1) {
+        mergeBanner->setText(
+            tr("Merges %1 into %2. %1 stops being a separate part: it is hidden, its shape "
+               "becomes part of %2, and features added to %1 after this point fail.")
+                .arg(ticked.front(), into)
+        );
+    }
+    else if (!ticked.isEmpty()) {
+        mergeBanner->setText(
+            tr("Merges %1 into %2. They stop being separate parts: they are hidden, their shapes "
+               "become part of %2, and features added to them after this point fail.")
+                .arg(ticked.join(comma), into)
+        );
+    }
+    mergeBanner->setVisible(!ticked.isEmpty());
+}
+
 void TaskResultParameters::updateTouches()
 {
     auto feature = freecad_cast<PartDesign::FeatureAddSub*>(featureT.getObject());
-    if (!feature || !parts) {
+    if (!feature) {
         return;
     }
-    for (int i = 1; i < parts->count(); ++i) {
-        QListWidgetItem* item = parts->item(i);
-        auto other = freecad_cast<PartDesign::Body*>(
-            feature->getDocument()->getObject(item->data(Qt::UserRole).toString().toLatin1())
-        );
-        if (other) {
-            item->setText(touchText(other, toolTouches(feature, other, *touchCache)));
+    for (QListWidget* list : {parts, mergeParts}) {
+        // the parts list's first row is the feature's own part
+        for (int i = list == parts ? 1 : 0; list && i < list->count(); ++i) {
+            QListWidgetItem* item = list->item(i);
+            auto other = freecad_cast<PartDesign::Body*>(
+                feature->getDocument()->getObject(item->data(Qt::UserRole).toString().toLatin1())
+            );
+            if (other) {
+                const bool touches = toolTouches(feature, other, *touchCache);
+                QSignalBlocker block(list);
+                item->setText(touchText(other, touches));
+                item->setData(Qt::UserRole + 1, touches);
+            }
         }
     }
+    updateMergeNotes();
 }
 
 void TaskResultParameters::slotChangedObject(
@@ -760,6 +876,32 @@ void TaskResultParameters::apply()
     if (feature && feature->getAddSubType() == PartDesign::FeatureAddSub::Type::Subtractive
         && !primaryOf(feature)) {
         FCMD_OBJ_CMD(feature, "Operation = '" << feature->Operation.getValueAsString() << "'");
+    }
+    // The ticked parts merged into this one, right after the feature (design 2.5). A part merged
+    // already (an OK that failed, tried again) is left out
+    if (feature && mergeParts) {
+        App::Document* doc = feature->getDocument();
+        std::string ticked;
+        for (int i = 0; i < mergeParts->count(); ++i) {
+            QListWidgetItem* item = mergeParts->item(i);
+            App::DocumentObject* other =
+                doc->getObject(item->data(Qt::UserRole).toString().toLatin1());
+            if (other && item->checkState() == Qt::Checked
+                && !PartDesign::Boolean::mergeOf(other)) {
+                ticked += (ticked.empty() ? "" : ", ") + Gui::Command::getObjectCmd(other);
+            }
+        }
+        if (!ticked.empty()) {
+            Gui::Command::doCommand(Gui::Command::Doc, "import PartDesign");
+            Gui::Command::doCommand(
+                Gui::Command::Doc,
+                "PartDesign.makeMerge(%s, [%s])",
+                Gui::Command::getObjectCmd(feature).c_str(),
+                ticked.c_str()
+            );
+            // The Merge computes now: OK purges the document's touched objects (accept())
+            Gui::cmdAppDocument(feature, "recompute()");
+        }
     }
     if (!feature || !parts) {
         return;

@@ -41,6 +41,7 @@
 #include "Body.h"
 #include "BodyPy.h"
 #include "FeatureBase.h"
+#include "FeatureBoolean.h"
 #include "FeatureSketchBased.h"
 #include "FeatureSolid.h"
 #include "FeatureTransformed.h"
@@ -840,6 +841,38 @@ void Body::onChanged(const App::Property* prop)
 {
     if (prop == &Tip && !isRestoring() && getDocument()) {
         touchHeldSolidReaders(*this);
+    }
+    if (prop == &Placement && !isRestoring() && getDocument()) {
+        // A Merge converts its parts' frames but links features, not Bodies: a moved Body
+        // touches the Merge it is merged into and the Merges it holds, when their poll sees the
+        // move (an expression sets an equal value again on the second pass). Moved by an
+        // expression, in the middle of a recompute, after the Merge's poll, the second pass runs
+        // them (FreeCAD-CH ops#325, PR 305 round 1). A reopened file is left to the poll
+        auto touchMoved = [](Boolean* merge) {
+            if (merge && merge->isMerge() && merge->mustExecute() > 0) {
+                merge->touch();
+            }
+        };
+        touchMoved(Boolean::mergeOf(this));
+        for (auto feature : Group.getValues()) {
+            touchMoved(freecad_cast<Boolean*>(feature));
+        }
+    }
+    if (prop->getName() && std::strcmp(prop->getName(), "MergedInto") == 0 && !isRestoring()
+        && getDocument()) {
+        // Merged into another part, or unmerged by deleting the Merge, by undo and redo too
+        // (FreeCAD-CH ops#325, design 2.6, PR 305 round 1): its solids after the merged feature
+        // fail, or compute again, and nothing else runs them. Unmerged, it shows again (undo
+        // and redo put Visibility back themselves)
+        for (auto feature : Group.getValues()) {
+            if (isSolidFeature(feature)) {
+                feature->touch();
+            }
+        }
+        if (!getDocument()->isPerformingTransaction()
+            && !static_cast<const App::PropertyLinkHidden*>(prop)->getValue()) {
+            Visibility.setValue(true);
+        }
     }
     if (prop == &Tip && !isRestoring() && getDocument() && !isRolledBack()) {
         // Tip has Output status (ops#127, R7): a bar move touches the Body only when rolling to

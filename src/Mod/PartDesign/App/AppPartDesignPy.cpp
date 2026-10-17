@@ -33,6 +33,7 @@
 #include <Mod/Part/App/BodyBase.h>
 
 #include "Body.h"
+#include "FeatureBoolean.h"
 #include "FeatureSketchBased.h"
 
 
@@ -88,6 +89,14 @@ public:
             &Module::unlinkSibling,
             "unlinkSibling(sibling) -- Makes the sibling independent: its expressions on its "
             "primary and its SiblingOf are cleared, its values stay."
+        );
+        add_varargs_method(
+            "makeMerge",
+            &Module::makeMerge,
+            "makeMerge(at, bodies) -- Merges the bodies, other parts of the studio, into the part "
+            "of at: a solid feature (the Merge goes right after it) or a Body (at its Tip). The "
+            "Merge is a Fuse of their last solid features; each merged Body gets MergedInto and is "
+            "hidden. Returns the Merge; no recompute."
         );
         add_varargs_method(
             "studioOriginFeature",
@@ -188,6 +197,21 @@ private:
         return list;
     }
 
+    static std::vector<App::DocumentObject*> objectsArg(PyObject* objects)
+    {
+        std::vector<App::DocumentObject*> result;
+        Py::Sequence sequence(objects);
+        for (Py::Sequence::iterator it = sequence.begin(); it != sequence.end(); ++it) {
+            PyObject* item = (*it).ptr();
+            if (!PyObject_TypeCheck(item, &(App::DocumentObjectPy::Type))) {
+                PyErr_SetString(PyExc_TypeError, "Expected a sequence of bodies");
+                throw Py::Exception();
+            }
+            result.push_back(objectArg(item));
+        }
+        return result;
+    }
+
     Py::Object makeSiblings(const Py::Tuple& args)
     {
         PyObject* pObj;
@@ -196,18 +220,28 @@ private:
             throw Py::Exception();
         }
         FeatureAddSub* feature = addSubArg(pObj);
-        std::vector<App::DocumentObject*> bodies;
-        Py::Sequence sequence(pBodies);
-        for (Py::Sequence::iterator it = sequence.begin(); it != sequence.end(); ++it) {
-            PyObject* item = (*it).ptr();
-            if (!PyObject_TypeCheck(item, &(App::DocumentObjectPy::Type))) {
-                PyErr_SetString(PyExc_TypeError, "Expected a sequence of bodies");
-                throw Py::Exception();
-            }
-            bodies.push_back(objectArg(item));
-        }
+        std::vector<App::DocumentObject*> bodies = objectsArg(pBodies);
         try {
             return objectList(FeatureAddSub::makeSiblings(feature, bodies));
+        }
+        catch (const Base::Exception& e) {
+            e.setPyException();
+            throw Py::Exception();
+        }
+    }
+
+    // FreeCAD-CH (ops#325 3b): Merge
+    Py::Object makeMerge(const Py::Tuple& args)
+    {
+        PyObject* pObj;
+        PyObject* pBodies;
+        if (!PyArg_ParseTuple(args.ptr(), "O!O", &(App::DocumentObjectPy::Type), &pObj, &pBodies)) {
+            throw Py::Exception();
+        }
+        App::DocumentObject* at = objectArg(pObj);
+        std::vector<App::DocumentObject*> bodies = objectsArg(pBodies);
+        try {
+            return Py::asObject(Boolean::makeMerge(at, bodies)->getPyObject());
         }
         catch (const Base::Exception& e) {
             e.setPyException();

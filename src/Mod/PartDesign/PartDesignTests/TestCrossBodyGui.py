@@ -675,5 +675,144 @@ class TestSiblingsGui(ResultBoxGuiCase):
         self.assertAlmostEqual(self.below.Shape.Volume, 16000, places=3)
 
 
+class TestMergeGui(ResultBoxGuiCase):
+    """Merge in the panel (ops#325, B+ Stage 1 session 3b; notes/bplus-stage1-design.md 2.5): an
+    additive feature's Result box lists the studio's other parts under Merge with, unticked; a
+    touching one left out gets a plain line, a ticked one the yellow banner, and OK merges it. The
+    Merge's panel offers Accept; the tree marks an unaccepted Merge while it is held; the Merge
+    Parts command merges after the fact. Designed geometry: the enclosure with its lid sketch
+    (30 x 30 on its top; the pad's default length is 10), a part "Panel" 40 x 30 x 10 from
+    (20, 0, 10), which the lid pad overlaps in 10 x 30 x 10, and a part "Far" (100 away)."""
+
+    def part(self, name, rect, z):
+        body = self.doc.addObject("PartDesign::Body", name)
+        body.Label = name
+        pad(body, name + "Pad", sketch(body, name + "Sk", xyPlane(body), rect, z=z), 10)
+        self.doc.recompute()
+        return body
+
+    def parts(self):
+        self.enclosure()
+        self.panel = self.part("Panel", (20, 0, 60, 30), 10)
+        self.far = self.part("Far", (100, 0, 140, 40), 0)
+
+    def visible(self, cls, name):
+        QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+        found = [w for w in Gui.getMainWindow().findChildren(cls, name) if w.isVisible()]
+        return found[0] if found else None
+
+    def mergeItems(self):
+        rows = self.visible(QtWidgets.QListWidget, "mergeList")
+        self.assertIsNotNone(rows, "no Merge with list")
+        return [
+            (rows.item(i).text(), rows.item(i).checkState() == QtCore.Qt.Checked)
+            for i in range(rows.count())
+        ]
+
+    def treeIcon(self, obj):
+        """The image of obj's icon in the tree."""
+        for tree in Gui.getMainWindow().findChildren(QtWidgets.QTreeWidget):
+            for item in tree.findItems(obj.Label, QtCore.Qt.MatchExactly | QtCore.Qt.MatchRecursive):
+                return item.icon(0).pixmap(16, 16).toImage()
+        self.fail(f"{obj.Label} isn't in the tree")
+
+    def testMergeFromTheResultBox(self):
+        """M-t1 in the panel: Pad on the lid sketch lists Panel (touched) and Far, unticked, with
+        the plain line "Touches Panel (not merged)" and no banner. Panel ticked: the banner says
+        what merging does, the line goes. OK: a Merge right after the pad, the Enclosure's Tip,
+        fuses Panel's pad (16000 + 9000 + 12000 - 3000 = 34000); Panel is hidden and merged, and
+        the Merge warns. One undo step removes the pad and the Merge."""
+        self.parts()
+        before = sorted(o.Name for o in self.doc.Objects)
+        lid = self.featurePanel("PartDesign_Pad")
+        self.assertEqual(self.mergeItems(), [("Panel", False), ("Far (doesn't touch)", False)])
+        note = self.visible(QtWidgets.QLabel, "mergeNote")
+        self.assertIsNotNone(note, "no plain line")
+        self.assertEqual(note.text(), "Touches Panel (not merged)")
+        self.assertIsNone(self.visible(QtWidgets.QLabel, "mergeBanner"))
+        self.visible(QtWidgets.QListWidget, "mergeList").item(0).setCheckState(QtCore.Qt.Checked)
+        banner = self.visible(QtWidgets.QLabel, "mergeBanner")
+        self.assertIsNotNone(banner, "no banner")
+        self.assertTrue(banner.text().startswith("Merges Panel into Enclosure. Panel stops"))
+        self.assertIsNone(self.visible(QtWidgets.QLabel, "mergeNote"))
+        self.close(ok=True)
+        merge = self.panel.MergedInto
+        self.assertIsNotNone(merge)
+        group = self.body.Group
+        self.assertEqual(group.index(merge), group.index(lid) + 1)
+        self.assertIs(self.body.Tip, merge)
+        self.assertFalse(self.panel.Visibility)
+        self.assertIn("Merged Panel into Enclosure", merge.getStatusString())
+        self.assertAlmostEqual(self.body.Shape.Volume, 34000, places=3)
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertEqual(sorted(o.Name for o in self.doc.Objects), before)
+        self.assertTrue(self.panel.Visibility)
+
+    def testAcceptInTheMergePanelAndTheTreeMark(self):
+        """M-t2 in the Gui: held (the Enclosure rolled back above it), the Merge isn't
+        recomputed and keeps its warning, so the tree marks it. Failed (Panel's pad of length
+        0), the document has cleared its warning, yet the tree marks it until accepted. Its
+        panel says what it merges, keeps the tools fixed, and offers Accept: OK, and the Merge
+        is accepted, without a warning."""
+        self.parts()
+        merge = PartDesign.makeMerge(self.body, [self.panel])
+        self.doc.recompute()
+        self.assertIn("Warning", merge.State)
+        self.body.Tip = self.base
+        self.doc.recompute()
+        self.assertIn("Warning", merge.State)
+        self.body.Tip = merge
+        self.doc.recompute()
+
+        panelPad = self.panel.Tip
+        panelPad.Length = 0
+        self.doc.recompute()
+        pump(0.3)
+        self.assertFalse(merge.isValid())
+        self.assertNotIn("Warning", merge.State)
+        marked = self.treeIcon(merge)
+        merge.MergeAccepted = True
+        pump(0.3)
+        self.assertNotEqual(self.treeIcon(merge), marked, "no mark while failed")
+        merge.MergeAccepted = False
+        panelPad.Length = 10
+        self.doc.recompute()
+        pump(0.3)
+        self.assertIn("Warning", merge.State)
+
+        self.doc.openTransaction("Edit Merge")
+        Gui.getDocument(self.doc.Name).setEdit(merge.Name)
+        self.waitForPanel()
+        note = self.visible(QtWidgets.QLabel, "mergeNote")
+        self.assertIsNotNone(note, "no note")
+        self.assertEqual(note.text(), "A Merge of Panel: delete it to unmerge")
+        self.assertFalse(self.visible(QtWidgets.QToolButton, "buttonBodyAdd").isEnabled())
+        self.visible(QtWidgets.QPushButton, "acceptMergeButton").click()
+        self.close(ok=True)
+        self.assertTrue(merge.MergeAccepted)
+        self.assertNotIn("Warning", merge.State)
+
+    def testMergePartsCommand(self):
+        """Merge Parts after the fact: the Enclosure picked, then Panel: a Merge at the
+        Enclosure's Tip (16000 + 12000, no overlap), in one undo step."""
+        self.parts()
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.doc.Name, self.body.Name)
+        Gui.Selection.addSelection(self.doc.Name, self.panel.Name)
+        Gui.runCommand("PartDesign_MergeParts")
+        pump(0.2)
+        merge = self.panel.MergedInto
+        self.assertIsNotNone(merge)
+        self.assertIs(self.body.Tip, merge)
+        self.assertEqual(merge.Group, [self.panel.Tip])
+        self.assertAlmostEqual(self.body.Shape.Volume, 28000, places=3)
+        name = merge.Name
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertIsNone(self.doc.getObject(name))
+        self.assertAlmostEqual(self.body.Shape.Volume, 16000, places=3)
+
+
 if __name__ == "__main__":
     unittest.main()
