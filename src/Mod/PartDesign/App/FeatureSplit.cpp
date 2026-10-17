@@ -120,6 +120,13 @@ Split::Split()
         (App::PropertyType)(App::Prop_Hidden | App::Prop_Output),
         "Where the partner's part was, in this part's frame, when this Split last computed"
     );
+    ADD_PROPERTY_TYPE(
+        ToolFrame,
+        (Base::Placement()),
+        "Split",
+        (App::PropertyType)(App::Prop_Hidden | App::Prop_Output),
+        "Where the plane's object was, in this part's frame, when this Split last computed"
+    );
     Partner.setStatus(App::Property::Hidden, true);
 }
 
@@ -135,6 +142,26 @@ Base::Placement Split::partnerFrame() const
     Body* other = partner ? partner->getFeatureBody() : nullptr;
     const Base::Placement here = own ? own->globalPlacement() : Base::Placement();
     return here.inverse() * (other ? other->globalPlacement() : Base::Placement());
+}
+
+Base::Placement Split::toolFrame() const
+{
+    const Split* source = NewHalf.getValue() ? partnerSplit() : this;
+    App::DocumentObject* tool = source ? source->Tool.getValue() : nullptr;
+    if (!tool) {
+        return {};
+    }
+    // The Tool with its container: its Body, the coordinate system or group of an origin plane
+    Body* own = getFeatureBody();
+    const Base::Placement here = own ? own->globalPlacement() : Base::Placement();
+    return here.inverse() * App::GeoFeature::getGlobalPlacement(tool);
+}
+
+bool Split::waits() const
+{
+    const Split* held = NewHalf.getValue() ? partnerSplit() : this;
+    Body* body = held ? held->getFeatureBody() : nullptr;
+    return body && body->holds(held);
 }
 
 void Split::onChanged(const App::Property* prop)
@@ -160,12 +187,14 @@ short Split::mustExecute() const
     if (Tool.isTouched() || Side.isTouched() || Partner.isTouched() || NewHalf.isTouched()) {
         return 1;
     }
-    // The partner's part moved: nothing this half links changed (as a Merge's, ops#325 M-t6).
-    // Not while it waits for the partner
-    if (Split* partner = partnerSplit()) {
-        Body* body = partner->getFeatureBody();
-        if (!(body && body->holds(partner))
+    // A part moved, and nothing this Split links changed (as a Merge's, ops#325 M-t6): the
+    // partner's part, for the new half, or the Tool's own part. Not while it waits
+    if (!waits()) {
+        if (partnerSplit()
             && !partnerFrame().isSame(PartnerFrame.getValue(), Precision::Confusion())) {
+            return 1;
+        }
+        if (!toolFrame().isSame(ToolFrame.getValue(), Precision::Confusion())) {
             return 1;
         }
     }
@@ -207,6 +236,7 @@ App::DocumentObjectExecReturn* Split::execute()
         keepFront = partner->Side.getValue() != 0;
         PartnerFrame.setValue(partnerFrame());
     }
+    ToolFrame.setValue(toolFrame());
 
     Body* part = source->getFeatureBody();
     App::DocumentObject* baseObject = source->BaseFeature.getValue();

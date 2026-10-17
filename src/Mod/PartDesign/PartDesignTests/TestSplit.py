@@ -329,6 +329,26 @@ class TestSplit(unittest.TestCase):
         self.assertIsNotNone(face)
         self.split(tool=(slabBox, face))
         self.assertHalves(FRONT, BACK)
+        return slab
+
+    def testToolPartMovedFollows(self):
+        """S-t9: split by the slab's face, then the slab moved by (0, 1, 0): nothing either Split
+        links changed, and both cut at y = 4: front 20 x 6 x 8 - 18 x 5 x 7 = 330, back
+        20 x 4 x 8 - 18 x 3 x 7 = 262 (polled, as the partner's frame). Then the shroud moved
+        alone by (0, 1, 0): the original cuts at y = 3 in its own frame again, the new half reads
+        it where it now is, and the halves still make the whole, apart."""
+        slab = self.testOriginPlaneAndFace()
+        part = self.half.getParentGeoFeatureGroup()
+        slab.Placement = App.Placement(V(0, 1, 0), App.Rotation())
+        self.doc.recompute()
+        self.assertHalves(330, 262)
+        self.body.Placement = App.Placement(V(0, 1, 0), App.Rotation())
+        self.doc.recompute()
+        for split in (self.original, self.half):
+            self.assertTrue(split.isValid(), split.getStatusString())
+        self.assertAlmostEqual(self.body.Shape.Volume + part.Shape.Volume, WHOLE, places=6)
+        self.assertAlmostEqual(self.body.Shape.common(part.Shape).Volume, 0, places=6)
+        self.assertHalves(FRONT, BACK)
 
     def testProbeHalfSpace(self):
         """S-t8, the probe as a test: a half-space Common, at shape level, through

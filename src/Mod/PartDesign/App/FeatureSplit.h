@@ -46,6 +46,9 @@ public:
     App::PropertyBool NewHalf;
     /// Where the partner's Body was, in this one's frame, at the last compute (new half only)
     App::PropertyPlacement PartnerFrame;
+    /// Where the plane's object was, in this one's frame, at the last compute: a move of the
+    /// Tool's own part is seen by no link (the partner's Tool, for the new half)
+    App::PropertyPlacement ToolFrame;
 
     App::DocumentObjectExecReturn* recompute() override;
     App::DocumentObjectExecReturn* execute() override;
@@ -83,6 +86,10 @@ public:
 private:
     /// Where the partner's Body is in this Body's frame
     Base::Placement partnerFrame() const;
+    /// Where the Tool this Split cuts by (the partner's, for the new half) is in this Body's frame
+    Base::Placement toolFrame() const;
+    /// Whether this Split, or the new half's partner, is held by its rolled-back Body
+    bool waits() const;
 
     static const char* SideEnums[];
 };
