@@ -96,6 +96,27 @@ class TestCompatRecord(unittest.TestCase):
         moved = self.recordOf(Part.Face(Part.Plane(V(0, 0, 6), V(0, 0, 1))))
         self.assertTrue(self.differences(rec, moved))
 
+    def testPlainPythonDataIsRecordedByItsContent(self):
+        # A PropertyPythonObject holding plain data: its content, not "builtins.dict" (a dict's
+        # __getstate__() is None on Python 3.11+, so its content went unseen)
+        def recorded(data):
+            doc = self.newDocument("CompatRecordData")
+            obj = doc.addObject("App::FeaturePython", "Holder")
+            obj.addProperty("App::PropertyPythonObject", "Data")
+            obj.Data = data
+            rec = CompatRecord.record(doc)
+            App.closeDocument(doc.Name)
+            self.docs.remove(doc)
+            return rec
+
+        rec = recorded({"b": [1, 2.5], "a": "x"})
+        kind, value = rec["objects"]["Holder"]["props"]["Data"]
+        self.assertEqual(kind, "App::PropertyPythonObject")
+        self.assertEqual(value, {"a": "x", "b": [1, 2.5]})
+        self.assertEqual(CompatRecord.opaqueValues(rec), [])
+        lines, _ = CompatRecord.compare(rec, recorded({"b": [1, 2.5], "a": "y"}), "recompute")
+        self.assertTrue([line for line in lines if line.startswith("Holder.Data")])
+
     def testReferenceToAnInfiniteFace(self):
         # A reference to a datum plane's face (DatumPlane:Face1), and to an infinite cylinder:
         # keyed by the surface's type, and a plane by its normal and offset

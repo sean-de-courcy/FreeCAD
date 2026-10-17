@@ -165,10 +165,14 @@ def _object(obj, doc, masker, names):
 def _pythonObject(value):
     """A Python feature's proxy (an Assembly joint's, a VarSet-free FeaturePython's): its class,
     as the file names it (module and class), which a restore needs to find; its state too, when
-    the class saves one in a plain form."""
+    the class saves one in a plain form. Plain data (a dict, a list) by its content."""
     if value is None:
         return None
     kind = type(value)
+    if kind.__module__ == "builtins":
+        # plain data (a dict, a list, a string), compared by its content: a dict's __getstate__()
+        # is None on Python 3.11+
+        return _plainState(value)
     entry = {"proxy": f"{kind.__module__}.{kind.__qualname__}"}
     dumps = getattr(value, "dumps", None) or getattr(value, "__getstate__", None)
     if dumps is not None:
