@@ -451,3 +451,15 @@ def getNewerFormat(doc: Document, /) -> str:
     is saved to its own file.
     """
     ...
+
+def checkVariableName(
+    name: str, holder: DocumentObject | str | None = None, /
+) -> str:
+    """Why `name` can't be a variable (ops#317), or "" when it can: the rules of the Variables
+    panel's Add and of the import. Not an identifier; a unit, constant or function name in
+    expressions (`t`, `pi`, `cos`); a property every `holder` has (`Label`), or a variable
+    `holder` already has. `holder` is a document object, a type name for an object not made yet
+    (`"App::VarSetCopy"`: only its own properties count), or None (no holder checks).
+    Raises ValueError for a type name that isn't a document object type.
+    """
+    ...

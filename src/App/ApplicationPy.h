@@ -104,6 +104,7 @@ public:
     static PyObject *sMarkReferenceBroken    (PyObject *self,PyObject *args);
     static PyObject *sGetForkRelease         (PyObject *self,PyObject *args);
     static PyObject *sGetNewerFormat         (PyObject *self,PyObject *args);
+    static PyObject *sCheckVariableName      (PyObject *self,PyObject *args);
     // clang-format on
 };
 

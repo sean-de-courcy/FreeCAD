@@ -45,6 +45,7 @@
 #include <App/NameTable.h>
 #include <App/ReferenceReport.h>
 #include <App/ReferenceRepair.h>
+#include <App/VariableLookup.h>
 
 #include "Application.h"
 #include "ApplicationPy.h"
@@ -1610,6 +1611,47 @@ PyObject* ApplicationPy::sGetNewerFormat(PyObject* /*self*/, PyObject* args)
             return nullptr;
         }
         return Py::new_reference_to(Py::String(newerFormatMessage(doc)));
+    }
+    PY_CATCH;
+}
+
+// FreeCAD-CH ops#317 PR E1: the variable name rules (notes/variables-studio.md section 1.3) for
+// Python, as the import checks the names it gives.
+PyObject* ApplicationPy::sCheckVariableName(PyObject* /*self*/, PyObject* args)
+{
+    char* name = nullptr;
+    PyObject* pyHolder = Py_None;
+    if (!PyArg_ParseTuple(args, "s|O", &name, &pyHolder)) {
+        return nullptr;
+    }
+
+    PY_TRY
+    {
+        if (pyHolder == Py_None) {
+            return Py::new_reference_to(Py::String(VariableLookup::checkVariableName(nullptr, name)));
+        }
+        if (PyObject_TypeCheck(pyHolder, &DocumentObjectPy::Type)) {
+            auto holder = static_cast<DocumentObjectPy*>(pyHolder)->getDocumentObjectPtr();
+            return Py::new_reference_to(Py::String(VariableLookup::checkVariableName(holder, name)));
+        }
+        if (PyUnicode_Check(pyHolder)) {
+            // A type name: an object not made yet, checked against that type's own properties.
+            const char* typeName = PyUnicode_AsUTF8(pyHolder);
+            Base::Type type = Base::Type::fromName(typeName);
+            if (type.isBad() || !type.isDerivedFrom(DocumentObject::getClassTypeId())
+                || !type.canInstantiate()) {
+                PyErr_Format(PyExc_ValueError, "'%s' isn't a document object type", typeName);
+                return nullptr;
+            }
+            std::unique_ptr<DocumentObject> holder(
+                static_cast<DocumentObject*>(type.createInstance())
+            );
+            return Py::new_reference_to(
+                Py::String(VariableLookup::checkVariableName(holder.get(), name))
+            );
+        }
+        PyErr_SetString(PyExc_TypeError, "holder must be a document object, a type name or None");
+        return nullptr;
     }
     PY_CATCH;
 }
