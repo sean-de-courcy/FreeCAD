@@ -49,6 +49,7 @@
 #include "ObjectIdentifier.h"
 #include "ElementNamingUtils.h"
 #include "GeoFeature.h"
+#include "Link.h"
 #include "ElementReferences.h"
 #include "LinkRetarget.h"
 #include "NamingRevision.h"
@@ -1359,6 +1360,27 @@ void PropertyLink::resetLink()
     _pcLink = nullptr;
 }
 
+// A Link whose LinkedObject reaches the Link again makes LinkBaseExtension::extensionMustExecute
+// recurse without end (ops#333). LinkBaseExtension::setLink refuses such a target; a direct
+// assignment of the property is refused the same way, before anything changes.
+static void checkLinkedObjectCycle(const Property* prop,
+                                   DocumentObject* owner,
+                                   DocumentObject* target)
+{
+    if (!target || !owner || !owner->getDocument() || App::Document::isAnyRestoring()
+        || owner->getDocument()->isPerformingTransaction()) {
+        return;
+    }
+    auto ext = owner->getExtensionByType<LinkBaseExtension>(true);
+    if (!ext || ext->getProperty(LinkBaseExtension::PropLinkedObject) != prop) {
+        return;
+    }
+    if (owner->getInListEx(true).count(target) != 0) {
+        throw Base::ValueError("Cyclic dependency: linking " + owner->getFullName() + " to "
+                               + target->getFullName() + " makes a cycle");
+    }
+}
+
 void PropertyLink::setValue(App::DocumentObject* lValue)
 {
     auto parent = dynamic_cast<App::DocumentObject*>(getContainer());
@@ -1366,6 +1388,7 @@ void PropertyLink::setValue(App::DocumentObject* lValue)
         && parent->getDocument() != lValue->getDocument()) {
         throw Base::ValueError("PropertyLink does not support external object");
     }
+    checkLinkedObjectCycle(this, parent, lValue);
 
     aboutToSetValue();
 
@@ -6070,6 +6093,7 @@ void PropertyXLink::setValue(App::DocumentObject* lValue,
     if (lValue == owner) {
         throw Base::ValueError("self linking");
     }
+    checkLinkedObjectCycle(this, owner, lValue);
 
     aboutToSetValue();
 
