@@ -24,8 +24,8 @@
 
 #include <algorithm>
 #include <limits>
+#include <map>
 #include <mutex>
-#include <set>
 
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/range.hpp>
@@ -60,18 +60,21 @@ using CharRange = boost::iterator_range<const char*>;
 
 namespace
 {
-// Links whose cycle was reported (ops#349). The GUI asks a Link's mustExecute() and linked object
-// on every tree update and command poll, and each answer met the cycle again: each Link is
-// reported once as an error, then logged, until its LinkedObject changes or it is removed
+// Links whose cycle was reported, with their objects (ops#349). The GUI asks a Link's
+// mustExecute() and linked object on every tree update and command poll, and each answer met the
+// cycle again: each Link is reported once as an error, then logged, until its LinkedObject or
+// that of a Link it leads to changes, or it is removed or destroyed. Keyed by the extension,
+// which every way a Link dies destroys: closing a document deletes its objects without
+// unsetting them up, and a later Link could take the address
 std::mutex reportedCyclesMutex;
-std::set<const DocumentObject*> reportedCycles;
+std::map<const LinkBaseExtension*, const DocumentObject*> reportedCycles;
 
-void reportLinkCycle(const DocumentObject* owner, const std::string& msg)
+void reportLinkCycle(const LinkBaseExtension* ext, const std::string& msg)
 {
     bool first = false;
     {
         std::lock_guard<std::mutex> lock(reportedCyclesMutex);
-        first = reportedCycles.insert(owner).second;
+        first = reportedCycles.emplace(ext, ext->getContainer()).second;
     }
     if (first) {
         FC_ERR(msg);
@@ -81,10 +84,42 @@ void reportLinkCycle(const DocumentObject* owner, const std::string& msg)
     }
 }
 
-void forgetLinkCycle(const DocumentObject* owner)
+void forgetLinkCycle(const LinkBaseExtension* ext)
 {
     std::lock_guard<std::mutex> lock(reportedCyclesMutex);
-    reportedCycles.erase(owner);
+    reportedCycles.erase(ext);
+}
+
+// Whether following LinkedObject from `from`, through Links only, reaches `to`
+bool linksLeadTo(const DocumentObject* from, const DocumentObject* to)
+{
+    std::vector<const DocumentObject*> seen;
+    for (const DocumentObject* obj = from; obj;) {
+        if (obj == to) {
+            return true;
+        }
+        if (std::ranges::find(seen, obj) != seen.end()) {
+            return false;
+        }
+        seen.push_back(obj);
+        auto ext = obj->getExtensionByType<LinkBaseExtension>(true);
+        obj = ext ? ext->getLinkedObjectValue() : nullptr;
+    }
+    return false;
+}
+
+// ext's LinkedObject changed: forget it, and every reported Link whose links lead to it, the rest
+// of a ring it was on, so that each reports again if the cycle comes back (an undo of the
+// change). Otherwise only the changed Link would (PR 330 review, L3)
+void forgetLinkCyclesThrough(const LinkBaseExtension* ext, const DocumentObject* owner)
+{
+    std::lock_guard<std::mutex> lock(reportedCyclesMutex);
+    reportedCycles.erase(ext);
+    if (owner) {
+        std::erase_if(reportedCycles, [owner](const auto& entry) {
+            return linksLeadTo(entry.second, owner);
+        });
+    }
 }
 
 // The chain "A -> B -> A" when following LinkedObject from owner, through Links only, comes back
@@ -263,6 +298,12 @@ LinkBaseExtension::LinkBaseExtension()
                                 PropertyType(Prop_Hidden | Prop_Output),
                                 0);
     props.resize(PropMax, nullptr);
+}
+
+LinkBaseExtension::~LinkBaseExtension()
+{
+    // Every way a Link dies ends here; removal alone also forgets (onExtendedUnsetupObject)
+    forgetLinkCycle(this);
 }
 
 PyObject* LinkBaseExtension::getExtensionPyObject()
@@ -554,7 +595,7 @@ short LinkBaseExtension::extensionMustExecute()
         for (auto it = std::find(asking.begin(), asking.end(), owner); it != asking.end(); ++it) {
             chain += (*it)->getFullName() + " -> ";
         }
-        reportLinkCycle(owner, "Cyclic link: " + chain + owner->getFullName());
+        reportLinkCycle(this, "Cyclic link: " + chain + owner->getFullName());
         return 0;
     }
     asking.push_back(owner);
@@ -1302,7 +1343,7 @@ DocumentObject* LinkBaseExtension::getLink(int depth) const
     // Deeper than the number of objects: the links went round a cycle (ops#349)
     if (!GetApplication().checkLinkDepth(depth, MessageOption::Quiet)) {
         auto owner = getContainer();
-        reportLinkCycle(owner,
+        reportLinkCycle(this,
                         "Link recursion limit reached at " + owner->getFullName()
                             + ". Please check for cyclic reference.");
         return nullptr;
@@ -1776,7 +1817,7 @@ void LinkBaseExtension::checkGeoElementMap(const App::DocumentObject* obj,
 
 void LinkBaseExtension::onExtendedUnsetupObject()
 {
-    forgetLinkCycle(getContainer());
+    forgetLinkCycle(this);
     if (!getElementListProperty()) {
         return;
     }
@@ -1841,7 +1882,7 @@ void LinkBaseExtension::extensionOnChanged(const Property* prop)
 {
     auto parent = getContainer();
     if (prop && prop == getLinkedObjectProperty()) {
-        forgetLinkCycle(parent);
+        forgetLinkCyclesThrough(this, parent);
     }
     if (parent && !parent->isRestoring() && prop && !prop->testStatus(Property::User3)) {
         update(parent, prop);

@@ -23,6 +23,7 @@
 #include <Mod/Sketcher/App/GeoEnum.h>
 #include <Mod/Sketcher/App/SketchObject.h>
 #include "SketcherTestHelpers.h"
+#include "src/App/RecomputeWorkerHop.h"
 
 using namespace SketcherTestHelpers;
 
@@ -1009,7 +1010,7 @@ void besideTheWorker(bool singleObject, const std::function<void()>& whileHeld)
 
 }  // namespace
 
-class SketchObjectPollTest: public SketchObjectTest, public ::testing::WithParamInterface<bool>
+class SketchObjectOfAMovedPartTest: public SketchObjectTest
 {
 protected:
     /// The fixture's sketch at the document's root takes a vertex of a box in a placed container
@@ -1035,6 +1036,10 @@ protected:
     }
 };
 
+class SketchObjectPollTest: public SketchObjectOfAMovedPartTest,
+                            public ::testing::WithParamInterface<bool>
+{};
+
 TEST_P(SketchObjectPollTest, externalFramesWalkOnlyWithTheWorkerIdle)
 {
     // externalFramesChanged() walks the links' containers and placements: from the GUI's poll
@@ -1054,5 +1059,40 @@ INSTANTIATE_TEST_SUITE_P(
     ::testing::Values(true, false),
     [](const ::testing::TestParamInfo<bool>& info) {
         return info.param ? "OneObject" : "AnotherDocument";
+    }
+);
+
+// A slot run in the worker's hop to the GUI thread (ops#349, PR 330 review R1) -------------------
+
+class SketchObjectHopTest: public SketchObjectOfAMovedPartTest,
+                           public ::testing::WithParamInterface<tests::HopRequest>
+{};
+
+TEST_P(SketchObjectHopTest, aSlotInTheWorkersHopAsksAsTheWorker)
+{
+    // ContainerMoves (ops#342) asks a sketch's mustExecute() from signalRecomputedObject's slot,
+    // which a GUI runs on its thread while the worker waits inside its request: the worker's own
+    // question. Its document recomputing on the worker (ThisDocument) didn't stop it either
+    externalOfAMovedPart();
+    auto sketch = getObject();
+    const auto seen = tests::askInTheWorkersHop(GetParam(), *sketch->getDocument(), *sketch, [&] {
+        return sketch->externalFramesChanged();
+    });
+    EXPECT_TRUE(seen.ran);
+    EXPECT_TRUE(seen.onThisThread);
+    EXPECT_TRUE(seen.answer);
+    EXPECT_EQ(sketch->externalFramesChanged(), GetParam() != tests::HopRequest::ThisDocument);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    WorkerRequest,
+    SketchObjectHopTest,
+    ::testing::Values(
+        tests::HopRequest::OneObject,
+        tests::HopRequest::AnotherDocument,
+        tests::HopRequest::ThisDocument
+    ),
+    [](const ::testing::TestParamInfo<tests::HopRequest>& info) {
+        return tests::hopRequestName(info.param);
     }
 );

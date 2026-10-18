@@ -455,17 +455,17 @@ class TestViewProviderLink(unittest.TestCase):
         )
 
 
-def _write_cyclic_link_file(FreeCAD, path: Path) -> None:
-    """A file whose links C1 and C2 link each other: saved as Box <- C1 <- C2, then C1's
-    LinkedObject pointed at C2 in Document.xml (an assignment refuses the cycle)."""
+def _write_cyclic_link_file(FreeCAD, path: Path, count: int = 2) -> None:
+    """A file whose `count` links C1 ... Cn link round a ring: saved as Box <- C1 <- C2 ... <- Cn,
+    then C1's LinkedObject pointed at Cn in Document.xml (an assignment refuses the cycle)."""
     import zipfile
 
-    doc = FreeCAD.newDocument("CyclicLinks")
-    box = doc.addObject("App::FeatureTest", "Box")
-    c1 = doc.addObject("App::Link", "C1")
-    c2 = doc.addObject("App::Link", "C2")
-    c1.LinkedObject = box
-    c2.LinkedObject = c1
+    doc = FreeCAD.newDocument(path.stem)
+    linked = doc.addObject("App::FeatureTest", "Box")
+    for i in range(1, count + 1):
+        link = doc.addObject("App::Link", f"C{i}")
+        link.LinkedObject = linked
+        linked = link
     doc.recompute()
     doc.saveAs(str(path))
     FreeCAD.closeDocument(doc.Name)
@@ -479,7 +479,7 @@ def _write_cyclic_link_file(FreeCAD, path: Path) -> None:
                 start = text.index('<Object name="C1"', text.index("<ObjectData"))
                 begin = text.index('name="LinkedObject"', start)
                 end = text.index("</Property>", begin)
-                text = text[:begin] + text[begin:end].replace('"Box"', '"C2"') + text[end:]
+                text = text[:begin] + text[begin:end].replace('"Box"', f'"C{count}"') + text[end:]
                 data = text.encode("utf-8")
             zout.writestr(info, data)
 
@@ -491,6 +491,18 @@ def _report_text(FreeCADGui) -> str:
         if edit.metaObject().className() == "Gui::DockWnd::ReportOutput":
             return edit.toPlainText()
     return ""
+
+
+def _spin(seconds: float = 0.5) -> None:
+    """Runs the event loop for a while, as the GUI does after an open: timers fire too."""
+    import time
+
+    from PySide import QtCore  # type: ignore
+
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        QtCore.QCoreApplication.processEvents()
+        time.sleep(0.02)
 
 
 class TestLinkCycleGui(unittest.TestCase):
@@ -505,15 +517,38 @@ class TestLinkCycleGui(unittest.TestCase):
         if self.doc is not None and self.FreeCAD.getDocument(self.doc.Name):
             self.FreeCAD.closeDocument(self.doc.Name)
 
-    def test_cyclic_file_opens_and_reports_once(self):
-        path = Path(tempfile.mkdtemp()) / "CyclicLinks.FCStd"
-        _write_cyclic_link_file(self.FreeCAD, path)
-        before = _report_text(self.FreeCADGui)
-
+    def _open_ring(self, count: int, stem: str = ""):
+        path = Path(tempfile.mkdtemp()) / f"{stem or 'CyclicRing'}{count}.FCStd"
+        _write_cyclic_link_file(self.FreeCAD, path, count)
         self.doc = self.FreeCAD.openDocument(str(path))
-        c1 = self.doc.getObject("C1")
-        c2 = self.doc.getObject("C2")
-        self.assertEqual(c1.LinkedObject, c2)
+        links = [self.doc.getObject(f"C{i}") for i in range(1, count + 1)]
+        self.assertEqual(links[0].LinkedObject, links[-1])
+        return path, links
+
+    def _close(self):
+        self.FreeCAD.closeDocument(self.doc.Name)
+        self.doc = None
+        _spin(0.1)
+
+    def _reports(self, before: str) -> list:
+        _spin(0.1)  # the Report view shows queued messages
+        report = _report_text(self.FreeCADGui)[len(before) :]
+        return [
+            line
+            for line in report.splitlines()
+            if "Cyclic link" in line or "recursion limit" in line
+        ]
+
+    @staticmethod
+    def _reported_for(lines: list, doc_name: str, name: str) -> int:
+        """How many messages report the cycle for Link `name`: each names it first."""
+        full = f"{doc_name}#{name}"
+        texts = (f"Cyclic link: {full} ->", f"limit reached at {full}.")
+        return sum(any(text in line for text in texts) for line in lines)
+
+    def test_cyclic_file_opens_and_reports_once(self):
+        before = _report_text(self.FreeCADGui)
+        _, (c1, c2) = self._open_ring(2, "CyclicLinks")
         self.assertEqual(c2.LinkedObject, c1)
         self.assertIsNotNone(self.FreeCADGui.getDocument(self.doc.Name))
 
@@ -528,15 +563,75 @@ class TestLinkCycleGui(unittest.TestCase):
             self.assertIsNotNone(c1.getLinkedObject())
         self.FreeCADGui.updateGui()
 
-        report = _report_text(self.FreeCADGui)[len(before) :]
-        lines = [
-            line
-            for line in report.splitlines()
-            if "Cyclic link" in line or "recursion limit" in line
-        ]
+        lines = self._reports(before)
         self.assertTrue(lines, "the cycle is reported")
         for name in ("C1", "C2"):
             # a message names the Link it is reported for first
             full = f"{self.doc.Name}#{name}"
             for text in (f"Cyclic link: {full} ->", f"limit reached at {full}."):
                 self.assertLessEqual(sum(text in line for line in lines), 1, "\n".join(lines))
+        # and nothing else repeats: at most both texts once per Link, no generic flood
+        self.assertLessEqual(len(lines), 2 * 2, "\n".join(lines))
+
+    def test_cyclic_files_survive_the_event_loop(self):
+        # The GUI's first tree update after the open asked each Link's icon, its claimed children
+        # and (from Python) a name it lacks from its linked view, round the ring without end: a
+        # stack overflow ended FreeCAD. Rings of two and three Links (PR 330 review, R2)
+        for count in (2, 3):
+            with self.subTest(links=count):
+                _, links = self._open_ring(count)
+                _spin()
+                for link in links:
+                    self.assertIsNotNone(link.ViewObject.Icon)
+                    self.assertIsInstance(link.ViewObject.claimChildren(), list)
+                    self.assertIsNone(getattr(link.ViewObject, "NoSuchProperty349", None))
+                _spin()
+                self._close()
+
+    def test_a_ring_broken_and_restored_reports_again(self):
+        # A Link's LinkedObject change forgets the report of every Link whose links lead to it,
+        # the rest of its ring: a ring broken at C2 and restored by undo reports for each Link
+        # again, not only for C2 (PR 330 review, L3). In the GUI the undo that restores the ring
+        # also passed each Link's touch round it without end (a stack overflow)
+        before = _report_text(self.FreeCADGui)
+        _, links = self._open_ring(3)
+        box = self.doc.getObject("Box")
+        names = [link.Name for link in links]
+        for link in links:
+            link.MustExecute
+        lines = self._reports(before)
+        for name in names:
+            self.assertEqual(self._reported_for(lines, self.doc.Name, name), 1, "\n".join(lines))
+
+        self.doc.UndoMode = 1
+        self.doc.openTransaction("Break the ring")
+        links[1].LinkedObject = box
+        self.doc.commitTransaction()
+        for link in links:
+            link.MustExecute
+        self.doc.undo()
+        self.assertEqual(links[1].LinkedObject, links[0])
+        for link in links:
+            link.MustExecute
+        lines = self._reports(before)
+        for name in names:
+            self.assertEqual(self._reported_for(lines, self.doc.Name, name), 2, "\n".join(lines))
+
+    def test_a_reopened_cyclic_file_reports_again(self):
+        # Closing a document deletes its Links without unsetting them up: each Link's report is
+        # forgotten when it is destroyed, so the Links of the file opened again, which may take
+        # the same addresses, report their cycle again (PR 330 review, Sonnet 1)
+        before = _report_text(self.FreeCADGui)
+        path, links = self._open_ring(2, "Reopened")
+        doc_name = self.doc.Name
+        for _ in range(3):
+            for link in links:
+                link.MustExecute
+            self._close()
+            self.doc = self.FreeCAD.openDocument(str(path))
+            links = [self.doc.getObject(name) for name in ("C1", "C2")]
+        for link in links:
+            link.MustExecute
+        lines = self._reports(before)
+        for name in ("C1", "C2"):
+            self.assertEqual(self._reported_for(lines, doc_name, name), 4, "\n".join(lines))

@@ -14,6 +14,7 @@
 #include <boost/scope_exit.hpp>
 
 #include <src/App/InitApplication.h>
+#include <src/App/RecomputeWorkerHop.h>
 #include <Base/Reader.h>
 #include <Base/Writer.h>
 #include <App/Application.h>
@@ -473,6 +474,39 @@ TEST_F(AttachExtensionTest, testPollBesideAWorkerRecomputeOfAnotherDocument)
         }
     );
 }
+
+// A slot run in the worker's hop to the GUI thread (ops#349, PR 330 review R1)
+class AttachExtensionHopTest: public AttachExtensionTest,
+                              public ::testing::WithParamInterface<tests::HopRequest>
+{};
+
+TEST_P(AttachExtensionHopTest, aSlotInTheWorkersHopAsksAsTheWorker)
+{
+    // ContainerMoves (ops#342) asks an attached object's mustExecute() from
+    // signalRecomputedObject's slot, which a GUI runs on its thread while the worker waits inside
+    // its request: the worker's own question, so linkFramesChanged() walks
+    auto plane = planeOnAMovedPart(getDocument());
+    const auto seen = tests::askInTheWorkersHop(GetParam(), *getDocument(), *plane, [&] {
+        return polledFramesChanged(plane);
+    });
+    EXPECT_TRUE(seen.ran);
+    EXPECT_TRUE(seen.onThisThread);
+    EXPECT_TRUE(seen.answer);
+    EXPECT_EQ(polledFramesChanged(plane), GetParam() != tests::HopRequest::ThisDocument);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    WorkerRequest,
+    AttachExtensionHopTest,
+    ::testing::Values(
+        tests::HopRequest::OneObject,
+        tests::HopRequest::AnotherDocument,
+        tests::HopRequest::ThisDocument
+    ),
+    [](const ::testing::TestParamInfo<tests::HopRequest>& info) {
+        return tests::hopRequestName(info.param);
+    }
+);
 
 TEST_F(AttachExtensionTest, testPollWithTheWorkerIdleComparesFrames)
 {

@@ -67,7 +67,7 @@ class AppExport LinkBaseExtension: public App::DocumentObjectExtension
 
 public:
     LinkBaseExtension();
-    ~LinkBaseExtension() override = default;
+    ~LinkBaseExtension() override;
 
     /// Whether the link has been touched (i.e. its linked object changed)
     PropertyBool _LinkTouched;

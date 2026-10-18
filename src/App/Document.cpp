@@ -213,14 +213,43 @@ struct RecomputingHere
 };
 }  // namespace
 
+namespace
+{
+// The RecomputeHop whose slots this thread runs, innermost (ops#349)
+thread_local const RecomputeHop* runningHop = nullptr;
+}  // namespace
+
+RecomputeHop::RecomputeHop()
+    : worker(isRecomputeWorkerThread())
+    , recomputing(runningHop ? runningHop->recomputing : &recomputingHere)
+{}
+
+RecomputeHop::Scope::Scope(const RecomputeHop& hop)
+    : previous(runningHop)
+{
+    runningHop = &hop;
+}
+
+RecomputeHop::Scope::~Scope()
+{
+    runningHop = previous;
+}
+
+const RecomputeHop* RecomputeHop::current()
+{
+    return runningHop;
+}
+
 bool App::isRecomputingOnThisThread(const Document* doc)
 {
-    return std::ranges::find(recomputingHere, doc) != recomputingHere.end();
+    return std::ranges::find(recomputingHere, doc) != recomputingHere.end()
+        || (runningHop && std::ranges::find(*runningHop->recomputing, doc)
+                != runningHop->recomputing->end());
 }
 
 bool App::isRecomputingOnThisThread()
 {
-    return !recomputingHere.empty();
+    return !recomputingHere.empty() || (runningHop && !runningHop->recomputing->empty());
 }
 
 std::optional<ImportedSource> App::importedSource(const DocumentObject* obj)

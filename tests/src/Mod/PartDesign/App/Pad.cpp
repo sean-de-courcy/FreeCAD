@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 #include "src/App/InitApplication.h"
+#include "src/App/RecomputeWorkerHop.h"
 
 #include <chrono>
 #include <functional>
@@ -141,7 +142,7 @@ void besideTheWorker(bool singleObject, const std::function<void()>& whileHeld)
 
 }  // namespace
 
-class PadPollTest: public PadTest, public ::testing::WithParamInterface<bool>
+class PadOfAMovedBodyTest: public PadTest
 {
 protected:
     /// The fixture's sketch in Body A, a pad of it in Body B, recomputed at one origin; then A
@@ -164,6 +165,9 @@ protected:
     }
 };
 
+class PadPollTest: public PadOfAMovedBodyTest, public ::testing::WithParamInterface<bool>
+{};
+
 TEST_P(PadPollTest, placerElsewhereWalksOnlyWithTheWorkerIdle)
 {
     // Feature::mustExecute's placerElsewhere() walks Bodies, containers and placements: from the
@@ -182,6 +186,40 @@ INSTANTIATE_TEST_SUITE_P(
     ::testing::Values(true, false),
     [](const ::testing::TestParamInfo<bool>& info) {
         return info.param ? "OneObject" : "AnotherDocument";
+    }
+);
+
+// A slot run in the worker's hop to the GUI thread (ops#349, PR 330 review R1) -------------------
+
+class PadHopTest: public PadOfAMovedBodyTest, public ::testing::WithParamInterface<tests::HopRequest>
+{};
+
+TEST_P(PadHopTest, aSlotInTheWorkersHopAsksAsTheWorker)
+{
+    // A GUI runs signalRecomputedObject's slots on its thread while the worker waits inside its
+    // request; ContainerMoves (ops#342) asks a reader's mustExecute() there. The worker's own
+    // question: the walk runs, where the poll's guard answered "nothing moved"
+    auto pad = padOfAMovedBodysSketch();
+    const auto seen = tests::askInTheWorkersHop(GetParam(), *getDocument(), *pad, [&] {
+        return pad->mustExecute() > 0;
+    });
+    EXPECT_TRUE(seen.ran);
+    EXPECT_TRUE(seen.onThisThread);
+    EXPECT_TRUE(seen.answer);
+    // Beside the idle worker again, as the GUI's poll: the walk runs
+    EXPECT_EQ(pad->mustExecute() > 0, GetParam() != tests::HopRequest::ThisDocument);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    WorkerRequest,
+    PadHopTest,
+    ::testing::Values(
+        tests::HopRequest::OneObject,
+        tests::HopRequest::AnotherDocument,
+        tests::HopRequest::ThisDocument
+    ),
+    [](const ::testing::TestParamInfo<tests::HopRequest>& info) {
+        return tests::hopRequestName(info.param);
     }
 );
 

@@ -24,6 +24,7 @@
 
 #include <Base/Interpreter.h>
 #include <fastsignals/signal.h>
+#include "RecomputeThread.h"
 #include <functional>
 #include <memory>
 #include <optional>
@@ -235,6 +236,8 @@ private:
         }
 
         Base::PyGILStateRelease release;
+        // This thread waits while the slots run: their questions are its own (FreeCAD-CH ops#349)
+        const RecomputeHop hop;
 
         auto caps = std::make_tuple(
             detail::captureSignalArg<typename ::fastsignals::signal_arg_t<Arguments>>(args)...
@@ -242,7 +245,8 @@ private:
 
         if constexpr (std::is_void_v<result_type>) {
             MainThreadSignalConfig::invoke(
-                [self, caps = std::move(caps)]() mutable {
+                [self, caps = std::move(caps), &hop]() mutable {
+                    const RecomputeHop::Scope scope(hop);
                     std::apply([self](auto&... c) { self->sig_(c.get()...); }, caps);
                 },
                 /*blocking=*/true
@@ -251,7 +255,8 @@ private:
         else {
             std::optional<detail::non_void_t<result_type>> result;
             MainThreadSignalConfig::invoke(
-                [self, caps = std::move(caps), &result]() mutable {
+                [self, caps = std::move(caps), &result, &hop]() mutable {
+                    const RecomputeHop::Scope scope(hop);
                     result.emplace(
                         std::apply([self](auto&... c) { return self->sig_(c.get()...); }, caps)
                     );
