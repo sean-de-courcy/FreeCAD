@@ -6,8 +6,11 @@ answers each modal box and records it. The App side is in ForkReleaseTest.
 """
 
 import contextlib
+import glob
+import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -84,6 +87,61 @@ def _waitWritable(path, seconds=10):
         if time.monotonic() > deadline:
             return  # the save then reports it
         time.sleep(0.05)
+
+
+def _freecadGui():
+    """This build's FreeCAD (the GUI), for a child started with files on its command line."""
+    name = os.path.basename(sys.executable).lower()
+    if name.startswith("freecad") and not name.startswith("freecadcmd"):
+        return sys.executable
+    for folder in ("bin", "MacOS"):
+        for name in ("FreeCAD.exe", "FreeCAD"):
+            path = os.path.join(App.getHomePath(), folder, name)
+            if os.path.isfile(path):
+                return path
+    raise FileNotFoundError("FreeCAD next to " + App.getHomePath())
+
+
+# The last file on a child's command line: records the modal boxes shown until a few seconds after
+# the files were processed, writes them to FORK_RELEASE_STARTUP_OUT and ends the process. The boxes
+# that come after processFiles run in the box's own event loop, where this timer still fires
+_STARTUP_PROBE = """\
+import json, os, traceback
+import FreeCAD as App
+from PySide import QtCore, QtWidgets
+out = os.environ["FORK_RELEASE_STARTUP_OUT"]
+seen = []
+def poll():
+    modal = QtWidgets.QApplication.activeModalWidget()
+    if modal is None or modal.property("answeredByTest"):
+        return
+    modal.setProperty("answeredByTest", True)
+    box = isinstance(modal, QtWidgets.QMessageBox)
+    seen.append([modal.windowTitle(), modal.text() if box else ""])
+    modal.done(0) if box else modal.reject()
+def finish():
+    try:
+        docs = {d.Label: App.getNewerFormat(d) for d in App.listDocuments().values()}
+        with open(out, "w", encoding="utf-8") as fh:
+            json.dump({"seen": seen, "docs": docs}, fh)
+    except Exception:
+        with open(out + ".error", "w", encoding="utf-8") as fh:
+            fh.write(traceback.format_exc())
+    if os.name == "nt":
+        # On Windows os._exit still runs DLL detach handlers, which can deadlock
+        import ctypes
+        from ctypes import wintypes
+        kernel32 = ctypes.windll.kernel32
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.TerminateProcess.argtypes = (wintypes.HANDLE, wintypes.UINT)
+        kernel32.TerminateProcess(kernel32.GetCurrentProcess(), 0)
+    os._exit(0)
+timer = QtCore.QTimer()
+timer.timeout.connect(poll)
+timer.start(100)
+App.__forkReleaseStartupProbe = timer
+QtCore.QTimer.singleShot(5000, finish)
+"""
 
 
 DIALOG_PARAMETERS = "User parameter:BaseApp/Preferences/Dialog"
@@ -204,6 +262,61 @@ class ForkReleaseGuiTest(unittest.TestCase):
         newer = os.path.join(self.dir, "Newer.FCStd")
         _rewriteDocumentXml(path, newer, _setDocumentAttribute("ForkRelease", 999))
         return newer
+
+    def _startWith(self, *files):
+        """Starts this build's FreeCAD with `files` on its command line, as an Explorer
+        double-click does, in its own new home and off screen; returns the modal boxes it showed
+        (title, text) and its documents' newer-file messages by label."""
+        home = os.path.join(self.dir, "home")
+        os.makedirs(home, exist_ok=True)
+        out = os.path.join(self.dir, "startup.json")
+        probe = os.path.join(self.dir, "probe.FCMacro")
+        with open(probe, "w", encoding="utf-8") as fh:
+            fh.write(_STARTUP_PROBE)
+        env = dict(os.environ)
+        env["FREECAD_USER_HOME"] = home
+        env["QT_QPA_PLATFORM"] = "offscreen"
+        env["FORK_RELEASE_STARTUP_OUT"] = out
+        run = subprocess.run(
+            [_freecadGui(), *files, probe],
+            env=env,
+            cwd=self.dir,
+            timeout=180,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        log = run.stdout.decode("utf-8", "replace")
+        if os.path.isfile(out + ".error"):
+            with open(out + ".error", encoding="utf-8") as fh:
+                self.fail(fh.read() + "\n" + log)
+        self.assertTrue(os.path.isfile(out), f"no result (exit {run.returncode}):\n{log}")
+        with open(out, encoding="utf-8") as fh:
+            result = json.load(fh)
+        os.remove(out)
+        return result["seen"], result["docs"]
+
+    def testCommandLineFilesWarnAtStartup(self):
+        """Files on the command line (an Explorer double-click) warn at the start, as File > Open
+        does (ops#368): a current file shows no box; a newer file among several gives one box,
+        which lists the newer ones only."""
+        newer = self._newerFile()
+        current = os.path.join(self.dir, "Saved.FCStd")
+        newest = os.path.join(self.dir, "Newest.FCStd")
+        _rewriteDocumentXml(current, newest, _setDocumentAttribute("ForkRelease", 1000))
+
+        seen, docs = self._startWith(current)
+        self.assertEqual(seen, [], "a current file")
+        self.assertEqual(docs, {"Saved": ""})
+
+        seen, docs = self._startWith(newer, current, newest)
+        self.assertEqual(sorted(docs), ["Newer", "Newest", "Saved"], docs)
+        self.assertEqual(len(seen), 1, seen)
+        title, text = seen[0]
+        self.assertIn("newer", title.lower())
+        self.assertIn("ForkRelease 999", text)
+        self.assertIn("ForkRelease 1000", text)
+        self.assertNotIn("'Saved'", text)
 
     def _opened(self, path):
         for name, doc in App.listDocuments().items():
@@ -355,7 +468,29 @@ class ForkReleaseGuiTest(unittest.TestCase):
         exe = App.ConfigGet("ExeName")
         lock = os.path.join(cache, f"{exe}_{session}.lock")
         folder = os.path.join(cache, f"{exe}_Doc_{session}Document_{session}")
-        os.makedirs(folder)
+        # The cache is the test's alone (ops#368): a killed run's leftovers go first, and
+        # recovery files of any other session (in a real profile, the user's) mean no recovery here
+        for path in [lock, *glob.glob(os.path.join(cache, f"{exe}_Doc_*_{session}"))]:
+            if os.path.isdir(path):
+                shutil.rmtree(path, ignore_errors=True)
+            elif os.path.exists(path):
+                os.remove(path)
+        live = {
+            os.path.normcase(os.path.realpath(doc.TransientDir))
+            for doc in App.listDocuments().values()
+        }
+        others = [
+            path
+            for path in glob.glob(os.path.join(cache, f"{exe}_Doc_*"))
+            if os.path.isfile(os.path.join(path, "fc_recovery_file.xml"))
+            and os.path.normcase(os.path.realpath(path)) not in live
+        ]
+        if others:
+            self.skipTest(
+                "the user cache holds other sessions' recovery files, which Start Recovery would "
+                "take: " + ", ".join(others)
+            )
+        os.makedirs(folder, exist_ok=True)
         shutil.copyfile(snapshot, os.path.join(folder, "fc_recovery_file.fcstd"))
         with open(os.path.join(folder, "fc_recovery_file.xml"), "w", encoding="utf-8") as meta:
             meta.write(

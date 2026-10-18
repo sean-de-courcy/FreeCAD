@@ -1862,6 +1862,8 @@ void MainWindow::processMessages(const QList<QString>& msg)
             QFileInfo fi(filename);
             appendRecentFile(fi.absoluteFilePath());
         }
+        // A file another instance passed on gets the boxes File > Open gives (ops#368)
+        Application::checkForRecomputes();
     }
     catch (const Base::SystemExitException&) {
     }
@@ -1917,6 +1919,11 @@ void MainWindow::delayedStartup()
         QApplication::quit();
         return;
     }
+
+    // The command line's files (an Explorer double-click) get the boxes File > Open gives
+    // (ops#368): one warning for the files of a newer fork release, then upstream's recompute
+    // prompt for the documents that need one
+    Application::checkForRecomputes();
 
     // TODO: Check for deprecated settings
     Application::Instance->checkForDeprecatedSettings();
