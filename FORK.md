@@ -358,7 +358,8 @@ names it.
 | `fix/354-refine-in-place` | fix | ops#354 | - | `integration` `23165bc6b0` | `27364d2839` (fork PR 328), 2026-10-18 | never (fork fix) |
 | `fix/357-upto-split-followups` | fix | ops#357 | - | `fix/354-refine-in-place` `eaffb0a7cd` (stacked on fork PR 328) | `37ace26da0` (fork PR 331), 2026-10-18 | never (fork fix) |
 | `fix/327-cross-body-gui` | fix | ops#327, ops#321, ops#301 | - | `integration` `27364d2839` | `c0ae7379e3` (fork PR 329), 2026-10-18 | never (fork fix) |
-| `fix/330-newer-file-lows` | fix | ops#330 | - | `integration` `8d6875f298` | (fork PR 332) | never (fork fix) |
+| `fix/330-newer-file-lows` | fix | ops#330 | - | `integration` `8d6875f298` | `62575f717f` (fork PR 332), 2026-10-18 | never (fork fix) |
+| `fix/362-multifuse-refined-edges` | fix | ops#362 | - | `integration` `62575f717f` | (fork PR 333) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 

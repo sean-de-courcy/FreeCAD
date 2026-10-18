@@ -50,6 +50,30 @@ extern void throwIfInvalidIfCheckModel(const TopoDS_Shape& shape);
 extern bool getRefineModelParameter();
 }  // namespace Part
 
+namespace
+{
+// The refine's history for the mapper, as TopoShape::makeElementRefine() gives it
+// (MyRefineMaker there): every sub-shape refine modified, the edges it merged as well as the
+// faces. With only the faces' lists, a merged edge was named from its faces (UPP), not from
+// the edges it was made of as Part::Fuse with Refine names it (ops#362).
+class RefineMaker: public BRepBuilderAPI_RefineModel
+{
+public:
+    explicit RefineMaker(const TopoDS_Shape& shape)
+        : BRepBuilderAPI_RefineModel(shape)
+    {}
+
+    void populate(ShapeMapper& mapper)
+    {
+        for (decltype(myModified)::Iterator it(myModified); it.More(); it.Next()) {
+            if (!it.Key().IsNull()) {
+                mapper.populate(MappingStatus::Modified, it.Key(), it.Value());
+            }
+        }
+    }
+};
+}  // namespace
+
 PROPERTY_SOURCE(Part::Fuse, Part::Boolean)
 
 
@@ -181,14 +205,9 @@ App::DocumentObjectExecReturn* MultiFuse::execute()
                     TopoShape input(res);
                     input.setShape(BRepBuilderAPI_Copy(res.getShape(), false).Shape(), false);
                     const TopoDS_Shape& oldShape = input.getShape();
-                    BRepBuilderAPI_RefineModel mkRefine(oldShape);
+                    RefineMaker mkRefine(oldShape);
                     GenericShapeMapper mapper;
-                    for (const TopoShape& face : input.getSubTopoShapes(TopAbs_FACE)) {
-                        const TopTools_ListOfShape& merged = mkRefine.Modified(face.getShape());
-                        if (!merged.IsEmpty()) {
-                            mapper.populate(MappingStatus::Modified, face, merged);
-                        }
-                    }
+                    mkRefine.populate(mapper);
                     mapper.init(input, mkRefine.Shape());
                     TopoShape refined = makeTopoShape(false);
                     refined.makeShapeWithElementMap(
