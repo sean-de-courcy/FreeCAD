@@ -117,6 +117,7 @@ set(PartDesign_TestScenarios
     PartDesignTests/Scenarios/booleans.py
     PartDesignTests/Scenarios/consumers.py
     PartDesignTests/Scenarios/crossdoc.py
+    PartDesignTests/Scenarios/derived.py
     PartDesignTests/Scenarios/dressups.py
     PartDesignTests/Scenarios/external.py
     PartDesignTests/Scenarios/fillet_limit.py

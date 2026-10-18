@@ -145,6 +145,32 @@ public:
      */
     static std::vector<std::string> sourceSections(std::string_view name);
 
+    /// How a name's ancestry reaches a node (ops#335).
+    enum class Reach
+    {
+        /// Not at all, or only through the connected elements.
+        None,
+        /// On a path that passes no projection's embedded names and only nodes of the name's
+        /// element type: the element itself, an earlier state, a piece, a same-type `GEN`.
+        SameType,
+        /// Outside projections, but every such path passes a node of another type, e.g. an edge
+        /// on a face generated from the old edge (`E<F<E`): related, not the same element.
+        Derived,
+        /// Only through a projection section's (`PRJ`) embedded names: a far-end partner.
+        Projected,
+    };
+
+    /** How \a name reaches \a ancestor (ops#335), walking the name's prefixes (in a copy
+     * section's context) and embedded names as tier 1 does. SameType wins over Derived, Derived
+     * over Projected. A section without an element type leaves a path's type as it is.
+     */
+    static Reach reaches(std::string_view name, std::string_view ancestor);
+
+    /** The element types of a Derived path from \a name to \a ancestor, e.g. `E<F<E`, for the
+     * evidence text; empty if \a name doesn't reach it that way.
+     */
+    static std::string derivedPath(std::string_view name, std::string_view ancestor);
+
     /** The maker of \a name (ops#167): the iteration tag of its first section, the feature or
      * sketch that made the element. Later sections are what later features did to it. Empty for
      * an empty name or a first section without a tag.
@@ -314,6 +340,16 @@ enum class Tier1Check
     None,
     Kind,
     Intrinsic,
+};
+
+/// What tier 1 makes of a candidate that holds the old name only through a node of another
+/// element type (ops#335, the NamingSolver/Tier1Derived parameter): `Place`, geometric evidence
+/// (the default; a set of such survivors alone goes to the no-candidate branch, where the place
+/// decides); `Ancestry`, in the old name's ancestry, as before ops#335 (for comparison runs).
+enum class Tier1Derived
+{
+    Place,
+    Ancestry,
 };
 
 /** The tolerances of tiers 2 and 3 (the NamingSolver parameters; conservative starts, changed
@@ -545,6 +581,15 @@ struct AppExport SolveInput
     Tier1Source source = Tier1Source::Union;
     OverlapMeasure measure = OverlapMeasure::Plain;
     Tier1Check check = Tier1Check::Intrinsic;
+    /// A candidate whose names reach the old name only through a node of another element type
+    /// (an edge on a face generated from the old edge: `E<F<E`, ops#335). Under Place it is not
+    /// in the old name's ancestry: an element another reference holds exactly isn't admitted
+    /// through it, it merges with no other entry, and it gets no T1/T1' exemption. When every
+    /// survivor of tier 1's filters is such a candidate (no piece among them), the entry runs
+    /// the no-candidate branch (tiers 2 and 3 over the pool, G2 under policy D), and a break
+    /// lists them first with the role `derived`. Among other survivors, one is evidence only
+    /// when tier 3 (strict or G1) chose it. Ancestry restores the earlier rule.
+    Tier1Derived derived = Tier1Derived::Place;
     /// Tiers 2 and 3.
     GeometryTolerances tolerances;
     /// The target's bounding-box diagonal, the scale of tier 3's d_max.

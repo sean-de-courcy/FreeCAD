@@ -227,6 +227,17 @@ Data::Tier1Check tier1Check()
     return Data::Tier1Check::Intrinsic;
 }
 
+// What tier 1 makes of a candidate that holds the old name only through a node of another type
+// (ops#335): `place` (geometry decides, the default) or `ancestry` (before ops#335)
+Data::Tier1Derived tier1Derived()
+{
+    std::string value = solverParameters()->GetASCII("Tier1Derived", "place");
+    if (value == "ancestry") {
+        return Data::Tier1Derived::Ancestry;
+    }
+    return Data::Tier1Derived::Place;
+}
+
 // Tier 1's gap, the tolerances of tiers 2 and 3 and the continuation's distance (fork-only
 // parameters for the tuning runs; a value that isn't positive and finite keeps the default).
 void readTolerances(double& gap, Data::GeometryTolerances& tolerances, double& continuation)
@@ -723,6 +734,7 @@ bool solveElementReferences(DocumentObject* feature,
     Data::Tier1Source source = Data::Tier1Source::Union;
     Data::OverlapMeasure measure = Data::OverlapMeasure::Plain;
     Data::Tier1Check check = Data::Tier1Check::Intrinsic;
+    Data::Tier1Derived derived = Data::Tier1Derived::Place;
     double gap = Data::SolveInput().gap;
     Data::GeometryTolerances tolerances;
     double continuationDistance = Data::SolveInput().continuationDistance;
@@ -910,6 +922,7 @@ bool solveElementReferences(DocumentObject* feature,
             source = tier1Source();
             measure = overlapMeasure();
             check = tier1Check();
+            derived = tier1Derived();
             readTolerances(gap, tolerances, continuationDistance);
             guess = solverParameters()->GetBool("Guess", true);
             guessNoStructure = solverParameters()->GetBool("GuessNoStructure", true);
@@ -1234,6 +1247,7 @@ bool solveElementReferences(DocumentObject* feature,
         input.source = source;
         input.measure = measure;
         input.check = check;
+        input.derived = derived;
         input.gap = gap;
         input.tolerances = tolerances;
         input.diagonal = diagonal;

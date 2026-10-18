@@ -5942,3 +5942,379 @@ TEST(SolveOwner, guessThePieceOfASplitFace)
     EXPECT_EQ(outcomes[0].element, "Face3");
     EXPECT_EQ(outcomes[0].guessKind, "piece");
 }
+
+// ---------------------------------------------------------------------------------------------
+// Derived survivors (ops#335, PLAN decision 81): a candidate that holds the old name only through
+// a node of another element type is geometric evidence, not tier 1's.
+
+TEST(NameAncestry, reachClassifiesThePathTypes)
+{
+    using Reach = NameAncestry::Reach;
+    const auto g2 = sketchEdge(2);
+    const auto wallFace = generated({g2}, 7, "XTR", 'F');
+    //   a section edge on the face the edge g2 generated: E<F<E
+    const auto sectionEdge = generated({wallFace}, 9, "CUT", 'E');
+    EXPECT_EQ(NameAncestry::reaches(sectionEdge, g2), Reach::Derived);
+    EXPECT_EQ(NameAncestry::derivedPath(sectionEdge, g2), "E<F<E");
+
+    //   a section vertex on the edge a sketch vertex generated: V<E<V
+    const auto corner = sketchVertex({"g1v2", "g2v1"});
+    const auto sweptEdge = generated({corner}, 7, "XTR", 'E');
+    const auto sectionVertex = section({}, {sweptEdge}, 9, "CUT", 0, 'V', {"GEN"});
+    EXPECT_EQ(NameAncestry::reaches(sectionVertex, corner), Reach::Derived);
+    EXPECT_EQ(NameAncestry::derivedPath(sectionVertex, corner), "V<E<V");
+
+    //   a pipe's cap embedding the UPP edges that bound it, which embed the profile face: F<E<F
+    const auto profileFace = lowFace({sketchEdge(1), g2, sketchEdge(3), sketchEdge(4)});
+    const auto capEdge = upper({profileFace}, 8, "PSH");
+    const auto cap = section({}, {capEdge}, 8, "SEW", 0, 'F', {"LOW"});
+    EXPECT_EQ(NameAncestry::reaches(cap, profileFace), Reach::Derived);
+    EXPECT_EQ(NameAncestry::derivedPath(cap, profileFace), "F<E<F");
+
+    //   a Thickness's inner edge: E<F<F<E
+    const auto innerFace = generated({wallFace}, 11, "THK", 'F');
+    const auto innerEdge = generated({innerFace}, 11, "THK", 'E');
+    EXPECT_EQ(NameAncestry::reaches(innerEdge, g2), Reach::Derived);
+    EXPECT_EQ(NameAncestry::derivedPath(innerEdge, g2), "E<F<F<E");
+
+    //   a far-end partner: projected
+    const auto topEdge = section({}, {g2}, 7, "XTR", 0, 'E', {"PRJ"});
+    EXPECT_EQ(NameAncestry::reaches(topEdge, g2), Reach::Projected);
+    EXPECT_EQ(NameAncestry::derivedPath(topEdge, g2), "");
+
+    //   an edge generated from the edge, a piece of it: same-type
+    EXPECT_EQ(NameAncestry::reaches(generated({g2}, 7, "XTR", 'E'), g2), Reach::SameType);
+    EXPECT_EQ(NameAncestry::reaches(piece(g2, 9, "CUT", 0, 'E'), g2), Reach::SameType);
+    EXPECT_EQ(NameAncestry::derivedPath(piece(g2, 9, "CUT", 0, 'E'), g2), "");
+    //   a piece of the section edge still reaches g2 only through the face
+    EXPECT_EQ(NameAncestry::reaches(piece(sectionEdge, 12, "CUT", 1, 'E'), g2), Reach::Derived);
+
+    //   a pattern copy lives in its own context: not the bare name
+    EXPECT_EQ(NameAncestry::reaches(stepInstance(g2, 9, "2", 'E'), g2), Reach::None);
+
+    //   reached both ways: same-type wins, whichever path the walk meets first
+    EXPECT_EQ(NameAncestry::reaches(generated({wallFace, g2}, 9, "CUT", 'E'), g2), Reach::SameType);
+    EXPECT_EQ(NameAncestry::reaches(generated({g2, wallFace}, 9, "CUT", 'E'), g2), Reach::SameType);
+    //   derived and projected (a pad's section edge on its bottom: the cut face's PRJ name and
+    //   the wall face): derived
+    const auto farFace = section({}, {profileFace}, 7, "XTR", 0, 'F', {"PRJ"});
+    EXPECT_EQ(NameAncestry::reaches(generated({farFace, wallFace}, 9, "CUT", 'E'), g2),
+              Reach::Derived);
+    EXPECT_EQ(NameAncestry::reaches(generated({farFace}, 9, "CUT", 'E'), g2), Reach::Projected);
+
+    //   unrelated
+    EXPECT_EQ(NameAncestry::reaches(sketchEdge(3), g2), Reach::None);
+}
+
+namespace
+{
+
+// A straight loft's bottom edge g2 (a line along Y at x = 20, z = 0, 10 long) and what a pocket
+// from below leaves: the section edge on the wall face g2 made (E<F<E), the wall section of the
+// opposite side (from g4), and the far cap's edge from the second profile (another sketch).
+struct Loft
+{
+    std::string g2 = sketchEdge(2);
+    std::string section2 = generated({generated({sketchEdge(2)}, 7, "LFT", 'F')}, 9, "CUT", 'E');
+    std::string section4 =
+        generated({generated({sketchEdge(4)}, 7, "LFT", 'F', 1)}, 9, "CUT", 'E', 1);
+    std::string farEdge = generated({sketchEdge(2, 6)}, 7, "LFT", 'E', 2);
+    double diagonal = 27.0;  // strict d_max 0.27, wide 1.35
+
+    static ElementFingerprint line(double x, double z)
+    {
+        return fingerprint('E', "Line", 10, Base::Vector3d(x, 5, z), Base::Vector3d(0, 1, 0));
+    }
+
+    // The pool after the cut, the section edge \a z above the old edge
+    SolveInput input(double z) const
+    {
+        SolveInput in;
+        in.diagonal = diagonal;
+        in.guess = true;
+        in.guessNoStructure = true;
+        in.pool["Edge"] = {
+            element("Edge1", {section2}),
+            element("Edge2", {farEdge}),
+            element("Edge3", {section4}),
+        };
+        measure(in,
+                {{"Edge1", line(20, z)}, {"Edge2", line(20, 15)}, {"Edge3", line(0, z)}},
+                nullptr);
+        in.entries = {missing(g2, "Edge")};
+        in.entries[0].fingerprint = line(20, 0);
+        return in;
+    }
+};
+
+}  // namespace
+
+TEST(SolveOwner, derivedSurvivorFarFromTheOldPlaceBreaks)
+{
+    // L2: the pocket cuts 8 mm: the derived edge alone survives tier 1, 8 mm up. Before ops#335
+    // it was taken at tier 1 (the fillet moved 8 mm, silently).
+    Loft loft;
+    auto input = loft.input(8);
+
+    auto outcomes = Data::solveOwner(input);
+
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    ASSERT_FALSE(outcomes[0].candidates.empty());
+    EXPECT_EQ(outcomes[0].candidates[0], "Edge1");
+    EXPECT_EQ(outcomes[0].candidateRoles[0], "derived");
+    EXPECT_NEAR(outcomes[0].candidateDistances[0], 8.0, 1e-9);
+    EXPECT_EQ(outcomes[0].evidence.rfind("no structural candidate, tier 3 found none", 0), 0U)
+        << outcomes[0].evidence;
+    EXPECT_NE(outcomes[0].evidence.find(
+                  "tier 1's 1 survivor is in ancestry through another type (E<F<E), not at the "
+                  "old place"
+              ),
+              std::string::npos)
+        << outcomes[0].evidence;
+    //   listed once
+    EXPECT_EQ(std::count(outcomes[0].candidates.begin(), outcomes[0].candidates.end(), "Edge1"), 1);
+
+    //   NamingSolver/Tier1Derived = ancestry: as before
+    input.derived = Data::Tier1Derived::Ancestry;
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved);
+    EXPECT_EQ(outcomes[0].element, "Edge1");
+    EXPECT_EQ(outcomes[0].tier, 1);
+    EXPECT_NE(outcomes[0].evidence.find(", in ancestry"), std::string::npos);
+}
+
+TEST(SolveOwner, derivedSurvivorAtTheOldPlaceResolvesByGeometry)
+{
+    // L3: the cut 0.1 mm deep: the derived edge is within tier 3's strict d_max, resolved by
+    // geometry (warned, with a record, by the batch), where it was silent before.
+    Loft loft;
+    auto input = loft.input(0.1);
+
+    auto outcomes = Data::solveOwner(input);
+
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved);
+    EXPECT_EQ(outcomes[0].element, "Edge1");
+    EXPECT_EQ(outcomes[0].tier, 3);
+    EXPECT_EQ(outcomes[0].evidence.rfind("no structural candidate, tier 3: ", 0), 0U);
+    EXPECT_NE(outcomes[0].evidence.find("in ancestry through another type (E<F<E)"),
+              std::string::npos);
+
+    //   no saved fingerprint: nothing can place it; broken, the derived edge listed
+    input.entries[0].fingerprint = ElementFingerprint();
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[0].candidates, (std::vector<std::string> {"Edge1"}));
+    EXPECT_EQ(outcomes[0].candidateRoles, (std::vector<std::string> {"derived"}));
+    EXPECT_EQ(outcomes[0].evidence,
+              "no candidate; tier 1's 1 survivor is in ancestry through another type (E<F<E), "
+              "no saved fingerprint");
+}
+
+TEST(SolveOwner, derivedSurvivorWithinTheGuessWidthIsAGuess)
+{
+    // A loft cut 1 mm deep: beyond the strict d_max (0.27), within G2's (1.35), the next line
+    // far: a warned guess under policy D (the derived edge shares the old edge's source).
+    Loft loft;
+    auto input = loft.input(1.0);
+
+    auto outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Guessed);
+    EXPECT_EQ(outcomes[0].element, "Edge1");
+    EXPECT_EQ(outcomes[0].guessKind, "geometric");
+    EXPECT_EQ(outcomes[0].tier, 3);
+
+    //   G2 off: broken
+    input.guessNoStructure = false;
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[0].candidates[0], "Edge1");
+    EXPECT_EQ(outcomes[0].candidateRoles[0], "derived");
+
+    //   guessing off: broken
+    input.guessNoStructure = true;
+    input.guess = false;
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
+}
+
+TEST(SolveOwner, derivedSurvivorTiesWithANearerUnrelatedElement)
+{
+    // The whole pool ranks (N8): an unrelated line 1.5 mm below the old edge ties with the
+    // derived edge 1 mm above it (within G2's gap factor 2): broken, the derived edge first.
+    Loft loft;
+    auto input = loft.input(1.0);
+    input.pool["Edge"].push_back(element("Edge4", {sketchEdge(7, 6)}));
+    measure(input,
+            {{"Edge1", Loft::line(20, 1)},
+             {"Edge2", Loft::line(20, 15)},
+             {"Edge3", Loft::line(0, 1)},
+             {"Edge4", Loft::line(20, -1.5)}},
+            nullptr);
+
+    auto outcomes = Data::solveOwner(input);
+
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    ASSERT_GE(outcomes[0].candidates.size(), 2U);
+    EXPECT_EQ(outcomes[0].candidates[0], "Edge1");
+    EXPECT_EQ(outcomes[0].candidates[1], "Edge4");
+    EXPECT_EQ(outcomes[0].candidateRoles[1], "geometric");
+}
+
+TEST(SolveOwner, derivedSurvivorOfAnotherKindBreaks)
+{
+    // L1, a tapered loft: the section of the ruled face is a B-spline, the old edge a line.
+    Loft loft;
+    auto input = loft.input(0.1);
+    auto bspline = Loft::line(20, 0.1);
+    bspline.kind = "BSpline";
+    bspline.direction.reset();
+    measure(input, {{"Edge1", bspline}, {"Edge2", Loft::line(20, 15)}}, nullptr);
+    input.pool["Edge"].pop_back();  // no other wall section
+
+    auto outcomes = Data::solveOwner(input);
+
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[0].candidates[0], "Edge1");
+    EXPECT_EQ(outcomes[0].candidateRoles[0], "derived");
+    EXPECT_NE(outcomes[0].evidence.find("(E<F<E), tier 2 disagrees with it"), std::string::npos)
+        << outcomes[0].evidence;
+}
+
+TEST(SolveOwner, derivedVertexFarFromTheOldPlaceBreaks)
+{
+    // L4: a tapered loft's bottom corner (20, 0, 0), the cut 8 mm deep: the new corner on the
+    // swept edge (V<E<V) is the only survivor. A vertex has no intrinsic geometry to check;
+    // before ops#335 an attached sketch moved there.
+    const auto corner = sketchVertex({"g1v2", "g2v1"});
+    const auto sweptEdge = generated({corner}, 7, "LFT", 'E');
+    const auto newCorner = section({}, {sweptEdge}, 9, "CUT", 0, 'V', {"GEN"});
+    const auto otherEdge = generated({sketchVertex({"g2v2", "g3v1"})}, 7, "LFT", 'E', 1);
+    const auto otherCorner = section({}, {otherEdge}, 9, "CUT", 1, 'V', {"GEN"});
+    auto point = [](double x, double y, double z) {
+        return fingerprint('V', "Point", {}, Base::Vector3d(x, y, z));
+    };
+    SolveInput input;
+    input.diagonal = 27.0;
+    input.guess = true;
+    input.guessNoStructure = true;
+    input.pool["Vertex"] = {element("Vertex1", {newCorner}), element("Vertex2", {otherCorner})};
+    measure(input, {{"Vertex1", point(18.9, 0.53, 8)}, {"Vertex2", point(18.9, 9.47, 8)}}, nullptr);
+    input.entries = {missing(corner, "Vertex")};
+    input.entries[0].fingerprint = point(20, 0, 0);
+
+    auto outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[0].candidates[0], "Vertex1");
+    EXPECT_EQ(outcomes[0].candidateRoles[0], "derived");
+    EXPECT_NE(outcomes[0].evidence.find("(V<E<V)"), std::string::npos) << outcomes[0].evidence;
+
+    //   L5, the cut 0.1 mm deep: resolved by geometry
+    measure(input, {{"Vertex1", point(20, 0.01, 0.1)}, {"Vertex2", point(20, 10, 0.1)}}, nullptr);
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved);
+    EXPECT_EQ(outcomes[0].element, "Vertex1");
+    EXPECT_EQ(outcomes[0].tier, 3);
+
+    //   ancestry: tier 1, as before
+    measure(input, {{"Vertex1", point(18.9, 0.53, 8)}, {"Vertex2", point(18.9, 9.47, 8)}}, nullptr);
+    input.derived = Data::Tier1Derived::Ancestry;
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved);
+    EXPECT_EQ(outcomes[0].element, "Vertex1");
+    EXPECT_EQ(outcomes[0].tier, 1);
+}
+
+TEST(SolveOwner, derivedElementHeldExactlyIsNotAdmitted)
+{
+    // Another reference holds the section edge exactly: only same-type ancestry admits it to a
+    // missing entry's pool.
+    Loft loft;
+    auto input = loft.input(0.1);
+    input.entries.push_back(exact("Edge1", "Edge"));
+
+    auto outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[1].status, SolveStatus::Exact);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    const auto& candidates = outcomes[0].candidates;
+    EXPECT_EQ(std::find(candidates.begin(), candidates.end(), "Edge1"), candidates.end());
+
+    //   ancestry: admitted, and the merge with the exact entry resolves it
+    input.derived = Data::Tier1Derived::Ancestry;
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved);
+    EXPECT_EQ(outcomes[0].element, "Edge1");
+}
+
+TEST(SolveOwner, derivedFromEveryProfileEdgeMergesNothing)
+{
+    // A section edge on a pad's start face (`FAC;F;LOW` embeds every profile edge) is derived
+    // from each of them: two references to two cut-away profile edges don't both take it.
+    const auto startFace = lowFace({sketchEdge(1), sketchEdge(2), sketchEdge(3), sketchEdge(4)});
+    const auto onStart = generated({startFace}, 9, "CUT", 'E');
+    SolveInput input;
+    input.diagonal = 27.0;
+    input.pool["Edge"] = {element("Edge1", {onStart})};
+    input.entries = {missing(sketchEdge(1), "Edge"), missing(sketchEdge(2), "Edge")};
+
+    auto outcomes = Data::solveOwner(input);
+    for (const auto& outcome : outcomes) {
+        EXPECT_EQ(outcome.status, SolveStatus::Broken);
+        EXPECT_EQ(outcome.candidates, (std::vector<std::string> {"Edge1"}));
+        EXPECT_EQ(outcome.candidateRoles, (std::vector<std::string> {"derived"}));
+    }
+}
+
+TEST(SolveOwner, derivedAmongOtherSurvivorsNeedsTier3)
+{
+    // S5, a pad 20 x 10 x 10 whose bottom slab a pocket cuts 1 mm deep: the section edge (E<F<E)
+    // and the top edge (the PRJ partner) survive tier 1; G1 picks the section edge, 1 mm away,
+    // the top edge 9 mm: a guess, as before ops#335.
+    Loft loft;
+    const auto topEdge = section({}, {loft.g2}, 7, "XTR", 0, 'E', {"PRJ"});
+    SolveInput input;
+    input.diagonal = 24.5;  // strict 0.245, wide 1.225
+    input.guess = true;
+    input.guessNoStructure = true;
+    input.pool["Edge"] = {element("Edge7", {loft.section2}), element("Edge9", {topEdge})};
+    measure(input, {{"Edge7", Loft::line(20, 1)}, {"Edge9", Loft::line(20, 10)}}, nullptr);
+    input.entries = {missing(loft.g2, "Edge")};
+    input.entries[0].fingerprint = Loft::line(20, 0);
+
+    auto outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Guessed);
+    EXPECT_EQ(outcomes[0].element, "Edge7");
+    EXPECT_EQ(outcomes[0].guessKind, "nearest");
+    EXPECT_EQ(outcomes[0].candidateRoles, (std::vector<std::string> {"guess", "structural"}));
+
+    //   S1, the slab 8 mm: ambiguous, the section edge marked
+    measure(input, {{"Edge7", Loft::line(20, 8)}, {"Edge9", Loft::line(20, 10)}}, nullptr);
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[0].evidence, "ambiguous");
+    EXPECT_EQ(outcomes[0].candidates, (std::vector<std::string> {"Edge7", "Edge9"}));
+    EXPECT_EQ(outcomes[0].candidateRoles, (std::vector<std::string> {"derived", "structural"}));
+
+    //   tier 2 alone narrowing to the section edge isn't enough: the top edge is a circle here,
+    //   the section edge 8 mm away: broken
+    auto circle =
+        fingerprint('E', "Circle", 10, Base::Vector3d(20, 5, 10), Base::Vector3d(0, 0, 1), {2.0});
+    measure(input, {{"Edge7", Loft::line(20, 8)}, {"Edge9", circle}}, nullptr);
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[0].evidence,
+              "Edge7 is in ancestry through another type (E<F<E), tier 3 didn't choose it, tier 2: "
+              "1 of 2");
+    //   ... and 0.1 mm away: tier 3 chooses it
+    measure(input, {{"Edge7", Loft::line(20, 0.1)}, {"Edge9", circle}}, nullptr);
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved);
+    EXPECT_EQ(outcomes[0].element, "Edge7");
+    EXPECT_EQ(outcomes[0].tier, 3);
+
+    //   ancestry: tier 2 took it at 8 mm
+    measure(input, {{"Edge7", Loft::line(20, 8)}, {"Edge9", circle}}, nullptr);
+    input.derived = Data::Tier1Derived::Ancestry;
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved);
+    EXPECT_EQ(outcomes[0].element, "Edge7");
+    EXPECT_EQ(outcomes[0].tier, 2);
+}
