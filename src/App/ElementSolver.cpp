@@ -372,12 +372,19 @@ bool lostASource(const std::vector<std::string>& names, const std::vector<Source
 // redrawn. The connected elements are in neither (PR 243 round 7): a modified element's
 // neighbours, per end vertex the vertex and one face of another input holding it, which is never
 // the element itself; a base edge collinear with a profile line's extruded face lists that face.
+// `derived` (ops#335): the nodes reached outside projections only through a node of another
+// element type than the name's, "GEN of a GEN": a section edge on a face that an edge generated
+// (`<<g2>;XTR;F;GEN>;CUT;E;GEN`) reaches the edge g2 through the face. Such a node is in the
+// element's lineage, but the element needn't be where the node was: relatedness, not identity.
+// A node reached both ways is in `outside` and `derived`; `outside` decides.
 struct AncestryNodes
 {
     std::set<std::string> outside;
+    std::set<std::string> derived;
     std::set<std::string> projected;
 
-    // True if both hold a node reached the same way
+    // True if both hold a node reached the same way; derived counts as outside, since sharing
+    // an ancestor is sharing it, whatever the path's types.
     bool meets(const AncestryNodes& other) const
     {
         auto shares = [](const std::set<std::string>& a, const std::set<std::string>& b) {
@@ -385,13 +392,28 @@ struct AncestryNodes
                 return b.count(node) > 0;
             });
         };
-        return shares(outside, other.outside) || shares(projected, other.projected);
+        return shares(outside, other.outside) || shares(outside, other.derived)
+            || shares(derived, other.outside) || shares(derived, other.derived)
+            || shares(projected, other.projected);
     }
 };
 
-void collectAncestryNodes(std::string_view name, bool projected, AncestryNodes& nodes)
+// True if \a type is an element type a name's section can carry (a section without one leaves a
+// path's type as it is).
+bool knownElementType(char type)
 {
-    auto& set = projected ? nodes.projected : nodes.outside;
+    return type == 'V' || type == 'E' || type == 'F';
+}
+
+// \a type: the element type of the name the walk started from. \a changed: the path so far
+// passed a node of another type.
+void collectAncestryNodes(std::string_view name,
+                          bool projected,
+                          bool changed,
+                          char type,
+                          AncestryNodes& nodes)
+{
+    auto& set = projected ? nodes.projected : changed ? nodes.derived : nodes.outside;
     if (name.empty() || !set.emplace(name).second) {
         return;
     }
@@ -410,18 +432,22 @@ void collectAncestryNodes(std::string_view name, bool projected, AncestryNodes& 
         return;
     }
     const auto& last = decodeSection(sections.back());
+    if (!type && knownElementType(last.elementType)) {
+        type = last.elementType;
+    }
+    changed = changed || (knownElementType(last.elementType) && last.elementType != type);
     if (sections.size() > 1) {
         auto prefixSize = static_cast<std::size_t>(sections.back().data() - node.data()) - 1;
         std::string prefix(node.substr(0, prefixSize));
         if (isCopySection(last)) {
             prefix = contextMark + last.iterationTag + ";" + copyIndex(last) + contextMark + prefix;
         }
-        collectAncestryNodes(context + prefix, projected, nodes);
+        collectAncestryNodes(context + prefix, projected, changed, type, nodes);
     }
     const bool throughProjection = projected || last.hasMapperFlag(MAPPER_FLAG_PROJECTION);
     for (const auto& embedded : last.linkedNames) {
         if (!embedded.empty()) {
-            collectAncestryNodes(context + embedded, throughProjection, nodes);
+            collectAncestryNodes(context + embedded, throughProjection, changed, type, nodes);
         }
     }
 }
@@ -429,18 +455,90 @@ void collectAncestryNodes(std::string_view name, bool projected, AncestryNodes& 
 AncestryNodes ancestryNodes(std::string_view name)
 {
     AncestryNodes nodes;
-    collectAncestryNodes(name, false, nodes);
+    collectAncestryNodes(name, false, false, 0, nodes);
     return nodes;
 }
 
-// True if \a ancestor is in the ancestry of \a name other than through a projection's embedded
-// names or the connected elements (AncestryNodes::outside).
-bool reachesOutsideProjections(std::string_view name, std::string_view ancestor)
+// The element types of a path from \a name down to \a ancestor that passes a node of another
+// type and no projection's embedded names, e.g. `E<F<E`; empty if there is none. For the
+// evidence text only: the first such path the walk finds.
+std::string derivedPathOf(std::string_view name, std::string_view ancestor)
 {
-    return ancestryNodes(name).outside.count(std::string(ancestor)) > 0;
+    std::set<std::pair<std::string, bool>> visited;
+    std::string path;
+    char type = 0;
+    std::function<bool(std::string_view, bool)> walk = [&](std::string_view at, bool changed) {
+        if (at.empty() || !visited.emplace(std::string(at), changed).second) {
+            return false;
+        }
+        std::string context;
+        std::string_view node = at;
+        while (!node.empty() && node.front() == contextMark) {
+            auto end = node.find(contextMark, 1);
+            if (end == std::string_view::npos) {
+                break;
+            }
+            context.append(node.substr(0, end + 1));
+            node.remove_prefix(end + 1);
+        }
+        auto sections = NameAncestry::splitSections(node);
+        if (sections.empty()) {
+            return false;
+        }
+        const auto& last = decodeSection(sections.back());
+        const char nodeType = knownElementType(last.elementType) ? last.elementType : '?';
+        if (!type && knownElementType(nodeType)) {
+            type = nodeType;
+        }
+        const std::size_t mark = path.size();
+        path += path.empty() ? std::string(1, nodeType) : std::string("<") + nodeType;
+        if (changed && at == ancestor) {
+            return true;
+        }
+        changed = changed || (knownElementType(nodeType) && nodeType != type);
+        if (sections.size() > 1) {
+            auto prefixSize = static_cast<std::size_t>(sections.back().data() - node.data()) - 1;
+            std::string prefix(node.substr(0, prefixSize));
+            if (isCopySection(last)) {
+                prefix =
+                    contextMark + last.iterationTag + ";" + copyIndex(last) + contextMark + prefix;
+            }
+            // An earlier state of the same element: no step in the path
+            path.resize(mark);
+            if (walk(context + prefix, changed)) {
+                return true;
+            }
+            path += path.empty() ? std::string(1, nodeType) : std::string("<") + nodeType;
+        }
+        if (!last.hasMapperFlag(MAPPER_FLAG_PROJECTION)) {
+            for (const auto& embedded : last.linkedNames) {
+                if (!embedded.empty() && walk(context + embedded, changed)) {
+                    return true;
+                }
+            }
+        }
+        path.resize(mark);
+        return false;
+    };
+    return walk(name, false) ? path : std::string();
 }
 
 }  // namespace
+
+NameAncestry::Reach NameAncestry::reaches(std::string_view name, std::string_view ancestor)
+{
+    const AncestryNodes nodes = ancestryNodes(name);
+    const std::string node(ancestor);
+    return nodes.outside.count(node)     ? Reach::SameType
+        : nodes.derived.count(node)      ? Reach::Derived
+        : nodes.projected.count(node)    ? Reach::Projected
+                                         : Reach::None;
+}
+
+std::string NameAncestry::derivedPath(std::string_view name, std::string_view ancestor)
+{
+    return derivedPathOf(name, ancestor);
+}
 
 std::vector<std::string> NameAncestry::sourceTags(std::string_view name)
 {
@@ -2850,6 +2948,11 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         std::set<int> fromNames;
         std::set<std::string> matchedNames;  // the names the name match found them by
         std::set<int> inAncestry;
+        // Under Tier1Derived::Place: the elements that reach the old name only through a node of
+        // another type (ops#335), and the survivors of tier 1 that were all such elements, which
+        // the no-candidate branch then got instead (listed first on a break, role `derived`).
+        std::set<int> derivedOnly;
+        std::vector<int> derived;
         // Tier 1's candidates that T1 dropped, made by another maker (ops#167), and that T1'
         // dropped, which lost one of the old element's sources (ops#173): for the evidence, and
         // listed last on a break (ops#174).
@@ -2919,9 +3022,10 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             state.outcome.candidateNames.push_back(
                 element.names.empty() ? std::string() : element.names.front()
             );
-            state.outcome.candidateRoles.emplace_back(role ? role
-                                                      : isPiece(k) ? "piece"
-                                                                   : "structural");
+            state.outcome.candidateRoles.emplace_back(role                       ? role
+                                                      : isPiece(k)               ? "piece"
+                                                      : state.derivedOnly.count(k) ? "derived"
+                                                                                 : "structural");
             state.outcome.candidateDistances.push_back(nan);
         }
     };
@@ -2995,6 +3099,49 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 : "; tier 1's " + std::to_string(n) + " survivors lost the old element's source";
         }
         return text;
+    };
+    // The derived survivors the no-candidate branch ran instead of (ops#335), for the evidence:
+    // how they hold the old name and, given \a agree (the pool's elements tier 2 kept), why none
+    // was taken.
+    auto derivedText = [](const GroupState& state, const std::vector<int>* agree) {
+        if (state.derived.empty()) {
+            return std::string();
+        }
+        const auto n = state.derived.size();
+        std::string path;
+        for (const auto& name : state.pool->elements[state.derived.front()].names) {
+            path = derivedPathOf(name, state.oldName);
+            if (!path.empty()) {
+                break;
+            }
+        }
+        std::string text = n == 1
+            ? std::string("; tier 1's 1 survivor is in ancestry through another type")
+            : "; tier 1's " + std::to_string(n) + " survivors are in ancestry through another type";
+        if (!path.empty()) {
+            text += " (" + path + ")";
+        }
+        if (agree) {
+            const bool kept = std::any_of(state.derived.begin(), state.derived.end(), [&](int k) {
+                return std::find(agree->begin(), agree->end(), k) != agree->end();
+            });
+            text += kept ? (n == 1 ? ", not at the old place" : ", none at the old place")
+                         : (n == 1 ? ", tier 2 disagrees with it" : ", tier 2 disagrees with them");
+        }
+        return text;
+    };
+    // A break's candidates: the derived survivors first (ops#335), then the rest of \a agree,
+    // each nearest the saved centre first, eight at most.
+    auto listDerivedFirst = [&listByDistance](GroupState& state, const std::vector<int>& agree) {
+        listByDistance(state, state.derived, "derived");
+        std::vector<int> rest;
+        for (int k : agree) {
+            if (std::find(state.derived.begin(), state.derived.end(), k) == state.derived.end()) {
+                rest.push_back(k);
+            }
+        }
+        const auto n = state.outcome.candidates.size();
+        listByDistance(state, rest, "geometric", n < 8 ? 8 - n : std::size_t(0));
     };
     // The survivors T1 and T1' dropped, last on a break (ops#174), in the room left of eight
     // candidates: never taken automatically, offered to the user's pick. Those the break listed
@@ -3076,20 +3223,38 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 continue;
             }
             // A projection partner of the old element holds its name, but is another element
-            // (reachesOutsideProjections()): it is no evidence, and not in the old name's ancestry.
-            bool contains = !oldName.empty()
-                && std::any_of(element.names.begin(), element.names.end(), [&](const auto& n) {
-                                if (!ancestry.contains(n, oldName)) {
-                                    return false;
-                                }
-                                return reachesOutsideProjections(n, oldName);
-                            });
+            // (AncestryNodes::projected): it is no evidence, and not in the old name's ancestry.
+            // Under Tier1Derived::Place, nor is an element that reaches it only through a node
+            // of another type (ops#335): it is related to the old element, and geometry decides.
+            bool contains = false;
+            bool derivedName = false;
+            if (!oldName.empty()) {
+                for (const auto& n : element.names) {
+                    if (!ancestry.contains(n, oldName)) {
+                        continue;
+                    }
+                    const AncestryNodes nodes = ancestryNodes(n);
+                    if (nodes.outside.count(oldName)) {
+                        contains = true;
+                        break;
+                    }
+                    if (nodes.derived.count(oldName)) {
+                        derivedName = true;
+                    }
+                }
+                if (!contains && derivedName && input.derived == Tier1Derived::Ancestry) {
+                    contains = true;
+                }
+            }
             if (pool.exact.count(element.index) && !contains) {
                 continue;
             }
             allowed[k] = 1;
             if (contains) {
                 state.inAncestry.insert(static_cast<int>(k));
+            }
+            else if (derivedName) {
+                state.derivedOnly.insert(static_cast<int>(k));
             }
             const bool same = fromMaker(static_cast<int>(k));
             for (const auto& name : element.names) {
@@ -3209,6 +3374,24 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             }
         }
         state.candidates.assign(all.begin(), all.end());
+
+        // Derived survivors only (ops#335, PLAN decision 81): every survivor reaches the old name
+        // only through a node of another type, so none shows that the old element is still
+        // there; a section edge on a face generated from the old edge survives wherever the cut
+        // left it. They are G2's same-source evidence, not tier 1's: the no-candidate branch
+        // runs as it is, over the whole pool, and they are listed first on a break.
+        if (!state.candidates.empty()
+            && std::all_of(state.candidates.begin(), state.candidates.end(), [&](int k) {
+                   const auto& names = pool.elements[k].names;
+                   return state.derivedOnly.count(k) > 0
+                       && std::none_of(names.begin(), names.end(), [&](const auto& n) {
+                              return NameAncestry::isPieceOf(n, oldName)
+                                  || NameAncestry::isIndexPieceOf(n, oldName);
+                          });
+               })) {
+            state.derived = std::move(state.candidates);
+            state.candidates.clear();
+        }
 
         // Tiers 2 and 3 and the IDX source, for a reference with a saved fingerprint.
         const ElementFingerprint* saved = savedFingerprint(members);
@@ -3357,12 +3540,14 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         if (saved && state.candidates.size() > 1) {
             // Geometry breaks ties among tier 1's survivors; it never replaces them.
             std::vector<int> agree = intrinsicSurvivors(state.candidates);
-            if (agree.size() == 1) {
+            // A derived survivor (ops#335) is evidence only where tier 3 chose it: tier 2 alone
+            // narrowing to it isn't enough, so tier 3 runs on it.
+            if (agree.size() == 1 && !state.derivedOnly.count(agree.front())) {
                 state.geometryTier = 2;
                 state.geometryEvidence = "tier 2: 1 of " + std::to_string(state.candidates.size());
                 state.candidates = agree;
             }
-            else if (agree.size() > 1) {
+            else if (!agree.empty()) {
                 Nearest nearest = nearestOf(agree);
                 Nearest wide;
                 if (nearest.index < 0 && guessing) {
@@ -3410,7 +3595,7 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 if (nearest.index >= 0) {
                     state.geometric = true;
                     state.geometryEvidence = "no structural candidate, tier 3: "
-                        + describeNearest(nearest);
+                        + describeNearest(nearest) + derivedText(state, nullptr);
                     state.candidates = {agree[nearest.index]};
                     state.listed = state.candidates;
                 }
@@ -3437,8 +3622,9 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                     if (wide.index < 0) {
                         state.decided = true;
                         state.outcome.evidence = "no structural candidate, tier 3 found none: "
-                            + describeNearest(nearest) + otherSource + otherMakerText(state);
-                        listByDistance(state, agree, "geometric");
+                            + describeNearest(nearest) + otherSource
+                            + derivedText(state, &agree) + otherMakerText(state);
+                        listDerivedFirst(state, agree);
                         listDropped(state);
                         continue;
                     }
@@ -3452,7 +3638,7 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                                   ? "guess: no structural candidate"
                                   : "guess: no structural candidate, redrawn in the same source"
                           )
-                        + ", tier 3 wide: " + describeNearest(wide);
+                        + ", tier 3 wide: " + describeNearest(wide) + derivedText(state, nullptr);
                     for (int k : agree) {
                         if (k != pick) {
                             state.guessAlternatives.push_back(k);
@@ -3466,7 +3652,12 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
 
         if (state.candidates.empty()) {
             state.decided = true;
-            state.outcome.evidence = "no candidate" + otherMakerText(state);
+            static const std::vector<int> none;
+            state.outcome.evidence = "no candidate"
+                + derivedText(state, saved ? &none : nullptr)
+                + (saved || state.derived.empty() ? "" : ", no saved fingerprint")
+                + otherMakerText(state);
+            listDerivedFirst(state, {});
             listDropped(state);
             continue;
         }
@@ -3556,19 +3747,24 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 }
                 return ancestryNodes(name).meets(*oldNodes);
             };
+            // A derived survivor among others (ops#335) is evidence only where tier 3 (strict or
+            // G1) chose it: its lineage holds the old element's source, not the old element.
+            const bool derivedPartner = k >= 0 && state.derivedOnly.count(k) > 0;
             bool evidenced = k >= 0
-                && (state.geometric || state.inAncestry.count(k) > 0
-                    || (state.indexed && state.fromIndex.count(k) > 0) || !state.equivalent.empty()
-                    || !state.expanded.empty()
-                    || std::any_of(
-                        state.pool->elements[k].names.begin(),
-                        state.pool->elements[k].names.end(),
-                        [&](const auto& n) {
-                            return NameAncestry::topAgrees(state.oldName, n)
-                                && (state.matchedNames.count(n) > 0
-                                    || related(n));
-                        }
-                    ));
+                && (state.geometric || (state.indexed && state.fromIndex.count(k) > 0)
+                    || (derivedPartner
+                            ? state.geometryTier == 3
+                            : state.inAncestry.count(k) > 0 || !state.equivalent.empty()
+                                || !state.expanded.empty()
+                                || std::any_of(
+                                    state.pool->elements[k].names.begin(),
+                                    state.pool->elements[k].names.end(),
+                                    [&](const auto& n) {
+                                        return NameAncestry::topAgrees(state.oldName, n)
+                                            && (state.matchedNames.count(n) > 0
+                                                || related(n));
+                                    }
+                                )));
             // A partner that tier 1 alone found must not contradict the saved geometry (ops#87:
             // a thread's B-spline edge resolved to a circle with which it shares sources). The
             // geometric tiers, the IDX source and pieces checked or need no check.
@@ -3585,6 +3781,20 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             if (status == MatchStatus::Resolved && sibling) {
                 state.outcome.evidence = "pattern sibling";
                 listCandidates(state, state.listed, state.geometric ? "geometric" : nullptr);
+            }
+            else if (status == MatchStatus::Resolved && !evidenced && derivedPartner) {
+                std::string path;
+                for (const auto& name : state.pool->elements[k].names) {
+                    path = derivedPathOf(name, state.oldName);
+                    if (!path.empty()) {
+                        break;
+                    }
+                }
+                state.outcome.evidence = state.pool->elements[k].index
+                    + " is in ancestry through another type"
+                    + (path.empty() ? "" : " (" + path + ")") + ", tier 3 didn't choose it"
+                    + (state.geometryEvidence.empty() ? "" : ", " + state.geometryEvidence);
+                listCandidates(state, state.listed);
             }
             else if (status == MatchStatus::Resolved && !evidenced) {
                 state.outcome.evidence = "no top agreement";
@@ -3656,7 +3866,9 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                         return std::isnan(db) ? !std::isnan(da) : da < db;
                     });
                     for (int position : alternatives) {
-                        addCandidate(position, state.guessRole);
+                        addCandidate(position,
+                                     state.derivedOnly.count(position) ? "derived"
+                                                                       : state.guessRole);
                     }
                 }
                 else if (state.geometric || state.geometryTier >= 2) {
@@ -3669,6 +3881,14 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                         }
                     }
                     listCandidates(state, others, state.geometric ? "geometric" : nullptr);
+                    // The derived survivors geometry passed over (ops#335)
+                    others.clear();
+                    for (int position : state.derived) {
+                        if (position != k) {
+                            others.push_back(position);
+                        }
+                    }
+                    listCandidates(state, others, "derived");
                 }
                 if (state.geometric || !state.guessKind.empty()) {
                     state.outcome.evidence = state.geometryEvidence;

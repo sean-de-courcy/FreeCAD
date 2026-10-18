@@ -1,0 +1,19 @@
+# Derived survivors (ops#335, Scenarios/derived.py). The `...Ancestry` scenarios run with
+# NamingSolver/Tier1Derived = ancestry, the rule before ops#335, kept for comparison runs: the
+# reference moves silently to the element derived from the old one (wrong by geometry). That is
+# the setting's expected result; remove the entries with the setting.
+
+issue: ops#335
+
+reason: Tier1Derived = ancestry takes the lone derived survivor at tier 1, 8 mm from the old place (the comparison setting's expected wrong)
+cli  PartDesignTests.TestNamingScenarios.LoftEdgeCutAwayAncestry.test_fillet_bottom_V2s
+cli  PartDesignTests.TestNamingScenarios.LoftCornerCutAwayAncestry.test_sketch_corner_V2s
+
+# A Pipe's start-cap edge cut away: tier 1 takes the bend edge 30 mm away through the top
+# agreement on `PSH;E;UPP` and the shared side face (ops#351). Loud by luck here (the fillet fails
+# on the bend). Remove the entry when ops#351 is fixed.
+
+issue: ops#351
+
+reason: the start cap's UPP edge resolves to the bend edge's UPP name (both named from the side face of the profile's line), 30 mm away
+cli  PartDesignTests.TestNamingScenarios.PipeStartCapEdgeCutAway.test_fillet_bottom_V2s
