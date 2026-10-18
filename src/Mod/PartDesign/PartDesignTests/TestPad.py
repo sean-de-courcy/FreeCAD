@@ -595,17 +595,11 @@ def holdBases(*objects):
 
 
 def assertBasesKept(test, held):
-    """The held shapes are as they were: the same tolerances and curves on surfaces. A tolerance
-    may differ by an ULP (1e-23 at 1e-7): a boolean's refinement moves the tolerance of an edge
-    or vertex the result shares with the base that much (a Pad up to the last face), and a raise
-    that matters is orders of magnitude more (1e-7 to 5e-6, or 1.8e-15 in the research)."""
+    """The held shapes are as they were: the same tolerances, exactly, and curves on surfaces.
+    A boolean's refinement moved a tolerance the result shared with the base by an ULP (a Pad up
+    to the last face) until refine ran on a copy (ops#354)"""
     for name, shape, before in held:
-        after = toleranceState(shape)
-        for kept, was in zip(after[:3], before[:3]):
-            test.assertEqual(len(kept), len(was), name)
-            for x, y in zip(kept, was):
-                test.assertAlmostEqual(x, y, delta=1e-18, msg=name)
-        test.assertEqual(after[3], before[3], name)
+        test.assertEqual(toleranceState(shape), before, name)
 
 
 def planarFaceAt(shape, axis, value):

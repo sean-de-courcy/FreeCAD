@@ -4364,7 +4364,9 @@ TopoShape& TopoShape::makeRefine(const TopoShape& shape, const char* op, RefineF
         return *this;
     }
     try {
-        BRepBuilderAPI_RefineModel mkRefine(shape.getShape());
+        // On a topology-only copy, as makeElementRefine() refines: refined in place, the input's
+        // edges kept a curve on surface more at every run (ops#354). No caller today
+        BRepBuilderAPI_RefineModel mkRefine(BRepBuilderAPI_Copy(shape.getShape(), false).Shape());
         _Shape = mkRefine.Shape();
         return *this;
     }
