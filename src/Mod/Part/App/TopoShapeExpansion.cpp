@@ -48,13 +48,18 @@
 
 #include <Base/Profiler.h>
 #include <BRepAlgoAPI_Defeaturing.hxx>
+#include <BRepAlgoAPI_Splitter.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepFill.hxx>
 #include <BRepFill_Generator.hxx>
+#include <BOPTools_AlgoTools3D.hxx>
+#include <BRepAdaptor_Surface.hxx>
+#include <BRepClass_FaceClassifier.hxx>
 #include <BRepTools.hxx>
+#include <IntTools_Context.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <Mod/Part/App/FCBRepAlgoAPI_BooleanOperation.h>
@@ -87,6 +92,7 @@
 #include <GeomFill_BezierCurves.hxx>
 #include <GeomFill_BSplineCurves.hxx>
 #include <Precision.hxx>
+#include <TColStd_Array1OfReal.hxx>
 #include <BRepGProp.hxx>
 #include <GProp_GProps.hxx>
 #include <TopExp_Explorer.hxx>
@@ -6466,6 +6472,364 @@ TopoShape& TopoShape::makeElementPrism(const TopoShape& base, const gp_Vec& vec,
     return makeElementShape(mkPrism, base, op);
 }
 
+namespace
+{
+// How far prismUpToBySplit() extrudes the profile: past the whole of `upTo` from any point of it
+double splitLength(const TopoDS_Shape& profile, const TopoDS_Shape& upTo)
+{
+    Bnd_Box box;
+    BRepBndLib::Add(profile, box);
+    BRepBndLib::Add(upTo, box);
+    if (box.IsVoid() || box.IsOpen()) {
+        return -1.0;
+    }
+    return std::sqrt(box.SquareExtent()) + 1.0;
+}
+
+// Whether BRepFeat_MakePrism extrudes `profile` along `direction` up to `upTo`: only when each
+// face of it that the extrusion can meet lies on an elementary surface. Up to a face on a
+// freeform surface (a loft's B-spline side, a surface of extrusion or revolution) it gave an
+// empty compound, or a solid ten times too large, and said it was done (ops#353). For an up-to
+// shape of several faces, faces whose bounding boxes miss the extrusion's both ways (an up-to
+// shape's unrelated faces, e.g. a whole base's) don't count: BRepFeat keeps building what it
+// built before. A single face always counts: BRepFeat chooses its own sense and gets the face
+// without its limits, larger than the face (PR 324 round 1 verification).
+bool brepFeatReaches(const TopoDS_Shape& profile, const TopoDS_Shape& upTo, const gp_Dir& direction)
+{
+    int faceCount = 0;
+    for (TopExp_Explorer faces(upTo, TopAbs_FACE); faces.More() && faceCount < 2; faces.Next()) {
+        ++faceCount;
+    }
+    const double length = faceCount > 1 ? splitLength(profile, upTo) : -1.0;
+    Bnd_Box path;
+    if (length > 0.0) {
+        Bnd_Box start;
+        BRepBndLib::Add(profile, start);
+        path.Add(start);
+        for (double sense : {1.0, -1.0}) {
+            gp_Trsf shift;
+            shift.SetTranslation(gp_Vec(direction) * (sense * length));
+            path.Add(start.Transformed(shift));
+        }
+        path.Enlarge(Precision::Confusion());
+    }
+    for (TopExp_Explorer faces(upTo, TopAbs_FACE); faces.More(); faces.Next()) {
+        if (!path.IsVoid()) {
+            Bnd_Box box;
+            BRepBndLib::Add(faces.Current(), box);
+            if (!box.IsVoid() && path.IsOut(box)) {
+                continue;
+            }
+        }
+        switch (BRepAdaptor_Surface(TopoDS::Face(faces.Current()), Standard_False).GetType()) {
+            case GeomAbs_Plane:
+            case GeomAbs_Cylinder:
+            case GeomAbs_Cone:
+            case GeomAbs_Sphere:
+            case GeomAbs_Torus:
+                break;
+            default:
+                return false;
+        }
+    }
+    return true;
+}
+
+// The history of the prism up to a shape (prismUpToBySplit()), for the kept solids only, as
+// FeatureRevolved.cpp's UpToFaceSweepMapper names a Revolution's sweep up to a face (ops#293,
+// ops#334): pieces in the solids left out don't count, and the far end's edges and vertices,
+// where the faces and edges that the profile's edges and vertices generate meet the up-to shape,
+// are those profile elements' projections (PRJ).
+class UpToShapePrismMapper: public MapperMaker
+{
+public:
+    UpToShapePrismMapper(
+        BRepAlgoAPI_Splitter& splitter,
+        BRepPrimAPI_MakePrism& extrusion,
+        const TopoDS_Shape& profile,
+        const TopoDS_Shape& result
+    )
+        : MapperMaker(splitter)
+    {
+        for (TopAbs_ShapeEnum type : {TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX}) {
+            TopExp::MapShapes(result, type, kept);
+        }
+        // In the profile's order (ops#19: names are written in a defined order)
+        for (TopAbs_ShapeEnum type : {TopAbs_EDGE, TopAbs_VERTEX}) {
+            TopTools_IndexedMapOfShape elements;
+            TopExp::MapShapes(profile, type, elements);
+            for (int i = 1; i <= elements.Extent(); ++i) {
+                const TopoDS_Shape& element = elements(i);
+                TopTools_ListOfShape farEnds;
+                for (const TopoDS_Shape& side : extrusion.Generated(element)) {
+                    for (const TopoDS_Shape& meeting : splitter.Generated(side)) {
+                        if (meeting.ShapeType() == type && kept.Contains(meeting)
+                            && farEnd.Add(meeting)) {
+                            farEnds.Append(meeting);
+                        }
+                    }
+                }
+                if (!farEnds.IsEmpty()) {
+                    projections.Bind(extrusion.FirstShape(element), farEnds);
+                }
+            }
+        }
+    }
+
+    const std::vector<TopoDS_Shape>& modified(const TopoDS_Shape& s) const override
+    {
+        MapperMaker::modified(s);
+        std::erase_if(_res, [this](const TopoDS_Shape& piece) { return !kept.Contains(piece); });
+        return _res;
+    }
+
+    const std::vector<TopoDS_Shape>& generated(const TopoDS_Shape& s) const override
+    {
+        MapperMaker::generated(s);
+        std::erase_if(_res, [this](const TopoDS_Shape& shape) {
+            return !kept.Contains(shape) || farEnd.Contains(shape);
+        });
+        return _res;
+    }
+
+    const std::vector<TopoDS_Shape>& projected(const TopoDS_Shape& s) const override
+    {
+        _res.clear();
+        if (const TopTools_ListOfShape* farEnds = projections.Seek(s)) {
+            for (const TopoDS_Shape& shape : *farEnds) {
+                _res.push_back(shape);
+            }
+        }
+        return _res;
+    }
+
+private:
+    TopTools_IndexedMapOfShape kept;
+    TopTools_MapOfShape farEnd;
+    TopTools_DataMapOfShapeListOfShape projections;
+};
+
+// Whether, somewhere on `piece` (a face of a solid, oriented as in it), the solid's outward normal
+// points against `direction`. Sampled: a grid over the piece's parameter range with a few points
+// in each knot span of its surface each way (16 at least, 256 at most), those inside it, and one
+// point inside it; a fold narrower than a span's step can be missed. Evenly spread, a band near a
+// rim under 3 % of the range was (PR 324 round 2 verification). Throws when no point inside the
+// piece is found.
+bool facesAgainst(const TopoDS_Face& piece, const gp_Dir& direction)
+{
+    const BRepAdaptor_Surface surface(piece);
+    const gp_Vec along(direction);
+    auto against = [&](double u, double v) {
+        gp_Pnt point;
+        gp_Vec alongU;
+        gp_Vec alongV;
+        surface.D1(u, v, point, alongU, alongV);
+        gp_Vec outward = alongU.Crossed(alongV);
+        if (piece.Orientation() == TopAbs_REVERSED) {
+            outward.Reverse();
+        }
+        const double size = outward.Magnitude();
+        return size > gp::Resolution() && outward.Dot(along) < -1e-9 * size;
+    };
+    auto inside = [&](double u, double v) {
+        BRepClass_FaceClassifier classifier(piece, gp_Pnt2d(u, v), Precision::PConfusion());
+        return classifier.State() == TopAbs_IN;
+    };
+    // The parameters to sample one way, from the bounds of the surface's knot spans over the
+    // piece's range (one span for a surface without knots)
+    auto spread = [](const TColStd_Array1OfReal& bounds) {
+        constexpr int least = 16;
+        constexpr int perSpan = 4;
+        constexpr int most = 256;
+        int spans = bounds.Length() - 1;
+        int each = std::max(perSpan, (least + spans - 1) / spans);
+        double low = bounds.First();
+        double high = bounds.Last();
+        if (spans * each > most) {
+            each = most / spans;
+            if (each == 0) {
+                spans = 1;
+                each = most;
+            }
+        }
+        std::vector<double> values;
+        for (int s = 0; s < spans; ++s) {
+            const double from = spans == 1 ? low : bounds(bounds.Lower() + s);
+            const double to = spans == 1 ? high : bounds(bounds.Lower() + s + 1);
+            for (int i = 0; i < each; ++i) {
+                values.push_back(from + (i + 0.5) / each * (to - from));
+            }
+        }
+        return values;
+    };
+    TColStd_Array1OfReal uBounds(1, surface.NbUIntervals(GeomAbs_CN) + 1);
+    surface.UIntervals(uBounds, GeomAbs_CN);
+    TColStd_Array1OfReal vBounds(1, surface.NbVIntervals(GeomAbs_CN) + 1);
+    surface.VIntervals(vBounds, GeomAbs_CN);
+    const std::vector<double> us = spread(uBounds);
+    const std::vector<double> vs = spread(vBounds);
+    // The normal first: classifying each point costs more
+    for (double u : us) {
+        for (double v : vs) {
+            if (against(u, v) && inside(u, v)) {
+                return true;
+            }
+        }
+    }
+    gp_Pnt point;
+    gp_Pnt2d uv;
+    Handle(IntTools_Context) context = new IntTools_Context;
+    if (BOPTools_AlgoTools3D::PointInFace(piece, point, uv, context) == 0) {
+        return against(uv.X(), uv.Y());
+    }
+    for (double u : us) {
+        for (double v : vs) {
+            if (inside(u, v)) {
+                return false;
+            }
+        }
+    }
+    throw Base::CADKernelError(QT_TRANSLATE_NOOP("Exception", "Could not extrude up to the face"));
+}
+
+// The prism of `profile` along `direction` up to `upTo` (a face or a shell), built without
+// BRepFeat (ops#353), as a Revolution's sweep up to a face is (FeatureRevolved.cpp's
+// sweepUpToFace(), ops#293): the profile extruded past `upTo`, split by it, and the pieces that
+// start at the profile. Each point of the profile goes as far as the first crossing. Named into
+// `named` from the extrusion, which is named from the profile, and from `upTo`. Throws when a
+// piece that starts at the profile reaches the extrusion's far end (`upTo` doesn't stop all of
+// the profile), or holds a piece of `upTo` inside it or one facing against the direction on its
+// boundary (where the profile first meets `upTo` jumps within the profile).
+TopoShape prismUpToBySplit(
+    TopoShape named,
+    const TopoShape& profile,
+    const TopoShape& upTo,
+    const gp_Dir& direction,
+    const char* op
+)
+{
+    auto fail = []() {
+        return Base::CADKernelError(
+            QT_TRANSLATE_NOOP("Exception", "Could not extrude up to the face")
+        );
+    };
+    const TopoShape blank(named);
+    const double length = splitLength(profile.getShape(), upTo.getShape());
+    if (length <= 0.0) {
+        throw fail();
+    }
+    BRepPrimAPI_MakePrism extrusion(profile.getShape(), gp_Vec(direction) * length);
+    if (!extrusion.IsDone()) {
+        throw fail();
+    }
+    TopoShape sweep(blank);
+    sweep.makeElementShape(extrusion, profile, op);
+    BRepAlgoAPI_Splitter splitter;
+    TopTools_ListOfShape arguments;
+    arguments.Append(sweep.getShape());
+    TopTools_ListOfShape tools;
+    tools.Append(upTo.getShape());
+    splitter.SetArguments(arguments);
+    splitter.SetTools(tools);
+    splitter.SetNonDestructive(Standard_True);
+    splitter.Build();
+    if (!splitter.IsDone()) {
+        throw fail();
+    }
+    // The pieces of the start and end caps
+    auto piecesOf = [&](const TopoDS_Shape& cap) {
+        TopTools_IndexedMapOfShape pieces;
+        for (TopExp_Explorer faces(cap, TopAbs_FACE); faces.More(); faces.Next()) {
+            const TopTools_ListOfShape& modified = splitter.Modified(faces.Current());
+            if (modified.IsEmpty()) {
+                pieces.Add(faces.Current());
+            }
+            for (const TopoDS_Shape& piece : modified) {
+                pieces.Add(piece);
+            }
+        }
+        return pieces;
+    };
+    const TopTools_IndexedMapOfShape start = piecesOf(extrusion.FirstShape());
+    const TopTools_IndexedMapOfShape end = piecesOf(extrusion.LastShape());
+    const TopTools_IndexedMapOfShape upToPieces = piecesOf(upTo.getShape());
+    // The refusals are RuntimeErrors: they name what is wrong, and FeatureExtrude passes them on
+    std::vector<TopoDS_Shape> kept;
+    for (TopExp_Explorer solids(splitter.Shape(), TopAbs_SOLID); solids.More(); solids.Next()) {
+        bool atStart = false;
+        bool atEnd = false;
+        bool inside = false;
+        for (TopExp_Explorer faces(solids.Current(), TopAbs_FACE); faces.More(); faces.Next()) {
+            atStart = atStart || start.Contains(faces.Current());
+            atEnd = atEnd || end.Contains(faces.Current());
+            inside = inside || faces.Current().Orientation() == TopAbs_INTERNAL
+                || faces.Current().Orientation() == TopAbs_EXTERNAL;
+        }
+        if (atStart && atEnd) {
+            throw Base::RuntimeError(QT_TRANSLATE_NOOP(
+                "Exception",
+                "Could not extrude up to the face: part of the profile doesn't meet it"
+            ));
+        }
+        // A piece of `upTo` that doesn't divide the extrusion, because an edge of it lies inside
+        // (a free edge, a hole's), stays in the solid as an internal face: the profile beside
+        // it goes on to whatever stops the solid further on, through its first contact (ops#353
+        // review H1; the Revolution refuses the same, certifyFirstContact() check (i)). Points
+        // on such an edge classify ON the solid, not IN, so the face is what is checked.
+        if (atStart && inside) {
+            throw Base::RuntimeError(QT_TRANSLATE_NOOP(
+                "Exception",
+                "Could not extrude up to the face: the face's edge lies in the profile's way, so "
+                "where the profile first meets the face jumps within the profile"
+            ));
+        }
+        if (!atStart) {
+            continue;
+        }
+        // A piece of `upTo` on the solid's boundary whose outward normal points against the
+        // direction: lines along it leave the solid at the first contact and come back into it
+        // there, through a closed obstacle's far side or an undercut, and the solid fills what
+        // lies behind (PR 324 round 1 verification; the Revolution's certifyFirstContact()
+        // checks (ii) and (iii)). With no such piece, a line enters the solid only through the
+        // profile, so the solid is what first contact gives. A piece of the start cap is left
+        // out: where the profile lies on a face of `upTo` (a sketch on the base, up to the base)
+        // the splitter makes the two one face, whose outward normal is against the direction
+        // (PR 324 round 2 verification)
+        for (TopExp_Explorer faces(solids.Current(), TopAbs_FACE); faces.More(); faces.Next()) {
+            if (upToPieces.Contains(faces.Current()) && !start.Contains(faces.Current())
+                && facesAgainst(TopoDS::Face(faces.Current()), direction)) {
+                throw Base::RuntimeError(QT_TRANSLATE_NOOP(
+                    "Exception",
+                    "Could not extrude up to the face: the profile meets the face from behind, so "
+                    "where the profile first meets the face jumps within the profile"
+                ));
+            }
+        }
+        kept.push_back(solids.Current());
+    }
+    if (kept.empty()) {
+        throw fail();
+    }
+    TopoDS_Shape result = kept.front();
+    if (kept.size() > 1) {
+        TopoDS_Compound compound;
+        BRep_Builder builder;
+        builder.MakeCompound(compound);
+        for (const TopoDS_Shape& solid : kept) {
+            builder.Add(compound, solid);
+        }
+        result = compound;
+    }
+    named.makeShapeWithElementMap(
+        result,
+        UpToShapePrismMapper(splitter, extrusion, profile.getShape(), result),
+        {sweep, upTo},
+        op
+    );
+    return named;
+}
+}  // namespace
+
 TopoShape& TopoShape::makeElementPrismUntil(
     const TopoShape& baseShape,
     const TopoShape& profileShape,
@@ -6601,7 +6965,42 @@ TopoShape& TopoShape::makeElementPrismUntil(
 
     std::vector<TopoShape> srcShapes;
     TopoShape result;
-    for (;;) {
+    // Up to a freeform face, by a split instead of BRepFeat (ops#353): up to the face as it is,
+    // then up to the face without its limits, when they were removed and it is still finite
+    const bool bySplit = !brepFeatReaches(profile.getShape(), _uptoface.getShape(), direction);
+    if (bySplit) {
+        const TopoShape named(Tag, Hasher, historyAlgorithm);
+        // OCCT's own failures as the Revolution's sweep up to a face takes them: a failed try
+        auto split = [&](const TopoShape& upTo) {
+            try {
+                return prismUpToBySplit(named, profile, upTo, direction, op);
+            }
+            catch (const Standard_Failure&) {
+                throw Base::CADKernelError(
+                    QT_TRANSLATE_NOOP("Exception", "Could not extrude up to the face")
+                );
+            }
+        };
+        try {
+            result = split(_uptoface);
+        }
+        catch (const Base::Exception&) {
+            Bnd_Box box;
+            BRepBndLib::Add(uptoface.getShape(), box);
+            if (uptoface.isSame(_uptoface) || box.IsVoid() || box.IsOpen()) {
+                throw;
+            }
+            // When the face without its limits fails too, the face as it is says why
+            const std::exception_ptr first = std::current_exception();
+            try {
+                result = split(uptoface);
+            }
+            catch (const Base::Exception&) {
+                std::rethrow_exception(first);
+            }
+        }
+    }
+    while (!bySplit) {
         try {
             result = base;
 
@@ -6654,7 +7053,12 @@ TopoShape& TopoShape::makeElementPrismUntil(
 
                 PrismMaker.Perform(uptoface.getShape());
 
-                if (!PrismMaker.IsDone() || PrismMaker.Shape().IsNull()) {
+                // A face's prism with no solid is a failure too: BRepFeat gave an empty
+                // compound, done, up to faces it doesn't reach (ops#353)
+                const TopAbs_ShapeEnum made = face.shapeType() == TopAbs_FACE ? TopAbs_SOLID
+                                                                              : TopAbs_FACE;
+                if (!PrismMaker.IsDone() || PrismMaker.Shape().IsNull()
+                    || !TopExp_Explorer(PrismMaker.Shape(), made).More()) {
                     FC_THROWM(Base::CADKernelError, "BRepFeat_MakePrism: extrusion failed");
                 }
 

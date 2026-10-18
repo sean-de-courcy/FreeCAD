@@ -351,7 +351,8 @@ names it.
 | `fix/337-attach-poll` | fix | ops#337, ops#332 | - | `integration` `8f31aaece8` | `855d0c0932` (fork PR 323), 2026-10-17 | never (fork fix) |
 | `fix/347-upto-tolerances` | fix | ops#347 | - | `integration` `33628cc4d3` | `1b1161843c` (fork PR 321), 2026-10-17 | never (fork fix) |
 | `fix/322-basefeature-follows` | fix | ops#322 | - | `integration` `33bae7bd4e` | `a47e001660` (fork PR 322), 2026-10-17 | never (fork fix) |
-| `fix/348-varsetcopy-add-property` | fix | ops#348 | - | `integration` `a47e001660` | (fork PR 325) | never (fork fix) |
+| `fix/348-varsetcopy-add-property` | fix | ops#348 | - | `integration` `a47e001660` | `b2b1911afc` (fork PR 325), 2026-10-17 | never (fork fix) |
+| `fix/353-empty-prism` | fix | ops#353 | fork PR 321 | `fix/347-upto-tolerances` `04ac2ed1bc` | (fork PR 324) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 

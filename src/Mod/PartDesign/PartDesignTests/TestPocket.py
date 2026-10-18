@@ -281,12 +281,50 @@ class TestPocket(unittest.TestCase):
                 self.assertIn("names several faces", pocket.getStatusString())
 
     def testPocketUpToFaceLeavesTheBaseAlone(self):
-        # ops#347: the up-to face is the base's, and BRepFeat raised it in place. The volume isn't
-        # checked: what BRepFeat makes up to the lofted face depends on the platform (ops#353)
-        from PartDesignTests.TestPad import upToTheLoftSide
+        # ops#347: the up-to face is the base's, and BRepFeat raised it in place. The square is
+        # outside the loft, so the pocket removes nothing
+        from PartDesignTests.TestPad import LOFT_VOLUME_DELTA, upToTheLoftSide
 
         base, pocket = upToTheLoftSide(self, self.Doc, "Pocket")
         self.assertTrue(pocket.Shape.isValid())
+        self.assertAlmostEqual(pocket.Shape.Volume, base.Shape.Volume, delta=LOFT_VOLUME_DELTA)
+        self.assertAlmostEqual(base.Shape.common(pocket.AddSubShape).Volume, 0, places=6)
+
+    def testPocketUpToALoftedFace(self):
+        # ops#353: BRepFeat gave an empty prism up to the loft's B-spline side, and the Pocket
+        # was valid and removed nothing. The square is inside the loft, in the plane x = 0: the
+        # Pocket removes what lies between it and the side (the loft is symmetric about x = 0,
+        # so the same either way)
+        from PartDesignTests.TestPad import (
+            LOFT_VOLUME_DELTA,
+            PRISM_VOLUME_RELATIVE,
+            loftSideReach,
+            squareUpToTheLoft,
+        )
+
+        expected = loftSideReach(0, -2, 2, 5, 9)
+        base, pocket = squareUpToTheLoft(self.Doc, "Pocket", 0, 5, 9, False)
+        self.assertTrue(pocket.isValid(), pocket.getStatusString())
+        self.assertTrue(pocket.Shape.isValid())
+        self.assertEqual(len(pocket.Shape.Solids), 1)
+        self.assertAlmostEqual(
+            pocket.AddSubShape.Volume, expected, delta=PRISM_VOLUME_RELATIVE * expected
+        )
+        self.assertAlmostEqual(
+            pocket.Shape.Volume, base.Shape.Volume - expected, delta=LOFT_VOLUME_DELTA
+        )
+
+    def testPocketUpToALoftedFaceWhoseRimIsInTheWay(self):
+        # ops#353 review H1: TestPad's tilted rectangle as a Pocket. The split's solid ran from
+        # the rectangle through the near side's patch to the far side, and the Pocket cut the
+        # loft's inside between its two sides. It fails, saying why
+        from PartDesignTests.TestPad import squareUpToTheLoft
+
+        base, pocket = squareUpToTheLoft(
+            self.Doc, "Pocket", 22, 14.5, 17.5, False, FreeCAD.Vector(-1, 0, -0.15)
+        )
+        self.assertFalse(pocket.isValid())
+        self.assertIn("lies in the profile's way", pocket.getStatusString())
 
     def testPocketUpToABaseWithNames(self):
         """ops#347, review of fork PR 321: a Pocket that cuts through the base, up to its far

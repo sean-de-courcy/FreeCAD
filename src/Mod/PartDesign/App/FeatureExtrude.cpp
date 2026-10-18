@@ -1216,12 +1216,20 @@ TopoShape FeatureExtrude::generateSingleExtrusionSide(
                 true /*CheckUpToFaceLimits.getValue()*/
             );
         }
+        catch (Base::RuntimeError&) {
+            // The prism up to a freeform face refuses with what is wrong: the profile passes the
+            // shape, or meets it first in a jump (ops#353)
+            throw;
+        }
         catch (Base::Exception&) {
             if (method == "UpToShape" && faceCount > 1) {
                 throw Base::RuntimeError(
                     "Extrude: Unable to reach the selected shape, please select faces"
                 );
             }
+            // Not an empty prism: one side gave a null result, and a side of two was left out
+            // with no error (ops#353)
+            throw;
         }
     }
     else if (method == "Length" || method == "ThroughAll") {
