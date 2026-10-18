@@ -163,13 +163,17 @@ public:
     /** How \a name reaches \a ancestor (ops#335), walking the name's prefixes (in a copy
      * section's context) and embedded names as tier 1 does. SameType wins over Derived, Derived
      * over Projected. A section without an element type leaves a path's type as it is.
+     * \a type: the element type of \a name's element ('V', 'E', 'F'), or 0 to take it from the
+     * first section with a type, which can mistake a path for SameType when the top section has
+     * none (ops#359; solveOwner() passes the pool's type).
      */
-    static Reach reaches(std::string_view name, std::string_view ancestor);
+    static Reach reaches(std::string_view name, std::string_view ancestor, char type = 0);
 
     /** The element types of a Derived path from \a name to \a ancestor, e.g. `E<F<E`, for the
-     * evidence text; empty if \a name doesn't reach it that way.
+     * evidence text; empty if \a name doesn't reach it that way. \a type as for reaches().
      */
-    static std::string derivedPath(std::string_view name, std::string_view ancestor);
+    static std::string
+    derivedPath(std::string_view name, std::string_view ancestor, char type = 0);
 
     /** The maker of \a name (ops#167): the iteration tag of its first section, the feature or
      * sketch that made the element. Later sections are what later features did to it. Empty for
