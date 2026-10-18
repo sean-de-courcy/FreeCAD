@@ -78,6 +78,7 @@ public:
     static PyObject* sExport                   (PyObject *self,PyObject *args);
     static PyObject* sReload                   (PyObject *self,PyObject *args); // reload FCStd file
     static PyObject* sLoadFile                 (PyObject *self,PyObject *args); // open all types of files
+    static PyObject* sCheckForPreviousCrashes  (PyObject *self,PyObject *args); // recovery dialog
 
     static PyObject* sCoinRemoveAllChildren    (PyObject *self,PyObject *args);
     static PyObject* sApplyElementColorOverride(PyObject *self,PyObject *args);
