@@ -122,8 +122,6 @@ struct DocumentP
     std::map<SoSeparator*, ViewProviderDocumentObject*> _CoinMap;
     std::map<std::string, ViewProvider*> _ViewProviderMapAnnotation;
     std::list<ViewProviderDocumentObject*> _redoViewProviders;
-    /// The steps of other documents that redo() takes after this document's
-    std::map<App::Document*, int> _otherRedos;
 
     using Connection = fastsignals::connection;
     using AdvancedConnection = fastsignals::advanced_connection;
@@ -3075,7 +3073,6 @@ std::vector<std::string> Document::getRedoVector() const
 
 bool Document::checkTransactionID(bool undo, int iSteps)
 {
-    d->_otherRedos.clear();
     if (!iSteps) {
         return false;
     }
@@ -3144,16 +3141,14 @@ bool Document::checkTransactionID(bool undo, int iSteps)
             return true;
         }
     }
-    // FreeCAD-CH (PR 329 round 1): a redo takes the other documents after this one, the reverse
-    // of an undo. Their steps can link objects that this document's steps bring back (Migrate's
-    // relinks in another document, to the body it makes); redone first, such a link was dropped
-    if (!undo) {
-        d->_otherRedos = std::move(dmap);
-        return true;
-    }
     for (auto& v : dmap) {
         for (int i = 0; i < v.second; ++i) {
-            v.first->undo();
+            if (undo) {
+                v.first->undo();
+            }
+            else {
+                v.first->redo();
+            }
         }
     }
     return true;
@@ -3190,11 +3185,6 @@ void Document::redo(int iSteps)
 
     for (int i = 0; i < iSteps; i++) {
         getDocument()->redo();
-    }
-    for (auto& [doc, steps] : std::exchange(d->_otherRedos, {})) {
-        for (int i = 0; i < steps; ++i) {
-            doc->redo();
-        }
     }
     App::GetApplication().signalRedo();
 
