@@ -777,11 +777,37 @@ class DocumentBasicCases(unittest.TestCase):
         c1.touch()
         c2.touch()
         self.Doc.recompute()
+        # ops#349: the recompute reports the cycle as a link's error; the other link depends on
+        # it, so it is left touched (not recomputed), as after any failed dependency
+        failed = [link for link in (c1, c2) if "Invalid" in link.State]
+        self.assertTrue(failed, (c1.State, c2.State))
+        for link in (c1, c2):
+            if link in failed:
+                self.assertFalse(link.isValid(), link.Name)
+                self.assertIn("Cyclic link", link.getStatusString(), link.Name)
+            else:
+                self.assertIn("Touched", link.State, link.Name)
         # the open document still refuses a new cycle
         c3 = self.Doc.addObject("App::Link", "C3")
         c3.LinkedObject = c2
         with self.assertRaises(ValueError):
             c2.LinkedObject = c3
+
+    def testLinkedObjectInAPlainPropertyLinkRefusesTheOwner(self):
+        """ops#349: a LinkedObject mapped to a plain PropertyLink, as Draft's link arrays map it to
+        Base, refuses the owner itself (the cycle check read only the in-list)."""
+        arr = self.Doc.addObject("App::FeaturePython", "Arr")
+        arr.addProperty("App::PropertyLink", "Base")
+        arr.addExtension("App::LinkBaseExtensionPython")
+        arr.configLinkProperty(LinkedObject="Base")
+        box = self.Doc.addObject("App::FeatureTest", "Box")
+        with self.assertRaises(ValueError):
+            arr.Base = arr
+        self.assertIsNone(arr.Base)
+        arr.Base = box
+        with self.assertRaises(ValueError):
+            arr.Base = arr
+        self.assertEqual(arr.Base, box)
 
     def tearDown(self):
         # closing doc

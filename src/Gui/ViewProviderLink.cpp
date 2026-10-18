@@ -154,6 +154,7 @@ public:
     NodeMap nodeMap;
 
     std::map<qint64, QIcon> iconMap;
+    bool changingIcon = false;
 
     static ViewProviderDocumentObject* getView(App::DocumentObject* obj)
     {
@@ -771,9 +772,12 @@ public:
     void slotChangeIcon()
     {
         iconMap.clear();
-        if (!isLinked()) {
+        // Links that link each other (a cycle a file can hold) pass the change back here, without
+        // end: the GUI's open overflowed the stack (ops#349)
+        if (!isLinked() || changingIcon) {
             return;
         }
+        Base::StateLocker guard(changingIcon);
         LinkInfoPtr me(this);
         for (auto link : links) {
             link->onLinkedIconChange(me);

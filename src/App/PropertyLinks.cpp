@@ -1375,6 +1375,12 @@ static void checkLinkedObjectCycle(const Property* prop,
     if (!ext || ext->getProperty(LinkBaseExtension::PropLinkedObject) != prop) {
         return;
     }
+    // The in-list doesn't hold the owner itself: a LinkedObject mapped to a plain PropertyLink
+    // (Draft's link arrays map it to Base) took the owner (ops#349)
+    if (target == owner) {
+        throw Base::ValueError("Cyclic dependency: linking " + owner->getFullName()
+                               + " to itself");
+    }
     if (owner->getInListEx(true).count(target) != 0) {
         throw Base::ValueError("Cyclic dependency: linking " + owner->getFullName() + " to "
                                + target->getFullName() + " makes a cycle");

@@ -453,3 +453,90 @@ class TestViewProviderLink(unittest.TestCase):
             ob + 80.0,
             f"link Face6 override did not render red on the visible top face: {(or_, og, ob)}",
         )
+
+
+def _write_cyclic_link_file(FreeCAD, path: Path) -> None:
+    """A file whose links C1 and C2 link each other: saved as Box <- C1 <- C2, then C1's
+    LinkedObject pointed at C2 in Document.xml (an assignment refuses the cycle)."""
+    import zipfile
+
+    doc = FreeCAD.newDocument("CyclicLinks")
+    box = doc.addObject("App::FeatureTest", "Box")
+    c1 = doc.addObject("App::Link", "C1")
+    c2 = doc.addObject("App::Link", "C2")
+    c1.LinkedObject = box
+    c2.LinkedObject = c1
+    doc.recompute()
+    doc.saveAs(str(path))
+    FreeCAD.closeDocument(doc.Name)
+
+    with zipfile.ZipFile(path) as zin:
+        entries = [(info, zin.read(info.filename)) for info in zin.infolist()]
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zout:
+        for info, data in entries:
+            if info.filename == "Document.xml":
+                text = data.decode("utf-8")
+                start = text.index('<Object name="C1"', text.index("<ObjectData"))
+                begin = text.index('name="LinkedObject"', start)
+                end = text.index("</Property>", begin)
+                text = text[:begin] + text[begin:end].replace('"Box"', '"C2"') + text[end:]
+                data = text.encode("utf-8")
+            zout.writestr(info, data)
+
+
+def _report_text(FreeCADGui) -> str:
+    from PySide import QtWidgets  # type: ignore
+
+    for edit in FreeCADGui.getMainWindow().findChildren(QtWidgets.QTextEdit):
+        if edit.metaObject().className() == "Gui::DockWnd::ReportOutput":
+            return edit.toPlainText()
+    return ""
+
+
+class TestLinkCycleGui(unittest.TestCase):
+    """ops#349: a file holding a cycle of Links opens in the GUI, and the cycle is reported once
+    per Link however often the tree and the commands ask the Links again."""
+
+    def setUp(self):
+        self.FreeCAD, self.FreeCADGui, _ = _require_gui()
+        self.doc = None
+
+    def tearDown(self):
+        if self.doc is not None and self.FreeCAD.getDocument(self.doc.Name):
+            self.FreeCAD.closeDocument(self.doc.Name)
+
+    def test_cyclic_file_opens_and_reports_once(self):
+        path = Path(tempfile.mkdtemp()) / "CyclicLinks.FCStd"
+        _write_cyclic_link_file(self.FreeCAD, path)
+        before = _report_text(self.FreeCADGui)
+
+        self.doc = self.FreeCAD.openDocument(str(path))
+        c1 = self.doc.getObject("C1")
+        c2 = self.doc.getObject("C2")
+        self.assertEqual(c1.LinkedObject, c2)
+        self.assertEqual(c2.LinkedObject, c1)
+        self.assertIsNotNone(self.FreeCADGui.getDocument(self.doc.Name))
+
+        # what the GUI keeps doing: tree updates, the Refresh command's state, and the Links'
+        # own answers
+        refresh = self.FreeCADGui.Command.get("Std_Refresh")
+        for _ in range(5):
+            self.FreeCADGui.updateGui()
+            refresh.isActive()
+            self.assertIsNotNone(c1.MustExecute)
+            self.assertIsNotNone(c2.MustExecute)
+            self.assertIsNotNone(c1.getLinkedObject())
+        self.FreeCADGui.updateGui()
+
+        report = _report_text(self.FreeCADGui)[len(before) :]
+        lines = [
+            line
+            for line in report.splitlines()
+            if "Cyclic link" in line or "recursion limit" in line
+        ]
+        self.assertTrue(lines, "the cycle is reported")
+        for name in ("C1", "C2"):
+            # a message names the Link it is reported for first
+            full = f"{self.doc.Name}#{name}"
+            for text in (f"Cyclic link: {full} ->", f"limit reached at {full}."):
+                self.assertLessEqual(sum(text in line for line in lines), 1, "\n".join(lines))

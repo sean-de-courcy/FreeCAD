@@ -24,6 +24,8 @@
 
 #include <algorithm>
 #include <limits>
+#include <mutex>
+#include <set>
 
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/range.hpp>
@@ -55,6 +57,59 @@ using namespace Base;
 namespace sp = std::placeholders;
 
 using CharRange = boost::iterator_range<const char*>;
+
+namespace
+{
+// Links whose cycle was reported (ops#349). The GUI asks a Link's mustExecute() and linked object
+// on every tree update and command poll, and each answer met the cycle again: each Link is
+// reported once as an error, then logged, until its LinkedObject changes or it is removed
+std::mutex reportedCyclesMutex;
+std::set<const DocumentObject*> reportedCycles;
+
+void reportLinkCycle(const DocumentObject* owner, const std::string& msg)
+{
+    bool first = false;
+    {
+        std::lock_guard<std::mutex> lock(reportedCyclesMutex);
+        first = reportedCycles.insert(owner).second;
+    }
+    if (first) {
+        FC_ERR(msg);
+    }
+    else {
+        FC_LOG(msg);
+    }
+}
+
+void forgetLinkCycle(const DocumentObject* owner)
+{
+    std::lock_guard<std::mutex> lock(reportedCyclesMutex);
+    reportedCycles.erase(owner);
+}
+
+// The chain "A -> B -> A" when following LinkedObject from owner, through Links only, comes back
+// to owner; empty otherwise (no cycle, or one further on that owner only leads into)
+std::string linkCycleThrough(const DocumentObject* owner)
+{
+    std::vector<const DocumentObject*> chain {owner};
+    for (const DocumentObject* obj = owner;;) {
+        auto ext = obj->getExtensionByType<LinkBaseExtension>(true);
+        const DocumentObject* next = ext ? ext->getLinkedObjectValue() : nullptr;
+        if (!next || (next != owner && std::ranges::find(chain, next) != chain.end())) {
+            return {};
+        }
+        if (next == owner) {
+            std::string text;
+            for (auto o : chain) {
+                text += o->getFullName() + " -> ";
+            }
+            return text + owner->getFullName();
+        }
+        chain.push_back(next);
+        obj = next;
+    }
+}
+}  // namespace
 
 ////////////////////////////////////////////////////////////////////////
 
@@ -368,6 +423,12 @@ App::DocumentObjectExecReturn* LinkBaseExtension::extensionExecute()
     _LinkTouched.touch();
 
     if (getLinkedObjectProperty()) {
+        // A cycle restored from a file (assignments refuse one): the recompute reports it as
+        // this Link's error, instead of following it to the recursion limit (ops#349)
+        auto cycle = linkCycleThrough(getContainer());
+        if (!cycle.empty()) {
+            return new App::DocumentObjectExecReturn("Cyclic link: " + cycle);
+        }
         DocumentObject* linked = getTrueLinkedObject(true);
         if (!linked) {
             std::ostringstream ss;
@@ -493,7 +554,7 @@ short LinkBaseExtension::extensionMustExecute()
         for (auto it = std::find(asking.begin(), asking.end(), owner); it != asking.end(); ++it) {
             chain += (*it)->getFullName() + " -> ";
         }
-        FC_ERR("Cyclic link: " << chain << owner->getFullName());
+        reportLinkCycle(owner, "Cyclic link: " + chain + owner->getFullName());
         return 0;
     }
     asking.push_back(owner);
@@ -1238,7 +1299,12 @@ DocumentObject* LinkBaseExtension::getContainer()
 
 DocumentObject* LinkBaseExtension::getLink(int depth) const
 {
-    if (!GetApplication().checkLinkDepth(depth, MessageOption::Error)) {
+    // Deeper than the number of objects: the links went round a cycle (ops#349)
+    if (!GetApplication().checkLinkDepth(depth, MessageOption::Quiet)) {
+        auto owner = getContainer();
+        reportLinkCycle(owner,
+                        "Link recursion limit reached at " + owner->getFullName()
+                            + ". Please check for cyclic reference.");
         return nullptr;
     }
     if (getLinkedObjectProperty()) {
@@ -1710,6 +1776,7 @@ void LinkBaseExtension::checkGeoElementMap(const App::DocumentObject* obj,
 
 void LinkBaseExtension::onExtendedUnsetupObject()
 {
+    forgetLinkCycle(getContainer());
     if (!getElementListProperty()) {
         return;
     }
@@ -1773,6 +1840,9 @@ bool LinkBaseExtension::extensionGetLinkedObject(DocumentObject*& ret,
 void LinkBaseExtension::extensionOnChanged(const Property* prop)
 {
     auto parent = getContainer();
+    if (prop && prop == getLinkedObjectProperty()) {
+        forgetLinkCycle(parent);
+    }
     if (parent && !parent->isRestoring() && prop && !prop->testStatus(Property::User3)) {
         update(parent, prop);
     }
