@@ -6595,80 +6595,6 @@ bool reachesPast(
         || reach->first < std::min(limit->first, start->first) - Precision::Confusion();
 }
 
-// The history of the prism up to a shape (prismUpToBySplit()), for the kept solids only, as
-// FeatureRevolved.cpp's UpToFaceSweepMapper names a Revolution's sweep up to a face (ops#293,
-// ops#334): pieces in the solids left out don't count, and the far end's edges and vertices,
-// where the faces and edges that the profile's edges and vertices generate meet the up-to shape,
-// are those profile elements' projections (PRJ).
-class UpToShapePrismMapper: public MapperMaker
-{
-public:
-    UpToShapePrismMapper(
-        BRepAlgoAPI_Splitter& splitter,
-        BRepPrimAPI_MakePrism& extrusion,
-        const TopoDS_Shape& profile,
-        const TopoDS_Shape& result
-    )
-        : MapperMaker(splitter)
-    {
-        for (TopAbs_ShapeEnum type : {TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX}) {
-            TopExp::MapShapes(result, type, kept);
-        }
-        // In the profile's order (ops#19: names are written in a defined order)
-        for (TopAbs_ShapeEnum type : {TopAbs_EDGE, TopAbs_VERTEX}) {
-            TopTools_IndexedMapOfShape elements;
-            TopExp::MapShapes(profile, type, elements);
-            for (int i = 1; i <= elements.Extent(); ++i) {
-                const TopoDS_Shape& element = elements(i);
-                TopTools_ListOfShape farEnds;
-                for (const TopoDS_Shape& side : extrusion.Generated(element)) {
-                    for (const TopoDS_Shape& meeting : splitter.Generated(side)) {
-                        if (meeting.ShapeType() == type && kept.Contains(meeting)
-                            && farEnd.Add(meeting)) {
-                            farEnds.Append(meeting);
-                        }
-                    }
-                }
-                if (!farEnds.IsEmpty()) {
-                    projections.Bind(extrusion.FirstShape(element), farEnds);
-                }
-            }
-        }
-    }
-
-    const std::vector<TopoDS_Shape>& modified(const TopoDS_Shape& s) const override
-    {
-        MapperMaker::modified(s);
-        std::erase_if(_res, [this](const TopoDS_Shape& piece) { return !kept.Contains(piece); });
-        return _res;
-    }
-
-    const std::vector<TopoDS_Shape>& generated(const TopoDS_Shape& s) const override
-    {
-        MapperMaker::generated(s);
-        std::erase_if(_res, [this](const TopoDS_Shape& shape) {
-            return !kept.Contains(shape) || farEnd.Contains(shape);
-        });
-        return _res;
-    }
-
-    const std::vector<TopoDS_Shape>& projected(const TopoDS_Shape& s) const override
-    {
-        _res.clear();
-        if (const TopTools_ListOfShape* farEnds = projections.Seek(s)) {
-            for (const TopoDS_Shape& shape : *farEnds) {
-                _res.push_back(shape);
-            }
-        }
-        return _res;
-    }
-
-private:
-    TopTools_IndexedMapOfShape kept;
-    TopTools_MapOfShape farEnd;
-    TopTools_DataMapOfShapeListOfShape projections;
-};
-
 // Whether, somewhere on `piece` (a face of a solid, oriented as in it), the solid's outward normal
 // points against `direction`, by more than a lean at modelling precision (below). Sampled: a grid
 // over the piece's parameter range with a few points in each knot span of its surface each way
@@ -6853,18 +6779,8 @@ TopoShape prismUpToBySplit(
         throw fail();
     }
     // The pieces of the start and end caps
-    auto piecesOf = [&](const TopoDS_Shape& cap) {
-        TopTools_IndexedMapOfShape pieces;
-        for (TopExp_Explorer faces(cap, TopAbs_FACE); faces.More(); faces.Next()) {
-            const TopTools_ListOfShape& modified = splitter.Modified(faces.Current());
-            if (modified.IsEmpty()) {
-                pieces.Add(faces.Current());
-            }
-            for (const TopoDS_Shape& piece : modified) {
-                pieces.Add(piece);
-            }
-        }
-        return pieces;
+    auto piecesOf = [&splitter](const TopoDS_Shape& shape) {
+        return UpToSplitMapper::piecesOf(splitter, shape);
     };
     const TopTools_IndexedMapOfShape start = piecesOf(extrusion.FirstShape());
     const TopTools_IndexedMapOfShape end = piecesOf(extrusion.LastShape());
@@ -6926,19 +6842,13 @@ TopoShape prismUpToBySplit(
     if (kept.empty()) {
         throw fail();
     }
-    TopoDS_Shape result = kept.front();
-    if (kept.size() > 1) {
-        TopoDS_Compound compound;
-        BRep_Builder builder;
-        builder.MakeCompound(compound);
-        for (const TopoDS_Shape& solid : kept) {
-            builder.Add(compound, solid);
-        }
-        result = compound;
-    }
+    const TopoDS_Shape result = UpToSplitMapper::keptShape(kept);
+    auto firstShape = [&extrusion](const TopoDS_Shape& element) {
+        return extrusion.FirstShape(element);
+    };
     named.makeShapeWithElementMap(
         result,
-        UpToShapePrismMapper(splitter, extrusion, profile.getShape(), result),
+        UpToSplitMapper(splitter, extrusion, firstShape, profile.getShape(), result),
         {sweep, upTo},
         op
     );
