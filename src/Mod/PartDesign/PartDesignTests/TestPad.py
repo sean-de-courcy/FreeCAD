@@ -184,10 +184,8 @@ def upToTheLoftSide(test, doc, kind):
     feature.Type = "UpToFace"
     feature.UpToFace = (baseFeature, [side])
     feature.Reversed = True
-    # The maker is what this model tests. Refined, a Pocket whose cut removes nothing but splits
-    # the side adds a curve on surface to the base's edges in place, one more at each recompute
-    # (ops#354), once there is a prism
-    feature.Refine = False
+    # Refined (the default): refine runs on a copy, and no longer adds a curve on surface to the
+    # base's edges in place where the cut splits the side (ops#354)
     doc.recompute()
     test.assertTrue(feature.isValid(), feature.getStatusString())
     assertBasesKept(test, held)
@@ -237,10 +235,11 @@ def loftSideReach(x0, y0, y1, z0, z1):
     return total * h / 3
 
 
-def squareUpToTheLoft(doc, kind, x0, z0, z1, reversed=True, direction=None):
+def squareUpToTheLoft(doc, kind, x0, z0, z1, reversed=True, direction=None, refine=True):
     """ops#353: ops#347's loft as a Body's BaseFeature, a 4 x 4 square y -2..2, z z0..z1 in the
     plane x = x0 (sketch normal +x), and a Pad or Pocket from it up to the loft's B-spline side
-    face, along `direction` when given (a custom vector). Recomputed, not checked."""
+    face, along `direction` when given (a custom vector), refined or not. Recomputed, not
+    checked."""
     import Sketcher
 
     V = FreeCAD.Vector
@@ -274,6 +273,7 @@ def squareUpToTheLoft(doc, kind, x0, z0, z1, reversed=True, direction=None):
     feature.Type = "UpToFace"
     feature.UpToFace = (baseFeature, [side])
     feature.Reversed = reversed
+    feature.Refine = refine
     if direction is not None:
         feature.UseCustomVector = True
         feature.Direction = direction

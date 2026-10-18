@@ -3542,9 +3542,11 @@ TopoDS_Shape TopoShape::removeSplitter() const
     if (_Shape.IsNull()) {
         throw Standard_Failure("Cannot remove splitter from empty shape");
     }
+    // On a topology-only copy, as TopoShape::makeElementRefine() refines (ops#354)
+    const TopoDS_Shape input = BRepBuilderAPI_Copy(_Shape, false).Shape();
 
-    if (_Shape.ShapeType() == TopAbs_SOLID) {
-        const TopoDS_Solid& solid = TopoDS::Solid(_Shape);
+    if (input.ShapeType() == TopAbs_SOLID) {
+        const TopoDS_Solid& solid = TopoDS::Solid(input);
         BRepBuilderAPI_MakeSolid mkSolid;
         TopExp_Explorer it;
         for (it.Init(solid, TopAbs_SHELL); it.More(); it.Next()) {
@@ -3566,8 +3568,8 @@ TopoDS_Shape TopoShape::removeSplitter() const
         }
         return mkSolid.Solid();
     }
-    else if (_Shape.ShapeType() == TopAbs_SHELL) {
-        const TopoDS_Shell& shell = TopoDS::Shell(_Shape);
+    else if (input.ShapeType() == TopAbs_SHELL) {
+        const TopoDS_Shell& shell = TopoDS::Shell(input);
         ModelRefine::FaceUniter uniter(shell);
         if (uniter.process()) {
             return uniter.getShell();
@@ -3576,14 +3578,14 @@ TopoDS_Shape TopoShape::removeSplitter() const
             throw Standard_Failure("Removing splitter failed");
         }
     }
-    else if (_Shape.ShapeType() == TopAbs_COMPOUND) {
+    else if (input.ShapeType() == TopAbs_COMPOUND) {
         BRep_Builder builder;
         TopoDS_Compound comp;
         builder.MakeCompound(comp);
 
         TopExp_Explorer xp;
         // solids
-        for (xp.Init(_Shape, TopAbs_SOLID); xp.More(); xp.Next()) {
+        for (xp.Init(input, TopAbs_SOLID); xp.More(); xp.Next()) {
             const TopoDS_Solid& solid = TopoDS::Solid(xp.Current());
             BRepTools_ReShape reshape;
             TopExp_Explorer it;
@@ -3600,7 +3602,7 @@ TopoDS_Shape TopoShape::removeSplitter() const
             builder.Add(comp, reshape.Apply(solid));
         }
         // free shells
-        for (xp.Init(_Shape, TopAbs_SHELL, TopAbs_SOLID); xp.More(); xp.Next()) {
+        for (xp.Init(input, TopAbs_SHELL, TopAbs_SOLID); xp.More(); xp.Next()) {
             const TopoDS_Shell& shell = TopoDS::Shell(xp.Current());
             ModelRefine::FaceUniter uniter(shell);
             if (uniter.process()) {
@@ -3608,22 +3610,22 @@ TopoDS_Shape TopoShape::removeSplitter() const
             }
         }
         // the rest
-        for (xp.Init(_Shape, TopAbs_FACE, TopAbs_SHELL); xp.More(); xp.Next()) {
+        for (xp.Init(input, TopAbs_FACE, TopAbs_SHELL); xp.More(); xp.Next()) {
             if (!xp.Current().IsNull()) {
                 builder.Add(comp, xp.Current());
             }
         }
-        for (xp.Init(_Shape, TopAbs_WIRE, TopAbs_FACE); xp.More(); xp.Next()) {
+        for (xp.Init(input, TopAbs_WIRE, TopAbs_FACE); xp.More(); xp.Next()) {
             if (!xp.Current().IsNull()) {
                 builder.Add(comp, xp.Current());
             }
         }
-        for (xp.Init(_Shape, TopAbs_EDGE, TopAbs_WIRE); xp.More(); xp.Next()) {
+        for (xp.Init(input, TopAbs_EDGE, TopAbs_WIRE); xp.More(); xp.Next()) {
             if (!xp.Current().IsNull()) {
                 builder.Add(comp, xp.Current());
             }
         }
-        for (xp.Init(_Shape, TopAbs_VERTEX, TopAbs_EDGE); xp.More(); xp.Next()) {
+        for (xp.Init(input, TopAbs_VERTEX, TopAbs_EDGE); xp.More(); xp.Next()) {
             if (!xp.Current().IsNull()) {
                 builder.Add(comp, xp.Current());
             }

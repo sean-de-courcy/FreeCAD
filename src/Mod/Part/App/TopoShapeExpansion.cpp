@@ -7459,11 +7459,20 @@ TopoShape& TopoShape::makeElementRefine(const TopoShape& shape, const char* op, 
     }
     bool closed = shape.isClosed();
     try {
-        MyRefineMaker mkRefine(shape.getShape());
+        // Refine runs on a topology-only copy, with the shape's element map and Tag (ops#354).
+        // Merging faces of a B-spline surface, ShapeFix_Face adds a curve on surface to their
+        // boundary edges for the merged face's surface, a new copy at every run (ops#316), and
+        // keeps it when the merge is then dropped. The input shares its TShapes with the shapes it
+        // was made from (a cut's untouched edges are its base's), which kept one more curve per
+        // edge at every recompute. The copy's sub-shapes come in the same order, so the result
+        // is named as from the shape.
+        TopoShape input(shape);
+        input.setShape(BRepBuilderAPI_Copy(shape.getShape(), false).Shape(), false);
+        MyRefineMaker mkRefine(input.getShape());
         GenericShapeMapper mapper;
         mkRefine.populate(mapper);
-        mapper.init(shape, mkRefine.Shape());
-        makeShapeWithElementMap(mkRefine.Shape(), mapper, {shape}, op);
+        mapper.init(input, mkRefine.Shape());
+        makeShapeWithElementMap(mkRefine.Shape(), mapper, {input}, op);
         // For some reason, refine operation may reverse the solid
         fixSolidOrientation();
         if (isClosed() == closed) {

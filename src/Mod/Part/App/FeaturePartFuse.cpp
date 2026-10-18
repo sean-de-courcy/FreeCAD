@@ -23,6 +23,7 @@
  ***************************************************************************/
 
 #include <Mod/Part/App/FCBRepAlgoAPI_Fuse.h>
+#include <BRepBuilderAPI_Copy.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <Standard_Failure.hxx>
 #include <TopoDS_Iterator.hxx>
@@ -170,7 +171,10 @@ App::DocumentObjectExecReturn* MultiFuse::execute()
 
             if (this->Refine.getValue()) {
                 try {
-                    TopoDS_Shape oldShape = res.getShape();
+                    // On a topology-only copy, as TopoShape::makeElementRefine() refines
+                    // (ops#354): its sub-shapes come in the same order, so the history by
+                    // index is the same
+                    TopoDS_Shape oldShape = BRepBuilderAPI_Copy(res.getShape(), false).Shape();
                     BRepBuilderAPI_RefineModel mkRefine(oldShape);
                     // We just built an element map above for the fuse, don't erase it for a refine.
                     res.setShape(mkRefine.Shape(), false);
