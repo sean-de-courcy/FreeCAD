@@ -19,8 +19,10 @@
  *                                                                            *
  ******************************************************************************/
 
+#include <atomic>
 #include <chrono>
 #include <future>
+#include <optional>
 #include <thread>
 
 #include <boost/scope_exit.hpp>
@@ -30,6 +32,7 @@
 #include "App/Document.h"
 #include "App/FeatureTest.h"
 #include <src/App/InitApplication.h>
+#include <src/App/RecomputeWorkerHop.h>
 
 using namespace std::chrono_literals;
 
@@ -117,3 +120,61 @@ TEST_F(AsyncRecomputeTest, WorkerSafetyIsCheckedFromRequest)
         App::GetApplication().canRecomputeRequestOnWorker(App::RecomputeRequest::fromDocument(*_doc))
     );
 }
+
+// A document signal emitted off the main thread runs its slots there while the emitting thread
+// waits (MainThreadSignal's hop), whether the emitting thread holds the GIL or not, and a slot can
+// take the GIL. A thread without it has none to release: the hop crashed in PyEval_SaveThread()
+// (ops#349, PR 330 round 2; off Windows the worker's single-object recompute emits without it)
+class MainThreadHopTest: public AsyncRecomputeTest, public ::testing::WithParamInterface<bool>
+{};
+
+TEST_P(MainThreadHopTest, AnEmissionOffTheMainThreadHops)
+{
+    const bool holdingTheGil = GetParam();
+    auto* object = _doc->addObject("App::FeatureTest", "Feature");
+    ASSERT_NE(object, nullptr);
+
+    const auto here = std::this_thread::get_id();
+    bool ran = false;
+    bool onThisThread = false;
+    bool tookTheGil = false;
+    fastsignals::scoped_connection connection =
+        _doc->signalRecomputedObject.connect([&](const App::DocumentObject& o) {
+            if (&o == object) {
+                ran = true;
+                onThisThread = std::this_thread::get_id() == here;
+                Base::PyGILStateLocker gil;
+                tookTheGil = PyGILState_Check() != 0;
+            }
+        });
+
+    tests::MainThreadHopHooks hooks;
+    std::atomic<bool> emitted {false};
+    std::thread emitter([&] {
+        std::optional<Base::PyGILStateLocker> gil;
+        if (holdingTheGil) {
+            gil.emplace();
+        }
+        _doc->signalRecomputedObject(*object);
+        emitted = true;
+    });
+    const bool inTime = tests::MainThreadHopHooks::pumpUntil(
+        [&] { return emitted.load(); },
+        std::chrono::seconds(10)
+    );
+    emitter.join();
+
+    EXPECT_TRUE(inTime);
+    EXPECT_TRUE(ran);
+    EXPECT_TRUE(onThisThread);
+    EXPECT_TRUE(tookTheGil);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    Emitter,
+    MainThreadHopTest,
+    ::testing::Bool(),
+    [](const ::testing::TestParamInfo<bool>& info) {
+        return info.param ? "HoldingTheGil" : "WithoutTheGil";
+    }
+);

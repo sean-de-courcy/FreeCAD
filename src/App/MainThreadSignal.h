@@ -235,7 +235,13 @@ private:
             return self->sig_(std::forward<typename ::fastsignals::signal_arg_t<Arguments>>(args)...);
         }
 
-        Base::PyGILStateRelease release;
+        // The slots may need the GIL while this thread waits: release it if this thread holds it.
+        // A thread without it, such as the worker in a single-object request's recomputeFeature(),
+        // has no Python thread state to save, and PyEval_SaveThread() crashes on it (ops#349)
+        std::optional<Base::PyGILStateRelease> release;
+        if (PyGILState_Check()) {
+            release.emplace();
+        }
         // This thread waits while the slots run: their questions are its own (FreeCAD-CH ops#349)
         const RecomputeHop hop;
 
