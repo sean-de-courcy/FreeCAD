@@ -922,6 +922,159 @@ class RegressionTests(unittest.TestCase):
                     self.assertTrue(refined.isValid())
                     self.assertAlmostEqual(refined.Volume, volume, delta=1e-7 * volume)
 
+    def _refineLoftAndPiece(self, inside):
+        """ops#354's designed model: the ruled loft from the circle r 10 at z 0 to the ellipse
+        12 x 6 at z 15, and the box x 8..22, y -2..2, z 5..9 outside the loft (cut from it, it
+        removes nothing) or inside it (fused with it, it adds nothing). Either way the result is
+        the loft with its B-spline side split where the box meets it, and refine tries to merge
+        the pieces back on the loft's own circle and ellipse."""
+        loft = Part.makeLoft(
+            [
+                Part.Wire(Part.Circle(Vector(0, 0, 0), Vector(0, 0, 1), 10).toShape()),
+                Part.Wire(Part.Ellipse(Vector(0, 0, 15), 12, 6).toShape()),
+            ],
+            True,
+        )
+        box = Part.makeBox(14, 4, 4, Vector(8, -2, 5))
+        piece = (box.common(loft) if inside else box.cut(loft)).Solids[0]
+        return loft, piece
+
+    @staticmethod
+    def _curvesOnSurfaces(shape):
+        def count(edge):
+            n = 0
+            while n < 50:
+                try:
+                    if edge.curveOnSurface(n) is None:
+                        break
+                except Exception:  # noqa: BLE001  (past the last one)
+                    break
+                n += 1
+            return n
+
+        return [count(e) for e in shape.Edges]
+
+    def _assertKept(self, held):
+        for name, shape, curves, text in held:
+            self.assertEqual(self._curvesOnSurfaces(shape), curves, name)
+            self.assertTrue(shape.exportBrepToString() == text, name + " changed in place")
+
+    def test_refine_leaves_its_inputs_alone(self):
+        """Refine runs on a copy of its input (ops#354). Merging faces of a B-spline surface,
+        ShapeFix_Face added a curve on surface to their boundary edges for the merged face's
+        surface, a new copy at every run (ops#316), and kept it when the merge was dropped. A
+        cut's or fuse's untouched edges are its inputs' own, so every recompute of a refined
+        Part::Cut, Part::Fuse, Part::MultiFuse or Part::Refine left one more on the source
+        feature's stored edges. Expected: the sources' stored shapes are unchanged, curve for
+        curve and in their saved text, after three recomputes. Refine off is the control."""
+        cases = [
+            ("Part::Cut", False, True),
+            ("Part::Fuse", True, True),
+            ("Part::MultiFuse", True, True),
+            ("Part::Refine", False, False),
+            ("Part::Cut", False, False),
+        ]
+        for kind, inside, refine in cases:
+            with self.subTest(kind=kind, refine=refine):
+                doc = self.Doc
+                loft, piece = self._refineLoftAndPiece(inside)
+                source = doc.addObject("Part::Feature", "Loft")
+                source.Shape = loft
+                tool = doc.addObject("Part::Feature", "Piece")
+                tool.Shape = piece
+                if kind == "Part::MultiFuse":
+                    feature = doc.addObject(kind, "Fuse")
+                    feature.Shapes = [source, tool]
+                else:
+                    feature = doc.addObject("Part::Cut" if kind == "Part::Refine" else kind)
+                    feature.Base = source
+                    feature.Tool = tool
+                feature.Refine = refine
+                if kind == "Part::Refine":
+                    refined = doc.addObject("Part::Refine", "Refine")
+                    refined.Source = feature
+                    feature = refined
+                doc.recompute()
+                self.assertTrue(feature.isValid(), feature.getStatusString())
+                self.assertEqual(self._curvesOnSurfaces(source.Shape), [1, 2, 1])
+                held = [
+                    (o.Name, o.Shape, self._curvesOnSurfaces(o.Shape), o.Shape.exportBrepToString())
+                    for o in (source, tool)
+                ]
+                for _ in range(3):
+                    feature.touch()
+                    doc.recompute()
+                    self.assertTrue(feature.isValid(), feature.getStatusString())
+                self._assertKept(held)
+                self.assertAlmostEqual(feature.Shape.Volume, loft.Volume, delta=5e-3)
+                for obj in doc.Objects:
+                    doc.removeObject(obj.Name)
+
+    def test_removeSplitter_leaves_its_input_alone(self):
+        """Shape.removeSplitter() refines a copy (ops#354): a cut's untouched edges are the
+        loft's, and refining the cut left a curve on surface more on them."""
+        loft, piece = self._refineLoftAndPiece(False)
+        cut = loft.cut(piece)
+        held = [
+            (name, s, self._curvesOnSurfaces(s), s.exportBrepToString())
+            for name, s in (("loft", loft), ("cut", cut))
+        ]
+        refined = cut.removeSplitter()
+        self.assertTrue(refined.isValid())
+        self._assertKept(held)
+
+    def test_refined_multifuse_names_its_own_elements(self):
+        """Part::MultiFuse with Refine names the refined shape's elements (PR 328 review). It kept
+        the fuse's element map on the refined shape, whose names indexed the fused shape's
+        elements: two boxes side by side, refined to 6 faces and 12 edges, had names for Edge15 to
+        Edge18, and a name resolved to whatever element had its index now. Expected: every name
+        in the map indexes an element of the refined shape, and the names that the elements
+        refine leaves alone (the end faces x = 0 and x = 20, their edges and vertices) have with
+        Refine off resolve with Refine on to the same places."""
+        doc = self.Doc
+        boxes = []
+        for name, x in (("A", 0), ("B", 10)):
+            box = doc.addObject("Part::Box", name)
+            box.Length, box.Width, box.Height = 10, 10, 5
+            box.Placement.Base = Vector(x, 0, 0)
+            boxes.append(box)
+        fuse = doc.addObject("Part::MultiFuse", "Fuse")
+        fuse.Shapes = boxes
+        fuse.Refine = False
+        doc.recompute()
+
+        def where(shape, indexed):
+            element = shape.getElement(indexed)
+            return element.Point if indexed.startswith("Vertex") else element.CenterOfMass
+
+        def atEnd(element):
+            return all(abs(v.X) < 1e-9 or abs(v.X - 20) < 1e-9 for v in element.Vertexes)
+
+        fused = fuse.Shape
+        held = {}
+        elements = {"Face": fused.Faces, "Edge": fused.Edges, "Vertex": fused.Vertexes}
+        for kind, shapes in elements.items():
+            for i, element in enumerate(shapes, 1):
+                if atEnd(element):
+                    indexed = "%s%d" % (kind, i)
+                    held[fused.getElementMappedName(indexed)] = where(fused, indexed)
+        self.assertEqual(len(held), 2 + 8 + 8)
+        fuse.Refine = True
+        doc.recompute()
+        self.assertTrue(fuse.isValid(), fuse.getStatusString())
+        refined = fuse.Shape
+        counts = {"Face": 6, "Edge": 12, "Vertex": 8}
+        self.assertEqual(
+            (len(refined.Faces), len(refined.Edges), len(refined.Vertexes)), tuple(counts.values())
+        )
+        for mapped, indexed in refined.ElementMap.items():
+            kind = indexed.rstrip("0123456789")
+            self.assertLessEqual(int(indexed[len(kind) :]), counts[kind], (mapped, indexed))
+        for mapped, place in held.items():
+            indexed = refined.getElementIndexedName(mapped)
+            self.assertTrue(indexed, mapped)
+            self.assertLess(where(refined, indexed).distanceToPoint(place), 1e-9, (mapped, indexed))
+
     def tearDown(self):
         """Clean up our test, optionally preserving the test document"""
         # This flag allows doing something like this:

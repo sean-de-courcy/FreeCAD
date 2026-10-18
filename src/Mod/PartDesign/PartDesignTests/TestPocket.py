@@ -290,6 +290,48 @@ class TestPocket(unittest.TestCase):
         self.assertAlmostEqual(pocket.Shape.Volume, base.Shape.Volume, delta=LOFT_VOLUME_DELTA)
         self.assertAlmostEqual(base.Shape.common(pocket.AddSubShape).Volume, 0, places=6)
 
+    def testRefinedPocketLeavesTheBaseAlone(self):
+        # ops#354: the 4 x 4 square at x = 22 (y -2..2, z 5..9), outside the loft, and a Pocket
+        # up to the loft's side: the cut removes nothing and splits the side. Refine tried to
+        # merge the pieces back on the base's own circle and ellipse, and added a curve on surface
+        # to them at every recompute (1, 2, 3, ...), in the base feature's stored shape and the
+        # Part::Feature's. Refine runs on a copy now: both keep their edges, curve for curve and
+        # in their saved text. Refine off is the control
+        from PartDesignTests.TestPad import (
+            LOFT_VOLUME_DELTA,
+            assertBasesKept,
+            squareUpToTheLoft,
+            toleranceState,
+        )
+
+        for refine in (True, False):
+            with self.subTest(refine=refine):
+                doc = FreeCAD.newDocument("PartDesignTestPocketRefine")
+                try:
+                    base, pocket = squareUpToTheLoft(doc, "Pocket", 22, 5, 9, refine=refine)
+                    self.assertTrue(pocket.isValid(), pocket.getStatusString())
+                    loft = doc.getObject("Loft")
+                    # The base as it was made: one curve on surface on the circle and the
+                    # ellipse, two on the seam
+                    for obj in (loft, base):
+                        self.assertEqual(toleranceState(obj.Shape)[3], [1, 2, 1], obj.Name)
+                    held = [
+                        (o.Name, o.Shape, toleranceState(o.Shape), o.Shape.exportBrepToString())
+                        for o in (loft, base)
+                    ]
+                    for _ in range(2):
+                        pocket.touch()
+                        doc.recompute()
+                        self.assertTrue(pocket.isValid(), pocket.getStatusString())
+                    assertBasesKept(self, [h[:3] for h in held])
+                    for name, shape, _, text in held:
+                        self.assertTrue(shape.exportBrepToString() == text, name)
+                    self.assertAlmostEqual(
+                        pocket.Shape.Volume, base.Shape.Volume, delta=LOFT_VOLUME_DELTA
+                    )
+                finally:
+                    FreeCAD.closeDocument(doc.Name)
+
     def testPocketUpToALoftedFace(self):
         # ops#353: BRepFeat gave an empty prism up to the loft's B-spline side, and the Pocket
         # was valid and removed nothing. The square is inside the loft, in the plane x = 0: the

@@ -184,10 +184,8 @@ def upToTheLoftSide(test, doc, kind):
     feature.Type = "UpToFace"
     feature.UpToFace = (baseFeature, [side])
     feature.Reversed = True
-    # The maker is what this model tests. Refined, a Pocket whose cut removes nothing but splits
-    # the side adds a curve on surface to the base's edges in place, one more at each recompute
-    # (ops#354), once there is a prism
-    feature.Refine = False
+    # Refined (the default): refine runs on a copy, and no longer adds a curve on surface to the
+    # base's edges in place where the cut splits the side (ops#354)
     doc.recompute()
     test.assertTrue(feature.isValid(), feature.getStatusString())
     assertBasesKept(test, held)
@@ -237,10 +235,11 @@ def loftSideReach(x0, y0, y1, z0, z1):
     return total * h / 3
 
 
-def squareUpToTheLoft(doc, kind, x0, z0, z1, reversed=True, direction=None):
+def squareUpToTheLoft(doc, kind, x0, z0, z1, reversed=True, direction=None, refine=True):
     """ops#353: ops#347's loft as a Body's BaseFeature, a 4 x 4 square y -2..2, z z0..z1 in the
     plane x = x0 (sketch normal +x), and a Pad or Pocket from it up to the loft's B-spline side
-    face, along `direction` when given (a custom vector). Recomputed, not checked."""
+    face, along `direction` when given (a custom vector), refined or not. Recomputed, not
+    checked."""
     import Sketcher
 
     V = FreeCAD.Vector
@@ -274,6 +273,7 @@ def squareUpToTheLoft(doc, kind, x0, z0, z1, reversed=True, direction=None):
     feature.Type = "UpToFace"
     feature.UpToFace = (baseFeature, [side])
     feature.Reversed = reversed
+    feature.Refine = refine
     if direction is not None:
         feature.UseCustomVector = True
         feature.Direction = direction
@@ -595,17 +595,11 @@ def holdBases(*objects):
 
 
 def assertBasesKept(test, held):
-    """The held shapes are as they were: the same tolerances and curves on surfaces. A tolerance
-    may differ by an ULP (1e-23 at 1e-7): a boolean's refinement moves the tolerance of an edge
-    or vertex the result shares with the base that much (a Pad up to the last face), and a raise
-    that matters is orders of magnitude more (1e-7 to 5e-6, or 1.8e-15 in the research)."""
+    """The held shapes are as they were: the same tolerances, exactly, and curves on surfaces.
+    A boolean's refinement moved a tolerance the result shared with the base by an ULP (a Pad up
+    to the last face) until refine ran on a copy (ops#354)"""
     for name, shape, before in held:
-        after = toleranceState(shape)
-        for kept, was in zip(after[:3], before[:3]):
-            test.assertEqual(len(kept), len(was), name)
-            for x, y in zip(kept, was):
-                test.assertAlmostEqual(x, y, delta=1e-18, msg=name)
-        test.assertEqual(after[3], before[3], name)
+        test.assertEqual(toleranceState(shape), before, name)
 
 
 def planarFaceAt(shape, axis, value):

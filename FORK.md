@@ -354,7 +354,8 @@ names it.
 | `fix/348-varsetcopy-add-property` | fix | ops#348 | - | `integration` `a47e001660` | `b2b1911afc` (fork PR 325), 2026-10-17 | never (fork fix) |
 | `fix/353-empty-prism` | fix | ops#353 | fork PR 321 | `fix/347-upto-tolerances` `04ac2ed1bc` | `96ca14805a` (fork PR 324), 2026-10-17 | never (fork fix) |
 | `fix/356-upto-overhang` | fix | ops#356 | fork PR 324 | `fix/353-empty-prism` `f1bbcf8b83` | `23165bc6b0` (fork PR 326), 2026-10-17 | never (fork fix) |
-| `feat/335-derived-survivors` | feat | ops#335 | - | `integration` `23165bc6b0` | (fork PR 327) | never (fork feature) |
+| `feat/335-derived-survivors` | feat | ops#335 | - | `integration` `23165bc6b0` | `8d6875f298` (fork PR 327), 2026-10-18 | never (fork feature) |
+| `fix/354-refine-in-place` | fix | ops#354 | - | `integration` `23165bc6b0` | (fork PR 328) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 
