@@ -31,7 +31,6 @@
 
 #include <App/Origin.h>
 #include <App/Datums.h>
-#include <App/Application.h>
 #include <App/GroupExtension.h>
 #include <App/Link.h>
 #include <App/Part.h>
@@ -505,23 +504,11 @@ bool isPartDesignAwareObjecta(App::DocumentObject* obj, bool respectGroups = fal
     );
 }
 
-// The objects whose links to the feature are looked at: its document's, and those of other
-// documents that link it (through an XLink, the only link across documents: ops#301)
-static std::vector<App::DocumentObject*> linkOwners(const PartDesign::Feature* feature)
-{
-    const App::Document* doc = feature->getDocument();
-    std::vector<App::DocumentObject*> owners = doc->getObjects();
-    for (auto obj : feature->getInList()) {
-        if (obj->getDocument() != doc && std::ranges::find(owners, obj) == owners.end()) {
-            owners.push_back(obj);
-        }
-    }
-    return owners;
-}
-
 bool isAnyNonPartDesignLinksTo(PartDesign::Feature* feature, bool respectGroups)
 {
-    for (const auto& obj : linkOwners(feature)) {
+    App::Document* doc = feature->getDocument();
+
+    for (const auto& obj : doc->getObjects()) {
         if (!isPartDesignAwareObjecta(obj, respectGroups)) {
             std::vector<App::Property*> properties;
             obj->getPropertyList(properties);
@@ -564,6 +551,7 @@ bool isAnyNonPartDesignLinksTo(PartDesign::Feature* feature, bool respectGroups)
 
 void relinkToBody(PartDesign::Feature* feature, bool last)
 {
+    App::Document* doc = feature->getDocument();
     PartDesign::Body* body = PartDesign::Body::findBodyOf(feature);
 
     if (!body) {
@@ -609,7 +597,35 @@ void relinkToBody(PartDesign::Feature* feature, bool last)
             return kept(obj, prop, sub);
         });
     };
-    for (const auto& obj : linkOwners(feature)) {
+    // FreeCAD-CH (PR 329 round 2): links in other documents stay as they are, with a warning. Migrate's
+    // transaction is this document's, and a grouped Undo/Redo across documents doesn't keep a
+    // link to the body it makes (ops#301)
+    for (auto obj : feature->getInList()) {
+        if (obj->getDocument() == doc || isPartDesignAwareObjecta(obj)) {
+            continue;
+        }
+        std::vector<App::Property*> properties;
+        obj->getPropertyList(properties);
+        for (auto prop : properties) {
+            auto propLink = freecad_cast<App::PropertyLinkBase*>(prop);
+            if (!propLink || !prop->hasName()) {
+                continue;
+            }
+            std::vector<App::DocumentObject*> links;
+            propLink->getLinks(links, true);
+            if (std::ranges::find(links, feature) != links.end()) {
+                FC_WARN(
+                    "In document " << obj->getDocument()->getName() << ", "
+                                   << obj->getFullName() << "." << prop->getName()
+                                   << " keeps its link to " << feature->getFullName()
+                                   << ": Migrate doesn't change other documents; relink it by "
+                                      "hand if it should follow "
+                                   << body->getFullName()
+                );
+            }
+        }
+    }
+    for (const auto& obj : doc->getObjects()) {
         if (!isPartDesignAwareObjecta(obj)) {
             std::vector<App::Property*> properties;
             obj->getPropertyList(properties);
@@ -717,33 +733,19 @@ void relinkToBody(PartDesign::Feature* feature, bool last)
                 if (valueStr.empty() || !prop->hasName()) {
                     continue;
                 }
-                // (PR 329 round 1) A change in another document goes into Migrate's transaction
-                // there too, so that Undo and Redo take it along: otherwise nothing records it
-                // and an Undo, which deletes the body, loses the entry
-                const App::Document* doc = feature->getDocument();
-                const int transaction = doc->getBookedTransactionID();
-                if (obj->getDocument() != doc && transaction != App::NullTransaction) {
-                    obj->getDocument()->setActiveTransaction(
-                        App::TransactionName {
-                            .name = App::GetApplication().getTransactionName(transaction),
-                            .temporary = false
-                        },
-                        transaction
-                    );
-                }
                 FCMD_OBJ_CMD(obj, prop->getName() << '=' << valueStr);
-                // (PR 329 round 1) A link that leaves out its target's own placement
-                // (LinkTransform off) showed the feature without it; the body's shape holds it,
-                // so the link makes up for it to stay where it was
+                // FreeCAD-CH (PR 329 round 2): a link that leaves out its target's own placement
+                // (LinkTransform off) showed the feature without it, and the body's shape holds
+                // it. Making up for it isn't exact (arrays, links of links, expressions, a
+                // placement the migration changes), so Migrate warns instead
                 auto link = obj->getExtensionByType<App::LinkBaseExtension>(true);
-                if (link && prop == link->getLinkedObjectProperty() && !link->linkTransform()
-                    && link->getPlacementProperty()) {
-                    FCMD_OBJ_CMD(
-                        obj,
-                        "Placement = " << Gui::Command::getObjectCmd(obj)
-                                       << ".Placement.multiply("
-                                       << Gui::Command::getObjectCmd(feature)
-                                       << ".Placement.inverse())"
+                if (link && prop == link->getLinkedObjectProperty() && !link->linkTransform()) {
+                    FC_WARN(
+                        obj->getFullName()
+                        << " now links " << body->getFullName() << " instead of "
+                        << feature->getFullName()
+                        << ": with LinkTransform off it may have moved by the Placement of "
+                        << feature->getFullName() << ", and so may links of it"
                     );
                 }
             }

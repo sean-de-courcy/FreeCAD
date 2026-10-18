@@ -366,37 +366,40 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertSameFace(body1.Shape, "Face3", before["Face3"])
         self.assertSameFace(body2.Shape, "Face1", before["Face1"])
 
-    def testMigrateRelinksAnXLinkListInAnotherDocument(self):
-        """ops#301: a legacy box, and in another document a FeaturePython whose
-        PropertyXLinkSubList names its Face2. Migrate moves the entry to the box's body with its
-        element, which names the same face. Owners in other documents weren't looked at: the link
-        stayed on the box."""
+    def otherDocument(self, name):
+        """Saves this document and a new, visible one (UndoMode 1) in a temporary folder: an XLink
+        to another document needs both saved, and Std_Undo/Std_Redo go to a document's view."""
         import os
         import tempfile
 
-        box = self.doc.addObject("PartDesign::AdditiveBox", "Box1")
-        self.doc.recompute()
-        # an XLink to another document needs both documents saved
         folder = tempfile.mkdtemp()
-        self.doc.saveAs(os.path.join(folder, "MigrateXLinked.FCStd"))
-        other = App.newDocument("PanelFixesOther", hidden=True)
-        try:
-            other.saveAs(os.path.join(folder, "MigrateXLinkOwner.FCStd"))
-            user = other.addObject("App::FeaturePython", "User")
-            user.addProperty("App::PropertyXLinkSubList", "Far")
-            user.Far = [(box, ["Face2"])]
-            before = self.namedFace(box.Shape, "Face2")
-            App.setActiveDocument(self.doc.Name)
-            Gui.setActiveDocument(self.doc.Name)
-            self.migrate()
-            body = box.getParentGeoFeatureGroup()
-            self.assertIsNotNone(body)
-            self.assertEqual(self.xlinkEntries(user.Far), {(body.Name, ("Face2",))})
-            self.assertIs(user.Far[0][0], body)
-            self.assertSameFace(body.Shape, "Face2", before)
-        finally:
-            App.setActiveDocument(self.doc.Name)
-            App.closeDocument(other.Name)
+        self.doc.saveAs(os.path.join(folder, name + "Linked.FCStd"))
+        other = App.newDocument("PanelFixesOther")
+        other.UndoMode = 1
+        other.saveAs(os.path.join(folder, name + "Owner.FCStd"))
+        pump()
+        return other
+
+    def activate(self, doc):
+        """Makes doc the active document and its view the active MDI window (Std_Undo and
+        Std_Redo go to the active view's document)."""
+        App.setActiveDocument(doc.Name)
+        Gui.setActiveDocument(doc.Name)
+        area = Gui.getMainWindow().findChild(QtWidgets.QMdiArea)
+        for sub in area.subWindowList():
+            if sub.windowTitle().startswith(doc.Label + " "):
+                area.setActiveSubWindow(sub)
+        pump()
+        self.assertIs(Gui.ActiveDocument.Document, doc)
+
+    def runFrom(self, command, doc):
+        """Runs Std_Undo or Std_Redo from doc's view; asserts no modal was shown."""
+        self.activate(doc)
+        self.answerModals()
+        Gui.runCommand(command)
+        pump()
+        self.answering = False
+        self.assertEqual(self.modals, [], command)
 
     def placedLegacyBox(self):
         """A legacy box (10 x 10 x 10) placed at (5, 0, 0), turned 30 degrees about Z."""
@@ -404,84 +407,143 @@ class TestPanelFixesGui(unittest.TestCase):
         box.Placement = App.Placement(App.Vector(5, 0, 0), App.Rotation(App.Vector(0, 0, 1), 30))
         return box
 
-    def assertSameBox(self, link, expected):
+    def assertSameBox(self, link, expected, msg=None):
         bound = Part.getShape(link).BoundBox
         for name in ("XMin", "YMin", "ZMin", "XMax", "YMax", "ZMax"):
             self.assertAlmostEqual(
-                getattr(bound, name), getattr(expected, name), delta=1e-6, msg=link.Name
+                getattr(bound, name), getattr(expected, name), delta=1e-6, msg=msg or link.Name
             )
 
-    def testMigrateKeepsAnAppLinkInPlace(self):
-        """PR 329 review, item 1: App::Links of a placed legacy box. One with LinkTransform off
-        (the default) shows the box without its own placement; relinked to the body, whose shape
-        holds that placement, it moved by it ([0, 10] to [0, 13.66]), the whole box and an
-        element alike. Migrate makes up for it in the link's placement; a link with LinkTransform
-        on is right as it is."""
+    def testMigrateWarnsAboutAppLinksOfAPlacedFeature(self):
+        """PR 329 round 2: App::Links of a placed legacy box. One with LinkTransform off (the
+        default) shows the box without its own placement, and the body's shape holds it, so
+        relinked to the body it moves by it. Migrate relinks it as before, with its Placement
+        unchanged, and warns, naming it: a whole-box link, an element link and a link array. (Round
+        1 changed their Placement, which an array, a link of a link or a re-placed sketch got
+        wrong.) A link with LinkTransform on is relinked where it was, without a warning."""
         box = self.placedLegacyBox()
         whole = self.doc.addObject("App::Link", "LnkWhole")
         whole.setLink(box)
         face = self.doc.addObject("App::Link", "LnkFace")
         face.LinkedObject = (box, ["Face1"])
+        array = self.doc.addObject("App::Link", "LnkArray")
+        array.setLink(box)
+        array.ElementCount = 2
         placed = self.doc.addObject("App::Link", "LnkPlaced")
         placed.setLink(box)
         placed.LinkTransform = True
         self.doc.recompute()
-        before = {link.Name: Part.getShape(link).BoundBox for link in (whole, face, placed)}
+        before = Part.getShape(placed).BoundBox
         self.migrate()
         body = box.getParentGeoFeatureGroup()
         self.assertIsNotNone(body)
-        for link in (whole, face, placed):
+        for link in (whole, face, array, placed):
             target = link.LinkedObject
             target = target[0] if isinstance(target, tuple) else target
             self.assertIs(target, body, link.Name)
-            self.assertSameBox(link, before[link.Name])
+        for link in (whole, face, array):
+            self.assertTrue(link.Placement.isIdentity(), link.Name)
+        self.assertSameBox(placed, before)
+        report = reportText()
+        self.assertIsNotNone(report, "no Report view")
+        for name in ("LnkWhole", "LnkFace", "LnkArray"):
+            self.assertIn(f"{self.doc.Name}#{name} now links {self.doc.Name}#{body.Name}", report)
+        self.assertNotIn("LnkPlaced now links", report)
 
-    def testMigrateRelinksAnotherDocumentInItsUndo(self):
-        """PR 329 review, items 1 and 2: in another document, an App::Link (LinkTransform off) of
-        a placed legacy box and an XLinkSubList on its Face2. After Migrate the link is where it
-        was, and Undo and Redo take the other document's links along. Its change wasn't recorded:
-        Undo, which deletes the body, emptied the list, and Redo didn't bring the entry back."""
-        import os
-        import tempfile
-
+    def testMigrateLeavesAnotherDocumentsLinks(self):
+        """PR 329 round 2: in another document, a FeaturePython whose PropertyXLinkSubList names
+        Face2 of a placed legacy box, and an App::Link of the box. Migrate leaves both on the box
+        and warns, naming the document, the owner and the property; the other document's undo
+        stack stays empty. Undo and Redo, from either document in any order, leave them as they
+        were. Round 1 relinked them to the body, and every order but Undo and Redo from the
+        migrated document lost them (the list emptied, the link None or moved)."""
         box = self.placedLegacyBox()
         self.doc.recompute()
-        folder = tempfile.mkdtemp()
-        self.doc.saveAs(os.path.join(folder, "MigrateUndoLinked.FCStd"))
-        other = App.newDocument("PanelFixesOther", hidden=True)
+        other = self.otherDocument("MigrateOther")
         try:
-            other.UndoMode = 1
-            other.saveAs(os.path.join(folder, "MigrateUndoOwner.FCStd"))
             user = other.addObject("App::FeaturePython", "User")
             user.addProperty("App::PropertyXLinkSubList", "Far")
             user.Far = [(box, ["Face2"])]
             link = other.addObject("App::Link", "LnkFar")
             link.setLink(box)
             other.recompute()
+            other.commitTransaction()
+            other.clearUndos()
             before = Part.getShape(link).BoundBox
-            App.setActiveDocument(self.doc.Name)
-            Gui.setActiveDocument(self.doc.Name)
+            face = self.namedFace(box.Shape, "Face2")
+            self.activate(self.doc)
             self.migrate()
             body = box.getParentGeoFeatureGroup()
             self.assertIsNotNone(body)
-            bodyName = body.Name
-            self.assertEqual(self.xlinkEntries(user.Far), {(bodyName, ("Face2",))})
+            self.assertEqual(other.UndoNames, [])
+            report = reportText()
+            self.assertIsNotNone(report, "no Report view")
+            for prop in ("User.Far", "LnkFar.LinkedObject"):
+                self.assertIn(
+                    f"{other.Name}#{prop} keeps its link to {self.doc.Name}#{box.Name}", report
+                )
 
-            for command, entries in (
-                ("Std_Undo", {("Box1", ("Face2",))}),
-                ("Std_Redo", {(bodyName, ("Face2",))}),
-            ):
-                self.answerModals()
-                Gui.runCommand(command)
-                pump()
-                self.answering = False
-                self.assertEqual(self.modals, [], command)
-                self.assertEqual(self.xlinkEntries(user.Far), entries, command)
-            other.recompute()
-            self.assertSameBox(link, before)
+            def check(step):
+                self.assertEqual(self.xlinkEntries(user.Far), {(box.Name, ("Face2",))}, step)
+                self.assertIs(link.LinkedObject, box, step)
+                other.recompute()
+                self.assertSameBox(link, before, step)
+                self.assertSameFace(box.Shape, "Face2", face)
+
+            check("after Migrate")
+            documents = {"A": self.doc, "B": other}
+            for undoFrom, redoFrom in (("A", "A"), ("A", "B"), ("B", "B"), ("B", "A")):
+                self.runFrom("Std_Undo", documents[undoFrom])
+                check(f"Undo from {undoFrom}")
+                self.runFrom("Std_Redo", documents[redoFrom])
+                check(f"Undo from {undoFrom}, Redo from {redoFrom}")
         finally:
-            App.setActiveDocument(self.doc.Name)
+            self.activate(self.doc)
             App.closeDocument(other.Name)
+            pump()
+
+    def testGroupedRedoTakesTheOtherDocumentsFirst(self):
+        """PR 329 round 2: one application transaction in which another document gets a box first
+        and this document's PropertyXLink, PropertyXLinkSubList and App::Link then point at it.
+        Std_Undo from the other document, then Std_Redo from this one, brings all three back:
+        a grouped Redo takes the other documents' steps before the active one's, as on
+        integration. Round 1 took them after it, and the three links came back empty."""
+        holder = self.doc.addObject("App::FeaturePython", "Holder")
+        holder.addProperty("App::PropertyXLink", "Ref")
+        holder.addProperty("App::PropertyXLinkSubList", "Many")
+        link = self.doc.addObject("App::Link", "LnkA")
+        self.doc.recompute()
+        other = self.otherDocument("GroupedRedo")
+        try:
+            App.closeActiveTransaction()
+            self.doc.commitTransaction()
+            other.commitTransaction()
+            # with no active document, the transaction is the application's: every document
+            # that changes joins it
+            App.setActiveDocument("")
+            App.setActiveTransaction("Cross")
+            boxB = other.addObject("Part::Box", "BoxB")
+            other.recompute()
+            holder.Ref = boxB
+            holder.Many = [(boxB, ["Face1"])]
+            link.setLink(boxB)
+            App.closeActiveTransaction()
+            self.doc.recompute()
+            self.assertEqual(self.doc.UndoNames, ["Cross"])
+            self.assertEqual(other.UndoNames, ["Cross"])
+
+            self.runFrom("Std_Undo", other)
+            self.assertIsNone(other.getObject("BoxB"))
+            self.runFrom("Std_Redo", self.doc)
+            boxB = other.getObject("BoxB")
+            self.assertIsNotNone(boxB)
+            self.assertIs(holder.Ref, boxB)
+            self.assertEqual(self.xlinkEntries(holder.Many), {("BoxB", ("Face1",))})
+            self.assertIs(link.LinkedObject, boxB)
+        finally:
+            self.activate(self.doc)
+            App.closeDocument(other.Name)
+            pump()
 
     # -- ops#327: the Profile command's copy of a sketch in another document ---------------------
 

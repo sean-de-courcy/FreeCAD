@@ -682,6 +682,9 @@ void CmdPartDesignMigrate::activated(int iMsg)
     }
 
     updateActive();
+    // FreeCAD-CH (PR 329 round 2): the migration was left open, so a later scripted change
+    // joined it and its Undo
+    commitCommand();
 }
 
 bool CmdPartDesignMigrate::isActive()
