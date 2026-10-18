@@ -322,6 +322,124 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertEqual((target.Name, subs), (body.Name, ["Face1"]))
         self.assertSameFace(body.Shape, "Face1", before)
 
+    def xlinkEntries(self, prop):
+        """A PropertyXLinkSubList's or PropertyXLinkList's value as a set of (name, elements)."""
+        entries = set()
+        for entry in prop:
+            target, subs = entry if isinstance(entry, tuple) else (entry, ())
+            subs = (subs,) if isinstance(subs, str) else tuple(subs)
+            entries.add((target.Name, subs))
+        return entries
+
+    def testMigrateRelinksXLinkLists(self):
+        """ops#301 (fork PR 274 review, item 4): two legacy boxes outside a body, the second on
+        the first, linked by a FeaturePython only through a PropertyXLinkSubList (Face3 of the
+        first box, Face1 of the second) and a PropertyXLinkList (both boxes). These links to the
+        first box split the chain: a body per box. Each entry moves to its box's body with its
+        element, which names the same face. Neither list derives from the link lists Migrate
+        handled: they weren't counted (one body for both) nor relinked."""
+        box1 = self.doc.addObject("PartDesign::AdditiveBox", "Box1")
+        box2 = self.doc.addObject("PartDesign::AdditiveBox", "Box2")
+        box2.BaseFeature = box1
+        box2.Placement = App.Placement(App.Vector(5, 0, 0), App.Rotation())
+        user = self.doc.addObject("App::FeaturePython", "User")
+        user.addProperty("App::PropertyXLinkSubList", "CrossMany")
+        user.addProperty("App::PropertyXLinkList", "CrossList")
+        user.CrossMany = [(box1, ["Face3"]), (box2, ["Face1"])]
+        user.CrossList = [box1, box2]
+        self.doc.recompute()
+        before = {
+            "Face3": self.namedFace(box1.Shape, "Face3"),
+            "Face1": self.namedFace(box2.Shape, "Face1"),
+        }
+        self.migrate()
+        body1 = self.doc.getObject("Box1Body")
+        body2 = self.doc.getObject("Box2Body")
+        self.assertIsNotNone(body1, "the chain wasn't split")
+        self.assertIsNotNone(body2, "the chain wasn't split")
+        self.assertIn(box1, body1.Group)
+        self.assertIn(box2, body2.Group)
+        self.assertEqual(
+            self.xlinkEntries(user.CrossMany), {(body1.Name, ("Face3",)), (body2.Name, ("Face1",))}
+        )
+        self.assertEqual(self.xlinkEntries(user.CrossList), {(body1.Name, ()), (body2.Name, ())})
+        self.assertSameFace(body1.Shape, "Face3", before["Face3"])
+        self.assertSameFace(body2.Shape, "Face1", before["Face1"])
+
+    def testMigrateRelinksAnXLinkListInAnotherDocument(self):
+        """ops#301: a legacy box, and in another document a FeaturePython whose
+        PropertyXLinkSubList names its Face2. Migrate moves the entry to the box's body with its
+        element, which names the same face. Owners in other documents weren't looked at: the link
+        stayed on the box."""
+        import os
+        import tempfile
+
+        box = self.doc.addObject("PartDesign::AdditiveBox", "Box1")
+        self.doc.recompute()
+        # an XLink to another document needs both documents saved
+        folder = tempfile.mkdtemp()
+        self.doc.saveAs(os.path.join(folder, "MigrateXLinked.FCStd"))
+        other = App.newDocument("PanelFixesOther", hidden=True)
+        try:
+            other.saveAs(os.path.join(folder, "MigrateXLinkOwner.FCStd"))
+            user = other.addObject("App::FeaturePython", "User")
+            user.addProperty("App::PropertyXLinkSubList", "Far")
+            user.Far = [(box, ["Face2"])]
+            before = self.namedFace(box.Shape, "Face2")
+            App.setActiveDocument(self.doc.Name)
+            Gui.setActiveDocument(self.doc.Name)
+            self.migrate()
+            body = box.getParentGeoFeatureGroup()
+            self.assertIsNotNone(body)
+            self.assertEqual(self.xlinkEntries(user.Far), {(body.Name, ("Face2",))})
+            self.assertIs(user.Far[0][0], body)
+            self.assertSameFace(body.Shape, "Face2", before)
+        finally:
+            App.setActiveDocument(self.doc.Name)
+            App.closeDocument(other.Name)
+
+    # -- ops#327: the Profile command's copy of a sketch in another document ---------------------
+
+    def testPadOnASketchOfAnotherDocumentStopsWhenTheCopyIsRefused(self):
+        """ops#327: Pad, with an active body, on a sketch of another document outside any body,
+        answered with Make dependent copy, which is refused (its link can't reach another
+        document). The command stops with the refusal: nothing is added to either document, and
+        no transaction is left open. The refused copy, a null, went to the body's addObject and on
+        as the pad's profile: nothing was made, without a word, and the "Make Copy" transaction
+        stayed open."""
+        self.body = models.body(self.doc)
+        self.doc.recompute()
+        other = App.newDocument("PanelFixesOther", hidden=True)
+        try:
+            outer = models.sketch(other, "Outer", models.rectangle(0, 0, 10, 10), None)
+            other.recompute()
+            Gui.activateWorkbench("PartDesignWorkbench")
+            App.setActiveDocument(self.doc.Name)
+            Gui.setActiveDocument(self.doc.Name)
+            pump(0.2)
+            Gui.getDocument(self.doc.Name).ActiveView.setActiveObject("pdbody", self.body)
+            names = sorted(o.Name for o in self.doc.Objects)
+            group = self.body.Group
+            undo = self.doc.UndoNames
+            Gui.Selection.addSelection(other.Name, outer.Name)
+            self.answerModals("radioDependent")
+            Gui.runCommand("PartDesign_Pad")
+            pump(0.5)
+            self.answering = False
+            self.assertFalse(Gui.Control.activeDialog())
+            self.assertEqual(sorted(o.Name for o in self.doc.Objects), names)
+            self.assertEqual(self.body.Group, group)
+            self.assertEqual([o.Name for o in other.Objects], [outer.Name])
+            self.assertIsNone(App.getActiveTransaction())
+            self.assertEqual(self.doc.UndoNames, undo)
+            self.assertEqual(len(self.modals), 2, self.modals)
+            self.assertEqual(self.modals[0], "DlgReference")
+            self.assertIn("'Outer' is in another document", self.modals[1])
+        finally:
+            Gui.Selection.clearSelection()
+            App.setActiveDocument(self.doc.Name)
+            App.closeDocument(other.Name)
+
     # -- ops#170 1-3: the Pipe's orientation and scaling panels ----------------------------------
 
     def testPipeBinormalLoaded(self):

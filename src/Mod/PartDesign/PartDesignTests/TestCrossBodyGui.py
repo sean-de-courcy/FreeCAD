@@ -50,10 +50,30 @@ class TestCrossBodyGui(unittest.TestCase):
         Gui.setActiveDocument(self.doc.Name)
         pump(0.2)
         Gui.getDocument(self.doc.Name).ActiveView.setActiveObject("pdbody", active)
+        Gui.Selection.clearSelection()
         Gui.Selection.addSelection(self.doc.Name, source.Name, sub)
         before = {o.Name for o in self.doc.Objects}
-        Gui.runCommand("PartDesign_SubShapeBinder")
-        pump(0.2)
+        # the command's error box (a cyclic reference, ops#321) is closed and recorded: left
+        # open, it held the test until the run's timeout
+        modals = []
+        answering = [True]
+
+        def poll():
+            if not answering[0]:
+                return
+            widget = QtWidgets.QApplication.activeModalWidget()
+            if isinstance(widget, QtWidgets.QMessageBox):
+                modals.append(widget.text())
+                widget.accept()
+            QtCore.QTimer.singleShot(50, poll)
+
+        QtCore.QTimer.singleShot(50, poll)
+        try:
+            Gui.runCommand("PartDesign_SubShapeBinder")
+            pump(0.2)
+        finally:
+            answering[0] = False
+        self.assertEqual(modals, [])
         [binder] = [
             o for o in self.doc.Objects
             if o.Name not in before and o.TypeId == "PartDesign::SubShapeBinder"
@@ -62,13 +82,40 @@ class TestCrossBodyGui(unittest.TestCase):
         self.assertTrue(binder.isValid(), binder.getStatusString())
         return binder
 
-    def assertOnTheTop(self, binder):
-        """The binder lies on the pad's top, where the pad is in the document."""
+    def assertOnTheTop(self, binder, at=(100, 50, 5)):
+        """The binder lies on the pad's top, where the pad is in the document: the 20 x 10
+        rectangle from at."""
         self.assertAlmostEqual(binder.Shape.Area, 200, places=6)
-        box = binder.Shape.BoundBox
+        shape = binder.Shape.copy()
+        container = binder.getParentGeoFeatureGroup()
+        if container:
+            shape = shape.transformed(container.getGlobalPlacement().toMatrix())
+        box = shape.BoundBox
+        x, y, z = at
         for got, expected in zip((box.XMin, box.YMin, box.ZMin, box.XMax, box.YMax, box.ZMax),
-                                 (100, 50, 5, 120, 60, 5)):
+                                 (x, y, z, x + 20, y + 10, z)):
             self.assertAlmostEqual(got, expected, places=6)
+
+    def bodyInPart(self, name, part, at):
+        """A Body named name at at in part, with a pad 20 x 10 x 5; returns the Body, the pad and
+        its top."""
+        body = self.doc.addObject("PartDesign::Body", name)
+        body.Placement.Base = at
+        part.addObject(body)
+        sketch = models.sketch(self.doc, name + "Sk", models.rectangle(0, 0, 20, 10), body)
+        feature = models.pad(body, sketch, 5)
+        self.doc.recompute()
+        [top] = [
+            f"Face{i}"
+            for i, f in enumerate(feature.Shape.Faces, 1)
+            if abs(f.normalAt(0, 0).z - 1) < 1e-9 and abs(f.CenterOfMass.z - 5) < 1e-6
+        ]
+        return body, feature, top
+
+    def placedPart(self, name, at):
+        part = self.doc.addObject("App::Part", name)
+        part.Placement.Base = at
+        return part
 
     def testBinderOfAFaceOfAnotherBodyBindsTheFeature(self):
         """In a second, active Body, the command on the pad's top as picked in 3D,
@@ -94,6 +141,58 @@ class TestCrossBodyGui(unittest.TestCase):
         self.assertIsNone(binder.getParentGeoFeatureGroup())
         self.assertEqual(binder.Support, [(source, ("%s.%s" % (pad.Name, top),))])
         self.assertOnTheTop(binder)
+
+    def testBinderOfAFaceThroughAPartBindsTheFeature(self):
+        """ops#321: a Body at (70, 50) in an App::Part at z 30; in a second, active Body at the
+        top level, the command on the pad's top as picked in 3D through the Part,
+        (P1, "Source.Pad.FaceN"). The binder binds (Pad, "FaceN"), as for a pick through the Body
+        alone: through the Part it depended on everything in it. It lies on the pad's top, where
+        the pad is in the document, at z 35."""
+        p1 = self.placedPart("P1", V(0, 0, 30))
+        source, pad, top = self.bodyInPart("Source", p1, V(70, 50, 0))
+        target = self.doc.addObject("PartDesign::Body", "Target")
+        self.doc.recompute()
+        binder = self.bind(target, p1, "%s.%s.%s" % (source.Name, pad.Name, top))
+        self.assertIn(binder, target.Group)
+        self.assertEqual(binder.Support, [(pad, (top,))])
+        self.assertOnTheTop(binder, at=(70, 50, 35))
+
+    def testBindersOfEachOtherThroughPartsBuild(self):
+        """ops#321: two Bodies, each in its own App::Part (P1 at z 30, P2 at x 200), bind each
+        other's pads through the Parts, interleaved: B's binder of A's top, then A's binder of
+        B's top. Through the Parts, each binder depended on the other Part, so on the other
+        binder: a cyclic dependency, and the document didn't recompute. Of the features, both
+        build, each on the other pad's top."""
+        p1 = self.placedPart("P1", V(0, 0, 30))
+        p2 = self.placedPart("P2", V(200, 0, 0))
+        bodyA, padA, topA = self.bodyInPart("BodyA", p1, V(70, 50, 0))
+        bodyB, padB, topB = self.bodyInPart("BodyB", p2, V(10, 20, 0))
+        binderB = self.bind(bodyB, p1, "%s.%s.%s" % (bodyA.Name, padA.Name, topA))
+        binderA = self.bind(bodyA, p2, "%s.%s.%s" % (bodyB.Name, padB.Name, topB))
+        self.assertIn(binderB, bodyB.Group)
+        self.assertIn(binderA, bodyA.Group)
+        self.assertEqual(binderB.Support, [(padA, (topA,))])
+        self.assertEqual(binderA.Support, [(padB, (topB,))])
+        self.doc.recompute()
+        for obj in (binderA, binderB, padA, padB):
+            self.assertTrue(obj.isValid(), "%s: %s" % (obj.Name, obj.getStatusString()))
+        self.assertOnTheTop(binderB, at=(70, 50, 35))
+        self.assertOnTheTop(binderA, at=(210, 20, 5))
+
+    def testBinderOfAFaceOfAnotherBodyInTheSamePart(self):
+        """ops#321: both Bodies in one App::Part at z 30, the source at (70, 50) in it. The
+        command in the target, on the pad's top picked through the Part, (P, "Source.Pad.FaceN"),
+        binds (Pad, "FaceN"), on the pad's top at z 35. A guard: the pick, resolved from the
+        Part the active Body is in, came through the Body alone before ops#321 too."""
+        part = self.placedPart("P", V(0, 0, 30))
+        source, pad, top = self.bodyInPart("Source", part, V(70, 50, 0))
+        target = self.doc.addObject("PartDesign::Body", "Target")
+        part.addObject(target)
+        self.doc.recompute()
+        binder = self.bind(target, part, "%s.%s.%s" % (source.Name, pad.Name, top))
+        self.assertIn(binder, target.Group)
+        self.assertEqual(binder.Support, [(pad, (top,))])
+        self.assertOnTheTop(binder, at=(70, 50, 35))
 
 
 def globalBox(feature):

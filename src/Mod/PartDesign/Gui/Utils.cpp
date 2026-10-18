@@ -503,11 +503,23 @@ bool isPartDesignAwareObjecta(App::DocumentObject* obj, bool respectGroups = fal
     );
 }
 
+// The objects whose links to the feature are looked at: its document's, and those of other
+// documents that link it (through an XLink, the only link across documents: ops#301)
+static std::vector<App::DocumentObject*> linkOwners(const PartDesign::Feature* feature)
+{
+    const App::Document* doc = feature->getDocument();
+    std::vector<App::DocumentObject*> owners = doc->getObjects();
+    for (auto obj : feature->getInList()) {
+        if (obj->getDocument() != doc && std::ranges::find(owners, obj) == owners.end()) {
+            owners.push_back(obj);
+        }
+    }
+    return owners;
+}
+
 bool isAnyNonPartDesignLinksTo(PartDesign::Feature* feature, bool respectGroups)
 {
-    App::Document* doc = feature->getDocument();
-
-    for (const auto& obj : doc->getObjects()) {
+    for (const auto& obj : linkOwners(feature)) {
         if (!isPartDesignAwareObjecta(obj, respectGroups)) {
             std::vector<App::Property*> properties;
             obj->getPropertyList(properties);
@@ -534,6 +546,13 @@ bool isAnyNonPartDesignLinksTo(PartDesign::Feature* feature, bool respectGroups)
                         return true;
                     }
                 }
+                // (ops#301) an XLink list, or an XLinkSubList: neither derives from the above
+                else if (prop->isDerivedFrom(App::PropertyXLinkSubList::getClassTypeId())) {
+                    auto values = static_cast<App::PropertyXLinkSubList*>(prop)->getValues();
+                    if (std::ranges::find(values, feature) != values.end()) {
+                        return true;
+                    }
+                }
             }
         }
     }
@@ -543,7 +562,6 @@ bool isAnyNonPartDesignLinksTo(PartDesign::Feature* feature, bool respectGroups)
 
 void relinkToBody(PartDesign::Feature* feature, bool last)
 {
-    App::Document* doc = feature->getDocument();
     PartDesign::Body* body = PartDesign::Body::findBodyOf(feature);
 
     if (!body) {
@@ -589,7 +607,7 @@ void relinkToBody(PartDesign::Feature* feature, bool last)
             return kept(obj, prop, sub);
         });
     };
-    for (const auto& obj : doc->getObjects()) {
+    for (const auto& obj : linkOwners(feature)) {
         if (!isPartDesignAwareObjecta(obj)) {
             std::vector<App::Property*> properties;
             obj->getPropertyList(properties);
@@ -661,6 +679,36 @@ void relinkToBody(PartDesign::Feature* feature, bool last)
                         valueStr = buildLinkSubListPythonStr(linkList, subs);
                         // TODO Issue some message here due to it likely will break something
                         //     (2015-08-13, Fat-Zer)
+                    }
+                }
+                // FreeCAD-CH (ops#301): an XLinkSubList, or an XLink list (derived from it), as
+                // (object, [elements]) entries. Neither derives from the lists above, so they
+                // were never relinked. An entry on the body already takes the moved elements.
+                else if (prop->isDerivedFrom(App::PropertyXLinkSubList::getClassTypeId())) {
+                    auto propLink = static_cast<App::PropertyXLinkSubList*>(prop);
+                    std::string entries;
+                    bool valueChanged = false;
+                    bool unresolved = false;
+                    for (const auto& link : propLink->getSubListValues()) {
+                        App::DocumentObject* target = link.getValue();
+                        const auto& subs = link.getSubValues();
+                        if (target == feature && !keptAny(obj, prop, subs)) {
+                            target = body;
+                            valueChanged = true;
+                        }
+                        unresolved = unresolved || !target;
+                        entries += buildLinkSubPythonStr(target, subs) + ",";
+                    }
+                    // an entry of a document that isn't open would be lost
+                    if (valueChanged && unresolved) {
+                        FC_WARN(
+                            obj->getFullName() << "." << prop->getName() << " keeps its link to "
+                                               << feature->getFullName()
+                                               << ": it also links a document that isn't open"
+                        );
+                    }
+                    else if (valueChanged) {
+                        valueStr = "[" + entries + "]";
                     }
                 }
 
