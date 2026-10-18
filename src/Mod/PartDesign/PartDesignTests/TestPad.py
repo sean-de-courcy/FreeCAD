@@ -640,6 +640,68 @@ def padUpToABallUnderAPlate(doc, half):
     return pad
 
 
+def padUpToABumpOverABall(doc, theta, length, height=0.5):
+    """PR 331 round 1: a Body whose BaseFeature is the ball of radius 5 about the origin under a
+    plate x, y -8..8 whose bottom is the B-spline z = -0.2 + `height` exp(-(t/`length`)^2 -
+    (r/0.4)^2), a bump about the point of the equator at `theta` degrees (t along the circle, r
+    across it), and whose top is 2.2 above it. Where the bump rises above z = 0, the plate meets
+    the ball above its equator: a band of the sphere face, short along its edge, faces the plate.
+    A Pad from the square x, y -6..6 at z = -15, along +z, up to the base (UpToShape, nothing
+    selected), by the split (the plate's bottom is a B-spline). Recomputed, not checked."""
+    import math
+
+    V = FreeCAD.Vector
+    c, s = math.cos(math.radians(theta)), math.sin(math.radians(theta))
+    cx, cy = 5 * c, 5 * s
+
+    def bottom(x, y):
+        t = -(x - cx) * s + (y - cy) * c
+        r = (x - cx) * c + (y - cy) * s
+        return -0.2 + height * math.exp(-((t / length) ** 2) - ((r / 0.4) ** 2))
+
+    def axis(centre):
+        # Poles 0.05 apart within 1.5 of the bump's centre, 2 apart elsewhere
+        fine = [round(centre + 0.05 * k, 6) for k in range(-30, 31)]
+        coarse = [v for v in (-6, -4, -2, 2, 4, 6) if abs(v - centre) > 1.6]
+        return sorted(set([-8.0, 8.0] + coarse + [v for v in fine if -8 < v < 8]))
+
+    xs, ys = axis(cx), axis(cy)
+
+    # Poles on the grid, clamped cubic: the surface stays within the poles' hull, unlike an
+    # interpolation through them, which overshoots on so uneven a grid
+    def knots(count):
+        return [float(k) for k in range(count - 2)], [4] + [1] * (count - 4) + [4]
+
+    uKnots, uMults = knots(len(xs))
+    vKnots, vMults = knots(len(ys))
+    surface = Part.BSplineSurface()
+    surface.buildFromPolesMultsKnots(
+        [[V(x, y, bottom(x, y)) for y in ys] for x in xs],
+        uMults,
+        vMults,
+        uKnots,
+        vKnots,
+        False,
+        False,
+        3,
+        3,
+    )
+    plate = surface.toShape().extrude(V(0, 0, 2.2))
+    base = doc.addObject("Part::Feature", "Base")
+    base.Shape = plate.fuse(Part.makeSphere(5)).removeSplitter()
+    body = doc.addObject("PartDesign::Body", "Body")
+    baseFeature = body.newObject("PartDesign::FeatureBase", "BaseFeature")
+    baseFeature.BaseFeature = base
+    placement = FreeCAD.Placement(V(0, 0, -15), FreeCAD.Rotation())
+    sketch = squareSketch(body, "Square", placement, [(-6, -6, 6, 6)])
+    pad = body.newObject("PartDesign::Pad", "Pad")
+    pad.Profile = sketch
+    pad.Type = "UpToShape"
+    pad.Refine = False
+    doc.recompute()
+    return pad
+
+
 def ballBottomReach(half):
     """The volume from z = -15 up to the bottom of padUpToABallUnderAPlate()'s ball, z = -0.1 -
     sqrt(25 - x^2 - y^2), over the square x, y -half..half (half < 3.5), by Simpson's rule with
@@ -1757,8 +1819,9 @@ class TestPad(unittest.TestCase):
         # ops#357: the square x, y -6..6 passes the ball's equator (radius 5 at z = -0.1); lines
         # at radius 4.999..5 first meet the ball below it, and the band above it faces the plate.
         # The grid's last row on the sphere face lies under the equator: the split kept one solid
-        # up to the plate, filling the band's shadow (0.001). It fails, saying why. The square
-        # x, y -1..1 meets only the ball's bottom and stops there
+        # up to the plate, filling the band's shadow (0.001). It fails, saying why. The control,
+        # the square x, y -1..1, misses the knob, so BRepFeat builds it (only planes and the
+        # sphere in its path), up to the ball's bottom
         for half in (1, 6):
             with self.subTest(half=half):
                 doc = FreeCAD.newDocument("PadUpToABallUnderAPlate")
@@ -1766,13 +1829,42 @@ class TestPad(unittest.TestCase):
                     pad = padUpToABallUnderAPlate(doc, half)
                     if half == 1:
                         self.assertTrue(pad.isValid(), pad.getStatusString())
-                        assertSplitPrismSound(self, pad.AddSubShape)
                         expected = ballBottomReach(1)
                         self.assertAlmostEqual(
                             pad.AddSubShape.Volume,
                             expected,
                             delta=PRISM_VOLUME_RELATIVE * expected,
                         )
+                    else:
+                        self.assertFalse(pad.isValid())
+                        self.assertIn("meets the face from behind", pad.getStatusString())
+                finally:
+                    FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToABumpOverABallsEquator(self):
+        # PR 331 round 1: the bump rises 0.3 over the equator, so a band of the sphere face up to
+        # 0.29 high faces the plate, along 1 to 2 % of the face's edge with the plate. With 32
+        # samples per edge, 3 % apart, the band was missed at these angles: the Pad was valid and
+        # filled the band's shadow (8e-3 across). It fails, saying why. Under a bump 0.15 high,
+        # which stays below the equator, the Pad stops at the ball and the plate: the control.
+        # Its split edges carry the intersection's tolerance (4e-3), so it is checked by points:
+        # outside the ball under the bump's centre, whose bottom is at z -0.052 there, the prism
+        # reaches z -0.1 and not z 0
+        import math
+
+        for theta, length, height in ((42, 0.25, 0.5), (22, 0.12, 0.5), (42, 0.25, 0.15)):
+            with self.subTest(theta=theta, length=length, height=height):
+                doc = FreeCAD.newDocument("PadUpToABumpOverABallsEquator")
+                try:
+                    pad = padUpToABumpOverABall(doc, theta, length, height)
+                    if height == 0.15:
+                        self.assertTrue(pad.isValid(), pad.getStatusString())
+                        prism = pad.AddSubShape
+                        self.assertTrue(prism.isValid())
+                        c, s = math.cos(math.radians(theta)), math.sin(math.radians(theta))
+                        for z, inPrism in ((-0.1, True), (0.0, False)):
+                            point = FreeCAD.Vector(5.05 * c, 5.05 * s, z)
+                            self.assertEqual(prism.isInside(point, 1e-9, False), inPrism, z)
                     else:
                         self.assertFalse(pad.isValid())
                         self.assertIn("meets the face from behind", pad.getStatusString())

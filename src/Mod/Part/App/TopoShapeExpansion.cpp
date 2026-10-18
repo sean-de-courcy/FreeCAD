@@ -29,6 +29,7 @@
 #include <cstring>
 #include <exception>
 #include <limits>
+#include <memory>
 #include <numeric>
 #include <optional>
 #include <sstream>
@@ -90,6 +91,9 @@
 #include <BRepProj_Projection.hxx>
 #include <BRepTools_WireExplorer.hxx>
 #include <Geom2d_Curve.hxx>
+#include <Geom2dAdaptor_Curve.hxx>
+#include <BndLib_Add2dCurve.hxx>
+#include <Bnd_Box2d.hxx>
 #include <GeomConvert.hxx>
 #include <GeomFill_BezierCurves.hxx>
 #include <GeomFill_BSplineCurves.hxx>
@@ -6599,11 +6603,14 @@ bool reachesPast(
 // points against `direction`, by more than a lean at modelling precision (below). Sampled: a grid
 // over the piece's parameter range with a few points in each knot span of its surface each way
 // (16 at least, 256 at most), those inside it; points just inside its edges, at fractions of the
-// grid's step from each edge's curve on the surface; and one point inside it. A fold narrower
-// than a span's step away from the edges can be missed. Evenly spread, a band near a rim under
-// 3 % of the range was (PR 324 round 2 verification); on the grid alone, a band along a rim
-// narrower than half a step was (ops#357: a ball's band above its equator, under the plate it
-// hangs from). Throws when no point inside the piece is found.
+// grid's step from each edge's curve on the surface, a few in each knot span of that curve (32 at
+// least, more for an edge across many of the surface's spans, 1024 at most); and one point inside
+// it. A fold narrower than a span's step away from the edges can be missed, and so can a band
+// along a rim shorter than the gap between two of its edge's samples. Evenly spread, a band near
+// a rim under 3 % of the range was (PR 324 round 2 verification); on the grid alone, a band along
+// a rim narrower than half a step was (ops#357: a ball's band above its equator, under the plate
+// it hangs from); with 32 samples per edge, a band along 2 % of its edge was (PR 331 round 1: a
+// bump in the plate over the equator). Throws when no point inside the piece is found.
 bool facesAgainst(const TopoDS_Face& piece, const gp_Dir& direction)
 {
     const BRepAdaptor_Surface surface(piece);
@@ -6611,9 +6618,9 @@ bool facesAgainst(const TopoDS_Face& piece, const gp_Dir& direction)
     // A lean that moves the piece sideways by less than Precision::Confusion() over its extent
     // along the direction isn't a fold at modelling precision: a wall lofted from a circle to a
     // B-spline interpolation of it leans 1e-8 rad, and was refused (ops#357). A piece without
-    // that extent (across the direction) keeps the strict bound.
-    const auto reach = extentAlong(piece, direction, false);
-    const double extent = reach ? reach->second - reach->first : 0.0;
+    // that extent (across the direction) keeps the strict bound. Measured at the first sample
+    // that faces against the direction: most pieces have none
+    std::optional<double> extent;
     auto against = [&](double u, double v) {
         gp_Pnt point;
         gp_Vec alongU;
@@ -6631,23 +6638,29 @@ bool facesAgainst(const TopoDS_Face& piece, const gp_Dir& direction)
         if (cosine <= 1e-9) {
             return false;
         }
+        if (!extent) {
+            const auto reach = extentAlong(piece, direction, false);
+            extent = reach ? reach->second - reach->first : 0.0;
+        }
         const double sine = std::sqrt(std::max(0.0, 1.0 - cosine * cosine));
-        return extent <= Precision::Confusion()
-            || extent * cosine > Precision::Confusion() * sine;
+        return *extent <= Precision::Confusion()
+            || *extent * cosine > Precision::Confusion() * sine;
     };
-    // One classifier for the piece: built per point, a piece facing against the direction mostly
-    // outside its trimming cost up to 65,536 of them on a dense B-spline (ops#357). Near the
-    // boundary it classifies exactly
-    BRepTopAdaptor_FClass2d classifier(piece, Precision::PConfusion());
+    // One classifier for the piece, built at the first point to classify: built per point, a
+    // piece facing against the direction mostly outside its trimming cost up to 65,536 of them on
+    // a dense B-spline (ops#357). Near the boundary it classifies exactly
+    std::unique_ptr<BRepTopAdaptor_FClass2d> classifier;
     auto inside = [&](double u, double v) {
-        return classifier.Perform(gp_Pnt2d(u, v)) == TopAbs_IN;
+        if (!classifier) {
+            classifier = std::make_unique<BRepTopAdaptor_FClass2d>(piece, Precision::PConfusion());
+        }
+        return classifier->Perform(gp_Pnt2d(u, v)) == TopAbs_IN;
     };
-    // The parameters to sample one way, from the bounds of the surface's knot spans over the
-    // piece's range (one span for a surface without knots)
-    auto spread = [](const TColStd_Array1OfReal& bounds) {
-        constexpr int least = 16;
+    // The parameters to sample over the range of `bounds`, the bounds of knot spans (one span
+    // for a curve or surface without knots): a few in each span, `least` at least and `most` at
+    // most (evenly over the range when the spans are more than `most`)
+    auto spread = [](const TColStd_Array1OfReal& bounds, int least, int most) {
         constexpr int perSpan = 4;
-        constexpr int most = 256;
         int spans = bounds.Length() - 1;
         int each = std::max(perSpan, (least + spans - 1) / spans);
         double low = bounds.First();
@@ -6673,8 +6686,8 @@ bool facesAgainst(const TopoDS_Face& piece, const gp_Dir& direction)
     surface.UIntervals(uBounds, GeomAbs_CN);
     TColStd_Array1OfReal vBounds(1, surface.NbVIntervals(GeomAbs_CN) + 1);
     surface.VIntervals(vBounds, GeomAbs_CN);
-    const std::vector<double> us = spread(uBounds);
-    const std::vector<double> vs = spread(vBounds);
+    const std::vector<double> us = spread(uBounds, 16, 256);
+    const std::vector<double> vs = spread(vBounds, 16, 256);
     // The normal first: classifying each point costs more
     for (double u : us) {
         for (double v : vs) {
@@ -6688,6 +6701,16 @@ bool facesAgainst(const TopoDS_Face& piece, const gp_Dir& direction)
     // first row there
     const double uStep = (uBounds.Last() - uBounds.First()) / static_cast<double>(us.size());
     const double vStep = (vBounds.Last() - vBounds.First()) / static_cast<double>(vs.size());
+    // How many of the surface's knot spans one way lie across low..high
+    auto spansAcross = [](const TColStd_Array1OfReal& bounds, double low, double high) {
+        int spans = 1;
+        for (int i = bounds.Lower() + 1; i < bounds.Upper(); ++i) {
+            if (bounds(i) > low && bounds(i) < high) {
+                ++spans;
+            }
+        }
+        return spans;
+    };
     for (TopExp_Explorer edges(piece, TopAbs_EDGE); edges.More(); edges.Next()) {
         const TopoDS_Edge& edge = TopoDS::Edge(edges.Current());
         double first = 0.0;
@@ -6696,11 +6719,30 @@ bool facesAgainst(const TopoDS_Face& piece, const gp_Dir& direction)
         if (BRep_Tool::Degenerated(edge) || curve.IsNull()) {
             continue;
         }
-        constexpr int alongEdge = 32;
-        for (int i = 0; i < alongEdge; ++i) {
+        // In each knot span of the edge's curve: an intersection's curve has its knots where it
+        // bends, 62 to 72 of them where a bump in the plate meets the ball (PR 331 round 1). And
+        // a few in each of the surface's spans that the curve's box lies across
+        const Geom2dAdaptor_Curve adaptor(curve, first, last);
+        TColStd_Array1OfReal tBounds(1, adaptor.NbIntervals(GeomAbs_CN) + 1);
+        adaptor.Intervals(tBounds, GeomAbs_CN);
+        int least = 32;
+        Bnd_Box2d box;
+        BndLib_Add2dCurve::Add(adaptor, 0.0, box);
+        if (!box.IsVoid()) {
+            double uLow = 0.0;
+            double vLow = 0.0;
+            double uHigh = 0.0;
+            double vHigh = 0.0;
+            box.Get(uLow, vLow, uHigh, vHigh);
+            least = std::max(
+                least,
+                4 * (spansAcross(uBounds, uLow, uHigh) + spansAcross(vBounds, vLow, vHigh))
+            );
+        }
+        for (double t : spread(tBounds, least, 1024)) {
             gp_Pnt2d at;
             gp_Vec2d tangent;
-            curve->D1(first + (i + 0.5) / alongEdge * (last - first), at, tangent);
+            curve->D1(t, at, tangent);
             gp_Vec2d across(-tangent.Y() / vStep, tangent.X() / uStep);
             const double size = across.Magnitude();
             if (size <= gp::Resolution()) {
