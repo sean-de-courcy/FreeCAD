@@ -31,7 +31,9 @@
 
 #include <App/Origin.h>
 #include <App/Datums.h>
+#include <App/Application.h>
 #include <App/GroupExtension.h>
+#include <App/Link.h>
 #include <App/Part.h>
 #include <Gui/Application.h>
 #include <Gui/CommandT.h>
@@ -712,8 +714,37 @@ void relinkToBody(PartDesign::Feature* feature, bool last)
                     }
                 }
 
-                if (!valueStr.empty() && prop->hasName()) {
-                    FCMD_OBJ_CMD(obj, prop->getName() << '=' << valueStr);
+                if (valueStr.empty() || !prop->hasName()) {
+                    continue;
+                }
+                // (PR 329 round 1) A change in another document goes into Migrate's transaction
+                // there too, so that Undo and Redo take it along: otherwise nothing records it
+                // and an Undo, which deletes the body, loses the entry
+                const App::Document* doc = feature->getDocument();
+                const int transaction = doc->getBookedTransactionID();
+                if (obj->getDocument() != doc && transaction != App::NullTransaction) {
+                    obj->getDocument()->setActiveTransaction(
+                        App::TransactionName {
+                            .name = App::GetApplication().getTransactionName(transaction),
+                            .temporary = false
+                        },
+                        transaction
+                    );
+                }
+                FCMD_OBJ_CMD(obj, prop->getName() << '=' << valueStr);
+                // (PR 329 round 1) A link that leaves out its target's own placement
+                // (LinkTransform off) showed the feature without it; the body's shape holds it,
+                // so the link makes up for it to stay where it was
+                auto link = obj->getExtensionByType<App::LinkBaseExtension>(true);
+                if (link && prop == link->getLinkedObjectProperty() && !link->linkTransform()
+                    && link->getPlacementProperty()) {
+                    FCMD_OBJ_CMD(
+                        obj,
+                        "Placement = " << Gui::Command::getObjectCmd(obj)
+                                       << ".Placement.multiply("
+                                       << Gui::Command::getObjectCmd(feature)
+                                       << ".Placement.inverse())"
+                    );
                 }
             }
         }

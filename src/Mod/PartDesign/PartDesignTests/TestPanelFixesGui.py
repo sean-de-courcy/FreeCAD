@@ -398,6 +398,91 @@ class TestPanelFixesGui(unittest.TestCase):
             App.setActiveDocument(self.doc.Name)
             App.closeDocument(other.Name)
 
+    def placedLegacyBox(self):
+        """A legacy box (10 x 10 x 10) placed at (5, 0, 0), turned 30 degrees about Z."""
+        box = self.doc.addObject("PartDesign::AdditiveBox", "Box1")
+        box.Placement = App.Placement(App.Vector(5, 0, 0), App.Rotation(App.Vector(0, 0, 1), 30))
+        return box
+
+    def assertSameBox(self, link, expected):
+        bound = Part.getShape(link).BoundBox
+        for name in ("XMin", "YMin", "ZMin", "XMax", "YMax", "ZMax"):
+            self.assertAlmostEqual(
+                getattr(bound, name), getattr(expected, name), delta=1e-6, msg=link.Name
+            )
+
+    def testMigrateKeepsAnAppLinkInPlace(self):
+        """PR 329 review, item 1: App::Links of a placed legacy box. One with LinkTransform off
+        (the default) shows the box without its own placement; relinked to the body, whose shape
+        holds that placement, it moved by it ([0, 10] to [0, 13.66]), the whole box and an
+        element alike. Migrate makes up for it in the link's placement; a link with LinkTransform
+        on is right as it is."""
+        box = self.placedLegacyBox()
+        whole = self.doc.addObject("App::Link", "LnkWhole")
+        whole.setLink(box)
+        face = self.doc.addObject("App::Link", "LnkFace")
+        face.LinkedObject = (box, ["Face1"])
+        placed = self.doc.addObject("App::Link", "LnkPlaced")
+        placed.setLink(box)
+        placed.LinkTransform = True
+        self.doc.recompute()
+        before = {link.Name: Part.getShape(link).BoundBox for link in (whole, face, placed)}
+        self.migrate()
+        body = box.getParentGeoFeatureGroup()
+        self.assertIsNotNone(body)
+        for link in (whole, face, placed):
+            target = link.LinkedObject
+            target = target[0] if isinstance(target, tuple) else target
+            self.assertIs(target, body, link.Name)
+            self.assertSameBox(link, before[link.Name])
+
+    def testMigrateRelinksAnotherDocumentInItsUndo(self):
+        """PR 329 review, items 1 and 2: in another document, an App::Link (LinkTransform off) of
+        a placed legacy box and an XLinkSubList on its Face2. After Migrate the link is where it
+        was, and Undo and Redo take the other document's links along. Its change wasn't recorded:
+        Undo, which deletes the body, emptied the list, and Redo didn't bring the entry back."""
+        import os
+        import tempfile
+
+        box = self.placedLegacyBox()
+        self.doc.recompute()
+        folder = tempfile.mkdtemp()
+        self.doc.saveAs(os.path.join(folder, "MigrateUndoLinked.FCStd"))
+        other = App.newDocument("PanelFixesOther", hidden=True)
+        try:
+            other.UndoMode = 1
+            other.saveAs(os.path.join(folder, "MigrateUndoOwner.FCStd"))
+            user = other.addObject("App::FeaturePython", "User")
+            user.addProperty("App::PropertyXLinkSubList", "Far")
+            user.Far = [(box, ["Face2"])]
+            link = other.addObject("App::Link", "LnkFar")
+            link.setLink(box)
+            other.recompute()
+            before = Part.getShape(link).BoundBox
+            App.setActiveDocument(self.doc.Name)
+            Gui.setActiveDocument(self.doc.Name)
+            self.migrate()
+            body = box.getParentGeoFeatureGroup()
+            self.assertIsNotNone(body)
+            bodyName = body.Name
+            self.assertEqual(self.xlinkEntries(user.Far), {(bodyName, ("Face2",))})
+
+            for command, entries in (
+                ("Std_Undo", {("Box1", ("Face2",))}),
+                ("Std_Redo", {(bodyName, ("Face2",))}),
+            ):
+                self.answerModals()
+                Gui.runCommand(command)
+                pump()
+                self.answering = False
+                self.assertEqual(self.modals, [], command)
+                self.assertEqual(self.xlinkEntries(user.Far), entries, command)
+            other.recompute()
+            self.assertSameBox(link, before)
+        finally:
+            App.setActiveDocument(self.doc.Name)
+            App.closeDocument(other.Name)
+
     # -- ops#327: the Profile command's copy of a sketch in another document ---------------------
 
     def testPadOnASketchOfAnotherDocumentStopsWhenTheCopyIsRefused(self):
