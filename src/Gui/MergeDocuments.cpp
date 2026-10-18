@@ -112,14 +112,21 @@ std::vector<App::DocumentObject*> MergeDocuments::importObjects(std::istream& in
     this->nameMap.clear();
     this->stream = new zipios::ZipInputStream(input);
     XMLMergeReader reader(this->nameMap, "<memory>", *stream);
+    // The markers only grow, so the message changes exactly when this import adds one
+    const std::string newerBefore = App::newerFormatMessage(appdoc);
     std::vector<App::DocumentObject*> objs = appdoc->importObjects(reader);
 
     delete this->stream;
     this->stream = nullptr;
 
     // Objects of a newer fork release (ops#323, decision 71 Q2 B): warned when they come in, not at
-    // the next open
-    if (App::takeNewerFormatNotice(appdoc) && getMainWindow()) {
+    // the next open. Only when they brought markers: a document newer by itself whose notice is
+    // still pending (opened from the console) keeps it for the next open (ops#330 L2)
+    const bool added = App::newerFormatMessage(appdoc) != newerBefore;
+    if (added) {
+        App::takeNewerFormatNotice(appdoc);
+    }
+    if (added && getMainWindow()) {
         QMessageBox::warning(
             getMainWindow(),
             QObject::tr("Objects from a newer FreeCAD-CH build"),

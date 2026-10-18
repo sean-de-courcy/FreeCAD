@@ -12,10 +12,11 @@ import sys
 import tempfile
 import time
 import unittest
+from xml.sax.saxutils import escape as xml_escape
 
 import FreeCAD as App
 import FreeCADGui as Gui
-from PySide import QtCore, QtWidgets
+from PySide import QtCore, QtGui, QtWidgets
 
 from parttests.ForkReleaseTest import (
     FORK_RELEASE,
@@ -37,6 +38,13 @@ def _acceptFile(path=None):
         dialog.accept()
 
     return answer
+
+
+def _clickOk(dialog):
+    """An answer for a dialog with a button box: clicks its OK button (the recovery dialog's "Start
+    Recovery", then its "Finish")."""
+    box = dialog.findChild(QtWidgets.QDialogButtonBox)
+    box.button(QtWidgets.QDialogButtonBox.Ok).click()
 
 
 def _rejectFile(dialog):
@@ -155,6 +163,12 @@ class ForkReleaseGuiTest(unittest.TestCase):
                 seen.append((modal.windowTitle(), text, [], "file"))
                 App.Console.PrintLog(f"ForkReleaseGuiTest: {seen[-1]}\n")
                 act((lambda: wanted(modal)) if callable(wanted) else modal.reject)
+                return
+            if callable(wanted):
+                # Any other dialog, or a box the answer looks into: the function answers it
+                seen.append((modal.windowTitle(), text, buttons, "call"))
+                App.Console.PrintLog(f"ForkReleaseGuiTest: {seen[-1]}\n")
+                act(lambda: wanted(modal))
                 return
             seen.append((modal.windowTitle(), text, buttons, wanted))
             # In the console log: which box a failing or hanging run stopped at
@@ -308,3 +322,127 @@ class ForkReleaseGuiTest(unittest.TestCase):
             Gui.loadFile(current)
         self._opened(current)
         self.assertEqual(seen, [], "no late warning at the next open")
+
+    def testMergeWarnsOnlyWhenItBringsMarkers(self):
+        """The merge box blames the merged objects only when they made the document newer (ops#330
+        L2). A document newer by itself, opened from the console, shows no box at a merge of
+        current objects; a warned document shows one when a merge brings another marker."""
+        newer = self._newerFile()
+        current = os.path.join(self.dir, "Saved.FCStd")
+        doc = App.openDocument(newer)  # no GUI open: its notice is still pending
+        self.docNames.append(doc.Name)
+        with self.answering() as seen:
+            Gui.getDocument(doc.Name).mergeProject(current)
+        self.assertEqual(seen, [], "the merged objects are current")
+        App.closeDocument(doc.Name)
+
+        _, doc, gdoc = self._openedNewer()  # warned at the open
+        newest = os.path.join(self.dir, "Newest.FCStd")
+        _rewriteDocumentXml(current, newest, _setDocumentAttribute("ForkRelease", 1000))
+        with self.answering("OK") as seen:
+            gdoc.mergeProject(newest)
+        self.assertEqual(len(seen), 1, seen)
+        self.assertIn("newer", seen[0][0].lower())
+        self.assertIn("ForkRelease 1000", seen[0][1])
+
+    def _fakeCrashedSession(self, snapshot, label, fileName):
+        """Recovery files of a crashed session in the user cache, as the start finds them: the
+        session's lock file (not held) and one document folder with `snapshot` (a compressed
+        recovery file) and its meta file. Returns the paths to delete afterwards."""
+        cache = App.getUserCachePath()
+        # Letters only: the start skips the lock files whose name holds its own (numeric) ID
+        session = "opsTestRecovery"
+        exe = App.ConfigGet("ExeName")
+        lock = os.path.join(cache, f"{exe}_{session}.lock")
+        folder = os.path.join(cache, f"{exe}_Doc_{session}Document_{session}")
+        os.makedirs(folder)
+        shutil.copyfile(snapshot, os.path.join(folder, "fc_recovery_file.fcstd"))
+        with open(os.path.join(folder, "fc_recovery_file.xml"), "w", encoding="utf-8") as meta:
+            meta.write(
+                "<?xml version='1.0' encoding='utf-8'?>\n"
+                '<AutoRecovery SchemaVersion="1">\n'
+                "  <Status>Created</Status>\n"
+                f"  <Label>{xml_escape(label)}</Label>\n"
+                f"  <FileName>{xml_escape(fileName)}</FileName>\n"
+                "</AutoRecovery>\n"
+            )
+        open(lock, "w").close()
+        return [lock, folder]
+
+    def testRecoveryWarnsAtOnce(self):
+        """A recovered newer document warns when it is recovered, not at the next File > Open
+        (ops#330 L1)."""
+        newer = self._newerFile()
+        doc = App.openDocument(newer)
+        self.assertTrue(App.writeRecoverySnapshotToTransientDir(doc, compressed=True))
+        snapshot = os.path.join(self.dir, "Snapshot.FCStd")
+        shutil.copyfile(os.path.join(doc.TransientDir, "fc_recovery_file.fcstd"), snapshot)
+        App.closeDocument(doc.Name)
+        leftovers = self._fakeCrashedSession(snapshot, "Newer", newer)
+        try:
+            with self.answering(_clickOk, "OK", _clickOk) as seen:
+                self.assertTrue(Gui.checkForPreviousCrashes())
+        finally:
+            for path in leftovers:
+                if os.path.isdir(path):
+                    shutil.rmtree(path, ignore_errors=True)
+                elif os.path.exists(path):
+                    os.remove(path)
+        recovered = self._opened(newer)
+        self.assertIn("ForkRelease 999", App.getNewerFormat(recovered))
+        self.assertEqual(len(seen), 3, seen)
+        self.assertEqual(seen[0][3], "call", seen)  # Start Recovery
+        title, text, _, answer = seen[1]
+        self.assertIn("newer", title.lower(), seen)
+        self.assertIn("ForkRelease 999", text)
+        self.assertEqual(answer, "OK")
+        self.assertEqual(seen[2][0], seen[0][0], seen)  # Finish
+
+        current = os.path.join(self.dir, "Saved.FCStd")
+        with self.answering() as seen:
+            Gui.loadFile(current)
+        self._opened(current)
+        self.assertEqual(seen, [], "no late warning at the next open")
+
+    def testDropWarnsAfterTheDrop(self):
+        """A dropped newer file opens, and warns, once the drop has returned: the drag source
+        doesn't wait for the box (ops#330 L3)."""
+        newer = self._newerFile()
+        mime = QtCore.QMimeData()
+        mime.setUrls([QtCore.QUrl.fromLocalFile(newer)])
+        window = Gui.getMainWindow()
+        # Qt gives a drop only to the widget that accepted the drag's entry
+        enter = QtGui.QDragEnterEvent(
+            QtCore.QPoint(10, 10),
+            QtCore.Qt.CopyAction,
+            mime,
+            QtCore.Qt.LeftButton,
+            QtCore.Qt.NoModifier,
+        )
+        QtWidgets.QApplication.sendEvent(window, enter)
+        self.assertTrue(enter.isAccepted())
+        event = QtGui.QDropEvent(
+            QtCore.QPointF(10, 10),
+            QtCore.Qt.CopyAction,
+            mime,
+            QtCore.Qt.LeftButton,
+            QtCore.Qt.NoModifier,
+        )
+        dropping = [False]
+        during = []
+
+        def ok(box):
+            during.append(dropping[0])
+            box.accept()
+
+        with self.answering(ok) as seen:
+            dropping[0] = True
+            QtWidgets.QApplication.sendEvent(window, event)
+            dropping[0] = False
+            deadline = time.monotonic() + 30
+            while not during and time.monotonic() < deadline:
+                QtWidgets.QApplication.processEvents(QtCore.QEventLoop.AllEvents, 50)
+        self._opened(newer)
+        self.assertEqual(len(seen), 1, seen)
+        self.assertIn("newer", seen[0][0].lower())
+        self.assertEqual(during, [False], "the box showed inside the drop")

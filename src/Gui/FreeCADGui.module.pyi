@@ -561,6 +561,14 @@ def loadFile(fileName: str, module: str = "", /) -> None:
     """
     ...
 
+def checkForPreviousCrashes() -> bool:
+    """Offer to recover the documents of crashed sessions, as the start does.
+
+    Shows the document recovery dialog when another session left recovery files in the
+    user cache, and returns whether it was shown.
+    """
+    ...
+
 # Main window and view helpers
 def getMainWindow() -> _MainWindow:
     """Return the main application window wrapper."""

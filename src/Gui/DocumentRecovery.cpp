@@ -358,6 +358,10 @@ void DocumentRecovery::accept()
             }
         }
 
+        // A recovered newer document warns now, not at the next File > Open, and one that needs
+        // recomputing is offered it, as after an open (ops#330 L1)
+        Application::checkForRecomputes();
+
         d->ui.buttonBox->button(QDialogButtonBox::Ok)->setText(tr("&Finish"));
         d->ui.buttonBox->button(QDialogButtonBox::Cancel)->setEnabled(false);
         d->recovered = true;

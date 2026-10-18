@@ -64,6 +64,7 @@
 #include "Dialogs/DlgPreferencesImp.h"
 #include "Document.h"
 #include "DocumentObserverPython.h"
+#include "DocumentRecovery.h"
 #include "DownloadManager.h"
 #include "EditorView.h"
 #include "FileHandler.h"
@@ -1856,6 +1857,21 @@ PyObject* ApplicationPy::sLoadFile(PyObject* /*self*/, PyObject* args)
         Application::Instance->open(path, module.c_str());
 
         Py_Return;
+    }
+    PY_CATCH
+}
+
+// FreeCAD-CH ops#330: the recovery the start offers, for tests of what a recovery does
+PyObject* ApplicationPy::sCheckForPreviousCrashes(PyObject* /*self*/, PyObject* args)
+{
+    if (!PyArg_ParseTuple(args, "")) {
+        return nullptr;
+    }
+
+    PY_TRY
+    {
+        Dialog::DocumentRecoveryFinder finder;
+        return Py::new_reference_to(Py::Boolean(finder.checkForPreviousCrashes()));
     }
     PY_CATCH
 }

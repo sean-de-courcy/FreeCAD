@@ -2664,7 +2664,14 @@ void MainWindow::loadUrls(App::Document* doc, const QList<QUrl>& urls)
 
     QByteArray docName = doc ? QByteArray(doc->getName())
                              : qApp->translate("StdCmdNew", "Unnamed").toUtf8();
-    ModuleIO::importFiles(files, docName);
+    if (files.isEmpty()) {
+        return;
+    }
+    // Loaded once the drop has returned: an open can show modal boxes (a file of a newer build,
+    // a recompute to offer), and on Windows the drag source waits until they close (ops#330 L3)
+    QTimer::singleShot(0, this, [files, docName]() {
+        ModuleIO::importFiles(files, docName);
+    });
 }
 
 void MainWindow::changeEvent(QEvent* e)
