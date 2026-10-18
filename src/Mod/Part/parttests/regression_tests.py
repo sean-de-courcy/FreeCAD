@@ -1075,6 +1075,109 @@ class RegressionTests(unittest.TestCase):
             self.assertTrue(indexed, mapped)
             self.assertLess(where(refined, indexed).distanceToPoint(place), 1e-9, (mapped, indexed))
 
+    def test_refined_multifuse_names_as_fuse_with_refine(self):
+        """A refined Part::MultiFuse names its elements as Part::Fuse with Refine does (ops#362):
+        refine's history for the edges it merges reaches the mapper, as in makeElementRefine.
+        Before, only the faces' history did, and a merged edge was named from its two faces
+        (RFI...UPP) instead of from the edges it was made of. Expected, element by element
+        (matched by place and size), with each feature's own tag left out: the same names as
+        Part::Fuse with Refine on the same two inputs, and, for three inputs, as makeElementRefine
+        of the MultiFuse with Refine off (what Part::Fuse's Refine runs)."""
+        self.maxDiff = None
+        doc = self.Doc
+
+        def box(name, x, y=0, height=10):
+            b = doc.addObject("Part::Box", name)
+            b.Length, b.Width, b.Height = 10, 10, height
+            b.Placement.Base = Vector(x, y, 0)
+            return b
+
+        def multiFuse(name, inputs, refine):
+            fuse = doc.addObject("Part::MultiFuse", name)
+            fuse.Shapes = inputs
+            fuse.Refine = refine
+            return fuse
+
+        def names(shape, tag):
+            """{(kind, place, size): the element's mapped names, with ;tag; as ;*;}"""
+            elements = {"Face": shape.Faces, "Edge": shape.Edges, "Vertex": shape.Vertexes}
+            result = {}
+            for mapped, indexed in shape.ElementMap.items():
+                kind = indexed.rstrip("0123456789")
+                index = int(indexed[len(kind) :])
+                self.assertLessEqual(index, len(elements[kind]), (mapped, indexed))
+                element = elements[kind][index - 1]
+                if kind == "Vertex":
+                    place, size = element.Point, 0
+                elif kind == "Face":
+                    place, size = element.CenterOfMass, element.Area
+                else:
+                    place, size = element.CenterOfMass, element.Length
+                key = (kind,) + tuple(round(c, 6) + 0.0 for c in (place.x, place.y, place.z, size))
+                result.setdefault(key, set()).add(mapped.replace(";%d;" % tag, ";*;"))
+            return result
+
+        def assertSameNames(case, shape, tag, reference, referenceTag, counts):
+            for s in (shape, reference):
+                self.assertEqual((len(s.Faces), len(s.Edges), len(s.Vertexes)), counts, case)
+            mine, theirs = names(shape, tag), names(reference, referenceTag)
+            self.assertEqual(len(mine), sum(counts), case)  # every element named
+            differ = {
+                k: (sorted(mine.get(k, ())), sorted(theirs.get(k, ())))
+                for k in set(mine) | set(theirs)
+                if mine.get(k) != theirs.get(k)
+            }
+            with self.subTest(case):
+                self.assertEqual(differ, {})
+
+        # two boxes side by side: four edges and four faces merge
+        a, b = box("A", 0), box("B", 10)
+        twoOn = multiFuse("TwoOn", [a, b], True)
+        fuse = doc.addObject("Part::Fuse", "Fuse")
+        fuse.Base, fuse.Tool = a, b
+        fuse.Refine = True
+        # three boxes in a row, and inputs with element maps of their own: a filleted box and a
+        # refined MultiFuse of two boxes
+        c, d, e = box("C", 0, 30), box("D", 10, 30), box("E", 20, 30)
+        threeOn = multiFuse("ThreeOn", [c, d, e], True)
+        threeOff = multiFuse("ThreeOff", [c, d, e], False)
+        f = box("F", 0, 60)
+        doc.recompute()
+        top = [
+            i
+            for i, edge in enumerate(f.Shape.Edges, 1)
+            if abs(edge.CenterOfMass.x) < 1e-9 and abs(edge.CenterOfMass.z - 10) < 1e-9
+        ]
+        fillet = doc.addObject("Part::Fillet", "Fillet")
+        fillet.Base = f
+        fillet.Edges = [(top[0], 1.0, 1.0)]
+        inner = multiFuse("Inner", [box("G", 10, 60), box("H", 20, 60)], True)
+        mappedOn = multiFuse("MappedOn", [fillet, inner], True)
+        mappedFuse = doc.addObject("Part::Fuse", "MappedFuse")
+        mappedFuse.Base, mappedFuse.Tool = fillet, inner
+        mappedFuse.Refine = True
+        doc.recompute()
+        for feature in doc.Objects:
+            self.assertTrue(feature.isValid(), (feature.Name, feature.getStatusString()))
+
+        assertSameNames("two boxes", twoOn.Shape, twoOn.ID, fuse.Shape, fuse.ID, (6, 12, 8))
+        assertSameNames(
+            "three boxes",
+            threeOn.Shape,
+            threeOn.ID,
+            Part.getShape(threeOff, refine=True),
+            threeOff.ID,
+            (6, 12, 8),
+        )
+        assertSameNames(
+            "mapped inputs",
+            mappedOn.Shape,
+            mappedOn.ID,
+            mappedFuse.Shape,
+            mappedFuse.ID,
+            (7, 15, 10),
+        )
+
     def tearDown(self):
         """Clean up our test, optionally preserving the test document"""
         # This flag allows doing something like this:
