@@ -154,6 +154,9 @@ public:
     NodeMap nodeMap;
 
     std::map<qint64, QIcon> iconMap;
+    bool changingIcon = false;
+    bool gettingIcon = false;
+    bool updatingData = false;
 
     static ViewProviderDocumentObject* getView(App::DocumentObject* obj)
     {
@@ -521,7 +524,14 @@ public:
 
     void updateData(const App::Property* prop)
     {
+        // Each Link touches its own _LinkTouched for a change of its linked object, which changes
+        // the next Link's linked object: round a cycle of Links (a file can hold one) without
+        // end, after any change in it, such as an undo (ops#349)
+        if (updatingData) {
+            return;
+        }
         LinkInfoPtr me(this);
+        Base::StateLocker guard(updatingData);
         for (auto link : links) {
             link->onLinkedUpdateData(me, prop);
         }
@@ -771,10 +781,14 @@ public:
     void slotChangeIcon()
     {
         iconMap.clear();
-        if (!isLinked()) {
+        // Links that link each other (a cycle a file can hold) pass the change back here, without
+        // end: the GUI's open overflowed the stack (ops#349)
+        if (!isLinked() || changingIcon) {
             return;
         }
+        // me first: it keeps this alive until guard has reset the flag
         LinkInfoPtr me(this);
+        Base::StateLocker guard(changingIcon);
         for (auto link : links) {
             link->onLinkedIconChange(me);
         }
@@ -789,9 +803,13 @@ public:
             iconSize = static_cast<int>(sampleIcon.width() / pixelRatio);
         }
 
-        if (!isLinked()) {
+        // A Link's icon is its linked object's: Links that link each other (a cycle a file can
+        // hold, of any length) ask back here without end, and the GUI's first tree update after
+        // the open overflowed the stack. The Link asked again shows its own icon (ops#349)
+        if (!isLinked() || gettingIcon) {
             return QIcon();
         }
+        Base::StateLocker guard(gettingIcon);
 
         if (px.isNull()) {
             return pcLinked->getIcon();
@@ -2624,9 +2642,22 @@ std::vector<App::DocumentObject*> ViewProviderLink::claimChildren() const
         }
     }
     else if (!hasSubName) {
-        auto linked = getLinkedView(true);
+        // A Link claims its linked object's children: Links that link each other (a cycle a file
+        // can hold, of three or more) ask around the ring without end, and the GUI's first tree
+        // update after the open overflowed the stack. The Link asked again claims none (ops#349)
+        thread_local std::vector<const ViewProviderLink*> claiming;
+        auto linked = std::ranges::find(claiming, this) == claiming.end() ? getLinkedView(true)
+                                                                         : nullptr;
         if (linked) {
-            ret = linked->claimChildren();
+            claiming.push_back(this);
+            try {
+                ret = linked->claimChildren();
+            }
+            catch (...) {
+                claiming.pop_back();
+                throw;
+            }
+            claiming.pop_back();
             if (ext->getLinkClaimChildValue() && ext->getLinkedObjectValue()) {
                 ret.insert(ret.begin(), ext->getLinkedObjectValue());
             }
@@ -4020,10 +4051,23 @@ App::Property* ViewProviderLink::getPropertyByName(const char* name) const
         }
         prop = nullptr;
     }
-    if (pcObject && pcObject->canLinkProperties()) {
+    // A name it lacks is looked up in its linked object's view: in a cycle of three or more Links,
+    // which a file can hold, the lookup went round the ring without end (ops#349). The Link asked
+    // again has none
+    thread_local std::vector<const ViewProviderLink*> asking;
+    if (pcObject && pcObject->canLinkProperties()
+        && std::ranges::find(asking, this) == asking.end()) {
         auto linked = getLinkedViewProvider(nullptr, true);
         if (linked && linked != this) {
-            prop = linked->getPropertyByName(name);
+            asking.push_back(this);
+            try {
+                prop = linked->getPropertyByName(name);
+            }
+            catch (...) {
+                asking.pop_back();
+                throw;
+            }
+            asking.pop_back();
         }
     }
     return prop;

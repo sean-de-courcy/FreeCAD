@@ -51,6 +51,7 @@
 #include <App/ElementSolverBatch.h>
 #include <App/FeaturePythonPyImp.h>
 #include <App/GeoFeatureGroupExtension.h>
+#include <App/RecomputeThread.h>
 #include <Base/Console.h>
 
 #include "Feature.h"
@@ -316,9 +317,25 @@ short Feature::mustExecute() const
     // would ever settle (F6). No Body::onChanged(Placement) hook: a moved Body is itself touched,
     // so the next recompute asks here (ops#325); a container moved by an expression in the
     // middle of a recompute touches this when it asks to run (ContainerMoves.h, ops#342)
-    auto body = getFeatureBody();
-    if (body && !Suppressed.getValue() && !body->holds(this) && !placerProperties().empty()) {
-        if (placerElsewhere() != (failedElsewhere && isError())) {
+    if (!Suppressed.getValue() && !placerProperties().empty()) {
+        auto moved = [this] {
+            auto body = getFeatureBody();
+            return body && !body->holds(this)
+                && placerElsewhere() != (failedElsewhere && isError());
+        };
+        // The walk reads in-lists, groups and placements a recompute on another thread changes.
+        // A recompute's own question (on this thread for any document, or the worker's) walks;
+        // the GUI's Refresh poll walks only while the async worker recomputes nothing, in no
+        // document, and holds it off meanwhile, else answers as if nothing moved (ops#352, as
+        // ops#337's attachment poll)
+        bool run = false;
+        if (App::isRecomputingOnThisThread() || App::isRecomputeWorkerThread()) {
+            run = moved();
+        }
+        else {
+            App::runWhileRecomputeWorkerIdle([&] { run = moved(); });
+        }
+        if (run) {
             return 1;
         }
     }

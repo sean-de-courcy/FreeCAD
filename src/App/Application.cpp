@@ -884,7 +884,9 @@ void Application::queueRecomputeRequest(RecomputeRequest req)
 
 bool App::isRecomputeWorkerThread()
 {
-    return onRecomputeWorker;
+    // Or running a signal's slots while the worker waits for them (ops#349)
+    auto hop = RecomputeHop::current();
+    return onRecomputeWorker || (hop && hop->worker);
 }
 
 bool App::runWhileRecomputeWorkerIdle(const std::function<void()>& fn)
