@@ -33,6 +33,7 @@
 
 #include "FeaturePartFuse.h"
 #include "TopoShape.h"
+#include "TopoShapeMapper.h"
 #include "modelRefine.h"
 #include "TopoShapeOpCode.h"
 
@@ -173,11 +174,30 @@ App::DocumentObjectExecReturn* MultiFuse::execute()
                 try {
                     // On a topology-only copy, as TopoShape::makeElementRefine() refines
                     // (ops#354): its sub-shapes come in the same order, so the history by
-                    // index is the same
-                    TopoDS_Shape oldShape = BRepBuilderAPI_Copy(res.getShape(), false).Shape();
+                    // index is the same. Named from the fuse as makeElementRefine() names it:
+                    // the fuse's map kept on the refined shape named elements by their places
+                    // in the fused shape, some of which the refined shape doesn't have
+                    // (Edge15 of 12), and others by what was there (PR 328 review)
+                    TopoShape input(res);
+                    input.setShape(BRepBuilderAPI_Copy(res.getShape(), false).Shape(), false);
+                    const TopoDS_Shape& oldShape = input.getShape();
                     BRepBuilderAPI_RefineModel mkRefine(oldShape);
-                    // We just built an element map above for the fuse, don't erase it for a refine.
-                    res.setShape(mkRefine.Shape(), false);
+                    GenericShapeMapper mapper;
+                    for (const TopoShape& face : input.getSubTopoShapes(TopAbs_FACE)) {
+                        const TopTools_ListOfShape& merged = mkRefine.Modified(face.getShape());
+                        if (!merged.IsEmpty()) {
+                            mapper.populate(MappingStatus::Modified, face, merged);
+                        }
+                    }
+                    mapper.init(input, mkRefine.Shape());
+                    TopoShape refined = makeTopoShape(false);
+                    refined.makeShapeWithElementMap(
+                        mkRefine.Shape(),
+                        mapper,
+                        {input},
+                        OpCodes::Refine
+                    );
+                    res = refined;
                     ShapeHistory hist = buildHistory(mkRefine, TopAbs_FACE, res.getShape(), oldShape);
                     for (auto& jt : history) {
                         jt = joinHistory(jt, hist);

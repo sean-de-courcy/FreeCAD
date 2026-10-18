@@ -1023,6 +1023,58 @@ class RegressionTests(unittest.TestCase):
         self.assertTrue(refined.isValid())
         self._assertKept(held)
 
+    def test_refined_multifuse_names_its_own_elements(self):
+        """Part::MultiFuse with Refine names the refined shape's elements (PR 328 review). It kept
+        the fuse's element map on the refined shape, whose names indexed the fused shape's
+        elements: two boxes side by side, refined to 6 faces and 12 edges, had names for Edge15 to
+        Edge18, and a name resolved to whatever element had its index now. Expected: every name
+        in the map indexes an element of the refined shape, and the names that the elements
+        refine leaves alone (the end faces x = 0 and x = 20, their edges and vertices) have with
+        Refine off resolve with Refine on to the same places."""
+        doc = self.Doc
+        boxes = []
+        for name, x in (("A", 0), ("B", 10)):
+            box = doc.addObject("Part::Box", name)
+            box.Length, box.Width, box.Height = 10, 10, 5
+            box.Placement.Base = Vector(x, 0, 0)
+            boxes.append(box)
+        fuse = doc.addObject("Part::MultiFuse", "Fuse")
+        fuse.Shapes = boxes
+        fuse.Refine = False
+        doc.recompute()
+
+        def where(shape, indexed):
+            element = shape.getElement(indexed)
+            return element.Point if indexed.startswith("Vertex") else element.CenterOfMass
+
+        def atEnd(element):
+            return all(abs(v.X) < 1e-9 or abs(v.X - 20) < 1e-9 for v in element.Vertexes)
+
+        fused = fuse.Shape
+        held = {}
+        elements = {"Face": fused.Faces, "Edge": fused.Edges, "Vertex": fused.Vertexes}
+        for kind, shapes in elements.items():
+            for i, element in enumerate(shapes, 1):
+                if atEnd(element):
+                    indexed = "%s%d" % (kind, i)
+                    held[fused.getElementMappedName(indexed)] = where(fused, indexed)
+        self.assertEqual(len(held), 2 + 8 + 8)
+        fuse.Refine = True
+        doc.recompute()
+        self.assertTrue(fuse.isValid(), fuse.getStatusString())
+        refined = fuse.Shape
+        counts = {"Face": 6, "Edge": 12, "Vertex": 8}
+        self.assertEqual(
+            (len(refined.Faces), len(refined.Edges), len(refined.Vertexes)), tuple(counts.values())
+        )
+        for mapped, indexed in refined.ElementMap.items():
+            kind = indexed.rstrip("0123456789")
+            self.assertLessEqual(int(indexed[len(kind) :]), counts[kind], (mapped, indexed))
+        for mapped, place in held.items():
+            indexed = refined.getElementIndexedName(mapped)
+            self.assertTrue(indexed, mapped)
+            self.assertLess(where(refined, indexed).distanceToPoint(place), 1e-9, (mapped, indexed))
+
     def tearDown(self):
         """Clean up our test, optionally preserving the test document"""
         # This flag allows doing something like this:
