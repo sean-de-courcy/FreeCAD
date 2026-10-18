@@ -21,6 +21,7 @@
  *                                                                          *
  ***************************************************************************/
 
+#include <functional>
 #include <limits>
 #include <map>
 #include <unordered_set>
@@ -29,12 +30,16 @@
 #include <Standard_Version.hxx>
 #include <TopoDS.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopTools_DataMapOfShapeListOfShape.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
+#include <TopTools_MapOfShape.hxx>
 #include "TopoShape.h"
 
 #include <Base/Tools.h>
 
 #include <Mod/Part/PartGlobal.h>
 
+class BRepAlgoAPI_Splitter;
 class BRepBuilderAPI_MakeShape;
 class BRepTools_History;
 class BRepTools_ReShape;
@@ -259,6 +264,47 @@ struct PartExport GenericShapeMapper: ShapeMapper
 {
     /// Populate the map with a given source shape to an output shape
     void init(const TopoShape& src, const TopoDS_Shape& dst);
+};
+
+/** History of a sweep up to a shape built without BRepFeat: the profile swept past the up-to
+ *  shape, split by it, and the solids that start at the profile kept (a prism up to a freeform
+ *  face, ops#353; a PartDesign Revolution up to a face, ops#293).
+ *
+ *  Pieces in the solids left out don't count, so a side face that keeps one piece keeps its name.
+ *  The far end's edges and vertices, where the faces and edges that the profile's edges and
+ *  vertices generate meet the up-to shape, are those profile elements' projections (PRJ), as
+ *  BRepFeat named them. Generated from the side faces instead, a far edge had the profile edge in
+ *  its ancestry, and the solver took it for the profile's own edge silently (ops#334).
+ */
+class PartExport UpToSplitMapper: public MapperMaker
+{
+public:
+    /// `firstShape` gives the sweep's copy of an element of the profile, as the sweep's
+    /// FirstShape(S) does (BRepPrimAPI_MakePrism, BRepPrimAPI_MakeRevol); `result` is the kept
+    /// solids
+    UpToSplitMapper(
+        BRepAlgoAPI_Splitter& splitter,
+        BRepBuilderAPI_MakeShape& sweep,
+        const std::function<TopoDS_Shape(const TopoDS_Shape&)>& firstShape,
+        const TopoDS_Shape& profile,
+        const TopoDS_Shape& result
+    );
+    const std::vector<TopoDS_Shape>& modified(const TopoDS_Shape& s) const override;
+    const std::vector<TopoDS_Shape>& generated(const TopoDS_Shape& s) const override;
+    const std::vector<TopoDS_Shape>& projected(const TopoDS_Shape& s) const override;
+
+    /// The pieces the split leaves of the faces of `shape`; a face it doesn't cut is its own
+    static TopTools_IndexedMapOfShape piecesOf(
+        BRepAlgoAPI_Splitter& splitter,
+        const TopoDS_Shape& shape
+    );
+    /// The kept solids as one shape: the solid, or a compound of them
+    static TopoDS_Shape keptShape(const std::vector<TopoDS_Shape>& solids);
+
+private:
+    TopTools_IndexedMapOfShape kept;
+    TopTools_MapOfShape farEnd;
+    TopTools_DataMapOfShapeListOfShape projections;
 };
 
 /// Parameters for TopoShape::makeElementFilledFace()

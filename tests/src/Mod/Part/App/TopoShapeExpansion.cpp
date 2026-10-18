@@ -14,6 +14,7 @@
 #include <boost/core/ignore_unused.hpp>
 #include <BRepAdaptor_CompCurve.hxx>
 #include <BRepAdaptor_Surface.hxx>
+#include <BRep_Builder.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
@@ -2939,6 +2940,71 @@ TEST_F(TopoShapeExpansionTest, makeElementPrismUntil)
     EXPECT_EQ(result.countSubElements("Edge"), 12);
     EXPECT_EQ(result.countSubElements("Face"), 6);
     EXPECT_EQ(result.countSubElements("Vertex"), 8);
+}
+
+// BRepFeat up to a shell that stops only part of the profile extruded all of it far past the
+// shell, and said it was done (ops#356). BRepFeat chooses its own sense, so the maker refuses a
+// prism that reaches past both the shell and the profile either way. FeatureExtrude turns the
+// direction toward the up-to shape first, so no Pad or Pocket reaches the backwards half: here the
+// direction points away from the box. BRepFeat turns round, and the overhanging square's prism
+// reaches z = 163, past the box, the other way (ops#357)
+TEST_F(TopoShapeExpansionTest, makeElementPrismUntilRefusesReachingPastBackwards)
+{
+    // The box x 10..35, y -5..5, z 0..10 without its top: a Pad's shell up to the whole base
+    BRepPrimAPI_MakeBox box(gp_Pnt(10, -5, 0), 25, 10, 10);
+    const TopoDS_Face top = box.TopFace();
+    TopoDS_Shell shell;
+    BRep_Builder builder;
+    builder.MakeShell(shell);
+    for (TopExp_Explorer faces(box.Shape(), TopAbs_FACE); faces.More(); faces.Next()) {
+        if (!faces.Current().IsSame(top)) {
+            builder.Add(shell, faces.Current());
+        }
+    }
+    const TopoShape upTo(shell, 3L);
+    const TopoShape base(box.Shape(), 4L);
+    // The 4 x 4 square x x0..x0 + 4, y -2..2 at z = -5
+    auto square = [](double x0) {
+        BRepBuilderAPI_MakePolygon outline(
+            gp_Pnt(x0, -2, -5),
+            gp_Pnt(x0 + 4, -2, -5),
+            gp_Pnt(x0 + 4, 2, -5),
+            gp_Pnt(x0, 2, -5),
+            Standard_True
+        );
+        return TopoShape(BRepBuilderAPI_MakeFace(outline.Wire()).Face(), 2L);
+    };
+    // With the box as the base and the square as its own support, as FeatureExtrude passes them:
+    // without a base BRepFeat fails either way
+    auto prism = [&](double x0) {
+        const TopoShape profile = square(x0);
+        TopoShape result(1L);
+        result.makeElementPrismUntil(
+            base,
+            profile,
+            profile,
+            upTo,
+            gp_Dir(0, 0, -1),
+            TopoShape::PrismMode::None,
+            Standard_True
+        );
+        return result;
+    };
+    // All of the square under the box: up to its bottom, 4 x 4 x 5
+    const TopoShape under = prism(25);
+    EXPECT_NEAR(getVolume(under.getShape()), 80, 1e-6);
+    Base::BoundBox3d bounds = under.getBoundBox();
+    EXPECT_NEAR(bounds.MinZ, -5, 1e-6);
+    EXPECT_NEAR(bounds.MaxZ, 0, 1e-6);
+    // Half of it beside the box
+    try {
+        const TopoShape past = prism(33);
+        ADD_FAILURE() << "a prism of volume " << getVolume(past.getShape());
+    }
+    catch (const Base::RuntimeError& error) {
+        EXPECT_NE(std::string(error.what()).find("doesn't meet"), std::string::npos)
+            << error.what();
+    }
 }
 
 namespace

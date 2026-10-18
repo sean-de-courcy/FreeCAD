@@ -355,7 +355,8 @@ names it.
 | `fix/353-empty-prism` | fix | ops#353 | fork PR 321 | `fix/347-upto-tolerances` `04ac2ed1bc` | `96ca14805a` (fork PR 324), 2026-10-17 | never (fork fix) |
 | `fix/356-upto-overhang` | fix | ops#356 | fork PR 324 | `fix/353-empty-prism` `f1bbcf8b83` | `23165bc6b0` (fork PR 326), 2026-10-17 | never (fork fix) |
 | `feat/335-derived-survivors` | feat | ops#335 | - | `integration` `23165bc6b0` | `8d6875f298` (fork PR 327), 2026-10-18 | never (fork feature) |
-| `fix/354-refine-in-place` | fix | ops#354 | - | `integration` `23165bc6b0` | (fork PR 328) | never (fork fix) |
+| `fix/354-refine-in-place` | fix | ops#354 | - | `integration` `23165bc6b0` | `27364d2839` (fork PR 328), 2026-10-18 | never (fork fix) |
+| `fix/357-upto-split-followups` | fix | ops#357 | - | `fix/354-refine-in-place` `eaffb0a7cd` (stacked on fork PR 328) | (fork PR 331) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 
