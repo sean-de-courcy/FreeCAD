@@ -58,7 +58,7 @@
 #include <BRepFill_Generator.hxx>
 #include <BOPTools_AlgoTools3D.hxx>
 #include <BRepAdaptor_Surface.hxx>
-#include <BRepClass_FaceClassifier.hxx>
+#include <BRepTopAdaptor_FClass2d.hxx>
 #include <BRepTools.hxx>
 #include <IntTools_Context.hxx>
 #include <BRep_Builder.hxx>
@@ -89,6 +89,7 @@
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <BRepProj_Projection.hxx>
 #include <BRepTools_WireExplorer.hxx>
+#include <Geom2d_Curve.hxx>
 #include <GeomConvert.hxx>
 #include <GeomFill_BezierCurves.hxx>
 #include <GeomFill_BSplineCurves.hxx>
@@ -110,6 +111,7 @@
 #include <gp.hxx>
 #include <gp_Ax3.hxx>
 #include <gp_Pln.hxx>
+#include <gp_Vec2d.hxx>
 #include <BRepFill_CompatibleWires.hxx>
 
 #include <boost/algorithm/string/predicate.hpp>
@@ -6668,15 +6670,24 @@ private:
 };
 
 // Whether, somewhere on `piece` (a face of a solid, oriented as in it), the solid's outward normal
-// points against `direction`. Sampled: a grid over the piece's parameter range with a few points
-// in each knot span of its surface each way (16 at least, 256 at most), those inside it, and one
-// point inside it; a fold narrower than a span's step can be missed. Evenly spread, a band near a
-// rim under 3 % of the range was (PR 324 round 2 verification). Throws when no point inside the
-// piece is found.
+// points against `direction`, by more than a lean at modelling precision (below). Sampled: a grid
+// over the piece's parameter range with a few points in each knot span of its surface each way
+// (16 at least, 256 at most), those inside it; points just inside its edges, at fractions of the
+// grid's step from each edge's curve on the surface; and one point inside it. A fold narrower
+// than a span's step away from the edges can be missed. Evenly spread, a band near a rim under
+// 3 % of the range was (PR 324 round 2 verification); on the grid alone, a band along a rim
+// narrower than half a step was (ops#357: a ball's band above its equator, under the plate it
+// hangs from). Throws when no point inside the piece is found.
 bool facesAgainst(const TopoDS_Face& piece, const gp_Dir& direction)
 {
     const BRepAdaptor_Surface surface(piece);
     const gp_Vec along(direction);
+    // A lean that moves the piece sideways by less than Precision::Confusion() over its extent
+    // along the direction isn't a fold at modelling precision: a wall lofted from a circle to a
+    // B-spline interpolation of it leans 1e-8 rad, and was refused (ops#357). A piece without
+    // that extent (across the direction) keeps the strict bound.
+    const auto reach = extentAlong(piece, direction, false);
+    const double extent = reach ? reach->second - reach->first : 0.0;
     auto against = [&](double u, double v) {
         gp_Pnt point;
         gp_Vec alongU;
@@ -6687,11 +6698,23 @@ bool facesAgainst(const TopoDS_Face& piece, const gp_Dir& direction)
             outward.Reverse();
         }
         const double size = outward.Magnitude();
-        return size > gp::Resolution() && outward.Dot(along) < -1e-9 * size;
+        if (size <= gp::Resolution()) {
+            return false;
+        }
+        const double cosine = -outward.Dot(along) / size;
+        if (cosine <= 1e-9) {
+            return false;
+        }
+        const double sine = std::sqrt(std::max(0.0, 1.0 - cosine * cosine));
+        return extent <= Precision::Confusion()
+            || extent * cosine > Precision::Confusion() * sine;
     };
+    // One classifier for the piece: built per point, a piece facing against the direction mostly
+    // outside its trimming cost up to 65,536 of them on a dense B-spline (ops#357). Near the
+    // boundary it classifies exactly
+    BRepTopAdaptor_FClass2d classifier(piece, Precision::PConfusion());
     auto inside = [&](double u, double v) {
-        BRepClass_FaceClassifier classifier(piece, gp_Pnt2d(u, v), Precision::PConfusion());
-        return classifier.State() == TopAbs_IN;
+        return classifier.Perform(gp_Pnt2d(u, v)) == TopAbs_IN;
     };
     // The parameters to sample one way, from the bounds of the surface's knot spans over the
     // piece's range (one span for a surface without knots)
@@ -6731,6 +6754,41 @@ bool facesAgainst(const TopoDS_Face& piece, const gp_Dir& direction)
         for (double v : vs) {
             if (against(u, v) && inside(u, v)) {
                 return true;
+            }
+        }
+    }
+    // Along the edges, on both sides of each (the classifier keeps the inside), across the edge's
+    // curve measured in the grid's steps: a band along a rim lies between the rim and the grid's
+    // first row there
+    const double uStep = (uBounds.Last() - uBounds.First()) / static_cast<double>(us.size());
+    const double vStep = (vBounds.Last() - vBounds.First()) / static_cast<double>(vs.size());
+    for (TopExp_Explorer edges(piece, TopAbs_EDGE); edges.More(); edges.Next()) {
+        const TopoDS_Edge& edge = TopoDS::Edge(edges.Current());
+        double first = 0.0;
+        double last = 0.0;
+        const Handle(Geom2d_Curve) curve = BRep_Tool::CurveOnSurface(edge, piece, first, last);
+        if (BRep_Tool::Degenerated(edge) || curve.IsNull()) {
+            continue;
+        }
+        constexpr int alongEdge = 32;
+        for (int i = 0; i < alongEdge; ++i) {
+            gp_Pnt2d at;
+            gp_Vec2d tangent;
+            curve->D1(first + (i + 0.5) / alongEdge * (last - first), at, tangent);
+            gp_Vec2d across(-tangent.Y() / vStep, tangent.X() / uStep);
+            const double size = across.Magnitude();
+            if (size <= gp::Resolution()) {
+                continue;
+            }
+            across /= size;
+            for (double fraction : {1.0 / 8, 1.0 / 64, 1.0 / 512}) {
+                for (double side : {1.0, -1.0}) {
+                    const double u = at.X() + side * fraction * across.X() * uStep;
+                    const double v = at.Y() + side * fraction * across.Y() * vStep;
+                    if (against(u, v) && inside(u, v)) {
+                        return true;
+                    }
+                }
             }
         }
     }
