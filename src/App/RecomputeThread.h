@@ -51,7 +51,8 @@ AppExport bool isRecomputeWorkerThread();
  *
  * Returns false without running fn when the worker is inside a request, or while another caller
  * runs one (a try-lock: the caller never waits). fn must not queue, cancel or wait for
- * recomputes.
+ * recomputes, nor call runWhileRecomputeWorkerIdle again: the mutex isn't recursive, and a
+ * try-lock by its owner is undefined (ops#352).
  */
 AppExport bool runWhileRecomputeWorkerIdle(const std::function<void()>& fn);
 

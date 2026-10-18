@@ -338,17 +338,32 @@ bool SketchObject::externalFramesChanged(bool restored) const
                 && !App::isRecomputingOnThisThread(doc)))) {
         return false;
     }
-    const auto current = externalFrames();
-    const auto& built = ExternalFrames.getValues();
-    if (current.size() != built.size()) {
-        return true;
-    }
-    for (std::size_t i = 0; i < current.size(); ++i) {
-        if (!current[i].isSame(built[i], Precision::Confusion())) {
+    auto differ = [this] {
+        const auto current = externalFrames();
+        const auto& built = ExternalFrames.getValues();
+        if (current.size() != built.size()) {
             return true;
         }
+        for (std::size_t i = 0; i < current.size(); ++i) {
+            if (!current[i].isSame(built[i], Precision::Confusion())) {
+                return true;
+            }
+        }
+        return false;
+    };
+    // Asked from onDocumentRestored(), by a recompute running on this thread for any document, or
+    // by the worker (its single-object recompute sets no status): its own question
+    if (restored || App::isRecomputingOnThisThread() || App::isRecomputeWorkerThread()) {
+        return differ();
     }
-    return false;
+    // Otherwise (the GUI's Refresh poll), walk only while the async worker recomputes nothing, in
+    // no document, and hold it off meanwhile: the status above is read once, set late, not set
+    // for a single object, and only this document's (ops#352, as ops#337's attachment poll)
+    bool changed = false;
+    if (!App::runWhileRecomputeWorkerIdle([&] { changed = differ(); })) {
+        return false;
+    }
+    return changed;
 }
 // clang-format off
 

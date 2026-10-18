@@ -2,12 +2,24 @@
 
 #include <FCConfig.h>
 
+#include <chrono>
+#include <functional>
+#include <string>
+#include <thread>
+
+#include <boost/scope_exit.hpp>
+
 #include <App/Application.h>
 #include <App/Document.h>
 #include <App/ElementNamingUtils.h>
 #include <App/Expression.h>
 #include <App/MappedName.h>
 #include <App/ObjectIdentifier.h>
+#include <App/FeatureTest.h>
+#include <App/GroupExtension.h>
+#include <App/RecomputeThread.h>
+#include <Mod/Part/App/BodyBase.h>
+#include <Mod/Part/App/FeaturePartBox.h>
 #include <Mod/Sketcher/App/GeoEnum.h>
 #include <Mod/Sketcher/App/SketchObject.h>
 #include "SketcherTestHelpers.h"
@@ -954,3 +966,93 @@ TEST_F(SketchObjectTest, testStaleOrUntypedSubnameIsNoElement)
     EXPECT_EQ(getObject()->checkSubName("Constraint3").toString(), "Constraint3");
     EXPECT_EQ(getObject()->getElementName("Edge1", App::GeoFeature::ElementNameType::Normal).oldName, "Edge1");
 }
+
+// The GUI's Refresh poll beside an async recompute (FreeCAD-CH ops#352) -------------------------
+
+namespace
+{
+
+/// Runs `whileHeld` while the async recompute worker is inside a request for a blocking feature in
+/// a second document, then lets the worker finish and waits until it is idle. A single-object
+/// request sets no document's Recomputing status; a document request sets only the other
+/// document's (as ops#337's attachment poll tests)
+void besideTheWorker(bool singleObject, const std::function<void()>& whileHeld)
+{
+    auto& app = App::GetApplication();
+    const std::string otherName = app.getUniqueDocumentName("other");
+    auto other = app.newDocument(otherName.c_str(), "testUser");
+    BOOST_SCOPE_EXIT_ALL(&)
+    {
+        app.closeDocument(otherName.c_str());
+    };
+    auto blocker = other->addObject("App::FeatureTestAsyncBlocker", "Blocker");
+    ASSERT_TRUE(blocker);
+    const auto request = singleObject ? App::RecomputeRequest::fromDocumentObject(*blocker)
+                                      : App::RecomputeRequest::fromDocument(*other, true);
+    App::FeatureTestAsyncBlocker::resetBlocker();
+    BOOST_SCOPE_EXIT_ALL(&)
+    {
+        App::FeatureTestAsyncBlocker::releaseBlocker();
+        const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (!App::runWhileRecomputeWorkerIdle([] {})
+               && std::chrono::steady_clock::now() < until) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    };
+    blocker->touch();
+    ASSERT_TRUE(app.canRecomputeRequestOnWorker(request));
+    app.queueRecomputeRequest(request);
+    ASSERT_TRUE(App::FeatureTestAsyncBlocker::waitUntilStarted(std::chrono::seconds(10)));
+    ASSERT_FALSE(App::runWhileRecomputeWorkerIdle([] {}));
+    whileHeld();
+}
+
+}  // namespace
+
+class SketchObjectPollTest: public SketchObjectTest, public ::testing::WithParamInterface<bool>
+{
+protected:
+    /// The fixture's sketch at the document's root takes a vertex of a box in a placed container
+    /// at z = 50 (a Part::BodyBase: a root sketch may not link into an App::Part) as external
+    /// geometry, recomputed; then the container moved to z = 80: the link's frame differs from
+    /// the one its geometry was built with (ops#331)
+    void externalOfAMovedPart()
+    {
+        auto sketch = getObject();
+        auto doc = sketch->getDocument();
+        auto part = static_cast<Part::BodyBase*>(doc->addObject("Part::BodyBase", "Container"));
+        ASSERT_TRUE(part);
+        part->Placement.setValue(Base::Placement(Base::Vector3d(0, 0, 50), Base::Rotation()));
+        auto box = doc->addObject<Part::Box>("Inside");
+        part->getExtensionByType<App::GroupExtension>()->addObject(box);
+        doc->recompute();
+        ASSERT_GE(sketch->addExternal(box, "Vertex2"), 0);
+        doc->recompute();
+        EXPECT_EQ(sketch->ExternalFrames.getSize(), 1);
+        EXPECT_FALSE(sketch->externalFramesChanged());
+        part->Placement.setValue(Base::Placement(Base::Vector3d(0, 0, 80), Base::Rotation()));
+        EXPECT_TRUE(sketch->externalFramesChanged());
+    }
+};
+
+TEST_P(SketchObjectPollTest, externalFramesWalkOnlyWithTheWorkerIdle)
+{
+    // externalFramesChanged() walks the links' containers and placements: from the GUI's poll
+    // (this thread, no recompute here) not while the worker is inside any request
+    externalOfAMovedPart();
+    auto sketch = getObject();
+    besideTheWorker(GetParam(), [&] { EXPECT_FALSE(sketch->externalFramesChanged()); });
+    EXPECT_TRUE(sketch->externalFramesChanged());
+    EXPECT_TRUE(sketch->mustExecute());
+    sketch->getDocument()->recompute();
+    EXPECT_FALSE(sketch->externalFramesChanged());
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    WorkerRequest,
+    SketchObjectPollTest,
+    ::testing::Values(true, false),
+    [](const ::testing::TestParamInfo<bool>& info) {
+        return info.param ? "OneObject" : "AnotherDocument";
+    }
+);
