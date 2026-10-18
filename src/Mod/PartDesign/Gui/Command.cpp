@@ -420,26 +420,53 @@ DEF_STD_CMD_A(CmdPartDesignSubShapeBinder)
 // settles (FreeCAD-CH ops#308 T2). The feature itself, (PadB, "Face5"), is bound instead; the
 // binder follows its Body's placement. A whole Body picked stays as it is, and so does every pick
 // with no active Body: the binder is then made at the top level, where no cycle through a Body forms.
+// A pick through App::Parts, (P1, "Body2.PadB.Face5"), is followed down to the Body's feature the
+// same way (ops#321: the binder depended on the whole Part); a whole Part or Body picked, or a path
+// through anything else (an App::Link), stays as it is.
 static void bindFeaturesNotBodies(
     std::map<App::DocumentObject*, std::vector<std::string>>& values,
     const PartDesign::Body* active
 )
 {
+    // The feature and its element that sub names from obj, through App::Parts and then a Body
+    // other than the active one; none when it names something else
+    auto featurePick = [active](App::DocumentObject* obj, const std::string& sub)
+        -> std::optional<std::pair<App::DocumentObject*, std::string>> {
+        App::DocumentObject* current = obj;
+        std::size_t start = 0;
+        while (current) {
+            const auto dot = sub.find('.', start);
+            if (dot == std::string::npos) {
+                return std::nullopt;
+            }
+            App::DocumentObject* child =
+                obj->getSubObject(sub.substr(0, dot + 1).c_str(), nullptr, nullptr, false);
+            if (auto body = freecad_cast<PartDesign::Body*>(current)) {
+                if (body == active || !child || !body->hasObject(child) || dot + 1 >= sub.size()) {
+                    return std::nullopt;
+                }
+                return std::make_pair(child, sub.substr(dot + 1));
+            }
+            auto part = freecad_cast<App::Part*>(current);
+            if (!part || !child || !part->hasObject(child)) {
+                return std::nullopt;
+            }
+            current = child;
+            start = dot + 1;
+        }
+        return std::nullopt;
+    };
+
     std::map<App::DocumentObject*, std::vector<std::string>> result;
     for (auto& [obj, subs] : values) {
-        auto body = freecad_cast<PartDesign::Body*>(obj);
-        if (!active || !body || body == active || subs.empty()) {
+        if (!active || subs.empty()) {
             auto& kept = result[obj];
             kept.insert(kept.end(), subs.begin(), subs.end());
             continue;
         }
         for (const auto& sub : subs) {
-            const auto dot = sub.find('.');
-            App::DocumentObject* feature = dot == std::string::npos
-                ? nullptr
-                : obj->getSubObject(sub.substr(0, dot + 1).c_str(), nullptr, nullptr, false);
-            if (feature && body->hasObject(feature) && dot + 1 < sub.size()) {
-                result[feature].push_back(sub.substr(dot + 1));
+            if (auto pick = featurePick(obj, sub)) {
+                result[pick->first].push_back(pick->second);
             }
             else {
                 result[obj].push_back(sub);
@@ -1295,12 +1322,29 @@ void prepareProfileBased(
             auto oBody = PartDesignGui::getBodyFor(sketches[0], false);
             App::DocumentObject* target = oBody ? static_cast<App::DocumentObject*>(pcActiveBody)
                                                 : pcActivePart;
+            QString refusal;
             auto copy = PartDesignGui::TaskFeaturePick::makeCopy(
                 sketches[0],
                 "",
                 dlg.radioIndependent->isChecked(),
-                target
+                target,
+                &refusal
             );
+            // FreeCAD-CH (ops#327): no copy (a dependent copy of a sketch in another document):
+            // stop, as the other callers do. The null went to the body's addObject and on as the
+            // profile: nothing was made, without a word, and the transaction stayed open.
+            if (!copy) {
+                cmd->abortCommand();
+                QMessageBox::warning(
+                    Gui::getMainWindow(),
+                    QObject::tr("No copy"),
+                    refusal.isEmpty()
+                        ? QObject::tr("'%1' can't be copied. Make a cross-reference instead.")
+                              .arg(QString::fromUtf8(sketches[0]->Label.getValue()))
+                        : refusal
+                );
+                return;
+            }
             if (oBody) {
                 pcActiveBody->addObject(copy);
             }

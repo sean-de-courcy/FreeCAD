@@ -32,6 +32,7 @@
 #include <App/Origin.h>
 #include <App/Datums.h>
 #include <App/GroupExtension.h>
+#include <App/Link.h>
 #include <App/Part.h>
 #include <Gui/Application.h>
 #include <Gui/CommandT.h>
@@ -534,6 +535,13 @@ bool isAnyNonPartDesignLinksTo(PartDesign::Feature* feature, bool respectGroups)
                         return true;
                     }
                 }
+                // (ops#301) an XLink list, or an XLinkSubList: neither derives from the above
+                else if (prop->isDerivedFrom(App::PropertyXLinkSubList::getClassTypeId())) {
+                    auto values = static_cast<App::PropertyXLinkSubList*>(prop)->getValues();
+                    if (std::ranges::find(values, feature) != values.end()) {
+                        return true;
+                    }
+                }
             }
         }
     }
@@ -589,6 +597,34 @@ void relinkToBody(PartDesign::Feature* feature, bool last)
             return kept(obj, prop, sub);
         });
     };
+    // FreeCAD-CH (PR 329 round 2): links in other documents stay as they are, with a warning. Migrate's
+    // transaction is this document's, and a grouped Undo/Redo across documents doesn't keep a
+    // link to the body it makes (ops#301)
+    for (auto obj : feature->getInList()) {
+        if (obj->getDocument() == doc || isPartDesignAwareObjecta(obj)) {
+            continue;
+        }
+        std::vector<App::Property*> properties;
+        obj->getPropertyList(properties);
+        for (auto prop : properties) {
+            auto propLink = freecad_cast<App::PropertyLinkBase*>(prop);
+            if (!propLink || !prop->hasName()) {
+                continue;
+            }
+            std::vector<App::DocumentObject*> links;
+            propLink->getLinks(links, true);
+            if (std::ranges::find(links, feature) != links.end()) {
+                FC_WARN(
+                    "In document " << obj->getDocument()->getName() << ", "
+                                   << obj->getFullName() << "." << prop->getName()
+                                   << " keeps its link to " << feature->getFullName()
+                                   << ": Migrate doesn't change other documents; relink it by "
+                                      "hand if it should follow "
+                                   << body->getFullName()
+                );
+            }
+        }
+    }
     for (const auto& obj : doc->getObjects()) {
         if (!isPartDesignAwareObjecta(obj)) {
             std::vector<App::Property*> properties;
@@ -663,9 +699,54 @@ void relinkToBody(PartDesign::Feature* feature, bool last)
                         //     (2015-08-13, Fat-Zer)
                     }
                 }
+                // FreeCAD-CH (ops#301): an XLinkSubList, or an XLink list (derived from it), as
+                // (object, [elements]) entries. Neither derives from the lists above, so they
+                // were never relinked. An entry on the body already takes the moved elements.
+                else if (prop->isDerivedFrom(App::PropertyXLinkSubList::getClassTypeId())) {
+                    auto propLink = static_cast<App::PropertyXLinkSubList*>(prop);
+                    std::string entries;
+                    bool valueChanged = false;
+                    bool unresolved = false;
+                    for (const auto& link : propLink->getSubListValues()) {
+                        App::DocumentObject* target = link.getValue();
+                        const auto& subs = link.getSubValues();
+                        if (target == feature && !keptAny(obj, prop, subs)) {
+                            target = body;
+                            valueChanged = true;
+                        }
+                        unresolved = unresolved || !target;
+                        entries += buildLinkSubPythonStr(target, subs) + ",";
+                    }
+                    // an entry of a document that isn't open would be lost
+                    if (valueChanged && unresolved) {
+                        FC_WARN(
+                            obj->getFullName() << "." << prop->getName() << " keeps its link to "
+                                               << feature->getFullName()
+                                               << ": it also links a document that isn't open"
+                        );
+                    }
+                    else if (valueChanged) {
+                        valueStr = "[" + entries + "]";
+                    }
+                }
 
-                if (!valueStr.empty() && prop->hasName()) {
-                    FCMD_OBJ_CMD(obj, prop->getName() << '=' << valueStr);
+                if (valueStr.empty() || !prop->hasName()) {
+                    continue;
+                }
+                FCMD_OBJ_CMD(obj, prop->getName() << '=' << valueStr);
+                // FreeCAD-CH (PR 329 round 2): a link that leaves out its target's own placement
+                // (LinkTransform off) showed the feature without it, and the body's shape holds
+                // it. Making up for it isn't exact (arrays, links of links, expressions, a
+                // placement the migration changes), so Migrate warns instead
+                auto link = obj->getExtensionByType<App::LinkBaseExtension>(true);
+                if (link && prop == link->getLinkedObjectProperty() && !link->linkTransform()) {
+                    FC_WARN(
+                        obj->getFullName()
+                        << " now links " << body->getFullName() << " instead of "
+                        << feature->getFullName()
+                        << ": with LinkTransform off it may have moved by the Placement of "
+                        << feature->getFullName() << ", and so may links of it"
+                    );
                 }
             }
         }
