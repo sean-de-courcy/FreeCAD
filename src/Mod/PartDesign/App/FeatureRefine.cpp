@@ -104,7 +104,13 @@ TopoShape FeatureRefine::refineShapeIfActive(
     TopoShape shape(oldShape);
     try {
         TopoShape refinedShape = shape.makeElementRefine();
-        if (refinedShape.isValid() || !oldShape.isValid()) {
+        // A refine that merges no face keeps the shells as they were (BRepBuilderAPI_RefineModel
+        // adds an unmodified shell unchanged), so only a merge can make a valid shape invalid. The
+        // check reads the whole shape (BRepCheck_Analyzer): about a third of a 40-feature body's
+        // recompute when it ran after every refine (ops#389).
+        const bool merged = refinedShape.countSubShapes(TopAbs_FACE)
+            != oldShape.countSubShapes(TopAbs_FACE);
+        if (!merged || refinedShape.isValid() || !oldShape.isValid()) {
             return refinedShape;
         }
         if (onError == RefineErrorPolicy::Raise) {
