@@ -432,6 +432,15 @@ void qtInvokeOnMain(std::function<void()>&& fn, bool blocking)
     );
 }
 
+// Hook: run the functors queued for the GUI thread, and no other events (FreeCAD-CH ops#365)
+void qtRunQueuedOnMain()
+{
+    if (!qApp) {
+        return;  // qtInvokeOnMain ran them inline
+    }
+    QCoreApplication::sendPostedEvents(MainThreadInvoker::instance(), QEvent::MetaCall);
+}
+
 }  // namespace Gui
 
 void Application::initStyleParameterManager()
@@ -518,7 +527,7 @@ Application::Application(bool GUIenabled)
 {
     // App::GetApplication().Attach(this);
     if (GUIenabled) {
-        App::MainThreadSignalConfig::setHooks(&qtIsMainThread, &qtInvokeOnMain);
+        App::MainThreadSignalConfig::setHooks(&qtIsMainThread, &qtInvokeOnMain, &qtRunQueuedOnMain);
 
         // NOLINTBEGIN
         App::GetApplication().signalNewDocument.connect(

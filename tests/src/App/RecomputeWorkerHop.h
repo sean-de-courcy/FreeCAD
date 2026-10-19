@@ -11,6 +11,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
 #include <deque>
 #include <functional>
 #include <memory>
@@ -37,11 +38,11 @@ public:
     MainThreadHopHooks()
     {
         state().mainThread = std::this_thread::get_id();
-        App::MainThreadSignalConfig::setHooks(&isMainThread, &invoke);
+        App::MainThreadSignalConfig::setHooks(&isMainThread, &invoke, &runQueued);
     }
     ~MainThreadHopHooks()
     {
-        App::MainThreadSignalConfig::setHooks(nullptr, nullptr);
+        App::MainThreadSignalConfig::setHooks(nullptr, nullptr, nullptr);
     }
     MainThreadHopHooks(const MainThreadHopHooks&) = delete;
     MainThreadHopHooks& operator=(const MainThreadHopHooks&) = delete;
@@ -57,20 +58,57 @@ public:
             }
             std::unique_lock lock(s.mutex);
             s.cv.wait_for(lock, std::chrono::milliseconds(5), [&] { return !s.queue.empty(); });
-            while (!s.queue.empty()) {
-                auto task = std::move(s.queue.front());
-                s.queue.pop_front();
-                lock.unlock();
-                task->fn();
-                lock.lock();
-                task->done = true;
-                s.cv.notify_all();
-            }
+            runQueuedLocked(lock);
         }
         return true;
     }
 
+    /// Runs the slots queued when it starts, not those queued meanwhile, as Qt's
+    /// sendPostedEvents() does (the runQueued hook, ops#365)
+    static void runQueued()
+    {
+        auto& s = state();
+        std::unique_lock lock(s.mutex);
+        for (auto n = s.queue.size(); n > 0 && !s.queue.empty(); --n) {
+            runFrontLocked(lock);
+        }
+    }
+
+    /// How many emissions on another thread have queued their slots so far
+    static std::size_t invokes()
+    {
+        std::lock_guard lock(state().mutex);
+        return state().invokes;
+    }
+
+    /// Waits until an emission on another thread has queued its slots, without running them
+    static bool waitUntilQueued(std::chrono::seconds limit)
+    {
+        auto& s = state();
+        std::unique_lock lock(s.mutex);
+        return s.cv.wait_for(lock, limit, [&] { return !s.queue.empty(); });
+    }
+
 private:
+    static void runQueuedLocked(std::unique_lock<std::mutex>& lock)
+    {
+        while (!state().queue.empty()) {
+            runFrontLocked(lock);
+        }
+    }
+
+    static void runFrontLocked(std::unique_lock<std::mutex>& lock)
+    {
+        auto& s = state();
+        auto task = std::move(s.queue.front());
+        s.queue.pop_front();
+        lock.unlock();
+        task->fn();
+        lock.lock();
+        task->done = true;
+        s.cv.notify_all();
+    }
+
     struct Task
     {
         std::function<void()> fn;
@@ -82,6 +120,7 @@ private:
         std::mutex mutex;
         std::condition_variable cv;
         std::deque<std::shared_ptr<Task>> queue;
+        std::size_t invokes = 0;
     };
     static State& state()
     {
@@ -99,6 +138,7 @@ private:
         task->fn = std::move(fn);
         std::unique_lock lock(s.mutex);
         s.queue.push_back(task);
+        ++s.invokes;
         s.cv.notify_all();
         if (blocking) {
             s.cv.wait(lock, [&] { return task->done; });
@@ -133,11 +173,11 @@ inline const char* hopRequestName(HopRequest request)
 
 /**
  * Emits doc.signalRecomputedObject(obj) from the async recompute worker inside a request, with
- * MainThreadHopHooks set: its slots run on this thread while the worker waits, as a GUI's do. On
- * Windows only an emission compiled outside FreeCADApp hops (ops#365): this one is. For the two
- * requests in a second document it comes from the request's callback (the worker is still inside
- * the request); for ThisDocument from a slot of doc.signalBeforeRecompute, which runs on the
- * worker on Windows and in its hop elsewhere.
+ * MainThreadHopHooks set: its slots run on this thread while the worker waits, as a GUI's do. For
+ * the two requests in a second document it comes from the request's callback (the worker is still
+ * inside the request); for ThisDocument from a slot of doc.signalBeforeRecompute, which itself
+ * runs in the worker's hop (on Windows too since ops#365), so the emission is on this thread
+ * inside that hop.
  */
 inline void emitFromTheWorkersRequest(
     HopRequest kind,

@@ -21,7 +21,9 @@
 *                                                                          *
 ***************************************************************************/"""
 
+import inspect
 import os
+import sys
 import tempfile
 import threading
 import time
@@ -221,6 +223,150 @@ class TestGuiDocument(unittest.TestCase):
 
         self.assertEqual(proxy.executed_thread_id, threading.get_ident())
         self.assertGreaterEqual(elapsed, 0.04)
+
+    def testAsyncRefreshRunsDocumentObserversOnTheMainThread(self):
+        """The worker's document signals run their slots on the main thread (ops#365): on
+        Windows FreeCADApp.dll had its own null copy of the GUI's hooks, so an observer of
+        signalRecomputedObject ran on the recompute worker during an async Std_Refresh."""
+        params = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/Document")
+        old_async = params.GetBool("EnableAsyncRecompute", True)
+        main = threading.get_ident()
+
+        class Observer:
+            def __init__(self, doc):
+                self.doc = doc
+                self.threads = []
+
+            def slotRecomputedObject(self, obj):
+                if obj.Document == self.doc and obj.Name == "Feature":
+                    self.threads.append(threading.get_ident())
+
+        obj = self.doc.addObject("App::FeatureTest", "Feature")
+        self.doc.recompute()
+        observer = Observer(self.doc)
+        FreeCAD.addDocumentObserver(observer)
+        try:
+            params.SetBool("EnableAsyncRecompute", True)
+            FreeCADGui.setActiveDocument(self.doc.Name)
+            obj.touch()
+            FreeCADGui.runCommand("Std_Refresh", 0)
+            # On the worker: its hop to this thread waits for the event loop
+            ranBeforeReturning = list(observer.threads)
+            self.assertTrue(self._processEventsUntil(lambda: observer.threads, timeout=10.0))
+            self.assertTrue(self._processEventsUntil(lambda: not self.doc.Recomputing))
+        finally:
+            FreeCAD.removeDocumentObserver(observer)
+            params.SetBool("EnableAsyncRecompute", old_async)
+
+        self.assertEqual(observer.threads, [main])
+        self.assertEqual(ranBeforeReturning, [])
+
+    def testCloseDuringAsyncRefreshRunsTheWorkersHops(self):
+        """Closing a document while the worker waits in a hop to the main thread (ops#365): the
+        close waits for the worker's request and runs the hops meanwhile. It waited for a worker
+        that waited for it (a hang, off Windows before ops#365, since the hop happened there)."""
+        params = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/Document")
+        old_async = params.GetBool("EnableAsyncRecompute", True)
+        main = threading.get_ident()
+
+        class Observer:
+            def __init__(self, doc):
+                self.doc = doc
+                self.threads = []
+
+            def slotRecomputedObject(self, obj):
+                if obj.Document == self.doc and obj.Name == "Feature":
+                    self.threads.append(threading.get_ident())
+
+        obj = self.doc.addObject("App::FeatureTest", "Feature")
+        self.doc.recompute()
+        observer = Observer(self.doc)
+        FreeCAD.addDocumentObserver(observer)
+        name = self.doc.Name
+        try:
+            params.SetBool("EnableAsyncRecompute", True)
+            FreeCADGui.setActiveDocument(name)
+            obj.touch()
+            FreeCADGui.runCommand("Std_Refresh", 0)
+            # No events: the worker reaches its first hop and waits there, Recomputing set
+            deadline = time.monotonic() + 10.0
+            while not self.doc.Recomputing and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(self.doc.Recomputing)
+            FreeCAD.closeDocument(name)
+            self.doc = None
+        finally:
+            FreeCAD.removeDocumentObserver(observer)
+            params.SetBool("EnableAsyncRecompute", old_async)
+
+        self.assertNotIn(name, FreeCAD.listDocuments())
+        self.assertEqual(observer.threads, [main])
+
+    def testASlotClosingItsDocumentInTheWorkersHopGetsARuntimeError(self):
+        """A slot in the worker's hop that closes the document being recomputed gets a Python
+        RuntimeError (ops#365). App.closeDocument let the C++ refusal unwind through the
+        interpreter's frames: the except never ran, and a later slot in the same wait walked a
+        cycle of stale frames forever."""
+        params = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/Document")
+        old_async = params.GetBool("EnableAsyncRecompute", True)
+
+        class Observer:
+            def __init__(self, doc):
+                self.doc = doc
+                self.closing = False
+                self.caught = None
+                self.depths = []
+
+            def slotRecomputedObject(self, obj):
+                if not self.closing or obj.Document != self.doc:
+                    return
+                if self.caught is None:
+                    self.caught = "nothing"
+                    try:
+                        FreeCAD.closeDocument(self.doc.Name)
+                        self.caught = "returned"
+                    except RuntimeError:
+                        self.caught = "RuntimeError"
+                    return
+                if len(self.depths) < 3:
+                    # The frames above this slot end, a few calls above the test
+                    frame = sys._getframe()
+                    n = 0
+                    while frame is not None and n < 10000:
+                        frame = frame.f_back
+                        n += 1
+                    self.depths.append(n)
+
+        for i in range(5):
+            self.doc.addObject("App::FeatureTest", "Feature%d" % i)
+        self.doc.recompute()
+        observer = Observer(self.doc)
+        FreeCAD.addDocumentObserver(observer)
+        name = self.doc.Name
+        here = len(inspect.stack(0))
+        try:
+            params.SetBool("EnableAsyncRecompute", True)
+            FreeCADGui.setActiveDocument(name)
+            for obj in self.doc.Objects:
+                obj.touch()
+            FreeCADGui.runCommand("Std_Refresh", 0)
+            deadline = time.monotonic() + 10.0
+            while not self.doc.Recomputing and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(self.doc.Recomputing)
+            observer.closing = True
+            # The slots run in this close's wait
+            FreeCAD.closeDocument(name)
+            self.doc = None
+        finally:
+            FreeCAD.removeDocumentObserver(observer)
+            params.SetBool("EnableAsyncRecompute", old_async)
+
+        self.assertEqual(observer.caught, "RuntimeError")
+        self.assertNotIn(name, FreeCAD.listDocuments())
+        self.assertTrue(observer.depths)
+        for depth in observer.depths:
+            self.assertLess(depth, here + 20)
 
     def testSaveCommandDoesNotUseDeprecatedAPI(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -368,7 +368,8 @@ names it.
 | `feat/351-pipe-end-names` | feat | ops#351 | - | `integration` `4575e65657` | `2e2bb138ba` (fork PR 337), 2026-10-19 | never (fork feature) |
 | `fix/244-copy-picks` | fix | ops#244 | - | `integration` `2e2bb138ba` | `23b0fe87d3` (fork PR 343), 2026-10-19 | never (fork fix) |
 | `fix/303-dropped-base-parts` | fix | ops#303 | - | `integration` `2e2bb138ba` | `b810473540` (fork PR 341), 2026-10-19 | never (fork fix) |
-| `infra/388-release-env` | infra | ops#388 | upstream PR 30068, `fed6d0db9b`, `19eb9fe7d3`, `2354b07b52`, `ec6852e6ca` | `integration` `2e2bb138ba` | (fork PR 342) | upstream commits: at a base that has them; the release check: never |
+| `infra/388-release-env` | infra | ops#388 | upstream PR 30068, `fed6d0db9b`, `19eb9fe7d3`, `2354b07b52`, `ec6852e6ca` | `integration` `2e2bb138ba` | `953f76e711` (fork PR 342), 2026-10-19 | upstream commits: at a base that has them; the release check: never |
+| `fix/365-main-thread-hooks` | fix | ops#365 | - | `integration` `2e2bb138ba` | (fork PR 347) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 

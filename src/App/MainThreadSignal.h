@@ -43,51 +43,35 @@ namespace App
 // may observe while recompute can run on a worker thread. Raw
 // App::DocumentObject signals intentionally remain plain fastsignals with
 // same-thread semantics.
-class MainThreadSignalConfig
+//
+// The hooks are stored once, in FreeCADApp (Application.cpp), and every library
+// reaches them through these exported functions. They used to be function-local
+// statics of inline members: on Windows each DLL then had its own copy, setHooks
+// from FreeCADGui set only Gui's, and App's emits on the recompute worker ran
+// their slots on the worker (FreeCAD-CH ops#365).
+class AppExport MainThreadSignalConfig
 {
 public:
     using IsMainThreadFn = bool (*)();  // true iff currently on GUI/main thread
     using InvokeFn = void (*)(std::function<void()>&& fn, bool blocking);
+    using RunQueuedFn = void (*)();
 
-    static void setHooks(IsMainThreadFn isMainThread, InvokeFn invoke)
-    {
-        isMainThreadSlot() = isMainThread;
-        invokeSlot() = invoke;
-    }
+    static void setHooks(IsMainThreadFn isMainThread, InvokeFn invoke, RunQueuedFn runQueued = nullptr);
 
-    static inline bool isMainThread()
-    {
-        auto* f = isMainThreadSlot();
-        return f ? f() : true;  // no hooks, treat current thread as "main"
-    }
+    /// No hooks: the current thread counts as "main"
+    static bool isMainThread();
 
-    static inline bool hasHooks()
-    {
-        return isMainThreadSlot() && invokeSlot();
-    }
+    static bool hasHooks();
 
-    static inline void invoke(std::function<void()>&& fn, bool blocking)
-    {
-        auto* f = invokeSlot();
-        if (f) {
-            f(std::move(fn), blocking);
-        }
-        else {
-            fn();  // no hooks, run inline
-        }
-    }
+    /// No hooks: runs fn inline
+    static void invoke(std::function<void()>&& fn, bool blocking);
 
-private:
-    static IsMainThreadFn& isMainThreadSlot()
-    {
-        static IsMainThreadFn fn = nullptr;
-        return fn;
-    }
-    static InvokeFn& invokeSlot()
-    {
-        static InvokeFn fn = nullptr;
-        return fn;
-    }
+    /**
+     * On the main thread: runs the functions invoke() queued for it, and no other events. A
+     * main-thread wait for the recompute worker calls it, since the worker may be blocked in a
+     * hop to this thread (ops#365). No hook: does nothing.
+     */
+    static void runQueued();
 };
 
 namespace detail
