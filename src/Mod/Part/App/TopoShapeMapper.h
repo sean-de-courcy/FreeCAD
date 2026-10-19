@@ -31,6 +31,7 @@
 #include <TopoDS.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopTools_DataMapOfShapeListOfShape.hxx>
+#include <TopTools_DataMapOfShapeInteger.hxx>
 #include <TopTools_DataMapOfShapeShape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopTools_MapOfShape.hxx>
@@ -286,7 +287,10 @@ struct PartExport GenericShapeMapper: ShapeMapper
  *  A profile face whose cap the up-to shape cuts into several pieces (a shell's faces, a hole in
  *  the up-to face) has one projection per piece. Each such piece carries marks, the elements of
  *  the inputs that bound it (marksOf()), since a counter in the pieces' order shifts when an edit
- *  adds or removes a piece (ops#360, PR 340 round 1).
+ *  adds or removes a piece (ops#360, PR 340 round 1). The marks are only what tells it apart
+ *  from the other caps (round 2): a piece alone on its face of the up-to shape is marked by that
+ *  face, others by the edges that bound it too, and pieces with the same marks still by the
+ *  duplicate counter (counterOf()).
  */
 class PartExport UpToSplitMapper: public MapperMaker
 {
@@ -311,6 +315,12 @@ public:
     /// start cap's edges whose projections they are and the up-to shape's edges they are pieces
     /// of. Empty for a cap in one piece, and for any other element
     std::vector<TopoDS_Shape> marksOf(const TopoDS_Shape& cap) const;
+    /// For a far cap whose marks other pieces of its cap share, the duplicate counter of its
+    /// name: how many share them and its place among them, by their centres. 0 otherwise
+    int counterOf(const TopoDS_Shape& cap) const;
+    /// True if `shape` is a far cap, bound as a projection; a face of the up-to shape the split
+    /// leaves whole is one too
+    bool isFarCap(const TopoDS_Shape& shape) const;
 
     /// The pieces the split leaves of the faces of `shape`; a face it doesn't cut is its own
     static TopTools_IndexedMapOfShape piecesOf(
@@ -331,7 +341,7 @@ private:
     void markCaps(
         BRepAlgoAPI_Splitter& splitter,
         const TopoDS_Shape& upTo,
-        const TopTools_ListOfShape& caps
+        const std::vector<TopTools_ListOfShape>& severalPieces
     );
 
     TopTools_IndexedMapOfShape kept;
@@ -341,6 +351,7 @@ private:
     /// A far edge's source: the start cap's edge it is the projection of
     TopTools_DataMapOfShapeShape farSources;
     TopTools_DataMapOfShapeListOfShape capMarks;
+    TopTools_DataMapOfShapeInteger capCounters;
 };
 
 /// Parameters for TopoShape::makeElementFilledFace()

@@ -183,6 +183,11 @@ static void expandCompound(const TopoShape& shape, std::vector<TopoShape>& res)
 
 namespace
 {
+/// Mapper flag of a far cap told apart from its twins, the pieces of its cap with the same marks,
+/// only by its place among them (the duplicate counter; ops#360, PR 340 round 2). Beside
+/// Data's flags (ElementNamingUtils.h), kept here as only the split's far caps carry it
+constexpr const char* MAPPER_FLAG_ORDERED = "ORD";
+
 /// A name in the form of a map that interns or not (ops#6), as ElementMap::setElementName stores it
 Data::MappedName toMapForm(const Data::MappedName& name, bool interned)
 {
@@ -2611,12 +2616,12 @@ TopoShape& TopoShape::makeShapeWithElementMap(
         }
 
         std::unordered_multiset<Data::MappedName, Data::MappedNameHasher> usedProjectedLinkedNames;
-        std::unordered_multiset<std::string> usedProjectedMarks;
         std::unordered_set<Data::IndexedName, Data::IndexedNameHasher> allGeneratedShapes;
 
         // A far cap that is one of several pieces of its profile face's cap is told apart by its
         // marks, the inputs' elements that bound it, as a modified element by its neighbours
-        // (ops#360, PR 340 round 1). Its section carries MOD with PRJ: a reference to a piece is
+        // (ops#360, PR 340 round 1), and pieces with the same marks by the duplicate counter
+        // (round 2). Its section carries MOD with PRJ: a reference to a piece is
         // not the cap in one piece that an edit leaves, nor the other way round (the solver's
         // top agreement compares the flags), as a split face's piece isn't the face made whole
         const auto* upToSplit = dynamic_cast<const UpToSplitMapper*>(&mapper);
@@ -2766,7 +2771,14 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                             = Data::IndexedName::fromConst(newInfo.shapetype, projectedShapeIndex);
 
                         if (getMappedName(element)) {
-                            continue;
+                            // A face of the up-to shape that the split leaves whole is a far cap
+                            // all the same: it has the face's name from mapSubElement, which
+                            // stood for a piece of another cap once the piece grew to cover the
+                            // face (ops#360, PR 340 round 2)
+                            if (!upToSplit || !upToSplit->isFarCap(projectedShape)) {
+                                continue;
+                            }
+                            ensureElementMap()->erase(element);
                         }
 
                         const Data::MappedName& frontName = incomingShapeElementMappedNames.front().first;
@@ -2780,18 +2792,22 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                             }
                             sortNameSet(marks);
                         }
-                        // Marked pieces are counted among the pieces with the same marks only
-                        std::string marksKey = frontName.toString();
-                        for (const Data::MappedName& name : marks) {
-                            marksKey += '\n' + name.toString();
-                        }
+                        // A marked piece's marks tell it apart, or with them the duplicate
+                        // counter the mapper gives it (round 2): its index is 0
                         const auto index = static_cast<int>(
-                            marks.empty() ? usedProjectedLinkedNames.count(frontName)
-                                          : usedProjectedMarks.count(marksKey)
+                            marks.empty() ? usedProjectedLinkedNames.count(frontName) : 0
                         );
+                        const int counter = upToSplit ? upToSplit->counterOf(projectedShape) : 0;
                         std::vector<std::string> flags {Data::MAPPER_FLAG_PROJECTION};
                         if (!marks.empty()) {
                             flags.emplace_back(Data::MAPPER_FLAG_MODIFIED);
+                        }
+                        // A piece told apart only by its place among its twins: a reference to
+                        // it never goes, at the solver's tier 1, to a piece that isn't one (the
+                        // bottom twin left alone when the top one goes), since the top sections'
+                        // flags disagree (round 2)
+                        if (counter != 0) {
+                            flags.emplace_back(MAPPER_FLAG_ORDERED);
                         }
 
                         ensureElementMap()->setElementName(
@@ -2804,7 +2820,7 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                                     op,
                                     index,
                                     newInfo.shapetype[0],
-                                    0,
+                                    counter,
                                     flags,
                                     marks
                                 )
@@ -2814,9 +2830,6 @@ TopoShape& TopoShape::makeShapeWithElementMap(
 
                         if (marks.empty()) {
                             usedProjectedLinkedNames.insert(frontName);
-                        }
-                        else {
-                            usedProjectedMarks.insert(marksKey);
                         }
                     }
 

@@ -883,6 +883,58 @@ def freeformHoleShell(doc, z):
     return shell
 
 
+def ellipticHoleShell(z, turn=0):
+    """PR 340 round 2: a shell of two B-spline faces at height z: the rectangle x -10..20,
+    y -10..10 with an elliptic hole about (3, 3), semi-axes 4 along x and 1 along y (one closed
+    edge), and the hole's fill. `turn` turns the ellipse about its centre by that many degrees
+    before the faces are built: 180 gives the same faces, their edge starting on the other side"""
+    V = FreeCAD.Vector
+    edge = Part.Ellipse(V(3, 3, z), 4, 1).toShape()
+    if turn:
+        edge.rotate(V(3, 3, z), V(0, 0, 1), turn)
+    outer = [V(-10, -10, z), V(20, -10, z), V(20, 10, z), V(-10, 10, z)]
+    plane = Part.Plane(V(0, 0, z), V(0, 0, 1))
+    plate = Part.Face(plane, [Part.makePolygon(outer + outer[:1]), Part.Wire([edge])])
+    fill = Part.Face(Part.Wire([edge]))
+    return Part.Shell([plate.toNurbs().Faces[0], fill.toNurbs().Faces[0]])
+
+
+def discUpToAnEllipticHole(doc):
+    """PR 340 round 2: a Pad from the disc A (centre (3, 3), radius 3, its centre's place named
+    xA and yA) and the rectangle B up to the plate with the elliptic hole and its fill
+    (UpToShape). The circle crosses the ellipse four times: A's cap is three pieces, the middle
+    one on the fill, and the top and bottom ones on the plate, each bounded by the circle and the
+    ellipse alone. Returns the Pad and the height of its far caps"""
+    import Sketcher
+
+    body = doc.addObject("PartDesign::Body", "Body")
+    xy = [f for f in body.Origin.OriginFeatures if f.Role == "XY_Plane"][0]
+    plate = doc.addObject("Part::Feature", "Plate")
+    plate.Shape = ellipticHoleShell(10)
+    sketch = body.newObject("Sketcher::SketchObject", "Profile")
+    sketch.AttachmentSupport = [(xy, "")]
+    sketch.MapMode = "FlatFace"
+    circle = sketch.addGeometry(Part.Circle(FreeCAD.Vector(3, 3, 0), FreeCAD.Vector(0, 0, 1), 3))
+    sketch.addConstraint(Sketcher.Constraint("Radius", circle, 3))
+    for axis, tag in (("DistanceX", "xA"), ("DistanceY", "yA")):
+        place = sketch.addConstraint(Sketcher.Constraint(axis, -1, 1, circle, 3, 3))
+        sketch.renameConstraint(place, tag)
+    dimensionedRectangle(sketch, "B", 10, 0, 13, 3)
+    pad = body.newObject("PartDesign::Pad", "Pad")
+    pad.Profile = sketch
+    pad.Type = "UpToShape"
+    pad.UpToShape = (plate, ["Face1", "Face2"])
+    pad.Refine = False
+    doc.recompute()
+    return pad, 10
+
+
+def centreOfFarCapAt(shape, z, x, y):
+    """The (x, y) of the centre of mass of the far cap at height z that holds (x, y, z)"""
+    centre = farCaps(shape, z)[farCapAt(shape, z, x, y)].CenterOfMass
+    return centre.x, centre.y
+
+
 def capsUpToAFreeformPlate(doc, kind, seam=None, hole=False, capA=CAP_A):
     """ops#360: a Pad from A and B in the XY plane up to a B-spline plate at z = 10 (UpToFace, or
     UpToShape up to the two-face shell meeting at x = `seam`, or with `hole` the plate with a hole
@@ -2215,8 +2267,9 @@ class TestPad(unittest.TestCase):
 
     def testPadUpToAFreeformShellCapsStayOnTheirFaces(self):
         # ops#360: up to a shell of two B-spline faces meeting at x = 1, under A's middle, A's
-        # cap is two pieces: each a projection of A, marked by the shell's face it lies on and
-        # the edges that bound it, with MOD among its flags (PR 340 round 1); B's is a
+        # cap is two pieces: each a projection of A, marked by the shell's face it lies on (and
+        # the edges that bound it where B's cap shares the face, round 2), with MOD among its
+        # flags (PR 340 round 1); B's is a
         # projection of B, unmarked. Datums
         # on A's pieces stay there when A grows past B. When A moves onto the left face only,
         # its right piece is gone, and its datum must not land on another cap quietly: named
@@ -2285,7 +2338,8 @@ class TestPad(unittest.TestCase):
     def testPadUpToAFreeformHoleCapPieces(self):
         # ops#360 round 1: up to a B-spline plate with a hole x -1..1, y -2..2 and the hole's
         # fill, A (x -3..3, y -0.5..0.5) crosses the fill: three pieces, left and right on the
-        # plate, the middle on the fill. Each is marked by its face and the edges that bound it.
+        # plate, the middle on the fill. Each is marked by its face, and the left and right ones,
+        # which share the plate with B's cap, by the hole's edge that bounds them (round 2).
         # A piece whose marks stay keeps its datum when A changes; a datum on a piece that is
         # gone, or whose bounds changed, must not land on another piece quietly. Told apart by
         # a counter alone, the left one's went to the right piece and the right one's to the
@@ -2334,6 +2388,79 @@ class TestPad(unittest.TestCase):
                             assertOnCap(self, points[piece], z, *allowed[0])
                         else:
                             assertNotQuietlyElsewhere(self, points[piece], z, allowed)
+                finally:
+                    FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToAnEllipticHoleTwinPieces(self):
+        # PR 340 round 2: the disc's top and bottom pieces on the plate are bounded by the circle
+        # and the ellipse alone, so their marks are the same; the round 1 build told them apart
+        # by the splitter's order alone. With the ellipse rebuilt turned by 180 degrees (the same
+        # faces, its edge starting on the other side) the two datums swapped pieces, and with the
+        # disc moved down so that the top piece is gone, the top's datum went to the bottom
+        # piece, valid and with no warning both times. Now they are ordered by their centres
+        # (the datums stay), and their duplicate counter holds how many there are (the top's
+        # datum breaks or warns)
+        for edit in ("turnedEllipse", "topGone"):
+            with self.subTest(edit=edit):
+                doc = FreeCAD.newDocument("PadUpToAnEllipticHoleTwinPieces")
+                try:
+                    pad, z = discUpToAnEllipticHole(doc)
+                    self.assertTrue(pad.isValid(), pad.getStatusString())
+                    shape = pad.Shape
+                    self.assertEqual(len(farCaps(shape, z)), 4)
+                    top = shape.getElementMappedName(farCapAt(shape, z, 3, 5.5))
+                    bottom = shape.getElementMappedName(farCapAt(shape, z, 3, 0.5))
+                    self.assertNotEqual(top, bottom)
+                    topPoint = pointOnFarCap(pad, farCapAt(shape, z, 3, 5.5))
+                    bottomPoint = pointOnFarCap(pad, farCapAt(shape, z, 3, 0.5))
+                    if edit == "turnedEllipse":
+                        doc.getObject("Plate").Shape = ellipticHoleShell(z, turn=180)
+                        doc.recompute()
+                        self.assertTrue(pad.isValid(), pad.getStatusString())
+                        shape = pad.Shape
+                        assertOnCap(self, topPoint, z, *centreOfFarCapAt(shape, z, 3, 5.5))
+                        assertOnCap(self, bottomPoint, z, *centreOfFarCapAt(shape, z, 3, 0.5))
+                    else:
+                        pad.Profile[0].setDatum(
+                            "yA", FreeCAD.Units.Quantity(0.8, FreeCAD.Units.Length)
+                        )
+                        doc.recompute()
+                        self.assertTrue(pad.isValid(), pad.getStatusString())
+                        shape = pad.Shape
+                        self.assertEqual(len(farCaps(shape, z)), 3)
+                        assertNotQuietlyElsewhere(self, topPoint, z, [])
+                        assertNotQuietlyElsewhere(
+                            self, bottomPoint, z, [centreOfFarCapAt(shape, z, 3, 0)]
+                        )
+                finally:
+                    FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToAFreeformHoleCapPieceCoversTheFill(self):
+        # PR 340 round 2: A (x -3..3, y -0.5..0.5) across the plate's hole and its fill, a datum
+        # on its middle piece, on the fill. A made taller than the hole (y -3..2.5) covers the
+        # fill: the split leaves the fill whole, and it kept the fill's own name, while the
+        # middle piece's name had the ring A's other pieces became as its only match: the datum
+        # went to the ring (0, -0.33), valid and with no warning. The fill is now A's
+        # projection too, marked by the fill alone (the only far cap on it), as the middle
+        # piece was: the datum stays on it. Made taller on one side only (y -0.5..2.5), the
+        # middle piece is still the only cap on the fill, its bounds changed: the round 1 build
+        # broke the datum, now it stays
+        for case, (yA, hA, centre) in {
+            "covers": (-3, 5.5, (0, 0)),
+            "half": (-0.5, 3, (0, 0.75)),
+        }.items():
+            with self.subTest(case=case):
+                doc = FreeCAD.newDocument("PadUpToAFreeformHoleCapPieceCoversTheFill")
+                try:
+                    pad, z = capsUpToAFreeformPlate(doc, "Pad", hole=True, capA=(-3, -0.5, 3, 0.5))
+                    self.assertTrue(pad.isValid(), pad.getStatusString())
+                    point = pointOnFarCap(pad, farCapAt(pad.Shape, z, 0, 0))
+                    sketch = pad.Profile[0]
+                    sketch.setDatum("hA", FreeCAD.Units.Quantity(hA, FreeCAD.Units.Length))
+                    sketch.setDatum("yA", FreeCAD.Units.Quantity(yA, FreeCAD.Units.Length))
+                    doc.recompute()
+                    self.assertTrue(pad.isValid(), pad.getStatusString())
+                    assertOnCap(self, point, z, *centre)
                 finally:
                     FreeCAD.closeDocument(doc.Name)
 
