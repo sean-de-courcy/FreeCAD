@@ -178,3 +178,41 @@ INSTANTIATE_TEST_SUITE_P(
         return info.param ? "HoldingTheGil" : "WithoutTheGil";
     }
 );
+
+// The worker's own emissions hop too: Document::recompute(), compiled in FreeCADApp, emits
+// signalRecomputedObject on the worker, and its slot runs on the main thread while the worker
+// waits. On Windows FreeCADApp.dll had its own copy of the hooks, which setHooks from another
+// library (Gui, or this test) never set, so the slot ran on the worker (ops#365)
+TEST_F(AsyncRecomputeTest, TheWorkersEmissionsRunTheirSlotsOnTheMainThread)
+{
+    auto* object = _doc->addObject("App::FeatureTest", "Feature");
+    ASSERT_NE(object, nullptr);
+    object->touch();
+    auto request = App::RecomputeRequest::fromDocument(*_doc, true);
+    ASSERT_TRUE(App::GetApplication().canRecomputeRequestOnWorker(request));
+
+    const auto here = std::this_thread::get_id();
+    std::atomic<bool> ran {false};
+    std::atomic<bool> onThisThread {false};
+    std::atomic<bool> forTheWorker {false};
+    fastsignals::scoped_connection connection =
+        _doc->signalRecomputedObject.connect([&](const App::DocumentObject& o) {
+            if (&o == object && !ran) {
+                onThisThread = std::this_thread::get_id() == here;
+                // Emitted by the worker: the hop carries its recompute (ops#349)
+                forTheWorker = App::isRecomputeWorkerThread();
+                ran = true;
+            }
+        });
+
+    tests::MainThreadHopHooks hooks;
+    App::GetApplication().queueRecomputeRequest(request);
+    EXPECT_TRUE(tests::MainThreadHopHooks::pumpUntil(
+        [&] { return ran.load() && App::runWhileRecomputeWorkerIdle([] {}); },
+        std::chrono::seconds(10)
+    ));
+
+    EXPECT_TRUE(ran);
+    EXPECT_TRUE(onThisThread);
+    EXPECT_TRUE(forTheWorker);
+}
