@@ -1068,19 +1068,18 @@ void Application::cancelRecomputeRequestsForDocument(const std::string& document
     // Declared before the lock: the GIL comes back after the mutex is released
     std::optional<Base::PyGILStateRelease> release;
     std::unique_lock<std::mutex> lock(_recomputeMutex);
-    // At once, so the worker can't take the document's next queued request after the one in flight
-    cancelQueued();
-    if (finished()) {
-        return;
-    }
-
     // The worker itself, or a slot in its hop, closing the document it recomputes would wait for
-    // itself (ops#365)
-    if (isRecomputeWorkerThread()) {
+    // itself (ops#365). Refused before anything is cancelled: the document stays open
+    if (!finished() && isRecomputeWorkerThread()) {
         throw Base::RuntimeError(
             "Cannot close document '" + documentName
             + "' from a signal of its recompute on the worker thread"
         );
+    }
+    // At once, so the worker can't take the document's next queued request after the one in flight
+    cancelQueued();
+    if (finished()) {
+        return;
     }
 
     // The worker's request may need the GIL (a Python feature's execute(), the GIL taken back
@@ -1092,21 +1091,24 @@ void Application::cancelRecomputeRequestsForDocument(const std::string& document
 
     // On the GUI's main thread the worker may be blocked in a hop to it, waiting for a document
     // signal's slots: run the hops while waiting (ops#365)
+    // Once it has finished, the requests queued meanwhile are cancelled under the same lock, so the
+    // worker can't take one between the check and the cancel
     if (MainThreadSignalConfig::hasHooks() && MainThreadSignalConfig::isMainThread()) {
         waitRunningHops([&] {
             lock.lock();
             const bool done = finished();
+            if (done) {
+                cancelQueued();
+            }
             lock.unlock();
             return done;
         });
-        lock.lock();
     }
     else {
         lock.lock();
         _recomputeStateChanged.wait(lock, finished);
+        cancelQueued();
     }
-    // Requests the one in flight queued for the document
-    cancelQueued();
 }
 
 struct DocTiming {

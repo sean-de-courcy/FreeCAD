@@ -244,7 +244,15 @@ PyObject* ApplicationPy::sCloseDocument(PyObject* /*self*/, PyObject* args)
             return nullptr;
         }
 
-        if (!GetApplication().closeDocument(pstr)) {
+        // The close can throw (it refuses inside the recompute worker's own hop, ops#365): a C++
+        // exception mustn't unwind through the interpreter's frames
+        bool closed = false;
+        PY_TRY
+        {
+            closed = GetApplication().closeDocument(pstr);
+        }
+        PY_CATCH;
+        if (!closed) {
             PyErr_Format(PyExc_RuntimeError, "Closing the document '%s' failed", pstr);
             return nullptr;
         }
@@ -266,7 +274,13 @@ PyObject* ApplicationPy::sCloseDocument(PyObject* /*self*/, PyObject* args)
             return nullptr;
         }
 
-        if (!GetApplication().closeDocument(doc)) {
+        bool closed = false;
+        PY_TRY
+        {
+            closed = GetApplication().closeDocument(doc);
+        }
+        PY_CATCH;
+        if (!closed) {
             PyErr_Format(PyExc_RuntimeError, "Closing the document '%s' failed", doc->getName());
             return nullptr;
         }
