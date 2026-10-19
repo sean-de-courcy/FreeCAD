@@ -437,3 +437,45 @@ TEST_F(AsyncRecomputeTest, CloseDocumentWaitsWithoutTheGil)
 
     EXPECT_TRUE(gilTakenInTime);
 }
+
+// A refused close cancels nothing: the document stays open with its queued recompute requests.
+// They were cancelled before the refusal (ops#365, round 2)
+TEST_F(AsyncRecomputeTest, ARefusedCloseKeepsTheQueuedRequests)
+{
+    auto* object = _doc->addObject("App::FeatureTest", "Feature");
+    ASSERT_NE(object, nullptr);
+    object->touch();
+    auto request = App::RecomputeRequest::fromDocument(*_doc, true);
+    ASSERT_TRUE(App::GetApplication().canRecomputeRequestOnWorker(request));
+
+    std::atomic<int> processed {0};
+    request.callback = [&](App::RecomputeRequest&, App::RecomputeResult&) {
+        ++processed;
+    };
+    std::atomic<bool> ran {false};
+    std::atomic<bool> refused {false};
+    fastsignals::scoped_connection connection =
+        _doc->signalRecomputedObject.connect([&](const App::DocumentObject& o) {
+            if (&o == object && !ran) {
+                ran = true;
+                try {
+                    App::GetApplication().closeDocument(_docName.c_str());
+                }
+                catch (const Base::RuntimeError&) {
+                    refused = true;
+                }
+            }
+        });
+
+    tests::MainThreadHopHooks hooks;
+    App::GetApplication().queueRecomputeRequest(request);
+    App::GetApplication().queueRecomputeRequest(request);
+    EXPECT_TRUE(tests::MainThreadHopHooks::pumpUntil(
+        [&] { return ran.load() && App::runWhileRecomputeWorkerIdle([] {}); },
+        std::chrono::seconds(10)
+    ));
+
+    EXPECT_TRUE(refused);
+    EXPECT_NE(App::GetApplication().getDocument(_docName.c_str()), nullptr);
+    EXPECT_EQ(processed, 2);
+}

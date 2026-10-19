@@ -21,7 +21,9 @@
 *                                                                          *
 ***************************************************************************/"""
 
+import inspect
 import os
+import sys
 import tempfile
 import threading
 import time
@@ -299,6 +301,72 @@ class TestGuiDocument(unittest.TestCase):
 
         self.assertNotIn(name, FreeCAD.listDocuments())
         self.assertEqual(observer.threads, [main])
+
+    def testASlotClosingItsDocumentInTheWorkersHopGetsARuntimeError(self):
+        """A slot in the worker's hop that closes the document being recomputed gets a Python
+        RuntimeError (ops#365). App.closeDocument let the C++ refusal unwind through the
+        interpreter's frames: the except never ran, and a later slot in the same wait walked a
+        cycle of stale frames forever."""
+        params = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/Document")
+        old_async = params.GetBool("EnableAsyncRecompute", True)
+
+        class Observer:
+            def __init__(self, doc):
+                self.doc = doc
+                self.closing = False
+                self.caught = None
+                self.depths = []
+
+            def slotRecomputedObject(self, obj):
+                if not self.closing or obj.Document != self.doc:
+                    return
+                if self.caught is None:
+                    self.caught = "nothing"
+                    try:
+                        FreeCAD.closeDocument(self.doc.Name)
+                        self.caught = "returned"
+                    except RuntimeError:
+                        self.caught = "RuntimeError"
+                    return
+                if len(self.depths) < 3:
+                    # The frames above this slot end, a few calls above the test
+                    frame = sys._getframe()
+                    n = 0
+                    while frame is not None and n < 10000:
+                        frame = frame.f_back
+                        n += 1
+                    self.depths.append(n)
+
+        for i in range(5):
+            self.doc.addObject("App::FeatureTest", "Feature%d" % i)
+        self.doc.recompute()
+        observer = Observer(self.doc)
+        FreeCAD.addDocumentObserver(observer)
+        name = self.doc.Name
+        here = len(inspect.stack(0))
+        try:
+            params.SetBool("EnableAsyncRecompute", True)
+            FreeCADGui.setActiveDocument(name)
+            for obj in self.doc.Objects:
+                obj.touch()
+            FreeCADGui.runCommand("Std_Refresh", 0)
+            deadline = time.monotonic() + 10.0
+            while not self.doc.Recomputing and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(self.doc.Recomputing)
+            observer.closing = True
+            # The slots run in this close's wait
+            FreeCAD.closeDocument(name)
+            self.doc = None
+        finally:
+            FreeCAD.removeDocumentObserver(observer)
+            params.SetBool("EnableAsyncRecompute", old_async)
+
+        self.assertEqual(observer.caught, "RuntimeError")
+        self.assertNotIn(name, FreeCAD.listDocuments())
+        self.assertTrue(observer.depths)
+        for depth in observer.depths:
+            self.assertLess(depth, here + 20)
 
     def testSaveCommandDoesNotUseDeprecatedAPI(self):
         with tempfile.TemporaryDirectory() as temp_dir:
