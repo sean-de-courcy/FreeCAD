@@ -826,7 +826,7 @@ CAP_A_GROWN = 4
 
 def dimensionedRectangle(sketch, tag, x0, y0, x1, y1):
     """A closed rectangle in sketch, held by constraints, its width and height named w<tag> and
-    h<tag>"""
+    h<tag>, the place of its first corner x<tag> and y<tag>"""
     import Sketcher
 
     V = FreeCAD.Vector
@@ -848,8 +848,10 @@ def dimensionedRectangle(sketch, tag, x0, y0, x1, y1):
         Sketcher.Constraint("DistanceY", start + 1, 1, start + 1, 2, y1 - y0)
     )
     sketch.renameConstraint(height, "h" + tag)
-    sketch.addConstraint(Sketcher.Constraint("DistanceX", -1, 1, start, 1, x0))
-    sketch.addConstraint(Sketcher.Constraint("DistanceY", -1, 1, start, 1, y0))
+    left = sketch.addConstraint(Sketcher.Constraint("DistanceX", -1, 1, start, 1, x0))
+    sketch.renameConstraint(left, "x" + tag)
+    bottom = sketch.addConstraint(Sketcher.Constraint("DistanceY", -1, 1, start, 1, y0))
+    sketch.renameConstraint(bottom, "y" + tag)
 
 
 def freeformPlate(doc, z, seam=None):
@@ -866,15 +868,30 @@ def freeformPlate(doc, z, seam=None):
     return plate
 
 
-def capsUpToAFreeformPlate(doc, kind, seam=None):
+def freeformHoleShell(doc, z):
+    """ops#360 round 1: a shell of two B-spline faces at height z: the rectangle x -10..20,
+    y -10..10 with the hole x -1..1, y -2..2, and the hole's fill"""
+    V = FreeCAD.Vector
+    outer = [V(-10, -10, z), V(20, -10, z), V(20, 10, z), V(-10, 10, z)]
+    hole = [V(-1, -2, z), V(-1, 2, z), V(1, 2, z), V(1, -2, z)]
+    wires = [Part.makePolygon(corners + corners[:1]) for corners in (outer, hole)]
+    plate = Part.Face(Part.Plane(V(0, 0, z), V(0, 0, 1)), wires).toNurbs().Faces[0]
+    fill = [V(-1, -2, z), V(1, -2, z), V(1, 2, z), V(-1, 2, z)]
+    fillFace = Part.Face(Part.makePolygon(fill + fill[:1])).toNurbs().Faces[0]
+    shell = doc.addObject("Part::Feature", "Plate")
+    shell.Shape = Part.Shell([plate, fillFace])
+    return shell
+
+
+def capsUpToAFreeformPlate(doc, kind, seam=None, hole=False, capA=CAP_A):
     """ops#360: a Pad from A and B in the XY plane up to a B-spline plate at z = 10 (UpToFace, or
-    UpToShape up to the two-face shell meeting at x = `seam`); or a Pocket from them on top of the
-    block x -2..12, y -5..8, z 0..10, down to the plate at z = 4. Returns the feature and the
-    height of its far caps (the Pocket's floors)"""
+    UpToShape up to the two-face shell meeting at x = `seam`, or with `hole` the plate with a hole
+    and its fill); or a Pocket from them on top of the block x -2..12, y -5..8, z 0..10, down to
+    the plate at z = 4. Returns the feature and the height of its far caps (the Pocket's floors)"""
     body = doc.addObject("PartDesign::Body", "Body")
     xy = [f for f in body.Origin.OriginFeatures if f.Role == "XY_Plane"][0]
     capZ = 10 if kind == "Pad" else 4
-    plate = freeformPlate(doc, capZ, seam)
+    plate = freeformHoleShell(doc, capZ) if hole else freeformPlate(doc, capZ, seam)
     if kind == "Pocket":
         blockSketch = body.newObject("Sketcher::SketchObject", "BlockSketch")
         blockSketch.AttachmentSupport = [(xy, "")]
@@ -888,11 +905,11 @@ def capsUpToAFreeformPlate(doc, kind, seam=None):
     sketch.MapMode = "FlatFace"
     if kind == "Pocket":
         sketch.AttachmentOffset = FreeCAD.Placement(FreeCAD.Vector(0, 0, 10), FreeCAD.Rotation())
-    dimensionedRectangle(sketch, "A", *CAP_A)
+    dimensionedRectangle(sketch, "A", *capA)
     dimensionedRectangle(sketch, "B", *CAP_B)
     feature = body.newObject("PartDesign::" + kind, kind)
     feature.Profile = sketch
-    if seam is None:
+    if seam is None and not hole:
         feature.Type = "UpToFace"
         feature.UpToFace = (plate, ["Face1"])
     else:
@@ -936,6 +953,24 @@ def pointOnFarCap(feature, sub):
     body.Tip = feature
     feature.Document.recompute()
     return point
+
+
+def assertOnCap(test, point, z, x, y):
+    """The datum point is valid, quiet, and at (x, y, z)"""
+    test.assertTrue(point.isValid(), point.getStatusString())
+    test.assertEqual(point.getStatusString(), "Valid")
+    test.assertLess((point.Placement.Base - FreeCAD.Vector(x, y, z)).Length, 1e-6, point.Placement)
+
+
+def assertNotQuietlyElsewhere(test, point, z, allowed):
+    """ops#360 round 1: the datum point is at one of the `allowed` (x, y) places, or says it lost
+    its cap (it is invalid, or its status warns); never valid and quiet on another cap"""
+    if point.isValid() and point.getStatusString() == "Valid":
+        base = point.Placement.Base
+        test.assertTrue(
+            any((base - FreeCAD.Vector(x, y, z)).Length < 1e-6 for x, y in allowed),
+            "quietly at %s, not at one of %s" % (base, allowed),
+        )
 
 
 # The child of testPadUpToAFreeformFaceCapsMigrate: opens the saved file, recomputes every object
@@ -2180,33 +2215,127 @@ class TestPad(unittest.TestCase):
 
     def testPadUpToAFreeformShellCapsStayOnTheirFaces(self):
         # ops#360: up to a shell of two B-spline faces meeting at x = 1, under A's middle, A's
-        # cap is two pieces: each a projection of A, told apart by the projection's counter in
-        # the shell's face order; B's is a projection of B. A datum on A's left piece stays
-        # there when A grows past B
-        feature, z = capsUpToAFreeformPlate(self.Doc, "Pad", seam=1)
+        # cap is two pieces: each a projection of A, marked by the shell's face it lies on and
+        # the edges that bound it, with MOD among its flags (PR 340 round 1); B's is a
+        # projection of B, unmarked. Datums
+        # on A's pieces stay there when A grows past B. When A moves onto the left face only,
+        # its right piece is gone, and its datum must not land on another cap quietly: named
+        # from the shell (MOD) it went to B's cap, and told apart by a counter alone to A's
+        # left piece, valid and with no warning both times
+        for edit in ("grow", "offTheRightFace"):
+            with self.subTest(edit=edit):
+                doc = FreeCAD.newDocument("PadUpToAFreeformShellCaps")
+                try:
+                    feature, z = capsUpToAFreeformPlate(doc, "Pad", seam=1)
+                    self.assertTrue(feature.isValid(), feature.getStatusString())
+                    shape = feature.Shape
+                    self.assertEqual(len(farCaps(shape, z)), 3)
+                    left = shape.getElementMappedName(farCapAt(shape, z, 0.5, 1))
+                    right = shape.getElementMappedName(farCapAt(shape, z, 1.5, 1))
+                    other = shape.getElementMappedName(farCapAt(shape, z, 6.5, 1.5))
+                    for name, flags in ((left, {"PRJ", "MOD"}), (right, {"PRJ", "MOD"})):
+                        top = FreeCAD.getDecodedMappedName(name)[-1]
+                        self.assertEqual(set(top["mapperFlags"]), flags, name)
+                        self.assertTrue(top["connectedElements"], name)
+                    self.assertEqual(
+                        FreeCAD.getDecodedMappedName(other)[-1]["mapperFlags"], ["PRJ"], other
+                    )
+                    self.assertEqual(len({left, right, other}), 3)
+                    leftPoint = pointOnFarCap(feature, farCapAt(shape, z, 0.5, 1))
+                    rightPoint = pointOnFarCap(feature, farCapAt(shape, z, 1.5, 1))
+                    sketch = feature.Profile[0]
+                    if edit == "grow":
+                        growCapA(sketch)
+                        doc.recompute()
+                        self.assertTrue(feature.isValid(), feature.getStatusString())
+                        assertOnCap(self, leftPoint, z, 0.5, CAP_A_GROWN / 2)
+                        assertOnCap(self, rightPoint, z, 2.5, CAP_A_GROWN / 2)
+                        shape = feature.Shape
+                        self.assertEqual(
+                            shape.getElementMappedName(farCapAt(shape, z, 0.5, 1)),
+                            left,
+                            "A's left piece",
+                        )
+                    else:
+                        sketch.setDatum("xA", FreeCAD.Units.Quantity(-3, FreeCAD.Units.Length))
+                        doc.recompute()
+                        self.assertTrue(feature.isValid(), feature.getStatusString())
+                        self.assertEqual(len(farCaps(feature.Shape, z)), 2)
+                        assertNotQuietlyElsewhere(self, rightPoint, z, [])
+                        assertNotQuietlyElsewhere(self, leftPoint, z, [(-2, 1)])
+                finally:
+                    FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToAFreeformShellCapPieceAppears(self):
+        # ops#360 round 1: A at x 2..4 lies on the shell's right face only, one cap. Moved to
+        # x 0..2, it crosses the faces' seam at x = 1, and its cap is two pieces. A datum on its
+        # cap stays on the right face's piece, or says it moved: told apart by a counter alone,
+        # it went to the new left piece, valid and with no warning
+        feature, z = capsUpToAFreeformPlate(self.Doc, "Pad", seam=1, capA=(2, 0, 4, 2))
         self.assertTrue(feature.isValid(), feature.getStatusString())
-        shape = feature.Shape
-        self.assertEqual(len(farCaps(shape, z)), 3)
-        left = shape.getElementMappedName(farCapAt(shape, z, 0.5, 1))
-        right = shape.getElementMappedName(farCapAt(shape, z, 1.5, 1))
-        other = shape.getElementMappedName(farCapAt(shape, z, 6.5, 1.5))
-        for name in (left, right, other):
-            self.assertIn(";PRJ;", name)
-        self.assertEqual(len({left, right, other}), 3)
-        point = pointOnFarCap(feature, farCapAt(shape, z, 0.5, 1))
-        growCapA(feature.Profile[0])
+        self.assertEqual(len(farCaps(feature.Shape, z)), 2)
+        point = pointOnFarCap(feature, farCapAt(feature.Shape, z, 3, 1))
+        sketch = feature.Profile[0]
+        sketch.setDatum("xA", FreeCAD.Units.Quantity(0, FreeCAD.Units.Length))
         self.Doc.recompute()
         self.assertTrue(feature.isValid(), feature.getStatusString())
-        self.assertTrue(point.isValid(), point.getStatusString())
-        self.assertLess(
-            (point.Placement.Base - FreeCAD.Vector(0.5, CAP_A_GROWN / 2, z)).Length,
-            1e-6,
-            point.Placement.Base,
-        )
-        shape = feature.Shape
-        self.assertEqual(
-            shape.getElementMappedName(farCapAt(shape, z, 0.5, 1)), left, "A's left piece"
-        )
+        self.assertEqual(len(farCaps(feature.Shape, z)), 3)
+        assertNotQuietlyElsewhere(self, point, z, [(1.5, 1)])
+
+    def testPadUpToAFreeformHoleCapPieces(self):
+        # ops#360 round 1: up to a B-spline plate with a hole x -1..1, y -2..2 and the hole's
+        # fill, A (x -3..3, y -0.5..0.5) crosses the fill: three pieces, left and right on the
+        # plate, the middle on the fill. Each is marked by its face and the edges that bound it.
+        # A piece whose marks stay keeps its datum when A changes; a datum on a piece that is
+        # gone, or whose bounds changed, must not land on another piece quietly. Told apart by
+        # a counter alone, the left one's went to the right piece and the right one's to the
+        # middle when the left piece went
+        cases = {
+            # A x -4..3: all three pieces stay, the left one wider
+            "wider": ((-4, 7), {"left": [(-2.5, 0)], "middle": [(0, 0)], "right": [(2, 0)]}),
+            # A x -0.5..4.5: the left piece is gone, the middle one shorter
+            "leftGone": ((-0.5, 5), {"left": [], "middle": [(0.25, 0)], "right": [(2.75, 0)]}),
+            # A x -5..0.5: the right piece is gone
+            "rightGone": ((-5, 5.5), {"left": [(-3, 0)], "middle": [(-0.25, 0)], "right": []}),
+        }
+        # Pieces whose bounds stay the same keep their names: their datums stay, quietly
+        unchanged = {
+            "wider": ("left", "middle", "right"),
+            "leftGone": ("right",),
+            "rightGone": ("left",),
+        }
+        for case, ((xA, wA), expected) in cases.items():
+            with self.subTest(case=case):
+                doc = FreeCAD.newDocument("PadUpToAFreeformHoleCapPieces")
+                try:
+                    feature, z = capsUpToAFreeformPlate(
+                        doc, "Pad", hole=True, capA=(-3, -0.5, 3, 0.5)
+                    )
+                    self.assertTrue(feature.isValid(), feature.getStatusString())
+                    shape = feature.Shape
+                    self.assertEqual(len(farCaps(shape, z)), 4)
+                    places = {"left": (-2, 0), "middle": (0, 0), "right": (2, 0)}
+                    names = {
+                        piece: shape.getElementMappedName(farCapAt(shape, z, x, y))
+                        for piece, (x, y) in places.items()
+                    }
+                    self.assertEqual(len(set(names.values())), 3, names)
+                    points = {
+                        piece: pointOnFarCap(feature, farCapAt(shape, z, x, y))
+                        for piece, (x, y) in places.items()
+                    }
+                    sketch = feature.Profile[0]
+                    sketch.setDatum("wA", FreeCAD.Units.Quantity(wA, FreeCAD.Units.Length))
+                    sketch.setDatum("xA", FreeCAD.Units.Quantity(xA, FreeCAD.Units.Length))
+                    doc.recompute()
+                    self.assertTrue(feature.isValid(), feature.getStatusString())
+                    for piece, allowed in expected.items():
+                        if piece in unchanged[case]:
+                            assertOnCap(self, points[piece], z, *allowed[0])
+                        else:
+                            assertNotQuietlyElsewhere(self, points[piece], z, allowed)
+                finally:
+                    FreeCAD.closeDocument(doc.Name)
 
     def testPadUpToAFreeformFaceCapsMigrate(self):
         # ops#360's naming revision: a file saved with a datum on A's cap, reopened by a child

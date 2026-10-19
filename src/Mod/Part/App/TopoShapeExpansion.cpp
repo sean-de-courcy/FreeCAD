@@ -2611,7 +2611,40 @@ TopoShape& TopoShape::makeShapeWithElementMap(
         }
 
         std::unordered_multiset<Data::MappedName, Data::MappedNameHasher> usedProjectedLinkedNames;
+        std::unordered_multiset<std::string> usedProjectedMarks;
         std::unordered_set<Data::IndexedName, Data::IndexedNameHasher> allGeneratedShapes;
+
+        // A far cap that is one of several pieces of its profile face's cap is told apart by its
+        // marks, the inputs' elements that bound it, as a modified element by its neighbours
+        // (ops#360, PR 340 round 1). Its section carries MOD with PRJ: a reference to a piece is
+        // not the cap in one piece that an edit leaves, nor the other way round (the solver's
+        // top agreement compares the flags), as a split face's piece isn't the face made whole
+        const auto* upToSplit = dynamic_cast<const UpToSplitMapper*>(&mapper);
+        // The front name of an input's element, as the loop below reads it
+        auto inputName = [&](const TopoDS_Shape& element) {
+            for (const auto& incomingShape : shapes) {
+                int index = canMapElement(incomingShape) ? incomingShape.findShape(element) : 0;
+                if (index == 0) {
+                    continue;
+                }
+                const std::string& type = shapeName(element.ShapeType());
+                Data::IndexedName name = Data::IndexedName::fromConst(type.c_str(), index);
+                Data::MappedName mapped = incomingShape.getMappedName(name);
+                if (!mapped) {
+                    mapped = Data::MappedName::makeUnmappedName(
+                        {name.toString()},
+                        incomingShape.Tag,
+                        op,
+                        type[0]
+                    );
+                }
+                if (incomingShape.getInternNames() != getInternNames()) {
+                    mapped = toMapForm(mapped, getInternNames());
+                }
+                return mapped;
+            }
+            return Data::MappedName();
+        };
 
         // These loops generate names with the Modified and Generated methods of the Maker class.
         // This will miss some shapes, so in the next stage we will find names with the IsPartner method.
@@ -2738,6 +2771,29 @@ TopoShape& TopoShape::makeShapeWithElementMap(
 
                         const Data::MappedName& frontName = incomingShapeElementMappedNames.front().first;
 
+                        std::vector<Data::MappedName> marks;
+                        if (upToSplit) {
+                            for (const TopoDS_Shape& mark : upToSplit->marksOf(projectedShape)) {
+                                if (Data::MappedName name = inputName(mark)) {
+                                    marks.push_back(name);
+                                }
+                            }
+                            sortNameSet(marks);
+                        }
+                        // Marked pieces are counted among the pieces with the same marks only
+                        std::string marksKey = frontName.toString();
+                        for (const Data::MappedName& name : marks) {
+                            marksKey += '\n' + name.toString();
+                        }
+                        const auto index = static_cast<int>(
+                            marks.empty() ? usedProjectedLinkedNames.count(frontName)
+                                          : usedProjectedMarks.count(marksKey)
+                        );
+                        std::vector<std::string> flags {Data::MAPPER_FLAG_PROJECTION};
+                        if (!marks.empty()) {
+                            flags.emplace_back(Data::MAPPER_FLAG_MODIFIED);
+                        }
+
                         ensureElementMap()->setElementName(
                             element,
                             Data::MappedName(
@@ -2746,17 +2802,22 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                                     {frontName},
                                     masterTag,
                                     op,
-                                    usedProjectedLinkedNames.count(frontName),
+                                    index,
                                     newInfo.shapetype[0],
                                     0,
-                                    {Data::MAPPER_FLAG_PROJECTION},
-                                    {}
+                                    flags,
+                                    marks
                                 )
                             ),
                             masterTag
                         );
 
-                        usedProjectedLinkedNames.insert(frontName);
+                        if (marks.empty()) {
+                            usedProjectedLinkedNames.insert(frontName);
+                        }
+                        else {
+                            usedProjectedMarks.insert(marksKey);
+                        }
                     }
 
                     for (size_t generatedI = 0; generatedI < generatedShapes.size(); generatedI++) {
@@ -6889,12 +6950,9 @@ TopoShape prismUpToBySplit(
         return extrusion.FirstShape(element);
     };
     // Each far cap is the projection of its profile face, as BRepFeat names the top (ops#360)
-    named.makeShapeWithElementMap(
-        result,
-        UpToSplitMapper(splitter, extrusion, firstShape, profile.getShape(), result, upTo.getShape()),
-        {sweep, upTo},
-        op
-    );
+    const UpToSplitMapper
+        mapper(splitter, extrusion, firstShape, profile.getShape(), result, upTo.getShape());
+    named.makeShapeWithElementMap(result, mapper, {sweep, upTo}, op);
     return named;
 }
 }  // namespace
