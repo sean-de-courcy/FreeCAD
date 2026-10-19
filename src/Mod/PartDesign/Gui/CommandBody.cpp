@@ -23,18 +23,29 @@
  ***************************************************************************/
 
 
+#include <algorithm>
+#include <map>
+#include <set>
+
 #include <QApplication>
 #include <QComboBox>
 #include <QInputDialog>
 #include <QMessageBox>
+#include <BRep_Tool.hxx>
+#include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
+#include <TopoDS.hxx>
+#include <gp_Pnt.hxx>
 
 #include <App/Datums.h>
 #include <App/Document.h>
 #include <App/GeoFeature.h>
 #include <App/GeoFeatureGroupExtension.h>
+#include <App/Link.h>
 #include <App/Origin.h>
 #include <App/Part.h>
+#include <Base/BoundBox.h>
 #include <Base/Console.h>
 #include <Base/Tools.h>
 #include <Gui/CommandT.h>
@@ -44,7 +55,9 @@
 #include <Gui/Application.h>
 #include <Gui/MainWindow.h>
 #include <Gui/MDIView.h>
+#include <Mod/Part/App/PartFeature.h>
 #include <Mod/Part/App/PropertyTopoShape.h>
+#include <Mod/Part/App/TopoShape.h>
 #include <Mod/Sketcher/App/SketchObject.h>
 #include <Mod/PartDesign/App/Body.h>
 #include <Mod/PartDesign/App/FeatureBase.h>
@@ -56,6 +69,8 @@
 #include "Utils.h"
 #include "ViewProviderBody.h"
 #include "WorkflowManager.h"
+
+FC_LOG_LEVEL_INIT("PartDesignGui", true, true)
 
 
 //===========================================================================
@@ -426,6 +441,85 @@ bool CmdPartDesignBody::isActive()
 // PartDesign_Migrate
 //===========================================================================
 
+namespace
+{
+
+// FreeCAD-CH (ops#367): what an object shows, to tell whether Migrate moved it: its bounding box,
+// centre of mass and vertex points
+struct ShapeSignature
+{
+    bool known = false;
+    bool null = true;
+    Base::BoundBox3d box;
+    bool hasCentre = false;
+    Base::Vector3d centre;
+    std::vector<Base::Vector3d> vertices;  // by x
+};
+
+ShapeSignature signatureOf(const App::DocumentObject* obj)
+{
+    ShapeSignature signature;
+    try {
+        Part::TopoShape shape = Part::Feature::getTopoShape(
+            obj,
+            Part::ShapeOption::Transform | Part::ShapeOption::NoElementMap
+        );
+        signature.known = true;
+        if (shape.isNull()) {
+            return signature;
+        }
+        signature.null = false;
+        signature.box = shape.getBoundBoxOptimal();
+        signature.hasCentre = shape.getCenterOfGravity(signature.centre);
+        TopTools_IndexedMapOfShape vertices;
+        TopExp::MapShapes(shape.getShape(), TopAbs_VERTEX, vertices);
+        for (int index = 1; index <= vertices.Extent(); ++index) {
+            gp_Pnt point = BRep_Tool::Pnt(TopoDS::Vertex(vertices(index)));
+            signature.vertices.emplace_back(point.X(), point.Y(), point.Z());
+        }
+        std::ranges::sort(signature.vertices, {}, &Base::Vector3d::x);
+    }
+    catch (...) {
+        signature.known = false;
+    }
+    return signature;
+}
+
+// every point of from lies on one of to (both by x)
+bool covers(const std::vector<Base::Vector3d>& from, const std::vector<Base::Vector3d>& to, double tol)
+{
+    return std::ranges::all_of(from, [&](const Base::Vector3d& point) {
+        auto it = std::ranges::lower_bound(to, point.x - tol, {}, &Base::Vector3d::x);
+        for (; it != to.end() && it->x <= point.x + tol; ++it) {
+            if (Base::Distance(*it, point) <= tol) {
+                return true;
+            }
+        }
+        return false;
+    });
+}
+
+bool sameShape(const ShapeSignature& before, const ShapeSignature& after)
+{
+    if (!before.known || !after.known || before.null != after.null) {
+        return false;
+    }
+    if (before.null) {
+        return true;
+    }
+    double tol = 1e-6 * std::max(1.0, before.box.CalcDiagonalLength());
+    auto within = [tol](const Base::Vector3d& a, const Base::Vector3d& b) {
+        return Base::Distance(a, b) <= tol;
+    };
+    return within(before.box.GetMinimum(), after.box.GetMinimum())
+        && within(before.box.GetMaximum(), after.box.GetMaximum())
+        && before.hasCentre == after.hasCentre
+        && (!before.hasCentre || within(before.centre, after.centre))
+        && covers(before.vertices, after.vertices, tol) && covers(after.vertices, before.vertices, tol);
+}
+
+}  // namespace
+
 DEF_STD_CMD_A(CmdPartDesignMigrate)
 
 CmdPartDesignMigrate::CmdPartDesignMigrate()
@@ -568,8 +662,40 @@ void CmdPartDesignMigrate::activated(int iMsg)
         return;
     }
 
+    // FreeCAD-CH (ops#367): what each App::Link with LinkTransform off of a legacy feature shows,
+    // so that only those the migration moves are warned about
+    std::set<App::DocumentObject*> legacy;
+    for (const auto& featureChain : featureChains) {
+        legacy.insert(featureChain.begin(), featureChain.end());
+    }
+    std::map<App::DocumentObject*, ShapeSignature> offLinksBefore;
+    for (auto obj : doc->getObjects()) {
+        auto link = obj->getExtensionByType<App::LinkBaseExtension>(true);
+        if (link && !link->linkTransform() && legacy.contains(link->getLinkedObjectValue())) {
+            offLinksBefore.emplace(obj, signatureOf(obj));
+        }
+    }
+    std::vector<PartDesignGui::RelinkedLink> offLinks;
+
     // do the actual migration
     openCommand(QT_TRANSLATE_NOOP("Command", "Migrate legacy Part Design features to bodies"));
+    // FreeCAD-CH (ops#367): a failing command (doCommand, FCMD_OBJ_CMD) left the transaction
+    // open, and later changes joined it
+    struct AbortUnlessCommitted
+    {
+        CmdPartDesignMigrate* command;
+        bool committed = false;
+        ~AbortUnlessCommitted()
+        {
+            if (!committed) {
+                try {
+                    command->abortCommand();
+                }
+                catch (...) {
+                }
+            }
+        }
+    } transaction {this};
 
     for (auto chainIt = featureChains.begin(); !featureChains.empty();
          featureChains.erase(chainIt), chainIt = featureChains.begin()) {
@@ -677,7 +803,7 @@ void CmdPartDesignMigrate::activated(int iMsg)
                 feature->getNameInDocument()
             );
 
-            PartDesignGui::relinkToBody(feature, feature == chainIt->back());
+            PartDesignGui::relinkToBody(feature, feature == chainIt->back(), offLinks);
         }
     }
 
@@ -685,6 +811,30 @@ void CmdPartDesignMigrate::activated(int iMsg)
     // FreeCAD-CH (PR 329 round 2): the migration was left open, so a later scripted change
     // joined it and its Undo
     commitCommand();
+    transaction.committed = true;
+
+    // FreeCAD-CH (ops#367): the relinked links with LinkTransform off that moved, once per link
+    // array (its elements follow it)
+    Part::Feature::clearShapeCache();
+    for (const auto& relinked : offLinks) {
+        auto element = freecad_cast<App::LinkElement*>(relinked.link);
+        if (element && std::ranges::any_of(offLinks, [&](const PartDesignGui::RelinkedLink& other) {
+                return other.link == element->getLinkGroup();
+            })) {
+            continue;
+        }
+        auto before = offLinksBefore.find(relinked.link);
+        if (before != offLinksBefore.end() && sameShape(before->second, signatureOf(relinked.link))) {
+            continue;
+        }
+        FC_WARN(
+            relinked.link->getFullName()
+            << " now links " << relinked.body->getFullName() << " instead of "
+            << relinked.feature->getFullName()
+            << ": with LinkTransform off it moved (the body's shape holds the Placement of "
+            << relinked.feature->getFullName() << "), and so may links of it"
+        );
+    }
 }
 
 bool CmdPartDesignMigrate::isActive()

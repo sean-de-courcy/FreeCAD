@@ -24,6 +24,7 @@
 
 
 #include <algorithm>
+#include <set>
 #include <QMessageBox>
 #include <gp_Pln.hxx>
 #include <Precision.hxx>
@@ -549,7 +550,7 @@ bool isAnyNonPartDesignLinksTo(PartDesign::Feature* feature, bool respectGroups)
     return false;
 }
 
-void relinkToBody(PartDesign::Feature* feature, bool last)
+void relinkToBody(PartDesign::Feature* feature, bool last, std::vector<RelinkedLink>& offLinks)
 {
     App::Document* doc = feature->getDocument();
     PartDesign::Body* body = PartDesign::Body::findBodyOf(feature);
@@ -599,10 +600,20 @@ void relinkToBody(PartDesign::Feature* feature, bool last)
     };
     // FreeCAD-CH (PR 329 round 2): links in other documents stay as they are, with a warning. Migrate's
     // transaction is this document's, and a grouped Undo/Redo across documents doesn't keep a
-    // link to the body it makes (ops#301)
-    for (auto obj : feature->getInList()) {
-        if (obj->getDocument() == doc || isPartDesignAwareObjecta(obj)) {
+    // link to the body it makes (ops#301). Once per owner (getInList() lists it once per link) and
+    // once per link array: its elements link the feature as it does (ops#367).
+    const std::vector<App::DocumentObject*> inList = feature->getInList();
+    const std::set<App::DocumentObject*> owners(inList.begin(), inList.end());
+    std::set<App::DocumentObject*> seen;
+    for (auto obj : inList) {
+        if (!seen.insert(obj).second || obj->getDocument() == doc
+            || isPartDesignAwareObjecta(obj)) {
             continue;
+        }
+        if (auto element = freecad_cast<App::LinkElement*>(obj)) {
+            if (owners.contains(element->getLinkGroup())) {
+                continue;
+            }
         }
         std::vector<App::Property*> properties;
         obj->getPropertyList(properties);
@@ -737,16 +748,11 @@ void relinkToBody(PartDesign::Feature* feature, bool last)
                 // FreeCAD-CH (PR 329 round 2): a link that leaves out its target's own placement
                 // (LinkTransform off) showed the feature without it, and the body's shape holds
                 // it. Making up for it isn't exact (arrays, links of links, expressions, a
-                // placement the migration changes), so Migrate warns instead
+                // placement the migration changes), so Migrate warns instead, once the body is
+                // computed and only if the link moved (ops#367)
                 auto link = obj->getExtensionByType<App::LinkBaseExtension>(true);
                 if (link && prop == link->getLinkedObjectProperty() && !link->linkTransform()) {
-                    FC_WARN(
-                        obj->getFullName()
-                        << " now links " << body->getFullName() << " instead of "
-                        << feature->getFullName()
-                        << ": with LinkTransform off it may have moved by the Placement of "
-                        << feature->getFullName() << ", and so may links of it"
-                    );
+                    offLinks.push_back({obj, feature, body});
                 }
             }
         }
