@@ -24,7 +24,9 @@
 #include <Standard_Failure.hxx>
 
 #include <App/Application.h>
+#include <App/Document.h>
 #include <App/FeaturePythonPyImp.h>
+#include <Base/Exception.h>
 #include <Base/Parameter.h>
 #include <Mod/Part/App/modelRefine.h>
 
@@ -101,7 +103,24 @@ TopoShape FeatureRefine::refineShapeIfActive(
     }
     TopoShape shape(oldShape);
     try {
-        return shape.makeElementRefine();
+        TopoShape refinedShape = shape.makeElementRefine();
+        if (refinedShape.isValid() || !oldShape.isValid()) {
+            return refinedShape;
+        }
+        if (onError == RefineErrorPolicy::Raise) {
+            throw Base::RuntimeError("Refine produced an invalid shape");
+        }
+        // A warning on the feature (ops#389), which the recompute also reports: it computes, but
+        // its result is unrefined although Refine is on.
+        const std::string text = "Refine produced an invalid shape; the unrefined shape is kept";
+        if (auto doc = getDocument()) {
+            const char* previous = doc->getWarningDescription(this);
+            doc->setWarning(
+                const_cast<FeatureRefine*>(this),
+                previous && *previous ? std::string(previous) + "\n" + text : text
+            );
+        }
+        return oldShape;
     }
     catch (Standard_Failure& err) {
         if (onError == RefineErrorPolicy::Warn) {
