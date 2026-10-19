@@ -22,6 +22,7 @@
 # ***************************************************************************
 
 import math
+import time
 import unittest
 
 import FreeCAD
@@ -923,11 +924,12 @@ class TestPipeCorners(unittest.TestCase):
         pipe = self.pipe(spine, self.profile([models.circle(0, 0, 2)]), Transition="Transformed")
         self.assertFails(pipe, "folds", "(0, 0, 30)", "Right corner")
 
-    def testFoldAlongACurveTakesTheBooleanCheck(self):
+    def testFoldAlongACurve(self):
         """A circle of radius 2, an 85 degree corner, then a B-spline bending 40 degrees more
-        over 10 mm: the tilted section folds along the curve, which no exact test covers (not an
-        arc), and BRepCheck passes the solid. The boolean check finds it: the pipe fails. The
-        same with a 60 degree corner and a gentle bend (30 degrees over 20 mm) stays valid."""
+        over 10 mm: the tilted section folds along the curve, which BRepCheck passes. The
+        section's motion sampled along the curve shows it: the pipe fails, naming where the
+        curve starts. The same with a 60 degree corner and a gentle bend (30 degrees over 20 mm)
+        stays valid, with no self-intersection the boolean check finds."""
         for theta, bend, length, folds in ((85, 40, 10, True), (60, 30, 20, False)):
             with self.subTest(theta=theta):
                 self.renew()
@@ -944,10 +946,130 @@ class TestPipeCorners(unittest.TestCase):
                 profile = self.profile([models.circle(0, 0, 2)])
                 pipe = self.pipe(spine, profile, Transition="Transformed", Refine=False)
                 if folds:
-                    self.assertFails(pipe, "crosses itself", "(0, 0, 30)", "Right corner")
+                    self.assertFails(pipe, "along the curve from (0, 0, 30)", "Right corner")
                 else:
                     self.assertValidSolid(pipe)
                     pipe.Shape.check(True)
+
+    def timedPipe(self, spine, profile=None, **properties):
+        """The pipe, and how long its recompute took (s)."""
+        start = time.perf_counter()
+        pipe = self.pipe(spine, profile, **properties)
+        return pipe, time.perf_counter() - start
+
+    def testLongCurvesAreQuick(self):
+        """Along a long B-spline after a corner, and along a smooth chain of B-splines, a square's
+        pipe recomputes in well under 10 s (integration's build: 0.1 s), and doesn't fold. Fork
+        PR 344 round 3 ran the boolean check there: 44 s and 23 s.
+        - A 30 degree corner, then a B-spline through 121 points (60 mm, waving 2 mm sideways):
+          the section is tilted to the curve, so its folds are looked for.
+        - Four B-splines joined smoothly in space, the profile flat at the start, which the
+          spine leaves at about 55 degrees (`interpolate` ignores an InitialTangent given without
+          a FinalTangent): the profile's slant tilts the section, so the folds are looked for
+          along all four. The volume integration gives."""
+        corner = V(0, 0, 30)
+        leg = V(math.sin(math.radians(30)), 0, math.cos(math.radians(30)))
+        points = [
+            corner + leg * (0.5 * i) + V(0, 2 * math.sin(i / 6), 0) * (i / 120) for i in range(121)
+        ]
+        curve = Part.BSplineCurve()
+        curve.interpolate(points, InitialTangent=leg)
+        spine = models.feature(
+            self.doc, "Path", Part.Wire([Part.makeLine(V(0, 0, 0), corner), curve.toShape()])
+        )
+        pipe, seconds = self.timedPipe(spine, Transition="Transformed", Refine=False)
+        self.assertValidSolid(pipe)
+        self.assertLess(seconds, 10)
+
+        self.renew()
+        points = [
+            V(8 * math.sin(4 * math.pi * t), 4 * math.sin(2.6 * math.pi * t), 60 * t)
+            for t in (i / 24 for i in range(25))
+        ]
+        curve = Part.BSplineCurve()
+        curve.interpolate(points, InitialTangent=V(0, 0, 1))
+        first, last = curve.FirstParameter, curve.LastParameter
+        cuts = [first + (last - first) * k / 4 for k in range(5)]
+        spine = models.feature(
+            self.doc, "Path", Part.Wire([curve.toShape(a, b) for a, b in zip(cuts, cuts[1:])])
+        )
+        profile = self.profile(models.rectangle(-1, -1, 1, 1))
+        pipe, seconds = self.timedPipe(spine, profile, Transition="Transformed", Refine=False)
+        self.assertValidSolid(pipe)
+        self.assertAlmostEqual(pipe.Shape.Volume, 218.489, 3)
+        self.assertLess(seconds, 10)
+
+    def arcAfterACorner(self, degrees, tilt, radius, arc):
+        """Up 30 along Z, a corner of `degrees` towards +X, then an arc of `radius` turning `arc`
+        degrees further, in a plane tilted `tilt` degrees about the second leg (0: the corner's
+        plane)."""
+        corner = V(0, 0, 30)
+        leg = V(math.sin(math.radians(degrees)), 0, math.cos(math.radians(degrees)))
+        towards = App.Rotation(leg, tilt).multVec(V(0, 1, 0)).cross(leg).normalize()
+        centre = corner + towards * radius
+
+        def at(angle):
+            angle = math.radians(angle)
+            return centre + (towards * -math.cos(angle) + leg * math.sin(angle)) * radius
+
+        edges = [Part.makeLine(V(0, 0, 0), corner), Part.Arc(at(0), at(arc / 2), at(arc)).toShape()]
+        return models.feature(self.doc, "Path", Part.Wire(edges))
+
+    def testBinormalModeFoldsAlongArcs(self):
+        """In Binormal mode the profile turns about an arc's axis only when that is the binormal,
+        so the arc's exact test doesn't hold; the sampled motion decides. A square, a 60 degree
+        corner, then an arc of radius 10 turning 60 degrees in a plane tilted 45 degrees,
+        binormal (0.6, 1, 0): the section folds within the arc, and the pipe fails. A 30 degree
+        corner and an arc of radius 3 turning 20 degrees in that plane, binormal +Y: no fold,
+        valid, as integration gives it (494.365). Round 3 accepted the first (539.40,
+        self-intersecting, silently) and refused the second."""
+        binormal = V(0.6, 1, 0).normalize()
+        spine = self.arcAfterACorner(60, 45, 10, 60)
+        pipe = self.pipe(
+            spine, Transition="Transformed", Mode="Binormal", Binormal=binormal, Refine=False
+        )
+        self.assertFails(pipe, "folds", "arc from (0, 0, 30)", "Right corner")
+
+        self.renew()
+        spine = self.arcAfterACorner(30, 45, 3, 20)
+        pipe = self.pipe(
+            spine, Transition="Transformed", Mode="Binormal", Binormal=V(0, 1, 0), Refine=False
+        )
+        self.assertValidSolid(pipe)
+        pipe.Shape.check(True)
+        self.assertAlmostEqual(pipe.Shape.Volume, 494.365, 2)
+
+    def testSmallFoldPasses(self):
+        """A circle of radius 2, a 60 degree corner, then an arc of radius 3 turning 20 degrees in
+        a plane tilted 45 degrees: the section reaches 0.08 mm past the line where it turns back,
+        a sliver (about 1e-3 mm^3) that the boolean check doesn't find. Valid, as integration
+        gives it (383.571). Round 3 refused it."""
+        spine = self.arcAfterACorner(60, 45, 3, 20)
+        pipe = self.pipe(
+            spine, self.profile([models.circle(0, 0, 2)]), Transition="Transformed", Refine=False
+        )
+        self.assertValidSolid(pipe)
+        pipe.Shape.check(True)
+        self.assertAlmostEqual(pipe.Shape.Volume, 383.571, 2)
+
+    def testSeparateWiresPast90Degrees(self):
+        """Two squares side by side (x -5..-1 and 1..5) along an L at 120 degrees: the union of
+        both squares' extrusions. Round 3 made each piece of the union one solid of both
+        squares' shells, which isn't valid, and failed with a fold's message."""
+        points = self.lPoints(120)
+        profile = self.profile(models.rectangle(-5, -2, -1, 2) + models.rectangle(1, -2, 5, 2))
+        pipe = self.transformed(points, profile=profile)
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        self.assertTrue(pipe.Shape.isValid())
+        pipe.Shape.check(True)
+        faces = [
+            Part.Face(Part.makePolygon([V(x, y, 0) for x, y in corners]))
+            for corners in (
+                [(-5, -2), (-1, -2), (-1, 2), (-5, 2), (-5, -2)],
+                [(1, -2), (5, -2), (5, 2), (1, 2), (1, -2)],
+            )
+        ]
+        self.assertSameShape(pipe.Shape, extrusions(self.inSpace(points), Part.makeCompound(faces)))
 
     def testFixedModePast90DegreesFails(self):
         """"Fixed" mode along an L at 120 degrees: the profile keeps its orientation, the second
