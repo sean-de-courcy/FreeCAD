@@ -286,6 +286,9 @@ class TestHole(unittest.TestCase):
             hole = self.Doc.getObject("Hole")
             self.assertAlmostEqual(hole.HoleCutDiameter.Value, values[0], msg=(cut, "reopened"))
             self.assertAlmostEqual(hole.HoleCutDepth.Value, values[1], msg=(cut, "reopened"))
+            editable = ("HoleCutDiameter",) + (("HoleCutDepth",) if depth else ("HoleCutCountersinkAngle",))
+            for name in editable:
+                self.assertNotIn("ReadOnly", hole.getPropertyStatus(name), (cut, name, "reopened"))
             hole.Depth = 9
             hole.Depth = 10
             hole.touch()

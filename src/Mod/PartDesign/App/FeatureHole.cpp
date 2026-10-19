@@ -831,9 +831,11 @@ void Hole::updateHoleCutParams()
                     // updateHoleCutParams()
                     if (!HoleCutCustomValues.getValue()) {
                         HoleCutCustomValues.setValue(true);
-                        HoleCutDiameter.setReadOnly(false);
-                        HoleCutDepth.setReadOnly(false);
                     }
+                    // FreeCAD-CH (ops#389): editable on every pass, not only the first:
+                    // a reopened countersink's angle stayed read-only
+                    HoleCutDiameter.setReadOnly(false);
+                    HoleCutDepth.setReadOnly(false);
                 }
                 else {
                     // set normed values if not overwritten or if previously there
@@ -882,10 +884,11 @@ void Hole::updateHoleCutParams()
                     // updateHoleCutParams()
                     if (!HoleCutCustomValues.getValue()) {
                         HoleCutCustomValues.setValue(true);
-                        HoleCutDiameter.setReadOnly(false);
-                        HoleCutDepth.setReadOnly(false);
-                        HoleCutCountersinkAngle.setReadOnly(false);
                     }
+                    // FreeCAD-CH (ops#389): as for the counterbore above
+                    HoleCutDiameter.setReadOnly(false);
+                    HoleCutDepth.setReadOnly(false);
+                    HoleCutCountersinkAngle.setReadOnly(false);
                 }
                 else {
                     // set normed values if not overwritten or if previously there
