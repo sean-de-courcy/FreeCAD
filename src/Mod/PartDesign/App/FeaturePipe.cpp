@@ -40,11 +40,13 @@
 #include <BRepBuilderAPI_MakeSolid.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepCheck_Analyzer.hxx>
+#include <BRepGProp.hxx>
 #include <BRepClass3d_SolidClassifier.hxx>
 #include <BRepOffsetAPI_MakePipeShell.hxx>
 #include <BRepTools_WireExplorer.hxx>
 #include <BRep_Tool.hxx>
 #include <gp.hxx>
+#include <GProp_GProps.hxx>
 #include <gp_Ax2.hxx>
 #include <Law_Function.hxx>
 #include <Precision.hxx>
@@ -482,6 +484,18 @@ CornerTilts measureCorners(
     return tilts;
 }
 
+/// Whether \a shape holds a solid that passes BRepCheck and encloses a positive volume once
+/// oriented (an inside-out one passes BRepCheck: a multisection Pipe on macOS, ops#396)
+bool isValidSolid(const Part::TopoShape& shape)
+{
+    if (!shape.countSubShapes(TopAbs_SOLID) || !BRepCheck_Analyzer(shape.getShape()).IsValid()) {
+        return false;
+    }
+    GProp_GProps properties;
+    BRepGProp::VolumeProperties(shape.getShape(), properties);
+    return properties.Mass() > Precision::Confusion();
+}
+
 /// The union past 90 degrees: \a spine cut into pieces at \a pieceStarts, each piece swept with
 /// "Transformed" (\a setup) from where the one before ends, closed with its caps and made a
 /// solid, and the pieces fused. \a profiles are the sections the first piece starts from, one
@@ -569,8 +583,7 @@ Part::TopoShape sweepPiecesAndFuse(
         if (classifier.State() == TopAbs_IN) {
             solid.setShape(solid.getShape().Reversed(), false);
         }
-        if (!solid.countSubShapes(TopAbs_SOLID)
-            || !BRepCheck_Analyzer(solid.getShape()).IsValid()) {
+        if (!isValidSolid(solid)) {
             return {};
         }
         solids.push_back(solid);
@@ -1213,14 +1226,15 @@ App::DocumentObjectExecReturn* Pipe::execute()
             }
         }
 
-        // Every pipe is a valid solid, whatever its transition (ops#381): "Right corner" and
-        // "Round corner" gave no solid, or an invalid one, at the corners of a pipe with
-        // several sections and at hairpins, and "Transformed" an invalid one where a tight curve
-        // follows a corner of nearly 90 degrees. A self-intersection that only the boolean
-        // check finds passes: that check takes up to a second on a helix sweep, and reports
-        // valid ones (C0 continuity).
+        // Every pipe is a valid solid with a positive volume, whatever its transition (ops#381):
+        // "Right corner" and "Round corner" gave no solid, or an invalid one, at the corners of
+        // a pipe with several sections and at hairpins, and "Transformed" an invalid one where
+        // a tight curve follows a corner of nearly 90 degrees; a multisection pipe on macOS an
+        // inside-out one (ops#396). A self-intersection that only the boolean check finds
+        // passes: that check takes up to a second on a helix sweep, and reports valid ones (C0
+        // continuity).
         for (const auto& s : shapes) {
-            if (!s.countSubShapes(TopAbs_SOLID) || !BRepCheck_Analyzer(s.getShape()).IsValid()) {
+            if (!isValidSolid(s)) {
                 return new App::DocumentObjectExecReturn(invalidPipe(mode, Transition.getValue()));
             }
         }
