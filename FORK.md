@@ -361,7 +361,8 @@ names it.
 | `fix/330-newer-file-lows` | fix | ops#330 | - | `integration` `8d6875f298` | `62575f717f` (fork PR 332), 2026-10-18 | never (fork fix) |
 | `fix/362-multifuse-refined-edges` | fix | ops#362 | - | `integration` `62575f717f` | `8d7db92190` (fork PR 333), 2026-10-18 | never (fork fix) |
 | `fix/349-cycles-and-poll` | fix | ops#349, ops#352 | - | `integration` `23165bc6b0` | `2c10a1584e` (fork PR 330), 2026-10-18 | never (fork fix) |
-| `test/359-derived-survivor-tests` | test | ops#359 | - | `integration` `2c10a1584e` | (fork PR 334) | never (fork tests) |
+| `test/359-derived-survivor-tests` | test | ops#359 | - | `integration` `2c10a1584e` | `4575e65657` (fork PR 334), 2026-10-18 | never (fork tests) |
+| `fix/368-startup-newer-file` | fix | ops#368 | - | `integration` `8d7db92190` | (fork PR 335) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 
