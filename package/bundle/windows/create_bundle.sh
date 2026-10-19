@@ -3,7 +3,7 @@
 set -e
 set -x
 
-conda_env="$(pwd)/../.pixi/envs/default/"
+conda_env="$(pwd | sed 's#\\#/#g')/../../../.pixi/envs/default"
 
 # FreeCAD-CH: the package's name and executables come from fork.json. The executables are
 # renamed here only (build trees keep FreeCAD.exe), so that official FreeCAD's FreeCAD.exe
@@ -44,14 +44,26 @@ cp -a ${conda_env}/Library/Mod ${copy_dir}/Mod
 mkdir -p ${copy_dir}/doc
 cp -a ${conda_env}/Library/doc/{ThirdPartyLibraries.html,LICENSE.html} ${copy_dir}/doc
 
+# Generate graphviz config
+${copy_dir}/bin/dot.exe -c
+
 # delete unnecessary stuff
 find ${copy_dir} -name \*.a -delete
 find ${copy_dir} -name \*.lib -delete
 find ${copy_dir} -name \*arm\*.exe -delete # arm binaries that fail to extract unless using latest 7zip
 
-# Apply Patches
-mv ${copy_dir}/bin/Lib/ssl.py .ssl-orig.py
-cp ssl-patch.py ${copy_dir}/bin/Lib/ssl.py
+rm -rf ${copy_dir}/bin/Lib/site-packages/conda
+rm -rf ${copy_dir}/bin/Lib/site-packages/pandas/tests
+rm -rf ${copy_dir}/bin/Lib/site-packages/pre_commit
+rm -rf ${copy_dir}/bin/Lib/site-packages/pycparser
+rm -rf ${copy_dir}/bin/Lib/site-packages/pyright*
+rm -rf ${copy_dir}/bin/libclang-*.dll
+rm -rf ${copy_dir}/lib/cmake
+rm -rf ${copy_dir}/lib/objects-Release
+rm -rf ${copy_dir}/lib/qt6/bin
+rm -rf ${copy_dir}/share/cmake
+rm -rf ${copy_dir}/share/cmake-*
+rm -rf ${copy_dir}/share/man
 
 # Turn off the echo before we start actually calling "echo"
 set +x
@@ -59,21 +71,14 @@ set +x
 echo '[Paths]' >> ${copy_dir}/bin/qt6.conf
 echo 'Prefix = ../lib/qt6' >> ${copy_dir}/bin/qt6.conf
 
-# convenient shortcuts to run the binaries
-if [ -x /c/ProgramData/chocolatey/tools/shimgen.exe ]; then
-    pushd ${copy_dir}
-    /c/ProgramData/chocolatey/tools/shimgen.exe -p "bin/${app_cmd_exe}" -i "$(pwd)/../../../WindowsInstaller/icons/FreeCAD.ico" -o "$(pwd)/${app_cmd_exe}"
-    /c/ProgramData/chocolatey/tools/shimgen.exe --gui -p "bin/${app_exe}" -i "$(pwd)/../../../WindowsInstaller/icons/FreeCAD.ico" -o "$(pwd)/${app_exe}"
-    popd
-fi
-
 version_name="${app_name}_${BUILD_TAG}-Windows-$(uname -m)"
 
 echo -e "################"
 echo -e "version_name:  ${version_name}"
 echo -e "################"
 
-pixi list -e default > ${copy_dir}/packages.txt
+# FreeCAD-CH: the shipped packages are the workspace's default environment, not this folder's tools
+pixi list --frozen --manifest-path ../../../pixi.toml -e default > ${copy_dir}/packages.txt
 sed -i '1s/.*/\nLIST OF PACKAGES:/' ${copy_dir}/packages.txt
 
 mv ${copy_dir} ${version_name}
@@ -100,7 +105,6 @@ if [[ "${WINDOWS_SIGN_RELEASE:-0}" == "1" ]]; then
     shopt -s nullglob
 
     FILES=(
-      "$SIGN_DIR"/*.exe
       "$SIGN_DIR"/bin/*.exe
       "$SIGN_DIR"/bin/*.dll
       "$SIGN_DIR"/bin/*.pyd
@@ -147,6 +151,9 @@ if ! "$SIGN_DIR/bin/${app_cmd_exe}" --safe-mode --console "import pivy; from piv
   echo "FreeCAD bundled Pivy smoke test failed; the Windows bundle cannot import the bundled Coin/Pivy runtime."
   exit 1
 fi
+
+# FreeCAD-CH: refuse a bundle that doesn't run the tested environment, pixi.lock's (ops#388)
+python ../../scripts/check_release_env.py --lock ../../../pixi.lock --platform "${TARGET_PLATFORM:-win-64}"   --freecadcmd "$SIGN_DIR/bin/${app_cmd_exe}" ${GITHUB_STEP_SUMMARY:+--summary "$GITHUB_STEP_SUMMARY"}
 
 7z a -t7z -mx9 -mmt=${NUMBER_OF_PROCESSORS} ${version_name}.7z ${version_name} -bb
 # create hash

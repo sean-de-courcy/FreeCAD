@@ -6,7 +6,7 @@
 
 # Assemble an experimental Windows FreeCAD bundle from a LibPack-based build.
 #
-# Unlike package/rattler-build/windows/create_bundle.sh (which sources everything from a conda
+# Unlike package/bundle/windows/create_bundle.sh (which sources everything from a conda
 # environment), this script sources the redistributable tree from a "cmake --install" staging
 # prefix produced by a LibPack build. The LibPack supplies OCCT, Qt6 and Python; FreeCAD supplies
 # its own bundled Coin/Pivy. The resulting tree matches the layout the NSIS installer expects
@@ -188,7 +188,6 @@ if [[ "${sign_available}" == "1" ]]; then
     echo "Azure Artifact Signing access confirmed. Signing binaries..."
     shopt -s nullglob
     files=(
-        "${sign_dir}"/*.exe
         "${sign_dir}"/bin/*.exe
         "${sign_dir}"/bin/*.dll
         "${sign_dir}"/bin/*.pyd

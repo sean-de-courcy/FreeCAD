@@ -13,11 +13,46 @@ conda_env="${app_bundle}/Contents/Resources"
 
 mkdir -p ${conda_env}
 
-cp -a ../.pixi/envs/default/* ${conda_env}
+cp -a ../../../.pixi/envs/default/* ${conda_env}
 
 # delete unnecessary stuff
 rm -rf ${conda_env}/include
 find ${conda_env} -name \*.a -delete
+rm -rf ${conda_env}/conda-meta
+rm -rf ${conda_env}/doc
+rm -rf ${conda_env}/etc/conda
+rm -rf ${conda_env}/lib/clang
+rm -rf ${conda_env}/lib/gcc
+rm -rf ${conda_env}/lib/libclang-cpp.*.dylib
+rm -rf ${conda_env}/lib/libclang.*.dylib
+rm -rf ${conda_env}/lib/libLLVM.*.dylib
+rm -rf ${conda_env}/lib/node_modules
+rm -rf ${conda_env}/lib/perl5
+rm -rf ${conda_env}/lib/python*/site-packages/pandas/tests
+rm -rf ${conda_env}/lib/python*/site-packages/pre_commit
+rm -rf ${conda_env}/lib/python*/site-packages/pycparser
+rm -rf ${conda_env}/lib/python*/site-packages/pyright
+rm -rf ${conda_env}/lib/python*/site-packages/qtpy/tests
+rm -rf ${conda_env}/lib/python*/site-packages/tests
+rm -rf ${conda_env}/lib/qt6/bin
+rm -rf ${conda_env}/libexec/gcc
+rm -rf ${conda_env}/libexec/git-core
+rm -rf ${conda_env}/man
+rm -rf ${conda_env}/share/cmake
+rm -rf ${conda_env}/share/cmake-*
+rm -rf ${conda_env}/share/emacs
+rm -rf ${conda_env}/share/git-core
+rm -rf ${conda_env}/share/git-gui
+rm -rf ${conda_env}/share/gitk
+rm -rf ${conda_env}/share/gitweb
+rm -rf ${conda_env}/share/info
+rm -rf ${conda_env}/share/man
+rm -rf ${conda_env}/share/perl5
+rm -rf ${conda_env}/share/swig
+rm -rf ${conda_env}/share/vim
+
+# Also delete symlinks whose target no longer exists
+find ${conda_env} -type l ! -exec test -e {} \; -delete
 
 mv ${conda_env}/bin ${conda_env}/bin_tmp
 mkdir ${conda_env}/bin
@@ -32,6 +67,8 @@ cp ${conda_env}/bin_tmp/dot ${conda_env}/bin/
 cp ${conda_env}/bin_tmp/unflatten ${conda_env}/bin/
 rm -rf ${conda_env}/bin_tmp
 
+${conda_env}/bin/dot -c
+
 sed -i '1s|.*|#!/usr/bin/env python|' ${conda_env}/bin/pip
 
 # copy resources
@@ -45,7 +82,7 @@ find . -name "*.pyc" -type f -delete
 # see https://github.com/FreeCAD/FreeCAD/issues/10144#issuecomment-1836686775
 # and https://github.com/FreeCAD/FreeCAD-Bundle/pull/203
 # and https://github.com/FreeCAD/FreeCAD-Bundle/issues/375
-python ../scripts/fix_macos_lib_paths.py ${conda_env}/lib -r
+python fix_macos_lib_paths.py ${conda_env}/lib -r
 
 # build and install the launcher
 cmake -B build launcher
@@ -87,7 +124,8 @@ sed -i "s/APPLICATION_MENU_NAME/${application_menu_name}/" ${conda_env}/../Info.
 sed -i "s/APPLICATION_EXECUTABLE/${app_name}/" ${conda_env}/../Info.plist
 sed -i "s/BUNDLE_IDENTIFIER/${bundle_id}/" ${conda_env}/../Info.plist
 
-pixi list -e default > "${app_bundle}/Contents/packages.txt"
+# FreeCAD-CH: the shipped packages are the workspace's default environment, not this folder's tools
+pixi list --frozen --manifest-path ../../../pixi.toml -e default > "${app_bundle}/Contents/packages.txt"
 sed -i '1s/.*/\nLIST OF PACKAGES:/' "${app_bundle}/Contents/packages.txt"
 
 echo "Running FreeCAD command-line smoke test..."
@@ -101,6 +139,9 @@ if ! "${conda_env}/bin/freecadcmd" --safe-mode --console "import pivy; from pivy
     echo "FreeCAD bundled Pivy smoke test failed; the macOS bundle cannot import the bundled Coin/Pivy runtime."
     exit 1
 fi
+
+# FreeCAD-CH: refuse a bundle that doesn't run the tested environment, pixi.lock's (ops#388)
+python ../../scripts/check_release_env.py --lock ../../../pixi.lock --platform "${TARGET_PLATFORM:-osx-$(uname -m)}"     --freecadcmd "${conda_env}/bin/freecadcmd" ${GITHUB_STEP_SUMMARY:+--summary "$GITHUB_STEP_SUMMARY"}
 
 # FreeCAD-CH: the launcher runs bin/freecad outside Contents/MacOS, so the application menu's
 # About, Hide and Quit items take their name from the Info.plist embedded in it (ops#98)
