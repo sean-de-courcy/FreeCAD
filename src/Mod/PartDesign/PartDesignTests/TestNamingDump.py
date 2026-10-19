@@ -219,14 +219,27 @@ def modelFilletChamfer(doc):
 
 
 def modelPipeShell(doc):
-    """Pipe shell of a rectangle along a line: the end sections' edges (S4)."""
+    """Pipe shell of a rectangle along a line: the end sections' edges (S4). And a PartDesign
+    Pipe of a square with a square hole along an L path: its start edges and vertices keep the
+    profile's names, its end ones are their projections, and the bend edges are named from the
+    side faces (ops#351). Not a round hole: at the bend its side face meets the next leg's in
+    four arcs, named `UPP` from the same faces and told apart only by an index, which comes out
+    in another order on macOS (fork PR 337's CI)."""
     profile = models.feature(doc, "Profile", models.closedWire([(0, 0, 0), (4, 0, 0), (4, 2, 0), (0, 2, 0)]))
     spine = models.feature(doc, "Spine", Part.makeLine(V(0, 0, 0), V(0, 0, 20)))
     sweep = doc.addObject("Part::Sweep", "Sweep")
     sweep.Sections = [profile]
     sweep.Spine = (spine, ["Edge1"])
     sweep.Solid = True
-    return [sweep]
+    body = models.body(doc)
+    xz = App.Placement(V(0, 0, 0), App.Rotation(V(1, 0, 0), 90))
+    path = models.sketch(doc, "Path", models.polyline([(0, 0), (0, 30), (20, 30)]), body, placement=xz)
+    square = models.sketch(doc, "Square", models.rectangle(-3, -3, 3, 3) + models.rectangle(-1, -1, 1, 1), body)
+    pipe = body.newObject("PartDesign::AdditivePipe", "Pipe")
+    pipe.Profile = square
+    pipe.Spine = (path, [])
+    pipe.Transition = "Right corner"  # "Transformed" gives an invalid solid at a sharp corner
+    return [sweep, pipe]
 
 
 def modelLoftRevolve(doc):

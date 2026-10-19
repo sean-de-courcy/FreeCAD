@@ -23,6 +23,9 @@
  ***************************************************************************/
 
 
+#include <algorithm>
+#include <limits>
+
 #include <Mod/Part/App/FCBRepAlgoAPI_Cut.h>
 #include <Mod/Part/App/FCBRepAlgoAPI_Fuse.h>
 #include <BRepBndLib.hxx>
@@ -31,6 +34,7 @@
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepClass3d_SolidClassifier.hxx>
 #include <BRepOffsetAPI_MakePipeShell.hxx>
+#include <BRep_Tool.hxx>
 #include <gp_Ax2.hxx>
 #include <Law_Function.hxx>
 #include <Precision.hxx>
@@ -39,7 +43,9 @@
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Wire.hxx>
+#include <TopTools_DataMapOfShapeListOfShape.hxx>
 #include <TopTools_HSequenceOfShape.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
 
 
 #include <App/Document.h>
@@ -56,6 +62,190 @@
 FC_LOG_LEVEL_INIT("PartDesign", true, true);
 
 using namespace PartDesign;
+
+namespace
+{
+// The pipe shell's history, plus the wires where it starts and ends (ops#351). MakePipeShell
+// reports the side faces and edges that the sections' edges and vertices generate, but nothing
+// for its end wires, so those were named `UPP` from the side faces, and a start edge's name had
+// the same shape as a bend edge's beside it. As in a Pad, and Helix's caps: the start wire's
+// edges and vertices are the first section's modified, so they keep its names (the sketch's
+// own), and the end wire's are the last section's projected (`PRJ`): for a pipe of one profile,
+// the profile moved to the end of the sweep. The shell starts where the spine does, and the ends
+// may swap roles, so the names stay with the end the sections say; a tie (a closed spine) keeps
+// the start.
+// - One profile: the ends swap when the profile lies nearer the spine's far end (a spine drawn
+//   towards it, perhaps extended past it), so the names stay with the end at or nearest the
+//   profile's place. The switch point is the spine's middle: an edit that moves the profile (or
+//   the spine's nearer end) across it moves the profile's names, and whatever references them,
+//   to the other end.
+// - Several sections: the first and last decide together, by the pairing of sections and ends
+//   whose distances add up to less, each section's distance the mean over its vertices (so a
+//   section weighs the same whatever its number of vertices). There is no middle switch: the
+//   ends follow the sections' order along the spine (on a straight one, they swap when the
+//   profile lies beyond the last section). Each wire of a holed section decides alone.
+// Each end element is found through the side face or edge its section element generated. A
+// point section names only its end's vertex. Edges at a bend, a corner or a middle section have
+// no section element of their own: they keep their `UPP` names.
+class MapperPipeShellEnds: public Part::MapperMaker
+{
+public:
+    /// \a first and \a last are the first and last sections added to \a pipe, a wire or a
+    /// vertex each (the same for a pipe of one profile); \a point is \a first when it is the
+    /// profile's point, which the side shapes' history leaves out (it isn't otherwise a source)
+    MapperPipeShellEnds(
+        BRepOffsetAPI_MakePipeShell& pipe,
+        const TopoDS_Shape& first,
+        const TopoDS_Shape& last,
+        const TopoDS_Shape& point
+    )
+        : MapperMaker(pipe)
+        , point(point)
+    {
+        TopTools_IndexedMapOfShape startElements;
+        TopTools_IndexedMapOfShape endElements;
+        TopExp::MapShapes(pipe.FirstShape(), startElements);
+        TopExp::MapShapes(pipe.LastShape(), endElements);
+        double kept = distanceTo(first, pipe.FirstShape());
+        double swapped = distanceTo(first, pipe.LastShape());
+        // One profile: its distances alone (the two sections' terms would be the same on both
+        // sides, and nothing would ever swap)
+        if (!last.IsSame(first)) {
+            kept += distanceTo(last, pipe.LastShape());
+            swapped += distanceTo(last, pipe.FirstShape());
+        }
+        const bool reversed = swapped + Precision::Confusion() < kept;
+        const TopTools_IndexedMapOfShape& own = reversed ? endElements : startElements;
+        const TopTools_IndexedMapOfShape& other = reversed ? startElements : endElements;
+        bindEnds(pipe, first, own, nullptr, starts);
+        // With a closed spine the shell ends where it starts: those elements keep the first
+        // section's names
+        bindEnds(pipe, last, other, &own, ends);
+    }
+
+    const std::vector<TopoDS_Shape>& modified(const TopoDS_Shape& s) const override
+    {
+        if (s.IsSame(point)) {
+            _res.clear();
+        }
+        else {
+            MapperMaker::modified(s);
+        }
+        if (const TopTools_ListOfShape* elements = starts.Seek(s)) {
+            for (const TopoDS_Shape& element : *elements) {
+                _res.push_back(element);
+            }
+        }
+        return _res;
+    }
+
+    const std::vector<TopoDS_Shape>& generated(const TopoDS_Shape& s) const override
+    {
+        if (s.IsSame(point)) {
+            _res.clear();
+            return _res;
+        }
+        return MapperMaker::generated(s);
+    }
+
+    const std::vector<TopoDS_Shape>& projected(const TopoDS_Shape& s) const override
+    {
+        _res.clear();
+        if (const TopTools_ListOfShape* elements = ends.Seek(s)) {
+            for (const TopoDS_Shape& element : *elements) {
+                _res.push_back(element);
+            }
+        }
+        return _res;
+    }
+
+private:
+    /// How far \a section lies from the shell's end \a end: the mean over its vertices of the
+    /// distance to the nearest vertex of the end, so that each section weighs the same whatever
+    /// its number of vertices; infinite when either has none
+    static double distanceTo(const TopoDS_Shape& section, const TopoDS_Shape& end)
+    {
+        constexpr double none = std::numeric_limits<double>::infinity();
+        if (section.IsNull() || end.IsNull()) {
+            return none;
+        }
+        TopTools_IndexedMapOfShape sectionVertices;
+        TopTools_IndexedMapOfShape endVertices;
+        TopExp::MapShapes(section, TopAbs_VERTEX, sectionVertices);
+        TopExp::MapShapes(end, TopAbs_VERTEX, endVertices);
+        if (sectionVertices.IsEmpty() || endVertices.IsEmpty()) {
+            return none;
+        }
+        double sum = 0;
+        for (int i = 1; i <= sectionVertices.Extent(); ++i) {
+            const gp_Pnt at = BRep_Tool::Pnt(TopoDS::Vertex(sectionVertices(i)));
+            double nearest = none;
+            for (int j = 1; j <= endVertices.Extent(); ++j) {
+                nearest = std::min(
+                    nearest,
+                    at.Distance(BRep_Tool::Pnt(TopoDS::Vertex(endVertices(j))))
+                );
+            }
+            sum += nearest;
+        }
+        return sum / sectionVertices.Extent();
+    }
+
+    /// Binds each edge and vertex of \a section (in its order) to the elements of one end of
+    /// the shell, \a endElements, that the side faces or edges it generated hold; a point
+    /// section to the end's vertex
+    static void bindEnds(
+        BRepOffsetAPI_MakePipeShell& pipe,
+        const TopoDS_Shape& section,
+        const TopTools_IndexedMapOfShape& endElements,
+        const TopTools_IndexedMapOfShape* skip,
+        TopTools_DataMapOfShapeListOfShape& bound
+    )
+    {
+        if (section.IsNull()) {
+            return;
+        }
+        auto take = [&](const TopoDS_Shape& element, TopTools_ListOfShape& found) {
+            if (endElements.Contains(element) && !(skip && skip->Contains(element))) {
+                found.Append(element);
+            }
+        };
+        if (section.ShapeType() == TopAbs_VERTEX) {
+            TopTools_ListOfShape found;
+            for (int i = 1; i <= endElements.Extent(); ++i) {
+                if (endElements(i).ShapeType() == TopAbs_VERTEX) {
+                    take(endElements(i), found);
+                }
+            }
+            if (found.Extent() == 1) {
+                bound.Bind(section, found);
+            }
+            return;
+        }
+        for (TopAbs_ShapeEnum type : {TopAbs_EDGE, TopAbs_VERTEX}) {
+            TopTools_IndexedMapOfShape elements;
+            TopExp::MapShapes(section, type, elements);
+            for (int i = 1; i <= elements.Extent(); ++i) {
+                TopTools_IndexedMapOfShape candidates;
+                for (const TopoDS_Shape& side : pipe.Generated(elements(i))) {
+                    TopExp::MapShapes(side, type, candidates);
+                }
+                TopTools_ListOfShape found;
+                for (int j = 1; j <= candidates.Extent(); ++j) {
+                    take(candidates(j), found);
+                }
+                if (!found.IsEmpty()) {
+                    bound.Bind(elements(i), found);
+                }
+            }
+        }
+    }
+
+    TopoDS_Shape point;
+    TopTools_DataMapOfShapeListOfShape starts;
+    TopTools_DataMapOfShapeListOfShape ends;
+};
+}  // namespace
 
 const char* Pipe::TypeEnums[] = {"FullPath", "UpToFace", nullptr};
 const char* Pipe::TransitionEnums[] = {"Transformed", "Right corner", "Round corner", nullptr};
@@ -400,8 +590,26 @@ App::DocumentObjectExecReturn* Pipe::execute()
                 );
             }
 
+            // The profile's point, when it is one, names the shell's start vertex
+            std::vector<Part::TopoShape> sections;
+            if (!profilePoint.isNull()) {
+                sections.push_back(copyProfilePoint);
+            }
+            sections.insert(sections.end(), wires.begin(), wires.end());
             Part::TopoShape shell = makeTopoShape();
-            shell.makeElementShape(mkPS, wires, Part::OpCodes::PipeShell);
+            // Shape() builds the pipe, which the mapper's FirstShape() and LastShape() need
+            const TopoDS_Shape built = mkPS.Shape();
+            shell.makeShapeWithElementMap(
+                built,
+                MapperPipeShellEnds(
+                    mkPS,
+                    sections.front().getShape(),
+                    sections.back().getShape(),
+                    copyProfilePoint.getShape()
+                ),
+                sections,
+                Part::OpCodes::PipeShell
+            );
             shells.push_back(shell);
 
             if (!shell.isClosed()) {

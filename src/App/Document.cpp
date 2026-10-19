@@ -131,8 +131,10 @@ namespace
 // built as two solids mark side 1's start cap, the seam (CPY;1), and a Pad's two sides built
 // as one prism start from side 2's end when it has a length (when it goes up to a face, from
 // side 1's end, the start cap marked CPY;0 and the far cap CPY;2) (no build was released
-// between them).
-constexpr int ForkNamingRevision = 2;
+// between them). 3: ops#351, a PartDesign Pipe's start edges and vertices keep the profile's
+// names and its end ones are their projections (PRJ), where both were `UPP` names from the side
+// faces.
+constexpr int ForkNamingRevision = 3;
 
 // The `.N<n>` of the element map version: the form interned names are saved in (ops#6). 2: the
 // references are indices into the file's table (NamingFormat 2).

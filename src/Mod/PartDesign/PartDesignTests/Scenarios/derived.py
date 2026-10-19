@@ -278,10 +278,11 @@ class PadEdgeCutShallow(OnEdge, Pad, Recessed):
 
 class PipeStartCapEdgeCutAway(OnEdge, Recessed):
     """ops#351: a Pipe of the square -2..2 along an L path (up 30, then +X 20), the slab 8 mm:
-    the start cap's edge at x = 2 (a `UPP` name from the side face the profile's line made) is
-    gone. The edge at the bend, (2, 0, 30), between that side face and the next leg's, is named
-    `UPP` from both: tier 1 takes it on the top agreement (`PSH;E;UPP`) and the shared face, 30 mm
-    away. Nothing stands at the old place: broken."""
+    the start cap's edge at x = 2 is gone. It was a `UPP` name from the side face the profile's
+    line made, and tier 1 took the edge at the bend, (2, 0, 30), named `UPP` from that face and
+    the next leg's, on the top agreement (`PSH;E;UPP`), 30 mm away. The start edge now keeps the
+    sketch line's own name and the far end's is its projection (PRJ): the section edge 8 mm up
+    and the far twin are only candidates. Nothing stands at the old place: broken."""
 
     def solid(self, doc, body):
         path = m.sketch(doc, "Path", m.polyline([(0, 0), (0, 30), (20, 30)]), body, placement=XZ)

@@ -53,6 +53,7 @@ from PartDesignTests.TestHelix import TestHelix
 from PartDesignTests.TestHole import TestHole
 from PartDesignTests.TestRevolve import TestRevolve
 from PartDesignTests.TestPipe import TestPipe
+from PartDesignTests.TestPipe import TestPipeEndNames  # FreeCAD-CH, ops#351
 from PartDesignTests.TestLoft import TestLoft
 from PartDesignTests.TestPrimitive import TestPrimitive
 from PartDesignTests.TestHelix import TestHelix
