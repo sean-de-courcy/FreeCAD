@@ -231,6 +231,57 @@ std::atomic<MainThreadSignalConfig::IsMainThreadFn> isMainThreadHook {nullptr};
 std::atomic<MainThreadSignalConfig::InvokeFn> invokeHook {nullptr};
 std::atomic<MainThreadSignalConfig::RunQueuedFn> runQueuedHook {nullptr};
 
+// What a main-thread wait for the worker (cancelRecomputeRequestsForDocument) wakes for: a
+// function that invoke() posted to the main thread, which it then runs, or a request leaving
+// _recomputeDocumentsInProgress. Each hop of the worker is one blocking post, and Qt's
+// sendPostedEvents() runs only those posted before it starts, so a wait that woke only on a timer
+// ran about one hop per wake-up (ops#365)
+std::mutex hopWakeMutex;
+std::condition_variable hopWake;
+int invokesPending = 0;  // posted and not yet started (or dropped unrun)
+unsigned requestsFinished = 0;
+
+// Counts one posted function from its post until it starts on the main thread, or is dropped
+class PendingInvoke
+{
+public:
+    PendingInvoke()
+    {
+        {
+            std::lock_guard<std::mutex> lock(hopWakeMutex);
+            ++invokesPending;
+        }
+        hopWake.notify_all();
+    }
+    ~PendingInvoke()
+    {
+        started();
+    }
+    PendingInvoke(const PendingInvoke&) = delete;
+    PendingInvoke& operator=(const PendingInvoke&) = delete;
+
+    void started()
+    {
+        std::lock_guard<std::mutex> lock(hopWakeMutex);
+        if (counted) {
+            counted = false;
+            --invokesPending;
+        }
+    }
+
+private:
+    bool counted = true;
+};
+
+void notifyRequestFinished()
+{
+    {
+        std::lock_guard<std::mutex> lock(hopWakeMutex);
+        ++requestsFinished;
+    }
+    hopWake.notify_all();
+}
+
 void setWorkerInRequest(bool inRequest)
 {
     std::lock_guard<std::mutex> lock(workerIdleMutex);
@@ -921,12 +972,18 @@ bool MainThreadSignalConfig::hasHooks()
 void MainThreadSignalConfig::invoke(std::function<void()>&& fn, bool blocking)
 {
     auto* f = invokeHook.load();
-    if (f) {
-        f(std::move(fn), blocking);
-    }
-    else {
+    if (!f) {
         fn();
+        return;
     }
+    // Counted until it starts, so that a main-thread wait for the worker wakes and runs it
+    f(
+        [fn = std::move(fn), pending = std::make_shared<PendingInvoke>()]() mutable {
+            pending->started();
+            fn();
+        },
+        blocking
+    );
 }
 
 void MainThreadSignalConfig::runQueued()
@@ -946,48 +1003,110 @@ bool App::runWhileRecomputeWorkerIdle(const std::function<void()>& fn)
     return true;
 }
 
+namespace
+{
+
+// Waits until finished() holds, running the functions invoke() posts to this thread meanwhile
+void waitRunningHops(const std::function<bool()>& finished)
+{
+    for (;;) {
+        unsigned seen = 0;
+        {
+            std::lock_guard<std::mutex> wake(hopWakeMutex);
+            seen = requestsFinished;
+        }
+        if (finished()) {
+            return;
+        }
+        try {
+            MainThreadSignalConfig::runQueued();
+        }
+        catch (...) {
+            // A slot's exception mustn't end the wait with the worker still in the request
+            // (ops#365); in the event loop, GUIApplication::notify() reports it
+            Base::PyGILStateLocker gil;
+            try {
+                throw;
+            }
+            catch (Base::Exception& e) {
+                e.reportException();
+            }
+            catch (const std::exception& e) {
+                Base::Console().error("Exception in a signal's slot during a close: %s\n", e.what());
+            }
+            catch (...) {
+                Base::Console().error("Unknown exception in a signal's slot during a close\n");
+            }
+        }
+        // The 10 ms bound covers a post invoke() doesn't count (no other path posts one now)
+        std::unique_lock<std::mutex> wake(hopWakeMutex);
+        hopWake.wait_for(wake, std::chrono::milliseconds(10), [&] {
+            return invokesPending > 0 || requestsFinished != seen;
+        });
+    }
+}
+
+}  // namespace
+
 void Application::cancelRecomputeRequestsForDocument(const std::string& documentName)
 {
     if (documentName.empty()) {
         return;
     }
 
-    // On the GUI's main thread the worker may be blocked in a hop to it, waiting for a document
-    // signal's slots, and then needs the GIL back: wait without it, running the hops (ops#365).
-    // The GIL goes before the mutex is taken and comes back after it is released
-    const bool runHops = MainThreadSignalConfig::hasHooks() && MainThreadSignalConfig::isMainThread();
-    std::optional<Base::PyGILStateRelease> release;
-    if (runHops && PyGILState_Check()) {
-        release.emplace();
-    }
-
-    std::unique_lock<std::mutex> lock(_recomputeMutex);
+    // Cancellation runs on document-close boundaries, so a linear scan keeps
+    // the queue simple without affecting the steady-state worker path.
+    auto cancelQueued = [this, &documentName] {
+        std::erase_if(_recomputeRequests, [&documentName](const RecomputeRequest& request) {
+            return requestTargetsDocument(request, documentName);
+        });
+    };
     auto finished = [this, &documentName] {
         return !_recomputeDocumentsInProgress.contains(documentName);
     };
-    if (!runHops) {
-        _recomputeStateChanged.wait(lock, finished);
-    }
-    else if (!finished()) {
-        // A slot in the worker's hop closing the document it recomputes would wait for itself
-        if (auto* hop = RecomputeHop::current(); hop && hop->worker) {
-            throw Base::RuntimeError(
-                "Cannot close document '" + documentName
-                + "' from a signal of its recompute on the worker thread"
-            );
-        }
-        while (!_recomputeStateChanged.wait_for(lock, std::chrono::milliseconds(10), finished)) {
-            lock.unlock();
-            MainThreadSignalConfig::runQueued();
-            lock.lock();
-        }
+
+    // Declared before the lock: the GIL comes back after the mutex is released
+    std::optional<Base::PyGILStateRelease> release;
+    std::unique_lock<std::mutex> lock(_recomputeMutex);
+    // At once, so the worker can't take the document's next queued request after the one in flight
+    cancelQueued();
+    if (finished()) {
+        return;
     }
 
-    // Cancellation runs on document-close boundaries, so a linear scan keeps
-    // the queue simple without affecting the steady-state worker path.
-    std::erase_if(_recomputeRequests, [&documentName](const RecomputeRequest& request) {
-        return requestTargetsDocument(request, documentName);
-    });
+    // The worker itself, or a slot in its hop, closing the document it recomputes would wait for
+    // itself (ops#365)
+    if (isRecomputeWorkerThread()) {
+        throw Base::RuntimeError(
+            "Cannot close document '" + documentName
+            + "' from a signal of its recompute on the worker thread"
+        );
+    }
+
+    // The worker's request may need the GIL (a Python feature's execute(), the GIL taken back
+    // after a hop), so wait without it. It goes before the mutex is taken again
+    lock.unlock();
+    if (PyGILState_Check()) {
+        release.emplace();
+    }
+
+    // On the GUI's main thread the worker may be blocked in a hop to it, waiting for a document
+    // signal's slots: run the hops while waiting (ops#365)
+    if (MainThreadSignalConfig::hasHooks() && MainThreadSignalConfig::isMainThread()) {
+        waitRunningHops([&] {
+            lock.lock();
+            const bool done = finished();
+            lock.unlock();
+            return done;
+        });
+        lock.lock();
+    }
+    else {
+        lock.lock();
+        _recomputeStateChanged.wait(lock, finished);
+    }
+    // Requests the one in flight queued for the document
+    cancelQueued();
 }
 
 struct DocTiming {
@@ -3381,6 +3500,7 @@ void Application::recomputeWorker()
             if (!request.documentName.empty()) {
                 _recomputeDocumentsInProgress.erase(request.documentName);
                 _recomputeStateChanged.notify_all();
+                notifyRequestFinished();
             }
         }
     }
