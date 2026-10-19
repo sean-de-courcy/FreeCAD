@@ -91,6 +91,7 @@ from PartDesignTests.TestNamingDump import TestNamingGolden, TestNamingSeeded
 from PartDesignTests.TestNamingDump import TestNamingRepeated, TestNamingTagCollision
 from PartDesignTests.TestNamingDump import TestNamingRevision  # FreeCAD-CH, ops#103
 from PartDesignTests.TestNamingDump import TestNamingInterning  # FreeCAD-CH, ops#6
+from PartDesignTests.TestNamingDump import TestOps378Probe  # DO NOT MERGE: ops#378 probe
 from PartDesignTests.TestNamingSave import *  # FreeCAD-CH, ops#6
 from PartDesignTests.TestNamingLoad import *  # FreeCAD-CH, ops#6
 from PartDesignTests.TestNamingScenarios import *  # one class per scenario (FreeCAD-CH, ops#5)
