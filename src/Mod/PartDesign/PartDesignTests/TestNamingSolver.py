@@ -1997,13 +1997,22 @@ class TestNamingSolver(unittest.TestCase):
     # lines are at log level, and a reference found again in the same place is the quieter level
     # with a shorter text.
 
-    def consoleOutput(self, action):
-        """What `action()` prints through the console's std observer (stderr, fd 2), warnings on
-        and the log tags at their defaults, as text."""
+    def consoleOutput(self, action, log=False):
+        """What `action()` prints through the console's std observer (stderr, fd 2), warnings and
+        errors on and the log tags at their defaults, as text; with `log`, log lines too and the
+        `App` tag at log level. Fails without the observer, which FreeCADCmd has; the GUI's
+        Report view replaces it, so there the test is skipped."""
         if "Console" not in App.Console.GetObservers():
-            self.skipTest("no console observer to catch the warnings")
-        status = App.Console.GetStatus("Console", "Wrn")
-        App.Console.SetStatus("Console", "Wrn", True)
+            if App.GuiUp:
+                self.skipTest("no console observer to catch the warnings (the GUI)")
+            self.fail("no console observer to catch the warnings")
+        kinds = ("Wrn", "Err", "Log") if log else ("Wrn", "Err")
+        statuses = {kind: App.Console.GetStatus("Console", kind) for kind in kinds}
+        for kind in kinds:
+            App.Console.SetStatus("Console", kind, True)
+        level = App.getLogLevel("App")
+        if log:
+            App.setLogLevel("App", "Log")
         saved = os.dup(2)
         with tempfile.TemporaryFile() as caught:
             os.dup2(caught.fileno(), 2)
@@ -2012,7 +2021,9 @@ class TestNamingSolver(unittest.TestCase):
             finally:
                 os.dup2(saved, 2)
                 os.close(saved)
-                App.Console.SetStatus("Console", "Wrn", bool(status))
+                for kind, status in statuses.items():
+                    App.Console.SetStatus("Console", kind, bool(status))
+                App.setLogLevel("App", level)
             caught.seek(0)
             return caught.read().decode("utf-8", "replace")
 
@@ -2136,3 +2147,204 @@ class TestNamingSolver(unittest.TestCase):
             reopened.Pad.Length = 14
             reopened.recompute()
             self.assertEqual(App.getReferenceReport(fillet)[0]["warning_level"], level, name)
+
+    # Fork PR 348 round 1 (ops#391, decisions 100 and 102)
+
+    def redrawAt(self, doc, x, recompute=True):
+        """`redraw`, with the profile's right side drawn at `x` (20: where it was)."""
+        doc.Profile.deleteAllGeometry()
+        doc.Profile.addGeometry(models.polygon([(x, 10), (x, 0), (0, 0), (0, 10)]), False)
+        if recompute:
+            doc.recompute()
+
+    def assertReopenedNormal(self, doc):
+        """Saves `doc`, reopens it, and expects its fillet's warning at the normal level, before
+        and after a recompute, which words it in full (resolved by geometry, 0.1 mm off)."""
+        folder = tempfile.mkdtemp(prefix="NamingSolver")
+        self.addCleanup(shutil.rmtree, folder, True)
+        path = os.path.join(folder, "Saved.FCStd")
+        doc.saveAs(path)
+        App.closeDocument(doc.Name)
+        reopened = App.openDocument(path)
+        self.documents.append(reopened.Name)
+        fillet = reopened.Fillet
+        self.assertIn("Warning", fillet.State)
+        self.assertEqual(App.getReferenceReport(fillet)[0]["warning_level"], "normal")
+        fillet.touch()
+        reopened.recompute()
+        self.assertIn("Warning", fillet.State)
+        self.assertEqual(App.getReferenceReport(fillet)[0]["warning_level"], "normal")
+        self.assertRegex(
+            fillet.getStatusString(),
+            r"^Warning: Edge reference resolved by geometry: Edge\d+ for Edge\d+ \(Base\[0\], tier 3\)$",
+        )
+
+    def testPartialRecomputeBeforeSaveIsJudgedFromTheShapes(self):
+        """The redrawn rectangle's edge, exactly in place (the quieter level), then drawn 0.1 mm
+        off and only the profile and the pad recomputed: the fillet, touched, keeps the
+        same-place text while its record is now the 0.1 mm one. Saved so and reopened, its level
+        comes from the shapes, not the text (decision 102): normal, and the full text after a
+        recompute."""
+        doc = self.newDocument()
+        pad, fillet = self.padWithFillet(doc)
+        self.redrawAt(doc, 20)
+        self.assertEqual(App.getReferenceReport(fillet)[0]["warning_level"], "same-place")
+        self.redrawAt(doc, 20.1, recompute=False)
+        doc.recompute([doc.Profile, pad])
+        self.assertIn("Touched", fillet.State)
+        self.assertEqual(
+            fillet.getStatusString(),
+            "Warning: Edge reference found again in the same place (Base[0])",
+        )
+        self.assertReopenedNormal(doc)
+
+    def testUndoBeforeSaveIsJudgedFromTheShapes(self):
+        """The redrawn rectangle drawn 0.1 mm off (normal), then back in place (the quieter
+        level), and that undone: the fillet, touched, keeps the same-place text with the 0.1 mm
+        record back. Saved so and reopened, its level comes from the shapes (decision 102):
+        normal, and the full text after a recompute."""
+        doc = self.newDocument()
+        doc.UndoMode = 1
+        pad, fillet = self.padWithFillet(doc)
+        doc.openTransaction("off")
+        self.redrawAt(doc, 20.1)
+        doc.commitTransaction()
+        self.assertEqual(App.getReferenceReport(fillet)[0]["warning_level"], "normal")
+        doc.openTransaction("in place")
+        self.redrawAt(doc, 20)
+        doc.commitTransaction()
+        self.assertEqual(App.getReferenceReport(fillet)[0]["warning_level"], "same-place")
+        doc.undo()
+        self.assertIn("Touched", fillet.State)
+        self.assertEqual(
+            fillet.getStatusString(),
+            "Warning: Edge reference found again in the same place (Base[0])",
+        )
+        self.assertReopenedNormal(doc)
+
+    def testHiddenSamePlaceMarkerSendsItsPrintToTheLog(self):
+        """With the tree's marker for same-place warnings hidden (the TreeView preference), the
+        redrawn rectangle's two filleted edges, found again in the same place, print no warning
+        line; the fillet keeps the Warning state and the quieter level, and the line is in the
+        log. Drawn 0.1 mm off, the normal warning still prints."""
+        params = App.ParamGet("User parameter:BaseApp/Preferences/TreeView")
+        params.SetBool("ShowSamePlaceWarnings", False)
+        self.addCleanup(params.RemBool, "ShowSamePlaceWarnings")
+        doc = self.newDocument()
+        pad, fillet = self.twoEdgeFillet(doc)
+        printed = self.consoleOutput(lambda: self.redrawAt(doc, 20), log=True)
+        self.assertIn("Warning", fillet.State)
+        self.assertEqual(App.getReferenceReport(fillet)[0]["warning_level"], "same-place")
+        text = fillet.getStatusString()[len("Warning: ") :]
+        self.assertNotIn("Fillet: " + text, printed.splitlines())  # the warning line
+        self.assertIn("#Fillet: " + text, printed)  # the log line, NamingSolver#Fillet
+
+        printed = self.consoleOutput(lambda: self.redrawAt(doc, 20.1))
+        self.assertEqual(App.getReferenceReport(fillet)[0]["warning_level"], "normal")
+        self.assertIn("Fillet: " + fillet.getStatusString()[len("Warning: ") :], printed)
+
+    def testAcceptedWarningPrintsAgainWhenItComesBack(self):
+        """The redrawn rectangle's two filleted edges, found again in the same place: the warning
+        prints; both references accepted, with no recompute after, and the rectangle redrawn
+        again: the same text comes back, and prints again (it was gone)."""
+        doc = self.newDocument()
+        pad, fillet = self.twoEdgeFillet(doc)
+
+        def lines(text):
+            return [line for line in text.splitlines() if line.startswith("Fillet: ")]
+
+        printed = self.consoleOutput(lambda: self.redrawAt(doc, 20))
+        first = fillet.getStatusString()
+        self.assertEqual(lines(printed), ["Fillet: " + first[len("Warning: ") :]])
+        App.acceptReference(fillet, "Base", 0)
+        App.acceptReference(fillet, "Base", 1)
+        self.assertNotIn("Warning", fillet.State)
+        printed = self.consoleOutput(lambda: self.redrawAt(doc, 20))
+        self.assertEqual(fillet.getStatusString(), first)
+        self.assertEqual(lines(printed), ["Fillet: " + first[len("Warning: ") :]])
+
+    def testErrorPrintsOnceAndAgainWhenItComesBack(self):
+        """A fillet too large for its edge fails: its error prints once, and not at the two
+        recomputes after (the pad touched), though it stays in error; mended and broken again,
+        it prints again (decision 100)."""
+        doc = self.newDocument()
+        pad, fillet = self.padWithFillet(doc)
+
+        def lines(text):
+            return [line for line in text.splitlines() if line.startswith("Fillet: ")]
+
+        def setRadius(radius):
+            fillet.Radius = radius
+            doc.recompute()
+
+        printed = self.consoleOutput(lambda: setRadius(30))
+        self.assertIn("Invalid", fillet.State)
+        error = "Fillet: " + fillet.getStatusString()
+        self.assertEqual(lines(printed), [error])
+
+        def touch():
+            pad.touch()
+            doc.recompute()
+
+        for step in range(2):
+            self.assertEqual(lines(self.consoleOutput(touch)), [], f"recompute {step}")
+            self.assertIn("Invalid", fillet.State)
+        self.assertEqual(lines(self.consoleOutput(lambda: setRadius(1))), [])
+        self.assertTrue(fillet.isValid())
+        printed = self.consoleOutput(lambda: setRadius(30))
+        self.assertEqual(lines(printed), [error])
+
+    def testMissingElementReferenceStaysAWarningWithoutTheSolver(self):
+        """Without the reference solver, the fillet's edge gone (the profile drawn as a triangle
+        without it): `PropertyLinks`' "missing element reference" stays a warning (upstream's);
+        only solver documents put it at log level (ops#391)."""
+        doc = self.newDocument(solver=False)
+        pad, fillet = self.padWithFillet(doc)
+
+        def triangle():
+            doc.Profile.deleteAllGeometry()
+            doc.Profile.addGeometry(models.polygon([(0, 0), (0, 10), (15, 10)]), False)
+            doc.recompute()
+
+        printed = self.consoleOutput(triangle)
+        self.assertIn("missing element reference", printed)
+
+    def testReorderPrintsNoTransientAttachError(self):
+        """A sketch on the top face of the last pocket of a block, with a pocket of its own,
+        moved before that pocket (right after an earlier one): the reorder points the sketch at
+        the earlier pocket's face, marked missing until the solver finds it there. It prints no
+        "PositionBySupport" error on the way, and after the recompute the sketch sits on that
+        face where it was and every feature computes (ops#391 H)."""
+        doc = self.newDocument()
+        body = models.body(doc)
+        profile = models.sketch(doc, "Profile", models.rectangle(0, 0, 40, 20), body)
+        models.pad(body, profile, 10, "Block")
+        notch = models.pocketThroughAll(
+            body, models.sketch(doc, "NotchSketch", models.rectangle(30, 0, 40, 20), body, z=10), "Notch"
+        )
+        slot = models.pocketThroughAll(
+            body, models.sketch(doc, "SlotSketch", models.rectangle(0, 0, 5, 20), body, z=10), "Slot"
+        )
+        doc.recompute()
+        sketch = body.newObject("Sketcher::SketchObject", "OutletSketch")
+        sketch.AttachmentSupport = (slot, face("plane", normal=Z, through=(0, 0, 10)).one(slot.Shape))
+        sketch.MapMode = "FlatFace"
+        sketch.addGeometry(Part.Circle(App.Vector(15, 10, 0), App.Vector(0, 0, 1), 2), False)
+        outlet = models.pocket(body, sketch, 3, "Outlet")
+        doc.recompute()
+        self.assertTrue(outlet.isValid())
+        placement = sketch.Placement
+
+        def reorder():
+            body.reorderObject([sketch, outlet], notch, True)
+            doc.recompute()
+
+        printed = self.consoleOutput(reorder)
+        self.assertNotIn("PositionBySupport", printed)
+        [(support, subs)] = sketch.AttachmentSupport
+        self.assertEqual(support, notch)
+        self.assertEqual(list(subs), face("plane", normal=Z, through=(0, 0, 10)).one(notch.Shape))
+        self.assertTrue(sketch.Placement.isSame(placement, 1e-9), sketch.Placement)
+        for feature in body.Group:
+            self.assertTrue(feature.isValid(), (feature.Name, feature.getStatusString()))
+        self.assertEqual([o.Name for o in body.Group][-4:], ["OutletSketch", "Outlet", "SlotSketch", "Slot"])
