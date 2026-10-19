@@ -563,8 +563,8 @@ class TestProblemNavigationGui(unittest.TestCase):
         moved = self.treeIcon(fillet)
         self.assertNotEqual(moved, hidden)
         self.assertNotEqual(moved, shown)
-        Gui.Selection.clearSelection()
-        self.assertEqual(self.step(), ["Fillet"])
+        self.search("")  # the same text again searches nothing anew
+        self.assertEqual(self.search(":warnings"), ["Fillet"])
 
         # Accepted: no warning, the plain icon, which the hidden same-place one matched
         App.acceptReference(fillet, "Base", 0)

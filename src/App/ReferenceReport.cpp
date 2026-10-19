@@ -469,6 +469,75 @@ std::string guessedText(const ReferenceReport::Slot& slot,
     return ss.str();
 }
 
+// The records judged found again in the same place (ops#391), by property and reference
+// position: the record's identity when judged. Its original fingerprint is a snapshot, so a later
+// edit that moves the element (a dimension upstream) would undo the judgement at the next
+// recompute; the judgement holds while the record does.
+using SamePlaceKey = std::pair<const PropertyLinkBase*, int>;
+std::map<SamePlaceKey, std::string>& samePlaceRecords()
+{
+    static std::map<SamePlaceKey, std::string> records;
+    return records;
+}
+
+// The record and the element it picked: another solve, which may pick another element with the
+// same record, judges again
+std::string recordIdentity(const ReferenceReport::Slot& slot)
+{
+    const GuessRecord& guess = slot.guess;
+    return guess.kind + '\n' + guess.origText() + '\n' + guess.origFingerprint + '\n'
+        + guess.altText() + '\n' + (slot.mappedName.empty() ? slot.sub : slot.mappedName);
+}
+
+// Whether the slot's reference was found again in the same place: now (reboundInPlace()), or
+// when its record was judged
+bool foundInPlace(const ReferenceReport::Slot& slot)
+{
+    auto& records = samePlaceRecords();
+    const SamePlaceKey key {slot.prop, slot.localIndex};
+    if (reboundInPlace(slot.obj, slot.sub, slot.guess)) {
+        records[key] = recordIdentity(slot);
+        return true;
+    }
+    auto it = records.find(key);
+    return it != records.end() && it->second == recordIdentity(slot);
+}
+
+// The references a warning text names as found again in the same place (samePlaceText()), as
+// (property, position): `Base[1-3, 5]` gives Base 1, 2, 3 and 5.
+std::set<std::pair<std::string, int>> samePlaceNamed(const std::string& text)
+{
+    std::set<std::pair<std::string, int>> named;
+    const std::string marker = " found again in the same place (";
+    for (auto at = text.find(marker); at != std::string::npos; at = text.find(marker, at + 1)) {
+        const auto open = at + marker.size();
+        const auto bracket = text.find('[', open);
+        const auto close = text.find("])", open);
+        if (bracket == std::string::npos || close == std::string::npos || bracket > close) {
+            continue;
+        }
+        const std::string property = text.substr(open, bracket - open);
+        std::istringstream list(text.substr(bracket + 1, close - bracket - 1));
+        std::string item;
+        while (std::getline(list, item, ',')) {
+            std::istringstream range(item);
+            int first = 0;
+            if (!(range >> first)) {
+                continue;
+            }
+            int last = first;
+            char dash = 0;
+            if (range >> dash && dash == '-') {
+                range >> last;
+            }
+            for (int i = first; i <= last && i - first < 100000; ++i) {
+                named.emplace(property, i);
+            }
+        }
+    }
+    return named;
+}
+
 // A property's references found again in the same place (ops#391), in one text:
 // `Edge reference found again in the same place (Base[1])`, `3 edge references found again in the
 // same place (Base[1-3, 5])`; \a type is empty when they are of mixed types.
@@ -594,9 +663,10 @@ bool ReferenceReport::describe(const DocumentObject* obj, Outcome& outcome)
             continue;
         }
         if (slot.guess.empty()) {
+            samePlaceRecords().erase({slot.prop, slot.localIndex});
             continue;
         }
-        if (reboundInPlace(slot.obj, slot.sub, slot.guess)) {
+        if (foundInPlace(slot)) {
             auto [it, first] = samePlace.try_emplace(slot.property);
             auto& same = it->second;
             const std::string type = typeOf(elementOfSub(slot.sub));
@@ -664,6 +734,18 @@ void ReferenceReport::setSamePlaceWarning(const DocumentObject* obj, bool on)
 
 bool ReferenceReport::restoredSamePlaceWarning(const DocumentObject* obj, const std::string& text)
 {
+    // The saved text keeps the judgement of the session that saved it, which the shapes alone
+    // can't give back once an edit moved the element since (foundInPlace())
+    const auto named = samePlaceNamed(text);
+    if (!named.empty()) {
+        for (const auto& slot : slotsOf(obj)) {
+            if ((slot.guess.kind == "tier2" || slot.guess.kind == "tier3")
+                && !Data::hasMissingElement(slot.sub.c_str())
+                && named.contains({slot.property, slot.index})) {
+                samePlaceRecords()[{slot.prop, slot.localIndex}] = recordIdentity(slot);
+            }
+        }
+    }
     Outcome outcome;
     return describe(obj, outcome) && outcome.fatal.empty() && outcome.samePlace
         && outcome.warning == text;

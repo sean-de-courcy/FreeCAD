@@ -2085,12 +2085,21 @@ class TestNamingSolver(unittest.TestCase):
 
     def testSamePlaceLevelAndAfterReopen(self):
         """The redrawn rectangle's edge, exactly where it was: the warning names it in the short
-        same-place form and is the quieter level. Drawn 0.1 mm off instead (tier 3 within its
-        distance, not the same place), the warning keeps its full form and the normal level.
-        Both levels read the same after a save and reopen (derived at load, nothing saved)."""
+        same-place form and is the quieter level, also after the pad is made longer (the edge
+        then no longer matches the record's snapshot of the original). Drawn 0.1 mm off instead
+        (tier 3 within its distance, not the same place), the warning keeps its full form and
+        the normal level. Both levels read the same after a save and reopen (derived at load,
+        nothing new saved)."""
         doc = self.newDocument()
         pad, fillet = self.padWithFillet(doc)
         self.redraw(doc)
+        self.assertEqual(App.getReferenceReport(fillet)[0]["warning_level"], "same-place")
+        self.assertEqual(
+            fillet.getStatusString(),
+            "Warning: Edge reference found again in the same place (Base[0])",
+        )
+        pad.Length = 12
+        doc.recompute()
         self.assertEqual(App.getReferenceReport(fillet)[0]["warning_level"], "same-place")
         self.assertEqual(
             fillet.getStatusString(),
@@ -2124,4 +2133,7 @@ class TestNamingSolver(unittest.TestCase):
             self.documents.append(reopened.Name)
             fillet = reopened.Fillet
             self.assertIn("Warning", fillet.State, name)
+            self.assertEqual(App.getReferenceReport(fillet)[0]["warning_level"], level, name)
+            reopened.Pad.Length = 14
+            reopened.recompute()
             self.assertEqual(App.getReferenceReport(fillet)[0]["warning_level"], level, name)
