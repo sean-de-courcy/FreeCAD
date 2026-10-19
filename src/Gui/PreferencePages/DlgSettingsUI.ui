@@ -386,6 +386,25 @@
         </property>
        </widget>
       </item>
+      <item row="8" column="0" colspan="2">
+       <widget class="Gui::PrefCheckBox" name="showSamePlaceWarningsCheckBox">
+        <property name="toolTip">
+         <string>Shows a pale warning marker on objects whose element references were found again in the same place. When off, they show no marker, F8 skips them and their warning goes to the log.</string>
+        </property>
+        <property name="text">
+         <string>Show the marker for references found again in the same place</string>
+        </property>
+        <property name="checked">
+         <bool>true</bool>
+        </property>
+        <property name="prefEntry" stdset="0">
+         <cstring>ShowSamePlaceWarnings</cstring>
+        </property>
+        <property name="prefPath" stdset="0">
+         <cstring>TreeView</cstring>
+        </property>
+       </widget>
+      </item>
      </layout>
     </widget>
    </item>
@@ -584,6 +603,7 @@
   <tabstop>hideInternalNamesCheckBox</tabstop>
   <tabstop>hideTreeViewScrollBarCheckBox</tabstop>
   <tabstop>hideHeaderCheckBox</tabstop>
+  <tabstop>showSamePlaceWarningsCheckBox</tabstop>
   <tabstop>hideTabBarCheckBox</tabstop>
   <tabstop>hintShowTabBarCheckBox</tabstop>
   <tabstop>hidePropertyViewScrollBarCheckBox</tabstop>

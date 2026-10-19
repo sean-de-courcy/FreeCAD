@@ -1993,3 +1993,135 @@ class TestNamingSolver(unittest.TestCase):
             self.assertEqual(entry["guess_kind"], "piece", step)
             pad.touch()
             doc.recompute()
+
+    # The warning load (ops#391, decision 97): a warning prints once, the solver's developer
+    # lines are at log level, and a reference found again in the same place is the quieter level
+    # with a shorter text.
+
+    def consoleOutput(self, action):
+        """What `action()` prints through the console's std observer (stderr, fd 2), warnings on
+        and the log tags at their defaults, as text."""
+        if "Console" not in App.Console.GetObservers():
+            self.skipTest("no console observer to catch the warnings")
+        status = App.Console.GetStatus("Console", "Wrn")
+        App.Console.SetStatus("Console", "Wrn", True)
+        saved = os.dup(2)
+        with tempfile.TemporaryFile() as caught:
+            os.dup2(caught.fileno(), 2)
+            try:
+                action()
+            finally:
+                os.dup2(saved, 2)
+                os.close(saved)
+                App.Console.SetStatus("Console", "Wrn", bool(status))
+            caught.seek(0)
+            return caught.read().decode("utf-8", "replace")
+
+    def twoEdgeFillet(self, doc):
+        """padWithFillet's model with the fillet on both vertical edges at y = 0."""
+        pad, fillet = self.padWithFillet(doc)
+        fillet.Base = (
+            pad,
+            [
+                edge("line", direction=Z, through=(20, 0, 0)).one(pad.Shape)[0],
+                edge("line", direction=Z, through=(0, 0, 0)).one(pad.Shape)[0],
+            ],
+        )
+        doc.recompute()
+        self.assertTrue(fillet.isValid())
+        self.assertNotIn("Warning", fillet.State)
+        return pad, fillet
+
+    def testSolverDeveloperLinesAreLogLevel(self):
+        """The redrawn rectangle's two filleted edges, found again by geometry: the redraw prints
+        the fillet's warning and none of the solver's developer lines (`<PropertyLinks>`: the
+        resolutions and the raw `missing element reference`), which are at log level."""
+        doc = self.newDocument()
+        pad, fillet = self.twoEdgeFillet(doc)
+        printed = self.consoleOutput(lambda: self.redraw(doc))
+        self.assertIn("Warning", fillet.State)
+        self.assertIn("Fillet: ", printed)
+        self.assertNotIn("<PropertyLinks>", printed)
+        self.assertNotIn("missing element reference", printed)
+
+    def testWarningPrintsOnceAndAgainWhenItChanges(self):
+        """The redrawn rectangle's two filleted edges, both found again by geometry: the fillet's
+        warning prints once, at the redraw, and not at the three recomputes after (a pad length
+        changed each time), until its text changes (one reference accepted)."""
+        doc = self.newDocument()
+        pad, fillet = self.twoEdgeFillet(doc)
+
+        def lines(text):
+            return [line for line in text.splitlines() if line.startswith("Fillet: ")]
+
+        def warning():
+            return "Fillet: " + fillet.getStatusString()[len("Warning: ") :]
+
+        printed = self.consoleOutput(lambda: self.redraw(doc))
+        self.assertIn("Warning", fillet.State)
+        self.assertEqual(lines(printed), [warning()])
+        for length in (11, 12, 13):
+
+            def lengthen():
+                pad.Length = length
+                doc.recompute()
+
+            self.assertEqual(lines(self.consoleOutput(lengthen)), [], f"length {length}")
+            self.assertIn("Warning", fillet.State)
+
+        def accept():
+            App.acceptReference(fillet, "Base", 0)
+            doc.recompute()
+
+        before = warning()
+        self.assertEqual(lines(self.consoleOutput(accept)), [warning()])
+        self.assertNotEqual(warning(), before)
+
+        def touch():
+            pad.touch()
+            doc.recompute()
+
+        self.assertEqual(lines(self.consoleOutput(touch)), [])
+
+    def testSamePlaceLevelAndAfterReopen(self):
+        """The redrawn rectangle's edge, exactly where it was: the warning names it in the short
+        same-place form and is the quieter level. Drawn 0.1 mm off instead (tier 3 within its
+        distance, not the same place), the warning keeps its full form and the normal level.
+        Both levels read the same after a save and reopen (derived at load, nothing saved)."""
+        doc = self.newDocument()
+        pad, fillet = self.padWithFillet(doc)
+        self.redraw(doc)
+        self.assertEqual(App.getReferenceReport(fillet)[0]["warning_level"], "same-place")
+        self.assertEqual(
+            fillet.getStatusString(),
+            "Warning: Edge reference found again in the same place (Base[0])",
+        )
+
+        other = self.newDocument()
+        pad2, fillet2 = self.padWithFillet(other)
+        original = fillet2.Base[1][0]
+        other.Profile.deleteAllGeometry()
+        other.Profile.addGeometry(models.polygon([(20.1, 10), (20.1, 0), (0, 0), (0, 10)]), False)
+        other.recompute()
+        self.assertTrue(fillet2.isValid())
+        corner = edge("line", direction=Z, through=(20.1, 0, 0)).one(pad2.Shape)
+        self.assertEqual(fillet2.Base[1], corner)
+        self.assertEqual(
+            fillet2.getStatusString(),
+            "Warning: Edge reference resolved by geometry: %s for %s (Base[0], tier 3)"
+            % (corner[0], original),
+        )
+        self.assertEqual(App.getReferenceReport(fillet2)[0]["warning_level"], "normal")
+
+        folder = tempfile.mkdtemp(prefix="NamingSolver")
+        self.addCleanup(shutil.rmtree, folder, True)
+        for document, level in ((doc, "same-place"), (other, "normal")):
+            path = os.path.join(folder, document.Name + ".FCStd")
+            document.saveAs(path)
+            name = document.Name
+            App.closeDocument(name)
+            reopened = App.openDocument(path)
+            self.documents.append(reopened.Name)
+            fillet = reopened.Fillet
+            self.assertIn("Warning", fillet.State, name)
+            self.assertEqual(App.getReferenceReport(fillet)[0]["warning_level"], level, name)

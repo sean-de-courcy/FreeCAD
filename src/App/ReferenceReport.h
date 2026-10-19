@@ -139,15 +139,34 @@ public:
         /// The owner computes with a warning: guessed references, references resolved by
         /// geometry, and missing ones of a property that computes on the rest.
         std::string warning;
+        /// The warning names only references found again in the same place (ops#391,
+        /// reboundInPlace()): the quieter level.
+        bool samePlace = false;
     };
     /** Describes \a obj's missing, guessed and warned references, one text per reference, joined
      * by `; `: a missing reference as describeBroken() does, in \a outcome.fatal unless its
      * property allows partial computation and one of its references resolves (then in
      * \a outcome.warning, with `computed on <n> of <m> <type>s`); a guessed one in
      * \a outcome.warning (`Guessed edge reference: Edge7 for Edge5 (Base[0], tier 3;
-     * alternatives: Edge9)`). Returns true if either text is set.
+     * alternatives: Edge9)`). The references of a property found again in the same place share
+     * one text (ops#391): `2 edge references found again in the same place (Base[1, 3])`.
+     * Returns true if either text is set.
      */
     static bool describe(const DocumentObject* obj, Outcome& outcome);
+
+    /** The level of \a obj's warning (ops#391, decision 97 D): true for the quieter one, a
+     * warning that names only references found again in the same place (Outcome::samePlace).
+     * Kept by object beside the document's warning: Document::setWarning() and clearWarning()
+     * reset it, so any other warning is the normal level; the recompute check and the restore
+     * set it.
+     */
+    static bool isSamePlaceWarning(const DocumentObject* obj);
+    static void setSamePlaceWarning(const DocumentObject* obj, bool on);
+    /** The level of a warning \a text restored with \a obj, from its references' saved records
+     * and the shapes now: true if describe() finds only same-place references and words them
+     * as \a text (anything else in the text is another warning).
+     */
+    static bool restoredSamePlaceWarning(const DocumentObject* obj, const std::string& text);
 };
 
 }  // namespace App

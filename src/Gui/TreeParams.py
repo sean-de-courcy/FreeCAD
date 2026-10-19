@@ -138,6 +138,13 @@ Params = [
         title="Show visibility icon",
         doc="Displays an eye icon in front of the tree view items, showing the items visibility status. When clicked the visibility is toggled",
     ),
+    ParamBool(
+        "ShowSamePlaceWarnings",
+        True,
+        on_change=True,
+        title="Show the same-place warning marker",
+        doc="Shows a pale warning marker on objects whose element references were found again in the same place. When off, they show no marker, F8 skips them and their warning goes to the log",
+    ),
 ]
 
 

@@ -83,6 +83,7 @@ public:
     long ColumnSize3;
     bool TreeToolTipIcon;
     bool VisibilityIcon;
+    bool ShowSamePlaceWarnings;
 
     // Auto generated code (Tools/params_utils.py:245)
     TreeParamsP()
@@ -170,6 +171,8 @@ public:
         funcs["TreeToolTipIcon"] = &TreeParamsP::updateTreeToolTipIcon;
         VisibilityIcon = handle->GetBool("VisibilityIcon", true);
         funcs["VisibilityIcon"] = &TreeParamsP::updateVisibilityIcon;
+        ShowSamePlaceWarnings = handle->GetBool("ShowSamePlaceWarnings", true);
+        funcs["ShowSamePlaceWarnings"] = &TreeParamsP::updateShowSamePlaceWarnings;
     }
 
     // Auto generated code (Tools/params_utils.py:263)
@@ -463,6 +466,15 @@ public:
         if (self->VisibilityIcon != v) {
             self->VisibilityIcon = v;
             TreeParams::onVisibilityIconChanged();
+        }
+    }
+    // Auto generated code (Tools/params_utils.py:296)
+    static void updateShowSamePlaceWarnings(TreeParamsP* self)
+    {
+        auto v = self->handle->GetBool("ShowSamePlaceWarnings", true);
+        if (self->ShowSamePlaceWarnings != v) {
+            self->ShowSamePlaceWarnings = v;
+            TreeParams::onShowSamePlaceWarningsChanged();
         }
     }
 };
@@ -1733,6 +1745,43 @@ void TreeParams::removeVisibilityIcon()
 {
     instance()->handle->RemoveBool("VisibilityIcon");
 }
+
+// Auto generated code (Tools/params_utils.py:350)
+const char* TreeParams::docShowSamePlaceWarnings()
+{
+    return QT_TRANSLATE_NOOP(
+        "TreeParams",
+        "Shows a pale warning marker on objects whose element references were found again in "
+        "the same place. When off, they show no marker, F8 skips them and their warning goes "
+        "to the log"
+    );
+}
+
+// Auto generated code (Tools/params_utils.py:358)
+const bool& TreeParams::getShowSamePlaceWarnings()
+{
+    return instance()->ShowSamePlaceWarnings;
+}
+
+// Auto generated code (Tools/params_utils.py:366)
+const bool& TreeParams::defaultShowSamePlaceWarnings()
+{
+    const static bool def = true;
+    return def;
+}
+
+// Auto generated code (Tools/params_utils.py:375)
+void TreeParams::setShowSamePlaceWarnings(const bool& v)
+{
+    instance()->handle->SetBool("ShowSamePlaceWarnings", v);
+    instance()->ShowSamePlaceWarnings = v;
+}
+
+// Auto generated code (Tools/params_utils.py:384)
+void TreeParams::removeShowSamePlaceWarnings()
+{
+    instance()->handle->RemoveBool("ShowSamePlaceWarnings");
+}
 //[[[end]]]
 
 void TreeParams::onSyncSelectionChanged()
@@ -1854,5 +1903,11 @@ void TreeParams::onHideInternalNamesChanged()
 
 void TreeParams::onVisibilityIconChanged()
 {
+    TreeWidget::updateVisibilityIcons();
+}
+
+void TreeParams::onShowSamePlaceWarningsChanged()
+{
+    // The same-place warnings' marker (ops#391): every item's icon again
     TreeWidget::updateVisibilityIcons();
 }

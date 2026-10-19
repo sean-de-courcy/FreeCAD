@@ -298,6 +298,8 @@ App::DocumentObjectExecReturn* DocumentObject::recompute()
                 return new DocumentObjectExecReturn(outcome.fatal, this);
             }
             doc->setWarning(this, outcome.warning);
+            // The quieter level (ops#391); any warning set after this one is the normal level
+            ReferenceReport::setSamePlaceWarning(this, outcome.samePlace);
         }
         if (auto held = heldInputWarning(this); !held.empty()) {
             auto prior = doc->getWarningDescription(this);

@@ -1492,6 +1492,16 @@ PyObject* ApplicationPy::sGetReferenceReport(PyObject* /*self*/, PyObject* args)
             dict.setItem("alternatives", alternatives);
             dict.setItem("headline", Py::String(row.headline));
             dict.setItem("warning", Py::String(warning ? warning : ""));
+            // The warning's level (ops#391): the quieter one names only references found again
+            // in the same place
+            dict.setItem(
+                "warning_level",
+                Py::String(
+                    !warning || !obj->isWarning()                  ? ""
+                        : ReferenceReport::isSamePlaceWarning(obj) ? "same-place"
+                                                                   : "normal"
+                )
+            );
             list.append(dict);
         }
         return Py::new_reference_to(list);

@@ -508,3 +508,66 @@ class TestProblemNavigationGui(unittest.TestCase):
         # Not a token: an ordinary search, which finds nothing and highlights nothing
         self.assertEqual(self.search(":zzz"), [])
         self.assertEqual(self.search(""), [], "clearing the box leaves highlights")
+
+    # -- the same-place warning's marker (ops#391, decision 97 D) --------------------------------
+
+    def treeIcon(self, obj):
+        """The image of obj's icon in the model tree."""
+        pump()
+        for tree in Gui.getMainWindow().findChildren(QtWidgets.QTreeWidget):
+            try:
+                if tree.metaObject().className() != "Gui::TreeWidget":
+                    continue
+                flags = QtCore.Qt.MatchExactly | QtCore.Qt.MatchRecursive
+                for item in tree.findItems(obj.Label, flags):
+                    return item.icon(0).pixmap(256, 256).toImage()
+            except RuntimeError:
+                continue
+        self.fail(f"{obj.Label} isn't in the tree")
+
+    def showSamePlace(self, on):
+        group = App.ParamGet("User parameter:BaseApp/Preferences/TreeView")
+        group.SetBool("ShowSamePlaceWarnings", on)
+        if on:
+            group.RemBool("ShowSamePlaceWarnings")  # the default
+        pump()
+
+    def testSamePlaceMarkerIsQuieterAndCanBeHidden(self):
+        """The fillet's edge, drawn again exactly where it was, is a same-place warning: the tree
+        draws a quieter marker than a guess's, which the preference ShowSamePlaceWarnings hides.
+        Hidden, the fillet's icon is its plain one (as after Accept), Next problem and :warnings
+        skip it; the Warning state stays. A warning of another kind (the fillet's edge moved
+        0.1 mm, tier 3 without the same place) keeps today's marker with the preference off."""
+        self.addCleanup(self.showSamePlace, True)
+        self.model()
+        fillet = self.doc.Fillet
+        shown = self.treeIcon(fillet)
+
+        self.showSamePlace(False)
+        hidden = self.treeIcon(fillet)
+        self.assertNotEqual(hidden, shown)
+        [entry] = App.getReferenceReport(fillet)
+        self.assertEqual(entry["warning_level"], "same-place")
+        self.assertIn("Warning", fillet.State)
+        self.assertEqual(self.step(), ["Pocket"], "skips the hidden same-place warning")
+        self.assertEqual(self.search(":warnings"), [])
+
+        # Today's marker: the edge 0.1 mm off its saved place (the rectangle 0.1 mm wider)
+        self.doc.Profile.deleteAllGeometry()
+        self.doc.Profile.addGeometry(
+            models.polygon([(20.1, 10), (20.1, 0), (0, 0), (0, 10)]), False
+        )
+        self.doc.recompute()
+        [entry] = App.getReferenceReport(fillet)
+        self.assertEqual(entry["warning_level"], "normal")
+        moved = self.treeIcon(fillet)
+        self.assertNotEqual(moved, hidden)
+        self.assertNotEqual(moved, shown)
+        Gui.Selection.clearSelection()
+        self.assertEqual(self.step(), ["Fillet"])
+
+        # Accepted: no warning, the plain icon, which the hidden same-place one matched
+        App.acceptReference(fillet, "Base", 0)
+        self.doc.recompute()
+        self.assertNotIn("Warning", fillet.State)
+        self.assertEqual(self.treeIcon(fillet), hidden)

@@ -112,6 +112,10 @@ struct DocumentP
         bool reported = false;  // printed by the recompute that set it
     };
     std::map<const App::DocumentObject*, WarningText> _WarningLog;
+    // Per object: the warning text last printed for it, kept across its recomputes, so that a
+    // warning prints once and again only when its text changes (ops#391). Dropped when the
+    // object has no warning after a recompute.
+    std::map<const App::DocumentObject*, std::string> _WarningPrinted;
     ExportInfo exportInfo;
 
     StringHasherRef Hasher {new StringHasher};

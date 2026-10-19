@@ -238,4 +238,13 @@ AppExport void countReferenceMigration(const DocumentObject* owner, MigrationOut
 /// the end of each recompute.
 AppExport void reportReferenceMigration();
 
+/** Whether a reference resolved by geometry was found again in the same place (ops#391,
+ * decision 97 D): \a guess is a `tier2` or `tier3` record with the original's fingerprint, the
+ * element \a sub gives in \a obj sits where the original was (Data::atSamePlace(), with the
+ * solver's tolerances and the target's diagonal) and none of the record's alternatives sits
+ * there too. From the saved record and the current shape alone, so it reads the same after a
+ * reopen. False for any other record, and when anything can't be measured.
+ */
+AppExport bool reboundInPlace(DocumentObject* obj, const std::string& sub, const GuessRecord& guess);
+
 }  // namespace App

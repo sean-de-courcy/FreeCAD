@@ -82,11 +82,13 @@ void reportReferenceMigration()
     auto counts = std::move(migrationCounts);
     migrationCounts.clear();
     for (const auto& [name, count] : counts) {
-        FC_WARN("Document '" << name << "': " << count.kept + count.moved + count.broken
-                             << " element references re-derived from their geometry after a "
-                                "naming change: "
-                             << count.moved << " moved back to their element, " << count.broken
-                             << " broken (listed above)");
+        FC_WARN(
+            "Document '" << name << "': " << count.kept + count.moved + count.broken
+                         << " element references re-derived from their geometry after a "
+                            "naming change: "
+                         << count.moved << " moved back to their element, " << count.broken
+                         << " broken (their features name them)"
+        );
     }
 }
 
@@ -993,7 +995,7 @@ bool solveElementReferences(DocumentObject* feature,
                 resolutionFor(*entry, entry->oldIndex, entry->exactName, resolution);
                 resolutions[entry->prop].push_back(resolution);
                 snapped.emplace(entry->prop, entry->index);
-                FC_WARN(
+                FC_LOG(
                     referenceName(entry->prop)
                     << "[" << entry->index << "]: " << entry->guessedIndex << " -> "
                     << entry->oldIndex << " (the original " << entry->guess.origIndex << " is back)"
@@ -1072,9 +1074,11 @@ bool solveElementReferences(DocumentObject* feature,
                     item.candidates.emplace_back(hit, nameAt(hit));
                     item.candidateRoles.emplace_back("name");
                     item.candidateDistances.push_back(std::numeric_limits<double>::quiet_NaN());
-                    FC_WARN(referenceName(entry->prop)
-                            << "[" << entry->index << "]: " << entry->exactName << " broken ("
-                            << item.evidence << ", candidates: " << hit << ")");
+                    FC_LOG(
+                        referenceName(entry->prop)
+                        << "[" << entry->index << "]: " << entry->exactName << " broken ("
+                        << item.evidence << ", candidates: " << hit << ")"
+                    );
                     countReferenceMigration(entry->owner, MigrationOutcome::Broken);
                     report(*entry, std::move(item));
                     continue;
@@ -1129,9 +1133,11 @@ bool solveElementReferences(DocumentObject* feature,
                     item.candidates.emplace_back(pick, nameAt(pick));
                     item.candidateRoles.emplace_back("place");
                     item.candidateDistances.push_back(std::numeric_limits<double>::quiet_NaN());
-                    FC_WARN(referenceName(entry->prop)
-                            << "[" << entry->index << "]: " << oldName << " -> " << pick
-                            << " (" << item.evidence << ", not " << hit << ")");
+                    FC_LOG(
+                        referenceName(entry->prop)
+                        << "[" << entry->index << "]: " << oldName << " -> " << pick << " ("
+                        << item.evidence << ", not " << hit << ")"
+                    );
                     countReferenceMigration(entry->owner, MigrationOutcome::Moved);
                 }
                 else {
@@ -1174,10 +1180,11 @@ bool solveElementReferences(DocumentObject* feature,
                     for (const auto& candidate : item.candidates) {
                         candidates.push_back(candidate.first);
                     }
-                    FC_WARN(referenceName(entry->prop)
-                            << "[" << entry->index << "]: " << oldName << " broken ("
-                            << item.evidence << ", candidates: " << joinCandidates(candidates)
-                            << ")");
+                    FC_LOG(
+                        referenceName(entry->prop)
+                        << "[" << entry->index << "]: " << oldName << " broken (" << item.evidence
+                        << ", candidates: " << joinCandidates(candidates) << ")"
+                    );
                     countReferenceMigration(entry->owner, MigrationOutcome::Broken);
                 }
                 report(*entry, std::move(item));
@@ -1217,9 +1224,11 @@ bool solveElementReferences(DocumentObject* feature,
                     item.kind = resolution.guess.kind;
                     item.newIndex = index;
                     item.evidence = "index carry, fingerprint equal";
-                    FC_WARN(referenceName(entry->prop)
-                            << "[" << entry->index << "]: " << entry->oldName << " -> " << index
-                            << " (tier index, fingerprint equal)");
+                    FC_LOG(
+                        referenceName(entry->prop)
+                        << "[" << entry->index << "]: " << entry->oldName << " -> " << index
+                        << " (tier index, fingerprint equal)"
+                    );
                 }
                 else {
                     countReferenceMigration(entry->owner, MigrationOutcome::Broken);
@@ -1234,10 +1243,11 @@ bool solveElementReferences(DocumentObject* feature,
                             std::numeric_limits<double>::quiet_NaN()
                         );
                     }
-                    FC_WARN(referenceName(entry->prop)
-                            << "[" << entry->index << "]: " << entry->oldName << " broken ("
-                            << item.evidence << (exists ? ", candidates: " + index : "")
-                            << ")");
+                    FC_LOG(
+                        referenceName(entry->prop)
+                        << "[" << entry->index << "]: " << entry->oldName << " broken ("
+                        << item.evidence << (exists ? ", candidates: " + index : "") << ")"
+                    );
                 }
                 report(*entry, std::move(item));
             }
@@ -1361,9 +1371,10 @@ bool solveElementReferences(DocumentObject* feature,
                 resolution.prop = entry.prop;
                 resolution.index = entry.index;
                 resolutions[entry.prop].push_back(resolution);
-                FC_WARN(referenceName(entry.prop)
-                        << "[" << entry.index << "]: " << oldName << " removed ("
-                        << outcome.evidence << " to " << outcome.element << ")");
+                FC_LOG(
+                    referenceName(entry.prop) << "[" << entry.index << "]: " << oldName << " removed ("
+                                              << outcome.evidence << " to " << outcome.element << ")"
+                );
                 continue;
             }
             // A guess whose pick the solver finds again as the element the original's name
@@ -1432,10 +1443,12 @@ bool solveElementReferences(DocumentObject* feature,
                     item.newIndex = returned;
                     item.evidence = "the original's name gives it again";
                     report(entry, std::move(item));
-                    FC_WARN(referenceName(entry.prop)
-                            << "[" << entry.index << "]: " << oldName << " -> "
-                            << returned << " (the original " << entry.guess.origIndex
-                            << " is back, changed since it was saved)");
+                    FC_LOG(
+                        referenceName(entry.prop)
+                        << "[" << entry.index << "]: " << oldName << " -> " << returned
+                        << " (the original " << entry.guess.origIndex
+                        << " is back, changed since it was saved)"
+                    );
                     continue;
                 }
             }
@@ -1458,10 +1471,11 @@ bool solveElementReferences(DocumentObject* feature,
                     item.pieces.emplace_back(outcome.elements[p], mapForm(outcome.names[p]));
                 }
                 resolutions[entry.prop].push_back(resolution);
-                FC_WARN(referenceName(entry.prop)
-                        << "[" << entry.index << "]: " << oldName << " -> "
-                        << joinCandidates(outcome.elements) << " (tier " << outcome.tier << ", "
-                        << outcome.evidence << ")");
+                FC_LOG(
+                    referenceName(entry.prop) << "[" << entry.index << "]: " << oldName << " -> "
+                                              << joinCandidates(outcome.elements) << " (tier "
+                                              << outcome.tier << ", " << outcome.evidence << ")"
+                );
                 item.status = ReferenceReport::Status::Expanded;
                 item.kind = resolution.guess.kind;
                 item.tier = outcome.tier;
@@ -1500,9 +1514,11 @@ bool solveElementReferences(DocumentObject* feature,
                     item.kind = resolution.guess.kind;
                 }
                 resolutions[entry.prop].push_back(resolution);
-                FC_WARN(referenceName(entry.prop)
-                        << "[" << entry.index << "]: " << oldName << " -> " << outcome.element
-                        << " (tier " << outcome.tier << ", " << outcome.evidence << ")");
+                FC_LOG(
+                    referenceName(entry.prop)
+                    << "[" << entry.index << "]: " << oldName << " -> " << outcome.element
+                    << " (tier " << outcome.tier << ", " << outcome.evidence << ")"
+                );
                 item.status = ReferenceReport::Status::Resolved;
                 item.tier = outcome.tier;
                 item.newIndex = outcome.element;
@@ -1536,9 +1552,11 @@ bool solveElementReferences(DocumentObject* feature,
                 }
                 item.candidateRoles = outcome.candidateRoles;
                 item.candidateDistances = outcome.candidateDistances;
-                FC_WARN(referenceName(entry.prop)
-                        << "[" << entry.index << "]: " << oldName << " -> " << outcome.element
-                        << " (guessed, " << outcome.evidence << ")");
+                FC_LOG(
+                    referenceName(entry.prop)
+                    << "[" << entry.index << "]: " << oldName << " -> " << outcome.element
+                    << " (guessed, " << outcome.evidence << ")"
+                );
             }
             else {
                 if (entry.kind == SolverEntry::Kind::Exact) {
@@ -1573,13 +1591,14 @@ bool solveElementReferences(DocumentObject* feature,
                         + (places.find(" and ") == std::string::npos ? " sits" : " sit")
                         + " where it was";
                 }
-                FC_WARN(referenceName(entry.prop)
-                        << "[" << entry.index << "]: " << oldName << " broken ("
-                        << outcome.evidence
-                        << (outcome.candidates.empty()
-                                ? std::string()
-                                : ", candidates: " + joinCandidates(outcome.candidates))
-                        << ")");
+                FC_LOG(
+                    referenceName(entry.prop)
+                    << "[" << entry.index << "]: " << oldName << " broken (" << outcome.evidence
+                    << (outcome.candidates.empty()
+                            ? std::string()
+                            : ", candidates: " + joinCandidates(outcome.candidates))
+                    << ")"
+                );
             }
             report(entry, std::move(item));
         }
@@ -1615,6 +1634,63 @@ bool solveElementReferences(DocumentObject* feature,
         ReferenceReport::replace(prop, targetName, std::move(reports[prop]));
     }
     return changed;
+}
+
+bool reboundInPlace(DocumentObject* obj, const std::string& sub, const GuessRecord& guess)
+{
+    if ((guess.kind != "tier2" && guess.kind != "tier3") || guess.origFingerprint.empty() || !obj
+        || !obj->isAttachedToDocument() || Data::hasMissingElement(sub.c_str())) {
+        return false;
+    }
+    const Data::ElementFingerprint saved = Data::ElementFingerprint::fromString(guess.origFingerprint);
+    if (!saved.isValid()) {
+        return false;
+    }
+    // The element the reference holds, in the feature that owns it (as the solver measured it)
+    ElementNamePair elementName;
+    GeoFeature* geo = nullptr;
+    const char* element = nullptr;
+    if (!GeoFeature::resolveElement(
+            obj,
+            sub.c_str(),
+            elementName,
+            false,
+            GeoFeature::Normal,
+            nullptr,
+            &element,
+            &geo
+        )
+        || !geo || !element || !element[0] || elementName.oldName.empty()
+        || GeoFeature::hasMissingElement(elementName.oldName.c_str())) {
+        return false;
+    }
+    double diagonal = 0.0;
+    if (auto prop = geo->getPropertyOfGeometry()) {
+        if (auto data = prop->getComplexData()) {
+            diagonal = data->getBoundBox().CalcDiagonalLength();
+        }
+    }
+    double gap = Data::SolveInput().gap;
+    Data::GeometryTolerances tolerances;
+    double continuationDistance = Data::SolveInput().continuationDistance;
+    readTolerances(gap, tolerances, continuationDistance);
+    auto here = [&](const std::string& index) {
+        Data::ElementFingerprint now;
+        return geo->getElementFingerprint(index.c_str(), now)
+            && Data::atSamePlace(saved, now, diagonal, tolerances, continuationDistance);
+    };
+    if (!here(elementName.oldName)) {
+        return false;
+    }
+    // The only element there: an alternative at the same place makes the pick a choice
+    return std::none_of(
+        guess.alternatives.begin(),
+        guess.alternatives.end(),
+        [&](const GuessRecord::Alternative& alternative) {
+            return !alternative.index.empty() && alternative.index != elementName.oldName
+                && here(alternative.index);
+        }
+    );
 }
 
 }  // namespace App

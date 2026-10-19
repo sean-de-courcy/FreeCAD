@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdio>
 #include <map>
+#include <set>
 #include <sstream>
 
 #include "Document.h"
@@ -468,6 +469,40 @@ std::string guessedText(const ReferenceReport::Slot& slot,
     return ss.str();
 }
 
+// A property's references found again in the same place (ops#391), in one text:
+// `Edge reference found again in the same place (Base[1])`, `3 edge references found again in the
+// same place (Base[1-3, 5])`; \a type is empty when they are of mixed types.
+std::string samePlaceText(
+    const std::string& property,
+    const std::vector<int>& indices,
+    const std::string& type
+)
+{
+    std::ostringstream ss;
+    if (indices.size() == 1) {
+        ss << capitalized(type.empty() ? "element" : type) << " reference";
+    }
+    else {
+        ss << indices.size() << ' ' << (type.empty() ? std::string("element") : type)
+           << " references";
+    }
+    ss << " found again in the same place (" << property << '[';
+    // runs of consecutive positions as `a-b`
+    for (std::size_t i = 0; i < indices.size();) {
+        std::size_t j = i;
+        while (j + 1 < indices.size() && indices[j + 1] == indices[j] + 1) {
+            ++j;
+        }
+        ss << (i ? ", " : "") << indices[i];
+        if (j > i) {
+            ss << '-' << indices[j];
+        }
+        i = j + 1;
+    }
+    ss << "])";
+    return ss.str();
+}
+
 }  // namespace
 
 bool ReferenceReport::describeBroken(const DocumentObject* obj, std::string& why)
@@ -527,6 +562,18 @@ bool ReferenceReport::describe(const DocumentObject* obj, Outcome& outcome)
     auto append = [](std::string& text, const std::string& item) {
         text += (text.empty() ? "" : "; ") + item;
     };
+    // The warning's texts in order; a property's references found again in the same place share
+    // one text, at its first one's position (ops#391), filled in at the end
+    std::vector<std::string> warnings;
+    struct SamePlace
+    {
+        std::size_t position = 0;
+        std::vector<int> indices;
+        std::string type;
+        bool mixed = false;
+    };
+    std::map<std::string, SamePlace> samePlace;  // by property
+    bool othersWarned = false;
     for (std::size_t s = 0; s < slots.size(); ++s) {
         const auto& slot = slots[s];
         auto entry = find(slot.prop, slot.localIndex);
@@ -536,16 +583,35 @@ bool ReferenceReport::describe(const DocumentObject* obj, Outcome& outcome)
                 append(outcome.fatal, missingText(slot, entry));
                 continue;
             }
-            append(outcome.warning, missingText(slot, entry));
+            warnings.push_back(missingText(slot, entry));
+            othersWarned = true;
             if (count.lastMissing == static_cast<int>(s)) {
-                outcome.warning += "; computed on " + std::to_string(count.resolving) + " of "
-                    + std::to_string(count.total) + " " + plural(count.type);
+                warnings.push_back(
+                    "computed on " + std::to_string(count.resolving) + " of "
+                    + std::to_string(count.total) + " " + plural(count.type)
+                );
             }
             continue;
         }
         if (slot.guess.empty()) {
             continue;
         }
+        if (reboundInPlace(slot.obj, slot.sub, slot.guess)) {
+            auto [it, first] = samePlace.try_emplace(slot.property);
+            auto& same = it->second;
+            const std::string type = typeOf(elementOfSub(slot.sub));
+            if (first) {
+                same.position = warnings.size();
+                same.type = type;
+                warnings.emplace_back();
+            }
+            else if (same.type != type) {
+                same.mixed = true;
+            }
+            same.indices.push_back(slot.index);
+            continue;
+        }
+        othersWarned = true;
         // The pieces of an expanded reference carry the same record: one text for them.
         std::size_t last = s;
         std::string elements = elementOfSub(slot.sub);
@@ -558,10 +624,49 @@ bool ReferenceReport::describe(const DocumentObject* obj, Outcome& outcome)
         }
         std::string where = slot.property + "[" + std::to_string(slot.index)
             + (last > s ? ".." + std::to_string(slots[last].index) : std::string()) + "]";
-        append(outcome.warning, guessedText(slot, elements, where));
+        warnings.push_back(guessedText(slot, elements, where));
         s = last;
     }
+    for (const auto& [property, same] : samePlace) {
+        warnings[same.position] = samePlaceText(property, same.indices, same.mixed ? "" : same.type);
+    }
+    for (const auto& text : warnings) {
+        append(outcome.warning, text);
+    }
+    outcome.samePlace = !samePlace.empty() && !othersWarned;
     return !outcome.fatal.empty() || !outcome.warning.empty();
+}
+
+namespace
+{
+// By object: the warnings of the quieter level (ops#391)
+std::set<const DocumentObject*>& samePlaceWarnings()
+{
+    static std::set<const DocumentObject*> objects;
+    return objects;
+}
+}  // namespace
+
+bool ReferenceReport::isSamePlaceWarning(const DocumentObject* obj)
+{
+    return samePlaceWarnings().contains(obj);
+}
+
+void ReferenceReport::setSamePlaceWarning(const DocumentObject* obj, bool on)
+{
+    if (on) {
+        samePlaceWarnings().insert(obj);
+    }
+    else {
+        samePlaceWarnings().erase(obj);
+    }
+}
+
+bool ReferenceReport::restoredSamePlaceWarning(const DocumentObject* obj, const std::string& text)
+{
+    Outcome outcome;
+    return describe(obj, outcome) && outcome.fatal.empty() && outcome.samePlace
+        && outcome.warning == text;
 }
 
 }  // namespace App

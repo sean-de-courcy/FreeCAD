@@ -1128,10 +1128,22 @@ bool PropertyLinkBase::_updateElementReference(DocumentObject* feature,
     };
 
     if (missing) {
-        FC_WARN(propertyName(this)
+        // In a solver document the solver resolves or breaks it next, and the owner's warning or
+        // error says so in words: the raw name goes to the log (ops#391)
+        if (inSolverDocument()) {
+            FC_LOG(
+                propertyName(this)
                 << " missing element reference " << ret->getFullName() << " "
-                << (elementName.newName.size() ? elementName.newName : elementName.oldName)
-                << why);
+                << (elementName.newName.size() ? elementName.newName : elementName.oldName) << why
+            );
+        }
+        else {
+            FC_WARN(
+                propertyName(this)
+                << " missing element reference " << ret->getFullName() << " "
+                << (elementName.newName.size() ? elementName.newName : elementName.oldName) << why
+            );
+        }
         shadow.oldName.swap(elementName.oldName);
         if (dropName) {
             shadow.newName.clear();

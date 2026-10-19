@@ -395,7 +395,9 @@ def getReferenceReport(obj: DocumentObject, /) -> list[dict[str, Any]]:
     split element that holds its saved centre; empty without a record),
     `original` (`{"index", "name"}`: what the reference stood for), `alternatives` (a list of
     `{"index", "role", "distance"}`, the other elements it could be), `headline` and `warning`
-    (the owner's warning text, empty if none).
+    (the owner's warning text, empty if none). `warning_level` is the owner warning's level
+    (ops#391): `same-place` when it names only references found again in the same place (the
+    tree's quieter marker), `normal` for any other warning, empty without one.
     """
     ...
 

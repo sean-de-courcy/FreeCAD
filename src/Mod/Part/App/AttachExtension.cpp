@@ -42,6 +42,7 @@
 #include <App/Application.h>
 #include <App/Document.h>
 #include <App/Datums.h>
+#include <App/ElementNamingUtils.h>
 #include <App/GeoFeatureGroupExtension.h>
 #include <App/ObjectIdentifier.h>
 #include <App/Expression.h>
@@ -803,8 +804,20 @@ void AttachExtension::extensionOnChanged(const App::Property* prop)
         if ((prop == &AttachmentSupport || prop == &MapMode || prop == &MapPathParameter
              || prop == &MapReversed || prop == &AttachmentOffset || prop == &MapOrigin)) {
             bool bAttached = false;
+            // FreeCAD-CH (ops#391): in a solver document, a support element already marked
+            // missing (`?Face18`) can't position. A reorder writes it so before the solver finds
+            // it on its new object, and the recompute words a real one; positioning now only
+            // printed a transient error.
+            auto doc = getExtendedObject()->getDocument();
+            const auto subs = AttachmentSupport.getSubValues(false);
+            const bool missingSupport = doc && doc->isReferenceSolverOn()
+                && std::any_of(subs.begin(), subs.end(), [](const std::string& sub) {
+                                            return Data::hasMissingElement(sub.c_str());
+                                        });
             try {
-                bAttached = positionBySupport();
+                if (!missingSupport) {
+                    bAttached = positionBySupport();
+                }
             }
             catch (Base::Exception& e) {
                 getExtendedObject()->setStatus(App::Error, true);

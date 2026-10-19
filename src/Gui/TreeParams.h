@@ -495,6 +495,20 @@ public:
     static const char* docVisibilityIcon();
     static void onVisibilityIconChanged();
     //@}
+
+    // Auto generated code (Tools/params_utils.py:138)
+    //@{
+    /// Accessor for parameter ShowSamePlaceWarnings
+    ///
+    /// Shows a pale warning marker on objects whose element references were found again in the
+    /// same place. When off, they show no marker, F8 skips them and their warning goes to the log
+    static const bool& getShowSamePlaceWarnings();
+    static const bool& defaultShowSamePlaceWarnings();
+    static void removeShowSamePlaceWarnings();
+    static void setShowSamePlaceWarnings(const bool& v);
+    static const char* docShowSamePlaceWarnings();
+    static void onShowSamePlaceWarningsChanged();
+    //@}
     //[[[end]]]
 
     static void refreshTreeViews();
