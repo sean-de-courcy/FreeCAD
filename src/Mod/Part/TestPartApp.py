@@ -40,6 +40,7 @@ from parttests.ElementReferenceTest import ElementReferenceTest, ElementReferenc
 from parttests.FilletFallbackTest import (
     BaseToleranceTest,
     DroppedBasePartsTest,
+    FilledRecessTest,
     FilletFallbackTest,
     InvalidDressUpTest,
 )

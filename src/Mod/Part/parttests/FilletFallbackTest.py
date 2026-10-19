@@ -885,6 +885,172 @@ class DroppedBasePartsTest(unittest.TestCase):
                 self.assertAlmostEqual(feature.Shape.Volume, 1000 - removed, delta=1e-6)
 
 
+def front_top_removed(kind, size):
+    """What a fillet or chamfer of the size on the front top edge of the 10 mm cube removes: the
+    prism z > 10 - size + y, or the square y < r, z > 10 - r outside the round's cylinder (1 mm past
+    the cube's sides)"""
+    if kind == "Chamfer":
+        corners = [V(-1, 0, 10 - size), V(-1, size, 10), V(-1, -1, 10), V(-1, -1, 10 - size)]
+        return Part.Face(Part.makePolygon(corners, True)).extrude(V(12, 0, 0))
+    square = Part.makeBox(12, size + 1, size + 1, V(-1, -1, 10 - size))
+    return square.cut(Part.makeCylinder(size, 12, V(-1, size, 10 - size), V(1, 0, 0)))
+
+
+def concave_block():
+    """The 10 mm cube without its quarter y > 5, z > 5: an L whose concave edge runs along x at
+    y = z = 5"""
+    return Part.makeBox(10, 10, 10).cut(Part.makeBox(12, 6, 6, V(-1, 5, 5)))
+
+
+def concave_added(kind, size):
+    """What a fillet or chamfer of the size on concave_block()'s concave edge adds: the square
+    5 < y, z < 5 + r outside the round's cylinder, or the triangle y + z < 10 + size"""
+    if kind == "Chamfer":
+        corners = [V(0, 5, 5), V(0, 5 + size, 5), V(0, 5, 5 + size)]
+        return Part.Face(Part.makePolygon(corners, True)).extrude(V(10, 0, 0))
+    square = Part.makeBox(10, size, size, V(0, 5, 5))
+    return square.cut(Part.makeCylinder(size, 10, V(0, 5 + size, 5 + size), V(1, 0, 0)))
+
+
+def dressed_up_in_a_body(doc, kind, recess, size):
+    """A PartDesign Body whose BaseFeature is the 10 mm cube without the recess, and a Fillet or
+    Chamfer of the size on the cube's front top edge (for the PartDesign tests). Returns the
+    feature and the edge's name"""
+    base = doc.addObject("Part::Feature", "Base")
+    base.Shape = Part.makeBox(10, 10, 10).cut(recess)
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.BaseFeature = base
+    doc.recompute()
+    dressed = body.newObject("PartDesign::" + kind, kind)
+    edge = edge_between(base.Shape, (0, 0, 10), (10, 0, 10))
+    name = "Edge%d" % next(i for i, e in enumerate(base.Shape.Edges, 1) if e.isSame(edge))
+    dressed.Base = (body.BaseFeature, [name])
+    if kind == "Fillet":
+        dressed.Radius = size
+    else:
+        dressed.Size = size
+    doc.recompute()
+    return dressed, name
+
+
+class FilledRecessTest(unittest.TestCase):
+    """OCCT's fillet and chamfer cover the opening of a recess their band crosses in a face next to
+    the edge (a blind pocket, a notch, a hole), and fill the recess under the new face: a valid
+    solid with the volume of the plain dress-up (ops#393). The result must be the Boolean
+    construction (the base without the recess, dressed up, without the recess again), or the
+    feature fails naming the edge.
+    """
+
+    setUp = InvalidDressUpTest.setUp
+    tearDown = InvalidDressUpTest.tearDown
+    dressUp = InvalidDressUpTest.dressUp
+
+    def assertExactOrFails(self, feature, base, edge, expected):
+        if feature.isValid():
+            self.assertTrue(feature.Shape.isValid())
+            self.assertAlmostEqual(feature.Shape.Volume, expected, delta=1e-6)
+            return
+        index = next(i for i, e in enumerate(base.Edges, 1) if e.isSame(edge))
+        self.assertTrue(
+            feature.getStatusString().startswith(
+                "The %s fills a recess of the base next to Edge%d:"
+                % (feature.TypeId[6:].lower(), index)
+            ),
+            feature.getStatusString(),
+        )
+
+    def assertFront(self, recess, kinds=("Chamfer", "Fillet")):
+        """The cube without the recess, dressed up 3 on its front top edge"""
+        base = Part.makeBox(10, 10, 10).cut(recess)
+        edge = edge_between(base, (0, 0, 10), (10, 0, 10))
+        for kind in kinds:
+            with self.subTest(kind=kind):
+                expected = Part.makeBox(10, 10, 10).cut(front_top_removed(kind, 3)).cut(recess)
+                feature = self.dressUp(kind, base, [edge], [(3, 3)])
+                self.assertExactOrFails(feature, base, edge, expected.Volume)
+
+    def testBandAcrossABlindPocket(self):
+        # The issue's pocket, open at the top: chamfer 951 (OCCT 955), fillet 973.439 (980.686)
+        self.assertFront(Part.makeBox(4, 1, 2, V(3, 1.5, 8)))
+
+    def testBandAcrossAShallowerPocket(self):
+        # z0 = 8.5, dz = 1.5: chamfer 953 (OCCT 955), fillet 975.439 (980.686)
+        self.assertFront(Part.makeBox(4, 1, 1.5, V(3, 1.5, 8.5)))
+
+    def testBandAcrossANotchInTheSideFace(self):
+        # Open on the top and the right face: the top face has no inner wire. Chamfer 953, fillet
+        # 977.062 (OCCT 955, 980.686)
+        self.assertFront(Part.makeBox(2, 1, 2, V(8, 1.5, 8)))
+
+    def testBandAcrossAPocketInTheFrontFace(self):
+        # Open on the front face, under the edge: chamfer 954.5, fillet 975.881 (OCCT 955, 980.686)
+        self.assertFront(Part.makeBox(4, 2, 1, V(3, 0, 8.5)))
+
+    def testBandAcrossARoundHole(self):
+        # A blind hole r 0.6, 2 deep: chamfer 953.869, fillet 978.638 (OCCT 955, 980.686)
+        self.assertFront(Part.makeCylinder(0.6, 2, V(5, 2, 8)))
+
+    def testBandAcrossAPocketWithASizePerEdge(self):
+        # The front edge 3 and the back one 1: Part's own maker (a size per edge), not makeFillet
+        recess = Part.makeBox(4, 1, 2, V(3, 1.5, 8))
+        base = Part.makeBox(10, 10, 10).cut(recess)
+        front = edge_between(base, (0, 0, 10), (10, 0, 10))
+        back = edge_between(base, (0, 10, 10), (10, 10, 10))
+        for kind, back_removed in (("Chamfer", 0.5 * 10), ("Fillet", fillet_section(1) * 10)):
+            with self.subTest(kind=kind):
+                cut = Part.makeBox(10, 10, 10).cut(front_top_removed(kind, 3)).cut(recess)
+                feature = self.dressUp(kind, base, [front, back], [(3, 3), (1, 1)])
+                self.assertExactOrFails(feature, base, front, cut.Volume - back_removed)
+
+    def testConcaveBandOverAPocket(self):
+        # A pocket 4 x 1 x 1 in the L's floor under the round of 2 on its concave edge: OCCT's
+        # result has the pocket filled (758.584 for 754.584; the chamfer 770 for 766). The
+        # material a concave edge adds in its corner and the filled pocket are one piece
+        recess = Part.makeBox(4, 1, 1, V(3, 5.5, 4))
+        base = concave_block().cut(recess)
+        edge = edge_between(base, (0, 5, 5), (10, 5, 5))
+        for kind in ("Fillet", "Chamfer"):
+            with self.subTest(kind=kind):
+                expected = concave_block().fuse(concave_added(kind, 2)).cut(recess)
+                feature = self.dressUp(kind, base, [edge], [(2, 2)])
+                self.assertExactOrFails(feature, base, edge, expected.Volume)
+
+    def testConcaveBandStays(self):
+        # The concave edge's round or chamfer adds material: right, and kept, also beside a
+        # pocket the band doesn't reach (y 8 to 9; the band ends at y = 7)
+        for recess in (None, Part.makeBox(4, 1, 1, V(3, 8, 4))):
+            base = concave_block() if recess is None else concave_block().cut(recess)
+            edge = edge_between(base, (0, 5, 5), (10, 5, 5))
+            for kind in ("Fillet", "Chamfer"):
+                with self.subTest(kind=kind, recess=recess is not None):
+                    expected = base.fuse(concave_added(kind, 2)).Volume
+                    feature = self.dressUp(kind, base, [edge], [(2, 2)])
+                    self.assertTrue(feature.isValid(), feature.getStatusString())
+                    self.assertAlmostEqual(feature.Shape.Volume, expected, delta=1e-6)
+
+    def testPocketOutOfReachStays(self):
+        # A pocket 4 x 1 x 2 at y 6 to 7, beyond the band (y < 3): untouched, 947 and 972.686
+        recess = Part.makeBox(4, 1, 2, V(3, 6, 8))
+        base = Part.makeBox(10, 10, 10).cut(recess)
+        edge = edge_between(base, (0, 0, 10), (10, 0, 10))
+        for kind, removed in (("Chamfer", 4.5 * 10), ("Fillet", fillet_section(3) * 10)):
+            with self.subTest(kind=kind):
+                feature = self.dressUp(kind, base, [edge], [(3, 3)])
+                self.assertTrue(feature.isValid(), feature.getStatusString())
+                self.assertEqual(len(feature.Shape.Faces), len(base.Faces) + 1)
+                self.assertAlmostEqual(feature.Shape.Volume, 1000 - 8 - removed, delta=1e-6)
+
+    def testPocketTheChamferRemovesStaysRemoved(self):
+        # A pocket 4 x 1 x 0.5 at the top, y 0.5 to 1.5: above the chamfer's plane, so the chamfer
+        # removes it with its material (955). Its faces go, which sends the result to the Boolean
+        recess = Part.makeBox(4, 1, 0.5, V(3, 0.5, 9.5))
+        base = Part.makeBox(10, 10, 10).cut(recess)
+        edge = edge_between(base, (0, 0, 10), (10, 0, 10))
+        feature = self.dressUp("Chamfer", base, [edge], [(3, 3)])
+        self.assertTrue(feature.isValid(), feature.getStatusString())
+        self.assertAlmostEqual(feature.Shape.Volume, 1000 - 4.5 * 10, delta=1e-6)
+
+
 def tolerances(shape):
     return [s.Tolerance for s in shape.Vertexes + shape.Edges + shape.Faces]
 

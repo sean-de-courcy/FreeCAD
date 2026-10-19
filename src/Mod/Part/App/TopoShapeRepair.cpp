@@ -13,26 +13,41 @@
 #include <set>
 #include <string>
 #include <tuple>
+#include <unordered_map>
 #include <vector>
 
 #include <Bnd_Box.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
+#include <BRepAdaptor_Curve.hxx>
 #include <BRepAlgoAPI_Common.hxx>
+#include <BRepAlgoAPI_Cut.hxx>
 #include <BRepBndLib.hxx>
+#include <BRepCheck_Analyzer.hxx>
+#include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepGProp.hxx>
+#include <ChFi3d.hxx>
+#include <Geom_Surface.hxx>
 #include <GProp_GProps.hxx>
+#include <gp.hxx>
 #include <gp_Pnt.hxx>
+#include <gp_Vec.hxx>
+#include <Precision.hxx>
 #include <Standard_Failure.hxx>
 #include <TopAbs_ShapeEnum.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopLoc_Location.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Compound.hxx>
+#include <TopoDS_Edge.hxx>
+#include <TopoDS_Face.hxx>
 #include <TopoDS_Iterator.hxx>
 #include <TopoDS_Solid.hxx>
+#include <TopoDS_Vertex.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
+#include <TopTools_ListOfShape.hxx>
 
 #include <App/ElementMap.h>
 #include <Base/Console.h>
@@ -848,6 +863,206 @@ bool checkResult(TopoShape& shape, const TopoShape& base)
     return true;
 }
 
+// The angle within which an edge continues another at a vertex: OCCT's fillet and chamfer carry
+// on along such an edge
+constexpr double chainAngle = 0.01;
+// The least thickness of a piece of material the result has that the base didn't, its volume
+// over its area: below it the piece is the Boolean's numerical noise
+constexpr double leastThickness = 1e-6;
+
+gp_Vec tangentAt(const TopoDS_Edge& edge, const TopoDS_Vertex& vertex)
+{
+    BRepAdaptor_Curve curve(edge);
+    gp_Pnt point;
+    gp_Vec tangent;
+    curve.D1(BRep_Tool::Parameter(vertex, edge), point, tangent);
+    return tangent;
+}
+
+// The edges OCCT dresses up for the given ones: those, and every edge that continues one of them
+// tangentially at a vertex, which OCCT carries the fillet or chamfer on along
+TopTools_IndexedMapOfShape chainOf(const TopoDS_Shape& base, const std::vector<TopoShape>& edges)
+{
+    TopTools_IndexedDataMapOfShapeListOfShape edgesAt;
+    TopExp::MapShapesAndAncestors(base, TopAbs_VERTEX, TopAbs_EDGE, edgesAt);
+    TopTools_IndexedMapOfShape chain;
+    for (const auto& edge : edges) {
+        if (!edge.isNull() && edge.getShape().ShapeType() == TopAbs_EDGE) {
+            chain.Add(edge.getShape());
+        }
+    }
+    for (int i = 1; i <= chain.Extent(); ++i) {
+        const TopoDS_Edge edge = TopoDS::Edge(chain(i));
+        for (TopExp_Explorer it(edge, TopAbs_VERTEX); it.More(); it.Next()) {
+            const TopoDS_Vertex& vertex = TopoDS::Vertex(it.Current());
+            const int index = edgesAt.FindIndex(vertex);
+            if (index == 0 || BRep_Tool::Degenerated(edge)) {
+                continue;
+            }
+            const gp_Vec tangent = tangentAt(edge, vertex);
+            for (const auto& other : edgesAt(index)) {
+                const TopoDS_Edge& next = TopoDS::Edge(other);
+                if (chain.Contains(next) || BRep_Tool::Degenerated(next)) {
+                    continue;
+                }
+                const gp_Vec along = tangentAt(next, vertex);
+                if (tangent.Magnitude() > gp::Resolution() && along.Magnitude() > gp::Resolution()
+                    && tangent.IsParallel(along, chainAngle)) {
+                    chain.Add(next);
+                }
+            }
+        }
+    }
+    return chain;
+}
+
+// The faces of the base that hold a vertex of the edges
+TopTools_IndexedMapOfShape facesAt(
+    const TopTools_IndexedDataMapOfShapeListOfShape& facesAtVertices,
+    const TopTools_IndexedMapOfShape& edges
+)
+{
+    TopTools_IndexedMapOfShape faces;
+    for (int i = 1; i <= edges.Extent(); ++i) {
+        for (TopExp_Explorer it(edges(i), TopAbs_VERTEX); it.More(); it.Next()) {
+            const int index = facesAtVertices.FindIndex(it.Current());
+            if (index == 0) {
+                continue;
+            }
+            for (const auto& face : facesAtVertices(index)) {
+                faces.Add(face);
+            }
+        }
+    }
+    return faces;
+}
+
+std::vector<gp_Pnt> vertexPoints(const TopoDS_Shape& face)
+{
+    TopTools_IndexedMapOfShape vertices;
+    TopExp::MapShapes(face, TopAbs_VERTEX, vertices);
+    std::vector<gp_Pnt> points;
+    points.reserve(vertices.Extent());
+    for (int i = 1; i <= vertices.Extent(); ++i) {
+        points.push_back(BRep_Tool::Pnt(TopoDS::Vertex(vertices(i))));
+    }
+    return points;
+}
+
+bool samePoints(const std::vector<gp_Pnt>& a, const std::vector<gp_Pnt>& b)
+{
+    return a.size() == b.size() && std::all_of(a.begin(), a.end(), [&](const gp_Pnt& p) {
+               return std::any_of(b.begin(), b.end(), [&](const gp_Pnt& q) {
+                   return p.Distance(q) <= Precision::Confusion();
+               });
+           });
+}
+
+/* Whether the result changed a face of the base other than the given ones: the result has no face
+ * on its surface with its vertices. OCCT's maker runs on a copy of the base that shares its
+ * geometry (ops#345) and keeps the faces it leaves alone, and so do the exact construction's
+ * Booleans; a repaired result, whose geometry is copied, changes all of them. */
+bool changesOtherFaces(
+    const TopoDS_Shape& shape,
+    const TopoDS_Shape& base,
+    const TopTools_IndexedMapOfShape& changing
+)
+{
+    std::unordered_map<const Geom_Surface*, std::vector<TopoDS_Shape>> onSurface;
+    TopTools_IndexedMapOfShape resultFaces;
+    TopExp::MapShapes(shape, TopAbs_FACE, resultFaces);
+    for (int i = 1; i <= resultFaces.Extent(); ++i) {
+        TopLoc_Location location;
+        const auto& surface = BRep_Tool::Surface(TopoDS::Face(resultFaces(i)), location);
+        onSurface[surface.get()].push_back(resultFaces(i));
+    }
+    TopTools_IndexedMapOfShape baseFaces;
+    TopExp::MapShapes(base, TopAbs_FACE, baseFaces);
+    for (int i = 1; i <= baseFaces.Extent(); ++i) {
+        const TopoDS_Shape& face = baseFaces(i);
+        if (changing.Contains(face)) {
+            continue;
+        }
+        TopLoc_Location location;
+        const auto& surface = BRep_Tool::Surface(TopoDS::Face(face), location);
+        const auto candidates = onSurface.find(surface.get());
+        if (candidates == onSurface.end()) {
+            return true;
+        }
+        const auto points = vertexPoints(face);
+        if (std::none_of(candidates->second.begin(), candidates->second.end(), [&](const auto& other) {
+                return samePoints(points, vertexPoints(other));
+            })) {
+            return true;
+        }
+    }
+    return false;
+}
+
+TopoDS_Compound solidsIn(const TopoDS_Shape& shape)
+{
+    BRep_Builder builder;
+    TopoDS_Compound solids;
+    builder.MakeCompound(solids);
+    for (TopExp_Explorer it(shape, TopAbs_SOLID); it.More(); it.Next()) {
+        builder.Add(solids, it.Current());
+    }
+    return solids;
+}
+
+// The edges of the chain between two faces that aren't convex: a concave edge's dress-up adds
+// material in its corner (ChFi3d's own test, which the fillet uses)
+TopTools_IndexedMapOfShape concaveEdges(const TopoDS_Shape& base, const TopTools_IndexedMapOfShape& chain)
+{
+    TopTools_IndexedDataMapOfShapeListOfShape facesOfEdges;
+    TopExp::MapShapesAndAncestors(base, TopAbs_EDGE, TopAbs_FACE, facesOfEdges);
+    TopTools_IndexedMapOfShape concave;
+    for (int i = 1; i <= chain.Extent(); ++i) {
+        const TopoDS_Edge& edge = TopoDS::Edge(chain(i));
+        const int index = facesOfEdges.FindIndex(edge);
+        TopTools_IndexedMapOfShape faces;
+        if (index != 0) {
+            for (const auto& face : facesOfEdges(index)) {
+                faces.Add(face);
+            }
+        }
+        if (faces.Extent() != 2
+            || ChFi3d::DefineConnectType(
+                   edge,
+                   TopoDS::Face(faces(1)),
+                   TopoDS::Face(faces(2)),
+                   std::sin(Precision::Angular()),
+                   false
+               ) != ChFiDS_Convex) {
+            concave.Add(edge);
+        }
+    }
+    return concave;
+}
+
+// The selected edge nearest to the piece, by its name in the base
+std::string nearestEdge(
+    const TopoShape& base,
+    const std::vector<TopoShape>& edges,
+    const TopoDS_Shape& piece
+)
+{
+    std::string name;
+    double least = 0.0;
+    for (const auto& edge : edges) {
+        BRepExtrema_DistShapeShape distance(piece, edge.getShape());
+        if (!distance.IsDone()) {
+            continue;
+        }
+        const int index = base.findShape(edge.getShape());
+        if (index != 0 && (name.empty() || distance.Value() < least)) {
+            least = distance.Value();
+            name = TopoShape::shapeName(TopAbs_EDGE) + std::to_string(index);
+        }
+    }
+    return name.empty() ? std::string("an edge") : name;
+}
+
 }  // namespace
 
 bool checkDressUp(TopoShape& shape, const TopoShape& base, LooseParts looseParts)
@@ -861,6 +1076,87 @@ bool checkDressUp(TopoShape& shape, const TopoShape& base, LooseParts looseParts
         return false;
     }
     return looseParts == LooseParts::drop || keepLooseParts(shape, base);
+}
+
+std::string filledPocket(const TopoShape& shape, const TopoShape& base, const std::vector<TopoShape>& edges)
+{
+    const TopoDS_Compound result = solidsIn(shape.getShape());
+    const TopoDS_Compound before = solidsIn(base.getShape());
+    if (edges.empty() || !TopoDS_Iterator(result).More() || !TopoDS_Iterator(before).More()) {
+        return {};
+    }
+    const char* unchecked = "changes faces away from its edges in a way that can't be checked";
+    try {
+        const auto chain = chainOf(before, edges);
+        TopTools_IndexedDataMapOfShapeListOfShape facesAtVertices;
+        TopExp::MapShapesAndAncestors(before, TopAbs_VERTEX, TopAbs_FACE, facesAtVertices);
+        if (!changesOtherFaces(result, before, facesAt(facesAtVertices, chain))) {
+            return {};
+        }
+        // A Boolean with an invalid base finds material that isn't there (the fin cube's inner
+        // face, ops#12): such a base's defects pass on, as in checkDressUp()
+        if (!BRepCheck_Analyzer(before).IsValid()) {
+            return {};
+        }
+        FC_LOG("Dress-up result that changes faces away from its edges: checking what it adds");
+        BRepAlgoAPI_Cut cut;
+        TopTools_ListOfShape objects;
+        TopTools_ListOfShape tools;
+        objects.Append(result);
+        tools.Append(before);
+        cut.SetArguments(objects);
+        cut.SetTools(tools);
+        // The Boolean would raise the shapes' tolerances in place
+        cut.SetNonDestructive(Standard_True);
+        cut.Build();
+        if (!cut.IsDone() || cut.HasErrors()) {
+            return unchecked;
+        }
+        // A concave edge adds material in its corner, on the faces at it: a piece that lies on any
+        // other face of the base fills what that face bounded
+        const auto concave = concaveEdges(before, chain);
+        TopTools_IndexedMapOfShape walls;
+        if (concave.Extent() > 0) {
+            const auto allowed = facesAt(facesAtVertices, concave);
+            TopTools_IndexedMapOfShape baseFaces;
+            TopExp::MapShapes(before, TopAbs_FACE, baseFaces);
+            for (int i = 1; i <= baseFaces.Extent(); ++i) {
+                const TopoDS_Shape& face = baseFaces(i);
+                if (allowed.Contains(face) || cut.IsDeleted(face)) {
+                    continue;
+                }
+                const TopTools_ListOfShape& images = cut.Modified(face);
+                if (images.IsEmpty()) {
+                    walls.Add(face);
+                }
+                for (const auto& image : images) {
+                    walls.Add(image);
+                }
+            }
+        }
+        for (TopExp_Explorer it(cut.Shape(), TopAbs_SOLID); it.More(); it.Next()) {
+            const TopoDS_Shape& piece = it.Current();
+            GProp_GProps volume;
+            BRepGProp::VolumeProperties(piece, volume);
+            GProp_GProps area;
+            BRepGProp::SurfaceProperties(piece, area);
+            if (std::abs(volume.Mass()) <= leastThickness * area.Mass()) {
+                continue;
+            }
+            bool wrong = concave.Extent() == 0;
+            for (TopExp_Explorer face(piece, TopAbs_FACE); !wrong && face.More(); face.Next()) {
+                wrong = walls.Contains(face.Current());
+            }
+            if (wrong) {
+                return "fills a recess of the base next to " + nearestEdge(base, edges, piece)
+                    + ": its new face covers the recess's opening";
+            }
+        }
+    }
+    catch (const Standard_Failure&) {
+        return unchecked;
+    }
+    return {};
 }
 
 }  // namespace Part

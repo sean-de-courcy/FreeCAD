@@ -466,6 +466,21 @@ class TestFillet(unittest.TestCase):
         volume = sum(s.Volume for s in pad.Shape.Solids)
         self.assertAlmostEqual(volume, 1000 - self._fillet_section(1) * 10 + 48, delta=1e-6)
 
+    def testFilletAcrossAPocketFillsNothing(self):
+        # A round of 3 on the front top edge of a 10 mm cube whose top has a pocket 4 x 1 x 2 at
+        # (3, 1.5, 8): OCCT covers the pocket's opening and fills it under the round (980.686 for
+        # the Boolean construction's 973.439). The Fillet is that construction, or fails naming
+        # the edge (ops#393)
+        recess = Part.makeBox(4, 1, 2, FreeCAD.Vector(3, 1.5, 8))
+        fillet, edge = models.dressed_up_in_a_body(self.Doc, "Fillet", recess, 3)
+        removed = models.front_top_removed("Fillet", 3)
+        expected = Part.makeBox(10, 10, 10).cut(removed).cut(recess).Volume
+        if fillet.isValid():
+            self.assertAlmostEqual(fillet.Shape.Volume, expected, delta=1e-6)
+        else:
+            message = "The fillet fills a recess of the base next to %s:" % edge
+            self.assertTrue(fillet.getStatusString().startswith(message), fillet.getStatusString())
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("PartDesignTestFillet")

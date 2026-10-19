@@ -404,6 +404,22 @@ class TestChamfer(unittest.TestCase):
         volume = sum(s.Volume for s in pad.Shape.Solids)
         self.assertAlmostEqual(volume, 1000 - 0.5 * 10 + 48, delta=1e-6)
 
+    def testChamferAcrossAPocketFillsNothing(self):
+        # As testFilletAcrossAPocketFillsNothing (ops#393): a chamfer of 3 across the pocket gives
+        # 955 for the Boolean construction's 951; the Chamfer is 951 or fails naming the edge
+        recess = Part.makeBox(4, 1, 2, FreeCAD.Vector(3, 1.5, 8))
+        chamfer, edge = models.dressed_up_in_a_body(self.Doc, "Chamfer", recess, 3)
+        removed = models.front_top_removed("Chamfer", 3)
+        expected = Part.makeBox(10, 10, 10).cut(removed).cut(recess).Volume
+        self.assertAlmostEqual(expected, 951, delta=1e-9)
+        if chamfer.isValid():
+            self.assertAlmostEqual(chamfer.Shape.Volume, expected, delta=1e-6)
+        else:
+            message = "The chamfer fills a recess of the base next to %s:" % edge
+            self.assertTrue(
+                chamfer.getStatusString().startswith(message), chamfer.getStatusString()
+            )
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("PartDesignTestChamfer")
