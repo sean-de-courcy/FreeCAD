@@ -54,8 +54,9 @@ class AppExport MainThreadSignalConfig
 public:
     using IsMainThreadFn = bool (*)();  // true iff currently on GUI/main thread
     using InvokeFn = void (*)(std::function<void()>&& fn, bool blocking);
+    using RunQueuedFn = void (*)();
 
-    static void setHooks(IsMainThreadFn isMainThread, InvokeFn invoke);
+    static void setHooks(IsMainThreadFn isMainThread, InvokeFn invoke, RunQueuedFn runQueued = nullptr);
 
     /// No hooks: the current thread counts as "main"
     static bool isMainThread();
@@ -64,6 +65,13 @@ public:
 
     /// No hooks: runs fn inline
     static void invoke(std::function<void()>&& fn, bool blocking);
+
+    /**
+     * On the main thread: runs the functions invoke() queued for it, and no other events. A
+     * main-thread wait for the recompute worker calls it, since the worker may be blocked in a
+     * hop to this thread (ops#365). No hook: does nothing.
+     */
+    static void runQueued();
 };
 
 namespace detail

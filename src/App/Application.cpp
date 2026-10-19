@@ -229,6 +229,7 @@ thread_local bool onRecomputeWorker = false;
 // startup; the worker may read them from its start
 std::atomic<MainThreadSignalConfig::IsMainThreadFn> isMainThreadHook {nullptr};
 std::atomic<MainThreadSignalConfig::InvokeFn> invokeHook {nullptr};
+std::atomic<MainThreadSignalConfig::RunQueuedFn> runQueuedHook {nullptr};
 
 void setWorkerInRequest(bool inRequest)
 {
@@ -895,10 +896,15 @@ bool App::isRecomputeWorkerThread()
     return onRecomputeWorker || (hop && hop->worker);
 }
 
-void MainThreadSignalConfig::setHooks(IsMainThreadFn isMainThread, InvokeFn invoke)
+void MainThreadSignalConfig::setHooks(
+    IsMainThreadFn isMainThread,
+    InvokeFn invoke,
+    RunQueuedFn runQueued
+)
 {
     isMainThreadHook = isMainThread;
     invokeHook = invoke;
+    runQueuedHook = runQueued;
 }
 
 bool MainThreadSignalConfig::isMainThread()
@@ -923,6 +929,13 @@ void MainThreadSignalConfig::invoke(std::function<void()>&& fn, bool blocking)
     }
 }
 
+void MainThreadSignalConfig::runQueued()
+{
+    if (auto* f = runQueuedHook.load()) {
+        f();
+    }
+}
+
 bool App::runWhileRecomputeWorkerIdle(const std::function<void()>& fn)
 {
     std::unique_lock<std::mutex> lock(workerIdleMutex, std::try_to_lock);
@@ -939,10 +952,36 @@ void Application::cancelRecomputeRequestsForDocument(const std::string& document
         return;
     }
 
+    // On the GUI's main thread the worker may be blocked in a hop to it, waiting for a document
+    // signal's slots, and then needs the GIL back: wait without it, running the hops (ops#365).
+    // The GIL goes before the mutex is taken and comes back after it is released
+    const bool runHops = MainThreadSignalConfig::hasHooks() && MainThreadSignalConfig::isMainThread();
+    std::optional<Base::PyGILStateRelease> release;
+    if (runHops && PyGILState_Check()) {
+        release.emplace();
+    }
+
     std::unique_lock<std::mutex> lock(_recomputeMutex);
-    _recomputeStateChanged.wait(lock, [this, &documentName] {
+    auto finished = [this, &documentName] {
         return !_recomputeDocumentsInProgress.contains(documentName);
-    });
+    };
+    if (!runHops) {
+        _recomputeStateChanged.wait(lock, finished);
+    }
+    else if (!finished()) {
+        // A slot in the worker's hop closing the document it recomputes would wait for itself
+        if (auto* hop = RecomputeHop::current(); hop && hop->worker) {
+            throw Base::RuntimeError(
+                "Cannot close document '" + documentName
+                + "' from a signal of its recompute on the worker thread"
+            );
+        }
+        while (!_recomputeStateChanged.wait_for(lock, std::chrono::milliseconds(10), finished)) {
+            lock.unlock();
+            MainThreadSignalConfig::runQueued();
+            lock.lock();
+        }
+    }
 
     // Cancellation runs on document-close boundaries, so a linear scan keeps
     // the queue simple without affecting the steady-state worker path.

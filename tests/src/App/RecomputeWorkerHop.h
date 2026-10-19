@@ -37,7 +37,7 @@ public:
     MainThreadHopHooks()
     {
         state().mainThread = std::this_thread::get_id();
-        App::MainThreadSignalConfig::setHooks(&isMainThread, &invoke);
+        App::MainThreadSignalConfig::setHooks(&isMainThread, &invoke, &runQueued);
     }
     ~MainThreadHopHooks()
     {
@@ -57,20 +57,41 @@ public:
             }
             std::unique_lock lock(s.mutex);
             s.cv.wait_for(lock, std::chrono::milliseconds(5), [&] { return !s.queue.empty(); });
-            while (!s.queue.empty()) {
-                auto task = std::move(s.queue.front());
-                s.queue.pop_front();
-                lock.unlock();
-                task->fn();
-                lock.lock();
-                task->done = true;
-                s.cv.notify_all();
-            }
+            runQueuedLocked(lock);
         }
         return true;
     }
 
+    /// Runs the slots queued now (the runQueued hook, ops#365)
+    static void runQueued()
+    {
+        std::unique_lock lock(state().mutex);
+        runQueuedLocked(lock);
+    }
+
+    /// Waits until an emission on another thread has queued its slots, without running them
+    static bool waitUntilQueued(std::chrono::seconds limit)
+    {
+        auto& s = state();
+        std::unique_lock lock(s.mutex);
+        return s.cv.wait_for(lock, limit, [&] { return !s.queue.empty(); });
+    }
+
 private:
+    static void runQueuedLocked(std::unique_lock<std::mutex>& lock)
+    {
+        auto& s = state();
+        while (!s.queue.empty()) {
+            auto task = std::move(s.queue.front());
+            s.queue.pop_front();
+            lock.unlock();
+            task->fn();
+            lock.lock();
+            task->done = true;
+            s.cv.notify_all();
+        }
+    }
+
     struct Task
     {
         std::function<void()> fn;

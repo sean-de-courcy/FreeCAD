@@ -216,3 +216,87 @@ TEST_F(AsyncRecomputeTest, TheWorkersEmissionsRunTheirSlotsOnTheMainThread)
     EXPECT_TRUE(onThisThread);
     EXPECT_TRUE(forTheWorker);
 }
+
+// Closing a document while the worker waits in a hop for this thread: the close waits for the
+// worker's request, so it runs the hops meanwhile, without the GIL, which the worker takes back
+// after its hop. It waited without either, for a worker that waited for it (ops#365; before the
+// fix only off Windows, where the hop happened)
+TEST_F(AsyncRecomputeTest, CloseDocumentRunsTheWorkersHopsWhileItWaits)
+{
+    auto* object = _doc->addObject("App::FeatureTest", "Feature");
+    ASSERT_NE(object, nullptr);
+    object->touch();
+    auto request = App::RecomputeRequest::fromDocument(*_doc, true);
+    ASSERT_TRUE(App::GetApplication().canRecomputeRequestOnWorker(request));
+
+    tests::MainThreadHopHooks hooks;
+    App::GetApplication().queueRecomputeRequest(request);
+    // The worker waits in its first hop (signalBeforeRecompute)
+    ASSERT_TRUE(tests::MainThreadHopHooks::waitUntilQueued(10s));
+
+    // A deadlocked close fails the test instead of hanging it: after a while another thread runs
+    // the hops, and the worker finishes
+    std::atomic<bool> closed {false};
+    std::atomic<bool> rescued {false};
+    std::thread watchdog([&] {
+        const auto until = std::chrono::steady_clock::now() + 10s;
+        while (!closed && std::chrono::steady_clock::now() < until) {
+            std::this_thread::sleep_for(10ms);
+        }
+        if (!closed) {
+            rescued = true;
+            tests::MainThreadHopHooks::pumpUntil([&] { return closed.load(); }, 30s);
+        }
+    });
+    {
+        // As App.closeDocument() from Python
+        Base::PyGILStateLocker gil;
+        EXPECT_TRUE(App::GetApplication().closeDocument(_docName.c_str()));
+    }
+    closed = true;
+    watchdog.join();
+    _doc = nullptr;
+
+    EXPECT_FALSE(rescued);
+    EXPECT_TRUE(tests::MainThreadHopHooks::pumpUntil(
+        [] { return App::runWhileRecomputeWorkerIdle([] {}); },
+        std::chrono::seconds(10)
+    ));
+}
+
+// A slot in the worker's hop can't close the document being recomputed: the close would wait for
+// the request, which waits for the slot. It refuses instead (ops#365)
+TEST_F(AsyncRecomputeTest, ASlotInTheWorkersHopCantCloseItsDocument)
+{
+    auto* object = _doc->addObject("App::FeatureTest", "Feature");
+    ASSERT_NE(object, nullptr);
+    object->touch();
+    auto request = App::RecomputeRequest::fromDocument(*_doc, true);
+    ASSERT_TRUE(App::GetApplication().canRecomputeRequestOnWorker(request));
+
+    std::atomic<bool> ran {false};
+    std::atomic<bool> refused {false};
+    fastsignals::scoped_connection connection =
+        _doc->signalRecomputedObject.connect([&](const App::DocumentObject& o) {
+            if (&o == object && !ran) {
+                ran = true;
+                try {
+                    App::GetApplication().closeDocument(_docName.c_str());
+                }
+                catch (const Base::RuntimeError&) {
+                    refused = true;
+                }
+            }
+        });
+
+    tests::MainThreadHopHooks hooks;
+    App::GetApplication().queueRecomputeRequest(request);
+    EXPECT_TRUE(tests::MainThreadHopHooks::pumpUntil(
+        [&] { return ran.load() && App::runWhileRecomputeWorkerIdle([] {}); },
+        std::chrono::seconds(10)
+    ));
+
+    EXPECT_TRUE(ran);
+    EXPECT_TRUE(refused);
+    EXPECT_NE(App::GetApplication().getDocument(_docName.c_str()), nullptr);
+}
