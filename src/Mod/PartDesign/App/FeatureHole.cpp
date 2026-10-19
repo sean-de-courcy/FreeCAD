@@ -815,7 +815,16 @@ void Hole::updateHoleCutParams()
                 HoleCutCountersinkAngle.setReadOnly(true);
                 const CounterBoreDimension& dimen = counter.get_bore(threadSizeStr);
                 if (dimen.thread == "None") {
-                    calculateAndSetCounterbore();
+                    // FreeCAD-CH (ops#389): the values are custom and editable here, so
+                    // they are proposed only when this cut is new, the user changed the
+                    // thread or the cut type, or they can't make a cut. A restore or an
+                    // unrelated edit (Depth, ThreadFit) kept recalculating them over the
+                    // user's values, and the next recompute cut those without a message.
+                    if ((!isRestoring() && (proposeHoleCutValues || !HoleCutCustomValues.getValue()))
+                        || HoleCutDiameter.getValue() <= diameterVal
+                        || HoleCutDepth.getValue() <= 0.0) {
+                        calculateAndSetCounterbore();
+                    }
                     // we force custom values since there are no normed ones
                     HoleCutCustomValues.setReadOnly(true);
                     // important to set only if not already true, to avoid loop call of
@@ -862,7 +871,11 @@ void Hole::updateHoleCutParams()
                     if (HoleCutCountersinkAngle.getValue() == 0.0) {
                         HoleCutCountersinkAngle.setValue(counter.angle);
                     }
-                    calculateAndSetCountersink();
+                    // FreeCAD-CH (ops#389): as for the counterbore above
+                    if ((!isRestoring() && (proposeHoleCutValues || !HoleCutCustomValues.getValue()))
+                        || HoleCutDiameter.getValue() <= diameterVal) {
+                        calculateAndSetCountersink();
+                    }
                     // we force custom values since there are no normed ones
                     HoleCutCustomValues.setReadOnly(true);
                     // important to set only if not already true, to avoid loop call of
@@ -1326,6 +1339,13 @@ void Hole::findClosestDesignation()
 
 void Hole::onChanged(const App::Property* prop)
 {
+    // FreeCAD-CH (ops#389): held through the nested changes (size, diameter) such an edit makes
+    Base::StateLocker proposing(
+        proposeHoleCutValues,
+        proposeHoleCutValues
+            || (!isRestoring() && (prop == &ThreadType || prop == &ThreadSize || prop == &HoleCutType))
+    );
+
     if (prop == &StartType) {
         const bool hasOffset = std::strcmp(StartType.getValueAsString(), "Profile plane") != 0;
         StartOffset.setReadOnly(!hasOffset);

@@ -231,6 +231,75 @@ class TestHole(unittest.TestCase):
             for name in names:
                 self.assertIn("ReadOnly", hole.getPropertyStatus(name), (cut, name, "reopened"))
 
+    def testForcedCustomCutValuesStay(self):
+        """Cut values the user entered for a size the norm has none for stay through unrelated
+        edits and a save and reopen (ops#389). Each change of the hole diameter (a Depth or
+        ThreadFit edit, the restore) recalculated them, and the next recompute cut those
+        without a message. A new size still proposes new values."""
+        self.Hole.ThreadType = "ISOMetricProfile"
+        self.Hole.Depth = 10
+        self.Hole.DepthType = "Dimension"
+        self.Hole.DrillPoint = "Flat"
+        self.Hole.Tapered = False
+        folder = tempfile.mkdtemp()
+
+        def removed(hole):
+            # 10 deep through the 10 box; counterbore: a cylinder; countersink (90 degrees):
+            # a cone from the cut diameter down to the hole's
+            r = hole.Diameter.Value / 2
+            cut = hole.HoleCutDiameter.Value / 2
+            if hole.HoleCutType == "ISO 4762":
+                return pi * r**2 * 10 + pi * (cut**2 - r**2) * hole.HoleCutDepth.Value
+            h = cut - r
+            return pi * r**2 * 10 + pi * h / 3 * (cut**2 + cut * r + r**2) - pi * r**2 * h
+
+        for cut, depth in (("ISO 4762", 2), ("ISO 10642", None)):
+            hole = self.Doc.getObject("Hole")
+            hole.ThreadSize = "M4.5x0.75"
+            hole.HoleCutType = cut
+            self.Doc.recompute()
+            # no normed values for M4.5: custom values, forced on, editable
+            self.assertTrue(hole.HoleCutCustomValues, cut)
+            self.assertIn("ReadOnly", hole.getPropertyStatus("HoleCutCustomValues"), cut)
+            self.assertNotIn("ReadOnly", hole.getPropertyStatus("HoleCutDiameter"), cut)
+            hole.HoleCutDiameter = 9
+            if depth:
+                hole.HoleCutDepth = depth
+            self.Doc.recompute()
+            values = (hole.HoleCutDiameter.Value, hole.HoleCutDepth.Value)
+            self.assertAlmostEqual(values[0], 9, msg=cut)
+            self.assertAlmostEqual(hole.Shape.Volume, 10**3 - removed(hole), msg=cut)
+
+            hole.Depth = 9
+            hole.Depth = 10
+            hole.ThreadFit = hole.getEnumerationsOfProperty("ThreadFit")[-1]
+            self.Doc.recompute()
+            self.assertAlmostEqual(hole.HoleCutDiameter.Value, values[0], msg=(cut, "edits"))
+            self.assertAlmostEqual(hole.HoleCutDepth.Value, values[1], msg=(cut, "edits"))
+            self.assertAlmostEqual(hole.Shape.Volume, 10**3 - removed(hole), msg=(cut, "edits"))
+            volume = hole.Shape.Volume
+
+            path = os.path.join(folder, "PartDesignTestHoleForced.FCStd")
+            self.Doc.saveAs(path)
+            FreeCAD.closeDocument(self.Doc.Name)
+            self.Doc = FreeCAD.openDocument(path)
+            hole = self.Doc.getObject("Hole")
+            self.assertAlmostEqual(hole.HoleCutDiameter.Value, values[0], msg=(cut, "reopened"))
+            self.assertAlmostEqual(hole.HoleCutDepth.Value, values[1], msg=(cut, "reopened"))
+            hole.Depth = 9
+            hole.Depth = 10
+            hole.touch()
+            self.Doc.recompute()
+            self.assertAlmostEqual(hole.HoleCutDiameter.Value, values[0], msg=(cut, "reopened"))
+            self.assertAlmostEqual(hole.Shape.Volume, volume, msg=(cut, "reopened"))
+
+            # another size the norm has no values for: values proposed for it
+            hole.ThreadSize = "M2.2x0.45" if depth else "M3.5x0.6"
+            self.Doc.recompute()
+            self.assertTrue(hole.HoleCutCustomValues, cut)
+            proposed = 1.5 * hole.Diameter.Value + 1 if depth else 2.24 * hole.Diameter.Value
+            self.assertAlmostEqual(hole.HoleCutDiameter.Value, proposed, msg=(cut, "new size"))
+
     def testNoRefineHole(self):
         # Add a second box to get a shape with more faces
         self.Box2 = self.Doc.addObject("PartDesign::AdditiveBox", "Box")
