@@ -320,6 +320,40 @@ class TestPipeEndNames(unittest.TestCase):
         self.assertEndProjects(pipe.Shape, section, onPlane(2, 30))
         self.assertNamesDistinct(pipe.Shape)
 
+    def testMultisectionProfilePastTheMiddle(self):
+        """Multisection along z = 0 -> 30, the profile (4x4) at z = 14 and a section (6x6) at
+        z = 30, a fillet on the start edge the profile's g1 names; then the profile moves to
+        z = 16, past the spine's middle: the start (z = 0) keeps the profile's names, the end
+        (z = 30) the section's projections, and the fillet stays at z = 0. Both sections decide
+        which end is which (fork PR 337 round 2): with the profile's distance alone, the ends
+        swapped, and the fillet went to the section's cap, 30 mm away."""
+        profile = self.square(z=14)
+        section = self.square("Section", 3, z=30)
+        pipe = self.pipe(profile, self.line(), Transformation="Multisection", Sections=[section])
+        g1 = firstName(profile.Shape, "Edge1")
+        edges = [
+            f"Edge{index}"
+            for index in range(1, len(pipe.Shape.Edges) + 1)
+            if firstName(pipe.Shape, f"Edge{index}") == g1
+        ]
+        self.assertEqual(len(edges), 1, edges)
+        self.assertIn(edges[0], elementsWhere(pipe.Shape, "Edge", onPlane(2, 0)))
+        fillet = self.body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (pipe, edges)
+        fillet.Radius = 0.3
+        self.doc.recompute()
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+
+        profile.Placement = App.Placement(V(0, 0, 16), App.Rotation())
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        starts = elementsWhere(pipe.Shape, "Edge", onPlane(2, 0))
+        own = sorted(firstName(profile.Shape, f"Edge{index}") for index in range(1, 5))
+        self.assertEqual(sorted(firstName(pipe.Shape, edge) for edge in starts), own)
+        self.assertEndProjects(pipe.Shape, section, onPlane(2, 30))
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        self.assertIn(fillet.Base[1][0], starts)
+
     def testPointLastSection(self):
         """A point as the last section: the apex is its projection; no edge at the end."""
         profile = self.square()

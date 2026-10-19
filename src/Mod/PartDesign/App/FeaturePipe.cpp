@@ -74,9 +74,13 @@ namespace
 // the profile moved to the end of the sweep. The shell starts where the spine does; when the
 // profile lies nearer the spine's far end (a spine drawn towards it, perhaps extended past it),
 // the ends swap roles, so the names stay with the end at or nearest the profile's place; a tie
-// (a closed spine) keeps the start. Each end element is found through the side face or edge its
-// section element generated. A point section names only its end's vertex. Edges at a bend, a
-// corner or a middle section have no section element of their own: they keep their `UPP` names.
+// (a closed spine) keeps the start. With several sections, the first and last decide together:
+// the pairing of sections and ends whose distances add up to less. So the switch point is the
+// spine's middle: an edit that moves a lone profile (or the spine's nearer end) across it moves
+// the profile's names, and whatever references them, to the other end. Each end element is found
+// through the side face or edge its section element generated. A point section names only its
+// end's vertex. Edges at a bend, a corner or a middle section have no section element of their
+// own: they keep their `UPP` names.
 class MapperPipeShellEnds: public Part::MapperMaker
 {
 public:
@@ -96,8 +100,13 @@ public:
         TopTools_IndexedMapOfShape endElements;
         TopExp::MapShapes(pipe.FirstShape(), startElements);
         TopExp::MapShapes(pipe.LastShape(), endElements);
-        const bool reversed = distanceTo(first, pipe.LastShape()) + Precision::Confusion()
-            < distanceTo(first, pipe.FirstShape());
+        double kept = distanceTo(first, pipe.FirstShape());
+        double swapped = distanceTo(first, pipe.LastShape());
+        if (!last.IsSame(first)) {
+            kept += distanceTo(last, pipe.LastShape());
+            swapped += distanceTo(last, pipe.FirstShape());
+        }
+        const bool reversed = swapped + Precision::Confusion() < kept;
         const TopTools_IndexedMapOfShape& own = reversed ? endElements : startElements;
         const TopTools_IndexedMapOfShape& other = reversed ? startElements : endElements;
         bindEnds(pipe, first, own, nullptr, starts);
