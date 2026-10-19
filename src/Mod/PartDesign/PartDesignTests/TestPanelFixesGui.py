@@ -502,6 +502,128 @@ class TestPanelFixesGui(unittest.TestCase):
             App.closeDocument(other.Name)
             pump()
 
+    def newReport(self, start):
+        """The Report view's text after its first start characters."""
+        report = reportText()
+        self.assertIsNotNone(report, "no Report view")
+        return report[start:]
+
+    def testMigrateWarnsOncePerOwnerAndArray(self):
+        """ops#367 (PR 329 round 2 verification, V6): in another document, a FeaturePython whose
+        PropertyXLink and PropertyXLinkList each name a placed legacy box, and a link array (two
+        elements) of the box. Migrate leaves them on the box and warns once per owner and property
+        and once for the array. It warned twice about each property (getInList() lists the owner
+        once per link) and about each element of the array as well."""
+        box = self.placedLegacyBox()
+        self.doc.recompute()
+        other = self.otherDocument("MigrateOnce")
+        try:
+            user = other.addObject("App::FeaturePython", "User")
+            user.addProperty("App::PropertyXLink", "One")
+            user.addProperty("App::PropertyXLinkList", "Many")
+            user.One = box
+            user.Many = [box]
+            array = other.addObject("App::Link", "LArr")
+            array.setLink(box)
+            array.ElementCount = 2
+            other.recompute()
+            elements = [element.Name for element in array.ElementList]
+            self.assertEqual(len(elements), 2)
+            start = len(reportText() or "")
+            self.activate(self.doc)
+            self.migrate()
+            self.assertIsNotNone(box.getParentGeoFeatureGroup())
+            report = self.newReport(start)
+            for prop in ("User.One", "User.Many", "LArr.LinkedObject"):
+                warning = f"{other.Name}#{prop} keeps its link to {self.doc.Name}#{box.Name}"
+                self.assertEqual(report.count(warning), 1, prop)
+            for name in elements:
+                self.assertNotIn(f"{other.Name}#{name}.", report)
+            self.assertIs(user.One, box)
+            self.assertEqual(user.Many, [box])
+            self.assertIs(array.LinkedObject, box)
+        finally:
+            self.activate(self.doc)
+            App.closeDocument(other.Name)
+            pump()
+
+    def testMigrateWarnsOnlyAboutAppLinksThatMoved(self):
+        """ops#367 (PR 329 round 2 verification, V1e): a legacy pad of a sketch placed at
+        (5, 0, 0) turned 30 degrees, an App::Link (LinkTransform off) of it and a link array of it;
+        and a placed legacy box with a link of it. Migrate re-places the sketch and the pad to the
+        body's origin, so the pad's links show the same shape as before and get no warning; the
+        box's link moves by the box's Placement and is warned about. Every link with LinkTransform
+        off was warned about, moved or not."""
+        sketch = models.sketch(
+            self.doc,
+            "Sk",
+            models.rectangle(0, 0, 10, 6),
+            placement=App.Placement(V(5, 0, 0), App.Rotation(V(0, 0, 1), 30)),
+        )
+        pad = self.doc.addObject("PartDesign::Pad", "Pad")
+        pad.Profile = sketch
+        pad.Length = 4
+        still = self.doc.addObject("App::Link", "LPad")
+        still.setLink(pad)
+        stillArray = self.doc.addObject("App::Link", "LPadArray")
+        stillArray.setLink(pad)
+        stillArray.ElementCount = 2
+        box = self.placedLegacyBox()
+        moved = self.doc.addObject("App::Link", "LBox")
+        moved.setLink(box)
+        self.doc.recompute()
+        before = {link.Name: Part.getShape(link).BoundBox for link in (still, stillArray, moved)}
+        start = len(reportText() or "")
+        self.migrate()
+        padBody = pad.getParentGeoFeatureGroup()
+        boxBody = box.getParentGeoFeatureGroup()
+        self.assertIsNotNone(padBody)
+        self.assertIsNotNone(boxBody)
+        self.assertIsNot(padBody, boxBody)
+        for link, body in ((still, padBody), (stillArray, padBody), (moved, boxBody)):
+            self.assertIs(link.LinkedObject, body, link.Name)
+        self.assertSameBox(still, before[still.Name])
+        self.assertSameBox(stillArray, before[stillArray.Name])
+        movedBox = Part.getShape(moved).BoundBox
+        self.assertGreater((movedBox.Center - before[moved.Name].Center).Length, 1)
+        report = self.newReport(start)
+        self.assertNotIn("LPad", report)
+        self.assertEqual(
+            report.count(f"{self.doc.Name}#LBox now links {self.doc.Name}#{boxBody.Name}"), 1
+        )
+
+    def testMigrateAbortsWhenACommandFails(self):
+        """ops#367 (PR 329 round 2 verification, item 5): a FeaturePython links a legacy box by a
+        PropertyLink that Python can't set (Immutable), so relinking it to the body fails after
+        Migrate has opened its transaction. The error shows in a box, and Migrate aborts its
+        transaction: none stays open, the body is gone and the link stays on the box. The
+        transaction stayed open, and later changes joined it."""
+        box = self.doc.addObject("PartDesign::AdditiveBox", "Box1")
+        user = self.doc.addObject("App::FeaturePython", "User")
+        user.addProperty("App::PropertyLink", "Ref")
+        user.Ref = box
+        user.setPropertyStatus("Ref", "Immutable")
+        self.doc.recompute()
+        App.closeActiveTransaction()
+        self.doc.commitTransaction()
+        try:
+            Gui.activateWorkbench("PartDesignWorkbench")
+            self.answerModals()
+            Gui.runCommand("PartDesign_Migrate")
+            pump()
+            self.answering = False
+            self.assertEqual(len(self.modals), 1, self.modals)
+            self.assertIn("'Ref' is read-only", self.modals[0])
+            self.assertIsNone(App.getActiveTransaction())
+            self.assertFalse(self.doc.HasPendingTransaction)
+            self.assertNotIn("Migrate legacy Part Design features to bodies", self.doc.UndoNames)
+            bodies = [o.Name for o in self.doc.Objects if o.isDerivedFrom("PartDesign::Body")]
+            self.assertEqual(bodies, [])
+            self.assertIsNone(box.getParentGeoFeatureGroup())
+            self.assertIs(user.Ref, box)
+        finally:
+            App.closeActiveTransaction(True)
+
     def testGroupedRedoTakesTheOtherDocumentsFirst(self):
         """PR 329 round 2: one application transaction in which another document gets a box first
         and this document's PropertyXLink, PropertyXLinkSubList and App::Link then point at it.

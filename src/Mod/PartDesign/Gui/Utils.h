@@ -24,6 +24,8 @@
 
 #pragma once
 
+#include <vector>
+
 /** \file PartDesign/Gui/Utils.h
  *  This file contains some utility function used over PartDesignGui module
  */
@@ -116,10 +118,20 @@ void fixSketchSupport(Sketcher::SketchObject* sketch);
  */
 bool isAnyNonPartDesignLinksTo(PartDesign::Feature* feature, bool respectGroups = false);
 
+/// An App::Link with LinkTransform off that relinkToBody moved from a feature to its body
+/// (FreeCAD-CH ops#367): Migrate warns about it once the body is computed, if what it shows moved
+struct RelinkedLink
+{
+    App::DocumentObject* link;
+    App::DocumentObject* feature;
+    App::DocumentObject* body;
+};
+
 /// Relink all nonPartDesign features to the body instead of the given partDesign Feature. An
-/// element of the feature is relinked only when it is the chain's last ( last): the body's
-/// shape is the last feature's, so another feature's Face3 would be another face of the body
-void relinkToBody(PartDesign::Feature* feature, bool last);
+/// element of the feature is relinked only when it is the chain's last (\a last): the body's
+/// shape is the last feature's, so another feature's Face3 would be another face of the body.
+/// The App::Links with LinkTransform off it relinks are added to offLinks.
+void relinkToBody(PartDesign::Feature* feature, bool last, std::vector<RelinkedLink>& offLinks);
 
 /// Check if feature is dependent on anything except movable sketches and datums
 bool isFeatureMovable(App::DocumentObject* feature);
