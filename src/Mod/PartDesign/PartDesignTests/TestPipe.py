@@ -354,6 +354,68 @@ class TestPipeEndNames(unittest.TestCase):
         self.assertTrue(fillet.isValid(), fillet.getStatusString())
         self.assertIn(fillet.Base[1][0], starts)
 
+    def testMultisectionLastSectionWithMoreVertices(self):
+        """Multisection along z = 0 -> 30, the profile at z = 0 and a 6x6 square section at
+        z = 12, with more vertices than the profile (a circle; a square with a round hole, whose
+        hole wire decides alone), a fillet on an edge of the far cap; then the spine's end is
+        extended to z = 60: the start (z = 0) keeps the profile's names, the far cap (z = 60) the
+        section's projections, and the fillet follows to z = 60. Each section weighs the same
+        (fork PR 337 round 3): with distances summed over a section's vertices, the square
+        outweighed the profile, the ends swapped, and the fillet went to the profile's cap."""
+        cases = {
+            "circle": ([models.circle(0, 0, 2)], models.rectangle(-3, -3, 3, 3)),
+            "holed": (
+                models.rectangle(-2, -2, 2, 2) + [models.circle(0, 0, 1)],
+                models.rectangle(-3, -3, 3, 3) + models.rectangle(-1, -1, 1, 1),
+            ),
+        }
+        for number, (case, (profileGeometry, sectionGeometry)) in enumerate(cases.items()):
+            if number:
+                self.tearDown()
+                self.setUp()
+            with self.subTest(case):
+                profile = self.sketch("Profile", profileGeometry)
+                section = self.sketch("Section", sectionGeometry, z=12)
+                path = self.line()
+                pipe = self.pipe(profile, path, Transformation="Multisection", Sections=[section])
+                # The section's side at y = -3, widened past it (the sweep grows beyond z = 12)
+                farEdge = lambda z: lambda p: abs(p.z - z) < 1e-6 and p.y < -4
+                edges = elementsWhere(pipe.Shape, "Edge", farEdge(30))[:1]
+                self.assertEqual(len(edges), 1)
+                fillet = self.body.newObject("PartDesign::Fillet", "Fillet")
+                fillet.Base = (pipe, edges)
+                fillet.Radius = 0.3
+                self.doc.recompute()
+                self.assertTrue(fillet.isValid(), fillet.getStatusString())
+
+                path.deleteAllGeometry()
+                path.addGeometry(Part.LineSegment(V(0, 0, 0), V(0, 60, 0)))
+                self.doc.recompute()
+                self.assertTrue(pipe.isValid(), pipe.getStatusString())
+                shape = pipe.Shape
+                own = {
+                    firstName(profile.Shape, f"Edge{i}")
+                    for i in range(1, len(profile.Shape.Edges) + 1)
+                }
+                starts = elementsWhere(shape, "Edge", onPlane(2, 0))
+                self.assertTrue(starts)
+                for element in starts:
+                    name = firstName(shape, element)
+                    self.assertNotIn("PRJ", name, element)
+                    self.assertIn(name.split("|")[0], own, (element, name))
+                sectionNames = {
+                    firstName(section.Shape, f"Edge{i}")
+                    for i in range(1, len(section.Shape.Edges) + 1)
+                }
+                ends = elementsWhere(shape, "Edge", onPlane(2, 60))
+                self.assertTrue(ends)
+                for element in ends:
+                    last = lastSection(shape, element)
+                    self.assertIn("PRJ", last["mapperFlags"], (element, firstName(shape, element)))
+                    self.assertLessEqual(set(last["linkedNames"]), sectionNames, element)
+                self.assertTrue(fillet.isValid(), fillet.getStatusString())
+                self.assertIn(fillet.Base[1][0], elementsWhere(shape, "Edge", farEdge(60)))
+
     def testPointLastSection(self):
         """A point as the last section: the apex is its projection; no edge at the end."""
         profile = self.square()

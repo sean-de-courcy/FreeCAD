@@ -71,16 +71,22 @@ namespace
 // the same shape as a bend edge's beside it. As in a Pad, and Helix's caps: the start wire's
 // edges and vertices are the first section's modified, so they keep its names (the sketch's
 // own), and the end wire's are the last section's projected (`PRJ`): for a pipe of one profile,
-// the profile moved to the end of the sweep. The shell starts where the spine does; when the
-// profile lies nearer the spine's far end (a spine drawn towards it, perhaps extended past it),
-// the ends swap roles, so the names stay with the end at or nearest the profile's place; a tie
-// (a closed spine) keeps the start. With several sections, the first and last decide together:
-// the pairing of sections and ends whose distances add up to less. So the switch point is the
-// spine's middle: an edit that moves a lone profile (or the spine's nearer end) across it moves
-// the profile's names, and whatever references them, to the other end. Each end element is found
-// through the side face or edge its section element generated. A point section names only its
-// end's vertex. Edges at a bend, a corner or a middle section have no section element of their
-// own: they keep their `UPP` names.
+// the profile moved to the end of the sweep. The shell starts where the spine does, and the ends
+// may swap roles, so the names stay with the end the sections say; a tie (a closed spine) keeps
+// the start.
+// - One profile: the ends swap when the profile lies nearer the spine's far end (a spine drawn
+//   towards it, perhaps extended past it), so the names stay with the end at or nearest the
+//   profile's place. The switch point is the spine's middle: an edit that moves the profile (or
+//   the spine's nearer end) across it moves the profile's names, and whatever references them,
+//   to the other end.
+// - Several sections: the first and last decide together, by the pairing of sections and ends
+//   whose distances add up to less, each section's distance the mean over its vertices (so a
+//   section weighs the same whatever its number of vertices). There is no middle switch: the
+//   ends follow the sections' order along the spine (on a straight one, they swap when the
+//   profile lies beyond the last section). Each wire of a holed section decides alone.
+// Each end element is found through the side face or edge its section element generated. A
+// point section names only its end's vertex. Edges at a bend, a corner or a middle section have
+// no section element of their own: they keep their `UPP` names.
 class MapperPipeShellEnds: public Part::MapperMaker
 {
 public:
@@ -102,6 +108,8 @@ public:
         TopExp::MapShapes(pipe.LastShape(), endElements);
         double kept = distanceTo(first, pipe.FirstShape());
         double swapped = distanceTo(first, pipe.LastShape());
+        // One profile: its distances alone (the two sections' terms would be the same on both
+        // sides, and nothing would ever swap)
         if (!last.IsSame(first)) {
             kept += distanceTo(last, pipe.LastShape());
             swapped += distanceTo(last, pipe.FirstShape());
@@ -152,8 +160,9 @@ public:
     }
 
 private:
-    /// How far \a section lies from the shell's end \a end: the sum over its vertices of the
-    /// distance to the nearest vertex of the end; infinite when either has none
+    /// How far \a section lies from the shell's end \a end: the mean over its vertices of the
+    /// distance to the nearest vertex of the end, so that each section weighs the same whatever
+    /// its number of vertices; infinite when either has none
     static double distanceTo(const TopoDS_Shape& section, const TopoDS_Shape& end)
     {
         constexpr double none = std::numeric_limits<double>::infinity();
@@ -179,7 +188,7 @@ private:
             }
             sum += nearest;
         }
-        return sum;
+        return sum / sectionVertices.Extent();
     }
 
     /// Binds each edge and vertex of \a section (in its order) to the elements of one end of
