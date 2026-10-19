@@ -11,6 +11,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
 #include <deque>
 #include <functional>
 #include <memory>
@@ -41,7 +42,7 @@ public:
     }
     ~MainThreadHopHooks()
     {
-        App::MainThreadSignalConfig::setHooks(nullptr, nullptr);
+        App::MainThreadSignalConfig::setHooks(nullptr, nullptr, nullptr);
     }
     MainThreadHopHooks(const MainThreadHopHooks&) = delete;
     MainThreadHopHooks& operator=(const MainThreadHopHooks&) = delete;
@@ -62,11 +63,22 @@ public:
         return true;
     }
 
-    /// Runs the slots queued now (the runQueued hook, ops#365)
+    /// Runs the slots queued when it starts, not those queued meanwhile, as Qt's
+    /// sendPostedEvents() does (the runQueued hook, ops#365)
     static void runQueued()
     {
-        std::unique_lock lock(state().mutex);
-        runQueuedLocked(lock);
+        auto& s = state();
+        std::unique_lock lock(s.mutex);
+        for (auto n = s.queue.size(); n > 0 && !s.queue.empty(); --n) {
+            runFrontLocked(lock);
+        }
+    }
+
+    /// How many emissions on another thread have queued their slots so far
+    static std::size_t invokes()
+    {
+        std::lock_guard lock(state().mutex);
+        return state().invokes;
     }
 
     /// Waits until an emission on another thread has queued its slots, without running them
@@ -80,16 +92,21 @@ public:
 private:
     static void runQueuedLocked(std::unique_lock<std::mutex>& lock)
     {
-        auto& s = state();
-        while (!s.queue.empty()) {
-            auto task = std::move(s.queue.front());
-            s.queue.pop_front();
-            lock.unlock();
-            task->fn();
-            lock.lock();
-            task->done = true;
-            s.cv.notify_all();
+        while (!state().queue.empty()) {
+            runFrontLocked(lock);
         }
+    }
+
+    static void runFrontLocked(std::unique_lock<std::mutex>& lock)
+    {
+        auto& s = state();
+        auto task = std::move(s.queue.front());
+        s.queue.pop_front();
+        lock.unlock();
+        task->fn();
+        lock.lock();
+        task->done = true;
+        s.cv.notify_all();
     }
 
     struct Task
@@ -103,6 +120,7 @@ private:
         std::mutex mutex;
         std::condition_variable cv;
         std::deque<std::shared_ptr<Task>> queue;
+        std::size_t invokes = 0;
     };
     static State& state()
     {
@@ -120,6 +138,7 @@ private:
         task->fn = std::move(fn);
         std::unique_lock lock(s.mutex);
         s.queue.push_back(task);
+        ++s.invokes;
         s.cv.notify_all();
         if (blocking) {
             s.cv.wait(lock, [&] { return task->done; });

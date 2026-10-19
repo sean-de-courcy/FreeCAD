@@ -286,8 +286,10 @@ class TestGuiDocument(unittest.TestCase):
             FreeCADGui.setActiveDocument(name)
             obj.touch()
             FreeCADGui.runCommand("Std_Refresh", 0)
-            # No events: the worker reaches its first hop and waits there
-            time.sleep(0.3)
+            # No events: the worker reaches its first hop and waits there, Recomputing set
+            deadline = time.monotonic() + 10.0
+            while not self.doc.Recomputing and time.monotonic() < deadline:
+                time.sleep(0.01)
             self.assertTrue(self.doc.Recomputing)
             FreeCAD.closeDocument(name)
             self.doc = None
