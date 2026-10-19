@@ -2009,6 +2009,62 @@ class TestPad(unittest.TestCase):
                 finally:
                     FreeCAD.closeDocument(doc.Name)
 
+    def _tubeWithTabAtTheSeam(self, refine):
+        """A tube (radii 6 and 10, height 10) and a tab Pad 5 high, x 6..14 and y -2..2, whose
+        side x = 6 is tangent to the bore along the bore's seam (upstream issue 32645, ops#389).
+        """
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        tube = body.newObject("Sketcher::SketchObject", "TubeSketch")
+        tube.AttachmentSupport = (self.Doc.getObject("XY_Plane"), [""])
+        tube.MapMode = "FlatFace"
+        for radius in (10, 6):
+            tube.addGeometry(
+                Part.Circle(FreeCAD.Vector(), FreeCAD.Vector(0, 0, 1), radius)
+            )
+        pad = body.newObject("PartDesign::Pad", "Pad")
+        pad.Profile = tube
+        pad.Length = 10
+        pad.Refine = refine
+        self.Doc.recompute()
+        tab = body.newObject("Sketcher::SketchObject", "TabSketch")
+        tab.AttachmentSupport = (self.Doc.getObject("XY_Plane"), [""])
+        tab.MapMode = "FlatFace"
+        corners = [FreeCAD.Vector(x, y, 0) for x, y in ((6, -2), (14, -2), (14, 2), (6, 2))]
+        for i in range(4):
+            tab.addGeometry(Part.LineSegment(corners[i], corners[(i + 1) % 4]))
+        tabPad = body.newObject("PartDesign::Pad", "TabPad")
+        tabPad.Profile = tab
+        tabPad.Length = 5
+        tabPad.Refine = refine
+        self.Doc.recompute()
+        return tabPad
+
+    def testRefineKeepsATabTangentAtTheSeamValid(self):
+        """Refine merged the seam halves of the bore into one edge, leaving the bore's wire
+        open: an invalid solid of the wrong volume, without an error (ops#389)."""
+        # The tube, and the tab outside the outer radius: its area of 32 less the part inside
+        # the wall, the integral of sqrt(100 - y^2) - 6 over y in -2..2
+        inWall = 2 * (math.sqrt(96) + 50 * math.asin(0.2)) - 24
+        expected = math.pi * (10**2 - 6**2) * 10 + 5 * (32 - inWall)
+        for refine in (False, True):
+            with self.subTest(refine=refine):
+                tabPad = self._tubeWithTabAtTheSeam(refine)
+                self.assertTrue(tabPad.isValid())
+                self.assertTrue(tabPad.Shape.isValid())
+                self.assertAlmostEqual(tabPad.Shape.Volume, expected, places=4)
+                self.assertNotIn("Warning", tabPad.State)
+                FreeCAD.closeDocument(self.Doc.Name)
+                self.Doc = FreeCAD.newDocument("PartDesignTestPad")
+
+    def testRefineMergesATabTangentAtTheSeam(self):
+        """Refine still merges there (the tab's bottom face with the tube's): the seam is kept
+        out of the edge fuse, the refine isn't dropped (ops#389)."""
+        unrefined = len(self._tubeWithTabAtTheSeam(False).Shape.Faces)
+        FreeCAD.closeDocument(self.Doc.Name)
+        self.Doc = FreeCAD.newDocument("PartDesignTestPad")
+        refined = len(self._tubeWithTabAtTheSeam(True).Shape.Faces)
+        self.assertLess(refined, unrefined)
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("PartDesignTestPad")

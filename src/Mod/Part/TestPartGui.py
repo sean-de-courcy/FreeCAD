@@ -22,6 +22,7 @@
 #   USA                                                                   *
 # **************************************************************************
 
+import math
 import os
 import sys
 import unittest
@@ -1059,3 +1060,74 @@ class SectionCutTestCases(unittest.TestCase):
 
     def tearDown(self):
         FreeCAD.closeDocument("SectionCut")
+
+
+class PartGuiPickEdgeTestCases(unittest.TestCase):
+    """A 3D pick names the edge under the cursor when an earlier edge has no polygon on its
+    face's mesh (ops#389). The line set left such edges out, and a pick read its line index plus
+    one as the edge: every later edge got the name of one before it."""
+
+    def setUp(self):
+        self.Doc = FreeCAD.newDocument("PartGuiPickEdge")
+
+    def tearDown(self):
+        FreeCAD.closeDocument(self.Doc.Name)
+
+    def _pickedEdges(self, vp, point, direction):
+        """The element names of the lines a ray pick finds at <point> looking along <direction>,
+        in an orthographic view 40 high of 400 x 400 pixels, within 3 pixels."""
+        from pivy import coin
+
+        root = coin.SoSeparator()
+        root.ref()
+        camera = coin.SoOrthographicCamera()
+        camera.height = 40
+        camera.position = coin.SbVec3f(*(point - direction * 50))
+        up = coin.SbVec3f(0, 0, 1) if abs(direction.z) < 0.9 else coin.SbVec3f(0, 1, 0)
+        camera.pointAt(coin.SbVec3f(*point), up)
+        camera.nearDistance = 1
+        camera.farDistance = 200
+        root.addChild(camera)
+        root.addChild(vp.RootNode)
+        pick = coin.SoRayPickAction(coin.SbViewportRegion(400, 400))
+        pick.setPoint(coin.SbVec2s(200, 200))
+        pick.setRadius(3)
+        pick.setPickAll(True)
+        pick.apply(root)
+        names = set()
+        for picked in pick.getPickedPointList():
+            detail = picked.getDetail()
+            if detail and detail.getTypeId() == coin.SoLineDetail.getClassTypeId():
+                names.add(vp.getElementPicked(picked))
+        root.unref()
+        return names
+
+    def testPickAfterAnEdgeWithoutPolygon(self):
+        # A quarter cylinder face whose edges have no curves on its surface: the mesher can't
+        # triangulate it, and the view meshes its surface's bounds instead, without its edges
+        # (as some imported faces). Then a box, whose edges 5 to 16 come after the face's.
+        V = FreeCAD.Vector
+        arcs = [
+            Part.ArcOfCircle(Part.Circle(V(0, 0, z), V(0, 0, 1), 5), 0, math.pi / 2).toShape()
+            for z in (0, 4)
+        ]
+        sides = [Part.makeLine(V(0, 5, 0), V(0, 5, 4)), Part.makeLine(V(5, 0, 4), V(5, 0, 0))]
+        wire = Part.Wire(Part.__sortEdges__([arcs[0], sides[0], arcs[1], sides[1]]))
+        shape = Part.makeCompound(
+            [Part.Face(Part.Cylinder(), wire), Part.makeBox(4, 4, 4, V(10, 0, 0))]
+        )
+        feature = self.Doc.addObject("Part::Feature", "Shape")
+        feature.Shape = shape
+        self.Doc.recompute()
+        FreeCADGui.updateGui()
+
+        wrong = []
+        for i, edge in enumerate(shape.Edges[4:], 5):
+            middle = edge.valueAt(0.5 * (edge.FirstParameter + edge.LastParameter))
+            direction = edge.tangentAt(0.5 * (edge.FirstParameter + edge.LastParameter))
+            direction = direction.cross(V(0.3, 0.5, 0.8))
+            direction.normalize()
+            names = self._pickedEdges(feature.ViewObject, middle, direction)
+            if names != {"Edge" + str(i)}:
+                wrong.append(("Edge" + str(i), sorted(names)))
+        self.assertEqual(wrong, [])

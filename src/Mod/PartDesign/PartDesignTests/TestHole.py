@@ -22,6 +22,8 @@
 #   USA                                                                   *
 # **************************************************************************
 from math import pi
+import os
+import tempfile
 import unittest
 
 import FreeCAD
@@ -162,6 +164,41 @@ class TestHole(unittest.TestCase):
         self.Hole.Tapered = 0
         self.Doc.recompute()
         self.assertAlmostEqual(self.Hole.Shape.Volume, 10**3 - pi * 3**2 * 10 - 24.7400421)
+
+    def testCustomCutValuesSurviveReopen(self):
+        """Custom counterbore values of a normed hole cut stay after a save and reopen (ops#389)"""
+        # An M6 hole with an ISO 4762 counterbore, whose normed cut is wider than 10, overridden
+        # with a cut 9 wide and 2 deep. The restore reset them to the normed values.
+        self.Hole.ThreadType = "ISOMetricProfile"
+        self.Hole.ThreadSize = "M6x1.0"
+        self.Hole.HoleCutType = "ISO 4762"
+        self.Hole.Depth = 10
+        self.Hole.DepthType = "Dimension"
+        self.Hole.DrillPoint = "Flat"
+        self.Hole.Tapered = False
+        self.Doc.recompute()
+        self.assertGreater(self.Hole.HoleCutDiameter.Value, 10)
+        self.Hole.HoleCutCustomValues = True
+        self.Hole.HoleCutDiameter = 9
+        self.Hole.HoleCutDepth = 2
+        self.Doc.recompute()
+        self.assertAlmostEqual(self.Hole.HoleCutDiameter.Value, 9)
+        self.assertAlmostEqual(self.Hole.HoleCutDepth.Value, 2)
+        volume = self.Hole.Shape.Volume
+
+        folder = tempfile.mkdtemp()
+        path = os.path.join(folder, "PartDesignTestHole.FCStd")
+        self.Doc.saveAs(path)
+        FreeCAD.closeDocument(self.Doc.Name)
+        self.Doc = FreeCAD.openDocument(path)
+        hole = self.Doc.getObject("Hole")
+
+        self.assertTrue(hole.HoleCutCustomValues)
+        self.assertAlmostEqual(hole.HoleCutDiameter.Value, 9)
+        self.assertAlmostEqual(hole.HoleCutDepth.Value, 2)
+        hole.touch()
+        self.Doc.recompute()
+        self.assertAlmostEqual(hole.Shape.Volume, volume)
 
     def testNoRefineHole(self):
         # Add a second box to get a shape with more faces
@@ -717,5 +754,5 @@ class TestHole(unittest.TestCase):
 
     def tearDown(self):
         # closing doc
-        FreeCAD.closeDocument("PartDesignTestHole")
+        FreeCAD.closeDocument(self.Doc.Name)
         # print ("omit closing document for debugging")
