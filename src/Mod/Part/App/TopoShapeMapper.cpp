@@ -400,18 +400,61 @@ bool sameShapes(const TopTools_IndexedMapOfShape& a, const TopTools_IndexedMapOf
     return true;
 }
 
-/// True if `a`'s centre comes before `b`'s along x, then y, then z, a difference within the
-/// tolerance counting as none
-bool comesBefore(const gp_Pnt& a, const gp_Pnt& b)
+using PlacedTwins = std::vector<std::pair<gp_Pnt, std::size_t>>;
+
+/// How far `placed`'s centres spread along `axis` (1 x, 2 y, 3 z)
+double spreadAlong(const PlacedTwins& placed, int axis)
 {
-    constexpr double tie = 100 * Precision::Confusion();
-    for (int k = 1; k <= 3; ++k) {
-        const double difference = a.Coord(k) - b.Coord(k);
-        if (std::abs(difference) > tie) {
-            return difference < 0;
+    double low = placed.front().first.Coord(axis);
+    double high = low;
+    for (const auto& [centre, twin] : placed) {
+        low = std::min(low, centre.Coord(axis));
+        high = std::max(high, centre.Coord(axis));
+    }
+    return high - low;
+}
+
+/// Orders twins by their centres (PR 340 round 3): along the one of `axes` in which they spread
+/// most, an earlier axis unless a later one spreads more by a margin. Centres closer along it
+/// than a quarter of the even step (the spread over the gaps) are a run, ordered the same way
+/// along the other axes. Two twins then keep their order until the pair turns by about 45 degrees
+/// from an axis. Ordered by x first, a pair one above the other swapped on any tilt that moved
+/// one ahead in x: the elliptic hole turned 0.0003 degrees moved a reference to the other twin.
+/// Where a turn does swap them, the solver's moved check breaks the reference
+void orderTwins(PlacedTwins& placed, std::vector<int> axes)
+{
+    if (placed.size() < 2 || axes.empty()) {
+        return;
+    }
+    // Symmetric twins (four lobes) spread as much along x as along y whatever their turn: the
+    // margin keeps their axis from following rounding
+    constexpr double margin = 1.01;
+    int axis = axes.front();
+    double spread = spreadAlong(placed, axis);
+    for (int other : axes) {
+        const double otherSpread = spreadAlong(placed, other);
+        if (otherSpread > margin * spread) {
+            axis = other;
+            spread = otherSpread;
         }
     }
-    return false;
+    std::stable_sort(placed.begin(), placed.end(), [axis](const auto& a, const auto& b) {
+        return a.first.Coord(axis) < b.first.Coord(axis);
+    });
+    axes.erase(std::find(axes.begin(), axes.end(), axis));
+    const double step = spread / static_cast<double>(placed.size() - 1);
+    const double tie = std::max(step / 4, 100 * Precision::Confusion());
+    for (auto run = placed.begin(); run != placed.end();) {
+        auto end = std::next(run);
+        while (end != placed.end()
+               && end->first.Coord(axis) - std::prev(end)->first.Coord(axis) <= tie) {
+            ++end;
+        }
+        PlacedTwins part(run, end);
+        orderTwins(part, axes);
+        std::copy(part.begin(), part.end(), run);
+        run = end;
+    }
 }
 }  // namespace
 
@@ -526,8 +569,8 @@ void UpToSplitMapper::markCaps(
         // duplicate counter, which the solver reads as "a sibling, never the element itself": a
         // reference that lands on another of them breaks instead of following it. The counter
         // holds how many share the marks, so that one going or coming renames them all, and
-        // each one's place among them, by their centres, so that a change of the splitter's
-        // order (the up-to face rebuilt with another parametrization) renames none
+        // each one's place among them, by their centres (orderTwins()), so that a change of the
+        // splitter's order (the up-to face rebuilt with another parametrization) renames none
         std::vector<bool> counted(pieces.size(), false);
         for (std::size_t i = 0; i < pieces.size(); ++i) {
             if (counted[i]) {
@@ -543,19 +586,13 @@ void UpToSplitMapper::markCaps(
             if (twins.size() < 2) {
                 continue;
             }
-            std::vector<std::pair<gp_Pnt, std::size_t>> placed;
+            PlacedTwins placed;
             for (std::size_t twin : twins) {
                 GProp_GProps props;
                 BRepGProp::SurfaceProperties(pieces[twin].cap, props);
                 placed.emplace_back(props.CentreOfMass(), twin);
             }
-            // Insertion sort: the tolerance makes the order no strict weak one
-            for (std::size_t j = 1; j < placed.size(); ++j) {
-                for (std::size_t k = j; k > 0 && comesBefore(placed[k].first, placed[k - 1].first);
-                     --k) {
-                    std::swap(placed[k], placed[k - 1]);
-                }
-            }
+            orderTwins(placed, {1, 2, 3});
             const int count = static_cast<int>(placed.size());
             for (int position = 0; position < count; ++position) {
                 // One number for the pair: count (count - 1) / 2 + position, 1 and 2 for two

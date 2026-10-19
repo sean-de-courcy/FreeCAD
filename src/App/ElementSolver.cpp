@@ -1639,6 +1639,73 @@ bool isCounterSibling(std::string_view name, std::string_view oldName)
     return name != oldName && sameUpToCounter(name, oldName);
 }
 
+// Part's mapper flag of a far cap told apart from its twins only by its place among them
+// (MAPPER_FLAG_ORDERED, TopoShapeExpansion.cpp; ops#360, PR 340 round 2)
+constexpr const char* orderedFlag = "ORD";
+
+/* True if a section of \a name carries the ORD flag: its element is told apart from its counter
+ * siblings only by its place among them, which an edit that moves them all can change.
+ */
+bool isOrdered(std::string_view name)
+{
+    const auto sections = NameAncestry::splitSections(name);
+    return std::any_of(sections.begin(), sections.end(), [](std::string_view section) {
+        return decodeSection(section).hasMapperFlag(orderedFlag);
+    });
+}
+
+/* True if \a name's element holds \a oldName's, a piece of a far cap that an edit merged with
+ * others into one (ops#360, PR 340 round 3): the names are the same but in one section, a marked
+ * piece's (PRJ and MOD), where \a name's marks, its connected elements, hold every one of
+ * \a oldName's and more. The pieces either side of a hole become the ring around it. The old
+ * marks must hold an edge of the up-to shape (the piece shared its face with other caps): a
+ * piece marked by its face alone is no evidence, since a renumbered up-to shell (a Part feature
+ * without names, its faces reordered) gives that face's name to another face, which holds
+ * other pieces.
+ */
+bool holdsMarkedPiece(std::string_view name, std::string_view oldName)
+{
+    const auto sections = NameAncestry::splitSections(name);
+    const auto oldSections = NameAncestry::splitSections(oldName);
+    if (sections.empty() || sections.size() != oldSections.size()) {
+        return false;
+    }
+    bool held = false;
+    for (std::size_t i = 0; i < sections.size(); ++i) {
+        if (sections[i] == oldSections[i]) {
+            continue;
+        }
+        if (held) {
+            return false;
+        }
+        const DecodedMappedSection& x = decodeSection(sections[i]);
+        const DecodedMappedSection& y = decodeSection(oldSections[i]);
+        if (!y.hasMapperFlag(MAPPER_FLAG_PROJECTION) || !y.hasMapperFlag(MAPPER_FLAG_MODIFIED)
+            || y.connectedElements.empty() || x.opCode != y.opCode || x.referenceIDs != y.referenceIDs
+            || x.iterationTag != y.iterationTag || x.index != y.index
+            || x.elementType != y.elementType || x.duplicateCount != y.duplicateCount
+            || sortedFlags(x) != sortedFlags(y) || x.linkedNames != y.linkedNames
+            || x.connectedElements.size() <= y.connectedElements.size()) {
+            return false;
+        }
+        bool edge = false;
+        for (const auto& mark : y.connectedElements) {
+            if (std::find(x.connectedElements.begin(), x.connectedElements.end(), mark)
+                == x.connectedElements.end()) {
+                return false;
+            }
+            const auto markSections = NameAncestry::splitSections(mark);
+            edge = edge
+                || (!markSections.empty() && decodeSection(markSections.back()).elementType == 'E');
+        }
+        if (!edge) {
+            return false;
+        }
+        held = true;
+    }
+    return held;
+}
+
 // The element of a target without an element map that the IDX section \a section names, when it
 // carries the target's tag \a tag (Q5): the section's index name (`Edge11`), if it is of type
 // \a type; otherwise empty.
@@ -2234,6 +2301,11 @@ bool atSamePlace(
     return true;
 }
 
+bool isOrderedName(std::string_view name)
+{
+    return isOrdered(name);
+}
+
 bool mayBeAtPlace(
     const ElementFingerprint& saved,
     const ElementFingerprint& intrinsic,
@@ -2452,6 +2524,33 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                     place.push_back(static_cast<int>(k));
                 }
             }
+            const std::string& hitName = entry.exactName.empty()
+                ? firstName(pool.elements[hitPosition])
+                : entry.exactName;
+            // Twins (ops#360, PR 340 round 3): pieces of one far cap told apart only by their
+            // place among them (the ORD flag and the duplicate counter) can trade names when an
+            // edit moves them all, so nothing sits at the old place. A counter sibling nearer
+            // the saved centre than the hit is the sign: never a pick.
+            bool nearerTwin = false;
+            if (place.empty() && saved.center && now.center && isOrdered(hitName)) {
+                const double hitDistance = Base::Distance(*saved.center, *now.center);
+                for (std::size_t k = 0; k < pool.elements.size(); ++k) {
+                    const auto& element = pool.elements[k];
+                    const auto& names = element.names;
+                    if (static_cast<int>(k) == hitPosition
+                        || std::none_of(names.begin(), names.end(), [&](const auto& name) {
+                               return isCounterSibling(name, hitName);
+                           })) {
+                        continue;
+                    }
+                    const ElementFingerprint& sibling = fingerprintOfIndex(element.index);
+                    if (sibling.center
+                        && Base::Distance(*saved.center, *sibling.center) < hitDistance) {
+                        place.push_back(static_cast<int>(k));
+                    }
+                }
+                nearerTwin = !place.empty();
+            }
             if (place.empty()) {
                 continue;  // moved alone
             }
@@ -2483,9 +2582,6 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             // length. The element moved with its feature; nothing else took its place. The hit's
             // name is the one the reference holds; copies count in the whole lineage, so a
             // later feature's edges on a boss and on its mirror copy are no twins.
-            const std::string& hitName = entry.exactName.empty()
-                ? firstName(pool.elements[hitPosition])
-                : entry.exactName;
             const auto hitSources = NameAncestry::sourceSections(hitName);
             const auto hitCopies = copyContexts(hitName);
             auto ownTwin = [&](int k) {
@@ -2521,7 +2617,9 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 list(k, "place");
             }
             list(hitPosition, "name");
-            outcome.evidence = movedBy() + "; " + there + sit + " where it was";
+            outcome.evidence = movedBy() + "; "
+                + (nearerTwin ? (place.size() > 1 ? "its twins " : "its twin ") : "") + there + sit
+                + (nearerTwin ? " nearer where it was" : " where it was");
         }
         // The elements at an old place are as ambiguous as the moved one: no other entry of the
         // owner takes them.
@@ -3432,6 +3530,28 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 else {
                     ++it;
                 }
+            }
+        }
+        // A piece of a far cap merged with others into one (ops#360, PR 340 round 3): the one
+        // candidate whose name holds the old piece's (holdsMarkedPiece()) is the evidence, as a
+        // name in its ancestry is, and the other survivors don't count. Their overlap is the
+        // start cap's, which every piece of the cap shares, so the piece on the hole's fill
+        // stayed within the gap of the ring, and the old piece's reference broke. Several old
+        // pieces may merge into it (their entries take it together).
+        if (!oldName.empty()) {
+            std::vector<int> holders;
+            for (int k : all) {
+                const auto& names = pool.elements[k].names;
+                if (std::any_of(names.begin(), names.end(), [&](const auto& n) {
+                        return holdsMarkedPiece(n, oldName);
+                    })) {
+                    holders.push_back(k);
+                }
+            }
+            if (holders.size() == 1) {
+                all = {holders.front()};
+                state.inAncestry.insert(holders.front());
+                state.derivedOnly.erase(holders.front());
             }
         }
         state.candidates.assign(all.begin(), all.end());

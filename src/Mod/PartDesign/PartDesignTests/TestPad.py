@@ -899,34 +899,46 @@ def ellipticHoleShell(z, turn=0):
     return Part.Shell([plate.toNurbs().Faces[0], fill.toNurbs().Faces[0]])
 
 
-def discUpToAnEllipticHole(doc):
+def discUpToAnEllipticHole(doc, kind="Pad"):
     """PR 340 round 2: a Pad from the disc A (centre (3, 3), radius 3, its centre's place named
     xA and yA) and the rectangle B up to the plate with the elliptic hole and its fill
     (UpToShape). The circle crosses the ellipse four times: A's cap is three pieces, the middle
     one on the fill, and the top and bottom ones on the plate, each bounded by the circle and the
-    ellipse alone. Returns the Pad and the height of its far caps"""
+    ellipse alone. Or a Pocket from them on top of the block x -2..15, y -5..8, z 0..10, down to
+    the plate at z = 4 (round 3). Returns the feature and the height of its far caps"""
     import Sketcher
 
     body = doc.addObject("PartDesign::Body", "Body")
     xy = [f for f in body.Origin.OriginFeatures if f.Role == "XY_Plane"][0]
+    capZ = 10 if kind == "Pad" else 4
     plate = doc.addObject("Part::Feature", "Plate")
-    plate.Shape = ellipticHoleShell(10)
+    plate.Shape = ellipticHoleShell(capZ)
+    if kind == "Pocket":
+        blockSketch = body.newObject("Sketcher::SketchObject", "BlockSketch")
+        blockSketch.AttachmentSupport = [(xy, "")]
+        blockSketch.MapMode = "FlatFace"
+        dimensionedRectangle(blockSketch, "Block", -2, -5, 15, 8)
+        block = body.newObject("PartDesign::Pad", "Block")
+        block.Profile = blockSketch
+        block.Length = 10
     sketch = body.newObject("Sketcher::SketchObject", "Profile")
     sketch.AttachmentSupport = [(xy, "")]
     sketch.MapMode = "FlatFace"
+    if kind == "Pocket":
+        sketch.AttachmentOffset = FreeCAD.Placement(FreeCAD.Vector(0, 0, 10), FreeCAD.Rotation())
     circle = sketch.addGeometry(Part.Circle(FreeCAD.Vector(3, 3, 0), FreeCAD.Vector(0, 0, 1), 3))
     sketch.addConstraint(Sketcher.Constraint("Radius", circle, 3))
     for axis, tag in (("DistanceX", "xA"), ("DistanceY", "yA")):
         place = sketch.addConstraint(Sketcher.Constraint(axis, -1, 1, circle, 3, 3))
         sketch.renameConstraint(place, tag)
     dimensionedRectangle(sketch, "B", 10, 0, 13, 3)
-    pad = body.newObject("PartDesign::Pad", "Pad")
-    pad.Profile = sketch
-    pad.Type = "UpToShape"
-    pad.UpToShape = (plate, ["Face1", "Face2"])
-    pad.Refine = False
+    feature = body.newObject("PartDesign::" + kind, kind)
+    feature.Profile = sketch
+    feature.Type = "UpToShape"
+    feature.UpToShape = (plate, ["Face1", "Face2"])
+    feature.Refine = False
     doc.recompute()
-    return pad, 10
+    return feature, capZ
 
 
 def centreOfFarCapAt(shape, z, x, y):
@@ -935,11 +947,12 @@ def centreOfFarCapAt(shape, z, x, y):
     return centre.x, centre.y
 
 
-def capsUpToAFreeformPlate(doc, kind, seam=None, hole=False, capA=CAP_A):
+def capsUpToAFreeformPlate(doc, kind, seam=None, hole=False, capA=CAP_A, block=(-2, -5, 12, 8)):
     """ops#360: a Pad from A and B in the XY plane up to a B-spline plate at z = 10 (UpToFace, or
     UpToShape up to the two-face shell meeting at x = `seam`, or with `hole` the plate with a hole
-    and its fill); or a Pocket from them on top of the block x -2..12, y -5..8, z 0..10, down to
-    the plate at z = 4. Returns the feature and the height of its far caps (the Pocket's floors)"""
+    and its fill); or a Pocket from them on top of the block x -2..12, y -5..8 (or `block`'s x0,
+    y0, x1, y1), z 0..10, down to the plate at z = 4. Returns the feature and the height of its
+    far caps (the Pocket's floors)"""
     body = doc.addObject("PartDesign::Body", "Body")
     xy = [f for f in body.Origin.OriginFeatures if f.Role == "XY_Plane"][0]
     capZ = 10 if kind == "Pad" else 4
@@ -948,10 +961,10 @@ def capsUpToAFreeformPlate(doc, kind, seam=None, hole=False, capA=CAP_A):
         blockSketch = body.newObject("Sketcher::SketchObject", "BlockSketch")
         blockSketch.AttachmentSupport = [(xy, "")]
         blockSketch.MapMode = "FlatFace"
-        dimensionedRectangle(blockSketch, "Block", -2, -5, 12, 8)
-        block = body.newObject("PartDesign::Pad", "Block")
-        block.Profile = blockSketch
-        block.Length = 10
+        dimensionedRectangle(blockSketch, "Block", *block)
+        blockPad = body.newObject("PartDesign::Pad", "Block")
+        blockPad.Profile = blockSketch
+        blockPad.Length = 10
     sketch = body.newObject("Sketcher::SketchObject", "Profile")
     sketch.AttachmentSupport = [(xy, "")]
     sketch.MapMode = "FlatFace"
@@ -2463,6 +2476,104 @@ class TestPad(unittest.TestCase):
                     assertOnCap(self, point, z, *centre)
                 finally:
                     FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToAnEllipticHoleTwinsStayPut(self):
+        # PR 340 round 3: the twins (the disc's top and bottom pieces on the plate) were ordered
+        # by their centres along x first, ties only within 1e-5 mm. One above the other, any
+        # small edit that moved one ahead in x swapped their names: the ellipse turned 0.01
+        # degrees, or the disc moved from (3, 3) to (3.1, 3.1), and each datum went to the other
+        # piece, valid and with no warning, for the Pad and the Pocket. Ordered along the axis
+        # in which they spread most, they keep their names until the pair turns by about 45
+        # degrees. Turned 60 degrees, their names swap (they did on the round 2 build too,
+        # quietly), and the solver breaks both references: a counter sibling of the name lies
+        # nearer the old place than the piece the name holds
+        edits = {
+            # edit: (the disc's centre, the ellipse's turn, the places in the top and bottom
+            # pieces after it, whether the datums stay)
+            "tilt": ((3, 3), 0.01, ((3, 5.5), (3, 0.5)), True),
+            "move": ((3.1, 3.1), 0, ((3.1, 5.5), (3.1, 0.5)), True),
+            "turn60": (
+                (3, 3),
+                60,
+                ((3 - 1.1 * math.sqrt(3), 4.1), (3 + 1.1 * math.sqrt(3), 1.9)),
+                False,
+            ),
+        }
+        for kind in ("Pad", "Pocket"):
+            for edit, (centre, turn, (topAfter, bottomAfter), stays) in edits.items():
+                with self.subTest(kind=kind, edit=edit):
+                    doc = FreeCAD.newDocument("PadUpToAnEllipticHoleTwinsStayPut")
+                    try:
+                        feature, z = discUpToAnEllipticHole(doc, kind)
+                        self.assertTrue(feature.isValid(), feature.getStatusString())
+                        shape = feature.Shape
+                        self.assertEqual(len(farCaps(shape, z)), 4)
+                        topPoint = pointOnFarCap(feature, farCapAt(shape, z, 3, 5.5))
+                        bottomPoint = pointOnFarCap(feature, farCapAt(shape, z, 3, 0.5))
+                        sketch = feature.Profile[0]
+                        for tag, value in zip(("xA", "yA"), centre):
+                            sketch.setDatum(
+                                tag, FreeCAD.Units.Quantity(value, FreeCAD.Units.Length)
+                            )
+                        if turn:
+                            doc.getObject("Plate").Shape = ellipticHoleShell(z, turn=turn)
+                        doc.recompute()
+                        self.assertTrue(feature.isValid(), feature.getStatusString())
+                        shape = feature.Shape
+                        self.assertEqual(len(farCaps(shape, z)), 4)
+                        topCentre = centreOfFarCapAt(shape, z, *topAfter)
+                        bottomCentre = centreOfFarCapAt(shape, z, *bottomAfter)
+                        if stays:
+                            assertOnCap(self, topPoint, z, *topCentre)
+                            assertOnCap(self, bottomPoint, z, *bottomCentre)
+                        else:
+                            assertNotQuietlyElsewhere(self, topPoint, z, [topCentre])
+                            assertNotQuietlyElsewhere(self, bottomPoint, z, [bottomCentre])
+                    finally:
+                        FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToAFreeformHoleCapPiecesMergeIntoARing(self):
+        # PR 340 round 3: A (x -3..3, y -0.5..0.5) across the plate's hole and its fill, datums
+        # on its left and right pieces, on the plate. A made taller than the hole (y -3..2.5)
+        # makes them one ring around the fill; taller on one side (y -0.5..2.5), one U around
+        # the fill's top. The new piece's marks hold each old piece's, but tier 1's overlap is
+        # mostly the start cap's, which the piece on the fill shares as much: both references
+        # broke (round 2), where integration's names (MOD of the plate) took them to the ring.
+        # Now the one candidate whose name holds the old piece's takes it: the datums go to
+        # the ring, quietly, also when only one of them is there, and for the Pocket's floors
+        for kind in ("Pad", "Pocket"):
+            for case, (yA, hA) in {"ring": (-3, 5.5), "u": (-0.5, 3)}.items():
+                for pieces in (("left", "right"), ("left",)):
+                    with self.subTest(kind=kind, case=case, pieces=pieces):
+                        doc = FreeCAD.newDocument("PadUpToAFreeformHoleCapPiecesMergeIntoARing")
+                        try:
+                            feature, z = capsUpToAFreeformPlate(
+                                doc,
+                                kind,
+                                hole=True,
+                                capA=(-3, -0.5, 3, 0.5),
+                                block=(-8, -8, 18, 10),
+                            )
+                            self.assertTrue(feature.isValid(), feature.getStatusString())
+                            shape = feature.Shape
+                            self.assertEqual(len(farCaps(shape, z)), 4)
+                            places = {"left": (-2, 0), "right": (2, 0)}
+                            points = {
+                                piece: pointOnFarCap(feature, farCapAt(shape, z, *places[piece]))
+                                for piece in pieces
+                            }
+                            sketch = feature.Profile[0]
+                            sketch.setDatum("hA", FreeCAD.Units.Quantity(hA, FreeCAD.Units.Length))
+                            sketch.setDatum("yA", FreeCAD.Units.Quantity(yA, FreeCAD.Units.Length))
+                            doc.recompute()
+                            self.assertTrue(feature.isValid(), feature.getStatusString())
+                            shape = feature.Shape
+                            self.assertEqual(farCapAt(shape, z, -2, 0), farCapAt(shape, z, 2, 0))
+                            merged = centreOfFarCapAt(shape, z, -2, 0)
+                            for piece in pieces:
+                                assertOnCap(self, points[piece], z, *merged)
+                        finally:
+                            FreeCAD.closeDocument(doc.Name)
 
     def testPadUpToAFreeformFaceCapsMigrate(self):
         # ops#360's naming revision: a file saved with a datum on A's cap, reopened by a child

@@ -468,6 +468,13 @@ AppExport bool atSamePlace(
     double distance
 );
 
+/** True if a section of \a name carries the ORD flag (ops#360, PR 340): a far cap told apart
+ * from its twins only by its place among them, which an edit that moves them all can trade. An
+ * exact reference to it that moved goes to solveOwner()'s moved check even with nothing at its
+ * old place.
+ */
+AppExport bool isOrderedName(std::string_view name);
+
 /** A cheap necessary condition for atSamePlace(\a saved, the element's fingerprint), from the
  * element's \a intrinsic part (type, kind, direction, radii and a circle's centre, measured as
  * its fingerprint measures them) and \a anchor, a point of its plane (a plane face), its line (a
@@ -729,6 +736,10 @@ struct AppExport SolveOutcome
  *   lineage), not told apart only by the duplicate counter, and not two pieces of one split
  *   element (NameAncestry::isPieceOf() of their common sections), e.g. a pad's bottom edge where
  *   its top edge was after a lift by the pad's own length. The exact outcome's evidence says so.
+ *   Moved with nothing at its old place, an element whose name carries the ORD flag (a far cap
+ *   told apart from its twins only by its place among them, ops#360) is ambiguous all the same
+ *   when a counter sibling of its name lies nearer the saved centre than it: the twins traded
+ *   names. Those siblings take role `place`.
  * - Collapse (PR 7): the entries with the same scope and `from` are a group. When `from` names
  *   an element of the target exactly and every member is exact on that element or missing and
  *   merged back into it (a structural piece of `from`, or saved geometry lying on the element
@@ -758,6 +769,11 @@ struct AppExport SolveOutcome
  *   outcome. Geometry runs for them only if they all hold the same valid fingerprint.
  * - Candidates: the overlap survivors (NameAncestry::structuralSurvivors() over every name of
  *   every pool element of the entry's type) and the name matches of that type, by \a source.
+ * - A merged far-cap piece (ops#360): when exactly one candidate's name is the old name with,
+ *   in one marked section (PRJ and MOD), more marks (connected elements) holding all of the old
+ *   ones, an edge among them, it is the only candidate, as if the old name were in its
+ *   ancestry: the pieces either side of a hole that became the ring around it resolve to the
+ *   ring, together.
  * - The IDX source (Task 2 PR 6): when the old name stands for an IDX section
  *   (NameAncestry::indexSource()), the elements named by a section of the same source under any
  *   op code (NameAncestry::sameIndexSource()), and, for a target without an element map whose

@@ -5170,6 +5170,154 @@ TEST(Moved, hintsSaveMeasurements)
     }
 }
 
+namespace
+{
+
+// PR 340 round 3: a piece of the far cap of the Pad (tag 7) from profile face A (sketch 5's
+// lines 1-8), up to a plate: A's start cap's projection, `<start cap>;7;XTR;0;F;<counter>;
+// <flags>;<marks>`.
+std::string farPiece(
+    const std::vector<std::string>& marks,
+    int counter = 0,
+    const std::vector<std::string>& flags = {"PRJ", "MOD"}
+)
+{
+    std::vector<std::string> edges;
+    for (int geoId = 1; geoId <= 8; ++geoId) {
+        edges.push_back(sketchEdge(geoId));
+    }
+    return Data::MappedName::makeEncodedSection(
+        {},
+        {lowFace(edges)},
+        "7",
+        "XTR",
+        "0",
+        'F',
+        std::to_string(counter),
+        flags,
+        marks
+    );
+}
+
+// An element of the up-to plate (Part feature, tag 3), as a mark.
+std::string plateElement(const char* id, char elementType)
+{
+    return section({id}, {}, 3, "SRC", 0, elementType, {"SRC"});
+}
+
+// A far cap's piece at (x, y) on the plate at z = 10.
+ElementFingerprint capAt(double x, double y)
+{
+    return fingerprint('F', "Plane", 5, Base::Vector3d(x, y, 10), Base::Vector3d(0, 0, 1));
+}
+
+// A disc's pieces either side of an elliptic hole, both bounded by the plate, the ellipse and the
+// circle alone: told apart only by their order (the duplicate counter), with the ORD flag, or
+// without it in \a flags. Face1 holds counter \a bottom and sits at (3.1, 0.6), Face2 the other
+// at (3.1, 5.6); the reference was saved on counter 2, the top piece, at (3, 5.5).
+SolveInput twinPieces(int bottom, const std::vector<std::string>& flags = {"PRJ", "MOD", "ORD"})
+{
+    const std::vector<std::string> marks {
+        plateElement("plate", 'F'),
+        plateElement("ellipse", 'E'),
+        plateElement("circle", 'E')
+    };
+    SolveInput input;
+    input.diagonal = 40;
+    input.pool["Face"] = {
+        element("Face1", {farPiece(marks, bottom, flags)}),
+        element("Face2", {farPiece(marks, 3 - bottom, flags)}),
+        element("Face3", {farPiece({plateElement("fill", 'F')})}),
+    };
+    auto entry = exact(bottom == 2 ? "Face1" : "Face2");
+    entry.exactName = farPiece(marks, 2, flags);
+    entry.fingerprint = capAt(3, 5.5);
+    input.entries = {entry};
+    measure(
+        input,
+        {{"Face1", capAt(3.1, 0.6)}, {"Face2", capAt(3.1, 5.6)}, {"Face3", capAt(3, 3)}},
+        nullptr
+    );
+    return input;
+}
+
+}  // namespace
+
+TEST(Moved, twinsThatTradedNamesBreak)
+{
+    // An edit moved both twins a little and traded their order: the top's name holds the bottom
+    // piece, and nothing sits at the old place. The top piece, the name's counter sibling, lies
+    // nearer it than the hit: broken, the twin first (PR 340 round 3).
+    auto outcome = Data::solveOwner(twinPieces(2))[0];
+    EXPECT_EQ(
+        describe(outcome),
+        "broken  -1 [Face2 Face1 ] moved 4.901 mm; its twin Face2 sits nearer where it was"
+    );
+    EXPECT_EQ(outcome.candidateRoles, (std::vector<std::string> {"place", "name"}));
+}
+
+TEST(Moved, twinsInTheirOrderKeepTheirNames)
+{
+    // Moved the same, in their order: the name holds the top piece, the nearer one.
+    EXPECT_EQ(describe(Data::solveOwner(twinPieces(1))[0]), "exact Face2 0 [] ");
+}
+
+TEST(Moved, counterSiblingsWithoutTheOrderFlagMoveAlone)
+{
+    // Elements told apart by the duplicate counter without the ORD flag keep the rule as it
+    // was: moved with nothing at the old place, the name stands.
+    EXPECT_EQ(describe(Data::solveOwner(twinPieces(2, {"PRJ", "MOD"}))[0]), "exact Face1 0 [] ");
+}
+
+TEST(SolveOwner, mergedFarCapPiecesResolveToTheirWhole)
+{
+    // PR 340 round 3: A's pieces either side of a hole in the plate (marks: the plate and the
+    // hole's left or right edge) became one ring around it (the plate and the hole's four
+    // edges). The piece on the hole's fill shares their start cap as fully, and survives tier 1
+    // beside the ring; the ring's name holds each old piece's, so it takes them, together.
+    const auto plate = plateElement("plate", 'F');
+    const auto left = plateElement("left", 'E');
+    const auto right = plateElement("right", 'E');
+    const auto oldLeft = farPiece({plate, left});
+    const auto oldRight = farPiece({plate, right});
+    SolveInput input;
+    input.pool["Face"] = {
+        element(
+            "Face4",
+            {farPiece({plate, left, plateElement("top", 'E'), right, plateElement("bottom", 'E')})}
+        ),
+        element("Face7", {farPiece({plateElement("fill", 'F')})}),
+        element("Face9", {sketchEdge(9)}),
+    };
+    input.entries = {missing(oldLeft), missing(oldRight)};
+    auto outcomes = Data::solveOwner(input);
+    for (const auto& outcome : outcomes) {
+        EXPECT_EQ(outcome.status, SolveStatus::Resolved) << describe(outcome);
+        EXPECT_EQ(outcome.element, "Face4") << describe(outcome);
+    }
+    //   one of them alone
+    input.entries = {missing(oldLeft)};
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Resolved) << describe(outcome);
+    EXPECT_EQ(outcome.element, "Face4");
+
+    // A piece marked by its face alone is no evidence: a renumbered up-to shell gives the face's
+    // name to another face, whose pieces then hold it (the probe's seam/reorder).
+    input.entries = {missing(farPiece({plate}))};
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
+    input.entries = {missing(oldLeft)};
+
+    // Two candidates that hold the old piece: no evidence, as before.
+    input.pool["Face"].push_back(element("Face5", {farPiece({plate, left, plateElement("top", 'E')})}));
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
+    // A projection that isn't a marked piece (PRJ alone) gets no such evidence either.
+    input.pool["Face"].pop_back();
+    input.pool["Face"][0] = element("Face4", {farPiece({plate, left, right}, 0, {"PRJ"})});
+    input.pool["Face"][1] = element("Face7", {farPiece({plateElement("fill", 'F')}, 0, {"PRJ"})});
+    input.entries = {missing(farPiece({plate, left}, 0, {"PRJ"}))};
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
+}
+
 TEST(Moved, hintKeepsATwinAtTheToleranceEdge)
 {
     // Twins as far from the saved element as atSamePlace() allows (just inside every

@@ -372,7 +372,10 @@ bool exactNeedsSolving(const SolverEntry& entry,
         && Data::faceWithinOldPlane(saved, now, diagonal, tolerances, distance)) {
         return true;
     }
-    return !Data::atSamePlace(saved, now, diagonal, tolerances, distance) && occupied();
+    // A twin (ops#360, PR 340 round 3) that moved may have traded names with another twin that
+    // moved too: nothing at its old place, solveOwner() compares the twins' distances
+    return !Data::atSamePlace(saved, now, diagonal, tolerances, distance)
+        && (occupied() || Data::isOrderedName(plainName(entry.exactName)));
 }
 
 // Whether an exact hit is still the saved element in a naming migration (ops#103, rule 3): at
@@ -1586,10 +1589,13 @@ bool solveElementReferences(DocumentObject* feature,
                     // The evidence's verb: `moved`, or `changed` in place.
                     const char* verb =
                         outcome.evidence.rfind("changed", 0) == 0 ? " changed and " : " moved and ";
+                    // A twin nearer the old place than the hit (ops#360, PR 340 round 3)
+                    const bool nearer = outcome.evidence.find(" nearer where it was")
+                        != std::string::npos;
                     item.headline = "Ambiguous " + type + " reference: " + entry.oldIndex + verb
                         + places
                         + (places.find(" and ") == std::string::npos ? " sits" : " sit")
-                        + " where it was";
+                        + (nearer ? " nearer where it was" : " where it was");
                 }
                 FC_LOG(
                     referenceName(entry.prop)
