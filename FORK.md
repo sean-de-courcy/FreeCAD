@@ -365,7 +365,8 @@ names it.
 | `fix/368-startup-newer-file` | fix | ops#368 | - | `integration` `8d7db92190` | `ffd6b0b0a8` (fork PR 335), 2026-10-18 | never (fork fix) |
 | `fix/358-offset-gen-evidence` | fix | ops#358 | - | `integration` `4575e65657` | `16c2e39572` (fork PR 336), 2026-10-18 | never (fork fix) |
 | `fix/367-migrate-warnings` | fix | ops#367 | - | `integration` `ffd6b0b0a8` | `ee101f5f1e` (fork PR 338), 2026-10-18 | never (fork fix) |
-| `feat/351-pipe-end-names` | feat | ops#351 | - | `integration` `4575e65657` | (fork PR 337) | never (fork feature) |
+| `feat/351-pipe-end-names` | feat | ops#351 | - | `integration` `4575e65657` | `2e2bb138ba` (fork PR 337), 2026-10-19 | never (fork feature) |
+| `fix/244-copy-picks` | fix | ops#244 | - | `integration` `2e2bb138ba` | (fork PR 343) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 

@@ -52,6 +52,7 @@
 #include <Mod/PartDesign/App/DatumLine.h>
 #include <Mod/PartDesign/App/DatumPlane.h>
 #include <Mod/PartDesign/App/DatumPoint.h>
+#include <Mod/PartDesign/App/ShapeBinder.h>
 
 #include "ui_DlgReference.h"
 #include "ReferenceSelection.h"
@@ -404,6 +405,24 @@ bool getReferencedSelection(
                 }
                 subname = *element;
                 body->addObject(copy);
+                // FreeCAD-CH (ops#244): a dependent copy (a traced shape binder) has no shape
+                // until it computes. The feature in edit read it as linked ("null shape") and OK
+                // failed, the panel staying open. Computed in the body, where it is placed; one
+                // that fails isn't linked
+                if (auto* binder = freecad_cast<PartDesign::ShapeBinder*>(copy);
+                    binder && binder->TraceSupport.getValue() && !binder->recomputeFeature()) {
+                    const QString why = QString::fromUtf8(binder->getStatusString());
+                    copy->getDocument()->removeObject(copy->getNameInDocument());
+                    QMessageBox::warning(
+                        Gui::getMainWindow(),
+                        QObject::tr("No copy"),
+                        QObject::tr("The copy of '%1' doesn't compute: %2. Make a cross-reference "
+                                    "instead.")
+                            .arg(QString::fromUtf8(selObj->Label.getValue()), why)
+                    );
+                    selObj = nullptr;
+                    return false;
+                }
 
                 selObj = copy;
             }

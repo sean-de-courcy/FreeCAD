@@ -2473,6 +2473,83 @@ class TestPanelFixesGui(unittest.TestCase):
         # the ring (x 1..3, z 0..2) turned about the line x = 10: radii 7..9, height 2
         self.assertAlmostEqual(revolution.Shape.Volume, math.pi * (81 - 49) * 2, places=3)
 
+    def pickAxisAsDependentCopy(self, revolution, obj, sub):
+        """In the open Revolution panel, picks `sub` of obj (in another body) as the axis, Make
+        dependent copy; returns the copy (a shape binder of the element)."""
+        self.armAxisField()
+        self.answerModals("radioDependent")
+        Gui.Selection.addSelection(self.doc.Name, obj.Name, sub)
+        self.assertTrue(waitFor(lambda: self.modals), "no copy dialog")
+        pump(0.3)
+        self.answering = False
+        self.assertEqual(self.modals, ["DlgReference"])
+        copy = self.doc.getObject("Reference" + obj.Name)
+        self.assertIsNotNone(copy)
+        self.assertEqual(copy.TypeId, "PartDesign::ShapeBinder")
+        self.assertEqual(copy.Support, [(obj, (sub,))])
+        self.assertEqual(revolution.ReferenceAxis, (copy, ["Edge1"]))
+        return copy
+
+    def assertGloballyTheEdge(self, copy, obj, sub):
+        """copy's Edge1, globally, is obj's edge `sub`."""
+
+        def placed(o, name):
+            edge = o.Shape.getElement(name).copy()
+            edge.transformShape(o.getGlobalPlacement().multiply(o.Placement.inverse()).toMatrix())
+            return edge
+
+        edge, picked = placed(copy, "Edge1"), placed(obj, sub)
+        self.assertLess((edge.CenterOfMass - picked.CenterOfMass).Length, 1e-6)
+        self.assertAlmostEqual(edge.Length, picked.Length, places=6)
+
+    def testRevolutionAxisOnAnEdgeOfADependentCopyOfABox(self):
+        """ops#244 (getReferencedSelection, Make dependent copy): the Revolution's axis picked on
+        the edge x = 10, y = 0 of a box in another body (not Edge1). The axis links Edge1 of a
+        shape binder of that edge, but the binder wasn't computed: the revolution failed ("null
+        shape") as soon as it was picked, and OK did nothing, the panel staying open. The binder
+        holds the picked edge at once, OK closes the panel, and the revolution is valid.
+        Model: as testRevolutionAxisOnAnEdgeOfACopiedBox."""
+        box, revolution, edge = self.revolutionBesideABox()
+        self.edit(revolution)
+        copy = self.pickAxisAsDependentCopy(revolution, box, edge)
+        self.assertFalse(copy.Shape.isNull())
+        self.assertIn(copy, self.body.Group)
+        self.assertGloballyTheEdge(copy, box, edge)
+        self.assertNotEqual(revolution.getStatusString(), "null shape")
+        self.close(ok=True)
+        self.doc.recompute()
+        self.assertEqual(revolution.ReferenceAxis, (copy, ["Edge1"]))
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        self.assertEqual(App.getReferenceReport(revolution), [])
+        self.assertAlmostEqual(revolution.Shape.Volume, math.pi * (81 - 49) * 2, places=3)
+
+    def testRevolutionAxisOnAnEdgeOfADependentCopyOfASketch(self):
+        """ops#244, as testRevolutionAxisOnAnEdgeOfADependentCopyOfABox on Edge2 of a sketch in
+        another body (its lines x = 20 and x = 10, z 0..10 on XZ: the axis is the second), whose
+        App::Part is moved up by 5 along Z: the axis is the line x = 10, y = 0 globally, as the
+        box's edge is, and the binder holds it there."""
+        other = self.otherBody()
+        other.getParentGeoFeatureGroup().Placement.Base = V(0, 0, 5)
+        axis = models.sketch(
+            self.doc, "Axis", [line(20, 0, 20, 10), line(10, 0, 10, 10)], other, placement=XZ
+        )
+        self.body = models.body(self.doc)
+        ring = models.sketch(self.doc, "Ring", models.rectangle(1, 0, 3, 2), self.body, placement=XZ)
+        revolution = self.body.newObject("PartDesign::Revolution", "Revolution")
+        revolution.Profile = ring
+        revolution.ReferenceAxis = (ring, ["V_Axis"])
+        revolution.Angle = 360
+        self.doc.recompute()
+        self.assertAlmostEqual(axis.Shape.Edges[1].CenterOfMass.x, 10, places=6)
+        self.edit(revolution)
+        copy = self.pickAxisAsDependentCopy(revolution, axis, "Edge2")
+        self.assertFalse(copy.Shape.isNull())
+        self.assertGloballyTheEdge(copy, axis, "Edge2")
+        self.close(ok=True)
+        self.doc.recompute()
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        self.assertAlmostEqual(revolution.Shape.Volume, math.pi * (81 - 49) * 2, places=3)
+
     def revolutionBesideAnAxisSketch(self):
         """revolutionBesideABox with a sketch in the other body instead of the box: Axis, the
         line x = 10, z 0..10 (on XZ). Returns the sketch and the revolution."""
@@ -2970,6 +3047,40 @@ class TestPanelFixesGui(unittest.TestCase):
         self.doc.recompute()
         self.assertTrue(datum.isValid(), datum.getStatusString())
         self.assertAlmostEqual(datum.getGlobalPlacement().Base.z, 10, places=6)
+
+    def datumPointOnABoxVertex(self, choice):
+        """ops#244 P2, a vertex: a datum point attached to the vertex (10, 10, 10) of a 10 mm box
+        in another body (not Vertex1), OK answered with `choice`. Returns the datum, the copy and
+        the vertex's name; the datum is at the vertex."""
+        other = self.otherBody()
+        box = other.newObject("PartDesign::AdditiveBox", "Box")
+        self.body = models.body(self.doc)
+        self.doc.recompute()
+        [corner] = [
+            f"Vertex{i}"
+            for i, v in enumerate(box.Shape.Vertexes, 1)
+            if (v.Point - V(10, 10, 10)).Length < 1e-6
+        ]
+        self.assertNotEqual(corner, "Vertex1")
+        datum = self.attachDatumAcross("PartDesign::Point", [(box, corner)], "Vertex", choice)
+        [(copy, _)] = datum.AttachmentSupport
+        self.assertIsNot(copy, box)
+        self.assertTrue(self.body.hasObject(copy))
+        self.doc.recompute()
+        self.assertTrue(datum.isValid(), datum.getStatusString())
+        self.assertLess((datum.getGlobalPlacement().Base - V(10, 10, 10)).Length, 1e-6)
+        return datum, copy, corner
+
+    def testDatumOnAVertexOfAnIndependentCopyOfABox(self):
+        """ops#244 P2: Make independent copy, a shape binder of the box's shape: the same
+        vertex index."""
+        datum, copy, corner = self.datumPointOnABoxVertex("radioIndependent")
+        self.assertEqual(datum.AttachmentSupport, [(copy, (corner,))])
+
+    def testDatumOnAVertexOfADependentCopyOfABox(self):
+        """ops#244 P2: Make dependent copy, a shape binder of the vertex: its Vertex1."""
+        datum, copy, corner = self.datumPointOnABoxVertex("radioDependent")
+        self.assertEqual(datum.AttachmentSupport, [(copy, ("Vertex1",))])
 
     def testDatumOnAStaleCopiedSketchStops(self):
         """ops#244 P2, the check: a datum plane normal to Edge1 of a sketch in another body (the
