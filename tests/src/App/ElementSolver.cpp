@@ -1483,8 +1483,9 @@ TEST(SolveOwner, tierZeroElementsLeaveTheOtherPools)
     EXPECT_TRUE(outcomes[1].candidates.empty());
     EXPECT_EQ(outcomes[1].evidence, "no candidate");
 
-    //   unless tier 1 shows a merge: a name of Face1 has the old name in its ancestry
-    const auto merged = generated({names.oldTop}, 9, "FUS", 'F');
+    //   unless tier 1 shows a merge: a name of Face1 has the old name in its ancestry (a MOD
+    //   section that holds it; through a GEN section it would be a source, ops#358)
+    const auto merged = section({}, {names.oldTop}, 9, "FUS", 0, 'F', {"MOD"});
     input.pool["Face"][0].names.push_back(merged);
     outcomes = Data::solveOwner(input);
     EXPECT_EQ(outcomes[0].status, SolveStatus::Exact);
@@ -1885,7 +1886,7 @@ TEST(SolveOwner, independentOfInputOrder)
     SolveInput input;
     input.pool["Face"] = {
         element("Face1", {names.side}),
-        element("Face2", {names.newTop, generated({names.oldTop}, 11, "FUS", 'F')}),
+        element("Face2", {names.newTop, section({}, {names.oldTop}, 11, "FUS", 0, 'F', {"MOD"})}),
         element("Face3", {piece(split, 9, "CUT", 0, 'F')}),
         element("Face4", {piece(split, 9, "CUT", 1, 'F')}),
         element("Face5", {names.unrelated}),
@@ -3271,7 +3272,8 @@ TEST(Continuation, anotherMakersEdgeIsNoPiece)
 TEST(Continuation, piecesLeaveOtherPools)
 {
     // A missing reference whose only candidate (a name match) is the piece taken: broken, unless
-    // the piece holds its old name in its ancestry (a proven merge).
+    // the piece holds its old name in its ancestry (a proven merge: a MOD section that holds
+    // it; through a GEN section the old name would be a source, ops#358).
     Notch notch;
     const auto old = generated({sketchEdge(5)}, 7, "Extrude", 'E', 4);
     auto input = notch.input(Data::SolvePolicy::Expand);
@@ -3282,7 +3284,7 @@ TEST(Continuation, piecesLeaveOtherPools)
     EXPECT_EQ(outcomes[1].status, SolveStatus::Broken) << describe(outcomes[1]);
 
     //   (made by the hit's maker: another feature's edge is no piece of the hit, ops#284)
-    notch.pieceName = generated({old}, 7, "FUS", 'E');
+    notch.pieceName = section({}, {old}, 7, "FUS", 0, 'E', {"MOD"});
     input = notch.input(Data::SolvePolicy::Expand);
     input.entries.push_back(missing(old, "Edge", {notch.pieceName}));
     outcomes = Data::solveOwner(input);
@@ -3293,7 +3295,7 @@ TEST(Continuation, piecesLeaveOtherPools)
     //   made by another feature (tag 9; the review of fork PR 257: no boolean names a merged
     //   piece so, it reports pieces as modified): no piece of the hit, which stays exact, and
     //   the missing reference follows its merge
-    notch.pieceName = generated({old}, 9, "FUS", 'E');
+    notch.pieceName = section({}, {old}, 9, "FUS", 0, 'E', {"MOD"});
     input = notch.input(Data::SolvePolicy::Expand);
     input.entries.push_back(missing(old, "Edge", {notch.pieceName}));
     outcomes = Data::solveOwner(input);
@@ -5971,30 +5973,38 @@ TEST(NameAncestry, reachClassifiesThePathTypes)
     EXPECT_EQ(NameAncestry::reaches(cap, profileFace), Reach::Derived);
     EXPECT_EQ(NameAncestry::derivedPath(cap, profileFace), "F<E<F");
 
-    //   a Thickness's inner edge: E<F<F<E
+    //   a Thickness's inner edge: E<F<F<E, the same-type step through the Thickness's GEN
+    //   section named (ops#358)
     const auto innerFace = generated({wallFace}, 11, "THK", 'F');
     const auto innerEdge = generated({innerFace}, 11, "THK", 'E');
     EXPECT_EQ(NameAncestry::reaches(innerEdge, g2), Reach::Derived);
-    EXPECT_EQ(NameAncestry::derivedPath(innerEdge, g2), "E<F<F<E");
+    EXPECT_EQ(NameAncestry::derivedPath(innerEdge, g2), "E<F<F (THK)<E");
 
     //   a far-end partner: projected
     const auto topEdge = section({}, {g2}, 7, "XTR", 0, 'E', {"PRJ"});
     EXPECT_EQ(NameAncestry::reaches(topEdge, g2), Reach::Projected);
     EXPECT_EQ(NameAncestry::derivedPath(topEdge, g2), "");
 
-    //   an edge generated from the edge, a piece of it: same-type
-    EXPECT_EQ(NameAncestry::reaches(generated({g2}, 7, "XTR", 'E'), g2), Reach::SameType);
+    //   a piece of the edge: same-type; an edge generated from the edge, a copy at another
+    //   place (an offset): derived (ops#358)
     EXPECT_EQ(NameAncestry::reaches(piece(g2, 9, "CUT", 0, 'E'), g2), Reach::SameType);
     EXPECT_EQ(NameAncestry::derivedPath(piece(g2, 9, "CUT", 0, 'E'), g2), "");
+    EXPECT_EQ(NameAncestry::reaches(generated({g2}, 7, "OFF", 'E'), g2), Reach::Derived);
+    EXPECT_EQ(NameAncestry::derivedPath(generated({g2}, 7, "OFF", 'E'), g2), "E<E (OFF)");
     //   a piece of the section edge still reaches g2 only through the face
     EXPECT_EQ(NameAncestry::reaches(piece(sectionEdge, 12, "CUT", 1, 'E'), g2), Reach::Derived);
 
     //   a pattern copy lives in its own context: not the bare name
     EXPECT_EQ(NameAncestry::reaches(stepInstance(g2, 9, "2", 'E'), g2), Reach::None);
 
-    //   reached both ways: same-type wins, whichever path the walk meets first
-    EXPECT_EQ(NameAncestry::reaches(generated({wallFace, g2}, 9, "CUT", 'E'), g2), Reach::SameType);
-    EXPECT_EQ(NameAncestry::reaches(generated({g2, wallFace}, 9, "CUT", 'E'), g2), Reach::SameType);
+    //   reached both ways (a section that embeds names without generating from them, e.g. a
+    //   bounding face's UPP edge): same-type wins, whichever path the walk meets first
+    EXPECT_EQ(NameAncestry::reaches(section({}, {wallFace, g2}, 9, "XXX", 0, 'E', {"UPP"}), g2),
+              Reach::SameType);
+    EXPECT_EQ(NameAncestry::reaches(section({}, {g2, wallFace}, 9, "XXX", 0, 'E', {"UPP"}), g2),
+              Reach::SameType);
+    //   through a GEN section, both ways are a source: derived
+    EXPECT_EQ(NameAncestry::reaches(generated({wallFace, g2}, 9, "CUT", 'E'), g2), Reach::Derived);
     //   derived and projected (a pad's section edge on its bottom: the cut face's PRJ name and
     //   the wall face): derived
     const auto farFace = section({}, {profileFace}, 7, "XTR", 0, 'F', {"PRJ"});
@@ -6665,13 +6675,16 @@ TEST(NameAncestry, reachFromATopSectionWithoutAType)
     // designed). Without the element's type, each branch takes the type of its first typed node,
     // for the classification and for the path text alike (PR 327's Opus review, F4).
     using Reach = NameAncestry::Reach;
+    // The untyped section and the edge below it generate nothing (no GEN), so the walk's type
+    // alone decides between same-type and derived (a GEN section would make every node below it
+    // a source, ops#358).
     const auto g2 = sketchEdge(2);
     const auto otherFace = generated({sketchEdge(7, 6)}, 7, "XTR", 'F');
-    const auto fromG2 = generated({g2}, 7, "XTR", 'E');
+    const auto fromG2 = piece(g2, 7, "CUT", 0, 'E');
     const auto untyped = [](const std::vector<std::string>& embedded) {
-        return section({}, embedded, 9, "XXX", 0, '_', {"GEN"});
+        return section({}, embedded, 9, "XXX", 0, '_', {"MOD"});
     };
-    //   an edge generated from g2 below it: same-type, whatever another branch's type is
+    //   a piece of g2 below it: same-type, whatever another branch's type is
     EXPECT_EQ(NameAncestry::reaches(untyped({fromG2}), g2), Reach::SameType);
     EXPECT_EQ(NameAncestry::reaches(untyped({otherFace, fromG2}), g2), Reach::SameType);
     EXPECT_EQ(NameAncestry::derivedPath(untyped({otherFace, fromG2}), g2), "");
@@ -6679,26 +6692,29 @@ TEST(NameAncestry, reachFromATopSectionWithoutAType)
     const auto sectionEdge = generated({generated({g2}, 7, "XTR", 'F')}, 9, "CUT", 'E');
     EXPECT_EQ(NameAncestry::reaches(untyped({otherFace, sectionEdge}), g2), Reach::Derived);
     EXPECT_EQ(NameAncestry::derivedPath(untyped({otherFace, sectionEdge}), g2), "?<E<F<E");
-    //   the face g2 generated right below the untyped top: the face's type would be the
-    //   start's, and g2 below it same-type; given the element's type (an edge), derived
-    const auto wallFace = generated({g2}, 7, "XTR", 'F');
-    EXPECT_EQ(NameAncestry::reaches(untyped({wallFace}), g2, 'E'), Reach::Derived);
-    EXPECT_EQ(NameAncestry::derivedPath(untyped({wallFace}), g2, 'E'), "?<F<E");
+    //   a face bounded by g2 (LOW, no GEN) right below the untyped top: the face's type would be
+    //   the start's, and g2 below it same-type; given the element's type (an edge), derived
+    const auto boundedFace = lowFace({g2, sketchEdge(3)});
+    EXPECT_EQ(NameAncestry::reaches(untyped({boundedFace}), g2), Reach::SameType);
+    EXPECT_EQ(NameAncestry::reaches(untyped({boundedFace}), g2, 'E'), Reach::Derived);
+    EXPECT_EQ(NameAncestry::derivedPath(untyped({boundedFace}), g2, 'E'), "?<F<E");
     EXPECT_EQ(NameAncestry::reaches(untyped({fromG2}), g2, 'E'), Reach::SameType);
     EXPECT_EQ(NameAncestry::reaches(untyped({otherFace, sectionEdge}), g2, 'E'), Reach::Derived);
 }
 
 TEST(SolveOwner, derivedSurvivorUnderATopSectionWithoutAType)
 {
-    // ops#359: an edge whose name's top section has no type embeds the loft's wall face, the
-    // face g2 generated (E<F<E through an untyped section). The walk takes the edge type from
-    // the pool, so the edge is derived: 8 mm up, broken, listed first. Before, the walk took the
-    // face's type for the start, the path counted as same-type, and tier 1 took the edge
-    // silently. No fork operation is known to write such a name.
+    // ops#359: an edge whose name's top section has no type embeds a face bounded by g2 (E<F<E
+    // through an untyped section; neither section generates, so no GEN makes the path derived,
+    // ops#358). The walk takes the edge type from the pool, so the edge is derived: 8 mm up,
+    // broken, listed first. Before, the walk took the face's type for the start, the path
+    // counted as same-type, and tier 1 took the edge silently. No fork operation is known to
+    // write such a name.
     Loft loft;
     auto input = loft.input(8);
-    const auto wallFace = generated({loft.g2}, 7, "LFT", 'F');
-    input.pool["Edge"][0] = element("Edge1", {section({}, {wallFace}, 9, "XXX", 0, '_', {"GEN"})});
+    const auto boundedFace = section({}, {loft.g2}, 7, "LFT", 0, 'F', {"LOW"});
+    input.pool["Edge"][0] =
+        element("Edge1", {section({}, {boundedFace}, 9, "XXX", 0, '_', {"MOD"})});
 
     auto outcomes = Data::solveOwner(input);
     EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
@@ -6712,4 +6728,303 @@ TEST(SolveOwner, derivedSurvivorUnderATopSectionWithoutAType)
         ),
         std::string::npos
     ) << outcomes[0].evidence;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Offset copies (ops#358, PLAN decision 86): a Thickness's or an offset's copy of an element is a
+// same-type GEN of it at a distance. Below a GEN section a name is a source, so the copy is
+// geometric evidence like ops#335's derived survivors, not tier 1's.
+
+TEST(NameAncestry, reachThroughAGenSectionIsDerived)
+{
+    using Reach = NameAncestry::Reach;
+    const auto corner = sketchVertex({"g1v2", "g2v1"});
+    //   a pad's top corner and rim edge (PRJ) and wall (GEN from the profile edge)
+    const auto topCorner = section({}, {corner}, 7, "XTR", 0, 'V', {"PRJ"});
+    const auto rimEdge = section({}, {sketchEdge(2)}, 7, "XTR", 0, 'E', {"PRJ"});
+    const auto wall = generated({sketchEdge(2)}, 7, "XTR", 'F');
+    //   a Thickness's copies of them: V<V, E<E, F<F through the THK GEN section
+    const auto innerCorner = generated({topCorner}, 11, "THK", 'V');
+    const auto innerRim = generated({rimEdge}, 11, "THK", 'E');
+    const auto innerWall = generated({wall}, 11, "THK", 'F');
+    EXPECT_EQ(NameAncestry::reaches(innerCorner, topCorner), Reach::Derived);
+    EXPECT_EQ(NameAncestry::derivedPath(innerCorner, topCorner), "V<V (THK)");
+    EXPECT_EQ(NameAncestry::reaches(innerRim, rimEdge), Reach::Derived);
+    EXPECT_EQ(NameAncestry::derivedPath(innerRim, rimEdge), "E<E (THK)");
+    EXPECT_EQ(NameAncestry::reaches(innerWall, wall), Reach::Derived);
+    EXPECT_EQ(NameAncestry::derivedPath(innerWall, wall), "F<F (THK)");
+    //   the copy reaches the sketch vertex below the top corner through the projection only
+    EXPECT_EQ(NameAncestry::reaches(innerCorner, corner), Reach::Projected);
+
+    //   Part::Offset (OFS) and Offset2D (OFF), and a copy of a copy
+    EXPECT_EQ(NameAncestry::derivedPath(generated({topCorner}, 13, "OFS", 'V'), topCorner),
+              "V<V (OFS)");
+    EXPECT_EQ(NameAncestry::derivedPath(generated({sketchEdge(2)}, 9, "OFF", 'E'), sketchEdge(2)),
+              "E<E (OFF)");
+    EXPECT_EQ(NameAncestry::derivedPath(generated({innerCorner}, 13, "OFS", 'V'), topCorner),
+              "V<V (OFS)<V (THK)");
+
+    //   a piece of the copy: still derived; a piece of the old element: same-type
+    EXPECT_EQ(NameAncestry::reaches(piece(innerRim, 12, "CUT", 0, 'E'), rimEdge), Reach::Derived);
+    EXPECT_EQ(NameAncestry::reaches(piece(innerRim, 12, "CUT", 0, 'E'), innerRim),
+              Reach::SameType);
+    EXPECT_EQ(NameAncestry::reaches(piece(rimEdge, 12, "CUT", 0, 'E'), rimEdge), Reach::SameType);
+    //   a GEN section with a prefix (written after the source's own sections): the prefix is a
+    //   source too; with MOD it stays an earlier state
+    const auto prefixed = rimEdge + "|" + section({}, {}, 11, "THK", 0, 'E', {"GEN"});
+    EXPECT_EQ(NameAncestry::reaches(prefixed, rimEdge), Reach::Derived);
+    EXPECT_EQ(NameAncestry::derivedPath(prefixed, rimEdge), "E<E (THK)");
+    EXPECT_EQ(NameAncestry::reaches(piece(rimEdge, 11, "THK", 0, 'E'), rimEdge), Reach::SameType);
+    //   reached both ways, as a source and as itself: same-type wins
+    EXPECT_EQ(
+        NameAncestry::reaches(section({}, {innerRim, rimEdge}, 12, "XXX", 0, 'E', {"UPP"}), rimEdge),
+        Reach::SameType
+    );
+}
+
+namespace
+{
+
+// A pad 20 x 10 x 10 from a sketch rectangle (tag 5), a Thickness 2 mm inward with the top open
+// (tag 11), and a pocket (tag 12, its sketch tag 8) that shaves the wall x = 20: the reference is
+// the outer top corner (20, 0, 10), which the shave removes; the Thickness's inner corner
+// (18, 2, 10) survives, 2.83 mm away (`ThicknessCornerShaved358`). Diagonal 24.5: tier 3's strict
+// d_max 0.245, the guess width 1.225.
+struct ThickCorner
+{
+    std::string corner = sketchVertex({"g1v2", "g2v1"});
+    std::string topCorner = section({}, {corner}, 7, "XTR", 0, 'V', {"PRJ"});
+    std::string innerCorner = generated({topCorner}, 11, "THK", 'V');
+    //   the shave's corner: on the pad's wall y = 0 (from g1) and the pocket's wall
+    std::string shaveCorner = section({},
+                                      {generated({sketchEdge(1)}, 7, "XTR", 'F'),
+                                       generated({sketchEdge(1, 8)}, 12, "XTR", 'F')},
+                                      12,
+                                      "CUT",
+                                      0,
+                                      'V',
+                                      {"GEN"});
+    //   an unrelated corner far away
+    std::string farCorner =
+        section({}, {sketchVertex({"g3v2", "g4v1"})}, 7, "XTR", 0, 'V', {"PRJ"});
+    double diagonal = 24.5;
+
+    static ElementFingerprint point(const Base::Vector3d& at)
+    {
+        return fingerprint('V', "Point", {}, at);
+    }
+
+    // The pool after the shave: the inner corner at \a inner, the shave's corner at \a shave
+    // (none if null).
+    SolveInput input(const Base::Vector3d& inner, const Base::Vector3d* shave) const
+    {
+        SolveInput in;
+        in.diagonal = diagonal;
+        in.guess = true;
+        in.guessNoStructure = true;
+        in.pool["Vertex"] = {element("Vertex1", {innerCorner}), element("Vertex2", {farCorner})};
+        std::map<std::string, ElementFingerprint> at {
+            {"Vertex1", point(inner)},
+            {"Vertex2", point(Base::Vector3d(0, 10, 10))},
+        };
+        if (shave) {
+            in.pool["Vertex"].push_back(element("Vertex3", {shaveCorner}));
+            at["Vertex3"] = point(*shave);
+        }
+        measure(in, at, nullptr);
+        in.entries = {missing(topCorner, "Vertex")};
+        in.entries[0].fingerprint = point(Base::Vector3d(20, 0, 10));
+        return in;
+    }
+};
+
+// The role \a outcome lists \a element with, or empty.
+std::string roleOf(const Data::SolveOutcome& outcome, const std::string& element)
+{
+    for (std::size_t i = 0; i < outcome.candidates.size(); ++i) {
+        if (outcome.candidates[i] == element && i < outcome.candidateRoles.size()) {
+            return outcome.candidateRoles[i];
+        }
+    }
+    return {};
+}
+
+}  // namespace
+
+TEST(SolveOwner, offsetCopyOfAVertexAloneFarAwayBreaks)
+{
+    // ops#358's repro without the shave's corner: the Thickness's inner corner, 2.83 mm away, is
+    // the only survivor of tier 1. Before, tier 1 took it silently ("in ancestry").
+    ThickCorner model;
+    auto input = model.input(Base::Vector3d(18, 2, 10), nullptr);
+
+    auto outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    ASSERT_FALSE(outcomes[0].candidates.empty());
+    EXPECT_EQ(outcomes[0].candidates[0], "Vertex1");
+    EXPECT_EQ(outcomes[0].candidateRoles[0], "derived");
+    EXPECT_NEAR(outcomes[0].candidateDistances[0], std::sqrt(8.0), 1e-9);
+    EXPECT_NE(outcomes[0].evidence.find(
+                  "tier 1's 1 survivor is in ancestry through a generated copy (V<V (THK)), not "
+                  "at the old place"
+              ),
+              std::string::npos)
+        << outcomes[0].evidence;
+
+    //   NamingSolver/Tier1Derived = ancestry: tier 1 takes the copy, as before
+    input.derived = Data::Tier1Derived::Ancestry;
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved);
+    EXPECT_EQ(outcomes[0].element, "Vertex1");
+    EXPECT_EQ(outcomes[0].tier, 1);
+}
+
+TEST(SolveOwner, offsetCopyOfAVertexWithTheShaveCornerNearIsAGuess)
+{
+    // ops#358's repro (decision 86 Q2): the shave's own corner 0.5 mm away, within the guess
+    // width, shares the profile sketch as a source and the pad as the maker: policy D's warned
+    // guess; the inner corner listed as derived.
+    ThickCorner model;
+    const Base::Vector3d shave(19.5, 0, 10);
+    auto input = model.input(Base::Vector3d(18, 2, 10), &shave);
+
+    auto outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Guessed);
+    EXPECT_EQ(outcomes[0].element, "Vertex3");
+    EXPECT_EQ(outcomes[0].tier, 3);
+    EXPECT_EQ(roleOf(outcomes[0], "Vertex1"), "derived");
+
+    //   the shave from x = 18.5 (`...Wide`): its corner 1.5 mm away, beyond the width: broken,
+    //   the inner corner first
+    const Base::Vector3d wide(18.5, 0, 10);
+    input = model.input(Base::Vector3d(18, 2, 10), &wide);
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    ASSERT_FALSE(outcomes[0].candidates.empty());
+    EXPECT_EQ(outcomes[0].candidates[0], "Vertex1");
+    EXPECT_EQ(outcomes[0].candidateRoles[0], "derived");
+
+    //   a 0.5 mm wall (`...Half`): the copy 0.71 mm away and the shave's corner 0.5 mm, both
+    //   within the width and within the gap factor: broken
+    input = model.input(Base::Vector3d(19.5, 0.5, 10), &shave);
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(roleOf(outcomes[0], "Vertex1"), "derived");
+
+    //   ancestry: tier 1 takes the copy, as before
+    input = model.input(Base::Vector3d(18, 2, 10), &shave);
+    input.derived = Data::Tier1Derived::Ancestry;
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved);
+    EXPECT_EQ(outcomes[0].element, "Vertex1");
+    EXPECT_EQ(outcomes[0].tier, 1);
+}
+
+TEST(SolveOwner, offsetCopyWithinTheStrictDistanceResolvesByGeometry)
+{
+    // A thin wall (decision 86 Q3): the copy 0.14 mm away, within the strict d_max (0.245),
+    // nothing else near: resolved at tier 3 (warned, with a record, by the batch).
+    ThickCorner model;
+    auto input = model.input(Base::Vector3d(19.9, 0.1, 10), nullptr);
+
+    auto outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved);
+    EXPECT_EQ(outcomes[0].element, "Vertex1");
+    EXPECT_EQ(outcomes[0].tier, 3);
+    EXPECT_EQ(outcomes[0].evidence.rfind("no structural candidate, tier 3: ", 0), 0U)
+        << outcomes[0].evidence;
+    EXPECT_NE(outcomes[0].evidence.find("in ancestry through a generated copy (V<V (THK))"),
+              std::string::npos)
+        << outcomes[0].evidence;
+}
+
+TEST(SolveOwner, offsetCopyOfALineEdge)
+{
+    // The rim edge x = 20 (a line along Y at z = 10) and its Thickness copy x = 18: parallel, so
+    // intrinsically alike. Alone: broken (before: tier 1, silently). With the shave's edge
+    // x = 19.5 near: a guess to it. Beside a piece of the old edge itself: the piece (the copy
+    // is no tier-1 evidence).
+    const auto rimEdge = section({}, {sketchEdge(2)}, 7, "XTR", 0, 'E', {"PRJ"});
+    const auto innerRim = generated({rimEdge}, 11, "THK", 'E');
+    const auto shaveEdge = section({},
+                                   {generated({sketchEdge(2)}, 7, "XTR", 'F'),
+                                    generated({sketchEdge(4, 8)}, 12, "XTR", 'F')},
+                                   12,
+                                   "CUT",
+                                   0,
+                                   'E',
+                                   {"GEN"});
+    auto line = [](double x) {
+        return fingerprint('E', "Line", 10, Base::Vector3d(x, 5, 10), Base::Vector3d(0, 1, 0));
+    };
+    SolveInput input;
+    input.diagonal = 24.5;
+    input.guess = true;
+    input.guessNoStructure = true;
+    input.pool["Edge"] = {element("Edge1", {innerRim})};
+    measure(input, {{"Edge1", line(18)}}, nullptr);
+    input.entries = {missing(rimEdge, "Edge")};
+    input.entries[0].fingerprint = line(20);
+
+    auto outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    ASSERT_FALSE(outcomes[0].candidates.empty());
+    EXPECT_EQ(outcomes[0].candidates[0], "Edge1");
+    EXPECT_EQ(outcomes[0].candidateRoles[0], "derived");
+    EXPECT_NE(outcomes[0].evidence.find("(E<E (THK))"), std::string::npos) << outcomes[0].evidence;
+
+    //   the shave's edge 0.5 mm away: a guess to it
+    input.pool["Edge"].push_back(element("Edge2", {shaveEdge}));
+    measure(input, {{"Edge1", line(18)}, {"Edge2", line(19.5)}}, nullptr);
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Guessed);
+    EXPECT_EQ(outcomes[0].element, "Edge2");
+    EXPECT_EQ(roleOf(outcomes[0], "Edge1"), "derived");
+
+    //   a piece of the old edge at its place, beside the copy: the piece
+    input.pool["Edge"] = {element("Edge1", {innerRim}),
+                          element("Edge3", {piece(rimEdge, 12, "CUT", 0, 'E')})};
+    measure(input, {{"Edge1", line(18)}, {"Edge3", line(20)}}, nullptr);
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].element, "Edge3");
+    EXPECT_NE(outcomes[0].status, SolveStatus::Broken);
+
+    //   ancestry: the lone copy at tier 1, as before
+    input.pool["Edge"] = {element("Edge1", {innerRim})};
+    measure(input, {{"Edge1", line(18)}}, nullptr);
+    input.derived = Data::Tier1Derived::Ancestry;
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved);
+    EXPECT_EQ(outcomes[0].element, "Edge1");
+    EXPECT_EQ(outcomes[0].tier, 1);
+}
+
+TEST(SolveOwner, offsetCopyOfAFaceFacingAwayBreaks)
+{
+    // The wall x = 20 and its Thickness copy x = 18: the plane's normal carries its sense, so
+    // tier 2 disagrees (broken before as well, as tier 1's contradicted partner); now the copy
+    // is listed as derived.
+    const auto wall = generated({sketchEdge(2)}, 7, "XTR", 'F');
+    const auto innerWall = generated({wall}, 11, "THK", 'F');
+    SolveInput input;
+    input.diagonal = 24.5;
+    input.guess = true;
+    input.guessNoStructure = true;
+    input.pool["Face"] = {element("Face1", {innerWall})};
+    measure(input,
+            {{"Face1",
+              fingerprint('F', "Plane", 80, Base::Vector3d(18, 5, 6), Base::Vector3d(-1, 0, 0))}},
+            nullptr);
+    input.entries = {missing(wall, "Face")};
+    input.entries[0].fingerprint =
+        fingerprint('F', "Plane", 100, Base::Vector3d(20, 5, 5), Base::Vector3d(1, 0, 0));
+
+    auto outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    ASSERT_FALSE(outcomes[0].candidates.empty());
+    EXPECT_EQ(outcomes[0].candidates[0], "Face1");
+    EXPECT_EQ(outcomes[0].candidateRoles[0], "derived");
+    EXPECT_NE(outcomes[0].evidence.find("(F<F (THK)), tier 2 disagrees with it"),
+              std::string::npos)
+        << outcomes[0].evidence;
 }
