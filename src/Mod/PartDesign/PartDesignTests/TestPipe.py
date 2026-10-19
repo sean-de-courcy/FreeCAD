@@ -178,9 +178,10 @@ class TestPipeEndNames(unittest.TestCase):
         self.assertTrue(pipe.isValid(), pipe.getStatusString())
         return pipe
 
-    def assertStartKeepsNames(self, shape, sketch, atStart, kinds=("Edge", "Vertex")):
+    def assertStartKeepsNames(self, shape, sketch, atStart, kinds=("Edge", "Vertex"), shift=V()):
         """Each edge and vertex at the start has the name of the sketch's element at its place
-        (the pipe starts where the profile lies)."""
+        (the pipe starts where the profile lies), or `shift` away from it (the start nearest the
+        profile, when the profile lies inside the spine)."""
         for kind in kinds:
             own = [
                 (place(element), firstName(sketch.Shape, f"{kind}{index}"))
@@ -189,7 +190,7 @@ class TestPipeEndNames(unittest.TestCase):
             starts = elementsWhere(shape, kind, atStart)
             self.assertEqual(len(starts), len(own), (kind, starts))
             for element in starts:
-                where = place(shape.getElement(element))
+                where = place(shape.getElement(element)) - shift
                 expected = [name for at, name in own if at.isEqual(where, 1e-6)]
                 self.assertEqual(len(expected), 1, (element, where))
                 self.assertEqual(firstName(shape, element), expected[0], element)
@@ -272,6 +273,34 @@ class TestPipeEndNames(unittest.TestCase):
         self.assertAlmostEqual(pipe.Shape.Volume, 480)
         self.assertStartKeepsNames(pipe.Shape, profile, onPlane(2, 0))
         self.assertEndProjects(pipe.Shape, profile, onPlane(2, 30))
+
+    def testSpineExtendedPastTheProfile(self):
+        """A spine drawn towards the profile (z = 30 down to z = 0), a fillet on the start edge
+        at the profile's place, then the spine extended past the profile to z = -10: the end
+        nearer the profile (z = -10) keeps its names, the far end (z = 30) is the projection, and
+        the fillet follows to z = -10. Before (fork PR 337 round 1), only a profile lying exactly
+        on the far end swapped the ends, so the names, and the fillet, went to z = 30."""
+        profile = self.square()
+        path = self.line(30, 0)
+        pipe = self.pipe(profile, path)
+        startEdge = lambda z: lambda point: abs(point.z - z) < 1e-6 and abs(point.y + 2) < 1e-6
+        edges = elementsWhere(pipe.Shape, "Edge", startEdge(0))
+        self.assertEqual(len(edges), 1, edges)
+        fillet = self.body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (pipe, edges)
+        fillet.Radius = 0.5
+        self.doc.recompute()
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+
+        path.deleteAllGeometry()
+        path.addGeometry(Part.LineSegment(V(0, 30, 0), V(0, -10, 0)))
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        self.assertAlmostEqual(pipe.Shape.Volume, 640)
+        self.assertStartKeepsNames(pipe.Shape, profile, onPlane(2, -10), shift=V(0, 0, -10))
+        self.assertEndProjects(pipe.Shape, profile, onPlane(2, 30))
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        self.assertEqual(fillet.Base[1], elementsWhere(pipe.Shape, "Edge", startEdge(-10)))
 
     def testAuxiliarySpine(self):
         """Auxiliary mode: a straight spine with a slanted auxiliary one."""

@@ -23,6 +23,9 @@
  ***************************************************************************/
 
 
+#include <algorithm>
+#include <limits>
+
 #include <Mod/Part/App/FCBRepAlgoAPI_Cut.h>
 #include <Mod/Part/App/FCBRepAlgoAPI_Fuse.h>
 #include <BRepBndLib.hxx>
@@ -69,11 +72,11 @@ namespace
 // edges and vertices are the first section's modified, so they keep its names (the sketch's
 // own), and the end wire's are the last section's projected (`PRJ`): for a pipe of one profile,
 // the profile moved to the end of the sweep. The shell starts where the spine does; when the
-// profile lies at the spine's far end instead (a spine drawn towards it), the ends swap roles, so
-// the names stay with the elements at the profile's place. Each end element is found through
-// the side face or edge its section element generated. A point section names only its end's
-// vertex. Edges at a bend, a corner or a middle section have no section element of their own:
-// they keep their `UPP` names.
+// profile lies nearer the spine's far end (a spine drawn towards it, perhaps extended past it),
+// the ends swap roles, so the names stay with the end at or nearest the profile's place; a tie
+// (a closed spine) keeps the start. Each end element is found through the side face or edge its
+// section element generated. A point section names only its end's vertex. Edges at a bend, a
+// corner or a middle section have no section element of their own: they keep their `UPP` names.
 class MapperPipeShellEnds: public Part::MapperMaker
 {
 public:
@@ -93,7 +96,8 @@ public:
         TopTools_IndexedMapOfShape endElements;
         TopExp::MapShapes(pipe.FirstShape(), startElements);
         TopExp::MapShapes(pipe.LastShape(), endElements);
-        const bool reversed = !liesAt(first, pipe.FirstShape()) && liesAt(first, pipe.LastShape());
+        const bool reversed = distanceTo(first, pipe.LastShape()) + Precision::Confusion()
+            < distanceTo(first, pipe.FirstShape());
         const TopTools_IndexedMapOfShape& own = reversed ? endElements : startElements;
         const TopTools_IndexedMapOfShape& other = reversed ? startElements : endElements;
         bindEnds(pipe, first, own, nullptr, starts);
@@ -139,32 +143,34 @@ public:
     }
 
 private:
-    /// Whether every vertex of \a section lies on a vertex of the shell's end \a end
-    static bool liesAt(const TopoDS_Shape& section, const TopoDS_Shape& end)
+    /// How far \a section lies from the shell's end \a end: the sum over its vertices of the
+    /// distance to the nearest vertex of the end; infinite when either has none
+    static double distanceTo(const TopoDS_Shape& section, const TopoDS_Shape& end)
     {
+        constexpr double none = std::numeric_limits<double>::infinity();
         if (section.IsNull() || end.IsNull()) {
-            return false;
+            return none;
         }
         TopTools_IndexedMapOfShape sectionVertices;
         TopTools_IndexedMapOfShape endVertices;
         TopExp::MapShapes(section, TopAbs_VERTEX, sectionVertices);
         TopExp::MapShapes(end, TopAbs_VERTEX, endVertices);
-        if (sectionVertices.IsEmpty()) {
-            return false;
+        if (sectionVertices.IsEmpty() || endVertices.IsEmpty()) {
+            return none;
         }
+        double sum = 0;
         for (int i = 1; i <= sectionVertices.Extent(); ++i) {
-            const gp_Pnt point = BRep_Tool::Pnt(TopoDS::Vertex(sectionVertices(i)));
-            bool found = false;
-            for (int j = 1; j <= endVertices.Extent() && !found; ++j) {
-                const TopoDS_Vertex& vertex = TopoDS::Vertex(endVertices(j));
-                found = point.Distance(BRep_Tool::Pnt(vertex))
-                    <= BRep_Tool::Tolerance(vertex) + Precision::Confusion();
+            const gp_Pnt at = BRep_Tool::Pnt(TopoDS::Vertex(sectionVertices(i)));
+            double nearest = none;
+            for (int j = 1; j <= endVertices.Extent(); ++j) {
+                nearest = std::min(
+                    nearest,
+                    at.Distance(BRep_Tool::Pnt(TopoDS::Vertex(endVertices(j))))
+                );
             }
-            if (!found) {
-                return false;
-            }
+            sum += nearest;
         }
-        return true;
+        return sum;
     }
 
     /// Binds each edge and vertex of \a section (in its order) to the elements of one end of
