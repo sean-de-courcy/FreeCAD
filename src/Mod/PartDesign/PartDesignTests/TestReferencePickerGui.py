@@ -216,7 +216,8 @@ class TestReferencePickerGui(unittest.TestCase):
         [(reference, state, element, held)] = panel.rows()
         self.assertEqual((reference, element, held), ("Base[0]", corner, original))
         self.assertIn("tier 3", state)
-        self.assertIn(original, panel.header.text())
+        # the header's warning is the short same-place text (ops#391); the row names the original
+        self.assertIn("found again in the same place", panel.header.text())
         self.assertTrue(panel.accept.isEnabled())
         self.assertTrue(panel.broken.isEnabled())
         self.assertFalse(panel.use.isEnabled())

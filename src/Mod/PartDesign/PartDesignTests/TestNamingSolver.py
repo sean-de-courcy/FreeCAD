@@ -819,8 +819,8 @@ class TestNamingSolver(unittest.TestCase):
 
     def testGeometryResolutionWarnsWithARecord(self):
         """The redrawn rectangle's edge, found by tier 3: the fillet computes, with the Warning
-        state and a text naming the edge, the original and the tier; the reference holds the
-        edge, and its saved record names the original."""
+        state and, the edge being where it was, the short same-place text (ops#391); the
+        reference holds the edge, and its saved record names the original."""
         doc, pad, fillet, original = self.redrawnFillet()
 
         corner = edge("line", direction=Z, through=(20, 0, 0)).one(pad.Shape)
@@ -828,8 +828,7 @@ class TestNamingSolver(unittest.TestCase):
         self.assertIn("Warning", fillet.State)
         self.assertEqual(
             fillet.getStatusString(),
-            "Warning: Edge reference resolved by geometry: %s for %s (Base[0], tier 3)"
-            % (corner[0], original),
+            "Warning: Edge reference found again in the same place (Base[0])",
         )
         [entry] = App.getReferenceReport(fillet)
         self.assertEqual((entry["status"], entry["tier"]), ("resolved", 3))
@@ -1547,15 +1546,15 @@ class TestNamingSolver(unittest.TestCase):
         sketch.addGeometry(models.rectangle(*corners), False)
 
     def assertWarnedInPlace(self, owner, kind, expected):
-        """The reference resolved by geometry at tier 3, on `expected`, with a warning. Returns
-        its report row."""
+        """The reference resolved by geometry at tier 3, on `expected`, with a warning: the
+        short same-place text and the quieter level (ops#391). Returns its report row."""
         self.assertTrue(owner.isValid(), owner.getStatusString())
         self.assertIn("Warning", owner.State)
         [entry] = App.getReferenceReport(owner)
         self.assertEqual((entry["status"], entry["tier"]), ("resolved", 3), entry)
-        self.assertIn(
-            f"{kind} reference resolved by geometry: {expected} for ", owner.getStatusString()
-        )
+        self.assertEqual(entry["new"], expected, entry)
+        self.assertIn(f"{kind} reference found again in the same place (", owner.getStatusString())
+        self.assertEqual(entry["warning_level"], "same-place", entry)
         return entry
 
     def testHorizontalHoleKeepsTheEntryCircle(self):
