@@ -573,6 +573,34 @@ def modelTwoSidesOnePrimitive(doc):
     return features
 
 
+def modelPadUpToFreeform(doc):
+    """A Pad and a Pocket from two rectangles up to a B-spline plate (ops#360): the split
+    builds them, the plate not being elementary. A (x 0..2, y 0..2) and B (x 5..8, y 0..3) padded
+    from z = 0 up to the plate at z = 10, and pocketed from the top of a block x -2..12, y -5..8,
+    z 0..10, down to the plate at z = 4. Each far cap (floor) is a projection of its own profile
+    face."""
+    features = []
+    for kind, z in (("Pad", 10), ("Pocket", 4)):
+        corners = [(-10, -10, z), (20, -10, z), (20, 10, z), (-10, 10, z)]
+        plate = Part.Face(models.closedWire(corners)).toNurbs().Faces[0]
+        plateFeature = models.feature(doc, f"Plate{kind}", plate)
+        body = models.body(doc)
+        top = 0
+        if kind == "Pocket":
+            block = models.sketch(doc, "Block", models.rectangle(-2, -5, 12, 8), body)
+            models.pad(body, block, 10, "BlockPad")
+            top = 10
+        rectangles = models.rectangle(0, 0, 2, 2) + models.rectangle(5, 0, 8, 3)
+        profile = models.sketch(doc, f"Profile{kind}", rectangles, body, z=top)
+        feature = body.newObject(f"PartDesign::{kind}", f"UpToFreeform{kind}")
+        feature.Profile = profile
+        feature.Refine = False
+        feature.Type = "UpToFace"
+        feature.UpToFace = (plateFeature, ["Face1"])
+        features.append(feature)
+    return features
+
+
 MODELS = {
     "Sketch": modelSketch,
     "PadPocket": modelPadPocket,
@@ -594,6 +622,7 @@ MODELS = {
     "RevolutionUpToFace": modelRevolutionUpToFace,
     "PadUpToFace": modelPadUpToFace,
     "TwoSidesOnePrimitive": modelTwoSidesOnePrimitive,
+    "PadUpToFreeform": modelPadUpToFreeform,
 }
 
 # ---------------------------------------------------------------------------------------------
