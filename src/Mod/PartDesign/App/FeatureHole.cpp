@@ -1274,7 +1274,9 @@ void Hole::updateDiameterParam()
 {
     int threadType = ThreadType.getValue();
     int threadSize = ThreadSize.getValue();
-    if (threadType > 0 && threadSize > 0) {
+    // FreeCAD-CH (ops#389): >= 0, so the first size of a type (M1) sets it too: the stale
+    // diameter made the restore's findClosestDesignation() reopen an M1 hole as M1.2
+    if (threadType > 0 && threadSize >= 0) {
         ThreadDiameter.setValue(threadDescription[threadType][threadSize].diameter);
     }
     if (auto opt = determineDiameter()) {

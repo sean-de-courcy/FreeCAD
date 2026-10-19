@@ -300,6 +300,34 @@ class TestHole(unittest.TestCase):
             proposed = 1.5 * hole.Diameter.Value + 1 if depth else 2.24 * hole.Diameter.Value
             self.assertAlmostEqual(hole.HoleCutDiameter.Value, proposed, msg=(cut, "new size"))
 
+    def testFirstThreadSizeSurvivesReopen(self):
+        """A hole of the first size of a thread type (M1) keeps it after a save and reopen
+        (ops#389): its ThreadDiameter was never set, and the restore picked the size closest to
+        the stale value (M1.2, a wider hole) without a message."""
+        self.Hole.ThreadType = "ISOMetricProfile"
+        self.Hole.ThreadSize = "M6x1.0"
+        self.Hole.ThreadSize = "M1.2x0.25"
+        self.Hole.ThreadSize = "M1x0.25"
+        self.Hole.Depth = 10
+        self.Hole.DepthType = "Dimension"
+        self.Hole.DrillPoint = "Flat"
+        self.Hole.Tapered = False
+        self.Doc.recompute()
+        diameter = self.Hole.Diameter.Value
+        self.assertAlmostEqual(self.Hole.Shape.Volume, 10**3 - pi * (diameter / 2) ** 2 * 10)
+
+        folder = tempfile.mkdtemp()
+        path = os.path.join(folder, "PartDesignTestHoleM1.FCStd")
+        self.Doc.saveAs(path)
+        FreeCAD.closeDocument(self.Doc.Name)
+        self.Doc = FreeCAD.openDocument(path)
+        hole = self.Doc.getObject("Hole")
+        self.assertEqual(hole.ThreadSize, "M1x0.25")
+        self.assertAlmostEqual(hole.Diameter.Value, diameter)
+        hole.touch()
+        self.Doc.recompute()
+        self.assertAlmostEqual(hole.Shape.Volume, 10**3 - pi * (diameter / 2) ** 2 * 10)
+
     def testNoRefineHole(self):
         # Add a second box to get a shape with more faces
         self.Box2 = self.Doc.addObject("PartDesign::AdditiveBox", "Box")
