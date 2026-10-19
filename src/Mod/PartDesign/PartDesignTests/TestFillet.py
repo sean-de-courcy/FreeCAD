@@ -455,6 +455,17 @@ class TestFillet(unittest.TestCase):
         self.assertLess(removed, models.pyramid_edge_rounds(1))
         self.assertGreater(removed, 0.98 * models.pyramid_edge_rounds(1))
 
+    def testFilletDropsTheLoosePartsOfABaseFeature(self):
+        # With Allow Compound, a BaseFeature of a cube beside loose parts: the Fillet keeps solids
+        # and shells only, as OCCT returns them, and a Pad on its top works (ops#303; PR 341
+        # review: the Pad failed with "Null shape" on a Fillet that kept a loose face)
+        pad = models.pad_on_dressed_up_base(self.Doc, "Fillet", 1.0)
+        self.assertTrue(pad.isValid(), pad.getStatusString())
+        fillet = self.Doc.getObject("Fillet")
+        self.assertEqual(models.loose_parts(fillet.Shape), ([], [], []))
+        volume = sum(s.Volume for s in pad.Shape.Solids)
+        self.assertAlmostEqual(volume, 1000 - self._fillet_section(1) * 10 + 48, delta=1e-6)
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("PartDesignTestFillet")

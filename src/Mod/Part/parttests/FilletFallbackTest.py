@@ -577,7 +577,8 @@ class InvalidDressUpTest(unittest.TestCase):
 
     def testRepairDropsTheFinOfABaseWithALooseFace(self):
         # The fin cube beside a loose square face: OCCT's result drops the face, a solid with the
-        # fin, and its repair is the same compound with the fin outside the solid
+        # fin, and its repair is the same compound with the fin outside the solid. The repair
+        # keeps the solid, and the face is put back (ops#303)
         corners = [V(20, 0, 0), V(30, 0, 0), V(30, 10, 0), V(20, 10, 0)]
         loose = Part.Face(Part.makePolygon(corners, True))
         base = Part.Compound([cube_with_fin(), loose])
@@ -586,9 +587,14 @@ class InvalidDressUpTest(unittest.TestCase):
             feature = self.dressUp(kind, base, [edge], [(1, 1)])
             self.assertTrue(feature.isValid(), feature.getStatusString())
             shape = feature.Shape
-            self.assertEqual(shape.ShapeType, "Solid")
-            self.assertEqual(len(shape.Faces), 7)
-            self.assertExact(shape, 1000 - removed)
+            self.assertEqual(shape.ShapeType, "Compound")
+            self.assertEqual(len(shape.Solids), 1)
+            self.assertEqual(len(shape.Solids[0].Faces), 7)
+            self.assertExact(shape.Solids[0], 1000 - removed)
+            faces, edges, vertices = loose_parts(shape)
+            self.assertEqual((len(faces), len(edges), len(vertices)), (1, 0, 0))
+            self.assertAlmostEqual(faces[0].Area, 100, delta=1e-9)
+            self.assertTrue(faces[0].BoundBox.isInside(V(25, 5, 0)))
 
     def testPartFeaturesAtTheLimit(self):
         # Part::Fillet and Part::Chamfer build what OCCT refuses as makeFillet does (ops#300)
@@ -674,6 +680,209 @@ class InvalidDressUpTest(unittest.TestCase):
         self.assertIn("face of zero width", fillet.getStatusString())
         fillet = self.dressUp("Fillet", box, top_edges(box), [(2 - 1e-5,) * 2, (2 - 2e-5,) * 2])
         self.assertTrue(fillet.isValid(), fillet.getStatusString())
+
+
+def loose_parts(shape):
+    """The shape's faces outside its shells, edges outside its faces and vertices outside its
+    edges"""
+    shell_faces = [f for s in shape.Shells for f in s.Faces]
+    faces = [f for f in shape.Faces if not any(f.isSame(g) for g in shell_faces)]
+    face_edges = [e for f in shape.Faces for e in f.Edges]
+    edges = [e for e in shape.Edges if not any(e.isSame(g) for g in face_edges)]
+    edge_vertices = [v for e in shape.Edges for v in e.Vertexes]
+    vertices = [v for v in shape.Vertexes if not any(v.isSame(w) for w in edge_vertices)]
+    return faces, edges, vertices
+
+
+def cube_beside_loose_parts():
+    """A 10 mm cube in a compound with a 10 mm square face, a 10 mm line, a wire of two 10 mm
+    lines and a vertex, all outside it"""
+    square = [V(20, 0, 0), V(30, 0, 0), V(30, 10, 0), V(20, 10, 0)]
+    return Part.Compound(
+        [
+            Part.makeBox(10, 10, 10),
+            Part.Face(Part.makePolygon(square, True)),
+            Part.makeLine(V(40, 0, 0), V(50, 0, 0)),
+            Part.makePolygon([V(60, 0, 0), V(70, 0, 0), V(70, 10, 0)]),
+            Part.Vertex(V(80, 0, 0)),
+        ]
+    )
+
+
+def pad_on_dressed_up_base(doc, kind, size):
+    """A PartDesign Body with Allow Compound whose BaseFeature is cube_beside_loose_parts(); a
+    Fillet or Chamfer of the cube's front top edge; a Pad 3 high of a 4 mm square on its top, clear
+    of the dress-up. Returns the Pad (for the PartDesign tests)"""
+    base = doc.addObject("Part::Feature", "Base")
+    base.Shape = cube_beside_loose_parts()
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.AllowCompound = True
+    body.BaseFeature = base
+    doc.recompute()
+    dressed = body.newObject("PartDesign::" + kind, kind)
+    edge = edge_between(base.Shape, (0, 0, 10), (10, 0, 10))
+    index = next(i for i, e in enumerate(base.Shape.Edges, 1) if e.isSame(edge))
+    dressed.Base = (body.BaseFeature, ["Edge%d" % index])
+    if kind == "Fillet":
+        dressed.Radius = size
+    else:
+        dressed.Size = size
+    doc.recompute()
+    sketch = body.newObject("Sketcher::SketchObject", "Sketch")
+    sketch.Placement = FreeCAD.Placement(V(0, 0, 10), FreeCAD.Rotation())
+    corners = [V(2, 2, 0), V(6, 2, 0), V(6, 6, 0), V(2, 6, 0)]
+    for i in range(4):
+        sketch.addGeometry(Part.LineSegment(corners[i], corners[(i + 1) % 4]))
+    pad = body.newObject("PartDesign::Pad", "Pad")
+    pad.Profile = sketch
+    pad.Length = 3
+    doc.recompute()
+    return pad
+
+
+def cube_with_void(origin, size):
+    """A 10 mm cube with a box-shaped void"""
+    return Part.makeBox(10, 10, 10).cut(Part.makeBox(*size, V(*origin)))
+
+
+def cube_with_moved_void(shell):
+    """The 10 mm cube with a 2 mm void whose shell is replaced: an invalid solid"""
+    solid = cube_with_void((4, 6, 6), (2, 2, 2))
+    void = next(s for s in solid.Shells if s.BoundBox.XLength < 3)
+    return solid.replaceShape([(void, shell(void))])
+
+
+class DroppedBasePartsTest(unittest.TestCase):
+    """OCCT's fillet and chamfer drop parts of the base they leave alone (ops#303): its faces,
+    wires, edges and vertices outside its shells, and the shells of a solid they change that don't
+    bound the rebuilt solid. Part::Fillet and Part::Chamfer put the loose parts back, and fail
+    where a lost shell bounds material or a lost void is now inside material.
+    """
+
+    setUp = InvalidDressUpTest.setUp
+    tearDown = InvalidDressUpTest.tearDown
+    dressUp = InvalidDressUpTest.dressUp
+    assertFails = InvalidDressUpTest.assertFails
+
+    def testLoosePartsOfTheBaseStay(self):
+        base = cube_beside_loose_parts()
+        front = edge_between(base, (0, 0, 10), (10, 0, 10))
+        back = edge_between(base, (0, 10, 10), (10, 10, 10))
+        # One size, and a size per edge (OCCT's maker in Part::Fillet itself)
+        two = [(1, 1), (0.5, 0.5)]
+        for kind, edges, sizes, removed in (
+            ("Fillet", [front], [(1, 1)], fillet_section(1) * 10),
+            ("Chamfer", [front], [(1, 1)], 0.5 * 10),
+            ("Fillet", [front, back], two, (fillet_section(1) + fillet_section(0.5)) * 10),
+            ("Chamfer", [front, back], two, (0.5 + 0.125) * 10),
+        ):
+            feature = self.dressUp(kind, base, edges, sizes)
+            self.assertTrue(feature.isValid(), feature.getStatusString())
+            shape = feature.Shape
+            self.assertTrue(shape.isValid())
+            self.assertEqual(len(shape.Solids), 1)
+            self.assertAlmostEqual(shape.Solids[0].Volume, 1000 - removed, delta=1e-6)
+            faces, edges, vertices = loose_parts(shape)
+            self.assertEqual((len(faces), len(edges), len(vertices)), (1, 3, 1))
+            self.assertAlmostEqual(faces[0].Area, 100, delta=1e-9)
+            self.assertAlmostEqual(sum(e.Length for e in edges), 30, delta=1e-9)
+            self.assertEqual(len(shape.Wires), len(shape.Solids[0].Wires) + 2)
+            self.assertTrue(vertices[0].Point.isEqual(V(80, 0, 0), 1e-12))
+
+    def testSecondOuterShellFails(self):
+        # The cube's solid with a second outer shell, a 5 mm cube beside it: OCCT's result is the
+        # dressed-up cube alone, valid, without the 125 mm3 of the second shell
+        base = cube_with_moved_void(lambda void: Part.makeBox(5, 5, 5, V(20, 0, 0)).Shells[0])
+        self.assertAlmostEqual(base.Volume, 1125, delta=1e-9)
+        edge = edge_between(base, (0, 0, 10), (10, 0, 10))
+        for kind in ("Fillet", "Chamfer"):
+            self.assertFails(self.dressUp(kind, base, [edge], [(1, 1)]))
+
+    def testChamferIntoAVoidFails(self):
+        # A void 4 x 2 x 2 under the front top edge, which a chamfer of 3 cuts into: OCCT's result
+        # has no void and the volume of the plain cube's chamfer, as if material filled it. A
+        # fillet of 3 stays clear of the void ((3 - y)^2 + (z - 7)^2 <= 8 there), and keeps it
+        base = cube_with_void((3, 1, 7), (4, 2, 2))
+        edge = edge_between(base, (0, 0, 10), (10, 0, 10))
+        self.assertFails(self.dressUp("Chamfer", base, [edge], [(3, 3)]))
+        fillet = self.dressUp("Fillet", base, [edge], [(3, 3)])
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        self.assertEqual(len(fillet.Shape.Shells), 2)
+        self.assertAlmostEqual(fillet.Shape.Volume, 1000 - fillet_section(3) * 10 - 16, delta=1e-6)
+
+    def testChamferIntoACurvedVoidFails(self):
+        # A void a chamfer cuts into where no vertex or edge of it is (PR 341 review): a bore along
+        # the edge, and a sphere centred on the chamfer's plane with its seam away from the cut.
+        # OCCT's result has no void and the plain cube's chamfer volume
+        cube = Part.makeBox(20, 20, 20)
+        bore = cube.cut(Part.makeCylinder(1.9, 12, V(4, 1.95, 18.05), V(1, 0, 0)))
+        edge = edge_between(bore, (0, 0, 20), (20, 0, 20))
+        self.assertFails(self.dressUp("Chamfer", bore, [edge], [(6, 6)]))
+        sphere = Part.makeSphere(2, V(0, 0, 0), V(1, 0, 0))
+        sphere.translate(V(5, 3, 7))
+        base = Part.makeBox(10, 10, 10).cut(sphere)
+        edge = edge_between(base, (0, 0, 10), (10, 0, 10))
+        self.assertFails(self.dressUp("Chamfer", base, [edge], [(6, 6)]))
+
+    def testVoidsOfSeveralSolids(self):
+        # Two cubes with a void each: A's 4 x 2 x 2 void under its front top edge, which a chamfer
+        # of 3 cuts into and a fillet of 3 clears; B's 2 mm void away from its edges
+        a = cube_with_void((3, 1, 7), (4, 2, 2))
+        b = Part.makeBox(10, 10, 10, V(20, 0, 0)).cut(Part.makeBox(2, 2, 2, V(24, 4, 4)))
+        base = Part.Compound([a, b])
+        front_a = edge_between(base, (0, 0, 10), (10, 0, 10))
+        front_b = edge_between(base, (20, 0, 10), (30, 0, 10))
+        self.assertFails(self.dressUp("Chamfer", base, [front_a], [(3, 3)]))
+        for kind, edge, removed in (
+            ("Chamfer", front_b, 4.5 * 10),
+            ("Fillet", front_a, fillet_section(3) * 10),
+            ("Fillet", front_b, fillet_section(3) * 10),
+        ):
+            feature = self.dressUp(kind, base, [edge], [(3, 3)])
+            self.assertTrue(feature.isValid(), feature.getStatusString())
+            self.assertEqual(len(feature.Shape.Solids), 2)
+            self.assertEqual(len(feature.Shape.Shells), 4)
+            self.assertAlmostEqual(feature.Shape.Volume, 2000 - 16 - 8 - removed, delta=1e-6)
+
+    def testIslandInACavityFails(self):
+        # A 20 mm cube's solid with an 8 mm cavity and a 2 mm island inside it, a third shell of the
+        # same solid (invalid): OCCT's dress-up of an outer edge drops the island and its material
+        hollow = Part.makeBox(20, 20, 20).cut(Part.makeBox(8, 8, 8, V(6, 6, 6)))
+        hollow = hollow.cut(Part.makeBox(1, 1, 1, V(1, 1, 1)))
+        small = next(s for s in hollow.Shells if s.BoundBox.XLength < 1.5)
+        base = hollow.replaceShape([(small, Part.makeBox(2, 2, 2, V(9, 9, 9)).Shells[0])])
+        self.assertAlmostEqual(base.Volume, 8000 - 512 + 8, delta=1e-9)
+        edge = edge_between(base, (0, 0, 20), (20, 0, 20))
+        for kind in ("Fillet", "Chamfer"):
+            self.assertFails(self.dressUp(kind, base, [edge], [(3, 3)]))
+
+    def testSolidInsideARemovedVoidStays(self):
+        # The void the chamfer of 3 removes with its material, holding a 1 x 0.2 x 0.2 box, another
+        # solid of the compound: the box was there in the base, so it fills nothing (PR 341 round 1
+        # verification)
+        cube = cube_with_void((3, 0.2, 9.3), (4, 0.5, 0.5))
+        base = Part.Compound([cube, Part.makeBox(1, 0.2, 0.2, V(4, 0.35, 9.45))])
+        edge = edge_between(base, (0, 0, 10), (10, 0, 10))
+        feature = self.dressUp("Chamfer", base, [edge], [(3, 3)])
+        self.assertTrue(feature.isValid(), feature.getStatusString())
+        self.assertEqual(len(feature.Shape.Solids), 2)
+        self.assertAlmostEqual(feature.Shape.Volume, 1000 - 4.5 * 10 + 0.04, delta=1e-6)
+
+    def testVoidRemovedWithItsMaterialStaysRemoved(self):
+        # A void 4 x 0.5 x 0.5 inside the wedge a chamfer or fillet of 3 removes, and a void moved
+        # outside the cube (an invalid solid): neither bounds what is left, and the result is the
+        # plain cube's
+        consumed = cube_with_void((3, 0.2, 9.3), (4, 0.5, 0.5))
+        outside = cube_with_moved_void(lambda void: void.translated(V(20, 0, 0)))
+        # A sphere's space and the solid around it share its face, where OCCT's Common warns
+        sphere = Part.makeBox(10, 10, 10).cut(Part.makeSphere(0.2, V(5, 0.5, 9.5)))
+        for base in (consumed, outside, sphere):
+            edge = edge_between(base, (0, 0, 10), (10, 0, 10))
+            for kind, removed in (("Fillet", fillet_section(3) * 10), ("Chamfer", 4.5 * 10)):
+                feature = self.dressUp(kind, base, [edge], [(3, 3)])
+                self.assertTrue(feature.isValid(), feature.getStatusString())
+                self.assertEqual(len(feature.Shape.Shells), 1)
+                self.assertAlmostEqual(feature.Shape.Volume, 1000 - removed, delta=1e-6)
 
 
 def tolerances(shape):

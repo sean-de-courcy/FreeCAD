@@ -15,8 +15,11 @@
 #include <tuple>
 #include <vector>
 
+#include <Bnd_Box.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
+#include <BRepAlgoAPI_Common.hxx>
+#include <BRepBndLib.hxx>
 #include <BRepGProp.hxx>
 #include <GProp_GProps.hxx>
 #include <gp_Pnt.hxx>
@@ -27,6 +30,7 @@
 #include <TopoDS.hxx>
 #include <TopoDS_Compound.hxx>
 #include <TopoDS_Iterator.hxx>
+#include <TopoDS_Solid.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 
@@ -569,9 +573,225 @@ bool hasOpenShellInASolid(const TopoDS_Shape& shape)
     return false;
 }
 
-}  // namespace
+// Each closed shell of the shape's solids, with the volume it bounds: negative for a void
+std::vector<std::pair<TopoDS_Shape, double>> closedShells(const TopoDS_Shape& shape)
+{
+    std::vector<std::pair<TopoDS_Shape, double>> shells;
+    for (TopExp_Explorer solid(shape, TopAbs_SOLID); solid.More(); solid.Next()) {
+        for (TopoDS_Iterator it(solid.Current()); it.More(); it.Next()) {
+            const TopoDS_Shape& shell = it.Value();
+            if (shell.ShapeType() == TopAbs_SHELL
+                && (shell.Orientation() == TopAbs_FORWARD || shell.Orientation() == TopAbs_REVERSED)
+                && closesUp(shell)) {
+                GProp_GProps props;
+                BRepGProp::VolumeProperties(shell, props);
+                shells.emplace_back(shell, props.Mass());
+            }
+        }
+    }
+    return shells;
+}
 
-bool checkDressUp(TopoShape& shape, const TopoShape& base)
+// The space a void's shell encloses, as a solid of positive volume
+TopoDS_Solid voidSpace(const TopoDS_Shape& shell)
+{
+    BRep_Builder builder;
+    TopoDS_Solid solid;
+    builder.MakeSolid(solid);
+    builder.Add(solid, shell.Reversed());
+    return solid;
+}
+
+// A solid, or a void's space, with its bounding box
+struct Space
+{
+    TopoDS_Shape solid;
+    Bnd_Box box;
+};
+
+Space spaceOf(const TopoDS_Shape& solid)
+{
+    Space space {solid, {}};
+    BRepBndLib::Add(solid, space.box);
+    return space;
+}
+
+// The volume two solids share, or nothing if the Boolean fails. Not on warnings: a void's space
+// and the solid around it share their faces, which warns on a sphere's
+std::optional<double> sharedVolume(const Space& a, const Space& b)
+{
+    if (a.box.IsOut(b.box)) {
+        return 0.0;
+    }
+    try {
+        BRepAlgoAPI_Common common(a.solid, b.solid);
+        if (!common.IsDone() || common.HasErrors()) {
+            return std::nullopt;
+        }
+        GProp_GProps props;
+        BRepGProp::VolumeProperties(common.Shape(), props);
+        return props.Mass();
+    }
+    catch (const Standard_Failure&) {
+        return std::nullopt;
+    }
+}
+
+// The volume a space shares with the solids, or nothing if a Boolean fails
+std::optional<double> sharedVolume(const Space& space, const std::vector<Space>& solids)
+{
+    double total = 0.0;
+    for (const auto& solid : solids) {
+        const auto shared = sharedVolume(space, solid);
+        if (!shared) {
+            return std::nullopt;
+        }
+        total += *shared;
+    }
+    return total;
+}
+
+std::vector<Space> solidSpaces(const TopoDS_Shape& shape)
+{
+    std::vector<Space> spaces;
+    for (TopExp_Explorer solid(shape, TopAbs_SOLID); solid.More(); solid.Next()) {
+        spaces.push_back(spaceOf(solid.Current()));
+    }
+    return spaces;
+}
+
+/* Why the dress-up's result lost a closed shell of the base's solids, or null. OCCT's fillet and
+ * chamfer rebuild a solid they change from its outer shell, and keep its other shells only where
+ * they bound the rebuilt solid (ops#303): a second outer shell goes, and its material with it; a
+ * void goes also where the material around it stays (a chamfer cutting into it), which fills it.
+ * A void that goes with the material around it, or one outside it (an invalid base), rightly
+ * goes. */
+const char* droppedShell(const TopoDS_Shape& shape, const TopoDS_Shape& base)
+{
+    // Only a solid with more shells than its outer one has one to lose
+    int most = 0;
+    for (TopExp_Explorer solid(base, TopAbs_SOLID); solid.More(); solid.Next()) {
+        int shells = 0;
+        for (TopoDS_Iterator it(solid.Current()); it.More(); it.Next()) {
+            ++shells;
+        }
+        most = std::max(most, shells);
+    }
+    if (most < 2) {
+        return nullptr;
+    }
+    const auto before = closedShells(base);
+    const auto after = closedShells(shape);
+    const auto count = [](const auto& shells, bool material) {
+        return std::count_if(shells.begin(), shells.end(), [&](const auto& shell) {
+            return material ? shell.second > 0 : shell.second < 0;
+        });
+    };
+    if (count(after, true) < count(before, true)) {
+        return "drops a shell of the base's solids that bounds material";
+    }
+    if (count(after, false) >= count(before, false)) {
+        return nullptr;
+    }
+    // A void the result lost is one no void of the result overlaps: a void the dress-up changes
+    // (an edge of it rounded) stays one. A lost void's space must hold no more material of the
+    // result than of the base (another solid of a compound may lie in it), which a sample of points
+    // on a sphere or a cylinder misses (PR 341 reviews). Bounding boxes spare most Booleans
+    std::vector<Space> keptVoids;
+    for (const auto& [shell, volume] : after) {
+        if (volume < 0) {
+            keptVoids.push_back(spaceOf(voidSpace(shell)));
+        }
+    }
+    std::optional<std::vector<Space>> resultSolids;
+    std::optional<std::vector<Space>> baseSolids;
+    for (const auto& [shell, volume] : before) {
+        if (volume >= 0) {
+            continue;
+        }
+        const double threshold = 1e-6 * -volume;
+        const Space space = spaceOf(voidSpace(shell));
+        const bool kept = std::any_of(keptVoids.begin(), keptVoids.end(), [&](const auto& other) {
+            const auto shared = sharedVolume(space, other);
+            return shared && *shared > threshold;
+        });
+        if (kept) {
+            continue;
+        }
+        if (!resultSolids) {
+            resultSolids = solidSpaces(shape);
+            baseSolids = solidSpaces(base);
+        }
+        const auto filled = sharedVolume(space, *resultSolids);
+        const auto had = sharedVolume(space, *baseSolids);
+        if (!filled || !had) {
+            return "loses a void of the base whose space can't be checked";
+        }
+        if (*filled - *had > threshold) {
+            return "fills a void of the base";
+        }
+    }
+    return nullptr;
+}
+
+// The members of the shape's compounds that are faces, wires, edges or vertices, outside every
+// shell
+void collectLooseParts(const TopoShape& shape, std::vector<TopoShape>& parts)
+{
+    if (shape.getShape().ShapeType() != TopAbs_COMPOUND) {
+        return;
+    }
+    for (const auto& member : shape.getSubTopoShapes()) {
+        switch (member.getShape().ShapeType()) {
+            case TopAbs_COMPOUND:
+                collectLooseParts(member, parts);
+                break;
+            case TopAbs_FACE:
+            case TopAbs_WIRE:
+            case TopAbs_EDGE:
+            case TopAbs_VERTEX:
+                parts.push_back(member);
+                break;
+            default:
+                break;
+        }
+    }
+}
+
+/* Puts the base's loose parts into the dress-up's result: OCCT's fillet and chamfer keep only the
+ * solids and shells of their input, and drop its loose faces, wires, edges and vertices, which
+ * they leave alone (ops#303). False if the result has loose parts of its own: they would come
+ * from the maker's copy of the base, so which of the base's they are can't be told. */
+bool keepLooseParts(TopoShape& shape, const TopoShape& base)
+{
+    std::vector<TopoShape> parts;
+    collectLooseParts(base, parts);
+    if (parts.empty()) {
+        return true;
+    }
+    std::vector<TopoShape> kept;
+    collectLooseParts(shape, kept);
+    if (!kept.empty()) {
+        FC_WARN("Dress-up result with " << kept.size() << " shapes outside its shells, beside the "
+                                        << "base's " << parts.size());
+        return false;
+    }
+    std::vector<TopoShape> members;
+    if (shape.getShape().ShapeType() == TopAbs_COMPOUND) {
+        members = shape.getSubTopoShapes();
+    }
+    else {
+        members.push_back(shape);
+    }
+    members.insert(members.end(), parts.begin(), parts.end());
+    TopoShape res(shape.Tag, shape.Hasher, shape.getHistoryAlgorithm());
+    res.makeElementCompound(members);
+    shape = res;
+    return true;
+}
+
+// checkDressUp() for what OCCT kept of the base: its solids and shells
+bool checkResult(TopoShape& shape, const TopoShape& base)
 {
     // An invalid base passes its defects on, also into a result BRepCheck accepts: there it is
     // repaired as an invalid one. A valid base keeps the check as before, since a solid may hold an
@@ -626,6 +846,21 @@ bool checkDressUp(TopoShape& shape, const TopoShape& base)
     }
     shape = repaired;
     return true;
+}
+
+}  // namespace
+
+bool checkDressUp(TopoShape& shape, const TopoShape& base, LooseParts looseParts)
+{
+    if (!checkResult(shape, base)) {
+        return false;
+    }
+    // After the repair, which may close a shell that closesUp() would not count
+    if (const char* why = droppedShell(shape.getShape(), base.getShape())) {
+        FC_WARN("Dress-up result that " << why);
+        return false;
+    }
+    return looseParts == LooseParts::drop || keepLooseParts(shape, base);
 }
 
 }  // namespace Part

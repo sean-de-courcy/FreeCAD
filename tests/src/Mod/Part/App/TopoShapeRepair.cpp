@@ -9,12 +9,14 @@
 #include <Mod/Part/App/TopoShape.h>
 #include <Mod/Part/App/TopoShapeRepair.h>
 
+#include <BRepAlgoAPI_Cut.hxx>
 #include <BRep_Builder.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRep_Tool.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
+#include <BRepPrimAPI_MakePrism.hxx>
 #include <BRepPrimAPI_MakeSphere.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Trsf.hxx>
@@ -146,5 +148,33 @@ TEST_F(CheckDressUpTest, internalFacesOfAValidResultOnAnInvalidBaseStay)
 
     EXPECT_TRUE(Part::checkDressUp(result, invalidBase));
     EXPECT_EQ(result.countSubShapes(TopAbs_FACE), 7U);
+    EXPECT_EQ(result.countSubShapes(TopAbs_SHELL), 2U);
+}
+
+TEST_F(CheckDressUpTest, aChangedVoidBesideAVoidRemovedWithItsMaterialStays)
+{
+    // The base: the 10 mm box with a 2 mm void A and a 4 x 0.5 x 0.5 void B under its front top
+    // edge. The result, made by Booleans: the box less the wedge z > 7 + y (a chamfer of 3, which
+    // removes B), with A 0.5 lower, as if the dress-up had rounded A's top edges. A is changed,
+    // not lost, and holds material of the result where it was; only the lost B is checked, and
+    // its space holds none (PR 341 review)
+    const auto cut = [](const TopoDS_Shape& a, const TopoDS_Shape& b) {
+        return BRepAlgoAPI_Cut(a, b).Shape();
+    };
+    const TopoDS_Shape voidA = BRepPrimAPI_MakeBox(gp_Pnt(4, 4, 2), 2, 2, 2).Shape();
+    const TopoDS_Shape voidB = BRepPrimAPI_MakeBox(gp_Pnt(3, 0.2, 9.3), 4, 0.5, 0.5).Shape();
+    Part::TopoShape base(cut(cut(box(0), voidA), voidB), 1L);
+    BRepBuilderAPI_MakePolygon
+        triangle(gp_Pnt(-1, -1, 6), gp_Pnt(-1, 4, 11), gp_Pnt(-1, -1, 11), true);
+    const TopoDS_Shape wedge
+        = BRepPrimAPI_MakePrism(BRepBuilderAPI_MakeFace(triangle.Wire()).Face(), gp_Vec(12, 0, 0))
+              .Shape();
+    const TopoDS_Shape lowerA = BRepPrimAPI_MakeBox(gp_Pnt(4, 4, 2), 2, 2, 1.5).Shape();
+    Part::TopoShape result(cut(cut(box(0), wedge), lowerA), 1L);
+    ASSERT_TRUE(result.isValid());
+    ASSERT_EQ(base.countSubShapes(TopAbs_SHELL), 3U);
+    ASSERT_EQ(result.countSubShapes(TopAbs_SHELL), 2U);
+
+    EXPECT_TRUE(Part::checkDressUp(result, base));
     EXPECT_EQ(result.countSubShapes(TopAbs_SHELL), 2U);
 }

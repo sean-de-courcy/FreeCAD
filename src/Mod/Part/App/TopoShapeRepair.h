@@ -40,6 +40,13 @@ class TopoShape;
  */
 PartExport bool fixKeepingNames(TopoShape& shape, const TopoShape& before);
 
+/// What checkDressUp() does with the base's faces, wires, edges and vertices outside its shells
+enum class LooseParts
+{
+    keep,
+    drop
+};
+
 /** Checks a fillet's or chamfer's result, which OCCT sometimes returns invalid without an error
  * (FreeCAD-CH, ops#297).
  *
@@ -56,11 +63,25 @@ PartExport bool fixKeepingNames(TopoShape& shape, const TopoShape& before);
  * dropped don't enclose a volume, and fails otherwise. A result with faces outside its solids may
  * not have more of them after the repair. A failure is logged with its reason.
  *
- * @param shape The result; replaced by the repaired shape if the repair is kept
+ * OCCT also drops parts of the base it leaves alone (ops#303). A result that lost a closed shell of
+ * the base's solids fails if the shell bounds material (a second outer shell, an invalid base), or
+ * if it is a void whose space now holds material of the result (a chamfer cutting into it); a void
+ * removed with its material stays removed. With LooseParts::keep, the base's faces, wires, edges
+ * and vertices outside its shells are put back into the result, which then is a compound; a result
+ * that has such parts of its own fails.
+ *
+ * @param shape The result; replaced by the repaired shape if the repair is kept, and holding the
+ * base's loose parts if they are kept
  * @param base The shape that was dressed up
+ * @param looseParts Whether the result keeps the base's loose parts: Part's features do,
+ * PartDesign's keep solids and shells only, as OCCT returns them
  * @return false if the result is invalid and wasn't repaired: the feature must fail
  */
-PartExport bool checkDressUp(TopoShape& shape, const TopoShape& base);
+PartExport bool checkDressUp(
+    TopoShape& shape,
+    const TopoShape& base,
+    LooseParts looseParts = LooseParts::keep
+);
 
 /** Whether faces outside the shape's solids enclose a volume, which checkDressUp() never drops: a
  * closed shell, or faces that close up among themselves (a sphere's face), each judged on its own,
