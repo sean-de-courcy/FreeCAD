@@ -34,6 +34,7 @@
 
 #include <Mod/Part/App/FCBRepAlgoAPI_Cut.h>
 #include <Mod/Part/App/FCBRepAlgoAPI_Fuse.h>
+#include <BOPAlgo_ArgumentAnalyzer.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_Sewing.hxx>
@@ -56,6 +57,7 @@
 #include <TopoDS.hxx>
 #include <TopoDS_Wire.hxx>
 #include <TopTools_DataMapOfShapeListOfShape.hxx>
+#include <TopTools_DataMapOfShapeShape.hxx>
 #include <TopTools_HSequenceOfShape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 
@@ -104,12 +106,17 @@ class MapperPipeShellEnds: public Part::MapperMaker
 public:
     /// \a first and \a last are the first and last sections added to \a pipe, a wire or a
     /// vertex each (the same for a pipe of one profile); \a point is \a first when it is the
-    /// profile's point, which the side shapes' history leaves out (it isn't otherwise a source)
+    /// profile's point, which the side shapes' history leaves out (it isn't otherwise a source).
+    /// A piece of a union (sweepPiecesAndFuse) names its end only when it is the last, with
+    /// \a projectEnd; \a origins, when given, binds each element of \a last to the profile's
+    /// element it was swept from, and the end projects those instead (a source of the shape too).
     MapperPipeShellEnds(
         BRepOffsetAPI_MakePipeShell& pipe,
         const TopoDS_Shape& first,
         const TopoDS_Shape& last,
-        const TopoDS_Shape& point
+        const TopoDS_Shape& point,
+        bool projectEnd = true,
+        const TopTools_DataMapOfShapeShape* origins = nullptr
     )
         : MapperMaker(pipe)
         , point(point)
@@ -132,7 +139,26 @@ public:
         bindEnds(pipe, first, own, nullptr, starts);
         // With a closed spine the shell ends where it starts: those elements keep the first
         // section's names
-        bindEnds(pipe, last, other, &own, ends);
+        bindEnds(pipe, last, other, &own, bound);
+        if (!projectEnd) {
+            return;
+        }
+        if (!origins) {
+            ends = bound;
+            return;
+        }
+        for (TopTools_DataMapIteratorOfDataMapOfShapeListOfShape it(bound); it.More(); it.Next()) {
+            if (const TopoDS_Shape* origin = origins->Seek(it.Key())) {
+                ends.Bind(*origin, it.Value());
+            }
+        }
+    }
+
+    /// Each element of the last section and the elements of the shell's end it became, whether
+    /// or not the end is named from them
+    const TopTools_DataMapOfShapeListOfShape& endsOf() const
+    {
+        return bound;
     }
 
     const std::vector<TopoDS_Shape>& modified(const TopoDS_Shape& s) const override
@@ -255,6 +281,7 @@ private:
 
     TopoDS_Shape point;
     TopTools_DataMapOfShapeListOfShape starts;
+    TopTools_DataMapOfShapeListOfShape bound;
     TopTools_DataMapOfShapeListOfShape ends;
 };
 
@@ -297,6 +324,11 @@ struct CornerTilts
     std::optional<Corner> collapsed;
     /// The stretches within 1 degree of the collapse
     std::vector<Corner> nearCollapse;
+    /// Where the first arc starts along which the section folds over itself
+    std::optional<gp_Pnt> foldedArc;
+    /// Whether a curve other than an arc follows a corner that tilted the section: whether it
+    /// folds takes the boolean check
+    bool tiltedCurve = false;
 };
 
 /// The edges of \a wire in their order along it
@@ -345,7 +377,7 @@ TopoDS_Wire firstWire(const TopoDS_Shape& shape)
 /// Points along \a wire in its order: each edge's start and points inside it
 std::vector<gp_Pnt> pointsAlong(const TopoDS_Wire& wire)
 {
-    constexpr int steps = 16;
+    constexpr int steps = 64;  // a circle's extent within 0.12 % of its radius
     std::vector<gp_Pnt> points;
     for (BRepTools_WireExplorer it(wire); it.More(); it.Next()) {
         BRepAdaptor_Curve curve(it.Current());
@@ -397,6 +429,36 @@ double extentAlong(const std::vector<gp_Pnt>& points, const gp_Dir& direction)
     return high - low;
 }
 
+/// A section of the sweep where a spine's edge starts
+struct Section
+{
+    gp_Dir normal;
+    std::vector<gp_Pnt> points;
+};
+
+/// Whether the section (\a normal, \a points) folds back over itself along the arc \a edge. It
+/// turns about the arc's axis, each point at the speed of its distance from the axis, so its
+/// points move through its plane one way on one side of the line where that plane meets the
+/// plane through the axis, and the other way beyond: the sweep folds where the section reaches
+/// across that line (ops#370). A section in the arc's plane only turns within it: no fold here.
+bool foldsAlongArc(const TopoDS_Edge& edge, const gp_Dir& normal, const std::vector<gp_Pnt>& points)
+{
+    const gp_Ax1 axis = BRepAdaptor_Curve(edge).Circle().Axis();
+    const gp_Vec across = gp_Vec(normal).Crossed(gp_Vec(axis.Direction()));
+    if (across.Magnitude() < gp::Resolution()) {
+        return false;
+    }
+    const gp_Dir side(across);
+    double low = std::numeric_limits<double>::infinity();
+    double high = -low;
+    for (const gp_Pnt& point : points) {
+        const double at = gp_Vec(axis.Location(), point).Dot(gp_Vec(side));
+        low = std::min(low, at);
+        high = std::max(high, at);
+    }
+    return low < -Precision::Confusion() && high > Precision::Confusion();
+}
+
 /// The tilt at each corner of \a spine where "Transformed" keeps the section's orientation,
 /// from \a pipe, its sweep of one wire of the profile, set up by \a setup. Along straight edges
 /// the section only moves, so its normal is the start's; after a curved one, the sweep of the
@@ -433,52 +495,89 @@ CornerTilts measureCorners(
     const double nearLimit = std::sin(std::numbers::pi / 180);
     const double thinnest = 100 * Precision::Confusion();
 
+    const gp_Pnt spineStart = BRep_Tool::Pnt(TopExp::FirstVertex(edges.front(), true));
+    // The section where edge k starts, its normal and points: on a straight run the start's,
+    // moved there; after a curve, the end of the sweep of the spine up to there
+    auto sectionAt = [&](size_t k, bool straightBefore) -> std::optional<Section> {
+        if (straightBefore) {
+            const gp_Vec move(spineStart, BRep_Tool::Pnt(TopExp::FirstVertex(edges[k], true)));
+            std::vector<gp_Pnt> points;
+            for (const gp_Pnt& point : startPoints) {
+                points.push_back(point.Translated(move));
+            }
+            return Section {*startNormal, points};
+        }
+        BRepBuilderAPI_MakeWire upTo;
+        for (size_t i = 0; i < k; ++i) {
+            upTo.Add(edges[i]);
+        }
+        BRepOffsetAPI_MakePipeShell part(upTo.Wire());
+        setup(part);
+        part.Add(start);
+        TopTools_ListOfShape ends;
+        part.Simulate(2, ends);
+        std::vector<gp_Pnt> points = pointsAlong(firstWire(ends.Last()));
+        const std::optional<gp_Dir> normal = planeNormal(points);
+        if (!normal) {
+            return std::nullopt;
+        }
+        return Section {*normal, points};
+    };
+    // A curved edge: an arc folds the section where its axis meets it; another curve is left to
+    // the boolean check, when the section is tilted to it
+    auto checkCurve = [&](size_t k, const Section& section) {
+        if (isLine(edges[k])) {
+            return;
+        }
+        if (BRepAdaptor_Curve(edges[k]).GetType() == GeomAbs_Circle) {
+            if (!tilts.foldedArc && foldsAlongArc(edges[k], section.normal, section.points)) {
+                tilts.foldedArc = BRep_Tool::Pnt(TopExp::FirstVertex(edges[k], true));
+            }
+        }
+        else if (std::abs(section.normal.Dot(tangentAlong(edges[k], true))) < 1 - 1e-9) {
+            tilts.tiltedCurve = true;
+        }
+    };
+    checkCurve(0, Section {*startNormal, startPoints});
+
     bool straight = isLine(edges.front());
     double previous = 1;
     for (size_t k = 1; k < edges.size(); ++k) {
         const gp_Dir out = tangentAlong(edges[k], true);
-        if (tangentAlong(edges[k - 1], false).Angle(out) > Precision::Angular()) {
-            gp_Dir normal = *startNormal;
-            std::vector<gp_Pnt> points = startPoints;
-            if (!straight) {
-                BRepBuilderAPI_MakeWire upTo;
-                for (size_t i = 0; i < k; ++i) {
-                    upTo.Add(edges[i]);
-                }
-                BRepOffsetAPI_MakePipeShell part(upTo.Wire());
-                setup(part);
-                part.Add(start);
-                TopTools_ListOfShape ends;
-                part.Simulate(2, ends);
-                points = pointsAlong(firstWire(ends.Last()));
-                const std::optional<gp_Dir> there = planeNormal(points);
-                if (!there) {
-                    return {};
-                }
-                normal = *there;
-            }
-            Corner corner {
-                BRep_Tool::Pnt(TopExp::LastVertex(edges[k - 1], true)),
-                side * normal.Dot(out),
-                std::numeric_limits<double>::infinity()
-            };
-            const gp_Vec across = gp_Vec(out) - gp_Vec(normal) * normal.Dot(out);
-            if (across.Magnitude() > gp::Resolution()) {
-                corner.thickness = extentAlong(points, gp_Dir(across)) * std::abs(corner.cosine);
-            }
-            if (corner.thickness < thinnest) {
-                tilts.collapsed = corner;
-                return tilts;
-            }
-            if (std::abs(corner.cosine) < nearLimit) {
-                tilts.nearCollapse.push_back(corner);
-            }
-            if ((corner.cosine > 0) != (previous > 0)) {
-                tilts.pieceStarts.push_back(k);
-            }
-            previous = corner.cosine;
+        const bool corner = tangentAlong(edges[k - 1], false).Angle(out) > Precision::Angular();
+        if (!corner && isLine(edges[k])) {
+            continue;  // a straight run goes on: nothing changes
+        }
+        const std::optional<Section> section = sectionAt(k, straight);
+        if (!section) {
+            return {};
         }
         straight = straight && isLine(edges[k]);
+        checkCurve(k, *section);
+        if (!corner) {
+            continue;
+        }
+        const gp_Dir& normal = section->normal;
+        Corner turn {
+            BRep_Tool::Pnt(TopExp::LastVertex(edges[k - 1], true)),
+            side * normal.Dot(out),
+            std::numeric_limits<double>::infinity()
+        };
+        const gp_Vec across = gp_Vec(out) - gp_Vec(normal) * normal.Dot(out);
+        if (across.Magnitude() > gp::Resolution()) {
+            turn.thickness = extentAlong(section->points, gp_Dir(across)) * std::abs(turn.cosine);
+        }
+        if (turn.thickness < thinnest) {
+            tilts.collapsed = turn;
+            return tilts;
+        }
+        if (std::abs(turn.cosine) < nearLimit) {
+            tilts.nearCollapse.push_back(turn);
+        }
+        if ((turn.cosine > 0) != (previous > 0)) {
+            tilts.pieceStarts.push_back(k);
+        }
+        previous = turn.cosine;
     }
     return tilts;
 }
@@ -499,12 +598,18 @@ bool isValidSolid(const Part::TopoShape& shape)
 /// "Transformed" (\a setup) from where the one before ends, closed with its caps and made a
 /// solid, and the pieces fused. \a profiles are the sections the first piece starts from, one
 /// per wire of the profile; \a make makes a shape named as this feature's. A null shape when a
-/// piece isn't a valid solid: the profile folds over itself within it (a tight curve after a
-/// corner of nearly 90 degrees), which no union mends.
-/// Names: the first piece's start keeps the profile's names, as the one sweep's. Each later
-/// piece sweeps the end wire of the piece before, so its side faces are named from that end's
-/// edges (the profile's projections), apart from the first piece's, and its end projects them in
-/// turn. The caps between the pieces are named from their edges, as the one sweep's ends.
+/// piece isn't a valid solid (the profile folds over itself within it: a tight curve after a
+/// corner of nearly 90 degrees, which no union mends); an exception when OCCT can't fuse the
+/// pieces.
+/// Each later piece's section is added at the piece's first vertex: added plainly, a section
+/// that doesn't lie on the piece's start plane (a profile behind the spine's start) was placed
+/// where it lies nearest the piece, and the union came out wrong.
+/// Names: the first piece's start keeps the profile's names, and the last piece's end projects
+/// them, as the one sweep's ends do, so a reference to either end follows it when an edit takes
+/// the pipe across 90 degrees. The other pieces' ends aren't named from their sections (their
+/// edges are named from the side faces, `UPP`), each later piece sweeps the end wire of the
+/// piece before, so its side faces are named from that wire's edges, and the caps between the
+/// pieces carry their piece's index (`PCE<n>`).
 Part::TopoShape sweepPiecesAndFuse(
     const TopoDS_Wire& spine,
     const std::vector<size_t>& pieceStarts,
@@ -517,6 +622,7 @@ Part::TopoShape sweepPiecesAndFuse(
     std::vector<size_t> ends = pieceStarts;
     ends.push_back(edges.size());
     std::vector<TopoDS_Wire> pieces;
+    std::vector<TopoDS_Vertex> pieceFirsts;
     size_t begin = 0;
     for (size_t end : ends) {
         BRepBuilderAPI_MakeWire wire;
@@ -524,30 +630,57 @@ Part::TopoShape sweepPiecesAndFuse(
             wire.Add(edges[k]);
         }
         pieces.push_back(wire.Wire());
+        pieceFirsts.push_back(TopExp::FirstVertex(edges[begin], true));
         begin = end;
     }
 
     std::vector<Part::TopoShape> solids;
-    std::vector<Part::TopoShape> sections = std::move(profiles);
-    for (const TopoDS_Wire& piece : pieces) {
+    std::vector<Part::TopoShape> sections = profiles;
+    // Per wire: each element of the current section, and the profile's element it was swept from
+    std::vector<TopTools_DataMapOfShapeShape> origins(sections.size());
+    for (size_t index = 0; index < pieces.size(); ++index) {
+        const bool first = index == 0;
+        const bool last = index + 1 == pieces.size();
         std::vector<Part::TopoShape> shells;
         std::vector<Part::TopoShape> fronts;
         std::vector<Part::TopoShape> backs;
-        for (const Part::TopoShape& section : sections) {
-            BRepOffsetAPI_MakePipeShell mkPS(piece);
+        for (size_t i = 0; i < sections.size(); ++i) {
+            const Part::TopoShape& section = sections[i];
+            BRepOffsetAPI_MakePipeShell mkPS(pieces[index]);
             setup(mkPS);
-            mkPS.Add(section.getShape());
+            if (first) {
+                mkPS.Add(section.getShape());
+            }
+            else {
+                mkPS.Add(section.getShape(), pieceFirsts[index]);
+            }
             if (!mkPS.IsReady()) {
                 throw Base::CADKernelError("Pipe could not be built");
             }
             const TopoDS_Shape built = mkPS.Shape();
             Part::TopoShape shell = make(TopoDS_Shape());
-            shell.makeShapeWithElementMap(
-                built,
-                MapperPipeShellEnds(mkPS, section.getShape(), section.getShape(), TopoDS_Shape()),
-                {section},
-                Part::OpCodes::PipeShell
+            const MapperPipeShellEnds mapper(
+                mkPS,
+                section.getShape(),
+                section.getShape(),
+                TopoDS_Shape(),
+                last,
+                first ? nullptr : &origins[i]
             );
+            std::vector<Part::TopoShape> sources {section};
+            if (last && !first) {
+                sources.push_back(profiles[i]);
+            }
+            shell.makeShapeWithElementMap(built, mapper, sources, Part::OpCodes::PipeShell);
+            TopTools_DataMapOfShapeShape next;
+            for (TopTools_DataMapIteratorOfDataMapOfShapeListOfShape it(mapper.endsOf()); it.More();
+                 it.Next()) {
+                const TopoDS_Shape* origin = origins[i].Seek(it.Key());
+                for (const TopoDS_Shape& element : it.Value()) {
+                    next.Bind(element, origin ? *origin : it.Key());
+                }
+            }
+            origins[i] = next;
             Part::TopoShape front = make(mkPS.FirstShape());
             front.mapSubElement(shell);
             Part::TopoShape back = make(mkPS.LastShape());
@@ -562,10 +695,28 @@ Part::TopoShape sweepPiecesAndFuse(
         for (const Part::TopoShape& shell : shells) {
             sewer.Add(shell.getShape());
         }
+        // The pipe's own ends are named from their edges by the sewing, as the one sweep's; a cap
+        // between pieces is named, and marked with its piece, before
+        std::vector<Part::TopoShape> sources = shells;
+        const std::string between = "PCE" + std::to_string(index);
         Part::TopoShape frontface;
         Part::TopoShape backface;
-        frontface.makeElementFace(fronts);
-        backface.makeElementFace(backs, Part::OpCodes::Sewing);
+        if (first) {
+            frontface.makeElementFace(fronts);
+        }
+        else {
+            frontface = make(TopoDS_Shape());
+            frontface.makeElementFace(fronts, between.c_str());
+            sources.push_back(frontface);
+        }
+        if (last) {
+            backface.makeElementFace(backs, Part::OpCodes::Sewing);
+        }
+        else {
+            backface = make(TopoDS_Shape());
+            backface.makeElementFace(backs, between.c_str());
+            sources.push_back(backface);
+        }
         sewer.Add(frontface.getShape());
         sewer.Add(backface.getShape());
         sewer.Perform();
@@ -573,7 +724,7 @@ Part::TopoShape sweepPiecesAndFuse(
         solid.makeShapeWithElementMap(
             sewer.SewedShape(),
             Part::MapperSewing(sewer),
-            shells,
+            sources,
             Part::OpCodes::Sewing
         );
         solid = solid.makeElementSolid();
@@ -588,8 +739,23 @@ Part::TopoShape sweepPiecesAndFuse(
         solids.push_back(solid);
         sections = backs;
     }
+    // OCCT fails to fuse some pieces (a round profile along an arc after the corner): say so,
+    // not with its "Null shape"
+    const char* unfused = "Pipe: the pieces of this 'Transformed' pipe past 90 degrees can't be "
+                          "fused into a valid solid: try 'Right corner' or 'Round corner'.";
     Part::TopoShape fused = make(TopoDS_Shape());
-    fused.makeElementFuse(solids);
+    try {
+        fused.makeElementFuse(solids);
+    }
+    catch (const Base::Exception&) {
+        throw Base::CADKernelError(unfused);
+    }
+    catch (const Standard_Failure&) {
+        throw Base::CADKernelError(unfused);
+    }
+    if (fused.isNull() || !isValidSolid(fused)) {
+        throw Base::CADKernelError(unfused);
+    }
     return fused;
 }
 
@@ -616,26 +782,95 @@ bool samePlace(const TopoDS_Shape& a, const TopoDS_Shape& b)
     return true;
 }
 
-/// Why a pipe's result isn't a valid solid, as far as its \a mode and \a transition tell
-std::string invalidPipe(int mode, int transition)
+/// Why a pipe's result isn't a valid solid, as far as its \a mode, its \a transition, whether
+/// it has several sections (\a multisection) and its spine's sharpest corner (\a corner, none
+/// on a smooth spine) tell
+std::string whyInvalid(int mode, int transition, bool multisection, const std::optional<std::string>& corner)
 {
     std::string text = "Pipe: the result isn't a valid solid.";
     if (mode == 1) {
         text += " 'Fixed' mode keeps the profile's orientation: the spine may turn edge-on to it.";
     }
     else if (mode == 3) {
+        text += " 'Auxiliary' mode turns the profile to follow the auxiliary spine: it may turn "
+                "it edge-on to the spine, or fold it over itself.";
+    }
+    else if (!corner) {
+        text += " Where the spine curves more tightly than the profile is wide, the sweep folds "
+                "over itself.";
+    }
+    else if (multisection && transition != 0) {
+        text += fmt::format(
+            " 'Right corner' and 'Round corner' can't join the corners of a pipe with several "
+            "sections (the corner at {}): try 'Transformed'.",
+            *corner
+        );
+    }
+    else if (multisection) {
+        text += fmt::format(
+            " The sections may twist or cross over each other along the spine, or at its corner "
+            "at {}.",
+            *corner
+        );
     }
     else if (transition == 0) {
-        text += " Where the spine curves tightly after a corner of nearly 90 degrees, "
-                "'Transformed' folds the profile over itself: try 'Right corner' or 'Round "
-                "corner'.";
+        text += fmt::format(
+            " Where the spine curves tightly after a corner of nearly 90 degrees (the sharpest is "
+            "at {}), 'Transformed' folds the profile over itself: try 'Right corner' or 'Round "
+            "corner'.",
+            *corner
+        );
     }
     else {
-        text += " 'Right corner' and 'Round corner' can't join a corner that turns nearly back "
-                "on itself, nor the corners of a pipe with several sections: try 'Transformed' "
-                "there.";
+        text += fmt::format(
+            " 'Right corner' and 'Round corner' can't join a corner that turns nearly back on "
+            "itself (the sharpest is at {}): try 'Transformed' there.",
+            *corner
+        );
     }
     return text;
+}
+
+/// Where \a spine turns most sharply, none when it turns nowhere
+std::optional<gp_Pnt> sharpestCorner(const TopoDS_Wire& spine)
+{
+    const std::vector<TopoDS_Edge> edges = edgesInOrder(spine);
+    std::optional<gp_Pnt> sharpest;
+    double most = Precision::Angular();
+    const size_t joints = BRep_Tool::IsClosed(spine) ? edges.size() : edges.size() - 1;
+    for (size_t k = 0; edges.size() > 1 && k < joints; ++k) {
+        const TopoDS_Edge& before = edges[k];
+        const TopoDS_Edge& after = edges[(k + 1) % edges.size()];
+        const double angle = tangentAlong(before, false).Angle(tangentAlong(after, true));
+        if (angle > most) {
+            most = angle;
+            sharpest = BRep_Tool::Pnt(TopExp::LastVertex(before, true));
+        }
+    }
+    return sharpest;
+}
+
+/// Whether the boolean check finds no self-intersection in \a shapes
+bool selfIntersectionFree(const std::vector<Part::TopoShape>& shapes)
+{
+    for (const Part::TopoShape& shape : shapes) {
+        BOPAlgo_ArgumentAnalyzer check;
+        check.SetShape1(shape.getShape());
+        check.ArgumentTypeMode() = false;
+        check.SelfInterMode() = true;
+        check.SmallEdgeMode() = false;
+        check.RebuildFaceMode() = false;
+        check.TangentMode() = false;
+        check.MergeVertexMode() = false;
+        check.MergeEdgeMode() = false;
+        check.ContinuityMode() = false;
+        check.CurveOnSurfaceMode() = false;
+        check.Perform();
+        if (check.HasFaulty()) {
+            return false;
+        }
+    }
+    return true;
 }
 
 /// \a point as text, "(x, y, z)", without rounding noise
@@ -972,6 +1207,15 @@ App::DocumentObjectExecReturn* Pipe::execute()
         auto inPlace = [&](const gp_Pnt& point) {
             return pointText(point.Transformed(invObjLoc.Inverted().Transformation()));
         };
+        const std::optional<gp_Pnt> sharpest = sharpestCorner(TopoDS::Wire(path.getShape()));
+        auto invalidPipe = [&]() {
+            return whyInvalid(
+                mode,
+                Transition.getValue(),
+                Transformation.getValue() == 1,
+                sharpest ? std::optional<std::string>(inPlace(*sharpest)) : std::nullopt
+            );
+        };
         CornerTilts tilts;
         std::vector<TopoDS_Shape> sweptStarts;
 
@@ -1052,6 +1296,16 @@ App::DocumentObjectExecReturn* Pipe::execute()
                             tiltDegrees(*corner)
                         ));
                     }
+                    if (const auto& at = tilts.foldedArc) {
+                        const std::string text = fmt::format(
+                            "Pipe: 'Transformed' folds the profile over itself along the arc "
+                            "from {}: the arc's axis passes through the profile, as the corners "
+                            "before it tilt it. Use 'Right corner' or 'Round corner', or a "
+                            "larger radius.",
+                            inPlace(*at)
+                        );
+                        return new App::DocumentObjectExecReturn(text);
+                    }
                     for (const Corner& corner : tilts.nearCollapse) {
                         const std::string text = fmt::format(
                             "Pipe: the stretch after the corner at {} is nearly edge-on to the "
@@ -1061,7 +1315,6 @@ App::DocumentObjectExecReturn* Pipe::execute()
                             tiltDegrees(corner),
                             std::abs(corner.cosine) * 100
                         );
-                        FC_WARN(getFullName() << ": " << text);
                         if (auto doc = getDocument()) {
                             const char* previous = doc->getWarningDescription(this);
                             doc->setWarning(
@@ -1132,7 +1385,7 @@ App::DocumentObjectExecReturn* Pipe::execute()
                 [this](const TopoDS_Shape& shape) { return makeTopoShape(shape); }
             );
             if (result.isNull()) {
-                return new App::DocumentObjectExecReturn(invalidPipe(mode, Transition.getValue()));
+                return new App::DocumentObjectExecReturn(invalidPipe());
             }
         }
         else if (!frontwires.empty() || !backwires.empty()) {
@@ -1230,26 +1483,96 @@ App::DocumentObjectExecReturn* Pipe::execute()
         // a pipe with several sections and at hairpins, and "Transformed" an invalid one where
         // a tight curve follows a corner of nearly 90 degrees; a multisection pipe on macOS an
         // inside-out one (ops#396). A self-intersection that only the boolean check finds
-        // passes: that check takes up to a second on a helix sweep, and reports valid ones (C0
-        // continuity).
+        // passes, but after a corner that tilts the profile onto a curve (other than an arc,
+        // which measureCorners tests exactly): that check takes up to a second on a helix
+        // sweep, and reports valid ones (C0 continuity).
         for (const auto& s : shapes) {
             if (!isValidSolid(s)) {
-                return new App::DocumentObjectExecReturn(invalidPipe(mode, Transition.getValue()));
+                return new App::DocumentObjectExecReturn(invalidPipe());
             }
         }
+        if (tilts.tiltedCurve && !selfIntersectionFree(shapes)) {
+            const std::string text = fmt::format(
+                "Pipe: the result crosses itself: 'Transformed' folds the profile over itself "
+                "along a curve that a corner tilted it onto (the sharpest is at {}). Use 'Right "
+                "corner' or 'Round corner', or a gentler curve.",
+                sharpest ? inPlace(*sharpest) : std::string("the start")
+            );
+            return new App::DocumentObjectExecReturn(text);
+        }
 
-        AddSubShape.setValue(result.makeElementCompound(
-            shapes,
-            nullptr,
-            Part::TopoShape::SingleShapeCompoundCreationPolicy::returnShape
-        ));
-
-        if (shapes.size() > 1) {
-            result.makeElementFuse(shapes);
+        // A closed spine sweeps a closed shell for each wire of a holed profile, and a closed
+        // spine's union keeps one for each hole too: a shell inside another is a void cut from
+        // it, not a solid fused back in, which filled the hole (ops#370); one inside that again
+        // is a solid
+        std::vector<int> depths(shapes.size(), 0);
+        for (size_t i = 0; i < shapes.size(); ++i) {
+            TopExp_Explorer vertex(shapes[i].getShape(), TopAbs_VERTEX);
+            if (!vertex.More()) {
+                continue;
+            }
+            const gp_Pnt point = BRep_Tool::Pnt(TopoDS::Vertex(vertex.Current()));
+            for (size_t j = 0; j < shapes.size(); ++j) {
+                BRepClass3d_SolidClassifier inside;
+                if (j != i) {
+                    inside.Load(shapes[j].getShape());
+                    inside.Perform(point, Precision::Confusion());
+                    depths[i] += inside.State() == TopAbs_IN ? 1 : 0;
+                }
+            }
+        }
+        const int deepest = shapes.empty() ? 0 : *std::max_element(depths.begin(), depths.end());
+        if (deepest == 0) {
+            AddSubShape.setValue(result.makeElementCompound(
+                shapes,
+                nullptr,
+                Part::TopoShape::SingleShapeCompoundCreationPolicy::returnShape
+            ));
+            if (shapes.size() > 1) {
+                result.makeElementFuse(shapes);
+            }
+            else {
+                result = shapes.front();
+            }
         }
         else {
-            result = shapes.front();
+            auto atDepth = [&](int depth) {
+                std::vector<Part::TopoShape> found;
+                for (size_t i = 0; i < shapes.size(); ++i) {
+                    if (depths[i] == depth) {
+                        found.push_back(shapes[i]);
+                    }
+                }
+                return found;
+            };
+            std::vector<Part::TopoShape> outer = atDepth(0);
+            if (outer.size() > 1) {
+                result.makeElementFuse(outer);
+            }
+            else {
+                result = outer.front();
+            }
+            for (int depth = 1; depth <= deepest; ++depth) {
+                std::vector<Part::TopoShape> level = atDepth(depth);
+                if (level.empty()) {
+                    continue;
+                }
+                level.insert(level.begin(), result);
+                Part::TopoShape next = makeTopoShape();
+                if (depth % 2) {
+                    next.makeElementCut(level);
+                }
+                else {
+                    next.makeElementFuse(level);
+                }
+                result = next;
+            }
+            if (!isValidSolid(result)) {
+                return new App::DocumentObjectExecReturn(invalidPipe());
+            }
+            AddSubShape.setValue(result);
         }
+
 
         if (base.isNull()) {
             if (getAddSubType() == FeatureAddSub::Type::Subtractive) {
@@ -1269,6 +1592,10 @@ App::DocumentObjectExecReturn* Pipe::execute()
             this->rawShape = result;
 
             result = refineShapeIfActive(result);
+            // Refine can leave an invalid solid of a valid one ('Fixed' mode past 90 degrees)
+            if (!isValidSolid(result)) {
+                return new App::DocumentObjectExecReturn(invalidPipe());
+            }
             Shape.setValue(getSolid(result));
             return App::DocumentObject::StdReturn;
         }
@@ -1308,6 +1635,10 @@ App::DocumentObjectExecReturn* Pipe::execute()
             ));
         }
 
+        // As above, after the boolean too, unless the base was invalid already
+        if (!isValidSolid(solid) && BRepCheck_Analyzer(base.getShape()).IsValid()) {
+            return new App::DocumentObjectExecReturn(invalidPipe());
+        }
         Shape.setValue(solid);
         return App::DocumentObject::StdReturn;
     }
