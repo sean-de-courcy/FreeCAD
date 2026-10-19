@@ -14,6 +14,7 @@ versions (the release notes job).
 """
 
 import argparse
+import itertools
 import os
 import re
 import shutil
@@ -96,9 +97,10 @@ def packaged_versions(freecadcmd):
 
 
 def same(locked, reported):
-    # A conda version can carry more parts than the library reports (occt 8.0.1.1 is OCCT 8.0.1)
+    # A conda version can carry more parts than the library reports (occt 8.0.1.1 is OCCT 8.0.1),
+    # and a library can add a suffix after its numbers (OCCT's development builds report "dev")
     lparts = locked.split(".")
-    rparts = reported.split(".")
+    rparts = list(itertools.takewhile(str.isdigit, reported.split(".")))
     return len(rparts) >= 3 and lparts[: len(rparts)] == rparts
 
 
