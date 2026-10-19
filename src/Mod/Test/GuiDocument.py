@@ -259,6 +259,45 @@ class TestGuiDocument(unittest.TestCase):
         self.assertEqual(observer.threads, [main])
         self.assertEqual(ranBeforeReturning, [])
 
+    def testCloseDuringAsyncRefreshRunsTheWorkersHops(self):
+        """Closing a document while the worker waits in a hop to the main thread (ops#365): the
+        close waits for the worker's request and runs the hops meanwhile. It waited for a worker
+        that waited for it (a hang, off Windows before ops#365, since the hop happened there)."""
+        params = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/Document")
+        old_async = params.GetBool("EnableAsyncRecompute", True)
+        main = threading.get_ident()
+
+        class Observer:
+            def __init__(self, doc):
+                self.doc = doc
+                self.threads = []
+
+            def slotRecomputedObject(self, obj):
+                if obj.Document == self.doc and obj.Name == "Feature":
+                    self.threads.append(threading.get_ident())
+
+        obj = self.doc.addObject("App::FeatureTest", "Feature")
+        self.doc.recompute()
+        observer = Observer(self.doc)
+        FreeCAD.addDocumentObserver(observer)
+        name = self.doc.Name
+        try:
+            params.SetBool("EnableAsyncRecompute", True)
+            FreeCADGui.setActiveDocument(name)
+            obj.touch()
+            FreeCADGui.runCommand("Std_Refresh", 0)
+            # No events: the worker reaches its first hop and waits there
+            time.sleep(0.3)
+            self.assertTrue(self.doc.Recomputing)
+            FreeCAD.closeDocument(name)
+            self.doc = None
+        finally:
+            FreeCAD.removeDocumentObserver(observer)
+            params.SetBool("EnableAsyncRecompute", old_async)
+
+        self.assertNotIn(name, FreeCAD.listDocuments())
+        self.assertEqual(observer.threads, [main])
+
     def testSaveCommandDoesNotUseDeprecatedAPI(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             self.doc.saveAs(os.path.join(temp_dir, "TestDoc.FCStd"))
