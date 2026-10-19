@@ -134,8 +134,9 @@ namespace
 // side 1's end, the start cap marked CPY;0 and the far cap CPY;2) (no build was released
 // between them). 3: ops#351, a PartDesign Pipe's start edges and vertices keep the profile's
 // names and its end ones are their projections (PRJ), where both were `UPP` names from the side
-// faces.
-constexpr int ForkNamingRevision = 3;
+// faces. 4: ops#360, a Pad's or Pocket's far caps up to a freeform face named from their profile
+// faces (PRJ), where they were pieces of the up-to face (MOD) told apart by a counter.
+constexpr int ForkNamingRevision = 4;
 
 // The `.N<n>` of the element map version: the form interned names are saved in (ops#6). 2: the
 // references are indices into the file's table (NamingFormat 2).

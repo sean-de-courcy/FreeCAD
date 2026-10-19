@@ -275,19 +275,27 @@ struct PartExport GenericShapeMapper: ShapeMapper
  *  vertices generate meet the up-to shape, are those profile elements' projections (PRJ), as
  *  BRepFeat named them. Generated from the side faces instead, a far edge had the profile edge in
  *  its ancestry, and the solver took it for the profile's own edge silently (ops#334).
+ *
+ *  Given the up-to shape, the far caps, its pieces in the solids that start at a profile face,
+ *  are that face's projections too, as BRepFeat names the top (the prism, ops#360). Named only
+ *  as pieces of the up-to shape (MOD), they were told apart by a counter in the result's face
+ *  order, which follows the profile's faces, sorted by area: a sketch edit that reordered them
+ *  moved a reference to another cap silently.
  */
 class PartExport UpToSplitMapper: public MapperMaker
 {
 public:
     /// `firstShape` gives the sweep's copy of an element of the profile, as the sweep's
     /// FirstShape(S) does (BRepPrimAPI_MakePrism, BRepPrimAPI_MakeRevol); `result` is the kept
-    /// solids
+    /// solids. Without `upTo`, the far caps are left to the caller's sources (the Revolution's
+    /// up-to face isn't one, so its caps take their edges' names)
     UpToSplitMapper(
         BRepAlgoAPI_Splitter& splitter,
         BRepBuilderAPI_MakeShape& sweep,
         const std::function<TopoDS_Shape(const TopoDS_Shape&)>& firstShape,
         const TopoDS_Shape& profile,
-        const TopoDS_Shape& result
+        const TopoDS_Shape& result,
+        const TopoDS_Shape& upTo = TopoDS_Shape()
     );
     const std::vector<TopoDS_Shape>& modified(const TopoDS_Shape& s) const override;
     const std::vector<TopoDS_Shape>& generated(const TopoDS_Shape& s) const override;
@@ -304,6 +312,7 @@ public:
 private:
     TopTools_IndexedMapOfShape kept;
     TopTools_MapOfShape farEnd;
+    TopTools_MapOfShape farCaps;
     TopTools_DataMapOfShapeListOfShape projections;
 };
 

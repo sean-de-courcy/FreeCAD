@@ -23,7 +23,9 @@
 """UpToFace: a Pad up to a face of an earlier feature keeps reaching that face when the
 features before it change."""
 
-from .harness import Broken, ReachesFace, Scenario, Z, face, pieces
+import Part
+
+from .harness import Attached, Broken, ReachesFace, Scenario, Z, face, pieces
 from . import models as m
 
 
@@ -135,3 +137,39 @@ class UpToFaceSplitAbove(UpToFaceSplit):
     def upToPad(self, doc, body):
         sketch = m.sketch(doc, "TopProfile", m.rectangle(2, 2, 6, 8), body, z=20)
         return m.pad(body, sketch, 1, name="TopPad")
+
+
+class UpToFreeformCapsReorder(Scenario):
+    """ops#360: a Pad from two rectangles, A (0..2 x 0..2) and B (5..8 x 0..3), up to a B-spline
+    plate at z = 10 (a Part feature, so the split builds the prism), with a datum point at the
+    centre of the far cap over A. A grows to 0..4 x 0..4, its lines keeping their geometry IDs,
+    and becomes larger than B: the face maker sorts the profile's faces by area, so the caps'
+    order swaps. The point stays on A's cap: each cap is the projection of its own profile face.
+    Named from the plate alone, told apart by a counter in that order, the point went to B's."""
+
+    area = "UpToFace"
+    REFS = ("point_on_cap_a",)
+    size = 2
+
+    def capA(self):
+        return face(contains=(self.size / 2, self.size / 2, 10))
+
+    def build(self, doc):
+        body = m.body(doc)
+        corners = [(-10, -10, 10), (20, -10, 10), (20, 10, 10), (-10, 10, 10)]
+        plate = m.feature(doc, "Plate", Part.Face(m.closedWire(corners)).toNurbs().Faces[0])
+        profile = m.sketch(doc, "Profile", m.rectangle(0, 0, 2, 2) + m.rectangle(5, 0, 8, 3), body)
+        pad = m.pad(body, profile, 1)
+        pad.Type = "UpToFace"
+        pad.UpToFace = (plate, ["Face1"])
+        doc.recompute()
+        point = body.newObject("PartDesign::Point", "CapPoint")
+        point.AttachmentSupport = [(pad, self.names(pad, self.capA())[0])]
+        point.MapMode = "CenterOfMass"
+        body.Tip = pad
+        self.ref("point_on_cap_a", point, "AttachmentSupport", self.capA, Attached())
+
+    def edit(self, doc):
+        lines = {0: ((0, 0), (4, 0)), 1: ((4, 0), (4, 4)), 2: ((4, 4), (0, 4)), 3: ((0, 4), (0, 0))}
+        m.setLines(doc.Profile, lines)
+        self.size = 4

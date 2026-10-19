@@ -6888,9 +6888,10 @@ TopoShape prismUpToBySplit(
     auto firstShape = [&extrusion](const TopoDS_Shape& element) {
         return extrusion.FirstShape(element);
     };
+    // Each far cap is the projection of its profile face, as BRepFeat names the top (ops#360)
     named.makeShapeWithElementMap(
         result,
-        UpToSplitMapper(splitter, extrusion, firstShape, profile.getShape(), result),
+        UpToSplitMapper(splitter, extrusion, firstShape, profile.getShape(), result, upTo.getShape()),
         {sweep, upTo},
         op
     );

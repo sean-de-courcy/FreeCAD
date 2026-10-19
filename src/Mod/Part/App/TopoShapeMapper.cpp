@@ -231,7 +231,8 @@ UpToSplitMapper::UpToSplitMapper(
     BRepBuilderAPI_MakeShape& sweep,
     const std::function<TopoDS_Shape(const TopoDS_Shape&)>& firstShape,
     const TopoDS_Shape& profile,
-    const TopoDS_Shape& result
+    const TopoDS_Shape& result,
+    const TopoDS_Shape& upTo
 )
     : MapperMaker(splitter)
 {
@@ -258,12 +259,55 @@ UpToSplitMapper::UpToSplitMapper(
             }
         }
     }
+    if (upTo.IsNull()) {
+        return;
+    }
+    // The far caps (ops#360): for each face of the profile, in its order, the pieces of `upTo`
+    // in the kept solids that start at the face's start cap, in `upTo`'s face order. A cap that
+    // spans several faces of `upTo` has one piece each, told apart by the projection's counter.
+    // A piece of the start cap is left out: where the profile lies on `upTo`, the splitter makes
+    // the two one face
+    const TopTools_IndexedMapOfShape upToPieces = piecesOf(splitter, upTo);
+    TopTools_IndexedMapOfShape solids;
+    TopExp::MapShapes(result, TopAbs_SOLID, solids);
+    TopTools_IndexedMapOfShape profileFaces;
+    TopExp::MapShapes(profile, TopAbs_FACE, profileFaces);
+    for (int i = 1; i <= profileFaces.Extent(); ++i) {
+        const TopoDS_Shape startCap = firstShape(profileFaces(i));
+        const TopTools_IndexedMapOfShape startPieces = piecesOf(splitter, startCap);
+        TopTools_MapOfShape facesOfItsSolids;
+        for (int j = 1; j <= solids.Extent(); ++j) {
+            TopTools_IndexedMapOfShape solidFaces;
+            TopExp::MapShapes(solids(j), TopAbs_FACE, solidFaces);
+            bool startsHere = false;
+            for (int k = 1; k <= solidFaces.Extent() && !startsHere; ++k) {
+                startsHere = startPieces.Contains(solidFaces(k));
+            }
+            for (int k = 1; startsHere && k <= solidFaces.Extent(); ++k) {
+                facesOfItsSolids.Add(solidFaces(k));
+            }
+        }
+        TopTools_ListOfShape caps;
+        for (int k = 1; k <= upToPieces.Extent(); ++k) {
+            const TopoDS_Shape& piece = upToPieces(k);
+            if (facesOfItsSolids.Contains(piece) && !startPieces.Contains(piece)
+                && farCaps.Add(piece)) {
+                caps.Append(piece);
+            }
+        }
+        if (!caps.IsEmpty()) {
+            projections.Bind(startCap, caps);
+        }
+    }
 }
 
 const std::vector<TopoDS_Shape>& UpToSplitMapper::modified(const TopoDS_Shape& s) const
 {
     MapperMaker::modified(s);
-    std::erase_if(_res, [this](const TopoDS_Shape& piece) { return !kept.Contains(piece); });
+    // A far cap is its profile face's projection, not a second name from the up-to shape
+    std::erase_if(_res, [this](const TopoDS_Shape& piece) {
+        return !kept.Contains(piece) || farCaps.Contains(piece);
+    });
     return _res;
 }
 

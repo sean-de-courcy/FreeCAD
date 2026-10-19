@@ -816,6 +816,156 @@ def padUpToTheLoftFrom(doc, rectangles):
     return pad
 
 
+# ops#360: two rectangles held by constraints, A 2 x 2 at the origin and B 3 x 3 at x 5..8, up to
+# a B-spline plate. The face maker sorts the profile's faces by area, larger first, so A grown to
+# 4 x 4 (16 mm^2, B's is 9) comes first: the far caps' order swaps, their geometry IDs kept
+CAP_A = (0, 0, 2, 2)
+CAP_B = (5, 0, 8, 3)
+CAP_A_GROWN = 4
+
+
+def dimensionedRectangle(sketch, tag, x0, y0, x1, y1):
+    """A closed rectangle in sketch, held by constraints, its width and height named w<tag> and
+    h<tag>"""
+    import Sketcher
+
+    V = FreeCAD.Vector
+    start = sketch.GeometryCount
+    corners = [V(x0, y0, 0), V(x1, y0, 0), V(x1, y1, 0), V(x0, y1, 0)]
+    for i in range(4):
+        sketch.addGeometry(Part.LineSegment(corners[i], corners[(i + 1) % 4]))
+    for i in range(4):
+        sketch.addConstraint(
+            Sketcher.Constraint("Coincident", start + i, 2, start + (i + 1) % 4, 1)
+        )
+    sketch.addConstraint(Sketcher.Constraint("Horizontal", start))
+    sketch.addConstraint(Sketcher.Constraint("Horizontal", start + 2))
+    sketch.addConstraint(Sketcher.Constraint("Vertical", start + 1))
+    sketch.addConstraint(Sketcher.Constraint("Vertical", start + 3))
+    width = sketch.addConstraint(Sketcher.Constraint("DistanceX", start, 1, start, 2, x1 - x0))
+    sketch.renameConstraint(width, "w" + tag)
+    height = sketch.addConstraint(
+        Sketcher.Constraint("DistanceY", start + 1, 1, start + 1, 2, y1 - y0)
+    )
+    sketch.renameConstraint(height, "h" + tag)
+    sketch.addConstraint(Sketcher.Constraint("DistanceX", -1, 1, start, 1, x0))
+    sketch.addConstraint(Sketcher.Constraint("DistanceY", -1, 1, start, 1, y0))
+
+
+def freeformPlate(doc, z, seam=None):
+    """A Part feature holding the rectangle x -10..20, y -10..10 of the plane z = `z` as a B-spline
+    face (not elementary, so a prism up to it is built by the split), or with `seam`, a shell of
+    two such faces meeting at x = `seam`"""
+    V = FreeCAD.Vector
+    faces = []
+    for x0, x1 in ((-10, seam), (seam, 20)) if seam is not None else ((-10, 20),):
+        corners = [V(x0, -10, z), V(x1, -10, z), V(x1, 10, z), V(x0, 10, z)]
+        faces.append(Part.Face(Part.makePolygon(corners + corners[:1])).toNurbs().Faces[0])
+    plate = doc.addObject("Part::Feature", "Plate")
+    plate.Shape = faces[0] if len(faces) == 1 else Part.Shell(faces)
+    return plate
+
+
+def capsUpToAFreeformPlate(doc, kind, seam=None):
+    """ops#360: a Pad from A and B in the XY plane up to a B-spline plate at z = 10 (UpToFace, or
+    UpToShape up to the two-face shell meeting at x = `seam`); or a Pocket from them on top of the
+    block x -2..12, y -5..8, z 0..10, down to the plate at z = 4. Returns the feature and the
+    height of its far caps (the Pocket's floors)"""
+    body = doc.addObject("PartDesign::Body", "Body")
+    xy = [f for f in body.Origin.OriginFeatures if f.Role == "XY_Plane"][0]
+    capZ = 10 if kind == "Pad" else 4
+    plate = freeformPlate(doc, capZ, seam)
+    if kind == "Pocket":
+        blockSketch = body.newObject("Sketcher::SketchObject", "BlockSketch")
+        blockSketch.AttachmentSupport = [(xy, "")]
+        blockSketch.MapMode = "FlatFace"
+        dimensionedRectangle(blockSketch, "Block", -2, -5, 12, 8)
+        block = body.newObject("PartDesign::Pad", "Block")
+        block.Profile = blockSketch
+        block.Length = 10
+    sketch = body.newObject("Sketcher::SketchObject", "Profile")
+    sketch.AttachmentSupport = [(xy, "")]
+    sketch.MapMode = "FlatFace"
+    if kind == "Pocket":
+        sketch.AttachmentOffset = FreeCAD.Placement(FreeCAD.Vector(0, 0, 10), FreeCAD.Rotation())
+    dimensionedRectangle(sketch, "A", *CAP_A)
+    dimensionedRectangle(sketch, "B", *CAP_B)
+    feature = body.newObject("PartDesign::" + kind, kind)
+    feature.Profile = sketch
+    if seam is None:
+        feature.Type = "UpToFace"
+        feature.UpToFace = (plate, ["Face1"])
+    else:
+        feature.Type = "UpToShape"
+        feature.UpToShape = (plate, ["Face1", "Face2"])
+    feature.Refine = False
+    doc.recompute()
+    return feature, capZ
+
+
+def growCapA(sketch):
+    """A's width and height dimensions set to CAP_A_GROWN: its lines keep their geometry IDs"""
+    sketch.setDatum("wA", FreeCAD.Units.Quantity(CAP_A_GROWN, FreeCAD.Units.Length))
+    sketch.setDatum("hA", FreeCAD.Units.Quantity(CAP_A_GROWN, FreeCAD.Units.Length))
+
+
+def farCaps(shape, z):
+    """{index name: face} of shape's faces at height z smaller than the plate: the far caps"""
+    return {
+        "Face%d" % i: f
+        for i, f in enumerate(shape.Faces, 1)
+        if abs(f.BoundBox.ZMin - z) < 1e-6 and abs(f.BoundBox.ZMax - z) < 1e-6 and f.Area < 50
+    }
+
+
+def farCapAt(shape, z, x, y):
+    """The index name of the far cap at height z that holds the point (x, y, z)"""
+    point = FreeCAD.Vector(x, y, z)
+    names = [n for n, f in farCaps(shape, z).items() if f.isInside(point, 1e-6, True)]
+    if len(names) != 1:
+        raise AssertionError("far caps at (%g, %g, %g): %s" % (x, y, z, names))
+    return names[0]
+
+
+def pointOnFarCap(feature, sub):
+    """A datum point at the centre of mass of feature's face `sub`, the feature kept as the Tip"""
+    body = feature.getParentGeoFeatureGroup()
+    point = body.newObject("PartDesign::Point", "CapPoint")
+    point.AttachmentSupport = [(feature, sub)]
+    point.MapMode = "CenterOfMass"
+    body.Tip = feature
+    feature.Document.recompute()
+    return point
+
+
+# The child of testPadUpToAFreeformFaceCapsMigrate: opens the saved file, recomputes every object
+# (the naming migration), records the datum point, grows A and records it again
+_MIGRATION_CHILD = """\
+import json, os, traceback
+import FreeCAD
+out = os.environ["PAD_CAPS_OUT"]
+try:
+    doc = FreeCAD.openDocument(os.environ["PAD_CAPS_FILE"])
+    for obj in doc.Objects:
+        obj.touch()
+    doc.recompute()
+    point = doc.getObject("CapPoint")
+    result = {"opened": list(point.Placement.Base), "valid": point.isValid()}
+    sketch = doc.getObject("Profile")
+    for name in ("wA", "hA"):
+        sketch.setDatum(name, FreeCAD.Units.Quantity(%d, FreeCAD.Units.Length))
+    doc.recompute()
+    result["grown"] = list(point.Placement.Base)
+    result["valid"] = result["valid"] and point.isValid()
+    with open(out, "w", encoding="utf-8") as fh:
+        json.dump(result, fh)
+except Exception:
+    with open(out + ".error", "w", encoding="utf-8") as fh:
+        fh.write(traceback.format_exc())
+os._exit(0)
+""" % CAP_A_GROWN
+
+
 # A split prism's vertices where it meets a freeform up-to face carry the intersection's
 # tolerance: 5e-6 up to the loft's side (ops#357). A raise orders of magnitude more is a defect
 SPLIT_TOLERANCE = 1e-5
@@ -1899,8 +2049,9 @@ class TestPad(unittest.TestCase):
 
     def testPadUpToALoftedFaceFromSeveralFaces(self):
         # ops#357: two rectangles, and a rectangle with a hole, up to the loft's side: one prism
-        # per face, each its own volume, the hole's taken out. Each far cap is a piece of the side
-        # named from it; two pieces of one face differ only by a duplicate counter (ops#357)
+        # per face, each its own volume, the hole's taken out. Each far cap is the projection
+        # (PRJ) of its own profile face, no longer a piece of the side told apart from the other
+        # by a counter in the result's face order (ops#360)
         cases = {
             "two": [(-3, 3, -1, 5), (1, 7, 3, 10)],
             "hole": [(-2, 4, 2, 10), (-1, 6, 1, 8)],
@@ -1929,15 +2080,16 @@ class TestPad(unittest.TestCase):
                     ]
                     self.assertEqual(len(caps), 2 if kind == "two" else 1)
                     self.assertEqual(len(set(caps)), len(caps))
-                    self.assertTrue(all(";MOD;" in name for name in caps), caps)
+                    self.assertTrue(all(";PRJ;" in name for name in caps), caps)
                 finally:
                     FreeCAD.closeDocument(doc.Name)
 
     def testPadUpToALoftedFaceNames(self):
         # ops#357 (ops#334's rule for the split): the side faces are generated from the sketch's
-        # edges, the far cap is the piece of the up-to face, and the far cap's edges and
-        # vertices are the projections of the sketch's edges and vertices (PRJ), not generated
-        # from the side faces, where the solver took a far edge for the sketch's own
+        # edges, and the far cap's edges and vertices are the projections of the sketch's edges
+        # and vertices (PRJ), not generated from the side faces, where the solver took a far edge
+        # for the sketch's own. The far cap is the projection of the sketch's face (ops#360), no
+        # longer the piece of the up-to face
         base, pad = squareUpToTheLoft(self.Doc, "Pad", 22, 5, 9)
         self.assertTrue(pad.isValid(), pad.getStatusString())
         prism = pad.AddSubShape
@@ -1948,7 +2100,7 @@ class TestPad(unittest.TestCase):
             for i, f in enumerate(prism.Faces, 1)
             if f.Surface.TypeId == "Part::GeomBSplineSurface"
         )
-        self.assertIn(";MOD;", prism.getElementMappedName("Face%d" % cap))
+        self.assertIn(";PRJ;", prism.getElementMappedName("Face%d" % cap))
         sides = [
             i
             for i, f in enumerate(prism.Faces, 1)
@@ -1966,6 +2118,156 @@ class TestPad(unittest.TestCase):
                 # Where the loft's seam crosses the far edges, the vertices are generated
                 name = prism.getElementMappedName("Vertex%d" % i)
                 self.assertTrue(";PRJ;" in name or ";GEN;" in name, name)
+
+    def testPadUpToAFreeformFaceCapsStayOnTheirFaces(self):
+        # ops#360: the split named the far caps from the plate alone (MOD), told apart by a
+        # counter in the result's face order, which follows the profile's faces, sorted by
+        # area. A grown past B came first, and a datum on A's cap went to B's, valid and with no
+        # warning: (6.5, 1.5, z). Each cap is now the projection of its own profile face
+        for kind in ("Pad", "Pocket"):
+            with self.subTest(kind=kind):
+                doc = FreeCAD.newDocument("PadUpToAFreeformFaceCaps")
+                try:
+                    feature, z = capsUpToAFreeformPlate(doc, kind)
+                    self.assertTrue(feature.isValid(), feature.getStatusString())
+                    point = pointOnFarCap(feature, farCapAt(feature.Shape, z, 1, 1))
+                    self.assertTrue(point.isValid(), point.getStatusString())
+                    self.assertLess((point.Placement.Base - FreeCAD.Vector(1, 1, z)).Length, 1e-6)
+                    growCapA(feature.Profile[0])
+                    doc.recompute()
+                    self.assertTrue(feature.isValid(), feature.getStatusString())
+                    self.assertTrue(point.isValid(), point.getStatusString())
+                    centre = CAP_A_GROWN / 2
+                    self.assertLess(
+                        (point.Placement.Base - FreeCAD.Vector(centre, centre, z)).Length,
+                        1e-6,
+                        point.Placement.Base,
+                    )
+                finally:
+                    FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToAFreeformFaceCapNames(self):
+        # ops#360: each far cap is the projection (PRJ) of its own profile face, as BRepFeat
+        # names the top, not a piece of the plate (MOD); the two differ, and each keeps its name
+        # when A grows past B. The Pocket's floors are the caps' names modified by the cut
+        for kind in ("Pad", "Pocket"):
+            with self.subTest(kind=kind):
+                doc = FreeCAD.newDocument("PadUpToAFreeformFaceCapNames")
+                try:
+                    feature, z = capsUpToAFreeformPlate(doc, kind)
+                    caps = farCaps(feature.Shape, z)
+                    self.assertEqual(len(caps), 2)
+                    names = {n: feature.Shape.getElementMappedName(n) for n in caps}
+                    for name in names.values():
+                        self.assertIn(";PRJ;", name)
+                        self.assertNotIn(";MOD;", name.split(";PRJ;")[-1])
+                    self.assertEqual(len(set(names.values())), 2, names)
+                    before = {
+                        "A": names[farCapAt(feature.Shape, z, 1, 1)],
+                        "B": names[farCapAt(feature.Shape, z, 6.5, 1.5)],
+                    }
+                    growCapA(feature.Profile[0])
+                    doc.recompute()
+                    self.assertTrue(feature.isValid(), feature.getStatusString())
+                    shape = feature.Shape
+                    after = {
+                        "A": shape.getElementMappedName(farCapAt(shape, z, 2, 2)),
+                        "B": shape.getElementMappedName(farCapAt(shape, z, 6.5, 1.5)),
+                    }
+                    self.assertEqual(after, before)
+                finally:
+                    FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToAFreeformShellCapsStayOnTheirFaces(self):
+        # ops#360: up to a shell of two B-spline faces meeting at x = 1, under A's middle, A's
+        # cap is two pieces: each a projection of A, told apart by the projection's counter in
+        # the shell's face order; B's is a projection of B. A datum on A's left piece stays
+        # there when A grows past B
+        feature, z = capsUpToAFreeformPlate(self.Doc, "Pad", seam=1)
+        self.assertTrue(feature.isValid(), feature.getStatusString())
+        shape = feature.Shape
+        self.assertEqual(len(farCaps(shape, z)), 3)
+        left = shape.getElementMappedName(farCapAt(shape, z, 0.5, 1))
+        right = shape.getElementMappedName(farCapAt(shape, z, 1.5, 1))
+        other = shape.getElementMappedName(farCapAt(shape, z, 6.5, 1.5))
+        for name in (left, right, other):
+            self.assertIn(";PRJ;", name)
+        self.assertEqual(len({left, right, other}), 3)
+        point = pointOnFarCap(feature, farCapAt(shape, z, 0.5, 1))
+        growCapA(feature.Profile[0])
+        self.Doc.recompute()
+        self.assertTrue(feature.isValid(), feature.getStatusString())
+        self.assertTrue(point.isValid(), point.getStatusString())
+        self.assertLess(
+            (point.Placement.Base - FreeCAD.Vector(0.5, CAP_A_GROWN / 2, z)).Length,
+            1e-6,
+            point.Placement.Base,
+        )
+        shape = feature.Shape
+        self.assertEqual(
+            shape.getElementMappedName(farCapAt(shape, z, 0.5, 1)), left, "A's left piece"
+        )
+
+    def testPadUpToAFreeformFaceCapsMigrate(self):
+        # ops#360's naming revision: a file saved with a datum on A's cap, reopened by a child
+        # FreeCADCmd under FREECAD_TEST_NAMING_REVISION_OFFSET=1, looks older and takes the
+        # naming migration: its reference is re-derived from geometry onto A's cap (none moved
+        # back, none broken), and stays there when A grows past B
+        import json
+        import os
+        import re
+        import subprocess
+        import tempfile
+
+        from PartDesignTests.TestNamingDump import _freecadCmd
+
+        feature, z = capsUpToAFreeformPlate(self.Doc, "Pad")
+        pointOnFarCap(feature, farCapAt(feature.Shape, z, 1, 1))
+        work = tempfile.mkdtemp(prefix="pad-caps-migrate-")
+        path = os.path.join(work, "caps.FCStd")
+        self.Doc.saveAs(path)
+        script = os.path.join(work, "child.py")
+        with open(script, "w", encoding="utf-8") as fh:
+            fh.write(_MIGRATION_CHILD)
+        out = os.path.join(work, "child.json")
+        env = dict(os.environ)
+        env["FREECAD_TEST_NAMING_REVISION_OFFSET"] = "1"
+        env["PAD_CAPS_FILE"] = path
+        env["PAD_CAPS_OUT"] = out
+        run = subprocess.run(
+            [_freecadCmd(), script],
+            env=env,
+            cwd=work,
+            timeout=600,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        log = run.stdout.decode("utf-8", "replace")
+        if os.path.isfile(out + ".error"):
+            with open(out + ".error", encoding="utf-8") as fh:
+                self.fail(fh.read() + "\n" + log)
+        with open(out, encoding="utf-8") as fh:
+            result = json.load(fh)
+        self.assertIn("FREECAD_TEST_NAMING_REVISION_OFFSET=1", log)
+        found = re.findall(
+            r"(\d+) element references re-derived from their geometry after a naming change: "
+            r"(\d+) moved back to their element, (\d+) broken",
+            log,
+        )
+        self.assertTrue(found, log)
+        self.assertGreater(sum(int(total) for total, _, _ in found), 0, log)
+        self.assertEqual(
+            [(int(moved), int(broken)) for _, moved, broken in found], [(0, 0)] * len(found), log
+        )
+        self.assertTrue(result["valid"], result)
+        self.assertLess((FreeCAD.Vector(*result["opened"]) - FreeCAD.Vector(1, 1, z)).Length, 1e-6)
+        centre = CAP_A_GROWN / 2
+        self.assertLess(
+            (FreeCAD.Vector(*result["grown"]) - FreeCAD.Vector(centre, centre, z)).Length,
+            1e-6,
+            result,
+        )
 
     def testTwoSidedPadWhoseSideMissesAFreeformFace(self):
         # ops#357 (ops#353's rethrow): side 2 of the 5 x 5 square goes up to a B-spline plate at
