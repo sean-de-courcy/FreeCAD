@@ -86,26 +86,27 @@ jobs:
           fi
           echo "BUILD_TAG=${BUILD_TAG}" >> "$GITHUB_ENV"
           echo "build_tag=${BUILD_TAG}" >> "$GITHUB_OUTPUT"
+          # No exit here: under bash -l, exit returns ~/.bash_logout's status (1 on the runner)
           if [ "${DRY_RUN}" = "true" ]; then
             echo "Dry run: no draft release for ${BUILD_TAG}"
-            exit 0
-          fi
-          # Always a draft: CI never publishes. A re-run for the same tag reuses its draft (the
-          # uploads use --clobber and find drafts by tag name). gh release create doesn't: a
-          # draft has no git tag yet, so it makes a second draft. So look the tag up first.
-          RELEASES=$(gh api --paginate "repos/${{ github.repository }}/releases?per_page=100" \
-                       --jq ".[] | select(.tag_name == \"${BUILD_TAG}\") | if .draft then \"draft\" else \"published\" end")
-          if [ -z "${RELEASES}" ]; then
-            gh release create "${BUILD_TAG}" --target "${{ github.sha }}" \
-                                             --title "FreeCAD-CH build ${BUILD_TAG}" \
-                                             -F .github/workflows/build-notes.md \
-                                             --draft
-          elif [ "${RELEASES}" = "draft" ]; then
-            echo "Reusing the draft release ${BUILD_TAG}"
           else
-            echo "Releases with tag ${BUILD_TAG}: $(echo ${RELEASES})." >&2
-            echo "Expected none or one draft (a published release is never reused): delete the extra drafts, or run with another build_tag." >&2
-            exit 1
+            # Always a draft: CI never publishes. A re-run for the same tag reuses its draft (the
+            # uploads use --clobber and find drafts by tag name). gh release create doesn't: a
+            # draft has no git tag yet, so it makes a second draft. So look the tag up first.
+            RELEASES=$(gh api --paginate "repos/${{ github.repository }}/releases?per_page=100" \
+                         --jq ".[] | select(.tag_name == \"${BUILD_TAG}\") | if .draft then \"draft\" else \"published\" end")
+            if [ -z "${RELEASES}" ]; then
+              gh release create "${BUILD_TAG}" --target "${{ github.sha }}" \
+                                               --title "FreeCAD-CH build ${BUILD_TAG}" \
+                                               -F .github/workflows/build-notes.md \
+                                               --draft
+            elif [ "${RELEASES}" = "draft" ]; then
+              echo "Reusing the draft release ${BUILD_TAG}"
+            else
+              echo "Releases with tag ${BUILD_TAG}: $(echo ${RELEASES})." >&2
+              echo "Expected none or one draft (a published release is never reused): delete the extra drafts, or run with another build_tag." >&2
+              exit 1
+            fi
           fi
 
       - name: Upload Source
