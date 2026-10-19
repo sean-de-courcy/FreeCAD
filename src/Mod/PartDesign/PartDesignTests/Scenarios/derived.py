@@ -32,8 +32,9 @@ bottom, so the slab z 0..`depth` and every bottom edge and corner go. Before ops
 survivor was taken at tier 1, silently, wherever it was (L2, L4: 8 mm up).
 
 Scenarios named `...Ancestry` run with NamingSolver/Tier1Derived = ancestry, the rule before
-ops#335, kept for comparison runs: their reference moves to the derived survivor (wrong by
-geometry; known failures in V2s). Without the solver (V2) every cut breaks the reference."""
+ops#335, kept for comparison runs: they assert that the setting still gives the old rule, the
+reference moved silently to the derived survivor (wrong by geometry, which is why `place` is the
+default; ops#359). Without the solver (V2) every cut breaks the reference."""
 
 import FreeCAD as App
 
@@ -163,7 +164,13 @@ class LoftEdgeCutAway(OnEdge, Loft, Recessed):
 
 
 class LoftEdgeCutAwayAncestry(AncestryRule, LoftEdgeCutAway):
-    """L2 under the rule before ops#335: the fillet moves 8 mm up, silently (wrong)."""
+    """L2 under the rule before ops#335: the fillet moves 8 mm up to the derived edge, silently
+    (wrong by geometry; the comparison setting's expected result)."""
+
+    def expectEdge(self):
+        if self.stepName is None:
+            return bottomEdge()
+        return Settled(bottomEdge(self.depth)) if self.solver else BROKEN
 
 
 class LoftCornerCutAway(OnCorner, Loft, Recessed):
@@ -178,7 +185,15 @@ class LoftCornerCutAway(OnCorner, Loft, Recessed):
 
 
 class LoftCornerCutAwayAncestry(AncestryRule, LoftCornerCutAway):
-    """L4 under the rule before ops#335: the sketch moves 8 mm, silently (wrong)."""
+    """L4 under the rule before ops#335: the sketch moves to the new corner 8 mm up, silently
+    (wrong by geometry; the comparison setting's expected result)."""
+
+    def expectCorner(self):
+        if self.stepName is None:
+            return vertex((20, 0, 0))
+        # the tapered loft's edge from (20, 0, 0) to (18, 1, 15), at z = depth
+        t = self.depth / 15
+        return Settled(vertex((20 - 2 * t, t, self.depth))) if self.solver else BROKEN
 
 
 class TaperedLoftEdgeCutAway(OnEdge, Loft, Recessed):

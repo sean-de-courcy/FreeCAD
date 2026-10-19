@@ -6318,3 +6318,398 @@ TEST(SolveOwner, derivedAmongOtherSurvivorsNeedsTier3)
     EXPECT_EQ(outcomes[0].element, "Edge7");
     EXPECT_EQ(outcomes[0].tier, 2);
 }
+
+TEST(SolveOwner, derivedSharedByTwoMixedSetsMergesNothing)
+{
+    // Two references to the opposite sides g2 (x = 20) and g4 (x = 0) of a pad's profile, both
+    // cut away. Each keeps its top edge (the PRJ partner) and the section edge on the start face
+    // (`FAC;F;LOW` embeds every profile edge: E<F<E from each). The top edges are B-splines here,
+    // so tier 2 keeps only the section edge for both, 10 mm from either old edge. A derived
+    // survivor is no proven merge: the two references compete for it in the match graph, and
+    // both break as ambiguous. Under ancestry the section edge was in both old names' ancestry,
+    // and both merged onto it.
+    const auto g2 = sketchEdge(2);
+    const auto g4 = sketchEdge(4);
+    const auto startFace = lowFace({sketchEdge(1), g2, sketchEdge(3), g4});
+    const auto onStart = generated({startFace}, 9, "CUT", 'E');
+    auto bspline = [](double x) {
+        auto fp = Loft::line(x, 10);
+        fp.kind = "BSpline";
+        return fp;
+    };
+    SolveInput input;
+    input.diagonal = 24.5;
+    input.pool["Edge"] = {
+        element("Edge1", {onStart}),
+        element("Edge2", {section({}, {g2}, 7, "XTR", 0, 'E', {"PRJ"})}),
+        element("Edge3", {section({}, {g4}, 7, "XTR", 0, 'E', {"PRJ"})}),
+    };
+    measure(input, {{"Edge1", Loft::line(10, 1)}, {"Edge2", bspline(20)}, {"Edge3", bspline(0)}}, nullptr);
+    input.entries = {missing(g2, "Edge"), missing(g4, "Edge")};
+    input.entries[0].fingerprint = Loft::line(20, 0);
+    input.entries[1].fingerprint = Loft::line(0, 0);
+
+    auto outcomes = Data::solveOwner(input);
+    ASSERT_EQ(outcomes.size(), 2U);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[0].evidence, "ambiguous, tier 2: 1 of 2");
+    EXPECT_EQ(outcomes[0].candidates, (std::vector<std::string> {"Edge1", "Edge2"}));
+    EXPECT_EQ(outcomes[0].candidateRoles, (std::vector<std::string> {"derived", "structural"}));
+    EXPECT_EQ(outcomes[1].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[1].evidence, "ambiguous, tier 2: 1 of 2");
+    EXPECT_EQ(outcomes[1].candidates, (std::vector<std::string> {"Edge1", "Edge3"}));
+    EXPECT_EQ(outcomes[1].candidateRoles, (std::vector<std::string> {"derived", "structural"}));
+
+    //   ancestry: both merged onto the section edge
+    input.derived = Data::Tier1Derived::Ancestry;
+    outcomes = Data::solveOwner(input);
+    for (const auto& outcome : outcomes) {
+        EXPECT_EQ(outcome.status, SolveStatus::Resolved);
+        EXPECT_EQ(outcome.element, "Edge1");
+    }
+}
+
+namespace
+{
+
+// An edge whose name holds the loft's wall face (the face g2 generated) only in a later section
+// (`<base>|<a MOD section embedding the face>`, e.g. where a later feature joined it to that
+// face): it reaches g2 through the face (E<F<E), and its lineage and its sources are \a base's.
+std::string modifiedAlongTheWall(const std::string& base)
+{
+    const auto wallFace = generated({sketchEdge(2)}, 7, "LFT", 'F');
+    return base + "|" + section({}, {wallFace}, 9, "FUS", 0, 'E', {"MOD"});
+}
+
+}  // namespace
+
+TEST(SolveOwner, derivedSurvivorOfAnotherMakerIsDroppedByT1)
+{
+    // A derived element gets no T1 exemption (PR 327's Sonnet review, 1): another sketch's edge
+    // (tag 6), joined to the loft's wall face later, lacks g2's maker in its lineage. T1 drops it,
+    // and the no-candidate branch decides over the whole pool: 8 mm up, broken, the evidence
+    // naming another maker's survivor (not a derived one), the edge ranked with the others by
+    // distance.
+    Loft loft;
+    auto input = loft.input(8);
+    const auto joined = modifiedAlongTheWall(generated({sketchEdge(3, 6)}, 8, "XTR", 'E'));
+    EXPECT_EQ(NameAncestry::reaches(joined, loft.g2), NameAncestry::Reach::Derived);
+    input.pool["Edge"][0] = element("Edge1", {joined});
+
+    auto outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[0].evidence.rfind("no structural candidate, tier 3 found none", 0), 0U)
+        << outcomes[0].evidence;
+    EXPECT_NE(outcomes[0].evidence.find("; tier 1's 1 survivor has another maker"), std::string::npos)
+        << outcomes[0].evidence;
+    EXPECT_EQ(outcomes[0].evidence.find("through another type"), std::string::npos)
+        << outcomes[0].evidence;
+    ASSERT_FALSE(outcomes[0].candidates.empty());
+    EXPECT_EQ(outcomes[0].candidates[0], "Edge1");
+    EXPECT_EQ(outcomes[0].candidateRoles[0], "geometric");
+
+    //   0.1 mm up: tier 3 over the pool takes it (warned, with a record, by the batch)
+    measure(
+        input,
+        {{"Edge1", Loft::line(20, 0.1)}, {"Edge2", Loft::line(20, 15)}, {"Edge3", Loft::line(0, 0.1)}},
+        nullptr
+    );
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved);
+    EXPECT_EQ(outcomes[0].element, "Edge1");
+    EXPECT_EQ(outcomes[0].tier, 3);
+    EXPECT_EQ(outcomes[0].evidence.rfind("no structural candidate, tier 3: ", 0), 0U)
+        << outcomes[0].evidence;
+    EXPECT_EQ(outcomes[0].evidence.find("through another type"), std::string::npos)
+        << outcomes[0].evidence;
+
+    //   ancestry: in the old name's ancestry, so exempt from T1: tier 1, as before ops#335
+    input.derived = Data::Tier1Derived::Ancestry;
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved);
+    EXPECT_EQ(outcomes[0].element, "Edge1");
+    EXPECT_EQ(outcomes[0].tier, 1);
+}
+
+TEST(SolveOwner, derivedSurvivorThatLostTheSourceIsDroppedByT1Prime)
+{
+    // ... nor a T1' exemption: an edge the loft made from g3, g2's sketch (so the maker is in its
+    // lineage), joined to the wall face later, lost g2 as a source. T1' drops it: broken 8 mm up,
+    // tier 3 at 0.1 mm, the evidence naming a survivor that lost the source.
+    Loft loft;
+    auto input = loft.input(8);
+    const auto joined = modifiedAlongTheWall(generated({sketchEdge(3)}, 7, "LFT", 'E', 3));
+    EXPECT_EQ(NameAncestry::reaches(joined, loft.g2), NameAncestry::Reach::Derived);
+    input.pool["Edge"][0] = element("Edge1", {joined});
+
+    auto outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[0].evidence.rfind("no structural candidate, tier 3 found none", 0), 0U)
+        << outcomes[0].evidence;
+    EXPECT_NE(
+        outcomes[0].evidence.find("; tier 1's 1 survivor lost the old element's source"),
+        std::string::npos
+    ) << outcomes[0].evidence;
+    EXPECT_EQ(outcomes[0].evidence.find("through another type"), std::string::npos)
+        << outcomes[0].evidence;
+    ASSERT_FALSE(outcomes[0].candidates.empty());
+    EXPECT_EQ(outcomes[0].candidates[0], "Edge1");
+    EXPECT_EQ(outcomes[0].candidateRoles[0], "geometric");
+
+    measure(
+        input,
+        {{"Edge1", Loft::line(20, 0.1)}, {"Edge2", Loft::line(20, 15)}, {"Edge3", Loft::line(0, 0.1)}},
+        nullptr
+    );
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved);
+    EXPECT_EQ(outcomes[0].element, "Edge1");
+    EXPECT_EQ(outcomes[0].tier, 3);
+    EXPECT_EQ(outcomes[0].evidence.find("through another type"), std::string::npos)
+        << outcomes[0].evidence;
+
+    input.derived = Data::Tier1Derived::Ancestry;
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved);
+    EXPECT_EQ(outcomes[0].element, "Edge1");
+    EXPECT_EQ(outcomes[0].tier, 1);
+}
+
+TEST(SolveOwner, derivedSurvivorThatIsTheIndexSource)
+{
+    // An edge of a map-less shape, referenced by its IDX name (`Edge3;...;MKR;...;IDX,SRC`): the
+    // element still named by that IDX section under another op code also holds a section edge's
+    // name on a face generated from the old edge (E<F<E). Every survivor is derived, but the IDX
+    // source is evidence of its own: confirmed when tier 2 agrees, at tier 1.
+    const auto oldEdge = indexed("Edge3", 4, "MKR", 'E');
+    const auto onWall = generated({generated({oldEdge}, 7, "XTR", 'F')}, 9, "CUT", 'E');
+    SolveInput input;
+    input.diagonal = 27.0;
+    input.pool["Edge"] = {
+        element("Edge1", {indexed("Edge3", 4, "FUS", 'E'), onWall}),
+        element("Edge2", {sketchEdge(7, 6)}),
+    };
+    measure(input, {{"Edge1", Loft::line(20, 0)}, {"Edge2", Loft::line(0, 0)}}, nullptr);
+    input.entries = {missing(oldEdge, "Edge")};
+    input.entries[0].fingerprint = Loft::line(20, 0);
+
+    auto outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved);
+    EXPECT_EQ(outcomes[0].element, "Edge1");
+    EXPECT_EQ(outcomes[0].tier, 1);
+    EXPECT_NE(outcomes[0].evidence.find("index"), std::string::npos) << outcomes[0].evidence;
+    EXPECT_NE(outcomes[0].evidence.find("tier 2 agrees"), std::string::npos) << outcomes[0].evidence;
+
+    //   tier 2 disagrees (a B-spline now): the IDX source confirms nothing, and the derived
+    //   element goes to the no-candidate branch: broken, listed first
+    auto bspline = Loft::line(20, 0);
+    bspline.kind = "BSpline";
+    bspline.direction.reset();
+    measure(input, {{"Edge1", bspline}, {"Edge2", Loft::line(0, 0)}}, nullptr);
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    ASSERT_FALSE(outcomes[0].candidates.empty());
+    EXPECT_EQ(outcomes[0].candidates[0], "Edge1");
+    EXPECT_EQ(outcomes[0].candidateRoles[0], "derived");
+    EXPECT_NE(outcomes[0].evidence.find("(E<F<E), tier 2 disagrees with it"), std::string::npos)
+        << outcomes[0].evidence;
+}
+
+TEST(SolveOwner, derivedSurvivorBesideThePiecesDoesNotCount)
+{
+    // The cut splits the old edge g2 in two (pieces, `g2|CUT;MOD`) and leaves a section edge on
+    // the wall face (E<F<E) 8 mm up: the pieces are what is left of the old edge, under every
+    // policy, and the derived edge is listed after them, as derived.
+    Loft loft;
+    auto half = [](double y) {
+        return fingerprint('E', "Line", 5, Base::Vector3d(20, y, 0), Base::Vector3d(0, 1, 0));
+    };
+    SolveInput input;
+    input.diagonal = loft.diagonal;
+    input.pool["Edge"] = {
+        element("Edge1", {piece(loft.g2, 9, "CUT", 0, 'E')}),
+        element("Edge2", {piece(loft.g2, 9, "CUT", 1, 'E')}),
+        element("Edge3", {loft.section2}),
+    };
+    measure(input, {{"Edge1", half(2.5)}, {"Edge2", half(7.5)}, {"Edge3", Loft::line(20, 8)}}, nullptr);
+    input.entries = {missing(loft.g2, "Edge")};
+    input.entries[0].fingerprint = Loft::line(20, 0);
+    const std::vector<std::string> listed {"Edge1", "Edge2", "Edge3"};
+    const std::vector<std::string> roles {"piece", "piece", "derived"};
+
+    //   One: broken, split
+    auto outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[0].evidence, "split into 2 pieces");
+    EXPECT_EQ(outcomes[0].candidates, listed);
+    EXPECT_EQ(outcomes[0].candidateRoles, roles);
+
+    //   Expand: both pieces
+    input.entries[0].policy = Data::SolvePolicy::Expand;
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved);
+    EXPECT_EQ(outcomes[0].elements, (std::vector<std::string> {"Edge1", "Edge2"}));
+    EXPECT_EQ(outcomes[0].evidence, "split into 2 pieces, expanded");
+
+    //   Equivalent, the pieces the same for the consumer: one of them
+    input.entries[0].policy = Data::SolvePolicy::Equivalent;
+    input.entries[0].equivalent = [](const std::string& a, const std::string& b) {
+        return a != "Edge3" && b != "Edge3";
+    };
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved);
+    EXPECT_TRUE(outcomes[0].element == "Edge1" || outcomes[0].element == "Edge2")
+        << outcomes[0].element;
+    EXPECT_NE(outcomes[0].evidence.find("2 pieces equivalent for the consumer"), std::string::npos)
+        << outcomes[0].evidence;
+
+    //   ... and not the same: broken
+    input.entries[0].equivalent = [](const std::string&, const std::string&) {
+        return false;
+    };
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[0].evidence, "split into 2 pieces, 2 different results for the consumer");
+    EXPECT_EQ(outcomes[0].candidates, listed);
+    EXPECT_EQ(outcomes[0].candidateRoles, roles);
+
+    //   Expand and Equivalent without pieces are One: the derived edge alone breaks (L2)
+    for (auto policy : {Data::SolvePolicy::Expand, Data::SolvePolicy::Equivalent}) {
+        auto alone = loft.input(8);
+        alone.entries[0].policy = policy;
+        outcomes = Data::solveOwner(alone);
+        EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+        ASSERT_FALSE(outcomes[0].candidates.empty());
+        EXPECT_EQ(outcomes[0].candidates[0], "Edge1");
+        EXPECT_EQ(outcomes[0].candidateRoles[0], "derived");
+    }
+}
+
+TEST(SolveOwner, derivedSurvivorsInThePlural)
+{
+    // A stepped cut leaves two section edges on the wall face, 8 and 9 mm up: both derived
+    // (E<F<E), neither at the old place.
+    Loft loft;
+    const auto wallFace = generated({loft.g2}, 7, "LFT", 'F');
+    SolveInput input = loft.input(8);
+    input.pool["Edge"] = {
+        element("Edge1", {generated({wallFace}, 9, "CUT", 'E')}),
+        element("Edge2", {loft.farEdge}),
+        element("Edge3", {loft.section4}),
+        element("Edge4", {generated({wallFace}, 9, "CUT", 'E', 1)}),
+    };
+    auto heights = [&input](double z1, double z4, const char* kind = "Line") {
+        auto at = [kind](double z) {
+            auto fp = Loft::line(20, z);
+            fp.kind = kind;
+            return fp;
+        };
+        measure(
+            input,
+            {{"Edge1", at(z1)},
+             {"Edge2", Loft::line(20, 15)},
+             {"Edge3", Loft::line(0, z1)},
+             {"Edge4", at(z4)}},
+            nullptr
+        );
+    };
+    heights(8, 9);
+
+    auto outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_NE(
+        outcomes[0].evidence.find(
+            "; tier 1's 2 survivors are in ancestry through another "
+            "type (E<F<E), none at the old place"
+        ),
+        std::string::npos
+    ) << outcomes[0].evidence;
+    ASSERT_GE(outcomes[0].candidates.size(), 2U);
+    EXPECT_EQ(outcomes[0].candidates[0], "Edge1");
+    EXPECT_EQ(outcomes[0].candidates[1], "Edge4");
+    EXPECT_EQ(outcomes[0].candidateRoles[0], "derived");
+    EXPECT_EQ(outcomes[0].candidateRoles[1], "derived");
+
+    //   both B-splines: tier 2 disagrees with them
+    heights(8, 9, "BSpline");
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_NE(outcomes[0].evidence.find("(E<F<E), tier 2 disagrees with them"), std::string::npos)
+        << outcomes[0].evidence;
+
+    //   the lower one 1 mm up, within the guess width: a guess, the other listed as derived
+    heights(1, 9);
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Guessed);
+    EXPECT_EQ(outcomes[0].element, "Edge1");
+    ASSERT_GE(outcomes[0].candidates.size(), 2U);
+    EXPECT_EQ(outcomes[0].candidateRoles[0], "guess");
+    EXPECT_EQ(outcomes[0].candidates[1], "Edge4");
+    EXPECT_EQ(outcomes[0].candidateRoles[1], "derived");
+
+    //   no saved fingerprint
+    input.entries[0].fingerprint = ElementFingerprint();
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(
+        outcomes[0].evidence,
+        "no candidate; tier 1's 2 survivors are in ancestry through another type (E<F<E), "
+        "no saved fingerprint"
+    );
+    EXPECT_EQ(outcomes[0].candidates, (std::vector<std::string> {"Edge1", "Edge4"}));
+}
+
+TEST(NameAncestry, reachFromATopSectionWithoutAType)
+{
+    // A name whose top section carries no V/E/F type (none of the fork's operations writes one;
+    // designed). Without the element's type, each branch takes the type of its first typed node,
+    // for the classification and for the path text alike (PR 327's Opus review, F4).
+    using Reach = NameAncestry::Reach;
+    const auto g2 = sketchEdge(2);
+    const auto otherFace = generated({sketchEdge(7, 6)}, 7, "XTR", 'F');
+    const auto fromG2 = generated({g2}, 7, "XTR", 'E');
+    const auto untyped = [](const std::vector<std::string>& embedded) {
+        return section({}, embedded, 9, "XXX", 0, '_', {"GEN"});
+    };
+    //   an edge generated from g2 below it: same-type, whatever another branch's type is
+    EXPECT_EQ(NameAncestry::reaches(untyped({fromG2}), g2), Reach::SameType);
+    EXPECT_EQ(NameAncestry::reaches(untyped({otherFace, fromG2}), g2), Reach::SameType);
+    EXPECT_EQ(NameAncestry::derivedPath(untyped({otherFace, fromG2}), g2), "");
+    //   a section edge on the face g2 generated: derived, the path from its own edge
+    const auto sectionEdge = generated({generated({g2}, 7, "XTR", 'F')}, 9, "CUT", 'E');
+    EXPECT_EQ(NameAncestry::reaches(untyped({otherFace, sectionEdge}), g2), Reach::Derived);
+    EXPECT_EQ(NameAncestry::derivedPath(untyped({otherFace, sectionEdge}), g2), "?<E<F<E");
+    //   the face g2 generated right below the untyped top: the face's type would be the
+    //   start's, and g2 below it same-type; given the element's type (an edge), derived
+    const auto wallFace = generated({g2}, 7, "XTR", 'F');
+    EXPECT_EQ(NameAncestry::reaches(untyped({wallFace}), g2, 'E'), Reach::Derived);
+    EXPECT_EQ(NameAncestry::derivedPath(untyped({wallFace}), g2, 'E'), "?<F<E");
+    EXPECT_EQ(NameAncestry::reaches(untyped({fromG2}), g2, 'E'), Reach::SameType);
+    EXPECT_EQ(NameAncestry::reaches(untyped({otherFace, sectionEdge}), g2, 'E'), Reach::Derived);
+}
+
+TEST(SolveOwner, derivedSurvivorUnderATopSectionWithoutAType)
+{
+    // ops#359: an edge whose name's top section has no type embeds the loft's wall face, the
+    // face g2 generated (E<F<E through an untyped section). The walk takes the edge type from
+    // the pool, so the edge is derived: 8 mm up, broken, listed first. Before, the walk took the
+    // face's type for the start, the path counted as same-type, and tier 1 took the edge
+    // silently. No fork operation is known to write such a name.
+    Loft loft;
+    auto input = loft.input(8);
+    const auto wallFace = generated({loft.g2}, 7, "LFT", 'F');
+    input.pool["Edge"][0] = element("Edge1", {section({}, {wallFace}, 9, "XXX", 0, '_', {"GEN"})});
+
+    auto outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    ASSERT_FALSE(outcomes[0].candidates.empty());
+    EXPECT_EQ(outcomes[0].candidates[0], "Edge1");
+    EXPECT_EQ(outcomes[0].candidateRoles[0], "derived");
+    EXPECT_NE(
+        outcomes[0].evidence.find(
+            "in ancestry through another type (?<F<E), not at the "
+            "old place"
+        ),
+        std::string::npos
+    ) << outcomes[0].evidence;
+}

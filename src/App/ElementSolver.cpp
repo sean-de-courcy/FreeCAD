@@ -452,22 +452,26 @@ void collectAncestryNodes(std::string_view name,
     }
 }
 
-AncestryNodes ancestryNodes(std::string_view name)
+// \a type: the element type of \a name's element, or 0 to take it from the first typed section
+// (NameAncestry::reaches()).
+AncestryNodes ancestryNodes(std::string_view name, char type = 0)
 {
     AncestryNodes nodes;
-    collectAncestryNodes(name, false, false, 0, nodes);
+    collectAncestryNodes(name, false, false, type, nodes);
     return nodes;
 }
 
 // The element types of a path from \a name down to \a ancestor that passes a node of another
 // type and no projection's embedded names, e.g. `E<F<E`; empty if there is none. For the
-// evidence text only: the first such path the walk finds.
-std::string derivedPathOf(std::string_view name, std::string_view ancestor)
+// evidence text only: the first such path the walk finds. Each branch carries its start type, as
+// collectAncestryNodes() does. \a elementType: as ancestryNodes()' type.
+std::string derivedPathOf(std::string_view name, std::string_view ancestor, char elementType = 0)
 {
     std::set<std::pair<std::string, bool>> visited;
     std::string path;
-    char type = 0;
-    std::function<bool(std::string_view, bool)> walk = [&](std::string_view at, bool changed) {
+    std::function<bool(std::string_view, bool, char)> walk = [&](std::string_view at,
+                                                                 bool changed,
+                                                                 char type) {
         if (at.empty() || !visited.emplace(std::string(at), changed).second) {
             return false;
         }
@@ -505,14 +509,14 @@ std::string derivedPathOf(std::string_view name, std::string_view ancestor)
             }
             // An earlier state of the same element: no step in the path
             path.resize(mark);
-            if (walk(context + prefix, changed)) {
+            if (walk(context + prefix, changed, type)) {
                 return true;
             }
             path += path.empty() ? std::string(1, nodeType) : std::string("<") + nodeType;
         }
         if (!last.hasMapperFlag(MAPPER_FLAG_PROJECTION)) {
             for (const auto& embedded : last.linkedNames) {
-                if (!embedded.empty() && walk(context + embedded, changed)) {
+                if (!embedded.empty() && walk(context + embedded, changed, type)) {
                     return true;
                 }
             }
@@ -520,14 +524,16 @@ std::string derivedPathOf(std::string_view name, std::string_view ancestor)
         path.resize(mark);
         return false;
     };
-    return walk(name, false) ? path : std::string();
+    return walk(name, false, elementType) ? path : std::string();
 }
 
 }  // namespace
 
-NameAncestry::Reach NameAncestry::reaches(std::string_view name, std::string_view ancestor)
+NameAncestry::Reach NameAncestry::reaches(std::string_view name,
+                                          std::string_view ancestor,
+                                          char type)
 {
-    const AncestryNodes nodes = ancestryNodes(name);
+    const AncestryNodes nodes = ancestryNodes(name, type);
     const std::string node(ancestor);
     return nodes.outside.count(node)     ? Reach::SameType
         : nodes.derived.count(node)      ? Reach::Derived
@@ -535,9 +541,11 @@ NameAncestry::Reach NameAncestry::reaches(std::string_view name, std::string_vie
                                          : Reach::None;
 }
 
-std::string NameAncestry::derivedPath(std::string_view name, std::string_view ancestor)
+std::string NameAncestry::derivedPath(std::string_view name,
+                                      std::string_view ancestor,
+                                      char type)
 {
-    return derivedPathOf(name, ancestor);
+    return derivedPathOf(name, ancestor, type);
 }
 
 std::vector<std::string> NameAncestry::sourceTags(std::string_view name)
@@ -2943,6 +2951,8 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         const std::vector<int>* members = nullptr;
         Pool* pool = nullptr;
         std::string oldName;
+        // The pool's element type ('V', 'E', 'F'), for the ancestry walk (ops#359)
+        char type = 0;
         std::vector<int> candidates;  // positions in the pool, in index order
         std::set<int> fromOverlap;
         std::set<int> fromNames;
@@ -3110,7 +3120,7 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         const auto n = state.derived.size();
         std::string path;
         for (const auto& name : state.pool->elements[state.derived.front()].names) {
-            path = derivedPathOf(name, state.oldName);
+            path = derivedPathOf(name, state.oldName, state.type);
             if (!path.empty()) {
                 break;
             }
@@ -3180,6 +3190,14 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         state.members = &members;
         state.oldName = std::get<0>(key);
         state.pool = &pools[std::get<1>(key)];
+        // The walk takes the element's type from the pool: a name whose top section has none
+        // would otherwise get the first typed node's, and a path through another type could
+        // count as same-type (ops#359).
+        const std::string& poolType = std::get<1>(key);
+        state.type = poolType == "Vertex" ? 'V'
+            : poolType == "Edge"          ? 'E'
+            : poolType == "Face"          ? 'F'
+                                          : 0;
         Pool& pool = *state.pool;
         const std::string& oldName = state.oldName;
 
@@ -3233,7 +3251,7 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                     if (!ancestry.contains(n, oldName)) {
                         continue;
                     }
-                    const AncestryNodes nodes = ancestryNodes(n);
+                    const AncestryNodes nodes = ancestryNodes(n, state.type);
                     if (nodes.outside.count(oldName)) {
                         contains = true;
                         break;
@@ -3785,7 +3803,7 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             else if (status == MatchStatus::Resolved && !evidenced && derivedPartner) {
                 std::string path;
                 for (const auto& name : state.pool->elements[k].names) {
-                    path = derivedPathOf(name, state.oldName);
+                    path = derivedPathOf(name, state.oldName, state.type);
                     if (!path.empty()) {
                         break;
                     }
