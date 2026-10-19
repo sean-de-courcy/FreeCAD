@@ -841,6 +841,13 @@ void Hole::updateHoleCutParams()
                             HoleCutCustomValues.setValue(false);
                         }
                     }
+                    else if (isRestoring()) {
+                        // FreeCAD-CH (ops#389): the saved values stay; only the read-only
+                        // flags follow HoleCutCustomValues (still read-only from the
+                        // constructor here, so its flag can't tell)
+                        HoleCutDiameter.setReadOnly(!HoleCutCustomValues.getValue());
+                        HoleCutDepth.setReadOnly(!HoleCutCustomValues.getValue());
+                    }
                     else {
                         HoleCutDiameter.setReadOnly(false);
                         HoleCutDepth.setReadOnly(false);
@@ -882,6 +889,12 @@ void Hole::updateHoleCutParams()
                         if (HoleCutCustomValues.getValue() && HoleCutCustomValues.isReadOnly()) {
                             HoleCutCustomValues.setValue(false);
                         }
+                    }
+                    else if (isRestoring()) {
+                        // FreeCAD-CH (ops#389): as for the counterbore above
+                        HoleCutDiameter.setReadOnly(!HoleCutCustomValues.getValue());
+                        HoleCutDepth.setReadOnly(!HoleCutCustomValues.getValue());
+                        HoleCutCountersinkAngle.setReadOnly(!HoleCutCustomValues.getValue());
                     }
                     else {
                         HoleCutDiameter.setReadOnly(false);

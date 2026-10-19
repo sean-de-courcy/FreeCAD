@@ -120,11 +120,16 @@ TopoShape FeatureRefine::refineShapeIfActive(
         // its result is unrefined although Refine is on.
         const std::string text = "Refine produced an invalid shape; the unrefined shape is kept";
         if (auto doc = getDocument()) {
-            const char* previous = doc->getWarningDescription(this);
-            doc->setWarning(
-                const_cast<FeatureRefine*>(this),
-                previous && *previous ? std::string(previous) + "\n" + text : text
-            );
+            // once, although a feature may refine more than once in one execute
+            const std::string previous = doc->getWarningDescription(this)
+                ? doc->getWarningDescription(this)
+                : "";
+            if (previous.find(text) == std::string::npos) {
+                doc->setWarning(
+                    const_cast<FeatureRefine*>(this),
+                    previous.empty() ? text : previous + "\n" + text
+                );
+            }
         }
         return oldShape;
     }

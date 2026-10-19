@@ -1131,3 +1131,36 @@ class PartGuiPickEdgeTestCases(unittest.TestCase):
             if names != {"Edge" + str(i)}:
                 wrong.append(("Edge" + str(i), sorted(names)))
         self.assertEqual(wrong, [])
+
+    def testPickAtAVertexNamesEdgesThroughIt(self):
+        # The box first, then the quarter cylinder face above: a pick at any vertex names only
+        # edges through that vertex. The face's curved edges have no line; a placeholder line at
+        # the shape's first vertex (the box's corner) made a pick there name them.
+        V = FreeCAD.Vector
+        arcs = [
+            Part.ArcOfCircle(Part.Circle(V(0, 0, z), V(0, 0, 1), 5), 0, math.pi / 2).toShape()
+            for z in (0, 4)
+        ]
+        sides = [Part.makeLine(V(0, 5, 0), V(0, 5, 4)), Part.makeLine(V(5, 0, 4), V(5, 0, 0))]
+        wire = Part.Wire(Part.__sortEdges__([arcs[0], sides[0], arcs[1], sides[1]]))
+        shape = Part.makeCompound(
+            [Part.makeBox(4, 4, 4, V(-10, -10, 0)), Part.Face(Part.Cylinder(), wire)]
+        )
+        feature = self.Doc.addObject("Part::Feature", "Shape")
+        feature.Shape = shape
+        self.Doc.recompute()
+        FreeCADGui.updateGui()
+
+        direction = V(0.3, 0.5, 0.8)
+        direction.normalize()
+        wrong = []
+        for vertex in shape.Vertexes:
+            through = {
+                "Edge" + str(i)
+                for i, edge in enumerate(shape.Edges, 1)
+                if edge.distToShape(vertex)[0] < 1e-7
+            }
+            names = self._pickedEdges(feature.ViewObject, vertex.Point, direction)
+            if not names <= through:
+                wrong.append((tuple(vertex.Point), sorted(names - through)))
+        self.assertEqual(wrong, [])

@@ -200,6 +200,37 @@ class TestHole(unittest.TestCase):
         self.Doc.recompute()
         self.assertAlmostEqual(hole.Shape.Volume, volume)
 
+    def testNormedCutValuesStayReadOnlyAfterReopen(self):
+        """Normed hole cut values stay read-only after a save and reopen (ops#389): the restore
+        made them editable, and a later edit of another property put the normed value back over
+        an edit of them."""
+        self.Hole.ThreadType = "ISOMetricProfile"
+        self.Hole.ThreadSize = "M6x1.0"
+        self.Hole.Depth = 10
+        self.Hole.DepthType = "Dimension"
+        self.Hole.DrillPoint = "Flat"
+        self.Hole.Tapered = False
+        folder = tempfile.mkdtemp()
+        for cut, names in (
+            ("ISO 4762", ("HoleCutDiameter", "HoleCutDepth")),
+            ("ISO 10642", ("HoleCutDiameter", "HoleCutDepth", "HoleCutCountersinkAngle")),
+        ):
+            hole = self.Doc.getObject("Hole")
+            hole.HoleCutType = cut
+            self.Doc.recompute()
+            self.assertFalse(hole.HoleCutCustomValues)
+            for name in names:
+                self.assertIn("ReadOnly", hole.getPropertyStatus(name), (cut, name))
+
+            path = os.path.join(folder, "PartDesignTestHoleNormed.FCStd")
+            self.Doc.saveAs(path)
+            FreeCAD.closeDocument(self.Doc.Name)
+            self.Doc = FreeCAD.openDocument(path)
+            hole = self.Doc.getObject("Hole")
+            self.assertFalse(hole.HoleCutCustomValues)
+            for name in names:
+                self.assertIn("ReadOnly", hole.getPropertyStatus(name), (cut, name, "reopened"))
+
     def testNoRefineHole(self):
         # Add a second box to get a shape with more faces
         self.Box2 = self.Doc.addObject("PartDesign::AdditiveBox", "Box")

@@ -1418,26 +1418,28 @@ void ViewProviderPartExt::setupCoinGeometry(
     }
 
     // If no adjacent face has a polygon for an edge, use its endpoint coordinates so that
-    // the edge still has a line entry. Fall back to a zero-length line to preserve the edge
-    // numbering when no usable polygon is available.
+    // the edge still has a line entry. Fall back to a zero-length line at the edge's own first
+    // vertex when no usable polygon is available, so that a pick there names an edge through
+    // that point (FreeCAD-CH, ops#389: it sat at the shape's first vertex, so a pick there
+    // named an edge elsewhere). An edge without vertices gets no line; the line-to-edge mapping
+    // keeps the numbering.
     for (int edgeIndex : edgeFailed) {
         if (lineSetMap.find(edgeIndex) != lineSetMap.end()) {
             continue;
         }
 
-        int indexedPnt1 = faceNodeOffset;
-        int indexedPnt2 = faceNodeOffset;
         TopoDS_Edge edge = TopoDS::Edge(edgeMap.FindKey(edgeIndex));
+        const auto it = coordsMap.find(vertexMap.FindIndex(TopExp::FirstVertex(edge)));
+        const auto jt = coordsMap.find(vertexMap.FindIndex(TopExp::LastVertex(edge)));
+        if (it == coordsMap.end()) {
+            continue;
+        }
+
+        int indexedPnt1 = it->second;
+        int indexedPnt2 = it->second;
         Handle(Poly_Polygon3D) aPoly = Part::Tools::polygonOfEdge(edge, aLoc);
-        if (!aPoly.IsNull() && aPoly->NbNodes() == 2) {
-            const int v1 = vertexMap.FindIndex(TopExp::FirstVertex(edge));
-            const int v2 = vertexMap.FindIndex(TopExp::LastVertex(edge));
-            const auto it = coordsMap.find(v1);
-            const auto jt = coordsMap.find(v2);
-            if (it != coordsMap.end() && jt != coordsMap.end()) {
-                indexedPnt1 = it->second;
-                indexedPnt2 = jt->second;
-            }
+        if (!aPoly.IsNull() && aPoly->NbNodes() == 2 && jt != coordsMap.end()) {
+            indexedPnt2 = jt->second;
         }
 
         lineSetMap[edgeIndex].push_back(indexedPnt1);
