@@ -481,6 +481,18 @@ class TestFillet(unittest.TestCase):
             message = "The fillet fills a recess of the base next to %s:" % edge
             self.assertTrue(fillet.getStatusString().startswith(message), fillet.getStatusString())
 
+    def testFilletOntoATangentRound(self):
+        # A round of 2 on the concave edge of an L whose floor ends in a round R4: its band runs on
+        # onto that round, and the material it adds there is the corner's (722.942; PR 346 review,
+        # H1: the Fillet failed with "fills a recess")
+        base = models.rounded_concave_block()
+        ends = ((0, 5, 5), (10, 5, 5))
+        fillet, _ = models.dressed_in_a_body(self.Doc, "Fillet", base, ends, 2)
+        expected = base.fuse(models.concave_added_onto_round("Fillet", 2)).Volume
+        self.assertAlmostEqual(expected, 722.942091, delta=1e-5)
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        self.assertAlmostEqual(fillet.Shape.Volume, expected, delta=1e-5)
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("PartDesignTestFillet")

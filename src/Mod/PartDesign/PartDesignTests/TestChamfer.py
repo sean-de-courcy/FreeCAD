@@ -420,6 +420,17 @@ class TestChamfer(unittest.TestCase):
                 chamfer.getStatusString().startswith(message), chamfer.getStatusString()
             )
 
+    def testChamferOntoATangentRound(self):
+        # As testFilletOntoATangentRound: a chamfer of 2 on the concave edge reaches the round the
+        # L's floor ends in, at its point 2 from the edge (734.782; PR 346 review, H1)
+        base = models.rounded_concave_block()
+        ends = ((0, 5, 5), (10, 5, 5))
+        chamfer, _ = models.dressed_in_a_body(self.Doc, "Chamfer", base, ends, 2)
+        expected = base.fuse(models.concave_added_onto_round("Chamfer", 2)).Volume
+        self.assertAlmostEqual(expected, 734.782190, delta=1e-5)
+        self.assertTrue(chamfer.isValid(), chamfer.getStatusString())
+        self.assertAlmostEqual(chamfer.Shape.Volume, expected, delta=1e-5)
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("PartDesignTestChamfer")

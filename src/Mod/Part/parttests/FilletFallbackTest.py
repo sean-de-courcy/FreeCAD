@@ -912,17 +912,58 @@ def concave_added(kind, size):
     return square.cut(Part.makeCylinder(size, 10, V(0, 5 + size, 5 + size), V(1, 0, 0)))
 
 
+# The round on rounded_concave_block()'s outer floor edge: its axis runs along x at y = 6, z = 1
+FLOOR_ROUND = 4
+
+
+def rounded_concave_block():
+    """concave_block() with its outer floor edge (y = 10, z = 5) rounded 4: the floor ends at
+    y = 6 and runs on into the round, tangentially"""
+    block = concave_block()
+    return block.makeFillet(FLOOR_ROUND, [edge_between(block, (0, 10, 5), (10, 10, 5))])
+
+
+def concave_added_onto_round(kind, size):
+    """What a fillet or chamfer of the size (over 1) on rounded_concave_block()'s concave edge adds,
+    its band running on from the floor onto the round: under the rolling ball of the size that
+    touches the wall y = 5 and the round, or under the chord from the wall at z = 5 + size to the
+    round's point at the size's distance from the edge"""
+    R = FLOOR_ROUND
+    axis_y, axis_z = 10 - R, 5 - R
+    if kind == "Chamfer":
+        # The round's point (axis_y + R sin t, axis_z + R cos t) at the distance size from
+        # (5, 5): a sin t + b cos t = k
+        a, b = 2 * R * (axis_y - 5), 2 * R * (axis_z - 5)
+        k = size**2 - (axis_y - 5) ** 2 - (axis_z - 5) ** 2 - R**2
+        t = math.asin(k / math.hypot(a, b)) - math.atan2(b, a)
+        y, z = axis_y + R * math.sin(t), axis_z + R * math.cos(t)
+        corners = [V(0, 5, 5 + size), V(0, y, z), V(0, y, 3), V(0, 5, 3)]
+        return Part.Face(Part.makePolygon(corners, True)).extrude(V(10, 0, 0))
+    ball_y = 5 + size
+    ball_z = axis_z + math.sqrt((R + size) ** 2 - (ball_y - axis_y) ** 2)
+    contact_y = axis_y + (ball_y - axis_y) * R / (R + size)
+    box = Part.makeBox(10, contact_y - 5, ball_z - 3, V(0, 5, 3))
+    return box.cut(Part.makeCylinder(size, 10, V(0, ball_y, ball_z), V(1, 0, 0)))
+
+
 def dressed_up_in_a_body(doc, kind, recess, size):
     """A PartDesign Body whose BaseFeature is the 10 mm cube without the recess, and a Fillet or
     Chamfer of the size on the cube's front top edge (for the PartDesign tests). Returns the
     feature and the edge's name"""
+    shape = Part.makeBox(10, 10, 10).cut(recess)
+    return dressed_in_a_body(doc, kind, shape, ((0, 0, 10), (10, 0, 10)), size)
+
+
+def dressed_in_a_body(doc, kind, shape, ends, size):
+    """A PartDesign Body whose BaseFeature is the shape, and a Fillet or Chamfer of the size on its
+    edge between the two points. Returns the feature and the edge's name"""
     base = doc.addObject("Part::Feature", "Base")
-    base.Shape = Part.makeBox(10, 10, 10).cut(recess)
+    base.Shape = shape
     body = doc.addObject("PartDesign::Body", "Body")
     body.BaseFeature = base
     doc.recompute()
     dressed = body.newObject("PartDesign::" + kind, kind)
-    edge = edge_between(base.Shape, (0, 0, 10), (10, 0, 10))
+    edge = edge_between(base.Shape, *ends)
     name = "Edge%d" % next(i for i, e in enumerate(base.Shape.Edges, 1) if e.isSame(edge))
     dressed.Base = (body.BaseFeature, [name])
     if kind == "Fillet":
@@ -1027,6 +1068,41 @@ class FilledRecessTest(unittest.TestCase):
                     feature = self.dressUp(kind, base, [edge], [(2, 2)])
                     self.assertTrue(feature.isValid(), feature.getStatusString())
                     self.assertAlmostEqual(feature.Shape.Volume, expected, delta=1e-6)
+
+    def testConcaveBandOntoATangentRound(self):
+        # The L's floor ends in a round R4 at y = 6, and a concave round or chamfer of 1.5 to 2.5
+        # runs on from the floor onto it. The round holds no vertex of the edge and the dress-up
+        # trims it, so the check runs: the material added on the round is the corner's, not a
+        # filled recess (PR 346 review, H1; 153729a478 failed all six with "fills a recess")
+        base = rounded_concave_block()
+        edge = edge_between(base, (0, 5, 5), (10, 5, 5))
+        for kind in ("Fillet", "Chamfer"):
+            for size in (1.5, 2, 2.5):
+                with self.subTest(kind=kind, size=size):
+                    expected = base.fuse(concave_added_onto_round(kind, size)).Volume
+                    feature = self.dressUp(kind, base, [edge], [(size, size)])
+                    self.assertTrue(feature.isValid(), feature.getStatusString())
+                    self.assertAlmostEqual(feature.Shape.Volume, expected, delta=1e-5)
+
+    def testConcaveBandWhileTheCheckRuns(self):
+        # The L's concave edge 2 and its front top edge 1, with a pocket 2 x 0.15 x 0.4 at the top
+        # that the front's round or chamfer removes whole: its faces go, so the check runs, and
+        # the concave edge's material passes (PR 346 review, L4; 756.438 and 765)
+        recess = Part.makeBox(2, 0.15, 0.4, V(4, 0.05, 9.85))
+        base = concave_block().cut(recess)
+        edges = [
+            edge_between(base, (0, 5, 5), (10, 5, 5)),
+            edge_between(base, (0, 0, 10), (10, 0, 10)),
+        ]
+        for kind in ("Fillet", "Chamfer"):
+            with self.subTest(kind=kind):
+                added = concave_block().fuse(concave_added(kind, 2))
+                expected = added.cut(front_top_removed(kind, 1)).Volume
+                feature = self.dressUp(kind, base, edges, [(2, 2), (1, 1)])
+                self.assertTrue(feature.isValid(), feature.getStatusString())
+                # The L's 8 faces and the two new ones: the pocket's are gone
+                self.assertEqual(len(feature.Shape.Faces), 10)
+                self.assertAlmostEqual(feature.Shape.Volume, expected, delta=1e-6)
 
     def testPocketOutOfReachStays(self):
         # A pocket 4 x 1 x 2 at y 6 to 7, beyond the band (y < 3): untouched, 947 and 972.686

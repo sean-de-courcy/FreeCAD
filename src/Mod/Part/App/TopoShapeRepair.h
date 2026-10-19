@@ -101,11 +101,14 @@ PartExport bool enclosesOutsideSolids(const TopoDS_Shape& shape);
  * what a concave edge adds in its corner. The check:
  * - runs only if a face of the base that holds no vertex of the dressed edges changed: the result
  *   has no face on its surface with its vertices. The dressed edges are the given ones and those
- *   continuing them tangentially, which OCCT dresses too. An ordinary dress-up stops there;
- * - then takes the material the result has that the base didn't (a Boolean cut). With convex
- *   edges only, any of it is wrong; with a concave edge, a piece of it is wrong where it lies on a
- *   base face other than those at the concave edges (a recess's wall or floor).
- * A Boolean that fails fails the check too.
+ *   continuing them tangentially, which OCCT dresses too; only the solids holding them are
+ *   compared. An ordinary dress-up stops there;
+ * - then takes the material the result has that the base didn't (a Boolean cut, of both cut down
+ *   to a box around the changed faces). With convex edges only, any of it is wrong; with a
+ *   concave edge, a piece of it is wrong where it lies on a base face other than those at the
+ *   concave edges and those joining them across smooth edges (a recess's wall or floor).
+ * A Boolean that fails fails the check too. A base that isn't valid there isn't checked, nor is a
+ * result whose analysis before the Boolean fails (with a warning).
  *
  * @param shape The dress-up's result (its solids are checked)
  * @param base The shape that was dressed up

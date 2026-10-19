@@ -14,6 +14,7 @@
 #include <string>
 #include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <Bnd_Box.hxx>
@@ -26,6 +27,7 @@
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepGProp.hxx>
+#include <BRepPrimAPI_MakeBox.hxx>
 #include <ChFi3d.hxx>
 #include <Geom_Surface.hxx>
 #include <GProp_GProps.hxx>
@@ -869,6 +871,10 @@ constexpr double chainAngle = 0.01;
 // The least thickness of a piece of material the result has that the base didn't, its volume
 // over its area: below it the piece is the Boolean's numerical noise
 constexpr double leastThickness = 1e-6;
+// How far the Boolean's region reaches beyond the changed faces, relative to its least extent and
+// least: its sides stay clear of the faces in it
+constexpr double regionMargin = 0.05;
+constexpr double leastMargin = 0.01;
 
 gp_Vec tangentAt(const TopoDS_Edge& edge, const TopoDS_Vertex& vertex)
 {
@@ -958,45 +964,75 @@ bool samePoints(const std::vector<gp_Pnt>& a, const std::vector<gp_Pnt>& b)
            });
 }
 
-/* Whether the result changed a face of the base other than the given ones: the result has no face
- * on its surface with its vertices. OCCT's maker runs on a copy of the base that shares its
- * geometry (ops#345) and keeps the faces it leaves alone, and so do the exact construction's
- * Booleans; a repaired result, whose geometry is copied, changes all of them. */
-bool changesOtherFaces(
+const Geom_Surface* surfaceOf(const TopoDS_Shape& face)
+{
+    TopLoc_Location location;
+    return BRep_Tool::Surface(TopoDS::Face(face), location).get();
+}
+
+// The faces that don't come through the dress-up unchanged, of the base and of the result
+struct Changes
+{
+    // A face of the base other than the given ones changed: the check runs
+    bool away = false;
+    // Where those, and the result's faces that aren't on the surface of a given one, lie: every
+    // recess the result fills has a changed face there (its walls, its floor)
+    Bnd_Box region;
+};
+
+/* The faces of the base the result changed: the result has no face on its surface with its
+ * vertices. OCCT's maker runs on a copy of the base that shares its geometry (ops#345) and keeps
+ * the faces it leaves alone, and so do the exact construction's Booleans; a repaired result,
+ * whose geometry is copied, changes all of them. The given faces, those at the dressed edges,
+ * change in an ordinary dress-up: they don't count, nor do the result's faces on their surfaces,
+ * which may span the whole base (a plate's top face) while they change only at the edges. */
+Changes changesOf(
     const TopoDS_Shape& shape,
     const TopoDS_Shape& base,
     const TopTools_IndexedMapOfShape& changing
 )
 {
-    std::unordered_map<const Geom_Surface*, std::vector<TopoDS_Shape>> onSurface;
+    std::unordered_map<const Geom_Surface*, std::vector<int>> onSurface;
     TopTools_IndexedMapOfShape resultFaces;
     TopExp::MapShapes(shape, TopAbs_FACE, resultFaces);
     for (int i = 1; i <= resultFaces.Extent(); ++i) {
-        TopLoc_Location location;
-        const auto& surface = BRep_Tool::Surface(TopoDS::Face(resultFaces(i)), location);
-        onSurface[surface.get()].push_back(resultFaces(i));
+        onSurface[surfaceOf(resultFaces(i))].push_back(i);
     }
+    std::vector<bool> kept(resultFaces.Extent() + 1, false);
+    std::unordered_set<const Geom_Surface*> changingSurfaces;
+    Changes changes;
     TopTools_IndexedMapOfShape baseFaces;
     TopExp::MapShapes(base, TopAbs_FACE, baseFaces);
     for (int i = 1; i <= baseFaces.Extent(); ++i) {
         const TopoDS_Shape& face = baseFaces(i);
+        const Geom_Surface* surface = surfaceOf(face);
         if (changing.Contains(face)) {
-            continue;
+            changingSurfaces.insert(surface);
         }
-        TopLoc_Location location;
-        const auto& surface = BRep_Tool::Surface(TopoDS::Face(face), location);
-        const auto candidates = onSurface.find(surface.get());
-        if (candidates == onSurface.end()) {
-            return true;
+        const auto candidates = onSurface.find(surface);
+        if (candidates != onSurface.end()) {
+            const auto points = vertexPoints(face);
+            const auto match = std::find_if(
+                candidates->second.begin(),
+                candidates->second.end(),
+                [&](int index) { return samePoints(points, vertexPoints(resultFaces(index))); }
+            );
+            if (match != candidates->second.end()) {
+                kept[*match] = true;
+                continue;
+            }
         }
-        const auto points = vertexPoints(face);
-        if (std::none_of(candidates->second.begin(), candidates->second.end(), [&](const auto& other) {
-                return samePoints(points, vertexPoints(other));
-            })) {
-            return true;
+        if (!changing.Contains(face)) {
+            changes.away = true;
+            BRepBndLib::Add(face, changes.region, false);
         }
     }
-    return false;
+    for (int i = 1; i <= resultFaces.Extent(); ++i) {
+        if (!kept[i] && changingSurfaces.count(surfaceOf(resultFaces(i))) == 0) {
+            BRepBndLib::Add(resultFaces(i), changes.region, false);
+        }
+    }
+    return changes;
 }
 
 TopoDS_Compound solidsIn(const TopoDS_Shape& shape)
@@ -1011,7 +1047,9 @@ TopoDS_Compound solidsIn(const TopoDS_Shape& shape)
 }
 
 // The edges of the chain between two faces that aren't convex: a concave edge's dress-up adds
-// material in its corner (ChFi3d's own test, which the fillet uses)
+// material in its corner (ChFi3d's own test, which the fillet uses). An edge without exactly two
+// faces (a seam, a free or a non-manifold edge) counts as concave too: the lenient side, where
+// material on the faces at it passes
 TopTools_IndexedMapOfShape concaveEdges(const TopoDS_Shape& base, const TopTools_IndexedMapOfShape& chain)
 {
     TopTools_IndexedDataMapOfShapeListOfShape facesOfEdges;
@@ -1063,6 +1101,263 @@ std::string nearestEdge(
     return name.empty() ? std::string("an edge") : name;
 }
 
+/* Adds the faces of the base that meet one of the faces across a smooth edge, and so on. A
+ * concave edge's band runs on onto a face tangent to one at the edge (a floor that ends in a
+ * round), and the material it adds lies on that face too (PR 346 review, H1). A recess's walls
+ * meet its floor and the face it opens on at sharp edges, so they stay out. */
+void addSmoothNeighbours(const TopoDS_Shape& base, TopTools_IndexedMapOfShape& faces)
+{
+    TopTools_IndexedDataMapOfShapeListOfShape facesOfEdges;
+    TopExp::MapShapesAndAncestors(base, TopAbs_EDGE, TopAbs_FACE, facesOfEdges);
+    for (int i = 1; i <= faces.Extent(); ++i) {
+        const TopoDS_Face face = TopoDS::Face(faces(i));
+        for (TopExp_Explorer it(face, TopAbs_EDGE); it.More(); it.Next()) {
+            const TopoDS_Edge& edge = TopoDS::Edge(it.Current());
+            const int index = facesOfEdges.FindIndex(edge);
+            if (index == 0 || BRep_Tool::Degenerated(edge)) {
+                continue;
+            }
+            for (const auto& other : facesOfEdges(index)) {
+                if (!other.IsSame(face) && !faces.Contains(other)
+                    && ChFi3d::IsTangentFaces(edge, face, TopoDS::Face(other))) {
+                    faces.Add(other);
+                }
+            }
+        }
+    }
+}
+
+Bnd_Box boundsOf(const TopoDS_Shape& shape)
+{
+    Bnd_Box bounds;
+    BRepBndLib::Add(shape, bounds, false);
+    return bounds;
+}
+
+bool holds(const Bnd_Box& outer, const Bnd_Box& inner)
+{
+    if (inner.IsVoid()) {
+        return true;
+    }
+    double a[6];
+    double b[6];
+    outer.Get(a[0], a[1], a[2], a[3], a[4], a[5]);
+    inner.Get(b[0], b[1], b[2], b[3], b[4], b[5]);
+    return a[0] <= b[0] && a[1] <= b[1] && a[2] <= b[2] && b[3] <= a[3] && b[4] <= a[4]
+        && b[5] <= a[5];
+}
+
+// The solids of the shape whose bounds meet the box
+TopoDS_Compound solidsMeeting(const TopoDS_Shape& shape, const Bnd_Box& box)
+{
+    BRep_Builder builder;
+    TopoDS_Compound solids;
+    builder.MakeCompound(solids);
+    for (TopExp_Explorer it(shape, TopAbs_SOLID); it.More(); it.Next()) {
+        if (!box.IsOut(boundsOf(it.Current()))) {
+            builder.Add(solids, it.Current());
+        }
+    }
+    return solids;
+}
+
+// The solids of the base that hold a dressed edge: OCCT changes no other
+TopoDS_Compound dressedSolids(const TopoDS_Shape& base, const TopTools_IndexedMapOfShape& chain)
+{
+    BRep_Builder builder;
+    TopoDS_Compound solids;
+    builder.MakeCompound(solids);
+    for (TopExp_Explorer it(base, TopAbs_SOLID); it.More(); it.Next()) {
+        TopTools_IndexedMapOfShape edges;
+        TopExp::MapShapes(it.Current(), TopAbs_EDGE, edges);
+        for (int i = 1; i <= chain.Extent(); ++i) {
+            if (edges.Contains(chain(i))) {
+                builder.Add(solids, it.Current());
+                break;
+            }
+        }
+    }
+    return solids;
+}
+
+// Sets up a non-destructive Boolean: one with the default would raise the shapes' tolerances in
+// place
+template<class Boolean>
+bool runBoolean(Boolean& boolean, const TopoDS_Shape& object, const TopoDS_Shape& tool)
+{
+    TopTools_ListOfShape objects;
+    TopTools_ListOfShape tools;
+    objects.Append(object);
+    tools.Append(tool);
+    boolean.SetArguments(objects);
+    boolean.SetTools(tools);
+    boolean.SetNonDestructive(Standard_True);
+    boolean.Build();
+    return boolean.IsDone() && !boolean.HasErrors();
+}
+
+// The images of a shape in a Boolean's result: none if it was deleted, the shape itself if it
+// came through unchanged
+void addImages(
+    BRepAlgoAPI_BooleanOperation& boolean,
+    const TopoDS_Shape& shape,
+    TopTools_ListOfShape& images
+)
+{
+    if (boolean.IsDeleted(shape)) {
+        return;
+    }
+    const TopTools_ListOfShape& modified = boolean.Modified(shape);
+    if (modified.IsEmpty()) {
+        images.Append(shape);
+    }
+    for (const auto& image : modified) {
+        images.Append(image);
+    }
+}
+
+// What the dress-up changed, found before the Boolean
+struct Prepared
+{
+    // The result's solids to check, and the base's solids they're compared with
+    TopoDS_Compound checked;
+    TopoDS_Compound against;
+    // Where the result can have material the base didn't
+    Bnd_Box region;
+    TopTools_IndexedMapOfShape concave;
+    // The base's faces the material a concave edge adds may lie on
+    TopTools_IndexedMapOfShape allowed;
+};
+
+// Whether the result changed the base away from its edges (the gate), and where
+std::optional<Prepared> prepare(
+    const TopoDS_Compound& result,
+    const TopoDS_Compound& before,
+    const std::vector<TopoShape>& edges
+)
+{
+    const auto chain = chainOf(before, edges);
+    const TopoDS_Compound dressed = dressedSolids(before, chain);
+    if (!TopoDS_Iterator(dressed).More()) {
+        return std::nullopt;
+    }
+    // The result's solids where the dressed ones were: OCCT keeps the others as they were
+    Bnd_Box dressedBounds = boundsOf(dressed);
+    dressedBounds.Enlarge(Precision::Confusion());
+    const TopoDS_Compound images = solidsMeeting(result, dressedBounds);
+    TopTools_IndexedDataMapOfShapeListOfShape facesAtVertices;
+    TopExp::MapShapesAndAncestors(dressed, TopAbs_VERTEX, TopAbs_FACE, facesAtVertices);
+    const Changes changes = changesOf(images, dressed, facesAt(facesAtVertices, chain));
+    if (!changes.away) {
+        return std::nullopt;
+    }
+    Prepared prepared;
+    // A concave edge adds material in its corner, on the faces at it and on those joining them
+    // smoothly
+    prepared.concave = concaveEdges(dressed, chain);
+    if (prepared.concave.Extent() > 0) {
+        prepared.allowed = facesAt(facesAtVertices, prepared.concave);
+        addSmoothNeighbours(dressed, prepared.allowed);
+    }
+    // Every recess the result fills has a changed face in the region, so the Boolean runs on what
+    // lies there (PR 346 review, M1). Its sides keep clear of the faces in it
+    prepared.region = changes.region;
+    double x0 = 0.0;
+    double y0 = 0.0;
+    double z0 = 0.0;
+    double x1 = 0.0;
+    double y1 = 0.0;
+    double z1 = 0.0;
+    prepared.region.Get(x0, y0, z0, x1, y1, z1);
+    prepared.region.Enlarge(regionMargin * std::min({x1 - x0, y1 - y0, z1 - z0}) + leastMargin);
+    prepared.checked = solidsMeeting(images, prepared.region);
+    prepared.against = solidsMeeting(before, prepared.region);
+    if (!TopoDS_Iterator(prepared.checked).More()) {
+        return std::nullopt;
+    }
+    return prepared;
+}
+
+// The material the result has that the base didn't, and why it is wrong, or an empty string
+std::string whatItAdds(const Prepared& prepared, const TopoShape& base, const std::vector<TopoShape>& edges)
+{
+    const auto& [checked, against, region, concave, allowed] = prepared;
+    // Both cut down to the region, unless it holds them whole. If that fails, the Boolean runs
+    // on the whole solids
+    TopoDS_Shape object = checked;
+    TopoDS_Shape tool = against;
+    std::unique_ptr<BRepAlgoAPI_Common> toolInRegion;
+    if (!holds(region, boundsOf(checked)) || !holds(region, boundsOf(against))) {
+        double x0 = 0.0;
+        double y0 = 0.0;
+        double z0 = 0.0;
+        double x1 = 0.0;
+        double y1 = 0.0;
+        double z1 = 0.0;
+        region.Get(x0, y0, z0, x1, y1, z1);
+        const TopoDS_Shape box = BRepPrimAPI_MakeBox(gp_Pnt(x0, y0, z0), gp_Pnt(x1, y1, z1)).Shape();
+        BRepAlgoAPI_Common objectInRegion;
+        toolInRegion = std::make_unique<BRepAlgoAPI_Common>();
+        if (runBoolean(objectInRegion, checked, box) && runBoolean(*toolInRegion, against, box)) {
+            object = objectInRegion.Shape();
+            tool = toolInRegion->Shape();
+        }
+        else {
+            toolInRegion.reset();
+        }
+    }
+    BRepAlgoAPI_Cut cut;
+    if (!runBoolean(cut, object, tool)) {
+        return "changes faces away from its edges in a way that can't be checked";
+    }
+    // A concave edge adds material on the allowed faces: a piece of it that lies on any other face
+    // of the base fills what that face bounded
+    TopTools_IndexedMapOfShape walls;
+    if (concave.Extent() > 0) {
+        TopTools_IndexedMapOfShape baseFaces;
+        TopExp::MapShapes(against, TopAbs_FACE, baseFaces);
+        for (int i = 1; i <= baseFaces.Extent(); ++i) {
+            const TopoDS_Shape& face = baseFaces(i);
+            if (allowed.Contains(face)) {
+                continue;
+            }
+            TopTools_ListOfShape parts;
+            if (toolInRegion) {
+                addImages(*toolInRegion, face, parts);
+            }
+            else {
+                parts.Append(face);
+            }
+            TopTools_ListOfShape images;
+            for (const auto& part : parts) {
+                addImages(cut, part, images);
+            }
+            for (const auto& image : images) {
+                walls.Add(image);
+            }
+        }
+    }
+    for (TopExp_Explorer it(cut.Shape(), TopAbs_SOLID); it.More(); it.Next()) {
+        const TopoDS_Shape& piece = it.Current();
+        GProp_GProps volume;
+        BRepGProp::VolumeProperties(piece, volume);
+        GProp_GProps area;
+        BRepGProp::SurfaceProperties(piece, area);
+        if (std::abs(volume.Mass()) <= leastThickness * area.Mass()) {
+            continue;
+        }
+        bool wrong = concave.Extent() == 0;
+        for (TopExp_Explorer face(piece, TopAbs_FACE); !wrong && face.More(); face.Next()) {
+            wrong = walls.Contains(face.Current());
+        }
+        if (wrong) {
+            return "fills a recess of the base next to " + nearestEdge(base, edges, piece)
+                + ": its new face covers the recess's opening";
+        }
+    }
+    return {};
+}
+
 }  // namespace
 
 bool checkDressUp(TopoShape& shape, const TopoShape& base, LooseParts looseParts)
@@ -1085,78 +1380,43 @@ std::string filledPocket(const TopoShape& shape, const TopoShape& base, const st
     if (edges.empty() || !TopoDS_Iterator(result).More() || !TopoDS_Iterator(before).More()) {
         return {};
     }
-    const char* unchecked = "changes faces away from its edges in a way that can't be checked";
+    // If the analysis before the Boolean throws, the check is skipped with a warning: it decides
+    // only whether the Boolean runs (PR 346 review, L1)
+    std::optional<Prepared> prepared;
     try {
-        const auto chain = chainOf(before, edges);
-        TopTools_IndexedDataMapOfShapeListOfShape facesAtVertices;
-        TopExp::MapShapesAndAncestors(before, TopAbs_VERTEX, TopAbs_FACE, facesAtVertices);
-        if (!changesOtherFaces(result, before, facesAt(facesAtVertices, chain))) {
-            return {};
-        }
-        // A Boolean with an invalid base finds material that isn't there (the fin cube's inner
-        // face, ops#12): such a base's defects pass on, as in checkDressUp()
-        if (!BRepCheck_Analyzer(before).IsValid()) {
-            return {};
-        }
+        prepared = prepare(result, before, edges);
+    }
+    catch (const Standard_Failure& e) {
+        FC_WARN("Dress-up result not checked for a filled recess: " << e.GetMessageString());
+        return {};
+    }
+    if (!prepared) {
+        return {};
+    }
+    std::string why;
+    try {
         FC_LOG("Dress-up result that changes faces away from its edges: checking what it adds");
-        BRepAlgoAPI_Cut cut;
-        TopTools_ListOfShape objects;
-        TopTools_ListOfShape tools;
-        objects.Append(result);
-        tools.Append(before);
-        cut.SetArguments(objects);
-        cut.SetTools(tools);
-        // The Boolean would raise the shapes' tolerances in place
-        cut.SetNonDestructive(Standard_True);
-        cut.Build();
-        if (!cut.IsDone() || cut.HasErrors()) {
-            return unchecked;
-        }
-        // A concave edge adds material in its corner, on the faces at it: a piece that lies on any
-        // other face of the base fills what that face bounded
-        const auto concave = concaveEdges(before, chain);
-        TopTools_IndexedMapOfShape walls;
-        if (concave.Extent() > 0) {
-            const auto allowed = facesAt(facesAtVertices, concave);
-            TopTools_IndexedMapOfShape baseFaces;
-            TopExp::MapShapes(before, TopAbs_FACE, baseFaces);
-            for (int i = 1; i <= baseFaces.Extent(); ++i) {
-                const TopoDS_Shape& face = baseFaces(i);
-                if (allowed.Contains(face) || cut.IsDeleted(face)) {
-                    continue;
-                }
-                const TopTools_ListOfShape& images = cut.Modified(face);
-                if (images.IsEmpty()) {
-                    walls.Add(face);
-                }
-                for (const auto& image : images) {
-                    walls.Add(image);
-                }
-            }
-        }
-        for (TopExp_Explorer it(cut.Shape(), TopAbs_SOLID); it.More(); it.Next()) {
-            const TopoDS_Shape& piece = it.Current();
-            GProp_GProps volume;
-            BRepGProp::VolumeProperties(piece, volume);
-            GProp_GProps area;
-            BRepGProp::SurfaceProperties(piece, area);
-            if (std::abs(volume.Mass()) <= leastThickness * area.Mass()) {
-                continue;
-            }
-            bool wrong = concave.Extent() == 0;
-            for (TopExp_Explorer face(piece, TopAbs_FACE); !wrong && face.More(); face.Next()) {
-                wrong = walls.Contains(face.Current());
-            }
-            if (wrong) {
-                return "fills a recess of the base next to " + nearestEdge(base, edges, piece)
-                    + ": its new face covers the recess's opening";
-            }
-        }
+        why = whatItAdds(*prepared, base, edges);
     }
     catch (const Standard_Failure&) {
-        return unchecked;
+        why = "changes faces away from its edges in a way that can't be checked";
     }
-    return {};
+    if (why.empty()) {
+        return {};
+    }
+    // A Boolean with an invalid base finds material that isn't there (the fin cube's inner face,
+    // ops#12): such a base's defects pass on, as in checkDressUp(). Checked only for a result
+    // that would fail: on a large base it costs more than the Boolean in the region
+    try {
+        if (!BRepCheck_Analyzer(prepared->against).IsValid()) {
+            return {};
+        }
+    }
+    catch (const Standard_Failure& e) {
+        FC_WARN("Dress-up result not checked for a filled recess: " << e.GetMessageString());
+        return {};
+    }
+    return why;
 }
 
 }  // namespace Part
