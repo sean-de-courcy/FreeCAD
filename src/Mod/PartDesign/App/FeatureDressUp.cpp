@@ -220,7 +220,8 @@ std::vector<TopoShape> DressUp::getContinuousEdges(const TopoShape& shape)
         GeomAbs_Shape cont
             = BRep_Tool::Continuity(TopoDS::Edge(subshape), TopoDS::Face(face1), TopoDS::Face(face2));
         if (cont != GeomAbs_C0) {
-            FC_WARN(getFullName() << ": skip edge " << ref << " that is not C0 continuous");
+            // A developer's line: log level (decision 100)
+            FC_LOG(getFullName() << ": skip edge " << ref << " that is not C0 continuous");
             return;
         }
         ret.push_back(subshape);

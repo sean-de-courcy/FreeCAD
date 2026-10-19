@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdio>
 #include <map>
+#include <mutex>
 #include <set>
 #include <sstream>
 
@@ -469,15 +470,30 @@ std::string guessedText(const ReferenceReport::Slot& slot,
     return ss.str();
 }
 
-// The records judged found again in the same place (ops#391), by property and reference
-// position: the record's identity when judged. Its original fingerprint is a snapshot, so a later
-// edit that moves the element (a dimension upstream) would undo the judgement at the next
-// recompute; the judgement holds while the record does.
 using SamePlaceKey = std::pair<const PropertyLinkBase*, int>;
-std::map<SamePlaceKey, std::string>& samePlaceRecords()
+
+// What is kept about warnings beside the documents (ops#391), process-wide by object. The
+// recompute writes it, on the worker thread of an asynchronous recompute, and the tree reads it
+// on the GUI thread: one lock for all of it. Forgotten with the object (forgetWarningState()).
+struct WarningState
 {
-    static std::map<SamePlaceKey, std::string> records;
-    return records;
+    std::mutex lock;
+    // The objects whose warning is the quieter level
+    std::set<const DocumentObject*> samePlace;
+    // Per object: the warning text last printed for it, so that a warning prints once and again
+    // only when its text changes
+    std::map<const DocumentObject*, std::string> printed;
+    // The records judged found again in the same place, by property and reference position: the
+    // owner, and the record's identity when judged. Its original fingerprint is a snapshot, so a
+    // later edit that moves the element (a dimension upstream) would undo the judgement at the
+    // next recompute; the judgement holds while the record does.
+    std::map<SamePlaceKey, std::pair<const DocumentObject*, std::string>> records;
+};
+
+WarningState& warningState()
+{
+    static WarningState state;
+    return state;
 }
 
 // The record and the element it picked: another solve, which may pick another element with the
@@ -489,18 +505,21 @@ std::string recordIdentity(const ReferenceReport::Slot& slot)
         + guess.altText() + '\n' + (slot.mappedName.empty() ? slot.sub : slot.mappedName);
 }
 
-// Whether the slot's reference was found again in the same place: now (reboundInPlace()), or
-// when its record was judged
-bool foundInPlace(const ReferenceReport::Slot& slot)
+// Whether \a owner's reference in \a slot was found again in the same place: now
+// (reboundInPlace()), or when its record was judged
+bool foundInPlace(const DocumentObject* owner, const ReferenceReport::Slot& slot)
 {
-    auto& records = samePlaceRecords();
     const SamePlaceKey key {slot.prop, slot.localIndex};
-    if (reboundInPlace(slot.obj, slot.sub, slot.guess)) {
-        records[key] = recordIdentity(slot);
+    const bool now = reboundInPlace(slot.obj, slot.sub, slot.guess);
+    auto identity = recordIdentity(slot);
+    auto& state = warningState();
+    std::lock_guard<std::mutex> guard(state.lock);
+    if (now) {
+        state.records[key] = {owner, std::move(identity)};
         return true;
     }
-    auto it = records.find(key);
-    return it != records.end() && it->second == recordIdentity(slot);
+    auto it = state.records.find(key);
+    return it != state.records.end() && it->second.first == owner && it->second.second == identity;
 }
 
 // The references a warning text names as found again in the same place (samePlaceText()), as
@@ -663,10 +682,12 @@ bool ReferenceReport::describe(const DocumentObject* obj, Outcome& outcome)
             continue;
         }
         if (slot.guess.empty()) {
-            samePlaceRecords().erase({slot.prop, slot.localIndex});
+            auto& state = warningState();
+            std::lock_guard<std::mutex> guard(state.lock);
+            state.records.erase({slot.prop, slot.localIndex});
             continue;
         }
-        if (foundInPlace(slot)) {
+        if (foundInPlace(obj, slot)) {
             auto [it, first] = samePlace.try_emplace(slot.property);
             auto& same = it->second;
             const std::string type = typeOf(elementOfSub(slot.sub));
@@ -707,43 +728,81 @@ bool ReferenceReport::describe(const DocumentObject* obj, Outcome& outcome)
     return !outcome.fatal.empty() || !outcome.warning.empty();
 }
 
-namespace
-{
-// By object: the warnings of the quieter level (ops#391)
-std::set<const DocumentObject*>& samePlaceWarnings()
-{
-    static std::set<const DocumentObject*> objects;
-    return objects;
-}
-}  // namespace
-
 bool ReferenceReport::isSamePlaceWarning(const DocumentObject* obj)
 {
-    return samePlaceWarnings().contains(obj);
+    auto& state = warningState();
+    std::lock_guard<std::mutex> guard(state.lock);
+    return state.samePlace.contains(obj);
 }
 
 void ReferenceReport::setSamePlaceWarning(const DocumentObject* obj, bool on)
 {
+    auto& state = warningState();
+    std::lock_guard<std::mutex> guard(state.lock);
     if (on) {
-        samePlaceWarnings().insert(obj);
+        state.samePlace.insert(obj);
     }
     else {
-        samePlaceWarnings().erase(obj);
+        state.samePlace.erase(obj);
     }
 }
 
-bool ReferenceReport::restoredSamePlaceWarning(const DocumentObject* obj, const std::string& text)
+bool ReferenceReport::notePrintedWarning(const DocumentObject* obj, const std::string& text)
+{
+    auto& state = warningState();
+    std::lock_guard<std::mutex> guard(state.lock);
+    auto [it, added] = state.printed.try_emplace(obj, text);
+    if (added) {
+        return true;
+    }
+    if (it->second == text) {
+        return false;
+    }
+    it->second = text;
+    return true;
+}
+
+void ReferenceReport::forgetPrintedWarning(const DocumentObject* obj)
+{
+    auto& state = warningState();
+    std::lock_guard<std::mutex> guard(state.lock);
+    state.printed.erase(obj);
+}
+
+void ReferenceReport::forgetWarningState(const DocumentObject* obj)
+{
+    auto& state = warningState();
+    std::lock_guard<std::mutex> guard(state.lock);
+    state.samePlace.erase(obj);
+    state.printed.erase(obj);
+    std::erase_if(state.records, [obj](const auto& entry) {
+        return entry.second.first == obj;
+    });
+}
+
+bool ReferenceReport::restoredSamePlaceWarning(
+    const DocumentObject* obj,
+    const std::string& text,
+    bool trustText
+)
 {
     // The saved text keeps the judgement of the session that saved it, which the shapes alone
-    // can't give back once an edit moved the element since (foundInPlace())
-    const auto named = samePlaceNamed(text);
+    // can't give back once an edit moved the element since (foundInPlace()). It is as old as the
+    // records only when the object was up to date when saved (decision 102).
+    const auto named = trustText ? samePlaceNamed(text) : std::set<std::pair<std::string, int>> {};
     if (!named.empty()) {
+        std::vector<std::pair<SamePlaceKey, std::string>> judged;
         for (const auto& slot : slotsOf(obj)) {
             if ((slot.guess.kind == "tier2" || slot.guess.kind == "tier3")
                 && !Data::hasMissingElement(slot.sub.c_str())
                 && named.contains({slot.property, slot.index})) {
-                samePlaceRecords()[{slot.prop, slot.localIndex}] = recordIdentity(slot);
+                judged.emplace_back(SamePlaceKey {slot.prop, slot.localIndex}, recordIdentity(slot));
             }
+        }
+        auto& state = warningState();
+        std::lock_guard<std::mutex> guard(state.lock);
+        for (auto& [key, identity] : judged) {
+            state.records[key] = {obj, std::move(identity)};
         }
     }
     Outcome outcome;

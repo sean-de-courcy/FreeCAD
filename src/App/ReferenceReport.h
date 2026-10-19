@@ -164,9 +164,28 @@ public:
     static void setSamePlaceWarning(const DocumentObject* obj, bool on);
     /** The level of a warning \a text restored with \a obj, from its references' saved records
      * and the shapes now: true if describe() finds only same-place references and words them
-     * as \a text (anything else in the text is another warning).
+     * as \a text (anything else in the text is another warning). With \a trustText, the
+     * references the text names as found again in the same place count as judged so; without
+     * it (the object was touched when saved: the text may be older than its records), only the
+     * shapes judge, which errs loud (decision 102).
      */
-    static bool restoredSamePlaceWarning(const DocumentObject* obj, const std::string& text);
+    static bool
+    restoredSamePlaceWarning(const DocumentObject* obj, const std::string& text, bool trustText);
+
+    /** A warning prints once (ops#391): true if \a text isn't the warning text last printed for
+     * \a obj, which it becomes. Kept by object beside the document's warning, as the level.
+     */
+    static bool notePrintedWarning(const DocumentObject* obj, const std::string& text);
+    /** Forgets the warning text last printed for \a obj: when its warning goes (a recompute finds
+     * none, or it is accepted, repaired, held or blocked), so that it prints again if it comes
+     * back.
+     */
+    static void forgetPrintedWarning(const DocumentObject* obj);
+    /** Forgets all that is kept about \a obj's warning (its level, its printed text, the records
+     * judged found again in the same place): when it is removed or its document cleared, restored
+     * or closed, since another object may take its address.
+     */
+    static void forgetWarningState(const DocumentObject* obj);
 };
 
 }  // namespace App
