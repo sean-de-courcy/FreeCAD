@@ -39,6 +39,7 @@
 # include <boost/program_options.hpp>
 # include <boost/date_time/posix_time/posix_time.hpp>
 # include <boost/scope_exit.hpp>
+# include <atomic>
 # include <chrono>
 # include <optional>
 # include <memory>
@@ -223,6 +224,11 @@ namespace
 std::mutex workerIdleMutex;
 bool workerInRequest = false;
 thread_local bool onRecomputeWorker = false;
+
+// MainThreadSignalConfig's hooks, one copy for every library (ops#365). Gui sets them once at
+// startup; the worker may read them from its start
+std::atomic<MainThreadSignalConfig::IsMainThreadFn> isMainThreadHook {nullptr};
+std::atomic<MainThreadSignalConfig::InvokeFn> invokeHook {nullptr};
 
 void setWorkerInRequest(bool inRequest)
 {
@@ -887,6 +893,34 @@ bool App::isRecomputeWorkerThread()
     // Or running a signal's slots while the worker waits for them (ops#349)
     auto hop = RecomputeHop::current();
     return onRecomputeWorker || (hop && hop->worker);
+}
+
+void MainThreadSignalConfig::setHooks(IsMainThreadFn isMainThread, InvokeFn invoke)
+{
+    isMainThreadHook = isMainThread;
+    invokeHook = invoke;
+}
+
+bool MainThreadSignalConfig::isMainThread()
+{
+    auto* f = isMainThreadHook.load();
+    return f ? f() : true;
+}
+
+bool MainThreadSignalConfig::hasHooks()
+{
+    return isMainThreadHook.load() && invokeHook.load();
+}
+
+void MainThreadSignalConfig::invoke(std::function<void()>&& fn, bool blocking)
+{
+    auto* f = invokeHook.load();
+    if (f) {
+        f(std::move(fn), blocking);
+    }
+    else {
+        fn();
+    }
 }
 
 bool App::runWhileRecomputeWorkerIdle(const std::function<void()>& fn)

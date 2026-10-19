@@ -133,11 +133,11 @@ inline const char* hopRequestName(HopRequest request)
 
 /**
  * Emits doc.signalRecomputedObject(obj) from the async recompute worker inside a request, with
- * MainThreadHopHooks set: its slots run on this thread while the worker waits, as a GUI's do. On
- * Windows only an emission compiled outside FreeCADApp hops (ops#365): this one is. For the two
- * requests in a second document it comes from the request's callback (the worker is still inside
- * the request); for ThisDocument from a slot of doc.signalBeforeRecompute, which runs on the
- * worker on Windows and in its hop elsewhere.
+ * MainThreadHopHooks set: its slots run on this thread while the worker waits, as a GUI's do. For
+ * the two requests in a second document it comes from the request's callback (the worker is still
+ * inside the request); for ThisDocument from a slot of doc.signalBeforeRecompute, which itself
+ * runs in the worker's hop (on Windows too since ops#365), so the emission is on this thread
+ * inside that hop.
  */
 inline void emitFromTheWorkersRequest(
     HopRequest kind,
