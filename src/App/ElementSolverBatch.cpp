@@ -40,6 +40,7 @@ namespace App
 namespace
 {
 ElementHintsFunction elementHintsFunction = nullptr;
+ElementHoldsPointFunction elementHoldsPointFunction = nullptr;
 
 struct MigrationCounts
 {
@@ -54,6 +55,11 @@ std::map<std::string, MigrationCounts> migrationCounts;
 void setElementHintsFunction(ElementHintsFunction function)
 {
     elementHintsFunction = function;
+}
+
+void setElementHoldsPointFunction(ElementHoldsPointFunction function)
+{
+    elementHoldsPointFunction = function;
 }
 
 void countReferenceMigration(const DocumentObject* owner, MigrationOutcome outcome)
@@ -1287,6 +1293,12 @@ bool solveElementReferences(DocumentObject* feature,
             return faces;
         };
         input.neighboursOf = neighboursOf;
+        if (elementHoldsPointFunction) {
+            input.holdsPoint =
+                [geo](const std::string& index, const Base::Vector3d& point, double distance) {
+                    return elementHoldsPointFunction(geo, index.c_str(), point, distance);
+                };
+        }
         for (const auto* entry : entries) {
             Data::SolveInput::Entry item;
             item.type = indexType(entry->oldIndex);

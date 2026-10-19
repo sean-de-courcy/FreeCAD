@@ -791,6 +791,49 @@ bool elementHints(const App::GeoFeature* geo, const char* type, std::vector<App:
 
 const bool elementHintsRegistered = (App::setElementHintsFunction(&elementHints), true);
 
+// Whether a point lies over a face of Shape (App::ElementHoldsPointFunction, ops#360, PR 340
+// round 4): within the distance, and every nearest point inside the face, none on its boundary.
+// In the frame getElementFingerprint() measures in (without the shape's placement).
+bool elementHoldsPoint(
+    const App::GeoFeature* geo,
+    const char* element,
+    const Base::Vector3d& point,
+    double distance
+)
+{
+    auto feature = dynamic_cast<const Feature*>(geo);
+    if (!feature || !element) {
+        return false;
+    }
+    const TopoShape& shape = feature->Shape.getShape();
+    if (shape.isNull()) {
+        return false;
+    }
+    try {
+        const TopoDS_Shape sub = shape.located(TopLoc_Location()).getSubShape(element, true);
+        if (sub.IsNull() || sub.ShapeType() != TopAbs_FACE) {
+            return false;
+        }
+        const TopoDS_Vertex vertex
+            = BRepBuilderAPI_MakeVertex(gp_Pnt(point.x, point.y, point.z)).Vertex();
+        BRepExtrema_DistShapeShape extrema(vertex, sub);
+        if (!extrema.IsDone() || extrema.NbSolution() < 1 || extrema.Value() > distance) {
+            return false;
+        }
+        for (int i = 1; i <= extrema.NbSolution(); ++i) {
+            if (extrema.SupportTypeShape2(i) != BRepExtrema_IsInFace) {
+                return false;
+            }
+        }
+        return true;
+    }
+    catch (const Standard_Failure&) {
+        return false;
+    }
+}
+
+const bool elementHoldsPointRegistered = (App::setElementHoldsPointFunction(&elementHoldsPoint), true);
+
 }  // namespace
 
 bool Feature::getElementFingerprint(const char* element, Data::ElementFingerprint& fingerprint) const

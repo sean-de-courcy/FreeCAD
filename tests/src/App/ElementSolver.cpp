@@ -5269,6 +5269,164 @@ TEST(Moved, counterSiblingsWithoutTheOrderFlagMoveAlone)
     EXPECT_EQ(describe(Data::solveOwner(twinPieces(2, {"PRJ", "MOD"}))[0]), "exact Face1 0 [] ");
 }
 
+namespace
+{
+
+// PR 340 round 4: twins of one far cap (the ORD flag), told apart by the duplicate counter
+// `count (count - 1) / 2 + place`, each at its place now; the reference was saved on the twin
+// with counter \a savedCounter at \a saved, and its name now holds the twin with that counter.
+SolveInput placedTwins(
+    const std::vector<Base::Vector3d>& places,
+    int savedCounter,
+    const Base::Vector3d& saved
+)
+{
+    const std::vector<std::string> marks {
+        plateElement("plate", 'F'),
+        plateElement("hole", 'E'),
+        plateElement("circle", 'E')
+    };
+    const int count = static_cast<int>(places.size());
+    SolveInput input;
+    input.diagonal = 40;
+    std::map<std::string, ElementFingerprint> fingerprints;
+    std::string hit;
+    for (int place = 0; place < count; ++place) {
+        const int counter = count * (count - 1) / 2 + place;
+        const std::string index = "Face" + std::to_string(place + 1);
+        input.pool["Face"].push_back(element(index, {farPiece(marks, counter, {"PRJ", "MOD", "ORD"})}));
+        fingerprints[index] = capAt(places[place].x, places[place].y);
+        if (counter == savedCounter) {
+            hit = index;
+        }
+    }
+    auto entry = exact(hit);
+    entry.exactName = farPiece(marks, savedCounter, {"PRJ", "MOD", "ORD"});
+    entry.fingerprint = capAt(saved.x, saved.y);
+    input.entries = {entry};
+    measure(input, fingerprints, nullptr);
+    return input;
+}
+
+}  // namespace
+
+TEST(Moved, twinsMovedTogetherKeepTheirNames)
+{
+    // PR 340 round 4 (N2): the pair one above the other (spacing 5) moved up 3 mm together, in
+    // their order. The bottom twin now lies nearer the top one's old place (2 mm) than the top
+    // twin does (3 mm), which round 3 took for a trade. The saved centre lies 0.5 from the
+    // pair's centroid, the twins 2.5: no turn about their centre. The name stands.
+    EXPECT_EQ(
+        describe(
+            Data::solveOwner(placedTwins(
+                {Base::Vector3d(3, 3.5, 10), Base::Vector3d(3, 8.5, 10)},
+                2,
+                Base::Vector3d(3, 5.5, 10)
+            ))[0]
+        ),
+        "exact Face2 0 [] "
+    );
+    // One twin grown a lot, the other where it was (the top one's centre 7 mm up): the bottom
+    // twin is nearer, 5 mm, but the saved centre lies 1 from the centroid, the twins 6.
+    EXPECT_EQ(
+        describe(
+            Data::solveOwner(placedTwins(
+                {Base::Vector3d(3, 0.5, 10), Base::Vector3d(3, 12.5, 10)},
+                2,
+                Base::Vector3d(3, 5.5, 10)
+            ))[0]
+        ),
+        "exact Face2 0 [] "
+    );
+}
+
+TEST(Moved, twinsTurnedOffTheirCentreBreak)
+{
+    // PR 340 round 4: the hole turned 60 degrees about a point off the twins' centre, so the
+    // twins changed shape and their centroid moved a little: the saved centre lies 2.35 from
+    // it, the twin where the old piece went 2.49 (6 % apart). Still a trade: broken.
+    auto outcome = Data::solveOwner(placedTwins(
+        {Base::Vector3d(0.9, 4.4, 10), Base::Vector3d(5.2, 1.9, 10)},
+        2,
+        Base::Vector3d(3, 5.5, 10)
+    ))[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << describe(outcome);
+    EXPECT_EQ(outcome.candidates, (std::vector<std::string> {"Face1", "Face2"}));
+}
+
+TEST(Moved, tiedTwinsBreak)
+{
+    // PR 340 round 4 (N3): three twins at radius 2 about (3, 3), turned 60 degrees so that
+    // they traded names: the reference saved on the twin at 300 degrees now names the piece at
+    // 240, as far from the saved centre (2 mm) as the piece at 0, where the twin went (here a
+    // hair farther, 0.1 um, which round 3's strict comparison let stand). A tie is a trade too:
+    // broken, the twin first.
+    const double s = std::sqrt(3.0);
+    auto outcome = Data::solveOwner(placedTwins(
+        {Base::Vector3d(2, 3 - s, 10), Base::Vector3d(2, 3 + s, 10), Base::Vector3d(5.0001, 3, 10)},
+        3,
+        Base::Vector3d(4, 3 - s, 10)
+    ))[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << describe(outcome);
+    EXPECT_EQ(outcome.candidates, (std::vector<std::string> {"Face3", "Face1"}));
+    EXPECT_EQ(outcome.candidateRoles, (std::vector<std::string> {"place", "name"}));
+}
+
+TEST(SolveOwner, mergedFarCapPieceAloneOnItsFaceNeedsTheCentre)
+{
+    // PR 340 round 4 (N1): A's pieces either side of a hole in the plate (marks: the plate and
+    // the hole's left or right edge) became one ring around it, the only far cap on the plate,
+    // so its marks are the plate alone and don't hold the old ones. The one candidate marked by
+    // the old piece's face alone takes it when the saved centre lies over it.
+    const auto plate = plateElement("plate", 'F');
+    const auto oldLeft = farPiece({plate, plateElement("left", 'E')});
+    const auto oldRight = farPiece({plate, plateElement("right", 'E')});
+    SolveInput input;
+    input.pool["Face"] = {
+        element("Face4", {farPiece({plate})}),
+        element("Face7", {farPiece({plateElement("fill", 'F')})}),
+        element("Face9", {sketchEdge(9)}),
+    };
+    auto entryAt = [](const std::string& name, double x) {
+        auto entry = missing(name);
+        entry.fingerprint = capAt(x, 0);
+        return entry;
+    };
+    input.entries = {entryAt(oldLeft, -2), entryAt(oldRight, 2)};
+    measure(input, {{"Face4", capAt(0, 0)}, {"Face7", capAt(0, 0)}}, nullptr);
+    std::vector<std::string> asked;
+    input.holdsPoint = [&](const std::string& index, const Base::Vector3d&, double) {
+        asked.push_back(index);
+        return index == "Face4";
+    };
+    for (const auto& outcome : Data::solveOwner(input)) {
+        EXPECT_EQ(outcome.status, SolveStatus::Resolved) << describe(outcome);
+        EXPECT_EQ(outcome.element, "Face4") << describe(outcome);
+    }
+    EXPECT_FALSE(asked.empty());
+    EXPECT_TRUE(std::all_of(asked.begin(), asked.end(), [](const auto& index) {
+        return index == "Face4";
+    }));
+
+    // The saved centre not over it (a face renamed by a reordered up-to shell): broken.
+    input.holdsPoint = [](const std::string&, const Base::Vector3d&, double) {
+        return false;
+    };
+    for (const auto& outcome : Data::solveOwner(input)) {
+        EXPECT_EQ(outcome.status, SolveStatus::Broken) << describe(outcome);
+    }
+    // No geometry to ask: broken.
+    input.holdsPoint = nullptr;
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
+
+    // Marked by another face than the old piece's: broken, whatever the geometry says.
+    input.holdsPoint = [](const std::string&, const Base::Vector3d&, double) {
+        return true;
+    };
+    input.pool["Face"][0] = element("Face4", {farPiece({plateElement("other", 'F')})});
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
+}
+
 TEST(SolveOwner, mergedFarCapPiecesResolveToTheirWhole)
 {
     // PR 340 round 3: A's pieces either side of a hole in the plate (marks: the plate and the

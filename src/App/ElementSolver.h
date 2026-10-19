@@ -664,6 +664,10 @@ struct AppExport SolveInput
     /// The target is in error (a failed feature passing its input through, ops#126): nothing is
     /// guessed against it (N2's never list, N10).
     bool targetFailed = false;
+    /// Whether the point lies over the face \a index within the distance: its nearest point on
+    /// the face is inside it, not on its boundary (ops#360, PR 340 round 4). Unset: no point
+    /// lies over any face.
+    std::function<bool(const std::string& index, const Base::Vector3d& point, double distance)> holdsPoint;
 };
 
 enum class SolveStatus
@@ -738,8 +742,10 @@ struct AppExport SolveOutcome
  *   its top edge was after a lift by the pad's own length. The exact outcome's evidence says so.
  *   Moved with nothing at its old place, an element whose name carries the ORD flag (a far cap
  *   told apart from its twins only by its place among them, ops#360) is ambiguous all the same
- *   when a counter sibling of its name lies nearer the saved centre than it: the twins traded
- *   names. Those siblings take role `place`.
+ *   when a counter sibling of its name lies as near the saved centre as it or nearer (a tie
+ *   within 2 %), and about as far from the twins' centroid as the saved centre (within 20 %): the
+ *   twins turned and traded names. Those siblings take role `place`. A move of the
+ *   pair or a twin's growth leaves the name standing.
  * - Collapse (PR 7): the entries with the same scope and `from` are a group. When `from` names
  *   an element of the target exactly and every member is exact on that element or missing and
  *   merged back into it (a structural piece of `from`, or saved geometry lying on the element
@@ -773,7 +779,8 @@ struct AppExport SolveOutcome
  *   in one marked section (PRJ and MOD), more marks (connected elements) holding all of the old
  *   ones, an edge among them, it is the only candidate, as if the old name were in its
  *   ancestry: the pieces either side of a hole that became the ring around it resolve to the
- *   ring, together.
+ *   ring, together. Without such a candidate, the one marked by the old marks' face alone (the
+ *   only far cap on it) counts the same if the saved centre lies over it (\a holdsPoint).
  * - The IDX source (Task 2 PR 6): when the old name stands for an IDX section
  *   (NameAncestry::indexSource()), the elements named by a section of the same source under any
  *   op code (NameAncestry::sameIndexSource()), and, for a target without an element map whose
