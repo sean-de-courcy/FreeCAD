@@ -130,7 +130,9 @@ App::DocumentObjectExecReturn* Fillet::execute()
         // feature, as it did up to 0.21, instead of breaking the features after it. The check is
         // the full one: BRepAlgo::IsValid on the new faces passed OCCT's two-solid result of an
         // overlong full round (ops#297).
-        if (!Part::checkDressUp(shape, baseShape)) {
+        // Solids and shells only, as OCCT returns them: a later feature fails on a BaseFeature's
+        // loose faces (ops#303)
+        if (!Part::checkDressUp(shape, baseShape, Part::LooseParts::drop)) {
             return new App::DocumentObjectExecReturn(
                 QT_TRANSLATE_NOOP("Exception", "Resulting shape is invalid")
             );

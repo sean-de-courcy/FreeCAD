@@ -394,6 +394,16 @@ class TestChamfer(unittest.TestCase):
         self.assertLess(removed, chamfers)
         self.assertGreater(removed, 0.9 * chamfers)
 
+    def testChamferDropsTheLoosePartsOfABaseFeature(self):
+        # As testFilletDropsTheLoosePartsOfABaseFeature (ops#303): solids and shells only, and a
+        # Pad on the top works
+        pad = models.pad_on_dressed_up_base(self.Doc, "Chamfer", 1.0)
+        self.assertTrue(pad.isValid(), pad.getStatusString())
+        chamfer = self.Doc.getObject("Chamfer")
+        self.assertEqual(models.loose_parts(chamfer.Shape), ([], [], []))
+        volume = sum(s.Volume for s in pad.Shape.Solids)
+        self.assertAlmostEqual(volume, 1000 - 0.5 * 10 + 48, delta=1e-6)
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("PartDesignTestChamfer")

@@ -17,12 +17,10 @@
 
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
-#include <BRepAdaptor_Curve.hxx>
-#include <BRepClass3d_SolidClassifier.hxx>
+#include <BRepAlgoAPI_Common.hxx>
 #include <BRepGProp.hxx>
 #include <GProp_GProps.hxx>
 #include <gp_Pnt.hxx>
-#include <Precision.hxx>
 #include <Standard_Failure.hxx>
 #include <TopAbs_ShapeEnum.hxx>
 #include <TopExp.hxx>
@@ -30,6 +28,7 @@
 #include <TopoDS.hxx>
 #include <TopoDS_Compound.hxx>
 #include <TopoDS_Iterator.hxx>
+#include <TopoDS_Solid.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 
@@ -591,30 +590,31 @@ std::vector<std::pair<TopoDS_Shape, double>> closedShells(const TopoDS_Shape& sh
     return shells;
 }
 
-// Whether a vertex or the middle of an edge of the shell lies inside a solid of the shape
-bool inMaterial(const TopoDS_Shape& shell, const TopoDS_Shape& shape)
+// The space a void's shell encloses, as a solid of positive volume
+TopoDS_Solid voidSpace(const TopoDS_Shape& shell)
 {
-    std::vector<gp_Pnt> points;
-    for (TopExp_Explorer it(shell, TopAbs_VERTEX); it.More(); it.Next()) {
-        points.push_back(BRep_Tool::Pnt(TopoDS::Vertex(it.Current())));
-    }
-    for (TopExp_Explorer it(shell, TopAbs_EDGE); it.More(); it.Next()) {
-        const TopoDS_Edge& edge = TopoDS::Edge(it.Current());
-        if (!BRep_Tool::Degenerated(edge)) {
-            BRepAdaptor_Curve curve(edge);
-            points.push_back(curve.Value((curve.FirstParameter() + curve.LastParameter()) / 2));
+    BRep_Builder builder;
+    TopoDS_Solid solid;
+    builder.MakeSolid(solid);
+    builder.Add(solid, shell.Reversed());
+    return solid;
+}
+
+// The volume two solids share, or nothing if the Boolean fails
+std::optional<double> sharedVolume(const TopoDS_Shape& a, const TopoDS_Shape& b)
+{
+    try {
+        BRepAlgoAPI_Common common(a, b);
+        if (!common.IsDone()) {
+            return std::nullopt;
         }
+        GProp_GProps props;
+        BRepGProp::VolumeProperties(common.Shape(), props);
+        return props.Mass();
     }
-    for (TopExp_Explorer solid(shape, TopAbs_SOLID); solid.More(); solid.Next()) {
-        BRepClass3d_SolidClassifier classifier(solid.Current());
-        for (const auto& point : points) {
-            classifier.Perform(point, Precision::Confusion());
-            if (classifier.State() == TopAbs_IN) {
-                return true;
-            }
-        }
+    catch (const Standard_Failure&) {
+        return std::nullopt;
     }
-    return false;
 }
 
 /* Why the dress-up's result lost a closed shell of the base's solids, or null. OCCT's fillet and
@@ -650,9 +650,33 @@ const char* droppedShell(const TopoDS_Shape& shape, const TopoDS_Shape& base)
     if (count(after, false) >= count(before, false)) {
         return nullptr;
     }
+    // A void the result lost is one no void of the result overlaps: a void the dress-up changes
+    // (an edge of it rounded) stays one. A lost void's space must hold no material of the result,
+    // which a sample of points on a sphere or a cylinder misses (PR 341 review)
     for (const auto& [shell, volume] : before) {
-        if (volume < 0 && inMaterial(shell, shape)) {
-            return "fills a void of the base";
+        if (volume >= 0) {
+            continue;
+        }
+        const double threshold = 1e-6 * -volume;
+        const TopoDS_Solid space = voidSpace(shell);
+        const bool kept = std::any_of(after.begin(), after.end(), [&](const auto& other) {
+            if (other.second >= 0) {
+                return false;
+            }
+            const auto shared = sharedVolume(space, voidSpace(other.first));
+            return shared && *shared > threshold;
+        });
+        if (kept) {
+            continue;
+        }
+        for (TopExp_Explorer solid(shape, TopAbs_SOLID); solid.More(); solid.Next()) {
+            const auto filled = sharedVolume(space, solid.Current());
+            if (!filled) {
+                return "loses a void of the base whose space can't be checked";
+            }
+            if (*filled > threshold) {
+                return "fills a void of the base";
+            }
         }
     }
     return nullptr;
@@ -684,19 +708,20 @@ void collectLooseParts(const TopoShape& shape, std::vector<TopoShape>& parts)
 
 /* Puts the base's loose parts into the dress-up's result: OCCT's fillet and chamfer keep only the
  * solids and shells of their input, and drop its loose faces, wires, edges and vertices, which
- * they leave alone (ops#303). False if the result has only some of them. */
+ * they leave alone (ops#303). False if the result has loose parts of its own: they would come
+ * from the maker's copy of the base, so which of the base's they are can't be told. */
 bool keepLooseParts(TopoShape& shape, const TopoShape& base)
 {
     std::vector<TopoShape> parts;
     collectLooseParts(base, parts);
-    std::vector<TopoShape> kept;
-    collectLooseParts(shape, kept);
-    if (kept.size() >= parts.size()) {
+    if (parts.empty()) {
         return true;
     }
+    std::vector<TopoShape> kept;
+    collectLooseParts(shape, kept);
     if (!kept.empty()) {
-        FC_WARN("Dress-up result with " << kept.size() << " of the base's " << parts.size()
-                                        << " shapes outside its shells");
+        FC_WARN("Dress-up result with " << kept.size() << " shapes outside its shells, beside the "
+                                        << "base's " << parts.size());
         return false;
     }
     std::vector<TopoShape> members;
@@ -773,13 +798,17 @@ bool checkResult(TopoShape& shape, const TopoShape& base)
 
 }  // namespace
 
-bool checkDressUp(TopoShape& shape, const TopoShape& base)
+bool checkDressUp(TopoShape& shape, const TopoShape& base, LooseParts looseParts)
 {
+    if (!checkResult(shape, base)) {
+        return false;
+    }
+    // After the repair, which may close a shell that closesUp() would not count
     if (const char* why = droppedShell(shape.getShape(), base.getShape())) {
         FC_WARN("Dress-up result that " << why);
         return false;
     }
-    return checkResult(shape, base) && keepLooseParts(shape, base);
+    return looseParts == LooseParts::drop || keepLooseParts(shape, base);
 }
 
 }  // namespace Part

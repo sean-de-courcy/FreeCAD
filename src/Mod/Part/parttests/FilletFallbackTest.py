@@ -709,6 +709,37 @@ def cube_beside_loose_parts():
     )
 
 
+def pad_on_dressed_up_base(doc, kind, size):
+    """A PartDesign Body with Allow Compound whose BaseFeature is cube_beside_loose_parts(); a
+    Fillet or Chamfer of the cube's front top edge; a Pad 3 high of a 4 mm square on its top, clear
+    of the dress-up. Returns the Pad (for the PartDesign tests)"""
+    base = doc.addObject("Part::Feature", "Base")
+    base.Shape = cube_beside_loose_parts()
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.AllowCompound = True
+    body.BaseFeature = base
+    doc.recompute()
+    dressed = body.newObject("PartDesign::" + kind, kind)
+    edge = edge_between(base.Shape, (0, 0, 10), (10, 0, 10))
+    index = next(i for i, e in enumerate(base.Shape.Edges, 1) if e.isSame(edge))
+    dressed.Base = (body.BaseFeature, ["Edge%d" % index])
+    if kind == "Fillet":
+        dressed.Radius = size
+    else:
+        dressed.Size = size
+    doc.recompute()
+    sketch = body.newObject("Sketcher::SketchObject", "Sketch")
+    sketch.Placement = FreeCAD.Placement(V(0, 0, 10), FreeCAD.Rotation())
+    corners = [V(2, 2, 0), V(6, 2, 0), V(6, 6, 0), V(2, 6, 0)]
+    for i in range(4):
+        sketch.addGeometry(Part.LineSegment(corners[i], corners[(i + 1) % 4]))
+    pad = body.newObject("PartDesign::Pad", "Pad")
+    pad.Profile = sketch
+    pad.Length = 3
+    doc.recompute()
+    return pad
+
+
 def cube_with_void(origin, size):
     """A 10 mm cube with a box-shaped void"""
     return Part.makeBox(10, 10, 10).cut(Part.makeBox(*size, V(*origin)))
@@ -778,6 +809,52 @@ class DroppedBasePartsTest(unittest.TestCase):
         self.assertTrue(fillet.isValid(), fillet.getStatusString())
         self.assertEqual(len(fillet.Shape.Shells), 2)
         self.assertAlmostEqual(fillet.Shape.Volume, 1000 - fillet_section(3) * 10 - 16, delta=1e-6)
+
+    def testChamferIntoACurvedVoidFails(self):
+        # A void a chamfer cuts into where no vertex or edge of it is (PR 341 review): a bore along
+        # the edge, and a sphere centred on the chamfer's plane with its seam away from the cut.
+        # OCCT's result has no void and the plain cube's chamfer volume
+        cube = Part.makeBox(20, 20, 20)
+        bore = cube.cut(Part.makeCylinder(1.9, 12, V(4, 1.95, 18.05), V(1, 0, 0)))
+        edge = edge_between(bore, (0, 0, 20), (20, 0, 20))
+        self.assertFails(self.dressUp("Chamfer", bore, [edge], [(6, 6)]))
+        sphere = Part.makeSphere(2, V(0, 0, 0), V(1, 0, 0))
+        sphere.translate(V(5, 3, 7))
+        base = Part.makeBox(10, 10, 10).cut(sphere)
+        edge = edge_between(base, (0, 0, 10), (10, 0, 10))
+        self.assertFails(self.dressUp("Chamfer", base, [edge], [(6, 6)]))
+
+    def testVoidsOfSeveralSolids(self):
+        # Two cubes with a void each: A's 4 x 2 x 2 void under its front top edge, which a chamfer
+        # of 3 cuts into and a fillet of 3 clears; B's 2 mm void away from its edges
+        a = cube_with_void((3, 1, 7), (4, 2, 2))
+        b = Part.makeBox(10, 10, 10, V(20, 0, 0)).cut(Part.makeBox(2, 2, 2, V(24, 4, 4)))
+        base = Part.Compound([a, b])
+        front_a = edge_between(base, (0, 0, 10), (10, 0, 10))
+        front_b = edge_between(base, (20, 0, 10), (30, 0, 10))
+        self.assertFails(self.dressUp("Chamfer", base, [front_a], [(3, 3)]))
+        for kind, edge, removed in (
+            ("Chamfer", front_b, 4.5 * 10),
+            ("Fillet", front_a, fillet_section(3) * 10),
+            ("Fillet", front_b, fillet_section(3) * 10),
+        ):
+            feature = self.dressUp(kind, base, [edge], [(3, 3)])
+            self.assertTrue(feature.isValid(), feature.getStatusString())
+            self.assertEqual(len(feature.Shape.Solids), 2)
+            self.assertEqual(len(feature.Shape.Shells), 4)
+            self.assertAlmostEqual(feature.Shape.Volume, 2000 - 16 - 8 - removed, delta=1e-6)
+
+    def testIslandInACavityFails(self):
+        # A 20 mm cube's solid with an 8 mm cavity and a 2 mm island inside it, a third shell of the
+        # same solid (invalid): OCCT's dress-up of an outer edge drops the island and its material
+        hollow = Part.makeBox(20, 20, 20).cut(Part.makeBox(8, 8, 8, V(6, 6, 6)))
+        hollow = hollow.cut(Part.makeBox(1, 1, 1, V(1, 1, 1)))
+        small = next(s for s in hollow.Shells if s.BoundBox.XLength < 1.5)
+        base = hollow.replaceShape([(small, Part.makeBox(2, 2, 2, V(9, 9, 9)).Shells[0])])
+        self.assertAlmostEqual(base.Volume, 8000 - 512 + 8, delta=1e-9)
+        edge = edge_between(base, (0, 0, 20), (20, 0, 20))
+        for kind in ("Fillet", "Chamfer"):
+            self.assertFails(self.dressUp(kind, base, [edge], [(3, 3)]))
 
     def testVoidRemovedWithItsMaterialStaysRemoved(self):
         # A void 4 x 0.5 x 0.5 inside the wedge a chamfer or fillet of 3 removes, and a void moved

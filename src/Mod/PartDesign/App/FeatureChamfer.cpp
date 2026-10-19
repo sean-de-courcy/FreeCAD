@@ -179,8 +179,9 @@ App::DocumentObjectExecReturn* Chamfer::execute()
         }
 
         // Repair an invalid result on a copy, keeping names, or fail (see Fillet::execute(),
-        // ops#12, ops#168, ops#297)
-        if (!Part::checkDressUp(shape, TopShape)) {
+        // ops#12, ops#168, ops#297). Solids and shells only, as OCCT returns them: a later
+        // feature fails on a BaseFeature's loose faces (ops#303)
+        if (!Part::checkDressUp(shape, TopShape, Part::LooseParts::drop)) {
             return new App::DocumentObjectExecReturn(
                 QT_TRANSLATE_NOOP("Exception", "Resulting shape is invalid")
             );
