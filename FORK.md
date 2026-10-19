@@ -362,7 +362,8 @@ names it.
 | `fix/362-multifuse-refined-edges` | fix | ops#362 | - | `integration` `62575f717f` | `8d7db92190` (fork PR 333), 2026-10-18 | never (fork fix) |
 | `fix/349-cycles-and-poll` | fix | ops#349, ops#352 | - | `integration` `23165bc6b0` | `2c10a1584e` (fork PR 330), 2026-10-18 | never (fork fix) |
 | `test/359-derived-survivor-tests` | test | ops#359 | - | `integration` `2c10a1584e` | `4575e65657` (fork PR 334), 2026-10-18 | never (fork tests) |
-| `fix/368-startup-newer-file` | fix | ops#368 | - | `integration` `8d7db92190` | (fork PR 335) | never (fork fix) |
+| `fix/368-startup-newer-file` | fix | ops#368 | - | `integration` `8d7db92190` | `ffd6b0b0a8` (fork PR 335), 2026-10-18 | never (fork fix) |
+| `fix/358-offset-gen-evidence` | fix | ops#358 | - | `integration` `4575e65657` | (fork PR 336) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 

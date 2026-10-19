@@ -228,7 +228,8 @@ Data::Tier1Check tier1Check()
 }
 
 // What tier 1 makes of a candidate that holds the old name only through a node of another type
-// (ops#335): `place` (geometry decides, the default) or `ancestry` (before ops#335)
+// or a GEN section (ops#335, ops#358): `place` (geometry decides, the default) or `ancestry`
+// (before ops#335)
 Data::Tier1Derived tier1Derived()
 {
     std::string value = solverParameters()->GetASCII("Tier1Derived", "place");

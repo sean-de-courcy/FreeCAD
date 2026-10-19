@@ -34,7 +34,11 @@ survivor was taken at tier 1, silently, wherever it was (L2, L4: 8 mm up).
 Scenarios named `...Ancestry` run with NamingSolver/Tier1Derived = ancestry, the rule before
 ops#335, kept for comparison runs: they assert that the setting still gives the old rule, the
 reference moved silently to the derived survivor (wrong by geometry, which is why `place` is the
-default; ops#359). Without the solver (V2) every cut breaks the reference."""
+default; ops#359). Without the solver (V2) every cut breaks the reference.
+
+The second part, offset copies (ops#358, PLAN decision 86), applies the rule to a survivor that
+holds the old name through a GEN section of the same type: a Thickness's or an offset's copy of
+the element at another place (`V<V (THK)`)."""
 
 import FreeCAD as App
 
@@ -48,6 +52,7 @@ from .harness import (
     V,
     Warned,
     edge,
+    face,
     vertex,
 )
 from . import models as m
@@ -308,3 +313,357 @@ class PipeStartCapEdgeCutAway(OnEdge, Recessed):
 
     def expectEdge(self):
         return self.startEdge() if self.stepName is None else BROKEN
+
+
+# Offset copies (ops#358, PLAN decision 86). A Thickness's or an offset's copy of an element is
+# named after it with a GEN section of the same type (`<outer corner>;THK;V;GEN`): a copy at
+# another place. Below a GEN section a name is a source, so the copy is geometric evidence like
+# the derived survivors above: when the shave removes the referenced element, the place decides
+# (a warned policy-D guess to the shave's own element when it stands within the guess width and
+# shares the old element's source, else broken, the copy listed first). Before ops#358 a vertex
+# or a line edge moved silently to its copy at tier 1 (`notes/solver-offset-gen.md` section 2).
+
+X = (1, 0, 0)
+Y = (0, 1, 0)
+
+
+def rimEdge(x):
+    """The top rim edge along Y at x, z = 10."""
+    return edge("line", direction=Y, through=(x, 5, 10))
+
+
+class Hollowed(Scenario):
+    """A block 20 x 10 x 10 hollowed by a Thickness (top open, `value`, inward unless `outward`,
+    join `join`) and a through-all Pocket from z = 10 notching the x = 0 wall (x -5..0.5,
+    y 4..6), with a consumer on an element at x = 20. The edit moves the notch onto `shave`
+    (x0, y0, x1, y1), which removes that element; its offset copy survives at a distance.
+    Diagonal 24.5 (inward): tier 3's strict distance 0.245 mm, the guess width 1.22 mm."""
+
+    abstract = True
+    area = "OffsetCopies"
+    value = 2.0
+    outward = False
+    join = "Arc"
+    shave = (19.5, -5, 25, 15)
+
+    def build(self, doc):
+        body = m.body(doc)
+        block = m.pad(body, m.sketch(doc, "Profile", m.rectangle(0, 0, 20, 10), body), 10)
+        doc.recompute()
+        thickness = body.newObject("PartDesign::Thickness", "Thickness")
+        top = face("plane", normal=(0, 0, 1), through=(0, 0, 10))
+        thickness.Base = (block, self.names(block, top))
+        thickness.Value = self.value
+        thickness.Reversed = not self.outward
+        thickness.Join = self.join
+        doc.recompute()
+        notch = m.sketch(doc, "Shave", m.rectangle(-5, 4, 0.5, 6), body, z=10)
+        pocket = m.pocketThroughAll(body, notch)
+        doc.recompute()
+        self.consumer(doc, body, pocket)
+
+    def edit(self, doc):
+        m.moveRectangle(doc.Shave, *self.shave)
+
+
+class OnTopCorner:
+    """A sketch attached (Translate) to the top corner (20, 0, 10)."""
+
+    REFS = ("sketch_corner",)
+
+    def consumer(self, doc, body, pocket):
+        sketch = body.newObject("Sketcher::SketchObject", "OnCorner")
+        sketch.AttachmentSupport = [(pocket, self.names(pocket, vertex((20, 0, 10)))[0])]
+        sketch.MapMode = "Translate"
+        self.ref("sketch_corner", sketch, "AttachmentSupport", self.expectCorner, Attached())
+
+    def expectCorner(self):
+        return vertex((20, 0, 10)) if self.stepName is None else self.cornerAfter()
+
+
+class OnRimEdge:
+    """A fillet (0.5) on the top rim edge along Y at x = 20."""
+
+    REFS = ("fillet_rim",)
+
+    def consumer(self, doc, body, pocket):
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (pocket, self.names(pocket, rimEdge(20)))
+        fillet.Radius = 0.5
+        self.ref("fillet_rim", fillet, "Base", self.expectRim, Filleted(0.5))
+
+    def expectRim(self):
+        return rimEdge(20) if self.stepName is None else self.rimAfter()
+
+
+class OnWall:
+    """A sketch attached (FlatFace) to the wall x = 20 (normal `wallNormal`)."""
+
+    REFS = ("sketch_wall",)
+    wallNormal = X
+
+    def consumer(self, doc, body, pocket):
+        sketch = body.newObject("Sketcher::SketchObject", "OnWall")
+        wall = face("plane", normal=self.wallNormal, through=(20, 5, 5))
+        sketch.AttachmentSupport = [(pocket, self.names(pocket, wall)[0])]
+        sketch.MapMode = "FlatFace"
+        self.ref("sketch_wall", sketch, "AttachmentSupport", self.expectWall, Attached())
+
+    def expectWall(self):
+        if self.stepName is None:
+            return face("plane", normal=self.wallNormal, through=(20, 5, 5))
+        return BROKEN
+
+
+class ThicknessCornerShaved(OnTopCorner, Hollowed):
+    """ops#358's repro: inward 2, the shave from x = 19.5 removes the outer wall and its top
+    corner. The inner corner (18, 2, 10), `<corner>;THK;V;GEN`, survives 2.83 mm away; the
+    shave's own corner (19.5, 0, 10) stands 0.5 mm away and shares the profile sketch and the
+    pad: policy D's warned guess to it (decision 86 Q2). Before: tier 1, silent, to the inner
+    corner."""
+
+    def cornerAfter(self):
+        return Guessed(vertex((19.5, 0, 10))) if self.solver else BROKEN
+
+
+class ThicknessCornerShavedAncestry(AncestryRule, ThicknessCornerShaved):
+    """The repro under NamingSolver/Tier1Derived = ancestry (the rule before ops#335 and
+    ops#358): the sketch moves to the inner corner, silently (wrong by geometry; the comparison
+    setting's expected result)."""
+
+    def cornerAfter(self):
+        return Settled(vertex((18, 2, 10))) if self.solver else BROKEN
+
+
+class ThicknessCornerShavedWide(OnTopCorner, Hollowed):
+    """The shave from x = 18.5: its corner (18.5, 0, 10) is 1.5 mm away, the inner corner 2.83:
+    nothing within the guess width (1.22 mm). Broken, the inner corner listed first."""
+
+    shave = (18.5, -5, 25, 15)
+
+    def cornerAfter(self):
+        return BROKEN
+
+
+class ThicknessCornerShavedHalf(OnTopCorner, Hollowed):
+    """A 0.5 mm wall: the inner corner (19.5, 0.5, 10) is 0.71 mm away and the shave's corner
+    (19.5, 0, 10) 0.5 mm, both within the guess width and within the gap factor of each other:
+    ambiguous, broken."""
+
+    value = 0.5
+
+    def cornerAfter(self):
+        return BROKEN
+
+
+class ThicknessRimEdgeShaved(OnRimEdge, Hollowed):
+    """Inward 2: the rim edge x = 20 goes with the wall; the inner rim edge x = 18,
+    `<rim edge>;THK;E;GEN`, survives 2 mm away, parallel (tier 2 can't tell lines apart by
+    direction). The shave's edge x = 19.5 stands 0.5 mm away, but it is named from the top ring
+    and the pocket, without the rim edge's source (the profile's line g2): policy D doesn't guess
+    it, and the reference breaks, the inner rim edge listed first. Before: tier 1, silent, to the
+    inner rim edge."""
+
+    def rimAfter(self):
+        return BROKEN
+
+
+class ThicknessRimEdgeShavedAncestry(AncestryRule, ThicknessRimEdgeShaved):
+    """The rim edge under the rule before ops#358: the fillet moves to the inner rim edge,
+    silently (the comparison setting's expected result)."""
+
+    def rimAfter(self):
+        return Settled(rimEdge(18)) if self.solver else BROKEN
+
+
+class ThicknessVerticalEdgeShaved(Hollowed):
+    """The vertical edge (20, 0, z): its inner copy (18, 2, z) is named through the two inner
+    walls (E<F<F<E, ops#335's derived path), so the place decided before ops#358 too: a warned
+    guess to the shave's edge (19.5, 0, z), 0.5 mm away. Unchanged by ops#358."""
+
+    REFS = ("fillet_edge",)
+
+    @staticmethod
+    def vertical(x):
+        return edge("line", direction=(0, 0, 1), through=(x, 0, 5))
+
+    def consumer(self, doc, body, pocket):
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (pocket, self.names(pocket, self.vertical(20)))
+        fillet.Radius = 0.5
+        self.ref("fillet_edge", fillet, "Base", self.expectEdge, Filleted(0.5))
+
+    def expectEdge(self):
+        if self.stepName is None:
+            return self.vertical(20)
+        return Guessed(self.vertical(19.5)) if self.solver else BROKEN
+
+
+class ThicknessWallShaved(OnWall, Hollowed):
+    """The wall x = 20: its inner copy x = 18 is `F<F` with the opposite normal; tier 2 rejects
+    it (broken before ops#358 too, now with the copy listed as derived)."""
+
+
+class ThicknessOutwardCornerShaved(OnTopCorner, Hollowed):
+    """Outward 2, Join=Intersection (every outer element a same-type GEN of the block's): the
+    cavity's corner (20, 0, 10) is the source. A slot x 19.5..21 removes the cavity wall x = 20
+    and keeps the skin x 21..22, whose corner (22, -2, 10) is the copy, 2.83 mm away. The slot's
+    corner (19.5, 0, 10) on the wall y = 0 stands 0.5 mm away: a warned guess to it. Before:
+    tier 1, silent, to the skin's corner."""
+
+    outward = True
+    join = "Intersection"
+    shave = (19.5, -5, 21, 15)
+
+    def cornerAfter(self):
+        return Guessed(vertex((19.5, 0, 10))) if self.solver else BROKEN
+
+
+class ThicknessOutwardCornerShavedAncestry(AncestryRule, ThicknessOutwardCornerShaved):
+    """The outward corner under the rule before ops#358: the sketch moves to the skin's corner,
+    silently (the comparison setting's expected result)."""
+
+    def cornerAfter(self):
+        return Settled(vertex((22, -2, 10))) if self.solver else BROKEN
+
+
+class ThicknessOutwardRimEdgeShaved(OnRimEdge, Hollowed):
+    """Outward 2, Join=Intersection, the cavity's rim edge x = 20: the slot removes it; the
+    skin's rim edge x = 22 is the copy, 2 mm away, and the slot's rim edge x = 21 stands 1 mm
+    away without the old edge's source: broken, the copy listed first. Before: tier 1, silent,
+    to the skin's rim edge."""
+
+    outward = True
+    join = "Intersection"
+    shave = (19.5, -5, 21, 15)
+
+    def rimAfter(self):
+        return BROKEN
+
+
+class ThicknessOutwardWallShaved(OnWall, Hollowed):
+    """Outward 2, Join=Intersection, the cavity wall x = 20 (normal -X): the skin's face x = 22
+    (normal +X) is `F<F` at 2 mm with the opposite normal: broken, as before ops#358."""
+
+    outward = True
+    join = "Intersection"
+    shave = (19.5, -5, 21, 15)
+    wallNormal = (-1, 0, 0)
+
+
+class Offset2DFrame(Scenario):
+    """Part workbench: a sketch rectangle 0..20 x 0..10 offset inward by 1 with Fill (a frame
+    face, Part::Offset2D), and a Part::Cut with a tool box notching the x = 0 side; the edit
+    moves the tool onto x 19.5..25. A consumer on the outer side x = 20 (`g2`), which the tool
+    removes; its copy at x = 19, `g2;OFF;E;GEN`, survives 1 mm away. Diagonal 22.4: the guess
+    width 1.12 mm."""
+
+    abstract = True
+    area = "OffsetCopies"
+
+    def build(self, doc):
+        profile = m.sketch(doc, "Profile", m.rectangle(0, 0, 20, 10))
+        offset = doc.addObject("Part::Offset2D", "Offset2D")
+        offset.Source = profile
+        offset.Value = -1
+        offset.Fill = True
+        tool = doc.addObject("Part::Box", "Tool")
+        tool.Length, tool.Width, tool.Height = 5.5, 2, 4
+        tool.Placement = App.Placement(V(-5, 4, -2), App.Rotation())
+        cut = doc.addObject("Part::Cut", "Cut")
+        cut.Base = offset
+        cut.Tool = tool
+        doc.recompute()
+        self.consumer(doc, cut)
+
+    def edit(self, doc):
+        tool = doc.Tool
+        tool.Length, tool.Width, tool.Height = 5.5, 20, 4
+        tool.Placement = App.Placement(V(19.5, -5, -2), App.Rotation())
+
+
+class Offset2DFrameEdge(Offset2DFrame):
+    """A sketch attached (NormalToEdge) to the outer edge x = 20. The cut's edge x = 19.5 is
+    0.5 mm away and the copy x = 19 1 mm, both within the guess width and the gap factor:
+    ambiguous, broken (before ops#358 as well, with the copy as tier 1's)."""
+
+    REFS = ("sketch_edge",)
+
+    @staticmethod
+    def side():
+        return edge("line", direction=Y, through=(20, 5, 0))
+
+    def consumer(self, doc, cut):
+        sketch = doc.addObject("Sketcher::SketchObject", "OnEdge")
+        sketch.AttachmentSupport = [(cut, self.names(cut, self.side())[0])]
+        sketch.MapMode = "NormalToEdge"
+        self.ref("sketch_edge", sketch, "AttachmentSupport", self.expectEdge, Attached())
+
+    def expectEdge(self):
+        return self.side() if self.stepName is None else BROKEN
+
+
+class Offset2DFrameCorner(Offset2DFrame):
+    """A sketch attached (Translate) to the outer corner (20, 0, 0). The inner corner (19, 1, 0)
+    is named from the two offset edges (V<E<V, derived since ops#335), 1.41 mm away; the cut's
+    corner (19.5, 0, 0) 0.5 mm: a warned guess to it, unchanged by ops#358."""
+
+    REFS = ("sketch_corner",)
+
+    def consumer(self, doc, cut):
+        sketch = doc.addObject("Sketcher::SketchObject", "OnCorner")
+        sketch.AttachmentSupport = [(cut, self.names(cut, vertex((20, 0, 0)))[0])]
+        sketch.MapMode = "Translate"
+        self.ref("sketch_corner", sketch, "AttachmentSupport", self.expectCorner, Attached())
+
+    def expectCorner(self):
+        if self.stepName is None:
+            return vertex((20, 0, 0))
+        return Guessed(vertex((19.5, 0, 0))) if self.solver else BROKEN
+
+
+class PartOffsetCavityCorner(Scenario):
+    """Part workbench: a Box 20 x 10 x 10 and its Part::Offset by 2 (Join=Intersection; every
+    element a same-type GEN of the box's), the box cut out of it (Part::Cut: a closed hollow), and
+    a second Part::Cut with a slot box. The edit moves the slot onto x 19.5..21, which removes the
+    cavity's corner (20, 0, 10); the slot's corner (19.5, 0, 10) stands 0.5 mm away: a warned
+    guess to it. The cut names the cavity from the box, so the offset's corner
+    (`<box corner>;OFS;V;GEN`, 3.46 mm away) never held the cavity corner's name, and the guess
+    was the same before ops#358: a Part::Offset alone holds only the copy, and with Fill it is
+    invalid in this build (`notes/solver-offset-gen.md` section 2), so Part::Offset meets the
+    rule only through models like this one."""
+
+    area = "OffsetCopies"
+    REFS = ("sketch_corner",)
+
+    def build(self, doc):
+        box = doc.addObject("Part::Box", "Box")
+        box.Length, box.Width, box.Height = 20, 10, 10
+        offset = doc.addObject("Part::Offset", "Offset")
+        offset.Source = box
+        offset.Value = 2
+        offset.Join = "Intersection"
+        hollow = doc.addObject("Part::Cut", "Hollow")
+        hollow.Base = offset
+        hollow.Tool = box
+        slot = doc.addObject("Part::Box", "Slot")
+        slot.Length, slot.Width, slot.Height = 1.5, 2, 20
+        slot.Placement = App.Placement(V(-1, 4, -5), App.Rotation())
+        cut = doc.addObject("Part::Cut", "Cut")
+        cut.Base = hollow
+        cut.Tool = slot
+        doc.recompute()
+        sketch = doc.addObject("Sketcher::SketchObject", "OnCorner")
+        sketch.AttachmentSupport = [(cut, self.names(cut, vertex((20, 0, 10)))[0])]
+        sketch.MapMode = "Translate"
+        self.ref("sketch_corner", sketch, "AttachmentSupport", self.expectCorner, Attached())
+
+    def edit(self, doc):
+        slot = doc.Slot
+        slot.Length, slot.Width = 1.5, 20
+        slot.Placement = App.Placement(V(19.5, -5, -5), App.Rotation())
+
+    def expectCorner(self):
+        if self.stepName is None:
+            return vertex((20, 0, 10))
+        return Guessed(vertex((19.5, 0, 10))) if self.solver else BROKEN

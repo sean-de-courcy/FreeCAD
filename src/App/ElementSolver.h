@@ -150,11 +150,13 @@ public:
     {
         /// Not at all, or only through the connected elements.
         None,
-        /// On a path that passes no projection's embedded names and only nodes of the name's
-        /// element type: the element itself, an earlier state, a piece, a same-type `GEN`.
+        /// On a path that passes no projection's embedded names, no `GEN` section and only
+        /// nodes of the name's element type: the element itself, an earlier state, a piece.
         SameType,
         /// Outside projections, but every such path passes a node of another type, e.g. an edge
-        /// on a face generated from the old edge (`E<F<E`): related, not the same element.
+        /// on a face generated from the old edge (`E<F<E`), or a `GEN` section, e.g. a
+        /// Thickness's or an offset's copy of a vertex (`V<V (THK)`, ops#358): related, not the
+        /// same element.
         Derived,
         /// Only through a projection section's (`PRJ`) embedded names: a far-end partner.
         Projected,
@@ -169,8 +171,9 @@ public:
      */
     static Reach reaches(std::string_view name, std::string_view ancestor, char type = 0);
 
-    /** The element types of a Derived path from \a name to \a ancestor, e.g. `E<F<E`, for the
-     * evidence text; empty if \a name doesn't reach it that way. \a type as for reaches().
+    /** The element types of a Derived path from \a name to \a ancestor, e.g. `E<F<E` or
+     * `V<V (THK)` (a same-type step through a `GEN` section names its op), for the evidence text;
+     * empty if \a name doesn't reach it that way. \a type as for reaches().
      */
     static std::string
     derivedPath(std::string_view name, std::string_view ancestor, char type = 0);
@@ -347,7 +350,8 @@ enum class Tier1Check
 };
 
 /// What tier 1 makes of a candidate that holds the old name only through a node of another
-/// element type (ops#335, the NamingSolver/Tier1Derived parameter): `Place`, geometric evidence
+/// element type or a `GEN` section (ops#335, ops#358, the NamingSolver/Tier1Derived parameter):
+/// `Place`, geometric evidence
 /// (the default; a set of such survivors alone goes to the no-candidate branch, where the place
 /// decides); `Ancestry`, in the old name's ancestry, as before ops#335 (for comparison runs).
 enum class Tier1Derived

@@ -372,11 +372,15 @@ bool lostASource(const std::vector<std::string>& names, const std::vector<Source
 // redrawn. The connected elements are in neither (PR 243 round 7): a modified element's
 // neighbours, per end vertex the vertex and one face of another input holding it, which is never
 // the element itself; a base edge collinear with a profile line's extruded face lists that face.
-// `derived` (ops#335): the nodes reached outside projections only through a node of another
-// element type than the name's, "GEN of a GEN": a section edge on a face that an edge generated
-// (`<<g2>;XTR;F;GEN>;CUT;E;GEN`) reaches the edge g2 through the face. Such a node is in the
-// element's lineage, but the element needn't be where the node was: relatedness, not identity.
-// A node reached both ways is in `outside` and `derived`; `outside` decides.
+// `derived` (ops#335, ops#358): the nodes reached outside projections only through a node of
+// another element type than the name's, "GEN of a GEN", or through a GEN section (a
+// generated element, MAPPER_FLAG_GENERATED) of any type. A section edge on a face that an edge
+// generated (`<<g2>;XTR;F;GEN>;CUT;E;GEN`) reaches the edge g2 through the face; a Thickness's
+// or an offset's copy of a vertex (`<V>;THK;V;GEN`) reaches the vertex through the GEN section,
+// at a distance. Below a GEN section a name is a source of the element, below MOD, an unchanged
+// prefix or a piece an earlier state. Such a node is in the element's lineage, but the element
+// needn't be where the node was: relatedness, not identity. A node reached both ways is in
+// `outside` and `derived`; `outside` decides.
 struct AncestryNodes
 {
     std::set<std::string> outside;
@@ -405,8 +409,15 @@ bool knownElementType(char type)
     return type == 'V' || type == 'E' || type == 'F';
 }
 
+// True if \a section names an element generated from the names it holds (OCCT's Generated(), a
+// new element at another place or of another type), not a later state of them.
+bool isGenerated(const DecodedMappedSection& section)
+{
+    return section.hasMapperFlag(MAPPER_FLAG_GENERATED);
+}
+
 // \a type: the element type of the name the walk started from. \a changed: the path so far
-// passed a node of another type.
+// passed a node of another type or a GEN section.
 void collectAncestryNodes(std::string_view name,
                           bool projected,
                           bool changed,
@@ -435,7 +446,8 @@ void collectAncestryNodes(std::string_view name,
     if (!type && knownElementType(last.elementType)) {
         type = last.elementType;
     }
-    changed = changed || (knownElementType(last.elementType) && last.elementType != type);
+    changed = changed || (knownElementType(last.elementType) && last.elementType != type)
+        || isGenerated(last);
     if (sections.size() > 1) {
         auto prefixSize = static_cast<std::size_t>(sections.back().data() - node.data()) - 1;
         std::string prefix(node.substr(0, prefixSize));
@@ -462,16 +474,19 @@ AncestryNodes ancestryNodes(std::string_view name, char type = 0)
 }
 
 // The element types of a path from \a name down to \a ancestor that passes a node of another
-// type and no projection's embedded names, e.g. `E<F<E`; empty if there is none. For the
+// type or a GEN section and no projection's embedded names, e.g. `E<F<E`; empty if there is
+// none. A step through a GEN section that keeps the type carries the section's op code after
+// the type it reaches, e.g. `V<V (THK)` for a Thickness's copy of a vertex (ops#358). For the
 // evidence text only: the first such path the walk finds. Each branch carries its start type, as
 // collectAncestryNodes() does. \a elementType: as ancestryNodes()' type.
 std::string derivedPathOf(std::string_view name, std::string_view ancestor, char elementType = 0)
 {
     std::set<std::pair<std::string, bool>> visited;
     std::string path;
-    std::function<bool(std::string_view, bool, char)> walk = [&](std::string_view at,
-                                                                 bool changed,
-                                                                 char type) {
+    // \a from: the type of the node whose GEN section led here, and \a op that section's op
+    // code; 0 and empty when no GEN section did.
+    std::function<bool(std::string_view, bool, char, char, const std::string&)> walk =
+        [&](std::string_view at, bool changed, char type, char from, const std::string& op) {
         if (at.empty() || !visited.emplace(std::string(at), changed).second) {
             return false;
         }
@@ -495,11 +510,19 @@ std::string derivedPathOf(std::string_view name, std::string_view ancestor, char
             type = nodeType;
         }
         const std::size_t mark = path.size();
-        path += path.empty() ? std::string(1, nodeType) : std::string("<") + nodeType;
+        auto step = [&]() {
+            path += path.empty() ? std::string(1, nodeType) : std::string("<") + nodeType;
+            if (!op.empty() && knownElementType(nodeType) && nodeType == from) {
+                path += " (" + op + ")";
+            }
+        };
+        step();
         if (changed && at == ancestor) {
             return true;
         }
-        changed = changed || (knownElementType(nodeType) && nodeType != type);
+        const bool generated = isGenerated(last);
+        changed = changed || (knownElementType(nodeType) && nodeType != type) || generated;
+        const std::string via = generated ? last.opCode : std::string();
         if (sections.size() > 1) {
             auto prefixSize = static_cast<std::size_t>(sections.back().data() - node.data()) - 1;
             std::string prefix(node.substr(0, prefixSize));
@@ -507,16 +530,22 @@ std::string derivedPathOf(std::string_view name, std::string_view ancestor, char
                 prefix =
                     contextMark + last.iterationTag + ";" + copyIndex(last) + contextMark + prefix;
             }
-            // An earlier state of the same element: no step in the path
-            path.resize(mark);
-            if (walk(context + prefix, changed, type)) {
+            // An earlier state of the same element: no step in the path. Below a GEN section,
+            // a source: a step.
+            if (!generated) {
+                path.resize(mark);
+            }
+            const char prefixFrom = generated ? nodeType : from;
+            if (walk(context + prefix, changed, type, prefixFrom, generated ? via : op)) {
                 return true;
             }
-            path += path.empty() ? std::string(1, nodeType) : std::string("<") + nodeType;
+            if (!generated) {
+                step();
+            }
         }
         if (!last.hasMapperFlag(MAPPER_FLAG_PROJECTION)) {
             for (const auto& embedded : last.linkedNames) {
-                if (!embedded.empty() && walk(context + embedded, changed, type)) {
+                if (!embedded.empty() && walk(context + embedded, changed, type, nodeType, via)) {
                     return true;
                 }
             }
@@ -524,7 +553,18 @@ std::string derivedPathOf(std::string_view name, std::string_view ancestor, char
         path.resize(mark);
         return false;
     };
-    return walk(name, false, elementType) ? path : std::string();
+    return walk(name, false, elementType, 0, std::string()) ? path : std::string();
+}
+
+// How a derivedPathOf() \a path holds the old element, for the evidence: "through another type"
+// (`E<F<E`), or "through a generated copy" when every node keeps the type (`V<V (THK)`).
+std::string derivedVia(const std::string& path)
+{
+    bool sameType = !path.empty();
+    for (std::size_t i = 2; i < path.size() && sameType; ++i) {
+        sameType = path[i - 1] != '<' || path[i] == path[0];
+    }
+    return sameType ? "through a generated copy" : "through another type";
 }
 
 }  // namespace
@@ -2959,8 +2999,9 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         std::set<std::string> matchedNames;  // the names the name match found them by
         std::set<int> inAncestry;
         // Under Tier1Derived::Place: the elements that reach the old name only through a node of
-        // another type (ops#335), and the survivors of tier 1 that were all such elements, which
-        // the no-candidate branch then got instead (listed first on a break, role `derived`).
+        // another type or a GEN section (ops#335, ops#358), and the survivors of tier 1 that were
+        // all such elements, which the no-candidate branch then got instead (listed first on a
+        // break, role `derived`).
         std::set<int> derivedOnly;
         std::vector<int> derived;
         // Tier 1's candidates that T1 dropped, made by another maker (ops#167), and that T1'
@@ -3125,9 +3166,10 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 break;
             }
         }
-        std::string text = n == 1
-            ? std::string("; tier 1's 1 survivor is in ancestry through another type")
-            : "; tier 1's " + std::to_string(n) + " survivors are in ancestry through another type";
+        std::string text = (n == 1 ? std::string("; tier 1's 1 survivor is in ancestry ")
+                                   : "; tier 1's " + std::to_string(n)
+                                    + " survivors are in ancestry ")
+            + derivedVia(path);
         if (!path.empty()) {
             text += " (" + path + ")";
         }
@@ -3243,7 +3285,8 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             // A projection partner of the old element holds its name, but is another element
             // (AncestryNodes::projected): it is no evidence, and not in the old name's ancestry.
             // Under Tier1Derived::Place, nor is an element that reaches it only through a node
-            // of another type (ops#335): it is related to the old element, and geometry decides.
+            // of another type or a GEN section (ops#335, ops#358: an offset copy): it is related
+            // to the old element, and geometry decides.
             bool contains = false;
             bool derivedName = false;
             if (!oldName.empty()) {
@@ -3394,10 +3437,11 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         state.candidates.assign(all.begin(), all.end());
 
         // Derived survivors only (ops#335, PLAN decision 81): every survivor reaches the old name
-        // only through a node of another type, so none shows that the old element is still
-        // there; a section edge on a face generated from the old edge survives wherever the cut
-        // left it. They are G2's same-source evidence, not tier 1's: the no-candidate branch
-        // runs as it is, over the whole pool, and they are listed first on a break.
+        // only through a node of another type or a GEN section, so none shows that the old
+        // element is still there; a section edge on a face generated from the old edge survives
+        // wherever the cut left it, a Thickness's copy of a corner 2 mm in (ops#358, decision
+        // 86). They are G2's same-source evidence, not tier 1's: the no-candidate branch runs as
+        // it is, over the whole pool, and they are listed first on a break.
         if (!state.candidates.empty()
             && std::all_of(state.candidates.begin(), state.candidates.end(), [&](int k) {
                    const auto& names = pool.elements[k].names;
@@ -3808,9 +3852,9 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                         break;
                     }
                 }
-                state.outcome.evidence = state.pool->elements[k].index
-                    + " is in ancestry through another type"
-                    + (path.empty() ? "" : " (" + path + ")") + ", tier 3 didn't choose it"
+                state.outcome.evidence = state.pool->elements[k].index + " is in ancestry "
+                    + derivedVia(path) + (path.empty() ? "" : " (" + path + ")")
+                    + ", tier 3 didn't choose it"
                     + (state.geometryEvidence.empty() ? "" : ", " + state.geometryEvidence);
                 listCandidates(state, state.listed);
             }
