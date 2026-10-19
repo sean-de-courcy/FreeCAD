@@ -1,0 +1,9 @@
+# A multisection Pipe with "Transformed" along an L (ops#396): Windows gives the valid solid (920),
+# macOS an inside-out one (volume -161.6) that BRepCheck passes. The result gate of ops#370 also
+# requires a positive volume, so on macOS the Pipe fails instead. Remove the entry when macOS
+# gives the solid.
+
+issue: ops#396
+
+reason: macOS's OCCT result for this multisection sweep is wrong (inside-out); the test expects Windows' valid 920
+cli  PartDesignTests.TestPipe.TestPipeCorners.testMultisectionTransformedUnchanged   macos
