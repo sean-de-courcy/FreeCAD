@@ -56,7 +56,14 @@ PartExport bool fixKeepingNames(TopoShape& shape, const TopoShape& before);
  * dropped don't enclose a volume, and fails otherwise. A result with faces outside its solids may
  * not have more of them after the repair. A failure is logged with its reason.
  *
- * @param shape The result; replaced by the repaired shape if the repair is kept
+ * OCCT also drops parts of the base it leaves alone (ops#303). The base's faces, wires, edges and
+ * vertices outside its shells are put back into the result, which then is a compound; a result
+ * that has only some of them fails. A result that lost a closed shell of the base's solids fails
+ * if the shell bounds material (a second outer shell, an invalid base), or if it is a void that
+ * material now fills (a chamfer cutting into it). A void removed with its material stays removed.
+ *
+ * @param shape The result; replaced by the repaired shape if the repair is kept, and holding the
+ * base's loose parts
  * @param base The shape that was dressed up
  * @return false if the result is invalid and wasn't repaired: the feature must fail
  */

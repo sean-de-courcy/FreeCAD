@@ -17,9 +17,12 @@
 
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
+#include <BRepAdaptor_Curve.hxx>
+#include <BRepClass3d_SolidClassifier.hxx>
 #include <BRepGProp.hxx>
 #include <GProp_GProps.hxx>
 #include <gp_Pnt.hxx>
+#include <Precision.hxx>
 #include <Standard_Failure.hxx>
 #include <TopAbs_ShapeEnum.hxx>
 #include <TopExp.hxx>
@@ -569,9 +572,149 @@ bool hasOpenShellInASolid(const TopoDS_Shape& shape)
     return false;
 }
 
-}  // namespace
+// Each closed shell of the shape's solids, with the volume it bounds: negative for a void
+std::vector<std::pair<TopoDS_Shape, double>> closedShells(const TopoDS_Shape& shape)
+{
+    std::vector<std::pair<TopoDS_Shape, double>> shells;
+    for (TopExp_Explorer solid(shape, TopAbs_SOLID); solid.More(); solid.Next()) {
+        for (TopoDS_Iterator it(solid.Current()); it.More(); it.Next()) {
+            const TopoDS_Shape& shell = it.Value();
+            if (shell.ShapeType() == TopAbs_SHELL
+                && (shell.Orientation() == TopAbs_FORWARD || shell.Orientation() == TopAbs_REVERSED)
+                && closesUp(shell)) {
+                GProp_GProps props;
+                BRepGProp::VolumeProperties(shell, props);
+                shells.emplace_back(shell, props.Mass());
+            }
+        }
+    }
+    return shells;
+}
 
-bool checkDressUp(TopoShape& shape, const TopoShape& base)
+// Whether a vertex or the middle of an edge of the shell lies inside a solid of the shape
+bool inMaterial(const TopoDS_Shape& shell, const TopoDS_Shape& shape)
+{
+    std::vector<gp_Pnt> points;
+    for (TopExp_Explorer it(shell, TopAbs_VERTEX); it.More(); it.Next()) {
+        points.push_back(BRep_Tool::Pnt(TopoDS::Vertex(it.Current())));
+    }
+    for (TopExp_Explorer it(shell, TopAbs_EDGE); it.More(); it.Next()) {
+        const TopoDS_Edge& edge = TopoDS::Edge(it.Current());
+        if (!BRep_Tool::Degenerated(edge)) {
+            BRepAdaptor_Curve curve(edge);
+            points.push_back(curve.Value((curve.FirstParameter() + curve.LastParameter()) / 2));
+        }
+    }
+    for (TopExp_Explorer solid(shape, TopAbs_SOLID); solid.More(); solid.Next()) {
+        BRepClass3d_SolidClassifier classifier(solid.Current());
+        for (const auto& point : points) {
+            classifier.Perform(point, Precision::Confusion());
+            if (classifier.State() == TopAbs_IN) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/* Why the dress-up's result lost a closed shell of the base's solids, or null. OCCT's fillet and
+ * chamfer rebuild a solid they change from its outer shell, and keep its other shells only where
+ * they bound the rebuilt solid (ops#303): a second outer shell goes, and its material with it; a
+ * void goes also where the material around it stays (a chamfer cutting into it), which fills it.
+ * A void that goes with the material around it, or one outside it (an invalid base), rightly
+ * goes. */
+const char* droppedShell(const TopoDS_Shape& shape, const TopoDS_Shape& base)
+{
+    // Only a solid with more shells than its outer one has one to lose
+    int most = 0;
+    for (TopExp_Explorer solid(base, TopAbs_SOLID); solid.More(); solid.Next()) {
+        int shells = 0;
+        for (TopoDS_Iterator it(solid.Current()); it.More(); it.Next()) {
+            ++shells;
+        }
+        most = std::max(most, shells);
+    }
+    if (most < 2) {
+        return nullptr;
+    }
+    const auto before = closedShells(base);
+    const auto after = closedShells(shape);
+    const auto count = [](const auto& shells, bool material) {
+        return std::count_if(shells.begin(), shells.end(), [&](const auto& shell) {
+            return material ? shell.second > 0 : shell.second < 0;
+        });
+    };
+    if (count(after, true) < count(before, true)) {
+        return "drops a shell of the base's solids that bounds material";
+    }
+    if (count(after, false) >= count(before, false)) {
+        return nullptr;
+    }
+    for (const auto& [shell, volume] : before) {
+        if (volume < 0 && inMaterial(shell, shape)) {
+            return "fills a void of the base";
+        }
+    }
+    return nullptr;
+}
+
+// The members of the shape's compounds that are faces, wires, edges or vertices, outside every
+// shell
+void collectLooseParts(const TopoShape& shape, std::vector<TopoShape>& parts)
+{
+    if (shape.getShape().ShapeType() != TopAbs_COMPOUND) {
+        return;
+    }
+    for (const auto& member : shape.getSubTopoShapes()) {
+        switch (member.getShape().ShapeType()) {
+            case TopAbs_COMPOUND:
+                collectLooseParts(member, parts);
+                break;
+            case TopAbs_FACE:
+            case TopAbs_WIRE:
+            case TopAbs_EDGE:
+            case TopAbs_VERTEX:
+                parts.push_back(member);
+                break;
+            default:
+                break;
+        }
+    }
+}
+
+/* Puts the base's loose parts into the dress-up's result: OCCT's fillet and chamfer keep only the
+ * solids and shells of their input, and drop its loose faces, wires, edges and vertices, which
+ * they leave alone (ops#303). False if the result has only some of them. */
+bool keepLooseParts(TopoShape& shape, const TopoShape& base)
+{
+    std::vector<TopoShape> parts;
+    collectLooseParts(base, parts);
+    std::vector<TopoShape> kept;
+    collectLooseParts(shape, kept);
+    if (kept.size() >= parts.size()) {
+        return true;
+    }
+    if (!kept.empty()) {
+        FC_WARN("Dress-up result with " << kept.size() << " of the base's " << parts.size()
+                                        << " shapes outside its shells");
+        return false;
+    }
+    std::vector<TopoShape> members;
+    if (shape.getShape().ShapeType() == TopAbs_COMPOUND) {
+        members = shape.getSubTopoShapes();
+    }
+    else {
+        members.push_back(shape);
+    }
+    members.insert(members.end(), parts.begin(), parts.end());
+    TopoShape res(shape.Tag, shape.Hasher, shape.getHistoryAlgorithm());
+    res.makeElementCompound(members);
+    shape = res;
+    return true;
+}
+
+// checkDressUp() for what OCCT kept of the base: its solids and shells
+bool checkResult(TopoShape& shape, const TopoShape& base)
 {
     // An invalid base passes its defects on, also into a result BRepCheck accepts: there it is
     // repaired as an invalid one. A valid base keeps the check as before, since a solid may hold an
@@ -626,6 +769,17 @@ bool checkDressUp(TopoShape& shape, const TopoShape& base)
     }
     shape = repaired;
     return true;
+}
+
+}  // namespace
+
+bool checkDressUp(TopoShape& shape, const TopoShape& base)
+{
+    if (const char* why = droppedShell(shape.getShape(), base.getShape())) {
+        FC_WARN("Dress-up result that " << why);
+        return false;
+    }
+    return checkResult(shape, base) && keepLooseParts(shape, base);
 }
 
 }  // namespace Part

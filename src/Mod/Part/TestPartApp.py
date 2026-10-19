@@ -39,6 +39,7 @@ from parttests.TopoShapeTest import TopoShapeTest
 from parttests.ElementReferenceTest import ElementReferenceTest, ElementReferenceTestV2i
 from parttests.FilletFallbackTest import (
     BaseToleranceTest,
+    DroppedBasePartsTest,
     FilletFallbackTest,
     InvalidDressUpTest,
 )
