@@ -37,6 +37,7 @@
 #include "modelRefine.h"
 #include "TopoShapeOpCode.h"
 
+#include <App/Document.h>
 #include <Base/ProgramVersion.h>
 
 
@@ -216,14 +217,29 @@ App::DocumentObjectExecReturn* MultiFuse::execute()
                         {input},
                         OpCodes::Refine
                     );
-                    res = refined;
-                    ShapeHistory hist = buildHistory(mkRefine, TopAbs_FACE, res.getShape(), oldShape);
-                    for (auto& jt : history) {
-                        jt = joinHistory(jt, hist);
+                    // As makeElementRefine() does (ops#372): refine may reverse the solid, and
+                    // a refine that changes whether the shape is closed is dropped.
+                    refined.fixSolidOrientation();
+                    if (refined.isClosed() == res.isClosed()) {
+                        res = refined;
+                        ShapeHistory hist
+                            = buildHistory(mkRefine, TopAbs_FACE, res.getShape(), oldShape);
+                        for (auto& jt : history) {
+                            jt = joinHistory(jt, hist);
+                        }
                     }
                 }
-                catch (Standard_Failure&) {
-                    // do nothing
+                catch (Standard_Failure& e) {
+                    // The unrefined fuse is kept, with a warning on the feature (ops#372)
+                    if (auto doc = getDocument()) {
+                        const std::string text = std::string("Refine failed: ")
+                            + e.GetMessageString() + "; the unrefined shape is kept";
+                        const char* previous = doc->getWarningDescription(this);
+                        doc->setWarning(
+                            this,
+                            previous && *previous ? std::string(previous) + "\n" + text : text
+                        );
+                    }
                 }
             }
 
