@@ -7,6 +7,8 @@
 - Attach Sketch (Sketcher_MapSketch) took the chosen sketch by its label's text, so of two
   sketches with one label, the first was attached whichever row was chosen.
 - Select Associated Geometry named a constraint's axes Edge0 and Edge-1.
+- The coincident tool joined two vertices that are a line's two ends through other lines
+  (ops#390, upstream PR 32459).
 
 Designed geometry: a 10 x 10 x 10 box whose top face carries the sketches."""
 
@@ -177,3 +179,31 @@ class TestSketchCommandsGui(SketcherGuiTestCase):
             for name in sel.SubElementNames
         ]
         self.assertEqual(sorted(names), ["H_Axis", "V_Axis", "Vertex1", "Vertex2"])
+
+    def test_coincident_refuses_joining_one_lines_ends(self):
+        """A 10 x 5 rectangle of four lines. The vertex shared by the bottom line's start and the
+        left line's end, and the one shared by the bottom line's end and the right line's start,
+        are picked through the side lines: a coincidence would join the bottom line's two ends.
+        The tool adds nothing and the sketch keeps solving (ops#390, upstream PR 32459; it
+        collapsed the line before, "Both points are equal")."""
+        sketch = self.doc.addObject("Sketcher::SketchObject", "Sketch")
+        corners = [V(0, 0, 0), V(10, 0, 0), V(10, 5, 0), V(0, 5, 0)]
+        for i in range(4):
+            sketch.addGeometry(Part.LineSegment(corners[i], corners[(i + 1) % 4]), False)
+        for i in range(4):
+            sketch.addConstraint(Sketcher.Constraint("Coincident", i, 2, (i + 1) % 4, 1))
+        self.doc.recompute()
+        FreeCADGui.ActiveDocument.setEdit(sketch.Name)
+        self.flush_gui(100)
+        FreeCADGui.Selection.clearSelection()
+        # Vertex3 is the right line's start, Vertex8 the left line's end (two vertices per line)
+        FreeCADGui.Selection.addSelection(self.doc.Name, sketch.Name, "Vertex3")
+        FreeCADGui.Selection.addSelection(self.doc.Name, sketch.Name, "Vertex8")
+        FreeCADGui.runCommand("Sketcher_ConstrainCoincidentUnified")
+        self.flush_gui(100)
+        FreeCADGui.ActiveDocument.resetEdit()
+        self.flush_gui(100)
+        self.assertEqual(sketch.ConstraintCount, 4)
+        self.assertEqual(sketch.solve(), 0)
+        bottom = sketch.Geometry[0]
+        self.assertAlmostEqual(bottom.length(), 10.0, places=9)

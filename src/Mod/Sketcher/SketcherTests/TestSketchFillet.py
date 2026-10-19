@@ -392,6 +392,37 @@ class TestSketchFillet(unittest.TestCase):
             App.Vector(5, 3, 0).distanceToPoint(SketchFeature.getPoint(3, 1)), 0.0
         )
 
+    def testChamferWithTrimKeepsTheCorner(self):
+        """A chamfer with Trim on an L corner, its lines picked in either order, cuts the corner at
+        2 from it and moves nothing else (ops#390, upstream PR 33402). With the vertical line
+        picked first, the chamfer's coincidences went to the wrong line ends, and the solve
+        pulled the whole corner away from its coordinates."""
+        for first, second, firstPoint, secondPoint in (
+            (0, 1, App.Vector(5, 0, 0), App.Vector(10, 5, 0)),
+            (1, 0, App.Vector(10, 5, 0), App.Vector(5, 0, 0)),
+        ):
+            sketch = self.Doc.addObject("Sketcher::SketchObject", "Chamfer")
+            sketch.addGeometry(Part.LineSegment(App.Vector(0, 0, 0), App.Vector(10, 0, 0)))
+            sketch.addGeometry(Part.LineSegment(App.Vector(10, 0, 0), App.Vector(10, 10, 0)))
+            sketch.addConstraint(Sketcher.Constraint("Coincident", 0, 2, 1, 1))
+            sketch.fillet(first, second, firstPoint, secondPoint, 2.0, True, False, True)
+            self.assertEqual(sketch.solve(), 0)
+            self.Doc.recompute()
+            self.assertEqual(sketch.MalformedConstraints, [])
+
+            def at(point, expected):
+                self.assertLess(point.distanceToPoint(expected), 1e-7, (first, point, expected))
+
+            bottom, side, chamfer = sketch.Geometry[0], sketch.Geometry[1], sketch.Geometry[3]
+            at(bottom.StartPoint, App.Vector(0, 0, 0))
+            at(bottom.EndPoint, App.Vector(8, 0, 0))
+            at(side.StartPoint, App.Vector(10, 2, 0))
+            at(side.EndPoint, App.Vector(10, 10, 0))
+            ends = sorted([chamfer.StartPoint, chamfer.EndPoint], key=lambda p: p.x)
+            at(ends[0], App.Vector(8, 0, 0))
+            at(ends[1], App.Vector(10, 2, 0))
+            self.assertFalse(sketch.getConstruction(3))
+
     def tearDown(self):
         # comment out to omit closing document for debugging
         FreeCAD.closeDocument("TestSketchFillet")
