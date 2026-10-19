@@ -1,6 +1,10 @@
 # FreeCAD-CH: builds Windows x64 and macOS arm64 packages into a DRAFT GitHub release.
 # Run by hand only (Actions > Build Release > Run workflow). Nothing is published: the
 # draft is visible only to the repository's maintainers, who hand the builds on.
+# The bundles are FreeCAD built in the workspace's pixi environment, the one CI and every test
+# use (pixi.lock), and each is refused unless its FreeCADCmd reports pixi.lock's OCCT, Python and
+# Qt (package/scripts/check_release_env.py, ops#388). dry_run builds and checks both packages
+# without creating a release or a tag, and without uploading anything.
 name: Build Release
 on:
   workflow_dispatch:
@@ -9,12 +13,18 @@ on:
         description: "Release tag, e.g. fork-0.1.0. Empty: weekly-<date> on the default branch, <branch>-<date> elsewhere."
         required: false
         default: ""
+      dry_run:
+        description: "Build and check the packages only: no draft release, no uploads."
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: build-release-${{ github.event_name }}
+  # a dry run never cancels a release build, nor a release build a dry run
+  group: build-release-${{ github.event_name }}${{ inputs.dry_run && '-dry-run' || '' }}
   cancel-in-progress: true
 
 jobs:
@@ -45,6 +55,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           INPUT_TAG: ${{ inputs.build_tag }}
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
           set -euo pipefail
           if [ -n "${INPUT_TAG}" ]; then
@@ -73,6 +84,12 @@ jobs:
               export BUILD_TAG=${SAFE_BRANCH}-$(date "+%Y.%m.%d")
             fi
           fi
+          echo "BUILD_TAG=${BUILD_TAG}" >> "$GITHUB_ENV"
+          echo "build_tag=${BUILD_TAG}" >> "$GITHUB_OUTPUT"
+          if [ "${DRY_RUN}" = "true" ]; then
+            echo "Dry run: no draft release for ${BUILD_TAG}"
+            exit 0
+          fi
           # Always a draft: CI never publishes. A re-run for the same tag reuses its draft (the
           # uploads use --clobber and find drafts by tag name). gh release create doesn't: a
           # draft has no git tag yet, so it makes a second draft. So look the tag up first.
@@ -90,11 +107,10 @@ jobs:
             echo "Expected none or one draft (a published release is never reused): delete the extra drafts, or run with another build_tag." >&2
             exit 1
           fi
-          echo "BUILD_TAG=${BUILD_TAG}" >> "$GITHUB_ENV"
-          echo "build_tag=${BUILD_TAG}" >> "$GITHUB_OUTPUT"
 
       - name: Upload Source
         id: upload_source
+        if: ${{ !inputs.dry_run }}
         shell: bash -l {0}
         env:
           GH_TOKEN: ${{ github.token }}
@@ -246,7 +262,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TARGET_PLATFORM: ${{ matrix.target }}
           MAKE_INSTALLER: "true"
-          UPLOAD_RELEASE: "true"
+          UPLOAD_RELEASE: ${{ inputs.dry_run && 'false' || 'true' }}
           BUILD_TAG: ${{ needs.upload_src.outputs.build_tag }}
         run: |
           set -euo pipefail
@@ -290,3 +306,52 @@ jobs:
       #   run: |
       #     security delete-keychain $RUNNER_TEMP/app-signing.keychain-db
       #     rm ~/Library/MobileDevice/Provisioning\ Profiles/build_pp.mobileprovision
+
+  # FreeCAD-CH: once both packages passed the release check, the draft's notes record the versions
+  # they run (ops#388). Each build job has already refused a package whose FreeCADCmd reported
+  # other versions than pixi.lock's, so these are pixi.lock's, per platform.
+  release_notes:
+    needs: [upload_src, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Record the release environment in the draft's notes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_TAG: ${{ needs.upload_src.outputs.build_tag }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          {
+            echo "<!-- release-env -->"
+            echo "## Release environment"
+            echo ""
+            echo "Both packages run the tested environment (pixi.lock); their FreeCADCmd reported:"
+            echo ""
+            # the build matrix's targets
+            for platform in win-64 osx-arm64; do
+              python3 package/scripts/check_release_env.py --lock pixi.lock --platform "${platform}" --notes-line
+            done
+          } > release-env.md
+          cat release-env.md >> "$GITHUB_STEP_SUMMARY"
+          if [ "${DRY_RUN}" = "true" ]; then
+            echo "Dry run: no draft release to edit"
+            exit 0
+          fi
+          # A re-run replaces the section instead of adding a second one
+          gh release view "${BUILD_TAG}" --json body --jq .body | sed '/^<!-- release-env -->$/,$d' > notes.md
+          echo "" >> notes.md
+          cat release-env.md >> notes.md
+          gh release edit "${BUILD_TAG}" --notes-file notes.md --draft=true

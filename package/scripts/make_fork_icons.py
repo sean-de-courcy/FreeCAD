@@ -10,7 +10,7 @@ Start menu. Run from the top of the source tree with the pixi environment's Pyth
 It adds the badge to src/Gui/Icons/freecad.svg (once) and renders, from that SVG:
     src/Main/icon.ico                                   the executables' icon (Windows)
     package/WindowsInstaller/icons/FreeCAD.ico          the installer's icon
-    package/rattler-build/osx/resources/freecad.icns    the app bundle's icon (macOS)
+    package/bundle/osx/resources/freecad.icns    the app bundle's icon (macOS)
 """
 
 import io
@@ -24,7 +24,7 @@ from PySide6.QtSvg import QSvgRenderer
 
 SVG = "src/Gui/Icons/freecad.svg"
 ICO_OUTPUTS = ["src/Main/icon.ico", "package/WindowsInstaller/icons/FreeCAD.ico"]
-ICNS_OUTPUT = "package/rattler-build/osx/resources/freecad.icns"
+ICNS_OUTPUT = "package/bundle/osx/resources/freecad.icns"
 
 # Drawn in the stock icon's 48x48 user space, bottom right: a red tag with "CH" in white
 # strokes (paths, not text, so it looks the same without any font).

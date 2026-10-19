@@ -124,7 +124,8 @@ sed -i "s/APPLICATION_MENU_NAME/${application_menu_name}/" ${conda_env}/../Info.
 sed -i "s/APPLICATION_EXECUTABLE/${app_name}/" ${conda_env}/../Info.plist
 sed -i "s/BUNDLE_IDENTIFIER/${bundle_id}/" ${conda_env}/../Info.plist
 
-pixi list -e default > "${app_bundle}/Contents/packages.txt"
+# FreeCAD-CH: the shipped packages are the workspace's default environment, not this folder's tools
+pixi list --frozen --manifest-path ../../../pixi.toml -e default > "${app_bundle}/Contents/packages.txt"
 sed -i '1s/.*/\nLIST OF PACKAGES:/' "${app_bundle}/Contents/packages.txt"
 
 echo "Running FreeCAD command-line smoke test..."
@@ -138,6 +139,9 @@ if ! "${conda_env}/bin/freecadcmd" --safe-mode --console "import pivy; from pivy
     echo "FreeCAD bundled Pivy smoke test failed; the macOS bundle cannot import the bundled Coin/Pivy runtime."
     exit 1
 fi
+
+# FreeCAD-CH: refuse a bundle that doesn't run the tested environment, pixi.lock's (ops#388)
+python ../../scripts/check_release_env.py --lock ../../../pixi.lock --platform "${TARGET_PLATFORM:-osx-$(uname -m)}"     --freecadcmd "${conda_env}/bin/freecadcmd" ${GITHUB_STEP_SUMMARY:+--summary "$GITHUB_STEP_SUMMARY"}
 
 # FreeCAD-CH: the launcher runs bin/freecad outside Contents/MacOS, so the application menu's
 # About, Hide and Quit items take their name from the Info.plist embedded in it (ops#98)

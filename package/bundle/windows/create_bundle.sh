@@ -77,7 +77,8 @@ echo -e "################"
 echo -e "version_name:  ${version_name}"
 echo -e "################"
 
-pixi list -e default > ${copy_dir}/packages.txt
+# FreeCAD-CH: the shipped packages are the workspace's default environment, not this folder's tools
+pixi list --frozen --manifest-path ../../../pixi.toml -e default > ${copy_dir}/packages.txt
 sed -i '1s/.*/\nLIST OF PACKAGES:/' ${copy_dir}/packages.txt
 
 mv ${copy_dir} ${version_name}
@@ -150,6 +151,9 @@ if ! "$SIGN_DIR/bin/${app_cmd_exe}" --safe-mode --console "import pivy; from piv
   echo "FreeCAD bundled Pivy smoke test failed; the Windows bundle cannot import the bundled Coin/Pivy runtime."
   exit 1
 fi
+
+# FreeCAD-CH: refuse a bundle that doesn't run the tested environment, pixi.lock's (ops#388)
+python ../../scripts/check_release_env.py --lock ../../../pixi.lock --platform "${TARGET_PLATFORM:-win-64}"   --freecadcmd "$SIGN_DIR/bin/${app_cmd_exe}" ${GITHUB_STEP_SUMMARY:+--summary "$GITHUB_STEP_SUMMARY"}
 
 7z a -t7z -mx9 -mmt=${NUMBER_OF_PROCESSORS} ${version_name}.7z ${version_name} -bb
 # create hash
