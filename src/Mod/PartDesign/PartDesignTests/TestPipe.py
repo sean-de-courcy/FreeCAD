@@ -107,6 +107,12 @@ V = App.Vector
 XZ = App.Placement(V(0, 0, 0), App.Rotation(V(1, 0, 0), 90))
 
 
+def turned(z, degrees, length):
+    """In an XZ sketch: the end of a leg of `length` from (0, z), turned `degrees` from +Z
+    towards +X."""
+    return (length * math.sin(math.radians(degrees)), z + length * math.cos(math.radians(degrees)))
+
+
 def onPlane(axis, value):
     """Whether a point lies on the plane where the coordinate `axis` (0, 1, 2) is `value`."""
     return lambda point: abs(point[axis] - value) < 1e-6
@@ -247,11 +253,10 @@ class TestPipeEndNames(unittest.TestCase):
 
     def testTransitionsAndModes(self):
         """The same names under each transition and in Frenet mode, on the pipe's own solid
-        (AddSubShape: "Transformed" makes an invalid one at the sharp corner, ops#370, which
-        Refine reduces, and whose end isn't where the profile's would be: its end is found by
-        name)."""
+        (AddSubShape). "Transformed" fails at this right angle (ops#370, TestPipeCorners); at 60
+        degrees it shears the second leg, whose end isn't where the profile's would be: its end
+        is found by name."""
         cases = [
-            {"Transition": "Transformed", "Refine": False},
             {"Transition": "Right corner"},
             {"Transition": "Round corner"},
             {"Transition": "Right corner", "Mode": "Frenet"},
@@ -261,8 +266,13 @@ class TestPipeEndNames(unittest.TestCase):
                 pipe = self.pipe(self.square(), self.lPath(), **properties)
                 profile = pipe.Profile[0]
                 self.assertStartKeepsNames(pipe.AddSubShape, profile, onPlane(2, 0))
-                atEnd = None if properties["Transition"] == "Transformed" else onPlane(0, 20)
-                self.assertEndProjects(pipe.AddSubShape, profile, atEnd)
+                self.assertEndProjects(pipe.AddSubShape, profile, onPlane(0, 20))
+        self.tearDown()
+        self.setUp()
+        path = self.sketch("Path", models.polyline([(0, 0), (0, 30), turned(30, 60, 20)]), placement=XZ)
+        pipe = self.pipe(self.square(), path, Transition="Transformed", Refine=False)
+        self.assertStartKeepsNames(pipe.AddSubShape, pipe.Profile[0], onPlane(2, 0))
+        self.assertEndProjects(pipe.AddSubShape, pipe.Profile[0], None)
 
     def testSpineTowardsTheProfile(self):
         """A spine drawn towards the profile (from z = 30 down to it at z = 0): the shell starts
@@ -464,6 +474,340 @@ class TestPipeEndNames(unittest.TestCase):
             name = firstName(pipe.Shape, element)
             self.assertIn("PRJ", name, element)
             self.assertIn(f"{profile.ID}", name, element)
+
+
+SQUARE = [V(-2, -2, 0), V(2, -2, 0), V(2, 2, 0), V(-2, 2, 0)]
+
+
+def extrusions(points, face=None):
+    """What "Transformed" means along a polyline: the profile isn't turned at the corners, only
+    moved along each segment, so the pipe is the union of its extrusions along the segments.
+    `face` (default the square -2..2) lies at points[0]."""
+    face = face or Part.Face(Part.makePolygon(SQUARE + SQUARE[:1]))
+    parts = []
+    for start, end in zip(points, points[1:]):
+        part = face.copy()
+        part.translate(start - points[0])
+        parts.append(part.extrude(end - start))
+    return parts[0].multiFuse(parts[1:]).removeSplitter() if len(parts) > 1 else parts[0]
+
+
+class TestPipeCorners(unittest.TestCase):
+    """ops#370 and ops#381: a Pipe at sharp spine corners. New pipes join them as "Right
+    corner". "Transformed" keeps the profile's orientation across a corner, so the stretch after
+    it is sheared: it fails where that stretch has no thickness (thinner than 1e-5 mm, at a
+    right angle), warns within 1 degree of that, and past 90 degrees, where the profile would
+    pass back through itself, the pipe is the union of the pieces between those corners. Every
+    pipe's result must be a valid solid, whatever its transition. The profile is the square
+    -2..2 at z = 0 in a Body, the spines sketches on XZ (a point (x, z)), unless stated."""
+
+    def setUp(self):
+        self.doc = models.newDocument("PartDesignTestPipeCorners")
+        self.doc.HistoryAlgorithm = "V2"
+        self.doc.InternNames = False  # plain names as text (ops#6 Q6)
+        self.body = models.body(self.doc)
+
+    def tearDown(self):
+        App.closeDocument(self.doc.Name)
+
+    def renew(self):
+        self.tearDown()
+        self.setUp()
+
+    def spine(self, points, closed=False):
+        geometry = models.polygon(points) if closed else models.polyline(points)
+        return models.sketch(self.doc, "Path", geometry, self.body, placement=XZ)
+
+    def profile(self, geometry=None):
+        return models.sketch(
+            self.doc, "Profile", geometry or models.rectangle(-2, -2, 2, 2), self.body
+        )
+
+    def pipe(self, spine, profile=None, **properties):
+        pipe = self.body.newObject("PartDesign::AdditivePipe", "Pipe")
+        pipe.Profile = profile or self.profile()
+        pipe.Spine = (spine, [])
+        for name, value in properties.items():
+            setattr(pipe, name, value)
+        self.doc.recompute()
+        return pipe
+
+    def transformed(self, points, closed=False, profile=None, **properties):
+        return self.pipe(self.spine(points, closed), profile, Transition="Transformed", **properties)
+
+    def assertValidSolid(self, pipe):
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        self.assertEqual(len(pipe.Shape.Solids), 1)
+        self.assertTrue(pipe.Shape.isValid())
+
+    def assertFails(self, pipe, *phrases):
+        self.assertFalse(pipe.isValid())
+        for phrase in phrases:
+            self.assertIn(phrase, pipe.getStatusString())
+
+    def assertWarns(self, pipe, warns=True):
+        if warns:
+            self.assertIn("Warning", pipe.State)
+            self.assertIn("nearly edge-on", pipe.getStatusString())
+        else:
+            self.assertNotIn("Warning", pipe.State)
+
+    def assertSameShape(self, shape, reference):
+        """The same solid: equal volumes, and the common part is all of it (to 1e-5 of it: the
+        sweep approximates its surfaces as B-splines, 1.1e-6 off for a circle at 150 degrees)."""
+        delta = 1e-5 * reference.Volume
+        self.assertAlmostEqual(shape.Volume, reference.Volume, delta=delta)
+        self.assertAlmostEqual(shape.common(reference).Volume, reference.Volume, delta=delta)
+
+    def assertUnionOf(self, pipe, points, face=None, warns=False):
+        """A valid solid, with no self-intersection the boolean check finds, equal to the
+        profile's extrusions along the spine's segments, with no warning unless `warns` (None:
+        either)."""
+        self.assertValidSolid(pipe)
+        pipe.Shape.check(True)
+        self.assertSameShape(pipe.Shape, extrusions(points, face))
+        if warns is not None:
+            self.assertWarns(pipe, warns)
+
+    @staticmethod
+    def lPoints(degrees, first=30, second=20):
+        """Up `first` along Z, then `second` turned `degrees` from +Z towards +X."""
+        return [(0, 0), (0, first), turned(first, degrees, second)]
+
+    @staticmethod
+    def inSpace(points):
+        return [V(x, 0, z) for x, z in points]
+
+    # The default ----------------------------------------------------------------------------
+
+    def testNewPipeJoinsCornersAsRightCorner(self):
+        """A new pipe, nothing set, along an L: "Right corner", the full 4 x 4 section all
+        along, 4 * 4 * (30 + 20)."""
+        pipe = self.pipe(self.spine(self.lPoints(90)))
+        self.assertEqual(pipe.Transition, "Right corner")
+        self.assertValidSolid(pipe)
+        self.assertAlmostEqual(pipe.Shape.Volume, 800, 6)
+
+    # The right-angle case -------------------------------------------------------------------
+
+    def testRightAngleFails(self):
+        """Exactly 90 degrees: the second leg would have no thickness. The pipe fails, naming
+        the corner. Before, the solid was invalid, and nothing said so."""
+        pipe = self.transformed([(0, 0), (0, 30), (20, 30)])
+        self.assertFails(pipe, "(0, 0, 30)", "no thickness", "Right corner")
+
+    def testInsideTheBandFails(self):
+        """89.9999 and 90.0001 degrees: the leg is 4 * cos = 7e-6 mm thick, under 1e-5 mm."""
+        for degrees in (89.9999, 90.0001):
+            with self.subTest(degrees=degrees):
+                self.renew()
+                self.assertFails(self.transformed(self.lPoints(degrees)), "no thickness")
+
+    def testNearTheBandWarns(self):
+        """89.999 degrees: 7e-5 mm, outside the band: the sheared pipe, 4 * 4 * 30 + 4 * 4 * 20
+        * cos 89.999, with a warning (within 1 degree of the collapse)."""
+        pipe = self.transformed(self.lPoints(89.999))
+        self.assertValidSolid(pipe)
+        self.assertAlmostEqual(
+            pipe.Shape.Volume, 480 + 320 * math.cos(math.radians(89.999)), 6
+        )
+        self.assertWarns(pipe)
+
+    def testTwoZsAndAClosedSquareFail(self):
+        """A Z (+90, -90), a U (+90, +90) and a closed square: each fails at its first corner,
+        (0, 0, 30). Before, they were invalid or had no volume."""
+        cases = {
+            "Z": ([(0, 0), (0, 30), (20, 30), (20, 60)], False),
+            "U": ([(0, 0), (0, 30), (20, 30), (20, 0)], False),
+            "square": ([(0, 0), (0, 30), (30, 30), (30, 0)], True),
+        }
+        for case, (points, closed) in cases.items():
+            with self.subTest(case):
+                self.renew()
+                self.assertFails(self.transformed(points, closed), "(0, 0, 30)", "no thickness")
+
+    # Unchanged: under 90 degrees -------------------------------------------------------------
+
+    def testShearedUnder90DegreesUnchanged(self):
+        """45 degrees, with and without Refine: the sheared pipe as before, 480 + 320 * cos 45,
+        the extrusions' union, with no warning."""
+        for refine in (False, True):
+            with self.subTest(refine=refine):
+                self.renew()
+                points = self.lPoints(45)
+                pipe = self.transformed(points, Refine=refine)
+                self.assertValidSolid(pipe)
+                self.assertAlmostEqual(pipe.Shape.Volume, 480 + 320 * math.cos(math.pi / 4), 6)
+                self.assertSameShape(pipe.Shape, extrusions(self.inSpace(points)))
+                self.assertWarns(pipe, False)
+
+    def testSmoothSpineSameUnderEveryTransition(self):
+        """A quarter circle of radius 20 and a circle of radius 2: no corner, so every
+        transition gives the same pipe, pi * 2^2 * (pi / 2 * 20) (Pappus), with no warning."""
+        for transition in ("Transformed", "Right corner", "Round corner"):
+            with self.subTest(transition):
+                self.renew()
+                arc = Part.ArcOfCircle(Part.Circle(V(20, 0, 0), V(0, 0, 1), 20), math.pi / 2, math.pi)
+                spine = models.sketch(self.doc, "Path", arc, self.body, placement=XZ)
+                pipe = self.pipe(spine, self.profile(models.circle(0, 0, 2)), Transition=transition)
+                self.assertValidSolid(pipe)
+                self.assertAlmostEqual(pipe.Shape.Volume, 4 * math.pi * 10 * math.pi, 3)
+                self.assertWarns(pipe, False)
+
+    # The union past 90 degrees --------------------------------------------------------------
+
+    def testPast90DegreesIsTheUnion(self):
+        """120 degrees: the second leg runs back under the corner. One valid solid, the
+        extrusions' union. Before, a self-intersecting solid (320) that isValid() passed."""
+        points = self.lPoints(120)
+        self.assertUnionOf(self.transformed(points), self.inSpace(points))
+
+    def testJustPast90Degrees(self):
+        """91 degrees: the union. 91 is the warning's edge (1 degree from the collapse), so the
+        warning is tested off it: 90.5 degrees warns, 92 doesn't."""
+        points = self.lPoints(91)
+        self.assertUnionOf(self.transformed(points), self.inSpace(points), warns=None)
+        for degrees, warns in ((90.5, True), (92, False)):
+            with self.subTest(degrees=degrees):
+                self.renew()
+                pipe = self.transformed(self.lPoints(degrees))
+                self.assertValidSolid(pipe)
+                self.assertWarns(pipe, warns)
+
+    def testCircleAt150Degrees(self):
+        """A circle of radius 2 at 150 degrees: the union of its extrusions."""
+        points = self.lPoints(150)
+        pipe = self.transformed(points, profile=self.profile(models.circle(0, 0, 2)))
+        self.assertUnionOf(pipe, self.inSpace(points), Part.Face(Part.Wire(Part.makeCircle(2))))
+
+    def testTwoCornersPassing90Together(self):
+        """Two 60 degree corners turning the same way (legs of 20): the tilt is 60, then 120,
+        so only the second corner passes 90. The union."""
+        points = [(0, 0), (0, 20), turned(20, 60, 20)]
+        x, z = points[-1]
+        points.append((x + 20 * math.sin(math.radians(120)), z + 20 * math.cos(math.radians(120))))
+        self.assertUnionOf(self.transformed(points), self.inSpace(points))
+
+    def testClosedTriangle(self):
+        """An equilateral triangle, closed: tilts 0, 120 and 240 degrees. The union; before, no
+        volume."""
+        points = [(0, 0), (0, 30), (15 * math.sqrt(3), 15)]
+        pipe = self.transformed(points, closed=True)
+        self.assertUnionOf(pipe, self.inSpace(points + points[:1]))
+
+    def testSpaceSpine(self):
+        """A spine in space: up 30, then 120 degrees towards +X for 20, then that direction
+        turned 90 degrees about Z for 20 more. The union."""
+        leg = App.Vector(math.sin(math.radians(120)), 0, math.cos(math.radians(120))) * 20
+        points = [V(0, 0, 0), V(0, 0, 30)]
+        points.append(points[-1] + leg)
+        points.append(points[-1] + App.Rotation(V(0, 0, 1), 90).multVec(leg))
+        spine = models.feature(self.doc, "Path", Part.makePolygon(points))
+        pipe = self.pipe(spine, Transition="Transformed")
+        self.assertUnionOf(pipe, points)
+
+    # Curved stretches ------------------------------------------------------------------------
+
+    def curvedSpine(self, degrees, arc):
+        """Up 30, a corner of `degrees`, then an arc of radius 10 turning `arc` degrees further
+        the same way; and the arc's centre (x, z)."""
+        start = math.radians(degrees)
+        centre = (10 * math.cos(start), 30 - 10 * math.sin(start))  # right of the turned leg
+        towards = math.radians(180 - degrees)  # from the centre to the corner, from +X
+        circle = Part.Circle(V(*centre, 0), V(0, 0, 1), 10)
+        geometry = models.polyline([(0, 0), (0, 30)])
+        geometry.append(Part.ArcOfCircle(circle, towards - math.radians(arc), towards))
+        return models.sketch(self.doc, "Path", geometry, self.body, placement=XZ), centre
+
+    def testCurveAfterACornerPast90(self):
+        """A 120 degree corner, then an arc turning 30 more: the union. Along the arc the
+        profile turns with the spine, so the second piece is the square, as it lies at the
+        corner, revolved 30 degrees about the arc's axis."""
+        spine, (x, z) = self.curvedSpine(120, 30)
+        pipe = self.pipe(spine, Transition="Transformed")
+        self.assertValidSolid(pipe)
+        face = Part.Face(Part.makePolygon(SQUARE + SQUARE[:1]))
+        corner = face.copy()
+        corner.translate(V(0, 0, 30))
+        reference = face.extrude(V(0, 0, 30)).fuse(corner.revolve(V(x, 0, z), V(0, 1, 0), 30))
+        self.assertSameShape(pipe.Shape, reference.removeSplitter())
+
+    def testFoldAlongACurveFails(self):
+        """A 100 degree corner, then an arc turning 40 more: the profile, nearly edge-on to the
+        curve, folds over itself within the arc. No union fixes that: the result gate fails the
+        pipe. Before, an invalid solid."""
+        pipe = self.pipe(self.curvedSpine(100, 40)[0], Transition="Transformed")
+        self.assertFails(pipe, "isn't a valid solid")
+
+    # The result gate (ops#381) ---------------------------------------------------------------
+
+    def multisection(self, transition):
+        """Along the L (90 degrees), to a 6 x 6 section normal to the last leg, at its end."""
+        section = models.sketch(
+            self.doc,
+            "Section",
+            models.rectangle(-3, -3, 3, 3),
+            self.body,
+            placement=App.Placement(V(20, 0, 30), App.Rotation(V(0, 1, 0), 90)),
+        )
+        return self.pipe(
+            self.spine(self.lPoints(90)),
+            Transformation="Multisection",
+            Sections=[section],
+            Transition=transition,
+        )
+
+    def testMultisectionCornersNeedTransformed(self):
+        """Several sections at a corner: "Right corner" gave no solid and "Round corner" an
+        invalid one, silently (ops#381). Both fail now."""
+        for transition in ("Right corner", "Round corner"):
+            with self.subTest(transition):
+                self.renew()
+                self.assertFails(self.multisection(transition), "isn't a valid solid")
+
+    def testMultisectionTransformedUnchanged(self):
+        """With "Transformed" the sections join at the corner: valid, the volume integration's
+        build gave (920; the sections set the orientation, no tilt test)."""
+        pipe = self.multisection("Transformed")
+        self.assertValidSolid(pipe)
+        self.assertAlmostEqual(pipe.Shape.Volume, 920, 2)
+        self.assertWarns(pipe, False)
+
+    def testHairpinFails(self):
+        """A 170 degree hairpin: "Right corner" and "Round corner" gave invalid solids
+        (ops#381). Both fail now."""
+        for transition in ("Right corner", "Round corner"):
+            with self.subTest(transition):
+                self.renew()
+                pipe = self.pipe(self.spine(self.lPoints(170)), Transition=transition)
+                self.assertFails(pipe, "isn't a valid solid")
+
+    # Names ----------------------------------------------------------------------------------
+
+    def testUnionNames(self):
+        """The union at 120 degrees: the start cap keeps the sketch's names; the far end (on
+        z = 20, the square only moved there) projects them, through the corner's section; every
+        name is distinct, so the second leg's side faces aren't named as the first's."""
+        profile = self.profile()
+        pipe = self.transformed(self.lPoints(120), profile=profile)
+        shape = pipe.Shape
+        TestPipeEndNames.assertStartKeepsNames(self, shape, profile, onPlane(2, 0))
+        TestPipeEndNames.assertNamesDistinct(self, shape)
+        own = [firstName(profile.Shape, f"Edge{index}") for index in range(1, 5)]
+        ends = elementsWhere(shape, "Edge", onPlane(2, 20))
+        self.assertEqual(len(ends), 4, ends)
+        traced = []
+        for element in ends:
+            # the end's projection of the corner's edge, the first leg's projection of the sketch's
+            name = firstName(shape, element)
+            for _ in range(2):
+                last = App.getDecodedMappedName(name)[-1]
+                self.assertIn("PRJ", last["mapperFlags"], (element, name))
+                self.assertEqual(last["opCode"], "PSH", (element, name))
+                self.assertEqual(len(last["linkedNames"]), 1, (element, name))
+                name = last["linkedNames"][0]
+            traced.append(name)
+        self.assertEqual(sorted(traced), sorted(own))
 
 
 def bendPoints(first, second, towards=False, *more):

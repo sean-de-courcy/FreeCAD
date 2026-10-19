@@ -254,6 +254,7 @@ def LoftPipe(make):
     pipe = body.newObject("PartDesign::AdditivePipe", "Pipe")
     pipe.Profile = profile
     pipe.Spine = spine
+    pipe.Transition = "Transformed"  # the default before ops#370 (the spine is smooth)
     body2 = newBody(doc, "Body001")
     xy2 = plane(body2, "XY_Plane")
     sections = []
@@ -298,6 +299,40 @@ def LoftPipe(make):
             "Pipe": loftVolume + math.pi * 4 * (math.pi * 10 / 2),
         }
     }
+
+
+def PipeCorners(make):
+    """A Pipe's spine corners (ops#370).
+
+    Body: a square, side 4, centred on the XY plane, swept with "Transformed" along an L on the
+    XZ plane: up 30, then 20 turned 120 degrees from +Z towards +X. "Transformed" doesn't turn
+    the profile at the corner, so the second leg, past 90 degrees, runs back under the corner:
+    the pipe is the union of the square's extrusions along the two legs, 4 * 4 * 30 and
+    4 * 4 * 20 * |cos 120|, less their overlap below the corner, a wedge 4 deep with the
+    triangle of legs 4 and 4 / tan 60 (32 / sqrt 3). Body001: the same square along an L with a
+    right angle (up 30, then 20 along +X), its Transition as a new pipe has it ("Right corner"):
+    4 * 4 * 50."""
+    doc = make("PipeCorners")
+    turned = math.radians(120)
+    for name, end, transition in (
+        ("Body", (20 * math.sin(turned), 30 + 20 * math.cos(turned)), "Transformed"),
+        ("Body001", (20, 30), None),
+    ):
+        body = newBody(doc, name)
+        profile = attachedSketch(
+            body, "Profile" + name[4:], plane(body, "XY_Plane"), m.rectangle(-2, -2, 2, 2)
+        )
+        # in the XZ plane's sketch, x is X and y is Z
+        spine = attachedSketch(
+            body, "Spine" + name[4:], plane(body, "XZ_Plane"), m.polyline([(0, 0), (0, 30), end])
+        )
+        pipe = body.newObject("PartDesign::AdditivePipe", "Pipe" + name[4:])
+        pipe.Profile = profile
+        pipe.Spine = spine
+        if transition:
+            pipe.Transition = transition
+    doc.recompute()
+    return {"volumes": {"Pipe": 480 + 160 - 32 / math.sqrt(3), "Pipe001": 800}}
 
 
 def HoleFeature(make):
@@ -592,6 +627,7 @@ MODELS = [
     DraftThickness,
     MirroredMultiTransform,
     LoftPipe,
+    PipeCorners,
     HoleFeature,
     UpToFace,
     BodyFromFeature,
