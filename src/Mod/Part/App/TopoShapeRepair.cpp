@@ -15,9 +15,11 @@
 #include <tuple>
 #include <vector>
 
+#include <Bnd_Box.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <BRepAlgoAPI_Common.hxx>
+#include <BRepBndLib.hxx>
 #include <BRepGProp.hxx>
 #include <GProp_GProps.hxx>
 #include <gp_Pnt.hxx>
@@ -600,12 +602,30 @@ TopoDS_Solid voidSpace(const TopoDS_Shape& shell)
     return solid;
 }
 
-// The volume two solids share, or nothing if the Boolean fails
-std::optional<double> sharedVolume(const TopoDS_Shape& a, const TopoDS_Shape& b)
+// A solid, or a void's space, with its bounding box
+struct Space
 {
+    TopoDS_Shape solid;
+    Bnd_Box box;
+};
+
+Space spaceOf(const TopoDS_Shape& solid)
+{
+    Space space {solid, {}};
+    BRepBndLib::Add(solid, space.box);
+    return space;
+}
+
+// The volume two solids share, or nothing if the Boolean fails. Not on warnings: a void's space
+// and the solid around it share their faces, which warns on a sphere's
+std::optional<double> sharedVolume(const Space& a, const Space& b)
+{
+    if (a.box.IsOut(b.box)) {
+        return 0.0;
+    }
     try {
-        BRepAlgoAPI_Common common(a, b);
-        if (!common.IsDone()) {
+        BRepAlgoAPI_Common common(a.solid, b.solid);
+        if (!common.IsDone() || common.HasErrors()) {
             return std::nullopt;
         }
         GProp_GProps props;
@@ -615,6 +635,29 @@ std::optional<double> sharedVolume(const TopoDS_Shape& a, const TopoDS_Shape& b)
     catch (const Standard_Failure&) {
         return std::nullopt;
     }
+}
+
+// The volume a space shares with the solids, or nothing if a Boolean fails
+std::optional<double> sharedVolume(const Space& space, const std::vector<Space>& solids)
+{
+    double total = 0.0;
+    for (const auto& solid : solids) {
+        const auto shared = sharedVolume(space, solid);
+        if (!shared) {
+            return std::nullopt;
+        }
+        total += *shared;
+    }
+    return total;
+}
+
+std::vector<Space> solidSpaces(const TopoDS_Shape& shape)
+{
+    std::vector<Space> spaces;
+    for (TopExp_Explorer solid(shape, TopAbs_SOLID); solid.More(); solid.Next()) {
+        spaces.push_back(spaceOf(solid.Current()));
+    }
+    return spaces;
 }
 
 /* Why the dress-up's result lost a closed shell of the base's solids, or null. OCCT's fillet and
@@ -651,32 +694,41 @@ const char* droppedShell(const TopoDS_Shape& shape, const TopoDS_Shape& base)
         return nullptr;
     }
     // A void the result lost is one no void of the result overlaps: a void the dress-up changes
-    // (an edge of it rounded) stays one. A lost void's space must hold no material of the result,
-    // which a sample of points on a sphere or a cylinder misses (PR 341 review)
+    // (an edge of it rounded) stays one. A lost void's space must hold no more material of the
+    // result than of the base (another solid of a compound may lie in it), which a sample of points
+    // on a sphere or a cylinder misses (PR 341 reviews). Bounding boxes spare most Booleans
+    std::vector<Space> keptVoids;
+    for (const auto& [shell, volume] : after) {
+        if (volume < 0) {
+            keptVoids.push_back(spaceOf(voidSpace(shell)));
+        }
+    }
+    std::optional<std::vector<Space>> resultSolids;
+    std::optional<std::vector<Space>> baseSolids;
     for (const auto& [shell, volume] : before) {
         if (volume >= 0) {
             continue;
         }
         const double threshold = 1e-6 * -volume;
-        const TopoDS_Solid space = voidSpace(shell);
-        const bool kept = std::any_of(after.begin(), after.end(), [&](const auto& other) {
-            if (other.second >= 0) {
-                return false;
-            }
-            const auto shared = sharedVolume(space, voidSpace(other.first));
+        const Space space = spaceOf(voidSpace(shell));
+        const bool kept = std::any_of(keptVoids.begin(), keptVoids.end(), [&](const auto& other) {
+            const auto shared = sharedVolume(space, other);
             return shared && *shared > threshold;
         });
         if (kept) {
             continue;
         }
-        for (TopExp_Explorer solid(shape, TopAbs_SOLID); solid.More(); solid.Next()) {
-            const auto filled = sharedVolume(space, solid.Current());
-            if (!filled) {
-                return "loses a void of the base whose space can't be checked";
-            }
-            if (*filled > threshold) {
-                return "fills a void of the base";
-            }
+        if (!resultSolids) {
+            resultSolids = solidSpaces(shape);
+            baseSolids = solidSpaces(base);
+        }
+        const auto filled = sharedVolume(space, *resultSolids);
+        const auto had = sharedVolume(space, *baseSolids);
+        if (!filled || !had) {
+            return "loses a void of the base whose space can't be checked";
+        }
+        if (*filled - *had > threshold) {
+            return "fills a void of the base";
         }
     }
     return nullptr;

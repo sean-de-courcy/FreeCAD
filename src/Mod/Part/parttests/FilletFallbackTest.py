@@ -856,13 +856,27 @@ class DroppedBasePartsTest(unittest.TestCase):
         for kind in ("Fillet", "Chamfer"):
             self.assertFails(self.dressUp(kind, base, [edge], [(3, 3)]))
 
+    def testSolidInsideARemovedVoidStays(self):
+        # The void the chamfer of 3 removes with its material, holding a 1 x 0.2 x 0.2 box, another
+        # solid of the compound: the box was there in the base, so it fills nothing (PR 341 round 1
+        # verification)
+        cube = cube_with_void((3, 0.2, 9.3), (4, 0.5, 0.5))
+        base = Part.Compound([cube, Part.makeBox(1, 0.2, 0.2, V(4, 0.35, 9.45))])
+        edge = edge_between(base, (0, 0, 10), (10, 0, 10))
+        feature = self.dressUp("Chamfer", base, [edge], [(3, 3)])
+        self.assertTrue(feature.isValid(), feature.getStatusString())
+        self.assertEqual(len(feature.Shape.Solids), 2)
+        self.assertAlmostEqual(feature.Shape.Volume, 1000 - 4.5 * 10 + 0.04, delta=1e-6)
+
     def testVoidRemovedWithItsMaterialStaysRemoved(self):
         # A void 4 x 0.5 x 0.5 inside the wedge a chamfer or fillet of 3 removes, and a void moved
         # outside the cube (an invalid solid): neither bounds what is left, and the result is the
         # plain cube's
         consumed = cube_with_void((3, 0.2, 9.3), (4, 0.5, 0.5))
         outside = cube_with_moved_void(lambda void: void.translated(V(20, 0, 0)))
-        for base in (consumed, outside):
+        # A sphere's space and the solid around it share its face, where OCCT's Common warns
+        sphere = Part.makeBox(10, 10, 10).cut(Part.makeSphere(0.2, V(5, 0.5, 9.5)))
+        for base in (consumed, outside, sphere):
             edge = edge_between(base, (0, 0, 10), (10, 0, 10))
             for kind, removed in (("Fillet", fillet_section(3) * 10), ("Chamfer", 4.5 * 10)):
                 feature = self.dressUp(kind, base, [edge], [(3, 3)])
