@@ -52,6 +52,7 @@
 #include <TopExp.hxx>
 
 #include <App/Application.h>
+#include <App/Document.h>
 #include <App/DocumentObject.h>
 #include <App/ElementNamingUtils.h>
 #include <Base/Converter.h>
@@ -805,6 +806,19 @@ void Hole::updateHoleCutParams()
             HoleCutDepth.setReadOnly(false);
         }
 
+        // FreeCAD-CH (ops#389): where the norm has no values, the cut values are custom and
+        // editable. They are proposed only for a new cut or a changed thread type, size or
+        // cut type: a restore, an unrelated edit (Depth, ThreadFit), a rewrite of the same
+        // values (the task panel's OK, an expression on ThreadSize) kept recalculating them
+        // over the user's, and the next recompute cut those without a message. An undo or
+        // redo brings its values with it, in no fixed property order.
+        const std::string cutValuesKey = threadTypeStr + '|' + threadSizeStr + '|' + holeCutTypeStr;
+        const App::Document* doc = getDocument();
+        const bool inTransaction = doc && doc->isPerformingTransaction();
+        const bool proposeValues = !isRestoring() && !inTransaction
+            && (cutValuesKey != holeCutValuesKey || !HoleCutCustomValues.getValue());
+        holeCutValuesKey = cutValuesKey;
+
         // cut definition
         CutDimensionKey key {threadTypeStr, holeCutTypeStr};
         if (HoleCutTypeMap.count(key)) {
@@ -815,23 +829,33 @@ void Hole::updateHoleCutParams()
                 HoleCutCountersinkAngle.setReadOnly(true);
                 const CounterBoreDimension& dimen = counter.get_bore(threadSizeStr);
                 if (dimen.thread == "None") {
-                    calculateAndSetCounterbore();
+                    // FreeCAD-CH (ops#389): proposed as said above, or when they can't
+                    // make a cut
+                    if (proposeValues
+                        || (!inTransaction
+                            && (HoleCutDiameter.getValue() <= diameterVal
+                                || HoleCutDepth.getValue() <= 0.0))) {
+                        calculateAndSetCounterbore();
+                    }
                     // we force custom values since there are no normed ones
                     HoleCutCustomValues.setReadOnly(true);
                     // important to set only if not already true, to avoid loop call of
                     // updateHoleCutParams()
                     if (!HoleCutCustomValues.getValue()) {
                         HoleCutCustomValues.setValue(true);
-                        HoleCutDiameter.setReadOnly(false);
-                        HoleCutDepth.setReadOnly(false);
                     }
+                    // FreeCAD-CH (ops#389): editable on every pass, not only the first:
+                    // a reopened countersink's angle stayed read-only
+                    HoleCutDiameter.setReadOnly(false);
+                    HoleCutDepth.setReadOnly(false);
                 }
                 else {
                     // set normed values if not overwritten or if previously there
                     // were no normed values available and thus HoleCutCustomValues is checked and
                     // read-only
-                    if (!HoleCutCustomValues.getValue()
-                        || (HoleCutCustomValues.getValue() && HoleCutCustomValues.isReadOnly())) {
+                    if (!isRestoring()
+                        && (!HoleCutCustomValues.getValue()
+                            || (HoleCutCustomValues.getValue() && HoleCutCustomValues.isReadOnly()))) {
                         HoleCutDiameter.setValue(dimen.diameter);
                         HoleCutDepth.setValue(dimen.depth);
                         HoleCutDiameter.setReadOnly(true);
@@ -839,6 +863,13 @@ void Hole::updateHoleCutParams()
                         if (HoleCutCustomValues.getValue() && HoleCutCustomValues.isReadOnly()) {
                             HoleCutCustomValues.setValue(false);
                         }
+                    }
+                    else if (isRestoring()) {
+                        // FreeCAD-CH (ops#389): the saved values stay; only the read-only
+                        // flags follow HoleCutCustomValues (still read-only from the
+                        // constructor here, so its flag can't tell)
+                        HoleCutDiameter.setReadOnly(!HoleCutCustomValues.getValue());
+                        HoleCutDepth.setReadOnly(!HoleCutCustomValues.getValue());
                     }
                     else {
                         HoleCutDiameter.setReadOnly(false);
@@ -854,24 +885,30 @@ void Hole::updateHoleCutParams()
                     if (HoleCutCountersinkAngle.getValue() == 0.0) {
                         HoleCutCountersinkAngle.setValue(counter.angle);
                     }
-                    calculateAndSetCountersink();
+                    // FreeCAD-CH (ops#389): as for the counterbore above
+                    if (proposeValues
+                        || (!inTransaction && HoleCutDiameter.getValue() <= diameterVal)) {
+                        calculateAndSetCountersink();
+                    }
                     // we force custom values since there are no normed ones
                     HoleCutCustomValues.setReadOnly(true);
                     // important to set only if not already true, to avoid loop call of
                     // updateHoleCutParams()
                     if (!HoleCutCustomValues.getValue()) {
                         HoleCutCustomValues.setValue(true);
-                        HoleCutDiameter.setReadOnly(false);
-                        HoleCutDepth.setReadOnly(false);
-                        HoleCutCountersinkAngle.setReadOnly(false);
                     }
+                    // FreeCAD-CH (ops#389): as for the counterbore above
+                    HoleCutDiameter.setReadOnly(false);
+                    HoleCutDepth.setReadOnly(false);
+                    HoleCutCountersinkAngle.setReadOnly(false);
                 }
                 else {
                     // set normed values if not overwritten or if previously there
                     // were no normed values available and thus HoleCutCustomValues is checked and
                     // read-only
-                    if (!HoleCutCustomValues.getValue()
-                        || (HoleCutCustomValues.getValue() && HoleCutCustomValues.isReadOnly())) {
+                    if (!isRestoring()
+                        && (!HoleCutCustomValues.getValue()
+                            || (HoleCutCustomValues.getValue() && HoleCutCustomValues.isReadOnly()))) {
                         HoleCutDiameter.setValue(dimen.diameter);
                         HoleCutDiameter.setReadOnly(true);
                         HoleCutDepth.setReadOnly(true);
@@ -880,6 +917,12 @@ void Hole::updateHoleCutParams()
                         if (HoleCutCustomValues.getValue() && HoleCutCustomValues.isReadOnly()) {
                             HoleCutCustomValues.setValue(false);
                         }
+                    }
+                    else if (isRestoring()) {
+                        // FreeCAD-CH (ops#389): as for the counterbore above
+                        HoleCutDiameter.setReadOnly(!HoleCutCustomValues.getValue());
+                        HoleCutDepth.setReadOnly(!HoleCutCustomValues.getValue());
+                        HoleCutCountersinkAngle.setReadOnly(!HoleCutCustomValues.getValue());
                     }
                     else {
                         HoleCutDiameter.setReadOnly(false);
@@ -1246,7 +1289,9 @@ void Hole::updateDiameterParam()
 {
     int threadType = ThreadType.getValue();
     int threadSize = ThreadSize.getValue();
-    if (threadType > 0 && threadSize > 0) {
+    // FreeCAD-CH (ops#389): >= 0, so the first size of a type (M1) sets it too: the stale
+    // diameter made the restore's findClosestDesignation() reopen an M1 hole as M1.2
+    if (threadType > 0 && threadSize >= 0) {
         ThreadDiameter.setValue(threadDescription[threadType][threadSize].diameter);
     }
     if (auto opt = determineDiameter()) {
@@ -1321,8 +1366,22 @@ void Hole::onChanged(const App::Property* prop)
 
         if (ThreadType.isValid()) {
             type = ThreadType.getValueAsString();
+            // FreeCAD-CH (ops#389): setEnums() keeps a size of the same name, else falls back
+            // to the new type's first size, and that size's change sets ThreadDiameter: after
+            // a fallback the closest size is looked up from the old diameter, not the first
+            // size's. A restore keeps the reset, which corrects a stale saved ThreadDiameter.
+            const double oldThreadDiameter = ThreadDiameter.getValue();
+            std::string oldThreadSize;
+            if (ThreadSize.isValid()) {
+                oldThreadSize = ThreadSize.getValueAsString();
+            }
             ThreadSize.setEnums(getThreadDesignations(ThreadType.getValue()));
             if (type != "None") {
+                const bool sizeKept = ThreadSize.isValid()
+                    && oldThreadSize == ThreadSize.getValueAsString();
+                if (!isRestoring() && !sizeKept) {
+                    ThreadDiameter.setValue(oldThreadDiameter);
+                }
                 findClosestDesignation();
             }
         }

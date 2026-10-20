@@ -22,6 +22,8 @@
 #   USA                                                                   *
 # **************************************************************************
 from math import pi
+import os
+import tempfile
 import unittest
 
 import FreeCAD
@@ -162,6 +164,233 @@ class TestHole(unittest.TestCase):
         self.Hole.Tapered = 0
         self.Doc.recompute()
         self.assertAlmostEqual(self.Hole.Shape.Volume, 10**3 - pi * 3**2 * 10 - 24.7400421)
+
+    def testCustomCutValuesSurviveReopen(self):
+        """Custom counterbore values of a normed hole cut stay after a save and reopen (ops#389)"""
+        # An M6 hole with an ISO 4762 counterbore, whose normed cut is wider than 10, overridden
+        # with a cut 9 wide and 2 deep. The restore reset them to the normed values.
+        self.Hole.ThreadType = "ISOMetricProfile"
+        self.Hole.ThreadSize = "M6x1.0"
+        self.Hole.HoleCutType = "ISO 4762"
+        self.Hole.Depth = 10
+        self.Hole.DepthType = "Dimension"
+        self.Hole.DrillPoint = "Flat"
+        self.Hole.Tapered = False
+        self.Doc.recompute()
+        self.assertGreater(self.Hole.HoleCutDiameter.Value, 10)
+        self.Hole.HoleCutCustomValues = True
+        self.Hole.HoleCutDiameter = 9
+        self.Hole.HoleCutDepth = 2
+        self.Doc.recompute()
+        self.assertAlmostEqual(self.Hole.HoleCutDiameter.Value, 9)
+        self.assertAlmostEqual(self.Hole.HoleCutDepth.Value, 2)
+        volume = self.Hole.Shape.Volume
+
+        folder = tempfile.mkdtemp()
+        path = os.path.join(folder, "PartDesignTestHole.FCStd")
+        self.Doc.saveAs(path)
+        FreeCAD.closeDocument(self.Doc.Name)
+        self.Doc = FreeCAD.openDocument(path)
+        hole = self.Doc.getObject("Hole")
+
+        self.assertTrue(hole.HoleCutCustomValues)
+        self.assertAlmostEqual(hole.HoleCutDiameter.Value, 9)
+        self.assertAlmostEqual(hole.HoleCutDepth.Value, 2)
+        hole.touch()
+        self.Doc.recompute()
+        self.assertAlmostEqual(hole.Shape.Volume, volume)
+
+    def testNormedCutValuesStayReadOnlyAfterReopen(self):
+        """Normed hole cut values stay read-only after a save and reopen (ops#389): the restore
+        made them editable, and a later edit of another property put the normed value back over
+        an edit of them."""
+        self.Hole.ThreadType = "ISOMetricProfile"
+        self.Hole.ThreadSize = "M6x1.0"
+        self.Hole.Depth = 10
+        self.Hole.DepthType = "Dimension"
+        self.Hole.DrillPoint = "Flat"
+        self.Hole.Tapered = False
+        folder = tempfile.mkdtemp()
+        for cut, names in (
+            ("ISO 4762", ("HoleCutDiameter", "HoleCutDepth")),
+            ("ISO 10642", ("HoleCutDiameter", "HoleCutDepth", "HoleCutCountersinkAngle")),
+        ):
+            hole = self.Doc.getObject("Hole")
+            hole.HoleCutType = cut
+            self.Doc.recompute()
+            self.assertFalse(hole.HoleCutCustomValues)
+            for name in names:
+                self.assertIn("ReadOnly", hole.getPropertyStatus(name), (cut, name))
+
+            path = os.path.join(folder, "PartDesignTestHoleNormed.FCStd")
+            self.Doc.saveAs(path)
+            FreeCAD.closeDocument(self.Doc.Name)
+            self.Doc = FreeCAD.openDocument(path)
+            hole = self.Doc.getObject("Hole")
+            self.assertFalse(hole.HoleCutCustomValues)
+            for name in names:
+                self.assertIn("ReadOnly", hole.getPropertyStatus(name), (cut, name, "reopened"))
+
+    def testForcedCustomCutValuesStay(self):
+        """Cut values the user entered for a size the norm has none for stay through unrelated
+        edits and a save and reopen (ops#389). Each change of the hole diameter (a Depth or
+        ThreadFit edit, the restore) recalculated them, and the next recompute cut those
+        without a message. A new size still proposes new values."""
+        self.Hole.ThreadType = "ISOMetricProfile"
+        self.Hole.Depth = 10
+        self.Hole.DepthType = "Dimension"
+        self.Hole.DrillPoint = "Flat"
+        self.Hole.Tapered = False
+        folder = tempfile.mkdtemp()
+
+        def removed(hole):
+            # 10 deep through the 10 box; counterbore: a cylinder; countersink (90 degrees):
+            # a cone from the cut diameter down to the hole's
+            r = hole.Diameter.Value / 2
+            cut = hole.HoleCutDiameter.Value / 2
+            if hole.HoleCutType == "ISO 4762":
+                return pi * r**2 * 10 + pi * (cut**2 - r**2) * hole.HoleCutDepth.Value
+            h = cut - r
+            return pi * r**2 * 10 + pi * h / 3 * (cut**2 + cut * r + r**2) - pi * r**2 * h
+
+        for cut, depth in (("ISO 4762", 2), ("ISO 10642", None)):
+            hole = self.Doc.getObject("Hole")
+            hole.ThreadSize = "M4.5x0.75"
+            hole.HoleCutType = cut
+            self.Doc.recompute()
+            # no normed values for M4.5: custom values, forced on, editable
+            self.assertTrue(hole.HoleCutCustomValues, cut)
+            self.assertIn("ReadOnly", hole.getPropertyStatus("HoleCutCustomValues"), cut)
+            self.assertNotIn("ReadOnly", hole.getPropertyStatus("HoleCutDiameter"), cut)
+            hole.HoleCutDiameter = 9
+            if depth:
+                hole.HoleCutDepth = depth
+            self.Doc.recompute()
+            values = (hole.HoleCutDiameter.Value, hole.HoleCutDepth.Value)
+            self.assertAlmostEqual(values[0], 9, msg=cut)
+            self.assertAlmostEqual(hole.Shape.Volume, 10**3 - removed(hole), msg=cut)
+
+            hole.Depth = 9
+            hole.Depth = 10
+            hole.ThreadFit = hole.getEnumerationsOfProperty("ThreadFit")[-1]
+            self.Doc.recompute()
+            self.assertAlmostEqual(hole.HoleCutDiameter.Value, values[0], msg=(cut, "edits"))
+            self.assertAlmostEqual(hole.HoleCutDepth.Value, values[1], msg=(cut, "edits"))
+            self.assertAlmostEqual(hole.Shape.Volume, 10**3 - removed(hole), msg=(cut, "edits"))
+            volume = hole.Shape.Volume
+
+            # round 3: the same values written again (as the task panel's OK does), a ThreadSize
+            # bound to an expression (set on every recompute), and an undo and redo of a size
+            # change propose nothing: each replaced the values
+            hole.ThreadType = hole.ThreadType
+            hole.ThreadSize = hole.ThreadSize
+            hole.HoleCutType = hole.HoleCutType
+            self.Doc.recompute()
+            self.assertAlmostEqual(hole.HoleCutDiameter.Value, values[0], msg=(cut, "same values"))
+            self.assertAlmostEqual(hole.HoleCutDepth.Value, values[1], msg=(cut, "same values"))
+            # (a string, which the expression engine writes on every evaluation: it compares
+            # it with the size's index)
+            hole.setExpression("ThreadSize", "<<M4.5x0.75>>")
+            self.Doc.recompute()
+            hole.touch()
+            self.Doc.recompute()
+            hole.setExpression("ThreadSize", None)
+            self.assertEqual(hole.ThreadSize, "M4.5x0.75")
+            self.assertAlmostEqual(hole.HoleCutDiameter.Value, values[0], msg=(cut, "expression"))
+            self.assertAlmostEqual(hole.HoleCutDepth.Value, values[1], msg=(cut, "expression"))
+            self.Doc.UndoMode = 1
+            self.Doc.openTransaction("size")
+            hole.ThreadSize = "M2.2x0.45" if depth else "M3.5x0.6"
+            self.Doc.commitTransaction()
+            self.Doc.recompute()
+            changed = (hole.HoleCutDiameter.Value, hole.HoleCutDepth.Value)
+            self.assertNotAlmostEqual(changed[0], values[0], msg=(cut, "size"))
+            self.Doc.undo()
+            self.Doc.recompute()
+            self.assertEqual(hole.ThreadSize, "M4.5x0.75")
+            self.assertAlmostEqual(hole.HoleCutDiameter.Value, values[0], msg=(cut, "undo"))
+            self.assertAlmostEqual(hole.HoleCutDepth.Value, values[1], msg=(cut, "undo"))
+            self.Doc.redo()
+            self.Doc.recompute()
+            self.assertAlmostEqual(hole.HoleCutDiameter.Value, changed[0], msg=(cut, "redo"))
+            self.assertAlmostEqual(hole.HoleCutDepth.Value, changed[1], msg=(cut, "redo"))
+            self.Doc.undo()
+            self.Doc.recompute()
+            self.assertAlmostEqual(hole.HoleCutDiameter.Value, values[0], msg=(cut, "undo 2"))
+            self.assertAlmostEqual(hole.Shape.Volume, volume, msg=(cut, "undo 2"))
+
+            path = os.path.join(folder, "PartDesignTestHoleForced.FCStd")
+            self.Doc.saveAs(path)
+            FreeCAD.closeDocument(self.Doc.Name)
+            self.Doc = FreeCAD.openDocument(path)
+            hole = self.Doc.getObject("Hole")
+            self.assertAlmostEqual(hole.HoleCutDiameter.Value, values[0], msg=(cut, "reopened"))
+            self.assertAlmostEqual(hole.HoleCutDepth.Value, values[1], msg=(cut, "reopened"))
+            editable = ("HoleCutDiameter",) + (("HoleCutDepth",) if depth else ("HoleCutCountersinkAngle",))
+            for name in editable:
+                self.assertNotIn("ReadOnly", hole.getPropertyStatus(name), (cut, name, "reopened"))
+            hole.Depth = 9
+            hole.Depth = 10
+            hole.touch()
+            self.Doc.recompute()
+            self.assertAlmostEqual(hole.HoleCutDiameter.Value, values[0], msg=(cut, "reopened"))
+            self.assertAlmostEqual(hole.Shape.Volume, volume, msg=(cut, "reopened"))
+
+            # another size the norm has no values for: values proposed for it
+            hole.ThreadSize = "M2.2x0.45" if depth else "M3.5x0.6"
+            self.Doc.recompute()
+            self.assertTrue(hole.HoleCutCustomValues, cut)
+            proposed = 1.5 * hole.Diameter.Value + 1 if depth else 2.24 * hole.Diameter.Value
+            self.assertAlmostEqual(hole.HoleCutDiameter.Value, proposed, msg=(cut, "new size"))
+
+    def testFirstThreadSizeSurvivesReopen(self):
+        """A hole of the first size of a thread type (M1) keeps it after a save and reopen
+        (ops#389): its ThreadDiameter was never set, and the restore picked the size closest to
+        the stale value (M1.2, a wider hole) without a message."""
+        self.Hole.ThreadType = "ISOMetricProfile"
+        self.Hole.ThreadSize = "M6x1.0"
+        self.Hole.ThreadSize = "M1.2x0.25"
+        self.Hole.ThreadSize = "M1x0.25"
+        self.Hole.Depth = 10
+        self.Hole.DepthType = "Dimension"
+        self.Hole.DrillPoint = "Flat"
+        self.Hole.Tapered = False
+        self.Doc.recompute()
+        diameter = self.Hole.Diameter.Value
+        self.assertAlmostEqual(self.Hole.Shape.Volume, 10**3 - pi * (diameter / 2) ** 2 * 10)
+
+        folder = tempfile.mkdtemp()
+        path = os.path.join(folder, "PartDesignTestHoleM1.FCStd")
+        self.Doc.saveAs(path)
+        FreeCAD.closeDocument(self.Doc.Name)
+        self.Doc = FreeCAD.openDocument(path)
+        hole = self.Doc.getObject("Hole")
+        self.assertEqual(hole.ThreadSize, "M1x0.25")
+        self.assertAlmostEqual(hole.Diameter.Value, diameter)
+        hole.touch()
+        self.Doc.recompute()
+        self.assertAlmostEqual(hole.Shape.Volume, 10**3 - pi * (diameter / 2) ** 2 * 10)
+
+        # a thread type change picks the new type's size closest to the old one (round 3: the
+        # first size's change, when the new type's sizes were set, overwrote the diameter the
+        # closest size is looked up from: M12 became M1 or #1)
+        hole.ThreadType = "ISOMetricFineProfile"
+        self.assertAlmostEqual(hole.ThreadDiameter.Value, 1.0)
+        # (the nearest by diameter and pitch: 7/16" is 11.113, 1 1/8" 28.575)
+        for start, other, nearest in (
+            ("M12x1.75", "ISOMetricFineProfile", 12.0),
+            ("M12x1.75", "UNC", 11.113),
+            ("M30x3.5", "UNC", 28.575),
+        ):
+            hole.ThreadType = "ISOMetricProfile"
+            hole.ThreadSize = start
+            self.assertAlmostEqual(hole.ThreadDiameter.Value, float(start[1:3]))
+            hole.ThreadType = other
+            self.assertAlmostEqual(hole.ThreadDiameter.Value, nearest, msg=(start, other))
+        # a size of the same name in the new type is kept, as before (3/4 UNC to 3/4 NPT)
+        hole.ThreadSize = "3/4"
+        hole.ThreadType = "NPT"
+        self.assertEqual(hole.ThreadSize, "3/4")
 
     def testNoRefineHole(self):
         # Add a second box to get a shape with more faces
@@ -717,5 +946,5 @@ class TestHole(unittest.TestCase):
 
     def tearDown(self):
         # closing doc
-        FreeCAD.closeDocument("PartDesignTestHole")
+        FreeCAD.closeDocument(self.Doc.Name)
         # print ("omit closing document for debugging")

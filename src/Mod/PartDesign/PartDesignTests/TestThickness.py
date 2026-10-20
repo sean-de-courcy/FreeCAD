@@ -21,6 +21,7 @@
 # *                                                                         *
 # ***************************************************************************
 
+import math
 import unittest
 
 import FreeCAD
@@ -134,6 +135,49 @@ class TestThickness(unittest.TestCase):
         self.assertTrue(thickness.Shape.isValid())
         self.assertEqual(len(thickness.Shape.Solids), 1)
         self.assertEqual(thickness.Placement, fillet.Placement)
+
+    def _cup(self, value):
+        """A cylinder Pad, radius 20 and height 10, hollowed from its top face by <value>."""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        sketch = body.newObject("Sketcher::SketchObject", "Sketch")
+        sketch.AttachmentSupport = (self.Doc.getObject("XY_Plane"), [""])
+        sketch.MapMode = "FlatFace"
+        sketch.addGeometry(Part.Circle(FreeCAD.Vector(), FreeCAD.Vector(0, 0, 1), 20))
+        pad = body.newObject("PartDesign::Pad", "Pad")
+        pad.Profile = sketch
+        pad.Length = 10
+        self.Doc.recompute()
+        top = next(
+            "Face" + str(i)
+            for i, face in enumerate(pad.Shape.Faces, 1)
+            if isinstance(face.Surface, Part.Plane) and abs(face.CenterOfMass.z - 10) < 1e-7
+        )
+        thickness = body.newObject("PartDesign::Thickness", "Thickness")
+        thickness.Base = (pad, [top])
+        thickness.Value = value
+        self.Doc.recompute()
+        return thickness
+
+    def testThicknessLeavesAWall(self):
+        """A wall thinner than the cup's height leaves a floor 1 thick (ops#389)."""
+        thickness = self._cup(9)
+        self.assertTrue(thickness.isValid())
+        self.assertTrue(thickness.Shape.isValid())
+        # Walls 9 thick: the cavity is radius 11, from z = 9 up to the open top at z = 10
+        self.assertAlmostEqual(
+            thickness.Shape.Volume, math.pi * 20**2 * 10 - math.pi * 11**2 * 1, places=4
+        )
+
+    def testThicknessAsThickAsTheHeightFails(self):
+        """A wall as thick as the cup is high leaves no cavity: the feature fails instead of
+        keeping an invalid solid (upstream issue 25050, ops#389)."""
+        for value in (10, 11):
+            with self.subTest(value=value):
+                thickness = self._cup(value)
+                self.assertFalse(thickness.isValid())
+                self.assertIn("invalid", thickness.getStatusString())
+                FreeCAD.closeDocument(self.Doc.Name)
+                self.Doc = FreeCAD.newDocument("PartDesignTestThickness")
 
     def tearDown(self):
         # closing doc

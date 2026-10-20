@@ -24,7 +24,9 @@
 #include <Standard_Failure.hxx>
 
 #include <App/Application.h>
+#include <App/Document.h>
 #include <App/FeaturePythonPyImp.h>
+#include <Base/Exception.h>
 #include <Base/Parameter.h>
 #include <Mod/Part/App/modelRefine.h>
 
@@ -101,7 +103,35 @@ TopoShape FeatureRefine::refineShapeIfActive(
     }
     TopoShape shape(oldShape);
     try {
-        return shape.makeElementRefine();
+        TopoShape refinedShape = shape.makeElementRefine();
+        // A refine that merges no face keeps the shells as they were (BRepBuilderAPI_RefineModel
+        // adds an unmodified shell unchanged), so only a merge can make a valid shape invalid. The
+        // check reads the whole shape (BRepCheck_Analyzer): about a third of a 40-feature body's
+        // recompute when it ran after every refine (ops#389).
+        const bool merged = refinedShape.countSubShapes(TopAbs_FACE)
+            != oldShape.countSubShapes(TopAbs_FACE);
+        if (!merged || refinedShape.isValid() || !oldShape.isValid()) {
+            return refinedShape;
+        }
+        if (onError == RefineErrorPolicy::Raise) {
+            throw Base::RuntimeError("Refine produced an invalid shape");
+        }
+        // A warning on the feature (ops#389), which the recompute also reports: it computes, but
+        // its result is unrefined although Refine is on.
+        const std::string text = "Refine produced an invalid shape; the unrefined shape is kept";
+        if (auto doc = getDocument()) {
+            // once, although a feature may refine more than once in one execute
+            const std::string previous = doc->getWarningDescription(this)
+                ? doc->getWarningDescription(this)
+                : "";
+            if (previous.find(text) == std::string::npos) {
+                doc->setWarning(
+                    const_cast<FeatureRefine*>(this),
+                    previous.empty() ? text : previous + "\n" + text
+                );
+            }
+        }
+        return oldShape;
     }
     catch (Standard_Failure& err) {
         if (onError == RefineErrorPolicy::Warn) {

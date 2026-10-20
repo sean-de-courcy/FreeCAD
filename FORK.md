@@ -369,7 +369,8 @@ names it.
 | `fix/244-copy-picks` | fix | ops#244 | - | `integration` `2e2bb138ba` | `23b0fe87d3` (fork PR 343), 2026-10-19 | never (fork fix) |
 | `fix/303-dropped-base-parts` | fix | ops#303 | - | `integration` `2e2bb138ba` | `b810473540` (fork PR 341), 2026-10-19 | never (fork fix) |
 | `infra/388-release-env` | infra | ops#388 | upstream PR 30068, `fed6d0db9b`, `19eb9fe7d3`, `2354b07b52`, `ec6852e6ca` | `integration` `2e2bb138ba` | `953f76e711` (fork PR 342), 2026-10-19 | upstream commits: at a base that has them; the release check: never |
-| `fix/365-main-thread-hooks` | fix | ops#365 | - | `integration` `2e2bb138ba` | (fork PR 347) | never (fork fix) |
+| `fix/365-main-thread-hooks` | fix | ops#365 | - | `integration` `2e2bb138ba` | `41762ed4ec` (fork PR 347), 2026-10-19 | never (fork fix) |
+| `carry/389-upstream-fixes-a` | carry | ops#389 | `upstream PR 32301`: main `5986d3145c` and `a69f2974c2` (as `f26be439d5`, `e5ae44eee1`), main `32c8c3bf0e` (as `0677366c92`), `upstream PR 32850`: main `7ff88754d3` (as `86720dbdf2`, test list adapted, linkage from `994ec17340`), `upstream PR 32794` head `c3b93063b5` (ported as `33f762c097`, warning made visible; `f8c1a8d88d` checks only after a merge), `upstream PR 32879` head `520011f9c5` (ported as `32cb410ab8`); fork-only `b1d7df9f1e` (ops#372), tests `a605ad7fc2`, review round 1 `6375f04287`, round 2 `0f09a496bb`, `60471ebf2e`, `e6161fe9fb`, round 3 `fe5f2d5c34`, `4e4d104eda` | `integration` `2e2bb138ba` | (fork PR 345) | a new base contains main `5986d3145c`, `a69f2974c2`, `32c8c3bf0e`, `7ff88754d3` and upstream PRs 32794 and 32879 (or their replacements) |
 
 ## Fork-only commits in carried topics
 
