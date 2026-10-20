@@ -2222,6 +2222,32 @@ class TestNamingSolver(unittest.TestCase):
         )
         self.assertReopenedNormal(doc)
 
+    def testRecordBackAfterAnotherIsJudgedAgain(self):
+        """The redrawn rectangle's edge, exactly in place (the quieter level), stays quiet when
+        the pad is made longer (its record unchanged, decision 102). Drawn 0.1 mm off, the solver
+        writes another record (normal); undone, the first record and its pick come back, but the
+        edge is no longer where that record's original was: judged again, the level is normal,
+        not the old judgement's quieter one."""
+        doc = self.newDocument()
+        doc.UndoMode = 1
+        pad, fillet = self.padWithFillet(doc)
+        self.redrawAt(doc, 20)
+        self.assertEqual(App.getReferenceReport(fillet)[0]["warning_level"], "same-place")
+        pad.Length = 12
+        doc.recompute()
+        self.assertEqual(App.getReferenceReport(fillet)[0]["warning_level"], "same-place")
+        judged = fillet.Base[1]
+        doc.openTransaction("off")
+        self.redrawAt(doc, 20.1)
+        doc.commitTransaction()
+        self.assertEqual(App.getReferenceReport(fillet)[0]["warning_level"], "normal")
+        doc.undo()
+        doc.recompute()
+        self.assertTrue(fillet.isValid())
+        self.assertEqual(fillet.Base[1], judged)
+        self.assertIn("Warning", fillet.State)
+        self.assertEqual(App.getReferenceReport(fillet)[0]["warning_level"], "normal")
+
     def testHiddenSamePlaceMarkerSendsItsPrintToTheLog(self):
         """With the tree's marker for same-place warnings hidden (the TreeView preference), the
         redrawn rectangle's two filleted edges, found again in the same place, print no warning
