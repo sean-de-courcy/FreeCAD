@@ -492,8 +492,9 @@ struct WarningState
 
 WarningState& warningState()
 {
-    static WarningState state;
-    return state;
+    // Never destroyed: a document deleted after static destruction still forgets its objects here
+    static auto* state = new WarningState;
+    return *state;
 }
 
 // The record and the element it picked: another solve, which may pick another element with the
@@ -519,7 +520,16 @@ bool foundInPlace(const DocumentObject* owner, const ReferenceReport::Slot& slot
         return true;
     }
     auto it = state.records.find(key);
-    return it != state.records.end() && it->second.first == owner && it->second.second == identity;
+    if (it == state.records.end()) {
+        return false;
+    }
+    if (it->second.first == owner && it->second.second == identity) {
+        return true;
+    }
+    // Another record now: the judgement goes, so that the judged one coming back (an undo, a
+    // later solve) is judged again
+    state.records.erase(it);
+    return false;
 }
 
 // The references a warning text names as found again in the same place (samePlaceText()), as
@@ -549,8 +559,9 @@ std::set<std::pair<std::string, int>> samePlaceNamed(const std::string& text)
             if (range >> dash && dash == '-') {
                 range >> last;
             }
-            for (int i = first; i <= last && i - first < 100000; ++i) {
-                named.emplace(property, i);
+            // 64-bit, so that a saved text's extreme positions can't overflow
+            for (long long i = first; i <= last && i - first < 100000; ++i) {
+                named.emplace(property, static_cast<int>(i));
             }
         }
     }
