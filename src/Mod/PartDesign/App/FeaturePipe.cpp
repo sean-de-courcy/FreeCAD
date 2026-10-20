@@ -30,6 +30,7 @@
 #include <limits>
 #include <numbers>
 #include <optional>
+#include <queue>
 
 #include <fmt/format.h>
 
@@ -49,6 +50,7 @@
 #include <BRepOffsetAPI_MakePipeShell.hxx>
 #include <BRepTools_WireExplorer.hxx>
 #include <BRep_Tool.hxx>
+#include <Geom_BSplineCurve.hxx>
 #include <Geom_Curve.hxx>
 #include <GeomAPI_ProjectPointOnCurve.hxx>
 #include <gp.hxx>
@@ -351,6 +353,9 @@ struct CornerTilts
     std::optional<Fold> folded;
     /// The first curve along which it folds only a little, which passes with a warning
     std::optional<Fold> smallFold;
+    /// The first curve with stretches where the section could fold that the budget of places
+    /// left unchecked, and how many, which passes with a warning
+    std::optional<std::pair<gp_Pnt, int>> unchecked;
 };
 
 /// The edges of \a wire in their order along it
@@ -469,6 +474,8 @@ struct Reach
 {
     double past = 0;
     double across = 0;
+    /// Stretches where the section could fold that weren't looked at closely (refinedMotions)
+    int unchecked = 0;
 };
 
 /// A fold that reaches back less than this part of the section's extent passes, with a warning: a
@@ -599,30 +606,124 @@ double turnBetween(const gp_Trsf& here, const gp_Trsf& next)
     return 2 * std::acos(std::min(1.0, std::abs(turn.W())));
 }
 
-/// \a sampled, the motions of the section (\a frame, \a points) to places along the curve \a edge,
-/// with more places between two of them where the section could fold: there it turns at most
-/// sampleTurn from one to the next. In every mode measured here the sweep's frame keeps the
-/// tangent as an axis, so the section's tilt to the curve stays as it starts, and its speed
+/// The section's motions along a curve, in runs (refinedMotions)
+struct Refined
+{
+    std::vector<std::vector<gp_Trsf>> runs;
+    /// Stretches between two places where the section could fold that were left as sampled:
+    /// the budget of places ran out first
+    int unchecked = 0;
+};
+
+/// The places between two places of the sweep along the curve of \a adaptor (\a here at its
+/// parameter \a from, \a next at \a to), \a count steps apart, both included: at each the section
+/// lies where the curve does, turned with the sweep frame's axis along the curve from the step
+/// before by the least rotation, and twisted about that axis by a part (as far along) of what
+/// the sweep's own law adds between the two. The axis is the curve's tangent, or in Binormal mode
+/// (\a binormal) the tangent made square to the binormal, as OCCT's frame has it (that frame
+/// turns about the binormal only, so the places are exact). Exact for the curve's position and
+/// the axis; the sweep's twist is spread evenly over the step (none in Standard mode, in the
+/// probes). The first place is \a here and the last \a next. Empty where there is no axis.
+std::vector<gp_Trsf> placesBetween(
+    const BRepAdaptor_Curve& adaptor,
+    bool reversed,
+    const std::optional<gp_Dir>& binormal,
+    const gp_Pnt& origin,
+    const gp_Trsf& here,
+    const gp_Trsf& next,
+    double from,
+    double to,
+    int count
+)
+{
+    std::vector<gp_Pnt> at(count + 1);
+    std::vector<gp_Vec> tangents(count + 1);
+    std::vector<double> along(count + 1, 0);
+    for (int k = 0; k <= count; ++k) {
+        adaptor.D1(from + (to - from) * k / count, at[k], tangents[k]);
+        if (binormal) {
+            const gp_Vec across(*binormal);
+            tangents[k] -= across * tangents[k].Dot(across);
+        }
+        if (tangents[k].Magnitude() < gp::Resolution()) {
+            return {};
+        }
+        tangents[k].Normalize();
+        if (reversed) {
+            tangents[k].Reverse();
+        }
+        if (k > 0) {
+            along[k] = along[k - 1] + at[k].Distance(at[k - 1]);
+        }
+    }
+    // The least rotation from tangent to tangent, then what the sweep's law turns more
+    const gp_Quaternion start = here.GetRotation();
+    std::vector<gp_Quaternion> turns {start};
+    for (int k = 1; k <= count; ++k) {
+        turns.push_back(gp_Quaternion(tangents[k - 1], tangents[k]) * turns.back());
+    }
+    gp_Quaternion rest = next.GetRotation() * turns.back().Inverted();
+    rest.Normalize();
+    gp_Vec axis;
+    double angle = 0;
+    rest.GetVectorAndAngle(axis, angle);
+    if (angle > std::numbers::pi) {
+        angle -= 2 * std::numbers::pi;
+    }
+    const double twist = axis.Dot(tangents.back()) < 0 ? -angle : angle;
+
+    const gp_Pnt first = origin.Transformed(here);
+    gp_Trsf back;
+    back.SetTranslation(gp_Vec(first, gp::Origin()));
+    std::vector<gp_Trsf> places {here};
+    for (int k = 1; k < count; ++k) {
+        const double part = along.back() > 0 ? along[k] / along.back() : 0;
+        gp_Quaternion turn = gp_Quaternion(tangents[k], twist * part) * turns[k] * start.Inverted();
+        turn.Normalize();
+        gp_Trsf rotation;
+        rotation.SetRotation(turn);
+        gp_Trsf there;
+        there.SetTranslation(gp_Vec(gp::Origin(), first.Translated(gp_Vec(at[0], at[k]))));
+        places.push_back(there * rotation * back * here);
+    }
+    places.push_back(next);
+    return places;
+}
+
+/// \a sampled, the motions of the section (\a frame, \a points) to places along the curve \a edge
+/// as OCCT's sweep has them, with more places between two of them where the section could fold:
+/// there it turns at most sampleTurn from one to the next, and each of the curve's pieces (a
+/// B-spline's spans) has two places at least. In every mode measured here the sweep's frame keeps
+/// the tangent as an axis (Binormal mode: the tangent's part square to the binormal), so the
+/// section's tilt to it stays as it starts, and its speed
 /// through its own plane changes across it at the rate it turns: it can fold only where it turns
 /// faster than |cos tilt| over its reach from the spine, per mm along the curve. That is judged
-/// from how far it turns between the two places and how tightly the curve bends between them.
-/// The places between are a sweep of the piece of the curve between the two, from the section
-/// as it lies at the first: the same motions, as the sweep's frame depends only on the curve
-/// from there (or, Standard mode, turns from its start the least it can). In runs, each from
-/// one sweep: the folds are measured between two places of a run.
-std::vector<std::vector<gp_Trsf>> refinedMotions(
+/// from how far it turns between the two places and how tightly the curve bends between them,
+/// looked at within each piece of the curve: an S-bend that turns back to where it started,
+/// shorter than the places' spacing, turns the section by nothing between two of them (ops#370).
+/// The places between are computed (placesBetween), not swept: OCCT's sweep of a piece of the
+/// curve can turn the section otherwise than its sweep of the whole curve (by 180 degrees across
+/// a short S-bend, by none along a straight end that the whole sweep twists by 55 degrees a
+/// step). The most fold-prone stretches (where the curve bends fastest beside the turn a fold
+/// needs) are subdivided first, and their new places again where needed, until the budget runs
+/// out: those left are counted. The result is one run (the places are the sweep's own at the
+/// samples, so a fold is measured between any two in a row).
+Refined refinedMotions(
     const TopoDS_Edge& edge,
     const gp_Ax2& frame,
     const std::vector<gp_Pnt>& points,
     const std::vector<gp_Trsf>& sampled,
-    const std::function<void(BRepOffsetAPI_MakePipeShell&)>& setup
+    const std::optional<gp_Dir>& binormal
 )
 {
-    // At most this many places more (each costs about 1 ms), and so many between two
-    constexpr int budget = 2048;
-    constexpr int mostBetween = 90;
-    // Where the curvature is looked at between two places
+    // At most this many places more (each costs some 20 microseconds), and so many between two
+    constexpr int budget = 1 << 14;
+    constexpr int mostBetween = 1024;
+    // Where the curvature is looked at between two of the sweep's places (between two computed
+    // ones, a step of at most sampleTurn, fewer), and within each piece of the curve between them
     constexpr int looks = 16;
+    constexpr int looksBetweenComputed = 4;
+    constexpr int looksInPiece = 4;
     const gp_Pnt origin = frame.Location();
     double reachFromSpine = Precision::Confusion();
     for (const gp_Pnt& point : points) {
@@ -636,7 +737,7 @@ std::vector<std::vector<gp_Trsf>> refinedMotions(
     double last = 0;
     const Handle(Geom_Curve) geometry = BRep_Tool::Curve(edge, first, last);
     if (geometry.IsNull()) {
-        return {sampled};
+        return {{sampled}};
     }
     const bool reversed = edge.Orientation() == TopAbs_REVERSED;
     // Where each place lies on the curve
@@ -648,71 +749,208 @@ std::vector<std::vector<gp_Trsf>> refinedMotions(
         }
         GeomAPI_ProjectPointOnCurve onCurve(origin.Transformed(sampled[i]), geometry, first, last);
         if (onCurve.NbPoints() == 0) {
-            return {sampled};
+            return {{sampled}};
         }
         at.push_back(onCurve.LowerDistanceParameter());
     }
 
+    // Where the curve's pieces meet (a B-spline's knots), its ends included
     const BRepAdaptor_Curve adaptor(edge);
+    std::vector<double> knots {first};
+    if (adaptor.GetType() == GeomAbs_BSplineCurve) {
+        const Handle(Geom_BSplineCurve) spline = adaptor.BSpline();
+        for (int i = spline->FirstUKnotIndex(); i <= spline->LastUKnotIndex(); ++i) {
+            const double knot = spline->Knot(i);
+            if (knot > first + Precision::PConfusion() && knot < last - Precision::PConfusion()) {
+                knots.push_back(knot);
+            }
+        }
+    }
+    knots.push_back(last);
     BRepLProp_CLProps properties(adaptor, 2, Precision::Confusion());
-    std::vector<std::vector<gp_Trsf>> runs;
-    std::vector<gp_Trsf> motions {sampled.front()};
-    int added = 0;
-    for (size_t i = 0; i + 1 < sampled.size(); ++i) {
-        const gp_Trsf& here = sampled[i];
-        const gp_Trsf& next = sampled[i + 1];
-        const double length = origin.Transformed(here).Distance(origin.Transformed(next));
+    // How tightly the curve bends between two of its parameters, and its shortest piece there
+    auto bending = [&](double from, double to, int times) {
+        const double low = std::min(from, to);
+        const double high = std::max(from, to);
         double curvature = 0;
-        for (int j = 0; j <= looks; ++j) {
-            properties.SetParameter(at[i] + (at[i + 1] - at[i]) * j / looks);
+        auto look = [&](double parameter) {
+            properties.SetParameter(parameter);
             if (properties.IsTangentDefined()) {
                 curvature = std::max(curvature, properties.Curvature());
             }
+        };
+        for (int j = 0; j <= times; ++j) {
+            look(low + (high - low) * j / times);
         }
-        const double turn = std::max(turnBetween(here, next), curvature * length);
-        if (turn > sampleTurn && turn > foldingRate * length && added < budget) {
-            const int between = std::min(
-                {mostBetween, static_cast<int>(std::ceil(turn / sampleTurn)), budget - added}
-            );
-            BRepBuilderAPI_MakeEdge piece(
-                geometry,
-                std::min(at[i], at[i + 1]),
-                std::max(at[i], at[i + 1])
-            );
-            if (piece.IsDone()) {
-                TopoDS_Edge part = piece.Edge();
-                if (reversed) {
-                    part.Reverse();
-                }
-                const std::optional<std::vector<gp_Trsf>> finer = motionsAlong(
-                    BRepBuilderAPI_MakeWire(part).Wire(),
-                    frame.Transformed(here),
-                    between + 1,
-                    setup
-                );
-                // A run of its own: its last place and next are two sweeps' versions of one
-                // place, a little apart, and that step would read as a sharp turn
-                if (finer) {
-                    if (motions.size() > 1) {
-                        runs.push_back(motions);
-                    }
-                    motions.clear();
-                    for (const gp_Trsf& motion : *finer) {
-                        motions.push_back(motion * here);
-                    }
-                    runs.push_back(motions);
-                    added += between;
-                    motions = {next};
-                    continue;
-                }
+        double shortest = std::numeric_limits<double>::infinity();
+        // The piece where low lies, and those after it up to high
+        const auto after = std::upper_bound(knots.begin(), knots.end(), low);
+        size_t k = after == knots.begin() ? 0 : after - knots.begin() - 1;
+        for (; k + 1 < knots.size() && knots[k] < high; ++k) {
+            shortest = std::min(shortest, knots[k + 1] - knots[k]);
+            const double start = std::max(low, knots[k]);
+            const double end = std::min(high, knots[k + 1]);
+            for (int j = 0; j <= looksInPiece; ++j) {
+                look(start + (end - start) * j / looksInPiece);
             }
         }
-        motions.push_back(next);
+        return std::pair {curvature, shortest};
+    };
+
+    // The places in runs; a step between two places may be refined by another run, whose first
+    // and last places are the step's ends
+    struct Run
+    {
+        std::vector<gp_Trsf> motions;
+        std::vector<double> at;
+        std::vector<int> finer;
+    };
+    std::vector<Run> runs {{sampled, at, std::vector<int>(sampled.size() - 1, -1)}};
+    // A step to refine: how fold-prone it is (how fast the section turns beside the turn a fold
+    // needs), and how many places it needs between its ends
+    struct Step
+    {
+        double proneness;
+        int order;
+        size_t run;
+        size_t index;
+        int needed;
+    };
+    auto later = [](const Step& a, const Step& b) {
+        return a.proneness != b.proneness ? a.proneness < b.proneness : a.order > b.order;
+    };
+    std::priority_queue<Step, std::vector<Step>, decltype(later)> steps(later);
+    int order = 0;
+    auto examine = [&](size_t r) {
+        const Run& run = runs[r];
+        for (size_t i = 0; i + 1 < run.motions.size(); ++i) {
+            const gp_Trsf& here = run.motions[i];
+            const gp_Trsf& next = run.motions[i + 1];
+            const double length = origin.Transformed(here).Distance(origin.Transformed(next));
+            if (length < 100 * Precision::Confusion()) {
+                continue;
+            }
+            const int count = r == 0 ? looks : looksBetweenComputed;
+            const auto [curvature, shortest] = bending(run.at[i], run.at[i + 1], count);
+            const double turn = std::max(turnBetween(here, next), curvature * length);
+            if (turn <= foldingRate * length) {
+                continue;
+            }
+            const double span = std::abs(run.at[i + 1] - run.at[i]);
+            const double needed = std::max(turn / sampleTurn, 2 * span / shortest);
+            if (needed > 1) {
+                const double proneness = turn / length / foldingRate;
+                steps.push({proneness, order++, r, i, static_cast<int>(std::ceil(needed))});
+            }
+        }
+    };
+    examine(0);
+
+    Refined refined;
+    int added = 0;
+    while (!steps.empty()) {
+        const Step step = steps.top();
+        steps.pop();
+        const int count = std::min({mostBetween, step.needed, budget - added});
+        if (count < 2) {
+            refined.unchecked += 1 + static_cast<int>(steps.size());
+            break;
+        }
+        const Run& run = runs[step.run];
+        const double from = run.at[step.index];
+        const double to = run.at[step.index + 1];
+        std::vector<gp_Trsf> places = placesBetween(
+            adaptor,
+            reversed,
+            binormal,
+            origin,
+            run.motions[step.index],
+            run.motions[step.index + 1],
+            from,
+            to,
+            count
+        );
+        if (places.empty()) {
+            ++refined.unchecked;
+            continue;
+        }
+        std::vector<double> parameters;
+        for (int k = 0; k <= count; ++k) {
+            parameters.push_back(from + (to - from) * k / count);
+        }
+        runs[step.run].finer[step.index] = static_cast<int>(runs.size());
+        runs.push_back({std::move(places), std::move(parameters), std::vector<int>(count, -1)});
+        added += count;
+        examine(runs.size() - 1);
     }
-    if (motions.size() > 1) {
-        runs.push_back(motions);
+
+    // In order along the curve: a refined step's places in place of the step
+    std::vector<gp_Trsf> motions {sampled.front()};
+    std::function<void(size_t)> flatten = [&](size_t r) {
+        const Run& run = runs[r];
+        for (size_t i = 0; i + 1 < run.motions.size(); ++i) {
+            if (run.finer[i] < 0) {
+                motions.push_back(run.motions[i + 1]);
+            }
+            else {
+                flatten(run.finer[i]);
+            }
+        }
+    };
+    flatten(0);
+    refined.runs.push_back(std::move(motions));
+    return refined;
+}
+
+/// The corners of the convex hull of \a points, which lie in the plane of \a frame: an affine
+/// function of a point takes its least and greatest values over the points at these (a polygon's
+/// sampled sides add none), so foldAlongCurve measures the fold at these only
+std::vector<gp_Pnt> hullOf(const std::vector<gp_Pnt>& points, const gp_Ax2& frame)
+{
+    struct Corner
+    {
+        double x;
+        double y;
+        gp_Pnt point;
+    };
+    std::vector<Corner> corners;
+    const gp_Vec alongX(frame.XDirection());
+    const gp_Vec alongY(frame.YDirection());
+    for (const gp_Pnt& point : points) {
+        const gp_Vec from(frame.Location(), point);
+        corners.push_back({from.Dot(alongX), from.Dot(alongY), point});
     }
-    return runs;
+    std::sort(corners.begin(), corners.end(), [](const Corner& a, const Corner& b) {
+        return a.x != b.x ? a.x < b.x : a.y < b.y;
+    });
+    if (corners.size() < 3) {
+        return points;
+    }
+    auto turn = [](const Corner& o, const Corner& a, const Corner& b) {
+        return (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+    };
+    // Andrew's monotone chain: the lower side, then the upper
+    std::vector<Corner> hull;
+    for (int side = 0; side < 2; ++side) {
+        const size_t start = hull.size();
+        for (size_t i = 0; i < corners.size(); ++i) {
+            const Corner& next = side == 0 ? corners[i] : corners[corners.size() - 1 - i];
+            // Drop the last corner while it doesn't turn left on the way to next
+            auto straight = [&]() {
+                return turn(hull[hull.size() - 2], hull.back(), next) <= 0;
+            };
+            while (hull.size() >= start + 2 && straight()) {
+                hull.pop_back();
+            }
+            hull.push_back(next);
+        }
+        hull.pop_back();
+    }
+    std::vector<gp_Pnt> result;
+    for (const Corner& corner : hull) {
+        result.push_back(corner.point);
+    }
+    return result.size() < 3 ? points : result;
 }
 
 /// How far the section (\a normal, \a points) reaches back over itself along the curve \a edge,
@@ -723,12 +961,13 @@ std::vector<std::vector<gp_Trsf>> refinedMotions(
 /// the reach is measured from the line where it is zero (ops#370), at the place it is largest.
 /// The samples follow the curve's pieces (a long B-spline gets more), and between two of them
 /// where the section could fold, they are subdivided until it turns at most sampleTurn between
-/// two: a short bend in a B-spline of few pieces fell between them.
+/// two: a short bend in a B-spline of few pieces fell between them. \a binormal: Binormal mode's.
 Reach foldAlongCurve(
     const TopoDS_Edge& edge,
     const gp_Dir& normal,
     const std::vector<gp_Pnt>& points,
-    const std::function<void(BRepOffsetAPI_MakePipeShell&)>& setup
+    const std::function<void(BRepOffsetAPI_MakePipeShell&)>& setup,
+    const std::optional<gp_Dir>& binormal
 )
 {
     const BRepAdaptor_Curve curve(edge);
@@ -741,12 +980,13 @@ Reach foldAlongCurve(
         return {};
     }
     const gp_Pnt origin = frame.Location();
-    const std::vector<std::vector<gp_Trsf>> runs
-        = refinedMotions(edge, frame, points, *sampled, setup);
+    const std::vector<gp_Pnt> corners = hullOf(points, frame);
+    const Refined refined = refinedMotions(edge, frame, corners, *sampled, binormal);
     const gp_Pnt alongX = origin.Translated(gp_Vec(frame.XDirection()));
     const gp_Pnt alongY = origin.Translated(gp_Vec(frame.YDirection()));
     Reach reach;
-    for (const std::vector<gp_Trsf>& motions : runs) {
+    reach.unchecked = refined.unchecked;
+    for (const std::vector<gp_Trsf>& motions : refined.runs) {
         for (size_t i = 0; i + 1 < motions.size(); ++i) {
             const gp_Trsf& here = motions[i];
             const gp_Trsf& next = motions[i + 1];
@@ -774,13 +1014,14 @@ Reach foldAlongCurve(
             }
             double low = std::numeric_limits<double>::infinity();
             double high = -low;
-            for (const gp_Pnt& point : points) {
+            for (const gp_Pnt& point : corners) {
                 const double at = speed(point);
                 low = std::min(low, at);
                 high = std::max(high, at);
             }
             if (low < 0 && high > 0 && std::min(-low, high) / slope > reach.past) {
-                reach = {std::min(-low, high) / slope, (high - low) / slope};
+                reach.past = std::min(-low, high) / slope;
+                reach.across = (high - low) / slope;
             }
         }
     }
@@ -880,7 +1121,11 @@ CornerTilts measureCorners(
             reach = foldAlongArc(edges[k], section.normal, section.points);
         }
         else if (tilted && tiltTo(section.normal, tangentAlong(edges[k], true)) > tiltTolerance) {
-            reach = foldAlongCurve(edges[k], section.normal, section.points, setup);
+            reach = foldAlongCurve(edges[k], section.normal, section.points, setup, binormal);
+        }
+        if (reach.unchecked > 0 && !tilts.unchecked) {
+            const gp_Pnt start = BRep_Tool::Pnt(TopExp::FirstVertex(edges[k], true));
+            tilts.unchecked = {start, reach.unchecked};
         }
         if (reach.past < Precision::Confusion()) {
             return;
@@ -1228,6 +1473,47 @@ struct SpineCorner
     gp_Pnt at;
     double degrees;
 };
+
+/// Where "Fixed" mode, which keeps the section's orientation (\a normal) all along, turns the
+/// spine edge-on to it or past: the first point of \a spine where the tangent lies in the
+/// section's plane or on its other side than at the start. From there the sweep runs back
+/// through itself, a solid that BRepCheck passes, of the wrong volume (ops#370). None when it
+/// doesn't.
+std::optional<gp_Pnt> fixedTurnsBack(const TopoDS_Wire& spine, const gp_Dir& normal)
+{
+    const std::vector<TopoDS_Edge> edges = edgesInOrder(spine);
+    if (edges.empty()) {
+        return std::nullopt;
+    }
+    const double start = normal.Dot(tangentAlong(edges.front(), true));
+    if (std::abs(start) < Precision::Angular()) {
+        return std::nullopt;
+    }
+    const double side = start > 0 ? 1 : -1;
+    for (const TopoDS_Edge& edge : edges) {
+        const BRepAdaptor_Curve curve(edge);
+        // A line's two ends; along a curve, 8 places in each of its pieces
+        const int pieces = curve.NbIntervals(GeomAbs_C2);
+        const int looks = isLine(edge) ? 1 : std::clamp(8 * pieces, 16, 1024);
+        const double first = curve.FirstParameter();
+        const double last = curve.LastParameter();
+        for (int i = 0; i <= looks; ++i) {
+            gp_Pnt point;
+            gp_Vec tangent;
+            curve.D1(first + (last - first) * i / looks, point, tangent);
+            if (tangent.Magnitude() < gp::Resolution()) {
+                continue;
+            }
+            if (edge.Orientation() == TopAbs_REVERSED) {
+                tangent.Reverse();
+            }
+            if (side * normal.Dot(gp_Dir(tangent)) < 1e-9) {
+                return point;
+            }
+        }
+    }
+    return std::nullopt;
+}
 
 /// Where \a spine turns most sharply, none when it turns nowhere
 std::optional<SpineCorner> sharpestCorner(const TopoDS_Wire& spine)
@@ -1579,6 +1865,8 @@ App::DocumentObjectExecReturn* Pipe::execute()
         const int mode = Mode.getValue();
         const bool sheared = Transition.getValue() == 0 && Transformation.getValue() != 1
             && profilePoint.isNull() && (mode == 0 || mode == 2 || mode == 4);
+        // "Fixed" with one profile: the spine mustn't turn edge-on to it or past
+        const bool fixedMode = mode == 1 && profilePoint.isNull() && multisections.empty();
         auto setup = [&](BRepOffsetAPI_MakePipeShell& pipe) {
             setupAlgorithm(pipe, auxpath.getShape());
         };
@@ -1699,7 +1987,7 @@ App::DocumentObjectExecReturn* Pipe::execute()
             );
             shells.push_back(shell);
 
-            if (sheared) {
+            if (sheared || fixedMode) {
                 TopTools_ListOfShape simulated;
                 mkPS.Simulate(2, simulated);
                 sweptStarts.push_back(simulated.First());
@@ -1734,6 +2022,26 @@ App::DocumentObjectExecReturn* Pipe::execute()
                     }
                     backwires.push_back(back);
                 }
+            }
+        }
+
+        // "Fixed" mode keeps the profile's orientation: where the spine turns past square to it,
+        // the sweep runs back through itself, a solid that BRepCheck passes, of the wrong volume
+        // (an L at 120 degrees: 320 for its legs' 621.5, and nothing in common with them).
+        // Refine, which left an invalid solid there, keeps the unrefined shape since ops#389.
+        if (fixedMode && !sweptStarts.empty()) {
+            const TopoDS_Wire start = firstWire(sweptStarts.front());
+            const std::optional<gp_Dir> normal
+                = start.IsNull() ? std::nullopt : planeNormal(pointsAlong(start));
+            const std::optional<gp_Pnt> turn
+                = normal ? fixedTurnsBack(TopoDS::Wire(path.getShape()), *normal) : std::nullopt;
+            if (turn) {
+                return new App::DocumentObjectExecReturn(fmt::format(
+                    "Pipe: 'Fixed' mode keeps the profile's orientation, and at {} the spine turns "
+                    "edge-on to it or past: the pipe would run back through itself. Use 'Standard' "
+                    "mode, or change the spine.",
+                    inPlace(*turn)
+                ));
             }
         }
 
@@ -1908,6 +2216,20 @@ App::DocumentObjectExecReturn* Pipe::execute()
         // the same file gives the same result on every platform (smallFold)
         if (const auto& fold = tilts.smallFold) {
             warn(foldText(*fold, true));
+        }
+        // A curve where the budget of places ran out before every stretch where the profile could
+        // fold was looked at closely: neither silent nor a failure, as most such pipes are sound
+        if (const auto& unchecked = tilts.unchecked) {
+            warn(fmt::format(
+                "Pipe: the curve from {} bends in too many places to check them all for folds: "
+                "{} stretch{} where 'Transformed' could fold the profile over itself {} left "
+                "unchecked, and the result may cross itself there. Use 'Right corner' or 'Round "
+                "corner' to avoid it.",
+                inPlace(unchecked->first),
+                unchecked->second,
+                unchecked->second == 1 ? "" : "es",
+                unchecked->second == 1 ? "was" : "were"
+            ));
         }
 
         // A closed spine sweeps a closed shell for each wire of a holed profile, and a closed

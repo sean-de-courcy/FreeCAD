@@ -1102,6 +1102,95 @@ class TestPipeCorners(unittest.TestCase):
         self.assertValidSolid(pipe)
         self.assertNotIn("Warning", pipe.State)
 
+    def wavySpine(self, waves):
+        """Up 30 along Z, a 60 degree corner towards +X, then one B-spline: `waves` waves of
+        amplitude 1.5 and length 20 towards +X (a point every 1 mm), 20 mm straight on, a bend of
+        10 degrees over the length of an arc of radius 3, and 20 mm on. The waves bend the curve
+        everywhere, but no tighter than radius 6.1; the bend, interpolated, to radius 2.4."""
+        corner = V(0, 0, 30)
+        leg = V(math.sin(math.radians(60)), 0, math.cos(math.radians(60)))
+        towards = V(math.cos(math.radians(60)), 0, -math.sin(math.radians(60)))
+        k = 2 * math.pi / 20
+        points = [
+            corner + leg * x + towards * (1.5 * (1 - math.cos(k * x)))
+            for x in range(20 * waves + 1)
+        ]
+        on = leg + towards * (1.5 * k * math.sin(k * 20 * waves))
+        on.normalize()
+        side = towards - on * towards.dot(on)
+        side.normalize()
+        last = points[-1]
+        points += [last + on * x for x in range(2, 21, 2)]
+        length = 3 * math.radians(10) / 4
+        for i in range(1, 5):
+            angle = math.radians(10 * (i - 0.5) / 4)
+            points.append(points[-1] + (on * math.cos(angle) + side * math.sin(angle)) * length)
+        end = on * math.cos(math.radians(10)) + side * math.sin(math.radians(10))
+        last = points[-1]
+        points += [last + end * x for x in range(2, 21, 2)]
+        curve = Part.BSplineCurve()
+        curve.interpolate(points)  # given end tangents, it overshoots into a cusp at the end
+        return models.feature(
+            self.doc, "Path", Part.Wire([Part.makeLine(V(0, 0, 0), corner), curve.toShape()])
+        )
+
+    def testShortBendAfterALongCurveFolds(self):
+        """A circle of radius 2, a 60 degree corner, then a B-spline of 25 waves (567 mm), and at
+        its end a bend of 10 degrees over 0.52 mm: the tilted section folds at the bend by about
+        0.74 mm (19 % of it, by an independent check). Round 5 subdivided the samples
+        in their order along the curve, up to 2048 places: the waves used them all, the bend was
+        never looked at closely, and the pipe was accepted silently (4604.24). The most
+        fold-prone stretches are now looked at first, and a curve the budget can't cover warns."""
+        profile = self.profile([models.circle(0, 0, 2)])
+        pipe = self.pipe(self.wavySpine(25), profile, Transition="Transformed", Refine=False)
+        self.assertFails(pipe, "folds", "along the curve from (0, 0, 30)", "Right corner")
+
+    def sBendSpine(self, degrees, bend, length):
+        """Up 30 along Z, a corner of `degrees` towards +X, then one B-spline through 15 points:
+        20 mm on, an S-bend over `length` (through 8 points, turning up to `bend` degrees towards
+        +X and back), and 20 mm on, in the direction it had. Its net turn is nothing."""
+        corner = V(0, 0, 30)
+        start = math.radians(degrees)
+        leg = V(math.sin(start), 0, math.cos(start))
+        towards = V(math.cos(start), 0, -math.sin(start))
+        points = [corner, corner + leg * 10, corner + leg * 20]
+        for i in range(1, 9):
+            step = i - 0.5 if i <= 4 else 8.5 - i
+            angle = math.radians(bend * step / 4)
+            along = leg * math.cos(angle) + towards * math.sin(angle)
+            points.append(points[-1] + along * (length / 8))
+        last = points[-1]
+        points += [last + leg * 10, last + leg * 20]
+        curve = Part.BSplineCurve()
+        curve.interpolate(points, InitialTangent=leg, FinalTangent=leg)
+        return models.feature(
+            self.doc, "Path", Part.Wire([Part.makeLine(V(0, 0, 0), corner), curve.toShape()])
+        )
+
+    def testShortSBendFolds(self):
+        """A circle of radius 2, a 75 degree corner, then a B-spline with a short S-bend inside it
+        (up to 0.5 degrees over 0.05 mm, tightest radius 2.3; 1 degree over 0.07 mm, 1.6; 5 degrees
+        over 0.05 mm, 0.23): the section, tilted 75 degrees, folds there wherever the curve bends
+        tighter than about 7.7 (a fold of a third to a half of the section by an independent
+        check). Round 5 looked at the curvature 16 times between two samples and at the turn
+        between them, which is nothing: the S-bend fell between, and the pipes were accepted
+        silently. A circle of radius 0.5 along the gentlest S-bend would need a bend tighter than
+        1.9 to fold: valid, without a warning."""
+        for bend, length in ((0.5, 0.05), (1, 0.07), (5, 0.05)):
+            with self.subTest(bend=bend, length=length):
+                self.renew()
+                profile = self.profile([models.circle(0, 0, 2)])
+                spine = self.sBendSpine(75, bend, length)
+                pipe = self.pipe(spine, profile, Transition="Transformed", Refine=False)
+                self.assertFails(pipe, "folds", "along the curve from (0, 0, 30)", "Right corner")
+
+        self.renew()
+        profile = self.profile([models.circle(0, 0, 0.5)])
+        spine = self.sBendSpine(75, 0.5, 0.05)
+        pipe = self.pipe(spine, profile, Transition="Transformed", Refine=False)
+        self.assertValidSolid(pipe)
+        self.assertNotIn("Warning", pipe.State)
+
     def testManySmallCornersAddUp(self):
         """A circle of radius 2, up 10, then 775 corners of 0.0009 rad 0.05 mm apart (40 degrees in
         all), then a B-spline bending 40 degrees more over 1.54 mm: "Transformed" keeps the
@@ -1190,14 +1279,26 @@ class TestPipeCorners(unittest.TestCase):
         self.assertSameShape(pipe.Shape, extrusions(self.inSpace(points), Part.makeCompound(faces)))
 
     def testFixedModePast90DegreesFails(self):
-        """"Fixed" mode along an L at 120 degrees: the profile keeps its orientation, the second
-        leg runs back through the first, and Refine leaves an invalid solid. The pipe fails.
-        Before, it was Up-to-date with an invalid shape."""
+        """"Fixed" mode along an L at 120 degrees: the profile keeps its orientation, and the
+        second leg runs back through the first. The one sweep is a solid that BRepCheck passes,
+        of volume 320 where the legs' extrusions have 621.5, with nothing in common with them.
+        The pipe fails, naming the corner, with Refine on or off. Round 5 failed it only with
+        Refine on, where refine left an invalid solid; since ops#389 refine keeps the unrefined
+        shape then, and the pipe was Up-to-date. At 60 degrees: the legs' extrusions."""
         for transition in ("Right corner", "Transformed"):
-            with self.subTest(transition):
-                self.renew()
-                pipe = self.pipe(self.spine(self.lPoints(120)), Mode="Fixed", Transition=transition)
-                self.assertFails(pipe, "isn't a valid solid", "'Fixed'")
+            for refine in (False, True):
+                with self.subTest(transition=transition, refine=refine):
+                    self.renew()
+                    spine = self.spine(self.lPoints(120))
+                    pipe = self.pipe(spine, Mode="Fixed", Transition=transition, Refine=refine)
+                    phrases = ("'Fixed' mode", "at (0, 0, 30)", "run back", "'Standard'")
+                    self.assertFails(pipe, *phrases)
+
+        self.renew()
+        points = self.lPoints(60)
+        pipe = self.pipe(self.spine(points), Mode="Fixed", Refine=False)
+        self.assertValidSolid(pipe)
+        self.assertSameShape(pipe.Shape, extrusions(self.inSpace(points)))
 
     def testUnionThatCannotFuseFails(self):
         """A circle, a 120 degree corner, then an arc of radius 10 turning 30 more: the pieces
