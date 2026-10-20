@@ -946,6 +946,25 @@ def concave_added_onto_round(kind, size):
     return box.cut(Part.makeCylinder(size, 10, V(0, ball_y, ball_z), V(1, 0, 0)))
 
 
+def smoothly_dimpled_block():
+    """concave_block() with its wall's top edge (y = 5, z = 10) rounded 1, and that block with a
+    spherical dimple r 1 at (5, 1.2, 9.6) in its top face, the dimple's rim rounded 0.15: the wall,
+    the round, the top face, the rim and the dimple each join the next smoothly. Returns both"""
+    block = concave_block()
+    block = block.makeFillet(1, [edge_between(block, (0, 5, 10), (10, 5, 10))])
+    dimpled = block.cut(Part.makeSphere(1, V(5, 1.2, 9.6)))
+    rim = [
+        e
+        for e in dimpled.Edges
+        if abs(e.BoundBox.ZMin - 10) < 1e-6
+        and abs(e.BoundBox.ZMax - 10) < 1e-6
+        and 3 < e.BoundBox.XMin
+        and e.BoundBox.XMax < 7
+        and e.BoundBox.YMax < 3
+    ]
+    return block, dimpled.makeFillet(0.15, rim)
+
+
 def dressed_up_in_a_body(doc, kind, recess, size):
     """A PartDesign Body whose BaseFeature is the 10 mm cube without the recess, and a Fillet or
     Chamfer of the size on the cube's front top edge (for the PartDesign tests). Returns the
@@ -954,24 +973,28 @@ def dressed_up_in_a_body(doc, kind, recess, size):
     return dressed_in_a_body(doc, kind, shape, ((0, 0, 10), (10, 0, 10)), size)
 
 
-def dressed_in_a_body(doc, kind, shape, ends, size):
+def dressed_in_a_body(doc, kind, shape, ends, size, *more):
     """A PartDesign Body whose BaseFeature is the shape, and a Fillet or Chamfer of the size on its
-    edge between the two points. Returns the feature and the edge's name"""
+    edge between the two points (and on those between more pairs). Returns the feature and the
+    (first) edge's name"""
     base = doc.addObject("Part::Feature", "Base")
     base.Shape = shape
     body = doc.addObject("PartDesign::Body", "Body")
     body.BaseFeature = base
     doc.recompute()
     dressed = body.newObject("PartDesign::" + kind, kind)
-    edge = edge_between(base.Shape, *ends)
-    name = "Edge%d" % next(i for i, e in enumerate(base.Shape.Edges, 1) if e.isSame(edge))
-    dressed.Base = (body.BaseFeature, [name])
+    names = []
+    for pair in (ends,) + more:
+        edge = edge_between(base.Shape, *pair)
+        index = next(i for i, e in enumerate(base.Shape.Edges, 1) if e.isSame(edge))
+        names.append("Edge%d" % index)
+    dressed.Base = (body.BaseFeature, names)
     if kind == "Fillet":
         dressed.Radius = size
     else:
         dressed.Size = size
     doc.recompute()
-    return dressed, name
+    return dressed, names[0]
 
 
 class FilledRecessTest(unittest.TestCase):
@@ -1103,6 +1126,23 @@ class FilledRecessTest(unittest.TestCase):
                 # The L's 8 faces and the two new ones: the pocket's are gone
                 self.assertEqual(len(feature.Shape.Faces), 10)
                 self.assertAlmostEqual(feature.Shape.Volume, expected, delta=1e-6)
+
+    def testConvexBandOverASmoothDimple(self):
+        # The front top edge's chamfer or round of 2.5 crosses smoothly_dimpled_block()'s dimple,
+        # with the concave edge's of 1 in the same feature. Every face from the concave edge's wall
+        # to the dimple joins the next smoothly, but the faces the concave edge's material may lie
+        # on grow only through faces the dress-up changes, and it leaves the wall's round alone:
+        # the filled dimple is still caught. OCCT fills it (721.604 for 721.239, the fillet 736.587
+        # for 734.550), and 8e642b9516 let both pass (PR 346 round 2)
+        block, base = smoothly_dimpled_block()
+        dimple = block.cut(base)
+        front = edge_between(base, (0, 0, 10), (10, 0, 10))
+        concave = edge_between(base, (0, 5, 5), (10, 5, 5))
+        for kind in ("Chamfer", "Fillet"):
+            with self.subTest(kind=kind):
+                dressed = block.cut(front_top_removed(kind, 2.5)).fuse(concave_added(kind, 1))
+                feature = self.dressUp(kind, base, [front, concave], [(2.5, 2.5), (1, 1)])
+                self.assertExactOrFails(feature, base, front, dressed.cut(dimple).Volume)
 
     def testPocketOutOfReachStays(self):
         # A pocket 4 x 1 x 2 at y 6 to 7, beyond the band (y < 3): untouched, 947 and 972.686

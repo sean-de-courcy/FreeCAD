@@ -978,6 +978,8 @@ struct Changes
     // Where those, and the result's faces that aren't on the surface of a given one, lie: every
     // recess the result fills has a changed face there (its walls, its floor)
     Bnd_Box region;
+    // The base's faces the result changed, the given ones included
+    TopTools_IndexedMapOfShape changed;
 };
 
 /* The faces of the base the result changed: the result has no face on its surface with its
@@ -1022,6 +1024,7 @@ Changes changesOf(
                 continue;
             }
         }
+        changes.changed.Add(face);
         if (!changing.Contains(face)) {
             changes.away = true;
             BRepBndLib::Add(face, changes.region, false);
@@ -1101,11 +1104,18 @@ std::string nearestEdge(
     return name.empty() ? std::string("an edge") : name;
 }
 
-/* Adds the faces of the base that meet one of the faces across a smooth edge, and so on. A
- * concave edge's band runs on onto a face tangent to one at the edge (a floor that ends in a
- * round), and the material it adds lies on that face too (PR 346 review, H1). A recess's walls
- * meet its floor and the face it opens on at sharp edges, so they stay out. */
-void addSmoothNeighbours(const TopoDS_Shape& base, TopTools_IndexedMapOfShape& faces)
+/* Adds the faces of the base that the result changed and that meet one of the faces across a
+ * smooth edge, and so on. A concave edge's band runs on onto a face tangent to one at the edge (a
+ * floor that ends in a round) and trims it, and the material it adds lies on that face too (PR 346
+ * review, H1). A face the dress-up leaves alone holds none of it, and the growth stops there: else
+ * it would run on over the base, through a round the band doesn't reach, to a smooth recess another
+ * edge's band fills (PR 346 round 2). A recess's walls meet its floor and the face it opens on at
+ * sharp edges, so they stay out. */
+void addSmoothNeighbours(
+    const TopoDS_Shape& base,
+    const TopTools_IndexedMapOfShape& changed,
+    TopTools_IndexedMapOfShape& faces
+)
 {
     TopTools_IndexedDataMapOfShapeListOfShape facesOfEdges;
     TopExp::MapShapesAndAncestors(base, TopAbs_EDGE, TopAbs_FACE, facesOfEdges);
@@ -1118,7 +1128,7 @@ void addSmoothNeighbours(const TopoDS_Shape& base, TopTools_IndexedMapOfShape& f
                 continue;
             }
             for (const auto& other : facesOfEdges(index)) {
-                if (!other.IsSame(face) && !faces.Contains(other)
+                if (!other.IsSame(face) && !faces.Contains(other) && changed.Contains(other)
                     && ChFi3d::IsTangentFaces(edge, face, TopoDS::Face(other))) {
                     faces.Add(other);
                 }
@@ -1239,6 +1249,10 @@ std::optional<Prepared> prepare(
     const auto chain = chainOf(before, edges);
     const TopoDS_Compound dressed = dressedSolids(before, chain);
     if (!TopoDS_Iterator(dressed).More()) {
+        // None of the edges is a solid's of the base (the callers take them from the base)
+        FC_WARN(
+            "Dress-up result not checked for a filled recess: no solid of the base holds its edges"
+        );
         return std::nullopt;
     }
     // The result's solids where the dressed ones were: OCCT keeps the others as they were
@@ -1252,12 +1266,12 @@ std::optional<Prepared> prepare(
         return std::nullopt;
     }
     Prepared prepared;
-    // A concave edge adds material in its corner, on the faces at it and on those joining them
-    // smoothly
+    // A concave edge adds material in its corner, on the faces at it and on the changed ones
+    // joining them smoothly
     prepared.concave = concaveEdges(dressed, chain);
     if (prepared.concave.Extent() > 0) {
         prepared.allowed = facesAt(facesAtVertices, prepared.concave);
-        addSmoothNeighbours(dressed, prepared.allowed);
+        addSmoothNeighbours(dressed, changes.changed, prepared.allowed);
     }
     // Every recess the result fills has a changed face in the region, so the Boolean runs on what
     // lies there (PR 346 review, M1). Its sides keep clear of the faces in it
