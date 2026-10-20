@@ -331,6 +331,27 @@ class TestHole(unittest.TestCase):
         self.Doc.recompute()
         self.assertAlmostEqual(hole.Shape.Volume, 10**3 - pi * (diameter / 2) ** 2 * 10)
 
+        # a thread type change picks the new type's size closest to the old one (round 3: the
+        # first size's change, when the new type's sizes were set, overwrote the diameter the
+        # closest size is looked up from: M12 became M1 or #1)
+        hole.ThreadType = "ISOMetricFineProfile"
+        self.assertAlmostEqual(hole.ThreadDiameter.Value, 1.0)
+        # (the nearest by diameter and pitch: 7/16" is 11.113, 1 1/8" 28.575)
+        for start, other, nearest in (
+            ("M12x1.75", "ISOMetricFineProfile", 12.0),
+            ("M12x1.75", "UNC", 11.113),
+            ("M30x3.5", "UNC", 28.575),
+        ):
+            hole.ThreadType = "ISOMetricProfile"
+            hole.ThreadSize = start
+            self.assertAlmostEqual(hole.ThreadDiameter.Value, float(start[1:3]))
+            hole.ThreadType = other
+            self.assertAlmostEqual(hole.ThreadDiameter.Value, nearest, msg=(start, other))
+        # a size of the same name in the new type is kept, as before (3/4 UNC to 3/4 NPT)
+        hole.ThreadSize = "3/4"
+        hole.ThreadType = "NPT"
+        self.assertEqual(hole.ThreadSize, "3/4")
+
     def testNoRefineHole(self):
         # Add a second box to get a shape with more faces
         self.Box2 = self.Doc.addObject("PartDesign::AdditiveBox", "Box")

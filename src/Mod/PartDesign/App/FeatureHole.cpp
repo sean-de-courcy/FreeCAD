@@ -1361,8 +1361,22 @@ void Hole::onChanged(const App::Property* prop)
 
         if (ThreadType.isValid()) {
             type = ThreadType.getValueAsString();
+            // FreeCAD-CH (ops#389): setEnums() keeps a size of the same name, else falls back
+            // to the new type's first size, and that size's change sets ThreadDiameter: after
+            // a fallback the closest size is looked up from the old diameter, not the first
+            // size's. A restore keeps the reset, which corrects a stale saved ThreadDiameter.
+            const double oldThreadDiameter = ThreadDiameter.getValue();
+            std::string oldThreadSize;
+            if (ThreadSize.isValid()) {
+                oldThreadSize = ThreadSize.getValueAsString();
+            }
             ThreadSize.setEnums(getThreadDesignations(ThreadType.getValue()));
             if (type != "None") {
+                const bool sizeKept = ThreadSize.isValid()
+                    && oldThreadSize == ThreadSize.getValueAsString();
+                if (!isRestoring() && !sizeKept) {
+                    ThreadDiameter.setValue(oldThreadDiameter);
+                }
                 findClosestDesignation();
             }
         }
