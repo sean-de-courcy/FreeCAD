@@ -47,10 +47,12 @@
 #include <Geom_Circle.hxx>
 #include <Geom_Curve.hxx>
 #include <Geom_RectangularTrimmedSurface.hxx>
+#include <Geom2d_BSplineCurve.hxx>
 #include <Geom2d_TrimmedCurve.hxx>
 #include <Geom2dAPI_Interpolate.hxx>
 #include <Geom2dAPI_PointsToBSpline.hxx>
 #include <Geom2dAPI_ProjectPointOnCurve.hxx>
+#include <Geom2dConvert_CompCurveToBSplineCurve.hxx>
 #include <GeomAdaptor_Curve.hxx>
 #include <GeomAPI.hxx>
 #include <GeomConvert.hxx>
@@ -66,6 +68,7 @@
 #include <TColGeom_Array2OfBezierSurface.hxx>
 #include <TColgp_Array2OfPnt.hxx>
 #include <TColgp_HArray1OfPnt2d.hxx>
+#include <TColStd_Array1OfReal.hxx>
 #include <TColStd_Array2OfReal.hxx>
 #include <TColStd_HArray1OfReal.hxx>
 #include <TopExp.hxx>
@@ -583,6 +586,9 @@ struct Track
     // For an edge in a half-plane through the axis: the edge turned into the frame, parametrized
     // like the edge
     Handle(Geom2d_Curve) exactCurve;
+    // For an edge: the parameters where its curve is less than C2 (a section's approximation is
+    // C1 at its knots), each one a sample's; the fit is split there
+    std::vector<double> breaks;
 };
 
 // The profile in the frame: its image box, and whether an image point lies in it
@@ -787,6 +793,137 @@ std::optional<double> firstContact(IntCurvesFace_Intersector& intersector, const
     return first;
 }
 
+// A curve through a run of samples, within `deviation` of the image at each sample and at the
+// images halfway between them (`middles`), checked by projection within the neighbouring
+// parameters; null when neither an approximation nor the interpolation fits, with `worst` the
+// largest distance found
+Handle(Geom2d_BSplineCurve) fitThrough(
+    const std::vector<Sample>& samples,
+    const std::vector<Sample>& middles,
+    double deviation,
+    double& worst
+)
+{
+    const int n = static_cast<int>(samples.size());
+    // Chord-length parameters
+    std::vector<double> parameters(n, 0.0);
+    for (int i = 1; i < n; ++i) {
+        parameters[i] = parameters[i - 1] + samples[i].image.Distance(samples[i - 1].image);
+    }
+    if (n < 2 || parameters.back() <= 0.0) {
+        return {};
+    }
+    auto within = [&](const Handle(Geom2d_Curve)& curve) {
+        Geom2dAPI_ProjectPointOnCurve projection;
+        auto distance = [&](const gp_Pnt2d& point, double low, double high) {
+            projection.Init(point, curve, low, high);
+            if (projection.NbPoints() == 0) {
+                // At an end of the window: the nearer end
+                return std::min(point.Distance(curve->Value(low)), point.Distance(curve->Value(high)));
+            }
+            return projection.LowerDistance();
+        };
+        for (int i = 0; i < n; ++i) {
+            const double low = parameters[std::max(i - 1, 0)];
+            const double high = parameters[std::min(i + 1, n - 1)];
+            worst = std::max(worst, distance(samples[i].image, low, high));
+            if (worst > deviation) {
+                return false;
+            }
+        }
+        for (int i = 0; i + 1 < n; ++i) {
+            worst = std::max(worst, distance(middles[i].image, parameters[i], parameters[i + 1]));
+            if (worst > deviation) {
+                return false;
+            }
+        }
+        return true;
+    };
+    try {
+        TColgp_Array1OfPnt2d points(1, n);
+        TColStd_Array1OfReal knots(1, n);
+        for (int i = 0; i < n; ++i) {
+            points(i + 1) = samples[i].image;
+            knots(i + 1) = parameters[i];
+        }
+        worst = 0.0;
+        Geom2dAPI_PointsToBSpline approximation(points, knots, 3, 8, GeomAbs_C2, deviation / 4.0);
+        if (approximation.IsDone() && within(approximation.Curve())) {
+            return approximation.Curve();
+        }
+        Handle(TColgp_HArray1OfPnt2d) through = new TColgp_HArray1OfPnt2d(1, n);
+        Handle(TColStd_HArray1OfReal) at = new TColStd_HArray1OfReal(1, n);
+        for (int i = 0; i < n; ++i) {
+            through->SetValue(i + 1, samples[i].image);
+            at->SetValue(i + 1, parameters[i]);
+        }
+        Geom2dAPI_Interpolate interpolation(through, at, Standard_False, Precision::Confusion() * 1e-3);
+        interpolation.Perform();
+        worst = 0.0;
+        if (interpolation.IsDone() && within(interpolation.Curve())) {
+            return interpolation.Curve();
+        }
+    }
+    catch (const Standard_Failure&) {
+    }
+    return {};
+}
+
+// Fits a run of a track's samples into `curves`, in order: whole; where no curve fits it, in two
+// halves; a short run with its samples doubled (an edge's own curve can bend between them), up to
+// three times along any stretch. False when that fails.
+bool fitRuns(
+    const Track& track,
+    const std::vector<Sample>& samples,
+    const std::vector<Sample>& middles,
+    double deviation,
+    int doublings,
+    std::vector<Handle(Geom2d_BSplineCurve)>& curves,
+    double& worst
+)
+{
+    double off = 0.0;
+    if (Handle(Geom2d_BSplineCurve) curve = fitThrough(samples, middles, deviation, off); !curve.IsNull()) {
+        curves.push_back(curve);
+        return true;
+    }
+    worst = std::max(worst, off);
+    constexpr std::size_t shortRun = 16;
+    if (samples.size() > shortRun) {
+        const std::size_t half = samples.size() / 2;
+        return fitRuns(
+                   track,
+                   std::vector<Sample>(samples.begin(), samples.begin() + half + 1),
+                   std::vector<Sample>(middles.begin(), middles.begin() + half),
+                   deviation,
+                   doublings,
+                   curves,
+                   worst
+               )
+            && fitRuns(
+                   track,
+                   std::vector<Sample>(samples.begin() + half, samples.end()),
+                   std::vector<Sample>(middles.begin() + half, middles.end()),
+                   deviation,
+                   doublings,
+                   curves,
+                   worst
+               );
+    }
+    if (doublings >= 3) {
+        return false;
+    }
+    std::vector<Sample> doubled {samples.front()};
+    std::vector<Sample> doubledMiddles;
+    for (std::size_t i = 0; i + 1 < samples.size(); ++i) {
+        doubledMiddles.push_back(track.between(doubled.back(), middles[i], 0.5));
+        doubled.push_back(middles[i]);
+        doubledMiddles.push_back(track.between(middles[i], samples[i + 1], 0.5));
+        doubled.push_back(samples[i + 1]);
+    }
+    return fitRuns(track, doubled, doubledMiddles, deviation, doublings + 1, curves, worst);
+}
+
 // The track's pieces: split where its side flips, each fitted within `deviation`
 std::vector<JumpPiece> piecesOf(Track& track, double deviation)
 {
@@ -909,113 +1046,54 @@ std::vector<JumpPiece> piecesOf(Track& track, double deviation)
             pieces.push_back(std::move(piece));
             continue;
         }
-        // Fitted through the samples; where the fit strays between them, the samples are doubled
-        // (an edge's own curve can bend between them, a section's approximation), up to three times
-        Handle(Geom2d_Curve) curve;
-        std::vector<double> parameters;
-        for (int attempt = 0;; ++attempt) {
-            piece.points.clear();
-            for (const Sample& sample : stretch.samples) {
-                piece.points.push_back(sample.image);
-            }
-            // Chord-length parameters
-            const int n = static_cast<int>(stretch.samples.size());
-            parameters.assign(n, 0.0);
-            for (int i = 1; i < n; ++i) {
-                parameters[i] = parameters[i - 1] + piece.points[i].Distance(piece.points[i - 1]);
-            }
-            if (parameters.back() <= 0.0) {
-                break;
-            }
-            double worst = 0.0;
-            auto within = [&](const Handle(Geom2d_Curve)& curve) {
-                worst = 0.0;
-                Geom2dAPI_ProjectPointOnCurve projection;
-                auto distance = [&](const gp_Pnt2d& point, double low, double high) {
-                    projection.Init(point, curve, low, high);
-                    if (projection.NbPoints() == 0) {
-                        // At an end of the window: the nearer end
-                        return std::min(point.Distance(curve->Value(low)), point.Distance(curve->Value(high)));
-                    }
-                    return projection.LowerDistance();
-                };
-                for (int i = 0; i < n; ++i) {
-                    const double low = parameters[std::max(i - 1, 0)];
-                    const double high = parameters[std::min(i + 1, n - 1)];
-                    worst = std::max(worst, distance(piece.points[i], low, high));
-                    if (worst > deviation) {
-                        return false;
-                    }
-                }
-                for (int i = 0; i + 1 < n; ++i) {
-                    worst = std::max(worst, distance(stretch.middles[i].image, parameters[i], parameters[i + 1]));
-                    if (worst > deviation) {
-                        return false;
-                    }
-                }
-                return true;
-            };
-            curve.Nullify();
-            try {
-                TColgp_Array1OfPnt2d points(1, n);
-                TColStd_Array1OfReal knots(1, n);
-                for (int i = 0; i < n; ++i) {
-                    points(i + 1) = piece.points[i];
-                    knots(i + 1) = parameters[i];
-                }
-                if (n >= 2) {
-                    Geom2dAPI_PointsToBSpline approximation(points, knots, 3, 8, GeomAbs_C2, deviation / 4.0);
-                    if (approximation.IsDone() && within(approximation.Curve())) {
-                        curve = approximation.Curve();
-                    }
-                }
-                if (curve.IsNull()) {
-                    Handle(TColgp_HArray1OfPnt2d) through = new TColgp_HArray1OfPnt2d(1, n);
-                    Handle(TColStd_HArray1OfReal) at = new TColStd_HArray1OfReal(1, n);
-                    for (int i = 0; i < n; ++i) {
-                        through->SetValue(i + 1, piece.points[i]);
-                        at->SetValue(i + 1, parameters[i]);
-                    }
-                    Geom2dAPI_Interpolate interpolation(through, at, Standard_False, Precision::Confusion() * 1e-3);
-                    interpolation.Perform();
-                    if (interpolation.IsDone() && within(interpolation.Curve())) {
-                        curve = interpolation.Curve();
-                    }
-                }
-            }
-            catch (const Standard_Failure&) {
-                curve.Nullify();
-            }
-            if (curve.IsNull() && attempt >= 3) {
-                throw untraceable(
-                    std::string("no curve fits a jump within its deviation (")
-                    + (track.source == JumpSource::Edge ? "edge " + std::to_string(track.edge) : std::string("silhouette"))
-                    + ", " + std::to_string(n) + " points from (" + std::to_string(piece.points.front().X()) + ", "
-                    + std::to_string(piece.points.front().Y()) + ") to (" + std::to_string(piece.points.back().X())
-                    + ", " + std::to_string(piece.points.back().Y()) + "), off by " + std::to_string(worst) + ")"
+        // Fitted run by run: split where the edge's curve is less than C2 and every `longestRun`
+        // samples, so that each fit stays small (one fit through the 7,000 samples of a section's
+        // edge took most of a minute), then joined end to end
+        constexpr std::size_t longestRun = 128;
+        std::vector<Handle(Geom2d_BSplineCurve)> curves;
+        double worst = 0.0;
+        bool fitted = true;
+        std::size_t begin = 0;
+        const std::size_t n = stretch.samples.size();
+        for (std::size_t i = 1; i < n && fitted; ++i) {
+            const bool atBreak = std::ranges::binary_search(track.breaks, stretch.samples[i].u);
+            if (i + 1 == n || atBreak || i - begin == longestRun) {
+                fitted = fitRuns(
+                    track,
+                    std::vector<Sample>(stretch.samples.begin() + begin, stretch.samples.begin() + i + 1),
+                    std::vector<Sample>(stretch.middles.begin() + begin, stretch.middles.begin() + i),
+                    deviation,
+                    0,
+                    curves,
+                    worst
                 );
+                begin = i;
             }
-            if (!curve.IsNull()) {
-                break;
+        }
+        // The fits pass through their end samples, which neighbouring runs share
+        Handle(Geom2d_BSplineCurve) curve;
+        if (fitted && !curves.empty()) {
+            Geom2dConvert_CompCurveToBSplineCurve joined(curves.front());
+            for (std::size_t k = 1; k < curves.size() && fitted; ++k) {
+                fitted = curves[k - 1]->EndPoint().Distance(curves[k]->StartPoint()) <= deviation * 1e-3
+                    && joined.Add(curves[k], deviation * 1e-3, Standard_True);
             }
-            std::vector<Sample> samples {stretch.samples.front()};
-            std::vector<Sample> middles;
-            for (std::size_t i = 0; i + 1 < stretch.samples.size(); ++i) {
-                const Sample& middle = stretch.middles[i];
-                middles.push_back(track.between(samples.back(), middle, 0.5));
-                samples.push_back(middle);
-                middles.push_back(track.between(middle, stretch.samples[i + 1], 0.5));
-                samples.push_back(stretch.samples[i + 1]);
+            if (fitted) {
+                curve = joined.BSplineCurve();
             }
-            stretch.samples = std::move(samples);
-            stretch.middles = std::move(middles);
         }
         if (curve.IsNull()) {
-            continue;
+            throw untraceable(
+                std::string("no curve fits a jump within its deviation (")
+                + (track.source == JumpSource::Edge ? "edge " + std::to_string(track.edge) : std::string("silhouette"))
+                + ", " + std::to_string(n) + " points from (" + std::to_string(piece.points.front().X()) + ", "
+                + std::to_string(piece.points.front().Y()) + ") to (" + std::to_string(piece.points.back().X())
+                + ", " + std::to_string(piece.points.back().Y()) + "), off by " + std::to_string(worst) + ")"
+            );
         }
         piece.curve = curve;
-        piece.first = parameters.front();
-        piece.last = parameters.back();
+        piece.first = curve->FirstParameter();
+        piece.last = curve->LastParameter();
         pieces.push_back(std::move(piece));
     }
     return pieces;
@@ -1509,6 +1587,20 @@ JumpTrace traceJumps(
                     parameters.push_back(first + (last - first) * i / segments);
                 }
             }
+            // A sample at each place where the curve is less than C2, and the fit split there
+            std::vector<double> breaks;
+            if (const int intervals = curve->NbIntervals(GeomAbs_C2); intervals > 1) {
+                TColStd_Array1OfReal bounds(1, intervals + 1);
+                curve->Intervals(bounds, GeomAbs_C2);
+                for (int i = 2; i <= intervals; ++i) {
+                    if (bounds(i) > first && bounds(i) < last) {
+                        breaks.push_back(bounds(i));
+                    }
+                }
+                parameters.insert(parameters.end(), breaks.begin(), breaks.end());
+                std::ranges::sort(parameters);
+                parameters.erase(std::ranges::unique(parameters).begin(), parameters.end());
+            }
             const double step = length / segments;
             // By value: the tracks outlive this loop's locals
             auto imageAt = [curve, &phi](double t) {
@@ -1613,6 +1705,7 @@ JumpTrace traceJumps(
                     track.between = between;
                     track.sideAt = sideAt;
                     track.exactCurve = exact;
+                    track.breaks = breaks;
                     tracks.push_back(std::move(track));
                 }
                 run.clear();
