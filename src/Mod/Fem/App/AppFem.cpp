@@ -63,6 +63,12 @@
 #include "WorkerExtension.h"
 
 #ifdef FC_USE_VTK
+# include <string>
+# include <vtkLogger.h>
+# include <vtkObjectFactory.h>
+# include <vtkOutputWindow.h>
+# include <vtkSmartPointer.h>
+
 # include "FemPostFilter.h"
 # include "FemPostFunction.h"
 # include "FemPostPipeline.h"
@@ -75,6 +81,55 @@ namespace Fem
 {
 extern PyObject* initModule();
 }
+
+#ifdef FC_USE_VTK
+namespace
+{
+/** Sends VTK's messages to the Console (ops#382). VTK's default output window on Windows,
+ * vtkWin32OutputWindow, opens a window on the desktop for every VTK warning or error (e.g.
+ * vtkSmoothPolyDataFilter's "No data to smooth!" on empty data). */
+class FemVtkOutputWindow: public vtkOutputWindow
+{
+public:
+    static FemVtkOutputWindow* New();
+    vtkTypeMacro(FemVtkOutputWindow, vtkOutputWindow);
+
+    void DisplayText(const char* text) override
+    {
+        if (!text) {
+            return;
+        }
+        std::string msg(text);
+        msg.erase(msg.find_last_not_of(" \t\r\n") + 1);
+        if (msg.empty()) {
+            return;
+        }
+        msg += '\n';
+        switch (GetCurrentMessageType()) {
+            case MESSAGE_TYPE_ERROR:
+                Base::Console().developerError("VTK", "%s", msg.c_str());
+                break;
+            case MESSAGE_TYPE_WARNING:
+            case MESSAGE_TYPE_GENERIC_WARNING:
+                Base::Console().developerWarning("VTK", "%s", msg.c_str());
+                break;
+            default:
+                Base::Console().log("VTK", "%s", msg.c_str());
+                break;
+        }
+    }
+};
+
+vtkStandardNewMacro(FemVtkOutputWindow);
+
+void forwardVtkMessagesToConsole()
+{
+    vtkOutputWindow::SetInstance(vtkSmartPointer<FemVtkOutputWindow>::New());
+    // VTK's logger writes its errors and warnings to stderr as well: the Console has them now
+    vtkLogger::SetStderrVerbosity(vtkLogger::VERBOSITY_OFF);
+}
+}  // namespace
+#endif
 
 /* Python entry */
 PyMOD_INIT_FUNC(Fem)
@@ -194,6 +249,8 @@ PyMOD_INIT_FUNC(Fem)
     Fem::PlaneExtensionPython                 ::init();
 
 #ifdef FC_USE_VTK
+    forwardVtkMessagesToConsole();
+
     Fem::FemPostSmoothFilterExtension         ::init();
 
     Fem::FemPostObject                        ::init();
