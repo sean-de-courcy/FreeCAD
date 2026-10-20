@@ -643,6 +643,49 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
         self.assertBounds(surface1, App.BoundBox(-5, -5, 0, 5, 5, 10), precision=2)
         del surface1
 
+    def testPartSweepPointApexName(self):
+        """A Part Sweep along a line between a square and a point (a Part::Vertex), either order,
+        Solid off and on: the apex vertex is named after the point, with the point's own name
+        when it is the first section and its projection (PRJ) when it is the last (fork PR 352
+        round 1; with Solid on, the sweep crashed)."""
+        spine = self.doc.addObject("Part::Line", "SweepSpine")
+        spine.X2, spine.Y2, spine.Z2 = 0, 0, 30
+        point = self.doc.addObject("Part::Vertex", "SweepPoint")
+        square = self.doc.addObject("Part::Polygon", "SweepSquare")
+        square.Close = True
+        for pointFirst in (False, True):
+            pointZ, squareZ = (0, 30) if pointFirst else (30, 0)
+            point.Z = pointZ
+            square.Nodes = [App.Vector(x, y, squareZ) for x, y in ((-2, -2), (2, -2), (2, 2), (-2, 2))]
+            for solid in (False, True):
+                with self.subTest(pointFirst=pointFirst, solid=solid):
+                    sweep = self.doc.addObject("Part::Sweep", "Sweep")
+                    sweep.Sections = [point, square] if pointFirst else [square, point]
+                    sweep.Spine = (spine, [])
+                    sweep.Solid = solid
+                    self.doc.recompute()
+                    shape = sweep.Shape
+                    self.assertTrue(shape.isValid())
+                    self.assertEqual(shape.ShapeType, "Solid" if solid else "Shell")
+                    apex = [
+                        f"Vertex{index}"
+                        for index, vertex in enumerate(shape.Vertexes, 1)
+                        if (vertex.Point - App.Vector(0, 0, pointZ)).Length < 1e-6
+                    ]
+                    self.assertEqual(len(apex), 1)
+                    name = shape.ElementReverseMap[apex[0]]
+                    sections = App.getDecodedMappedName(name)
+                    if pointFirst:
+                        self.assertEqual(sections[0]["referenceIDs"], ["Vertex1"])
+                        self.assertEqual(int(sections[0]["iterationTag"]), point.ID)
+                    else:
+                        self.assertEqual(sections[-1]["opCode"], "SWP")
+                        self.assertIn("PRJ", sections[-1]["mapperFlags"])
+                        source = App.getDecodedMappedName(sections[-1]["linkedNames"][0])[0]
+                        self.assertEqual(source["referenceIDs"], ["Vertex1"])
+                        self.assertEqual(int(source["iterationTag"]), point.ID)
+                    self.doc.removeObject(sweep.Name)
+
     def testAppPartMakeLoft(self):
         # Act
         solid1 = Part.makeLoft(self.doc.Box1.Shape.Wires[0:2])

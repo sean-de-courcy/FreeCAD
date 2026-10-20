@@ -3845,45 +3845,71 @@ static std::vector<TopoShape> prepareProfiles(const std::vector<TopoShape>& shap
 
 namespace
 {
-// A sweep's ends and corners (ops#375). MakePipeShell reports the edges and vertices of the
-// sections it places at the spine's vertices (the start and end wires, and the wire at each
-// corner) as generated from those vertices, so a square's four start edges were all
+// A sweep's ends, corners and lateral edges (ops#375). MakePipeShell reports the edges and
+// vertices of the sections it places at the spine's vertices (the start and end wires, and the
+// wire at each corner) as generated from those vertices, so a square's four start edges were all
 // `<spine vertex>;SWP;<n>;E;GEN`, told apart only by the counter n, in the wire's order. A
 // profile edit that adds an edge before another (a chamfer at a corner) shifted the counters, and
-// references on start, corner and end edges moved silently to a neighbour. As in a PartDesign
-// Pipe (ops#351, FeaturePipe.cpp's MapperPipeShellEnds): the start wire's edges and vertices are
-// the first section's modified (its own names) and the end wire's the last section's projected
-// (`PRJ`), the ends swapping when the sections lie nearer the shell's other end (a spine drawn
-// towards the profile). The spine's vertices generate no edges or vertices, so the edges at a
-// corner are named after the side faces they bound (`UPP`), whose names hold the spine's edge and
-// the profile's. Faces keep their history: a round corner's faces are the profile edges' too.
+// references on start, corner and end edges moved silently to a neighbour.
+// - Ends. As in a PartDesign Pipe (ops#351, FeaturePipe.cpp's MapperPipeShellEnds): the start
+//   wire's edges and vertices are the first section's modified (its own names) and the end wire's
+//   the last section's projected (`PRJ`), the ends swapping when the sections lie nearer the
+//   shell's other end (a spine drawn towards the profile). Only when the first section lies at
+//   the end it names (within MakePipeShell's default 3D tolerance): a profile inside the spine
+//   would hand its names to the nearer end, and an edit moving it across the spine's middle would
+//   swap the ends' names silently (fork PR 352 round 1). There the end wires keep the names the
+//   spine's end vertices give them, whatever the profile's place.
+// - Corners. The spine's other vertices generate no edges or vertices, so the edges at a corner
+//   are named after the side faces they bound (`UPP`), whose names hold the spine's edge and the
+//   profile's. Faces keep their history: a round corner's faces are the profile edges' too.
+// - Lateral edges (a section vertex swept along one leg) are also generated from the spine edge
+//   (or round corner's vertex) whose side faces they bound, so each is named after its section
+//   vertex and that spine element, as a side face is after its profile edge and spine edge.
+//   MakePipeShell reports them as generated from the section vertex alone, and they were told
+//   apart by leg order, the first leg's taking the start vertex's name once there were two legs:
+//   adding a leg at the far end, or deleting the last, moved references silently (fork PR 352
+//   round 1).
 class MapperSweepEnds: public MapperMaker
 {
 public:
-    /// \a spine is the spine as given and as a wire (their vertices may differ), \a first and
-    /// \a last the first and last sections added to \a pipe (the same for a sweep of one profile),
-    /// a wire or a vertex each
+    /// \a spine is the spine as given and as a wire (their vertices may differ), \a sections
+    /// the sections added to \a pipe, a wire or a vertex each. Built before MakeSolid(), after
+    /// which a point section's ends are null.
     MapperSweepEnds(
         BRepOffsetAPI_MakePipeShell& pipe,
         const std::vector<TopoDS_Shape>& spine,
-        const TopoDS_Shape& first,
-        const TopoDS_Shape& last
+        const std::vector<TopoShape>& sections
     )
         : MapperMaker(pipe)
     {
         for (const TopoDS_Shape& shape : spine) {
             TopExp::MapShapes(shape, TopAbs_VERTEX, spineVertices);
+            TopExp::MapShapes(shape, TopAbs_EDGE, spineEdges);
         }
         // A section's vertex keeps the edges it sweeps, should a section share it with the spine
-        for (const TopoDS_Shape& section : {first, last}) {
-            TopExp::MapShapes(section, TopAbs_VERTEX, sectionVertices);
+        for (const TopoShape& section : sections) {
+            TopExp::MapShapes(section.getShape(), TopAbs_VERTEX, sectionVertices);
         }
+        for (int i = 1; i <= sectionVertices.Extent(); ++i) {
+            for (const TopoDS_Shape& element : pipe.Generated(sectionVertices(i))) {
+                if (element.ShapeType() == TopAbs_EDGE) {
+                    laterals.Add(element);
+                }
+            }
+        }
+        const TopoDS_Shape& first = sections.front().getShape();
+        const TopoDS_Shape& last = sections.back().getShape();
         TopTools_IndexedMapOfShape startElements;
         TopTools_IndexedMapOfShape endElements;
-        TopExp::MapShapes(pipe.FirstShape(), startElements);
-        TopExp::MapShapes(pipe.LastShape(), endElements);
+        if (!pipe.FirstShape().IsNull()) {
+            TopExp::MapShapes(pipe.FirstShape(), startElements);
+        }
+        if (!pipe.LastShape().IsNull()) {
+            TopExp::MapShapes(pipe.LastShape(), endElements);
+        }
         double kept = distanceTo(first, pipe.FirstShape());
         double swapped = distanceTo(first, pipe.LastShape());
+        const double atOwnEnd = std::min(kept, swapped);
         // One profile: its distances alone (the two sections' terms would be the same on both
         // sides, and nothing would ever swap)
         if (!last.IsSame(first)) {
@@ -3891,6 +3917,19 @@ public:
             swapped += distanceTo(last, pipe.FirstShape());
         }
         const bool reversed = swapped + Precision::Confusion() < kept;
+        // MakePipeShell's default 3D tolerance (BRepOffsetAPI_MakePipeShell::SetTolerance)
+        constexpr double atEndTolerance = 1e-4;
+        if (atOwnEnd > atEndTolerance) {
+            for (const TopTools_IndexedMapOfShape* end : {&startElements, &endElements}) {
+                for (int i = 1; i <= end->Extent(); ++i) {
+                    const TopAbs_ShapeEnum type = end->FindKey(i).ShapeType();
+                    if (type == TopAbs_EDGE || type == TopAbs_VERTEX) {
+                        spineEndElements.Add(end->FindKey(i));
+                    }
+                }
+            }
+            return;
+        }
         const TopTools_IndexedMapOfShape& own = reversed ? endElements : startElements;
         const TopTools_IndexedMapOfShape& other = reversed ? startElements : endElements;
         bindEnds(pipe, first, own, nullptr, starts);
@@ -3914,9 +3953,28 @@ public:
     {
         MapperMaker::generated(s);
         if (spineVertices.Contains(s) && !sectionVertices.Contains(s)) {
-            std::erase_if(_res, [](const TopoDS_Shape& element) {
-                return element.ShapeType() == TopAbs_EDGE || element.ShapeType() == TopAbs_VERTEX;
+            std::erase_if(_res, [this](const TopoDS_Shape& element) {
+                return (element.ShapeType() == TopAbs_EDGE || element.ShapeType() == TopAbs_VERTEX)
+                    && !spineEndElements.Contains(element);
             });
+        }
+        if (spineVertices.Contains(s) || spineEdges.Contains(s)) {
+            // The lateral edges that bound the side faces this spine element generated
+            TopTools_IndexedMapOfShape bounding;
+            for (const TopoDS_Shape& element : _res) {
+                if (element.ShapeType() == TopAbs_FACE) {
+                    TopExp::MapShapes(element, TopAbs_EDGE, bounding);
+                }
+            }
+            for (int i = 1; i <= bounding.Extent(); ++i) {
+                const TopoDS_Shape& edge = bounding(i);
+                if (laterals.Contains(edge)
+                    && std::ranges::none_of(_res, [&](const TopoDS_Shape& element) {
+                           return element.IsSame(edge);
+                       })) {
+                    _res.push_back(edge);
+                }
+            }
         }
         return _res;
     }
@@ -3986,7 +4044,7 @@ private:
         if (section.ShapeType() == TopAbs_VERTEX) {
             TopTools_ListOfShape found;
             for (int i = 1; i <= endElements.Extent(); ++i) {
-                if (endElements(i).ShapeType() == TopAbs_VERTEX) {
+                if (!endElements(i).IsNull() && endElements(i).ShapeType() == TopAbs_VERTEX) {
                     take(endElements(i), found);
                 }
             }
@@ -4015,7 +4073,13 @@ private:
     }
 
     TopTools_IndexedMapOfShape spineVertices;
+    TopTools_IndexedMapOfShape spineEdges;
     TopTools_IndexedMapOfShape sectionVertices;
+    /// The edges the section vertices sweep
+    TopTools_IndexedMapOfShape laterals;
+    /// The end wires' edges and vertices when the first section doesn't lie at its end: the
+    /// spine's end vertices keep generating them
+    TopTools_IndexedMapOfShape spineEndElements;
     TopTools_DataMapOfShapeListOfShape starts;
     TopTools_DataMapOfShapeListOfShape ends;
 };
@@ -4092,18 +4156,20 @@ TopoShape& TopoShape::makeElementPipeShell(
 #endif
     }
 
+    // Shape() builds the pipe, which the mapper's FirstShape(), LastShape() and Generated() need.
+    // The mapper reads the ends before MakeSolid(): after it, a point section's are null.
+    mkPipeShell.Shape();
+    const MapperSweepEnds mapper(
+        mkPipeShell,
+        {shapes.front().getShape(), spine.getShape()},
+        profiles
+    );
+
     if (make_solid == MakeSolid::makeSolid) {
         mkPipeShell.MakeSolid();
     }
 
-    // Shape() builds the pipe, which the mapper's FirstShape(), LastShape() and Generated() need
     const TopoDS_Shape built = mkPipeShell.Shape();
-    const MapperSweepEnds mapper(
-        mkPipeShell,
-        {shapes.front().getShape(), spine.getShape()},
-        profiles.front().getShape(),
-        profiles.back().getShape()
-    );
     return makeShapeWithElementMap(built, mapper, shapes, op);
 }
 

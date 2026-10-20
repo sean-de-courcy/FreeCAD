@@ -2177,31 +2177,25 @@ TEST_F(TopoShapeExpansionTest, makeElementPipeShell)
             {index == 1 ? unmappedName("Edge1", 2, "PSH") : upperName(topoShape, edge, 1, "PSH")}
         ));
     }
-    //   each profile vertex generates an edge along each spine edge, the four told apart by the
-    //   index, 0 to 3 in the result's edge order (ops#19)
+    //   each profile vertex generates an edge along each spine edge, named after both, as a side
+    //   face is after its spine edge and profile edge (fork PR 352 round 1; before, the four were
+    //   told apart by an index in the result's edge order)
     for (auto [profileVertex, z] : {std::pair {"Vertex1", 0.0}, std::pair {"Vertex2", -8.0}}) {
-        int rank = 0;
-        auto edges = static_cast<int>(topoShape.countSubElements("Edge"));
-        for (int index = 1; index <= edges; ++index) {
-            auto edge = "Edge" + std::to_string(index);
-            auto center = topoShape.getSubTopoShape(edge.c_str()).getBoundBox().GetCenter();
-            if (std::abs(center.z - z) < 1e-7) {
-                EXPECT_TRUE(elementHasNames(
-                    topoShape,
-                    edge.c_str(),
-                    {linkingName(
-                        {unmappedName(profileVertex, 2, "PSH")},
-                        1,
-                        "PSH",
-                        'E',
-                        MAPPER_FLAG_GENERATED,
-                        rank
-                    )}
-                ));
-                ++rank;
-            }
+        for (int index = 1; index <= 4; ++index) {
+            auto spineEdge = "Edge" + std::to_string(index);
+            auto center = face1ts.getSubTopoShape(spineEdge.c_str()).getBoundBox().GetCenter();
+            EXPECT_TRUE(elementHasNames(
+                topoShape,
+                elementAt(topoShape, "Edge", Base::Vector3d(center.x, center.y, z)).c_str(),
+                {linkingName(
+                    {unmappedName(spineEdge, 1, "PSH"), unmappedName(profileVertex, 2, "PSH")},
+                    1,
+                    "PSH",
+                    'E',
+                    MAPPER_FLAG_GENERATED
+                )}
+            ));
         }
-        EXPECT_EQ(rank, 4);
     }
     //   the vertices: the profile's own at the start (the line's ends), the others named after the
     //   faces they bound (UPP), those at z = 0 and z = -8 between the same faces told apart by the
