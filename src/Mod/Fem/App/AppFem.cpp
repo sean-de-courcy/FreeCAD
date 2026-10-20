@@ -105,16 +105,19 @@ public:
             return;
         }
         msg += '\n';
+        // A std::string notifier: Console().log also has a (const char* format, ...) overload,
+        // which a literal "VTK" would pick, printing only "VTK"
+        static const std::string notifier("VTK");
         switch (GetCurrentMessageType()) {
             case MESSAGE_TYPE_ERROR:
-                Base::Console().developerError("VTK", "%s", msg.c_str());
+                Base::Console().developerError(notifier, "%s", msg.c_str());
                 break;
             case MESSAGE_TYPE_WARNING:
             case MESSAGE_TYPE_GENERIC_WARNING:
-                Base::Console().developerWarning("VTK", "%s", msg.c_str());
+                Base::Console().developerWarning(notifier, "%s", msg.c_str());
                 break;
             default:
-                Base::Console().log("VTK", "%s", msg.c_str());
+                Base::Console().log(notifier, "%s", msg.c_str());
                 break;
         }
     }
@@ -125,7 +128,10 @@ vtkStandardNewMacro(FemVtkOutputWindow);
 void forwardVtkMessagesToConsole()
 {
     vtkOutputWindow::SetInstance(vtkSmartPointer<FemVtkOutputWindow>::New());
-    // VTK's logger writes its errors and warnings to stderr as well: the Console has them now
+    // VTK's logger writes its errors and warnings to stderr as well: the Console has them now.
+    // This is global, so it also silences vtkLog/vtkLogF calls that bypass vtkOutputWindow,
+    // the Python vtk module's in macros included. A vtkLogger::AddCallback forwarding to the
+    // Console would restore those if they are ever needed.
     vtkLogger::SetStderrVerbosity(vtkLogger::VERBOSITY_OFF);
 }
 }  // namespace
