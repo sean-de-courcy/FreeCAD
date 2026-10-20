@@ -118,6 +118,9 @@ bool TaskDlgDatumParameters::reject()
 
 bool TaskDlgDatumParameters::accept()
 {
+    if (!ViewProvider) {
+        return reject();
+    }
 
     Part::Datum* pcDatum = ViewProvider->getObject<Part::Datum>();
     auto pcActiveBody = PartDesignGui::getBodyFor(pcDatum, false);

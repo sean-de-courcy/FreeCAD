@@ -618,7 +618,7 @@ public:
     }
 
     // create right click context menu based on selection in the 3D view
-    void generateContextMenu();
+    void generateContextMenu(const Gui::View3DInventorViewer* viewer);
 
     //@}
 

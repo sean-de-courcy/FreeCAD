@@ -51,6 +51,7 @@
 #include <App/ElementNamingUtils.h>
 #include <App/Expression.h>
 #include <App/ObjectIdentifier.h>
+#include <App/DocumentObserver.h>
 #include <App/Origin.h>
 #include <App/Datums.h>
 #include <App/Part.h>
@@ -77,6 +78,16 @@
 
 using namespace PartDesignGui;
 using namespace Attacher;
+
+namespace
+{
+void acceptDialogOf(const std::string& docName)
+{
+    if (Gui::Document* doc = Gui::Application::Instance->getDocument(docName.c_str())) {
+        Gui::Control().accept(doc->getDocument());
+    }
+}
+}  // namespace
 
 // TODO Do ve should snap here to App:Part or GeoFeatureGroup/DocumentObjectGroup ? (2015-09-04,
 // Fat-Zer)
@@ -1150,12 +1161,7 @@ void TaskFeaturePick::onSelectionChanged(const Gui::SelectionChanges& msg)
                     if (isSingleSelectionEnabled()) {
                         QMetaObject::invokeMethod(
                             qobject_cast<Gui::ControlSingleton*>(&Gui::Control()),
-                            [docNameCopy] {
-                                Gui::Control().accept(
-                                    Gui::Application::Instance->getDocument(docNameCopy.c_str())
-                                        ->getDocument()
-                                );
-                            },
+                            [docNameCopy] { acceptDialogOf(docNameCopy); },
                             Qt::QueuedConnection
                         );
                     }
@@ -1198,11 +1204,7 @@ void TaskFeaturePick::onDoubleClick(QListWidgetItem* item)
     std::string docNameCopy = documentName;
     QMetaObject::invokeMethod(
         qobject_cast<Gui::ControlSingleton*>(&Gui::Control()),
-        [docNameCopy] {
-            Gui::Control().accept(
-                Gui::Application::Instance->getDocument(docNameCopy.c_str())->getDocument()
-            );
-        },
+        [docNameCopy] { acceptDialogOf(docNameCopy); },
         Qt::QueuedConnection
     );
 }
@@ -1217,15 +1219,18 @@ void TaskFeaturePick::slotDeletedObject(const Gui::ViewProviderDocumentObject& O
 void TaskFeaturePick::slotUndoDocument(const Gui::Document& doc)
 {
     if (origins.empty()) {
-        QTimer::singleShot(100, [&doc]() { Gui::Control().closeDialog(doc.getDocument()); });
+        // The document may be closed before the timer fires, so look it up again by name
+        QTimer::singleShot(100, [docT = App::DocumentT(doc.getDocument())]() {
+            if (App::Document* appDoc = docT.getDocument()) {
+                Gui::Control().closeDialog(appDoc);
+            }
+        });
     }
 }
 
-void TaskFeaturePick::slotDeleteDocument(const Gui::Document& doc)
+void TaskFeaturePick::slotDeleteDocument(const Gui::Document&)
 {
     origins.clear();
-    App::Document* docPtr = doc.getDocument();
-    QTimer::singleShot(100, [docPtr]() { Gui::Control().closeDialog(docPtr); });
 }
 
 void TaskFeaturePick::showExternal(bool val)

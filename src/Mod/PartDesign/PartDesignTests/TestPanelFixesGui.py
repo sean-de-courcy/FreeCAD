@@ -669,13 +669,14 @@ class TestPanelFixesGui(unittest.TestCase):
 
     # -- ops#327: the Profile command's copy of a sketch in another document ---------------------
 
-    def testPadOnASketchOfAnotherDocumentStopsWhenTheCopyIsRefused(self):
-        """ops#327: Pad, with an active body, on a sketch of another document outside any body,
-        answered with Make dependent copy, which is refused (its link can't reach another
-        document). The command stops with the refusal: nothing is added to either document, and
-        no transaction is left open. The refused copy, a null, went to the body's addObject and on
-        as the pad's profile: nothing was made, without a word, and the "Make Copy" transaction
-        stayed open."""
+    def testPadOnASketchOfAnotherDocumentIsNotTaken(self):
+        """ops#327, then ops#390: Pad, with an active body, on a sketch of another document
+        outside any body. Since ops#390 (upstream PR 33716) a command's selection holds only the
+        active document's objects again, so Pad finds no sketch and says so: nothing is added to
+        either document, and no transaction is left open. (Before, the sketch was offered for a
+        copy; Make dependent copy was refused, its link can't reach another document, and ops#327
+        made the command stop there: the refused copy, a null, had gone on as the pad's profile,
+        nothing made, without a word, and the "Make Copy" transaction left open.)"""
         self.body = models.body(self.doc)
         self.doc.recompute()
         other = App.newDocument("PanelFixesOther", hidden=True)
@@ -701,9 +702,7 @@ class TestPanelFixesGui(unittest.TestCase):
             self.assertEqual([o.Name for o in other.Objects], [outer.Name])
             self.assertIsNone(App.getActiveTransaction())
             self.assertEqual(self.doc.UndoNames, undo)
-            self.assertEqual(len(self.modals), 2, self.modals)
-            self.assertEqual(self.modals[0], "DlgReference")
-            self.assertIn("'Outer' is in another document", self.modals[1])
+            self.assertEqual(self.modals, ["QMessageBox: No sketch is available in the document"])
         finally:
             Gui.Selection.clearSelection()
             App.setActiveDocument(self.doc.Name)
