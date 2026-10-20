@@ -88,8 +88,11 @@ class TestNewSketchDialogGui(unittest.TestCase):
 
     def test_cancel_after_the_body_is_removed(self):
         """The Body removed from the console while the dialog is open: Cancel closes the dialog
-        and leaves the document usable."""
-        self.open_new_sketch()
+        and leaves the document usable. Cancel aborts New Sketch's transaction, which the removal
+        joined, so the document is back as it was before New Sketch: the Body and its origin, no
+        sketch, no transaction left open."""
+        before = sorted(o.Name for o in self.doc.Objects)
+        name = self.open_new_sketch()
         self.doc.removeObject(self.body.Name)
         flush_gui()
         dialog = FreeCADGui.Control.activeTaskDialog()
@@ -98,7 +101,10 @@ class TestNewSketchDialogGui(unittest.TestCase):
             flush_gui()
         self.assertFalse(FreeCADGui.Control.activeDialog())
         self.assertEqual(attacher_panels(), [])
-        self.assertIsNone(self.doc.getObject("Body"))
+        self.assertIsNone(self.doc.getObject(name))
+        self.assertEqual(sorted(o.Name for o in self.doc.Objects), before)
+        self.assertEqual(self.doc.getObject("Body").Group, [])
+        self.assertIsNone(FreeCAD.getActiveTransaction())
         # the document still works
         box = self.doc.addObject("Part::Box", "Box")
         self.doc.recompute()
