@@ -2248,6 +2248,66 @@ class TestNamingSolver(unittest.TestCase):
         self.assertIn("Warning", fillet.State)
         self.assertEqual(App.getReferenceReport(fillet)[0]["warning_level"], "normal")
 
+    # Fork PR 348 round 3 (ops#391): a judgement goes when its reference isn't found in place
+
+    def testRecordBackAfterMissingIsJudgedAgain(self):
+        """The redrawn rectangle's edge, exactly in place (the quieter level), stays quiet when
+        the pad is made longer. Drawn at 60 mm instead, the edge goes missing; undone, the
+        judged record and its pick come back, but the edge is no longer where that record's
+        original was: judged again, the level is normal, also after a redo and a second undo."""
+        doc = self.newDocument()
+        doc.UndoMode = 1
+        pad, fillet = self.padWithFillet(doc)
+        self.redrawAt(doc, 20)
+        pad.Length = 12
+        doc.recompute()
+        self.assertEqual(App.getReferenceReport(fillet)[0]["warning_level"], "same-place")
+        judged = fillet.Base[1]
+        doc.openTransaction("far")
+        self.redrawAt(doc, 60)
+        doc.commitTransaction()
+        self.assertFalse(fillet.isValid())
+        for action in (doc.undo, doc.redo, doc.undo):
+            action()
+            doc.recompute()
+        self.assertTrue(fillet.isValid())
+        self.assertEqual(fillet.Base[1], judged)
+        self.assertIn("Warning", fillet.State)
+        self.assertEqual(App.getReferenceReport(fillet)[0]["warning_level"], "normal")
+
+    def testRemovedReferenceBackIsJudgedAgain(self):
+        """A fillet on the rectangle's left bottom edge and its right vertical edge. Redrawn in
+        place, then the pad made longer: both quiet (the bottom edge in place now, the vertical
+        one by its judgement). The vertical edge's reference removed and the removal undone:
+        its record comes back, but the edge has moved since: judged again, the level is normal."""
+        doc = self.newDocument()
+        doc.UndoMode = 1
+        pad, fillet = self.padWithFillet(doc)
+        fillet.Base = (
+            pad,
+            [
+                edge("line", direction=App.Vector(0, 1, 0), through=(0, 5, 0)).one(pad.Shape)[0],
+                edge("line", direction=Z, through=(20, 0, 0)).one(pad.Shape)[0],
+            ],
+        )
+        doc.recompute()
+        self.assertTrue(fillet.isValid())
+        self.redrawAt(doc, 20)
+        pad.Length = 12
+        doc.recompute()
+        self.assertEqual(App.getReferenceReport(fillet)[0]["warning_level"], "same-place")
+        both = fillet.Base[1]
+        doc.openTransaction("remove")
+        fillet.Base = (pad, both[:1])
+        doc.recompute()
+        doc.commitTransaction()
+        doc.undo()
+        doc.recompute()
+        self.assertTrue(fillet.isValid())
+        self.assertEqual(fillet.Base[1], both)
+        self.assertIn("Warning", fillet.State)
+        self.assertEqual(App.getReferenceReport(fillet)[0]["warning_level"], "normal")
+
     def testHiddenSamePlaceMarkerSendsItsPrintToTheLog(self):
         """With the tree's marker for same-place warnings hidden (the TreeView preference), the
         redrawn rectangle's two filleted edges, found again in the same place, print no warning
