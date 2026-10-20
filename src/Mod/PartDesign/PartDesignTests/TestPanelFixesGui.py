@@ -28,7 +28,7 @@ import unittest
 import FreeCAD as App
 import FreeCADGui as Gui
 import Part
-from PySide import QtCore, QtWidgets
+from PySide import QtCore, QtGui, QtWidgets
 from PySide6 import QtTest
 
 from PartDesignTests.Scenarios import models
@@ -1786,6 +1786,73 @@ class TestPanelFixesGui(unittest.TestCase):
     def testHoleUnlistedPointsAndCirclesKept(self):
         """6: the same for 3 (points and circles): three holes."""
         self.unlistedBaseProfileType(3, holes=3)
+
+    # -- ops#389: OK keeps cut values typed for a size the norm has none for ---------------------
+
+    def typeQuantity(self, name, text):
+        """Types text over the value in the panel's quantity box `name`, key by key, and leaves
+        the box, which commits it (the box doesn't track keys; Return would press OK). The focus
+        change is sent as an event: off screen, the window may not be active, and Tab then
+        moves nothing."""
+        box = self.widget(QtWidgets.QWidget, name)
+        edit = box.findChild(QtWidgets.QLineEdit)
+        self.assertIsNotNone(edit, name)
+        edit.setFocus()
+        edit.selectAll()
+        QtTest.QTest.keyClicks(edit, text)
+        leave = QtGui.QFocusEvent(QtCore.QEvent.FocusOut, QtCore.Qt.TabFocusReason)
+        QtWidgets.QApplication.sendEvent(box, leave)
+        pump()
+
+    def forcedCustomCutKeptOnOk(self, cut, depth):
+        """An M4.5 hole through the Plate's two circles with a cut the norm has no values for (the
+        values are custom, forced on, editable): the user types a cut 9 wide (and `depth` deep)
+        into the panel and presses OK. OK writes the thread type, size and cut type again with
+        the same values, and each write proposed new cut values over the typed ones, without a
+        message (DIN 7984: 8.5 x 5, ISO 10642: 11.2)."""
+        box, sketch = self.plate()
+        hole = self.body.newObject("PartDesign::Hole", "Hole")
+        hole.Profile = sketch
+        hole.BaseProfileType = 6  # circles and arcs, listed: the two circles, not the point
+        hole.DepthType = "ThroughAll"
+        hole.ThreadType = "ISOMetricProfile"
+        hole.ThreadSize = "M4.5x0.75"
+        hole.HoleCutType = cut
+        self.doc.recompute()
+        self.assertTrue(hole.isValid(), hole.getStatusString())
+        self.assertTrue(hole.HoleCutCustomValues)
+        self.assertIn("ReadOnly", hole.getPropertyStatus("HoleCutCustomValues"))
+        self.assertNotAlmostEqual(hole.HoleCutDiameter.Value, 9)
+
+        self.edit(hole)
+        self.typeQuantity("HoleCutDiameter", "9")
+        if depth:
+            self.typeQuantity("HoleCutDepth", "%g" % depth)
+        self.assertAlmostEqual(hole.HoleCutDiameter.Value, 9)
+        values = (hole.HoleCutDiameter.Value, hole.HoleCutDepth.Value)
+        self.close(ok=True)
+        self.assertAlmostEqual(hole.HoleCutDiameter.Value, values[0])
+        self.assertAlmostEqual(hole.HoleCutDepth.Value, values[1])
+
+        # two holes through the 10 plate; a counterbore adds a cylinder, a 90 degree countersink
+        # a cone from the cut's radius down to the hole's
+        self.doc.recompute()
+        self.assertTrue(hole.isValid(), hole.getStatusString())
+        r = hole.Diameter.Value / 2
+        big = values[0] / 2
+        if depth:
+            each = math.pi * r**2 * 10 + math.pi * (big**2 - r**2) * depth
+        else:
+            h = big - r
+            cone = math.pi * h / 3 * (big**2 + big * r + r**2)
+            each = math.pi * r**2 * (10 - h) + cone
+        self.assertAlmostEqual(box.Shape.Volume - hole.Shape.Volume, 2 * each, places=3)
+
+    def testHoleForcedCustomCounterboreKeptOnOk(self):
+        self.forcedCustomCutKeptOnOk("DIN 7984", depth=2)
+
+    def testHoleForcedCustomCountersinkKeptOnOk(self):
+        self.forcedCustomCutKeptOnOk("ISO 10642", depth=None)
 
     # -- ops#233: an independent copy leaves the original alone ---------------------------------
 

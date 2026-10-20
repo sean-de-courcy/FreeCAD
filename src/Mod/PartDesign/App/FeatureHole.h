@@ -304,9 +304,9 @@ private:
     gp_Vec computePerpendicular(const gp_Vec&) const;
     TopoDS_Shape makeThread(const gp_Vec&, const gp_Vec&, double);
 
-    // FreeCAD-CH (ops#389): true while the user changes the thread type, size or hole cut
-    // type, the only edits that propose new values for a cut the norm has none for
-    bool proposeHoleCutValues = false;
+    // FreeCAD-CH (ops#389): the thread type, size and hole cut type the current cut values
+    // belong to; a cut the norm has no values for gets new ones only when this changes
+    std::string holeCutValuesKey;
 
     // helpers for nlohmann json
     friend void from_json(const nlohmann::json& j, CounterBoreDimension& t);

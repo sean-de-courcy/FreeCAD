@@ -279,6 +279,46 @@ class TestHole(unittest.TestCase):
             self.assertAlmostEqual(hole.Shape.Volume, 10**3 - removed(hole), msg=(cut, "edits"))
             volume = hole.Shape.Volume
 
+            # round 3: the same values written again (as the task panel's OK does), a ThreadSize
+            # bound to an expression (set on every recompute), and an undo and redo of a size
+            # change propose nothing: each replaced the values
+            hole.ThreadType = hole.ThreadType
+            hole.ThreadSize = hole.ThreadSize
+            hole.HoleCutType = hole.HoleCutType
+            self.Doc.recompute()
+            self.assertAlmostEqual(hole.HoleCutDiameter.Value, values[0], msg=(cut, "same values"))
+            self.assertAlmostEqual(hole.HoleCutDepth.Value, values[1], msg=(cut, "same values"))
+            # (a string, which the expression engine writes on every evaluation: it compares
+            # it with the size's index)
+            hole.setExpression("ThreadSize", "<<M4.5x0.75>>")
+            self.Doc.recompute()
+            hole.touch()
+            self.Doc.recompute()
+            hole.setExpression("ThreadSize", None)
+            self.assertEqual(hole.ThreadSize, "M4.5x0.75")
+            self.assertAlmostEqual(hole.HoleCutDiameter.Value, values[0], msg=(cut, "expression"))
+            self.assertAlmostEqual(hole.HoleCutDepth.Value, values[1], msg=(cut, "expression"))
+            self.Doc.UndoMode = 1
+            self.Doc.openTransaction("size")
+            hole.ThreadSize = "M2.2x0.45" if depth else "M3.5x0.6"
+            self.Doc.commitTransaction()
+            self.Doc.recompute()
+            changed = (hole.HoleCutDiameter.Value, hole.HoleCutDepth.Value)
+            self.assertNotAlmostEqual(changed[0], values[0], msg=(cut, "size"))
+            self.Doc.undo()
+            self.Doc.recompute()
+            self.assertEqual(hole.ThreadSize, "M4.5x0.75")
+            self.assertAlmostEqual(hole.HoleCutDiameter.Value, values[0], msg=(cut, "undo"))
+            self.assertAlmostEqual(hole.HoleCutDepth.Value, values[1], msg=(cut, "undo"))
+            self.Doc.redo()
+            self.Doc.recompute()
+            self.assertAlmostEqual(hole.HoleCutDiameter.Value, changed[0], msg=(cut, "redo"))
+            self.assertAlmostEqual(hole.HoleCutDepth.Value, changed[1], msg=(cut, "redo"))
+            self.Doc.undo()
+            self.Doc.recompute()
+            self.assertAlmostEqual(hole.HoleCutDiameter.Value, values[0], msg=(cut, "undo 2"))
+            self.assertAlmostEqual(hole.Shape.Volume, volume, msg=(cut, "undo 2"))
+
             path = os.path.join(folder, "PartDesignTestHoleForced.FCStd")
             self.Doc.saveAs(path)
             FreeCAD.closeDocument(self.Doc.Name)
