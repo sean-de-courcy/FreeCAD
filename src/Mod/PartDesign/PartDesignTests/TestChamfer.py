@@ -404,6 +404,70 @@ class TestChamfer(unittest.TestCase):
         volume = sum(s.Volume for s in pad.Shape.Solids)
         self.assertAlmostEqual(volume, 1000 - 0.5 * 10 + 48, delta=1e-6)
 
+    def testChamferAcrossAPocketFillsNothing(self):
+        # As testFilletAcrossAPocketFillsNothing (ops#393): a chamfer of 3 across the pocket gives
+        # 955 for the Boolean construction's 951; the Chamfer is 951 or fails naming the edge
+        recess = Part.makeBox(4, 1, 2, FreeCAD.Vector(3, 1.5, 8))
+        chamfer, edge = models.dressed_up_in_a_body(self.Doc, "Chamfer", recess, 3)
+        removed = models.front_top_removed("Chamfer", 3)
+        expected = Part.makeBox(10, 10, 10).cut(removed).cut(recess).Volume
+        self.assertAlmostEqual(expected, 951, delta=1e-9)
+        if chamfer.isValid():
+            self.assertAlmostEqual(chamfer.Shape.Volume, expected, delta=1e-6)
+        else:
+            message = "The chamfer fills a recess of the base next to %s:" % edge
+            self.assertTrue(
+                chamfer.getStatusString().startswith(message), chamfer.getStatusString()
+            )
+
+    def testChamferOntoATangentRound(self):
+        # As testFilletOntoATangentRound: a chamfer of 2 on the concave edge reaches the round the
+        # L's floor ends in, at its point 2 from the edge (734.782; PR 346 review, H1)
+        base = models.rounded_concave_block()
+        ends = ((0, 5, 5), (10, 5, 5))
+        chamfer, _ = models.dressed_in_a_body(self.Doc, "Chamfer", base, ends, 2)
+        expected = base.fuse(models.concave_added_onto_round("Chamfer", 2)).Volume
+        self.assertAlmostEqual(expected, 734.782190, delta=1e-5)
+        self.assertTrue(chamfer.isValid(), chamfer.getStatusString())
+        self.assertAlmostEqual(chamfer.Shape.Volume, expected, delta=1e-5)
+
+    def testChamferOverASmoothDimpleFillsNothing(self):
+        # As testFilletOverASmoothDimpleFillsNothing: chamfers of 2.5 give 747.854 for the
+        # construction's 747.489; the Chamfer is that or fails naming the front edge
+        block, base = models.smoothly_dimpled_block()
+        front, concave = ((0, 0, 10), (10, 0, 10)), ((0, 5, 5), (10, 5, 5))
+        chamfer, edge = models.dressed_in_a_body(self.Doc, "Chamfer", base, front, 2.5, concave)
+        dressed = block.cut(models.front_top_removed("Chamfer", 2.5))
+        dressed = dressed.fuse(models.concave_added("Chamfer", 2.5))
+        expected = dressed.cut(block.cut(base)).Volume
+        self.assertAlmostEqual(expected, 747.488978, delta=1e-5)
+        if chamfer.isValid():
+            self.assertAlmostEqual(chamfer.Shape.Volume, expected, delta=1e-6)
+        else:
+            message = "The chamfer fills a recess of the base next to %s:" % edge
+            self.assertTrue(
+                chamfer.getStatusString().startswith(message), chamfer.getStatusString()
+            )
+
+    def testChamferOverASmoothDimpleInTheFloorFillsNothing(self):
+        # As testFilletOverASmoothDimpleInTheFloorFillsNothing: chamfers of 2.5 give 950 for the
+        # construction's 949.635; the Chamfer is that or fails naming the outer edge
+        block = models.deep_concave_block()
+        base = models.dimpled(block, 5, 12.8, 5)
+        outer, concave = ((0, 14, 5), (10, 14, 5)), ((0, 5, 5), (10, 5, 5))
+        chamfer, edge = models.dressed_in_a_body(self.Doc, "Chamfer", base, outer, 2.5, concave)
+        dressed = block.cut(models.outer_floor_removed("Chamfer", 2.5))
+        dressed = dressed.fuse(models.concave_added("Chamfer", 2.5))
+        expected = dressed.cut(block.cut(base)).Volume
+        self.assertAlmostEqual(expected, 949.634998, delta=1e-5)
+        if chamfer.isValid():
+            self.assertAlmostEqual(chamfer.Shape.Volume, expected, delta=1e-6)
+        else:
+            message = "The chamfer fills a recess of the base next to %s:" % edge
+            self.assertTrue(
+                chamfer.getStatusString().startswith(message), chamfer.getStatusString()
+            )
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("PartDesignTestChamfer")

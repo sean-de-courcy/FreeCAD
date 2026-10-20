@@ -2,6 +2,9 @@
 
 #pragma once
 
+#include <string>
+#include <vector>
+
 #include <Mod/Part/PartGlobal.h>
 
 class TopoDS_Shape;
@@ -88,5 +91,35 @@ PartExport bool checkDressUp(
  * so that an open face beside them doesn't hide them (FreeCAD-CH, ops#297).
  */
 PartExport bool enclosesOutsideSolids(const TopoDS_Shape& shape);
+
+/** Why a fillet's or chamfer's result is wrong where its band crosses a recess of the base, or
+ * an empty string (FreeCAD-CH, ops#393).
+ *
+ * OCCT's fillet and chamfer cover the opening of a recess in a face next to the edge (a blind
+ * pocket, a notch, a hole) with their new face, and fill the recess under it: a valid solid with
+ * the volume of the plain dress-up. The result must have no material the base didn't, but for
+ * what a concave edge adds in its corner. The check:
+ * - runs only if a face of the base that holds no vertex of the dressed edges changed: the result
+ *   has no face on its surface with its vertices. The dressed edges are the given ones and those
+ *   continuing them tangentially, which OCCT dresses too; only the solids holding them are
+ *   compared. An ordinary dress-up stops there;
+ * - then takes the material the result has that the base didn't (a Boolean cut, of both cut down
+ *   to a box around the changed faces). With convex edges only, any of it is wrong; with a
+ *   concave edge, a piece of it is wrong where it lies on a base face other than those at the
+ *   concave edges and those joining them across smooth edges (a recess's wall or floor).
+ * A Boolean that fails fails the check too. A base that isn't valid there isn't checked, nor is a
+ * result whose analysis before the Boolean fails (with a warning).
+ *
+ * @param shape The dress-up's result (its solids are checked)
+ * @param base The shape that was dressed up
+ * @param edges The edges of \a base that were dressed up
+ * @return what the result fills, naming the edge nearest to it (e.g. "fills a recess of the base
+ * next to Edge3: ..."), or an empty string if the result is right
+ */
+PartExport std::string filledPocket(
+    const TopoShape& shape,
+    const TopoShape& base,
+    const std::vector<TopoShape>& edges
+);
 
 }  // namespace Part

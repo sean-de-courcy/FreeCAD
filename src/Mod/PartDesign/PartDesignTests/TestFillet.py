@@ -466,6 +466,72 @@ class TestFillet(unittest.TestCase):
         volume = sum(s.Volume for s in pad.Shape.Solids)
         self.assertAlmostEqual(volume, 1000 - self._fillet_section(1) * 10 + 48, delta=1e-6)
 
+    def testFilletAcrossAPocketFillsNothing(self):
+        # A round of 3 on the front top edge of a 10 mm cube whose top has a pocket 4 x 1 x 2 at
+        # (3, 1.5, 8): OCCT covers the pocket's opening and fills it under the round (980.686 for
+        # the Boolean construction's 973.439). The Fillet is that construction, or fails naming
+        # the edge (ops#393)
+        recess = Part.makeBox(4, 1, 2, FreeCAD.Vector(3, 1.5, 8))
+        fillet, edge = models.dressed_up_in_a_body(self.Doc, "Fillet", recess, 3)
+        removed = models.front_top_removed("Fillet", 3)
+        expected = Part.makeBox(10, 10, 10).cut(removed).cut(recess).Volume
+        if fillet.isValid():
+            self.assertAlmostEqual(fillet.Shape.Volume, expected, delta=1e-6)
+        else:
+            message = "The fillet fills a recess of the base next to %s:" % edge
+            self.assertTrue(fillet.getStatusString().startswith(message), fillet.getStatusString())
+
+    def testFilletOntoATangentRound(self):
+        # A round of 2 on the concave edge of an L whose floor ends in a round R4: its band runs on
+        # onto that round, and the material it adds there is the corner's (722.942; PR 346 review,
+        # H1: the Fillet failed with "fills a recess")
+        base = models.rounded_concave_block()
+        ends = ((0, 5, 5), (10, 5, 5))
+        fillet, _ = models.dressed_in_a_body(self.Doc, "Fillet", base, ends, 2)
+        expected = base.fuse(models.concave_added_onto_round("Fillet", 2)).Volume
+        self.assertAlmostEqual(expected, 722.942091, delta=1e-5)
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        self.assertAlmostEqual(fillet.Shape.Volume, expected, delta=1e-5)
+
+    def testFilletOverASmoothDimpleFillsNothing(self):
+        # Rounds of 2.5 on the front top edge and the concave edge of the L whose dimple lies under
+        # the front's band and joins the concave edge's wall through faces that each join the next
+        # smoothly (models.smoothly_dimpled_block()). OCCT fills the dimple (747.854 for 745.816);
+        # the Fillet is the construction or fails naming the front edge (PR 346 round 2:
+        # 8e642b9516 let it pass)
+        block, base = models.smoothly_dimpled_block()
+        front, concave = ((0, 0, 10), (10, 0, 10)), ((0, 5, 5), (10, 5, 5))
+        fillet, edge = models.dressed_in_a_body(self.Doc, "Fillet", base, front, 2.5, concave)
+        dressed = block.cut(models.front_top_removed("Fillet", 2.5))
+        dressed = dressed.fuse(models.concave_added("Fillet", 2.5))
+        expected = dressed.cut(block.cut(base)).Volume
+        self.assertAlmostEqual(expected, 745.816371, delta=1e-5)
+        if fillet.isValid():
+            self.assertAlmostEqual(fillet.Shape.Volume, expected, delta=1e-6)
+        else:
+            message = "The fillet fills a recess of the base next to %s:" % edge
+            self.assertTrue(fillet.getStatusString().startswith(message), fillet.getStatusString())
+
+    def testFilletOverASmoothDimpleInTheFloorFillsNothing(self):
+        # Rounds of 2.5 on the outer floor edge and the concave edge of the deep L, with a dimple
+        # whose rim is rounded in the floor under the outer edge's band: the floor holds the
+        # concave edge, and the dimple joins it smoothly. OCCT fills the dimple (950 for 947.962);
+        # the Fillet is the construction or fails naming the outer edge (PR 346 round 3:
+        # 2b534f9017 let it pass, also after a reopen)
+        block = models.deep_concave_block()
+        base = models.dimpled(block, 5, 12.8, 5)
+        outer, concave = ((0, 14, 5), (10, 14, 5)), ((0, 5, 5), (10, 5, 5))
+        fillet, edge = models.dressed_in_a_body(self.Doc, "Fillet", base, outer, 2.5, concave)
+        dressed = block.cut(models.outer_floor_removed("Fillet", 2.5))
+        dressed = dressed.fuse(models.concave_added("Fillet", 2.5))
+        expected = dressed.cut(block.cut(base)).Volume
+        self.assertAlmostEqual(expected, 947.961856, delta=1e-5)
+        if fillet.isValid():
+            self.assertAlmostEqual(fillet.Shape.Volume, expected, delta=1e-6)
+        else:
+            message = "The fillet fills a recess of the base next to %s:" % edge
+            self.assertTrue(fillet.getStatusString().startswith(message), fillet.getStatusString())
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("PartDesignTestFillet")

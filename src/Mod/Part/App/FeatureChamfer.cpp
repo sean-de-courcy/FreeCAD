@@ -157,6 +157,11 @@ App::DocumentObjectExecReturn* Chamfer::execute()
         if (!Part::checkDressUp(res, baseTopoShape)) {
             return new App::DocumentObjectExecReturn("Resulting shape is invalid");
         }
+        // OCCT fills a recess its band crosses, in a valid solid (ops#393)
+        const std::string filled = Part::filledPocket(res, baseTopoShape, edgeShapes);
+        if (!filled.empty()) {
+            return new App::DocumentObjectExecReturn("The chamfer " + filled);
+        }
         // Where OCCT failed, the exact construction built it (ops#300, decision 54)
         recorder.report(Label.getValue());
         this->Shape.setValue(res);

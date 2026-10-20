@@ -137,6 +137,11 @@ App::DocumentObjectExecReturn* Fillet::execute()
                 QT_TRANSLATE_NOOP("Exception", "Resulting shape is invalid")
             );
         }
+        // OCCT fills a recess its band crosses, in a valid solid (ops#393)
+        const std::string filled = Part::filledPocket(shape, baseShape, edges);
+        if (!filled.empty()) {
+            return new App::DocumentObjectExecReturn("The fillet " + filled);
+        }
         // store shape before refinement
         this->rawShape = shape;
         shape = refineShapeIfActive(shape);
