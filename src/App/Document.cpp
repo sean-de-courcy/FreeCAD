@@ -136,7 +136,10 @@ namespace
 // names and its end ones are their projections (PRJ), where both were `UPP` names from the side
 // faces. 4: ops#360, a Pad's or Pocket's far caps up to a freeform face named from their profile
 // faces (PRJ), where they were pieces of the up-to face (MOD) told apart by a counter.
-constexpr int ForkNamingRevision = 4;
+// 5: ops#375, a Part Sweep's start edges and vertices keep the profile's names and its end ones
+// are their projections (PRJ), and its corner edges are named from the side faces (`UPP`), where
+// all were generated from the spine's vertices and told apart by a counter.
+constexpr int ForkNamingRevision = 5;
 
 // The `.N<n>` of the element map version: the form interned names are saved in (ops#6). 2: the
 // references are indices into the file's table (NamingFormat 2).

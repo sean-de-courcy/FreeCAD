@@ -41,6 +41,7 @@ holds the old name through a GEN section of the same type: a Thickness's or an o
 the element at another place (`V<V (THK)`)."""
 
 import FreeCAD as App
+import Part
 
 from .harness import (
     BROKEN,
@@ -314,6 +315,116 @@ class PipeStartCapEdgeCutAway(OnEdge, Recessed):
 
     def expectEdge(self):
         return self.startEdge() if self.stepName is None else BROKEN
+
+
+# A Part Sweep's ends and corners (ops#375). MakePipeShell reports the edges of the sections at
+# the spine's vertices (the start, end and corner wires) as generated from those vertices, so the
+# four start edges of a square were `<spine vertex>;SWP;<n>;E;GEN`, told apart only by the
+# counter n in the wire's order. A chamfer drawn at the profile's corner between its first and
+# second lines shifted the counters, and every start, corner and end edge after it moved silently
+# to its neighbour. The start edges now keep the profile's names, the end ones are their
+# projections (PRJ), and the corner edges are named from the side faces either side (UPP).
+
+
+class SweepL(Scenario):
+    """A Part Sweep (Part workbench, no body) of the square -2..2 along an L path in XZ (up 30,
+    then +X 20, Transition "Right corner"), sketches attached NormalToEdge to edges at the
+    start, at the corner and at the end."""
+
+    abstract = True
+    area = "SweepEnds"
+    path = [(0, 0), (0, 30), (20, 30)]
+
+    def build(self, doc):
+        path = m.sketch(doc, "Path", m.polyline(self.path), placement=XZ)
+        profile = m.sketch(doc, "Profile", m.rectangle(-2, -2, 2, 2))
+        sweep = doc.addObject("Part::Sweep", "Sweep")
+        sweep.Sections = [profile]
+        sweep.Spine = (path, [])
+        sweep.Solid = True
+        sweep.Transition = "Right corner"
+        doc.recompute()
+        self.consumers(doc, sweep)
+
+    def attach(self, doc, sweep, ref, predicate):
+        sketch = doc.addObject("Sketcher::SketchObject", "On" + ref)
+        sketch.AttachmentSupport = [(sweep, self.names(sweep, predicate())[0])]
+        sketch.MapMode = "NormalToEdge"
+        self.ref(ref, sketch, "AttachmentSupport", predicate, Attached())
+
+
+def startEdgeX2():
+    return edge("line", direction=(0, 1, 0), through=(2, 0, 0))
+
+
+def startEdgeY2():
+    return edge("line", direction=(1, 0, 0), through=(0, 2, 0))
+
+
+def cornerEdgeX2():
+    return edge("line", direction=(0, 1, 0), through=(2, 0, 28))
+
+
+def endEdgeTop():
+    return edge("line", direction=(0, 1, 0), through=(20, 0, 32))
+
+
+class SweepProfileChamfered(SweepL):
+    """The edit chamfers the profile's corner (2, -2), between its first line (y = -2) and its
+    second (x = 2), as a new fifth line. Every referenced edge survives, the x = 2 ones shortened
+    by 1 mm."""
+
+    REFS = ("start_x2", "start_y2", "corner_x2", "end_top")
+
+    def consumers(self, doc, sweep):
+        self.attach(doc, sweep, "start_x2", startEdgeX2)
+        self.attach(doc, sweep, "start_y2", startEdgeY2)
+        self.attach(doc, sweep, "corner_x2", cornerEdgeX2)
+        self.attach(doc, sweep, "end_top", endEdgeTop)
+
+    def edit(self, doc):
+        m.setLines(doc.Profile, {0: ((-2, -2), (1, -2)), 1: ((2, -1), (2, 2))})
+        doc.Profile.addGeometry(Part.LineSegment(V(1, -2, 0), V(2, -1, 0)), False)
+
+
+class SweepTowardsProfileChamfered(SweepProfileChamfered):
+    """The spine drawn towards the profile, from (20, 30) to (0, 0): the shell starts at x = 20
+    and ends at the profile, whose names stay at z = 0."""
+
+    path = [(20, 30), (0, 30), (0, 0)]
+
+
+class SweepStartCapEdgeCutAway(SweepL):
+    """ops#375's check: ops#351's PipeStartCapEdgeCutAway as a Part Sweep, a Part::Cut whose tool
+    grows from a dimple in the start cap to the slab z 0..8. The start edge at x = 2 is gone, and
+    no edge at the corner relates to it: broken (it already was before ops#375)."""
+
+    REFS = ("start_x2",)
+
+    def build(self, doc):
+        path = m.sketch(doc, "Path", m.polyline(self.path), placement=XZ)
+        profile = m.sketch(doc, "Profile", m.rectangle(-2, -2, 2, 2))
+        sweep = doc.addObject("Part::Sweep", "Sweep")
+        sweep.Sections = [profile]
+        sweep.Spine = (path, [])
+        sweep.Solid = True
+        sweep.Transition = "Right corner"
+        tool = doc.addObject("Part::Box", "Tool")
+        tool.Length, tool.Width, tool.Height = 2, 2, 2
+        tool.Placement = App.Placement(V(-1, -1, -1), App.Rotation())
+        cut = doc.addObject("Part::Cut", "Cut")
+        cut.Base = sweep
+        cut.Tool = tool
+        doc.recompute()
+        self.attach(doc, cut, "start_x2", self.expectEdge)
+
+    def edit(self, doc):
+        tool = doc.Tool
+        tool.Length, tool.Width, tool.Height = 10, 10, 9
+        tool.Placement = App.Placement(V(-5, -5, -1), App.Rotation())
+
+    def expectEdge(self):
+        return startEdgeX2() if self.stepName is None else BROKEN
 
 
 # Offset copies (ops#358, PLAN decision 86). A Thickness's or an offset's copy of an element is
