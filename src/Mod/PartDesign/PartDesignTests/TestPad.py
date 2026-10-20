@@ -2713,6 +2713,49 @@ class TestPad(unittest.TestCase):
                     finally:
                         FreeCAD.closeDocument(doc.Name)
 
+    def testPadUpToALobedHoleOffCentreTurnedBySymmetryBreaks(self):
+        # PR 340 round 6 (N9): the disc 0.3 mm off the centre of a hole of four lobes, the hole
+        # turned exactly 45 degrees, its symmetry angle: +45 and -45 give the same hole, and the
+        # twins trade names. Off the centre, the twin at 225 degrees has its two candidates'
+        # offsets from the twins' centroid 4 % apart from its old offset (1.36 and 1.42 mm),
+        # beyond the 2 % tie, and the datum stood on the -45 piece, valid and with no warning,
+        # while the +45 piece holds all of its material. The offsets lie at the same angle from
+        # the old one: an angular tie, and every datum breaks (or stays on its own piece)
+        def turned(x, y, turn):
+            a = math.radians(turn)
+            x, y = x - 3, y - 3
+            return 3 + x * math.cos(a) - y * math.sin(a), 3 + x * math.sin(a) + y * math.cos(a)
+
+        for kind in ("Pad", "Pocket"):
+            with self.subTest(kind=kind):
+                doc = FreeCAD.newDocument("PadUpToALobedHoleOffCentreTurnedBySymmetryBreaks")
+                try:
+                    feature, z = discUpToAnEllipticHole(
+                        doc, kind, shell=lambda z: lobedHoleShell(z, 4), radius=2.3
+                    )
+                    sketch = feature.Profile[0]
+                    sketch.setDatum("xA", FreeCAD.Units.Quantity(3.3, FreeCAD.Units.Length))
+                    doc.recompute()
+                    self.assertTrue(feature.isValid(), feature.getStatusString())
+                    self.assertEqual(len(farCaps(feature.Shape, z)), 6)
+                    # the twins, between the lobes at 45, 135, 225 and 315 degrees
+                    places = [
+                        (3 + 1.7 * math.cos(math.radians(t)), 3 + 1.7 * math.sin(math.radians(t)))
+                        for t in (45, 135, 225, 315)
+                    ]
+                    names = [farCapAt(feature.Shape, z, *place) for place in places]
+                    self.assertEqual(len(set(names)), 4)
+                    centres = [centreOfFarCapAt(feature.Shape, z, *place) for place in places]
+                    points = [pointOnFarCap(feature, name) for name in names]
+                    doc.getObject("Plate").Shape = lobedHoleShell(z, 4, turn=45)
+                    doc.recompute()
+                    self.assertTrue(feature.isValid(), feature.getStatusString())
+                    for point, centre in zip(points, centres):
+                        own = centreOfFarCapAt(feature.Shape, z, *turned(*centre, 45))
+                        assertNotQuietlyElsewhere(self, point, z, [own])
+                finally:
+                    FreeCAD.closeDocument(doc.Name)
+
     def testPadUpToAFreeformHoleCapPiecesMergeIntoARing(self):
         # PR 340 round 3: A (x -3..3, y -0.5..0.5) across the plate's hole and its fill, datums
         # on its left and right pieces, on the plate. A made taller than the hole (y -3..2.5)
