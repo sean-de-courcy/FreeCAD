@@ -25,7 +25,6 @@
 
 #include <algorithm>
 #include <array>
-#include <chrono>
 #include <cmath>
 #include <functional>
 #include <limits>
@@ -36,26 +35,29 @@
 
 #include <Mod/Part/App/FCBRepAlgoAPI_Cut.h>
 #include <Mod/Part/App/FCBRepAlgoAPI_Fuse.h>
-#include <BOPAlgo_ArgumentAnalyzer.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_Sewing.hxx>
+#include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
 #include <BRepBuilderAPI_MakeSolid.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepGProp.hxx>
+#include <BRepLProp_CLProps.hxx>
 #include <BRepClass3d_SolidClassifier.hxx>
 #include <BRepOffsetAPI_MakePipeShell.hxx>
 #include <BRepTools_WireExplorer.hxx>
 #include <BRep_Tool.hxx>
+#include <Geom_Curve.hxx>
+#include <GeomAPI_ProjectPointOnCurve.hxx>
 #include <gp.hxx>
 #include <GProp_GProps.hxx>
 #include <gp_Ax2.hxx>
 #include <gp_Ax3.hxx>
+#include <gp_Quaternion.hxx>
 #include <gp_Trsf.hxx>
 #include <Law_Function.hxx>
-#include <Message_ProgressIndicator.hxx>
 #include <Precision.hxx>
 #include <ShapeAnalysis_FreeBounds.hxx>
 #include <TopExp.hxx>
@@ -332,6 +334,8 @@ struct Fold
     bool tilted;
     /// How far the section reaches past the line where it turns back (mm)
     double reach;
+    /// The section's extent across that line (mm)
+    double across;
 };
 
 /// What "Transformed" does at a spine's corners
@@ -345,7 +349,7 @@ struct CornerTilts
     std::vector<Corner> nearCollapse;
     /// The first curve along which the section folds over itself
     std::optional<Fold> folded;
-    /// The first curve along which it folds only a little, which the boolean check decides
+    /// The first curve along which it folds only a little, which passes with a warning
     std::optional<Fold> smallFold;
 };
 
@@ -467,12 +471,17 @@ struct Reach
     double across = 0;
 };
 
-/// A fold that reaches back less than this part of the section's extent is left to the boolean
-/// check. Of such small folds it finds some and not others: a round profile of radius 2 reaching
-/// 0.10 mm past the line along an arc passes it (and changes the volume by about 1e-3 mm^3),
-/// one reaching 0.06 mm fails it (ops#370). A larger fold always fails: the check misses some of
-/// those too (within a single face), and takes many minutes on a long B-spline spine.
+/// A fold that reaches back less than this part of the section's extent passes, with a warning: a
+/// sliver of about 1e-3 mm^3 for a round profile of radius 2 reaching 0.10 mm past the line along
+/// an arc. A larger fold fails. The fold's measure alone decides, so a file gives the same result
+/// on every platform and machine: the boolean self-interference check found some small folds and
+/// not others, found a 0.10 mm one on macOS that it passed on Windows, and takes many minutes on
+/// a long B-spline spine (ops#370).
 constexpr double smallFold = 0.05;
+
+/// Where the section could fold along a curve, foldAlongCurve's samples are this close (radians
+/// of the section's turn): a bend shorter than their spacing would fall between them (ops#370)
+constexpr double sampleTurn = std::numbers::pi / 180;
 
 /// The angle between the section's \a normal and the spine's \a tangent, either way along it
 double tiltTo(const gp_Dir& normal, const gp_Dir& tangent)
@@ -582,13 +591,139 @@ std::optional<std::vector<gp_Trsf>> motionsAlong(
     return motions;
 }
 
+/// The angle (radians) the section turns by from \a here to \a next
+double turnBetween(const gp_Trsf& here, const gp_Trsf& next)
+{
+    gp_Quaternion turn = next.GetRotation() * here.GetRotation().Inverted();
+    turn.Normalize();
+    return 2 * std::acos(std::min(1.0, std::abs(turn.W())));
+}
+
+/// \a sampled, the motions of the section (\a frame, \a points) to places along the curve \a edge,
+/// with more places between two of them where the section could fold: there it turns at most
+/// sampleTurn from one to the next. In every mode measured here the sweep's frame keeps the
+/// tangent as an axis, so the section's tilt to the curve stays as it starts, and its speed
+/// through its own plane changes across it at the rate it turns: it can fold only where it turns
+/// faster than |cos tilt| over its reach from the spine, per mm along the curve. That is judged
+/// from how far it turns between the two places and how tightly the curve bends between them.
+/// The places between are a sweep of the piece of the curve between the two, from the section
+/// as it lies at the first: the same motions, as the sweep's frame depends only on the curve
+/// from there (or, Standard mode, turns from its start the least it can). In runs, each from
+/// one sweep: the folds are measured between two places of a run.
+std::vector<std::vector<gp_Trsf>> refinedMotions(
+    const TopoDS_Edge& edge,
+    const gp_Ax2& frame,
+    const std::vector<gp_Pnt>& points,
+    const std::vector<gp_Trsf>& sampled,
+    const std::function<void(BRepOffsetAPI_MakePipeShell&)>& setup
+)
+{
+    // At most this many places more (each costs about 1 ms), and so many between two
+    constexpr int budget = 2048;
+    constexpr int mostBetween = 90;
+    // Where the curvature is looked at between two places
+    constexpr int looks = 16;
+    const gp_Pnt origin = frame.Location();
+    double reachFromSpine = Precision::Confusion();
+    for (const gp_Pnt& point : points) {
+        reachFromSpine = std::max(reachFromSpine, point.Distance(origin));
+    }
+    // A margin of 2 below the turn a fold needs (radians per mm)
+    const double foldingRate = 0.5 * std::abs(frame.Direction().Dot(tangentAlong(edge, true)))
+        / reachFromSpine;
+
+    double first = 0;
+    double last = 0;
+    const Handle(Geom_Curve) geometry = BRep_Tool::Curve(edge, first, last);
+    if (geometry.IsNull()) {
+        return {sampled};
+    }
+    const bool reversed = edge.Orientation() == TopAbs_REVERSED;
+    // Where each place lies on the curve
+    std::vector<double> at;
+    for (size_t i = 0; i < sampled.size(); ++i) {
+        if (i == 0 || i + 1 == sampled.size()) {
+            at.push_back((i == 0) != reversed ? first : last);
+            continue;
+        }
+        GeomAPI_ProjectPointOnCurve onCurve(origin.Transformed(sampled[i]), geometry, first, last);
+        if (onCurve.NbPoints() == 0) {
+            return {sampled};
+        }
+        at.push_back(onCurve.LowerDistanceParameter());
+    }
+
+    const BRepAdaptor_Curve adaptor(edge);
+    BRepLProp_CLProps properties(adaptor, 2, Precision::Confusion());
+    std::vector<std::vector<gp_Trsf>> runs;
+    std::vector<gp_Trsf> motions {sampled.front()};
+    int added = 0;
+    for (size_t i = 0; i + 1 < sampled.size(); ++i) {
+        const gp_Trsf& here = sampled[i];
+        const gp_Trsf& next = sampled[i + 1];
+        const double length = origin.Transformed(here).Distance(origin.Transformed(next));
+        double curvature = 0;
+        for (int j = 0; j <= looks; ++j) {
+            properties.SetParameter(at[i] + (at[i + 1] - at[i]) * j / looks);
+            if (properties.IsTangentDefined()) {
+                curvature = std::max(curvature, properties.Curvature());
+            }
+        }
+        const double turn = std::max(turnBetween(here, next), curvature * length);
+        if (turn > sampleTurn && turn > foldingRate * length && added < budget) {
+            const int between = std::min(
+                {mostBetween, static_cast<int>(std::ceil(turn / sampleTurn)), budget - added}
+            );
+            BRepBuilderAPI_MakeEdge piece(
+                geometry,
+                std::min(at[i], at[i + 1]),
+                std::max(at[i], at[i + 1])
+            );
+            if (piece.IsDone()) {
+                TopoDS_Edge part = piece.Edge();
+                if (reversed) {
+                    part.Reverse();
+                }
+                const std::optional<std::vector<gp_Trsf>> finer = motionsAlong(
+                    BRepBuilderAPI_MakeWire(part).Wire(),
+                    frame.Transformed(here),
+                    between + 1,
+                    setup
+                );
+                // A run of its own: its last place and next are two sweeps' versions of one
+                // place, a little apart, and that step would read as a sharp turn
+                if (finer) {
+                    if (motions.size() > 1) {
+                        runs.push_back(motions);
+                    }
+                    motions.clear();
+                    for (const gp_Trsf& motion : *finer) {
+                        motions.push_back(motion * here);
+                    }
+                    runs.push_back(motions);
+                    added += between;
+                    motions = {next};
+                    continue;
+                }
+            }
+        }
+        motions.push_back(next);
+    }
+    if (motions.size() > 1) {
+        runs.push_back(motions);
+    }
+    return runs;
+}
+
 /// How far the section (\a normal, \a points) reaches back over itself along the curve \a edge,
 /// as a sweep set up by \a setup moves it, none when it doesn't fold (or OCCT can't sweep it). The
 /// arc's test for any curve and mode, from the section's motion sampled along the curve: between
 /// two samples each point moves through the section's plane at a speed that changes linearly
 /// across it, and where that is forward on one side and backward on the other the sweep folds;
 /// the reach is measured from the line where it is zero (ops#370), at the place it is largest.
-/// The samples follow the curve's pieces: a long B-spline gets more.
+/// The samples follow the curve's pieces (a long B-spline gets more), and between two of them
+/// where the section could fold, they are subdivided until it turns at most sampleTurn between
+/// two: a short bend in a B-spline of few pieces fell between them.
 Reach foldAlongCurve(
     const TopoDS_Edge& edge,
     const gp_Dir& normal,
@@ -596,52 +731,57 @@ Reach foldAlongCurve(
     const std::function<void(BRepOffsetAPI_MakePipeShell&)>& setup
 )
 {
+    const BRepAdaptor_Curve curve(edge);
     // Each place costs about 1 ms (Simulate builds it)
-    const int count = std::clamp(2 * BRepAdaptor_Curve(edge).NbIntervals(GeomAbs_C3), 32, 256);
+    const int count = std::clamp(2 * curve.NbIntervals(GeomAbs_C3), 32, 256);
     const gp_Ax2 frame(BRep_Tool::Pnt(TopExp::FirstVertex(edge, true)), normal);
-    const std::optional<std::vector<gp_Trsf>> motions
+    const std::optional<std::vector<gp_Trsf>> sampled
         = motionsAlong(BRepBuilderAPI_MakeWire(edge).Wire(), frame, count, setup);
-    if (!motions) {
+    if (!sampled) {
         return {};
     }
     const gp_Pnt origin = frame.Location();
+    const std::vector<std::vector<gp_Trsf>> runs
+        = refinedMotions(edge, frame, points, *sampled, setup);
     const gp_Pnt alongX = origin.Translated(gp_Vec(frame.XDirection()));
     const gp_Pnt alongY = origin.Translated(gp_Vec(frame.YDirection()));
     Reach reach;
-    for (size_t i = 0; i + 1 < motions->size(); ++i) {
-        const gp_Trsf& here = (*motions)[i];
-        const gp_Trsf& next = (*motions)[i + 1];
-        // Simulate can give the last place twice: no motion, only rounding noise
-        if (std::max(
-                {origin.Transformed(here).Distance(origin.Transformed(next)),
-                 alongX.Transformed(here).Distance(alongX.Transformed(next)),
-                 alongY.Transformed(here).Distance(alongY.Transformed(next))}
-            )
-            < Precision::Confusion()) {
-            continue;
-        }
-        gp_XYZ through = normal.Transformed(here).XYZ() + normal.Transformed(next).XYZ();
-        if (through.Modulus() < gp::Resolution()) {
-            continue;
-        }
-        through.Normalize();
-        auto speed = [&](const gp_Pnt& point) {
-            return (point.Transformed(next).XYZ() - point.Transformed(here).XYZ()).Dot(through);
-        };
-        const double atOrigin = speed(origin);
-        const double slope = std::hypot(speed(alongX) - atOrigin, speed(alongY) - atOrigin);
-        if (slope < 1e-9) {  // no turn: the section only moves
-            continue;
-        }
-        double low = std::numeric_limits<double>::infinity();
-        double high = -low;
-        for (const gp_Pnt& point : points) {
-            const double at = speed(point);
-            low = std::min(low, at);
-            high = std::max(high, at);
-        }
-        if (low < 0 && high > 0 && std::min(-low, high) / slope > reach.past) {
-            reach = {std::min(-low, high) / slope, (high - low) / slope};
+    for (const std::vector<gp_Trsf>& motions : runs) {
+        for (size_t i = 0; i + 1 < motions.size(); ++i) {
+            const gp_Trsf& here = motions[i];
+            const gp_Trsf& next = motions[i + 1];
+            // Simulate can give the last place twice: no motion, only rounding noise
+            if (std::max(
+                    {origin.Transformed(here).Distance(origin.Transformed(next)),
+                     alongX.Transformed(here).Distance(alongX.Transformed(next)),
+                     alongY.Transformed(here).Distance(alongY.Transformed(next))}
+                )
+                < Precision::Confusion()) {
+                continue;
+            }
+            gp_XYZ through = normal.Transformed(here).XYZ() + normal.Transformed(next).XYZ();
+            if (through.Modulus() < gp::Resolution()) {
+                continue;
+            }
+            through.Normalize();
+            auto speed = [&](const gp_Pnt& point) {
+                return (point.Transformed(next).XYZ() - point.Transformed(here).XYZ()).Dot(through);
+            };
+            const double atOrigin = speed(origin);
+            const double slope = std::hypot(speed(alongX) - atOrigin, speed(alongY) - atOrigin);
+            if (slope < 1e-9) {  // no turn: the section only moves
+                continue;
+            }
+            double low = std::numeric_limits<double>::infinity();
+            double high = -low;
+            for (const gp_Pnt& point : points) {
+                const double at = speed(point);
+                low = std::min(low, at);
+                high = std::max(high, at);
+            }
+            if (low < 0 && high > 0 && std::min(-low, high) / slope > reach.past) {
+                reach = {std::min(-low, high) / slope, (high - low) / slope};
+            }
         }
     }
     return reach;
@@ -729,8 +869,8 @@ CornerTilts measureCorners(
         }
         return section;
     };
-    // Whether the section folds along the curved edge k: a small fold is left to the boolean
-    // check, and the next curves are still looked at
+    // Whether the section folds along the curved edge k: after a small fold, which only warns,
+    // the next curves are still looked at
     auto checkCurve = [&](size_t k, const Section& section) {
         if (tilts.folded || isLine(edges[k])) {
             return;
@@ -749,7 +889,8 @@ CornerTilts measureCorners(
             BRep_Tool::Pnt(TopExp::FirstVertex(edges[k], true)),
             BRepAdaptor_Curve(edges[k]).GetType() == GeomAbs_Circle,
             tilted,
-            reach.past
+            reach.past,
+            reach.across
         };
         if (reach.past > smallFold * reach.across) {
             tilts.folded = fold;
@@ -776,7 +917,8 @@ CornerTilts measureCorners(
         if (!section) {
             return {};
         }
-        tilted = tilted || turn > tiltTolerance;
+        // By the section's own tilt there: many small corners add up to a large one
+        tilted = tilted || tiltTo(section->normal, out) > tiltTolerance;
         checkCurve(k, *section);
         if (!corner) {
             continue;
@@ -1017,8 +1159,14 @@ bool samePlace(const TopoDS_Shape& a, const TopoDS_Shape& b)
 
 /// Why a pipe's result isn't a valid solid, as far as its \a mode, its \a transition, whether
 /// it has several sections (\a multisection) and its spine's sharpest corner (\a corner, none
-/// on a smooth spine) tell
-std::string whyInvalid(int mode, int transition, bool multisection, const std::optional<std::string>& corner)
+/// on a smooth spine, turning \a degrees) tell
+std::string whyInvalid(
+    int mode,
+    int transition,
+    bool multisection,
+    const std::optional<std::string>& corner,
+    double degrees
+)
 {
     std::string text = "Pipe: the result isn't a valid solid.";
     if (mode == 1) {
@@ -1048,27 +1196,44 @@ std::string whyInvalid(int mode, int transition, bool multisection, const std::o
     }
     else if (transition == 0) {
         text += fmt::format(
-            " Where the spine curves tightly after a corner of nearly 90 degrees (the sharpest is "
-            "at {}), 'Transformed' folds the profile over itself: try 'Right corner' or 'Round "
+            " Where the spine curves tightly after a corner (the sharpest, {:.3g} degrees, is at "
+            "{}), 'Transformed' may fold the profile over itself: try 'Right corner' or 'Round "
             "corner'.",
+            degrees,
+            *corner
+        );
+    }
+    else if (degrees >= 150) {
+        text += fmt::format(
+            " 'Right corner' and 'Round corner' can't join a corner that turns nearly back on "
+            "itself (the sharpest, {:.3g} degrees, is at {}): try 'Transformed' there.",
+            degrees,
             *corner
         );
     }
     else {
         text += fmt::format(
-            " 'Right corner' and 'Round corner' can't join a corner that turns nearly back on "
-            "itself (the sharpest is at {}): try 'Transformed' there.",
+            " 'Right corner' and 'Round corner' couldn't join the sweep at the spine's corners "
+            "into one solid (the sharpest, {:.3g} degrees, is at {}): try 'Transformed'.",
+            degrees,
             *corner
         );
     }
     return text;
 }
 
+/// A spine's vertex where it turns, and by how much
+struct SpineCorner
+{
+    gp_Pnt at;
+    double degrees;
+};
+
 /// Where \a spine turns most sharply, none when it turns nowhere
-std::optional<gp_Pnt> sharpestCorner(const TopoDS_Wire& spine)
+std::optional<SpineCorner> sharpestCorner(const TopoDS_Wire& spine)
 {
     const std::vector<TopoDS_Edge> edges = edgesInOrder(spine);
-    std::optional<gp_Pnt> sharpest;
+    std::optional<SpineCorner> sharpest;
     double most = Precision::Angular();
     const size_t joints = BRep_Tool::IsClosed(spine) ? edges.size() : edges.size() - 1;
     for (size_t k = 0; edges.size() > 1 && k < joints; ++k) {
@@ -1077,59 +1242,13 @@ std::optional<gp_Pnt> sharpestCorner(const TopoDS_Wire& spine)
         const double angle = tangentAlong(before, false).Angle(tangentAlong(after, true));
         if (angle > most) {
             most = angle;
-            sharpest = BRep_Tool::Pnt(TopExp::LastVertex(before, true));
+            sharpest = SpineCorner {
+                BRep_Tool::Pnt(TopExp::LastVertex(before, true)),
+                angle * 180 / std::numbers::pi
+            };
         }
     }
     return sharpest;
-}
-
-/// Stops OCCT's work at a deadline
-class Deadline: public Message_ProgressIndicator
-{
-public:
-    explicit Deadline(std::chrono::milliseconds budget)
-        : end(std::chrono::steady_clock::now() + budget)
-    {}
-    bool UserBreak() override
-    {
-        return std::chrono::steady_clock::now() > end;
-    }
-    void Show(const Message_ProgressScope& /*scope*/, const bool /*force*/) override
-    {}
-
-private:
-    std::chrono::steady_clock::time_point end;
-};
-
-/// Whether the boolean check finds \a shapes crossing themselves; none when it takes more than
-/// \a budget (on a long B-spline spine it takes many minutes)
-std::optional<bool> crossesItself(
-    const std::vector<Part::TopoShape>& shapes,
-    std::chrono::milliseconds budget
-)
-{
-    Handle(Deadline) deadline = new Deadline(budget);
-    for (const Part::TopoShape& shape : shapes) {
-        BOPAlgo_ArgumentAnalyzer check;
-        check.SetShape1(shape.getShape());
-        check.ArgumentTypeMode() = false;
-        check.SelfInterMode() = true;
-        check.SmallEdgeMode() = false;
-        check.RebuildFaceMode() = false;
-        check.TangentMode() = false;
-        check.MergeVertexMode() = false;
-        check.MergeEdgeMode() = false;
-        check.ContinuityMode() = false;
-        check.CurveOnSurfaceMode() = false;
-        check.Perform(deadline->Start());
-        if (deadline->UserBreak()) {
-            return std::nullopt;
-        }
-        if (check.HasFaulty()) {
-            return true;
-        }
-    }
-    return false;
 }
 
 /// \a point as text, "(x, y, z)", without rounding noise
@@ -1466,13 +1585,48 @@ App::DocumentObjectExecReturn* Pipe::execute()
         auto inPlace = [&](const gp_Pnt& point) {
             return pointText(point.Transformed(invObjLoc.Inverted().Transformation()));
         };
-        const std::optional<gp_Pnt> sharpest = sharpestCorner(TopoDS::Wire(path.getShape()));
+        const std::optional<SpineCorner> sharpest = sharpestCorner(TopoDS::Wire(path.getShape()));
+        // A fold fails the pipe; a small one (under smallFold of the section's extent) warns
+        auto foldText = [&](const Fold& fold, bool small) {
+            const std::string by = small
+                ? fmt::format("by {:.2g} mm of its {:.2g} mm width", fold.reach, fold.across)
+                : fmt::format("by {:.2g} mm", fold.reach);
+            if (!fold.tilted) {
+                return fmt::format(
+                    "Pipe: the profile folds {}over itself along the arc from {} ({}): the arc's "
+                    "axis passes through it{}. Use a larger radius or a smaller profile{}.",
+                    small ? "slightly " : "",
+                    inPlace(fold.at),
+                    by,
+                    small ? ", and the result may cross itself there" : "",
+                    small ? " to avoid it" : ""
+                );
+            }
+            return fmt::format(
+                "Pipe: 'Transformed' folds the profile {}over itself along the {} from {} ({}), as "
+                "the corners before it (or the profile's own slant) tilt the profile to it{}. Use "
+                "'Right corner' or 'Round corner', or a gentler {}{}.",
+                small ? "slightly " : "",
+                fold.arc ? "arc" : "curve",
+                inPlace(fold.at),
+                by,
+                small ? ": the result may cross itself there" : "",
+                fold.arc ? "arc" : "curve",
+                small ? ", to avoid it" : ""
+            );
+        };
+        CornerTilts tilts;
         auto invalidPipe = [&]() {
+            // A small fold that BRepCheck refuses (a square profile's): the fold is the reason
+            if (const auto& fold = tilts.smallFold) {
+                return "Pipe: the result isn't a valid solid: " + foldText(*fold, false).substr(6);
+            }
             return whyInvalid(
                 mode,
                 Transition.getValue(),
                 Transformation.getValue() == 1,
-                sharpest ? std::optional<std::string>(inPlace(*sharpest)) : std::nullopt
+                sharpest ? std::optional<std::string>(inPlace(sharpest->at)) : std::nullopt,
+                sharpest ? sharpest->degrees : 0
             );
         };
         auto warn = [&](const std::string& text) {
@@ -1481,26 +1635,6 @@ App::DocumentObjectExecReturn* Pipe::execute()
                 doc->setWarning(this, previous && *previous ? std::string(previous) + "\n" + text : text);
             }
         };
-        auto foldText = [&](const Fold& fold) {
-            if (!fold.tilted) {
-                return fmt::format(
-                    "Pipe: the profile folds over itself along the arc from {} (by {:.2g} mm): "
-                    "the arc's axis passes through it. Use a larger radius or a smaller profile.",
-                    inPlace(fold.at),
-                    fold.reach
-                );
-            }
-            return fmt::format(
-                "Pipe: 'Transformed' folds the profile over itself along the {} from {} (by {:.2g} "
-                "mm), as the corners before it (or the profile's own slant) tilt the profile to "
-                "it. Use 'Right corner' or 'Round corner', or a gentler {}.",
-                fold.arc ? "arc" : "curve",
-                inPlace(fold.at),
-                fold.reach,
-                fold.arc ? "arc" : "curve"
-            );
-        };
-        CornerTilts tilts;
         std::vector<TopoDS_Shape> sweptStarts;
 
         // build all shells
@@ -1623,7 +1757,7 @@ App::DocumentObjectExecReturn* Pipe::execute()
                 );
             }
             if (const auto& fold = tilts.folded) {
-                return new App::DocumentObjectExecReturn(foldText(*fold));
+                return new App::DocumentObjectExecReturn(foldText(*fold, false));
             }
             for (const Corner& corner : tilts.nearCollapse) {
                 const std::string text = fmt::format(
@@ -1770,23 +1904,10 @@ App::DocumentObjectExecReturn* Pipe::execute()
                 return new App::DocumentObjectExecReturn(invalidPipe());
             }
         }
-        // A small fold fails when the boolean check finds the pipe crossing itself, and warns
-        // when the check runs out of time
+        // A small fold passes, with a warning: its measure decides, not the boolean check, so
+        // the same file gives the same result on every platform (smallFold)
         if (const auto& fold = tilts.smallFold) {
-            const std::optional<bool> crosses = crossesItself(shapes, std::chrono::seconds(2));
-            if (crosses.value_or(false)) {
-                return new App::DocumentObjectExecReturn(foldText(*fold));
-            }
-            if (!crosses) {
-                const std::string text = fmt::format(
-                    "Pipe: the profile may cross itself slightly along the {} from {}, by up to "
-                    "{:.2g} mm: the check for it took too long.",
-                    fold->arc ? "arc" : "curve",
-                    inPlace(fold->at),
-                    fold->reach
-                );
-                warn(text);
-            }
+            warn(foldText(*fold, true));
         }
 
         // A closed spine sweeps a closed shell for each wire of a holed profile, and a closed

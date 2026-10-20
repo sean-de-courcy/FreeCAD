@@ -1039,18 +1039,136 @@ class TestPipeCorners(unittest.TestCase):
         pipe.Shape.check(True)
         self.assertAlmostEqual(pipe.Shape.Volume, 494.365, 2)
 
+    def assertFoldWarns(self, pipe, *phrases):
+        """Valid, with the warning of a small fold."""
+        self.assertValidSolid(pipe)
+        self.assertIn("Warning", pipe.State)
+        for phrase in ("folds the profile slightly", "may cross itself") + phrases:
+            self.assertIn(phrase, pipe.getStatusString())
+
     def testSmallFoldPasses(self):
         """A circle of radius 2, a 60 degree corner, then an arc of radius 3 turning 20 degrees in
         a plane tilted 45 degrees: the section reaches 0.08 mm past the line where it turns back,
-        a sliver (about 1e-3 mm^3) that the boolean check doesn't find. Valid, as integration
-        gives it (383.571). Round 3 refused it."""
-        spine = self.arcAfterACorner(60, 45, 3, 20)
-        pipe = self.pipe(
-            spine, self.profile([models.circle(0, 0, 2)]), Transition="Transformed", Refine=False
+        a sliver (about 1e-3 mm^3). Valid, as integration gives it (383.571), with a warning
+        naming the fold. The same with a 70 degree corner and radius 4 (0.17 mm of the circle's
+        4 mm). The fold's measure alone decides, the same on every platform: round 4 left such
+        folds to the boolean check, which passed the first on Windows and refused it on macOS,
+        and refused the second on Windows; round 3 refused the first."""
+        for degrees, radius, volume in ((60, 3, 383.571), (70, 4, None)):
+            with self.subTest(degrees=degrees):
+                self.renew()
+                spine = self.arcAfterACorner(degrees, 45, radius, 20)
+                profile = self.profile([models.circle(0, 0, 2)])
+                pipe = self.pipe(spine, profile, Transition="Transformed", Refine=False)
+                self.assertFoldWarns(pipe, "arc from (0, 0, 30)", "Right corner")
+                if volume:
+                    self.assertAlmostEqual(pipe.Shape.Volume, volume, 2)
+
+    def kinkedSpine(self, degrees, radius, bend):
+        """Up 30 along Z, a corner of `degrees` towards +X, then one B-spline through nine points:
+        20 mm on, a bend of `bend` degrees further (towards +X) over the length of an arc of
+        `radius`, and 20 mm on. The bend is short beside the B-spline's few pieces."""
+        corner = V(0, 0, 30)
+        start = math.radians(degrees)
+        leg = V(math.sin(start), 0, math.cos(start))
+        towards = V(math.cos(start), 0, -math.sin(start))
+        points = [corner, corner + leg * 10, corner + leg * 20]
+        length = radius * math.radians(bend) / 4
+        for i in range(1, 5):
+            angle = math.radians(bend * (i - 0.5) / 4)
+            points.append(points[-1] + (leg * math.cos(angle) + towards * math.sin(angle)) * length)
+        end = leg * math.cos(math.radians(bend)) + towards * math.sin(math.radians(bend))
+        points += [points[-1] + end * 10, points[-1] + end * 20]
+        curve = Part.BSplineCurve()
+        curve.interpolate(points, InitialTangent=leg, FinalTangent=end)
+        return models.feature(
+            self.doc, "Path", Part.Wire([Part.makeLine(V(0, 0, 0), corner), curve.toShape()])
         )
+
+    def testShortBendInACurveFolds(self):
+        """A circle of radius 2, a 60 degree corner, then a B-spline with a bend of 10 degrees over
+        0.52 mm (radius 3) inside it: the tilted section folds there, by 0.8 mm (as the same bend
+        as an arc of radius 3 does). Round 4 sampled the B-spline 32 times, 1.4 mm apart, missed
+        the bend and accepted the pipe (629.588). The samples are now subdivided where the section
+        turns fast enough to fold. Without the corner the section stays square to the bend, which
+        is wider than the profile: valid, without a warning."""
+        profile = self.profile([models.circle(0, 0, 2)])
+        pipe = self.pipe(self.kinkedSpine(60, 3, 10), profile, Transition="Transformed")
+        self.assertFails(pipe, "folds", "along the curve from (0, 0, 30)", "Right corner")
+
+        self.renew()
+        profile = self.profile([models.circle(0, 0, 2)])
+        pipe = self.pipe(self.kinkedSpine(0, 3, 10), profile, Transition="Transformed")
         self.assertValidSolid(pipe)
-        pipe.Shape.check(True)
-        self.assertAlmostEqual(pipe.Shape.Volume, 383.571, 2)
+        self.assertNotIn("Warning", pipe.State)
+
+    def testManySmallCornersAddUp(self):
+        """A circle of radius 2, up 10, then 775 corners of 0.0009 rad 0.05 mm apart (40 degrees in
+        all), then a B-spline bending 40 degrees more over 1.54 mm: "Transformed" keeps the
+        section's orientation at every corner, so it is tilted 40 degrees to the bend and folds
+        (0.67 mm), as after one corner of 40 degrees. Round 4 counted the section as tilted only
+        after a corner over 1e-3 rad, didn't look for folds and accepted it (588.80)."""
+        points = [V(0, 0, 0), V(0, 0, 10)]
+        angle = 0
+        for _ in range(775):
+            angle += 0.0009
+            points.append(points[-1] + V(math.sin(angle), 0, math.cos(angle)) * 0.05)
+        leg = V(math.sin(angle), 0, math.cos(angle))
+        towards = V(math.cos(angle), 0, -math.sin(angle))
+        bend = [points[-1]]
+        step = 2.2 * math.radians(40) / 8
+        for i in range(1, 9):
+            turn = math.radians(40 * (i - 0.5) / 8)
+            bend.append(bend[-1] + (leg * math.cos(turn) + towards * math.sin(turn)) * step)
+        end = leg * math.cos(math.radians(40)) + towards * math.sin(math.radians(40))
+        curve = Part.BSplineCurve()
+        curve.interpolate(bend, InitialTangent=leg, FinalTangent=end)
+        spine = models.feature(
+            self.doc, "Path", Part.Wire(Part.makePolygon(points).Edges + [curve.toShape()])
+        )
+        pipe = self.pipe(spine, self.profile([models.circle(0, 0, 2)]), Transition="Transformed")
+        self.assertFails(pipe, "folds", "along the curve from", "Right corner")
+
+    def testBinormalArcFoldsAtItsEnd(self):
+        """Binormal mode, binormal (-0.5, 1, 0.3), a square, a 60 degree corner, then an arc of
+        radius 3 turning 60 degrees in a plane tilted 90 degrees: the section folds a little
+        (about 0.02 mm) near the arc's end. Round 4's 32 samples missed it, and the pipe passed
+        silently, though it crosses itself; now it warns."""
+        spine = self.arcAfterACorner(60, 90, 3, 60)
+        pipe = self.pipe(
+            spine,
+            Transition="Transformed",
+            Mode="Binormal",
+            Binormal=V(-0.5, 1, 0.3),
+            Refine=False,
+        )
+        self.assertFoldWarns(pipe, "arc from (0, 0, 30)")
+
+    def testHintsNameTheCorner(self):
+        """The hint of an invalid result names the sharpest corner's angle, not "nearly 90" or
+        "nearly back on itself" when it isn't. A square, a 50 degree corner, then an arc of radius
+        4 turning 20 degrees in a plane tilted 45 degrees: "Transformed" leaves an invalid solid.
+        A 30 degree corner, then a waving B-spline, under "Right corner": OCCT gives no solid.
+        Round 4 said "a corner of nearly 90 degrees" and "a corner that turns nearly back on
+        itself"."""
+        pipe = self.pipe(self.arcAfterACorner(50, 45, 4, 20), Transition="Transformed")
+        self.assertFails(pipe, "isn't a valid solid", "(0, 0, 30)", "Right corner")
+        self.assertNotIn("nearly 90", pipe.getStatusString())
+
+        self.renew()
+        corner = V(0, 0, 30)
+        leg = V(math.sin(math.radians(30)), 0, math.cos(math.radians(30)))
+        points = [
+            corner + leg * (0.5 * i) + V(0, 2 * math.sin(i / 6), 0) * (i / 120) for i in range(121)
+        ]
+        curve = Part.BSplineCurve()
+        curve.interpolate(points, InitialTangent=leg)
+        spine = models.feature(
+            self.doc, "Path", Part.Wire([Part.makeLine(V(0, 0, 0), corner), curve.toShape()])
+        )
+        pipe = self.pipe(spine, Transition="Right corner", Refine=False)
+        self.assertFails(pipe, "isn't a valid solid", "30 degrees", "(0, 0, 30)", "'Transformed'")
+        self.assertNotIn("back on itself", pipe.getStatusString())
 
     def testSeparateWiresPast90Degrees(self):
         """Two squares side by side (x -5..-1 and 1..5) along an L at 120 degrees: the union of
