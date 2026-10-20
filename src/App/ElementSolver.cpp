@@ -8,6 +8,7 @@
 #include <limits>
 #include <locale>
 #include <map>
+#include <numbers>
 #include <numeric>
 #include <optional>
 #include <set>
@@ -2585,9 +2586,35 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 const Base::Vector3d old = offsets ? *saved.center - *saved.twinCentroid
                                                    : *saved.center;
                 const Base::Vector3d origin = offsets ? centroid : Base::Vector3d();
-                const double hitDistance = Base::Distance(old, *now.center - origin);
+                const Base::Vector3d hitOffset = *now.center - origin;
+                const double hitDistance = Base::Distance(old, hitOffset);
+                // Round 6 (N9): the angular tie. A turn by a symmetry's angle (45 degrees for four
+                // lobes) gives the old piece's place two readings, +45 and -45: the hit's and a
+                // sibling's offsets lie at the same angle from the old offset. Off the twins'
+                // centre their lengths differ a little, and the offsets' distances from the old
+                // one can differ by more than the 2 % tie (4 % with the disc 0.3 mm off). So the
+                // sibling ties also when its offset's angle from the old offset is within 5
+                // degrees of the hit's and the two offsets are about as long (within 25 %), as
+                // two places one turn could take the old piece to. A hit within 5 degrees of the
+                // old offset (a move, hitDistance 0) has no such tie; neither has a sibling on the
+                // same ray at another distance from the centroid (twins in a row).
+                constexpr double degrees = 180.0 / std::numbers::pi;
+                auto angleFromOld = [&](const Base::Vector3d& offset) {
+                    return std::atan2((old % offset).Length(), old * offset) * degrees;
+                };
+                const double tieDegrees = 5.0;
+                const bool angular = offsets && old.Length() > eps && hitOffset.Length() > eps
+                    && angleFromOld(hitOffset) > tieDegrees;
+                const double hitAngle = angular ? angleFromOld(hitOffset) : 0.0;
+                auto angularTie = [&](const Base::Vector3d& offset) {
+                    const double shorter = std::min(offset.Length(), hitOffset.Length());
+                    const double longer = std::max(offset.Length(), hitOffset.Length());
+                    return angular && shorter > eps && shorter >= 0.75 * longer
+                        && std::abs(angleFromOld(offset) - hitAngle) <= tieDegrees;
+                };
                 for (const auto& [k, centre] : siblings) {
-                    if (Base::Distance(old, centre - origin) <= hitDistance * 1.02 + eps) {
+                    if (Base::Distance(old, centre - origin) <= hitDistance * 1.02 + eps
+                        || angularTie(centre - origin)) {
                         place.push_back(k);
                     }
                 }

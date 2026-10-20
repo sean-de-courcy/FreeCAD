@@ -5483,6 +5483,57 @@ TEST(Moved, tiedTwinsBreak)
     }
 }
 
+TEST(Moved, twinsTurnedBySymmetryOffCentreBreak)
+{
+    // PR 340 round 6 (N9): four twins of a disc 0.3 mm off the centre of a hole of four lobes,
+    // the hole turned exactly 45 degrees, its symmetry angle. The reference saved on the twin
+    // at 225 degrees, (1.806, 1.735), offset (-1.333, -1.265) from the twins' centroid then,
+    // now names the piece at 180, offset (-1.828, 0), 1.36 from the old offset; the piece at
+    // 270, where the material went, has (-0.038, -1.87), 1.43 from it: 5 % farther, past the
+    // 2 % tie. Both offsets lie about 45 degrees from the old one (43.5 and 45.4): an angular
+    // tie, broken, the twin first.
+    auto outcome = Data::solveOwner(placedTwins(
+        {Base::Vector3d(1.31, 3, 10),
+         Base::Vector3d(3.10, 1.13, 10),
+         Base::Vector3d(3.10, 4.87, 10),
+         Base::Vector3d(5.04, 3, 10)},
+        6,
+        Base::Vector3d(1.806, 1.735, 10),
+        Base::Vector3d(3.1385, 3, 10),
+        4
+    ))[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << describe(outcome);
+    EXPECT_EQ(outcome.candidates, (std::vector<std::string> {"Face2", "Face1"}));
+    EXPECT_EQ(outcome.candidateRoles, (std::vector<std::string> {"place", "name"}));
+}
+
+TEST(Moved, twinsInARowKeepTheirNamesUnderTheAngularTie)
+{
+    // PR 340 round 6: the angular tie needs the two offsets about as long. Four twins in a row
+    // through (3, 3), the reference saved on the outer right one at (6, 3), turned 10 degrees
+    // about (3, 3): the twin next to it lies on the same ray from the centroid, at the same
+    // angle from the old offset, but a third as far out. No tie: the name stands. Moved
+    // without a turn, the hit's offset is the old one: no angular tie either.
+    const double c = std::cos(10.0 * std::numbers::pi / 180.0);
+    const double s = std::sin(10.0 * std::numbers::pi / 180.0);
+    std::vector<Base::Vector3d> turned;
+    std::vector<Base::Vector3d> moved;
+    for (double x : {-3.0, -1.0, 1.0, 3.0}) {
+        turned.emplace_back(3 + x * c, 3 + x * s, 10);
+        moved.emplace_back(3.5 + x, 7, 10);
+    }
+    for (const auto& places : {turned, moved}) {
+        EXPECT_EQ(
+            describe(
+                Data::solveOwner(
+                    placedTwins(places, 9, Base::Vector3d(6, 3, 10), Base::Vector3d(3, 3, 10), 4)
+                )[0]
+            ),
+            "exact Face4 0 [] "
+        );
+    }
+}
+
 TEST(SolveOwner, mergedFarCapPieceAloneOnItsFaceNeedsTheCentre)
 {
     // PR 340 round 4 (N1): A's pieces either side of a hole in the plate (marks: the plate and
