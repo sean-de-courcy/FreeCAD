@@ -226,6 +226,18 @@ using ElementHoldsPointFunction
     = bool (*)(const GeoFeature* geo, const char* element, const Base::Vector3d& point, double distance);
 AppExport void setElementHoldsPointFunction(ElementHoldsPointFunction function);
 
+/** The mean of the centres of \a element (`Face7`) of \a geo's shape and of its twins, and their
+ * number (ops#360, PR 340 round 5): the elements of its type with a name that is one of its
+ * ordered names (Data::isOrderedName()) up to the duplicate counter. Each centre as the element's
+ * fingerprint measures it. False when the element has no ordered name or no twin.
+ */
+AppExport bool elementTwinCentroid(
+    const GeoFeature* geo,
+    const char* element,
+    Base::Vector3d& centroid,
+    int& count
+);
+
 /// The bare mapped name in a shadow's new-style name (`Body.;<name>.Face3` -> `<name>`), or an
 /// empty string.
 AppExport std::string bareMappedName(const std::string& newStyleName);

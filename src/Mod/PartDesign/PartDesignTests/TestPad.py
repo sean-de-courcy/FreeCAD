@@ -2653,6 +2653,66 @@ class TestPad(unittest.TestCase):
                     finally:
                         FreeCAD.closeDocument(doc.Name)
 
+    def testPadUpToAnEllipticHoleUnequalTwinsTurnedBreak(self):
+        # PR 340 round 5 (N5): the disc off the hole's centre, along the twins' axis (unequal
+        # twins) or across it, the long hole (a 6) turned 50-75 degrees about its own centre:
+        # the twins trade names. Round 4's check wanted the counter sibling as far from the
+        # twins' centroid as the saved centre (within 20 %), as after a turn about their
+        # centroid; turned about the hole's centre, the twins changed shape and the centroid
+        # moved, and both datums stood on the other twin's piece, valid and with no warning. The
+        # saved fingerprint now holds the twins' centroid, and the offsets from it show the trade:
+        # each datum breaks (or stays on its own piece)
+        def turned(x, y, turn):
+            a = math.radians(turn)
+            x, y = x - 3, y - 3
+            return 3 + x * math.cos(a) - y * math.sin(a), 3 + x * math.sin(a) + y * math.cos(a)
+
+        cases = {
+            # case: (the disc's centre and radius, the hole's turn, the top and bottom twins'
+            # places before the turn and after it)
+            "unequal60": ((3, 4), 3, 60, ((3, 5.5), (3, 1.5))),
+            "unequal75": ((3, 4), 3, 75, ((3, 5.5), (3, 1.5))),
+            "unequal50": ((3, 4), 3, 50, ((3, 5.5), (3, 1.5))),
+            "across50": ((4.5, 3), 3, 50, ((4.5, 5.5), (4.5, 0.5))),
+            "across60": ((5, 3), 3, 60, ((5, 5.5), (5, 0.5))),
+            "across75": ((5, 3), 3, 75, ((5, 5.5), (5, 0.5))),
+        }
+        for kind in ("Pad", "Pocket"):
+            for case, (centre, radius, turn, places) in cases.items():
+                with self.subTest(kind=kind, case=case):
+                    doc = FreeCAD.newDocument("PadUpToAnEllipticHoleUnequalTwinsTurnedBreak")
+                    try:
+                        feature, z = discUpToAnEllipticHole(
+                            doc, kind, shell=lambda z: ellipticHoleShell(z, a=6), radius=radius
+                        )
+                        sketch = feature.Profile[0]
+                        for tag, value in zip(("xA", "yA"), centre):
+                            sketch.setDatum(
+                                tag, FreeCAD.Units.Quantity(value, FreeCAD.Units.Length)
+                            )
+                        doc.recompute()
+                        self.assertTrue(feature.isValid(), feature.getStatusString())
+                        self.assertEqual(len(farCaps(feature.Shape, z)), 4)
+                        points = [
+                            pointOnFarCap(feature, farCapAt(feature.Shape, z, *place))
+                            for place in places
+                        ]
+                        doc.getObject("Plate").Shape = ellipticHoleShell(z, turn=turn, a=6)
+                        doc.recompute()
+                        self.assertTrue(feature.isValid(), feature.getStatusString())
+                        for point, place in zip(points, places):
+                            if case.startswith("unequal"):
+                                after = turned(*place, turn)
+                            else:
+                                # the place as far along the hole's normal through the disc
+                                d = place[1] - 3
+                                a = math.radians(turn)
+                                after = (centre[0] - d * math.sin(a), 3 + d * math.cos(a))
+                            own = centreOfFarCapAt(feature.Shape, z, *after)
+                            assertNotQuietlyElsewhere(self, point, z, [own])
+                    finally:
+                        FreeCAD.closeDocument(doc.Name)
+
     def testPadUpToAFreeformHoleCapPiecesMergeIntoARing(self):
         # PR 340 round 3: A (x -3..3, y -0.5..0.5) across the plate's hole and its fill, datums
         # on its left and right pieces, on the plate. A made taller than the hole (y -3..2.5)

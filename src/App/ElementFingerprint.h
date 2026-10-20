@@ -53,6 +53,16 @@ namespace Data
  *   face's region can't be bounded, so a coplanar face beside a shrunk one can't be told from
  *   the rest of it; with it, a face outside the old box can't hold a point of the old face.
  *
+ * Version 4 (ops#360, PR 340 round 5), written only for an element told apart from its twins
+ * only by its place among them (the ORD flag: a piece of a far cap):
+ *
+ *     4|<type>|<kind>|<size>|<c>|<d>|<r>|<o or x0..z1 or _>|<tx>,<ty>,<tz>,<n>
+ *
+ * - the eighth field: what versions 2 and 3 have there, or `_`.
+ * - t: the mean of the centres of the n twins, the element's included (n >= 2), in the frame of
+ *   c. An edit can trade twins' names; the element's offset from it tells the solver which twin
+ *   went where, under a move or a turn of them all.
+ *
  * Numbers have 12 significant digits, in the classic locale, so the text is the same on every
  * platform and in every locale. A reader takes a version it doesn't know as no fingerprint.
  */
@@ -65,6 +75,9 @@ struct AppExport ElementFingerprint
     /// The text form of a fingerprint with an extent (Task 2 PR 8): an eighth field. Only planar
     /// faces have one.
     static constexpr int VersionWithExtent = 3;
+    /// The text form of a fingerprint with its twins' centroid (ops#360, PR 340 round 5): a
+    /// ninth field. Only ordered twins have one.
+    static constexpr int VersionWithTwins = 4;
 
     /// `F`, `E` or `V`; 0 for no fingerprint.
     char type = 0;
@@ -79,6 +92,10 @@ struct AppExport ElementFingerprint
     /// `center`); both empty otherwise.
     std::optional<Base::Vector3d> extentMin;
     std::optional<Base::Vector3d> extentMax;
+    /// The mean of the centres of the element's ordered twins, its own included (in the frame
+    /// of `center`), and their number; empty and 0 otherwise.
+    std::optional<Base::Vector3d> twinCentroid;
+    int twinCount = 0;
 
     bool isValid() const
     {
@@ -101,7 +118,8 @@ struct AppExport ElementFingerprint
     {
         return a.type == b.type && a.kind == b.kind && a.size == b.size && a.center == b.center
             && a.direction == b.direction && a.radii == b.radii && a.location == b.location
-            && a.extentMin == b.extentMin && a.extentMax == b.extentMax;
+            && a.extentMin == b.extentMin && a.extentMax == b.extentMax
+            && a.twinCentroid == b.twinCentroid && a.twinCount == b.twinCount;
     }
     friend bool operator!=(const ElementFingerprint& a, const ElementFingerprint& b)
     {

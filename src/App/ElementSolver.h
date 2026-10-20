@@ -475,6 +475,11 @@ AppExport bool atSamePlace(
  */
 AppExport bool isOrderedName(std::string_view name);
 
+/** True if \a name is \a other up to the duplicate counter and not \a other itself: for ordered
+ * names (isOrderedName()), twins (ops#360, PR 340 round 5, the fingerprint's twin centroid).
+ */
+AppExport bool isCounterSiblingName(std::string_view name, std::string_view other);
+
 /** A cheap necessary condition for atSamePlace(\a saved, the element's fingerprint), from the
  * element's \a intrinsic part (type, kind, direction, radii and a circle's centre, measured as
  * its fingerprint measures them) and \a anchor, a point of its plane (a plane face), its line (a

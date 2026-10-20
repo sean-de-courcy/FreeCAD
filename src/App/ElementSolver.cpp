@@ -2321,6 +2321,11 @@ bool isOrderedName(std::string_view name)
     return isOrdered(name);
 }
 
+bool isCounterSiblingName(std::string_view name, std::string_view other)
+{
+    return isCounterSibling(name, other);
+}
+
 bool mayBeAtPlace(
     const ElementFingerprint& saved,
     const ElementFingerprint& intrinsic,
@@ -2544,18 +2549,18 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 : entry.exactName;
             // Twins (ops#360, PR 340 round 3): pieces of one far cap told apart only by their
             // place among them (the ORD flag and the duplicate counter) can trade names when an
-            // edit turns them, so nothing sits at the old place. The sign: a counter sibling as
-            // near the saved centre as the hit or nearer (round 4: a tie too, within 2 %), that
-            // lies about as far from the twins' centroid as the saved centre does (within 20 % of
-            // that distance, so the turn may come with a small move, or about a point near their
-            // centre, the twins changing shape): the twins turned, and the sibling is where the
-            // old piece went. A move of the pair or a twin's growth changes the saved centre's
-            // distance from the centroid, and the name stands (round 4: a move by more than half
-            // their spacing put the sibling nearer). Never a pick.
+            // edit turns them, so nothing sits at the old place. Round 5: the saved fingerprint
+            // holds the twins' centroid, so the saved centre's offset from it is the old piece's
+            // place among them. A counter sibling whose offset from the twins' centroid now is as
+            // near the old offset as the hit's or nearer (a tie within 2 %, round 4) is where the
+            // old piece went: the twins turned, about any point. A move of them all keeps every
+            // offset, and a twin's growth moves the centroid by a fraction of it, so the hit's
+            // offset stays the nearest and the name stands. An older record (no centroid, or
+            // another number of twins) compares the centres themselves (round 3), which breaks
+            // a move of the pair too: loud, never a pick.
             bool nearerTwin = false;
             if (place.empty() && saved.center && now.center && isOrdered(hitName)) {
                 const double eps = input.continuationDistance * std::max(1.0, input.diagonal);
-                const double hitDistance = Base::Distance(*saved.center, *now.center);
                 std::vector<std::pair<int, Base::Vector3d>> siblings;
                 Base::Vector3d centroid = *now.center;
                 for (std::size_t k = 0; k < pool.elements.size(); ++k) {
@@ -2574,11 +2579,15 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                     }
                 }
                 centroid /= static_cast<double>(siblings.size() + 1);
-                const double savedRadius = Base::Distance(*saved.center, centroid);
+                const bool offsets = saved.twinCentroid
+                    && saved.twinCount == static_cast<int>(siblings.size() + 1);
+                // The old place and the twins' places now, from their centroids or as they are
+                const Base::Vector3d old = offsets ? *saved.center - *saved.twinCentroid
+                                                   : *saved.center;
+                const Base::Vector3d origin = offsets ? centroid : Base::Vector3d();
+                const double hitDistance = Base::Distance(old, *now.center - origin);
                 for (const auto& [k, centre] : siblings) {
-                    const double radius = Base::Distance(centre, centroid);
-                    if (Base::Distance(*saved.center, centre) <= hitDistance * 1.02 + eps
-                        && std::abs(savedRadius - radius) <= radius * 0.2 + eps) {
+                    if (Base::Distance(old, centre - origin) <= hitDistance * 1.02 + eps) {
                         place.push_back(k);
                     }
                 }

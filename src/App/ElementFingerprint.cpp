@@ -127,8 +127,12 @@ std::string ElementFingerprint::toString() const
             + formatNumber(v->z);
     };
     const bool withExtent = extentMin && extentMax;
+    const bool withTwins = twinCentroid && twinCount >= 2;
     std::string text = std::to_string(
-        withExtent ? VersionWithExtent : location ? VersionWithLocation : Version
+        withTwins        ? VersionWithTwins
+            : withExtent ? VersionWithExtent
+            : location   ? VersionWithLocation
+                         : Version
     );
     text += fieldDelimiter;
     text += type;
@@ -158,19 +162,29 @@ std::string ElementFingerprint::toString() const
         text += fieldDelimiter;
         text += vector(extentMin) + listDelimiter + vector(extentMax);
     }
+    else if (withTwins) {
+        text += fieldDelimiter;
+        text += emptyField;
+    }
+    if (withTwins) {
+        text += fieldDelimiter;
+        text += vector(twinCentroid) + listDelimiter + std::to_string(twinCount);
+    }
     return text;
 }
 
 ElementFingerprint ElementFingerprint::fromString(std::string_view text)
 {
     auto fields = split(text, fieldDelimiter);
+    const bool circle = fields.size() > 2 && fields[1] == "E" && fields[2] == "Circle";
+    const bool plane = fields.size() > 2 && fields[1] == "F" && fields[2] == "Plane";
     const bool withLocation = fields.size() == fieldCount + 1
-        && fields[0] == std::to_string(VersionWithLocation) && fields[1] == "E"
-        && fields[2] == "Circle";
+        && fields[0] == std::to_string(VersionWithLocation) && circle;
     const bool withExtent = fields.size() == fieldCount + 1
-        && fields[0] == std::to_string(VersionWithExtent) && fields[1] == "F"
-        && fields[2] == "Plane";
-    if (!withLocation && !withExtent
+        && fields[0] == std::to_string(VersionWithExtent) && plane;
+    const bool withTwins = fields.size() == fieldCount + 2
+        && fields[0] == std::to_string(VersionWithTwins);
+    if (!withLocation && !withExtent && !withTwins
         && (fields.size() != fieldCount || fields[0] != std::to_string(Version))) {
         return {};
     }
@@ -200,6 +214,31 @@ ElementFingerprint ElementFingerprint::fromString(std::string_view text)
         }
         result.extentMin = Base::Vector3d(corners[0], corners[1], corners[2]);
         result.extentMax = Base::Vector3d(corners[3], corners[4], corners[5]);
+    }
+    if (withTwins) {
+        // The eighth field holds a circle's centre or a plane's extent, as in versions 2 and 3,
+        // or nothing.
+        std::vector<double> extra;
+        if (!parseList(fields[7], extra)) {
+            return {};
+        }
+        if (extra.size() == 3 && circle) {
+            result.location = Base::Vector3d(extra[0], extra[1], extra[2]);
+        }
+        else if (extra.size() == 6 && plane) {
+            result.extentMin = Base::Vector3d(extra[0], extra[1], extra[2]);
+            result.extentMax = Base::Vector3d(extra[3], extra[4], extra[5]);
+        }
+        else if (!extra.empty()) {
+            return {};
+        }
+        std::vector<double> twins;
+        if (!parseList(fields[8], twins) || twins.size() != 4 || twins[3] < 2
+            || twins[3] != std::floor(twins[3]) || twins[3] > 1e6) {
+            return {};
+        }
+        result.twinCentroid = Base::Vector3d(twins[0], twins[1], twins[2]);
+        result.twinCount = static_cast<int>(twins[3]);
     }
     result.type = fields[1][0];
     return result;

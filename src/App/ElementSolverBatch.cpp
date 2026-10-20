@@ -1711,4 +1711,62 @@ bool reboundInPlace(DocumentObject* obj, const std::string& sub, const GuessReco
     );
 }
 
+bool elementTwinCentroid(const GeoFeature* geo, const char* element, Base::Vector3d& centroid, int& count)
+{
+    count = 0;
+    const PropertyComplexGeoData* prop = geo ? geo->getPropertyOfGeometry() : nullptr;
+    const Data::ComplexGeoData* data = prop ? prop->getComplexData() : nullptr;
+    if (!data || !element || !element[0]) {
+        return false;
+    }
+    Data::IndexedName indexed(element);
+    if (!indexed) {
+        return false;
+    }
+    // The element's ordered names, plain, as the solver sees them (poolOf())
+    std::vector<std::string> ordered;
+    for (const auto& mapped : data->getElementMappedNames(indexed)) {
+        std::string plain = plainName(mapped.first.toString());
+        if (Data::isOrderedName(plain)) {
+            ordered.push_back(std::move(plain));
+        }
+    }
+    if (ordered.empty()) {
+        return false;
+    }
+    // Its twins: the elements of its type with a name that is one of these up to the counter
+    std::set<std::string> twins;
+    for (const auto& mapped : data->getElementMap()) {
+        if (!mapped.index || mapped.index == indexed
+            || std::strcmp(mapped.index.getType(), indexed.getType()) != 0) {
+            continue;
+        }
+        const std::string plain = plainName(mapped.name.toString());
+        if (std::any_of(ordered.begin(), ordered.end(), [&](const std::string& name) {
+                return Data::isCounterSiblingName(plain, name);
+            })) {
+            twins.insert(mapped.index.toString());
+        }
+    }
+    Data::ElementFingerprint own;
+    if (twins.empty() || !geo->getElementFingerprint(element, own) || !own.center) {
+        return false;
+    }
+    Base::Vector3d sum = *own.center;
+    int number = 1;
+    for (const auto& index : twins) {
+        Data::ElementFingerprint twin;
+        if (geo->getElementFingerprint(index.c_str(), twin) && twin.center) {
+            sum += *twin.center;
+            ++number;
+        }
+    }
+    if (number < 2) {
+        return false;
+    }
+    centroid = sum / static_cast<double>(number);
+    count = number;
+    return true;
+}
+
 }  // namespace App
