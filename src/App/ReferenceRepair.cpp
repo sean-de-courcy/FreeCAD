@@ -98,6 +98,8 @@ void apply(PropertyLinkBase* prop, const Reference& reference, std::vector<Solve
         if (auto doc = owner->getDocument()) {
             doc->clearWarning(owner);
         }
+        // Its warning is gone: the same text prints again if it comes back (ops#391)
+        ReferenceReport::forgetPrintedWarning(owner);
         owner->touch();
     }
 }

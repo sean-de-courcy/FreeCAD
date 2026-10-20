@@ -74,6 +74,7 @@ void DlgSettingsUI::saveSettings()
     ui->hideInternalNamesCheckBox->onSave();
     ui->hideTreeViewScrollBarCheckBox->onSave();
     ui->hideHeaderCheckBox->onSave();
+    ui->showSamePlaceWarningsCheckBox->onSave();
 
     // Overlay
     ui->hideTabBarCheckBox->onSave();
@@ -103,6 +104,7 @@ void DlgSettingsUI::loadSettings()
     ui->hideInternalNamesCheckBox->onRestore();
     ui->hideTreeViewScrollBarCheckBox->onRestore();
     ui->hideHeaderCheckBox->onRestore();
+    ui->showSamePlaceWarningsCheckBox->onRestore();
 
     // Overlay
     ui->hideTabBarCheckBox->onRestore();

@@ -89,6 +89,7 @@
 #include "Link.h"
 #include "MergeDocuments.h"
 #include "NameTable.h"
+#include "ReferenceReport.h"
 #include "ElementReferences.h"
 #include "ForkRelease.h"
 #include "NamingRevision.h"
@@ -1393,9 +1394,20 @@ bool Document::isTransactionEmpty() const
 
 }
 
+// What is kept about the objects' warnings beside the document, and the errors printed (ops#391):
+// forgotten before the objects go, since others may take their addresses
+static void forgetWarningsAndErrors(DocumentP& d)
+{
+    for (const auto& entry : d.objectMap) {
+        ReferenceReport::forgetWarningState(entry.second);
+    }
+    d._ErrorPrinted.clear();
+}
+
 void Document::clearDocument() // NOLINT
 {
     d->activeObject = nullptr;
+    forgetWarningsAndErrors(*d);
 
     if (!d->objectArray.empty()) {
         GetApplication().signalDeleteDocument(*this);
@@ -1790,6 +1802,7 @@ Document::~Document()
     Console().log("-Delete Features of %s \n", getName());
 #endif
 
+    forgetWarningsAndErrors(*d);
     d->clearDocument();
     documentNamingRevisions.erase(this);
     documentForkReleases.erase(this);
@@ -2577,7 +2590,11 @@ std::vector<DocumentObject*> Document::readObjects(Base::XMLReader& reader)
                     obj->setStatus(ObjectStatus::Error,
                                    reader.getAttribute<bool>("Invalid"));
                     if (obj->isError() && reader.hasAttribute("Error")) {
-                        d->addRecomputeLog(reader.getAttribute<const char*>("Error"), obj);
+                        const char* text = reader.getAttribute<const char*>("Error");
+                        d->addRecomputeLog(text, obj);
+                        // Printed when it was set: again only when its text changes (decision
+                        // 100)
+                        d->_ErrorPrinted[obj] = text;
                     }
                 }
                 if (reader.hasAttribute("Freeze")) {
@@ -2586,8 +2603,12 @@ std::vector<DocumentObject*> Document::readObjects(Base::XMLReader& reader)
                     }
                 }
                 if (reader.hasAttribute("Warning")) {
-                    setWarning(obj, reader.getAttribute<const char*>("Warning"));
-                    d->_WarningLog[obj].reported = true;  // it was reported when it was set
+                    const char* text = reader.getAttribute<const char*>("Warning");
+                    setWarning(obj, text);
+                    // It was reported when it was set: shown again only when its text changes
+                    // (ops#391); its level is derived in afterRestore()
+                    d->_WarningLog[obj].reported = true;
+                    ReferenceReport::notePrintedWarning(obj, text);
                 }
             }
         }
@@ -3171,6 +3192,7 @@ void Document::restore(const char* filename,
 {
     clearUndos();
     d->activeObject = nullptr;
+    forgetWarningsAndErrors(*d);
 
     bool signal = false;
     Document* activeDoc = GetApplication().getActiveDocument();
@@ -3416,6 +3438,32 @@ bool Document::afterRestore(const std::vector<DocumentObject*>& objArray, bool c
         }
         if (!d->touchedObjs.contains(obj)) {
             obj->purgeTouched();
+        }
+
+        // A restored warning's level (ops#391): from its references' saved records and the
+        // shapes now, its targets' restored before it; nothing about it is saved. The saved
+        // text's same-place clauses count only when the object was up to date when saved and
+        // isn't touched now: after a partial recompute or an undo, the text is older than the
+        // records, and the shapes judge alone, erring loud (decision 102). A failure to judge
+        // is the normal level and doesn't stop the restore.
+        if (obj->isWarning() && isReferenceSolverOn()) {
+            if (const char* text = getWarningDescription(obj)) {
+                const bool upToDate = !d->touchedObjs.contains(obj) && !obj->isTouched();
+                bool samePlace = false;
+                try {
+                    samePlace = ReferenceReport::restoredSamePlaceWarning(obj, text, upToDate);
+                }
+                catch (const Base::Exception& e) {
+                    FC_LOG(obj->getFullName() << ": the restored warning's level: " << e.what());
+                }
+                catch (const std::exception& e) {
+                    FC_LOG(obj->getFullName() << ": the restored warning's level: " << e.what());
+                }
+                catch (...) {
+                    FC_LOG(obj->getFullName() << ": the restored warning's level: unknown exception");
+                }
+                ReferenceReport::setSamePlaceWarning(obj, samePlace);
+            }
         }
 
         signalFinishRestoreObject(*obj);
@@ -4058,8 +4106,9 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
                         }
                         if (verdict == AfterInputFailure::Fail) {
                             // It doesn't run: its warning from the last recompute goes (ops#127,
-                            // N1 4.9)
+                            // N1 4.9), and prints again if it comes back (ops#391)
                             clearWarning(obj);
+                            ReferenceReport::forgetPrintedWarning(obj);
                             d->addRecomputeLog(why, obj);
                             res = 1;
                         }
@@ -4067,6 +4116,7 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
                             // A reference set aside by a reorder (ops#127): it doesn't run
                             // either, so its warning goes too
                             clearWarning(obj);
+                            ReferenceReport::forgetPrintedWarning(obj);
                             d->addRecomputeLog(why, obj);
                             res = 1;
                         }
@@ -4209,27 +4259,65 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
     // References re-derived from geometry in this recompute (a naming migration, ops#103)
     reportReferenceMigration();
 
+    // The errors set in this recompute, once when an error appears and again only when its text
+    // changes (decision 100), as the warnings below; the tree's mark is unchanged. An object no
+    // longer in error forgets its text: if the error comes back, it is new.
+    for (auto it : topoSortedObjects) {
+        if (!it->isError()) {
+            d->_ErrorPrinted.erase(it);
+        }
+    }
     if (!failedNow.empty()) {
         if (!testStatus(Status::IgnoreErrorOnRecompute)) {
             for (auto it : topoSortedObjects) {
                 if (it->isError() && failedNow.contains(it)) {
                     const char* text = getErrorDescription(it);
                     if (text) {
+                        auto [printed, added] = d->_ErrorPrinted.try_emplace(it, text);
+                        if (!added && printed->second == text) {
+                            continue;
+                        }
+                        printed->second = text;
                         Base::Console().error("%s: %s\n", it->Label.getValue(), text);
                     }
                 }
             }
         }
     }
-    // The warnings set in this recompute (ops#127), once each: to the Report view and the
-    // notification area (Console().warning(); userWarning() doesn't reach the Report view).
+    // The warnings set in this recompute (ops#127): to the Report view and the notification area
+    // (Console().warning(); userWarning() doesn't reach the Report view), once when a warning
+    // appears and again only when its text changes, not at every recompute of its owner
+    // (ops#391). The tree's marker stays until it is accepted or fixed. A same-place warning
+    // whose marker the tree hides goes to the log.
+    std::optional<bool> showSamePlace;
+    auto samePlaceShown = [&showSamePlace]() {
+        if (!showSamePlace) {
+            showSamePlace = GetApplication()
+                                .GetParameterGroupByPath("User parameter:BaseApp/Preferences/TreeView")
+                                ->GetBool("ShowSamePlaceWarnings", true);
+        }
+        return *showSamePlace;
+    };
     for (auto it : topoSortedObjects) {
         auto found = d->_WarningLog.find(it);
-        if (found == d->_WarningLog.end() || found->second.reported) {
+        if (found == d->_WarningLog.end()) {
+            ReferenceReport::forgetPrintedWarning(it);  // gone: if it comes back, it is new
+            continue;
+        }
+        if (found->second.reported) {
             continue;
         }
         found->second.reported = true;
-        if (it->isAttachedToDocument() && !it->isError()) {
+        if (!it->isAttachedToDocument() || it->isError()) {
+            continue;
+        }
+        if (!ReferenceReport::notePrintedWarning(it, found->second.text)) {
+            continue;
+        }
+        if (ReferenceReport::isSamePlaceWarning(it) && !samePlaceShown()) {
+            FC_LOG(it->getFullName() << ": " << found->second.text);
+        }
+        else {
             Base::Console().warning("%s: %s\n", it->Label.getValue(), found->second.text.c_str());
         }
     }
@@ -4447,6 +4535,8 @@ void Document::setWarning(DocumentObject* Obj, const std::string& text)
     }
     warning.text = text;
     warning.status = "Warning: " + text;
+    // The normal level, unless the recompute check marks it quieter after this (ops#391)
+    ReferenceReport::setSamePlaceWarning(Obj, false);
     Obj->setStatus(ObjectStatus::Warning, true);
 }
 
@@ -4456,6 +4546,7 @@ void Document::clearWarning(DocumentObject* Obj)
         return;
     }
     d->_WarningLog.erase(Obj);
+    ReferenceReport::setSamePlaceWarning(Obj, false);
     Obj->setStatus(ObjectStatus::Warning, false);
 }
 
@@ -4549,6 +4640,7 @@ bool Document::recomputeFeature(DocumentObject* feature, bool recursive)
     if (continuation && !continuation->holds(feature) && continuation->blocked(feature, why)) {
         // A reference set aside by a reorder fails it here too (ops#127), without its warning
         clearWarning(feature);
+        ReferenceReport::forgetPrintedWarning(feature);
         d->addRecomputeLog(why, feature);
         res = 1;
     }
@@ -4859,6 +4951,9 @@ void Document::_removeObject(DocumentObject* pcObject, RemoveObjectOptions optio
     if (tobedestroyed) {
         tobedestroyed->pcNameInDocument = nullptr;
     }
+    // Another object may take its address (ops#391)
+    ReferenceReport::forgetWarningState(pcObject);
+    d->_ErrorPrinted.erase(pcObject);
 
     // Erase last to avoid invalidating pcObject->pcNameInDocument
     // when it is still needed in Transaction::addObjectNew

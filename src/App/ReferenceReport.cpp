@@ -7,6 +7,8 @@
 #include <cmath>
 #include <cstdio>
 #include <map>
+#include <mutex>
+#include <set>
 #include <sstream>
 
 #include "Document.h"
@@ -468,6 +470,131 @@ std::string guessedText(const ReferenceReport::Slot& slot,
     return ss.str();
 }
 
+using SamePlaceKey = std::pair<const PropertyLinkBase*, int>;
+
+// What is kept about warnings beside the documents (ops#391), process-wide by object. The
+// recompute writes it, on the worker thread of an asynchronous recompute, and the tree reads it
+// on the GUI thread: one lock for all of it. Forgotten with the object (forgetWarningState()).
+struct WarningState
+{
+    std::mutex lock;
+    // The objects whose warning is the quieter level
+    std::set<const DocumentObject*> samePlace;
+    // Per object: the warning text last printed for it, so that a warning prints once and again
+    // only when its text changes
+    std::map<const DocumentObject*, std::string> printed;
+    // The records judged found again in the same place, by property and reference position: the
+    // owner, and the record's identity when judged. Its original fingerprint is a snapshot, so a
+    // later edit that moves the element (a dimension upstream) would undo the judgement at the
+    // next recompute; the judgement holds while the record does.
+    std::map<SamePlaceKey, std::pair<const DocumentObject*, std::string>> records;
+};
+
+WarningState& warningState()
+{
+    // Never destroyed: a document deleted after static destruction still forgets its objects here
+    static auto* state = new WarningState;
+    return *state;
+}
+
+// The record and the element it picked: another solve, which may pick another element with the
+// same record, judges again
+std::string recordIdentity(const ReferenceReport::Slot& slot)
+{
+    const GuessRecord& guess = slot.guess;
+    return guess.kind + '\n' + guess.origText() + '\n' + guess.origFingerprint + '\n'
+        + guess.altText() + '\n' + (slot.mappedName.empty() ? slot.sub : slot.mappedName);
+}
+
+// Whether \a owner's reference in \a slot was found again in the same place: now
+// (reboundInPlace()), or when its record was judged
+bool foundInPlace(const DocumentObject* owner, const ReferenceReport::Slot& slot)
+{
+    const SamePlaceKey key {slot.prop, slot.localIndex};
+    const bool now = reboundInPlace(slot.obj, slot.sub, slot.guess);
+    auto identity = recordIdentity(slot);
+    auto& state = warningState();
+    std::lock_guard<std::mutex> guard(state.lock);
+    if (now) {
+        state.records[key] = {owner, std::move(identity)};
+        return true;
+    }
+    // Another record now: describe() drops the judgement, so that the judged one coming back (an
+    // undo, a later solve) is judged again
+    auto it = state.records.find(key);
+    return it != state.records.end() && it->second.first == owner && it->second.second == identity;
+}
+
+// The references a warning text names as found again in the same place (samePlaceText()), as
+// (property, position): `Base[1-3, 5]` gives Base 1, 2, 3 and 5.
+std::set<std::pair<std::string, int>> samePlaceNamed(const std::string& text)
+{
+    std::set<std::pair<std::string, int>> named;
+    const std::string marker = " found again in the same place (";
+    for (auto at = text.find(marker); at != std::string::npos; at = text.find(marker, at + 1)) {
+        const auto open = at + marker.size();
+        const auto bracket = text.find('[', open);
+        const auto close = text.find("])", open);
+        if (bracket == std::string::npos || close == std::string::npos || bracket > close) {
+            continue;
+        }
+        const std::string property = text.substr(open, bracket - open);
+        std::istringstream list(text.substr(bracket + 1, close - bracket - 1));
+        std::string item;
+        while (std::getline(list, item, ',')) {
+            std::istringstream range(item);
+            int first = 0;
+            if (!(range >> first)) {
+                continue;
+            }
+            int last = first;
+            char dash = 0;
+            if (range >> dash && dash == '-') {
+                range >> last;
+            }
+            // 64-bit, so that a saved text's extreme positions can't overflow
+            for (long long i = first; i <= last && i - first < 100000; ++i) {
+                named.emplace(property, static_cast<int>(i));
+            }
+        }
+    }
+    return named;
+}
+
+// A property's references found again in the same place (ops#391), in one text:
+// `Edge reference found again in the same place (Base[1])`, `3 edge references found again in the
+// same place (Base[1-3, 5])`; \a type is empty when they are of mixed types.
+std::string samePlaceText(
+    const std::string& property,
+    const std::vector<int>& indices,
+    const std::string& type
+)
+{
+    std::ostringstream ss;
+    if (indices.size() == 1) {
+        ss << capitalized(type.empty() ? "element" : type) << " reference";
+    }
+    else {
+        ss << indices.size() << ' ' << (type.empty() ? std::string("element") : type)
+           << " references";
+    }
+    ss << " found again in the same place (" << property << '[';
+    // runs of consecutive positions as `a-b`
+    for (std::size_t i = 0; i < indices.size();) {
+        std::size_t j = i;
+        while (j + 1 < indices.size() && indices[j + 1] == indices[j] + 1) {
+            ++j;
+        }
+        ss << (i ? ", " : "") << indices[i];
+        if (j > i) {
+            ss << '-' << indices[j];
+        }
+        i = j + 1;
+    }
+    ss << "])";
+    return ss.str();
+}
+
 }  // namespace
 
 bool ReferenceReport::describeBroken(const DocumentObject* obj, std::string& why)
@@ -527,6 +654,19 @@ bool ReferenceReport::describe(const DocumentObject* obj, Outcome& outcome)
     auto append = [](std::string& text, const std::string& item) {
         text += (text.empty() ? "" : "; ") + item;
     };
+    // The warning's texts in order; a property's references found again in the same place share
+    // one text, at its first one's position (ops#391), filled in at the end
+    std::vector<std::string> warnings;
+    struct SamePlace
+    {
+        std::size_t position = 0;
+        std::vector<int> indices;
+        std::string type;
+        bool mixed = false;
+    };
+    std::map<std::string, SamePlace> samePlace;  // by property
+    std::set<SamePlaceKey> inPlace;  // the references found in place in this pass
+    bool othersWarned = false;
     for (std::size_t s = 0; s < slots.size(); ++s) {
         const auto& slot = slots[s];
         auto entry = find(slot.prop, slot.localIndex);
@@ -536,16 +676,36 @@ bool ReferenceReport::describe(const DocumentObject* obj, Outcome& outcome)
                 append(outcome.fatal, missingText(slot, entry));
                 continue;
             }
-            append(outcome.warning, missingText(slot, entry));
+            warnings.push_back(missingText(slot, entry));
+            othersWarned = true;
             if (count.lastMissing == static_cast<int>(s)) {
-                outcome.warning += "; computed on " + std::to_string(count.resolving) + " of "
-                    + std::to_string(count.total) + " " + plural(count.type);
+                warnings.push_back(
+                    "computed on " + std::to_string(count.resolving) + " of "
+                    + std::to_string(count.total) + " " + plural(count.type)
+                );
             }
             continue;
         }
         if (slot.guess.empty()) {
             continue;
         }
+        if (foundInPlace(obj, slot)) {
+            inPlace.insert({slot.prop, slot.localIndex});
+            auto [it, first] = samePlace.try_emplace(slot.property);
+            auto& same = it->second;
+            const std::string type = typeOf(elementOfSub(slot.sub));
+            if (first) {
+                same.position = warnings.size();
+                same.type = type;
+                warnings.emplace_back();
+            }
+            else if (same.type != type) {
+                same.mixed = true;
+            }
+            same.indices.push_back(slot.index);
+            continue;
+        }
+        othersWarned = true;
         // The pieces of an expanded reference carry the same record: one text for them.
         std::size_t last = s;
         std::string elements = elementOfSub(slot.sub);
@@ -558,10 +718,108 @@ bool ReferenceReport::describe(const DocumentObject* obj, Outcome& outcome)
         }
         std::string where = slot.property + "[" + std::to_string(slot.index)
             + (last > s ? ".." + std::to_string(slots[last].index) : std::string()) + "]";
-        append(outcome.warning, guessedText(slot, elements, where));
+        warnings.push_back(guessedText(slot, elements, where));
         s = last;
     }
+    {
+        // A judgement goes with a reference not found in place now (missing, removed, no guess,
+        // another record), so that its record coming back (an undo) is judged again
+        auto& state = warningState();
+        std::lock_guard<std::mutex> guard(state.lock);
+        std::erase_if(state.records, [obj, &inPlace](const auto& entry) {
+            return entry.second.first == obj && !inPlace.contains(entry.first);
+        });
+    }
+    for (const auto& [property, same] : samePlace) {
+        warnings[same.position] = samePlaceText(property, same.indices, same.mixed ? "" : same.type);
+    }
+    for (const auto& text : warnings) {
+        append(outcome.warning, text);
+    }
+    outcome.samePlace = !samePlace.empty() && !othersWarned;
     return !outcome.fatal.empty() || !outcome.warning.empty();
+}
+
+bool ReferenceReport::isSamePlaceWarning(const DocumentObject* obj)
+{
+    auto& state = warningState();
+    std::lock_guard<std::mutex> guard(state.lock);
+    return state.samePlace.contains(obj);
+}
+
+void ReferenceReport::setSamePlaceWarning(const DocumentObject* obj, bool on)
+{
+    auto& state = warningState();
+    std::lock_guard<std::mutex> guard(state.lock);
+    if (on) {
+        state.samePlace.insert(obj);
+    }
+    else {
+        state.samePlace.erase(obj);
+    }
+}
+
+bool ReferenceReport::notePrintedWarning(const DocumentObject* obj, const std::string& text)
+{
+    auto& state = warningState();
+    std::lock_guard<std::mutex> guard(state.lock);
+    auto [it, added] = state.printed.try_emplace(obj, text);
+    if (added) {
+        return true;
+    }
+    if (it->second == text) {
+        return false;
+    }
+    it->second = text;
+    return true;
+}
+
+void ReferenceReport::forgetPrintedWarning(const DocumentObject* obj)
+{
+    auto& state = warningState();
+    std::lock_guard<std::mutex> guard(state.lock);
+    state.printed.erase(obj);
+}
+
+void ReferenceReport::forgetWarningState(const DocumentObject* obj)
+{
+    auto& state = warningState();
+    std::lock_guard<std::mutex> guard(state.lock);
+    state.samePlace.erase(obj);
+    state.printed.erase(obj);
+    std::erase_if(state.records, [obj](const auto& entry) {
+        return entry.second.first == obj;
+    });
+}
+
+bool ReferenceReport::restoredSamePlaceWarning(
+    const DocumentObject* obj,
+    const std::string& text,
+    bool trustText
+)
+{
+    // The saved text keeps the judgement of the session that saved it, which the shapes alone
+    // can't give back once an edit moved the element since (foundInPlace()). It is as old as the
+    // records only when the object was up to date when saved (decision 102).
+    const auto named = trustText ? samePlaceNamed(text) : std::set<std::pair<std::string, int>> {};
+    if (!named.empty()) {
+        std::vector<std::pair<SamePlaceKey, std::string>> judged;
+        for (const auto& slot : slotsOf(obj)) {
+            if ((slot.guess.kind == "tier2" || slot.guess.kind == "tier3")
+                && !Data::hasMissingElement(slot.sub.c_str())
+                && named.contains({slot.property, slot.index})) {
+                judged.emplace_back(SamePlaceKey {slot.prop, slot.localIndex}, recordIdentity(slot));
+            }
+        }
+        auto& state = warningState();
+        std::lock_guard<std::mutex> guard(state.lock);
+        for (auto& [key, identity] : judged) {
+            state.records[key] = {obj, std::move(identity)};
+        }
+    }
+    Outcome outcome;
+    return describe(obj, outcome) && outcome.fatal.empty() && outcome.samePlace
+        && outcome.warning == text;
 }
 
 }  // namespace App

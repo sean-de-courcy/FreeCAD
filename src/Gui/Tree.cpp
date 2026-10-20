@@ -58,6 +58,7 @@
 #include <App/GeoFeatureGroupExtension.h>
 #include <App/Link.h>
 #include <App/RecomputeContinuation.h>
+#include <App/ReferenceReport.h>
 #include <App/SuppressibleExtension.h>
 
 #include "Tree.h"
@@ -1453,6 +1454,11 @@ std::vector<TreeWidget::ProblemItem> TreeWidget::problemItems(
     for (auto obj : docItem->document()->getDocument()->getObjects()) {
         bool error = obj->isError();
         if (!(error ? errors : warnings && obj->isWarning())) {
+            continue;
+        }
+        // A same-place warning whose marker the tree hides (ops#391)
+        if (!error && !TreeParams::getShowSamePlaceWarnings()
+            && App::ReferenceReport::isSamePlaceWarning(obj)) {
             continue;
         }
         std::string subname;
@@ -7153,7 +7159,8 @@ enum Status
     External = 1 << 4,
     Freezed = 1 << 5,
     Warning = 1 << 6,  // computed on a guessed or partly resolved element reference (ops#127)
-    Held = 1 << 7      // held by a roll-back bar: not recomputed until the bar passes it (ops#127)
+    Held = 1 << 7,     // held by a roll-back bar: not recomputed until the bar passes it (ops#127)
+    SamePlace = 1 << 8  // a warning of references found again in the same place (ops#391)
 };
 }
 
@@ -7226,6 +7233,19 @@ void DocumentObjectItem::generateIcon(int currentStatus, QIcon::Mode mode, QIcon
             pxError = Gui::BitmapFactory().pixmapFromSvg("overlay_error", QSize(10, 10));
         }
         px = pxError;
+    }
+    else if (currentStatus & Status::SamePlace) {
+        static QPixmap pxSamePlace;
+        if (pxSamePlace.isNull()) {
+            // computed with references found again in the same place (ops#391): the warning
+            // triangle in pale yellow with a soft outline, quieter than a guess's
+            pxSamePlace = Gui::BitmapFactory().pixmapFromSvg(
+                "overlay_warning",
+                QSize(10, 10),
+                {{0xfce94f, 0xfdf7c8}, {0xedd400, 0xf6eca0}, {0x302b00, 0x8c8670}}
+            );
+        }
+        px = pxSamePlace;
     }
     else if (currentStatus & Status::Warning) {
         static QPixmap pxWarning;
@@ -7377,10 +7397,13 @@ void DocumentObjectItem::testStatus(bool resetStatus, QIcon& icon1, QIcon& icon2
     auto rule = App::recomputeContinuation();
     bool isHeld = rule && rule->holds(pObject);
 
-    int currentStatus = ((isHeld ? 1 : 0) << 7) | ((pObject->isWarning() ? 1 : 0) << 6)
-        | ((freezed ? 1 : 0) << 5)
-        | ((external ? 1 : 0) << 4) | ((object()->showInTree() ? 0 : 1) << 3)
-        | ((pObject->isError() ? 1 : 0) << 2)
+    // A same-place warning (ops#391): the quieter marker, or none when the tree hides it
+    const bool samePlace = pObject->isWarning() && App::ReferenceReport::isSamePlaceWarning(pObject);
+    const bool warning = pObject->isWarning()
+        && !(samePlace && !TreeParams::getShowSamePlaceWarnings());
+    int currentStatus = ((warning && samePlace ? 1 : 0) << 8) | ((isHeld ? 1 : 0) << 7)
+        | ((warning ? 1 : 0) << 6) | ((freezed ? 1 : 0) << 5) | ((external ? 1 : 0) << 4)
+        | ((object()->showInTree() ? 0 : 1) << 3) | ((pObject->isError() ? 1 : 0) << 2)
         | ((pObject->isTouched() || pObject->mustExecute() == 1 ? 1 : 0) << 1) | (visible ? 1 : 0);
 
 

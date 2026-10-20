@@ -1139,7 +1139,8 @@ void ProfileBased::markStartCap(
         const std::string text = "No far cap element was marked as side 2's: a reference to the "
                                  "far cap may move to side 1's far cap when the sides are built "
                                  "apart";
-        FC_WARN(getFullName() << ": " << text);
+        // The recompute prints the warning (once, ops#391): this line is the developers'
+        FC_LOG(getFullName() << ": " << text);
         if (auto doc = getDocument()) {
             const char* previous = doc->getWarningDescription(this);
             doc->setWarning(
