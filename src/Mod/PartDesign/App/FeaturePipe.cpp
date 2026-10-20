@@ -44,7 +44,6 @@
 #include <BRepBuilderAPI_MakeSolid.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepCheck_Analyzer.hxx>
-#include <BRepGProp.hxx>
 #include <BRepLProp_CLProps.hxx>
 #include <BRepClass3d_SolidClassifier.hxx>
 #include <BRepOffsetAPI_MakePipeShell.hxx>
@@ -1194,16 +1193,23 @@ CornerTilts measureCorners(
     return tilts;
 }
 
-/// Whether \a shape holds a solid that passes BRepCheck and encloses a positive volume once
-/// oriented (an inside-out one passes BRepCheck: a multisection Pipe on macOS, ops#396)
+/// Whether \a shape holds a solid that passes BRepCheck, each of its solids turned outward (a point
+/// at infinity lies outside it): an inside-out one passes BRepCheck (a multisection Pipe on macOS,
+/// ops#396). Not by the volume's sign: OCCT's default volume integration is badly wrong on faces
+/// with many curved B-spline spans, negative for a correct pipe along 1000 of them (ops#414).
 bool isValidSolid(const Part::TopoShape& shape)
 {
     if (!shape.countSubShapes(TopAbs_SOLID) || !BRepCheck_Analyzer(shape.getShape()).IsValid()) {
         return false;
     }
-    GProp_GProps properties;
-    BRepGProp::VolumeProperties(shape.getShape(), properties);
-    return properties.Mass() > Precision::Confusion();
+    for (TopExp_Explorer it(shape.getShape(), TopAbs_SOLID); it.More(); it.Next()) {
+        BRepClass3d_SolidClassifier classifier(it.Current());
+        classifier.PerformInfinitePoint(Precision::Confusion());
+        if (classifier.State() != TopAbs_OUT) {
+            return false;
+        }
+    }
+    return true;
 }
 
 /// The union past 90 degrees: \a spine cut into pieces at \a pieceStarts, each piece swept with
