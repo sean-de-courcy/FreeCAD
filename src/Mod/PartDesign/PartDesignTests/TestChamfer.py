@@ -449,6 +449,25 @@ class TestChamfer(unittest.TestCase):
                 chamfer.getStatusString().startswith(message), chamfer.getStatusString()
             )
 
+    def testChamferOverASmoothDimpleInTheFloorFillsNothing(self):
+        # As testFilletOverASmoothDimpleInTheFloorFillsNothing: chamfers of 2.5 give 950 for the
+        # construction's 949.635; the Chamfer is that or fails naming the outer edge
+        block = models.deep_concave_block()
+        base = models.dimpled(block, 5, 12.8, 5)
+        outer, concave = ((0, 14, 5), (10, 14, 5)), ((0, 5, 5), (10, 5, 5))
+        chamfer, edge = models.dressed_in_a_body(self.Doc, "Chamfer", base, outer, 2.5, concave)
+        dressed = block.cut(models.outer_floor_removed("Chamfer", 2.5))
+        dressed = dressed.fuse(models.concave_added("Chamfer", 2.5))
+        expected = dressed.cut(block.cut(base)).Volume
+        self.assertAlmostEqual(expected, 949.634998, delta=1e-5)
+        if chamfer.isValid():
+            self.assertAlmostEqual(chamfer.Shape.Volume, expected, delta=1e-6)
+        else:
+            message = "The chamfer fills a recess of the base next to %s:" % edge
+            self.assertTrue(
+                chamfer.getStatusString().startswith(message), chamfer.getStatusString()
+            )
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("PartDesignTestChamfer")

@@ -875,6 +875,9 @@ constexpr double leastThickness = 1e-6;
 // least: its sides stay clear of the faces in it
 constexpr double regionMargin = 0.05;
 constexpr double leastMargin = 0.01;
+// How near a concave edge, beyond its tolerance, a piece of the material the result adds must come
+// to be that edge's: the material a concave edge's dress-up adds lies in its corner and holds it
+constexpr double edgeReach = 1e-4;
 
 gp_Vec tangentAt(const TopoDS_Edge& edge, const TopoDS_Vertex& vertex)
 {
@@ -1110,7 +1113,9 @@ std::string nearestEdge(
  * review, H1). A face the dress-up leaves alone holds none of it, and the growth stops there: else
  * it would run on over the base, through a round the band doesn't reach, to a smooth recess another
  * edge's band fills (PR 346 round 2). A recess's walls meet its floor and the face it opens on at
- * sharp edges, so they stay out. */
+ * sharp edges, so they stay out. A filled recess's faces change too, so the growth still reaches a
+ * smooth one in a face it holds; the material filling it lies apart from the concave edges, which
+ * whatItAdds() checks (PR 346 round 3). */
 void addSmoothNeighbours(
     const TopoDS_Shape& base,
     const TopTools_IndexedMapOfShape& changed,
@@ -1155,6 +1160,27 @@ bool holds(const Bnd_Box& outer, const Bnd_Box& inner)
     inner.Get(b[0], b[1], b[2], b[3], b[4], b[5]);
     return a[0] <= b[0] && a[1] <= b[1] && a[2] <= b[2] && b[3] <= a[3] && b[4] <= a[4]
         && b[5] <= a[5];
+}
+
+// Whether the piece reaches one of the edges. If the distance can't be computed, it counts as
+// reaching it: the faces the piece lies on still decide
+bool reachesAny(const TopoDS_Shape& piece, const TopTools_IndexedMapOfShape& edges)
+{
+    const Bnd_Box bounds = boundsOf(piece);
+    for (int i = 1; i <= edges.Extent(); ++i) {
+        const TopoDS_Edge& edge = TopoDS::Edge(edges(i));
+        const double reach = edgeReach + BRep_Tool::Tolerance(edge);
+        Bnd_Box around = boundsOf(edge);
+        around.Enlarge(reach);
+        if (around.IsOut(bounds)) {
+            continue;
+        }
+        BRepExtrema_DistShapeShape distance(piece, edge);
+        if (!distance.IsDone() || distance.Value() <= reach) {
+            return true;
+        }
+    }
+    return false;
 }
 
 // The solids of the shape whose bounds meet the box
@@ -1249,7 +1275,8 @@ std::optional<Prepared> prepare(
     const auto chain = chainOf(before, edges);
     const TopoDS_Compound dressed = dressedSolids(before, chain);
     if (!TopoDS_Iterator(dressed).More()) {
-        // None of the edges is a solid's of the base (the callers take them from the base)
+        // None of the edges is a solid's: they are those of a shell or a face of the base beside
+        // its solids (a compound of a solid and an open shell), which the check doesn't cover
         FC_WARN(
             "Dress-up result not checked for a filled recess: no solid of the base holds its edges"
         );
@@ -1274,8 +1301,12 @@ std::optional<Prepared> prepare(
         addSmoothNeighbours(dressed, changes.changed, prepared.allowed);
     }
     // Every recess the result fills has a changed face in the region, so the Boolean runs on what
-    // lies there (PR 346 review, M1). Its sides keep clear of the faces in it
+    // lies there (PR 346 review, M1). Its sides keep clear of the faces in it. It holds the concave
+    // edges too, so the material their dress-up adds still reaches them once cut down to it
     prepared.region = changes.region;
+    for (int i = 1; i <= prepared.concave.Extent(); ++i) {
+        BRepBndLib::Add(prepared.concave(i), prepared.region, false);
+    }
     double x0 = 0.0;
     double y0 = 0.0;
     double z0 = 0.0;
@@ -1324,8 +1355,10 @@ std::string whatItAdds(const Prepared& prepared, const TopoShape& base, const st
     if (!runBoolean(cut, object, tool)) {
         return "changes faces away from its edges in a way that can't be checked";
     }
-    // A concave edge adds material on the allowed faces: a piece of it that lies on any other face
-    // of the base fills what that face bounded
+    // A concave edge adds material in its corner, on the allowed faces: a piece of it that lies on
+    // any other face of the base fills what that face bounded, and so does one that doesn't reach a
+    // concave edge, whatever faces it lies on (a smooth recess whose faces the growth allowed, PR 346
+    // round 3; a repaired result, all of whose faces changed)
     TopTools_IndexedMapOfShape walls;
     if (concave.Extent() > 0) {
         TopTools_IndexedMapOfShape baseFaces;
@@ -1360,7 +1393,7 @@ std::string whatItAdds(const Prepared& prepared, const TopoShape& base, const st
         if (std::abs(volume.Mass()) <= leastThickness * area.Mass()) {
             continue;
         }
-        bool wrong = concave.Extent() == 0;
+        bool wrong = concave.Extent() == 0 || !reachesAny(piece, concave);
         for (TopExp_Explorer face(piece, TopAbs_FACE); !wrong && face.More(); face.Next()) {
             wrong = walls.Contains(face.Current());
         }

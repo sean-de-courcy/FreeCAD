@@ -946,23 +946,68 @@ def concave_added_onto_round(kind, size):
     return box.cut(Part.makeCylinder(size, 10, V(0, ball_y, ball_z), V(1, 0, 0)))
 
 
-def smoothly_dimpled_block():
-    """concave_block() with its wall's top edge (y = 5, z = 10) rounded 1, and that block with a
-    spherical dimple r 1 at (5, 1.2, 9.6) in its top face, the dimple's rim rounded 0.15: the wall,
-    the round, the top face, the rim and the dimple each join the next smoothly. Returns both"""
-    block = concave_block()
-    block = block.makeFillet(1, [edge_between(block, (0, 5, 10), (10, 5, 10))])
-    dimpled = block.cut(Part.makeSphere(1, V(5, 1.2, 9.6)))
+def dimpled(shape, x, y, top):
+    """The shape with a spherical dimple r 1 at (x, y, top - 0.4) in its face z = top, the dimple's
+    rim rounded 0.15: the face, the rim and the dimple each join the next smoothly"""
+    dimpled = shape.cut(Part.makeSphere(1, V(x, y, top - 0.4)))
     rim = [
         e
         for e in dimpled.Edges
-        if abs(e.BoundBox.ZMin - 10) < 1e-6
-        and abs(e.BoundBox.ZMax - 10) < 1e-6
-        and 3 < e.BoundBox.XMin
-        and e.BoundBox.XMax < 7
-        and e.BoundBox.YMax < 3
+        if abs(e.BoundBox.ZMin - top) < 1e-6
+        and abs(e.BoundBox.ZMax - top) < 1e-6
+        and x - 1.01 < e.BoundBox.XMin
+        and e.BoundBox.XMax < x + 1.01
+        and y - 1.01 < e.BoundBox.YMin
+        and e.BoundBox.YMax < y + 1.01
     ]
-    return block, dimpled.makeFillet(0.15, rim)
+    return dimpled.makeFillet(0.15, rim)
+
+
+def smoothly_dimpled_block():
+    """concave_block() with its wall's top edge (y = 5, z = 10) rounded 1, and that block with a
+    dimpled() at (5, 1.2) in its top face: the wall, the round, the top face, the rim and the dimple
+    each join the next smoothly. Returns both"""
+    block = concave_block()
+    block = block.makeFillet(1, [edge_between(block, (0, 5, 10), (10, 5, 10))])
+    return block, dimpled(block, 5, 1.2, 10)
+
+
+def deep_concave_block():
+    """The block 10 x 14 x 10 without its part y > 5, z > 5: an L like concave_block() whose floor
+    (z = 5) runs on to y = 14"""
+    return Part.makeBox(10, 14, 10).cut(Part.makeBox(12, 10, 6, V(-1, 5, 5)))
+
+
+def outer_floor_removed(kind, size):
+    """What a fillet or chamfer of the size on deep_concave_block()'s outer floor edge (y = 14,
+    z = 5) removes: the prism y + z > 19 - size, or the square y > 14 - r, z > 5 - r outside the
+    round's cylinder (1 mm past the block's sides)"""
+    if kind == "Chamfer":
+        corners = [
+            V(-1, 14 - size, 5),
+            V(-1, 14 - size, 6),
+            V(-1, 15, 6),
+            V(-1, 15, 5 - size),
+            V(-1, 14, 5 - size),
+        ]
+        return Part.Face(Part.makePolygon(corners, True)).extrude(V(12, 0, 0))
+    square = Part.makeBox(12, size + 1, size + 1, V(-1, 14 - size, 5 - size))
+    return square.cut(Part.makeCylinder(size, 12, V(-1, 14 - size, 5 - size), V(1, 0, 0)))
+
+
+def upright_concave_block():
+    """The 10 mm cube without its quarter x > 5, y > 5: its concave edge runs along z at x = y = 5"""
+    return Part.makeBox(10, 10, 10).cut(Part.makeBox(6, 6, 12, V(5, 5, -1)))
+
+
+def upright_concave_added(kind, size):
+    """What a fillet or chamfer of the size on upright_concave_block()'s concave edge adds: the
+    square 5 < x, y < 5 + r outside the round's cylinder, or the triangle x + y < 10 + size"""
+    if kind == "Chamfer":
+        corners = [V(5, 5, 0), V(5 + size, 5, 0), V(5, 5 + size, 0)]
+        return Part.Face(Part.makePolygon(corners, True)).extrude(V(0, 0, 10))
+    square = Part.makeBox(size, size, 10, V(5, 5, 0))
+    return square.cut(Part.makeCylinder(size, 10, V(5 + size, 5 + size, 0)))
 
 
 def dressed_up_in_a_body(doc, kind, recess, size):
@@ -1143,6 +1188,40 @@ class FilledRecessTest(unittest.TestCase):
                 dressed = block.cut(front_top_removed(kind, 2.5)).fuse(concave_added(kind, 1))
                 feature = self.dressUp(kind, base, [front, concave], [(2.5, 2.5), (1, 1)])
                 self.assertExactOrFails(feature, base, front, dressed.cut(dimple).Volume)
+
+    def testConvexBandOverASmoothDimpleInTheConcaveEdgesFace(self):
+        # A dimpled() face under a convex edge's band of 2.5 that holds a vertex of a concave edge
+        # dressed 1 in the same feature: deep_concave_block()'s floor under its outer floor edge's
+        # band, or upright_concave_block()'s top face under its front top edge's. The face is one
+        # the concave edge's material may lie on, and the dimple's faces join it smoothly and change
+        # as the dimple is filled. OCCT fills it (floor 923.750 for 923.385, the fillet 938.733 for
+        # 936.696; top 723.750 for 723.385, 738.733 for 736.695), and 2b534f9017 let all four pass:
+        # the filled dimple lies apart from the concave edge (PR 346 round 3)
+        floor = (
+            deep_concave_block(),
+            (5, 12.8, 5),
+            ((0, 14, 5), (10, 14, 5)),
+            outer_floor_removed,
+            ((0, 5, 5), (10, 5, 5)),
+            concave_added,
+        )
+        top = (
+            upright_concave_block(),
+            (3, 1.2, 10),
+            ((0, 0, 10), (10, 0, 10)),
+            front_top_removed,
+            ((5, 5, 0), (5, 5, 10)),
+            upright_concave_added,
+        )
+        for name, (block, at, convex, removed, concave, added) in (("floor", floor), ("top", top)):
+            base = dimpled(block, *at)
+            dimple = block.cut(base)
+            edges = [edge_between(base, *convex), edge_between(base, *concave)]
+            for kind in ("Chamfer", "Fillet"):
+                with self.subTest(face=name, kind=kind):
+                    dressed = block.cut(removed(kind, 2.5)).fuse(added(kind, 1))
+                    feature = self.dressUp(kind, base, edges, [(2.5, 2.5), (1, 1)])
+                    self.assertExactOrFails(feature, base, edges[0], dressed.cut(dimple).Volume)
 
     def testPocketOutOfReachStays(self):
         # A pocket 4 x 1 x 2 at y 6 to 7, beyond the band (y < 3): untouched, 947 and 972.686
