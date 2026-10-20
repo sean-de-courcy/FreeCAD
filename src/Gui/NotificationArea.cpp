@@ -56,8 +56,6 @@ using Connection = fastsignals::connection;
 
 namespace sp = std::placeholders;
 
-using std::lock_guard;
-
 class NotificationAreaObserver;
 
 namespace Gui
@@ -140,6 +138,51 @@ struct NotificationAreaP
 };
 
 }  // namespace Gui
+
+namespace
+{
+// How deep this thread is in the notification area's own code: holding mutexNotification, or
+// showing the non-intrusive notification. A notification raised from there (a Qt warning while a
+// widget is shown, e.g. "This plugin does not support raise()" under the offscreen platform)
+// would lock the mutex a second time on the same thread, which throws on MSVC
+// (resource_deadlock_would_occur) and is undefined elsewhere; pushNotification() pushes it again
+// from the event loop instead (ops#121).
+thread_local int insideNotificationArea = 0;
+
+class InsideNotificationArea
+{
+public:
+    InsideNotificationArea()
+    {
+        ++insideNotificationArea;
+    }
+    ~InsideNotificationArea()
+    {
+        --insideNotificationArea;
+    }
+    InsideNotificationArea(const InsideNotificationArea&) = delete;
+    InsideNotificationArea& operator=(const InsideNotificationArea&) = delete;
+};
+
+/** Holds mutexNotification; the thread counts as inside the area until it is destroyed, also
+ * after unlock(). */
+class NotificationLock
+{
+public:
+    explicit NotificationLock(std::mutex& mutex)
+        : lock(mutex)
+    {}
+
+    void unlock()
+    {
+        lock.unlock();
+    }
+
+private:
+    InsideNotificationArea inside;
+    std::unique_lock<std::mutex> lock;
+};
+}  // namespace
 
 
 /******************* Resource Management *****************************************/
@@ -911,14 +954,14 @@ NotificationArea::NotificationArea(QWidget* parent)
     // NOLINTBEGIN
     //  Signals for synchronisation of storage before showing/hiding the widget
     QObject::connect(pImp->menu, &QMenu::aboutToHide, [&]() {
-        lock_guard<std::mutex> g(pImp->mutexNotification);
+        NotificationLock g(pImp->mutexNotification);
         static_cast<NotificationsAction*>(pImp->notificationaction)->clearUnreadFlag();
         static_cast<NotificationsAction*>(pImp->notificationaction)->shiftToCache();
     });
 
     QObject::connect(pImp->menu, &QMenu::aboutToShow, [this]() {
         // guard to avoid modifying the notification list and indices while creating the tooltip
-        lock_guard<std::mutex> g(pImp->mutexNotification);
+        NotificationLock g(pImp->mutexNotification);
         setText(QString::number(0));  // no unread notifications
         if (pImp->missedNotifications) {
             setIcon(TrayIcon::Normal);
@@ -1003,7 +1046,7 @@ void NotificationArea::mousePressEvent(QMouseEvent* e)
 
         QAction* delnotifications = menu.addAction(tr("Delete User Notifications"), [&]() {
             // guard to avoid modifying the notification list and indices while creating the tooltip
-            lock_guard<std::mutex> g(pImp->mutexNotification);
+            NotificationLock g(pImp->mutexNotification);
             na->deleteNotifications();
             setText(QString::number(na->getUnreadCount()));
         });
@@ -1012,7 +1055,7 @@ void NotificationArea::mousePressEvent(QMouseEvent* e)
 
         QAction* delall = menu.addAction(tr("Delete All"), [&]() {
             // guard to avoid modifying the notification list and indices while creating the tooltip
-            lock_guard<std::mutex> g(pImp->mutexNotification);
+            NotificationLock g(pImp->mutexNotification);
             na->deleteAll();
             setText(QString::number(0));
         });
@@ -1043,13 +1086,25 @@ void NotificationArea::pushNotification(
     Base::LogStyle level
 )
 {
+    if (insideNotificationArea > 0) {
+        // Raised by the area's own code on this thread (ops#121): push it once that has returned
+        QMetaObject::invokeMethod(
+            this,
+            [this, notifiername, message, level]() {
+                pushNotification(notifiername, message, level);
+            },
+            Qt::QueuedConnection
+        );
+        return;
+    }
+
     auto confirmation = confirmationRequired(level);
 
     if (confirmation) {
         showConfirmationDialog(notifiername, message);
     }
     // guard to avoid modifying the notification list and indices while creating the tooltip
-    lock_guard<std::mutex> g(pImp->mutexNotification);
+    NotificationLock g(pImp->mutexNotification);
 
     // NOLINTNEXTLINE
     NotificationsAction* na = static_cast<NotificationsAction*>(pImp->notificationaction);
@@ -1140,7 +1195,7 @@ void NotificationArea::showConfirmationDialog(const QString& notifiername, const
 void NotificationArea::showInNotificationArea()
 {
     // guard to avoid modifying the notification list and indices while creating the tooltip
-    lock_guard<std::mutex> g(pImp->mutexNotification);
+    NotificationLock g(pImp->mutexNotification);
 
     // NOLINTNEXTLINE
     NotificationsAction* na = static_cast<NotificationsAction*>(pImp->notificationaction);
@@ -1246,7 +1301,7 @@ void NotificationArea::showInNotificationArea()
                         [this, item, repetitions = item->getRepetitions()]() {
                             // guard to avoid modifying the notification
                             // start index while creating the tooltip
-                            lock_guard<std::mutex> g(pImp->mutexNotification);
+                            NotificationLock g(pImp->mutexNotification);
 
                             // if the item exists and the number of repetitions has not changed in
                             // the meantime
@@ -1290,6 +1345,10 @@ void NotificationArea::showInNotificationArea()
         if (pImp->hideNonIntrusiveNotificationsWhenWindowDeactivated) {
             options = options | NotificationBox::Options::HideIfReferenceWidgetDeactivated;
         }
+
+        // Show it without the lock (ops#121): showing a widget can raise a Qt warning, which the
+        // Console passes back to pushNotification(); this thread still counts as inside the area
+        g.unlock();
 
         bool isshown = NotificationBox::showText(
             this->mapToGlobal(QPoint()),
