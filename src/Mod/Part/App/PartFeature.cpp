@@ -792,7 +792,9 @@ bool elementHints(const App::GeoFeature* geo, const char* type, std::vector<App:
 const bool elementHintsRegistered = (App::setElementHintsFunction(&elementHints), true);
 
 // Whether a point lies over a face of Shape (App::ElementHoldsPointFunction, ops#360, PR 340
-// round 4): within the distance, and every nearest point inside the face, none on its boundary.
+// round 4): within the distance, and every nearest point inside the face, none on its boundary;
+// or the face's own centre of mass within the distance of the point (round 5: a piece shaped
+// like an n or a ring has its centre over the hole it wraps, its nearest point on its edge).
 // In the frame getElementFingerprint() measures in (without the shape's placement).
 bool elementHoldsPoint(
     const App::GeoFeature* geo,
@@ -813,6 +815,11 @@ bool elementHoldsPoint(
         const TopoDS_Shape sub = shape.located(TopLoc_Location()).getSubShape(element, true);
         if (sub.IsNull() || sub.ShapeType() != TopAbs_FACE) {
             return false;
+        }
+        GProp_GProps props;
+        BRepGProp::SurfaceProperties(sub, props);
+        if (props.CentreOfMass().Distance(gp_Pnt(point.x, point.y, point.z)) <= distance) {
+            return true;
         }
         const TopoDS_Vertex vertex
             = BRepBuilderAPI_MakeVertex(gp_Pnt(point.x, point.y, point.z)).Vertex();

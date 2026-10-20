@@ -2707,6 +2707,38 @@ class TestPad(unittest.TestCase):
         finally:
             FreeCAD.closeDocument(doc.Name)
 
+    def testPadUpToAFreeformHoleCapPieceLeftAloneStays(self):
+        # PR 340 round 5 (N7): A (x -3..3, y 0.3..2.5) across the top of the plate's hole: its
+        # piece on the plate is an n around the hole's top, its centre of mass (0, 1.49) over
+        # the hole, and its piece on the fill is a strip. B deleted from the sketch leaves A's
+        # n the only far cap on the plate: renamed with the plate alone as its marks, it takes
+        # the old reference only when the old centre lies over it, and the check wanted the
+        # face's nearest point to that centre inside the face. The n's is on its edge along
+        # the hole: "Missing face reference". Its own centre of mass is the old centre, which
+        # counts the same now
+        for kind in ("Pad", "Pocket"):
+            with self.subTest(kind=kind):
+                doc = FreeCAD.newDocument("PadUpToAFreeformHoleCapPieceLeftAloneStays")
+                try:
+                    feature, z = capsUpToAFreeformPlate(
+                        doc, kind, hole=True, capA=(-3, 0.3, 3, 2.5), block=(-8, -8, 18, 10)
+                    )
+                    self.assertTrue(feature.isValid(), feature.getStatusString())
+                    shape = feature.Shape
+                    self.assertEqual(len(farCaps(shape, z)), 3)
+                    n = centreOfFarCapAt(shape, z, -2, 1.4)
+                    self.assertAlmostEqual(n[0], 0, places=6)
+                    point = pointOnFarCap(feature, farCapAt(shape, z, -2, 1.4))
+                    sketch = feature.Profile[0]
+                    sketch.delGeometries([4, 5, 6, 7])
+                    doc.recompute()
+                    self.assertTrue(feature.isValid(), feature.getStatusString())
+                    self.assertEqual(len(farCaps(feature.Shape, z)), 2)
+                    self.assertTrue(point.isValid(), point.getStatusString())
+                    assertOnCap(self, point, z, *n)
+                finally:
+                    FreeCAD.closeDocument(doc.Name)
+
     def testPadUpToAFreeformFaceCapsMigrate(self):
         # ops#360's naming revision: a file saved with a datum on A's cap, reopened by a child
         # FreeCADCmd under FREECAD_TEST_NAMING_REVISION_OFFSET=1, looks older and takes the
