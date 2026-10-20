@@ -3454,13 +3454,13 @@ bool Document::afterRestore(const std::vector<DocumentObject*>& objArray, bool c
                     samePlace = ReferenceReport::restoredSamePlaceWarning(obj, text, upToDate);
                 }
                 catch (const Base::Exception& e) {
-                    FC_LOG(obj->getFullName() << ": the restored warning's level:" << e.what());
+                    FC_LOG(obj->getFullName() << ": the restored warning's level: " << e.what());
                 }
                 catch (const std::exception& e) {
-                    FC_LOG(obj->getFullName() << ": the restored warning's level:" << e.what());
+                    FC_LOG(obj->getFullName() << ": the restored warning's level: " << e.what());
                 }
                 catch (...) {
-                    FC_LOG(obj->getFullName() << ": the restored warning's level:unknown exception");
+                    FC_LOG(obj->getFullName() << ": the restored warning's level: unknown exception");
                 }
                 ReferenceReport::setSamePlaceWarning(obj, samePlace);
             }

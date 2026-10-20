@@ -519,17 +519,10 @@ bool foundInPlace(const DocumentObject* owner, const ReferenceReport::Slot& slot
         state.records[key] = {owner, std::move(identity)};
         return true;
     }
+    // Another record now: describe() drops the judgement, so that the judged one coming back (an
+    // undo, a later solve) is judged again
     auto it = state.records.find(key);
-    if (it == state.records.end()) {
-        return false;
-    }
-    if (it->second.first == owner && it->second.second == identity) {
-        return true;
-    }
-    // Another record now: the judgement goes, so that the judged one coming back (an undo, a
-    // later solve) is judged again
-    state.records.erase(it);
-    return false;
+    return it != state.records.end() && it->second.first == owner && it->second.second == identity;
 }
 
 // The references a warning text names as found again in the same place (samePlaceText()), as
@@ -672,6 +665,7 @@ bool ReferenceReport::describe(const DocumentObject* obj, Outcome& outcome)
         bool mixed = false;
     };
     std::map<std::string, SamePlace> samePlace;  // by property
+    std::set<SamePlaceKey> inPlace;  // the references found in place in this pass
     bool othersWarned = false;
     for (std::size_t s = 0; s < slots.size(); ++s) {
         const auto& slot = slots[s];
@@ -693,12 +687,10 @@ bool ReferenceReport::describe(const DocumentObject* obj, Outcome& outcome)
             continue;
         }
         if (slot.guess.empty()) {
-            auto& state = warningState();
-            std::lock_guard<std::mutex> guard(state.lock);
-            state.records.erase({slot.prop, slot.localIndex});
             continue;
         }
         if (foundInPlace(obj, slot)) {
+            inPlace.insert({slot.prop, slot.localIndex});
             auto [it, first] = samePlace.try_emplace(slot.property);
             auto& same = it->second;
             const std::string type = typeOf(elementOfSub(slot.sub));
@@ -728,6 +720,15 @@ bool ReferenceReport::describe(const DocumentObject* obj, Outcome& outcome)
             + (last > s ? ".." + std::to_string(slots[last].index) : std::string()) + "]";
         warnings.push_back(guessedText(slot, elements, where));
         s = last;
+    }
+    {
+        // A judgement goes with a reference not found in place now (missing, removed, no guess,
+        // another record), so that its record coming back (an undo) is judged again
+        auto& state = warningState();
+        std::lock_guard<std::mutex> guard(state.lock);
+        std::erase_if(state.records, [obj, &inPlace](const auto& entry) {
+            return entry.second.first == obj && !inPlace.contains(entry.first);
+        });
     }
     for (const auto& [property, same] : samePlace) {
         warnings[same.position] = samePlaceText(property, same.indices, same.mixed ? "" : same.type);
