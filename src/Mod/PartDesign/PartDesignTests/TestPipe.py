@@ -1102,11 +1102,12 @@ class TestPipeCorners(unittest.TestCase):
         self.assertValidSolid(pipe)
         self.assertNotIn("Warning", pipe.State)
 
-    def wavySpine(self, waves):
+    def wavySpine(self, waves, bend=True):
         """Up 30 along Z, a 60 degree corner towards +X, then one B-spline: `waves` waves of
         amplitude 1.5 and length 20 towards +X (a point every 1 mm), 20 mm straight on, a bend of
-        10 degrees over the length of an arc of radius 3, and 20 mm on. The waves bend the curve
-        everywhere, but no tighter than radius 6.1; the bend, interpolated, to radius 2.4."""
+        10 degrees over the length of an arc of radius 3 (unless not `bend`), and 20 mm on. The
+        waves bend the curve everywhere, but no tighter than radius 6.1; the bend, interpolated,
+        to radius 2.4."""
         corner = V(0, 0, 30)
         leg = V(math.sin(math.radians(60)), 0, math.cos(math.radians(60)))
         towards = V(math.cos(math.radians(60)), 0, -math.sin(math.radians(60)))
@@ -1121,11 +1122,12 @@ class TestPipeCorners(unittest.TestCase):
         side.normalize()
         last = points[-1]
         points += [last + on * x for x in range(2, 21, 2)]
+        turn = 10 if bend else 0
         length = 3 * math.radians(10) / 4
-        for i in range(1, 5):
-            angle = math.radians(10 * (i - 0.5) / 4)
+        for i in range(1, 5 if bend else 1):
+            angle = math.radians(turn * (i - 0.5) / 4)
             points.append(points[-1] + (on * math.cos(angle) + side * math.sin(angle)) * length)
-        end = on * math.cos(math.radians(10)) + side * math.sin(math.radians(10))
+        end = on * math.cos(math.radians(turn)) + side * math.sin(math.radians(turn))
         last = points[-1]
         points += [last + end * x for x in range(2, 21, 2)]
         curve = Part.BSplineCurve()
@@ -1144,6 +1146,22 @@ class TestPipeCorners(unittest.TestCase):
         profile = self.profile([models.circle(0, 0, 2)])
         pipe = self.pipe(self.wavySpine(25), profile, Transition="Transformed", Refine=False)
         self.assertFails(pipe, "folds", "along the curve from (0, 0, 30)", "Right corner")
+
+    def testLongCurveWithANegativeVolumeAccepted(self):
+        """A circle of radius 2, a 60 degree corner, then a B-spline of 50 waves (about 1020 spans,
+        1093 mm), bending no tighter than radius 6.1: no fold, a correct solid. OCCT's default
+        volume integration (BRepGProp::VolumeProperties, Shape.Volume) gets faces with that many
+        curved spans badly wrong, here negative (ops#414): round 6 first refused the pipe as an
+        invalid solid, since the result gate took a negative volume for an inside-out solid. The
+        gate now tells inside-out solids by classifying a point at infinity."""
+        profile = self.profile([models.circle(0, 0, 2)])
+        spine = self.wavySpine(50, bend=False)
+        pipe = self.pipe(spine, profile, Transition="Transformed", Refine=False)
+        self.assertValidSolid(pipe)
+        curve = spine.Shape.Edges[1].Curve
+        middle = curve.value((curve.FirstParameter + curve.LastParameter) / 2)
+        self.assertTrue(pipe.Shape.isInside(middle, 1e-6, True))
+        self.assertFalse(pipe.Shape.isInside(middle + V(0, 3, 0), 1e-6, True))
 
     def sBendSpine(self, degrees, bend, length):
         """Up 30 along Z, a corner of `degrees` towards +X, then one B-spline through 15 points:
