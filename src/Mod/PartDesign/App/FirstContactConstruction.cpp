@@ -60,7 +60,9 @@
 #include <Geom2d_TrimmedCurve.hxx>
 #include <Geom2dAPI_InterCurveCurve.hxx>
 #include <Geom2dAPI_ProjectPointOnCurve.hxx>
+#include <Geom2d_BezierCurve.hxx>
 #include <Geom2dConvert.hxx>
+#include <Geom2dConvert_BSplineCurveToBezierCurve.hxx>
 #include <Geom2dInt_GInter.hxx>
 #include <GeomAPI.hxx>
 #include <GeomAPI_ProjectPointOnSurf.hxx>
@@ -634,33 +636,101 @@ void Band::add(const Handle(Geom2d_Curve)& curve, double width)
     if (spline.IsNull()) {
         throw refused("a wall's curve can't be bounded");
     }
-    parts.push_back({spline, width, derivativeBounds(spline).second});
+    Part part {spline, width, derivativeBounds(spline).second};
+    // The spans' boxes, from the Bezier arcs' poles: a rational arc lies in its poles' convex hull
+    // when its weights are positive. Otherwise one span, which every point may be near.
+    Geom2dConvert_BSplineCurveToBezierCurve arcs(spline);
+    TColStd_Array1OfReal knots(1, arcs.NbArcs() + 1);
+    arcs.Knots(knots);
+    bool bounded = true;
+    for (int k = 1; k <= arcs.NbArcs() && bounded; ++k) {
+        const Handle(Geom2d_BezierCurve) arc = arcs.Arc(k);
+        Span span {knots(k), knots(k + 1)};
+        span.xLow = span.yLow = std::numeric_limits<double>::max();
+        span.xHigh = span.yHigh = std::numeric_limits<double>::lowest();
+        for (int i = 1; i <= arc->NbPoles(); ++i) {
+            bounded = bounded && arc->Weight(i) > 0.0;
+            const gp_Pnt2d pole = arc->Pole(i);
+            span.xLow = std::min(span.xLow, pole.X());
+            span.xHigh = std::max(span.xHigh, pole.X());
+            span.yLow = std::min(span.yLow, pole.Y());
+            span.yHigh = std::max(span.yHigh, pole.Y());
+        }
+        part.spans.push_back(span);
+    }
+    if (!bounded) {
+        constexpr double huge = std::numeric_limits<double>::max();
+        part.spans = {{spline->FirstParameter(), spline->LastParameter(), -huge, huge, -huge, huge}};
+    }
+    part.box = part.spans.front();
+    for (const Span& span : part.spans) {
+        part.box.xLow = std::min(part.box.xLow, span.xLow);
+        part.box.xHigh = std::max(part.box.xHigh, span.xHigh);
+        part.box.yLow = std::min(part.box.yLow, span.yLow);
+        part.box.yHigh = std::max(part.box.yHigh, span.yHigh);
+    }
+    parts.push_back(std::move(part));
 }
 
-namespace
-{
 
-// The parameter of the part's nearest point to `point`, and the distance
-std::pair<double, double> nearest(const Handle(Geom2d_BSplineCurve)& curve, const gp_Pnt2d& point)
+std::pair<double, double> Band::nearest(const Part& part, const gp_Pnt2d& point)
 {
+    const Handle(Geom2d_BSplineCurve)& curve = part.curve;
     std::pair<double, double> best {curve->FirstParameter(), point.Distance(curve->StartPoint())};
     if (const double last = point.Distance(curve->EndPoint()); last < best.second) {
         best = {curve->LastParameter(), last};
     }
-    Geom2dAPI_ProjectPointOnCurve projection(point, curve);
-    if (projection.NbPoints() > 0 && projection.LowerDistance() < best.second) {
-        best = {projection.LowerDistanceParameter(), projection.LowerDistance()};
+    // The distance to a span's box (squared), a lower bound of the distance to its points: a span
+    // whose box is farther than the nearest point found so far can't hold a nearer one. The box of
+    // all of them first.
+    auto squared = [&](const Span& span) {
+        const double dx = std::max({span.xLow - point.X(), 0.0, point.X() - span.xHigh});
+        const double dy = std::max({span.yLow - point.Y(), 0.0, point.Y() - span.yHigh});
+        return dx * dx + dy * dy;
+    };
+    // Out of the part's band whatever its nearest point: no parameter, and the lower bound
+    const double width = part.width * part.width;
+    if (const double all = squared(part.box); all > width) {
+        return {std::numeric_limits<double>::quiet_NaN(), std::sqrt(all)};
+    }
+    std::vector<double> low(part.spans.size());
+    std::size_t closest = 0;
+    for (std::size_t k = 0; k < part.spans.size(); ++k) {
+        low[k] = squared(part.spans[k]);
+        if (low[k] < low[closest]) {
+            closest = k;
+        }
+    }
+    if (low[closest] > width) {
+        return {std::numeric_limits<double>::quiet_NaN(), std::sqrt(low[closest])};
+    }
+    auto search = [&](const Span& span) {
+        // The span's ends, where the nearest point may lie without being an extremum of the span
+        for (const double t : {span.first, span.last}) {
+            if (const double d = point.Distance(curve->Value(t)); d < best.second) {
+                best = {t, d};
+            }
+        }
+        Geom2dAPI_ProjectPointOnCurve projection(point, curve, span.first, span.last);
+        if (projection.NbPoints() > 0 && projection.LowerDistance() < best.second) {
+            best = {projection.LowerDistanceParameter(), projection.LowerDistance()};
+        }
+    };
+    // The closest box first, which usually leaves no other below the distance found
+    search(part.spans[closest]);
+    for (std::size_t k = 0; k < part.spans.size(); ++k) {
+        if (k != closest && low[k] < best.second * best.second) {
+            search(part.spans[k]);
+        }
     }
     return best;
 }
-
-}  // namespace
 
 bool Band::contains(const gp_Pnt& point) const
 {
     const gp_Pnt2d at = image(point);
     return std::ranges::any_of(parts, [&](const Part& part) {
-        return nearest(part.curve, at).second <= part.width;
+        return nearest(part, at).second <= part.width;
     });
 }
 
@@ -705,7 +775,7 @@ std::optional<gp_Pnt> Band::outside(const TopoDS_Edge& edge, double tolerance) c
         const gp_Pnt2d at = image(p);
         std::fprintf(stderr, "D2BAND %s t=%.9g of [%.9g, %.9g] dt=%.3g tol=%.3g speed=%.3g bend=%.3g at (%.6g, %.6g, %.6g) r=%.9g h=%.9g\n", what, t, curve->FirstParameter(), curve->LastParameter(), dt, tolerance, speed, bend, p.X(), p.Y(), p.Z(), at.X(), at.Y());
         for (const Part& part : parts) {
-            const auto n = nearest(part.curve, at);
+            const auto n = nearest(part, at);
             std::fprintf(stderr, "D2BAND   part width=%.3g d=%.3g u=%.9g bend=%.3g\n", part.width, n.second, n.first, part.bend);
         }
     };
@@ -715,7 +785,7 @@ std::optional<gp_Pnt> Band::outside(const TopoDS_Edge& edge, double tolerance) c
         here.radius = at.X();
         bool held = false;
         for (const Part& part : parts) {
-            here.near.push_back(nearest(part.curve, at));
+            here.near.push_back(nearest(part, at));
             held = held || here.near.back().second + tolerance < part.width;
         }
         if (!held) {
@@ -754,6 +824,10 @@ std::optional<gp_Pnt> Band::outside(const TopoDS_Edge& edge, double tolerance) c
             const double turn = bend + speed * speed / radius;
             bool held = false;
             for (std::size_t p = 0; p < parts.size() && !held; ++p) {
+                // A sample out of the part's band
+                if (std::isnan(low.near[p].first) || std::isnan(high.near[p].first)) {
+                    continue;
+                }
                 const double du = high.near[p].first - low.near[p].first;
                 held = std::max(low.near[p].second, high.near[p].second)
                         + (turn * dt * dt + parts[p].bend * du * du) / 8.0 + tolerance
@@ -972,7 +1046,7 @@ std::optional<gp_Pnt> Band::leavesOutside(const TopoDS_Face& face, bool whole) c
         const gp_Pnt2d at = image(here.point);
         here.radius = at.X();
         for (const Part& part : parts) {
-            here.near.push_back(nearest(part.curve, at));
+            here.near.push_back(nearest(part, at));
         }
         return here;
     };
@@ -1049,6 +1123,10 @@ std::optional<gp_Pnt> Band::leavesOutside(const TopoDS_Face& face, bool whole) c
         const auto& c = leaf.corners;
         double least = std::numeric_limits<double>::max();
         for (std::size_t p = 0; p < parts.size(); ++p) {
+            // A corner out of the part's band: the part can't hold the leaf
+            if (std::ranges::any_of(c, [&](const Corner& here) { return std::isnan(here.near[p].first); })) {
+                continue;
+            }
             const double duU = std::max(
                 std::abs(c[1].near[p].first - c[0].near[p].first),
                 std::abs(c[3].near[p].first - c[2].near[p].first)

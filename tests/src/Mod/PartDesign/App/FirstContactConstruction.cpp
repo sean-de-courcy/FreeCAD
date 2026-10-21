@@ -30,11 +30,15 @@
 #include <BRepPrimAPI_MakeRevol.hxx>
 #include <BRepTools.hxx>
 #include <GCE2d_MakeSegment.hxx>
+#include <Geom2d_Circle.hxx>
+#include <Geom2d_TrimmedCurve.hxx>
+#include <Geom2dConvert.hxx>
 #include <Geom_BSplineCurve.hxx>
 #include <GeomAPI.hxx>
 #include <GeomAPI_Interpolate.hxx>
 #include <GProp_GProps.hxx>
 #include <gp_Ax2.hxx>
+#include <gp_Ax2d.hxx>
 #include <gp_Ax3.hxx>
 #include <gp_Pln.hxx>
 #include <TColgp_HArray1OfPnt.hxx>
@@ -535,6 +539,45 @@ TEST(FirstContactConstruction, BandFindsSilhouetteOut)
 TEST(FirstContactConstruction, BandHoldsSilhouette)
 {
     EXPECT_FALSE(waveBand().outside(tangentPlane(1e-3)).has_value());
+}
+
+// The band's nearest point over a wall of many spans, found among the spans whose pole boxes can
+// hold a nearer one: an arc of 300 degrees of the unit circle about (5, 0), rational, in 60 spans.
+// A point within 0.9 of the width of the circle is in the band, one 1.1 of it out, all around the
+// arc and from either side. Past an end, the end is the nearest point.
+TEST(FirstContactConstruction, BandNearestOverManySpans)
+{
+    constexpr double width = 1e-3;
+    constexpr double gap = std::numbers::pi / 3.0;
+    const gp_Pnt2d centre(5.0, 0.0);
+    const Handle(Geom2d_Circle) circle = new Geom2d_Circle(gp_Ax2d(centre, gp_Dir2d(1, 0)), 1.0);
+    const Handle(Geom2d_BSplineCurve) arc
+        = Geom2dConvert::CurveToBSplineCurve(new Geom2d_TrimmedCurve(circle, gap / 2.0, 2.0 * std::numbers::pi - gap / 2.0));
+    const double first = arc->FirstParameter();
+    const double last = arc->LastParameter();
+    for (int k = 1; k < 60; ++k) {
+        arc->InsertKnot(first + (last - first) * k / 60.0);
+    }
+    ASSERT_GE(arc->NbKnots(), 60);
+    PartDesign::FirstContact::Band band(frame);
+    band.add(arc, width);
+    auto at = [&](double angle, double radius) {
+        return gp_Pnt(centre.X() + radius * std::cos(angle), 0.0, centre.Y() + radius * std::sin(angle));
+    };
+    for (int k = 0; k <= 200; ++k) {
+        const double angle = gap / 2.0 + (2.0 * std::numbers::pi - gap) * k / 200.0;
+        EXPECT_TRUE(band.contains(at(angle, 1.0 + 0.9 * width))) << angle;
+        EXPECT_TRUE(band.contains(at(angle, 1.0 - 0.9 * width))) << angle;
+        EXPECT_FALSE(band.contains(at(angle, 1.0 + 1.1 * width))) << angle;
+        EXPECT_FALSE(band.contains(at(angle, 1.0 - 1.1 * width))) << angle;
+    }
+    // Past an end along its tangent; the gap's middle and the circle's centre
+    const gp_Pnt2d end = arc->StartPoint();
+    const gp_Vec2d back(std::sin(gap / 2.0), -std::cos(gap / 2.0));
+    EXPECT_TRUE(band.contains(gp_Pnt(end.X() + 0.9 * width * back.X(), 0.0, end.Y() + 0.9 * width * back.Y())));
+    EXPECT_FALSE(band.contains(gp_Pnt(end.X() + 1.1 * width * back.X(), 0.0, end.Y() + 1.1 * width * back.Y())));
+    EXPECT_FALSE(band.contains(at(0.0, 1.0)));
+    EXPECT_FALSE(band.contains(at(0.0, 0.0)));
 }
 
 // TEMPORARY (ops#293 D2 session 5): TrimmedFold's face, profile, cells, walls and pieces as BREP files

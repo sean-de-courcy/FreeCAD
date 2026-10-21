@@ -24,6 +24,7 @@
 
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <Geom2d_BSplineCurve.hxx>
@@ -116,17 +117,35 @@ public:
     std::optional<gp_Pnt> behind(const TopoDS_Face& face) const;
 
 private:
+    // A span of a part's curve between two knots, and the box of its poles, which holds it (the
+    // convex hull property)
+    struct Span
+    {
+        double first = 0.0;
+        double last = 0.0;
+        double xLow = 0.0;
+        double xHigh = 0.0;
+        double yLow = 0.0;
+        double yHigh = 0.0;
+    };
     struct Part
     {
         Handle(Geom2d_BSplineCurve) curve;
         double width = 0.0;
         // A bound of |W''| over the curve
         double bend = 0.0;
+        std::vector<Span> spans;
+        // The box of all the spans
+        Span box;
     };
     gp_Ax2 frame;
     std::vector<Part> parts;
 
     gp_Pnt2d image(const gp_Pnt& point) const;
+    // The parameter of the part's nearest point to `point`, and the distance; or, where the point
+    // is farther than the part's width from every span's box, NaN and a lower bound of the
+    // distance (more than the width, so the part holds nothing near the point)
+    static std::pair<double, double> nearest(const Part& part, const gp_Pnt2d& point);
     // `whole`: the silhouette's leaves, and any point of the face found out of the band ends the
     // check; otherwise behind()'s leaves
     std::optional<gp_Pnt> leavesOutside(const TopoDS_Face& face, bool whole) const;
