@@ -139,7 +139,11 @@ namespace
 // 5: ops#375, a Part Sweep's start edges and vertices keep the profile's names and its end ones
 // are their projections (PRJ), and its corner edges are named from the side faces (`UPP`), where
 // all were generated from the spine's vertices and told apart by a counter.
-constexpr int ForkNamingRevision = 5;
+// 6: ops#378, an element named alike with others and told apart only by an index gets the index
+// in the order of the maker's history list (a group's generated or modified members) or of the
+// members' places on the face they are named from (UPP), where it followed the order OCCT
+// stores sub-shapes in.
+constexpr int ForkNamingRevision = 6;
 
 // The `.N<n>` of the element map version: the form interned names are saved in (ops#6). 2: the
 // references are indices into the file's table (NamingFormat 2).
