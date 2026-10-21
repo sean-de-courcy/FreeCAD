@@ -22,6 +22,7 @@
 # ***************************************************************************
 
 import math
+import re
 import time
 import unittest
 
@@ -1193,21 +1194,85 @@ class TestPipeCorners(unittest.TestCase):
         check). Round 5 looked at the curvature 16 times between two samples and at the turn
         between them, which is nothing: the S-bend fell between, and the pipes were accepted
         silently. A circle of radius 0.5 along the gentlest S-bend would need a bend tighter than
-        1.9 to fold: valid, without a warning."""
+        1.9 to fold: valid, without a warning. Where OCCT's sweep would crash along an S-bend
+        (testCurveWhereOCCTWouldCrashFails: macOS's numbers at 1 degree over 0.07 mm), the pipe
+        fails saying so before any sweep, and the fold isn't looked for."""
         for bend, length in ((0.5, 0.05), (1, 0.07), (5, 0.05)):
             with self.subTest(bend=bend, length=length):
                 self.renew()
                 profile = self.profile([models.circle(0, 0, 2)])
                 spine = self.sBendSpine(75, bend, length)
                 pipe = self.pipe(spine, profile, Transition="Transformed", Refine=False)
-                self.assertFails(pipe, "folds", "along the curve from (0, 0, 30)", "Right corner")
+                if not self.wouldCrash(pipe):
+                    phrases = ("folds", "along the curve from (0, 0, 30)", "Right corner")
+                    self.assertFails(pipe, *phrases)
 
         self.renew()
         profile = self.profile([models.circle(0, 0, 0.5)])
         spine = self.sBendSpine(75, 0.5, 0.05)
         pipe = self.pipe(spine, profile, Transition="Transformed", Refine=False)
-        self.assertValidSolid(pipe)
-        self.assertNotIn("Warning", pipe.State)
+        if not self.wouldCrash(pipe):
+            self.assertValidSolid(pipe)
+            self.assertNotIn("Warning", pipe.State)
+
+    def wouldCrash(self, pipe):
+        """Whether the pipe failed as OCCT's sweep would crash along its spine (ops#413), which
+        depends on the platform's numbers: then the message names the place and the mode."""
+        text = pipe.getStatusString()
+        if "would crash" not in text:
+            return False
+        self.assertFails(pipe, "OCCT's sweep would crash at (", "Smooth the curve there")
+        self.assertIn(f"'{pipe.Mode}' mode", text)
+        return True
+
+    def sBendAlongZ(self, bend, length):
+        """A B-spline up the Z axis through 15 points: 20 mm, an S-bend over `length` (through 8
+        points, turning up to `bend` degrees towards +X and back), and 20 mm more."""
+        points = [V(0, 0, 0), V(0, 0, 10), V(0, 0, 20)]
+        for i in range(1, 9):
+            step = i - 0.5 if i <= 4 else 8.5 - i
+            angle = math.radians(bend * step / 4)
+            points.append(points[-1] + V(math.sin(angle), 0, math.cos(angle)) * (length / 8))
+        points += [points[-1] + V(0, 0, 10), points[-1] + V(0, 0, 20)]
+        curve = Part.BSplineCurve()
+        curve.interpolate(points, InitialTangent=V(0, 0, 1), FinalTangent=V(0, 0, 1))
+        return models.feature(self.doc, "Path", Part.Wire([curve.toShape()]))
+
+    def testCurveWhereOCCTWouldCrashFails(self):
+        """A circle of radius 2 along a B-spline with a short S-bend (sBendAlongZ), in Standard,
+        Frenet and Binormal mode. Each mode's law uses OCCT's Frenet law, which, evaluated at a
+        point where the curve doesn't bend, evaluates itself a little further on: at the middle of
+        such an S-bend by a step too small to change the parameter, so it calls itself until the
+        stack overflows (ops#413). OCCT finds that point on some of these curves and not on others,
+        by the last bits of the numbers (on Windows: 13 of the 16 S-bends below in Standard mode,
+        and 1 degree over 0.07 mm and 5 degrees over 0.05 mm in every mode; on macOS, 1 degree
+        over 0.07 mm after testShortSBendFolds' corner too). Where it does, the pipe fails before
+        any sweep, naming the place and the mode, instead of crashing FreeCAD (round 6 crashed on
+        these on Windows, and on macOS in testShortSBendFolds); where it doesn't, OCCT sweeps it
+        without crashing."""
+        refused = []
+        everyMode = ((1, 0.07), (5, 0.05))
+        for bend in (0.5, 1, 2, 5):
+            for length in (0.05, 0.07, 0.105, 0.2):
+                modes = ("Standard", "Frenet", "Binormal") if (bend, length) in everyMode else ()
+                for mode in modes or ("Standard",):
+                    with self.subTest(bend=bend, length=length, mode=mode):
+                        self.renew()
+                        profile = self.profile([models.circle(0, 0, 2)])
+                        spine = self.sBendAlongZ(bend, length)
+                        pipe = self.pipe(
+                            spine, profile, Mode=mode, Binormal=V(0, 1, 0), Refine=False
+                        )
+                        if self.wouldCrash(pipe):
+                            # At the S-bend's middle, where it turns back
+                            text = pipe.getStatusString()
+                            place = re.search(r"crash at \(([^)]*)\)", text)[1]
+                            x, y, z = (float(value) for value in place.split(","))
+                            self.assertLess(abs(x), length)
+                            self.assertEqual(y, 0)
+                            self.assertAlmostEqual(z, 20 + length / 2, delta=length / 10)
+                            refused.append((bend, length, mode))
+        self.assertTrue(refused)
 
     def testManySmallCornersAddUp(self):
         """A circle of radius 2, up 10, then 775 corners of 0.0009 rad 0.05 mm apart (40 degrees in

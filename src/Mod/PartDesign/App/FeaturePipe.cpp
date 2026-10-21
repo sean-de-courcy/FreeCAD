@@ -51,6 +51,9 @@
 #include <BRep_Tool.hxx>
 #include <Geom_BSplineCurve.hxx>
 #include <Geom_Curve.hxx>
+#include <Geom_TrimmedCurve.hxx>
+#include <GeomAdaptor_Curve.hxx>
+#include <GeomFill_Frenet.hxx>
 #include <GeomAPI_ProjectPointOnCurve.hxx>
 #include <gp.hxx>
 #include <GProp_GProps.hxx>
@@ -1481,6 +1484,105 @@ struct SpineCorner
     double degrees;
 };
 
+/// OCCT's Frenet law, which counts how deep it calls itself and stops past a limit
+/// (frenetRunsAway)
+class BoundedFrenet: public GeomFill_Frenet
+{
+public:
+    bool D0(const double param, gp_Vec& tangent, gp_Vec& normal, gp_Vec& binormal) override
+    {
+        // At a singular point it evaluates itself once more nearby, and rarely again from there
+        if (depth >= 16) {
+            runaway = true;
+            return false;
+        }
+        // Back up a level however this one ends (OCCT throws when a deeper one refused)
+        struct Level
+        {
+            int& depth;
+            ~Level()
+            {
+                --depth;
+            }
+        } level {++depth};
+        return GeomFill_Frenet::D0(param, tangent, normal, binormal);
+    }
+    int depth = 0;
+    bool runaway = false;
+};
+
+/// Where OCCT's sweep would crash along \a spine in Standard, Frenet or Binormal mode (ops#413).
+/// Each mode's law uses OCCT's Frenet law (GeomFill_Frenet), which at a point where the curve
+/// doesn't bend (a singular point) evaluates itself again a little further on, by twice the width
+/// it gives that point. Where the curve's bend reverses abruptly (an S-bend of a tenth of a
+/// millimetre in a B-spline), that width is so small that the parameter doesn't change in floating
+/// point: the law calls itself for ever, and the stack overflows. It happens where the law is
+/// evaluated at such a point itself, as the end of one of its pieces: in Standard mode (\a
+/// corrected, OCCT's corrected Frenet law) the start of each C0 piece, and in every mode the ends
+/// of the finer pieces, unless the point was merged into a knot beside it. Whether OCCT's search
+/// finds the point at all depends on the last bits of the numbers: on macOS, the 1-degree S-bend
+/// over 0.07 mm of testShortSBendFolds; on Windows, over 0.105 mm. So this evaluates the law at
+/// those ends, set up as the sweep has it (BRepFill_Edge3DLaw: each edge's curve, reversed for a
+/// reversed edge), with its depth bounded. The point where it runs away; none where it doesn't.
+std::optional<gp_Pnt> frenetRunsAway(const TopoDS_Wire& spine, bool corrected)
+{
+    for (BRepTools_WireExplorer it(spine); it.More(); it.Next()) {
+        const TopoDS_Edge& edge = it.Current();
+        if (BRep_Tool::Degenerated(edge)) {
+            continue;
+        }
+        double first = 0;
+        double last = 0;
+        Handle(Geom_Curve) curve = BRep_Tool::Curve(edge, first, last);
+        if (curve.IsNull()) {
+            continue;
+        }
+        if (edge.Orientation() == TopAbs_REVERSED) {
+            Handle(Geom_TrimmedCurve) reversed = new Geom_TrimmedCurve(curve, first, last);
+            reversed->Reverse();
+            curve = reversed;
+            first = curve->FirstParameter();
+            last = curve->LastParameter();
+        }
+        Handle(BoundedFrenet) law = new BoundedFrenet();
+        law->SetCurve(new GeomAdaptor_Curve(curve, first, last));
+        // The ends of the law's pieces: its C0 pieces' starts, where the corrected law begins
+        // each of its own (GeomFill_CorrectedFrenet::Init), and every end of its finer pieces,
+        // which the sweep's approximation evaluates in every mode (they all give the curve's
+        // knots joined with the singular points)
+        std::vector<GeomAbs_Shape> shapes {GeomAbs_CN};
+        if (corrected) {
+            shapes.insert(shapes.begin(), GeomAbs_C0);
+        }
+        for (const GeomAbs_Shape shape : shapes) {
+            const int count = law->NbIntervals(shape);
+            NCollection_Array1<double> pieces(1, count + 1);
+            law->Intervals(pieces, shape);
+            for (int i = 1; i <= count; ++i) {
+                law->SetInterval(pieces(i), pieces(i + 1));
+                for (const double at : {pieces(i), pieces(i + 1)}) {
+                    if (shape == GeomAbs_C0 && at != pieces(i)) {
+                        continue;
+                    }
+                    gp_Vec tangent;
+                    gp_Vec normal;
+                    gp_Vec binormal;
+                    try {
+                        law->D0(at, tangent, normal, binormal);
+                    }
+                    catch (const Standard_Failure&) {
+                        // What a deeper level refused leaves unset: the runaway is the answer
+                    }
+                    if (law->runaway) {
+                        return curve->Value(at);
+                    }
+                }
+            }
+        }
+    }
+    return std::nullopt;
+}
+
 /// Where "Fixed" mode, which keeps the section's orientation (\a normal) all along, turns the
 /// spine edge-on to it or past: the first point of \a spine where the tangent lies in the
 /// section's plane or on its other side than at the start. From there the sweep runs back
@@ -1880,6 +1982,19 @@ App::DocumentObjectExecReturn* Pipe::execute()
         auto inPlace = [&](const gp_Pnt& point) {
             return pointText(point.Transformed(invObjLoc.Inverted().Transformation()));
         };
+        // Before any sweep: the modes that orient the profile by the curve's bend crash OCCT
+        // along some curves (ops#413)
+        if (mode == 0 || mode == 2 || mode == 4) {
+            if (const auto at = frenetRunsAway(TopoDS::Wire(path.getShape()), mode == 0)) {
+                return new App::DocumentObjectExecReturn(fmt::format(
+                    "Pipe: OCCT's sweep would crash at {} on the spine, where the curve's bend "
+                    "reverses too abruptly for OCCT to orient the profile in '{}' mode. Smooth the "
+                    "curve there.",
+                    inPlace(*at),
+                    Mode.getValueAsString()
+                ));
+            }
+        }
         const std::optional<SpineCorner> sharpest = sharpestCorner(TopoDS::Wire(path.getShape()));
         // A fold fails the pipe; a small one (under smallFold of the section's extent) warns
         auto foldText = [&](const Fold& fold, bool small) {
