@@ -2,6 +2,8 @@
 
 #include <TColgp_Array2OfPnt.hxx>
 #include <algorithm>
+#include <set>
+#include <sstream>
 #include <gtest/gtest.h>
 #include "src/App/InitApplication.h"
 #include <Base/Console.h>
@@ -37,6 +39,7 @@
 #include <TopoDS.hxx>
 #include <TopoDS_Iterator.hxx>
 #include <TopTools_DataMapOfShapeShape.hxx>
+#include <TopTools_MapOfShape.hxx>
 #include <GeomAPI_PointsToBSpline.hxx>
 #include <Geom_BezierCurve.hxx>
 #include <Geom_BezierSurface.hxx>
@@ -4009,26 +4012,45 @@ TEST_F(TopoShapeExpansionTest, makeElementCutNamesBothCoincidentPiecesV2)
 
 namespace
 {
-// ops#378: OCCT can store a wire's edges in another order on another platform (the bend arcs of
-// a pipe with a round hole come out in opposite orders on Windows and macOS). A result is named,
-// and then a copy whose wires store the same edges in reverse order; the names must not depend
-// on that order.
+// ops#378: OCCT can store sub-shapes in another order on another platform (the bend arcs of a
+// pipe with a round hole come out of the wire in opposite orders on Windows and macOS) or in
+// another OCCT version. A result is named, and then a copy that stores the same sub-shapes in
+// reverse order; an element told apart from others only by its index must keep its name.
 
-/// The shape with each wire's edges stored in reverse order. Every container above the edges is
-/// rebuilt once (`copies` maps the original, at the identity and forward, to its copy); edges and
-/// vertexes stay the same shapes.
-TopoDS_Shape reverseWireOrder(const TopoDS_Shape& shape, TopTools_DataMapOfShapeShape& copies)
+/// The shape at the identity and forward: the same TShape compares equal whatever its place.
+TopoDS_Shape bareShape(const TopoDS_Shape& shape)
 {
-    if (shape.ShapeType() >= TopAbs_EDGE) {
+    return shape.Located(TopLoc_Location()).Oriented(TopAbs_FORWARD);
+}
+
+/// Which containers store their children in reverse order in the copy.
+enum class Reversed
+{
+    Wires,  ///< each wire's edges: the order that differs in the Pipe's bend
+    All,    ///< every container's children: wires, faces' wires, shells, solids, compounds
+};
+
+/// The shape with its children stored in reverse order (`reversed`). Every container above the
+/// edges is rebuilt once (`copies` maps the original, bare, to its copy), except those the result
+/// took from its sources as they are (`kept`, bare): OCCT built only the others. Edges and
+/// vertexes stay the same shapes.
+TopoDS_Shape reverseChildOrder(
+    const TopoDS_Shape& shape,
+    Reversed reversed,
+    const TopTools_MapOfShape& kept,
+    TopTools_DataMapOfShapeShape& copies
+)
+{
+    const TopoDS_Shape bare = bareShape(shape);
+    if (shape.ShapeType() >= TopAbs_EDGE || kept.Contains(bare)) {
         return shape;
     }
-    const TopoDS_Shape bare = shape.Located(TopLoc_Location()).Oriented(TopAbs_FORWARD);
     if (!copies.IsBound(bare)) {
         std::vector<TopoDS_Shape> children;
         for (TopoDS_Iterator it(bare, Standard_False, Standard_False); it.More(); it.Next()) {
-            children.push_back(reverseWireOrder(it.Value(), copies));
+            children.push_back(reverseChildOrder(it.Value(), reversed, kept, copies));
         }
-        if (bare.ShapeType() == TopAbs_WIRE) {
+        if (reversed == Reversed::All || bare.ShapeType() == TopAbs_WIRE) {
             std::reverse(children.begin(), children.end());
         }
         TopoDS_Shape copy = bare.EmptyCopied();
@@ -4046,9 +4068,9 @@ TopoDS_Shape reverseWireOrder(const TopoDS_Shape& shape, TopTools_DataMapOfShape
 }
 
 /// A mapper's history, with the rebuilt containers in place of the original ones.
-struct ReversedWiresMapper: TopoShape::Mapper
+struct ReorderedMapper: TopoShape::Mapper
 {
-    ReversedWiresMapper(const TopoShape::Mapper& mapper, const TopTools_DataMapOfShapeShape& copies)
+    ReorderedMapper(const TopoShape::Mapper& mapper, const TopTools_DataMapOfShapeShape& copies)
         : mapper(mapper)
         , copies(copies)
     {}
@@ -4070,8 +4092,7 @@ private:
     {
         _res.clear();
         for (const auto& shape : shapes) {
-            const TopoDS_Shape bare = shape.Located(TopLoc_Location()).Oriented(TopAbs_FORWARD);
-            if (const TopoDS_Shape* copy = copies.Seek(bare)) {
+            if (const TopoDS_Shape* copy = copies.Seek(bareShape(shape))) {
                 _res.push_back(copy->Located(shape.Location()).Oriented(shape.Orientation()));
             }
             else {
@@ -4142,6 +4163,43 @@ NamesByPlace namesByPlace(const TopoShape& shape)
     return result;
 }
 
+/// The places whose names differ between `copy` and `original`, one line each; empty when none.
+std::string namesDiffer(const TopoShape& copy, const TopoShape& original)
+{
+    const NamesByPlace copyNames = namesByPlace(copy);
+    const NamesByPlace originalNames = namesByPlace(original);
+    std::set<NamesByPlace::key_type> places;
+    for (const auto* names : {&copyNames, &originalNames}) {
+        for (const auto& entry : *names) {
+            places.insert(entry.first);
+        }
+    }
+    auto text = [](const NamesByPlace& names, const NamesByPlace::key_type& place) {
+        auto found = names.find(place);
+        std::string result;
+        if (found == names.end()) {
+            return std::string("(none)");
+        }
+        for (const auto& elementNames : found->second) {
+            for (const auto& name : elementNames) {
+                result += " " + name;
+            }
+            result += " /";
+        }
+        return result;
+    };
+    std::ostringstream out;
+    for (const auto& place : places) {
+        const std::string copyText = text(copyNames, place);
+        const std::string originalText = text(originalNames, place);
+        if (copyText != originalText) {
+            out << place.first << " at (" << place.second[0] << ", " << place.second[1] << ", "
+                << place.second[2] << "): copy" << copyText << " original" << originalText << "\n";
+        }
+    }
+    return out.str();
+}
+
 /// The number of faces, edges and vertexes at another index in `copy` than at the same place in
 /// `original`.
 int movedElements(const TopoShape& original, const TopoShape& copy)
@@ -4157,32 +4215,43 @@ int movedElements(const TopoShape& original, const TopoShape& copy)
     return moved;
 }
 
-/// `built` named from `mapper` and `sources`, and a copy of it with its wires' edges in reverse
-/// order, named from the same history.
-std::pair<TopoShape, TopoShape> nameWithReversedWires(
+/// `built` named from `mapper` and `sources`, and a copy of it with children in reverse order
+/// (`reversed`), named from the same history.
+std::pair<TopoShape, TopoShape> nameWithReversedChildren(
     const TopoDS_Shape& built,
     const TopoShape::Mapper& mapper,
     const std::vector<TopoShape>& sources,
-    const char* op
+    const char* op,
+    Reversed reversed
 )
 {
     TopoShape original(App::HistoryAlgorithm::V2, 10L);
     original.makeShapeWithElementMap(built, mapper, sources, op);
+    TopTools_MapOfShape kept;
+    for (const auto& source : sources) {
+        for (auto type : {TopAbs_SOLID, TopAbs_SHELL, TopAbs_FACE, TopAbs_WIRE}) {
+            for (TopExp_Explorer xp(source.getShape(), type); xp.More(); xp.Next()) {
+                kept.Add(bareShape(xp.Current()));
+            }
+        }
+    }
     TopTools_DataMapOfShapeShape copies;
-    const TopoDS_Shape reversed = reverseWireOrder(built, copies);
+    const TopoDS_Shape reordered = reverseChildOrder(built, reversed, kept, copies);
     TopoShape copy(App::HistoryAlgorithm::V2, 10L);
-    copy.makeShapeWithElementMap(reversed, ReversedWiresMapper(mapper, copies), sources, op);
+    copy.makeShapeWithElementMap(reordered, ReorderedMapper(mapper, copies), sources, op);
     return {original, copy};
 }
 }  // namespace
 
-TEST_F(TopoShapeExpansionTest, makeShapeWithElementMapBendArcsIgnoreWireOrderV2)
+TEST_F(TopoShapeExpansionTest, makeShapeWithElementMapBendArcsIgnoreChildOrderV2)
 {
     // Arrange
     //   a round hole's wire (radius 1) swept along an L path (up 30, then 20 along X) with right
     //   corners, as PartDesign's Pipe sweeps each wire of its profile: at the bend the two legs'
     //   side faces meet in four quarter arcs, which with the four vertexes between them are named
-    //   from the same two faces and told apart only by their index (ops#378)
+    //   from the same two faces and told apart only by their index (UPP). OCCT stores the arcs in
+    //   the first leg's wire in opposite orders on Windows and macOS (ops#378); the copy also
+    //   swaps the two faces, which are generated from the same profile edge (S4)
     const gp_Circ circle(gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)), 1);
     const TopoDS_Wire hole = BRepBuilderAPI_MakeWire(BRepBuilderAPI_MakeEdge(circle).Edge()).Wire();
     BRepBuilderAPI_MakePolygon path(gp_Pnt(0, 0, 0), gp_Pnt(0, 0, 30), gp_Pnt(20, 0, 30));
@@ -4194,11 +4263,12 @@ TEST_F(TopoShapeExpansionTest, makeShapeWithElementMapBendArcsIgnoreWireOrderV2)
     const TopoShape profile(App::HistoryAlgorithm::V2, hole, 1L);
 
     // Act
-    auto [original, copy] = nameWithReversedWires(
+    auto [original, copy] = nameWithReversedChildren(
         pipe.Shape(),
         MapperMaker(pipe),
         {profile},
-        OpCodes::PipeShell
+        OpCodes::PipeShell,
+        Reversed::All
     );
 
     // Assert
@@ -4223,7 +4293,7 @@ TEST_F(TopoShapeExpansionTest, makeShapeWithElementMapBendArcsIgnoreWireOrderV2)
     //   the copy's arcs are at other indexes, and every element has the same names as the
     //   original's at the same place
     EXPECT_GT(movedElements(original, copy), 0);
-    EXPECT_EQ(namesByPlace(copy), namesByPlace(original));
+    EXPECT_EQ(namesDiffer(copy, original), "");
 }
 
 TEST_F(TopoShapeExpansionTest, makeShapeWithElementMapCutCornersIgnoreWireOrderV2)
@@ -4231,7 +4301,9 @@ TEST_F(TopoShapeExpansionTest, makeShapeWithElementMapCutCornersIgnoreWireOrderV
     // Arrange
     //   a compound of two overlapping boxes cut by a cylinder standing on their shared corner
     //   (TestNamingDump's CompoundCut): the cut corners' vertexes are named from the same faces
-    //   and told apart only by their index (ops#378), as are the pieces' edges
+    //   and told apart only by their index (UPP, ops#378). Only the wires are reversed: with the
+    //   faces reversed too, two modified edges of the top face take another Connected Name, the
+    //   first named ancestor face in the result's face order (ops#431, not an index)
     TopoShape box1(App::HistoryAlgorithm::V2, BRepPrimAPI_MakeBox(1.0, 2.0, 2.0).Shape(), 1L);
     TopoShape box2(App::HistoryAlgorithm::V2, BRepPrimAPI_MakeBox(2.0, 1.0, 2.0).Shape(), 2L);
     TopoShape cylinder(App::HistoryAlgorithm::V2, BRepPrimAPI_MakeCylinder(0.5, 2.0).Shape(), 3L);
@@ -4241,25 +4313,26 @@ TEST_F(TopoShapeExpansionTest, makeShapeWithElementMapCutCornersIgnoreWireOrderV
     ASSERT_TRUE(cut.IsDone());
 
     // Act
-    auto [original, copy] = nameWithReversedWires(
+    auto [original, copy] = nameWithReversedChildren(
         cut.Shape(),
         MapperMaker(cut),
         {compound, cylinder},
-        OpCodes::Cut
+        OpCodes::Cut,
+        Reversed::Wires
     );
 
     // Assert
     EXPECT_TRUE(allElementsNamed(original));
     EXPECT_GT(movedElements(original, copy), 0);
-    EXPECT_EQ(namesByPlace(copy), namesByPlace(original));
+    EXPECT_EQ(namesDiffer(copy, original), "");
 }
 
-TEST_F(TopoShapeExpansionTest, makeShapeWithElementMapPipeShellEndsIgnoreWireOrderV2)
+TEST_F(TopoShapeExpansionTest, makeShapeWithElementMapPipeShellEndsIgnoreChildOrderV2)
 {
     // Arrange
-    //   a 4 x 2 rectangle swept 20 along Z, as a solid (TestNamingDump's PipeShell Sweep): the
-    //   end sections' edges are generated from the profile's and told apart only by their index
-    //   (S4, ops#378)
+    //   a 4 x 2 rectangle swept 20 along Z, as a solid (TestNamingDump's PipeShell Sweep): each
+    //   end section's four edges are generated from the same end vertex of the spine and told
+    //   apart only by their index (S4, ops#378)
     const TopoDS_Wire rectangle = BRepBuilderAPI_MakePolygon(
                                       gp_Pnt(0, 0, 0),
                                       gp_Pnt(4, 0, 0),
@@ -4280,20 +4353,21 @@ TEST_F(TopoShapeExpansionTest, makeShapeWithElementMapPipeShellEndsIgnoreWireOrd
     const TopoShape profile(App::HistoryAlgorithm::V2, rectangle, 2L);
 
     // Act
-    auto [original, copy] = nameWithReversedWires(
+    auto [original, copy] = nameWithReversedChildren(
         pipe.Shape(),
         MapperMaker(pipe),
         {spine, profile},
-        OpCodes::PipeShell
+        OpCodes::PipeShell,
+        Reversed::All
     );
 
     // Assert
     EXPECT_TRUE(allElementsNamed(original));
     EXPECT_GT(movedElements(original, copy), 0);
-    EXPECT_EQ(namesByPlace(copy), namesByPlace(original));
+    EXPECT_EQ(namesDiffer(copy, original), "");
 }
 
-TEST_F(TopoShapeExpansionTest, makeShapeWithElementMapSliceIgnoresWireOrderV2)
+TEST_F(TopoShapeExpansionTest, makeShapeWithElementMapSliceIgnoresChildOrderV2)
 {
     // Arrange
     //   a 10 mm cube cut by the half space above z = 5, as TopoCrossSection slices a solid
@@ -4310,11 +4384,12 @@ TEST_F(TopoShapeExpansionTest, makeShapeWithElementMapSliceIgnoresWireOrderV2)
     ASSERT_TRUE(cut.IsDone());
 
     // Act
-    auto [original, copy] = nameWithReversedWires(
+    auto [original, copy] = nameWithReversedChildren(
         cut.Shape(),
         MapperMaker(cut),
         {cube, halfSpace},
-        OpCodes::Slice
+        OpCodes::Slice,
+        Reversed::All
     );
 
     // Assert
@@ -4322,7 +4397,7 @@ TEST_F(TopoShapeExpansionTest, makeShapeWithElementMapSliceIgnoresWireOrderV2)
     EXPECT_NEAR(getVolume(original.getShape()), 500, 1e-6);
     EXPECT_TRUE(allElementsNamed(original));
     EXPECT_GT(movedElements(original, copy), 0);
-    EXPECT_EQ(namesByPlace(copy), namesByPlace(original));
+    EXPECT_EQ(namesDiffer(copy, original), "");
 }
 
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
