@@ -40,16 +40,21 @@
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepCheck_Analyzer.hxx>
+#include <BRepClass3d_SolidClassifier.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepGProp.hxx>
 #include <BRepPrimAPI_MakeRevol.hxx>
+#include <BRepTools.hxx>
+#include <BRepTopAdaptor_FClass2d.hxx>
 #include <ElCLib.hxx>
 #include <Geom_Curve.hxx>
+#include <Geom_Surface.hxx>
 #include <Geom2d_TrimmedCurve.hxx>
 #include <Geom2dAPI_InterCurveCurve.hxx>
 #include <Geom2dConvert.hxx>
 #include <Geom2dInt_GInter.hxx>
 #include <GeomAPI.hxx>
+#include <GeomAPI_ProjectPointOnSurf.hxx>
 #include <GProp_GProps.hxx>
 #include <IntRes2d_IntersectionPoint.hxx>
 #include <gp_Ax3.hxx>
@@ -218,13 +223,15 @@ double largestRadius(const TopoDS_Shape& shape, const gp_Ax1& axis)
 // One cell swept up to the face: the cell revolved a sliver short of a whole turn, split by the
 // face, and the solid at its start cap (as sweepUpToFace() in FeatureRevolved.cpp). C1: exactly one
 // such solid, keeping the whole cap. `inBand` says whether a point lies within the band of a wall on
-// the cell's boundary. Returns the solid, or why it refuses.
+// the cell's boundary; `step` is lostSheet()'s. Returns the solid, or why it refuses.
 std::pair<TopoDS_Shape, std::string> sweepCell(
     const TopoDS_Face& cell,
     const TopoDS_Face& face,
     const gp_Ax1& axis,
     double sliver,
-    const std::function<bool(const gp_Pnt&)>& inBand
+    const std::function<bool(const gp_Pnt&)>& inBand,
+    double step,
+    double tolerance
 )
 {
     try {
@@ -269,48 +276,15 @@ std::pair<TopoDS_Shape, std::string> sweepCell(
         if (kept.size() != 1) {
             return {{}, fmt::format("C1: {} solids at the cell's start", kept.size())};
         }
-        // C2, a sheet of the face lost in the split: every edge of the piece where the face cuts the
-        // turn bounds a piece of the face there (the end, or a flap), unless it lies in the band of a
-        // wall, where the split may drop a flap that bounds nothing (the hook at the first push). On
-        // q18's fold trimmed by a slanted plane (TrimmedFold), the split cut the turn's faces along
-        // the face's middle leg but merged the leg's own piece with the face outside the turn, near a
-        // vertex of tolerance 2e-5 at the wall junction: the piece ran on to the next leg, +0.03 in
-        // volume, with every other check passing (ops#293 D2 session 5). PROVISIONAL like the flap's
-        // check below: a lost sheet whose edges all lie on walls isn't seen.
+        // C2, a sheet of the face lost in the split
         const TopTools_IndexedMapOfShape faceParts = Part::UpToSplitMapper::piecesOf(splitter, face);
         TopTools_IndexedMapOfShape sections;
         for (const TopoDS_Shape& edge : splitter.SectionEdges()) {
             sections.Add(edge);
         }
-        TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
-        TopExp::MapShapesAndAncestors(kept.front(), TopAbs_EDGE, TopAbs_FACE, edgeFaces);
-        for (int k = 1; k <= edgeFaces.Extent(); ++k) {
-            const TopoDS_Edge& edge = TopoDS::Edge(edgeFaces.FindKey(k));
-            if (!sections.Contains(edge) || BRep_Tool::Degenerated(edge)) {
-                continue;
-            }
-            bool bounded = false;
-            for (const TopoDS_Shape& next : edgeFaces.FindFromIndex(k)) {
-                bounded = bounded || faceParts.Contains(next);
-            }
-            if (bounded) {
-                continue;
-            }
-            BRepAdaptor_Curve along(edge);
-            for (int s = 0; s <= 32; ++s) {
-                const gp_Pnt point
-                    = along.Value(along.FirstParameter() + (along.LastParameter() - along.FirstParameter()) * s / 32);
-                if (inBand(point)) {
-                    continue;
-                }
-                return {{},
-                        fmt::format(
-                            "C2: the face crosses the cell's piece without splitting it (near ({:.4g}, {:.4g}, {:.4g}))",
-                            point.X(),
-                            point.Y(),
-                            point.Z()
-                        )};
-            }
+        if (const std::string lost = lostSheet(kept.front(), face, sections, faceParts, inBand, step, tolerance);
+            !lost.empty()) {
+            return {{}, lost};
         }
         const double cellArea = area(cell);
         const double allowed = 1e-9 * cellArea + perimeter(cell) * std::max(largestTolerance(cell), Precision::Confusion());
@@ -325,6 +299,128 @@ std::pair<TopoDS_Shape, std::string> sweepCell(
 }
 
 }  // namespace
+
+// Every section edge in the piece must bound a piece of the face there, unless it lies in a
+// wall's band, where the split may drop a flap that bounds nothing (the hook at the first push).
+// On q18's fold trimmed by a slanted plane (TrimmedFold), the split cut the turn's faces along
+// the face's middle leg but merged the leg's own piece with the face outside the turn, near a
+// vertex of tolerance 2e-5 at the wall junction: the piece ran on to the next leg, +0.03 in
+// volume, with every other check passing (ops#293 D2 session 5). The lost sheet crossed the
+// profile's own edge there, out of any band. In a cell bounded only by walls every section edge
+// is in a band, so the face's material through an unexplained edge is followed: a dropped flap
+// leaves the piece before its image leaves the band (the fold turns the face back, or the edge
+// ends it), a lost sheet runs on into the piece. PROVISIONAL like the flap's check: the band is
+// sampled at 33 points of the edge; section 15.8's curve bound replaces that.
+std::string lostSheet(
+    const TopoDS_Shape& piece,
+    const TopoDS_Face& face,
+    const TopTools_IndexedMapOfShape& sections,
+    const TopTools_IndexedMapOfShape& faceParts,
+    const std::function<bool(const gp_Pnt&)>& inBand,
+    double step,
+    double tolerance
+)
+{
+    auto refusal = [](const char* what, const gp_Pnt& point) {
+        return fmt::format("C2: {} (near ({:.4g}, {:.4g}, {:.4g}))", what, point.X(), point.Y(), point.Z());
+    };
+    // The nearest point of the face, with the face's normal there; nothing when the point is off
+    // the face by more than half a step, or beyond its boundary
+    const Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
+    double uLow = 0.0;
+    double uHigh = 0.0;
+    double vLow = 0.0;
+    double vHigh = 0.0;
+    BRepTools::UVBounds(face, uLow, uHigh, vLow, vHigh);
+    GeomAPI_ProjectPointOnSurf projection;
+    projection.Init(surface, uLow, uHigh, vLow, vHigh, Precision::Confusion());
+    BRepTopAdaptor_FClass2d inFace(face, Precision::PConfusion());
+    auto onFace = [&](const gp_Pnt& point) -> std::optional<std::pair<gp_Pnt, gp_Dir>> {
+        projection.Perform(point);
+        if (!projection.IsDone() || projection.NbPoints() < 1 || projection.LowerDistance() > step / 2.0) {
+            return std::nullopt;
+        }
+        double u = 0.0;
+        double v = 0.0;
+        projection.LowerDistanceParameters(u, v);
+        if (inFace.Perform(gp_Pnt2d(u, v)) == TopAbs_OUT) {
+            return std::nullopt;
+        }
+        gp_Pnt at;
+        gp_Vec du;
+        gp_Vec dv;
+        surface->D1(u, v, at, du, dv);
+        const gp_Vec normal = du.Crossed(dv);
+        if (normal.Magnitude() <= gp::Resolution()) {
+            return std::nullopt;
+        }
+        return std::make_pair(at, gp_Dir(normal));
+    };
+    TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
+    TopExp::MapShapesAndAncestors(piece, TopAbs_EDGE, TopAbs_FACE, edgeFaces);
+    BRepClass3d_SolidClassifier inPiece(piece);
+    for (int k = 1; k <= edgeFaces.Extent(); ++k) {
+        const TopoDS_Edge& edge = TopoDS::Edge(edgeFaces.FindKey(k));
+        if (!sections.Contains(edge) || BRep_Tool::Degenerated(edge)) {
+            continue;
+        }
+        bool bounded = false;
+        for (const TopoDS_Shape& next : edgeFaces.FindFromIndex(k)) {
+            bounded = bounded || faceParts.Contains(next);
+        }
+        if (bounded) {
+            continue;
+        }
+        BRepAdaptor_Curve along(edge);
+        for (int s = 0; s <= 32; ++s) {
+            const gp_Pnt point
+                = along.Value(along.FirstParameter() + (along.LastParameter() - along.FirstParameter()) * s / 32);
+            if (!inBand(point)) {
+                return refusal("the face crosses the cell's piece without splitting it", point);
+            }
+        }
+        // The face's material across the edge, both ways from its middle
+        gp_Pnt middle;
+        gp_Vec tangent;
+        along.D1((along.FirstParameter() + along.LastParameter()) / 2.0, middle, tangent);
+        const auto start = onFace(middle);
+        if (!start || tangent.Magnitude() <= gp::Resolution()) {
+            return refusal("the face can't be followed across the cell's piece", middle);
+        }
+        const gp_Vec across = gp_Vec(start->second).Crossed(tangent).Normalized();
+        for (const double sign : {1.0, -1.0}) {
+            gp_Pnt at = start->first;
+            gp_Vec direction = across * sign;
+            constexpr int farthest = 256;
+            int count = 0;
+            for (; count < farthest; ++count) {
+                const auto next = onFace(at.Translated(direction * step));
+                if (!next) {
+                    // The face ends: the material through the edge stays in the band
+                    break;
+                }
+                direction = gp_Vec(at, next->first);
+                if (direction.Magnitude() <= step / 4.0) {
+                    break;
+                }
+                direction.Normalize();
+                at = next->first;
+                if (inBand(at)) {
+                    continue;
+                }
+                inPiece.Perform(at, tolerance);
+                if (inPiece.State() == TopAbs_IN) {
+                    return refusal("a sheet of the face runs through the cell's piece unsplit", at);
+                }
+                break;
+            }
+            if (count == farthest) {
+                return refusal("the face stays in a wall's band too far to check", at);
+            }
+        }
+    }
+    return {};
+}
 
 Wall pushedWall(const JumpTrace& trace, std::size_t index, double push)
 {
@@ -699,7 +795,7 @@ FirstContactSolid constructFirstContact(
                     return false;
                 });
             };
-            auto [piece, why] = sweepCell(solid.cells[c], face, axis, sliver, inBand);
+            auto [piece, why] = sweepCell(solid.cells[c], face, axis, sliver, inBand, resolution, tolerance);
             if (piece.IsNull()) {
                 refusals.push_back({c, why});
                 continue;

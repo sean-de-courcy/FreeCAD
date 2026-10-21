@@ -19,12 +19,15 @@
 #include <vector>
 
 #include <BRepAlgoAPI_Cut.hxx>
+#include <BRepAlgoAPI_Section.hxx>
+#include <BRepAlgoAPI_Splitter.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepGProp.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
+#include <BRepPrimAPI_MakeRevol.hxx>
 #include <BRepTools.hxx>
 #include <Geom_BSplineCurve.hxx>
 #include <GeomAPI.hxx>
@@ -35,6 +38,8 @@
 #include <TColgp_HArray1OfPnt.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
+#include <TopTools_ListOfShape.hxx>
 
 #include <Base/Exception.h>
 #include <Mod/PartDesign/App/FirstContactConstruction.h>
@@ -76,10 +81,10 @@ Handle(Geom_BSplineCurve) polarCurve(const std::vector<double>& radii, const std
     return interpolation.Curve();
 }
 
-TopoDS_Face extruded(const Handle(Geom_BSplineCurve)& curve)
+TopoDS_Face extruded(const Handle(Geom_BSplineCurve)& curve, double height = 4.0)
 {
     const TopoDS_Shape prism
-        = BRepPrimAPI_MakePrism(BRepBuilderAPI_MakeEdge(curve).Edge(), gp_Vec(0, 0, 4)).Shape();
+        = BRepPrimAPI_MakePrism(BRepBuilderAPI_MakeEdge(curve).Edge(), gp_Vec(0, 0, height)).Shape();
     return TopoDS::Face(TopExp_Explorer(prism, TopAbs_FACE).Current());
 }
 
@@ -383,6 +388,67 @@ TEST(FirstContactConstruction, TrimmedFold)
     // One build: the junction's push covers the edge's tolerance from the start
     EXPECT_EQ(solid->builds, 1);
     expectSolid(*solid, expected);
+}
+
+// The lost-sheet check (C2) on a turn deliberately left unsplit, every section edge in a band: the
+// hook extruded from z 0.5 to 1.5 only, so its top and bottom are its own edges and the face cuts
+// the turn's cylinders only, which the band covers as if they were walls.
+namespace
+{
+
+// The profile's turn, F's section edges with it, and the check's verdict with that band
+std::string unsplitTurn(double x0, double x1)
+{
+    const TopoDS_Face face = extruded(polarCurve({2.0, 0.5, 3.5}, {100, 130, 220}, 0.5), 1.0);
+    const TopoDS_Shape turn = BRepPrimAPI_MakeRevol(profile(x0, x1, 0.0, 2.0), forward, 2.0 * std::numbers::pi - 1e-3).Shape();
+    BRepAlgoAPI_Section section(turn, face);
+    TopTools_IndexedMapOfShape sections;
+    for (TopExp_Explorer edges(section.Shape(), TopAbs_EDGE); edges.More(); edges.Next()) {
+        sections.Add(edges.Current());
+    }
+    // The check needs those edges in the solid: the turn split by its own section edges
+    BRepAlgoAPI_Splitter splitter;
+    TopTools_ListOfShape arguments;
+    arguments.Append(turn);
+    TopTools_ListOfShape tools;
+    for (int k = 1; k <= sections.Extent(); ++k) {
+        tools.Append(sections.FindKey(k));
+    }
+    splitter.SetArguments(arguments);
+    splitter.SetTools(tools);
+    splitter.Build();
+    TopTools_IndexedMapOfShape cut;
+    for (int k = 1; k <= sections.Extent(); ++k) {
+        for (const TopoDS_Shape& edge : splitter.Modified(sections.FindKey(k))) {
+            cut.Add(edge);
+        }
+        if (splitter.Modified(sections.FindKey(k)).IsEmpty()) {
+            cut.Add(sections.FindKey(k));
+        }
+    }
+    // As if the turn's cylinders were walls at r 2 and 2.5
+    auto inBand = [](const gp_Pnt& point) {
+        const double r = std::hypot(point.X(), point.Y());
+        return std::fabs(r - 2.0) <= 3e-4 || std::fabs(r - 2.5) <= 3e-4;
+    };
+    const TopoDS_Shape solid = TopExp_Explorer(splitter.Shape(), TopAbs_SOLID).Current();
+    return PartDesign::FirstContact::lostSheet(solid, face, cut, {}, inBand, 1e-3, tolerance);
+}
+
+}  // namespace
+
+// A wide turn, x in [2.0001, 2.4999]: the second leg crosses it at about 175 degrees, unsplit
+TEST(FirstContactConstruction, LostSheetSeen)
+{
+    const std::string why = unsplitTurn(2.0001, 2.4999);
+    EXPECT_NE(why.find("runs through the cell's piece unsplit"), std::string::npos) << why;
+}
+
+// A sliver turn about the free edge's radius, x in [1.9999, 2.0001]: the face's material through
+// its section edges leaves the turn before it leaves the band
+TEST(FirstContactConstruction, DroppedFlapPasses)
+{
+    EXPECT_EQ(unsplitTurn(1.9999, 2.0001), "");
 }
 
 // TEMPORARY (ops#293 D2 session 5): TrimmedFold's face, profile, cells, walls and pieces as BREP files

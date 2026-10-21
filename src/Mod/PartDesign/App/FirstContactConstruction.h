@@ -22,12 +22,16 @@
 
 #pragma once
 
+#include <functional>
+#include <string>
 #include <vector>
 
 #include <Geom2d_BSplineCurve.hxx>
 #include <gp_Ax1.hxx>
+#include <gp_Pnt.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
 
 #include <Mod/PartDesign/PartDesignGlobal.h>
 
@@ -59,6 +63,23 @@ struct PartDesignExport Wall
 // A piece of the trace as a wall: its curve moved `push` along its normal towards its side, within a
 // tenth of `push`. Throws Base::RuntimeError where that fails.
 PartDesignExport Wall pushedWall(const JumpTrace& trace, std::size_t piece, double push);
+
+// C2, a sheet of the face lost in a cell's split (section 15.10): `piece` is the solid at the
+// cell's start cap, `sections` the edges where the face cut the turn's faces, `faceParts` the
+// face's pieces. Every section edge in the piece must bound a piece of the face there (the exit,
+// or a flap), unless the face's material through it stays in a wall's band (`inBand`, of a point
+// of the turn): from the edge's middle, both ways across it along the face in steps of `step`,
+// until the face ends or the point maps out of the band. A point out of the band strictly inside
+// the piece is the lost sheet. Returns why it refuses, or an empty string.
+PartDesignExport std::string lostSheet(
+    const TopoDS_Shape& piece,
+    const TopoDS_Face& face,
+    const TopTools_IndexedMapOfShape& sections,
+    const TopTools_IndexedMapOfShape& faceParts,
+    const std::function<bool(const gp_Pnt&)>& inBand,
+    double step,
+    double tolerance
+);
 
 struct PartDesignExport FirstContactSolid
 {
