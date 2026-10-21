@@ -27,7 +27,16 @@
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <gp_Circ.hxx>
+#include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
+#include <BRepGProp.hxx>
+#include <BRepOffsetAPI_MakePipeShell.hxx>
+#include <BRepPrimAPI_MakeHalfSpace.hxx>
+#include <BRep_Tool.hxx>
+#include <GProp_GProps.hxx>
+#include <TopoDS.hxx>
+#include <TopoDS_Iterator.hxx>
+#include <TopTools_DataMapOfShapeShape.hxx>
 #include <GeomAPI_PointsToBSpline.hxx>
 #include <Geom_BezierCurve.hxx>
 #include <Geom_BezierSurface.hxx>
@@ -3996,6 +4005,324 @@ TEST_F(TopoShapeExpansionTest, makeElementCutNamesBothCoincidentPiecesV2)
     EXPECT_TRUE(pieces[0]);
     EXPECT_TRUE(pieces[1]);
     EXPECT_NE(pieces[0], pieces[1]);
+}
+
+namespace
+{
+// ops#378: OCCT can store a wire's edges in another order on another platform (the bend arcs of
+// a pipe with a round hole come out in opposite orders on Windows and macOS). A result is named,
+// and then a copy whose wires store the same edges in reverse order; the names must not depend
+// on that order.
+
+/// The shape with each wire's edges stored in reverse order. Every container above the edges is
+/// rebuilt once (`copies` maps the original, at the identity and forward, to its copy); edges and
+/// vertexes stay the same shapes.
+TopoDS_Shape reverseWireOrder(const TopoDS_Shape& shape, TopTools_DataMapOfShapeShape& copies)
+{
+    if (shape.ShapeType() >= TopAbs_EDGE) {
+        return shape;
+    }
+    const TopoDS_Shape bare = shape.Located(TopLoc_Location()).Oriented(TopAbs_FORWARD);
+    if (!copies.IsBound(bare)) {
+        std::vector<TopoDS_Shape> children;
+        for (TopoDS_Iterator it(bare, Standard_False, Standard_False); it.More(); it.Next()) {
+            children.push_back(reverseWireOrder(it.Value(), copies));
+        }
+        if (bare.ShapeType() == TopAbs_WIRE) {
+            std::reverse(children.begin(), children.end());
+        }
+        TopoDS_Shape copy = bare.EmptyCopied();
+        BRep_Builder builder;
+        for (const auto& child : children) {
+            builder.Add(copy, child);
+        }
+        copy.Closed(bare.Closed());
+        copy.Orientable(bare.Orientable());
+        copy.Infinite(bare.Infinite());
+        copy.Convex(bare.Convex());
+        copies.Bind(bare, copy);
+    }
+    return copies(bare).Located(shape.Location()).Oriented(shape.Orientation());
+}
+
+/// A mapper's history, with the rebuilt containers in place of the original ones.
+struct ReversedWiresMapper: TopoShape::Mapper
+{
+    ReversedWiresMapper(const TopoShape::Mapper& mapper, const TopTools_DataMapOfShapeShape& copies)
+        : mapper(mapper)
+        , copies(copies)
+    {}
+    const std::vector<TopoDS_Shape>& generated(const TopoDS_Shape& shape) const override
+    {
+        return translate(mapper.generated(shape));
+    }
+    const std::vector<TopoDS_Shape>& modified(const TopoDS_Shape& shape) const override
+    {
+        return translate(mapper.modified(shape));
+    }
+    const std::vector<TopoDS_Shape>& projected(const TopoDS_Shape& shape) const override
+    {
+        return translate(mapper.projected(shape));
+    }
+
+private:
+    const std::vector<TopoDS_Shape>& translate(const std::vector<TopoDS_Shape>& shapes) const
+    {
+        _res.clear();
+        for (const auto& shape : shapes) {
+            const TopoDS_Shape bare = shape.Located(TopLoc_Location()).Oriented(TopAbs_FORWARD);
+            if (const TopoDS_Shape* copy = copies.Seek(bare)) {
+                _res.push_back(copy->Located(shape.Location()).Oriented(shape.Orientation()));
+            }
+            else {
+                _res.push_back(shape);
+            }
+        }
+        return _res;
+    }
+
+    const TopoShape::Mapper& mapper;
+    const TopTools_DataMapOfShapeShape& copies;
+};
+
+/// An element's place: its centre of mass and its length or area (a vertex: its point), in
+/// micrometres.
+std::array<long long, 4> placeOf(const TopoDS_Shape& element)
+{
+    gp_Pnt center;
+    double mass = 0;
+    if (element.ShapeType() == TopAbs_VERTEX) {
+        center = BRep_Tool::Pnt(TopoDS::Vertex(element));
+    }
+    else {
+        GProp_GProps props;
+        if (element.ShapeType() == TopAbs_FACE) {
+            BRepGProp::SurfaceProperties(element, props);
+        }
+        else {
+            BRepGProp::LinearProperties(element, props);
+        }
+        center = props.CentreOfMass();
+        mass = props.Mass();
+    }
+    const double grid = 1e-6;
+    return {
+        std::llround(center.X() / grid),
+        std::llround(center.Y() / grid),
+        std::llround(center.Z() / grid),
+        std::llround(mass / grid)
+    };
+}
+
+using NamesByPlace = std::map<std::pair<std::string, std::array<long long, 4>>, std::vector<std::vector<std::string>>>;
+
+/// Each face's, edge's and vertex's names, sorted, by type and place. Coincident elements share a
+/// place; their name lists are sorted too.
+NamesByPlace namesByPlace(const TopoShape& shape)
+{
+    NamesByPlace result;
+    for (auto type : {TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX}) {
+        const std::string typeName = TopoShape::shapeName(type);
+        int index = 0;
+        for (const auto& element : shape.getSubShapes(type)) {
+            ++index;
+            std::vector<std::string> names;
+            for (const auto& name : shape.getElementMappedNames(
+                     Data::IndexedName::fromConst(typeName.c_str(), index)
+                 )) {
+                names.push_back(name.first.toString());
+            }
+            std::sort(names.begin(), names.end());
+            result[{typeName, placeOf(element)}].push_back(names);
+        }
+    }
+    for (auto& entry : result) {
+        std::sort(entry.second.begin(), entry.second.end());
+    }
+    return result;
+}
+
+/// The number of faces, edges and vertexes at another index in `copy` than at the same place in
+/// `original`.
+int movedElements(const TopoShape& original, const TopoShape& copy)
+{
+    int moved = 0;
+    for (auto type : {TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX}) {
+        const auto originalElements = original.getSubShapes(type);
+        const auto copyElements = copy.getSubShapes(type);
+        for (size_t i = 0; i < originalElements.size() && i < copyElements.size(); ++i) {
+            moved += placeOf(originalElements[i]) != placeOf(copyElements[i]) ? 1 : 0;
+        }
+    }
+    return moved;
+}
+
+/// `built` named from `mapper` and `sources`, and a copy of it with its wires' edges in reverse
+/// order, named from the same history.
+std::pair<TopoShape, TopoShape> nameWithReversedWires(
+    const TopoDS_Shape& built,
+    const TopoShape::Mapper& mapper,
+    const std::vector<TopoShape>& sources,
+    const char* op
+)
+{
+    TopoShape original(App::HistoryAlgorithm::V2, 10L);
+    original.makeShapeWithElementMap(built, mapper, sources, op);
+    TopTools_DataMapOfShapeShape copies;
+    const TopoDS_Shape reversed = reverseWireOrder(built, copies);
+    TopoShape copy(App::HistoryAlgorithm::V2, 10L);
+    copy.makeShapeWithElementMap(reversed, ReversedWiresMapper(mapper, copies), sources, op);
+    return {original, copy};
+}
+}  // namespace
+
+TEST_F(TopoShapeExpansionTest, makeShapeWithElementMapBendArcsIgnoreWireOrderV2)
+{
+    // Arrange
+    //   a round hole's wire (radius 1) swept along an L path (up 30, then 20 along X) with right
+    //   corners, as PartDesign's Pipe sweeps each wire of its profile: at the bend the two legs'
+    //   side faces meet in four quarter arcs, which with the four vertexes between them are named
+    //   from the same two faces and told apart only by their index (ops#378)
+    const gp_Circ circle(gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)), 1);
+    const TopoDS_Wire hole = BRepBuilderAPI_MakeWire(BRepBuilderAPI_MakeEdge(circle).Edge()).Wire();
+    BRepBuilderAPI_MakePolygon path(gp_Pnt(0, 0, 0), gp_Pnt(0, 0, 30), gp_Pnt(20, 0, 30));
+    BRepOffsetAPI_MakePipeShell pipe(path.Wire());
+    pipe.SetTransitionMode(BRepBuilderAPI_RightCorner);
+    pipe.Add(hole);
+    pipe.Build();
+    ASSERT_TRUE(pipe.IsDone());
+    const TopoShape profile(App::HistoryAlgorithm::V2, hole, 1L);
+
+    // Act
+    auto [original, copy] = nameWithReversedWires(
+        pipe.Shape(),
+        MapperMaker(pipe),
+        {profile},
+        OpCodes::PipeShell
+    );
+
+    // Assert
+    //   the four arcs at the bend (centres within the hole's radius of the path's corner), named
+    //   four ways
+    std::set<std::string> arcNames;
+    int arcs = 0;
+    int index = 0;
+    for (const auto& edge : original.getSubShapes(TopAbs_EDGE)) {
+        ++index;
+        GProp_GProps props;
+        BRepGProp::LinearProperties(edge, props);
+        const gp_Pnt center = props.CentreOfMass();
+        if (std::abs(center.X()) < 1 && std::abs(center.Z() - 30) < 1) {
+            ++arcs;
+            arcNames.insert(original.getMappedName(IndexedName::fromConst("Edge", index)).toString());
+        }
+    }
+    EXPECT_EQ(arcs, 4);
+    EXPECT_EQ(arcNames.size(), 4);
+    EXPECT_EQ(arcNames.count(""), 0);
+    //   the copy's arcs are at other indexes, and every element has the same names as the
+    //   original's at the same place
+    EXPECT_GT(movedElements(original, copy), 0);
+    EXPECT_EQ(namesByPlace(copy), namesByPlace(original));
+}
+
+TEST_F(TopoShapeExpansionTest, makeShapeWithElementMapCutCornersIgnoreWireOrderV2)
+{
+    // Arrange
+    //   a compound of two overlapping boxes cut by a cylinder standing on their shared corner
+    //   (TestNamingDump's CompoundCut): the cut corners' vertexes are named from the same faces
+    //   and told apart only by their index (ops#378), as are the pieces' edges
+    TopoShape box1(App::HistoryAlgorithm::V2, BRepPrimAPI_MakeBox(1.0, 2.0, 2.0).Shape(), 1L);
+    TopoShape box2(App::HistoryAlgorithm::V2, BRepPrimAPI_MakeBox(2.0, 1.0, 2.0).Shape(), 2L);
+    TopoShape cylinder(App::HistoryAlgorithm::V2, BRepPrimAPI_MakeCylinder(0.5, 2.0).Shape(), 3L);
+    TopoShape compound(4L);
+    compound.makeElementCompound({box1, box2});
+    BRepAlgoAPI_Cut cut(compound.getShape(), cylinder.getShape());
+    ASSERT_TRUE(cut.IsDone());
+
+    // Act
+    auto [original, copy] = nameWithReversedWires(
+        cut.Shape(),
+        MapperMaker(cut),
+        {compound, cylinder},
+        OpCodes::Cut
+    );
+
+    // Assert
+    EXPECT_TRUE(allElementsNamed(original));
+    EXPECT_GT(movedElements(original, copy), 0);
+    EXPECT_EQ(namesByPlace(copy), namesByPlace(original));
+}
+
+TEST_F(TopoShapeExpansionTest, makeShapeWithElementMapPipeShellEndsIgnoreWireOrderV2)
+{
+    // Arrange
+    //   a 4 x 2 rectangle swept 20 along Z, as a solid (TestNamingDump's PipeShell Sweep): the
+    //   end sections' edges are generated from the profile's and told apart only by their index
+    //   (S4, ops#378)
+    const TopoDS_Wire rectangle = BRepBuilderAPI_MakePolygon(
+                                      gp_Pnt(0, 0, 0),
+                                      gp_Pnt(4, 0, 0),
+                                      gp_Pnt(4, 2, 0),
+                                      gp_Pnt(0, 2, 0),
+                                      Standard_True
+    )
+                                      .Wire();
+    const TopoDS_Wire line = BRepBuilderAPI_MakeWire(
+                                 BRepBuilderAPI_MakeEdge(gp_Pnt(0, 0, 0), gp_Pnt(0, 0, 20)).Edge()
+    )
+                                 .Wire();
+    BRepOffsetAPI_MakePipeShell pipe(line);
+    pipe.Add(rectangle);
+    pipe.Build();
+    ASSERT_TRUE(pipe.MakeSolid());
+    const TopoShape spine(App::HistoryAlgorithm::V2, line, 1L);
+    const TopoShape profile(App::HistoryAlgorithm::V2, rectangle, 2L);
+
+    // Act
+    auto [original, copy] = nameWithReversedWires(
+        pipe.Shape(),
+        MapperMaker(pipe),
+        {spine, profile},
+        OpCodes::PipeShell
+    );
+
+    // Assert
+    EXPECT_TRUE(allElementsNamed(original));
+    EXPECT_GT(movedElements(original, copy), 0);
+    EXPECT_EQ(namesByPlace(copy), namesByPlace(original));
+}
+
+TEST_F(TopoShapeExpansionTest, makeShapeWithElementMapSliceIgnoresWireOrderV2)
+{
+    // Arrange
+    //   a 10 mm cube cut by the half space above z = 5, as TopoCrossSection slices a solid
+    //   (TestNamingDump's Slice): the slice face's edges and vertexes are generated from the
+    //   plane and the cube's sides (S2, S4, ops#378)
+    const TopoShape cube(App::HistoryAlgorithm::V2, BRepPrimAPI_MakeBox(10, 10, 10).Shape(), 1L);
+    const TopoDS_Face plane = BRepBuilderAPI_MakeFace(gp_Pln(gp_Pnt(0, 0, 5), gp_Dir(0, 0, 1))).Face();
+    const TopoShape halfSpace(
+        App::HistoryAlgorithm::V2,
+        BRepPrimAPI_MakeHalfSpace(plane, gp_Pnt(0, 0, 6)).Solid(),
+        2L
+    );
+    BRepAlgoAPI_Cut cut(cube.getShape(), halfSpace.getShape());
+    ASSERT_TRUE(cut.IsDone());
+
+    // Act
+    auto [original, copy] = nameWithReversedWires(
+        cut.Shape(),
+        MapperMaker(cut),
+        {cube, halfSpace},
+        OpCodes::Slice
+    );
+
+    // Assert
+    //   the lower half is left
+    EXPECT_NEAR(getVolume(original.getShape()), 500, 1e-6);
+    EXPECT_TRUE(allElementsNamed(original));
+    EXPECT_GT(movedElements(original, copy), 0);
+    EXPECT_EQ(namesByPlace(copy), namesByPlace(original));
 }
 
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
