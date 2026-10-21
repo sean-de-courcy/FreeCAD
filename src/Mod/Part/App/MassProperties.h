@@ -14,10 +14,16 @@ class TopoDS_Shape;
  * OCCT's default BRepGProp integration takes a fixed number of Gauss points per face, whatever
  * the face's knot spans, so a face carrying a curved B-spline with more than about 80 to 200 spans
  * is under-sampled: a long pipe's volume was +26 % or -31 %, a Pad's -300 %, a planar face's area
- * -426 %, all on geometry that is right. The adaptive Gauss-Kronrod method at 1e-6 is right on all
- * of them. Here a cheap screen of the faces picks the method: OCCT's default when no face carries
- * such a B-spline, so ordinary shapes get the same numbers bit for bit, and the adaptive method
- * otherwise.
+ * -426 %, all on geometry that is right. Here a cheap screen of the faces picks the method: OCCT's
+ * default when no face carries such a B-spline, so ordinary shapes get the same numbers bit for
+ * bit, and adaptive methods at 1e-6 otherwise:
+ * - volumes: Gauss-Kronrod with one integration per knot span, right on the prisms (extrusion
+ *   faces included), pipes and revolutions of such B-splines in the tests;
+ * - areas: OCCT's adaptive surface integration, each face on an extrusion converted to NURBS
+ *   first. On the extrusion itself the adaptive area is off (1.9 % at 41 spans, 4 to a wave) while
+ *   it is right on B-spline surfaces, revolutions and planes (within 1e-5 in the tests).
+ * The screen counts spans only: a strongly curved B-spline of 40 spans or fewer keeps the default,
+ * which can be off there too (ops#427).
  *
  * For the code whose decisions depend on a volume or an area (Refine's orientation, FilletFallback,
  * TopoShapeRepair). The reported Shape.Volume and Shape.Area stay OCCT's default for now (PLAN
@@ -40,7 +46,7 @@ PartExport bool needsAdaptive(const TopoDS_Shape& shape);
 PartExport void volumeProperties(const TopoDS_Shape& shape, GProp_GProps& props);
 
 /// The shape's surface properties into \a props, as BRepGProp::SurfaceProperties(shape, props)
-/// does, adaptive when needsAdaptive()
+/// does, adaptive when needsAdaptive(), with the faces on extrusions converted to NURBS
 PartExport void surfaceProperties(const TopoDS_Shape& shape, GProp_GProps& props);
 
 /// The volume the shape bounds: negative for a shell oriented inwards. The adaptive method

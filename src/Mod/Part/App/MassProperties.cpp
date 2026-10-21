@@ -2,7 +2,9 @@
 
 #include <vector>
 
+#include <BRepBuilderAPI_NurbsConvert.hxx>
 #include <BRepGProp.hxx>
+#include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <Geom2d_BSplineCurve.hxx>
 #include <Geom2d_OffsetCurve.hxx>
@@ -16,10 +18,12 @@
 #include <Geom_SurfaceOfRevolution.hxx>
 #include <Geom_TrimmedCurve.hxx>
 #include <Precision.hxx>
+#include <Standard_Failure.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopoDS.hxx>
+#include <TopoDS_Compound.hxx>
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
 #include <gp_XYZ.hxx>
@@ -153,7 +157,8 @@ bool needsCare(const Geom_BSplineSurface& surface)
         || (surface.NbVKnots() - 1 > spanThreshold && curvedAlong(false));
 }
 
-bool needsCare(Handle(Geom_Surface) surface)
+// The surface inside its trimmed and offset wrappers
+Handle(Geom_Surface) unwrapped(Handle(Geom_Surface) surface)
 {
     for (;;) {
         if (auto trimmed = Handle(Geom_RectangularTrimmedSurface)::DownCast(surface)) {
@@ -163,9 +168,14 @@ bool needsCare(Handle(Geom_Surface) surface)
             surface = offset->BasisSurface();
         }
         else {
-            break;
+            return surface;
         }
     }
+}
+
+bool needsCare(const Handle(Geom_Surface) & wrapped)
+{
+    const auto surface = unwrapped(wrapped);
     if (auto bspline = Handle(Geom_BSplineSurface)::DownCast(surface)) {
         return needsCare(*bspline);
     }
@@ -228,7 +238,11 @@ void volumeProperties(const TopoDS_Shape& shape, GProp_GProps& props, bool every
     if (needsAdaptive(shape)) {
         GProp_GProps adaptive = props;
         const bool onlyClosed = false;
-        const bool useSpans = false;
+        // One integration per knot span. Without, the volume a cut removed from a 500- or
+        // 1000-span prism, a difference of whole volumes, was off by 3e-6 and 3e-4 at any
+        // tolerance, too much for FilletFallback's 1e-6 checks; and a 150 x 150-span face took
+        // 46 s instead of 2 (ops#414)
+        const bool useSpans = true;
         if (BRepGProp::VolumePropertiesGK(
                 shape,
                 adaptive,
@@ -254,11 +268,54 @@ void volumeProperties(const TopoDS_Shape& shape, GProp_GProps& props)
     volumeProperties(shape, props, true);
 }
 
+namespace
+{
+
+bool onExtrusion(const TopoDS_Face& face)
+{
+    TopLoc_Location location;
+    const auto surface = BRep_Tool::Surface(face, location);
+    return surface && unwrapped(surface)->IsKind(STANDARD_TYPE(Geom_SurfaceOfLinearExtrusion));
+}
+
+// The shape's faces for the adaptive area: those on an extrusion (through trimmed and offset
+// wrappers) converted to NURBS. OCCT's adaptive area is off on an extrusion of a long curved
+// B-spline while its error estimate reports convergence (ops#414: 1.9 % on 41 spans, 4 to a
+// wave; 1.3e-4 on 500), and right on the same face as a B-spline surface. The shape itself when
+// it has no such face
+TopoDS_Shape facesForArea(const TopoDS_Shape& shape)
+{
+    BRep_Builder builder;
+    TopoDS_Compound faces;
+    builder.MakeCompound(faces);
+    bool converted = false;
+    for (TopExp_Explorer it(shape, TopAbs_FACE); it.More(); it.Next()) {
+        const TopoDS_Face& face = TopoDS::Face(it.Current());
+        if (onExtrusion(face)) {
+            try {
+                BRepBuilderAPI_NurbsConvert nurbs(face);
+                if (nurbs.IsDone()) {
+                    builder.Add(faces, nurbs.Shape());
+                    converted = true;
+                    continue;
+                }
+            }
+            catch (const Standard_Failure&) {
+                // The face as it is
+            }
+        }
+        builder.Add(faces, face);
+    }
+    return converted ? TopoDS_Shape(faces) : shape;
+}
+
+}  // namespace
+
 void surfaceProperties(const TopoDS_Shape& shape, GProp_GProps& props)
 {
     if (needsAdaptive(shape)) {
         GProp_GProps adaptive = props;
-        if (BRepGProp::SurfaceProperties(shape, adaptive, adaptiveTolerance) >= 0.0) {
+        if (BRepGProp::SurfaceProperties(facesForArea(shape), adaptive, adaptiveTolerance) >= 0.0) {
             props = adaptive;
             return;
         }

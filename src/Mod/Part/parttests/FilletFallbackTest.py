@@ -94,20 +94,24 @@ def plate_top_removed(a, b, alpha, r, depth):
     return sum(gauss_legendre(removed, p, q) for p, q in zip(ends, ends[1:]) if q > p)
 
 
-def ribbed_wave_prism(waves):
-    """A prism over a cosine wave with a rib along its flat side (ops#414). Its section in the
-    plane z = 0: x from -5 to the wave x = 1.5 (1 - cos(2 pi y / 20)), interpolated by one cubic
-    B-spline through points 1 mm apart (20 spans per wave), for y from 0 to the wave's length;
-    extruded by 10. The rib is the box x in [-9, -5], z in [3, 7] along the whole length: its top
-    x = -9 is 4 wide, so a round or chamfer of 2 on its two long edges is at the limit"""
+def wave_prism(waves):
+    """A prism over a cosine wave (ops#414). Its section in the plane z = 0: x from -5 to the wave
+    x = 1.5 (1 - cos(2 pi y / 20)), interpolated by one cubic B-spline through points 1 mm apart
+    (20 spans per wave), for y from 0 to the wave's length; extruded by 10"""
     length = 20 * waves
     points = [V(1.5 * (1 - math.cos(2 * math.pi * y / 20)), y, 0) for y in range(length + 1)]
     spline = Part.BSplineCurve()
     spline.interpolate(points)
     corners = [V(0, length, 0), V(-5, length, 0), V(-5, 0, 0), V(0, 0, 0)]
     edges = [spline.toShape()] + [Part.makeLine(a, b) for a, b in zip(corners, corners[1:])]
-    prism = Part.Face(Part.Wire(edges)).extrude(V(0, 0, 10))
-    return prism.fuse(Part.makeBox(4, length, 4, V(-9, 0, 3)))
+    return Part.Face(Part.Wire(edges)).extrude(V(0, 0, 10))
+
+
+def ribbed_wave_prism(waves):
+    """The wave prism with a rib along its flat side: the box x in [-9, -5], z in [3, 7] along the
+    whole length. Its top x = -9 is 4 wide, so a round or chamfer of 2 on its two long edges is at
+    the limit"""
+    return wave_prism(waves).fuse(Part.makeBox(4, 20 * waves, 4, V(-9, 0, 3)))
 
 
 class FilletFallbackTest(unittest.TestCase):
@@ -196,6 +200,36 @@ class FilletFallbackTest(unittest.TestCase):
                     )
                     rib = result.common(rib_side)
                     self.assertAlmostEqual(rib.Volume, section * length, delta=1e-6 * length)
+
+    def testCutAcrossLongSplineFaces(self):
+        # A short rib standing on the flat side, y in [3, 7], full height, refined into the prism's
+        # top and bottom, which the wave bounds. Each Boolean trims those faces, so the volume it
+        # removes, a difference of whole volumes, carries their integration error. The helper's
+        # adaptive method with one integration per knot span is fine enough for the 1e-6 check;
+        # without the spans it was off by 3e-6 (500 spans) and 3e-4 (1000), and every case was
+        # refused, "the cut removed 17.16820164 instead of 17.16814693" (ops#414)
+        for waves in (25, 50):
+            length = 20 * waves
+            base = wave_prism(waves).fuse(Part.makeBox(4, 4, 10, V(-9, 3, 0))).removeSplitter()
+            edges = [
+                edge_between(base, (-9, 3, 0), (-9, 3, 10)),
+                edge_between(base, (-9, 7, 0), (-9, 7, 10)),
+            ]
+            rib_side = Part.makeBox(5, length + 2, 12, V(-10, -1, -1))
+            for kind, section in (("fillet", 16 - 2 * fillet_section(2)), ("chamfer", 16 - 4)):
+                with self.subTest(waves=waves, kind=kind):
+                    if kind == "fillet":
+                        result = base.makeFillet(2, edges)
+                    else:
+                        result = base.makeChamfer(2, edges)
+                    self.assertTrue(result.isValid())
+                    self.assertEqual(len(result.Solids), 1)
+                    self.assertEqual(len(result.Faces), len(base.Faces) + 1)
+                    self.assertFalse(
+                        [face for face in result.Faces if abs(face.CenterOfMass.x + 9) < 1e-7]
+                    )
+                    rib = result.common(rib_side)
+                    self.assertAlmostEqual(rib.Volume, section * 10, delta=1e-9 * section * 10)
 
     def testChamfers(self):
         box = Part.makeBox(30, 4, 20)

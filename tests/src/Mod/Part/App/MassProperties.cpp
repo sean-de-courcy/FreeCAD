@@ -6,6 +6,7 @@
 #include <cmath>
 #include <iostream>
 #include <numbers>
+#include <utility>
 
 #include <BRepAdaptor_CompCurve.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
@@ -14,22 +15,44 @@
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
 #include <BRepGProp.hxx>
+#include <BRepLib.hxx>
 #include <BRepOffsetAPI_MakePipe.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
+#include <BRepPrimAPI_MakeRevol.hxx>
 #include <BRepPrimAPI_MakeSphere.hxx>
 #include <BRepPrimAPI_MakeTorus.hxx>
+#include <BRep_Builder.hxx>
+#include <BRep_Tool.hxx>
+#include <GCE2d_MakeSegment.hxx>
 #include <GCPnts_AbscissaPoint.hxx>
 #include <GProp_GProps.hxx>
+#include <Geom2dAPI_Interpolate.hxx>
+#include <Geom2d_BSplineCurve.hxx>
+#include <Geom2d_Line.hxx>
 #include <GeomAPI_Interpolate.hxx>
+#include <Geom_BSplineCurve.hxx>
+#include <Geom_OffsetCurve.hxx>
+#include <Geom_OffsetSurface.hxx>
+#include <Geom_Plane.hxx>
+#include <Geom_RectangularTrimmedSurface.hxx>
+#include <Geom_SurfaceOfLinearExtrusion.hxx>
+#include <Geom_TrimmedCurve.hxx>
 #include <Precision.hxx>
 #include <TColgp_HArray1OfPnt.hxx>
+#include <TColgp_HArray1OfPnt2d.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopTools_ListOfShape.hxx>
 #include <TopoDS.hxx>
+#include <TopoDS_Vertex.hxx>
+#include <gp_Ax1.hxx>
 #include <gp_Ax2.hxx>
 #include <gp_Circ.hxx>
+#include <gp_Dir2d.hxx>
+#include <gp_Pln.hxx>
+#include <gp_Pnt2d.hxx>
+#include <gp_Vec2d.hxx>
 
 #include <Mod/Part/App/MassProperties.h>
 
@@ -43,16 +66,142 @@ namespace
 constexpr double pi = std::numbers::pi;
 constexpr int period = 20;
 
-TopoDS_Edge waveEdge(int waves, double amplitude)
+/// x = base + amplitude (1 - cos(2 pi y / wavePeriod)) through the points y = 0, 1, ..., spans
+Handle(
+    Geom_BSplineCurve
+) waveSpline(int spans, int wavePeriod = period, double amplitude = 1.5, double base = 0.0)
 {
-    const int length = period * waves;
-    Handle(TColgp_HArray1OfPnt) points = new TColgp_HArray1OfPnt(1, length + 1);
-    for (int y = 0; y <= length; ++y) {
-        points->SetValue(y + 1, gp_Pnt(amplitude * (1 - std::cos(2 * pi * y / period)), y, 0));
+    Handle(TColgp_HArray1OfPnt) points = new TColgp_HArray1OfPnt(1, spans + 1);
+    for (int y = 0; y <= spans; ++y) {
+        const double x = base + amplitude * (1 - std::cos(2 * pi * y / wavePeriod));
+        points->SetValue(y + 1, gp_Pnt(x, y, 0));
     }
     GeomAPI_Interpolate interpolate(points, false, Precision::Confusion());
     interpolate.Perform();
-    return BRepBuilderAPI_MakeEdge(interpolate.Curve()).Edge();
+    return interpolate.Curve();
+}
+
+TopoDS_Edge waveEdge(int waves, double amplitude)
+{
+    return BRepBuilderAPI_MakeEdge(waveSpline(period * waves, period, amplitude)).Edge();
+}
+
+/// The integral of f over the curve's parameter range: 5-point Gauss-Legendre on 8 pieces of each
+/// knot span. Exact for an integrand that is a polynomial of degree 9 or less on each span; to
+/// rounding for the smooth ones below
+template<class Curve, class Function>
+double overSpans(const Curve& curve, Function f)
+{
+    constexpr double nodes[]
+        = {0.0, -0.5384693101056831, 0.5384693101056831, -0.9061798459386640, 0.9061798459386640};
+    constexpr double weights[] = {
+        0.5688888888888889,
+        0.4786286704993665,
+        0.4786286704993665,
+        0.2369268850561891,
+        0.2369268850561891
+    };
+    constexpr int pieces = 8;
+    double total = 0.0;
+    for (int i = 1; i < curve.NbKnots(); ++i) {
+        const double h = (curve.Knot(i + 1) - curve.Knot(i)) / pieces;
+        for (int piece = 0; piece < pieces; ++piece) {
+            const double middle = curve.Knot(i) + (piece + 0.5) * h;
+            for (int k = 0; k < 5; ++k) {
+                total += weights[k] * f(middle + nodes[k] * h / 2) * h / 2;
+            }
+        }
+    }
+    return total;
+}
+
+double arcLength(const Handle(Geom_BSplineCurve) & curve)
+{
+    return overSpans(*curve, [&](double t) { return curve->DN(t, 1).Magnitude(); });
+}
+
+/// The area between the curve, rising in y, and the line x = -5: the integral of (x + 5) dy,
+/// a polynomial of degree 5 on each span
+template<class Curve>
+double areaBehind(const Curve& curve)
+{
+    return overSpans(curve, [&](double t) {
+        const auto point = curve.Value(t);
+        const auto tangent = curve.DN(t, 1);
+        return (point.X() + 5) * tangent.Y();
+    });
+}
+
+/// The region between the curve, rising in y from y = 0, and the line x = -5
+TopoDS_Face faceBehind(const Handle(Geom_BSplineCurve) & curve)
+{
+    const gp_Pnt start = curve->StartPoint();
+    const gp_Pnt end = curve->EndPoint();
+    BRepBuilderAPI_MakeWire wire;
+    wire.Add(BRepBuilderAPI_MakeEdge(curve).Edge());
+    wire.Add(BRepBuilderAPI_MakeEdge(end, gp_Pnt(-5, end.Y(), 0)).Edge());
+    wire.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(-5, end.Y(), 0), gp_Pnt(-5, start.Y(), 0)).Edge());
+    wire.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(-5, start.Y(), 0), start).Edge());
+    return BRepBuilderAPI_MakeFace(wire.Wire(), true).Face();
+}
+
+/// The curve extruded 10 along z
+Handle(Geom_SurfaceOfLinearExtrusion) extrusionOf(const Handle(Geom_Curve) & curve)
+{
+    return new Geom_SurfaceOfLinearExtrusion(curve, gp_Dir(0, 0, 1));
+}
+
+/// The face of the curve's extrusion over the curve's range and z in [0, 10]: area 10 times the
+/// curve's length
+TopoDS_Face sideFace(const Handle(Geom_BSplineCurve) & curve)
+{
+    return BRepBuilderAPI_MakeFace(
+               extrusionOf(curve),
+               curve->FirstParameter(),
+               curve->LastParameter(),
+               0.0,
+               10.0,
+               Precision::Confusion()
+    )
+        .Face();
+}
+
+/// A face on the surface over [u0, u1] x [v0, v1], its edges made on that very surface. A trimmed
+/// surface stays the face's surface this way; BRepBuilderAPI_MakeFace takes its basis instead
+TopoDS_Face faceOn(const Handle(Geom_Surface) & surface, double u0, double u1, double v0, double v1)
+{
+    const double tolerance = Precision::Confusion();
+    BRep_Builder builder;
+    const gp_Pnt2d corners[] = {{u0, v0}, {u1, v0}, {u1, v1}, {u0, v1}};
+    TopoDS_Vertex vertices[4];
+    for (int i = 0; i < 4; ++i) {
+        builder.MakeVertex(vertices[i], surface->Value(corners[i].X(), corners[i].Y()), tolerance);
+    }
+    TopoDS_Face face;
+    builder.MakeFace(face, surface, tolerance);
+    TopoDS_Wire wire;
+    builder.MakeWire(wire);
+    for (int i = 0; i < 4; ++i) {
+        const gp_Pnt2d& start = corners[i];
+        const gp_Pnt2d& end = corners[(i + 1) % 4];
+        TopoDS_Edge edge;
+        builder.MakeEdge(edge);
+        builder.UpdateEdge(edge, new Geom2d_Line(start, gp_Dir2d(gp_Vec2d(start, end))), face, tolerance);
+        builder.Range(edge, 0.0, start.Distance(end));
+        builder.Add(edge, vertices[i].Oriented(TopAbs_FORWARD));
+        builder.Add(edge, vertices[(i + 1) % 4].Oriented(TopAbs_REVERSED));
+        BRepLib::BuildCurve3d(edge);
+        builder.Add(wire, edge);
+    }
+    builder.Add(face, wire);
+    return face;
+}
+
+double defaultArea(const TopoDS_Shape& shape)
+{
+    GProp_GProps props;
+    BRepGProp::SurfaceProperties(shape, props);
+    return props.Mass();
 }
 
 /// The wave closed by lines at x = -5: its area is (5 + a) times its length
@@ -306,4 +455,151 @@ TEST(MassProperties, screenIsCheap)
         std::cout << period * waves << "-span prism: helper " << adaptive << " ms, default "
                   << plain << " ms" << std::endl;
     }
+}
+
+// The face of an extrusion of the wave: its area is 10 times the wave's length. OCCT's adaptive
+// area on the extrusion was off by 1.3e-4 (500 spans), 2.9e-4 (1000) and 1.9 % (41 spans, 4 to a
+// wave); the helper integrates the same face converted to NURBS: within 1e-6 at 500 and 1000
+// spans, 2.9e-6 at 41 (ops#414)
+TEST(MassProperties, extrusionFaceArea)
+{
+    const std::pair<int, int> cases[] = {{500, 20}, {1000, 20}, {41, 4}};
+    for (const auto& [spans, wavePeriod] : cases) {
+        SCOPED_TRACE(spans);
+        const auto wave = waveSpline(spans, wavePeriod);
+        const TopoDS_Face side = sideFace(wave);
+        EXPECT_TRUE(Part::MassProperties::needsAdaptive(side));
+        GProp_GProps props;
+        Part::MassProperties::surfaceProperties(side, props);
+        EXPECT_LT(relativeError(props.Mass(), 10 * arcLength(wave)), 1e-5);
+        // The centre's height, half the face's, holds whatever the integration along the wave
+        EXPECT_NEAR(props.CentreOfMass().Z(), 5.0, 1e-6);
+    }
+}
+
+// Just past the screen's threshold: 41 spans, 4 to a wave, so curved that OCCT's default volume
+// is off by 6 %. The prism's volume is 10 times its section's area; its area is the side's (10
+// times the wave's length), the top's and bottom's, the back's (10 x 41) and the two ends'
+TEST(MassProperties, justPastTheThreshold)
+{
+    const auto wave = waveSpline(41, 4);
+    const TopoDS_Shape prism = BRepPrimAPI_MakePrism(faceBehind(wave), gp_Vec(0, 0, 10)).Shape();
+    EXPECT_TRUE(Part::MassProperties::needsAdaptive(prism));
+    const double section = areaBehind(*wave);
+    const double volume = 10 * section;
+    EXPECT_GT(relativeError(defaultVolume(prism), volume), 1e-2);
+    EXPECT_LT(relativeError(Part::MassProperties::volume(prism), volume), 1e-7);
+    const double ends = 10 * (wave->StartPoint().X() + 5) + 10 * (wave->EndPoint().X() + 5);
+    const double area = 10 * arcLength(wave) + 2 * section + 10 * 41 + ends;
+    // 1.2e-6 off; 0.8 % with the adaptive area on the extrusion itself
+    EXPECT_LT(relativeError(Part::MassProperties::area(prism), area), 1e-5);
+}
+
+// The screen sees a long B-spline through the wrappers OCCT puts around it, and the helper's
+// numbers are right through them
+TEST(MassProperties, wrappedSplines)
+{
+    const auto wave = waveSpline(500);
+    const double first = wave->FirstParameter();
+    const double last = wave->LastParameter();
+    {
+        // The extrusion's surface in a rectangular trim: area 10 times the wave's length
+        SCOPED_TRACE("trimmed surface");
+        Handle(Geom_Surface)
+            trimmed = new Geom_RectangularTrimmedSurface(extrusionOf(wave), first, last, 0.0, 10.0);
+        const TopoDS_Face face = faceOn(trimmed, first, last, 0.0, 10.0);
+        TopLoc_Location location;
+        ASSERT_TRUE(
+            BRep_Tool::Surface(face, location)->IsKind(STANDARD_TYPE(Geom_RectangularTrimmedSurface))
+        );
+        EXPECT_TRUE(Part::MassProperties::needsAdaptive(face));
+        EXPECT_LT(relativeError(Part::MassProperties::area(face), 10 * arcLength(wave)), 1e-6);
+    }
+    {
+        // An extrusion of the wave trimmed to its middle 250 spans, as a trimmed curve: area 10
+        // times the length of those spans
+        SCOPED_TRACE("trimmed basis curve");
+        const double a = wave->Knot(126);
+        const double b = wave->Knot(376);
+        Handle(Geom_Curve) half = new Geom_TrimmedCurve(wave, a, b);
+        const TopoDS_Face face
+            = BRepBuilderAPI_MakeFace(extrusionOf(half), a, b, 0.0, 10.0, Precision::Confusion()).Face();
+        const double length = overSpans(*wave, [&](double t) {
+            return t > a && t < b ? wave->DN(t, 1).Magnitude() : 0.0;
+        });
+        EXPECT_TRUE(Part::MassProperties::needsAdaptive(face));
+        EXPECT_LT(relativeError(Part::MassProperties::area(face), 10 * length), 1e-6);
+    }
+    {
+        // The extrusion offset by 1 along its normal, the wave's tangent crossed with z: the
+        // extrusion of the wave's offset curve, area 10 times that curve's length
+        SCOPED_TRACE("offset surface");
+        Handle(Geom_Surface) offset = new Geom_OffsetSurface(extrusionOf(wave), 1.0);
+        const TopoDS_Face face
+            = BRepBuilderAPI_MakeFace(offset, first, last, 0.0, 10.0, Precision::Confusion()).Face();
+        Handle(Geom_OffsetCurve) curve = new Geom_OffsetCurve(wave, 1.0, gp_Dir(0, 0, 1));
+        const double length = overSpans(*wave, [&](double t) { return curve->DN(t, 1).Magnitude(); });
+        EXPECT_TRUE(Part::MassProperties::needsAdaptive(face));
+        EXPECT_LT(relativeError(Part::MassProperties::area(face), 10 * length), 1e-6);
+    }
+    {
+        // The region between the cylinder r = 5 and the wave x = 10 + 1.5 (1 - cos(2 pi y / 20)),
+        // turned about the y axis: volume pi times the integral of (x^2 - 25) dy, and area the
+        // wave's surface, 2 pi times the integral of x ds, the cylinder's 2 pi 5 L and the two
+        // rings pi (10^2 - 5^2) at its ends
+        SCOPED_TRACE("revolution");
+        const auto profile = waveSpline(500, period, 1.5, 10.0);
+        BRepBuilderAPI_MakeWire wire;
+        wire.Add(BRepBuilderAPI_MakeEdge(profile).Edge());
+        wire.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(10, 500, 0), gp_Pnt(5, 500, 0)).Edge());
+        wire.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(5, 500, 0), gp_Pnt(5, 0, 0)).Edge());
+        wire.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(5, 0, 0), gp_Pnt(10, 0, 0)).Edge());
+        const TopoDS_Face section = BRepBuilderAPI_MakeFace(wire.Wire(), true).Face();
+        const TopoDS_Shape solid
+            = BRepPrimAPI_MakeRevol(section, gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(0, 1, 0))).Shape();
+        const double volume = pi * overSpans(*profile, [&](double t) {
+                                  return (std::pow(profile->Value(t).X(), 2) - 25)
+                                      * profile->DN(t, 1).Y();
+                              });
+        const double wavy = 2 * pi * overSpans(*profile, [&](double t) {
+                                return profile->Value(t).X() * profile->DN(t, 1).Magnitude();
+                            });
+        const double area = wavy + 2 * pi * 5 * 500 + 2 * pi * (100 - 25);
+        EXPECT_TRUE(Part::MassProperties::needsAdaptive(solid));
+        EXPECT_GT(relativeError(defaultVolume(solid), volume), 1e-2);
+        EXPECT_LT(relativeError(Part::MassProperties::volume(solid), volume), 1e-6);
+        EXPECT_LT(relativeError(Part::MassProperties::area(solid), area), 1e-5);
+    }
+}
+
+// An edge with only a pcurve, here on a plane: the screen reads the pcurve, and the area, which
+// OCCT integrates along the pcurves, is right (the default's is off by 0.13 %)
+TEST(MassProperties, pcurveAlone)
+{
+    Handle(TColgp_HArray1OfPnt2d) points = new TColgp_HArray1OfPnt2d(1, 501);
+    for (int y = 0; y <= 500; ++y) {
+        points->SetValue(y + 1, gp_Pnt2d(1.5 * (1 - std::cos(2 * pi * y / period)), y));
+    }
+    Geom2dAPI_Interpolate interpolate(points, false, Precision::Confusion());
+    interpolate.Perform();
+    const Handle(Geom2d_BSplineCurve) wave = interpolate.Curve();
+    // The plane z = 0 with u along x and v along y, so the pcurves are the section's own lines
+    Handle(Geom_Surface) plane = new Geom_Plane(gp_Pln());
+    const gp_Pnt2d corners[] = {{0, 500}, {-5, 500}, {-5, 0}, {0, 0}};
+    BRepBuilderAPI_MakeWire wire;
+    const TopoDS_Edge spline = BRepBuilderAPI_MakeEdge(wave, plane).Edge();
+    wire.Add(spline);
+    for (int i = 0; i < 3; ++i) {
+        wire.Add(
+            BRepBuilderAPI_MakeEdge(GCE2d_MakeSegment(corners[i], corners[i + 1]).Value(), plane).Edge()
+        );
+    }
+    const TopoDS_Face face = BRepBuilderAPI_MakeFace(plane, wire.Wire(), true).Face();
+    double first = 0.0;
+    double last = 0.0;
+    ASSERT_TRUE(BRep_Tool::Curve(spline, first, last).IsNull());
+    EXPECT_TRUE(Part::MassProperties::needsAdaptive(face));
+    const double area = areaBehind(*wave);
+    EXPECT_GT(relativeError(defaultArea(face), area), 1e-4);
+    EXPECT_LT(relativeError(Part::MassProperties::area(face), area), 1e-6);
 }
