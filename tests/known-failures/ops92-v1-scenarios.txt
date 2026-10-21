@@ -172,3 +172,14 @@ cli  PartDesignTests.TestNamingScenarios.FilletBottomCapEdgeOfOneSideToSymmetric
 cli  PartDesignTests.TestNamingScenarios.FilletBottomCapEdgeOfSymmetricLengthEdit.test_bottom_edge_V1
 cli  PartDesignTests.TestNamingScenarios.FilletBottomCapEdgeOfOneSideToStartOffset.test_bottom_edge_V1
 cli  PartDesignTests.TestNamingScenarios.FilletTopCapEdgeOfTwoSidesLengthEdit.test_top_edge_V1
+
+reason: V1 breaks a Part Sweep's corner edge under an attached sketch when a chamfer is drawn at the profile's corner (ops#375: V2 names the corner edges from the side faces; V1's names of them, from the spine's vertex, don't survive the profile's new edge; V1 naming is deferred, decision 58)
+cli  PartDesignTests.TestNamingScenarios.SweepProfileChamfered.test_corner_x2_V1
+cli  PartDesignTests.TestNamingScenarios.SweepTowardsProfileChamfered.test_corner_x2_V1
+
+reason: V1 breaks a Part Sweep's projected (PRJ) end edge that a chamfer at the profile's corner shortens, the profile away from the spine's ends (fork PR 352 round 3: the end behind the profile keeps the profile's own names, which V1 holds; V1 naming is deferred, decision 58)
+cli  PartDesignTests.TestNamingScenarios.SweepInteriorProfileChamfered.test_end_x2_V1
+cli  PartDesignTests.TestNamingScenarios.SweepShellInteriorProfileChamfered.test_end_x2_V1
+cli  PartDesignTests.TestNamingScenarios.SweepInteriorProfileChamferedTowards.test_end_x2_V1
+cli  PartDesignTests.TestNamingScenarios.SweepNearStartProfileChamfered.test_end_x2_V1
+cli  PartDesignTests.TestNamingScenarios.SweepInteriorFirstSectionChamfered.test_end_x2_V1

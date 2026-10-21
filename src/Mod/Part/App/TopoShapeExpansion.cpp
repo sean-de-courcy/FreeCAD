@@ -71,6 +71,7 @@
 #include <Mod/Part/App/FCBRepAlgoAPI_Section.h>
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBuilderAPI_FindPlane.hxx>
+#include <Geom_Plane.hxx>
 #include <BRepBuilderAPI_GTransform.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
@@ -101,9 +102,13 @@
 #include <TColStd_Array1OfReal.hxx>
 #include <BRepGProp.hxx>
 #include <GProp_GProps.hxx>
+#include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS_Iterator.hxx>
 #include <TopTools_DataMapOfShapeInteger.hxx>
+#include <TopTools_DataMapOfShapeListOfShape.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
+#include <BRepOffsetAPI_MakePipeShell.hxx>
 #include <ShapeAnalysis_FreeBounds.hxx>
 #include <ShapeBuild_ReShape.hxx>
 #include <ShapeConstruct_Curve.hxx>
@@ -3839,6 +3844,370 @@ static std::vector<TopoShape> prepareProfiles(const std::vector<TopoShape>& shap
     return ret;
 }
 
+namespace
+{
+// A sweep's ends, corners and lateral edges (ops#375). MakePipeShell reports the edges and
+// vertices of the sections it places at the spine's vertices (the start and end wires, and the
+// wire at each corner) as generated from those vertices, so a square's four start edges were all
+// `<spine vertex>;SWP;<n>;E;GEN`, told apart only by the counter n, in the wire's order. A
+// profile edit that adds an edge before another (a chamfer at a corner) shifted the counters, and
+// references on start, corner and end edges moved silently to a neighbour.
+// - Ends. As in a PartDesign Pipe (ops#351, FeaturePipe.cpp's MapperPipeShellEnds): one end
+//   wire's edges and vertices are the first section's modified (its own names), the other's the
+//   last section's projected (`PRJ`). The end that keeps the first section's names is the one
+//   behind its plane: the shell's start when the spine runs along the plane's normal where it
+//   meets the section, its end when the spine runs against it (fork PR 352 round 3). The normal
+//   is the plane's, turned towards the section's own Z axis (a sketch's normal), so the rule
+//   holds wherever the profile sits on the spine and whichever way the spine is drawn. Turning
+//   the profile over (reversing its placement's Z) swaps the ends' names: no rule can hold both
+//   that and a reversed spine without a fixed direction in space, which a spine turned across
+//   it would swap instead (ops repo notes\ops375-sweep-end-names.md, round 3). Earlier
+//   rounds gave the profile's names to the end it lies at, which an interior profile has none
+//   of: it handed them to the nearer end, and moving it across the spine's middle swapped the
+//   ends (round 1); then the ends there were named after the spine's end vertices (round 2),
+//   and an edit taking the profile across the pipe's 3D tolerance from an end renamed them all,
+//   and references broke; reversing the spine swapped them.
+//   When that rule can't tell (a point section, a profile without a plane, or one whose plane
+//   holds the spine's tangent), round 2's applies: the profile's names to the end it lies at,
+//   within the 3D tolerance; otherwise the end wires are generated from the spine's end
+//   vertices, and from the section elements whose side faces or lateral edges they bound (an
+//   end edge named after its spine vertex and profile edge, an end vertex after its spine
+//   vertex and profile vertex; from the spine vertex alone a counter told them apart, and a
+//   chamfer on the profile moved them silently).
+// - Corners. The spine's other vertices generate no edges or vertices, so the edges at a corner
+//   are named after the side faces they bound (`UPP`), whose names hold the spine's edge and the
+//   profile's. Faces keep their history: a round corner's faces are the profile edges' too.
+// - Lateral edges (a section vertex swept along one leg) are also generated from the spine edge
+//   (or round corner's vertex) whose side faces they bound, so each is named after its section
+//   vertex and that spine element, as a side face is after its profile edge and spine edge.
+//   MakePipeShell reports them as generated from the section vertex alone, and they were told
+//   apart by leg order, the first leg's taking the start vertex's name once there were two legs:
+//   adding a leg at the far end, or deleting the last, moved references silently (fork PR 352
+//   round 1).
+class MapperSweepEnds: public MapperMaker
+{
+public:
+    /// \a spine is the spine as given and as a wire, last (their vertices may differ),
+    /// \a sections the sections added to \a pipe, a wire or a vertex each, \a tolerance the
+    /// pipe's 3D tolerance. Built before MakeSolid(), after which a point section's ends are
+    /// null.
+    MapperSweepEnds(
+        BRepOffsetAPI_MakePipeShell& pipe,
+        const std::vector<TopoDS_Shape>& spine,
+        const std::vector<TopoShape>& sections,
+        double tolerance
+    )
+        : MapperMaker(pipe)
+    {
+        for (const TopoDS_Shape& shape : spine) {
+            TopExp::MapShapes(shape, TopAbs_VERTEX, spineVertices);
+            TopExp::MapShapes(shape, TopAbs_EDGE, spineEdges);
+        }
+        // A section's vertex keeps the edges it sweeps, should a section share it with the spine
+        for (const TopoShape& section : sections) {
+            TopExp::MapShapes(section.getShape(), TopAbs_VERTEX, sectionVertices);
+            TopExp::MapShapes(section.getShape(), TopAbs_EDGE, sectionEdges);
+        }
+        for (int i = 1; i <= sectionVertices.Extent(); ++i) {
+            for (const TopoDS_Shape& element : pipe.Generated(sectionVertices(i))) {
+                if (element.ShapeType() == TopAbs_EDGE) {
+                    laterals.Add(element);
+                }
+            }
+        }
+        const TopoDS_Shape& first = sections.front().getShape();
+        const TopoDS_Shape& last = sections.back().getShape();
+        TopTools_IndexedMapOfShape startElements;
+        TopTools_IndexedMapOfShape endElements;
+        if (!pipe.FirstShape().IsNull()) {
+            TopExp::MapShapes(pipe.FirstShape(), startElements);
+        }
+        if (!pipe.LastShape().IsNull()) {
+            TopExp::MapShapes(pipe.LastShape(), endElements);
+        }
+        // A point section is an end's apex, wherever the other sections' planes face
+        const bool point = std::ranges::any_of(sections, [](const TopoShape& section) {
+            return section.getShape().ShapeType() == TopAbs_VERTEX;
+        });
+        std::optional<bool> reversed;
+        if (!point) {
+            reversed = againstNormal(TopoDS::Wire(spine.back()), first);
+        }
+        if (!reversed) {
+            double kept = distanceTo(first, pipe.FirstShape());
+            double swapped = distanceTo(first, pipe.LastShape());
+            const double atOwnEnd = std::min(kept, swapped);
+            // One profile: its distances alone (the two sections' terms would be the same on
+            // both sides, and nothing would ever swap)
+            if (!last.IsSame(first)) {
+                kept += distanceTo(last, pipe.LastShape());
+                swapped += distanceTo(last, pipe.FirstShape());
+            }
+            reversed = swapped + Precision::Confusion() < kept;
+            if (atOwnEnd > tolerance) {
+                for (const TopTools_IndexedMapOfShape* end : {&startElements, &endElements}) {
+                    for (int i = 1; i <= end->Extent(); ++i) {
+                        const TopAbs_ShapeEnum type = end->FindKey(i).ShapeType();
+                        if (type == TopAbs_EDGE || type == TopAbs_VERTEX) {
+                            spineEndElements.Add(end->FindKey(i));
+                        }
+                    }
+                }
+                return;
+            }
+        }
+        const TopTools_IndexedMapOfShape& own = *reversed ? endElements : startElements;
+        const TopTools_IndexedMapOfShape& other = *reversed ? startElements : endElements;
+        bindEnds(pipe, first, own, nullptr, starts);
+        // With a closed spine the shell ends where it starts: those elements keep the first
+        // section's names
+        bindEnds(pipe, last, other, &own, ends);
+    }
+
+    const std::vector<TopoDS_Shape>& modified(const TopoDS_Shape& s) const override
+    {
+        MapperMaker::modified(s);
+        if (const TopTools_ListOfShape* elements = starts.Seek(s)) {
+            for (const TopoDS_Shape& element : *elements) {
+                _res.push_back(element);
+            }
+        }
+        return _res;
+    }
+
+    const std::vector<TopoDS_Shape>& generated(const TopoDS_Shape& s) const override
+    {
+        MapperMaker::generated(s);
+        if (spineVertices.Contains(s) && !sectionVertices.Contains(s)) {
+            std::erase_if(_res, [this](const TopoDS_Shape& element) {
+                return (element.ShapeType() == TopAbs_EDGE || element.ShapeType() == TopAbs_VERTEX)
+                    && !spineEndElements.Contains(element);
+            });
+        }
+        if (spineVertices.Contains(s) || spineEdges.Contains(s)) {
+            // The lateral edges that bound the side faces this spine element generated
+            addBounding(TopAbs_FACE, TopAbs_EDGE, laterals);
+        }
+        if (spineEndElements.IsEmpty()) {
+            return _res;
+        }
+        // Away from the profile, the end wires' elements are generated from their spine end
+        // vertex and from the section element they bound
+        if (spineVertices.Contains(s)) {
+            // The end wire's vertices, which MakePipeShell reports from no spine vertex
+            addBounding(TopAbs_EDGE, TopAbs_VERTEX, spineEndElements);
+        }
+        else if (sectionEdges.Contains(s)) {
+            // The end edges that bound this section edge's side faces
+            addBounding(TopAbs_FACE, TopAbs_EDGE, spineEndElements);
+        }
+        else if (sectionVertices.Contains(s)) {
+            // The end vertices that end this section vertex's lateral edges
+            addBounding(TopAbs_EDGE, TopAbs_VERTEX, spineEndElements);
+        }
+        return _res;
+    }
+
+    const std::vector<TopoDS_Shape>& projected(const TopoDS_Shape& s) const override
+    {
+        _res.clear();
+        if (const TopTools_ListOfShape* elements = ends.Seek(s)) {
+            for (const TopoDS_Shape& element : *elements) {
+                _res.push_back(element);
+            }
+        }
+        return _res;
+    }
+
+private:
+    /// Adds to the result the elements of type \a lower in \a among that bound its elements of
+    /// type \a upper
+    void addBounding(
+        TopAbs_ShapeEnum upper,
+        TopAbs_ShapeEnum lower,
+        const TopTools_IndexedMapOfShape& among
+    ) const
+    {
+        TopTools_IndexedMapOfShape bounding;
+        for (const TopoDS_Shape& element : _res) {
+            if (element.ShapeType() == upper) {
+                TopExp::MapShapes(element, lower, bounding);
+            }
+        }
+        for (int i = 1; i <= bounding.Extent(); ++i) {
+            const TopoDS_Shape& element = bounding(i);
+            if (among.Contains(element)
+                && std::ranges::none_of(_res, [&](const TopoDS_Shape& found) {
+                       return found.IsSame(element);
+                   })) {
+                _res.push_back(element);
+            }
+        }
+    }
+
+    /// Whether \a spine runs against the normal of \a section's plane where it passes nearest
+    /// the section's centre, the normal turned towards the section's Z axis (its placement's,
+    /// a sketch's normal); none when the section has no plane, its plane holds that Z axis or
+    /// the spine's tangent there
+    static std::optional<bool> againstNormal(const TopoDS_Wire& spine, const TopoDS_Shape& section)
+    {
+        TopExp_Explorer firstEdge(section, TopAbs_EDGE);
+        if (!firstEdge.More()) {
+            return std::nullopt;
+        }
+        BRepBuilderAPI_FindPlane findPlane(section);
+        if (!findPlane.Found()) {
+            return std::nullopt;
+        }
+        gp_Dir normal = findPlane.Plane()->Axis().Direction();
+        const gp_Dir axis = gp::DZ().Transformed(firstEdge.Current().Location().Transformation());
+        const double facing = normal.Dot(axis);
+        if (std::abs(facing) < 0.5) {
+            return std::nullopt;
+        }
+        if (facing < 0) {
+            normal.Reverse();
+        }
+        GProp_GProps properties;
+        BRepGProp::LinearProperties(section, properties);
+        const TopoDS_Vertex centre = BRepBuilderAPI_MakeVertex(properties.CentreOfMass());
+        // The nearest edge, the earlier one along the spine on a tie (a vertex between two)
+        double nearest = std::numeric_limits<double>::infinity();
+        gp_Vec tangent;
+        for (BRepTools_WireExplorer it(spine); it.More(); it.Next()) {
+            const TopoDS_Edge& edge = it.Current();
+            BRepExtrema_DistShapeShape distance(centre, edge);
+            if (!distance.IsDone() || distance.NbSolution() == 0
+                || distance.Value() >= nearest - Precision::Confusion()) {
+                continue;
+            }
+            double parameter = 0;
+            if (distance.SupportTypeShape2(1) == BRepExtrema_IsOnEdge) {
+                distance.ParOnEdgeS2(1, parameter);
+            }
+            else if (distance.SupportTypeShape2(1) == BRepExtrema_IsVertex) {
+                parameter = BRep_Tool::Parameter(TopoDS::Vertex(distance.SupportOnShape2(1)), edge);
+            }
+            else {
+                continue;
+            }
+            gp_Pnt point;
+            gp_Vec derivative;
+            BRepAdaptor_Curve(edge).D1(parameter, point, derivative);
+            if (derivative.Magnitude() < Precision::Confusion()) {
+                continue;
+            }
+            if (edge.Orientation() == TopAbs_REVERSED) {
+                derivative.Reverse();
+            }
+            nearest = distance.Value();
+            tangent = derivative.Normalized();
+        }
+        if (std::isinf(nearest)) {
+            return std::nullopt;
+        }
+        const double along = tangent.Dot(gp_Vec(normal));
+        if (std::abs(along) < 0.1) {
+            return std::nullopt;
+        }
+        return along < 0;
+    }
+
+    /// How far \a section lies from the shell's end \a end: the mean over its vertices of the
+    /// distance to the nearest vertex of the end, so that each section weighs the same whatever
+    /// its number of vertices; infinite when either has none
+    static double distanceTo(const TopoDS_Shape& section, const TopoDS_Shape& end)
+    {
+        constexpr double none = std::numeric_limits<double>::infinity();
+        if (section.IsNull() || end.IsNull()) {
+            return none;
+        }
+        TopTools_IndexedMapOfShape sectionVertices;
+        TopTools_IndexedMapOfShape endVertices;
+        TopExp::MapShapes(section, TopAbs_VERTEX, sectionVertices);
+        TopExp::MapShapes(end, TopAbs_VERTEX, endVertices);
+        if (sectionVertices.IsEmpty() || endVertices.IsEmpty()) {
+            return none;
+        }
+        double sum = 0;
+        for (int i = 1; i <= sectionVertices.Extent(); ++i) {
+            const gp_Pnt at = BRep_Tool::Pnt(TopoDS::Vertex(sectionVertices(i)));
+            double nearest = none;
+            for (int j = 1; j <= endVertices.Extent(); ++j) {
+                nearest = std::min(
+                    nearest,
+                    at.Distance(BRep_Tool::Pnt(TopoDS::Vertex(endVertices(j))))
+                );
+            }
+            sum += nearest;
+        }
+        return sum / sectionVertices.Extent();
+    }
+
+    /// Binds each edge and vertex of \a section to the elements of one end of the shell,
+    /// \a endElements, that the side faces or edges it generated hold; a point section to the
+    /// end's vertex
+    static void bindEnds(
+        BRepOffsetAPI_MakePipeShell& pipe,
+        const TopoDS_Shape& section,
+        const TopTools_IndexedMapOfShape& endElements,
+        const TopTools_IndexedMapOfShape* skip,
+        TopTools_DataMapOfShapeListOfShape& bound
+    )
+    {
+        if (section.IsNull()) {
+            return;
+        }
+        auto take = [&](const TopoDS_Shape& element, TopTools_ListOfShape& found) {
+            if (endElements.Contains(element) && !(skip && skip->Contains(element))) {
+                found.Append(element);
+            }
+        };
+        if (section.ShapeType() == TopAbs_VERTEX) {
+            TopTools_ListOfShape found;
+            for (int i = 1; i <= endElements.Extent(); ++i) {
+                if (!endElements(i).IsNull() && endElements(i).ShapeType() == TopAbs_VERTEX) {
+                    take(endElements(i), found);
+                }
+            }
+            if (found.Extent() == 1) {
+                bound.Bind(section, found);
+            }
+            return;
+        }
+        for (TopAbs_ShapeEnum type : {TopAbs_EDGE, TopAbs_VERTEX}) {
+            TopTools_IndexedMapOfShape elements;
+            TopExp::MapShapes(section, type, elements);
+            for (int i = 1; i <= elements.Extent(); ++i) {
+                TopTools_IndexedMapOfShape candidates;
+                for (const TopoDS_Shape& side : pipe.Generated(elements(i))) {
+                    TopExp::MapShapes(side, type, candidates);
+                }
+                TopTools_ListOfShape found;
+                for (int j = 1; j <= candidates.Extent(); ++j) {
+                    take(candidates(j), found);
+                }
+                if (!found.IsEmpty()) {
+                    bound.Bind(elements(i), found);
+                }
+            }
+        }
+    }
+
+    TopTools_IndexedMapOfShape spineVertices;
+    TopTools_IndexedMapOfShape spineEdges;
+    TopTools_IndexedMapOfShape sectionVertices;
+    TopTools_IndexedMapOfShape sectionEdges;
+    /// The edges the section vertices sweep
+    TopTools_IndexedMapOfShape laterals;
+    /// The end wires' edges and vertices when the first section doesn't lie at its end: the
+    /// spine's end vertices keep generating them, and so do the section elements they bound
+    TopTools_IndexedMapOfShape spineEndElements;
+    TopTools_DataMapOfShapeListOfShape starts;
+    TopTools_DataMapOfShapeListOfShape ends;
+};
+}  // namespace
+
 TopoShape& TopoShape::makeElementPipeShell(
     const std::vector<TopoShape>& shapes,
     const MakeSolid make_solid,
@@ -3894,7 +4263,8 @@ TopoShape& TopoShape::makeElementPipeShell(
         mkPipeShell.SetTolerance(tol3d, tolBound, tolAngular);
     }
 
-    for (auto& sh : prepareProfiles(shapes, 1)) {
+    const std::vector<TopoShape> profiles = prepareProfiles(shapes, 1);
+    for (auto& sh : profiles) {
         mkPipeShell.Add(sh.getShape());
     }
 
@@ -3909,11 +4279,23 @@ TopoShape& TopoShape::makeElementPipeShell(
 #endif
     }
 
+    // Shape() builds the pipe, which the mapper's FirstShape(), LastShape() and Generated() need.
+    // The mapper reads the ends before MakeSolid(): after it, a point section's are null.
+    mkPipeShell.Shape();
+    // MakePipeShell's default 3D tolerance (BRepOffsetAPI_MakePipeShell::SetTolerance) unless set
+    const MapperSweepEnds mapper(
+        mkPipeShell,
+        {shapes.front().getShape(), spine.getShape()},
+        profiles,
+        tol3d != 0.0 ? tol3d : 1e-4
+    );
+
     if (make_solid == MakeSolid::makeSolid) {
         mkPipeShell.MakeSolid();
     }
 
-    return makeElementShape(mkPipeShell, shapes, op);
+    const TopoDS_Shape built = mkPipeShell.Shape();
+    return makeShapeWithElementMap(built, mapper, shapes, op);
 }
 
 namespace

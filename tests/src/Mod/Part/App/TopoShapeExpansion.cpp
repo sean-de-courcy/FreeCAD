@@ -2144,9 +2144,10 @@ TEST_F(TopoShapeExpansionTest, makeElementPipeShell)
     // Assert that we're creating a correct element map
     EXPECT_TRUE(topoShape.getMappedChildElements().empty());
     EXPECT_EQ(elements.size(), 24);
-    //   the result has no tag, so its sections take the first input tag, the profile's (1). The
-    //   inputs have no names: they are linked by their elements' unmapped names, with op PSH.
-    //   Each side face is generated from a profile edge and the spine (tag 2)
+    //   the first input is the spine, the rectangle's closed wire (tag 1), the second the profile,
+    //   the line (tag 2). The result has no tag, so its sections take the first input tag (1).
+    //   The inputs have no names: they are linked by their elements' unmapped names, with op PSH.
+    //   Each side face is generated from a spine edge and the profile's edge
     for (int index = 1; index <= 4; ++index) {
         auto profileEdge = "Edge" + std::to_string(index);
         auto center = face1ts.getSubTopoShape(profileEdge.c_str()).getBoundBox().GetCenter();
@@ -2162,51 +2163,58 @@ TEST_F(TopoShapeExpansionTest, makeElementPipeShell)
             )}
         ));
     }
-    //   each edge along the spine is generated from a profile vertex
+    //   the profile placed at each spine vertex: OCCT reports it as generated from that vertex, but
+    //   the spine's vertices name nothing (ops#375). The spine is closed, so the shell ends where it
+    //   starts, and that edge is the profile's own; the others have no history: each is named
+    //   after the side faces it bounds (UPP)
     for (int index = 1; index <= 4; ++index) {
-        auto profileVertex = "Vertex" + std::to_string(index);
-        auto point = face1ts.getSubTopoShape(profileVertex.c_str()).getBoundBox().GetCenter();
+        auto spineVertex = "Vertex" + std::to_string(index);
+        auto point = face1ts.getSubTopoShape(spineVertex.c_str()).getBoundBox().GetCenter();
+        auto edge = elementAt(topoShape, "Edge", Base::Vector3d(point.x, point.y, -4));
         EXPECT_TRUE(elementHasNames(
             topoShape,
-            elementAt(topoShape, "Edge", Base::Vector3d(point.x, point.y, -4)).c_str(),
-            {linkingName(
-                {unmappedName(profileVertex, 1, "PSH")},
-                1,
-                "PSH",
-                'E',
-                MAPPER_FLAG_GENERATED
-            )}
+            edge.c_str(),
+            {index == 1 ? unmappedName("Edge1", 2, "PSH") : upperName(topoShape, edge, 1, "PSH")}
         ));
     }
-    //   OCCT reports the edges of the first and last sections as generated from the spine's ends;
-    //   the four edges generated from the same vertex are told apart by the index, 0 to 3 in the
-    //   result's edge order (ops#19)
-    for (auto [spineVertex, z] : {std::pair {"Vertex1", 0.0}, std::pair {"Vertex2", -8.0}}) {
-        int rank = 0;
-        auto edges = static_cast<int>(topoShape.countSubElements("Edge"));
-        for (int index = 1; index <= edges; ++index) {
-            auto edge = "Edge" + std::to_string(index);
-            auto center = topoShape.getSubTopoShape(edge.c_str()).getBoundBox().GetCenter();
-            if (std::abs(center.z - z) < 1e-7) {
-                EXPECT_TRUE(elementHasNames(
-                    topoShape,
-                    edge.c_str(),
-                    {linkingName(
-                        {unmappedName(spineVertex, 2, "PSH")},
-                        1,
-                        "PSH",
-                        'E',
-                        MAPPER_FLAG_GENERATED,
-                        rank
-                    )}
-                ));
-                ++rank;
-            }
+    //   each profile vertex generates an edge along each spine edge, named after both, as a side
+    //   face is after its spine edge and profile edge (fork PR 352 round 1; before, the four were
+    //   told apart by an index in the result's edge order)
+    for (auto [profileVertex, z] : {std::pair {"Vertex1", 0.0}, std::pair {"Vertex2", -8.0}}) {
+        for (int index = 1; index <= 4; ++index) {
+            auto spineEdge = "Edge" + std::to_string(index);
+            auto center = face1ts.getSubTopoShape(spineEdge.c_str()).getBoundBox().GetCenter();
+            EXPECT_TRUE(elementHasNames(
+                topoShape,
+                elementAt(topoShape, "Edge", Base::Vector3d(center.x, center.y, z)).c_str(),
+                {linkingName(
+                    {unmappedName(spineEdge, 1, "PSH"), unmappedName(profileVertex, 2, "PSH")},
+                    1,
+                    "PSH",
+                    'E',
+                    MAPPER_FLAG_GENERATED
+                )}
+            ));
         }
-        EXPECT_EQ(rank, 4);
     }
-    //   the vertices have no history: each is named after the faces it bounds (UPP)
-    EXPECT_TRUE(upperNamed(topoShape, "Vertex", 1, "PSH"));
+    //   the vertices: the profile's own at the start (the line's ends), the others named after the
+    //   faces they bound (UPP), those at z = 0 and z = -8 between the same faces told apart by the
+    //   index
+    auto vertices = static_cast<int>(topoShape.countSubElements("Vertex"));
+    for (int index = 1; index <= vertices; ++index) {
+        auto vertex = "Vertex" + std::to_string(index);
+        auto point = topoShape.getSubTopoShape(vertex.c_str()).getBoundBox().GetCenter();
+        if (std::abs(point.x) < 1e-7 && std::abs(point.y) < 1e-7) {
+            auto profileVertex = std::abs(point.z) < 1e-7 ? "Vertex1" : "Vertex2";
+            EXPECT_TRUE(elementHasNames(topoShape, vertex.c_str(), {unmappedName(profileVertex, 2, "PSH")}));
+            continue;
+        }
+        bool upper = false;
+        for (int rank = 0; rank < 4 && !upper; ++rank) {
+            upper = elementHasNames(topoShape, vertex.c_str(), {upperName(topoShape, vertex, 1, "PSH", rank)});
+        }
+        EXPECT_TRUE(upper) << vertex;
+    }
 }
 
 TEST_F(TopoShapeExpansionTest, makeElementThickSolid)

@@ -41,6 +41,7 @@ holds the old name through a GEN section of the same type: a Thickness's or an o
 the element at another place (`V<V (THK)`)."""
 
 import FreeCAD as App
+import Part
 
 from .harness import (
     BROKEN,
@@ -48,6 +49,7 @@ from .harness import (
     Filleted,
     Guessed,
     Scenario,
+    ScenarioError,
     Settled,
     V,
     Warned,
@@ -314,6 +316,456 @@ class PipeStartCapEdgeCutAway(OnEdge, Recessed):
 
     def expectEdge(self):
         return self.startEdge() if self.stepName is None else BROKEN
+
+
+# A Part Sweep's ends and corners (ops#375). MakePipeShell reports the edges of the sections at
+# the spine's vertices (the start, end and corner wires) as generated from those vertices, so the
+# four start edges of a square were `<spine vertex>;SWP;<n>;E;GEN`, told apart only by the
+# counter n in the wire's order. A chamfer drawn at the profile's corner between its first and
+# second lines shifted the counters, and every start, corner and end edge after it moved silently
+# to its neighbour. The start edges now keep the profile's names, the end ones are their
+# projections (PRJ), and the corner edges are named from the side faces either side (UPP).
+
+
+class SweepL(Scenario):
+    """A Part Sweep (Part workbench, no body) of the square -2..2 along an L path in XZ (up 30,
+    then +X 20, Transition "Right corner"), sketches attached NormalToEdge to edges at the
+    start, at the corner and at the end."""
+
+    abstract = True
+    area = "SweepEnds"
+    path = [(0, 0), (0, 30), (20, 30)]
+    solid = True
+    profileZ = 0
+
+    def build(self, doc):
+        path = m.sketch(doc, "Path", m.polyline(self.path), placement=XZ)
+        profile = m.sketch(doc, "Profile", m.rectangle(-2, -2, 2, 2), z=self.profileZ)
+        sweep = doc.addObject("Part::Sweep", "Sweep")
+        sweep.Sections = [profile]
+        sweep.Spine = (path, [])
+        sweep.Solid = self.solid
+        sweep.Transition = "Right corner"
+        doc.recompute()
+        self.consumers(doc, sweep)
+
+    def attach(self, doc, sweep, ref, predicate):
+        sketch = doc.addObject("Sketcher::SketchObject", "On" + ref)
+        sketch.AttachmentSupport = [(sweep, self.names(sweep, predicate())[0])]
+        sketch.MapMode = "NormalToEdge"
+        self.ref(ref, sketch, "AttachmentSupport", predicate, Attached())
+
+
+def startEdgeX2():
+    return edge("line", direction=(0, 1, 0), through=(2, 0, 0))
+
+
+def startEdgeY2():
+    return edge("line", direction=(1, 0, 0), through=(0, 2, 0))
+
+
+def cornerEdgeX2():
+    return edge("line", direction=(0, 1, 0), through=(2, 0, 28))
+
+
+def endEdgeTop():
+    return edge("line", direction=(0, 1, 0), through=(20, 0, 32))
+
+
+class SweepProfileChamfered(SweepL):
+    """The edit chamfers the profile's corner (2, -2), between its first line (y = -2) and its
+    second (x = 2), as a new fifth line. Every referenced edge survives, the x = 2 ones shortened
+    by 1 mm."""
+
+    REFS = ("start_x2", "start_y2", "corner_x2", "end_top")
+
+    def consumers(self, doc, sweep):
+        self.attach(doc, sweep, "start_x2", startEdgeX2)
+        self.attach(doc, sweep, "start_y2", startEdgeY2)
+        self.attach(doc, sweep, "corner_x2", cornerEdgeX2)
+        self.attach(doc, sweep, "end_top", endEdgeTop)
+
+    def edit(self, doc):
+        m.setLines(doc.Profile, {0: ((-2, -2), (1, -2)), 1: ((2, -1), (2, 2))})
+        doc.Profile.addGeometry(Part.LineSegment(V(1, -2, 0), V(2, -1, 0)), False)
+
+
+class SweepTowardsProfileChamfered(SweepProfileChamfered):
+    """The spine drawn towards the profile, from (20, 30) to (0, 0): the shell starts at x = 20
+    and ends at the profile, whose names stay at z = 0."""
+
+    path = [(20, 30), (0, 30), (0, 0)]
+
+
+class SweepStartCapEdgeCutAway(SweepL):
+    """ops#375's check: ops#351's PipeStartCapEdgeCutAway as a Part Sweep, a Part::Cut whose tool
+    grows from a dimple in the start cap to the slab z 0..8. The start edge at x = 2 is gone, and
+    no edge at the corner relates to it: broken (it already was before ops#375)."""
+
+    REFS = ("start_x2",)
+
+    def build(self, doc):
+        path = m.sketch(doc, "Path", m.polyline(self.path), placement=XZ)
+        profile = m.sketch(doc, "Profile", m.rectangle(-2, -2, 2, 2))
+        sweep = doc.addObject("Part::Sweep", "Sweep")
+        sweep.Sections = [profile]
+        sweep.Spine = (path, [])
+        sweep.Solid = True
+        sweep.Transition = "Right corner"
+        tool = doc.addObject("Part::Box", "Tool")
+        tool.Length, tool.Width, tool.Height = 2, 2, 2
+        tool.Placement = App.Placement(V(-1, -1, -1), App.Rotation())
+        cut = doc.addObject("Part::Cut", "Cut")
+        cut.Base = sweep
+        cut.Tool = tool
+        doc.recompute()
+        self.attach(doc, cut, "start_x2", self.expectEdge)
+
+    def edit(self, doc):
+        tool = doc.Tool
+        tool.Length, tool.Width, tool.Height = 10, 10, 9
+        tool.Placement = App.Placement(V(-5, -5, -1), App.Rotation())
+
+    def expectEdge(self):
+        return startEdgeX2() if self.stepName is None else BROKEN
+
+
+# Fork PR 352 round 1. A lateral edge (a profile vertex swept along one leg of the spine) was told
+# apart from the other legs' by a counter, and leg 0's took the start vertex's name as a
+# connected name once there were two legs: appending a segment at the far end of a straight spine
+# gave leg 1 the name leg 0 had, and deleting an L's last segment gave leg 0 leg 1's. A lateral
+# edge is now named after its profile vertex and the spine edge it runs along, as a side face is
+# after its profile edge and spine edge.
+
+
+class SweepStraight(SweepL):
+    """A Part Sweep of the square -2..2 along a straight path up Z (0..30), the Sweep's sketches
+    attached NormalToEdge."""
+
+    abstract = True
+    path = [(0, 0), (0, 30)]
+
+
+def lateralEdgeLeg0():
+    """The edge the profile's corner (2, 2) sweeps along the first leg, up Z."""
+    return edge("line", direction=(0, 0, 1), through=(2, 2, 0))
+
+
+def lateralEdgeLeg1():
+    """The edge the profile's corner (2, 2) sweeps along the L's second leg, along X at z = 28."""
+    return edge("line", direction=(1, 0, 0), through=(0, 2, 28))
+
+
+class SweepSegmentAppended(SweepStraight):
+    """The edit appends a segment along +X at the path's far end (Right corner): the lateral
+    edge on the first leg survives, shortened."""
+
+    REFS = ("lateral_leg0", "start_x2")
+
+    def consumers(self, doc, sweep):
+        self.attach(doc, sweep, "lateral_leg0", lateralEdgeLeg0)
+        self.attach(doc, sweep, "start_x2", startEdgeX2)
+
+    def edit(self, doc):
+        doc.Path.addGeometry(Part.LineSegment(V(0, 30, 0), V(20, 30, 0)), False)
+
+
+class SweepShellSegmentAppended(SweepSegmentAppended):
+    """As SweepSegmentAppended, the Sweep a shell (Solid off)."""
+
+    solid = False
+
+
+class SweepLastSegmentDeleted(SweepL):
+    """The edit deletes the L's second leg: the lateral edge on the first leg survives, the one
+    on the second is gone (broken; before PR 352 it broke too, and round 0 moved it silently to
+    the first leg's)."""
+
+    REFS = ("lateral_leg0", "lateral_leg1")
+
+    def consumers(self, doc, sweep):
+        self.attach(doc, sweep, "lateral_leg0", lateralEdgeLeg0)
+        self.attach(doc, sweep, "lateral_leg1", self.expectLeg1)
+
+    def edit(self, doc):
+        doc.Path.delGeometry(1)
+
+    def expectLeg1(self):
+        return lateralEdgeLeg1() if self.stepName is None else BROKEN
+
+
+# A profile inside the spine (fork PR 352 round 1, review 2). The ends take the profile's names
+# only when it lies at an end of the spine; otherwise they keep the names the spine's end vertices
+# give them, whatever the profile's place. In round 0 the profile's names went to the end nearer
+# it, so moving the profile across the spine's middle swapped the ends' names silently.
+
+
+def endEdgeYm(z):
+    """The end edge on y = -2 (along X) at height z."""
+    return edge("line", direction=(1, 0, 0), through=(0, -2, z))
+
+
+class SweepProfileCrossesMiddle(SweepStraight):
+    """The square sits at z = 14 on the path 0..30; the edit moves it to z = 16. The edges on
+    y = -2 at both ends stay where they are."""
+
+    REFS = ("start_ym", "end_ym")
+    profileZ = 14
+
+    def consumers(self, doc, sweep):
+        self.attach(doc, sweep, "start_ym", lambda: endEdgeYm(0))
+        self.attach(doc, sweep, "end_ym", lambda: endEdgeYm(30))
+
+    def edit(self, doc):
+        doc.Profile.Placement = App.Placement(V(0, 0, 16), App.Rotation())
+
+
+# A Sweep to or from a point (a Part::Vertex section; fork PR 352 round 1, review 1). With Solid
+# on, round 0 crashed: the solid was made before the ends were read, and a point section's ends
+# were then null.
+
+
+class SweepPoint(SweepStraight):
+    """A Part Sweep along the straight path up Z (0..30) between the square -2..2 and a point on
+    the path (`point`, a Part::Vertex), in `order`. A sketch attached by Translate to the apex
+    (the point's vertex), one NormalToEdge on the square's edge at x = 2. The edit grows the
+    square to -3..3: the apex stays, the edge moves to x = 3."""
+
+    abstract = True
+    REFS = ("apex", "square_x")
+    pointFirst = False
+
+    def build(self, doc):
+        path = m.sketch(doc, "Path", m.polyline(self.path), placement=XZ)
+        squareZ, pointZ = (30, 0) if self.pointFirst else (0, 30)
+        profile = m.sketch(doc, "Profile", m.rectangle(-2, -2, 2, 2), z=squareZ)
+        point = doc.addObject("Part::Vertex", "Point")
+        point.Z = pointZ
+        sweep = doc.addObject("Part::Sweep", "Sweep")
+        sweep.Sections = [point, profile] if self.pointFirst else [profile, point]
+        sweep.Spine = (path, [])
+        sweep.Solid = self.solid
+        doc.recompute()
+        if not sweep.isValid() or sweep.Shape.isNull():
+            raise ScenarioError("the sweep failed: " + str(sweep.State))
+        self.squareZ, self.pointZ = squareZ, pointZ
+        apex = sketchOnVertex(doc, sweep, vertex((0, 0, pointZ)), "OnApex")
+        self.ref("apex", apex, "AttachmentSupport", lambda: vertex((0, 0, self.pointZ)), Attached())
+        self.attach(doc, sweep, "square_x", self.expectSquareEdge)
+
+    def edit(self, doc):
+        m.setLines(
+            doc.Profile,
+            {
+                0: ((-3, -3), (3, -3)),
+                1: ((3, -3), (3, 3)),
+                2: ((3, 3), (-3, 3)),
+                3: ((-3, 3), (-3, -3)),
+            },
+        )
+
+    def expectSquareEdge(self):
+        # The sweep's edges are B-splines: found by a point of the edge
+        x = 2 if self.stepName is None else 3
+        return edge(contains=(x, 0, self.squareZ))
+
+
+def sketchOnVertex(doc, obj, predicate, name):
+    sketch = doc.addObject("Sketcher::SketchObject", name)
+    sketch.AttachmentSupport = [(obj, Scenario.names(obj, predicate)[0])]
+    sketch.MapMode = "Translate"
+    return sketch
+
+
+class SweepSquareToPoint(SweepPoint):
+    solid = True
+
+
+class SweepSquareToPointShell(SweepPoint):
+    solid = False
+
+
+class SweepPointToSquare(SweepPoint):
+    solid = True
+    pointFirst = True
+
+
+class SweepPointToSquareShell(SweepPoint):
+    solid = False
+    pointFirst = True
+
+
+# A profile away from the spine's ends (fork PR 352 round 2). Round 1 named the end wires there
+# from the spine's end vertices alone, told apart by a counter in the profile's edge order
+# (`<spine vertex>;SWP;<n>`), so a chamfer on the profile moved the end references silently. Each
+# end edge is now also generated from the profile edge whose side face it bounds, and each end
+# vertex from the profile vertex whose lateral edge it ends.
+
+
+def chamferProfile(sketch):
+    """Chamfers the square's corner (2, -2), between its first line (y = -2) and its second
+    (x = 2), as a new fifth line."""
+    m.setLines(sketch, {0: ((-2, -2), (1, -2)), 1: ((2, -1), (2, 2))})
+    sketch.addGeometry(Part.LineSegment(V(1, -2, 0), V(2, -1, 0)), False)
+
+
+class SweepInteriorProfileChamfered(SweepStraight):
+    """The square sits at z = 14 on the path 0..30; the edit chamfers it. The edges on x = 2 and
+    y = 2 at both ends stay theirs (the x = 2 ones shortened by 1 mm), and so does the vertex
+    (-2, 2) at both ends."""
+
+    REFS = ("start_x2", "start_y2", "start_v", "end_x2", "end_y2", "end_v")
+    profileZ = 14
+    startZ, endZ = 0, 30
+
+    def consumers(self, doc, sweep):
+        self.attach(doc, sweep, "start_x2", lambda: self.edgeX2(self.startZ))
+        self.attach(doc, sweep, "start_y2", lambda: self.edgeY2(self.startZ))
+        self.attachVertex(doc, sweep, "start_v", lambda: self.startZ)
+        self.attach(doc, sweep, "end_x2", lambda: self.edgeX2(self.endZ))
+        self.attach(doc, sweep, "end_y2", lambda: self.edgeY2(self.endZ))
+        self.attachVertex(doc, sweep, "end_v", lambda: self.endZ)
+
+    def attachVertex(self, doc, sweep, ref, z):
+        """z() gives the end's height when the reference is checked (an edit may move it)."""
+        predicate = lambda: vertex((-2, 2, z()))
+        sketch = sketchOnVertex(doc, sweep, predicate(), "On" + ref)
+        self.ref(ref, sketch, "AttachmentSupport", predicate, Attached())
+
+    @staticmethod
+    def edgeX2(z):
+        return edge("line", direction=(0, 1, 0), through=(2, 0, z))
+
+    @staticmethod
+    def edgeY2(z):
+        return edge("line", direction=(1, 0, 0), through=(0, 2, z))
+
+    def edit(self, doc):
+        for sketch in self.chamfered(doc):
+            chamferProfile(sketch)
+
+    def chamfered(self, doc):
+        return [doc.Profile]
+
+
+class SweepShellInteriorProfileChamfered(SweepInteriorProfileChamfered):
+    """As SweepInteriorProfileChamfered, the Sweep a shell (Solid off): no cap faces."""
+
+    solid = False
+
+
+class SweepInteriorProfileChamferedTowards(SweepInteriorProfileChamfered):
+    """As SweepInteriorProfileChamfered, the path drawn downwards (30..0): the shell starts at
+    z = 30."""
+
+    path = [(0, 30), (0, 0)]
+
+
+class SweepNearStartProfileChamfered(SweepInteriorProfileChamfered):
+    """As SweepInteriorProfileChamfered, the square 3e-4 above the path's start: further than
+    MakePipeShell's 3D tolerance (1e-4), so not at the end."""
+
+    profileZ = 3e-4
+
+
+class SweepInteriorFirstSectionChamfered(SweepInteriorProfileChamfered):
+    """Two squares, the first at z = 10 inside the path 0..30, the last at its end (z = 30); the
+    edit chamfers both. The ends' edges and vertices stay theirs."""
+
+    def build(self, doc):
+        path = m.sketch(doc, "Path", m.polyline(self.path), placement=XZ)
+        first = m.sketch(doc, "Profile", m.rectangle(-2, -2, 2, 2), z=10)
+        last = m.sketch(doc, "Last", m.rectangle(-2, -2, 2, 2), z=30)
+        sweep = doc.addObject("Part::Sweep", "Sweep")
+        sweep.Sections = [first, last]
+        sweep.Spine = (path, [])
+        sweep.Solid = self.solid
+        sweep.Transition = "Right corner"
+        doc.recompute()
+        self.consumers(doc, sweep)
+
+    def chamfered(self, doc):
+        return [doc.Profile, doc.Last]
+
+
+# One rule for both cases (fork PR 352 round 3, ops#425). Round 2 gave the ends the profile's
+# names (its own at one end, their projections at the other) only when the profile lay at an end
+# of the path, within MakePipeShell's 3D tolerance (1e-4), and named them after the path's end
+# vertices otherwise: an edit that took the profile across that band renamed every end element,
+# and the references broke. The end that keeps the profile's own names is now the one behind the
+# profile's plane, wherever the profile sits on the path.
+
+
+def reverseLine(sketch, index):
+    """Swaps the end points of a line, keeping its geometry ID (through a point between them)."""
+    geometry = sketch.Geometry
+    start, end = V(geometry[index].StartPoint), V(geometry[index].EndPoint)
+    geometry[index].StartPoint = start + (end - start) * 0.75
+    geometry[index].EndPoint = start
+    geometry[index].StartPoint = end
+    sketch.Geometry = geometry
+
+
+class SweepPathStartMovedOut(SweepInteriorProfileChamfered):
+    """The square at the path's start (z = 0); the edit moves the path's start 2e-4 down, so the
+    square lies inside the path, beyond the tolerance. The ends' edges and vertices stay theirs,
+    the start ones moved down with the path's start."""
+
+    profileZ = 0
+    path = [(0, 0), (0, 30)]
+    movedStart = -2e-4
+
+    def edit(self, doc):
+        m.setLines(doc.Path, {0: ((0, self.movedStart), (0, 30))})
+        self.startZ = self.movedStart
+
+
+class SweepPathStartMovedIn(SweepPathStartMovedOut):
+    """As SweepPathStartMovedOut the other way: the path starts 2e-4 below the square, and the
+    edit moves its start up to the square's plane."""
+
+    path = [(0, -2e-4), (0, 30)]
+    startZ = -2e-4
+    movedStart = 0
+
+
+class SweepPathExtendedBeforeProfile(SweepPathStartMovedOut):
+    """As SweepPathStartMovedOut, the path's start moved 5 mm down."""
+
+    movedStart = -5
+
+
+class SweepPathShortenedToProfile(SweepPathStartMovedOut):
+    """The square sits at z = 14 on the path 0..30; the edit moves the path's start up to it."""
+
+    profileZ = 14
+    movedStart = 14
+
+
+class SweepProfileAtEndMovedInside(SweepInteriorProfileChamfered):
+    """The square at the path's end (z = 30); the edit moves it inside, to z = 16. The ends stay
+    where they are, and so do their edges and vertices."""
+
+    profileZ = 30
+
+    def edit(self, doc):
+        doc.Profile.Placement = App.Placement(V(0, 0, 16), App.Rotation())
+
+
+class SweepInteriorPathReversed(SweepInteriorProfileChamfered):
+    """The square sits at z = 14 on the path 0..30; the edit reverses the path's line, keeping its
+    geometry ID. The ends stay where they are, and so do their edges and vertices (round 2 named
+    them after the path's end vertices, which the reversal swaps: both ends swapped)."""
+
+    def edit(self, doc):
+        reverseLine(doc.Path, 0)
+
+
+class SweepPathReversed(SweepInteriorPathReversed):
+    """As SweepInteriorPathReversed, the square at the path's start (coverage: round 2 held it,
+    the profile's names going to the end nearer the profile)."""
+
+    profileZ = 0
 
 
 # Offset copies (ops#358, PLAN decision 86). A Thickness's or an offset's copy of an element is
