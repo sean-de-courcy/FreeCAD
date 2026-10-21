@@ -374,7 +374,8 @@ names it.
 | `carry/390-upstream-fixes-b` | carry | ops#390 | main `c1c0b50621` (`upstream PR 33177`, as `48a080990e`), `84ae7a7c8e` (`upstream PR 33054`, as `53f6cbc354`, with its gtest), `33d332e273` (`upstream PR 33055`, ported as `783fb930b3`), `0b6ffa245a` (`upstream PR 33045`, as `806d29a36a`), `dc53a2036d` (`upstream PR 32989`, as `bf45940f9b`), `55c36e8c03` (`upstream PR 32457`, as `23dd6ca004`), `fab8e1af6a`, `5f05c77ea9`, `0ecfd89f62`, `3d899008bf`, `100bd750ce` (`upstream PR 33046`, as `414f9254b7`, `67ff785b7e`, `76bbef8d25`, ported `f06d776720`, `3926e51091`), `upstream PR 33716` head `cd588f4212` (open, approved; as `af569107fd`), `upstream PR 33209` head `0c1d1eaee0` (as `6244affe0b`), `e9b474306f` (`upstream PR 33402`, as `67b19c059f`), `084379651a` (`upstream PR 32459`, as `4c29d5c456`), `44a68a0046` (`upstream PR 32737`, ported as `17ede50493`); tests `ffd69ae7e0`, `985f77cff5` | `integration` `953f76e711` | `b0b066502e` (fork PR 349), 2026-10-20 | a new base contains these commits (upstream PRs 33716 and 33209 or their replacements) |
 | `fix/393-dressup-pocket` | fix | ops#393 | - | `integration` `2e2bb138ba` (needs `fix/303-dropped-base-parts`, fork PR 341) | `4f191bb942` (fork PR 346), 2026-10-20 | never (fork fix) |
 | `fix/121-notification-reentry` | fix | ops#121 | - | `integration` `41762ed4ec` | `ca745351d9` (fork PR 350), 2026-10-20 | never (fork fix) |
-| `feat/391-warning-load` | feat | ops#391 | - | `integration` `41762ed4ec` | (fork PR 348) | never (fork feature) |
+| `feat/391-warning-load` | feat | ops#391 | - | `integration` `41762ed4ec` | `6c8d6ea5b6` (fork PR 348), 2026-10-20 | never (fork feature) |
+| `fix/424-propertyeditor-focus-macos` | fix | ops#424 | main `15883e6f4c` (as `2f06336e66`) | `integration` `6c8d6ea5b6` | (fork PR 353) | a new base contains `15883e6f4c` |
 
 ## Fork-only commits in carried topics
 
