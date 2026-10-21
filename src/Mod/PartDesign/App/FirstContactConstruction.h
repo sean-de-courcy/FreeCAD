@@ -169,6 +169,19 @@ PartDesignExport std::string lostSheet(
     double tolerance
 );
 
+// C3-C5 on a cell's piece, today's certificate (certifyFirstContact() in FeatureRevolved.cpp) with
+// the band's exemption (sections 15.2 and 15.8): C3, no edge of the face inside the piece unless
+// its image lies in the band; C4 and C5, the circles leave the piece through each part of the face
+// on its boundary, and touch none, except in the band. `faceParts` are the face's pieces from the
+// cell's split. Returns why it refuses, or an empty string.
+PartDesignExport std::string certifyPiece(
+    const TopoDS_Shape& piece,
+    const TopoDS_Face& face,
+    const TopTools_IndexedMapOfShape& faceParts,
+    const Band& band,
+    double tolerance
+);
+
 // A solid's volume by Gauss-Kronrod integration over the surfaces' knot spans, to 1e-7, and the
 // error reached. The construction's checks use it, and so do the feature's checks of a constructed
 // tool: the adaptive VolumeProperties() at 1e-6 was 2e-4 off on the folded wall's tool (26.35470

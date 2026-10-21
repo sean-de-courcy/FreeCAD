@@ -22,10 +22,7 @@
 
 #include <algorithm>
 #include <array>
-#include <chrono>  // TEMP s8
 #include <cmath>
-#include <cstdio>
-#include <cstdlib>
 #include <limits>
 #include <numbers>
 #include <optional>
@@ -377,11 +374,8 @@ std::pair<double, double> derivativeBounds(Handle(Geom2d_BSplineCurve) curve)
     return derivativeBounds(points, weights, {sequence.begin(), sequence.end()}, curve->Degree());
 }
 
-// C3-C5 on a cell's piece, today's certificate (certifyFirstContact() in FeatureRevolved.cpp) with
-// the band's exemption (sections 15.2 and 15.8): C3, no edge of the face inside the piece unless
-// its image lies in the band; C4 and C5, the circles leave the piece through each part of the face
-// on its boundary, and touch none, except in the band. `faceParts` are the face's pieces from the
-// cell's split. Returns why it refuses, or an empty string.
+}  // namespace
+
 std::string certifyPiece(
     const TopoDS_Shape& piece,
     const TopoDS_Face& face,
@@ -450,13 +444,17 @@ std::string certifyPiece(
     return {};
 }
 
+namespace
+{
+
 // One cell swept up to the face: the cell revolved a sliver short of a whole turn, split by the
 // face, and the solid at its start cap (as sweepUpToFace() in FeatureRevolved.cpp). C1: exactly one
 // such solid, keeping the whole cap. `band` is that of the walls on the cell's boundary; `step` is
-// lostSheet()'s. C2's lost sheet and C3-C5 (certifyPiece()) on the solid. Returns the solid, or why
-// it refuses.
-std::pair<TopoDS_Shape, std::string> sweepCell(
-    const TopoDS_Face& cell,
+// lostSheet()'s. C2's lost sheet and C3-C5 (certifyPiece()) on the solid. Returns the solid, named
+// from `cell`'s names as sweepUpToFace() names its sweep, with `blank`'s tag; or why it refuses.
+std::pair<Part::TopoShape, std::string> sweepCell(
+    const Part::TopoShape& blank,
+    const Part::TopoShape& cell,
     const TopoDS_Face& face,
     const gp_Ax1& axis,
     double sliver,
@@ -820,17 +818,6 @@ std::optional<gp_Pnt> Band::outside(const TopoDS_Edge& edge, double tolerance) c
         std::vector<std::pair<double, double>> near;
     };
     // A sample whose image, widened by the tolerance, is in no part's band can't be certified
-    const bool why = std::getenv("FC_D2_WHY") != nullptr;  // TEMP s8
-    auto tell = [&](const char* what, double t, double dt) {  // TEMP s8
-        if (!why) { return; }
-        const gp_Pnt p = curve->Value(t);
-        const gp_Pnt2d at = image(p);
-        std::fprintf(stderr, "D2BAND %s t=%.9g of [%.9g, %.9g] dt=%.3g tol=%.3g speed=%.3g bend=%.3g at (%.6g, %.6g, %.6g) r=%.9g h=%.9g\n", what, t, curve->FirstParameter(), curve->LastParameter(), dt, tolerance, speed, bend, p.X(), p.Y(), p.Z(), at.X(), at.Y());
-        for (const Part& part : parts) {
-            const auto n = nearest(part, at);
-            std::fprintf(stderr, "D2BAND   part width=%.3g d=%.3g u=%.9g bend=%.3g\n", part.width, n.second, n.first, part.bend);
-        }
-    };
     auto sample = [&](double t) -> std::optional<Sample> {
         Sample here {t, curve->Value(t)};
         const gp_Pnt2d at = image(here.point);
@@ -853,7 +840,6 @@ std::optional<gp_Pnt> Band::outside(const TopoDS_Edge& edge, double tolerance) c
         const double t = first + (last - first) * k / initial;
         auto here = sample(t);
         if (!here) {
-            tell("initial sample out", t, 0.0);
             return curve->Value(t);
         }
         samples.push_back(std::move(*here));
@@ -890,12 +876,10 @@ std::optional<gp_Pnt> Band::outside(const TopoDS_Edge& edge, double tolerance) c
             }
         }
         if (dt <= floor || ++count > budget) {
-            tell(dt <= floor ? "floor" : "budget", low.t, dt);
             return low.point;
         }
         auto middle = sample(low.t + dt / 2.0);
         if (!middle) {
-            tell("middle sample out", low.t + dt / 2.0, dt);
             return curve->Value(low.t + dt / 2.0);
         }
         open.emplace_back(*middle, std::move(high));
@@ -1230,36 +1214,15 @@ std::optional<gp_Pnt> Band::leavesOutside(const TopoDS_Face& face, bool whole) c
             stack.push_back(std::move(leaf));
         }
     }
-    auto tell = [&](const char* what, const Leaf& leaf, const gp_Pnt& p) {  // TEMP s8
-        if (std::getenv("FC_D2_WHY")) {
-            std::fprintf(stderr, "D2LEAF %s whole=%d u [%.9g, %.9g] v [%.9g, %.9g] at (%.6g, %.6g, %.6g) r=%.9g h=%.9g count=%d\n", what, whole ? 1 : 0, leaf.u0, leaf.u1, leaf.v0, leaf.v1, p.X(), p.Y(), p.Z(), image(p).X(), image(p).Y(), 0);
-            for (std::size_t q = 0; q < parts.size(); ++q) {
-                std::fprintf(stderr, "D2LEAF   part width=%.3g d=%.3g %.3g %.3g %.3g\n", parts[q].width, leaf.corners[0].near[q].second, leaf.corners[1].near[q].second, leaf.corners[2].near[q].second, leaf.corners[3].near[q].second);
-            }
-        }
-    };
     // Halving stops at a floor, and the count at a budget (section 15.8: 1,000,000 nodes)
     const double floorU = (surface->UKnot(surface->NbUKnots()) - surface->UKnot(1)) * 1e-9;
     const double floorV = (surface->VKnot(surface->NbVKnots()) - surface->VKnot(1)) * 1e-9;
     constexpr int budget = 1000000;
     int count = 0;
-    struct Stats  // TEMP s8
-    {
-        const bool& whole;
-        const int& count;
-        std::chrono::steady_clock::time_point began = std::chrono::steady_clock::now();
-        ~Stats()
-        {
-            if (std::getenv("FC_D2_WHY")) {
-                std::fprintf(stderr, "D2STAT whole=%d leaves=%d ms=%.1f\n", whole ? 1 : 0, count, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - began).count());
-            }
-        }
-    } stats {whole, count};
     while (!stack.empty()) {
         Leaf leaf = std::move(stack.back());
         stack.pop_back();
         if (++count > budget) {
-            tell("budget", leaf, leaf.corners[0].point);
             return leaf.corners[0].point;
         }
         // None of the face, or no silhouette in the leaf (for behind(), none and g > 0)
@@ -1277,7 +1240,6 @@ std::optional<gp_Pnt> Band::leavesOutside(const TopoDS_Face& face, bool whole) c
         for (std::size_t k = 0; k < 4; ++k) {
             const double gCorner = g.value[g.index(k % 2 == 1 ? g.m : 0, k >= 2 ? g.n : 0)];
             if (away(leaf.corners[k], at[k].first, at[k].second, gCorner)) {
-                tell("away", leaf, leaf.corners[k].point);
                 return leaf.corners[k].point;
             }
         }
@@ -1288,7 +1250,6 @@ std::optional<gp_Pnt> Band::leavesOutside(const TopoDS_Face& face, bool whole) c
         const bool uSmall = leaf.u1 - leaf.u0 <= floorU;
         const bool vSmall = leaf.v1 - leaf.v0 <= floorV;
         if (uSmall && vSmall) {
-            tell("floor", leaf, leaf.corners[0].point);
             return leaf.corners[0].point;
         }
         alongU = vSmall || (alongU && !uSmall);
@@ -1843,7 +1804,6 @@ FirstContactSolid constructFirstContact(
                 std::ranges::fill(raising, true);
             }
         }
-        if (std::getenv("FC_D2_WHY")) { std::fprintf(stderr, "D2WHY build %d: %s\n", build, why.c_str()); }  // TEMP s7
         if (build == 3) {
             throw refused(why);
         }

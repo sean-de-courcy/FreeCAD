@@ -10,10 +10,9 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstdlib>
-#include <fstream>
 #include <functional>
 #include <numbers>
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -30,7 +29,6 @@
 #include <BRepGProp.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <BRepPrimAPI_MakeRevol.hxx>
-#include <BRepTools.hxx>
 #include <GCE2d_MakeSegment.hxx>
 #include <Geom2d_Circle.hxx>
 #include <Geom2d_TrimmedCurve.hxx>
@@ -382,6 +380,55 @@ TEST(FirstContactConstruction, FoldForward)
     expectSolid(*solid, extrudedVolume(Crossings(curve, true), 1.0, 3.0, 0.0, 2.0, {outer}));
 }
 
+// The parts of the face in a piece: its faces on the face's surface
+TopTools_IndexedMapOfShape faceParts(const TopoDS_Shape& piece, const TopoDS_Face& face)
+{
+    TopLoc_Location location;
+    const Handle(Geom_Surface)& surface = BRep_Tool::Surface(face, location);
+    TopTools_IndexedMapOfShape parts;
+    for (TopExp_Explorer faces(piece, TopAbs_FACE); faces.More(); faces.Next()) {
+        TopLoc_Location partLocation;
+        if (BRep_Tool::Surface(TopoDS::Face(faces.Current()), partLocation) == surface
+            && partLocation.IsEqual(location)) {
+            parts.Add(faces.Current());
+        }
+    }
+    return parts;
+}
+
+// C3 and C4-C5 inside a construction (section 15.17): the construction's pieces certified again
+// with their walls' band (each must pass) and with none. Returns how many pieces each check
+// refuses without the band, by the refusal's code.
+std::map<std::string, int> refusedWithoutTheBand(const FirstContactSolid& solid, const TopoDS_Face& face)
+{
+    std::map<std::string, int> refused;
+    PartDesign::FirstContact::Band band(solid.trace.frame);
+    for (const PartDesign::FirstContact::Wall& wall : solid.walls) {
+        band.add(wall.curve, 2.0 * wall.push);
+    }
+    const PartDesign::FirstContact::Band none(solid.trace.frame);
+    for (const TopoDS_Shape& piece : solid.pieces) {
+        const TopTools_IndexedMapOfShape parts = faceParts(piece, face);
+        EXPECT_GT(parts.Extent(), 0);
+        EXPECT_EQ(PartDesign::FirstContact::certifyPiece(piece, face, parts, band, tolerance), "");
+        const std::string why = PartDesign::FirstContact::certifyPiece(piece, face, parts, none, tolerance);
+        if (!why.empty()) {
+            ++refused[why.substr(0, why.find(':'))];
+        }
+    }
+    return refused;
+}
+
+// The hook's piece beyond its wall holds the face's edge at r 2, where first contact jumps: C3
+// refuses it without the band
+TEST(FirstContactConstruction, HookPieceNeedsTheBand)
+{
+    const TopoDS_Face face = extruded(hookCurve());
+    const auto solid = construct(face, profile(), forward);
+    ASSERT_TRUE(solid);
+    EXPECT_EQ(refusedWithoutTheBand(*solid, face), (std::map<std::string, int> {{"C3", 1}}));
+}
+
 // The same fold turning the other way: the jump is along the fold at its smallest radius near 200
 TEST(FirstContactConstruction, FoldReversed)
 {
@@ -665,57 +712,6 @@ TEST(FirstContactConstruction, BandNearestOverManySpans)
     EXPECT_FALSE(band.contains(gp_Pnt(end.X() + 1.1 * width * back.X(), 0.0, end.Y() + 1.1 * width * back.Y())));
     EXPECT_FALSE(band.contains(at(0.0, 1.0)));
     EXPECT_FALSE(band.contains(at(0.0, 0.0)));
-}
-
-// TEMPORARY (ops#293 D2 session 5): TrimmedFold's face, profile, cells, walls and pieces as BREP files
-// in FC_D2_DUMP, for probes
-TEST(FirstContactConstruction, DumpTrimmedFold)
-{
-    const char* folder = std::getenv("FC_D2_DUMP");
-    if (!folder) {
-        GTEST_SKIP();
-    }
-    const std::string base(folder);
-    const Handle(Geom_BSplineCurve) curve = foldCurve();
-    const gp_Dir up(0.12, 0.2, 1.0);
-    const TopoDS_Face slabBase = BRepBuilderAPI_MakeFace(gp_Pln(gp_Pnt(0, 0, 1), up), -40, 40, -40, 40).Face();
-    const TopoDS_Shape slab = BRepPrimAPI_MakePrism(slabBase, gp_Vec(up) * 30.0).Shape();
-    const TopoDS_Shape cut = BRepAlgoAPI_Cut(extruded(curve), slab).Shape();
-    const TopoDS_Face face = TopoDS::Face(TopExp_Explorer(cut, TopAbs_FACE).Current());
-    const TopoDS_Face prof = profile(1.5, 3.0, 0.0, 1.2);
-    BRepTools::Write(face, (base + "/face.brep").c_str());
-    BRepTools::Write(prof, (base + "/profile.brep").c_str());
-    const FirstContactSolid solid
-        = PartDesign::FirstContact::constructFirstContact(face, prof, forward, tolerance);
-    std::ofstream info(base + "/info.txt");
-    info << "builds " << solid.builds << "\n";
-    for (std::size_t k = 0; k < solid.trace.pieces.size(); ++k) {
-        const auto& piece = solid.trace.pieces[k];
-        info << "piece " << k << " source " << static_cast<int>(piece.source) << " edge " << piece.edge
-             << " side " << piece.side << " continues " << piece.continuesPrevious << " meets "
-             << piece.meetsProfile << " jumps " << piece.jumps << " points " << piece.points.size();
-        if (!piece.points.empty()) {
-            info << " from " << piece.points.front().X() << "," << piece.points.front().Y() << " to "
-                 << piece.points.back().X() << "," << piece.points.back().Y();
-        }
-        info << "\n";
-    }
-    for (std::size_t w = 0; w < solid.walls.size(); ++w) {
-        const auto& wall = solid.walls[w];
-        info << "wall " << w << " piece " << wall.piece << " push " << wall.push << "\n";
-        BRepTools::Write(
-            BRepBuilderAPI_MakeEdge(GeomAPI::To3d(wall.curve, gp_Pln(gp_Ax3(gp_Pnt(0, 0, 0), gp_Dir(0, -1, 0), gp_Dir(1, 0, 0)))))
-                .Edge(),
-            (base + "/wall" + std::to_string(w) + ".brep").c_str()
-        );
-    }
-    for (std::size_t c = 0; c < solid.cells.size(); ++c) {
-        BRepTools::Write(solid.cells[c], (base + "/cell" + std::to_string(c) + ".brep").c_str());
-    }
-    for (std::size_t c = 0; c < solid.pieces.size(); ++c) {
-        BRepTools::Write(solid.pieces[c], (base + "/piece" + std::to_string(c) + ".brep").c_str());
-    }
-    BRepTools::Write(solid.shape, (base + "/solid.brep").c_str());
 }
 
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
