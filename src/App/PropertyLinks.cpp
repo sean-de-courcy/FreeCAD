@@ -715,6 +715,14 @@ std::string PropertyLinkBase::_getElementFingerprint(App::DocumentObject* featur
     if (!geo->getElementFingerprint(elementName.oldName.c_str(), fingerprint)) {
         return {};
     }
+    // A piece told apart from its twins only by its place among them: their centroid, for the
+    // solver to tell a trade from a move (ops#360, PR 340 round 5)
+    Base::Vector3d centroid;
+    int count = 0;
+    if (elementTwinCentroid(geo, elementName.oldName.c_str(), centroid, count)) {
+        fingerprint.twinCentroid = centroid;
+        fingerprint.twinCount = count;
+    }
     return fingerprint.toString();
 }
 

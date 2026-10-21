@@ -816,6 +816,289 @@ def padUpToTheLoftFrom(doc, rectangles):
     return pad
 
 
+# ops#360: two rectangles held by constraints, A 2 x 2 at the origin and B 3 x 3 at x 5..8, up to
+# a B-spline plate. The face maker sorts the profile's faces by area, larger first, so A grown to
+# 4 x 4 (16 mm^2, B's is 9) comes first: the far caps' order swaps, their geometry IDs kept
+CAP_A = (0, 0, 2, 2)
+CAP_B = (5, 0, 8, 3)
+CAP_A_GROWN = 4
+
+
+def dimensionedRectangle(sketch, tag, x0, y0, x1, y1):
+    """A closed rectangle in sketch, held by constraints, its width and height named w<tag> and
+    h<tag>, the place of its first corner x<tag> and y<tag>"""
+    import Sketcher
+
+    V = FreeCAD.Vector
+    start = sketch.GeometryCount
+    corners = [V(x0, y0, 0), V(x1, y0, 0), V(x1, y1, 0), V(x0, y1, 0)]
+    for i in range(4):
+        sketch.addGeometry(Part.LineSegment(corners[i], corners[(i + 1) % 4]))
+    for i in range(4):
+        sketch.addConstraint(
+            Sketcher.Constraint("Coincident", start + i, 2, start + (i + 1) % 4, 1)
+        )
+    sketch.addConstraint(Sketcher.Constraint("Horizontal", start))
+    sketch.addConstraint(Sketcher.Constraint("Horizontal", start + 2))
+    sketch.addConstraint(Sketcher.Constraint("Vertical", start + 1))
+    sketch.addConstraint(Sketcher.Constraint("Vertical", start + 3))
+    width = sketch.addConstraint(Sketcher.Constraint("DistanceX", start, 1, start, 2, x1 - x0))
+    sketch.renameConstraint(width, "w" + tag)
+    height = sketch.addConstraint(
+        Sketcher.Constraint("DistanceY", start + 1, 1, start + 1, 2, y1 - y0)
+    )
+    sketch.renameConstraint(height, "h" + tag)
+    left = sketch.addConstraint(Sketcher.Constraint("DistanceX", -1, 1, start, 1, x0))
+    sketch.renameConstraint(left, "x" + tag)
+    bottom = sketch.addConstraint(Sketcher.Constraint("DistanceY", -1, 1, start, 1, y0))
+    sketch.renameConstraint(bottom, "y" + tag)
+
+
+def freeformPlate(doc, z, seam=None):
+    """A Part feature holding the rectangle x -10..20, y -10..10 of the plane z = `z` as a B-spline
+    face (not elementary, so a prism up to it is built by the split), or with `seam`, a shell of
+    two such faces meeting at x = `seam`"""
+    V = FreeCAD.Vector
+    faces = []
+    for x0, x1 in ((-10, seam), (seam, 20)) if seam is not None else ((-10, 20),):
+        corners = [V(x0, -10, z), V(x1, -10, z), V(x1, 10, z), V(x0, 10, z)]
+        faces.append(Part.Face(Part.makePolygon(corners + corners[:1])).toNurbs().Faces[0])
+    plate = doc.addObject("Part::Feature", "Plate")
+    plate.Shape = faces[0] if len(faces) == 1 else Part.Shell(faces)
+    return plate
+
+
+def freeformHoleShell(doc, z):
+    """ops#360 round 1: a shell of two B-spline faces at height z: the rectangle x -10..20,
+    y -10..10 with the hole x -1..1, y -2..2, and the hole's fill"""
+    V = FreeCAD.Vector
+    outer = [V(-10, -10, z), V(20, -10, z), V(20, 10, z), V(-10, 10, z)]
+    hole = [V(-1, -2, z), V(-1, 2, z), V(1, 2, z), V(1, -2, z)]
+    wires = [Part.makePolygon(corners + corners[:1]) for corners in (outer, hole)]
+    plate = Part.Face(Part.Plane(V(0, 0, z), V(0, 0, 1)), wires).toNurbs().Faces[0]
+    fill = [V(-1, -2, z), V(1, -2, z), V(1, 2, z), V(-1, 2, z)]
+    fillFace = Part.Face(Part.makePolygon(fill + fill[:1])).toNurbs().Faces[0]
+    shell = doc.addObject("Part::Feature", "Plate")
+    shell.Shape = Part.Shell([plate, fillFace])
+    return shell
+
+
+def ellipticHoleShell(z, turn=0, centre=(3, 3), a=4, bounds=(-10, -10, 20, 10)):
+    """PR 340 round 2: a shell of two B-spline faces at height z: the rectangle x -10..20,
+    y -10..10 (or `bounds`' x0, y0, x1, y1) with an elliptic hole about (3, 3) (or `centre`),
+    semi-axes 4 (or `a`) along x and 1 along y (one closed edge), and the hole's fill. `turn`
+    turns the ellipse about its centre by that many degrees before the faces are built: 180
+    gives the same faces, their edge starting on the other side"""
+    V = FreeCAD.Vector
+    edge = Part.Ellipse(V(centre[0], centre[1], z), a, 1).toShape()
+    if turn:
+        edge.rotate(V(centre[0], centre[1], z), V(0, 0, 1), turn)
+    x0, y0, x1, y1 = bounds
+    outer = [V(x0, y0, z), V(x1, y0, z), V(x1, y1, z), V(x0, y1, z)]
+    plane = Part.Plane(V(0, 0, z), V(0, 0, 1))
+    plate = Part.Face(plane, [Part.makePolygon(outer + outer[:1]), Part.Wire([edge])])
+    fill = Part.Face(Part.Wire([edge]))
+    return Part.Shell([plate.toNurbs().Faces[0], fill.toNurbs().Faces[0]])
+
+
+def lobedHoleShell(z, lobes, turn=0):
+    """PR 340 round 4: a shell of two B-spline faces at height z: the rectangle x -10..20,
+    y -10..10 with a hole of `lobes` lobes about (3, 3) (radius 2 + 0.8 cos(lobes t), lobes at
+    t = 0, 360 / lobes, ..., one closed B-spline edge), and the hole's fill. `turn` turns the
+    hole about its centre by that many degrees. A disc of radius 2.3 about (3, 3) crosses it
+    between the lobes: its cap is `lobes` twins on the plate and one piece on the fill"""
+    V = FreeCAD.Vector
+    points = []
+    for k in range(60):
+        t = 2 * math.pi * k / 60
+        r = 2 + 0.8 * math.cos(lobes * t)
+        points.append(V(3 + r * math.cos(t), 3 + r * math.sin(t), z))
+    curve = Part.BSplineCurve()
+    curve.interpolate(points, PeriodicFlag=True)
+    edge = curve.toShape()
+    if turn:
+        edge.rotate(V(3, 3, z), V(0, 0, 1), turn)
+    outer = [V(-10, -10, z), V(20, -10, z), V(20, 10, z), V(-10, 10, z)]
+    plane = Part.Plane(V(0, 0, z), V(0, 0, 1))
+    plate = Part.Face(plane, [Part.makePolygon(outer + outer[:1]), Part.Wire([edge])])
+    fill = Part.Face(Part.Wire([edge]))
+    return Part.Shell([plate.toNurbs().Faces[0], fill.toNurbs().Faces[0]])
+
+
+def discUpToAnEllipticHole(doc, kind="Pad", shell=ellipticHoleShell, radius=3):
+    """PR 340 round 2: a Pad from the disc A (centre (3, 3), radius 3, its centre's place named
+    xA and yA, its radius rA) and the rectangle B up to the plate with the elliptic hole and its
+    fill (UpToShape). The circle crosses the ellipse four times: A's cap is three pieces, the
+    middle one on the fill, and the top and bottom ones on the plate, each bounded by the circle
+    and the ellipse alone. Or a Pocket from them on top of the block x -2..15, y -5..8, z 0..10,
+    down to the plate at z = 4 (round 3). `shell(z)` gives another up-to shell, and `radius`
+    another radius (round 4). Returns the feature and the height of its far caps"""
+    import Sketcher
+
+    body = doc.addObject("PartDesign::Body", "Body")
+    xy = [f for f in body.Origin.OriginFeatures if f.Role == "XY_Plane"][0]
+    capZ = 10 if kind == "Pad" else 4
+    plate = doc.addObject("Part::Feature", "Plate")
+    plate.Shape = shell(capZ)
+    if kind == "Pocket":
+        blockSketch = body.newObject("Sketcher::SketchObject", "BlockSketch")
+        blockSketch.AttachmentSupport = [(xy, "")]
+        blockSketch.MapMode = "FlatFace"
+        dimensionedRectangle(blockSketch, "Block", -2, -5, 15, 8)
+        block = body.newObject("PartDesign::Pad", "Block")
+        block.Profile = blockSketch
+        block.Length = 10
+    sketch = body.newObject("Sketcher::SketchObject", "Profile")
+    sketch.AttachmentSupport = [(xy, "")]
+    sketch.MapMode = "FlatFace"
+    if kind == "Pocket":
+        sketch.AttachmentOffset = FreeCAD.Placement(FreeCAD.Vector(0, 0, 10), FreeCAD.Rotation())
+    circle = sketch.addGeometry(
+        Part.Circle(FreeCAD.Vector(3, 3, 0), FreeCAD.Vector(0, 0, 1), radius)
+    )
+    radiusConstraint = sketch.addConstraint(Sketcher.Constraint("Radius", circle, radius))
+    sketch.renameConstraint(radiusConstraint, "rA")
+    for axis, tag in (("DistanceX", "xA"), ("DistanceY", "yA")):
+        place = sketch.addConstraint(Sketcher.Constraint(axis, -1, 1, circle, 3, 3))
+        sketch.renameConstraint(place, tag)
+    dimensionedRectangle(sketch, "B", 10, 0, 13, 3)
+    feature = body.newObject("PartDesign::" + kind, kind)
+    feature.Profile = sketch
+    feature.Type = "UpToShape"
+    feature.UpToShape = (plate, ["Face1", "Face2"])
+    feature.Refine = False
+    doc.recompute()
+    return feature, capZ
+
+
+def centreOfFarCapAt(shape, z, x, y):
+    """The (x, y) of the centre of mass of the far cap at height z that holds (x, y, z)"""
+    centre = farCaps(shape, z)[farCapAt(shape, z, x, y)].CenterOfMass
+    return centre.x, centre.y
+
+
+def capsUpToAFreeformPlate(
+    doc, kind, seam=None, hole=False, capA=CAP_A, block=(-2, -5, 12, 8), withB=True
+):
+    """ops#360: a Pad from A and B in the XY plane up to a B-spline plate at z = 10 (UpToFace, or
+    UpToShape up to the two-face shell meeting at x = `seam`, or with `hole` the plate with a hole
+    and its fill); or a Pocket from them on top of the block x -2..12, y -5..8 (or `block`'s x0,
+    y0, x1, y1), z 0..10, down to the plate at z = 4. Without B if not `withB`. Returns the feature
+    and the height of its far caps (the Pocket's floors)"""
+    body = doc.addObject("PartDesign::Body", "Body")
+    xy = [f for f in body.Origin.OriginFeatures if f.Role == "XY_Plane"][0]
+    capZ = 10 if kind == "Pad" else 4
+    plate = freeformHoleShell(doc, capZ) if hole else freeformPlate(doc, capZ, seam)
+    if kind == "Pocket":
+        blockSketch = body.newObject("Sketcher::SketchObject", "BlockSketch")
+        blockSketch.AttachmentSupport = [(xy, "")]
+        blockSketch.MapMode = "FlatFace"
+        dimensionedRectangle(blockSketch, "Block", *block)
+        blockPad = body.newObject("PartDesign::Pad", "Block")
+        blockPad.Profile = blockSketch
+        blockPad.Length = 10
+    sketch = body.newObject("Sketcher::SketchObject", "Profile")
+    sketch.AttachmentSupport = [(xy, "")]
+    sketch.MapMode = "FlatFace"
+    if kind == "Pocket":
+        sketch.AttachmentOffset = FreeCAD.Placement(FreeCAD.Vector(0, 0, 10), FreeCAD.Rotation())
+    dimensionedRectangle(sketch, "A", *capA)
+    if withB:
+        dimensionedRectangle(sketch, "B", *CAP_B)
+    feature = body.newObject("PartDesign::" + kind, kind)
+    feature.Profile = sketch
+    if seam is None and not hole:
+        feature.Type = "UpToFace"
+        feature.UpToFace = (plate, ["Face1"])
+    else:
+        feature.Type = "UpToShape"
+        feature.UpToShape = (plate, ["Face1", "Face2"])
+    feature.Refine = False
+    doc.recompute()
+    return feature, capZ
+
+
+def growCapA(sketch):
+    """A's width and height dimensions set to CAP_A_GROWN: its lines keep their geometry IDs"""
+    sketch.setDatum("wA", FreeCAD.Units.Quantity(CAP_A_GROWN, FreeCAD.Units.Length))
+    sketch.setDatum("hA", FreeCAD.Units.Quantity(CAP_A_GROWN, FreeCAD.Units.Length))
+
+
+def farCaps(shape, z):
+    """{index name: face} of shape's faces at height z smaller than the plate: the far caps"""
+    return {
+        "Face%d" % i: f
+        for i, f in enumerate(shape.Faces, 1)
+        if abs(f.BoundBox.ZMin - z) < 1e-6 and abs(f.BoundBox.ZMax - z) < 1e-6 and f.Area < 50
+    }
+
+
+def farCapAt(shape, z, x, y):
+    """The index name of the far cap at height z that holds the point (x, y, z)"""
+    point = FreeCAD.Vector(x, y, z)
+    names = [n for n, f in farCaps(shape, z).items() if f.isInside(point, 1e-6, True)]
+    if len(names) != 1:
+        raise AssertionError("far caps at (%g, %g, %g): %s" % (x, y, z, names))
+    return names[0]
+
+
+def pointOnFarCap(feature, sub):
+    """A datum point at the centre of mass of feature's face `sub`, the feature kept as the Tip"""
+    body = feature.getParentGeoFeatureGroup()
+    point = body.newObject("PartDesign::Point", "CapPoint")
+    point.AttachmentSupport = [(feature, sub)]
+    point.MapMode = "CenterOfMass"
+    body.Tip = feature
+    feature.Document.recompute()
+    return point
+
+
+def assertOnCap(test, point, z, x, y):
+    """The datum point is valid, quiet, and at (x, y, z)"""
+    test.assertTrue(point.isValid(), point.getStatusString())
+    test.assertEqual(point.getStatusString(), "Valid")
+    test.assertLess((point.Placement.Base - FreeCAD.Vector(x, y, z)).Length, 1e-6, point.Placement)
+
+
+def assertNotQuietlyElsewhere(test, point, z, allowed):
+    """ops#360 round 1: the datum point is at one of the `allowed` (x, y) places, or says it lost
+    its cap (it is invalid, or its status warns); never valid and quiet on another cap"""
+    if point.isValid() and point.getStatusString() == "Valid":
+        base = point.Placement.Base
+        test.assertTrue(
+            any((base - FreeCAD.Vector(x, y, z)).Length < 1e-6 for x, y in allowed),
+            "quietly at %s, not at one of %s" % (base, allowed),
+        )
+
+
+# The child of testPadUpToAFreeformFaceCapsMigrate: opens the saved file, recomputes every object
+# (the naming migration), records the datum point, grows A and records it again
+_MIGRATION_CHILD = """\
+import json, os, traceback
+import FreeCAD
+out = os.environ["PAD_CAPS_OUT"]
+try:
+    doc = FreeCAD.openDocument(os.environ["PAD_CAPS_FILE"])
+    for obj in doc.Objects:
+        obj.touch()
+    doc.recompute()
+    point = doc.getObject("CapPoint")
+    result = {"opened": list(point.Placement.Base), "valid": point.isValid()}
+    sketch = doc.getObject("Profile")
+    for name in ("wA", "hA"):
+        sketch.setDatum(name, FreeCAD.Units.Quantity(%d, FreeCAD.Units.Length))
+    doc.recompute()
+    result["grown"] = list(point.Placement.Base)
+    result["valid"] = result["valid"] and point.isValid()
+    with open(out, "w", encoding="utf-8") as fh:
+        json.dump(result, fh)
+except Exception:
+    with open(out + ".error", "w", encoding="utf-8") as fh:
+        fh.write(traceback.format_exc())
+os._exit(0)
+""" % CAP_A_GROWN
+
+
 # A split prism's vertices where it meets a freeform up-to face carry the intersection's
 # tolerance: 5e-6 up to the loft's side (ops#357). A raise orders of magnitude more is a defect
 SPLIT_TOLERANCE = 1e-5
@@ -1899,8 +2182,9 @@ class TestPad(unittest.TestCase):
 
     def testPadUpToALoftedFaceFromSeveralFaces(self):
         # ops#357: two rectangles, and a rectangle with a hole, up to the loft's side: one prism
-        # per face, each its own volume, the hole's taken out. Each far cap is a piece of the side
-        # named from it; two pieces of one face differ only by a duplicate counter (ops#357)
+        # per face, each its own volume, the hole's taken out. Each far cap is the projection
+        # (PRJ) of its own profile face, no longer a piece of the side told apart from the other
+        # by a counter in the result's face order (ops#360)
         cases = {
             "two": [(-3, 3, -1, 5), (1, 7, 3, 10)],
             "hole": [(-2, 4, 2, 10), (-1, 6, 1, 8)],
@@ -1929,15 +2213,16 @@ class TestPad(unittest.TestCase):
                     ]
                     self.assertEqual(len(caps), 2 if kind == "two" else 1)
                     self.assertEqual(len(set(caps)), len(caps))
-                    self.assertTrue(all(";MOD;" in name for name in caps), caps)
+                    self.assertTrue(all(";PRJ;" in name for name in caps), caps)
                 finally:
                     FreeCAD.closeDocument(doc.Name)
 
     def testPadUpToALoftedFaceNames(self):
         # ops#357 (ops#334's rule for the split): the side faces are generated from the sketch's
-        # edges, the far cap is the piece of the up-to face, and the far cap's edges and
-        # vertices are the projections of the sketch's edges and vertices (PRJ), not generated
-        # from the side faces, where the solver took a far edge for the sketch's own
+        # edges, and the far cap's edges and vertices are the projections of the sketch's edges
+        # and vertices (PRJ), not generated from the side faces, where the solver took a far edge
+        # for the sketch's own. The far cap is the projection of the sketch's face (ops#360), no
+        # longer the piece of the up-to face
         base, pad = squareUpToTheLoft(self.Doc, "Pad", 22, 5, 9)
         self.assertTrue(pad.isValid(), pad.getStatusString())
         prism = pad.AddSubShape
@@ -1948,7 +2233,7 @@ class TestPad(unittest.TestCase):
             for i, f in enumerate(prism.Faces, 1)
             if f.Surface.TypeId == "Part::GeomBSplineSurface"
         )
-        self.assertIn(";MOD;", prism.getElementMappedName("Face%d" % cap))
+        self.assertIn(";PRJ;", prism.getElementMappedName("Face%d" % cap))
         sides = [
             i
             for i, f in enumerate(prism.Faces, 1)
@@ -1966,6 +2251,714 @@ class TestPad(unittest.TestCase):
                 # Where the loft's seam crosses the far edges, the vertices are generated
                 name = prism.getElementMappedName("Vertex%d" % i)
                 self.assertTrue(";PRJ;" in name or ";GEN;" in name, name)
+
+    def testPadUpToAFreeformFaceCapsStayOnTheirFaces(self):
+        # ops#360: the split named the far caps from the plate alone (MOD), told apart by a
+        # counter in the result's face order, which follows the profile's faces, sorted by
+        # area. A grown past B came first, and a datum on A's cap went to B's, valid and with no
+        # warning: (6.5, 1.5, z). Each cap is now the projection of its own profile face
+        for kind in ("Pad", "Pocket"):
+            with self.subTest(kind=kind):
+                doc = FreeCAD.newDocument("PadUpToAFreeformFaceCaps")
+                try:
+                    feature, z = capsUpToAFreeformPlate(doc, kind)
+                    self.assertTrue(feature.isValid(), feature.getStatusString())
+                    point = pointOnFarCap(feature, farCapAt(feature.Shape, z, 1, 1))
+                    self.assertTrue(point.isValid(), point.getStatusString())
+                    self.assertLess((point.Placement.Base - FreeCAD.Vector(1, 1, z)).Length, 1e-6)
+                    growCapA(feature.Profile[0])
+                    doc.recompute()
+                    self.assertTrue(feature.isValid(), feature.getStatusString())
+                    self.assertTrue(point.isValid(), point.getStatusString())
+                    centre = CAP_A_GROWN / 2
+                    self.assertLess(
+                        (point.Placement.Base - FreeCAD.Vector(centre, centre, z)).Length,
+                        1e-6,
+                        point.Placement.Base,
+                    )
+                finally:
+                    FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToAFreeformFaceCapNames(self):
+        # ops#360: each far cap is the projection (PRJ) of its own profile face, as BRepFeat
+        # names the top, not a piece of the plate (MOD); the two differ, and each keeps its name
+        # when A grows past B. The Pocket's floors are the caps' names modified by the cut
+        for kind in ("Pad", "Pocket"):
+            with self.subTest(kind=kind):
+                doc = FreeCAD.newDocument("PadUpToAFreeformFaceCapNames")
+                try:
+                    feature, z = capsUpToAFreeformPlate(doc, kind)
+                    caps = farCaps(feature.Shape, z)
+                    self.assertEqual(len(caps), 2)
+                    names = {n: feature.Shape.getElementMappedName(n) for n in caps}
+                    for name in names.values():
+                        self.assertIn(";PRJ;", name)
+                        self.assertNotIn(";MOD;", name.split(";PRJ;")[-1])
+                    self.assertEqual(len(set(names.values())), 2, names)
+                    before = {
+                        "A": names[farCapAt(feature.Shape, z, 1, 1)],
+                        "B": names[farCapAt(feature.Shape, z, 6.5, 1.5)],
+                    }
+                    growCapA(feature.Profile[0])
+                    doc.recompute()
+                    self.assertTrue(feature.isValid(), feature.getStatusString())
+                    shape = feature.Shape
+                    after = {
+                        "A": shape.getElementMappedName(farCapAt(shape, z, 2, 2)),
+                        "B": shape.getElementMappedName(farCapAt(shape, z, 6.5, 1.5)),
+                    }
+                    self.assertEqual(after, before)
+                finally:
+                    FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToAFreeformShellCapsStayOnTheirFaces(self):
+        # ops#360: up to a shell of two B-spline faces meeting at x = 1, under A's middle, A's
+        # cap is two pieces: each a projection of A, marked by the shell's face it lies on (and
+        # the edges that bound it where B's cap shares the face, round 2), with MOD among its
+        # flags (PR 340 round 1); B's is a
+        # projection of B, unmarked. Datums
+        # on A's pieces stay there when A grows past B. When A moves onto the left face only,
+        # its right piece is gone, and its datum must not land on another cap quietly: named
+        # from the shell (MOD) it went to B's cap, and told apart by a counter alone to A's
+        # left piece, valid and with no warning both times
+        for edit in ("grow", "offTheRightFace"):
+            with self.subTest(edit=edit):
+                doc = FreeCAD.newDocument("PadUpToAFreeformShellCaps")
+                try:
+                    feature, z = capsUpToAFreeformPlate(doc, "Pad", seam=1)
+                    self.assertTrue(feature.isValid(), feature.getStatusString())
+                    shape = feature.Shape
+                    self.assertEqual(len(farCaps(shape, z)), 3)
+                    left = shape.getElementMappedName(farCapAt(shape, z, 0.5, 1))
+                    right = shape.getElementMappedName(farCapAt(shape, z, 1.5, 1))
+                    other = shape.getElementMappedName(farCapAt(shape, z, 6.5, 1.5))
+                    for name, flags in ((left, {"PRJ", "MOD"}), (right, {"PRJ", "MOD"})):
+                        top = FreeCAD.getDecodedMappedName(name)[-1]
+                        self.assertEqual(set(top["mapperFlags"]), flags, name)
+                        self.assertTrue(top["connectedElements"], name)
+                    self.assertEqual(
+                        FreeCAD.getDecodedMappedName(other)[-1]["mapperFlags"], ["PRJ"], other
+                    )
+                    self.assertEqual(len({left, right, other}), 3)
+                    leftPoint = pointOnFarCap(feature, farCapAt(shape, z, 0.5, 1))
+                    rightPoint = pointOnFarCap(feature, farCapAt(shape, z, 1.5, 1))
+                    sketch = feature.Profile[0]
+                    if edit == "grow":
+                        growCapA(sketch)
+                        doc.recompute()
+                        self.assertTrue(feature.isValid(), feature.getStatusString())
+                        assertOnCap(self, leftPoint, z, 0.5, CAP_A_GROWN / 2)
+                        assertOnCap(self, rightPoint, z, 2.5, CAP_A_GROWN / 2)
+                        shape = feature.Shape
+                        self.assertEqual(
+                            shape.getElementMappedName(farCapAt(shape, z, 0.5, 1)),
+                            left,
+                            "A's left piece",
+                        )
+                    else:
+                        sketch.setDatum("xA", FreeCAD.Units.Quantity(-3, FreeCAD.Units.Length))
+                        doc.recompute()
+                        self.assertTrue(feature.isValid(), feature.getStatusString())
+                        self.assertEqual(len(farCaps(feature.Shape, z)), 2)
+                        assertNotQuietlyElsewhere(self, rightPoint, z, [])
+                        assertNotQuietlyElsewhere(self, leftPoint, z, [(-2, 1)])
+                finally:
+                    FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToAFreeformShellCapPieceAppears(self):
+        # ops#360 round 1: A at x 2..4 lies on the shell's right face only, one cap. Moved to
+        # x 0..2, it crosses the faces' seam at x = 1, and its cap is two pieces. A datum on its
+        # cap stays on the right face's piece, or says it moved: told apart by a counter alone,
+        # it went to the new left piece, valid and with no warning
+        feature, z = capsUpToAFreeformPlate(self.Doc, "Pad", seam=1, capA=(2, 0, 4, 2))
+        self.assertTrue(feature.isValid(), feature.getStatusString())
+        self.assertEqual(len(farCaps(feature.Shape, z)), 2)
+        point = pointOnFarCap(feature, farCapAt(feature.Shape, z, 3, 1))
+        sketch = feature.Profile[0]
+        sketch.setDatum("xA", FreeCAD.Units.Quantity(0, FreeCAD.Units.Length))
+        self.Doc.recompute()
+        self.assertTrue(feature.isValid(), feature.getStatusString())
+        self.assertEqual(len(farCaps(feature.Shape, z)), 3)
+        assertNotQuietlyElsewhere(self, point, z, [(1.5, 1)])
+
+    def testPadUpToAFreeformHoleCapPieces(self):
+        # ops#360 round 1: up to a B-spline plate with a hole x -1..1, y -2..2 and the hole's
+        # fill, A (x -3..3, y -0.5..0.5) crosses the fill: three pieces, left and right on the
+        # plate, the middle on the fill. Each is marked by its face, and the left and right ones,
+        # which share the plate with B's cap, by the hole's edge that bounds them (round 2).
+        # A piece whose marks stay keeps its datum when A changes; a datum on a piece that is
+        # gone, or whose bounds changed, must not land on another piece quietly. Told apart by
+        # a counter alone, the left one's went to the right piece and the right one's to the
+        # middle when the left piece went
+        cases = {
+            # A x -4..3: all three pieces stay, the left one wider
+            "wider": ((-4, 7), {"left": [(-2.5, 0)], "middle": [(0, 0)], "right": [(2, 0)]}),
+            # A x -0.5..4.5: the left piece is gone, the middle one shorter
+            "leftGone": ((-0.5, 5), {"left": [], "middle": [(0.25, 0)], "right": [(2.75, 0)]}),
+            # A x -5..0.5: the right piece is gone
+            "rightGone": ((-5, 5.5), {"left": [(-3, 0)], "middle": [(-0.25, 0)], "right": []}),
+        }
+        # Pieces whose bounds stay the same keep their names: their datums stay, quietly
+        unchanged = {
+            "wider": ("left", "middle", "right"),
+            "leftGone": ("right",),
+            "rightGone": ("left",),
+        }
+        for case, ((xA, wA), expected) in cases.items():
+            with self.subTest(case=case):
+                doc = FreeCAD.newDocument("PadUpToAFreeformHoleCapPieces")
+                try:
+                    feature, z = capsUpToAFreeformPlate(
+                        doc, "Pad", hole=True, capA=(-3, -0.5, 3, 0.5)
+                    )
+                    self.assertTrue(feature.isValid(), feature.getStatusString())
+                    shape = feature.Shape
+                    self.assertEqual(len(farCaps(shape, z)), 4)
+                    places = {"left": (-2, 0), "middle": (0, 0), "right": (2, 0)}
+                    names = {
+                        piece: shape.getElementMappedName(farCapAt(shape, z, x, y))
+                        for piece, (x, y) in places.items()
+                    }
+                    self.assertEqual(len(set(names.values())), 3, names)
+                    points = {
+                        piece: pointOnFarCap(feature, farCapAt(shape, z, x, y))
+                        for piece, (x, y) in places.items()
+                    }
+                    sketch = feature.Profile[0]
+                    sketch.setDatum("wA", FreeCAD.Units.Quantity(wA, FreeCAD.Units.Length))
+                    sketch.setDatum("xA", FreeCAD.Units.Quantity(xA, FreeCAD.Units.Length))
+                    doc.recompute()
+                    self.assertTrue(feature.isValid(), feature.getStatusString())
+                    for piece, allowed in expected.items():
+                        if piece in unchanged[case]:
+                            assertOnCap(self, points[piece], z, *allowed[0])
+                        else:
+                            assertNotQuietlyElsewhere(self, points[piece], z, allowed)
+                finally:
+                    FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToAnEllipticHoleTwinPieces(self):
+        # PR 340 round 2: the disc's top and bottom pieces on the plate are bounded by the circle
+        # and the ellipse alone, so their marks are the same; the round 1 build told them apart
+        # by the splitter's order alone. With the ellipse rebuilt turned by 180 degrees (the same
+        # faces, its edge starting on the other side) the two datums swapped pieces, and with the
+        # disc moved down so that the top piece is gone, the top's datum went to the bottom
+        # piece, valid and with no warning both times. Now they are ordered by their centres
+        # (the datums stay), and their duplicate counter holds how many there are (the top's
+        # datum breaks or warns)
+        for edit in ("turnedEllipse", "topGone"):
+            with self.subTest(edit=edit):
+                doc = FreeCAD.newDocument("PadUpToAnEllipticHoleTwinPieces")
+                try:
+                    pad, z = discUpToAnEllipticHole(doc)
+                    self.assertTrue(pad.isValid(), pad.getStatusString())
+                    shape = pad.Shape
+                    self.assertEqual(len(farCaps(shape, z)), 4)
+                    top = shape.getElementMappedName(farCapAt(shape, z, 3, 5.5))
+                    bottom = shape.getElementMappedName(farCapAt(shape, z, 3, 0.5))
+                    self.assertNotEqual(top, bottom)
+                    topPoint = pointOnFarCap(pad, farCapAt(shape, z, 3, 5.5))
+                    bottomPoint = pointOnFarCap(pad, farCapAt(shape, z, 3, 0.5))
+                    if edit == "turnedEllipse":
+                        doc.getObject("Plate").Shape = ellipticHoleShell(z, turn=180)
+                        doc.recompute()
+                        self.assertTrue(pad.isValid(), pad.getStatusString())
+                        shape = pad.Shape
+                        assertOnCap(self, topPoint, z, *centreOfFarCapAt(shape, z, 3, 5.5))
+                        assertOnCap(self, bottomPoint, z, *centreOfFarCapAt(shape, z, 3, 0.5))
+                    else:
+                        pad.Profile[0].setDatum(
+                            "yA", FreeCAD.Units.Quantity(0.8, FreeCAD.Units.Length)
+                        )
+                        doc.recompute()
+                        self.assertTrue(pad.isValid(), pad.getStatusString())
+                        shape = pad.Shape
+                        self.assertEqual(len(farCaps(shape, z)), 3)
+                        assertNotQuietlyElsewhere(self, topPoint, z, [])
+                        assertNotQuietlyElsewhere(
+                            self, bottomPoint, z, [centreOfFarCapAt(shape, z, 3, 0)]
+                        )
+                finally:
+                    FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToAFreeformHoleCapPieceCoversTheFill(self):
+        # PR 340 round 2: A (x -3..3, y -0.5..0.5) across the plate's hole and its fill, a datum
+        # on its middle piece, on the fill. A made taller than the hole (y -3..2.5) covers the
+        # fill: the split leaves the fill whole, and it kept the fill's own name, while the
+        # middle piece's name had the ring A's other pieces became as its only match: the datum
+        # went to the ring (0, -0.33), valid and with no warning. The fill is now A's
+        # projection too, marked by the fill alone (the only far cap on it), as the middle
+        # piece was: the datum stays on it. Made taller on one side only (y -0.5..2.5), the
+        # middle piece is still the only cap on the fill, its bounds changed: the round 1 build
+        # broke the datum, now it stays
+        for case, (yA, hA, centre) in {
+            "covers": (-3, 5.5, (0, 0)),
+            "half": (-0.5, 3, (0, 0.75)),
+        }.items():
+            with self.subTest(case=case):
+                doc = FreeCAD.newDocument("PadUpToAFreeformHoleCapPieceCoversTheFill")
+                try:
+                    pad, z = capsUpToAFreeformPlate(doc, "Pad", hole=True, capA=(-3, -0.5, 3, 0.5))
+                    self.assertTrue(pad.isValid(), pad.getStatusString())
+                    point = pointOnFarCap(pad, farCapAt(pad.Shape, z, 0, 0))
+                    sketch = pad.Profile[0]
+                    sketch.setDatum("hA", FreeCAD.Units.Quantity(hA, FreeCAD.Units.Length))
+                    sketch.setDatum("yA", FreeCAD.Units.Quantity(yA, FreeCAD.Units.Length))
+                    doc.recompute()
+                    self.assertTrue(pad.isValid(), pad.getStatusString())
+                    assertOnCap(self, point, z, *centre)
+                finally:
+                    FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToAnEllipticHoleTwinsStayPut(self):
+        # PR 340 round 3: the twins (the disc's top and bottom pieces on the plate) were ordered
+        # by their centres along x first, ties only within 1e-5 mm. One above the other, any
+        # small edit that moved one ahead in x swapped their names: the ellipse turned 0.01
+        # degrees, or the disc moved from (3, 3) to (3.1, 3.1), and each datum went to the other
+        # piece, valid and with no warning, for the Pad and the Pocket. Ordered along the axis
+        # in which they spread most, they keep their names until the pair turns by about 45
+        # degrees. Turned 60 degrees, their names swap (they did on the round 2 build too,
+        # quietly), and the solver breaks both references: a counter sibling of the name lies
+        # nearer the old place than the piece the name holds
+        edits = {
+            # edit: (the disc's centre, the ellipse's turn, the places in the top and bottom
+            # pieces after it, whether the datums stay)
+            "tilt": ((3, 3), 0.01, ((3, 5.5), (3, 0.5)), True),
+            "move": ((3.1, 3.1), 0, ((3.1, 5.5), (3.1, 0.5)), True),
+            "turn60": (
+                (3, 3),
+                60,
+                ((3 - 1.1 * math.sqrt(3), 4.1), (3 + 1.1 * math.sqrt(3), 1.9)),
+                False,
+            ),
+        }
+        for kind in ("Pad", "Pocket"):
+            for edit, (centre, turn, (topAfter, bottomAfter), stays) in edits.items():
+                with self.subTest(kind=kind, edit=edit):
+                    doc = FreeCAD.newDocument("PadUpToAnEllipticHoleTwinsStayPut")
+                    try:
+                        feature, z = discUpToAnEllipticHole(doc, kind)
+                        self.assertTrue(feature.isValid(), feature.getStatusString())
+                        shape = feature.Shape
+                        self.assertEqual(len(farCaps(shape, z)), 4)
+                        topPoint = pointOnFarCap(feature, farCapAt(shape, z, 3, 5.5))
+                        bottomPoint = pointOnFarCap(feature, farCapAt(shape, z, 3, 0.5))
+                        sketch = feature.Profile[0]
+                        for tag, value in zip(("xA", "yA"), centre):
+                            sketch.setDatum(
+                                tag, FreeCAD.Units.Quantity(value, FreeCAD.Units.Length)
+                            )
+                        if turn:
+                            doc.getObject("Plate").Shape = ellipticHoleShell(z, turn=turn)
+                        doc.recompute()
+                        self.assertTrue(feature.isValid(), feature.getStatusString())
+                        shape = feature.Shape
+                        self.assertEqual(len(farCaps(shape, z)), 4)
+                        topCentre = centreOfFarCapAt(shape, z, *topAfter)
+                        bottomCentre = centreOfFarCapAt(shape, z, *bottomAfter)
+                        if stays:
+                            assertOnCap(self, topPoint, z, *topCentre)
+                            assertOnCap(self, bottomPoint, z, *bottomCentre)
+                        else:
+                            assertNotQuietlyElsewhere(self, topPoint, z, [topCentre])
+                            assertNotQuietlyElsewhere(self, bottomPoint, z, [bottomCentre])
+                    finally:
+                        FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToAnEllipticHoleTwinsMovedOrGrownStay(self):
+        # PR 340 round 4 (N2): round 3's traded-twin check broke a reference whenever a counter
+        # sibling of its name lay nearer the saved centre than the piece the name holds. So it
+        # did when the disc and the hole moved together by more than half the twins' spacing
+        # (3 mm down: the bottom twin's new place is nearer the top one's old place), or when
+        # one twin grew a lot while the other stayed (the disc grown upward to radius 8 with
+        # its bottom fixed, over a longer hole): "Face5 moved and Face4 sits nearer where it
+        # was", where integration and round 2 kept the datums. Nothing was traded: the sibling
+        # must now also lie as far from the twins' centroid as the saved centre does, as after
+        # a turn about their centre, and the datums stay on their pieces, quietly
+        def longHole(z):
+            return ellipticHoleShell(z, a=12, bounds=(-12, -10, 22, 20))
+
+        def centreAt(shape, z, x, y):
+            # the centre of the face at height z that holds (x, y, z), of any size
+            point = FreeCAD.Vector(x, y, z)
+            faces = [
+                f
+                for f in shape.Faces
+                if abs(f.BoundBox.ZMin - z) < 1e-6
+                and abs(f.BoundBox.ZMax - z) < 1e-6
+                and f.isInside(point, 1e-6, True)
+            ]
+            self.assertEqual(len(faces), 1, (x, y, z))
+            return faces[0].CenterOfMass.x, faces[0].CenterOfMass.y
+
+        edits = {
+            # edit: (kinds, the up-to shell, the sketch's datums, the places in the top and
+            # bottom pieces after it)
+            "move": (("Pad", "Pocket"), ellipticHoleShell, {"yA": 0}, ((3, 2.5), (3, -2.5))),
+            "grow": (("Pad",), longHole, {"yA": 8, "rA": 8}, ((3, 5.5), (3, 0.5))),
+        }
+        for edit, (kinds, shell, datums, (topAfter, bottomAfter)) in edits.items():
+            for kind in kinds:
+                with self.subTest(kind=kind, edit=edit):
+                    doc = FreeCAD.newDocument("PadUpToAnEllipticHoleTwinsMovedOrGrownStay")
+                    try:
+                        feature, z = discUpToAnEllipticHole(doc, kind, shell=shell)
+                        self.assertTrue(feature.isValid(), feature.getStatusString())
+                        shape = feature.Shape
+                        topPoint = pointOnFarCap(feature, farCapAt(shape, z, 3, 5.5))
+                        bottomPoint = pointOnFarCap(feature, farCapAt(shape, z, 3, 0.5))
+                        sketch = feature.Profile[0]
+                        for tag, value in datums.items():
+                            sketch.setDatum(
+                                tag, FreeCAD.Units.Quantity(value, FreeCAD.Units.Length)
+                            )
+                        if edit == "move":
+                            doc.getObject("Plate").Shape = ellipticHoleShell(z, centre=(3, 0))
+                        doc.recompute()
+                        self.assertTrue(feature.isValid(), feature.getStatusString())
+                        shape = feature.Shape
+                        assertOnCap(self, topPoint, z, *centreAt(shape, z, *topAfter))
+                        assertOnCap(self, bottomPoint, z, *centreAt(shape, z, *bottomAfter))
+                    finally:
+                        FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToALobedHoleTiedTwinsBreak(self):
+        # PR 340 round 4 (N3): a disc across a hole of three lobes turned 60 degrees, or of
+        # four lobes turned 45, trades the twins' names, and the name of the twin at 300 (or
+        # 45) degrees lands on a piece exactly as far from its saved centre as the twin's own
+        # piece, now at 0 (or 90) degrees. Round 3's check wanted a sibling strictly nearer, so
+        # the tie let the datum stand there, valid and with no warning. A tie now counts too,
+        # and the reference breaks (or stays on the twin's own piece)
+        cases = {
+            # case: (lobes, the turn, the twin's place before and after it)
+            "three": (3, 60, (3 + 2.1 * 0.5, 3 - 2.1 * math.sqrt(3) / 2), (5.1, 3)),
+            "four": (4, 45, (3 + 1.9 / math.sqrt(2), 3 + 1.9 / math.sqrt(2)), (3, 4.9)),
+        }
+        for kind in ("Pad", "Pocket"):
+            for case, (lobes, turn, before, after) in cases.items():
+                with self.subTest(kind=kind, case=case):
+                    doc = FreeCAD.newDocument("PadUpToALobedHoleTiedTwinsBreak")
+                    try:
+                        feature, z = discUpToAnEllipticHole(
+                            doc, kind, shell=lambda z: lobedHoleShell(z, lobes), radius=2.3
+                        )
+                        self.assertTrue(feature.isValid(), feature.getStatusString())
+                        self.assertEqual(len(farCaps(feature.Shape, z)), lobes + 2)
+                        point = pointOnFarCap(feature, farCapAt(feature.Shape, z, *before))
+                        doc.getObject("Plate").Shape = lobedHoleShell(z, lobes, turn=turn)
+                        doc.recompute()
+                        self.assertTrue(feature.isValid(), feature.getStatusString())
+                        own = centreOfFarCapAt(feature.Shape, z, *after)
+                        assertNotQuietlyElsewhere(self, point, z, [own])
+                    finally:
+                        FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToAnEllipticHoleUnequalTwinsTurnedBreak(self):
+        # PR 340 round 5 (N5): the disc off the hole's centre, along the twins' axis (unequal
+        # twins) or across it, the long hole (a 6) turned 50-75 degrees about its own centre:
+        # the twins trade names. Round 4's check wanted the counter sibling as far from the
+        # twins' centroid as the saved centre (within 20 %), as after a turn about their
+        # centroid; turned about the hole's centre, the twins changed shape and the centroid
+        # moved, and both datums stood on the other twin's piece, valid and with no warning. The
+        # saved fingerprint now holds the twins' centroid, and the offsets from it show the trade:
+        # each datum breaks (or stays on its own piece)
+        def turned(x, y, turn):
+            a = math.radians(turn)
+            x, y = x - 3, y - 3
+            return 3 + x * math.cos(a) - y * math.sin(a), 3 + x * math.sin(a) + y * math.cos(a)
+
+        cases = {
+            # case: (the disc's centre and radius, the hole's turn, the top and bottom twins'
+            # places before the turn and after it)
+            "unequal60": ((3, 4), 3, 60, ((3, 5.5), (3, 1.5))),
+            "unequal75": ((3, 4), 3, 75, ((3, 5.5), (3, 1.5))),
+            "unequal50": ((3, 4), 3, 50, ((3, 5.5), (3, 1.5))),
+            "across50": ((4.5, 3), 3, 50, ((4.5, 5.5), (4.5, 0.5))),
+            "across60": ((5, 3), 3, 60, ((5, 5.5), (5, 0.5))),
+            "across75": ((5, 3), 3, 75, ((5, 5.5), (5, 0.5))),
+        }
+        for kind in ("Pad", "Pocket"):
+            for case, (centre, radius, turn, places) in cases.items():
+                with self.subTest(kind=kind, case=case):
+                    doc = FreeCAD.newDocument("PadUpToAnEllipticHoleUnequalTwinsTurnedBreak")
+                    try:
+                        feature, z = discUpToAnEllipticHole(
+                            doc, kind, shell=lambda z: ellipticHoleShell(z, a=6), radius=radius
+                        )
+                        sketch = feature.Profile[0]
+                        for tag, value in zip(("xA", "yA"), centre):
+                            sketch.setDatum(
+                                tag, FreeCAD.Units.Quantity(value, FreeCAD.Units.Length)
+                            )
+                        doc.recompute()
+                        self.assertTrue(feature.isValid(), feature.getStatusString())
+                        self.assertEqual(len(farCaps(feature.Shape, z)), 4)
+                        points = [
+                            pointOnFarCap(feature, farCapAt(feature.Shape, z, *place))
+                            for place in places
+                        ]
+                        doc.getObject("Plate").Shape = ellipticHoleShell(z, turn=turn, a=6)
+                        doc.recompute()
+                        self.assertTrue(feature.isValid(), feature.getStatusString())
+                        for point, place in zip(points, places):
+                            if case.startswith("unequal"):
+                                after = turned(*place, turn)
+                            else:
+                                # the place as far along the hole's normal through the disc
+                                d = place[1] - 3
+                                a = math.radians(turn)
+                                after = (centre[0] - d * math.sin(a), 3 + d * math.cos(a))
+                            own = centreOfFarCapAt(feature.Shape, z, *after)
+                            assertNotQuietlyElsewhere(self, point, z, [own])
+                    finally:
+                        FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToALobedHoleOffCentreTurnedBySymmetryBreaks(self):
+        # PR 340 round 6 (N9): the disc 0.3 mm off the centre of a hole of four lobes, the hole
+        # turned exactly 45 degrees, its symmetry angle: +45 and -45 give the same hole, and the
+        # twins trade names. Off the centre, the twin at 225 degrees has its two candidates'
+        # offsets from the twins' centroid 4 % apart from its old offset (1.36 and 1.42 mm),
+        # beyond the 2 % tie, and the datum stood on the -45 piece, valid and with no warning,
+        # while the +45 piece holds all of its material. The offsets lie at the same angle from
+        # the old one: an angular tie, and every datum breaks (or stays on its own piece)
+        def turned(x, y, turn):
+            a = math.radians(turn)
+            x, y = x - 3, y - 3
+            return 3 + x * math.cos(a) - y * math.sin(a), 3 + x * math.sin(a) + y * math.cos(a)
+
+        for kind in ("Pad", "Pocket"):
+            with self.subTest(kind=kind):
+                doc = FreeCAD.newDocument("PadUpToALobedHoleOffCentreTurnedBySymmetryBreaks")
+                try:
+                    feature, z = discUpToAnEllipticHole(
+                        doc, kind, shell=lambda z: lobedHoleShell(z, 4), radius=2.3
+                    )
+                    sketch = feature.Profile[0]
+                    sketch.setDatum("xA", FreeCAD.Units.Quantity(3.3, FreeCAD.Units.Length))
+                    doc.recompute()
+                    self.assertTrue(feature.isValid(), feature.getStatusString())
+                    self.assertEqual(len(farCaps(feature.Shape, z)), 6)
+                    # the twins, between the lobes at 45, 135, 225 and 315 degrees
+                    places = [
+                        (3 + 1.7 * math.cos(math.radians(t)), 3 + 1.7 * math.sin(math.radians(t)))
+                        for t in (45, 135, 225, 315)
+                    ]
+                    names = [farCapAt(feature.Shape, z, *place) for place in places]
+                    self.assertEqual(len(set(names)), 4)
+                    centres = [centreOfFarCapAt(feature.Shape, z, *place) for place in places]
+                    points = [pointOnFarCap(feature, name) for name in names]
+                    doc.getObject("Plate").Shape = lobedHoleShell(z, 4, turn=45)
+                    doc.recompute()
+                    self.assertTrue(feature.isValid(), feature.getStatusString())
+                    for point, centre in zip(points, centres):
+                        own = centreOfFarCapAt(feature.Shape, z, *turned(*centre, 45))
+                        assertNotQuietlyElsewhere(self, point, z, [own])
+                finally:
+                    FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToALobedHoleFarOffCentreTurnedBySymmetryBreaks(self):
+        # PR 340 round 7 (N12): as above, with a disc of radius 2 0.75 mm off the centre (0.37 of
+        # its radius). The twin at 225 degrees now has its two candidates' offsets from the twins'
+        # centroid 38 and 47 degrees from its old offset: past round 6's 5-degree band, and the
+        # hit is 27 % nearer by distance, so the datum stood quietly on the piece at 180 degrees
+        # while the piece at 270 holds all of its material. A 12-degree band ties them. The
+        # other twins' material, carried by the turn, lies partly outside the disc: a datum
+        # there may stand only on the piece holding its turned centre, if there is one
+        def turned(x, y, turn):
+            a = math.radians(turn)
+            x, y = x - 3, y - 3
+            return 3 + x * math.cos(a) - y * math.sin(a), 3 + x * math.sin(a) + y * math.cos(a)
+
+        def capsAt(shape, x, y):
+            """The (x, y) centres of the far caps holding (x, y): one, or none"""
+            point = FreeCAD.Vector(x, y, z)
+            return [
+                (cap.CenterOfMass.x, cap.CenterOfMass.y)
+                for cap in farCaps(shape, z).values()
+                if cap.isInside(point, 1e-6, True)
+            ]
+
+        for kind in ("Pad", "Pocket"):
+            with self.subTest(kind=kind):
+                doc = FreeCAD.newDocument("PadUpToALobedHoleFarOffCentreTurnedBySymmetryBreaks")
+                try:
+                    feature, z = discUpToAnEllipticHole(
+                        doc, kind, shell=lambda z: lobedHoleShell(z, 4), radius=2
+                    )
+                    sketch = feature.Profile[0]
+                    sketch.setDatum("xA", FreeCAD.Units.Quantity(3.75, FreeCAD.Units.Length))
+                    doc.recompute()
+                    self.assertTrue(feature.isValid(), feature.getStatusString())
+                    self.assertEqual(len(farCaps(feature.Shape, z)), 6)
+                    # the twins, between the lobes at 45, 135, 225 and 315 degrees; the ones at
+                    # 135 and 225 reach from the hole (1.2 from its centre) to about 1.4
+                    places = [
+                        (3 + 1.3 * math.cos(math.radians(t)), 3 + 1.3 * math.sin(math.radians(t)))
+                        for t in (45, 135, 225, 315)
+                    ]
+                    names = [farCapAt(feature.Shape, z, *place) for place in places]
+                    self.assertEqual(len(set(names)), 4)
+                    centres = [centreOfFarCapAt(feature.Shape, z, *place) for place in places]
+                    points = [pointOnFarCap(feature, name) for name in names]
+                    doc.getObject("Plate").Shape = lobedHoleShell(z, 4, turn=45)
+                    doc.recompute()
+                    self.assertTrue(feature.isValid(), feature.getStatusString())
+                    # the twin at 225 degrees went to the piece at 270
+                    self.assertEqual(
+                        len(capsAt(feature.Shape, *turned(*centres[2], 45))), 1, centres[2]
+                    )
+                    for point, centre in zip(points, centres):
+                        own = capsAt(feature.Shape, *turned(*centre, 45))
+                        assertNotQuietlyElsewhere(self, point, z, own)
+                finally:
+                    FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToAFreeformHoleCapPiecesMergeIntoARing(self):
+        # PR 340 round 3: A (x -3..3, y -0.5..0.5) across the plate's hole and its fill, datums
+        # on its left and right pieces, on the plate. A made taller than the hole (y -3..2.5)
+        # makes them one ring around the fill; taller on one side (y -0.5..2.5), one U around
+        # the fill's top. The new piece's marks hold each old piece's, but tier 1's overlap is
+        # mostly the start cap's, which the piece on the fill shares as much: both references
+        # broke (round 2), where integration's names (MOD of the plate) took them to the ring.
+        # Now the one candidate whose name holds the old piece's takes it: the datums go to
+        # the ring, quietly, also when only one of them is there, and for the Pocket's floors.
+        # Round 4 (N1): without B, the ring is the only far cap on the plate, and its marks are
+        # the plate alone, which don't hold the old piece's (the plate and the hole's edge):
+        # both references broke again. The one candidate marked by the old piece's face alone
+        # takes it when the old piece's centre lies over it
+        for kind in ("Pad", "Pocket"):
+            for case, (yA, hA) in {"ring": (-3, 5.5), "u": (-0.5, 3)}.items():
+                for pieces in (("left", "right"), ("left",)):
+                    for alone in (False, True) if case == "ring" else (False,):
+                        with self.subTest(kind=kind, case=case, pieces=pieces, alone=alone):
+                            self.mergeIntoARing(kind, yA, hA, pieces, alone)
+
+    def mergeIntoARing(self, kind, yA, hA, pieces, alone):
+        """testPadUpToAFreeformHoleCapPiecesMergeIntoARing's case: B on the plate unless
+        `alone`"""
+        doc = FreeCAD.newDocument("PadUpToAFreeformHoleCapPiecesMergeIntoARing")
+        try:
+            feature, z = capsUpToAFreeformPlate(
+                doc,
+                kind,
+                hole=True,
+                capA=(-3, -0.5, 3, 0.5),
+                block=(-8, -8, 18, 10),
+                withB=not alone,
+            )
+            self.assertTrue(feature.isValid(), feature.getStatusString())
+            shape = feature.Shape
+            self.assertEqual(len(farCaps(shape, z)), 3 if alone else 4)
+            places = {"left": (-2, 0), "right": (2, 0)}
+            points = {
+                piece: pointOnFarCap(feature, farCapAt(shape, z, *places[piece]))
+                for piece in pieces
+            }
+            sketch = feature.Profile[0]
+            sketch.setDatum("hA", FreeCAD.Units.Quantity(hA, FreeCAD.Units.Length))
+            sketch.setDatum("yA", FreeCAD.Units.Quantity(yA, FreeCAD.Units.Length))
+            doc.recompute()
+            self.assertTrue(feature.isValid(), feature.getStatusString())
+            shape = feature.Shape
+            self.assertEqual(farCapAt(shape, z, -2, 0), farCapAt(shape, z, 2, 0))
+            merged = centreOfFarCapAt(shape, z, -2, 0)
+            for piece in pieces:
+                assertOnCap(self, points[piece], z, *merged)
+        finally:
+            FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToAFreeformHoleCapPieceLeftAloneStays(self):
+        # PR 340 round 5 (N7): A (x -3..3, y 0.3..2.5) across the top of the plate's hole: its
+        # piece on the plate is an n around the hole's top, its centre of mass (0, 1.49) over
+        # the hole, and its piece on the fill is a strip. B deleted from the sketch leaves A's
+        # n the only far cap on the plate: renamed with the plate alone as its marks, it takes
+        # the old reference only when the old centre lies over it, and the check wanted the
+        # face's nearest point to that centre inside the face. The n's is on its edge along
+        # the hole: "Missing face reference". Its own centre of mass is the old centre, which
+        # counts the same now
+        for kind in ("Pad", "Pocket"):
+            with self.subTest(kind=kind):
+                doc = FreeCAD.newDocument("PadUpToAFreeformHoleCapPieceLeftAloneStays")
+                try:
+                    feature, z = capsUpToAFreeformPlate(
+                        doc, kind, hole=True, capA=(-3, 0.3, 3, 2.5), block=(-8, -8, 18, 10)
+                    )
+                    self.assertTrue(feature.isValid(), feature.getStatusString())
+                    shape = feature.Shape
+                    self.assertEqual(len(farCaps(shape, z)), 3)
+                    n = centreOfFarCapAt(shape, z, -2, 1.4)
+                    self.assertAlmostEqual(n[0], 0, places=6)
+                    point = pointOnFarCap(feature, farCapAt(shape, z, -2, 1.4))
+                    sketch = feature.Profile[0]
+                    sketch.delGeometries([4, 5, 6, 7])
+                    doc.recompute()
+                    self.assertTrue(feature.isValid(), feature.getStatusString())
+                    self.assertEqual(len(farCaps(feature.Shape, z)), 2)
+                    self.assertTrue(point.isValid(), point.getStatusString())
+                    assertOnCap(self, point, z, *n)
+                finally:
+                    FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToAFreeformFaceCapsMigrate(self):
+        # ops#360's naming revision: a file saved with a datum on A's cap, reopened by a child
+        # FreeCADCmd under FREECAD_TEST_NAMING_REVISION_OFFSET=1, looks older and takes the
+        # naming migration: its reference is re-derived from geometry onto A's cap (none moved
+        # back, none broken), and stays there when A grows past B
+        import json
+        import os
+        import re
+        import subprocess
+        import tempfile
+
+        from PartDesignTests.TestNamingDump import _freecadCmd
+
+        feature, z = capsUpToAFreeformPlate(self.Doc, "Pad")
+        pointOnFarCap(feature, farCapAt(feature.Shape, z, 1, 1))
+        work = tempfile.mkdtemp(prefix="pad-caps-migrate-")
+        path = os.path.join(work, "caps.FCStd")
+        self.Doc.saveAs(path)
+        script = os.path.join(work, "child.py")
+        with open(script, "w", encoding="utf-8") as fh:
+            fh.write(_MIGRATION_CHILD)
+        out = os.path.join(work, "child.json")
+        env = dict(os.environ)
+        env["FREECAD_TEST_NAMING_REVISION_OFFSET"] = "1"
+        env["PAD_CAPS_FILE"] = path
+        env["PAD_CAPS_OUT"] = out
+        run = subprocess.run(
+            [_freecadCmd(), script],
+            env=env,
+            cwd=work,
+            timeout=600,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        log = run.stdout.decode("utf-8", "replace")
+        if os.path.isfile(out + ".error"):
+            with open(out + ".error", encoding="utf-8") as fh:
+                self.fail(fh.read() + "\n" + log)
+        with open(out, encoding="utf-8") as fh:
+            result = json.load(fh)
+        self.assertIn("FREECAD_TEST_NAMING_REVISION_OFFSET=1", log)
+        found = re.findall(
+            r"(\d+) element references re-derived from their geometry after a naming change: "
+            r"(\d+) moved back to their element, (\d+) broken",
+            log,
+        )
+        self.assertTrue(found, log)
+        self.assertGreater(sum(int(total) for total, _, _ in found), 0, log)
+        self.assertEqual(
+            [(int(moved), int(broken)) for _, moved, broken in found], [(0, 0)] * len(found), log
+        )
+        self.assertTrue(result["valid"], result)
+        self.assertLess((FreeCAD.Vector(*result["opened"]) - FreeCAD.Vector(1, 1, z)).Length, 1e-6)
+        centre = CAP_A_GROWN / 2
+        self.assertLess(
+            (FreeCAD.Vector(*result["grown"]) - FreeCAD.Vector(centre, centre, z)).Length,
+            1e-6,
+            result,
+        )
 
     def testTwoSidedPadWhoseSideMissesAFreeformFace(self):
         # ops#357 (ops#353's rethrow): side 2 of the 5 x 5 square goes up to a B-spline plate at

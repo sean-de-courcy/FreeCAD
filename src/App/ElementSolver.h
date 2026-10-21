@@ -468,6 +468,18 @@ AppExport bool atSamePlace(
     double distance
 );
 
+/** True if a section of \a name carries the ORD flag (ops#360, PR 340): a far cap told apart
+ * from its twins only by its place among them, which an edit that moves them all can trade. An
+ * exact reference to it that moved goes to solveOwner()'s moved check even with nothing at its
+ * old place.
+ */
+AppExport bool isOrderedName(std::string_view name);
+
+/** True if \a name is \a other up to the duplicate counter and not \a other itself: for ordered
+ * names (isOrderedName()), twins (ops#360, PR 340 round 5, the fingerprint's twin centroid).
+ */
+AppExport bool isCounterSiblingName(std::string_view name, std::string_view other);
+
 /** A cheap necessary condition for atSamePlace(\a saved, the element's fingerprint), from the
  * element's \a intrinsic part (type, kind, direction, radii and a circle's centre, measured as
  * its fingerprint measures them) and \a anchor, a point of its plane (a plane face), its line (a
@@ -657,6 +669,10 @@ struct AppExport SolveInput
     /// The target is in error (a failed feature passing its input through, ops#126): nothing is
     /// guessed against it (N2's never list, N10).
     bool targetFailed = false;
+    /// Whether the point lies over the face \a index within the distance: its nearest point on
+    /// the face is inside it, not on its boundary (ops#360, PR 340 round 4). Unset: no point
+    /// lies over any face.
+    std::function<bool(const std::string& index, const Base::Vector3d& point, double distance)> holdsPoint;
 };
 
 enum class SolveStatus
@@ -729,6 +745,12 @@ struct AppExport SolveOutcome
  *   lineage), not told apart only by the duplicate counter, and not two pieces of one split
  *   element (NameAncestry::isPieceOf() of their common sections), e.g. a pad's bottom edge where
  *   its top edge was after a lift by the pad's own length. The exact outcome's evidence says so.
+ *   Moved with nothing at its old place, an element whose name carries the ORD flag (a far cap
+ *   told apart from its twins only by its place among them, ops#360) is ambiguous all the same
+ *   when a counter sibling of its name lies as near the saved centre as it or nearer (a tie
+ *   within 2 %), and about as far from the twins' centroid as the saved centre (within 20 %): the
+ *   twins turned and traded names. Those siblings take role `place`. A move of the
+ *   pair or a twin's growth leaves the name standing.
  * - Collapse (PR 7): the entries with the same scope and `from` are a group. When `from` names
  *   an element of the target exactly and every member is exact on that element or missing and
  *   merged back into it (a structural piece of `from`, or saved geometry lying on the element
@@ -758,6 +780,12 @@ struct AppExport SolveOutcome
  *   outcome. Geometry runs for them only if they all hold the same valid fingerprint.
  * - Candidates: the overlap survivors (NameAncestry::structuralSurvivors() over every name of
  *   every pool element of the entry's type) and the name matches of that type, by \a source.
+ * - A merged far-cap piece (ops#360): when exactly one candidate's name is the old name with,
+ *   in one marked section (PRJ and MOD), more marks (connected elements) holding all of the old
+ *   ones, an edge among them, it is the only candidate, as if the old name were in its
+ *   ancestry: the pieces either side of a hole that became the ring around it resolve to the
+ *   ring, together. Without such a candidate, the one marked by the old marks' face alone (the
+ *   only far cap on it) counts the same if the saved centre lies over it (\a holdsPoint).
  * - The IDX source (Task 2 PR 6): when the old name stands for an IDX section
  *   (NameAncestry::indexSource()), the elements named by a section of the same source under any
  *   op code (NameAncestry::sameIndexSource()), and, for a target without an element map whose

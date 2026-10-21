@@ -31,6 +31,8 @@
 #include <TopoDS.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopTools_DataMapOfShapeListOfShape.hxx>
+#include <TopTools_DataMapOfShapeInteger.hxx>
+#include <TopTools_DataMapOfShapeShape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopTools_MapOfShape.hxx>
 #include "TopoShape.h"
@@ -275,23 +277,50 @@ struct PartExport GenericShapeMapper: ShapeMapper
  *  vertices generate meet the up-to shape, are those profile elements' projections (PRJ), as
  *  BRepFeat named them. Generated from the side faces instead, a far edge had the profile edge in
  *  its ancestry, and the solver took it for the profile's own edge silently (ops#334).
+ *
+ *  Given the up-to shape, the far caps, its pieces in the solids that start at a profile face,
+ *  are that face's projections too, as BRepFeat names the top (the prism, ops#360). Named only
+ *  as pieces of the up-to shape (MOD), they were told apart by a counter in the result's face
+ *  order, which follows the profile's faces, sorted by area: a sketch edit that reordered them
+ *  moved a reference to another cap silently.
+ *
+ *  A profile face whose cap the up-to shape cuts into several pieces (a shell's faces, a hole in
+ *  the up-to face) has one projection per piece. Each such piece carries marks, the elements of
+ *  the inputs that bound it (marksOf()), since a counter in the pieces' order shifts when an edit
+ *  adds or removes a piece (ops#360, PR 340 round 1). The marks are only what tells it apart
+ *  from the other caps (round 2): a piece alone on its face of the up-to shape is marked by that
+ *  face, others by the edges that bound it too, and pieces with the same marks still by the
+ *  duplicate counter (counterOf()).
  */
 class PartExport UpToSplitMapper: public MapperMaker
 {
 public:
     /// `firstShape` gives the sweep's copy of an element of the profile, as the sweep's
     /// FirstShape(S) does (BRepPrimAPI_MakePrism, BRepPrimAPI_MakeRevol); `result` is the kept
-    /// solids
+    /// solids. Without `upTo`, the far caps are left to the caller's sources (the Revolution's
+    /// up-to face isn't one, so its caps take their edges' names)
     UpToSplitMapper(
         BRepAlgoAPI_Splitter& splitter,
         BRepBuilderAPI_MakeShape& sweep,
         const std::function<TopoDS_Shape(const TopoDS_Shape&)>& firstShape,
         const TopoDS_Shape& profile,
-        const TopoDS_Shape& result
+        const TopoDS_Shape& result,
+        const TopoDS_Shape& upTo = TopoDS_Shape()
     );
     const std::vector<TopoDS_Shape>& modified(const TopoDS_Shape& s) const override;
     const std::vector<TopoDS_Shape>& generated(const TopoDS_Shape& s) const override;
     const std::vector<TopoDS_Shape>& projected(const TopoDS_Shape& s) const override;
+    /// The elements of the inputs that tell a far cap apart from the other pieces of its profile
+    /// face's cap: the up-to shape's face it is a piece of and the edges it is bounded by, as the
+    /// start cap's edges whose projections they are and the up-to shape's edges they are pieces
+    /// of. Empty for a cap in one piece, and for any other element
+    std::vector<TopoDS_Shape> marksOf(const TopoDS_Shape& cap) const;
+    /// For a far cap whose marks other pieces of its cap share, the duplicate counter of its
+    /// name: how many share them and its place among them, by their centres. 0 otherwise
+    int counterOf(const TopoDS_Shape& cap) const;
+    /// True if `shape` is a far cap, bound as a projection; a face of the up-to shape the split
+    /// leaves whole is one too
+    bool isFarCap(const TopoDS_Shape& shape) const;
 
     /// The pieces the split leaves of the faces of `shape`; a face it doesn't cut is its own
     static TopTools_IndexedMapOfShape piecesOf(
@@ -302,9 +331,27 @@ public:
     static TopoDS_Shape keptShape(const std::vector<TopoDS_Shape>& solids);
 
 private:
+    void bindFarCaps(
+        BRepAlgoAPI_Splitter& splitter,
+        const std::function<TopoDS_Shape(const TopoDS_Shape&)>& firstShape,
+        const TopoDS_Shape& profile,
+        const TopoDS_Shape& result,
+        const TopoDS_Shape& upTo
+    );
+    void markCaps(
+        BRepAlgoAPI_Splitter& splitter,
+        const TopoDS_Shape& upTo,
+        const std::vector<TopTools_ListOfShape>& severalPieces
+    );
+
     TopTools_IndexedMapOfShape kept;
     TopTools_MapOfShape farEnd;
+    TopTools_MapOfShape farCaps;
     TopTools_DataMapOfShapeListOfShape projections;
+    /// A far edge's source: the start cap's edge it is the projection of
+    TopTools_DataMapOfShapeShape farSources;
+    TopTools_DataMapOfShapeListOfShape capMarks;
+    TopTools_DataMapOfShapeInteger capCounters;
 };
 
 /// Parameters for TopoShape::makeElementFilledFace()

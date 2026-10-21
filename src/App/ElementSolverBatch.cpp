@@ -40,6 +40,7 @@ namespace App
 namespace
 {
 ElementHintsFunction elementHintsFunction = nullptr;
+ElementHoldsPointFunction elementHoldsPointFunction = nullptr;
 
 struct MigrationCounts
 {
@@ -54,6 +55,11 @@ std::map<std::string, MigrationCounts> migrationCounts;
 void setElementHintsFunction(ElementHintsFunction function)
 {
     elementHintsFunction = function;
+}
+
+void setElementHoldsPointFunction(ElementHoldsPointFunction function)
+{
+    elementHoldsPointFunction = function;
 }
 
 void countReferenceMigration(const DocumentObject* owner, MigrationOutcome outcome)
@@ -372,7 +378,10 @@ bool exactNeedsSolving(const SolverEntry& entry,
         && Data::faceWithinOldPlane(saved, now, diagonal, tolerances, distance)) {
         return true;
     }
-    return !Data::atSamePlace(saved, now, diagonal, tolerances, distance) && occupied();
+    // A twin (ops#360, PR 340 round 3) that moved may have traded names with another twin that
+    // moved too: nothing at its old place, solveOwner() compares the twins' distances
+    return !Data::atSamePlace(saved, now, diagonal, tolerances, distance)
+        && (occupied() || Data::isOrderedName(plainName(entry.exactName)));
 }
 
 // Whether an exact hit is still the saved element in a naming migration (ops#103, rule 3): at
@@ -1284,6 +1293,12 @@ bool solveElementReferences(DocumentObject* feature,
             return faces;
         };
         input.neighboursOf = neighboursOf;
+        if (elementHoldsPointFunction) {
+            input.holdsPoint =
+                [geo](const std::string& index, const Base::Vector3d& point, double distance) {
+                    return elementHoldsPointFunction(geo, index.c_str(), point, distance);
+                };
+        }
         for (const auto* entry : entries) {
             Data::SolveInput::Entry item;
             item.type = indexType(entry->oldIndex);
@@ -1586,10 +1601,13 @@ bool solveElementReferences(DocumentObject* feature,
                     // The evidence's verb: `moved`, or `changed` in place.
                     const char* verb =
                         outcome.evidence.rfind("changed", 0) == 0 ? " changed and " : " moved and ";
+                    // A twin nearer the old place than the hit (ops#360, PR 340 round 3)
+                    const bool nearer = outcome.evidence.find(" nearer where it was")
+                        != std::string::npos;
                     item.headline = "Ambiguous " + type + " reference: " + entry.oldIndex + verb
                         + places
                         + (places.find(" and ") == std::string::npos ? " sits" : " sit")
-                        + " where it was";
+                        + (nearer ? " nearer where it was" : " where it was");
                 }
                 FC_LOG(
                     referenceName(entry.prop)
@@ -1691,6 +1709,64 @@ bool reboundInPlace(DocumentObject* obj, const std::string& sub, const GuessReco
                 && here(alternative.index);
         }
     );
+}
+
+bool elementTwinCentroid(const GeoFeature* geo, const char* element, Base::Vector3d& centroid, int& count)
+{
+    count = 0;
+    const PropertyComplexGeoData* prop = geo ? geo->getPropertyOfGeometry() : nullptr;
+    const Data::ComplexGeoData* data = prop ? prop->getComplexData() : nullptr;
+    if (!data || !element || !element[0]) {
+        return false;
+    }
+    Data::IndexedName indexed(element);
+    if (!indexed) {
+        return false;
+    }
+    // The element's ordered names, plain, as the solver sees them (poolOf())
+    std::vector<std::string> ordered;
+    for (const auto& mapped : data->getElementMappedNames(indexed)) {
+        std::string plain = plainName(mapped.first.toString());
+        if (Data::isOrderedName(plain)) {
+            ordered.push_back(std::move(plain));
+        }
+    }
+    if (ordered.empty()) {
+        return false;
+    }
+    // Its twins: the elements of its type with a name that is one of these up to the counter
+    std::set<std::string> twins;
+    for (const auto& mapped : data->getElementMap()) {
+        if (!mapped.index || mapped.index == indexed
+            || std::strcmp(mapped.index.getType(), indexed.getType()) != 0) {
+            continue;
+        }
+        const std::string plain = plainName(mapped.name.toString());
+        if (std::any_of(ordered.begin(), ordered.end(), [&](const std::string& name) {
+                return Data::isCounterSiblingName(plain, name);
+            })) {
+            twins.insert(mapped.index.toString());
+        }
+    }
+    Data::ElementFingerprint own;
+    if (twins.empty() || !geo->getElementFingerprint(element, own) || !own.center) {
+        return false;
+    }
+    Base::Vector3d sum = *own.center;
+    int number = 1;
+    for (const auto& index : twins) {
+        Data::ElementFingerprint twin;
+        if (geo->getElementFingerprint(index.c_str(), twin) && twin.center) {
+            sum += *twin.center;
+            ++number;
+        }
+    }
+    if (number < 2) {
+        return false;
+    }
+    centroid = sum / static_cast<double>(number);
+    count = number;
+    return true;
 }
 
 }  // namespace App

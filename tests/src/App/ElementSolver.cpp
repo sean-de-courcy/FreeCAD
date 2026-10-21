@@ -5170,6 +5170,522 @@ TEST(Moved, hintsSaveMeasurements)
     }
 }
 
+namespace
+{
+
+// PR 340 round 3: a piece of the far cap of the Pad (tag 7) from profile face A (sketch 5's
+// lines 1-8), up to a plate: A's start cap's projection, `<start cap>;7;XTR;0;F;<counter>;
+// <flags>;<marks>`.
+std::string farPiece(
+    const std::vector<std::string>& marks,
+    int counter = 0,
+    const std::vector<std::string>& flags = {"PRJ", "MOD"}
+)
+{
+    std::vector<std::string> edges;
+    for (int geoId = 1; geoId <= 8; ++geoId) {
+        edges.push_back(sketchEdge(geoId));
+    }
+    return Data::MappedName::makeEncodedSection(
+        {},
+        {lowFace(edges)},
+        "7",
+        "XTR",
+        "0",
+        'F',
+        std::to_string(counter),
+        flags,
+        marks
+    );
+}
+
+// An element of the up-to plate (Part feature, tag 3), as a mark.
+std::string plateElement(const char* id, char elementType)
+{
+    return section({id}, {}, 3, "SRC", 0, elementType, {"SRC"});
+}
+
+// A far cap's piece at (x, y) on the plate at z = 10.
+ElementFingerprint capAt(double x, double y)
+{
+    return fingerprint('F', "Plane", 5, Base::Vector3d(x, y, 10), Base::Vector3d(0, 0, 1));
+}
+
+// A disc's pieces either side of an elliptic hole, both bounded by the plate, the ellipse and the
+// circle alone: told apart only by their order (the duplicate counter), with the ORD flag, or
+// without it in \a flags. Face1 holds counter \a bottom and sits at (3.1, 0.6), Face2 the other
+// at (3.1, 5.6); the reference was saved on counter 2, the top piece, at (3, 5.5).
+SolveInput twinPieces(int bottom, const std::vector<std::string>& flags = {"PRJ", "MOD", "ORD"})
+{
+    const std::vector<std::string> marks {
+        plateElement("plate", 'F'),
+        plateElement("ellipse", 'E'),
+        plateElement("circle", 'E')
+    };
+    SolveInput input;
+    input.diagonal = 40;
+    input.pool["Face"] = {
+        element("Face1", {farPiece(marks, bottom, flags)}),
+        element("Face2", {farPiece(marks, 3 - bottom, flags)}),
+        element("Face3", {farPiece({plateElement("fill", 'F')})}),
+    };
+    auto entry = exact(bottom == 2 ? "Face1" : "Face2");
+    entry.exactName = farPiece(marks, 2, flags);
+    entry.fingerprint = capAt(3, 5.5);
+    input.entries = {entry};
+    measure(
+        input,
+        {{"Face1", capAt(3.1, 0.6)}, {"Face2", capAt(3.1, 5.6)}, {"Face3", capAt(3, 3)}},
+        nullptr
+    );
+    return input;
+}
+
+}  // namespace
+
+TEST(Moved, twinsThatTradedNamesBreak)
+{
+    // An edit moved both twins a little and traded their order: the top's name holds the bottom
+    // piece, and nothing sits at the old place. The top piece, the name's counter sibling, lies
+    // nearer it than the hit: broken, the twin first (PR 340 round 3).
+    auto outcome = Data::solveOwner(twinPieces(2))[0];
+    EXPECT_EQ(
+        describe(outcome),
+        "broken  -1 [Face2 Face1 ] moved 4.901 mm; its twin Face2 sits nearer where it was"
+    );
+    EXPECT_EQ(outcome.candidateRoles, (std::vector<std::string> {"place", "name"}));
+}
+
+TEST(Moved, twinsInTheirOrderKeepTheirNames)
+{
+    // Moved the same, in their order: the name holds the top piece, the nearer one.
+    EXPECT_EQ(describe(Data::solveOwner(twinPieces(1))[0]), "exact Face2 0 [] ");
+}
+
+TEST(Moved, counterSiblingsWithoutTheOrderFlagMoveAlone)
+{
+    // Elements told apart by the duplicate counter without the ORD flag keep the rule as it
+    // was: moved with nothing at the old place, the name stands.
+    EXPECT_EQ(describe(Data::solveOwner(twinPieces(2, {"PRJ", "MOD"}))[0]), "exact Face1 0 [] ");
+}
+
+namespace
+{
+
+// PR 340 round 4: twins of one far cap (the ORD flag), told apart by the duplicate counter
+// `count (count - 1) / 2 + place`, each at its place now; the reference was saved on the twin
+// with counter \a savedCounter at \a saved, and its name now holds the twin with that counter.
+// Round 5: the saved fingerprint holds the twins' centroid then, \a savedCentroid, and their
+// number, \a savedCount (0: an older record, without them).
+SolveInput placedTwins(
+    const std::vector<Base::Vector3d>& places,
+    int savedCounter,
+    const Base::Vector3d& saved,
+    std::optional<Base::Vector3d> savedCentroid = std::nullopt,
+    int savedCount = 0
+)
+{
+    const std::vector<std::string> marks {
+        plateElement("plate", 'F'),
+        plateElement("hole", 'E'),
+        plateElement("circle", 'E')
+    };
+    const int count = static_cast<int>(places.size());
+    SolveInput input;
+    input.diagonal = 40;
+    std::map<std::string, ElementFingerprint> fingerprints;
+    std::string hit;
+    for (int place = 0; place < count; ++place) {
+        const int counter = count * (count - 1) / 2 + place;
+        const std::string index = "Face" + std::to_string(place + 1);
+        input.pool["Face"].push_back(element(index, {farPiece(marks, counter, {"PRJ", "MOD", "ORD"})}));
+        fingerprints[index] = capAt(places[place].x, places[place].y);
+        if (counter == savedCounter) {
+            hit = index;
+        }
+    }
+    auto entry = exact(hit);
+    entry.exactName = farPiece(marks, savedCounter, {"PRJ", "MOD", "ORD"});
+    entry.fingerprint = capAt(saved.x, saved.y);
+    entry.fingerprint.twinCentroid = savedCentroid;
+    entry.fingerprint.twinCount = savedCount;
+    input.entries = {entry};
+    measure(input, fingerprints, nullptr);
+    return input;
+}
+
+// The pair's centroid when the reference was saved: the top twin at (3, 5.5), the bottom one at
+// (3, 0.5)
+const Base::Vector3d pairCentroid(3, 3, 10);
+
+}  // namespace
+
+TEST(Moved, twinsMovedTogetherKeepTheirNames)
+{
+    // PR 340 round 4 (N2): the pair one above the other (spacing 5) moved up 3 mm together, in
+    // their order. The bottom twin now lies nearer the top one's old place (2 mm) than the top
+    // twin does (3 mm), which round 3 took for a trade. Round 5: the top twin's offset from the
+    // pair's centroid is the saved one. The name stands.
+    EXPECT_EQ(
+        describe(
+            Data::solveOwner(placedTwins(
+                {Base::Vector3d(3, 3.5, 10), Base::Vector3d(3, 8.5, 10)},
+                2,
+                Base::Vector3d(3, 5.5, 10),
+                pairCentroid,
+                2
+            ))[0]
+        ),
+        "exact Face2 0 [] "
+    );
+    // Round 5 (N6): moved up 4.5, 1.8 half-spacings, the bottom twin 0.5 from the old place,
+    // which round 4's band took for a turn. The offsets are the same: the name stands.
+    EXPECT_EQ(
+        describe(
+            Data::solveOwner(placedTwins(
+                {Base::Vector3d(3, 5, 10), Base::Vector3d(3, 10, 10)},
+                2,
+                Base::Vector3d(3, 5.5, 10),
+                pairCentroid,
+                2
+            ))[0]
+        ),
+        "exact Face2 0 [] "
+    );
+    // One twin grown a lot, the other where it was (the top one's centre 7 mm up): the bottom
+    // twin is nearer, 5 mm, but the top twin's offset (0, 6) is nearer the saved one (0, 2.5)
+    // than the bottom twin's (0, -6).
+    EXPECT_EQ(
+        describe(
+            Data::solveOwner(placedTwins(
+                {Base::Vector3d(3, 0.5, 10), Base::Vector3d(3, 12.5, 10)},
+                2,
+                Base::Vector3d(3, 5.5, 10),
+                pairCentroid,
+                2
+            ))[0]
+        ),
+        "exact Face2 0 [] "
+    );
+}
+
+TEST(Moved, twinsTurnedOffTheirCentreBreak)
+{
+    // PR 340 round 4: the hole turned 60 degrees about a point off the twins' centre, so the
+    // twins changed shape and their centroid moved a little. Round 5: the twin where the old
+    // piece went has the offset (-2.15, 1.25), 2.49 from the saved one, (0, 2.5); the hit's lies
+    // 4.32 from it. A trade: broken.
+    auto outcome = Data::solveOwner(placedTwins(
+        {Base::Vector3d(0.9, 4.4, 10), Base::Vector3d(5.2, 1.9, 10)},
+        2,
+        Base::Vector3d(3, 5.5, 10),
+        pairCentroid,
+        2
+    ))[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << describe(outcome);
+    EXPECT_EQ(outcome.candidates, (std::vector<std::string> {"Face1", "Face2"}));
+}
+
+TEST(Moved, unequalTwinsTurnedBreak)
+{
+    // PR 340 round 5 (N5): the disc 1 mm off the hole's centre along the twins' axis, the hole
+    // turned 60 degrees about its own centre: the twins (centres (3, 5.25) and (3, 1.55) then,
+    // centroid (3, 3.4)) changed shape and traded names. Round 4's band wanted the sibling as far
+    // from the twins' centroid now as the saved centre (1.80 against 1.38, 23 % apart) and let
+    // the name stand on the other twin's piece. The offsets: the sibling's (-1.565, 0.89) lies
+    // 1.84 from the saved (0, 1.85), the hit's (1.565, -0.89) 3.15. Broken, the twin first.
+    auto outcome = Data::solveOwner(placedTwins(
+        {Base::Vector3d(1.71, 4.79, 10), Base::Vector3d(4.84, 3.01, 10)},
+        2,
+        Base::Vector3d(3, 5.25, 10),
+        Base::Vector3d(3, 3.4, 10),
+        2
+    ))[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << describe(outcome);
+    EXPECT_EQ(outcome.candidates, (std::vector<std::string> {"Face1", "Face2"}));
+    EXPECT_EQ(outcome.candidateRoles, (std::vector<std::string> {"place", "name"}));
+    // Turned 30 degrees, in their order: the hit's offset is the nearer, the name stands.
+    EXPECT_EQ(
+        describe(
+            Data::solveOwner(placedTwins(
+                {Base::Vector3d(3.6, 1.7, 10), Base::Vector3d(2.2, 4.95, 10)},
+                2,
+                Base::Vector3d(3, 5.25, 10),
+                Base::Vector3d(3, 3.4, 10),
+                2
+            ))[0]
+        ),
+        "exact Face2 0 [] "
+    );
+}
+
+TEST(Moved, twinsInAnOlderRecordCompareTheirCentres)
+{
+    // PR 340 round 5: a fingerprint saved without the twins' centroid (an older build), or with
+    // another number of twins than the name has now, compares the centres themselves (round 3):
+    // the pair moved up 3 mm together, the bottom twin nearer the old place than the top one,
+    // breaks. Loud, never a pick.
+    const std::vector<std::pair<std::optional<Base::Vector3d>, int>> records {
+        {std::nullopt, 0},
+        {pairCentroid, 3},
+    };
+    for (const auto& [centroid, count] : records) {
+        auto outcome = Data::solveOwner(placedTwins(
+            {Base::Vector3d(3, 3.5, 10), Base::Vector3d(3, 8.5, 10)},
+            2,
+            Base::Vector3d(3, 5.5, 10),
+            centroid,
+            count
+        ))[0];
+        EXPECT_EQ(outcome.status, SolveStatus::Broken) << count << describe(outcome);
+        EXPECT_EQ(outcome.candidates, (std::vector<std::string> {"Face1", "Face2"})) << count;
+    }
+    // Turned 60 degrees and traded, as in unequalTwinsTurnedBreak: broken too.
+    auto outcome = Data::solveOwner(placedTwins(
+        {Base::Vector3d(1.71, 4.79, 10), Base::Vector3d(4.84, 3.01, 10)},
+        2,
+        Base::Vector3d(3, 5.25, 10)
+    ))[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << describe(outcome);
+    // In their order, turned a little: the name stands.
+    EXPECT_EQ(
+        describe(
+            Data::solveOwner(placedTwins(
+                {Base::Vector3d(3.2, 0.5, 10), Base::Vector3d(2.8, 5.5, 10)},
+                2,
+                Base::Vector3d(3, 5.5, 10)
+            ))[0]
+        ),
+        "exact Face2 0 [] "
+    );
+}
+
+TEST(Moved, tiedTwinsBreak)
+{
+    // PR 340 round 4 (N3): three twins at radius 2 about (3, 3), turned 60 degrees so that
+    // they traded names: the reference saved on the twin at 300 degrees now names the piece at
+    // 240, as far from the saved centre (2 mm) as the piece at 0, where the twin went (here a
+    // hair farther, 0.1 um, which round 3's strict comparison let stand). A tie is a trade too:
+    // broken, the twin first. The same with the twins' centroid in the saved fingerprint
+    // (round 5) as without it.
+    const double s = std::sqrt(3.0);
+    for (int count : {3, 0}) {
+        auto outcome = Data::solveOwner(placedTwins(
+            {Base::Vector3d(2, 3 - s, 10), Base::Vector3d(2, 3 + s, 10), Base::Vector3d(5.0001, 3, 10)},
+            3,
+            Base::Vector3d(4, 3 - s, 10),
+            count ? std::optional<Base::Vector3d>(Base::Vector3d(3, 3, 10)) : std::nullopt,
+            count
+        ))[0];
+        EXPECT_EQ(outcome.status, SolveStatus::Broken) << count << " " << describe(outcome);
+        EXPECT_EQ(outcome.candidates, (std::vector<std::string> {"Face3", "Face1"})) << count;
+        EXPECT_EQ(outcome.candidateRoles, (std::vector<std::string> {"place", "name"})) << count;
+    }
+}
+
+TEST(Moved, twinsTurnedBySymmetryOffCentreBreak)
+{
+    // PR 340 round 6 (N9): four twins of a disc 0.3 mm off the centre of a hole of four lobes,
+    // the hole turned exactly 45 degrees, its symmetry angle. The reference saved on the twin
+    // at 225 degrees, (1.806, 1.735), offset (-1.333, -1.265) from the twins' centroid then,
+    // now names the piece at 180, offset (-1.828, 0), 1.36 from the old offset; the piece at
+    // 270, where the material went, has (-0.038, -1.87), 1.43 from it: 5 % farther, past the
+    // 2 % tie. Both offsets lie about 45 degrees from the old one (43.5 and 45.4): an angular
+    // tie, broken, the twin first.
+    auto outcome = Data::solveOwner(placedTwins(
+        {Base::Vector3d(1.31, 3, 10),
+         Base::Vector3d(3.10, 1.13, 10),
+         Base::Vector3d(3.10, 4.87, 10),
+         Base::Vector3d(5.04, 3, 10)},
+        6,
+        Base::Vector3d(1.806, 1.735, 10),
+        Base::Vector3d(3.1385, 3, 10),
+        4
+    ))[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << describe(outcome);
+    EXPECT_EQ(outcome.candidates, (std::vector<std::string> {"Face2", "Face1"}));
+    EXPECT_EQ(outcome.candidateRoles, (std::vector<std::string> {"place", "name"}));
+}
+
+TEST(Moved, twinsTurnedBySymmetryFarOffCentreBreak)
+{
+    // PR 340 round 7 (N12): as above, a disc of radius 2 0.75 mm off the hole's centre. The
+    // twin at 225 degrees, (2.095, 2.026), offset (-1.242, -0.974) from the twins' centroid
+    // then, now names the piece at 180, offset (-1.538, 0): 38 degrees from the old offset and
+    // 1.02 from it. The piece at 270, where the material went, has (-0.138, -1.65): 47 degrees
+    // and 1.30, 27 % farther. The angles lie 9 degrees apart, past round 6's 5-degree band:
+    // within the 12-degree band, a tie, broken, the twin first.
+    auto outcome = Data::solveOwner(placedTwins(
+        {Base::Vector3d(1.77, 3, 10),
+         Base::Vector3d(3.17, 1.35, 10),
+         Base::Vector3d(3.17, 4.65, 10),
+         Base::Vector3d(5.12, 3, 10)},
+        6,
+        Base::Vector3d(2.095, 2.026, 10),
+        Base::Vector3d(3.337, 3, 10),
+        4
+    ))[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << describe(outcome);
+    EXPECT_EQ(outcome.candidates, (std::vector<std::string> {"Face2", "Face1"}));
+    EXPECT_EQ(outcome.candidateRoles, (std::vector<std::string> {"place", "name"}));
+}
+
+TEST(Moved, eighteenTwinsTurnedBySymmetryBreak)
+{
+    // PR 340 round 7: the move guard (a hit within 5 degrees of the old offset has no angular
+    // tie) is not the band (12 degrees). Eighteen twins 20 degrees apart on a ring of radius 3
+    // about (10, 10), the reference saved on the one at 0 degrees, turned exactly 10 degrees:
+    // the name now holds the twin at -10, and the material went to the one at +10, an
+    // irregular piece whose centre lies 3.3 out. Both offsets lie 10 degrees from the old
+    // one, but the +10 one is 19 % farther from it: no 2 % tie. A guard as wide as the band
+    // would take the hit for a move; at 5 degrees it ties, broken, the twin first.
+    auto at = [](double degrees, double radius) {
+        const double a = degrees * std::numbers::pi / 180.0;
+        return Base::Vector3d(10 + radius * std::cos(a), 10 + radius * std::sin(a), 10);
+    };
+    std::vector<Base::Vector3d> places {at(-10, 3), at(10, 3.3)};
+    for (int k = 2; k < 18; ++k) {
+        places.push_back(at(-10 + 20 * k, 3));
+    }
+    auto outcome = Data::solveOwner(
+        placedTwins(places, 18 * 17 / 2, at(0, 3), Base::Vector3d(10, 10, 10), 18)
+    )[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << describe(outcome);
+    EXPECT_EQ(outcome.candidates, (std::vector<std::string> {"Face2", "Face1"}));
+    EXPECT_EQ(outcome.candidateRoles, (std::vector<std::string> {"place", "name"}));
+}
+
+TEST(Moved, twinsInARowKeepTheirNamesUnderTheAngularTie)
+{
+    // PR 340 round 6: the angular tie needs the two offsets about as long. Four twins in a row
+    // through (3, 3), the reference saved on the outer right one at (6, 3), turned 10 degrees
+    // about (3, 3): the twin next to it lies on the same ray from the centroid, at the same
+    // angle from the old offset, but a third as far out. No tie: the name stands. Moved
+    // without a turn, the hit's offset is the old one: no angular tie either.
+    const double c = std::cos(10.0 * std::numbers::pi / 180.0);
+    const double s = std::sin(10.0 * std::numbers::pi / 180.0);
+    std::vector<Base::Vector3d> turned;
+    std::vector<Base::Vector3d> moved;
+    for (double x : {-3.0, -1.0, 1.0, 3.0}) {
+        turned.emplace_back(3 + x * c, 3 + x * s, 10);
+        moved.emplace_back(3.5 + x, 7, 10);
+    }
+    for (const auto& places : {turned, moved}) {
+        EXPECT_EQ(
+            describe(
+                Data::solveOwner(
+                    placedTwins(places, 9, Base::Vector3d(6, 3, 10), Base::Vector3d(3, 3, 10), 4)
+                )[0]
+            ),
+            "exact Face4 0 [] "
+        );
+    }
+}
+
+TEST(SolveOwner, mergedFarCapPieceAloneOnItsFaceNeedsTheCentre)
+{
+    // PR 340 round 4 (N1): A's pieces either side of a hole in the plate (marks: the plate and
+    // the hole's left or right edge) became one ring around it, the only far cap on the plate,
+    // so its marks are the plate alone and don't hold the old ones. The one candidate marked by
+    // the old piece's face alone takes it when the saved centre lies over it.
+    const auto plate = plateElement("plate", 'F');
+    const auto oldLeft = farPiece({plate, plateElement("left", 'E')});
+    const auto oldRight = farPiece({plate, plateElement("right", 'E')});
+    SolveInput input;
+    input.pool["Face"] = {
+        element("Face4", {farPiece({plate})}),
+        element("Face7", {farPiece({plateElement("fill", 'F')})}),
+        element("Face9", {sketchEdge(9)}),
+    };
+    auto entryAt = [](const std::string& name, double x) {
+        auto entry = missing(name);
+        entry.fingerprint = capAt(x, 0);
+        return entry;
+    };
+    input.entries = {entryAt(oldLeft, -2), entryAt(oldRight, 2)};
+    measure(input, {{"Face4", capAt(0, 0)}, {"Face7", capAt(0, 0)}}, nullptr);
+    std::vector<std::string> asked;
+    input.holdsPoint = [&](const std::string& index, const Base::Vector3d&, double) {
+        asked.push_back(index);
+        return index == "Face4";
+    };
+    for (const auto& outcome : Data::solveOwner(input)) {
+        EXPECT_EQ(outcome.status, SolveStatus::Resolved) << describe(outcome);
+        EXPECT_EQ(outcome.element, "Face4") << describe(outcome);
+    }
+    EXPECT_FALSE(asked.empty());
+    EXPECT_TRUE(std::all_of(asked.begin(), asked.end(), [](const auto& index) {
+        return index == "Face4";
+    }));
+
+    // The saved centre not over it (a face renamed by a reordered up-to shell): broken.
+    input.holdsPoint = [](const std::string&, const Base::Vector3d&, double) {
+        return false;
+    };
+    for (const auto& outcome : Data::solveOwner(input)) {
+        EXPECT_EQ(outcome.status, SolveStatus::Broken) << describe(outcome);
+    }
+    // No geometry to ask: broken.
+    input.holdsPoint = nullptr;
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
+
+    // Marked by another face than the old piece's: broken, whatever the geometry says.
+    input.holdsPoint = [](const std::string&, const Base::Vector3d&, double) {
+        return true;
+    };
+    input.pool["Face"][0] = element("Face4", {farPiece({plateElement("other", 'F')})});
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
+}
+
+TEST(SolveOwner, mergedFarCapPiecesResolveToTheirWhole)
+{
+    // PR 340 round 3: A's pieces either side of a hole in the plate (marks: the plate and the
+    // hole's left or right edge) became one ring around it (the plate and the hole's four
+    // edges). The piece on the hole's fill shares their start cap as fully, and survives tier 1
+    // beside the ring; the ring's name holds each old piece's, so it takes them, together.
+    const auto plate = plateElement("plate", 'F');
+    const auto left = plateElement("left", 'E');
+    const auto right = plateElement("right", 'E');
+    const auto oldLeft = farPiece({plate, left});
+    const auto oldRight = farPiece({plate, right});
+    SolveInput input;
+    input.pool["Face"] = {
+        element(
+            "Face4",
+            {farPiece({plate, left, plateElement("top", 'E'), right, plateElement("bottom", 'E')})}
+        ),
+        element("Face7", {farPiece({plateElement("fill", 'F')})}),
+        element("Face9", {sketchEdge(9)}),
+    };
+    input.entries = {missing(oldLeft), missing(oldRight)};
+    auto outcomes = Data::solveOwner(input);
+    for (const auto& outcome : outcomes) {
+        EXPECT_EQ(outcome.status, SolveStatus::Resolved) << describe(outcome);
+        EXPECT_EQ(outcome.element, "Face4") << describe(outcome);
+    }
+    //   one of them alone
+    input.entries = {missing(oldLeft)};
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Resolved) << describe(outcome);
+    EXPECT_EQ(outcome.element, "Face4");
+
+    // A piece marked by its face alone is no evidence: a renumbered up-to shell gives the face's
+    // name to another face, whose pieces then hold it (the probe's seam/reorder).
+    input.entries = {missing(farPiece({plate}))};
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
+    input.entries = {missing(oldLeft)};
+
+    // Two candidates that hold the old piece: no evidence, as before.
+    input.pool["Face"].push_back(element("Face5", {farPiece({plate, left, plateElement("top", 'E')})}));
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
+    // A projection that isn't a marked piece (PRJ alone) gets no such evidence either.
+    input.pool["Face"].pop_back();
+    input.pool["Face"][0] = element("Face4", {farPiece({plate, left, right}, 0, {"PRJ"})});
+    input.pool["Face"][1] = element("Face7", {farPiece({plateElement("fill", 'F')}, 0, {"PRJ"})});
+    input.entries = {missing(farPiece({plate, left}, 0, {"PRJ"}))};
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
+}
+
 TEST(Moved, hintKeepsATwinAtTheToleranceEdge)
 {
     // Twins as far from the saved element as atSamePlace() allows (just inside every

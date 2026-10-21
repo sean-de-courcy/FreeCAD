@@ -217,6 +217,27 @@ using ElementHintsFunction = bool (*)(const GeoFeature* geo,
                                       std::vector<ElementHint>& hints);
 AppExport void setElementHintsFunction(ElementHintsFunction function);
 
+/** Whether \a point lies over the face \a element (`Face7`) of \a geo's shape, within
+ * \a distance: its nearest point on the face is inside the face, not on its boundary (ops#360,
+ * PR 340 round 4). False for another element type, or when it can't be told. Part sets it;
+ * without it no point lies over any face.
+ */
+using ElementHoldsPointFunction
+    = bool (*)(const GeoFeature* geo, const char* element, const Base::Vector3d& point, double distance);
+AppExport void setElementHoldsPointFunction(ElementHoldsPointFunction function);
+
+/** The mean of the centres of \a element (`Face7`) of \a geo's shape and of its twins, and their
+ * number (ops#360, PR 340 round 5): the elements of its type with a name that is one of its
+ * ordered names (Data::isOrderedName()) up to the duplicate counter. Each centre as the element's
+ * fingerprint measures it. False when the element has no ordered name or no twin.
+ */
+AppExport bool elementTwinCentroid(
+    const GeoFeature* geo,
+    const char* element,
+    Base::Vector3d& centroid,
+    int& count
+);
+
 /// The bare mapped name in a shadow's new-style name (`Body.;<name>.Face3` -> `<name>`), or an
 /// empty string.
 AppExport std::string bareMappedName(const std::string& newStyleName);

@@ -25,9 +25,13 @@
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <BRepAlgoAPI_Splitter.hxx>
+#include <BRepGProp.hxx>
+#include <GProp_GProps.hxx>
+#include <Precision.hxx>
 #include <TopExp.hxx>
 #include <TopoDS_Compound.hxx>
 #include <TopoDS_Edge.hxx>
+#include <TopoDS_Face.hxx>
 #include <algorithm>
 #include <array>
 
@@ -226,12 +230,53 @@ void GenericShapeMapper::init(const TopoShape& src, const TopoDS_Shape& dst)
     }
 }
 
+namespace
+{
+/// True if the pieces of a cap meet one another along `seams` alone, the seams of the up-to
+/// shape's faces (a closed B-spline face's): they are one cap, which a refine makes one face
+bool joinedAtSeams(const TopTools_ListOfShape& pieces, const TopTools_MapOfShape& seams)
+{
+    std::vector<TopoDS_Shape> left;
+    for (const TopoDS_Shape& piece : pieces) {
+        left.push_back(piece);
+    }
+    TopTools_MapOfShape reached;
+    auto join = [&](const TopoDS_Shape& piece) {
+        for (TopExp_Explorer edges(piece, TopAbs_EDGE); edges.More(); edges.Next()) {
+            if (seams.Contains(edges.Current())) {
+                reached.Add(edges.Current());
+            }
+        }
+    };
+    join(left.front());
+    left.erase(left.begin());
+    for (bool grew = true; grew && !left.empty();) {
+        grew = false;
+        for (auto it = left.begin(); it != left.end();) {
+            bool meets = false;
+            for (TopExp_Explorer edges(*it, TopAbs_EDGE); edges.More() && !meets; edges.Next()) {
+                meets = reached.Contains(edges.Current());
+            }
+            if (!meets) {
+                ++it;
+                continue;
+            }
+            join(*it);
+            it = left.erase(it);
+            grew = true;
+        }
+    }
+    return left.empty();
+}
+}  // namespace
+
 UpToSplitMapper::UpToSplitMapper(
     BRepAlgoAPI_Splitter& splitter,
     BRepBuilderAPI_MakeShape& sweep,
     const std::function<TopoDS_Shape(const TopoDS_Shape&)>& firstShape,
     const TopoDS_Shape& profile,
-    const TopoDS_Shape& result
+    const TopoDS_Shape& result,
+    const TopoDS_Shape& upTo
 )
     : MapperMaker(splitter)
 {
@@ -250,6 +295,9 @@ UpToSplitMapper::UpToSplitMapper(
                     if (meeting.ShapeType() == type && kept.Contains(meeting)
                         && farEnd.Add(meeting)) {
                         farEnds.Append(meeting);
+                        if (type == TopAbs_EDGE) {
+                            farSources.Bind(meeting, firstShape(element));
+                        }
                     }
                 }
             }
@@ -258,12 +306,333 @@ UpToSplitMapper::UpToSplitMapper(
             }
         }
     }
+    if (!upTo.IsNull()) {
+        bindFarCaps(splitter, firstShape, profile, result, upTo);
+    }
+}
+
+void UpToSplitMapper::bindFarCaps(
+    BRepAlgoAPI_Splitter& splitter,
+    const std::function<TopoDS_Shape(const TopoDS_Shape&)>& firstShape,
+    const TopoDS_Shape& profile,
+    const TopoDS_Shape& result,
+    const TopoDS_Shape& upTo
+)
+{
+    // The far caps (ops#360): for each face of the profile, in its order, the pieces of `upTo`
+    // in the kept solids that start at the face's start cap, in `upTo`'s face order, a face of
+    // `upTo` the split leaves whole included. A cap that spans several faces of `upTo`, or that a
+    // hole in one cuts, has several pieces, each marked by what bounds it; pieces that meet only
+    // along the seam of a face of `upTo` are one cap. A piece of the start cap is left out: where
+    // the profile lies on `upTo`, the splitter makes the two one face
+    const TopTools_IndexedMapOfShape upToPieces = piecesOf(splitter, upTo);
+    TopTools_MapOfShape seams;
+    for (TopExp_Explorer faces(upTo, TopAbs_FACE); faces.More(); faces.Next()) {
+        const TopoDS_Face& face = TopoDS::Face(faces.Current());
+        for (TopExp_Explorer edges(face, TopAbs_EDGE); edges.More(); edges.Next()) {
+            const TopoDS_Edge& edge = TopoDS::Edge(edges.Current());
+            if (!BRep_Tool::IsClosed(edge, face)) {
+                continue;
+            }
+            const TopTools_ListOfShape& pieces = splitter.Modified(edge);
+            if (pieces.IsEmpty()) {
+                seams.Add(edge);
+            }
+            for (const TopoDS_Shape& piece : pieces) {
+                seams.Add(piece);
+            }
+        }
+    }
+    TopTools_IndexedMapOfShape solids;
+    TopExp::MapShapes(result, TopAbs_SOLID, solids);
+    TopTools_IndexedMapOfShape profileFaces;
+    TopExp::MapShapes(profile, TopAbs_FACE, profileFaces);
+    std::vector<TopTools_ListOfShape> severalPieces;
+    for (int i = 1; i <= profileFaces.Extent(); ++i) {
+        const TopoDS_Shape startCap = firstShape(profileFaces(i));
+        const TopTools_IndexedMapOfShape startPieces = piecesOf(splitter, startCap);
+        TopTools_MapOfShape facesOfItsSolids;
+        for (int j = 1; j <= solids.Extent(); ++j) {
+            TopTools_IndexedMapOfShape solidFaces;
+            TopExp::MapShapes(solids(j), TopAbs_FACE, solidFaces);
+            bool startsHere = false;
+            for (int k = 1; k <= solidFaces.Extent() && !startsHere; ++k) {
+                startsHere = startPieces.Contains(solidFaces(k));
+            }
+            for (int k = 1; startsHere && k <= solidFaces.Extent(); ++k) {
+                facesOfItsSolids.Add(solidFaces(k));
+            }
+        }
+        TopTools_ListOfShape caps;
+        for (int k = 1; k <= upToPieces.Extent(); ++k) {
+            const TopoDS_Shape& piece = upToPieces(k);
+            if (facesOfItsSolids.Contains(piece) && !startPieces.Contains(piece)
+                && farCaps.Add(piece)) {
+                caps.Append(piece);
+            }
+        }
+        if (!caps.IsEmpty()) {
+            projections.Bind(startCap, caps);
+        }
+        if (caps.Extent() > 1 && !joinedAtSeams(caps, seams)) {
+            severalPieces.push_back(caps);
+        }
+    }
+    // Marked once every far cap is known: a piece's marks depend on the other caps on its face
+    if (!severalPieces.empty()) {
+        markCaps(splitter, upTo, severalPieces);
+    }
+}
+
+namespace
+{
+/// True if `a` and `b` hold the same shapes
+bool sameShapes(const TopTools_IndexedMapOfShape& a, const TopTools_IndexedMapOfShape& b)
+{
+    if (a.Extent() != b.Extent()) {
+        return false;
+    }
+    for (int i = 1; i <= a.Extent(); ++i) {
+        if (!b.Contains(a(i))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+using PlacedTwins = std::vector<std::pair<gp_Pnt, std::size_t>>;
+
+/// How far `placed`'s centres spread along `axis` (1 x, 2 y, 3 z)
+double spreadAlong(const PlacedTwins& placed, int axis)
+{
+    double low = placed.front().first.Coord(axis);
+    double high = low;
+    for (const auto& [centre, twin] : placed) {
+        low = std::min(low, centre.Coord(axis));
+        high = std::max(high, centre.Coord(axis));
+    }
+    return high - low;
+}
+
+/// Orders twins by their centres (PR 340 round 3): along the one of `axes` in which they spread
+/// most, an earlier axis unless a later one spreads more by a margin. Centres closer along it
+/// than a quarter of the even step (the spread over the gaps) are a run, ordered the same way
+/// along the other axes. Two twins then keep their order until the pair turns by about 45 degrees
+/// from an axis. Ordered by x first, a pair one above the other swapped on any tilt that moved
+/// one ahead in x: the elliptic hole turned 0.0003 degrees moved a reference to the other twin.
+/// Where a turn does swap them, the solver's moved check breaks the reference
+void orderTwins(PlacedTwins& placed, std::vector<int> axes)
+{
+    if (placed.size() < 2 || axes.empty()) {
+        return;
+    }
+    // Symmetric twins (four lobes) spread as much along x as along y whatever their turn: the
+    // margin keeps their axis from following rounding
+    constexpr double margin = 1.01;
+    int axis = axes.front();
+    double spread = spreadAlong(placed, axis);
+    for (int other : axes) {
+        const double otherSpread = spreadAlong(placed, other);
+        if (otherSpread > margin * spread) {
+            axis = other;
+            spread = otherSpread;
+        }
+    }
+    std::stable_sort(placed.begin(), placed.end(), [axis](const auto& a, const auto& b) {
+        return a.first.Coord(axis) < b.first.Coord(axis);
+    });
+    axes.erase(std::find(axes.begin(), axes.end(), axis));
+    const double step = spread / static_cast<double>(placed.size() - 1);
+    const double tie = std::max(step / 4, 100 * Precision::Confusion());
+    for (auto run = placed.begin(); run != placed.end();) {
+        auto end = std::next(run);
+        while (end != placed.end()
+               && end->first.Coord(axis) - std::prev(end)->first.Coord(axis) <= tie) {
+            ++end;
+        }
+        PlacedTwins part(run, end);
+        orderTwins(part, axes);
+        std::copy(part.begin(), part.end(), run);
+        run = end;
+    }
+}
+}  // namespace
+
+void UpToSplitMapper::markCaps(
+    BRepAlgoAPI_Splitter& splitter,
+    const TopoDS_Shape& upTo,
+    const std::vector<TopTools_ListOfShape>& severalPieces
+)
+{
+    // What each piece of `upTo` is a piece of: its face, or for an edge every edge of `upTo` it
+    // lies on (a shell's faces that meet along a line each bring their edge)
+    TopTools_DataMapOfShapeListOfShape sources;
+    for (TopAbs_ShapeEnum type : {TopAbs_FACE, TopAbs_EDGE}) {
+        TopTools_IndexedMapOfShape elements;
+        TopExp::MapShapes(upTo, type, elements);
+        for (int i = 1; i <= elements.Extent(); ++i) {
+            TopTools_ListOfShape pieces = splitter.Modified(elements(i));
+            if (pieces.IsEmpty()) {
+                pieces.Append(elements(i));
+            }
+            for (const TopoDS_Shape& piece : pieces) {
+                if (!sources.IsBound(piece)) {
+                    sources.Bind(piece, TopTools_ListOfShape());
+                }
+                sources.ChangeFind(piece).Append(elements(i));
+            }
+        }
+    }
+    // How many far caps, of any profile face, lie on each face of `upTo` (a count: the map's
+    // order doesn't matter)
+    TopTools_DataMapOfShapeInteger capsOnFace;
+    for (TopTools_MapOfShape::Iterator cap(farCaps); cap.More(); cap.Next()) {
+        if (const TopTools_ListOfShape* faces = sources.Seek(cap.Key())) {
+            for (const TopoDS_Shape& face : *faces) {
+                if (int* count = capsOnFace.ChangeSeek(face)) {
+                    ++*count;
+                }
+                else {
+                    capsOnFace.Bind(face, 1);
+                }
+            }
+        }
+    }
+    struct Piece
+    {
+        TopoDS_Shape cap;
+        TopTools_IndexedMapOfShape faces;
+        TopTools_IndexedMapOfShape upToEdges;
+        TopTools_IndexedMapOfShape startEdges;
+        TopTools_IndexedMapOfShape marks;
+    };
+    for (const TopTools_ListOfShape& caps : severalPieces) {
+        std::vector<Piece> pieces;
+        for (const TopoDS_Shape& cap : caps) {
+            Piece piece;
+            piece.cap = cap;
+            if (const TopTools_ListOfShape* faces = sources.Seek(cap)) {
+                for (const TopoDS_Shape& face : *faces) {
+                    piece.faces.Add(face);
+                }
+            }
+            TopTools_IndexedMapOfShape edges;
+            TopExp::MapShapes(cap, TopAbs_EDGE, edges);
+            for (int i = 1; i <= edges.Extent(); ++i) {
+                if (const TopoDS_Shape* source = farSources.Seek(edges(i))) {
+                    piece.startEdges.Add(*source);
+                }
+                if (const TopTools_ListOfShape* pieceOf = sources.Seek(edges(i))) {
+                    for (const TopoDS_Shape& source : *pieceOf) {
+                        piece.upToEdges.Add(source);
+                    }
+                }
+            }
+            pieces.push_back(std::move(piece));
+        }
+        // The marks (PR 340 round 2): the face of `upTo` a piece lies on, alone where it is the
+        // only far cap there, so that a change of its bounds keeps its name; with the edges of
+        // `upTo` that bound it where other caps lie on that face; with the start cap's edges
+        // whose projections bound it among pieces those don't tell apart. A sketch edit that
+        // splits or redraws a profile edge changes the marks only where they are needed
+        for (Piece& piece : pieces) {
+            bool alone = true;
+            for (int i = 1; i <= piece.faces.Extent(); ++i) {
+                piece.marks.Add(piece.faces(i));
+                const int* count = capsOnFace.Seek(piece.faces(i));
+                alone = alone && count && *count == 1;
+            }
+            for (int i = 1; !alone && i <= piece.upToEdges.Extent(); ++i) {
+                piece.marks.Add(piece.upToEdges(i));
+            }
+        }
+        std::vector<bool> told(pieces.size(), true);
+        for (std::size_t i = 0; i < pieces.size(); ++i) {
+            for (std::size_t j = i + 1; j < pieces.size(); ++j) {
+                if (sameShapes(pieces[i].marks, pieces[j].marks)) {
+                    told[i] = told[j] = false;
+                }
+            }
+        }
+        for (std::size_t i = 0; i < pieces.size(); ++i) {
+            for (int k = 1; !told[i] && k <= pieces[i].startEdges.Extent(); ++k) {
+                pieces[i].marks.Add(pieces[i].startEdges(k));
+            }
+            TopTools_ListOfShape list;
+            for (int k = 1; k <= pieces[i].marks.Extent(); ++k) {
+                list.Append(pieces[i].marks(k));
+            }
+            capMarks.Bind(pieces[i].cap, list);
+        }
+        // Pieces with the same marks still (a circle across an elliptic hole: the pieces on
+        // either side are bounded by the circle and the ellipse alone) are told apart by the
+        // duplicate counter, which the solver reads as "a sibling, never the element itself": a
+        // reference that lands on another of them breaks instead of following it. The counter
+        // holds how many share the marks, so that one going or coming renames them all, and
+        // each one's place among them, by their centres (orderTwins()), so that a change of the
+        // splitter's order (the up-to face rebuilt with another parametrization) renames none
+        std::vector<bool> counted(pieces.size(), false);
+        for (std::size_t i = 0; i < pieces.size(); ++i) {
+            if (counted[i]) {
+                continue;
+            }
+            std::vector<std::size_t> twins {i};
+            for (std::size_t j = i + 1; j < pieces.size(); ++j) {
+                if (!counted[j] && sameShapes(pieces[i].marks, pieces[j].marks)) {
+                    twins.push_back(j);
+                    counted[j] = true;
+                }
+            }
+            if (twins.size() < 2) {
+                continue;
+            }
+            PlacedTwins placed;
+            for (std::size_t twin : twins) {
+                GProp_GProps props;
+                BRepGProp::SurfaceProperties(pieces[twin].cap, props);
+                placed.emplace_back(props.CentreOfMass(), twin);
+            }
+            orderTwins(placed, {1, 2, 3});
+            const int count = static_cast<int>(placed.size());
+            for (int position = 0; position < count; ++position) {
+                // One number for the pair: count (count - 1) / 2 + position, 1 and 2 for two
+                // pieces, 3 to 5 for three; 0 is a piece with marks of its own
+                const int counter = count * (count - 1) / 2 + position;
+                capCounters.Bind(pieces[placed[position].second].cap, counter);
+            }
+        }
+    }
+}
+
+bool UpToSplitMapper::isFarCap(const TopoDS_Shape& shape) const
+{
+    return farCaps.Contains(shape);
+}
+
+int UpToSplitMapper::counterOf(const TopoDS_Shape& cap) const
+{
+    const int* counter = capCounters.Seek(cap);
+    return counter ? *counter : 0;
+}
+
+std::vector<TopoDS_Shape> UpToSplitMapper::marksOf(const TopoDS_Shape& cap) const
+{
+    std::vector<TopoDS_Shape> marks;
+    if (const TopTools_ListOfShape* found = capMarks.Seek(cap)) {
+        for (const TopoDS_Shape& mark : *found) {
+            marks.push_back(mark);
+        }
+    }
+    return marks;
 }
 
 const std::vector<TopoDS_Shape>& UpToSplitMapper::modified(const TopoDS_Shape& s) const
 {
     MapperMaker::modified(s);
-    std::erase_if(_res, [this](const TopoDS_Shape& piece) { return !kept.Contains(piece); });
+    // A far cap is its profile face's projection, not a second name from the up-to shape
+    std::erase_if(_res, [this](const TopoDS_Shape& piece) {
+        return !kept.Contains(piece) || farCaps.Contains(piece);
+    });
     return _res;
 }
 

@@ -221,3 +221,73 @@ TEST(ElementFingerprint, planeExtentRoundTrip)
     EXPECT_FALSE(old.extentMin.has_value());
     EXPECT_FALSE(old.extentMax.has_value());
 }
+
+TEST(ElementFingerprint, twinCentroidRoundTrip)
+{
+    // An ordered twin carries the centroid of its twins and their number, in version 4, with what
+    // versions 2 and 3 carry in the eighth field (ops#360, PR 340 round 5)
+    ElementFingerprint cap;
+    cap.type = 'F';
+    cap.kind = "BSpline";
+    cap.size = 8.5;
+    cap.center = Base::Vector3d(3, 5.25, 10);
+    cap.twinCentroid = Base::Vector3d(3, 3.4, 10);
+    cap.twinCount = 2;
+    const char* text = "4|F|BSpline|8.5|3,5.25,10|_|_|_|3,3.4,10,2";
+    EXPECT_EQ(cap.toString(), text);
+    auto parsed = ElementFingerprint::fromString(text);
+    ASSERT_TRUE(parsed.isValid());
+    EXPECT_EQ(parsed, cap);
+
+    ElementFingerprint plane = cap;
+    plane.kind = "Plane";
+    plane.direction = Base::Vector3d(0, 0, 1);
+    plane.extentMin = Base::Vector3d(2, 4, 10);
+    plane.extentMax = Base::Vector3d(4, 7, 10);
+    plane.twinCount = 3;
+    const char* planeText = "4|F|Plane|8.5|3,5.25,10|0,0,1|_|2,4,10,4,7,10|3,3.4,10,3";
+    EXPECT_EQ(plane.toString(), planeText);
+    EXPECT_EQ(ElementFingerprint::fromString(planeText), plane);
+
+    ElementFingerprint arc;
+    arc.type = 'E';
+    arc.kind = "Circle";
+    arc.size = 2;
+    arc.center = Base::Vector3d(0, 1, 0);
+    arc.direction = Base::Vector3d(0, 0, 1);
+    arc.radii = {1.5};
+    arc.location = Base::Vector3d(0, 0, 0);
+    arc.twinCentroid = Base::Vector3d(0, 0.5, 0);
+    arc.twinCount = 2;
+    const char* arcText = "4|E|Circle|2|0,1,0|0,0,1|1.5|0,0,0|0,0.5,0,2";
+    EXPECT_EQ(arc.toString(), arcText);
+    EXPECT_EQ(ElementFingerprint::fromString(arcText), arc);
+
+    //   one twin alone is no twin set: written without it
+    ElementFingerprint alone = cap;
+    alone.twinCount = 1;
+    EXPECT_EQ(alone.toString(), "1|F|BSpline|8.5|3,5.25,10|_|_");
+
+    //   version 4 only with nine fields, a centroid and a whole number of twins of at least 2,
+    //   and the eighth field as versions 2 and 3 have it
+    for (const auto& bad : {
+             "4|F|BSpline|8.5|3,5.25,10|_|_|_",
+             "4|F|BSpline|8.5|3,5.25,10|_|_|3,3.4,10,2",
+             "4|F|BSpline|8.5|3,5.25,10|_|_|_|3,3.4,10",
+             "4|F|BSpline|8.5|3,5.25,10|_|_|_|3,3.4,10,1",
+             "4|F|BSpline|8.5|3,5.25,10|_|_|_|3,3.4,10,2.5",
+             "4|F|BSpline|8.5|3,5.25,10|_|_|_|_",
+             "4|F|BSpline|8.5|3,5.25,10|_|_|0,0,0|3,3.4,10,2",
+             "4|F|Plane|8.5|3,5.25,10|0,0,1|_|0,0,0|3,3.4,10,2",
+             "4|E|Line|2|0,1,0|1,0,0|_|0,0,0,1,1,1|0,0.5,0,2",
+             "3|F|BSpline|8.5|3,5.25,10|_|_|_|3,3.4,10,2",
+         }) {
+        EXPECT_FALSE(ElementFingerprint::fromString(bad).isValid()) << bad;
+    }
+
+    //   an older record parses without it
+    auto old = ElementFingerprint::fromString("1|F|BSpline|8.5|3,5.25,10|_|_");
+    ASSERT_TRUE(old.isValid());
+    EXPECT_FALSE(old.twinCentroid.has_value());
+    EXPECT_EQ(old.twinCount, 0);
+}

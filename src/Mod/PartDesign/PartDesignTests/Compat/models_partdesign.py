@@ -225,7 +225,11 @@ def LoftPipe(make):
     the XZ plane (a quarter torus: Pappus, area times path). Body001: a smooth (BSpline) loft
     through a circle, radius 5, a square, side 8, 10 up, and a circle, radius 3, 20 up; its
     volume is integrated numerically, so it isn't stated: the gate's records pin it, and its
-    drift calibrates the BSpline tolerance (3.2)."""
+    drift calibrates the BSpline tolerance (3.2). Body002 (ops#376 F2): a square, side 4, centred
+    on (40, 0) on the XY plane, piped along an L, up from (40, 0, 0) to (40, 0, 10), then along
+    +X to (50, 0, 10), Right corner; a fillet, radius 1, on a start edge (y = -2, z = 0), and a
+    datum point at the centre of the first leg's side face x = 38, so the naming migration's
+    rehearsal covers references to a Pipe's start and first-leg elements."""
     doc = make("LoftPipe")
     body = newBody(doc, "Body")
     xy = plane(body, "XY_Plane")
@@ -263,6 +267,28 @@ def LoftPipe(make):
     smooth = body2.newObject("PartDesign::AdditiveLoft", "SmoothLoft")
     smooth.Profile = sections[0]
     smooth.Sections = sections[1:]
+    body3 = newBody(doc, "Body002")
+    square = attachedSketch(
+        body3, "SquareProfile", plane(body3, "XY_Plane"), m.rectangle(38, -2, 42, 2)
+    )
+    # in the XZ plane's sketch, x is X and y is Z
+    path = attachedSketch(
+        body3, "LPath", plane(body3, "XZ_Plane"), m.polyline([(40, 0), (40, 10), (50, 10)])
+    )
+    lPipe = body3.newObject("PartDesign::AdditivePipe", "LPipe")
+    lPipe.Profile = square
+    lPipe.Spine = path
+    lPipe.Transition = "Right corner"
+    doc.recompute()
+    fillet = body3.newObject("PartDesign::Fillet", "StartEdgeFillet")
+    fillet.Base = (lPipe, [edgeWhere(lPipe.Shape, lineThrough((38, -2, 0), (42, -2, 0)))])
+    fillet.Radius = 1
+    point = body3.newObject("PartDesign::Point", "SidePoint")
+    point.AttachmentSupport = [
+        (lPipe, faceWhere(lPipe.Shape, planeFacing(V(-1, 0, 0), V(38, 0, 0))))
+    ]
+    point.MapMode = "CenterOfMass"
+    body3.Tip = fillet
     doc.recompute()
     loftVolume = frustum(20, 10, 10)
     return {
@@ -312,7 +338,12 @@ def UpToFace(make):
     square x 5..15, y 5..15 on the block's top face padded up to the wall's top face (to z 25);
     a circle, radius 2, at (35, 10) on the wall's top face pocketed up to the block's top face
     (15 deep). Body001: a datum plane on the YZ plane; a rectangle x 4..8, z 0..4 on the XZ
-    plane revolved about the Z axis up to the datum plane (a quarter of a ring, radii 4..8)."""
+    plane revolved about the Z axis up to the datum plane (a quarter of a ring, radii 4..8).
+    Body002 (ops#360): a SubShapeBinder of a Part feature's B-spline plate x -10..20, y 25..45 at
+    z = 10 (not elementary, so the prism is built by the split); a block x -1..9, y 29..34, 2 high;
+    two rectangles on its top, A x 0..2, y 30..32 and B x 5..8, y 30..33, padded up to the
+    binder's face; a datum point at the centre of A's far cap. Each far cap is the projection of
+    its own profile face."""
     doc = make("UpToFace")
     body = newBody(doc, "Body")
     pad = block(body, 0, 0, 40, 20, 10)
@@ -349,6 +380,31 @@ def UpToFace(make):
     revolution.ReferenceAxis = (profile, ["V_Axis"])
     revolution.Type = "UpToFace"
     revolution.UpToFace = (datum, [""])
+    corners = [V(-10, 25, 10), V(20, 25, 10), V(20, 45, 10), V(-10, 45, 10)]
+    plate = doc.addObject("Part::Feature", "FreeformPlate")
+    plate.Shape = Part.Face(Part.makePolygon(corners + corners[:1])).toNurbs().Faces[0]
+    body3 = newBody(doc, "Body002")
+    plateBinder = body3.newObject("PartDesign::SubShapeBinder", "PlateBinder")
+    plateBinder.Support = [(plate, ("Face1",))]
+    splitBase = block(body3, -1, 29, 9, 34, 2, "SplitBase")
+    doc.recompute()
+    baseTop = faceWhere(splitBase.Shape, planeFacing(TOP, V(0, 0, 2)))
+    rectangles = m.rectangle(0, 30, 2, 32) + m.rectangle(5, 30, 8, 33)
+    splitPad = body3.newObject("PartDesign::Pad", "SplitPad")
+    splitPad.Profile = attachedSketch(body3, "SplitPadSketch", (splitBase, baseTop), rectangles)
+    splitPad.Type = "UpToFace"
+    splitPad.UpToFace = (plateBinder, ["Face1"])
+    doc.recompute()
+    capA = faceWhere(
+        splitPad.Shape,
+        lambda f: abs(f.BoundBox.ZMin - 10) < 1e-6
+        and abs(f.BoundBox.ZMax - 10) < 1e-6
+        and f.isInside(V(1, 31, 10), 1e-6, True),
+    )
+    point = body3.newObject("PartDesign::Point", "CapPoint")
+    point.AttachmentSupport = [(splitPad, capA)]
+    point.MapMode = "CenterOfMass"
+    body3.Tip = splitPad
     doc.recompute()
     walls = 8000 + 10 * 20 * 15
     return {
@@ -356,6 +412,7 @@ def UpToFace(make):
             "Post": walls + 10 * 10 * 15,
             "Pocket": walls + 10 * 10 * 15 - math.pi * 4 * 15,
             "Revolution": math.pi * (64 - 16) * 4 / 4,
+            "SplitPad": 10 * 5 * 2 + (4 + 9) * 8,
         }
     }
 

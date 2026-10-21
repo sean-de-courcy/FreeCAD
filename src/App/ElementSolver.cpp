@@ -8,6 +8,7 @@
 #include <limits>
 #include <locale>
 #include <map>
+#include <numbers>
 #include <numeric>
 #include <optional>
 #include <set>
@@ -1639,6 +1640,88 @@ bool isCounterSibling(std::string_view name, std::string_view oldName)
     return name != oldName && sameUpToCounter(name, oldName);
 }
 
+// Part's mapper flag of a far cap told apart from its twins only by its place among them
+// (MAPPER_FLAG_ORDERED, TopoShapeExpansion.cpp; ops#360, PR 340 round 2)
+constexpr const char* orderedFlag = "ORD";
+
+/* True if a section of \a name carries the ORD flag: its element is told apart from its counter
+ * siblings only by its place among them, which an edit that moves them all can change.
+ */
+bool isOrdered(std::string_view name)
+{
+    const auto sections = NameAncestry::splitSections(name);
+    return std::any_of(sections.begin(), sections.end(), [](std::string_view section) {
+        return decodeSection(section).hasMapperFlag(orderedFlag);
+    });
+}
+
+/* True if \a name's element holds \a oldName's, a piece of a far cap that an edit merged with
+ * others into one (ops#360, PR 340 round 3): the names are the same but in one section, a marked
+ * piece's (PRJ and MOD), where \a name's marks, its connected elements, hold every one of
+ * \a oldName's and more. The pieces either side of a hole become the ring around it. The old
+ * marks must hold an edge of the up-to shape (the piece shared its face with other caps): a
+ * piece marked by its face alone is no evidence, since a renumbered up-to shell (a Part feature
+ * without names, its faces reordered) gives that face's name to another face, which holds
+ * other pieces.
+ * With \a alone (round 4), the marks are instead the one face of the up-to shape among the old
+ * marks: the merged piece is the only far cap on that face, so its marks are the face alone
+ * (the strip across a hole made taller than the hole, with no other cap on the plate). Name
+ * evidence is then weaker (a renamed face holds it too): the caller corroborates by geometry.
+ */
+bool holdsMarkedPiece(std::string_view name, std::string_view oldName, bool alone = false)
+{
+    const auto sections = NameAncestry::splitSections(name);
+    const auto oldSections = NameAncestry::splitSections(oldName);
+    if (sections.empty() || sections.size() != oldSections.size()) {
+        return false;
+    }
+    bool held = false;
+    for (std::size_t i = 0; i < sections.size(); ++i) {
+        if (sections[i] == oldSections[i]) {
+            continue;
+        }
+        if (held) {
+            return false;
+        }
+        const DecodedMappedSection& x = decodeSection(sections[i]);
+        const DecodedMappedSection& y = decodeSection(oldSections[i]);
+        if (!y.hasMapperFlag(MAPPER_FLAG_PROJECTION) || !y.hasMapperFlag(MAPPER_FLAG_MODIFIED)
+            || y.connectedElements.empty() || x.opCode != y.opCode || x.referenceIDs != y.referenceIDs
+            || x.iterationTag != y.iterationTag || x.index != y.index
+            || x.elementType != y.elementType || x.duplicateCount != y.duplicateCount
+            || sortedFlags(x) != sortedFlags(y) || x.linkedNames != y.linkedNames
+            || (alone ? x.connectedElements.size() != 1
+                      : x.connectedElements.size() <= y.connectedElements.size())) {
+            return false;
+        }
+        auto markType = [](const std::string& mark) {
+            const auto markSections = NameAncestry::splitSections(mark);
+            return markSections.empty() ? char(0) : decodeSection(markSections.back()).elementType;
+        };
+        bool edge = false;
+        for (const auto& mark : y.connectedElements) {
+            if (!alone
+                && std::find(x.connectedElements.begin(), x.connectedElements.end(), mark)
+                    == x.connectedElements.end()) {
+                return false;
+            }
+            edge = edge || markType(mark) == 'E';
+        }
+        if (!edge
+            || (alone
+                && (markType(x.connectedElements.front()) != 'F'
+                    || std::find(
+                           y.connectedElements.begin(),
+                           y.connectedElements.end(),
+                           x.connectedElements.front()
+                       ) == y.connectedElements.end()))) {
+            return false;
+        }
+        held = true;
+    }
+    return held;
+}
+
 // The element of a target without an element map that the IDX section \a section names, when it
 // carries the target's tag \a tag (Q5): the section's index name (`Edge11`), if it is of type
 // \a type; otherwise empty.
@@ -2234,6 +2317,16 @@ bool atSamePlace(
     return true;
 }
 
+bool isOrderedName(std::string_view name)
+{
+    return isOrdered(name);
+}
+
+bool isCounterSiblingName(std::string_view name, std::string_view other)
+{
+    return isCounterSibling(name, other);
+}
+
 bool mayBeAtPlace(
     const ElementFingerprint& saved,
     const ElementFingerprint& intrinsic,
@@ -2452,6 +2545,89 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                     place.push_back(static_cast<int>(k));
                 }
             }
+            const std::string& hitName = entry.exactName.empty()
+                ? firstName(pool.elements[hitPosition])
+                : entry.exactName;
+            // Twins (ops#360, PR 340 round 3): pieces of one far cap told apart only by their
+            // place among them (the ORD flag and the duplicate counter) can trade names when an
+            // edit turns them, so nothing sits at the old place. Round 5: the saved fingerprint
+            // holds the twins' centroid, so the saved centre's offset from it is the old piece's
+            // place among them. A counter sibling whose offset from the twins' centroid now is as
+            // near the old offset as the hit's or nearer (a tie within 2 %, round 4) is where the
+            // old piece went: the twins turned, about any point. A move of them all keeps every
+            // offset, and a twin's growth moves the centroid by a fraction of it, so the hit's
+            // offset stays the nearest and the name stands. An older record (no centroid, or
+            // another number of twins) compares the centres themselves (round 3), which breaks
+            // a move of the pair too: loud, never a pick.
+            bool nearerTwin = false;
+            if (place.empty() && saved.center && now.center && isOrdered(hitName)) {
+                const double eps = input.continuationDistance * std::max(1.0, input.diagonal);
+                std::vector<std::pair<int, Base::Vector3d>> siblings;
+                Base::Vector3d centroid = *now.center;
+                for (std::size_t k = 0; k < pool.elements.size(); ++k) {
+                    const auto& element = pool.elements[k];
+                    const auto& names = element.names;
+                    if (static_cast<int>(k) == hitPosition
+                        || std::none_of(names.begin(), names.end(), [&](const auto& name) {
+                               return isCounterSibling(name, hitName);
+                           })) {
+                        continue;
+                    }
+                    const ElementFingerprint& sibling = fingerprintOfIndex(element.index);
+                    if (sibling.center) {
+                        siblings.emplace_back(static_cast<int>(k), *sibling.center);
+                        centroid += *sibling.center;
+                    }
+                }
+                centroid /= static_cast<double>(siblings.size() + 1);
+                const bool offsets = saved.twinCentroid
+                    && saved.twinCount == static_cast<int>(siblings.size() + 1);
+                // The old place and the twins' places now, from their centroids or as they are
+                const Base::Vector3d old = offsets ? *saved.center - *saved.twinCentroid
+                                                   : *saved.center;
+                const Base::Vector3d origin = offsets ? centroid : Base::Vector3d();
+                const Base::Vector3d hitOffset = *now.center - origin;
+                const double hitDistance = Base::Distance(old, hitOffset);
+                // Round 6 (N9): the angular tie. A turn by a symmetry's angle (45 degrees for four
+                // lobes) gives the old piece's place two readings, +45 and -45: the hit's and a
+                // sibling's offsets lie at the same angle from the old offset. Off the twins'
+                // centre their lengths differ a little, and the offsets' distances from the old
+                // one can differ by more than the 2 % tie (4 % with the disc 0.3 mm off). So the
+                // sibling ties also when its offset's angle from the old offset is within
+                // tieDegrees of the hit's and the two offsets are about as long (within 25 %), as
+                // two places one turn could take the old piece to. Round 7 (N12): with the disc
+                // 0.35-0.37 of its radius off, the two readings lie 5-9 degrees apart, so the band
+                // is 12 degrees. It assumes twins at least about twice the band apart (a ring of at
+                // most 15): a turn ties, loudly, within half the band of the symmetry turn; closer
+                // twins tie on smaller turns, down to moveDegrees. A merged twin moves the centroid
+                // off the turn's centre and can need 16 degrees (ops#422). A hit within
+                // moveDegrees of the old offset (a move, hitDistance 0) has no such tie; kept apart
+                // from the band, so a symmetry turn no wider than the band (15 lobes and more)
+                // still ties. Neither has a sibling on the same ray at another distance from the
+                // centroid (twins in a row).
+                constexpr double degrees = 180.0 / std::numbers::pi;
+                auto angleFromOld = [&](const Base::Vector3d& offset) {
+                    return std::atan2((old % offset).Length(), old * offset) * degrees;
+                };
+                const double tieDegrees = 12.0;
+                const double moveDegrees = 5.0;
+                const bool angular = offsets && old.Length() > eps && hitOffset.Length() > eps
+                    && angleFromOld(hitOffset) > moveDegrees;
+                const double hitAngle = angular ? angleFromOld(hitOffset) : 0.0;
+                auto angularTie = [&](const Base::Vector3d& offset) {
+                    const double shorter = std::min(offset.Length(), hitOffset.Length());
+                    const double longer = std::max(offset.Length(), hitOffset.Length());
+                    return angular && shorter > eps && shorter >= 0.75 * longer
+                        && std::abs(angleFromOld(offset) - hitAngle) <= tieDegrees;
+                };
+                for (const auto& [k, centre] : siblings) {
+                    if (Base::Distance(old, centre - origin) <= hitDistance * 1.02 + eps
+                        || angularTie(centre - origin)) {
+                        place.push_back(k);
+                    }
+                }
+                nearerTwin = !place.empty();
+            }
             if (place.empty()) {
                 continue;  // moved alone
             }
@@ -2483,9 +2659,6 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             // length. The element moved with its feature; nothing else took its place. The hit's
             // name is the one the reference holds; copies count in the whole lineage, so a
             // later feature's edges on a boss and on its mirror copy are no twins.
-            const std::string& hitName = entry.exactName.empty()
-                ? firstName(pool.elements[hitPosition])
-                : entry.exactName;
             const auto hitSources = NameAncestry::sourceSections(hitName);
             const auto hitCopies = copyContexts(hitName);
             auto ownTwin = [&](int k) {
@@ -2521,7 +2694,9 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 list(k, "place");
             }
             list(hitPosition, "name");
-            outcome.evidence = movedBy() + "; " + there + sit + " where it was";
+            outcome.evidence = movedBy() + "; "
+                + (nearerTwin ? (place.size() > 1 ? "its twins " : "its twin ") : "") + there + sit
+                + (nearerTwin ? " nearer where it was" : " where it was");
         }
         // The elements at an old place are as ambiguous as the moved one: no other entry of the
         // owner takes them.
@@ -3432,6 +3607,56 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 else {
                     ++it;
                 }
+            }
+        }
+        // A piece of a far cap merged with others into one (ops#360, PR 340 round 3): the one
+        // candidate whose name holds the old piece's (holdsMarkedPiece()) is the evidence, as a
+        // name in its ancestry is, and the other survivors don't count. Their overlap is the
+        // start cap's, which every piece of the cap shares, so the piece on the hole's fill
+        // stayed within the gap of the ring, and the old piece's reference broke. Several old
+        // pieces may merge into it (their entries take it together).
+        // Round 4: when no name holds the old piece's marks, the one candidate marked by the old
+        // piece's face alone (the only far cap on it) counts too, if the saved centre lies over
+        // it: a strip across a hole made taller, with no other cap on its face. A renamed face
+        // of a reordered up-to shell holds the name but not the old piece's centre.
+        if (!oldName.empty()) {
+            auto holdersOf = [&](bool alone) {
+                std::vector<int> holders;
+                for (int k : all) {
+                    const auto& names = pool.elements[k].names;
+                    if (std::any_of(names.begin(), names.end(), [&](const auto& n) {
+                            return holdsMarkedPiece(n, oldName, alone);
+                        })) {
+                        holders.push_back(k);
+                    }
+                }
+                return holders;
+            };
+            std::vector<int> holders = holdersOf(false);
+            if (holders.empty() && input.holdsPoint) {
+                holders = holdersOf(true);
+                const ElementFingerprint* saved = nullptr;
+                for (const auto member : members) {
+                    const ElementFingerprint& fingerprint = input.entries[member].fingerprint;
+                    if (fingerprint.isValid() && fingerprint.center) {
+                        saved = &fingerprint;
+                        break;
+                    }
+                }
+                const double eps = input.continuationDistance * std::max(1.0, input.diagonal);
+                if (holders.size() != 1 || !saved
+                    || !input.holdsPoint(
+                        pool.elements[holders.front()].index,
+                        *saved->center,
+                        (saved->size ? std::sqrt(*saved->size) / 4.0 : 0.0) + eps
+                    )) {
+                    holders.clear();
+                }
+            }
+            if (holders.size() == 1) {
+                all = {holders.front()};
+                state.inAncestry.insert(holders.front());
+                state.derivedOnly.erase(holders.front());
             }
         }
         state.candidates.assign(all.begin(), all.end());
