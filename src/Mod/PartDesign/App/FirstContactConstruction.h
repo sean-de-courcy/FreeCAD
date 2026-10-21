@@ -91,6 +91,9 @@ public:
     // convex hull property). Intervals that don't hold are halved, to a floor. Otherwise the first
     // point found out of the band, or where it couldn't be certified.
     std::optional<gp_Pnt> outside(const TopoDS_Edge& edge) const;
+    // The same with `tolerance` for the edge's (a piece of an edge cut by a boolean keeps its
+    // curve, but its tolerance grows with its new vertices')
+    std::optional<gp_Pnt> outside(const TopoDS_Edge& edge, double tolerance) const;
 
     // Nothing when the face's image, widened by its tolerance, is certified within the band
     // (section 15.8, 2b). The band is simply connected, so the image is in it when the images of
@@ -104,6 +107,14 @@ public:
     // be certified.
     std::optional<gp_Pnt> outside(const TopoDS_Face& face) const;
 
+    // C4 and C5 with the exemption: nothing when every point of the face (a part on a piece's
+    // boundary, oriented as there) where the circles about the axis meet it from behind or touch it
+    // (g <= 0 against its outward normal) is certified within the band, by the same leaves: those
+    // where g changes sign or is of the wrong sign. A fold's silhouette lies in the exit face near
+    // its edge on the wall, and the face beyond it turns back, all within the band. Otherwise a
+    // point out of the band, or where it couldn't be certified.
+    std::optional<gp_Pnt> behind(const TopoDS_Face& face) const;
+
 private:
     struct Part
     {
@@ -116,6 +127,9 @@ private:
     std::vector<Part> parts;
 
     gp_Pnt2d image(const gp_Pnt& point) const;
+    // `whole`: the silhouette's leaves, and any point of the face found out of the band ends the
+    // check; otherwise behind()'s leaves
+    std::optional<gp_Pnt> leavesOutside(const TopoDS_Face& face, bool whole) const;
 };
 
 // C2, a sheet of the face lost in a cell's split (section 15.10): `piece` is the solid at the

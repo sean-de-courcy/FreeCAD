@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>  // TEMP s8
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -34,9 +35,11 @@
 #include <Bnd_Box.hxx>
 #include <Bnd_Box2d.hxx>
 #include <BndLib_Add2dCurve.hxx>
+#include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepAlgoAPI_Section.hxx>
 #include <BRepAlgoAPI_Splitter.hxx>
@@ -77,6 +80,7 @@
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
+#include <TopoDS_Compound.hxx>
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Vertex.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
@@ -338,10 +342,84 @@ std::pair<double, double> derivativeBounds(Handle(Geom2d_BSplineCurve) curve)
     return derivativeBounds(points, weights, {sequence.begin(), sequence.end()}, curve->Degree());
 }
 
+// C3-C5 on a cell's piece, today's certificate (certifyFirstContact() in FeatureRevolved.cpp) with
+// the band's exemption (sections 15.2 and 15.8): C3, no edge of the face inside the piece unless
+// its image lies in the band; C4 and C5, the circles leave the piece through each part of the face
+// on its boundary, and touch none, except in the band. `faceParts` are the face's pieces from the
+// cell's split. Returns why it refuses, or an empty string.
+std::string certifyPiece(
+    const TopoDS_Shape& piece,
+    const TopoDS_Face& face,
+    const TopTools_IndexedMapOfShape& faceParts,
+    const Band& band,
+    double tolerance
+)
+{
+    auto refusal = [](const char* what, const gp_Pnt& point) {
+        return fmt::format("{} (near ({:.4g}, {:.4g}, {:.4g}))", what, point.X(), point.Y(), point.Z());
+    };
+    // C3: seams aren't edges, the face goes on across them
+    TopoDS_Compound edges;
+    BRep_Builder builder;
+    builder.MakeCompound(edges);
+    bool anyEdge = false;
+    for (TopExp_Explorer explorer(face, TopAbs_EDGE); explorer.More(); explorer.Next()) {
+        const TopoDS_Edge& edge = TopoDS::Edge(explorer.Current());
+        if (!BRep_Tool::Degenerated(edge) && !BRep_Tool::IsClosed(edge, face)) {
+            builder.Add(edges, edge);
+            anyEdge = true;
+        }
+    }
+    if (anyEdge) {
+        const double edgeTolerance = largestEdgeTolerance(face);
+        // Non-destructive: the piece's edges are the face's, and the boolean would raise their
+        // tolerances in place (the hook's flap edge from 5e-6 to 2.9e-5, past its band)
+        BRepAlgoAPI_Common common;
+        TopTools_ListOfShape arguments;
+        arguments.Append(edges);
+        TopTools_ListOfShape tools;
+        tools.Append(piece);
+        common.SetArguments(arguments);
+        common.SetTools(tools);
+        common.SetNonDestructive(Standard_True);
+        common.Build();
+        if (!common.IsDone()) {
+            return "C3: the face's edges can't be checked against the cell's piece";
+        }
+        BRepClass3d_SolidClassifier inPiece(piece);
+        for (TopExp_Explorer explorer(common.Shape(), TopAbs_EDGE); explorer.More(); explorer.Next()) {
+            const TopoDS_Edge& inside = TopoDS::Edge(explorer.Current());
+            BRepAdaptor_Curve curve(inside);
+            const gp_Pnt middle = curve.Value((curve.FirstParameter() + curve.LastParameter()) / 2.0);
+            inPiece.Perform(middle, tolerance);
+            if (inPiece.State() != TopAbs_IN) {
+                continue;
+            }
+            if (const auto out = band.outside(inside, edgeTolerance)) {
+                return refusal("C3: the face's edge lies in the cell's turn", *out);
+            }
+        }
+    }
+    // C4 and C5: where the circles meet a part of the face on the piece's boundary from behind or
+    // touch it, it lies in the band (Band::behind()). Internal parts are C2's.
+    for (TopExp_Explorer faces(piece, TopAbs_FACE); faces.More(); faces.Next()) {
+        const TopoDS_Face& part = TopoDS::Face(faces.Current());
+        if (!faceParts.Contains(part) || part.Orientation() == TopAbs_INTERNAL
+            || part.Orientation() == TopAbs_EXTERNAL) {
+            continue;
+        }
+        if (const auto out = band.behind(part)) {
+            return refusal("C4-C5: the cell's turn meets the face from behind, or touches it", *out);
+        }
+    }
+    return {};
+}
+
 // One cell swept up to the face: the cell revolved a sliver short of a whole turn, split by the
 // face, and the solid at its start cap (as sweepUpToFace() in FeatureRevolved.cpp). C1: exactly one
 // such solid, keeping the whole cap. `band` is that of the walls on the cell's boundary; `step` is
-// lostSheet()'s. Returns the solid, or why it refuses.
+// lostSheet()'s. C2's lost sheet and C3-C5 (certifyPiece()) on the solid. Returns the solid, or why
+// it refuses.
 std::pair<TopoDS_Shape, std::string> sweepCell(
     const TopoDS_Face& cell,
     const TopoDS_Face& face,
@@ -408,6 +486,9 @@ std::pair<TopoDS_Shape, std::string> sweepCell(
         const double allowed = 1e-9 * cellArea + perimeter(cell) * std::max(largestTolerance(cell), Precision::Confusion());
         if (std::fabs(cap - cellArea) > allowed) {
             return {{}, fmt::format("C1: the piece's start cap is {:.9g} of the cell's {:.9g}", cap, cellArea)};
+        }
+        if (const std::string why = certifyPiece(kept.front(), face, faceParts, band, tolerance); !why.empty()) {
+            return {{}, why};
         }
         return {kept.front(), {}};
     }
@@ -585,6 +666,11 @@ bool Band::contains(const gp_Pnt& point) const
 
 std::optional<gp_Pnt> Band::outside(const TopoDS_Edge& edge) const
 {
+    return outside(edge, BRep_Tool::Tolerance(edge));
+}
+
+std::optional<gp_Pnt> Band::outside(const TopoDS_Edge& edge, double tolerance) const
+{
     const gp_Pnt start = BRep_Tool::Pnt(TopExp::FirstVertex(edge));
     Handle(Geom_BSplineCurve) curve;
     try {
@@ -603,7 +689,6 @@ std::optional<gp_Pnt> Band::outside(const TopoDS_Edge& edge) const
         return start;
     }
     const auto [speed, bend] = derivativeBounds(curve);
-    const double tolerance = BRep_Tool::Tolerance(edge);
     struct Sample
     {
         double t = 0.0;
@@ -760,6 +845,16 @@ std::optional<gp_Pnt> Band::outside(const TopoDS_Face& face) const
             return out;
         }
     }
+    return leavesOutside(face, true);
+}
+
+std::optional<gp_Pnt> Band::behind(const TopoDS_Face& face) const
+{
+    return leavesOutside(face, false);
+}
+
+std::optional<gp_Pnt> Band::leavesOutside(const TopoDS_Face& face, bool whole) const
+{
     SilhouetteSurface silhouette;
     try {
         silhouette = silhouetteSurface(face);
@@ -775,10 +870,45 @@ std::optional<gp_Pnt> Band::outside(const TopoDS_Face& face) const
     const gp_Ax1 axis(frame.Location(), frame.YDirection());
     const gp_XYZ direction = axis.Direction().XYZ();
     const double tolerance = BRep_Tool::Tolerance(face);
+    // g's sign against the face's outward normal: the converted surface's normal against the
+    // face's own at the surface's middle
+    double orientation = 1.0;
+    if (!whole) {
+        double uFirst = 0.0;
+        double uLast = 0.0;
+        double vFirst = 0.0;
+        double vLast = 0.0;
+        surface->Bounds(uFirst, uLast, vFirst, vLast);
+        gp_Pnt middle;
+        gp_Vec alongU;
+        gp_Vec alongV;
+        surface->D1((uFirst + uLast) / 2.0, (vFirst + vLast) / 2.0, middle, alongU, alongV);
+        const gp_Vec converted = alongU.Crossed(alongV);
+        const Handle(Geom_Surface) own = BRep_Tool::Surface(face);
+        GeomAPI_ProjectPointOnSurf onOwn(middle, own);
+        if (!onOwn.IsDone() || onOwn.NbPoints() < 1 || converted.Magnitude() <= gp::Resolution()) {
+            return somewhere(face);
+        }
+        double u = 0.0;
+        double v = 0.0;
+        onOwn.LowerDistanceParameters(u, v);
+        gp_Pnt at;
+        own->D1(u, v, at, alongU, alongV);
+        gp_Vec outward = alongU.Crossed(alongV);
+        if (face.Orientation() == TopAbs_REVERSED) {
+            outward.Reverse();
+        }
+        const double agreement = converted.Dot(outward);
+        if (std::abs(agreement) <= 0.5 * converted.Magnitude() * outward.Magnitude()) {
+            return somewhere(face);
+        }
+        orientation = agreement > 0.0 ? 1.0 : -1.0;
+    }
 
     // Where the face's boundary can lie in its parameters: a rectangle that meets none of these
-    // boxes holds no point of the boundary, so it lies in the face or out of it whole. Where the
-    // surface's parameters aren't the face's, every leaf counts as reaching the face.
+    // boxes holds no point of the boundary, so it lies in the face or out of it whole. Each pcurve
+    // in 32 spans: one box for a slanted trim covers much of the face. Where the surface's
+    // parameters aren't the face's, every leaf counts as reaching the face.
     std::vector<Bnd_Box2d> boundary;
     for (TopExp_Explorer edges(carrier, TopAbs_EDGE); edges.More(); edges.Next()) {
         double first = 0.0;
@@ -788,9 +918,18 @@ std::optional<gp_Pnt> Band::outside(const TopoDS_Face& face) const
         if (pcurve.IsNull()) {
             return somewhere(face);
         }
-        Bnd_Box2d box;
-        BndLib_Add2dCurve::Add(pcurve, first, last, Precision::PConfusion(), box);
-        boundary.push_back(box);
+        constexpr int spans = 32;
+        for (int k = 0; k < spans; ++k) {
+            Bnd_Box2d box;
+            BndLib_Add2dCurve::Add(
+                pcurve,
+                first + (last - first) * k / spans,
+                first + (last - first) * (k + 1) / spans,
+                Precision::PConfusion(),
+                box
+            );
+            boundary.push_back(box);
+        }
     }
     BRepTopAdaptor_FClass2d inCarrier(carrier, Precision::PConfusion());
     auto inFace = [&](double u, double v) {
@@ -837,8 +976,12 @@ std::optional<gp_Pnt> Band::outside(const TopoDS_Face& face) const
         }
         return here;
     };
-    // A corner of the face whose image, widened by the tolerance, is in no part's band
-    auto away = [&](const Corner& here, double u, double v) {
+    // A corner of the face whose image, widened by the tolerance, is in no part's band: any, for
+    // the whole face; for behind(), one where g <= 0
+    auto away = [&](const Corner& here, double u, double v, double g) {
+        if (!whole && g * orientation > 0.0) {
+            return false;
+        }
         for (std::size_t p = 0; p < parts.size(); ++p) {
             if (here.near[p].second + tolerance < parts[p].width) {
                 return false;
@@ -957,19 +1100,42 @@ std::optional<gp_Pnt> Band::outside(const TopoDS_Face& face) const
             stack.push_back(std::move(leaf));
         }
     }
+    auto tell = [&](const char* what, const Leaf& leaf, const gp_Pnt& p) {  // TEMP s8
+        if (std::getenv("FC_D2_WHY")) {
+            std::fprintf(stderr, "D2LEAF %s whole=%d u [%.9g, %.9g] v [%.9g, %.9g] at (%.6g, %.6g, %.6g) r=%.9g h=%.9g count=%d\n", what, whole ? 1 : 0, leaf.u0, leaf.u1, leaf.v0, leaf.v1, p.X(), p.Y(), p.Z(), image(p).X(), image(p).Y(), 0);
+            for (std::size_t q = 0; q < parts.size(); ++q) {
+                std::fprintf(stderr, "D2LEAF   part width=%.3g d=%.3g %.3g %.3g %.3g\n", parts[q].width, leaf.corners[0].near[q].second, leaf.corners[1].near[q].second, leaf.corners[2].near[q].second, leaf.corners[3].near[q].second);
+            }
+        }
+    };
     // Halving stops at a floor, and the count at a budget (section 15.8: 1,000,000 nodes)
     const double floorU = (surface->UKnot(surface->NbUKnots()) - surface->UKnot(1)) * 1e-9;
     const double floorV = (surface->VKnot(surface->NbVKnots()) - surface->VKnot(1)) * 1e-9;
     constexpr int budget = 1000000;
     int count = 0;
+    struct Stats  // TEMP s8
+    {
+        const bool& whole;
+        const int& count;
+        std::chrono::steady_clock::time_point began = std::chrono::steady_clock::now();
+        ~Stats()
+        {
+            if (std::getenv("FC_D2_WHY")) {
+                std::fprintf(stderr, "D2STAT whole=%d leaves=%d ms=%.1f\n", whole ? 1 : 0, count, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - began).count());
+            }
+        }
+    } stats {whole, count};
     while (!stack.empty()) {
         Leaf leaf = std::move(stack.back());
         stack.pop_back();
         if (++count > budget) {
+            tell("budget", leaf, leaf.corners[0].point);
             return leaf.corners[0].point;
         }
-        // No silhouette in the leaf, or none of the face
-        if (oneSign(leaf.patch.g) || !reaches(leaf.u0, leaf.u1, leaf.v0, leaf.v1)) {
+        // None of the face, or no silhouette in the leaf (for behind(), none and g > 0)
+        const Bernstein& g = leaf.patch.g;
+        if (!reaches(leaf.u0, leaf.u1, leaf.v0, leaf.v1)
+            || (oneSign(g) && (whole || g.value.front() * orientation > 0.0))) {
             continue;
         }
         const std::array<std::pair<double, double>, 4> at {
@@ -979,7 +1145,9 @@ std::optional<gp_Pnt> Band::outside(const TopoDS_Face& face) const
             std::make_pair(leaf.u1, leaf.v1)
         };
         for (std::size_t k = 0; k < 4; ++k) {
-            if (away(leaf.corners[k], at[k].first, at[k].second)) {
+            const double gCorner = g.value[g.index(k % 2 == 1 ? g.m : 0, k >= 2 ? g.n : 0)];
+            if (away(leaf.corners[k], at[k].first, at[k].second, gCorner)) {
+                tell("away", leaf, leaf.corners[k].point);
                 return leaf.corners[k].point;
             }
         }
@@ -990,6 +1158,7 @@ std::optional<gp_Pnt> Band::outside(const TopoDS_Face& face) const
         const bool uSmall = leaf.u1 - leaf.u0 <= floorU;
         const bool vSmall = leaf.v1 - leaf.v0 <= floorV;
         if (uSmall && vSmall) {
+            tell("floor", leaf, leaf.corners[0].point);
             return leaf.corners[0].point;
         }
         alongU = vSmall || (alongU && !uSmall);
