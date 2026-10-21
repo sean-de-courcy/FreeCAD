@@ -588,6 +588,42 @@ TEST(FirstContactConstruction, BandHoldsSilhouette)
     EXPECT_FALSE(waveBand().outside(tangentPlane(1e-3)).has_value());
 }
 
+// C4 and C5 (Band::behind()) on the tangent plane x = 2, outward normal +x: the circles about the
+// axis meet it from behind (g = -y <= 0) where y >= 0, and there its image is r - 2 = y^2 / 4 to
+// first order. Half 0.5 wide, that leaves the band of 2e-6: refused on the side behind, either way
+// round. Half 1e-3 wide, it stays within 2.5e-7: certified.
+TEST(FirstContactConstruction, BandFindsFaceBehind)
+{
+    const auto band = waveBand();
+    const TopoDS_Face face = tangentPlane(0.5);
+    const auto out = band.behind(face);
+    ASSERT_TRUE(out.has_value());
+    EXPECT_GT(out->Y(), 0.0);
+    EXPECT_GT(std::hypot(out->X(), out->Y()) - 2.0, 2e-6);
+    const auto reversed = band.behind(TopoDS::Face(face.Reversed()));
+    ASSERT_TRUE(reversed.has_value());
+    EXPECT_LT(reversed->Y(), 0.0);
+    EXPECT_GT(std::hypot(reversed->X(), reversed->Y()) - 2.0, 2e-6);
+}
+
+// Where the circles meet the face from in front only (y in [-0.5, -0.1], g >= 0.1), nothing needs
+// the band, however far out of it the face maps
+TEST(FirstContactConstruction, BandHoldsFaceBehind)
+{
+    const auto band = waveBand();
+    EXPECT_FALSE(band.behind(tangentPlane(1e-3)).has_value());
+    BRepBuilderAPI_MakePolygon polygon(
+        gp_Pnt(2.0, -0.5, 0.0),
+        gp_Pnt(2.0, -0.1, 0.0),
+        gp_Pnt(2.0, -0.1, 1.0),
+        gp_Pnt(2.0, -0.5, 1.0),
+        Standard_True
+    );
+    const TopoDS_Face front = BRepBuilderAPI_MakeFace(polygon.Wire(), Standard_True).Face();
+    EXPECT_FALSE(band.behind(front).has_value());
+    EXPECT_TRUE(band.behind(TopoDS::Face(front.Reversed())).has_value());
+}
+
 // The band's nearest point over a wall of many spans, found among the spans whose pole boxes can
 // hold a nearer one: an arc of 300 degrees of the unit circle about (5, 0), rational, in 60 spans.
 // A point within 0.9 of the width of the circle is in the band, one 1.1 of it out, all around the
