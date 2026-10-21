@@ -4,6 +4,7 @@ add_executable(PartDesign_tests_run
         BackwardCompatibility.cpp
         BodyReorder.cpp
         DatumPlane.cpp
+        FirstContactConstruction.cpp
         FirstContactJumps.cpp
         ShapeBinder.cpp
         Pad.cpp
