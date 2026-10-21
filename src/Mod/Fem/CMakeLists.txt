@@ -398,6 +398,7 @@ SET(FemTestsApp_SRCS
     femtest/app/test_solver_mystran.py
     femtest/app/test_solver_z88.py
     femtest/app/test_gmsh.py
+    femtest/app/test_vtk_output.py
 )
 
 SET(FemTestsFiles_SRCS

@@ -27,6 +27,9 @@
 #include <vtkAlgorithmOutput.h>
 #include <vtkUnstructuredGrid.h>
 #include <vtkInformation.h>
+#include <vtkInformationVector.h>
+#include <vtkObjectFactory.h>
+#include <vtkPolyData.h>
 
 #include <App/FeaturePythonPyImp.h>
 #include <App/Document.h>
@@ -771,6 +774,36 @@ DocumentObjectExecReturn* FemPostClipFilter::execute()
 
 // ***************************************************************************
 // smoothing filter extension
+namespace
+{
+/** vtkSmoothPolyDataFilter, quiet on empty input (ops#382). The plain filter reports "No data to
+ * smooth!" as an error on every update when its input has no points or cells, e.g. a contour
+ * filter on a pipeline without data or on a constant field. Its output is then empty either way,
+ * so this one leaves it empty without the error. Any other input goes to the plain filter. */
+class FemSmoothPolyDataFilter: public vtkSmoothPolyDataFilter
+{
+public:
+    static FemSmoothPolyDataFilter* New();
+    vtkTypeMacro(FemSmoothPolyDataFilter, vtkSmoothPolyDataFilter);
+
+protected:
+    int RequestData(
+        vtkInformation* request,
+        vtkInformationVector** inputVector,
+        vtkInformationVector* outputVector
+    ) override
+    {
+        vtkPolyData* input = vtkPolyData::GetData(inputVector[0]);
+        if (!input || input->GetNumberOfPoints() < 1 || input->GetNumberOfCells() < 1) {
+            return 1;
+        }
+        return vtkSmoothPolyDataFilter::RequestData(request, inputVector, outputVector);
+    }
+};
+
+vtkStandardNewMacro(FemSmoothPolyDataFilter);
+}  // namespace
+
 const App::PropertyQuantityConstraint::Constraints FemPostSmoothFilterExtension::angleRange
     = {0.0, 180.0, 1.0};
 const App::PropertyIntegerConstraint::Constraints FemPostSmoothFilterExtension::iterationRange
@@ -837,7 +870,7 @@ FemPostSmoothFilterExtension::FemPostSmoothFilterExtension()
     Iterations.setConstraints(&iterationRange);
     RelaxationFactor.setConstraints(&relaxationRange);
 
-    m_smooth = vtkSmartPointer<vtkSmoothPolyDataFilter>::New();
+    m_smooth = vtkSmartPointer<FemSmoothPolyDataFilter>::New();
     // override default VTK values
     m_smooth->SetNumberOfIterations(EnableSmoothing.getValue() ? Iterations.getValue() : 0);
     m_smooth->SetBoundarySmoothing(BoundarySmoothing.getValue());

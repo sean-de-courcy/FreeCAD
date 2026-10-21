@@ -375,7 +375,8 @@ names it.
 | `fix/393-dressup-pocket` | fix | ops#393 | - | `integration` `2e2bb138ba` (needs `fix/303-dropped-base-parts`, fork PR 341) | `4f191bb942` (fork PR 346), 2026-10-20 | never (fork fix) |
 | `fix/121-notification-reentry` | fix | ops#121 | - | `integration` `41762ed4ec` | `ca745351d9` (fork PR 350), 2026-10-20 | never (fork fix) |
 | `feat/391-warning-load` | feat | ops#391 | - | `integration` `41762ed4ec` | `6c8d6ea5b6` (fork PR 348), 2026-10-20 | never (fork feature) |
-| `fix/424-propertyeditor-focus-macos` | fix | ops#424 | main `15883e6f4c` (as `2f06336e66`) | `integration` `6c8d6ea5b6` | (fork PR 353) | a new base contains `15883e6f4c` |
+| `fix/424-propertyeditor-focus-macos` | fix | ops#424 | main `15883e6f4c` (as `2f06336e66`) | `integration` `6c8d6ea5b6` | `4dab87cac2` (fork PR 353), 2026-10-21 | a new base contains `15883e6f4c` |
+| `fix/382-vtk-output-window` | fix | ops#382 | - | `integration` `19b2300169` | (fork PR 351) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 
