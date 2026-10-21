@@ -2782,9 +2782,15 @@ class TestRevolve(unittest.TestCase):
         of radius 1.46 to 1.65 cross the wall three times, at about 118, 145 to 180, and 200
         degrees; other circles cross it once. The band lay between the profile's samples, and the
         Groove also removed those circles between their second and third crossings, with no error
-        (the PR 279 round 3 verification's 1). First contact jumps there, and no tool the fork
-        builds is right: it fails, naming the place (ops#293 round 5)."""
-        wall = self.foldedWall(-1, 4)
+        (the PR 279 round 3 verification's 1). First contact jumps at the fold's outer radius,
+        which the certificate refuses (ops#293 round 5); the tool is built between walls along the
+        jump instead (ops#293 D2). Its cut from the box was refused as a wrong volume while the
+        check integrated adaptively (2e-4 off on the tool): the Groove removes what first contact
+        gives, and the band stays."""
+        wall, curve = self.polarWall(self.foldedLegs)
+        expected = self.firstContactVolume(
+            self.firstContactAngles(curve), 1, 3, 0, 2, self.radiusTurns(curve, 1, 3)
+        )
         body = self.Doc.addObject("PartDesign::Body", "Body")
         block = body.newObject("PartDesign::AdditiveBox", "Block")
         block.Length = block.Width = 12
@@ -2792,7 +2798,18 @@ class TestRevolve(unittest.TestCase):
         block.Placement = FreeCAD.Placement(FreeCAD.Vector(-6, -6, -0.5), FreeCAD.Rotation())
         self.Doc.recompute()
         groove = self.revolveProfileUpTo(body, "Groove", "One side", (wall, ["Face1"]))
-        self.assertJumpRefused(groove)
+        self.assertTrue(groove.isValid(), groove.getStatusString())
+        shape = groove.Shape
+        self.assertTrue(shape.isValid())
+        self.assertEqual(len(shape.Solids), 1)
+        self.assertAlmostEqual(groove.AddSubShape.Volume, expected, delta=1e-4 * expected)
+        self.assertAlmostEqual(
+            block.Shape.Volume - shape.Volume, expected, delta=1e-4 * expected
+        )
+        # Removed before the jump; the band between the second and third crossings stays
+        self.assertTurnHolds(
+            shape, [(1.5, 1, 130), (1.55, 1, 190), (2.5, 1, 250)], [(1.5, 1, 60), (2.5, 1, 150)]
+        )
 
     def testRevolutionUpToFaceNeverMet(self):
         """The plane y = 100, parallel to the profile plane: the sweep about the Z axis never
@@ -2853,13 +2870,15 @@ class TestRevolve(unittest.TestCase):
         self.Doc.recompute()
         return revolution
 
+    # foldedWall()'s polar legs (r0, r1, a0, a1), as polarWall() takes them
+    foldedLegs = ((0.5, 1.65, 100, 120), (1.65, 1.46, 120, 200), (1.46, 3.5, 200, 220))
+
     def foldedWall(self, low, height):
         """A wall along Z from z = `low`, `height` high, whose curve runs out from r = 0.5 to 1.65
         (angles 100 to 120 degrees), back in to 1.46 (120 to 200) and out to 3.5 (200 to 220):
         circles of radius 1.46 to 1.65 cross it three times (testGrooveUpToFoldedWall)."""
-        legs = ((0.5, 1.65, 100, 120), (1.65, 1.46, 120, 200), (1.46, 3.5, 200, 220))
         points = []
-        for index, (r0, r1, a0, a1) in enumerate(legs):
+        for index, (r0, r1, a0, a1) in enumerate(self.foldedLegs):
             for k in range(61 if index == 2 else 60):
                 radius = r0 + (r1 - r0) * k / 60
                 angle = math.radians(a0 + (a1 - a0) * k / 60)
@@ -2909,18 +2928,38 @@ class TestRevolve(unittest.TestCase):
     def testRevolutionUpToFoldedWallLeakInsideBase(self):
         """foldedWall() with a base block over where circles of radius 1.46 to 1.65 run between
         their second and third crossings: a Revolution that kept that band would hide it in the
-        base, but where first contact jumps no tool the fork builds is right, so it fails, naming
-        the place (ops#293 round 5; the critic's base-hidden regressions)."""
-        wall = self.foldedWall(-1, 4)
+        base (the critic's base-hidden regressions). First contact jumps, and the tool is built
+        between walls along the jump (ops#293 D2): the tool alone holds what first contact gives,
+        so the band isn't in it, and the result is the block and the tool less their overlap."""
+        wall, curve = self.polarWall(self.foldedLegs)
+        angle = self.firstContactAngles(curve)
+        breaks = self.radiusTurns(curve, 1, 3)
+        tool = self.firstContactVolume(angle, 1, 3, 0, 2, breaks)
+        x0, x1, y0, y1 = -2.5, -0.8, -0.5, 1.2
+        ends = [1] + breaks + [3]
+        overlap = 2 * sum(
+            self.midpointIntegral(
+                lambda r: r * self.arcInRect(r, 0, angle(r), x0, x1, y0, y1), low, high, steps=400
+            )
+            for low, high in zip(ends, ends[1:])
+        )
         body = self.Doc.addObject("PartDesign::Body", "Body")
         block = body.newObject("PartDesign::AdditiveBox", "Block")
-        block.Length = 1.7
-        block.Width = 1.7
+        block.Length = x1 - x0
+        block.Width = y1 - y0
         block.Height = 3
-        block.Placement = FreeCAD.Placement(FreeCAD.Vector(-2.5, -0.5, -0.5), FreeCAD.Rotation())
+        block.Placement = FreeCAD.Placement(FreeCAD.Vector(x0, y0, -0.5), FreeCAD.Rotation())
         self.Doc.recompute()
         revolution = self.revolveProfileUpTo(body, "Revolution", "One side", (wall, ["Face1"]))
-        self.assertJumpRefused(revolution)
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        shape = revolution.Shape
+        self.assertTrue(shape.isValid())
+        self.assertEqual(len(shape.Solids), 1)
+        self.assertAlmostEqual(revolution.AddSubShape.Volume, tool, delta=1e-4 * tool)
+        expected = block.Shape.Volume + tool - overlap
+        self.assertAlmostEqual(shape.Volume, expected, delta=1e-4 * expected)
+        # Outside the block: before the jump in the result, past it not
+        self.assertTurnHolds(shape, [(1.5, 1, 60), (2.5, 1, 150)], [(1.3, 1, 125), (2.5, 1, 250)])
 
     def polarWall(self, legs, low=-1, height=4):
         """A wall along Z from z = `low`, `height` high, whose curve runs through the polar legs
@@ -2975,6 +3014,61 @@ class TestRevolve(unittest.TestCase):
             return best
 
         return angle
+
+    @staticmethod
+    def radiusTurns(curve, low, high, samples=20000):
+        """The radii in (low, high) at which an extruded wall's curve turns toward or away from
+        Z: where first contact can jump. An interpolated curve overshoots its legs' corners
+        (foldedWall()'s 1.65 is 1.65299)."""
+        first = curve.FirstParameter
+        last = curve.LastParameter
+
+        def radius(t):
+            point = curve.value(t)
+            return math.hypot(point.x, point.y)
+
+        step = (last - first) / samples
+        turns = []
+        for i in range(1, samples):
+            t = first + i * step
+            before, here, after = radius(t - step), radius(t), radius(t + step)
+            if (here - before) * (after - here) >= 0:
+                continue
+            # Golden-section search for the extremum in [t - step, t + step]
+            sign = 1 if here > before else -1
+            a, b = t - step, t + step
+            for _ in range(60):
+                c = b - (b - a) * 0.618
+                d = a + (b - a) * 0.618
+                if sign * radius(c) > sign * radius(d):
+                    b = d
+                else:
+                    a = c
+            r = radius((a + b) / 2)
+            if low < r < high:
+                turns.append(r)
+        return sorted(turns)
+
+    @staticmethod
+    def arcInRect(r, low, high, x0, x1, y0, y1):
+        """The angle within [low, high] (radians from +X about +Z, in [0, 2 pi]) over which the
+        circle of radius r about Z lies in the rectangle x in [x0, x1], y in [y0, y1]."""
+        cuts = {low, high}
+        for c in (x0, x1):
+            if abs(c) <= r:
+                a = math.acos(c / r)
+                cuts |= {a, 2 * math.pi - a}
+        for c in (y0, y1):
+            if abs(c) <= r:
+                a = math.asin(c / r)
+                cuts |= {a % (2 * math.pi), (math.pi - a) % (2 * math.pi)}
+        cuts = sorted(c for c in cuts if low <= c <= high)
+        inside = 0
+        for a, b in zip(cuts, cuts[1:]):
+            m = (a + b) / 2
+            if x0 <= r * math.cos(m) <= x1 and y0 <= r * math.sin(m) <= y1:
+                inside += b - a
+        return inside
 
     def firstContactVolume(self, angle, x0, x1, z0, z1, breaks):
         """The volume first contact gives the profile x in [x0, x1], z in [z0, z1] turning about

@@ -129,6 +129,9 @@ private:
     // With `checkVolume`, the base operation's volume must be possible for a correct fuse or
     // cut of the two (an up-to-face tool, ops#293)
     void setResult(const TopoShape& base, const TopoShape& revolved, bool checkVolume = false);
+    // A side's tool was built by constructFirstContact() in this recompute (ops#293 D2): its
+    // volume checks integrate over knot spans (FirstContact::spanVolume())
+    mutable bool constructedTool = false;
 
     double getStartReferenceAngle(
         const TopoShape& profileShape,

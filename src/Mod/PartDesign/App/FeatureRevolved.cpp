@@ -1656,6 +1656,19 @@ SolidVolume solidVolume(const TopoDS_Shape& shape)
     return {props.Mass(), std::fabs(relativeError * props.Mass())};
 }
 
+// solidVolume(), or for a tool built by constructFirstContact() and what it was combined into, the
+// volume integrated over knot spans: the adaptive integration was 2e-4 off on the folded wall's tool
+// and refused its correct cut from the base (ops#293 D2). Sweeps the certificate accepts keep
+// solidVolume() (D2a).
+SolidVolume checkedVolume(const TopoDS_Shape& shape, bool constructed)
+{
+    if (!constructed || shape.IsNull()) {
+        return solidVolume(shape);
+    }
+    const auto [value, error] = FirstContact::spanVolume(shape);
+    return {value, error};
+}
+
 // The largest distance of a shape's bounding box's corners from the axis
 double largestRadius(const TopoDS_Shape& shape, const gp_Ax1& axis)
 {
@@ -2391,6 +2404,7 @@ void Revolved::onChanged(const App::Property* prop)
 
 App::DocumentObjectExecReturn* Revolved::executeRevolved(Part::RevolMode revolMode)
 {
+    constructedTool = false;
     try {
         return tryExecuteRevolved(revolMode);
     }
@@ -2783,9 +2797,9 @@ void Revolved::setResult(const TopoShape& base, const TopoShape& revolved, bool 
         // A correct fuse holds at least the larger of the two and at most both; a correct cut at
         // least the base less the tool and at most the base
         if (checkVolume) {
-            const auto [baseVolume, baseError] = solidVolume(base.getShape());
-            const auto [toolVolume, toolError] = solidVolume(tool.getShape());
-            const auto [volume, error] = solidVolume(result.getShape());
+            const auto [baseVolume, baseError] = checkedVolume(base.getShape(), constructedTool);
+            const auto [toolVolume, toolError] = checkedVolume(tool.getShape(), constructedTool);
+            const auto [volume, error] = checkedVolume(result.getShape(), constructedTool);
             const double slack = 1e-6 * (baseVolume + toolVolume) + baseError + toolError + error
                 + Precision::Confusion();
             const bool fuse = volume >= std::max(baseVolume, toolVolume) - slack
@@ -2918,6 +2932,7 @@ TopoShape Revolved::tryToRevolveToFace(
             if (!solid.isValid() || !toleranceHolds(solid.getShape(), {profile, face})) {
                 continue;
             }
+            constructedTool = true;
             return solid.moved(there.Inverted());
         }
         throw jump;
@@ -2980,9 +2995,10 @@ TopoShape Revolved::tryToRevolveToFace(
     if (!exactSeams.IsNull()) {
         bool agree = false;
         try {
-            const auto [volume, error] = solidVolume(sweep.getShape());
+            const TopoShape exactSweep = sweepToFirstContact(exactSeams);
+            const auto [volume, error] = checkedVolume(sweep.getShape(), constructedTool);
             const auto [exactVolume, exactError] =
-                solidVolume(sweepToFirstContact(exactSeams).getShape());
+                checkedVolume(exactSweep.getShape(), constructedTool);
             agree = std::fabs(volume - exactVolume)
                 <= 1e-6 * (volume + exactVolume) + error + exactError + Precision::Confusion();
         }

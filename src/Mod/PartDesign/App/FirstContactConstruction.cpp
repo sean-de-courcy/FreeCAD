@@ -504,6 +504,11 @@ std::pair<TopoDS_Shape, std::string> sweepCell(
 
 }  // namespace
 
+std::pair<double, double> spanVolume(const TopoDS_Shape& shape)
+{
+    return volume(shape);
+}
+
 // Every section edge in the piece must bound a piece of the face there, unless it lies in a
 // wall's band, where the split may drop a flap that bounds nothing (the hook at the first push).
 // On q18's fold trimmed by a slanted plane (TrimmedFold), the split cut the turn's faces along
