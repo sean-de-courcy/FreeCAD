@@ -8,6 +8,7 @@ models; the expectations are analytic volumes.
 """
 
 import math
+import time
 import unittest
 
 import FreeCAD
@@ -230,6 +231,28 @@ class FilletFallbackTest(unittest.TestCase):
                     )
                     rib = result.common(rib_side)
                     self.assertAlmostEqual(rib.Volume, section * 10, delta=1e-9 * section * 10)
+
+    def testRoundAlongALongSplineIsQuick(self):
+        # A round of 1 on the wave's top edge, which OCCT builds; FilletFallback then reads the area
+        # of each new face. In round 2 of ops#414 the side face, trimmed by the round, was converted
+        # to NURBS and integrated adaptively along its B-spline boundaries: 9.5 s at 500 spans, 18 s
+        # at 1000, for an OCCT fillet of 0.14 s and 0.24 s. Its boundary integral takes milliseconds
+        for waves in (25, 50):
+            with self.subTest(waves=waves):
+                prism = wave_prism(waves)
+                top = [
+                    edge
+                    for edge in prism.Edges
+                    if edge.Curve.TypeId == "Part::GeomBSplineCurve"
+                    and abs(edge.Vertexes[0].Point.z - 10) < 1e-9
+                ]
+                self.assertEqual(len(top), 1)
+                start = time.perf_counter()
+                result = prism.makeFillet(1, top)
+                elapsed = time.perf_counter() - start
+                self.assertTrue(result.isValid())
+                self.assertEqual(len(result.Faces), len(prism.Faces) + 1)
+                self.assertLess(elapsed, 2.0)
 
     def testChamfers(self):
         box = Part.makeBox(30, 4, 20)

@@ -9,6 +9,7 @@
 #include <utility>
 
 #include <BRepAdaptor_CompCurve.hxx>
+#include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
@@ -31,6 +32,7 @@
 #include <Geom2dAPI_Interpolate.hxx>
 #include <Geom2d_BSplineCurve.hxx>
 #include <Geom2d_Line.hxx>
+#include <Geom_Ellipse.hxx>
 #include <GeomAPI_Interpolate.hxx>
 #include <Geom_BSplineCurve.hxx>
 #include <Geom_OffsetCurve.hxx>
@@ -45,11 +47,14 @@
 #include <TopExp_Explorer.hxx>
 #include <TopTools_ListOfShape.hxx>
 #include <TopoDS.hxx>
+#include <TopoDS_Compound.hxx>
 #include <TopoDS_Vertex.hxx>
 #include <gp_Ax1.hxx>
 #include <gp_Ax2.hxx>
 #include <gp_Circ.hxx>
 #include <gp_Dir2d.hxx>
+#include <gp_Elips.hxx>
+#include <gp_Mat.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Pnt2d.hxx>
 #include <gp_Vec2d.hxx>
@@ -457,10 +462,12 @@ TEST(MassProperties, screenIsCheap)
     }
 }
 
-// The face of an extrusion of the wave: its area is 10 times the wave's length. OCCT's adaptive
-// area on the extrusion was off by 1.3e-4 (500 spans), 2.9e-4 (1000) and 1.9 % (41 spans, 4 to a
-// wave); the helper integrates the same face converted to NURBS: within 1e-6 at 500 and 1000
-// spans, 2.9e-6 at 41 (ops#414)
+// The face of an extrusion of the wave over z in [0, 10]. With ds the wave's arc length, its area
+// is 10 times the wave's length, its first moments 10 times the integrals of x ds and y ds and 50
+// times its length, its second moments 10 times those of x^2, y^2 and x y, 1000 / 3 times its
+// length for z^2, and 50 times the integrals of x ds and y ds for x z and y z. OCCT's adaptive area
+// on the extrusion was off by 1.3e-4 (500 spans), 2.9e-4 (1000) and 1.9 % (41 spans, 4 to a wave);
+// the helper's boundary integral is exact up to its tolerance (ops#414)
 TEST(MassProperties, extrusionFaceArea)
 {
     const std::pair<int, int> cases[] = {{500, 20}, {1000, 20}, {41, 4}};
@@ -471,9 +478,153 @@ TEST(MassProperties, extrusionFaceArea)
         EXPECT_TRUE(Part::MassProperties::needsAdaptive(side));
         GProp_GProps props;
         Part::MassProperties::surfaceProperties(side, props);
-        EXPECT_LT(relativeError(props.Mass(), 10 * arcLength(wave)), 1e-5);
-        // The centre's height, half the face's, holds whatever the integration along the wave
-        EXPECT_NEAR(props.CentreOfMass().Z(), 5.0, 1e-6);
+
+        const auto along = [&](auto g) {
+            return overSpans(*wave, [&](double t) {
+                return g(wave->Value(t)) * wave->DN(t, 1).Magnitude();
+            });
+        };
+        const double length = arcLength(wave);
+        const double area = 10 * length;
+        const double x = 10 * along([](const gp_Pnt& p) { return p.X(); }) / area;
+        const double y = 10 * along([](const gp_Pnt& p) { return p.Y(); }) / area;
+        const double z = 5.0;
+        // The second moments about the centre
+        const double xx = 10 * along([](const gp_Pnt& p) { return p.X() * p.X(); }) - area * x * x;
+        const double yy = 10 * along([](const gp_Pnt& p) { return p.Y() * p.Y(); }) - area * y * y;
+        const double zz = 1000.0 / 3 * length - area * z * z;
+        const double xy = 10 * along([](const gp_Pnt& p) { return p.X() * p.Y(); }) - area * x * y;
+        const double xz = 50 * along([](const gp_Pnt& p) { return p.X(); }) - area * x * z;
+        const double yz = 50 * along([](const gp_Pnt& p) { return p.Y(); }) - area * y * z;
+        const gp_Mat inertia(
+            gp_XYZ(yy + zz, -xy, -xz),
+            gp_XYZ(-xy, xx + zz, -yz),
+            gp_XYZ(-xz, -yz, xx + yy)
+        );
+
+        EXPECT_LT(relativeError(props.Mass(), area), 1e-9);
+        const gp_Pnt centre = props.CentreOfMass();
+        EXPECT_NEAR(centre.X(), x, 1e-9 * spans);
+        EXPECT_NEAR(centre.Y(), y, 1e-9 * spans);
+        EXPECT_NEAR(centre.Z(), z, 1e-9 * spans);
+        const double scale = inertia.Value(3, 3);
+        for (int i = 1; i <= 3; ++i) {
+            for (int j = 1; j <= 3; ++j) {
+                SCOPED_TRACE(10 * i + j);
+                EXPECT_NEAR(props.MatrixOfInertia().Value(i, j), inertia.Value(i, j), 1e-9 * scale);
+            }
+        }
+    }
+}
+
+// The extrusion of an offset curve of the wave, the basis of an offset of the extrusion's face:
+// its area is 10 times the offset curve's length. Round 2 converted it to NURBS, an approximation
+// 2.2 mm off at 500 spans and 5.4 at 1000 that OCCT reports as done: -3.4 % and -3.9 % (ops#414)
+TEST(MassProperties, offsetCurveExtrusion)
+{
+    for (int spans : {500, 1000}) {
+        const auto wave = waveSpline(spans);
+        for (double distance : {1.0, -1.0}) {
+            SCOPED_TRACE(spans * distance);
+            Handle(Geom_OffsetCurve) curve = new Geom_OffsetCurve(wave, distance, gp_Dir(0, 0, 1));
+            const TopoDS_Face face = BRepBuilderAPI_MakeFace(
+                                         extrusionOf(curve),
+                                         wave->FirstParameter(),
+                                         wave->LastParameter(),
+                                         0.0,
+                                         10.0,
+                                         Precision::Confusion()
+            )
+                                         .Face();
+            const double length = overSpans(*wave, [&](double t) {
+                return curve->DN(t, 1).Magnitude();
+            });
+            EXPECT_TRUE(Part::MassProperties::needsAdaptive(face));
+            EXPECT_LT(relativeError(Part::MassProperties::area(face), 10 * length), 1e-9);
+        }
+    }
+}
+
+// The wave's side trimmed by a Boolean to z in [2, 5]: its edges at z = 2 and 5 are intersection
+// curves, B-splines of their own spans in the face's parameters. Its area is 3 times the wave's
+// length. Round 2's NURBS conversion was exact here, but OCCT's adaptive area on it took 7.6 s at
+// 500 spans and 58 s at 1000, and FilletFallback reads the area of every new face of a fillet or
+// chamfer (ops#414)
+TEST(MassProperties, trimmedSideFaceIsFast)
+{
+    for (int waves : {25, 50}) {
+        SCOPED_TRACE(waves);
+        const double length = period * waves;
+        const auto wave = waveSpline(period * waves);
+        const TopoDS_Shape slab = BRepAlgoAPI_Common(
+                                      wavePrism(waves),
+                                      BRepPrimAPI_MakeBox(gp_Pnt(-10, -1, 2), 20, length + 2, 3).Shape()
+        )
+                                      .Shape();
+        TopoDS_Face side;
+        for (TopExp_Explorer it(slab, TopAbs_FACE); it.More(); it.Next()) {
+            TopLoc_Location location;
+            if (BRep_Tool::Surface(TopoDS::Face(it.Current()), location)
+                    ->IsKind(STANDARD_TYPE(Geom_SurfaceOfLinearExtrusion))) {
+                side = TopoDS::Face(it.Current());
+            }
+        }
+        ASSERT_FALSE(side.IsNull());
+        bool splineBoundary = false;
+        for (TopExp_Explorer it(side, TopAbs_EDGE); it.More(); it.Next()) {
+            double first = 0.0;
+            double last = 0.0;
+            const auto pcurve
+                = BRep_Tool::CurveOnSurface(TopoDS::Edge(it.Current()), side, first, last);
+            splineBoundary = splineBoundary || pcurve->IsKind(STANDARD_TYPE(Geom2d_BSplineCurve));
+        }
+        EXPECT_TRUE(splineBoundary);
+        EXPECT_TRUE(Part::MassProperties::needsAdaptive(side));
+        double area = 0.0;
+        const double milliseconds = millisecondsPerCall(1, [&] {
+            area = Part::MassProperties::area(side);
+        });
+        std::cout << period * waves << " spans, side trimmed to z in [2, 5]: " << milliseconds
+                  << " ms" << std::endl;
+        EXPECT_LT(relativeError(area, 3 * arcLength(wave)), 1e-9);
+        EXPECT_LT(milliseconds, 500.0);
+    }
+}
+
+// An elliptic prism in a shape the screen sends to the adaptive methods: its side, an extrusion of
+// the ellipse, by its boundary integral too. Round 2 converted it to a rational B-spline surface,
+// on which OCCT's adaptive area was 0.86 % off for 20 x 2 (ops#414). The ellipse's perimeter by the
+// trapezoidal rule, exact to rounding for a periodic integrand
+TEST(MassProperties, ellipseInAScreenedShape)
+{
+    for (const auto& [a, b] : {std::pair {5.0, 3.0}, std::pair {20.0, 2.0}}) {
+        SCOPED_TRACE(a);
+        const gp_Elips ellipse(gp_Ax2(gp_Pnt(0, -50, 0), gp_Dir(0, 0, 1)), a, b);
+        const TopoDS_Wire outline
+            = BRepBuilderAPI_MakeWire(BRepBuilderAPI_MakeEdge(ellipse).Edge()).Wire();
+        const TopoDS_Shape elliptic
+            = BRepPrimAPI_MakePrism(BRepBuilderAPI_MakeFace(outline, true).Face(), gp_Vec(0, 0, 10))
+                  .Shape();
+        const int steps = 4000;
+        double perimeter = 0.0;
+        for (int i = 0; i < steps; ++i) {
+            const double t = 2 * pi * i / steps;
+            perimeter += std::hypot(a * std::sin(t), b * std::cos(t)) * 2 * pi / steps;
+        }
+        const double ellipticArea = 10 * perimeter + 2 * pi * a * b;
+
+        const int waves = 25;
+        const auto wave = waveSpline(period * waves);
+        const double section = areaBehind(*wave);
+        const double waveArea = 10 * arcLength(wave) + 2 * section + 10 * period * waves + 2 * 50;
+
+        BRep_Builder builder;
+        TopoDS_Compound both;
+        builder.MakeCompound(both);
+        builder.Add(both, elliptic);
+        builder.Add(both, wavePrism(waves));
+        EXPECT_TRUE(Part::MassProperties::needsAdaptive(both));
+        EXPECT_LT(relativeError(Part::MassProperties::area(both), ellipticArea + waveArea), 1e-9);
     }
 }
 
@@ -513,7 +664,7 @@ TEST(MassProperties, wrappedSplines)
             BRep_Tool::Surface(face, location)->IsKind(STANDARD_TYPE(Geom_RectangularTrimmedSurface))
         );
         EXPECT_TRUE(Part::MassProperties::needsAdaptive(face));
-        EXPECT_LT(relativeError(Part::MassProperties::area(face), 10 * arcLength(wave)), 1e-6);
+        EXPECT_LT(relativeError(Part::MassProperties::area(face), 10 * arcLength(wave)), 1e-9);
     }
     {
         // An extrusion of the wave trimmed to its middle 250 spans, as a trimmed curve: area 10
@@ -528,7 +679,7 @@ TEST(MassProperties, wrappedSplines)
             return t > a && t < b ? wave->DN(t, 1).Magnitude() : 0.0;
         });
         EXPECT_TRUE(Part::MassProperties::needsAdaptive(face));
-        EXPECT_LT(relativeError(Part::MassProperties::area(face), 10 * length), 1e-6);
+        EXPECT_LT(relativeError(Part::MassProperties::area(face), 10 * length), 1e-9);
     }
     {
         // The extrusion offset by 1 along its normal, the wave's tangent crossed with z: the
@@ -540,7 +691,7 @@ TEST(MassProperties, wrappedSplines)
         Handle(Geom_OffsetCurve) curve = new Geom_OffsetCurve(wave, 1.0, gp_Dir(0, 0, 1));
         const double length = overSpans(*wave, [&](double t) { return curve->DN(t, 1).Magnitude(); });
         EXPECT_TRUE(Part::MassProperties::needsAdaptive(face));
-        EXPECT_LT(relativeError(Part::MassProperties::area(face), 10 * length), 1e-6);
+        EXPECT_LT(relativeError(Part::MassProperties::area(face), 10 * length), 1e-9);
     }
     {
         // The region between the cylinder r = 5 and the wave x = 10 + 1.5 (1 - cos(2 pi y / 20)),

@@ -19,9 +19,11 @@ class TopoDS_Shape;
  * bit, and adaptive methods at 1e-6 otherwise:
  * - volumes: Gauss-Kronrod with one integration per knot span, right on the prisms (extrusion
  *   faces included), pipes and revolutions of such B-splines in the tests;
- * - areas: OCCT's adaptive surface integration, each face on an extrusion converted to NURBS
- *   first. On the extrusion itself the adaptive area is off (1.9 % at 41 spans, 4 to a wave) while
- *   it is right on B-spline surfaces, revolutions and planes (within 1e-5 in the tests).
+ * - areas: each face on an extrusion (an offset of one included, through trimmed and offset
+ *   wrappers) exactly, by a boundary integral along its pcurves with Gauss-Legendre per knot span
+ *   of the basis curve; the other faces by OCCT's adaptive surface integration, which is off on
+ *   extrusions (1.9 % at 41 spans, 4 to a wave) and right on B-spline surfaces, revolutions and
+ *   planes (within 1e-5 in the tests).
  * The screen counts spans only: a strongly curved B-spline of 40 spans or fewer keeps the default,
  * which can be off there too (ops#427).
  *
@@ -46,7 +48,7 @@ PartExport bool needsAdaptive(const TopoDS_Shape& shape);
 PartExport void volumeProperties(const TopoDS_Shape& shape, GProp_GProps& props);
 
 /// The shape's surface properties into \a props, as BRepGProp::SurfaceProperties(shape, props)
-/// does, adaptive when needsAdaptive(), with the faces on extrusions converted to NURBS
+/// does, adaptive when needsAdaptive(), with the faces on extrusions integrated exactly
 PartExport void surfaceProperties(const TopoDS_Shape& shape, GProp_GProps& props);
 
 /// The volume the shape bounds: negative for a shell oriented inwards. The adaptive method
