@@ -595,6 +595,98 @@ class SweepPointToSquareShell(SweepPoint):
     pointFirst = True
 
 
+# A profile away from the spine's ends (fork PR 352 round 2). Round 1 named the end wires there
+# from the spine's end vertices alone, told apart by a counter in the profile's edge order
+# (`<spine vertex>;SWP;<n>`), so a chamfer on the profile moved the end references silently. Each
+# end edge is now also generated from the profile edge whose side face it bounds, and each end
+# vertex from the profile vertex whose lateral edge it ends.
+
+
+def chamferProfile(sketch):
+    """Chamfers the square's corner (2, -2), between its first line (y = -2) and its second
+    (x = 2), as a new fifth line."""
+    m.setLines(sketch, {0: ((-2, -2), (1, -2)), 1: ((2, -1), (2, 2))})
+    sketch.addGeometry(Part.LineSegment(V(1, -2, 0), V(2, -1, 0)), False)
+
+
+class SweepInteriorProfileChamfered(SweepStraight):
+    """The square sits at z = 14 on the path 0..30; the edit chamfers it. The edges on x = 2 and
+    y = 2 at both ends stay theirs (the x = 2 ones shortened by 1 mm), and so does the vertex
+    (-2, 2) at both ends."""
+
+    REFS = ("start_x2", "start_y2", "start_v", "end_x2", "end_y2", "end_v")
+    profileZ = 14
+    startZ, endZ = 0, 30
+
+    def consumers(self, doc, sweep):
+        self.attach(doc, sweep, "start_x2", lambda: self.edgeX2(self.startZ))
+        self.attach(doc, sweep, "start_y2", lambda: self.edgeY2(self.startZ))
+        self.attachVertex(doc, sweep, "start_v", self.startZ)
+        self.attach(doc, sweep, "end_x2", lambda: self.edgeX2(self.endZ))
+        self.attach(doc, sweep, "end_y2", lambda: self.edgeY2(self.endZ))
+        self.attachVertex(doc, sweep, "end_v", self.endZ)
+
+    def attachVertex(self, doc, sweep, ref, z):
+        predicate = lambda: vertex((-2, 2, z))
+        sketch = sketchOnVertex(doc, sweep, predicate(), "On" + ref)
+        self.ref(ref, sketch, "AttachmentSupport", predicate, Attached())
+
+    @staticmethod
+    def edgeX2(z):
+        return edge("line", direction=(0, 1, 0), through=(2, 0, z))
+
+    @staticmethod
+    def edgeY2(z):
+        return edge("line", direction=(1, 0, 0), through=(0, 2, z))
+
+    def edit(self, doc):
+        for sketch in self.chamfered(doc):
+            chamferProfile(sketch)
+
+    def chamfered(self, doc):
+        return [doc.Profile]
+
+
+class SweepShellInteriorProfileChamfered(SweepInteriorProfileChamfered):
+    """As SweepInteriorProfileChamfered, the Sweep a shell (Solid off): no cap faces."""
+
+    solid = False
+
+
+class SweepInteriorProfileChamferedTowards(SweepInteriorProfileChamfered):
+    """As SweepInteriorProfileChamfered, the path drawn downwards (30..0): the shell starts at
+    z = 30."""
+
+    path = [(0, 30), (0, 0)]
+
+
+class SweepNearStartProfileChamfered(SweepInteriorProfileChamfered):
+    """As SweepInteriorProfileChamfered, the square 3e-4 above the path's start: further than
+    MakePipeShell's 3D tolerance (1e-4), so not at the end."""
+
+    profileZ = 3e-4
+
+
+class SweepInteriorFirstSectionChamfered(SweepInteriorProfileChamfered):
+    """Two squares, the first at z = 10 inside the path 0..30, the last at its end (z = 30); the
+    edit chamfers both. The ends' edges and vertices stay theirs."""
+
+    def build(self, doc):
+        path = m.sketch(doc, "Path", m.polyline(self.path), placement=XZ)
+        first = m.sketch(doc, "Profile", m.rectangle(-2, -2, 2, 2), z=10)
+        last = m.sketch(doc, "Last", m.rectangle(-2, -2, 2, 2), z=30)
+        sweep = doc.addObject("Part::Sweep", "Sweep")
+        sweep.Sections = [first, last]
+        sweep.Spine = (path, [])
+        sweep.Solid = self.solid
+        sweep.Transition = "Right corner"
+        doc.recompute()
+        self.consumers(doc, sweep)
+
+    def chamfered(self, doc):
+        return [doc.Profile, doc.Last]
+
+
 # Offset copies (ops#358, PLAN decision 86). A Thickness's or an offset's copy of an element is
 # named after it with a GEN section of the same type (`<outer corner>;THK;V;GEN`): a copy at
 # another place. Below a GEN section a name is a source, so the copy is geometric evidence like
