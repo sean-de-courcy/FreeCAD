@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <numbers>
 #include <optional>
 #include <string>
@@ -55,10 +56,12 @@
 #include <Standard_Failure.hxx>
 #include <TColStd_Array1OfInteger.hxx>
 #include <TColStd_Array1OfReal.hxx>
+#include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Vertex.hxx>
+#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopTools_ListOfShape.hxx>
 
@@ -192,12 +195,14 @@ double largestRadius(const TopoDS_Shape& shape, const gp_Ax1& axis)
 
 // One cell swept up to the face: the cell revolved a sliver short of a whole turn, split by the
 // face, and the solid at its start cap (as sweepUpToFace() in FeatureRevolved.cpp). C1: exactly one
-// such solid, keeping the whole cap. Returns the solid, or why it refuses.
+// such solid, keeping the whole cap. `inBand` says whether a point lies within the band of a wall on
+// the cell's boundary. Returns the solid, or why it refuses.
 std::pair<TopoDS_Shape, std::string> sweepCell(
     const TopoDS_Face& cell,
     const TopoDS_Face& face,
     const gp_Ax1& axis,
-    double sliver
+    double sliver,
+    const std::function<bool(const gp_Pnt&)>& inBand
 )
 {
     try {
@@ -241,6 +246,49 @@ std::pair<TopoDS_Shape, std::string> sweepCell(
         }
         if (kept.size() != 1) {
             return {{}, fmt::format("C1: {} solids at the cell's start", kept.size())};
+        }
+        // C2, a sheet of the face lost in the split: every edge of the piece where the face cuts the
+        // turn bounds a piece of the face there (the end, or a flap), unless it lies in the band of a
+        // wall, where the split may drop a flap that bounds nothing (the hook at the first push). On
+        // q18's fold trimmed by a slanted plane (TrimmedFold), the split cut the turn's faces along
+        // the face's middle leg but merged the leg's own piece with the face outside the turn, near a
+        // vertex of tolerance 2e-5 at the wall junction: the piece ran on to the next leg, +0.03 in
+        // volume, with every other check passing (ops#293 D2 session 5). PROVISIONAL like the flap's
+        // check below: a lost sheet whose edges all lie on walls isn't seen.
+        const TopTools_IndexedMapOfShape faceParts = Part::UpToSplitMapper::piecesOf(splitter, face);
+        TopTools_IndexedMapOfShape sections;
+        for (const TopoDS_Shape& edge : splitter.SectionEdges()) {
+            sections.Add(edge);
+        }
+        TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
+        TopExp::MapShapesAndAncestors(kept.front(), TopAbs_EDGE, TopAbs_FACE, edgeFaces);
+        for (int k = 1; k <= edgeFaces.Extent(); ++k) {
+            const TopoDS_Edge& edge = TopoDS::Edge(edgeFaces.FindKey(k));
+            if (!sections.Contains(edge) || BRep_Tool::Degenerated(edge)) {
+                continue;
+            }
+            bool bounded = false;
+            for (const TopoDS_Shape& next : edgeFaces.FindFromIndex(k)) {
+                bounded = bounded || faceParts.Contains(next);
+            }
+            if (bounded) {
+                continue;
+            }
+            BRepAdaptor_Curve along(edge);
+            for (int s = 0; s <= 32; ++s) {
+                const gp_Pnt point
+                    = along.Value(along.FirstParameter() + (along.LastParameter() - along.FirstParameter()) * s / 32);
+                if (inBand(point)) {
+                    continue;
+                }
+                return {{},
+                        fmt::format(
+                            "C2: the face crosses the cell's piece without splitting it (near ({:.4g}, {:.4g}, {:.4g}))",
+                            point.X(),
+                            point.Y(),
+                            point.Z()
+                        )};
+            }
         }
         const double cellArea = area(cell);
         const double allowed = 1e-9 * cellArea + perimeter(cell) * std::max(largestTolerance(cell), Precision::Confusion());
@@ -459,11 +507,6 @@ FirstContactSolid constructFirstContact(
         std::vector<TopoDS_Shape> pieces;
         std::vector<CellRefusal> refusals;
         for (std::size_t c = 0; c < solid.cells.size(); ++c) {
-            auto [piece, why] = sweepCell(solid.cells[c], face, axis, sliver);
-            if (piece.IsNull()) {
-                refusals.push_back({c, why});
-                continue;
-            }
             // C2: a face of the piece left INTERNAL is the face failing to split it, unless it is
             // the flap along a wall on the cell's boundary: its image within 2 pushes of the wall.
             // PROVISIONAL (ops#293 D2 session 4): the image is checked at points along the
@@ -478,6 +521,27 @@ FirstContactSolid constructFirstContact(
                     }
                 }
             }
+            auto inBand = [&](const gp_Pnt& point) {
+                const gp_Vec offset(axis.Location(), point);
+                const double height = offset.Dot(gp_Vec(axis.Direction()));
+                const double out = (offset - gp_Vec(axis.Direction()) * height).Magnitude();
+                const TopoDS_Vertex image
+                    = BRepBuilderAPI_MakeVertex(ElCLib::To3d(wallPlane.Position().Ax2(), gp_Pnt2d(out, height)));
+                return std::ranges::any_of(bounding, [&](std::size_t w) {
+                    for (const TopoDS_Edge& edge : wallEdges[w]) {
+                        BRepExtrema_DistShapeShape distance(image, edge);
+                        if (distance.IsDone() && distance.Value() <= 2.0 * pushes[w]) {
+                            return true;
+                        }
+                    }
+                    return false;
+                });
+            };
+            auto [piece, why] = sweepCell(solid.cells[c], face, axis, sliver, inBand);
+            if (piece.IsNull()) {
+                refusals.push_back({c, why});
+                continue;
+            }
             std::string flap;
             for (TopExp_Explorer faces(piece, TopAbs_FACE); faces.More() && flap.empty(); faces.Next()) {
                 if (faces.Current().Orientation() != TopAbs_INTERNAL) {
@@ -490,22 +554,7 @@ FirstContactSolid constructFirstContact(
                         const gp_Pnt point = along.Value(
                             along.FirstParameter() + (along.LastParameter() - along.FirstParameter()) * k / 32
                         );
-                        const gp_Vec offset(axis.Location(), point);
-                        const double height = offset.Dot(gp_Vec(axis.Direction()));
-                        const double out = (offset - gp_Vec(axis.Direction()) * height).Magnitude();
-                        const TopoDS_Vertex image = BRepBuilderAPI_MakeVertex(
-                            ElCLib::To3d(wallPlane.Position().Ax2(), gp_Pnt2d(out, height))
-                        );
-                        const bool inBand = std::ranges::any_of(bounding, [&](std::size_t w) {
-                            for (const TopoDS_Edge& edge : wallEdges[w]) {
-                                BRepExtrema_DistShapeShape distance(image, edge);
-                                if (distance.IsDone() && distance.Value() <= 2.0 * pushes[w]) {
-                                    return true;
-                                }
-                            }
-                            return false;
-                        });
-                        if (!inBand) {
+                        if (!inBand(point)) {
                             away = point;
                         }
                     }
@@ -616,6 +665,14 @@ FirstContactSolid constructFirstContact(
         for (std::size_t w = 0; w < needed.size(); ++w) {
             if (raising[w]) {
                 raise(w);
+                if (pushes[w] > cap) {
+                    // The reason stays with the refusal: the cap alone doesn't say what failed
+                    throw refused(fmt::format(
+                        "{}; a wall would then be pushed {:.3g}, over 1e-4 of the profile's size",
+                        why,
+                        pushes[w]
+                    ));
+                }
             }
         }
     }

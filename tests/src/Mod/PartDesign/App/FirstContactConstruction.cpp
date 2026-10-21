@@ -10,6 +10,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <fstream>
 #include <functional>
 #include <numbers>
 #include <optional>
@@ -23,9 +25,12 @@
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepGProp.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
+#include <BRepTools.hxx>
 #include <Geom_BSplineCurve.hxx>
+#include <GeomAPI.hxx>
 #include <GeomAPI_Interpolate.hxx>
 #include <GProp_GProps.hxx>
+#include <gp_Ax3.hxx>
 #include <gp_Pln.hxx>
 #include <TColgp_HArray1OfPnt.hxx>
 #include <TopExp_Explorer.hxx>
@@ -367,8 +372,10 @@ TEST(FirstContactConstruction, TrimmedFold)
     };
     const double outer = extremalRadius(curve, 105.0, 160.0, true);
     const double expected = integral(swept, 1.5, 3.0, {outer}, 128);
-    // Never a wrong solid without an error (D2c): today the face fails to split the cell between the
-    // edge's two images (where circles meet the middle leg) at both pushes, and C2 refuses
+    // Never a wrong solid without an error (D2c). Today the split loses the middle leg's sheet in the
+    // cell between the edge's two images (the vertex at the walls' junction near the flip has
+    // tolerance 2e-5), and C2 refuses at both builds; the right volume is the goal (section 15.10).
+    // Session 4's build passed it with +0.03 and no error.
     try {
         const FirstContactSolid solid = PartDesign::FirstContact::constructFirstContact(
             face,
@@ -381,6 +388,57 @@ TEST(FirstContactConstruction, TrimmedFold)
     catch (const Base::Exception& error) {
         EXPECT_NE(std::string(error.what()).find("C2"), std::string::npos) << error.what();
     }
+}
+
+// TEMPORARY (ops#293 D2 session 5): TrimmedFold's face, profile, cells, walls and pieces as BREP files
+// in FC_D2_DUMP, for probes
+TEST(FirstContactConstruction, DumpTrimmedFold)
+{
+    const char* folder = std::getenv("FC_D2_DUMP");
+    if (!folder) {
+        GTEST_SKIP();
+    }
+    const std::string base(folder);
+    const Handle(Geom_BSplineCurve) curve = foldCurve();
+    const gp_Dir up(0.12, 0.2, 1.0);
+    const TopoDS_Face slabBase = BRepBuilderAPI_MakeFace(gp_Pln(gp_Pnt(0, 0, 1), up), -40, 40, -40, 40).Face();
+    const TopoDS_Shape slab = BRepPrimAPI_MakePrism(slabBase, gp_Vec(up) * 30.0).Shape();
+    const TopoDS_Shape cut = BRepAlgoAPI_Cut(extruded(curve), slab).Shape();
+    const TopoDS_Face face = TopoDS::Face(TopExp_Explorer(cut, TopAbs_FACE).Current());
+    const TopoDS_Face prof = profile(1.5, 3.0, 0.0, 1.2);
+    BRepTools::Write(face, (base + "/face.brep").c_str());
+    BRepTools::Write(prof, (base + "/profile.brep").c_str());
+    const FirstContactSolid solid
+        = PartDesign::FirstContact::constructFirstContact(face, prof, forward, tolerance);
+    std::ofstream info(base + "/info.txt");
+    info << "builds " << solid.builds << "\n";
+    for (std::size_t k = 0; k < solid.trace.pieces.size(); ++k) {
+        const auto& piece = solid.trace.pieces[k];
+        info << "piece " << k << " source " << static_cast<int>(piece.source) << " edge " << piece.edge
+             << " side " << piece.side << " continues " << piece.continuesPrevious << " meets "
+             << piece.meetsProfile << " jumps " << piece.jumps << " points " << piece.points.size();
+        if (!piece.points.empty()) {
+            info << " from " << piece.points.front().X() << "," << piece.points.front().Y() << " to "
+                 << piece.points.back().X() << "," << piece.points.back().Y();
+        }
+        info << "\n";
+    }
+    for (std::size_t w = 0; w < solid.walls.size(); ++w) {
+        const auto& wall = solid.walls[w];
+        info << "wall " << w << " piece " << wall.piece << " push " << wall.push << "\n";
+        BRepTools::Write(
+            BRepBuilderAPI_MakeEdge(GeomAPI::To3d(wall.curve, gp_Pln(gp_Ax3(gp_Pnt(0, 0, 0), gp_Dir(0, -1, 0), gp_Dir(1, 0, 0)))))
+                .Edge(),
+            (base + "/wall" + std::to_string(w) + ".brep").c_str()
+        );
+    }
+    for (std::size_t c = 0; c < solid.cells.size(); ++c) {
+        BRepTools::Write(solid.cells[c], (base + "/cell" + std::to_string(c) + ".brep").c_str());
+    }
+    for (std::size_t c = 0; c < solid.pieces.size(); ++c) {
+        BRepTools::Write(solid.pieces[c], (base + "/piece" + std::to_string(c) + ".brep").c_str());
+    }
+    BRepTools::Write(solid.shape, (base + "/solid.brep").c_str());
 }
 
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
