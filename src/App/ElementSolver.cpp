@@ -2593,18 +2593,26 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 // sibling's offsets lie at the same angle from the old offset. Off the twins'
                 // centre their lengths differ a little, and the offsets' distances from the old
                 // one can differ by more than the 2 % tie (4 % with the disc 0.3 mm off). So the
-                // sibling ties also when its offset's angle from the old offset is within 5
-                // degrees of the hit's and the two offsets are about as long (within 25 %), as
-                // two places one turn could take the old piece to. A hit within 5 degrees of the
-                // old offset (a move, hitDistance 0) has no such tie; neither has a sibling on the
-                // same ray at another distance from the centroid (twins in a row).
+                // sibling ties also when its offset's angle from the old offset is within
+                // tieDegrees of the hit's and the two offsets are about as long (within 25 %), as
+                // two places one turn could take the old piece to. Round 7 (N12): with the disc
+                // 0.35-0.37 of its radius off, the two readings lie 5-9 degrees apart, so the band
+                // is 12 degrees. It assumes twins at least about twice the band apart (a ring of at
+                // most 15): a turn ties, loudly, within half the band of the symmetry turn; closer
+                // twins tie on smaller turns, down to moveDegrees. A merged twin moves the centroid
+                // off the turn's centre and can need 16 degrees (ops#422). A hit within
+                // moveDegrees of the old offset (a move, hitDistance 0) has no such tie; kept apart
+                // from the band, so a symmetry turn no wider than the band (15 lobes and more)
+                // still ties. Neither has a sibling on the same ray at another distance from the
+                // centroid (twins in a row).
                 constexpr double degrees = 180.0 / std::numbers::pi;
                 auto angleFromOld = [&](const Base::Vector3d& offset) {
                     return std::atan2((old % offset).Length(), old * offset) * degrees;
                 };
-                const double tieDegrees = 5.0;
+                const double tieDegrees = 12.0;
+                const double moveDegrees = 5.0;
                 const bool angular = offsets && old.Length() > eps && hitOffset.Length() > eps
-                    && angleFromOld(hitOffset) > tieDegrees;
+                    && angleFromOld(hitOffset) > moveDegrees;
                 const double hitAngle = angular ? angleFromOld(hitOffset) : 0.0;
                 auto angularTie = [&](const Base::Vector3d& offset) {
                     const double shorter = std::min(offset.Length(), hitOffset.Length());

@@ -5507,6 +5507,54 @@ TEST(Moved, twinsTurnedBySymmetryOffCentreBreak)
     EXPECT_EQ(outcome.candidateRoles, (std::vector<std::string> {"place", "name"}));
 }
 
+TEST(Moved, twinsTurnedBySymmetryFarOffCentreBreak)
+{
+    // PR 340 round 7 (N12): as above, a disc of radius 2 0.75 mm off the hole's centre. The
+    // twin at 225 degrees, (2.095, 2.026), offset (-1.242, -0.974) from the twins' centroid
+    // then, now names the piece at 180, offset (-1.538, 0): 38 degrees from the old offset and
+    // 1.02 from it. The piece at 270, where the material went, has (-0.138, -1.65): 47 degrees
+    // and 1.30, 27 % farther. The angles lie 9 degrees apart, past round 6's 5-degree band:
+    // within the 12-degree band, a tie, broken, the twin first.
+    auto outcome = Data::solveOwner(placedTwins(
+        {Base::Vector3d(1.77, 3, 10),
+         Base::Vector3d(3.17, 1.35, 10),
+         Base::Vector3d(3.17, 4.65, 10),
+         Base::Vector3d(5.12, 3, 10)},
+        6,
+        Base::Vector3d(2.095, 2.026, 10),
+        Base::Vector3d(3.337, 3, 10),
+        4
+    ))[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << describe(outcome);
+    EXPECT_EQ(outcome.candidates, (std::vector<std::string> {"Face2", "Face1"}));
+    EXPECT_EQ(outcome.candidateRoles, (std::vector<std::string> {"place", "name"}));
+}
+
+TEST(Moved, eighteenTwinsTurnedBySymmetryBreak)
+{
+    // PR 340 round 7: the move guard (a hit within 5 degrees of the old offset has no angular
+    // tie) is not the band (12 degrees). Eighteen twins 20 degrees apart on a ring of radius 3
+    // about (10, 10), the reference saved on the one at 0 degrees, turned exactly 10 degrees:
+    // the name now holds the twin at -10, and the material went to the one at +10, an
+    // irregular piece whose centre lies 3.3 out. Both offsets lie 10 degrees from the old
+    // one, but the +10 one is 19 % farther from it: no 2 % tie. A guard as wide as the band
+    // would take the hit for a move; at 5 degrees it ties, broken, the twin first.
+    auto at = [](double degrees, double radius) {
+        const double a = degrees * std::numbers::pi / 180.0;
+        return Base::Vector3d(10 + radius * std::cos(a), 10 + radius * std::sin(a), 10);
+    };
+    std::vector<Base::Vector3d> places {at(-10, 3), at(10, 3.3)};
+    for (int k = 2; k < 18; ++k) {
+        places.push_back(at(-10 + 20 * k, 3));
+    }
+    auto outcome = Data::solveOwner(
+        placedTwins(places, 18 * 17 / 2, at(0, 3), Base::Vector3d(10, 10, 10), 18)
+    )[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << describe(outcome);
+    EXPECT_EQ(outcome.candidates, (std::vector<std::string> {"Face2", "Face1"}));
+    EXPECT_EQ(outcome.candidateRoles, (std::vector<std::string> {"place", "name"}));
+}
+
 TEST(Moved, twinsInARowKeepTheirNamesUnderTheAngularTie)
 {
     // PR 340 round 6: the angular tie needs the two offsets about as long. Four twins in a row
