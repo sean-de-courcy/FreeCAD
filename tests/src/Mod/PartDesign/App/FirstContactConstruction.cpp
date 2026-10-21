@@ -372,22 +372,17 @@ TEST(FirstContactConstruction, TrimmedFold)
     };
     const double outer = extremalRadius(curve, 105.0, 160.0, true);
     const double expected = integral(swept, 1.5, 3.0, {outer}, 128);
-    // Never a wrong solid without an error (D2c). Today the split loses the middle leg's sheet in the
-    // cell between the edge's two images (the vertex at the walls' junction near the flip has
-    // tolerance 2e-5), and C2 refuses at both builds; the right volume is the goal (section 15.10).
-    // Session 4's build passed it with +0.03 and no error.
-    try {
-        const FirstContactSolid solid = PartDesign::FirstContact::constructFirstContact(
-            face,
-            profile(1.5, 3.0, z0, z1),
-            forward,
-            tolerance
-        );
-        expectSolid(solid, expected);
-    }
-    catch (const Base::Exception& error) {
-        EXPECT_NE(std::string(error.what()).find("C2"), std::string::npos) << error.what();
-    }
+    // Three walls meeting at the flip in one junction (section 15.10): the fold below the edge,
+    // continued by the edge's leg-2 image above it, and the leg-1 image cut where it crosses the
+    // fold's wall. Three cells: below the leg-1 image left of the fold, between the edge's two
+    // images, and right of the fold and the leg-2 image.
+    const auto solid = construct(face, profile(1.5, 3.0, z0, z1), forward);
+    ASSERT_TRUE(solid);
+    EXPECT_EQ(solid->walls.size(), 3U);
+    EXPECT_EQ(solid->cells.size(), 3U);
+    // One build: the junction's push covers the edge's tolerance from the start
+    EXPECT_EQ(solid->builds, 1);
+    expectSolid(*solid, expected);
 }
 
 // TEMPORARY (ops#293 D2 session 5): TrimmedFold's face, profile, cells, walls and pieces as BREP files

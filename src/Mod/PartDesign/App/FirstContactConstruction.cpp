@@ -21,6 +21,7 @@
  ***************************************************************************/
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <functional>
 #include <numbers>
@@ -45,9 +46,12 @@
 #include <ElCLib.hxx>
 #include <Geom_Curve.hxx>
 #include <Geom2d_TrimmedCurve.hxx>
+#include <Geom2dAPI_InterCurveCurve.hxx>
 #include <Geom2dConvert.hxx>
+#include <Geom2dInt_GInter.hxx>
 #include <GeomAPI.hxx>
 #include <GProp_GProps.hxx>
+#include <IntRes2d_IntersectionPoint.hxx>
 #include <gp_Ax3.hxx>
 #include <gp_Lin.hxx>
 #include <gp_Pln.hxx>
@@ -89,6 +93,24 @@ struct CellRefusal
 {
     std::size_t cell;
     std::string why;
+};
+
+// Where an edge of the face crosses its silhouette (section 15.10): the edge's image flips side
+// there, tangent to the silhouette's image, whose wall ends there. The three walls meet in one
+// junction: the arm pushed to the silhouette wall's side continues it, and the other arm, pushed
+// the other way, is cut where it crosses the silhouette wall a little way on. Indices are into the
+// construction's walls; `AtEnd` says which end of a wall's curve lies at the flip.
+struct Junction
+{
+    std::size_t silhouette = 0;
+    bool silhouetteAtEnd = false;
+    std::size_t along = 0;
+    bool alongAtEnd = false;
+    std::size_t across = 0;
+    bool acrossAtEnd = false;
+    // The distance between the silhouette wall's end and the flip: the edge's curve and the
+    // surface agree only within the edge's tolerance
+    double gap = 0.0;
 };
 
 // The curve of a piece over its range, as a B-spline
@@ -397,13 +419,109 @@ FirstContactSolid constructFirstContact(
     const double radius = largestRadius(profile, axis);
     const double sliver = radius > 0.0 ? std::clamp(tolerance / radius, 1e-4, 1e-2) : 1e-4;
 
+    // A wall whose next piece continues its curve across a flip of the side
+    auto flipsToNext = [&](std::size_t w) {
+        return w + 1 < needed.size() && needed[w] + 1 == needed[w + 1]
+            && trace.pieces[needed[w + 1]].continuesPrevious;
+    };
+
+    // The junctions: a flip of an edge's image at the end of a silhouette wall. Found on the
+    // unpushed curves, so they hold at every push. The silhouette wall's end is the chain's
+    // crossing of the face's boundary, the flip the edge's own: within the tracer's resolution
+    // of each other when they are the same point.
+    std::vector<Handle(Geom2d_BSplineCurve)> unpushed;
+    for (std::size_t w = 0; w < needed.size(); ++w) {
+        unpushed.push_back(asBSpline(trace.pieces[needed[w]]));
+    }
+    auto normalAt = [&](std::size_t w, bool atEnd) {
+        const Handle(Geom2d_BSplineCurve)& curve = unpushed[w];
+        return normalTowards(
+            curve,
+            atEnd ? curve->LastParameter() : curve->FirstParameter(),
+            trace.pieces[needed[w]].side
+        );
+    };
+    std::vector<Junction> junctions;
+    // Which ends of each wall lie in a junction: [at its start, at its end]
+    std::vector<std::array<bool, 2>> joined(needed.size(), {false, false});
+    const double resolution = size / 1024.0;
+    for (std::size_t w = 0; w < needed.size(); ++w) {
+        if (!flipsToNext(w) || trace.pieces[needed[w]].source != JumpSource::Edge) {
+            // A cusp of the silhouette's image keeps its connector
+            continue;
+        }
+        const gp_Pnt2d flip = unpushed[w]->EndPoint();
+        Junction junction;
+        junction.gap = resolution;
+        bool found = false;
+        for (std::size_t s = 0; s < needed.size(); ++s) {
+            if (trace.pieces[needed[s]].source != JumpSource::Silhouette) {
+                continue;
+            }
+            for (const bool atEnd : {false, true}) {
+                const double gap = (atEnd ? unpushed[s]->EndPoint() : unpushed[s]->StartPoint()).Distance(flip);
+                if (gap < junction.gap) {
+                    junction.gap = gap;
+                    junction.silhouette = s;
+                    junction.silhouetteAtEnd = atEnd;
+                    found = true;
+                }
+            }
+        }
+        if (!found) {
+            continue;
+        }
+        // The arm pushed the silhouette wall's way continues it; the flip turns the other arm's
+        // push the other way
+        const gp_Vec2d normal = normalAt(junction.silhouette, junction.silhouetteAtEnd);
+        const bool firstAlong = normal.Dot(normalAt(w, true)) > 0.0;
+        if (firstAlong == (normal.Dot(normalAt(w + 1, false)) > 0.0)) {
+            continue;
+        }
+        junction.along = firstAlong ? w : w + 1;
+        junction.alongAtEnd = firstAlong;
+        junction.across = firstAlong ? w + 1 : w;
+        junction.acrossAtEnd = !firstAlong;
+        joined[junction.silhouette][junction.silhouetteAtEnd ? 1 : 0] = true;
+        joined[junction.along][junction.alongAtEnd ? 1 : 0] = true;
+        joined[junction.across][junction.acrossAtEnd ? 1 : 0] = true;
+        junctions.push_back(junction);
+    }
+
+    // Walls meeting in a junction share one push, raised together. The first push covers the
+    // junction's gap twice over: the silhouette wall's end is moved onto the arm's, so its band
+    // (2 pushes) must hold the flap along it, up to the push plus the gap wide.
+    std::vector<std::size_t> group(needed.size());
+    for (std::size_t w = 0; w < needed.size(); ++w) {
+        group[w] = w;
+    }
+    auto merge = [&](std::size_t a, std::size_t b) {
+        const std::size_t from = std::max(group[a], group[b]);
+        const std::size_t to = std::min(group[a], group[b]);
+        for (std::size_t& g : group) {
+            g = g == from ? to : g;
+        }
+    };
     std::vector<double> pushes(needed.size(), firstPush);
+    for (const Junction& junction : junctions) {
+        merge(junction.silhouette, junction.along);
+        merge(junction.silhouette, junction.across);
+        for (const std::size_t w : {junction.silhouette, junction.along, junction.across}) {
+            pushes[w] = std::max(pushes[w], 2.0 * junction.gap);
+        }
+    }
+    for (std::size_t w = 0; w < needed.size(); ++w) {
+        for (std::size_t v = 0; v < needed.size(); ++v) {
+            if (group[v] == group[w]) {
+                pushes[w] = std::max(pushes[w], pushes[v]);
+            }
+        }
+    }
     std::vector<int> raised(needed.size(), 0);
     // The largest edge tolerance of the face's section with the unpushed wall turned about the axis
     auto sectionTolerance = [&](std::size_t w) {
         try {
-            const Handle(Geom2d_BSplineCurve) curve = asBSpline(trace.pieces[needed[w]]);
-            const TopoDS_Edge edge = BRepBuilderAPI_MakeEdge(GeomAPI::To3d(curve, wallPlane)).Edge();
+            const TopoDS_Edge edge = BRepBuilderAPI_MakeEdge(GeomAPI::To3d(unpushed[w], wallPlane)).Edge();
             BRepPrimAPI_MakeRevol turn(edge, axis, 2.0 * std::numbers::pi);
             BRepAlgoAPI_Section section(face, turn.Shape());
             return section.IsDone() ? largestEdgeTolerance(section.Shape()) : 0.0;
@@ -412,14 +530,25 @@ FirstContactSolid constructFirstContact(
             return 0.0;
         }
     };
+    // A wall's group pushed a level farther: the first level is max(10 x the first push, 4 x the
+    // group's section tolerance), the next ten times more; never below where the group stands
     auto raise = [&](std::size_t w) {
-        if (raised[w] == 0) {
-            pushes[w] = std::max(10.0 * firstPush, 4.0 * sectionTolerance(w));
+        double push = 0.0;
+        for (std::size_t v = 0; v < needed.size(); ++v) {
+            if (group[v] != group[w]) {
+                continue;
+            }
+            push = std::max(
+                push,
+                raised[v] == 0 ? std::max(10.0 * firstPush, 4.0 * sectionTolerance(v)) : 10.0 * pushes[v]
+            );
         }
-        else {
-            pushes[w] *= 10.0;
+        for (std::size_t v = 0; v < needed.size(); ++v) {
+            if (group[v] == group[w]) {
+                pushes[v] = std::max(pushes[v], push);
+                ++raised[v];
+            }
         }
-        ++raised[w];
     };
 
     FirstContactSolid solid;
@@ -431,30 +560,63 @@ FirstContactSolid constructFirstContact(
         }
         solid = FirstContactSolid();
         solid.builds = build;
-        // Each wall's edges: its curve, a connector to the next piece of its curve where that is
-        // a wall too (the two lie 2 pushes apart across the flip), and its free ends carried out
-        std::vector<std::vector<TopoDS_Edge>> wallEdges(needed.size());
         for (std::size_t w = 0; w < needed.size(); ++w) {
             solid.walls.push_back(pushedWall(trace, needed[w], pushes[w]));
         }
+        // The junctions: the silhouette wall's end moved onto the arm's that continues it (the
+        // two are tangent there, pushed the same way: within the gap of each other), the other
+        // arm cut where it crosses the silhouette wall, its new end on the wall
+        for (const Junction& junction : junctions) {
+            Handle(Geom2d_BSplineCurve)& silhouette = solid.walls[junction.silhouette].curve;
+            const Handle(Geom2d_BSplineCurve)& along = solid.walls[junction.along].curve;
+            Handle(Geom2d_BSplineCurve)& across = solid.walls[junction.across].curve;
+            silhouette->SetPole(
+                junction.silhouetteAtEnd ? silhouette->NbPoles() : 1,
+                junction.alongAtEnd ? along->EndPoint() : along->StartPoint()
+            );
+            const double flip = junction.acrossAtEnd ? across->LastParameter() : across->FirstParameter();
+            Geom2dAPI_InterCurveCurve crossings(across, silhouette, Precision::PConfusion());
+            std::optional<double> nearest;
+            gp_Pnt2d onWall;
+            for (int k = 1; k <= crossings.NbPoints(); ++k) {
+                const IntRes2d_IntersectionPoint& crossing = crossings.Intersector().Point(k);
+                if (!nearest || std::fabs(crossing.ParamOnFirst() - flip) < std::fabs(*nearest - flip)) {
+                    nearest = crossing.ParamOnFirst();
+                    onWall = silhouette->Value(crossing.ParamOnSecond());
+                }
+            }
+            if (!nearest) {
+                throw refused("an edge's image flips side on the silhouette without crossing its wall");
+            }
+            Handle(Geom2d_Curve) kept = new Geom2d_TrimmedCurve(
+                across,
+                junction.acrossAtEnd ? across->FirstParameter() : *nearest,
+                junction.acrossAtEnd ? *nearest : across->LastParameter()
+            );
+            across = Geom2dConvert::CurveToBSplineCurve(kept);
+            across->SetPole(junction.acrossAtEnd ? across->NbPoles() : 1, onWall);
+        }
+        // Each wall's edges: its curve; at a flip outside a junction, a connector to the next
+        // piece of its curve (the two lie 2 pushes apart there); its free ends carried out
+        std::vector<std::vector<TopoDS_Edge>> wallEdges(needed.size());
         for (std::size_t w = 0; w < needed.size(); ++w) {
             const Handle(Geom2d_BSplineCurve)& curve = solid.walls[w].curve;
             wallEdges[w].push_back(BRepBuilderAPI_MakeEdge(GeomAPI::To3d(curve, wallPlane)).Edge());
-            const bool joinsPrevious = w > 0 && needed[w - 1] + 1 == needed[w]
-                && trace.pieces[needed[w]].continuesPrevious;
-            const bool joinsNext = w + 1 < needed.size() && needed[w] + 1 == needed[w + 1]
-                && trace.pieces[needed[w + 1]].continuesPrevious;
+            const bool joinsPrevious = w > 0 && flipsToNext(w - 1);
             auto at = [&](const gp_Pnt2d& point) {
                 return ElCLib::To3d(wallPlane.Position().Ax2(), point);
             };
             gp_Pnt2d point;
             gp_Vec2d along;
-            if (!joinsPrevious) {
+            if (!joinsPrevious && !joined[w][0]) {
                 curve->D1(curve->FirstParameter(), point, along);
                 const gp_Pnt2d out = point.Translated(along.Normalized() * -extension);
                 wallEdges[w].push_back(BRepBuilderAPI_MakeEdge(at(point), at(out)).Edge());
             }
-            if (joinsNext) {
+            if (joined[w][1]) {
+                continue;
+            }
+            if (flipsToNext(w)) {
                 const gp_Pnt2d to = solid.walls[w + 1].curve->StartPoint();
                 if (curve->EndPoint().Distance(to) > Precision::Confusion()) {
                     wallEdges[w].push_back(BRepBuilderAPI_MakeEdge(at(curve->EndPoint()), at(to)).Edge());
@@ -662,8 +824,9 @@ FirstContactSolid constructFirstContact(
         if (build == 3) {
             throw refused(why);
         }
+        // Once per group
         for (std::size_t w = 0; w < needed.size(); ++w) {
-            if (raising[w]) {
+            if (raising[w] && group[w] == w) {
                 raise(w);
                 if (pushes[w] > cap) {
                     // The reason stays with the refusal: the cap alone doesn't say what failed
