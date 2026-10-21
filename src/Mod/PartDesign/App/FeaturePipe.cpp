@@ -46,6 +46,7 @@
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepLProp_CLProps.hxx>
 #include <BRepClass3d_SolidClassifier.hxx>
+#include <BRepGProp_Face.hxx>
 #include <BRepOffsetAPI_MakePipeShell.hxx>
 #include <BRepTools_WireExplorer.hxx>
 #include <BRep_Tool.hxx>
@@ -1660,6 +1661,115 @@ std::string pointText(const gp_Pnt& point)
 }
 }  // namespace
 
+PipeCapFacing PartDesign::pipeCapsFacing(
+    const TopoDS_Shape& solid,
+    const TopoDS_Wire& spine,
+    const std::vector<TopoDS_Shape>& starts,
+    const std::vector<TopoDS_Shape>& ends,
+    bool turning
+)
+{
+    PipeCapFacing facing;
+    const std::vector<TopoDS_Edge> edges = edgesInOrder(spine);
+    if (solid.IsNull() || edges.empty()) {
+        return facing;
+    }
+    // An end of the spine: its sections' vertices, and how a point there moves along the spine
+    // (per mm), the tangent plus the frame's turn about the bend's axis (Darboux: curvature times
+    // binormal, C' x C'' / |C'|^3, turned with the wire's direction)
+    struct End
+    {
+        std::vector<gp_Pnt> vertices;
+        gp_Pnt at;
+        gp_Vec tangent;
+        gp_Vec turn;
+        // Which way an outward cap faces against the motion: back at the start, on at the end
+        double side;
+    };
+    auto endOf = [&](const TopoDS_Edge& edge, bool atStart, const std::vector<TopoDS_Shape>& sections) {
+        End end {{}, {}, gp_Vec(tangentAlong(edge, atStart)), gp_Vec(0, 0, 0), atStart ? -1.0 : 1.0};
+        for (const TopoDS_Shape& section : sections) {
+            for (TopExp_Explorer it(section, TopAbs_VERTEX); !section.IsNull() && it.More();
+                 it.Next()) {
+                end.vertices.push_back(BRep_Tool::Pnt(TopoDS::Vertex(it.Current())));
+            }
+        }
+        const BRepAdaptor_Curve curve(edge);
+        const bool reversed = edge.Orientation() == TopAbs_REVERSED;
+        gp_Vec d1;
+        gp_Vec d2;
+        curve.D2(atStart != reversed ? curve.FirstParameter() : curve.LastParameter(), end.at, d1, d2);
+        const double speed = d1.Magnitude();
+        if (turning && speed > gp::Resolution()) {
+            end.turn = d1.Crossed(d2) / (speed * speed * speed);
+            if (reversed) {
+                end.turn.Reverse();
+            }
+        }
+        return end;
+    };
+    std::vector<End> bothEnds;
+    if (!starts.empty()) {
+        bothEnds.push_back(endOf(edges.front(), true, starts));
+    }
+    if (!ends.empty()) {
+        bothEnds.push_back(endOf(edges.back(), false, ends));
+    }
+    const double edgeOn = std::sin(3 * std::numbers::pi / 180);
+    const double sameVertex = 100 * Precision::Confusion();
+    for (TopExp_Explorer it(solid, TopAbs_FACE); it.More(); it.Next()) {
+        const TopoDS_Face& face = TopoDS::Face(it.Current());
+        std::vector<gp_Pnt> corners;
+        for (TopExp_Explorer vertex(face, TopAbs_VERTEX); vertex.More(); vertex.Next()) {
+            corners.push_back(BRep_Tool::Pnt(TopoDS::Vertex(vertex.Current())));
+        }
+        for (const End& end : bothEnds) {
+            // A cap: every vertex of the face is one of the end's sections'
+            const bool cap = !corners.empty()
+                && std::all_of(corners.begin(), corners.end(), [&](const gp_Pnt& corner) {
+                       return std::any_of(
+                           end.vertices.begin(),
+                           end.vertices.end(),
+                           [&](const gp_Pnt& vertex) { return vertex.Distance(corner) < sameVertex; }
+                       );
+                   });
+            if (!cap) {
+                continue;
+            }
+            // The face's outward normal, by its orientation in the solid
+            BRepGProp_Face surface(face);
+            double u0 = 0;
+            double u1 = 0;
+            double v0 = 0;
+            double v1 = 0;
+            surface.Bounds(u0, u1, v0, v1);
+            gp_Pnt middle;
+            gp_Vec normal;
+            surface.Normal((u0 + u1) / 2, (v0 + v1) / 2, middle, normal);
+            if (normal.Magnitude() < gp::Resolution()) {
+                break;
+            }
+            normal.Normalize();
+            int out = 0;
+            int in = 0;
+            for (const gp_Pnt& corner : corners) {
+                const gp_Vec motion = end.tangent + end.turn.Crossed(gp_Vec(end.at, corner));
+                if (motion.Magnitude() < gp::Resolution()) {
+                    continue;
+                }
+                const double cosine = end.side * normal.Dot(motion) / motion.Magnitude();
+                out += cosine > edgeOn ? 1 : 0;
+                in += cosine < -edgeOn ? 1 : 0;
+            }
+            const int all = static_cast<int>(corners.size());
+            facing.outward += out == all ? 1 : 0;
+            facing.inward += in == all ? 1 : 0;
+            break;
+        }
+    }
+    return facing;
+}
+
 const char* Pipe::TypeEnums[] = {"FullPath", "UpToFace", nullptr};
 const char* Pipe::TransitionEnums[] = {"Transformed", "Right corner", "Round corner", nullptr};
 const char* Pipe::ModeEnums[] = {"Standard", "Fixed", "Frenet", "Auxiliary", "Binormal", nullptr};
@@ -1982,16 +2092,25 @@ App::DocumentObjectExecReturn* Pipe::execute()
             return pointText(point.Transformed(invObjLoc.Inverted().Transformation()));
         };
         // Before any sweep: the modes that orient the profile by the curve's bend crash OCCT
-        // along some curves (ops#413)
-        if (mode == 0 || mode == 2 || mode == 4) {
+        // along some curves (ops#413), and so does Auxiliary mode without curvilinear
+        // equivalence, whose law holds the same Frenet law of the spine. Along a long smooth
+        // B-spline edge the bend needn't reverse abruptly: the curve's parameter there is large,
+        // and the same curve split into shorter edges sweeps.
+        const bool auxiliaryFrenet = mode == 3 && !AuxiliaryCurvilinear.getValue();
+        if (mode == 0 || mode == 2 || mode == 4 || auxiliaryFrenet) {
             if (const auto at = frenetRunsAway(TopoDS::Wire(path.getShape()), mode == 0)) {
-                return new App::DocumentObjectExecReturn(fmt::format(
-                    "Pipe: OCCT's sweep would crash at {} on the spine, where the curve's bend "
-                    "reverses too abruptly for OCCT to orient the profile in '{}' mode. Smooth the "
-                    "curve there.",
-                    inPlace(*at),
-                    Mode.getValueAsString()
-                ));
+                return new App::DocumentObjectExecReturn(
+                    fmt::format(
+                        "Pipe: OCCT's sweep would crash at {} on the spine, where the curve's bend "
+                        "reverses too abruptly for OCCT to orient the profile in '{}' mode{}. "
+                        "Smooth the curve there, split it into shorter edges, {}or use another "
+                        "mode ('Fixed' isn't affected).",
+                        inPlace(*at),
+                        Mode.getValueAsString(),
+                        auxiliaryFrenet ? " without curvilinear equivalence" : "",
+                        auxiliaryFrenet ? "turn on 'Curvilinear equivalence', " : ""
+                    )
+                );
             }
         }
         const std::optional<SpineCorner> sharpest = sharpestCorner(TopoDS::Wire(path.getShape()));
@@ -2009,6 +2128,21 @@ App::DocumentObjectExecReturn* Pipe::execute()
                     by,
                     small ? ", and the result may cross itself there" : "",
                     small ? " to avoid it" : ""
+                );
+            }
+            // Frenet mode turns the profile with the curve's bend, over at each place where the
+            // bend reverses; "Round corner" crashes OCCT on such curves after a corner (ops#370)
+            if (mode == 2 && !fold.arc) {
+                return fmt::format(
+                    "Pipe: 'Frenet' mode folds the profile {}over itself along the curve from {} "
+                    "({}): it turns the profile with the curve's bend, over where the bend "
+                    "reverses, and the corners before it (or the profile's own slant) tilt the "
+                    "profile to it{}. Use 'Standard' or 'Binormal' mode, or a gentler curve{}.",
+                    small ? "slightly " : "",
+                    inPlace(fold.at),
+                    by,
+                    small ? ": the result may cross itself there" : "",
+                    small ? ", to avoid it" : ""
                 );
             }
             return fmt::format(
@@ -2309,13 +2443,39 @@ App::DocumentObjectExecReturn* Pipe::execute()
             );
         }
 
+        // Each solid turned outward by its caps where they tell (pipeCapsFacing), else by
+        // classifying a point at infinity (a closed spine has no caps). Not by the classifier
+        // alone: on macOS it took ops#396's inside-out multisection solid for an outward one, and
+        // the result gate below, which asked it again, passed it.
+        std::vector<TopoDS_Shape> startSections;
+        std::vector<TopoDS_Shape> endSections;
+        for (const Part::TopoShape& wire : frontwires) {
+            startSections.push_back(wire.getShape());
+        }
+        for (const Part::TopoShape& wire : backwires) {
+            endSections.push_back(wire.getShape());
+        }
+        auto capsFacing = [&](const Part::TopoShape& solid) {
+            return pipeCapsFacing(
+                solid.getShape(),
+                TopoDS::Wire(path.getShape()),
+                startSections,
+                endSections,
+                mode != 1
+            );
+        };
         auto shapes = result.getSubTopoShapes(TopAbs_SHELL);
         for (auto& s : shapes) {
             // build the solid
             s = s.makeElementSolid();
-            BRepClass3d_SolidClassifier SC(s.getShape());
-            SC.PerformInfinitePoint(Precision::Confusion());
-            if (SC.State() == TopAbs_IN) {
+            const PipeCapFacing caps = capsFacing(s);
+            bool inward = caps.inward > 0 && caps.outward == 0;
+            if (caps.inward == 0 && caps.outward == 0) {
+                BRepClass3d_SolidClassifier SC(s.getShape());
+                SC.PerformInfinitePoint(Precision::Confusion());
+                inward = SC.State() == TopAbs_IN;
+            }
+            if (inward) {
                 s.setShape(s.getShape().Reversed(), false);
             }
         }
@@ -2327,9 +2487,11 @@ App::DocumentObjectExecReturn* Pipe::execute()
         // inside-out one (ops#396). A self-intersection that only the boolean check finds
         // passes: that check takes seconds to many minutes on a long B-spline spine, and reports
         // valid ones (C0 continuity). measureCorners finds the folds of a tilted section along
-        // curves instead.
+        // curves instead. The caps and the classifier must both find the solid turned outward:
+        // caps that disagree with each other, or with the classifier, show a solid turned
+        // inside out in part (or the classifier's error).
         for (const auto& s : shapes) {
-            if (!isValidSolid(s)) {
+            if (!isValidSolid(s) || capsFacing(s).inward > 0) {
                 return new App::DocumentObjectExecReturn(invalidPipe());
             }
         }

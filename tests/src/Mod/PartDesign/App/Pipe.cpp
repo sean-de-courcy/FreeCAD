@@ -9,7 +9,14 @@
 #include "Mod/PartDesign/App/ShapeBinder.h"
 #include "Mod/PartDesign/App/FeaturePipe.h"
 #include "Mod/Sketcher/App/SketchObject.h"
+#include <BRepBuilderAPI_MakeEdge.hxx>
+#include <BRepBuilderAPI_MakePolygon.hxx>
+#include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepGProp.hxx>
+#include <BRepOffsetAPI_MakePipeShell.hxx>
+#include <GC_MakeArcOfCircle.hxx>
+#include <Geom_TrimmedCurve.hxx>
+#include <GProp_GProps.hxx>
 
 // NOLINTBEGIN(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
 
@@ -222,6 +229,85 @@ TEST_F(FeaturePipeTest, SketchProfileBinderSpine)
     auto shape = pipe->Shape.getShape().getShape();
     auto volume_measured = getVolume(shape);
     ASSERT_NEAR(volume_expected_, volume_measured, 0.001);
+}
+
+namespace
+{
+/// The solid that a square of side 2 centred at (x, 0, 0), square to Z, sweeps along \a spine
+/// (Standard mode), turned outward by its volume's sign (exact enough for these shapes), and the
+/// sections where the sweep starts and ends
+struct SweptSquare
+{
+    TopoDS_Shape solid;
+    std::vector<TopoDS_Shape> starts;
+    std::vector<TopoDS_Shape> ends;
+};
+
+SweptSquare sweepSquare(const TopoDS_Wire& spine, double x)
+{
+    BRepBuilderAPI_MakePolygon square(
+        gp_Pnt(x - 1, -1, 0),
+        gp_Pnt(x + 1, -1, 0),
+        gp_Pnt(x + 1, 1, 0),
+        gp_Pnt(x - 1, 1, 0),
+        true
+    );
+    BRepOffsetAPI_MakePipeShell sweep(spine);
+    sweep.Add(square.Wire());
+    sweep.Build();
+    sweep.MakeSolid();
+    TopoDS_Shape solid = sweep.Shape();
+    GProp_GProps properties;
+    BRepGProp::VolumeProperties(solid, properties);
+    if (properties.Mass() < 0) {
+        solid.Reverse();
+    }
+    return {solid, {sweep.FirstShape()}, {sweep.LastShape()}};
+}
+}  // namespace
+
+// The caps of a pipe tell which way its solid faces, without OCCT's solid classifier (ops#396):
+// along a line, both caps face out of the outward solid and into the reversed one
+TEST(PipeCapsFacing, StraightPipe)
+{
+    const TopoDS_Wire spine = BRepBuilderAPI_MakeWire(
+                                  BRepBuilderAPI_MakeEdge(gp_Pnt(0, 0, 0), gp_Pnt(0, 0, 10)).Edge()
+    )
+                                  .Wire();
+    const SweptSquare swept = sweepSquare(spine, 0);
+    const PartDesign::PipeCapFacing outward
+        = PartDesign::pipeCapsFacing(swept.solid, spine, swept.starts, swept.ends, true);
+    EXPECT_EQ(outward.outward, 2);
+    EXPECT_EQ(outward.inward, 0);
+    const PartDesign::PipeCapFacing inward
+        = PartDesign::pipeCapsFacing(swept.solid.Reversed(), spine, swept.starts, swept.ends, true);
+    EXPECT_EQ(inward.outward, 0);
+    EXPECT_EQ(inward.inward, 2);
+    // Without the sections, no cap is found
+    const PartDesign::PipeCapFacing none = PartDesign::pipeCapsFacing(swept.solid, spine, {}, {}, true);
+    EXPECT_EQ(none.outward + none.inward, 0);
+}
+
+// A profile beyond the centre of the spine's bend (an arc of radius 5 about (5, 0, 0), the square
+// centred 10 from the spine's start) moves backwards as the frame turns: its start cap faces along
+// the spine's tangent, yet out of the solid. The spine's tangent alone gets both caps wrong.
+TEST(PipeCapsFacing, ProfileBeyondTheBendsCentre)
+{
+    const Handle(Geom_TrimmedCurve)
+        arc = GC_MakeArcOfCircle(gp_Pnt(0, 0, 0), gp_Vec(0, 0, 1), gp_Pnt(5, 0, 5)).Value();
+    const TopoDS_Wire spine = BRepBuilderAPI_MakeWire(BRepBuilderAPI_MakeEdge(arc).Edge()).Wire();
+    const SweptSquare swept = sweepSquare(spine, 10);
+    // Pappus: the square's area 4 turned a quarter turn at 5 from the axis
+    GProp_GProps properties;
+    BRepGProp::VolumeProperties(swept.solid, properties);
+    EXPECT_NEAR(properties.Mass(), 4 * 5 * M_PI / 2, 1e-3);
+    const PartDesign::PipeCapFacing turning
+        = PartDesign::pipeCapsFacing(swept.solid, spine, swept.starts, swept.ends, true);
+    EXPECT_EQ(turning.outward, 2);
+    EXPECT_EQ(turning.inward, 0);
+    const PartDesign::PipeCapFacing tangentOnly
+        = PartDesign::pipeCapsFacing(swept.solid, spine, swept.starts, swept.ends, false);
+    EXPECT_EQ(tangentOnly.inward, 2);
 }
 
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)

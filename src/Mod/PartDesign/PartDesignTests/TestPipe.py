@@ -744,14 +744,16 @@ class TestPipeCorners(unittest.TestCase):
 
     # The result gate (ops#381) ---------------------------------------------------------------
 
-    def multisection(self, transition):
-        """Along the L (90 degrees), to a 6 x 6 section normal to the last leg, at its end."""
+    def multisection(self, transition, turn=0):
+        """Along the L (90 degrees), to a 6 x 6 section normal to the last leg, at its end; its
+        sketch turned `turn` degrees about the leg (the same square, its wire starting elsewhere)."""
+        turned = App.Rotation(V(1, 0, 0), turn).multiply(App.Rotation(V(0, 1, 0), 90))
         section = models.sketch(
             self.doc,
             "Section",
             models.rectangle(-3, -3, 3, 3),
             self.body,
-            placement=App.Placement(V(20, 0, 30), App.Rotation(V(0, 1, 0), 90)),
+            placement=App.Placement(V(20, 0, 30), turned),
         )
         return self.pipe(
             self.spine(self.lPoints(90)),
@@ -775,6 +777,24 @@ class TestPipeCorners(unittest.TestCase):
         self.assertValidSolid(pipe)
         self.assertAlmostEqual(pipe.Shape.Volume, 920, 2)
         self.assertWarns(pipe, False)
+
+    def testMultisectionInsideOutFails(self):
+        """The same pipe with the section's sketch turned about the last leg: which corner its
+        wire starts at changes OCCT's sweep. On Windows, turned 90 or 180 degrees, it gave the
+        solid that macOS gives unturned (ops#396): BRepCheck passes it, its volume is -161.6, the
+        boolean check finds faults, and OCCT's solid classifier took it for an outward solid, so
+        round 7 accepted it. Its caps now tell its orientation, and disagree with the classifier
+        or each other: the pipe fails. Every turn gives the valid 920 or fails, never another
+        solid."""
+        for turn in (0, 90, 180, 270):
+            with self.subTest(turn=turn):
+                self.renew()
+                pipe = self.multisection("Transformed", turn)
+                if pipe.isValid():
+                    self.assertValidSolid(pipe)
+                    self.assertAlmostEqual(pipe.Shape.Volume, 920, 2)
+                else:
+                    self.assertFails(pipe, "isn't a valid solid", "sections may twist or cross")
 
     def testHairpinFails(self):
         """A 170 degree hairpin: "Right corner" and "Round corner" gave invalid solids
@@ -1221,7 +1241,8 @@ class TestPipeCorners(unittest.TestCase):
         text = pipe.getStatusString()
         if "would crash" not in text:
             return False
-        self.assertFails(pipe, "OCCT's sweep would crash at (", "Smooth the curve there")
+        advice = "Smooth the curve there, split it into shorter edges, "
+        self.assertFails(pipe, "OCCT's sweep would crash at (", advice, "('Fixed' isn't affected)")
         self.assertIn(f"'{pipe.Mode}' mode", text)
         return True
 
@@ -1249,23 +1270,42 @@ class TestPipeCorners(unittest.TestCase):
         over 0.07 mm after testShortSBendFolds' corner too). Where it does, the pipe fails before
         any sweep, naming the place and the mode, instead of crashing FreeCAD (round 6 crashed on
         these on Windows, and on macOS in testShortSBendFolds); where it doesn't, OCCT sweeps it
-        without crashing."""
+        without crashing. Auxiliary mode without curvilinear equivalence (an auxiliary spine 5 mm
+        to the side) holds the same law of the spine: on Windows it crashed FreeCAD on those two
+        S-bends (round 7's verification), and fails the same way now, advising curvilinear
+        equivalence."""
         refused = []
         everyMode = ((1, 0.07), (5, 0.05))
         for bend in (0.5, 1, 2, 5):
             for length in (0.05, 0.07, 0.105, 0.2):
-                modes = ("Standard", "Frenet", "Binormal") if (bend, length) in everyMode else ()
-                for mode in modes or ("Standard",):
+                modes = ("Standard", "Frenet", "Binormal", "Auxiliary")
+                for mode in modes if (bend, length) in everyMode else ("Standard",):
                     with self.subTest(bend=bend, length=length, mode=mode):
                         self.renew()
                         profile = self.profile([models.circle(0, 0, 2)])
                         spine = self.sBendAlongZ(bend, length)
+                        auxiliary = {}
+                        if mode == "Auxiliary":
+                            aside = spine.Shape.copy()
+                            aside.translate(V(5, 0, 0))
+                            auxiliary = {
+                                "AuxiliarySpine": (models.feature(self.doc, "Aside", aside), []),
+                                "AuxiliaryCurvilinear": False,
+                            }
                         pipe = self.pipe(
-                            spine, profile, Mode=mode, Binormal=V(0, 1, 0), Refine=False
+                            spine,
+                            profile,
+                            Mode=mode,
+                            Binormal=V(0, 1, 0),
+                            Refine=False,
+                            **auxiliary,
                         )
                         if self.wouldCrash(pipe):
-                            # At the S-bend's middle, where it turns back
                             text = pipe.getStatusString()
+                            if mode == "Auxiliary":
+                                self.assertIn("without curvilinear equivalence", text)
+                                self.assertIn("turn on 'Curvilinear equivalence'", text)
+                            # At the S-bend's middle, where it turns back
                             place = re.search(r"crash at \(([^)]*)\)", text)[1]
                             x, y, z = (float(value) for value in place.split(","))
                             self.assertLess(abs(x), length)
@@ -1273,6 +1313,53 @@ class TestPipeCorners(unittest.TestCase):
                             self.assertAlmostEqual(z, 20 + length / 2, delta=length / 10)
                             refused.append((bend, length, mode))
         self.assertTrue(refused)
+
+    def testFrenetFoldAdvisesAnotherMode(self):
+        """Up 30, a 30 degree corner, then a B-spline waving ever wider to the side: Frenet mode
+        turns the tilted square over at each place where the curve's bend reverses (60 degrees
+        between two of the sweep's places 0.03 mm apart), and the pipe fails as a fold. The advice
+        is another mode: a transition change was advised before, and "Round corner" crashes OCCT
+        along such curves after a corner (round 7's verification)."""
+        corner = V(0, 0, 30)
+        leg = V(math.sin(math.radians(30)), 0, math.cos(math.radians(30)))
+        points = [
+            corner + leg * (0.5 * i) + V(0, 2 * math.sin(i / 6) * i / 120, 0) for i in range(121)
+        ]
+        curve = Part.BSplineCurve()
+        curve.interpolate(points, InitialTangent=leg)
+        spine = models.feature(
+            self.doc, "Path", Part.Wire([Part.makeLine(V(0, 0, 0), corner), curve.toShape()])
+        )
+        pipe = self.pipe(spine, Transition="Transformed", Mode="Frenet", Refine=False)
+        self.assertFails(pipe, "'Frenet' mode folds", "Use 'Standard' or 'Binormal' mode")
+        self.assertNotIn("corner'", pipe.getStatusString())
+
+    def testBudgetRunsOutWarns(self):
+        """A circle of radius 2, a 60 degree corner, then a B-spline of 100 waves (about 2000
+        mm, no tighter than radius 6.1, wavySpine without its bend): more stretches where the
+        tilted section could fold than the budget of places covers. The most fold-prone ones are
+        looked at first, and none folds: a valid solid, with a warning that counts the stretches
+        left unchecked (round 7's verification: 297)."""
+        profile = self.profile([models.circle(0, 0, 2)])
+        spine = self.wavySpine(100, bend=False)
+        pipe = self.pipe(spine, profile, Transition="Transformed", Refine=False)
+        self.assertValidSolid(pipe)
+        self.assertIn("Warning", pipe.State)
+        text = pipe.getStatusString()
+        self.assertIn("bends in too many places to check them all for folds", text)
+        self.assertRegex(text, r"\d+ stretches where 'Transformed' could fold")
+
+    def testProfileBeyondTheBendsCentre(self):
+        """A square of side 2 centred 10 from the spine's start, along a quarter arc of radius 5
+        that bends towards it: beyond the arc's centre, the profile moves backwards as the frame
+        turns. The pipe's caps tell its orientation (round 8, ops#396) by how the section moves,
+        not by the spine's tangent alone, which faces the other way: a valid solid, 4 * 5 * pi / 2
+        by Pappus."""
+        arc = Part.Arc(V(0, 0, 0), V(5 - 5 * math.sqrt(0.5), 0, 5 * math.sqrt(0.5)), V(5, 0, 5))
+        spine = models.feature(self.doc, "Path", Part.Wire([arc.toShape()]))
+        pipe = self.pipe(spine, self.profile(models.rectangle(9, -1, 11, 1)))
+        self.assertValidSolid(pipe)
+        self.assertAlmostEqual(pipe.Shape.Volume, 10 * math.pi, 3)
 
     def testManySmallCornersAddUp(self):
         """A circle of radius 2, up 10, then 775 corners of 0.0009 rad 0.05 mm apart (40 degrees in
