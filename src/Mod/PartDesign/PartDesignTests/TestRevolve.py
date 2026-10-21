@@ -2922,6 +2922,131 @@ class TestRevolve(unittest.TestCase):
         revolution = self.revolveProfileUpTo(body, "Revolution", "One side", (wall, ["Face1"]))
         self.assertJumpRefused(revolution)
 
+    def polarWall(self, legs, low=-1, height=4):
+        """A wall along Z from z = `low`, `height` high, whose curve runs through the polar legs
+        (r0, r1, a0, a1), the radius linear in the angle (degrees) along each: the wall, and its
+        curve."""
+        points = []
+        for index, (r0, r1, a0, a1) in enumerate(legs):
+            for k in range(61 if index == len(legs) - 1 else 60):
+                radius = r0 + (r1 - r0) * k / 60
+                angle = math.radians(a0 + (a1 - a0) * k / 60)
+                points.append(
+                    FreeCAD.Vector(radius * math.cos(angle), radius * math.sin(angle), low)
+                )
+        curve = Part.BSplineCurve()
+        curve.interpolate(points)
+        wall = self.Doc.addObject("Part::Feature", "Wall")
+        wall.Shape = Part.Edge(curve).extrude(FreeCAD.Vector(0, 0, height))
+        self.Doc.recompute()
+        return wall, curve
+
+    @staticmethod
+    def firstContactAngles(curve, forward=True, samples=2000):
+        """For an extruded wall's curve: r -> the angle at which the circle of radius r about Z
+        first meets the curve, from the XZ plane's +X side, turning about +Z (or -Z)."""
+        first = curve.FirstParameter
+        last = curve.LastParameter
+
+        def radius(t):
+            point = curve.value(t)
+            return math.hypot(point.x, point.y)
+
+        parameters = [first + (last - first) * i / samples for i in range(samples + 1)]
+        radii = [radius(t) for t in parameters]
+
+        def angle(r):
+            best = None
+            for i in range(samples):
+                if (radii[i] - r) * (radii[i + 1] - r) > 0 or radii[i] == radii[i + 1]:
+                    continue
+                a, b = parameters[i], parameters[i + 1]
+                rising = radii[i + 1] > radii[i]
+                for _ in range(60):
+                    c = (a + b) / 2
+                    if (radius(c) < r) == rising:
+                        a = c
+                    else:
+                        b = c
+                point = curve.value((a + b) / 2)
+                turned = math.atan2(point.y, point.x) % (2 * math.pi)
+                turned = turned if forward else 2 * math.pi - turned
+                best = turned if best is None else min(best, turned)
+            return best
+
+        return angle
+
+    def firstContactVolume(self, angle, x0, x1, z0, z1, breaks):
+        """The volume first contact gives the profile x in [x0, x1], z in [z0, z1] turning about
+        Z, `angle` from firstContactAngles(), integrated piecewise between `breaks`."""
+        ends = [x0] + sorted(breaks) + [x1]
+        swept = sum(
+            self.midpointIntegral(lambda r: r * angle(r), low, high, steps=200)
+            for low, high in zip(ends, ends[1:])
+        )
+        return (z1 - z0) * swept
+
+    def assertTurnHolds(self, shape, inside, outside):
+        """Points (r, z, degrees about Z from +X) of the shape: `inside` in it, `outside` not."""
+
+        def at(r, z, degrees):
+            return FreeCAD.Vector(
+                r * math.cos(math.radians(degrees)), r * math.sin(math.radians(degrees)), z
+            )
+
+        for point in inside:
+            self.assertTrue(shape.isInside(at(*point), 1e-7, True), point)
+        for point in outside:
+            self.assertFalse(shape.isInside(at(*point), 1e-7, True), point)
+
+    def testRevolutionUpToHookFirstContact(self):
+        """The profile x in [1, 3], z in [0, 2] up to an extruded hook whose curve runs in from
+        r 2 (100 degrees) to 0.5 (130) and out to 3.5 (220): circles inside r 2 meet its first
+        leg near 110 degrees, those outside only its second, from 175 degrees on. First contact
+        jumps at r 2, which today's certificate refuses; the solid is built between walls along
+        the jump instead (ops#293 D2), and holds what first contact gives."""
+        wall, curve = self.polarWall(((2, 0.5, 100, 130), (0.5, 3.5, 130, 220)))
+        expected = self.firstContactVolume(self.firstContactAngles(curve), 1, 3, 0, 2, [2])
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        sketch = self.rectProfile(body, 1, 3, 0, 2)
+        revolution = self.revolveUpTo(body, "Revolution", sketch, (wall, ["Face1"]))
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        shape = revolution.Shape
+        self.assertTrue(shape.isValid())
+        self.assertEqual(len(shape.Solids), 1)
+        self.assertAlmostEqual(shape.Volume, expected, delta=1e-4 * expected)
+        self.assertTurnHolds(shape, [(1.5, 1, 90), (2.5, 1, 150)], [(1.5, 1, 130), (2.5, 1, 200)])
+
+    def testRevolutionTwoSidesUpToHookFirstContact(self):
+        """testRevolutionUpToHookFirstContact's hook as side 1 of Two sides, side 2 turning the
+        other way up to the YZ plane: a quarter turn, which adds pi / 2 x 4 x 2 = 4 pi. Side 1
+        is built between walls along its jump, side 2 is today's sweep (ops#293 D2)."""
+        wall, curve = self.polarWall(((2, 0.5, 100, 130), (0.5, 3.5, 130, 220)))
+        expected = self.firstContactVolume(self.firstContactAngles(curve), 1, 3, 0, 2, [2])
+        expected += 4 * math.pi
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        sketch = self.rectProfile(body, 1, 3, 0, 2)
+        [yz] = [f for f in body.Origin.OriginFeatures if f.Role == "YZ_Plane"]
+        revolution = body.newObject("PartDesign::Revolution", "Revolution")
+        revolution.Profile = sketch
+        revolution.ReferenceAxis = (sketch, ["V_Axis"])
+        revolution.SideType = "Two sides"
+        revolution.Type = "UpToFace"
+        revolution.UpToFace = (wall, ["Face1"])
+        revolution.Type2 = "UpToFace"
+        revolution.UpToFace2 = (yz, [""])
+        self.Doc.recompute()
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        shape = revolution.Shape
+        self.assertTrue(shape.isValid())
+        self.assertEqual(len(shape.Solids), 1)
+        self.assertAlmostEqual(shape.Volume, expected, delta=1e-4 * expected)
+        self.assertTurnHolds(
+            shape,
+            [(1.5, 1, 90), (2.5, 1, 150), (1.5, 1, -45), (2.5, 1, -80)],
+            [(1.5, 1, 130), (2.5, 1, 200), (1.5, 1, -100), (2.5, 1, -100)],
+        )
+
     def testRevolutionUpToCylinderRingAroundProfile(self):
         """The profile x in [1.2, 1.8], z in [0.7, 1.3] up to a whole cylinder of radius 1 along
         X through (0, 1.5, 1): every circle of the profile crosses it twice, and its silhouette

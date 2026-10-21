@@ -114,6 +114,7 @@
 #include <Mod/Part/App/TopoShapeOpCode.h>
 
 #include "FeatureRevolved.h"
+#include "FirstContactConstruction.h"
 #include "FirstContactJumps.h"
 
 using namespace PartDesign;
@@ -2172,6 +2173,15 @@ std::optional<gp_Pnt> silhouetteOn(
 // first contact gives: where first contact jumps inside the profile, the sweep holds part of a turn
 // past the first contact (the jump's strip has no face of the sweep's to stop at), or misses one.
 // `faceParts` are the pieces of the up-to face from the sweep's split.
+//
+// A refusal where first contact jumps is a JumpRefused: the revolution then builds the solid
+// between walls along the jumps instead (tryToRevolveToFace(), ops#293 D2).
+class JumpRefused: public Base::RuntimeError
+{
+public:
+    using Base::RuntimeError::RuntimeError;
+};
+
 void certifyFirstContact(
     const TopoDS_Shape& sweep,
     const TopTools_IndexedMapOfShape& faceParts,
@@ -2184,7 +2194,7 @@ void certifyFirstContact(
     const gp_Lin line(axis);
     auto refusal = [&](const char* reason, const gp_Pnt& point) {
         const double along = gp_Vec(axis.Location(), point).Dot(gp_Vec(axis.Direction()));
-        return Base::RuntimeError(
+        return JumpRefused(
             std::string(reason)
             + fmt::format(
                 " (near radius {:.4g} from the axis, {:.4g} along it)",
@@ -2879,6 +2889,39 @@ TopoShape Revolved::tryToRevolveToFace(
     // in. Where a profile edge lies on the face and leaves it tangentially, the same sweep came out
     // with an edge of tolerance 0.54 in the sketch's frame and 1.5e-4 in the body's (ops#338); a
     // turn of 1 or 2 radians gave 8e-5 to 1.5e-4 in every case. Each try faces the same checks.
+    //
+    // Where the certificate refuses because first contact jumps inside the profile, the solid is
+    // built between walls along the jumps instead (constructFirstContact(), ops#293 D2), and only
+    // there: every sweep the certificate accepts stays the tool (decision 90, D2a). The same three
+    // frames are tried on a boolean failure (a throw, an invalid solid, a tolerance that doesn't
+    // hold); the construction's own refusal, after its walls were pushed farther, refuses at once.
+    // Either way the refusal names the jump.
+    const TopoDS_Face profileFace
+        = TopoDS::Face(TopExp_Explorer(sketchshape.getShape(), TopAbs_FACE).Current());
+    const auto constructToFirstContact = [&](const TopoDS_Face& upTo, const JumpRefused& jump) {
+        for (const double turn : {0.0, 1.0, 2.0}) {
+            gp_Trsf rotation;
+            rotation.SetRotation(axis, turn);
+            const TopLoc_Location there(rotation);
+            const TopoDS_Face profile = TopoDS::Face(profileFace.Moved(there));
+            const TopoDS_Face face = TopoDS::Face(upTo.Moved(there));
+            TopoShape solid = makeTopoShape();
+            try {
+                solid.setShape(constructFirstContact(face, profile, axis, tolerance).shape);
+            }
+            catch (const Standard_Failure&) {
+                continue;
+            }
+            catch (const Base::Exception& refusal) {
+                throw JumpRefused(std::string(jump.what()) + ". " + refusal.what());
+            }
+            if (!solid.isValid() || !toleranceHolds(solid.getShape(), {profile, face})) {
+                continue;
+            }
+            return solid.moved(there.Inverted());
+        }
+        throw jump;
+    };
     const auto sweepToFirstContact = [&](const TopoDS_Face& upTo) {
         bool built = false;
         for (const double turn : {0.0, 1.0, 2.0}) {
@@ -2900,14 +2943,19 @@ TopoShape Revolved::tryToRevolveToFace(
                 || !toleranceHolds(sweep.getShape(), {profile.getShape(), face})) {
                 continue;
             }
-            certifyFirstContact(
-                sweep.getShape(),
-                faceParts,
-                face,
-                profile.getShape(),
-                axis,
-                tolerance
-            );
+            try {
+                certifyFirstContact(
+                    sweep.getShape(),
+                    faceParts,
+                    face,
+                    profile.getShape(),
+                    axis,
+                    tolerance
+                );
+            }
+            catch (const JumpRefused& jump) {
+                return constructToFirstContact(upTo, jump);
+            }
             return sweep.moved(there.Inverted());
         }
         if (!built) {
