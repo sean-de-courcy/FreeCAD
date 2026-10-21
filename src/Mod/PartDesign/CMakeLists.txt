@@ -248,6 +248,8 @@ set(PartDesign_CompatGen0
     PartDesignTests/Compat/gen0/GuessRecord.oracle.json
     PartDesignTests/Compat/gen0/HoleFeature.FCStd
     PartDesignTests/Compat/gen0/HoleFeature.oracle.json
+    PartDesignTests/Compat/gen0/IndexToldGroups.FCStd
+    PartDesignTests/Compat/gen0/IndexToldGroups.oracle.json
     PartDesignTests/Compat/gen0/LoftPipe.FCStd
     PartDesignTests/Compat/gen0/LoftPipe.oracle.json
     PartDesignTests/Compat/gen0/MergeAccepted.FCStd
