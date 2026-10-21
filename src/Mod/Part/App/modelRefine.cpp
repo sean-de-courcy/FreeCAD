@@ -31,7 +31,6 @@
 #include <BRep_Tool.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepBndLib.hxx>
-#include <BRepGProp.hxx>
 #include <BRepLib.hxx>
 #include <BRepLib_FuseEdges.hxx>
 #include <BRepLib_MakeWire.hxx>
@@ -49,7 +48,6 @@
 #include <gp_Ax3.hxx>
 #include <gp_Cylinder.hxx>
 #include <gp_Pln.hxx>
-#include <GProp_GProps.hxx>
 #include <ShapeAnalysis_Curve.hxx>
 #include <ShapeAnalysis_Shell.hxx>
 #include <ShapeBuild_ReShape.hxx>
@@ -72,6 +70,7 @@
 #include <Base/Console.h>
 #include <App/ElementNamingUtils.h>
 
+#include "MassProperties.h"
 #include "modelRefine.h"
 
 
@@ -1309,10 +1308,10 @@ bool FaceUniter::process()
             ShapeAnalysis_Shell check;
             check.LoadShells(workShell);
             if (!check.HasFreeEdges()) {
-                // the shell is a solid, make sure that volume is positive
-                GProp_GProps props;
-                BRepGProp::VolumeProperties(workShell, props);
-                if (props.Mass() < 0) {
+                // the shell is a solid, make sure that volume is positive. OCCT's default
+                // integration can give a long curved B-spline face's solid the wrong sign
+                // (ops#414)
+                if (Part::MassProperties::volume(workShell) < 0) {
                     workShell = TopoDS::Shell(workShell.Reversed());
                 }
             }
