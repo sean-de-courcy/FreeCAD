@@ -1,9 +1,11 @@
 # A multisection Pipe with "Transformed" along an L (ops#396): Windows gives the valid solid (920),
-# macOS an inside-out one (volume -161.6) that BRepCheck passes. The result gate of ops#370 also
-# requires a positive volume, so on macOS the Pipe fails instead. Remove the entry when macOS
-# gives the solid.
+# macOS an inside-out one (volume -161.6 in round 4) that BRepCheck passes. OCCT's solid classifier
+# took it for an outward one on macOS (round 6), and the result gate, which asked the classifier
+# again, passed it. Since round 8 of ops#370 the Pipe's caps decide its orientation, and the gate
+# refuses a solid whose caps face into it, so on macOS the Pipe is expected to fail ("isn't a valid
+# solid"). Remove the entry when macOS gives the solid.
 
 issue: ops#396
 
-reason: macOS's OCCT result for this multisection sweep is wrong (inside-out); the test expects Windows' valid 920
+reason: macOS's OCCT result for this multisection sweep is wrong (inside-out): the Pipe fails there, the test expects Windows' valid 920
 cli  PartDesignTests.TestPipe.TestPipeCorners.testMultisectionTransformedUnchanged   macos

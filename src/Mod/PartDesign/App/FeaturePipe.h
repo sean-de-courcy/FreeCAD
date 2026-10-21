@@ -25,8 +25,11 @@
 
 #pragma once
 
+#include <vector>
+
 #include "FeatureSketchBased.h"
 #include <BRepOffsetAPI_MakePipeShell.hxx>
+#include <TopoDS_Wire.hxx>
 
 namespace PartDesign
 {
@@ -116,5 +119,28 @@ class PartDesignExport SubtractivePipe: public Pipe
 public:
     SubtractivePipe();
 };
+
+/// How many caps of a pipe's solid face out of it and how many into it (pipeCapsFacing)
+struct PipeCapFacing
+{
+    int outward = 0;
+    int inward = 0;
+};
+
+/// How the caps of \a solid, swept along \a spine, face: its faces made of the sections where the
+/// spine starts (\a starts) and ends (\a ends), each judged by the way the section moves at its
+/// vertices, away from the start cap and towards the end cap. An outward cap faces against that
+/// motion at the start and with it at the end. The motion is the spine's tangent plus the frame's
+/// turn with the spine's bend (\a turning, every mode but Fixed), so a profile that lies beyond the
+/// centre of the spine's first bend, moving backwards, is judged right. A cap whose vertices don't
+/// all agree, within 3 degrees of edge-on, isn't counted. Independent of OCCT's solid classifier,
+/// which passed an inside-out multisection solid on macOS (ops#396).
+PartDesignExport PipeCapFacing pipeCapsFacing(
+    const TopoDS_Shape& solid,
+    const TopoDS_Wire& spine,
+    const std::vector<TopoDS_Shape>& starts,
+    const std::vector<TopoDS_Shape>& ends,
+    bool turning
+);
 
 }  // namespace PartDesign
