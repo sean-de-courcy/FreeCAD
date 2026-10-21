@@ -92,6 +92,18 @@ public:
     // point found out of the band, or where it couldn't be certified.
     std::optional<gp_Pnt> outside(const TopoDS_Edge& edge) const;
 
+    // Nothing when the face's image, widened by its tolerance, is certified within the band
+    // (section 15.8, 2b). The band is simply connected, so the image is in it when the images of
+    // the face's edges and of its silhouette (where circles about the axis touch it) are: the edges
+    // by the curve bound, the silhouette by the leaves of a tree over the face's surface that hold
+    // g = 0 and reach the face. Over a leaf, with S bilinearly interpolated between the corners'
+    // nearest points of one part, the image stays within the corners' largest distance plus
+    // (|(Phi S)_ss| + |W''| du_s^2 + |(Phi S)_tt| + |W''| du_t^2) / 8, where |(Phi S)_ss| <=
+    // |S_ss| + |S_s|^2 / radius, bounded from the leaf's net. Leaves that don't hold are halved,
+    // to a floor and a budget. Otherwise a point of the face out of the band, or where it couldn't
+    // be certified.
+    std::optional<gp_Pnt> outside(const TopoDS_Face& face) const;
+
 private:
     struct Part
     {

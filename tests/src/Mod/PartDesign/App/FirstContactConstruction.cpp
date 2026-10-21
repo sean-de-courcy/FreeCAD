@@ -308,7 +308,9 @@ TEST(FirstContactConstruction, Hook)
     ASSERT_TRUE(solid);
     EXPECT_EQ(solid->walls.size(), 1U);
     EXPECT_EQ(solid->cells.size(), 2U);
-    EXPECT_EQ(solid->builds, 1);
+    // A section edge at the profile's top lies on the wall with a tolerance of 5e-6, wider than
+    // the first push's band (2e-6): it can't be certified there, and the wall is raised once
+    EXPECT_EQ(solid->builds, 2);
     expectSolid(*solid, extrudedVolume(Crossings(curve, true), 1.0, 3.0, 0.0, 2.0, {2.0}));
 }
 
@@ -461,6 +463,20 @@ PartDesign::FirstContact::Band waveBand()
     return band;
 }
 
+// The plane x = 2 over y in [-half, half], z in [0, 1]: its silhouette is the line y = 0, where
+// the circles about z touch it, and its image is r in [2, sqrt(4 + half^2)]
+TopoDS_Face tangentPlane(double half)
+{
+    BRepBuilderAPI_MakePolygon polygon(
+        gp_Pnt(2.0, -half, 0.0),
+        gp_Pnt(2.0, half, 0.0),
+        gp_Pnt(2.0, half, 1.0),
+        gp_Pnt(2.0, -half, 1.0),
+        Standard_True
+    );
+    return BRepBuilderAPI_MakeFace(polygon.Wire(), Standard_True).Face();
+}
+
 }  // namespace
 
 // A wide turn, x in [2.0001, 2.4999]: the second leg crosses it at about 175 degrees, unsplit
@@ -493,6 +509,32 @@ TEST(FirstContactConstruction, BandHoldsSmallWave)
     EXPECT_FALSE(band.outside(wave(1e-7)).has_value());
     EXPECT_TRUE(band.contains(gp_Pnt(2.0 + 1.9e-6, 0.0, 0.5)));
     EXPECT_FALSE(band.contains(gp_Pnt(2.0 + 2.1e-6, 0.0, 0.5)));
+}
+
+// The band's face bound (section 15.8, 2b): a band shaped as a C about the tangent plane's image,
+// open at r = 2, holds the images of all four of its edges but not its silhouette's
+TEST(FirstContactConstruction, BandFindsSilhouetteOut)
+{
+    const TopoDS_Face face = tangentPlane(0.5);
+    const double outer = std::sqrt(4.25);
+    PartDesign::FirstContact::Band band(frame);
+    band.add(GCE2d_MakeSegment(gp_Pnt2d(outer, -0.1), gp_Pnt2d(outer, 1.1)).Value(), 1e-3);
+    band.add(GCE2d_MakeSegment(gp_Pnt2d(1.99, 0.0), gp_Pnt2d(outer + 0.01, 0.0)).Value(), 1e-3);
+    band.add(GCE2d_MakeSegment(gp_Pnt2d(1.99, 1.0), gp_Pnt2d(outer + 0.01, 1.0)).Value(), 1e-3);
+    for (TopExp_Explorer edges(face, TopAbs_EDGE); edges.More(); edges.Next()) {
+        EXPECT_FALSE(band.outside(TopoDS::Edge(edges.Current())).has_value());
+    }
+    const auto out = band.outside(face);
+    ASSERT_TRUE(out.has_value());
+    EXPECT_NEAR(std::hypot(out->X(), out->Y()), 2.0, 1e-9);
+    EXPECT_GT(out->Z(), 1e-3);
+    EXPECT_LT(out->Z(), 1.0 - 1e-3);
+}
+
+// A strip of the tangent plane 2e-3 wide maps within 2.5e-7 of r = 2: certified in a band of 2e-6
+TEST(FirstContactConstruction, BandHoldsSilhouette)
+{
+    EXPECT_FALSE(waveBand().outside(tangentPlane(1e-3)).has_value());
 }
 
 // TEMPORARY (ops#293 D2 session 5): TrimmedFold's face, profile, cells, walls and pieces as BREP files

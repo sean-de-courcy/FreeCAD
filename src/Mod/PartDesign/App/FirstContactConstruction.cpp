@@ -32,6 +32,8 @@
 #include <utility>
 #include <vector>
 #include <Bnd_Box.hxx>
+#include <Bnd_Box2d.hxx>
+#include <BndLib_Add2dCurve.hxx>
 #include <BRep_Tool.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
@@ -60,6 +62,7 @@
 #include <GeomAPI.hxx>
 #include <GeomAPI_ProjectPointOnSurf.hxx>
 #include <GeomConvert.hxx>
+#include <GeomConvert_BSplineSurfaceToBezierSurface.hxx>
 #include <GProp_GProps.hxx>
 #include <IntRes2d_IntersectionPoint.hxx>
 #include <gp_Ax3.hxx>
@@ -70,6 +73,7 @@
 #include <Standard_Failure.hxx>
 #include <TColStd_Array1OfInteger.hxx>
 #include <TColStd_Array1OfReal.hxx>
+#include <TColGeom_Array2OfBezierSurface.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
@@ -609,6 +613,17 @@ std::optional<gp_Pnt> Band::outside(const TopoDS_Edge& edge) const
         std::vector<std::pair<double, double>> near;
     };
     // A sample whose image, widened by the tolerance, is in no part's band can't be certified
+    const bool why = std::getenv("FC_D2_WHY") != nullptr;  // TEMP s8
+    auto tell = [&](const char* what, double t, double dt) {  // TEMP s8
+        if (!why) { return; }
+        const gp_Pnt p = curve->Value(t);
+        const gp_Pnt2d at = image(p);
+        std::fprintf(stderr, "D2BAND %s t=%.9g of [%.9g, %.9g] dt=%.3g tol=%.3g speed=%.3g bend=%.3g at (%.6g, %.6g, %.6g) r=%.9g h=%.9g\n", what, t, curve->FirstParameter(), curve->LastParameter(), dt, tolerance, speed, bend, p.X(), p.Y(), p.Z(), at.X(), at.Y());
+        for (const Part& part : parts) {
+            const auto n = nearest(part.curve, at);
+            std::fprintf(stderr, "D2BAND   part width=%.3g d=%.3g u=%.9g bend=%.3g\n", part.width, n.second, n.first, part.bend);
+        }
+    };
     auto sample = [&](double t) -> std::optional<Sample> {
         Sample here {t, curve->Value(t)};
         const gp_Pnt2d at = image(here.point);
@@ -631,6 +646,7 @@ std::optional<gp_Pnt> Band::outside(const TopoDS_Edge& edge) const
         const double t = first + (last - first) * k / initial;
         auto here = sample(t);
         if (!here) {
+            tell("initial sample out", t, 0.0);
             return curve->Value(t);
         }
         samples.push_back(std::move(*here));
@@ -663,14 +679,335 @@ std::optional<gp_Pnt> Band::outside(const TopoDS_Edge& edge) const
             }
         }
         if (dt <= floor || ++count > budget) {
+            tell(dt <= floor ? "floor" : "budget", low.t, dt);
             return low.point;
         }
         auto middle = sample(low.t + dt / 2.0);
         if (!middle) {
+            tell("middle sample out", low.t + dt / 2.0, dt);
             return curve->Value(low.t + dt / 2.0);
         }
         open.emplace_back(*middle, std::move(high));
         open.emplace_back(std::move(low), std::move(*middle));
+    }
+    return std::nullopt;
+}
+
+namespace
+{
+
+// The largest norm of a vector polynomial's coefficients, a bound of its values (the convex hull
+// property)
+double largestNorm(const std::array<Bernstein, 3>& net)
+{
+    double largest = 0.0;
+    for (std::size_t k = 0; k < net[0].value.size(); ++k) {
+        largest = std::max(largest, std::hypot(net[0].value[k], net[1].value[k], net[2].value[k]));
+    }
+    return largest;
+}
+
+// The same across `axis` only: Phi's second derivative sees only that part of a tangent
+double largestNormAcross(const std::array<Bernstein, 3>& net, const gp_XYZ& axis)
+{
+    double largest = 0.0;
+    for (std::size_t k = 0; k < net[0].value.size(); ++k) {
+        const gp_XYZ value(net[0].value[k], net[1].value[k], net[2].value[k]);
+        largest = std::max(largest, (value - axis * value.Dot(axis)).Modulus());
+    }
+    return largest;
+}
+
+double largestValue(const Bernstein& polynomial)
+{
+    double largest = 0.0;
+    for (const double value : polynomial.value) {
+        largest = std::max(largest, std::abs(value));
+    }
+    return largest;
+}
+
+std::array<Bernstein, 3> derivatives(const std::array<Bernstein, 3>& net, bool alongU)
+{
+    return {derivative(net[0], alongU), derivative(net[1], alongU), derivative(net[2], alongU)};
+}
+
+// A point of the face, for a refusal that has no better one
+gp_Pnt somewhere(const TopoDS_Face& face)
+{
+    TopExp_Explorer vertices(face, TopAbs_VERTEX);
+    if (vertices.More()) {
+        return BRep_Tool::Pnt(TopoDS::Vertex(vertices.Current()));
+    }
+    double uLow = 0.0;
+    double uHigh = 0.0;
+    double vLow = 0.0;
+    double vHigh = 0.0;
+    BRepTools::UVBounds(face, uLow, uHigh, vLow, vHigh);
+    return BRep_Tool::Surface(face)->Value((uLow + uHigh) / 2.0, (vLow + vHigh) / 2.0);
+}
+
+}  // namespace
+
+std::optional<gp_Pnt> Band::outside(const TopoDS_Face& face) const
+{
+    for (TopExp_Explorer edges(face, TopAbs_EDGE); edges.More(); edges.Next()) {
+        const TopoDS_Edge& edge = TopoDS::Edge(edges.Current());
+        if (BRep_Tool::Degenerated(edge)) {
+            continue;
+        }
+        if (auto out = outside(edge)) {
+            return out;
+        }
+    }
+    SilhouetteSurface silhouette;
+    try {
+        silhouette = silhouetteSurface(face);
+    }
+    catch (const Base::Exception&) {
+        return somewhere(face);
+    }
+    catch (const Standard_Failure&) {
+        return somewhere(face);
+    }
+    const Handle(Geom_BSplineSurface)& surface = silhouette.surface;
+    const TopoDS_Face& carrier = silhouette.carrier;
+    const gp_Ax1 axis(frame.Location(), frame.YDirection());
+    const gp_XYZ direction = axis.Direction().XYZ();
+    const double tolerance = BRep_Tool::Tolerance(face);
+
+    // Where the face's boundary can lie in its parameters: a rectangle that meets none of these
+    // boxes holds no point of the boundary, so it lies in the face or out of it whole. Where the
+    // surface's parameters aren't the face's, every leaf counts as reaching the face.
+    std::vector<Bnd_Box2d> boundary;
+    for (TopExp_Explorer edges(carrier, TopAbs_EDGE); edges.More(); edges.Next()) {
+        double first = 0.0;
+        double last = 0.0;
+        const Handle(Geom2d_Curve) pcurve
+            = BRep_Tool::CurveOnSurface(TopoDS::Edge(edges.Current()), carrier, first, last);
+        if (pcurve.IsNull()) {
+            return somewhere(face);
+        }
+        Bnd_Box2d box;
+        BndLib_Add2dCurve::Add(pcurve, first, last, Precision::PConfusion(), box);
+        boundary.push_back(box);
+    }
+    BRepTopAdaptor_FClass2d inCarrier(carrier, Precision::PConfusion());
+    auto inFace = [&](double u, double v) {
+        return !silhouette.sameParameters || inCarrier.Perform(gp_Pnt2d(u, v)) != TopAbs_OUT;
+    };
+    auto reaches = [&](double u0, double u1, double v0, double v1) {
+        if (!silhouette.sameParameters) {
+            return true;
+        }
+        Bnd_Box2d rectangle;
+        rectangle.Update(u0, v0, u1, v1);
+        return std::ranges::any_of(boundary, [&](const Bnd_Box2d& box) { return !box.IsOut(rectangle); })
+            || inFace((u0 + u1) / 2.0, (v0 + v1) / 2.0);
+    };
+
+    struct Corner
+    {
+        gp_Pnt point;
+        double radius = 0.0;
+        // Per part: the nearest point's parameter and the distance
+        std::vector<std::pair<double, double>> near;
+    };
+    // Corners in the order (u0, v0), (u1, v0), (u0, v1), (u1, v1)
+    struct Leaf
+    {
+        SilhouettePatch patch;
+        double u0 = 0.0;
+        double u1 = 0.0;
+        double v0 = 0.0;
+        double v1 = 0.0;
+        std::array<Corner, 4> corners;
+    };
+    auto corner = [&](const SilhouettePatch& patch, bool uHigh, bool vHigh) {
+        const int k = patch.weights.index(uHigh ? patch.weights.m : 0, vHigh ? patch.weights.n : 0);
+        Corner here;
+        here.point = gp_Pnt(
+            gp_XYZ(patch.net[0].value[k], patch.net[1].value[k], patch.net[2].value[k]) / patch.weights.value[k]
+            + axis.Location().XYZ()
+        );
+        const gp_Pnt2d at = image(here.point);
+        here.radius = at.X();
+        for (const Part& part : parts) {
+            here.near.push_back(nearest(part.curve, at));
+        }
+        return here;
+    };
+    // A corner of the face whose image, widened by the tolerance, is in no part's band
+    auto away = [&](const Corner& here, double u, double v) {
+        for (std::size_t p = 0; p < parts.size(); ++p) {
+            if (here.near[p].second + tolerance < parts[p].width) {
+                return false;
+            }
+        }
+        return inFace(u, v);
+    };
+    // Whether the leaf's image is certified within one part's band; otherwise which way to halve it
+    auto holds = [&](const Leaf& leaf, bool& alongU) {
+        const SilhouettePatch& patch = leaf.patch;
+        const std::size_t count = patch.weights.value.size();
+        double lightest = std::numeric_limits<double>::max();
+        gp_XYZ centre;
+        for (std::size_t k = 0; k < count; ++k) {
+            const double weight = patch.weights.value[k];
+            lightest = std::min(lightest, weight);
+            centre += gp_XYZ(patch.net[0].value[k], patch.net[1].value[k], patch.net[2].value[k]) / weight;
+        }
+        alongU = leaf.u1 - leaf.u0 >= leaf.v1 - leaf.v0;
+        if (lightest <= 0.0) {
+            return false;
+        }
+        centre /= static_cast<double>(count);
+        double farthest = 0.0;
+        for (std::size_t k = 0; k < count; ++k) {
+            const gp_XYZ pole
+                = gp_XYZ(patch.net[0].value[k], patch.net[1].value[k], patch.net[2].value[k]) / patch.weights.value[k];
+            farthest = std::max(farthest, (pole - centre).Modulus());
+        }
+        // N = w (S - O) about the poles' centre O: S' = (N' - w' (S - O)) / w and
+        // S'' = (N'' - 2 w' S' - w'' (S - O)) / w, with |S - O| at most the farthest pole. Across
+        // the axis, the same with N' and S - O across it.
+        std::array<Bernstein, 3> about;
+        for (int c = 0; c < 3; ++c) {
+            about[c] = sum(patch.net[c], scaled(patch.weights, centre.Coord(c + 1)), -1.0);
+        }
+        auto bounds = [&](bool u) {
+            const std::array<Bernstein, 3> once = derivatives(about, u);
+            const Bernstein weightOnce = derivative(patch.weights, u);
+            const std::array<Bernstein, 3> twice = derivatives(once, u);
+            const Bernstein weightTwice = derivative(weightOnce, u);
+            const double speed = (largestNorm(once) + largestValue(weightOnce) * farthest) / lightest;
+            const double across
+                = (largestNormAcross(once, direction) + largestValue(weightOnce) * farthest) / lightest;
+            const double bend = (largestNorm(twice) + 2.0 * largestValue(weightOnce) * speed
+                                 + largestValue(weightTwice) * farthest)
+                / lightest;
+            return std::array<double, 3> {speed, across, bend};
+        };
+        const auto [speedU, acrossU, bendU] = bounds(true);
+        const auto [speedV, acrossV, bendV] = bounds(false);
+        alongU = speedU >= speedV;
+        // The radius is 1-Lipschitz, and every point of the leaf lies within half its sides of a
+        // corner
+        double radius = std::numeric_limits<double>::max();
+        for (const Corner& here : leaf.corners) {
+            radius = std::min(radius, here.radius);
+        }
+        radius -= (speedU + speedV) / 2.0;
+        if (radius <= 0.0) {
+            return false;
+        }
+        const double turnU = bendU + acrossU * acrossU / radius;
+        const double turnV = bendV + acrossV * acrossV / radius;
+        const auto& c = leaf.corners;
+        double least = std::numeric_limits<double>::max();
+        for (std::size_t p = 0; p < parts.size(); ++p) {
+            const double duU = std::max(
+                std::abs(c[1].near[p].first - c[0].near[p].first),
+                std::abs(c[3].near[p].first - c[2].near[p].first)
+            );
+            const double duV = std::max(
+                std::abs(c[2].near[p].first - c[0].near[p].first),
+                std::abs(c[3].near[p].first - c[1].near[p].first)
+            );
+            const double termU = turnU + parts[p].bend * duU * duU;
+            const double termV = turnV + parts[p].bend * duV * duV;
+            double reach = 0.0;
+            for (const Corner& here : c) {
+                reach = std::max(reach, here.near[p].second);
+            }
+            const double bound = reach + (termU + termV) / 8.0 + tolerance;
+            if (bound <= parts[p].width) {
+                return true;
+            }
+            if (bound < least) {
+                least = bound;
+                alongU = termU >= termV;
+            }
+        }
+        return false;
+    };
+
+    GeomConvert_BSplineSurfaceToBezierSurface pieces(surface);
+    TColGeom_Array2OfBezierSurface patches(1, pieces.NbUPatches(), 1, pieces.NbVPatches());
+    pieces.Patches(patches);
+    if (pieces.NbUPatches() != surface->NbUKnots() - 1 || pieces.NbVPatches() != surface->NbVKnots() - 1) {
+        return somewhere(face);
+    }
+    std::vector<Leaf> stack;
+    for (int i = patches.LowerRow(); i <= patches.UpperRow(); ++i) {
+        for (int j = patches.LowerCol(); j <= patches.UpperCol(); ++j) {
+            Leaf leaf {
+                silhouettePatch(patches(i, j), axis),
+                surface->UKnot(i),
+                surface->UKnot(i + 1),
+                surface->VKnot(j),
+                surface->VKnot(j + 1)
+            };
+            leaf.corners = {
+                corner(leaf.patch, false, false),
+                corner(leaf.patch, true, false),
+                corner(leaf.patch, false, true),
+                corner(leaf.patch, true, true)
+            };
+            stack.push_back(std::move(leaf));
+        }
+    }
+    // Halving stops at a floor, and the count at a budget (section 15.8: 1,000,000 nodes)
+    const double floorU = (surface->UKnot(surface->NbUKnots()) - surface->UKnot(1)) * 1e-9;
+    const double floorV = (surface->VKnot(surface->NbVKnots()) - surface->VKnot(1)) * 1e-9;
+    constexpr int budget = 1000000;
+    int count = 0;
+    while (!stack.empty()) {
+        Leaf leaf = std::move(stack.back());
+        stack.pop_back();
+        if (++count > budget) {
+            return leaf.corners[0].point;
+        }
+        // No silhouette in the leaf, or none of the face
+        if (oneSign(leaf.patch.g) || !reaches(leaf.u0, leaf.u1, leaf.v0, leaf.v1)) {
+            continue;
+        }
+        const std::array<std::pair<double, double>, 4> at {
+            std::make_pair(leaf.u0, leaf.v0),
+            std::make_pair(leaf.u1, leaf.v0),
+            std::make_pair(leaf.u0, leaf.v1),
+            std::make_pair(leaf.u1, leaf.v1)
+        };
+        for (std::size_t k = 0; k < 4; ++k) {
+            if (away(leaf.corners[k], at[k].first, at[k].second)) {
+                return leaf.corners[k].point;
+            }
+        }
+        bool alongU = true;
+        if (holds(leaf, alongU)) {
+            continue;
+        }
+        const bool uSmall = leaf.u1 - leaf.u0 <= floorU;
+        const bool vSmall = leaf.v1 - leaf.v0 <= floorV;
+        if (uSmall && vSmall) {
+            return leaf.corners[0].point;
+        }
+        alongU = vSmall || (alongU && !uSmall);
+        auto [first, second] = halves(leaf.patch, alongU);
+        Leaf low {std::move(first), leaf.u0, leaf.u1, leaf.v0, leaf.v1, leaf.corners};
+        Leaf high {std::move(second), leaf.u0, leaf.u1, leaf.v0, leaf.v1, leaf.corners};
+        if (alongU) {
+            low.u1 = high.u0 = (leaf.u0 + leaf.u1) / 2.0;
+            low.corners[1] = high.corners[0] = corner(low.patch, true, false);
+            low.corners[3] = high.corners[2] = corner(low.patch, true, true);
+        }
+        else {
+            low.v1 = high.v0 = (leaf.v0 + leaf.v1) / 2.0;
+            low.corners[2] = high.corners[0] = corner(low.patch, false, true);
+            low.corners[3] = high.corners[1] = corner(low.patch, true, true);
+        }
+        stack.push_back(std::move(high));
+        stack.push_back(std::move(low));
     }
     return std::nullopt;
 }
@@ -1026,8 +1363,7 @@ FirstContactSolid constructFirstContact(
         for (std::size_t c = 0; c < solid.cells.size(); ++c) {
             // C2: a face of the piece left INTERNAL is the face failing to split it, unless it is
             // the flap along a wall on the cell's boundary: its image within 2 pushes of the wall,
-            // its edges certified by the band's curve bound. Section 15.8 2b: the face's image lies
-            // in the band when its boundary's and its silhouette's do; NOT YET the silhouette.
+            // certified by its edges and its silhouette (section 15.8, 2b)
             std::vector<std::size_t> bounding;
             for (TopExp_Explorer edges(solid.cells[c], TopAbs_EDGE); edges.More(); edges.Next()) {
                 for (std::size_t w = 0; w < needed.size(); ++w) {
@@ -1053,13 +1389,7 @@ FirstContactSolid constructFirstContact(
                 if (faces.Current().Orientation() != TopAbs_INTERNAL) {
                     continue;
                 }
-                std::optional<gp_Pnt> away;
-                for (TopExp_Explorer edges(faces.Current(), TopAbs_EDGE); edges.More() && !away; edges.Next()) {
-                    if (!BRep_Tool::Degenerated(TopoDS::Edge(edges.Current()))) {
-                        away = band.outside(TopoDS::Edge(edges.Current()));
-                    }
-                }
-                if (away) {
+                if (const auto away = band.outside(TopoDS::Face(faces.Current()))) {
                     flap = fmt::format(
                         "C2: the face doesn't split the cell's piece (near ({:.4g}, {:.4g}, {:.4g}))",
                         away->X(),
