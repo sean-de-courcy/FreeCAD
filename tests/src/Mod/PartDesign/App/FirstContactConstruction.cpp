@@ -18,6 +18,8 @@
 #include <string>
 #include <vector>
 
+#include <BRep_TEdge.hxx>
+#include <BRep_Tool.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Section.hxx>
 #include <BRepAlgoAPI_Splitter.hxx>
@@ -42,6 +44,7 @@
 #include <gp_Ax3.hxx>
 #include <gp_Pln.hxx>
 #include <TColgp_HArray1OfPnt.hxx>
+#include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
@@ -263,9 +266,53 @@ double extremalRadius(const Handle(Geom_BSplineCurve)& curve, double low, double
     return radius((a + b) / 2.0);
 }
 
-// The construction, or a failure naming why it refused
+// The tolerances of a shape's vertices, edges and faces, and with `curves` the count of each
+// edge's curves (a destructive boolean raises its arguments' tolerances in place and adds pcurves
+// to their edges)
+std::vector<double> state(const TopoDS_Shape& shape, bool curves)
+{
+    std::vector<double> values;
+    for (const TopAbs_ShapeEnum type : {TopAbs_VERTEX, TopAbs_EDGE, TopAbs_FACE}) {
+        TopTools_IndexedMapOfShape map;
+        TopExp::MapShapes(shape, type, map);
+        for (int k = 1; k <= map.Extent(); ++k) {
+            const TopoDS_Shape& sub = map(k);
+            if (type == TopAbs_VERTEX) {
+                values.push_back(BRep_Tool::Tolerance(TopoDS::Vertex(sub)));
+            }
+            else if (type == TopAbs_EDGE) {
+                values.push_back(BRep_Tool::Tolerance(TopoDS::Edge(sub)));
+                if (curves) {
+                    values.push_back(Handle(BRep_TEdge)::DownCast(sub.TShape())->Curves().Extent());
+                }
+            }
+            else {
+                values.push_back(BRep_Tool::Tolerance(TopoDS::Face(sub)));
+            }
+        }
+    }
+    return values;
+}
+
+// The construction, or a failure naming why it refused. It leaves its inputs alone: the up-to
+// face, the user's, keeps every tolerance and curve over all cells and builds, and the profile
+// its tolerances (the cells' turns add pcurves to its edges, as today's turn of the profile does).
 std::optional<FirstContactSolid> construct(const TopoDS_Face& face, const TopoDS_Face& profile, const gp_Ax1& axis)
 {
+    const std::vector<double> faceBefore = state(face, true);
+    const std::vector<double> profileBefore = state(profile, false);
+    struct Check
+    {
+        const TopoDS_Face& face;
+        const TopoDS_Face& profile;
+        const std::vector<double>& faceBefore;
+        const std::vector<double>& profileBefore;
+        ~Check()
+        {
+            EXPECT_EQ(state(face, true), faceBefore) << "the construction changed the up-to face";
+            EXPECT_EQ(state(profile, false), profileBefore) << "the construction changed the profile";
+        }
+    } check {face, profile, faceBefore, profileBefore};
     try {
         return PartDesign::FirstContact::constructFirstContact(face, profile, axis, tolerance);
     }

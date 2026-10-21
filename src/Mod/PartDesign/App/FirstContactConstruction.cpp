@@ -437,6 +437,8 @@ std::pair<TopoDS_Shape, std::string> sweepCell(
         if (!turn.IsDone()) {
             return {{}, "the cell's turn failed"};
         }
+        // Non-destructive here and in every boolean of the construction: the face is the user's, and
+        // the pieces share its edges
         BRepAlgoAPI_Splitter splitter;
         TopTools_ListOfShape arguments;
         arguments.Append(turn.Shape());
@@ -444,6 +446,7 @@ std::pair<TopoDS_Shape, std::string> sweepCell(
         tools.Append(face);
         splitter.SetArguments(arguments);
         splitter.SetTools(tools);
+        splitter.SetNonDestructive(Standard_True);
         splitter.Build();
         if (!splitter.IsDone()) {
             return {{}, "the face's split of the cell's turn failed"};
@@ -1456,7 +1459,9 @@ FirstContactSolid constructFirstContact(
         try {
             const TopoDS_Edge edge = BRepBuilderAPI_MakeEdge(GeomAPI::To3d(unpushed[w], wallPlane)).Edge();
             BRepPrimAPI_MakeRevol turn(edge, axis, 2.0 * std::numbers::pi);
-            BRepAlgoAPI_Section section(face, turn.Shape());
+            BRepAlgoAPI_Section section(face, turn.Shape(), Standard_False);
+            section.SetNonDestructive(Standard_True);
+            section.Build();
             return section.IsDone() ? largestEdgeTolerance(section.Shape()) : 0.0;
         }
         catch (const Standard_Failure&) {
@@ -1580,6 +1585,7 @@ FirstContactSolid constructFirstContact(
         }
         splitter.SetArguments(arguments);
         splitter.SetTools(tools);
+        splitter.SetNonDestructive(Standard_True);
         splitter.Build();
         if (!splitter.IsDone()) {
             throw refused("the profile's split along the walls failed");
@@ -1679,6 +1685,7 @@ FirstContactSolid constructFirstContact(
                     }
                     fuse.SetArguments(first);
                     fuse.SetTools(rest);
+                    fuse.SetNonDestructive(Standard_True);
                     fuse.Build();
                     if (!fuse.IsDone()) {
                         throw refused("the pieces' fuse failed");
