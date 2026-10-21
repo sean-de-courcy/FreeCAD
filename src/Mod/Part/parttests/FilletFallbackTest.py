@@ -94,6 +94,22 @@ def plate_top_removed(a, b, alpha, r, depth):
     return sum(gauss_legendre(removed, p, q) for p, q in zip(ends, ends[1:]) if q > p)
 
 
+def ribbed_wave_prism(waves):
+    """A prism over a cosine wave with a rib along its flat side (ops#414). Its section in the
+    plane z = 0: x from -5 to the wave x = 1.5 (1 - cos(2 pi y / 20)), interpolated by one cubic
+    B-spline through points 1 mm apart (20 spans per wave), for y from 0 to the wave's length;
+    extruded by 10. The rib is the box x in [-9, -5], z in [3, 7] along the whole length: its top
+    x = -9 is 4 wide, so a round or chamfer of 2 on its two long edges is at the limit"""
+    length = 20 * waves
+    points = [V(1.5 * (1 - math.cos(2 * math.pi * y / 20)), y, 0) for y in range(length + 1)]
+    spline = Part.BSplineCurve()
+    spline.interpolate(points)
+    corners = [V(0, length, 0), V(-5, length, 0), V(-5, 0, 0), V(0, 0, 0)]
+    edges = [spline.toShape()] + [Part.makeLine(a, b) for a, b in zip(corners, corners[1:])]
+    prism = Part.Face(Part.Wire(edges)).extrude(V(0, 0, 10))
+    return prism.fuse(Part.makeBox(4, length, 4, V(-9, 0, 3)))
+
+
 class FilletFallbackTest(unittest.TestCase):
     def assertExact(self, shape, volume):
         self.assertTrue(shape.isValid())
@@ -147,6 +163,39 @@ class FilletFallbackTest(unittest.TestCase):
             edge_between(step, (0, 10, 14), (30, 10, 14)),
         ]
         self.assertExact(step.makeFillet(2, edges), 7200)
+
+    def testBaseWithALongSplineFace(self):
+        # The construction's checks compare volumes: the base's, and the volume each Boolean
+        # removes against its closed form. OCCT's default integration under-samples a face with
+        # many curved B-spline spans (the wave's side, and the top and bottom it bounds), so it
+        # refused every one of these: the base's volume came out negative at 30 and 50 waves, and
+        # the cut "removed" 343.200 instead of 343.363 at 10. Part's mass-properties helper
+        # integrates those faces adaptively (ops#414). Shape.Volume still reads OCCT's default, so
+        # the volume is checked on the rib's side of x = -5, where no face carries the spline
+        for waves in (10, 30, 50):
+            length = 20 * waves
+            base = ribbed_wave_prism(waves)
+            edges = [
+                edge_between(base, (-9, 0, 3), (-9, length, 3)),
+                edge_between(base, (-9, 0, 7), (-9, length, 7)),
+            ]
+            rib_side = Part.makeBox(5, length + 2, 12, V(-10, -1, -1))
+            # The rib's section, 4 x 4, less what the rounds or the chamfers remove
+            for kind, section in (("fillet", 16 - 2 * fillet_section(2)), ("chamfer", 16 - 4)):
+                with self.subTest(waves=waves, kind=kind):
+                    if kind == "fillet":
+                        result = base.makeFillet(2, edges)
+                    else:
+                        result = base.makeChamfer(2, edges)
+                    self.assertTrue(result.isValid())
+                    self.assertEqual(len(result.Solids), 1)
+                    # the rib's top is gone, two rounds or chamfers in its place
+                    self.assertEqual(len(result.Faces), len(base.Faces) + 1)
+                    self.assertFalse(
+                        [face for face in result.Faces if abs(face.CenterOfMass.x + 9) < 1e-7]
+                    )
+                    rib = result.common(rib_side)
+                    self.assertAlmostEqual(rib.Volume, section * length, delta=1e-6 * length)
 
     def testChamfers(self):
         box = Part.makeBox(30, 4, 20)
