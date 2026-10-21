@@ -621,13 +621,14 @@ class SweepInteriorProfileChamfered(SweepStraight):
     def consumers(self, doc, sweep):
         self.attach(doc, sweep, "start_x2", lambda: self.edgeX2(self.startZ))
         self.attach(doc, sweep, "start_y2", lambda: self.edgeY2(self.startZ))
-        self.attachVertex(doc, sweep, "start_v", self.startZ)
+        self.attachVertex(doc, sweep, "start_v", lambda: self.startZ)
         self.attach(doc, sweep, "end_x2", lambda: self.edgeX2(self.endZ))
         self.attach(doc, sweep, "end_y2", lambda: self.edgeY2(self.endZ))
-        self.attachVertex(doc, sweep, "end_v", self.endZ)
+        self.attachVertex(doc, sweep, "end_v", lambda: self.endZ)
 
     def attachVertex(self, doc, sweep, ref, z):
-        predicate = lambda: vertex((-2, 2, z))
+        """z() gives the end's height when the reference is checked (an edit may move it)."""
+        predicate = lambda: vertex((-2, 2, z()))
         sketch = sketchOnVertex(doc, sweep, predicate(), "On" + ref)
         self.ref(ref, sketch, "AttachmentSupport", predicate, Attached())
 
@@ -685,6 +686,86 @@ class SweepInteriorFirstSectionChamfered(SweepInteriorProfileChamfered):
 
     def chamfered(self, doc):
         return [doc.Profile, doc.Last]
+
+
+# One rule for both cases (fork PR 352 round 3, ops#425). Round 2 gave the ends the profile's
+# names (its own at one end, their projections at the other) only when the profile lay at an end
+# of the path, within MakePipeShell's 3D tolerance (1e-4), and named them after the path's end
+# vertices otherwise: an edit that took the profile across that band renamed every end element,
+# and the references broke. The end that keeps the profile's own names is now the one behind the
+# profile's plane, wherever the profile sits on the path.
+
+
+def reverseLine(sketch, index):
+    """Swaps the end points of a line, keeping its geometry ID (through a point between them)."""
+    geometry = sketch.Geometry
+    start, end = V(geometry[index].StartPoint), V(geometry[index].EndPoint)
+    geometry[index].StartPoint = start + (end - start) * 0.75
+    geometry[index].EndPoint = start
+    geometry[index].StartPoint = end
+    sketch.Geometry = geometry
+
+
+class SweepPathStartMovedOut(SweepInteriorProfileChamfered):
+    """The square at the path's start (z = 0); the edit moves the path's start 2e-4 down, so the
+    square lies inside the path, beyond the tolerance. The ends' edges and vertices stay theirs,
+    the start ones moved down with the path's start."""
+
+    profileZ = 0
+    path = [(0, 0), (0, 30)]
+    movedStart = -2e-4
+
+    def edit(self, doc):
+        m.setLines(doc.Path, {0: ((0, self.movedStart), (0, 30))})
+        self.startZ = self.movedStart
+
+
+class SweepPathStartMovedIn(SweepPathStartMovedOut):
+    """As SweepPathStartMovedOut the other way: the path starts 2e-4 below the square, and the
+    edit moves its start up to the square's plane."""
+
+    path = [(0, -2e-4), (0, 30)]
+    startZ = -2e-4
+    movedStart = 0
+
+
+class SweepPathExtendedBeforeProfile(SweepPathStartMovedOut):
+    """As SweepPathStartMovedOut, the path's start moved 5 mm down."""
+
+    movedStart = -5
+
+
+class SweepPathShortenedToProfile(SweepPathStartMovedOut):
+    """The square sits at z = 14 on the path 0..30; the edit moves the path's start up to it."""
+
+    profileZ = 14
+    movedStart = 14
+
+
+class SweepProfileAtEndMovedInside(SweepInteriorProfileChamfered):
+    """The square at the path's end (z = 30); the edit moves it inside, to z = 16. The ends stay
+    where they are, and so do their edges and vertices."""
+
+    profileZ = 30
+
+    def edit(self, doc):
+        doc.Profile.Placement = App.Placement(V(0, 0, 16), App.Rotation())
+
+
+class SweepInteriorPathReversed(SweepInteriorProfileChamfered):
+    """The square sits at z = 14 on the path 0..30; the edit reverses the path's line, keeping its
+    geometry ID. The ends stay where they are, and so do their edges and vertices (round 2 named
+    them after the path's end vertices, which the reversal swaps: both ends swapped)."""
+
+    def edit(self, doc):
+        reverseLine(doc.Path, 0)
+
+
+class SweepPathReversed(SweepInteriorPathReversed):
+    """As SweepInteriorPathReversed, the square at the path's start (coverage: round 2 held it,
+    the profile's names going to the end nearer the profile)."""
+
+    profileZ = 0
 
 
 # Offset copies (ops#358, PLAN decision 86). A Thickness's or an offset's copy of an element is
