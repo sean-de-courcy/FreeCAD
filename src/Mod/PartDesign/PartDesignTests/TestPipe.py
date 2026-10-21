@@ -22,7 +22,9 @@
 # ***************************************************************************
 
 import math
+import os
 import re
+import tempfile
 import time
 import unittest
 
@@ -338,7 +340,8 @@ class TestPipeEndNames(unittest.TestCase):
         z = 16, past the spine's middle: the start (z = 0) keeps the profile's names, the end
         (z = 30) the section's projections, and the fillet stays at z = 0. Both sections decide
         which end is which (fork PR 337 round 2): with the profile's distance alone, the ends
-        swapped, and the fillet went to the section's cap, 30 mm away."""
+        swapped, and the fillet went to the section's cap, 30 mm away. Nothing is stored
+        before the edit (a file saved before ops#379), so the sections decide."""
         profile = self.square(z=14)
         section = self.square("Section", 3, z=30)
         pipe = self.pipe(profile, self.line(), Transformation="Multisection", Sections=[section])
@@ -356,6 +359,7 @@ class TestPipeEndNames(unittest.TestCase):
         self.doc.recompute()
         self.assertTrue(fillet.isValid(), fillet.getStatusString())
 
+        pipe.SpineEnds = []
         profile.Placement = App.Placement(V(0, 0, 16), App.Rotation())
         self.doc.recompute()
         self.assertTrue(pipe.isValid(), pipe.getStatusString())
@@ -368,12 +372,14 @@ class TestPipeEndNames(unittest.TestCase):
 
     def testMultisectionLastSectionWithMoreVertices(self):
         """Multisection along z = 0 -> 30, the profile at z = 0 and a 6x6 square section at
-        z = 12, with more vertices than the profile (a circle; a square with a round hole, whose
-        hole wire decides alone), a fillet on an edge of the far cap; then the spine's end is
-        extended to z = 60: the start (z = 0) keeps the profile's names, the far cap (z = 60) the
-        section's projections, and the fillet follows to z = 60. Each section weighs the same
+        z = 12, with more vertices than the profile (a circle; a square with a round hole), a
+        fillet on an edge of the far cap; then the spine's end is extended to z = 60: the start
+        (z = 0) keeps the profile's names, the far cap (z = 60) the section's projections, and
+        the fillet follows to z = 60. Each section weighs the same
         (fork PR 337 round 3): with distances summed over a section's vertices, the square
-        outweighed the profile, the ends swapped, and the fillet went to the profile's cap."""
+        outweighed the profile, the ends swapped, and the fillet went to the profile's cap.
+        Nothing is stored before the edit (a file saved before ops#379), so the sections
+        decide."""
         cases = {
             "circle": ([models.circle(0, 0, 2)], models.rectangle(-3, -3, 3, 3)),
             "holed": (
@@ -400,6 +406,7 @@ class TestPipeEndNames(unittest.TestCase):
                 self.doc.recompute()
                 self.assertTrue(fillet.isValid(), fillet.getStatusString())
 
+                pipe.SpineEnds = []
                 path.deleteAllGeometry()
                 path.addGeometry(Part.LineSegment(V(0, 0, 0), V(0, 60, 0)))
                 self.doc.recompute()
@@ -476,6 +483,192 @@ class TestPipeEndNames(unittest.TestCase):
             name = firstName(pipe.Shape, element)
             self.assertIn("PRJ", name, element)
             self.assertIn(f"{profile.ID}", name, element)
+
+    # ops#379: which end carries the profile's names is remembered. The model: a 4x4 square at
+    # height z (a 2x2 hole with `hole`), swept along a line on the Z axis, a fillet on the cap
+    # edge the profile's first edge names and a sketch attached to the cap face that holds it.
+    # Before, every recompute chose the end nearest the profile, so an edit that crossed the
+    # spine's middle, or brought the profile or the far end to the other end, moved the names
+    # and the fillet and the sketch with them, valid and silent.
+
+    def endModel(self, start, end, z=0, hole=False):
+        geometry = models.rectangle(-2, -2, 2, 2)
+        if hole:
+            geometry += models.rectangle(-1, -1, 1, 1)
+        profile = self.sketch("Profile", geometry, z=z)
+        path = self.line(start, end)
+        pipe = self.pipe(profile, path)
+        g1 = firstName(profile.Shape, "Edge1")
+        edges = [
+            f"Edge{index}"
+            for index in range(1, len(pipe.Shape.Edges) + 1)
+            if firstName(pipe.Shape, f"Edge{index}") == g1
+        ]
+        self.assertEqual(len(edges), 1, edges)
+        capZ = pipe.Shape.getElement(edges[0]).CenterOfMass.z
+        caps = [
+            f"Face{index}"
+            for index, face in enumerate(pipe.Shape.Faces, 1)
+            if abs(face.CenterOfMass.z - capZ) < 1e-6 and abs(abs(face.normalAt(0, 0).z) - 1) < 1e-9
+        ]
+        self.assertEqual(len(caps), 1, caps)
+        fillet = self.body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (pipe, edges)
+        fillet.Radius = 0.3
+        onCap = self.body.newObject("Sketcher::SketchObject", "OnCap")
+        onCap.AttachmentSupport = [(pipe, caps[0])]
+        onCap.MapMode = "FlatFace"
+        onCap.addGeometry(models.circle(0, 0, 0.5), False)
+        self.body.Tip = fillet
+        self.doc.recompute()
+        return profile, path, pipe, fillet, onCap
+
+    def setLine(self, path, start, end):
+        path.deleteAllGeometry()
+        path.addGeometry(Part.LineSegment(V(0, start, 0), V(0, end, 0)))
+        self.doc.recompute()
+
+    def moveProfile(self, profile, z):
+        profile.Placement = App.Placement(V(0, 0, z), App.Rotation())
+        self.doc.recompute()
+
+    def assertNamesAt(self, model, z, other):
+        """Each edge of the profile names a cap edge at height `z` (the sketch's own name) and
+        one at `other` (its projection, PRJ); the fillet's edge and the attached sketch lie at
+        `z`."""
+        profile, _, pipe, fillet, onCap = model
+        for obj in (pipe, fillet, onCap):
+            self.assertTrue(obj.isValid(), (obj.Name, obj.getStatusString()))
+        shape = pipe.Shape
+        edges = [f"Edge{index}" for index in range(1, len(shape.Edges) + 1)]
+        for index in range(1, len(profile.Shape.Edges) + 1):
+            name = firstName(profile.Shape, f"Edge{index}")
+            own = [edge for edge in edges if firstName(shape, edge) == name]
+            projected = [
+                edge
+                for edge in edges
+                if "PRJ" in lastSection(shape, edge)["mapperFlags"]
+                and name in lastSection(shape, edge)["linkedNames"]
+            ]
+            self.assertEqual(len(own), 1, (name, own))
+            self.assertEqual(len(projected), 1, (name, projected))
+            self.assertAlmostEqual(shape.getElement(own[0]).CenterOfMass.z, z, 6, name)
+            self.assertAlmostEqual(shape.getElement(projected[0]).CenterOfMass.z, other, 6, name)
+        self.assertEqual(len(fillet.Base[1]), 1, fillet.Base[1])
+        self.assertAlmostEqual(shape.getElement(fillet.Base[1][0]).CenterOfMass.z, z, 6)
+        self.assertAlmostEqual(onCap.Placement.Base.z, z, 6)
+
+    def assertPointsAt(self, points, expected):
+        self.assertEqual(len(points), len(expected), points)
+        for point, at in zip(points, expected):
+            self.assertTrue(point.isEqual(V(*at), 1e-9), (point, at))
+
+    def reopen(self, *names):
+        path = os.path.join(tempfile.mkdtemp(), "PipeEnds.FCStd")
+        self.doc.saveAs(path)
+        App.closeDocument(self.doc.Name)
+        self.doc = App.openDocument(path)
+        self.body = self.doc.getObject("Body")
+        return tuple(self.doc.getObject(name) for name in names)
+
+    def testEndStaysWhenTheProfileCrossesTheMiddle(self):
+        """The profile at z = 0, the spine 15 -> -15 (a tie: the start), then 16 -> -15: the
+        names stay at the start (z = 16). Before, they went to z = -15."""
+        model = self.endModel(15, -15)
+        self.assertNamesAt(model, 15, -15)
+        self.setLine(model[1], 16, -15)
+        self.assertNamesAt(model, 16, -15)
+
+    def testEndStaysWhenTheProfileSketchMoves(self):
+        """The spine 0 -> 30, the profile at z = 14, moved to z = 16 (past the middle), then to
+        z = 30 (the far end; the solid is the same): the names stay at z = 0, and the z = 30 cap
+        keeps the projections. Before, they went to z = 30."""
+        model = self.endModel(0, 30, z=14)
+        self.assertNamesAt(model, 0, 30)
+        self.moveProfile(model[0], 16)
+        self.assertNamesAt(model, 0, 30)
+        self.moveProfile(model[0], 30)
+        self.assertNamesAt(model, 0, 30)
+
+    def testEndStaysWhenTheFarEndIsShortenedToTheProfile(self):
+        """The profile at z = 0, the spine 30 -> -40, then shortened to 30 -> 0: the names stay
+        on the unchanged cap at z = 30, and the cap at the profile (z = 0) has the projections.
+        Before, they went to z = 0."""
+        model = self.endModel(30, -40)
+        self.assertNamesAt(model, 30, -40)
+        self.setLine(model[1], 30, 0)
+        self.assertNamesAt(model, 30, 0)
+
+    def testEndStaysWhenTheSpineIsExtendedFarPastTheProfile(self):
+        """The profile at z = 0, the spine drawn towards it (30 -> 0), then extended past it to
+        -10 and on to -40: the names follow the extended end, to z = -10 and z = -40. Before, the
+        second extension took them to z = 30."""
+        model = self.endModel(30, 0)
+        self.assertNamesAt(model, 0, 30)
+        self.setLine(model[1], 30, -10)
+        self.assertNamesAt(model, -10, 30)
+        self.setLine(model[1], 30, -40)
+        self.assertNamesAt(model, -40, 30)
+
+    def testEndFollowsAReversedSpine(self):
+        """A spine redrawn the other way keeps the names where they were: 0 -> 30 redrawn
+        30 -> 0 (the profile at z = 0, an end), and 10 -> -30 redrawn -30 -> 10 (the profile
+        inside the spine)."""
+        model = self.endModel(0, 30)
+        self.setLine(model[1], 30, 0)
+        self.assertNamesAt(model, 0, 30)
+        self.tearDown()
+        self.setUp()
+        model = self.endModel(10, -30)
+        self.assertNamesAt(model, 10, -30)
+        self.setLine(model[1], -30, 10)
+        self.assertNamesAt(model, 10, -30)
+
+    def testHoledProfileDecidesOnce(self):
+        """testEndStaysWhenTheProfileCrossesTheMiddle with a 2x2 hole: the hole's names stay with
+        the outer wire's, at z = 16."""
+        model = self.endModel(15, -15, hole=True)
+        self.assertNamesAt(model, 15, -15)
+        self.setLine(model[1], 16, -15)
+        self.assertNamesAt(model, 16, -15)
+
+    def testStoredEndSurvivesSaveAndReopen(self):
+        """testEndStaysWhenTheFarEndIsShortenedToTheProfile's model saved after the edit and
+        reopened, then the spine redrawn and recomputed: the names stay at z = 30. The profile
+        lies on the spine's end (z = 0), so without the stored end they would go there."""
+        model = self.endModel(30, -40)
+        self.setLine(model[1], 30, 0)
+        model = self.reopen(*(obj.Name for obj in model))
+        self.assertEqual(len(model[2].SpineEnds), 2)
+        self.assertNamesAt(model, 30, 0)
+        self.setLine(model[1], 30, 0)
+        self.assertNamesAt(model, 30, 0)
+
+    def testNothingStoredDecidesAsBefore(self):
+        """testEndStaysWhenTheFarEndIsShortenedToTheProfile with nothing stored before the
+        edit, as in a file saved before ops#379: the end nearest the profile takes the names
+        (z = 0), and that end is stored from then on."""
+        model = self.endModel(30, -40)
+        pipe = model[2]
+        self.assertPointsAt(pipe.SpineEnds, [(0, 0, 30), (0, 0, -40)])
+        pipe.SpineEnds = []
+        self.setLine(model[1], 30, 0)
+        self.assertNamesAt(model, 0, 30)
+        self.assertPointsAt(pipe.SpineEnds, [(0, 0, 0), (0, 0, 30)])
+
+    def testFileWithoutStoredEndsReopensWithItsNames(self):
+        """A pipe saved with nothing stored reopens with the names it was saved with, and a
+        recompute without an edit keeps them."""
+        model = self.endModel(30, -40)
+        model[2].SpineEnds = []
+        names = dict(model[2].Shape.ElementReverseMap)
+        model = self.reopen(*(obj.Name for obj in model))
+        self.assertEqual(len(model[2].SpineEnds), 0)
+        self.assertEqual(dict(model[2].Shape.ElementReverseMap), names)
+        model[2].touch()
+        self.doc.recompute()
+        self.assertEqual(dict(model[2].Shape.ElementReverseMap), names)
+        self.assertNamesAt(model, 30, -40)
 
 
 SQUARE = [V(-2, -2, 0), V(2, -2, 0), V(2, 2, 0), V(-2, 2, 0)]
