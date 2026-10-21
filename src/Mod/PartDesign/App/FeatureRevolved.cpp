@@ -2909,19 +2909,18 @@ TopoShape Revolved::tryToRevolveToFace(
     // there: every sweep the certificate accepts stays the tool (decision 90, D2a). The same three
     // frames are tried on a boolean failure (a throw, an invalid solid, a tolerance that doesn't
     // hold); the construction's own refusal, after its walls were pushed farther, refuses at once.
-    // Either way the refusal names the jump.
-    const TopoDS_Face profileFace
-        = TopoDS::Face(TopExp_Explorer(sketchshape.getShape(), TopAbs_FACE).Current());
-    const auto constructToFirstContact = [&](const TopoDS_Face& upTo, const JumpRefused& jump) {
+    // Either way the refusal names the jump. The construction is named from the profile and the
+    // face, its walls from the face's elements (section 15.17).
+    const auto constructToFirstContact = [&](const TopoShape& upTo, const JumpRefused& jump) {
         for (const double turn : {0.0, 1.0, 2.0}) {
             gp_Trsf rotation;
             rotation.SetRotation(axis, turn);
             const TopLoc_Location there(rotation);
-            const TopoDS_Face profile = TopoDS::Face(profileFace.Moved(there));
-            const TopoDS_Face face = TopoDS::Face(upTo.Moved(there));
-            TopoShape solid = makeTopoShape();
+            const TopoShape profile = sketchshape.moved(there);
+            const TopoShape face = upTo.moved(there);
+            TopoShape solid;
             try {
-                solid.setShape(constructFirstContact(face, profile, axis, tolerance).shape);
+                solid = constructFirstContact(makeTopoShape(), face, profile, axis, tolerance).named;
             }
             catch (const Standard_Failure&) {
                 continue;
@@ -2929,7 +2928,8 @@ TopoShape Revolved::tryToRevolveToFace(
             catch (const Base::Exception& refusal) {
                 throw JumpRefused(std::string(jump.what()) + ". " + refusal.what());
             }
-            if (!solid.isValid() || !toleranceHolds(solid.getShape(), {profile, face})) {
+            if (!solid.isValid()
+                || !toleranceHolds(solid.getShape(), {profile.getShape(), face.getShape()})) {
                 continue;
             }
             constructedTool = true;
@@ -2937,14 +2937,14 @@ TopoShape Revolved::tryToRevolveToFace(
         }
         throw jump;
     };
-    const auto sweepToFirstContact = [&](const TopoDS_Face& upTo) {
+    const auto sweepToFirstContact = [&](const TopoShape& upTo) {
         bool built = false;
         for (const double turn : {0.0, 1.0, 2.0}) {
             gp_Trsf rotation;
             rotation.SetRotation(axis, turn);
             const TopLoc_Location there(rotation);
             const TopoShape profile = sketchshape.moved(there);
-            const TopoDS_Face face = TopoDS::Face(upTo.Moved(there));
+            const TopoDS_Face face = TopoDS::Face(upTo.getShape().Moved(there));
             TopTools_IndexedMapOfShape faceParts;
             TopoShape sweep;
             try {
@@ -2990,12 +2990,15 @@ TopoShape Revolved::tryToRevolveToFace(
     // nearly along passes the certificate, which takes a seam for no boundary (ops#293, q4: 39.04
     // instead of 13.35, or 0.036 short). Split by the exact copy alone, the tool's face parts no
     // longer matched the base's face, and the fuse with the base gave the base's volume alone.
-    TopoShape sweep = sweepToFirstContact(reachable);
+    // The up-to face keeps its names where it is the face checked (a bounded face), for the walls'
+    TopoShape sweep = sweepToFirstContact(
+        reachable.IsSame(upToFace.getShape()) ? upToFace : TopoShape(reachable)
+    );
     const TopoDS_Face exactSeams = withExactSeams(reachable);
     if (!exactSeams.IsNull()) {
         bool agree = false;
         try {
-            const TopoShape exactSweep = sweepToFirstContact(exactSeams);
+            const TopoShape exactSweep = sweepToFirstContact(TopoShape(exactSeams));
             const auto [volume, error] = checkedVolume(sweep.getShape(), constructedTool);
             const auto [exactVolume, exactError] =
                 checkedVolume(exactSweep.getShape(), constructedTool);

@@ -53,6 +53,8 @@
 #include <Base/Exception.h>
 #include <Mod/PartDesign/App/FirstContactConstruction.h>
 
+#include "src/App/InitApplication.h"
+
 // NOLINTBEGIN(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
 
 namespace
@@ -299,6 +301,8 @@ std::vector<double> state(const TopoDS_Shape& shape, bool curves)
 // its tolerances (the cells' turns add pcurves to its edges, as today's turn of the profile does).
 std::optional<FirstContactSolid> construct(const TopoDS_Face& face, const TopoDS_Face& profile, const gp_Ax1& axis)
 {
+    // The construction names its shapes (TopoShape), which needs the application
+    tests::initApplication();
     const std::vector<double> faceBefore = state(face, true);
     const std::vector<double> profileBefore = state(profile, false);
     struct Check

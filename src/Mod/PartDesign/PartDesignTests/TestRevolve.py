@@ -3141,6 +3141,85 @@ class TestRevolve(unittest.TestCase):
             [(1.5, 1, 130), (2.5, 1, 200), (1.5, 1, -100), (2.5, 1, -100)],
         )
 
+    def heightProfile(self, body, x0, x1, height):
+        """The profile x in [x0, x1], z in [0, `height`] on XZ, fully constrained: the sketch, and
+        the index of its height's constraint."""
+        sketch = self.rectProfile(body, x0, x1, 0, height)
+        for i in range(4):
+            sketch.addConstraint(Sketcher.Constraint("Coincident", i, 2, (i + 1) % 4, 1))
+        sketch.addConstraint(Sketcher.Constraint("Horizontal", 0))
+        sketch.addConstraint(Sketcher.Constraint("Horizontal", 2))
+        sketch.addConstraint(Sketcher.Constraint("Vertical", 1))
+        sketch.addConstraint(Sketcher.Constraint("Vertical", 3))
+        sketch.addConstraint(Sketcher.Constraint("PointOnObject", 0, 1, -1))
+        sketch.addConstraint(Sketcher.Constraint("DistanceX", -1, 1, 0, 1, x0))
+        sketch.addConstraint(Sketcher.Constraint("DistanceX", 0, x1 - x0))
+        index = sketch.addConstraint(Sketcher.Constraint("DistanceY", 1, height))
+        self.Doc.recompute()
+        return sketch, index
+
+    @staticmethod
+    def facesAtRadius(shape, radius):
+        """The names of the shape's faces, not planes, whose vertices and middle lie within 1e-4 of
+        `radius` from Z."""
+        names = []
+        for i, face in enumerate(shape.Faces, 1):
+            if face.Surface.TypeId == "Part::GeomPlane":
+                continue
+            u0, u1, v0, v1 = face.ParameterRange
+            points = [v.Point for v in face.Vertexes] + [face.valueAt((u0 + u1) / 2, (v0 + v1) / 2)]
+            if all(abs(math.hypot(p.x, p.y) - radius) < 1e-4 for p in points):
+                names.append("Face%d" % i)
+        return names
+
+    def testRevolutionUpToHookNamesItsWall(self):
+        """testRevolutionUpToHookFirstContact's solid built between walls is named (ops#293 D2,
+        notes 15.17): every face has a name, and the wall's (the turn of the jump at r 2) is
+        generated from the hook's edge there. Its name finds it again after a recompute and after
+        the profile's height goes from 2 to 2.5, and so does a SubShapeBinder of it."""
+        from PartDesignTests.TestPad import assertFacesAllNamed
+
+        wall, _ = self.polarWall(((2, 0.5, 100, 130), (0.5, 3.5, 130, 220)))
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        sketch, height = self.heightProfile(body, 1, 3, 2)
+        revolution = self.revolveUpTo(body, "Revolution", sketch, (wall, ["Face1"]))
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        assertFacesAllNamed(self, revolution.Shape)
+        [face] = self.facesAtRadius(revolution.Shape, 2)
+        names = {name for name, element in revolution.Shape.ElementMap.items() if element == face}
+        self.assertTrue(names)
+        # Generated from the hook's edge at r 2, whose image the jump is (a bare shape's names
+        # come from its own indices)
+        for name in names:
+            tag, source, _ = revolution.Shape.getElementHistory(name)
+            self.assertEqual(tag, wall.ID, name)
+            edge = wall.Shape.getElement(source)
+            for vertex in edge.Vertexes:
+                self.assertAlmostEqual(math.hypot(vertex.X, vertex.Y), 2, places=6)
+        binder = self.Doc.addObject("PartDesign::SubShapeBinder", "WallReference")
+        binder.Support = [(revolution, face)]
+        self.Doc.recompute()
+
+        def assertWall(top):
+            [face] = self.facesAtRadius(revolution.Shape, 2)
+            for name in names:
+                self.assertEqual(revolution.Shape.ElementMap.get(name), face, name)
+            self.assertEqual(len(binder.Shape.Faces), 1)
+            bound = binder.Shape.BoundBox
+            self.assertAlmostEqual(bound.ZMin, 0, places=6)
+            self.assertAlmostEqual(bound.ZMax, top, places=6)
+            self.assertEqual(self.facesAtRadius(binder.Shape, 2), ["Face1"])
+
+        assertWall(2)
+        revolution.touch()
+        self.Doc.recompute()
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        assertWall(2)
+        sketch.setDatum(height, FreeCAD.Units.Quantity("2.5 mm"))
+        self.Doc.recompute()
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        assertWall(2.5)
+
     def testRevolutionUpToCylinderRingAroundProfile(self):
         """The profile x in [1.2, 1.8], z in [0.7, 1.3] up to a whole cylinder of radius 1 along
         X through (0, 1.5, 1): every circle of the profile crosses it twice, and its silhouette

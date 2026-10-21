@@ -37,6 +37,7 @@
 #include <TopoDS_Shape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 
+#include <Mod/Part/App/TopoShape.h>
 #include <Mod/PartDesign/PartDesignGlobal.h>
 
 #include "FirstContactJumps.h"
@@ -177,6 +178,8 @@ PartDesignExport std::pair<double, double> spanVolume(const TopoDS_Shape& shape)
 struct PartDesignExport FirstContactSolid
 {
     TopoDS_Shape shape;
+    // The same shape with its element map (the named constructFirstContact())
+    Part::TopoShape named;
     JumpTrace trace;
     std::vector<Wall> walls;
     // The profile's cells between the walls, in the profile's place
@@ -190,10 +193,24 @@ struct PartDesignExport FirstContactSolid
 // The tool up to `face` where first contact jumps inside `profile`: what each of its points sweeps,
 // turning about `axis`, until it first meets the face, within the walls' pushes. `tolerance` is that
 // of the checks (profileCheckTolerance()). Throws Base::RuntimeError, saying why, where the jumps
-// can't be traced or the construction doesn't check.
+// can't be traced or the construction doesn't check. Unnamed: the result's `named` has no element
+// map. Either way it runs TopoShape's makers, which need the application initialised.
 PartDesignExport FirstContactSolid constructFirstContact(
     const TopoDS_Face& face,
     const TopoDS_Face& profile,
+    const gp_Ax1& axis,
+    double tolerance
+);
+
+// The same, named (section 15.17): the walls' edges as generated from the element of `face` each
+// wall is the image of (its edge, or the face itself for a silhouette), the cells from the profile's
+// and the walls' names through the split, each cell's piece as sweepUpToFace() names its sweep,
+// then the fuse and the refine. `named` gives the tag, hasher and history algorithm. `profile`
+// holds one face.
+PartDesignExport FirstContactSolid constructFirstContact(
+    Part::TopoShape named,
+    const Part::TopoShape& face,
+    const Part::TopoShape& profile,
     const gp_Ax1& axis,
     double tolerance
 );

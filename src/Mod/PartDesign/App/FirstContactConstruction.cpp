@@ -94,6 +94,7 @@
 #include <Base/Exception.h>
 #include <Mod/Part/App/TopoShape.h>
 #include <Mod/Part/App/TopoShapeMapper.h>
+#include <Mod/Part/App/TopoShapeOpCode.h>
 
 #include "FirstContactConstruction.h"
 
@@ -113,6 +114,38 @@ struct CellRefusal
 {
     std::size_t cell;
     std::string why;
+};
+
+// The walls' edges, generated from the element of the face each wall is the image of (section
+// 15.17): its edge, or the face itself for a silhouette. One element's walls in the walls' order,
+// which is the order along its curve.
+class WallSources: public Part::TopoShape::Mapper
+{
+public:
+    void add(const TopoDS_Shape& source, const std::vector<TopoDS_Edge>& edges)
+    {
+        for (auto& [element, generated] : sources) {
+            if (element.IsSame(source)) {
+                generated.insert(generated.end(), edges.begin(), edges.end());
+                return;
+            }
+        }
+        sources.emplace_back(source, std::vector<TopoDS_Shape>(edges.begin(), edges.end()));
+    }
+
+    const std::vector<TopoDS_Shape>& generated(const TopoDS_Shape& element) const override
+    {
+        _res.clear();
+        for (const auto& [source, edges] : sources) {
+            if (source.IsSame(element)) {
+                _res = edges;
+            }
+        }
+        return _res;
+    }
+
+private:
+    std::vector<std::pair<TopoDS_Shape, std::vector<TopoDS_Shape>>> sources;
 };
 
 // Where an edge of the face crosses its silhouette (section 15.10): the edge's image flips side
@@ -432,8 +465,9 @@ std::pair<TopoDS_Shape, std::string> sweepCell(
     double tolerance
 )
 {
+    const TopoDS_Face cellFace = TopoDS::Face(cell.getShape());
     try {
-        BRepPrimAPI_MakeRevol turn(cell, axis, 2.0 * std::numbers::pi - sliver);
+        BRepPrimAPI_MakeRevol turn(cellFace, axis, 2.0 * std::numbers::pi - sliver);
         if (!turn.IsDone()) {
             return {{}, "the cell's turn failed"};
         }
@@ -487,15 +521,25 @@ std::pair<TopoDS_Shape, std::string> sweepCell(
             !lost.empty()) {
             return {{}, lost};
         }
-        const double cellArea = area(cell);
-        const double allowed = 1e-9 * cellArea + perimeter(cell) * std::max(largestTolerance(cell), Precision::Confusion());
+        const double cellArea = area(cellFace);
+        const double allowed = 1e-9 * cellArea + perimeter(cellFace) * std::max(largestTolerance(cellFace), Precision::Confusion());
         if (std::fabs(cap - cellArea) > allowed) {
             return {{}, fmt::format("C1: the piece's start cap is {:.9g} of the cell's {:.9g}", cap, cellArea)};
         }
         if (const std::string why = certifyPiece(kept.front(), face, faceParts, band, tolerance); !why.empty()) {
             return {{}, why};
         }
-        return {kept.front(), {}};
+        Part::TopoShape turned(blank);
+        turned.makeElementShape(turn, cell, Part::OpCodes::Revolve);
+        auto firstShape = [&turn](const TopoDS_Shape& element) { return turn.FirstShape(element); };
+        Part::TopoShape piece(blank);
+        piece.makeShapeWithElementMap(
+            kept.front(),
+            Part::UpToSplitMapper(splitter, turn, firstShape, cellFace, kept.front()),
+            {turned, Part::TopoShape(face)},
+            Part::OpCodes::Revolve
+        );
+        return {piece, {}};
     }
     catch (const Standard_Failure& failure) {
         return {{}, std::string("the cell's sweep failed: ") + failure.GetMessageString()};
@@ -1326,6 +1370,28 @@ FirstContactSolid constructFirstContact(
     double tolerance
 )
 {
+    return constructFirstContact(
+        Part::TopoShape(),
+        Part::TopoShape(face),
+        Part::TopoShape(profile),
+        axis,
+        tolerance
+    );
+}
+
+FirstContactSolid constructFirstContact(
+    Part::TopoShape named,
+    const Part::TopoShape& namedFace,
+    const Part::TopoShape& namedProfile,
+    const gp_Ax1& axis,
+    double tolerance
+)
+{
+    // Empty, with the tag, hasher and history algorithm of `named`
+    const Part::TopoShape blank(named);
+    const TopoDS_Face face = TopoDS::Face(namedFace.getShape());
+    const TopoDS_Face profile
+        = TopoDS::Face(TopExp_Explorer(namedProfile.getShape(), TopAbs_FACE).Current());
     // The tracer's fit stays within half the first push, so the pushed wall lies on the side of
     // the earlier first contact by at least half of it
     const JumpTrace trace = traceJumps(face, profile, axis, tolerance, firstPush / 2.0);
@@ -1595,6 +1661,27 @@ FirstContactSolid constructFirstContact(
         if (!splitter.IsDone()) {
             throw refused("the profile's split along the walls failed");
         }
+        // The cells named through the split from the profile and the walls
+        WallSources sources;
+        TopTools_IndexedMapOfShape faceEdges;
+        TopExp::MapShapes(face, TopAbs_EDGE, faceEdges);
+        TopoDS_Compound wallCompound;
+        BRep_Builder builder;
+        builder.MakeCompound(wallCompound);
+        for (std::size_t w = 0; w < needed.size(); ++w) {
+            const JumpPiece& source = trace.pieces[needed[w]];
+            sources.add(
+                source.source == JumpSource::Edge ? faceEdges(source.edge) : TopoDS_Shape(face),
+                wallEdges[w]
+            );
+            for (const TopoDS_Edge& edge : wallEdges[w]) {
+                builder.Add(wallCompound, edge);
+            }
+        }
+        Part::TopoShape walls(blank);
+        walls.makeShapeWithElementMap(wallCompound, sources, {namedFace});
+        Part::TopoShape namedCells(blank);
+        namedCells.makeElementShape(splitter, {namedProfile, walls}, Part::OpCodes::Split);
         std::vector<TopTools_IndexedMapOfShape> onWall(needed.size());
         for (std::size_t w = 0; w < needed.size(); ++w) {
             for (const TopoDS_Edge& edge : wallEdges[w]) {
@@ -1617,6 +1704,7 @@ FirstContactSolid constructFirstContact(
 
         // Each cell up to the face, checked
         std::vector<TopoDS_Shape> pieces;
+        std::vector<Part::TopoShape> namedPieces;
         std::vector<CellRefusal> refusals;
         for (std::size_t c = 0; c < solid.cells.size(); ++c) {
             // C2: a face of the piece left INTERNAL is the face failing to split it, unless it is
@@ -1637,7 +1725,11 @@ FirstContactSolid constructFirstContact(
                     band.add(part, 2.0 * pushes[w]);
                 }
             }
-            auto [piece, why] = sweepCell(solid.cells[c], face, axis, sliver, band, resolution, tolerance);
+            const Part::TopoShape cell
+                = namedCells.getSubTopoShape(TopAbs_FACE, namedCells.findShape(solid.cells[c]));
+            auto [namedPiece, why]
+                = sweepCell(blank, cell, face, axis, sliver, band, resolution, tolerance);
+            const TopoDS_Shape piece = namedPiece.getShape();
             if (piece.IsNull()) {
                 refusals.push_back({c, why});
                 continue;
@@ -1661,6 +1753,7 @@ FirstContactSolid constructFirstContact(
                 continue;
             }
             pieces.push_back(piece);
+            namedPieces.push_back(namedPiece);
         }
 
         // The pieces fused (C6: their volumes add up, within the walls' area times the
@@ -1668,7 +1761,7 @@ FirstContactSolid constructFirstContact(
         std::string fuseRefusal;
         if (refusals.empty()) {
             try {
-                TopoDS_Shape fused = pieces.front();
+                Part::TopoShape fused = namedPieces.front();
                 double piecesArea = 0.0;
                 double piecesVolume = 0.0;
                 double piecesError = 0.0;
@@ -1695,13 +1788,14 @@ FirstContactSolid constructFirstContact(
                     if (!fuse.IsDone()) {
                         throw refused("the pieces' fuse failed");
                     }
-                    fused = fuse.Shape();
+                    fused = Part::TopoShape(blank).makeElementShape(fuse, namedPieces, Part::OpCodes::Fuse);
                 }
                 // The walls' faces lie between two pieces: counted twice in the pieces, not at
                 // all in the fuse
-                const double wallArea = std::max(0.0, (piecesArea - area(fused)) / 2.0);
-                const TopoDS_Shape refined
-                    = Part::TopoShape(fused).makeElementRefine(nullptr, Part::RefineFail::shapeUntouched).getShape();
+                const double wallArea = std::max(0.0, (piecesArea - area(fused.getShape())) / 2.0);
+                const Part::TopoShape namedRefined
+                    = fused.makeElementRefine(nullptr, Part::RefineFail::shapeUntouched);
+                const TopoDS_Shape refined = namedRefined.getShape();
                 int count = 0;
                 for (TopExp_Explorer solids(refined, TopAbs_SOLID); solids.More(); solids.Next()) {
                     ++count;
@@ -1720,6 +1814,7 @@ FirstContactSolid constructFirstContact(
                 }
                 else {
                     solid.shape = refined;
+                    solid.named = namedRefined;
                     solid.trace = trace;
                     solid.pieces = pieces;
                     return solid;
