@@ -1,0 +1,10 @@
+# V1 naming numbers a face's still-unnamed edges in OCCT's sub-shape order. OCCT stores the golden
+# Pipe's four bend arcs (its round hole meets the next leg) in opposite orders on Windows and macOS,
+# so their V1 names (:U to :U4) and those of the vertexes between them swap on macOS. V2 follows the
+# elements' places since ops#378. V1 is deferred (PLAN decision 58): remove the entry when ops#430
+# gives V1 the same order.
+
+issue: ops#430
+
+reason: the PipeShell Pipe's bend arcs and vertexes get other V1 names on macOS than in the Windows golden file
+cli  PartDesignTests.TestNamingDump.TestNamingGolden.testPipeShellV1   macos
