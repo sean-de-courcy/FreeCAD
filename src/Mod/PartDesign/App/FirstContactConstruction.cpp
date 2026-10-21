@@ -23,7 +23,9 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <functional>
+#include <cstdio>
+#include <cstdlib>
+#include <limits>
 #include <numbers>
 #include <optional>
 #include <string>
@@ -38,23 +40,26 @@
 #include <BRepAlgoAPI_Splitter.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
-#include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepClass3d_SolidClassifier.hxx>
-#include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepGProp.hxx>
 #include <BRepPrimAPI_MakeRevol.hxx>
 #include <BRepTools.hxx>
 #include <BRepTopAdaptor_FClass2d.hxx>
 #include <ElCLib.hxx>
+#include <GCE2d_MakeSegment.hxx>
+#include <Geom_BSplineCurve.hxx>
 #include <Geom_Curve.hxx>
+#include <Geom_TrimmedCurve.hxx>
 #include <Geom_Surface.hxx>
 #include <Geom2d_TrimmedCurve.hxx>
 #include <Geom2dAPI_InterCurveCurve.hxx>
+#include <Geom2dAPI_ProjectPointOnCurve.hxx>
 #include <Geom2dConvert.hxx>
 #include <Geom2dInt_GInter.hxx>
 #include <GeomAPI.hxx>
 #include <GeomAPI_ProjectPointOnSurf.hxx>
+#include <GeomConvert.hxx>
 #include <GProp_GProps.hxx>
 #include <IntRes2d_IntersectionPoint.hxx>
 #include <gp_Ax3.hxx>
@@ -220,16 +225,125 @@ double largestRadius(const TopoDS_Shape& shape, const gp_Ax1& axis)
     return largest;
 }
 
+// A B-spline's net in homogeneous coordinates (w x, w y, w z, w), with its flat knots
+struct Net
+{
+    std::vector<std::array<double, 4>> poles;
+    std::vector<double> knots;
+    int degree = 0;
+};
+
+// The derivative's net: p (H[i+1] - H[i]) / (k[i+p+1] - k[i+1]), of degree p - 1
+Net differenced(const Net& net)
+{
+    Net out;
+    if (net.degree == 0) {
+        return out;
+    }
+    out.degree = net.degree - 1;
+    out.knots.assign(net.knots.begin() + 1, net.knots.end() - 1);
+    for (std::size_t i = 0; i + 1 < net.poles.size(); ++i) {
+        const double span = net.knots[i + net.degree + 1] - net.knots[i + 1];
+        std::array<double, 4> pole {};
+        if (span > 0.0) {
+            for (int k = 0; k < 4; ++k) {
+                pole[k] = net.degree * (net.poles[i + 1][k] - net.poles[i][k]) / span;
+            }
+        }
+        out.poles.push_back(pole);
+    }
+    return out;
+}
+
+// Bounds of |S'| and |S''| over a B-spline with the given poles, weights and flat knots. The
+// derivatives of N = w (S - O) and of w are B-splines whose values lie in their nets' hulls;
+// S' = (N' - w' (S - O)) / w and S'' = (N'' - 2 w' S' - w'' (S - O)) / w, with O the poles' centre,
+// |S - O| at most the farthest pole and w at least the smallest weight.
+std::pair<double, double> derivativeBounds(
+    const std::vector<std::array<double, 3>>& points,
+    const std::vector<double>& weights,
+    const std::vector<double>& knots,
+    int degree
+)
+{
+    std::array<double, 3> centre {};
+    for (const auto& point : points) {
+        for (int k = 0; k < 3; ++k) {
+            centre[k] += point[k] / static_cast<double>(points.size());
+        }
+    }
+    Net net;
+    net.degree = degree;
+    net.knots = knots;
+    double reach = 0.0;
+    double lightest = std::numeric_limits<double>::max();
+    for (std::size_t i = 0; i < points.size(); ++i) {
+        const double w = weights.empty() ? 1.0 : weights[i];
+        const std::array<double, 3> d {points[i][0] - centre[0], points[i][1] - centre[1], points[i][2] - centre[2]};
+        net.poles.push_back({w * d[0], w * d[1], w * d[2], w});
+        reach = std::max(reach, std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]));
+        lightest = std::min(lightest, w);
+    }
+    auto largest = [](const Net& of) {
+        double space = 0.0;
+        double weight = 0.0;
+        for (const auto& pole : of.poles) {
+            space = std::max(space, std::sqrt(pole[0] * pole[0] + pole[1] * pole[1] + pole[2] * pole[2]));
+            weight = std::max(weight, std::fabs(pole[3]));
+        }
+        return std::make_pair(space, weight);
+    };
+    const Net first = differenced(net);
+    const auto [n1, w1] = largest(first);
+    const auto [n2, w2] = largest(differenced(first));
+    const double speed = (n1 + w1 * reach) / lightest;
+    return {speed, (n2 + 2.0 * w1 * speed + w2 * reach) / lightest};
+}
+
+std::pair<double, double> derivativeBounds(Handle(Geom_BSplineCurve) curve)
+{
+    curve = Handle(Geom_BSplineCurve)::DownCast(curve->Copy());
+    curve->SetNotPeriodic();
+    std::vector<std::array<double, 3>> points;
+    std::vector<double> weights;
+    for (int i = 1; i <= curve->NbPoles(); ++i) {
+        const gp_Pnt pole = curve->Pole(i);
+        points.push_back({pole.X(), pole.Y(), pole.Z()});
+        if (curve->IsRational()) {
+            weights.push_back(curve->Weight(i));
+        }
+    }
+    const TColStd_Array1OfReal& sequence = curve->KnotSequence();
+    return derivativeBounds(points, weights, {sequence.begin(), sequence.end()}, curve->Degree());
+}
+
+std::pair<double, double> derivativeBounds(Handle(Geom2d_BSplineCurve) curve)
+{
+    curve = Handle(Geom2d_BSplineCurve)::DownCast(curve->Copy());
+    curve->SetNotPeriodic();
+    std::vector<std::array<double, 3>> points;
+    std::vector<double> weights;
+    for (int i = 1; i <= curve->NbPoles(); ++i) {
+        const gp_Pnt2d pole = curve->Pole(i);
+        points.push_back({pole.X(), pole.Y(), 0.0});
+        if (curve->IsRational()) {
+            weights.push_back(curve->Weight(i));
+        }
+    }
+    const TColStd_Array1OfReal& sequence = curve->KnotSequence();
+    return derivativeBounds(points, weights, {sequence.begin(), sequence.end()}, curve->Degree());
+}
+
 // One cell swept up to the face: the cell revolved a sliver short of a whole turn, split by the
 // face, and the solid at its start cap (as sweepUpToFace() in FeatureRevolved.cpp). C1: exactly one
-// such solid, keeping the whole cap. `inBand` says whether a point lies within the band of a wall on
-// the cell's boundary; `step` is lostSheet()'s. Returns the solid, or why it refuses.
+// such solid, keeping the whole cap. `band` is that of the walls on the cell's boundary; `step` is
+// lostSheet()'s. Returns the solid, or why it refuses.
 std::pair<TopoDS_Shape, std::string> sweepCell(
     const TopoDS_Face& cell,
     const TopoDS_Face& face,
     const gp_Ax1& axis,
     double sliver,
-    const std::function<bool(const gp_Pnt&)>& inBand,
+    const Band& band,
     double step,
     double tolerance
 )
@@ -282,7 +396,7 @@ std::pair<TopoDS_Shape, std::string> sweepCell(
         for (const TopoDS_Shape& edge : splitter.SectionEdges()) {
             sections.Add(edge);
         }
-        if (const std::string lost = lostSheet(kept.front(), face, sections, faceParts, inBand, step, tolerance);
+        if (const std::string lost = lostSheet(kept.front(), face, sections, faceParts, band, step, tolerance);
             !lost.empty()) {
             return {{}, lost};
         }
@@ -309,14 +423,13 @@ std::pair<TopoDS_Shape, std::string> sweepCell(
 // profile's own edge there, out of any band. In a cell bounded only by walls every section edge
 // is in a band, so the face's material through an unexplained edge is followed: a dropped flap
 // leaves the piece before its image leaves the band (the fold turns the face back, or the edge
-// ends it), a lost sheet runs on into the piece. PROVISIONAL like the flap's check: the band is
-// sampled at 33 points of the edge; section 15.8's curve bound replaces that.
+// ends it), a lost sheet runs on into the piece.
 std::string lostSheet(
     const TopoDS_Shape& piece,
     const TopoDS_Face& face,
     const TopTools_IndexedMapOfShape& sections,
     const TopTools_IndexedMapOfShape& faceParts,
-    const std::function<bool(const gp_Pnt&)>& inBand,
+    const Band& band,
     double step,
     double tolerance
 )
@@ -371,14 +484,10 @@ std::string lostSheet(
         if (bounded) {
             continue;
         }
-        BRepAdaptor_Curve along(edge);
-        for (int s = 0; s <= 32; ++s) {
-            const gp_Pnt point
-                = along.Value(along.FirstParameter() + (along.LastParameter() - along.FirstParameter()) * s / 32);
-            if (!inBand(point)) {
-                return refusal("the face crosses the cell's piece without splitting it", point);
-            }
+        if (const auto out = band.outside(edge)) {
+            return refusal("the face crosses the cell's piece without splitting it", *out);
         }
+        BRepAdaptor_Curve along(edge);
         // The face's material across the edge, both ways from its middle
         gp_Pnt middle;
         gp_Vec tangent;
@@ -405,7 +514,7 @@ std::string lostSheet(
                 }
                 direction.Normalize();
                 at = next->first;
-                if (inBand(at)) {
+                if (band.contains(at)) {
                     continue;
                 }
                 inPiece.Perform(at, tolerance);
@@ -420,6 +529,150 @@ std::string lostSheet(
         }
     }
     return {};
+}
+
+Band::Band(const gp_Ax2& frame)
+    : frame(frame)
+{}
+
+gp_Pnt2d Band::image(const gp_Pnt& point) const
+{
+    const gp_Vec offset(frame.Location(), point);
+    const gp_Vec along(frame.YDirection());
+    const double height = offset.Dot(along);
+    return {(offset - along * height).Magnitude(), height};
+}
+
+void Band::add(const Handle(Geom2d_Curve)& curve, double width)
+{
+    const Handle(Geom2d_BSplineCurve) spline = Geom2dConvert::CurveToBSplineCurve(curve);
+    if (spline.IsNull()) {
+        throw refused("a wall's curve can't be bounded");
+    }
+    parts.push_back({spline, width, derivativeBounds(spline).second});
+}
+
+namespace
+{
+
+// The parameter of the part's nearest point to `point`, and the distance
+std::pair<double, double> nearest(const Handle(Geom2d_BSplineCurve)& curve, const gp_Pnt2d& point)
+{
+    std::pair<double, double> best {curve->FirstParameter(), point.Distance(curve->StartPoint())};
+    if (const double last = point.Distance(curve->EndPoint()); last < best.second) {
+        best = {curve->LastParameter(), last};
+    }
+    Geom2dAPI_ProjectPointOnCurve projection(point, curve);
+    if (projection.NbPoints() > 0 && projection.LowerDistance() < best.second) {
+        best = {projection.LowerDistanceParameter(), projection.LowerDistance()};
+    }
+    return best;
+}
+
+}  // namespace
+
+bool Band::contains(const gp_Pnt& point) const
+{
+    const gp_Pnt2d at = image(point);
+    return std::ranges::any_of(parts, [&](const Part& part) {
+        return nearest(part.curve, at).second <= part.width;
+    });
+}
+
+std::optional<gp_Pnt> Band::outside(const TopoDS_Edge& edge) const
+{
+    const gp_Pnt start = BRep_Tool::Pnt(TopExp::FirstVertex(edge));
+    Handle(Geom_BSplineCurve) curve;
+    try {
+        double first = 0.0;
+        double last = 0.0;
+        const Handle(Geom_Curve) carrier = BRep_Tool::Curve(edge, first, last);
+        if (carrier.IsNull() || last - first <= Precision::PConfusion()) {
+            return start;
+        }
+        curve = GeomConvert::CurveToBSplineCurve(new Geom_TrimmedCurve(carrier, first, last));
+    }
+    catch (const Standard_Failure&) {
+        return start;
+    }
+    if (curve.IsNull()) {
+        return start;
+    }
+    const auto [speed, bend] = derivativeBounds(curve);
+    const double tolerance = BRep_Tool::Tolerance(edge);
+    struct Sample
+    {
+        double t = 0.0;
+        gp_Pnt point;
+        double radius = 0.0;
+        // Per part: the nearest point's parameter and the distance
+        std::vector<std::pair<double, double>> near;
+    };
+    // A sample whose image, widened by the tolerance, is in no part's band can't be certified
+    auto sample = [&](double t) -> std::optional<Sample> {
+        Sample here {t, curve->Value(t)};
+        const gp_Pnt2d at = image(here.point);
+        here.radius = at.X();
+        bool held = false;
+        for (const Part& part : parts) {
+            here.near.push_back(nearest(part.curve, at));
+            held = held || here.near.back().second + tolerance < part.width;
+        }
+        if (!held) {
+            return std::nullopt;
+        }
+        return here;
+    };
+    const double first = curve->FirstParameter();
+    const double last = curve->LastParameter();
+    constexpr int initial = 8;
+    std::vector<Sample> samples;
+    for (int k = 0; k <= initial; ++k) {
+        const double t = first + (last - first) * k / initial;
+        auto here = sample(t);
+        if (!here) {
+            return curve->Value(t);
+        }
+        samples.push_back(std::move(*here));
+    }
+    std::vector<std::pair<Sample, Sample>> open;
+    for (int k = initial; k > 0; --k) {
+        open.emplace_back(samples[k - 1], samples[k]);
+    }
+    // Halving stops at a floor, and the count at a budget: past either, the edge isn't certified
+    const double floor = (last - first) * 1e-9;
+    constexpr int budget = 100000;
+    int count = 0;
+    while (!open.empty()) {
+        auto [low, high] = std::move(open.back());
+        open.pop_back();
+        const double dt = high.t - low.t;
+        // The radius is 1-Lipschitz along the curve
+        const double radius = std::min(low.radius, high.radius) - speed * dt / 2.0;
+        if (radius > 0.0) {
+            const double turn = bend + speed * speed / radius;
+            bool held = false;
+            for (std::size_t p = 0; p < parts.size() && !held; ++p) {
+                const double du = high.near[p].first - low.near[p].first;
+                held = std::max(low.near[p].second, high.near[p].second)
+                        + (turn * dt * dt + parts[p].bend * du * du) / 8.0 + tolerance
+                    <= parts[p].width;
+            }
+            if (held) {
+                continue;
+            }
+        }
+        if (dt <= floor || ++count > budget) {
+            return low.point;
+        }
+        auto middle = sample(low.t + dt / 2.0);
+        if (!middle) {
+            return curve->Value(low.t + dt / 2.0);
+        }
+        open.emplace_back(*middle, std::move(high));
+        open.emplace_back(std::move(low), std::move(*middle));
+    }
+    return std::nullopt;
 }
 
 Wall pushedWall(const JumpTrace& trace, std::size_t index, double push)
@@ -695,9 +948,12 @@ FirstContactSolid constructFirstContact(
         // Each wall's edges: its curve; at a flip outside a junction, a connector to the next
         // piece of its curve (the two lie 2 pushes apart there); its free ends carried out
         std::vector<std::vector<TopoDS_Edge>> wallEdges(needed.size());
+        // The same in the frame's coordinates, for the bands
+        std::vector<std::vector<Handle(Geom2d_Curve)>> wallParts(needed.size());
         for (std::size_t w = 0; w < needed.size(); ++w) {
             const Handle(Geom2d_BSplineCurve)& curve = solid.walls[w].curve;
             wallEdges[w].push_back(BRepBuilderAPI_MakeEdge(GeomAPI::To3d(curve, wallPlane)).Edge());
+            wallParts[w].push_back(curve);
             const bool joinsPrevious = w > 0 && flipsToNext(w - 1);
             auto at = [&](const gp_Pnt2d& point) {
                 return ElCLib::To3d(wallPlane.Position().Ax2(), point);
@@ -708,6 +964,7 @@ FirstContactSolid constructFirstContact(
                 curve->D1(curve->FirstParameter(), point, along);
                 const gp_Pnt2d out = point.Translated(along.Normalized() * -extension);
                 wallEdges[w].push_back(BRepBuilderAPI_MakeEdge(at(point), at(out)).Edge());
+                wallParts[w].push_back(GCE2d_MakeSegment(out, point).Value());
             }
             if (joined[w][1]) {
                 continue;
@@ -716,12 +973,14 @@ FirstContactSolid constructFirstContact(
                 const gp_Pnt2d to = solid.walls[w + 1].curve->StartPoint();
                 if (curve->EndPoint().Distance(to) > Precision::Confusion()) {
                     wallEdges[w].push_back(BRepBuilderAPI_MakeEdge(at(curve->EndPoint()), at(to)).Edge());
+                    wallParts[w].push_back(GCE2d_MakeSegment(curve->EndPoint(), to).Value());
                 }
             }
             else {
                 curve->D1(curve->LastParameter(), point, along);
                 const gp_Pnt2d out = point.Translated(along.Normalized() * extension);
                 wallEdges[w].push_back(BRepBuilderAPI_MakeEdge(at(point), at(out)).Edge());
+                wallParts[w].push_back(GCE2d_MakeSegment(point, out).Value());
             }
         }
 
@@ -766,10 +1025,9 @@ FirstContactSolid constructFirstContact(
         std::vector<CellRefusal> refusals;
         for (std::size_t c = 0; c < solid.cells.size(); ++c) {
             // C2: a face of the piece left INTERNAL is the face failing to split it, unless it is
-            // the flap along a wall on the cell's boundary: its image within 2 pushes of the wall.
-            // PROVISIONAL (ops#293 D2 session 4): the image is checked at points along the
-            // face's edges; section 15.8's certified band bound (the edges by the curve bound, the
-            // silhouette in the face by the patch bound) replaces it.
+            // the flap along a wall on the cell's boundary: its image within 2 pushes of the wall,
+            // its edges certified by the band's curve bound. Section 15.8 2b: the face's image lies
+            // in the band when its boundary's and its silhouette's do; NOT YET the silhouette.
             std::vector<std::size_t> bounding;
             for (TopExp_Explorer edges(solid.cells[c], TopAbs_EDGE); edges.More(); edges.Next()) {
                 for (std::size_t w = 0; w < needed.size(); ++w) {
@@ -779,23 +1037,13 @@ FirstContactSolid constructFirstContact(
                     }
                 }
             }
-            auto inBand = [&](const gp_Pnt& point) {
-                const gp_Vec offset(axis.Location(), point);
-                const double height = offset.Dot(gp_Vec(axis.Direction()));
-                const double out = (offset - gp_Vec(axis.Direction()) * height).Magnitude();
-                const TopoDS_Vertex image
-                    = BRepBuilderAPI_MakeVertex(ElCLib::To3d(wallPlane.Position().Ax2(), gp_Pnt2d(out, height)));
-                return std::ranges::any_of(bounding, [&](std::size_t w) {
-                    for (const TopoDS_Edge& edge : wallEdges[w]) {
-                        BRepExtrema_DistShapeShape distance(image, edge);
-                        if (distance.IsDone() && distance.Value() <= 2.0 * pushes[w]) {
-                            return true;
-                        }
-                    }
-                    return false;
-                });
-            };
-            auto [piece, why] = sweepCell(solid.cells[c], face, axis, sliver, inBand, resolution, tolerance);
+            Band band(trace.frame);
+            for (const std::size_t w : bounding) {
+                for (const Handle(Geom2d_Curve)& part : wallParts[w]) {
+                    band.add(part, 2.0 * pushes[w]);
+                }
+            }
+            auto [piece, why] = sweepCell(solid.cells[c], face, axis, sliver, band, resolution, tolerance);
             if (piece.IsNull()) {
                 refusals.push_back({c, why});
                 continue;
@@ -807,14 +1055,8 @@ FirstContactSolid constructFirstContact(
                 }
                 std::optional<gp_Pnt> away;
                 for (TopExp_Explorer edges(faces.Current(), TopAbs_EDGE); edges.More() && !away; edges.Next()) {
-                    BRepAdaptor_Curve along(TopoDS::Edge(edges.Current()));
-                    for (int k = 0; k <= 32 && !away; ++k) {
-                        const gp_Pnt point = along.Value(
-                            along.FirstParameter() + (along.LastParameter() - along.FirstParameter()) * k / 32
-                        );
-                        if (!inBand(point)) {
-                            away = point;
-                        }
+                    if (!BRep_Tool::Degenerated(TopoDS::Edge(edges.Current()))) {
+                        away = band.outside(TopoDS::Edge(edges.Current()));
                     }
                 }
                 if (away) {
@@ -917,6 +1159,7 @@ FirstContactSolid constructFirstContact(
                 std::ranges::fill(raising, true);
             }
         }
+        if (std::getenv("FC_D2_WHY")) { std::fprintf(stderr, "D2WHY build %d: %s\n", build, why.c_str()); }  // TEMP s7
         if (build == 3) {
             throw refused(why);
         }

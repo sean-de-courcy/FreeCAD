@@ -22,13 +22,16 @@
 
 #pragma once
 
-#include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include <Geom2d_BSplineCurve.hxx>
 #include <gp_Ax1.hxx>
+#include <gp_Ax2.hxx>
 #include <gp_Pnt.hxx>
+#include <gp_Pnt2d.hxx>
+#include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
@@ -64,19 +67,58 @@ struct PartDesignExport Wall
 // tenth of `push`. Throws Base::RuntimeError where that fails.
 PartDesignExport Wall pushedWall(const JumpTrace& trace, std::size_t piece, double push);
 
+// The bands of the walls on a cell's boundary (section 15.8): the points of the turn whose image
+// in the frame's half-plane (x the distance from the axis, y the height along it) lies within a
+// part's width of one of the parts' curves. A wall's parts are its pushed curve, its connectors
+// and its carried ends, each with twice the wall's push.
+class PartDesignExport Band
+{
+public:
+    // `frame` as JumpTrace's: the axis through its location along its y direction
+    explicit Band(const gp_Ax2& frame);
+
+    // A bounded curve in frame coordinates. Throws Base::RuntimeError where its net can't bound
+    // its second derivative.
+    void add(const Handle(Geom2d_Curve)& curve, double width);
+
+    // The point's image within the band, pointwise
+    bool contains(const gp_Pnt& point) const;
+
+    // Nothing when the edge's image, widened by the edge's tolerance, is certified within the band:
+    // between two samples t0, t1 whose images lie within d0, d1 of points W(u0), W(u1) of one part,
+    // the image stays within max(d0, d1) + (|S''| dt^2 + |W''| du^2) / 8 of that part, with
+    // |S''| <= |c''| + |c'|^2 / radius and the derivatives bounded from the B-spline nets (the
+    // convex hull property). Intervals that don't hold are halved, to a floor. Otherwise the first
+    // point found out of the band, or where it couldn't be certified.
+    std::optional<gp_Pnt> outside(const TopoDS_Edge& edge) const;
+
+private:
+    struct Part
+    {
+        Handle(Geom2d_BSplineCurve) curve;
+        double width = 0.0;
+        // A bound of |W''| over the curve
+        double bend = 0.0;
+    };
+    gp_Ax2 frame;
+    std::vector<Part> parts;
+
+    gp_Pnt2d image(const gp_Pnt& point) const;
+};
+
 // C2, a sheet of the face lost in a cell's split (section 15.10): `piece` is the solid at the
 // cell's start cap, `sections` the edges where the face cut the turn's faces, `faceParts` the
 // face's pieces. Every section edge in the piece must bound a piece of the face there (the exit,
-// or a flap), unless the face's material through it stays in a wall's band (`inBand`, of a point
-// of the turn): from the edge's middle, both ways across it along the face in steps of `step`,
-// until the face ends or the point maps out of the band. A point out of the band strictly inside
-// the piece is the lost sheet. Returns why it refuses, or an empty string.
+// or a flap), unless the face's material through it stays in a wall's band: the edge certified in
+// the band (Band::outside()), and from the edge's middle, both ways across it along the face in
+// steps of `step`, until the face ends or the point maps out of the band. A point out of the band
+// strictly inside the piece is the lost sheet. Returns why it refuses, or an empty string.
 PartDesignExport std::string lostSheet(
     const TopoDS_Shape& piece,
     const TopoDS_Face& face,
     const TopTools_IndexedMapOfShape& sections,
     const TopTools_IndexedMapOfShape& faceParts,
-    const std::function<bool(const gp_Pnt&)>& inBand,
+    const Band& band,
     double step,
     double tolerance
 );

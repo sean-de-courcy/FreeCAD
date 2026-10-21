@@ -29,10 +29,12 @@
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <BRepPrimAPI_MakeRevol.hxx>
 #include <BRepTools.hxx>
+#include <GCE2d_MakeSegment.hxx>
 #include <Geom_BSplineCurve.hxx>
 #include <GeomAPI.hxx>
 #include <GeomAPI_Interpolate.hxx>
 #include <GProp_GProps.hxx>
+#include <gp_Ax2.hxx>
 #include <gp_Ax3.hxx>
 #include <gp_Pln.hxx>
 #include <TColgp_HArray1OfPnt.hxx>
@@ -113,6 +115,8 @@ TopoDS_Face profile(double x0 = 1.0, double x1 = 3.0, double z0 = 0.0, double z1
 }
 
 const gp_Ax1 forward(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1));
+// The trace's frame for `forward`: x radial in y = 0, y along the axis
+const gp_Ax2 frame(gp_Pnt(0, 0, 0), gp_Dir(0, -1, 0), gp_Dir(1, 0, 0));
 const gp_Ax1 reversed(gp_Pnt(0, 0, 0), gp_Dir(0, 0, -1));
 
 // Where a circle of radius r about the Z axis crosses the wall's curve (seen from above): the
@@ -427,12 +431,34 @@ std::string unsplitTurn(double x0, double x1)
         }
     }
     // As if the turn's cylinders were walls at r 2 and 2.5
-    auto inBand = [](const gp_Pnt& point) {
-        const double r = std::hypot(point.X(), point.Y());
-        return std::fabs(r - 2.0) <= 3e-4 || std::fabs(r - 2.5) <= 3e-4;
-    };
+    PartDesign::FirstContact::Band band(frame);
+    band.add(GCE2d_MakeSegment(gp_Pnt2d(2.0, -1.0), gp_Pnt2d(2.0, 3.0)).Value(), 3e-4);
+    band.add(GCE2d_MakeSegment(gp_Pnt2d(2.5, -1.0), gp_Pnt2d(2.5, 3.0)).Value(), 3e-4);
     const TopoDS_Shape solid = TopExp_Explorer(splitter.Shape(), TopAbs_SOLID).Current();
-    return PartDesign::FirstContact::lostSheet(solid, face, cut, {}, inBand, 1e-3, tolerance);
+    return PartDesign::FirstContact::lostSheet(solid, face, cut, {}, band, 1e-3, tolerance);
+}
+
+// An edge in the half-plane y = 0 whose image waves about the wall r = 2 with `amplitude`, 16 waves
+// over its height of 1; the waves' nodes fall near the band's first samples (every eighth of the
+// curve), so a check by samples alone sees the image on the wall
+TopoDS_Edge wave(double amplitude)
+{
+    constexpr int count = 257;
+    Handle(TColgp_HArray1OfPnt) points = new TColgp_HArray1OfPnt(1, count);
+    for (int k = 0; k < count; ++k) {
+        const double s = static_cast<double>(k) / (count - 1);
+        points->SetValue(k + 1, gp_Pnt(2.0 + amplitude * std::sin(32.0 * std::numbers::pi * s), 0.0, s));
+    }
+    GeomAPI_Interpolate interpolate(points, false, 1e-9);
+    interpolate.Perform();
+    return BRepBuilderAPI_MakeEdge(interpolate.Curve()).Edge();
+}
+
+PartDesign::FirstContact::Band waveBand()
+{
+    PartDesign::FirstContact::Band band(frame);
+    band.add(GCE2d_MakeSegment(gp_Pnt2d(2.0, -1.0), gp_Pnt2d(2.0, 2.0)).Value(), 2e-6);
+    return band;
 }
 
 }  // namespace
@@ -449,6 +475,24 @@ TEST(FirstContactConstruction, LostSheetSeen)
 TEST(FirstContactConstruction, DroppedFlapPasses)
 {
     EXPECT_EQ(unsplitTurn(1.9999, 2.0001), "");
+}
+
+// The band's curve bound (section 15.8): a wave of 1e-5 about the wall leaves the band of 2e-6
+// between the samples where it crosses the wall; one of 1e-7 stays in it, with the edge's
+// tolerance
+TEST(FirstContactConstruction, BandFindsWaveBetweenSamples)
+{
+    const auto out = waveBand().outside(wave(1e-5));
+    ASSERT_TRUE(out.has_value());
+    EXPECT_GT(std::fabs(std::hypot(out->X(), out->Y()) - 2.0), 1.8e-6);
+}
+
+TEST(FirstContactConstruction, BandHoldsSmallWave)
+{
+    const auto band = waveBand();
+    EXPECT_FALSE(band.outside(wave(1e-7)).has_value());
+    EXPECT_TRUE(band.contains(gp_Pnt(2.0 + 1.9e-6, 0.0, 0.5)));
+    EXPECT_FALSE(band.contains(gp_Pnt(2.0 + 2.1e-6, 0.0, 0.5)));
 }
 
 // TEMPORARY (ops#293 D2 session 5): TrimmedFold's face, profile, cells, walls and pieces as BREP files
