@@ -3501,9 +3501,7 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                 // The members of each partner or list, in the result's order of their first
                 // member; the lists' order decides no index.
                 std::vector<std::vector<std::size_t>> lists;
-                std::array<
-                    std::unordered_map<std::vector<Data::MappedName>, std::size_t, Data::MappedNameHasher>,
-                    3>
+                std::array<std::unordered_map<std::vector<Data::MappedName>, std::size_t, Data::MappedNameHasher>, 3>
                     listIndex;
                 for (std::size_t i = 0; i < fallbackNames.size(); ++i) {
                     auto& lookup = listIndex[static_cast<std::size_t>(fallbackNames[i].kind)];
@@ -3539,7 +3537,9 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                         const char* flag = nullptr;
                         switch (fallback.kind) {
                             case Fallback::Partner:
-                                index = static_cast<int>(usedPartnerNames.count(fallback.names.front()));
+                                index = static_cast<int>(
+                                    usedPartnerNames.count(fallback.names.front())
+                                );
                                 usedPartnerNames.insert(fallback.names.front());
                                 flag = Data::MAPPER_FLAG_PROJECTION;
                                 break;

@@ -3275,7 +3275,9 @@ TEST_F(TopoShapeExpansionTest, makeElementBSplineFace)
     //   edges and vertices on a curve is that curve's element, modified: the corner the curves
     //   share is both curves' Vertex1, so it has both names. The other two edges (the one between
     //   the curves' far ends, and a degenerated one at the shared corner) bound only the face: UPP.
-    //   Before ops#47, V2 gave every edge tag 0, and the face its first edge's name.
+    //   Before ops#47, V2 gave every edge tag 0, and the face its first edge's name. The two UPP
+    //   edges are told apart by their index, in the order of their places, x first (ops#378): the
+    //   far edge (centre x -9.5) is 0, the degenerated one (x -4) 1.
     EXPECT_TRUE(allElementsNamed(result));
     EXPECT_TRUE(namesHaveTheirElementsType(result));
     EXPECT_TRUE(elementHasNames(
@@ -3289,17 +3291,16 @@ TEST_F(TopoShapeExpansionTest, makeElementBSplineFace)
             MAPPER_FLAG_GENERATED
         )}
     ));
-    int upperIndex = 0;
+    int upperNames = 0;
     for (int index = 1; index <= static_cast<int>(result.countSubElements("Edge")); ++index) {
         auto element = "Edge" + std::to_string(index);
         auto shape = result.getSubShape(element.c_str());
         if (BRep_Tool::Degenerated(TopoDS::Edge(shape))) {
             EXPECT_TRUE(liesOn(shape, BRepBuilderAPI_MakeVertex(gp_Pnt(-4, 0, 2)).Vertex()));
-            EXPECT_TRUE(elementHasNames(
-                result,
-                element.c_str(),
-                {upperName(result, element, 1, "BSF", upperIndex++)}
-            ));
+            EXPECT_TRUE(
+                elementHasNames(result, element.c_str(), {upperName(result, element, 1, "BSF", 1)})
+            );
+            ++upperNames;
         }
         else if (liesOn(shape, edge.Edge())) {
             EXPECT_TRUE(
@@ -3312,14 +3313,13 @@ TEST_F(TopoShapeExpansionTest, makeElementBSplineFace)
             );
         }
         else {
-            EXPECT_TRUE(elementHasNames(
-                result,
-                element.c_str(),
-                {upperName(result, element, 1, "BSF", upperIndex++)}
-            ));
+            EXPECT_TRUE(
+                elementHasNames(result, element.c_str(), {upperName(result, element, 1, "BSF", 0)})
+            );
+            ++upperNames;
         }
     }
-    EXPECT_EQ(upperIndex, 2);
+    EXPECT_EQ(upperNames, 2);
     auto end1 = elementAt(result, "Vertex", Base::Vector3d(-10, 0, 2));
     auto end2 = elementAt(result, "Vertex", Base::Vector3d(-9, 0, 2));
     auto shared = elementAt(result, "Vertex", Base::Vector3d(-4, 0, 2));
@@ -4135,7 +4135,8 @@ std::array<long long, 4> placeOf(const TopoDS_Shape& element)
     };
 }
 
-using NamesByPlace = std::map<std::pair<std::string, std::array<long long, 4>>, std::vector<std::vector<std::string>>>;
+using NamesByPlace
+    = std::map<std::pair<std::string, std::array<long long, 4>>, std::vector<std::vector<std::string>>>;
 
 /// Each face's, edge's and vertex's names, sorted, by type and place. Coincident elements share a
 /// place; their name lists are sorted too.
@@ -4148,9 +4149,8 @@ NamesByPlace namesByPlace(const TopoShape& shape)
         for (const auto& element : shape.getSubShapes(type)) {
             ++index;
             std::vector<std::string> names;
-            for (const auto& name : shape.getElementMappedNames(
-                     Data::IndexedName::fromConst(typeName.c_str(), index)
-                 )) {
+            for (const auto& name :
+                 shape.getElementMappedNames(Data::IndexedName::fromConst(typeName.c_str(), index))) {
                 names.push_back(name.first.toString());
             }
             std::sort(names.begin(), names.end());

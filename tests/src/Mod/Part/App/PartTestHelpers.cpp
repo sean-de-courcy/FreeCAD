@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 
+#include <array>
 #include <regex>
 #include "PartTestHelpers.h"
 
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepClass_FaceClassifier.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
+#include <BRepGProp.hxx>
 #include <BRepGProp_Face.hxx>
 #include <BRepTools.hxx>
 #include <BRep_Tool.hxx>
@@ -299,9 +301,36 @@ testing::AssertionResult upperNamed(
     const char* op
 )
 {
-    std::map<std::vector<std::string>, int> used;
+    // The elements in the order of their places: centre of mass (a vertex: its point), then length
+    // or area, in micrometres; the index breaks ties (ops#378)
+    std::vector<std::pair<std::array<long long, 4>, int>> places;
     for (int index = 1; index <= static_cast<int>(shape.countSubElements(type)); ++index) {
-        auto element = std::string(type) + std::to_string(index);
+        auto subShape = shape.getSubShape((std::string(type) + std::to_string(index)).c_str());
+        gp_Pnt center;
+        double mass = 0;
+        if (subShape.ShapeType() == TopAbs_VERTEX) {
+            center = BRep_Tool::Pnt(TopoDS::Vertex(subShape));
+        }
+        else {
+            GProp_GProps props;
+            if (subShape.ShapeType() == TopAbs_FACE) {
+                BRepGProp::SurfaceProperties(subShape, props);
+            }
+            else {
+                BRepGProp::LinearProperties(subShape, props);
+            }
+            center = props.CentreOfMass();
+            mass = props.Mass();
+        }
+        auto grid = [](double value) {
+            return std::llround(value * 1e6);
+        };
+        places.push_back({{grid(center.X()), grid(center.Y()), grid(center.Z()), grid(mass)}, index});
+    }
+    std::sort(places.begin(), places.end());
+    std::map<std::vector<std::string>, int> used;
+    for (const auto& place : places) {
+        auto element = std::string(type) + std::to_string(place.second);
         auto linkedNames = lastSection(upperName(shape, element, tag, op)).linkedNames;
         auto result = elementHasNames(
             shape,
