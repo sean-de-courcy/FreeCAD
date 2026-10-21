@@ -575,6 +575,8 @@ SET(Part_SRCS
     Geometry2d.h
     GizmoHelper.cpp
     GizmoHelper.h
+    MassProperties.cpp
+    MassProperties.h
     ImportIges.cpp
     ImportIges.h
     ImportStep.cpp

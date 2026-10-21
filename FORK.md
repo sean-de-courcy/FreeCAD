@@ -378,7 +378,8 @@ names it.
 | `fix/424-propertyeditor-focus-macos` | fix | ops#424 | main `15883e6f4c` (as `2f06336e66`) | `integration` `6c8d6ea5b6` | `4dab87cac2` (fork PR 353), 2026-10-21 | a new base contains `15883e6f4c` |
 | `fix/382-vtk-output-window` | fix | ops#382 | - | `integration` `19b2300169` | `01a7681c2f` (fork PR 351), 2026-10-21 | never (fork fix) |
 | `fix/360-upto-cap-names` | fix | ops#360 | - | `integration` `2e2bb138ba` | `c4b4011a87` (fork PR 340), 2026-10-21 | never (fork fix) |
-| `fix/375-sweep-end-names` | fix | ops#375 | - | `integration` `c4b4011a87` | (fork PR 352) | never (fork fix) |
+| `fix/375-sweep-end-names` | fix | ops#375 | - | `integration` `c4b4011a87` | `2b1690e050` (fork PR 352), 2026-10-21 | never (fork fix) |
+| `fix/414-mass-properties` | fix | ops#414 | - | `integration` `6c8d6ea5b6` | (fork PR 354) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 

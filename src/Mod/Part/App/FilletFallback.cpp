@@ -66,6 +66,7 @@
 #include <Base/Exception.h>
 
 #include "FilletFallback.h"
+#include "MassProperties.h"
 #include "TopoShapeMapper.h"
 
 FC_LOG_LEVEL_INIT("FilletFallback", true, true)
@@ -110,16 +111,12 @@ bool parallel(const gp_Dir& a, const gp_Dir& b)
 
 double volumeOf(const TopoDS_Shape& shape)
 {
-    GProp_GProps props;
-    BRepGProp::VolumeProperties(shape, props);
-    return props.Mass();
+    return MassProperties::volume(shape);
 }
 
 double areaOf(const TopoDS_Shape& shape)
 {
-    GProp_GProps props;
-    BRepGProp::SurfaceProperties(shape, props);
-    return props.Mass();
+    return MassProperties::area(shape);
 }
 
 int countSolids(const TopoDS_Shape& shape)

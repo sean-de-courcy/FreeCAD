@@ -19,6 +19,7 @@ add_executable(Part_tests_run
         FeatureRevolution.cpp
         FilletFallback.cpp
         FuzzyBoolean.cpp
+        MassProperties.cpp
         Geometry.cpp
         ModelRefine.cpp
         PartFeature.cpp

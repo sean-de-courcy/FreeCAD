@@ -26,7 +26,6 @@
 #include <BRepBndLib.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
-#include <BRepGProp.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <ChFi3d.hxx>
 #include <Geom_Surface.hxx>
@@ -56,6 +55,7 @@
 #include <Base/Exception.h>
 
 #include "Geometry.h"
+#include "MassProperties.h"
 #include "TopoShape.h"
 
 FC_LOG_LEVEL_INIT("TopoShape", true, true)  // NOLINT
@@ -88,7 +88,7 @@ struct FaceKey
             surface = geometry->getTypeId();
         }
         GProp_GProps props;
-        BRepGProp::SurfaceProperties(face.getShape(), props);
+        MassProperties::surfaceProperties(face.getShape(), props);
         area = props.Mass();
         centre = props.CentreOfMass();
     }
@@ -397,9 +397,7 @@ std::vector<double> faceAreas(const TopoShape& shape)
 {
     std::vector<double> areas;
     for (TopExp_Explorer it(shape.getShape(), TopAbs_FACE); it.More(); it.Next()) {
-        GProp_GProps props;
-        BRepGProp::SurfaceProperties(it.Current(), props);
-        areas.push_back(props.Mass());
+        areas.push_back(MassProperties::area(it.Current()));
     }
     std::sort(areas.begin(), areas.end());
     return areas;
@@ -600,9 +598,7 @@ std::vector<std::pair<TopoDS_Shape, double>> closedShells(const TopoDS_Shape& sh
             if (shell.ShapeType() == TopAbs_SHELL
                 && (shell.Orientation() == TopAbs_FORWARD || shell.Orientation() == TopAbs_REVERSED)
                 && closesUp(shell)) {
-                GProp_GProps props;
-                BRepGProp::VolumeProperties(shell, props);
-                shells.emplace_back(shell, props.Mass());
+                shells.emplace_back(shell, MassProperties::volume(shell));
             }
         }
     }
@@ -645,9 +641,7 @@ std::optional<double> sharedVolume(const Space& a, const Space& b)
         if (!common.IsDone() || common.HasErrors()) {
             return std::nullopt;
         }
-        GProp_GProps props;
-        BRepGProp::VolumeProperties(common.Shape(), props);
-        return props.Mass();
+        return MassProperties::volume(common.Shape());
     }
     catch (const Standard_Failure&) {
         return std::nullopt;
@@ -1386,11 +1380,8 @@ std::string whatItAdds(const Prepared& prepared, const TopoShape& base, const st
     }
     for (TopExp_Explorer it(cut.Shape(), TopAbs_SOLID); it.More(); it.Next()) {
         const TopoDS_Shape& piece = it.Current();
-        GProp_GProps volume;
-        BRepGProp::VolumeProperties(piece, volume);
-        GProp_GProps area;
-        BRepGProp::SurfaceProperties(piece, area);
-        if (std::abs(volume.Mass()) <= leastThickness * area.Mass()) {
+        if (std::abs(MassProperties::volume(piece))
+            <= leastThickness * MassProperties::area(piece)) {
             continue;
         }
         bool wrong = concave.Extent() == 0 || !reachesAny(piece, concave);
