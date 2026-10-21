@@ -1571,6 +1571,54 @@ struct ShapeInfo
 // makESHAPE -> makeShapeWithElementMap
 ///////////////////////////////////////
 
+namespace
+{
+/// Orders the elements of a group that share their names and are told apart only by an index
+/// (ops#378): the centre of mass, then the length or area (a vertex: its point), on the grid
+/// ops#49 uses, in the frame of the shape being named. The result's indexes follow the order in
+/// which OCCT stores sub-shapes, which can differ between platforms and OCCT versions (a round
+/// hole's four bend arcs in a Pipe: Windows and macOS store them in opposite orders); this key
+/// doesn't. Coincident elements tie, and keep their order in the result.
+using ElementOrderKey = std::array<long long, 4>;
+
+ElementOrderKey elementOrderKey(const TopoDS_Shape& element, const TopLoc_Location& frame)
+{
+    const TopoDS_Shape placed = element.Moved(frame);
+    gp_Pnt center;
+    double mass = 0;
+    if (placed.ShapeType() == TopAbs_VERTEX) {
+        center = BRep_Tool::Pnt(TopoDS::Vertex(placed));
+    }
+    else if (placed.ShapeType() == TopAbs_EDGE && BRep_Tool::Degenerated(TopoDS::Edge(placed))) {
+        const TopoDS_Vertex vertex = TopExp::FirstVertex(TopoDS::Edge(placed));
+        if (!vertex.IsNull()) {
+            center = BRep_Tool::Pnt(vertex);
+        }
+    }
+    else {
+        GProp_GProps props;
+        if (TopExp_Explorer(placed, TopAbs_FACE).More()) {
+            BRepGProp::SurfaceProperties(placed, props);
+        }
+        else {
+            BRepGProp::LinearProperties(placed, props);
+        }
+        center = props.CentreOfMass();
+        mass = props.Mass();
+    }
+    const double grid = 10 * Precision::Confusion();
+    // An unbounded element has no finite centre: all such elements tie.
+    auto onGrid = [grid](double value) {
+        const double steps = value / grid;
+        if (!std::isfinite(steps) || std::abs(steps) > 1e18) {
+            return std::numeric_limits<long long>::max();
+        }
+        return std::llround(steps);
+    };
+    return {onGrid(center.X()), onGrid(center.Y()), onGrid(center.Z()), onGrid(mass)};
+}
+}  // namespace
+
 struct NameKey
 {
     Data::MappedName name;
@@ -1671,9 +1719,11 @@ struct NamingMapKey
  * grouped by those sources.
  *
  * Names are written while iterating the groups, so their order is defined (ops#19): the members
- * of a group in the result's order (type: face, edge, vertex; then index), the groups in the
- * order of their first member. The hash maps here only look up; their hashes are seeded under
- * FREECAD_NAMING_HASH_SEED (NamingHash.h), which must leave the names unchanged.
+ * of a group by type (face, edge, vertex), then by place (elementOrderKey, ops#378), then by index
+ * in the result; the groups in the result's order of their first member, which decides no index.
+ * A member told apart from the others only by its index then gets the same index whatever order
+ * OCCT stores the result's sub-shapes in. The hash maps here only look up; their hashes are
+ * seeded under FREECAD_NAMING_HASH_SEED (NamingHash.h), which must leave the names unchanged.
  */
 class NamingMap
 {
@@ -1681,7 +1731,10 @@ public:
     /// The members (result elements) of a group, and their shared sources.
     using Group = std::pair<std::vector<NamingMapKey>, std::vector<NamingMapValue>>;
 
-    NamingMap() = default;
+    /// `frame` takes the result's elements to the frame of the shape being named.
+    explicit NamingMap(const TopLoc_Location& frame)
+        : frame(frame)
+    {}
 
     void add(
         const TopoDS_Shape& newShape,
@@ -1747,6 +1800,36 @@ public:
             }
         }
 
+        // Members of one type in a group of more than one by place; the sort is stable, so the
+        // index stays the last tie-break. A group of one needs no key.
+        for (auto& group : groups) {
+            auto& members = group.first;
+            if (members.size() < 2) {
+                continue;
+            }
+            std::vector<std::pair<ElementOrderKey, std::size_t>> keys;
+            keys.reserve(members.size());
+            for (std::size_t i = 0; i < members.size(); ++i) {
+                keys.emplace_back(elementOrderKey(members[i].newElementShape, frame), i);
+            }
+            std::stable_sort(keys.begin(), keys.end(), [&members](const auto& left, const auto& right) {
+                const int typeOrder = typeCompare(
+                    members[left.second].newElementName,
+                    members[right.second].newElementName
+                );
+                if (typeOrder != 0) {
+                    return typeOrder < 0;
+                }
+                return left.first < right.first;
+            });
+            std::vector<NamingMapKey> sorted;
+            sorted.reserve(members.size());
+            for (const auto& key : keys) {
+                sorted.push_back(members[key.second]);
+            }
+            members = std::move(sorted);
+        }
+
         isBuilt = true;
     };
 
@@ -1760,8 +1843,9 @@ public:
     };
 
 private:
-    /// Faces, then edges, then vertices (then any other type, by name); within a type, by index.
-    static bool resultOrderLess(const Data::IndexedName& left, const Data::IndexedName& right)
+    /// Faces, then edges, then vertices (then any other type, by name): below 0 if `left`'s type
+    /// comes first, 0 for the same type.
+    static int typeCompare(const Data::IndexedName& left, const Data::IndexedName& right)
     {
         auto rank = [](const Data::IndexedName& name) {
             static constexpr std::array<const char*, 3> types {"Face", "Edge", "Vertex"};
@@ -1776,9 +1860,15 @@ private:
         const std::size_t leftRank = rank(left);
         const std::size_t rightRank = rank(right);
         if (leftRank != rightRank) {
-            return leftRank < rightRank;
+            return leftRank < rightRank ? -1 : 1;
         }
-        const int typeOrder = std::strcmp(left.getType(), right.getType());
+        return std::strcmp(left.getType(), right.getType());
+    }
+
+    /// By type (typeCompare); within a type, by index.
+    static bool resultOrderLess(const Data::IndexedName& left, const Data::IndexedName& right)
+    {
+        const int typeOrder = typeCompare(left, right);
         if (typeOrder != 0) {
             return typeOrder < 0;
         }
@@ -1802,6 +1892,8 @@ private:
     std::vector<Group> groups {};
 
     std::hash<TopoDS_Shape> shapeHasher;
+
+    TopLoc_Location frame;
 
     bool isBuilt = false;
 };
@@ -2580,8 +2672,11 @@ TopoShape& TopoShape::makeShapeWithElementMap(
 
         // This algorithm has some edgecase detection from the V1 Algorithm, which is why it looks a
         // little bit copypasted.
-        NamingMap generatedNamingMap;
-        NamingMap modifiedNamingMap;
+        // The frame of the shape being named, which its own location (e.g. a Part feature's
+        // placement) doesn't move: the elements' order keys are taken there (ops#378).
+        const TopLoc_Location frame = _Shape.Location().Inverted();
+        NamingMap generatedNamingMap(frame);
+        NamingMap modifiedNamingMap(frame);
 
         const std::map<std::string, TopAbs_ShapeEnum> upperMapTypes {
             {"Edge", TopAbs_FACE},
@@ -3211,12 +3306,32 @@ TopoShape& TopoShape::makeShapeWithElementMap(
         // stays unnamed when those edges get their names only in this pass (UPP). A second pass
         // names what the first left, from the names the first gave; it changes no name (ops#25:
         // one of two coincident pieces of a split face, which has no history).
+        //
+        // The index of such a name counts the elements named before from the same partner or
+        // list. An element's partner and lists come only from elements of other types, so each
+        // type's lists are collected first and the indexes given after, per list in the order of
+        // the members' places (elementOrderKey), not of their indexes in the result, which follow
+        // OCCT's sub-shape order (ops#378: a round hole's bend arcs in a Pipe). Vertexes still
+        // count on from the edges named from the same faces.
+        enum class Fallback
+        {
+            Partner,
+            Upper,
+            Lower
+        };
+        struct FallbackName
+        {
+            int index;
+            Fallback kind;
+            std::vector<Data::MappedName> names;
+        };
         for (int pass = 0; pass < 2; ++pass) {
             bool unnamedLeft = false;
             for (const auto& info : topologyMapElementOrder) {
                 std::string stringSubshapeType {info->shapetype};
 
                 auto upperMapTypeEntry = upperMapTypes.find(stringSubshapeType);
+                std::vector<FallbackName> fallbackNames;
 
                 for (int mainI = 1; mainI <= info->count(); mainI++) {
                     bool wasMapped = false;
@@ -3269,27 +3384,10 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                                 }
 
                                 if (incomingShapeMapName) {
-                                    Data::MappedName newName = Data::MappedName(
-                                        Data::MappedName::makeEncodedSection(
-                                            {},
-                                            {incomingShapeMapName},
-                                            masterTag,
-                                            op,
-                                            usedPartnerNames.count(incomingShapeMapName),
-                                            (*info->shapetype),
-                                            0,
-                                            {Data::MAPPER_FLAG_PROJECTION}
-                                        )
+                                    fallbackNames.push_back(
+                                        {mainI, Fallback::Partner, {incomingShapeMapName}}
                                     );
-
-                                    usedPartnerNames.insert(incomingShapeMapName);
-
                                     wasMapped = true;
-                                    ensureElementMap()->setElementName(
-                                    mainElementIndexedName,
-                                    newName,
-                                    masterTag
-                                );
                                     break;
                                 }
                             }
@@ -3332,22 +3430,9 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                         sortNameSet(linkedUpperNames);
 
                         if (linkedUpperNames.size()) {
-                            Data::MappedName newName = Data::MappedName(
-                                Data::MappedName::makeEncodedSection(
-                                    {},
-                                    linkedUpperNames,
-                                    masterTag,
-                                    op,
-                                    usedUpperNames.count(linkedUpperNames),
-                                    (*info->shapetype),
-                                    0,
-                                    {Data::MAPPER_FLAG_UPPER}
-                                )
+                            fallbackNames.push_back(
+                                {mainI, Fallback::Upper, std::move(linkedUpperNames)}
                             );
-
-                            usedUpperNames.insert(linkedUpperNames);
-                            ensureElementMap()->setElementName(mainElementIndexedName, newName, masterTag);
-
                             continue;
                         }
 
@@ -3400,24 +3485,8 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                             sortNameSet(linkedLowerNames);
 
                             if (linkedLowerNames.size()) {
-                                Data::MappedName newName = Data::MappedName(
-                                    Data::MappedName::makeEncodedSection(
-                                        {},
-                                        linkedLowerNames,
-                                        masterTag,
-                                        op,
-                                        usedLowerNames.count(linkedLowerNames),
-                                        (*info->shapetype),
-                                        0,
-                                        {Data::MAPPER_FLAG_LOWER}
-                                    )
-                                );
-
-                                usedLowerNames.insert(linkedLowerNames);
-                                ensureElementMap()->setElementName(
-                                    mainElementIndexedName,
-                                    newName,
-                                    masterTag
+                                fallbackNames.push_back(
+                                    {mainI, Fallback::Lower, std::move(linkedLowerNames)}
                                 );
                                 continue;
                             }
@@ -3426,6 +3495,82 @@ TopoShape& TopoShape::makeShapeWithElementMap(
 
                     if (!wasMapped) {
                         unnamedLeft = true;  // named neither by a partner nor by UPP or LOW
+                    }
+                }
+
+                // The members of each partner or list, in the result's order of their first
+                // member; the lists' order decides no index.
+                std::vector<std::vector<std::size_t>> lists;
+                std::array<
+                    std::unordered_map<std::vector<Data::MappedName>, std::size_t, Data::MappedNameHasher>,
+                    3>
+                    listIndex;
+                for (std::size_t i = 0; i < fallbackNames.size(); ++i) {
+                    auto& lookup = listIndex[static_cast<std::size_t>(fallbackNames[i].kind)];
+                    auto found = lookup.try_emplace(fallbackNames[i].names, lists.size());
+                    if (found.second) {
+                        lists.emplace_back();
+                    }
+                    lists[found.first->second].push_back(i);
+                }
+
+                for (auto& list : lists) {
+                    if (list.size() > 1) {
+                        std::vector<std::pair<ElementOrderKey, std::size_t>> keys;
+                        keys.reserve(list.size());
+                        for (std::size_t i : list) {
+                            keys.emplace_back(
+                                elementOrderKey(info->find(fallbackNames[i].index), frame),
+                                i
+                            );
+                        }
+                        // Stable: coincident members keep the result's order.
+                        std::stable_sort(keys.begin(), keys.end(), [](const auto& left, const auto& right) {
+                            return left.first < right.first;
+                        });
+                        for (std::size_t k = 0; k < keys.size(); ++k) {
+                            list[k] = keys[k].second;
+                        }
+                    }
+
+                    for (std::size_t i : list) {
+                        const FallbackName& fallback = fallbackNames[i];
+                        int index = 0;
+                        const char* flag = nullptr;
+                        switch (fallback.kind) {
+                            case Fallback::Partner:
+                                index = static_cast<int>(usedPartnerNames.count(fallback.names.front()));
+                                usedPartnerNames.insert(fallback.names.front());
+                                flag = Data::MAPPER_FLAG_PROJECTION;
+                                break;
+                            case Fallback::Upper:
+                                index = static_cast<int>(usedUpperNames.count(fallback.names));
+                                usedUpperNames.insert(fallback.names);
+                                flag = Data::MAPPER_FLAG_UPPER;
+                                break;
+                            case Fallback::Lower:
+                                index = static_cast<int>(usedLowerNames.count(fallback.names));
+                                usedLowerNames.insert(fallback.names);
+                                flag = Data::MAPPER_FLAG_LOWER;
+                                break;
+                        }
+                        Data::MappedName newName = Data::MappedName(
+                            Data::MappedName::makeEncodedSection(
+                                {},
+                                fallback.names,
+                                masterTag,
+                                op,
+                                index,
+                                (*info->shapetype),
+                                0,
+                                {flag}
+                            )
+                        );
+                        ensureElementMap()->setElementName(
+                            Data::IndexedName::fromConst(info->shapetype, fallback.index),
+                            newName,
+                            masterTag
+                        );
                     }
                 }
             }
