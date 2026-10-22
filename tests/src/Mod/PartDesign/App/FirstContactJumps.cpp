@@ -3,21 +3,18 @@
 // Where first contact jumps for a Revolution up to a face (ops#293 D2, the tracer):
 // FirstContact::traceJumps() on designed walls, against the jump curves found independently of the
 // tracer: from the wall's own curve (an extruded wall's fold is where its curve's radius is
-// extremal, and its free edge is a vertical line), from sections of the wall by planes across the
-// axis (a slanted fold), and from where a trimmed wall's edge crosses its folds.
+// extremal, and its free edge is a vertical line), from the wall's level curves across the axis
+// (a slanted fold), and from where a trimmed wall's edge crosses its folds.
 
 #include <gtest/gtest.h>
 
 #include <algorithm>
 #include <cmath>
-#include <functional>
 #include <numbers>
 #include <vector>
 
-#include <BRep_Tool.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
-#include <BRepAlgoAPI_Section.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
@@ -283,9 +280,12 @@ TEST(FirstContactJumps, FoldReversed)
 }
 
 // The fold with its radii scaled by 1 + 0.1 z, a B-spline surface through 17 rows: its fold's image
-// is a slanted curve, near r = 1.65 (1 + 0.1 z). At each height the jump lies where the wall's
-// section by the horizontal plane is farthest from the axis there (circles about the axis touch
-// the section), which the fitted curve must give.
+// is a slanted curve, near r = 1.65 (1 + 0.1 z). At each height the jump lies where the surface's
+// level curve Z = z is farthest from the axis there (circles about the axis touch it), which the
+// fitted curve must give within its deviation. The level curve is followed on the surface itself
+// (Newton in u for each v): OCCT's section by the plane is an approximation whose radial error here
+// (up to 7.5e-5) its edges' tolerances don't bound and which differs between platforms (macOS arm64
+// missed the fold by 2.5e-5 at z = 1.4, with a tolerance of 1e-5).
 TEST(FirstContactJumps, SlantedFold)
 {
     TColgp_Array2OfPnt rows(1, 17, 1, 121);
@@ -302,63 +302,69 @@ TEST(FirstContactJumps, SlantedFold)
     }
     GeomAPI_PointsToBSplineSurface interpolation;
     interpolation.Interpolate(rows);
-    const TopoDS_Face face = BRepBuilderAPI_MakeFace(interpolation.Surface(), 1e-7).Face();
+    const Handle(Geom_BSplineSurface) surface = interpolation.Surface();
+    const TopoDS_Face face = BRepBuilderAPI_MakeFace(surface, 1e-7).Face();
     const JumpTrace trace = traceJumps(face, profile(), forward, tolerance, deviation);
     const std::vector<const JumpPiece*> walls = kept(trace);
     ASSERT_EQ(walls.size(), 1U);
     EXPECT_EQ(walls.front()->source, JumpSource::Silhouette);
     EXPECT_LT(sideRadially(*walls.front()), 0.0);
+    double u1 {};
+    double u2 {};
+    double v1 {};
+    double v2 {};
+    surface->Bounds(u1, u2, v1, v2);
     for (double z : {0.1, 0.6, 1.0, 1.4, 1.9}) {
-        BRepAlgoAPI_Section section(face, gp_Pln(gp_Pnt(0, 0, z), gp_Dir(0, 0, 1)));
-        ASSERT_TRUE(section.IsDone());
-        double farthest = 0.0;
-        double sectionTolerance = 0.0;
+        // The rows run along u, so the level curve has one point per v
+        const double start = u1 + (u2 - u1) * (z + 1.0) / 4.0;
+        auto onLevel = [&](double v) {
+            double u = start;
+            for (int step = 0; step < 60; ++step) {
+                gp_Pnt point;
+                gp_Vec du;
+                gp_Vec dv;
+                surface->D1(u, v, point, du, dv);
+                const double change = (point.Z() - z) / du.Z();
+                u -= change;
+                if (std::abs(change) < 1e-15) {
+                    break;
+                }
+            }
+            return surface->Value(u, v);
+        };
+        auto radius = [&](double v) {
+            const gp_Pnt point = onLevel(v);
+            return std::hypot(point.X(), point.Y());
+        };
         const double around = 1.65 * (1.0 + 0.1 * z);
-        for (TopExp_Explorer edges(section.Shape(), TopAbs_EDGE); edges.More(); edges.Next()) {
-            const TopoDS_Edge& edge = TopoDS::Edge(edges.Current());
-            BRepAdaptor_Curve along(edge);
-            sectionTolerance = std::max(sectionTolerance, BRep_Tool::Tolerance(edge));
-            std::function<double(double)> radius = [&](double t) {
-                const gp_Pnt point = along.Value(t);
-                return std::hypot(point.X(), point.Y());
-            };
-            const double first = along.FirstParameter();
-            const double last = along.LastParameter();
-            double best = first;
-            double bestValue = -1.0;
-            for (int i = 0; i <= 20000; ++i) {
-                const double t = first + (last - first) * i / 20000;
-                const double r = radius(t);
-                const gp_Pnt point = along.Value(t);
-                double degrees = std::atan2(point.Y(), point.X()) * 180.0 / std::numbers::pi;
-                degrees += degrees < 0.0 ? 360.0 : 0.0;
-                // The fold near 120 degrees, not the third leg passing the same radii
-                if (degrees > 105.0 && degrees < 160.0 && std::abs(r - around) < 0.1 && r > bestValue) {
-                    best = t;
-                    bestValue = r;
-                }
+        double best = v1;
+        double bestValue = -1.0;
+        for (int i = 0; i <= 20000; ++i) {
+            const double v = v1 + (v2 - v1) * i / 20000;
+            const gp_Pnt point = onLevel(v);
+            const double r = std::hypot(point.X(), point.Y());
+            double degrees = std::atan2(point.Y(), point.X()) * 180.0 / std::numbers::pi;
+            degrees += degrees < 0.0 ? 360.0 : 0.0;
+            // The fold near 120 degrees, not the third leg passing the same radii
+            if (degrees > 105.0 && degrees < 160.0 && std::abs(r - around) < 0.1 && r > bestValue) {
+                best = v;
+                bestValue = r;
             }
-            if (bestValue < 0.0) {
-                continue;
-            }
-            double a = std::max(first, best - (last - first) / 20000);
-            double b = std::min(last, best + (last - first) / 20000);
-            const double ratio = (std::sqrt(5.0) - 1.0) / 2.0;
-            for (int step = 0; step < 200 && b - a > 1e-15; ++step) {
-                const double c = b - ratio * (b - a);
-                const double d = a + ratio * (b - a);
-                if (radius(c) > radius(d)) {
-                    b = d;
-                }
-                else {
-                    a = c;
-                }
-            }
-            farthest = std::max(farthest, radius((a + b) / 2.0));
         }
-        ASSERT_GT(farthest, 0.0) << z;
-        EXPECT_NEAR(radiusAt(*walls.front(), z), farthest, deviation + 2.0 * sectionTolerance + 1e-8)
-            << z;
+        ASSERT_GT(bestValue, 0.0) << z;
+        double a = std::max(v1, best - (v2 - v1) / 20000);
+        double b = std::min(v2, best + (v2 - v1) / 20000);
+        const double ratio = (std::sqrt(5.0) - 1.0) / 2.0;
+        for (int step = 0; step < 200 && b - a > 1e-15; ++step) {
+            const double c = b - ratio * (b - a);
+            const double d = a + ratio * (b - a);
+            const bool keepLow = radius(c) > radius(d);
+            (keepLow ? b : a) = keepLow ? d : c;
+        }
+        const gp_Pnt farthest = onLevel((a + b) / 2.0);
+        ASSERT_NEAR(farthest.Z(), z, 1e-12);
+        const double exact = std::hypot(farthest.X(), farthest.Y());
+        EXPECT_NEAR(radiusAt(*walls.front(), z), exact, deviation) << z;
     }
 }
 

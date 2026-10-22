@@ -2903,9 +2903,22 @@ class TestRevolve(unittest.TestCase):
         """foldedWall() 120 high (z from -60.25), much taller than profileAcross(): the round 4
         grid's rows were 2.5 apart there and none fell in the profile, so its fold went unseen and
         12 of 24 tools were wrong, with no error (the PR 279 round 4 verification's q22 A). The
-        certified silhouette finds it whatever the face's height: each Revolution and Groove,
-        either way, fails naming where first contact jumps (ops#293 round 5)."""
+        certified silhouette finds it whatever the face's height (ops#293 round 5), and first
+        contact jumps there. Turning forward, each Revolution and Groove either fails naming the
+        jump, or is built between walls along it (ops#293 D2) and holds what first contact gives,
+        within the walls' push. Which one depends on OCCT's numerics: here the construction
+        refuses heights 119, 120, 122 and 140 ("part of the cell goes all the way round") and
+        builds it 4 to 118 and 121 high; macOS arm64 builds 120 (fork PR 357 round 3)."""
         wall = self.foldedWall(-60.25, 120)
+        curve = wall.Shape.Faces[0].Surface.BasisCurve
+        angle = self.firstContactAngles(curve)
+        breaks = self.radiusTurns(curve, 1, 3)
+        expected = self.firstContactVolume(angle, 1, 3, 0, 2, breaks)
+        # A tool built between walls pushed at most 1e-4 of the profile's size (the
+        # construction's cap) differs from first contact by at most the strips along the jumps,
+        # each push x the jump in angle x the radius x the profile's height (section 15.2)
+        push = 1e-4 * math.hypot(2, 2)
+        strips = sum(push * abs(angle(r + 1e-3) - angle(r - 1e-3)) * r * 2 for r in breaks)
         for kind in ("Revolution", "Groove"):
             for reversed_ in (False, True):
                 with self.subTest(kind=kind, reversed_=reversed_):
@@ -2923,7 +2936,17 @@ class TestRevolve(unittest.TestCase):
                     if reversed_ and feature.isValid():
                         # Turning the other way the wall's third leg comes first: no jump
                         continue
-                    self.assertJumpRefused(feature)
+                    if not feature.isValid():
+                        self.assertJumpRefused(feature)
+                        continue
+                    self.assertFalse(reversed_)
+                    tool = feature.AddSubShape.Volume
+                    self.assertAlmostEqual(tool, expected, delta=strips + 1e-6 * expected)
+                    # The tool lies inside the block: the Revolution adds nothing, the Groove cuts it
+                    result = block.Shape.Volume - (tool if kind == "Groove" else 0.0)
+                    self.assertAlmostEqual(
+                        feature.Shape.Volume, result, delta=strips + 1e-6 * result
+                    )
 
     def testRevolutionUpToFoldedWallLeakInsideBase(self):
         """foldedWall() with a base block over where circles of radius 1.46 to 1.65 run between
