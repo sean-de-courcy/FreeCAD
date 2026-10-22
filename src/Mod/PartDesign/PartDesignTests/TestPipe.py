@@ -785,25 +785,34 @@ class TestPipeEndNames(unittest.TestCase):
         self.doc.recompute()
         return path, pipe, sketches
 
-    def legsOf(self, pipe, sketches, points):
-        """The leg of `points` (0, 1, ...) nearest the centre of each sketch's face, None for an
-        invalid sketch"""
+    def facesOf(self, pipe, sketches, points):
+        """For each sketch, the side face its face is, as (leg, edge): the leg of `points`
+        (0, 1, ...) nearest the face's centre, and the square's edge it was swept from, by the
+        side of the leg the centre lies on ("Transformed" keeps the square's orientation): "y"
+        +-1 for the edges at y = +-2, "x" +-1 for those at x = +-2. None for an invalid sketch."""
+        ends = [V(x, 0, z) for x, z in points]
 
-        def leg(point):
-            ends = [V(x, 0, z) for x, z in points]
-            return min(
-                range(len(ends) - 1),
-                key=lambda i: point.distanceToLineSegment(ends[i], ends[i + 1]).Length,
-            )
+        def nearest(point, i):
+            along = ends[i + 1] - ends[i]
+            t = max(0.0, min(1.0, (point - ends[i]).dot(along) / along.dot(along)))
+            return ends[i] + along * t
 
-        legs = []
+        def face(point):
+            leg = min(range(len(ends) - 1), key=lambda i: (point - nearest(point, i)).Length)
+            offset = point - nearest(point, leg)
+            if abs(offset.y) > 1:
+                return leg, ("y", 1 if offset.y > 0 else -1)
+            self.assertGreater(abs(offset.x), 1e-3, (point, leg))
+            return leg, ("x", 1 if offset.x > 0 else -1)
+
+        faces = []
         for sketch in sketches:
             if not sketch.isValid():
-                legs.append(None)
+                faces.append(None)
                 continue
             (support,) = sketch.AttachmentSupport[0][1]
-            legs.append(leg(pipe.Shape.getElement(support).CenterOfMass))
-        return legs
+            faces.append(face(pipe.Shape.getElement(support).CenterOfMass))
+        return faces
 
     def alone(self, pipe, sketches):
         """For each sketch, whether its face shares its plane with no other face of the pipe"""
@@ -829,29 +838,29 @@ class TestPipeEndNames(unittest.TestCase):
         """The L through points(degrees), made at 80 degrees and at 120 (the union), the corner
         turned to the other angle and back.
         - From 80 degrees to 120 (the one sweep to the union), each side face's sketch stays
-          valid, on a face of the leg it was attached on.
+          valid, on the face of the same leg and profile edge it was attached on.
         - From the union, the fuse has renamed (MOD) the faces it cut, those in the planes that
           the two legs share (y = +-2) past 90 degrees, and a reference to one goes missing, as
           before. A sketch on a face that shares its plane with no other face stays valid on
-          its leg; any sketch that stays valid is on its leg."""
+          its face; any sketch that stays valid is on the same leg and profile edge."""
         for start, other in ((80, 120), (120, 80)):
             if start == 120:
                 self.tearDown()
                 self.setUp()
             with self.subTest(start=start):
                 path, pipe, sketches = self.sideFaceModel(points(start))
-                legs = self.legsOf(pipe, sketches, points(start))
-                self.assertNotIn(None, legs)
-                self.assertEqual(set(legs), {0, 1})
+                faces = self.facesOf(pipe, sketches, points(start))
+                self.assertNotIn(None, faces)
+                self.assertEqual({leg for leg, side in faces}, {0, 1})
                 before = start
                 for degrees in (other, start):
                     kept = [sketch for sketch in sketches if sketch.isValid()]
                     alone = self.alone(pipe, kept)
                     self.setPolyline(path, points(degrees))
-                    now = dict(zip(sketches, self.legsOf(pipe, sketches, points(degrees))))
-                    for sketch, leg in zip(sketches, legs):
+                    now = dict(zip(sketches, self.facesOf(pipe, sketches, points(degrees))))
+                    for sketch, face in zip(sketches, faces):
                         if now[sketch] is not None:
-                            self.assertEqual(now[sketch], leg, (before, degrees, sketch.Name))
+                            self.assertEqual(now[sketch], face, (before, degrees, sketch.Name))
                     for sketch, single in zip(kept, alone):
                         if before < 90 or single:
                             self.assertIsNotNone(
@@ -867,6 +876,80 @@ class TestPipeEndNames(unittest.TestCase):
     def testSideFacesStayOnTheirLegsPastNinetyDegreesTowardsTheProfile(self):
         """The same L drawn towards the profile."""
         self.assertSidesStayOnTheirLegs(lambda degrees: [turned(30, degrees, 20), (0, 30), (0, 0)])
+
+    def assertCapBetweenPiecesDoesNotMoveSilently(self, towards):
+        """"Transformed" along a U, legs 30, 20 and 20 from the square at z = 0, turning 80 and
+        then 20 degrees more: past 90 degrees only after the second corner, so the union's two
+        pieces meet there, and the cap between them shows at that corner. A sketch on that cap
+        and a datum point on each of its edges; then the first turn made 100 degrees: the pieces
+        meet at the first corner. Each reference goes missing, is reported with a warning, or
+        stays at the second corner (an edge of the cap, now inside a piece, where the one sweep
+        has its name); none goes to the first corner's cap silently. Before (fork PR 344), the
+        cap and its edges were named after their piece (PCE<n>) and the side faces, so the same
+        names came out at the first corner, valid and with no warning (ops#379, round 4)."""
+
+        def points(first):
+            result = [(0, 0), (0, 30), turned(30, first, 20)]
+            x, z = result[-1]
+            dx, dz = turned(0, first + 20, 20)
+            result.append((x + dx, z + dz))
+            return result[::-1] if towards else result
+
+        profile = self.square()
+        path = self.sketch("Path", models.polyline(points(80)), placement=XZ)
+        pipe = self.pipe(profile, path, Transition="Transformed", Refine=False)
+        corners = [V(x, 0, z) for x, z in points(80)][1:-1]
+        caps = [
+            index
+            for index, face in enumerate(pipe.Shape.Faces, 1)
+            if abs(abs(face.normalAt(0, 0).z) - 1) < 1e-9 and face.CenterOfMass.z > 1
+        ]
+        self.assertEqual(len(caps), 2, caps)  # the far end's and the one between the pieces
+        (between,) = [
+            index
+            for index in caps
+            if min((pipe.Shape.Faces[index - 1].CenterOfMass - c).Length for c in corners) < 4
+        ]
+        cap = pipe.Shape.Faces[between - 1]
+        x, z = turned(30, 80, 20)  # the second corner
+        self.assertLess((cap.CenterOfMass - V(x, 0, z)).Length, 4)
+        sketch = self.body.newObject("Sketcher::SketchObject", "OnCap")
+        sketch.AttachmentSupport = [(pipe, f"Face{between}")]
+        sketch.MapMode = "FlatFace"
+        references = [sketch]
+        for index, edge in enumerate(pipe.Shape.Edges, 1):
+            if any(edge.isSame(own) for own in cap.Edges):
+                point = self.body.newObject("PartDesign::Point", f"OnEdge{index}")
+                point.AttachmentSupport = [(pipe, f"Edge{index}")]
+                point.MapMode = "CenterOfMass"
+                references.append(point)
+        self.doc.recompute()
+        self.assertEqual(len(references), 5)
+        self.assertTrue(all(reference.isValid() for reference in references))
+
+        self.setPolyline(path, points(100))
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        x, z = turned(30, 100, 20)
+        second = V(x, 0, z)
+        for reference in references:
+            if not reference.isValid():
+                continue
+            levels = [entry["warning_level"] for entry in App.getReferenceReport(reference)]
+            if "normal" in levels:
+                continue
+            # Silent ("resolved" without a warning is too): only where it was, at the second
+            # corner (its edges, now inside a piece)
+            (support,) = reference.AttachmentSupport[0][1]
+            at = pipe.Shape.getElement(support).CenterOfMass
+            self.assertLess((at - second).Length, 4, (reference.Name, support, at, levels))
+
+    def testCapBetweenPiecesDoesNotMoveSilently(self):
+        """The spine from the profile."""
+        self.assertCapBetweenPiecesDoesNotMoveSilently(towards=False)
+
+    def testCapBetweenPiecesDoesNotMoveSilentlyTowardsTheProfile(self):
+        """The same U drawn towards the profile."""
+        self.assertCapBetweenPiecesDoesNotMoveSilently(towards=True)
 
     def testUndoAndRedoOfAnEditKeepTheirNames(self):
         """testEndStaysWhenTheProfileCrossesTheMiddle's edit in a transaction, undone and redone,
@@ -1243,10 +1326,12 @@ class TestPipeCorners(unittest.TestCase):
     def testUnionNames(self):
         """The union at 120 degrees: the start cap keeps the sketch's names; the far end (on
         z = 20, the square only moved there) projects them, as the one sweep's far end does; the
-        caps between the pieces (z = 30) carry neither, but their piece's index; every name is
-        distinct, so the second leg's side faces aren't named as the first's. Before (fork PR
-        344 round 2), the first piece's end cap at the corner carried the one sweep's far-end
-        name, and the far end projections of projections."""
+        caps between the pieces (z = 30) carry neither, but the spine vertex they lie at (the
+        corner, 1: PCB1 for the first piece's back, PCF1 for the second's front; fork PR 356
+        round 4, their piece's index before); every name is distinct, so the second leg's side
+        faces aren't named as the first's. Before (fork PR 344 round 2), the first piece's end
+        cap at the corner carried the one sweep's far-end name, and the far end projections of
+        projections."""
         profile = self.profile()
         pipe = self.transformed(self.lPoints(120), profile=profile)
         shape = pipe.Shape
@@ -1260,7 +1345,7 @@ class TestPipeCorners(unittest.TestCase):
         for face in corner:
             name = firstName(shape, face)
             self.assertNotEqual(name, firstName(shape, farEnd[0]))
-            self.assertEqual(App.getDecodedMappedName(name)[-1]["opCode"], "PCE0", name)
+            self.assertIn(App.getDecodedMappedName(name)[-1]["opCode"], ("PCB1", "PCF1"), name)
 
     def horizontalFaces(self, shape, z):
         """The faces on the plane at height z."""
