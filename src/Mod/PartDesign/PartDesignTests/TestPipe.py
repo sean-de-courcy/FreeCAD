@@ -255,6 +255,54 @@ class TestPipeEndNames(unittest.TestCase):
             self.assertIn("UPP", lastSection(shape, element)["mapperFlags"], element)
         self.assertNamesDistinct(shape)
 
+    def testLegNamesCarryTheSpineEdge(self):
+        """The square along an L path: each side face and lateral edge is named from its spine
+        edge too, so the two legs' faces of one profile edge differ only in the spine's line
+        (ops#415). Named from the profile alone, they were told apart by the legs' order, and a
+        segment added at the spine's start moved every reference to another leg silently
+        (TestNamingScenarios' PipeLegs area)."""
+        path = self.lPath()
+        profile = self.square()
+        # Refine off: it merges the legs' coplanar faces y = +-2
+        shape = self.pipe(profile, path, Transition="Right corner", Refine=False).Shape
+        spine = [firstName(path.Shape, f"Edge{index}") for index in (1, 2)]
+        tag = ":H%x" % path.ID
+
+        def leg(element):
+            # the first leg runs along Z, x -2..2 and z below 28; the second along X, x past 2
+            at = place(element)
+            return 0 if at.x < 2 + 1e-6 and at.z < 28 - 1e-6 else 1 if at.x > 2 + 1e-6 else None
+
+        for kind, count in (("Face", 8), ("Edge", 8)):
+            sides = {}
+            for index, element in enumerate(elementsOf(shape, kind), 1):
+                if kind == "Edge" and not element.Curve.Direction.cross(
+                    V(0, 0, 1) if leg(element) == 0 else V(1, 0, 0)
+                ).Length < 1e-9:
+                    continue  # not a lateral edge
+                at = place(element)
+                if leg(element) is None or (
+                    kind == "Face" and (abs(at.z) < 1e-6 or abs(at.x - 20) < 1e-6)
+                ):
+                    continue  # a cap, or at the corner
+                sides.setdefault(leg(element), []).append(f"{kind}{index}")
+            self.assertEqual(sorted(len(v) for v in sides.values()), [count // 2] * 2, sides)
+            for legIndex, elements in sides.items():
+                for element in elements:
+                    name = firstName(shape, element)
+                    self.assertIn(tag, name, (element, name))
+                    self.assertIn(spine[legIndex], name, (element, name))
+            # leg B's names are leg A's with the spine's line changed
+            named = {
+                firstName(shape, e).replace(spine[0] + tag, "<leg>") for e in sides[0]
+            }
+            self.assertEqual(
+                named,
+                {firstName(shape, e).replace(spine[1] + tag, "<leg>") for e in sides[1]},
+                kind,
+            )
+        self.assertNamesDistinct(shape)
+
     def testTransitionsAndModes(self):
         """The same names under each transition and in Frenet mode, on the pipe's own solid
         (AddSubShape). "Transformed" fails at this right angle (ops#370, TestPipeCorners); at 60
