@@ -11,8 +11,9 @@ The spines are designed: a planar wave x = 1.5 (1 - cos(2 pi z / 20)) (smallest 
 curvature 6.75 mm, above the profile's 2 mm, so the tube doesn't fold), the same wave lifted along
 Y by eps (z - 5)^3, a lead line and a corner before it, a B-spline that is planar around its
 inflections and rises after them, a Bezier curve with a flat point that doesn't reverse its
-normal, a Bezier curve whose normal turns over within micrometres, and a long lead line, the wave
-and an arc leaving the wave's plane by 10 degrees. A circle swept with its centre on the spine and
+normal, a Bezier curve whose normal turns over within micrometres, a long lead line, the wave
+and an arc leaving the wave's plane by 10 degrees, the waves turned off the main planes, and a
+Part.makeHelix helix. A circle swept with its centre on the spine and
 its plane normal to it is the tube of points at r from the spine, of volume A L (Pappus)."""
 
 import math
@@ -26,15 +27,19 @@ R = 2.0
 A = math.pi * R * R
 
 
-def wave_edge(start=V(0, 0, 0), direction=V(0, 0, 1), side=V(1, 0, 0), waves=1, lift=0.0):
+def wave_edge(
+    start=V(0, 0, 0), direction=V(0, 0, 1), side=V(1, 0, 0), waves=1, lift=0.0, rotation=None
+):
     """A cubic B-spline through the wave's points, every mm along `direction` from `start`, with
-    the wave's offset along `side` (both in the XZ plane) and `lift` (z - 5)^3 along Y"""
+    the wave's offset along `side` (both in the XZ plane) and `lift` (z - 5)^3 along Y, the points
+    turned by `rotation` about the origin"""
     length = 20.0 * waves
     points = []
     for i in range(int(length) + 1):
         s = float(i)
         offset = side * (1.5 * (1 - math.cos(2 * math.pi * s / 20.0)))
-        points.append(start + direction * s + offset + V(0, lift * (s - 5) ** 3, 0))
+        point = start + direction * s + offset + V(0, lift * (s - 5) ** 3, 0)
+        points.append(rotation.multVec(point) if rotation else point)
     curve = Part.BSplineCurve()
     curve.interpolate(points)
     return curve.toShape()
@@ -298,6 +303,41 @@ class SweepFrenetTest(unittest.TestCase):
         self.assertIn("Frenet frame turns over", sweep.getStatusString())
         with self.assertRaises(Part.OCCError):
             wire.makePipeShell([circle_at_start(wire)], True, True)
+
+    def testFrenetPlanarWavesOffTheMainPlanes(self):
+        """Ten exactly planar waves turned 45 degrees about X, as a sketch on a tilted plane: in
+        place of Frenet, corrected Frenet left vertices with tolerances of 0.15 mm and the tube
+        1.6e-2 mm off, where the same waves in XZ come out within 5e-5. The sweep gives the tube
+        or fails, saying why (fork PR 358 round 3's verification, finding 1)"""
+        wire = Part.Wire([wave_edge(waves=10, rotation=App.Rotation(V(1, 0, 0), 45.0))])
+        sweep = self.sweep(wire, circle_at_start(wire))
+        if sweep.isValid():
+            self.assertLess(distance_from_tube(sweep.Shape, wire), 1e-3)
+        else:
+            self.assertIn("Frenet frame turns over", sweep.getStatusString())
+
+    def testFrenetAlongAHelixWithoutSampling(self):
+        """A Part.makeHelix helix is one B-spline with about one knot span a turn, sampled 6.4
+        times a turn: neighbouring normals 56 degrees apart, two apart 113, while the frame turns
+        about the tangent by 2 degrees. A triangle beside it keeps OCCT's Frenet law: the same
+        solid as MakePipeShell's own Frenet mode. Before, the sweep was refused, saying the frame
+        turns over (fork PR 358 round 3's verification, finding 2)"""
+        wire = Part.Wire([Part.makeHelix(2.0, 20.0, 10.0)])
+        point, tangent = start_frame(wire)
+        radial = V(1, 0, 0)
+        radial = (radial - tangent * radial.dot(tangent)).normalize()
+        other = tangent.cross(radial)
+        corners = [point - other * 0.1, point + radial * 0.2, point + other * 0.1]
+        triangle = Part.makePolygon(corners + [corners[0]])
+        sweep = self.sweep(wire, triangle)
+        self.assertTrue(sweep.isValid(), sweep.getStatusString())
+        pipe = Part.BRepOffsetAPI.MakePipeShell(wire)
+        pipe.setFrenetMode(True)
+        pipe.add(triangle, False, False)
+        pipe.build()
+        pipe.makeSolid()
+        self.assertAlmostEqual(sweep.Shape.Volume, pipe.shape().Volume, places=9)
+        self.assertEqual(len(sweep.Shape.Faces), len(pipe.shape().Faces))
 
     def testFrenetWithoutTurnOverIsUnchanged(self):
         """A planar arc, a helix and a Bezier curve with a flat point that doesn't reverse its

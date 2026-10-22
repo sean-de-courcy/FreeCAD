@@ -38,11 +38,18 @@ FC_LOG_LEVEL_INIT("Part", true, true)
 namespace
 {
 
-/// The law's unit normal at \a u, where the curvature is clearly above zero (at least
+/// The law's unit tangent and normal at a sample
+struct Frame
+{
+    gp_Vec tangent;
+    gp_Vec normal;
+};
+
+/// The law's frame at \a u, where the curvature is clearly above zero (at least
 /// SweepFrenet::curvatureFloor over the edge's length): where it is zero the law's normal is
 /// whatever OCCT makes of a singular point, and a flat point that doesn't reverse the normal was
 /// taken for a turn-over when it fell on a sample (fork PR 358 round 1, R1)
-std::optional<gp_Vec> normalAt(GeomFill_Frenet& law, const BRepAdaptor_Curve& curve, double u, double length)
+std::optional<Frame> frameAt(GeomFill_Frenet& law, const BRepAdaptor_Curve& curve, double u, double length)
 {
     gp_Pnt point;
     gp_Vec d1, d2;
@@ -54,10 +61,32 @@ std::optional<gp_Vec> normalAt(GeomFill_Frenet& law, const BRepAdaptor_Curve& cu
         return std::nullopt;
     }
     gp_Vec tangent, normal, binormal;
-    if (!law.D0(u, tangent, normal, binormal) || normal.SquareMagnitude() < 0.25) {
+    if (!law.D0(u, tangent, normal, binormal) || normal.SquareMagnitude() < 0.25
+        || tangent.SquareMagnitude() < 0.25) {
         return std::nullopt;
     }
-    return normal;
+    return Frame {tangent.Normalized(), normal.Normalized()};
+}
+
+/// The cosine of the angle by which the frame turns about the tangent from \a from to \a to: the
+/// normal of \a from carried by the smallest rotation that takes its tangent to \a to's, against
+/// \a to's normal. Comparing the normals themselves counts the tangent's own turn as well: along a
+/// helix sampled 6.4 times a turn, neighbouring normals were 56 degrees apart and two apart 113,
+/// where the frame turns by 2 to 6 degrees about the tangent (fork PR 358 round 3's verification,
+/// finding 2)
+double turnCosine(const Frame& from, const Frame& to)
+{
+    const double cosine = from.tangent.Dot(to.tangent);
+    if (cosine <= 0) {
+        // The tangent turns by a right angle or more between the samples, which sampleParameters()
+        // avoids where it can: compare the normals themselves
+        return from.normal.Dot(to.normal);
+    }
+    // Rodrigues' formula with the axis scaled by the sine: v cos + a x v + a (a . v) / (1 + cos)
+    const gp_Vec axis = from.tangent.Crossed(to.tangent);
+    const gp_Vec carried = from.normal * cosine + axis.Crossed(from.normal)
+        + axis * (axis.Dot(from.normal) / (1 + cosine));
+    return carried.Dot(to.normal);
 }
 
 /// The number of sample intervals along \a curve: samplesPerSpan per knot span, at least minSamples
@@ -72,13 +101,61 @@ int sampleCount(const BRepAdaptor_Curve& curve)
     );
 }
 
+/// Appends to \a parameters the sample parameters after \a u0 up to \a u1: \a u1, after those
+/// of the halves of the interval while the curve's tangent turns by more than 45 degrees across it
+/// (at most SweepFrenet::maxHalvings times), so that turnCosine() compares nearby tangents
+void addSamples(
+    const BRepAdaptor_Curve& curve,
+    double u0,
+    const gp_Vec& d0,
+    double u1,
+    const gp_Vec& d1,
+    int halvings,
+    std::vector<double>& parameters
+)
+{
+    if (halvings < Part::SweepFrenet::maxHalvings
+        && d0.Dot(d1) < std::sqrt(0.5) * d0.Magnitude() * d1.Magnitude()) {
+        const double middle = (u0 + u1) / 2;
+        gp_Pnt point;
+        gp_Vec dm;
+        curve.D1(middle, point, dm);
+        addSamples(curve, u0, d0, middle, dm, halvings + 1, parameters);
+        addSamples(curve, middle, dm, u1, d1, halvings + 1, parameters);
+        return;
+    }
+    parameters.push_back(u1);
+}
+
+/// The parameters of the samples along \a curve: sampleCount() even intervals, halved where the
+/// tangent turns fast (addSamples())
+std::vector<double> sampleParameters(const BRepAdaptor_Curve& curve)
+{
+    const int samples = sampleCount(curve);
+    const double first = curve.FirstParameter();
+    const double last = curve.LastParameter();
+    std::vector<double> parameters {first};
+    gp_Pnt point;
+    gp_Vec previous;
+    curve.D1(first, point, previous);
+    for (int i = 1; i <= samples; ++i) {
+        const double u = first + (last - first) * i / samples;
+        gp_Vec tangent;
+        curve.D1(u, point, tangent);
+        addSamples(curve, parameters.back(), previous, u, tangent, 0, parameters);
+        previous = tangent;
+    }
+    return parameters;
+}
+
 /// A point of \a edge where OCCT's Frenet trihedron turns over: two samples at most two apart, with
-/// the curvature clearly above zero, whose normals point more than a right angle apart. Within a
-/// quarter of a knot span the frame turns by more than a right angle about the tangent there: a
-/// section that isn't a circle about the spine folds, whether OCCT's surface follows the turn or
-/// not. A turn completed within one sample interval holds at most one sample, whose normal can be
-/// half-way round (fork PR 358 round 2's verification, finding 2), so it is found wherever the
-/// samples fall; a half turn spread evenly over four intervals or more (half a knot span) is not.
+/// the curvature clearly above zero, between which the frame turns by more than a right angle
+/// about the tangent (turnCosine()). Within a quarter of a knot span the frame turns by more than a
+/// right angle about the tangent there: a section that isn't a circle about the spine folds,
+/// whether OCCT's surface follows the turn or not. A turn completed within one sample interval
+/// holds at most one sample, whose normal can be half-way round (fork PR 358 round 2's
+/// verification, finding 2), so it is found wherever the samples fall; a half turn spread evenly
+/// over four intervals or more (half a knot span) is not, nor the steady turn of a helix's frame.
 std::optional<gp_Pnt> turnOver(const TopoDS_Edge& edge)
 {
     if (BRep_Tool::Degenerated(edge)) {
@@ -101,26 +178,22 @@ std::optional<gp_Pnt> turnOver(const TopoDS_Edge& edge)
         return std::nullopt;
     }
     const double length = GCPnts_AbscissaPoint::Length(*curve);
-    const int samples = sampleCount(*curve);
-    const double first = curve->FirstParameter();
-    const double last = curve->LastParameter();
-    std::optional<gp_Vec> previous;
-    std::optional<gp_Vec> beforePrevious;
-    double previousU = first;
-    for (int i = 0; i <= samples; ++i) {
-        const double u = first + (last - first) * i / samples;
-        const std::optional<gp_Vec> normal = normalAt(*law, *curve, u, length);
-        if (!normal) {
+    std::optional<Frame> previous;
+    std::optional<Frame> beforePrevious;
+    double previousU = curve->FirstParameter();
+    for (const double u : sampleParameters(*curve)) {
+        const std::optional<Frame> frame = frameAt(*law, *curve, u, length);
+        if (!frame) {
             continue;
         }
-        if (previous && previous->Dot(*normal) < 0) {
+        if (previous && turnCosine(*previous, *frame) < 0) {
             return curve->Value(u);
         }
-        if (beforePrevious && beforePrevious->Dot(*normal) < 0) {
+        if (beforePrevious && turnCosine(*beforePrevious, *frame) < 0) {
             return curve->Value(previousU);
         }
         beforePrevious = previous;
-        previous = normal;
+        previous = frame;
         previousU = u;
     }
     return std::nullopt;
@@ -345,7 +418,10 @@ Part::SweepFrenet::Mode Part::SweepFrenet::setMode(
 
 void Part::SweepFrenet::checkBuilt(const TopoDS_Shape& built, Mode mode, double tolerance)
 {
-    if (mode != Mode::PlaneNormal) {
+    // Corrected Frenet too: on ten exactly planar waves turned 45 degrees about X (a sketch on a
+    // tilted plane) it left vertices of 0.15 mm and the tube 1.6e-2 mm off, where the same waves
+    // in XZ came out within 5e-5 (fork PR 358 round 3's verification, finding 1)
+    if (mode == Mode::Asked) {
         return;
     }
     double largest = 0;
@@ -359,8 +435,17 @@ void Part::SweepFrenet::checkBuilt(const TopoDS_Shape& built, Mode mode, double 
         return;
     }
     std::ostringstream message;
-    message << "Sweep: the spine's Frenet frame turns over on a spine that is only nearly planar, "
-               "and sweeping with its plane's normal as binormal left a tolerance of "
-            << largest << " mm. Make the spine planar, or turn Frenet off";
+    if (mode == Mode::PlaneNormal) {
+        message << "Sweep: the spine's Frenet frame turns over on a spine that is only nearly "
+                   "planar, and sweeping with its plane's normal as binormal left a tolerance of "
+                << largest << " mm. Make the spine planar, or turn Frenet off";
+    }
+    else {
+        // Frenet off is corrected Frenet as well, so it isn't suggested
+        message << "Sweep: the spine's Frenet frame turns over, and sweeping with corrected Frenet "
+                   "in its place left a tolerance of "
+                << largest << " mm, more than " << maxToleranceRatio
+                << " times the sweep's own";
+    }
     throw Standard_Failure(message.str().c_str());
 }
