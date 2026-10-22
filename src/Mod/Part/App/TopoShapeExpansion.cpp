@@ -7232,6 +7232,57 @@ bool facesAgainst(const TopoDS_Face& piece, const gp_Dir& direction)
     throw Base::CADKernelError(QT_TRANSLATE_NOOP("Exception", "Could not extrude up to the face"));
 }
 
+// Whether BRepFeat_MakePrism's `prism` of `profile` along `direction` holds what lies behind the
+// first contact: a face of one of its solids, other than one on the profile, whose outward normal
+// points against the way the prism goes (facesAgainst()). Lines along it leave the prism and come
+// back into it there. Up to a whole base of planes and a ball through the plate, BRepFeat filled
+// the shadow of the ball's band above its equator, under the plate, and said it was done
+// (ops#361); the split refuses the same geometry. BRepFeat chooses its own sense, so the way the
+// prism goes is the way it reaches past the profile
+bool fillsBehind(const TopoDS_Shape& prism, const TopoDS_Shape& profile, const gp_Dir& direction)
+{
+    const auto start = extentAlong(profile, direction, true);
+    const auto reach = extentAlong(prism, direction, false);
+    if (!start || !reach) {
+        return false;
+    }
+    gp_Dir way(direction);
+    if (reach->second <= start->second + Precision::Confusion()) {
+        if (reach->first >= start->first - Precision::Confusion()) {
+            return false;
+        }
+        way.Reverse();
+    }
+    // Whether a point inside `face` lies on the profile: the prism's start, which faces against
+    // the way it goes
+    auto onProfile = [&profile](const TopoDS_Face& face) {
+        gp_Pnt point;
+        gp_Pnt2d uv;
+        Handle(IntTools_Context) context = new IntTools_Context;
+        if (BOPTools_AlgoTools3D::PointInFace(face, point, uv, context) != 0) {
+            return false;
+        }
+        BRepExtrema_DistShapeShape distance(BRepBuilderAPI_MakeVertex(point).Vertex(), profile);
+        return distance.IsDone()
+            && distance.Value() <= std::max(BRep_Tool::MaxTolerance(face, TopAbs_EDGE),
+                                            Precision::Confusion());
+    };
+    for (TopExp_Explorer solids(prism, TopAbs_SOLID); solids.More(); solids.Next()) {
+        for (TopExp_Explorer faces(solids.Current(), TopAbs_FACE); faces.More(); faces.Next()) {
+            const TopoDS_Face& face = TopoDS::Face(faces.Current());
+            try {
+                if (facesAgainst(face, way) && !onProfile(face)) {
+                    return true;
+                }
+            }
+            catch (const Base::Exception&) {
+                // No point inside the face to sample: nothing to say about it
+            }
+        }
+    }
+    return false;
+}
+
 // The prism of `profile` along `direction` up to `upTo` (a face or a shell), built without
 // BRepFeat (ops#353), as a Revolution's sweep up to a face is (FeatureRevolved.cpp's
 // sweepUpToFace(), ops#293): the profile extruded past `upTo`, split by it, and the pieces that
@@ -7489,8 +7540,7 @@ TopoShape& TopoShape::makeElementPrismUntil(
     TopoShape result;
     // Up to a freeform face, by a split instead of BRepFeat (ops#353): up to the face as it is,
     // then up to the face without its limits, when they were removed and it is still finite
-    const bool bySplit = !brepFeatReaches(profile.getShape(), _uptoface.getShape(), direction);
-    if (bySplit) {
+    auto prismBySplit = [&]() -> TopoShape {
         const TopoShape named(Tag, Hasher, historyAlgorithm);
         // OCCT's own failures as the Revolution's sweep up to a face takes them: a failed try
         auto split = [&](const TopoShape& upTo) {
@@ -7504,26 +7554,30 @@ TopoShape& TopoShape::makeElementPrismUntil(
             }
         };
         try {
-            result = split(_uptoface);
+            return split(_uptoface);
         }
         catch (const Base::Exception&) {
             // Not without the limits of a closed or periodic surface, which can stop the profile
             // at a part of it far from the face: the first try's error stands (ops#353 review M1)
             Bnd_Box box;
-            BRepBndLib::Add(uptoface.getShape(), box);
-            if (uptoface.isSame(_uptoface) || box.IsVoid() || box.IsOpen()
+            BRepBndLib::Add(uptofaceCopy.getShape(), box);
+            if (uptofaceCopy.isSame(_uptoface) || box.IsVoid() || box.IsOpen()
                 || onClosedSurface(_uptoface)) {
                 throw;
             }
             // When the face without its limits fails too, the face as it is says why
             const std::exception_ptr first = std::current_exception();
             try {
-                result = split(uptoface);
+                return split(uptofaceCopy);
             }
             catch (const Base::Exception&) {
                 std::rethrow_exception(first);
             }
         }
+    };
+    const bool bySplit = !brepFeatReaches(profile.getShape(), _uptoface.getShape(), direction);
+    if (bySplit) {
+        result = prismBySplit();
     }
     while (!bySplit) {
         try {
@@ -7614,6 +7668,10 @@ TopoShape& TopoShape::makeElementPrismUntil(
             "Exception",
             "Could not extrude up to the face: part of the profile doesn't meet it"
         ));
+    }
+    // By the split, which builds the first contact or refuses it, saying why (ops#361)
+    if (!bySplit && fillsBehind(result.getShape(), profile.getShape(), direction)) {
+        result = prismBySplit();
     }
 
     if (!_base.isNull() && Mode != PrismMode::None) {

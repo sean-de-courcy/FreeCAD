@@ -615,19 +615,22 @@ def squareSketch(body, name, placement, rectangles):
     return sketch
 
 
-def padUpToABallUnderAPlate(doc, half):
+def padUpToABallUnderAPlate(doc, half, knob=True, faces=False, length2=None):
     """ops#357: a Body whose BaseFeature is the plate x, y -8..8, z 0..2 with the ball of radius
     5 about (0, 0, -0.1) through it (a dome above it to z 4.9) and the B-spline knob x 5..6, y
     -0.5..0.5, z 2..3 on it beside the dome (a freeform face in the Pad's path, so the Pad goes by
     the split), and a Pad from the square x, y -`half`..`half` at z = -15, along +z, up to the
     base (UpToShape, nothing selected). The ball's band between its equator and the plate (z
-    -0.1..0, 0.02 of the sphere face's 1.59 range) faces the plate. Recomputed, not checked."""
+    -0.1..0, 0.02 of the sphere face's 1.59 range) faces the plate. Without the `knob`, the base
+    has only planes and spheres, and the Pad goes by BRepFeat (ops#361). With `faces`, the Pad goes
+    up to the ball's lower face and the plate's bottom alone; with `length2`, it has a second side
+    of that length. Recomputed, not checked."""
     V = FreeCAD.Vector
     plate = Part.makeBox(16, 16, 2, V(-8, -8, 0))
     ball = Part.makeSphere(5, V(0, 0, -0.1))
-    knob = Part.makeBox(1, 1, 1, V(5, -0.5, 2)).toNurbs()
+    tools = [ball, Part.makeBox(1, 1, 1, V(5, -0.5, 2)).toNurbs()] if knob else [ball]
     base = doc.addObject("Part::Feature", "Base")
-    base.Shape = plate.fuse([ball, knob]).removeSplitter()
+    base.Shape = plate.fuse(tools).removeSplitter()
     body = doc.addObject("PartDesign::Body", "Body")
     baseFeature = body.newObject("PartDesign::FeatureBase", "BaseFeature")
     baseFeature.BaseFeature = base
@@ -636,8 +639,36 @@ def padUpToABallUnderAPlate(doc, half):
     pad = body.newObject("PartDesign::Pad", "Pad")
     pad.Profile = sketch
     pad.Type = "UpToShape"
+    if faces:
+        doc.recompute()
+        pad.UpToShape = [(baseFeature, ballAndPlateBottom(baseFeature.Shape))]
+    if length2 is not None:
+        pad.SideType = "Two sides"
+        pad.Type2 = "Length"
+        pad.Length2 = length2
     doc.recompute()
     return pad
+
+
+def ballAndPlateBottom(shape):
+    """The names of `shape`'s faces on the sphere below z = 0 and on the plane z = 0: the faces of
+    padUpToABallUnderAPlate()'s base (or of TestPocket's mold of it) that the square first meets"""
+    names = []
+    for i, face in enumerate(shape.Faces, 1):
+        kind = face.Surface.TypeId
+        centre = face.CenterOfMass
+        if (kind == "Part::GeomSphere" and centre.z < 0) or (
+            kind == "Part::GeomPlane" and abs(centre.z) < 1e-9 and face.Area < 300
+        ):
+            names.append("Face%d" % i)
+    return names
+
+
+def ballBandShadow():
+    """The shadow of padUpToABallUnderAPlate()'s band: the cylinder of radius 5 between the ball's
+    equator and the plate (z -0.1..0) less the ball, pi times the integral of z^2 over 0..0.1"""
+    V = FreeCAD.Vector
+    return Part.makeCylinder(5, 0.1, V(0, 0, -0.1)).cut(Part.makeSphere(5, V(0, 0, -0.1)))
 
 
 def padUpToABumpOverABall(doc, theta, length, height=0.5):
@@ -2123,6 +2154,34 @@ class TestPad(unittest.TestCase):
                         self.assertIn("meets the face from behind", pad.getStatusString())
                 finally:
                     FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToABallUnderAPlateOfElementaryFaces(self):
+        # ops#361: testPadUpToABallUnderAPlate() without the knob, so the Pad goes by BRepFeat
+        # (planes and spheres only), up to the base, up to the ball's lower face and the plate's
+        # bottom, and with a second side 3 long. BRepFeat filled the band's shadow (0.00105): a
+        # valid Pad, 1890.35. It fails as with the knob, saying why. The control, the square
+        # x, y -1..1, stops at the ball's bottom (and reaches 3 below the sketch)
+        for faces, length2 in ((False, None), (True, None), (False, 3)):
+            for half in (1, 6):
+                with self.subTest(faces=faces, length2=length2, half=half):
+                    doc = FreeCAD.newDocument("PadUpToABallUnderAPlateOfElementaryFaces")
+                    try:
+                        pad = padUpToABallUnderAPlate(doc, half, False, faces, length2)
+                        if half == 1:
+                            self.assertTrue(pad.isValid(), pad.getStatusString())
+                            expected = ballBottomReach(1) + 4 * (length2 or 0)
+                            self.assertAlmostEqual(
+                                pad.AddSubShape.Volume,
+                                expected,
+                                delta=PRISM_VOLUME_RELATIVE * expected,
+                            )
+                            shadow = pad.AddSubShape.common(ballBandShadow())
+                            self.assertAlmostEqual(shadow.Volume, 0, places=9)
+                        else:
+                            self.assertFalse(pad.isValid())
+                            self.assertIn("meets the face from behind", pad.getStatusString())
+                    finally:
+                        FreeCAD.closeDocument(doc.Name)
 
     def testPadUpToABumpOverABallsEquator(self):
         # PR 331 round 1: the bump rises 0.3 over the equator, so a band of the sphere face up to
