@@ -4858,4 +4858,126 @@ TEST_F(TopoShapeExpansionTest, makeShapeWithElementMapSeamKeepsIndexUnderWireOrd
     EXPECT_EQ(namesDiffer(copy, original), "");
 }
 
+namespace
+{
+/// A cylinder (radius 5, height 10) whose profile is a circle drawn as two half arcs, the
+/// profile turned about Z by `degrees`, extruded and offset by 1, named V2 (TestNamingDump's
+/// OffsetSplitCylinder). The offset's caps are planes, which OCCT builds with `u` along world X
+/// whatever the profile's turn. The profile's face and arcs carry given names: with `capFirst`,
+/// the names of the caps' descendants sort before those of the half-cylinders' (as interned
+/// names can), else after.
+TopoShape namedSplitCylinderOffset(double degrees, bool capFirst)
+{
+    const gp_Circ circle(gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)), 5);
+    const TopoDS_Wire wire
+        = BRepBuilderAPI_MakeWire(
+              BRepBuilderAPI_MakeEdge(circle, 0, std::numbers::pi).Edge(),
+              BRepBuilderAPI_MakeEdge(circle, std::numbers::pi, 2 * std::numbers::pi).Edge()
+        )
+              .Wire();
+    // The face is made from the turned wire, so OCCT chooses its plane's axes, as for a sketch
+    const TopoDS_Face face
+        = BRepBuilderAPI_MakeFace(
+              TopoDS::Wire(
+                  BRepBuilderAPI_Transform(wire, rotationAboutZ(degrees), Standard_True).Shape()
+              ),
+              Standard_True
+        )
+              .Face();
+    TopoShape profile(App::HistoryAlgorithm::V2, face, 1L);
+    profile.setElementName(IndexedName::fromConst("Face", 1), MappedName(capFirst ? "A" : "Z"), 1L);
+    for (int arc = 1; arc <= 2; ++arc) {
+        profile.setElementName(
+            IndexedName::fromConst("Edge", arc),
+            MappedName((capFirst ? "Z" : "A") + std::to_string(arc)),
+            1L
+        );
+    }
+    TopoShape cylinder(App::HistoryAlgorithm::V2, 2L);
+    cylinder.makeElementPrism(profile, gp_Vec(0, 0, 10));
+    TopoShape offset(App::HistoryAlgorithm::V2, 3L);
+    offset.makeElementOffset(cylinder, 1.0, 1e-7);
+    return offset;
+}
+}  // namespace
+
+TEST_F(TopoShapeExpansionTest, makeElementOffsetSplitCylinderKeepsNamesWhenTurnedV2)
+{
+    // Arrange
+    //   the offset split cylinder, and the same from a profile turned by 100 degrees about Z. The
+    //   offset's cap vertexes over the split are named from a cap and the two half-cylinders
+    //   (UPP) and told apart only by their index. Their places are read on the first named face
+    //   that isn't a plane: a cap's `u` runs along world X at every turn, so on the cap the pair
+    //   swapped between 90 and 100 degrees (fork PR 355 round 2's review, finding 1). Whether a
+    //   cap is the list's first name depends on how the names sort; both orders are checked
+    for (bool capFirst : {true, false}) {
+        const TopoShape unturned = namedSplitCylinderOffset(0, capFirst);
+        for (double degrees : {-100.0, 100.0}) {
+            // Act
+            const TopoShape turned = namedSplitCylinderOffset(degrees, capFirst);
+
+            // Assert
+            //   every element has the unturned offset's names at the turned place
+            EXPECT_TRUE(allElementsNamed(turned)) << degrees << " degrees";
+            EXPECT_EQ(namesDiffer(turned, unturned, rotationAboutZ(degrees)), "")
+                << degrees << " degrees, cap first: " << capFirst;
+        }
+    }
+}
+
+TEST_F(TopoShapeExpansionTest, makeElementSectionVertexesKeepNamesAcrossTheSeamV2)
+{
+    // Arrange
+    //   a cylinder (radius 5, height 10, its seam at x = 5, y = 0) cut by a vertical plane 1 from
+    //   its axis, turned about Z. Each circle's two section vertexes are generated from that
+    //   circle (S4) and told apart only by their index. OCCT lists them along the circle from its
+    //   seam, so the list's order flips when a chord end passes the seam (between turns of 78 and
+    //   80 degrees either way); the vertexes of a group generated from a closed edge keep the
+    //   result's order instead (fork PR 355 round 2's review, finding 2)
+    const TopoShape cylinder(App::HistoryAlgorithm::V2, BRepPrimAPI_MakeCylinder(5, 10).Shape(), 1L);
+    const double halfChord = std::acos(0.2) * 180 / std::numbers::pi;  // 78.46 degrees
+    auto sectionNames = [&](double degrees) {
+        const TopoDS_Shape plane
+            = BRepBuilderAPI_Transform(
+                  BRepBuilderAPI_MakeFace(gp_Pln(gp_Pnt(1, 0, 0), gp_Dir(1, 0, 0)), -15, 15, -15, 15)
+                      .Face(),
+                  rotationAboutZ(degrees),
+                  Standard_True
+            )
+                  .Shape();
+        TopoShape section(App::HistoryAlgorithm::V2, 3L);
+        section.makeElementBoolean(
+            OpCodes::Section,
+            {cylinder, TopoShape(App::HistoryAlgorithm::V2, plane, 2L)}
+        );
+        //   each vertex's name by the end of the chord it is at (+ or -) and its circle (z)
+        std::map<std::string, std::string> names;
+        const auto vertexes = section.getSubShapes(TopAbs_VERTEX);
+        for (int index = 1; index <= static_cast<int>(vertexes.size()); ++index) {
+            const gp_Pnt point = BRep_Tool::Pnt(TopoDS::Vertex(vertexes[index - 1]));
+            for (double side : {1.0, -1.0}) {
+                const double angle = (degrees + side * halfChord) * std::numbers::pi / 180;
+                for (double z : {0.0, 10.0}) {
+                    if (point.Distance(gp_Pnt(5 * std::cos(angle), 5 * std::sin(angle), z)) < 1e-6) {
+                        names[(side > 0 ? "+" : "-") + std::to_string(static_cast<int>(z))]
+                            = section.getMappedName(IndexedName::fromConst("Vertex", index)).toString();
+                    }
+                }
+            }
+        }
+        return names;
+    };
+
+    for (auto [before, after] : {std::pair {-80.0, -78.0}, std::pair {78.0, 80.0}}) {
+        // Act
+        const auto namesBefore = sectionNames(before);
+        const auto namesAfter = sectionNames(after);
+
+        // Assert
+        //   the four vertexes are found and keep their names as the chord end passes the seam
+        EXPECT_EQ(namesBefore.size(), 4) << before;
+        EXPECT_EQ(namesBefore, namesAfter) << before << " to " << after << " degrees";
+    }
+}
+
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
