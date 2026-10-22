@@ -4980,4 +4980,69 @@ TEST_F(TopoShapeExpansionTest, makeElementSectionVertexesKeepNamesAcrossTheSeamV
     }
 }
 
+namespace
+{
+/// Six 8 x 4 rectangles in a 3 x 2 grid, 5 apart in X and 3 in Y, so that neighbours overlap
+/// (PatternSteps' copies), each extruded 4 along Z, the grid turned about Z by `degrees`, and
+/// fused, named V2. Each profile face is made from the turned wire, so OCCT chooses its plane's
+/// axes, as for a sketch: `u` runs along world X at every turn.
+TopoShape namedFusedRectangleGrid(double degrees)
+{
+    const gp_Trsf turn = rotationAboutZ(degrees);
+    std::vector<TopoShape> blocks;
+    long tag = 1;
+    for (double y : {0.0, 3.0}) {
+        for (double x : {0.0, 5.0, 10.0}) {
+            BRepBuilderAPI_MakePolygon polygon(
+                gp_Pnt(x, y, 0).Transformed(turn),
+                gp_Pnt(x + 8, y, 0).Transformed(turn),
+                gp_Pnt(x + 8, y + 4, 0).Transformed(turn),
+                gp_Pnt(x, y + 4, 0).Transformed(turn),
+                Standard_True
+            );
+            const TopoShape profile(
+                App::HistoryAlgorithm::V2,
+                BRepBuilderAPI_MakeFace(polygon.Wire(), Standard_True).Face(),
+                tag++
+            );
+            TopoShape block(App::HistoryAlgorithm::V2, tag++);
+            block.makeElementPrism(profile, gp_Vec(0, 0, 4));
+            blocks.push_back(block);
+        }
+    }
+    TopoShape fused(App::HistoryAlgorithm::V2, tag);
+    fused.makeElementFuse(blocks);
+    return fused;
+}
+}  // namespace
+
+TEST_F(TopoShapeExpansionTest, makeElementFuseOfRectangleGridKeepsNamesWhenTurnedV2)
+{
+    // Arrange
+    //   the fused grid, and the same turned by 100 degrees about Z. Where the copies overlap, the
+    //   fuse leaves pairs of edges on a cap (the bottom or the top face of the result) that have no
+    //   history and are named from that cap alone (UPP), told apart only by their index. Their
+    //   places can't be read on the cap: its `u` runs along world X at every turn, so a key on it
+    //   swapped the pairs between turns of 89 and 91 degrees (fork PR 355 round 3's review,
+    //   finding 1). A list named only from planes keeps the result's order instead
+    const TopoShape unturned = namedFusedRectangleGrid(0);
+    int upperFromOneFace = 0;
+    for (int index = 1; index <= static_cast<int>(unturned.countSubElements("Edge")); ++index) {
+        const DecodedMappedSection section = lastSection(
+            unturned.getMappedName(IndexedName::fromConst("Edge", index))
+        );
+        upperFromOneFace += section.hasMapperFlag(MAPPER_FLAG_UPPER)
+            && section.linkedNames.size() == 1 && section.index == "1";
+    }
+    EXPECT_GT(upperFromOneFace, 0);  // the case is there
+
+    // Act
+    const TopoShape turned = namedFusedRectangleGrid(100);
+
+    // Assert
+    //   every element has the unturned fuse's names at the turned place
+    EXPECT_TRUE(allElementsNamed(turned));
+    EXPECT_EQ(namesDiffer(turned, unturned, rotationAboutZ(100)), "");
+}
+
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
