@@ -741,6 +741,25 @@ class TestPipeEndNames(unittest.TestCase):
         self.setPolyline(model[1], points(80))
         self.assertNamesAt(model, 0, far(80))
 
+    def testNewTransformedPipePastNinetyDegreesNamesTheProfileEnd(self):
+        """testEndStaysWhenATransformedPipeTurnsPastNinetyDegrees's L made at 120 degrees, a
+        union from the start, then edited to 80 degrees: the names are at the profile's end
+        (z = 0) both times, as for the one sweep. Before (fork PR 356 round 2), with nothing
+        stored the union named the spine's start (z = 20) and stored that."""
+
+        def points(degrees):
+            return [turned(30, degrees, 20), (0, 30), (0, 0)]
+
+        def far(degrees):
+            return 30 + 20 * math.cos(math.radians(degrees))
+
+        model = self.endModel(
+            None, None, points=points(120), Transition="Transformed", Refine=False
+        )
+        self.assertNamesAt(model, 0, far(120))
+        self.setPolyline(model[1], points(80))
+        self.assertNamesAt(model, 0, far(80))
+
     def testUndoAndRedoOfAnEditKeepTheirNames(self):
         """testEndStaysWhenTheProfileCrossesTheMiddle's edit in a transaction, undone and redone,
         the recompute inside the transaction or after it: the names are at the spine's start

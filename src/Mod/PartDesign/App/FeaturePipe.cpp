@@ -2290,7 +2290,6 @@ App::DocumentObjectExecReturn* Pipe::execute()
             }
             reversed = storedSideAtEnd(SpineEnds.getValues(), *spineEnds);
         }
-        const bool storedSide = reversed.has_value();
         // Once the pipe is good: the spine's ends the next recompute pairs with its own, written
         // only when they moved, so that a recompute that changes nothing leaves the file as it was
         auto storeSpineEnds = [&]() {
@@ -2487,11 +2486,8 @@ App::DocumentObjectExecReturn* Pipe::execute()
                 profiles.push_back(profile);
             }
             // The end stored at the last good recompute keeps the names, as in the one sweep, so
-            // that an edit across 90 degrees and back leaves them where they were. With nothing
-            // stored, the spine's start has them, as before ops#379: its first piece starts there.
-            if (!storedSide) {
-                reversed = false;
-            }
+            // that an edit across 90 degrees and back leaves them where they were; with nothing
+            // stored, the one sweep's sections decided above (the end nearest the profile)
             result = sweepPiecesAndFuse(
                 TopoDS::Wire(path.getShape()),
                 tilts.pieceStarts,
