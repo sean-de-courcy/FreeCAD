@@ -4577,8 +4577,6 @@ TopoShape& TopoShape::makeElementPipeShell(
             transMode = BRepBuilderAPI_Transformed;
             break;
     }
-    // Frenet's trihedron turns over at an inflection inside a spine edge (ops#421)
-    SweepFrenet::setMode(mkPipeShell, TopoDS::Wire(spine.getShape()), isFrenet);
     mkPipeShell.SetTransitionMode(transMode);
     if (tol3d != 0.0 || tolBound != 0.0 || tolAngular != 0.0) {
         if (tol3d == 0.0) {
@@ -4594,6 +4592,18 @@ TopoShape& TopoShape::makeElementPipeShell(
     }
 
     const std::vector<TopoShape> profiles = prepareProfiles(shapes, 1);
+    std::vector<TopoDS_Shape> sections;
+    for (auto& sh : profiles) {
+        sections.push_back(sh.getShape());
+    }
+    // Frenet's trihedron turns over at an inflection inside a spine edge (ops#421)
+    SweepFrenet::setMode(
+        mkPipeShell,
+        TopoDS::Wire(spine.getShape()),
+        sections,
+        isFrenet,
+        tol3d != 0.0 ? tol3d : 1e-4
+    );
     for (auto& sh : profiles) {
         mkPipeShell.Add(sh.getShape());
     }

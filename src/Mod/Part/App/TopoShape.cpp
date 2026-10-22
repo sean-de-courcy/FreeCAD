@@ -2129,7 +2129,8 @@ TopoDS_Shape TopoShape::makePipeShell(
             break;
     }
     // Frenet's trihedron turns over at an inflection inside a spine edge (ops#421)
-    SweepFrenet::setMode(mkPipeShell, TopoDS::Wire(this->_Shape), isFrenet);
+    std::vector<TopoDS_Shape> sections(profiles.begin(), profiles.end());
+    SweepFrenet::setMode(mkPipeShell, TopoDS::Wire(this->_Shape), sections, isFrenet, 1e-4);
     mkPipeShell.SetTransitionMode(transMode);
     TopTools_ListIteratorOfListOfShape it;
     for (it.Initialize(profiles); it.More(); it.Next()) {
