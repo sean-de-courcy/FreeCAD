@@ -2782,9 +2782,15 @@ class TestRevolve(unittest.TestCase):
         of radius 1.46 to 1.65 cross the wall three times, at about 118, 145 to 180, and 200
         degrees; other circles cross it once. The band lay between the profile's samples, and the
         Groove also removed those circles between their second and third crossings, with no error
-        (the PR 279 round 3 verification's 1). First contact jumps there, and no tool the fork
-        builds is right: it fails, naming the place (ops#293 round 5)."""
-        wall = self.foldedWall(-1, 4)
+        (the PR 279 round 3 verification's 1). First contact jumps at the fold's outer radius,
+        which the certificate refuses (ops#293 round 5); the tool is built between walls along the
+        jump instead (ops#293 D2). Its cut from the box was refused as a wrong volume while the
+        check integrated adaptively (2e-4 off on the tool): the Groove removes what first contact
+        gives, and the band stays."""
+        wall, curve = self.polarWall(self.foldedLegs)
+        expected = self.firstContactVolume(
+            self.firstContactAngles(curve), 1, 3, 0, 2, self.radiusTurns(curve, 1, 3)
+        )
         body = self.Doc.addObject("PartDesign::Body", "Body")
         block = body.newObject("PartDesign::AdditiveBox", "Block")
         block.Length = block.Width = 12
@@ -2792,7 +2798,18 @@ class TestRevolve(unittest.TestCase):
         block.Placement = FreeCAD.Placement(FreeCAD.Vector(-6, -6, -0.5), FreeCAD.Rotation())
         self.Doc.recompute()
         groove = self.revolveProfileUpTo(body, "Groove", "One side", (wall, ["Face1"]))
-        self.assertJumpRefused(groove)
+        self.assertTrue(groove.isValid(), groove.getStatusString())
+        shape = groove.Shape
+        self.assertTrue(shape.isValid())
+        self.assertEqual(len(shape.Solids), 1)
+        self.assertAlmostEqual(groove.AddSubShape.Volume, expected, delta=1e-4 * expected)
+        self.assertAlmostEqual(
+            block.Shape.Volume - shape.Volume, expected, delta=1e-4 * expected
+        )
+        # Removed before the jump; the band between the second and third crossings stays
+        self.assertTurnHolds(
+            shape, [(1.5, 1, 130), (1.55, 1, 190), (2.5, 1, 250)], [(1.5, 1, 60), (2.5, 1, 150)]
+        )
 
     def testRevolutionUpToFaceNeverMet(self):
         """The plane y = 100, parallel to the profile plane: the sweep about the Z axis never
@@ -2853,13 +2870,15 @@ class TestRevolve(unittest.TestCase):
         self.Doc.recompute()
         return revolution
 
+    # foldedWall()'s polar legs (r0, r1, a0, a1), as polarWall() takes them
+    foldedLegs = ((0.5, 1.65, 100, 120), (1.65, 1.46, 120, 200), (1.46, 3.5, 200, 220))
+
     def foldedWall(self, low, height):
         """A wall along Z from z = `low`, `height` high, whose curve runs out from r = 0.5 to 1.65
         (angles 100 to 120 degrees), back in to 1.46 (120 to 200) and out to 3.5 (200 to 220):
         circles of radius 1.46 to 1.65 cross it three times (testGrooveUpToFoldedWall)."""
-        legs = ((0.5, 1.65, 100, 120), (1.65, 1.46, 120, 200), (1.46, 3.5, 200, 220))
         points = []
-        for index, (r0, r1, a0, a1) in enumerate(legs):
+        for index, (r0, r1, a0, a1) in enumerate(self.foldedLegs):
             for k in range(61 if index == 2 else 60):
                 radius = r0 + (r1 - r0) * k / 60
                 angle = math.radians(a0 + (a1 - a0) * k / 60)
@@ -2884,9 +2903,22 @@ class TestRevolve(unittest.TestCase):
         """foldedWall() 120 high (z from -60.25), much taller than profileAcross(): the round 4
         grid's rows were 2.5 apart there and none fell in the profile, so its fold went unseen and
         12 of 24 tools were wrong, with no error (the PR 279 round 4 verification's q22 A). The
-        certified silhouette finds it whatever the face's height: each Revolution and Groove,
-        either way, fails naming where first contact jumps (ops#293 round 5)."""
+        certified silhouette finds it whatever the face's height (ops#293 round 5), and first
+        contact jumps there. Turning forward, each Revolution and Groove either fails naming the
+        jump, or is built between walls along it (ops#293 D2) and holds what first contact gives,
+        within the walls' push. Which one depends on OCCT's numerics: here the construction
+        refuses heights 119, 120, 122 and 140 ("part of the cell goes all the way round") and
+        builds it 4 to 118 and 121 high; macOS arm64 builds 120 (fork PR 357 round 3)."""
         wall = self.foldedWall(-60.25, 120)
+        curve = wall.Shape.Faces[0].Surface.BasisCurve
+        angle = self.firstContactAngles(curve)
+        breaks = self.radiusTurns(curve, 1, 3)
+        expected = self.firstContactVolume(angle, 1, 3, 0, 2, breaks)
+        # A tool built between walls pushed at most 1e-4 of the profile's size (the
+        # construction's cap) differs from first contact by at most the strips along the jumps,
+        # each push x the jump in angle x the radius x the profile's height (section 15.2)
+        push = 1e-4 * math.hypot(2, 2)
+        strips = sum(push * abs(angle(r + 1e-3) - angle(r - 1e-3)) * r * 2 for r in breaks)
         for kind in ("Revolution", "Groove"):
             for reversed_ in (False, True):
                 with self.subTest(kind=kind, reversed_=reversed_):
@@ -2904,23 +2936,464 @@ class TestRevolve(unittest.TestCase):
                     if reversed_ and feature.isValid():
                         # Turning the other way the wall's third leg comes first: no jump
                         continue
-                    self.assertJumpRefused(feature)
+                    if not feature.isValid():
+                        self.assertJumpRefused(feature)
+                        continue
+                    self.assertFalse(reversed_)
+                    tool = feature.AddSubShape.Volume
+                    self.assertAlmostEqual(tool, expected, delta=strips + 1e-6 * expected)
+                    # The tool lies inside the block: the Revolution adds nothing, the Groove cuts it
+                    result = block.Shape.Volume - (tool if kind == "Groove" else 0.0)
+                    self.assertAlmostEqual(
+                        feature.Shape.Volume, result, delta=strips + 1e-6 * result
+                    )
 
     def testRevolutionUpToFoldedWallLeakInsideBase(self):
         """foldedWall() with a base block over where circles of radius 1.46 to 1.65 run between
         their second and third crossings: a Revolution that kept that band would hide it in the
-        base, but where first contact jumps no tool the fork builds is right, so it fails, naming
-        the place (ops#293 round 5; the critic's base-hidden regressions)."""
-        wall = self.foldedWall(-1, 4)
+        base (the critic's base-hidden regressions). First contact jumps, and the tool is built
+        between walls along the jump (ops#293 D2): the tool alone holds what first contact gives,
+        so the band isn't in it, and the result is the block and the tool less their overlap."""
+        wall, curve = self.polarWall(self.foldedLegs)
+        angle = self.firstContactAngles(curve)
+        breaks = self.radiusTurns(curve, 1, 3)
+        tool = self.firstContactVolume(angle, 1, 3, 0, 2, breaks)
+        x0, x1, y0, y1 = -2.5, -0.8, -0.5, 1.2
+        ends = [1] + breaks + [3]
+        overlap = 2 * sum(
+            self.midpointIntegral(
+                lambda r: r * self.arcInRect(r, 0, angle(r), x0, x1, y0, y1), low, high, steps=400
+            )
+            for low, high in zip(ends, ends[1:])
+        )
         body = self.Doc.addObject("PartDesign::Body", "Body")
         block = body.newObject("PartDesign::AdditiveBox", "Block")
-        block.Length = 1.7
-        block.Width = 1.7
+        block.Length = x1 - x0
+        block.Width = y1 - y0
         block.Height = 3
-        block.Placement = FreeCAD.Placement(FreeCAD.Vector(-2.5, -0.5, -0.5), FreeCAD.Rotation())
+        block.Placement = FreeCAD.Placement(FreeCAD.Vector(x0, y0, -0.5), FreeCAD.Rotation())
         self.Doc.recompute()
         revolution = self.revolveProfileUpTo(body, "Revolution", "One side", (wall, ["Face1"]))
-        self.assertJumpRefused(revolution)
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        shape = revolution.Shape
+        self.assertTrue(shape.isValid())
+        self.assertEqual(len(shape.Solids), 1)
+        self.assertAlmostEqual(revolution.AddSubShape.Volume, tool, delta=1e-4 * tool)
+        expected = block.Shape.Volume + tool - overlap
+        self.assertAlmostEqual(shape.Volume, expected, delta=1e-4 * expected)
+        # Outside the block: before the jump in the result, past it not
+        self.assertTurnHolds(shape, [(1.5, 1, 60), (2.5, 1, 150)], [(1.3, 1, 125), (2.5, 1, 250)])
+
+    def polarWall(self, legs, low=-1, height=4):
+        """A wall along Z from z = `low`, `height` high, whose curve runs through the polar legs
+        (r0, r1, a0, a1), the radius linear in the angle (degrees) along each: the wall, and its
+        curve."""
+        points = []
+        for index, (r0, r1, a0, a1) in enumerate(legs):
+            for k in range(61 if index == len(legs) - 1 else 60):
+                radius = r0 + (r1 - r0) * k / 60
+                angle = math.radians(a0 + (a1 - a0) * k / 60)
+                points.append(
+                    FreeCAD.Vector(radius * math.cos(angle), radius * math.sin(angle), low)
+                )
+        curve = Part.BSplineCurve()
+        curve.interpolate(points)
+        wall = self.Doc.addObject("Part::Feature", "Wall")
+        wall.Shape = Part.Edge(curve).extrude(FreeCAD.Vector(0, 0, height))
+        self.Doc.recompute()
+        return wall, curve
+
+    @staticmethod
+    def firstContactAngles(curve, forward=True, samples=2000):
+        """For an extruded wall's curve: r -> the angle at which the circle of radius r about Z
+        first meets the curve, from the XZ plane's +X side, turning about +Z (or -Z)."""
+        first = curve.FirstParameter
+        last = curve.LastParameter
+
+        def radius(t):
+            point = curve.value(t)
+            return math.hypot(point.x, point.y)
+
+        parameters = [first + (last - first) * i / samples for i in range(samples + 1)]
+        radii = [radius(t) for t in parameters]
+
+        def angle(r):
+            best = None
+            for i in range(samples):
+                if (radii[i] - r) * (radii[i + 1] - r) > 0 or radii[i] == radii[i + 1]:
+                    continue
+                a, b = parameters[i], parameters[i + 1]
+                rising = radii[i + 1] > radii[i]
+                for _ in range(60):
+                    c = (a + b) / 2
+                    if (radius(c) < r) == rising:
+                        a = c
+                    else:
+                        b = c
+                point = curve.value((a + b) / 2)
+                turned = math.atan2(point.y, point.x) % (2 * math.pi)
+                turned = turned if forward else 2 * math.pi - turned
+                best = turned if best is None else min(best, turned)
+            return best
+
+        return angle
+
+    @staticmethod
+    def radiusTurns(curve, low, high, samples=20000):
+        """The radii in (low, high) at which an extruded wall's curve turns toward or away from
+        Z: where first contact can jump. An interpolated curve overshoots its legs' corners
+        (foldedWall()'s 1.65 is 1.65299)."""
+        first = curve.FirstParameter
+        last = curve.LastParameter
+
+        def radius(t):
+            point = curve.value(t)
+            return math.hypot(point.x, point.y)
+
+        step = (last - first) / samples
+        turns = []
+        for i in range(1, samples):
+            t = first + i * step
+            before, here, after = radius(t - step), radius(t), radius(t + step)
+            if (here - before) * (after - here) >= 0:
+                continue
+            # Golden-section search for the extremum in [t - step, t + step]
+            sign = 1 if here > before else -1
+            a, b = t - step, t + step
+            for _ in range(60):
+                c = b - (b - a) * 0.618
+                d = a + (b - a) * 0.618
+                if sign * radius(c) > sign * radius(d):
+                    b = d
+                else:
+                    a = c
+            r = radius((a + b) / 2)
+            if low < r < high:
+                turns.append(r)
+        return sorted(turns)
+
+    @staticmethod
+    def arcInRect(r, low, high, x0, x1, y0, y1):
+        """The angle within [low, high] (radians from +X about +Z, in [0, 2 pi]) over which the
+        circle of radius r about Z lies in the rectangle x in [x0, x1], y in [y0, y1]."""
+        cuts = {low, high}
+        for c in (x0, x1):
+            if abs(c) <= r:
+                a = math.acos(c / r)
+                cuts |= {a, 2 * math.pi - a}
+        for c in (y0, y1):
+            if abs(c) <= r:
+                a = math.asin(c / r)
+                cuts |= {a % (2 * math.pi), (math.pi - a) % (2 * math.pi)}
+        cuts = sorted(c for c in cuts if low <= c <= high)
+        inside = 0
+        for a, b in zip(cuts, cuts[1:]):
+            m = (a + b) / 2
+            if x0 <= r * math.cos(m) <= x1 and y0 <= r * math.sin(m) <= y1:
+                inside += b - a
+        return inside
+
+    def firstContactVolume(self, angle, x0, x1, z0, z1, breaks):
+        """The volume first contact gives the profile x in [x0, x1], z in [z0, z1] turning about
+        Z, `angle` from firstContactAngles(), integrated piecewise between `breaks`."""
+        ends = [x0] + sorted(breaks) + [x1]
+        swept = sum(
+            self.midpointIntegral(lambda r: r * angle(r), low, high, steps=200)
+            for low, high in zip(ends, ends[1:])
+        )
+        return (z1 - z0) * swept
+
+    def assertTurnHolds(self, shape, inside, outside):
+        """Points (r, z, degrees about Z from +X) of the shape: `inside` in it, `outside` not."""
+
+        def at(r, z, degrees):
+            return FreeCAD.Vector(
+                r * math.cos(math.radians(degrees)), r * math.sin(math.radians(degrees)), z
+            )
+
+        for point in inside:
+            self.assertTrue(shape.isInside(at(*point), 1e-7, True), point)
+        for point in outside:
+            self.assertFalse(shape.isInside(at(*point), 1e-7, True), point)
+
+    def testRevolutionUpToHookFirstContact(self):
+        """The profile x in [1, 3], z in [0, 2] up to an extruded hook whose curve runs in from
+        r 2 (100 degrees) to 0.5 (130) and out to 3.5 (220): circles inside r 2 meet its first
+        leg near 110 degrees, those outside only its second, from 175 degrees on. First contact
+        jumps at r 2, which today's certificate refuses; the solid is built between walls along
+        the jump instead (ops#293 D2), and holds what first contact gives."""
+        wall, curve = self.polarWall(((2, 0.5, 100, 130), (0.5, 3.5, 130, 220)))
+        expected = self.firstContactVolume(self.firstContactAngles(curve), 1, 3, 0, 2, [2])
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        sketch = self.rectProfile(body, 1, 3, 0, 2)
+        revolution = self.revolveUpTo(body, "Revolution", sketch, (wall, ["Face1"]))
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        shape = revolution.Shape
+        self.assertTrue(shape.isValid())
+        self.assertEqual(len(shape.Solids), 1)
+        self.assertAlmostEqual(shape.Volume, expected, delta=1e-4 * expected)
+        self.assertTurnHolds(shape, [(1.5, 1, 90), (2.5, 1, 150)], [(1.5, 1, 130), (2.5, 1, 200)])
+
+    def testRevolutionTwoSidesUpToHookFirstContact(self):
+        """testRevolutionUpToHookFirstContact's hook as side 1 of Two sides, side 2 turning the
+        other way up to the YZ plane: a quarter turn, which adds pi / 2 x 4 x 2 = 4 pi. Side 1
+        is built between walls along its jump, side 2 is today's sweep (ops#293 D2)."""
+        wall, curve = self.polarWall(((2, 0.5, 100, 130), (0.5, 3.5, 130, 220)))
+        expected = self.firstContactVolume(self.firstContactAngles(curve), 1, 3, 0, 2, [2])
+        expected += 4 * math.pi
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        sketch = self.rectProfile(body, 1, 3, 0, 2)
+        [yz] = [f for f in body.Origin.OriginFeatures if f.Role == "YZ_Plane"]
+        revolution = body.newObject("PartDesign::Revolution", "Revolution")
+        revolution.Profile = sketch
+        revolution.ReferenceAxis = (sketch, ["V_Axis"])
+        revolution.SideType = "Two sides"
+        revolution.Type = "UpToFace"
+        revolution.UpToFace = (wall, ["Face1"])
+        revolution.Type2 = "UpToFace"
+        revolution.UpToFace2 = (yz, [""])
+        self.Doc.recompute()
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        shape = revolution.Shape
+        self.assertTrue(shape.isValid())
+        self.assertEqual(len(shape.Solids), 1)
+        self.assertAlmostEqual(shape.Volume, expected, delta=1e-4 * expected)
+        self.assertTurnHolds(
+            shape,
+            [(1.5, 1, 90), (2.5, 1, 150), (1.5, 1, -45), (2.5, 1, -80)],
+            [(1.5, 1, 130), (2.5, 1, 200), (1.5, 1, -100), (2.5, 1, -100)],
+        )
+
+    def heightProfile(self, body, x0, x1, height):
+        """The profile x in [x0, x1], z in [0, `height`] on XZ, fully constrained: the sketch, and
+        the index of its height's constraint."""
+        sketch = self.rectProfile(body, x0, x1, 0, height)
+        for i in range(4):
+            sketch.addConstraint(Sketcher.Constraint("Coincident", i, 2, (i + 1) % 4, 1))
+        sketch.addConstraint(Sketcher.Constraint("Horizontal", 0))
+        sketch.addConstraint(Sketcher.Constraint("Horizontal", 2))
+        sketch.addConstraint(Sketcher.Constraint("Vertical", 1))
+        sketch.addConstraint(Sketcher.Constraint("Vertical", 3))
+        sketch.addConstraint(Sketcher.Constraint("PointOnObject", 0, 1, -1))
+        sketch.addConstraint(Sketcher.Constraint("DistanceX", -1, 1, 0, 1, x0))
+        sketch.addConstraint(Sketcher.Constraint("DistanceX", 0, x1 - x0))
+        index = sketch.addConstraint(Sketcher.Constraint("DistanceY", 1, height))
+        self.Doc.recompute()
+        return sketch, index
+
+    @staticmethod
+    def facesAtRadius(shape, radius):
+        """The names of the shape's faces, not planes, whose vertices and middle lie within 1e-4 of
+        `radius` from Z."""
+        names = []
+        for i, face in enumerate(shape.Faces, 1):
+            if face.Surface.TypeId == "Part::GeomPlane":
+                continue
+            u0, u1, v0, v1 = face.ParameterRange
+            points = [v.Point for v in face.Vertexes] + [face.valueAt((u0 + u1) / 2, (v0 + v1) / 2)]
+            if all(abs(math.hypot(p.x, p.y) - radius) < 1e-4 for p in points):
+                names.append("Face%d" % i)
+        return names
+
+    def testRevolutionUpToHookNamesItsWall(self):
+        """testRevolutionUpToHookFirstContact's solid built between walls is named (ops#293 D2,
+        notes 15.17): every face has a name, and the wall's (the turn of the jump at r 2) is
+        generated from the hook's edge there. Its name finds it again after a recompute and after
+        the profile's height goes from 2 to 2.5, and so does a SubShapeBinder of it."""
+        from PartDesignTests.TestPad import assertFacesAllNamed
+
+        wall, _ = self.polarWall(((2, 0.5, 100, 130), (0.5, 3.5, 130, 220)))
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        sketch, height = self.heightProfile(body, 1, 3, 2)
+        revolution = self.revolveUpTo(body, "Revolution", sketch, (wall, ["Face1"]))
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        assertFacesAllNamed(self, revolution.Shape)
+        [face] = self.facesAtRadius(revolution.Shape, 2)
+        names = {name for name, element in revolution.Shape.ElementMap.items() if element == face}
+        self.assertTrue(names)
+        # Generated from the hook's edge at r 2, whose image the jump is (a bare shape's names
+        # come from its own indices)
+        for name in names:
+            tag, source, _ = revolution.Shape.getElementHistory(name)
+            self.assertEqual(tag, wall.ID, name)
+            edge = wall.Shape.getElement(source)
+            for vertex in edge.Vertexes:
+                self.assertAlmostEqual(math.hypot(vertex.X, vertex.Y), 2, places=6)
+        binder = self.Doc.addObject("PartDesign::SubShapeBinder", "WallReference")
+        binder.Support = [(revolution, face)]
+        self.Doc.recompute()
+
+        def assertWall(top):
+            [face] = self.facesAtRadius(revolution.Shape, 2)
+            for name in names:
+                self.assertEqual(revolution.Shape.ElementMap.get(name), face, name)
+            self.assertEqual(len(binder.Shape.Faces), 1)
+            bound = binder.Shape.BoundBox
+            self.assertAlmostEqual(bound.ZMin, 0, places=6)
+            self.assertAlmostEqual(bound.ZMax, top, places=6)
+            self.assertEqual(self.facesAtRadius(binder.Shape, 2), ["Face1"])
+
+        assertWall(2)
+        revolution.touch()
+        self.Doc.recompute()
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        assertWall(2)
+        sketch.setDatum(height, FreeCAD.Units.Quantity("2.5 mm"))
+        self.Doc.recompute()
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        assertWall(2.5)
+
+    # A wall with two folds: first contact jumps at both fold radii (r 1.65299 and 2.30091 after the
+    # interpolation's overshoot), and both walls are images of the face itself
+    twoFoldLegs = (
+        (0.5, 1.65, 100, 120),
+        (1.65, 1.46, 120, 200),
+        (1.46, 2.3, 200, 230),
+        (2.3, 2.0, 230, 280),
+        (2.0, 3.5, 280, 300),
+    )
+
+    @staticmethod
+    def wallFaceAt(shape, radius):
+        """The name of the shape's largest face lying at `radius` from Z (each wall here has a
+        sliver face beside its main one), or None."""
+        faces = TestRevolve.facesAtRadius(shape, radius)
+        if not faces:
+            return None
+        return max(faces, key=lambda name: shape.getElement(name).Area)
+
+    def testRevolutionUpToTwoFoldsNamesEachWall(self):
+        """The profile x in [1, 3], z in [0, 2] up to a wall with two folds: first contact jumps
+        at r 1.653 and 2.301, and the solid is built between two walls, both generated from the
+        wall's face (ops#293 D2). Each wall's names hold its own line: a SubShapeBinder of the
+        outer wall follows a height edit, and breaks loudly, never moving to the inner wall, when
+        x1 goes from 3 to 2.1 and the outer wall leaves the profile (PR 357 review round 1, R1)."""
+        from PartDesignTests.TestPad import assertFacesAllNamed
+
+        wall, curve = self.polarWall(self.twoFoldLegs)
+        # The curve's radius turns at 1.458, 1.653, 1.999 and 2.301; first contact jumps at the
+        # two maxima
+        turns = self.radiusTurns(curve, 1, 3)
+        self.assertEqual(len(turns), 4)
+        inner, outer = turns[1], turns[3]
+        self.assertAlmostEqual(inner, 1.653, places=3)
+        self.assertAlmostEqual(outer, 2.301, places=3)
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        sketch, height = self.heightProfile(body, 1, 3, 2)
+        width = height - 1
+        revolution = self.revolveUpTo(body, "Revolution", sketch, (wall, ["Face1"]))
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        shape = revolution.Shape
+        self.assertEqual(len(shape.Solids), 1)
+        assertFacesAllNamed(self, shape)
+        self.assertIsNotNone(self.wallFaceAt(shape, inner))
+        outerFace = self.wallFaceAt(shape, outer)
+        self.assertIsNotNone(outerFace)
+        names = {name for name, element in shape.ElementMap.items() if element == outerFace}
+        self.assertTrue(names)
+        binder = self.Doc.addObject("PartDesign::SubShapeBinder", "OuterWall")
+        binder.Support = [(revolution, outerFace)]
+        self.Doc.recompute()
+
+        def assertOuterWall(top):
+            face = self.wallFaceAt(revolution.Shape, outer)
+            for name in names:
+                self.assertEqual(revolution.Shape.ElementMap.get(name), face, name)
+            self.assertTrue(binder.isValid(), binder.getStatusString())
+            self.assertEqual(len(binder.Shape.Faces), 1)
+            self.assertEqual(self.facesAtRadius(binder.Shape, outer), ["Face1"])
+            self.assertAlmostEqual(binder.Shape.BoundBox.ZMax, top, places=6)
+
+        assertOuterWall(2)
+        sketch.setDatum(height, FreeCAD.Units.Quantity("2.5 mm"))
+        self.Doc.recompute()
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        assertOuterWall(2.5)
+
+        sketch.setDatum(width, FreeCAD.Units.Quantity("1.1 mm"))
+        self.Doc.recompute()
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        shape = revolution.Shape
+        self.assertIsNone(self.wallFaceAt(shape, outer))
+        innerFace = self.wallFaceAt(shape, inner)
+        self.assertIsNotNone(innerFace)
+        # The outer wall's names are gone, not moved to the inner wall's face
+        for name in names:
+            self.assertIsNone(shape.ElementMap.get(name), name)
+        # The binder fails loudly: its reference is reported missing, and it doesn't hold the
+        # inner wall
+        self.assertFalse(binder.isValid())
+        self.assertIn("Invalid", binder.State)
+        self.assertIn("Missing face reference", binder.getStatusString())
+        self.assertEqual(self.facesAtRadius(binder.Shape, inner), [])
+
+    # A wall with three folds: first contact jumps at r 1.652, 2.300 and 2.901 (after the
+    # interpolation's overshoot), and all three walls are images of the face itself
+    threeFoldLegs = (
+        (0.5, 1.65, 80, 100),
+        (1.65, 1.46, 100, 160),
+        (1.46, 2.3, 160, 190),
+        (2.3, 2.0, 190, 230),
+        (2.0, 2.9, 230, 260),
+        (2.9, 2.6, 260, 300),
+        (2.6, 3.8, 300, 320),
+    )
+
+    def testRevolutionUpToThreeFoldsKeepsWallNames(self):
+        """The profile x in [1, 2.5], z in [0, 2] up to a wall with three folds holds the walls at
+        r 1.652 and 2.300. Moving the profile to x in [1.8, 3.3] (x0 edited, width kept) drops the
+        1.652 wall and brings in the 2.901 one, keeping the count of walls: the 2.300 wall's
+        names, and a SubShapeBinder of it, stay on the 2.300 wall and never move to the 2.901
+        one (ops#293 D2, PR 357 review round 1, V1)."""
+        from PartDesignTests.TestPad import assertFacesAllNamed
+
+        wall, curve = self.polarWall(self.threeFoldLegs)
+        # The curve's radius turns at 1.459, 1.652, 2.000, 2.300, 2.599 and 2.901; first contact
+        # jumps at the three maxima
+        turns = self.radiusTurns(curve, 0.6, 3.7)
+        self.assertEqual(len(turns), 6)
+        first, middle, last = turns[1], turns[3], turns[5]
+        self.assertAlmostEqual(first, 1.652, delta=1e-3)
+        self.assertAlmostEqual(middle, 2.300, delta=1e-3)
+        self.assertAlmostEqual(last, 2.901, delta=1e-3)
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        sketch, height = self.heightProfile(body, 1, 2.5, 2)
+        x0 = height - 2
+        revolution = self.revolveUpTo(body, "Revolution", sketch, (wall, ["Face1"]))
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        shape = revolution.Shape
+        self.assertEqual(len(shape.Solids), 1)
+        assertFacesAllNamed(self, shape)
+        self.assertIsNotNone(self.wallFaceAt(shape, first))
+        self.assertIsNone(self.wallFaceAt(shape, last))
+        middleFace = self.wallFaceAt(shape, middle)
+        self.assertIsNotNone(middleFace)
+        names = {name for name, element in shape.ElementMap.items() if element == middleFace}
+        self.assertTrue(names)
+        binder = self.Doc.addObject("PartDesign::SubShapeBinder", "MiddleWall")
+        binder.Support = [(revolution, middleFace)]
+        self.Doc.recompute()
+        self.assertTrue(binder.isValid(), binder.getStatusString())
+        self.assertEqual(self.facesAtRadius(binder.Shape, middle), ["Face1"])
+
+        sketch.setDatum(x0, FreeCAD.Units.Quantity("1.8 mm"))
+        self.Doc.recompute()
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        shape = revolution.Shape
+        self.assertEqual(len(shape.Solids), 1)
+        self.assertAlmostEqual(shape.BoundBox.XMax, 3.3, places=6)
+        assertFacesAllNamed(self, shape)
+        self.assertIsNone(self.wallFaceAt(shape, first))
+        self.assertIsNotNone(self.wallFaceAt(shape, last))
+        middleFace = self.wallFaceAt(shape, middle)
+        self.assertIsNotNone(middleFace)
+        # The 2.300 wall's names still find it, not the 2.901 wall that took the other's place
+        for name in names:
+            self.assertEqual(shape.ElementMap.get(name), middleFace, name)
+        self.assertTrue(binder.isValid(), binder.getStatusString())
+        self.assertEqual(len(binder.Shape.Faces), 1)
+        self.assertEqual(self.facesAtRadius(binder.Shape, middle), ["Face1"])
+        self.assertEqual(self.facesAtRadius(binder.Shape, last), [])
 
     def testRevolutionUpToCylinderRingAroundProfile(self):
         """The profile x in [1.2, 1.8], z in [0.7, 1.3] up to a whole cylinder of radius 1 along

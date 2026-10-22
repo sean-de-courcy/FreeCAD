@@ -379,7 +379,8 @@ names it.
 | `fix/382-vtk-output-window` | fix | ops#382 | - | `integration` `19b2300169` | `01a7681c2f` (fork PR 351), 2026-10-21 | never (fork fix) |
 | `fix/360-upto-cap-names` | fix | ops#360 | - | `integration` `2e2bb138ba` | `c4b4011a87` (fork PR 340), 2026-10-21 | never (fork fix) |
 | `fix/375-sweep-end-names` | fix | ops#375 | - | `integration` `c4b4011a87` | `2b1690e050` (fork PR 352), 2026-10-21 | never (fork fix) |
-| `fix/414-mass-properties` | fix | ops#414 | - | `integration` `6c8d6ea5b6` | (fork PR 354) | never (fork fix) |
+| `fix/414-mass-properties` | fix | ops#414 | - | `integration` `6c8d6ea5b6` | `72e19a4705` (fork PR 354), 2026-10-21 | never (fork fix) |
+| `feat/293-d2-first-contact` | feat | ops#293 | - | `integration` `4f191bb942` | (fork PR 357) | never (fork feature) |
 
 ## Fork-only commits in carried topics
 
