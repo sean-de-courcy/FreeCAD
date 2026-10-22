@@ -377,7 +377,35 @@ std::pair<double, double> derivativeBounds(Handle(Geom2d_BSplineCurve) curve)
     return derivativeBounds(points, weights, {sequence.begin(), sequence.end()}, curve->Degree());
 }
 
-// A point inside the face: OCCT's, or the middle of its parameters' box where that lies inside
+// A wall's line, for its name (section 15.19): the line through its unpushed curve's ends, as the
+// doubled angle of its direction and the foot of the perpendicular from the frame's origin, rounded
+// (to 1e-3 and 1e-4 mm). The same for a straight wall wherever the profile cuts it; a curved wall's
+// changes with the profile, and a reference to it breaks.
+std::string lineKey(const Handle(Geom2d_BSplineCurve)& curve)
+{
+    const gp_Pnt2d start = curve->StartPoint();
+    gp_Vec2d along(start, curve->EndPoint());
+    if (along.Magnitude() < Precision::Confusion()) {
+        return "P";
+    }
+    along.Normalize();
+    const gp_Vec2d normal(-along.Y(), along.X());
+    const double offset = gp_Vec2d(start.XY()).Dot(normal);
+    auto rounded = [](double value) {
+        const long long k = std::llround(value);
+        return k < 0 ? "N" + std::to_string(-k) : std::to_string(k);
+    };
+    return fmt::format(
+        "{}_{}_{}_{}",
+        rounded(1e3 * (along.X() * along.X() - along.Y() * along.Y())),
+        rounded(1e3 * 2.0 * along.X() * along.Y()),
+        rounded(offset * normal.X() / 1e-4),
+        rounded(offset * normal.Y() / 1e-4)
+    );
+}
+
+// A point inside the face: OCCT's, or the first of points along the middle of its parameters' box
+// (across u, then across v) that lies inside
 std::optional<gp_Pnt> pointInside(const TopoDS_Face& face, const Handle(IntTools_Context)& context)
 {
     gp_Pnt point;
@@ -390,11 +418,18 @@ std::optional<gp_Pnt> pointInside(const TopoDS_Face& face, const Handle(IntTools
     double v0 = 0.0;
     double v1 = 0.0;
     BRepTools::UVBounds(face, u0, u1, v0, v1);
-    uv.SetCoord((u0 + u1) / 2.0, (v0 + v1) / 2.0);
-    if (BRepTopAdaptor_FClass2d(face, Precision::PConfusion()).Perform(uv) != TopAbs_IN) {
-        return std::nullopt;
+    const BRepTopAdaptor_FClass2d classifier(face, Precision::PConfusion());
+    for (const bool acrossU : {true, false}) {
+        for (const int k : {4, 1, 2, 3, 5, 6, 7}) {
+            const double share = k / 8.0;
+            uv = acrossU ? gp_Pnt2d(u0 + share * (u1 - u0), (v0 + v1) / 2.0)
+                         : gp_Pnt2d((u0 + u1) / 2.0, v0 + share * (v1 - v0));
+            if (classifier.Perform(uv) == TopAbs_IN) {
+                return BRep_Tool::Surface(face)->Value(uv.X(), uv.Y());
+            }
+        }
     }
-    return BRep_Tool::Surface(face)->Value(uv.X(), uv.Y());
+    return std::nullopt;
 }
 
 }  // namespace
@@ -1651,25 +1686,33 @@ FirstContactSolid constructFirstContact(
         if (!splitter.IsDone()) {
             throw refused("the profile's split along the walls failed");
         }
-        // The cells named through the split from the profile and the walls. Each source's walls
-        // are named together, ordered by where they lie (not by the trace's order, which follows
-        // the curves), and the count of its walls goes into their names: an edit that removes one
-        // renames the others, so a reference to one breaks instead of moving to another.
+        // The cells named through the split from the profile and the walls. A wall's name holds
+        // its line (lineKey()), which the profile doesn't move: the walls of one element of F that
+        // lie in the profile change with an edit of the profile, so a rank among them would move a
+        // reference to another wall. Walls of one element on one line are ranked by their place,
+        // and their count goes into the name: an edit that removes one renames the others.
         TopTools_IndexedMapOfShape faceEdges;
         TopExp::MapShapes(face, TopAbs_EDGE, faceEdges);
-        std::vector<std::pair<TopoDS_Shape, std::vector<std::size_t>>> bySource;
+        struct WallGroup
+        {
+            TopoDS_Shape element;
+            std::string line;
+            std::vector<std::size_t> members;
+        };
+        std::vector<WallGroup> bySource;
         for (std::size_t w = 0; w < needed.size(); ++w) {
             const JumpPiece& source = trace.pieces[needed[w]];
             const TopoDS_Shape element
                 = source.source == JumpSource::Edge ? faceEdges(source.edge) : TopoDS_Shape(face);
-            auto found = std::ranges::find_if(bySource, [&](const auto& entry) {
-                return entry.first.IsSame(element);
+            const std::string line = lineKey(unpushed[w]);
+            auto found = std::ranges::find_if(bySource, [&](const WallGroup& entry) {
+                return entry.element.IsSame(element) && entry.line == line;
             });
             if (found == bySource.end()) {
-                bySource.emplace_back(element, std::vector<std::size_t>());
+                bySource.push_back({element, line, {}});
                 found = std::prev(bySource.end());
             }
-            found->second.push_back(w);
+            found->members.push_back(w);
         }
         // A wall's place: its unpushed curve's middle, by the distance from the axis, then the
         // height along it
@@ -1679,7 +1722,7 @@ FirstContactSolid constructFirstContact(
             return std::pair(middle.X(), middle.Y());
         };
         std::vector<Part::TopoShape> namedSources {namedProfile};
-        for (auto& [element, members] : bySource) {
+        for (auto& [element, line, members] : bySource) {
             std::ranges::sort(members, [&](std::size_t a, std::size_t b) { return place(a) < place(b); });
             WallSources sources;
             TopoDS_Compound wallCompound;
@@ -1691,7 +1734,7 @@ FirstContactSolid constructFirstContact(
                     builder.Add(wallCompound, edge);
                 }
             }
-            const std::string op = fmt::format("FCW{}", members.size());
+            const std::string op = fmt::format("FCW{}_{}", members.size(), line);
             Part::TopoShape walls(blank);
             walls.makeShapeWithElementMap(wallCompound, sources, {namedFace}, op.c_str());
             namedSources.push_back(walls);

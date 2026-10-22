@@ -3242,11 +3242,9 @@ class TestRevolve(unittest.TestCase):
     def testRevolutionUpToTwoFoldsNamesEachWall(self):
         """The profile x in [1, 3], z in [0, 2] up to a wall with two folds: first contact jumps
         at r 1.653 and 2.301, and the solid is built between two walls, both generated from the
-        wall's face (ops#293 D2). Their names hold the count of the face's walls (FCW<n>), and
-        sort them by position, so an edit that removes one wall renames the other: a
-        SubShapeBinder of the outer wall follows a height edit, and breaks loudly, never moving
-        to the inner wall, when x1 goes from 3 to 2.1 and the outer wall leaves the profile (PR
-        357 review round 1, R1)."""
+        wall's face (ops#293 D2). Each wall's names hold its own line: a SubShapeBinder of the
+        outer wall follows a height edit, and breaks loudly, never moving to the inner wall, when
+        x1 goes from 3 to 2.1 and the outer wall leaves the profile (PR 357 review round 1, R1)."""
         from PartDesignTests.TestPad import assertFacesAllNamed
 
         wall, curve = self.polarWall(self.twoFoldLegs)
@@ -3305,6 +3303,74 @@ class TestRevolve(unittest.TestCase):
         self.assertIn("Invalid", binder.State)
         self.assertIn("Missing face reference", binder.getStatusString())
         self.assertEqual(self.facesAtRadius(binder.Shape, inner), [])
+
+    # A wall with three folds: first contact jumps at r 1.652, 2.300 and 2.901 (after the
+    # interpolation's overshoot), and all three walls are images of the face itself
+    threeFoldLegs = (
+        (0.5, 1.65, 80, 100),
+        (1.65, 1.46, 100, 160),
+        (1.46, 2.3, 160, 190),
+        (2.3, 2.0, 190, 230),
+        (2.0, 2.9, 230, 260),
+        (2.9, 2.6, 260, 300),
+        (2.6, 3.8, 300, 320),
+    )
+
+    def testRevolutionUpToThreeFoldsKeepsWallNames(self):
+        """The profile x in [1, 2.5], z in [0, 2] up to a wall with three folds holds the walls at
+        r 1.652 and 2.300. Moving the profile to x in [1.8, 3.3] (x0 edited, width kept) drops the
+        1.652 wall and brings in the 2.901 one, keeping the count of walls: the 2.300 wall's
+        names, and a SubShapeBinder of it, stay on the 2.300 wall and never move to the 2.901
+        one (ops#293 D2, PR 357 review round 1, V1)."""
+        from PartDesignTests.TestPad import assertFacesAllNamed
+
+        wall, curve = self.polarWall(self.threeFoldLegs)
+        # The curve's radius turns at 1.459, 1.652, 2.000, 2.300, 2.599 and 2.901; first contact
+        # jumps at the three maxima
+        turns = self.radiusTurns(curve, 0.6, 3.7)
+        self.assertEqual(len(turns), 6)
+        first, middle, last = turns[1], turns[3], turns[5]
+        self.assertAlmostEqual(first, 1.652, delta=1e-3)
+        self.assertAlmostEqual(middle, 2.300, delta=1e-3)
+        self.assertAlmostEqual(last, 2.901, delta=1e-3)
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        sketch, height = self.heightProfile(body, 1, 2.5, 2)
+        x0 = height - 2
+        revolution = self.revolveUpTo(body, "Revolution", sketch, (wall, ["Face1"]))
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        shape = revolution.Shape
+        self.assertEqual(len(shape.Solids), 1)
+        assertFacesAllNamed(self, shape)
+        self.assertIsNotNone(self.wallFaceAt(shape, first))
+        self.assertIsNone(self.wallFaceAt(shape, last))
+        middleFace = self.wallFaceAt(shape, middle)
+        self.assertIsNotNone(middleFace)
+        names = {name for name, element in shape.ElementMap.items() if element == middleFace}
+        self.assertTrue(names)
+        binder = self.Doc.addObject("PartDesign::SubShapeBinder", "MiddleWall")
+        binder.Support = [(revolution, middleFace)]
+        self.Doc.recompute()
+        self.assertTrue(binder.isValid(), binder.getStatusString())
+        self.assertEqual(self.facesAtRadius(binder.Shape, middle), ["Face1"])
+
+        sketch.setDatum(x0, FreeCAD.Units.Quantity("1.8 mm"))
+        self.Doc.recompute()
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        shape = revolution.Shape
+        self.assertEqual(len(shape.Solids), 1)
+        self.assertAlmostEqual(shape.BoundBox.XMax, 3.3, places=6)
+        assertFacesAllNamed(self, shape)
+        self.assertIsNone(self.wallFaceAt(shape, first))
+        self.assertIsNotNone(self.wallFaceAt(shape, last))
+        middleFace = self.wallFaceAt(shape, middle)
+        self.assertIsNotNone(middleFace)
+        # The 2.300 wall's names still find it, not the 2.901 wall that took the other's place
+        for name in names:
+            self.assertEqual(shape.ElementMap.get(name), middleFace, name)
+        self.assertTrue(binder.isValid(), binder.getStatusString())
+        self.assertEqual(len(binder.Shape.Faces), 1)
+        self.assertEqual(self.facesAtRadius(binder.Shape, middle), ["Face1"])
+        self.assertEqual(self.facesAtRadius(binder.Shape, last), [])
 
     def testRevolutionUpToCylinderRingAroundProfile(self):
         """The profile x in [1.2, 1.8], z in [0.7, 1.3] up to a whole cylinder of radius 1 along
