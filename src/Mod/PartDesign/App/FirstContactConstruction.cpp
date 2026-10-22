@@ -23,12 +23,14 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <iterator>
 #include <limits>
 #include <numbers>
 #include <optional>
 #include <string>
 #include <utility>
 #include <vector>
+#include <BOPTools_AlgoTools3D.hxx>
 #include <Bnd_Box.hxx>
 #include <Bnd_Box2d.hxx>
 #include <BndLib_Add2dCurve.hxx>
@@ -67,6 +69,7 @@
 #include <GeomConvert_BSplineSurfaceToBezierSurface.hxx>
 #include <GProp_GProps.hxx>
 #include <IntRes2d_IntersectionPoint.hxx>
+#include <IntTools_Context.hxx>
 #include <gp_Ax3.hxx>
 #include <gp_Lin.hxx>
 #include <gp_Pln.hxx>
@@ -114,8 +117,8 @@ struct CellRefusal
 };
 
 // The walls' edges, generated from the element of the face each wall is the image of (section
-// 15.17): its edge, or the face itself for a silhouette. One element's walls in the walls' order,
-// which is the order along its curve.
+// 15.17): its edge, or the face itself for a silhouette. One element's walls in the order they are
+// added.
 class WallSources: public Part::TopoShape::Mapper
 {
 public:
@@ -372,6 +375,26 @@ std::pair<double, double> derivativeBounds(Handle(Geom2d_BSplineCurve) curve)
     }
     const TColStd_Array1OfReal& sequence = curve->KnotSequence();
     return derivativeBounds(points, weights, {sequence.begin(), sequence.end()}, curve->Degree());
+}
+
+// A point inside the face: OCCT's, or the middle of its parameters' box where that lies inside
+std::optional<gp_Pnt> pointInside(const TopoDS_Face& face, const Handle(IntTools_Context)& context)
+{
+    gp_Pnt point;
+    gp_Pnt2d uv;
+    if (BOPTools_AlgoTools3D::PointInFace(face, point, uv, context) == 0) {
+        return point;
+    }
+    double u0 = 0.0;
+    double u1 = 0.0;
+    double v0 = 0.0;
+    double v1 = 0.0;
+    BRepTools::UVBounds(face, u0, u1, v0, v1);
+    uv.SetCoord((u0 + u1) / 2.0, (v0 + v1) / 2.0);
+    if (BRepTopAdaptor_FClass2d(face, Precision::PConfusion()).Perform(uv) != TopAbs_IN) {
+        return std::nullopt;
+    }
+    return BRep_Tool::Surface(face)->Value(uv.X(), uv.Y());
 }
 
 }  // namespace
@@ -815,7 +838,7 @@ std::optional<gp_Pnt> Band::outside(const TopoDS_Edge& edge, double tolerance) c
         gp_Pnt point;
         double radius = 0.0;
         // Per part: the nearest point's parameter and the distance
-        std::vector<std::pair<double, double>> near;
+        std::vector<std::pair<double, double>> closest;
     };
     // A sample whose image, widened by the tolerance, is in no part's band can't be certified
     auto sample = [&](double t) -> std::optional<Sample> {
@@ -824,8 +847,8 @@ std::optional<gp_Pnt> Band::outside(const TopoDS_Edge& edge, double tolerance) c
         here.radius = at.X();
         bool held = false;
         for (const Part& part : parts) {
-            here.near.push_back(nearest(part, at));
-            held = held || here.near.back().second + tolerance < part.width;
+            here.closest.push_back(nearest(part, at));
+            held = held || here.closest.back().second + tolerance < part.width;
         }
         if (!held) {
             return std::nullopt;
@@ -863,11 +886,11 @@ std::optional<gp_Pnt> Band::outside(const TopoDS_Edge& edge, double tolerance) c
             bool held = false;
             for (std::size_t p = 0; p < parts.size() && !held; ++p) {
                 // A sample out of the part's band
-                if (std::isnan(low.near[p].first) || std::isnan(high.near[p].first)) {
+                if (std::isnan(low.closest[p].first) || std::isnan(high.closest[p].first)) {
                     continue;
                 }
-                const double du = high.near[p].first - low.near[p].first;
-                held = std::max(low.near[p].second, high.near[p].second)
+                const double du = high.closest[p].first - low.closest[p].first;
+                held = std::max(low.closest[p].second, high.closest[p].second)
                         + (turn * dt * dt + parts[p].bend * du * du) / 8.0 + tolerance
                     <= parts[p].width;
             }
@@ -1060,7 +1083,7 @@ std::optional<gp_Pnt> Band::leavesOutside(const TopoDS_Face& face, bool whole) c
         gp_Pnt point;
         double radius = 0.0;
         // Per part: the nearest point's parameter and the distance
-        std::vector<std::pair<double, double>> near;
+        std::vector<std::pair<double, double>> closest;
     };
     // Corners in the order (u0, v0), (u1, v0), (u0, v1), (u1, v1)
     struct Leaf
@@ -1082,7 +1105,7 @@ std::optional<gp_Pnt> Band::leavesOutside(const TopoDS_Face& face, bool whole) c
         const gp_Pnt2d at = image(here.point);
         here.radius = at.X();
         for (const Part& part : parts) {
-            here.near.push_back(nearest(part, at));
+            here.closest.push_back(nearest(part, at));
         }
         return here;
     };
@@ -1093,7 +1116,7 @@ std::optional<gp_Pnt> Band::leavesOutside(const TopoDS_Face& face, bool whole) c
             return false;
         }
         for (std::size_t p = 0; p < parts.size(); ++p) {
-            if (here.near[p].second + tolerance < parts[p].width) {
+            if (here.closest[p].second + tolerance < parts[p].width) {
                 return false;
             }
         }
@@ -1160,22 +1183,22 @@ std::optional<gp_Pnt> Band::leavesOutside(const TopoDS_Face& face, bool whole) c
         double least = std::numeric_limits<double>::max();
         for (std::size_t p = 0; p < parts.size(); ++p) {
             // A corner out of the part's band: the part can't hold the leaf
-            if (std::ranges::any_of(c, [&](const Corner& here) { return std::isnan(here.near[p].first); })) {
+            if (std::ranges::any_of(c, [&](const Corner& here) { return std::isnan(here.closest[p].first); })) {
                 continue;
             }
             const double duU = std::max(
-                std::abs(c[1].near[p].first - c[0].near[p].first),
-                std::abs(c[3].near[p].first - c[2].near[p].first)
+                std::abs(c[1].closest[p].first - c[0].closest[p].first),
+                std::abs(c[3].closest[p].first - c[2].closest[p].first)
             );
             const double duV = std::max(
-                std::abs(c[2].near[p].first - c[0].near[p].first),
-                std::abs(c[3].near[p].first - c[1].near[p].first)
+                std::abs(c[2].closest[p].first - c[0].closest[p].first),
+                std::abs(c[3].closest[p].first - c[1].closest[p].first)
             );
             const double termU = turnU + parts[p].bend * duU * duU;
             const double termV = turnV + parts[p].bend * duV * duV;
             double reach = 0.0;
             for (const Corner& here : c) {
-                reach = std::max(reach, here.near[p].second);
+                reach = std::max(reach, here.closest[p].second);
             }
             const double bound = reach + (termU + termV) / 8.0 + tolerance;
             if (bound <= parts[p].width) {
@@ -1501,17 +1524,23 @@ FirstContactSolid constructFirstContact(
         }
     };
     // A wall's group pushed a level farther: the first level is max(10 x the first push, 4 x the
-    // group's section tolerance), the next ten times more; never below where the group stands
+    // group's section tolerance), the next ten times more; always above where the group stands (a
+    // junction's group starts at twice its gap, which may be above the first level)
     auto raise = [&](std::size_t w) {
         double push = 0.0;
+        double current = 0.0;
         for (std::size_t v = 0; v < needed.size(); ++v) {
             if (group[v] != group[w]) {
                 continue;
             }
+            current = std::max(current, pushes[v]);
             push = std::max(
                 push,
                 raised[v] == 0 ? std::max(10.0 * firstPush, 4.0 * sectionTolerance(v)) : 10.0 * pushes[v]
             );
+        }
+        if (push <= current) {
+            push = 10.0 * current;
         }
         for (std::size_t v = 0; v < needed.size(); ++v) {
             if (group[v] == group[w]) {
@@ -1622,27 +1651,53 @@ FirstContactSolid constructFirstContact(
         if (!splitter.IsDone()) {
             throw refused("the profile's split along the walls failed");
         }
-        // The cells named through the split from the profile and the walls
-        WallSources sources;
+        // The cells named through the split from the profile and the walls. Each source's walls
+        // are named together, ordered by where they lie (not by the trace's order, which follows
+        // the curves), and the count of its walls goes into their names: an edit that removes one
+        // renames the others, so a reference to one breaks instead of moving to another.
         TopTools_IndexedMapOfShape faceEdges;
         TopExp::MapShapes(face, TopAbs_EDGE, faceEdges);
-        TopoDS_Compound wallCompound;
-        BRep_Builder builder;
-        builder.MakeCompound(wallCompound);
+        std::vector<std::pair<TopoDS_Shape, std::vector<std::size_t>>> bySource;
         for (std::size_t w = 0; w < needed.size(); ++w) {
             const JumpPiece& source = trace.pieces[needed[w]];
-            sources.add(
-                source.source == JumpSource::Edge ? faceEdges(source.edge) : TopoDS_Shape(face),
-                wallEdges[w]
-            );
-            for (const TopoDS_Edge& edge : wallEdges[w]) {
-                builder.Add(wallCompound, edge);
+            const TopoDS_Shape element
+                = source.source == JumpSource::Edge ? faceEdges(source.edge) : TopoDS_Shape(face);
+            auto found = std::ranges::find_if(bySource, [&](const auto& entry) {
+                return entry.first.IsSame(element);
+            });
+            if (found == bySource.end()) {
+                bySource.emplace_back(element, std::vector<std::size_t>());
+                found = std::prev(bySource.end());
             }
+            found->second.push_back(w);
         }
-        Part::TopoShape walls(blank);
-        walls.makeShapeWithElementMap(wallCompound, sources, {namedFace});
+        // A wall's place: its unpushed curve's middle, by the distance from the axis, then the
+        // height along it
+        auto place = [&](std::size_t w) {
+            const Handle(Geom2d_BSplineCurve)& curve = unpushed[w];
+            const gp_Pnt2d middle = curve->Value((curve->FirstParameter() + curve->LastParameter()) / 2.0);
+            return std::pair(middle.X(), middle.Y());
+        };
+        std::vector<Part::TopoShape> namedSources {namedProfile};
+        for (auto& [element, members] : bySource) {
+            std::ranges::sort(members, [&](std::size_t a, std::size_t b) { return place(a) < place(b); });
+            WallSources sources;
+            TopoDS_Compound wallCompound;
+            BRep_Builder builder;
+            builder.MakeCompound(wallCompound);
+            for (const std::size_t w : members) {
+                sources.add(element, wallEdges[w]);
+                for (const TopoDS_Edge& edge : wallEdges[w]) {
+                    builder.Add(wallCompound, edge);
+                }
+            }
+            const std::string op = fmt::format("FCW{}", members.size());
+            Part::TopoShape walls(blank);
+            walls.makeShapeWithElementMap(wallCompound, sources, {namedFace}, op.c_str());
+            namedSources.push_back(walls);
+        }
         Part::TopoShape namedCells(blank);
-        namedCells.makeElementShape(splitter, {namedProfile, walls}, Part::OpCodes::Split);
+        namedCells.makeElementShape(splitter, namedSources, Part::OpCodes::Split);
         std::vector<TopTools_IndexedMapOfShape> onWall(needed.size());
         for (std::size_t w = 0; w < needed.size(); ++w) {
             for (const TopoDS_Edge& edge : wallEdges[w]) {
@@ -1657,6 +1712,9 @@ FirstContactSolid constructFirstContact(
         }
         for (TopExp_Explorer faces(splitter.Shape(), TopAbs_FACE); faces.More(); faces.Next()) {
             solid.cells.push_back(TopoDS::Face(faces.Current()));
+        }
+        if (solid.cells.empty()) {
+            throw refused("the profile's split along the walls left no face");
         }
         constexpr std::size_t largestCells = 32;
         if (solid.cells.size() > largestCells) {
@@ -1696,11 +1754,24 @@ FirstContactSolid constructFirstContact(
                 continue;
             }
             std::string flap;
+            const Handle(IntTools_Context) context = new IntTools_Context;
             for (TopExp_Explorer faces(piece, TopAbs_FACE); faces.More() && flap.empty(); faces.Next()) {
                 if (faces.Current().Orientation() != TopAbs_INTERNAL) {
                     continue;
                 }
-                if (const auto away = band.outside(TopoDS::Face(faces.Current()))) {
+                const TopoDS_Face internal = TopoDS::Face(faces.Current());
+                std::optional<gp_Pnt> away = band.outside(internal);
+                // The bands of all the walls on the cell's boundary may enclose the cell: then the
+                // face's edges and silhouette in the band don't hold its interior there (a sheet
+                // across the cell has neither; section 15.18). A flap's interior maps into the band
+                // too. A flap too thin for OCCT to find a point inside (the hook's, 2 pushes wide)
+                // lies within its width of its edges.
+                if (!away) {
+                    if (const auto point = pointInside(internal, context); point && !band.contains(*point)) {
+                        away = point;
+                    }
+                }
+                if (away) {
                     flap = fmt::format(
                         "C2: the face doesn't split the cell's piece (near ({:.4g}, {:.4g}, {:.4g}))",
                         away->X(),
@@ -1807,18 +1878,22 @@ FirstContactSolid constructFirstContact(
         if (build == 3) {
             throw refused(why);
         }
-        // Once per group
+        // Once per group, whichever of its walls bounds a cell that refused
+        std::vector<std::size_t> groups;
         for (std::size_t w = 0; w < needed.size(); ++w) {
-            if (raising[w] && group[w] == w) {
-                raise(w);
-                if (pushes[w] > cap) {
-                    // The reason stays with the refusal: the cap alone doesn't say what failed
-                    throw refused(fmt::format(
-                        "{}; a wall would then be pushed {:.3g}, over 1e-4 of the profile's size",
-                        why,
-                        pushes[w]
-                    ));
-                }
+            if (raising[w] && std::ranges::find(groups, group[w]) == groups.end()) {
+                groups.push_back(group[w]);
+            }
+        }
+        for (const std::size_t w : groups) {
+            raise(w);
+            if (pushes[w] > cap) {
+                // The reason stays with the refusal: the cap alone doesn't say what failed
+                throw refused(fmt::format(
+                    "{}; a wall would then be pushed {:.3g}, over 1e-4 of the profile's size",
+                    why,
+                    pushes[w]
+                ));
             }
         }
     }

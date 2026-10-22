@@ -2835,8 +2835,10 @@ void Revolved::setResult(const TopoShape& base, const TopoShape& revolved, bool 
 }
 
 // The tool up to a face is the sweep up to it (sweepUpToFace()), certified to be what first contact
-// gives (certifyFirstContact()); otherwise the revolution fails, naming where first contact jumps:
-// never a wrong solid without an error (ops#293). Not BRepFeat's tool: up to a face it kept a piece
+// gives (certifyFirstContact()). Where the certificate refuses because first contact jumps inside the
+// profile, the tool is built cell by cell between walls along the jumps (constructFirstContact(),
+// ops#293 D2); where that fails too, the revolution fails, naming where first contact jumps: never a
+// wrong solid without an error. Not BRepFeat's tool: up to a face it kept a piece
 // past a second crossing, swept 357 degrees, cut by an extended surface, or lost the base's thin
 // ribs (notes\revolution-upto-first-contact.md, sections 4 and 9). Up to planar and cylindrical
 // faces of the base, Revolution and Groove, One side and Reversed, the sweep's fuse and cut with
@@ -2991,6 +2993,7 @@ TopoShape Revolved::tryToRevolveToFace(
     // instead of 13.35, or 0.036 short). Split by the exact copy alone, the tool's face parts no
     // longer matched the base's face, and the fuse with the base gave the base's volume alone.
     // The up-to face keeps its names where it is the face checked (a bounded face), for the walls'
+    // names when the sweep is constructed where first contact jumps
     TopoShape sweep = sweepToFirstContact(
         reachable.IsSame(upToFace.getShape()) ? upToFace : TopoShape(reachable)
     );
