@@ -145,6 +145,7 @@
 #include "BRepOffsetAPI_MakeOffsetFix.h"
 #include "ProgressIndicator.h"
 #include "ShapeAnalysis_FreeBoundsFix.h"
+#include "SweepFrenet.h"
 
 #include <App/Application.h>
 #include <App/Document.h>
@@ -4576,7 +4577,8 @@ TopoShape& TopoShape::makeElementPipeShell(
             transMode = BRepBuilderAPI_Transformed;
             break;
     }
-    mkPipeShell.SetMode(isFrenet);
+    // Frenet's trihedron turns over at an inflection inside a spine edge (ops#421)
+    SweepFrenet::setMode(mkPipeShell, TopoDS::Wire(spine.getShape()), isFrenet);
     mkPipeShell.SetTransitionMode(transMode);
     if (tol3d != 0.0 || tolBound != 0.0 || tolAngular != 0.0) {
         if (tol3d == 0.0) {
