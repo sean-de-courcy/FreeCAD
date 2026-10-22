@@ -368,6 +368,61 @@ class TestPocket(unittest.TestCase):
         self.assertFalse(pocket.isValid())
         self.assertIn("lies in the profile's way", pocket.getStatusString())
 
+    def testPocketUpToABallUnderAPlateOfElementaryFaces(self):
+        # ops#361: the block x, y -9..9, z -15..5 with a cavity shaped as TestPad's ball under a
+        # plate (planes and spheres only, so the Pocket goes by BRepFeat), and a Pocket from the
+        # square x, y -6..6 on its bottom, along +z, up to the cavity's ball below the plate and
+        # the plate's bottom. BRepFeat cut away the material in the band's shadow (0.00105): a
+        # valid Pocket. It fails, saying why. The control, the square x, y -1..1, stops at the
+        # ball's bottom and leaves the shadow alone
+        import Part
+        from PartDesignTests.TestPad import (
+            PRISM_VOLUME_RELATIVE,
+            ballAndPlateBottom,
+            ballBandShadow,
+            ballBottomReach,
+            squareSketch,
+        )
+
+        V = FreeCAD.Vector
+        cavity = Part.makeBox(16, 16, 2, V(-8, -8, 0)).fuse(Part.makeSphere(5, V(0, 0, -0.1)))
+        mold = Part.makeBox(18, 18, 20, V(-9, -9, -15)).cut(cavity.removeSplitter())
+        for half in (1, 6):
+            with self.subTest(half=half):
+                doc = FreeCAD.newDocument("PocketUpToABallUnderAPlateOfElementaryFaces")
+                try:
+                    base = doc.addObject("Part::Feature", "Base")
+                    base.Shape = mold
+                    body = doc.addObject("PartDesign::Body", "Body")
+                    baseFeature = body.newObject("PartDesign::FeatureBase", "BaseFeature")
+                    baseFeature.BaseFeature = base
+                    doc.recompute()
+                    placement = FreeCAD.Placement(V(0, 0, -15), FreeCAD.Rotation())
+                    sketch = squareSketch(body, "Square", placement, [(-half, -half, half, half)])
+                    pocket = body.newObject("PartDesign::Pocket", "Pocket")
+                    pocket.Profile = sketch
+                    pocket.Type = "UpToShape"
+                    pocket.UpToShape = [(baseFeature, ballAndPlateBottom(baseFeature.Shape))]
+                    pocket.Reversed = True
+                    doc.recompute()
+                    if half == 1:
+                        self.assertTrue(pocket.isValid(), pocket.getStatusString())
+                        expected = ballBottomReach(1)
+                        self.assertAlmostEqual(
+                            mold.Volume - pocket.Shape.Volume,
+                            expected,
+                            delta=PRISM_VOLUME_RELATIVE * expected,
+                        )
+                        shadow = ballBandShadow()
+                        self.assertAlmostEqual(
+                            pocket.Shape.common(shadow).Volume, shadow.Volume, places=9
+                        )
+                    else:
+                        self.assertFalse(pocket.isValid())
+                        self.assertIn("meets the face from behind", pocket.getStatusString())
+                finally:
+                    FreeCAD.closeDocument(doc.Name)
+
     def testPocketUpToABaseWithNames(self):
         """ops#347, review of fork PR 321: a Pocket that cuts through the base, up to its far
         face, keeps the base's names and has the topology of the box less the hole."""

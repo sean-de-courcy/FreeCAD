@@ -381,7 +381,8 @@ names it.
 | `fix/375-sweep-end-names` | fix | ops#375 | - | `integration` `c4b4011a87` | `2b1690e050` (fork PR 352), 2026-10-21 | never (fork fix) |
 | `fix/414-mass-properties` | fix | ops#414 | - | `integration` `6c8d6ea5b6` | `72e19a4705` (fork PR 354), 2026-10-21 | never (fork fix) |
 | `feat/293-d2-first-contact` | feat | ops#293 | - | `integration` `4f191bb942` | `df872a5f80` (fork PR 357), 2026-10-22 | never (fork feature) |
-| `fix/378-geometric-index` | fix | ops#378 | - | `integration` `72e19a4705` | (fork PR 355) | never (fork fix) |
+| `fix/378-geometric-index` | fix | ops#378 | - | `integration` `72e19a4705` | `e8ababd393` (fork PR 355), 2026-10-22 | never (fork fix) |
+| `fix/361-elementary-upto` | fix | ops#361 | - | `integration` `df872a5f80` | (fork PR 359) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 
