@@ -1573,49 +1573,188 @@ struct ShapeInfo
 
 namespace
 {
-/// Orders the elements of a group that share their names and are told apart only by an index
-/// (ops#378): the centre of mass, then the length or area (a vertex: its point), on the grid
-/// ops#49 uses, in the frame of the shape being named. The result's indexes follow the order in
-/// which OCCT stores sub-shapes, which can differ between platforms and OCCT versions (a round
-/// hole's four bend arcs in a Pipe: Windows and macOS store them in opposite orders); this key
-/// doesn't. Coincident elements tie, and keep their order in the result.
-using ElementOrderKey = std::array<long long, 4>;
+// The order of the members of a fallback list (UPP, LOW, PRJ) that share their names and are
+// told apart only by an index (ops#378). The result's indexes follow the order in which OCCT
+// stores sub-shapes, which can differ between platforms and OCCT versions (a round hole's four
+// bend arcs in a Pipe: Windows and macOS store them in opposite orders). Instead, an UPP member's
+// place is read in the parameterization of its reference, the element the list's first name
+// belongs to: a rigid motion of the inputs, a dimension edit or a tilt through an axis-aligned
+// position moves the members and the reference together, so the order holds. The shape's own
+// coordinates come last, and are all that LOW and PRJ members have (no reference).
 
-ElementOrderKey elementOrderKey(const TopoDS_Shape& element, const TopLoc_Location& frame)
+/// One component of an element's order key: a value, and the period that wraps it (0: none).
+struct OrderValue
 {
-    const TopoDS_Shape placed = element.Moved(frame);
-    gp_Pnt center;
-    double mass = 0;
-    if (placed.ShapeType() == TopAbs_VERTEX) {
-        center = BRep_Tool::Pnt(TopoDS::Vertex(placed));
+    double value = 0;
+    double period = 0;
+};
+/// The components of a key in order of precedence; every member of a list has the same number.
+using OrderValues = std::vector<OrderValue>;
+
+/// An element's point (its centre of mass; a vertex: its point; a degenerate edge: its vertex)
+/// and its length or area, `mass`.
+gp_Pnt elementPoint(const TopoDS_Shape& element, double& mass)
+{
+    mass = 0;
+    if (element.ShapeType() == TopAbs_VERTEX) {
+        return BRep_Tool::Pnt(TopoDS::Vertex(element));
     }
-    else if (placed.ShapeType() == TopAbs_EDGE && BRep_Tool::Degenerated(TopoDS::Edge(placed))) {
-        const TopoDS_Vertex vertex = TopExp::FirstVertex(TopoDS::Edge(placed));
-        if (!vertex.IsNull()) {
-            center = BRep_Tool::Pnt(vertex);
-        }
+    if (element.ShapeType() == TopAbs_EDGE && BRep_Tool::Degenerated(TopoDS::Edge(element))) {
+        const TopoDS_Vertex vertex = TopExp::FirstVertex(TopoDS::Edge(element));
+        return vertex.IsNull() ? gp_Pnt() : BRep_Tool::Pnt(vertex);
+    }
+    GProp_GProps props;
+    if (TopExp_Explorer(element, TopAbs_FACE).More()) {
+        BRepGProp::SurfaceProperties(element, props);
     }
     else {
-        GProp_GProps props;
-        if (TopExp_Explorer(placed, TopAbs_FACE).More()) {
-            BRepGProp::SurfaceProperties(placed, props);
-        }
-        else {
-            BRepGProp::LinearProperties(placed, props);
-        }
-        center = props.CentreOfMass();
-        mass = props.Mass();
+        BRepGProp::LinearProperties(element, props);
     }
-    const double grid = 10 * Precision::Confusion();
-    // An unbounded element has no finite centre: all such elements tie.
-    auto onGrid = [grid](double value) {
-        const double steps = value / grid;
-        if (!std::isfinite(steps) || std::abs(steps) > 1e18) {
-            return std::numeric_limits<long long>::max();
+    mass = props.Mass();
+    return props.CentreOfMass();
+}
+
+/// The parameters of `element` on `face`, of which it is a sub-shape: an edge, at the midpoint of
+/// its pcurve; a vertex, the smallest (`u` first) over the pcurves of the face's edges that end
+/// there. An edge closed on the face (a seam) has two pcurves, and `CurveOnSurface` picks one by
+/// the edge's orientation, which follows the storage order: the seam takes the smaller of the
+/// two, as a vertex on it does. Not finite when no pcurve is found.
+gp_Pnt2d parametersOnFace(const TopoDS_Face& face, const TopoDS_Shape& element)
+{
+    const double none = std::numeric_limits<double>::quiet_NaN();
+    bool found = false;
+    gp_Pnt2d smallest(none, none);
+    auto consider = [&](const gp_Pnt2d& candidate) {
+        if (!found || candidate.X() < smallest.X()
+            || (candidate.X() == smallest.X() && candidate.Y() < smallest.Y())) {
+            smallest = candidate;
+            found = true;
         }
-        return std::llround(steps);
     };
-    return {onGrid(center.X()), onGrid(center.Y()), onGrid(center.Z()), onGrid(mass)};
+    auto onPcurve = [&](const TopoDS_Edge& edge, auto parameterOf) {
+        double first = 0;
+        double last = 0;
+        Handle(Geom2d_Curve) pcurve = BRep_Tool::CurveOnSurface(edge, face, first, last);
+        if (!pcurve.IsNull()) {
+            consider(pcurve->Value(parameterOf(first, last)));
+        }
+    };
+    if (element.ShapeType() == TopAbs_EDGE) {
+        const TopoDS_Edge edge = TopoDS::Edge(element);
+        auto midpoint = [](double first, double last) {
+            return (first + last) / 2;
+        };
+        onPcurve(edge, midpoint);
+        if (BRep_Tool::IsClosed(edge, face)) {
+            onPcurve(TopoDS::Edge(edge.Reversed()), midpoint);
+        }
+    }
+    else if (element.ShapeType() == TopAbs_VERTEX) {
+        // The explorer meets a seam once per orientation, so both of its pcurves count
+        for (TopExp_Explorer edges(face, TopAbs_EDGE); edges.More(); edges.Next()) {
+            const TopoDS_Edge edge = TopoDS::Edge(edges.Current());
+            for (TopExp_Explorer vertexes(edge, TopAbs_VERTEX); vertexes.More(); vertexes.Next()) {
+                if (vertexes.Current().IsSame(element)) {
+                    const double parameter
+                        = BRep_Tool::Parameter(TopoDS::Vertex(vertexes.Current()), edge);
+                    onPcurve(edge, [parameter](double, double) { return parameter; });
+                }
+            }
+        }
+    }
+    return smallest;
+}
+
+/// The parameter of `vertex` on `edge`; not finite when it doesn't bound the edge.
+double parameterOnEdge(const TopoDS_Edge& edge, const TopoDS_Shape& vertex)
+{
+    for (TopExp_Explorer vertexes(edge, TopAbs_VERTEX); vertexes.More(); vertexes.Next()) {
+        if (vertexes.Current().IsSame(vertex)) {
+            return BRep_Tool::Parameter(TopoDS::Vertex(vertexes.Current()), edge);
+        }
+    }
+    return std::numeric_limits<double>::quiet_NaN();
+}
+
+/// The key of a member of a fallback list: its place on the list's `reference` (a face: its `u`
+/// and `v`; an edge, for a vertex named from edges: its parameter; null: none), then its length
+/// or area, then its point in `frame`, the frame of the shape being named. Members that the
+/// reference doesn't tell apart are told apart by the last components; coincident members tie
+/// and keep the result's order, which no name tells apart anyway.
+OrderValues elementOrderValues(
+    const TopoDS_Shape& element,
+    const TopoDS_Shape& reference,
+    const TopLoc_Location& frame
+)
+{
+    OrderValues values;
+    if (!reference.IsNull() && reference.ShapeType() == TopAbs_FACE) {
+        const TopoDS_Face face = TopoDS::Face(reference);
+        const gp_Pnt2d parameters = parametersOnFace(face, element);
+        const BRepAdaptor_Surface surface(face, Standard_False);
+        values.push_back({parameters.X(), surface.IsUPeriodic() ? surface.UPeriod() : 0});
+        values.push_back({parameters.Y(), surface.IsVPeriodic() ? surface.VPeriod() : 0});
+    }
+    else if (!reference.IsNull() && reference.ShapeType() == TopAbs_EDGE) {
+        values.push_back({parameterOnEdge(TopoDS::Edge(reference), element)});
+    }
+    double mass = 0;
+    const gp_Pnt point = elementPoint(element, mass).Transformed(frame.Transformation());
+    values.push_back({mass});
+    values.push_back({point.X()});
+    values.push_back({point.Y()});
+    values.push_back({point.Z()});
+    return values;
+}
+
+/// Each member's rank per component of its key: sorted by value, members closer than
+/// `10 * Precision::Confusion()` to their neighbour share a rank (no grid, so a near-tie can't
+/// straddle a cell boundary); a periodic component also chains the values at the end of its
+/// period to those at its start. Members compare by their ranks, lexicographically. A value
+/// that isn't finite (no pcurve, an unbounded element) ranks last.
+std::vector<std::vector<long>> rankByGaps(const std::vector<OrderValues>& keys)
+{
+    const double tolerance = 10 * Precision::Confusion();
+    std::vector<std::vector<long>> ranks(keys.size());
+    if (keys.empty()) {
+        return ranks;
+    }
+    std::size_t components = keys.front().size();
+    for (const auto& key : keys) {
+        components = std::min(components, key.size());
+    }
+    std::vector<std::size_t> order(keys.size());
+    std::vector<long> rankOf(keys.size());
+    for (std::size_t component = 0; component < components; ++component) {
+        auto valueOf = [&](std::size_t member) {
+            const double value = keys[member][component].value;
+            return std::isfinite(value) ? value : std::numeric_limits<double>::max();
+        };
+        std::iota(order.begin(), order.end(), 0);
+        std::stable_sort(order.begin(), order.end(), [&](std::size_t left, std::size_t right) {
+            return valueOf(left) < valueOf(right);
+        });
+        long rank = 0;
+        for (std::size_t k = 0; k < order.size(); ++k) {
+            if (k > 0 && valueOf(order[k]) - valueOf(order[k - 1]) > tolerance) {
+                ++rank;
+            }
+            rankOf[order[k]] = rank;
+        }
+        const double period = keys[order.front()][component].period;
+        if (period > 0 && rank > 0
+            && valueOf(order.front()) + period - valueOf(order.back()) <= tolerance) {
+            for (std::size_t member : order) {
+                if (rankOf[member] == rank) {
+                    rankOf[member] = 0;
+                }
+            }
+        }
+        for (std::size_t member = 0; member < keys.size(); ++member) {
+            ranks[member].push_back(rankOf[member]);
+        }
+    }
+    return ranks;
 }
 }  // namespace
 
@@ -1718,23 +1857,23 @@ struct NamingMapKey
 /** The elements of a result, each with the source elements it was modified or generated from,
  * grouped by those sources.
  *
- * Names are written while iterating the groups, so their order is defined (ops#19): the members
- * of a group by type (face, edge, vertex), then by place (elementOrderKey, ops#378), then by index
- * in the result; the groups in the result's order of their first member, which decides no index.
- * A member told apart from the others only by its index then gets the same index whatever order
- * OCCT stores the result's sub-shapes in. The hash maps here only look up; their hashes are
- * seeded under FREECAD_NAMING_HASH_SEED (NamingHash.h), which must leave the names unchanged.
+ * Names are written while iterating the groups, so their order is defined (ops#19, ops#378): the
+ * members of a group by type (face, edge, vertex), then in the order they were first added, which
+ * is their order in the modified or generated list of their first shared source, the maker's
+ * history; the groups in the order of their first members. A member told apart from the others
+ * only by its index then gets the same index whatever order OCCT stores the result's sub-shapes
+ * in, and keeps it through the edits that leave the maker's lists alone (a rigid motion, a
+ * dimension edit, a tilt). The groups' order decides no index (the Connected Name maps are
+ * complete before any group is named, and the counters restart per group); it only orders the
+ * duplicate counter ElementMap::setElementName gives when two elements get one mapped name. The
+ * hash maps here only look up; their hashes are seeded under FREECAD_NAMING_HASH_SEED
+ * (NamingHash.h), which must leave the names unchanged.
  */
 class NamingMap
 {
 public:
     /// The members (result elements) of a group, and their shared sources.
     using Group = std::pair<std::vector<NamingMapKey>, std::vector<NamingMapValue>>;
-
-    /// `frame` takes the result's elements to the frame of the shape being named.
-    explicit NamingMap(const TopLoc_Location& frame)
-        : frame(frame)
-    {}
 
     void add(
         const TopoDS_Shape& newShape,
@@ -1771,21 +1910,11 @@ public:
     {
         groups.clear();
 
-        std::vector<std::size_t> order(entries.size());
-        std::iota(order.begin(), order.end(), 0);
-        std::sort(order.begin(), order.end(), [this](std::size_t left, std::size_t right) {
-            return resultOrderLess(
-                entries[left].first.newElementName,
-                entries[right].first.newElementName
-            );
-        });
-
         // Members with the same sources (IsSame, in the same order) form a group. The map only
         // finds the groups whose sources hash alike.
         std::unordered_map<std::size_t, std::vector<std::size_t>> groupsBySourcesHash;
 
-        for (std::size_t entryIdx : order) {
-            const auto& [key, sources] = entries[entryIdx];
+        for (const auto& [key, sources] : entries) {
             auto& candidates = groupsBySourcesHash[sourcesHash(sources)];
             auto match = std::find_if(candidates.begin(), candidates.end(), [&](std::size_t groupIdx) {
                 return groups[groupIdx].second == sources;
@@ -1800,34 +1929,16 @@ public:
             }
         }
 
-        // Members of one type in a group of more than one by place; the sort is stable, so the
-        // index stays the last tie-break. A group of one needs no key.
+        // The members of a group by type; the sort is stable, so within a type they keep the
+        // order of their first shared source's list (ops#378)
         for (auto& group : groups) {
-            auto& members = group.first;
-            if (members.size() < 2) {
-                continue;
-            }
-            std::vector<std::pair<ElementOrderKey, std::size_t>> keys;
-            keys.reserve(members.size());
-            for (std::size_t i = 0; i < members.size(); ++i) {
-                keys.emplace_back(elementOrderKey(members[i].newElementShape, frame), i);
-            }
-            std::stable_sort(keys.begin(), keys.end(), [&members](const auto& left, const auto& right) {
-                const int typeOrder = typeCompare(
-                    members[left.second].newElementName,
-                    members[right.second].newElementName
-                );
-                if (typeOrder != 0) {
-                    return typeOrder < 0;
+            std::stable_sort(
+                group.first.begin(),
+                group.first.end(),
+                [](const NamingMapKey& left, const NamingMapKey& right) {
+                    return typeCompare(left.newElementName, right.newElementName) < 0;
                 }
-                return left.first < right.first;
-            });
-            std::vector<NamingMapKey> sorted;
-            sorted.reserve(members.size());
-            for (const auto& key : keys) {
-                sorted.push_back(members[key.second]);
-            }
-            members = std::move(sorted);
+            );
         }
 
         isBuilt = true;
@@ -1865,16 +1976,6 @@ private:
         return std::strcmp(left.getType(), right.getType());
     }
 
-    /// By type (typeCompare); within a type, by index.
-    static bool resultOrderLess(const Data::IndexedName& left, const Data::IndexedName& right)
-    {
-        const int typeOrder = typeCompare(left, right);
-        if (typeOrder != 0) {
-            return typeOrder < 0;
-        }
-        return left.getIndex() < right.getIndex();
-    }
-
     std::size_t sourcesHash(const std::vector<NamingMapValue>& sources) const
     {
         std::size_t hash = sources.size();
@@ -1892,8 +1993,6 @@ private:
     std::vector<Group> groups {};
 
     std::hash<TopoDS_Shape> shapeHasher;
-
-    TopLoc_Location frame;
 
     bool isBuilt = false;
 };
@@ -2673,10 +2772,11 @@ TopoShape& TopoShape::makeShapeWithElementMap(
         // This algorithm has some edgecase detection from the V1 Algorithm, which is why it looks a
         // little bit copypasted.
         // The frame of the shape being named, which its own location (e.g. a Part feature's
-        // placement) doesn't move: the elements' order keys are taken there (ops#378).
+        // placement) doesn't move: the fallback lists' order keys end with coordinates taken
+        // there (ops#378).
         const TopLoc_Location frame = _Shape.Location().Inverted();
-        NamingMap generatedNamingMap(frame);
-        NamingMap modifiedNamingMap(frame);
+        NamingMap generatedNamingMap;
+        NamingMap modifiedNamingMap;
 
         const std::map<std::string, TopAbs_ShapeEnum> upperMapTypes {
             {"Edge", TopAbs_FACE},
@@ -3310,9 +3410,11 @@ TopoShape& TopoShape::makeShapeWithElementMap(
         // The index of such a name counts the elements named before from the same partner or
         // list. An element's partner and lists come only from elements of other types, so each
         // type's lists are collected first and the indexes given after, per list in the order of
-        // the members' places (elementOrderKey), not of their indexes in the result, which follow
-        // OCCT's sub-shape order (ops#378: a round hole's bend arcs in a Pipe). Vertexes still
-        // count on from the edges named from the same faces.
+        // the members' places (elementOrderValues), not of their indexes in the result, which
+        // follow OCCT's sub-shape order (ops#378: a round hole's bend arcs in a Pipe). An UPP
+        // member's place is read on its reference, the ancestor the list's first name belongs
+        // to; LOW and PRJ members have no reference, and are ordered by their length or area and
+        // their coordinates. Vertexes still count on from the edges named from the same faces.
         enum class Fallback
         {
             Partner,
@@ -3324,6 +3426,7 @@ TopoShape& TopoShape::makeShapeWithElementMap(
             int index;
             Fallback kind;
             std::vector<Data::MappedName> names;
+            TopoDS_Shape reference;  ///< UPP: the ancestor of the first name; else null
         };
         for (int pass = 0; pass < 2; ++pass) {
             bool unnamedLeft = false;
@@ -3385,7 +3488,7 @@ TopoShape& TopoShape::makeShapeWithElementMap(
 
                                 if (incomingShapeMapName) {
                                     fallbackNames.push_back(
-                                        {mainI, Fallback::Partner, {incomingShapeMapName}}
+                                        {mainI, Fallback::Partner, {incomingShapeMapName}, {}}
                                     );
                                     wasMapped = true;
                                     break;
@@ -3396,12 +3499,13 @@ TopoShape& TopoShape::makeShapeWithElementMap(
 
                     if (!wasMapped && upperMapTypeEntry != upperMapTypes.end()) {
                         std::vector<Data::MappedName> linkedUpperNames;
+                        std::vector<std::pair<Data::MappedName, TopoDS_Shape>> namedAncestors;
                         auto linkAncestorNames = [&](TopAbs_ShapeEnum ancestorType) {
-                            for (const auto& ancestorIndex :
-                                 findAncestors(mainElement, ancestorType)) {
+                            for (const auto& ancestor :
+                                 findAncestorsShapes(mainElement, ancestorType)) {
                                 Data::IndexedName ancestorIndexName = Data::IndexedName::fromConst(
                                     shapeName(ancestorType).c_str(),
-                                    ancestorIndex
+                                    findShape(ancestor)
                                 );
                                 Data::MappedName ancestorMappedName
                                     = getMappedName(ancestorIndexName);
@@ -3413,6 +3517,7 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                                            ancestorMappedName
                                        ) == linkedUpperNames.end()) {
                                     linkedUpperNames.push_back(ancestorMappedName);
+                                    namedAncestors.emplace_back(ancestorMappedName, ancestor);
                                 }
                             }
                         };
@@ -3430,8 +3535,17 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                         sortNameSet(linkedUpperNames);
 
                         if (linkedUpperNames.size()) {
+                            // The list's reference: the ancestor its first name belongs to,
+                            // chosen by name, never by the result's sub-shape order
+                            TopoDS_Shape reference;
+                            for (const auto& [name, ancestor] : namedAncestors) {
+                                if (name == linkedUpperNames.front()) {
+                                    reference = ancestor;
+                                    break;
+                                }
+                            }
                             fallbackNames.push_back(
-                                {mainI, Fallback::Upper, std::move(linkedUpperNames)}
+                                {mainI, Fallback::Upper, std::move(linkedUpperNames), reference}
                             );
                             continue;
                         }
@@ -3486,7 +3600,7 @@ TopoShape& TopoShape::makeShapeWithElementMap(
 
                             if (linkedLowerNames.size()) {
                                 fallbackNames.push_back(
-                                    {mainI, Fallback::Lower, std::move(linkedLowerNames)}
+                                    {mainI, Fallback::Lower, std::move(linkedLowerNames), {}}
                                 );
                                 continue;
                             }
@@ -3514,21 +3628,32 @@ TopoShape& TopoShape::makeShapeWithElementMap(
 
                 for (auto& list : lists) {
                     if (list.size() > 1) {
-                        std::vector<std::pair<ElementOrderKey, std::size_t>> keys;
+                        std::vector<OrderValues> keys;
                         keys.reserve(list.size());
                         for (std::size_t i : list) {
-                            keys.emplace_back(
-                                elementOrderKey(info->find(fallbackNames[i].index), frame),
-                                i
-                            );
+                            keys.push_back(elementOrderValues(
+                                info->find(fallbackNames[i].index),
+                                fallbackNames[i].reference,
+                                frame
+                            ));
                         }
+                        const std::vector<std::vector<long>> ranks = rankByGaps(keys);
+                        std::vector<std::size_t> order(list.size());
+                        std::iota(order.begin(), order.end(), 0);
                         // Stable: coincident members keep the result's order.
-                        std::stable_sort(keys.begin(), keys.end(), [](const auto& left, const auto& right) {
-                            return left.first < right.first;
-                        });
-                        for (std::size_t k = 0; k < keys.size(); ++k) {
-                            list[k] = keys[k].second;
+                        std::stable_sort(
+                            order.begin(),
+                            order.end(),
+                            [&ranks](std::size_t left, std::size_t right) {
+                                return ranks[left] < ranks[right];
+                            }
+                        );
+                        std::vector<std::size_t> sorted;
+                        sorted.reserve(list.size());
+                        for (std::size_t k : order) {
+                            sorted.push_back(list[k]);
                         }
+                        list = std::move(sorted);
                     }
 
                     for (std::size_t i : list) {
