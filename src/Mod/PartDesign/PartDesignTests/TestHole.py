@@ -376,10 +376,11 @@ class TestHole(unittest.TestCase):
         # closest size is looked up from: M12 became M1 or #1)
         hole.ThreadType = "ISOMetricFineProfile"
         self.assertAlmostEqual(hole.ThreadDiameter.Value, 1.0)
-        # (the nearest by diameter and pitch: 7/16" is 11.113, 1 1/8" 28.575)
+        # (the nearest by diameter and the old size's pitch: 1/2" is 12.7 with 1.954, 1 1/8"
+        # 28.575; 7/16" is nearer in diameter alone, ops#405 N1)
         for start, other, nearest in (
             ("M12x1.75", "ISOMetricFineProfile", 12.0),
-            ("M12x1.75", "UNC", 11.113),
+            ("M12x1.75", "UNC", 12.7),
             ("M30x3.5", "UNC", 28.575),
         ):
             hole.ThreadType = "ISOMetricProfile"
@@ -391,6 +392,24 @@ class TestHole(unittest.TestCase):
         hole.ThreadSize = "3/4"
         hole.ThreadType = "NPT"
         self.assertEqual(hole.ThreadSize, "3/4")
+
+    def testThreadTypeChangePicksTheSizeNearestByTheOldPitch(self):
+        """ops#405 N1: a thread type change picks the new type's size nearest the old one by
+        diameter and by the old size's pitch. The pitch was the new type's first size's
+        (M12x1.75 to UNC gave 7/16, 11.113 with 1.814, not 1/2, 12.700 with 1.954; to NPT
+        1/8, not 1/4; to ISO fine M12x1.0, not M12x1.5), silently from Python.
+        Model: M12x1.75, diameter 12 and pitch 1.75: UNC 7/16 is 0.889 away (0.887 in diameter,
+        0.064 in pitch), 1/2 0.729 (0.700, 0.204); NPT 1/8 1.894, 1/4 1.749; M12x1.0 0.75 away
+        in pitch, M12x1.5 0.25."""
+        for other, expected in (
+            ("UNC", "1/2"),
+            ("NPT", "1/4"),
+            ("ISOMetricFineProfile", "M12x1.5"),
+        ):
+            self.Hole.ThreadType = "ISOMetricProfile"
+            self.Hole.ThreadSize = "M12x1.75"
+            self.Hole.ThreadType = other
+            self.assertEqual(self.Hole.ThreadSize, expected, other)
 
     def testNoRefineHole(self):
         # Add a second box to get a shape with more faces

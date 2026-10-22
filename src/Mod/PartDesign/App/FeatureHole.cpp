@@ -1305,7 +1305,25 @@ double Hole::getThreadProfileAngle()
     return 90 - 1.79;
 }
 
-void Hole::findClosestDesignation()
+// FreeCAD-CH (ops#405 N1): the pitch of the size at `index` in a size list, when the list is one
+// type's alone (the lists of two types differ); else 0, unknown
+static double pitchInListedSizes(const std::vector<std::string>& designations, int index)
+{
+    const int numTypes = static_cast<int>(std::size(Hole::threadDescription));
+    double pitch = 0.0;
+    int found = 0;
+    for (int type = 0; type < numTypes; ++type) {
+        if (getThreadDesignations(type) == designations) {
+            ++found;
+            if (index >= 0 && index < static_cast<int>(Hole::threadDescription[type].size())) {
+                pitch = Hole::threadDescription[type][index].pitch;
+            }
+        }
+    }
+    return found == 1 ? pitch : 0.0;
+}
+
+void Hole::findClosestDesignation(double oldPitch)
 {
     int threadType = ThreadType.getValue();
     const int numTypes = static_cast<int>(std::size(threadDescription));
@@ -1321,8 +1339,10 @@ void Hole::findClosestDesignation()
 
     int oldSizeIndex = ThreadSize.getValue();
     const auto& options = threadDescription[threadType];
-    double targetPitch = 0.0;
-    if (oldSizeIndex >= 0 && oldSizeIndex < static_cast<int>(options.size())) {
+    // after a type change, the pitch of the size it left; else the new type's size at the index
+    double targetPitch = oldPitch;
+    if (targetPitch == 0.0 && oldSizeIndex >= 0
+        && oldSizeIndex < static_cast<int>(options.size())) {
         targetPitch = options[oldSizeIndex].pitch;
     }
     size_t bestIndex = 0;
@@ -1372,17 +1392,21 @@ void Hole::onChanged(const App::Property* prop)
             // size's. A restore keeps the reset, which corrects a stale saved ThreadDiameter.
             const double oldThreadDiameter = ThreadDiameter.getValue();
             std::string oldThreadSize;
+            double oldPitch = 0.0;
             if (ThreadSize.isValid()) {
                 oldThreadSize = ThreadSize.getValueAsString();
+                // ops#405 N1: its pitch too, from the old type's sizes (still listed)
+                oldPitch = pitchInListedSizes(ThreadSize.getEnumVector(), ThreadSize.getValue());
             }
             ThreadSize.setEnums(getThreadDesignations(ThreadType.getValue()));
             if (type != "None") {
                 const bool sizeKept = ThreadSize.isValid()
                     && oldThreadSize == ThreadSize.getValueAsString();
-                if (!isRestoring() && !sizeKept) {
+                const bool changed = !isRestoring() && !sizeKept;
+                if (changed) {
                     ThreadDiameter.setValue(oldThreadDiameter);
                 }
-                findClosestDesignation();
+                findClosestDesignation(changed ? oldPitch : 0.0);
             }
         }
 

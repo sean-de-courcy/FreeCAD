@@ -220,8 +220,26 @@ bool TaskDlgDatumParameters::accept()
                     // until it computes, and the attacher reads it on OK ("No planar face": the
                     // panel stayed). Placed again once it's in the body (its Group change).
                     if (auto* binder = freecad_cast<PartDesign::ShapeBinder*>(copy);
-                        binder && binder->TraceSupport.getValue()) {
-                        binder->recomputeFeature();
+                        binder && binder->TraceSupport.getValue()
+                        && !binder->recomputeFeature()) {
+                        // FreeCAD-CH (ops#395 2): one that doesn't compute isn't attached to, as
+                        // in getReferencedSelection
+                        const QString status = QString::fromUtf8(binder->getStatusString());
+                        copies.push_back(copy);
+                        for (App::DocumentObject* made : copies) {
+                            made->getDocument()->removeObject(made->getNameInDocument());
+                        }
+                        QMessageBox::warning(
+                            Gui::getMainWindow(),
+                            tr("No copy"),
+                            tr("The copy of '%1' doesn't compute: %2. Make a cross-reference "
+                               "instead.")
+                                .arg(
+                                    QString::fromUtf8(obj->Label.getValue()),
+                                    status.isEmpty() ? tr("it has no shape") : status
+                                )
+                        );
+                        return false;
                     }
                     copyObjects.push_back(copy);
                     copies.push_back(copyObjects.back());

@@ -667,17 +667,17 @@ class TestPanelFixesGui(unittest.TestCase):
             App.closeDocument(other.Name)
             pump()
 
-    # -- ops#327: the Profile command's copy of a sketch in another document ---------------------
+    # -- ops#410: Pad on a sketch of another document ---------------------------------------------
 
-    def testPadOnASketchOfAnotherDocumentIsNotTaken(self):
-        """ops#327, then ops#390: Pad, with an active body, on a sketch of another document
-        outside any body. Since ops#390 (upstream PR 33716) a command's selection holds only the
-        active document's objects again, so Pad finds no sketch and says so: nothing is added to
-        either document, and no transaction is left open. (Before, the sketch was offered for a
-        copy; Make dependent copy was refused, its link can't reach another document, and ops#327
-        made the command stop there: the refused copy, a null, had gone on as the pad's profile,
-        nothing made, without a word, and the "Make Copy" transaction left open.)"""
+    def padOnASketchOfAnotherDocument(self, ownSketch):
+        """Pad, with an active body, on a sketch selected in another document (decision 104: a
+        command's selection holds only the active document's objects, ops#390). Returns the
+        modals shown. Nothing is added to either document, no task dialog opens and no
+        transaction is left open. With `ownSketch` the active document has a sketch of its own,
+        which Pad must not take in its place."""
         self.body = models.body(self.doc)
+        if ownSketch:
+            models.sketch(self.doc, "Own", models.rectangle(0, 0, 5, 5), self.body)
         self.doc.recompute()
         other = App.newDocument("PanelFixesOther", hidden=True)
         try:
@@ -702,11 +702,72 @@ class TestPanelFixesGui(unittest.TestCase):
             self.assertEqual([o.Name for o in other.Objects], [outer.Name])
             self.assertIsNone(App.getActiveTransaction())
             self.assertEqual(self.doc.UndoNames, undo)
-            self.assertEqual(self.modals, ["QMessageBox: No sketch is available in the document"])
+            return list(self.modals), other.Label
         finally:
             Gui.Selection.clearSelection()
             App.setActiveDocument(self.doc.Name)
             App.closeDocument(other.Name)
+
+    def testPadOnASketchOfAnotherDocumentSaysSo(self):
+        """ops#410 (decision 104), then ops#327 retired: since ops#390 (upstream PR 33716) a
+        command's selection holds only the active document's objects, so a sketch selected in
+        another document is no profile. Pad says so, naming the sketch and its document, and
+        advises a sketch of the active document: "No sketch is available in the document"
+        sent the user looking for one in a document that has none. (Before ops#327 a refused
+        dependent copy, a null, went on as the pad's profile, without a word.)"""
+        modals, label = self.padOnASketchOfAnotherDocument(ownSketch=False)
+        self.assertEqual(
+            modals,
+            [
+                f"QMessageBox: 'Outer' is in the document '{label}', not in the active "
+                "document. Select a sketch of the active document."
+            ],
+        )
+
+    def testPadOnASketchOfAnotherDocumentDoesNotTakeAnotherSketch(self):
+        """ops#410: as testPadOnASketchOfAnotherDocumentSaysSo, with a sketch in the active
+        document. The command took that one as the pad's profile, and no word was said that the
+        selected sketch was left out; now it stops."""
+        modals, label = self.padOnASketchOfAnotherDocument(ownSketch=True)
+        self.assertEqual(len(modals), 1)
+        self.assertIn(f"is in the document '{label}'", modals[0])
+        self.assertEqual(
+            [o.Name for o in self.doc.Objects if o.isDerivedFrom("PartDesign::Pad")], []
+        )
+
+    # -- ops#395 1: Pad on a sketch of another body ---------------------------------------------
+
+    def testPadOnASketchOfAnotherBodyIsRefused(self):
+        """ops#395 1 (PR 343 review L3): the dependent profile copy that Pad's code makes for a
+        selected sketch outside the active body (a traced shape binder, not computed before the
+        pad's recompute) can't be reached: a selection of anything outside the body (and its
+        studio) stops the command first, with a message. Pinned here: a 4 x 5 sketch in a body of
+        another App::Part, selected, Pad asks no copy question, opens no panel and adds nothing."""
+        other = self.otherBody()
+        profile = models.sketch(self.doc, "Profile", models.rectangle(0, 0, 4, 5), other)
+        self.body = models.body(self.doc)
+        self.doc.recompute()
+        Gui.activateWorkbench("PartDesignWorkbench")
+        App.setActiveDocument(self.doc.Name)
+        Gui.setActiveDocument(self.doc.Name)
+        pump(0.2)
+        Gui.getDocument(self.doc.Name).ActiveView.setActiveObject("pdbody", self.body)
+        names = sorted(o.Name for o in self.doc.Objects)
+        Gui.Selection.addSelection(self.doc.Name, profile.Name)
+        self.answerModals("radioDependent")
+        Gui.runCommand("PartDesign_Pad")
+        pump(0.5)
+        self.answering = False
+        self.assertFalse(Gui.Control.activeDialog())
+        self.assertEqual(sorted(o.Name for o in self.doc.Objects), names)
+        self.assertIsNone(App.getActiveTransaction())
+        self.assertEqual(
+            self.modals,
+            [
+                "QMessageBox: Cannot use selected object. Selected object must belong to the "
+                "active body"
+            ],
+        )
 
     # -- ops#170 1-3: the Pipe's orientation and scaling panels ----------------------------------
 

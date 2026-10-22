@@ -1229,6 +1229,28 @@ void prepareProfileBased(
     );
     if (sketches.empty()) {  // no sketches were selected. Let user pick an object from valid ones
                              // available in document
+        // FreeCAD-CH (ops#410, decision 104): the selection holds only the active document's
+        // objects (upstream PR 33716), so a sketch selected in another document is no profile.
+        // Said, rather than left out: the command went on with a sketch of this document, or said
+        // that none is available
+        const auto elsewhere = cmd->getSelection().getObjectsOfType(
+            Part::Part2DObject::getClassTypeId(),
+            "*"
+        );
+        if (!elsewhere.empty()) {
+            App::DocumentObject* other = elsewhere.front();
+            QMessageBox::warning(
+                Gui::getMainWindow(),
+                QObject::tr("Sketch in another document"),
+                QObject::tr("'%1' is in the document '%2', not in the active document. Select a "
+                            "sketch of the active document.")
+                    .arg(
+                        QString::fromUtf8(other->Label.getValue()),
+                        QString::fromUtf8(other->getDocument()->Label.getValue())
+                    )
+            );
+            return;
+        }
         sketches = cmd->getDocument()->getObjectsOfType(Part::Part2DObject::getClassTypeId());
         bNoSketchWasSelected = true;
     }
@@ -1322,29 +1344,15 @@ void prepareProfileBased(
             auto oBody = PartDesignGui::getBodyFor(sketches[0], false);
             App::DocumentObject* target = oBody ? static_cast<App::DocumentObject*>(pcActiveBody)
                                                 : pcActivePart;
-            QString refusal;
+            // FreeCAD-CH (ops#410, decision 104): the sketch is in the active document, so the
+            // copy isn't refused (ops#327's guard against a dependent copy across documents is
+            // gone with the selection that could reach it)
             auto copy = PartDesignGui::TaskFeaturePick::makeCopy(
                 sketches[0],
                 "",
                 dlg.radioIndependent->isChecked(),
-                target,
-                &refusal
+                target
             );
-            // FreeCAD-CH (ops#327): no copy (a dependent copy of a sketch in another document):
-            // stop, as the other callers do. The null went to the body's addObject and on as the
-            // profile: nothing was made, without a word, and the transaction stayed open.
-            if (!copy) {
-                cmd->abortCommand();
-                QMessageBox::warning(
-                    Gui::getMainWindow(),
-                    QObject::tr("No copy"),
-                    refusal.isEmpty()
-                        ? QObject::tr("'%1' can't be copied. Make a cross-reference instead.")
-                              .arg(QString::fromUtf8(sketches[0]->Label.getValue()))
-                        : refusal
-                );
-                return;
-            }
             if (oBody) {
                 pcActiveBody->addObject(copy);
             }
