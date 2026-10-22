@@ -1577,10 +1577,10 @@ namespace
 // told apart only by an index (ops#378). The result's indexes follow the order in which OCCT
 // stores sub-shapes, which can differ between platforms and OCCT versions (a round hole's four
 // bend arcs in a Pipe: Windows and macOS store them in opposite orders). Instead, an UPP member's
-// place is read in the parameterization of its reference, the element the list's first name
-// belongs to: a rigid motion of the inputs, a dimension edit or a tilt through an axis-aligned
-// position moves the members and the reference together, so the order holds. The shape's own
-// coordinates come last, and are all that LOW and PRJ members have (no reference).
+// place is read in the parameterization of its reference, the first element in the list's name
+// order that isn't a plane: a rigid motion of the inputs, a dimension edit or a tilt through an
+// axis-aligned position moves the members and the reference together, so the order holds. The
+// shape's own coordinates come last, and are all that LOW and PRJ members have (no reference).
 
 /// One component of an element's order key: a value, and the period that wraps it (0: none).
 struct OrderValue
@@ -3446,9 +3446,10 @@ TopoShape& TopoShape::makeShapeWithElementMap(
         // type's lists are collected first and the indexes given after, per list in the order of
         // the members' places (elementOrderValues), not of their indexes in the result, which
         // follow OCCT's sub-shape order (ops#378: a round hole's bend arcs in a Pipe). An UPP
-        // member's place is read on its reference, the ancestor the list's first name belongs
-        // to; LOW and PRJ members have no reference, and are ordered by their length or area and
-        // their coordinates. Vertexes still count on from the edges named from the same faces.
+        // member's place is read on its reference, the first ancestor in the list's name order
+        // that isn't a plane; an UPP list named only from planes keeps the result's order. LOW
+        // and PRJ members have no reference, and are ordered by their length or area and their
+        // coordinates. Vertexes still count on from the edges named from the same faces.
         enum class Fallback
         {
             Partner,
@@ -3460,7 +3461,7 @@ TopoShape& TopoShape::makeShapeWithElementMap(
             int index;
             Fallback kind;
             std::vector<Data::MappedName> names;
-            TopoDS_Shape reference;  ///< UPP: the ancestor of the first name; else null
+            TopoDS_Shape reference;  ///< UPP: the first named ancestor not a plane; else null
         };
         for (int pass = 0; pass < 2; ++pass) {
             bool unnamedLeft = false;
@@ -3574,7 +3575,9 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                             // plane OCCT builds for a sketch's face has its axes along the
                             // world's whatever the sketch's turn, so on it the order would be
                             // the world's (fork PR 355 round 3). A list named only from planes
-                            // takes the first: its order is the world's, as LOW's (ops#438)
+                            // has no reference and keeps the result's order, as before ops#378:
+                            // any key on a plane or on the shape's coordinates swaps such a pair
+                            // under a turn of the whole model (fork PR 355 round 4)
                             TopoDS_Shape reference;
                             for (const auto& listName : linkedUpperNames) {
                                 const auto named = std::find_if(
@@ -3588,9 +3591,6 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                                     continue;
                                 }
                                 const TopoDS_Shape& ancestor = named->second;
-                                if (reference.IsNull()) {
-                                    reference = ancestor;
-                                }
                                 if (ancestor.ShapeType() != TopAbs_FACE
                                     || BRepAdaptor_Surface(TopoDS::Face(ancestor), Standard_False)
                                             .GetType()
@@ -3682,7 +3682,10 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                 }
 
                 for (auto& list : lists) {
-                    if (list.size() > 1) {
+                    const FallbackName& first = fallbackNames[list.front()];
+                    const bool resultOrder = first.kind == Fallback::Upper
+                        && first.reference.IsNull();  // named only from planes
+                    if (list.size() > 1 && !resultOrder) {
                         std::vector<OrderValues> keys;
                         keys.reserve(list.size());
                         for (std::size_t i : list) {
