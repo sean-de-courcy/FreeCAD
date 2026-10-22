@@ -301,44 +301,41 @@ testing::AssertionResult upperNamed(
     const char* op
 )
 {
-    // The elements in the order of their places: centre of mass (a vertex: its point), then length
-    // or area, in micrometres; the index breaks ties (ops#378)
-    std::vector<std::pair<std::array<long long, 4>, int>> places;
-    for (int index = 1; index <= static_cast<int>(shape.countSubElements(type)); ++index) {
-        auto subShape = shape.getSubShape((std::string(type) + std::to_string(index)).c_str());
-        gp_Pnt center;
-        double mass = 0;
-        if (subShape.ShapeType() == TopAbs_VERTEX) {
-            center = BRep_Tool::Pnt(TopoDS::Vertex(subShape));
-        }
-        else {
-            GProp_GProps props;
-            if (subShape.ShapeType() == TopAbs_FACE) {
-                BRepGProp::SurfaceProperties(subShape, props);
+    // Every element has its UPP name with some index below the element count, and the elements
+    // named from the same names use the indexes 0 .. n-1 once each. Which member gets which
+    // index is the order rule's (ops#378: the elements' places on the face they are named from;
+    // the order gtests check it), so this holds for any rule.
+    const int count = static_cast<int>(shape.countSubElements(type));
+    std::map<std::vector<std::string>, std::set<int>> used;
+    for (int index = 1; index <= count; ++index) {
+        auto element = std::string(type) + std::to_string(index);
+        const MappedName actual = shape.getMappedName(IndexedName::fromConst(type, index));
+        int found = -1;
+        for (int candidate = 0; candidate < count && found < 0; ++candidate) {
+            if (actual == upperName(shape, element, tag, op, candidate)) {
+                found = candidate;
             }
-            else {
-                BRepGProp::LinearProperties(subShape, props);
-            }
-            center = props.CentreOfMass();
-            mass = props.Mass();
         }
-        auto grid = [](double value) {
-            return std::llround(value * 1e6);
-        };
-        places.push_back({{grid(center.X()), grid(center.Y()), grid(center.Z()), grid(mass)}, index});
-    }
-    std::sort(places.begin(), places.end());
-    std::map<std::vector<std::string>, int> used;
-    for (const auto& place : places) {
-        auto element = std::string(type) + std::to_string(place.second);
-        auto linkedNames = lastSection(upperName(shape, element, tag, op)).linkedNames;
         auto result = elementHasNames(
             shape,
             element.c_str(),
-            {upperName(shape, element, tag, op, used[linkedNames]++)}
+            {upperName(shape, element, tag, op, std::max(found, 0))}
         );
         if (!result) {
             return result;
+        }
+        auto linkedNames = lastSection(upperName(shape, element, tag, op)).linkedNames;
+        if (!used[linkedNames].insert(found).second) {
+            return testing::AssertionFailure()
+                << element << " repeats the UPP index " << found << " of its name list";
+        }
+    }
+    for (const auto& [linkedNames, indexes] : used) {
+        if (*indexes.rbegin() != static_cast<int>(indexes.size()) - 1) {
+            return testing::AssertionFailure()
+                << "the " << indexes.size() << " " << type << "s named from "
+                << (linkedNames.empty() ? std::string("nothing") : linkedNames.front())
+                << " don't use the UPP indexes 0 .. " << indexes.size() - 1;
         }
     }
     return testing::AssertionSuccess();
