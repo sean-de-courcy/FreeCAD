@@ -4597,12 +4597,13 @@ TopoShape& TopoShape::makeElementPipeShell(
         sections.push_back(sh.getShape());
     }
     // Frenet's trihedron turns over at an inflection inside a spine edge (ops#421)
-    SweepFrenet::setMode(
+    const double pipeTolerance = tol3d != 0.0 ? tol3d : 1e-4;
+    const SweepFrenet::Mode mode = SweepFrenet::setMode(
         mkPipeShell,
         TopoDS::Wire(spine.getShape()),
         sections,
         isFrenet,
-        tol3d != 0.0 ? tol3d : 1e-4
+        pipeTolerance
     );
     for (auto& sh : profiles) {
         mkPipeShell.Add(sh.getShape());
@@ -4622,6 +4623,7 @@ TopoShape& TopoShape::makeElementPipeShell(
     // Shape() builds the pipe, which the mapper's FirstShape(), LastShape() and Generated() need.
     // The mapper reads the ends before MakeSolid(): after it, a point section's are null.
     mkPipeShell.Shape();
+    SweepFrenet::checkBuilt(mkPipeShell.Shape(), mode, pipeTolerance);
     // MakePipeShell's default 3D tolerance (BRepOffsetAPI_MakePipeShell::SetTolerance) unless set
     const MapperSweepEnds mapper(
         mkPipeShell,

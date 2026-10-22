@@ -10,9 +10,10 @@ of its plane, the wave's frame turns half a turn within micrometres instead, wit
 The spines are designed: a planar wave x = 1.5 (1 - cos(2 pi z / 20)) (smallest radius of
 curvature 6.75 mm, above the profile's 2 mm, so the tube doesn't fold), the same wave lifted along
 Y by eps (z - 5)^3, a lead line and a corner before it, a B-spline that is planar around its
-inflections and rises after them, and a Bezier curve with a flat point that doesn't reverse its
-normal. A circle swept with its centre on the spine and its plane normal to it is the tube of
-points at r from the spine, of volume A L (Pappus)."""
+inflections and rises after them, a Bezier curve with a flat point that doesn't reverse its
+normal, a Bezier curve whose normal turns over within micrometres, and a long lead line, the wave
+and an arc leaving the wave's plane by 10 degrees. A circle swept with its centre on the spine and
+its plane normal to it is the tube of points at r from the spine, of volume A L (Pappus)."""
 
 import math
 import unittest
@@ -85,6 +86,48 @@ def flat_point_spine(shift=0.0):
     curve = Part.BezierCurve()
     curve.setPoles([V(x[i], y[i], z[i]) for i in range(6)])
     return Part.Wire([curve.toShape()])
+
+
+def narrow_turn_spine(eps):
+    """One cubic Bezier curve z = 20 t - 10, x = 0.01 z^3, y = eps z^2: its normal turns from -X to
+    +X through +Y within about eps / 0.03 mm of z = 0, the edge's middle parameter (fork PR 358
+    round 2's verification, finding 2: with a sample inside the turn, it went undetected)"""
+
+    def poles(coefficients):
+        coefficients = list(coefficients) + [0.0] * (4 - len(coefficients))
+        return [
+            sum(math.comb(i, k) / math.comb(3, k) * coefficients[k] for k in range(i + 1))
+            for i in range(4)
+        ]
+
+    x = poles([0.01 * math.comb(3, j) * (-10.0) ** (3 - j) * 20**j for j in range(4)])
+    y = poles([eps * math.comb(2, j) * (-10.0) ** (2 - j) * 20**j for j in range(3)])
+    z = poles([-10.0, 20.0])
+    curve = Part.BezierCurve()
+    curve.setPoles([V(x[i], y[i], z[i]) for i in range(4)])
+    return Part.Wire([curve.toShape()])
+
+
+def leaving_plane_spine():
+    """A 1000 mm lead line up Z, the planar wave (two inflections, in XZ), then an arc of radius 50
+    mm turning 10 degrees towards +Y: within a thousandth of its size of the XZ plane, but its
+    tangent leaves the plane by 10 degrees (fork PR 358 round 2's verification, finding 1)"""
+    end = V(0, 0, 20)
+    a = math.radians(10)
+    arc = Part.Arc(
+        end,
+        end + V(0, 50 * (1 - math.cos(a / 2)), 50 * math.sin(a / 2)),
+        end + V(0, 50 * (1 - math.cos(a)), 50 * math.sin(a)),
+    )
+    return Part.Wire([Part.makeLine(V(0, 0, -1000), V(0, 0, 0)), wave_edge(), arc.toShape()])
+
+
+def end_offset(shape, wire, axis):
+    """The offset along `axis` of the end cap's centre of mass from the spine's end"""
+    end = wire.OrderedVertexes[-1].Point
+    caps = [face for face in shape.Faces if face.Surface.TypeId == "Part::GeomPlane"]
+    cap = min(caps, key=lambda face: (face.CenterOfMass - end).Length)
+    return (cap.CenterOfMass - end).dot(axis)
 
 
 def start_frame(wire):
@@ -212,6 +255,49 @@ class SweepFrenetTest(unittest.TestCase):
             self.assertIn("Frenet frame turns over", sweep.getStatusString())
             corrected = self.sweep(wire, rectangle_at_start(wire), frenet=False)
             self.assertTrue(corrected.isValid(), corrected.getStatusString())
+
+    def testFrenetNarrowTurnOnASample(self):
+        """A turn of the normal so narrow that a sample lands inside it, half-way round, so that
+        neither neighbouring pair of samples is more than a right angle apart. Off the plane (eps =
+        1e-3) a circle about the spine gives the tube and a rectangle beside it is refused; nearly
+        planar (eps = 1e-5), the rectangle beside the spine on +Y stays there. Before, both
+        rectangles ended on the other side, -1.5 mm (fork PR 358 round 2's verification,
+        finding 2)"""
+        wire = narrow_turn_spine(1e-3)
+        self.assertTube(wire, 0.5)
+        sweep = self.sweep(wire, rectangle_at_start(wire))
+        self.assertFalse(sweep.isValid())
+        self.assertIn("Frenet frame turns over", sweep.getStatusString())
+
+        wire = narrow_turn_spine(1e-5)
+        sweep = self.sweep(wire, rectangle_at_start(wire))
+        self.assertTrue(sweep.isValid(), sweep.getStatusString())
+        self.assertAlmostEqual(end_offset(sweep.Shape, wire, V(0, 1, 0)), 1.5, delta=1e-3)
+        self.assertSound(sweep.Shape)
+
+    def testFrenetNearlyPlanarSpineLeavingItsPlane(self):
+        """A spine within a thousandth of its size of a plane, whose tangent still leaves it by 10
+        degrees. The plane's normal as a constant binormal tilts the sections there and swept the
+        circle 1.5e-2 mm out of round, r (1 / cos 10 - 1). The circle gives the tube; a rectangle
+        beside the spine is refused, as on the same spine without the lead line (fork PR 358 round
+        2's verification, finding 1)"""
+        wire = leaving_plane_spine()
+        self.assertTube(wire, 1.0)
+        sweep = self.sweep(wire, rectangle_at_start(wire))
+        self.assertFalse(sweep.isValid())
+        self.assertIn("Frenet frame turns over", sweep.getStatusString())
+
+    def testFrenetLiftedWavesFailLoudly(self):
+        """Ten waves lifted out of their plane by 1e-11 (z - 5)^3 (75 nm at most): OCCT's Frenet and
+        corrected Frenet fail there, and the plane's normal as a constant binormal left vertices
+        with tolerances of 0.15 mm and the tube 1.1e-2 mm off. The sweep fails, saying why, in Part
+        Sweep and in Wire.makePipeShell (fork PR 358 round 2's verification, finding 1)"""
+        wire = Part.Wire([wave_edge(waves=10, lift=1e-11)])
+        sweep = self.sweep(wire, circle_at_start(wire))
+        self.assertFalse(sweep.isValid())
+        self.assertIn("Frenet frame turns over", sweep.getStatusString())
+        with self.assertRaises(Part.OCCError):
+            wire.makePipeShell([circle_at_start(wire)], True, True)
 
     def testFrenetWithoutTurnOverIsUnchanged(self):
         """A planar arc, a helix and a Bezier curve with a flat point that doesn't reverse its
