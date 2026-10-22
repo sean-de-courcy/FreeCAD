@@ -369,7 +369,12 @@ bool getReferencedSelection(
 
             if (!dlg.radioXRef->isChecked()) {
                 App::Document* document = thisObj->getDocument();
-                document->openTransaction("Make copy");
+                // FreeCAD-CH (ops#395 3): inside the panel's open transaction, when there is one.
+                // A new one committed the feature's creation, so Cancel undid the copy alone and
+                // left the feature (a new Revolution) in the body
+                if (!document->hasPendingTransaction()) {
+                    document->openTransaction("Make copy");
+                }
                 QString refusal;
                 auto copy = PartDesignGui::TaskFeaturePick::makeCopy(
                     selObj,

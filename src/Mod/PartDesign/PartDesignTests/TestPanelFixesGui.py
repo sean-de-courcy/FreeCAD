@@ -2600,6 +2600,39 @@ class TestPanelFixesGui(unittest.TestCase):
         # the ring (x 1..3, z 0..2) turned about the line x = 10: radii 7..9, height 2
         self.assertAlmostEqual(revolution.Shape.Volume, math.pi * (81 - 49) * 2, places=3)
 
+    def testNewRevolutionCopyPickThenCancelRemovesTheRevolution(self):
+        """ops#395 3: a new Revolution (its creation is the open transaction, as Make Revolution
+        opens it), the axis picked on an edge of a box in another body, Make independent copy,
+        then Cancel. The "Make copy" transaction getReferencedSelection opened committed the
+        creation first, so Cancel undid the copy alone and left the Revolution in the body.
+        Cancel removes the Revolution and the copy, and the document is as before."""
+        other = self.otherBody()
+        box = other.newObject("PartDesign::AdditiveBox", "Box")
+        self.body = models.body(self.doc)
+        ring = models.sketch(self.doc, "Ring", models.rectangle(1, 0, 3, 2), self.body, placement=XZ)
+        self.doc.recompute()
+        edge = self.boxElement(
+            box, "Edge", lambda p: abs(p.x - 10) < 1e-6 and abs(p.y) < 1e-6 and abs(p.z - 5) < 1e-6
+        )
+        names = sorted(o.Name for o in self.doc.Objects)
+        self.doc.openTransaction("Make Revolution")
+        revolution = self.body.newObject("PartDesign::Revolution", "Revolution")
+        revolution.Profile = ring
+        revolution.ReferenceAxis = (ring, ["V_Axis"])
+        revolution.Angle = 360
+        self.doc.recompute()
+        self.edit(revolution, transaction=False)
+        self.armAxisField()
+        self.answerModals()
+        Gui.Selection.addSelection(self.doc.Name, box.Name, edge)
+        self.assertTrue(waitFor(lambda: self.modals), "no copy dialog")
+        pump(0.3)
+        self.answering = False
+        self.assertIsNotNone(self.doc.getObject("CopyBox"))
+        self.close(ok=False)
+        self.assertEqual(sorted(o.Name for o in self.doc.Objects), names)
+        self.assertIsNone(App.getActiveTransaction())
+
     def pickAxisAsDependentCopy(self, revolution, obj, sub):
         """In the open Revolution panel, picks `sub` of obj (in another body) as the axis, Make
         dependent copy; returns the copy (a shape binder of the element)."""

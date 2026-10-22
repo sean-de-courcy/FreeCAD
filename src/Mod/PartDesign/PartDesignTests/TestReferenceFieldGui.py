@@ -82,7 +82,7 @@ from PySide6 import QtTest
 
 from PartDesignTests.Scenarios import models
 from PartDesignTests.Scenarios.harness import X, Z, edge, face, vertex
-from PartDesignTests.TestDressUpDeleteKeyGui import focus, pump, taskButton, waitFor
+from PartDesignTests.TestDressUpDeleteKeyGui import focus, pump, reportText, taskButton, waitFor
 
 STATE_ROLE = QtCore.Qt.UserRole + 1
 SUB_ROLE = QtCore.Qt.UserRole + 2
@@ -4612,6 +4612,59 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "OK didn't close")
         self.assertIsNotNone(pattern.Direction, "OK cleared the direction")
         self.assertEqual(pattern.Direction[0].Name, pad.Name)
+
+    def testPatternDirectionOnARefusedCopySaysItOnce(self):
+        """ops#395 5: the Pattern panel's direction picked on Edge1 of a sketch in a body of
+        another App::Part, Make independent copy, the sketch's line moved from x = 10 to x = 20
+        and not recomputed: its copy, recomputed, has the line at x = 20, so the picked edge
+        would be another line there (as testRevolutionAxisOnAStaleCopiedSketchStops). A message
+        box says so; the panel also wrote "Invalid selection. Select an edge, planar face, or
+        datum line." to the Report view. It says it once, and the direction stays."""
+        first, second = self.bumps()
+        part = self.doc.addObject("App::Part", "OtherPart")
+        other = models.body(self.doc)
+        part.addObject(other)
+        axis = models.sketch(
+            self.doc,
+            "Axis",
+            [Part.LineSegment(App.Vector(10, 0, 0), App.Vector(10, 10, 0))],
+            other,
+        )
+        pattern = self.pattern("PartDesign::LinearPattern", [first])
+        direction = pattern.Direction
+        axis.Geometry = [Part.LineSegment(App.Vector(20, 0, 0), App.Vector(20, 10, 0))]
+        self.edit(pattern)
+        self.selectReference("comboDirection")
+        modals = []
+        answering = [True]
+
+        def poll():
+            if not answering[0]:
+                return
+            widget = QtWidgets.QApplication.activeModalWidget()
+            if widget is not None:
+                radio = widget.findChild(QtWidgets.QRadioButton, "radioIndependent")
+                if radio is not None:
+                    modals.append("DlgReference")
+                    radio.setChecked(True)
+                    widget.accept()
+                elif isinstance(widget, QtWidgets.QMessageBox):
+                    modals.append("QMessageBox: " + widget.text())
+                    widget.accept()
+            QtCore.QTimer.singleShot(50, poll)
+
+        QtCore.QTimer.singleShot(50, poll)
+        Gui.Selection.addSelection(self.doc.Name, axis.Name, "Edge1")
+        self.assertTrue(waitFor(lambda: len(modals) >= 2), f"modals {modals}")
+        pump(0.3)
+        answering[0] = False
+        self.assertEqual(modals[0], "DlgReference")
+        self.assertTrue(modals[1].startswith("QMessageBox: Edge1"), modals)
+        self.assertNotIn("Invalid selection", reportText() or "")
+        self.assertEqual([o.Name for o in self.doc.Objects if o.Name.startswith("CopyAxis")], [])
+        self.assertEqual(pattern.Direction, direction)
+        taskButton(QtWidgets.QDialogButtonBox.Cancel).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()))
 
     def testMirroredUpdateViewOffPickPending(self):
         """ops#186 (4): "Update view" off, "Select reference..." chosen, the Originals field
