@@ -316,18 +316,16 @@ class SweepFrenetTest(unittest.TestCase):
         else:
             self.assertIn("Frenet frame turns over", sweep.getStatusString())
 
-    def testFrenetAlongAHelixWithoutSampling(self):
-        """A Part.makeHelix helix is one B-spline with about one knot span a turn, sampled 6.4
-        times a turn: neighbouring normals 56 degrees apart, two apart 113, while the frame turns
-        about the tangent by 2 degrees. A triangle beside it keeps OCCT's Frenet law: the same
-        solid as MakePipeShell's own Frenet mode. Before, the sweep was refused, saying the frame
-        turns over (fork PR 358 round 3's verification, finding 2)"""
-        wire = Part.Wire([Part.makeHelix(2.0, 20.0, 10.0)])
+    def assertFrenetHelix(self, pitch, height, radius):
+        """A thread-like triangle beside a Part.makeHelix helix keeps OCCT's Frenet law: the same
+        solid as MakePipeShell's own Frenet mode"""
+        wire = Part.Wire([Part.makeHelix(pitch, height, radius)])
         point, tangent = start_frame(wire)
         radial = V(1, 0, 0)
         radial = (radial - tangent * radial.dot(tangent)).normalize()
         other = tangent.cross(radial)
-        corners = [point - other * 0.1, point + radial * 0.2, point + other * 0.1]
+        size = min(0.1, radius / 10)
+        corners = [point - other * size, point + radial * 2 * size, point + other * size]
         triangle = Part.makePolygon(corners + [corners[0]])
         sweep = self.sweep(wire, triangle)
         self.assertTrue(sweep.isValid(), sweep.getStatusString())
@@ -338,6 +336,22 @@ class SweepFrenetTest(unittest.TestCase):
         pipe.makeSolid()
         self.assertAlmostEqual(sweep.Shape.Volume, pipe.shape().Volume, places=9)
         self.assertEqual(len(sweep.Shape.Faces), len(pipe.shape().Faces))
+
+    def testFrenetAlongAHelixWithoutSampling(self):
+        """A Part.makeHelix helix is one B-spline with about one knot span a turn, sampled 6.4
+        times a turn: neighbouring normals 56 degrees apart, two apart 113, while the frame turns
+        about the tangent by 2 degrees. Before, the sweep was refused, saying the frame turns over
+        (fork PR 358 round 3's verification, finding 2)"""
+        self.assertFrenetHelix(2.0, 20.0, 10.0)
+
+    def testFrenetAlongASteepHelix(self):
+        """A steep helix's Frenet frame really turns about the tangent, by 360 c / sqrt(r^2 + c^2)
+        degrees a turn (c = pitch / 2 pi): 249 degrees at a pitch of 6 r, 343 at 20 r. Sampled 6.4
+        times a turn, neighbouring frames are 41 to 56 degrees apart and two apart 92 to 112, a
+        steady twist and not a turn-over. Before, both sweeps were refused (fork PR 358 round 4's
+        verification, finding 1)"""
+        self.assertFrenetHelix(6.0, 60.0, 1.0)
+        self.assertFrenetHelix(20.0, 200.0, 1.0)
 
     def testFrenetWithoutTurnOverIsUnchanged(self):
         """A planar arc, a helix and a Bezier curve with a flat point that doesn't reverse its

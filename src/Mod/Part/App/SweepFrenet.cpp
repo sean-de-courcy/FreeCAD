@@ -127,11 +127,11 @@ void addSamples(
     parameters.push_back(u1);
 }
 
-/// The parameters of the samples along \a curve: sampleCount() even intervals, halved where the
-/// tangent turns fast (addSamples())
-std::vector<double> sampleParameters(const BRepAdaptor_Curve& curve)
+/// The parameters of the samples along \a curve: \a factor times sampleCount() even intervals,
+/// halved where the tangent turns fast (addSamples())
+std::vector<double> sampleParameters(const BRepAdaptor_Curve& curve, int factor)
 {
-    const int samples = sampleCount(curve);
+    const int samples = factor * sampleCount(curve);
     const double first = curve.FirstParameter();
     const double last = curve.LastParameter();
     std::vector<double> parameters {first};
@@ -148,6 +148,51 @@ std::vector<double> sampleParameters(const BRepAdaptor_Curve& curve)
     return parameters;
 }
 
+/// What scanTurns() found along an edge
+struct Scan
+{
+    /// The first sample where the frame turns over, if any
+    std::optional<gp_Pnt> where;
+    /// The median of turnCosine() between neighbouring counted samples (1 with fewer than two)
+    double medianCosine;
+};
+
+/// Samples \a law along \a curve, \a factor times sampleParameters()'s even intervals, for
+/// turnOver(): the first point where the frame turns by more than a right angle about the tangent
+/// between two counted samples at most two apart, and the median turn between neighbours
+Scan scanTurns(GeomFill_Frenet& law, const BRepAdaptor_Curve& curve, double length, int factor)
+{
+    Scan scan {std::nullopt, 1};
+    std::vector<double> cosines;
+    std::optional<Frame> previous;
+    std::optional<Frame> beforePrevious;
+    double previousU = curve.FirstParameter();
+    for (const double u : sampleParameters(curve, factor)) {
+        const std::optional<Frame> frame = frameAt(law, curve, u, length);
+        if (!frame) {
+            continue;
+        }
+        if (previous) {
+            cosines.push_back(turnCosine(*previous, *frame));
+            if (!scan.where && cosines.back() < 0) {
+                scan.where = curve.Value(u);
+            }
+        }
+        if (!scan.where && beforePrevious && turnCosine(*beforePrevious, *frame) < 0) {
+            scan.where = curve.Value(previousU);
+        }
+        beforePrevious = previous;
+        previous = frame;
+        previousU = u;
+    }
+    if (!cosines.empty()) {
+        const auto middle = cosines.begin() + cosines.size() / 2;
+        std::nth_element(cosines.begin(), middle, cosines.end());
+        scan.medianCosine = *middle;
+    }
+    return scan;
+}
+
 /// A point of \a edge where OCCT's Frenet trihedron turns over: two samples at most two apart, with
 /// the curvature clearly above zero, between which the frame turns by more than a right angle
 /// about the tangent (turnCosine()). Within a quarter of a knot span the frame turns by more than a
@@ -155,7 +200,13 @@ std::vector<double> sampleParameters(const BRepAdaptor_Curve& curve)
 /// whether OCCT's surface follows the turn or not. A turn completed within one sample interval
 /// holds at most one sample, whose normal can be half-way round (fork PR 358 round 2's
 /// verification, finding 2), so it is found wherever the samples fall; a half turn spread evenly
-/// over four intervals or more (half a knot span) is not, nor the steady turn of a helix's frame.
+/// over four intervals or more (half a knot span) is not.
+/// A frame that turns steadily about the tangent, as a steep helix's does (249 degrees a turn at a
+/// pitch of 6 times the radius), is not a turn-over: where the median turn between neighbours is
+/// above SweepFrenet::steadyTwistCosine's angle, the edge is sampled again twice as densely, at
+/// most SweepFrenet::maxDoublings times, and a turn-over counts only if it is still found where the
+/// median is below that angle or at the last doubling. Planar spines don't turn about the tangent
+/// (median 0 at the inflections seen), so their samples don't change.
 std::optional<gp_Pnt> turnOver(const TopoDS_Edge& edge)
 {
     if (BRep_Tool::Degenerated(edge)) {
@@ -178,25 +229,13 @@ std::optional<gp_Pnt> turnOver(const TopoDS_Edge& edge)
         return std::nullopt;
     }
     const double length = GCPnts_AbscissaPoint::Length(*curve);
-    std::optional<Frame> previous;
-    std::optional<Frame> beforePrevious;
-    double previousU = curve->FirstParameter();
-    for (const double u : sampleParameters(*curve)) {
-        const std::optional<Frame> frame = frameAt(*law, *curve, u, length);
-        if (!frame) {
-            continue;
+    for (int doublings = 0;; ++doublings) {
+        const Scan scan = scanTurns(*law, *curve, length, 1 << doublings);
+        if (!scan.where || scan.medianCosine >= Part::SweepFrenet::steadyTwistCosine
+            || doublings == Part::SweepFrenet::maxDoublings) {
+            return scan.where;
         }
-        if (previous && turnCosine(*previous, *frame) < 0) {
-            return curve->Value(u);
-        }
-        if (beforePrevious && turnCosine(*beforePrevious, *frame) < 0) {
-            return curve->Value(previousU);
-        }
-        beforePrevious = previous;
-        previous = frame;
-        previousU = u;
     }
-    return std::nullopt;
 }
 
 /// The spine's tangent at its point nearest to \a point, and the distance to it
@@ -411,7 +450,8 @@ Part::SweepFrenet::Mode Part::SweepFrenet::setMode(
     // "A fatal error occurred when making the sweep")
     std::ostringstream message;
     message << "Sweep: the spine's Frenet frame turns over at " << at.str()
-            << ", where its curvature passes through zero, and a profile that isn't a circle "
+            << ", turning by more than a right angle about the spine within a short stretch (as "
+               "where a wave's curvature passes through zero), and a profile that isn't a circle "
                "about the spine would twist through itself there. Turn Frenet off";
     throw Standard_Failure(message.str().c_str());
 }

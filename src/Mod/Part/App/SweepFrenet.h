@@ -22,7 +22,9 @@ class TopoDS_Wire;
  * right or 1.8 mm off, and any other profile folds. An inflection at a vertex between two edges is
  * harmless: OCCT makes the edges' trihedrons agree there.
  *
- * Where the frame turns by more than a right angle about the tangent between nearby samples:
+ * Where the frame turns by more than a right angle about the tangent between nearby samples, and
+ * not as a steady twist (a steep helix's frame turns about the tangent all along; such edges are
+ * sampled more densely until neighbours are less than 30 degrees apart):
  * - on a planar spine, corrected Frenet: a planar curve's Frenet frame doesn't turn about the
  *   tangent, so the rotation-minimizing frame is Frenet's own, kept continuous;
  * - on a spine planar within a thousandth of its size whose tangent stays close enough to the
@@ -46,6 +48,12 @@ constexpr double curvatureFloor = 1e-9;
 /// A sample interval across which the tangent turns by more than 45 degrees is halved, at most this
 /// many times (a Part.makeHelix helix got 6.4 samples a turn, its tangent turning 56 degrees)
 constexpr int maxHalvings = 6;
+/// The cosine of 30 degrees: where the frame's median turn about the tangent between neighbouring
+/// samples is larger, the edge's frame twists steadily (a Part.makeHelix helix with a pitch of 6
+/// times its radius: 41 to 56 degrees, two apart 92 to 112) and it is sampled again twice as densely
+constexpr double steadyTwistCosine = 0.8660254037844386;
+/// At most this many doublings of an edge's samples for a steady twist (16 times the samples)
+constexpr int maxDoublings = 4;
 /// A plane near the spine is looked for within this fraction of its bounding box's diagonal (lifts
 /// of 5 um on a 60 mm wave are within it); whether its normal can be the binormal depends on how
 /// far the tangent leaves it
