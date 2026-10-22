@@ -28,6 +28,7 @@
 #include <cmath>
 #include <functional>
 #include <limits>
+#include <map>
 #include <numbers>
 #include <optional>
 #include <queue>
@@ -46,6 +47,7 @@
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepLProp_CLProps.hxx>
 #include <BRepClass3d_SolidClassifier.hxx>
+#include <BRepGProp.hxx>
 #include <BRepGProp_Face.hxx>
 #include <BRepOffsetAPI_MakePipeShell.hxx>
 #include <BRepTools_WireExplorer.hxx>
@@ -1256,6 +1258,155 @@ bool isValidSolid(const Part::TopoShape& shape)
     return true;
 }
 
+/// A face or edge the one sweep made from an element of the profile, and its names
+struct SweptName
+{
+    TopoDS_Shape shape;
+    std::vector<std::pair<Data::MappedName, Data::ElementIDRefs>> names;
+};
+
+/// Per element of a profile's wire (`Edge<k>`, `Vertex<k>`), what the one sweep made from it
+/// along the spine, one per spine edge in the spine's order: the side faces of an edge, the
+/// side edges of a vertex
+using SweptNames = std::map<Data::IndexedName, std::vector<SweptName>>;
+
+/// The centre of mass of \a shape and its area or length
+std::pair<gp_Pnt, double> massOf(const TopoDS_Shape& shape)
+{
+    GProp_GProps props;
+    if (shape.ShapeType() == TopAbs_FACE) {
+        BRepGProp::SurfaceProperties(shape, props);
+    }
+    else {
+        BRepGProp::LinearProperties(shape, props);
+    }
+    return {props.CentreOfMass(), props.Mass()};
+}
+
+/// What a face or edge \a section's element of \a type generates in a sweep
+TopAbs_ShapeEnum sideType(TopAbs_ShapeEnum type)
+{
+    return type == TopAbs_EDGE ? TopAbs_FACE : TopAbs_EDGE;
+}
+
+/// The names \a shell, the one sweep \a pipe of \a section, gives the side faces and edges, per
+/// element of \a section (ops#379)
+SweptNames sweptNamesOf(
+    BRepOffsetAPI_MakePipeShell& pipe,
+    const Part::TopoShape& section,
+    const Part::TopoShape& shell
+)
+{
+    SweptNames named;
+    for (TopAbs_ShapeEnum type : {TopAbs_EDGE, TopAbs_VERTEX}) {
+        const std::string& typeName = Part::TopoShape::shapeName(type);
+        const std::string& sideName = Part::TopoShape::shapeName(sideType(type));
+        for (int k = 1; k <= section.countSubShapes(type); ++k) {
+            std::vector<SweptName>& along = named[Data::IndexedName::fromConst(typeName.c_str(), k)];
+            for (const TopoDS_Shape& made : pipe.Generated(section.getSubShape(type, k))) {
+                if (made.ShapeType() != sideType(type)) {
+                    continue;
+                }
+                SweptName swept {made, {}};
+                if (const int index = shell.findShape(made)) {
+                    swept.names = shell.getElementMappedNames(
+                        Data::IndexedName::fromConst(sideName.c_str(), index)
+                    );
+                }
+                along.push_back(swept);
+            }
+        }
+    }
+    return named;
+}
+
+/// Names the side faces and edges of a piece of the union, \a shell swept by \a pipe from \a
+/// section starting at the spine's edge \a firstEdge, as the one sweep named those of the same
+/// spine edges (\a swept, by the element of \a profile each was swept from, through \a origins
+/// when given): with the profile at the spine's start, the first piece's side faces had the
+/// names the one sweep gives the far leg's, so a reference to the far leg went to the first
+/// one silently when an edit took the pipe across 90 degrees (ops#379, N1). Now a reference to
+/// a side face or edge stays on its leg either way. A face or edge that doesn't lie where the
+/// one sweep's did (a curve the piece sweeps differently) is marked with its piece instead, as
+/// the caps between pieces are (\a between, `PCE<n>`), so it never takes another leg's name.
+void nameSidesAsTheOneSweep(
+    Part::TopoShape& shell,
+    BRepOffsetAPI_MakePipeShell& pipe,
+    const TopoDS_Shape& section,
+    const Part::TopoShape& profile,
+    const TopTools_DataMapOfShapeShape* origins,
+    const SweptNames* swept,
+    size_t firstEdge,
+    const std::string& between
+)
+{
+    for (TopAbs_ShapeEnum type : {TopAbs_EDGE, TopAbs_VERTEX}) {
+        const std::string& typeName = Part::TopoShape::shapeName(type);
+        const std::string& sideName = Part::TopoShape::shapeName(sideType(type));
+        TopTools_IndexedMapOfShape elements;
+        TopExp::MapShapes(section, type, elements);
+        for (int i = 1; i <= elements.Extent(); ++i) {
+            const TopoDS_Shape* origin = origins ? origins->Seek(elements(i)) : &elements(i);
+            const int k = origin ? profile.findShape(*origin) : 0;
+            const std::vector<SweptName>* along = nullptr;
+            if (swept && k > 0) {
+                auto it = swept->find(Data::IndexedName::fromConst(typeName.c_str(), k));
+                if (it != swept->end()) {
+                    along = &it->second;
+                }
+            }
+            size_t at = firstEdge;
+            for (const TopoDS_Shape& made : pipe.Generated(elements(i))) {
+                if (made.ShapeType() != sideType(type)) {
+                    continue;
+                }
+                const SweptName* same = along && at < along->size() ? &(*along)[at] : nullptr;
+                ++at;
+                const int index = shell.findShape(made);
+                if (index == 0) {
+                    continue;
+                }
+                const Data::IndexedName element = Data::IndexedName::fromConst(sideName.c_str(), index);
+                if (same && !same->names.empty()) {
+                    const auto [centre, size] = massOf(made);
+                    const auto [sweptCentre, sweptSize] = massOf(same->shape);
+                    constexpr double close = 100 * Precision::Confusion();
+                    if (centre.Distance(sweptCentre) <= close
+                        && std::abs(size - sweptSize) <= close * std::max(1.0, size)) {
+                        bool overwrite = true;
+                        for (const auto& [name, sids] : same->names) {
+                            shell.setElementName(element, name, shell.Tag, &sids, overwrite);
+                            overwrite = false;
+                        }
+                        continue;
+                    }
+                }
+                const auto names = shell.getElementMappedNames(element);
+                if (names.empty()) {
+                    continue;
+                }
+                Data::MappedName marked = names.front().first;
+                marked.append(Data::NAME_SECTION_DELIMINATOR);
+                marked.append(
+                    Data::MappedName::makeEncodedSection(
+                        {},
+                        {},
+                        static_cast<int>(shell.Tag),
+                        between.c_str(),
+                        0,
+                        sideName[0],
+                        0,
+                        {Data::MAPPER_FLAG_MODIFIED},
+                        {}
+                    )
+                        .c_str()
+                );
+                shell.setElementName(element, marked, shell.Tag, &names.front().second, true);
+            }
+        }
+    }
+}
+
 /// The union past 90 degrees: \a spine cut into pieces at \a pieceStarts, each piece swept with
 /// "Transformed" (\a setup) from where the one before ends, closed with its caps and made a
 /// solid, and the pieces fused. \a profiles are the sections the first piece starts from, one
@@ -1272,13 +1423,15 @@ bool isValidSolid(const Part::TopoShape& shape)
 /// its end carries the profile's names (ops#379): the first piece's start projects them, and the
 /// last piece's end keeps them. The other pieces' ends aren't named from their sections (their
 /// edges are named from the side faces, `UPP`), each later piece sweeps the end wire of the
-/// piece before, so its side faces are named from that wire's edges, and the caps between the
-/// pieces carry their piece's index (`PCE<n>`).
+/// piece before, and the caps between the pieces carry their piece's index (`PCE<n>`). The side
+/// faces and edges are named as the one sweep named them, from \a swept (one per wire of the
+/// profile; nameSidesAsTheOneSweep).
 Part::TopoShape sweepPiecesAndFuse(
     const TopoDS_Wire& spine,
     const std::vector<size_t>& pieceStarts,
     std::vector<Part::TopoShape> profiles,
     bool profileAtEnd,
+    const std::vector<SweptNames>& swept,
     const std::function<void(BRepOffsetAPI_MakePipeShell&)>& setup,
     const std::function<Part::TopoShape(const TopoDS_Shape&)>& make
 )
@@ -1288,6 +1441,7 @@ Part::TopoShape sweepPiecesAndFuse(
     ends.push_back(edges.size());
     std::vector<TopoDS_Wire> pieces;
     std::vector<TopoDS_Vertex> pieceFirsts;
+    std::vector<size_t> pieceBegins;
     size_t begin = 0;
     for (size_t end : ends) {
         BRepBuilderAPI_MakeWire wire;
@@ -1296,6 +1450,7 @@ Part::TopoShape sweepPiecesAndFuse(
         }
         pieces.push_back(wire.Wire());
         pieceFirsts.push_back(TopExp::FirstVertex(edges[begin], true));
+        pieceBegins.push_back(begin);
         begin = end;
     }
 
@@ -1306,6 +1461,7 @@ Part::TopoShape sweepPiecesAndFuse(
     for (size_t index = 0; index < pieces.size(); ++index) {
         const bool first = index == 0;
         const bool last = index + 1 == pieces.size();
+        const std::string between = "PCE" + std::to_string(index);
         std::vector<Part::TopoShape> shells;
         std::vector<Part::TopoShape> fronts;
         std::vector<Part::TopoShape> backs;
@@ -1340,6 +1496,18 @@ Part::TopoShape sweepPiecesAndFuse(
                 sources.push_back(profiles[i]);
             }
             shell.makeShapeWithElementMap(built, mapper, sources, Part::OpCodes::PipeShell);
+            if (shell.getHistoryAlgorithm() == App::HistoryAlgorithm::V2) {
+                nameSidesAsTheOneSweep(
+                    shell,
+                    mkPS,
+                    section.getShape(),
+                    profiles[i],
+                    first ? nullptr : &origins[i],
+                    i < swept.size() ? &swept[i] : nullptr,
+                    pieceBegins[index],
+                    between
+                );
+            }
             TopTools_DataMapOfShapeShape next;
             for (TopTools_DataMapIteratorOfDataMapOfShapeListOfShape it(mapper.endsOf()); it.More();
                  it.Next()) {
@@ -1366,7 +1534,6 @@ Part::TopoShape sweepPiecesAndFuse(
         // The pipe's own ends are named from their edges by the sewing, as the one sweep's; a cap
         // between pieces is named, and marked with its piece, before
         std::vector<Part::TopoShape> sources = shells;
-        const std::string between = "PCE" + std::to_string(index);
         Part::TopoShape frontface;
         Part::TopoShape backface;
         if (first) {
@@ -2314,6 +2481,9 @@ App::DocumentObjectExecReturn* Pipe::execute()
         };
 
         std::vector<Part::TopoShape> frontwires, backwires;
+        // Per wire of the profile, the one sweep's names for its side faces and edges, which the
+        // union past 90 degrees gives its pieces' (ops#379)
+        std::vector<SweptNames> sweptNames;
         for (auto& wires : wiresections) {
             BRepOffsetAPI_MakePipeShell mkPS(TopoDS::Wire(path.getShape()));
             setupAlgorithm(mkPS, auxpath.getShape());
@@ -2374,6 +2544,9 @@ App::DocumentObjectExecReturn* Pipe::execute()
                 Part::OpCodes::PipeShell
             );
             shells.push_back(shell);
+            if (sheared) {
+                sweptNames.push_back(sweptNamesOf(mkPS, wires.front(), shell));
+            }
 
             if (sheared || fixedMode) {
                 TopTools_ListOfShape simulated;
@@ -2494,6 +2667,7 @@ App::DocumentObjectExecReturn* Pipe::execute()
                 tilts.pieceStarts,
                 profiles,
                 *reversed,
+                sweptNames,
                 setup,
                 [this](const TopoDS_Shape& shape) { return makeTopoShape(shape); }
             );
