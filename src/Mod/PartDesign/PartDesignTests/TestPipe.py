@@ -886,7 +886,11 @@ class TestPipeEndNames(unittest.TestCase):
         stays at the second corner (an edge of the cap, now inside a piece, where the one sweep
         has its name); none goes to the first corner's cap silently. Before (fork PR 344), the
         cap and its edges were named after their piece (PCE<n>) and the side faces, so the same
-        names came out at the first corner, valid and with no warning (ops#379, round 4)."""
+        names came out at the first corner, valid and with no warning (ops#379, round 4).
+        The same for what the fuse made at the break (round 5): a datum point and a fillet on
+        the crease where the pieces cut each other, points on the crease's vertices and on the
+        pieces of the y = +-2 faces there. They were named from the side faces around them, the
+        same at either corner, and went to the first corner's crease."""
 
         def points(first):
             result = [(0, 0), (0, 30), turned(30, first, 20)]
@@ -912,20 +916,78 @@ class TestPipeEndNames(unittest.TestCase):
         ]
         cap = pipe.Shape.Faces[between - 1]
         x, z = turned(30, 80, 20)  # the second corner
-        self.assertLess((cap.CenterOfMass - V(x, 0, z)).Length, 4)
+        second = V(x, 0, z)
+        self.assertLess((cap.CenterOfMass - second).Length, 4)
+
+        def point(name, element, mode="CenterOfMass"):
+            point = self.body.newObject("PartDesign::Point", name)
+            point.AttachmentSupport = [(pipe, element)]
+            point.MapMode = mode
+            return point
+
         sketch = self.body.newObject("Sketcher::SketchObject", "OnCap")
         sketch.AttachmentSupport = [(pipe, f"Face{between}")]
         sketch.MapMode = "FlatFace"
+        # What each reference is on, where: the element's centre, a point's place, a fillet's
+        # round faces
+        places = {
+            sketch.Name: lambda: [
+                pipe.Shape.getElement(sketch.AttachmentSupport[0][1][0]).CenterOfMass
+            ]
+        }
         references = [sketch]
-        for index, edge in enumerate(pipe.Shape.Edges, 1):
+        shape = pipe.Shape
+        for index, edge in enumerate(shape.Edges, 1):
             if any(edge.isSame(own) for own in cap.Edges):
-                point = self.body.newObject("PartDesign::Point", f"OnEdge{index}")
-                point.AttachmentSupport = [(pipe, f"Edge{index}")]
-                point.MapMode = "CenterOfMass"
-                references.append(point)
-        self.doc.recompute()
+                references.append(point(f"OnEdge{index}", f"Edge{index}"))
         self.assertEqual(len(references), 5)
-        self.assertTrue(all(reference.isValid() for reference in references))
+        # What the fuse made at the break (round 5): the crease where the pieces cut each other
+        # and its vertices (off the cap's plane, near the corner), and the pieces of the faces
+        # in the planes both legs share (y = +-2)
+        creases = [
+            index
+            for index, edge in enumerate(shape.Edges, 1)
+            if (edge.CenterOfMass - second).Length < 4 and abs(edge.CenterOfMass.z - z) > 1e-6
+        ]
+        self.assertTrue(creases)
+        for index in creases:
+            references.append(point(f"OnCrease{index}", f"Edge{index}"))
+        # The crease proper runs across the square (along y), between the pieces' faces
+        (crease,) = [
+            index
+            for index in creases
+            if abs(shape.Edges[index - 1].tangentAt(shape.Edges[index - 1].FirstParameter).y)
+            > 1 - 1e-9
+        ]
+        for index, vertex in enumerate(shape.Vertexes, 1):
+            if (vertex.Point - second).Length < 4 and abs(vertex.Point.z - z) > 1e-6:
+                references.append(point(f"OnCreaseVertex{index}", f"Vertex{index}", "Vertex"))
+        planes = [
+            index
+            for index, face in enumerate(shape.Faces, 1)
+            if abs(abs(face.normalAt(0, 0).y) - 1) < 1e-9
+            and (face.CenterOfMass - second).Length < 4
+        ]
+        self.assertEqual(len(planes), 2, planes)
+        for index in planes:
+            references.append(point(f"OnPlane{index}", f"Face{index}"))
+        fillet = self.body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (pipe, [f"Edge{crease}"])
+        fillet.Radius = 0.5
+        references.append(fillet)
+        self.doc.recompute()
+        self.assertEqual([(r.Name, r.getStatusString()) for r in references if not r.isValid()], [])
+
+        def at(reference):
+            if reference.TypeId == "PartDesign::Fillet":
+                return [
+                    face.CenterOfMass
+                    for face in reference.Shape.Faces
+                    if face.Surface.__class__.__name__ != "Plane"
+                ]
+            if reference.TypeId == "PartDesign::Point":
+                return [reference.Placement.Base]
+            return places[reference.Name]()
 
         self.setPolyline(path, points(100))
         self.assertTrue(pipe.isValid(), pipe.getStatusString())
@@ -938,10 +1000,9 @@ class TestPipeEndNames(unittest.TestCase):
             if "normal" in levels:
                 continue
             # Silent ("resolved" without a warning is too): only where it was, at the second
-            # corner (its edges, now inside a piece)
-            (support,) = reference.AttachmentSupport[0][1]
-            at = pipe.Shape.getElement(support).CenterOfMass
-            self.assertLess((at - second).Length, 4, (reference.Name, support, at, levels))
+            # corner (the cap's edges, now inside a piece)
+            for place in at(reference):
+                self.assertLess((place - second).Length, 4, (reference.Name, place, levels))
 
     def testCapBetweenPiecesDoesNotMoveSilently(self):
         """The spine from the profile."""

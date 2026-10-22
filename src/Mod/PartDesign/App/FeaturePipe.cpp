@@ -1464,10 +1464,13 @@ void nameAs(
 /// the same names at whichever corner the pieces met, and a reference to them went to another
 /// corner silently when an edit moved the break between the pieces (ops#379, round 4, N1). One
 /// that doesn't lie where the one sweep's did is marked with \a marker (`PCF<n>`, `PCB<n>`: the
-/// spine vertex).
+/// spine vertex). \a origins is keyed by the elements of \a keyed: an element of \a section that
+/// isn't one of them (OCCT's pipe gives its first section as copies) is matched to the one at its
+/// place; without that, a later piece's front edges were marked after their own names (round 5).
 void nameJoint(
     Part::TopoShape& shell,
     const TopoDS_Shape& section,
+    const TopoDS_Shape& keyed,
     const Part::TopoShape& profile,
     const TopTools_DataMapOfShapeShape& origins,
     const SweptNames* swept,
@@ -1485,6 +1488,11 @@ void nameJoint(
                 continue;
             }
             const TopoDS_Shape* origin = origins.Seek(elements(i));
+            for (TopExp_Explorer it(keyed, type); !origin && it.More(); it.Next()) {
+                if (samePlaceAs(elements(i), it.Current())) {
+                    origin = origins.Seek(it.Current());
+                }
+            }
             const int k = origin ? profile.findShape(*origin) : 0;
             nameAs(
                 shell,
@@ -1559,6 +1567,71 @@ void nameSidesAsTheOneSweep(
                     );
                 }
             }
+        }
+    }
+}
+
+/// Marks the faces, edges and vertices the fuse of the union's pieces made, those of \a fused that
+/// none of \a solids has and the fuse didn't name as modified from one of theirs, with the spine
+/// vertex of the nearest break (\a breaks: the
+/// place and spine vertex of each), as their last section (`PCU<v>`). The fuse names them from
+/// the side faces and vertices around them, the same whichever corner the break is at: the crease
+/// where two pieces cut each other, its vertices, and the pieces of the faces in the planes both
+/// legs share took the new break's when an edit moved it, and a reference went there with no
+/// warning (ops#379, round 5). Marked, a reference to one goes missing then.
+void markWhatTheFuseMade(
+    Part::TopoShape& fused,
+    const std::vector<Part::TopoShape>& solids,
+    const std::vector<std::pair<gp_Pnt, size_t>>& breaks
+)
+{
+    if (breaks.empty()) {
+        return;
+    }
+    for (TopAbs_ShapeEnum type : {TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX}) {
+        TopTools_IndexedMapOfShape kept;
+        for (const Part::TopoShape& solid : solids) {
+            TopExp::MapShapes(solid.getShape(), type, kept);
+        }
+        const std::string& typeName = Part::TopoShape::shapeName(type);
+        const int count = static_cast<int>(fused.countSubShapes(type));
+        for (int k = 1; k <= count; ++k) {
+            const TopoDS_Shape made = fused.getSubShape(type, k);
+            if (kept.Contains(made)) {
+                continue;
+            }
+            const gp_Pnt at = type == TopAbs_VERTEX ? BRep_Tool::Pnt(TopoDS::Vertex(made))
+                                                    : massOf(made).first;
+            const auto nearest
+                = std::min_element(breaks.begin(), breaks.end(), [&at](const auto& a, const auto& b) {
+                      return at.Distance(a.first) < at.Distance(b.first);
+                  });
+            const Data::IndexedName element = Data::IndexedName::fromConst(typeName.c_str(), k);
+            const auto names = fused.getElementMappedNames(element);
+            if (names.empty()) {
+                continue;
+            }
+            // Only what the fuse named itself, from the elements around it (`FUS`, not `MOD`):
+            // one it only cut (a side face trimmed where the other piece covers it) keeps its
+            // leg's name, or is named modified from it; marked, a reference to it went missing
+            // when the pipe went back below 90 degrees, where it followed before
+            const Data::DecodedMappedName& decoded = names.front().first.getDecodedMappedName();
+            if (decoded.empty() || decoded.back().opCode != Part::OpCodes::Fuse
+                || decoded.back().hasMapperFlag(Data::MAPPER_FLAG_MODIFIED)) {
+                continue;
+            }
+            fused.setElementName(
+                element,
+                marked(
+                    names.front().first,
+                    "PCU" + std::to_string(nearest->second),
+                    typeName[0],
+                    fused.Tag
+                ),
+                fused.Tag,
+                &names.front().second,
+                true
+            );
         }
     }
 }
@@ -1690,6 +1763,7 @@ Part::TopoShape sweepPiecesAndFuse(
                     nameJoint(
                         shell,
                         mkPS.FirstShape(),
+                        section.getShape(),
                         profiles[i],
                         origins[i],
                         sweptHere,
@@ -1698,7 +1772,16 @@ Part::TopoShape sweepPiecesAndFuse(
                     );
                 }
                 if (!last) {
-                    nameJoint(shell, mkPS.LastShape(), profiles[i], next, sweptHere, ends[index], backMark);
+                    nameJoint(
+                        shell,
+                        mkPS.LastShape(),
+                        mkPS.LastShape(),
+                        profiles[i],
+                        next,
+                        sweptHere,
+                        ends[index],
+                        backMark
+                    );
                 }
             }
             origins[i] = next;
@@ -1785,6 +1868,13 @@ Part::TopoShape sweepPiecesAndFuse(
     }
     if (fused.isNull() || !isValidSolid(fused)) {
         throw Base::CADKernelError(unfused);
+    }
+    if (fused.getHistoryAlgorithm() == App::HistoryAlgorithm::V2) {
+        std::vector<std::pair<gp_Pnt, size_t>> breaks;
+        for (size_t index = 1; index < pieces.size(); ++index) {
+            breaks.emplace_back(BRep_Tool::Pnt(pieceFirsts[index]), pieceBegins[index]);
+        }
+        markWhatTheFuseMade(fused, solids, breaks);
     }
     return fused;
 }
