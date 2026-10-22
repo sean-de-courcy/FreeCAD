@@ -265,8 +265,10 @@ class TestPipeEndNames(unittest.TestCase):
         profile = self.square()
         # Refine off: it merges the legs' coplanar faces y = +-2
         shape = self.pipe(profile, path, Transition="Right corner", Refine=False).Shape
-        spine = [firstName(path.Shape, f"Edge{index}") for index in (1, 2)]
-        tag = ":H%x" % path.ID
+        # the spine's lines' names, as a source's appear inside a name (`;` escaped)
+        spine = [firstName(path.Shape, f"Edge{index}").replace(";", "^;") for index in (1, 2)]
+        # a source's name holds its owner's tag (the sketch's ID)
+        tag = "^;_^;%d^;" % path.ID
 
         def leg(element):
             # the first leg runs along Z, x -2..2 and z below 28; the second along X, x past 2
@@ -292,13 +294,17 @@ class TestPipeEndNames(unittest.TestCase):
                     name = firstName(shape, element)
                     self.assertIn(tag, name, (element, name))
                     self.assertIn(spine[legIndex], name, (element, name))
-            # leg B's names are leg A's with the spine's line changed
-            named = {
-                firstName(shape, e).replace(spine[0] + tag, "<leg>") for e in sides[0]
-            }
+            # leg B's names are leg A's with the spine's line changed (the sources sorted as
+            # text, so their order may differ)
+            def legless(element, line):
+                name = firstName(shape, element).replace(line, "<leg>")
+                found = re.match(r"(_;)(.*?)(;\d+;PSH;.*)", name)
+                self.assertTrue(found, name)
+                return found[1] + ",".join(sorted(found[2].split(","))) + found[3]
+
             self.assertEqual(
-                named,
-                {firstName(shape, e).replace(spine[1] + tag, "<leg>") for e in sides[1]},
+                {legless(e, spine[0]) for e in sides[0]},
+                {legless(e, spine[1]) for e in sides[1]},
                 kind,
             )
         self.assertNamesDistinct(shape)
@@ -1435,9 +1441,10 @@ class TestPipeCorners(unittest.TestCase):
     def testUnionNames(self):
         """The union at 120 degrees: the start cap keeps the sketch's names; the far end (on
         z = 20, the square only moved there) projects them, as the one sweep's far end does; the
-        caps between the pieces (z = 30) carry neither, but the spine vertex they lie at (the
-        corner, 1: PCB1 for the first piece's back, PCF1 for the second's front; fork PR 356
-        round 4, their piece's index before); every name is distinct, so the second leg's side
+        caps between the pieces (z = 30) carry neither, but are told apart as the first piece's
+        back (PCB) and the second's front (PCF), named from their edges, which hold their legs'
+        spine edges (ops#415; keyed by the spine vertex's index in fork PR 356 rounds 4-5, by
+        the piece's before); every name is distinct, so the second leg's side
         faces aren't named as the first's. Before (fork PR 344 round 2), the first piece's end
         cap at the corner carried the one sweep's far-end name, and the far end projections of
         projections."""
@@ -1454,7 +1461,7 @@ class TestPipeCorners(unittest.TestCase):
         for face in corner:
             name = firstName(shape, face)
             self.assertNotEqual(name, firstName(shape, farEnd[0]))
-            self.assertIn(App.getDecodedMappedName(name)[-1]["opCode"], ("PCB1", "PCF1"), name)
+            self.assertIn(App.getDecodedMappedName(name)[-1]["opCode"], ("PCB", "PCF"), name)
 
     def horizontalFaces(self, shape, z):
         """The faces on the plane at height z."""
