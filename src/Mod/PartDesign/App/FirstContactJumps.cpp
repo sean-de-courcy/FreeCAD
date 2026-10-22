@@ -1180,7 +1180,8 @@ JumpTrace traceJumps(
                      surface->UKnot(i),
                      surface->UKnot(i + 1),
                      surface->VKnot(j),
-                     surface->VKnot(j + 1)}
+                     surface->VKnot(j + 1),
+                     0}
                 );
             }
         }

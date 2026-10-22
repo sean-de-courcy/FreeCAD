@@ -744,7 +744,7 @@ void Band::add(const Handle(Geom2d_Curve)& curve, double width)
     if (spline.IsNull()) {
         throw refused("a wall's curve can't be bounded");
     }
-    Part part {spline, width, derivativeBounds(spline).second};
+    Part part {spline, width, derivativeBounds(spline).second, {}, {}};
     // The spans' boxes, from the Bezier arcs' poles: a rational arc lies in its poles' convex hull
     // when its weights are positive. Otherwise one span, which every point may be near.
     Geom2dConvert_BSplineCurveToBezierCurve arcs(spline);
@@ -877,7 +877,7 @@ std::optional<gp_Pnt> Band::outside(const TopoDS_Edge& edge, double tolerance) c
     };
     // A sample whose image, widened by the tolerance, is in no part's band can't be certified
     auto sample = [&](double t) -> std::optional<Sample> {
-        Sample here {t, curve->Value(t)};
+        Sample here {t, curve->Value(t), 0.0, {}};
         const gp_Pnt2d at = image(here.point);
         here.radius = at.X();
         bool held = false;
@@ -1261,7 +1261,8 @@ std::optional<gp_Pnt> Band::leavesOutside(const TopoDS_Face& face, bool whole) c
                 surface->UKnot(i),
                 surface->UKnot(i + 1),
                 surface->VKnot(j),
-                surface->VKnot(j + 1)
+                surface->VKnot(j + 1),
+                {}
             };
             leaf.corners = {
                 corner(leaf.patch, false, false),
