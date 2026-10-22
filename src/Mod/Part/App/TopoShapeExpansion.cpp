@@ -1710,8 +1710,8 @@ OrderValues elementOrderValues(
 /// Each member's rank per component of its key: sorted by value, members closer than
 /// `10 * Precision::Confusion()` to their neighbour share a rank (no grid, so a near-tie can't
 /// straddle a cell boundary); a periodic component also chains the values at the end of its
-/// period to those at its start. Members compare by their ranks, lexicographically. A value
-/// that isn't finite (no pcurve, an unbounded element) ranks last.
+/// period to those at its start. Members compare by their ranks, lexicographically. Values that
+/// aren't finite (no pcurve, an unbounded element) share the last rank, after the wrap-around.
 std::vector<std::vector<long>> rankByGaps(const std::vector<OrderValues>& keys)
 {
     const double tolerance = 10 * Precision::Confusion();
@@ -1723,31 +1723,42 @@ std::vector<std::vector<long>> rankByGaps(const std::vector<OrderValues>& keys)
     for (const auto& key : keys) {
         components = std::min(components, key.size());
     }
-    std::vector<std::size_t> order(keys.size());
+    std::vector<std::size_t> order;
     std::vector<long> rankOf(keys.size());
     for (std::size_t component = 0; component < components; ++component) {
         auto valueOf = [&](std::size_t member) {
-            const double value = keys[member][component].value;
-            return std::isfinite(value) ? value : std::numeric_limits<double>::max();
+            return keys[member][component].value;
         };
-        std::iota(order.begin(), order.end(), 0);
+        // The finite values sorted; the others after them, in no order
+        order.clear();
+        for (std::size_t member = 0; member < keys.size(); ++member) {
+            if (std::isfinite(valueOf(member))) {
+                order.push_back(member);
+            }
+        }
+        const std::size_t finite = order.size();
         std::stable_sort(order.begin(), order.end(), [&](std::size_t left, std::size_t right) {
             return valueOf(left) < valueOf(right);
         });
         long rank = 0;
-        for (std::size_t k = 0; k < order.size(); ++k) {
+        for (std::size_t k = 0; k < finite; ++k) {
             if (k > 0 && valueOf(order[k]) - valueOf(order[k - 1]) > tolerance) {
                 ++rank;
             }
             rankOf[order[k]] = rank;
         }
-        const double period = keys[order.front()][component].period;
+        const double period = finite > 0 ? keys[order.front()][component].period : 0;
         if (period > 0 && rank > 0
-            && valueOf(order.front()) + period - valueOf(order.back()) <= tolerance) {
+            && valueOf(order.front()) + period - valueOf(order[finite - 1]) <= tolerance) {
             for (std::size_t member : order) {
                 if (rankOf[member] == rank) {
                     rankOf[member] = 0;
                 }
+            }
+        }
+        for (std::size_t member = 0; member < keys.size(); ++member) {
+            if (!std::isfinite(valueOf(member))) {
+                rankOf[member] = finite > 0 ? rank + 1 : 0;
             }
         }
         for (std::size_t member = 0; member < keys.size(); ++member) {
@@ -1930,13 +1941,24 @@ public:
         }
 
         // The members of a group by type; the sort is stable, so within a type they keep the
-        // order of their first shared source's list (ops#378)
+        // order of their first shared source's list (ops#378). Except vertexes generated along a
+        // closed edge: a maker lists them along the edge from its seam, so the list's order
+        // turns over when one of them passes the seam (a section's chord end going round a
+        // cylinder's circle), and they keep the result's order instead, as before ops#378
+        // (fork PR 355 round 3)
         for (auto& group : groups) {
+            const bool closedEdgeSource = isClosedEdge(group.second.front().incomingElementShape);
             std::stable_sort(
                 group.first.begin(),
                 group.first.end(),
-                [](const NamingMapKey& left, const NamingMapKey& right) {
-                    return typeCompare(left.newElementName, right.newElementName) < 0;
+                [closedEdgeSource](const NamingMapKey& left, const NamingMapKey& right) {
+                    const int typeOrder = typeCompare(left.newElementName, right.newElementName);
+                    if (typeOrder != 0) {
+                        return typeOrder < 0;
+                    }
+                    return closedEdgeSource
+                        && std::strcmp(left.newElementName.getType(), "Vertex") == 0
+                        && left.newElementName.getIndex() < right.newElementName.getIndex();
                 }
             );
         }
@@ -1974,6 +1996,18 @@ private:
             return leftRank < rightRank ? -1 : 1;
         }
         return std::strcmp(left.getType(), right.getType());
+    }
+
+    /// An edge that starts and ends at the same vertex (a full circle, a closed B-spline)
+    static bool isClosedEdge(const TopoDS_Shape& shape)
+    {
+        if (shape.IsNull() || shape.ShapeType() != TopAbs_EDGE) {
+            return false;
+        }
+        TopoDS_Vertex first;
+        TopoDS_Vertex last;
+        TopExp::Vertices(TopoDS::Edge(shape), first, last);
+        return !first.IsNull() && first.IsSame(last);
     }
 
     std::size_t sourcesHash(const std::vector<NamingMapValue>& sources) const
@@ -3535,11 +3569,32 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                         sortNameSet(linkedUpperNames);
 
                         if (linkedUpperNames.size()) {
-                            // The list's reference: the ancestor its first name belongs to,
-                            // chosen by name, never by the result's sub-shape order
+                            // The list's reference: the ancestor of its first name that isn't
+                            // a plane, chosen by name, never by the result's sub-shape order. A
+                            // plane OCCT builds for a sketch's face has its axes along the
+                            // world's whatever the sketch's turn, so on it the order would be
+                            // the world's (fork PR 355 round 3). A list named only from planes
+                            // takes the first: its order is the world's, as LOW's (ops#438)
                             TopoDS_Shape reference;
-                            for (const auto& [name, ancestor] : namedAncestors) {
-                                if (name == linkedUpperNames.front()) {
+                            for (const auto& listName : linkedUpperNames) {
+                                const auto named = std::find_if(
+                                    namedAncestors.begin(),
+                                    namedAncestors.end(),
+                                    [&listName](const auto& entry) {
+                                        return entry.first == listName;
+                                    }
+                                );
+                                if (named == namedAncestors.end()) {
+                                    continue;
+                                }
+                                const TopoDS_Shape& ancestor = named->second;
+                                if (reference.IsNull()) {
+                                    reference = ancestor;
+                                }
+                                if (ancestor.ShapeType() != TopAbs_FACE
+                                    || BRepAdaptor_Surface(TopoDS::Face(ancestor), Standard_False)
+                                            .GetType()
+                                        != GeomAbs_Plane) {
                                     reference = ancestor;
                                     break;
                                 }
