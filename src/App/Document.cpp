@@ -143,7 +143,10 @@ namespace
 // in the order of the maker's history list (a group's generated or modified members) or of the
 // members' places on the face they are named from (UPP), where it followed the order OCCT
 // stores sub-shapes in.
-constexpr int ForkNamingRevision = 6;
+// 7: ops#379 (fork PR 356 round 3), a "Transformed" PartDesign Pipe past 90 degrees (the union of
+// its pieces) names its pieces' side faces and edges as the one sweep names those of the same
+// spine edges, where the first piece had the names the one sweep gives the far leg's.
+constexpr int ForkNamingRevision = 7;
 
 // The `.N<n>` of the element map version: the form interned names are saved in (ops#6). 2: the
 // references are indices into the file's table (NamingFormat 2).

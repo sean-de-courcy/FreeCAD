@@ -760,6 +760,114 @@ class TestPipeEndNames(unittest.TestCase):
         self.setPolyline(model[1], points(80))
         self.assertNamesAt(model, 0, far(80))
 
+    # A sketch attached to each side face of the L of
+    # testEndStaysWhenATransformedPipeTurnsPastNinetyDegrees (spine from the profile or towards
+    # it), the corner turned across 90 degrees and back: each
+    # stays on a face of its own leg. Before (fork PR 344), the union's first piece took the names
+    # the one sweep gives the far leg's side faces: with the spine from the profile, the sketches
+    # on the second leg went to the first leg's faces, valid and silent; drawn towards it, those
+    # on the profile's leg went missing.
+
+    def sideFaceModel(self, points):
+        """"Transformed" along the polyline `points` (an XZ sketch), Refine off, the square at
+        z = 0, a sketch attached to each side face (every face but the caps, which face +-Z)."""
+        profile = self.square()
+        path = self.sketch("Path", models.polyline(points), placement=XZ)
+        pipe = self.pipe(profile, path, Transition="Transformed", Refine=False)
+        sketches = []
+        for index, face in enumerate(pipe.Shape.Faces, 1):
+            if abs(abs(face.normalAt(0, 0).z) - 1) < 1e-9:
+                continue
+            sketch = self.body.newObject("Sketcher::SketchObject", f"Side{index}")
+            sketch.AttachmentSupport = [(pipe, f"Face{index}")]
+            sketch.MapMode = "FlatFace"
+            sketches.append(sketch)
+        self.doc.recompute()
+        return path, pipe, sketches
+
+    def legsOf(self, pipe, sketches, points):
+        """The leg of `points` (0, 1, ...) nearest the centre of each sketch's face, None for an
+        invalid sketch"""
+
+        def leg(point):
+            ends = [V(x, 0, z) for x, z in points]
+            return min(
+                range(len(ends) - 1),
+                key=lambda i: point.distanceToLineSegment(ends[i], ends[i + 1]).Length,
+            )
+
+        legs = []
+        for sketch in sketches:
+            if not sketch.isValid():
+                legs.append(None)
+                continue
+            (support,) = sketch.AttachmentSupport[0][1]
+            legs.append(leg(pipe.Shape.getElement(support).CenterOfMass))
+        return legs
+
+    def alone(self, pipe, sketches):
+        """For each sketch, whether its face shares its plane with no other face of the pipe"""
+
+        def plane(face):
+            normal = face.normalAt(0, 0)
+            return normal, face.CenterOfMass.dot(normal)
+
+        planes = [plane(face) for face in pipe.Shape.Faces]
+        result = []
+        for sketch in sketches:
+            (support,) = sketch.AttachmentSupport[0][1]
+            normal, offset = plane(pipe.Shape.getElement(support))
+            shared = [
+                (n, d)
+                for n, d in planes
+                if abs(abs(n.dot(normal)) - 1) < 1e-9 and abs(abs(d) - abs(offset)) < 1e-7
+            ]
+            result.append(len(shared) == 1)
+        return result
+
+    def assertSidesStayOnTheirLegs(self, points):
+        """The L through points(degrees), made at 80 degrees and at 120 (the union), the corner
+        turned to the other angle and back.
+        - From 80 degrees to 120 (the one sweep to the union), each side face's sketch stays
+          valid, on a face of the leg it was attached on.
+        - From the union, the fuse has renamed (MOD) the faces it cut, those in the planes that
+          the two legs share (y = +-2) past 90 degrees, and a reference to one goes missing, as
+          before. A sketch on a face that shares its plane with no other face stays valid on
+          its leg; any sketch that stays valid is on its leg."""
+        for start, other in ((80, 120), (120, 80)):
+            if start == 120:
+                self.tearDown()
+                self.setUp()
+            with self.subTest(start=start):
+                path, pipe, sketches = self.sideFaceModel(points(start))
+                legs = self.legsOf(pipe, sketches, points(start))
+                self.assertNotIn(None, legs)
+                self.assertEqual(set(legs), {0, 1})
+                before = start
+                for degrees in (other, start):
+                    kept = [sketch for sketch in sketches if sketch.isValid()]
+                    alone = self.alone(pipe, kept)
+                    self.setPolyline(path, points(degrees))
+                    now = dict(zip(sketches, self.legsOf(pipe, sketches, points(degrees))))
+                    for sketch, leg in zip(sketches, legs):
+                        if now[sketch] is not None:
+                            self.assertEqual(now[sketch], leg, (before, degrees, sketch.Name))
+                    for sketch, single in zip(kept, alone):
+                        if before < 90 or single:
+                            self.assertIsNotNone(
+                                now[sketch],
+                                (before, degrees, sketch.Name, sketch.getStatusString()),
+                            )
+                    before = degrees
+
+    def testSideFacesStayOnTheirLegsPastNinetyDegrees(self):
+        """The spine from the profile: up 30, then 20 turned 80 or 120 degrees."""
+        self.assertSidesStayOnTheirLegs(lambda degrees: [(0, 0), (0, 30), turned(30, degrees, 20)])
+
+    def testSideFacesStayOnTheirLegsPastNinetyDegreesTowardsTheProfile(self):
+        """The same L drawn towards the profile."""
+        self.assertSidesStayOnTheirLegs(lambda degrees: [turned(30, degrees, 20), (0, 30), (0, 0)])
+
     def testUndoAndRedoOfAnEditKeepTheirNames(self):
         """testEndStaysWhenTheProfileCrossesTheMiddle's edit in a transaction, undone and redone,
         the recompute inside the transaction or after it: the names are at the spine's start
