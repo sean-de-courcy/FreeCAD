@@ -464,3 +464,136 @@ class TestPipeEndNames(unittest.TestCase):
             name = firstName(pipe.Shape, element)
             self.assertIn("PRJ", name, element)
             self.assertIn(f"{profile.ID}", name, element)
+
+
+def bendPoints(first, second, towards=False):
+    """In an XZ sketch: up 30 from the square at z = 0, then 20 turned `first` degrees from +Z
+    towards +X, then 20 turned `second` degrees more; drawn towards the profile if `towards`."""
+    points = [(0.0, 0.0), (0.0, 30.0)]
+    heading = 0.0
+    for turn in (first, second):
+        heading += turn
+        x, z = points[-1]
+        a = math.radians(heading)
+        points.append((x + 20 * math.sin(a), z + 20 * math.cos(a)))
+    return points[::-1] if towards else points
+
+
+def inSquareAt(at):
+    """Whether a point lies in the square's copy at the spine vertex `at` ("Transformed" only
+    translates the profile)."""
+    return lambda p: abs(p.z - at.z) < 1e-6 and abs(p.x - at.x) < 2 + 1e-6 and abs(p.y) < 2 + 1e-6
+
+
+class TestJointsWhenABendStraightens(unittest.TestCase):
+    """A refined "Transformed" pipe along a U (ops#446): the joint edges and vertices at a bend
+    are named after the side faces they lie on (UPP). When the bend is made straight, refine
+    merges the two legs' faces into one that keeps both names, and the joint is gone. The other
+    bend's joint shares one of those faces, and its sources: tier 1 took it, 20 mm away and
+    silently. Each reference at the straightened bend now goes missing, warns, or stays where it
+    was, and is in its place again once the bend is turned back. The same with the pipe
+    unrefined and a refined feature after it (Fillet, SubShapeBinder)."""
+
+    def setUp(self):
+        self.doc = models.newDocument("PartDesignTestPipeBends")
+        self.doc.HistoryAlgorithm = "V2"
+        self.doc.InternNames = False
+        self.body = models.body(self.doc)
+
+    def tearDown(self):
+        App.closeDocument(self.doc.Name)
+
+    def setPath(self, path, points):
+        path.deleteAllGeometry()
+        path.addGeometry(models.polyline(points))
+        self.doc.recompute()
+
+    def pipe(self, points, refine):
+        profile = models.sketch(self.doc, "Profile", models.rectangle(-2, -2, 2, 2), self.body)
+        path = models.sketch(self.doc, "Path", models.polyline(points), self.body, placement=XZ)
+        pipe = self.body.newObject("PartDesign::AdditivePipe", "Pipe")
+        pipe.Profile = profile
+        pipe.Spine = (path, [])
+        pipe.Transition = "Transformed"
+        pipe.Refine = refine
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        return path, pipe
+
+    def pointsOn(self, target, at):
+        """A datum point on each edge and vertex of `target` lying wholly in the square at `at`"""
+        points = []
+        for kind in ("Edge", "Vertex"):
+            for element in elementsWhere(target.Shape, kind, inSquareAt(at)):
+                point = self.body.newObject("PartDesign::Point", "On" + element)
+                point.AttachmentSupport = [(target, element)]
+                point.MapMode = "Vertex" if kind == "Vertex" else "CenterOfMass"
+                points.append(point)
+        self.doc.recompute()
+        self.assertEqual([p.Name for p in points if not p.isValid()], [])
+        return points
+
+    def assertGoneOrLoud(self, points, before, report):
+        """Each point is invalid, warned, or where it was: none moved silently. With `report`
+        False only the places count: a SubShapeBinder updates twice and its report is empty
+        afterwards (ops#449)."""
+        for point in points:
+            if not point.isValid():
+                continue
+            levels = [e.get("warning_level") for e in App.getReferenceReport(point)]
+            if report and "normal" in levels:
+                continue
+            moved = (point.Placement.Base - before[point.Name]).Length
+            self.assertLess(moved, 1e-6, (point.Name, point.AttachmentSupport, levels))
+
+    def assertBackInPlace(self, points, before):
+        for point in points:
+            self.assertTrue(point.isValid(), (point.Name, point.getStatusString()))
+            moved = (point.Placement.Base - before[point.Name]).Length
+            self.assertLess(moved, 1e-6, (point.Name, point.AttachmentSupport))
+
+    def straighten(self, downstream=None):
+        """For each bend and spine direction: the U at 40 and 20 degrees, the points on that
+        bend's joint (on the pipe, or on the refined feature after an unrefined pipe), the bend
+        made straight, then turned back."""
+        for bend, straight in ((1, (0, 20)), (2, (40, 0))):
+            for towards in (False, True):
+                with self.subTest(bend=bend, towards=towards):
+                    self.tearDown()
+                    self.setUp()
+                    points = bendPoints(40, 20, towards)
+                    path, pipe = self.pipe(points, refine=downstream is None)
+                    target = pipe
+                    if downstream == "Fillet":
+                        # the start cap's y = +2 edge, away from both bends
+                        (edge,) = elementsWhere(
+                            pipe.Shape, "Edge", lambda p: abs(p.z) < 1e-6 and abs(p.y - 2) < 1e-6
+                        )
+                        target = self.body.newObject("PartDesign::Fillet", "Fillet")
+                        target.Base = (pipe, [edge])
+                        target.Radius = 0.5
+                        target.Refine = True
+                    elif downstream == "Binder":
+                        target = self.body.newObject("PartDesign::SubShapeBinder", "Binder")
+                        target.Support = [(pipe, "")]
+                        target.Refine = True
+                    self.doc.recompute()
+                    x, z = (points[::-1] if towards else points)[bend]
+                    joint = self.pointsOn(target, V(x, 0, z))
+                    # refined: the y = +-2 sides are one face each, so the joint is the two
+                    # edges at x = +-2 and the four vertices
+                    self.assertEqual(len(joint), 6, [p.Name for p in joint])
+                    before = {p.Name: V(p.Placement.Base) for p in joint}
+                    self.setPath(path, bendPoints(*straight, towards))
+                    self.assertGoneOrLoud(joint, before, report=downstream != "Binder")
+                    self.setPath(path, points)
+                    self.assertBackInPlace(joint, before)
+
+    def testJointOfARefinedPipe(self):
+        self.straighten()
+
+    def testJointOfARefinedFilletAfterThePipe(self):
+        self.straighten("Fillet")
+
+    def testJointOfARefinedBinderOfThePipe(self):
+        self.straighten("Binder")

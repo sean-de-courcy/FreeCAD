@@ -1346,6 +1346,17 @@ bool solveElementReferences(DocumentObject* feature,
             }
             else {
                 item.oldName = plainOld(entry->oldName);
+                // An edge or vertex named after its faces (UPP): the merged-neighbour test needs
+                // the target's faces (ops#446)
+                if (input.faces.empty() && !item.oldName.empty()
+                    && (item.type == "Edge" || item.type == "Vertex")) {
+                    const auto sections = Data::NameAncestry::splitSections(item.oldName);
+                    const auto& top =
+                        Data::MappedName::getDecodedMappedName(std::string(sections.back()));
+                    if (!top.empty() && top.front().hasMapperFlag(Data::MAPPER_FLAG_UPPER)) {
+                        input.faces = pool("Face");
+                    }
+                }
                 if (source != Data::Tier1Source::Overlap && !entry->oldName.empty()) {
                     auto it = nameMatches.find(entry->oldName);
                     if (it == nameMatches.end()) {
