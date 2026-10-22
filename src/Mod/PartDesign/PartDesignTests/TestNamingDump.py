@@ -220,11 +220,12 @@ def modelFilletChamfer(doc):
 
 def modelPipeShell(doc):
     """Pipe shell of a rectangle along a line: the end sections' edges (S4). And a PartDesign
-    Pipe of a square with a square hole along an L path: its start edges and vertices keep the
+    Pipe of a square with a round hole along an L path: its start edges and vertices keep the
     profile's names, its end ones are their projections, and the bend edges are named from the
-    side faces (ops#351). Not a round hole: at the bend its side face meets the next leg's in
-    four arcs, named `UPP` from the same faces and told apart only by an index, which comes out
-    in another order on macOS (fork PR 337's CI)."""
+    side faces (ops#351). At the bend the hole's side face meets the next leg's in four arcs,
+    named `UPP` from the same faces and told apart only by an index. OCCT stores the arcs in
+    opposite orders on Windows and macOS; the V2 index follows their places, so it is the same
+    on both (ops#378). V1's follows OCCT's order and differs on macOS (a known failure)."""
     profile = models.feature(doc, "Profile", models.closedWire([(0, 0, 0), (4, 0, 0), (4, 2, 0), (0, 2, 0)]))
     spine = models.feature(doc, "Spine", Part.makeLine(V(0, 0, 0), V(0, 0, 20)))
     sweep = doc.addObject("Part::Sweep", "Sweep")
@@ -234,7 +235,7 @@ def modelPipeShell(doc):
     body = models.body(doc)
     xz = App.Placement(V(0, 0, 0), App.Rotation(V(1, 0, 0), 90))
     path = models.sketch(doc, "Path", models.polyline([(0, 0), (0, 30), (20, 30)]), body, placement=xz)
-    square = models.sketch(doc, "Square", models.rectangle(-3, -3, 3, 3) + models.rectangle(-1, -1, 1, 1), body)
+    square = models.sketch(doc, "Square", models.rectangle(-3, -3, 3, 3) + [models.circle(0, 0, 1)], body)
     pipe = body.newObject("PartDesign::AdditivePipe", "Pipe")
     pipe.Profile = square
     pipe.Spine = (path, [])

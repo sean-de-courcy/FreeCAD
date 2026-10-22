@@ -929,6 +929,69 @@ class TestHole(unittest.TestCase):
                 self.Hole.ThreadSize = size_index
                 self._helperNotCorrectMessage(self.Hole.ThreadSize, designation)
 
+    def testCounterboreFacesKeepNamesWhenTilted(self):
+        """The faces a Hole generates from its circle keep their indexes through a tilt.
+
+        A counterbored Hole with an angled drill point in a 40 x 20 x 10 block, its sketch
+        tilted about Y from -1 to +1 degree (an attachment edit), then on the block's bottom
+        face drilling up (Reversed). The four faces generated from the one circle are told apart
+        only by an index (ops#378); it follows the order the Hole lists them in, its drilled
+        profile's from the top: counterbore wall 1, counterbore floor 2, cylinder 3, cone 4 (0 is
+        the drilled shape's top disc, named before the cut removes it), in every state. A key in
+        the shape's coordinates renumbered them when the axis passed vertical and when the Hole
+        drilled the other way (fork PR 355 round 1, finding 2)."""
+        self.Box.Length = 40
+        self.Box.Width = 20
+        self.HoleSketch.MapReversed = False
+        self.Hole.ThreadType = "None"
+        self.Hole.Diameter = 6
+        self.Hole.DepthType = "Dimension"
+        self.Hole.Depth = 8
+        self.Hole.HoleCutType = "Counterbore"
+        self.Hole.HoleCutDiameter = 10
+        self.Hole.HoleCutDepth = 2
+        self.Hole.DrillPoint = "Angled"
+        self.Hole.DrillPointAngle = 118
+
+        def kind(face):
+            surface = face.Surface
+            name = type(surface).__name__
+            if name == "Cone":
+                return "cone"
+            if name == "Cylinder":
+                return "cylinder" if abs(surface.Radius - 3) < 1e-6 else "wall"
+            if name == "Plane" and abs(face.Area - 16 * pi) < 0.5:
+                return "floor"
+            return None
+
+        def indexes(state):
+            self.Doc.recompute()
+            shape = self.Hole.Shape
+            self.assertTrue(shape.isValid(), state)
+            result = {}
+            for i, face in enumerate(shape.Faces):
+                k = kind(face)
+                if k is None:
+                    continue
+                name = shape.getElementMappedName(f"Face{i + 1}")
+                name = str(name[0] if isinstance(name, tuple) else name)
+                self.assertIn(";MAK;", name, f"{state}: {k} has no Hole name: {name}")
+                result[k] = int(name.split(";MAK;")[1].split(";")[0])
+            return result
+
+        expected = {"wall": 1, "floor": 2, "cylinder": 3, "cone": 4}
+        for tilt in (-1.0, -0.1, -0.001, 0.0, 0.001, 0.1, 1.0):
+            # the sketch's circle (-5, 5) lands at (15, 10, 10), the counterbore well inside
+            # the block's top face
+            self.HoleSketch.AttachmentOffset = App.Placement(
+                App.Vector(20, 5, 10), App.Rotation(App.Vector(0, 1, 0), tilt)
+            )
+            self.assertEqual(indexes(f"tilt {tilt}"), expected, f"tilt {tilt}")
+        # on the bottom face, drilling up: the cone's tip stays inside the block
+        self.Hole.Reversed = True
+        self.HoleSketch.AttachmentOffset = App.Placement(App.Vector(20, 5, 0), App.Rotation())
+        self.assertEqual(indexes("Reversed"), expected, "Reversed")
+
     def _helperNotCorrectMessage(self, value, comparison):
         self.assertEqual(
             value,

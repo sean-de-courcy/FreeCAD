@@ -38,6 +38,7 @@ from PartDesignTests.Compat.models import (
     lineThrough,
     plane,
     planeFacing,
+    vertexAt,
 )
 from PartDesignTests.Scenarios import models as m
 
@@ -512,6 +513,79 @@ def Binders(make):
     }
 
 
+def IndexToldGroups(make):
+    """References to elements named alike and told apart only by an index (ops#378).
+
+    Body: a 6 x 6 square with a round hole, radius 1, centred on the XY plane's origin, piped
+    along an L in the XZ plane, up from (0, 0, 0) to (0, 0, 30), then along +X to (20, 0, 30),
+    Right corner (TestNamingDump's PipeShell Pipe). At the bend the hole's two side faces meet in
+    four quarter arcs, and the four vertexes between them, all named from the same two faces;
+    OCCT stores the arcs in opposite orders on Windows and macOS, and the index follows their
+    places since ops#378. A chamfer, size 0.2, on the arc centred at (-0.6009, -0.6729, 30.6009)
+    (a fillet there fails in OCCT: "command not done"), and a datum point on the bend vertex
+    (0, -1, 30). CornerCut: two overlapping boxes, 1 x 2 x 2 and 2 x 1 x 2, as a compound, cut
+    by a cylinder, radius 0.5, 2 high, on their shared corner (TestNamingDump's CompoundCut); a
+    sphere, radius 0.1, attached to the cut corner (0, 0.5, 2), the one of its two coincident
+    vertexes named `UPP` (index 1, counted on from an edge named from the same faces)."""
+    doc = make("IndexToldGroups")
+    body = newBody(doc, "Body")
+    profile = attachedSketch(
+        body,
+        "HoledSquare",
+        plane(body, "XY_Plane"),
+        m.rectangle(-3, -3, 3, 3) + [m.circle(0, 0, 1)],
+    )
+    # in the XZ plane's sketch, x is X and y is Z
+    path = attachedSketch(
+        body, "LPath", plane(body, "XZ_Plane"), m.polyline([(0, 0), (0, 30), (20, 30)])
+    )
+    pipe = body.newObject("PartDesign::AdditivePipe", "Pipe")
+    pipe.Profile = profile
+    pipe.Spine = path
+    pipe.Transition = "Right corner"
+    doc.recompute()
+    arc = edgeWhere(
+        pipe.Shape, lambda e: (e.CenterOfMass - V(-0.6009, -0.6729, 30.6009)).Length < 1e-3
+    )
+    chamfer = body.newObject("PartDesign::Chamfer", "ArcChamfer")
+    chamfer.Base = (pipe, [arc])
+    chamfer.Size = 0.2
+    point = body.newObject("PartDesign::Point", "BendPoint")
+    point.AttachmentSupport = [(pipe, vertexAt(pipe.Shape, V(0, -1, 30)))]
+    point.MapMode = "Vertex"
+    body.Tip = chamfer
+    first = m.box(doc, "First", (1, 2, 2))
+    second = m.box(doc, "Second", (2, 1, 2))
+    cylinder = doc.addObject("Part::Cylinder", "Cylinder")
+    cylinder.Radius = 0.5
+    cylinder.Height = 2
+    compound = doc.addObject("Part::Compound", "Compound")
+    compound.Links = [first, second]
+    cut = doc.addObject("Part::Cut", "CornerCut")
+    cut.Base, cut.Tool, cut.Refine = compound, cylinder, False
+    doc.recompute()
+    corners = [
+        f"Vertex{i + 1}"
+        for i, v in enumerate(cut.Shape.Vertexes)
+        if (v.Point - V(0, 0.5, 2)).Length < 1e-6
+        and ";UPP;" in cut.Shape.getElementMappedName(f"Vertex{i + 1}")
+    ]
+    if len(corners) != 1:
+        raise AssertionError(f"{len(corners)} UPP vertexes at the cut corner, expected one")
+    ball = doc.addObject("Part::Sphere", "CornerBall")
+    ball.Radius = 0.1
+    ball.AttachmentSupport = [(cut, corners[0])]
+    ball.MapMode = "Translate"
+    doc.recompute()
+    return {
+        "volumes": {
+            "Pipe": (36 - math.pi) * 50,
+            "CornerCut": 8 - 2 * (math.pi * 0.25 * 2 / 4),
+            "CornerBall": 4 / 3 * math.pi * 0.001,
+        }
+    }
+
+
 MODELS = [
     RevolutionGroove,
     SidedVariants,
@@ -522,4 +596,5 @@ MODELS = [
     UpToFace,
     BodyFromFeature,
     Binders,
+    IndexToldGroups,
 ]

@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 
+#include <array>
 #include <regex>
 #include "PartTestHelpers.h"
 
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepClass_FaceClassifier.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
+#include <BRepGProp.hxx>
 #include <BRepGProp_Face.hxx>
 #include <BRepTools.hxx>
 #include <BRep_Tool.hxx>
@@ -299,17 +301,41 @@ testing::AssertionResult upperNamed(
     const char* op
 )
 {
-    std::map<std::vector<std::string>, int> used;
-    for (int index = 1; index <= static_cast<int>(shape.countSubElements(type)); ++index) {
+    // Every element has its UPP name with some index below the element count, and the elements
+    // named from the same names use the indexes 0 .. n-1 once each. Which member gets which
+    // index is the order rule's (ops#378: the elements' places on the face they are named from;
+    // the order gtests check it), so this holds for any rule.
+    const int count = static_cast<int>(shape.countSubElements(type));
+    std::map<std::vector<std::string>, std::set<int>> used;
+    for (int index = 1; index <= count; ++index) {
         auto element = std::string(type) + std::to_string(index);
-        auto linkedNames = lastSection(upperName(shape, element, tag, op)).linkedNames;
+        const MappedName actual = shape.getMappedName(IndexedName::fromConst(type, index));
+        int found = -1;
+        for (int candidate = 0; candidate < count && found < 0; ++candidate) {
+            if (actual == upperName(shape, element, tag, op, candidate)) {
+                found = candidate;
+            }
+        }
         auto result = elementHasNames(
             shape,
             element.c_str(),
-            {upperName(shape, element, tag, op, used[linkedNames]++)}
+            {upperName(shape, element, tag, op, std::max(found, 0))}
         );
         if (!result) {
             return result;
+        }
+        auto linkedNames = lastSection(upperName(shape, element, tag, op)).linkedNames;
+        if (!used[linkedNames].insert(found).second) {
+            return testing::AssertionFailure()
+                << element << " repeats the UPP index " << found << " of its name list";
+        }
+    }
+    for (const auto& [linkedNames, indexes] : used) {
+        if (*indexes.rbegin() != static_cast<int>(indexes.size()) - 1) {
+            return testing::AssertionFailure()
+                << "the " << indexes.size() << " " << type << "s named from "
+                << (linkedNames.empty() ? std::string("nothing") : linkedNames.front())
+                << " don't use the UPP indexes 0 .. " << indexes.size() - 1;
         }
     }
     return testing::AssertionSuccess();
