@@ -12,8 +12,14 @@ The PartDesign Pipe named its side faces and lateral edges from the profile alon
 one profile element told apart by their order along the spine: a segment added at the spine's
 start, or the spine drawn the other way, moved every reference to another leg silently, in V2s
 too. They are named from the spine edge too now, as Part::Sweep's are (fork PR 352). The Sweep
-scenarios are guards.
+scenarios are guards, as is the corner made round.
+
+"Transformed" across 90 degrees (TransformedAcross90): the corner turned from 80 to 120 degrees
+and back, or from 120, makes the Pipe the union of its legs' pieces and back to the one sweep.
+There a reference stays on its own element or breaks loudly.
 """
+
+import math
 
 import FreeCAD as App
 import Part
@@ -35,13 +41,14 @@ def point3(pt):
     return V(pt[0], 0, pt[1])
 
 
-def onLeg(leg, uv):
-    """The point (u, v) of the profile's plane carried to the middle of \a leg (id, start,
-    end): the profile's X turns with the leg at a right corner, its Y stays"""
+def onLeg(leg, uv, transformed=False):
+    """The point (u, v) of the profile's plane carried to the middle of `leg` (id, start,
+    end): the profile's X turns with the leg at a right corner, its Y stays; "Transformed"
+    keeps the profile's orientation (the legs after a corner are sheared)"""
     _, a, b = leg
     d = point3(b) - point3(a)
     d.normalize()
-    across = V(d.z, 0, -d.x)
+    across = V(1, 0, 0) if transformed else V(d.z, 0, -d.x)
     return (point3(a) + point3(b)) * 0.5 + across * uv[0] + Y * uv[1]
 
 
@@ -75,7 +82,7 @@ class Shared:
         return "Shared(%s)" % self.text
 
 
-def predicate(legs, key):
+def predicate(legs, key, transformed=False):
     """key: '<leg>.f<j>' a side face, '<leg>.v<j>' a lateral edge, '<a><b>.c<j>' the edge
     between legs a and b on the profile's edge j"""
     where, what = key.split(".")
@@ -84,9 +91,13 @@ def predicate(legs, key):
         return Shared(onLeg(legs[where[0]], EDGES[j]), onLeg(legs[where[1]], EDGES[j]), key)
     leg = legs[where]
     if what.startswith("f"):
-        return h.face(contains=onLeg(leg, EDGES[what]))
+        return h.face(contains=onLeg(leg, EDGES[what], transformed))
     _, a, b = leg
-    return h.edge(curve="line", direction=point3(b) - point3(a), contains=onLeg(leg, VERTICES[what]))
+    return h.edge(
+        curve="line",
+        direction=point3(b) - point3(a),
+        contains=onLeg(leg, VERTICES[what], transformed),
+    )
 
 
 def refsFor(legs, corners):
@@ -107,6 +118,7 @@ class Legs(h.Scenario):
     abstract = True
     area = "PipeLegs"
     kind = "pipe"
+    TRANSITION = "Right corner"
     DRAW = ()
     LEGS = ()
     AFTER = None
@@ -120,6 +132,11 @@ class Legs(h.Scenario):
     def legsNow(self):
         legs = self.AFTER if self.stepName == "edit" and self.AFTER is not None else self.LEGS
         return {leg[0]: leg for leg in legs}
+
+    def expect(self, key):
+        """What the reference `key` should hold after the current step: the element at its
+        place on its leg"""
+        return predicate(self.legsNow(), key, self.TRANSITION == "Transformed")
 
     def build(self, doc):
         body = m.body(doc) if self.kind == "pipe" else None
@@ -135,7 +152,7 @@ class Legs(h.Scenario):
             solid.Sections = [profile]
             solid.Solid = True
         solid.Spine = (path, [])
-        solid.Transition = "Right corner"
+        solid.Transition = self.TRANSITION
         doc.recompute()
         if not solid.isValid() or solid.Shape.isNull():
             raise h.ScenarioError("model invalid: %s" % solid.State)
@@ -143,17 +160,9 @@ class Legs(h.Scenario):
             sketch = doc.addObject("Sketcher::SketchObject", "On_" + key.replace(".", "_"))
             if body is not None:
                 body.addObject(sketch)
-            sketch.AttachmentSupport = [
-                (solid, self.names(solid, predicate(self.legsNow(), key))[0])
-            ]
+            sketch.AttachmentSupport = [(solid, self.names(solid, self.expect(key))[0])]
             sketch.MapMode = "FlatFace" if ".f" in key else "NormalToEdge"
-            self.ref(
-                key,
-                sketch,
-                "AttachmentSupport",
-                lambda k=key: predicate(self.legsNow(), k),
-                h.Attached(),
-            )
+            self.ref(key, sketch, "AttachmentSupport", lambda k=key: self.expect(k), h.Attached())
 
     def edit(self, doc):
         raise NotImplementedError
@@ -285,6 +294,107 @@ class PipeLegsSegmentRedrawn(Legs):
     def edit(self, doc):
         doc.Path.delGeometry(0)
         addLine(doc, (0, 0), (0, 30))
+
+
+class PipeLegsRoundCorner(Legs):
+    """Guard: the corner made round ("Right corner" -> "Round corner"). The legs keep their side
+    faces and lateral edges. Only the corner's outer side is rounded: the faces of profile edges
+    1-3 on the two legs still meet (f1 and f3 along a shorter edge, beside a corner face in their
+    plane), and the edge between the f4 faces is gone. With the solver, a reference to an f1 or f3
+    face breaks loudly: the corner face beside it in its plane could be a piece of it (the split
+    rule)."""
+
+    abstract = False
+    DRAW, LEGS, CORNERS = L_DRAW, L_LEGS, ("AB",)
+
+    def expect(self, key):
+        found = super().expect(key)
+        if self.stepName != "edit":
+            return found
+        if key == "AB.c4":
+            return h.BROKEN
+        if self.solver and key.endswith((".f1", ".f3")):
+            return h.Broken(found)
+        return found
+
+    def edit(self, doc):
+        doc.Pipe.Transition = "Round corner"
+
+
+def transformedL(degrees, towards):
+    """The L of TestPipe's side-face tests: up 30 from the profile, then 20 turned `degrees` from
+    +Z towards +X; (DRAW, LEGS), the lines drawn towards the profile with `towards`"""
+    end = (20 * math.sin(math.radians(degrees)), 30 + 20 * math.cos(math.radians(degrees)))
+    legs = (("A", (0, 0), (0, 30)), ("B", (0, 30), end))
+    draw = (((0, 0), (0, 30)), ((0, 30), end))
+    if towards:
+        draw = ((end, (0, 30)), ((0, 30), (0, 0)))
+    return draw, legs
+
+
+class TransformedAcross90(Legs):
+    """"Transformed" along an L whose corner turns from START degrees to OTHER and back, across
+    90: between the one sweep and the union of pieces, the lines moved (their ids kept). A
+    reference stays on its own element or breaks loudly: the union's fuse renames the faces it
+    cuts in the planes the two legs share (y = +-2), and a reference to one may go missing. It
+    never moves to another leg or face (ops#415, the design's Transformed test). Without the
+    solver (V2), a lateral edge the fuse splits where the legs overlap gives its name to both
+    pieces, and V2's name match takes the short one at the corner: those are listed known
+    failures (tests/known-failures/ops7-scenarios-broken.txt)."""
+
+    abstract = True
+    TRANSITION = "Transformed"
+    START, OTHER, TOWARDS = 80, 120, False
+    steps = ("across", "back")
+
+    def legsNow(self):
+        degrees = self.OTHER if self.stepName == "across" else self.START
+        return {leg[0]: leg for leg in transformedL(degrees, self.TOWARDS)[1]}
+
+    def expect(self, key):
+        found = super().expect(key)
+        return found if self.stepName is None else h.OwnOrBroken(found)
+
+    def turnTo(self, doc, degrees):
+        for geo, (a, b) in enumerate(transformedL(degrees, self.TOWARDS)[0]):
+            moveLine(doc.Path, geo, a, b)
+
+    def across(self, doc):
+        self.turnTo(doc, self.OTHER)
+
+    def back(self, doc):
+        self.turnTo(doc, self.START)
+
+
+class PipeLegsTransformedAcross90(TransformedAcross90):
+    """80 -> 120 -> 80 degrees, the spine from the profile"""
+
+    abstract = False
+    DRAW, LEGS = transformedL(80, False)
+
+
+class PipeLegsTransformedBackAcross90(TransformedAcross90):
+    """120 -> 80 -> 120 degrees (the union first), the spine from the profile"""
+
+    abstract = False
+    START, OTHER = 120, 80
+    DRAW, LEGS = transformedL(120, False)
+
+
+class PipeLegsTransformedAcross90TowardsTheProfile(TransformedAcross90):
+    """80 -> 120 -> 80 degrees, the spine drawn towards the profile"""
+
+    abstract = False
+    TOWARDS = True
+    DRAW, LEGS = transformedL(80, True)
+
+
+class PipeLegsTransformedBackAcross90TowardsTheProfile(TransformedAcross90):
+    """120 -> 80 -> 120 degrees, the spine drawn towards the profile"""
+
+    abstract = False
+    START, OTHER, TOWARDS = 120, 80, True
+    DRAW, LEGS = transformedL(120, True)
 
 
 class SweepLegsSegmentAddedAtStart(PipeLegsSegmentAddedAtStart):

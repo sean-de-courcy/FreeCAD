@@ -604,6 +604,14 @@ class TestPipeEndNames(unittest.TestCase):
         path.addGeometry(models.polyline(points))
         self.doc.recompute()
 
+    def movePolyline(self, path, points):
+        """Moves the ends of `path`'s lines to `points`, as dragging them does: each line keeps
+        its geometry id, which a Pipe's legs are named from (ops#415)."""
+        for geo, (start, end) in enumerate(zip(points, points[1:])):
+            path.moveGeometry(geo, 1, V(*start, 0))
+            path.moveGeometry(geo, 2, V(*end, 0))
+        self.doc.recompute()
+
     def moveProfile(self, profile, z):
         profile.Placement = App.Placement(V(0, 0, z), App.Rotation())
         self.doc.recompute()
@@ -890,18 +898,26 @@ class TestPipeEndNames(unittest.TestCase):
 
     def assertSidesStayOnTheirLegs(self, points):
         """The L through points(degrees), made at 80 degrees and at 120 (the union), the corner
-        turned to the other angle and back.
+        turned to the other angle and back by moving the spine's lines (their geometry ids
+        kept).
         - From 80 degrees to 120 (the one sweep to the union), each side face's sketch stays
           valid, on the face of the same leg and profile edge it was attached on.
         - From the union, the fuse has renamed (MOD) the faces it cut, those in the planes that
           the two legs share (y = +-2) past 90 degrees, and a reference to one goes missing, as
           before. A sketch on a face that shares its plane with no other face stays valid on
-          its face; any sketch that stays valid is on the same leg and profile edge."""
-        for start, other in ((80, 120), (120, 80)):
-            if start == 120:
-                self.tearDown()
-                self.setUp()
-            with self.subTest(start=start):
+          its face; any sketch that stays valid is on the same leg and profile edge.
+        Then the same with the spine deleted and drawn again at each angle (new geometry ids):
+        the legs' names are new, so a reference may go missing (the leg that stays in place is
+        found by its place), but none moves to another face (ops#415)."""
+        for redraw, start, other in (
+            (False, 80, 120),
+            (False, 120, 80),
+            (True, 80, 120),
+            (True, 120, 80),
+        ):
+            self.tearDown()
+            self.setUp()
+            with self.subTest(start=start, redraw=redraw):
                 path, pipe, sketches = self.sideFaceModel(points(start))
                 faces = self.facesOf(pipe, sketches, points(start))
                 self.assertNotIn(None, faces)
@@ -910,13 +926,16 @@ class TestPipeEndNames(unittest.TestCase):
                 for degrees in (other, start):
                     kept = [sketch for sketch in sketches if sketch.isValid()]
                     alone = self.alone(pipe, kept)
-                    self.setPolyline(path, points(degrees))
+                    if redraw:
+                        self.setPolyline(path, points(degrees))
+                    else:
+                        self.movePolyline(path, points(degrees))
                     now = dict(zip(sketches, self.facesOf(pipe, sketches, points(degrees))))
                     for sketch, face in zip(sketches, faces):
                         if now[sketch] is not None:
                             self.assertEqual(now[sketch], face, (before, degrees, sketch.Name))
                     for sketch, single in zip(kept, alone):
-                        if before < 90 or single:
+                        if not redraw and (before < 90 or single):
                             self.assertIsNotNone(
                                 now[sketch],
                                 (before, degrees, sketch.Name, sketch.getStatusString()),
