@@ -52,7 +52,7 @@ public:
     App::PropertyEnumeration Transformation;
     App::PropertyLinkSubList Sections;
     /// Where the spine started and ended at the last successful recompute, the end that carried
-    /// the profile's names first, in the feature's frame; empty before (ops#379)
+    /// the profile's names first, where they lie in the body; empty before (ops#379)
     App::PropertyVectorList SpineEnds;
 
     App::DocumentObjectExecReturn* execute() override;

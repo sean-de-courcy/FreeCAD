@@ -119,18 +119,13 @@ public:
     /// \a first and \a last are the first and last sections added to \a pipe, a wire or a
     /// vertex each (the same for a pipe of one profile); \a point is \a first when it is the
     /// profile's point, which the side shapes' history leaves out (it isn't otherwise a source).
-    /// A piece of a union (sweepPiecesAndFuse) names its end only when it is the last, with
-    /// \a projectEnd; \a origins, when given, binds each element of \a last to the profile's
-    /// element it was swept from, and the end projects those instead (a source of the shape too).
     /// \a reversed: the shell's end, not its start, carries \a first's names (ops#379).
     MapperPipeShellEnds(
         BRepOffsetAPI_MakePipeShell& pipe,
         const TopoDS_Shape& first,
         const TopoDS_Shape& last,
         const TopoDS_Shape& point,
-        bool reversed,
-        bool projectEnd = true,
-        const TopTools_DataMapOfShapeShape* origins = nullptr
+        bool reversed
     )
         : MapperMaker(pipe)
         , point(point)
@@ -145,16 +140,50 @@ public:
         // With a closed spine the shell ends where it starts: those elements keep the first
         // section's names
         bindEnds(pipe, last, other, &own, bound);
-        if (!projectEnd) {
+        ends = bound;
+    }
+
+    /// How a piece of a union (sweepPiecesAndFuse) names its end
+    enum class PieceEnd
+    {
+        /// Not from its section: a piece before the last
+        None,
+        /// Projecting the profile's names: the last piece, when the union's start has them
+        Projected,
+        /// With the profile's own names: the last piece, when the union's end has them
+        Own,
+    };
+
+    /// A piece of a union, swept from \a section at its start (ops#370). Its start keeps the
+    /// section's names, or, with \a startProjects (the first piece, when the union's end carries
+    /// the profile's names), projects them (ops#379). Its end is named as \a end says; \a
+    /// origins, when given, binds each element of \a section to the profile's element it was
+    /// swept from, and the end is named from those instead (a source of the shape too).
+    MapperPipeShellEnds(
+        BRepOffsetAPI_MakePipeShell& pipe,
+        const TopoDS_Shape& section,
+        bool startProjects,
+        PieceEnd end,
+        const TopTools_DataMapOfShapeShape* origins
+    )
+        : MapperMaker(pipe)
+    {
+        TopTools_IndexedMapOfShape startElements;
+        TopTools_IndexedMapOfShape endElements;
+        TopExp::MapShapes(pipe.FirstShape(), startElements);
+        TopExp::MapShapes(pipe.LastShape(), endElements);
+        TopTools_DataMapOfShapeListOfShape atStart;
+        bindEnds(pipe, section, startElements, nullptr, atStart);
+        bindEnds(pipe, section, endElements, &startElements, bound);
+        (startProjects ? ends : starts) = atStart;
+        if (end == PieceEnd::None) {
             return;
         }
-        if (!origins) {
-            ends = bound;
-            return;
-        }
+        TopTools_DataMapOfShapeListOfShape& named = end == PieceEnd::Own ? starts : ends;
         for (TopTools_DataMapIteratorOfDataMapOfShapeListOfShape it(bound); it.More(); it.Next()) {
-            if (const TopoDS_Shape* origin = origins->Seek(it.Key())) {
-                ends.Bind(*origin, it.Value());
+            const TopoDS_Shape* origin = origins ? origins->Seek(it.Key()) : &it.Key();
+            if (origin) {
+                named.Bind(*origin, it.Value());
             }
         }
     }
@@ -1239,7 +1268,9 @@ bool isValidSolid(const Part::TopoShape& shape)
 /// where it lies nearest the piece, and the union came out wrong.
 /// Names: the first piece's start keeps the profile's names, and the last piece's end projects
 /// them, as the one sweep's ends do, so a reference to either end follows it when an edit takes
-/// the pipe across 90 degrees. The other pieces' ends aren't named from their sections (their
+/// the pipe across 90 degrees. With \a profileAtEnd the two swap, as the one sweep's do when
+/// its end carries the profile's names (ops#379): the first piece's start projects them, and the
+/// last piece's end keeps them. The other pieces' ends aren't named from their sections (their
 /// edges are named from the side faces, `UPP`), each later piece sweeps the end wire of the
 /// piece before, so its side faces are named from that wire's edges, and the caps between the
 /// pieces carry their piece's index (`PCE<n>`).
@@ -1247,6 +1278,7 @@ Part::TopoShape sweepPiecesAndFuse(
     const TopoDS_Wire& spine,
     const std::vector<size_t>& pieceStarts,
     std::vector<Part::TopoShape> profiles,
+    bool profileAtEnd,
     const std::function<void(BRepOffsetAPI_MakePipeShell&)>& setup,
     const std::function<Part::TopoShape(const TopoDS_Shape&)>& make
 )
@@ -1292,13 +1324,15 @@ Part::TopoShape sweepPiecesAndFuse(
             }
             const TopoDS_Shape built = mkPS.Shape();
             Part::TopoShape shell = make(TopoDS_Shape());
+            using PieceEnd = MapperPipeShellEnds::PieceEnd;
+            const PieceEnd end = !last ? PieceEnd::None
+                : profileAtEnd         ? PieceEnd::Own
+                                       : PieceEnd::Projected;
             const MapperPipeShellEnds mapper(
                 mkPS,
                 section.getShape(),
-                section.getShape(),
-                TopoDS_Shape(),
-                false,  // each piece sweeps its section from the piece's start
-                last,
+                first && profileAtEnd,
+                end,
                 first ? nullptr : &origins[i]
             );
             std::vector<Part::TopoShape> sources {section};
@@ -1865,8 +1899,8 @@ Pipe::Pipe()
         "Sweep",
         App::PropertyType(App::Prop_Output | App::Prop_Hidden),
         "Where the spine started and ended at the last successful recompute, the end with the "
-        "profile's names first, in the feature's frame: the next recompute keeps the names on "
-        "the matching end (ops#379)"
+        "profile's names first, where they lie in the body: the next recompute keeps the names "
+        "on the matching end (ops#379)"
     );
     Mode.setEnums(ModeEnums);
     Transition.setEnums(TransitionEnums);
@@ -2245,14 +2279,21 @@ App::DocumentObjectExecReturn* Pipe::execute()
 
         // Which end of the shell carries the profile's names, decided once for every wire: the
         // end the names were on at the last good recompute, so that no edit moves them, or the
-        // first wire's sections when nothing is stored (ops#379)
-        const std::optional<std::array<gp_Pnt, 2>> spineEnds
-            = wireEnds(TopoDS::Wire(path.getShape()));
+        // first wire's sections when nothing is stored (ops#379). The spine's ends are paired
+        // and stored where they lie in the body, not in the pipe's own frame: that frame is the
+        // profile sketch's or the base feature's, and moves with them while the spine stays.
+        std::optional<std::array<gp_Pnt, 2>> spineEnds = wireEnds(TopoDS::Wire(path.getShape()));
         std::optional<bool> reversed;
         if (spineEnds) {
+            const gp_Trsf inBody = invObjLoc.Inverted().Transformation();
+            for (gp_Pnt& end : *spineEnds) {
+                end.Transform(inBody);
+            }
             reversed = storedSideAtEnd(SpineEnds.getValues(), *spineEnds);
         }
-        // Once the pipe is good: the spine's ends the next recompute pairs with its own
+        const bool storedSide = reversed.has_value();
+        // Once the pipe is good: the spine's ends the next recompute pairs with its own, written
+        // only when they moved, so that a recompute that changes nothing leaves the file as it was
         auto storeSpineEnds = [&]() {
             if (!spineEnds) {
                 return;
@@ -2264,7 +2305,11 @@ App::DocumentObjectExecReturn* Pipe::execute()
                 Base::Vector3d(profileSide.X(), profileSide.Y(), profileSide.Z()),
                 Base::Vector3d(other.X(), other.Y(), other.Z())
             };
-            if (SpineEnds.getValues() != values) {
+            const std::vector<Base::Vector3d>& stored = SpineEnds.getValues();
+            const bool same = stored.size() == values.size()
+                && stored[0].IsEqual(values[0], Precision::Confusion())
+                && stored[1].IsEqual(values[1], Precision::Confusion());
+            if (!same) {
                 SpineEnds.setValues(values);
             }
         };
@@ -2442,18 +2487,23 @@ App::DocumentObjectExecReturn* Pipe::execute()
                 }
                 profiles.push_back(profile);
             }
+            // The end stored at the last good recompute keeps the names, as in the one sweep, so
+            // that an edit across 90 degrees and back leaves them where they were. With nothing
+            // stored, the spine's start has them, as before ops#379: its first piece starts there.
+            if (!storedSide) {
+                reversed = false;
+            }
             result = sweepPiecesAndFuse(
                 TopoDS::Wire(path.getShape()),
                 tilts.pieceStarts,
                 profiles,
+                *reversed,
                 setup,
                 [this](const TopoDS_Shape& shape) { return makeTopoShape(shape); }
             );
             if (result.isNull()) {
                 return new App::DocumentObjectExecReturn(invalidPipe());
             }
-            // The first piece starts from the spine's start, so that end has the profile's names
-            reversed = false;
         }
         else if (!frontwires.empty() || !backwires.empty()) {
             BRepBuilderAPI_Sewing sewer;
