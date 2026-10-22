@@ -22,11 +22,11 @@ Face c=(0.0000,0.0000,11.0000) m=78.5398 : _;~oihgv1gt32p30;3;OFS;0;F;0;GEN;_
 Face c=(0.0000,3.5991,-0.6212) m=27.8156 : _;~50tn5vam225ik;3;OFS;0;F;0;GEN;_
 Face c=(0.0000,3.5991,10.6212) m=27.8156 : _;~qjaq9ii958uaq;3;OFS;0;F;0;GEN;_
 Face c=(0.0000,3.8197,5.0000) m=188.4956 : _;~bpahnd49oo84c;3;OFS;0;F;0;GEN;_
-Vertex c=(-5.0000,0.0000,-1.0000) m=0.0000 : _;~d3u369r6l9ets,~pk8vsai5l9ckc,~c4hnaefetrd8i;3;OFS;0;V;0;UPP;_
-Vertex c=(-5.0000,0.0000,11.0000) m=0.0000 : _;~v6qi9a16fqure,~52pmp6mpenhu0,~2gvo0vtpbi1lq;3;OFS;0;V;0;UPP;_
+Vertex c=(-5.0000,0.0000,-1.0000) m=0.0000 : _;~d3u369r6l9ets,~pk8vsai5l9ckc,~c4hnaefetrd8i;3;OFS;1;V;0;UPP;_
+Vertex c=(-5.0000,0.0000,11.0000) m=0.0000 : _;~v6qi9a16fqure,~52pmp6mpenhu0,~2gvo0vtpbi1lq;3;OFS;1;V;0;UPP;_
 Vertex c=(-6.0000,0.0000,0.0000) m=0.0000 : _;~729o3s3lki15a,~n2eac1h44lbom,~pk8vsai5l9ckc,~c4hnaefetrd8i;3;OFS;1;V;0;UPP;_
 Vertex c=(-6.0000,0.0000,10.0000) m=0.0000 : _;~52pmp6mpenhu0,~729o3s3lki15a,~2gvo0vtpbi1lq,~n2eac1h44lbom;3;OFS;1;V;0;UPP;_
-Vertex c=(5.0000,0.0000,-1.0000) m=0.0000 : _;~d3u369r6l9ets,~pk8vsai5l9ckc,~c4hnaefetrd8i;3;OFS;1;V;0;UPP;_
-Vertex c=(5.0000,0.0000,11.0000) m=0.0000 : _;~v6qi9a16fqure,~52pmp6mpenhu0,~2gvo0vtpbi1lq;3;OFS;1;V;0;UPP;_
+Vertex c=(5.0000,0.0000,-1.0000) m=0.0000 : _;~d3u369r6l9ets,~pk8vsai5l9ckc,~c4hnaefetrd8i;3;OFS;0;V;0;UPP;_
+Vertex c=(5.0000,0.0000,11.0000) m=0.0000 : _;~v6qi9a16fqure,~52pmp6mpenhu0,~2gvo0vtpbi1lq;3;OFS;0;V;0;UPP;_
 Vertex c=(6.0000,0.0000,0.0000) m=0.0000 : _;~729o3s3lki15a,~n2eac1h44lbom,~pk8vsai5l9ckc,~c4hnaefetrd8i;3;OFS;0;V;0;UPP;_
 Vertex c=(6.0000,0.0000,10.0000) m=0.0000 : _;~52pmp6mpenhu0,~729o3s3lki15a,~2gvo0vtpbi1lq,~n2eac1h44lbom;3;OFS;0;V;0;UPP;_
