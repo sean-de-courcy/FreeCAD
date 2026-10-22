@@ -62,6 +62,7 @@ from PartDesignTests.Scenarios import attachment, booleans, dressups, patterns, 
 from PartDesignTests.Scenarios import ambiguous, consumers, crossdoc, derived, external, internal
 from PartDesignTests.Scenarios import issues
 from PartDesignTests.Scenarios import fillet_limit, interning, moves, reorder
+from PartDesignTests.Scenarios import pipe_legs
 from PartDesignTests.Scenarios import rlist
 from PartDesignTests.Scenarios import randomized, revolve_uptoface, splits, uptoface
 
@@ -86,6 +87,7 @@ AREAS = (
     reorder,
     fillet_limit,
     derived,
+    pipe_legs,
 )
 
 
