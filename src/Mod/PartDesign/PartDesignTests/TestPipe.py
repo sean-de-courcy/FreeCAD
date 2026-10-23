@@ -1773,9 +1773,11 @@ class TestJointsWhenABendStraightens(unittest.TestCase):
             with self.subTest(towards=towards):
                 self.tearDown()
                 self.setUp()
-                points = bendPoints(40, 20, towards, 30)
+                # the last turn 20 degrees: at 30 the fourth leg would run at 90 degrees to the
+                # profile, which "Transformed" refuses (fork PR 344)
+                points = bendPoints(40, 20, towards, 20)
                 path, pipe = self.pipe(points, True)
-                x, z = bendPoints(40, 20, False, 30)[3]
+                x, z = bendPoints(40, 20, False, 20)[3]
                 joint = self.pointsOn(pipe, V(x, 0, z), kinds=("Vertex",))
                 self.assertEqual(len(joint), 4, [p.Name for p in joint])
                 before = {p.Name: V(p.Placement.Base) for p in joint}
