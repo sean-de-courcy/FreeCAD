@@ -796,6 +796,8 @@ const bool elementHintsRegistered = (App::setElementHintsFunction(&elementHints)
 // round 4): within the distance, and every nearest point inside the face, none on its boundary;
 // or the face's own centre of mass within the distance of the point (round 5: a piece shaped
 // like an n or a ring has its centre over the hole it wraps, its nearest point on its edge).
+// Or whether it lies within the distance of an edge, its ends included (ops#386: a piece of a far
+// edge whose centre sits at the end of the piece left in its place).
 // In the frame getElementFingerprint() measures in (without the shape's placement).
 bool elementHoldsPoint(
     const App::GeoFeature* geo,
@@ -814,7 +816,16 @@ bool elementHoldsPoint(
     }
     try {
         const TopoDS_Shape sub = shape.located(TopLoc_Location()).getSubShape(element, true);
-        if (sub.IsNull() || sub.ShapeType() != TopAbs_FACE) {
+        if (sub.IsNull()) {
+            return false;
+        }
+        if (sub.ShapeType() == TopAbs_EDGE) {
+            const TopoDS_Vertex vertex
+                = BRepBuilderAPI_MakeVertex(gp_Pnt(point.x, point.y, point.z)).Vertex();
+            BRepExtrema_DistShapeShape extrema(vertex, sub);
+            return extrema.IsDone() && extrema.NbSolution() > 0 && extrema.Value() <= distance;
+        }
+        if (sub.ShapeType() != TopAbs_FACE) {
             return false;
         }
         GProp_GProps props;
