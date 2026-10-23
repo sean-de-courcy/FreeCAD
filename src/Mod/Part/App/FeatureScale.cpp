@@ -109,19 +109,18 @@ TopoShape Scale::scaleShape(const TopoShape& source, const Scale::ScaleParameter
 TopoShape Scale::uniformScale(const TopoShape& source, const double& factor)
 {
     //    Base::Console().message("FS::uniformScale()\n");
-    TopoDS_Shape transShape;
+    // With the source's element map, here and in nonuniformScale(): a bare shape left references
+    // to the result going by index (ops#453)
     TopoShape transTopo;
     try {
         gp_Trsf scaleTransform;
         scaleTransform.SetScale(gp_Pnt(0, 0, 0), factor);
 
-        BRepBuilderAPI_Transform mkTrf(source.getShape(), scaleTransform);
-        transShape = mkTrf.Shape();
+        transTopo = TopoShape(source).makeElementTransform(scaleTransform, nullptr, CopyType::copy);
     }
     catch (...) {
-        return transTopo;
+        return {};
     }
-    transTopo.setShape(transShape);
     return transTopo;
 }
 
@@ -131,29 +130,13 @@ TopoShape Scale::nonuniformScale(const TopoShape& source, const Scale::ScalePara
     Base::Matrix4D matScale;
     matScale.scale(params.XScale, params.YScale, params.ZScale);
 
-    // copy the FreeCAD matrix cell values to an OCC matrix
-    gp_GTrsf mat;
-    mat.SetValue(1, 1, matScale[0][0]);
-    mat.SetValue(2, 1, matScale[1][0]);
-    mat.SetValue(3, 1, matScale[2][0]);
-    mat.SetValue(1, 2, matScale[0][1]);
-    mat.SetValue(2, 2, matScale[1][1]);
-    mat.SetValue(3, 2, matScale[2][1]);
-    mat.SetValue(1, 3, matScale[0][2]);
-    mat.SetValue(2, 3, matScale[1][2]);
-    mat.SetValue(3, 3, matScale[2][2]);
-    mat.SetValue(1, 4, matScale[0][3]);
-    mat.SetValue(2, 4, matScale[1][3]);
-    mat.SetValue(3, 4, matScale[2][3]);
-
     // this copy step seems to eliminate Part.OCCError: gp_GTrsf::Trsf() - non-orthogonal GTrsf
     // which may to be related to the tessellation of the input shape.  See Github issue #9651
     // for more detail.
-    BRepBuilderAPI_Copy copier(source.getShape());
+    TopoShape copied = source.makeElementCopy();
     TopoShape transTopo;
     try {
-        BRepBuilderAPI_GTransform mkTrf(copier.Shape(), mat, true);
-        transTopo.setShape(mkTrf.Shape());
+        transTopo = copied.makeElementGTransform(matScale, nullptr, CopyType::copy);
     }
     catch (...) {
         Base::Console().warning("FeatureScale failed on nonuniform scale\n");

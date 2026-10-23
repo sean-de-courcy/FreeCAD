@@ -468,7 +468,10 @@ App::DocumentObjectExecReturn* Refine::execute()
 
     try {
         TopoShape myShape = source->Shape.getShape();
-        this->Shape.setValue(myShape.removeSplitter());
+        // Refined with the element map, as the booleans' Refine and PartDesign's do:
+        // removeSplitter() returned a bare shape, so references to the result went by index
+        // and moved to other elements silently after an edit upstream (ops#453)
+        this->Shape.setValue(makeTopoShape(false).makeElementRefine(myShape));
         return App::DocumentObject::StdReturn;
     }
     catch (Standard_Failure& e) {
@@ -497,7 +500,11 @@ App::DocumentObjectExecReturn* Reverse::execute()
     try {
         TopoDS_Shape myShape = topoShape.getShape();
         if (!myShape.IsNull()) {
-            this->Shape.setValue(myShape.Reversed());
+            // With the source's element map: reversing keeps the sub-shapes and their order, and a
+            // bare shape left references to the result going by index (ops#453)
+            TopoShape reversed(topoShape);
+            reversed.setShape(myShape.Reversed(), false);
+            this->Shape.setValue(reversed);
             Base::Placement p;
             p.fromMatrix(topoShape.getTransform());
             this->Placement.setValue(p);
