@@ -30,10 +30,14 @@ reason: a consumer that needs one element keeps one piece of a split element or 
 cli  PartDesignTests.TestNamingScenarios.ExternalSplit.test_front_edge_V2
 
 reason: a sketch on a lateral edge of a "Transformed" Pipe turned across 90 degrees, which the union's fuse splits where the legs overlap (ops#415's PipeLegs scenarios): V2's name match takes the first of the pieces whose names extend the edge's, the short one at the corner, with a log warning only (V2; V2s correct or broken, as the scenarios expect)
+cli  PartDesignTests.TestNamingScenarios.PipeLegsTransformedAcross90.test_A.v2_V2
 cli  PartDesignTests.TestNamingScenarios.PipeLegsTransformedAcross90.test_A.v3_V2
+cli  PartDesignTests.TestNamingScenarios.PipeLegsTransformedBackAcross90.test_A.v2_V2
 cli  PartDesignTests.TestNamingScenarios.PipeLegsTransformedBackAcross90.test_A.v3_V2
+cli  PartDesignTests.TestNamingScenarios.PipeLegsTransformedAcross90TowardsTheProfile.test_A.v2_V2
 cli  PartDesignTests.TestNamingScenarios.PipeLegsTransformedAcross90TowardsTheProfile.test_A.v3_V2
 cli  PartDesignTests.TestNamingScenarios.PipeLegsTransformedAcross90TowardsTheProfile.test_B.v4_V2
+cli  PartDesignTests.TestNamingScenarios.PipeLegsTransformedBackAcross90TowardsTheProfile.test_A.v2_V2
 cli  PartDesignTests.TestNamingScenarios.PipeLegsTransformedBackAcross90TowardsTheProfile.test_A.v3_V2
 cli  PartDesignTests.TestNamingScenarios.PipeLegsTransformedBackAcross90TowardsTheProfile.test_B.v4_V2
 cli  PartDesignTests.TestNamingScenarios.ExternalSplitOffCentre.test_front_edge_V2
