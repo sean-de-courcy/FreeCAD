@@ -268,6 +268,40 @@ bool piecesOfOne(std::string_view a, std::string_view b)
     return NameAncestry::isPieceOf(a, whole) && NameAncestry::isPieceOf(b, whole);
 }
 
+// True if \a a and \a b are two marked pieces of one projection (ops#386): the names are the same
+// but in one section, where both are a far cap's or far edge's piece (PRJ and MOD) told apart by
+// their marks (connected elements) or their duplicate counters. They share every source, but are
+// no twins: an up-to shell rebuilt with its faces in another order trades their marks, and the
+// piece left at the old place is the element the reference held.
+bool markedPiecesOfOne(std::string_view a, std::string_view b)
+{
+    const auto as = NameAncestry::splitSections(a);
+    const auto bs = NameAncestry::splitSections(b);
+    if (as.empty() || as.size() != bs.size()) {
+        return false;
+    }
+    bool marked = false;
+    for (std::size_t i = 0; i < as.size(); ++i) {
+        if (as[i] == bs[i]) {
+            continue;
+        }
+        if (marked) {
+            return false;
+        }
+        const DecodedMappedSection& x = decodeSection(as[i]);
+        const DecodedMappedSection& y = decodeSection(bs[i]);
+        if (!x.hasMapperFlag(MAPPER_FLAG_PROJECTION) || !x.hasMapperFlag(MAPPER_FLAG_MODIFIED)
+            || !y.hasMapperFlag(MAPPER_FLAG_PROJECTION) || !y.hasMapperFlag(MAPPER_FLAG_MODIFIED)
+            || x.opCode != y.opCode || x.referenceIDs != y.referenceIDs
+            || x.iterationTag != y.iterationTag || x.index != y.index
+            || x.elementType != y.elementType || x.linkedNames != y.linkedNames) {
+            return false;
+        }
+        marked = true;
+    }
+    return marked;
+}
+
 // An innermost source section (walkLineage()): its tag, element type and reference IDs.
 struct SourceSection
 {
@@ -1722,6 +1756,42 @@ bool holdsMarkedPiece(std::string_view name, std::string_view oldName, bool alon
     return held;
 }
 
+/* True if \a name's element is \a oldName's far edge or far cap made whole again (ops#386): the
+ * names are the same but in one section, a marked piece's in \a oldName (PRJ and MOD), which in
+ * \a name is the same projection unmarked: PRJ alone, no marks, no duplicate counter. A far edge
+ * that an edit moved off the up-to shell's seam, or out of a hole, is one projection again. The
+ * old piece's place on it is the caller's to check.
+ */
+bool isWholeProjectionOf(std::string_view name, std::string_view oldName)
+{
+    const auto sections = NameAncestry::splitSections(name);
+    const auto oldSections = NameAncestry::splitSections(oldName);
+    if (sections.empty() || sections.size() != oldSections.size()) {
+        return false;
+    }
+    bool whole = false;
+    for (std::size_t i = 0; i < sections.size(); ++i) {
+        if (sections[i] == oldSections[i]) {
+            continue;
+        }
+        if (whole) {
+            return false;
+        }
+        const DecodedMappedSection& x = decodeSection(sections[i]);
+        const DecodedMappedSection& y = decodeSection(oldSections[i]);
+        if (!y.hasMapperFlag(MAPPER_FLAG_PROJECTION) || !y.hasMapperFlag(MAPPER_FLAG_MODIFIED)
+            || y.connectedElements.empty() || !x.connectedElements.empty()
+            || sortedFlags(x) != std::vector<std::string> {MAPPER_FLAG_PROJECTION}
+            || x.duplicateCount != "0" || x.opCode != y.opCode || x.referenceIDs != y.referenceIDs
+            || x.iterationTag != y.iterationTag || x.index != y.index
+            || x.elementType != y.elementType || x.linkedNames != y.linkedNames) {
+            return false;
+        }
+        whole = true;
+    }
+    return whole;
+}
+
 // The element of a target without an element map that the IDX section \a section names, when it
 // carries the target's tag \a tag (Q5): the section's index name (`Edge11`), if it is of type
 // \a type; otherwise empty.
@@ -2658,7 +2728,8 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             // geometry, e.g. a pad's bottom edge where its top edge was after a lift by the pad's
             // length. The element moved with its feature; nothing else took its place. The hit's
             // name is the one the reference holds; copies count in the whole lineage, so a
-            // later feature's edges on a boss and on its mirror copy are no twins.
+            // later feature's edges on a boss and on its mirror copy are no twins. Nor are two
+            // marked pieces of one far edge or cap (ops#386: a reordered up-to shell).
             const auto hitSources = NameAncestry::sourceSections(hitName);
             const auto hitCopies = copyContexts(hitName);
             auto ownTwin = [&](int k) {
@@ -2669,7 +2740,7 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 return std::any_of(names.begin(), names.end(), [&](const auto& name) {
                     return NameAncestry::sourceSections(name) == hitSources
                         && copyContexts(name) == hitCopies && !isCounterSibling(name, hitName)
-                        && !piecesOfOne(name, hitName);
+                        && !piecesOfOne(name, hitName) && !markedPiecesOfOne(name, hitName);
                 });
             };
             if (std::all_of(place.begin(), place.end(), ownTwin)) {
@@ -3841,7 +3912,32 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         // piece's face alone (the only far cap on it) counts too, if the saved centre lies over
         // it: a strip across a hole made taller, with no other cap on its face. A renamed face
         // of a reordered up-to shell holds the name but not the old piece's centre.
+        // The single-piece rule (ops#386): when no name holds the old piece's, the one element
+        // that is its far edge or far cap made whole again (the same projection unmarked,
+        // isWholeProjectionOf()) is the element if the saved centre lies on it: a far edge moved
+        // off the up-to shell's seam keeps the reference to the piece still under it. The
+        // whole one's name comes from the profile alone, so a reordered nameless up-to shell
+        // can't fake it; geometry corroborates.
         if (!oldName.empty()) {
+            const ElementFingerprint* centred = nullptr;
+            for (const auto member : members) {
+                const ElementFingerprint& fingerprint = input.entries[member].fingerprint;
+                if (fingerprint.isValid() && fingerprint.center) {
+                    centred = &fingerprint;
+                    break;
+                }
+            }
+            // Within a quarter of a face's side of its inside, or a hundredth of an edge's length
+            // of the edge (ops#386)
+            const double eps = input.continuationDistance * std::max(1.0, input.diagonal);
+            auto holdsSavedCentre = [&](int k) {
+                if (!centred || !input.holdsPoint) {
+                    return false;
+                }
+                const double size = centred->size ? *centred->size : 0.0;
+                const double reach = centred->type == 'E' ? size / 100.0 : std::sqrt(size) / 4.0;
+                return input.holdsPoint(pool.elements[k].index, *centred->center, reach + eps);
+            };
             auto holdersOf = [&](bool alone) {
                 std::vector<int> holders;
                 for (int k : all) {
@@ -3857,21 +3953,20 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             std::vector<int> holders = holdersOf(false);
             if (holders.empty() && input.holdsPoint) {
                 holders = holdersOf(true);
-                const ElementFingerprint* saved = nullptr;
-                for (const auto member : members) {
-                    const ElementFingerprint& fingerprint = input.entries[member].fingerprint;
-                    if (fingerprint.isValid() && fingerprint.center) {
-                        saved = &fingerprint;
-                        break;
+                if (holders.size() != 1 || !holdsSavedCentre(holders.front())) {
+                    holders.clear();
+                }
+            }
+            if (holders.empty() && input.holdsPoint) {
+                for (std::size_t k = 0; k < pool.elements.size(); ++k) {
+                    const auto& names = pool.elements[k].names;
+                    if (allowed[k] && std::any_of(names.begin(), names.end(), [&](const auto& n) {
+                            return isWholeProjectionOf(n, oldName);
+                        })) {
+                        holders.push_back(static_cast<int>(k));
                     }
                 }
-                const double eps = input.continuationDistance * std::max(1.0, input.diagonal);
-                if (holders.size() != 1 || !saved
-                    || !input.holdsPoint(
-                        pool.elements[holders.front()].index,
-                        *saved->center,
-                        (saved->size ? std::sqrt(*saved->size) / 4.0 : 0.0) + eps
-                    )) {
+                if (holders.size() != 1 || !holdsSavedCentre(holders.front())) {
                     holders.clear();
                 }
             }

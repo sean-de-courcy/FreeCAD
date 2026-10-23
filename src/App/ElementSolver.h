@@ -674,8 +674,9 @@ struct AppExport SolveInput
     /// guessed against it (N2's never list, N10).
     bool targetFailed = false;
     /// Whether the point lies over the face \a index within the distance: its nearest point on
-    /// the face is inside it, not on its boundary (ops#360, PR 340 round 4). Unset: no point
-    /// lies over any face.
+    /// the face is inside it, not on its boundary (ops#360, PR 340 round 4); or within the
+    /// distance of the edge \a index, its ends included (ops#386). Unset: no point lies over any
+    /// face or on any edge.
     std::function<bool(const std::string& index, const Base::Vector3d& point, double distance)> holdsPoint;
 };
 
@@ -810,7 +811,10 @@ struct AppExport SolveOutcome
  *   ones, an edge among them, it is the only candidate, as if the old name were in its
  *   ancestry: the pieces either side of a hole that became the ring around it resolve to the
  *   ring, together. Without such a candidate, the one marked by the old marks' face alone (the
- *   only far cap on it) counts the same if the saved centre lies over it (\a holdsPoint).
+ *   only far cap on it) counts the same if the saved centre lies over it (\a holdsPoint). The
+ *   same for a far edge's pieces (ops#386). Without either, the one element that is the old
+ *   piece's far edge or cap made whole again (its section unmarked: PRJ alone) counts the same
+ *   if the saved centre lies on it.
  * - The IDX source (Task 2 PR 6): when the old name stands for an IDX section
  *   (NameAncestry::indexSource()), the elements named by a section of the same source under any
  *   op code (NameAncestry::sameIndexSource()), and, for a target without an element map whose
