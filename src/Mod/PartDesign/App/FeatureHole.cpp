@@ -1506,7 +1506,10 @@ void Hole::onChanged(const App::Property* prop)
             // (a restore keeps what was saved: the cells may not be loaded yet)
             std::optional<BoundThreadSize> bound;
             if (type != "None" && !isRestoring()) {
-                bound = evaluateBoundThreadSize(*this, getThreadDesignations(ThreadType.getValue()));
+                bound = evaluateBoundThreadSize(
+                    *this,
+                    getThreadDesignations(ThreadType.getValue())
+                );
             }
             if (bound && bound->index >= 0) {
                 ThreadSize.setValue(static_cast<long>(bound->index));

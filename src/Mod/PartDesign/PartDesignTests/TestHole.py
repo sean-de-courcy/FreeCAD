@@ -518,7 +518,9 @@ class TestHole(unittest.TestCase):
     def assertHoleIsOfSize(self, threadType, threadSize, msg):
         """The hole has the type and size, and the diameters a hole set directly to them has
         (the expressions are taken off for the comparison and put back)."""
-        self.assertEqual((self.Hole.ThreadType, self.Hole.ThreadSize), (threadType, threadSize), msg)
+        self.assertEqual(
+            (self.Hole.ThreadType, self.Hole.ThreadSize), (threadType, threadSize), msg
+        )
         bound = (self.Hole.ThreadDiameter.Value, self.Hole.Diameter.Value)
         expressions = dict(self.Hole.ExpressionEngine)
         for prop in expressions:
@@ -534,7 +536,9 @@ class TestHole(unittest.TestCase):
         for prop, expression in expressions.items():
             self.Hole.setExpression(prop, expression)
         self.Doc.recompute()
-        self.assertEqual((self.Hole.ThreadType, self.Hole.ThreadSize), (threadType, threadSize), msg)
+        self.assertEqual(
+            (self.Hole.ThreadType, self.Hole.ThreadSize), (threadType, threadSize), msg
+        )
 
     def testThreadTypeAndSizeBoundTogetherChangeInOneRecompute(self):
         """ops#457: ThreadType and ThreadSize bound to cells, both cells changed before one
