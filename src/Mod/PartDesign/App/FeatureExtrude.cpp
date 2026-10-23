@@ -1066,7 +1066,9 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
                     getBooleanMaker(),
                     {base, prism},
                     nullptr,
-                    FuzzyTolerance.getValue()
+                    FuzzyTolerance.getValue(),
+                    Part::ElementMapPolicy::Propagate,
+                    booleanInputCheck()
                 );
             }
             catch (Standard_Failure&) {

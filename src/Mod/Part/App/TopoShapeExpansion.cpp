@@ -9354,7 +9354,8 @@ TopoShape& TopoShape::makeElementBoolean(
     const std::vector<TopoShape>& shapes,
     const char* op,
     double tolerance,
-    ElementMapPolicy elementMapPolicy
+    ElementMapPolicy elementMapPolicy,
+    BooleanInputCheck inputCheck
 )
 {
     if (!maker) {
@@ -9466,6 +9467,8 @@ TopoShape& TopoShape::makeElementBoolean(
     bool buildShell = true;
 
     std::vector<TopoShape> _shapes;
+    // How many of the inputs come from the first argument: all of its parts when Fuse expands it
+    int firstArgumentInputs = 1;
     if (strcmp(maker, Part::OpCodes::Fuse) == 0) {
         for (auto it = shapes.begin(); it != shapes.end(); ++it) {
             auto& s = *it;
@@ -9480,6 +9483,9 @@ TopoShape& TopoShape::makeElementBoolean(
                     _shapes.insert(_shapes.end(), shapes.begin(), it);
                 }
                 expandCompound(s, _shapes);
+                if (it == shapes.begin()) {
+                    firstArgumentInputs = static_cast<int>(_shapes.size());
+                }
             }
             else if (_shapes.size()) {
                 _shapes.push_back(s);
@@ -9558,7 +9564,10 @@ TopoShape& TopoShape::makeElementBoolean(
             FC_THROWM(NullShapeException, "Null input shape");
         }
 
-        if (!shape.isValid()) {
+        // A first argument the caller vouches for isn't checked (ops#310): the check is a full
+        // BRepCheck_Analyzer, and a PartDesign feature's base is the result of the feature before
+        const bool vouchedFor = inputCheck == BooleanInputCheck::Tools && i + 1 < firstArgumentInputs;
+        if (!vouchedFor && !shape.isValid()) {
             shape.fix();
         }
 

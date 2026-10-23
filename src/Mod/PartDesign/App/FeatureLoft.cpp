@@ -360,7 +360,9 @@ App::DocumentObjectExecReturn* Loft::execute()
                 getBooleanMaker(),
                 {base, result},
                 nullptr,
-                FuzzyTolerance.getValue()
+                FuzzyTolerance.getValue(),
+                Part::ElementMapPolicy::Propagate,
+                booleanInputCheck()
             );
         }
         catch (Standard_Failure&) {

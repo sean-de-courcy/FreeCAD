@@ -431,6 +431,8 @@ App::DocumentObjectExecReturn* Transformed::execute()
     gp_Trsf trsfInv = supportShape.getShape().Location().Transformation().Inverted();
 
     supportShape.locate(TopLoc_Location());
+    // The support, and this feature's own results after each original
+    const auto inputCheck = booleanInputCheck();
 
     // V2 names each instance by content (ops#55): each copy gets a section with this feature's ID
     // and its instance number appended to every name, one number per step (instanceNumbers(),
@@ -502,14 +504,28 @@ App::DocumentObjectExecReturn* Transformed::execute()
                     if (Base::Sequencer().wasCanceled()) {
                         return new App::DocumentObjectExecReturn("User aborted");
                     }
-                    supportShape = makeResultShape(supportShape).makeElementFuse(shapes);
+                    supportShape = makeResultShape(supportShape).makeElementBoolean(
+                        Part::OpCodes::Fuse,
+                        shapes,
+                        nullptr,
+                        -1.0,
+                        Part::ElementMapPolicy::Propagate,
+                        inputCheck
+                    );
                 }
                 if (!cutShape.isNull()) {
                     auto shapes = getTransformedCompShape(supportShape, cutShape);
                     if (Base::Sequencer().wasCanceled()) {
                         return new App::DocumentObjectExecReturn("User aborted");
                     }
-                    supportShape = makeResultShape(supportShape).makeElementCut(shapes);
+                    supportShape = makeResultShape(supportShape).makeElementBoolean(
+                        Part::OpCodes::Cut,
+                        shapes,
+                        nullptr,
+                        -1.0,
+                        Part::ElementMapPolicy::Propagate,
+                        inputCheck
+                    );
                 }
             }
             break;
@@ -518,7 +534,14 @@ App::DocumentObjectExecReturn* Transformed::execute()
             if (Base::Sequencer().wasCanceled()) {
                 return new App::DocumentObjectExecReturn("User aborted");
             }
-            supportShape = makeResultShape(supportShape).makeElementFuse(shapes);
+            supportShape = makeResultShape(supportShape).makeElementBoolean(
+                Part::OpCodes::Fuse,
+                shapes,
+                nullptr,
+                -1.0,
+                Part::ElementMapPolicy::Propagate,
+                inputCheck
+            );
             break;
         }
     }
