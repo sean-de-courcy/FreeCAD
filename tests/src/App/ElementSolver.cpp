@@ -7544,3 +7544,331 @@ TEST(SolveOwner, offsetCopyOfAFaceFacingAwayBreaks)
               std::string::npos)
         << outcomes[0].evidence;
 }
+
+// ---------------------------------------------------------------------------------------------
+// Merged neighbours (ops#446)
+
+namespace
+{
+
+// A refined "Transformed" pipe (tag 9) of a square (sketch 5) along a U, as TestPipe's
+// testJointOfARefinedPipe builds it: each leg's side faces are generated from a profile edge
+// (leg 0's carries it as its connected element, the start), and the joints at the bends are named
+// after the side faces they lie on (UPP). The first bend straightened: refine merged legs 0 and 1
+// into one face, which holds both names, and the first bend's joints are gone.
+struct RefinedBend
+{
+    // The x = +2 sides (profile edge g2) and the y = -2 sides (g1) of the three legs
+    std::string x0 = side(2, 0, true);
+    std::string x1 = side(2, 0);
+    std::string x2 = side(2, 1);
+    std::string y0 = side(1, 0, true);
+    std::string y1 = side(1, 0);
+    std::string y2 = side(1, 1);
+    // The joints at the first bend (the old names) and at the second
+    std::string edge1 = upper({x1, x0}, 9, "PSH");
+    std::string edge2 = upper({x1, x2}, 9, "PSH");
+    std::string vertex1 = joint({x1, x0, y1, y0});
+    std::string vertex2 = joint({x1, x2, y1, y2});
+    // The cap edge g2 at the start
+    std::string cap = sketchEdge(2);
+
+    static std::string side(int geoId, int index, bool start = false)
+    {
+        const auto edge = sketchEdge(geoId);
+        std::vector<std::string> connected;
+        if (start) {
+            connected.push_back(edge);
+        }
+        return section({}, {edge}, 9, "PSH", index, 'F', {"GEN"}, connected);
+    }
+    static std::string joint(const std::vector<std::string>& faces)
+    {
+        return section({}, faces, 9, "PSH", 0, 'V', {"UPP"});
+    }
+
+    // Face6 is legs 0 and 1's x = +2 side, Face3 leg 2's, Face9 the y = -2 side of all three
+    // (one plane), Face4 the start cap.
+    std::vector<SolveInput::Element> faces() const
+    {
+        return {element("Face3", {x2}),
+                element("Face4", {lowFace({sketchEdge(1), cap, sketchEdge(3), sketchEdge(4)})}),
+                element("Face6", {x0, x1}),
+                element("Face9", {y0, y1, y2})};
+    }
+
+    // The faces each edge or vertex lies on
+    static void lieOn(SolveInput& input, std::map<std::string, std::vector<std::string>> faces)
+    {
+        input.facesOf = [faces = std::move(faces)](const std::string& index) {
+            auto it = faces.find(index);
+            return it == faces.end() ? std::vector<std::string>() : it->second;
+        };
+    }
+
+    // The second bend's joint edge (Edge7) and the cap edge (Edge2), with their faces; the
+    // first bend's joint edge missing
+    SolveInput edgeInput() const
+    {
+        SolveInput input;
+        input.diagonal = 60.0;
+        input.pool["Edge"] = {element("Edge2", {cap}), element("Edge7", {edge2})};
+        input.faces = faces();
+        lieOn(input, {{"Edge2", {"Face4", "Face6"}}, {"Edge7", {"Face3", "Face6"}}});
+        input.entries = {missing(edge1, "Edge")};
+        return input;
+    }
+};
+
+// A line along y, 4 long, centred at x = 2, y = 0 and \a z
+ElementFingerprint jointLine(double z)
+{
+    return fingerprint('E', "Line", 4, Base::Vector3d(2, 0, z), Base::Vector3d(0, 1, 0));
+}
+
+}  // namespace
+
+TEST(SolveOwner, mergedNeighboursDropTheOtherBendsJoint)
+{
+    // The first bend's joint is gone: Face6 holds both of its faces. The second bend's joint
+    // shares Face6 (x1) and the profile edge with it (overlap 0.50) and keeps its maker and
+    // sources, so tier 1 took it, 20 mm away and silently. It lies on Face3 too, which holds
+    // none of the old joint's faces: it is dropped and listed last, before the cap edge (the
+    // sketch's, another maker).
+    RefinedBend b;
+    auto input = b.edgeInput();
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << outcome.evidence;
+    EXPECT_EQ(outcome.evidence,
+              "no candidate; tier 1's 1 survivor has another maker; tier 1's 1 survivor lies off "
+              "the old element's faces (Face6 holds 2 of them)");
+    EXPECT_EQ(outcome.candidates, (std::vector<std::string> {"Edge7", "Edge2"}));
+    EXPECT_EQ(outcome.candidateRoles, (std::vector<std::string> {"other faces", "other maker"}));
+
+    //   with the saved line: tier 3 finds nothing at its place, the break says why
+    input.entries[0].fingerprint = jointLine(30);
+    measure(input, {{"Edge2", jointLine(0)}, {"Edge7", jointLine(50)}}, nullptr);
+    outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << outcome.evidence;
+    EXPECT_EQ(outcome.evidence.rfind("no structural candidate, tier 3 found none", 0), 0U)
+        << outcome.evidence;
+    EXPECT_NE(outcome.evidence.find("(Face6 holds 2 of them)"), std::string::npos)
+        << outcome.evidence;
+
+    //   without the target's faces (the test off): tier 1's pick, as before ops#446
+    input.faces.clear();
+    outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Resolved) << outcome.evidence;
+    EXPECT_EQ(outcome.element, "Edge7");
+    EXPECT_EQ(outcome.tier, 1);
+}
+
+TEST(SolveOwner, mergedNeighboursDropTheOtherBendsJointVertex)
+{
+    // The joint vertex on four faces, merged pairwise (Face6, and Face9 which was one plane
+    // already): the second bend's vertex shares Face6 and Face9 but lies on Face3 as well.
+    RefinedBend b;
+    SolveInput input;
+    input.diagonal = 60.0;
+    input.pool["Vertex"] = {element("Vertex5", {b.vertex2})};
+    input.faces = b.faces();
+    RefinedBend::lieOn(input, {{"Vertex5", {"Face3", "Face6", "Face9"}}});
+    input.entries = {missing(b.vertex1, "Vertex")};
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << outcome.evidence;
+    EXPECT_EQ(outcome.evidence,
+              "no candidate; tier 1's 1 survivor lies off the old element's faces (Face6 holds 2 "
+              "of them, Face9 holds 2 of them)");
+    EXPECT_EQ(outcome.candidateRoles, (std::vector<std::string> {"other faces"}));
+
+    input.faces.clear();
+    outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Resolved) << outcome.evidence;
+    EXPECT_EQ(outcome.element, "Vertex5");
+}
+
+TEST(SolveOwner, mergedNeighboursKeepTheVertexAtTheMergedCorner)
+{
+    // A vertex of four faces A, B, C, D, of which A and B became one face (Face6): the vertex
+    // still sits at the corner of {AB, C, D}, now named after A, C and D. It lies on old faces
+    // only, so it stays tier 1's, silently, as before.
+    auto face = [](int geoId) {
+        return generated({sketchEdge(geoId)}, 9, "XTR", 'F');
+    };
+    const auto a = face(1);
+    const auto b = face(2);
+    const auto c = face(3);
+    const auto d = face(4);
+    SolveInput input;
+    input.diagonal = 60.0;
+    input.pool["Vertex"] = {element("Vertex2", {RefinedBend::joint({a, c, d})})};
+    input.faces = {element("Face6", {a, b}), element("Face7", {c}), element("Face8", {d})};
+    RefinedBend::lieOn(input, {{"Vertex2", {"Face6", "Face7", "Face8"}}});
+    input.entries = {missing(RefinedBend::joint({a, b, c, d}), "Vertex")};
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Resolved) << outcome.evidence;
+    EXPECT_EQ(outcome.element, "Vertex2");
+    EXPECT_EQ(outcome.tier, 1);
+}
+
+TEST(SolveOwner, mergedNeighboursChangeNothingWithoutAMerge)
+{
+    // The old joint's faces are two faces still (Face5 and Face6): whatever made its name go
+    // missing, the test doesn't apply, and the outcome is the one without the target's faces.
+    RefinedBend b;
+    auto input = b.edgeInput();
+    input.faces = {element("Face3", {b.x2}), element("Face5", {b.x0}), element("Face6", {b.x1})};
+    input.entries[0].fingerprint = jointLine(30);
+    measure(input, {{"Edge2", jointLine(0)}, {"Edge7", jointLine(50)}}, nullptr);
+    const auto with = Data::solveOwner(input)[0];
+    input.faces.clear();
+    const auto without = Data::solveOwner(input)[0];
+    EXPECT_EQ(describe(with), describe(without));
+    EXPECT_EQ(with.candidateRoles, without.candidateRoles);
+    EXPECT_EQ(with.status, SolveStatus::Resolved);
+    EXPECT_EQ(with.element, "Edge7");
+}
+
+TEST(SolveOwner, mergedNeighboursKeepAPiece)
+{
+    // A piece of the old joint (split by a later cut, tag 12) lies on Face6 and the cut's face
+    // (Face20): it is still a piece, and an expanding reference takes it; the other bend's joint
+    // doesn't count beside it.
+    RefinedBend b;
+    auto input = b.edgeInput();
+    input.pool["Edge"].push_back(element("Edge11", {piece(b.edge1, 12, "CUT", 0, 'E')}));
+    RefinedBend::lieOn(input,
+                       {{"Edge2", {"Face4", "Face6"}},
+                        {"Edge7", {"Face3", "Face6"}},
+                        {"Edge11", {"Face6", "Face20"}}});
+    input.entries[0].policy = Data::SolvePolicy::Expand;
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Resolved) << outcome.evidence;
+    EXPECT_EQ(outcome.element, "Edge11");
+    EXPECT_EQ(outcome.elements, (std::vector<std::string> {"Edge11"}));
+}
+
+TEST(SolveOwner, mergedNeighboursDropASeam)
+{
+    // All three legs' x = +2 sides are one face (Face6): the second bend's joint survives as a
+    // seam of it, on Face6 alone. An edge on one face is no element between two: dropped.
+    RefinedBend b;
+    auto input = b.edgeInput();
+    input.faces = {element("Face6", {b.x0, b.x1, b.x2})};
+    RefinedBend::lieOn(input, {{"Edge2", {"Face4", "Face6"}}, {"Edge7", {"Face6"}}});
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << outcome.evidence;
+    EXPECT_EQ(outcome.candidateRoles, (std::vector<std::string> {"other faces", "other maker"}));
+}
+
+TEST(SolveOwner, mergedNeighboursLeavePolicyD)
+{
+    // A short middle leg: the other bend's joint 2 mm away, within G2's reach (5 % of the
+    // 60 mm diagonal) but not tier 3's (1 %). It is dropped from tier 1, and G2 takes it as a
+    // warned guess, the same source and maker (policy D, decision 20, unchanged).
+    RefinedBend b;
+    auto input = b.edgeInput();
+    input.guess = true;
+    input.guessNoStructure = true;
+    input.entries[0].fingerprint = jointLine(30);
+    measure(input, {{"Edge2", jointLine(0)}, {"Edge7", jointLine(32)}}, nullptr);
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Guessed) << outcome.evidence;
+    EXPECT_EQ(outcome.element, "Edge7");
+    EXPECT_EQ(outcome.guessKind, "geometric");
+    EXPECT_EQ(outcome.tier, 3);
+    EXPECT_EQ(outcome.evidence.rfind("guess: no structural candidate, redrawn in the same source", 0),
+              0U)
+        << outcome.evidence;
+}
+
+TEST(SolveOwner, mergedNeighboursNeverNarrowToAPick)
+{
+    // Fork PR 361 round 2 (a Round corner pipe): the y = -2 side was one plane when the pipe was
+    // saved (Face9 holds y0, y1, y2), so the test is armed whatever the edit. Two survivors share
+    // x1 and y1 with the old joint vertex. One lies on Face3 too (x2: not the old vertex's), the
+    // other on Face6 and Face9 only, both holders: it fits. Narrowing to it would make tier 1's
+    // pick of what is a tie (round 1: Vertex8, 20 mm away, silently). Both stay: ambiguous.
+    RefinedBend b;
+    const std::string x3 = RefinedBend::side(2, 2);
+    const std::string y3 = RefinedBend::side(1, 2);
+    SolveInput input;
+    input.diagonal = 60.0;
+    input.pool["Vertex"] = {element("Vertex5", {b.vertex2}),
+                            element("Vertex8", {RefinedBend::joint({b.x1, x3, b.y1, y3})})};
+    input.faces = {element("Face3", {b.x2}),
+                   element("Face6", {b.x0, b.x1}),
+                   element("Face9", {b.y0, b.y1, b.y2})};
+    RefinedBend::lieOn(input,
+                       {{"Vertex5", {"Face3", "Face6", "Face9"}}, {"Vertex8", {"Face6", "Face9"}}});
+    input.entries = {missing(b.vertex1, "Vertex")};
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << outcome.evidence;
+    EXPECT_EQ(outcome.evidence.rfind("ambiguous", 0), 0U) << outcome.evidence;
+    EXPECT_EQ(outcome.candidates, (std::vector<std::string> {"Vertex5", "Vertex8"}));
+    EXPECT_EQ(outcome.candidateRoles, (std::vector<std::string> {"structural", "structural"}));
+
+    //   the same without the target's faces
+    input.faces.clear();
+    const auto without = Data::solveOwner(input)[0];
+    EXPECT_EQ(describe(outcome), describe(without));
+}
+
+TEST(SolveOwner, mergedNeighboursArmedByAFaceNoneHolds)
+{
+    // Fork PR 361 round 2 (a round profile): the legs' cylinders merged into one that keeps leg
+    // 0's name only (Face6 holds x0); leg 1's name x1 is on no face. The other bend's joint
+    // circle shares x1 with the old one and lies on Face6 and leg 2's Face3, which holds none of
+    // the old joint's faces: dropped.
+    RefinedBend b;
+    auto input = b.edgeInput();
+    input.faces = {element("Face3", {b.x2}), element("Face6", {b.x0})};
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << outcome.evidence;
+    EXPECT_EQ(outcome.evidence,
+              "no candidate; tier 1's 1 survivor has another maker; tier 1's 1 survivor lies off "
+              "the old element's faces (1 of them is on no face)");
+    EXPECT_EQ(outcome.candidates, (std::vector<std::string> {"Edge7", "Edge2"}));
+    EXPECT_EQ(outcome.candidateRoles, (std::vector<std::string> {"other faces", "other maker"}));
+
+    //   both faces held, one each: not armed, tier 1's pick as before
+    input.faces = {element("Face3", {b.x2}), element("Face5", {b.x0}), element("Face6", {b.x1})};
+    outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Resolved) << outcome.evidence;
+    EXPECT_EQ(outcome.element, "Edge7");
+}
+
+TEST(SolveOwner, mergedNeighboursSamePlaceAmongTheDropped)
+{
+    // Fork PR 361 round 2 (a Round corner pipe's last leg dropped and put back: the counter
+    // names move): the only survivor lies off the old element's faces but sits where it sat.
+    // Over the whole pool tier 3 finds nothing (another element 0.4 mm away, within d_max);
+    // among the dropped it takes the survivor, as tier 3 does, with its warning.
+    RefinedBend b;
+    auto input = b.edgeInput();
+    input.pool["Edge"].push_back(element("Edge9", {sketchEdge(7)}));
+    input.entries[0].fingerprint = jointLine(30);
+    measure(input,
+            {{"Edge2", jointLine(0)}, {"Edge7", jointLine(30)}, {"Edge9", jointLine(30.4)}},
+            nullptr);
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Resolved) << outcome.evidence;
+    EXPECT_EQ(outcome.element, "Edge7");
+    EXPECT_EQ(outcome.tier, 3);
+    EXPECT_EQ(outcome.evidence.rfind("no structural candidate, tier 3 among tier 1's survivors "
+                                     "off the old element's faces: nearest 0.000",
+                                     0),
+              0U)
+        << outcome.evidence;
+
+    //   the survivor 20 mm away: the whole pool decides, as before (the other element, alone
+    //   within d_max now)
+    measure(input,
+            {{"Edge2", jointLine(0)}, {"Edge7", jointLine(50)}, {"Edge9", jointLine(30.4)}},
+            nullptr);
+    outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Resolved) << outcome.evidence;
+    EXPECT_EQ(outcome.element, "Edge9");
+    EXPECT_EQ(outcome.evidence.rfind("no structural candidate, tier 3: nearest 0.400", 0), 0U)
+        << outcome.evidence;
+}

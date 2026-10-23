@@ -10,12 +10,15 @@
 #include <App/ElementMap.h>
 #include <App/NameTable.h>
 #include <BRepPrimAPI_MakeBox.hxx>
+#include <TopExp_Explorer.hxx>
+#include <TopoDS_Shape.hxx>
 #include <algorithm>
 #include <random>
 #include <type_traits>
 #include <cstring>
 #include <new>
 #include <set>
+#include <tuple>
 
 
 class TopoShapeTest: public ::testing::Test
@@ -645,5 +648,47 @@ TEST_F(TopoShapeTest, sortNameSetOrdersInternedNamesAsTheirExpansions)
         EXPECT_EQ(expanded(interned), expected);
         EXPECT_EQ(expanded(mixed), expected);
         EXPECT_EQ(expanded(internedText), expected);
+    }
+}
+
+TEST_F(TopoShapeTest, higherElementsGiveAVertexItsFaces)
+{
+    // The solver's facesOf (ElementSolverBatch.cpp) keeps the faces among getHigherElements():
+    // the merged-neighbour test (ops#446) reads them for vertices as for edges (fork PR 361
+    // round 2). Each corner of a box lies on three faces, each holding it; each edge on two. A
+    // vertex gets each of its faces twice (once per edge of the face at it): the solver's users
+    // take them as a set.
+    Part::TopoShape shape(App::HistoryAlgorithm::V2,
+                          BRepPrimAPI_MakeBox(1.0, 2.0, 3.0).Shape(),
+                          1L);
+    auto facesOf = [&](const std::string& element) {
+        std::set<std::string> faces;
+        for (const auto& higher : shape.getHigherElements(element.c_str(), true)) {
+            if (std::strcmp(higher.getType(), "Face") == 0) {
+                faces.insert(higher.toString());
+            }
+        }
+        return faces;
+    };
+    auto holds = [&](const std::string& face, const std::string& element) {
+        const TopoDS_Shape sub = shape.getSubShape(element.c_str());
+        for (TopExp_Explorer it(shape.getSubShape(face.c_str()), sub.ShapeType()); it.More();
+             it.Next()) {
+            if (it.Current().IsSame(sub)) {
+                return true;
+            }
+        }
+        return false;
+    };
+    for (const auto& [type, count, faces] :
+         {std::tuple<std::string, int, std::size_t> {"Vertex", 8, 3}, {"Edge", 12, 2}}) {
+        for (int i = 1; i <= count; ++i) {
+            const std::string element = type + std::to_string(i);
+            const auto found = facesOf(element);
+            EXPECT_EQ(found.size(), faces) << element;
+            for (const auto& face : found) {
+                EXPECT_TRUE(holds(face, element)) << element << " " << face;
+            }
+        }
     }
 }

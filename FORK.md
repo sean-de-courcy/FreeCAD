@@ -383,7 +383,8 @@ names it.
 | `feat/293-d2-first-contact` | feat | ops#293 | - | `integration` `4f191bb942` | `df872a5f80` (fork PR 357), 2026-10-22 | never (fork feature) |
 | `fix/378-geometric-index` | fix | ops#378 | - | `integration` `72e19a4705` | `e8ababd393` (fork PR 355), 2026-10-22 | never (fork fix) |
 | `fix/361-elementary-upto` | fix | ops#361 | - | `integration` `df872a5f80` | `2d2ac2ac5b` (fork PR 359), 2026-10-22 | never (fork fix) |
-| `polish/pd-followups` | polish | ops#395, ops#405, ops#410 | - | `integration` `df872a5f80` | (fork PR 360) | never (fork feature) |
+| `polish/pd-followups` | polish | ops#395, ops#405, ops#410 | - | `integration` `df872a5f80` | `7fe252a1b5` (fork PR 360), 2026-10-23 | never (fork feature) |
+| `fix/446-merged-neighbours` | fix | ops#446 | - | `integration` `7fe252a1b5` | (fork PR 361) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 

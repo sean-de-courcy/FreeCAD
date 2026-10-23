@@ -464,3 +464,300 @@ class TestPipeEndNames(unittest.TestCase):
             name = firstName(pipe.Shape, element)
             self.assertIn("PRJ", name, element)
             self.assertIn(f"{profile.ID}", name, element)
+
+
+def bendPoints(first, second, towards=False, *more):
+    """In an XZ sketch: up 30 from the square at z = 0, then 20 turned `first` degrees from +Z
+    towards +X, then 20 turned `second` degrees more (and 20 more per turn in `more`); drawn
+    towards the profile if `towards`."""
+    points = [(0.0, 0.0), (0.0, 30.0)]
+    heading = 0.0
+    for turn in (first, second) + more:
+        heading += turn
+        x, z = points[-1]
+        a = math.radians(heading)
+        points.append((x + 20 * math.sin(a), z + 20 * math.cos(a)))
+    return points[::-1] if towards else points
+
+
+def near(at, radius):
+    """Whether a point lies within `radius` of `at`."""
+    return lambda p: (p - at).Length < radius
+
+
+def inSquareAt(at):
+    """Whether a point lies in the square's copy at the spine vertex `at` ("Transformed" only
+    translates the profile)."""
+    return lambda p: abs(p.z - at.z) < 1e-6 and abs(p.x - at.x) < 2 + 1e-6 and abs(p.y) < 2 + 1e-6
+
+
+class TestJointsWhenABendStraightens(unittest.TestCase):
+    """A refined "Transformed" pipe along a U (ops#446): the joint edges and vertices at a bend
+    are named after the side faces they lie on (UPP). When the bend is made straight, refine
+    merges the two legs' faces into one that keeps both names, and the joint is gone. The other
+    bend's joint shares one of those faces, and its sources: tier 1 took it, 20 mm away and
+    silently. Each reference at the straightened bend now goes missing, warns, or stays where it
+    was, and is in its place again once the bend is turned back. The same with the pipe
+    unrefined and a refined feature after it (Fillet, SubShapeBinder)."""
+
+    def setUp(self):
+        self.doc = models.newDocument("PartDesignTestPipeBends")
+        self.doc.HistoryAlgorithm = "V2"
+        self.doc.InternNames = False
+        self.body = models.body(self.doc)
+
+    def tearDown(self):
+        App.closeDocument(self.doc.Name)
+
+    def setPath(self, path, points):
+        path.deleteAllGeometry()
+        path.addGeometry(models.polyline(points))
+        self.doc.recompute()
+
+    def pipe(self, points, refine, transition="Transformed", circular=False):
+        """A pipe of the square, or of a circle of radius 2 if `circular`, along the points"""
+        geometry = [models.circle(0, 0, 2)] if circular else models.rectangle(-2, -2, 2, 2)
+        profile = models.sketch(self.doc, "Profile", geometry, self.body)
+        path = models.sketch(self.doc, "Path", models.polyline(points), self.body, placement=XZ)
+        pipe = self.body.newObject("PartDesign::AdditivePipe", "Pipe")
+        pipe.Profile = profile
+        pipe.Spine = (path, [])
+        pipe.Transition = transition
+        pipe.Refine = refine
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        return path, pipe
+
+    def pointsOn(self, target, at, where=None, kinds=("Edge", "Vertex")):
+        """A datum point on each edge and vertex of `target` lying wholly in the square at `at`,
+        or where `where` holds"""
+        points = []
+        for kind in kinds:
+            for element in elementsWhere(target.Shape, kind, where or inSquareAt(at)):
+                point = self.body.newObject("PartDesign::Point", "On" + element)
+                point.AttachmentSupport = [(target, element)]
+                point.MapMode = "Vertex" if kind == "Vertex" else "CenterOfMass"
+                points.append(point)
+        self.doc.recompute()
+        self.assertEqual([p.Name for p in points if not p.isValid()], [])
+        return points
+
+    def assertGoneOrLoud(self, points, before, report, solved=False):
+        """Each point is invalid, warned, or at its place in `before` (where it was, unless the
+        pipe moved it): none is elsewhere silently. With `report`
+        False only the places count: a SubShapeBinder updates twice and its report is empty
+        afterwards (ops#449). With `solved`, only the points the solver re-bound count (a report
+        entry): an exact name may move with its element (ops#455)."""
+        for point in points:
+            if not point.isValid():
+                continue
+            levels = [e.get("warning_level") for e in App.getReferenceReport(point)]
+            if solved and not levels:
+                continue
+            if report and "normal" in levels:
+                continue
+            moved = (point.Placement.Base - before[point.Name]).Length
+            self.assertLess(moved, 1e-6, (point.Name, point.AttachmentSupport, levels))
+
+    def assertBackInPlace(self, points, before):
+        for point in points:
+            self.assertTrue(point.isValid(), (point.Name, point.getStatusString()))
+            moved = (point.Placement.Base - before[point.Name]).Length
+            self.assertLess(moved, 1e-6, (point.Name, point.AttachmentSupport))
+
+    def straighten(self, downstream=None):
+        """For each bend and spine direction: the U at 40 and 20 degrees, the points on that
+        bend's joint (on the pipe, or on the refined feature after an unrefined pipe), the bend
+        made straight, then turned back."""
+        for bend, straight in ((1, (0, 20)), (2, (40, 0))):
+            for towards in (False, True):
+                with self.subTest(bend=bend, towards=towards):
+                    self.tearDown()
+                    self.setUp()
+                    points = bendPoints(40, 20, towards)
+                    path, pipe = self.pipe(points, refine=downstream is None)
+                    target = pipe
+                    if downstream == "Fillet":
+                        # the start cap's y = +2 edge, away from both bends
+                        (edge,) = elementsWhere(
+                            pipe.Shape, "Edge", lambda p: abs(p.z) < 1e-6 and abs(p.y - 2) < 1e-6
+                        )
+                        target = self.body.newObject("PartDesign::Fillet", "Fillet")
+                        target.Base = (pipe, [edge])
+                        target.Radius = 0.5
+                        target.Refine = True
+                    elif downstream == "Binder":
+                        target = self.body.newObject("PartDesign::SubShapeBinder", "Binder")
+                        target.Support = [(pipe, "")]
+                        target.Refine = True
+                    self.doc.recompute()
+                    x, z = (points[::-1] if towards else points)[bend]
+                    joint = self.pointsOn(target, V(x, 0, z))
+                    # refined: the y = +-2 sides are one face each, so the joint is the two
+                    # edges at x = +-2 and the four vertices
+                    self.assertEqual(len(joint), 6, [p.Name for p in joint])
+                    before = {p.Name: V(p.Placement.Base) for p in joint}
+                    self.setPath(path, bendPoints(*straight, towards))
+                    self.assertGoneOrLoud(joint, before, report=downstream != "Binder")
+                    self.setPath(path, points)
+                    self.assertBackInPlace(joint, before)
+
+    def testJointOfARefinedPipe(self):
+        self.straighten()
+
+    def testJointOfARefinedFilletAfterThePipe(self):
+        self.straighten("Fillet")
+
+    def testJointOfARefinedBinderOfThePipe(self):
+        self.straighten("Binder")
+
+    def straightenNear(
+        self, transition="Transformed", circular=False, fillet=False, count=None, solved=False
+    ):
+        """As straighten(), for the points on the edges and vertices lying wholly within 3 mm of
+        the bend's spine vertex (fork PR 361 round 2): a Round corner's round face and the
+        joints at both of its ends, or a round profile's joint circle and its seam vertex. With
+        `fillet`, the pipe is unrefined and a refined Fillet of the start cap's circle is the
+        target."""
+        for bend, straight in ((1, (0, 20)), (2, (40, 0))):
+            for towards in (False, True):
+                with self.subTest(bend=bend, towards=towards):
+                    self.tearDown()
+                    self.setUp()
+                    points = bendPoints(40, 20, towards)
+                    path, pipe = self.pipe(points, not fillet, transition, circular)
+                    target = pipe
+                    if fillet:
+                        (edge,) = elementsWhere(pipe.Shape, "Edge", lambda p: abs(p.z) < 1e-6)
+                        target = self.body.newObject("PartDesign::Fillet", "Fillet")
+                        target.Base = (pipe, [edge])
+                        target.Radius = 0.3
+                        target.Refine = True
+                        self.doc.recompute()
+                    x, z = (points[::-1] if towards else points)[bend]
+                    joint = self.pointsOn(target, None, near(V(x, 0, z), 3))
+                    if count is not None:
+                        self.assertEqual(len(joint), count, [p.Name for p in joint])
+                    else:
+                        self.assertGreater(len(joint), 4, [p.Name for p in joint])
+                    before = {p.Name: V(p.Placement.Base) for p in joint}
+                    self.setPath(path, bendPoints(*straight, towards))
+                    self.assertGoneOrLoud(joint, before, report=True, solved=solved)
+                    self.setPath(path, points)
+                    self.assertBackInPlace(joint, before)
+
+    def testRoundCornerOfARefinedPipe(self):
+        """Round corner: the round face's counter name passes to the other bend's round face
+        when a bend is made straight. Its vertices then lie on faces that hold the old ones'
+        names, beside one that doesn't: tier 1 must not take one of them, 20 mm away. Only the
+        references the solver re-binds count: the round face's edges and vertices are named
+        after the counter, and the other bend's can take their names exactly (ops#455)."""
+        self.straightenNear("Round corner", solved=True)
+
+    def testJointOfARefinedRoundPipe(self):
+        """A round profile: the legs' cylinders merge into one that keeps one leg's name only.
+        The joint circle and its seam vertex (count 2) go missing or warn."""
+        self.straightenNear(circular=True, count=2)
+
+    def testJointOfARefinedFilletAfterARoundPipe(self):
+        self.straightenNear(circular=True, fillet=True, count=2)
+
+    def testEndOfADroppedLegComesBack(self):
+        """A refined Round corner pipe along four legs, the last one dropped and put back. Where
+        the second bend's round face ends, at the third leg's start, two vertices stay where they
+        are, though the round faces' counter names shift with the edit and back: points on them
+        stay where they are, and are valid and there once the leg is back (fork PR 361 round 2;
+        the last bend's own vertices: testLastJointOfADroppedLegStaysInPlace)."""
+        points = bendPoints(40, 20, False, 30)
+        path, pipe = self.pipe(points, True, "Round corner")
+        start = V(points[2][0], 0, points[2][1])
+        leg = V(points[3][0], 0, points[3][1]) - start
+        leg.normalize()
+        corners = self.pointsOn(
+            pipe,
+            None,
+            lambda p: abs((p - start).dot(leg)) < 1e-6 and (p - start).Length < 3,
+            kinds=("Vertex",),
+        )
+        self.assertEqual(len(corners), 2, [p.Name for p in corners])
+        before = {p.Name: V(p.Placement.Base) for p in corners}
+        self.setPath(path, points[:-1])
+        self.assertGoneOrLoud(corners, before, report=True)
+        self.setPath(path, points)
+        self.assertBackInPlace(corners, before)
+
+    def testLastJointOfADroppedLegStaysInPlace(self):
+        """A refined "Transformed" pipe along four legs, the last one dropped and put back
+        (ops#452). The last bend's joint vertices are named after the third and fourth legs'
+        side faces; without the fourth leg they are the end cap's, in the same place. The fourth
+        leg's faces are gone, and tier 1 took the previous bend's joint vertices (they share the
+        third leg's faces), 20 mm away and silently. Now they stay where they are, warned at the
+        same-place level, and are exact again once the leg is back. Drawn towards the profile,
+        the dropped leg is the first: they break, and are back once the leg is."""
+        for towards in (False, True):
+            with self.subTest(towards=towards):
+                self.tearDown()
+                self.setUp()
+                points = bendPoints(40, 20, towards, 30)
+                path, pipe = self.pipe(points, True)
+                x, z = bendPoints(40, 20, False, 30)[3]
+                joint = self.pointsOn(pipe, V(x, 0, z), kinds=("Vertex",))
+                self.assertEqual(len(joint), 4, [p.Name for p in joint])
+                before = {p.Name: V(p.Placement.Base) for p in joint}
+                self.setPath(path, points[1:] if towards else points[:-1])
+                if not towards:
+                    for point in joint:
+                        levels = [e.get("warning_level") for e in App.getReferenceReport(point)]
+                        self.assertTrue(point.isValid(), (point.Name, point.getStatusString()))
+                        self.assertEqual(levels, ["same-place"], point.Name)
+                self.assertGoneOrLoud(joint, before, report=True)
+                self.setPath(path, points)
+                self.assertBackInPlace(joint, before)
+                self.assertEqual([p.Name for p in joint if App.getReferenceReport(p)], [])
+
+    def testOtherRoundCornerOfARefinedPipe(self):
+        """A refined Round corner pipe, one bend made straight: points on the other bend's
+        round-face vertices (fork PR 361 round 3). The round faces' counter names shift with the
+        edit, so a name can't tell the other bend's vertex from the straightened one's: when one
+        of the old element's faces is held by no face, the merged-neighbour test empties tier 1,
+        and a vertex that would have followed breaks. Each point is invalid, warned, or at its
+        place moved with the pipe (the legs after the straightened joint turn about it), never
+        elsewhere silently; after the turn back none is elsewhere silently, and the broken ones
+        are valid and in place. Only the references the solver re-binds count after the edit
+        (ops#455). Along the U, the vertices that break went to a neighbour 0.7 mm off before;
+        along the S (bends 40 and -40), bend 2's round-end vertices followed correctly and break
+        now. This pins the breaks: names that stay with their bend (ops#455) are to turn them
+        into follows."""
+        for turns in ((40, 20), (40, -40)):
+            for bend in (1, 2):
+                straight = (0, turns[1]) if bend == 1 else (turns[0], 0)
+                for towards in (False, True):
+                    with self.subTest(turns=turns, bend=bend, towards=towards):
+                        self.straightenOther(turns, bend, straight, towards)
+
+    def straightenOther(self, turns, bend, straight, towards):
+        """One subtest of testOtherRoundCornerOfARefinedPipe: the pipe along `turns`, `bend`
+        made `straight`, the points on the other bend's round-face vertices"""
+        self.tearDown()
+        self.setUp()
+        points = bendPoints(*turns, towards)
+        path, pipe = self.pipe(points, True, "Round corner")
+        spine = bendPoints(*turns)
+        other = 3 - bend
+        x, z = spine[other]
+        corner = self.pointsOn(pipe, None, near(V(x, 0, z), 3), kinds=("Vertex",))
+        self.assertEqual(len(corner), 6, [p.Name for p in corner])
+        before = {p.Name: V(p.Placement.Base) for p in corner}
+        x, z = spine[bend]
+        joint = V(x, 0, z)
+        turn = App.Rotation(V(0, 1, 0), straight[bend - 1] - turns[bend - 1])
+        moved = {
+            name: joint + turn.multVec(at - joint) if other > bend else at
+            for name, at in before.items()
+        }
+        self.setPath(path, bendPoints(*straight, towards))
+        broken = [p for p in corner if not p.isValid()]
+        self.assertGoneOrLoud(corner, moved, report=True, solved=True)
+        self.setPath(path, points)
+        self.assertGoneOrLoud(corner, before, report=True)
+        self.assertBackInPlace(broken, before)

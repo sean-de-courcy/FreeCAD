@@ -628,9 +628,11 @@ struct AppExport SolveInput
                        ElementFingerprint& intrinsic,
                        std::optional<Base::Vector3d>& anchor)>
         hintOf;
-    /// The faces of the target that the edge \a index bounds (index names). Unset: none, so
-    /// no edge continues.
+    /// The faces of the target that the edge or vertex \a index lies on (index names). Unset:
+    /// none, so no edge continues and the merged-neighbour test is off.
     std::function<std::vector<std::string>(const std::string& index)> facesOf;
+    /// The target's named faces, for the merged-neighbour test (ops#446); empty: the test is off.
+    std::vector<Element> faces;
     /// The faces of the target that share an edge with the face \a index (index names). Unset:
     /// none, so no face is split by a coplanar one.
     std::function<std::vector<std::string>(const std::string& index)> neighboursOf;
@@ -717,8 +719,9 @@ struct AppExport SolveOutcome
     std::vector<std::string> candidateNames;
     /// Parallel to candidates: why each is one (ops#105): `place` (it sits where the element
     /// was), `name` (the element the reference's name holds), `piece` (a piece of the old
-    /// element), `structural` (tier 1's survivor), `geometric` (tiers 2-3 found it); and its
-    /// centre's distance from the saved centre, NaN where unknown.
+    /// element), `structural` (tier 1's survivor), `geometric` (tiers 2-3 found it), `other
+    /// faces` (a survivor the merged-neighbour test dropped, ops#446); and its centre's distance
+    /// from the saved centre, NaN where unknown.
     std::vector<std::string> candidateRoles;
     std::vector<double> candidateDistances;
     /// The evidence, for the log and the report: overlap and sources, or why it broke.
@@ -780,6 +783,16 @@ struct AppExport SolveOutcome
  *   outcome. Geometry runs for them only if they all hold the same valid fingerprint.
  * - Candidates: the overlap survivors (NameAncestry::structuralSurvivors() over every name of
  *   every pool element of the entry's type) and the name matches of that type, by \a source.
+ * - Merged neighbours (ops#446): an edge or vertex named after the faces it lies on (the UPP
+ *   flag on its top section, two linked names at least), when two of those are one face of the
+ *   target (SolveInput::faces: a face holding each of the two linked names, or a same-type
+ *   descendant of it, NameAncestry::reaches()) or one is held by no face. A candidate fits if it
+ *   is in the old name's ancestry, a piece of it or from its IDX source, or lies on two faces at
+ *   least, each a holder of a linked name (facesOf): another bend's joint shares one face with
+ *   the old one, and its sources, but lies on a third face. When no candidate fits, none counts:
+ *   tier 3 at the same place runs among them first, then geometry and the guess rules decide as
+ *   for no candidate, and a break lists them last (role `other faces`). When one fits, all stay:
+ *   the test never narrows the candidates to a pick.
  * - A merged far-cap piece (ops#360): when exactly one candidate's name is the old name with,
  *   in one marked section (PRJ and MOD), more marks (connected elements) holding all of the old
  *   ones, an edge among them, it is the only candidate, as if the old name were in its

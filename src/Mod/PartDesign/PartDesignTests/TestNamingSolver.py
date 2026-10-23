@@ -1229,8 +1229,8 @@ class TestNamingSolver(unittest.TestCase):
         self.assertEqual(entry["status"], "broken")
         self.assertEqual(entry["candidates"][0], nearest)
         self.assertAlmostEqual(entry["candidate_distances"][0], distance, places=6)
-        # NaN last; the survivors tier 1 dropped (ops#174) come after the ranked ones
-        dropped = ("other maker", "other source")
+        # NaN last; the survivors tier 1 dropped (ops#174, ops#446) come after the ranked ones
+        dropped = ("other faces", "other maker", "other source")
         roles = entry["candidate_roles"]
         ranked = [r for r in roles if r not in dropped]
         self.assertEqual(roles[: len(ranked)], ranked)
