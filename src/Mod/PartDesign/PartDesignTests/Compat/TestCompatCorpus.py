@@ -34,10 +34,28 @@ and compared with the records saved with it (`<model>.oracle.json`, Part's `Comp
    `ForkRelease`, and the record matches again;
 4. (upgrades: once an upgrade registry exists, beta-compatibility.md 2.4.)
 
-Each pass also fails on a console line that says a reference or link was lost. The **rehearsal**
+Each pass also fails on a console line that says a reference or link was lost.
+
+**A generation made by an older naming revision** (its MANIFEST's `namingRevision` is below this
+build's; regenerated once per merge batch, not in every naming PR: ops#418) is read the way a
+user's older file is: the open runs the naming migration, which re-derives every element reference
+from its geometry. For such a generation the passes still compare every property, every
+reference's geometry key and target, every shape and sketch geometry, `dof` and the Touched state
+after the recompute, and still fail on a console line that says a reference was lost; and
+`testOlderGenerationMigration` fails when the migration breaks a reference (a "broken" in its
+console line) or runs on no reference at all. They no longer compare: element names (as before for
+any generation of another revision), which objects are Touched at the open (the migration touches
+what it migrates), and the guess records beyond "a stored guess record is still there for the same
+reference and original" (the migration adds "index" records for names that moved, and may change a
+record's kind and alternatives). A regression that moves a reference to another element, changes a
+shape, or loses a reference still fails; a change of element names, and a reference that is kept
+by its place instead of by its name, no longer do until the next regeneration. The **rehearsal**
 runs passes 1-2 again in a FreeCADCmd with FREECAD_TEST_NAMING_REVISION_OFFSET=1, so every file
 looks older and takes the full naming migration: it must move nothing back and break nothing, and
-every reference and shape must stay the same (names aren't compared there).
+every reference and shape must stay the same (names aren't compared there). It skips a generation
+that is already older than the build (a `COMPAT-REHEARSAL` line says so): the gate pass migrates
+that one for real, and a name that moved there is what a real naming change produces, which the
+rehearsal, with no real change, would fail; with only older generations nothing is rehearsed.
 
 The passes run in two child FreeCADCmd processes (the gate and the rehearsal, in parallel), so
 their console lines can be read: the child marks each step on stderr (`@@COMPAT <label>`), where
@@ -152,8 +170,9 @@ def buildNamingRevision(folder):
 class _Step:
     """One model opened one way: its documents in a fresh copy, opened, recomputed, saved."""
 
-    def __init__(self, label, genFolder, model, stems, order, work, report):
+    def __init__(self, label, genFolder, model, stems, order, work, report, older=False):
         self.label = label
+        self.older = older
         self.toOpen = stems if order == "ordered" else stems[-1:]
         self.folder = os.path.join(work, label.replace("/", "-"))
         self.report = report
@@ -196,8 +215,11 @@ class _Step:
         lines, drifts = [], []
         for stem, doc in docs.items():
             actual = CompatRecord.record(doc, names=names)
+            compared = (expected[stem], actual)
+            if self.older:
+                compared = olderForm(*compared, atOpen=passName == "open")
             found, drift = CompatRecord.compare(
-                expected[stem], actual, stage, names=names, touched=touched
+                compared[0], compared[1], stage, names=names, touched=touched
             )
             lines += [f"{stem}: {line}" for line in found]
             drifts.append(drift)
@@ -218,8 +240,10 @@ class _Step:
         _mark(self.label + "/open")
         docs = self.open()
         openSeconds = time.perf_counter() - t0
-        # a forced naming migration touches what it migrates at the open
-        self.compare("open", docs, self.opened, stage, names, touched=stage != "rehearsal")
+        # a naming migration, forced or of an older generation, touches what it migrates at the open
+        self.compare(
+            "open", docs, self.opened, stage, names, touched=stage != "rehearsal" and not self.older
+        )
         _mark(self.label + "/recompute")
         t1 = time.perf_counter()
         everything = list(App.listDocuments().values())
@@ -270,9 +294,10 @@ class _Step:
 
             # recomputed by the step: no longer Touched (a step that recomputes nothing is red)
             actual = only(CompatRecord.record(doc, names=names))
-            found, drift = CompatRecord.compare(
-                only(self.saved[stem], touched=False), actual, "recompute", names=names
-            )
+            compared = (only(self.saved[stem], touched=False), actual)
+            if self.older:
+                compared = olderForm(*compared)
+            found, drift = CompatRecord.compare(compared[0], compared[1], "recompute", names=names)
             lines += [f"{stem}: {line}" for line in found]
             drifts.append(drift)
         self.result["rollforward"] = {
@@ -280,6 +305,49 @@ class _Step:
             "drift": max(drifts, key=lambda d: d["abs"]) if drifts else None,
             "objects": held,
         }
+
+
+def _guessKey(guess):
+    return (guess.get("property") or "", guess.get("index", -1), guess.get("original") or "")
+
+
+def olderForm(expected, actual, atOpen=False):
+    """The two records of an object set as an older generation is compared (module docstring): a
+    guess record the saved file holds must still be there for the same reference and original; the
+    records the migration adds, and a changed kind or alternatives, are left out of both. `atOpen`
+    (before any recompute): a reference the open reports broken, because its name now gives an
+    element that moved, is left out too; the recompute migration re-derives it, and the recompute
+    pass compares it."""
+    exp, act = dict(expected), dict(actual)
+    exp["objects"], act["objects"] = dict(expected["objects"]), dict(actual["objects"])
+    for name, e in expected["objects"].items():
+        a = actual["objects"].get(name)
+        if a is None:
+            continue
+        if atOpen:
+            pending = [
+                ref
+                for ref, entry in a.get("refs", {}).items()
+                if entry.get("key") == {"broken": True}
+                and e.get("refs", {}).get(ref, {}).get("key") != {"broken": True}
+            ]
+            if pending:
+                e, a = dict(e), dict(a)
+                for side in (e, a):
+                    side["refs"] = {
+                        r: v for r, v in side.get("refs", {}).items() if r not in pending
+                    }
+                exp["objects"][name], act["objects"][name] = e, a
+        wanted = sorted({_guessKey(g) for g in e.get("guesses", [])})
+        present = {_guessKey(g) for g in a.get("guesses", [])}
+        e2, a2 = dict(e), dict(a)
+        for entry, keys in ((e2, wanted), (a2, [k for k in wanted if k in present])):
+            if keys:
+                entry["guesses"] = [list(k) for k in keys]
+            else:
+                entry.pop("guesses", None)
+        exp["objects"][name], act["objects"][name] = e2, a2
+    return exp, act
 
 
 def childMain(outPath):
@@ -300,15 +368,37 @@ def childMain(outPath):
         "forkRelease": App.getForkRelease(),
         "namingRevision": buildNamingRevision(work),
         "namesSkipped": [],
+        "older": [],
+        "skipped": {},
         "steps": {},
     }
+    # The revision the gate pass compares with: the rehearsal's own forced bump is one above it.
+    gateRevision = result["namingRevision"] - (1 if kind == "rehearsal" else 0)
     for gen, genFolder in generations().items():
         try:
             info = manifest(genFolder)
         except Exception as e:
             result["steps"][gen] = {"error": f"{gen}: no readable MANIFEST ({e})"}
             continue
+        if (
+            kind == "rehearsal"
+            and isinstance(info.get("namingRevision"), int)
+            and info["namingRevision"] < gateRevision
+        ):
+            # the gate pass migrates an older generation for real, and a name that moved is
+            # then the normal outcome; the rehearsal, which has no real change, expects none
+            result["skipped"][
+                gen
+            ] = f"naming revision {info['namingRevision']}, this build's {gateRevision}"
+            continue
         names = kind == "gate" and info.get("namingRevision") == result["namingRevision"]
+        older = (
+            kind == "gate"
+            and isinstance(info.get("namingRevision"), int)
+            and info["namingRevision"] < result["namingRevision"]
+        )
+        if older:
+            result["older"].append(gen)
         if kind == "gate" and not names:
             result["namesSkipped"].append(
                 f"{gen} (naming revision {info.get('namingRevision')}, this build's "
@@ -323,7 +413,7 @@ def childMain(outPath):
                 label = f"{gen}/{model}/{order}"
                 step = None
                 try:
-                    step = _Step(label, genFolder, model, stems, order, work, report)
+                    step = _Step(label, genFolder, model, stems, order, work, report, older)
                     step.run(stage, names, roundTrip=kind == "gate")
                     step.result["names"] = names
                     result["steps"][label] = step.result
@@ -388,23 +478,33 @@ _children = None
 def children():
     """{"gate": result, "rehearsal": result}, each with its log's segments under "console".
     Runs the two children once per process, in parallel."""
-    global _children
+    global _children, _work
     if _children is not None:
         return _children
-    global _work
     _work = work = os.path.realpath(tempfile.mkdtemp(prefix="compat-gate-"))
+    _children = runChildren(corpusFolder(), ("gate", "rehearsal"), work)
+    return _children
+
+
+def runChildren(corpus, kinds, work, offset=0):
+    """{kind: result} of the children (`kinds`: "gate", "rehearsal") run in parallel over the
+    generations in `corpus`, each with its log's segments under "console". `offset` raises the
+    gate's naming revision by the test aid (and the rehearsal's, which is one above the gate's), so
+    every generation in the corpus is an older one."""
     script = os.path.join(work, "child.py")
     with open(script, "w", encoding="utf-8") as fh:
         fh.write(CHILD_SCRIPT)
     runs = {}
-    for kind in ("gate", "rehearsal"):
+    for kind in kinds:
         env = dict(os.environ)
         env.pop("FREECAD_TEST_NAMING_REVISION_OFFSET", None)
-        env["FREECAD_COMPAT_CORPUS"] = corpusFolder()
+        env["FREECAD_COMPAT_CORPUS"] = corpus
         env["FREECAD_COMPAT_WORK"] = work
         env["FREECAD_COMPAT_CHILD"] = kind
         if kind == "rehearsal":
-            env["FREECAD_TEST_NAMING_REVISION_OFFSET"] = "1"
+            env["FREECAD_TEST_NAMING_REVISION_OFFSET"] = str(offset + 1)
+        elif offset:
+            env["FREECAD_TEST_NAMING_REVISION_OFFSET"] = str(offset)
         out = os.path.join(work, kind + ".json")
         env["FREECAD_COMPAT_CHILD_OUT"] = out
         logPath = os.path.join(work, kind + ".log")
@@ -413,7 +513,7 @@ def children():
             [_freecadCmd(), script], env=env, stdout=log, stderr=subprocess.STDOUT, cwd=work
         )
         runs[kind] = (proc, out, log, logPath)
-    _children = {}
+    found = {}
     deadline = time.monotonic() + CHILD_TIMEOUT
     for kind, (proc, out, log, logPath) in runs.items():
         timedOut = False
@@ -442,8 +542,8 @@ def children():
         result["console"] = segments(text)
         result["log"] = logPath
         result["fullLog"] = text
-        _children[kind] = result
-    return _children
+        found[kind] = result
+    return found
 
 
 _work = None
@@ -474,6 +574,99 @@ def tearDownModule():
         shutil.rmtree(_work, ignore_errors=True)
 
 
+def migrationProblems(console, gens):
+    """(problems, totals) of the naming migration's console lines in the segments of the
+    generations `gens`: a line with broken references is a problem, and so is no migrated
+    reference at all (the older path didn't run). totals: (migrated, moved back to their element).
+    """
+    problems = []
+    migrated = moved = 0
+    for label, lines in sorted(console.items()):
+        if label.split("/")[0] not in gens:
+            continue
+        for line in lines:
+            found = MIGRATION.search(line)
+            if not found:
+                continue
+            total, back, broken = (int(found.group(i)) for i in (2, 3, 4))
+            migrated += total
+            moved += back
+            if broken:
+                problems.append(f"{label}: {broken} of {total} references broken: {line}")
+    if not migrated:
+        problems.append(f"the migration ran on no reference of {sorted(gens)}")
+    return problems, (migrated, moved)
+
+
+def rewriteDocument(path, edit):
+    """Replaces the Document.xml of the FCStd `path` by edit(xml); the other members stay."""
+    with zipfile.ZipFile(path) as z:
+        members = [(info, z.read(info.filename)) for info in z.infolist()]
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        for info, data in members:
+            if info.filename == "Document.xml":
+                data = edit(data.decode("utf-8")).encode("utf-8")
+            z.writestr(info.filename, data)
+
+
+_SUB = re.compile(r'<Sub value="([^"]*)" shadow="([^"]*)" fp="([^"]*)"')
+
+
+def rewriteSub(xml, owner, prop, value, donor, parts):
+    """The stored reference of `owner.prop` to the element `value` rewritten with what the one to
+    `donor` stores: `parts` is "shadow" (its mapped name; the index name after the last dot
+    stays), "fp" (its fingerprint) or both. The rest of the entry is kept."""
+    start = xml.index(f'<Object name="{owner}"')
+    start = xml.index(f'<Property name="{prop}"', start)
+    end = xml.index("</Property>", start)
+    subs = {m.group(1): m for m in _SUB.finditer(xml, start, end)}
+    mine, other = subs[value], subs[donor]
+    shadow = other.group(2).rsplit(".", 1)[0] + "." + mine.group(2).rsplit(".", 1)[1]
+    replacement = (
+        f'<Sub value="{value}" shadow="{shadow if "shadow" in parts else mine.group(2)}" '
+        f'fp="{other.group(3) if "fp" in parts else mine.group(3)}"'
+    )
+    return xml[: mine.start()] + replacement + xml[mine.end() :]
+
+
+def subsetCorpus(work, models, tamper=None, files=None):
+    """A corpus folder in `work` holding the first generation's `models`; `tamper`
+    {model: function(oracle)} edits an oracle first, `files` {stem: function(path)} a saved file
+    (before the MANIFEST hashes it). Returns the folder, a corpus for FREECAD_COMPAT_CORPUS."""
+    source = next(iter(generations().values()))
+    info = manifest(source)
+    target = os.path.join(work, "corpus", os.path.basename(source))
+    os.makedirs(target)
+    kept = {model: info["models"][model] for model in models}
+    for model, stems in kept.items():
+        for stem in stems:
+            shutil.copy2(os.path.join(source, stem + ".FCStd"), target)
+            if files and stem in files:
+                files[stem](os.path.join(target, stem + ".FCStd"))
+        oracle = CompatRecord.load(os.path.join(source, model + ".oracle.json"))
+        if tamper and model in tamper:
+            tamper[model](oracle)
+        CompatRecord.dump(oracle, os.path.join(target, model + ".oracle.json"), compact=True)
+    files = {}
+    for fileName in os.listdir(target):
+        with open(os.path.join(target, fileName), "rb") as fh:
+            files[fileName] = hashlib.sha256(fh.read()).hexdigest()
+    with open(os.path.join(target, "MANIFEST"), "w", encoding="utf-8", newline="\n") as fh:
+        json.dump(
+            {
+                "format": info["format"],
+                "generation": info.get("generation"),
+                "models": kept,
+                "namingRevision": info["namingRevision"],
+                "files": files,
+            },
+            fh,
+            indent=1,
+            sort_keys=True,
+        )
+    return os.path.join(work, "corpus")
+
+
 def _printDrift(kind, passName, steps):
     worst = None
     for label, step in steps.items():
@@ -494,8 +687,17 @@ class TestCompatCorpus(unittest.TestCase):
     def child(self, kind):
         result = children()[kind]
         self.assertNotIn("ERROR", result, f"{kind} child: {result.get('ERROR')}")
-        self.assertTrue(result["steps"], f"{kind} child ran no model ({result['log']})")
+        # the rehearsal runs nothing when every generation is already older than the build
+        self.assertTrue(
+            result["steps"] or result.get("skipped"), f"{kind} child ran no model ({result['log']})"
+        )
         return result
+
+    def saySkipped(self, result):
+        for gen, why in sorted(result.get("skipped", {}).items()):
+            print(
+                f"COMPAT-REHEARSAL {gen} not rehearsed ({why}): the gate pass migrates it for real"
+            )
 
     def checkPass(self, kind, passName, optional=False):
         """Fails for each step whose pass differs or logged a lost reference. `optional`: only
@@ -614,12 +816,15 @@ class TestCompatCorpus(unittest.TestCase):
     def testRehearsalOpen(self):
         """Rehearsal, pass 1: with the naming revision raised, every file opens as before."""
         self.checkPass("rehearsal", "open")
+        self.saySkipped(self.child("rehearsal"))
 
     def testRehearsalRecompute(self):
         """Rehearsal, pass 2: the forced naming migration moves nothing back and breaks nothing,
-        and every reference and shape stays the same."""
+        and every reference and shape stays the same. Older generations are not rehearsed (the
+        gate pass migrates them for real), so a corpus of only those migrates nothing here."""
         self.checkPass("rehearsal", "recompute")
         result = self.child("rehearsal")
+        self.saySkipped(result)
         self.assertIn(
             "FREECAD_TEST_NAMING_REVISION_OFFSET=1", result["fullLog"], "the test aid wasn't on"
         )
@@ -633,7 +838,223 @@ class TestCompatCorpus(unittest.TestCase):
                 migrated += total
                 with self.subTest(step=label):
                     self.assertEqual((moved, broken), (0, 0), f"{label}: {line}")
-        self.assertGreater(migrated, 0, "the rehearsal migrated no reference")
+        if set(result.get("skipped", {})) == set(generations()):
+            print("COMPAT-REHEARSAL every generation is older than this build: nothing rehearsed")
+        else:
+            self.assertGreater(migrated, 0, "the rehearsal migrated no reference")
+
+    def testOlderGenerationMigration(self):
+        """A generation made by an older naming revision is migrated at the open without breaking
+        a reference (the passes compare the rest: module docstring)."""
+        result = self.child("gate")
+        older = result.get("older", [])
+        if not older:
+            print("COMPAT-OLDER no generation is older than this build's naming revision")
+            return
+        problems, (migrated, moved) = migrationProblems(result["console"], older)
+        print(f"COMPAT-OLDER {older}: {migrated} references migrated, {moved} moved back")
+        self.assertEqual(problems, [], "\n".join(problems))
+
+    def testMigrationProblems(self):
+        """The migration lines of the older generations' segments only: broken references and a
+        migration that ran on nothing are problems; moved ones are counted."""
+        line = (
+            "Document 'A': {total} element references re-derived from their geometry after a "
+            "naming change: {moved} moved back to their element, {broken} broken (their "
+            "features name them)"
+        )
+        console = {
+            "gen0/A/ordered/open": [line.format(total=5, moved=2, broken=0)],
+            "gen0/B/ordered/open": [line.format(total=3, moved=0, broken=0)],
+            "gen1/C/ordered/open": [line.format(total=4, moved=0, broken=4)],
+        }
+        self.assertEqual(migrationProblems(console, ["gen0"]), ([], (8, 2)))
+        problems, _ = migrationProblems(console, ["gen0", "gen1"])
+        self.assertEqual(len(problems), 1)
+        self.assertIn("gen1/C/ordered/open: 4 of 4 references broken", problems[0])
+        problems, totals = migrationProblems({"gen0/A/ordered/open": []}, ["gen0"])
+        self.assertEqual((len(problems), totals), (1, (0, 0)))
+
+    def testOlderForm(self):
+        """For an older generation a stored guess record must still be there for the same
+        reference and original; added records and a changed kind or alternatives don't count."""
+
+        def guess(index, kind, original, alternatives):
+            return {
+                "property": "Base",
+                "index": index,
+                "kind": kind,
+                "original": original,
+                "alternatives": alternatives,
+            }
+
+        def guessed(*guesses):
+            return {"objects": {"F": {"type": "X", "guesses": list(guesses)}}}
+
+        def referring(key):
+            return {
+                "objects": {"F": {"type": "X", "refs": {"Base[0]": {"key": key, "target": "P"}}}}
+            }
+
+        def differences(expected, actual):
+            both = olderForm(expected, actual)
+            return CompatRecord.compare(both[0], both[1], "open", names=False)[0]
+
+        stored = guess(0, "geometric", "Edge2", ["Edge1"])
+        # kept with another kind and alternatives, and a new record beside it: the same
+        kept = [guess(0, "index", "Edge2", []), guess(1, "index", "Edge5", [])]
+        self.assertEqual(differences(guessed(stored), guessed(*kept)), [])
+        # the stored record lost, or standing for another original: a difference
+        self.assertTrue(differences(guessed(stored), guessed()))
+        self.assertTrue(differences(guessed(stored), guessed(guess(0, "geometric", "Edge9", []))))
+        # records only the migration adds, on an object that held none: not compared
+        self.assertEqual(differences(guessed(), guessed(guess(0, "index", "Edge2", []))), [])
+        # a reference moved to another element is still a difference
+        self.assertEqual(differences(referring(2.0), referring(2.0)), [])
+        self.assertTrue(differences(referring(2.0), referring(3.0)))
+        # a reference the open reports broken (its name gives an element that moved) is left to
+        # the recompute pass, which compares it; but only at the open, and only if it was whole
+        broken = referring({"broken": True})
+
+        def atOpen(expected, actual):
+            both = olderForm(expected, actual, atOpen=True)
+            return CompatRecord.compare(both[0], both[1], "open", names=False)[0]
+
+        self.assertEqual(atOpen(referring(2.0), broken), [])
+        self.assertTrue(differences(referring(2.0), broken))
+        self.assertTrue(atOpen(referring(2.0), referring(3.0)))
+        self.assertEqual(atOpen(broken, broken), [])
+
+    AGED_MODELS = ("PadPocket", "LoftPipe", "GuessRecord", "SketchCarbonCopy")
+
+    def agedRun(self, tamper=None, files=None, models=AGED_MODELS, rehearsal=False):
+        """The gate child over a few models of the corpus, with the test aid raising its naming
+        revision by one: the generation is then an older one, and the open migrates its files
+        as a user's older file would be (the element map's revision token is older than the
+        build's). `rehearsal`: the rehearsal child runs too, and must skip the older generation
+        (it would fail a name that moved) without an error."""
+        work = os.path.realpath(tempfile.mkdtemp(prefix="compat-aged-"))
+        self.addCleanup(shutil.rmtree, work, True)
+        corpus = subsetCorpus(work, models, tamper, files)
+        kinds = ("gate", "rehearsal") if rehearsal else ("gate",)
+        results = runChildren(corpus, kinds, work, offset=1)
+        result = results["gate"]
+        self.assertNotIn("ERROR", result, result.get("ERROR"))
+        self.assertIn("FREECAD_TEST_NAMING_REVISION_OFFSET=1", result["fullLog"])
+        self.assertEqual(result["older"], ["gen0"])
+        if rehearsal:
+            again = results["rehearsal"]
+            self.assertNotIn("ERROR", again, again.get("ERROR"))
+            self.assertIn("FREECAD_TEST_NAMING_REVISION_OFFSET=2", again["fullLog"])
+            self.assertEqual(sorted(again["skipped"]), ["gen0"])
+            self.assertEqual(again["steps"], {})
+        return result
+
+    def agedProblems(self, result):
+        """{label, pass: [differences and lost-reference console lines]} of the gate child's steps
+        that have any."""
+        found = {}
+        for label, step in result["steps"].items():
+            self.assertNotIn("error", step, f"{label}: {step.get('error')}")
+            for passName, pas in step.items():
+                if isinstance(pas, dict) and "differences" in pas:
+                    problems = list(pas["differences"]) + [
+                        f"console: {line}"
+                        for line in _badLines(result["console"].get(f"{label}/{passName}", []))
+                    ]
+                    if problems:
+                        found[f"{label}, {passName}"] = problems
+        return found
+
+    def testAgedGenerationPasses(self):
+        """The older-generation rules end to end: a generation one revision older opens,
+        migrates, recomputes, round-trips and matches its oracles, and the migration breaks
+        nothing. The rehearsal skips it."""
+        result = self.agedRun(rehearsal=True)
+        self.assertEqual(self.agedProblems(result), {})
+        problems, (migrated, _) = migrationProblems(result["console"], ["gen0"])
+        self.assertEqual(problems, [], "\n".join(problems))
+        self.assertGreater(migrated, 0)
+
+    FILLET_MODEL = ("FilletChamfer",)
+
+    def rewriteFillet(self, parts):
+        """FilletChamfer's file with the stored reference of Fillet.Base to Edge18 given what the
+        one to Edge17 stores in `parts` ("shadow": the mapped name, "fp": the fingerprint)."""
+
+        def edit(path):
+            rewriteDocument(
+                path, lambda xml: rewriteSub(xml, "Fillet", "Base", "Edge18", "Edge17", parts)
+            )
+
+        return {"FilletChamfer": edit}
+
+    def testAgedGenerationMovedName(self):
+        """A stored mapped name rewritten in an older generation's file, its fingerprint kept (what
+        a naming change leaves: the name now gives another element): the migration moves the
+        reference back to the element at the saved place, counts it, and every pass matches the
+        oracle. The rehearsal skips this generation (it would fail the moved name)."""
+        result = self.agedRun(
+            files=self.rewriteFillet(("shadow",)), models=self.FILLET_MODEL, rehearsal=True
+        )
+        self.assertEqual(self.agedProblems(result), {})
+        problems, (migrated, moved) = migrationProblems(result["console"], ["gen0"])
+        self.assertEqual(problems, [], "\n".join(problems))
+        self.assertEqual(moved, 1, "the rewritten name is the only one that moved back")
+
+    def testAgedGenerationWrongPlaceFailsOnKey(self):
+        """The twin: the fingerprint of the stored reference to Edge18 is the one of Edge17, the
+        element at another place, so the migration takes Edge17 for it (moved, not broken) and the
+        reference's geometry key no longer matches the oracle's Edge18."""
+        result = self.agedRun(files=self.rewriteFillet(("fp",)), models=self.FILLET_MODEL)
+        found = self.agedProblems(result)
+        self.assertTrue(found, "a reference kept at another element's place passed")
+        lines = [line for problems in found.values() for line in problems]
+        self.assertTrue(
+            any(
+                "Fillet.Base[0] (Edge18 -> Edge17).centre[0]: expected 15.0, got 25.0" in line
+                for line in lines
+            ),
+            lines,
+        )
+        problems, (_, moved) = migrationProblems(result["console"], ["gen0"])
+        self.assertEqual((problems, moved), ([], 1))
+
+    def testAgedGenerationStillCatchesRegressions(self):
+        """On an older generation a moved reference (the oracle's geometry key changed) and a lost
+        guess record still fail, and an untouched model beside them still passes."""
+
+        def moveReference(oracle):
+            for record in oracle["records"].values():
+                key = record["objects"]["HoleSketch"]["refs"]["AttachmentSupport[0]"]["key"]
+                key["area"] = key["area"] * 2
+
+        def loseGuess(oracle):
+            for record in oracle["records"].values():
+                record["objects"]["Fillet"]["guesses"][0]["original"] = "Edge9"
+
+        result = self.agedRun({"PadPocket": moveReference, "GuessRecord": loseGuess})
+        failing = {
+            label.split("/")[1]
+            for label, step in result["steps"].items()
+            if any(isinstance(found, dict) and found.get("differences") for found in step.values())
+        }
+        self.assertEqual(failing, {"PadPocket", "GuessRecord"}, sorted(result["steps"]))
+        # and for the planted reasons
+        found = self.agedProblems(result)
+
+        def linesOf(model):
+            return [
+                line
+                for key, problems in found.items()
+                if key.split("/")[1] == model
+                for line in problems
+            ]
+
+        self.assertTrue(
+            any("HoleSketch.AttachmentSupport[0]" in l for l in linesOf("PadPocket")), found
+        )
+        self.assertTrue(any("Fillet.guesses" in l for l in linesOf("GuessRecord")), found)
 
     def testTimings(self):
         """Not a check: prints the passes' times (3.7) as COMPAT-TIME lines."""
