@@ -16,6 +16,7 @@
 #include <Bnd_Box.hxx>
 #include <GCPnts_AbscissaPoint.hxx>
 #include <GeomFill_Frenet.hxx>
+#include <Geom_BSplineCurve.hxx>
 #include <Geom_Plane.hxx>
 #include <Precision.hxx>
 #include <Standard_Failure.hxx>
@@ -25,6 +26,7 @@
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Vertex.hxx>
 #include <TopoDS_Wire.hxx>
+#include <gp.hxx>
 #include <gp_Circ.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Pnt.hxx>
@@ -170,21 +172,78 @@ double median(std::vector<double> values)
     return *middle;
 }
 
-/// Whether the curvature dips between the counted samples \a first and \a last (indices into
-/// \a counted, the indices of the samples with a frame; \a curvatures holds every sample's): its
-/// lowest value there, uncounted samples included, is at most SweepFrenet::curvatureDip times the
-/// median over SweepFrenet::curvatureWindow counted samples on either side, on both sides
+/// The unit principal normal of \a curve at \a u, where the curve bends
+std::optional<gp_Vec> principalNormal(const BRepAdaptor_Curve& curve, double u)
+{
+    gp_Pnt point;
+    gp_Vec d1, d2;
+    curve.D2(u, point, d1, d2);
+    const double speed2 = d1.SquareMagnitude();
+    if (speed2 <= 0) {
+        return std::nullopt;
+    }
+    const gp_Vec normal = d2 - d1 * (d1.Dot(d2) / speed2);
+    if (normal.Magnitude() <= gp::Resolution()) {
+        return std::nullopt;
+    }
+    return normal.Normalized();
+}
+
+/// Whether the normal of \a curve reverses at a knot strictly between \a u0 and \a u1 where the
+/// curve is continuous only up to C1: its normals just before and just after the knot are more than
+/// a right angle apart. The curvature jumps there instead of dipping (two tangent arcs bending
+/// opposite ways, joined into one B-spline: fork PR 358 round 6's verification, finding 2); a long
+/// Part.makeHelix curve's frame jumps by 47 degrees at such a knot.
+bool knotReverses(const BRepAdaptor_Curve& curve, double u0, double u1)
+{
+    if (curve.GetType() != GeomAbs_BSplineCurve) {
+        return false;
+    }
+    const Handle(Geom_BSplineCurve) spline = curve.BSpline();
+    const double step = 1e-7 * (curve.LastParameter() - curve.FirstParameter());
+    for (int i = spline->FirstUKnotIndex() + 1; i < spline->LastUKnotIndex(); ++i) {
+        const double knot = spline->Knot(i);
+        if (knot <= u0 || knot >= u1 || spline->Degree() - spline->Multiplicity(i) >= 2) {
+            continue;
+        }
+        const std::optional<gp_Vec> before = principalNormal(curve, knot - step);
+        const std::optional<gp_Vec> after = principalNormal(curve, knot + step);
+        if (before && after && before->Dot(*after) < 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Whether the curvature of \a curve dips between the counted samples \a first and \a last
+/// (indices into \a counted, the indices of the samples with a frame; \a parameters and
+/// \a curvatures hold every sample's): its lowest value there, over the samples between them and
+/// SweepFrenet::curvatureRefinement even steps (it can cross zero between two samples: fork PR 358
+/// round 6's verification, finding 1), is at most SweepFrenet::curvatureDip times the median over
+/// SweepFrenet::curvatureWindow counted samples on either side, on both sides. Where a side has no
+/// samples, the lowest value must also be below the curvature at the end next to it: a curvature
+/// rising along the edge from its start, as along a steep conical helix, isn't a dip (finding 3).
 bool curvatureDips(
+    const BRepAdaptor_Curve& curve,
+    const std::vector<double>& parameters,
     const std::vector<double>& curvatures,
     const std::vector<std::size_t>& counted,
     std::size_t first,
     std::size_t last
 )
 {
-    const double lowest = *std::min_element(
+    double lowest = *std::min_element(
         curvatures.begin() + static_cast<std::ptrdiff_t>(counted[first]),
         curvatures.begin() + static_cast<std::ptrdiff_t>(counted[last]) + 1
     );
+    const double u0 = parameters[counted[first]];
+    const double u1 = parameters[counted[last]];
+    for (int i = 1; i < Part::SweepFrenet::curvatureRefinement; ++i) {
+        lowest = std::min(
+            lowest,
+            curvatureAt(curve, u0 + (u1 - u0) * i / Part::SweepFrenet::curvatureRefinement)
+        );
+    }
     const auto window = static_cast<std::size_t>(Part::SweepFrenet::curvatureWindow);
     std::vector<double> before;
     for (std::size_t i = first - std::min(first, window); i < first; ++i) {
@@ -194,14 +253,21 @@ bool curvatureDips(
     for (std::size_t i = last + 1; i < counted.size() && i <= last + window; ++i) {
         after.push_back(curvatures[counted[i]]);
     }
+    if (before.empty() || after.empty()) {
+        // 0.999: the lowest value is never above the end's, and equal where it is the end's
+        const double end = curvatures[counted[before.empty() ? first : last]];
+        if (lowest >= 0.999 * end) {
+            return false;
+        }
+    }
     return (before.empty() || lowest <= Part::SweepFrenet::curvatureDip * median(before))
         && (after.empty() || lowest <= Part::SweepFrenet::curvatureDip * median(after));
 }
 
 /// Samples \a law along \a curve, \a factor times sampleParameters()'s even intervals, for
 /// turnOver(): the first point where the frame turns by more than a right angle about the tangent
-/// between two counted samples at most two apart, where the curvature dips (curvatureDips()), and
-/// the median turn between neighbours
+/// between two counted samples at most two apart, where the curvature dips (curvatureDips()) or the
+/// normal reverses at a knot (knotReverses()), and the median turn between neighbours
 Scan scanTurns(GeomFill_Frenet& law, const BRepAdaptor_Curve& curve, double length, int factor)
 {
     Scan scan {std::nullopt, 1};
@@ -233,7 +299,8 @@ Scan scanTurns(GeomFill_Frenet& law, const BRepAdaptor_Curve& curve, double leng
         previous = frame;
     }
     for (const auto& [first, last] : turns) {
-        if (curvatureDips(curvatures, counted, first, last)) {
+        if (knotReverses(curve, parameters[counted[first]], parameters[counted[last]])
+            || curvatureDips(curve, parameters, curvatures, counted, first, last)) {
             // Between neighbours the later sample, two apart the one between them
             scan.where = curve.Value(parameters[counted[last - (last - first) / 2]]);
             break;

@@ -127,6 +127,67 @@ def leaving_plane_spine():
     return Part.Wire([Part.makeLine(V(0, 0, -1000), V(0, 0, 0)), wave_edge(), arc.toShape()])
 
 
+def s_curve_edge(ratio=30.0, width=0.02, count=300):
+    """A planar S-curve in XY as one cubic B-spline through `count` points: its curvature runs
+    -1 + (1 + 1 / ratio) (1 + tanh((s - s0) / width)) / 2 along the arc length s: -1 until the
+    curve has turned by 120 degrees, then 1 / ratio the other way for 20 mm (or 60 degrees, if
+    shorter). It passes through zero within about `width` of s0, between two of the sweep's
+    samples (fork PR 358 round 6's verification, finding 1)"""
+    a = 1.0
+    b = a / ratio
+    s0 = 2 * math.pi / 3 / a
+    length = s0 + min(math.pi / 3 / b, 20.0)
+    steps = 40000
+    ds = length / steps
+    x = y = angle = 0.0
+    points = [V(0, 0, 0)]
+    for i in range(steps):
+        s = (i + 0.5) * ds
+        angle += ((b - a) / 2 + (a + b) / 2 * math.tanh((s - s0) / width)) * ds
+        x += math.cos(angle) * ds
+        y += math.sin(angle) * ds
+        if (i + 1) % (steps // count) == 0:
+            points.append(V(x, y, 0))
+    curve = Part.BSplineCurve()
+    curve.interpolate(points)
+    return curve.toShape()
+
+
+def arc_s_edge(radius=3.0):
+    """Two tangent arcs in XY bending opposite ways, joined into one B-spline: radius 1 turning 120
+    degrees, then `radius` turning 60 degrees back. The inflection is at an inner knot where the
+    curve is only C1, and its curvature jumps from 1 to -1 / radius there (fork PR 358 round 6's
+    verification, finding 2)"""
+    first = Part.ArcOfCircle(
+        Part.Circle(V(0, 1, 0), V(0, 0, 1), 1), -math.pi / 2, -math.pi / 2 + 2 * math.pi / 3
+    )
+    end = first.value(first.LastParameter)
+    tangent = V(first.tangent(first.LastParameter)[0]).normalize()
+    centre = end - V(-tangent.y, tangent.x, 0) * radius
+    start = math.atan2(end.y - centre.y, end.x - centre.x)
+
+    def at(angle):
+        return centre + V(radius * math.cos(angle), radius * math.sin(angle), 0)
+
+    second = Part.Arc(at(start), at(start - math.pi / 6), at(start - math.pi / 3))
+    curve = first.toBSpline()
+    curve.join(second.toBSpline())
+    return curve.toShape()
+
+
+def rectangle_on_side(wire, side, scale):
+    """A rectangle in the plane normal to the spine's start, `scale` (0.5 to 2.5) from the spine
+    along `side` and `scale` (-0.5 to 0.5) across"""
+    point, tangent = start_frame(wire)
+    side = (side - tangent * side.dot(tangent)).normalize()
+    other = tangent.cross(side)
+    corners = [
+        point + (side * a + other * b) * scale
+        for a, b in ((0.5, -0.5), (2.5, -0.5), (2.5, 0.5), (0.5, 0.5))
+    ]
+    return Part.makePolygon(corners + [corners[0]])
+
+
 def end_offset(shape, wire, axis):
     """The offset along `axis` of the end cap's centre of mass from the spine's end"""
     end = wire.OrderedVertexes[-1].Point
@@ -326,8 +387,8 @@ class SweepFrenetTest(unittest.TestCase):
         0.154 from the axis half-way up the 100 turns of radius 0.1 below)"""
         wire = Part.Wire([Part.makeHelix(pitch, height, radius, angle)])
         point, tangent = start_frame(wire)
-        radial = V(1, 0, 0)
-        radial = (radial - tangent * radial.dot(tangent)).normalize()
+        # Away from the centre of curvature: from the axis, tilted on a steep cone
+        radial = -wire.Edges[0].normalAt(wire.Edges[0].FirstParameter)
         other = tangent.cross(radial)
         size = min(0.1, radius / 10)
         corners = [point - other * size, point + radial * 2 * size, point + other * size]
@@ -393,6 +454,35 @@ class SweepFrenetTest(unittest.TestCase):
         5's verification, finding 2)"""
         self.assertFrenetHelix(6.0, 60.0, 1.0, 1.0)
         self.assertFrenetHelix(10.0, 100.0, 1.0, 5.0)
+
+    def testFrenetAlongAFewTurnsOfASteepConicalHelix(self):
+        """Ten turns at a pitch of 100 times the radius on a cone of 3 degrees: the curvature rises
+        from the edge's start along the cone, where a turn of the frame is flagged with no samples
+        before it. Before, that was read as a dip, and the sweep was refused (fork PR 358 round 6's
+        verification, finding 3)"""
+        self.assertFrenetHelix(100.0, 1000.0, 1.0, 3.0)
+
+    def assertStaysOnItsSide(self, edge):
+        """A rectangle beside a planar spine in XY, on its +Z side, its binormal's: the spine's
+        Frenet frame turns over at the inflection, and the rectangle stays on +Z"""
+        wire = Part.Wire([edge])
+        sweep = self.sweep(wire, rectangle_on_side(wire, V(0, 0, 1), 0.02))
+        self.assertTrue(sweep.isValid(), sweep.getStatusString())
+        self.assertGreater(sweep.Shape.BoundBox.ZMin, 0)
+
+    def testFrenetInflectionBetweenSamples(self):
+        """An S-curve whose curvature passes through zero between two samples, with 0.0714 and
+        0.0585 on either side and a median of 0.0503 after them: the lowest curvature is looked for
+        between the samples. Before, the inflection was missed, and the rectangle beside the spine
+        flipped to -0.22 (fork PR 358 round 6's verification, finding 1)"""
+        self.assertStaysOnItsSide(s_curve_edge())
+
+    def testFrenetInflectionAtAKnot(self):
+        """Two tangent arcs bending opposite ways, joined into one B-spline: the curvature jumps
+        from 1 to -1/3 at a knot instead of dipping, and the normals on either side of it are half
+        a turn apart. Before, the inflection was missed, and the rectangle beside the spine flipped
+        to -0.20 (fork PR 358 round 6's verification, finding 2)"""
+        self.assertStaysOnItsSide(arc_s_edge())
 
     def testFrenetWithoutTurnOverIsUnchanged(self):
         """A planar arc, a helix and a Bezier curve with a flat point that doesn't reverse its

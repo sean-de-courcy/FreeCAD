@@ -23,9 +23,9 @@ class TopoDS_Wire;
  * harmless: OCCT makes the edges' trihedrons agree there.
  *
  * Where the frame turns by more than a right angle about the tangent between nearby samples and
- * the curvature dips there (a steep helix's frame turns about the tangent all along, with its
- * curvature steady; where the samples are too far apart to follow such a twist, the edge is
- * sampled again more densely):
+ * the curvature dips there, or the normal reverses at a knot where the curve is only C1 (a steep
+ * helix's frame turns about the tangent all along, with its curvature steady; where the samples
+ * are too far apart to follow such a twist, the edge is sampled again more densely):
  * - on a planar spine, corrected Frenet: a planar curve's Frenet frame doesn't turn about the
  *   tangent, so the rotation-minimizing frame is Frenet's own, kept continuous;
  * - on a spine planar within a thousandth of its size whose tangent stays close enough to the
@@ -58,6 +58,10 @@ constexpr int maxHalvings = 6;
 constexpr double curvatureDip = 0.5;
 /// The medians of curvatureDip are taken over this many counted samples on either side
 constexpr int curvatureWindow = 4;
+/// The lowest curvature between two samples is also looked for at this many even steps: an S-curve
+/// interpolated through 300 points crossed zero between two samples with 0.0714 and 0.0585 on
+/// either side, against a median of 0.0503 after them
+constexpr int curvatureRefinement = 32;
 /// The cosine of 30 degrees: where the frame's median turn about the tangent between neighbouring
 /// samples is larger, the samples are too far apart to tell a twist from a turn-over (a
 /// Part.makeHelix helix with a pitch of 6 times its radius: 41 to 56 degrees, two apart 92 to 112)
