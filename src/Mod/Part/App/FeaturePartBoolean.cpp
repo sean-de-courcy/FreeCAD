@@ -102,14 +102,17 @@ bool isExactIdentity(const gp_Trsf& trsf)
  * getTopoShape() moves the stored shape, whose location is already its Placement, by a new datum
  * for an identity Placement, and the boolean keeps that location on every sub-shape it leaves
  * untouched: along a chain of Part::Cut the locations grew by two datums per cut, and every query
- * on those sub-shapes walked them. An identity becomes no location; anything else one datum.
+ * on those sub-shapes walked them. The Base's identity becomes no location; anything else, and
+ * the Tool always, one new datum. The Tool's datum is new even at an identity: inputs that share
+ * TShapes (pieces of one BooleanFragments, a SimpleCopy) must not become IsSame across Base and
+ * Tool, which the composed datums never let them be.
  */
-TopoShape getBooleanInput(const App::DocumentObject* obj)
+TopoShape getBooleanInput(const App::DocumentObject* obj, bool isBase)
 {
     TopoShape shape = Feature::getTopoShape(obj, ShapeOption::ResolveLink | ShapeOption::Transform);
     if (!shape.isNull()) {
         const gp_Trsf trsf = shape.getShape().Location().Transformation();
-        shape.locate(isExactIdentity(trsf) ? TopLoc_Location() : TopLoc_Location(trsf));
+        shape.locate(isBase && isExactIdentity(trsf) ? TopLoc_Location() : TopLoc_Location(trsf));
     }
     return shape;
 }
@@ -175,12 +178,12 @@ App::DocumentObjectExecReturn* Boolean::execute()
         std::vector<TopoShape> shapes;
         shapes.reserve(2);
         // Now, let's get the TopoDS_Shape
-        shapes.push_back(getBooleanInput(Base.getValue()));
+        shapes.push_back(getBooleanInput(Base.getValue(), true));
         auto BaseShape = shapes[0].getShape();
         if (BaseShape.IsNull()) {
             throw NullShapeException("Base shape is null");
         }
-        shapes.push_back(getBooleanInput(Tool.getValue()));
+        shapes.push_back(getBooleanInput(Tool.getValue(), false));
         auto ToolShape = shapes[1].getShape();
         if (ToolShape.IsNull()) {
             throw NullShapeException("Tool shape is null");
