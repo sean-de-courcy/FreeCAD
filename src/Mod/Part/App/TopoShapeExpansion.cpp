@@ -7606,6 +7606,10 @@ bool fillsBehind(const TopoDS_Shape& prism, const TopoDS_Shape& profile, const g
             catch (const Base::Exception&) {
                 // No point inside the face to sample: nothing to say about it
             }
+            catch (const Standard_Failure&) {
+                // OCCT failed sampling the face or measuring its distance to the profile: nothing
+                // to say about it either, so a prism BRepFeat built keeps its way (ops#450)
+            }
         }
     }
     return false;

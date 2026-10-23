@@ -2183,6 +2183,48 @@ class TestPad(unittest.TestCase):
                     finally:
                         FreeCAD.closeDocument(doc.Name)
 
+    def testPadOfTwoSquaresUpToACylinderOfElementaryFaces(self):
+        # ops#450 (fork PR 359 review, finding 1): the cylinder of radius 6 about the line y = 0,
+        # z = 10 (x -20..20), and a Pad of the squares x -8..-4 and 4..8, y -3..3 at z = 0, along
+        # +z, up to its cylinder face. Each square goes up to the cylinder's underside, z = 10 -
+        # sqrt(36 - y^2): 4 (60 - integral of sqrt(36 - y^2) over y -3..3) = 4 (60 - 3 sqrt(27) -
+        # 6 pi) each, 204.50 for both. BRepFeat built the second square up to the slab inside the
+        # cylinder, whose lower face faces back: a valid Pad, 377.75. fillsBehind() sends it to
+        # the split, which builds it right
+        doc = FreeCAD.newDocument("PadOfTwoSquaresUpToACylinderOfElementaryFaces")
+        try:
+            V = FreeCAD.Vector
+            cylinder = Part.makeCylinder(6, 40, V(-20, 0, 10), V(1, 0, 0))
+            base = doc.addObject("Part::Feature", "Base")
+            base.Shape = cylinder
+            body = doc.addObject("PartDesign::Body", "Body")
+            baseFeature = body.newObject("PartDesign::FeatureBase", "BaseFeature")
+            baseFeature.BaseFeature = base
+            doc.recompute()
+            names = [
+                "Face%d" % i
+                for i, face in enumerate(baseFeature.Shape.Faces, 1)
+                if face.Surface.TypeId == "Part::GeomCylinder"
+            ]
+            sketch = squareSketch(
+                body, "Squares", FreeCAD.Placement(), [(-8, -3, -4, 3), (4, -3, 8, 3)]
+            )
+            pad = body.newObject("PartDesign::Pad", "Pad")
+            pad.Profile = sketch
+            pad.Type = "UpToFace"
+            pad.UpToFace = (baseFeature, names)
+            doc.recompute()
+            self.assertTrue(pad.isValid(), pad.getStatusString())
+            expected = 2 * 4 * (60 - 3 * math.sqrt(27) - 6 * math.pi)
+            self.assertAlmostEqual(
+                pad.AddSubShape.Volume, expected, delta=PRISM_VOLUME_RELATIVE * expected
+            )
+            self.assertAlmostEqual(pad.AddSubShape.common(cylinder).Volume, 0, places=6)
+            whole = cylinder.Volume + expected
+            self.assertAlmostEqual(pad.Shape.Volume, whole, delta=PRISM_VOLUME_RELATIVE * whole)
+        finally:
+            FreeCAD.closeDocument(doc.Name)
+
     def testPadUpToABumpOverABallsEquator(self):
         # PR 331 round 1: the bump rises 0.3 over the equator, so a band of the sphere face up to
         # 0.29 high faces the plate, along 1 to 2 % of the face's edge with the plate. With 32
