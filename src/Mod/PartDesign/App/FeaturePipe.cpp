@@ -75,6 +75,7 @@
 #include <TopTools_DataMapOfShapeListOfShape.hxx>
 #include <TopTools_DataMapOfShapeShape.hxx>
 #include <TopTools_HSequenceOfShape.hxx>
+#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 
 
@@ -122,9 +123,13 @@ namespace
 // profile alone, a profile element's sides on every leg shared one name told apart by the legs'
 // order, and an edit adding a segment at the spine's start or drawing it the other way moved
 // references to another leg silently. The section copies MakePipeShell reports from the spine's
-// vertices (at the corners and ends) are left out: the edges at a corner are named from the side
-// faces they bound (`UPP`), which now hold their legs, and the ends from the sections. A cap
-// between a union's pieces is the exception: its copies are named from the spine's vertex there.
+// vertices (at the corners and ends) are left out, and the ends are named from the sections. A
+// joint, where a profile element's sides along two spine edges meet at their spine vertex, is
+// named from that element and that vertex, and so is a cap between a union's pieces (the same
+// element's copy at a break): a joint that becomes a break, or a break that becomes a joint, keeps
+// its name at its own vertex. Named from the side faces they bound (`UPP`), a joint whose corner
+// became a break took the next corner's joint, which shares a leg's side face (ops#415, round 4).
+// At a Round corner the round face lies between the legs' sides: its edges stay `UPP`.
 class MapperPipeShellEnds: public Part::MapperMaker
 {
 public:
@@ -148,6 +153,7 @@ public:
             swept.push_back(section.getShape());
         }
         useSpine(pipe, spine, swept);
+        bindJoints(pipe, spine, swept, nullptr);
         const TopoDS_Shape& first = swept.front();
         const TopoDS_Shape& last = swept.back();
         TopTools_IndexedMapOfShape startElements;
@@ -211,6 +217,7 @@ public:
                 sectionElements.Add(it.Value());
             }
         }
+        bindJoints(pipe, spine, {section}, origins);
         TopTools_IndexedMapOfShape startElements;
         TopTools_IndexedMapOfShape endElements;
         TopExp::MapShapes(pipe.FirstShape(), startElements);
@@ -304,10 +311,10 @@ public:
                 return element.ShapeType() == TopAbs_EDGE || element.ShapeType() == TopAbs_VERTEX;
             });
         }
-        if (const TopTools_ListOfShape* copies = breakCopies.Seek(s)) {
-            // The edges and vertices of a cap between pieces: of a profile's element, its copy
-            // there; of the spine's vertex there, all of them
-            for (const TopoDS_Shape& copy : *copies) {
+        if (const TopTools_ListOfShape* bound = copies.Seek(s)) {
+            // The joints and the edges and vertices of a cap between pieces: of a profile's
+            // element, its copies there; of the spine's vertex, all of them there
+            for (const TopoDS_Shape& copy : *bound) {
                 if (std::ranges::none_of(_res, [&](const TopoDS_Shape& found) {
                         return found.IsSame(copy);
                     })) {
@@ -429,33 +436,122 @@ private:
     }
 
     /// Binds the spine's vertex \a vertex (none when null) and the profile's elements to the
-    /// elements of the cap there, \a copies (by the section's elements, each the copy of the
+    /// elements of the cap there, \a cap (by the section's elements, each the copy of the
     /// profile's element \a origins binds it to, or of itself without \a origins)
     void bindBreak(
         const TopoDS_Shape& vertex,
-        const TopTools_DataMapOfShapeListOfShape& copies,
+        const TopTools_DataMapOfShapeListOfShape& cap,
         const TopTools_DataMapOfShapeShape* origins
     )
     {
         if (vertex.IsNull()) {
             return;
         }
-        auto add = [this](const TopoDS_Shape& key, const TopoDS_Shape& copy) {
-            if (!breakCopies.IsBound(key)) {
-                breakCopies.Bind(key, TopTools_ListOfShape());
-            }
-            breakCopies.ChangeFind(key).Append(copy);
-        };
-        for (TopTools_DataMapIteratorOfDataMapOfShapeListOfShape it(copies); it.More(); it.Next()) {
+        for (TopTools_DataMapIteratorOfDataMapOfShapeListOfShape it(cap); it.More(); it.Next()) {
             const TopoDS_Shape* origin = origins ? origins->Seek(it.Key()) : &it.Key();
             if (!origin) {
                 continue;
             }
             for (const TopoDS_Shape& copy : it.Value()) {
-                add(*origin, copy);
-                add(vertex, copy);
+                bindCopy(*origin, copy);
+                bindCopy(vertex, copy);
             }
         }
+    }
+
+    /// Binds each of \a spine's vertices between two of its edges, and the profile's elements, to
+    /// the joints there: the edges where the side faces a profile's edge sweeps along the two
+    /// spine edges meet, and the vertices where the lateral edges of a profile's vertex do. The
+    /// profile's element of each element of \a sections is the one \a origins binds it to, or
+    /// itself without \a origins. The shell's end wires are left out: where a closed spine closes,
+    /// the joint is the start, which keeps the section's names.
+    void bindJoints(
+        BRepOffsetAPI_MakePipeShell& pipe,
+        const TopoDS_Shape& spine,
+        const std::vector<TopoDS_Shape>& sections,
+        const TopTools_DataMapOfShapeShape* origins
+    )
+    {
+        TopTools_IndexedDataMapOfShapeListOfShape edgesAt;
+        TopExp::MapShapesAndAncestors(spine, TopAbs_VERTEX, TopAbs_EDGE, edgesAt);
+        TopTools_IndexedMapOfShape ends;
+        TopExp::MapShapes(pipe.FirstShape(), ends);
+        TopExp::MapShapes(pipe.LastShape(), ends);
+        // Per spine edge (by its index in spineEdges): the side faces it sweeps and their edges
+        std::vector<TopTools_IndexedMapOfShape> legFaces(spineEdges.Extent() + 1);
+        std::vector<TopTools_IndexedMapOfShape> legEdges(spineEdges.Extent() + 1);
+        for (int i = 1; i <= spineEdges.Extent(); ++i) {
+            for (const TopoDS_Shape& face : pipe.Generated(spineEdges(i))) {
+                if (face.ShapeType() == TopAbs_FACE) {
+                    legFaces[i].Add(face);
+                    TopExp::MapShapes(face, TopAbs_EDGE, legEdges[i]);
+                }
+            }
+        }
+        for (const TopoDS_Shape& section : sections) {
+            if (section.IsNull()) {
+                continue;
+            }
+            for (TopAbs_ShapeEnum type : {TopAbs_EDGE, TopAbs_VERTEX}) {
+                const TopAbs_ShapeEnum sideType = type == TopAbs_EDGE ? TopAbs_FACE : TopAbs_EDGE;
+                const std::vector<TopTools_IndexedMapOfShape>& legSides
+                    = type == TopAbs_EDGE ? legFaces : legEdges;
+                TopTools_IndexedMapOfShape elements;
+                TopExp::MapShapes(section, type, elements);
+                for (int k = 1; k <= elements.Extent(); ++k) {
+                    const TopoDS_Shape* origin = origins ? origins->Seek(elements(k))
+                                                         : &elements(k);
+                    if (!origin) {
+                        continue;
+                    }
+                    // The element's side along the spine edge \a i
+                    auto sideOn = [&](int i) {
+                        for (const TopoDS_Shape& side : pipe.Generated(elements(k))) {
+                            if (side.ShapeType() == sideType && legSides[i].Contains(side)) {
+                                return side;
+                            }
+                        }
+                        return TopoDS_Shape();
+                    };
+                    for (int v = 1; v <= edgesAt.Extent(); ++v) {
+                        const TopTools_ListOfShape& around = edgesAt(v);
+                        if (around.Extent() != 2) {
+                            continue;
+                        }
+                        const TopoDS_Shape before = sideOn(spineEdges.FindIndex(around.First()));
+                        const TopoDS_Shape after = sideOn(spineEdges.FindIndex(around.Last()));
+                        if (before.IsNull() || after.IsNull()) {
+                            continue;
+                        }
+                        TopTools_IndexedMapOfShape bounding;
+                        TopExp::MapShapes(before, type, bounding);
+                        for (TopExp_Explorer it(after, type); it.More(); it.Next()) {
+                            if (bounding.Contains(it.Current())
+                                && !sectionElements.Contains(it.Current())
+                                && !ends.Contains(it.Current())) {
+                                bindCopy(*origin, it.Current());
+                                bindCopy(edgesAt.FindKey(v), it.Current());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Adds \a copy to what \a key generates (copies), once
+    void bindCopy(const TopoDS_Shape& key, const TopoDS_Shape& copy)
+    {
+        if (!copies.IsBound(key)) {
+            copies.Bind(key, TopTools_ListOfShape());
+        }
+        TopTools_ListOfShape& bound = copies.ChangeFind(key);
+        for (const TopoDS_Shape& found : bound) {
+            if (found.IsSame(copy)) {
+                return;
+            }
+        }
+        bound.Append(copy);
     }
 
     /// Takes \a spine's vertices and edges, and the edges \a sections' vertices sweep
@@ -496,9 +592,9 @@ private:
     TopTools_IndexedMapOfShape laterals;
     /// A piece's profile elements and the elements of its section swept from each
     TopTools_DataMapOfShapeListOfShape sweptFrom;
-    /// The spine's vertices at a break and the profile's elements, and the elements of the caps
-    /// between pieces they generate (bindBreak)
-    TopTools_DataMapOfShapeListOfShape breakCopies;
+    /// The spine's vertices and the profile's elements, and the joints and the edges and vertices
+    /// of the caps between pieces they generate (bindJoints, bindBreak)
+    TopTools_DataMapOfShapeListOfShape copies;
 };
 
 // "Transformed" at the spine's corners (ops#370). It doesn't turn the profile at a corner: the
