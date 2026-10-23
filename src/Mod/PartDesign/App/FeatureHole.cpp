@@ -176,7 +176,7 @@ const std::vector<Hole::ThreadDescription> Hole::threadDescription[] = {
      {"M22x2.0", 22.0, 2.00, 20.00},   {"M24x1.0", 24.0, 1.00, 23.00},
      {"M24x1.5", 24.0, 1.50, 22.50},   {"M24x2.0", 24.0, 2.00, 22.00},
      {"M25x1.0", 25.0, 1.00, 24.00},   {"M25x1.5", 25.0, 1.50, 23.50},
-     {"M25x2.0", 25.0, 2.00, 23.00},   {"M26x1.5", 27.0, 1.00, 24.50},
+     {"M25x2.0", 25.0, 2.00, 23.00},   {"M26x1.5", 26.0, 1.50, 24.50},
      {"M27x1.0", 27.0, 1.00, 26.00},   {"M27x1.5", 27.0, 1.50, 25.50},
      {"M27x2.0", 27.0, 2.00, 25.00},   {"M28x1.0", 28.0, 1.00, 27.00},
      {"M28x1.5", 28.0, 1.50, 26.50},   {"M28x2.0", 28.0, 2.00, 26.00},
@@ -186,7 +186,7 @@ const std::vector<Hole::ThreadDescription> Hole::threadDescription[] = {
      {"M33x1.5", 33.0, 1.50, 31.50},   {"M33x2.0", 33.0, 2.00, 31.00},
      {"M33x3.0", 33.0, 3.00, 30.00},   {"M35x1.5", 35.0, 1.50, 33.50},
      {"M36x1.5", 36.0, 1.50, 34.50},   {"M36x2.0", 36.0, 2.00, 34.00},
-     {"M36x3.0", 36.0, 3.00, 33.00},   {"M38x1.5", 39.0, 1.50, 36.50},
+     {"M36x3.0", 36.0, 3.00, 33.00},   {"M38x1.5", 38.0, 1.50, 36.50},
      {"M39x1.5", 39.0, 1.50, 37.50},   {"M39x2.0", 39.0, 2.00, 37.00},
      {"M39x3.0", 39.0, 3.00, 36.00},   {"M40x1.5", 40.0, 1.50, 38.50},
      {"M40x2.0", 40.0, 2.00, 38.00},   {"M40x3.0", 40.0, 3.00, 37.00},
@@ -1329,63 +1329,97 @@ static double pitchInListedSizes(const std::vector<std::string>& designations, i
     return found == 1 ? pitch : 0.0;
 }
 
+// FreeCAD-CH (ops#457): what the expression of ThreadSize gives, as a place in a size list
+struct BoundThreadSize
+{
+    std::string given;  // the value as text, for the messages
+    int index = -1;     // the place in the list the enumeration would take it to; -1: none
+    bool whole = true;  // false: a number with a fraction, which the enumeration truncates
+};
+
+// nullopt: no expression, or one that doesn't evaluate (the engine reports that)
+static std::optional<BoundThreadSize> evaluateBoundThreadSize(
+    const Hole& hole,
+    const std::vector<std::string>& designations
+)
+{
+    const auto info = hole.getExpression(App::ObjectIdentifier(hole.ThreadSize));
+    if (!info.expression) {
+        return std::nullopt;
+    }
+    BoundThreadSize bound;
+    try {
+        const boost::any value = info.expression->getValueAsAny();
+        // a size's name, or its place in the list (the enumeration takes either)
+        std::optional<double> number;
+        if (const auto* name = boost::any_cast<std::string>(&value)) {
+            bound.given = *name;
+            const auto found = std::find(designations.begin(), designations.end(), *name);
+            if (found != designations.end()) {
+                bound.index = static_cast<int>(found - designations.begin());
+            }
+        }
+        else if (const auto* real = boost::any_cast<double>(&value)) {
+            number = *real;
+        }
+        else if (const auto* integer = boost::any_cast<long>(&value)) {
+            number = static_cast<double>(*integer);
+        }
+        else if (const auto* plain = boost::any_cast<int>(&value)) {
+            number = static_cast<double>(*plain);
+        }
+        else if (const auto* quantity = boost::any_cast<Base::Quantity>(&value)) {
+            number = quantity->getValue();
+        }
+        else {
+            return std::nullopt;
+        }
+        if (number) {
+            bound.given = std::to_string(*number);
+            if (*number >= 0.0 && *number < static_cast<double>(designations.size())) {
+                bound.index = static_cast<int>(*number);
+                bound.whole = *number == std::floor(*number);
+            }
+        }
+    }
+    catch (const Base::Exception&) {
+        return std::nullopt;
+    }
+    return bound;
+}
+
 // FreeCAD-CH (ops#405 N2, decision 116): a ThreadSize bound to an expression whose value isn't a
-// size of the thread type (a type change leaves the expression's old size behind): the enum took
-// its first size without a word. Said in the Report view; the expression stays
+// size of the thread type (a type change leaves the expression's old size behind): the size is
+// not the expression's. Said in the Report view; the expression stays. (ops#457: a number with a
+// fraction is truncated to the place before it, which the message says.)
 static void warnOfUnlistedThreadSize(const Hole& hole)
 {
     if (!hole.ThreadType.isValid() || hole.ThreadType.getValue() == 0) {
         return;
     }
-    const auto info = hole.getExpression(App::ObjectIdentifier(hole.ThreadSize));
-    if (!info.expression) {
+    const auto bound = evaluateBoundThreadSize(
+        hole,
+        getThreadDesignations(hole.ThreadType.getValue())
+    );
+    if (!bound || (bound->index >= 0 && bound->whole)) {
         return;
     }
-    const std::vector<std::string> designations = getThreadDesignations(hole.ThreadType.getValue());
-    std::string given;
-    bool listed = false;
-    try {
-        const boost::any value = info.expression->getValueAsAny();
-        // a size's name, or its index in the list (the enumeration takes either)
-        std::optional<double> index;
-        if (const auto* name = boost::any_cast<std::string>(&value)) {
-            given = *name;
-            listed = std::find(designations.begin(), designations.end(), given)
-                != designations.end();
-        }
-        else if (const auto* real = boost::any_cast<double>(&value)) {
-            index = *real;
-        }
-        else if (const auto* integer = boost::any_cast<long>(&value)) {
-            index = static_cast<double>(*integer);
-        }
-        else if (const auto* plain = boost::any_cast<int>(&value)) {
-            index = static_cast<double>(*plain);
-        }
-        else if (const auto* quantity = boost::any_cast<Base::Quantity>(&value)) {
-            index = quantity->getValue();
-        }
-        else {
-            return;
-        }
-        if (index) {
-            given = std::to_string(*index);
-            listed = *index >= 0.0 && *index < static_cast<double>(designations.size())
-                && *index == std::floor(*index);
-        }
-    }
-    catch (const Base::Exception&) {
-        return;  // an expression that doesn't evaluate is reported by the engine
-    }
-    if (!listed) {
+    if (bound->index >= 0) {
         FC_WARN(
-            hole.getFullName() << ": the expression of ThreadSize gives '" << given
-                               << "', which is no size of the thread type '"
+            hole.getFullName() << ": the expression of ThreadSize gives '" << bound->given
+                               << "', which is no whole place in the sizes of the thread type '"
                                << hole.ThreadType.getValueAsString()
-                               << "'. The expression is kept, and the size is the enumeration's "
-                                  "fallback"
+                               << "'. The expression is kept, and the size is the one at place "
+                               << bound->index
         );
+        return;
     }
+    FC_WARN(
+        hole.getFullName() << ": the expression of ThreadSize gives '" << bound->given
+                           << "', which is no size of the thread type '"
+                           << hole.ThreadType.getValueAsString()
+                           << "'. The expression is kept, and the size is not the expression's"
+    );
 }
 
 void Hole::findClosestDesignation(double oldPitch, bool byDiameter)
@@ -1466,7 +1500,21 @@ void Hole::onChanged(const App::Property* prop)
                 oldPitch = pitchInListedSizes(ThreadSize.getEnumVector(), ThreadSize.getValue());
             }
             ThreadSize.setEnums(getThreadDesignations(ThreadType.getValue()));
-            if (type != "None") {
+            // FreeCAD-CH (ops#457): the expression of ThreadSize, evaluated before the type's,
+            // met the old type's list: a name only the new type lists took that list's first size,
+            // and the closest size was then picked from that one. The bound size is the size
+            // (a restore keeps what was saved: the cells may not be loaded yet)
+            std::optional<BoundThreadSize> bound;
+            if (type != "None" && !isRestoring()) {
+                bound = evaluateBoundThreadSize(
+                    *this,
+                    getThreadDesignations(ThreadType.getValue())
+                );
+            }
+            if (bound && bound->index >= 0) {
+                ThreadSize.setValue(static_cast<long>(bound->index));
+            }
+            else if (type != "None") {
                 const bool sizeKept = ThreadSize.isValid()
                     && oldThreadSize == ThreadSize.getValueAsString();
                 const bool changed = !isRestoring() && !sizeKept;

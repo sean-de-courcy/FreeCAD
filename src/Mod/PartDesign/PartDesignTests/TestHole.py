@@ -476,6 +476,131 @@ class TestHole(unittest.TestCase):
         self.assertEqual(self.Hole.ThreadSize, "1/2")
         self.assertEqual(dict(self.Hole.ExpressionEngine).get("ThreadSize"), "Sheet.B1")
 
+    def testIsoFineSizesNextToTheRepeatedRowsSurviveReopen(self):
+        """ops#404: the ISO metric fine table's M26x1.5 row held M27x1.0's diameter and pitch,
+        and M38x1.5's those of M39x1.5. A hole of M27x1.0 reopened as M26x1.5 (the restore picks
+        the first row nearest the saved diameter and pitch), M39x1.5 as M38x1.5, and M26x1.5 and
+        M38x1.5 holes were 27 and 39 mm. Each of the four reopens as itself with its own
+        diameter."""
+        self.Hole.ThreadType = "ISOMetricFineProfile"
+        for size, diameter in (
+            ("M26x1.5", 26.0),
+            ("M27x1.0", 27.0),
+            ("M38x1.5", 38.0),
+            ("M39x1.5", 39.0),
+        ):
+            self.Hole.ThreadSize = size
+            self.Doc.recompute()
+            self.assertAlmostEqual(self.Hole.ThreadDiameter.Value, diameter, msg=size)
+
+            folder = tempfile.mkdtemp()
+            path = os.path.join(folder, "PartDesignTestHoleFine.FCStd")
+            self.Doc.saveAs(path)
+            FreeCAD.closeDocument(self.Doc.Name)
+            self.Doc = FreeCAD.openDocument(path)
+            self.Hole = self.Doc.getObject("Hole")
+            self.assertEqual(self.Hole.ThreadSize, size)
+            self.assertAlmostEqual(self.Hole.ThreadDiameter.Value, diameter, msg=size)
+
+    def bindTypeAndSize(self, typeCell, sizeCell, order):
+        """A spreadsheet with the type in A1 and the size in B1, bound to the hole's ThreadType
+        and ThreadSize in the order given, then one recompute (ops#457)."""
+        sheet = self.Doc.addObject("Spreadsheet::Sheet", "Sheet")
+        sheet.set("A1", "'" + typeCell)
+        sheet.set("B1", "'" + sizeCell)
+        self.Doc.recompute()
+        cells = {"ThreadType": "Sheet.A1", "ThreadSize": "Sheet.B1"}
+        for prop in order:
+            self.Hole.setExpression(prop, cells[prop])
+        self.Doc.recompute()
+        return sheet
+
+    def assertHoleIsOfSize(self, threadType, threadSize, msg):
+        """The hole has the type and size, and the diameters a hole set directly to them has
+        (the expressions are taken off for the comparison and put back)."""
+        self.assertEqual(
+            (self.Hole.ThreadType, self.Hole.ThreadSize), (threadType, threadSize), msg
+        )
+        bound = (self.Hole.ThreadDiameter.Value, self.Hole.Diameter.Value)
+        expressions = dict(self.Hole.ExpressionEngine)
+        for prop in expressions:
+            self.Hole.setExpression(prop, None)
+        self.Hole.ThreadType = "None"
+        self.Hole.ThreadType = threadType
+        self.Hole.ThreadSize = threadSize
+        self.Doc.recompute()
+        self.assertEqual((self.Hole.ThreadType, self.Hole.ThreadSize), (threadType, threadSize))
+        self.assertGreater(self.Hole.ThreadDiameter.Value, 0.0, msg)
+        self.assertAlmostEqual(bound[0], self.Hole.ThreadDiameter.Value, msg=msg)
+        self.assertAlmostEqual(bound[1], self.Hole.Diameter.Value, msg=msg)
+        for prop, expression in expressions.items():
+            self.Hole.setExpression(prop, expression)
+        self.Doc.recompute()
+        self.assertEqual(
+            (self.Hole.ThreadType, self.Hole.ThreadSize), (threadType, threadSize), msg
+        )
+
+    def testThreadTypeAndSizeBoundTogetherChangeInOneRecompute(self):
+        """ops#457: ThreadType and ThreadSize bound to cells, both cells changed before one
+        recompute. ThreadSize's expression is applied first, its name is no size of the old type,
+        so the enumeration took its first size (M1x0.25), and the type change then picked the
+        size closest to that: M12x1.75 gave M1x0.25, UNC 1/4 gave UNC #1, M6x1.0 gave M1.8x0.35,
+        silently. The size is the bound cell's, in both orders of binding."""
+        steps = (
+            ("UNC", "1/4"),
+            ("ISOMetricProfile", "M6x1.0"),
+            ("ISOMetricFineProfile", "M20x1.5"),
+            ("ISOMetricProfile", "M12x1.75"),
+        )
+        for order in (("ThreadType", "ThreadSize"), ("ThreadSize", "ThreadType")):
+            self.tearDown()
+            self.setUp()
+            sheet = self.bindTypeAndSize("ISOMetricProfile", "M12x1.75", order)
+            self.assertHoleIsOfSize("ISOMetricProfile", "M12x1.75", (order, "bound"))
+            for typeCell, sizeCell in steps:
+                sheet.set("A1", "'" + typeCell)
+                sheet.set("B1", "'" + sizeCell)
+                self.Doc.recompute()
+                self.assertHoleIsOfSize(typeCell, sizeCell, (order, typeCell, sizeCell))
+
+    def testThreadTypeAndSizeBoundBeforeTheFirstRecompute(self):
+        """ops#457: both bound at once (the hole is of type None, sized for no thread), one
+        recompute: the cells' size, not the first of the type."""
+        for typeCell, sizeCell in (
+            ("ISOMetricProfile", "M12x1.75"),
+            ("UNC", "1/4"),
+            ("ISOMetricProfile", "M6x1.0"),
+        ):
+            for order in (("ThreadType", "ThreadSize"), ("ThreadSize", "ThreadType")):
+                self.tearDown()
+                self.setUp()
+                self.bindTypeAndSize(typeCell, sizeCell, order)
+                self.assertHoleIsOfSize(typeCell, sizeCell, (order, typeCell, sizeCell))
+
+    def testThreadSizeExpressionWithAFractionIsTruncatedAndSaid(self):
+        """ops#457 (PR 360 round 2, F2): ThreadSize bound to 2.5 takes the size at place 2 (the
+        enumeration truncates), and the warning says so, not that the size is the enumeration's
+        fallback."""
+        sheet = self.Doc.addObject("Spreadsheet::Sheet", "Sheet")
+        sheet.set("A1", "'ISOMetricProfile")
+        sheet.set("B1", "2.5")
+        self.Doc.recompute()
+        self.Hole.setExpression("ThreadType", "Sheet.A1")
+        self.Doc.recompute()
+        self.Hole.setExpression("ThreadSize", "Sheet.B1")
+        printed = self.consoleOutput(self.Doc.recompute)
+        sizes = self.Hole.getEnumerationsOfProperty("ThreadSize")
+        self.assertEqual(self.Hole.ThreadSize, sizes[2])
+        self.assertIn("the expression of ThreadSize gives '2.5", printed)
+        self.assertIn("no whole place in the sizes of the thread type 'ISOMetricProfile'", printed)
+        self.assertIn("the size is the one at place 2", printed)
+        self.assertNotIn("fallback", printed)
+
+        sheet.set("B1", "3")
+        printed = self.consoleOutput(self.Doc.recompute)
+        self.assertEqual(self.Hole.ThreadSize, sizes[3])
+        self.assertNotIn("ThreadSize", printed)
+
     def testNoRefineHole(self):
         # Add a second box to get a shape with more faces
         self.Box2 = self.Doc.addObject("PartDesign::AdditiveBox", "Box")
