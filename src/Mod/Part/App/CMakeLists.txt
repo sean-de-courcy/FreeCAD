@@ -590,6 +590,8 @@ SET(Part_SRCS
     Services.h
     SignalException.cpp
     SignalException.h
+    SweepFrenet.cpp
+    SweepFrenet.h
     TopoShape.cpp
     TopoShape.h
     TopoShapeCache.cpp

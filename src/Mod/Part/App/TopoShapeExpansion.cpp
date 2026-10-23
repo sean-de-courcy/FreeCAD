@@ -145,6 +145,7 @@
 #include "BRepOffsetAPI_MakeOffsetFix.h"
 #include "ProgressIndicator.h"
 #include "ShapeAnalysis_FreeBoundsFix.h"
+#include "SweepFrenet.h"
 
 #include <App/Application.h>
 #include <App/Document.h>
@@ -4576,7 +4577,6 @@ TopoShape& TopoShape::makeElementPipeShell(
             transMode = BRepBuilderAPI_Transformed;
             break;
     }
-    mkPipeShell.SetMode(isFrenet);
     mkPipeShell.SetTransitionMode(transMode);
     if (tol3d != 0.0 || tolBound != 0.0 || tolAngular != 0.0) {
         if (tol3d == 0.0) {
@@ -4592,6 +4592,19 @@ TopoShape& TopoShape::makeElementPipeShell(
     }
 
     const std::vector<TopoShape> profiles = prepareProfiles(shapes, 1);
+    std::vector<TopoDS_Shape> sections;
+    for (auto& sh : profiles) {
+        sections.push_back(sh.getShape());
+    }
+    // Frenet's trihedron turns over at an inflection inside a spine edge (ops#421)
+    const double pipeTolerance = tol3d != 0.0 ? tol3d : 1e-4;
+    const SweepFrenet::Mode mode = SweepFrenet::setMode(
+        mkPipeShell,
+        TopoDS::Wire(spine.getShape()),
+        sections,
+        isFrenet,
+        pipeTolerance
+    );
     for (auto& sh : profiles) {
         mkPipeShell.Add(sh.getShape());
     }
@@ -4610,6 +4623,7 @@ TopoShape& TopoShape::makeElementPipeShell(
     // Shape() builds the pipe, which the mapper's FirstShape(), LastShape() and Generated() need.
     // The mapper reads the ends before MakeSolid(): after it, a point section's are null.
     mkPipeShell.Shape();
+    SweepFrenet::checkBuilt(mkPipeShell.Shape(), mode, pipeTolerance);
     // MakePipeShell's default 3D tolerance (BRepOffsetAPI_MakePipeShell::SetTolerance) unless set
     const MapperSweepEnds mapper(
         mkPipeShell,

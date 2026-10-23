@@ -92,6 +92,7 @@ set(Part_tests
     parttests/InternNamesTest.py
     parttests/ForkReleaseTest.py
     parttests/ForkReleaseGuiTest.py
+    parttests/SweepFrenetTest.py
     parttests/TestTangentMode3-0.21.FCStd
     parttests/TestPartMirror.py
     parttests/TestFaceMakerUnifiedPlanar.py

@@ -181,6 +181,7 @@
 #include "modelRefine.h"
 #include "PartPyCXX.h"
 #include "ProgressIndicator.h"
+#include "SweepFrenet.h"
 #include "Tools.h"
 #include "TopoShape.h"
 #include "TopoShapeCompoundPy.h"
@@ -2127,7 +2128,10 @@ TopoDS_Shape TopoShape::makePipeShell(
             transMode = BRepBuilderAPI_Transformed;
             break;
     }
-    mkPipeShell.SetMode(isFrenet);
+    // Frenet's trihedron turns over at an inflection inside a spine edge (ops#421)
+    std::vector<TopoDS_Shape> sections(profiles.begin(), profiles.end());
+    const SweepFrenet::Mode mode
+        = SweepFrenet::setMode(mkPipeShell, TopoDS::Wire(this->_Shape), sections, isFrenet, 1e-4);
     mkPipeShell.SetTransitionMode(transMode);
     TopTools_ListIteratorOfListOfShape it;
     for (it.Initialize(profiles); it.More(); it.Next()) {
@@ -2143,6 +2147,7 @@ TopoDS_Shape TopoShape::makePipeShell(
 #else
     mkPipeShell.Build();
 #endif
+    SweepFrenet::checkBuilt(mkPipeShell.Shape(), mode, 1e-4);
     if (make_solid) {
         mkPipeShell.MakeSolid();
     }

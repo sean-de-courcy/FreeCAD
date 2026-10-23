@@ -51,6 +51,7 @@ from parttests.AttachAcrossContainersTest import AttachAcrossContainersTest
 from parttests.TestPartMirror import TestPartMirroringRegression
 from parttests.CompoundFilterTest import CompoundFilterTest
 from parttests.RefineElementMapTest import RefineElementMapTest
+from parttests.SweepFrenetTest import SweepFrenetTest
 from parttests.TestFaceMakerUnifiedPlanar import *
 from parttests.TestFaceMakerUnifiedNonPlanar import *
 
