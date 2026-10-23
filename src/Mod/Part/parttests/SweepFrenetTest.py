@@ -227,6 +227,24 @@ def arc_s_edge(radius=3.0, line=0.0):
     return curve.toShape()
 
 
+def helix_edge(pitch, height, radius, angle=0.0):
+    """A right-handed helix about Z from (radius, 0, 0), on a cone of `angle` degrees widening
+    upwards, as Part.makeHelix makes it, but as one B-spline of degree 6 continuous in its fourth
+    derivative everywhere: one interval for the sweep's sampling, so 64 samples over the whole edge
+    (6.4 a turn over ten turns, as makeHelix's curves gave before ops#447)"""
+    turns = height / pitch
+    count = int(64 * turns)
+    points = []
+    for i in range(count + 1):
+        t = 2 * math.pi * turns * i / count
+        z = height * i / count
+        r = radius + z * math.tan(math.radians(angle))
+        points.append(V(r * math.cos(t), r * math.sin(t), z))
+    curve = Part.BSplineCurve()
+    curve.approximate(Points=points, DegMin=6, DegMax=6, Continuity="C3", Tolerance=1e-6 * radius)
+    return curve.toShape()
+
+
 def rectangle_on_side(wire, side, scale):
     """A rectangle in the plane normal to the spine's start, `scale` (0.5 to 2.5) from the spine
     along `side` and `scale` (-0.5 to 0.5) across"""
@@ -429,15 +447,15 @@ class SweepFrenetTest(unittest.TestCase):
         else:
             self.assertIn("Frenet frame turns over", sweep.getStatusString())
 
-    def assertFrenetHelix(self, pitch, height, radius, angle=0.0):
-        """A thread-like triangle beside a Part.makeHelix helix, its tip pointing away from the
-        axis, keeps OCCT's Frenet law: the same solid as MakePipeShell's own Frenet mode. Frenet's
-        normal points to the centre of curvature, towards the axis, so the triangle stays outside:
-        sliced normal to the helix a quarter, a half and three quarters of a turn into the first,
-        second, middle and last turns, the section's centre of mass is 2/3 of the triangle's size
-        from the helix against the curve's normal. (A long makeHelix curve strays from its helix:
-        0.154 from the axis half-way up the 100 turns of radius 0.1 below)"""
-        wire = Part.Wire([Part.makeHelix(pitch, height, radius, angle)])
+    def assertFrenetHelix(self, pitch, height, radius, angle=0.0, make=Part.makeHelix):
+        """A thread-like triangle beside a helix made by `make` (Part.makeHelix, or helix_edge()
+        for one sampling interval), its tip pointing away from the axis, keeps OCCT's Frenet law:
+        the same solid as MakePipeShell's own Frenet mode. Frenet's normal points to the centre of
+        curvature, towards the axis, so the triangle stays outside: sliced normal to the helix a
+        quarter, a half and three quarters of a turn into the first, second, middle and last turns,
+        the section's centre of mass is 2/3 of the triangle's size from the helix against the
+        curve's normal"""
+        wire = Part.Wire([make(pitch, height, radius, angle)])
         point, tangent = start_frame(wire)
         # Away from the centre of curvature: from the axis, tilted on a steep cone
         radial = -wire.Edges[0].normalAt(wire.Edges[0].FirstParameter)
@@ -474,11 +492,11 @@ class SweepFrenetTest(unittest.TestCase):
         self.assertEqual(len(sweep.Shape.Faces), len(pipe.shape().Faces))
 
     def testFrenetAlongAHelixWithoutSampling(self):
-        """A Part.makeHelix helix is one B-spline with about one knot span a turn, sampled 6.4
-        times a turn: neighbouring normals 56 degrees apart, two apart 113, while the frame turns
-        about the tangent by 2 degrees. Before, the sweep was refused, saying the frame turns over
-        (fork PR 358 round 3's verification, finding 2)"""
-        self.assertFrenetHelix(2.0, 20.0, 10.0)
+        """A helix sampled 6.4 times a turn (helix_edge(), as Part.makeHelix's curves were before
+        ops#447): neighbouring normals 56 degrees apart, two apart 113, while the frame turns about
+        the tangent by 1 degree. Before, the sweep was refused, saying the frame turns over (fork
+        PR 358 round 3's verification, finding 2)"""
+        self.assertFrenetHelix(2.0, 20.0, 10.0, make=helix_edge)
 
     def testFrenetAlongASteepHelix(self):
         """A steep helix's Frenet frame really turns about the tangent, by 360 c / sqrt(r^2 + c^2)
@@ -501,19 +519,21 @@ class SweepFrenetTest(unittest.TestCase):
         self.assertFrenetHelix(10.0, 1000.0, 0.1)
 
     def testFrenetAlongASteepConicalHelix(self):
-        """Steep helices on cones of 1 and 5 degrees: the frame twists by 40 to 50 degrees between
-        neighbouring samples where the cone is narrow and steep, and by less than 20 along the rest.
-        Before, they were refused, saying the frame turns over at their start (fork PR 358 round
-        5's verification, finding 2)"""
-        self.assertFrenetHelix(6.0, 60.0, 1.0, 1.0)
-        self.assertFrenetHelix(10.0, 100.0, 1.0, 5.0)
+        """Steep helices on cones of 3 and 5 degrees, sampled 6.4 times a turn (helix_edge()): the
+        frame twists fast where the cone is narrow and steep, by up to 52 and 74 degrees between
+        neighbouring samples and by more than a right angle two apart there, with the curvature
+        steady, and by 9 to 14 degrees along the rest, so the edge isn't sampled again. Before,
+        that was taken for a turn-over, and they were refused (fork PR 358 round 5's verification,
+        finding 2)"""
+        self.assertFrenetHelix(10.0, 100.0, 1.0, 3.0, make=helix_edge)
+        self.assertFrenetHelix(10.0, 100.0, 1.0, 5.0, make=helix_edge)
 
     def testFrenetAlongAFewTurnsOfASteepConicalHelix(self):
-        """Ten turns at a pitch of 100 times the radius on a cone of 3 degrees: the curvature rises
-        from the edge's start along the cone, where a turn of the frame is flagged with no samples
-        before it. Before, that was read as a dip, and the sweep was refused (fork PR 358 round 6's
-        verification, finding 3)"""
-        self.assertFrenetHelix(100.0, 1000.0, 1.0, 3.0)
+        """Ten turns at a pitch of 100 times the radius on a cone of 3 degrees, sampled 6.4 times a
+        turn (helix_edge()): the curvature rises from the edge's start along the cone, where a turn
+        of the frame is flagged with no samples before it. Before, that was read as a dip, and the
+        sweep was refused (fork PR 358 round 6's verification, finding 3)"""
+        self.assertFrenetHelix(100.0, 1000.0, 1.0, 3.0, make=helix_edge)
 
     def assertStaysOnItsSide(self, edge):
         """A rectangle beside a planar spine in XY, on its +Z side, its binormal's: the spine's

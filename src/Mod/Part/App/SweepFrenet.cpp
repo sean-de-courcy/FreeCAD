@@ -218,8 +218,8 @@ bool knotReverses(const BRepAdaptor_Curve& curve, double u0, double u1)
 /// The curvature of \a curve where \a law's frame turns over between \a u0 and \a u1, where the
 /// frame at \a u1 has turned by more than a right angle about the tangent from the one at \a u0:
 /// the last point turned by less and the first by more, found by SweepFrenet::turnBisections
-/// halvings, give the lower of their curvatures. A point without a frame (the curvature at the floor
-/// or below) gives 0.
+/// halvings, give the lower of their curvatures. A point without a frame (the curvature at the
+/// floor or below) gives 0.
 double turnOverCurvature(
     GeomFill_Frenet& law,
     const BRepAdaptor_Curve& curve,
@@ -365,11 +365,11 @@ Scan scanTurns(GeomFill_Frenet& law, const BRepAdaptor_Curve& curve, double leng
 /// or near zero: only a turn where the curvature dips counts (scanTurns()). Elsewhere the frame
 /// turns about the tangent by the curve's torsion, which a helix has all along (249 degrees a turn
 /// at a pitch of 6 times the radius), steep conical helices fast where they are narrow and slowly
-/// where they are wide, and which jumped at a knot of a long Part.makeHelix curve continuous only in
-/// its tangent (47 degrees, until ops#447): such turns were refused as turn-overs or swept in another frame (fork
-/// PR 358 round 5's verification, findings 1 and 2). Where the median turn between neighbours is
-/// above SweepFrenet::steadyTwistCosine's angle, the samples are too far apart to tell a twist
-/// from a turn-over, so the edge is sampled again twice as densely, at most
+/// where they are wide, and which jumped at a knot of a long Part.makeHelix curve continuous only
+/// in its tangent (47 degrees, until ops#447): such turns were refused as turn-overs or swept in
+/// another frame (fork PR 358 round 5's verification, findings 1 and 2). Where the median turn
+/// between neighbours is above SweepFrenet::steadyTwistCosine's angle, the samples are too far
+/// apart to tell a twist from a turn-over, so the edge is sampled again twice as densely, at most
 /// SweepFrenet::maxDoublings times, and a turn-over counts only if it is still found where the
 /// median is below that angle or at the last doubling. Planar spines don't turn about the tangent
 /// (median 0 at the inflections seen), so their samples don't change.

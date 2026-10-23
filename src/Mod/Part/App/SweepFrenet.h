@@ -48,7 +48,8 @@ constexpr int minSamples = 64;
 /// A sample's normal counts only where the curvature times the edge's length is above this
 constexpr double curvatureFloor = 1e-9;
 /// A sample interval across which the tangent turns by more than 45 degrees is halved, at most this
-/// many times (a Part.makeHelix helix got 6.4 samples a turn, its tangent turning 56 degrees)
+/// many times (a helix sampled 6.4 times a turn, as Part.makeHelix's curves were before ops#447:
+/// its tangent turns 56 degrees between samples)
 constexpr int maxHalvings = 6;
 /// A turn of the frame counts as a turn-over only where the curvature dips: its lowest value
 /// between the samples is at most this fraction of the median over the samples on either side.
