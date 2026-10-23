@@ -386,7 +386,8 @@ names it.
 | `polish/pd-followups` | polish | ops#395, ops#405, ops#410 | - | `integration` `df872a5f80` | `7fe252a1b5` (fork PR 360), 2026-10-23 | never (fork feature) |
 | `fix/446-merged-neighbours` | fix | ops#446 | - | `integration` `7fe252a1b5` | `13bc96d0ad` (fork PR 361), 2026-10-23 | never (fork fix) |
 | `fix/447-makehelix-accuracy` | fix | ops#447 | - | `integration` `2d2ac2ac5b` | `eb39b884e5` (fork PR 364), 2026-10-23 | never (fork fix) |
-| `infra/418-gen0-script` | infra | ops#418 | none | `integration` `7fe252a1b5` | (fork PR 365) | never |
+| `infra/418-gen0-script` | infra | ops#418 | none | `integration` `7fe252a1b5` | `30dabfe2f2` (fork PR 365), 2026-10-23 | never |
+| `fix/450-upto-followups` | fix | ops#450 | - | `integration` `2d2ac2ac5b` | (fork PR 362) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 

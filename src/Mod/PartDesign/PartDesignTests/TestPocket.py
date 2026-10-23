@@ -423,6 +423,52 @@ class TestPocket(unittest.TestCase):
                 finally:
                     FreeCAD.closeDocument(doc.Name)
 
+    def testPocketUpToATunnelOfElementaryFaces(self):
+        # ops#450 (fork PR 359 review, finding 1): the block x, y, z -10..10 with a tunnel of
+        # radius 5 about the x axis, and a Pocket from the square x, y -3..3 on its top, down to
+        # the tunnel's (concave) cylinder face. It removes the material from the top down to the
+        # tunnel's roof, z = sqrt(25 - y^2): 6 (60 - integral of sqrt(25 - y^2) over y -3..3) =
+        # 6 (48 - 25 asin(0.6)), 191.47. BRepFeat removed nothing: a valid Pocket. fillsBehind()
+        # sends it to the split, which builds it right
+        import math
+        import Part
+        from PartDesignTests.TestPad import PRISM_VOLUME_RELATIVE, squareSketch
+
+        V = FreeCAD.Vector
+        block = Part.makeBox(20, 20, 20, V(-10, -10, -10)).cut(
+            Part.makeCylinder(5, 20, V(-10, 0, 0), V(1, 0, 0))
+        )
+        doc = FreeCAD.newDocument("PocketUpToATunnelOfElementaryFaces")
+        try:
+            base = doc.addObject("Part::Feature", "Base")
+            base.Shape = block
+            body = doc.addObject("PartDesign::Body", "Body")
+            baseFeature = body.newObject("PartDesign::FeatureBase", "BaseFeature")
+            baseFeature.BaseFeature = base
+            doc.recompute()
+            names = [
+                "Face%d" % i
+                for i, face in enumerate(baseFeature.Shape.Faces, 1)
+                if face.Surface.TypeId == "Part::GeomCylinder"
+            ]
+            placement = FreeCAD.Placement(V(0, 0, 10), FreeCAD.Rotation())
+            sketch = squareSketch(body, "Square", placement, [(-3, -3, 3, 3)])
+            pocket = body.newObject("PartDesign::Pocket", "Pocket")
+            pocket.Profile = sketch
+            pocket.Type = "UpToFace"
+            pocket.UpToFace = (baseFeature, names)
+            doc.recompute()
+            self.assertTrue(pocket.isValid(), pocket.getStatusString())
+            expected = 6 * (48 - 25 * math.asin(0.6))
+            self.assertAlmostEqual(
+                block.Volume - pocket.Shape.Volume,
+                expected,
+                delta=PRISM_VOLUME_RELATIVE * expected,
+            )
+            self.assertEqual(len(pocket.Shape.Solids), 1)
+        finally:
+            FreeCAD.closeDocument(doc.Name)
+
     def testPocketUpToABaseWithNames(self):
         """ops#347, review of fork PR 321: a Pocket that cuts through the base, up to its far
         face, keeps the base's names and has the topology of the box less the hole."""
