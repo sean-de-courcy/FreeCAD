@@ -143,7 +143,11 @@ namespace
 // in the order of the maker's history list (a group's generated or modified members) or of the
 // members' places on the face they are named from (UPP), where it followed the order OCCT
 // stores sub-shapes in.
-constexpr int ForkNamingRevision = 6;
+// 7: ops#386, a Pad's or Pocket's far edge cut into several pieces by the up-to shape names each
+// piece by the up-to face and edges it lies on and ends at, and by its place along the edge among
+// how many there are (PRJ,MOD,ORD), where the pieces were told apart by a counter in the
+// splitter's order.
+constexpr int ForkNamingRevision = 7;
 
 // The `.N<n>` of the element map version: the form interned names are saved in (ops#6). 2: the
 // references are indices into the file's table (NamingFormat 2).
