@@ -281,6 +281,79 @@ class TestMultiTransform(unittest.TestCase):
             tops.update(harness.topFaceInstances(multi.Shape, z))
         self.assertEqual(sorted(tops.values()), [[], ["2"], ["3"]])
 
+    def testScaledAboutALongWavesCentre(self):
+        """Scaled scales about the original's true centre of mass (ops#428).
+
+        A Pad, 10 high, of a steep wave x = 4 (1 - cos(2 pi y / 10)), y = 0..100, one cubic
+        B-spline of 100 spans, closed at x = -5; Scaled by 2 with 2 occurrences. OCCT's default
+        integration put the centre at x = -4.16 instead of -0.054. The scale centre c follows
+        from the boxes, whose low sides are the flat faces x = -5, y = 0 and z = 0: the copy's are
+        at c + 2 (low - c). The section's centre is integrated along its boundary (Green's
+        theorem), by 5-point Gauss-Legendre on each knot span of the wave; y is half the length by
+        symmetry, z half the height."""
+        import Part
+
+        V = FreeCAD.Vector
+        spans = 100
+        points = [V(4 * (1 - math.cos(2 * math.pi * y / 10)), y, 0) for y in range(spans + 1)]
+        wave = Part.BSplineCurve()
+        wave.interpolate(points)
+        corners = [V(0, spans, 0), V(-5, spans, 0), V(-5, 0, 0), V(0, 0, 0)]
+
+        nodes = [
+            (-0.9061798459386640, 0.2369268850561891),
+            (-0.5384693101056831, 0.4786286704993665),
+            (0.0, 0.5688888888888889),
+            (0.5384693101056831, 0.4786286704993665),
+            (0.9061798459386640, 0.2369268850561891),
+        ]
+
+        def boundaryIntegral(integrand):
+            """The integral of integrand(point, tangent) along the section's boundary"""
+            total = 0.0
+            knots = wave.getKnots()
+            for a, b in zip(knots, knots[1:]):
+                for x, w in nodes:
+                    point, tangent = wave.getD1((a + b) / 2 + (b - a) / 2 * x)
+                    total += w * (b - a) / 2 * integrand(point, tangent)
+            for a, b in zip(corners, corners[1:]):
+                for x, w in nodes:
+                    total += w / 2 * integrand(a + (b - a) * (0.5 + 0.5 * x), b - a)
+            return total
+
+        area = boundaryIntegral(lambda p, t: p.x * t.y)
+        centreX = boundaryIntegral(lambda p, t: p.x * p.x / 2 * t.y) / area
+
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        sketch = body.newObject("Sketcher::SketchObject", "Sketch")
+        sketch.AttachmentSupport = (self.Doc.getObject("XY_Plane"), [""])
+        sketch.MapMode = "FlatFace"
+        sketch.addGeometry(wave, False)
+        for a, b in zip(corners, corners[1:]):
+            sketch.addGeometry(Part.LineSegment(a, b), False)
+        self.Doc.recompute()
+        pad = body.newObject("PartDesign::Pad", "Pad")
+        pad.Profile = sketch
+        pad.Length = 10
+        pad.Refine = False
+        self.Doc.recompute()
+        multi = self.Doc.addObject("PartDesign::MultiTransform", "MultiTransform")
+        multi.Originals = [pad]
+        multi.Refine = False
+        body.addObject(multi)
+        scaled = self.Doc.addObject("PartDesign::Scaled", "Scaled")
+        scaled.Factor = 2
+        scaled.Occurrences = 2
+        body.addObject(scaled)
+        multi.Transformations = [scaled]
+        self.Doc.recompute()
+        self.assertTrue(multi.isValid(), multi.getStatusString())
+        low = pad.AddSubShape.BoundBox
+        scaledLow = multi.Shape.BoundBox
+        self.assertAlmostEqual(2 * low.XMin - scaledLow.XMin, centreX, delta=1e-4)
+        self.assertAlmostEqual(2 * low.YMin - scaledLow.YMin, spans / 2, delta=1e-4)
+        self.assertAlmostEqual(2 * low.ZMin - scaledLow.ZMin, 5, delta=1e-4)
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("PartDesignTestMultiTransform")

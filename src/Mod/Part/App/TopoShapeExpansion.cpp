@@ -134,6 +134,7 @@
 #include "modelRefine.h"
 #include "CrossSection.h"
 #include "FilletFallback.h"
+#include "MassProperties.h"
 #include "TopoShape.h"
 #include "TopoShapeOpCode.h"
 #include "TopoShapeCache.h"
@@ -4913,7 +4914,7 @@ TopoShape& TopoShape::makeElementOffset(
             // contrary to the occ docs the return value OrientCloseSolid doesn't
             // indicate whether the shell was open or not. It returns true with an
             // open shell and we end up with an invalid solid.
-            if (BRepLib::OrientClosedSolid(temp)) {
+            if (MassProperties::orientClosedSolid(temp)) {
                 outputShape = temp;
             }
         }
@@ -6521,7 +6522,7 @@ TopoShape& TopoShape::makeElementSolid(const TopoShape& shape, const char* op)
         makeElementShape(mkSolid, shape, op);
 
         TopoDS_Solid solid = TopoDS::Solid(_Shape);
-        BRepLib::OrientClosedSolid(solid);
+        MassProperties::orientClosedSolid(solid);
         setShape(solid, false);
     }
     else if (count == 1) {
@@ -9289,7 +9290,7 @@ bool TopoShape::fixSolidOrientation()
 
     if (shapeType() == TopAbs_SOLID) {
         TopoDS_Solid solid = TopoDS::Solid(_Shape);
-        BRepLib::OrientClosedSolid(solid);
+        MassProperties::orientClosedSolid(solid);
         if (solid.IsEqual(_Shape)) {
             return false;
         }

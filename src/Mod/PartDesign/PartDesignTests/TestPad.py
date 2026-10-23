@@ -3159,6 +3159,126 @@ class TestPad(unittest.TestCase):
         refined = len(self._tubeWithTabAtTheSeam(True).Shape.Faces)
         self.assertLess(refined, unrefined)
 
+    @staticmethod
+    def _flatFaceNormal(shape, z):
+        """The outward normal, as its orientation within the shape gives it, of the shape's one
+        planar face at height z: up on the top of a solid oriented outwards. An orientation oracle
+        that uses neither OCCT's classifier nor its mass integration, which both go wrong on long
+        curved B-spline faces (ops#414, ops#426)."""
+        faces = [
+            face
+            for face in shape.Faces
+            if face.Surface.TypeId == "Part::GeomPlane"
+            and abs(face.BoundBox.ZMin - z) < 1e-7
+            and abs(face.BoundBox.ZMax - z) < 1e-7
+        ]
+        assert len(faces) == 1, len(faces)
+        return faces[0].normalAt(0, 0)
+
+    def _waveSketch(self, body, name, spans, amplitude, period):
+        """A sketch on XY of the wave x = amplitude (1 - cos(2 pi y / period)), y = 0..spans, one
+        cubic B-spline of `spans` spans, closed at x = -5"""
+        points = [
+            FreeCAD.Vector(amplitude * (1 - math.cos(2 * math.pi * y / period)), y, 0)
+            for y in range(spans + 1)
+        ]
+        wave = Part.BSplineCurve()
+        wave.interpolate(points)
+        sketch = body.newObject("Sketcher::SketchObject", name)
+        sketch.AttachmentSupport = (self.Doc.getObject("XY_Plane"), [""])
+        sketch.MapMode = "FlatFace"
+        sketch.addGeometry(wave, False)
+        corners = [(0, spans), (-5, spans), (-5, 0), (0, 0)]
+        for (x0, y0), (x1, y1) in zip(corners, corners[1:]):
+            sketch.addGeometry(
+                Part.LineSegment(FreeCAD.Vector(x0, y0, 0), FreeCAD.Vector(x1, y1, 0)), False
+            )
+        return sketch
+
+    def _squareSketch(self, body, name, x, y, z=0):
+        """A 2 x 2 square sketch on XY at height z, its corner at (x, y)"""
+        sketch = body.newObject("Sketcher::SketchObject", name)
+        sketch.AttachmentSupport = (self.Doc.getObject("XY_Plane"), [""])
+        sketch.MapMode = "FlatFace"
+        sketch.AttachmentOffset = FreeCAD.Placement(FreeCAD.Vector(0, 0, z), FreeCAD.Rotation())
+        corners = [(x, y), (x + 2, y), (x + 2, y + 2), (x, y + 2), (x, y)]
+        for (x0, y0), (x1, y1) in zip(corners, corners[1:]):
+            sketch.addGeometry(
+                Part.LineSegment(FreeCAD.Vector(x0, y0, 0), FreeCAD.Vector(x1, y1, 0)), False
+            )
+        return sketch
+
+    def testRefineKeepsALongWaveOutward(self):
+        """A Pad, a Pocket and a Pad, all with Refine, on a steep wave of 1000 spans stay
+        outward (ops#426).
+
+        The Pad of the wave (period 10, amplitude 4, closed at x = -5, 10 high), a 2 x 2 Pocket
+        through all at y = 500, a 2 x 2 x 5 Pad on top at y = 250. Refine's orientation step
+        (BRepLib::OrientClosedSolid) turned the Pocket's solid inside out with status Valid, and
+        the Pad on top of it then lost its material."""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        sketch = self._waveSketch(body, "Sketch", 1000, 4, 10)
+        self.Doc.recompute()
+        pad = body.newObject("PartDesign::Pad", "Pad")
+        pad.Profile = sketch
+        pad.Length = 10
+        pad.Refine = True
+        self.Doc.recompute()
+        pocket = body.newObject("PartDesign::Pocket", "Pocket")
+        pocket.Profile = self._squareSketch(body, "Sketch001", -4, 500)
+        pocket.Type = "ThroughAll"
+        pocket.Reversed = True
+        pocket.Refine = True
+        self.Doc.recompute()
+        top = body.newObject("PartDesign::Pad", "Pad001")
+        top.Profile = self._squareSketch(body, "Sketch002", -4, 250, 10)
+        top.Length = 5
+        top.Refine = True
+        self.Doc.recompute()
+        V = FreeCAD.Vector
+        for feature in (pad, pocket, top):
+            self.assertTrue(feature.isValid(), feature.Name)
+            self.assertLess((self._flatFaceNormal(feature.Shape, 10) - V(0, 0, 1)).Length, 1e-9)
+            self.assertLess((self._flatFaceNormal(feature.Shape, 0) - V(0, 0, -1)).Length, 1e-9)
+        # 1 mm cubes in the pocket and in the second Pad: plain boxes, away from the wave, so
+        # their common volumes are exact
+        inPocket = Part.makeBox(1, 1, 1, V(-3.5, 500.5, 4.5))
+        inTop = Part.makeBox(1, 1, 1, V(-3.5, 250.5, 12))
+        self.assertAlmostEqual(top.Shape.common(inPocket).Volume, 0, places=6)
+        self.assertAlmostEqual(top.Shape.common(inTop).Volume, 1, places=6)
+
+    def testUpToFirstFromTheProfilesCentre(self):
+        """Pad UpToFirst finds its face from the profile's true centre (ops#428).
+
+        The profile is a steep wave (period 10, amplitude 4) of 400 spans closed at x = -5: its
+        centre is at x = -0.054, and OCCT's default integration put it at x = -0.78. The base is a
+        plate at z = 10..12 over x > -0.5 and one at z = 20..22 over all of the profile, joined by a
+        wall beyond it. The ray up from the true centre meets the lower plate first, so the Pad
+        ends at z = 10 under the whole profile; from the wrong centre it went on to z = 20."""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        spans = 400
+        V = FreeCAD.Vector
+        lower = Part.makeBox(17.5, spans + 20, 2, V(-0.5, -10, 10))
+        upper = Part.makeBox(27, spans + 20, 2, V(-10, -10, 20))
+        wall = Part.makeBox(2, spans + 20, 8, V(15, -10, 12))
+        plates = self.Doc.addObject("Part::Feature", "Plates")
+        plates.Shape = lower.fuse([upper, wall]).removeSplitter()
+        body.BaseFeature = plates
+        sketch = self._waveSketch(body, "Sketch", spans, 4, 10)
+        self.Doc.recompute()
+        pad = body.newObject("PartDesign::Pad", "Pad")
+        pad.Profile = sketch
+        pad.Type = "UpToFirst"
+        pad.Refine = False
+        self.Doc.recompute()
+        self.assertTrue(pad.isValid(), pad.getStatusString())
+        # 1 mm cubes beside the lower plate's edge, below and above z = 10: plain boxes, away
+        # from the wave, so their common volumes are exact
+        below = Part.makeBox(1, 1, 1, V(-3.5, spans / 2, 8.5))
+        above = Part.makeBox(1, 1, 1, V(-3.5, spans / 2, 14.5))
+        self.assertAlmostEqual(pad.Shape.common(below).Volume, 1, places=6)
+        self.assertAlmostEqual(pad.Shape.common(above).Volume, 0, places=6)
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("PartDesignTestPad")

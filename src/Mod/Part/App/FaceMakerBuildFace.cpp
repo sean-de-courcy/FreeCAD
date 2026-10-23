@@ -23,6 +23,7 @@
  ***************************************************************************/
 
 #include "FaceMakerBuildFace.h"
+#include "MassProperties.h"
 
 #include <Bnd_Box.hxx>
 #include <BOPAlgo_BuilderFace.hxx>
@@ -32,7 +33,6 @@
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
-#include <BRepGProp.hxx>
 #include <BRepLib.hxx>
 #include <BRepLib_FindSurface.hxx>
 #include <Geom2dAPI_InterCurveCurve.hxx>
@@ -41,7 +41,6 @@
 #include <Geom_Line.hxx>
 #include <GeomAdaptor_Surface.hxx>
 #include <GeomAPI.hxx>
-#include <GProp_GProps.hxx>
 #include <Precision.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
@@ -269,9 +268,9 @@ std::vector<TopoDS_Face> Part::FaceMakerBuildFace::collectBoundedFaces(
         if (box.SquareExtent() > outerThreshold) {
             continue;
         }
-        GProp_GProps props;
-        BRepGProp::SurfaceProperties(it.Value(), props);
-        if (props.Mass() < Precision::Confusion()) {
+        // OCCT's default area of a face bounded by a long curved B-spline can be far off, even
+        // below zero (ops#414, ops#428)
+        if (MassProperties::area(it.Value()) < Precision::Confusion()) {
             continue;
         }
         faces.push_back(TopoDS::Face(it.Value()));

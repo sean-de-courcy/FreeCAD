@@ -6,6 +6,7 @@
 #include <vector>
 
 #include <BRepGProp.hxx>
+#include <BRepLib.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <Geom2d_BSplineCurve.hxx>
@@ -29,7 +30,10 @@
 #include <TopoDS_Compound.hxx>
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
+#include <TopoDS_Solid.hxx>
+#include <TopoDS_Vertex.hxx>
 #include <gp_Mat.hxx>
+#include <gp_Pnt.hxx>
 #include <gp_Pnt2d.hxx>
 #include <gp_Trsf.hxx>
 #include <gp_Vec.hxx>
@@ -249,10 +253,15 @@ namespace
 
 // The volume properties, with the centre of mass and inertia when everything is set; the mass
 // alone otherwise, which costs the adaptive method about a tenth (ops#414: 30-60 ms against
-// 300-600 ms on prisms of 200-1000 spans)
-void volumeProperties(const TopoDS_Shape& shape, GProp_GProps& props, bool everything)
+// 300-600 ms on prisms of 200-1000 spans). Adaptive when forceAdaptive or needsAdaptive()
+void integrateVolume(
+    const TopoDS_Shape& shape,
+    GProp_GProps& props,
+    bool everything,
+    bool forceAdaptive
+)
 {
-    if (needsAdaptive(shape)) {
+    if (forceAdaptive || needsAdaptive(shape)) {
         GProp_GProps adaptive = props;
         const bool onlyClosed = false;
         // One integration per knot span. Without, the volume a cut removed from a 500- or
@@ -282,7 +291,12 @@ void volumeProperties(const TopoDS_Shape& shape, GProp_GProps& props, bool every
 
 void volumeProperties(const TopoDS_Shape& shape, GProp_GProps& props)
 {
-    volumeProperties(shape, props, true);
+    integrateVolume(shape, props, true, false);
+}
+
+void volumeProperties(const TopoDS_Shape& shape, GProp_GProps& props, bool forceAdaptive)
+{
+    integrateVolume(shape, props, true, forceAdaptive);
 }
 
 namespace
@@ -715,9 +729,12 @@ bool adaptiveSurfaceProperties(const TopoDS_Shape& shape, GProp_GProps& props)
 
 }  // namespace
 
-void surfaceProperties(const TopoDS_Shape& shape, GProp_GProps& props)
+namespace
 {
-    if (needsAdaptive(shape)) {
+
+void integrateSurface(const TopoDS_Shape& shape, GProp_GProps& props, bool forceAdaptive)
+{
+    if (forceAdaptive || needsAdaptive(shape)) {
         GProp_GProps adaptive = props;
         if (adaptiveSurfaceProperties(shape, adaptive)) {
             props = adaptive;
@@ -727,18 +744,85 @@ void surfaceProperties(const TopoDS_Shape& shape, GProp_GProps& props)
     BRepGProp::SurfaceProperties(shape, props);
 }
 
+}  // namespace
+
+void surfaceProperties(const TopoDS_Shape& shape, GProp_GProps& props)
+{
+    integrateSurface(shape, props, false);
+}
+
 double volume(const TopoDS_Shape& shape)
 {
-    GProp_GProps props;
-    volumeProperties(shape, props, false);
-    return props.Mass();
+    return volume(shape, false);
 }
 
 double area(const TopoDS_Shape& shape)
 {
+    return area(shape, false);
+}
+
+double volume(const TopoDS_Shape& shape, bool forceAdaptive)
+{
     GProp_GProps props;
-    surfaceProperties(shape, props);
+    integrateVolume(shape, props, false, forceAdaptive);
     return props.Mass();
+}
+
+double area(const TopoDS_Shape& shape, bool forceAdaptive)
+{
+    GProp_GProps props;
+    integrateSurface(shape, props, forceAdaptive);
+    return props.Mass();
+}
+
+bool centreOfMass(const TopoDS_Shape& shape, gp_Pnt& centre)
+{
+    if (shape.IsNull()) {
+        return false;
+    }
+    GProp_GProps props;
+    if (TopExp_Explorer(shape, TopAbs_SOLID).More()) {
+        volumeProperties(shape, props);
+    }
+    else if (TopExp_Explorer(shape, TopAbs_FACE).More()) {
+        surfaceProperties(shape, props);
+    }
+    else if (TopExp_Explorer(shape, TopAbs_EDGE).More()) {
+        BRepGProp::LinearProperties(shape, props);
+    }
+    else {
+        gp_XYZ sum;
+        int count = 0;
+        for (TopExp_Explorer it(shape, TopAbs_VERTEX); it.More(); it.Next()) {
+            sum += BRep_Tool::Pnt(TopoDS::Vertex(it.Current())).XYZ();
+            ++count;
+        }
+        if (count == 0) {
+            return false;
+        }
+        centre.SetXYZ(sum / count);
+        return true;
+    }
+    if (props.Mass() > Precision::Infinite()) {
+        return false;
+    }
+    centre = props.CentreOfMass();
+    return true;
+}
+
+bool orientClosedSolid(TopoDS_Solid& solid)
+{
+    if (needsAdaptive(solid)) {
+        const double signedVolume = volume(solid, true);
+        if (std::isfinite(signedVolume) && signedVolume != 0.0) {
+            if (signedVolume < 0.0) {
+                solid.Reverse();
+            }
+            return true;
+        }
+        // No sign to go by: the classifier, as before
+    }
+    return BRepLib::OrientClosedSolid(solid);
 }
 
 }  // namespace Part::MassProperties

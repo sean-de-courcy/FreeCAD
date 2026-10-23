@@ -109,6 +109,7 @@
 #include <Base/Tools.h>
 #include <Base/Translation.h>
 #include <Mod/Part/App/FilletFallback.h>
+#include <Mod/Part/App/MassProperties.h>
 #include <Mod/Part/App/Tools.h>
 #include <Mod/Part/App/TopoShapeMapper.h>
 #include <Mod/Part/App/TopoShapeOpCode.h>
@@ -147,12 +148,13 @@ bool isLegacyTwoAngles(const std::string& method)
 
 bool getProfileOrbit(const TopoShape& profileShape, const gp_Ax1& axis, gp_Pnt& center, gp_Vec& radial)
 {
-    Base::Vector3d profileCenter;
-    if (!profileShape.getCenterOfGravity(profileCenter)) {
+    // OCCT's default integration can put the centre far off on a profile bounded by a long
+    // curved B-spline (ops#428)
+    gp_Pnt profilePoint;
+    if (!Part::MassProperties::centreOfMass(profileShape.getShape(), profilePoint)) {
         return false;
     }
 
-    const gp_Pnt profilePoint = Base::convertTo<gp_Pnt>(profileCenter);
     const gp_Vec axisVector(axis.Direction());
     const double parameter = gp_Vec(axis.Location(), profilePoint).Dot(axisVector);
     center = axis.Location();
@@ -222,11 +224,16 @@ bool isUnboundedFace(const TopoShape& face)
     return !faceBox.IsValid() || Precision::IsInfinite(faceBox.CalcDiagonalLength());
 }
 
-double faceArea(const TopoDS_Shape& shape)
+// The area, adaptive also when forceAdaptive: the areas compared below are integrated the same
+// way, adaptive when either input needs it (ops#428)
+double faceArea(const TopoDS_Shape& shape, bool forceAdaptive = false)
 {
-    GProp_GProps props;
-    BRepGProp::SurfaceProperties(shape, props);
-    return props.Mass();
+    return Part::MassProperties::area(shape, forceAdaptive);
+}
+
+bool eitherNeedsAdaptive(const TopoDS_Shape& shape, const TopoDS_Shape& other)
+{
+    return Part::MassProperties::needsAdaptive(shape) || Part::MassProperties::needsAdaptive(other);
 }
 
 // Whether two faces lie on the same plane.
@@ -248,13 +255,14 @@ bool onSamePlane(const TopoDS_Face& face, const TopoDS_Face& other)
 bool coversSamePoints(const TopoShape& face, const TopoShape& other)
 {
     try {
-        const double area = faceArea(face.getShape());
-        const double otherArea = faceArea(other.getShape());
+        const bool adaptive = eitherNeedsAdaptive(face.getShape(), other.getShape());
+        const double area = faceArea(face.getShape(), adaptive);
+        const double otherArea = faceArea(other.getShape(), adaptive);
         BRepAlgoAPI_Common common(face.getShape(), other.getShape());
         if (!common.IsDone() || area <= Precision::Confusion()) {
             return false;
         }
-        const double shared = faceArea(common.Shape());
+        const double shared = faceArea(common.Shape(), adaptive);
         const double tolerance = area * 1e-6;
         return std::fabs(shared - area) <= tolerance && std::fabs(shared - otherArea) <= tolerance;
     }
@@ -550,7 +558,8 @@ bool returnsToProfile(const TopoShape& profile, const gp_Ax1& axis)
                 QT_TRANSLATE_NOOP("Exception", "Could not check the revolution up to the face")
             );
         }
-        return faceArea(common.Shape()) > 1e-9 * faceArea(profile.getShape());
+        const bool adaptive = Part::MassProperties::needsAdaptive(profile.getShape());
+        return faceArea(common.Shape(), adaptive) > 1e-9 * faceArea(profile.getShape(), adaptive);
     }
     catch (const Standard_Failure&) {
         throw Base::RuntimeError(
@@ -954,12 +963,13 @@ FaceGaps faceGaps(const TopoDS_Face& face, const Bnd_Box& sweep)
     };
     FaceGaps gaps;
     const TopoDS_Face own = rectangle(surface, uMin, uMax, vMin, vMax);
-    const double ownArea = faceArea(own);
-    const double inside = ownArea - faceArea(face);
+    const bool adaptive = eitherNeedsAdaptive(own, face);
+    const double ownArea = faceArea(own, adaptive);
+    const double inside = ownArea - faceArea(face, adaptive);
     if (inside > 1e-9 * ownArea) {
         BRepAlgoAPI_Cut cut(own, face);
         if (!cut.IsDone() || cut.Shape().IsNull()
-            || std::abs(faceArea(cut.Shape()) - inside) > 1e-6 * ownArea) {
+            || std::abs(faceArea(cut.Shape(), adaptive) - inside) > 1e-6 * ownArea) {
             throw checkFailed();
         }
         gaps.within = cut.Shape();
@@ -975,7 +985,7 @@ FaceGaps faceGaps(const TopoDS_Face& face, const Bnd_Box& sweep)
             continue;
         }
         const TopoDS_Face strip = rectangle(wideSurface, u0, u1, v0, v1);
-        if (faceArea(strip) <= 1e-9 * ownArea) {
+        if (faceArea(strip, adaptive) <= 1e-9 * ownArea) {
             continue;
         }
         gaps.beyond.push_back(strip);
@@ -1348,7 +1358,8 @@ TopoShape wholeSurface(const TopoDS_Face& face)
 }
 
 // Whether two solids are the same: neither has volume outside the other, within 1e-6 of the
-// larger volume.
+// larger volume. All four volumes are integrated the same way, adaptive when either solid needs it
+// (ops#428).
 bool sameSolid(const TopoShape& shape, const TopoShape& other)
 {
     if (shape.isNull() || shape.getShape().IsNull() || other.isNull()
@@ -1356,12 +1367,11 @@ bool sameSolid(const TopoShape& shape, const TopoShape& other)
         return false;
     }
     try {
-        GProp_GProps props;
-        BRepGProp::VolumeProperties(shape.getShape(), props);
-        GProp_GProps otherProps;
-        BRepGProp::VolumeProperties(other.getShape(), otherProps);
+        const bool adaptive = eitherNeedsAdaptive(shape.getShape(), other.getShape());
+        const double volume = Part::MassProperties::volume(shape.getShape(), adaptive);
+        const double otherVolume = Part::MassProperties::volume(other.getShape(), adaptive);
         const double tolerance = std::max(
-            std::max(std::fabs(props.Mass()), std::fabs(otherProps.Mass())) * 1e-6,
+            std::max(std::fabs(volume), std::fabs(otherVolume)) * 1e-6,
             Precision::Confusion()
         );
         for (const auto& [from, cut] : {std::pair {&shape, &other}, std::pair {&other, &shape}}) {
@@ -1369,9 +1379,7 @@ bool sameSolid(const TopoShape& shape, const TopoShape& other)
             if (!difference.IsDone()) {
                 return false;
             }
-            GProp_GProps rest;
-            BRepGProp::VolumeProperties(difference.Shape(), rest);
-            if (std::fabs(rest.Mass()) > tolerance) {
+            if (std::fabs(Part::MassProperties::volume(difference.Shape(), adaptive)) > tolerance) {
                 return false;
             }
         }
@@ -1454,12 +1462,13 @@ bool liesOnSurface(const TopoDS_Face& face, const Handle(Geom_Surface)& surface)
 bool liesWithin(const TopoDS_Face& face, const TopoDS_Face& other)
 {
     try {
-        const double area = faceArea(face);
+        const bool adaptive = eitherNeedsAdaptive(face, other);
+        const double area = faceArea(face, adaptive);
         BRepAlgoAPI_Common common(face, other);
         if (!common.IsDone()) {
             return false;
         }
-        return std::fabs(faceArea(common.Shape()) - area)
+        return std::fabs(faceArea(common.Shape(), adaptive) - area)
             <= std::max(area * 1e-6, Precision::Confusion());
     }
     catch (const Standard_Failure&) {
@@ -1639,7 +1648,10 @@ TopoShape ownNamesWhereNamed(const TopoShape& tool, long featureTag)
 
 // A shape's volume and a bound on its error. BRepGProp's default integration, a fixed number of
 // points per face, was 7 % off on a surface of revolution of a B-spline edge (26.19 for 28.05,
-// ops#338), so it integrates adaptively to 1e-6 and returns the error it reached.
+// ops#338), so it integrates adaptively to 1e-6 and returns the error it reached. That adaptive
+// integration is wrong on an extrusion of a long curved B-spline while its error estimate reports
+// convergence (ops#414), so a shape MassProperties screens is integrated over knot spans
+// (FirstContact::spanVolume(), ops#428).
 struct SolidVolume
 {
     double value;
@@ -1650,6 +1662,10 @@ SolidVolume solidVolume(const TopoDS_Shape& shape)
 {
     if (shape.IsNull()) {
         return {0.0, 0.0};
+    }
+    if (Part::MassProperties::needsAdaptive(shape)) {
+        const auto [value, error] = FirstContact::spanVolume(shape);
+        return {value, error};
     }
     GProp_GProps props;
     const double relativeError = BRepGProp::VolumeProperties(shape, props, 1e-6);

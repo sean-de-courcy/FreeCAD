@@ -24,11 +24,13 @@
 
 #include <FCConfig.h>
 
+#include <algorithm>
+#include <cmath>
+
 #include <Mod/Part/App/FCBRepAlgoAPI_Cut.h>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepBuilderAPI_Sewing.hxx>
-#include <BRepGProp.hxx>
 #include <BRepOffsetAPI_MakeOffset.hxx>
 #include <BRepOffsetAPI_ThruSections.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
@@ -50,8 +52,23 @@
 #include "TopoShape.h"
 #include "BRepOffsetAPI_MakeOffsetFix.h"
 #include "Geometry.h"
+#include "MassProperties.h"
 
 using namespace Part;
+
+namespace
+{
+
+// Whether a cut changed a prism: its moment of inertia about the extrusion direction changed by
+// more than rounding. Both moments come from the same integration (MassProperties, adaptive for
+// both when either prism needs it, ops#428), so an untouched prism rebuilt by the cut gives the
+// same value to rounding; an exact comparison took such rounding for a cut
+bool momentChanged(double initial, double final)
+{
+    return std::abs(final - initial) > 1e-9 * std::max(std::abs(initial), std::abs(final));
+}
+
+}  // namespace
 
 ExtrusionHelper::ExtrusionHelper() = default;
 
@@ -315,7 +332,9 @@ void ExtrusionHelper::makeDraft(
                             continue;
                         }
                         // get MomentOfInertia of first shape
-                        BRepGProp::VolumeProperties(*itOuter, tempProperties);
+                        const bool adaptive = MassProperties::needsAdaptive(*itOuter)
+                            || MassProperties::needsAdaptive(*itInner);
+                        MassProperties::volumeProperties(*itOuter, tempProperties, adaptive);
                         momentOfInertiaInitial = tempProperties.MomentOfInertia(
                             gp_Ax1(gp_Pnt(), direction)
                         );
@@ -323,14 +342,14 @@ void ExtrusionHelper::makeDraft(
                         if (!mkCut.IsDone()) {
                             throw Standard_Failure("Extrusion: Final cut out failed");
                         }
-                        BRepGProp::VolumeProperties(mkCut.Shape(), tempProperties);
+                        MassProperties::volumeProperties(mkCut.Shape(), tempProperties, adaptive);
                         momentOfInertiaFinal = tempProperties.MomentOfInertia(
                             gp_Ax1(gp_Pnt(), direction)
                         );
                         // if the whole shape was cut away the resulting shape is not Null but its
                         // MomentOfInertia is 0.0 therefore we have a valid cut if the
                         // MomentOfInertia is not zero and changed
-                        if ((momentOfInertiaInitial != momentOfInertiaFinal)
+                        if (momentChanged(momentOfInertiaInitial, momentOfInertiaFinal)
                             && (momentOfInertiaFinal > Precision::Confusion())) {
                             // immediately update the outer shape since more inner wire prism might
                             // cut it
@@ -411,17 +430,19 @@ void ExtrusionHelper::checkInnerWires(
                 continue;
             }
             // get MomentOfInertia of first shape
-            BRepGProp::VolumeProperties(*itInner, tempProperties);
+            const bool adaptive = MassProperties::needsAdaptive(*itInner)
+                || MassProperties::needsAdaptive(*itOuter);
+            MassProperties::volumeProperties(*itInner, tempProperties, adaptive);
             momentOfInertiaInitial = tempProperties.MomentOfInertia(gp_Ax1(gp_Pnt(), direction));
             FCBRepAlgoAPI_Cut mkCut(*itInner, *itOuter);
             if (!mkCut.IsDone()) {
                 throw Standard_Failure("Extrusion: Cut out failed");
             }
-            BRepGProp::VolumeProperties(mkCut.Shape(), tempProperties);
+            MassProperties::volumeProperties(mkCut.Shape(), tempProperties, adaptive);
             momentOfInertiaFinal = tempProperties.MomentOfInertia(gp_Ax1(gp_Pnt(), direction));
             // if the whole shape was cut away the resulting shape is not Null but its MomentOfInertia
             // is 0.0 therefore we have an inner wire if the MomentOfInertia is not zero and changed
-            if ((momentOfInertiaInitial != momentOfInertiaFinal)
+            if (momentChanged(momentOfInertiaInitial, momentOfInertiaFinal)
                 && (momentOfInertiaFinal > Precision::Confusion())) {
                 *isInnerWireIterator = !forInner;
                 ++numCheckWires;

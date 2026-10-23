@@ -7,6 +7,8 @@
 #include <Mod/Part/PartGlobal.h>
 
 class TopoDS_Shape;
+class TopoDS_Solid;
+class gp_Pnt;
 
 /** Volume and area that stay right on faces with many curved B-spline spans (FreeCAD-CH,
  * ops#414).
@@ -27,9 +29,13 @@ class TopoDS_Shape;
  * The screen counts spans only: a strongly curved B-spline of 40 spans or fewer keeps the default,
  * which can be off there too (ops#427).
  *
- * For the code whose decisions depend on a volume or an area (Refine's orientation, FilletFallback,
- * TopoShapeRepair). The reported Shape.Volume and Shape.Area stay OCCT's default for now (PLAN
- * decision 106). */
+ * For the code whose decisions depend on a volume, an area or a centre of mass (Refine's and the
+ * solid makers' orientation, FilletFallback, TopoShapeRepair, the face makers, PartDesign's
+ * up-to faces, Revolution's checks, Scaled; ops#428). A comparison of two shapes integrates both
+ * the same way: the overloads taking forceAdaptive, with needsAdaptive() of either shape. The
+ * reported Shape.Volume, Shape.Area and centres stay OCCT's default for now (PLAN decision 106).
+ * Lengths need no screen: OCCT's linear integration follows the knot spans (1e-14 on a curved
+ * B-spline of 1000 spans, ops#428). */
 namespace Part::MassProperties
 {
 
@@ -47,6 +53,10 @@ PartExport bool needsAdaptive(const TopoDS_Shape& shape);
 /// BRepGProp::VolumeProperties(shape, props) does, adaptive when needsAdaptive()
 PartExport void volumeProperties(const TopoDS_Shape& shape, GProp_GProps& props);
 
+/// As volumeProperties(shape, props), adaptive also when \a forceAdaptive
+PartExport void
+volumeProperties(const TopoDS_Shape& shape, GProp_GProps& props, bool forceAdaptive);
+
 /// The shape's surface properties into \a props, as BRepGProp::SurfaceProperties(shape, props)
 /// does, adaptive when needsAdaptive(), with the faces on extrusions integrated exactly
 PartExport void surfaceProperties(const TopoDS_Shape& shape, GProp_GProps& props);
@@ -57,5 +67,21 @@ PartExport double volume(const TopoDS_Shape& shape);
 
 /// The total area of the shape's faces
 PartExport double area(const TopoDS_Shape& shape);
+
+/// As volume(shape), adaptive also when \a forceAdaptive
+PartExport double volume(const TopoDS_Shape& shape, bool forceAdaptive);
+
+/// As area(shape), adaptive also when \a forceAdaptive
+PartExport double area(const TopoDS_Shape& shape, bool forceAdaptive);
+
+/// The centre of mass of the shape's solids, else of its faces, else of its edges, else the mean
+/// of its vertices, as TopoShape::getCenterOfGravity() chooses; false for an empty or infinite
+/// shape
+PartExport bool centreOfMass(const TopoDS_Shape& shape, gp_Pnt& centre);
+
+/// Orients a closed solid outwards, as BRepLib::OrientClosedSolid(solid) does, and returns what it
+/// returns. When needsAdaptive(), by the sign of the volume instead: OCCT's classifier turned a
+/// prism over a long steep wave inside out (ops#426)
+PartExport bool orientClosedSolid(TopoDS_Solid& solid);
 
 }  // namespace Part::MassProperties

@@ -26,7 +26,6 @@
 #include <algorithm>
 #include <utility>
 
-#include <BRepGProp.hxx>
 #include <GProp_GProps.hxx>
 #include <Precision.hxx>
 
@@ -34,6 +33,7 @@
 #include "FeatureMultiTransform.h"
 #include "FeatureAddSub.h"
 #include "FeatureScaled.h"
+#include <Mod/Part/App/MassProperties.h>
 
 
 using namespace PartDesign;
@@ -116,8 +116,10 @@ const std::list<gp_Trsf> MultiTransform::getTransformations(
         if (auto addFeature = freecad_cast<PartDesign::FeatureAddSub*>(originals.front())) {
             TopoDS_Shape original = addFeature->AddSubShape.getShape().getShape();
 
+            // OCCT's default integration can put the centre far off on a solid with a long
+            // curved B-spline face (ops#428)
             GProp_GProps props;
-            BRepGProp::VolumeProperties(original, props);
+            Part::MassProperties::volumeProperties(original, props);
             cog = props.CentreOfMass();
         }
     }
