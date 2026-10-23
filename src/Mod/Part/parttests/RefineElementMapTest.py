@@ -14,7 +14,14 @@ midpoints in the block (a Scale's result has them scaled). A reference to one of
 it; a reference to any other edge must stay on an edge of its own direction or break loudly, and
 never land on one of the seven unchanged edges. Without the map (a bare shape from
 removeSplitter(), Reversed() or BRepBuilderAPI_Transform in their execute()) the references went by
-index: all twelve points on a Refine moved to other edges silently, by 2.5 to 20 mm."""
+index: all twelve points on a Refine moved to other edges silently, by 2.5 to 20 mm.
+
+A Scale's or a Reverse's result is a copy of its source, and its names are the source's with a
+copy section of the feature's own (CPY;1). A shape that holds the source and the copy, or two
+copies of one source, tells them apart by that section: with the source's names verbatim their
+twins differed only by the duplicate counter, which follows the inputs' order, so a reorder moved
+references to the other twin (loudly where the solver saw the move, silently onto a Reverse's twin
+in the same place)."""
 
 import unittest
 
@@ -193,6 +200,135 @@ class RefineElementMapTest(unittest.TestCase):
         far = place(FILLET_EDGE)
         self.assertFalse(fillet.Shape.isInside(V(far.x - 0.1, far.y, 0.1), 0, True))
         self.assertTrue(fillet.Shape.isInside(V(0.1, far.y, 0.1), 0, True))
+
+    def copies(self, kind):
+        """Box A (10 mm, at x = 20) in one shape with copies of it, recomputed: the shape's
+        feature, A and the copies.
+
+        "Scale": a Part::MultiFuse of A and two uniform Part::Scales of it, by 3 and by 0.4.
+        Part::Scale scales A's placement offset too, so they lie at x = 40..70 and x = -12..-8,
+        apart from A and from each other. "Reverse": a Part::Compound of A and a Part::Reverse of
+        A, a copy in A's place with its faces reversed."""
+        self.tearDown()
+        self.doc = doc = App.newDocument("RefineElementMapTest")
+        a = doc.addObject("Part::Box", "A")
+        a.Placement.Base = V(20, 0, 0)
+        if kind == "Scale":
+            copies = []
+            for factor in (3, 0.4):
+                scale = doc.addObject("Part::Scale", "Scale")
+                scale.Base = a
+                scale.Uniform = True
+                scale.UniformScale = factor
+                copies.append(scale)
+            whole = doc.addObject("Part::MultiFuse", "Fuse")
+            whole.Shapes = [a] + copies
+        else:
+            reverse = doc.addObject("Part::Reverse", "Reverse")
+            reverse.Source = a
+            copies = [reverse]
+            whole = doc.addObject("Part::Compound", "Compound")
+            whole.Links = [a, reverse]
+        doc.recompute()
+        self.assertTrue(whole.isValid(), whole.getStatusString())
+        return whole, a, copies
+
+    def faceNames(self, shape):
+        names = shape.ElementReverseMap
+        result = []
+        for i in range(1, len(shape.Faces) + 1):
+            name = names.get("Face%d" % i)
+            self.assertTrue(name, "Face%d" % i)
+            if isinstance(name, (list, tuple)):
+                name = name[0]
+            result.append(App.expandMappedName(name))
+        return result
+
+    def assertToldApart(self, shape, copyOf):
+        """Every face of `shape` has a name of its own with no duplicate count, and the faces of a
+        copy (copyOf(index, face): the copy's feature, or None for A) end in its copy section."""
+        names = self.faceNames(shape)
+        self.assertEqual(len(set(names)), len(names))
+        for index, (face, name) in enumerate(zip(shape.Faces, names), 1):
+            with self.subTest(name=name):
+                decoded = App.getDecodedMappedName(name)
+                self.assertEqual(decoded[-1]["duplicateCount"], "0")
+                copy = copyOf(index, face)
+                sections = [(s["iterationTag"], s["opCode"]) for s in decoded]
+                if copy is None:
+                    self.assertNotIn("CPY", [op for _, op in sections])
+                else:
+                    self.assertEqual(sections[-1], (str(copy.ID), "CPY"))
+
+    @staticmethod
+    def faceOnPlaneX(shape, x, faces=None):
+        """The index of the face of `shape` on the plane at x, among `faces`."""
+        for i, face in enumerate(shape.Faces, 1):
+            bound = face.BoundBox
+            if (faces is None or i in faces) and abs(bound.XMin - x) < TOL and abs(bound.XMax - x) < TOL:
+                return i
+        return None
+
+    def testScaleCopiesAreToldApart(self):
+        """A Part::MultiFuse of a box and two Scales of it: the copies' faces are named apart from
+        the box's, and a point on each of the box's and a copy's far +X faces stays when the
+        Shapes are reordered. With the source's names verbatim the copies' faces had duplicate
+        counts 1 and 2, and after the reorder both points broke (each named the other's face)."""
+        fuse, a, (big, small) = self.copies("Scale")
+        self.assertEqual(len(fuse.Shape.Faces), 18)
+
+        def copyOf(_, face):
+            if face.BoundBox.XMin > 40 - TOL:
+                return big
+            if face.BoundBox.XMax < -8 + TOL:
+                return small
+            return None
+
+        self.assertToldApart(fuse.Shape, copyOf)
+
+        doc = self.doc
+        points = []
+        for x, at in ((70, V(70, 15, 15)), (30, V(30, 5, 5))):
+            point = doc.addObject("Part::DatumPoint", "P%d" % x)
+            point.AttachmentSupport = [(fuse, "Face%d" % self.faceOnPlaneX(fuse.Shape, x))]
+            point.MapMode = "CenterOfMass"
+            points.append((point, at))
+        doc.recompute()
+        for point, at in points:
+            self.assertLess((point.Placement.Base - at).Length, TOL, point.Name)
+
+        fuse.Shapes = [big, a, small]
+        doc.recompute()
+        for point, at in points:
+            self.assertTrue(point.isValid(), "%s: %s" % (point.Name, point.getStatusString()))
+            self.assertFalse(self.warned(point), point.Name)
+            self.assertLess((point.Placement.Base - at).Length, TOL, point.Name)
+
+    def testReverseCopyIsToldApart(self):
+        """A Part::Compound of a box and a Reverse of it, the twin in the box's place: the twin's
+        faces are named apart from the box's, and a point on the twin's +X face stays on the twin
+        when the Links are reordered. With the source's names verbatim the twin's faces had
+        duplicate count 1, and the point moved to the box's face silently (same place)."""
+        compound, a, (reverse,) = self.copies("Reverse")
+        self.assertEqual(len(compound.Shape.Faces), 12)
+        # A compound's faces follow its children: A's first, then the twin's
+        self.assertToldApart(compound.Shape, lambda index, _: reverse if index > 6 else None)
+
+        doc = self.doc
+        twinFace = self.faceOnPlaneX(compound.Shape, 30, range(7, 13))
+        self.assertIsNotNone(twinFace)
+        point = doc.addObject("Part::DatumPoint", "P")
+        point.AttachmentSupport = [(compound, "Face%d" % twinFace)]
+        point.MapMode = "CenterOfMass"
+        doc.recompute()
+        self.assertLess((point.Placement.Base - V(30, 5, 5)).Length, TOL)
+
+        compound.Links = [reverse, a]
+        doc.recompute()
+        self.assertTrue(point.isValid(), point.getStatusString())
+        self.assertFalse(self.warned(point))
+        index = int(point.AttachmentSupport[0][1][0][len("Face"):])
+        self.assertIn(index, range(1, 7), "the point moved from the twin to the box's face")
 
 
 if __name__ == "__main__":

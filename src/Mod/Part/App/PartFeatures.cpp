@@ -504,6 +504,15 @@ App::DocumentObjectExecReturn* Reverse::execute()
             // bare shape left references to the result going by index (ops#453)
             TopoShape reversed(topoShape);
             reversed.setShape(myShape.Reversed(), false);
+            // The names get a copy section with this feature's ID, as a Part::Scale's do
+            // (FeatureScale.cpp): the source's names verbatim left the source and its reversed
+            // twin in one shape told apart only by the duplicate counter (ops#453)
+            if (reversed.getHistoryAlgorithm() == App::HistoryAlgorithm::V2) {
+                if (!reversed.getElementMapSize() && reversed.Tag && reversed.Tag != getID()) {
+                    reversed.reTagElementMap(getID(), reversed.Hasher, nullptr);
+                }
+                reversed.appendElementSection(getID(), OpCodes::Copy, "1");
+            }
             this->Shape.setValue(reversed);
             Base::Placement p;
             p.fromMatrix(topoShape.getTransform());

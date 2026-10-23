@@ -34,6 +34,7 @@
 #include <Base/Exception.h>
 
 #include "FeatureScale.h"
+#include "TopoShapeOpCode.h"
 
 using namespace Part;
 
@@ -159,6 +160,18 @@ App::DocumentObjectExecReturn* Scale::execute()
             Feature::getTopoShape(link, ShapeOption::ResolveLink | ShapeOption::Transform),
             params
         );
+        // The result is a copy of the source with the source's names. In V2 they get a copy
+        // section with this feature's ID (CPY;1), as a second side's do (FeatureExtrude.cpp):
+        // otherwise a shape holding the source and the copy, or two Scales of one source, told
+        // them apart only by the duplicate counter, which follows the inputs' order (ops#453).
+        // A source without an element map (a primitive) is named first, as setValue() names it.
+        // Part::Reverse does the same (PartFeatures.cpp).
+        if (!result.isNull() && result.getHistoryAlgorithm() == App::HistoryAlgorithm::V2) {
+            if (!result.getElementMapSize() && result.Tag && result.Tag != getID()) {
+                result.reTagElementMap(getID(), result.Hasher, nullptr);
+            }
+            result.appendElementSection(getID(), OpCodes::Copy, "1");
+        }
         this->Shape.setValue(result);
         return App::DocumentObject::StdReturn;
     }
