@@ -950,7 +950,9 @@ class TestPipeEndNames(unittest.TestCase):
         """The same L drawn towards the profile."""
         self.assertSidesStayOnTheirLegs(lambda degrees: [turned(30, degrees, 20), (0, 30), (0, 0)])
 
-    def assertCapBetweenPiecesDoesNotMoveSilently(self, towards):
+    def assertCapBetweenPiecesDoesNotMoveSilently(
+        self, towards, refine=False, downstream=False, redraw=True
+    ):
         """"Transformed" along a U, legs 30, 20 and 20 from the square at z = 0, turning 80 and
         then 20 degrees more: past 90 degrees only after the second corner, so the union's two
         pieces meet there, and the cap between them shows at that corner. A sketch on that cap
@@ -963,7 +965,15 @@ class TestPipeEndNames(unittest.TestCase):
         The same for what the fuse made at the break (round 5): a datum point and a fillet on
         the crease where the pieces cut each other, points on the crease's vertices and on the
         pieces of the y = +-2 faces there. They were named from the side faces around them, the
-        same at either corner, and went to the first corner's crease."""
+        same at either corner, and went to the first corner's crease.
+        With `refine` the pipe is refined; with `downstream` it isn't, and the references are on
+        a refined Fillet after it (of a profile cap edge, away from the break). Refine merges the
+        legs' faces in the planes y = +-2 into one face each, so the cap's edges there are named
+        from that face and the cap, and the joint names around the break share a source at either
+        corner: the solver took the first corner's at tier 1, valid and silent (fork PR 356
+        round 5, finding 1), until a merged face voids such a match (ops#446, fork PR 361). The
+        spine's lines are drawn again (`redraw`, new geometry ids) or moved (their ids kept,
+        which the legs are named from, ops#415)."""
 
         def points(first):
             result = [(0, 0), (0, 30), turned(30, first, 20)]
@@ -974,49 +984,65 @@ class TestPipeEndNames(unittest.TestCase):
 
         profile = self.square()
         path = self.sketch("Path", models.polyline(points(80)), placement=XZ)
-        pipe = self.pipe(profile, path, Transition="Transformed", Refine=False)
+        pipe = self.pipe(
+            profile, path, Transition="Transformed", Refine=refine and not downstream
+        )
+        target = pipe
+        if downstream:
+            (edge,) = [
+                index
+                for index, edge in enumerate(pipe.Shape.Edges, 1)
+                if abs(edge.CenterOfMass.z) < 1e-6 and abs(edge.CenterOfMass.x - 2) < 1e-6
+            ]
+            target = self.body.newObject("PartDesign::Fillet", "Downstream")
+            target.Base = (pipe, [f"Edge{edge}"])
+            target.Radius = 0.3
+            target.Refine = True
+            self.doc.recompute()
+            self.assertTrue(target.isValid(), target.getStatusString())
         corners = [V(x, 0, z) for x, z in points(80)][1:-1]
         caps = [
             index
-            for index, face in enumerate(pipe.Shape.Faces, 1)
+            for index, face in enumerate(target.Shape.Faces, 1)
             if abs(abs(face.normalAt(0, 0).z) - 1) < 1e-9 and face.CenterOfMass.z > 1
         ]
         self.assertEqual(len(caps), 2, caps)  # the far end's and the one between the pieces
         (between,) = [
             index
             for index in caps
-            if min((pipe.Shape.Faces[index - 1].CenterOfMass - c).Length for c in corners) < 4
+            if min((target.Shape.Faces[index - 1].CenterOfMass - c).Length for c in corners) < 4
         ]
-        cap = pipe.Shape.Faces[between - 1]
+        cap = target.Shape.Faces[between - 1]
         x, z = turned(30, 80, 20)  # the second corner
         second = V(x, 0, z)
         self.assertLess((cap.CenterOfMass - second).Length, 4)
 
         def point(name, element, mode="CenterOfMass"):
             point = self.body.newObject("PartDesign::Point", name)
-            point.AttachmentSupport = [(pipe, element)]
+            point.AttachmentSupport = [(target, element)]
             point.MapMode = mode
             return point
 
         sketch = self.body.newObject("Sketcher::SketchObject", "OnCap")
-        sketch.AttachmentSupport = [(pipe, f"Face{between}")]
+        sketch.AttachmentSupport = [(target, f"Face{between}")]
         sketch.MapMode = "FlatFace"
         # What each reference is on, where: the element's centre, a point's place, a fillet's
         # round faces
         places = {
             sketch.Name: lambda: [
-                pipe.Shape.getElement(sketch.AttachmentSupport[0][1][0]).CenterOfMass
+                target.Shape.getElement(sketch.AttachmentSupport[0][1][0]).CenterOfMass
             ]
         }
         references = [sketch]
-        shape = pipe.Shape
+        shape = target.Shape
         for index, edge in enumerate(shape.Edges, 1):
             if any(edge.isSame(own) for own in cap.Edges):
                 references.append(point(f"OnEdge{index}", f"Edge{index}"))
         self.assertEqual(len(references), 5)
         # What the fuse made at the break (round 5): the crease where the pieces cut each other
         # and its vertices (off the cap's plane, near the corner), and the pieces of the faces
-        # in the planes both legs share (y = +-2)
+        # in the planes both legs share (y = +-2): refined, those are one face each, whose
+        # centre moves with any edit
         creases = [
             index
             for index, edge in enumerate(shape.Edges, 1)
@@ -1041,11 +1067,12 @@ class TestPipeEndNames(unittest.TestCase):
             if abs(abs(face.normalAt(0, 0).y) - 1) < 1e-9
             and (face.CenterOfMass - second).Length < 4
         ]
-        self.assertEqual(len(planes), 2, planes)
-        for index in planes:
-            references.append(point(f"OnPlane{index}", f"Face{index}"))
+        if not (refine or downstream):
+            self.assertEqual(len(planes), 2, planes)
+            for index in planes:
+                references.append(point(f"OnPlane{index}", f"Face{index}"))
         fillet = self.body.newObject("PartDesign::Fillet", "Fillet")
-        fillet.Base = (pipe, [f"Edge{crease}"])
+        fillet.Base = (target, [f"Edge{crease}"])
         fillet.Radius = 0.5
         references.append(fillet)
         self.doc.recompute()
@@ -1062,8 +1089,12 @@ class TestPipeEndNames(unittest.TestCase):
                 return [reference.Placement.Base]
             return places[reference.Name]()
 
-        self.setPolyline(path, points(100))
-        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        if redraw:
+            self.setPolyline(path, points(100))
+        else:
+            self.movePolyline(path, points(100))
+        for feature in (pipe, target):
+            self.assertTrue(feature.isValid(), feature.getStatusString())
         x, z = turned(30, 100, 20)
         second = V(x, 0, z)
         for reference in references:
@@ -1084,6 +1115,33 @@ class TestPipeEndNames(unittest.TestCase):
     def testCapBetweenPiecesDoesNotMoveSilentlyTowardsTheProfile(self):
         """The same U drawn towards the profile."""
         self.assertCapBetweenPiecesDoesNotMoveSilently(towards=True)
+
+    def assertCapBetweenRefinedPiecesDoesNotMoveSilently(self, **options):
+        """assertCapBetweenPiecesDoesNotMoveSilently with `options`, the spine from the profile
+        and towards it, its lines moved and drawn again. With the lines moved, every subtest
+        fails on ops#415 round 2 (`work\\415\\r3\\probe_c.out`): a cap edge between the pieces is
+        named from the one side face it bounds, so the cap at that leg's other end takes its name,
+        and a crease the fuse makes resolves at tier 1 to the other corner's crease."""
+        for towards in (False, True):
+            for redraw in (False, True):
+                self.tearDown()
+                self.setUp()
+                with self.subTest(towards=towards, redraw=redraw):
+                    self.assertCapBetweenPiecesDoesNotMoveSilently(
+                        towards, redraw=redraw, **options
+                    )
+
+    def testCapBetweenPiecesDoesNotMoveSilentlyWhenTheSpineLinesMove(self):
+        """The pipe unrefined, the corner turned by moving the spine's lines (as a drag does)."""
+        self.assertCapBetweenRefinedPiecesDoesNotMoveSilently()
+
+    def testCapBetweenPiecesOfARefinedPipeDoesNotMoveSilently(self):
+        """The pipe refined (refine is a new Pipe's default)."""
+        self.assertCapBetweenRefinedPiecesDoesNotMoveSilently(refine=True)
+
+    def testCapBetweenPiecesDoesNotMoveSilentlyOnARefinedFilletAfterThePipe(self):
+        """The pipe unrefined, the references on a refined Fillet after it."""
+        self.assertCapBetweenRefinedPiecesDoesNotMoveSilently(downstream=True)
 
     def testUndoAndRedoOfAnEditKeepTheirNames(self):
         """testEndStaysWhenTheProfileCrossesTheMiddle's edit in a transaction, undone and redone,
