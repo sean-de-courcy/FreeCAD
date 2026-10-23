@@ -389,7 +389,8 @@ names it.
 | `infra/418-gen0-script` | infra | ops#418 | none | `integration` `7fe252a1b5` | `30dabfe2f2` (fork PR 365), 2026-10-23 | never |
 | `fix/450-upto-followups` | fix | ops#450 | - | `integration` `2d2ac2ac5b` | `0cb0a470c0` (fork PR 362), 2026-10-23 | never (fork fix) |
 | `fix/453-refine-element-map` | fix | ops#453 | - | `integration` `2d2ac2ac5b` | `31c71a7276` (fork PR 363), 2026-10-23 | never (fork fix) |
-| `fix/421-sweep-corner` | fix | ops#421 | - | `integration` `31c71a7276` | (fork PR 358) | never (fork fix) |
+| `fix/421-sweep-corner` | fix | ops#421 | - | `integration` `31c71a7276` | `f6b19b43f5` (fork PR 358), 2026-10-23 | never (fork fix) |
+| `fix/454-missing-generator` | fix | ops#454 | - | `integration` `30dabfe2f2` | (fork PR 368) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 

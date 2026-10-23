@@ -3190,6 +3190,13 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         std::vector<int> otherFaces;
         std::vector<std::pair<std::string, std::size_t>> mergedFaces;
         std::size_t lostFaces = 0;
+        // Tier 1's candidates that the missing-generator test dropped (ops#454); the generator's
+        // type ("edge", "vertex") and, as above, its faces' holders that hold two or more of
+        // them and how many no face holds.
+        std::vector<int> otherGenerator;
+        const char* generatorType = "";
+        std::vector<std::pair<std::string, std::size_t>> generatorMergedFaces;
+        std::size_t generatorLostFaces = 0;
         // The IDX source's elements, and whether they replaced the other candidates (tier 2
         // agreed with one of them at least).
         std::set<int> fromIndex;
@@ -3318,8 +3325,25 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         }
         return nullptr;
     };
+    // Which faces hold several of the old element's faces, and how many it lost (ops#446). Not
+    // whether the edit merged them: a refined pipe's faces were merged when it was saved already
+    // (fork PR 361's review).
+    auto facesText = [](const std::vector<std::pair<std::string, std::size_t>>& merged,
+                        std::size_t lost) {
+        std::string why;
+        for (const auto& [face, count] : merged) {
+            why += (why.empty() ? "" : ", ") + face + " holds " + std::to_string(count)
+                + " of them";
+        }
+        if (lost) {
+            why += (why.empty() ? "" : ", ")
+                + (lost == 1 ? std::string("1 of them is") : std::to_string(lost) + " of them are")
+                + " on no face";
+        }
+        return why;
+    };
     // Why structure didn't decide, when T1 dropped tier 1's candidates (ops#167).
-    auto otherMakerText = [](const GroupState& state) {
+    auto otherMakerText = [&facesText](const GroupState& state) {
         std::string text;
         if (const auto n = state.otherMaker.size()) {
             text = n == 1 ? std::string("; tier 1's 1 survivor has another maker")
@@ -3331,24 +3355,19 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 : "; tier 1's " + std::to_string(n) + " survivors lost the old element's source";
         }
         if (const auto n = state.otherFaces.size()) {
-            // Which faces hold several of the old element's faces, and how many it lost. Not
-            // whether the edit merged them: a refined pipe's faces were merged when it was saved
-            // already (fork PR 361's review).
-            std::string why;
-            for (const auto& [face, count] : state.mergedFaces) {
-                why += (why.empty() ? "" : ", ") + face + " holds " + std::to_string(count)
-                    + " of them";
-            }
-            if (const auto lost = state.lostFaces) {
-                why += (why.empty() ? "" : ", ")
-                    + (lost == 1 ? std::string("1 of them is")
-                                 : std::to_string(lost) + " of them are")
-                    + " on no face";
-            }
             text += (n == 1 ? std::string("; tier 1's 1 survivor lies off the old element's faces")
                             : "; tier 1's " + std::to_string(n)
                          + " survivors lie off the old element's faces")
-                + " (" + why + ")";
+                + " (" + facesText(state.mergedFaces, state.lostFaces) + ")";
+        }
+        if (const auto n = state.otherGenerator.size()) {
+            const std::string type = state.generatorType;
+            text += (n == 1 ? std::string("; tier 1's 1 survivor lacks")
+                            : "; tier 1's " + std::to_string(n) + " survivors lack")
+                + " the old element's generator (" + (type == "edge" ? "an " : "a ") + type
+                + " named after its faces, which no "
+                + type + " holds; "
+                + facesText(state.generatorMergedFaces, state.generatorLostFaces) + ")";
         }
         return text;
     };
@@ -3396,8 +3415,8 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         const auto n = state.outcome.candidates.size();
         listByDistance(state, rest, "geometric", n < 8 ? 8 - n : std::size_t(0));
     };
-    // The survivors T1, T1' and the merged-neighbour test dropped, last on a break (ops#174,
-    // ops#446), in the room left of eight
+    // The survivors T1, T1', the merged-neighbour and the missing-generator tests dropped, last on
+    // a break (ops#174, ops#446, ops#454), in the room left of eight
     // candidates: never taken automatically, offered to the user's pick. Those the break listed
     // already aren't listed again (a tier-3 pick T1' dropped). The same feature's elements first:
     // they are the likelier pick (PR 149's review).
@@ -3417,9 +3436,63 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             const auto n = state.outcome.candidates.size();
             return n < 8 ? 8 - n : std::size_t(0);
         };
+        listByDistance(state, unlisted(state.otherGenerator), "other generator", room());
         listByDistance(state, unlisted(state.otherFaces), "other faces", room());
         listByDistance(state, unlisted(state.otherSource), "other source", room());
         listByDistance(state, unlisted(state.otherMaker), "other maker", room());
+    };
+
+    // The linked names of \a section if it carries the UPP flag (an element named after the faces
+    // it lies on), sorted and distinct; otherwise none.
+    auto upperLinked = [](const DecodedMappedSection& section) {
+        std::vector<std::string> linked;
+        if (section.hasMapperFlag(MAPPER_FLAG_UPPER)) {
+            linked = section.linkedNames;
+            std::sort(linked.begin(), linked.end());
+            linked.erase(std::unique(linked.begin(), linked.end()), linked.end());
+        }
+        return linked;
+    };
+    // The target's faces that hold a name of \a linked, or a same-type descendant of it (a piece,
+    // a fusion's modification), with the number of linked names each holds; those holding two or
+    // more (merged), in index order; and the number of linked names no face holds (lost). For the
+    // merged-neighbour and missing-generator tests (ops#446, ops#454).
+    struct FaceHolders
+    {
+        std::map<std::string, std::size_t> holders;
+        std::vector<std::pair<std::string, std::size_t>> merged;
+        std::size_t lost = 0;
+    };
+    auto faceHolders = [&input, &ancestry](const std::vector<std::string>& linked) {
+        FaceHolders result;
+        std::map<std::string, std::set<std::size_t>> held;
+        std::vector<bool> found(linked.size(), false);
+        for (const auto& face : input.faces) {
+            for (std::size_t i = 0; i < linked.size(); ++i) {
+                if (std::any_of(face.names.begin(), face.names.end(), [&](const auto& n) {
+                        return n == linked[i]
+                            || (ancestry.contains(n, linked[i])
+                                && NameAncestry::reaches(n, linked[i], 'F')
+                                    == NameAncestry::Reach::SameType);
+                    })) {
+                    held[face.index].insert(i);
+                    found[i] = true;
+                }
+            }
+        }
+        for (const auto& [index, which] : held) {
+            result.holders.emplace(index, which.size());
+            if (which.size() >= 2) {
+                result.merged.emplace_back(index, which.size());
+            }
+        }
+        std::sort(result.merged.begin(), result.merged.end(), [](const auto& a, const auto& b) {
+            const long na = indexNumber(a.first);
+            const long nb = indexNumber(b.first);
+            return na != nb ? na < nb : a.first < b.first;
+        });
+        result.lost = static_cast<std::size_t>(std::count(found.begin(), found.end(), false));
+        return result;
     };
 
     MatchGraph graph;
@@ -3651,76 +3724,111 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         // entry breaks. When one fits, they all stay: the test empties the survivors or leaves
         // them, it never narrows them to a pick (fork PR 361 round 2: a merge older than the edit
         // arms it, and a Round corner's counter names can make another bend's vertex fit).
+        // The UPP flag is read on the making section, the name's first (ops#454): a joint trimmed
+        // by a later cut (`UPP{...}|CUT;MOD`) is the joint's piece, and a hole leaving one piece
+        // of the other bend's joint beside it would make that piece tier 1's pick.
+        // The survivors MN and MG never drop: the old name's ancestry, its pieces and the IDX
+        // source, as for T1'.
+        auto exempt = [&](int k) {
+            const auto& names = pool.elements[k].names;
+            return state.inAncestry.count(k) || state.fromIndex.count(k)
+                || std::any_of(names.begin(), names.end(), [&](const auto& n) {
+                       return NameAncestry::isPieceOf(n, oldName)
+                           || NameAncestry::isIndexPieceOf(n, oldName);
+                   });
+        };
         if (!oldName.empty() && !input.faces.empty() && input.facesOf
             && (state.type == 'E' || state.type == 'V') && !all.empty()) {
-            const auto& top = decodeSection(NameAncestry::splitSections(oldName).back());
-            std::vector<std::string> linked;
-            if (top.hasMapperFlag(MAPPER_FLAG_UPPER)) {
-                linked = top.linkedNames;
-                std::sort(linked.begin(), linked.end());
-                linked.erase(std::unique(linked.begin(), linked.end()), linked.end());
-            }
-            // The target's faces that hold a linked name, or a same-type descendant of it (a
-            // piece, a fusion's modification), with the number of linked names each holds; and
-            // the number of linked names no face holds
-            std::map<std::string, std::size_t> holders;
-            std::size_t lost = 0;
-            if (linked.size() >= 2) {
-                std::map<std::string, std::set<std::size_t>> held;
-                std::vector<bool> found(linked.size(), false);
-                for (const auto& face : input.faces) {
-                    for (std::size_t i = 0; i < linked.size(); ++i) {
-                        if (std::any_of(face.names.begin(), face.names.end(), [&](const auto& n) {
-                                return n == linked[i]
-                                    || (ancestry.contains(n, linked[i])
-                                        && NameAncestry::reaches(n, linked[i], 'F')
-                                            == NameAncestry::Reach::SameType);
-                            })) {
-                            held[face.index].insert(i);
-                            found[i] = true;
-                        }
-                    }
-                }
-                for (const auto& [index, which] : held) {
-                    holders.emplace(index, which.size());
-                }
-                lost = static_cast<std::size_t>(std::count(found.begin(), found.end(), false));
-            }
-            std::vector<std::pair<std::string, std::size_t>> merged;
-            for (const auto& [index, count] : holders) {
-                if (count >= 2) {
-                    merged.emplace_back(index, count);
-                }
-            }
+            const auto linked =
+                upperLinked(decodeSection(NameAncestry::splitSections(oldName).front()));
+            const FaceHolders faces = linked.size() >= 2 ? faceHolders(linked) : FaceHolders();
             auto fits = [&](int k) {
-                const auto& element = pool.elements[k];
-                const auto& names = element.names;
-                if (state.inAncestry.count(k) || state.fromIndex.count(k)
-                    || std::any_of(names.begin(), names.end(), [&](const auto& n) {
-                           return NameAncestry::isPieceOf(n, oldName)
-                               || NameAncestry::isIndexPieceOf(n, oldName);
-                       })) {
+                if (exempt(k)) {
                     return true;
                 }
-                std::set<std::string> faces;
-                for (auto& face : input.facesOf(element.index)) {
-                    faces.insert(std::move(face));
+                std::set<std::string> on;
+                for (auto& face : input.facesOf(pool.elements[k].index)) {
+                    on.insert(std::move(face));
                 }
-                return faces.size() >= 2
-                    && std::all_of(faces.begin(), faces.end(), [&](const auto& face) {
-                           return holders.count(face) > 0;
+                return on.size() >= 2 && std::all_of(on.begin(), on.end(), [&](const auto& face) {
+                           return faces.holders.count(face) > 0;
                        });
             };
-            if ((!merged.empty() || lost > 0) && std::none_of(all.begin(), all.end(), fits)) {
+            if ((!faces.merged.empty() || faces.lost > 0)
+                && std::none_of(all.begin(), all.end(), fits)) {
                 state.otherFaces.assign(all.begin(), all.end());
                 all.clear();
-                std::sort(merged.begin(), merged.end(), [](const auto& a, const auto& b) {
-                    const long na = indexNumber(a.first);
-                    const long nb = indexNumber(b.first);
-                    return na != nb ? na < nb : a.first < b.first;
-                });
-                state.mergedFaces = std::move(merged);
-                state.lostFaces = lost;
+                state.mergedFaces = faces.merged;
+                state.lostFaces = faces.lost;
+            }
+        }
+        // A missing generator (MG, ops#454): an edge or vertex generated (GEN on its making
+        // section) from an edge or vertex named after its faces (UPP, two at least), e.g. a
+        // refined Pocket's hole vertex where a refined Pipe's joint edge enters the hole. When
+        // that element's faces aren't one face each any more (merged or lost, as MN arms) and no
+        // element of its type holds it, or a same-type descendant of it (a trimmed piece), it is
+        // gone, and so is the point or edge it generated. A vertex on the same hole and the same
+        // merged face shares more than half its ancestry, the maker and the sources: tier 1 took
+        // the seam vertex, 1 mm away, silently. Every survivor that isn't exempt is dropped;
+        // geometry decides (tier 3 at the same place, G2 under policy D) or the entry breaks,
+        // listing them (role `other generator`). Both conditions are needed: a cylinder renamed
+        // upstream renames its seam inside the seam vertices' names, so no edge reaches the old
+        // seam although it's there, and a refined pipe's y sides are one face when it is saved,
+        // so a joint vertex's faces are merged before any edit. Not in pattern instances: an
+        // instance's names aren't the plain linked name.
+        if (!oldName.empty() && !input.faces.empty() && (state.type == 'E' || state.type == 'V')
+            && !all.empty() && patternInstances(oldName).empty()) {
+            const auto& making = decodeSection(NameAncestry::splitSections(oldName).front());
+            std::vector<std::string> generators;
+            if (making.hasMapperFlag(MAPPER_FLAG_GENERATED)) {
+                generators = making.linkedNames;
+                std::sort(generators.begin(), generators.end());
+                generators.erase(std::unique(generators.begin(), generators.end()),
+                                 generators.end());
+            }
+            for (const auto& generator : generators) {
+                if (generator.empty() || generator == Data::EMPTY_VALUE) {
+                    continue;
+                }
+                const auto sections = NameAncestry::splitSections(generator);
+                const auto linked = upperLinked(decodeSection(sections.front()));
+                const char type = decodeSection(sections.back()).elementType;
+                const auto typePool = input.pool.find(type == 'E' ? "Edge"
+                                                      : type == 'V' ? "Vertex"
+                                                                    : "");
+                if (linked.size() < 2 || typePool == input.pool.end()) {
+                    continue;
+                }
+                const FaceHolders faces = faceHolders(linked);
+                if (faces.merged.empty() && faces.lost == 0) {
+                    continue;
+                }
+                const auto& elements = typePool->second;
+                if (std::any_of(elements.begin(), elements.end(), [&](const auto& element) {
+                        return std::any_of(element.names.begin(),
+                                           element.names.end(),
+                                           [&](const auto& n) {
+                                               return n == generator
+                                                   || (ancestry.contains(n, generator)
+                                                       && NameAncestry::reaches(n, generator, type)
+                                                           == NameAncestry::Reach::SameType);
+                                           });
+                    })) {
+                    continue;
+                }
+                for (auto it = all.begin(); it != all.end();) {
+                    if (exempt(*it)) {
+                        ++it;
+                    }
+                    else {
+                        state.otherGenerator.push_back(*it);
+                        it = all.erase(it);
+                    }
+                }
+                state.generatorType = type == 'E' ? "edge" : "vertex";
+                state.generatorMergedFaces = faces.merged;
+                state.generatorLostFaces = faces.lost;
+                break;
             }
         }
         // A piece of a far cap merged with others into one (ops#360, PR 340 round 3): the one

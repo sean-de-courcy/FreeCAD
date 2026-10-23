@@ -611,6 +611,63 @@ class TestJointsWhenABendStraightens(unittest.TestCase):
     def testJointOfARefinedBinderOfThePipe(self):
         self.straighten("Binder")
 
+    def holeAcrossTheJoint(self, redraw=False):
+        """For each bend and spine direction: the refined pipe along the U and a refined Pocket
+        (through all, midplane) of a circle of radius 0.5 centred on that bend's joint edges
+        (ops#454), the points on the Pocket's edges and vertices at the joint; the bend made
+        straight, then turned back. With `redraw`, the hole's circle is deleted and drawn again
+        at the same place instead."""
+        for bend, straight in ((1, (0, 20)), (2, (40, 0))):
+            for towards in (False, True):
+                with self.subTest(bend=bend, towards=towards):
+                    self.tearDown()
+                    self.setUp()
+                    points = bendPoints(40, 20, towards)
+                    path, pipe = self.pipe(points, refine=True)
+                    x, z = (points[::-1] if towards else points)[bend]
+                    # sketch x -> world y, sketch y -> world z, the sketch plane at world x = x
+                    hole = models.sketch(
+                        self.doc,
+                        "Hole",
+                        models.circle(0, z, 0.5),
+                        self.body,
+                        placement=App.Placement(V(x, 0, 0), App.Rotation(V(1, 1, 1), 120)),
+                    )
+                    pocket = self.body.newObject("PartDesign::Pocket", "Pocket")
+                    pocket.Profile = hole
+                    pocket.Type = 1  # through all
+                    pocket.Midplane = True
+                    pocket.Refine = True
+                    self.doc.recompute()
+                    self.assertTrue(pocket.isValid(), pocket.getStatusString())
+                    joint = self.pointsOn(pocket, V(x, 0, z))
+                    # the joint edges' four pieces beside the hole and the hole's seam; the
+                    # four corners, and the hole's and the seam's vertices on the joint edges
+                    self.assertEqual(len(joint), 13, [p.Name for p in joint])
+                    before = {p.Name: V(p.Placement.Base) for p in joint}
+                    if redraw:
+                        hole.deleteAllGeometry()
+                        hole.addGeometry(models.circle(0, z, 0.5), False)
+                        self.doc.recompute()
+                        self.assertBackInPlace(joint, before)
+                        continue
+                    self.setPath(path, bendPoints(*straight, towards))
+                    self.assertGoneOrLoud(joint, before, report=True)
+                    self.setPath(path, points)
+                    self.assertBackInPlace(joint, before)
+
+    def testHoleAcrossTheJointOfARefinedPipe(self):
+        """The hole's vertices on a joint edge are named after the joint edge (a GEN section
+        linking its UPP name). When the bend is made straight the joint is gone, and the seam
+        vertex on the merged face shares most of their ancestry: tier 1 took it, 1 mm away and
+        silently. Now they go missing or warn."""
+        self.holeAcrossTheJoint()
+
+    def testHoleAcrossTheJointStaysWhenItsCircleIsRedrawn(self):
+        """The control: the hole's circle drawn again renames the cylinder and its seam, but the
+        joint is there. Every point stays valid and in place."""
+        self.holeAcrossTheJoint(redraw=True)
+
     def straightenNear(
         self, transition="Transformed", circular=False, fillet=False, count=None, solved=False
     ):

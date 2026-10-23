@@ -631,7 +631,9 @@ struct AppExport SolveInput
     /// The faces of the target that the edge or vertex \a index lies on (index names). Unset:
     /// none, so no edge continues and the merged-neighbour test is off.
     std::function<std::vector<std::string>(const std::string& index)> facesOf;
-    /// The target's named faces, for the merged-neighbour test (ops#446); empty: the test is off.
+    /// The target's named faces, for the merged-neighbour and missing-generator tests (ops#446,
+    /// ops#454); empty: the tests are off. The missing-generator test also needs the pool of its
+    /// generator's type (an edge's for a hole vertex), and is off without it.
     std::vector<Element> faces;
     /// The faces of the target that share an edge with the face \a index (index names). Unset:
     /// none, so no face is split by a coplanar one.
@@ -720,8 +722,9 @@ struct AppExport SolveOutcome
     /// Parallel to candidates: why each is one (ops#105): `place` (it sits where the element
     /// was), `name` (the element the reference's name holds), `piece` (a piece of the old
     /// element), `structural` (tier 1's survivor), `geometric` (tiers 2-3 found it), `other
-    /// faces` (a survivor the merged-neighbour test dropped, ops#446); and its centre's distance
-    /// from the saved centre, NaN where unknown.
+    /// faces` (a survivor the merged-neighbour test dropped, ops#446), `other generator` (one the
+    /// missing-generator test dropped, ops#454); and its centre's distance from the saved centre,
+    /// NaN where unknown.
     std::vector<std::string> candidateRoles;
     std::vector<double> candidateDistances;
     /// The evidence, for the log and the report: overlap and sources, or why it broke.
@@ -784,8 +787,9 @@ struct AppExport SolveOutcome
  * - Candidates: the overlap survivors (NameAncestry::structuralSurvivors() over every name of
  *   every pool element of the entry's type) and the name matches of that type, by \a source.
  * - Merged neighbours (ops#446): an edge or vertex named after the faces it lies on (the UPP
- *   flag on its top section, two linked names at least), when two of those are one face of the
- *   target (SolveInput::faces: a face holding each of the two linked names, or a same-type
+ *   flag on its making section, the first, so a trimmed joint too, ops#454; two linked names at
+ *   least), when two of those are one face of the target (SolveInput::faces: a face holding
+ *   each of the two linked names, or a same-type
  *   descendant of it, NameAncestry::reaches()) or one is held by no face. A candidate fits if it
  *   is in the old name's ancestry, a piece of it or from its IDX source, or lies on two faces at
  *   least, each a holder of a linked name (facesOf): another bend's joint shares one face with
@@ -793,6 +797,14 @@ struct AppExport SolveOutcome
  *   tier 3 at the same place runs among them first, then geometry and the guess rules decide as
  *   for no candidate, and a break lists them last (role `other faces`). When one fits, all stay:
  *   the test never narrows the candidates to a pick.
+ * - A missing generator (ops#454): an edge or vertex whose making section carries GEN and links
+ *   an edge or vertex L named after its faces (UPP, two linked names at least), e.g. a hole's
+ *   vertex where a refined pipe's joint edge enters the hole. When L's faces are armed as for
+ *   merged neighbours (two held by one face of the target, or one held by none) and no element
+ *   of L's type in SolveInput::pool holds L or a same-type descendant of it, L is gone, and
+ *   every candidate but those in the old name's ancestry, its pieces and its IDX source's is
+ *   dropped: geometry and the guess rules decide as for no candidate, and a break lists them
+ *   last (role `other generator`). Not for names in pattern instances.
  * - A merged far-cap piece (ops#360): when exactly one candidate's name is the old name with,
  *   in one marked section (PRJ and MOD), more marks (connected elements) holding all of the old
  *   ones, an edge among them, it is the only candidate, as if the old name were in its
