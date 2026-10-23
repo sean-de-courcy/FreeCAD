@@ -379,9 +379,12 @@ bool exactNeedsSolving(const SolverEntry& entry,
         return true;
     }
     // A twin (ops#360, PR 340 round 3) that moved may have traded names with another twin that
-    // moved too: nothing at its old place, solveOwner() compares the twins' distances
+    // moved too: nothing at its old place, solveOwner() compares the twins' distances. A marked
+    // far cap may have taken another's name from a reordered up-to shell (ops#386, PR 366 round
+    // 2): solveOwner() checks that it holds its old centre
+    const std::string plain = plainName(entry.exactName);
     return !Data::atSamePlace(saved, now, diagonal, tolerances, distance)
-        && (occupied() || Data::isOrderedName(plainName(entry.exactName)));
+        && (occupied() || Data::isOrderedName(plain) || Data::isMarkedCapName(plain));
 }
 
 // Whether an exact hit is still the saved element in a naming migration (ops#103, rule 3): at

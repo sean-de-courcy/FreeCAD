@@ -475,6 +475,15 @@ AppExport bool atSamePlace(
  */
 AppExport bool isOrderedName(std::string_view name);
 
+/** True if a section of \a name is a far cap's piece told apart from the other pieces by one face
+ * of the up-to shape alone (PRJ and MOD with that mark, a face's section), and none is ordered
+ * (ops#386, PR 366 round 2). The marks of an up-to shape without names are its faces' indexes,
+ * which a rebuild in another order trades: an exact reference to it that moved goes to
+ * solveOwner()'s moved check even with nothing at its old place, which breaks it when it moved
+ * off its old centre and another such piece of its projection holds that centre.
+ */
+AppExport bool isMarkedCapName(std::string_view name);
+
 /** True if \a name is \a other up to the duplicate counter and not \a other itself: for ordered
  * names (isOrderedName()), twins (ops#360, PR 340 round 5, the fingerprint's twin centroid).
  */

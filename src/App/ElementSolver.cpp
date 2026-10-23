@@ -1689,6 +1689,34 @@ bool isOrdered(std::string_view name)
     });
 }
 
+/* True if a section of \a name is a far cap's piece marked by its marks (PRJ and MOD with
+ * connected elements, a face), and none is ordered (isMarkedCapName()). With \a faceAlone, marked
+ * by one face of the up-to shape alone (the only piece on it): an up-to shell without names,
+ * rebuilt in another order, trades such marks between pieces.
+ */
+bool isMarkedCap(std::string_view name, bool faceAlone = false)
+{
+    if (isOrdered(name)) {
+        return false;
+    }
+    const auto sections = NameAncestry::splitSections(name);
+    return std::any_of(sections.begin(), sections.end(), [faceAlone](std::string_view section) {
+        const DecodedMappedSection& decoded = decodeSection(section);
+        if (decoded.elementType != 'F' || !decoded.hasMapperFlag(MAPPER_FLAG_PROJECTION)
+            || !decoded.hasMapperFlag(MAPPER_FLAG_MODIFIED) || decoded.connectedElements.empty()) {
+            return false;
+        }
+        if (!faceAlone) {
+            return true;
+        }
+        if (decoded.connectedElements.size() != 1) {
+            return false;
+        }
+        const auto markSections = NameAncestry::splitSections(decoded.connectedElements.front());
+        return !markSections.empty() && decodeSection(markSections.back()).elementType == 'F';
+    });
+}
+
 /* True if \a name's element holds \a oldName's, a piece of a far cap that an edit merged with
  * others into one (ops#360, PR 340 round 3): the names are the same but in one section, a marked
  * piece's (PRJ and MOD), where \a name's marks, its connected elements, hold every one of
@@ -2392,6 +2420,11 @@ bool isOrderedName(std::string_view name)
     return isOrdered(name);
 }
 
+bool isMarkedCapName(std::string_view name)
+{
+    return isMarkedCap(name, true);
+}
+
 bool isCounterSiblingName(std::string_view name, std::string_view other)
 {
     return isCounterSibling(name, other);
@@ -2698,10 +2731,41 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 }
                 nearerTwin = !place.empty();
             }
+            // A far cap marked by one face of the up-to shape alone (ops#386, PR 366 round 2) that
+            // moved with nothing at its old place, off its old centre, while another piece of the
+            // same projection marked by a face alone holds that centre, is ambiguous. The marks of
+            // an up-to shape without names are its faces' indexes: rebuilt with a face more, or
+            // in another order, it gives the name to another piece, and the piece the reference
+            // held shrank around its old centre. A piece that moved off its old centre onto
+            // another kind of piece (the hole's fill piece onto a twin, the disc and the hole
+            // moved together) keeps its name
+            bool offCentre = false;
+            if (place.empty() && saved.center && input.holdsPoint && isMarkedCap(hitName, true)) {
+                const double eps = input.continuationDistance * std::max(1.0, input.diagonal);
+                const double reach = (saved.size ? std::sqrt(*saved.size) / 4.0 : 0.0) + eps;
+                if (!input.holdsPoint(hit, *saved.center, reach)) {
+                    for (std::size_t k = 0; k < pool.elements.size(); ++k) {
+                        const auto& names = pool.elements[k].names;
+                        if (static_cast<int>(k) != hitPosition
+                            && std::any_of(
+                                names.begin(),
+                                names.end(),
+                                [&](const auto& name) {
+                                    return markedPiecesOfOne(name, hitName)
+                                        && isMarkedCap(name, true);
+                                }
+                            )
+                            && input.holdsPoint(pool.elements[k].index, *saved.center, reach)) {
+                            place.push_back(static_cast<int>(k));
+                        }
+                    }
+                    offCentre = !place.empty();
+                }
+            }
             if (place.empty()) {
                 continue;  // moved alone
             }
-            if (entry.policy == SolvePolicy::Equivalent && entry.equivalent
+            if (!offCentre && entry.policy == SolvePolicy::Equivalent && entry.equivalent
                 && std::all_of(place.begin(), place.end(), [&](int k) {
                        return entry.equivalent(hit, pool.elements[k].index);
                    })) {
@@ -2765,9 +2829,15 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 list(k, "place");
             }
             list(hitPosition, "name");
-            outcome.evidence = movedBy() + "; "
-                + (nearerTwin ? (place.size() > 1 ? "its twins " : "its twin ") : "") + there + sit
-                + (nearerTwin ? " nearer where it was" : " where it was");
+            if (offCentre) {
+                outcome.evidence = movedBy() + " off its old centre; " + there
+                    + (place.size() > 1 ? " hold it" : " holds it");
+            }
+            else {
+                outcome.evidence = movedBy() + "; "
+                    + (nearerTwin ? (place.size() > 1 ? "its twins " : "its twin ") : "") + there
+                    + sit + (nearerTwin ? " nearer where it was" : " where it was");
+            }
         }
         // The elements at an old place are as ambiguous as the moved one: no other entry of the
         // owner takes them.
@@ -3957,6 +4027,9 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                     holders.clear();
                 }
             }
+            // A far edge or far cap made whole again takes its piece quietly, twins together,
+            // like the ring rule above (PLAN decision 122 (2): a disc across an elliptic hole
+            // that moves away from under it, both twins onto the whole cap)
             if (holders.empty() && input.holdsPoint) {
                 for (std::size_t k = 0; k < pool.elements.size(); ++k) {
                     const auto& names = pool.elements[k].names;
@@ -4343,7 +4416,20 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                     return isCounterSibling(n, state.oldName);
                 });
             };
-            bool sibling = k >= 0
+            // But a piece of a far edge or cap counted by its place among the pieces (ORD) that
+            // sits where the old piece was is the old piece, renumbered because another piece
+            // went or came (PR 366 round 2); a pattern's copy never sits there
+            auto renumbered = [&](int position) {
+                return state.saved && isOrdered(state.oldName)
+                    && atSamePlace(
+                           *state.saved,
+                           fingerprintOf(state.pool->elements[position]),
+                           input.diagonal,
+                           input.tolerances,
+                           input.continuationDistance
+                    );
+            };
+            bool sibling = k >= 0 && !renumbered(k)
                 && (state.expanded.empty() ? siblingElement(k)
                                            : std::any_of(state.expanded.begin(),
                                                          state.expanded.end(),
