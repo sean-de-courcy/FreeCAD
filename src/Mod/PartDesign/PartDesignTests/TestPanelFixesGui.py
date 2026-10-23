@@ -155,10 +155,10 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "the dialog stays")
         pump(0.2)
 
-    def answerModals(self, choice="radioIndependent"):
+    def answerModals(self, choice="radioIndependent", button=None):
         """Until self.answering is False: answers the copy dialog (DlgReference) with `choice`
-        (default its default, Make independent copy), and closes any message box; records each in
-        self.modals."""
+        (default its default, Make independent copy), and closes any message box, by clicking its
+        button named `button` if it has one; records each in self.modals."""
         self.answering = True
 
         def poll():
@@ -173,7 +173,11 @@ class TestPanelFixesGui(unittest.TestCase):
                     widget.accept()
                 elif isinstance(widget, QtWidgets.QMessageBox):
                     self.modals.append("QMessageBox: " + widget.text())
-                    widget.accept()
+                    named = [b for b in widget.buttons() if b.text().replace("&", "") == button]
+                    if named:
+                        named[0].click()
+                    else:
+                        widget.accept()
             QtCore.QTimer.singleShot(50, poll)
 
         QtCore.QTimer.singleShot(50, poll)
@@ -669,12 +673,13 @@ class TestPanelFixesGui(unittest.TestCase):
 
     # -- ops#410: Pad on a sketch of another document ---------------------------------------------
 
-    def padOnASketchOfAnotherDocument(self, ownSketch):
+    def padOnASketchOfAnotherDocument(self, ownSketch, button=None):
         """Pad, with an active body, on a sketch selected in another document (decision 104: a
         command's selection holds only the active document's objects, ops#390). Returns the
-        modals shown. Nothing is added to either document, no task dialog opens and no
-        transaction is left open. With `ownSketch` the active document has a sketch of its own,
-        which Pad must not take in its place."""
+        modals shown, the other document's label and, if a pick dialog was left open, the texts
+        of its list (it is closed here). Nothing is added to either document. With `ownSketch`
+        the active document has a sketch of its own, which Pad must not take in its place without
+        a word: the box asks, and `button` (default: the box's accept) answers it."""
         self.body = models.body(self.doc)
         if ownSketch:
             models.sketch(self.doc, "Own", models.rectangle(0, 0, 5, 5), self.body)
@@ -692,17 +697,26 @@ class TestPanelFixesGui(unittest.TestCase):
             group = self.body.Group
             undo = self.doc.UndoNames
             Gui.Selection.addSelection(other.Name, outer.Name)
-            self.answerModals("radioDependent")
+            self.answerModals("radioDependent", button)
             Gui.runCommand("PartDesign_Pad")
             pump(0.5)
             self.answering = False
-            self.assertFalse(Gui.Control.activeDialog())
+            picked = None
+            if Gui.Control.activeDialog():
+                pump(0.3)
+                Gui.Control.showTaskView()
+                listWidget = self.widget(QtWidgets.QListWidget, "listWidget")
+                picked = [listWidget.item(i).text() for i in range(listWidget.count())]
             self.assertEqual(sorted(o.Name for o in self.doc.Objects), names)
             self.assertEqual(self.body.Group, group)
             self.assertEqual([o.Name for o in other.Objects], [outer.Name])
-            self.assertIsNone(App.getActiveTransaction())
-            self.assertEqual(self.doc.UndoNames, undo)
-            return list(self.modals), other.Label
+            if picked is None:
+                self.assertIsNone(App.getActiveTransaction())
+                self.assertEqual(self.doc.UndoNames, undo)
+            else:
+                Gui.Control.closeDialog()
+                pump()
+            return list(self.modals), other.Label, picked
         finally:
             Gui.Selection.clearSelection()
             App.setActiveDocument(self.doc.Name)
@@ -711,11 +725,12 @@ class TestPanelFixesGui(unittest.TestCase):
     def testPadOnASketchOfAnotherDocumentSaysSo(self):
         """ops#410 (decision 104), then ops#327 retired: since ops#390 (upstream PR 33716) a
         command's selection holds only the active document's objects, so a sketch selected in
-        another document is no profile. Pad says so, naming the sketch and its document, and
-        advises a sketch of the active document: "No sketch is available in the document"
-        sent the user looking for one in a document that has none. (Before ops#327 a refused
-        dependent copy, a null, went on as the pad's profile, without a word.)"""
-        modals, label = self.padOnASketchOfAnotherDocument(ownSketch=False)
+        another document is no profile. With no sketch in the active document Pad says so,
+        naming the sketch and its document, and advises a sketch of the active document: "No
+        sketch is available in the document" sent the user looking for one in a document that
+        has none. (Before ops#327 a refused dependent copy, a null, went on as the pad's profile,
+        without a word.)"""
+        modals, label, picked = self.padOnASketchOfAnotherDocument(ownSketch=False)
         self.assertEqual(
             modals,
             [
@@ -723,14 +738,38 @@ class TestPanelFixesGui(unittest.TestCase):
                 "document. Select a sketch of the active document."
             ],
         )
+        self.assertIsNone(picked)
 
     def testPadOnASketchOfAnotherDocumentDoesNotTakeAnotherSketch(self):
-        """ops#410: as testPadOnASketchOfAnotherDocumentSaysSo, with a sketch in the active
-        document. The command took that one as the pad's profile, and no word was said that the
-        selected sketch was left out; now it stops."""
-        modals, label = self.padOnASketchOfAnotherDocument(ownSketch=True)
-        self.assertEqual(len(modals), 1)
-        self.assertIn(f"is in the document '{label}'", modals[0])
+        """ops#410, PR 360 round 2: as testPadOnASketchOfAnotherDocumentSaysSo, with a sketch in
+        the active document, and Cancel. The command took that sketch as the pad's profile, and
+        no word was said that the selected one was left out; now it asks, and Cancel makes
+        nothing: no pad, no pick dialog."""
+        modals, label, picked = self.padOnASketchOfAnotherDocument(ownSketch=True, button="Cancel")
+        self.assertEqual(
+            modals,
+            [
+                f"QMessageBox: 'Outer' is in the document '{label}', not in the active "
+                f"document. Continue with a sketch of '{self.doc.Label}'?"
+            ],
+        )
+        self.assertIsNone(picked)
+        self.assertEqual(
+            [o.Name for o in self.doc.Objects if o.isDerivedFrom("PartDesign::Pad")], []
+        )
+
+    def testPadOnASketchOfAnotherDocumentContinuesThroughThePickDialog(self):
+        """ops#410, PR 360 round 2: the same, answered Continue. The command goes on as it did
+        before the selection mattered, but through the pick dialog although the active document
+        has exactly one free sketch, which it takes only when the user picks it."""
+        modals, label, picked = self.padOnASketchOfAnotherDocument(
+            ownSketch=True, button="Continue"
+        )
+        self.assertEqual(len(modals), 1, modals)
+        self.assertIn("Continue with a sketch of", modals[0])
+        self.assertIsNotNone(picked, "no pick dialog")
+        self.assertEqual(len(picked), 1, picked)
+        self.assertIn("Own", picked[0])
         self.assertEqual(
             [o.Name for o in self.doc.Objects if o.isDerivedFrom("PartDesign::Pad")], []
         )
