@@ -899,6 +899,19 @@ def freeformPlateShape(z, seam=None, swapped=False):
     return faces[0] if len(faces) == 1 else Part.Shell(faces)
 
 
+def freeformStripsShape(z, cuts, order=None):
+    """PR 366 round 2: the rectangle x -10..20, y -10..10 of the plane z = `z` as a shell of
+    B-spline faces meeting at x = each of `cuts`, left to right, or in the order of `order`'s
+    indexes"""
+    V = FreeCAD.Vector
+    xs = [-10] + list(cuts) + [20]
+    faces = []
+    for x0, x1 in zip(xs, xs[1:]):
+        corners = [V(x0, -10, z), V(x1, -10, z), V(x1, 10, z), V(x0, 10, z)]
+        faces.append(Part.Face(Part.makePolygon(corners + corners[:1])).toNurbs().Faces[0])
+    return Part.Shell([faces[i] for i in order] if order else faces)
+
+
 def freeformPlate(doc, z, seam=None):
     """A Part feature holding freeformPlateShape(z, seam)"""
     plate = doc.addObject("Part::Feature", "Plate")
@@ -2777,19 +2790,23 @@ class TestPad(unittest.TestCase):
         # in the splitter's order (right, left, middle), the left one's datum went to the
         # middle piece when the left piece went, and the right one's to the left piece when the
         # right piece went, quietly; with the shell's faces swapped all three moved. Now a
-        # datum on a piece that went says so, the middle's stays on the fill's piece, and the
-        # piece left alone on the plate keeps its datum where its old centre lies on it (the
-        # solver's alone rule, with edges). For the Pad and the Pocket
+        # datum on a piece that went says so, and the others are on their pieces or say they
+        # lost them: the pieces are counted too (PR 366 round 2), so one going renames them all.
+        # A piece going with the shell's faces swapped in the same recompute gave the
+        # middle's marks (the fill's index) to a plate piece: the middle's datum followed it
+        # quietly (round 1's marks alone). For the Pad and the Pocket
         places = {"L": (-2, 1), "M": (0, 1), "R": (2, 1)}
         edits = {
-            # edit: (A's x and width after it, or None for the swapped shell; the datums' places
-            # after it, None for a piece that went)
-            "leftGone": ((-0.5, 3.5), {"L": None, "M": (0.25, 1), "R": (2, 1)}),
-            "rightGone": ((-3, 3.5), {"L": (-2, 1), "M": (-0.25, 1), "R": None}),
-            "facesSwapped": (None, places),
+            # edit: (A's x and width after it, or None; the shell's faces swapped; the datums'
+            # places after it, None for a piece that went)
+            "leftGone": ((-0.5, 3.5), False, {"L": None, "M": (0.25, 1), "R": (2, 1)}),
+            "rightGone": ((-3, 3.5), False, {"L": (-2, 1), "M": (-0.25, 1), "R": None}),
+            "facesSwapped": (None, True, places),
+            "leftGoneFacesSwapped": ((-0.5, 3.5), True, {"L": None, "M": (0.25, 1), "R": (2, 1)}),
+            "rightGoneFacesSwapped": ((-3, 3.5), True, {"L": (-2, 1), "M": (-0.25, 1), "R": None}),
         }
         for kind in ("Pad", "Pocket"):
-            for edit, (dimensions, after) in edits.items():
+            for edit, (dimensions, swapped, after) in edits.items():
                 with self.subTest(kind=kind, edit=edit):
                     doc = FreeCAD.newDocument("PadUpToAHoledShellFarEdgePieces")
                     try:
@@ -2807,17 +2824,127 @@ class TestPad(unittest.TestCase):
                             xA, wA = dimensions
                             sketch.setDatum("wA", FreeCAD.Units.Quantity(wA, FreeCAD.Units.Length))
                             sketch.setDatum("xA", FreeCAD.Units.Quantity(xA, FreeCAD.Units.Length))
-                        else:
+                        if swapped:
                             replaceUpToShape(feature, freeformHoleShellShape(z, swapped=True))
                         doc.recompute()
                         self.assertTrue(feature.isValid(), feature.getStatusString())
                         for piece, place in after.items():
-                            if place is None:
-                                assertNotQuietlyElsewhere(self, points[piece], z, [])
-                            elif dimensions is None:
-                                assertNotQuietlyElsewhere(self, points[piece], z, [place])
+                            assertNotQuietlyElsewhere(
+                                self, points[piece], z, [place] if place else []
+                            )
+                    finally:
+                        FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToThreePlatesFarEdgePieceGone(self):
+        # PR 366 round 2: up to a shell of three B-spline plates meeting at x = 1 and x = 3, A
+        # (x 0..5) has its far top edge in three pieces, P1 to P3 left to right, each alone on its
+        # plate, so marked by it alone: by its index in a shell without names. A shortened to
+        # x 0..2.5 so that P3 went, with the shell's last two plates swapped (or its plates
+        # turned by one) in the same recompute: the right plate's index went to the middle one,
+        # and P3's datum followed the middle piece quietly to (1.75, 2). Counted by their place
+        # and how many there are, the pieces are renamed when one goes: P3's datum says it lost
+        # its piece, and P1's and P2's are on theirs or say they lost them. A shortened from the
+        # left so that P1 went, the shell unchanged: P3, where it was and renumbered, keeps its
+        # datum (a counted piece in its old place is no pattern's copy). For the Pad and the
+        # Pocket
+        places = {"P1": (0.5, 2), "P2": (2, 2), "P3": (4, 2)}
+        edits = {
+            # edit: (A's x and width after it; the plates' order; each datum's place after it,
+            # or a list of the places it may be at unless it says it lost its piece)
+            "rightGoneSwapped": (
+                (0, 2.5),
+                (0, 2, 1),
+                {"P1": [(0.5, 2)], "P2": [(1.75, 2)], "P3": []},
+            ),
+            "rightGoneTurned": (
+                (0, 2.5),
+                (2, 0, 1),
+                {"P1": [(0.5, 2)], "P2": [(1.75, 2)], "P3": []},
+            ),
+            "leftGone": ((1.5, 3.5), None, {"P1": [], "P2": [(2.25, 2)], "P3": (4, 2)}),
+        }
+        for kind in ("Pad", "Pocket"):
+            for edit, ((xA, wA), order, after) in edits.items():
+                with self.subTest(kind=kind, edit=edit):
+                    doc = FreeCAD.newDocument("PadUpToThreePlatesFarEdgePieceGone")
+                    try:
+                        feature, z = capsUpToAFreeformPlate(
+                            doc, kind, seam=1, capA=(0, 0, 5, 2), block=(-8, -8, 18, 9), withB=False
+                        )
+                        replaceUpToShape(feature, freeformStripsShape(z, (1, 3)))
+                        doc.recompute()
+                        self.assertTrue(feature.isValid(), feature.getStatusString())
+                        shape = feature.Shape
+                        points = {
+                            piece: pointOnFarEdge(feature, farEdgeAt(shape, z, x, y))
+                            for piece, (x, y) in places.items()
+                        }
+                        sketch = feature.Profile[0]
+                        sketch.setDatum("wA", FreeCAD.Units.Quantity(wA, FreeCAD.Units.Length))
+                        sketch.setDatum("xA", FreeCAD.Units.Quantity(xA, FreeCAD.Units.Length))
+                        if order:
+                            replaceUpToShape(feature, freeformStripsShape(z, (1, 3), order))
+                        doc.recompute()
+                        self.assertTrue(feature.isValid(), feature.getStatusString())
+                        for piece, place in after.items():
+                            if isinstance(place, list):
+                                assertNotQuietlyElsewhere(self, points[piece], z, place)
                             else:
                                 assertOnCap(self, points[piece], z, *place)
+                    finally:
+                        FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToAReorderedShellFarEdgePiecesNotQuietlyElsewhere(self):
+        # PR 366 round 2: A's far top and bottom edges across the seam of a two-face shell
+        # without names, each piece marked by its face's index alone. The shell rebuilt with its
+        # faces swapped while A moved along the seam (x 0.5..2.5), or with the seam moved to
+        # x = 0.3: every piece's marks went to the other piece, which moved too, with nothing
+        # left at the old place, and each datum followed the other piece quietly. A third face
+        # put first in the shell, under A's middle (x 0.7..1.3): the left face's index went to
+        # it, and TL's and BL's datums followed the new middle piece quietly. Counted by their
+        # place along the edge too, the pieces' names are no piece's then, or the same place's:
+        # each datum is on its own piece or says it lost it. For the Pad and the Pocket
+        places = {"TL": (0.5, 2), "TR": (1.5, 2), "BL": (0.5, 0), "BR": (1.5, 0)}
+        edits = {
+            # edit: (A's x after it, or None; the shell after it (its cuts and their order); the
+            # datums' right places after it)
+            "swappedAndShifted": (
+                0.5,
+                ((1,), (1, 0)),
+                {"TL": (0.75, 2), "TR": (1.75, 2), "BL": (0.75, 0), "BR": (1.75, 0)},
+            ),
+            "swappedSeamMoved": (
+                None,
+                ((0.3,), (1, 0)),
+                {"TL": (0.15, 2), "TR": (1.15, 2), "BL": (0.15, 0), "BR": (1.15, 0)},
+            ),
+            "middleFaceFirst": (
+                None,
+                ((0.7, 1.3), (1, 0, 2)),
+                {"TL": (0.35, 2), "TR": (1.65, 2), "BL": (0.35, 0), "BR": (1.65, 0)},
+            ),
+        }
+        for kind in ("Pad", "Pocket"):
+            for edit, (xA, (cuts, order), after) in edits.items():
+                with self.subTest(kind=kind, edit=edit):
+                    doc = FreeCAD.newDocument("PadUpToAReorderedShellFarEdgePieces")
+                    try:
+                        feature, z = capsUpToAFreeformPlate(doc, kind, seam=1)
+                        self.assertTrue(feature.isValid(), feature.getStatusString())
+                        shape = feature.Shape
+                        points = {
+                            piece: pointOnFarEdge(feature, farEdgeAt(shape, z, x, y))
+                            for piece, (x, y) in places.items()
+                        }
+                        if xA is not None:
+                            feature.Profile[0].setDatum(
+                                "xA", FreeCAD.Units.Quantity(xA, FreeCAD.Units.Length)
+                            )
+                        replaceUpToShape(feature, freeformStripsShape(z, cuts, order))
+                        doc.recompute()
+                        self.assertTrue(feature.isValid(), feature.getStatusString())
+                        for piece, place in after.items():
+                            assertNotQuietlyElsewhere(self, points[piece], z, [place])
                     finally:
                         FreeCAD.closeDocument(doc.Name)
 
@@ -2869,8 +2996,9 @@ class TestPad(unittest.TestCase):
     def testPadUpToAFreeformFarEdgePieceNames(self):
         # ops#386: each piece of a far edge the up-to shape cuts (A's top edge across the
         # shell's seam at x = 1) is a projection of the profile edge marked by what tells it
-        # apart, PRJ with MOD, and the pieces' names differ; a far edge in one piece (B's top
-        # edge, on the right face) stays the projection alone, PRJ with index 0
+        # apart, PRJ with MOD, and counted by its place along the edge (ORD, PR 366 round 2),
+        # and the pieces' names differ; a far edge in one piece (B's top edge, on the right
+        # face) stays the projection alone, PRJ with index 0
         for kind in ("Pad", "Pocket"):
             with self.subTest(kind=kind):
                 doc = FreeCAD.newDocument("PadUpToAFreeformFarEdgePieceNames")
@@ -2885,7 +3013,7 @@ class TestPad(unittest.TestCase):
                     self.assertEqual(len(set(names)), 4, names)
                     for name in names:
                         top = FreeCAD.getDecodedMappedName(name)[-1]
-                        self.assertEqual(set(top["mapperFlags"]), {"PRJ", "MOD"}, name)
+                        self.assertEqual(set(top["mapperFlags"]), {"PRJ", "MOD", "ORD"}, name)
                         self.assertTrue(top["connectedElements"], name)
                     single = shape.getElementMappedName(farEdgeAt(shape, z, 6.5, 3))
                     top = FreeCAD.getDecodedMappedName(single)[-1]

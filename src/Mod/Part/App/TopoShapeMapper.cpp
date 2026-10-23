@@ -24,10 +24,16 @@
 
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
+#include <BRepAdaptor_Curve.hxx>
 #include <BRepAlgoAPI_Splitter.hxx>
 #include <BRepGProp.hxx>
+#include <Geom_Plane.hxx>
+#include <GeomAPI_ProjectPointOnCurve.hxx>
+#include <GeomProjLib.hxx>
 #include <GProp_GProps.hxx>
 #include <Precision.hxx>
+#include <Standard_Failure.hxx>
+#include <gp.hxx>
 #include <TopExp.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopoDS_Compound.hxx>
@@ -329,9 +335,11 @@ UpToSplitMapper::UpToSplitMapper(
     const std::function<TopoDS_Shape(const TopoDS_Shape&)>& firstShape,
     const TopoDS_Shape& profile,
     const TopoDS_Shape& result,
-    const TopoDS_Shape& upTo
+    const TopoDS_Shape& upTo,
+    const std::optional<gp_Dir>& along
 )
     : MapperMaker(splitter)
+    , along(along)
 {
     for (TopAbs_ShapeEnum type : {TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX}) {
         TopExp::MapShapes(result, type, kept);
@@ -510,6 +518,69 @@ void orderTwins(PlacedTwins& placed, std::vector<int> axes)
         std::copy(part.begin(), part.end(), run);
         run = end;
     }
+}
+
+/// The pieces of a far edge in their order along it (PR 366 round 2): by the parameter on
+/// `profileEdge` of each piece's middle taken back onto it along `along`, the prism's direction,
+/// so that a change of the splitter's order (the up-to shell rebuilt with its faces in another
+/// order) or a move of where the pieces meet keeps it. By their centres (orderTwins()) where
+/// that can't be measured. Indexes into `pieces`
+std::vector<std::size_t> orderAlong(
+    const std::vector<TopoDS_Shape>& pieces,
+    const TopoDS_Shape& profileEdge,
+    const std::optional<gp_Dir>& along
+)
+{
+    std::vector<std::pair<double, std::size_t>> placed;
+    if (along && profileEdge.ShapeType() == TopAbs_EDGE) {
+        try {
+            double first = 0.0;
+            double last = 0.0;
+            const Handle(Geom_Curve) curve = BRep_Tool::Curve(TopoDS::Edge(profileEdge), first, last);
+            if (!curve.IsNull()) {
+                // The edge seen along the direction: a plane across it, the parametrization kept
+                const Handle(Geom_Plane) across = new Geom_Plane(gp::Origin(), *along);
+                const Handle(Geom_Curve)
+                    seen = GeomProjLib::ProjectOnPlane(curve, across, *along, Standard_True);
+                const gp_Vec direction(*along);
+                for (std::size_t i = 0; i < pieces.size(); ++i) {
+                    const BRepAdaptor_Curve piece(TopoDS::Edge(pieces[i]));
+                    gp_Pnt middle = piece.Value((piece.FirstParameter() + piece.LastParameter()) / 2);
+                    middle.Translate(-direction * gp_Vec(middle.XYZ()).Dot(direction));
+                    GeomAPI_ProjectPointOnCurve onEdge(middle, seen, first, last);
+                    if (onEdge.NbPoints() == 0) {
+                        placed.clear();
+                        break;
+                    }
+                    placed.emplace_back(onEdge.LowerDistanceParameter(), i);
+                }
+            }
+        }
+        catch (const Standard_Failure&) {
+            placed.clear();
+        }
+    }
+    std::vector<std::size_t> order;
+    if (placed.size() == pieces.size()) {
+        std::stable_sort(placed.begin(), placed.end(), [](const auto& a, const auto& b) {
+            return a.first < b.first;
+        });
+        for (const auto& [parameter, piece] : placed) {
+            order.push_back(piece);
+        }
+        return order;
+    }
+    PlacedTwins centres;
+    for (std::size_t i = 0; i < pieces.size(); ++i) {
+        GProp_GProps props;
+        BRepGProp::LinearProperties(pieces[i], props);
+        centres.emplace_back(props.CentreOfMass(), i);
+    }
+    orderTwins(centres, {1, 2, 3});
+    for (const auto& [centre, piece] : centres) {
+        order.push_back(piece);
+    }
+    return order;
 }
 
 /// A far cap, or a piece of a far edge, among the pieces of its profile face's cap or of its
@@ -737,6 +808,23 @@ void UpToSplitMapper::markFarEdges(
             pieces.push_back(std::move(piece));
         }
         markPieces(pieces, piecesOnFace, pieceMarks, pieceCounters);
+        // And each piece's place along the edge among how many there are, in the duplicate
+        // counter as for twins (PR 366 round 2). The marks of an up-to shape without names are
+        // its faces' and edges' indexes: rebuilt with its faces in another order, it gives a
+        // piece's marks to another piece, and a reference followed that one silently when the
+        // pieces moved too, or one went. With its place and the count, the name is no piece's
+        // then, or the piece's in the same place. A piece going or coming renames them all
+        std::vector<TopoDS_Shape> shapes;
+        for (const Piece& piece : pieces) {
+            shapes.push_back(piece.shape);
+        }
+        const TopoDS_Shape* profileEdge = farSources.Seek(edges.First());
+        const std::vector<std::size_t> order
+            = orderAlong(shapes, profileEdge ? *profileEdge : TopoDS_Shape(), along);
+        const int count = static_cast<int>(order.size());
+        for (int position = 0; position < count; ++position) {
+            pieceCounters.Bind(shapes[order[position]], count * (count - 1) / 2 + position);
+        }
     }
 }
 
