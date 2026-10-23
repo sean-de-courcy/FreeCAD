@@ -33,6 +33,7 @@
 #include <numbers>
 #include <optional>
 #include <queue>
+#include <tuple>
 
 #include <fmt/format.h>
 
@@ -485,7 +486,8 @@ private:
     /// along the two spine edges meet, and the vertices where the lateral edges of a profile's
     /// vertex do. The profile's element of each element of \a sections is the one \a origins
     /// binds it to, or itself without \a origins. The shell's end wires are left out: where a
-    /// closed spine closes, the joint is the start, which keeps the section's names.
+    /// closed spine closes, the joint is the start, which keeps the section's names. A joint is
+    /// bound to one corner, the one it lies at (round 6).
     void bindJoints(
         BRepOffsetAPI_MakePipeShell& pipe,
         const TopoDS_Shape& spine,
@@ -498,6 +500,11 @@ private:
         TopTools_IndexedMapOfShape ends;
         TopExp::MapShapes(pipe.FirstShape(), ends);
         TopExp::MapShapes(pipe.LastShape(), ends);
+        // The joints found, and each one's corner (by its index in edgesAt): where two corners lie
+        // between the same two spine edges (a closed spine of two), a joint is found at both, and
+        // is the nearer one's
+        TopTools_IndexedMapOfShape joints;
+        std::vector<int> cornerAt;
         // Per spine edge (by its index in spineEdges): the side faces it sweeps and their edges
         std::vector<TopTools_IndexedMapOfShape> legFaces(spineEdges.Extent() + 1);
         std::vector<TopTools_IndexedMapOfShape> legEdges(spineEdges.Extent() + 1);
@@ -551,12 +558,23 @@ private:
                                 && !sectionElements.Contains(it.Current())
                                 && !ends.Contains(it.Current())) {
                                 bindCopy(*origin, it.Current());
-                                bindCopy(cornerOf(edgesAt.FindKey(v)), it.Current());
+                                const int found = joints.FindIndex(it.Current());
+                                if (found == 0) {
+                                    joints.Add(it.Current());
+                                    cornerAt.push_back(v);
+                                }
+                                else if (distanceTo(edgesAt.FindKey(v), it.Current())
+                                         < distanceTo(edgesAt.FindKey(cornerAt[found - 1]), it.Current())) {
+                                    cornerAt[found - 1] = v;
+                                }
                             }
                         }
                     }
                 }
             }
+        }
+        for (int j = 1; j <= joints.Extent(); ++j) {
+            bindCopy(cornerOf(edgesAt.FindKey(cornerAt[j - 1])), joints(j));
         }
     }
 
@@ -1537,25 +1555,6 @@ bool isValidSolid(const Part::TopoShape& shape)
     return true;
 }
 
-/// \a element's mapped name in \a path, in full (not interned), the first in text order when it
-/// has several; without one, its type's letter and index (`E<n>`, `V<n>`)
-std::string firstName(const Part::TopoShape& path, const TopoDS_Shape& element)
-{
-    const int index = path.findShape(element);
-    const std::string& typeName = Part::TopoShape::shapeName(element.ShapeType());
-    std::vector<std::string> names;
-    if (index > 0) {
-        for (const auto& [name, sids] :
-             path.getElementMappedNames(Data::IndexedName::fromConst(typeName.c_str(), index))) {
-            names.push_back(Data::NameTable::instance().toPlain(name.toString()));
-        }
-    }
-    if (names.empty()) {
-        return typeName.substr(0, 1) + std::to_string(index);
-    }
-    return *std::ranges::min_element(names);
-}
-
 /// The V2 name \a name with the tags of its sections, and of the names in them, left out: what
 /// it says without the IDs of the objects that made it. Any other name as it is.
 std::string withoutTags(const std::string& name)
@@ -1596,6 +1595,34 @@ long lastTag(const std::string& name)
     }
 }
 
+/// \a element's mapped name in \a path, in full (not interned), the first in text order without
+/// tags when it has several (so object IDs don't choose); without one, its type's letter and index
+/// (`E<n>`, `V<n>`)
+std::string firstName(const Part::TopoShape& path, const TopoDS_Shape& element)
+{
+    const int index = path.findShape(element);
+    const std::string& typeName = Part::TopoShape::shapeName(element.ShapeType());
+    std::vector<std::string> names;
+    if (index > 0) {
+        for (const auto& [name, sids] :
+             path.getElementMappedNames(Data::IndexedName::fromConst(typeName.c_str(), index))) {
+            names.push_back(Data::NameTable::instance().toPlain(name.toString()));
+        }
+    }
+    if (names.empty()) {
+        return typeName.substr(0, 1) + std::to_string(index);
+    }
+    return *std::ranges::min_element(names, {}, [](const std::string& name) {
+        return std::make_pair(withoutTags(name), name);
+    });
+}
+
+/// \a text as one field of a key: its length, then itself, so no two lists of fields make one text
+std::string field(const std::string& text)
+{
+    return std::to_string(text.size()) + ":" + text;
+}
+
 /// The 64-bit FNV-1a hash of \a text, in hex: short, and the same on every platform
 std::string hashed(const std::string& text)
 {
@@ -1621,8 +1648,9 @@ std::string hashed(const std::string& text)
 /// (`g1v2,g2v1`), which swap when the lines are drawn the other way, and its next corner's name
 /// shares one of them (`g2v1,g3v2`): a joint's name went there at the solver's tier 1. A name of
 /// one part shares nothing with the next corner's. Two corners between the same two edges (a
-/// closed spine of two) are told apart by their vertices' names as well; two edges from two
-/// objects, by the second's tag. Spines without names are keyed by the edges' indices.
+/// closed spine of two) are told apart by which end of each edge they are (round 6); two edges
+/// from two objects, by the second's tag. Each part is length-prefixed (field), since a name's
+/// sections are separated by `|`. Spines without names are keyed by the edges' indices.
 struct CornerSource
 {
     /// A compound of the corners' vertices, named
@@ -1653,8 +1681,11 @@ CornerSource makeCornerSource(const Part::TopoShape& path, Part::TopoShape shape
     }
     TopTools_IndexedDataMapOfShapeListOfShape edgesAt;
     TopExp::MapShapesAndAncestors(path.getShape(), TopAbs_VERTEX, TopAbs_EDGE, edgesAt);
-    // Per corner, the tag its name carries
+    // Per corner, the tag its name carries; which end of each of its two edges (in the key's
+    // order) it is; and those edges' names with their tags
     std::vector<long> tags;
+    std::vector<std::string> endsOf;
+    std::vector<std::string> taggedNames;
     for (int v = 1; v <= edgesAt.Extent(); ++v) {
         TopTools_IndexedMapOfShape around;
         for (const TopoDS_Shape& edge : edgesAt(v)) {
@@ -1663,28 +1694,48 @@ CornerSource makeCornerSource(const Part::TopoShape& path, Part::TopoShape shape
         if (around.Extent() != 2) {
             continue;
         }
-        std::array<std::pair<std::string, long>, 2> edges;
+        const TopoDS_Shape& vertex = edgesAt.FindKey(v);
+        // Name without tags, tag, end (`s`tart or `e`nd, as the edge is drawn), name
+        std::array<std::tuple<std::string, long, char, std::string>, 2> edges;
         for (int i = 0; i < 2; ++i) {
-            const std::string name = firstName(path, around(i + 1));
-            edges[i] = {withoutTags(name), lastTag(name)};
+            const TopoDS_Edge& edge = TopoDS::Edge(around(i + 1));
+            const std::string name = firstName(path, edge);
+            const char end = TopExp::LastVertex(edge).IsSame(vertex) ? 'e' : 's';
+            edges[i] = {withoutTags(name), lastTag(name), end, name};
         }
         std::ranges::sort(edges);
-        std::string key = edges[0].first + "|" + edges[1].first;
-        if (edges[1].second != edges[0].second) {
-            key += "|" + std::to_string(edges[1].second);
+        const auto& [name0, tag0, end0, tagged0] = edges[0];
+        const auto& [name1, tag1, end1, tagged1] = edges[1];
+        std::string key = field(name0) + field(name1);
+        if (tag1 != tag0) {
+            key += field(std::to_string(tag1));
         }
-        source.keys.emplace_back(edgesAt.FindKey(v), key);
-        tags.push_back(edges[0].second);
+        source.keys.emplace_back(vertex, key);
+        tags.push_back(tag0);
+        endsOf.push_back(field(std::string {end0, end1}));
+        taggedNames.push_back(field(tagged0) + field(tagged1));
     }
-    for (auto& [vertex, key] : source.keys) {
-        const std::string pair = key;
-        if (std::ranges::count_if(source.keys, [&pair](const auto& other) {
-                return other.second == pair;
-            })
-            > 1) {
-            key += "|" + withoutTags(firstName(path, vertex));
+    // Corners with the same key and tag (they'd have one name) get \a suffixes, each its own,
+    // counted on the keys as they were, so no corner's key depends on the others' order
+    auto tellApart = [&source, &tags](const std::vector<std::string>& suffixes) {
+        const auto keys = source.keys;
+        for (size_t i = 0; i < keys.size(); ++i) {
+            for (size_t j = 0; j < keys.size(); ++j) {
+                if (j != i && keys[j].second == keys[i].second && tags[j] == tags[i]) {
+                    source.keys[i].second += suffixes[i];
+                    break;
+                }
+            }
         }
-    }
+    };
+    // A closed spine of two edges has two corners between them: which end of each edge the
+    // corner is tells them apart, whatever order the corners come in. Drawing one line the other
+    // way changes both corners' ends to ones neither had, so their names break (loud); drawing
+    // both the other way swaps them, which no name of the edges can tell from the corners trading
+    // places (round 6). Corners still alike lie between edges whose names differ only by their
+    // tags (copies of one object): the tags tell them apart.
+    tellApart(endsOf);
+    tellApart(taggedNames);
     if (source.keys.empty()) {
         return source;
     }
