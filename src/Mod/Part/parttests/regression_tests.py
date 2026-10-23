@@ -1178,6 +1178,119 @@ class RegressionTests(unittest.TestCase):
             (7, 15, 10),
         )
 
+    @staticmethod
+    def _helixDeviation(wire, pitch, radius, angle=0.0, left=False, vertical=False, perTurn=50):
+        """The largest distance of the wire's points from the helix they should lie on.
+
+        The helix lies on the cone (a cylinder for angle 0) of radius `radius` at z 0 with
+        half-angle `angle` (degrees), as Geom_ConicalSurface: P(u, v) = (radius + v sin a)
+        (cos u, sin u) + v cos a Z, and turns once per `pitch` of v (makeHelix's old style), or
+        of z (`vertical`: makeHelix's new style, makeLongHelix). For a point at angle u the
+        helix point at that angle nearest in height is found from the pitch, so the distance
+        measures both the radius and the height. The samples (`perTurn` per turn of each edge,
+        plus 7) are chosen independently of the C++ check's."""
+        a = math.radians(angle)
+        hand = -1.0 if left else 1.0
+        vPitch = pitch / math.cos(a) if vertical else pitch
+        worst = 0.0
+        for edge in wire.Edges:
+            first, last = edge.ParameterRange
+            ends = (edge.valueAt(first), edge.valueAt(last))
+            turns = abs(ends[1].z - ends[0].z) / (vPitch * math.cos(a))
+            count = int(perTurn * turns) + 7
+            for i in range(count + 1):
+                point = edge.valueAt(first + (last - first) * i / count)
+                u = math.atan2(point.y, point.x)
+                v = point.z / math.cos(a)
+                k = round(v / vPitch - hand * u / (2 * math.pi))
+                v = vPitch * (k + hand * u / (2 * math.pi))
+                r = radius + v * math.sin(a)
+                onHelix = Vector(r * math.cos(u), r * math.sin(u), v * math.cos(a))
+                worst = max(worst, point.distanceToPoint(onHelix))
+        return worst
+
+    def test_makeHelix_follows_the_helix_at_many_turns(self):
+        """makeHelix with many turns gives one edge on the helix (ops#447).
+
+        Designed geometry, the expectations from the helix's equation (_helixDeviation). With
+        OCCT's default approximation (30 segments) makeHelix(1, 50, 5) came out up to 6 mm off
+        the helix and 30 % short, with an edge tolerance of 1e-5; it started to leave its
+        tolerance at about 30 turns. makeHelix now asks for 1e-7 with up to 10000 segments: the
+        points stay within 1e-6 (ten times that), the end is where the helix ends, the length is
+        the helix's (turns x hypot(2 pi r, pitch)), and the edge's tolerance stays small. Still
+        one edge: CAM's Path.Geom reads Edges[0]."""
+        cases = [
+            # pitch, height, radius, angle, left-handed
+            (1, 10, 3, 0.0, False),  # control: within its tolerance (1e-5) before the fix too
+            (1, 50, 5, 0.0, False),  # the issue's case
+            (1, 50, 5, 0.0, True),
+            (0.5, 50, 1, 0.0, False),  # 100 turns
+            (1, 200, 5, 0.0, False),
+            (2.5, 75, 20, 0.0, False),  # 30 turns at radius 20: 3.5e-4 off before the fix
+            (1, 50, 5, 10.0, False),  # conical, old style: pitch and height along the cone
+        ]
+        for pitch, height, radius, angle, left in cases:
+            with self.subTest(pitch=pitch, height=height, radius=radius, angle=angle, left=left):
+                wire = Part.makeHelix(pitch, height, radius, angle, left)
+                self.assertEqual(len(wire.Edges), 1)
+                edge = wire.Edges[0]
+                self.assertLess(self._helixDeviation(wire, pitch, radius, angle, left), 1e-6)
+                self.assertLessEqual(edge.Tolerance, 1e-6)
+                a = math.radians(angle)
+                turnAngle = 2 * math.pi * height / pitch * (-1 if left else 1)
+                endRadius = radius + height * math.sin(a)
+                end = Vector(
+                    endRadius * math.cos(turnAngle),
+                    endRadius * math.sin(turnAngle),
+                    height * math.cos(a),
+                )
+                start = Vector(radius, 0, 0)
+                self.assertLess(edge.valueAt(edge.FirstParameter).distanceToPoint(start), 1e-6)
+                self.assertLess(edge.valueAt(edge.LastParameter).distanceToPoint(end), 1e-6)
+                if angle == 0.0:
+                    length = height / pitch * math.hypot(2 * math.pi * radius, pitch)
+                    self.assertAlmostEqual(edge.Length, length, delta=1e-6 * length)
+
+    def test_makeHelix_new_style_conical(self):
+        """A conical makeHelix with the height measured along the axis (ops#447).
+
+        pvertHeight: the helix rises `pitch` along Z per turn and ends at z = height, on the
+        cone r = radius + z tan(angle)."""
+        wire = Part.makeHelix(1, 50, 5, 10.0, False, True)
+        self.assertEqual(len(wire.Edges), 1)
+        self.assertLess(self._helixDeviation(wire, 1, 5, 10.0, vertical=True), 1e-6)
+        edge = wire.Edges[0]
+        end = Vector(5 + 50 * math.tan(math.radians(10.0)), 0, 50)
+        self.assertLess(edge.valueAt(edge.LastParameter).distanceToPoint(end), 1e-6)
+
+    def test_makeHelix_refuses_a_curve_off_the_helix(self):
+        """Where one edge can't follow the helix, makeHelix fails loudly (ops#447).
+
+        20000 turns in one approximation, at most 10000 segments: each segment would have to
+        cover two turns or more, which a curve of degree 14 can't do to the tolerance (OCCT's
+        curve was about 2000 off). makeHelix used to return such a curve silently."""
+        with self.assertRaises(Part.OCCError):
+            Part.makeHelix(1, 20000, 5)
+
+    def test_makeLongHelix_default_is_a_cylinder(self):
+        """makeLongHelix without an angle makes a cylindrical helix, one edge per turn (ops#447).
+
+        Its doc string says so, but the default angle was -1, and makeLongHelix takes a negative
+        angle as a narrowing cone (FeatureHole's tapered threads): the radius shrank by tan(1
+        degree) per unit of height, 0.87 at z = 50 for radius 5. The edges are approximated with
+        OCCT's default tolerance (1e-5); the test allows twice that, its samples differing from
+        the approximation's. A negative angle still makes the narrowing cone."""
+        wire = Part.makeLongHelix(1, 50, 5)
+        self.assertEqual(len(wire.Edges), 50)
+        self.assertLess(self._helixDeviation(wire, 1, 5, vertical=True), 2e-5)
+        tapered = Part.makeLongHelix(1, 20, 5, -5.0)
+        self.assertEqual(len(tapered.Edges), 20)
+        self.assertLess(self._helixDeviation(tapered, 1, 5, -5.0, vertical=True), 2e-5)
+        top = max((v.Point for v in tapered.Vertexes), key=lambda p: p.z)
+        self.assertAlmostEqual(top.z, 20, delta=1e-6)
+        topRadius = 5 - 20 * math.tan(math.radians(5.0))
+        self.assertAlmostEqual(math.hypot(top.x, top.y), topRadius, delta=1e-6)
+
     def tearDown(self):
         """Clean up our test, optionally preserving the test document"""
         # This flag allows doing something like this:

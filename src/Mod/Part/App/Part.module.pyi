@@ -402,7 +402,7 @@ def makeLongHelix(
     pitch: float,
     height: float,
     radius: float,
-    angle: float = -1.0,
+    angle: float = 0.0,
     pleft: bool = False,
     /,
 ) -> Wire:
