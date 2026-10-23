@@ -1209,6 +1209,61 @@ class TestPipeEndNames(unittest.TestCase):
                                 (place - target).Length, near, (point.Name, first, place, levels)
                             )
 
+    def testJointOfAClosedSpineOfTwoEdgesWhenALineIsDrawnTheOtherWay(self):
+        """"Transformed" along a closed spine of two edges, a line up 10 along Z and an arc back
+        to its start: both corners lie between the same two edges. Datum points on the joint's
+        edges and vertices at the line's top; then the line drawn the other way (its id kept, the
+        solid the same). Each point goes missing, warns, or stays where it was. Before, one of the
+        two corners kept the bare key of the edge pair and the joint carried both corners' keys,
+        so it shared a source with the joint at the other corner: the eight points moved 10 mm
+        there at tier 1, silently (ops#415 round 6; `work\\pr369-r1v\\closedD_Tr2.out`). Where a
+        closed spine starts follows the line's direction (the start moves to the top), which is
+        not checked here. Refined and not."""
+        top = V(0, 0, 10)
+        for refine in (False, True):
+            self.tearDown()
+            self.setUp()
+            with self.subTest(refine=refine):
+                path = self.sketch(
+                    "Path",
+                    [
+                        Part.LineSegment(V(0, 0, 0), V(0, 10, 0)),
+                        Part.ArcOfCircle(V(0, 10, 0), V(-18.66025, 5, 0), V(0, 0, 0)),
+                    ],
+                    placement=XZ,
+                )
+                pipe = self.pipe(
+                    self.square(half=1), path, Transition="Transformed", Refine=refine
+                )
+                joint = []
+                for kind in ("Edge", "Vertex"):
+                    for element in elementsWhere(pipe.Shape, kind, inSquareAt(top)):
+                        point = self.body.newObject("PartDesign::Point", "On" + element)
+                        point.AttachmentSupport = [(pipe, element)]
+                        point.MapMode = "Vertex" if kind == "Vertex" else "CenterOfMass"
+                        joint.append(point)
+                self.doc.recompute()
+                self.assertGreaterEqual(len(joint), 6, [p.Name for p in joint])
+                self.assertEqual([p.Name for p in joint if not p.isValid()], [])
+                before = {p.Name: V(p.Placement.Base) for p in joint}
+                geometry = path.Geometry
+                line = geometry[0]
+                line.StartPoint, line.EndPoint = V(100, 100, 0), V(200, 200, 0)
+                line.StartPoint, line.EndPoint = V(0, 10, 0), V(0, 0, 0)
+                path.Geometry = geometry
+                self.doc.recompute()
+                self.assertTrue(pipe.isValid(), pipe.getStatusString())
+                for point in joint:
+                    if not point.isValid():
+                        continue
+                    levels = [e["warning_level"] for e in App.getReferenceReport(point)]
+                    if "normal" in levels:
+                        continue
+                    place = point.Placement.Base
+                    self.assertLess(
+                        (place - before[point.Name]).Length, 1e-6, (point.Name, place, levels)
+                    )
+
     def testUndoAndRedoOfAnEditKeepTheirNames(self):
         """testEndStaysWhenTheProfileCrossesTheMiddle's edit in a transaction, undone and redone,
         the recompute inside the transaction or after it: the names are at the spine's start
