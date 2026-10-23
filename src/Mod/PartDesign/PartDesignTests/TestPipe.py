@@ -241,9 +241,9 @@ class TestPipeEndNames(unittest.TestCase):
     def testLPathEnds(self):
         """A square with a round hole (two wires) along an L path: both wires' start elements
         keep the sketch's names, the end ones (at x = 20) are their projections, and the edges at
-        the bend (on the plane x + z = 30) are generated from the bend's spine vertex (the path's
-        `g1v2,g2v1`) and their profile edge (ops#415; they were `UPP`, named from the side faces
-        they bound)."""
+        the bend (on the plane x + z = 30) are generated from the bend's corner (a `PCV` source,
+        not the path's vertex, `g1v2,g2v1`) and their profile edge (ops#415; they were `UPP`,
+        named from the side faces they bound)."""
         path = self.lPath()
         profile = self.sketch("Profile", models.rectangle(-2, -2, 2, 2) + [models.circle(0, 0, 1)])
         pipe = self.pipe(profile, path, Transition="Right corner")
@@ -254,9 +254,14 @@ class TestPipeEndNames(unittest.TestCase):
         bend = elementsWhere(shape, "Edge", lambda p: abs(p.x + p.z - 30) < 1e-6)
         self.assertTrue(bend)
         for element in bend:
-            self.assertIn("GEN", lastSection(shape, element)["mapperFlags"], element)
-            self.assertIn("g1v2", firstName(shape, element), element)
-            self.assertIn("g2v1", firstName(shape, element), element)
+            last = lastSection(shape, element)
+            self.assertIn("GEN", last["mapperFlags"], element)
+            corners = [
+                name for name in last["linkedNames"]
+                if App.getDecodedMappedName(name)[-1]["opCode"] == "PCV"
+            ]
+            self.assertEqual(len(corners), 1, (element, firstName(shape, element)))
+            self.assertNotIn("g1v2", firstName(shape, element), element)
         self.assertNamesDistinct(shape)
 
     def testLegNamesCarryTheSpineEdge(self):
@@ -2642,6 +2647,9 @@ class TestRoundCornerNames(unittest.TestCase):
     an exact name passed to another bend's round face or to a leg (ops#455). Named from the
     bend's spine vertex too (ops#415), each round face's name is its own."""
 
+    # The first bend, by its lines' geometry ids (a new sketch numbers its lines from 1)
+    firstBend = ((1, 2),)
+
     def setUp(self):
         self.doc = models.newDocument("PartDesignTestPipeRoundCorners")
         self.doc.HistoryAlgorithm = "V2"
@@ -2706,20 +2714,23 @@ class TestRoundCornerNames(unittest.TestCase):
         self.assertGreater(len(references), 0)
         return references
 
-    def assertNoneElsewhere(self, pipe, path, references, before):
+    def assertNoneElsewhere(self, pipe, path, references, before, flipped=()):
         """After an edit: a reference on a bend that still turns (has a round face) is valid and
         on its own bend's round face; one on another bend is invalid, warned, on its own bend's
-        round face, or where it was."""
+        round face, or where it was. A bend in `flipped` turns the other way now: its round face
+        is swept by the profile's other side, another element, so a reference there may also go
+        missing or warn."""
         self.assertTrue(pipe.isValid(), pipe.getStatusString())
         faces = self.roundFaces(pipe, path)
         for point, bend in references:
             own = faces.get(bend, [])
-            if bend in faces:
+            mayBreak = bend not in faces or bend in flipped
+            if not mayBreak:
                 self.assertTrue(point.isValid(), (point.Name, bend, point.getStatusString()))
             elif not point.isValid():
                 continue
             levels = [entry.get("warning_level") for entry in App.getReferenceReport(point)]
-            if bend not in faces and "normal" in levels:
+            if mayBreak and "normal" in levels:
                 continue
             ((_, (element,)),) = point.AttachmentSupport
             shape = pipe.Shape.getElement(element)
@@ -2739,9 +2750,10 @@ class TestRoundCornerNames(unittest.TestCase):
             moved = (point.Placement.Base - before[point.Name]).Length
             self.assertLess(moved, 1e-6, (point.Name, point.AttachmentSupport))
 
-    def edit(self, points, change, back=False):
+    def edit(self, points, change, back=False, flipped=()):
         """For the pipe refined and not: references on the round faces along `points`, then
-        `change(path)`; with `back`, the lines moved back to `points` after it"""
+        `change(path)`; with `back`, the lines moved back to `points` after it. `flipped`: the
+        bends the change turns the other way (assertNoneElsewhere)."""
         for refine in (False, True):
             self.tearDown()
             self.setUp()
@@ -2751,7 +2763,7 @@ class TestRoundCornerNames(unittest.TestCase):
                 before = {p.Name: App.Vector(p.Placement.Base) for p, _ in references}
                 change(path)
                 self.doc.recompute()
-                self.assertNoneElsewhere(pipe, path, references, before)
+                self.assertNoneElsewhere(pipe, path, references, before, flipped)
                 if back:
                     self.moveTo(path, points)
                     self.assertBackInPlace(references, before)
@@ -2800,3 +2812,34 @@ class TestRoundCornerNames(unittest.TestCase):
         """The first bend turned 30 degrees instead of 40: every reference stays on its own
         bend's round face (a guard: this passed before ops#415 too)."""
         self.edit(bendPoints(40, 20), lambda path: self.moveTo(path, bendPoints(30, 20)))
+
+    def testFirstBendOfAnSStraightened(self):
+        """An S (40 degrees, then 40 back): the first bend made straight, then turned back. On
+        integration the vertices at the ends of the first bend's round face went 18-19 mm to the
+        second bend at the solver's tier 1 (fork PR 361 round 3 verification, ops#455)."""
+        self.edit(bendPoints(40, -40), lambda path: self.moveTo(path, bendPoints(0, -40)), True)
+
+    def testFirstBendOfAnSFlipped(self):
+        """An S: the first bend turned the other way (-40 degrees), then back. Its round face is
+        now on the profile's other side: a reference to the first bend stays on its round face or
+        goes missing, and none goes to the second bend's (ops#455)."""
+        self.edit(
+            bendPoints(40, -40),
+            lambda path: self.moveTo(path, bendPoints(-40, -40)),
+            True,
+            self.firstBend,
+        )
+
+    def testFirstBendOfAnNStraightened(self):
+        """An N (-30 degrees, then 50 more): the first bend made straight, then turned back
+        (ops#455, as the S)."""
+        self.edit(bendPoints(-30, 50), lambda path: self.moveTo(path, bendPoints(0, 50)), True)
+
+    def testFirstBendFlipped(self):
+        """The first bend turned the other way (-40 degrees), then back (ops#455, as the S)."""
+        self.edit(
+            bendPoints(40, 20),
+            lambda path: self.moveTo(path, bendPoints(-40, 20)),
+            True,
+            self.firstBend,
+        )
