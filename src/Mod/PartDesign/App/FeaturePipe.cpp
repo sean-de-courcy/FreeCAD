@@ -44,6 +44,7 @@
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
 #include <BRepBuilderAPI_MakeSolid.hxx>
+#include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepLProp_CLProps.hxx>
@@ -52,6 +53,7 @@
 #include <BRepGProp_Face.hxx>
 #include <BRepOffsetAPI_MakePipeShell.hxx>
 #include <BRepTools_WireExplorer.hxx>
+#include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <Geom_BSplineCurve.hxx>
 #include <Geom_Curve.hxx>
@@ -71,6 +73,7 @@
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
+#include <TopoDS_Compound.hxx>
 #include <TopoDS_Wire.hxx>
 #include <TopTools_DataMapOfShapeListOfShape.hxx>
 #include <TopTools_DataMapOfShapeShape.hxx>
@@ -81,6 +84,7 @@
 
 #include <App/Document.h>
 #include <App/DocumentObject.h>
+#include <App/NameTable.h>
 #include <Base/Exception.h>
 #include <Base/Reader.h>
 #include <Mod/Part/App/FaceMakerCheese.h>
@@ -126,11 +130,15 @@ namespace
 // references to another leg silently. The section copies MakePipeShell reports from the spine's
 // vertices (at the corners and ends) are left out, and the ends are named from the sections. A
 // joint, where a profile element's sides along two spine edges meet at their spine vertex, is
-// named from that element and that vertex, and so is a cap between a union's pieces (the same
+// named from that element and that corner, and so is a cap between a union's pieces (the same
 // element's copy at a break): a joint that becomes a break, or a break that becomes a joint, keeps
-// its name at its own vertex. Named from the side faces they bound (`UPP`), a joint whose corner
+// its name at its own corner. Named from the side faces they bound (`UPP`), a joint whose corner
 // became a break took the next corner's joint, which shares a leg's side face (ops#415, round 4).
-// At a Round corner the round face lies between the legs' sides: its edges stay `UPP`.
+// The corner is a vertex of a third source (CornerSource), not the spine's own vertex: a sketch
+// vertex's name is its lines' ends (`g1v2,g2v1`), which swap when a line is drawn the other way,
+// and the next corner's shares one of them, so a joint's name went to the next corner's by the
+// shared part (round 5). At a Round corner the round face lies between the legs' sides: its edges
+// stay `UPP`.
 class MapperPipeShellEnds: public Part::MapperMaker
 {
 public:
@@ -138,16 +146,19 @@ public:
     /// point is the first when it is the profile's point, which the side shapes' history leaves
     /// out (it isn't otherwise a source). \a spine is the wire \a pipe sweeps along, a source of
     /// the shape too. \a reversed: the shell's end, not its start, carries the first section's
-    /// names (ops#379).
+    /// names (ops#379). \a corners binds the spine's vertices to the corner source's
+    /// (CornerSource::vertices), which name the joints.
     MapperPipeShellEnds(
         BRepOffsetAPI_MakePipeShell& pipe,
         const std::vector<Part::TopoShape>& sections,
         const TopoDS_Shape& point,
         const TopoDS_Shape& spine,
-        bool reversed
+        bool reversed,
+        const TopTools_DataMapOfShapeShape& corners
     )
         : MapperMaker(pipe)
         , point(point)
+        , corners(corners)
     {
         std::vector<TopoDS_Shape> swept;
         for (const Part::TopoShape& section : sections) {
@@ -191,11 +202,11 @@ public:
     /// the piece before, they descended from that piece's names, the same at whichever corner
     /// the break between the pieces fell (ops#379, round 4). \a frontBreak and \a backBreak are
     /// the spine's vertices where the piece meets the one before and after it (null at the
-    /// union's ends): the edges and vertices of the cap there are generated from that vertex and
-    /// the profile's element each is a copy of, as Part::Sweep names its ends. Named from the one
-    /// side face each bounds, which holds its leg but not the leg's end, a cap edge had the same
-    /// name at either end of its leg, and a reference went to the other end by its exact name
-    /// when an edit moved the break along the leg (ops#415, round 3).
+    /// union's ends): the edges and vertices of the cap there are generated from that corner (its
+    /// vertex in \a corners) and the profile's element each is a copy of, as Part::Sweep names
+    /// its ends. Named from the one side face each bounds, which holds its leg but not the leg's
+    /// end, a cap edge had the same name at either end of its leg, and a reference went to the
+    /// other end by its exact name when an edit moved the break along the leg (ops#415, round 3).
     MapperPipeShellEnds(
         BRepOffsetAPI_MakePipeShell& pipe,
         const TopoDS_Shape& section,
@@ -204,9 +215,11 @@ public:
         PieceEnd end,
         const TopTools_DataMapOfShapeShape* origins,
         const TopoDS_Shape& frontBreak,
-        const TopoDS_Shape& backBreak
+        const TopoDS_Shape& backBreak,
+        const TopTools_DataMapOfShapeShape& corners
     )
         : MapperMaker(pipe)
+        , corners(corners)
     {
         useSpine(pipe, spine, {section});
         if (origins) {
@@ -436,9 +449,16 @@ private:
         }
     }
 
-    /// Binds the spine's vertex \a vertex (none when null) and the profile's elements to the
-    /// elements of the cap there, \a cap (by the section's elements, each the copy of the
-    /// profile's element \a origins binds it to, or of itself without \a origins)
+    /// The corner source's vertex for the spine's vertex \a vertex
+    const TopoDS_Shape& cornerOf(const TopoDS_Shape& vertex) const
+    {
+        const TopoDS_Shape* corner = corners.Seek(vertex);
+        return corner ? *corner : vertex;
+    }
+
+    /// Binds the corner at the spine's vertex \a vertex (none when null) and the profile's
+    /// elements to the elements of the cap there, \a cap (by the section's elements, each the copy
+    /// of the profile's element \a origins binds it to, or of itself without \a origins)
     void bindBreak(
         const TopoDS_Shape& vertex,
         const TopTools_DataMapOfShapeListOfShape& cap,
@@ -455,17 +475,17 @@ private:
             }
             for (const TopoDS_Shape& copy : it.Value()) {
                 bindCopy(*origin, copy);
-                bindCopy(vertex, copy);
+                bindCopy(cornerOf(vertex), copy);
             }
         }
     }
 
-    /// Binds each of \a spine's vertices between two of its edges, and the profile's elements, to
-    /// the joints there: the edges where the side faces a profile's edge sweeps along the two
-    /// spine edges meet, and the vertices where the lateral edges of a profile's vertex do. The
-    /// profile's element of each element of \a sections is the one \a origins binds it to, or
-    /// itself without \a origins. The shell's end wires are left out: where a closed spine closes,
-    /// the joint is the start, which keeps the section's names.
+    /// Binds the corner at each of \a spine's vertices between two of its edges, and the profile's
+    /// elements, to the joints there: the edges where the side faces a profile's edge sweeps
+    /// along the two spine edges meet, and the vertices where the lateral edges of a profile's
+    /// vertex do. The profile's element of each element of \a sections is the one \a origins
+    /// binds it to, or itself without \a origins. The shell's end wires are left out: where a
+    /// closed spine closes, the joint is the start, which keeps the section's names.
     void bindJoints(
         BRepOffsetAPI_MakePipeShell& pipe,
         const TopoDS_Shape& spine,
@@ -531,7 +551,7 @@ private:
                                 && !sectionElements.Contains(it.Current())
                                 && !ends.Contains(it.Current())) {
                                 bindCopy(*origin, it.Current());
-                                bindCopy(edgesAt.FindKey(v), it.Current());
+                                bindCopy(cornerOf(edgesAt.FindKey(v)), it.Current());
                             }
                         }
                     }
@@ -593,9 +613,11 @@ private:
     TopTools_IndexedMapOfShape laterals;
     /// A piece's profile elements and the elements of its section swept from each
     TopTools_DataMapOfShapeListOfShape sweptFrom;
-    /// The spine's vertices and the profile's elements, and the joints and the edges and vertices
+    /// The corners' vertices and the profile's elements, and the joints and the edges and vertices
     /// of the caps between pieces they generate (bindJoints, bindBreak)
     TopTools_DataMapOfShapeListOfShape copies;
+    /// The spine's vertices and the corner source's vertices that name the joints there
+    TopTools_DataMapOfShapeShape corners;
 };
 
 // "Transformed" at the spine's corners (ops#370). It doesn't turn the profile at a corner: the
@@ -1515,31 +1537,187 @@ bool isValidSolid(const Part::TopoShape& shape)
     return true;
 }
 
-/// A short key for \a vertex, a vertex of \a path, the same for the same vertex whatever its
-/// index: the FNV-1a hash (in hex) of its mapped name, the first in text order when it has
-/// several (a sketch's line ends keep theirs, `g<i>v<j>`, while the lines are moved). A vertex
-/// without a name is keyed by its index (`V<n>`).
-std::string vertexKey(const Part::TopoShape& path, const TopoDS_Shape& vertex)
+/// \a element's mapped name in \a path, in full (not interned), the first in text order when it
+/// has several; without one, its type's letter and index (`E<n>`, `V<n>`)
+std::string firstName(const Part::TopoShape& path, const TopoDS_Shape& element)
 {
-    const int index = path.findShape(vertex);
-    if (index <= 0) {
-        return {};
-    }
+    const int index = path.findShape(element);
+    const std::string& typeName = Part::TopoShape::shapeName(element.ShapeType());
     std::vector<std::string> names;
-    for (const auto& [name, sids] : path.getElementMappedNames(
-             Data::IndexedName::fromConst(Part::TopoShape::shapeName(TopAbs_VERTEX).c_str(), index)
-         )) {
-        names.push_back(name.toString());
+    if (index > 0) {
+        for (const auto& [name, sids] :
+             path.getElementMappedNames(Data::IndexedName::fromConst(typeName.c_str(), index))) {
+            names.push_back(Data::NameTable::instance().toPlain(name.toString()));
+        }
     }
     if (names.empty()) {
-        return "V" + std::to_string(index);
+        return typeName.substr(0, 1) + std::to_string(index);
     }
-    std::uint32_t hash = 2166136261U;
-    for (const unsigned char c : *std::ranges::min_element(names)) {
+    return *std::ranges::min_element(names);
+}
+
+/// The V2 name \a name with the tags of its sections, and of the names in them, left out: what
+/// it says without the IDs of the objects that made it. Any other name as it is.
+std::string withoutTags(const std::string& name)
+{
+    const Data::DecodedMappedName& decoded = Data::MappedName::getDecodedMappedName(name);
+    if (decoded.empty()) {
+        return name;
+    }
+    std::string result;
+    for (Data::DecodedMappedSection section : decoded) {
+        for (std::string& linked : section.linkedNames) {
+            linked = withoutTags(linked);
+        }
+        for (std::string& connected : section.connectedElements) {
+            connected = withoutTags(connected);
+        }
+        section.iterationTag = Data::EMPTY_VALUE;
+        if (!result.empty()) {
+            result += Data::NAME_SECTION_DELIMINATOR;
+        }
+        result += Data::MappedName::makeEncodedSection(section);
+    }
+    return result;
+}
+
+/// The tag of the V2 name \a name's last section, the object that made it; 0 for any other name
+long lastTag(const std::string& name)
+{
+    const Data::DecodedMappedName& decoded = Data::MappedName::getDecodedMappedName(name);
+    if (decoded.empty()) {
+        return 0;
+    }
+    try {
+        return std::stol(decoded.back().iterationTag);
+    }
+    catch (const std::exception&) {
+        return 0;
+    }
+}
+
+/// The 64-bit FNV-1a hash of \a text, in hex: short, and the same on every platform
+std::string hashed(const std::string& text)
+{
+    std::uint64_t hash = 14695981039346656037ULL;
+    for (const unsigned char c : text) {
         hash ^= c;
-        hash *= 16777619U;
+        hash *= 1099511628211ULL;
     }
-    return fmt::format("{:08x}", hash);
+    return fmt::format("{:016x}", hash);
+}
+
+/// The corners of a pipe's spine, its vertices between two of its edges, as a source of the
+/// pipe's names (ops#415, round 5): a new vertex at each (its own TShape, so the spine's names
+/// for its vertex don't join in), named by hand as a source is (a sketch's vertex): the V2
+/// section `<key>;_;<tag>;PCV;0;V;0;SRC;_`, the tag the spine's object's (its first edge's last).
+/// V1 has none (its names hold their objects' tags and string IDs, which a key can't leave out):
+/// its joints are named from the spine's vertex, as before (decision 58). The key hashes the first mapped names of the two spine edges there, without
+/// their tags, in text order, so it stays the same for one corner while the lines are moved,
+/// drawn the other way, a segment is added before them or the bend between them straightens,
+/// and differs between corners (work\415\r5\probe_key.py); the objects' IDs stay out of it as
+/// they stay out of a name's text (the tag is masked where names are compared, the interned
+/// scenarios' oracle). The spine's vertex is no such key: a sketch names it from its lines' ends
+/// (`g1v2,g2v1`), which swap when the lines are drawn the other way, and its next corner's name
+/// shares one of them (`g2v1,g3v2`): a joint's name went there at the solver's tier 1. A name of
+/// one part shares nothing with the next corner's. Two corners between the same two edges (a
+/// closed spine of two) are told apart by their vertices' names as well; two edges from two
+/// objects, by the second's tag. Spines without names are keyed by the edges' indices.
+struct CornerSource
+{
+    /// A compound of the corners' vertices, named
+    Part::TopoShape shape;
+    /// Each corner's spine vertex and its vertex in shape
+    TopTools_DataMapOfShapeShape vertices;
+    /// Each corner's spine vertex and its key
+    std::vector<std::pair<TopoDS_Shape, std::string>> keys;
+
+    /// The key of the corner at the spine's vertex \a vertex, empty when it is none
+    std::string keyOf(const TopoDS_Shape& vertex) const
+    {
+        for (const auto& [corner, key] : keys) {
+            if (corner.IsSame(vertex)) {
+                return key;
+            }
+        }
+        return {};
+    }
+};
+
+/// The corners of \a path; \a shape is the feature's shape to name them in
+CornerSource makeCornerSource(const Part::TopoShape& path, Part::TopoShape shape)
+{
+    CornerSource source;
+    if (shape.getHistoryAlgorithm() != App::HistoryAlgorithm::V2) {
+        return source;
+    }
+    TopTools_IndexedDataMapOfShapeListOfShape edgesAt;
+    TopExp::MapShapesAndAncestors(path.getShape(), TopAbs_VERTEX, TopAbs_EDGE, edgesAt);
+    // Per corner, the tag its name carries
+    std::vector<long> tags;
+    for (int v = 1; v <= edgesAt.Extent(); ++v) {
+        TopTools_IndexedMapOfShape around;
+        for (const TopoDS_Shape& edge : edgesAt(v)) {
+            around.Add(edge);
+        }
+        if (around.Extent() != 2) {
+            continue;
+        }
+        std::array<std::pair<std::string, long>, 2> edges;
+        for (int i = 0; i < 2; ++i) {
+            const std::string name = firstName(path, around(i + 1));
+            edges[i] = {withoutTags(name), lastTag(name)};
+        }
+        std::ranges::sort(edges);
+        std::string key = edges[0].first + "|" + edges[1].first;
+        if (edges[1].second != edges[0].second) {
+            key += "|" + std::to_string(edges[1].second);
+        }
+        source.keys.emplace_back(edgesAt.FindKey(v), key);
+        tags.push_back(edges[0].second);
+    }
+    for (auto& [vertex, key] : source.keys) {
+        const std::string pair = key;
+        if (std::ranges::count_if(source.keys, [&pair](const auto& other) {
+                return other.second == pair;
+            })
+            > 1) {
+            key += "|" + withoutTags(firstName(path, vertex));
+        }
+    }
+    if (source.keys.empty()) {
+        return source;
+    }
+    TopoDS_Compound compound;
+    BRep_Builder builder;
+    builder.MakeCompound(compound);
+    for (const auto& [vertex, key] : source.keys) {
+        const TopoDS_Vertex corner
+            = BRepBuilderAPI_MakeVertex(BRep_Tool::Pnt(TopoDS::Vertex(vertex))).Vertex();
+        builder.Add(compound, corner);
+        source.vertices.Bind(vertex, corner);
+    }
+    shape.setShape(compound);
+    for (size_t i = 0; i < source.keys.size(); ++i) {
+        auto& [vertex, key] = source.keys[i];
+        key = hashed(key);
+        shape.setElementName(
+            Data::IndexedName::fromConst("Vertex", shape.findShape(source.vertices.Find(vertex))),
+            Data::MappedName(Data::MappedName::makeEncodedSection(
+                {key},
+                {},
+                static_cast<int>(tags[i]),
+                "PCV",
+                0,
+                'V',
+                0,
+                {Data::MAPPER_FLAG_SOURCE}
+            )),
+            shape.Tag
+        );
+    }
+    source.shape = shape;
+    return source;
 }
 
 /// \a name marked with \a marker (`<name>;<marker>;...;MOD`), for an element of type \a type
@@ -1566,10 +1744,10 @@ Data::MappedName marked(const Data::MappedName& name, const std::string& marker,
 
 /// Marks the faces, edges and vertices the fuse of the union's pieces made, those of \a fused that
 /// none of \a solids has, with the marker of the nearest break (\a breaks: the place and marker
-/// of each, `PCU<key>`, the key of the break's spine vertex), each of their names the fuse gave
-/// them itself (`FUS`, not modified from a piece's). The fuse names them from the side faces
-/// and vertices around them, the same at whichever corner the break is: the crease where two
-/// pieces cut each other, its vertices, and the pieces of the faces in the planes both legs
+/// of each, `PCU<key>`, the key of the break's corner, CornerSource), each of their names the
+/// fuse gave them itself (`FUS`, not modified from a piece's). The fuse names them from the side
+/// faces and vertices around them, the same at whichever corner the break is: the crease where
+/// two pieces cut each other, its vertices, and the pieces of the faces in the planes both legs
 /// share took the new break's when an edit moved it, and a reference went there with no warning
 /// (ops#379, round 5). Marked, a reference to one goes missing then. Keyed by the spine vertex's
 /// index, as they were in round 5, they moved with a segment added at the spine's start; marked
@@ -1655,14 +1833,14 @@ void markWhatTheFuseMade(
 /// them, as the one sweep's ends do, so a reference to either end follows it when an edit takes
 /// the pipe across 90 degrees. With \a profileAtEnd the two swap, as the one sweep's do when
 /// its end carries the profile's names (ops#379): the first piece's start projects them, and the
-/// last piece's end keeps them. Each piece's sources are the profile and \a spine, the path with
-/// its names, as the one sweep's (ops#415): its side faces and edges are named from the
-/// profile's elements and their spine edges, the names the one sweep gives them, and the edges
-/// where they meet (`UPP`) from those. The other pieces' ends aren't named from their sections:
-/// the edges and vertices of a cap between pieces are generated from the spine's vertex at the
+/// last piece's end keeps them. Each piece's sources are the profile, \a spine, the path with
+/// its names, and its corners, as the one sweep's (ops#415): its side faces and edges are named
+/// from the profile's elements and their spine edges, the names the one sweep gives them, and
+/// the edges where they meet (`UPP`) from those. The other pieces' ends aren't named from their
+/// sections: the edges and vertices of a cap between pieces are generated from the corner at the
 /// break and the profile's element each is a copy of (MapperPipeShellEnds), and the caps are told
 /// apart as a piece's front (`PCF`) or back (`PCB`); what the fuse makes there is marked with
-/// that vertex (markWhatTheFuseMade). So every name at a break holds the spine's vertex there:
+/// that corner's key (markWhatTheFuseMade). So every name at a break holds its corner:
 /// one taken at a corner can't go to another when an edit moves the break, adds a segment before
 /// it or draws the spine the other way. Keyed by the spine vertex's index, as they were (ops#379,
 /// rounds 4 and 5), they moved with a segment added at the start; named from the side faces
@@ -1693,6 +1871,7 @@ Part::TopoShape sweepPiecesAndFuse(
         begin = end;
     }
 
+    const CornerSource corners = makeCornerSource(path, make(TopoDS_Shape()));
     std::vector<Part::TopoShape> solids;
     std::vector<Part::TopoShape> sections = profiles;
     // Per wire: each element of the current section, and the profile's element it was swept from
@@ -1731,14 +1910,14 @@ Part::TopoShape sweepPiecesAndFuse(
                 end,
                 first ? nullptr : &origins[i],
                 first ? TopoDS_Shape() : pieceFirsts[index],
-                last ? TopoDS_Shape() : pieceFirsts[index + 1]
+                last ? TopoDS_Shape() : pieceFirsts[index + 1],
+                corners.vertices
             );
-            shell.makeShapeWithElementMap(
-                built,
-                mapper,
-                {profiles[i], path},
-                Part::OpCodes::PipeShell
-            );
+            std::vector<Part::TopoShape> pieceSources {profiles[i], path};
+            if (!corners.shape.isNull()) {
+                pieceSources.push_back(corners.shape);
+            }
+            shell.makeShapeWithElementMap(built, mapper, pieceSources, Part::OpCodes::PipeShell);
             TopTools_DataMapOfShapeShape next;
             for (TopTools_DataMapIteratorOfDataMapOfShapeListOfShape it(mapper.endsOf()); it.More();
                  it.Next()) {
@@ -1766,7 +1945,7 @@ Part::TopoShape sweepPiecesAndFuse(
             sewer.Add(shell.getShape());
         }
         // The pipe's own ends are named from their edges by the sewing, as the one sweep's; a cap
-        // between pieces is named before, from its edges (which hold the break's spine vertex),
+        // between pieces is named before, from its edges (which hold the break's corner),
         // the front and back told apart
         std::vector<Part::TopoShape> sources = shells;
         Part::TopoShape frontface;
@@ -1840,7 +2019,7 @@ Part::TopoShape sweepPiecesAndFuse(
         for (size_t index = 1; index < pieces.size(); ++index) {
             breaks.emplace_back(
                 BRep_Tool::Pnt(pieceFirsts[index]),
-                "PCU" + vertexKey(path, pieceFirsts[index])
+                "PCU" + corners.keyOf(pieceFirsts[index])
             );
         }
         markWhatTheFuseMade(fused, solids, breaks);
@@ -2773,10 +2952,14 @@ App::DocumentObjectExecReturn* Pipe::execute()
                     sections.back().getShape()
                 );
             }
-            // The spine is a source too, last, so that the start keeps the sections' names
-            // (ops#415)
+            // The spine is a source too, after the sections, so that the start keeps their
+            // names, and its corners, which name the joints (ops#415)
+            const CornerSource corners = makeCornerSource(path, makeTopoShape());
             std::vector<Part::TopoShape> sources = sections;
             sources.push_back(path);
+            if (!corners.shape.isNull()) {
+                sources.push_back(corners.shape);
+            }
             shell.makeShapeWithElementMap(
                 built,
                 MapperPipeShellEnds(
@@ -2784,7 +2967,8 @@ App::DocumentObjectExecReturn* Pipe::execute()
                     sections,
                     copyProfilePoint.getShape(),
                     path.getShape(),
-                    *reversed
+                    *reversed,
+                    corners.vertices
                 ),
                 sources,
                 Part::OpCodes::PipeShell
