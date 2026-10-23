@@ -58,6 +58,7 @@
 #include "FailureContinuation.h"
 #include "FeaturePy.h"
 #include "Body.h"
+#include "FeatureBase.h"
 #include "FeatureBoolean.h"
 #include "ShapeBinder.h"
 
@@ -880,6 +881,17 @@ TopLoc_Location Feature::getInverseLocation(const TopoShape& base) const
         return base.getShape().Location().Inverted();
     }
     return location.Inverted();
+}
+
+Part::BooleanInputCheck Feature::booleanInputCheck() const
+{
+    // A FeatureBase only copies the Body's BaseFeature, which can be any shape
+    const Part::Feature* base = getBaseObject(true);
+    if (base && base->isDerivedFrom<PartDesign::Feature>()
+        && !base->isDerivedFrom<PartDesign::FeatureBase>()) {
+        return Part::BooleanInputCheck::Tools;
+    }
+    return Part::BooleanInputCheck::All;
 }
 
 Part::TopoShape Feature::getTopoShapeInLocalCoordinates(const App::DocumentObject* object) const

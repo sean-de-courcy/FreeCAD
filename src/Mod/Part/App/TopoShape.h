@@ -72,6 +72,16 @@ enum class ElementMapPolicy
     Drop
 };
 
+/** Which inputs makeElementBoolean() checks with isValid(), fixing those found invalid (ops#310) */
+enum class BooleanInputCheck
+{
+    /// Every input
+    All,
+    /// The tools only. The first argument is a result the caller vouches for, e.g. a PartDesign
+    /// feature's base, which the feature before it made.
+    Tools
+};
+
 /* A special sub-class to indicate null shapes
  */
 // NOLINTNEXTLINE cppcoreguidelines-special-member-functions
@@ -2269,6 +2279,9 @@ public:
      *            the operation
      * @param tol: tolerance option available to some shape making algorithm
      * @param elementMapPolicy: whether to propagate or drop mapped element names
+     * @param inputCheck: which inputs of a boolean (Fuse, Cut, Common, Section) are checked,
+     *                    and fixed if invalid. The check is a full BRepCheck_Analyzer, about half
+     *                    of a boolean's time on a large base.
      *
      * @return The original content of this TopoShape is discarded and replaced
      *         with the new shape built by the shape maker. The function
@@ -2281,7 +2294,8 @@ public:
         const std::vector<TopoShape>& sources,
         const char* op = nullptr,
         double tol = -1.0,
-        ElementMapPolicy elementMapPolicy = ElementMapPolicy::Propagate
+        ElementMapPolicy elementMapPolicy = ElementMapPolicy::Propagate,
+        BooleanInputCheck inputCheck = BooleanInputCheck::All
     );
     /** Generalized shape making with mapped element name from shape history
      *

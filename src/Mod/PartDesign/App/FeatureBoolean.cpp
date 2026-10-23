@@ -292,8 +292,17 @@ App::DocumentObjectExecReturn* Boolean::execute()
         }
 
         try {
+            // Without a BaseFeature, the base is a tool Body's shape, and booleanInputCheck()
+            // checks it
             result = makeResultShape(baseTopShape)
-                         .makeElementBoolean(op, shapes, nullptr, FuzzyTolerance.getValue());
+                         .makeElementBoolean(
+                             op,
+                             shapes,
+                             nullptr,
+                             FuzzyTolerance.getValue(),
+                             Part::ElementMapPolicy::Propagate,
+                             booleanInputCheck()
+                         );
         }
         catch (Standard_Failure& e) {
             FC_ERR("Boolean operation failed: " << e.GetMessageString());
