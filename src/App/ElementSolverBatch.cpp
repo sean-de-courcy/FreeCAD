@@ -1346,15 +1346,48 @@ bool solveElementReferences(DocumentObject* feature,
             }
             else {
                 item.oldName = plainOld(entry->oldName);
-                // An edge or vertex named after its faces (UPP): the merged-neighbour test needs
-                // the target's faces (ops#446)
-                if (input.faces.empty() && !item.oldName.empty()
-                    && (item.type == "Edge" || item.type == "Vertex")) {
-                    const auto sections = Data::NameAncestry::splitSections(item.oldName);
-                    const auto& top =
-                        Data::MappedName::getDecodedMappedName(std::string(sections.back()));
-                    if (!top.empty() && top.front().hasMapperFlag(Data::MAPPER_FLAG_UPPER)) {
-                        input.faces = pool("Face");
+                // An edge or vertex named after its faces (UPP on its making section, the
+                // first): the merged-neighbour test needs the target's faces (ops#446). One
+                // generated from such an edge or vertex (GEN, the linked name's making section
+                // UPP with two linked names at least): the missing-generator test needs them
+                // and the pool of the linked name's type (ops#454).
+                if (!item.oldName.empty() && (item.type == "Edge" || item.type == "Vertex")) {
+                    // The first (making) or last section of a name, decoded
+                    auto sectionOf = [](std::string_view name, bool making) {
+                        static const Data::DecodedMappedSection none;
+                        const auto sections = Data::NameAncestry::splitSections(name);
+                        if (sections.empty()) {
+                            return none;
+                        }
+                        const auto& decoded = Data::MappedName::getDecodedMappedName(
+                            std::string(making ? sections.front() : sections.back())
+                        );
+                        return decoded.empty() ? none : decoded.front();
+                    };
+                    const auto making = sectionOf(item.oldName, true);
+                    if (making.hasMapperFlag(Data::MAPPER_FLAG_UPPER)) {
+                        if (input.faces.empty()) {
+                            input.faces = pool("Face");
+                        }
+                    }
+                    else if (making.hasMapperFlag(Data::MAPPER_FLAG_GENERATED)) {
+                        for (const auto& linked : making.linkedNames) {
+                            const auto generator = sectionOf(linked, true);
+                            const std::set<std::string> faces(generator.linkedNames.begin(),
+                                                              generator.linkedNames.end());
+                            const char type = sectionOf(linked, false).elementType;
+                            if (!generator.hasMapperFlag(Data::MAPPER_FLAG_UPPER)
+                                || faces.size() < 2 || (type != 'E' && type != 'V')) {
+                                continue;
+                            }
+                            if (input.faces.empty()) {
+                                input.faces = pool("Face");
+                            }
+                            const std::string typeName = type == 'E' ? "Edge" : "Vertex";
+                            if (input.pool.find(typeName) == input.pool.end()) {
+                                input.pool[typeName] = pool(typeName);
+                            }
+                        }
                     }
                 }
                 if (source != Data::Tier1Source::Overlap && !entry->oldName.empty()) {
