@@ -23,8 +23,11 @@
  ***************************************************************************/
 
 
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <limits>
+#include <optional>
 #include <gp_Circ.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Cylinder.hxx>
@@ -55,7 +58,10 @@
 #include <App/Document.h>
 #include <App/DocumentObject.h>
 #include <App/ElementNamingUtils.h>
+#include <App/Expression.h>
+#include <App/ObjectIdentifier.h>
 #include <Base/Converter.h>
+#include <Base/Quantity.h>
 #include <Base/Placement.h>
 #include <Base/Reader.h>
 #include <Base/Stream.h>
@@ -1305,7 +1311,84 @@ double Hole::getThreadProfileAngle()
     return 90 - 1.79;
 }
 
-void Hole::findClosestDesignation()
+// FreeCAD-CH (ops#405 N1): the pitch of the size at `index` in a size list, when the list is one
+// type's alone (the lists of two types differ); else 0, unknown
+static double pitchInListedSizes(const std::vector<std::string>& designations, int index)
+{
+    const int numTypes = static_cast<int>(std::size(Hole::threadDescription));
+    double pitch = 0.0;
+    int found = 0;
+    for (int type = 0; type < numTypes; ++type) {
+        if (getThreadDesignations(type) == designations) {
+            ++found;
+            if (index >= 0 && index < static_cast<int>(Hole::threadDescription[type].size())) {
+                pitch = Hole::threadDescription[type][index].pitch;
+            }
+        }
+    }
+    return found == 1 ? pitch : 0.0;
+}
+
+// FreeCAD-CH (ops#405 N2, decision 116): a ThreadSize bound to an expression whose value isn't a
+// size of the thread type (a type change leaves the expression's old size behind): the enum took
+// its first size without a word. Said in the Report view; the expression stays
+static void warnOfUnlistedThreadSize(const Hole& hole)
+{
+    if (!hole.ThreadType.isValid() || hole.ThreadType.getValue() == 0) {
+        return;
+    }
+    const auto info = hole.getExpression(App::ObjectIdentifier(hole.ThreadSize));
+    if (!info.expression) {
+        return;
+    }
+    const std::vector<std::string> designations = getThreadDesignations(hole.ThreadType.getValue());
+    std::string given;
+    bool listed = false;
+    try {
+        const boost::any value = info.expression->getValueAsAny();
+        // a size's name, or its index in the list (the enumeration takes either)
+        std::optional<double> index;
+        if (const auto* name = boost::any_cast<std::string>(&value)) {
+            given = *name;
+            listed = std::find(designations.begin(), designations.end(), given)
+                != designations.end();
+        }
+        else if (const auto* real = boost::any_cast<double>(&value)) {
+            index = *real;
+        }
+        else if (const auto* integer = boost::any_cast<long>(&value)) {
+            index = static_cast<double>(*integer);
+        }
+        else if (const auto* plain = boost::any_cast<int>(&value)) {
+            index = static_cast<double>(*plain);
+        }
+        else if (const auto* quantity = boost::any_cast<Base::Quantity>(&value)) {
+            index = quantity->getValue();
+        }
+        else {
+            return;
+        }
+        if (index) {
+            given = std::to_string(*index);
+            listed = *index >= 0.0 && *index < static_cast<double>(designations.size())
+                && *index == std::floor(*index);
+        }
+    }
+    catch (const Base::Exception&) {
+        return;  // an expression that doesn't evaluate is reported by the engine
+    }
+    if (!listed) {
+        FC_WARN(
+            hole.getFullName() << ": the expression of ThreadSize gives '" << given
+                               << "', which is no size of the thread type '"
+                               << hole.ThreadType.getValueAsString()
+                               << "'. The expression is kept, and the size is the enumeration's "
+                                  "fallback"
+        );
+    }
+}
+
+void Hole::findClosestDesignation(double oldPitch, bool byDiameter)
 {
     int threadType = ThreadType.getValue();
     const int numTypes = static_cast<int>(std::size(threadDescription));
@@ -1321,8 +1404,12 @@ void Hole::findClosestDesignation()
 
     int oldSizeIndex = ThreadSize.getValue();
     const auto& options = threadDescription[threadType];
-    double targetPitch = 0.0;
-    if (oldSizeIndex >= 0 && oldSizeIndex < static_cast<int>(options.size())) {
+    // after a type change, the pitch of the size it left; else the new type's size at the index
+    // (a restore), unless the change left no pitch to go by (ops#405 review: from "None", the
+    // new type's first size is only where setEnums() fell back to)
+    double targetPitch = oldPitch;
+    if (!byDiameter && targetPitch == 0.0 && oldSizeIndex >= 0
+        && oldSizeIndex < static_cast<int>(options.size())) {
         targetPitch = options[oldSizeIndex].pitch;
     }
     size_t bestIndex = 0;
@@ -1372,17 +1459,21 @@ void Hole::onChanged(const App::Property* prop)
             // size's. A restore keeps the reset, which corrects a stale saved ThreadDiameter.
             const double oldThreadDiameter = ThreadDiameter.getValue();
             std::string oldThreadSize;
+            double oldPitch = 0.0;
             if (ThreadSize.isValid()) {
                 oldThreadSize = ThreadSize.getValueAsString();
+                // ops#405 N1: its pitch too, from the old type's sizes (still listed)
+                oldPitch = pitchInListedSizes(ThreadSize.getEnumVector(), ThreadSize.getValue());
             }
             ThreadSize.setEnums(getThreadDesignations(ThreadType.getValue()));
             if (type != "None") {
                 const bool sizeKept = ThreadSize.isValid()
                     && oldThreadSize == ThreadSize.getValueAsString();
-                if (!isRestoring() && !sizeKept) {
+                const bool changed = !isRestoring() && !sizeKept;
+                if (changed) {
                     ThreadDiameter.setValue(oldThreadDiameter);
                 }
-                findClosestDesignation();
+                findClosestDesignation(changed ? oldPitch : 0.0, changed && oldPitch == 0.0);
             }
         }
 
@@ -1829,6 +1920,8 @@ static gp_Pnt toPnt(gp_Vec dir)
 
 App::DocumentObjectExecReturn* Hole::execute()
 {
+    warnOfUnlistedThreadSize(*this);
+
     TopoShape profileshape = getProfileShape(
         Part::ShapeOption::NeedSubElement | Part::ShapeOption::ResolveLink
         | Part::ShapeOption::Transform | Part::ShapeOption::DontSimplifyCompound

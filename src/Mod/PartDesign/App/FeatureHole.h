@@ -299,7 +299,10 @@ private:
     double getThreadClassClearance() const;
     double getThreadRunout(int mode = 1) const;
     double getThreadProfileAngle();
-    void findClosestDesignation();
+    /// `oldPitch`, when not 0, is the pitch of the size a thread type change leaves (ops#405 N1);
+    /// `byDiameter` is for a type change that leaves no known pitch (from "None"): the closest
+    /// diameter alone, not the pitch of the new type's first size, which the fallback made current
+    void findClosestDesignation(double oldPitch = 0.0, bool byDiameter = false);
     void rotateToNormal(const gp_Dir& helixAxis, const gp_Dir& normalAxis, TopoDS_Shape& helixShape) const;
     gp_Vec computePerpendicular(const gp_Vec&) const;
     TopoDS_Shape makeThread(const gp_Vec&, const gp_Vec&, double);

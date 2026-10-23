@@ -362,8 +362,13 @@ void TaskPatternParameters::onSelectionChanged(const Gui::SelectionChanges& msg)
 
     std::vector<std::string> directions;
     App::DocumentObject* selObj = nullptr;
-    getReferencedSelection(patternObj, msg, selObj, directions);
+    bool answered = false;
+    getReferencedSelection(patternObj, msg, selObj, directions, &answered);
     if (!selObj) {
+        // FreeCAD-CH (ops#395 5): a refused copy was said in its message box
+        if (answered) {
+            return;
+        }
         Base::Console().warning(
             tr("Invalid selection. Select an edge, planar face, or datum line.").toStdString().c_str()
         );

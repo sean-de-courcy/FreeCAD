@@ -27,6 +27,7 @@
 #include <BRepAdaptor_Surface.hxx>
 #include <GeomLib_IsPlanarSurface.hxx>
 #include <QMessageBox>
+#include <QPushButton>
 #include <TopExp_Explorer.hxx>
 #include <TopLoc_Location.hxx>
 #include <TopoDS.hxx>
@@ -1222,6 +1223,9 @@ void prepareProfileBased(
     // no face profile was selected, do the extended sketch logic
 
     bool bNoSketchWasSelected = false;
+    // FreeCAD-CH (ops#410): the user chose to go on although a sketch of another document is
+    // selected; the pick dialog then shows even for a single free sketch
+    bool sketchOfAnotherDocumentSelected = false;
     // Get a valid sketch from the user
     // First check selections
     std::vector<App::DocumentObject*> sketches = cmd->getSelection().getObjectsOfType(
@@ -1231,6 +1235,56 @@ void prepareProfileBased(
                              // available in document
         sketches = cmd->getDocument()->getObjectsOfType(Part::Part2DObject::getClassTypeId());
         bNoSketchWasSelected = true;
+
+        // FreeCAD-CH (ops#410, decision 104): the selection holds only the active document's
+        // objects (upstream PR 33716), so a sketch selected in another document is no profile.
+        // Said, rather than left out: the command went on with a sketch of this document, or said
+        // that none is available. The selection can be a leftover (switching documents doesn't
+        // clear it), so the user is asked, and a sketch is never taken without the pick dialog.
+        // A Link into the active document resolves to an object of it: not another document's
+        App::DocumentObject* other = nullptr;
+        for (App::DocumentObject* obj : cmd->getSelection().getObjectsOfType(
+                 Part::Part2DObject::getClassTypeId(),
+                 "*"
+             )) {
+            if (obj->getDocument() != cmd->getDocument()) {
+                other = obj;
+                break;
+            }
+        }
+        if (other) {
+            const QString otherLabel = QString::fromUtf8(other->Label.getValue());
+            const QString otherDocLabel = QString::fromUtf8(other->getDocument()->Label.getValue());
+            const QString activeLabel = QString::fromUtf8(cmd->getDocument()->Label.getValue());
+            if (sketches.empty()) {
+                QMessageBox::warning(
+                    Gui::getMainWindow(),
+                    QObject::tr("Sketch in another document"),
+                    QObject::tr("'%1' is in the document '%2', not in the active document. Select "
+                                "a sketch of the active document.")
+                        .arg(otherLabel, otherDocLabel)
+                );
+                return;
+            }
+            QMessageBox msgBox(Gui::getMainWindow());
+            msgBox.setIcon(QMessageBox::Warning);
+            msgBox.setWindowTitle(QObject::tr("Sketch in another document"));
+            msgBox.setText(
+                QObject::tr("'%1' is in the document '%2', not in the active document. Continue "
+                            "with a sketch of '%3'?")
+                    .arg(otherLabel, otherDocLabel, activeLabel)
+            );
+            QPushButton* proceed
+                = msgBox.addButton(QObject::tr("Continue"), QMessageBox::AcceptRole);
+            QPushButton* cancel = msgBox.addButton(QMessageBox::Cancel);
+            msgBox.setDefaultButton(QMessageBox::Cancel);
+            msgBox.setEscapeButton(cancel);
+            msgBox.exec();
+            if (msgBox.clickedButton() != proceed) {
+                return;
+            }
+            sketchOfAnotherDocumentSelected = true;
+        }
     }
 
     if (sketches.empty()) {
@@ -1322,27 +1376,17 @@ void prepareProfileBased(
             auto oBody = PartDesignGui::getBodyFor(sketches[0], false);
             App::DocumentObject* target = oBody ? static_cast<App::DocumentObject*>(pcActiveBody)
                                                 : pcActivePart;
-            QString refusal;
+            // FreeCAD-CH (ops#410, decision 104): the sketch is in the active document, so the
+            // copy isn't refused (ops#327's guard against a dependent copy across documents is
+            // gone with the selection that could reach it)
             auto copy = PartDesignGui::TaskFeaturePick::makeCopy(
                 sketches[0],
                 "",
                 dlg.radioIndependent->isChecked(),
-                target,
-                &refusal
+                target
             );
-            // FreeCAD-CH (ops#327): no copy (a dependent copy of a sketch in another document):
-            // stop, as the other callers do. The null went to the body's addObject and on as the
-            // profile: nothing was made, without a word, and the transaction stayed open.
-            if (!copy) {
+            if (!copy) {  // PR 360 review: makeCopy gives none without an object or a document
                 cmd->abortCommand();
-                QMessageBox::warning(
-                    Gui::getMainWindow(),
-                    QObject::tr("No copy"),
-                    refusal.isEmpty()
-                        ? QObject::tr("'%1' can't be copied. Make a cross-reference instead.")
-                              .arg(QString::fromUtf8(sketches[0]->Label.getValue()))
-                        : refusal
-                );
                 return;
             }
             if (oBody) {
@@ -1359,7 +1403,7 @@ void prepareProfileBased(
 
     // Show sketch choose dialog and let user pick sketch if no sketch was selected and no free one
     // available or multiple free ones are available
-    if (bNoSketchWasSelected && (freeSketches != 1)) {
+    if (bNoSketchWasSelected && (freeSketches != 1 || sketchOfAnotherDocumentSelected)) {
 
         Gui::TaskView::TaskDialog* dlg = Gui::Control().activeDialog();
         PartDesignGui::TaskDlgFeaturePick* pickDlg

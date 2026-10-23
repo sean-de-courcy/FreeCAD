@@ -315,10 +315,14 @@ bool getReferencedSelection(
     const App::DocumentObject* thisObj,
     const Gui::SelectionChanges& msg,
     App::DocumentObject*& selObj,
-    std::vector<std::string>& selSub
+    std::vector<std::string>& selSub,
+    bool* answered
 )
 {
     selObj = nullptr;
+    if (answered) {
+        *answered = false;
+    }
     if (!thisObj) {
         return false;
     }
@@ -357,12 +361,20 @@ bool getReferencedSelection(
             int result = dia.exec();
             if (result == QDialog::DialogCode::Rejected) {
                 selObj = nullptr;
+                if (answered) {
+                    *answered = true;
+                }
                 return false;
             }
 
             if (!dlg.radioXRef->isChecked()) {
                 App::Document* document = thisObj->getDocument();
-                document->openTransaction("Make copy");
+                // FreeCAD-CH (ops#395 3): inside the panel's open transaction, when there is one.
+                // A new one committed the feature's creation, so Cancel undid the copy alone and
+                // left the feature (a new Revolution) in the body
+                if (!document->hasPendingTransaction()) {
+                    document->openTransaction("Make copy");
+                }
                 QString refusal;
                 auto copy = PartDesignGui::TaskFeaturePick::makeCopy(
                     selObj,
@@ -382,6 +394,9 @@ bool getReferencedSelection(
                             : refusal
                     );
                     selObj = nullptr;
+                    if (answered) {
+                        *answered = true;
+                    }
                     return false;
                 }
 
@@ -401,6 +416,9 @@ bool getReferencedSelection(
                         PartDesignGui::TaskFeaturePick::copyDiffers(selObj, subname)
                     );
                     selObj = nullptr;
+                    if (answered) {
+                        *answered = true;
+                    }
                     return false;
                 }
                 subname = *element;
@@ -411,7 +429,11 @@ bool getReferencedSelection(
                 // that fails isn't linked
                 if (auto* binder = freecad_cast<PartDesign::ShapeBinder*>(copy);
                     binder && binder->TraceSupport.getValue() && !binder->recomputeFeature()) {
-                    const QString why = QString::fromUtf8(binder->getStatusString());
+                    // FreeCAD-CH (ops#395 6): a failure with no status text read "...: ."
+                    QString why = QString::fromUtf8(binder->getStatusString());
+                    if (why.isEmpty()) {
+                        why = QObject::tr("it has no shape");
+                    }
                     copy->getDocument()->removeObject(copy->getNameInDocument());
                     QMessageBox::warning(
                         Gui::getMainWindow(),
@@ -421,6 +443,9 @@ bool getReferencedSelection(
                             .arg(QString::fromUtf8(selObj->Label.getValue()), why)
                     );
                     selObj = nullptr;
+                    if (answered) {
+                        *answered = true;
+                    }
                     return false;
                 }
 

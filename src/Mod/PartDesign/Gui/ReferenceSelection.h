@@ -104,12 +104,15 @@ public:
     bool allow(App::Document* pDoc, App::DocumentObject* pObj, const char* sSubName) override;
 };
 // Convenience methods
-/// Extract reference from Selection
+/// Extract reference from Selection. `answered`, when given, is set when a false result was
+/// already answered to the user (the copy question was cancelled, or a message box said why no
+/// copy was made): the caller says nothing more (ops#395 5).
 bool getReferencedSelection(
     const App::DocumentObject* thisObj,
     const Gui::SelectionChanges& msg,
     App::DocumentObject*& selObj,
-    std::vector<std::string>& selSub
+    std::vector<std::string>& selSub,
+    bool* answered = nullptr
 );
 /// Return reference as string for UI elements (format <obj>:<subelement>
 QString getRefStr(const App::DocumentObject* obj, const std::vector<std::string>& sub);

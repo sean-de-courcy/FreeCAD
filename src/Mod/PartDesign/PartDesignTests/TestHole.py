@@ -376,10 +376,11 @@ class TestHole(unittest.TestCase):
         # closest size is looked up from: M12 became M1 or #1)
         hole.ThreadType = "ISOMetricFineProfile"
         self.assertAlmostEqual(hole.ThreadDiameter.Value, 1.0)
-        # (the nearest by diameter and pitch: 7/16" is 11.113, 1 1/8" 28.575)
+        # (the nearest by diameter and the old size's pitch: 1/2" is 12.7 with 1.954, 1 1/8"
+        # 28.575; 7/16" is nearer in diameter alone, ops#405 N1)
         for start, other, nearest in (
             ("M12x1.75", "ISOMetricFineProfile", 12.0),
-            ("M12x1.75", "UNC", 11.113),
+            ("M12x1.75", "UNC", 12.7),
             ("M30x3.5", "UNC", 28.575),
         ):
             hole.ThreadType = "ISOMetricProfile"
@@ -391,6 +392,89 @@ class TestHole(unittest.TestCase):
         hole.ThreadSize = "3/4"
         hole.ThreadType = "NPT"
         self.assertEqual(hole.ThreadSize, "3/4")
+
+    def testThreadTypeChangePicksTheSizeNearestByTheOldPitch(self):
+        """ops#405 N1: a thread type change picks the new type's size nearest the old one by
+        diameter and by the old size's pitch. The pitch was the new type's first size's
+        (M12x1.75 to UNC gave 7/16, 11.113 with 1.814, not 1/2, 12.700 with 1.954; to NPT
+        1/8, not 1/4; to ISO fine M12x1.0, not M12x1.5), silently from Python.
+        Model: M12x1.75, diameter 12 and pitch 1.75: UNC 7/16 is 0.889 away (0.887 in diameter,
+        0.064 in pitch), 1/2 0.729 (0.700, 0.204); NPT 1/8 1.894, 1/4 1.749; M12x1.0 0.75 away
+        in pitch, M12x1.5 0.25."""
+        for other, expected in (
+            ("UNC", "1/2"),
+            ("NPT", "1/4"),
+            ("ISOMetricFineProfile", "M12x1.5"),
+        ):
+            self.Hole.ThreadType = "ISOMetricProfile"
+            self.Hole.ThreadSize = "M12x1.75"
+            self.Hole.ThreadType = other
+            self.assertEqual(self.Hole.ThreadSize, expected, other)
+
+    def testThreadTypeChangeFromNoneIsByDiameter(self):
+        """ops#405 N1, PR 360 round 2: from "None" the old size has no pitch, and the closest
+        size is the nearest by diameter alone. The pitch was the new type's first size's, which
+        setEnums() had fallen back to (UNC #1: 0.397): Diameter 12 gave 7/16 (11.113, 1.814;
+        1.67 away with that pitch), not 1/2 (12.700, 1.954; 1.71 away), though 1/2 is nearer in
+        diameter (0.7 against 0.887)."""
+        self.assertEqual(self.Hole.ThreadType, "None")
+        for other, expected in (("UNC", "1/2"), ("ISOMetricProfile", "M12x1.75")):
+            self.Hole.ThreadType = "None"
+            self.Hole.Diameter = 12
+            self.Hole.ThreadType = other
+            self.assertEqual(self.Hole.ThreadSize, expected, other)
+
+    def consoleOutput(self, action):
+        """What `action()` prints through the console's std observer (stderr, fd 2), warnings and
+        errors on, as text (TestNamingSolver.consoleOutput)."""
+        if "Console" not in App.Console.GetObservers():
+            self.skipTest("no console observer to catch the warnings (the GUI)")
+        kinds = ("Wrn", "Err")
+        statuses = {kind: App.Console.GetStatus("Console", kind) for kind in kinds}
+        for kind in kinds:
+            App.Console.SetStatus("Console", kind, True)
+        saved = os.dup(2)
+        with tempfile.TemporaryFile() as caught:
+            os.dup2(caught.fileno(), 2)
+            try:
+                action()
+            finally:
+                os.dup2(saved, 2)
+                os.close(saved)
+                for kind, status in statuses.items():
+                    App.Console.SetStatus("Console", kind, bool(status))
+            caught.seek(0)
+            return caught.read().decode("utf-8", "replace")
+
+    def testThreadSizeExpressionOfAnotherTypeWarnsAndStays(self):
+        """ops#405 N2 (decision 116): ThreadType and ThreadSize bound to cells, the type cell
+        changed to a type with no size of the size cell's name. The enumeration took its first
+        size (UNC #1) without a word. The recompute now warns, naming the expression's value
+        and the type, and the expression stays; a size of the new type warns nothing."""
+        sheet = self.Doc.addObject("Spreadsheet::Sheet", "Sheet")
+        sheet.set("A1", "'ISOMetricProfile")
+        sheet.set("B1", "'M12x1.75")
+        self.Doc.recompute()
+        self.Hole.setExpression("ThreadType", "Sheet.A1")
+        self.Doc.recompute()
+        self.Hole.setExpression("ThreadSize", "Sheet.B1")
+        self.Doc.recompute()
+        self.assertEqual(self.Hole.ThreadType, "ISOMetricProfile")
+        self.assertEqual(self.Hole.ThreadSize, "M12x1.75")
+        self.assertNotIn("ThreadSize", self.consoleOutput(self.Doc.recompute))
+
+        sheet.set("A1", "'UNC")
+        printed = self.consoleOutput(self.Doc.recompute)
+        self.assertIn("the expression of ThreadSize gives 'M12x1.75'", printed)
+        self.assertIn("no size of the thread type 'UNC'", printed)
+        self.assertEqual(self.Hole.ThreadType, "UNC")
+        self.assertEqual(dict(self.Hole.ExpressionEngine).get("ThreadSize"), "Sheet.B1")
+
+        sheet.set("B1", "'1/2")
+        printed = self.consoleOutput(self.Doc.recompute)
+        self.assertNotIn("ThreadSize", printed)
+        self.assertEqual(self.Hole.ThreadSize, "1/2")
+        self.assertEqual(dict(self.Hole.ExpressionEngine).get("ThreadSize"), "Sheet.B1")
 
     def testNoRefineHole(self):
         # Add a second box to get a shape with more faces
