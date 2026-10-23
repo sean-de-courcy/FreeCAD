@@ -466,17 +466,23 @@ class TestPipeEndNames(unittest.TestCase):
             self.assertIn(f"{profile.ID}", name, element)
 
 
-def bendPoints(first, second, towards=False):
+def bendPoints(first, second, towards=False, *more):
     """In an XZ sketch: up 30 from the square at z = 0, then 20 turned `first` degrees from +Z
-    towards +X, then 20 turned `second` degrees more; drawn towards the profile if `towards`."""
+    towards +X, then 20 turned `second` degrees more (and 20 more per turn in `more`); drawn
+    towards the profile if `towards`."""
     points = [(0.0, 0.0), (0.0, 30.0)]
     heading = 0.0
-    for turn in (first, second):
+    for turn in (first, second) + more:
         heading += turn
         x, z = points[-1]
         a = math.radians(heading)
         points.append((x + 20 * math.sin(a), z + 20 * math.cos(a)))
     return points[::-1] if towards else points
+
+
+def near(at, radius):
+    """Whether a point lies within `radius` of `at`."""
+    return lambda p: (p - at).Length < radius
 
 
 def inSquareAt(at):
@@ -508,23 +514,26 @@ class TestJointsWhenABendStraightens(unittest.TestCase):
         path.addGeometry(models.polyline(points))
         self.doc.recompute()
 
-    def pipe(self, points, refine):
-        profile = models.sketch(self.doc, "Profile", models.rectangle(-2, -2, 2, 2), self.body)
+    def pipe(self, points, refine, transition="Transformed", circular=False):
+        """A pipe of the square, or of a circle of radius 2 if `circular`, along the points"""
+        geometry = [models.circle(0, 0, 2)] if circular else models.rectangle(-2, -2, 2, 2)
+        profile = models.sketch(self.doc, "Profile", geometry, self.body)
         path = models.sketch(self.doc, "Path", models.polyline(points), self.body, placement=XZ)
         pipe = self.body.newObject("PartDesign::AdditivePipe", "Pipe")
         pipe.Profile = profile
         pipe.Spine = (path, [])
-        pipe.Transition = "Transformed"
+        pipe.Transition = transition
         pipe.Refine = refine
         self.doc.recompute()
         self.assertTrue(pipe.isValid(), pipe.getStatusString())
         return path, pipe
 
-    def pointsOn(self, target, at):
-        """A datum point on each edge and vertex of `target` lying wholly in the square at `at`"""
+    def pointsOn(self, target, at, where=None, kinds=("Edge", "Vertex")):
+        """A datum point on each edge and vertex of `target` lying wholly in the square at `at`,
+        or where `where` holds"""
         points = []
-        for kind in ("Edge", "Vertex"):
-            for element in elementsWhere(target.Shape, kind, inSquareAt(at)):
+        for kind in kinds:
+            for element in elementsWhere(target.Shape, kind, where or inSquareAt(at)):
                 point = self.body.newObject("PartDesign::Point", "On" + element)
                 point.AttachmentSupport = [(target, element)]
                 point.MapMode = "Vertex" if kind == "Vertex" else "CenterOfMass"
@@ -533,14 +542,17 @@ class TestJointsWhenABendStraightens(unittest.TestCase):
         self.assertEqual([p.Name for p in points if not p.isValid()], [])
         return points
 
-    def assertGoneOrLoud(self, points, before, report):
+    def assertGoneOrLoud(self, points, before, report, solved=False):
         """Each point is invalid, warned, or where it was: none moved silently. With `report`
         False only the places count: a SubShapeBinder updates twice and its report is empty
-        afterwards (ops#449)."""
+        afterwards (ops#449). With `solved`, only the points the solver re-bound count (a report
+        entry): an exact name may move with its element (ops#455)."""
         for point in points:
             if not point.isValid():
                 continue
             levels = [e.get("warning_level") for e in App.getReferenceReport(point)]
+            if solved and not levels:
+                continue
             if report and "normal" in levels:
                 continue
             moved = (point.Placement.Base - before[point.Name]).Length
@@ -597,3 +609,78 @@ class TestJointsWhenABendStraightens(unittest.TestCase):
 
     def testJointOfARefinedBinderOfThePipe(self):
         self.straighten("Binder")
+
+    def straightenNear(
+        self, transition="Transformed", circular=False, fillet=False, count=None, solved=False
+    ):
+        """As straighten(), for the points on the edges and vertices lying wholly within 3 mm of
+        the bend's spine vertex (fork PR 361 round 2): a Round corner's round face and the
+        joints at both of its ends, or a round profile's joint circle and its seam vertex. With
+        `fillet`, the pipe is unrefined and a refined Fillet of the start cap's circle is the
+        target."""
+        for bend, straight in ((1, (0, 20)), (2, (40, 0))):
+            for towards in (False, True):
+                with self.subTest(bend=bend, towards=towards):
+                    self.tearDown()
+                    self.setUp()
+                    points = bendPoints(40, 20, towards)
+                    path, pipe = self.pipe(points, not fillet, transition, circular)
+                    target = pipe
+                    if fillet:
+                        (edge,) = elementsWhere(pipe.Shape, "Edge", lambda p: abs(p.z) < 1e-6)
+                        target = self.body.newObject("PartDesign::Fillet", "Fillet")
+                        target.Base = (pipe, [edge])
+                        target.Radius = 0.3
+                        target.Refine = True
+                        self.doc.recompute()
+                    x, z = (points[::-1] if towards else points)[bend]
+                    joint = self.pointsOn(target, None, near(V(x, 0, z), 3))
+                    if count is not None:
+                        self.assertEqual(len(joint), count, [p.Name for p in joint])
+                    else:
+                        self.assertGreater(len(joint), 4, [p.Name for p in joint])
+                    before = {p.Name: V(p.Placement.Base) for p in joint}
+                    self.setPath(path, bendPoints(*straight, towards))
+                    self.assertGoneOrLoud(joint, before, report=True, solved=solved)
+                    self.setPath(path, points)
+                    self.assertBackInPlace(joint, before)
+
+    def testRoundCornerOfARefinedPipe(self):
+        """Round corner: the round face's counter name passes to the other bend's round face
+        when a bend is made straight. Its vertices then lie on faces that hold the old ones'
+        names, beside one that doesn't: tier 1 must not take one of them, 20 mm away. Only the
+        references the solver re-binds count: the round face's edges and vertices are named
+        after the counter, and the other bend's can take their names exactly (ops#455)."""
+        self.straightenNear("Round corner", solved=True)
+
+    def testJointOfARefinedRoundPipe(self):
+        """A round profile: the legs' cylinders merge into one that keeps one leg's name only.
+        The joint circle and its seam vertex (count 2) go missing or warn."""
+        self.straightenNear(circular=True, count=2)
+
+    def testJointOfARefinedFilletAfterARoundPipe(self):
+        self.straightenNear(circular=True, fillet=True, count=2)
+
+    def testEndOfADroppedLegComesBack(self):
+        """A refined Round corner pipe along four legs, the last one dropped and put back. Where
+        the second bend's round face ends, at the third leg's start, two vertices stay where they
+        are, though the round faces' counter names shift with the edit and back: points on them
+        stay where they are, and are valid and there once the leg is back (fork PR 361 round 2;
+        the last bend's own vertices are ops#452)."""
+        points = bendPoints(40, 20, False, 30)
+        path, pipe = self.pipe(points, True, "Round corner")
+        start = V(points[2][0], 0, points[2][1])
+        leg = V(points[3][0], 0, points[3][1]) - start
+        leg.normalize()
+        corners = self.pointsOn(
+            pipe,
+            None,
+            lambda p: abs((p - start).dot(leg)) < 1e-6 and (p - start).Length < 3,
+            kinds=("Vertex",),
+        )
+        self.assertEqual(len(corners), 2, [p.Name for p in corners])
+        before = {p.Name: V(p.Placement.Base) for p in corners}
+        self.setPath(path, points[:-1])
+        self.assertGoneOrLoud(corners, before, report=True)
+        self.setPath(path, points)
+        self.assertBackInPlace(corners, before)

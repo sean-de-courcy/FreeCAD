@@ -784,14 +784,15 @@ struct AppExport SolveOutcome
  * - Candidates: the overlap survivors (NameAncestry::structuralSurvivors() over every name of
  *   every pool element of the entry's type) and the name matches of that type, by \a source.
  * - Merged neighbours (ops#446): an edge or vertex named after the faces it lies on (the UPP
- *   flag on its top section, two linked names at least), two of which are now one face of the
+ *   flag on its top section, two linked names at least), when two of those are one face of the
  *   target (SolveInput::faces: a face holding each of the two linked names, or a same-type
- *   descendant of it, NameAncestry::reaches()), is gone with the boundary between them. A
- *   candidate that isn't in the old name's ancestry, a piece of it or from its IDX source then
- *   counts only if it lies on two faces at least, each a holder of a linked name (facesOf):
- *   another bend's joint shares one face with the old one, and its sources, but lies on a third
- *   face. The others are listed last on a break (role `other faces`); geometry and the guess
- *   rules decide as for no candidate.
+ *   descendant of it, NameAncestry::reaches()) or one is held by no face. A candidate fits if it
+ *   is in the old name's ancestry, a piece of it or from its IDX source, or lies on two faces at
+ *   least, each a holder of a linked name (facesOf): another bend's joint shares one face with
+ *   the old one, and its sources, but lies on a third face. When no candidate fits, none counts:
+ *   tier 3 at the same place runs among them first, then geometry and the guess rules decide as
+ *   for no candidate, and a break lists them last (role `other faces`). When one fits, all stay:
+ *   the test never narrows the candidates to a pick.
  * - A merged far-cap piece (ops#360): when exactly one candidate's name is the old name with,
  *   in one marked section (PRJ and MOD), more marks (connected elements) holding all of the old
  *   ones, an edge among them, it is the only candidate, as if the old name were in its
