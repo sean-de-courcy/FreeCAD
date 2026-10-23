@@ -193,7 +193,7 @@ std::optional<gp_Vec> principalNormal(const BRepAdaptor_Curve& curve, double u)
 /// curve is continuous only up to C1: its normals just before and just after the knot are more than
 /// a right angle apart. The curvature jumps there instead of dipping (two tangent arcs bending
 /// opposite ways, joined into one B-spline: fork PR 358 round 6's verification, finding 2); a long
-/// Part.makeHelix curve's frame jumps by 47 degrees at such a knot.
+/// Part.makeHelix curve's frame jumped by 47 degrees at such a knot (until ops#447).
 bool knotReverses(const BRepAdaptor_Curve& curve, double u0, double u1)
 {
     if (curve.GetType() != GeomAbs_BSplineCurve) {
@@ -215,16 +215,56 @@ bool knotReverses(const BRepAdaptor_Curve& curve, double u0, double u1)
     return false;
 }
 
+/// The curvature of \a curve where \a law's frame turns over between \a u0 and \a u1, where the
+/// frame at \a u1 has turned by more than a right angle about the tangent from the one at \a u0:
+/// the last point turned by less and the first by more, found by SweepFrenet::turnBisections
+/// halvings, give the lower of their curvatures. A point without a frame (the curvature at the floor
+/// or below) gives 0.
+double turnOverCurvature(
+    GeomFill_Frenet& law,
+    const BRepAdaptor_Curve& curve,
+    double length,
+    double u0,
+    double u1
+)
+{
+    const std::optional<Frame> start = frameAt(law, u0, curvatureAt(curve, u0), length);
+    if (!start) {
+        return 0;
+    }
+    double below = u0;
+    double above = u1;
+    for (int i = 0; i < Part::SweepFrenet::turnBisections; ++i) {
+        const double middle = (below + above) / 2;
+        const std::optional<Frame> frame = frameAt(law, middle, curvatureAt(curve, middle), length);
+        if (!frame) {
+            return 0;
+        }
+        if (turnCosine(*start, *frame) < 0) {
+            above = middle;
+        }
+        else {
+            below = middle;
+        }
+    }
+    return std::min(curvatureAt(curve, below), curvatureAt(curve, above));
+}
+
 /// Whether the curvature of \a curve dips between the counted samples \a first and \a last
 /// (indices into \a counted, the indices of the samples with a frame; \a parameters and
-/// \a curvatures hold every sample's): its lowest value there, over the samples between them and
+/// \a curvatures hold every sample's): its lowest value there, over the samples between them,
 /// SweepFrenet::curvatureRefinement even steps (it can cross zero between two samples: fork PR 358
-/// round 6's verification, finding 1), is at most SweepFrenet::curvatureDip times the median over
+/// round 6's verification, finding 1) and the point where \a law's frame turns over
+/// (turnOverCurvature(): an inflection within a 64th of a step from an end sample, round 7's
+/// verification, findings 1 and 2), is at most SweepFrenet::curvatureDip times the median over
 /// SweepFrenet::curvatureWindow counted samples on either side, on both sides. Where a side has no
 /// samples, the lowest value must also be below the curvature at the end next to it: a curvature
-/// rising along the edge from its start, as along a steep conical helix, isn't a dip (finding 3).
+/// rising along the edge from its start, as along a steep conical helix, isn't a dip (round 6's
+/// verification, finding 3).
 bool curvatureDips(
+    GeomFill_Frenet& law,
     const BRepAdaptor_Curve& curve,
+    double length,
     const std::vector<double>& parameters,
     const std::vector<double>& curvatures,
     const std::vector<std::size_t>& counted,
@@ -244,6 +284,7 @@ bool curvatureDips(
             curvatureAt(curve, u0 + (u1 - u0) * i / Part::SweepFrenet::curvatureRefinement)
         );
     }
+    lowest = std::min(lowest, turnOverCurvature(law, curve, length, u0, u1));
     const auto window = static_cast<std::size_t>(Part::SweepFrenet::curvatureWindow);
     std::vector<double> before;
     for (std::size_t i = first - std::min(first, window); i < first; ++i) {
@@ -300,7 +341,7 @@ Scan scanTurns(GeomFill_Frenet& law, const BRepAdaptor_Curve& curve, double leng
     }
     for (const auto& [first, last] : turns) {
         if (knotReverses(curve, parameters[counted[first]], parameters[counted[last]])
-            || curvatureDips(curve, parameters, curvatures, counted, first, last)) {
+            || curvatureDips(law, curve, length, parameters, curvatures, counted, first, last)) {
             // Between neighbours the later sample, two apart the one between them
             scan.where = curve.Value(parameters[counted[last - (last - first) / 2]]);
             break;
@@ -324,8 +365,8 @@ Scan scanTurns(GeomFill_Frenet& law, const BRepAdaptor_Curve& curve, double leng
 /// or near zero: only a turn where the curvature dips counts (scanTurns()). Elsewhere the frame
 /// turns about the tangent by the curve's torsion, which a helix has all along (249 degrees a turn
 /// at a pitch of 6 times the radius), steep conical helices fast where they are narrow and slowly
-/// where they are wide, and which jumps at a knot of a long Part.makeHelix curve continuous only in
-/// its tangent (47 degrees): such turns were refused as turn-overs or swept in another frame (fork
+/// where they are wide, and which jumped at a knot of a long Part.makeHelix curve continuous only in
+/// its tangent (47 degrees, until ops#447): such turns were refused as turn-overs or swept in another frame (fork
 /// PR 358 round 5's verification, findings 1 and 2). Where the median turn between neighbours is
 /// above SweepFrenet::steadyTwistCosine's angle, the samples are too far apart to tell a twist
 /// from a turn-over, so the edge is sampled again twice as densely, at most

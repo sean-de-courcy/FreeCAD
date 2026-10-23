@@ -53,8 +53,8 @@ constexpr int maxHalvings = 6;
 /// A turn of the frame counts as a turn-over only where the curvature dips: its lowest value
 /// between the samples is at most this fraction of the median over the samples on either side.
 /// Inflections and narrow turns measured 0 to 0.26 (0.29 at worst where an inflection's sample is
-/// skipped); helices, conical ones included, and a makeHelix knot where the frame jumps by 47
-/// degrees 0.74 to 1
+/// skipped); helices, conical ones included, and a makeHelix knot where the frame jumped by 47
+/// degrees (until ops#447): 0.74 to 1
 constexpr double curvatureDip = 0.5;
 /// The medians of curvatureDip are taken over this many counted samples on either side
 constexpr int curvatureWindow = 4;
@@ -62,6 +62,10 @@ constexpr int curvatureWindow = 4;
 /// interpolated through 300 points crossed zero between two samples with 0.0714 and 0.0585 on
 /// either side, against a median of 0.0503 after them
 constexpr int curvatureRefinement = 32;
+/// The point where the frame turns over between two samples is found by this many halvings, and
+/// the curvature there counts towards the lowest: an inflection within a 64th of a sample interval
+/// from an edge's end sample has that sample as the nearest of the even steps
+constexpr int turnBisections = 50;
 /// The cosine of 30 degrees: where the frame's median turn about the tangent between neighbouring
 /// samples is larger, the samples are too far apart to tell a twist from a turn-over (a
 /// Part.makeHelix helix with a pitch of 6 times its radius: 41 to 56 degrees, two apart 92 to 112)

@@ -153,16 +153,69 @@ def s_curve_edge(ratio=30.0, width=0.02, count=300):
     return curve.toShape()
 
 
-def arc_s_edge(radius=3.0):
+def trimmed_s_curve_edge(share):
+    """s_curve_edge() trimmed to start before its inflection by `share` of the sweep's first sample
+    interval (8 per knot span): an inflection within a 64th of an interval from the end sample (fork
+    PR 358 round 7's verification, finding 1)"""
+    full = s_curve_edge()
+    curve = full.Curve
+    last = full.LastParameter
+
+    def signed_curvature(u):
+        d1 = full.derivative1At(u)
+        d2 = full.derivative2At(u)
+        return (d1.x * d2.y - d1.y * d2.x) / d1.Length**3
+
+    # the inflection: where the curvature turns from -1 to positive
+    steps = 4000
+    us = [full.FirstParameter + (last - full.FirstParameter) * i / steps for i in range(steps + 1)]
+    i = next(i for i in range(steps) if signed_curvature(us[i]) < 0 <= signed_curvature(us[i + 1]))
+    below, above = us[i], us[i + 1]
+    for _ in range(80):
+        middle = (below + above) / 2
+        if signed_curvature(middle) < 0:
+            below = middle
+        else:
+            above = middle
+    inflection = (below + above) / 2
+    # the first interval depends on the start: a few fixed-point steps
+    start = inflection
+    for _ in range(10):
+        spans = len([k for k in curve.getKnots() if start < k < last]) + 1
+        start = inflection - share * (last - start) / max(64, 8 * spans)
+    return Part.Edge(curve, start, last)
+
+
+def bezier_cubic_edge(x0, x1):
+    """y = x^3 in XY between x0 and x1 as a cubic Bezier curve, linear in x: its inflection is at
+    x = 0"""
+    curve = Part.BezierCurve()
+    curve.setPoles(
+        [
+            V(x0, x0**3, 0),
+            V((2 * x0 + x1) / 3, x0**2 * x1, 0),
+            V((x0 + 2 * x1) / 3, x0 * x1**2, 0),
+            V(x1, x1**3, 0),
+        ]
+    )
+    return curve.toShape()
+
+
+def arc_s_edge(radius=3.0, line=0.0):
     """Two tangent arcs in XY bending opposite ways, joined into one B-spline: radius 1 turning 120
     degrees, then `radius` turning 60 degrees back. The inflection is at an inner knot where the
     curve is only C1, and its curvature jumps from 1 to -1 / radius there (fork PR 358 round 6's
-    verification, finding 2)"""
+    verification, finding 2). With a `line` between them, of that length, the knots are C2 or C3
+    at a line of 5e-6 to 3e-5 (round 7's verification, finding 2)"""
     first = Part.ArcOfCircle(
         Part.Circle(V(0, 1, 0), V(0, 0, 1), 1), -math.pi / 2, -math.pi / 2 + 2 * math.pi / 3
     )
     end = first.value(first.LastParameter)
     tangent = V(first.tangent(first.LastParameter)[0]).normalize()
+    curve = first.toBSpline()
+    if line > 0:
+        curve.join(Part.LineSegment(end, end + tangent * line).toBSpline())
+        end = end + tangent * line
     centre = end - V(-tangent.y, tangent.x, 0) * radius
     start = math.atan2(end.y - centre.y, end.x - centre.x)
 
@@ -170,7 +223,6 @@ def arc_s_edge(radius=3.0):
         return centre + V(radius * math.cos(angle), radius * math.sin(angle), 0)
 
     second = Part.Arc(at(start), at(start - math.pi / 6), at(start - math.pi / 3))
-    curve = first.toBSpline()
     curve.join(second.toBSpline())
     return curve.toShape()
 
@@ -438,13 +490,14 @@ class SweepFrenetTest(unittest.TestCase):
         self.assertFrenetHelix(20.0, 200.0, 1.0)
 
     def testFrenetAlongALongSteepHelix(self):
-        """A helix of 100 turns at a pitch of 100 times its radius. Part.makeHelix makes it of 30
-        knot spans, the last of them half the helix, where the curve strays from it (ops#447); the
-        frame twists by 360 degrees a turn, too fast for the samples there, and jumps by 47 degrees
-        at a knot where the curve is continuous only in its tangent, with its curvature steady.
-        Before, that was taken for a turn-over and the spine for a planar one, and the triangle
-        beside it was swept in corrected Frenet: a half turn on, it was on the axis's side (fork PR
-        358 round 5's verification, finding 1)"""
+        """A helix of 100 turns at a pitch of 100 times its radius: the frame twists by 360 degrees
+        a turn. Part.makeHelix makes it of 128 even knot spans, continuous only in the tangent at
+        the knots, sampled about 10 times a turn (36 degrees apart), so the edge is sampled again
+        more densely. Until ops#447 it made 30 spans, the last of them half the helix, where the
+        curve strayed from it, and the frame jumped by 47 degrees at the knot before it, with its
+        curvature steady. Before, that was taken for a turn-over and the spine for a planar one,
+        and the triangle beside it was swept in corrected Frenet: a half turn on, it was on the
+        axis's side (fork PR 358 round 5's verification, finding 1)"""
         self.assertFrenetHelix(10.0, 1000.0, 0.1)
 
     def testFrenetAlongASteepConicalHelix(self):
@@ -483,6 +536,27 @@ class SweepFrenetTest(unittest.TestCase):
         a turn apart. Before, the inflection was missed, and the rectangle beside the spine flipped
         to -0.20 (fork PR 358 round 6's verification, finding 2)"""
         self.assertStaysOnItsSide(arc_s_edge())
+
+    def testFrenetInflectionNextToAnEndSample(self):
+        """Inflections within a 64th of a sample interval from an edge's end sample: y = x^3 from
+        x = -1.5627e-4 to 1 and from -1 to 1.5627e-4, and the S-curve trimmed to start 0.01 and
+        0.003 of an interval before its inflection. The end sample was the nearest of the even
+        steps to the zero of the curvature, so the lowest curvature was the end's, which isn't a
+        dip; the point where the frame turns over is now looked for too. Before, the rectangle
+        beside the spine flipped to -0.22, -0.14 and -0.17 (fork PR 358 round 7's verification,
+        finding 1)"""
+        self.assertStaysOnItsSide(bezier_cubic_edge(-1.5627e-4, 1.0))
+        self.assertStaysOnItsSide(bezier_cubic_edge(-1.0, 1.5627e-4))
+        for share in (0.01, 0.003):
+            self.assertStaysOnItsSide(trimmed_s_curve_edge(share))
+
+    def testFrenetInflectionAcrossAShortLine(self):
+        """Two tangent arcs bending opposite ways with a line of 1e-5 between them, joined into one
+        B-spline: its knots are C2 and C3, so the normal's jump there isn't looked at, and the
+        curvature crosses zero between the even steps. Before, the inflection was missed, and the
+        rectangle beside the spine flipped to -0.19 (fork PR 358 round 7's verification, finding
+        2)"""
+        self.assertStaysOnItsSide(arc_s_edge(line=1e-5))
 
     def testFrenetWithoutTurnOverIsUnchanged(self):
         """A planar arc, a helix and a Bezier curve with a flat point that doesn't reverse its
