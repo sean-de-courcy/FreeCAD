@@ -316,10 +316,15 @@ class SweepFrenetTest(unittest.TestCase):
         else:
             self.assertIn("Frenet frame turns over", sweep.getStatusString())
 
-    def assertFrenetHelix(self, pitch, height, radius):
-        """A thread-like triangle beside a Part.makeHelix helix keeps OCCT's Frenet law: the same
-        solid as MakePipeShell's own Frenet mode"""
-        wire = Part.Wire([Part.makeHelix(pitch, height, radius)])
+    def assertFrenetHelix(self, pitch, height, radius, angle=0.0):
+        """A thread-like triangle beside a Part.makeHelix helix, its tip pointing away from the
+        axis, keeps OCCT's Frenet law: the same solid as MakePipeShell's own Frenet mode. Frenet's
+        normal points to the centre of curvature, towards the axis, so the triangle stays outside:
+        sliced normal to the helix a quarter, a half and three quarters of a turn into the first,
+        second, middle and last turns, the section's centre of mass is 2/3 of the triangle's size
+        from the helix against the curve's normal. (A long makeHelix curve strays from its helix:
+        0.154 from the axis half-way up the 100 turns of radius 0.1 below)"""
+        wire = Part.Wire([Part.makeHelix(pitch, height, radius, angle)])
         point, tangent = start_frame(wire)
         radial = V(1, 0, 0)
         radial = (radial - tangent * radial.dot(tangent)).normalize()
@@ -329,6 +334,24 @@ class SweepFrenetTest(unittest.TestCase):
         triangle = Part.makePolygon(corners + [corners[0]])
         sweep = self.sweep(wire, triangle)
         self.assertTrue(sweep.isValid(), sweep.getStatusString())
+        edge = wire.Edges[0]
+        turns = int(round(height / pitch))
+        for turn in sorted({0, 1, turns // 2, turns - 1}):
+            for fraction in (0.25, 0.5, 0.75):
+                u = edge.FirstParameter + (edge.LastParameter - edge.FirstParameter) * (
+                    turn + fraction
+                ) / turns
+                point = edge.valueAt(u)
+                tangent = edge.tangentAt(u)
+                outward = -edge.normalAt(u)
+                centres = [
+                    Part.Face(section).CenterOfMass
+                    for section in sweep.Shape.slice(tangent, point.dot(tangent))
+                ]
+                centre = min(centres, key=lambda c: (c - point).Length)
+                self.assertAlmostEqual(
+                    (centre - point).dot(outward) / size, 2 / 3, delta=0.1, msg="at %s" % point
+                )
         pipe = Part.BRepOffsetAPI.MakePipeShell(wire)
         pipe.setFrenetMode(True)
         pipe.add(triangle, False, False)
@@ -352,6 +375,24 @@ class SweepFrenetTest(unittest.TestCase):
         verification, finding 1)"""
         self.assertFrenetHelix(6.0, 60.0, 1.0)
         self.assertFrenetHelix(20.0, 200.0, 1.0)
+
+    def testFrenetAlongALongSteepHelix(self):
+        """A helix of 100 turns at a pitch of 100 times its radius. Part.makeHelix makes it of 30
+        knot spans, the last of them half the helix, where the curve strays from it (ops#447); the
+        frame twists by 360 degrees a turn, too fast for the samples there, and jumps by 47 degrees
+        at a knot where the curve is continuous only in its tangent, with its curvature steady.
+        Before, that was taken for a turn-over and the spine for a planar one, and the triangle
+        beside it was swept in corrected Frenet: a half turn on, it was on the axis's side (fork PR
+        358 round 5's verification, finding 1)"""
+        self.assertFrenetHelix(10.0, 1000.0, 0.1)
+
+    def testFrenetAlongASteepConicalHelix(self):
+        """Steep helices on cones of 1 and 5 degrees: the frame twists by 40 to 50 degrees between
+        neighbouring samples where the cone is narrow and steep, and by less than 20 along the rest.
+        Before, they were refused, saying the frame turns over at their start (fork PR 358 round
+        5's verification, finding 2)"""
+        self.assertFrenetHelix(6.0, 60.0, 1.0, 1.0)
+        self.assertFrenetHelix(10.0, 100.0, 1.0, 5.0)
 
     def testFrenetWithoutTurnOverIsUnchanged(self):
         """A planar arc, a helix and a Bezier curve with a flat point that doesn't reverse its
