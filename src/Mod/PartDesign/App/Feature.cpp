@@ -58,8 +58,8 @@
 #include "FailureContinuation.h"
 #include "FeaturePy.h"
 #include "Body.h"
-#include "FeatureBase.h"
 #include "FeatureBoolean.h"
+#include "FeatureDressUp.h"
 #include "ShapeBinder.h"
 
 #include <BRep_Builder.hxx>
@@ -885,10 +885,17 @@ TopLoc_Location Feature::getInverseLocation(const TopoShape& base) const
 
 Part::BooleanInputCheck Feature::booleanInputCheck() const
 {
-    // A FeatureBase only copies the Body's BaseFeature, which can be any shape
-    const Part::Feature* base = getBaseObject(true);
-    if (base && base->isDerivedFrom<PartDesign::Feature>()
-        && !base->isDerivedFrom<PartDesign::FeatureBase>()) {
+    // Only a boolean's output is vouched for: those features always cut or fuse a solid base.
+    // A first feature's raw result (a Pipe's is invalid at a sharp corner, ops#370), a dress-up's,
+    // a pattern's (it can return its support unchanged), a FeatureBase's (any shape) and a failed
+    // feature's passed-through base are still checked, and repaired if invalid.
+    const auto base = freecad_cast<const Feature*>(getBaseObject(true));
+    if (!base || !base->isValid()) {
+        return Part::BooleanInputCheck::All;
+    }
+    const bool isBoolean = (base->isDerivedFrom<FeatureAddSub>() && !base->isDerivedFrom<DressUp>())
+        || base->isDerivedFrom<Boolean>();
+    if (isBoolean && !base->getBaseTopoShape(true).isNull()) {
         return Part::BooleanInputCheck::Tools;
     }
     return Part::BooleanInputCheck::All;

@@ -138,10 +138,12 @@ public:
      */
     TopLoc_Location getInverseLocation(const TopoShape& base) const;
     /**
-     * Which inputs of a boolean on base makeElementBoolean() is to check (ops#310). When base is
-     * another PartDesign feature's result, only the tools: base is what the feature before made,
-     * and checking it costs about half of each boolean. When base comes from outside the Body's
-     * features (a BaseFeature), all of them, so an invalid shape is still fixed.
+     * Which inputs of a boolean on base makeElementBoolean() is to check, and fix if invalid
+     * (ops#310). Only the tools when base is the output of the feature before's own boolean on a
+     * solid base (a Pad, Pocket, Revolution, Groove, Loft, Pipe, Helix, Hole, primitive or Boolean
+     * that didn't fail), whose inputs were checked: checking base again costs about half of each
+     * boolean. All of them otherwise, so an invalid base (a first feature's raw Pipe, a dress-up's
+     * result, a BaseFeature) is still repaired.
      */
     Part::BooleanInputCheck booleanInputCheck() const;
 
