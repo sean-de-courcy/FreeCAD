@@ -1972,7 +1972,9 @@ private:
     }
     Py::Object makeLongHelix(const Py::Tuple& args)
     {
-        double pitch, height, radius, angle = -1.0;
+        // makeLongHelix takes a negative angle as a narrowing cone (FeatureHole's tapered
+        // threads), so the default is 0: a cylinder, as the doc string says (ops#447)
+        double pitch, height, radius, angle = 0.0;
         PyObject* pleft = Py_False;
         if (
             !PyArg_ParseTuple(args.ptr(), "ddd|dO!", &pitch, &height, &radius, &angle, &(PyBool_Type), &pleft)

@@ -2327,6 +2327,66 @@ TopoDS_Shape TopoShape::makeTorus(
     return mkRevol.Shape();
 }
 
+namespace
+{
+// Checks the 3D curves BRepLib::BuildCurves3d approximated for a helix wire against the exact
+// helix: the edge's surface at its 2D line, at the same parameter. OCCT returns its best curve
+// even when it misses the tolerance and keeps the requested tolerance on the edge, so a helix
+// with too few segments came out silently as another curve (ops#447: Part.makeHelix(1, 50, 5)
+// was up to 6 mm off with a tolerance of 1e-5). A small miss raises the edge's tolerance to the
+// deviation. Beyond 1e-4 x the helix's largest radius (and 10 x the approximation's tolerance,
+// for tiny helices) the curve is another curve: throw.
+void checkHelixCurves(const TopoDS_Wire& wire, Standard_Real approxTolerance)
+{
+    BRep_Builder builder;
+    for (TopExp_Explorer xp(wire, TopAbs_EDGE); xp.More(); xp.Next()) {
+        const TopoDS_Edge& edge = TopoDS::Edge(xp.Current());
+        TopLoc_Location loc3d;
+        Standard_Real first3d, last3d;
+        Handle(Geom_Curve) curve = BRep_Tool::Curve(edge, loc3d, first3d, last3d);
+        Handle(Geom2d_Curve) curve2d;
+        Handle(Geom_Surface) surf;
+        TopLoc_Location locSurf;
+        Standard_Real first, last;
+        BRep_Tool::CurveOnSurface(edge, curve2d, surf, locSurf, first, last);
+        if (curve.IsNull() || curve2d.IsNull() || surf.IsNull()) {
+            throw Standard_Failure("Helix: no 3D curve was built");
+        }
+
+        // u is the angle on the cylinder or cone: 16 samples per turn, at least 64 per edge
+        Standard_Real turns = std::fabs(curve2d->Value(last).X() - curve2d->Value(first).X())
+            / (2.0 * std::numbers::pi);
+        int samples = std::max(64, static_cast<int>(16.0 * turns) + 16);
+        Standard_Real deviation = 0.0;
+        Standard_Real maxRadius = 0.0;
+        for (int i = 0; i <= samples; ++i) {
+            Standard_Real s = static_cast<Standard_Real>(i) / samples;
+            gp_Pnt2d uv = curve2d->Value(first + s * (last - first));
+            gp_Pnt exact = surf->Value(uv.X(), uv.Y()).Transformed(locSurf.Transformation());
+            gp_Pnt approx = curve->Value(first3d + s * (last3d - first3d))
+                                .Transformed(loc3d.Transformation());
+            deviation = std::max(deviation, exact.Distance(approx));
+            maxRadius = std::max(maxRadius, std::hypot(exact.X(), exact.Y()));
+        }
+
+        Standard_Real bound = std::max(1e-4 * maxRadius, 10.0 * approxTolerance);
+        if (deviation > bound) {
+            std::ostringstream msg;
+            msg << "Helix: the approximated curve is " << deviation << " off the helix (more than "
+                << bound << "); use fewer turns per edge";
+            throw Standard_Failure(msg.str().c_str());
+        }
+        if (deviation > BRep_Tool::Tolerance(edge)) {
+            builder.UpdateEdge(edge, deviation);
+            TopoDS_Vertex v1, v2;
+            TopExp::Vertices(edge, v1, v2);
+            builder.UpdateVertex(v1, deviation);
+            builder.UpdateVertex(v2, deviation);
+        }
+    }
+}
+}  // namespace
+
 TopoDS_Shape TopoShape::makeHelix(
     Standard_Real pitch,
     Standard_Real height,
@@ -2394,7 +2454,13 @@ TopoDS_Shape TopoShape::makeHelix(
 
     TopoDS_Edge edgeOnSurf = BRepBuilderAPI_MakeEdge(segm, surf);
     TopoDS_Wire wire = BRepBuilderAPI_MakeWire(edgeOnSurf);
-    BRepLib::BuildCurves3d(wire);
+    // One edge for all the turns (CAM's Geom.py reads Edges[0]). With MaxSegment 0 OCCT
+    // approximates it with 30 segments, too few past about 25 turns (ops#447): allow as many
+    // as makeSpiralHelix does.
+    if (!BRepLib::BuildCurves3d(wire, Precision::Confusion(), GeomAbs_C1, 14, 10000)) {
+        throw Standard_Failure("Helix: the 3D curve could not be built");
+    }
+    checkHelixCurves(wire, Precision::Confusion());
     return TopoDS_Shape(std::move(wire));
 }
 
@@ -2487,7 +2553,11 @@ TopoDS_Shape TopoShape::makeLongHelix(
     }
 
     TopoDS_Wire wire = mkWire.Wire();
-    BRepLib::BuildCurves3d(wire);
+    // One turn per edge stays well within OCCT's default approximation; check it all the same.
+    if (!BRepLib::BuildCurves3d(wire)) {
+        throw Standard_Failure("Helix: the 3D curves could not be built");
+    }
+    checkHelixCurves(wire, 1.0e-5);
     return TopoDS_Shape(std::move(wire));
 }
 
