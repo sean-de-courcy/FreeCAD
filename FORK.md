@@ -387,7 +387,8 @@ names it.
 | `fix/446-merged-neighbours` | fix | ops#446 | - | `integration` `7fe252a1b5` | `13bc96d0ad` (fork PR 361), 2026-10-23 | never (fork fix) |
 | `fix/447-makehelix-accuracy` | fix | ops#447 | - | `integration` `2d2ac2ac5b` | `eb39b884e5` (fork PR 364), 2026-10-23 | never (fork fix) |
 | `infra/418-gen0-script` | infra | ops#418 | none | `integration` `7fe252a1b5` | `30dabfe2f2` (fork PR 365), 2026-10-23 | never |
-| `fix/450-upto-followups` | fix | ops#450 | - | `integration` `2d2ac2ac5b` | (fork PR 362) | never (fork fix) |
+| `fix/450-upto-followups` | fix | ops#450 | - | `integration` `2d2ac2ac5b` | `0cb0a470c0` (fork PR 362), 2026-10-23 | never (fork fix) |
+| `fix/453-refine-element-map` | fix | ops#453 | - | `integration` `2d2ac2ac5b` | (fork PR 363) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 

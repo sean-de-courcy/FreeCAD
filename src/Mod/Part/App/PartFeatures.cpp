@@ -468,7 +468,10 @@ App::DocumentObjectExecReturn* Refine::execute()
 
     try {
         TopoShape myShape = source->Shape.getShape();
-        this->Shape.setValue(myShape.removeSplitter());
+        // Refined with the element map, as the booleans' Refine and PartDesign's do:
+        // removeSplitter() returned a bare shape, so references to the result went by index
+        // and moved to other elements silently after an edit upstream (ops#453)
+        this->Shape.setValue(makeTopoShape(false).makeElementRefine(myShape));
         return App::DocumentObject::StdReturn;
     }
     catch (Standard_Failure& e) {
@@ -497,7 +500,20 @@ App::DocumentObjectExecReturn* Reverse::execute()
     try {
         TopoDS_Shape myShape = topoShape.getShape();
         if (!myShape.IsNull()) {
-            this->Shape.setValue(myShape.Reversed());
+            // With the source's element map: reversing keeps the sub-shapes and their order, and a
+            // bare shape left references to the result going by index (ops#453)
+            TopoShape reversed(topoShape);
+            reversed.setShape(myShape.Reversed(), false);
+            // The names get a copy section with this feature's ID, as a Part::Scale's do
+            // (FeatureScale.cpp): the source's names verbatim left the source and its reversed
+            // twin in one shape told apart only by the duplicate counter (ops#453)
+            if (reversed.getHistoryAlgorithm() == App::HistoryAlgorithm::V2) {
+                if (!reversed.getElementMapSize() && reversed.Tag && reversed.Tag != getID()) {
+                    reversed.reTagElementMap(getID(), reversed.Hasher, nullptr);
+                }
+                reversed.appendElementSection(getID(), OpCodes::Copy, "1");
+            }
+            this->Shape.setValue(reversed);
             Base::Placement p;
             p.fromMatrix(topoShape.getTransform());
             this->Placement.setValue(p);
