@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 #
 # Regenerates, or checks, gen0 of the CI reopen corpus with a given build (FreeCAD-CH ops#418;
-# notes/beta-compatibility.md 3.8 in the ops repo).
+# notes/beta-compatibility.md 3.9 in the ops repo).
 #
 #   regen_gen0.sh [options]            generate gen0 into a scratch folder and report how it differs
 #                                      from the committed one; writes nothing in the checkout
@@ -35,13 +35,16 @@
 #   --keep               keep the scratch folder
 #   --timeout SEC        stop FreeCADCmd after SEC seconds (default 1200)
 #   --strict             a known flake (compare_generations.py) counts as a difference
-#   --force-stale        go on although the build's Compat files differ from the checkout's
+#   --force-stale        go on although the build is not the checkout's: its Compat files differ, or
+#                        (--check, --install) the generation's namingRevision isn't the source's
+#                        ForkNamingRevision or its build commit differs in src/ from the checkout
+#                        (HEAD, or REV with --against-rev)
 #
 # Exit status: 0 done (check: no difference), 1 the check found a difference, 2 usage or
 # environment error, 3 the generation failed, 4 (--install) CMakeLists.txt doesn't list gen0's
-# files, 5 the build is not the checkout's (its Compat files differ; see --force-stale).
+# files, 5 the build is not the checkout's (see --force-stale): build the merged integration first.
 #
-# A regenerated gen0 is a commit of its own on the PR's branch (beta-compatibility.md 3.8). Run
+# A regenerated gen0 is a commit of its own on the PR's branch (beta-compatibility.md 3.9). Run
 # `FreeCADCmd -t PartDesignTests.Compat.TestCompatCorpus` against it before pushing.
 #
 # Works in Git Bash on Windows (the first target) and in bash on macOS and Linux.
@@ -206,6 +209,58 @@ if [ ! -f "$result" ] || [ "$(head -n 1 "$result")" != OK ] || [ ! -f "$gen/MANI
     exit 3
 fi
 tail -n 1 "$log"
+
+# The generation must come from the checkout's own source, not only its Compat files: a naming PR
+# changes C++ and goldens, and a gen0 saved by a build from before it would carry the old naming
+# revision, which the gate then reads as "older" and passes, with the name check off indefinitely.
+# --install and --check refuse (the report only warns); the build whose source is compared is the
+# checkout's HEAD, or REV with --against-rev REV.
+manifestOf() {
+    "$py" -c 'import json, sys; m = json.load(open(sys.argv[1])); print(m["namingRevision"] if sys.argv[2] == "rev" else m["build"].split()[-1])' \
+        "$(native "$gen/MANIFEST")" "$1"
+}
+genRev=$(manifestOf rev) && genHash=$(manifestOf hash) || die "can't read $gen/MANIFEST"
+sourceRef=${againstRev:-HEAD}
+sourceName="the working tree of $checkout"
+[ -z "$againstRev" ] || sourceName=$againstRev
+if [ -n "$againstRev" ]; then
+    sourceRev=$(git -C "$checkout" show "$againstRev:src/App/Document.cpp" 2> /dev/null)
+else
+    sourceRev=$(cat "$checkout/src/App/Document.cpp" 2> /dev/null)
+fi
+sourceRev=$(printf '%s\n' "$sourceRev" | sed -n 's/^constexpr int ForkNamingRevision = \([0-9][0-9]*\);.*/\1/p' | head -n 1)
+genStale=
+if [ -z "$sourceRev" ]; then
+    genStale="$genStale
+  - can't find ForkNamingRevision in src/App/Document.cpp of $sourceRef"
+elif [ "$genRev" != "$sourceRev" ]; then
+    genStale="$genStale
+  - the generation's namingRevision is $genRev, the source's ForkNamingRevision is $sourceRev"
+fi
+if [ -n "$againstRev" ]; then
+    git -C "$checkout" diff --quiet "$genHash" "$againstRev" -- src ":!$compat/gen0" 2> /dev/null
+else
+    git -C "$checkout" diff --quiet "$genHash" -- src ":!$compat/gen0" 2> /dev/null
+fi
+case $? in
+    0) ;;
+    1) genStale="$genStale
+  - the build ($genHash) differs in src/ from $sourceName: merge, then build, then regenerate" ;;
+    *) genStale="$genStale
+  - the build's commit $genHash is not in this checkout's history (fetch it, or the build isn't from this repository)" ;;
+esac
+if [ -n "$genStale" ]; then
+    echo "regen_gen0: the generation was not made from this checkout's source:$genStale" >&2
+    if [ $forceStale = 1 ]; then
+        echo "regen_gen0: going on (--force-stale)" >&2
+    elif [ "$mode" != report ]; then
+        failed=1
+        echo "regen_gen0: build the merged integration first (beta-compatibility.md 3.9); --force-stale goes on" >&2
+        exit 5
+    else
+        echo "regen_gen0: (the report goes on; --check and --install refuse)" >&2
+    fi
+fi
 
 echo "regen_gen0: comparing $gen with $old"
 "$py" -I "$here/compare_generations.py" "$(native "$old")" "$(native "$gen")" $strict

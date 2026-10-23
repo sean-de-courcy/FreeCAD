@@ -21,12 +21,12 @@
 # ***************************************************************************
 
 """Compares two generations of the CI reopen corpus (FreeCAD-CH ops#418, notes/beta-compatibility.md
-3.8). Plain Python, no FreeCAD: run it with any Python 3.
+3.9). Plain Python, no FreeCAD: run it with any Python 3.
 
     python compare_generations.py <old gen folder> <new gen folder> [--strict]
 
 Exit 0: no difference. Exit 1: a difference (or, with --strict, a known flake). Exit 2: a
-generation can't be read.
+generation can't be read (a missing or corrupt MANIFEST, oracle or FCStd: the message says which).
 
 A regeneration changes by itself the MANIFEST's `build`, `date` and file hashes, every object `id`
 and the assemblies' `Uid`s, and the saved files' timestamps, so those are ignored. What is compared:
@@ -36,7 +36,8 @@ and its objects (type and name, in order). Not each FCStd's whole Document.xml: 
 ids inside the name tables, UUIDs and dates, which change in every regeneration.
 
 KNOWN_FLAKES are differences seen between two runs of the same build; they are reported as such and
-don't fail the comparison, unless --strict.
+don't fail the comparison, unless --strict. A flake also has a guard on the two whole oracles: the
+differences count as the flake only if the guard holds.
 """
 
 import json
@@ -50,21 +51,55 @@ MANIFEST_FIELDS = ("format", "generation", "platform", "forkRelease", "namingRev
 
 _OBJECT = re.compile(r'<Object type="([^"]*)" name="([^"]*)"')
 
-# (oracle file, path pattern, the values both sides must be among, why). Binders' two twin Pads
-# swap their names in some runs (ops#344's rebase, work\pr344-rebase2\gen).
+
+class ReadError(Exception):
+    """A generation file can't be read, so the comparison can't say anything (exit 2)."""
+
+
+def _twin_tops_permuted(old, new):
+    """Binders' TwinTops binds both twin Pads and the flake swaps them: the Support targets of the
+    new run are a permutation of the old run's, in the property and in the references. One side
+    changing alone (both supports on one Pad, say) is a real change, not the flake."""
+    try:
+        a = old["records"]["Binders"]["objects"]["TwinTops"]
+        b = new["records"]["Binders"]["objects"]["TwinTops"]
+
+        def refs(o):
+            return [
+                o["refs"][f"Support[{i}]"]["target"] for i in range(len(o["props"]["Support"][1]))
+            ]
+
+        def prop(o):
+            return list(o["props"]["Support"][1])
+
+        # each run agrees with itself (the references follow the property), and the runs differ
+        # only by the order of the same targets
+        return refs(a) == prop(a) and refs(b) == prop(b) and sorted(prop(a)) == sorted(prop(b))
+    except (KeyError, TypeError, IndexError):
+        return False
+
+
+# (oracle file, path pattern, the values both sides must be among, a guard on the two oracles, why).
+# Binders' two twin Pads swap their names in some runs (ops#344's rebase, work\pr344-rebase2\gen).
 KNOWN_FLAKES = [
     (
         "Binders.oracle.json",
-        re.compile(r"^/records/Binders/objects/TwinTops/(props/Support\[\d\]\[\d\]|refs/Support\[\d\]/target)$"),
+        re.compile(
+            r"^/records/Binders/objects/TwinTops/(props/Support\[\d\]\[\d\]|refs/Support\[\d\]/target)$"
+        ),
         {"TwinPad", "Twin001Pad"},
+        _twin_tops_permuted,
         "Binders: the twin Pads' names swap between runs",
     ),
 ]
 
 
 def _load(path):
-    with open(path, "r", encoding="utf-8") as fh:
-        return json.load(fh)
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError) as e:
+        raise ReadError(f"can't read {path}: {e}")
 
 
 def _walk(x, y, path, out):
@@ -74,8 +109,13 @@ def _walk(x, y, path, out):
             if key in IGNORED_KEYS:
                 continue
             if key not in x or key not in y:
-                out.append((f"{path}/{key}", "(missing)" if key not in x else x[key],
-                            "(missing)" if key not in y else y[key]))
+                out.append(
+                    (
+                        f"{path}/{key}",
+                        "(missing)" if key not in x else x[key],
+                        "(missing)" if key not in y else y[key],
+                    )
+                )
             else:
                 _walk(x[key], y[key], f"{path}/{key}", out)
     elif isinstance(x, list) and isinstance(y, list) and len(x) == len(y):
@@ -104,27 +144,37 @@ def _describe(path, old, new):
     return f"{path}: {_short(old)} -> {_short(new)}"
 
 
-def _flake(name, path, old, new):
-    for file, pattern, values, why in KNOWN_FLAKES:
-        if name == file and pattern.match(path) and old in values and new in values:
+def _flake(name, path, old, new, oldDoc, newDoc):
+    for file, pattern, values, guard, why in KNOWN_FLAKES:
+        if (
+            name == file
+            and pattern.match(path)
+            and old in values
+            and new in values
+            and guard(oldDoc, newDoc)
+        ):
             return why
     return None
 
 
 def _document(path):
-    with zipfile.ZipFile(path) as z:
-        names = sorted(z.namelist())
-        xml = z.read("Document.xml").decode("utf-8", errors="replace") if "Document.xml" in names else ""
+    try:
+        with zipfile.ZipFile(path) as z:
+            names = sorted(z.namelist())
+            xml = (
+                z.read("Document.xml").decode("utf-8", errors="replace")
+                if "Document.xml" in names
+                else ""
+            )
+    except (OSError, zipfile.BadZipFile) as e:
+        raise ReadError(f"can't read {path}: {e}")
     return names, _OBJECT.findall(xml)
 
 
 def compare(old, new):
     """(differences, flakes): lists of lines."""
     differences, flakes = [], []
-    try:
-        mold, mnew = _load(os.path.join(old, "MANIFEST")), _load(os.path.join(new, "MANIFEST"))
-    except (OSError, ValueError) as e:
-        raise SystemExit(f"compare_generations: can't read a MANIFEST: {e}")
+    mold, mnew = _load(os.path.join(old, "MANIFEST")), _load(os.path.join(new, "MANIFEST"))
     for field in MANIFEST_FIELDS:
         if mold.get(field) != mnew.get(field):
             if field == "models":
@@ -144,9 +194,10 @@ def compare(old, new):
         a, b = os.path.join(old, name), os.path.join(new, name)
         if name.endswith(".oracle.json"):
             found = []
-            _walk(_load(a), _load(b), "", found)
+            docA, docB = _load(a), _load(b)
+            _walk(docA, docB, "", found)
             for path, x, y in found:
-                why = _flake(name, path, x, y)
+                why = _flake(name, path, x, y, docA, docB)
                 if why:
                     flakes.append(f"{name} {_describe(path, x, y)} (known flake: {why})")
                 else:
@@ -168,7 +219,14 @@ def main(argv):
     if len(args) != 2:
         sys.stderr.write(__doc__.split("\n\n")[1] + "\n")
         return 2
-    differences, flakes = compare(args[0], args[1])
+    try:
+        differences, flakes = compare(args[0], args[1])
+    except ReadError as e:
+        sys.stderr.write(f"compare_generations: {e}\n")
+        return 2
+    except (KeyError, TypeError, AttributeError) as e:
+        sys.stderr.write(f"compare_generations: a MANIFEST is malformed: {type(e).__name__} {e}\n")
+        return 2
     for line in differences:
         print("DIFFERENCE", line)
     for line in flakes:
