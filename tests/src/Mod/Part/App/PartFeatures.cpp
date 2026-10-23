@@ -170,8 +170,11 @@ TEST_F(PartFeaturesTest, testRefine)
     EXPECT_DOUBLE_EQ(volume, 12.0);
     EXPECT_DOUBLE_EQ(area, 38.0);
     EXPECT_TRUE(PartTestHelpers::boxesMatch(bb, Base::BoundBox3d(0, 0, 0, 1, 4, 3)));
-    // Assert element map is correct
-    EXPECT_EQ(0, elementMap.size());  // TODO: Expect this to be non-zero.
+    // Assert element map is correct: every refined edge is named (ops#453)
+    EXPECT_GT(elementMap.size(), 0);
+    for (int i = 1; i <= static_cast<int>(refinedEdges.size()); ++i) {
+        EXPECT_FALSE(ts.getMappedName(Data::IndexedName::fromConst("Edge", i)).empty()) << i;
+    }
 }
 
 TEST_F(PartFeaturesTest, testReverse)
@@ -204,6 +207,14 @@ TEST_F(PartFeaturesTest, testReverse)
     EXPECT_DOUBLE_EQ(volume, 6.0);
     EXPECT_DOUBLE_EQ(area, 22.0);
     EXPECT_TRUE(PartTestHelpers::boxesMatch(bb, Base::BoundBox3d(0, 0, 0, 1, 2, 3)));
-    // Assert element map is correct
-    EXPECT_EQ(0, elementMap.size());  // TODO: Expect this to be non-zero.
+    // Assert element map is correct: every face, edge and vertex is named (ops#453)
+    EXPECT_GT(elementMap.size(), 0);
+    for (const char* type : {"Face", "Edge", "Vertex"}) {
+        const int count = static_cast<int>(ts.countSubElements(type));
+        EXPECT_GT(count, 0) << type;
+        for (int i = 1; i <= count; ++i) {
+            EXPECT_FALSE(ts.getMappedName(Data::IndexedName::fromConst(type, i)).empty())
+                << type << i;
+        }
+    }
 }
