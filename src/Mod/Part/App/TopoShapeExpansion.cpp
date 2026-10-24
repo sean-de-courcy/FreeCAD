@@ -2858,7 +2858,8 @@ TopoShape& TopoShape::makeShapeWithElementMap(
         // (ops#360, PR 340 round 1), and pieces with the same marks by the duplicate counter
         // (round 2). Its section carries MOD with PRJ: a reference to a piece is
         // not the cap in one piece that an edit leaves, nor the other way round (the solver's
-        // top agreement compares the flags), as a split face's piece isn't the face made whole
+        // top agreement compares the flags), as a split face's piece isn't the face made whole.
+        // The same for a piece of a far edge the up-to shape cuts (ops#386)
         const auto* upToSplit = dynamic_cast<const UpToSplitMapper*>(&mapper);
         // The front name of an input's element, as the loop below reads it
         auto inputName = [&](const TopoDS_Shape& element) {
@@ -7745,7 +7746,7 @@ TopoShape prismUpToBySplit(
     };
     // Each far cap is the projection of its profile face, as BRepFeat names the top (ops#360)
     const UpToSplitMapper
-        mapper(splitter, extrusion, firstShape, profile.getShape(), result, upTo.getShape());
+        mapper(splitter, extrusion, firstShape, profile.getShape(), result, upTo.getShape(), direction);
     named.makeShapeWithElementMap(result, mapper, {sweep, upTo}, op);
     return named;
 }
