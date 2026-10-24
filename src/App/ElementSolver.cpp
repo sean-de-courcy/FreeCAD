@@ -1717,6 +1717,20 @@ bool isMarkedCap(std::string_view name, bool faceAlone = false)
     });
 }
 
+/* True if a section of \a name is a marked piece of a far edge or a far cap: PRJ and MOD with
+ * connected elements, ordered or not (PR 366 round 3).
+ */
+bool isMarkedPiece(std::string_view name)
+{
+    const auto sections = NameAncestry::splitSections(name);
+    return std::any_of(sections.begin(), sections.end(), [](std::string_view section) {
+        const DecodedMappedSection& decoded = decodeSection(section);
+        return (decoded.elementType == 'F' || decoded.elementType == 'E')
+            && decoded.hasMapperFlag(MAPPER_FLAG_PROJECTION)
+            && decoded.hasMapperFlag(MAPPER_FLAG_MODIFIED) && !decoded.connectedElements.empty();
+    });
+}
+
 /* True if \a name's element holds \a oldName's, a piece of a far cap that an edit merged with
  * others into one (ops#360, PR 340 round 3): the names are the same but in one section, a marked
  * piece's (PRJ and MOD), where \a name's marks, its connected elements, hold every one of
@@ -1818,6 +1832,65 @@ bool isWholeProjectionOf(std::string_view name, std::string_view oldName)
         whole = true;
     }
     return whole;
+}
+
+/* True if \a name's element is \a oldName's piece of a far edge after others of its pieces went
+ * (PR 366 round 3): the names are the same but in one section, a marked piece's in both (PRJ,
+ * MOD, ORD), with the same marks, where the duplicate counter (count (count - 1) / 2 + place,
+ * TopoShapeMapper.cpp) counts fewer pieces in \a name. The count renames every piece, so a
+ * piece left alone on its face of the up-to shape (the hole's fill piece when the piece left of
+ * the hole goes) has the old name nowhere. A piece coming instead may take a face's index, the
+ * marks, from another face (a face added to an up-to shell without names): never this rule's.
+ * The caller corroborates by geometry.
+ */
+bool isFewerPiecesOf(std::string_view name, std::string_view oldName)
+{
+    const auto sections = NameAncestry::splitSections(name);
+    const auto oldSections = NameAncestry::splitSections(oldName);
+    if (sections.empty() || sections.size() != oldSections.size()) {
+        return false;
+    }
+    // The count from a counter: the largest n with n (n - 1) / 2 <= counter
+    auto countOf = [](const std::string& counter) {
+        int value = 0;
+        for (const char c : counter) {
+            if (c < '0' || c > '9' || value > 1000000) {
+                return 0;
+            }
+            value = value * 10 + (c - '0');
+        }
+        int count = 1;
+        while ((count + 1) * count / 2 <= value) {
+            ++count;
+        }
+        return value > 0 ? count : 0;
+    };
+    bool fewer = false;
+    for (std::size_t i = 0; i < sections.size(); ++i) {
+        if (sections[i] == oldSections[i]) {
+            continue;
+        }
+        if (fewer) {
+            return false;
+        }
+        const DecodedMappedSection& x = decodeSection(sections[i]);
+        const DecodedMappedSection& y = decodeSection(oldSections[i]);
+        if (!y.hasMapperFlag(MAPPER_FLAG_PROJECTION) || !y.hasMapperFlag(MAPPER_FLAG_MODIFIED)
+            || !y.hasMapperFlag(orderedFlag) || y.connectedElements.empty()
+            || sortedFlags(x) != sortedFlags(y) || x.opCode != y.opCode
+            || x.referenceIDs != y.referenceIDs || x.iterationTag != y.iterationTag
+            || x.index != y.index || x.elementType != y.elementType
+            || x.linkedNames != y.linkedNames || x.connectedElements != y.connectedElements) {
+            return false;
+        }
+        const int count = countOf(x.duplicateCount);
+        const int oldCount = countOf(y.duplicateCount);
+        if (count == 0 || oldCount == 0 || count >= oldCount) {
+            return false;
+        }
+        fewer = true;
+    }
+    return fewer;
 }
 
 // The element of a target without an element map that the IDX section \a section names, when it
@@ -2425,6 +2498,11 @@ bool isMarkedCapName(std::string_view name)
     return isMarkedCap(name, true);
 }
 
+bool isMarkedPieceName(std::string_view name)
+{
+    return isMarkedPiece(name);
+}
+
 bool isCounterSiblingName(std::string_view name, std::string_view other)
 {
     return isCounterSibling(name, other);
@@ -2663,6 +2741,7 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             // another number of twins) compares the centres themselves (round 3), which breaks
             // a move of the pair too: loud, never a pick.
             bool nearerTwin = false;
+            bool hasTwins = false;
             if (place.empty() && saved.center && now.center && isOrdered(hitName)) {
                 const double eps = input.continuationDistance * std::max(1.0, input.diagonal);
                 std::vector<std::pair<int, Base::Vector3d>> siblings;
@@ -2730,6 +2809,7 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                     }
                 }
                 nearerTwin = !place.empty();
+                hasTwins = !siblings.empty();
             }
             // A far cap marked by one face of the up-to shape alone (ops#386, PR 366 round 2) that
             // moved with nothing at its old place, off its old centre, while another piece of the
@@ -2738,35 +2818,126 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             // in another order, it gives the name to another piece, and the piece the reference
             // held shrank around its old centre. A piece that moved off its old centre onto
             // another kind of piece (the hole's fill piece onto a twin, the disc and the hole
-            // moved together) keeps its name
+            // moved together) keeps its name. Round 3: so does one whose neighbour holding the
+            // centre reaches out of the old place (box), a seam moved across the old piece, the
+            // neighbour's plate grown over it; the piece that shrank around its old centre lies
+            // within it
             bool offCentre = false;
-            if (place.empty() && saved.center && input.holdsPoint && isMarkedCap(hitName, true)) {
+            if (place.empty() && isMarkedCap(hitName, true)) {
                 const double eps = input.continuationDistance * std::max(1.0, input.diagonal);
                 const double reach = (saved.size ? std::sqrt(*saved.size) / 4.0 : 0.0) + eps;
-                if (!input.holdsPoint(hit, *saved.center, reach)) {
-                    for (std::size_t k = 0; k < pool.elements.size(); ++k) {
-                        const auto& names = pool.elements[k].names;
-                        if (static_cast<int>(k) != hitPosition
-                            && std::any_of(
-                                names.begin(),
-                                names.end(),
-                                [&](const auto& name) {
-                                    return markedPiecesOfOne(name, hitName)
-                                        && isMarkedCap(name, true);
+                const bool centreLeft = saved.center && input.holdsPoint
+                    && !input.holdsPoint(hit, *saved.center, reach);
+                // Within the old piece's box; a face without one (not planar), no larger than the
+                // old piece (a plate grown over the old centre is larger)
+                auto withinOldPlace = [&](const ElementFingerprint& other) {
+                    if (!saved.extentMin || !saved.extentMax || !other.extentMin || !other.extentMax) {
+                        return !saved.size || !other.size || *other.size <= *saved.size * 1.01;
+                    }
+                    const Base::Vector3d& low = *saved.extentMin;
+                    const Base::Vector3d& high = *saved.extentMax;
+                    const Base::Vector3d& otherLow = *other.extentMin;
+                    const Base::Vector3d& otherHigh = *other.extentMax;
+                    return otherLow.x >= low.x - eps && otherLow.y >= low.y - eps
+                        && otherLow.z >= low.z - eps && otherHigh.x <= high.x + eps
+                        && otherHigh.y <= high.y + eps && otherHigh.z <= high.z + eps;
+                };
+                for (std::size_t k = 0; centreLeft && k < pool.elements.size(); ++k) {
+                    const auto& names = pool.elements[k].names;
+                    if (static_cast<int>(k) != hitPosition
+                        && std::any_of(names.begin(), names.end(), [&](const auto& name) {
+                               return markedPiecesOfOne(name, hitName) && isMarkedCap(name, true);
+                           })
+                        && input.holdsPoint(pool.elements[k].index, *saved.center, reach)
+                        && withinOldPlace(fingerprintOfIndex(pool.elements[k].index))) {
+                        place.push_back(static_cast<int>(k));
+                    }
+                }
+                offCentre = !place.empty();
+            }
+            // A marked piece of a far edge or far cap (PR 366 round 3) that moved with nothing at
+            // its old place and no longer overlaps it: an up-to shell without names, rebuilt in
+            // another order while the pieces slid onto the next face, gives the old face's index
+            // to that face, and the name to its piece, with the same count and place along the
+            // edge. Overlapping: two pieces of one edge whose centres lie nearer than half their
+            // lengths together (a seam moved may leave a sliver of the old piece); two planar
+            // faces whose boxes share an area; otherwise faces whose centres lie nearer than half
+            // their sides together. A piece shifted within its old place keeps its name; twins
+            // went by their places above. The piece on a hole's fill, the disc and the hole moved
+            // together further than its size, breaks too: its old place left bare, it can't be
+            // told from a cap whose pieces slid onto the next faces of a reordered shell, its
+            // other pieces sharing their faces with another profile's caps (round 3, three
+            // plates)
+            bool departed = false;
+            if (place.empty() && !hasTwins && saved.center && now.center && saved.size && now.size
+                && isMarkedPiece(hitName)) {
+                const double eps = input.continuationDistance * std::max(1.0, input.diagonal);
+                const double apart = Base::Distance(*saved.center, *now.center);
+                if (saved.type == 'E') {
+                    // Along the edge only: the far edge moved across itself (A grown taller) still
+                    // holds its old span. A line's direction; a curve's (a B-spline plate's far
+                    // edge), the way to the nearest other piece of the edge now; without one,
+                    // the distance itself
+                    std::optional<Base::Vector3d> direction;
+                    if (saved.kind == "Line" && saved.direction && saved.direction->Length() > eps) {
+                        direction = *saved.direction;
+                    }
+                    else {
+                        double nearest = std::numeric_limits<double>::infinity();
+                        for (std::size_t k = 0; k < pool.elements.size(); ++k) {
+                            const auto& names = pool.elements[k].names;
+                            if (static_cast<int>(k) == hitPosition
+                                || std::none_of(names.begin(), names.end(), [&](const auto& name) {
+                                       return markedPiecesOfOne(name, hitName);
+                                   })) {
+                                continue;
+                            }
+                            const ElementFingerprint& other = fingerprintOfIndex(
+                                pool.elements[k].index
+                            );
+                            if (other.center) {
+                                const Base::Vector3d way = *other.center - *now.center;
+                                if (way.Length() > eps && way.Length() < nearest) {
+                                    nearest = way.Length();
+                                    direction = way;
                                 }
-                            )
-                            && input.holdsPoint(pool.elements[k].index, *saved.center, reach)) {
-                            place.push_back(static_cast<int>(k));
+                            }
                         }
                     }
-                    offCentre = !place.empty();
+                    double along = apart;
+                    if (direction) {
+                        along = std::abs(
+                            (*now.center - *saved.center) * Base::Vector3d(*direction).Normalize()
+                        );
+                    }
+                    departed = along >= (*saved.size + *now.size) / 2.0 - eps;
+                }
+                else if (saved.extentMin && saved.extentMax && now.extentMin && now.extentMax) {
+                    // The boxes' common part, on each axis; a flat face's box is flat on one
+                    const Base::Vector3d low(
+                        std::max(saved.extentMin->x, now.extentMin->x),
+                        std::max(saved.extentMin->y, now.extentMin->y),
+                        std::max(saved.extentMin->z, now.extentMin->z)
+                    );
+                    const Base::Vector3d high(
+                        std::min(saved.extentMax->x, now.extentMax->x),
+                        std::min(saved.extentMax->y, now.extentMax->y),
+                        std::min(saved.extentMax->z, now.extentMax->z)
+                    );
+                    const Base::Vector3d common = high - low;
+                    const int shared = (common.x > eps) + (common.y > eps) + (common.z > eps);
+                    const bool apartOnAxis = common.x < -eps || common.y < -eps || common.z < -eps;
+                    departed = apartOnAxis || shared < 2;
+                }
+                else {
+                    departed = apart >= (std::sqrt(*saved.size) + std::sqrt(*now.size)) / 2.0 - eps;
                 }
             }
-            if (place.empty()) {
+            if (place.empty() && !departed) {
                 continue;  // moved alone
             }
-            if (!offCentre && entry.policy == SolvePolicy::Equivalent && entry.equivalent
-                && std::all_of(place.begin(), place.end(), [&](int k) {
+            if (!offCentre && !departed && entry.policy == SolvePolicy::Equivalent
+                && entry.equivalent && std::all_of(place.begin(), place.end(), [&](int k) {
                        return entry.equivalent(hit, pool.elements[k].index);
                    })) {
                 // Every element there gives the consumer the hit's result: the entry is exact,
@@ -2807,7 +2978,7 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                         && !piecesOfOne(name, hitName) && !markedPiecesOfOne(name, hitName);
                 });
             };
-            if (std::all_of(place.begin(), place.end(), ownTwin)) {
+            if (!departed && std::all_of(place.begin(), place.end(), ownTwin)) {
                 outcomes[i].evidence = movedBy() + "; its own twin" + (place.size() > 1 ? "s " : " ")
                     + there + sit + " where it was";
                 continue;
@@ -2829,7 +3000,10 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 list(k, "place");
             }
             list(hitPosition, "name");
-            if (offCentre) {
+            if (departed) {
+                outcome.evidence = movedBy() + " off where it was, and nothing sits there";
+            }
+            else if (offCentre) {
                 outcome.evidence = movedBy() + " off its old centre; " + there
                     + (place.size() > 1 ? " hold it" : " holds it");
             }
@@ -3314,6 +3488,9 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         std::set<int> fromNames;
         std::set<std::string> matchedNames;  // the names the name match found them by
         std::set<int> inAncestry;
+        // The far edge's piece left after others of its pieces went (isFewerPiecesOf(), PR 366
+        // round 3), or -1: the old piece renumbered, no pattern's copy
+        int fewerPieces = -1;
         // Under Tier1Derived::Place: the elements that reach the old name only through a node of
         // another type or a GEN section (ops#335, ops#358), and the survivors of tier 1 that were
         // all such elements, which the no-candidate branch then got instead (listed first on a
@@ -4027,6 +4204,33 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                     holders.clear();
                 }
             }
+            // Round 3: a far edge's piece after others of its pieces went, its marks the same
+            // (isFewerPiecesOf()), is the element if it is the only piece with those marks and the
+            // saved centre lies on it: the hole's fill piece left alone on its face when the piece
+            // left of the hole goes. Pieces coming never count, since a face added to an up-to
+            // shell without names may take another's index
+            if (holders.empty() && input.holdsPoint) {
+                int marked = 0;
+                for (std::size_t k = 0; k < pool.elements.size(); ++k) {
+                    const auto& names = pool.elements[k].names;
+                    if (std::any_of(names.begin(), names.end(), [&](const auto& n) {
+                            return isCounterSibling(n, oldName);
+                        })) {
+                        ++marked;
+                        if (allowed[k] && std::any_of(names.begin(), names.end(), [&](const auto& n) {
+                                return isFewerPiecesOf(n, oldName);
+                            })) {
+                            holders.push_back(static_cast<int>(k));
+                        }
+                    }
+                }
+                if (marked != 1 || holders.size() != 1 || !holdsSavedCentre(holders.front())) {
+                    holders.clear();
+                }
+                else {
+                    state.fewerPieces = holders.front();
+                }
+            }
             // A far edge or far cap made whole again takes its piece quietly, twins together,
             // like the ring rule above (PLAN decision 122 (2): a disc across an elliptic hole
             // that moves away from under it, both twins onto the whole cap)
@@ -4418,8 +4622,12 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             };
             // But a piece of a far edge or cap counted by its place among the pieces (ORD) that
             // sits where the old piece was is the old piece, renumbered because another piece
-            // went or came (PR 366 round 2); a pattern's copy never sits there
+            // went or came (PR 366 round 2); a pattern's copy never sits there. So is the one
+            // piece with its marks after others went, the saved centre on it (round 3)
             auto renumbered = [&](int position) {
+                if (position == state.fewerPieces) {
+                    return true;
+                }
                 return state.saved && isOrdered(state.oldName)
                     && atSamePlace(
                            *state.saved,

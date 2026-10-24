@@ -484,6 +484,14 @@ AppExport bool isOrderedName(std::string_view name);
  */
 AppExport bool isMarkedCapName(std::string_view name);
 
+/** True if a section of \a name is a marked piece of a far edge or far cap (PRJ and MOD with
+ * marks), ordered or not (ops#386, PR 366 round 3). An up-to shell without names, rebuilt in
+ * another order while the pieces slid onto the next face, gives the name to another piece that
+ * no longer overlaps the old one: an exact reference to it that moved goes to solveOwner()'s
+ * moved check, which breaks it then.
+ */
+AppExport bool isMarkedPieceName(std::string_view name);
+
 /** True if \a name is \a other up to the duplicate counter and not \a other itself: for ordered
  * names (isOrderedName()), twins (ops#360, PR 340 round 5, the fingerprint's twin centroid).
  */

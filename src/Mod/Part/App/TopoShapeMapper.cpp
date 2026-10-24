@@ -532,7 +532,8 @@ std::vector<std::size_t> orderAlong(
 )
 {
     std::vector<std::pair<double, std::size_t>> placed;
-    if (along && profileEdge.ShapeType() == TopAbs_EDGE) {
+    std::vector<gp_Pnt> middles(pieces.size());
+    if (along && !profileEdge.IsNull() && profileEdge.ShapeType() == TopAbs_EDGE) {
         try {
             double first = 0.0;
             double last = 0.0;
@@ -546,6 +547,7 @@ std::vector<std::size_t> orderAlong(
                 for (std::size_t i = 0; i < pieces.size(); ++i) {
                     const BRepAdaptor_Curve piece(TopoDS::Edge(pieces[i]));
                     gp_Pnt middle = piece.Value((piece.FirstParameter() + piece.LastParameter()) / 2);
+                    middles[i] = middle;
                     middle.Translate(-direction * gp_Vec(middle.XYZ()).Dot(direction));
                     GeomAPI_ProjectPointOnCurve onEdge(middle, seen, first, last);
                     if (onEdge.NbPoints() == 0) {
@@ -567,6 +569,21 @@ std::vector<std::size_t> orderAlong(
         });
         for (const auto& [parameter, piece] : placed) {
             order.push_back(piece);
+        }
+        // Round 3: the same order whichever way the profile edge runs (a rectangle drawn from its
+        // other corner reverses its edges, the geometry unchanged): an open edge's pieces go from
+        // the first piece towards the last along the largest coordinate of their middles' offset
+        if (order.size() > 1 && !BRep_Tool::IsClosed(TopoDS::Edge(profileEdge))) {
+            const gp_XYZ offset = middles[order.back()].XYZ() - middles[order.front()].XYZ();
+            double largest = offset.X();
+            for (double c : {offset.Y(), offset.Z()}) {
+                if (std::abs(c) > std::abs(largest)) {
+                    largest = c;
+                }
+            }
+            if (largest < 0.0) {
+                std::reverse(order.begin(), order.end());
+            }
         }
         return order;
     }

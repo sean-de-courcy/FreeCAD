@@ -5211,6 +5211,21 @@ ElementFingerprint capAt(double x, double y)
     return fingerprint('F', "Plane", 5, Base::Vector3d(x, y, 10), Base::Vector3d(0, 0, 1));
 }
 
+// A far cap's piece from (x0, y0) to (x1, y1) on the plate at z = 10, with its box.
+ElementFingerprint capBox(double x0, double x1, double y0, double y1)
+{
+    ElementFingerprint fp = fingerprint(
+        'F',
+        "Plane",
+        (x1 - x0) * (y1 - y0),
+        Base::Vector3d((x0 + x1) / 2, (y0 + y1) / 2, 10),
+        Base::Vector3d(0, 0, 1)
+    );
+    fp.extentMin = Base::Vector3d(x0, y0, 10);
+    fp.extentMax = Base::Vector3d(x1, y1, 10);
+    return fp;
+}
+
 // A disc's pieces either side of an elliptic hole, both bounded by the plate, the ellipse and the
 // circle alone: told apart only by their order (the duplicate counter), with the ORD flag, or
 // without it in \a flags. Face1 holds counter \a bottom and sits at (3.1, 0.6), Face2 the other
@@ -5264,9 +5279,13 @@ TEST(Moved, twinsInTheirOrderKeepTheirNames)
 
 TEST(Moved, counterSiblingsWithoutTheOrderFlagMoveAlone)
 {
-    // Elements told apart by the duplicate counter without the ORD flag keep the rule as it
-    // was: moved with nothing at the old place, the name stands.
-    EXPECT_EQ(describe(Data::solveOwner(twinPieces(2, {"PRJ", "MOD"}))[0]), "exact Face1 0 [] ");
+    // Elements told apart by the duplicate counter without the ORD flag go by no twins' places:
+    // moved with nothing at the old place, the name stands while it overlaps its old place. These
+    // are marked pieces 4.9 mm off, past it (PR 366 round 3): broken, the hit its one candidate.
+    EXPECT_EQ(
+        describe(Data::solveOwner(twinPieces(2, {"PRJ", "MOD"}))[0]),
+        "broken  -1 [Face1 ] moved 4.901 mm off where it was, and nothing sits there"
+    );
 }
 
 namespace
@@ -5778,7 +5797,7 @@ TEST(Moved, markedEdgePiecesThatTradedMarksBreak)
     // the left piece's name now holds the right piece, and the left piece, marked by the other
     // face, sits where it was. The two share every source but are no own twins (ops#168, a copy
     // lifted by its feature): broken, the piece at the old place first. Without it there, the
-    // hit moved alone and stands.
+    // hit moved alone and stands while it overlaps its old place; past it, broken (round 3).
     SolveInput input;
     input.diagonal = 30;
     const auto first = farEdgePiece({plateElement("Face1", 'F')});
@@ -5797,8 +5816,35 @@ TEST(Moved, markedEdgePiecesThatTradedMarksBreak)
     EXPECT_EQ(outcome.candidates, (std::vector<std::string> {"Edge26", "Edge24"}));
     EXPECT_EQ(outcome.candidateRoles, (std::vector<std::string> {"place", "name"}));
 
-    measure(input, {{"Edge24", farEdgeAt(1, 2, 2)}, {"Edge26", farEdgeAt(5, 6, 2)}}, nullptr);
+    measure(input, {{"Edge24", farEdgeAt(0.5, 1.5, 2)}, {"Edge26", farEdgeAt(5, 6, 2)}}, nullptr);
     EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Exact);
+    measure(input, {{"Edge24", farEdgeAt(1, 2, 2)}, {"Edge26", farEdgeAt(5, 6, 2)}}, nullptr);
+    outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << describe(outcome);
+    EXPECT_EQ(outcome.candidates, (std::vector<std::string> {"Edge24"}));
+    // Moved 2 mm across itself (A grown taller), its old span along the line held: stands.
+    measure(input, {{"Edge24", farEdgeAt(0, 1, 4)}, {"Edge26", farEdgeAt(5, 6, 2)}}, nullptr);
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Exact);
+    // The same for curves (a B-spline plate's far edges), with no direction of their own: along
+    // the way to the edge's other piece. Slid past the old place that way: broken.
+    auto curve = [](ElementFingerprint fp) {
+        fp.kind = "BSpline";
+        fp.direction.reset();
+        return fp;
+    };
+    input.entries[0].fingerprint = curve(farEdgeAt(0, 1, 2));
+    measure(
+        input,
+        {{"Edge24", curve(farEdgeAt(0, 1, 4))}, {"Edge26", curve(farEdgeAt(5, 6, 2))}},
+        nullptr
+    );
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Exact);
+    measure(
+        input,
+        {{"Edge24", curve(farEdgeAt(2.5, 3, 2))}, {"Edge26", curve(farEdgeAt(3, 4.5, 2))}},
+        nullptr
+    );
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
 }
 
 TEST(Moved, markedCapOffItsOldCentreBreaks)
@@ -5807,9 +5853,9 @@ TEST(Moved, markedCapOffItsOldCentreBreaks)
     // by its face's index name, Face1. The shell rebuilt with a third face first, under A's
     // middle: Face1 is that face now, and the left piece's name holds the middle piece, which
     // moved, with nothing at the old place (the left piece shrank). The hit doesn't hold the
-    // saved centre and the left piece, marked by Face2 now, does: broken, it first. With no
-    // other piece holding the centre (the piece on a hole's fill, the disc shifted), the hit
-    // moved alone and stands; so does a hit that holds its old centre (A grew).
+    // saved centre and the left piece, marked by Face2 now, does: broken, it first. A hit that
+    // holds its old centre (A grew) stands. Round 3: one that holds nothing of its old place
+    // breaks even with nothing else there (the pieces slid onto the next face).
     SolveInput input;
     const auto first = farPiece({plateElement("Face1", 'F')});
     const auto second = farPiece({plateElement("Face2", 'F')});
@@ -5831,9 +5877,10 @@ TEST(Moved, markedCapOffItsOldCentreBreaks)
     EXPECT_EQ(outcome.candidates, (std::vector<std::string> {"Face12", "Face11"}));
     EXPECT_EQ(outcome.candidateRoles, (std::vector<std::string> {"place", "name"}));
 
-    holders.clear();
-    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Exact);
     holders = {"Face11"};
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Exact);
+    // Nothing holds the centre, and the hit, 0.5 mm off, still overlaps its old place: stands
+    holders.clear();
     EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Exact);
     // The piece holding the centre marked by more than a face (a twin, bounded by the hole's
     // edge), as when the disc and the hole moved together: no trade of a face's index, stands
@@ -5842,15 +5889,88 @@ TEST(Moved, markedCapOffItsOldCentreBreaks)
         farPiece({plateElement("plate", 'F'), plateElement("ellipse", 'E')}, 1, {"PRJ", "MOD"})
     };
     EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Exact);
-    // A twin (ORD) goes by its twins' places instead, and a name that isn't a marked piece's
-    // moved alone: both stand
+
+    // Round 3: the hit 4.5 mm off, past its old place (the pieces slid onto the next face), with
+    // nothing there: broken, the hit its one candidate. A twin (ORD) without twins and an
+    // unmarked name: the first breaks the same way, the second moved alone and stands.
     holders.clear();
-    for (const auto& name :
-         {farPiece({plateElement("Face1", 'F')}, 1, {"PRJ", "MOD", "ORD"}), sketchEdge(9)}) {
-        input.pool["Face"][0].names = {name};
-        input.entries[0].exactName = name;
-        EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Exact) << name;
-    }
+    input.pool["Face"][1].names = {second};
+    measure(input, {{"Face11", capAt(5, 1)}, {"Face12", capAt(0.35, 1)}}, nullptr);
+    outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << describe(outcome);
+    EXPECT_EQ(outcome.candidates, (std::vector<std::string> {"Face11"}));
+    const auto ordered = farPiece({plateElement("Face1", 'F')}, 1, {"PRJ", "MOD", "ORD"});
+    input.pool["Face"][0].names = {ordered};
+    input.entries[0].exactName = ordered;
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
+    input.pool["Face"][0].names = {sketchEdge(9)};
+    input.entries[0].exactName = sketchEdge(9);
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Exact);
+    // No other piece marked by a face alone (the other bounded by the hole's edge, as the twins
+    // around a hole's fill): the piece on the fill when the disc and the hole moved together
+    // further than its size, or A's left piece slid onto the next plate, whose other piece
+    // shares its plate with B's cap. The two can't be told apart: broken.
+    input.pool["Face"][0].names = {first};
+    input.entries[0].exactName = first;
+    input.pool["Face"][1].names = {
+        farPiece({plateElement("plate", 'F'), plateElement("ellipse", 'E')}, 1, {"PRJ", "MOD"})
+    };
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
+}
+
+TEST(Moved, markedCapOnASeamMovedStands)
+{
+    // PR 366 round 3: A's cap (x 0..5) in pieces on a nameless three-plate shell, the left one
+    // (x 0..1) marked by Face1's index name. The first seam moved from 1 to 0.2, the order the
+    // same: the left piece shrank to x 0..0.2, and the middle one, marked by Face2, grew over
+    // the old centre. It reaches out of the left piece's old place, so it took ground, not the
+    // name: the hit stands. The control (round 2): the piece holding the old centre lies within
+    // the old place, the hit off it (a face added first under A's middle took Face1's index):
+    // broken, the piece at the old centre first.
+    SolveInput input;
+    const auto first = farPiece({plateElement("Face1", 'F')});
+    const auto second = farPiece({plateElement("Face2", 'F')});
+    input.pool["Face"] = {
+        element("Face11", {first}),
+        element("Face12", {second}),
+    };
+    auto entry = exact("Face11");
+    entry.exactName = first;
+    entry.fingerprint = capBox(0, 1, 0, 2);
+    input.entries = {entry};
+    input.holdsPoint = [](const std::string& index, const Base::Vector3d&, double) {
+        return index == "Face12";
+    };
+    measure(input, {{"Face11", capBox(0, 0.2, 0, 2)}, {"Face12", capBox(0.2, 3, 0, 2)}}, nullptr);
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Exact) << describe(outcome);
+
+    measure(input, {{"Face11", capBox(0.7, 1.3, 0, 2)}, {"Face12", capBox(0, 0.7, 0, 2)}}, nullptr);
+    outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << describe(outcome);
+    EXPECT_EQ(outcome.candidates, (std::vector<std::string> {"Face12", "Face11"}));
+
+    // Faces without a box (a B-spline plate's caps): the neighbour larger than the old piece
+    // grew over it, stands; smaller, it shrank around the old centre, broken.
+    auto boxless = [](ElementFingerprint fp) {
+        fp.kind = "BSpline";
+        fp.extentMin.reset();
+        fp.extentMax.reset();
+        return fp;
+    };
+    input.entries[0].fingerprint = boxless(capBox(0, 1, 0, 2));
+    measure(
+        input,
+        {{"Face11", boxless(capBox(0, 0.2, 0, 2))}, {"Face12", boxless(capBox(0.2, 3, 0, 2))}},
+        nullptr
+    );
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Exact);
+    measure(
+        input,
+        {{"Face11", boxless(capBox(0.7, 1.3, 0, 2))}, {"Face12", boxless(capBox(0, 0.7, 0, 2))}},
+        nullptr
+    );
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
 }
 
 TEST(Moved, orderedEdgePiecesMovedTogetherStand)
@@ -5908,6 +6028,29 @@ TEST(SolveOwner, renumberedEdgePieceInItsPlaceResolves)
     EXPECT_EQ(outcome.element, "Edge12") << describe(outcome);
 
     input.entries = {entryAt(farEdgePiece({plate2}, 4, {"PRJ", "MOD", "ORD"}), 1, 3)};
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
+
+    // Round 3: with geometry to ask, the middle piece, the only one marked by plate 2, fewer
+    // pieces counted (two of two, was three) and the saved centre (x 2) on it, is the element.
+    input.holdsPoint = [](const std::string& index, const Base::Vector3d& point, double distance) {
+        return (index == "Edge12" && onEdgeAt(point, distance, 3, 5))
+            || (index == "Edge14" && onEdgeAt(point, distance, 1.5, 3));
+    };
+    outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Resolved) << describe(outcome);
+    EXPECT_EQ(outcome.element, "Edge14") << describe(outcome);
+    // Its centre off the piece (x 0.5): broken.
+    input.entries = {entryAt(farEdgePiece({plate2}, 4, {"PRJ", "MOD", "ORD"}), 0, 1)};
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
+    // Pieces coming (second of three now, was first of two): a face added to the shell may
+    // have taken plate 2's index, so broken.
+    input.entries = {entryAt(farEdgePiece({plate2}, 1, {"PRJ", "MOD", "ORD"}), 1, 3)};
+    input.pool["Edge"][1].names = {farEdgePiece({plate2}, 4, {"PRJ", "MOD", "ORD"})};
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
+    // Another piece marked by plate 2 too: broken.
+    input.entries = {entryAt(farEdgePiece({plate2}, 4, {"PRJ", "MOD", "ORD"}), 1, 3)};
+    input.pool["Edge"][1].names = {farEdgePiece({plate2}, 1, {"PRJ", "MOD", "ORD"})};
+    input.pool["Edge"][0].names = {farEdgePiece({plate2}, 2, {"PRJ", "MOD", "ORD"})};
     EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
 }
 

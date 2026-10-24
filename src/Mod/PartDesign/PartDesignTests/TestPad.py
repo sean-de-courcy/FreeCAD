@@ -2805,6 +2805,9 @@ class TestPad(unittest.TestCase):
             "leftGoneFacesSwapped": ((-0.5, 3.5), True, {"L": None, "M": (0.25, 1), "R": (2, 1)}),
             "rightGoneFacesSwapped": ((-3, 3.5), True, {"L": (-2, 1), "M": (-0.25, 1), "R": None}),
         }
+        # Round 3: the middle piece, alone on the fill (the one piece with its marks, the saved
+        # centre on it), follows it quietly when a piece beside it went, the shell unchanged
+        quiet = {"leftGone": ("M",), "rightGone": ("M",)}
         for kind in ("Pad", "Pocket"):
             for edit, (dimensions, swapped, after) in edits.items():
                 with self.subTest(kind=kind, edit=edit):
@@ -2829,9 +2832,12 @@ class TestPad(unittest.TestCase):
                         doc.recompute()
                         self.assertTrue(feature.isValid(), feature.getStatusString())
                         for piece, place in after.items():
-                            assertNotQuietlyElsewhere(
-                                self, points[piece], z, [place] if place else []
-                            )
+                            if piece in quiet.get(edit, ()):
+                                assertOnCap(self, points[piece], z, *place)
+                            else:
+                                assertNotQuietlyElsewhere(
+                                    self, points[piece], z, [place] if place else []
+                                )
                     finally:
                         FreeCAD.closeDocument(doc.Name)
 
@@ -2947,6 +2953,89 @@ class TestPad(unittest.TestCase):
                             assertNotQuietlyElsewhere(self, points[piece], z, [place])
                     finally:
                         FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToThreePlatesPiecesSlidOntoTheNextPlate(self):
+        # PR 366 round 3: up to a shell of three B-spline plates without names meeting at x = 1
+        # and x = 3, A (x 0..2) has its far cap and far edges in two pieces each, on plates 1
+        # and 2, marked by their plate's index. A moved to x 2.5..4.5, over plates 2 and 3, with
+        # the shell rebuilt in the order 2, 3, 1: plate 2 took plate 1's index and plate 3 plate
+        # 2's, while the count and the places along the edges stayed. The old names lay exactly
+        # on the new pieces: the left datums followed plate 2's pieces quietly, the right ones
+        # plate 3's. Now a marked piece that moved off its old place, with nothing there,
+        # breaks: the left datums say they lost their pieces, the right ones are on plate 2's
+        # or say they lost them. For the Pad and the Pocket
+        places = {
+            "CL": (farCapAt, pointOnFarCap, 0.5, 1),
+            "CR": (farCapAt, pointOnFarCap, 1.5, 1),
+            "TL": (farEdgeAt, pointOnFarEdge, 0.5, 2),
+            "TR": (farEdgeAt, pointOnFarEdge, 1.5, 2),
+            "BL": (farEdgeAt, pointOnFarEdge, 0.5, 0),
+            "BR": (farEdgeAt, pointOnFarEdge, 1.5, 0),
+        }
+        after = {
+            "CL": [],
+            "CR": [(2.75, 1)],
+            "TL": [],
+            "TR": [(2.75, 2)],
+            "BL": [],
+            "BR": [(2.75, 0)],
+        }
+        for kind in ("Pad", "Pocket"):
+            with self.subTest(kind=kind):
+                doc = FreeCAD.newDocument("PadUpToThreePlatesPiecesSlid")
+                try:
+                    feature, z = capsUpToAFreeformPlate(
+                        doc, kind, seam=1, capA=(0, 0, 2, 2), block=(-8, -8, 18, 9), withB=False
+                    )
+                    replaceUpToShape(feature, freeformStripsShape(z, (1, 3)))
+                    doc.recompute()
+                    self.assertTrue(feature.isValid(), feature.getStatusString())
+                    shape = feature.Shape
+                    points = {
+                        piece: attach(feature, find(shape, z, x, y))
+                        for piece, (find, attach, x, y) in places.items()
+                    }
+                    feature.Profile[0].setDatum(
+                        "xA", FreeCAD.Units.Quantity(2.5, FreeCAD.Units.Length)
+                    )
+                    replaceUpToShape(feature, freeformStripsShape(z, (1, 3), (1, 2, 0)))
+                    doc.recompute()
+                    self.assertTrue(feature.isValid(), feature.getStatusString())
+                    for piece, allowed in after.items():
+                        assertNotQuietlyElsewhere(self, points[piece], z, allowed)
+                finally:
+                    FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToAHoledShellFarEdgePiecesOfAFlippedRectangle(self):
+        # PR 366 round 3: A (x -3..3, y 1..3) across the plate's hole and its fill, its far bottom
+        # edge in three pieces, ordered along A's edge. A drawn again from its other corner (x 3,
+        # width -6), the geometry the same: the edge runs the other way, and the pieces' order
+        # along it flipped, so the left and right pieces' datums warned that they were found
+        # again in the same place. The order no longer depends on the edge's direction: each
+        # datum stays on its piece, quietly. For the Pad and the Pocket
+        places = {"L": (-2, 1), "M": (0, 1), "R": (2, 1)}
+        for kind in ("Pad", "Pocket"):
+            with self.subTest(kind=kind):
+                doc = FreeCAD.newDocument("PadUpToAHoledShellFlippedRectangle")
+                try:
+                    feature, z = capsUpToAFreeformPlate(
+                        doc, kind, hole=True, capA=(-3, 1, 3, 3), block=(-8, -8, 18, 9)
+                    )
+                    self.assertTrue(feature.isValid(), feature.getStatusString())
+                    shape = feature.Shape
+                    points = {
+                        piece: pointOnFarEdge(feature, farEdgeAt(shape, z, x, y))
+                        for piece, (x, y) in places.items()
+                    }
+                    sketch = feature.Profile[0]
+                    sketch.setDatum("xA", FreeCAD.Units.Quantity(3, FreeCAD.Units.Length))
+                    sketch.setDatum("wA", FreeCAD.Units.Quantity(-6, FreeCAD.Units.Length))
+                    doc.recompute()
+                    self.assertTrue(feature.isValid(), feature.getStatusString())
+                    for piece, (x, y) in places.items():
+                        assertOnCap(self, points[piece], z, x, y)
+                finally:
+                    FreeCAD.closeDocument(doc.Name)
 
     def testPadUpToAnEllipticHoleFarEdgeTwins(self):
         # ops#386: the disc's far circle across the elliptic hole: its top and bottom arcs lie on
