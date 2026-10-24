@@ -3279,6 +3279,76 @@ class TestPad(unittest.TestCase):
         self.assertAlmostEqual(pad.Shape.common(below).Volume, 1, places=6)
         self.assertAlmostEqual(pad.Shape.common(above).Volume, 0, places=6)
 
+    @staticmethod
+    def _trough(spans, cx):
+        """The trough z = 10 + 0.002 (x - cx)^2 as a B-spline surface parametrised along the
+        diagonals (u ~ x + y, v ~ x - y), trimmed to x >= -2, y = -10..spans + 10. Its concavity
+        seen from a point below, which decides whether a Pad up to it may remove its limits
+        (Part::Tools::isConcave()), is then (x of the point >= cx)."""
+        n = 24
+        us = [-30 + (spans + 60) * i / (n - 1) for i in range(n)]
+        vs = [-spans - 60 + (spans + 90) * j / (n - 1) for j in range(n)]
+        grid = [
+            [
+                FreeCAD.Vector((u + v) / 2, (u - v) / 2, 10 + 0.002 * ((u + v) / 2 - cx) ** 2)
+                for v in vs
+            ]
+            for u in us
+        ]
+        surface = Part.BSplineSurface()
+        surface.interpolate(grid)
+        box = Part.makeBox(40, spans + 20, 200, FreeCAD.Vector(-2, -10, -50))
+        return Part.Face(surface).common(box).Faces[0]
+
+    def testUpToFaceLimitsFromTheProfilesCentre(self):
+        """Pad UpToFace decides whether to remove a curved face's limits from the profile's true
+        centre (ops#428, fork PR 371 round 2).
+
+        The profile is the steep wave of testUpToFirstFromTheProfilesCentre() (400 spans, true
+        centre x = -0.054, OCCT's default x = -0.78). The face is _trough() with cx = -0.4, between
+        the two: seen from the true centre it is concave, so its limits stay, and the profile's part
+        at x < -2 doesn't meet it, as for a rectangle with the same centre (x = -5..4.892). From the
+        default centre the limits went and the Pad filled up to the extended surface. With
+        cx = +0.5 both centres see it convex, and the wave pads up to the extended surface."""
+        spans = 400
+        V = FreeCAD.Vector
+
+        def padUpTo(cx, rectangle):
+            body = self.Doc.addObject("PartDesign::Body", "Body")
+            if rectangle:
+                sketch = body.newObject("Sketcher::SketchObject", "Rectangle")
+                sketch.AttachmentSupport = (self.Doc.getObject("XY_Plane"), [""])
+                sketch.MapMode = "FlatFace"
+                corners = [(4.892, 0), (4.892, spans), (-5, spans), (-5, 0), (4.892, 0)]
+                for (x0, y0), (x1, y1) in zip(corners, corners[1:]):
+                    sketch.addGeometry(Part.LineSegment(V(x0, y0, 0), V(x1, y1, 0)), False)
+            else:
+                sketch = self._waveSketch(body, "Wave", spans, 4, 10)
+            upTo = self.Doc.addObject("Part::Feature", "Trough")
+            upTo.Shape = self._trough(spans, cx)
+            self.Doc.recompute()
+            pad = body.newObject("PartDesign::Pad", "Pad")
+            pad.Profile = sketch
+            pad.Type = "UpToFace"
+            pad.UpToFace = (upTo, ["Face1"])
+            pad.Refine = False
+            self.Doc.recompute()
+            return pad
+
+        control = padUpTo(-0.4, rectangle=True)
+        self.assertFalse(control.isValid())
+        self.assertIn("doesn't meet it", control.getStatusString())
+        wave = padUpTo(-0.4, rectangle=False)
+        self.assertFalse(wave.isValid())
+        self.assertIn("doesn't meet it", wave.getStatusString())
+        convex = padUpTo(0.5, rectangle=False)
+        self.assertTrue(convex.isValid(), convex.getStatusString())
+        # A 1 mm cube at x = -3.5, outside the trimmed face, just under the extended surface: a
+        # plain box away from the wave, so its common volume is exact
+        z = 10 + 0.002 * (-3.5 - 0.5) ** 2
+        below = Part.makeBox(1, 1, 1, V(-4, spans / 2, z - 1.5))
+        self.assertAlmostEqual(convex.Shape.common(below).Volume, 1, places=6)
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("PartDesignTestPad")

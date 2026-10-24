@@ -80,8 +80,9 @@ PartExport double area(const TopoDS_Shape& shape, bool forceAdaptive);
 PartExport bool centreOfMass(const TopoDS_Shape& shape, gp_Pnt& centre);
 
 /// Orients a closed solid outwards, as BRepLib::OrientClosedSolid(solid) does, and returns what it
-/// returns. When needsAdaptive(), by the sign of the volume instead: OCCT's classifier turned a
-/// prism over a long steep wave inside out (ops#426)
+/// returns. When needsAdaptive(), by the sign of the adaptive volume instead: OCCT's classifier
+/// turned a prism over a long steep wave inside out (ops#426). The classifier still decides when
+/// the adaptive integration fails or gives no sign
 PartExport bool orientClosedSolid(TopoDS_Solid& solid);
 
 }  // namespace Part::MassProperties

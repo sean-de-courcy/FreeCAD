@@ -185,7 +185,8 @@ PartDesignExport std::string certifyPiece(
 // A solid's volume by Gauss-Kronrod integration over the surfaces' knot spans, to 1e-7, and the
 // error reached. The construction's checks use it, and so do the feature's checks of a constructed
 // tool: the adaptive VolumeProperties() at 1e-6 was 2e-4 off on the folded wall's tool (26.35470
-// for 26.34937) and refused its correct cut (section 15.16).
+// for 26.34937) and refused its correct cut (section 15.16). Throws Standard_Failure when the
+// integration fails.
 PartDesignExport std::pair<double, double> spanVolume(const TopoDS_Shape& shape);
 
 struct PartDesignExport FirstContactSolid

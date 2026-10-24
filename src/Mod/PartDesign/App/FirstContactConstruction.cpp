@@ -237,12 +237,16 @@ double perimeter(const TopoDS_Shape& shape)
 // reached. The adaptive integration of VolumeProperties() at 1e-6 (solidVolume() in
 // FeatureRevolved.cpp) was 3e-4 off on the folds' pieces (26.3629 for 26.3494) and gave the fuse
 // 2.6e-4 less than its pieces; Gauss-Kronrod agreed with them to 1e-8 and with first contact
-// integrated from the wall's curve to 4e-7.
+// integrated from the wall's curve to 4e-7. A failed integration (a negative error) leaves no
+// volume to check by, so it throws: read as a volume, its error passed every check (ops#428).
 std::pair<double, double> volume(const TopoDS_Shape& shape)
 {
     GProp_GProps properties;
     const double relativeError
         = BRepGProp::VolumePropertiesGK(shape, properties, 1e-7, Standard_True, Standard_True);
+    if (relativeError < 0.0) {
+        throw Standard_Failure("the volume's integration over knot spans failed");
+    }
     return {properties.Mass(), std::fabs(relativeError * properties.Mass())};
 }
 

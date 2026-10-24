@@ -251,6 +251,32 @@ bool needsAdaptive(const TopoDS_Shape& shape)
 namespace
 {
 
+// The adaptive volume properties into props, with the centre of mass and inertia when everything
+// is set; false, with props unchanged, when the integration failed
+bool adaptiveVolume(const TopoDS_Shape& shape, GProp_GProps& props, bool everything)
+{
+    GProp_GProps adaptive = props;
+    const bool onlyClosed = false;
+    // One integration per knot span. Without, the volume a cut removed from a 500- or 1000-span
+    // prism, a difference of whole volumes, was off by 3e-6 and 3e-4 at any tolerance, too much
+    // for FilletFallback's 1e-6 checks; and a 150 x 150-span face took 46 s instead of 2 (ops#414)
+    const bool useSpans = true;
+    if (BRepGProp::VolumePropertiesGK(
+            shape,
+            adaptive,
+            adaptiveTolerance,
+            onlyClosed,
+            useSpans,
+            everything,
+            everything
+        )
+        < 0.0) {
+        return false;
+    }
+    props = adaptive;
+    return true;
+}
+
 // The volume properties, with the centre of mass and inertia when everything is set; the mass
 // alone otherwise, which costs the adaptive method about a tenth (ops#414: 30-60 ms against
 // 300-600 ms on prisms of 200-1000 spans). Adaptive when forceAdaptive or needsAdaptive()
@@ -261,29 +287,10 @@ void integrateVolume(
     bool forceAdaptive
 )
 {
-    if (forceAdaptive || needsAdaptive(shape)) {
-        GProp_GProps adaptive = props;
-        const bool onlyClosed = false;
-        // One integration per knot span. Without, the volume a cut removed from a 500- or
-        // 1000-span prism, a difference of whole volumes, was off by 3e-6 and 3e-4 at any
-        // tolerance, too much for FilletFallback's 1e-6 checks; and a 150 x 150-span face took
-        // 46 s instead of 2 (ops#414)
-        const bool useSpans = true;
-        if (BRepGProp::VolumePropertiesGK(
-                shape,
-                adaptive,
-                adaptiveTolerance,
-                onlyClosed,
-                useSpans,
-                everything,
-                everything
-            )
-            >= 0.0) {
-            props = adaptive;
-            return;
-        }
-        // The adaptive method failed: the default, as before
+    if ((forceAdaptive || needsAdaptive(shape)) && adaptiveVolume(shape, props, everything)) {
+        return;
     }
+    // Not screened, or the adaptive method failed: the default, as before
     BRepGProp::VolumeProperties(shape, props);
 }
 
@@ -812,16 +819,19 @@ bool centreOfMass(const TopoDS_Shape& shape, gp_Pnt& centre)
 
 bool orientClosedSolid(TopoDS_Solid& solid)
 {
-    if (needsAdaptive(solid)) {
-        const double signedVolume = volume(solid, true);
+    // The sign from the adaptive integration alone: the default one is the integration that is
+    // wrong on these solids, and volume() falls back to it when the adaptive one fails
+    GProp_GProps props;
+    if (needsAdaptive(solid) && adaptiveVolume(solid, props, false)) {
+        const double signedVolume = props.Mass();
         if (std::isfinite(signedVolume) && signedVolume != 0.0) {
             if (signedVolume < 0.0) {
                 solid.Reverse();
             }
             return true;
         }
-        // No sign to go by: the classifier, as before
     }
+    // Not screened, or no sign to go by: the classifier, as before
     return BRepLib::OrientClosedSolid(solid);
 }
 

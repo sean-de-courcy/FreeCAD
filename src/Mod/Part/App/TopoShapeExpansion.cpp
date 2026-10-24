@@ -7786,11 +7786,11 @@ TopoShape& TopoShape::makeElementPrismUntil(
 
     BRepFeat_MakePrism PrismMaker;
 
-    // don't remove limits of concave face
+    // don't remove limits of concave face. The default centre of a long curved B-spline profile is
+    // millimetres off, enough to take the wrong side of a curved face (ops#428)
     if (checkLimits && __uptoface.shapeType(true) == TopAbs_FACE) {
-        Base::Vector3d vCog;
-        profile.getCenterOfGravity(vCog);
-        gp_Pnt pCog(vCog.x, vCog.y, vCog.z);
+        gp_Pnt pCog;
+        MassProperties::centreOfMass(profile.getShape(), pCog);
         checkLimits = !Part::Tools::isConcave(TopoDS::Face(__uptoface.getShape()), pCog, direction);
     }
 

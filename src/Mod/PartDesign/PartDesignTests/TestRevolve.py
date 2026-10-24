@@ -3701,6 +3701,65 @@ class TestRevolve(unittest.TestCase):
             places=6,
         )
 
+    def testRevolutionUpToFaceSymmetricOnALongWave(self):
+        """A Symmetric Revolution up to a bounded wall on a profile of a long curved B-spline,
+        whose volume checks integrate over knot spans (ops#428, fork PR 371 round 2).
+
+        The profile on XZ runs from x = 10 to the wave x = 15 + 4 (1 - cos(2 pi z / 10)),
+        z = 0..100, one cubic B-spline of 100 spans, and is revolved about the z axis. The wall is
+        the face x = 0, y in [0.5, 40] of a Part::Plane: a quarter turn on the first side, mirrored
+        to y < 0. The oracles need no mass integration: the half ring x >= 0 out to the wave's
+        largest radius, 23, both end faces on x = 0 with outward normals -x, and material between
+        the radii 10 and 15 on both sides, none on x < 0."""
+        spans = 100
+        V = FreeCAD.Vector
+        points = [V(15 + 4 * (1 - math.cos(2 * math.pi * z / 10)), z, 0) for z in range(spans + 1)]
+        wave = Part.BSplineCurve()
+        wave.interpolate(points)
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        sketch = body.newObject("Sketcher::SketchObject", "Profile")
+        sketch.AttachmentSupport = (self.Doc.getObject("XZ_Plane"), [""])
+        sketch.MapMode = "FlatFace"
+        sketch.addGeometry(wave, False)
+        corners = [points[-1], V(10, spans, 0), V(10, 0, 0), points[0]]
+        for a, b in zip(corners, corners[1:]):
+            sketch.addGeometry(Part.LineSegment(a, b), False)
+        plane = self.Doc.addObject("Part::Plane", "Wall")
+        plane.Length = spans + 2
+        plane.Width = 39.5
+        plane.Placement = FreeCAD.Placement(V(0, 0.5, spans + 1), FreeCAD.Rotation(V(0, 1, 0), 90))
+        self.Doc.recompute()
+        revolution = body.newObject("PartDesign::Revolution", "Revolution")
+        revolution.Profile = sketch
+        revolution.ReferenceAxis = (sketch, ["V_Axis"])
+        revolution.Type = "UpToFace"
+        revolution.UpToFace = (plane, ["Face1"])
+        revolution.SideType = "Symmetric"
+        revolution.Refine = False
+        self.Doc.recompute()
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        shape = revolution.Shape
+        box = shape.optimalBoundingBox()
+        self.assertAlmostEqual(box.XMin, 0, places=6)
+        self.assertAlmostEqual(box.XMax, 23, places=3)
+        self.assertAlmostEqual(box.YMax, 23, places=3)
+        self.assertAlmostEqual(box.YMin, -box.YMax, places=6)
+        self.assertAlmostEqual(box.ZMin, 0, places=6)
+        self.assertAlmostEqual(box.ZMax, spans, places=6)
+        ends = sorted(
+            ("y+" if face.BoundBox.YMin > 0 else "y-", round(face.normalAt(0, 0).x, 9))
+            for face in shape.Faces
+            if face.Surface.TypeId == "Part::GeomPlane"
+            and face.BoundBox.XMax - face.BoundBox.XMin < 1e-7
+            and abs(face.BoundBox.XMin) < 1e-6
+        )
+        self.assertEqual(ends, [("y+", -1.0), ("y-", -1.0)])
+        # 1 mm cubes at radii 11.3 to 12.8, between the cylinder r = 10 and the wave: inside the
+        # revolution on both sides of the profile plane, so their common volumes are exact
+        for x, y, inside in ((8, 8, 1), (8, -9, 1), (-9, 8, 0), (-9, -9, 0)):
+            cube = Part.makeBox(1, 1, 1, V(x, y, spans / 2))
+            self.assertAlmostEqual(shape.common(cube).Volume, inside, places=6, msg=(x, y))
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("PartDesignTestRevolve")
