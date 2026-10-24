@@ -3,7 +3,9 @@
 # draft is visible only to the repository's maintainers, who hand the builds on.
 # The bundles are FreeCAD built in the workspace's pixi environment, the one CI and every test
 # use (pixi.lock), and each is refused unless its FreeCADCmd reports pixi.lock's OCCT, Python and
-# Qt (package/scripts/check_release_env.py, ops#388). dry_run builds and checks both packages
+# Qt (package/scripts/check_release_env.py, ops#388). The run is refused before the draft exists
+# unless the newest compat generation (gen0) carries the source's naming revision
+# (package/scripts/check_release_gen0.py, ops#460). dry_run builds and checks both packages
 # without creating a release or a tag, and without uploading anything.
 name: Build Release
 on:
@@ -48,6 +50,21 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
           submodules: 'recursive'
+
+      # FreeCAD-CH (ops#460): before the draft exists. A gen0 whose naming revision differs from the
+      # source's makes TestCompatCorpus read it as an older file and skip the element-name check, so
+      # such a commit is not released. A dry run reports it and goes on.
+      - name: Check that the compat corpus (gen0) is current
+        shell: bash
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          args=(--source . --summary "${GITHUB_STEP_SUMMARY}")
+          if [ "${DRY_RUN}" = "true" ]; then
+            args+=(--warn-only)
+          fi
+          python3 package/scripts/check_release_gen0.py "${args[@]}"
 
       - name: Get tag and create the draft release
         id: get_tag
