@@ -54,12 +54,15 @@
 #include <BRepGProp.hxx>
 #include <BRepGProp_Face.hxx>
 #include <BRepOffsetAPI_MakePipeShell.hxx>
+#include <BRepTools.hxx>
 #include <BRepTools_WireExplorer.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
+#include <ElCLib.hxx>
 #include <Geom2d_Curve.hxx>
 #include <Geom_BSplineCurve.hxx>
 #include <Geom_Curve.hxx>
+#include <Geom_Surface.hxx>
 #include <Geom_TrimmedCurve.hxx>
 #include <GeomAdaptor_Curve.hxx>
 #include <GeomFill_Frenet.hxx>
@@ -512,9 +515,11 @@ private:
         // is the nearer one's
         TopTools_IndexedMapOfShape joints;
         std::vector<int> cornerAt;
-        // Each joint's profile element and the two sides it bounds
+        // Each joint's profile element, the two sides it bounds, and whether the sides run
+        // against the section's element (runsAgainst)
         std::vector<TopoDS_Shape> originOf;
         std::vector<std::pair<TopoDS_Shape, TopoDS_Shape>> sidesOf;
+        std::vector<bool> againstOf;
         // Per spine edge (by its index in spineEdges): the side faces it sweeps and their edges
         std::vector<TopTools_IndexedMapOfShape> legFaces(spineEdges.Extent() + 1);
         std::vector<TopTools_IndexedMapOfShape> legEdges(spineEdges.Extent() + 1);
@@ -542,6 +547,8 @@ private:
                     if (!origin) {
                         continue;
                     }
+                    const bool against = type == TopAbs_EDGE
+                        && runsAgainst(pipe, TopoDS::Edge(elements(k)), ends);
                     // The element's side along the spine edge \a i
                     auto sideOn = [&](int i) {
                         for (const TopoDS_Shape& side : pipe.Generated(elements(k))) {
@@ -573,6 +580,7 @@ private:
                                     cornerAt.push_back(v);
                                     originOf.push_back(*origin);
                                     sidesOf.emplace_back(before, after);
+                                    againstOf.push_back(against);
                                 }
                                 else if (distanceTo(edgesAt.FindKey(v), it.Current())
                                          < distanceTo(edgesAt.FindKey(cornerAt[found - 1]), it.Current())) {
@@ -581,6 +589,45 @@ private:
                             }
                         }
                     }
+                }
+            }
+        }
+        // The vertices between the edges of one element's joint at one corner (a round hole's
+        // bend arcs) that no profile vertex's sides meet at: joints of that element and corner,
+        // told apart by their places too. Named from the two sides they lie on (`UPP`), they were
+        // told apart in the order OCCT stores them, which follows the sweep's direction: with the
+        // spine's first line drawn the other way, each went to its mirror vertex (round 8). Only
+        // where the joint is split, in more than one edge: the vertices of a single joint edge
+        // would name it (its connected elements) instead of its index, a name it has at a "Right
+        // corner" but not at a "Round corner", where its far end is the round face's (a reference
+        // broke when the corner was made round: PipeLegsRoundCorner, V2)
+        const int edgeJoints = joints.Extent();
+        auto split = [&](int j) {
+            int edges = 0;
+            for (int k = 1; k <= edgeJoints; ++k) {
+                if (joints(k).ShapeType() == TopAbs_EDGE && cornerAt[k - 1] == cornerAt[j - 1]
+                    && originOf[k - 1].IsSame(originOf[j - 1])) {
+                    ++edges;
+                }
+            }
+            return edges > 1;
+        };
+        for (int j = 1; j <= edgeJoints; ++j) {
+            if (joints(j).ShapeType() != TopAbs_EDGE || !split(j)) {
+                continue;
+            }
+            const int corner = cornerAt[j - 1];
+            const TopoDS_Shape origin = originOf[j - 1];
+            const std::pair<TopoDS_Shape, TopoDS_Shape> sides = sidesOf[j - 1];
+            const bool against = againstOf[j - 1];
+            for (TopExp_Explorer it(joints(j), TopAbs_VERTEX); it.More(); it.Next()) {
+                if (!joints.Contains(it.Current()) && !sectionElements.Contains(it.Current())
+                    && !ends.Contains(it.Current())) {
+                    joints.Add(it.Current());
+                    cornerAt.push_back(corner);
+                    originOf.push_back(origin);
+                    sidesOf.push_back(sides);
+                    againstOf.push_back(against);
                 }
             }
         }
@@ -596,7 +643,7 @@ private:
                     break;
                 }
             }
-            placeOf[j] = placeOn(joints(j + 1), sidesOf[j]);
+            placeOf[j] = placeOn(joints(j + 1), sidesOf[j], againstOf[j]);
         }
         std::vector<int> order(joints.Extent());
         std::iota(order.begin(), order.end(), 0);
@@ -611,26 +658,117 @@ private:
         }
     }
 
+    /// Whether the side faces the section's edge \a element sweeps run their u, the parameter
+    /// along the section, against the edge's own parameter. It is read where a side meets the
+    /// section's copy at the shell's end that lies on \a element (one of \a ends): the copy's
+    /// pcurve and its curve against \a element's. The faces' u follows the direction of the
+    /// sweep, which follows the spine's: a spine whose first line is drawn the other way is
+    /// swept from its other end, its sides' u runs the other way round a profile's circle, and
+    /// a round hole's bend arcs, told apart by their places, swapped with their mirror arcs
+    /// (ops#415, round 8). False where no such copy is found, or where it doesn't run along u.
+    static bool runsAgainst(
+        BRepOffsetAPI_MakePipeShell& pipe,
+        const TopoDS_Edge& element,
+        const TopTools_IndexedMapOfShape& ends
+    )
+    {
+        double first = 0;
+        double last = 0;
+        Handle(Geom_Curve) curve = BRep_Tool::Curve(element, first, last);
+        if (curve.IsNull()) {
+            return false;
+        }
+        for (const TopoDS_Shape& side : pipe.Generated(element)) {
+            if (side.ShapeType() != TopAbs_FACE) {
+                continue;
+            }
+            for (TopExp_Explorer it(side, TopAbs_EDGE); it.More(); it.Next()) {
+                const TopoDS_Edge& copy = TopoDS::Edge(it.Current());
+                if (!ends.Contains(copy)) {
+                    continue;
+                }
+                double from = 0;
+                double to = 0;
+                Handle(Geom2d_Curve) pcurve
+                    = BRep_Tool::CurveOnSurface(copy, TopoDS::Face(side), from, to);
+                Handle(Geom_Curve) copied = BRep_Tool::Curve(copy, from, to);
+                if (pcurve.IsNull() || copied.IsNull()) {
+                    continue;
+                }
+                const double at = (from + to) / 2;
+                gp_Pnt point;
+                gp_Vec along;
+                copied->D1(at, point, along);
+                gp_Pnt2d uv;
+                gp_Vec2d alongUV;
+                pcurve->D1(at, uv, alongUV);
+                GeomAPI_ProjectPointOnCurve onElement(point, curve, first, last);
+                const double tolerance = BRep_Tool::Tolerance(copy) + BRep_Tool::Tolerance(element);
+                if (onElement.NbPoints() == 0 || onElement.LowerDistance() > tolerance
+                    || std::abs(alongUV.X()) <= std::abs(alongUV.Y())) {
+                    continue;
+                }
+                gp_Pnt found;
+                gp_Vec own;
+                curve->D1(onElement.LowerDistanceParameter(), found, own);
+                return (along.Dot(own) > 0) != (alongUV.X() > 0);
+            }
+        }
+        return false;
+    }
+
     /// Where \a joint lies on the two sides it bounds, \a sides, each in its own parameters: an
-    /// edge at its pcurve's midpoint on a face, a vertex at its parameter on an edge. The
+    /// edge at its pcurve's midpoint on a face, a vertex at its parameters on a face or on an
+    /// edge. A face's u is taken into the face's range (a pcurve may lie a period away), and,
+    /// when the sides run \a against the section's element (runsAgainst), turned round within
+    /// it, so that it runs with the profile element's own parameter whichever way the spine is
+    /// drawn. The
     /// parameters follow the profile's element along the side, so a rigid motion, a dimension
     /// edit or another platform leaves the joints' order alone. The smaller pair comes first, so
     /// the sides' order doesn't count; infinite where none is found.
     static std::array<double, 4> placeOn(
         const TopoDS_Shape& joint,
-        const std::pair<TopoDS_Shape, TopoDS_Shape>& sides
+        const std::pair<TopoDS_Shape, TopoDS_Shape>& sides,
+        bool against
     )
     {
-        auto on = [&joint](const TopoDS_Shape& side) {
+        auto on = [&joint, against](const TopoDS_Shape& side) {
             constexpr double none = std::numeric_limits<double>::infinity();
-            if (joint.ShapeType() == TopAbs_EDGE && side.ShapeType() == TopAbs_FACE) {
-                double first = 0;
-                double last = 0;
-                Handle(Geom2d_Curve) pcurve
-                    = BRep_Tool::CurveOnSurface(TopoDS::Edge(joint), TopoDS::Face(side), first, last);
-                if (!pcurve.IsNull()) {
-                    const gp_Pnt2d at = pcurve->Value((first + last) / 2);
-                    return std::make_pair(at.X(), at.Y());
+            if (side.ShapeType() == TopAbs_FACE
+                && (joint.ShapeType() == TopAbs_EDGE || joint.ShapeType() == TopAbs_VERTEX)) {
+                const TopoDS_Face& face = TopoDS::Face(side);
+                std::optional<gp_Pnt2d> at;
+                if (joint.ShapeType() == TopAbs_VERTEX) {
+                    at = BRep_Tool::Parameters(TopoDS::Vertex(joint), face);
+                }
+                else {
+                    double first = 0;
+                    double last = 0;
+                    Handle(Geom2d_Curve) pcurve
+                        = BRep_Tool::CurveOnSurface(TopoDS::Edge(joint), face, first, last);
+                    if (!pcurve.IsNull()) {
+                        at = pcurve->Value((first + last) / 2);
+                    }
+                }
+                if (at) {
+                    double uFirst = 0;
+                    double uLast = 0;
+                    double vFirst = 0;
+                    double vLast = 0;
+                    BRepTools::UVBounds(face, uFirst, uLast, vFirst, vLast);
+                    Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
+                    // Into the face's range again after turning round: a place on the seam
+                    // stays at its start
+                    auto inRange = [&](double u) {
+                        return !surface.IsNull() && surface->IsUPeriodic()
+                            ? ElCLib::InPeriod(u, uFirst, uFirst + surface->UPeriod())
+                            : u;
+                    };
+                    double u = inRange(at->X());
+                    if (against) {
+                        u = inRange(uFirst + uLast - u);
+                    }
+                    return std::make_pair(u, at->Y());
                 }
             }
             else if (joint.ShapeType() == TopAbs_VERTEX && side.ShapeType() == TopAbs_EDGE) {

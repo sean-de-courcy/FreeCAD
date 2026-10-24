@@ -1267,21 +1267,57 @@ class TestPipeEndNames(unittest.TestCase):
     def testBendArcsOfARoundHoleFollowTheirPlaces(self):
         """A square with a round hole along the L path, "Right corner": the hole's sides along
         the two legs meet at the corner in four arcs, all named from the hole's circle and the
-        corner, told apart by an index. Datum points on the four arcs; then the first leg made
-        longer, the hole moved, or both sketches moved and turned together. Each point goes
-        missing, warns, or lies where its arc went: the corner's shift, the hole's shift along
-        the miter, or the motion. The index followed the order in which OCCT stores the arcs,
-        which these edits change (and which differs between Windows and macOS): the points went
-        to the mirror arcs, about 1.35 mm away, silently (ops#415 round 7,
-        `work\\pr369-r2v\\arc_leg1.out`, `arc_centre.out`, `arc_rotate.out`)."""
+        corner, told apart by an index, and so are the vertices between them. Datum points on
+        the four arcs and their four vertices; then the first leg made longer, the hole moved,
+        both sketches moved and turned together, or the path's first line, or both, drawn the
+        other way (their ids kept, the solid the same). Each point goes missing, warns, or lies
+        where its arc or vertex went: the corner's shift, the hole's shift along the miter, the
+        motion, or nowhere; all eight keep their places, without a warning, except where the hole
+        moves. The index followed the order in which OCCT stores the arcs, which
+        these edits change (and which differs between Windows and macOS): the points went to the
+        mirror arcs, about 1.35 mm away, silently (ops#415 round 7, `work\\pr369-r2v\\arc_leg1.out`,
+        `arc_centre.out`, `arc_rotate.out`). Then the order of the arcs' places on the hole's
+        sides, which run the way the path is swept: drawing its first line the other way sweeps
+        it from the other end, and the points went to the mirror arcs again; the vertices, named
+        from the two sides in the order OCCT stores them, went to their mirrors too (round 8,
+        `work\\pr369-r3v\\flipone.out`, `v2rev1_h1_R.out`)."""
         corner = V(0, 0, 30)
         motion = App.Placement(V(5, 2, 1), App.Rotation(V(0, 0, 1), 30))
+
+        def lengthen(path, profile):
+            self.movePolyline(path, [(0, 0), (0, 34), (20, 34)])
+
+        def moveHole(path, profile):
+            geometry = profile.Geometry
+            geometry[4].Center = V(0.4, 0.3, 0)
+            profile.Geometry = geometry
+
+        def move(path, profile):
+            path.Placement = motion.multiply(XZ)
+            profile.Placement = motion
+
+        def drawnTheOtherWay(*lines):
+            def edit(path, profile):
+                geometry = path.Geometry
+                for index in lines:
+                    line = geometry[index]
+                    start, end = V(line.StartPoint), V(line.EndPoint)
+                    line.StartPoint, line.EndPoint = V(100, 100, 0), V(200, 200, 0)
+                    line.StartPoint, line.EndPoint = end, start
+                path.Geometry = geometry
+
+            return edit
+
+        # Each edit, where it takes a point, and whether all eight points keep their places
+        # without a warning
         edits = {
-            "leg": V(0, 0, 4),
-            "hole": V(0.4, 0.3, -0.4),
-            "motion": motion,
+            "leg": (lengthen, lambda at: at + V(0, 0, 4), True),
+            "hole": (moveHole, lambda at: at + V(0.4, 0.3, -0.4), False),
+            "motion": (move, motion.multVec, True),
+            "first line drawn the other way": (drawnTheOtherWay(0), lambda at: at, True),
+            "both lines drawn the other way": (drawnTheOtherWay(0, 1), lambda at: at, True),
         }
-        for edit, moved in edits.items():
+        for edit, (change, moved, kept) in edits.items():
             self.tearDown()
             self.setUp()
             with self.subTest(edit=edit):
@@ -1291,31 +1327,22 @@ class TestPipeEndNames(unittest.TestCase):
                 )
                 pipe = self.pipe(profile, path, Transition="Right corner")
                 arcs = []
-                for element in elementsWhere(
-                    pipe.Shape, "Edge", lambda point: (point - corner).Length < 2
-                ):
-                    point = self.body.newObject("PartDesign::Point", "On" + element)
-                    point.AttachmentSupport = [(pipe, element)]
-                    point.MapMode = "CenterOfMass"
-                    arcs.append(point)
+                for kind in ("Edge", "Vertex"):
+                    for element in elementsWhere(
+                        pipe.Shape, kind, lambda point: (point - corner).Length < 2
+                    ):
+                        point = self.body.newObject("PartDesign::Point", "On" + element)
+                        point.AttachmentSupport = [(pipe, element)]
+                        point.MapMode = "Vertex" if kind == "Vertex" else "CenterOfMass"
+                        arcs.append(point)
                 self.doc.recompute()
-                self.assertEqual(len(arcs), 4, [p.Name for p in arcs])
+                self.assertEqual(len(arcs), 8, [p.Name for p in arcs])
                 self.assertEqual([p.Name for p in arcs if not p.isValid()], [])
-                if edit == "motion":
-                    expected = {p.Name: motion.multVec(p.Placement.Base) for p in arcs}
-                    path.Placement = motion.multiply(XZ)
-                    profile.Placement = motion
-                    self.doc.recompute()
-                else:
-                    expected = {p.Name: p.Placement.Base + moved for p in arcs}
-                    if edit == "leg":
-                        self.movePolyline(path, [(0, 0), (0, 34), (20, 34)])
-                    else:
-                        geometry = profile.Geometry
-                        geometry[4].Center = V(0.4, 0.3, 0)
-                        profile.Geometry = geometry
-                        self.doc.recompute()
+                expected = {p.Name: moved(V(p.Placement.Base)) for p in arcs}
+                change(path, profile)
+                self.doc.recompute()
                 self.assertTrue(pipe.isValid(), pipe.getStatusString())
+                compared = []
                 for point in arcs:
                     if not point.isValid():
                         continue
@@ -1326,6 +1353,9 @@ class TestPipeEndNames(unittest.TestCase):
                     self.assertLess(
                         (place - expected[point.Name]).Length, 1e-6, (point.Name, place, levels)
                     )
+                    compared.append(point.Name)
+                if kept:
+                    self.assertEqual(len(compared), 8, compared)
 
     def testUndoAndRedoOfAnEditKeepTheirNames(self):
         """testEndStaysWhenTheProfileCrossesTheMiddle's edit in a transaction, undone and redone,
