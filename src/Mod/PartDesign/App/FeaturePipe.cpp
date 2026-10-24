@@ -31,6 +31,7 @@
 #include <limits>
 #include <map>
 #include <numbers>
+#include <numeric>
 #include <optional>
 #include <queue>
 #include <tuple>
@@ -56,6 +57,7 @@
 #include <BRepTools_WireExplorer.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
+#include <Geom2d_Curve.hxx>
 #include <Geom_BSplineCurve.hxx>
 #include <Geom_Curve.hxx>
 #include <Geom_TrimmedCurve.hxx>
@@ -486,7 +488,12 @@ private:
     /// vertex do. The profile's element of each element of \a sections is the one \a origins
     /// binds it to, or itself without \a origins. The shell's end wires are left out: where a
     /// closed spine closes, the joint is the start, which keeps the section's names. A joint is
-    /// bound to one corner, the one it lies at (round 6).
+    /// bound to one corner, the one it lies at (round 6). The joints of one element at one corner
+    /// share their two sources and are told apart by an index, which follows the order they are
+    /// bound in: they are bound in the order of their places on the sides they bound (placeOn),
+    /// not in the order OCCT stores them, which differs between Windows and macOS and changes
+    /// with edits that keep the topology (a round hole's four bend arcs at a "Right corner": a
+    /// reference went to the mirror arc, silently; round 7).
     void bindJoints(
         BRepOffsetAPI_MakePipeShell& pipe,
         const TopoDS_Shape& spine,
@@ -504,6 +511,9 @@ private:
         // is the nearer one's
         TopTools_IndexedMapOfShape joints;
         std::vector<int> cornerAt;
+        // Each joint's profile element and the two sides it bounds
+        std::vector<TopoDS_Shape> originOf;
+        std::vector<std::pair<TopoDS_Shape, TopoDS_Shape>> sidesOf;
         // Per spine edge (by its index in spineEdges): the side faces it sweeps and their edges
         std::vector<TopTools_IndexedMapOfShape> legFaces(spineEdges.Extent() + 1);
         std::vector<TopTools_IndexedMapOfShape> legEdges(spineEdges.Extent() + 1);
@@ -556,11 +566,12 @@ private:
                             if (bounding.Contains(it.Current())
                                 && !sectionElements.Contains(it.Current())
                                 && !ends.Contains(it.Current())) {
-                                bindCopy(*origin, it.Current());
                                 const int found = joints.FindIndex(it.Current());
                                 if (found == 0) {
                                     joints.Add(it.Current());
                                     cornerAt.push_back(v);
+                                    originOf.push_back(*origin);
+                                    sidesOf.emplace_back(before, after);
                                 }
                                 else if (distanceTo(edgesAt.FindKey(v), it.Current())
                                          < distanceTo(edgesAt.FindKey(cornerAt[found - 1]), it.Current())) {
@@ -572,9 +583,69 @@ private:
                 }
             }
         }
-        for (int j = 1; j <= joints.Extent(); ++j) {
-            bindCopy(cornerOf(edgesAt.FindKey(cornerAt[j - 1])), joints(j));
+        // The joints by (element, corner), the pairs in the order they were first found, and
+        // each pair's joints by their places
+        std::vector<int> groupOf(joints.Extent());
+        std::vector<std::array<double, 4>> placeOf(joints.Extent());
+        for (int j = 0; j < joints.Extent(); ++j) {
+            groupOf[j] = j;
+            for (int k = 0; k < j; ++k) {
+                if (cornerAt[k] == cornerAt[j] && originOf[k].IsSame(originOf[j])) {
+                    groupOf[j] = groupOf[k];
+                    break;
+                }
+            }
+            placeOf[j] = placeOn(joints(j + 1), sidesOf[j]);
         }
+        std::vector<int> order(joints.Extent());
+        std::iota(order.begin(), order.end(), 0);
+        std::ranges::stable_sort(order, {}, [&](int j) {
+            return std::make_pair(groupOf[j], placeOf[j]);
+        });
+        for (int j : order) {
+            bindCopy(originOf[j], joints(j + 1));
+        }
+        for (int j : order) {
+            bindCopy(cornerOf(edgesAt.FindKey(cornerAt[j])), joints(j + 1));
+        }
+    }
+
+    /// Where \a joint lies on the two sides it bounds, \a sides, each in its own parameters: an
+    /// edge at its pcurve's midpoint on a face, a vertex at its parameter on an edge. The
+    /// parameters follow the profile's element along the side, so a rigid motion, a dimension
+    /// edit or another platform leaves the joints' order alone. The smaller pair comes first, so
+    /// the sides' order doesn't count; infinite where none is found.
+    static std::array<double, 4> placeOn(
+        const TopoDS_Shape& joint,
+        const std::pair<TopoDS_Shape, TopoDS_Shape>& sides
+    )
+    {
+        auto on = [&joint](const TopoDS_Shape& side) {
+            constexpr double none = std::numeric_limits<double>::infinity();
+            if (joint.ShapeType() == TopAbs_EDGE && side.ShapeType() == TopAbs_FACE) {
+                double first = 0;
+                double last = 0;
+                Handle(Geom2d_Curve) pcurve
+                    = BRep_Tool::CurveOnSurface(TopoDS::Edge(joint), TopoDS::Face(side), first, last);
+                if (!pcurve.IsNull()) {
+                    const gp_Pnt2d at = pcurve->Value((first + last) / 2);
+                    return std::make_pair(at.X(), at.Y());
+                }
+            }
+            else if (joint.ShapeType() == TopAbs_VERTEX && side.ShapeType() == TopAbs_EDGE) {
+                return std::make_pair(
+                    BRep_Tool::Parameter(TopoDS::Vertex(joint), TopoDS::Edge(side)),
+                    0.0
+                );
+            }
+            return std::make_pair(none, none);
+        };
+        auto lower = on(sides.first);
+        auto upper = on(sides.second);
+        if (upper < lower) {
+            std::swap(lower, upper);
+        }
+        return {lower.first, lower.second, upper.first, upper.second};
     }
 
     /// Adds \a copy to what \a key generates (copies), once
