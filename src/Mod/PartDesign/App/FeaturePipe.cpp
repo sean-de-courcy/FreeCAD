@@ -144,7 +144,9 @@ namespace
 // vertex's name is its lines' ends (`g1v2,g2v1`), which swap when a line is drawn the other way,
 // and the next corner's shares one of them, so a joint's name went to the next corner's by the
 // shared part (round 5). At a Round corner the round face lies between the legs' sides: its edges
-// stay `UPP`.
+// stay `UPP`. What OCCT reports the spine's vertex at a corner generated (a Round corner's round
+// faces and sectors) and the lateral edges that bound them are generated from the corner's second
+// vertex instead (CornerSource::rounds, ops#478), for the same reason.
 class MapperPipeShellEnds: public Part::MapperMaker
 {
 public:
@@ -160,12 +162,14 @@ public:
         const TopoDS_Shape& point,
         const TopoDS_Shape& spine,
         bool reversed,
-        const TopTools_DataMapOfShapeShape& corners
+        const TopTools_DataMapOfShapeShape& corners,
+        const TopTools_DataMapOfShapeShape& rounds
     )
         : MapperMaker(pipe)
         , point(point)
         , corners(corners)
     {
+        useRounds(rounds);
         std::vector<TopoDS_Shape> swept;
         for (const Part::TopoShape& section : sections) {
             swept.push_back(section.getShape());
@@ -222,11 +226,13 @@ public:
         const TopTools_DataMapOfShapeShape* origins,
         const TopoDS_Shape& frontBreak,
         const TopoDS_Shape& backBreak,
-        const TopTools_DataMapOfShapeShape& corners
+        const TopTools_DataMapOfShapeShape& corners,
+        const TopTools_DataMapOfShapeShape& rounds
     )
         : MapperMaker(pipe)
         , corners(corners)
     {
+        useRounds(rounds);
         useSpine(pipe, spine, {section});
         if (origins) {
             for (TopTools_DataMapIteratorOfDataMapOfShapeShape it(*origins); it.More(); it.Next()) {
@@ -305,6 +311,32 @@ public:
 
     const std::vector<TopoDS_Shape>& generated(const TopoDS_Shape& s) const override
     {
+        if (const TopoDS_Shape* vertex = roundsOf.Seek(s)) {
+            // A corner's second vertex: what its spine vertex generated
+            return generatedFrom(*vertex);
+        }
+        if (rounded.Contains(s)) {
+            _res.clear();
+            return _res;
+        }
+        return generatedFrom(s);
+    }
+
+    const std::vector<TopoDS_Shape>& projected(const TopoDS_Shape& s) const override
+    {
+        _res.clear();
+        if (const TopTools_ListOfShape* elements = ends.Seek(s)) {
+            for (const TopoDS_Shape& element : *elements) {
+                _res.push_back(element);
+            }
+        }
+        return _res;
+    }
+
+private:
+    /// What \a s generates, a spine's vertex at a corner included
+    const std::vector<TopoDS_Shape>& generatedFrom(const TopoDS_Shape& s) const
+    {
         if (s.IsSame(point)) {
             _res.clear();
             return _res;
@@ -362,18 +394,6 @@ public:
         return _res;
     }
 
-    const std::vector<TopoDS_Shape>& projected(const TopoDS_Shape& s) const override
-    {
-        _res.clear();
-        if (const TopTools_ListOfShape* elements = ends.Seek(s)) {
-            for (const TopoDS_Shape& element : *elements) {
-                _res.push_back(element);
-            }
-        }
-        return _res;
-    }
-
-private:
     /// How far \a section lies from the shell's end \a end: the mean over its vertices of the
     /// distance to the nearest vertex of the end, so that each section weighs the same whatever
     /// its number of vertices; infinite when either has none
@@ -802,6 +822,16 @@ private:
         bound.Append(copy);
     }
 
+    /// Takes \a rounds (CornerSource::rounds): what each of their spine vertices generates becomes
+    /// its second corner vertex's
+    void useRounds(const TopTools_DataMapOfShapeShape& rounds)
+    {
+        for (TopTools_DataMapIteratorOfDataMapOfShapeShape it(rounds); it.More(); it.Next()) {
+            roundsOf.Bind(it.Value(), it.Key());
+            rounded.Add(it.Key());
+        }
+    }
+
     /// Takes \a spine's vertices and edges, and the edges \a sections' vertices sweep
     void useSpine(
         BRepOffsetAPI_MakePipeShell& pipe,
@@ -845,6 +875,10 @@ private:
     TopTools_DataMapOfShapeListOfShape copies;
     /// The spine's vertices and the corner source's vertices that name the joints there
     TopTools_DataMapOfShapeShape corners;
+    /// The corner source's second vertices (CornerSource::rounds) and the spine's vertices whose
+    /// generated elements they take
+    TopTools_DataMapOfShapeShape roundsOf;
+    TopTools_IndexedMapOfShape rounded;
 };
 
 // "Transformed" at the spine's corners (ops#370). It doesn't turn the profile at a corner: the
@@ -1860,12 +1894,20 @@ std::string hashed(const std::string& text)
 /// closed spine of two) are told apart by which end of each edge they are (round 6); two edges
 /// from two objects, by the second's tag. Each part is length-prefixed (field), since a name's
 /// sections are separated by `|`. Spines without names are keyed by the edges' indices.
+/// Each corner has a second vertex, `<key>;_;<tag>;PCR;0;V;0;SRC;_`, the source of what OCCT
+/// reports its spine vertex generated: a Round corner's round faces and sectors, and the lateral
+/// arcs that bound them (ops#478). Named from the spine's vertex, a round face went to the other
+/// bend at the solver's tier 1 when the lines were drawn the other way, by the shared part of the
+/// vertex's name; from the joints' corner vertex, it would join their group (round 4).
 struct CornerSource
 {
     /// A compound of the corners' vertices, named
     Part::TopoShape shape;
     /// Each corner's spine vertex and its vertex in shape
     TopTools_DataMapOfShapeShape vertices;
+    /// Each corner's spine vertex and its second vertex in shape, for what the spine vertex
+    /// generates
+    TopTools_DataMapOfShapeShape rounds;
     /// Each corner's spine vertex and its key
     std::vector<std::pair<TopoDS_Shape, std::string>> keys;
 
@@ -1956,25 +1998,32 @@ CornerSource makeCornerSource(const Part::TopoShape& path, Part::TopoShape shape
             = BRepBuilderAPI_MakeVertex(BRep_Tool::Pnt(TopoDS::Vertex(vertex))).Vertex();
         builder.Add(compound, corner);
         source.vertices.Bind(vertex, corner);
+        const TopoDS_Vertex round
+            = BRepBuilderAPI_MakeVertex(BRep_Tool::Pnt(TopoDS::Vertex(vertex))).Vertex();
+        builder.Add(compound, round);
+        source.rounds.Bind(vertex, round);
     }
     shape.setShape(compound);
     for (size_t i = 0; i < source.keys.size(); ++i) {
         auto& [vertex, key] = source.keys[i];
         key = hashed(key);
-        shape.setElementName(
-            Data::IndexedName::fromConst("Vertex", shape.findShape(source.vertices.Find(vertex))),
-            Data::MappedName(Data::MappedName::makeEncodedSection(
-                {key},
-                {},
-                static_cast<int>(tags[i]),
-                "PCV",
-                0,
-                'V',
-                0,
-                {Data::MAPPER_FLAG_SOURCE}
-            )),
-            shape.Tag
-        );
+        for (const auto& [op, of] :
+             {std::pair {"PCV", &source.vertices}, std::pair {"PCR", &source.rounds}}) {
+            shape.setElementName(
+                Data::IndexedName::fromConst("Vertex", shape.findShape(of->Find(vertex))),
+                Data::MappedName(Data::MappedName::makeEncodedSection(
+                    {key},
+                    {},
+                    static_cast<int>(tags[i]),
+                    op,
+                    0,
+                    'V',
+                    0,
+                    {Data::MAPPER_FLAG_SOURCE}
+                )),
+                shape.Tag
+            );
+        }
     }
     source.shape = shape;
     return source;
@@ -2171,7 +2220,8 @@ Part::TopoShape sweepPiecesAndFuse(
                 first ? nullptr : &origins[i],
                 first ? TopoDS_Shape() : pieceFirsts[index],
                 last ? TopoDS_Shape() : pieceFirsts[index + 1],
-                corners.vertices
+                corners.vertices,
+                corners.rounds
             );
             std::vector<Part::TopoShape> pieceSources {profiles[i], path};
             if (!corners.shape.isNull()) {
@@ -3228,7 +3278,8 @@ App::DocumentObjectExecReturn* Pipe::execute()
                     copyProfilePoint.getShape(),
                     path.getShape(),
                     *reversed,
-                    corners.vertices
+                    corners.vertices,
+                    corners.rounds
                 ),
                 sources,
                 Part::OpCodes::PipeShell

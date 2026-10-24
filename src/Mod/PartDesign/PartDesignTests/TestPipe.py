@@ -1357,6 +1357,64 @@ class TestPipeEndNames(unittest.TestCase):
                 if kept:
                     self.assertEqual(len(compared), 8, compared)
 
+    def testRoundCornersStayAtTheirBendsWhenTheLinesAreDrawnTheOtherWay(self):
+        """A square along a U (up 30, along X 20, down 20), "Round corner": datum points on the
+        faces, edges and vertices at both bends; then every line, or the first two, drawn the
+        other way (their ids kept, the solid the same). Each point stays where it was, without a
+        warning. The round faces, their sectors and the lateral arcs were generated from the
+        spine's vertex, which a sketch names from its lines' ends (`g1v2,g2v1`): drawn the other
+        way, the other bend's vertex shared a part of that name, and the points on the bend's
+        edges went to the other bend, 21.3 mm away, at the solver's tier 1 with an empty warning
+        (ops#478, `work\\pr369-r3v\\v2rev_h0_Round.out`)."""
+        corners = (V(0, 0, 30), V(20, 0, 30))
+
+        def atABend(point):
+            return min((point - corner).Length for corner in corners) < 2.5
+
+        for lines in ((0, 1, 2), (0, 1)):
+            self.tearDown()
+            self.setUp()
+            with self.subTest(lines=lines):
+                path = self.sketch(
+                    "Path", models.polyline([(0, 0), (0, 30), (20, 30), (20, 10)]), placement=XZ
+                )
+                pipe = self.pipe(self.square(half=1), path, Transition="Round corner")
+                names = [
+                    f"Face{index}"
+                    for index, face in enumerate(pipe.Shape.Faces, 1)
+                    if all(atABend(V(vertex.Point)) for vertex in face.Vertexes)
+                ]
+                names += elementsWhere(pipe.Shape, "Edge", atABend)
+                names += elementsWhere(pipe.Shape, "Vertex", atABend)
+                points = []
+                for name in names:
+                    point = self.body.newObject("PartDesign::Point", "On" + name)
+                    point.AttachmentSupport = [(pipe, name)]
+                    point.MapMode = "Vertex" if name.startswith("Vertex") else "CenterOfMass"
+                    points.append(point)
+                self.doc.recompute()
+                self.assertTrue(any(name.startswith("Face") for name in names), names)
+                self.assertEqual([p.Name for p in points if not p.isValid()], [])
+                before = {p.Name: V(p.Placement.Base) for p in points}
+                geometry = path.Geometry
+                for index in lines:
+                    line = geometry[index]
+                    start, end = V(line.StartPoint), V(line.EndPoint)
+                    line.StartPoint, line.EndPoint = V(100, 100, 0), V(200, 200, 0)
+                    line.StartPoint, line.EndPoint = end, start
+                path.Geometry = geometry
+                self.doc.recompute()
+                self.assertTrue(pipe.isValid(), pipe.getStatusString())
+                for point in points:
+                    levels = [e["warning_level"] for e in App.getReferenceReport(point)]
+                    self.assertTrue(point.isValid(), (point.Name, levels))
+                    self.assertEqual([level for level in levels if level], [], point.Name)
+                    self.assertLess(
+                        (point.Placement.Base - before[point.Name]).Length,
+                        1e-6,
+                        (point.Name, point.Placement.Base, levels),
+                    )
+
     def testUndoAndRedoOfAnEditKeepTheirNames(self):
         """testEndStaysWhenTheProfileCrossesTheMiddle's edit in a transaction, undone and redone,
         the recompute inside the transaction or after it: the names are at the spine's start
