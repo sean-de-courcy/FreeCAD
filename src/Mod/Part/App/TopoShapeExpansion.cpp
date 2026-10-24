@@ -9355,9 +9355,13 @@ TopoShape& TopoShape::makeElementBoolean(
     const char* op,
     double tolerance,
     ElementMapPolicy elementMapPolicy,
-    BooleanInputCheck inputCheck
+    BooleanInputCheck inputCheck,
+    bool* inputsValid
 )
 {
+    if (inputsValid) {
+        *inputsValid = false;
+    }
     if (!maker) {
         FC_THROWM(Base::CADKernelError, "no maker");
     }
@@ -9558,6 +9562,7 @@ TopoShape& TopoShape::makeElementBoolean(
 
     std::vector<TopoShape> fixedInputs = inputs;
 
+    bool allValid = true;
     int i = -1;
     for (auto& shape : fixedInputs) {
         if (shape.isNull()) {
@@ -9565,9 +9570,10 @@ TopoShape& TopoShape::makeElementBoolean(
         }
 
         // A first argument the caller vouches for isn't checked (ops#310): the check is a full
-        // BRepCheck_Analyzer, and a PartDesign feature's base is the result of the feature before
+        // BRepCheck_Analyzer, and a PartDesign feature's base can be the output of its own boolean
         const bool vouchedFor = inputCheck == BooleanInputCheck::Tools && i + 1 < firstArgumentInputs;
         if (!vouchedFor && !shape.isValid()) {
+            allValid = false;
             shape.fix();
         }
 
@@ -9602,6 +9608,9 @@ TopoShape& TopoShape::makeElementBoolean(
 
     if (buildShell) {
         makeElementShell(true, nullptr, elementMapPolicy);
+    }
+    if (inputsValid) {
+        *inputsValid = allValid;
     }
     return *this;
 }

@@ -1068,7 +1068,8 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
                     nullptr,
                     FuzzyTolerance.getValue(),
                     Part::ElementMapPolicy::Propagate,
-                    booleanInputCheck()
+                    booleanInputCheck(),
+                    &booleanInputsValid
                 );
             }
             catch (Standard_Failure&) {

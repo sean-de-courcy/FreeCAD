@@ -77,8 +77,8 @@ enum class BooleanInputCheck
 {
     /// Every input
     All,
-    /// The tools only. The first argument is a result the caller vouches for, e.g. a PartDesign
-    /// feature's base, which the feature before it made.
+    /// The tools only. The first argument is a result the caller vouches for: a PartDesign
+    /// feature's base whose own boolean reported every input valid (inputsValid below).
     Tools
 };
 
@@ -2282,6 +2282,9 @@ public:
      * @param inputCheck: which inputs of a boolean (Fuse, Cut, Common, Section) are checked,
      *                    and fixed if invalid. The check is a full BRepCheck_Analyzer, about half
      *                    of a boolean's time on a large base.
+     * @param inputsValid: if given, set to whether a boolean ran with every input valid as given
+     *                     (a vouched-for first argument counts as valid); false when an input was
+     *                     invalid, for any other maker, and when no boolean ran (one input).
      *
      * @return The original content of this TopoShape is discarded and replaced
      *         with the new shape built by the shape maker. The function
@@ -2295,7 +2298,8 @@ public:
         const char* op = nullptr,
         double tol = -1.0,
         ElementMapPolicy elementMapPolicy = ElementMapPolicy::Propagate,
-        BooleanInputCheck inputCheck = BooleanInputCheck::All
+        BooleanInputCheck inputCheck = BooleanInputCheck::All,
+        bool* inputsValid = nullptr
     );
     /** Generalized shape making with mapped element name from shape history
      *

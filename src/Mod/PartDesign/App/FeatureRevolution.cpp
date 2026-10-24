@@ -123,7 +123,8 @@ TopoShape Revolution::makeShape(const TopoShape& base, const TopoShape& revolve)
         nullptr,
         -1.0,
         Part::ElementMapPolicy::Propagate,
-        booleanInputCheck()
+        booleanInputCheck(),
+        &booleanInputsValid
     );
 }
 

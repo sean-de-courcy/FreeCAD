@@ -59,7 +59,6 @@
 #include "FeaturePy.h"
 #include "Body.h"
 #include "FeatureBoolean.h"
-#include "FeatureDressUp.h"
 #include "ShapeBinder.h"
 
 #include <BRep_Builder.hxx>
@@ -215,6 +214,8 @@ bool Feature::placerElsewhereThan(const Body* body, const char** property, std::
 App::DocumentObjectExecReturn* Feature::recompute()
 {
     failedElsewhere = false;
+    booleanInputsValid = false;
+    vouchedShape.Nullify();
     // Held by the Body's roll-back bar (ops#127): not run on any path (also obj.recompute()); it
     // stays touched and runs when the bar passes it
     if (auto body = getFeatureBody(); body && body->holds(this)) {
@@ -261,7 +262,11 @@ App::DocumentObjectExecReturn* Feature::recompute()
             return new App::DocumentObjectExecReturn(why, this);
         }
     }
-    return Part::Feature::recompute();
+    auto ret = Part::Feature::recompute();
+    if (ret == App::DocumentObject::StdReturn && booleanInputsValid) {
+        vouchedShape = Shape.getShape().getShape();
+    }
+    return ret;
 }
 
 App::DocumentObjectExecReturn* Feature::recomputePreview()
@@ -885,17 +890,12 @@ TopLoc_Location Feature::getInverseLocation(const TopoShape& base) const
 
 Part::BooleanInputCheck Feature::booleanInputCheck() const
 {
-    // Only a boolean's output is vouched for: those features always cut or fuse a solid base.
-    // A first feature's raw result (a Pipe's is invalid at a sharp corner, ops#370), a dress-up's,
-    // a pattern's (it can return its support unchanged), a FeatureBase's (any shape) and a failed
-    // feature's passed-through base are still checked, and repaired if invalid.
+    // Evidence, not the feature's type: the base is vouched for only while its Shape is the one
+    // its own boolean made from inputs that were all valid as given. A boolean of valid inputs
+    // can still give an invalid output; upstream checks no input at all.
     const auto base = freecad_cast<const Feature*>(getBaseObject(true));
-    if (!base || !base->isValid()) {
-        return Part::BooleanInputCheck::All;
-    }
-    const bool isBoolean = (base->isDerivedFrom<FeatureAddSub>() && !base->isDerivedFrom<DressUp>())
-        || base->isDerivedFrom<Boolean>();
-    if (isBoolean && !base->getBaseTopoShape(true).isNull()) {
+    if (base && base->isValid() && !base->vouchedShape.IsNull()
+        && base->Shape.getShape().getShape().IsPartner(base->vouchedShape)) {
         return Part::BooleanInputCheck::Tools;
     }
     return Part::BooleanInputCheck::All;

@@ -785,7 +785,8 @@ App::DocumentObjectExecReturn* Pipe::execute()
             nullptr,
             FuzzyTolerance.getValue(),
             Part::ElementMapPolicy::Propagate,
-            booleanInputCheck()
+            booleanInputCheck(),
+            &booleanInputsValid
         );
 
         if (!isSingleSolidRuleSatisfied(boolOp.getShape())) {

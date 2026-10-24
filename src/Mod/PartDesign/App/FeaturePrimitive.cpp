@@ -119,7 +119,8 @@ App::DocumentObjectExecReturn* FeaturePrimitive::execute(const TopoDS_Shape& pri
                 nullptr,
                 FuzzyTolerance.getValue(),
                 Part::ElementMapPolicy::Propagate,
-                booleanInputCheck()
+                booleanInputCheck(),
+                &booleanInputsValid
             );
         }
         catch (Standard_Failure&) {
