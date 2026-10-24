@@ -55,6 +55,7 @@ from PartDesignTests.TestRevolve import TestRevolve
 from PartDesignTests.TestPipe import TestPipe
 from PartDesignTests.TestPipe import TestPipeEndNames  # FreeCAD-CH, ops#351
 from PartDesignTests.TestPipe import TestJointsWhenABendStraightens  # FreeCAD-CH, ops#446
+from PartDesignTests.TestPipe import TestPipeAlongTiltedWaves  # FreeCAD-CH, ops#448
 from PartDesignTests.TestLoft import TestLoft
 from PartDesignTests.TestPrimitive import TestPrimitive
 from PartDesignTests.TestHelix import TestHelix

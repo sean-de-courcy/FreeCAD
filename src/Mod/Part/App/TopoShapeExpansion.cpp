@@ -143,6 +143,7 @@
 #include "FaceMaker.h"
 #include "Geometry.h"
 #include "BRepOffsetAPI_MakeOffsetFix.h"
+#include "PipeShellApproximation.h"
 #include "ProgressIndicator.h"
 #include "ShapeAnalysis_FreeBoundsFix.h"
 #include "SweepFrenet.h"
@@ -4590,6 +4591,8 @@ TopoShape& TopoShape::makeElementPipeShell(
         }
         mkPipeShell.SetTolerance(tol3d, tolBound, tolAngular);
     }
+    // OCCT's default caps left long planar spines off the main planes up to 0.15 mm loose (ops#448)
+    PipeShellApproximation::set(mkPipeShell);
 
     const std::vector<TopoShape> profiles = prepareProfiles(shapes, 1);
     std::vector<TopoDS_Shape> sections;
