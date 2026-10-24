@@ -134,6 +134,7 @@
 #include "modelRefine.h"
 #include "CrossSection.h"
 #include "FilletFallback.h"
+#include "MassProperties.h"
 #include "TopoShape.h"
 #include "TopoShapeOpCode.h"
 #include "TopoShapeCache.h"
@@ -4913,7 +4914,7 @@ TopoShape& TopoShape::makeElementOffset(
             // contrary to the occ docs the return value OrientCloseSolid doesn't
             // indicate whether the shell was open or not. It returns true with an
             // open shell and we end up with an invalid solid.
-            if (BRepLib::OrientClosedSolid(temp)) {
+            if (MassProperties::orientClosedSolid(temp)) {
                 outputShape = temp;
             }
         }
@@ -6521,7 +6522,7 @@ TopoShape& TopoShape::makeElementSolid(const TopoShape& shape, const char* op)
         makeElementShape(mkSolid, shape, op);
 
         TopoDS_Solid solid = TopoDS::Solid(_Shape);
-        BRepLib::OrientClosedSolid(solid);
+        MassProperties::orientClosedSolid(solid);
         setShape(solid, false);
     }
     else if (count == 1) {
@@ -7785,11 +7786,11 @@ TopoShape& TopoShape::makeElementPrismUntil(
 
     BRepFeat_MakePrism PrismMaker;
 
-    // don't remove limits of concave face
+    // don't remove limits of concave face. The default centre of a long curved B-spline profile is
+    // millimetres off, enough to take the wrong side of a curved face (ops#428)
     if (checkLimits && __uptoface.shapeType(true) == TopAbs_FACE) {
-        Base::Vector3d vCog;
-        profile.getCenterOfGravity(vCog);
-        gp_Pnt pCog(vCog.x, vCog.y, vCog.z);
+        gp_Pnt pCog;
+        MassProperties::centreOfMass(profile.getShape(), pCog);
         checkLimits = !Part::Tools::isConcave(TopoDS::Face(__uptoface.getShape()), pCog, direction);
     }
 
@@ -9289,7 +9290,7 @@ bool TopoShape::fixSolidOrientation()
 
     if (shapeType() == TopAbs_SOLID) {
         TopoDS_Solid solid = TopoDS::Solid(_Shape);
-        BRepLib::OrientClosedSolid(solid);
+        MassProperties::orientClosedSolid(solid);
         if (solid.IsEqual(_Shape)) {
             return false;
         }

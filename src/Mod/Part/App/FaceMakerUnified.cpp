@@ -20,6 +20,7 @@
  ******************************************************************************/
 
 #include "FaceMakerUnified.h"
+#include "MassProperties.h"
 
 #include <BOPTools_AlgoTools3D.hxx>
 #include <BRep_Tool.hxx>
@@ -27,10 +28,8 @@
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepFill_Filling.hxx>
-#include <BRepGProp.hxx>
 #include <Bnd_Box.hxx>
 #include <GeomAbs_Shape.hxx>
-#include <GProp_GProps.hxx>
 #include <IntTools_Context.hxx>
 #include <Precision.hxx>
 #include <TopExp_Explorer.hxx>
@@ -70,11 +69,11 @@ TopoDS_Face makeFaceFromWire(const TopoDS_Wire& w, const gp_Pln& plane)
     return mf.IsDone() ? mf.Face() : TopoDS_Face();
 }
 
-double shapeArea(const TopoDS_Shape& s)
+// The area, adaptive also when forceAdaptive: areas compared with each other are integrated the
+// same way (ops#428)
+double shapeArea(const TopoDS_Shape& s, bool forceAdaptive = false)
 {
-    GProp_GProps props;
-    BRepGProp::SurfaceProperties(s, props);
-    return props.Mass();
+    return Part::MassProperties::area(s, forceAdaptive);
 }
 
 int findRoot(std::vector<int>& parent, int i)
@@ -109,6 +108,7 @@ OverlapResult findOverlapGroups(const std::vector<TopoDS_Wire>& wires, const gp_
     std::vector<double> areas(n, 0.0);
 
     int closedCount = 0;
+    bool adaptive = false;
     for (int i = 0; i < n; ++i) {
         if (!BRep_Tool::IsClosed(wires[i])) {
             continue;
@@ -116,8 +116,13 @@ OverlapResult findOverlapGroups(const std::vector<TopoDS_Wire>& wires, const gp_
         out.wireFaces[i] = makeFaceFromWire(wires[i], plane);
         if (!out.wireFaces[i].IsNull()) {
             BRepBndLib::AddOptimal(wires[i], boxes[i], Standard_False);
-            areas[i] = shapeArea(out.wireFaces[i]);
+            adaptive = adaptive || Part::MassProperties::needsAdaptive(out.wireFaces[i]);
             ++closedCount;
+        }
+    }
+    for (int i = 0; i < n; ++i) {
+        if (!out.wireFaces[i].IsNull()) {
+            areas[i] = shapeArea(out.wireFaces[i], adaptive);
         }
     }
     if (closedCount < 2) {
@@ -137,7 +142,7 @@ OverlapResult findOverlapGroups(const std::vector<TopoDS_Wire>& wires, const gp_
             if (!common.IsDone() || common.Shape().IsNull()) {
                 continue;
             }
-            double ca = shapeArea(common.Shape());
+            double ca = shapeArea(common.Shape(), adaptive);
             // Partial overlap only — exclude full containment
             if (ca > tol && ca < areas[i] - tol && ca < areas[j] - tol) {
                 out.groups[findRoot(out.groups, i)] = findRoot(out.groups, j);

@@ -177,6 +177,7 @@
 #include "encodeFilename.h"
 #include "FaceMakerBullseye.h"
 #include "Interface.h"
+#include "MassProperties.h"
 #include "WireJoiner.h"
 #include "modelRefine.h"
 #include "PartPyCXX.h"
@@ -2966,7 +2967,7 @@ TopoDS_Shape TopoShape::makeOffsetShape(
             // contrary to the occ docs the return value OrientCloseSolid doesn't
             // indicate whether the shell was open or not. It returns true with an
             // open shell and we end up with an invalid solid.
-            if (BRepLib::OrientClosedSolid(temp)) {
+            if (MassProperties::orientClosedSolid(temp)) {
                 outputShape = temp;
             }
         }

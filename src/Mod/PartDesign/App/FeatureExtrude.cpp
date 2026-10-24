@@ -57,6 +57,7 @@
 #include <Base/Converter.h>
 #include <Base/Tools.h>
 #include <Mod/Part/App/ExtrusionHelper.h>
+#include <Mod/Part/App/MassProperties.h>
 #include <Mod/Part/App/Tools.h>
 #include "Mod/Part/App/TopoShapeOpCode.h"
 #include <Mod/Part/App/PartFeature.h>
@@ -112,9 +113,10 @@ std::optional<Base::Placement> upToFaceReached(TopoShape face, const TopoShape& 
     if (distance.Value() < Precision::Confusion()) {
         return std::nullopt;
     }
-    Base::Vector3d cog;
-    profile.getCenterOfGravity(cog);
-    gp_Pnt pCog(cog.x, cog.y, cog.z);
+    // OCCT's default integration can put the centre far off on a profile bounded by a long
+    // curved B-spline (ops#428)
+    gp_Pnt pCog;
+    Part::MassProperties::centreOfMass(profile.getShape(), pCog);
     if (Part::Tools::isConcave(topoFace, pCog, dir) || !face.hasSubShape(TopAbs_WIRE)) {
         return std::nullopt;
     }
@@ -165,13 +167,13 @@ bool sideGoesAlong(
     const gp_Dir& dir
 )
 {
-    Base::Vector3d prismCog;
-    Base::Vector3d profileCog;
-    if (prism.isNull() || !prism.getCenterOfGravity(prismCog)
-        || !profile.getCenterOfGravity(profileCog)) {
+    gp_Pnt prismCog;
+    gp_Pnt profileCog;
+    if (prism.isNull() || !Part::MassProperties::centreOfMass(prism.getShape(), prismCog)
+        || !Part::MassProperties::centreOfMass(profile.getShape(), profileCog)) {
         return true;
     }
-    double along = (prismCog - profileCog) * Base::Vector3d(normal.X(), normal.Y(), normal.Z());
+    double along = gp_Vec(profileCog, prismCog).Dot(gp_Vec(normal));
     return along * normal.Dot(dir) > -Precision::Confusion();
 }
 
@@ -187,15 +189,15 @@ bool sideReachesPlane(
     const gp_Dir& dir
 )
 {
-    Base::Vector3d profileCog;
-    if (prism.isNull() || !profile.getCenterOfGravity(profileCog)) {
+    gp_Pnt profileCog;
+    if (prism.isNull() || !Part::MassProperties::centreOfMass(profile.getShape(), profileCog)) {
         return true;
     }
     gp_Dir sideNormal = normal.Dot(dir) < 0 ? normal.Reversed() : normal;
     // In a frame whose Z axis is the plane's normal on dir's side, the prism's highest Z is how far
     // it reaches past the plane.
     gp_Trsf toPlane;
-    toPlane.SetTransformation(gp_Ax3(gp_Pnt(profileCog.x, profileCog.y, profileCog.z), sideNormal));
+    toPlane.SetTransformation(gp_Ax3(profileCog, sideNormal));
     Bnd_Box box;
     BRepBndLib::AddOptimal(prism.getShape().Moved(TopLoc_Location(toPlane)), box, false, false);
     if (box.IsVoid()) {

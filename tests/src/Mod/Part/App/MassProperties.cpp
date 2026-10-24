@@ -13,6 +13,7 @@
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
 #include <BRepGProp.hxx>
@@ -48,6 +49,7 @@
 #include <TopTools_ListOfShape.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Compound.hxx>
+#include <TopoDS_Solid.hxx>
 #include <TopoDS_Vertex.hxx>
 #include <gp_Ax1.hxx>
 #include <gp_Ax2.hxx>
@@ -753,4 +755,91 @@ TEST(MassProperties, pcurveAlone)
     const double area = areaBehind(*wave);
     EXPECT_GT(relativeError(defaultArea(face), area), 1e-4);
     EXPECT_LT(relativeError(Part::MassProperties::area(face), area), 1e-6);
+}
+
+// ops#426: a prism over a steep wave (period 10, amplitude 4) of 1000 spans, which Refine's
+// orientation step (BRepLib::OrientClosedSolid's classifier) turned inside out, and its reversal:
+// both come out outward, the volume positive. Over whole waves the wave's mean is its amplitude
+TEST(MassProperties, orientClosedSolidByTheVolumesSign)
+{
+    const int spans = 1000;
+    BRepBuilderAPI_MakeWire wire;
+    wire.Add(BRepBuilderAPI_MakeEdge(waveSpline(spans, 10, 4.0)).Edge());
+    wire.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(0, spans, 0), gp_Pnt(-5, spans, 0)).Edge());
+    wire.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(-5, spans, 0), gp_Pnt(-5, 0, 0)).Edge());
+    wire.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(-5, 0, 0), gp_Pnt(0, 0, 0)).Edge());
+    const TopoDS_Face face = BRepBuilderAPI_MakeFace(wire.Wire(), true).Face();
+    const TopoDS_Solid prism
+        = TopoDS::Solid(BRepPrimAPI_MakePrism(face, gp_Vec(0, 0, 10)).Shape());
+    EXPECT_TRUE(Part::MassProperties::needsAdaptive(prism));
+    const double expected = 10.0 * (5 + 4) * spans;
+    for (bool reversed : {false, true}) {
+        SCOPED_TRACE(reversed);
+        TopoDS_Solid solid = reversed ? TopoDS::Solid(prism.Reversed()) : prism;
+        EXPECT_TRUE(Part::MassProperties::orientClosedSolid(solid));
+        EXPECT_EQ(solid.Orientation(), prism.Orientation());
+        EXPECT_LT(relativeError(Part::MassProperties::volume(solid), expected), 1e-3);
+    }
+}
+
+// Shapes the screen passes are oriented by OCCT's classifier, as before
+TEST(MassProperties, orientClosedSolidUnscreenedAsOCCT)
+{
+    for (const TopoDS_Shape& shape : {BRepPrimAPI_MakeBox(20, 10, 5).Shape(), filletedBox()}) {
+        // the shape's solid: TopoDS::Solid() of the shape itself threw for one of them
+        const TopoDS_Solid solid = TopoDS::Solid(TopExp_Explorer(shape, TopAbs_SOLID).Current());
+        EXPECT_FALSE(Part::MassProperties::needsAdaptive(solid));
+        for (bool reversed : {false, true}) {
+            SCOPED_TRACE(reversed);
+            TopoDS_Solid ours = reversed ? TopoDS::Solid(solid.Reversed()) : solid;
+            TopoDS_Solid occt = ours;
+            EXPECT_EQ(
+                Part::MassProperties::orientClosedSolid(ours),
+                BRepLib::OrientClosedSolid(occt)
+            );
+            EXPECT_EQ(ours.Orientation(), occt.Orientation());
+            EXPECT_EQ(ours.Orientation(), solid.Orientation());
+        }
+    }
+}
+
+// The centre of the solids, else the faces, else the edges, else the vertices' mean, as
+// TopoShape::getCenterOfGravity() chooses; screened like the volumes and areas (the long wave
+// prism's and face's centres as in longWavePrismCentreOfMass)
+TEST(MassProperties, centreOfMassByDimension)
+{
+    const double centreX = (1.5 * 1.5 * 1.5 - 25) / (2 * 6.5);
+    gp_Pnt centre;
+    ASSERT_TRUE(Part::MassProperties::centreOfMass(wavePrism(25), centre));
+    EXPECT_NEAR(centre.X(), centreX, 1e-3);
+    EXPECT_NEAR(centre.Z(), 5.0, 1e-3);
+    ASSERT_TRUE(Part::MassProperties::centreOfMass(waveFace(25), centre));
+    EXPECT_NEAR(centre.X(), centreX, 1e-3);
+    EXPECT_NEAR(centre.Z(), 0.0, 1e-9);
+    ASSERT_TRUE(Part::MassProperties::centreOfMass(
+        BRepBuilderAPI_MakeEdge(gp_Pnt(0, 0, 0), gp_Pnt(2, 4, 6)).Edge(),
+        centre
+    ));
+    EXPECT_LT(centre.Distance(gp_Pnt(1, 2, 3)), 1e-12);
+    BRep_Builder builder;
+    TopoDS_Compound vertices;
+    builder.MakeCompound(vertices);
+    builder.Add(vertices, BRepBuilderAPI_MakeVertex(gp_Pnt(0, 0, 0)).Vertex());
+    builder.Add(vertices, BRepBuilderAPI_MakeVertex(gp_Pnt(2, 4, 6)).Vertex());
+    ASSERT_TRUE(Part::MassProperties::centreOfMass(vertices, centre));
+    EXPECT_LT(centre.Distance(gp_Pnt(1, 2, 3)), 1e-12);
+    EXPECT_FALSE(Part::MassProperties::centreOfMass(TopoDS_Shape(), centre));
+}
+
+// forceAdaptive integrates an unscreened shape adaptively, still right; without it, the default
+TEST(MassProperties, forceAdaptive)
+{
+    const TopoDS_Shape box = BRepPrimAPI_MakeBox(20, 10, 5).Shape();
+    EXPECT_EQ(Part::MassProperties::volume(box, false), defaultVolume(box));
+    EXPECT_EQ(Part::MassProperties::area(box, false), defaultArea(box));
+    EXPECT_LT(relativeError(Part::MassProperties::volume(box, true), 1000.0), 1e-9);
+    EXPECT_LT(relativeError(Part::MassProperties::area(box, true), 700.0), 1e-9);
+    GProp_GProps props;
+    Part::MassProperties::volumeProperties(box, props, true);
+    EXPECT_LT(props.CentreOfMass().Distance(gp_Pnt(10, 5, 2.5)), 1e-9);
 }

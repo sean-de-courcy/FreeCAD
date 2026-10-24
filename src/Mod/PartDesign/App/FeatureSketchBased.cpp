@@ -74,6 +74,7 @@
 #include <Base/Translation.h>
 #include <Mod/Part/App/AttachExtension.h>
 #include <Mod/Part/App/FaceMakerCheese.h>
+#include <Mod/Part/App/MassProperties.h>
 #include <Mod/Part/App/Tools.h>
 #include <Mod/Part/App/TopoShapeOpCode.h>
 
@@ -949,8 +950,10 @@ std::optional<double> getPlanarStartReferenceDistance(
         return std::nullopt;
     }
 
-    Base::Vector3d profileCenter;
-    if (!profileShape.getCenterOfGravity(profileCenter)) {
+    // OCCT's default integration can put the centre far off on a profile bounded by a long
+    // curved B-spline (ops#428)
+    gp_Pnt profilePoint;
+    if (!Part::MassProperties::centreOfMass(profileShape.getShape(), profilePoint)) {
         return std::nullopt;
     }
 
@@ -960,7 +963,7 @@ std::optional<double> getPlanarStartReferenceDistance(
         return std::nullopt;
     }
 
-    const gp_Vec profileToReference(Base::convertTo<gp_Pnt>(profileCenter), surface.Plane().Location());
+    const gp_Vec profileToReference(profilePoint, surface.Plane().Location());
     return profileToReference.Dot(gp_Vec(normal)) / denominator;
 }
 }  // namespace
@@ -1645,9 +1648,10 @@ double ProfileBased::getReversedAngle(
         Part::Feature* obj = getVerifiedObject();
         TopoShape sketchshape = getTopoShapeVerifiedFace();
 
-        // get centre of gravity of the sketch face
+        // get centre of gravity of the sketch face (ops#428: the default integration can put it
+        // far off on a face bounded by a long curved B-spline)
         GProp_GProps props;
-        BRepGProp::SurfaceProperties(sketchshape.getShape(), props);
+        Part::MassProperties::surfaceProperties(sketchshape.getShape(), props);
         gp_Pnt cog = props.CentreOfMass();
         Base::Vector3d p_cog(cog.X(), cog.Y(), cog.Z());
         // get direction to cog from its projection on the revolve axis

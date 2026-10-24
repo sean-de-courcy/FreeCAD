@@ -1291,6 +1291,75 @@ class RegressionTests(unittest.TestCase):
         topRadius = 5 - 20 * math.tan(math.radians(5.0))
         self.assertAlmostEqual(math.hypot(top.x, top.y), topRadius, delta=1e-6)
 
+    @staticmethod
+    def _flatFaceNormals(shape):
+        """The outward normals of the shape's planar faces, as the faces' orientation within the
+        shape gives them, by the faces' constant coordinate: {("z", 10.0): Vector, ...}. An
+        orientation oracle that uses neither OCCT's classifier nor its mass integration, which
+        both go wrong on long curved B-spline faces (ops#414, ops#426)."""
+        normals = {}
+        for face in shape.Faces:
+            if face.Surface.TypeId != "Part::GeomPlane":
+                continue
+            box = face.BoundBox
+            for axis, low, high in (("x", box.XMin, box.XMax), ("y", box.YMin, box.YMax),
+                                    ("z", box.ZMin, box.ZMax)):
+                if high - low < 1e-7:
+                    normals[(axis, round(low, 6))] = face.normalAt(0, 0)
+        return normals
+
+    def test_removeSplitter_keeps_a_long_wave_prism_outward(self):
+        """Refine orients a long wave prism outwards (ops#426).
+
+        A prism over a steep wave x = 4 (1 - cos(2 pi y / 10)), y = 0..1000, interpolated by one
+        cubic B-spline of 1000 spans and closed at x = -5, 10 high. It has no faces to merge, so
+        only Refine's orientation step can change it, and BRepLib::OrientClosedSolid's classifier
+        turned it inside out: its top face's normal then points down."""
+        length = 1000
+        points = [
+            Vector(4 * (1 - math.cos(2 * math.pi * y / 10)), y, 0) for y in range(length + 1)
+        ]
+        wave = Part.BSplineCurve()
+        wave.interpolate(points)
+        corners = [Vector(0, length, 0), Vector(-5, length, 0), Vector(-5, 0, 0), Vector(0, 0, 0)]
+        lines = [Part.makeLine(a, b) for a, b in zip(corners, corners[1:])]
+        prism = Part.Face(Part.Wire([wave.toShape()] + lines)).extrude(Vector(0, 0, 10))
+        outward = {
+            ("z", 10.0): Vector(0, 0, 1),
+            ("z", 0.0): Vector(0, 0, -1),
+            ("x", -5.0): Vector(-1, 0, 0),
+        }
+        for shape in (prism, prism.removeSplitter()):
+            self.assertEqual(len(shape.Faces), 6)
+            normals = self._flatFaceNormals(shape)
+            for key, normal in outward.items():
+                self.assertLess((normals[key] - normal).Length, 1e-9, key)
+
+    @unittest.skipIf("BUILD_SKETCHER" not in FreeCAD.__cmake__, "Sketcher not built")
+    def test_sketch_keeps_the_face_of_a_long_wave(self):
+        """A sketch closed by a long steep wave makes its internal face (ops#428, a guard).
+
+        FaceMakerBuildFace drops a face whose area is below Confusion, and OCCT's default area of
+        a face bounded by a long curved B-spline can be far off: 26 % above the true area for this
+        wave (period 10, amplitude 4, 200 spans, closed at x = -5). It was never measured below
+        zero, so the face was kept before the change too; the area now comes from MassProperties.
+        The face's outer wire is the wave and the three lines."""
+        length = 200
+        points = [
+            Vector(4 * (1 - math.cos(2 * math.pi * y / 10)), y, 0) for y in range(length + 1)
+        ]
+        wave = Part.BSplineCurve()
+        wave.interpolate(points)
+        sketch = self.Doc.addObject("Sketcher::SketchObject", "Sketch")
+        sketch.addGeometry(wave, False)
+        corners = [Vector(0, length, 0), Vector(-5, length, 0), Vector(-5, 0, 0), Vector(0, 0, 0)]
+        for a, b in zip(corners, corners[1:]):
+            sketch.addGeometry(Part.LineSegment(a, b), False)
+        self.Doc.recompute()
+        faces = sketch.InternalShape.Faces
+        self.assertEqual(len(faces), 1)
+        self.assertEqual(len(faces[0].OuterWire.Edges), 4)
+
     def tearDown(self):
         """Clean up our test, optionally preserving the test document"""
         # This flag allows doing something like this:

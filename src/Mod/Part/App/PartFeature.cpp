@@ -90,6 +90,7 @@
 #include <Mod/Material/App/MaterialManager.h>
 
 #include "Geometry.h"
+#include "MassProperties.h"
 #include "PartFeature.h"
 #include "PartFeaturePy.h"
 #include "PartPyCXX.h"
@@ -3372,9 +3373,10 @@ std::vector<Part::cutTopoShapeFaces> Part::findAllFacesCutBy(
     const gp_Dir& dir
 )
 {
-    // Find the centre of gravity of the face
+    // Find the centre of gravity of the face. OCCT's default integration can put it far off on a
+    // face bounded by a long curved B-spline (ops#428)
     GProp_GProps props;
-    BRepGProp::SurfaceProperties(face.getShape(), props);
+    MassProperties::surfaceProperties(face.getShape(), props);
     gp_Pnt cog = props.CentreOfMass();
 
     // create a line through the centre of gravity
@@ -3420,9 +3422,10 @@ std::vector<Part::cutTopoShapeFaces> Part::findAllFacesCutBy(
     const gp_Ax1& axis
 )
 {
-    // Find the centre of gravity of the face
+    // Find the centre of gravity of the face. OCCT's default integration can put it far off on a
+    // face bounded by a long curved B-spline (ops#428)
     GProp_GProps props;
-    BRepGProp::SurfaceProperties(face.getShape(), props);
+    MassProperties::surfaceProperties(face.getShape(), props);
     gp_Pnt cog = props.CentreOfMass();
 
     // Get the projection of cog on the line defined by axis.
