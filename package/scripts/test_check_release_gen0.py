@@ -72,12 +72,14 @@ class CheckReleaseGen0(unittest.TestCase):
         # after the beta an old generation stays old on purpose; the newest must match
         make_source(self.root, 6, {0: 3, 1: 6, 2: 6})
         self.assertIsNone(self.run_main()[0])
-        tmp2 = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp2.cleanup)
-        make_source(tmp2.name, 6, {0: 6, 1: 6, 10: 5})
-        self.root = tmp2.name
+        # gen10 is newer than gen2 (a text sort would take gen2)
+        self.fresh_root()
+        make_source(self.root, 6, {0: 6, 1: 6, 2: 6, 10: 5})
         code, _, _ = self.run_main()
         self.assertIn("gen10 has naming revision 5", code)
+        self.fresh_root()
+        make_source(self.root, 6, {0: 5, 2: 5, 10: 6})
+        self.assertIsNone(self.run_main()[0])
 
     def test_warn_only_reports_and_passes(self):
         make_source(self.root, 6, {0: 3})
@@ -94,25 +96,52 @@ class CheckReleaseGen0(unittest.TestCase):
         with open(summary, encoding="utf-8") as text:
             self.assertIn("**Refused:**", text.read())
 
+    def assert_exit_2(self, text):
+        """main() exits 2, even with --warn-only, naming `text` on stderr and in the summary."""
+        summary = os.path.join(self.root, "summary.md")
+        code, out, err = self.run_main("--warn-only", "--summary", summary)
+        self.assertEqual(code, 2)
+        self.assertIn(text, err)
+        self.assertEqual(out, "")
+        with open(summary, encoding="utf-8") as written:
+            self.assertIn(text, written.read())
+
+    def fresh_root(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = tmp.name
+
     def test_unreadable_input_is_exit_2_not_a_pass(self):
         # missing revision line
         make_source(self.root, 6, {0: 6})
         with open(os.path.join(self.root, gen0check.DOCUMENT), "w", encoding="utf-8") as document:
             document.write("int main() {}\n")
-        self.assertIn("no `constexpr int ForkNamingRevision", self.run_main("--warn-only")[0])
+        self.assert_exit_2("no `constexpr int ForkNamingRevision")
         # a MANIFEST without namingRevision
-        tmp2 = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp2.cleanup)
-        make_source(tmp2.name, 6, {0: None})
-        self.root = tmp2.name
-        self.assertIn("can't read namingRevision", self.run_main("--warn-only")[0])
+        self.fresh_root()
+        make_source(self.root, 6, {0: None})
+        self.assert_exit_2("can't read namingRevision")
         # no generation at all
-        tmp3 = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp3.cleanup)
-        make_source(tmp3.name, 6, {})
-        os.makedirs(os.path.join(tmp3.name, gen0check.COMPAT))
-        self.root = tmp3.name
-        self.assertIn("no gen<k> folder", self.run_main()[0])
+        self.fresh_root()
+        make_source(self.root, 6, {})
+        os.makedirs(os.path.join(self.root, gen0check.COMPAT))
+        self.assert_exit_2("no gen<k> folder")
+        # no Compat folder
+        self.fresh_root()
+        make_source(self.root, 6, {})
+        self.assert_exit_2("can't list")
+
+    def test_newest_folder_without_manifest_does_not_fall_back(self):
+        make_source(self.root, 6, {0: 6})
+        os.makedirs(os.path.join(self.root, gen0check.COMPAT, "gen1"))
+        self.assert_exit_2("can't read namingRevision")
+
+    def test_naming_revision_must_be_an_int(self):
+        for value in ("6", 6.0, True, [6]):
+            with self.subTest(value=value):
+                self.fresh_root()
+                make_source(self.root, 1 if value is True else 6, {0: value})
+                self.assert_exit_2("not an integer")
 
 
 if __name__ == "__main__":

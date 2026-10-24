@@ -55,7 +55,10 @@ def build_revision(source):
 
 
 def newest_generation(source):
-    """(name, namingRevision, build) of the highest-numbered gen<k> folder with a MANIFEST."""
+    """(name, namingRevision, build) of the highest-numbered gen<k> folder.
+
+    The newest folder counts even without a MANIFEST: that is an error (exit 2), never a
+    fall back to an older generation."""
     compat = os.path.join(source, COMPAT)
     try:
         entries = os.listdir(compat)
@@ -69,7 +72,11 @@ def newest_generation(source):
     try:
         with open(path, encoding="utf-8") as manifest:
             data = json.load(manifest)
-        return name, int(data["namingRevision"]), str(data.get("build", "")).split()[-1:]
+        naming = data["namingRevision"]
+        # TestCompatCorpus compares an exact int: "6", 6.0 and true are not a revision
+        if type(naming) is not int:
+            raise ValueError(f"namingRevision is {naming!r}, not an integer")
+        return name, naming, str(data.get("build", "")).split()[-1:]
     except (OSError, ValueError, KeyError, TypeError) as error:
         raise CheckError(f"can't read namingRevision from {path}: {error!r}")
 
@@ -97,13 +104,19 @@ def main():
     parser.add_argument("--summary", help="append the result to this Markdown file")
     args = parser.parse_args()
 
+    def summarize(text):
+        if args.summary:
+            with open(args.summary, "a", encoding="utf-8") as summary:
+                summary.write(text + "\n\n")
+
     try:
         ok, message = check(args.source)
     except CheckError as error:
-        sys.exit(f"Release check (gen0): {error}")
-    if args.summary:
-        with open(args.summary, "a", encoding="utf-8") as summary:
-            summary.write(("" if ok else "**Refused:** ") + message + "\n\n")
+        message = f"Release check (gen0): {error}"
+        summarize("**Refused:** " + message)
+        print(message, file=sys.stderr)
+        sys.exit(2)
+    summarize(("" if ok else "**Refused:** ") + message)
     if ok:
         print(message)
     elif args.warn_only:
