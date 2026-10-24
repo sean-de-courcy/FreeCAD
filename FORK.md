@@ -391,7 +391,8 @@ names it.
 | `fix/453-refine-element-map` | fix | ops#453 | - | `integration` `2d2ac2ac5b` | `31c71a7276` (fork PR 363), 2026-10-23 | never (fork fix) |
 | `fix/421-sweep-corner` | fix | ops#421 | - | `integration` `31c71a7276` | `f6b19b43f5` (fork PR 358), 2026-10-23 | never (fork fix) |
 | `fix/454-missing-generator` | fix | ops#454 | - | `integration` `30dabfe2f2` | `1764323b4f` (fork PR 368), 2026-10-23 | never (fork fix) |
-| `fix/457-hole-polish` | fix | ops#457, ops#404 | - | `integration` `31c71a7276` | (fork PR 372) | never (fork fix) |
+| `fix/457-hole-polish` | fix | ops#457, ops#404 | - | `integration` `31c71a7276` | `a024b9ae8f` (fork PR 372), 2026-10-23 | never (fork fix) |
+| `perf/310-b-boolean-locations` | fix | ops#310 | - | `integration` `31c71a7276` | (fork PR 367) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 

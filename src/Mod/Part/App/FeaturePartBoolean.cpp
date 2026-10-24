@@ -28,7 +28,10 @@
 
 #include <Mod/Part/App/FCBRepAlgoAPI_BooleanOperation.h>
 #include <BRepCheck_Analyzer.hxx>
+#include <gp_Mat.hxx>
+#include <gp_Trsf.hxx>
 #include <Standard_Failure.hxx>
+#include <TopLoc_Location.hxx>
 
 #include <App/Application.h>
 #include <Base/Exception.h>
@@ -71,6 +74,49 @@ bool getRefineModelParameter()
 }
 
 }  // namespace Part
+
+namespace
+{
+/// Whether trsf is exactly the identity, whatever its form: a zero Placement gives one
+bool isExactIdentity(const gp_Trsf& trsf)
+{
+    if (trsf.Form() == gp_Identity) {
+        return true;
+    }
+    if (trsf.ScaleFactor() != 1.0 || trsf.TranslationPart().SquareModulus() != 0.0) {
+        return false;
+    }
+    const gp_Mat& matrix = trsf.HVectorialPart();
+    for (int row = 1; row <= 3; ++row) {
+        for (int col = 1; col <= 3; ++col) {
+            if (matrix.Value(row, col) != (row == col ? 1.0 : 0.0)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+/**
+ * A boolean input in global coordinates, its location replaced rather than composed (ops#310).
+ * getTopoShape() moves the stored shape, whose location is already its Placement, by a new datum
+ * for an identity Placement, and the boolean keeps that location on every sub-shape it leaves
+ * untouched: along a chain of Part::Cut the locations grew by two datums per cut, and every query
+ * on those sub-shapes walked them. The Base's identity becomes no location; anything else, and
+ * the Tool always, one new datum. The Tool's datum is new even at an identity: inputs that share
+ * TShapes (pieces of one BooleanFragments, a SimpleCopy) must not become IsSame across Base and
+ * Tool, which the composed datums never let them be.
+ */
+TopoShape getBooleanInput(const App::DocumentObject* obj, bool isBase)
+{
+    TopoShape shape = Feature::getTopoShape(obj, ShapeOption::ResolveLink | ShapeOption::Transform);
+    if (!shape.isNull()) {
+        const gp_Trsf trsf = shape.getShape().Location().Transformation();
+        shape.locate(isBase && isExactIdentity(trsf) ? TopLoc_Location() : TopLoc_Location(trsf));
+    }
+    return shape;
+}
+}  // namespace
 
 PROPERTY_SOURCE_ABSTRACT(Part::Boolean, Part::Feature)
 
@@ -132,16 +178,12 @@ App::DocumentObjectExecReturn* Boolean::execute()
         std::vector<TopoShape> shapes;
         shapes.reserve(2);
         // Now, let's get the TopoDS_Shape
-        shapes.push_back(
-            Feature::getTopoShape(Base.getValue(), ShapeOption::ResolveLink | ShapeOption::Transform)
-        );
+        shapes.push_back(getBooleanInput(Base.getValue(), true));
         auto BaseShape = shapes[0].getShape();
         if (BaseShape.IsNull()) {
             throw NullShapeException("Base shape is null");
         }
-        shapes.push_back(
-            Feature::getTopoShape(Tool.getValue(), ShapeOption::ResolveLink | ShapeOption::Transform)
-        );
+        shapes.push_back(getBooleanInput(Tool.getValue(), false));
         auto ToolShape = shapes[1].getShape();
         if (ToolShape.IsNull()) {
             throw NullShapeException("Tool shape is null");
