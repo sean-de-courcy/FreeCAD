@@ -80,8 +80,15 @@ App::DocumentObjectExecReturn* Groove::execute()
 TopoShape Groove::makeShape(const TopoShape& base, const TopoShape& revolve) const
 {
     TopoShape result = makeTopoShape(false);
-    return result
-        .makeElementBoolean(getBooleanMaker(), {base, revolve}, nullptr, FuzzyTolerance.getValue());
+    return result.makeElementBoolean(
+        getBooleanMaker(),
+        {base, revolve},
+        nullptr,
+        FuzzyTolerance.getValue(),
+        Part::ElementMapPolicy::Propagate,
+        booleanInputCheck(),
+        &booleanInputsValid
+    );
 }
 
 bool Groove::suggestReversedAngle(double angle) const
