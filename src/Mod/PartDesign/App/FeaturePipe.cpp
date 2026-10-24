@@ -53,6 +53,7 @@
 #include <Base/Exception.h>
 #include <Base/Reader.h>
 #include <Mod/Part/App/FaceMakerCheese.h>
+#include <Mod/Part/App/PipeShellApproximation.h>
 
 #include "FeaturePipe.h"
 #include "Mod/Part/App/TopoShapeOpCode.h"
@@ -834,6 +835,9 @@ void Pipe::setupAlgorithm(BRepOffsetAPI_MakePipeShell& mkPipeShell, const TopoDS
 {
 
     mkPipeShell.SetTolerance(Precision::Confusion());
+    // As Part::Sweep (ops#448): at OCCT's default caps, Standard mode swept a circle along ten
+    // planar waves sketched on a plane turned 45 degrees about X 1.9e-2 mm off the tube
+    Part::PipeShellApproximation::set(mkPipeShell);
 
     switch (Transition.getValue()) {
         case 0:

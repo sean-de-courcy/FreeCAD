@@ -583,6 +583,7 @@ SET(Part_SRCS
     ImportStep.h
     Interface.cpp
     Interface.h
+    PipeShellApproximation.h
     PreCompiled.h
     ProgressIndicator.cpp
     ProgressIndicator.h

@@ -181,6 +181,7 @@
 #include "WireJoiner.h"
 #include "modelRefine.h"
 #include "PartPyCXX.h"
+#include "PipeShellApproximation.h"
 #include "ProgressIndicator.h"
 #include "SweepFrenet.h"
 #include "Tools.h"
@@ -2134,6 +2135,8 @@ TopoDS_Shape TopoShape::makePipeShell(
     const SweepFrenet::Mode mode
         = SweepFrenet::setMode(mkPipeShell, TopoDS::Wire(this->_Shape), sections, isFrenet, 1e-4);
     mkPipeShell.SetTransitionMode(transMode);
+    // As makeElementPipeShell() (ops#448)
+    PipeShellApproximation::set(mkPipeShell);
     TopTools_ListIteratorOfListOfShape it;
     for (it.Initialize(profiles); it.More(); it.Next()) {
         mkPipeShell.Add(TopoDS_Shape(it.Value()));
