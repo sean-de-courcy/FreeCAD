@@ -750,6 +750,21 @@ App::DocumentObjectExecReturn* Pipe::execute()
             result = shapes.front();
         }
 
+        // A loose pipe may be a poor approximation of the swept surface, which OCCT reports only
+        // through tolerances (ops#448)
+        const std::string loose
+            = Part::PipeShellApproximation::looseWarning(result.getShape(), "pipe");
+        auto warnIfLoose = [&]() {
+            auto doc = getDocument();
+            if (doc && !loose.empty()) {
+                const char* previous = doc->getWarningDescription(this);
+                doc->setWarning(
+                    this,
+                    previous && *previous ? std::string(previous) + "\n" + loose : loose
+                );
+            }
+        };
+
         if (base.isNull()) {
             if (getAddSubType() == FeatureAddSub::Type::Subtractive) {
                 return new App::DocumentObjectExecReturn(
@@ -769,6 +784,7 @@ App::DocumentObjectExecReturn* Pipe::execute()
 
             result = refineShapeIfActive(result);
             Shape.setValue(getSolid(result));
+            warnIfLoose();
             return App::DocumentObject::StdReturn;
         }
 
@@ -816,6 +832,7 @@ App::DocumentObjectExecReturn* Pipe::execute()
         }
 
         Shape.setValue(solid);
+        warnIfLoose();
         return App::DocumentObject::StdReturn;
     }
     catch (Standard_Failure& e) {

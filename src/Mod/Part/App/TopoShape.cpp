@@ -2156,6 +2156,11 @@ TopoDS_Shape TopoShape::makePipeShell(
         mkPipeShell.MakeSolid();
     }
 
+    // Logged, not thrown: Wire.makePipeShell's callers expect a shape (ops#448)
+    const std::string loose = PipeShellApproximation::looseWarning(mkPipeShell.Shape(), "sweep");
+    if (!loose.empty()) {
+        Base::Console().warning("makePipeShell: %s\n", loose.c_str());
+    }
     return mkPipeShell.Shape();
 }
 

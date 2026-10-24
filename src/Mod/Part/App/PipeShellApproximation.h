@@ -2,7 +2,12 @@
 
 #pragma once
 
+#include <sstream>
+#include <string>
+
 #include <BRepOffsetAPI_MakePipeShell.hxx>
+#include <ShapeAnalysis_ShapeTolerance.hxx>
+#include <TopoDS_Shape.hxx>
 
 /** How finely MakePipeShell approximates a sweep's surface (FreeCAD-CH, ops#448).
  *
@@ -23,10 +28,14 @@ namespace Part::PipeShellApproximation
 constexpr int maxDegree = 14;
 /// The surface's largest number of spans along the spine
 constexpr int maxSegments = 1000;
-/// Part::Sweep warns where its result has a larger tolerance (mm). OCCT puts its estimate of the
+/// A sweep warns where its result has a larger tolerance (mm). OCCT puts its estimate of the
 /// approximation's error on the pipe's vertices: 0.15 mm on the ten waves turned 45 degrees, at
 /// the default caps, where the tube was 1.9e-2 off. It isn't a measure of the error itself: of 200
 /// tilted spines of 1 to 10 waves, all built within 6e-6 of the tube at these caps, some had 0.02.
+/// The caps don't help everywhere: a circle along a 3D spiral through 1000 points, which failed
+/// to build at the default caps, builds 0.43 mm off the tube with tolerances of 2 mm (fork PR
+/// 373's review), and PartDesign Pipe's Auxiliary mode at its 1e-7 Tol3d stays 0.11 mm off
+/// (tolerance 0.15)
 constexpr double warningTolerance = 0.1;
 
 /// Sets \a pipe's caps; call before Build()
@@ -34,6 +43,20 @@ inline void set(BRepOffsetAPI_MakePipeShell& pipe)
 {
     pipe.SetMaxDegree(maxDegree);
     pipe.SetMaxSegments(maxSegments);
+}
+
+/// The warning for a \a what (sweep, pipe) whose result \a shape has a tolerance above
+/// warningTolerance, else empty
+inline std::string looseWarning(const TopoDS_Shape& shape, const char* what)
+{
+    const double tolerance = ShapeAnalysis_ShapeTolerance().Tolerance(shape, 1);
+    if (!(tolerance > warningTolerance)) {
+        return {};
+    }
+    std::ostringstream text;
+    text << "The " << what << "'s result has a tolerance of " << tolerance
+         << " mm: its surface may be off the swept profile by up to that much";
+    return text.str();
 }
 
 }  // namespace Part::PipeShellApproximation

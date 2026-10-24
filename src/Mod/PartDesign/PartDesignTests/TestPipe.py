@@ -1044,3 +1044,65 @@ class TestPipeAlongTiltedWaves(unittest.TestCase):
         self.setUp()
         tilted = self.pipe(App.Rotation(V(1, 0, 0), 45.0)).Shape.Volume
         self.assertAlmostEqual(tilted / control, 1.0, delta=1e-5)
+
+
+class TestLoosePipeWarns(unittest.TestCase):
+    """Pipes whose swept surface OCCT approximates poorly, reported only through the result's
+    tolerance: the Pipe builds, with a warning naming it (ops#448, fork PR 373's review)."""
+
+    def setUp(self):
+        self.doc = models.newDocument("PartDesignTestLoosePipeWarns")
+        self.body = models.body(self.doc)
+
+    def tearDown(self):
+        App.closeDocument(self.doc.Name)
+
+    def assertWarns(self, pipe):
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        self.assertIn("Warning", pipe.getStatusString())
+        self.assertIn("pipe's result has a tolerance of", pipe.getStatusString())
+
+    def testLongSpiral(self):
+        """A circle of radius 0.5 along a 3D spiral through 1000 points (radius 10 to 30 mm,
+        rising 0.05 mm a point; curvature radius at least 10 mm), Standard mode: at degree 14 it
+        builds 0.43 mm off the tube with tolerances of 2 mm (at OCCT's default degree it failed to
+        build). Before, the Pipe was "Valid" with no warning"""
+        points = [
+            V((10 + 0.02 * i) * math.cos(i * 0.05), (10 + 0.02 * i) * math.sin(i * 0.05), 0.05 * i)
+            for i in range(1000)
+        ]
+        curve = Part.BSplineCurve()
+        curve.interpolate(points)
+        spine = models.feature(self.doc, "Spiral", Part.Wire([curve.toShape()]))
+        start = curve.value(curve.FirstParameter)
+        tangent = curve.tangent(curve.FirstParameter)[0]
+        profile = models.sketch(
+            self.doc,
+            "Circle",
+            [models.circle(0, 0, 0.5)],
+            self.body,
+            placement=App.Placement(start, App.Rotation(V(0, 0, 1), tangent)),
+        )
+        pipe = self.body.newObject("PartDesign::AdditivePipe", "Pipe")
+        pipe.Profile = profile
+        pipe.Spine = (spine, ["Edge1"])
+        self.assertWarns(pipe)
+
+    def testTwistedSquareAlongAnAuxiliarySpine(self):
+        """A square of side 2 along a 50 mm line up Z, a helix of radius 5 and pitch 50 as
+        curvilinear auxiliary spine (Auxiliary mode): at PartDesign's 3D tolerance of 1e-7 the
+        sides are 0.11 mm off the turning square, tolerance 0.15 (0.21 at OCCT's default degree).
+        Before, the Pipe was "Valid" with no warning"""
+        spine = models.feature(
+            self.doc, "Line", Part.Wire([Part.LineSegment(V(0, 0, 0), V(0, 0, 50)).toShape()])
+        )
+        helix = models.feature(self.doc, "Helix", Part.Wire([Part.makeHelix(50, 50, 5)]))
+        profile = models.sketch(self.doc, "Square", models.rectangle(-1, -1, 1, 1), self.body)
+        pipe = self.body.newObject("PartDesign::AdditivePipe", "Pipe")
+        pipe.Profile = profile
+        pipe.Spine = (spine, ["Edge1"])
+        pipe.Mode = "Auxiliary"
+        pipe.AuxiliarySpine = (helix, ["Edge1"])
+        pipe.AuxiliaryCurvilinear = True
+        self.assertWarns(pipe)

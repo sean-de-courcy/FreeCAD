@@ -431,10 +431,12 @@ class SweepFrenetTest(unittest.TestCase):
         degree and segments (ops#448) the binormal gives the tube, in Part Sweep and in
         Wire.makePipeShell, and a rectangle beside the spine on +Y stays there"""
         wire = Part.Wire([wave_edge(waves=10, lift=1e-11)])
-        self.assertTube(wire)
+        sweep = self.sweep(wire, circle_at_start(wire))
+        self.assertTrue(sweep.isValid(), sweep.getStatusString())
+        self.assertLess(distance_from_tube(sweep.Shape, wire), 1e-4)
         shape = wire.makePipeShell([circle_at_start(wire)], True, True)
         self.assertTrue(shape.isValid())
-        self.assertLess(distance_from_tube(shape, wire), 1e-3)
+        self.assertLess(distance_from_tube(shape, wire), 1e-4)
         sweep = self.sweep(wire, rectangle_at_start(wire))
         self.assertTrue(sweep.isValid(), sweep.getStatusString())
         self.assertAlmostEqual(end_offset(sweep.Shape, wire, V(0, 1, 0)), 1.5, delta=1e-3)
