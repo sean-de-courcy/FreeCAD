@@ -141,6 +141,12 @@ jobs:
         if: always()
         run: python3 src/Tools/sync_version.py --check
 
+    # FreeCAD-CH (ops#460): the release check for the compat corpus, tested here because the
+    # release workflow only runs by hand
+      - name: Test the release gen0 check
+        if: always()
+        run: python3 -I -m unittest discover -s package/scripts -p "test_check_release_gen0.py"
+
     # Generic lints steps
       - name: Check File Case Sensitivity
         uses: credfeto/action-case-checker@cb652aeab29ed363bbdb7d9ee1bfcc010c46cac5 # v1.3.0
