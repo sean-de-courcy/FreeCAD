@@ -1264,6 +1264,69 @@ class TestPipeEndNames(unittest.TestCase):
                         (place - before[point.Name]).Length, 1e-6, (point.Name, place, levels)
                     )
 
+    def testBendArcsOfARoundHoleFollowTheirPlaces(self):
+        """A square with a round hole along the L path, "Right corner": the hole's sides along
+        the two legs meet at the corner in four arcs, all named from the hole's circle and the
+        corner, told apart by an index. Datum points on the four arcs; then the first leg made
+        longer, the hole moved, or both sketches moved and turned together. Each point goes
+        missing, warns, or lies where its arc went: the corner's shift, the hole's shift along
+        the miter, or the motion. The index followed the order in which OCCT stores the arcs,
+        which these edits change (and which differs between Windows and macOS): the points went
+        to the mirror arcs, about 1.35 mm away, silently (ops#415 round 7,
+        `work\\pr369-r2v\\arc_leg1.out`, `arc_centre.out`, `arc_rotate.out`)."""
+        corner = V(0, 0, 30)
+        motion = App.Placement(V(5, 2, 1), App.Rotation(V(0, 0, 1), 30))
+        edits = {
+            "leg": V(0, 0, 4),
+            "hole": V(0.4, 0.3, -0.4),
+            "motion": motion,
+        }
+        for edit, moved in edits.items():
+            self.tearDown()
+            self.setUp()
+            with self.subTest(edit=edit):
+                path = self.lPath()
+                profile = self.sketch(
+                    "Profile", models.rectangle(-3, -3, 3, 3) + [models.circle(0, 0, 1)]
+                )
+                pipe = self.pipe(profile, path, Transition="Right corner")
+                arcs = []
+                for element in elementsWhere(
+                    pipe.Shape, "Edge", lambda point: (point - corner).Length < 2
+                ):
+                    point = self.body.newObject("PartDesign::Point", "On" + element)
+                    point.AttachmentSupport = [(pipe, element)]
+                    point.MapMode = "CenterOfMass"
+                    arcs.append(point)
+                self.doc.recompute()
+                self.assertEqual(len(arcs), 4, [p.Name for p in arcs])
+                self.assertEqual([p.Name for p in arcs if not p.isValid()], [])
+                if edit == "motion":
+                    expected = {p.Name: motion.multVec(p.Placement.Base) for p in arcs}
+                    path.Placement = motion.multiply(XZ)
+                    profile.Placement = motion
+                    self.doc.recompute()
+                else:
+                    expected = {p.Name: p.Placement.Base + moved for p in arcs}
+                    if edit == "leg":
+                        self.movePolyline(path, [(0, 0), (0, 34), (20, 34)])
+                    else:
+                        geometry = profile.Geometry
+                        geometry[4].Center = V(0.4, 0.3, 0)
+                        profile.Geometry = geometry
+                        self.doc.recompute()
+                self.assertTrue(pipe.isValid(), pipe.getStatusString())
+                for point in arcs:
+                    if not point.isValid():
+                        continue
+                    levels = [e["warning_level"] for e in App.getReferenceReport(point)]
+                    if "normal" in levels:
+                        continue
+                    place = point.Placement.Base
+                    self.assertLess(
+                        (place - expected[point.Name]).Length, 1e-6, (point.Name, place, levels)
+                    )
+
     def testUndoAndRedoOfAnEditKeepTheirNames(self):
         """testEndStaysWhenTheProfileCrossesTheMiddle's edit in a transaction, undone and redone,
         the recompute inside the transaction or after it: the names are at the spine's start
