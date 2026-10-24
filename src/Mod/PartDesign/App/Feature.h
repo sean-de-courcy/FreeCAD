@@ -139,11 +139,11 @@ public:
     TopLoc_Location getInverseLocation(const TopoShape& base) const;
     /**
      * Which inputs of a boolean on base makeElementBoolean() is to check, and fix if invalid
-     * (ops#310). Only the tools when base is the output of the feature before's own boolean on a
-     * solid base (a Pad, Pocket, Revolution, Groove, Loft, Pipe, Helix, Hole, primitive or Boolean
-     * that didn't fail), whose inputs were checked: checking base again costs about half of each
-     * boolean. All of them otherwise, so an invalid base (a first feature's raw Pipe, a dress-up's
-     * result, a BaseFeature) is still repaired.
+     * (ops#310). Only the tools when the base feature's Shape is still the one its last recompute
+     * made with a boolean that reported every input valid (booleanInputsValid): checking base
+     * again costs about half of each boolean. All of them otherwise, so an invalid base (a raw
+     * Pipe, a Pipe fused from an invalid sweep, a dress-up's result, a BaseFeature, a suppressed
+     * feature's pass-through, a Shape from undo or a reopened file) is still repaired.
      */
     Part::BooleanInputCheck booleanInputCheck() const;
 
@@ -187,6 +187,19 @@ public:
 
 
 protected:
+    /**
+     * Set by this feature's boolean during execute() (makeElementBoolean's inputsValid): its result
+     * came from a boolean whose inputs were all valid as given (ops#310). Reset at the start of
+     * every recompute; a recompute that succeeds with it set vouches for the Shape it leaves.
+     * Mutable: some features' booleans run in const helpers (makeShape()).
+     */
+    mutable bool booleanInputsValid = false;
+    /// The check for a boolean on this feature's own result of its previous boolean (a pattern's
+    /// next original, a Hole's next hole), from that boolean's report
+    Part::BooleanInputCheck ownResultCheck() const
+    {
+        return booleanInputsValid ? Part::BooleanInputCheck::Tools : Part::BooleanInputCheck::All;
+    }
     /**
      * Get a solid of the given shape. If no solid is found an exception is raised.
      */
@@ -237,6 +250,9 @@ private:
     // Not read from the error text in mustExecute(): a recompute sets the texts aside while it
     // runs (ops#126)
     bool failedElsewhere = false;
+    // The Shape the last recompute vouched for (booleanInputsValid); a later Shape (undo, a reopen,
+    // a pass-through) isn't the same TShape, and is checked again (ops#310)
+    TopoDS_Shape vouchedShape;
     std::vector<const App::DocumentObject*> pendingMembers;
 };
 

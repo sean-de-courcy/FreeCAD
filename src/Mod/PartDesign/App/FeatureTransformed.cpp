@@ -431,8 +431,8 @@ App::DocumentObjectExecReturn* Transformed::execute()
     gp_Trsf trsfInv = supportShape.getShape().Location().Transformation().Inverted();
 
     supportShape.locate(TopLoc_Location());
-    // The support, and this feature's own results after each original
-    const auto inputCheck = booleanInputCheck();
+    // The support, then this feature's own result after each original
+    auto inputCheck = booleanInputCheck();
 
     // V2 names each instance by content (ops#55): each copy gets a section with this feature's ID
     // and its instance number appended to every name, one number per step (instanceNumbers(),
@@ -510,8 +510,10 @@ App::DocumentObjectExecReturn* Transformed::execute()
                         nullptr,
                         -1.0,
                         Part::ElementMapPolicy::Propagate,
-                        inputCheck
+                        inputCheck,
+                        &booleanInputsValid
                     );
+                    inputCheck = ownResultCheck();
                 }
                 if (!cutShape.isNull()) {
                     auto shapes = getTransformedCompShape(supportShape, cutShape);
@@ -524,8 +526,10 @@ App::DocumentObjectExecReturn* Transformed::execute()
                         nullptr,
                         -1.0,
                         Part::ElementMapPolicy::Propagate,
-                        inputCheck
+                        inputCheck,
+                        &booleanInputsValid
                     );
+                    inputCheck = ownResultCheck();
                 }
             }
             break;
@@ -540,7 +544,8 @@ App::DocumentObjectExecReturn* Transformed::execute()
                 nullptr,
                 -1.0,
                 Part::ElementMapPolicy::Propagate,
-                inputCheck
+                inputCheck,
+                &booleanInputsValid
             );
             break;
         }

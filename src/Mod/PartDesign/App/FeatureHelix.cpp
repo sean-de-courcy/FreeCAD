@@ -515,7 +515,8 @@ App::DocumentObjectExecReturn* Helix::execute()
             nullptr,
             -1.0,
             Part::ElementMapPolicy::Propagate,
-            booleanInputCheck()
+            booleanInputCheck(),
+            &booleanInputsValid
         );
 
         if (!isSingleSolidRuleSatisfied(boolOp.getShape())) {

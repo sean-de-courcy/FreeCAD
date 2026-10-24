@@ -362,7 +362,8 @@ App::DocumentObjectExecReturn* Loft::execute()
                 nullptr,
                 FuzzyTolerance.getValue(),
                 Part::ElementMapPolicy::Propagate,
-                booleanInputCheck()
+                booleanInputCheck(),
+                &booleanInputsValid
             );
         }
         catch (Standard_Failure&) {

@@ -86,7 +86,8 @@ TopoShape Groove::makeShape(const TopoShape& base, const TopoShape& revolve) con
         nullptr,
         FuzzyTolerance.getValue(),
         Part::ElementMapPolicy::Propagate,
-        booleanInputCheck()
+        booleanInputCheck(),
+        &booleanInputsValid
     );
 }
 

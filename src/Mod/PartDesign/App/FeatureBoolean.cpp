@@ -301,7 +301,8 @@ App::DocumentObjectExecReturn* Boolean::execute()
                              nullptr,
                              FuzzyTolerance.getValue(),
                              Part::ElementMapPolicy::Propagate,
-                             booleanInputCheck()
+                             booleanInputCheck(),
+                             &booleanInputsValid
                          );
         }
         catch (Standard_Failure& e) {
