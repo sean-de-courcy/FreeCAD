@@ -292,6 +292,7 @@ class PipeStartCapEdgeCutAway(OnEdge, Recessed):
         pipe = body.newObject("PartDesign::AdditivePipe", "Pipe")
         pipe.Profile = profile
         pipe.Spine = (path, [])
+        pipe.Transition = "Right corner"  # "Transformed" fails at the right angle (ops#370)
 
     def build(self, doc):
         body = m.body(doc)

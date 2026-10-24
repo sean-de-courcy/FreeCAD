@@ -119,6 +119,7 @@ set(PartDesign_TestScenarios
     PartDesignTests/Scenarios/consumers.py
     PartDesignTests/Scenarios/crossdoc.py
     PartDesignTests/Scenarios/derived.py
+    PartDesignTests/Scenarios/pipe_legs.py
     PartDesignTests/Scenarios/dressups.py
     PartDesignTests/Scenarios/external.py
     PartDesignTests/Scenarios/fillet_limit.py
@@ -270,6 +271,8 @@ set(PartDesign_CompatGen0
     PartDesignTests/Compat/gen0/PartProfiles.oracle.json
     PartDesignTests/Compat/gen0/Patterns.FCStd
     PartDesignTests/Compat/gen0/Patterns.oracle.json
+    PartDesignTests/Compat/gen0/PipeCorners.FCStd
+    PartDesignTests/Compat/gen0/PipeCorners.oracle.json
     PartDesignTests/Compat/gen0/ReorderBar.FCStd
     PartDesignTests/Compat/gen0/ReorderBar.oracle.json
     PartDesignTests/Compat/gen0/RevolutionGroove.FCStd
