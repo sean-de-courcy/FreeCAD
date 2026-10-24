@@ -423,17 +423,21 @@ class SweepFrenetTest(unittest.TestCase):
         self.assertFalse(sweep.isValid())
         self.assertIn("Frenet frame turns over", sweep.getStatusString())
 
-    def testFrenetLiftedWavesFailLoudly(self):
+    def testFrenetLiftedWaves(self):
         """Ten waves lifted out of their plane by 1e-11 (z - 5)^3 (75 nm at most): OCCT's Frenet and
-        corrected Frenet fail there, and the plane's normal as a constant binormal left vertices
-        with tolerances of 0.15 mm and the tube 1.1e-2 mm off. The sweep fails, saying why, in Part
-        Sweep and in Wire.makePipeShell (fork PR 358 round 2's verification, finding 1)"""
+        corrected Frenet fail there, and at OCCT's default degree and segments the plane's normal
+        as a constant binormal left vertices with tolerances of 0.15 mm and the tube 1.9e-2 mm off,
+        so the sweep was refused (fork PR 358 round 2's verification, finding 1). At the sweep's
+        degree and segments (ops#448) the binormal gives the tube, in Part Sweep and in
+        Wire.makePipeShell, and a rectangle beside the spine on +Y stays there"""
         wire = Part.Wire([wave_edge(waves=10, lift=1e-11)])
-        sweep = self.sweep(wire, circle_at_start(wire))
-        self.assertFalse(sweep.isValid())
-        self.assertIn("Frenet frame turns over", sweep.getStatusString())
-        with self.assertRaises(Part.OCCError):
-            wire.makePipeShell([circle_at_start(wire)], True, True)
+        self.assertTube(wire)
+        shape = wire.makePipeShell([circle_at_start(wire)], True, True)
+        self.assertTrue(shape.isValid())
+        self.assertLess(distance_from_tube(shape, wire), 1e-3)
+        sweep = self.sweep(wire, rectangle_at_start(wire))
+        self.assertTrue(sweep.isValid(), sweep.getStatusString())
+        self.assertAlmostEqual(end_offset(sweep.Shape, wire, V(0, 1, 0)), 1.5, delta=1e-3)
 
     def testFrenetPlanarWavesOffTheMainPlanes(self):
         """Ten exactly planar waves turned 45 degrees about X, as a sketch on a tilted plane: in
@@ -450,7 +454,8 @@ class SweepFrenetTest(unittest.TestCase):
     def assertFrenetHelix(self, pitch, height, radius, angle=0.0, make=Part.makeHelix):
         """A thread-like triangle beside a helix made by `make` (Part.makeHelix, or helix_edge()
         for one sampling interval), its tip pointing away from the axis, keeps OCCT's Frenet law:
-        the same solid as MakePipeShell's own Frenet mode. Frenet's normal points to the centre of
+        the same solid as MakePipeShell's own Frenet mode (with the sweep's degree and segments,
+        ops#448). Frenet's normal points to the centre of
         curvature, towards the axis, so the triangle stays outside: sliced normal to the helix a
         quarter, a half and three quarters of a turn into the first, second, middle and last turns,
         the section's centre of mass is 2/3 of the triangle's size from the helix against the
@@ -485,6 +490,8 @@ class SweepFrenetTest(unittest.TestCase):
                 )
         pipe = Part.BRepOffsetAPI.MakePipeShell(wire)
         pipe.setFrenetMode(True)
+        pipe.setMaxDegree(14)
+        pipe.setMaxSegments(1000)
         pipe.add(triangle, False, False)
         pipe.build()
         pipe.makeSolid()
