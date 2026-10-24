@@ -882,6 +882,13 @@ class TestBaseAfterAnInvalidPipe(unittest.TestCase):
         self.assertTrue(pocket.Shape.isValid(), state)
         self.assertAlmostEqual(pocket.Shape.Volume, expected.Volume, places=4, msg=state)
 
+    def requireInvalid(self, feature):
+        """The model's premise (ops#370). OCCT's sweep differs by platform: on macOS the Pipe comes
+        out valid, and these tests have no invalid base to test. TestBaseAfterAnInvalidBaseFeature
+        covers the suppressed feature in between with a base built invalid on purpose."""
+        if feature.Shape.isValid():
+            self.skipTest("the Transformed-transition Pipe is valid on this platform (ops#370)")
+
     def checkBeforeAndAfterTheEdit(self):
         self.assertCheckedCut("first recompute")
         models.moveRectangle(self.recess, -5, -5, 5, 5)
@@ -890,7 +897,7 @@ class TestBaseAfterAnInvalidPipe(unittest.TestCase):
 
     def testPocketOnTheFirstPipe(self):
         pipe = self.build()
-        self.assertFalse(pipe.Shape.isValid())  # the model's premise (ops#370)
+        self.requireInvalid(pipe)
         self.checkBeforeAndAfterTheEdit()
 
     def testPocketOnAPipeFusedOntoAPad(self):
@@ -899,7 +906,7 @@ class TestBaseAfterAnInvalidPipe(unittest.TestCase):
                 self.tearDown()
                 self.setUp()
                 pipe = self.build(pad=pad)
-                self.assertFalse(pipe.Shape.isValid())
+                self.requireInvalid(pipe)
                 self.checkBeforeAndAfterTheEdit()
 
     def testSuppressedFeatureBetween(self):
@@ -908,5 +915,71 @@ class TestBaseAfterAnInvalidPipe(unittest.TestCase):
                 self.tearDown()
                 self.setUp()
                 self.build(between=between)
-                self.assertFalse(self.base.Shape.isValid())  # the Pipe's result, passed through
+                self.requireInvalid(self.base)  # the Pipe's result, passed through
+                self.checkBeforeAndAfterTheEdit()
+
+
+class TestBaseAfterAnInvalidBaseFeature(unittest.TestCase):
+    """FreeCAD-CH ops#310 (fix C1), the same on every platform: a feature's boolean skips checking
+    its base only when the base feature's own boolean ran with every input valid. A suppressed
+    feature passes its base through without a boolean of its own, so the next feature must still
+    check that base and repair it.
+
+    Designed model: the Body's BaseFeature is a 20x20x10 box whose top face is reversed in its shell,
+    built that way on purpose (invalid: the shell can't be oriented; fix() repairs it). Then a 2x2
+    Pad or Pocket at (5, 5) on the top, suppressed after the first recompute, and a 5 mm Pocket of
+    a 2x2 square at the top's centre, then the square grown to 6x6. Unrepaired, the Pocket cuts
+    nothing. The expected result is the Part cut of the Pocket's base by its tool, which checks
+    and repairs every input."""
+
+    assertCheckedCut = TestBaseAfterAnInvalidPipe.assertCheckedCut
+
+    def setUp(self):
+        self.Doc = FreeCAD.newDocument("PartDesignTestBaseAfterAnInvalidBaseFeature")
+
+    def tearDown(self):
+        FreeCAD.closeDocument(self.Doc.Name)
+
+    @staticmethod
+    def invalidBox():
+        faces = list(Part.makeBox(20, 20, 10, App.Vector(-10, -10, 0)).Faces)
+        faces[5] = faces[5].reversed()  # the top face (z = 10)
+        return Part.Solid(Part.Shell(faces))
+
+    def build(self, between=None):
+        doc = self.Doc
+        raw = doc.addObject("Part::Feature", "Raw")
+        raw.Shape = self.invalidBox()
+        body = models.body(doc)
+        body.BaseFeature = raw
+        base = body.Group[0]
+        if between:
+            sketch = models.sketch(doc, "BetweenSketch", models.rectangle(5, 5, 7, 7), body, z=10)
+            make = models.pad if between == "Pad" else models.pocket
+            base = make(body, sketch, 1, name="Between")
+        self.recess = models.sketch(doc, "Recess", models.rectangle(-1, -1, 1, 1), body, z=10)
+        self.pocket = models.pocket(body, self.recess, 5)
+        doc.recompute()
+        if between:
+            base.Suppressed = True
+            doc.recompute()
+        self.base = base
+
+    def checkBeforeAndAfterTheEdit(self):
+        self.assertFalse(self.base.Shape.isValid())  # the model's premise, by construction
+        self.assertCheckedCut("first recompute")
+        models.moveRectangle(self.recess, -3, -3, 3, 3)
+        self.Doc.recompute()
+        self.assertCheckedCut("after the edit")
+
+    def testPocketOnTheBaseFeature(self):
+        self.build()
+        self.checkBeforeAndAfterTheEdit()
+
+    def testSuppressedFeatureBetween(self):
+        for between in ("Pad", "Pocket"):
+            with self.subTest(between=between):
+                self.tearDown()
+                self.setUp()
+                self.build(between=between)
                 self.checkBeforeAndAfterTheEdit()
