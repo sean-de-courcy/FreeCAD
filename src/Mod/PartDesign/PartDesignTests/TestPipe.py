@@ -818,3 +818,64 @@ class TestJointsWhenABendStraightens(unittest.TestCase):
         self.setPath(path, points)
         self.assertGoneOrLoud(corner, before, report=True)
         self.assertBackInPlace(broken, before)
+
+
+def tubeDistance(shape, spine, radius, samples=200):
+    """The largest | distance from the spine - radius | over points of the shape's lateral faces"""
+    worst = 0.0
+    for face in shape.Faces:
+        if face.Surface.TypeId != "Part::GeomBSplineSurface":
+            continue
+        u0, u1, v0, v1 = face.ParameterRange
+        for i in range(samples):
+            v = v0 + (v1 - v0) * (i + 0.5) / samples
+            for j in range(8):
+                point = face.valueAt(u0 + (u1 - u0) * j / 8, v)
+                worst = max(worst, abs(spine.distToShape(Part.Vertex(point))[0] - radius))
+    return worst
+
+
+class TestPipeAlongTiltedWaves(unittest.TestCase):
+    """A Pipe in Standard mode (corrected Frenet) of a circle along ten planar waves (200 spans),
+    sketched on a plane turned 45 degrees about X (ops#448). At OCCT's default degree and segments
+    the approximation of the swept surface depended on the rounding noise of the orientation: the
+    tube came out 1.9e-2 mm off, where the same pipe on the XZ plane is within 1e-4. The circle is
+    centred on the spine's start and normal to it, so the pipe is the tube of points 2 mm from the
+    spine."""
+
+    def setUp(self):
+        self.doc = models.newDocument("PartDesignTestPipeAlongTiltedWaves")
+        self.body = models.body(self.doc)
+
+    def tearDown(self):
+        App.closeDocument(self.doc.Name)
+
+    def pipe(self, turn):
+        """The pipe along the waves, sketched on the XZ plane turned by `turn` about the origin;
+        the profile's sketch is normal to the waves' start (Z, turned)"""
+        points = [V(1.5 * (1 - math.cos(2 * math.pi * s / 20.0)), s, 0) for s in range(201)]
+        waves = Part.BSplineCurve()
+        waves.interpolate(points)
+        spine = models.sketch(
+            self.doc, "Waves", [waves], self.body, placement=App.Placement(V(), turn) * XZ
+        )
+        profile = models.sketch(
+            self.doc, "Circle", [models.circle(0, 0, 2)], self.body, placement=App.Placement(V(), turn)
+        )
+        pipe = self.body.newObject("PartDesign::AdditivePipe", "Pipe")
+        pipe.Profile = profile
+        pipe.Spine = (spine, [])
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        self.assertTrue(pipe.Shape.isValid())
+        self.assertLess(tubeDistance(pipe.Shape, spine.Shape, 2.0), 1e-4)
+        return pipe
+
+    def testTiltedWavesGiveTheTube(self):
+        """The pipe on the tilted plane is the tube, with the volume of the pipe on the XZ plane
+        (Shape.Volume's default integration is itself 0.3 % off on such long pipes, ops#414)"""
+        control = self.pipe(App.Rotation()).Shape.Volume
+        self.tearDown()
+        self.setUp()
+        tilted = self.pipe(App.Rotation(V(1, 0, 0), 45.0)).Shape.Volume
+        self.assertAlmostEqual(tilted / control, 1.0, delta=1e-5)

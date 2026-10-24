@@ -23,6 +23,7 @@
  ***************************************************************************/
 
 #include <memory>
+#include <sstream>
 #include <BRepAdaptor_CompCurve.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
@@ -34,6 +35,7 @@
 #include <Precision.hxx>
 #include <ShapeAnalysis.hxx>
 #include <ShapeAnalysis_FreeBounds.hxx>
+#include <ShapeAnalysis_ShapeTolerance.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Face.hxx>
@@ -47,6 +49,7 @@
 
 #include <App/Document.h>
 #include "PartFeatures.h"
+#include "PipeShellApproximation.h"
 #include "TopoShapeOpCode.h"
 
 using namespace Part;
@@ -346,6 +349,20 @@ App::DocumentObjectExecReturn* Sweep::execute()
             result.linearize(LinearizeFace::linearizeFaces, LinearizeEdge::noEdges);
         }
         this->Shape.setValue(result);
+        // A loose result may be a poor approximation of the swept surface, which OCCT reports only
+        // through tolerances (ops#448)
+        const double tolerance = ShapeAnalysis_ShapeTolerance().Tolerance(result.getShape(), 1);
+        auto doc = getDocument();
+        if (doc && tolerance > PipeShellApproximation::warningTolerance) {
+            std::ostringstream text;
+            text << "The sweep's result has a tolerance of " << tolerance
+                 << " mm: its surface may be off the swept profile by up to that much";
+            const char* previous = doc->getWarningDescription(this);
+            doc->setWarning(
+                this,
+                previous && *previous ? std::string(previous) + "\n" + text.str() : text.str()
+            );
+        }
         return App::DocumentObject::StdReturn;
     }
     catch (Standard_Failure& e) {

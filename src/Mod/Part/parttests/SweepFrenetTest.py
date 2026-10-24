@@ -581,7 +581,7 @@ class SweepFrenetTest(unittest.TestCase):
     def testFrenetWithoutTurnOverIsUnchanged(self):
         """A planar arc, a helix and a Bezier curve with a flat point that doesn't reverse its
         normal (at a sample, and off it) keep OCCT's Frenet law: the tube, and the same solid as
-        MakePipeShell's own Frenet mode"""
+        MakePipeShell's own Frenet mode (with the sweep's degree and segments, ops#448)"""
         t = math.radians(60)
         arc = Part.Wire(
             [
@@ -602,11 +602,83 @@ class SweepFrenetTest(unittest.TestCase):
             sweep = self.assertTube(wire, radius)
             pipe = Part.BRepOffsetAPI.MakePipeShell(wire)
             pipe.setFrenetMode(True)
+            pipe.setMaxDegree(14)
+            pipe.setMaxSegments(1000)
             pipe.add(circle_at_start(wire, radius), False, False)
             pipe.build()
             pipe.makeSolid()
             self.assertAlmostEqual(sweep.Shape.Volume, pipe.shape().Volume, places=9)
             self.assertEqual(len(sweep.Shape.Faces), len(pipe.shape().Faces))
+
+
+class SweepApproximationTest(unittest.TestCase):
+    """Part Sweep with Frenet off (corrected Frenet) along planar waves whose plane isn't one of
+    the main planes, as on a sketch attached to a tilted plane (ops#448, ops#440). At OCCT's
+    default degree and segments the approximation of the swept surface depended on the rounding
+    noise of the orientation: the same ten waves came out within 8e-7 mm of the tube in XZ, but
+    1.9e-2 mm off when turned 45 degrees about X, or failed to build; two and three tilted waves
+    failed to build. A circle centred on the spine and normal to it sweeps the tube, as in
+    SweepFrenetTest."""
+
+    def setUp(self):
+        self.doc = App.newDocument("SweepApproximationTest")
+
+    def tearDown(self):
+        App.closeDocument(self.doc.Name)
+
+    sweep = SweepFrenetTest.sweep
+
+    def assertTubeFrenetOff(self, wire):
+        sweep = self.sweep(wire, circle_at_start(wire), frenet=False)
+        self.assertTrue(sweep.isValid(), sweep.getStatusString())
+        self.assertNotIn("Warning", sweep.getStatusString())
+        self.assertTrue(sweep.Shape.isValid())
+        self.assertLess(distance_from_tube(sweep.Shape, wire), 1e-4)
+        return sweep
+
+    def testLongPlanarWavesOffTheMainPlanes(self):
+        """Ten waves (200 spans) in XZ, then their points turned 45 degrees about X and 37 degrees
+        about (1, 2, 3) before the interpolation, and the XZ spine turned 45 degrees about X by the
+        spine object's placement. Before, the tubes were 1.9e-2 and 1.6e-4 mm off with vertex
+        tolerances of 0.15 and 5.4e-3 mm, and the placed spine failed ("command not done"); now
+        each is the XZ sweep turned: the tube, vertex tolerances of 5e-5 and the same volume. The
+        volume is compared with the XZ sweep's, since Shape.Volume's default integration is itself
+        0.3 % off on such long sweeps (ops#414)"""
+        control = self.assertTubeFrenetOff(Part.Wire([wave_edge(waves=10)]))
+        self.assertLess(control.Shape.getTolerance(1), 1e-3)
+        placed = Part.Wire([wave_edge(waves=10)])
+        placed.rotate(V(), V(1, 0, 0), 45.0)
+        for wire in (
+            Part.Wire([wave_edge(waves=10, rotation=App.Rotation(V(1, 0, 0), 45.0))]),
+            Part.Wire([wave_edge(waves=10, rotation=App.Rotation(V(1, 2, 3), 37.0))]),
+            placed,
+        ):
+            sweep = self.assertTubeFrenetOff(wire)
+            self.assertLess(sweep.Shape.getTolerance(1), 1e-3)
+            self.assertAlmostEqual(sweep.Shape.Volume / control.Shape.Volume, 1.0, delta=1e-5)
+
+    def testTiltedWaves(self):
+        """ops#440's tilted waves: two waves in a plane turned 37 degrees about (1, 2, 3) and three
+        turned 45 degrees about X (40 and 60 spans). Before, both failed to build ("command not
+        done"); now they are the tube"""
+        self.assertTubeFrenetOff(
+            Part.Wire([wave_edge(waves=2, rotation=App.Rotation(V(1, 2, 3), 37.0))])
+        )
+        self.assertTubeFrenetOff(
+            Part.Wire([wave_edge(waves=3, rotation=App.Rotation(V(1, 0, 0), 45.0))])
+        )
+
+    def testLooseResultWarns(self):
+        """A profile whose edges and vertices have a tolerance of 0.5 mm makes the sweep's own as
+        loose: the sweep builds, with a warning naming the tolerance"""
+        wire = Part.Wire([wave_edge()])
+        profile = circle_at_start(wire)
+        profile.fixTolerance(0.5)
+        sweep = self.sweep(wire, profile, frenet=False)
+        self.assertTrue(sweep.isValid(), sweep.getStatusString())
+        self.assertGreaterEqual(sweep.Shape.getTolerance(1), 0.5)
+        self.assertIn("Warning", sweep.getStatusString())
+        self.assertIn("tolerance of 0.5", sweep.getStatusString())
 
 
 if __name__ == "__main__":
