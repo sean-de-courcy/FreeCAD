@@ -28,15 +28,22 @@ A = math.pi * R * R
 
 
 def wave_edge(
-    start=V(0, 0, 0), direction=V(0, 0, 1), side=V(1, 0, 0), waves=1, lift=0.0, rotation=None
+    start=V(0, 0, 0),
+    direction=V(0, 0, 1),
+    side=V(1, 0, 0),
+    waves=1,
+    lift=0.0,
+    rotation=None,
+    step=1.0,
 ):
-    """A cubic B-spline through the wave's points, every mm along `direction` from `start`, with
-    the wave's offset along `side` (both in the XZ plane) and `lift` (z - 5)^3 along Y, the points
-    turned by `rotation` about the origin"""
+    """A cubic B-spline through the wave's points, every `step` mm along `direction` from `start`,
+    with the wave's offset along `side` (both in the XZ plane) and `lift` (z - 5)^3 along Y, the
+    points turned by `rotation` about the origin"""
     length = 20.0 * waves
+    count = int(round(length / step))
     points = []
-    for i in range(int(length) + 1):
-        s = float(i)
+    for i in range(count + 1):
+        s = length * i / count
         offset = side * (1.5 * (1 - math.cos(2 * math.pi * s / 20.0)))
         point = start + direction * s + offset + V(0, lift * (s - 5) ** 3, 0)
         points.append(rotation.multVec(point) if rotation else point)
@@ -72,10 +79,11 @@ def zigzag_spine():
     return Part.Wire([curve.toShape()])
 
 
-def flat_point_spine(shift=0.0):
-    """One degree-5 Bezier curve z = 20 t, x = 2e-4 (z - 10 - shift)^4, y = 1e-5 (z - 10 - shift)^5:
-    its curvature is zero at z = 10 + shift, but its normal doesn't reverse there (fork PR 358
-    round 1, R1: with the flat point at the edge's middle parameter, a sample, it was refused)"""
+def flat_point_spine(shift=0.0, bend=2e-4, twist=1e-5):
+    """One degree-5 Bezier curve z = 20 t, x = bend (z - 10 - shift)^4, y = twist (z - 10 -
+    shift)^5: its curvature is zero at z = 10 + shift, but its normal doesn't reverse there (fork
+    PR 358 round 1, R1: with the flat point at the edge's middle parameter, a sample, it was
+    refused)"""
     c = 10.0 + shift
 
     def poles(coefficients):
@@ -85,8 +93,8 @@ def flat_point_spine(shift=0.0):
             for i in range(6)
         ]
 
-    x = poles([2e-4 * math.comb(4, j) * (-c) ** (4 - j) * 20**j for j in range(5)])
-    y = poles([1e-5 * math.comb(5, j) * (-c) ** (5 - j) * 20**j for j in range(6)])
+    x = poles([bend * math.comb(4, j) * (-c) ** (4 - j) * 20**j for j in range(5)])
+    y = poles([twist * math.comb(5, j) * (-c) ** (5 - j) * 20**j for j in range(6)])
     z = poles([0.0, 20.0])
     curve = Part.BezierCurve()
     curve.setPoles([V(x[i], y[i], z[i]) for i in range(6)])
@@ -186,19 +194,69 @@ def trimmed_s_curve_edge(share):
     return Part.Edge(curve, start, last)
 
 
-def bezier_cubic_edge(x0, x1):
-    """y = x^3 in XY between x0 and x1 as a cubic Bezier curve, linear in x: its inflection is at
-    x = 0"""
+def bezier_cubic_edge(x0, x1, eps=1.0):
+    """y = eps x^3 in XY between x0 and x1 as a cubic Bezier curve, linear in x: its inflection is
+    at x = 0"""
     curve = Part.BezierCurve()
     curve.setPoles(
         [
-            V(x0, x0**3, 0),
-            V((2 * x0 + x1) / 3, x0**2 * x1, 0),
-            V((x0 + 2 * x1) / 3, x0 * x1**2, 0),
-            V(x1, x1**3, 0),
+            V(x0, eps * x0**3, 0),
+            V((2 * x0 + x1) / 3, eps * x0**2 * x1, 0),
+            V((x0 + 2 * x1) / 3, eps * x0 * x1**2, 0),
+            V(x1, eps * x1**3, 0),
         ]
     )
     return curve.toShape()
+
+
+def share_before(share):
+    """The x0 of bezier_cubic_edge(x0, 1) whose inflection is `share` of its first sample interval
+    (a 64th of its parameter range) from its start"""
+    t = share / 64
+    return -t / (1 - t)
+
+
+def bspline_edge(poles, knots):
+    """A cubic B-spline edge through `poles`, clamped, with simple inner `knots`"""
+    curve = Part.BSplineCurve()
+    curve.buildFromPolesMultsKnots(poles, [4] + [1] * (len(knots) - 2) + [4], knots, False, 3)
+    return curve.toShape()
+
+
+def flat_stretch_edge(first=0.0, last=2.0, knots=(0.0, 1.0, 2.0, 3.0)):
+    """A cubic B-spline in XY whose middle span's poles are collinear (a straight stretch), bending
+    the same way on both sides of it (its first and last poles, at y = `first` and `last`, are below
+    the line through the others): no inflection (fork PR 358 round 8's verification, finding 3)"""
+    poles = [V(0, first, 0), V(1, 1, 0), V(2, 1.5, 0), V(3, 2, 0), V(4, 2.5, 0), V(5, last, 0)]
+    return bspline_edge(poles, list(knots))
+
+
+def straight_start_spine(plane_normal=False):
+    """A cubic B-spline whose first span is straight along Z, its poles on the Z axis, and which
+    then bends: out of every plane (ops#439's triage), or in the YZ plane"""
+    if plane_normal:
+        bend = [V(0, 2, 12), V(0, 6, 14), V(0, 10, 15)]
+    else:
+        bend = [V(2, 1, 12), V(6, 4, 14), V(10, 9, 15)]
+    poles = [V(0, 0, 0), V(0, 0, 3), V(0, 0, 6), V(0, 0, 9)] + bend
+    return Part.Wire([bspline_edge(poles, [0.0, 1.0, 2.0, 3.0, 4.0])])
+
+
+def straight_middle_spine():
+    """A cubic B-spline that bends in XZ, runs straight up Z for two spans (poles on the Z axis),
+    then bends in the plane through Z and (1, 2, 0), 63.4 degrees from XZ (fork PR 358 round 1's
+    review, probe p2's "M straight span 3D")"""
+    poles = [
+        V(3, 0, 0),
+        V(0, 0, 5),
+        V(0, 0, 10),
+        V(0, 0, 15),
+        V(0, 0, 20),
+        V(0, 0, 25),
+        V(3, 6, 30),
+        V(6, 12, 35),
+    ]
+    return Part.Wire([bspline_edge(poles, [0.0, 1.0, 2.0, 3.0, 4.0, 5.0])])
 
 
 def arc_s_edge(radius=3.0, line=0.0):
@@ -223,6 +281,23 @@ def arc_s_edge(radius=3.0, line=0.0):
         return centre + V(radius * math.cos(angle), radius * math.sin(angle), 0)
 
     second = Part.Arc(at(start), at(start - math.pi / 6), at(start - math.pi / 3))
+    curve.join(second.toBSpline())
+    return curve.toShape()
+
+
+def same_side_arcs_edge(line):
+    """A quarter of a unit circle in XY, a line of length `line` along its end tangent, and another
+    quarter of a unit circle bending the same way, joined into one B-spline (degree 7: the line's
+    curvature comes out as rounding, 1e-12 to 1e-13)"""
+    first = Part.ArcOfCircle(Part.Circle(V(0, 1, 0), V(0, 0, 1), 1), -math.pi / 2, 0.0)
+    end = first.value(first.LastParameter)
+    tangent = V(first.tangent(first.LastParameter)[0]).normalize()
+    start = end + tangent * line
+    centre = start + V(-tangent.y, tangent.x, 0)
+    angle = math.atan2(start.y - centre.y, start.x - centre.x)
+    second = Part.ArcOfCircle(Part.Circle(centre, V(0, 0, 1), 1), angle, angle + math.pi / 2)
+    curve = first.toBSpline()
+    curve.join(Part.LineSegment(end, start).toBSpline())
     curve.join(second.toBSpline())
     return curve.toShape()
 
@@ -545,13 +620,15 @@ class SweepFrenetTest(unittest.TestCase):
         sweep was refused (fork PR 358 round 6's verification, finding 3)"""
         self.assertFrenetHelix(100.0, 1000.0, 1.0, 3.0, make=helix_edge)
 
-    def assertStaysOnItsSide(self, edge):
-        """A rectangle beside a planar spine in XY, on its +Z side, its binormal's: the spine's
-        Frenet frame turns over at the inflection, and the rectangle stays on +Z"""
-        wire = Part.Wire([edge])
-        sweep = self.sweep(wire, rectangle_on_side(wire, V(0, 0, 1), 0.02))
+    def assertStaysOnItsSide(self, edge, axis="Z"):
+        """A rectangle beside a planar spine in a main plane, on the + side of the plane's normal
+        `axis` (the spine in XY: +Z, its binormal's): the spine's Frenet frame turns over at the
+        inflection, and the rectangle stays on that side"""
+        wire = edge if isinstance(edge, Part.Wire) else Part.Wire([edge])
+        side = V(*(1 if a == axis else 0 for a in "XYZ"))
+        sweep = self.sweep(wire, rectangle_on_side(wire, side, 0.02))
         self.assertTrue(sweep.isValid(), sweep.getStatusString())
-        self.assertGreater(sweep.Shape.BoundBox.ZMin, 0)
+        self.assertGreater(getattr(sweep.Shape.BoundBox, axis + "Min"), 0)
 
     def testFrenetInflectionBetweenSamples(self):
         """An S-curve whose curvature passes through zero between two samples, with 0.0714 and
@@ -588,10 +665,78 @@ class SweepFrenetTest(unittest.TestCase):
         2)"""
         self.assertStaysOnItsSide(arc_s_edge(line=1e-5))
 
+    def testFrenetInflectionWhereNoSampleHasAFrame(self):
+        """Nearly straight S-curves y = eps x^3, their inflection 0.004 to 0.9 of the first sample
+        interval from the start: the curvature times the length stays at the floor (1e-9) up to the
+        first sample or two after it, so no pair of samples with a frame brackets it. OCCT's own
+        frame there is the curve's, turned over from the next one's; at eps = 1e-9 the curve is
+        straight there by the sweep's measure (curvature times length at most 1e-12), and the
+        frame is read at several points along it. Before, the rectangle beside the spine flipped
+        to -0.18 to -0.97 (fork PR 358 round 8's verification, finding 2; ops#465)"""
+        for eps, share in ((1e-6, 0.004), (1e-8, 0.004), (1e-8, 0.3), (1e-8, 0.9), (1e-9, 0.004)):
+            self.assertStaysOnItsSide(bezier_cubic_edge(share_before(share), 1.0, eps))
+
+    def testFrenetFlatStretch(self):
+        """Cubic B-splines with a straight middle span, bending the same way on both sides of it:
+        no inflection, and the frames on either side agree, but along the straight span OCCT's
+        Frenet frame takes the opposite normal. Before, the rectangle beside the spine turned over
+        there and back, down to -0.11 to -0.19 (fork PR 358 round 8's verification, finding 3;
+        ops#465)"""
+        self.assertStaysOnItsSide(flat_stretch_edge())
+        self.assertStaysOnItsSide(flat_stretch_edge(0.49, 2.99))
+        self.assertStaysOnItsSide(flat_stretch_edge(knots=(0.0, 0.1, 0.5, 1.0)))
+
+    def testFrenetShortWobbleIsPassedOver(self):
+        """Two arcs bending the same way with a line of 0.01 mm between them, in one B-spline: OCCT's
+        frame turns over for half the line and back, between two samples whose frames agree. The
+        sweep passes over it, and Frenet keeps the rectangle beside the spine on +Z, while corrected
+        Frenet fails to build there ("command not done"): Frenet is kept (ops#465)"""
+        self.assertStaysOnItsSide(same_side_arcs_edge(0.01))
+
+    def testFrenetStraightStartOfAPlanarSpine(self):
+        """A planar spine in YZ whose first span is straight along Z: there OCCT's Frenet frame
+        takes the normal X, at right angles to the curve's own where it bends. Before, the tube was
+        0.28 mm off and 1 % short; now it is Frenet off's, and a rectangle on the +X side stays
+        there (ops#465)"""
+        wire = straight_start_spine(plane_normal=True)
+        sweep = self.assertTube(wire, 1.0)
+        self.assertAlmostEqual(sweep.Shape.Volume / (math.pi * wire.Length), 1.0, delta=2e-4)
+        self.assertStaysOnItsSide(wire, "X")
+
+    def testFrenetStraightSpanThenOutOfPlane(self):
+        """A straight span and a part bending out of every plane, in one B-spline: along the
+        straight span OCCT's Frenet frame takes a normal of its own, 26.6 and 63.4 degrees from the
+        curve's where it bends next, and jumps there. A circle about the spine gives the tube, any
+        other profile would turn abruptly: refused, saying where, and swept with Frenet off. Before,
+        the tubes were 2.4e-2 and 0.14 mm off, +0.12 % and -0.78 % (ops#439)"""
+        for wire in (straight_start_spine(), straight_middle_spine()):
+            sweep = self.assertTube(wire, 1.0)
+            self.assertAlmostEqual(sweep.Shape.Volume / (math.pi * wire.Length), 1.0, delta=2e-4)
+            point, tangent = start_frame(wire)
+            side = V(0, 1, 0) if abs(tangent.y) < 0.9 else V(1, 0, 0)
+            profile = rectangle_on_side(wire, side, 0.1)
+            sweep = self.sweep(wire, profile)
+            self.assertFalse(sweep.isValid())
+            self.assertIn("Frenet frame jumps", sweep.getStatusString())
+            corrected = self.sweep(wire, profile, frenet=False)
+            self.assertTrue(corrected.isValid(), corrected.getStatusString())
+
+    def testFrenetPlanarWavesOffTheMainPlanesBuild(self):
+        """Two planar waves interpolated every 0.5 mm, turned 45 degrees about X: corrected Frenet,
+        what Frenet off sweeps, leaves vertex tolerances of 0.011 mm, OCCT's estimate (the tube is
+        within 2e-6), as Frenet off does. Before, the sweep was refused for them (ops#448's scan,
+        recorded on ops#465)"""
+        wire = Part.Wire([wave_edge(waves=2, rotation=App.Rotation(V(1, 0, 0), 45.0), step=0.5)])
+        sweep = self.assertTube(wire)
+        self.assertLess(distance_from_tube(sweep.Shape, wire), 1e-4)
+
     def testFrenetWithoutTurnOverIsUnchanged(self):
-        """A planar arc, a helix and a Bezier curve with a flat point that doesn't reverse its
-        normal (at a sample, and off it) keep OCCT's Frenet law: the tube, and the same solid as
-        MakePipeShell's own Frenet mode (with the sweep's degree and segments, ops#448)"""
+        """A planar arc, a helix, a Bezier curve with a flat point that doesn't reverse its normal
+        (at a sample, and off it, and a flatter one, straight by the sweep's measure for 9e-4 mm
+        around it, where OCCT's frame is a quarter turn off near the point) and a straight cubic
+        Bezier curve in 3D, where no sample has a frame, keep OCCT's Frenet law: the tube, and the
+        same solid as MakePipeShell's own Frenet mode (with the sweep's degree and segments,
+        ops#448)"""
         t = math.radians(60)
         arc = Part.Wire(
             [
@@ -603,11 +748,16 @@ class SweepFrenetTest(unittest.TestCase):
             ]
         )
         helix = Part.Wire(Part.makeHelix(10.0, 30.0, 6.0).Edges)
+        straight = Part.Wire(
+            [bspline_edge([V(0, 0, 0), V(1, 1, 1), V(2, 2, 2), V(3, 3, 3)], [0.0, 1.0])]
+        )
         for wire, radius in (
             (arc, R),
             (helix, R),
             (flat_point_spine(), 1.0),
             (flat_point_spine(0.37), 1.0),
+            (flat_point_spine(bend=2e-8, twist=1e-9), 1.0),
+            (straight, 1.0),
         ):
             sweep = self.assertTube(wire, radius)
             pipe = Part.BRepOffsetAPI.MakePipeShell(wire)

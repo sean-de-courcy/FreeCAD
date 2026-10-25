@@ -20,12 +20,20 @@ class TopoDS_Wire;
  * tolerances of 10 mm. Where the curvature only comes close to zero (a wave lifted out of its
  * plane), the frame turns half a turn within micrometres instead: a circle's tube can come out
  * right or 1.8 mm off, and any other profile folds. An inflection at a vertex between two edges is
- * harmless: OCCT makes the edges' trihedrons agree there.
+ * harmless: OCCT makes the edges' trihedrons agree there. Along a straight stretch inside an edge
+ * (a B-spline span with collinear poles) Frenet's frame isn't defined, and OCCT's takes a normal
+ * of its own there: turned over from the curve's on both sides of the stretch, the rectangle
+ * beside a planar spine turned over and back; 26.6 to 90 degrees from the curve's where it bends
+ * next, the frame jumps there, and a circle's tube came out 2.4e-2 to 0.28 mm off (ops#465,
+ * ops#439).
  *
  * Where the frame turns by more than a right angle about the tangent between nearby samples and
  * the curvature dips there, or the normal reverses at a knot where the curve is only C1 (a steep
  * helix's frame turns about the tangent all along, with its curvature steady; where the samples
- * are too far apart to follow such a twist, the edge is sampled again more densely):
+ * are too far apart to follow such a twist, the edge is sampled again more densely), or where
+ * OCCT's frame turns by more than a right angle among samples without a frame of their own (the
+ * curvature at the floor), or jumps by more than jumpCosine's angle where a straight stretch
+ * ends:
  * - on a planar spine, corrected Frenet: a planar curve's Frenet frame doesn't turn about the
  *   tangent, so the rotation-minimizing frame is Frenet's own, kept continuous;
  * - on a spine planar within a thousandth of its size whose tangent stays close enough to the
@@ -34,10 +42,10 @@ class TopoDS_Wire;
  *   this built the tube);
  * - otherwise corrected Frenet if every section is round about the spine (the same surface in any
  *   frame), and a refusal if not.
- * In each of these modes, checkBuilt() refuses the result where its tolerances come out far above
+ * With the plane's normal, checkBuilt() refuses the result where its tolerances come out far above
  * the pipe's.
- * Spines where the trihedron doesn't turn over keep OCCT's Frenet law, so their results don't
- * change. */
+ * Spines where the trihedron doesn't turn over or jump keep OCCT's Frenet law, so their results
+ * don't change. */
 namespace Part::SweepFrenet
 {
 
@@ -47,6 +55,22 @@ constexpr int samplesPerSpan = 8;
 constexpr int minSamples = 64;
 /// A sample's normal counts only where the curvature times the edge's length is above this
 constexpr double curvatureFloor = 1e-9;
+/// A point is on a straight stretch, where Frenet's frame isn't defined and OCCT's takes a normal
+/// of its own, where the curvature times the edge's length is at most this. OCCT's frame was the
+/// curve's at 3.75e-12 (y = 1e-8 x^3 near its inflection); on spans with collinear poles the
+/// curvature came out 0
+constexpr double straightFloor = 1e-12;
+/// Among samples without a frame, OCCT's frame is read this fraction of the edge's parameter range
+/// from each, towards the middle of their run: at a flat point it was a quarter turn off at the
+/// point and 1e-12 from it, and the curve's own 1e-9 from it (fork PR 358 round 1, R1)
+constexpr double runOffset = 1e-6;
+/// OCCT's frame on a straight stretch is read at the middles of this many even parts of it
+constexpr int stretchPoints = 8;
+/// The cosine of 1 degree: OCCT's frame on a straight stretch, against the curve's where it bends
+/// next, counts as a jump where they are further apart. Where OCCT kept the normal from before the
+/// stretch, they were 1e-7 degrees apart; elsewhere 26.6, 63.4, 90 or 180 degrees (ops#439,
+/// ops#465)
+constexpr double jumpCosine = 0.9998476951563913;
 /// A sample interval across which the tangent turns by more than 45 degrees is halved, at most this
 /// many times (a helix sampled 6.4 times a turn, as Part.makeHelix's curves were before ops#447:
 /// its tangent turns 56 degrees between samples)
@@ -83,11 +107,11 @@ constexpr double binormalOffShare = 0.1;
 /// of 5 um on a 60 mm wave are within it); whether its normal can be the binormal depends on how
 /// far the tangent leaves it
 constexpr double relativePlanarity = 1e-3;
-/// In a mode setMode() chose in place of Frenet, vertex or edge tolerances above this many times
-/// the pipe's 3D tolerance are refused: the binormal left vertices of 0.15 mm on ten waves lifted
-/// by 75 nm, and up to 1.3e-4 where it built the tube; corrected Frenet left 0.15 mm on ten planar
-/// waves turned 45 degrees about X; macOS's tolerances came out 16 times Windows' on the corner
-/// spine (1.6e-3), and results passing at 100 were within 4.7e-4 of the tube
+/// With the plane's normal as binormal in place of Frenet, vertex or edge tolerances above this
+/// many times the pipe's 3D tolerance are refused: the binormal left vertices of 0.15 mm on ten
+/// waves lifted by 75 nm, and up to 1.3e-4 where it built the tube; macOS's tolerances came out 16
+/// times Windows' on the corner spine (1.6e-3), and results passing at 100 were within 4.7e-4 of
+/// the tube
 constexpr double maxToleranceRatio = 100;
 
 /// The trihedron mode setMode() chose
@@ -103,8 +127,8 @@ enum class Mode
 
 /// Sets the trihedron mode of \a pipe, built on \a spine for \a sections (wires or vertices):
 /// corrected Frenet unless \a frenet, else Frenet, or the mode above where Frenet's trihedron
-/// turns over. \a tolerance is the pipe's 3D tolerance. Throws Standard_Failure where it turns
-/// over on a spine that isn't planar and a section isn't round about the spine.
+/// turns over or jumps. \a tolerance is the pipe's 3D tolerance. Throws Standard_Failure where it
+/// does on a spine that isn't planar and a section isn't round about the spine.
 PartExport Mode setMode(
     BRepOffsetAPI_MakePipeShell& pipe,
     const TopoDS_Wire& spine,
@@ -114,8 +138,11 @@ PartExport Mode setMode(
 );
 
 /// Checks the pipe \a built after Build() in the \a mode setMode() chose: throws Standard_Failure
-/// where that isn't the mode asked for and a vertex's or edge's tolerance is above
-/// maxToleranceRatio times \a tolerance, the pipe's 3D tolerance
+/// where that is the plane's normal and a vertex's or edge's tolerance is above maxToleranceRatio
+/// times \a tolerance, the pipe's 3D tolerance. Corrected Frenet is what Frenet off sweeps, so
+/// its results are left to the loose-result warning, as Frenet off's (ops#465: correct tilted
+/// waves were refused for vertex tolerances of 0.010 to 0.020 mm, OCCT's estimate, the tube
+/// within 1.7e-6)
 PartExport void checkBuilt(const TopoDS_Shape& built, Mode mode, double tolerance);
 
 }  // namespace Part::SweepFrenet
