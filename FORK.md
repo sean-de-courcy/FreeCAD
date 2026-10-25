@@ -399,7 +399,8 @@ names it.
 | `perf/474-refine-voids-vouch` | fix | ops#474 | - | `integration` `9cec95bc89` | `b42c494538` (fork PR 375), 2026-10-24 | never (fork fix) |
 | `fix/448-sweep-planar-degree` | fix | ops#448 | - | `integration` `9cec95bc89` | `e5b90e2b34` (fork PR 373), 2026-10-24 | a new base sets MakePipeShell's max degree 14 and segments 1000 in Part sweeps and PartDesign Pipe, and Part::Sweep and PartDesign Pipe warn (Wire.makePipeShell and Part.makeSweepSurface log) above 0.1 mm tolerance |
 | `feat/370-pipe-corners` | feat | ops#370, ops#381 | - | `integration` `e5b90e2b34` | `a977c44242` (fork PR 344), 2026-10-25 | never (fork feature) |
-| `feat/379-pipe-end-names` | feat | ops#379 | - | `feat/370-pipe-corners` `3544e12841` (stacked on fork PR 344) | (fork PR 356) | never (fork feature) |
+| `feat/379-pipe-end-names` | feat | ops#379 | - | `feat/370-pipe-corners` `3544e12841` (stacked on fork PR 344) | `4cd3f452d4` (fork PR 356), 2026-10-25 | never (fork feature) |
+| `feat/415-pipe-leg-names` | feat | ops#415, ops#455 | - | `feat/379-pipe-end-names` `76627462b0` (stacked on fork PR 356) | (fork PR 369) | never (fork feature) |
 
 ## Fork-only commits in carried topics
 

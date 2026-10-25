@@ -443,6 +443,21 @@ class Warned:
         return f"WARNED[{self.expected}]"
 
 
+class OwnOrBroken:
+    """The reference holds `expected`'s element, or it breaks loudly; on any other element it is
+    wrong (ops#415: an edit taking a "Transformed" Pipe across 90 degrees, between the one sweep
+    and the union of pieces, where the fuse renames the faces it cuts)."""
+
+    def __init__(self, expected):
+        self.expected = expected
+
+    def select(self, shape):
+        return self.expected.select(shape)
+
+    def __repr__(self):
+        return f"OWN-OR-BROKEN[{self.expected}]"
+
+
 class PartialWarned:
     """Some elements of a multi-element reference are gone and the consumer computes on the
     rest, with a warning (ops#127, Onshape's rule; reference solver documents only): the
@@ -869,6 +884,8 @@ class Result:
             return self.verdict in ("broken", "guessed")
         if expect.startswith("PARTIAL"):
             return self.verdict == "partial-warned"
+        if expect.startswith("OWN-OR-BROKEN"):
+            return self.verdict in ("correct", "equivalent", "guessed", "broken")
         if expect.startswith("GUESSED"):
             return self.verdict == "guessed"
         if expect.startswith("WARNED"):
@@ -1066,9 +1083,16 @@ class Scenario:
         partialWarned = isinstance(expectation, PartialWarned)
         settled = isinstance(expectation, Settled)
         warnedExpected = isinstance(expectation, Warned)
+        ownOrBroken = isinstance(expectation, OwnOrBroken)
         missing = sum(1 for s in subs if s.startswith("?"))
         live = [s for s in subs if not s.startswith("?")] if partialWarned else subs
-        if partialWarned or settled or warnedExpected or isinstance(expectation, Guessed):
+        if (
+            partialWarned
+            or settled
+            or warnedExpected
+            or ownOrBroken
+            or isinstance(expectation, Guessed)
+        ):
             expectation = expectation.expected
         resolved = []
         if target is None or not live or (not partialWarned and missing):
@@ -1117,7 +1141,11 @@ class Scenario:
 
         # 2. The consumer's result
         outcome, detail = None, ""
-        if isinstance(expectation, Broken) or target is None:
+        if (
+            isinstance(expectation, Broken)
+            or target is None
+            or (ownOrBroken and stored == "broken")
+        ):
             if stored == "broken" and owner.isValid():
                 # nothing reports the break: the consumer carries on without its element
                 outcome, detail = "wrong", f"{owner.Name} stays valid with the broken reference"
