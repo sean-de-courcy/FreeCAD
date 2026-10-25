@@ -23,6 +23,7 @@
  ***************************************************************************/
 
 
+#include <algorithm>
 #include <cstdint>
 #include <map>
 #include <mutex>
@@ -47,6 +48,9 @@
 #include <BRepGProp.hxx>
 #include <BRepGProp_Face.hxx>
 #include <BRepIntCurveSurface_Inter.hxx>
+#include <BRepTools.hxx>
+#include <BRepTools_WireExplorer.hxx>
+#include <GCPnts_QuasiUniformAbscissa.hxx>
 #include <gce_MakeCirc.hxx>
 #include <gce_MakeDir.hxx>
 #include <gce_MakeLin.hxx>
@@ -657,10 +661,82 @@ void extentFingerprint(const TopoDS_Shape& shape, Data::ElementFingerprint& fp)
     }
 }
 
+// An edge's points along it, from its start to its end as the edge runs: a line's two ends, any
+// other curve's 17, evenly along its length (ops#386, PR 366 round 5).
+std::vector<Base::Vector3d> pointsAlong(const TopoDS_Edge& edge)
+{
+    std::vector<Base::Vector3d> points;
+    if (BRep_Tool::Degenerated(edge)) {
+        return points;
+    }
+    BRepAdaptor_Curve curve(edge);
+    const double first = curve.FirstParameter();
+    const double last = curve.LastParameter();
+    std::vector<double> parameters;
+    if (curve.GetType() == GeomAbs_Line) {
+        parameters = {first, last};
+    }
+    else {
+        constexpr int count = 17;
+        GCPnts_QuasiUniformAbscissa abscissa(curve, count);
+        if (abscissa.IsDone() && abscissa.NbPoints() >= 2) {
+            for (int i = 1; i <= abscissa.NbPoints(); ++i) {
+                parameters.push_back(abscissa.Parameter(i));
+            }
+        }
+        else {
+            for (int i = 0; i < count; ++i) {
+                parameters.push_back(first + (last - first) * i / (count - 1));
+            }
+        }
+    }
+    for (double parameter : parameters) {
+        points.push_back(toVector(curve.Value(parameter).XYZ()));
+    }
+    if (edge.Orientation() == TopAbs_REVERSED) {
+        std::reverse(points.begin(), points.end());
+    }
+    return points;
+}
+
+// A face's outline (fingerprint version 5, ops#386, PR 366 round 5): its outer boundary's points,
+// convex about its plane, in order round it. A plane's normal; any other face's, its boundary's
+// own (Newell's sum). None when the boundary has no direction across it.
+void outlineFingerprint(const TopoDS_Face& face, Data::ElementFingerprint& fp)
+{
+    const TopoDS_Wire wire = BRepTools::OuterWire(face);
+    if (wire.IsNull()) {
+        return;
+    }
+    std::vector<Base::Vector3d> boundary;
+    for (BRepTools_WireExplorer explorer(wire, face); explorer.More(); explorer.Next()) {
+        const auto points = pointsAlong(explorer.Current());
+        boundary.insert(boundary.end(), points.begin(), points.end());
+    }
+    if (boundary.size() < 2) {
+        return;
+    }
+    Base::Vector3d normal;
+    if (fp.kind == "Plane" && fp.direction) {
+        normal = *fp.direction;
+    }
+    else {
+        const Base::Vector3d origin = boundary.front();
+        for (std::size_t i = 1; i + 1 < boundary.size(); ++i) {
+            normal += (boundary[i] - origin) % (boundary[i + 1] - origin);
+        }
+    }
+    if (normal.Length() <= Precision::Confusion() * Precision::Confusion()) {
+        return;
+    }
+    fp.outline = Data::ElementFingerprint::convexOutline(boundary, normal);
+}
+
 void faceFingerprint(const TopoDS_Face& face, Data::ElementFingerprint& fp)
 {
     faceIntrinsic(face, fp);
     extentFingerprint(face, fp);
+    outlineFingerprint(face, fp);
     GProp_GProps props;
     BRepGProp::SurfaceProperties(face, props);
     fp.size = props.Mass();
@@ -725,6 +801,7 @@ void edgeFingerprint(const TopoDS_Edge& edge, Data::ElementFingerprint& fp)
     if (props.Mass() > 0.0) {
         fp.center = toVector(props.CentreOfMass().XYZ());
         extentFingerprint(edge, fp);
+        fp.outline = pointsAlong(edge);
     }
     else {
         // A degenerated edge has no length: its vertex stands for it.

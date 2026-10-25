@@ -1731,6 +1731,23 @@ bool isMarkedPiece(std::string_view name)
     });
 }
 
+/* The marks of \a name's marked piece, the connected elements of its first section that is one
+ * (PR 366 round 5); empty for none. Two pieces of one edge on one face of the up-to shape share
+ * them, told apart by their counters.
+ */
+std::vector<std::string> pieceMarks(std::string_view name)
+{
+    for (const auto section : NameAncestry::splitSections(name)) {
+        const DecodedMappedSection& decoded = decodeSection(section);
+        if ((decoded.elementType == 'F' || decoded.elementType == 'E')
+            && decoded.hasMapperFlag(MAPPER_FLAG_PROJECTION)
+            && decoded.hasMapperFlag(MAPPER_FLAG_MODIFIED) && !decoded.connectedElements.empty()) {
+            return decoded.connectedElements;
+        }
+    }
+    return {};
+}
+
 /* True if \a name's element holds \a oldName's, a piece of a far cap that an edit merged with
  * others into one (ops#360, PR 340 round 3): the names are the same but in one section, a marked
  * piece's (PRJ and MOD), where \a name's marks, its connected elements, hold every one of
@@ -2344,6 +2361,63 @@ bool isPlane(const ElementFingerprint& fp)
         && fp.direction && fp.direction->Length() > 0.0;
 }
 
+// An outline's span seen along the unit direction (PR 366 round 5)
+std::pair<double, double> spanAlong(
+    const std::vector<Base::Vector3d>& outline,
+    const Base::Vector3d& direction
+)
+{
+    double low = std::numeric_limits<double>::infinity();
+    double high = -low;
+    for (const auto& point : outline) {
+        low = std::min(low, point * direction);
+        high = std::max(high, point * direction);
+    }
+    return {low, high};
+}
+
+// Whether two faces' outlines share no area, seen along the old one's normal (PR 366 round 5):
+// on an axis across a side of either, their spans share no length (two convex outlines that
+// don't overlap have such an axis). A face lifted along the normal keeps its place. Empty when
+// the old outline spans no area.
+std::optional<bool> outlinesApart(
+    const std::vector<Base::Vector3d>& old,
+    const std::vector<Base::Vector3d>& now,
+    double eps
+)
+{
+    if (old.size() < 3 || now.size() < 2) {
+        return std::nullopt;
+    }
+    Base::Vector3d normal;
+    for (std::size_t i = 1; i + 1 < old.size(); ++i) {
+        normal += (old[i] - old[0]) % (old[i + 1] - old[0]);
+    }
+    if (normal.Length() <= eps * eps) {
+        return std::nullopt;
+    }
+    normal.Normalize();
+    const auto oldOutline = ElementFingerprint::convexOutline(old, normal);
+    const auto outline = ElementFingerprint::convexOutline(now, normal);
+    auto separates = [&](const std::vector<Base::Vector3d>& sides) {
+        const std::size_t count = sides.size() > 2 ? sides.size() : 1;
+        for (std::size_t i = 0; i < count && sides.size() >= 2; ++i) {
+            Base::Vector3d axis = normal % (sides[(i + 1) % sides.size()] - sides[i]);
+            if (axis.Length() <= eps) {
+                continue;
+            }
+            axis.Normalize();
+            const auto [oldLow, oldHigh] = spanAlong(oldOutline, axis);
+            const auto [low, high] = spanAlong(outline, axis);
+            if (std::min(oldHigh, high) - std::max(oldLow, low) <= eps) {
+                return true;
+            }
+        }
+        return false;
+    };
+    return separates(oldOutline) || separates(outline);
+}
+
 }  // namespace
 
 bool planeAgrees(
@@ -2741,7 +2815,8 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             // another number of twins) compares the centres themselves (round 3), which breaks
             // a move of the pair too: loud, never a pick.
             bool nearerTwin = false;
-            bool hasTwins = false;
+            std::vector<int> twins;
+            bool twinsKeptShape = false;
             if (place.empty() && saved.center && now.center && isOrdered(hitName)) {
                 const double eps = input.continuationDistance * std::max(1.0, input.diagonal);
                 std::vector<std::pair<int, Base::Vector3d>> siblings;
@@ -2809,7 +2884,13 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                     }
                 }
                 nearerTwin = !place.empty();
-                hasTwins = !siblings.empty();
+                for (const auto& sibling : siblings) {
+                    twins.push_back(sibling.first);
+                }
+                // The hit's size and its offset from the twins' centroid as they were: the set
+                // moved as one, with whatever cut it
+                twinsKeptShape = offsets && hitDistance <= eps && saved.size && now.size
+                    && relativelyEqual(*saved.size, *now.size, 0.01);
             }
             // A far cap marked by one face of the up-to shape alone (ops#386, PR 366 round 2) that
             // moved with nothing at its old place, off its old centre, while another piece of the
@@ -2859,57 +2940,87 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             // its old place and no longer overlaps it: an up-to shell without names, rebuilt in
             // another order while the pieces slid onto the next face, gives the old face's index
             // to that face, and the name to its piece, with the same count and place along the
-            // edge. Overlapping (round 4, from the boxes every face and edge fingerprint has since
-            // version 5): two pieces of one edge whose boxes, seen along the edge, share a length
-            // (a seam moved may leave a sliver of the old piece); two faces whose boxes share a
-            // length on every axis both extend along (a cap lifted with its flat plate keeps its
-            // place). Sizes alone over-count the overlap of a tall or thin piece, and of an arc,
-            // whose length runs round its chord. An older fingerprint, without a box: edges by
-            // their centres' distance along the edge against half their lengths together, faces
-            // by their centres' distance against half their sides together. A piece shifted
-            // within its old place keeps its name; twins went by their places above. The piece
-            // on a hole's fill, the disc and the hole moved together further than its size,
-            // breaks too: its old place left bare, it can't be told from a cap whose pieces slid
-            // onto the next faces of a reordered shell, its other pieces sharing their faces with
-            // another profile's caps (round 3, three plates)
+            // edge. Overlapping (round 5, from the outlines every face and edge fingerprint has
+            // since version 5): two pieces of one edge whose points, seen along the edge, share a
+            // length (a seam moved may leave a sliver of the old piece); two faces whose outlines,
+            // seen along the old one's normal, share an area (a cap lifted with its plate keeps
+            // its place). Sizes alone over-count the overlap of a tall or thin piece, and of an
+            // arc, whose length runs round its chord; boxes in the world's axes (round 4) that of
+            // a turned piece, and an arc's box corners seen along a slanted way that of the arc.
+            // An older fingerprint, without an outline, keeps round 3's tests: edges by their
+            // centres' distance along the edge against half their lengths together, planes by
+            // their boxes, other faces by their centres' distance against half their sides
+            // together. A piece shifted within its old place keeps its name; twins went by their
+            // places above. The piece on a hole's fill, the disc and the hole moved together
+            // further than its size, breaks too: its old place left bare, it can't be told from a
+            // cap whose pieces slid onto the next faces of a reordered shell, its other pieces
+            // sharing their faces with another profile's caps (round 3, three plates). Round 5b:
+            // so do twins whose set left together, none of them where the old piece was (each
+            // outline apart from the old one, seen the same way), and changed shape: a half
+            // circle that a B-spline plate cut in two, the pieces slid onto the next plate of a
+            // reordered shell, where the plate cuts them elsewhere. Twins of one shape as before
+            // (the hit's size and offset from their centroid) moved with what cut them, a hole
+            // moved with its disc: their places above decide. So do twins without outlines (an
+            // older record)
+            const auto outlineOf = [&](int k) -> const std::vector<Base::Vector3d>& {
+                return fingerprintOfIndex(pool.elements[k].index).outline;
+            };
+            const bool twinOutlines = !saved.outline.empty()
+                && std::none_of(twins.begin(), twins.end(), [&](int k) {
+                       return outlineOf(k).empty();
+                   });
+            const bool twinsMayDepart = twins.empty() || (twinOutlines && !twinsKeptShape);
             bool departed = false;
-            if (place.empty() && !hasTwins && saved.center && now.center && saved.size && now.size
-                && isMarkedPiece(hitName)) {
+            if (place.empty() && twinsMayDepart && saved.center && now.center && saved.size
+                && now.size && isMarkedPiece(hitName)) {
                 const double eps = input.continuationDistance * std::max(1.0, input.diagonal);
                 const double apart = Base::Distance(*saved.center, *now.center);
-                const bool boxes = saved.extentMin && saved.extentMax && now.extentMin
-                    && now.extentMax;
-                // Apart on an axis both boxes extend along: they share no length there
-                auto apartWhereBothExtend = [&]() {
-                    for (int axis = 0; axis < 3; ++axis) {
-                        const double oldLow = (*saved.extentMin)[axis];
-                        const double oldHigh = (*saved.extentMax)[axis];
-                        const double low = (*now.extentMin)[axis];
-                        const double high = (*now.extentMax)[axis];
-                        if (oldHigh - oldLow > eps && high - low > eps
-                            && std::min(oldHigh, high) - std::max(oldLow, low) <= eps) {
-                            return true;
-                        }
+                const bool outlines = !saved.outline.empty() && !now.outline.empty();
+                std::optional<bool> outlinesSay;
+                // Whether an outline lies apart from the old one: an edge's span along the way
+                // (set below), a face's outline seen along the old one's normal
+                std::optional<Base::Vector3d> edgeWay;
+                auto apartFromOld = [&](const std::vector<Base::Vector3d>& outline) {
+                    if (saved.type != 'E') {
+                        return outlinesApart(saved.outline, outline, eps).value_or(false);
                     }
-                    return false;
+                    if (!edgeWay) {
+                        return false;
+                    }
+                    const auto [oldLow, oldHigh] = spanAlong(saved.outline, *edgeWay);
+                    const auto [low, high] = spanAlong(outline, *edgeWay);
+                    return std::min(oldHigh, high) - std::max(oldLow, low) <= eps;
                 };
                 if (saved.type == 'E') {
                     // Along the edge only: the far edge moved across itself (A grown taller) still
                     // holds its old span. A line's direction; a curve's (a B-spline plate's far
-                    // edge, an arc), the way to the nearest other piece of the edge now; without
-                    // one, the axes both boxes extend along, or the distance itself
+                    // edge, an arc), round 5, the way across the seams: to the middle of the edge's
+                    // pieces on other faces (marked otherwise), or, when that is short (the hit
+                    // between them), to the nearest of them. Round 3's test, for an older
+                    // fingerprint, takes the way to the nearest other piece, which is slanted
+                    // when a disc slid diagonally has two quarter arcs beside its half circle.
+                    // Without one, the way it moved, or the distance itself
                     std::optional<Base::Vector3d> direction;
+                    std::optional<Base::Vector3d> across;
                     if (saved.kind == "Line" && saved.direction && saved.direction->Length() > eps) {
                         direction = *saved.direction;
+                        across = direction;
                     }
                     else {
+                        const auto hitMarks = pieceMarks(hitName);
                         double nearest = std::numeric_limits<double>::infinity();
+                        double nearestElsewhere = std::numeric_limits<double>::infinity();
+                        std::optional<Base::Vector3d> wayElsewhere;
+                        Base::Vector3d sum;
+                        int elsewhere = 0;
                         for (std::size_t k = 0; k < pool.elements.size(); ++k) {
                             const auto& names = pool.elements[k].names;
-                            if (static_cast<int>(k) == hitPosition
-                                || std::none_of(names.begin(), names.end(), [&](const auto& name) {
-                                       return markedPiecesOfOne(name, hitName);
-                                   })) {
+                            const auto piece = std::find_if(
+                                names.begin(),
+                                names.end(),
+                                [&](const auto& name) { return markedPiecesOfOne(name, hitName); }
+                            );
+                            if (static_cast<int>(k) == hitPosition || piece == names.end()) {
                                 continue;
                             }
                             const ElementFingerprint& other = fingerprintOfIndex(
@@ -2921,31 +3032,34 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                                     nearest = way.Length();
                                     direction = way;
                                 }
+                                if (pieceMarks(*piece) != hitMarks) {
+                                    sum += *other.center;
+                                    ++elsewhere;
+                                    if (way.Length() > eps && way.Length() < nearestElsewhere) {
+                                        nearestElsewhere = way.Length();
+                                        wayElsewhere = way;
+                                    }
+                                }
                             }
                         }
+                        if (elsewhere > 0) {
+                            const Base::Vector3d middle = sum / static_cast<double>(elsewhere)
+                                - *now.center;
+                            across = middle.Length() >= nearestElsewhere / 2.0
+                                ? std::optional<Base::Vector3d>(middle)
+                                : wayElsewhere;
+                        }
+                        if (!across) {
+                            across = direction;
+                        }
                     }
-                    if (boxes && direction) {
-                        // Each box seen along the direction: the span of its corners
-                        const Base::Vector3d d = Base::Vector3d(*direction).Normalize();
-                        auto span = [&](const ElementFingerprint& fp) {
-                            double low = 0.0;
-                            double high = 0.0;
-                            for (int axis = 0; axis < 3; ++axis) {
-                                const double a = d[axis] * (*fp.extentMin)[axis];
-                                const double b = d[axis] * (*fp.extentMax)[axis];
-                                low += std::min(a, b);
-                                high += std::max(a, b);
-                            }
-                            return std::make_pair(low, high);
-                        };
-                        const auto [oldLow, oldHigh] = span(saved);
-                        const auto [low, high] = span(now);
-                        departed = std::min(oldHigh, high) - std::max(oldLow, low) <= eps;
+                    const Base::Vector3d way = across ? *across : *now.center - *saved.center;
+                    if (outlines && way.Length() > eps) {
+                        // Each piece's points seen along the way: their span
+                        edgeWay = Base::Vector3d(way).Normalize();
+                        outlinesSay = apartFromOld(now.outline);
                     }
-                    else if (boxes) {
-                        departed = apartWhereBothExtend();
-                    }
-                    else {
+                    else if (!outlines) {
                         double along = apart;
                         if (direction) {
                             along = std::abs(
@@ -2956,11 +3070,38 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                         departed = along >= (*saved.size + *now.size) / 2.0 - eps;
                     }
                 }
-                else if (boxes) {
-                    departed = apartWhereBothExtend();
+                else if (outlines) {
+                    outlinesSay = outlinesApart(saved.outline, now.outline, eps);
                 }
-                else {
+                if (outlinesSay) {
+                    departed = *outlinesSay;
+                }
+                else if (saved.type != 'E' && saved.kind == "Plane" && now.kind == "Plane"
+                         && saved.extentMin && saved.extentMax && now.extentMin && now.extentMax) {
+                    // The boxes' common part, on each axis; a flat face's box is flat on one
+                    const Base::Vector3d low(
+                        std::max(saved.extentMin->x, now.extentMin->x),
+                        std::max(saved.extentMin->y, now.extentMin->y),
+                        std::max(saved.extentMin->z, now.extentMin->z)
+                    );
+                    const Base::Vector3d high(
+                        std::min(saved.extentMax->x, now.extentMax->x),
+                        std::min(saved.extentMax->y, now.extentMax->y),
+                        std::min(saved.extentMax->z, now.extentMax->z)
+                    );
+                    const Base::Vector3d common = high - low;
+                    const int shared = (common.x > eps) + (common.y > eps) + (common.z > eps);
+                    const bool apartOnAxis = common.x < -eps || common.y < -eps || common.z < -eps;
+                    departed = apartOnAxis || shared < 2;
+                }
+                else if (saved.type != 'E') {
                     departed = apart >= (std::sqrt(*saved.size) + std::sqrt(*now.size)) / 2.0 - eps;
+                }
+                if (departed && !twins.empty()) {
+                    departed = outlinesSay.has_value()
+                        && std::all_of(twins.begin(), twins.end(), [&](int k) {
+                               return apartFromOld(outlineOf(k));
+                           });
                 }
             }
             if (place.empty() && !departed) {

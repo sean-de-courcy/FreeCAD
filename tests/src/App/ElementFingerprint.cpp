@@ -197,7 +197,7 @@ TEST(ElementFingerprint, planeExtentRoundTrip)
     face.extentMin = Base::Vector3d(0, 0, 0);
     face.extentMax = Base::Vector3d(8, 0, 10);
     const char* text = "3|F|Plane|80|4,0,5|0,-1,0|_|0,0,0,8,0,10";
-    EXPECT_EQ(face.toString(), "5|F|Plane|80|4,0,5|0,-1,0|_|_|0,0,0,8,0,10|_");
+    EXPECT_EQ(face.toString(), "5|F|Plane|80|4,0,5|0,-1,0|_|_|0,0,0,8,0,10|_|_");
     auto parsed = ElementFingerprint::fromString(text);
     ASSERT_TRUE(parsed.isValid());
     EXPECT_EQ(parsed, face);
@@ -248,7 +248,7 @@ TEST(ElementFingerprint, twinCentroidRoundTrip)
     plane.twinCount = 3;
     const char* planeText = "4|F|Plane|8.5|3,5.25,10|0,0,1|_|2,4,10,4,7,10|3,3.4,10,3";
     //   with its extent, written as version 5 (PR 366 round 4)
-    EXPECT_EQ(plane.toString(), "5|F|Plane|8.5|3,5.25,10|0,0,1|_|_|2,4,10,4,7,10|3,3.4,10,3");
+    EXPECT_EQ(plane.toString(), "5|F|Plane|8.5|3,5.25,10|0,0,1|_|_|2,4,10,4,7,10|3,3.4,10,3|_");
     EXPECT_EQ(ElementFingerprint::fromString(planeText), plane);
 
     ElementFingerprint arc;
@@ -305,7 +305,7 @@ TEST(ElementFingerprint, boxRoundTrip)
     cap.center = Base::Vector3d(0.5, 4, 10);
     cap.extentMin = Base::Vector3d(0, 0, 10);
     cap.extentMax = Base::Vector3d(1, 8, 10);
-    const char* capText = "5|F|BSpline|8|0.5,4,10|_|_|_|0,0,10,1,8,10|_";
+    const char* capText = "5|F|BSpline|8|0.5,4,10|_|_|_|0,0,10,1,8,10|_|_";
     EXPECT_EQ(cap.toString(), capText);
     auto parsed = ElementFingerprint::fromString(capText);
     ASSERT_TRUE(parsed.isValid());
@@ -322,7 +322,7 @@ TEST(ElementFingerprint, boxRoundTrip)
     arc.extentMin = Base::Vector3d(0, 0, 10);
     arc.extentMax = Base::Vector3d(1, 2, 10);
     const char* arcText =
-        "5|E|Circle|3.14159265359|0.363380227632,1,10|0,0,1|1|1,1,10|0,0,10,1,2,10|_";
+        "5|E|Circle|3.14159265359|0.363380227632,1,10|0,0,1|1|1,1,10|0,0,10,1,2,10|_|_";
     EXPECT_EQ(arc.toString(), arcText);
     EXPECT_EQ(ElementFingerprint::fromString(arcText), arc);
 
@@ -331,7 +331,7 @@ TEST(ElementFingerprint, boxRoundTrip)
     twin.twinCentroid = Base::Vector3d(1, 1, 10);
     twin.twinCount = 2;
     const char* twinText =
-        "5|E|Circle|3.14159265359|0.363380227632,1,10|0,0,1|1|1,1,10|0,0,10,1,2,10|1,1,10,2";
+        "5|E|Circle|3.14159265359|0.363380227632,1,10|0,0,1|1|1,1,10|0,0,10,1,2,10|1,1,10,2|_";
     EXPECT_EQ(twin.toString(), twinText);
     EXPECT_EQ(ElementFingerprint::fromString(twinText), twin);
 
@@ -343,23 +343,28 @@ TEST(ElementFingerprint, boxRoundTrip)
     line.direction = Base::Vector3d(1, 0, 0);
     line.extentMin = Base::Vector3d(0, 8, 10);
     line.extentMax = Base::Vector3d(2, 8, 10);
-    const char* lineText = "5|E|Line|2|1,8,10|1,0,0|_|_|0,8,10,2,8,10|_";
+    const char* lineText = "5|E|Line|2|1,8,10|1,0,0|_|_|0,8,10,2,8,10|_|_";
     EXPECT_EQ(line.toString(), lineText);
     EXPECT_EQ(ElementFingerprint::fromString(lineText), line);
 
-    //   version 5 only for a face or an edge, with ten fields, a centre only for a circle, six
-    //   numbers in the extent, and twins as version 4 has them
+    //   version 5 only for a face or an edge, with eleven fields (round 4's ten no longer), a
+    //   centre only for a circle, six numbers in the extent, twins as version 4 has them, and an
+    //   outline of whole points, two at least
     for (const auto& bad : {
              "5|F|BSpline|8|0.5,4,10|_|_|_|0,0,10,1,8,10",
-             "5|F|BSpline|8|0.5,4,10|_|_|_|0,0,10,1,8,10|_|_",
-             "5|F|BSpline|8|0.5,4,10|_|_|_|_|_",
-             "5|F|BSpline|8|0.5,4,10|_|_|_|0,0,10,1,8|_",
-             "5|F|BSpline|8|0.5,4,10|_|_|0,0,0|0,0,10,1,8,10|_",
-             "5|E|Line|2|1,8,10|1,0,0|_|0,0,0|0,8,10,2,8,10|_",
-             "5|V|Point|_|1,8,10|_|_|_|1,8,10,1,8,10|_",
-             "5|F|BSpline|8|0.5,4,10|_|_|_|0,0,10,1,8,10|1,1,10,1",
-             "5|F|BSpline|8|0.5,4,10|_|_|_|0,0,10,1,8,10|1,1,10",
-             "5|F|BSpline|8|0.5,4,10|_|_|_|0,0,10,1,8,10|1,1,10,2.5",
+             "5|F|BSpline|8|0.5,4,10|_|_|_|0,0,10,1,8,10|_",
+             "5|F|BSpline|8|0.5,4,10|_|_|_|0,0,10,1,8,10|_|_|_",
+             "5|F|BSpline|8|0.5,4,10|_|_|_|0,0,10,1,8,10|_|0,0,10",
+             "5|F|BSpline|8|0.5,4,10|_|_|_|0,0,10,1,8,10|_|0,0,10,1,8",
+             "5|F|BSpline|8|0.5,4,10|_|_|_|0,0,10,1,8,10|_|0,0,10,x,8,10",
+             "5|F|BSpline|8|0.5,4,10|_|_|_|_|_|_",
+             "5|F|BSpline|8|0.5,4,10|_|_|_|0,0,10,1,8|_|_",
+             "5|F|BSpline|8|0.5,4,10|_|_|0,0,0|0,0,10,1,8,10|_|_",
+             "5|E|Line|2|1,8,10|1,0,0|_|0,0,0|0,8,10,2,8,10|_|_",
+             "5|V|Point|_|1,8,10|_|_|_|1,8,10,1,8,10|_|_",
+             "5|F|BSpline|8|0.5,4,10|_|_|_|0,0,10,1,8,10|1,1,10,1|_",
+             "5|F|BSpline|8|0.5,4,10|_|_|_|0,0,10,1,8,10|1,1,10|_",
+             "5|F|BSpline|8|0.5,4,10|_|_|_|0,0,10,1,8,10|1,1,10,2.5|_",
              "4|F|BSpline|8|0.5,4,10|_|_|_|0,0,10,1,8,10|_",
          }) {
         EXPECT_FALSE(ElementFingerprint::fromString(bad).isValid()) << bad;
@@ -370,4 +375,104 @@ TEST(ElementFingerprint, boxRoundTrip)
     bare.extentMin.reset();
     bare.extentMax.reset();
     EXPECT_EQ(bare.toString(), "1|F|BSpline|8|0.5,4,10|_|_");
+}
+
+TEST(ElementFingerprint, outlineRoundTrip)
+{
+    // A face's and an edge's outline, the eleventh field of version 5 (PR 366 round 5): the cap's
+    // four corners, the line's two ends, in their order
+    ElementFingerprint cap;
+    cap.type = 'F';
+    cap.kind = "BSpline";
+    cap.size = 8;
+    cap.center = Base::Vector3d(0.5, 4, 10);
+    cap.extentMin = Base::Vector3d(0, 0, 10);
+    cap.extentMax = Base::Vector3d(1, 8, 10);
+    cap.outline = {
+        Base::Vector3d(0, 0, 10),
+        Base::Vector3d(1, 0, 10),
+        Base::Vector3d(1, 8, 10),
+        Base::Vector3d(0, 8, 10)
+    };
+    const char* capText =
+        "5|F|BSpline|8|0.5,4,10|_|_|_|0,0,10,1,8,10|_|0,0,10,1,0,10,1,8,10,0,8,10";
+    EXPECT_EQ(cap.toString(), capText);
+    auto parsed = ElementFingerprint::fromString(capText);
+    ASSERT_TRUE(parsed.isValid());
+    EXPECT_EQ(parsed, cap);
+    EXPECT_EQ(parsed.outline.size(), 4u);
+
+    ElementFingerprint line;
+    line.type = 'E';
+    line.kind = "Line";
+    line.size = 2;
+    line.center = Base::Vector3d(1, 8, 10);
+    line.direction = Base::Vector3d(1, 0, 0);
+    line.extentMin = Base::Vector3d(0, 8, 10);
+    line.extentMax = Base::Vector3d(2, 8, 10);
+    line.outline = {Base::Vector3d(2, 8, 10), Base::Vector3d(0, 8, 10)};
+    const char* lineText = "5|E|Line|2|1,8,10|1,0,0|_|_|0,8,10,2,8,10|_|2,8,10,0,8,10";
+    EXPECT_EQ(line.toString(), lineText);
+    EXPECT_EQ(ElementFingerprint::fromString(lineText), line);
+
+    //   an outline differs from none
+    ElementFingerprint without = line;
+    without.outline.clear();
+    EXPECT_NE(without, line);
+
+    //   too many points is no outline when written, and a malformed field when read
+    ElementFingerprint crowded = line;
+    crowded.outline.assign(ElementFingerprint::MaxOutline + 1, Base::Vector3d(1, 8, 10));
+    EXPECT_EQ(crowded.toString(), "5|E|Line|2|1,8,10|1,0,0|_|_|0,8,10,2,8,10|_|_");
+    std::string text = "5|E|Line|2|1,8,10|1,0,0|_|_|0,8,10,2,8,10|_|";
+    for (std::size_t i = 0; i <= ElementFingerprint::MaxOutline; ++i) {
+        text += i ? ",1,8,10" : "1,8,10";
+    }
+    EXPECT_FALSE(ElementFingerprint::fromString(text).isValid());
+}
+
+TEST(ElementFingerprint, convexOutline)
+{
+    // The hull of points seen along a normal (PR 366 round 5): an L's corners and a point inside
+    // give the L's convex corners, in order round it; points on a side between two others drop
+    const std::vector<Base::Vector3d> points {
+        Base::Vector3d(0, 0, 5),
+        Base::Vector3d(1, 0, 5),
+        Base::Vector3d(2, 0, 5),
+        Base::Vector3d(2, 1, 5),
+        Base::Vector3d(1, 1, 5),
+        Base::Vector3d(1, 2, 5),
+        Base::Vector3d(0, 2, 5),
+        Base::Vector3d(0.5, 0.5, 5)
+    };
+    const auto hull = ElementFingerprint::convexOutline(points, Base::Vector3d(0, 0, 1));
+    ASSERT_EQ(hull.size(), 5u);
+    const std::vector<Base::Vector3d> corners {
+        Base::Vector3d(0, 0, 5),
+        Base::Vector3d(2, 0, 5),
+        Base::Vector3d(2, 1, 5),
+        Base::Vector3d(1, 2, 5),
+        Base::Vector3d(0, 2, 5)
+    };
+    for (const auto& corner : corners) {
+        EXPECT_EQ(std::count(hull.begin(), hull.end(), corner), 1) << corner.x << "," << corner.y;
+    }
+    //   in order round it: each turn the same way
+    double turns = 0.0;
+    for (std::size_t i = 0; i < hull.size(); ++i) {
+        const auto& a = hull[i];
+        const auto& b = hull[(i + 1) % hull.size()];
+        const auto& c = hull[(i + 2) % hull.size()];
+        const double turn = ((b - a) % (c - b)).z;
+        EXPECT_NE(turn, 0.0);
+        turns += turn > 0.0 ? 1.0 : -1.0;
+    }
+    EXPECT_EQ(std::abs(turns), static_cast<double>(hull.size()));
+
+    //   seen from the side, the same points are a row: its two ends
+    const auto row = ElementFingerprint::convexOutline(points, Base::Vector3d(0, 1, 0));
+    ASSERT_EQ(row.size(), 2u);
+    //   no normal, or no points, gives nothing
+    EXPECT_TRUE(ElementFingerprint::convexOutline(points, Base::Vector3d()).empty());
+    EXPECT_TRUE(ElementFingerprint::convexOutline({}, Base::Vector3d(0, 0, 1)).empty());
 }

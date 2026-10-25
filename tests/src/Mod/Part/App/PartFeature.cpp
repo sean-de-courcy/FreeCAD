@@ -1288,6 +1288,16 @@ void expectExtent(
     EXPECT_LT(Base::Distance(*fp.extentMax, high), 1e-7) << fp.toString();
 }
 
+// Every point at radius 2 from the z axis, at height z (PR 366 round 5)
+void expectOnCircle(const std::vector<Base::Vector3d>& points, double z)
+{
+    ASSERT_FALSE(points.empty());
+    for (const auto& point : points) {
+        EXPECT_NEAR(std::hypot(point.x, point.y), 2.0, 1e-9);
+        EXPECT_NEAR(point.z, z, 1e-9);
+    }
+}
+
 }  // namespace
 
 TEST_F(FeaturePartTest, fingerprintsOfACylinder)
@@ -1321,6 +1331,9 @@ TEST_F(FeaturePartTest, fingerprintsOfACylinder)
             EXPECT_NEAR(*fp.size, 4.0 * std::numbers::pi, 1e-9);
             const double z = fp.center->z;
             expectExtent(fp, Base::Vector3d(-2, -2, z), Base::Vector3d(2, 2, z));
+            //   its outline (PR 366 round 5): points of its circle, convex round it
+            expectOnCircle(fp.outline, z);
+            EXPECT_GE(fp.outline.size(), 8u);
         }
     }
     for (int index = 1; index <= static_cast<int>(cylinder.countSubShapes(TopAbs_EDGE)); ++index) {
@@ -1343,11 +1356,21 @@ TEST_F(FeaturePartTest, fingerprintsOfACylinder)
             EXPECT_EQ(fp.toString().substr(0, 11), "5|E|Circle|");
             const double z = fp.center->z;
             expectExtent(fp, Base::Vector3d(-2, -2, z), Base::Vector3d(2, 2, z));
+            //   its outline: 17 points along it, its ends on its vertex
+            expectOnCircle(fp.outline, z);
+            ASSERT_EQ(fp.outline.size(), 17u);
+            EXPECT_LT(Base::Distance(fp.outline.front(), fp.outline.back()), 1e-9);
         }
         else {
             ++seams;
             EXPECT_EQ(fp.toString().substr(0, 29), "5|E|Line|5|2,0,2.5|0,0,1|_|_|");
             expectExtent(fp, Base::Vector3d(2, 0, 0), Base::Vector3d(2, 0, 5));
+            //   a line's outline: its two ends
+            ASSERT_EQ(fp.outline.size(), 2u);
+            EXPECT_NEAR(std::abs(fp.outline[0].z - fp.outline[1].z), 5.0, 1e-9);
+            for (const auto& point : fp.outline) {
+                EXPECT_LT(Base::Distance(Base::Vector3d(2, 0, point.z), point), 1e-9);
+            }
         }
     }
     EXPECT_EQ(lateral, 1);

@@ -39,9 +39,32 @@ def _vector(v):
     return ",".join(_number(c) for c in (v.x, v.y, v.z))
 
 
+def _outlines(fingerprints):
+    """{text without its outline: the outline's points} of version 5 fingerprints, the outline
+    being the eleventh field (PR 366 round 5); other versions' texts map to None. The points as a
+    set: their order round the element is the writer's own."""
+    result = {}
+    for text in fingerprints:
+        fields = text.split("|")
+        if fields[0] != "5":
+            result[text] = None
+            continue
+        numbers = [] if fields[10] == "_" else [float(n) for n in fields[10].split(",")]
+        result["|".join(fields[:10])] = {
+            tuple(round(c, 9) + 0.0 for c in numbers[i : i + 3]) for i in range(0, len(numbers), 3)
+        }
+    return result
+
+
+def _points(shape):
+    """The set of shape's vertexes' points, rounded as _outlines() rounds them"""
+    return {tuple(round(c, 9) + 0.0 for c in (v.X, v.Y, v.Z)) for v in shape.Vertexes}
+
+
 def _planeFingerprint(face):
     """The expected text of a planar face, from the Python geometry API (an independent path):
-    with the face's bounding box (Task 2 PR 8), in version 5 (ops#386, PR 366 round 4)."""
+    with the face's bounding box (Task 2 PR 8), in version 5 (ops#386, PR 366 round 4); without
+    its outline (round 5, see _outlines())."""
     u0, u1, v0, v1 = face.ParameterRange
     normal = face.normalAt((u0 + u1) / 2, (v0 + v1) / 2)
     box = face.optimalBoundingBox(False, False)
@@ -128,8 +151,13 @@ class ReferenceFingerprintTest(unittest.TestCase):
         self.assertEqual(len(fingerprints), 7, fingerprints)
 
         local = Part.makeBox(10, 10, 10)  # the box without its placement
+        outlines = _outlines(fingerprints)
         expected = {_planeFingerprint(local.Faces[i - 1]) for i in (1, 2, 3, 4, 6)}
-        self.assertTrue(expected.issubset(set(fingerprints)), (expected, fingerprints))
+        self.assertTrue(expected.issubset(set(outlines)), (expected, fingerprints))
+        # a face's outline: its square's corners (PR 366 round 5)
+        for i in (1, 2, 3, 4, 6):
+            face = local.Faces[i - 1]
+            self.assertEqual(outlines[_planeFingerprint(face)], _points(face))
         edge = local.Edges[0]
         direction = edge.Vertexes[1].Point - edge.Vertexes[0].Point
         direction.normalize()
@@ -146,16 +174,15 @@ class ReferenceFingerprintTest(unittest.TestCase):
             edgeBox.YMax,
             edgeBox.ZMax,
         )
-        self.assertIn(
-            "5|E|Line|%s|%s|%s|_|_|%s|_"
-            % (
-                _number(edge.Length),
-                _vector(edge.CenterOfMass),
-                _vector(direction),
-                ",".join(_number(c) for c in corners),
-            ),
-            fingerprints,
+        edgeText = "5|E|Line|%s|%s|%s|_|_|%s|_" % (
+            _number(edge.Length),
+            _vector(edge.CenterOfMass),
+            _vector(direction),
+            ",".join(_number(c) for c in corners),
         )
+        self.assertIn(edgeText, outlines)
+        #   and its outline, its two ends (PR 366 round 5)
+        self.assertEqual(outlines[edgeText], _points(edge))
         self.assertIn("1|V|Point|_|%s|_|_" % _vector(local.Vertexes[0].Point), fingerprints)
         # nothing global: the moved box gives the same text as the local one
         self.assertNotIn(_vector(box.Shape.Vertexes[0].Point), "".join(fingerprints))

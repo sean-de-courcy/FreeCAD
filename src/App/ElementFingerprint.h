@@ -66,13 +66,17 @@ namespace Data
  * Version 5 (ops#386, PR 366 round 4), written for every face and edge with an extent, which
  * every one but a degenerated edge has:
  *
- *     5|<type>|<kind>|<size>|<c>|<d>|<r>|<o or _>|<x0>,<y0>,<z0>,<x1>,<y1>,<z1>|<t,n or _>
+ *     5|<type>|<kind>|<size>|<c>|<d>|<r>|<o or _>|<x0>,<y0>,<z0>,<x1>,<y1>,<z1>|<t,n or _>|<p or _>
  *
  * - o: a circle's centre, as in version 2; `_` for anything else.
  * - x0..z1: the element's bounding box, as in version 3, for any kind of face or edge. Without it
  *   a curved or thin piece's place can't be bounded: whether a piece that moved still overlaps
  *   its old place was guessed from its size.
  * - t, n: the twins' centroid and number, as in version 4, or `_`.
+ * - p: the element's outline (round 5), the points' coordinates one after another: an edge's
+ *   points along it, a face's convex outer boundary in its plane. A box is bounded along the
+ *   world's axes only: a turned piece's box is wider than the piece, and an arc's corners seen
+ *   along a slanted direction reach past the arc.
  * Versions 3 and 4 are still read; an element with an extent is written as version 5.
  *
  * Numbers have 12 significant digits, in the classic locale, so the text is the same on every
@@ -112,6 +116,13 @@ struct AppExport ElementFingerprint
     /// of `center`), and their number; empty and 0 otherwise.
     std::optional<Base::Vector3d> twinCentroid;
     int twinCount = 0;
+    /// The element's outline (version 5, PR 366 round 5; in the frame of `center`): a line's two
+    /// ends, a curve's points along it from end to end, a face's outer boundary convex about its
+    /// plane, in order round it. Empty for a vertex and in an older fingerprint.
+    std::vector<Base::Vector3d> outline;
+
+    /// At most this many points in an outline: the reader takes more as a malformed field.
+    static constexpr std::size_t MaxOutline = 256;
 
     bool isValid() const
     {
@@ -130,12 +141,22 @@ struct AppExport ElementFingerprint
     /// for magnitudes below 1e-12 (numerical noise) and for -0.
     static std::string formatNumber(double value);
 
+    /** The convex hull of \a points seen along \a normal (PR 366 round 5): the points on it, in
+     * order round it, without those on a straight run between two others. Fewer than three points,
+     * or all in a row, give the two ends of the row.
+     */
+    static std::vector<Base::Vector3d> convexOutline(
+        const std::vector<Base::Vector3d>& points,
+        const Base::Vector3d& normal
+    );
+
     friend bool operator==(const ElementFingerprint& a, const ElementFingerprint& b)
     {
         return a.type == b.type && a.kind == b.kind && a.size == b.size && a.center == b.center
             && a.direction == b.direction && a.radii == b.radii && a.location == b.location
             && a.extentMin == b.extentMin && a.extentMax == b.extentMax
-            && a.twinCentroid == b.twinCentroid && a.twinCount == b.twinCount;
+            && a.twinCentroid == b.twinCentroid && a.twinCount == b.twinCount
+            && a.outline == b.outline;
     }
     friend bool operator!=(const ElementFingerprint& a, const ElementFingerprint& b)
     {
