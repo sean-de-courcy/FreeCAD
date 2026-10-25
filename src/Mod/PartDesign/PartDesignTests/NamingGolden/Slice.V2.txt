@@ -13,7 +13,7 @@ Edge c=(0.0000,5.0000,5.0000) m=10.0000 : _;Face1^;_^;{Box}^;SEC^;0^;F^;0^;IDX^,
 Edge c=(10.0000,5.0000,5.0000) m=10.0000 : _;Face1^;_^;{Plane}^;SEC^;0^;F^;0^;IDX^,SRC^;_,Face2^;_^;{Box}^;SEC^;0^;F^;0^;IDX^,SRC^;_;{Section};SEC;0;E;0;GEN;_
 Edge c=(5.0000,0.0000,5.0000) m=10.0000 : _;Face1^;_^;{Plane}^;SEC^;0^;F^;0^;IDX^,SRC^;_,Face3^;_^;{Box}^;SEC^;0^;F^;0^;IDX^,SRC^;_;{Section};SEC;0;E;0;GEN;_
 Edge c=(5.0000,10.0000,5.0000) m=10.0000 : _;Face1^;_^;{Plane}^;SEC^;0^;F^;0^;IDX^,SRC^;_,Face4^;_^;{Box}^;SEC^;0^;F^;0^;IDX^,SRC^;_;{Section};SEC;0;E;0;GEN;_
-Vertex c=(0.0000,0.0000,5.0000) m=0.0000 : _;Edge1^;_^;{Box}^;SEC^;0^;E^;0^;IDX^,SRC^;_,Face1^;_^;{Plane}^;SEC^;0^;F^;0^;IDX^,SRC^;_;{Section};SEC;0;V;0;GEN;_
-Vertex c=(0.0000,10.0000,5.0000) m=0.0000 : _;Edge3^;_^;{Box}^;SEC^;0^;E^;0^;IDX^,SRC^;_,Face1^;_^;{Plane}^;SEC^;0^;F^;0^;IDX^,SRC^;_;{Section};SEC;0;V;0;GEN;_
-Vertex c=(10.0000,0.0000,5.0000) m=0.0000 : _;Edge5^;_^;{Box}^;SEC^;0^;E^;0^;IDX^,SRC^;_,Face1^;_^;{Plane}^;SEC^;0^;F^;0^;IDX^,SRC^;_;{Section};SEC;0;V;0;GEN;_
-Vertex c=(10.0000,10.0000,5.0000) m=0.0000 : _;Edge7^;_^;{Box}^;SEC^;0^;E^;0^;IDX^,SRC^;_,Face1^;_^;{Plane}^;SEC^;0^;F^;0^;IDX^,SRC^;_;{Section};SEC;0;V;0;GEN;_
+Vertex c=(0.0000,0.0000,5.0000) m=0.0000 : _;Edge1^;_^;{Box}^;SEC^;0^;E^;0^;IDX^,SRC^;_,Face1^;_^;{Plane}^;SEC^;0^;F^;0^;IDX^,SRC^;_;{Section};SEC;out;V;0;GEN;_
+Vertex c=(0.0000,10.0000,5.0000) m=0.0000 : _;Edge3^;_^;{Box}^;SEC^;0^;E^;0^;IDX^,SRC^;_,Face1^;_^;{Plane}^;SEC^;0^;F^;0^;IDX^,SRC^;_;{Section};SEC;out;V;0;GEN;_
+Vertex c=(10.0000,0.0000,5.0000) m=0.0000 : _;Edge5^;_^;{Box}^;SEC^;0^;E^;0^;IDX^,SRC^;_,Face1^;_^;{Plane}^;SEC^;0^;F^;0^;IDX^,SRC^;_;{Section};SEC;out;V;0;GEN;_
+Vertex c=(10.0000,10.0000,5.0000) m=0.0000 : _;Edge7^;_^;{Box}^;SEC^;0^;E^;0^;IDX^,SRC^;_,Face1^;_^;{Plane}^;SEC^;0^;F^;0^;IDX^,SRC^;_;{Section};SEC;out;V;0;GEN;_

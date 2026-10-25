@@ -130,11 +130,11 @@ Vertex c=(-30.0000,-30.0000,0.0000) m=0.0000 : g1v1,g4v2;_;25;SKT;0;V;0;SRC;_
 Vertex c=(-30.0000,-30.0000,10.0000) m=0.0000 : _;~jsm32gah7t1uk;26;XTR;0;V;0;PRJ;_
 Vertex c=(-30.0000,30.0000,0.0000) m=0.0000 : g3v2,g4v1;_;25;SKT;0;V;0;SRC;_
 Vertex c=(-30.0000,30.0000,10.0000) m=0.0000 : _;~adiuglrg8290o;26;XTR;0;V;0;PRJ;_
-Vertex c=(-5.0000,0.0000,0.0000) m=0.0000 : _;~7f4sjmha1ambe,~8fliq1nvm6pme;28;CUT;0;V;0;GEN;_
+Vertex c=(-5.0000,0.0000,0.0000) m=0.0000 : _;~7f4sjmha1ambe,~8fliq1nvm6pme;28;CUT;out;V;0;GEN;_
 Vertex c=(-5.0000,0.0000,10.0000) m=0.0000 : g3v2,g4v1;_;27;SKT;0;V;0;SRC;_
 Vertex c=(-5.0000,30.0000,0.0000) m=0.0000 : _;~44ko2jel9ko20,~vp2tv9h6i48k6;28;CUT;0;V;0;GEN;_
 Vertex c=(-5.0000,30.0000,10.0000) m=0.0000 : g2v2,g3v1;_;27;SKT;0;V;0;SRC;_
-Vertex c=(0.0000,0.0000,0.0000) m=0.0000 : _;~7f4sjmha1ambe,~iigl0ime6klsc;28;CUT;0;V;0;GEN;_
+Vertex c=(0.0000,0.0000,0.0000) m=0.0000 : _;~7f4sjmha1ambe,~iigl0ime6klsc;28;CUT;out;V;0;GEN;_
 Vertex c=(0.0000,0.0000,10.0000) m=0.0000 : g1v1,g4v2;_;27;SKT;0;V;0;SRC;_
 Vertex c=(0.0000,10.0000,10.0000) m=0.0000 : _;~pj00f4r6bo3me;30;RVL;0;V;0;PRJ;_
 Vertex c=(0.0000,10.0000,6.0000) m=0.0000 : _;~kc63hjfdlcn2m;30;RVL;0;V;0;PRJ;_
