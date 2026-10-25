@@ -3400,6 +3400,12 @@ def arcPoints(radius=20, steps=3):
     return [V(radius - radius * math.cos(s), 0, radius * math.sin(s)) for s in angles]
 
 
+def nearBinormal(degrees):
+    """(1, 0, 1) turned `degrees` towards +Y: the arc's tangent passes within `degrees` of it."""
+    turn = math.radians(degrees)
+    return unit(V(1, 0, 1)) * math.cos(turn) + V(0, 1, 0) * math.sin(turn)
+
+
 def binormalVolume(spine, binormal, normal, area):
     """The volume a profile of `area` centred on the spine's start, in the plane of `normal`
     there, sweeps in Binormal mode where nothing folds. The mode carries the profile rigidly in
@@ -3423,6 +3429,13 @@ def binormalVolume(spine, binormal, normal, area):
             weight = 1 if i in (0, steps) else (4 if i % 2 else 2)
             total += weight * speed * (u1 - u0) / steps / 3
     return abs(area * total)
+
+
+def pointAfter(text, before):
+    """The point "(x, y, z)" that follows `before` in `text`, none when there is none."""
+    number = r"(-?[0-9.]+(?:e-?[0-9]+)?)"
+    found = re.search(re.escape(before) + rf"\({number}, {number}, {number}\)", text)
+    return V(*(float(found.group(i)) for i in (1, 2, 3))) if found else None
 
 
 class TestBinormalPipe(unittest.TestCase):
@@ -3469,6 +3482,18 @@ class TestBinormalPipe(unittest.TestCase):
     def arc():
         return Part.Wire([Part.Arc(*arcPoints()).toShape()])
 
+    def assertFailsAt(self, pipe, at, within, *phrases):
+        """Invalid, the status names the point `at` (within `within`) and every phrase."""
+        if pipe.isValid():
+            shape = pipe.Shape
+            self.fail("built: %s" % (shape.Volume if shape.isValid() else "an invalid solid"))
+        status = pipe.getStatusString()
+        for phrase in phrases:
+            self.assertIn(phrase, status)
+        point = pointAfter(status, "at ")
+        self.assertIsNotNone(point, status)
+        self.assertLess(point.distanceToPoint(at), within, status)
+
     def assertSwept(self, pipe, area, warns=False, normal=V(0, 0, 1)):
         """A valid solid of the mode's volume, with a small fold's warning only if `warns`."""
         self.assertTrue(pipe.isValid(), pipe.getStatusString())
@@ -3481,6 +3506,98 @@ class TestBinormalPipe(unittest.TestCase):
             self.assertIn("folds slightly over itself", pipe.getStatusString())
         else:
             self.assertNotIn("Warning", pipe.State)
+
+    # The tangent along the binormal ---------------------------------------------------------
+
+    def testTangentAlongBinormalFails(self):
+        """B = (1, 0, 1): the arc's tangent runs along it halfway, at (5.858, 0, 14.142). Before,
+        Valid, 408.325 where the arc without the cusp would give 452.4, crossing itself (BOP
+        SelfIntersect, tolerance 1.76 mm)."""
+        pipe = self.pipe(self.arc(), unit(V(1, 0, 1)))
+        self.assertFailsAt(
+            pipe, V(20 - 20 * math.sqrt(0.5), 0, 20 * math.sqrt(0.5)), 1e-3, "runs along the binormal"
+        )
+
+    def testTangentAlongBinormalFailsCircle(self):
+        """The same arc as a B-spline through 13 points, a circle: the same cusp, for any profile.
+        Before, Valid and crossing itself."""
+        curve = Part.BSplineCurve()
+        curve.interpolate(arcPoints(steps=13), InitialTangent=V(0, 0, 1), FinalTangent=V(1, 0, 0))
+        pipe = self.pipe(Part.Wire([curve.toShape()]), unit(V(1, 0, 1)), "circle")
+        self.assertFailsAt(
+            pipe, V(20 - 20 * math.sqrt(0.5), 0, 20 * math.sqrt(0.5)), 1e-2, "runs along the binormal"
+        )
+
+    def testBinormalReachedAtEndFails(self):
+        """B = X: the arc's tangent reaches it at the end, (20, 0, 20). Before, Valid, 266.667."""
+        pipe = self.pipe(self.arc(), V(1, 0, 0))
+        self.assertFailsAt(pipe, V(20, 0, 20), 1e-3, "runs along the binormal")
+
+    def testBinormalAlongStartFails(self):
+        """B = Z, the spine's tangent where it starts: no section plane there. Before, Valid, 320."""
+        pipe = self.pipe(self.arc(), V(0, 0, 1))
+        self.assertFailsAt(pipe, V(0, 0, 0), 1e-6, "runs along the binormal", "start")
+
+    def testIssueCaseFails(self):
+        """The issue's spine: 30 along Z, a 60 degree corner towards +X, then a B-spline bending
+        40 degrees more over 10 mm, B = X: the tangent passes along X in the B-spline, near
+        (7.147, 0, 31.92), under every transition. Before, Valid, 403.166 under all three."""
+        start = V(0, 0, 30)
+        leg = V(math.sin(math.radians(60)), 0, math.cos(math.radians(60)))
+        across = V(0, 1, 0).cross(leg).normalize()
+        points = [start]
+        for i in range(1, 9):
+            bend = math.radians(40 * (i - 0.5) / 8)
+            points.append(points[-1] + (leg * math.cos(bend) + across * math.sin(bend)) * 1.25)
+        end = leg * math.cos(math.radians(40)) + across * math.sin(math.radians(40))
+        curve = Part.BSplineCurve()
+        curve.interpolate(points, InitialTangent=leg, FinalTangent=end)
+        spine = Part.Wire([Part.makeLine(V(0, 0, 0), start), curve.toShape()])
+        for transition in ("Transformed", "Right corner", "Round corner"):
+            with self.subTest(transition=transition):
+                pipe = self.pipe(spine, V(1, 0, 0), Transition=transition)
+                self.assertFailsAt(pipe, V(7.147, 0, 31.92), 0.05, "runs along the binormal")
+                self.tearDown()
+                self.setUp()
+
+    # The tangent near the binormal ----------------------------------------------------------
+
+    def testNearBinormalFolds(self):
+        """B within 2 degrees of the arc's tangent at its middle: the square turns about B
+        faster than its width allows and folds by about a third of its extent. Before, Valid,
+        crossing itself (BOP SelfIntersect)."""
+        pipe = self.pipe(self.arc(), nearBinormal(2))
+        self.assertFailsAt(pipe, arcPoints(steps=3)[1], 1.0, "folds over itself by")
+
+    def testNearBinormalSmallFoldWarns(self):
+        """B within 10 degrees, the 2 x 8 rectangle across the arc's plane: it folds by 0.2 mm of
+        its 8.25 mm (2.4 %), under 5 %: the pipe builds with a warning. Before, no warning."""
+        pipe = self.pipe(self.arc(), nearBinormal(10), "rectY")
+        self.assertSwept(pipe, 16, warns=True)
+
+    def testBinormalTurnsBackFails(self):
+        """A 120 degree arc of radius 20 turning from +Z towards -X, B 10 degrees off +Z towards
+        +X: the sections stay near-level while the spine turns down, and past 90 degrees they run
+        back through the pipe (every point of the profile moves backwards through its plane).
+        The status names the first place sampled past it, within a sample's spacing (2.6 mm).
+        Before, Valid, a solid that isn't valid."""
+        centre = V(-20, 0, 0)
+        points = [centre + V(20 * math.cos(a), 0, 20 * math.sin(a)) for a in (0, math.pi / 3, 2 * math.pi / 3)]
+        binormal = V(math.sin(math.radians(10)), 0, math.cos(math.radians(10)))
+        pipe = self.pipe(Part.Wire([Part.Arc(*points).toShape()]), binormal)
+        self.assertFailsAt(pipe, V(-20, 0, 20), 2.7, "edge-on to the section or past")
+
+    # Clear of the binormal: as before -------------------------------------------------------
+
+    def testBinormalClear(self):
+        """B within 20 degrees: no fold, the mode's volume, no warning (square and rectangle)."""
+        for profile in ("square", "rectY"):
+            with self.subTest(profile=profile):
+                pipe = self.pipe(self.arc(), nearBinormal(20), profile)
+                self.assertSwept(pipe, 16)
+                pipe.Shape.check(True)
+                self.tearDown()
+                self.setUp()
 
     def testBinormalAxis(self):
         """B = Y, the arc's axis: the profile turns with the arc, 16 x 20 x pi / 2."""
