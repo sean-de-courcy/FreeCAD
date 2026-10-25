@@ -214,6 +214,8 @@ bool Feature::placerElsewhereThan(const Body* body, const char** property, std::
 App::DocumentObjectExecReturn* Feature::recompute()
 {
     failedElsewhere = false;
+    booleanInputsValid = false;
+    vouchedShape.Nullify();
     // Held by the Body's roll-back bar (ops#127): not run on any path (also obj.recompute()); it
     // stays touched and runs when the bar passes it
     if (auto body = getFeatureBody(); body && body->holds(this)) {
@@ -260,7 +262,11 @@ App::DocumentObjectExecReturn* Feature::recompute()
             return new App::DocumentObjectExecReturn(why, this);
         }
     }
-    return Part::Feature::recompute();
+    auto ret = Part::Feature::recompute();
+    if (ret == App::DocumentObject::StdReturn && booleanInputsValid) {
+        vouchedShape = Shape.getShape().getShape();
+    }
+    return ret;
 }
 
 App::DocumentObjectExecReturn* Feature::recomputePreview()
@@ -880,6 +886,19 @@ TopLoc_Location Feature::getInverseLocation(const TopoShape& base) const
         return base.getShape().Location().Inverted();
     }
     return location.Inverted();
+}
+
+Part::BooleanInputCheck Feature::booleanInputCheck() const
+{
+    // Evidence, not the feature's type: the base is vouched for only while its Shape is the one
+    // its own boolean made from inputs that were all valid as given. A boolean of valid inputs
+    // can still give an invalid output; upstream checks no input at all.
+    const auto base = freecad_cast<const Feature*>(getBaseObject(true));
+    if (base && base->isValid() && !base->vouchedShape.IsNull()
+        && base->Shape.getShape().getShape().IsPartner(base->vouchedShape)) {
+        return Part::BooleanInputCheck::Tools;
+    }
+    return Part::BooleanInputCheck::All;
 }
 
 Part::TopoShape Feature::getTopoShapeInLocalCoordinates(const App::DocumentObject* object) const

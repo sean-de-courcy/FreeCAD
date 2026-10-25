@@ -25,6 +25,7 @@
 #include "FeatureRevolution.h"
 
 #include <Base/ProgramVersion.h>
+#include <Mod/Part/App/TopoShapeOpCode.h>
 
 using namespace PartDesign;
 
@@ -116,7 +117,15 @@ TopoShape Revolution::makeShape(const TopoShape& base, const TopoShape& revolve)
     if (FuseOrder.getValue() == FeatureFirst) {
         return makeTopoShape(false).makeElementFuse({revolve, base});
     }
-    return makeTopoShape(false).makeElementFuse({base, revolve});
+    return makeTopoShape(false).makeElementBoolean(
+        Part::OpCodes::Fuse,
+        {base, revolve},
+        nullptr,
+        -1.0,
+        Part::ElementMapPolicy::Propagate,
+        booleanInputCheck(),
+        &booleanInputsValid
+    );
 }
 
 bool Revolution::suggestReversedAngle(double angle) const

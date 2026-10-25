@@ -394,7 +394,8 @@ names it.
 | `fix/457-hole-polish` | fix | ops#457, ops#404 | - | `integration` `31c71a7276` | `a024b9ae8f` (fork PR 372), 2026-10-23 | never (fork fix) |
 | `perf/310-b-boolean-locations` | fix | ops#310 | - | `integration` `31c71a7276` | `e82321a38b` (fork PR 367), 2026-10-24 | never (fork fix) |
 | `fix/428-massprops-callers` | fix | ops#428, ops#426 | - | `integration` `e82321a38b` | `7385573b2f` (fork PR 371), 2026-10-24 | never (fork fix) |
-| `infra/460-release-gen0` | infra | ops#460 | none | `integration` `7385573b2f` | (fork PR 374) | never |
+| `infra/460-release-gen0` | infra | ops#460 | none | `integration` `7385573b2f` | `47d7c1233d` (fork PR 374), 2026-10-24 | never |
+| `perf/310-c1-base-check` | fix | ops#310 | - | `integration` `7385573b2f` | (fork PR 370) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 

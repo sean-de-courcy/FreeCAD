@@ -2286,7 +2286,15 @@ App::DocumentObjectExecReturn* Hole::execute()
                 result = compound;
             }
             else {
-                result.makeElementBoolean(maker, {base, compound}, nullptr, FuzzyTolerance.getValue());
+                result.makeElementBoolean(
+                    maker,
+                    {base, compound},
+                    nullptr,
+                    FuzzyTolerance.getValue(),
+                    Part::ElementMapPolicy::Propagate,
+                    booleanInputCheck(),
+                    &booleanInputsValid
+                );
             }
             result = getSolid(result);
             retry = false;
@@ -2305,10 +2313,23 @@ App::DocumentObjectExecReturn* Hole::execute()
 
         if (retry) {
             int i = 0;
+            // The compound's boolean may have reported before getSolid() failed
+            booleanInputsValid = false;
+            // base is this feature's previous base, then its result after earlier holes
+            auto inputCheck = booleanInputCheck();
             for (auto& hole : holes) {
                 ++i;
                 try {
-                    result.makeElementBoolean(maker, {base, hole}, nullptr, FuzzyTolerance.getValue());
+                    result.makeElementBoolean(
+                        maker,
+                        {base, hole},
+                        nullptr,
+                        FuzzyTolerance.getValue(),
+                        Part::ElementMapPolicy::Propagate,
+                        inputCheck,
+                        &booleanInputsValid
+                    );
+                    inputCheck = ownResultCheck();
                 }
                 catch (Standard_Failure&) {
                     std::string msg(

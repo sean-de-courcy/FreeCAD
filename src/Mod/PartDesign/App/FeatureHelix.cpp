@@ -511,7 +511,12 @@ App::DocumentObjectExecReturn* Helix::execute()
         Part::TopoShape boolOp = makeTopoShape(false);
         boolOp.makeElementBoolean(
             getBooleanMaker(),
-            {base, nameResult ? named : TopoShape(result)}
+            {base, nameResult ? named : TopoShape(result)},
+            nullptr,
+            -1.0,
+            Part::ElementMapPolicy::Propagate,
+            booleanInputCheck(),
+            &booleanInputsValid
         );
 
         if (!isSingleSolidRuleSatisfied(boolOp.getShape())) {
