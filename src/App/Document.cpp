@@ -153,9 +153,9 @@ namespace
 // piece by the up-to face and edges it lies on and ends at, and by its place along the edge among
 // how many there are (PRJ,MOD,ORD), where the pieces were told apart by a counter in the
 // splitter's order.
-// 10: ops#468, vertexes generated along one edge and told apart by a counter carry their count
-// (`0of2`, `1of2`; a lone one stays `0`), so a name doesn't pass to another member when an edit
-// changes how many there are.
+// 10: ops#468, a vertex generated where an edge crosses a face is named by the side of the face
+// the edge goes to there (`in`, `out`), not by a counter alone, so a name doesn't pass to the
+// other crossing when an edit changes how many there are.
 constexpr int ForkNamingRevision = 10;
 
 // The `.N<n>` of the element map version: the form interned names are saved in (ops#6). 2: the
