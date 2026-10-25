@@ -397,7 +397,8 @@ names it.
 | `infra/460-release-gen0` | infra | ops#460 | none | `integration` `7385573b2f` | `47d7c1233d` (fork PR 374), 2026-10-24 | never |
 | `perf/310-c1-base-check` | fix | ops#310 | - | `integration` `7385573b2f` | `9cec95bc89` (fork PR 370), 2026-10-24 | never (fork fix) |
 | `perf/474-refine-voids-vouch` | fix | ops#474 | - | `integration` `9cec95bc89` | `b42c494538` (fork PR 375), 2026-10-24 | never (fork fix) |
-| `fix/448-sweep-planar-degree` | fix | ops#448 | - | `integration` `9cec95bc89` | (fork PR 373) | a new base sets MakePipeShell's max degree 14 and segments 1000 in Part sweeps and PartDesign Pipe, and Part::Sweep and PartDesign Pipe warn (Wire.makePipeShell and Part.makeSweepSurface log) above 0.1 mm tolerance |
+| `fix/448-sweep-planar-degree` | fix | ops#448 | - | `integration` `9cec95bc89` | `e5b90e2b34` (fork PR 373), 2026-10-24 | a new base sets MakePipeShell's max degree 14 and segments 1000 in Part sweeps and PartDesign Pipe, and Part::Sweep and PartDesign Pipe warn (Wire.makePipeShell and Part.makeSweepSurface log) above 0.1 mm tolerance |
+| `feat/370-pipe-corners` | feat | ops#370, ops#381 | - | `integration` `e5b90e2b34` | (fork PR 344) | never (fork feature) |
 
 ## Fork-only commits in carried topics
 

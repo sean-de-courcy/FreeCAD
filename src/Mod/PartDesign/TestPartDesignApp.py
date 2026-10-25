@@ -54,6 +54,7 @@ from PartDesignTests.TestHole import TestHole
 from PartDesignTests.TestRevolve import TestRevolve
 from PartDesignTests.TestPipe import TestPipe
 from PartDesignTests.TestPipe import TestPipeEndNames  # FreeCAD-CH, ops#351
+from PartDesignTests.TestPipe import TestPipeCorners  # FreeCAD-CH, ops#370
 from PartDesignTests.TestPipe import TestJointsWhenABendStraightens  # FreeCAD-CH, ops#446
 from PartDesignTests.TestPipe import TestBaseAfterAnInvalidPipe  # FreeCAD-CH, ops#310
 from PartDesignTests.TestPipe import TestBaseAfterAnInvalidBaseFeature  # FreeCAD-CH, ops#310
