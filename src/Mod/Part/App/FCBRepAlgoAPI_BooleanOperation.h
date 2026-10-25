@@ -37,6 +37,10 @@ class FCBRepAlgoAPIHelper
 public:
     static void setAutoFuzzy(BRepAlgoAPI_BooleanOperation* op);
     static void setAutoFuzzy(BRepAlgoAPI_BuilderAlgo* op);
+    /// Throws Base::CADKernelError when the built Cut or Fuse \a op lost a tool solid that lies
+    /// inside its base: OCCT's solid builder can drop a void, or keep the tool as a separate
+    /// overlapping solid (ops#472). Costs a look at the tool faces' history unless one left no trace
+    static void checkLostTools(BRepAlgoAPI_BooleanOperation* op);
 };
 
 class FCBRepAlgoAPI_BooleanOperation: public BRepAlgoAPI_BooleanOperation

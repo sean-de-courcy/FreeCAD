@@ -183,6 +183,7 @@ App::DocumentObjectExecReturn* MultiFuse::execute()
             if (!mkFuse.IsDone()) {
                 throw Base::RuntimeError("MultiFusion failed");
             }
+            FCBRepAlgoAPIHelper::checkLostTools(&mkFuse);
 
             TopoShape res = makeTopoShape(false);
             res = res.makeShapeWithElementMap(mkFuse.Shape(), MapperMaker(mkFuse), shapes, OpCodes::Fuse);
