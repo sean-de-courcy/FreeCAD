@@ -8968,3 +8968,170 @@ TEST(SolveOwner, missingGeneratorKeepsAPiece)
     EXPECT_EQ(outcome.element, "Vertex20");
     EXPECT_EQ(outcome.elements, (std::vector<std::string> {"Vertex20"}));
 }
+
+// ---------------------------------------------------------------------------------------------
+// The exact place (ops#394)
+
+namespace
+{
+
+// A long board's top edges (ops#394): 3600 along x, 45 apart in y, at z = 235, the target's
+// diagonal 5000 (d_max 50). The old edge's sketch line was deleted and drawn again, so no name
+// relates it to the pool (another geometry ID in another sketch).
+struct LongBoard
+{
+    std::string oldEdge = section({}, {sketchEdge(1)}, 7, "XTR", 0, 'E', {"PRJ"});
+    std::string redrawn = section({}, {sketchEdge(9, 6)}, 7, "XTR", 0, 'E', {"PRJ"});
+    std::string otherSide = section({}, {sketchEdge(3, 6)}, 7, "XTR", 0, 'E', {"PRJ"});
+
+    static ElementFingerprint edgeAt(double y, double length = 3600, double x = 1800)
+    {
+        return fingerprint('E', "Line", length, Base::Vector3d(x, y, 235), Base::Vector3d(1, 0, 0));
+    }
+
+    // The redrawn edge (Edge2) and the board's other top edge (Edge3), measured as given
+    SolveInput input(const ElementFingerprint& edge2, const ElementFingerprint& edge3) const
+    {
+        SolveInput input;
+        input.diagonal = 5000.0;
+        input.pool["Edge"] = {element("Edge2", {redrawn}), element("Edge3", {otherSide})};
+        measure(input, {{"Edge2", edge2}, {"Edge3", edge3}}, nullptr);
+        input.entries = {missing(oldEdge, "Edge")};
+        input.entries[0].fingerprint = edgeAt(0);
+        return input;
+    }
+};
+
+}  // namespace
+
+TEST(SolveOwner, exactPlaceBeatsTheGapTest)
+{
+    // The board's top edge drawn again where it was: the other top edge lies 45 mm away, within
+    // d_max, and tier 3's gap test broke the reference. The one element at the saved place, with
+    // the saved size, is the element.
+    LongBoard b;
+    auto input = b.input(LongBoard::edgeAt(0), LongBoard::edgeAt(45));
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Resolved) << outcome.evidence;
+    EXPECT_EQ(outcome.element, "Edge2");
+    EXPECT_EQ(outcome.tier, 3);
+    EXPECT_EQ(outcome.evidence,
+              "no structural candidate, at the same place: nearest 0.000, second 45.000, d_max "
+              "50.000");
+
+    //   the switch off: tier 3's gap test alone, as before
+    input.exactPlace = false;
+    outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << outcome.evidence;
+    EXPECT_EQ(outcome.evidence.rfind("no structural candidate, tier 3 found none: nearest 0.000, "
+                                     "second 45.000, d_max 50.000",
+                                     0),
+              0U)
+        << outcome.evidence;
+    EXPECT_EQ(outcome.candidates, (std::vector<std::string> {"Edge2", "Edge3"}));
+}
+
+TEST(SolveOwner, exactPlaceNeedsTheSize)
+{
+    // At the saved centre but 1 % longer: not the element as it was; the gap test decides, and
+    // breaks as before.
+    LongBoard b;
+    auto input = b.input(LongBoard::edgeAt(0, 3636), LongBoard::edgeAt(45));
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << outcome.evidence;
+    EXPECT_EQ(outcome.evidence.rfind("no structural candidate, tier 3 found none", 0), 0U)
+        << outcome.evidence;
+}
+
+TEST(SolveOwner, exactPlaceLeavesTheGapTestAlone)
+{
+    // 0.3 mm from the saved centre: near, not at the place; the gap test breaks it as before.
+    LongBoard b;
+    auto input = b.input(LongBoard::edgeAt(0.3), LongBoard::edgeAt(45));
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << outcome.evidence;
+    EXPECT_EQ(outcome.evidence.rfind("no structural candidate, tier 3 found none", 0), 0U)
+        << outcome.evidence;
+}
+
+TEST(SolveOwner, exactPlaceTieBreaks)
+{
+    // Two elements at the saved place with the saved size (coincident twins of a compound):
+    // ambiguous, both listed as at the place.
+    LongBoard b;
+    auto input = b.input(LongBoard::edgeAt(0), LongBoard::edgeAt(0));
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << outcome.evidence;
+    EXPECT_EQ(outcome.evidence, "ambiguous: 2 elements at the saved place");
+    EXPECT_EQ(outcome.candidates, (std::vector<std::string> {"Edge2", "Edge3"}));
+    EXPECT_EQ(outcome.candidateRoles, (std::vector<std::string> {"place", "place"}));
+}
+
+TEST(SolveOwner, exactPlaceAmongTies)
+{
+    // Two survivors of tier 1 (the same sources), one at the saved place, the other 45 mm off,
+    // within d_max: tier 3's gap test left them ambiguous; the one at the place is the element.
+    Placed p;
+    SolveInput input;
+    input.diagonal = 5000.0;
+    input.pool["Face"] = {
+        element("Face2", {p.names.newTop}),
+        element("Face10", {p.otherTop}),
+    };
+    input.entries = {missing(p.names.oldTop)};
+    input.entries[0].fingerprint = p.top;
+    measure(input, {{"Face2", p.topAt(55)}, {"Face10", p.top}}, nullptr);
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Resolved) << outcome.evidence;
+    EXPECT_EQ(outcome.element, "Face10");
+    EXPECT_EQ(outcome.tier, 3);
+    EXPECT_NE(outcome.evidence.find(
+                  "tier 3, at the same place: nearest 0.000, second 45.000, d_max 50.000"
+              ),
+              std::string::npos)
+        << outcome.evidence;
+    EXPECT_EQ(outcome.candidates, (std::vector<std::string> {"Face2"}));
+
+    //   the other 500 mm off, beyond the gap: tier 3 decides as before, with its own text
+    measure(input, {{"Face2", p.topAt(510)}, {"Face10", p.top}}, nullptr);
+    outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Resolved) << outcome.evidence;
+    EXPECT_EQ(outcome.element, "Face10");
+    EXPECT_NE(outcome.evidence.find("tier 3: nearest 0.000, second 500.000"), std::string::npos)
+        << outcome.evidence;
+
+    //   both at the place: ambiguous, both listed as at the place
+    measure(input, {{"Face2", p.top}, {"Face10", p.top}}, nullptr);
+    outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << outcome.evidence;
+    EXPECT_EQ(outcome.evidence, "ambiguous: 2 elements at the saved place");
+    EXPECT_EQ(outcome.candidateRoles, (std::vector<std::string> {"place", "place"}));
+}
+
+TEST(SolveOwner, exactPlaceAmongTheMergedNeighbours)
+{
+    // Tier 3 among the survivors the merged-neighbour test dropped: the second bend's joint at
+    // the saved place and a third bend's 0.4 mm off, within d_max (0.6): the one at the place.
+    RefinedBend b;
+    auto input = b.edgeInput();
+    const auto thirdJoint = upper({b.x1, RefinedBend::side(2, 2)}, 9, "PSH");
+    input.pool["Edge"].push_back(element("Edge8", {thirdJoint}));
+    RefinedBend::lieOn(input,
+                       {{"Edge2", {"Face4", "Face6"}},
+                        {"Edge7", {"Face3", "Face6"}},
+                        {"Edge8", {"Face3", "Face6"}}});
+    input.entries[0].fingerprint = jointLine(30);
+    measure(input,
+            {{"Edge2", jointLine(0)}, {"Edge7", jointLine(30)}, {"Edge8", jointLine(30.4)}},
+            nullptr);
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Resolved) << outcome.evidence;
+    EXPECT_EQ(outcome.element, "Edge7");
+    EXPECT_EQ(outcome.tier, 3);
+    EXPECT_EQ(outcome.evidence.rfind("no structural candidate, tier 3 among tier 1's survivors "
+                                     "off the old element's faces, at the same place: nearest "
+                                     "0.000, second 0.400",
+                                     0),
+              0U)
+        << outcome.evidence;
+}

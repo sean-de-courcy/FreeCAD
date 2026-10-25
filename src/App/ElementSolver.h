@@ -672,6 +672,15 @@ struct AppExport SolveInput
     /// (sourceTags(), a line redrawn in the same sketch); with this, any pick is. For comparison
     /// runs.
     bool guessAnySource = false;
+    /// The exact place (XP, ops#394): wherever geometry decides (no structural candidate, a tie
+    /// among tier 1's survivors, the survivors the merged-neighbour test dropped), the one
+    /// element of those tier 2 keeps that lies at the saved place (atSamePlace(): kind,
+    /// direction and radii, the size within GeometryTolerances::placeSize, the centre within
+    /// the continuation's ε) is the element, however near the second nearest is; two or more
+    /// there break the entry as ambiguous (role `place`). Without it, tier 3's gap test decides
+    /// alone, and a long board's other edge within d_max breaks a reference found in its place.
+    /// The batch sets it from the NamingSolver parameter ExactPlace (default on).
+    bool exactPlace = true;
     /// Tier 1 keeps only candidates made by the old element's maker (ops#167): a candidate that
     /// isn't in the old name's ancestry needs the old name's maker (NameAncestry::makerTag())
     /// in the lineage of one of its names (NameAncestry::hasLineageTag()), and so does G2's
@@ -871,6 +880,11 @@ struct AppExport SolveOutcome
  * - No candidates: tiers 2 and 3 run on every pool element of the type (tier-0 elements
  *   excluded), and both must pass: the element extrinsicNearest() chooses among those tier 2
  *   keeps, or nothing ("no candidate").
+ * - The exact place (ops#394, SolveInput::exactPlace): before tier 3 decides among several
+ *   candidates, among those the merged-neighbour test dropped, or without a candidate, the one
+ *   that lies at the saved place (atSamePlace()) is the element (tier 3, evidence `... at the
+ *   same place: ...`), whatever lies within the gap; two or more there break the entry
+ *   (`ambiguous: N elements at the saved place`, role `place`).
  * - The entry then goes into one MatchGraph per owner, one candidate per element, and
  *   forcedMatching() decides.
  * - A partner one of whose names equals the old name up to the duplicate counter of any section

@@ -4633,6 +4633,46 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             }
             return findNearest(*saved, fingerprints, input.diagonal, input.tolerances);
         };
+        // The exact place (XP, ops#394): those of \a positions, tier 2's survivors, that lie at
+        // the saved place. Asked where tier 3's gap test chose none: an element where the old one
+        // was and as it was is the element, not one plausible candidate among others, though a
+        // long board's other edge lies within d_max (decision 97 Q4)
+        auto atPlaceAmong = [&](const std::vector<int>& positions) {
+            std::vector<int> found;
+            if (!input.exactPlace || !saved->center) {
+                return found;
+            }
+            for (int k : positions) {
+                if (atSamePlace(*saved,
+                                fingerprintOf(pool.elements[k]),
+                                input.diagonal,
+                                input.tolerances,
+                                input.continuationDistance)) {
+                    found.push_back(k);
+                }
+            }
+            return found;
+        };
+        // Several elements at the saved place (coincident twins of a compound): the entry breaks,
+        // listing them first (role `place`), then the others of \a rest nearest first
+        auto breakAtPlace = [&](const std::vector<int>& place,
+                                const std::vector<int>& rest,
+                                const char* role,
+                                const std::string& why) {
+            state.decided = true;
+            state.outcome.evidence = "ambiguous: " + std::to_string(place.size())
+                + " elements at the saved place" + why;
+            listByDistance(state, place, "place");
+            std::vector<int> others;
+            for (int k : rest) {
+                if (std::find(place.begin(), place.end(), k) == place.end()) {
+                    others.push_back(k);
+                }
+            }
+            const auto n = state.outcome.candidates.size();
+            listByDistance(state, others, role, n < 8 ? 8 - n : std::size_t(0));
+            listDropped(state);
+        };
         // The guess rules (N2 section 5): never against a failed target (N10), never without a
         // saved fingerprint (N8).
         const bool guessing = input.guess && !input.targetFailed && saved != nullptr;
@@ -4766,12 +4806,20 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             std::vector<int> agree = intrinsicSurvivors(state.otherFaces);
             if (!agree.empty()) {
                 Nearest nearest = nearestOf(agree);
-                if (nearest.index >= 0) {
+                int pick = nearest.index >= 0 ? agree[nearest.index] : -1;
+                // XP; several at the place are left to the whole pool, which breaks on them
+                const auto place = pick < 0 ? atPlaceAmong(agree) : std::vector<int>();
+                if (place.size() == 1) {
+                    pick = place.front();
+                }
+                if (pick >= 0) {
                     state.geometric = true;
-                    state.geometryEvidence = "no structural candidate, tier 3 among tier 1's "
-                                             "survivors off the old element's faces: "
+                    state.geometryEvidence = std::string("no structural candidate, tier 3 among "
+                                                         "tier 1's survivors off the old "
+                                                         "element's faces")
+                        + (nearest.index >= 0 ? ": " : ", at the same place: ")
                         + describeNearest(nearest);
-                    state.candidates = {agree[nearest.index]};
+                    state.candidates = {pick};
                     state.listed = state.candidates;
                 }
             }
@@ -4789,14 +4837,26 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             }
             else if (!agree.empty()) {
                 Nearest nearest = nearestOf(agree);
+                const auto place = nearest.index < 0 ? atPlaceAmong(agree) : std::vector<int>();
                 Nearest wide;
-                if (nearest.index < 0 && guessing) {
+                if (nearest.index < 0 && place.empty() && guessing) {
                     wide = wideNearestOf(agree);
                 }
                 if (nearest.index >= 0) {
                     state.geometryTier = 3;
                     state.geometryEvidence = "tier 3: " + describeNearest(nearest);
                     state.candidates = {agree[nearest.index]};
+                }
+                else if (place.size() == 1) {
+                    // XP: a thin member's two edges, both tier 1's survivors, within d_max
+                    state.geometryTier = 3;
+                    state.geometryEvidence =
+                        "tier 3, at the same place: " + describeNearest(nearest);
+                    state.candidates = place;
+                }
+                else if (!place.empty()) {
+                    breakAtPlace(place, state.listed, "structural", "");
+                    continue;
                 }
                 else if (wide.index >= 0) {
                     // G1: tier 3's wider rule among the structural survivors tier 2 keeps
@@ -4832,12 +4892,25 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             std::vector<int> agree = intrinsicSurvivors(open);
             if (!agree.empty()) {
                 Nearest nearest = nearestOf(agree);
-                if (nearest.index >= 0) {
+                // XP: the board's top edge drawn again where it was, its other top edge within
+                // d_max (ops#394)
+                const auto place = nearest.index < 0 ? atPlaceAmong(agree) : std::vector<int>();
+                if (nearest.index >= 0 || place.size() == 1) {
                     state.geometric = true;
-                    state.geometryEvidence = "no structural candidate, tier 3: "
+                    state.geometryEvidence = std::string(nearest.index >= 0
+                                                             ? "no structural candidate, tier 3: "
+                                                             : "no structural candidate, at the "
+                                                               "same place: ")
                         + describeNearest(nearest) + derivedText(state, nullptr);
-                    state.candidates = {agree[nearest.index]};
+                    state.candidates = {nearest.index >= 0 ? agree[nearest.index] : place.front()};
                     state.listed = state.candidates;
+                }
+                else if (!place.empty()) {
+                    breakAtPlace(place,
+                                 agree,
+                                 "geometric",
+                                 derivedText(state, &agree) + otherMakerText(state));
+                    continue;
                 }
                 else {
                     // G2: tier 3's wider rule without structure, behind its own switch. Policy D

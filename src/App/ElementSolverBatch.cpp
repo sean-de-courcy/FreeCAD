@@ -771,6 +771,8 @@ bool solveElementReferences(DocumentObject* feature,
     bool guess = true;
     bool guessNoStructure = true;
     bool guessAnySource = false;
+    // The exact place (ops#394), on by default
+    bool exactPlace = true;
     // T1 and G2' (ops#167), T1' (ops#173), on by default
     bool sameMaker = true;
     bool sameSource = true;
@@ -957,6 +959,8 @@ bool solveElementReferences(DocumentObject* feature,
             guessNoStructure = solverParameters()->GetBool("GuessNoStructure", true);
             // G2 without the same-source test (N3 5.2), for comparison runs
             guessAnySource = solverParameters()->GetBool("GuessAnySource", false);
+            // The one element at the saved place, whatever lies within tier 3's gap (ops#394)
+            exactPlace = solverParameters()->GetBool("ExactPlace", true);
             // Tier 1 and G2 only from the old element's maker (ops#167), off for comparison runs
             sameMaker = solverParameters()->GetBool("Tier1SameMaker", true);
             // Tier 1 only from elements that kept the old element's sources (ops#173), off for
@@ -1293,6 +1297,7 @@ bool solveElementReferences(DocumentObject* feature,
         input.guess = guess;
         input.guessNoStructure = guessNoStructure;
         input.guessAnySource = guessAnySource;
+        input.exactPlace = exactPlace;
         input.sameMaker = sameMaker;
         input.sameSource = sameSource;
         // Nothing is guessed against a failed feature passing its input through (N2's N10)

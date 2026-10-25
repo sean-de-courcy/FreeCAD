@@ -237,13 +237,15 @@ class TestNamingSolver(unittest.TestCase):
         """A reference whose mapped name is gone after an element-map version change is
         re-derived by its index, checked against its saved fingerprint: the same geometry
         resolves ("index"). With tier 3 kept from deciding (NamingSolver/Tier3Distance so large
-        that every other edge is within d_max) and the guess rules off (their wider tier 3 would
-        decide), reopening the stale-name file breaks the reference, and the version change then
-        restores it."""
+        that every other edge is within d_max), the exact place off (the edge is at its place,
+        ops#394) and the guess rules off (their wider tier 3 would decide), reopening the
+        stale-name file breaks the reference, and the version change then restores it."""
         # Arrange
         group = App.ParamGet("User parameter:BaseApp/Preferences/Mod/Part/NamingSolver")
         group.SetFloat("Tier3Distance", 100.0)
         self.addCleanup(group.RemFloat, "Tier3Distance")
+        group.SetBool("ExactPlace", False)
+        self.addCleanup(group.RemBool, "ExactPlace")
         group.SetBool("Guess", False)
         self.addCleanup(group.RemBool, "Guess")
         doc, index = self.openWithStaleName()
@@ -2535,3 +2537,71 @@ class TestNamingSolver(unittest.TestCase):
         for feature in body.Group:
             self.assertTrue(feature.isValid(), (feature.Name, feature.getStatusString()))
         self.assertEqual([o.Name for o in body.Group][-4:], ["OutletSketch", "Outlet", "SlotSketch", "Slot"])
+
+    # The exact place (ops#394): an element found again where it was, in a long part
+
+    def chamferedRims(self, doc):
+        """A floor frame's two rims, 3600 x 45 and 235 high, 4045 apart, padded from one sketch
+        (the target's diagonal 5454, so tier 3's d_max is 54.5 mm), and a Chamfer of 5 mm on the
+        first rim's outer top edge (y = 0, z = 235). The rim's other top edge lies 45 mm away."""
+        body = models.body(doc)
+        geometry = models.rectangle(0, 0, 3600, 45) + models.rectangle(0, 4045, 3600, 4090)
+        profile = models.sketch(doc, "Profile", geometry, body)
+        pad = models.pad(body, profile, 235, "Rims")
+        doc.recompute()
+        chamfer = body.newObject("PartDesign::Chamfer", "Chamfer")
+        chamfer.Base = (pad, edge("line", direction=X, through=(0, 0, 235)).one(pad.Shape))
+        chamfer.Size = 5
+        doc.recompute()
+        self.assertTrue(chamfer.isValid(), chamfer.getStatusString())
+        return pad, chamfer
+
+    def redrawFirstRim(self, doc, corners):
+        """The first rim's four lines deleted and the rim drawn again through `corners`: new
+        geometry IDs, so no name relates its old edges to the new ones."""
+        doc.Profile.delGeometries([0, 1, 2, 3])
+        doc.Profile.addGeometry(models.polygon(corners), False)
+        doc.recompute()
+
+    def assertChamferAt(self, chamfer, pad, through):
+        base, subs = chamfer.Base
+        self.assertEqual(base, pad)
+        [sub] = subs
+        centre = pad.Shape.getElement(sub).CenterOfMass
+        self.assertLess((centre - App.Vector(*through)).Length, 1e-6, (sub, centre))
+
+    def testExactPlaceBeatsTheGapInALongPart(self):
+        """The first rim drawn again exactly where it was: no name relates the chamfered edge to
+        the new rim's, and the board's other top edge lies 45 mm from it, within tier 3's d_max.
+        The gap test broke the reference; the one edge at the saved place, with the saved length,
+        is the element: resolved at tier 3, with the quieter same-place warning (decision 97)."""
+        doc = self.newDocument()
+        pad, chamfer = self.chamferedRims(doc)
+
+        self.redrawFirstRim(doc, [(3600, 45), (3600, 0), (0, 0), (0, 45)])
+
+        self.assertTrue(chamfer.isValid(), chamfer.getStatusString())
+        self.assertChamferAt(chamfer, pad, (1800, 0, 235))
+        [entry] = App.getReferenceReport(chamfer)
+        self.assertEqual((entry["status"], entry["tier"]), ("resolved", 3), entry["evidence"])
+        self.assertEqual(entry["warning_level"], "same-place")
+        self.assertTrue(
+            entry["evidence"].startswith("no structural candidate, at the same place:"),
+            entry["evidence"],
+        )
+
+    def testExactPlaceNeedsTheSameSize(self):
+        """The control: the first rim drawn again 3000 long from the same corner. Its top edge's
+        centre is 300 mm from the saved one and its length differs: nothing is at the saved place,
+        and the reference is never taken quietly (broken, or a guess with the full warning)."""
+        doc = self.newDocument()
+        pad, chamfer = self.chamferedRims(doc)
+
+        self.redrawFirstRim(doc, [(3000, 45), (3000, 0), (0, 0), (0, 45)])
+
+        if chamfer.isValid():
+            [entry] = App.getReferenceReport(chamfer)
+            self.assertEqual(entry["warning_level"], "normal", entry["evidence"])
+        else:
+            [entry] = App.getReferenceReport(chamfer)
+            self.assertEqual(entry["status"], "broken")
