@@ -63,6 +63,18 @@ namespace Data
  *   c. An edit can trade twins' names; the element's offset from it tells the solver which twin
  *   went where, under a move or a turn of them all.
  *
+ * Version 5 (ops#386, PR 366 round 4), written for every face and edge with an extent, which
+ * every one but a degenerated edge has:
+ *
+ *     5|<type>|<kind>|<size>|<c>|<d>|<r>|<o or _>|<x0>,<y0>,<z0>,<x1>,<y1>,<z1>|<t,n or _>
+ *
+ * - o: a circle's centre, as in version 2; `_` for anything else.
+ * - x0..z1: the element's bounding box, as in version 3, for any kind of face or edge. Without it
+ *   a curved or thin piece's place can't be bounded: whether a piece that moved still overlaps
+ *   its old place was guessed from its size.
+ * - t, n: the twins' centroid and number, as in version 4, or `_`.
+ * Versions 3 and 4 are still read; an element with an extent is written as version 5.
+ *
  * Numbers have 12 significant digits, in the classic locale, so the text is the same on every
  * platform and in every locale. A reader takes a version it doesn't know as no fingerprint.
  */
@@ -78,6 +90,9 @@ struct AppExport ElementFingerprint
     /// The text form of a fingerprint with its twins' centroid (ops#360, PR 340 round 5): a
     /// ninth field. Only ordered twins have one.
     static constexpr int VersionWithTwins = 4;
+    /// The text form of a fingerprint with an extent of any kind (ops#386, PR 366 round 4): the
+    /// location, the extent and the twins in fields eight to ten. Every face and edge has one.
+    static constexpr int VersionWithBox = 5;
 
     /// `F`, `E` or `V`; 0 for no fingerprint.
     char type = 0;
@@ -88,8 +103,9 @@ struct AppExport ElementFingerprint
     std::vector<double> radii;
     /// The centre of a circle edge (in the frame of `center`); empty otherwise.
     std::optional<Base::Vector3d> location;
-    /// The bounding box of a planar face, its lower and upper corners (in the frame of
-    /// `center`); both empty otherwise.
+    /// The bounding box of a face or an edge, its lower and upper corners (in the frame of
+    /// `center`); both empty for a vertex and in an older fingerprint of anything but a planar
+    /// face (versions 1, 2 and 4).
     std::optional<Base::Vector3d> extentMin;
     std::optional<Base::Vector3d> extentMax;
     /// The mean of the centres of the element's ordered twins, its own included (in the frame

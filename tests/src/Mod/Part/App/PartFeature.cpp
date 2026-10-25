@@ -1273,6 +1273,23 @@ TEST_F(FeaturePartTest, fingerprintsOfABox)
     EXPECT_FALSE(none.isValid());
 }
 
+namespace
+{
+
+// A fingerprint's bounding box, within 1e-7 of the given corners
+void expectExtent(
+    const Data::ElementFingerprint& fp,
+    const Base::Vector3d& low,
+    const Base::Vector3d& high
+)
+{
+    ASSERT_TRUE(fp.extentMin && fp.extentMax) << fp.toString();
+    EXPECT_LT(Base::Distance(*fp.extentMin, low), 1e-7) << fp.toString();
+    EXPECT_LT(Base::Distance(*fp.extentMax, high), 1e-7) << fp.toString();
+}
+
+}  // namespace
+
 TEST_F(FeaturePartTest, fingerprintsOfACylinder)
 {
     // Arrange
@@ -1291,7 +1308,9 @@ TEST_F(FeaturePartTest, fingerprintsOfACylinder)
         );
         if (fp.kind == "Cylinder") {
             ++lateral;
-            EXPECT_EQ(fp.toString(), "1|F|Cylinder|62.8318530718|0,0,2.5|0,0,1|2");
+            //   with its bounding box, in version 5 (PR 366 round 4)
+            EXPECT_EQ(fp.toString().substr(0, 45), "5|F|Cylinder|62.8318530718|0,0,2.5|0,0,1|2|_|");
+            expectExtent(fp, Base::Vector3d(-2, -2, 0), Base::Vector3d(2, 2, 5));
         }
         else {
             ++planes;
@@ -1300,6 +1319,8 @@ TEST_F(FeaturePartTest, fingerprintsOfACylinder)
             //   top faces up, bottom faces down
             EXPECT_DOUBLE_EQ(fp.direction->z, fp.center->z > 2.5 ? 1.0 : -1.0);
             EXPECT_NEAR(*fp.size, 4.0 * std::numbers::pi, 1e-9);
+            const double z = fp.center->z;
+            expectExtent(fp, Base::Vector3d(-2, -2, z), Base::Vector3d(2, 2, z));
         }
     }
     for (int index = 1; index <= static_cast<int>(cylinder.countSubShapes(TopAbs_EDGE)); ++index) {
@@ -1316,14 +1337,17 @@ TEST_F(FeaturePartTest, fingerprintsOfACylinder)
             //   a full circle's centre of mass is its centre
             EXPECT_NEAR(fp.center->x, 0.0, 1e-9);
             EXPECT_NEAR(fp.center->y, 0.0, 1e-9);
-            //   a circle carries its centre, in version 2 (Task 2 PR 7b)
+            //   a circle carries its centre (Task 2 PR 7b), and its box, in version 5
             ASSERT_TRUE(fp.location);
             EXPECT_NEAR(Base::Distance(*fp.location, *fp.center), 0.0, 1e-9);
-            EXPECT_EQ(fp.toString().substr(0, 11), "2|E|Circle|");
+            EXPECT_EQ(fp.toString().substr(0, 11), "5|E|Circle|");
+            const double z = fp.center->z;
+            expectExtent(fp, Base::Vector3d(-2, -2, z), Base::Vector3d(2, 2, z));
         }
         else {
             ++seams;
-            EXPECT_EQ(fp.toString(), "1|E|Line|5|2,0,2.5|0,0,1|_");
+            EXPECT_EQ(fp.toString().substr(0, 29), "5|E|Line|5|2,0,2.5|0,0,1|_|_|");
+            expectExtent(fp, Base::Vector3d(2, 0, 0), Base::Vector3d(2, 0, 5));
         }
     }
     EXPECT_EQ(lateral, 1);

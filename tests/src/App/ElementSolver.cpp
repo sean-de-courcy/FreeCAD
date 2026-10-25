@@ -5918,6 +5918,106 @@ TEST(Moved, markedCapOffItsOldCentreBreaks)
     EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
 }
 
+TEST(Moved, markedPiecesThatLeftTheirBoxBreak)
+{
+    // PR 366 round 4: every face and edge fingerprint has a box (version 5). A marked piece that
+    // moved, with nothing at its old place, stands while its box shares a length with the old one
+    // on every axis both extend along (a cap), or seen along the edge (an edge piece).
+    SolveInput input;
+    input.diagonal = 30;
+    const auto first = farPiece({plateElement("Face1", 'F')});
+    const auto second = farPiece({plateElement("Face2", 'F')});
+    input.pool["Face"] = {
+        element("Face11", {first}),
+        element("Face12", {second}),
+    };
+    auto boxed = [](ElementFingerprint fp, Base::Vector3d low, Base::Vector3d high) {
+        fp.extentMin = low;
+        fp.extentMax = high;
+        return fp;
+    };
+    // A tall B-spline cap's left piece, 1 x 8 (x 0..1), slid by 2 onto the next plate of a
+    // reordered nameless shell. Its centre moved 2, under half the two pieces' sides together
+    // (2.8), which an older record without a box takes for an overlap: it stands. The boxes
+    // share no width: broken, the hit its one candidate.
+    auto tall = [&](double x0, double z) {
+        return boxed(
+            fingerprint('F', "BSpline", 8, Base::Vector3d(x0 + 0.5, 4, z)),
+            Base::Vector3d(x0, 0, z),
+            Base::Vector3d(x0 + 1, 8, z)
+        );
+    };
+    auto entry = exact("Face11");
+    entry.exactName = first;
+    entry.fingerprint = tall(0, 10);
+    entry.fingerprint.extentMin.reset();
+    entry.fingerprint.extentMax.reset();
+    input.entries = {entry};
+    measure(input, {{"Face11", tall(2, 10)}, {"Face12", tall(3, 10)}}, nullptr);
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Exact);
+    input.entries[0].fingerprint = tall(0, 10);
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << describe(outcome);
+    EXPECT_EQ(outcome.candidates, (std::vector<std::string> {"Face11"}));
+    // Shifted within its old place (0.5), it stands; lifted 0.5 with its flat plate, the boxes
+    // apart on z only, which neither extends along: it stands too.
+    measure(input, {{"Face11", tall(0.5, 10)}, {"Face12", tall(3, 10)}}, nullptr);
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Exact);
+    measure(input, {{"Face11", tall(0, 10.5)}, {"Face12", tall(1, 10.5)}}, nullptr);
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Exact);
+
+    // A disc's far circle in two arcs (radius 1, centre (1, 1)), the left one x 0..1, slid by 2
+    // with the shell reordered: the left arc's name on the next plate's arc, x 2..3. Along the
+    // way to the other arc (x), the centres moved 2, under half the arcs' lengths together (pi),
+    // which the older record takes for an overlap; the boxes seen along it share nothing:
+    // broken.
+    input.pool["Edge"] = {
+        element("Edge24", {farEdgePiece({plateElement("Face1", 'F')})}),
+        element("Edge26", {farEdgePiece({plateElement("Face2", 'F')})}),
+    };
+    auto arc = [&](double cx, bool left) {
+        const double offset = 2.0 / std::numbers::pi;
+        ElementFingerprint fp = fingerprint(
+            'E',
+            "Circle",
+            std::numbers::pi,
+            Base::Vector3d(left ? cx - offset : cx + offset, 1, 10),
+            Base::Vector3d(0, 0, 1),
+            {1}
+        );
+        fp.location = Base::Vector3d(cx, 1, 10);
+        return boxed(
+            fp,
+            Base::Vector3d(left ? cx - 1 : cx, 0, 10),
+            Base::Vector3d(left ? cx : cx + 1, 2, 10)
+        );
+    };
+    auto edgeEntry = exact("Edge24", "Edge");
+    edgeEntry.exactName = input.pool["Edge"][0].names[0];
+    edgeEntry.fingerprint = arc(1, true);
+    edgeEntry.fingerprint.extentMin.reset();
+    edgeEntry.fingerprint.extentMax.reset();
+    input.entries = {edgeEntry};
+    measure(input, {{"Edge24", arc(3, true)}, {"Edge26", arc(3, false)}}, nullptr);
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Exact);
+    input.entries[0].fingerprint = arc(1, true);
+    outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << describe(outcome);
+    EXPECT_EQ(outcome.candidates, (std::vector<std::string> {"Edge24"}));
+    // The disc moved 3 across the edge (y), its arcs beside each other as before: along the
+    // edge the boxes still share the old span, it stands.
+    auto across = [&](bool left) {
+        ElementFingerprint fp = arc(1, left);
+        fp.center->y += 3;
+        fp.location->y += 3;
+        fp.extentMin->y += 3;
+        fp.extentMax->y += 3;
+        return fp;
+    };
+    measure(input, {{"Edge24", across(true)}, {"Edge26", across(false)}}, nullptr);
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Exact);
+}
+
 TEST(Moved, markedCapOnASeamMovedStands)
 {
     // PR 366 round 3: A's cap (x 0..5) in pieces on a nameless three-plate shell, the left one

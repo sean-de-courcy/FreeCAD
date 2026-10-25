@@ -641,22 +641,26 @@ void faceIntrinsic(const TopoDS_Face& face,
     }
 }
 
+// An element's extent: its tight bounding box, without tolerances or gaps. A planar face's since
+// fingerprint version 3 (Task 2 PR 8), every face's and edge's since version 5 (ops#386, PR 366
+// round 4: a thin or curved piece's place, bounded).
+void extentFingerprint(const TopoDS_Shape& shape, Data::ElementFingerprint& fp)
+{
+    Bnd_Box box;
+    BRepBndLib::AddOptimal(shape, box, false, false);
+    if (!box.IsVoid()) {
+        box.SetGap(0.0);
+        double x0 {}, y0 {}, z0 {}, x1 {}, y1 {}, z1 {};
+        box.Get(x0, y0, z0, x1, y1, z1);
+        fp.extentMin = Base::Vector3d(x0, y0, z0);
+        fp.extentMax = Base::Vector3d(x1, y1, z1);
+    }
+}
+
 void faceFingerprint(const TopoDS_Face& face, Data::ElementFingerprint& fp)
 {
     faceIntrinsic(face, fp);
-    if (fp.kind == "Plane") {
-        // Its extent (fingerprint version 3, Task 2 PR 8): the tight bounding box of the face's
-        // boundary, without tolerances or gaps.
-        Bnd_Box box;
-        BRepBndLib::AddOptimal(face, box, false, false);
-        if (!box.IsVoid()) {
-            box.SetGap(0.0);
-            double x0 {}, y0 {}, z0 {}, x1 {}, y1 {}, z1 {};
-            box.Get(x0, y0, z0, x1, y1, z1);
-            fp.extentMin = Base::Vector3d(x0, y0, z0);
-            fp.extentMax = Base::Vector3d(x1, y1, z1);
-        }
-    }
+    extentFingerprint(face, fp);
     GProp_GProps props;
     BRepGProp::SurfaceProperties(face, props);
     fp.size = props.Mass();
@@ -720,6 +724,7 @@ void edgeFingerprint(const TopoDS_Edge& edge, Data::ElementFingerprint& fp)
     fp.size = props.Mass();
     if (props.Mass() > 0.0) {
         fp.center = toVector(props.CentreOfMass().XYZ());
+        extentFingerprint(edge, fp);
     }
     else {
         // A degenerated edge has no length: its vertex stands for it.

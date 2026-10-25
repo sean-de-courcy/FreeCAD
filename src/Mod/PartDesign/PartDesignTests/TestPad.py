@@ -1167,6 +1167,88 @@ def replaceUpToShape(feature, shape):
     feature.UpToShape = (plate, ["Face%d" % i for i in range(1, len(shape.Faces) + 1)])
 
 
+def dimensionedCircle(sketch, tag, x, y, radius):
+    """PR 366 round 4: a circle in sketch, its radius named r<tag>, its centre's place x<tag> and
+    y<tag>"""
+    import Sketcher
+
+    circle = sketch.addGeometry(
+        Part.Circle(FreeCAD.Vector(x, y, 0), FreeCAD.Vector(0, 0, 1), radius)
+    )
+    for kind, arguments, value, name in (
+        ("Radius", (circle,), radius, "r"),
+        ("DistanceX", (-1, 1, circle, 3), x, "x"),
+        ("DistanceY", (-1, 1, circle, 3), y, "y"),
+    ):
+        constraint = sketch.addConstraint(Sketcher.Constraint(kind, *arguments, value))
+        sketch.renameConstraint(constraint, name + tag)
+
+
+def profileUpToFreeformStrips(doc, kind, cuts, draw):
+    """PR 366 round 4: a Pad from the profile `draw(sketch)` draws in the XY plane up to the
+    B-spline strips freeformStripsShape(z, cuts) at z = 10 (UpToShape, Refine off), or a Pocket
+    from it on top of the block x -8..18, y -8..9, z 0..10, down to the strips at z = 4. Returns
+    the feature and the height of its far caps"""
+    body = doc.addObject("PartDesign::Body", "Body")
+    xy = [f for f in body.Origin.OriginFeatures if f.Role == "XY_Plane"][0]
+    capZ = 10 if kind == "Pad" else 4
+    plate = doc.addObject("Part::Feature", "Plate")
+    plate.Shape = freeformStripsShape(capZ, cuts)
+    if kind == "Pocket":
+        blockSketch = body.newObject("Sketcher::SketchObject", "BlockSketch")
+        blockSketch.AttachmentSupport = [(xy, "")]
+        blockSketch.MapMode = "FlatFace"
+        dimensionedRectangle(blockSketch, "Block", -8, -8, 18, 9)
+        blockPad = body.newObject("PartDesign::Pad", "Block")
+        blockPad.Profile = blockSketch
+        blockPad.Length = 10
+    sketch = body.newObject("Sketcher::SketchObject", "Profile")
+    sketch.AttachmentSupport = [(xy, "")]
+    sketch.MapMode = "FlatFace"
+    if kind == "Pocket":
+        sketch.AttachmentOffset = FreeCAD.Placement(FreeCAD.Vector(0, 0, 10), FreeCAD.Rotation())
+    draw(sketch)
+    feature = body.newObject("PartDesign::" + kind, kind)
+    feature.Profile = sketch
+    feature.Type = "UpToShape"
+    feature.UpToShape = (plate, ["Face%d" % i for i in range(1, len(plate.Shape.Faces) + 1)])
+    feature.Refine = False
+    doc.recompute()
+    return feature, capZ
+
+
+def slideOntoReorderedStrips(test, kind, cuts, draw, places, datum, order, after):
+    """PR 366 round 4: datum points on the pieces of profileUpToFreeformStrips(cuts, draw) at
+    `places` ({piece: ("F" or "E", x, y)}), then A's `datum` ((name, value)) set while the
+    strips are rebuilt in `order`; each point is then on the piece through one of its `after`
+    places or says it lost its piece, never quietly elsewhere"""
+    doc = FreeCAD.newDocument("PadUpToReorderedStrips")
+    try:
+        feature, z = profileUpToFreeformStrips(doc, kind, cuts, draw)
+        test.assertTrue(feature.isValid(), feature.getStatusString())
+        shape = feature.Shape
+        points = {}
+        for piece, (element, x, y) in places.items():
+            if element == "F":
+                points[piece] = pointOnFarCap(feature, farCapAt(shape, z, x, y))
+            else:
+                points[piece] = pointOnFarEdge(feature, farEdgeAt(shape, z, x, y))
+        feature.Profile[0].setDatum(
+            datum[0], FreeCAD.Units.Quantity(datum[1], FreeCAD.Units.Length)
+        )
+        replaceUpToShape(feature, freeformStripsShape(z, cuts, order))
+        doc.recompute()
+        test.assertTrue(feature.isValid(), feature.getStatusString())
+        shape = feature.Shape
+        for piece, allowed in after.items():
+            centre = centreOfFarCapAt if places[piece][0] == "F" else centreOfFarEdgeAt
+            assertNotQuietlyElsewhere(
+                test, points[piece], z, [centre(shape, z, x, y) for x, y in allowed]
+            )
+    finally:
+        FreeCAD.closeDocument(doc.Name)
+
+
 # The child of testPadUpToAFreeformFaceCapsMigrate: opens the saved file, recomputes every object
 # (the naming migration), records the datum point, grows A and records it again
 _MIGRATION_CHILD = """\
@@ -3005,6 +3087,78 @@ class TestPad(unittest.TestCase):
                         assertNotQuietlyElsewhere(self, points[piece], z, allowed)
                 finally:
                     FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToThreePlatesTallCapPiecesSlidOntoTheNextPlate(self):
+        # PR 366 round 4: as testPadUpToThreePlatesPiecesSlidOntoTheNextPlate, with A 8 high
+        # (x 0..2, y 0..8): its far cap's pieces are 1 x 8, on plates 1 and 2 of the strips meeting
+        # at x = 1 and 3. A moved by 2 or 2.5 onto plates 2 and 3, the strips rebuilt in the order
+        # 2, 1, 3 or 2, 3, 1: the left piece's name lay on plate 2's piece. B-spline caps had no
+        # box, and the overlap guessed from their sizes (centres about 2 apart, half their sides
+        # together 2.4 to 2.8) kept the left datum quietly on plate 2's piece. Every fingerprint
+        # has a box now, and the two boxes share no width: the left datums say they lost their
+        # pieces, the right ones are on plate 2's or say they lost them. For the Pad and the
+        # Pocket
+        def draw(sketch):
+            dimensionedRectangle(sketch, "A", 0, 0, 2, 8)
+            dimensionedRectangle(sketch, "B", 12, 0, 14, 3)
+
+        places = {
+            "CL": ("F", 0.5, 4),
+            "CR": ("F", 1.5, 4),
+            "TL": ("E", 0.5, 8),
+            "TR": ("E", 1.5, 8),
+        }
+        for kind in ("Pad", "Pocket"):
+            for x in (2, 2.5):
+                for order in ((1, 0, 2), (1, 2, 0)):
+                    with self.subTest(kind=kind, x=x, order=order):
+                        middle = (x + 3) / 2
+                        after = {"CL": [], "TL": [], "CR": [(middle, 4)], "TR": [(middle, 8)]}
+                        slideOntoReorderedStrips(
+                            self, kind, (1, 3), draw, places, ("xA", x), order, after
+                        )
+
+    def testPadUpToThreePlatesArcsSlidOntoTheNextPlate(self):
+        # PR 366 round 4: the disc A (radius 1, centre (1, 1)) up to the strips meeting at x = 1
+        # and 3: its far circle in two arcs, on plates 1 and 2. A moved to x 3 (arcs on plates 2
+        # and 3), the strips rebuilt in the order 2, 1, 3 or 2, 3, 1: the left arc's name lay on
+        # plate 2's arc. The overlap along the edge compared the chord to the other arc (2) with
+        # half the arcs' lengths together (3.1): the left datum stayed quietly on plate 2's arc.
+        # Seen in the arcs' boxes, the two share no length along the edge: it says it lost its
+        # arc. The right piece of the cap is on plate 2's piece or says it lost it. For the Pad
+        # and the Pocket
+        def draw(sketch):
+            dimensionedCircle(sketch, "A", 1, 1, 1)
+            dimensionedCircle(sketch, "B", 14, 3, 1)
+
+        places = {"L": ("E", 0, 1), "CL": ("F", 0.5, 1), "CR": ("F", 1.5, 1)}
+        after = {"L": [], "CL": [], "CR": [(2.5, 1)]}
+        for kind in ("Pad", "Pocket"):
+            for order in ((1, 0, 2), (1, 2, 0)):
+                with self.subTest(kind=kind, order=order):
+                    slideOntoReorderedStrips(
+                        self, kind, (1, 3), draw, places, ("xA", 3), order, after
+                    )
+
+    def testPadUpToThreePlatesCapPiecesSwapOnAPartialSlide(self):
+        # PR 366 round 4: the disc A (radius 1.2, centre (1, 1)) up to the strips meeting at x = 1
+        # and 3: its cap in two pieces, on plates 1 and 2. A moved by 1 (x 0.8..3.2), the strips
+        # rebuilt in the order 2, 1, 3: each piece's name lay on the other plate's piece, and
+        # both old places were bare. The pieces' sizes said they still overlapped them: the left
+        # datum went quietly to plate 2's piece, the right one to plate 1's sliver. The boxes
+        # only touch at x = 1: each datum is on its plate's piece now or says it lost it. For
+        # the Pad and the Pocket
+        def draw(sketch):
+            dimensionedCircle(sketch, "A", 1, 1, 1.2)
+            dimensionedCircle(sketch, "B", 14, 3, 1)
+
+        places = {"L": ("E", -0.2, 1), "CL": ("F", 0.4, 1), "CR": ("F", 1.6, 1)}
+        after = {"L": [], "CL": [(0.9, 1)], "CR": [(2, 1)]}
+        for kind in ("Pad", "Pocket"):
+            with self.subTest(kind=kind):
+                slideOntoReorderedStrips(
+                    self, kind, (1, 3), draw, places, ("xA", 2), (1, 0, 2), after
+                )
 
     def testPadUpToAHoledShellFarEdgePiecesOfAFlippedRectangle(self):
         # PR 366 round 3: A (x -3..3, y 1..3) across the plate's hole and its fill, its far bottom

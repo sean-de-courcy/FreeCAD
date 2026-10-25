@@ -41,12 +41,12 @@ def _vector(v):
 
 def _planeFingerprint(face):
     """The expected text of a planar face, from the Python geometry API (an independent path):
-    version 3, with the face's bounding box (Task 2 PR 8)."""
+    with the face's bounding box (Task 2 PR 8), in version 5 (ops#386, PR 366 round 4)."""
     u0, u1, v0, v1 = face.ParameterRange
     normal = face.normalAt((u0 + u1) / 2, (v0 + v1) / 2)
     box = face.optimalBoundingBox(False, False)
     corners = (box.XMin, box.YMin, box.ZMin, box.XMax, box.YMax, box.ZMax)
-    return "3|F|Plane|%s|%s|%s|_|%s" % (
+    return "5|F|Plane|%s|%s|%s|_|_|%s|_" % (
         _number(face.Area),
         _vector(face.CenterOfMass),
         _vector(normal),
@@ -136,9 +136,24 @@ class ReferenceFingerprintTest(unittest.TestCase):
         first = next(c for c in (direction.x, direction.y, direction.z) if abs(c) > 1e-12)
         if first < 0:
             direction = -direction
+        # an edge with its bounding box too, in version 5 (PR 366 round 4)
+        edgeBox = edge.optimalBoundingBox(False, False)
+        corners = (
+            edgeBox.XMin,
+            edgeBox.YMin,
+            edgeBox.ZMin,
+            edgeBox.XMax,
+            edgeBox.YMax,
+            edgeBox.ZMax,
+        )
         self.assertIn(
-            "1|E|Line|%s|%s|%s|_"
-            % (_number(edge.Length), _vector(edge.CenterOfMass), _vector(direction)),
+            "5|E|Line|%s|%s|%s|_|_|%s|_"
+            % (
+                _number(edge.Length),
+                _vector(edge.CenterOfMass),
+                _vector(direction),
+                ",".join(_number(c) for c in corners),
+            ),
             fingerprints,
         )
         self.assertIn("1|V|Point|_|%s|_|_" % _vector(local.Vertexes[0].Point), fingerprints)

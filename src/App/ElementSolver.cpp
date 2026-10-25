@@ -2828,8 +2828,8 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 const double reach = (saved.size ? std::sqrt(*saved.size) / 4.0 : 0.0) + eps;
                 const bool centreLeft = saved.center && input.holdsPoint
                     && !input.holdsPoint(hit, *saved.center, reach);
-                // Within the old piece's box; a face without one (not planar), no larger than the
-                // old piece (a plate grown over the old centre is larger)
+                // Within the old piece's box; an older fingerprint without one (a face not planar),
+                // no larger than the old piece (a plate grown over the old centre is larger)
                 auto withinOldPlace = [&](const ElementFingerprint& other) {
                     if (!saved.extentMin || !saved.extentMax || !other.extentMin || !other.extentMax) {
                         return !saved.size || !other.size || *other.size <= *saved.size * 1.01;
@@ -2859,25 +2859,45 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             // its old place and no longer overlaps it: an up-to shell without names, rebuilt in
             // another order while the pieces slid onto the next face, gives the old face's index
             // to that face, and the name to its piece, with the same count and place along the
-            // edge. Overlapping: two pieces of one edge whose centres lie nearer than half their
-            // lengths together (a seam moved may leave a sliver of the old piece); two planar
-            // faces whose boxes share an area; otherwise faces whose centres lie nearer than half
-            // their sides together. A piece shifted within its old place keeps its name; twins
-            // went by their places above. The piece on a hole's fill, the disc and the hole moved
-            // together further than its size, breaks too: its old place left bare, it can't be
-            // told from a cap whose pieces slid onto the next faces of a reordered shell, its
-            // other pieces sharing their faces with another profile's caps (round 3, three
-            // plates)
+            // edge. Overlapping (round 4, from the boxes every face and edge fingerprint has since
+            // version 5): two pieces of one edge whose boxes, seen along the edge, share a length
+            // (a seam moved may leave a sliver of the old piece); two faces whose boxes share a
+            // length on every axis both extend along (a cap lifted with its flat plate keeps its
+            // place). Sizes alone over-count the overlap of a tall or thin piece, and of an arc,
+            // whose length runs round its chord. An older fingerprint, without a box: edges by
+            // their centres' distance along the edge against half their lengths together, faces
+            // by their centres' distance against half their sides together. A piece shifted
+            // within its old place keeps its name; twins went by their places above. The piece
+            // on a hole's fill, the disc and the hole moved together further than its size,
+            // breaks too: its old place left bare, it can't be told from a cap whose pieces slid
+            // onto the next faces of a reordered shell, its other pieces sharing their faces with
+            // another profile's caps (round 3, three plates)
             bool departed = false;
             if (place.empty() && !hasTwins && saved.center && now.center && saved.size && now.size
                 && isMarkedPiece(hitName)) {
                 const double eps = input.continuationDistance * std::max(1.0, input.diagonal);
                 const double apart = Base::Distance(*saved.center, *now.center);
+                const bool boxes = saved.extentMin && saved.extentMax && now.extentMin
+                    && now.extentMax;
+                // Apart on an axis both boxes extend along: they share no length there
+                auto apartWhereBothExtend = [&]() {
+                    for (int axis = 0; axis < 3; ++axis) {
+                        const double oldLow = (*saved.extentMin)[axis];
+                        const double oldHigh = (*saved.extentMax)[axis];
+                        const double low = (*now.extentMin)[axis];
+                        const double high = (*now.extentMax)[axis];
+                        if (oldHigh - oldLow > eps && high - low > eps
+                            && std::min(oldHigh, high) - std::max(oldLow, low) <= eps) {
+                            return true;
+                        }
+                    }
+                    return false;
+                };
                 if (saved.type == 'E') {
                     // Along the edge only: the far edge moved across itself (A grown taller) still
                     // holds its old span. A line's direction; a curve's (a B-spline plate's far
-                    // edge), the way to the nearest other piece of the edge now; without one,
-                    // the distance itself
+                    // edge, an arc), the way to the nearest other piece of the edge now; without
+                    // one, the axes both boxes extend along, or the distance itself
                     std::optional<Base::Vector3d> direction;
                     if (saved.kind == "Line" && saved.direction && saved.direction->Length() > eps) {
                         direction = *saved.direction;
@@ -2904,30 +2924,40 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                             }
                         }
                     }
-                    double along = apart;
-                    if (direction) {
-                        along = std::abs(
-                            (*now.center - *saved.center) * Base::Vector3d(*direction).Normalize()
-                        );
+                    if (boxes && direction) {
+                        // Each box seen along the direction: the span of its corners
+                        const Base::Vector3d d = Base::Vector3d(*direction).Normalize();
+                        auto span = [&](const ElementFingerprint& fp) {
+                            double low = 0.0;
+                            double high = 0.0;
+                            for (int axis = 0; axis < 3; ++axis) {
+                                const double a = d[axis] * (*fp.extentMin)[axis];
+                                const double b = d[axis] * (*fp.extentMax)[axis];
+                                low += std::min(a, b);
+                                high += std::max(a, b);
+                            }
+                            return std::make_pair(low, high);
+                        };
+                        const auto [oldLow, oldHigh] = span(saved);
+                        const auto [low, high] = span(now);
+                        departed = std::min(oldHigh, high) - std::max(oldLow, low) <= eps;
                     }
-                    departed = along >= (*saved.size + *now.size) / 2.0 - eps;
+                    else if (boxes) {
+                        departed = apartWhereBothExtend();
+                    }
+                    else {
+                        double along = apart;
+                        if (direction) {
+                            along = std::abs(
+                                (*now.center - *saved.center)
+                                * Base::Vector3d(*direction).Normalize()
+                            );
+                        }
+                        departed = along >= (*saved.size + *now.size) / 2.0 - eps;
+                    }
                 }
-                else if (saved.extentMin && saved.extentMax && now.extentMin && now.extentMax) {
-                    // The boxes' common part, on each axis; a flat face's box is flat on one
-                    const Base::Vector3d low(
-                        std::max(saved.extentMin->x, now.extentMin->x),
-                        std::max(saved.extentMin->y, now.extentMin->y),
-                        std::max(saved.extentMin->z, now.extentMin->z)
-                    );
-                    const Base::Vector3d high(
-                        std::min(saved.extentMax->x, now.extentMax->x),
-                        std::min(saved.extentMax->y, now.extentMax->y),
-                        std::min(saved.extentMax->z, now.extentMax->z)
-                    );
-                    const Base::Vector3d common = high - low;
-                    const int shared = (common.x > eps) + (common.y > eps) + (common.z > eps);
-                    const bool apartOnAxis = common.x < -eps || common.y < -eps || common.z < -eps;
-                    departed = apartOnAxis || shared < 2;
+                else if (boxes) {
+                    departed = apartWhereBothExtend();
                 }
                 else {
                     departed = apart >= (std::sqrt(*saved.size) + std::sqrt(*now.size)) / 2.0 - eps;

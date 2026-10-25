@@ -186,7 +186,8 @@ TEST(ElementFingerprint, circleLocationRoundTrip)
 
 TEST(ElementFingerprint, planeExtentRoundTrip)
 {
-    // A planar face carries its bounding box, in version 3 (Task 2 PR 8)
+    // A planar face carries its bounding box, in version 3 (Task 2 PR 8); since version 5 (PR 366
+    // round 4) it is written there
     ElementFingerprint face;
     face.type = 'F';
     face.kind = "Plane";
@@ -196,7 +197,7 @@ TEST(ElementFingerprint, planeExtentRoundTrip)
     face.extentMin = Base::Vector3d(0, 0, 0);
     face.extentMax = Base::Vector3d(8, 0, 10);
     const char* text = "3|F|Plane|80|4,0,5|0,-1,0|_|0,0,0,8,0,10";
-    EXPECT_EQ(face.toString(), text);
+    EXPECT_EQ(face.toString(), "5|F|Plane|80|4,0,5|0,-1,0|_|_|0,0,0,8,0,10|_");
     auto parsed = ElementFingerprint::fromString(text);
     ASSERT_TRUE(parsed.isValid());
     EXPECT_EQ(parsed, face);
@@ -246,7 +247,8 @@ TEST(ElementFingerprint, twinCentroidRoundTrip)
     plane.extentMax = Base::Vector3d(4, 7, 10);
     plane.twinCount = 3;
     const char* planeText = "4|F|Plane|8.5|3,5.25,10|0,0,1|_|2,4,10,4,7,10|3,3.4,10,3";
-    EXPECT_EQ(plane.toString(), planeText);
+    //   with its extent, written as version 5 (PR 366 round 4)
+    EXPECT_EQ(plane.toString(), "5|F|Plane|8.5|3,5.25,10|0,0,1|_|_|2,4,10,4,7,10|3,3.4,10,3");
     EXPECT_EQ(ElementFingerprint::fromString(planeText), plane);
 
     ElementFingerprint arc;
@@ -290,4 +292,82 @@ TEST(ElementFingerprint, twinCentroidRoundTrip)
     ASSERT_TRUE(old.isValid());
     EXPECT_FALSE(old.twinCentroid.has_value());
     EXPECT_EQ(old.twinCount, 0);
+}
+
+TEST(ElementFingerprint, boxRoundTrip)
+{
+    // Every face and edge carries its bounding box, in version 5, beside a circle's centre and
+    // the twins' centroid (ops#386, PR 366 round 4): a B-spline cap, an arc of a circle, a line
+    ElementFingerprint cap;
+    cap.type = 'F';
+    cap.kind = "BSpline";
+    cap.size = 8;
+    cap.center = Base::Vector3d(0.5, 4, 10);
+    cap.extentMin = Base::Vector3d(0, 0, 10);
+    cap.extentMax = Base::Vector3d(1, 8, 10);
+    const char* capText = "5|F|BSpline|8|0.5,4,10|_|_|_|0,0,10,1,8,10|_";
+    EXPECT_EQ(cap.toString(), capText);
+    auto parsed = ElementFingerprint::fromString(capText);
+    ASSERT_TRUE(parsed.isValid());
+    EXPECT_EQ(parsed, cap);
+
+    ElementFingerprint arc;
+    arc.type = 'E';
+    arc.kind = "Circle";
+    arc.size = 3.14159265359;
+    arc.center = Base::Vector3d(0.363380227632, 1, 10);
+    arc.direction = Base::Vector3d(0, 0, 1);
+    arc.radii = {1};
+    arc.location = Base::Vector3d(1, 1, 10);
+    arc.extentMin = Base::Vector3d(0, 0, 10);
+    arc.extentMax = Base::Vector3d(1, 2, 10);
+    const char* arcText =
+        "5|E|Circle|3.14159265359|0.363380227632,1,10|0,0,1|1|1,1,10|0,0,10,1,2,10|_";
+    EXPECT_EQ(arc.toString(), arcText);
+    EXPECT_EQ(ElementFingerprint::fromString(arcText), arc);
+
+    //   with its twins
+    ElementFingerprint twin = arc;
+    twin.twinCentroid = Base::Vector3d(1, 1, 10);
+    twin.twinCount = 2;
+    const char* twinText =
+        "5|E|Circle|3.14159265359|0.363380227632,1,10|0,0,1|1|1,1,10|0,0,10,1,2,10|1,1,10,2";
+    EXPECT_EQ(twin.toString(), twinText);
+    EXPECT_EQ(ElementFingerprint::fromString(twinText), twin);
+
+    ElementFingerprint line;
+    line.type = 'E';
+    line.kind = "Line";
+    line.size = 2;
+    line.center = Base::Vector3d(1, 8, 10);
+    line.direction = Base::Vector3d(1, 0, 0);
+    line.extentMin = Base::Vector3d(0, 8, 10);
+    line.extentMax = Base::Vector3d(2, 8, 10);
+    const char* lineText = "5|E|Line|2|1,8,10|1,0,0|_|_|0,8,10,2,8,10|_";
+    EXPECT_EQ(line.toString(), lineText);
+    EXPECT_EQ(ElementFingerprint::fromString(lineText), line);
+
+    //   version 5 only for a face or an edge, with ten fields, a centre only for a circle, six
+    //   numbers in the extent, and twins as version 4 has them
+    for (const auto& bad : {
+             "5|F|BSpline|8|0.5,4,10|_|_|_|0,0,10,1,8,10",
+             "5|F|BSpline|8|0.5,4,10|_|_|_|0,0,10,1,8,10|_|_",
+             "5|F|BSpline|8|0.5,4,10|_|_|_|_|_",
+             "5|F|BSpline|8|0.5,4,10|_|_|_|0,0,10,1,8|_",
+             "5|F|BSpline|8|0.5,4,10|_|_|0,0,0|0,0,10,1,8,10|_",
+             "5|E|Line|2|1,8,10|1,0,0|_|0,0,0|0,8,10,2,8,10|_",
+             "5|V|Point|_|1,8,10|_|_|_|1,8,10,1,8,10|_",
+             "5|F|BSpline|8|0.5,4,10|_|_|_|0,0,10,1,8,10|1,1,10,1",
+             "5|F|BSpline|8|0.5,4,10|_|_|_|0,0,10,1,8,10|1,1,10",
+             "5|F|BSpline|8|0.5,4,10|_|_|_|0,0,10,1,8,10|1,1,10,2.5",
+             "4|F|BSpline|8|0.5,4,10|_|_|_|0,0,10,1,8,10|_",
+         }) {
+        EXPECT_FALSE(ElementFingerprint::fromString(bad).isValid()) << bad;
+    }
+
+    //   a fingerprint without an extent (a degenerated edge, a vertex) keeps its old version
+    ElementFingerprint bare = cap;
+    bare.extentMin.reset();
+    bare.extentMax.reset();
+    EXPECT_EQ(bare.toString(), "1|F|BSpline|8|0.5,4,10|_|_");
 }
