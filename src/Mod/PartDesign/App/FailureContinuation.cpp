@@ -7,6 +7,7 @@
 
 #include <Precision.hxx>
 #include <Standard_Failure.hxx>
+#include <TopLoc_Location.hxx>
 
 #include <App/DocumentObject.h>
 #include <App/PropertyLinks.h>
@@ -126,7 +127,8 @@ void collectLinks(const App::Property* prop, std::vector<InputLink>& links)
 /** Write the failed solid feature's base shape as its output (ops#126, N1 4.5.3, F1, F8)
  *
  * The base is re-expressed relative to the feature's own Placement when the two differ (an
- * unattached primitive), so the world geometry is the base's and the Placement is kept.
+ * unattached primitive, a Boolean, a feature that never ran), so the world geometry is the
+ * base's and the Placement is kept.
  */
 void passThroughBase(Feature& feature)
 {
@@ -144,10 +146,14 @@ void passThroughBase(Feature& feature)
             pass = base;
         }
         else {
-            pass = base.makeElementTransform(placement.inverse().toMatrix(),
-                                             nullptr,
-                                             Part::CheckScale::noScaleCheck,
-                                             Part::CopyType::copy);
+            // Writing the shape replaces its location with the Placement (below), so the base's
+            // own location goes into the geometry too: P^-1 * L, from the base unlocated. P^-1
+            // alone dropped L, and the base came out displaced by minus it (ops#487)
+            Part::TopoShape unlocated = base.located(TopLoc_Location());
+            pass = unlocated.makeElementTransform((placement.inverse() * location).toMatrix(),
+                                                  nullptr,
+                                                  Part::CheckScale::noScaleCheck,
+                                                  Part::CopyType::copy);
         }
     }
 
