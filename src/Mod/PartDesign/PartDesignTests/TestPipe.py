@@ -1214,9 +1214,9 @@ class TestPipeCorners(unittest.TestCase):
         check). Round 5 looked at the curvature 16 times between two samples and at the turn
         between them, which is nothing: the S-bend fell between, and the pipes were accepted
         silently. A circle of radius 0.5 along the gentlest S-bend would need a bend tighter than
-        1.9 to fold: valid, without a warning. Where OCCT's sweep would crash along an S-bend
-        (testCurveWhereOCCTWouldCrashFails: macOS's numbers at 1 degree over 0.07 mm), the pipe
-        fails saying so before any sweep, and the fold isn't looked for."""
+        1.9 to fold: valid and exact, without a warning of its own. Where OCCT's sweep would crash
+        along an S-bend (testCurveWhereOCCTWouldCrashFails: macOS's numbers at 1 degree over 0.07
+        mm), the pipe fails saying so before any sweep, and the fold isn't looked for."""
         for bend, length in ((0.5, 0.05), (1, 0.07), (5, 0.05)):
             with self.subTest(bend=bend, length=length):
                 self.renew()
@@ -1233,7 +1233,20 @@ class TestPipeCorners(unittest.TestCase):
         pipe = self.pipe(spine, profile, Transition="Transformed", Refine=False)
         if not self.wouldCrash(pipe):
             self.assertValidSolid(pipe)
-            self.assertNotIn("Warning", pipe.State)
+            # The section keeps its 75-degree tilt along the B-spline: there its area normal to the
+            # spine is cos(75) of the circle's. At OCCT's default caps the pipe was 20 % larger,
+            # silently; at fork PR 373's (ops#448) it is exact, but OCCT still puts 2 mm on the end
+            # cap's vertex, so the pipe may warn that it is loose, and of nothing else (ops#415)
+            area = math.pi * 0.5**2
+            expected = sum(
+                edge.Length * area * (1 if i == 0 else math.cos(math.radians(75)))
+                for i, edge in enumerate(spine.Shape.Edges)
+            )
+            self.assertAlmostEqual(pipe.Shape.Volume, expected, delta=0.01)
+            if "Warning" in pipe.State:
+                loose = r"Warning: The pipe's result has a tolerance of \S+ mm: its surface may be "
+                loose += r"off the swept profile by up to that much"
+                self.assertRegex(pipe.getStatusString(), f"^{loose}$")
 
     def wouldCrash(self, pipe):
         """Whether the pipe failed as OCCT's sweep would crash along its spine (ops#413), which
