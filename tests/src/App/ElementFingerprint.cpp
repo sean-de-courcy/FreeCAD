@@ -420,15 +420,75 @@ TEST(ElementFingerprint, outlineRoundTrip)
     without.outline.clear();
     EXPECT_NE(without, line);
 
-    //   too many points is no outline when written, and a malformed field when read
+    //   too many points are thinned when written (round 6: every second of 257, where round 5
+    //   wrote no outline), and are a malformed field when read
     ElementFingerprint crowded = line;
-    crowded.outline.assign(ElementFingerprint::MaxOutline + 1, Base::Vector3d(1, 8, 10));
-    EXPECT_EQ(crowded.toString(), "5|E|Line|2|1,8,10|1,0,0|_|_|0,8,10,2,8,10|_|_");
+    crowded.outline.clear();
+    for (std::size_t i = 0; i <= ElementFingerprint::MaxOutline; ++i) {
+        crowded.outline.emplace_back(static_cast<double>(i), 8, 10);
+    }
+    auto thinned = ElementFingerprint::fromString(crowded.toString());
+    ASSERT_TRUE(thinned.isValid()) << crowded.toString();
+    ASSERT_EQ(thinned.outline.size(), 129u);
+    EXPECT_EQ(thinned.outline[1], Base::Vector3d(2, 8, 10));
+    EXPECT_EQ(thinned.outline.back(), Base::Vector3d(256, 8, 10));
     std::string text = "5|E|Line|2|1,8,10|1,0,0|_|_|0,8,10,2,8,10|_|";
     for (std::size_t i = 0; i <= ElementFingerprint::MaxOutline; ++i) {
         text += i ? ",1,8,10" : "1,8,10";
     }
     EXPECT_FALSE(ElementFingerprint::fromString(text).isValid());
+}
+
+TEST(ElementFingerprint, thinOutline)
+{
+    // At most MaxOutline points (PR 366 round 6): every k-th, in order, k the least that fits
+    std::vector<Base::Vector3d> points;
+    for (std::size_t i = 0; i < ElementFingerprint::MaxOutline; ++i) {
+        points.emplace_back(static_cast<double>(i), 0, 0);
+    }
+    EXPECT_EQ(ElementFingerprint::thinOutline(points), points);
+    for (std::size_t i = points.size(); i < 3 * ElementFingerprint::MaxOutline + 1; ++i) {
+        points.emplace_back(static_cast<double>(i), 0, 0);
+    }
+    const auto thinned = ElementFingerprint::thinOutline(points);
+    ASSERT_EQ(thinned.size(), 193u);
+    for (std::size_t i = 0; i < thinned.size(); ++i) {
+        EXPECT_EQ(thinned[i], points[4 * i]);
+    }
+}
+
+TEST(ElementFingerprint, insideRoundTrip)
+{
+    // A face's point inside it, version 5's twelfth field (PR 366 round 6), written only when
+    // there is one; read back, and a malformed field, an edge's or an empty one, gives none
+    ElementFingerprint cap;
+    cap.type = 'F';
+    cap.kind = "BSpline";
+    cap.size = 1.75;
+    cap.center = Base::Vector3d(1.18, 1.18, 10);
+    cap.extentMin = Base::Vector3d(0.5, 0.5, 10);
+    cap.extentMax = Base::Vector3d(2.5, 2.5, 10);
+    cap.inside = Base::Vector3d(0.75, 0.75, 10);
+    const char* capText
+        = "5|F|BSpline|1.75|1.18,1.18,10|_|_|_|0.5,0.5,10,2.5,2.5,10|_|_|0.75,0.75,10";
+    EXPECT_EQ(cap.toString(), capText);
+    auto parsed = ElementFingerprint::fromString(capText);
+    ASSERT_TRUE(parsed.isValid());
+    EXPECT_EQ(parsed, cap);
+
+    //   a point differs from none
+    ElementFingerprint without = cap;
+    without.inside.reset();
+    EXPECT_NE(without, cap);
+    EXPECT_EQ(without.toString(), "5|F|BSpline|1.75|1.18,1.18,10|_|_|_|0.5,0.5,10,2.5,2.5,10|_|_");
+
+    for (const char* bad :
+         {"5|F|BSpline|1.75|1.18,1.18,10|_|_|_|0.5,0.5,10,2.5,2.5,10|_|_|_",
+          "5|F|BSpline|1.75|1.18,1.18,10|_|_|_|0.5,0.5,10,2.5,2.5,10|_|_|0.75,0.75",
+          "5|F|BSpline|1.75|1.18,1.18,10|_|_|_|0.5,0.5,10,2.5,2.5,10|_|_|0.75,0.75,10|_",
+          "5|E|Line|2|1,8,10|1,0,0|_|_|0,8,10,2,8,10|_|_|1,8,10"}) {
+        EXPECT_FALSE(ElementFingerprint::fromString(bad).isValid()) << bad;
+    }
 }
 
 TEST(ElementFingerprint, convexOutline)

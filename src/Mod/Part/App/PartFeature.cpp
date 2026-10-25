@@ -25,6 +25,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <sstream>
@@ -44,6 +45,7 @@
 #include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepBuilderAPI_MakeShape.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
+#include <BRepClass_FaceClassifier.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepGProp.hxx>
 #include <BRepGProp_Face.hxx>
@@ -59,6 +61,7 @@
 #include <gp_Ax3.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Pln.hxx>
+#include <gp_Pnt2d.hxx>
 #include <gp_Trsf.hxx>
 #include <GProp_GProps.hxx>
 #include <IntCurveSurface_IntersectionPoint.hxx>
@@ -729,7 +732,67 @@ void outlineFingerprint(const TopoDS_Face& face, Data::ElementFingerprint& fp)
     if (normal.Length() <= Precision::Confusion() * Precision::Confusion()) {
         return;
     }
-    fp.outline = Data::ElementFingerprint::convexOutline(boundary, normal);
+    // Round 6: at most the points the text holds, every k-th of more
+    fp.outline = Data::ElementFingerprint::thinOutline(
+        Data::ElementFingerprint::convexOutline(boundary, normal)
+    );
+}
+
+// A point inside a face whose area falls short of its outline's (fingerprint version 5's twelfth
+// field, PR 366 round 6): an L's or a ring's centre may lie outside it. Of the centres of a 9 x 9
+// grid over the face's parameters, the one inside the face farthest from its boundary's points
+// (17 along each edge). None for a face its outline bounds closely, whose centre is inside it.
+void insideFingerprint(const TopoDS_Face& face, Data::ElementFingerprint& fp)
+{
+    if (fp.outline.size() < 3 || !fp.size) {
+        return;
+    }
+    Base::Vector3d sum;
+    for (std::size_t i = 1; i + 1 < fp.outline.size(); ++i) {
+        sum += (fp.outline[i] - fp.outline.front()) % (fp.outline[i + 1] - fp.outline.front());
+    }
+    if (*fp.size >= 0.98 * sum.Length() / 2.0) {
+        return;
+    }
+    std::vector<gp_Pnt> boundary;
+    for (TopExp_Explorer explorer(face, TopAbs_EDGE); explorer.More(); explorer.Next()) {
+        const TopoDS_Edge& edge = TopoDS::Edge(explorer.Current());
+        if (BRep_Tool::Degenerated(edge)) {
+            continue;
+        }
+        BRepAdaptor_Curve curve(edge);
+        constexpr int count = 17;
+        const double first = curve.FirstParameter();
+        const double last = curve.LastParameter();
+        for (int i = 0; i < count; ++i) {
+            boundary.push_back(curve.Value(first + (last - first) * i / (count - 1)));
+        }
+    }
+    double u0 {}, u1 {}, v0 {}, v1 {};
+    BRepTools::UVBounds(face, u0, u1, v0, v1);
+    BRepAdaptor_Surface surface(face);
+    BRepClass_FaceClassifier classifier;
+    constexpr int cells = 9;
+    double farthest = -1.0;
+    for (int i = 0; i < cells; ++i) {
+        for (int j = 0; j < cells; ++j) {
+            const double u = u0 + (u1 - u0) * (i + 0.5) / cells;
+            const double v = v0 + (v1 - v0) * (j + 0.5) / cells;
+            classifier.Perform(face, gp_Pnt2d(u, v), Precision::Confusion());
+            if (classifier.State() != TopAbs_IN) {
+                continue;
+            }
+            const gp_Pnt point = surface.Value(u, v);
+            double nearest = std::numeric_limits<double>::infinity();
+            for (const auto& other : boundary) {
+                nearest = std::min(nearest, point.Distance(other));
+            }
+            if (nearest > farthest) {
+                farthest = nearest;
+                fp.inside = toVector(point.XYZ());
+            }
+        }
+    }
 }
 
 void faceFingerprint(const TopoDS_Face& face, Data::ElementFingerprint& fp)
@@ -741,6 +804,7 @@ void faceFingerprint(const TopoDS_Face& face, Data::ElementFingerprint& fp)
     BRepGProp::SurfaceProperties(face, props);
     fp.size = props.Mass();
     fp.center = toVector(props.CentreOfMass().XYZ());
+    insideFingerprint(face, fp);
 }
 
 // An edge's kind, direction, radii and a circle's centre, the cheap part of its fingerprint;

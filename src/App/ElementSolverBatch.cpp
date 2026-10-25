@@ -41,6 +41,7 @@ namespace
 {
 ElementHintsFunction elementHintsFunction = nullptr;
 ElementHoldsPointFunction elementHoldsPointFunction = nullptr;
+ElementSweepDirectionFunction elementSweepDirectionFunction = nullptr;
 
 struct MigrationCounts
 {
@@ -60,6 +61,11 @@ void setElementHintsFunction(ElementHintsFunction function)
 void setElementHoldsPointFunction(ElementHoldsPointFunction function)
 {
     elementHoldsPointFunction = function;
+}
+
+void setElementSweepDirectionFunction(ElementSweepDirectionFunction function)
+{
+    elementSweepDirectionFunction = function;
 }
 
 void countReferenceMigration(const DocumentObject* owner, MigrationOutcome outcome)
@@ -1303,6 +1309,11 @@ bool solveElementReferences(DocumentObject* feature,
                 [geo](const std::string& index, const Base::Vector3d& point, double distance) {
                     return elementHoldsPointFunction(geo, index.c_str(), point, distance);
                 };
+        }
+        Base::Vector3d sweep;
+        if (elementSweepDirectionFunction && elementSweepDirectionFunction(geo, sweep)
+            && sweep.Length() > 0.0) {
+            input.sweep = sweep.Normalize();
         }
         for (const auto* entry : entries) {
             Data::SolveInput::Entry item;

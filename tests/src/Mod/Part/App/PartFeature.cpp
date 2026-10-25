@@ -15,6 +15,8 @@
 #include <App/Link.h>
 #include <src/App/InitApplication.h>
 #include <BRep_Builder.hxx>
+#include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepBuilderAPI_MakePolygon.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
@@ -1410,6 +1412,54 @@ TEST_F(FeaturePartTest, fingerprintOfAnArcLocatesItsCircle)
         EXPECT_EQ(parsed.location.has_value(), true);
     }
     EXPECT_EQ(arcs, 2);
+}
+
+TEST_F(FeaturePartTest, fingerprintsOfAnLHaveAPointInside)
+{
+    // Arrange
+    //   the L x 0.5..2.5, y 0.5..2.5 without x 1..2.5, y 1..2.5 at z = 10 (PR 366 round 6): its
+    //   centre (1.18, 1.18) lies outside it; and the square x 0..2, y 0..2
+    auto face = [](const std::vector<gp_Pnt>& corners) {
+        BRepBuilderAPI_MakePolygon polygon;
+        for (const auto& corner : corners) {
+            polygon.Add(corner);
+        }
+        polygon.Close();
+        return TopoShape(BRepBuilderAPI_MakeFace(polygon.Wire()).Face());
+    };
+    const TopoShape lFace = face(
+        {gp_Pnt(0.5, 0.5, 10),
+         gp_Pnt(2.5, 0.5, 10),
+         gp_Pnt(2.5, 1, 10),
+         gp_Pnt(1, 1, 10),
+         gp_Pnt(1, 2.5, 10),
+         gp_Pnt(0.5, 2.5, 10)}
+    );
+    const TopoShape square = face(
+        {gp_Pnt(0, 0, 10), gp_Pnt(2, 0, 10), gp_Pnt(2, 2, 10), gp_Pnt(0, 2, 10)}
+    );
+
+    // Act
+    Data::ElementFingerprint lPrint;
+    Data::ElementFingerprint squarePrint;
+    ASSERT_TRUE(Feature::getElementFingerprint(lFace, "Face1", lPrint));
+    ASSERT_TRUE(Feature::getElementFingerprint(square, "Face1", squarePrint));
+
+    // Assert
+    //   the L's point lies in the L, half its arm's width from its sides at most; its text keeps it
+    ASSERT_TRUE(lPrint.inside) << lPrint.toString();
+    const Base::Vector3d& point = *lPrint.inside;
+    EXPECT_NEAR(point.z, 10.0, 1e-9);
+    EXPECT_TRUE(point.x >= 0.5 && point.y >= 0.5 && (point.x <= 1 || point.y <= 1))
+        << point.x << "," << point.y;
+    EXPECT_GT(std::min({point.x - 0.5, point.y - 0.5}), 0.1) << point.x << "," << point.y;
+    const auto parsed = Data::ElementFingerprint::fromString(lPrint.toString());
+    ASSERT_TRUE(parsed.inside) << lPrint.toString();
+    EXPECT_LT(Base::Distance(*parsed.inside, point), 1e-9);
+    //   a square's centre is inside it: no point, and no twelfth field
+    EXPECT_FALSE(squarePrint.inside);
+    const std::string squareText = squarePrint.toString();
+    EXPECT_EQ(std::count(squareText.begin(), squareText.end(), '|'), 10) << squareText;
 }
 
 TEST_F(FeaturePartTest, fingerprintsIgnoreThePlacement)

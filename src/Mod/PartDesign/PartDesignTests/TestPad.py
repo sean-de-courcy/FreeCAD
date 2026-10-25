@@ -1289,6 +1289,147 @@ def slideOntoReorderedStrips(
         FreeCAD.closeDocument(doc.Name)
 
 
+def polygonInSketch(sketch, corners):
+    """PR 366 round 6: the closed polygon through `corners` ((x, y) pairs) in sketch"""
+    import Sketcher
+
+    start = sketch.GeometryCount
+    count = len(corners)
+    for i in range(count):
+        sketch.addGeometry(
+            Part.LineSegment(
+                FreeCAD.Vector(*corners[i], 0), FreeCAD.Vector(*corners[(i + 1) % count], 0)
+            )
+        )
+    for i in range(count):
+        sketch.addConstraint(
+            Sketcher.Constraint("Coincident", start + i, 2, start + (i + 1) % count, 1)
+        )
+
+
+def bsplinePlate(corners):
+    """PR 366 round 6: the plane polygon through the (x, y, z) `corners` as a B-spline face"""
+    points = [FreeCAD.Vector(*corner) for corner in corners]
+    return Part.Face(Part.makePolygon(points + points[:1])).toNurbs().Faces[0]
+
+
+def foldedPlates(slope, step):
+    """PR 366 round 6: the faces at height z, as a function of z, of plate 1 (x -3..1) tilted,
+    at z + slope (x - 1); a steep ramp (x 1..1.2) from z to z + step; and plates 2 and 3 (x 1.2..3
+    and 3..20) flat at z + step; y -10..10, each a B-spline face"""
+
+    def faces(z):
+        def plate(x0, x1, height):
+            return bsplinePlate(
+                [(x, y, height(x)) for x, y in ((x0, -10), (x1, -10), (x1, 10), (x0, 10))]
+            )
+
+        return [
+            plate(-3, 1, lambda x: z + slope * (x - 1)),
+            plate(1, 1.2, lambda x: z + step * (x - 1) / 0.2),
+            plate(1.2, 3, lambda x: z + step),
+            plate(3, 20, lambda x: z + step),
+        ]
+
+    return faces
+
+
+def notchedPlates(z):
+    """PR 366 round 6: the faces at height z of the L-shaped plate x -10..4, y -10..10 without
+    the square x 1..4, y 1..10; that square, in its notch; and the plate x 4..20, y -10..10; each
+    a B-spline face"""
+    outlines = (
+        ((-10, -10), (4, -10), (4, 1), (1, 1), (1, 10), (-10, 10)),
+        ((1, 1), (4, 1), (4, 10), (1, 10)),
+        ((4, -10), (20, -10), (20, 10), (4, 10)),
+    )
+    return [bsplinePlate([(x, y, z) for x, y in outline]) for outline in outlines]
+
+
+def shellPointAt(shell, x, y):
+    """PR 366 round 6: the point of `shell` above or below (x, y)"""
+    line = Part.LineSegment(FreeCAD.Vector(x, y, -100), FreeCAD.Vector(x, y, 100)).toShape()
+    distance, pairs, _ = shell.distToShape(line)
+    if distance > 1e-6:
+        raise AssertionError("no point of the shell at (%g, %g)" % (x, y))
+    return pairs[0][0]
+
+
+def farPieceAt(shape, element, point):
+    """PR 366 round 6: the index name of shape's far cap ("F", smaller than the plates) or far
+    edge ("E") through `point`, a point of the up-to shell inside the piece"""
+    vertex = Part.Vertex(point)
+    if element == "F":
+        names = [
+            "Face%d" % i
+            for i, face in enumerate(shape.Faces, 1)
+            if face.Area < 50 and face.distToShape(vertex)[0] < 1e-6
+        ]
+    else:
+        names = [
+            "Edge%d" % i
+            for i, edge in enumerate(shape.Edges, 1)
+            if edge.distToShape(vertex)[0] < 1e-6
+        ]
+    if len(names) != 1:
+        raise AssertionError("far pieces (%s) at %s: %s" % (element, point, names))
+    return names[0]
+
+
+def slideOntoReorderedPlates(test, kind, faces, draw, places, move, order, after):
+    """PR 366 round 6: as slideOntoReorderedStrips, up to the shell of `faces(z)` (a list of
+    B-spline plates; z is the far caps' height where the plates are flat at it): datum points on
+    the pieces through the shell's points at `places` ({piece: ("F" or "E", x, y)}), then the
+    profile moved by `move` ((dx, dy)) while the shell is rebuilt from its faces in `order`. Each
+    point is then on the piece through the shell's point at one of its `after` places (a list)
+    or says it lost its piece, never quietly elsewhere; one whose `after` is a single place (a
+    tuple) is on that piece, quietly"""
+    doc = FreeCAD.newDocument("PadUpToReorderedPlates")
+    try:
+        feature, z = profileUpToFreeformStrips(doc, kind, (1, 3), draw)
+        replaceUpToShape(feature, Part.Shell(faces(z)))
+        doc.recompute()
+        test.assertTrue(feature.isValid(), feature.getStatusString())
+        shape = feature.Shape
+        shell = doc.getObject("Plate").Shape
+        points = {}
+        for piece, (element, x, y) in places.items():
+            sub = farPieceAt(shape, element, shellPointAt(shell, x, y))
+            attach = pointOnFarCap if element == "F" else pointOnFarEdge
+            points[piece] = attach(feature, sub)
+        sketch = feature.Profile[0]
+        base = sketch.AttachmentOffset.Base
+        sketch.AttachmentOffset = FreeCAD.Placement(
+            FreeCAD.Vector(base.x + move[0], base.y + move[1], base.z), FreeCAD.Rotation()
+        )
+        plates = faces(z)
+        replaceUpToShape(feature, Part.Shell([plates[i] for i in order]))
+        doc.recompute()
+        test.assertTrue(feature.isValid(), feature.getStatusString())
+        shape = feature.Shape
+        shell = doc.getObject("Plate").Shape
+
+        def centre(element, x, y):
+            sub = farPieceAt(shape, element, shellPointAt(shell, x, y))
+            return shape.getElement(sub).CenterOfMass
+
+        for piece, allowed in after.items():
+            element = places[piece][0]
+            point = points[piece]
+            base = point.Placement.Base
+            if isinstance(allowed, tuple):
+                test.assertTrue(point.isValid(), "%s: %s" % (piece, point.getStatusString()))
+                test.assertEqual(point.getStatusString(), "Valid", piece)
+                test.assertLess((base - centre(element, *allowed)).Length, 1e-6, piece)
+            elif point.isValid() and point.getStatusString() == "Valid":
+                test.assertTrue(
+                    any((base - centre(element, x, y)).Length < 1e-6 for x, y in allowed),
+                    "%s quietly at %s, not at one of %s" % (piece, base, allowed),
+                )
+    finally:
+        FreeCAD.closeDocument(doc.Name)
+
+
 # The child of testPadUpToAFreeformFaceCapsMigrate: opens the saved file, recomputes every object
 # (the naming migration), records the datum point, grows A and records it again
 _MIGRATION_CHILD = """\
@@ -3324,6 +3465,133 @@ class TestPad(unittest.TestCase):
                 with self.subTest(kind=kind, order=order):
                     slideOntoReorderedStrips(
                         self, kind, (1, 3), draw, places, {"xA": 3}, order, after, 20, True
+                    )
+
+    def testPadUpToThreePlatesSlantedEdgesSlidOntoTheNextPlate(self):
+        # PR 366 round 6: the parallelogram A (-1, -1) (1, -1) (4, 2) (2, 2) up to the strips
+        # meeting at x = 1 and 3: its left edge (y = x) in two pieces, on plates 1 and 2, its
+        # right edge (y = x - 2) on plates 2 and 3. A moved by 2 along x, the strips rebuilt in
+        # the order 2, 1, 3 or 2, 3, 1: plate 1 has no piece of the left edge any more, and the
+        # left edge's piece on plate 2, (1, -1) to (3, 1), took plate 1's piece's name. Seen
+        # along the edge, the way across the seams, the old and new pieces shared 1.41, and with
+        # the corner on the seam the edge's pieces kept their shape, as if moved with the plates:
+        # the datum on plate 1's piece stayed quietly on plate 2's. Seen along the Pad's
+        # direction, the old piece lies beyond the seam where the cap beside plate 2's piece
+        # ends: it says it lost its piece now, and the other datums are on their plate's piece or
+        # say they lost theirs. A moved by 0.2, each piece stays on its plate, and every datum
+        # keeps its piece. For the Pad and the Pocket
+        def draw(sketch):
+            polygonInSketch(sketch, ((-1, -1), (1, -1), (4, 2), (2, 2)))
+            dimensionedRectangle(sketch, "B", 12, 0, 14, 3)
+
+        def strips(z):
+            return freeformStripsShape(z, (1, 3)).Faces
+
+        places = {
+            "EL0": ("E", 0, 0),
+            "EL1": ("E", 1.5, 1.5),
+            "ER1": ("E", 2, 0),
+            "ER2": ("E", 3.5, 1.5),
+        }
+        moved = {"EL0": [], "EL1": [(2, 0)], "ER1": [], "ER2": [(4.5, 0.5)]}
+        kept = {"EL0": (0.2, 0), "EL1": (1.7, 1.5), "ER1": (2.2, 0), "ER2": (3.7, 1.5)}
+        cases = {
+            # case: (the move, the strips' order, the datums' places after it)
+            "order213": ((2, 0), (1, 0, 2), moved),
+            "order231": ((2, 0), (1, 2, 0), moved),
+            "kept": ((0.2, 0), (0, 1, 2), kept),
+        }
+        for kind in ("Pad", "Pocket"):
+            for case, (move, order, after) in cases.items():
+                with self.subTest(kind=kind, case=case):
+                    slideOntoReorderedPlates(self, kind, strips, draw, places, move, order, after)
+
+    def testPadUpToATiltedPlateCapPiecesSlidOntoALowerPlate(self):
+        # PR 366 round 6: up to a shell of plate 1 tilted (slope 1, -1 or 2 along x, x -3..1), a
+        # steep ramp (x 1..1.2) up or down by 1.5 or 2, and plates 2 and 3 flat (x 1.2..3, 3..20),
+        # A (x 0..2) has its far cap and top edge in pieces on plates 1, the ramp and 2. A moved
+        # by 2 along x, onto plates 2 and 3, the shell rebuilt in the order 2, ramp, 1, 3 or 2, 1,
+        # ramp, 3: plate 1 has no piece of A any more, and plate 2's cap piece took plate 1's
+        # name. Seen along the tilted plate's normal, the old piece and plate 2's new one
+        # overlapped (about 0.7) although they lie side by side, and the datum on plate 1's
+        # piece stayed quietly on plate 2's. Seen along the Pad's direction, they share nothing:
+        # it says it lost its piece, and the other datums are on plate 2's pieces or say they lost
+        # theirs. A moved by 0.5 along y, along the seams, with the shell rebuilt in the order 2,
+        # ramp, 1, 3: plate 2's piece took plate 1's name again, and the datum on plate 1's piece
+        # followed it quietly (seen along the tilted plate's normal, the old piece overlapped it
+        # too); each datum is on its plate's piece now or says it lost it. The same move with
+        # the shell as it was: every datum keeps its piece. For the Pad and the Pocket
+        def draw(sketch):
+            dimensionedRectangle(sketch, "A", 0, 0, 2, 2)
+            dimensionedRectangle(sketch, "B", 12, 0, 14, 3)
+
+        places = {
+            "CL": ("F", 0.5, 1),
+            "CR": ("F", 1.5, 1),
+            "TL": ("E", 0.5, 2),
+            "TR": ("E", 1.5, 2),
+        }
+        moved = {"CL": [], "CR": [(2.5, 1)], "TL": [], "TR": [(2.5, 2)]}
+        kept = {"CL": (0.5, 1.5), "CR": (1.5, 1.5), "TL": (0.5, 2.5), "TR": (1.5, 2.5)}
+        slid = {piece: [place] for piece, place in kept.items()}
+        for kind in ("Pad", "Pocket"):
+            for slope, step in ((1, -2), (-1, 2), (2, -1.5)):
+                cases = {
+                    # case: (the move, the shell's order, the datums' places after it)
+                    "order2r13": ((2, 0), (2, 1, 0, 3), moved),
+                    "order21r3": ((2, 0), (2, 0, 1, 3), moved),
+                    "slidAlong": ((0, 0.5), (2, 1, 0, 3), slid),
+                    "kept": ((0, 0.5), (0, 1, 2, 3), kept),
+                }
+                for case, (move, order, after) in cases.items():
+                    with self.subTest(kind=kind, slope=slope, step=step, case=case):
+                        slideOntoReorderedPlates(
+                            self, kind, foldedPlates(slope, step), draw, places, move, order, after
+                        )
+
+    def testPadUpToANotchedPlateLPieceNotMadeWholeElsewhere(self):
+        # PR 366 round 6: up to a shell of an L-shaped plate (x < 1 or y < 1), the square plate in
+        # its notch (x 1..4, y 1..10) and a plate beyond (x 4..20), the square A (x 0.5..2.5,
+        # y 0.5..2.5) has an L-shaped cap piece on the L plate and a square one on the square
+        # plate. A moved by 0.5 along x and y, wholly onto the square plate, the shell in any
+        # order: the L plate has no piece of A any more, and the whole cap took a name. The L's
+        # centre (1.18, 1.18) lies outside the L, and the whole cap holding it made the L piece
+        # look whole again: its datum went quietly to the whole cap. It says it lost its piece
+        # now, and the other datums are on their pieces or say they lost them. A moved by 0.2,
+        # the L piece is a thinner L, and every datum keeps its piece. For the Pad and the Pocket
+        def draw(sketch):
+            dimensionedRectangle(sketch, "A", 0.5, 0.5, 2.5, 2.5)
+            dimensionedRectangle(sketch, "B", 12, 0, 14, 3)
+
+        places = {
+            "CA": ("F", 0.75, 0.75),
+            "CB": ("F", 2, 2),
+            "TA": ("E", 0.75, 2.5),
+            "TB": ("E", 1.75, 2.5),
+            "RA": ("E", 2.5, 0.75),
+            "RB": ("E", 2.5, 1.75),
+        }
+        moved = {"CA": [], "CB": [(2, 2)], "TA": [], "TB": [(2, 3)], "RA": [], "RB": [(3, 2)]}
+        kept = {
+            "CA": (0.85, 0.85),
+            "CB": (2.2, 2.2),
+            "TA": (0.85, 2.7),
+            "TB": (1.85, 2.7),
+            "RA": (2.7, 0.85),
+            "RB": (2.7, 1.85),
+        }
+        cases = {
+            # case: (the move, the shell's order, the datums' places after it)
+            "order123": ((0.5, 0.5), (0, 1, 2), moved),
+            "order213": ((0.5, 0.5), (1, 0, 2), moved),
+            "order231": ((0.5, 0.5), (1, 2, 0), moved),
+            "kept": ((0.2, 0.2), (0, 1, 2), kept),
+        }
+        for kind in ("Pad", "Pocket"):
+            for case, (move, order, after) in cases.items():
+                with self.subTest(kind=kind, case=case):
+                    slideOntoReorderedPlates(
+                        self, kind, notchedPlates, draw, places, move, order, after
                     )
 
     def testPadUpToAHoledShellFarEdgePiecesOfAFlippedRectangle(self):

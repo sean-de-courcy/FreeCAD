@@ -695,6 +695,11 @@ struct AppExport SolveInput
     /// distance of the edge \a index, its ends included (ops#386). Unset: no point lies over any
     /// face or on any edge.
     std::function<bool(const std::string& index, const Base::Vector3d& point, double distance)> holdsPoint;
+    /// The unit direction the target swept its profile along, either sense (PR 366 round 6): a
+    /// Pad's or Pocket's, whose far pieces are seen along it to tell whether one left its old
+    /// place. Empty: the old piece's own normal stands for it, and a straight far edge's piece
+    /// is seen along its line only.
+    std::optional<Base::Vector3d> sweep;
 };
 
 enum class SolveStatus

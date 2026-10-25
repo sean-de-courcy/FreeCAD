@@ -226,6 +226,13 @@ using ElementHoldsPointFunction
     = bool (*)(const GeoFeature* geo, const char* element, const Base::Vector3d& point, double distance);
 AppExport void setElementHoldsPointFunction(ElementHoldsPointFunction function);
 
+/** The direction \a geo swept its profile along, in the frame its elements' fingerprints are
+ * measured in, either sense (PR 366 round 6): a Pad's or Pocket's. False for another feature.
+ * PartDesign sets it; without it no feature has one.
+ */
+using ElementSweepDirectionFunction = bool (*)(const GeoFeature* geo, Base::Vector3d& direction);
+AppExport void setElementSweepDirectionFunction(ElementSweepDirectionFunction function);
+
 /** The mean of the centres of \a element (`Face7`) of \a geo's shape and of its twins, and their
  * number (ops#360, PR 340 round 5): the elements of its type with a name that is one of its
  * ordered names (Data::isOrderedName()) up to the duplicate counter. Each centre as the element's

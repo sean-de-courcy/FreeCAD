@@ -164,14 +164,21 @@ std::string ElementFingerprint::toString() const
         text += withTwins ? vector(twinCentroid) + listDelimiter + std::to_string(twinCount)
                           : std::string(emptyField);
         text += fieldDelimiter;
-        if (outline.empty() || outline.size() > MaxOutline) {
+        // At most MaxOutline points (round 6: every k-th of a longer one, where round 5 wrote none)
+        const auto points = thinOutline(outline);
+        if (points.empty()) {
             text += emptyField;
         }
-        for (std::size_t i = 0; i < outline.size() && outline.size() <= MaxOutline; ++i) {
+        for (std::size_t i = 0; i < points.size(); ++i) {
             if (i) {
                 text += listDelimiter;
             }
-            text += vector(outline[i]);
+            text += vector(points[i]);
+        }
+        // Round 6: a point inside the face, a twelfth field only when there is one
+        if (inside) {
+            text += fieldDelimiter;
+            text += vector(inside);
         }
         return text;
     }
@@ -201,7 +208,8 @@ ElementFingerprint ElementFingerprint::fromString(std::string_view text)
         && fields[0] == std::to_string(VersionWithExtent) && plane;
     const bool withTwins = fields.size() == fieldCount + 2
         && fields[0] == std::to_string(VersionWithTwins);
-    const bool withBox = fields.size() == fieldCount + 4
+    // Version 5 with or without the inside point (round 6)
+    const bool withBox = (fields.size() == fieldCount + 4 || fields.size() == fieldCount + 5)
         && fields[0] == std::to_string(VersionWithBox) && (fields[1] == "F" || fields[1] == "E");
     if (!withLocation && !withExtent && !withTwins && !withBox
         && (fields.size() != fieldCount || fields[0] != std::to_string(Version))) {
@@ -291,9 +299,27 @@ ElementFingerprint ElementFingerprint::fromString(std::string_view text)
         for (std::size_t i = 0; i < points.size(); i += 3) {
             result.outline.emplace_back(points[i], points[i + 1], points[i + 2]);
         }
+        // The inside point, a face's, when its field is there
+        if (fields.size() == fieldCount + 5
+            && (fields[1] != "F" || !parseVector(fields[11], result.inside) || !result.inside)) {
+            return {};
+        }
     }
     result.type = fields[1][0];
     return result;
+}
+
+std::vector<Base::Vector3d> ElementFingerprint::thinOutline(const std::vector<Base::Vector3d>& points)
+{
+    if (points.size() <= MaxOutline) {
+        return points;
+    }
+    const std::size_t step = (points.size() + MaxOutline - 1) / MaxOutline;
+    std::vector<Base::Vector3d> kept;
+    for (std::size_t i = 0; i < points.size(); i += step) {
+        kept.push_back(points[i]);
+    }
+    return kept;
 }
 
 std::vector<Base::Vector3d> ElementFingerprint::convexOutline(
