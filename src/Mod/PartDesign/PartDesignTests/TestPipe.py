@@ -3387,3 +3387,127 @@ class TestRoundCornerNames(unittest.TestCase):
             True,
             self.firstBend,
         )
+
+
+def unit(vector):
+    return V(vector).normalize()
+
+
+def arcPoints(radius=20, steps=3):
+    """A quarter circle of `radius` about (radius, 0, 0) in XZ, from the origin along +Z to
+    (radius, 0, radius) along +X: its tangent is (sin s, 0, cos s)."""
+    angles = [math.pi / 2 * i / (steps - 1) for i in range(steps)]
+    return [V(radius - radius * math.cos(s), 0, radius * math.sin(s)) for s in angles]
+
+
+def binormalVolume(spine, binormal, normal, area):
+    """The volume a profile of `area` centred on the spine's start, in the plane of `normal`
+    there, sweeps in Binormal mode where nothing folds. The mode carries the profile rigidly in
+    the frame (e, B x e, B), e the spine's tangent made square to the binormal B, so each section
+    lies in a plane through B and keeps its normal's parts (alpha, beta, gamma) on that frame: the
+    volume is area * (alpha L' + gamma dB), L' the length of the spine's projection on the plane
+    square to B and dB its travel along B (Simpson's rule along each edge)."""
+    edges = spine.OrderedEdges
+    first = edges[0].derivative1At(edges[0].FirstParameter)
+    along = first - binormal * first.dot(binormal)
+    alpha = normal.dot(unit(along))
+    gamma = normal.dot(binormal)
+    total = 0.0
+    for edge in edges:
+        steps = 2000
+        u0, u1 = edge.FirstParameter, edge.LastParameter
+        for i in range(steps + 1):
+            tangent = edge.derivative1At(u0 + (u1 - u0) * i / steps)
+            square = tangent - binormal * tangent.dot(binormal)
+            speed = alpha * square.Length + gamma * tangent.dot(binormal)
+            weight = 1 if i in (0, steps) else (4 if i % 2 else 2)
+            total += weight * speed * (u1 - u0) / steps / 3
+    return abs(area * total)
+
+
+class TestBinormalPipe(unittest.TestCase):
+    """ops#406 and ops#458: a Pipe in Binormal mode. Every section lies in a plane through the
+    binormal B, the profile carried rigidly in (e, B x e, B) with e the spine's tangent made square
+    to B. Where the tangent runs along B the section turns half a turn about B at once (a cusp)
+    and the pipe crosses itself; where it passes within a few degrees of B the section turns about
+    B faster than the profile's width allows and folds. Both used to build a solid that BRepCheck
+    passes, of the wrong volume or crossing itself, silently. Now a cusp fails, a fold fails, and a
+    fold under 5 % of the profile's extent warns. The binormal is in the Body's coordinates. The
+    spine is a quarter circle of radius 20 from the origin along +Z, unless stated; the profile
+    a 16 mm^2 shape on XY at the origin. Expected volumes come from the mode's definition
+    (binormalVolume), not from OCCT."""
+
+    def setUp(self):
+        self.doc = models.newDocument("PartDesignTestBinormalPipe")
+        self.body = models.body(self.doc)
+
+    def tearDown(self):
+        App.closeDocument(self.doc.Name)
+
+    PROFILES = {
+        "square": lambda: models.rectangle(-2, -2, 2, 2),
+        "circle": lambda: [models.circle(0, 0, 2)],
+        "rectY": lambda: models.rectangle(-1, -4, 1, 4),
+    }
+
+    def pipe(self, spine, binormal, profile="square", placement=None, **properties):
+        sketch = models.sketch(
+            self.doc, "Profile", self.PROFILES[profile](), self.body, placement=placement
+        )
+        self.spine = models.feature(self.doc, "Spine", spine)
+        pipe = self.body.newObject("PartDesign::AdditivePipe", "Pipe")
+        pipe.Profile = sketch
+        pipe.Spine = (self.spine, [])
+        pipe.Mode = "Binormal"
+        pipe.Binormal = binormal
+        for name, value in properties.items():
+            setattr(pipe, name, value)
+        self.doc.recompute()
+        return pipe
+
+    @staticmethod
+    def arc():
+        return Part.Wire([Part.Arc(*arcPoints()).toShape()])
+
+    def assertSwept(self, pipe, area, warns=False, normal=V(0, 0, 1)):
+        """A valid solid of the mode's volume, with a small fold's warning only if `warns`."""
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        self.assertEqual(len(pipe.Shape.Solids), 1)
+        self.assertTrue(pipe.Shape.isValid())
+        expected = binormalVolume(self.spine.Shape, unit(pipe.Binormal), normal, area)
+        self.assertAlmostEqual(pipe.Shape.Volume, expected, delta=1e-4 * expected)
+        if warns:
+            self.assertIn("Warning", pipe.State)
+            self.assertIn("folds slightly over itself", pipe.getStatusString())
+        else:
+            self.assertNotIn("Warning", pipe.State)
+
+    def testBinormalAxis(self):
+        """B = Y, the arc's axis: the profile turns with the arc, 16 x 20 x pi / 2."""
+        pipe = self.pipe(self.arc(), V(0, 1, 0))
+        self.assertSwept(pipe, 16)
+        self.assertAlmostEqual(pipe.Shape.Volume, 16 * 20 * math.pi / 2, delta=1e-3)
+
+    def testZeroBinormalFails(self):
+        """A zero binormal: a clear message, not OCCT's "gp_Dir() - input vector has zero norm"."""
+        pipe = self.pipe(self.arc(), V(0, 0, 0))
+        self.assertFalse(pipe.isValid())
+        self.assertIn("needs a non-zero binormal", pipe.getStatusString())
+
+    # ops#458: the binormal in the Body's coordinates ----------------------------------------
+
+    def testBinormalInBodyCoordinates(self):
+        """An arc of radius 20 about the origin over a hilltop, from 135 to 45 degrees in XZ, the
+        square's sketch at its start square to it (its Placement turned 45 degrees about Y), and
+        B = (1, 1, 0) in the Body: the mode's volume, 493.917. Before, the Pipe read B in its own
+        placement, the sketch's, and swept another pipe (432.206)."""
+        angles = [math.radians(a) for a in (135, 90, 45)]
+        spine = Part.Wire([Part.Arc(*[V(20 * math.cos(a), 0, 20 * math.sin(a)) for a in angles]).toShape()])
+        edge = spine.Edges[0]
+        start = edge.valueAt(edge.FirstParameter)
+        tangent = unit(edge.derivative1At(edge.FirstParameter))
+        placement = App.Placement(start, App.Rotation(V(0, 0, 1), tangent))
+        pipe = self.pipe(spine, unit(V(1, 1, 0)), placement=placement)
+        self.assertFalse(pipe.Placement.isIdentity())
+        self.assertSwept(pipe, 16, normal=tangent)
+        self.assertAlmostEqual(pipe.Shape.Volume, 493.917, delta=1e-2)

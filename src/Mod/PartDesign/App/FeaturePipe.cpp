@@ -2720,6 +2720,20 @@ std::optional<gp_Pnt> fixedTurnsBack(const TopoDS_Wire& spine, const gp_Dir& nor
     return std::nullopt;
 }
 
+/// Binormal mode's binormal as the sweep gets it, in the pipe's own frame (\a pipe, its
+/// Placement): the property is in the Body's coordinates, where the spine and the profile are
+/// seen, and the sweep runs in the frame of the profile sketch's or the base feature's placement
+/// (ops#458). None for a zero vector.
+std::optional<gp_Dir> sweptBinormal(const Base::Vector3d& inBody, const TopLoc_Location& pipe)
+{
+    gp_Vec direction(inBody.x, inBody.y, inBody.z);
+    if (direction.Magnitude() < gp::Resolution()) {
+        return std::nullopt;
+    }
+    direction.Transform(pipe.Inverted().Transformation());
+    return gp_Dir(direction);
+}
+
 /// Where \a spine turns most sharply, none when it turns nowhere
 std::optional<SpineCorner> sharpestCorner(const TopoDS_Wire& spine)
 {
@@ -2935,7 +2949,7 @@ Pipe::Pipe()
         (Base::Vector3d()),
         "Sweep",
         App::Prop_None,
-        "Binormal vector for corresponding orientation mode"
+        "Binormal vector for corresponding orientation mode, in the Body's coordinates"
     );
     // New pipes join the spine's corners as "Right corner", as Part's Sweep does: "Transformed"
     // shears the pipe after a corner (ops#370). A saved pipe keeps its value: an enumeration is
@@ -3251,6 +3265,19 @@ App::DocumentObjectExecReturn* Pipe::execute()
                 );
             }
         }
+        // "Binormal": the binormal as the sweep gets it (ops#458)
+        std::optional<gp_Dir> binormal;
+        if (mode == 4) {
+            binormal = sweptBinormal(Binormal.getValue(), getLocation());
+            if (!binormal) {
+                return new App::DocumentObjectExecReturn(
+                    QT_TRANSLATE_NOOP(
+                        "Exception",
+                        "Pipe: 'Binormal' mode needs a non-zero binormal"
+                    )
+                );
+            }
+        }
         const std::optional<SpineCorner> sharpest = sharpestCorner(TopoDS::Wire(path.getShape()));
         // A fold fails the pipe; a small one (under smallFold of the section's extent) warns
         auto foldText = [&](const Fold& fold, bool small) {
@@ -3494,11 +3521,6 @@ App::DocumentObjectExecReturn* Pipe::execute()
 
         if (sheared) {
             // Every wire of the profile counts: a fold or a thin leg of any of them spoils the pipe
-            std::optional<gp_Dir> binormal;
-            if (mode == 4) {
-                const Base::Vector3d& direction = Binormal.getValue();
-                binormal = gp_Dir(direction.x, direction.y, direction.z);
-            }
             tilts = measureCorners(sweptStarts, TopoDS::Wire(path.getShape()), setup, binormal);
             if (const auto& corner = tilts.collapsed) {
                 return new App::DocumentObjectExecReturn(
@@ -3924,7 +3946,13 @@ void Pipe::setupAlgorithm(BRepOffsetAPI_MakePipeShell& mkPipeShell, const TopoDS
             auxiliary = true;
             break;
         case 4:
-            mkPipeShell.SetMode(gp_Dir(bVec.x, bVec.y, bVec.z));
+            // In the Body's coordinates, turned into the frame the sweep runs in (ops#458)
+            if (const std::optional<gp_Dir> binormal = sweptBinormal(bVec, getLocation())) {
+                mkPipeShell.SetMode(*binormal);
+            }
+            else {
+                throw Base::ValueError("Pipe: 'Binormal' mode needs a non-zero binormal");
+            }
             break;
     }
 
