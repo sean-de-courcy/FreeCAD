@@ -72,6 +72,12 @@
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBuilderAPI_FindPlane.hxx>
 #include <Geom_Plane.hxx>
+#include <Geom_Curve.hxx>
+#include <Geom_Surface.hxx>
+#include <gp.hxx>
+#include <GeomAPI_ProjectPointOnCurve.hxx>
+#include <GeomAPI_ProjectPointOnSurf.hxx>
+#include <GeomLProp_SLProps.hxx>
 #include <BRepBuilderAPI_GTransform.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
@@ -1679,6 +1685,108 @@ double parameterOnEdge(const TopoDS_Edge& edge, const TopoDS_Shape& vertex)
     return std::numeric_limits<double>::quiet_NaN();
 }
 
+/// Where `vertex`, generated where `edge` crosses `face`, lies on the edge (ops#468): `in` where
+/// the edge's curve, in the direction of its parameter, enters the face's side of the face (it
+/// runs against the face's normal, the face's orientation counted), `out` where it leaves it;
+/// empty where the vertex lies off the curve or the surface, or the curve runs along the face
+/// there. A hole crossing an edge twice makes one of each, and an edit that moves the hole keeps
+/// each crossing's side.
+std::string crossingSide(
+    const TopoDS_Shape& vertex,
+    const TopoDS_Shape& edge,
+    const TopoDS_Shape& face
+)
+{
+    if (vertex.IsNull() || vertex.ShapeType() != TopAbs_VERTEX || edge.IsNull()
+        || edge.ShapeType() != TopAbs_EDGE || face.IsNull() || face.ShapeType() != TopAbs_FACE) {
+        return {};
+    }
+    const gp_Pnt point = BRep_Tool::Pnt(TopoDS::Vertex(vertex));
+    const double tolerance = BRep_Tool::Tolerance(TopoDS::Vertex(vertex)) + Precision::Confusion();
+    double first = 0;
+    double last = 0;
+    const Handle(Geom_Curve) curve = BRep_Tool::Curve(TopoDS::Edge(edge), first, last);
+    const Handle(Geom_Surface) surface = BRep_Tool::Surface(TopoDS::Face(face));
+    if (curve.IsNull() || surface.IsNull()) {
+        return {};
+    }
+    GeomAPI_ProjectPointOnCurve onCurve(point, curve, first, last);
+    if (onCurve.NbPoints() == 0
+        || onCurve.LowerDistance() > tolerance + BRep_Tool::Tolerance(TopoDS::Edge(edge))) {
+        return {};
+    }
+    GeomAPI_ProjectPointOnSurf onSurface(point, surface);
+    if (onSurface.NbPoints() == 0
+        || onSurface.LowerDistance() > tolerance + BRep_Tool::Tolerance(TopoDS::Face(face))) {
+        return {};
+    }
+    gp_Pnt curvePoint;
+    gp_Vec tangent;
+    curve->D1(onCurve.LowerDistanceParameter(), curvePoint, tangent);
+    double u = 0;
+    double v = 0;
+    onSurface.LowerDistanceParameters(u, v);
+    GeomLProp_SLProps props(surface, u, v, 1, Precision::Confusion());
+    if (tangent.Magnitude() < gp::Resolution() || !props.IsNormalDefined()) {
+        return {};
+    }
+    gp_Dir normal = props.Normal();
+    if (face.Orientation() == TopAbs_REVERSED) {
+        normal.Reverse();
+    }
+    // Below this the curve runs along the face: no side to tell
+    constexpr double alongTheFace = 1e-4;
+    const double cosine = gp_Dir(tangent).Dot(normal);
+    if (std::abs(cosine) < alongTheFace) {
+        return {};
+    }
+    return cosine < 0 ? "in" : "out";
+}
+
+/// The Index fields of the vertexes of a group that a counter tells apart, `vertexes` in the
+/// counter's order, generated from `edge` and `face` (the group's first source, and its first face
+/// source; either may be null) (ops#468). Each is named by its side of the face (crossingSide),
+/// with `<k>of<n>` after it among the vertexes on the same side when there are several. Where a
+/// side can't be told for one of them, each is `<k>of<n>` among all, and a lone one `0`. A change
+/// in how many vertexes the face makes on the edge then never moves a name to another one.
+std::vector<std::string> crossingIndexes(
+    const std::vector<TopoDS_Shape>& vertexes,
+    const TopoDS_Shape& edge,
+    const TopoDS_Shape& face
+)
+{
+    const std::size_t count = vertexes.size();
+    std::vector<std::string> sides;
+    for (const auto& vertex : vertexes) {
+        sides.push_back(crossingSide(vertex, edge, face));
+        if (sides.back().empty()) {
+            sides.clear();
+            break;
+        }
+    }
+    std::vector<std::string> indexes;
+    if (sides.empty()) {
+        for (std::size_t k = 0; k < count; ++k) {
+            indexes.push_back(
+                count > 1 ? std::to_string(k) + "of" + std::to_string(count) : std::to_string(k)
+            );
+        }
+        return indexes;
+    }
+    std::map<std::string, std::size_t> onSide;
+    for (const auto& side : sides) {
+        ++onSide[side];
+    }
+    std::map<std::string, std::size_t> before;
+    for (const auto& side : sides) {
+        const std::size_t k = before[side]++;
+        indexes.push_back(
+            onSide[side] > 1 ? side + std::to_string(k) + "of" + std::to_string(onSide[side]) : side
+        );
+    }
+    return indexes;
+}
+
 /// The key of a member of a fallback list: its place on the list's `reference` (a face: its `u`
 /// and `v`; an edge, for a vertex named from edges: its parameter; null: none), then its length
 /// or area, then its point in `frame`, the frame of the shape being named. Members that the
@@ -3269,8 +3377,25 @@ TopoShape& TopoShape::makeShapeWithElementMap(
         // In the order of the generated groups.
         std::vector<std::pair<std::vector<NamingMapKey>, Data::DecodedMappedSection>>
             delayedGeneratedMap;
-        // Per entry of delayedGeneratedMap: whether the group's first shared source is an edge
-        std::vector<bool> delayedFromEdge;
+        // Per entry of delayedGeneratedMap: the group's first shared source if it is an edge, and
+        // its first face source (null if none), for its vertexes' indexes (crossingIndexes)
+        std::vector<std::pair<TopoDS_Shape, TopoDS_Shape>> delayedCrossingSources;
+        auto crossingSources = [](const std::vector<NamingMapValue>& sources) {
+            std::pair<TopoDS_Shape, TopoDS_Shape> result;
+            const TopoDS_Shape& first = sources.front().incomingElementShape;
+            if (first.IsNull() || first.ShapeType() != TopAbs_EDGE) {
+                return result;
+            }
+            result.first = first;
+            for (const NamingMapValue& source : sources) {
+                const TopoDS_Shape& shape = source.incomingElementShape;
+                if (!shape.IsNull() && shape.ShapeType() == TopAbs_FACE) {
+                    result.second = shape;
+                    break;
+                }
+            }
+            return result;
+        };
 
         generatedNamingMap.build();
 
@@ -3325,6 +3450,16 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                 if (generatedShapes == 1) {
                     newNameSection.elementType
                         = (*generatedShapeEntry.first[0].newElementName.getType());
+                    if (newNameSection.elementType == 'V') {
+                        const auto [edge, face] = crossingSources(generatedShapeEntry.second);
+                        if (!edge.IsNull()) {
+                            newNameSection.index = crossingIndexes(
+                                {generatedShapeEntry.first[0].newElementShape},
+                                edge,
+                                face
+                            ).front();
+                        }
+                    }
                     ensureElementMap()->setElementName(
                         generatedShapeEntry.first[0].newElementName,
                         Data::MappedName(Data::MappedName::makeEncodedSection(newNameSection)),
@@ -3333,11 +3468,7 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                 }
                 else if (generatedShapes > 1) {
                     delayedGeneratedMap.emplace_back(generatedShapeEntry.first, newNameSection);
-                    const TopoDS_Shape& firstSource
-                        = generatedShapeEntry.second.front().incomingElementShape;
-                    delayedFromEdge.push_back(
-                        !firstSource.IsNull() && firstSource.ShapeType() == TopAbs_EDGE
-                    );
+                    delayedCrossingSources.push_back(crossingSources(generatedShapeEntry.second));
                 }
             }
         }
@@ -3408,19 +3539,23 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                 connectedElementKey.second = finalConnectedElementsList;
             }
 
-            // Vertexes generated along one edge (a hole crossing it twice) are numbered with
-            // their count, `0of2` and `1of2`, and a lone one stays `0` (ops#468): when an edit
-            // changes how many there are (the hole's seam leaving the edge or reaching it), no
-            // old name stays on a member it doesn't belong to; the solver places it again.
-            unsigned int countedVertexes = 0;
-            if (delayedFromEdge[entryIndex]) {
+            // Vertexes generated along one edge (a hole crossing it twice) are named by the side
+            // of the other source they lie on, `in` and `out`, not by the counter alone (ops#468):
+            // when an edit changes how many there are (the hole's seam leaving the edge or
+            // reaching it), a name would pass to the other crossing. The same members as the
+            // counter's below, in its order.
+            std::vector<std::string> vertexIndexes;
+            const auto& [crossedEdge, crossingFace] = delayedCrossingSources[entryIndex];
+            if (!crossedEdge.IsNull()) {
+                std::vector<TopoDS_Shape> counted;
                 for (const Part::NamingMapKey& elementKey : delayedGeneratedEntry.first) {
                     auto it = generatedConnectedElementMap.find(elementKey.newElementShape);
                     if (std::strcmp(elementKey.newElementName.getType(), "Vertex") == 0
                         && (it == generatedConnectedElementMap.end() || it->second.empty())) {
-                        ++countedVertexes;
+                        counted.push_back(elementKey.newElementShape);
                     }
                 }
+                vertexIndexes = crossingIndexes(counted, crossedEdge, crossingFace);
             }
 
             for (const Part::NamingMapKey& elementKey : delayedGeneratedEntry.first) {
@@ -3440,11 +3575,12 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                     elementMappedSection.connectedElements = connectedElements;
                 }
                 else {
-                    elementMappedSection.index = std::to_string(
-                        emptyConnectedElementsIndex[elementMappedSection.elementType]++
-                    );
-                    if (elementMappedSection.elementType == 'V' && countedVertexes > 1) {
-                        elementMappedSection.index += "of" + std::to_string(countedVertexes);
+                    const unsigned int k
+                        = emptyConnectedElementsIndex[elementMappedSection.elementType]++;
+                    elementMappedSection.index = std::to_string(k);
+                    if (elementMappedSection.elementType == 'V' && !vertexIndexes.empty()) {
+                        assert(k < vertexIndexes.size());
+                        elementMappedSection.index = vertexIndexes[k];
                     }
                 }
 
