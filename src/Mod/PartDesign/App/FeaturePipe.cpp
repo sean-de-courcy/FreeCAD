@@ -53,6 +53,7 @@
 #include <Base/Exception.h>
 #include <Base/Reader.h>
 #include <Mod/Part/App/FaceMakerCheese.h>
+#include <Mod/Part/App/PipeShellApproximation.h>
 
 #include "FeaturePipe.h"
 #include "Mod/Part/App/TopoShapeOpCode.h"
@@ -749,6 +750,21 @@ App::DocumentObjectExecReturn* Pipe::execute()
             result = shapes.front();
         }
 
+        // A loose pipe may be a poor approximation of the swept surface, which OCCT reports only
+        // through tolerances (ops#448)
+        const std::string loose
+            = Part::PipeShellApproximation::looseWarning(result.getShape(), "pipe");
+        auto warnIfLoose = [&]() {
+            auto doc = getDocument();
+            if (doc && !loose.empty()) {
+                const char* previous = doc->getWarningDescription(this);
+                doc->setWarning(
+                    this,
+                    previous && *previous ? std::string(previous) + "\n" + loose : loose
+                );
+            }
+        };
+
         if (base.isNull()) {
             if (getAddSubType() == FeatureAddSub::Type::Subtractive) {
                 return new App::DocumentObjectExecReturn(
@@ -768,6 +784,7 @@ App::DocumentObjectExecReturn* Pipe::execute()
 
             result = refineShapeIfActive(result);
             Shape.setValue(getSolid(result));
+            warnIfLoose();
             return App::DocumentObject::StdReturn;
         }
 
@@ -815,6 +832,7 @@ App::DocumentObjectExecReturn* Pipe::execute()
         }
 
         Shape.setValue(solid);
+        warnIfLoose();
         return App::DocumentObject::StdReturn;
     }
     catch (Standard_Failure& e) {
@@ -834,6 +852,9 @@ void Pipe::setupAlgorithm(BRepOffsetAPI_MakePipeShell& mkPipeShell, const TopoDS
 {
 
     mkPipeShell.SetTolerance(Precision::Confusion());
+    // As Part::Sweep (ops#448): at OCCT's default caps, Standard mode swept a circle along ten
+    // planar waves sketched on a plane turned 45 degrees about X 1.9e-2 mm off the tube
+    Part::PipeShellApproximation::set(mkPipeShell);
 
     switch (Transition.getValue()) {
         case 0:

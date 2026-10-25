@@ -47,6 +47,7 @@
 
 #include <App/Document.h>
 #include "PartFeatures.h"
+#include "PipeShellApproximation.h"
 #include "TopoShapeOpCode.h"
 
 using namespace Part;
@@ -346,6 +347,14 @@ App::DocumentObjectExecReturn* Sweep::execute()
             result.linearize(LinearizeFace::linearizeFaces, LinearizeEdge::noEdges);
         }
         this->Shape.setValue(result);
+        // A loose result may be a poor approximation of the swept surface, which OCCT reports only
+        // through tolerances (ops#448)
+        const std::string loose = PipeShellApproximation::looseWarning(result.getShape(), "sweep");
+        auto doc = getDocument();
+        if (doc && !loose.empty()) {
+            const char* previous = doc->getWarningDescription(this);
+            doc->setWarning(this, previous && *previous ? std::string(previous) + "\n" + loose : loose);
+        }
         return App::DocumentObject::StdReturn;
     }
     catch (Standard_Failure& e) {

@@ -96,6 +96,7 @@
 #include "OCCError.h"
 #include "PartFeature.h"
 #include "PartPyCXX.h"
+#include "PipeShellApproximation.h"
 #include "PyException.h"
 #include "Tools.h"
 #include "TopoShapeCompoundPy.h"
@@ -2308,16 +2309,22 @@ private:
             TopoShape mShape = *static_cast<TopoShapePy*>(path)->getTopoShapePtr();
             // makeSweep uses GeomFill_Pipe which does not support shape
             // history. So use makEPipeShell() as a replacement
-            return shape2pyshape(TopoShape(0, mShape.Hasher, mShape.getHistoryAlgorithm())
-                                     .makeElementPipeShell(
-                                         {mShape,
-                                          *static_cast<TopoShapePy*>(profile)->getTopoShapePtr()},
-                                         Part::MakeSolid::noSolid,
-                                         Standard_False,
-                                         TransitionMode::Transformed,
-                                         nullptr,
-                                         tolerance
-                                     ));
+            TopoShape result = TopoShape(0, mShape.Hasher, mShape.getHistoryAlgorithm())
+                                   .makeElementPipeShell(
+                                       {mShape, *static_cast<TopoShapePy*>(profile)->getTopoShapePtr()},
+                                       Part::MakeSolid::noSolid,
+                                       Standard_False,
+                                       TransitionMode::Transformed,
+                                       nullptr,
+                                       tolerance
+                                   );
+            // Logged, not thrown: callers expect a shape (ops#448)
+            const std::string loose
+                = PipeShellApproximation::looseWarning(result.getShape(), "sweep");
+            if (!loose.empty()) {
+                Base::Console().warning("makeSweepSurface: %s\n", loose.c_str());
+            }
+            return shape2pyshape(result);
         }
         catch (Standard_Failure& e) {
             throw Py::Exception(PartExceptionOCCError, e.GetMessageString());
