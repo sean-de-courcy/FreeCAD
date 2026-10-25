@@ -27,16 +27,28 @@
  */
 
 #include <FCBRepAlgoAPI_BooleanOperation.h>
+#include <BRepAlgoAPI_Common.hxx>
 #include <BRepBndLib.hxx>
+#include <BRepClass3d_SolidClassifier.hxx>
 #include <Bnd_Box.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRep_Builder.hxx>
+#include <BRep_Tool.hxx>
+#include <TopExp.hxx>
+#include <TopExp_Explorer.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
+#include <TopoDS.hxx>
 #include <TopoDS_Shape.hxx>
 #include <TopoDS_Iterator.hxx>
 #include <Precision.hxx>
 #include <FuzzyHelper.h>
+#include <MassProperties.h>
 #include <SignalException.h>
 #include <Base/Console.h>
+#include <Base/Exception.h>
+
+#include <cmath>
+#include <vector>
 
 FCBRepAlgoAPI_BooleanOperation::FCBRepAlgoAPI_BooleanOperation()
 {
@@ -94,6 +106,148 @@ void FCBRepAlgoAPIHelper::setAutoFuzzy(BRepAlgoAPI_BuilderAlgo* op)
     op->SetFuzzyValue(
         Part::FuzzyHelper::getBooleanFuzzy() * sqrt(bounds.SquareExtent()) * Precision::Confusion()
     );
+}
+
+namespace
+{
+/// The solids of the shapes in \a list, also inside compounds and compsolids
+std::vector<TopoDS_Shape> solidsOf(const TopTools_ListOfShape& list)
+{
+    std::vector<TopoDS_Shape> solids;
+    for (TopTools_ListOfShape::Iterator it(list); it.More(); it.Next()) {
+        for (TopExp_Explorer xp(it.Value(), TopAbs_SOLID); xp.More(); xp.Next()) {
+            solids.push_back(xp.Current());
+        }
+    }
+    return solids;
+}
+
+/// The shapes that aren't compounds in \a shape's compound tree, as Build's piecewise paths count
+/// them (RecursiveCutCompound, RecursiveAddTools)
+int leafCount(const TopoDS_Shape& shape)
+{
+    if (shape.ShapeType() != TopAbs_COMPOUND) {
+        return 1;
+    }
+    int count = 0;
+    for (TopoDS_Iterator it(shape); it.More(); it.Next()) {
+        count += leafCount(it.Value());
+    }
+    return count;
+}
+
+/// Whether the boolean left no trace of \a tool: every face deleted, as a cut that removed nothing
+/// leaves them (a void's faces stay, reversed), or every face kept unchanged, as a fuse that
+/// merged nothing leaves them
+bool leftNoTrace(BRepAlgoAPI_BooleanOperation* op, const TopoDS_Shape& tool, bool deleted)
+{
+    TopExp_Explorer xp(tool, TopAbs_FACE);
+    if (!xp.More()) {
+        return false;
+    }
+    for (; xp.More(); xp.Next()) {
+        if (!op->Modified(xp.Current()).IsEmpty() || op->IsDeleted(xp.Current()) != deleted) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// Whether \a tool, which left no trace, overlaps the material of \a solid, by two independent
+/// witnesses: a vertex of the tool classifies IN the solid, and the screened volume of their
+/// common part is more than a millionth of the tool's (OCCT's Common is right where the solid
+/// builder fails, ops#472). The first vertex not ON the solid's boundary decides, as such a tool
+/// lies wholly in the material or wholly outside it (a vertex may touch the boundary), and each
+/// classification costs about 0.1 s on a 1000-span face
+bool overlaps(const TopoDS_Shape& solid, const TopoDS_Shape& tool, double fuzzy)
+{
+    Bnd_Box solidBounds, toolBounds;
+    BRepBndLib::Add(solid, solidBounds);
+    BRepBndLib::Add(tool, toolBounds);
+    if (solidBounds.IsOut(toolBounds)) {
+        return false;
+    }
+    TopTools_IndexedMapOfShape vertices;
+    TopExp::MapShapes(tool, TopAbs_VERTEX, vertices);
+    BRepClass3d_SolidClassifier classifier(solid);
+    TopAbs_State state = TopAbs_ON;
+    for (int i = 1; i <= vertices.Extent() && state == TopAbs_ON; ++i) {
+        classifier.Perform(BRep_Tool::Pnt(TopoDS::Vertex(vertices(i))), Precision::Confusion());
+        state = classifier.State();
+    }
+    if (state != TopAbs_IN) {
+        return false;
+    }
+    BRepAlgoAPI_Common common;
+    TopTools_ListOfShape arguments, tools;
+    arguments.Append(solid);
+    tools.Append(tool);
+    common.SetArguments(arguments);
+    common.SetTools(tools);
+    common.SetFuzzyValue(fuzzy);
+    common.Build();
+    if (!common.IsDone()) {
+        return false;
+    }
+    return Part::MassProperties::volume(common.Shape())
+        > 1e-6 * std::abs(Part::MassProperties::volume(tool));
+}
+}  // namespace
+
+void FCBRepAlgoAPIHelper::checkLostTools(BRepAlgoAPI_BooleanOperation* op)
+{
+    const bool cut = op->Operation() == BOPAlgo_CUT;
+    if ((!cut && op->Operation() != BOPAlgo_FUSE) || !op->IsDone() || !op->HasHistory()) {
+        return;
+    }
+    // FCBRepAlgoAPI_BooleanOperation::Build cuts a lone compound argument one leaf at a time, and
+    // fuses the leaves of a lone compound tool before the cut: the history then covers only the
+    // last build, so those cuts aren't checked yet (ops#472). A compound of one leaf, which every
+    // boolean and PartDesign feature returns, takes one build and is checked
+    if (cut && op->Arguments().Size() == 1
+        && (leafCount(op->Arguments().First()) > 1
+            || (op->Tools().Size() == 1 && leafCount(op->Tools().First()) > 1))) {
+        return;
+    }
+    const std::vector<TopoDS_Shape> bases = solidsOf(op->Arguments());
+    const std::vector<TopoDS_Shape> tools = solidsOf(op->Tools());
+    if (bases.empty() || tools.empty()) {
+        return;
+    }
+    std::vector<TopoDS_Shape> results;
+    for (TopExp_Explorer xp(op->Shape(), TopAbs_SOLID); xp.More(); xp.Next()) {
+        results.push_back(xp.Current());
+    }
+    // A fuse that kept a tool whole has more solids than its base, else it merged nothing
+    if (!cut && results.size() <= bases.size()) {
+        return;
+    }
+    for (const auto& tool : tools) {
+        if (!leftNoTrace(op, tool, cut)) {
+            continue;
+        }
+        // A cut that removed nothing lost the tool if the result still has material where the
+        // tool is (a tool outside the base, or inside another tool, has none). A fuse that merged
+        // nothing lost it if the tool lies in the material of the base or of another tool
+        std::vector<TopoDS_Shape> others = cut ? results : bases;
+        if (!cut) {
+            for (const auto& other : tools) {
+                if (!other.IsSame(tool)) {
+                    others.push_back(other);
+                }
+            }
+        }
+        for (const auto& other : others) {
+            if (overlaps(other, tool, op->FuzzyValue())) {
+                throw Base::CADKernelError(
+                    cut ? "Cut failed: a tool solid lies inside the base, but the result lost its "
+                          "cavity (OCCT solid builder fault, ops#472)"
+                        : "Fuse failed: a tool solid lies inside the base, but the result kept it "
+                          "as a separate overlapping solid (OCCT solid builder fault, ops#472)"
+                );
+            }
+        }
+    }
 }
 
 void FCBRepAlgoAPI_BooleanOperation::Build()

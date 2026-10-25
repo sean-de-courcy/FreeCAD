@@ -50,6 +50,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestLoft.py
     PartDesignTests/TestPipe.py
     PartDesignTests/TestPrimitive.py
+    PartDesignTests/TestLostTool.py
     PartDesignTests/TestMirrored.py
     PartDesignTests/TestLinearPattern.py
     PartDesignTests/TestPolarPattern.py

@@ -76,6 +76,7 @@ set(Part_tests
     parttests/__init__.py
     parttests/AttachAcrossContainersTest.py
     parttests/BooleanLocationsTest.py
+    parttests/BooleanLostToolTest.py
     parttests/BRep_tests.py
     parttests/CompoundFilterTest.py
     parttests/Geom2d_tests.py

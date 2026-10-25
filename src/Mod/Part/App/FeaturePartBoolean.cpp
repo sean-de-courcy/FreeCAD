@@ -201,6 +201,7 @@ App::DocumentObjectExecReturn* Boolean::execute()
             }
             return new App::DocumentObjectExecReturn(error.str());
         }
+        FCBRepAlgoAPIHelper::checkLostTools(mkBool.get());
         TopoDS_Shape resShape = mkBool->Shape();
         if (resShape.IsNull()) {
             return new App::DocumentObjectExecReturn("Resulting shape is null");

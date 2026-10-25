@@ -9608,6 +9608,7 @@ TopoShape& TopoShape::makeElementBoolean(
     if (Base::Sequencer().wasCanceled()) {
         FC_THROWM(Base::CADKernelError, "User aborted");
     }
+    FCBRepAlgoAPIHelper::checkLostTools(mk.get());
     makeElementShape(*mk, fixedInputs, op, elementMapPolicy);
 
     if (buildShell) {

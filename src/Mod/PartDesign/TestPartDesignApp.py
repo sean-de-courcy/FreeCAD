@@ -63,6 +63,7 @@ from PartDesignTests.TestPipe import TestRoundCornerNames  # FreeCAD-CH, ops#455
 from PartDesignTests.TestLoft import TestLoft
 from PartDesignTests.TestPrimitive import TestPrimitive
 from PartDesignTests.TestPrimitive import TestBaseAfterARefine  # FreeCAD-CH, ops#474
+from PartDesignTests.TestLostTool import TestLostTool  # FreeCAD-CH, ops#472
 from PartDesignTests.TestHelix import TestHelix
 
 # transformations and boolean
