@@ -157,9 +157,9 @@ namespace
 // `CPY;L` with the link's ID, and a link array's element n `CPY;L<n>` with the array's ID, in
 // either ShowElement mode and across documents too (10 and 11 are reserved by ops#469
 // and ops#468: whichever merges later takes the next number).
-// 13: ops#468, vertexes generated along one edge and told apart by a counter carry their count
-// (`0of2`, `1of2`; a lone one stays `0`), so a name doesn't pass to another member when an edit
-// changes how many there are.
+// 13: ops#468, a vertex generated where an edge crosses a face is named by the side of the face
+// the edge goes to there (`in`, `out`), not by a counter alone, so a name doesn't pass to the
+// other crossing when an edit changes how many there are.
 constexpr int ForkNamingRevision = 13;
 
 // The `.N<n>` of the element map version: the form interned names are saved in (ops#6). 2: the
