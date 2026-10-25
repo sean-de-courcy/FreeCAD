@@ -3834,6 +3834,10 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         const char* generatorType = "";
         std::vector<std::pair<std::string, std::size_t>> generatorMergedFaces;
         std::size_t generatorLostFaces = 0;
+        // Tier 1's candidates that the held-generator test dropped (ops#467), and the
+        // generators they aren't made from, each as its type ("edge") and an element holding it.
+        std::vector<int> notGenerated;
+        std::vector<std::pair<std::string, std::string>> heldGenerators;
         // The IDX source's elements, and whether they replaced the other candidates (tier 2
         // agreed with one of them at least).
         std::set<int> fromIndex;
@@ -4006,6 +4010,17 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 + type + " holds; "
                 + facesText(state.generatorMergedFaces, state.generatorLostFaces) + ")";
         }
+        if (const auto n = state.notGenerated.size()) {
+            std::string held;
+            for (const auto& [type, holder] : state.heldGenerators) {
+                held += (held.empty() ? "" : "; ") + std::string(type == "edge" ? "an " : "a ")
+                    + type + ", which " + holder + " holds";
+            }
+            text += (n == 1 ? std::string("; tier 1's 1 survivor isn't")
+                            : "; tier 1's " + std::to_string(n) + " survivors aren't")
+                + " made from the old element's generator"
+                + (state.heldGenerators.size() == 1 ? "" : "s") + " (" + held + ")";
+        }
         return text;
     };
     // The derived survivors the no-candidate branch ran instead of (ops#335), for the evidence:
@@ -4052,8 +4067,8 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         const auto n = state.outcome.candidates.size();
         listByDistance(state, rest, "geometric", n < 8 ? 8 - n : std::size_t(0));
     };
-    // The survivors T1, T1', the merged-neighbour and the missing-generator tests dropped, last on
-    // a break (ops#174, ops#446, ops#454), in the room left of eight
+    // The survivors T1, T1', the merged-neighbour and the missing- and held-generator tests
+    // dropped, last on a break (ops#174, ops#446, ops#454, ops#467), in the room left of eight
     // candidates: never taken automatically, offered to the user's pick. Those the break listed
     // already aren't listed again (a tier-3 pick T1' dropped). The same feature's elements first:
     // they are the likelier pick (PR 149's review).
@@ -4074,6 +4089,7 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             return n < 8 ? 8 - n : std::size_t(0);
         };
         listByDistance(state, unlisted(state.otherGenerator), "other generator", room());
+        listByDistance(state, unlisted(state.notGenerated), "other generator", room());
         listByDistance(state, unlisted(state.otherFaces), "other faces", room());
         listByDistance(state, unlisted(state.otherSource), "other source", room());
         listByDistance(state, unlisted(state.otherMaker), "other maker", room());
@@ -4413,44 +4429,59 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         // seam although it's there, and a refined pipe's y sides are one face when it is saved,
         // so a joint vertex's faces are merged before any edit. Not in pattern instances: an
         // instance's names aren't the plain linked name.
-        if (!oldName.empty() && !input.faces.empty() && (state.type == 'E' || state.type == 'V')
-            && !all.empty() && patternInstances(oldName).empty()) {
+        // The generators the old name's making section links, if it carries GEN, sorted and
+        // distinct (MG and HG)
+        std::vector<std::string> generators;
+        if (!oldName.empty() && (state.type == 'E' || state.type == 'V')) {
             const auto& making = decodeSection(NameAncestry::splitSections(oldName).front());
-            std::vector<std::string> generators;
             if (making.hasMapperFlag(MAPPER_FLAG_GENERATED)) {
-                generators = making.linkedNames;
+                for (const auto& generator : making.linkedNames) {
+                    if (!generator.empty() && generator != Data::EMPTY_VALUE) {
+                        generators.push_back(generator);
+                    }
+                }
                 std::sort(generators.begin(), generators.end());
                 generators.erase(std::unique(generators.begin(), generators.end()),
                                  generators.end());
             }
-            for (const auto& generator : generators) {
-                if (generator.empty() || generator == Data::EMPTY_VALUE) {
-                    continue;
+        }
+        // The elements of the pool of \a type (SolveInput::pool) that hold \a generator, or a
+        // same-type descendant of it (a trimmed piece); none without a pool of the type
+        auto holdersOf = [&](const std::string& generator, char type) {
+            std::vector<const SolveInput::Element*> holders;
+            const auto typePool = input.pool.find(type == 'F' ? "Face"
+                                                  : type == 'E' ? "Edge"
+                                                  : type == 'V' ? "Vertex"
+                                                                : "");
+            if (typePool == input.pool.end()) {
+                return holders;
+            }
+            for (const auto& element : typePool->second) {
+                if (std::any_of(element.names.begin(), element.names.end(), [&](const auto& n) {
+                        return n == generator
+                            || (ancestry.contains(n, generator)
+                                && NameAncestry::reaches(n, generator, type)
+                                    == NameAncestry::Reach::SameType);
+                    })) {
+                    holders.push_back(&element);
                 }
+            }
+            return holders;
+        };
+        if (!input.faces.empty() && !all.empty() && patternInstances(oldName).empty()) {
+            for (const auto& generator : generators) {
                 const auto sections = NameAncestry::splitSections(generator);
                 const auto linked = upperLinked(decodeSection(sections.front()));
                 const char type = decodeSection(sections.back()).elementType;
-                const auto typePool = input.pool.find(type == 'E' ? "Edge"
-                                                      : type == 'V' ? "Vertex"
-                                                                    : "");
-                if (linked.size() < 2 || typePool == input.pool.end()) {
+                if (linked.size() < 2 || (type != 'E' && type != 'V')
+                    || input.pool.find(type == 'E' ? "Edge" : "Vertex") == input.pool.end()) {
                     continue;
                 }
                 const FaceHolders faces = faceHolders(linked);
                 if (faces.merged.empty() && faces.lost == 0) {
                     continue;
                 }
-                const auto& elements = typePool->second;
-                if (std::any_of(elements.begin(), elements.end(), [&](const auto& element) {
-                        return std::any_of(element.names.begin(),
-                                           element.names.end(),
-                                           [&](const auto& n) {
-                                               return n == generator
-                                                   || (ancestry.contains(n, generator)
-                                                       && NameAncestry::reaches(n, generator, type)
-                                                           == NameAncestry::Reach::SameType);
-                                           });
-                    })) {
+                if (!holdersOf(generator, type).empty()) {
                     continue;
                 }
                 for (auto it = all.begin(); it != all.end();) {
@@ -4466,6 +4497,103 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 state.generatorMergedFaces = faces.merged;
                 state.generatorLostFaces = faces.lost;
                 break;
+            }
+        }
+        // A held generator (HG, ops#467), the converse of MG: an edge or vertex generated from an
+        // element L that the target still holds (an element of L's type holds L, or a same-type
+        // descendant of it) is the point or edge where L meets the other generators. A survivor
+        // that L didn't generate isn't it: a refined Pipe's joint moved off a hole by a longer
+        // leg keeps its name, and the seam vertex on the hole shares the cylinder, the leg's
+        // face and their sources with the hole vertex the joint generated (4 of 7 nodes), the
+        // maker and the hole's circle, so tier 1 took it, 1 mm away and silently; with holes at
+        // both bends and the first made straight, the second bend's seam vertex went to the
+        // other hole's, 12.9 mm away. A survivor fits L if one of its names has a making section
+        // with GEN that links L, a same-type descendant of L (a trimmed piece), or another name
+        // of an element holding L (a merged face holds both legs' names, and the whole circle on
+        // it links one of them: the merged arc stays). Every held generator counts, not any one:
+        // a seam vertex links the seam but not the joint (PLAN decision 124). The survivors that
+        // don't fit are dropped, the exempt ones never; geometry decides (the exact place, tier
+        // 3, G2 under policy D) or the entry breaks, listing them (role `other generator`). It
+        // narrows: unlike MN, it reads the survivor's own making section, and a name is held now
+        // or it isn't. Not in pattern instances, as MG. A generator nothing holds is MG's, T1''s
+        // and geometry's.
+        if (!generators.empty() && !all.empty() && patternInstances(oldName).empty()) {
+            struct Held
+            {
+                const std::string* generator;
+                char type;
+                std::set<std::string> names;  // the names of the elements holding it
+                std::string holder;           // the first of them by index
+            };
+            std::vector<Held> held;
+            for (const auto& generator : generators) {
+                const auto sections = NameAncestry::splitSections(generator);
+                if (sections.empty()) {
+                    continue;
+                }
+                const char type = decodeSection(sections.back()).elementType;
+                const auto holders = holdersOf(generator, type);
+                if (holders.empty()) {
+                    continue;
+                }
+                Held h {&generator, type, {}, {}};
+                for (const auto* element : holders) {
+                    h.names.insert(element->names.begin(), element->names.end());
+                    const long a = indexNumber(element->index);
+                    const long b = indexNumber(h.holder);
+                    if (h.holder.empty() || a < b || (a == b && element->index < h.holder)) {
+                        h.holder = element->index;
+                    }
+                }
+                held.push_back(std::move(h));
+            }
+            // Whether one of \a names has a making section with GEN linking \a h's generator
+            auto madeFrom = [&](const std::vector<std::string>& names, const Held& h) {
+                return std::any_of(names.begin(), names.end(), [&](const auto& n) {
+                    const auto sections = NameAncestry::splitSections(n);
+                    if (sections.empty()) {
+                        return false;
+                    }
+                    const auto& making = decodeSection(sections.front());
+                    if (!making.hasMapperFlag(MAPPER_FLAG_GENERATED)) {
+                        return false;
+                    }
+                    const auto& links = making.linkedNames;
+                    return std::any_of(links.begin(), links.end(), [&](const auto& link) {
+                        return link == *h.generator || h.names.count(link) > 0
+                            || (!link.empty() && link != Data::EMPTY_VALUE
+                                && ancestry.contains(link, *h.generator)
+                                && NameAncestry::reaches(link, *h.generator, h.type)
+                                    == NameAncestry::Reach::SameType);
+                    });
+                });
+            };
+            std::vector<bool> missed(held.size(), false);
+            for (auto it = all.begin(); it != all.end();) {
+                bool fits = true;
+                if (!exempt(*it)) {
+                    for (std::size_t i = 0; i < held.size(); ++i) {
+                        if (!madeFrom(pool.elements[*it].names, held[i])) {
+                            missed[i] = true;
+                            fits = false;
+                        }
+                    }
+                }
+                if (fits) {
+                    ++it;
+                }
+                else {
+                    state.notGenerated.push_back(*it);
+                    it = all.erase(it);
+                }
+            }
+            for (std::size_t i = 0; i < held.size(); ++i) {
+                if (missed[i]) {
+                    state.heldGenerators.emplace_back(held[i].type == 'F'   ? "face"
+                                                      : held[i].type == 'E' ? "edge"
+                                                                            : "vertex",
+                                                      held[i].holder);
+                }
             }
         }
         // A piece of a far cap merged with others into one (ops#360, PR 340 round 3): the one

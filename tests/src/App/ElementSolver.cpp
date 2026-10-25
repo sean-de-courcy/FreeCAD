@@ -8894,14 +8894,16 @@ TEST(SolveOwner, missingGeneratorNeedsTheBoundaryChanged)
 TEST(SolveOwner, missingGeneratorLeavesAHeldGenerator)
 {
     // The faces merged, but an edge holds the joint, trimmed by a later cut (tag 12): the
-    // generator is there, and tier 1 decides as before.
+    // generator is there, so MG leaves it. The seam vertex isn't made from it: the held-generator
+    // test drops it (ops#467), with its own evidence.
     HoledBend h;
     auto input = h.input(h.hole1);
     input.pool["Edge"].push_back(element("Edge4", {piece(h.edge1, 12, "CUT", 0, 'E')}));
     auto outcome = Data::solveOwner(input)[0];
-    EXPECT_EQ(outcome.status, SolveStatus::Resolved) << outcome.evidence;
-    EXPECT_EQ(outcome.element, "Vertex10");
-    EXPECT_EQ(outcome.tier, 1);
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << outcome.evidence;
+    EXPECT_EQ(outcome.evidence,
+              "no candidate; tier 1's 1 survivor isn't made from the old element's generator (an "
+              "edge, which Edge4 holds)");
 }
 
 TEST(SolveOwner, missingGeneratorThenTier3InPlace)
@@ -8970,7 +8972,7 @@ TEST(SolveOwner, missingGeneratorKeepsAPiece)
 }
 
 // ---------------------------------------------------------------------------------------------
-// The exact place (ops#394)
+// The exact place (ops#394) and a held generator (ops#467)
 
 namespace
 {
@@ -9134,4 +9136,167 @@ TEST(SolveOwner, exactPlaceAmongTheMergedNeighbours)
                                      0),
               0U)
         << outcome.evidence;
+}
+
+TEST(SolveOwner, heldGeneratorDropsTheSeamVertex)
+{
+    // ops#467: the joint moved off the hole (a leg made longer) and is held, exactly, by Edge3;
+    // its faces are as they were for MG's purpose. The hole vertex was where the joint entered
+    // the hole; the seam vertex shares the cylinder, the merged face and their sources, the
+    // maker and the circle, so tier 1 took it, 1 mm away and silently. The joint didn't
+    // generate it: it is no structural candidate.
+    HoledBend h;
+    auto input = h.input(h.hole1);
+    input.pool["Edge"].push_back(element("Edge3", {h.edge1}));
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << outcome.evidence;
+    EXPECT_EQ(outcome.evidence,
+              "no candidate; tier 1's 1 survivor isn't made from the old element's generator (an "
+              "edge, which Edge3 holds)");
+    EXPECT_EQ(outcome.candidates, (std::vector<std::string> {"Vertex10"}));
+    EXPECT_EQ(outcome.candidateRoles, (std::vector<std::string> {"other generator"}));
+
+    //   the cylinder held too (the target's faces as a pool): both generators named
+    input.pool["Face"] = input.faces;
+    outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << outcome.evidence;
+    EXPECT_EQ(outcome.evidence,
+              "no candidate; tier 1's 1 survivor isn't made from the old element's generators (an "
+              "edge, which Edge3 holds; a face, which Face10 holds)");
+
+    //   without the target's edges (the test off for the joint): tier 1's pick, as before
+    input = h.input(h.hole1);
+    input.pool.erase("Edge");
+    outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Resolved) << outcome.evidence;
+    EXPECT_EQ(outcome.element, "Vertex10");
+    EXPECT_EQ(outcome.tier, 1);
+}
+
+TEST(SolveOwner, heldGeneratorNeedsEveryHeldGenerator)
+{
+    // The old seam vertex on the joint, generated from the seam and the joint, both held. The
+    // seam vertex now links the seam but not the joint: dropped, and geometry decides. It sits
+    // where the old one sat (by coincidence: the seam's end is where the seam met the joint),
+    // so tier 3 takes it, with the quieter warning, instead of tier 1 silently; one that had
+    // moved with the seam would break (a straightened bend, ops#467's second case).
+    HoledBend h;
+    auto input = h.input(h.seam1);
+    input.pool["Edge"].push_back(element("Edge3", {h.edge1}));
+    input.pool["Vertex"].push_back(h.other());
+    input.entries[0].fingerprint = point(2, 0.5, 30);
+    measure(input, {{"Vertex10", point(2, 0.5, 30)}, {"Vertex15", point(2, -1.3, 30)}}, nullptr);
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Resolved) << outcome.evidence;
+    EXPECT_EQ(outcome.element, "Vertex10");
+    EXPECT_EQ(outcome.tier, 3);
+    EXPECT_EQ(outcome.evidence.rfind("no structural candidate, tier 3: nearest 0.000, second "
+                                     "1.800",
+                                     0),
+              0U)
+        << outcome.evidence;
+
+    //   the other vertex within d_max: at the same place still
+    measure(input, {{"Vertex10", point(2, 0.5, 30)}, {"Vertex15", point(2, 0.1, 30)}}, nullptr);
+    outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Resolved) << outcome.evidence;
+    EXPECT_EQ(outcome.element, "Vertex10");
+    EXPECT_EQ(outcome.evidence.rfind("no structural candidate, at the same place: nearest 0.000",
+                                     0),
+              0U)
+        << outcome.evidence;
+
+    //   the seam vertex moved off with the seam, 12.9 mm: nothing at the place, a break
+    measure(input,
+            {{"Vertex10", point(14.9, 0.5, 30)}, {"Vertex15", point(2, -1.3, 30)}},
+            nullptr);
+    outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << outcome.evidence;
+}
+
+TEST(SolveOwner, heldGeneratorKeepsAContinuation)
+{
+    // The joint trimmed by a later cut (tag 12) is held by its piece, and the new hole vertex
+    // is generated from that piece: it fits, and tier 1 takes it, not the seam vertex.
+    HoledBend h;
+    auto input = h.input(h.hole1);
+    const auto trimmed = piece(h.edge1, 12, "CUT", 0, 'E');
+    input.pool["Edge"].push_back(element("Edge4", {trimmed}));
+    input.pool["Vertex"] = {element("Vertex11", {generated({trimmed, h.cyl}, 11, "CUT", 'V')})};
+    RefinedBend::lieOn(input, {{"Vertex11", {"Face6", "Face10"}}});
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Resolved) << outcome.evidence;
+    EXPECT_EQ(outcome.element, "Vertex11");
+    EXPECT_EQ(outcome.tier, 1);
+
+    //   beside the seam vertex: it alone is dropped
+    input.pool["Vertex"].push_back(element("Vertex10", {h.seamNow}));
+    RefinedBend::lieOn(input,
+                       {{"Vertex10", {"Face6", "Face10"}}, {"Vertex11", {"Face6", "Face10"}}});
+    outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Resolved) << outcome.evidence;
+    EXPECT_EQ(outcome.element, "Vertex11");
+    EXPECT_EQ(outcome.tier, 1);
+}
+
+TEST(SolveOwner, heldGeneratorKeepsAHoldersOtherName)
+{
+    // The merged arc (policy D's C3): the hole's arc on leg 1's side, generated from the
+    // cylinder and x1, is the whole circle on the merged face now, generated from the cylinder
+    // and x0. Face6 holds both legs' names, so the circle fits x1 through its holder's other
+    // name, and tier 1 takes it as before.
+    HoledBend h;
+    auto input = h.input(generated({h.cyl, h.x1}, 11, "CUT", 'E'));
+    input.entries[0].type = "Edge";
+    input.pool["Face"] = input.faces;
+    input.pool.erase("Vertex");
+    input.pool["Edge"] = {element("Edge12", {generated({h.cyl, h.x0}, 11, "CUT", 'E')})};
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Resolved) << outcome.evidence;
+    EXPECT_EQ(outcome.element, "Edge12");
+    EXPECT_EQ(outcome.tier, 1);
+}
+
+TEST(SolveOwner, heldGeneratorLeavesAGoneGenerator)
+{
+    // No edge holds the joint and its faces are two faces still (MG off): nothing is held, so
+    // the test doesn't act and tier 1 decides as before.
+    HoledBend h;
+    auto input = h.input(h.hole1);
+    input.faces = {element("Face3", {h.x2}),
+                   element("Face5", {h.x1}),
+                   element("Face6", {h.x0}),
+                   element("Face10", {h.cyl})};
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Resolved) << outcome.evidence;
+    EXPECT_EQ(outcome.element, "Vertex10");
+    EXPECT_EQ(outcome.tier, 1);
+}
+
+TEST(SolveOwner, heldGeneratorKeepsAPiece)
+{
+    // A piece of the old hole vertex (a later Fillet's) is exempt, as for MG: an expanding
+    // reference takes it, and the seam vertex doesn't count beside it.
+    HoledBend h;
+    auto input = h.input(h.hole1);
+    input.pool["Edge"].push_back(element("Edge3", {h.edge1}));
+    input.pool["Vertex"].push_back(element("Vertex20", {piece(h.hole1, 12, "FLT", 0, 'V')}));
+    input.entries[0].policy = Data::SolvePolicy::Expand;
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Resolved) << outcome.evidence;
+    EXPECT_EQ(outcome.element, "Vertex20");
+    EXPECT_EQ(outcome.elements, (std::vector<std::string> {"Vertex20"}));
+}
+
+TEST(SolveOwner, heldGeneratorSkipsPatternInstances)
+{
+    // In a pattern's instance the names aren't the plain linked names: the test doesn't act.
+    HoledBend h;
+    auto input = h.input(stepInstance(h.hole1, 14, "2", 'V'));
+    input.pool["Edge"].push_back(element("Edge3", {stepInstance(h.edge1, 14, "2", 'E')}));
+    input.pool["Vertex"] = {element("Vertex10", {stepInstance(h.seamNow, 14, "2", 'V')})};
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Resolved) << outcome.evidence;
+    EXPECT_EQ(outcome.element, "Vertex10");
+    EXPECT_EQ(outcome.tier, 1);
 }

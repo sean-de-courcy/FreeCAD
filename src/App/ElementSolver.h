@@ -615,7 +615,8 @@ struct AppExport SolveInput
     };
 
     std::vector<Entry> entries;
-    /// The target's named elements, by type.
+    /// The target's named elements, by type. The held-generator test (ops#467) reads the pools
+    /// of the old name's generators' types, and is off for a generator whose type has none.
     std::map<std::string, std::vector<Element>> pool;
     /// Tier 1's overlap gap (NameAncestry::structuralSurvivors()).
     double gap = 0.25;
@@ -850,6 +851,17 @@ struct AppExport SolveOutcome
  *   every candidate but those in the old name's ancestry, its pieces and its IDX source's is
  *   dropped: geometry and the guess rules decide as for no candidate, and a break lists them
  *   last (role `other generator`). Not for names in pattern instances.
+ * - A held generator (ops#467): an edge or vertex whose making section carries GEN, for each
+ *   name L it links (a face, an edge or a vertex) that an element of L's type in
+ *   SolveInput::pool holds, or a same-type descendant of it (a trimmed piece): a candidate fits
+ *   L if one of its names has a making section with GEN that links L, a same-type descendant of
+ *   L, or another name of an element holding L (a merged face's other leg). The candidates that
+ *   don't fit every held L are dropped, except those in the old name's ancestry, its pieces and
+ *   its IDX source's: a hole's vertex where a pipe's joint edge entered the hole, the joint
+ *   moved off it, isn't the seam vertex on the same hole, which the joint didn't generate.
+ *   Geometry and the guess rules decide as for no candidate, and a break lists them last (role
+ *   `other generator`). Not for names in pattern instances, nor when a missing generator
+ *   dropped them already.
  * - A merged far-cap piece (ops#360): when exactly one candidate's name is the old name with,
  *   in one marked section (PRJ and MOD), more marks (connected elements) holding all of the old
  *   ones, an edge among them, it is the only candidate, as if the old name were in its

@@ -38,6 +38,7 @@ import FreeCAD as App
 import Part
 
 from PartDesignTests import TestNamingDump as dump
+from PartDesignTests import TestPipe as pipes
 from PartDesignTests.Scenarios import models
 from PartDesignTests.Scenarios.moves import moveCircles
 from PartDesignTests.Scenarios.harness import X, Z, edge, face
@@ -2605,3 +2606,210 @@ class TestNamingSolver(unittest.TestCase):
         else:
             [entry] = App.getReferenceReport(chamfer)
             self.assertEqual(entry["status"], "broken")
+
+    # A held generator (ops#467): a hole across an edge, the edge moved off it
+
+    def holedBlock(self, doc):
+        """A Pad of 0..20 x 0..10, 10 high, and a refined Pocket (through all, midplane, along y)
+        of a circle of radius 0.5 centred at x = 10 on the top edges' height, in an XZ sketch.
+        The hole's vertices on the front top edge, at (9.5, 0, 10) and (10.5, 0, 10), are
+        generated from that edge and the hole's cylinder, the second (where the circle's seam
+        lies) from the edge and the seam. A datum point on each; returns (pad, hole sketch,
+        points, their places)."""
+        body = models.body(doc)
+        profile = models.sketch(doc, "Profile", models.rectangle(0, 0, 20, 10), body)
+        pad = models.pad(body, profile, 10)
+        xz = App.Placement(App.Vector(), App.Rotation(App.Vector(1, 0, 0), 90))
+        hole = models.sketch(doc, "Hole", [models.circle(10, 10, 0.5)], body, placement=xz)
+        pocket = body.newObject("PartDesign::Pocket", "Pocket")
+        pocket.Profile = hole
+        pocket.Type = 1  # through all
+        pocket.Midplane = True
+        pocket.Refine = True
+        doc.recompute()
+        self.assertTrue(pocket.isValid(), pocket.getStatusString())
+        points = []
+        for x in (9.5, 10.5):
+            [vertex] = pipes.elementsWhere(
+                pocket.Shape, "Vertex", lambda p: (p - App.Vector(x, 0, 10)).Length < 1e-6
+            )
+            point = body.newObject("PartDesign::Point", "On" + vertex)
+            point.AttachmentSupport = [(pocket, vertex)]
+            point.MapMode = "Vertex"
+            points.append(point)
+        doc.recompute()
+        return pad, hole, points, {p.Name: App.Vector(p.Placement.Base) for p in points}
+
+    def moveCircle(self, sketch, x):
+        geometry = sketch.Geometry
+        geometry[0].Center = App.Vector(x, 10, 0)
+        sketch.Geometry = geometry
+
+    def testSeamVertexLeftByAMovedHole(self):
+        """The Pad made 3 mm taller and the hole moved 2 mm along x: the front top edge, still
+        there under its name, no longer meets the hole, which lies wholly in the front face. The
+        seam vertex there links the seam and the front face; it shares most of the old seam
+        vertex's ancestry, the maker and the sources, and tier 1 took it, 2 mm away and silently,
+        so the reference didn't come back when the edit was undone. The front top edge didn't
+        generate it: the references break or warn, and are in their place again once the Pad and
+        the hole are back."""
+        doc = self.newDocument()
+        pad, hole, points, before = self.holedBlock(doc)
+
+        pad.Length = 13
+        self.moveCircle(hole, 12)
+        doc.recompute()
+
+        for point in points:
+            if point.isValid():
+                levels = [e.get("warning_level") for e in App.getReferenceReport(point)]
+                self.assertIn("normal", levels, (point.Name, point.AttachmentSupport))
+
+        pad.Length = 10
+        self.moveCircle(hole, 10)
+        doc.recompute()
+        self.assertBackInPlace(points, before)
+
+    # The same on a refined pipe's joint (ops#454's model). Since the Pipe's leg names (ops#415),
+    # each leg's face has its own spine line as a source, so T1' keeps these loud without the
+    # held-generator test; they pin that they stay so.
+
+    def holedPipe(self, doc, heights):
+        """ops#454's model: a refined "Transformed" pipe of the 4 x 4 square along TestPipe's U
+        (legs 30, 20 and 20, turned 40 and 20 degrees), and a refined Pocket, through all and
+        midplane along x, of circles of radius 0.5 at the `heights`, in a sketch on the plane
+        x = 0 (sketch x is world y, sketch y world z). Returns (body, spine sketch, its points,
+        pocket)."""
+        body = models.body(doc)
+        profile = models.sketch(doc, "Profile", models.rectangle(-2, -2, 2, 2), body)
+        points = pipes.bendPoints(40, 20)
+        path = models.sketch(doc, "Path", models.polyline(points), body, placement=pipes.XZ)
+        pipe = body.newObject("PartDesign::AdditivePipe", "Pipe")
+        pipe.Profile = profile
+        pipe.Spine = (path, [])
+        pipe.Transition = "Transformed"
+        pipe.Refine = True
+        placement = App.Placement(App.Vector(), App.Rotation(App.Vector(1, 1, 1), 120))
+        circles = [models.circle(0, z, 0.5) for z in heights]
+        hole = models.sketch(doc, "Hole", circles, body, placement=placement)
+        pocket = body.newObject("PartDesign::Pocket", "Pocket")
+        pocket.Profile = hole
+        pocket.Type = 1  # through all
+        pocket.Midplane = True
+        pocket.Refine = True
+        doc.recompute()
+        self.assertTrue(pocket.isValid(), pocket.getStatusString())
+        return body, path, points, pocket
+
+    def pointsAt(self, body, target, at):
+        """A datum point on each of the target's edges and vertices lying wholly in the square at
+        the spine vertex `at`, with their places"""
+        points = []
+        for kind in ("Edge", "Vertex"):
+            for element in pipes.elementsWhere(target.Shape, kind, pipes.inSquareAt(at)):
+                point = body.newObject("PartDesign::Point", "On" + element)
+                point.AttachmentSupport = [(target, element)]
+                point.MapMode = "Vertex" if kind == "Vertex" else "CenterOfMass"
+                points.append(point)
+        body.Document.recompute()
+        self.assertEqual([p.Name for p in points if not p.isValid()], [])
+        return points, {p.Name: App.Vector(p.Placement.Base) for p in points}
+
+    def setSpine(self, path, points):
+        """The spine's lines moved through `points`, keeping their geometry IDs (a drag)"""
+        models.setLines(path, {i: (p, q) for i, (p, q) in enumerate(zip(points, points[1:]))})
+        path.Document.recompute()
+
+    def assertNothingMovedSilently(self, points, before):
+        """No point the solver re-bound lies elsewhere than it was without the normal warning: a
+        point is invalid, at its place, warned, or follows its element by its exact name"""
+        for point in points:
+            if not point.isValid():
+                continue
+            for entry in App.getReferenceReport(point):
+                if entry["status"] == "broken" or entry["tier"] == 0:
+                    continue
+                if entry.get("warning_level") == "normal":
+                    continue
+                moved = (point.Placement.Base - before[point.Name]).Length
+                self.assertLess(moved, 1e-6, (point.Name, point.AttachmentSupport, entry))
+
+    def assertBackInPlace(self, points, before):
+        for point in points:
+            self.assertTrue(point.isValid(), (point.Name, point.getStatusString()))
+            moved = (point.Placement.Base - before[point.Name]).Length
+            self.assertLess(moved, 1e-6, (point.Name, point.AttachmentSupport))
+
+    def testHoleLeftByAMovedJoint(self):
+        """Leg 0 made 1 mm longer: the first bend's joint rises off the hole, keeping its name.
+        The hole's vertices where the joint entered it, at (+-2, -0.5, 30), were generated from
+        the joint and the cylinder; the seam vertex on the same hole is 1 mm away (before the
+        leg names, tier 1 took it silently, ops#467). Those references break or warn. The seam
+        vertices at (+-2, 0.5, 30) are found at their place (the hole's seam is there still).
+        Leg 0 back at 30: every point is in its place."""
+        doc = self.newDocument()
+        body, path, points, pocket = self.holedPipe(doc, [30])
+        joint, before = self.pointsAt(body, pocket, App.Vector(0, 0, 30))
+        # the joint edges' four pieces beside the hole and the hole's seam; the four corners, and
+        # the hole's and the seam's vertices on the joint edges
+        self.assertEqual(len(joint), 13, [p.Name for p in joint])
+
+        self.setSpine(path, points[:1] + [(x, z + 1) for x, z in points[1:]])
+
+        self.assertNothingMovedSilently(joint, before)
+        onHole = [p for p in joint if p.MapMode == "Vertex" and abs(before[p.Name].z - 30) < 1e-6]
+        holeVertices = [p for p in onHole if abs(before[p.Name].y + 0.5) < 1e-6]
+        seamVertices = [p for p in onHole if abs(before[p.Name].y - 0.5) < 1e-6]
+        self.assertEqual((len(holeVertices), len(seamVertices)), (2, 2), [p.Name for p in onHole])
+        for point in holeVertices:
+            if point.isValid():
+                levels = [e.get("warning_level") for e in App.getReferenceReport(point)]
+                self.assertIn("normal", levels, point.Name)
+        for point in seamVertices:
+            self.assertTrue(point.isValid(), (point.Name, point.getStatusString()))
+            moved = (point.Placement.Base - before[point.Name]).Length
+            self.assertLess(moved, 1e-6, point.Name)
+
+        self.setSpine(path, points)
+        self.assertBackInPlace(joint, before)
+
+    def testSeamVertexLeftByAStraightenedBend(self):
+        """Holes across both bends' joints, the first bend made straight: the second bend moves
+        12.9 mm, away from its hole, which now crosses leg 1. The seam vertices of that hole on the
+        second bend's joint were generated from the joint and the seam; the hole's seam vertex now
+        on leg 1 links the seam but not the joint, which is still there (before the leg names,
+        tier 1 took it silently, ops#467). Those references break or warn; the bend turned back,
+        every point is in its place."""
+        doc = self.newDocument()
+        bends = pipes.bendPoints(40, 20)[1:3]
+        body, path, points, pocket = self.holedPipe(doc, [z for _, z in bends])
+        x, z = points[2]
+        joint, before = self.pointsAt(body, pocket, App.Vector(x, 0, z))
+        self.assertGreater(len(joint), 4, [p.Name for p in joint])
+
+        self.setSpine(path, pipes.bendPoints(0, 20))
+
+        self.assertNothingMovedSilently(joint, before)
+
+        self.setSpine(path, points)
+        self.assertBackInPlace(joint, before)
+
+    def testHoleVertexFollowsAJointStillCrossingIt(self):
+        """The control: leg 0 made 0.3 mm longer, so the joint still crosses the hole, at
+        y = +-0.4. The hole vertex at (2, -0.5, 30) follows it by its name to (2, -0.4, 30.3).
+        Only the x = +2 side: on the other, the two crossings' names can swap (ops#468)."""
+        doc = self.newDocument()
+        body, path, points, pocket = self.holedPipe(doc, [30])
+        joint, before = self.pointsAt(body, pocket, App.Vector(0, 0, 30))
+        [hole] = [
+            p
+            for p in joint
+            if p.MapMode == "Vertex" and (before[p.Name] - App.Vector(2, -0.5, 30)).Length < 1e-6
+        ]
+
+        self.setSpine(path, points[:1] + [(x, z + 0.3) for x, z in points[1:]])
+
+        self.assertTrue(hole.isValid(), hole.getStatusString())
+        moved = (hole.Placement.Base - App.Vector(2, -0.4, 30.3)).Length
+        self.assertLess(moved, 1e-6, hole.AttachmentSupport)
+        self.assertNothingMovedSilently(joint, before)

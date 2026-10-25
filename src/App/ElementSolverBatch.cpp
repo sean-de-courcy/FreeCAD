@@ -1385,7 +1385,8 @@ bool solveElementReferences(DocumentObject* feature,
                 // first): the merged-neighbour test needs the target's faces (ops#446). One
                 // generated from such an edge or vertex (GEN, the linked name's making section
                 // UPP with two linked names at least): the missing-generator test needs them
-                // and the pool of the linked name's type (ops#454).
+                // and the pool of the linked name's type (ops#454). Any generated one: the
+                // held-generator test needs the pools of its linked names' types (ops#467).
                 if (!item.oldName.empty() && (item.type == "Edge" || item.type == "Vertex")) {
                     // The first (making) or last section of a name, decoded
                     auto sectionOf = [](std::string_view name, bool making) {
@@ -1407,20 +1408,24 @@ bool solveElementReferences(DocumentObject* feature,
                     }
                     else if (making.hasMapperFlag(Data::MAPPER_FLAG_GENERATED)) {
                         for (const auto& linked : making.linkedNames) {
+                            // The held-generator test (ops#467) reads the pool of every
+                            // generator's type
+                            const char type = sectionOf(linked, false).elementType;
+                            if (type != 'F' && type != 'E' && type != 'V') {
+                                continue;
+                            }
+                            const std::string typeName = type == 'F' ? "Face"
+                                : type == 'E'                        ? "Edge"
+                                                                     : "Vertex";
+                            if (input.pool.find(typeName) == input.pool.end()) {
+                                input.pool[typeName] = pool(typeName);
+                            }
                             const auto generator = sectionOf(linked, true);
                             const std::set<std::string> faces(generator.linkedNames.begin(),
                                                               generator.linkedNames.end());
-                            const char type = sectionOf(linked, false).elementType;
-                            if (!generator.hasMapperFlag(Data::MAPPER_FLAG_UPPER)
-                                || faces.size() < 2 || (type != 'E' && type != 'V')) {
-                                continue;
-                            }
-                            if (input.faces.empty()) {
+                            if (generator.hasMapperFlag(Data::MAPPER_FLAG_UPPER)
+                                && faces.size() >= 2 && type != 'F' && input.faces.empty()) {
                                 input.faces = pool("Face");
-                            }
-                            const std::string typeName = type == 'E' ? "Edge" : "Vertex";
-                            if (input.pool.find(typeName) == input.pool.end()) {
-                                input.pool[typeName] = pool(typeName);
                             }
                         }
                     }
