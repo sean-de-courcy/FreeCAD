@@ -65,6 +65,10 @@ protected:
         const TopoShape& oldShape,
         const RefineErrorPolicy onError = RefineErrorPolicy::Warn
     ) const;
+
+private:
+    /// Every face of shape that isn't elementary (plane, cylinder, cone, sphere, torus) is valid
+    static bool freeFormFacesValid(const TopoShape& shape);
 };
 
 using FeatureRefinePython = App::FeaturePythonT<FeatureRefine>;

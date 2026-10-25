@@ -59,6 +59,7 @@ from PartDesignTests.TestPipe import TestBaseAfterAnInvalidPipe  # FreeCAD-CH, o
 from PartDesignTests.TestPipe import TestBaseAfterAnInvalidBaseFeature  # FreeCAD-CH, ops#310
 from PartDesignTests.TestLoft import TestLoft
 from PartDesignTests.TestPrimitive import TestPrimitive
+from PartDesignTests.TestPrimitive import TestBaseAfterARefine  # FreeCAD-CH, ops#474
 from PartDesignTests.TestHelix import TestHelix
 
 # transformations and boolean
