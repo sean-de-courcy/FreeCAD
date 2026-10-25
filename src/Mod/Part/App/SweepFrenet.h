@@ -33,9 +33,11 @@ class TopoDS_Wire;
  * are too far apart to follow such a twist, the edge is sampled again more densely), or where
  * OCCT's frame turns by more than a right angle among samples without a frame of their own (the
  * curvature at the floor), or jumps by more than jumpCosine's angle where a straight stretch
- * ends:
+ * ends, or isn't steady along a straight stretch inside the edge:
  * - on a planar spine, corrected Frenet: a planar curve's Frenet frame doesn't turn about the
- *   tangent, so the rotation-minimizing frame is Frenet's own, kept continuous;
+ *   tangent, so the rotation-minimizing frame is Frenet's own, kept continuous; or, where it was
+ *   found among samples without a frame, the plane's normal as a constant binormal, the same
+ *   frame (corrected Frenet builds on OCCT's Frenet frame, which is off there);
  * - on a spine planar within a thousandth of its size whose tangent stays close enough to the
  *   plane that no section tilts out of tolerance, and whose Frenet binormal stays close to the
  *   plane's normal, the plane's normal as a constant binormal (corrected Frenet failed there, where
@@ -121,7 +123,8 @@ enum class Mode
     Asked,
     /// Corrected Frenet in place of Frenet
     CorrectedFrenet,
-    /// The plane's normal as a constant binormal in place of Frenet
+    /// The normal of the spine's plane, or of a plane near it, as a constant binormal in place of
+    /// Frenet
     PlaneNormal,
 };
 

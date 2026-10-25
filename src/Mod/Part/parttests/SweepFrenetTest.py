@@ -302,6 +302,31 @@ def same_side_arcs_edge(line):
     return curve.toShape()
 
 
+TURN = App.Rotation(V(1, 2, 3), 37.0)
+
+
+def turned(wire):
+    """`wire`'s single edge turned 37 degrees about (1, 2, 3): its straight stretches off the main
+    axes, where their curvature comes out as rounding rather than 0 (fork PR 377's review, finding
+    1)"""
+    curve = wire.Edges[0].Curve.copy()
+    curve.transform(TURN.toMatrix())
+    return Part.Wire([curve.toShape()])
+
+
+def lowest_along(shape, direction, origin, count=40):
+    """The lowest (point - origin) . direction over the shape's vertexes and a count x count grid on
+    each face"""
+    lowest = min((vertex.Point - origin).dot(direction) for vertex in shape.Vertexes)
+    for face in shape.Faces:
+        u0, u1, v0, v1 = face.ParameterRange
+        for i in range(count + 1):
+            for j in range(count + 1):
+                point = face.valueAt(u0 + (u1 - u0) * i / count, v0 + (v1 - v0) * j / count)
+                lowest = min(lowest, (point - origin).dot(direction))
+    return lowest
+
+
 def helix_edge(pitch, height, radius, angle=0.0):
     """A right-handed helix about Z from (radius, 0, 0), on a cone of `angle` degrees widening
     upwards, as Part.makeHelix makes it, but as one B-spline of degree 6 continuous in its fourth
@@ -620,15 +645,25 @@ class SweepFrenetTest(unittest.TestCase):
         sweep was refused (fork PR 358 round 6's verification, finding 3)"""
         self.assertFrenetHelix(100.0, 1000.0, 1.0, 3.0, make=helix_edge)
 
-    def assertStaysOnItsSide(self, edge, axis="Z"):
-        """A rectangle beside a planar spine in a main plane, on the + side of the plane's normal
-        `axis` (the spine in XY: +Z, its binormal's): the spine's Frenet frame turns over at the
-        inflection, and the rectangle stays on that side"""
+    def assertStaysOnItsSide(self, edge, axis="Z", loud=False):
+        """A rectangle beside a planar spine, on the + side of the plane's normal `axis` (a main
+        axis's name, or a vector; the spine in XY: +Z, its binormal's): the spine's Frenet frame
+        turns over at the inflection, and the rectangle stays on that side. With `loud`, failing to
+        build, saying why, passes too"""
         wire = edge if isinstance(edge, Part.Wire) else Part.Wire([edge])
-        side = V(*(1 if a == axis else 0 for a in "XYZ"))
+        if isinstance(axis, str):
+            side = V(*(1 if a == axis else 0 for a in "XYZ"))
+        else:
+            side = axis
         sweep = self.sweep(wire, rectangle_on_side(wire, side, 0.02))
+        if loud and not sweep.isValid():
+            self.assertTrue(sweep.getStatusString())
+            return
         self.assertTrue(sweep.isValid(), sweep.getStatusString())
-        self.assertGreater(getattr(sweep.Shape.BoundBox, axis + "Min"), 0)
+        if isinstance(axis, str):
+            self.assertGreater(getattr(sweep.Shape.BoundBox, axis + "Min"), 0)
+        else:
+            self.assertGreater(lowest_along(sweep.Shape, side, start_frame(wire)[0]), 0)
 
     def testFrenetInflectionBetweenSamples(self):
         """An S-curve whose curvature passes through zero between two samples, with 0.0714 and
@@ -681,27 +716,43 @@ class SweepFrenetTest(unittest.TestCase):
         no inflection, and the frames on either side agree, but along the straight span OCCT's
         Frenet frame takes the opposite normal. Before, the rectangle beside the spine turned over
         there and back, down to -0.11 to -0.19 (fork PR 358 round 8's verification, finding 3;
-        ops#465)"""
+        ops#465). The plane's normal as binormal sweeps them now: corrected Frenet failed to build
+        the second on macOS (fork PR 377's CI), so failing loudly passes there. A straight span of a
+        hundredth of a knot interval held no sample, and its rectangle turned over to -0.25 (fork
+        PR 377's review, finding 2); turned off the main axes, Frenet failed to build them and
+        corrected Frenet left circles' tubes 1.1e-2 to 9.2e-2 mm off (finding 1)"""
         self.assertStaysOnItsSide(flat_stretch_edge())
-        self.assertStaysOnItsSide(flat_stretch_edge(0.49, 2.99))
+        self.assertStaysOnItsSide(flat_stretch_edge(0.49, 2.99), loud=True)
         self.assertStaysOnItsSide(flat_stretch_edge(knots=(0.0, 0.1, 0.5, 1.0)))
+        self.assertStaysOnItsSide(flat_stretch_edge(knots=(0.0, 1.0, 1.01, 2.01)))
+        for edge in (flat_stretch_edge(), flat_stretch_edge(knots=(0.0, 0.1, 0.5, 1.0))):
+            wire = turned(Part.Wire([edge]))
+            self.assertTube(wire, 0.2)
+            self.assertStaysOnItsSide(wire, TURN.multVec(V(0, 0, 1)))
 
-    def testFrenetShortWobbleIsPassedOver(self):
-        """Two arcs bending the same way with a line of 0.01 mm between them, in one B-spline: OCCT's
-        frame turns over for half the line and back, between two samples whose frames agree. The
-        sweep passes over it, and Frenet keeps the rectangle beside the spine on +Z, while corrected
-        Frenet fails to build there ("command not done"): Frenet is kept (ops#465)"""
-        self.assertStaysOnItsSide(same_side_arcs_edge(0.01))
+    def testFrenetLineBetweenArcs(self):
+        """Two arcs bending the same way with a line of 0.01, 0.1 or 1 mm between them, in one
+        B-spline (degree 7): the line's curvature is rounding, and OCCT's frame turns over along
+        part of it. Frenet failed to build the rectangle beside the spine for the longer lines, and
+        so does corrected Frenet for all three; the plane's normal as binormal keeps it on +Z
+        (ops#465)"""
+        for line in (0.01, 0.1, 1.0):
+            self.assertStaysOnItsSide(same_side_arcs_edge(line))
 
     def testFrenetStraightStartOfAPlanarSpine(self):
         """A planar spine in YZ whose first span is straight along Z: there OCCT's Frenet frame
         takes the normal X, at right angles to the curve's own where it bends. Before, the tube was
-        0.28 mm off and 1 % short; now it is Frenet off's, and a rectangle on the +X side stays
-        there (ops#465)"""
+        0.28 mm off and 1 % short; now it is the tube, and a rectangle on the +X side stays there
+        (ops#465). Turned off the main axes, Frenet and corrected Frenet failed to build it (fork
+        PR 377's review, finding 1)"""
         wire = straight_start_spine(plane_normal=True)
         sweep = self.assertTube(wire, 1.0)
         self.assertAlmostEqual(sweep.Shape.Volume / (math.pi * wire.Length), 1.0, delta=2e-4)
         self.assertStaysOnItsSide(wire, "X")
+        wire = turned(wire)
+        sweep = self.assertTube(wire, 1.0)
+        self.assertAlmostEqual(sweep.Shape.Volume / (math.pi * wire.Length), 1.0, delta=2e-4)
+        self.assertStaysOnItsSide(wire, TURN.multVec(V(1, 0, 0)))
 
     def testFrenetStraightSpanThenOutOfPlane(self):
         """A straight span and a part bending out of every plane, in one B-spline: along the
@@ -720,6 +771,13 @@ class SweepFrenetTest(unittest.TestCase):
             self.assertIn("Frenet frame jumps", sweep.getStatusString())
             corrected = self.sweep(wire, profile, frenet=False)
             self.assertTrue(corrected.isValid(), corrected.getStatusString())
+            # Turned off the main axes, the straight span's frame is noise or jumps further
+            # (165.6 degrees): the rectangle is refused all the same (fork PR 377's review,
+            # finding 1)
+            wire = turned(wire)
+            sweep = self.sweep(wire, rectangle_on_side(wire, TURN.multVec(side), 0.1))
+            self.assertFalse(sweep.isValid())
+            self.assertIn("Frenet frame", sweep.getStatusString())
 
     def testFrenetPlanarWavesOffTheMainPlanesBuild(self):
         """Two planar waves interpolated every 0.5 mm, turned 45 degrees about X: corrected Frenet,
