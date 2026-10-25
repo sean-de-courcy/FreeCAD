@@ -21,7 +21,11 @@
  *                                                                          *
  ***************************************************************************/
 
+#include <BRepAdaptor_Surface.hxx>
+#include <BRepCheck_Analyzer.hxx>
 #include <Standard_Failure.hxx>
+#include <TopExp_Explorer.hxx>
+#include <TopoDS.hxx>
 
 #include <App/Application.h>
 #include <App/Document.h>
@@ -93,6 +97,27 @@ bool FeatureRefine::onlyHaveRefined()
     Shape.setValue(result);
     return true;
 }
+
+bool FeatureRefine::freeFormFacesValid(const TopoShape& shape)
+{
+    for (TopExp_Explorer it(shape.getShape(), TopAbs_FACE); it.More(); it.Next()) {
+        const auto& face = TopoDS::Face(it.Current());
+        switch (BRepAdaptor_Surface(face, false).GetType()) {
+            case GeomAbs_Plane:
+            case GeomAbs_Cylinder:
+            case GeomAbs_Cone:
+            case GeomAbs_Sphere:
+            case GeomAbs_Torus:
+                continue;
+            default:
+                if (!BRepCheck_Analyzer(face).IsValid()) {
+                    return false;
+                }
+        }
+    }
+    return true;
+}
+
 TopoShape FeatureRefine::refineShapeIfActive(
     const TopoShape& oldShape,
     const RefineErrorPolicy onError
@@ -104,13 +129,27 @@ TopoShape FeatureRefine::refineShapeIfActive(
     TopoShape shape(oldShape);
     try {
         TopoShape refinedShape = shape.makeElementRefine();
-        // A refine that merges no face keeps the shells as they were (BRepBuilderAPI_RefineModel
-        // adds an unmodified shell unchanged), so only a merge can make a valid shape invalid. The
-        // check reads the whole shape (BRepCheck_Analyzer): about a third of a 40-feature body's
-        // recompute when it ran after every refine (ops#389).
+        // Only a refine that merges faces has its result checked here: the check reads the whole
+        // shape (BRepCheck_Analyzer), about a third of a 40-feature body's recompute when it ran
+        // after every refine (ops#389).
         const bool merged = refinedShape.countSubShapes(TopAbs_FACE)
             != oldShape.countSubShapes(TopAbs_FACE);
-        if (!merged || refinedShape.isValid() || !oldShape.isValid()) {
+        if (!merged) {
+            // A refine that merges no face still rebuilds its faces (nearly always all of them), and
+            // a rebuilt free-form face can come out invalid (a degenerate ellipsoid's B-spline face,
+            // ops#474). Those faces are checked; if one is invalid, the next feature checks this
+            // result instead of vouching for it (ops#310). Elementary faces (planes, cylinders,
+            // ...) are not checked, so a refined Pocket chain costs nothing more
+            if (booleanInputsValid && !freeFormFacesValid(refinedShape)) {
+                booleanInputsValid = false;
+            }
+            return refinedShape;
+        }
+        if (refinedShape.isValid()) {
+            return refinedShape;
+        }
+        if (!oldShape.isValid()) {
+            booleanInputsValid = false;
             return refinedShape;
         }
         if (onError == RefineErrorPolicy::Raise) {

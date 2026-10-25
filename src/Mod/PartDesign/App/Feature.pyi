@@ -30,3 +30,9 @@ class Feature(PartFeature):
         getBaseObject: returns feature this one fuses itself to, or None. Normally, this should be the same as BaseFeature property, except for legacy workflow. In legacy workflow, it will look up the support of referenced sketch.
         """
         ...
+
+    def checksBase(self) -> bool:
+        """
+        checksBase(): whether this feature's next boolean checks its base, and repairs it if invalid. False when the base feature's own boolean, in its last recompute, ran with every input valid and nothing rebuilt its result unchecked since (FreeCAD-CH ops#310, ops#474).
+        """
+        ...

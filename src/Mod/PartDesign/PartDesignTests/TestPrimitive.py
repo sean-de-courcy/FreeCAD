@@ -162,3 +162,79 @@ class TestPrimitive(unittest.TestCase):
         # closing doc
         FreeCAD.closeDocument("PartDesignTestPrimitive")
         # print ("omit closing document for debugging")
+
+
+class TestBaseAfterARefine(unittest.TestCase):
+    """FreeCAD-CH ops#474 (after ops#310 C1): a feature skips checking its base only when the base
+    feature's own boolean ran with every input valid and nothing rebuilt its result unchecked since
+    (checksBase()). Refine rebuilds every face of its result, also when it merges none, and only a
+    merge has its result checked (ops#389). After a refine that merged nothing, its free-form faces
+    (B-spline, ...) are checked, and one invalid face means the next feature checks the result.
+    Elementary faces (planes, cylinders, ...) aren't, so a refined Pocket chain keeps C1's gain.
+
+    Designed models: a 20 mm AdditiveBox, then a 5 mm SubtractiveBox at its corner or the default
+    SubtractiveEllipsoid with Radius3 = 0 (one B-spline face), then a 2 mm SubtractiveBox. Refine on
+    the middle feature only. Cut from the box, the degenerate ellipsoid's result is valid; refined,
+    its B-spline face is rebuilt invalid (UnorientableShape). The next feature then repairs it: its
+    result is valid and has the volume of the Part cut of the repaired base."""
+
+    def setUp(self):
+        self.Doc = FreeCAD.newDocument("PartDesignTestBaseAfterARefine")
+
+    def tearDown(self):
+        FreeCAD.closeDocument(self.Doc.Name)
+
+    def build(self, middle, refine):
+        doc = self.Doc
+        body = doc.addObject("PartDesign::Body", "Body")
+        box = doc.addObject("PartDesign::AdditiveBox", "Box")
+        box.Length = box.Width = box.Height = 20
+        box.Refine = False
+        body.addObject(box)
+        if middle == "Ellipsoid":
+            cut = doc.addObject("PartDesign::SubtractiveEllipsoid", "Ellipsoid")
+            cut.Radius1 = 2
+            cut.Radius2 = 4
+            cut.Radius3 = 0
+        else:
+            cut = doc.addObject("PartDesign::SubtractiveBox", "Corner")
+            cut.Length = cut.Width = cut.Height = 5
+            cut.AttachmentOffset = FreeCAD.Placement(FreeCAD.Vector(15, 15, 15), FreeCAD.Rotation())
+        cut.Refine = refine
+        body.addObject(cut)
+        nextFeature = doc.addObject("PartDesign::SubtractiveBox", "Next")
+        nextFeature.Length = nextFeature.Width = nextFeature.Height = 2
+        nextFeature.Refine = False
+        body.addObject(nextFeature)
+        doc.recompute()
+        return cut, nextFeature
+
+    def testUnrefinedResultIsTrusted(self):
+        # C1's gain: a boolean's own output, valid inputs, no Refine
+        for middle in ("Corner", "Ellipsoid"):
+            with self.subTest(middle=middle):
+                self.tearDown()
+                self.setUp()
+                cut, nextFeature = self.build(middle, refine=False)
+                self.assertTrue(cut.Shape.isValid())
+                self.assertFalse(nextFeature.checksBase())
+
+    def testRefinedPlanarResultIsTrusted(self):
+        # Refine merged nothing and rebuilt only planar faces: C1's gain is kept
+        cut, nextFeature = self.build("Corner", refine=True)
+        self.assertTrue(cut.Shape.isValid())
+        self.assertFalse(nextFeature.checksBase())
+
+    def testInvalidRefinedEllipsoidIsRepaired(self):
+        cut, nextFeature = self.build("Ellipsoid", refine=True)
+        if cut.Shape.isValid():
+            self.skipTest("Refine keeps the degenerate ellipsoid's result valid on this platform")
+        self.assertTrue(nextFeature.checksBase())
+        repaired = cut.Shape.copy()
+        repaired.fix(1e-7, 1e-7, 1e-7)
+        tool = nextFeature.AddSubShape.copy()
+        tool.Placement = nextFeature.Placement.multiply(tool.Placement)
+        expected = repaired.cut(tool)
+        self.assertTrue(nextFeature.isValid(), nextFeature.getStatusString())
+        self.assertTrue(nextFeature.Shape.isValid())
+        self.assertAlmostEqual(nextFeature.Shape.Volume, expected.Volume, places=4)

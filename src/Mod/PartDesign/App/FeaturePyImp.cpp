@@ -48,6 +48,15 @@ int FeaturePy::setCustomAttributes(const char*, PyObject*)
     return 0;
 }
 
+PyObject* FeaturePy::checksBase(PyObject* args)
+{
+    if (!PyArg_ParseTuple(args, "")) {
+        return nullptr;
+    }
+    const bool checks = getFeaturePtr()->booleanInputCheck() == Part::BooleanInputCheck::All;
+    return Py::new_reference_to(Py::Boolean(checks));
+}
+
 PyObject* FeaturePy::getBaseObject(PyObject* /*args*/)
 {
     App::DocumentObject* base = getFeaturePtr()->getBaseObject();
