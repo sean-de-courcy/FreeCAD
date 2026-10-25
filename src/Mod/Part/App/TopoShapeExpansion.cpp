@@ -3269,6 +3269,8 @@ TopoShape& TopoShape::makeShapeWithElementMap(
         // In the order of the generated groups.
         std::vector<std::pair<std::vector<NamingMapKey>, Data::DecodedMappedSection>>
             delayedGeneratedMap;
+        // Per entry of delayedGeneratedMap: whether the group's first shared source is an edge
+        std::vector<bool> delayedFromEdge;
 
         generatedNamingMap.build();
 
@@ -3331,6 +3333,11 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                 }
                 else if (generatedShapes > 1) {
                     delayedGeneratedMap.emplace_back(generatedShapeEntry.first, newNameSection);
+                    const TopoDS_Shape& firstSource
+                        = generatedShapeEntry.second.front().incomingElementShape;
+                    delayedFromEdge.push_back(
+                        !firstSource.IsNull() && firstSource.ShapeType() == TopAbs_EDGE
+                    );
                 }
             }
         }
@@ -3343,7 +3350,8 @@ TopoShape& TopoShape::makeShapeWithElementMap(
         std::map<char, unsigned int> emptyConnectedElementsIndex;
 
         // pair<std::vector<NamingMapKey>, Data::DecodedMappedSection>
-        for (const auto& delayedGeneratedEntry : delayedGeneratedMap) {
+        for (std::size_t entryIndex = 0; entryIndex < delayedGeneratedMap.size(); ++entryIndex) {
+            const auto& delayedGeneratedEntry = delayedGeneratedMap[entryIndex];
             for (const Part::NamingMapKey& elementKey : delayedGeneratedEntry.first) {
                 const Data::IndexedName& elementIndexName = elementKey.newElementName;
                 const TopoDS_Shape& elementShape = elementKey.newElementShape;
@@ -3400,6 +3408,21 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                 connectedElementKey.second = finalConnectedElementsList;
             }
 
+            // Vertexes generated along one edge (a hole crossing it twice) are numbered with
+            // their count, `0of2` and `1of2`, and a lone one stays `0` (ops#468): when an edit
+            // changes how many there are (the hole's seam leaving the edge or reaching it), no
+            // old name stays on a member it doesn't belong to; the solver places it again.
+            unsigned int countedVertexes = 0;
+            if (delayedFromEdge[entryIndex]) {
+                for (const Part::NamingMapKey& elementKey : delayedGeneratedEntry.first) {
+                    auto it = generatedConnectedElementMap.find(elementKey.newElementShape);
+                    if (std::strcmp(elementKey.newElementName.getType(), "Vertex") == 0
+                        && (it == generatedConnectedElementMap.end() || it->second.empty())) {
+                        ++countedVertexes;
+                    }
+                }
+            }
+
             for (const Part::NamingMapKey& elementKey : delayedGeneratedEntry.first) {
                 const Data::IndexedName& elementIndexName = elementKey.newElementName;
                 const TopoDS_Shape& elementShape = elementKey.newElementShape;
@@ -3420,6 +3443,9 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                     elementMappedSection.index = std::to_string(
                         emptyConnectedElementsIndex[elementMappedSection.elementType]++
                     );
+                    if (elementMappedSection.elementType == 'V' && countedVertexes > 1) {
+                        elementMappedSection.index += "of" + std::to_string(countedVertexes);
+                    }
                 }
 
                 ensureElementMap()->setElementName(

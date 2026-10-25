@@ -5045,4 +5045,127 @@ TEST_F(TopoShapeExpansionTest, makeElementFuseOfRectangleGridKeepsNamesWhenTurne
     EXPECT_EQ(namesDiffer(turned, unturned, rotationAboutZ(100)), "");
 }
 
+namespace
+{
+/// The last sections of the names of `shape`'s vertexes where `where` holds, by place along X
+/// then Y.
+std::vector<DecodedMappedSection> vertexSectionsWhere(
+    const TopoShape& shape,
+    const std::function<bool(const gp_Pnt&)>& where
+)
+{
+    std::vector<std::pair<std::pair<double, double>, DecodedMappedSection>> found;
+    int index = 0;
+    for (const auto& vertex : shape.getSubShapes(TopAbs_VERTEX)) {
+        ++index;
+        const gp_Pnt point = BRep_Tool::Pnt(TopoDS::Vertex(vertex));
+        if (where(point)) {
+            found.push_back(
+                {{point.X(), point.Y()},
+                 lastSection(shape.getMappedName(IndexedName::fromConst("Vertex", index)))}
+            );
+        }
+    }
+    std::sort(found.begin(), found.end(), [](const auto& left, const auto& right) {
+        return left.first < right.first;
+    });
+    std::vector<DecodedMappedSection> sections;
+    for (const auto& entry : found) {
+        sections.push_back(entry.second);
+    }
+    return sections;
+}
+
+/// A 10 mm box at the origin cut by a cylinder of radius 1 along Z through it, centred at
+/// (`x`, 0.3): it breaks out of the box's front face (y = 0) and crosses the face's bottom and
+/// top edges, named V2.
+TopoShape boxCutByCylinderAt(double x)
+{
+    TopoShape box(App::HistoryAlgorithm::V2, BRepPrimAPI_MakeBox(10.0, 10.0, 10.0).Shape(), 1L);
+    TopoShape cylinder(
+        App::HistoryAlgorithm::V2,
+        BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(x, 0.3, -1.0), gp_Dir(0, 0, 1)), 1.0, 12.0).Shape(),
+        2L
+    );
+    TopoShape result(App::HistoryAlgorithm::V2, 3L);
+    result.makeElementCut({box, cylinder});
+    return result;
+}
+}  // namespace
+
+TEST_F(TopoShapeExpansionTest, makeElementCutCountsTwinVertexesOnAnEdgeV2)
+{
+    // Arrange
+    //   the cylinder crosses the box's front bottom edge twice, at x = 5 -+ 0.954: both vertexes
+    //   are generated from that edge and the cylinder's face, told apart by a counter. The count
+    //   is part of it (ops#468): when an edit takes one of them away, or adds one to a lone one
+    //   (a hole's seam leaving the edge), no name passes to another vertex
+    auto onBottomEdge = [](const gp_Pnt& p) {
+        return std::abs(p.Y()) < 1e-6 && std::abs(p.Z()) < 1e-6 && p.X() > 1e-6 && p.X() < 10 - 1e-6;
+    };
+
+    // Act
+    const TopoShape twins = boxCutByCylinderAt(5.0);
+    const TopoShape lone = boxCutByCylinderAt(0.5);
+
+    // Assert
+    //   the twins' names differ only in the count `0of2` / `1of2`; a lone crossing (the cylinder
+    //   at the box's corner crosses the edge once) keeps `0`
+    EXPECT_TRUE(allElementsNamed(twins));
+    const auto twinSections = vertexSectionsWhere(twins, onBottomEdge);
+    ASSERT_EQ(twinSections.size(), 2);
+    std::set<std::string> indexes;
+    for (const auto& section : twinSections) {
+        EXPECT_TRUE(section.hasMapperFlag(MAPPER_FLAG_GENERATED));
+        EXPECT_EQ(section.linkedNames, twinSections.front().linkedNames);
+        indexes.insert(section.index);
+    }
+    EXPECT_EQ(indexes, (std::set<std::string> {"0of2", "1of2"}));
+    const auto loneSections = vertexSectionsWhere(lone, onBottomEdge);
+    ASSERT_EQ(loneSections.size(), 1);
+    EXPECT_TRUE(loneSections.front().hasMapperFlag(MAPPER_FLAG_GENERATED));
+    EXPECT_EQ(loneSections.front().index, "0");
+    //   only vertexes carry a count: the lines and arcs the cut makes are named as before
+    for (const TopoShape* shape : {&twins, &lone}) {
+        for (const char* type : {"Edge", "Face"}) {
+            for (int index = 1; index <= static_cast<int>(shape->countSubElements(type)); ++index) {
+                const DecodedMappedSection section
+                    = lastSection(shape->getMappedName(IndexedName::fromConst(type, index)));
+                EXPECT_EQ(section.index.find("of"), std::string::npos) << type << index;
+            }
+        }
+    }
+}
+
+TEST_F(TopoShapeExpansionTest, makeElementCutCountsTwinVertexesOnAClosedEdgeV2)
+{
+    // Arrange
+    //   a cylinder (radius 2, height 10) cut by a box whose face at x = 1 crosses the top circle
+    //   twice, at y = -+1.732: the vertexes are generated from the circle and that face. Their
+    //   order is the result's (fork PR 355 round 3); the count is there as on an open edge
+    TopoShape cylinder(App::HistoryAlgorithm::V2, BRepPrimAPI_MakeCylinder(2.0, 10.0).Shape(), 1L);
+    TopoShape box(
+        App::HistoryAlgorithm::V2,
+        BRepPrimAPI_MakeBox(gp_Pnt(1.0, -5.0, 8.0), 5.0, 10.0, 4.0).Shape(),
+        2L
+    );
+    TopoShape result(App::HistoryAlgorithm::V2, 3L);
+
+    // Act
+    result.makeElementCut({cylinder, box});
+
+    // Assert
+    EXPECT_TRUE(allElementsNamed(result));
+    const auto sections = vertexSectionsWhere(result, [](const gp_Pnt& p) {
+        return std::abs(p.X() - 1) < 1e-6 && std::abs(p.Z() - 10) < 1e-6;
+    });
+    ASSERT_EQ(sections.size(), 2);
+    std::set<std::string> indexes;
+    for (const auto& section : sections) {
+        EXPECT_TRUE(section.hasMapperFlag(MAPPER_FLAG_GENERATED));
+        indexes.insert(section.index);
+    }
+    EXPECT_EQ(indexes, (std::set<std::string> {"0of2", "1of2"}));
+}
+
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
