@@ -48,6 +48,20 @@ class TestLostTool(unittest.TestCase):
         cube = Part.makeBox(1, 1, 1, V(-3.5, 5.5, 4.5))
         self.assertAlmostEqual(shape.common(cube).Volume, 0.0, places=6)
 
+    def testSubtractiveBoxInsideAfterNotch(self):
+        """A second feature: its base, the first feature's shape, is a compound."""
+        notch = self.addBox("SubtractiveBox", V(-6, 50, 4))
+        notch.Width = notch.Height = 1
+        self.doc.recompute()
+        self.assertTrue(notch.isValid())
+        box = self.addBox("SubtractiveBox", V(-4, 5, 4))
+        if not box.isValid():
+            self.assertIn("ops#472", box.getStatusString())
+            return
+        self.assertEqual(len(box.Shape.Shells), 2)
+        cube = Part.makeBox(1, 1, 1, V(-3.5, 5.5, 4.5))
+        self.assertAlmostEqual(box.Shape.common(cube).Volume, 0.0, places=6)
+
     def testAdditiveBoxInside(self):
         box = self.addBox("AdditiveBox", V(-4, 20, 4))
         if not box.isValid():

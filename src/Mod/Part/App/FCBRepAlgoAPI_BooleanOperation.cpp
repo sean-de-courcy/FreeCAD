@@ -34,7 +34,9 @@
 #include <BRepCheck_Analyzer.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
+#include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Shape.hxx>
 #include <TopoDS_Iterator.hxx>
@@ -120,6 +122,20 @@ std::vector<TopoDS_Shape> solidsOf(const TopTools_ListOfShape& list)
     return solids;
 }
 
+/// The shapes that aren't compounds in \a shape's compound tree, as Build's piecewise paths count
+/// them (RecursiveCutCompound, RecursiveAddTools)
+int leafCount(const TopoDS_Shape& shape)
+{
+    if (shape.ShapeType() != TopAbs_COMPOUND) {
+        return 1;
+    }
+    int count = 0;
+    for (TopoDS_Iterator it(shape); it.More(); it.Next()) {
+        count += leafCount(it.Value());
+    }
+    return count;
+}
+
 /// Whether the boolean left no trace of \a tool: every face deleted, as a cut that removed nothing
 /// leaves them (a void's faces stay, reversed), or every face kept unchanged, as a fuse that
 /// merged nothing leaves them
@@ -140,23 +156,26 @@ bool leftNoTrace(BRepAlgoAPI_BooleanOperation* op, const TopoDS_Shape& tool, boo
 /// Whether \a tool, which left no trace, overlaps the material of \a solid, by two independent
 /// witnesses: a vertex of the tool classifies IN the solid, and the screened volume of their
 /// common part is more than a millionth of the tool's (OCCT's Common is right where the solid
-/// builder fails, ops#472). One vertex decides, as such a tool lies wholly in the material or
-/// wholly outside it, and each classification costs about 0.1 s on a 1000-span face
+/// builder fails, ops#472). The first vertex not ON the solid's boundary decides, as such a tool
+/// lies wholly in the material or wholly outside it (a vertex may touch the boundary), and each
+/// classification costs about 0.1 s on a 1000-span face
 bool overlaps(const TopoDS_Shape& solid, const TopoDS_Shape& tool, double fuzzy)
 {
     Bnd_Box solidBounds, toolBounds;
     BRepBndLib::Add(solid, solidBounds);
     BRepBndLib::Add(tool, toolBounds);
-    TopExp_Explorer vertex(tool, TopAbs_VERTEX);
-    if (solidBounds.IsOut(toolBounds) || !vertex.More()) {
+    if (solidBounds.IsOut(toolBounds)) {
         return false;
     }
-    BRepClass3d_SolidClassifier classifier(
-        solid,
-        BRep_Tool::Pnt(TopoDS::Vertex(vertex.Current())),
-        Precision::Confusion()
-    );
-    if (classifier.State() != TopAbs_IN) {
+    TopTools_IndexedMapOfShape vertices;
+    TopExp::MapShapes(tool, TopAbs_VERTEX, vertices);
+    BRepClass3d_SolidClassifier classifier(solid);
+    TopAbs_State state = TopAbs_ON;
+    for (int i = 1; i <= vertices.Extent() && state == TopAbs_ON; ++i) {
+        classifier.Perform(BRep_Tool::Pnt(TopoDS::Vertex(vertices(i))), Precision::Confusion());
+        state = classifier.State();
+    }
+    if (state != TopAbs_IN) {
         return false;
     }
     BRepAlgoAPI_Common common;
@@ -181,16 +200,14 @@ void FCBRepAlgoAPIHelper::checkLostTools(BRepAlgoAPI_BooleanOperation* op)
     if ((!cut && op->Operation() != BOPAlgo_FUSE) || !op->IsDone() || !op->HasHistory()) {
         return;
     }
-    // FCBRepAlgoAPI_BooleanOperation::Build cuts a compound argument or tool piece by piece, and
-    // the history then covers only the last piece: those cuts aren't checked yet (ops#472)
-    if (cut) {
-        for (const auto* list : {&op->Arguments(), &op->Tools()}) {
-            for (TopTools_ListOfShape::Iterator it(*list); it.More(); it.Next()) {
-                if (it.Value().ShapeType() == TopAbs_COMPOUND) {
-                    return;
-                }
-            }
-        }
+    // FCBRepAlgoAPI_BooleanOperation::Build cuts a lone compound argument one leaf at a time, and
+    // fuses the leaves of a lone compound tool before the cut: the history then covers only the
+    // last build, so those cuts aren't checked yet (ops#472). A compound of one leaf, which every
+    // boolean and PartDesign feature returns, takes one build and is checked
+    if (cut && op->Arguments().Size() == 1
+        && (leafCount(op->Arguments().First()) > 1
+            || (op->Tools().Size() == 1 && leafCount(op->Tools().First()) > 1))) {
+        return;
     }
     const std::vector<TopoDS_Shape> bases = solidsOf(op->Arguments());
     const std::vector<TopoDS_Shape> tools = solidsOf(op->Tools());

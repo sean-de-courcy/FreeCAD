@@ -45,6 +45,25 @@ def innerBox():
     return Part.makeBox(2, 2, 2, V(-4, 5, 4))
 
 
+def notchBox():
+    """A box 1 deep through the prisms' face x = -5: a notch that changes the outer shell."""
+    return Part.makeBox(2, 1, 1, V(-6, 50, 4))
+
+
+def vertexDownCube(position):
+    """The 2 mm cube turned about its centre so that its first vertex is its lowest point, then
+    moved to put that vertex at position: on a face there, it touches the face at that vertex only
+    """
+    cube = Part.makeBox(2, 2, 2)
+    centre = V(1, 1, 1)
+    direction = cube.Vertexes[0].Point - centre
+    direction.normalize()
+    cube.Placement = App.Placement(V(0, 0, 0), App.Rotation(direction, V(0, 0, -1)), centre)
+    cube = cube.copy()
+    cube.translate(position - cube.Vertexes[0].Point)
+    return cube
+
+
 def unitCube(centre):
     return Part.makeBox(1, 1, 1, centre - V(0.5, 0.5, 0.5))
 
@@ -81,8 +100,8 @@ class BooleanLostToolTest(unittest.TestCase):
         self.assertEqual(len(result.Faces), len(base.Faces))
         self.assertAlmostEqual(result.Volume, base.Volume, places=6)
 
-    def checkVoidCut(self, prism):
-        tool = innerBox()
+    def checkVoidCut(self, prism, tool=None):
+        tool = tool or innerBox()
         try:
             result = prism.cut(tool)
         except Exception as error:  # the loud check
@@ -112,6 +131,43 @@ class BooleanLostToolTest(unittest.TestCase):
 
     def testInnerFusePeriod8Spans600(self):
         self.checkInnerFuse(wavePrism(600, period=8.0))
+
+    def testVoidCutOfCompound(self):
+        """A compound of one solid, as every boolean returns, takes one build: checked."""
+        self.checkVoidCut(Part.makeCompound([wavePrism(1000)]))
+
+    def testVoidCutAfterCut(self):
+        notched = wavePrism(1000).cut(notchBox())
+        self.assertEqual(notched.ShapeType, "Compound")
+        self.checkVoidCut(notched)
+
+    def testVoidCutVertexOnBoundary(self):
+        """The tool's first vertex lies on the prism's face z = 0: the next one decides."""
+        tool = vertexDownCube(V(-3, 6, 0))
+        self.assertAlmostEqual(tool.BoundBox.ZMin, 0.0, places=9)
+        self.checkVoidCut(wavePrism(1000), tool)
+
+    def testChainedPartCut(self):
+        """Part::Cut on a Part::Cut: its base is a compound."""
+        self.doc = App.newDocument("BooleanLostToolChain")
+        base = self.doc.addObject("Part::Feature", "Wave")
+        base.Shape = wavePrism(1000)
+        notch = self.doc.addObject("Part::Feature", "Notch")
+        notch.Shape = notchBox()
+        tool = self.doc.addObject("Part::Feature", "Box")
+        tool.Shape = innerBox()
+        first = self.doc.addObject("Part::Cut", "Notched")
+        first.Base = base
+        first.Tool = notch
+        second = self.doc.addObject("Part::Cut", "Cut")
+        second.Base = first
+        second.Tool = tool
+        self.doc.recompute()
+        self.assertTrue(first.isValid())
+        if not second.isValid():
+            self.assertIn("ops#472", second.getStatusString())
+        else:
+            self.assertVoid(second.Shape, tool.Shape, len(first.Shape.Faces) + 6)
 
     def testPartCutFeature(self):
         """Part::Cut builds its boolean itself, not through makeElementBoolean."""
@@ -161,6 +217,14 @@ class BooleanLostToolTest(unittest.TestCase):
         ):
             with self.subTest(tool=tool.ShapeType + str(len(tool.Faces))):
                 self.assertVoid(block.cut(tool), tool, faces)
+
+    def testVertexOnBoundaryInBlock(self):
+        """The rotated cube touching a block's bottom at one vertex: a void, no error."""
+        block = Part.makeBox(20, 20, 10)
+        tool = vertexDownCube(V(10, 10, 0))
+        result = block.cut(tool)
+        self.assertEqual(len(result.Faces), 12)
+        self.assertAlmostEqual(result.common(unitCube(tool.BoundBox.Center)).Volume, 0.0, places=6)
 
     def testInnerFuseInBlock(self):
         block = Part.makeBox(20, 20, 10)
