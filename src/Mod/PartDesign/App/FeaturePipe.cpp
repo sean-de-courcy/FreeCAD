@@ -67,6 +67,7 @@
 #include <GeomAdaptor_Curve.hxx>
 #include <GeomFill_Frenet.hxx>
 #include <GeomAPI_ProjectPointOnCurve.hxx>
+#include <GeomAPI_ProjectPointOnSurf.hxx>
 #include <gp.hxx>
 #include <GProp_GProps.hxx>
 #include <gp_Ax2.hxx>
@@ -81,6 +82,7 @@
 #include <TopoDS.hxx>
 #include <TopoDS_Compound.hxx>
 #include <TopoDS_Wire.hxx>
+#include <TopTools_DataMapOfShapeInteger.hxx>
 #include <TopTools_DataMapOfShapeListOfShape.hxx>
 #include <TopTools_DataMapOfShapeShape.hxx>
 #include <TopTools_HSequenceOfShape.hxx>
@@ -146,7 +148,9 @@ namespace
 // shared part (round 5). At a Round corner the round face lies between the legs' sides: its edges
 // stay `UPP`. What OCCT reports the spine's vertex at a corner generated (a Round corner's round
 // faces and sectors) and the lateral edges that bound them are generated from the corner's second
-// vertex instead (CornerSource::rounds, ops#478), for the same reason.
+// vertex instead (CornerSource::rounds, ops#478), for the same reason. An element's round faces
+// at one corner (a round hole's two) are told apart by their places on the legs' sides, as the
+// joints are, and the edges and vertices named from them follow (placeRounds, round 9).
 class MapperPipeShellEnds: public Part::MapperMaker
 {
 public:
@@ -391,6 +395,7 @@ private:
                 }
             }
         }
+        orderRounds(_res);
         return _res;
     }
 
@@ -569,6 +574,9 @@ private:
                     }
                     const bool against = type == TopAbs_EDGE
                         && runsAgainst(pipe, TopoDS::Edge(elements(k)), ends);
+                    if (type == TopAbs_EDGE) {
+                        placeRounds(pipe, elements(k), against, edgesAt, legFaces);
+                    }
                     // The element's side along the spine edge \a i
                     auto sideOn = [&](int i) {
                         for (const TopoDS_Shape& side : pipe.Generated(elements(k))) {
@@ -679,13 +687,18 @@ private:
     }
 
     /// Whether the side faces the section's edge \a element sweeps run their u, the parameter
-    /// along the section, against the edge's own parameter. It is read where a side meets the
-    /// section's copy at the shell's end that lies on \a element (one of \a ends): the copy's
-    /// pcurve and its curve against \a element's. The faces' u follows the direction of the
-    /// sweep, which follows the spine's: a spine whose first line is drawn the other way is
-    /// swept from its other end, its sides' u runs the other way round a profile's circle, and
-    /// a round hole's bend arcs, told apart by their places, swapped with their mirror arcs
-    /// (ops#415, round 8). False where no such copy is found, or where it doesn't run along u.
+    /// along the section, against the edge's own parameter. The faces' u follows the direction
+    /// of the sweep, which follows the spine's: a spine whose first line is drawn the other way
+    /// is swept from its other end, its sides' u runs the other way round a profile's circle,
+    /// and a round hole's bend arcs, told apart by their places, swapped with their mirror arcs
+    /// (ops#415, round 8). It is read on \a element itself, at its middle, on the side face
+    /// through it (the sweep passes through the profile wherever along the spine it lies): the
+    /// surface's u direction there against the element's tangent. Read only where the shell's
+    /// end copy lay on \a element, it was missed for a profile drawn along the spine, away from
+    /// its ends, and the arcs swapped silently (round 9). Else where a side
+    /// meets the section's copy at the shell's end that lies on \a element (one of \a ends): the
+    /// copy's pcurve and its curve against \a element's. False where neither is found, or where
+    /// the element doesn't run along u.
     static bool runsAgainst(
         BRepOffsetAPI_MakePipeShell& pipe,
         const TopoDS_Edge& element,
@@ -697,6 +710,53 @@ private:
         Handle(Geom_Curve) curve = BRep_Tool::Curve(element, first, last);
         if (curve.IsNull()) {
             return false;
+        }
+        gp_Pnt middle;
+        gp_Vec tangent;
+        curve->D1((first + last) / 2, middle, tangent);
+        // The side through the element: the nearest within the tolerances, or within 1e-4 mm
+        // (MakePipeShell's default) for an approximated surface
+        std::optional<bool> nearest;
+        double nearestDistance = std::numeric_limits<double>::infinity();
+        for (const TopoDS_Shape& side : pipe.Generated(element)) {
+            if (side.ShapeType() != TopAbs_FACE || tangent.SquareMagnitude() == 0) {
+                continue;
+            }
+            const TopoDS_Face& face = TopoDS::Face(side);
+            Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
+            if (surface.IsNull()) {
+                continue;
+            }
+            double uFirst = 0;
+            double uLast = 0;
+            double vFirst = 0;
+            double vLast = 0;
+            BRepTools::UVBounds(face, uFirst, uLast, vFirst, vLast);
+            GeomAPI_ProjectPointOnSurf onSide(middle, surface, uFirst, uLast, vFirst, vLast);
+            const double tolerance = std::max(
+                1e-4,
+                BRep_Tool::Tolerance(face) + BRep_Tool::Tolerance(element)
+            );
+            if (onSide.NbPoints() == 0 || onSide.LowerDistance() > tolerance
+                || onSide.LowerDistance() >= nearestDistance) {
+                continue;
+            }
+            double u = 0;
+            double v = 0;
+            onSide.LowerDistanceParameters(u, v);
+            gp_Pnt found;
+            gp_Vec alongU;
+            gp_Vec alongV;
+            surface->D1(u, v, found, alongU, alongV);
+            const double across = 0.7 * tangent.Magnitude() * alongU.Magnitude();
+            if (alongU.SquareMagnitude() == 0 || std::abs(tangent.Dot(alongU)) <= across) {
+                continue;
+            }
+            nearest = tangent.Dot(alongU) < 0;
+            nearestDistance = onSide.LowerDistance();
+        }
+        if (nearest) {
+            return *nearest;
         }
         for (const TopoDS_Shape& side : pipe.Generated(element)) {
             if (side.ShapeType() != TopAbs_FACE) {
@@ -807,6 +867,89 @@ private:
         return {lower.first, lower.second, upper.first, upper.second};
     }
 
+    /// Places the faces the section's edge \a element makes round each Round corner (what the
+    /// corner's spine vertex generated, CornerSource::rounds): each at the first place (placeOn,
+    /// with \a against) of its edges on the element's sides along the corner's two legs. Such
+    /// faces share their two sources (the element, the corner's second vertex) and are told
+    /// apart by an index, which followed OCCT's order: a round hole's two round faces at a
+    /// left-turning Round corner, and with them the edges and vertices named from them (`UPP`),
+    /// went to their mirrors across the bend when the spine's first line was drawn the other way,
+    /// silently (round 9). Faces with no such edge keep OCCT's order, after the others
+    void placeRounds(
+        BRepOffsetAPI_MakePipeShell& pipe,
+        const TopoDS_Shape& element,
+        bool against,
+        const TopTools_IndexedDataMapOfShapeListOfShape& edgesAt,
+        const std::vector<TopTools_IndexedMapOfShape>& legFaces
+    )
+    {
+        constexpr double none = std::numeric_limits<double>::infinity();
+        // A copy: Generated() refills one list each call
+        const TopTools_ListOfShape made = pipe.Generated(element);
+        for (int v = 1; v <= edgesAt.Extent(); ++v) {
+            if (!rounded.Contains(edgesAt.FindKey(v)) || edgesAt(v).Extent() != 2) {
+                continue;
+            }
+            std::vector<TopoDS_Shape> sides;
+            for (const TopoDS_Shape& edge : edgesAt(v)) {
+                const int leg = spineEdges.FindIndex(edge);
+                for (const TopoDS_Shape& side : made) {
+                    if (leg > 0 && side.ShapeType() == TopAbs_FACE
+                        && legFaces[leg].Contains(side)) {
+                        sides.push_back(side);
+                    }
+                }
+            }
+            TopTools_IndexedMapOfShape atCorner;
+            for (const TopoDS_Shape& shape : pipe.Generated(edgesAt.FindKey(v))) {
+                atCorner.Add(shape);
+            }
+            const int group = roundCorners++;
+            for (const TopoDS_Shape& face : made) {
+                if (face.ShapeType() != TopAbs_FACE || !atCorner.Contains(face)
+                    || roundAt.IsBound(face)) {
+                    continue;
+                }
+                std::array<double, 4> place {none, none, none, none};
+                for (const TopoDS_Shape& side : sides) {
+                    TopTools_IndexedMapOfShape sideEdges;
+                    TopExp::MapShapes(side, TopAbs_EDGE, sideEdges);
+                    for (TopExp_Explorer it(face, TopAbs_EDGE); it.More(); it.Next()) {
+                        if (sideEdges.Contains(it.Current())) {
+                            place = std::min(place, placeOn(it.Current(), {side, side}, against));
+                        }
+                    }
+                }
+                roundAt.Bind(face, static_cast<int>(roundPlaces.size()));
+                roundPlaces.emplace_back(group, place);
+            }
+        }
+    }
+
+    /// Puts the faces placeRounds placed in \a made in the order of their places, each corner's
+    /// faces of one element among their own positions in the list, so that the others keep theirs
+    void orderRounds(std::vector<TopoDS_Shape>& made) const
+    {
+        std::map<int, std::vector<std::size_t>> positions;
+        for (std::size_t i = 0; i < made.size(); ++i) {
+            if (const int* at = roundAt.Seek(made[i])) {
+                positions[roundPlaces[*at].first].push_back(i);
+            }
+        }
+        for (const auto& [group, at] : positions) {
+            std::vector<TopoDS_Shape> members;
+            for (std::size_t i : at) {
+                members.push_back(made[i]);
+            }
+            std::ranges::stable_sort(members, {}, [this](const TopoDS_Shape& member) {
+                return roundPlaces[roundAt.Find(member)].second;
+            });
+            for (std::size_t j = 0; j < at.size(); ++j) {
+                made[at[j]] = members[j];
+            }
+        }
+    }
+
     /// Adds \a copy to what \a key generates (copies), once
     void bindCopy(const TopoDS_Shape& key, const TopoDS_Shape& copy)
     {
@@ -879,6 +1022,11 @@ private:
     /// generated elements they take
     TopTools_DataMapOfShapeShape roundsOf;
     TopTools_IndexedMapOfShape rounded;
+    /// The faces placed at the Round corners (placeRounds), by their index in roundPlaces: each
+    /// one's (corner, element) group, counted in roundCorners, and its place
+    TopTools_DataMapOfShapeInteger roundAt;
+    std::vector<std::pair<int, std::array<double, 4>>> roundPlaces;
+    int roundCorners = 0;
 };
 
 // "Transformed" at the spine's corners (ops#370). It doesn't turn the profile at a corner: the

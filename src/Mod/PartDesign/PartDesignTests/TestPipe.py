@@ -1280,7 +1280,10 @@ class TestPipeEndNames(unittest.TestCase):
         sides, which run the way the path is swept: drawing its first line the other way sweeps
         it from the other end, and the points went to the mirror arcs again; the vertices, named
         from the two sides in the order OCCT stores them, went to their mirrors too (round 8,
-        `work\\pr369-r3v\\flipone.out`, `v2rev1_h1_R.out`)."""
+        `work\\pr369-r3v\\flipone.out`, `v2rev1_h1_R.out`). The same with the profile drawn
+        along the first leg, at z = 15, away from the path's ends: the way the sides run was read
+        only at the ends, and the arcs went to their mirrors, silently (round 9,
+        `work\\pr369-r4v\\a_off_0_0_15_flip0.out`; 1.346 mm here, `work\\415\\r9\\fb_arcs.log`)."""
         corner = V(0, 0, 30)
         motion = App.Placement(V(5, 2, 1), App.Rotation(V(0, 0, 1), 30))
 
@@ -1308,16 +1311,28 @@ class TestPipeEndNames(unittest.TestCase):
 
             return edit
 
-        # Each edit, where it takes a point, and whether all eight points keep their places
-        # without a warning
+        # Each edit, where it takes a point, whether all eight points keep their places without a
+        # warning, and the profile's height along the first leg
         edits = {
-            "leg": (lengthen, lambda at: at + V(0, 0, 4), True),
-            "hole": (moveHole, lambda at: at + V(0.4, 0.3, -0.4), False),
-            "motion": (move, motion.multVec, True),
-            "first line drawn the other way": (drawnTheOtherWay(0), lambda at: at, True),
-            "both lines drawn the other way": (drawnTheOtherWay(0, 1), lambda at: at, True),
+            "leg": (lengthen, lambda at: at + V(0, 0, 4), True, 0),
+            "hole": (moveHole, lambda at: at + V(0.4, 0.3, -0.4), False, 0),
+            "motion": (move, motion.multVec, True, 0),
+            "first line drawn the other way": (drawnTheOtherWay(0), lambda at: at, True, 0),
+            "both lines drawn the other way": (drawnTheOtherWay(0, 1), lambda at: at, True, 0),
+            "the profile at z = 15, the first line drawn the other way": (
+                drawnTheOtherWay(0),
+                lambda at: at,
+                True,
+                15,
+            ),
+            "the profile at z = 15, both lines drawn the other way": (
+                drawnTheOtherWay(0, 1),
+                lambda at: at,
+                True,
+                15,
+            ),
         }
-        for edit, (change, moved, kept) in edits.items():
+        for edit, (change, moved, kept, height) in edits.items():
             self.tearDown()
             self.setUp()
             with self.subTest(edit=edit):
@@ -1325,6 +1340,7 @@ class TestPipeEndNames(unittest.TestCase):
                 profile = self.sketch(
                     "Profile", models.rectangle(-3, -3, 3, 3) + [models.circle(0, 0, 1)]
                 )
+                profile.Placement = App.Placement(V(0, 0, height), App.Rotation())
                 pipe = self.pipe(profile, path, Transition="Right corner")
                 arcs = []
                 for kind in ("Edge", "Vertex"):
@@ -1365,26 +1381,47 @@ class TestPipeEndNames(unittest.TestCase):
         spine's vertex, which a sketch names from its lines' ends (`g1v2,g2v1`): drawn the other
         way, the other bend's vertex shared a part of that name, and the points on the bend's
         edges went to the other bend, 21.3 mm away, at the solver's tier 1 with an empty warning
-        (ops#478, `work\\pr369-r3v\\v2rev_h0_Round.out`)."""
-        corners = (V(0, 0, 30), V(20, 0, 30))
+        (ops#478, `work\\pr369-r3v\\v2rev_h0_Round.out`). Then the same with a round hole in the
+        square, along an L or a U turning left (to -X): the hole's two round faces at a bend,
+        told apart by an index in the order OCCT stores them, which follows the way the path is
+        swept, went to their mirrors across the bend when the first line was drawn the other way,
+        and the edges and vertices named from them with them, 0.4 to 0.8 mm, silently (round 9,
+        `work\\pr369-r4v\\b_LleftRound_hole_f0.out`, `b_UleftRound_hole_fall.out`)."""
+        holed = models.rectangle(-1, -1, 1, 1) + [models.circle(0, 0, 0.4)]
+        cases = (
+            ("U", [(0, 0), (0, 30), (20, 30), (20, 10)], None, (0, 1, 2)),
+            ("U", [(0, 0), (0, 30), (20, 30), (20, 10)], None, (0, 1)),
+            ("L to the left, a round hole", [(0, 0), (0, 30), (-20, 30)], holed, (0,)),
+            ("L to the left, a round hole", [(0, 0), (0, 30), (-20, 30)], holed, (0, 1)),
+            (
+                "U to the left, a round hole",
+                [(0, 0), (0, 30), (-20, 30), (-20, 10)],
+                holed,
+                (0, 1, 2),
+            ),
+        )
+        for shape, polyline, geometry, lines in cases:
+            corners = [V(x, 0, z) for x, z in polyline[1:-1]]
 
-        def atABend(point):
-            return min((point - corner).Length for corner in corners) < 2.5
+            def atABend(point):
+                return min((point - corner).Length for corner in corners) < 2.5
 
-        for lines in ((0, 1, 2), (0, 1)):
             self.tearDown()
             self.setUp()
-            with self.subTest(lines=lines):
-                path = self.sketch(
-                    "Path", models.polyline([(0, 0), (0, 30), (20, 30), (20, 10)]), placement=XZ
+            with self.subTest(path=shape, lines=lines):
+                path = self.sketch("Path", models.polyline(polyline), placement=XZ)
+                profile = (
+                    self.square(half=1) if geometry is None else self.sketch("Profile", geometry)
                 )
-                pipe = self.pipe(self.square(half=1), path, Transition="Round corner")
+                pipe = self.pipe(profile, path, Transition="Round corner")
+                # By their vertices: at a bend that turns left the hole's inner side closes up
+                # in a degenerate edge, which has no points of its own
                 names = [
-                    f"Face{index}"
-                    for index, face in enumerate(pipe.Shape.Faces, 1)
-                    if all(atABend(V(vertex.Point)) for vertex in face.Vertexes)
+                    f"{kind}{index}"
+                    for kind, elements in (("Face", pipe.Shape.Faces), ("Edge", pipe.Shape.Edges))
+                    for index, element in enumerate(elements, 1)
+                    if all(atABend(V(vertex.Point)) for vertex in element.Vertexes)
                 ]
-                names += elementsWhere(pipe.Shape, "Edge", atABend)
                 names += elementsWhere(pipe.Shape, "Vertex", atABend)
                 points = []
                 for name in names:
