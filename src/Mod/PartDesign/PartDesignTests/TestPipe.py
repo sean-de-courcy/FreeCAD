@@ -2517,11 +2517,11 @@ class TestPipeCorners(unittest.TestCase):
             self.assertNotIn("Null shape", pipe.getStatusString())
 
 
-def bendPoints(first, second, towards=False, *more):
-    """In an XZ sketch: up 30 from the square at z = 0, then 20 turned `first` degrees from +Z
+def bendPoints(first, second, towards=False, *more, leg=30.0):
+    """In an XZ sketch: up `leg` from the square at z = 0, then 20 turned `first` degrees from +Z
     towards +X, then 20 turned `second` degrees more (and 20 more per turn in `more`); drawn
     towards the profile if `towards`."""
-    points = [(0.0, 0.0), (0.0, 30.0)]
+    points = [(0.0, 0.0), (0.0, leg)]
     heading = 0.0
     for turn in (first, second) + more:
         heading += turn
@@ -2734,6 +2734,94 @@ class TestJointsWhenABendStraightens(unittest.TestCase):
         """The control: the hole's circle drawn again renames the cylinder and its seam, but the
         joint is there. Every point stays valid and in place."""
         self.holeAcrossTheJoint(redraw=True)
+
+    def holeVerticesOnTheJoint(self, above, edit):
+        """The refined pipe along the U and a refined Pocket (through all, midplane) of a circle
+        of radius 0.5 centred `above` the first bend's joint edges (ops#468); points on the hole's
+        vertices on those edges (two per side, the seam's among them when it lies on the joint);
+        then `edit`: ("leg", length) makes the first leg `length` long, ("turn", degrees) turns
+        the spine about Y. Each point must be invalid, warned, or on a vertex of the hole's
+        circle on its side of the pipe and of the hole (the sign of y): never on the other
+        crossing silently."""
+        points = bendPoints(40, 20)
+        path, pipe = self.pipe(points, refine=True)
+        centre = 30 + above
+        hole = models.sketch(
+            self.doc,
+            "Hole",
+            models.circle(0, centre, 0.5),
+            self.body,
+            placement=App.Placement(V(0, 0, 0), App.Rotation(V(1, 1, 1), 120)),
+        )
+        pocket = self.body.newObject("PartDesign::Pocket", "Pocket")
+        pocket.Profile = hole
+        pocket.Type = 1  # through all
+        pocket.Midplane = True
+        pocket.Refine = True
+        self.doc.recompute()
+        self.assertTrue(pocket.isValid(), pocket.getStatusString())
+
+        def onHole(p):
+            return abs(math.hypot(p.y, p.z - centre) - 0.5) < 1e-6
+
+        crossings = self.pointsOn(
+            pocket, None, lambda p: onHole(p) and abs(p.z - 30) < 1e-6, kinds=("Vertex",)
+        )
+        self.assertEqual(len(crossings), 4, [p.Name for p in crossings])
+        before = {p.Name: V(p.Placement.Base) for p in crossings}
+        kind, amount = edit
+        if kind == "leg":
+            self.setPath(path, bendPoints(40, 20, leg=amount))
+            joint = V(0, 0, amount)
+        else:
+            turn = App.Rotation(V(0, 1, 0), amount)
+            path.Placement = App.Placement(V(0, 0, 0), turn.multiply(XZ.Rotation))
+            self.doc.recompute()
+            joint = turn.multVec(V(0, 0, 30))
+        self.assertTrue(pocket.isValid(), pocket.getStatusString())
+        holeVertices = [v.Point for v in pocket.Shape.Vertexes if onHole(v.Point)]
+        for point in crossings:
+            if not point.isValid():
+                continue
+            levels = [e.get("warning_level") for e in App.getReferenceReport(point)]
+            if "normal" in levels:
+                continue
+            at = point.Placement.Base
+            was = before[point.Name]
+            onAHoleVertex = any((at - v).Length < 1e-6 for v in holeVertices)
+            sameSide = (at.x > joint.x) == (was.x > 0) and (at.y > 0) == (was.y > 0)
+            self.assertTrue(
+                onAHoleVertex and sameSide,
+                (point.Name, tuple(was), tuple(at), point.AttachmentSupport, levels),
+            )
+
+    def testHoleVerticesOnTheJointWhenTheSeamLeavesIt(self):
+        """The hole's seam lies on the joint: one crossing on each side is the seam's vertex, the
+        other is the only vertex generated from the joint edge and the hole's face. The first leg
+        made longer, or the spine turned, takes the joint off the seam: two vertices are generated
+        from that pair, told apart by a counter that numbers them along the joint edge. On one
+        side the lone vertex's counter went to the other crossing, 0.8 mm off, by exact name and
+        silently (ops#468)."""
+        for edit in (("leg", 30.2), ("leg", 30.3), ("turn", 2)):
+            with self.subTest(edit=edit):
+                self.tearDown()
+                self.setUp()
+                self.holeVerticesOnTheJoint(0, edit)
+
+    def testHoleVerticesOnTheJointWhenOneReachesTheSeam(self):
+        """The reverse: two vertices generated from the joint edge and the hole's face, and the
+        edit brings the joint to the hole's centre, where one crossing is the seam's vertex. The
+        other takes the counter the first held, whatever it held before (ops#468)."""
+        self.holeVerticesOnTheJoint(0.2, ("leg", 30.2))
+
+    def testHoleVerticesOnTheJointStayTwins(self):
+        """The control: the hole's seam stays off the joint, two vertices are generated from the
+        pair before and after the edit, and each point follows its own crossing."""
+        for above, edit in ((0.1, ("leg", 30.2)), (-0.1, ("leg", 30.2)), (0.1, ("turn", 2))):
+            with self.subTest(above=above, edit=edit):
+                self.tearDown()
+                self.setUp()
+                self.holeVerticesOnTheJoint(above, edit)
 
     def straightenNear(
         self, transition="Transformed", circular=False, fillet=False, count=None
