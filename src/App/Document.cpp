@@ -153,7 +153,11 @@ namespace
 // piece by the up-to face and edges it lies on and ends at, and by its place along the edge among
 // how many there are (PRJ,MOD,ORD), where the pieces were told apart by a counter in the
 // splitter's order.
-constexpr int ForkNamingRevision = 9;
+// 10: ops#469, a PartDesign Pipe's closed spine (one profile, not Auxiliary) is swept from its
+// vertex nearest the profile, and its corners are keyed by its stored named start, not by which
+// end of each edge they are as drawn (`start` added to the start's key); ops#479, the corners of a
+// union's caps listed in the section's order.
+constexpr int ForkNamingRevision = 10;
 
 // The `.N<n>` of the element map version: the form interned names are saved in (ops#6). 2: the
 // references are indices into the file's table (NamingFormat 2).

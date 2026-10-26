@@ -25,6 +25,7 @@
 
 #pragma once
 
+#include <string>
 #include <vector>
 
 #include "FeatureSketchBased.h"
@@ -52,7 +53,9 @@ public:
     App::PropertyEnumeration Transformation;
     App::PropertyLinkSubList Sections;
     /// Where the spine started and ended at the last successful recompute, the end that carried
-    /// the profile's names first, where they lie in the body; empty before (ops#379)
+    /// the profile's names first, where they lie in the body (ops#379); for a closed spine of one
+    /// profile, its named start and a point of its first edge (ops#469). Empty before, and after
+    /// Spine is set to another input (ops#435)
     App::PropertyVectorList SpineEnds;
 
     App::DocumentObjectExecReturn* execute() override;
@@ -78,6 +81,8 @@ public:
     );
 
 protected:
+    void onBeforeChange(const App::Property* prop) override;
+    void onChanged(const App::Property* prop) override;
     /// get the given edges and all their tangent ones
     void getContinuousEdges(Part::TopoShape TopShape, std::vector<std::string>& SubNames);
     void buildPipePath(
@@ -103,6 +108,12 @@ private:
     static const char* TransitionEnums[];
     static const char* ModeEnums[];
     static const char* TransformEnums[];
+
+    /// Spine's object and sub-elements (sorted) before its current change, recorded by
+    /// onBeforeChange() and compared in onChanged()
+    App::DocumentObject* spineBeforeChange {nullptr};
+    std::vector<std::string> spineSubsBeforeChange;
+    bool spineChanging {false};
 };
 
 class PartDesignExport AdditivePipe: public Pipe
