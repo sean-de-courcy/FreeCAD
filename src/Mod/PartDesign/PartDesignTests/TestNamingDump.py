@@ -253,6 +253,42 @@ def modelPipeShell(doc):
     return [sweep, pipe]
 
 
+def modelPipeClosedAndUnion(doc):
+    """Two PartDesign Pipes of a square with a round hole, "Transformed". Along a closed D (a
+    line up 10, then a 300 degree arc back): the sweep starts at the spine's vertex nearest the
+    profile, and the corner there is the named start, keyed `start` too, so the two corners
+    between the same two edges have their own names whichever way the lines are drawn
+    (ops#469). Along a U turning 100 and then 20 degrees more: past 90 degrees, the union of two
+    pieces, whose caps between them name their edges from the corner and the profile's element
+    each copies, listed in the section's order (ops#479), the same in every process
+    (TestNamingSeeded)."""
+    xz = App.Placement(V(0, 0, 0), App.Rotation(V(1, 0, 0), 90))
+    holed = models.rectangle(-1, -1, 1, 1) + [models.circle(0, 0, 0.4)]
+    arc = Part.ArcOfCircle(V(0, 10, 0), V(-18.66025, 5, 0), V(0, 0, 0))
+    closedBody = models.body(doc)
+    path = models.sketch(doc, "ClosedPath", [Part.LineSegment(V(0, 0, 0), V(0, 10, 0)), arc], closedBody, placement=xz)
+    profile = models.sketch(doc, "ClosedProfile", holed, closedBody)
+    closed = closedBody.newObject("PartDesign::AdditivePipe", "ClosedPipe")
+    closed.Profile = profile
+    closed.Spine = (path, [])
+    closed.Transition = "Transformed"
+
+    def turned(z, degrees, length):
+        return (length * math.sin(math.radians(degrees)), z + length * math.cos(math.radians(degrees)))
+
+    points = [(0, 0), (0, 30), turned(30, 100, 20)]
+    dx, dz = turned(0, 120, 20)
+    points.append((points[-1][0] + dx, points[-1][1] + dz))
+    unionBody = models.body(doc)
+    upath = models.sketch(doc, "UnionPath", models.polyline(points), unionBody, placement=xz)
+    uprofile = models.sketch(doc, "UnionProfile", holed, unionBody)
+    union = unionBody.newObject("PartDesign::AdditivePipe", "UnionPipe")
+    union.Profile = uprofile
+    union.Spine = (upath, [])
+    union.Transition = "Transformed"
+    return [closed, union]
+
+
 def modelLoftRevolve(doc):
     """Loft of two rectangles, and a 90 degree revolve of a rectangle (S1, S4)."""
     lower = models.feature(doc, "Lower", models.closedWire([(0, 0, 0), (10, 0, 0), (10, 6, 0), (0, 6, 0)]))
@@ -622,6 +658,7 @@ MODELS = {
     "HelixBinderFace": modelHelixBinderFace,
     "FilletChamfer": modelFilletChamfer,
     "PipeShell": modelPipeShell,
+    "PipeClosedAndUnion": modelPipeClosedAndUnion,
     "LoftRevolve": modelLoftRevolve,
     "Slice": modelSlice,
     "CompoundCopies": modelCompoundCopies,
