@@ -1012,9 +1012,11 @@ class TestSketchExternalTypes(unittest.TestCase):
     def testBothLinkWhoseProjectionChangesInNumberKeepsTheSectionsConstraint(self):
         """A square face tilted 45 degrees, linked as Both: 4 projected edges and the section
         line (-5, 0)-(5, 0), with a sketch line's start on the section's start. The face becomes
-        a pentagon (5 edges): the constraint stays on the section. A constraint on the fifth
-        edge, and the face a square again: that constraint goes (with a warning), the
-        section's stays."""
+        a pentagon (5 edges): the constraint stays on the section. A constraint on an edge the
+        pentagon added, and the face a square again: that edge has no counterpart, so the
+        sketch fails naming it and keeps the constraint on it (ops#264 e2: before, the Ids went
+        by position and the last projected geometry went, with its constraint and a warning);
+        the section's constraint stays."""
         face = self.doc.addObject("Part::Feature", "Face")
         face.Shape = self.tiltedFace(self.SQUARE)
         sketch = self.doc.addObject("Sketcher::SketchObject", "TiltedSketch")
@@ -1042,19 +1044,66 @@ class TestSketchExternalTypes(unittest.TestCase):
         section, projections = self.sectionAndProjections(sketch)
         self.assertEqual((len(section), len(projections)), (1, 5))
         assertOnTheSection()
-        # the last projected geometry, whichever edge of the face it is: Ids within a kind still
-        # go by position, so a face with one edge fewer drops the last one
-        tip = max(i for i, _ in projections)
+        # the projection of the pentagon's edge (0, 8)-(-5, 5), which the square doesn't have
+        c = 0.5**0.5
+        tip = [
+            i
+            for i, g in projections
+            if {(round(p.x, 6), round(p.y, 6)) for p in (g.StartPoint, g.EndPoint)}
+            == {(0, round(8 * c, 6)), (-5, round(5 * c, 6))}
+        ][0]
         end = 1
         sketch.addConstraint(Sketcher.Constraint("Coincident", line, 2, -tip - 1, end))
         self.doc.recompute()
         self.assertEqual(len(sketch.Constraints), 2)
+        tipLine = sketch.ExternalGeo[tip]
         face.Shape = self.tiltedFace(self.SQUARE)
         self.doc.recompute()
+        self.assertFalse(sketch.isValid())
+        self.assertIn(f"ExternalEdge{tip - 1}", sketch.getStatusString())
+        self.assertEqual(len(sketch.Constraints), 2)
+        kept = sketch.ExternalGeo[-sketch.Constraints[1].Second - 1]
+        self.assertTrue(Sketcher.ExternalGeometryFacade(kept).testFlag("Missing"))
+        self.assertLess((kept.StartPoint - tipLine.StartPoint).Length, TOL)
+        self.assertLess((kept.EndPoint - tipLine.EndPoint).Length, TOL)
         section, projections = self.sectionAndProjections(sketch)
-        self.assertEqual((len(section), len(projections)), (1, 4))
-        self.assertEqual(len(sketch.Constraints), 1)
+        self.assertEqual(len(section), 1)
         assertOnTheSection()
+
+    def testFaceThatGainsAnEdgeKeepsTheConstraintOnItsEdge(self):
+        """ops#264 e2 (class E's E1): the tilted square face projected (four lines), a sketch
+        line's start on the projection of its left edge (x = -5). The face becomes the pentagon,
+        its new edges between the right and left ones in the face's order: by position the left
+        edge's Id went to the new edge (0, 8)-(-5, 5) and the line's start followed it, silently.
+        The shape is set anew from Python, so the edges' names are no evidence; geometry pairs
+        the left edge with its predecessor, and the constraint stays on it."""
+        face = self.doc.addObject("Part::Feature", "Face")
+        face.Shape = self.tiltedFace(self.SQUARE)
+        sketch = self.doc.addObject("Sketcher::SketchObject", "TiltedSketch")
+        self.doc.recompute()
+        sketch.addExternal(face.Name, "Face1", False, False)
+        self.doc.recompute()
+
+        def left():
+            _, projections = self.sectionAndProjections(sketch)
+            found = [
+                i
+                for i, g in projections
+                if abs(g.StartPoint.x + 5) < TOL and abs(g.EndPoint.x + 5) < TOL
+            ]
+            self.assertEqual(len(found), 1)
+            return found[0]
+
+        line = sketch.addGeometry(Part.LineSegment(V(-4, 1, 0), V(4, 2, 0)), False)
+        sketch.addConstraint(Sketcher.Constraint("PointOnObject", line, 1, -left() - 1))
+        self.doc.recompute()
+        face.Shape = self.tiltedFace(self.PENTAGON)
+        self.doc.recompute()
+        self.assertTrue(sketch.isValid(), sketch.getStatusString())
+        _, projections = self.sectionAndProjections(sketch)
+        self.assertEqual(len(projections), 5)
+        self.assertEqual(-sketch.Constraints[0].Second - 1, left())
+        self.assertAlmostEqual(sketch.Geometry[line].StartPoint.x, -5, delta=TOL)
 
 
 def reportText():

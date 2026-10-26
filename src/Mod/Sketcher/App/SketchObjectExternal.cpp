@@ -80,6 +80,7 @@
 #include <App/Datums.h>
 #include <App/Part.h>
 #include <App/RecomputeThread.h>
+#include <App/ReferenceReport.h>
 #include <Base/Console.h>
 #include <Base/Tools.h>
 #include <Base/Vector3D.h>
@@ -1909,6 +1910,8 @@ int SketchObject::attachExternal(
         auto &geo = geos[-geoId-1];
         geo = geo->clone();
         ExternalGeometryFacade::getFacade(geo)->setRef(ref);
+        // drawn, not projected: no source edge (ops#264 e2)
+        ExternalGeometryFacade::getFacade(geo)->setSource(std::string());
     }
 
     ExternalGeo.setValues(std::move(geos));
@@ -3063,7 +3066,8 @@ void processFace (const Rotation& invRot,
                   gp_Ax3& sketchAx3,
                   TopoDS_Shape& aProjFace,
                   std::vector<std::unique_ptr<Part::Geometry>>& geos,
-                  TopoDS_Shape& refSubShape)
+                  TopoDS_Shape& refSubShape,
+                  const std::vector<std::string>& edgeSources)
 {
     const TopoDS_Face& face = TopoDS::Face(refSubShape);
     BRepAdaptor_Surface surface(face);
@@ -3075,10 +3079,19 @@ void processFace (const Rotation& invRot,
 
         // Extract all edges from the face
         TopExp_Explorer edgeExp;
-        for (edgeExp.Init(face, TopAbs_EDGE); edgeExp.More(); edgeExp.Next()) {
+        std::size_t n = 0;
+        for (edgeExp.Init(face, TopAbs_EDGE); edgeExp.More(); edgeExp.Next(), ++n) {
             TopoDS_Edge edge = TopoDS::Edge(edgeExp.Current());
             // Process each edge
+            const std::size_t first = geos.size();
             processEdge(edge, geos, gPlane, invPlm, mov, sketchPlane, invRot, sketchAx3, aProjFace);
+            // FreeCAD-CH (ops#264 e2): each geometry records the edge it came from (the
+            // explorer's order on the unmoved face, which the names were read in)
+            if (n < edgeSources.size()) {
+                for (std::size_t k = first; k < geos.size(); ++k) {
+                    ExternalGeometryFacade::getFacade(geos[k].get())->setSource(edgeSources[n]);
+                }
+            }
         }
 
         if (fabs(dnormal.Angle(snormal) - std::numbers::pi/2) < Precision::Confusion()) {
@@ -3158,13 +3171,22 @@ void processFace (const Rotation& invRot,
     }
 }
 
-// the error of a sketch whose external geometry lost its element (ops#72); defined below
+// the error of a sketch whose external geometry lost its element (ops#72), or whose link no
+// longer gives a geometry with constraints on it (ops#264 e2); defined below
 std::string missingReferenceMessage(
     const App::Document* doc,
     const std::vector<std::pair<std::string, std::vector<std::size_t>>>& missingRefs,
+    const std::vector<std::pair<std::string, std::vector<std::size_t>>>& lostRefs,
     const std::vector<App::DocumentObject*>& objects,
     const std::vector<std::string>& subElements,
     const std::vector<std::string>& keys);
+std::string referenceText(const App::Document* doc,
+                          const std::string& ref,
+                          const std::vector<std::size_t>& indexes,
+                          const std::vector<App::DocumentObject*>& objects,
+                          const std::vector<std::string>& subElements,
+                          const std::vector<std::string>& keys,
+                          bool lost = false);
 
 }  // anonymous namespace
 
@@ -3278,6 +3300,179 @@ std::string typeList(const std::vector<long>& types)
         text += std::to_string(types[k]);
     }
     return text;
+}
+
+// How far apart two geometries of the same type lie, for pairing a link's geometries (ops#264
+// e2): lines by their supporting lines (each end of one from the other's line), only where they
+// overlap (a chamfer shortens its neighbours, so their ends move); arcs of circles by centre and
+// radius, only where they overlap; anything else as distanceFromSaved() compares it
+double placeDistance(const Part::Geometry* a, const Part::Geometry* b, double tolerance)
+{
+    constexpr double apart = std::numeric_limits<double>::infinity();
+    if (auto* line = freecad_cast<const Part::GeomLineSegment*>(a)) {
+        auto* other = static_cast<const Part::GeomLineSegment*>(b);
+        const auto a0 = line->getStartPoint();
+        const auto b0 = other->getStartPoint();
+        const auto b1 = other->getEndPoint();
+        const auto along = line->getEndPoint() - a0;
+        const auto otherAlong = b1 - b0;
+        if (along.Length() < tolerance || otherAlong.Length() < tolerance) {
+            return apart;
+        }
+        const double distance = std::max({b0.DistanceToLine(a0, along),
+                                          b1.DistanceToLine(a0, along),
+                                          a0.DistanceToLine(b0, otherAlong),
+                                          line->getEndPoint().DistanceToLine(b0, otherAlong)});
+        auto unit = along;
+        unit.Normalize();
+        const double s0 = (b0 - a0) * unit;
+        const double s1 = (b1 - a0) * unit;
+        const double overlap =
+            std::min(along.Length(), std::max(s0, s1)) - std::max(0.0, std::min(s0, s1));
+        return overlap > tolerance ? distance : apart;
+    }
+    if (auto* arc = freecad_cast<const Part::GeomArcOfCircle*>(a)) {
+        auto* other = static_cast<const Part::GeomArcOfCircle*>(b);
+        // the middle of one on the other
+        auto onOther = [tolerance](const Part::GeomArcOfCircle* from,
+                                   const Part::GeomArcOfCircle* to) {
+            const auto middle =
+                from->pointAtParameter((from->getFirstParameter() + from->getLastParameter()) / 2);
+            double u = 0.0;
+            return to->closestParameter(middle, u)
+                && Base::Distance(middle, to->pointAtParameter(u)) <= tolerance;
+        };
+        if (!onOther(arc, other) && !onOther(other, arc)) {
+            return apart;
+        }
+        return Base::Distance(arc->getCenter(), other->getCenter())
+            + std::abs(arc->getRadius() - other->getRadius());
+    }
+    // other open curves (B-splines and arcs of conics, many of them from a face projected through
+    // hidden lines) only with the same ends, either way round: distanceFromSaved() samples both
+    // curves, too slow to try every pair of a large link
+    if (auto* curve = freecad_cast<const Part::GeomBoundedCurve*>(a)) {
+        auto* other = static_cast<const Part::GeomBoundedCurve*>(b);
+        const auto a0 = curve->getStartPoint();
+        const auto a1 = curve->getEndPoint();
+        const auto b0 = other->getStartPoint();
+        const auto b1 = other->getEndPoint();
+        const bool same =
+            Base::Distance(a0, b0) <= tolerance && Base::Distance(a1, b1) <= tolerance;
+        const bool reversed =
+            Base::Distance(a0, b1) <= tolerance && Base::Distance(a1, b0) <= tolerance;
+        if (!same && !reversed) {
+            return apart;
+        }
+    }
+    return distanceFromSaved(a, b);
+}
+
+// FreeCAD-CH (ops#264 e2, class E's E1; I-R2): which of a link's old geometries of one kind each
+// new one continues, as an index into `olds` (-1: none, it is new). Before, the k-th new one took
+// the k-th old Id, and a constraint followed whatever edge came k-th now (a corner cut before it
+// moved it to the next edge, silently). In turn:
+// - one geometry before and after, of the same type: the link's reference names it (and its
+//   resolution carries any warning);
+// - the source edge's mapped name (Source), unique on both sides;
+// - the same type at the same place: within half the tolerance, and every other candidate either
+//   way beyond it (as carbon copy pairs, PR 260);
+// - by position, only where the link's order is evidence: the same count and types in the same
+//   order, the link's reference resolved by history this recompute (`byHistory`: exactly, or by
+//   the solver at tier 0-1 without a guess; a face found by its place may be a redrawn profile,
+//   whose edges come in another order, review CC1), and every pair made above at equal
+//   positions.
+// An old geometry left over is the caller's: it goes, or breaks where constraints are on it.
+std::vector<int> pairGeometries(const std::vector<const Part::Geometry*>& olds,
+                                const std::vector<const Part::Geometry*>& news,
+                                bool byHistory)
+{
+    std::vector<int> taken(news.size(), -1);
+    std::vector<bool> used(olds.size(), false);
+    auto sameType = [&](std::size_t j, std::size_t k) {
+        return olds[j] && olds[j]->getTypeId() == news[k]->getTypeId();
+    };
+    auto match = [&](std::size_t j, std::size_t k) {
+        taken[k] = static_cast<int>(j);
+        used[j] = true;
+    };
+    if (olds.size() == 1 && news.size() == 1) {
+        if (sameType(0, 0)) {
+            match(0, 0);
+        }
+        return taken;
+    }
+
+    auto sourceOf = [](const Part::Geometry* geo) {
+        return geo ? ExternalGeometryFacade::getFacade(geo)->getSource() : std::string();
+    };
+    std::map<std::string, std::vector<std::size_t>> oldSources;
+    std::map<std::string, std::vector<std::size_t>> newSources;
+    for (std::size_t j = 0; j < olds.size(); ++j) {
+        if (auto source = sourceOf(olds[j]); !source.empty()) {
+            oldSources[source].push_back(j);
+        }
+    }
+    for (std::size_t k = 0; k < news.size(); ++k) {
+        if (auto source = sourceOf(news[k]); !source.empty()) {
+            newSources[source].push_back(k);
+        }
+    }
+    for (const auto& [source, ks] : newSources) {
+        auto it = oldSources.find(source);
+        if (ks.size() == 1 && it != oldSources.end() && it->second.size() == 1
+            && sameType(it->second.front(), ks.front())) {
+            match(it->second.front(), ks.front());
+        }
+    }
+
+    constexpr double tolerance = 10 * Precision::Confusion();
+    std::vector<std::vector<double>> distance(
+        olds.size(),
+        std::vector<double>(news.size(), std::numeric_limits<double>::infinity()));
+    for (std::size_t j = 0; j < olds.size(); ++j) {
+        for (std::size_t k = 0; k < news.size(); ++k) {
+            if (!used[j] && taken[k] < 0 && sameType(j, k)) {
+                distance[j][k] = placeDistance(olds[j], news[k], tolerance);
+            }
+        }
+    }
+    std::vector<std::pair<std::size_t, std::size_t>> agreed;
+    for (std::size_t j = 0; j < olds.size(); ++j) {
+        for (std::size_t k = 0; k < news.size(); ++k) {
+            if (distance[j][k] > tolerance / 2) {
+                continue;
+            }
+            bool clear = true;
+            for (std::size_t other = 0; other < news.size() && clear; ++other) {
+                clear = other == k || distance[j][other] > tolerance;
+            }
+            for (std::size_t other = 0; other < olds.size() && clear; ++other) {
+                clear = other == j || distance[other][k] > tolerance;
+            }
+            if (clear) {
+                agreed.emplace_back(j, k);
+            }
+        }
+    }
+    for (const auto& [j, k] : agreed) {
+        match(j, k);
+    }
+
+    if (!byHistory || olds.size() != news.size()) {
+        return taken;
+    }
+    for (std::size_t k = 0; k < news.size(); ++k) {
+        if (!sameType(k, k) || (taken[k] >= 0 && taken[k] != static_cast<int>(k))) {
+            return taken;
+        }
+    }
+    for (std::size_t k = 0; k < news.size(); ++k) {
+        if (taken[k] < 0 && !used[k]) {
+            match(k, k);
+        }
+    }
+    return taken;
 }
 }  // namespace
 
@@ -3505,6 +3700,8 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
     std::vector<std::size_t> addedProjections;
     // for each entry of newGeos, how many of its geometries are the projection's (ops#264)
     std::vector<std::size_t> projSizes;
+    // and its link's index in ExternalGeometry (ops#264 e2)
+    std::vector<int> linkIndexes;
     // the key of the link that is being added to, whose new geometries keep the flags it gives
     std::string createdKey;
     for (int i=0; i < int(Objects.size()); i++) {
@@ -3557,6 +3754,8 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
         // builds the link's geometries into geos, as `projection` and `intersection` say
         auto build = [&]() {
             TopoDS_Shape refSubShape;
+            // a face's edges' mapped names, in the face's order (ops#264 e2)
+            std::vector<std::string> edgeSources;
 
             // Handles LCS ,resolve to actual datum object
             const App::DocumentObject* resolvedObj = Obj;
@@ -3575,6 +3774,17 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
             else if (auto* refObj = freecad_cast<const Part::Feature*>(resolvedObj)) {
                 const Part::TopoShape& refShape = refObj->Shape.getShape();
                 refSubShape = refShape.getSubShape(SubElement.c_str());
+                // FreeCAD-CH (ops#264 e2): the shape drops the names; read them here, on the
+                // unmoved shape, so a projected face's geometries can be paired by their source
+                if (!refSubShape.IsNull() && refSubShape.ShapeType() == TopAbs_FACE) {
+                    for (TopExp_Explorer exp(refSubShape, TopAbs_EDGE); exp.More(); exp.Next()) {
+                        const int index = refShape.findShape(exp.Current());
+                        const auto mapped = index > 0
+                            ? refShape.getMappedName(Data::IndexedName::fromConst("Edge", index))
+                            : Data::MappedName();
+                        edgeSources.push_back(mapped ? mapped.toString() : std::string());
+                    }
+                }
             }
             else if (auto* pl = freecad_cast<const App::Plane*>(resolvedObj)) {
                 Base::Vector3d base = pl->getBasePoint();
@@ -3657,7 +3867,8 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
             if (projection && !refSubShape.IsNull()) {
                 switch (refSubShape.ShapeType()) {
                 case TopAbs_FACE: {
-                    processFace(invRot, invPlm, mov, sketchPlane, gPlane, sketchAx3, aProjFace, geos, refSubShape);
+                    processFace(invRot, invPlm, mov, sketchPlane, gPlane, sketchAx3, aProjFace, geos,
+                                refSubShape, edgeSources);
                 } break;
                 case TopAbs_EDGE: {
                     const TopoDS_Edge& edge = TopoDS::Edge(refSubShape);
@@ -4051,6 +4262,7 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
         const bool projectionAdded = beingCreated && !extToAdd->intersection && intersection;
         addedProjections.push_back(projectionAdded ? projSize : 0);
         projSizes.push_back(projSize);
+        linkIndexes.push_back(i);
         if (beingCreated) {
             createdKey = key;
         }
@@ -4130,6 +4342,28 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
         return names;
     };
 
+    // FreeCAD-CH (ops#264 e2): whether link `index`'s reference resolved by history this
+    // recompute: exactly (no report entry), or by the solver at tier 0-1 without a guess record.
+    // A face found by geometry (tiers 2-3, a guess, a place keep) may be a redrawn profile: the
+    // order of its edges is no evidence (review CC1). A link added back after an older version
+    // dropped it has no entry of its own.
+    auto resolvedByHistory = [&](int index) {
+        if (index < 0 || static_cast<std::size_t>(index) >= linkCount) {
+            return false;
+        }
+        const auto* entry = App::ReferenceReport::find(&ExternalGeometry, index);
+        return !entry
+            || (entry->status == App::ReferenceReport::Status::Resolved && entry->tier >= 0
+                && entry->tier <= 1);
+    };
+    // the Ids of old geometry without a counterpart that carries constraints: kept where it is,
+    // flagged missing, and the sketch fails naming it; its constraints never move to another
+    // geometry (ops#264 e2, I-R2)
+    std::set<long> lostIds;
+    // the entries of newGeos whose Ids were paired by source, place or position (ops#264 e2): their
+    // geometries take their slots in build order (below)
+    std::vector<bool> pairedLinks(newGeos.size(), false);
+
     // allocate unique geometry id
     for (std::size_t n = 0; n < newGeos.size(); ++n) {
         auto& geos = newGeos[n];
@@ -4140,8 +4374,9 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
         // FreeCAD-CH (ops#264): the Ids go per kind, the projection's to the projection and the
         // intersection's to the intersection, so a Both link whose projection changes in number,
         // or a type written from Python, doesn't move constraints from one kind to the other.
-        // Within a kind they still go by position. Geometry saved before has no kind: such a link
-        // gets its Ids by position, as before, once, and has kinds from then on.
+        // Within a kind they go by source, place, then position (pairGeometries(), ops#264 e2).
+        // Geometry saved before has no kind: such a link gets its Ids by position, as before,
+        // once, and has kinds from then on.
         std::vector<long> projectionIds;
         std::vector<long> intersectionIds;
         bool byKind = !refs.empty();
@@ -4158,20 +4393,38 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
 
         std::set<long> geoIds;  // the Ids no new geometry takes, whose geometry goes
         if (byKind) {
+            const bool byHistory = resolvedByHistory(linkIndexes[n]);
             auto handOut = [&](const std::vector<long>& ids, std::size_t begin, std::size_t end) {
-                std::size_t k = 0;
-                for (std::size_t g = begin; g < end; ++g, ++k) {
-                    GeometryFacade::setId(geos[g].get(), k < ids.size() ? ids[k] : ++geoLastId);
+                std::vector<const Part::Geometry*> olds;
+                for (long id : ids) {
+                    auto it = externalGeoMap.find(id);
+                    olds.push_back(it != externalGeoMap.end() ? ExternalGeo[it->second] : nullptr);
                 }
-                geoIds.insert(ids.begin() + static_cast<std::ptrdiff_t>(std::min(k, ids.size())),
-                              ids.end());
+                std::vector<const Part::Geometry*> news;
+                for (std::size_t g = begin; g < end; ++g) {
+                    news.push_back(geos[g].get());
+                }
+                const auto taken = pairGeometries(olds, news, byHistory);
+                std::vector<bool> kept(ids.size(), false);
+                for (std::size_t k = 0; k < news.size(); ++k) {
+                    if (taken[k] >= 0) {
+                        kept[taken[k]] = true;
+                    }
+                    GeometryFacade::setId(geos[begin + k].get(),
+                                          taken[k] >= 0 ? ids[taken[k]] : ++geoLastId);
+                }
+                for (std::size_t j = 0; j < ids.size(); ++j) {
+                    if (!kept[j]) {
+                        (constraintsOn({ids[j]}).empty() ? geoIds : lostIds).insert(ids[j]);
+                    }
+                }
             };
             handOut(projectionIds, 0, projCount);
             handOut(intersectionIds, projCount, geos.size());
-            // a projection added to an intersection link goes before it, as below (ops#260)
-            if (!(addedProjections[n] > 0 && projectionIds.empty() && !intersectionIds.empty())) {
-                addedProjections[n] = 0;
-            }
+            // new geometry goes where the build gives it, a projection added to an intersection
+            // link before it too (ops#260), below
+            addedProjections[n] = 0;
+            pairedLinks[n] = true;
             refs.clear();
             for (const auto& geo : geos) {
                 refs.push_back(GeometryFacade::getId(geo.get()));
@@ -4236,8 +4489,11 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
     auto geoms = ExternalGeo.getValues();
 
     // now update the geometries
-    // projections added to an intersection link, each with the Id of the geometry it goes before
+    // projections added to an intersection link, each with the Id of the geometry it goes before;
+    // and a paired link's new geometries (ops#264 e2)
     std::vector<std::pair<long, std::vector<Part::Geometry*>>> projectionsBefore;
+    // the slots of geometries a paired link's build order moved: old index -> new (ops#264 e2)
+    std::map<int, int> movedSlots;
     for (std::size_t n = 0; n < newGeos.size(); ++n) {
         auto& geos = newGeos[n];
         if (geos.empty()) {
@@ -4260,6 +4516,31 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
                                            std::vector<Part::Geometry*> {});
             front = &projectionsBefore.back().second;
         }
+        // FreeCAD-CH (ops#264 e2): a link whose Ids were paired by source or place keeps its
+        // geometry in build order in ExternalGeo, as the Ids by position did (externalGeoRefMap,
+        // and so the next pairing by position, reads that order): the geometries that keep an Id
+        // take those Ids' slots in build order, and each new one goes before the next of them
+        // (or at the end, after them all). A lost geometry keeps its slot.
+        std::vector<int> slots;
+        std::vector<long> anchors(geos.size(), 0);  // a new geometry goes before this Id (0: end)
+        if (pairedLinks[n]) {
+            long next = 0;
+            for (std::size_t k = geos.size(); k-- > 0;) {
+                const long id = GeometryFacade::getId(geos[k].get());
+                auto it = externalGeoMap.find(id);
+                if (it != externalGeoMap.end()) {
+                    slots.push_back(it->second);
+                    next = id;
+                }
+                else {
+                    anchors[k] = next;
+                }
+            }
+            std::sort(slots.begin(), slots.end());
+        }
+        std::size_t nextSlot = 0;
+        std::vector<Part::Geometry*>* group = nullptr;  // the new ones going before `groupAnchor`
+        long groupAnchor = 0;
         for (std::size_t k = 0; k < geos.size(); ++k) {
             auto& geo = geos[k];
             auto it = externalGeoMap.find(GeometryFacade::getId(geo.get()));
@@ -4276,15 +4557,29 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
                 if (front && k < before) {
                     front->push_back(geo.release());
                 }
+                else if (anchors[k] != 0) {
+                    if (!group || groupAnchor != anchors[k]) {
+                        projectionsBefore.emplace_back(anchors[k], std::vector<Part::Geometry*> {});
+                        group = &projectionsBefore.back().second;
+                        groupAnchor = anchors[k];
+                    }
+                    group->push_back(geo.release());
+                }
                 else {
                     geoms.push_back(geo.release());
                 }
                 continue;
             }
+            const int from = it->second;
+            const int to = pairedLinks[n] ? slots[nextSlot++] : from;
+            if (to != from) {
+                movedSlots[from] = to;
+            }
             // This is an existing geometry. Update it while keeping the old flags, but the kind
-            // the build gave (ops#264; geometry saved before has none)
+            // the build gave (ops#264; geometry saved before has none). The old one is read from
+            // ExternalGeo: its slot in geoms may hold another geometry of the link by now
             const auto kind = kindOf(geo.get());
-            ExternalGeometryFacade::copyFlags(geoms[it->second], geo.get());
+            ExternalGeometryFacade::copyFlags(ExternalGeo[from], geo.get());
             if (kind) {
                 setKind(geo.get(), *kind);
             }
@@ -4296,7 +4591,7 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
             // again (PR 277 verification 5)
             ExternalGeometryFacade::getFacade(geo.get())
                 ->setFlag(ExternalGeometryExtension::TypeGuessed, guessed);
-            geoms[it->second] = geo.release();
+            geoms[to] = geo.release();
         }
     }
     // externalGeoRefMap is rebuilt from ExternalGeo's order, which must be the build order: the
@@ -4317,6 +4612,17 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
     bool hasError = false;
     // the missing references, in order, with the indexes of their geometries in geoms
     std::vector<std::pair<std::string, std::vector<std::size_t>>> missingRefs;
+    // and the links whose lost geometries (above) are flagged missing, alike (ops#264 e2)
+    std::vector<std::pair<std::string, std::vector<std::size_t>>> lostRefs;
+    auto addIndex = [](auto& refs, const std::string& ref, std::size_t index) {
+        auto it = std::find_if(refs.begin(), refs.end(), [&](const auto& entry) {
+            return entry.first == ref;
+        });
+        if (it == refs.end()) {
+            it = refs.emplace(refs.end(), ref, std::vector<std::size_t> {});
+        }
+        it->second.push_back(index);
+    };
     for (std::size_t index = 0; index < geoms.size(); ++index) {
         auto egf = ExternalGeometryFacade::getFacade(geoms[index]);
         egf->setFlag(ExternalGeometryExtension::Sync,false);
@@ -4341,15 +4647,16 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
                     << " missing reference: " << egf->getRef());
             hasError = true;
             egf->setFlag(ExternalGeometryExtension::Missing,true);
-            const std::string& ref = egf->getRef();
-            auto it = std::find_if(missingRefs.begin(), missingRefs.end(), [&](const auto& entry) {
-                return entry.first == ref;
-            });
-            if (it == missingRefs.end()) {
-                it = missingRefs.emplace(missingRefs.end(), ref, std::vector<std::size_t> {});
-            }
-            it->second.push_back(index);
-        } else {
+            addIndex(missingRefs, egf->getRef(), index);
+        }
+        else if (lostIds.count(egf->getId()) != 0) {
+            FC_ERR("External geometry " << getFullName() << ".e" << egf->getId()
+                   << " lost its source in " << egf->getRef());
+            hasError = true;
+            egf->setFlag(ExternalGeometryExtension::Missing, true);
+            addIndex(lostRefs, egf->getRef(), index);
+        }
+        else {
             egf->setFlag(ExternalGeometryExtension::Missing,false);
         }
     }
@@ -4368,12 +4675,22 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
     }
 
     ExternalGeo.setValues(std::move(geoms));
-    if (!inserted.empty()) {
+    if (!inserted.empty() || !movedSlots.empty()) {
         // getValuesForce(): getValues() is empty while the list is flagged invalid, and writing
         // that back would delete every constraint (as in unparkExternalGeometry)
         std::vector<Constraint*> constraints;
         for (const auto& cstr : Constraints.getValuesForce()) {
             auto shifted = cstr->clone();
+            // the geometries a paired link's build order moved, first (ops#264 e2)
+            for (int i = 0; shifted->hasElement(i); ++i) {
+                const int given = shifted->getGeoId(i);
+                auto moved = given <= GeoEnum::RefExt && given != GeoEnum::GeoUndef
+                    ? movedSlots.find(-given - 1)
+                    : movedSlots.end();
+                if (moved != movedSlots.end()) {
+                    shifted->setGeoId(i, -moved->second - 1);
+                }
+            }
             for (int at : inserted) {
                 const int geoId = -at - 1;
                 for (int i = 0; shifted->hasElement(i); ++i) {
@@ -4448,7 +4765,8 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
 
     if (hasError && this->isRecomputing()) {
         throw Base::RuntimeError(
-            missingReferenceMessage(getDocument(), missingRefs, Objects, SubElements, keys));
+            missingReferenceMessage(getDocument(), missingRefs, lostRefs, Objects, SubElements,
+                                    keys));
     }
 }
 
@@ -4457,54 +4775,88 @@ namespace
 std::string missingReferenceMessage(
     const App::Document* doc,
     const std::vector<std::pair<std::string, std::vector<std::size_t>>>& missingRefs,
+    const std::vector<std::pair<std::string, std::vector<std::size_t>>>& lostRefs,
     const std::vector<App::DocumentObject*>& objects,
     const std::vector<std::string>& subElements,
     const std::vector<std::string>& keys)
 {
     // Names each missing reference as the user sees it, Label.Element, with the external
     // geometry it gave (ExternalEdgeN, as the sketcher selects it; the first two are the axes)
-    std::string message = missingRefs.size() == 1 ? "Missing external geometry reference: "
-                                                  : "Missing external geometry references: ";
+    std::string message;
+    if (!missingRefs.empty()) {
+        message = missingRefs.size() == 1 ? "Missing external geometry reference: "
+                                          : "Missing external geometry references: ";
+    }
+    // FreeCAD-CH (ops#264 e2): and each link whose element is there but no longer gives the
+    // geometry the constraints are on (pairGeometries() found no counterpart)
+    if (!lostRefs.empty()) {
+        message += (message.empty() ? "" : "; ") + std::string("External geometry lost: ");
+    }
     bool first = true;
     for (const auto& [ref, indexes] : missingRefs) {
         if (!first) {
             message += "; ";
         }
         first = false;
-
-        std::string source;
-        std::string element;
-        auto it = std::find(keys.begin(), keys.end(), ref);
-        if (it != keys.end() && objects[it - keys.begin()]) {
-            const auto* obj = objects[it - keys.begin()];
-            source = obj->Label.getValue();
-            element = Data::oldElementName(subElements[it - keys.begin()].c_str());
-        }
-        else {
-            // a link dropped by an older version: only the geometry's reference is left
-            auto pos = ref.find('.');
-            std::string objName = ref.substr(0, pos);
-            auto obj = doc ? doc->getObject(objName.c_str()) : nullptr;
-            source = obj ? obj->Label.getValue() : objName;
-            if (pos != std::string::npos) {
-                element = Data::oldElementName(ref.c_str() + pos + 1);
-            }
-        }
-        if (boost::starts_with(element, Data::MISSING_PREFIX)) {
-            element.erase(0, std::strlen(Data::MISSING_PREFIX));
-        }
-        message += source;
-        if (!element.empty()) {
-            message += "." + element;
-        }
-
-        message += " (";
-        for (std::size_t i = 0; i < indexes.size(); ++i) {
-            message += (i ? ", " : "") + std::string("ExternalEdge")
-                + std::to_string(static_cast<long>(indexes[i]) - 1);
-        }
-        message += ")";
+        message += referenceText(doc, ref, indexes, objects, subElements, keys);
     }
+    first = true;
+    for (const auto& [ref, indexes] : lostRefs) {
+        if (!first) {
+            message += "; ";
+        }
+        first = false;
+        message += referenceText(doc, ref, indexes, objects, subElements, keys, true);
+    }
+    return message;
+}
+
+// "Label.Element (ExternalEdgeN, ...)", or for lost geometry "Label.Element no longer gives
+// ExternalEdgeN, ... (...)"
+std::string referenceText(const App::Document* doc,
+                          const std::string& ref,
+                          const std::vector<std::size_t>& indexes,
+                          const std::vector<App::DocumentObject*>& objects,
+                          const std::vector<std::string>& subElements,
+                          const std::vector<std::string>& keys,
+                          bool lost)
+{
+    std::string message;
+    std::string source;
+    std::string element;
+    auto it = std::find(keys.begin(), keys.end(), ref);
+    if (it != keys.end() && objects[it - keys.begin()]) {
+        const auto* obj = objects[it - keys.begin()];
+        source = obj->Label.getValue();
+        element = Data::oldElementName(subElements[it - keys.begin()].c_str());
+    }
+    else {
+        // a link dropped by an older version: only the geometry's reference is left
+        auto pos = ref.find('.');
+        std::string objName = ref.substr(0, pos);
+        auto obj = doc ? doc->getObject(objName.c_str()) : nullptr;
+        source = obj ? obj->Label.getValue() : objName;
+        if (pos != std::string::npos) {
+            element = Data::oldElementName(ref.c_str() + pos + 1);
+        }
+    }
+    if (boost::starts_with(element, Data::MISSING_PREFIX)) {
+        element.erase(0, std::strlen(Data::MISSING_PREFIX));
+    }
+    message += source;
+    if (!element.empty()) {
+        message += "." + element;
+    }
+
+    message += lost ? " no longer gives " : " (";
+    for (std::size_t i = 0; i < indexes.size(); ++i) {
+        message += (i ? ", " : "") + std::string("ExternalEdge")
+            + std::to_string(static_cast<long>(indexes[i]) - 1);
+    }
+    message += lost ? (indexes.size() == 1
+                           ? " (its source edge is gone; its constraints stay on it)"
+                           : " (their source edges are gone; their constraints stay on them)")
+                    : ")";
     return message;
 }
 }  // namespace
@@ -4571,6 +4923,7 @@ void SketchObject::fixExternalGeometry(const std::vector<int> &geoIds) {
                           .getMappedName(elements.front().index);
         (mapped ? mapped : elements.front().name).appendToBuffer(ref);
         egf->setRef(ref);
+        egf->setSource(std::string());  // linked anew (ops#264 e2)
         objs.push_back(obj);
         subs.emplace_back();
         elements.front().index.appendToStringBuffer(subs.back());
@@ -4877,6 +5230,8 @@ int SketchObject::unparkExternalGeometry(App::DocumentObject* obj,
             // The rebuild keeps the placeholder's flags on the projection: give it the entry's
             auto egf = ExternalGeometryFacade::getFacade(placeholder);
             egf->setRef(key);
+            // a copy of another geometry: not from that one's source edge (ops#264 e2)
+            egf->setSource(std::string());
             egf->setFlag(ExternalGeometryExtension::Defining, defining);
             egf->setFlag(ExternalGeometryExtension::Frozen, false);
             egf->setFlag(ExternalGeometryExtension::Sync, false);
@@ -4996,6 +5351,7 @@ int SketchObject::markExternalGeometryMissing(const std::vector<long>& ids, cons
         auto& geo = geos[it->second];
         geo = geo->clone();
         ExternalGeometryFacade::getFacade(geo)->setRef(ref);
+        ExternalGeometryFacade::getFacade(geo)->setSource(std::string());  // (ops#264 e2)
         ++marked;
     }
     if (marked) {

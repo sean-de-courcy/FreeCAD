@@ -22,6 +22,9 @@ class ExternalGeometryFacade(BaseClass):
     Ref: str = ""
     """Returns the reference string of this external geometry."""
 
+    Source: str = ""
+    """The mapped name of the source edge a face link's geometry was projected from, or empty."""
+
     Id: int = 0
     """Sets/returns the Internal Alignment Type of the Geometry."""
 

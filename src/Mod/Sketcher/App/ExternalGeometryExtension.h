@@ -62,6 +62,13 @@ public:
     virtual int getRefIndex() const = 0;
 
     virtual void setRefIndex(int index) = 0;
+
+    // FreeCAD-CH (ops#264 e2): the mapped name of the source edge a face link's geometry was
+    // projected from, empty where it has none (an edge or vertex link, an intersection, a face
+    // projected through hidden lines, geometry saved before)
+    virtual const std::string& getSource() const = 0;
+
+    virtual void setSource(const std::string& source) = 0;
 };
 
 class SketcherExport ExternalGeometryExtension: public Part::GeometryMigrationPersistenceExtension,
@@ -165,6 +172,16 @@ public:
         RefIndex = index;
     }
 
+    const std::string& getSource() const override
+    {
+        return Source;
+    }
+
+    void setSource(const std::string& source) override
+    {
+        Source = source;
+    }
+
     static bool getFlagsFromName(std::string str, ExternalGeometryExtension::Flag& flag);
 
 protected:
@@ -188,6 +205,7 @@ private:
     FlagType Flags;
     // END_CREDIT_BLOCK: Credit under LGPL for this block to Zheng, Lei (realthunder)
     // <realthunder.dev@gmail.com>
+    std::string Source;
 };
 
 }  // namespace Sketcher

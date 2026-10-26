@@ -1332,6 +1332,7 @@ void SketchObject::onExternalGeoChanged()
             if (!egf->getRef().empty()) {
                 detached.insert(egf->getRef());
                 egf->setRef(std::string());
+                egf->setSource(std::string());  // (ops#264 e2)
             }
             egf->setFlag(ExternalGeometryExtension::Detached,false);
             egf->setFlag(ExternalGeometryExtension::Missing,false);
@@ -1386,6 +1387,7 @@ void SketchObject::onExternalGeoChanged()
             if (it!=externalGeoMap.end()) {
                 auto geo = ExternalGeo[it->second];
                 ExternalGeometryFacade::getFacade(geo)->setRef(std::string());
+                ExternalGeometryFacade::getFacade(geo)->setSource(std::string());
             }
         }
         refs.clear();
