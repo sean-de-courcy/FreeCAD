@@ -3574,20 +3574,20 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
                 named = self.profileNamed(pipe, profile)
                 volume = pipe.Shape.Volume
                 points = self.attach(pipe)
-                stored = [V(v) for v in pipe.SpineEnds]
+                stored = [V(v) for v in pipe.SpineStart]
                 drawnTheOtherWay(path, flipped)
                 self.doc.recompute()
                 self.assertEqual(self.profileNamed(pipe, profile), named)
                 self.assertNoneMovedSilently(pipe, volume, points, lambda place: True)
                 # The stored start, way, end and the other vertex and middle stay as they were
-                self.assertEqual(len(pipe.SpineEnds), 5)
-                for before, after in zip(stored, pipe.SpineEnds):
-                    self.assertLess((V(after) - before).Length, 1e-6, (stored, pipe.SpineEnds))
+                self.assertEqual(len(pipe.SpineStart), 5)
+                for before, after in zip(stored, pipe.SpineStart):
+                    self.assertLess((V(after) - before).Length, 1e-6, (stored, pipe.SpineStart))
 
     def testClosedLensRunsTheStoredWayWhereBothWaysTie(self):
         """The lens's two arcs leave the profile at mirror angles to its normal, so neither way
         leaves more nearly along it: inside a band of 1e-6 the stored way decides (a point of the
-        first edge, SpineEnds), not the rounding of the two cosines, which an arc drawn the other
+        first edge, SpineStart), not the rounding of the two cosines, which an arc drawn the other
         way changes. "Transformed"; each arc and both drawn the other way, and back."""
         for flipped in ([0], [1], [0, 1]):
             self.tearDown()
@@ -3598,7 +3598,7 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
                 pipe = self.pipe(profile, path, "Transformed")
                 named = self.profileNamed(pipe, profile)
                 volume = pipe.Shape.Volume
-                stored = [V(v) for v in pipe.SpineEnds]
+                stored = [V(v) for v in pipe.SpineStart]
                 self.assertEqual(len(stored), 5)
                 self.assertGreater((stored[1] - stored[0]).Length, 1, stored)
                 points = self.attach(pipe)
@@ -3607,8 +3607,8 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
                     self.doc.recompute()
                     self.assertEqual(self.profileNamed(pipe, profile), named)
                     self.assertNoneMovedSilently(pipe, volume, points, lambda place: True)
-                    for before, after in zip(stored, pipe.SpineEnds):
-                        self.assertLess((V(after) - before).Length, 1e-6, (stored, pipe.SpineEnds))
+                    for before, after in zip(stored, pipe.SpineStart):
+                        self.assertLess((V(after) - before).Length, 1e-6, (stored, pipe.SpineStart))
 
     @staticmethod
     def cornerKeysAt(pipe, vertices):
@@ -3630,7 +3630,7 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
 
     def testClosedSpineProfileSlidToTheOtherVertex(self):
         """The D's profile moved from one vertex of the spine to the other, and back. The sweep
-        keeps its stored start (SpineEnds), so the profile's end names and the corners' keys stay
+        keeps its stored start (SpineStart), so the profile's end names and the corners' keys stay
         where they were, and no reference moves silently. Keyed from the profile's place each
         time, the start's key and the other corner's traded vertices, and the references to the
         joints there went loud (the review of `notes\\naming-class-B.md` round 1, CC1). From
@@ -3705,12 +3705,72 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
         moved the start to a tied one: 4 references broke (the review of fork PR 383, round 1)."""
         profile, pipe = self.ring(2, 10)
         volume = pipe.Shape.Volume
-        stored = list(pipe.SpineEnds)
+        stored = list(pipe.SpineStart)
         points = self.attach(pipe)
         pipe.touch()
         self.doc.recompute()
-        self.assertEqual(list(pipe.SpineEnds), stored)
+        self.assertEqual(list(pipe.SpineStart), stored)
         self.assertNoneMovedSilently(pipe, volume, points, lambda place: True)
+
+    def testClosedRingStartKeptThroughAnOpenSpine(self):
+        """The ring's profile moved along its leg past the leg's middle (4 to 16), then the spine
+        opened for one recompute and closed again: the bottom line's end moved off the bottom left
+        corner and back, or the Spine's bottom edge left out and picked again (as the task panel
+        does it). The solid is as built, and no reference moves: the closed spine's start is
+        stored apart (SpineStart), for its input, and the open spine's recompute leaves it. Stored
+        in SpineEnds, the open spine's ends replaced it, the start was taken from the profile
+        again, and 6 references at the bottom left went to the top left, silently (the review of
+        fork PR 383, round 2: `work\\pr383-r2\\cases\\pr383r2_closed.py`). The same for a
+        recompute in Multisection mode and back, and for the same spine picked anew: its four
+        edges listed, or an equal copy of the sketch, where a new input's start was taken from the
+        profile (the cloud reading review of round 2, N1, N2)."""
+
+        def moveTheLine(pipe, path):
+            for end in (V(5, -5, 0), V(0, 0, 0)):
+                geometry = path.Geometry
+                geometry[3].EndPoint = end
+                path.Geometry = geometry
+                self.doc.recompute()
+
+        def leaveTheEdgeOut(pipe, path):
+            for edges in (["Edge1", "Edge2", "Edge3"], ["Edge1", "Edge2", "Edge3", "Edge4"]):
+                pipe.Spine = (path, edges)
+                self.doc.recompute()
+
+        def multisectionAndBack(pipe, path):
+            section = models.sketch(self.doc, "Section", models.rectangle(-1, -1, 1, 1), self.body)
+            section.Placement = App.Placement(V(0, 0, 18), App.Rotation())
+            pipe.Transformation = "Multisection"
+            pipe.Sections = [section]
+            self.doc.recompute()
+            pipe.Sections = []
+            pipe.Transformation = "Constant"
+            self.doc.recompute()
+
+        def pickTheEdges(pipe, path):
+            pipe.Spine = (path, ["Edge1", "Edge2", "Edge3", "Edge4"])
+            self.doc.recompute()
+
+        def relinkToACopy(pipe, path):
+            copy = models.sketch(self.doc, "Copy", path.Geometry, self.body, placement=XZ)
+            pipe.Spine = (copy, [])
+            self.doc.recompute()
+
+        for edit in (moveTheLine, leaveTheEdgeOut, multisectionAndBack, pickTheEdges, relinkToACopy):
+            self.tearDown()
+            self.setUp()
+            with self.subTest(edit=edit.__name__):
+                profile, pipe = self.ring(0, 4)
+                path = pipe.Spine[0]
+                if edit is leaveTheEdgeOut:
+                    pipe.Spine = (path, ["Edge1", "Edge2", "Edge3", "Edge4"])
+                    self.doc.recompute()
+                volume = pipe.Shape.Volume
+                points = self.attach(pipe)
+                profile.Placement = App.Placement(V(0, 0, 16), App.Rotation())
+                self.doc.recompute()
+                edit(pipe, path)
+                self.assertNoneMovedSilently(pipe, volume, points)
 
     def testClosedSpineMovedKeepsItsStart(self):
         """The D moved down along Z (its sketch's placement), the profile left at z = 0: by 8, so
