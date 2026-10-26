@@ -1,5 +1,5 @@
 {
-"run": {"cases": 3, "dirty": false, "platform": "win32", "sha": "deb0c16a27e875622a052e266cd7e92c789a617f", "tier": "F", "time": "2026-10-26T22:11:20Z"},
+"run": {"cases": 3, "dirty": false, "platform": "win32", "sha": "adce33dd2d9e9a8fd795697b1dbfe3b50006e06b", "tier": "F", "time": "2026-10-26T22:18:52Z"},
 "entries": {
 "JoistRimRedrawnInPlaceBeforeJoists|rim_chamfer|V2s": {"axes": ["M2", "E3", "X4:3600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "port", "issue": "ops#503", "tier": "F"},
 "JoistRimRedrawnInPlace|rim_chamfer|V2s": {"axes": ["M2", "E3", "X4:3600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "port", "issue": "ops#503", "tier": "F"},

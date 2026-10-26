@@ -1,5 +1,5 @@
 {
-"run": {"cases": 2, "dirty": false, "platform": "win32", "sha": "deb0c16a27e875622a052e266cd7e92c789a617f", "tier": "F", "time": "2026-10-26T22:11:20Z"},
+"run": {"cases": 2, "dirty": false, "platform": "win32", "sha": "adce33dd2d9e9a8fd795697b1dbfe3b50006e06b", "tier": "F", "time": "2026-10-26T22:18:52Z"},
 "entries": {
 "SweepFoldMoveReorder|C_p0|V2s": {"axes": ["M2", "E2", "E4"], "classes": ["A", "D"], "expect": "BROKEN", "expected": "wrong", "found_by": "port", "issue": "ops#500", "tier": "F"},
 "SweepFoldMoveReorder|C_p1|V2s": {"axes": ["M2", "E2", "E4"], "classes": ["A", "D"], "expect": "BROKEN", "expected": "broken", "found_by": "port", "issue": "ops#500", "tier": "F"},
