@@ -3374,7 +3374,12 @@ double placeDistance(const Part::Geometry* a, const Part::Geometry* b, double to
 // moved it to the next edge, silently). In turn:
 // - one geometry before and after, of the same type: the link's reference names it (and its
 //   resolution carries any warning);
-// - the same type at the same place: within half the tolerance, and every other candidate either
+// - with the same count and types, the link's reference resolved by history this recompute
+//   (`byHistory`), the whole list by position, if each new geometry meets the others at the same
+//   ends as its predecessor did: the face's edges in their old order (an edit can move one edge
+//   onto another's old place, which the place stage below would take: fork PR 384's review,
+//   round 2);
+// - otherwise the same type at the same place: within half the tolerance, and every other candidate either
 //   way beyond it (as carbon copy pairs, PR 260);
 // - among those at the same place with several candidates within the tolerance (collinear
 //   pieces, coincident curves), the source edge's mapped name (Source), unique on both sides. A
@@ -3408,6 +3413,83 @@ std::vector<int> pairGeometries(const std::vector<const Part::Geometry*>& olds,
     }
 
     constexpr double tolerance = 10 * Precision::Confusion();
+    // A wire can come back traversed the other way or from another edge (a profile whose lines
+    // were reversed), its edges in another order though the face resolved by history: a pair by
+    // position must meet the lines paired above at the same ends. Each end of the old geometry on
+    // a paired line, on the side of that line's middle it is (along the old line), has an end of
+    // the new geometry on the same side of the paired new line (fork PR 384's review, round 1)
+    auto endsOf = [](const Part::Geometry* geo) -> std::vector<Base::Vector3d> {
+        if (auto* curve = freecad_cast<const Part::GeomBoundedCurve*>(geo)) {
+            return {curve->getStartPoint(), curve->getEndPoint()};
+        }
+        return {};
+    };
+    // the side of p along `line`, measured in the direction `along`
+    auto sideOn = [](const Part::GeomLineSegment* line,
+                     const Base::Vector3d& along,
+                     const Base::Vector3d& p) {
+        const double t = (p - line->getStartPoint()) * along;
+        const double middle = (line->getEndPoint() - line->getStartPoint()) * along / 2;
+        return t > middle;
+    };
+    auto meetsTheSameEnds = [&](std::size_t j, std::size_t k) {
+        const auto oldEnds = endsOf(olds[j]);
+        const auto newEnds = endsOf(news[k]);
+        for (std::size_t other = 0; other < news.size(); ++other) {
+            if (taken[other] < 0) {
+                continue;
+            }
+            auto* oldLine = freecad_cast<const Part::GeomLineSegment*>(olds[taken[other]]);
+            auto* newLine = freecad_cast<const Part::GeomLineSegment*>(news[other]);
+            if (!oldLine || !newLine) {
+                continue;
+            }
+            auto along = oldLine->getEndPoint() - oldLine->getStartPoint();
+            along.Normalize();
+            for (const auto& end : oldEnds) {
+                if (end.DistanceToLine(oldLine->getStartPoint(), along) > tolerance
+                    || std::min(Base::Distance(end, oldLine->getStartPoint()),
+                                Base::Distance(end, oldLine->getEndPoint()))
+                        > tolerance) {
+                    continue;  // not one of this line's ends
+                }
+                const bool side = sideOn(oldLine, along, end);
+                const bool met = std::any_of(newEnds.begin(), newEnds.end(), [&](const auto& p) {
+                    return std::min(Base::Distance(p, newLine->getStartPoint()),
+                                    Base::Distance(p, newLine->getEndPoint()))
+                        <= tolerance
+                        && sideOn(newLine, along, p) == side;
+                });
+                if (!met) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    };
+    // The same count and types, resolved by history: first the whole list by position, if every
+    // pair meets the others at the same ends (the face's edge order kept). Before the place stage,
+    // which an edit moving an edge onto another's old place misleads (a profile moved by its own
+    // width, a slot moved by its width: fork PR 384's review, round 2)
+    bool unchangedList = byHistory && olds.size() == news.size();
+    for (std::size_t k = 0; k < news.size() && unchangedList; ++k) {
+        unchangedList = sameType(k, k);
+    }
+    if (unchangedList) {
+        for (std::size_t k = 0; k < news.size(); ++k) {
+            match(k, k);
+        }
+        bool kept = true;
+        for (std::size_t k = 0; k < news.size() && kept; ++k) {
+            kept = meetsTheSameEnds(k, k);
+        }
+        if (kept) {
+            return taken;
+        }
+        std::fill(taken.begin(), taken.end(), -1);
+        std::fill(used.begin(), used.end(), false);
+    }
+
     std::vector<std::vector<double>> distance(
         olds.size(),
         std::vector<double>(news.size(), std::numeric_limits<double>::infinity()));
@@ -3463,68 +3545,9 @@ std::vector<int> pairGeometries(const std::vector<const Part::Geometry*>& olds,
         }
     }
 
-    if (!byHistory || olds.size() != news.size()) {
+    if (!unchangedList) {
         return taken;
     }
-    for (std::size_t k = 0; k < news.size(); ++k) {
-        if (!sameType(k, k)) {
-            return taken;
-        }
-    }
-    // A wire can come back traversed the other way or from another edge (a profile whose lines
-    // were reversed), its edges in another order though the face resolved by history: a pair by
-    // position must meet the lines paired above at the same ends. Each end of the old geometry on
-    // a paired line, on the side of that line's middle it is (along the old line), has an end of
-    // the new geometry on the same side of the paired new line (fork PR 384's review, round 1)
-    auto endsOf = [](const Part::Geometry* geo) -> std::vector<Base::Vector3d> {
-        if (auto* curve = freecad_cast<const Part::GeomBoundedCurve*>(geo)) {
-            return {curve->getStartPoint(), curve->getEndPoint()};
-        }
-        return {};
-    };
-    // the side of p along `line`, measured in the direction `along`
-    auto sideOn = [](const Part::GeomLineSegment* line,
-                     const Base::Vector3d& along,
-                     const Base::Vector3d& p) {
-        const double t = (p - line->getStartPoint()) * along;
-        const double middle = (line->getEndPoint() - line->getStartPoint()) * along / 2;
-        return t > middle;
-    };
-    auto meetsTheSameEnds = [&](std::size_t j, std::size_t k) {
-        const auto oldEnds = endsOf(olds[j]);
-        const auto newEnds = endsOf(news[k]);
-        for (std::size_t other = 0; other < news.size(); ++other) {
-            if (taken[other] < 0) {
-                continue;
-            }
-            auto* oldLine = freecad_cast<const Part::GeomLineSegment*>(olds[taken[other]]);
-            auto* newLine = freecad_cast<const Part::GeomLineSegment*>(news[other]);
-            if (!oldLine || !newLine) {
-                continue;
-            }
-            auto along = oldLine->getEndPoint() - oldLine->getStartPoint();
-            along.Normalize();
-            for (const auto& end : oldEnds) {
-                if (end.DistanceToLine(oldLine->getStartPoint(), along) > tolerance
-                    || std::min(Base::Distance(end, oldLine->getStartPoint()),
-                                Base::Distance(end, oldLine->getEndPoint()))
-                        > tolerance) {
-                    continue;  // not one of this line's ends
-                }
-                const bool side = sideOn(oldLine, along, end);
-                const bool met = std::any_of(newEnds.begin(), newEnds.end(), [&](const auto& p) {
-                    return std::min(Base::Distance(p, newLine->getStartPoint()),
-                                    Base::Distance(p, newLine->getEndPoint()))
-                        <= tolerance
-                        && sideOn(newLine, along, p) == side;
-                });
-                if (!met) {
-                    return false;
-                }
-            }
-        }
-        return true;
-    };
     for (std::size_t k = 0; k < news.size(); ++k) {
         if (taken[k] < 0 && !used[k] && meetsTheSameEnds(k, k)) {
             match(k, k);
