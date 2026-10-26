@@ -2055,13 +2055,13 @@ std::string hashed(const std::string& text)
 /// one part shares nothing with the next corner's. Two edges from two objects are told apart by
 /// the second's tag. Each part is length-prefixed (field), since a name's sections are separated by
 /// `|`. Spines without names are keyed by the edges' indices.
-/// A closed spine of one profile, outside Auxiliary mode, has a named start (\a namedStart: the
-/// start vertex stored at the last good recompute, paired with the spine's nearest vertex; on a
-/// new pipe the vertex nearest the profile, where the sweep starts), whose key has `start` added
+/// A closed spine of one profile, outside Auxiliary mode, has a named start (\a namedStart: where
+/// the sweep starts, the start vertex stored at the last good recompute, paired with the spine's
+/// nearest vertex; on a new pipe the vertex nearest the profile), whose key has `start` added
 /// (ops#469). So a closed spine of two edges, whose two vertices lie between the same edges, has
 /// the start and the other corner whatever the edges' directions, and a profile moved to the
-/// other vertex, where the sweep then starts, leaves both their keys: taken from the sweep's
-/// start, the two keys traded vertices (`notes\naming-class-B.md` 3, M1 (a)). Told apart by which
+/// other vertex leaves both their keys: taken from the profile's place each time, the two keys
+/// traded vertices (`notes\naming-class-B.md` 3, M1 (a)). Told apart by which
 /// end of each edge they are, as drawn, both broke when one line was drawn the other way, and
 /// swapped silently when both were (round 6; decision 122 (3)); so they still are without a named
 /// start (several sections, Auxiliary mode: on the known-issues list).
@@ -2873,17 +2873,22 @@ Part::TopoShape wireAlong(
     return wire;
 }
 
-/// \a path, a closed spine of more than one edge, restarted at its vertex nearest \a profile (the
-/// mean of the distances from the profile's vertices): its edges in the same direction, rotated
-/// in its order, made a wire as \a wire with their names (ops#469). The shell starts where the
-/// spine does, and its start keeps the profile's names; built from the sketch's first line, the
-/// start followed that line's direction, and a line drawn the other way moved the profile's names
-/// to the spine's other vertex, silently (the closed spine's two ends tie, so the stored side
-/// can't keep them, ops#379). The profile's place doesn't change with the lines' directions or
-/// order. Where vertices tie (the profile halfway between them), the one nearest \a stored, the
-/// named start, when there is one. \a path itself when it isn't such a spine, when the vertices
-/// tie without a stored start to tell them apart, or when the new wire doesn't start there.
-// anchor: rung 3 (the profile's place); a tie falls to rung 4 (the stored named start)
+/// \a path, a closed spine of more than one edge, restarted at its stored start (\a stored: the
+/// vertex nearest it), or on a new pipe at its vertex nearest \a profile (the mean of the
+/// distances from the profile's vertices): its edges in the same direction, rotated in its order,
+/// made a wire as \a wire with their names (ops#469). The shell starts where the spine does, and
+/// its start keeps the profile's names; built from the sketch's first line, the start followed
+/// that line's direction, and a line drawn the other way moved the profile's names to the spine's
+/// other vertex, silently (the closed spine's two ends tie, so the stored side can't keep them,
+/// ops#379). Neither the stored start nor the profile's place changes with the lines' directions
+/// or order. The start is stored, not taken from the profile each time: a profile moved along a
+/// leg past its middle moved the start to the leg's other vertex, and the profile's names with
+/// it, to the elements there, silently, though the solid hadn't changed (the review of fork PR
+/// 383, round 1). Vertices the stored start ties between fall to the profile's place; a tie left
+/// (a new pipe's profile halfway along a leg) to the first of them in the wire's order, which is
+/// then stored. \a path itself when it isn't such a spine, when it already starts there, or when
+/// the new wire doesn't start there.
+// anchor: rung 4 (the stored start), seeded by rung 3 (the profile's place)
 Part::TopoShape startNearest(
     const Part::TopoShape& path,
     const TopoDS_Shape& profile,
@@ -2900,39 +2905,42 @@ Part::TopoShape startNearest(
     if (edges.size() < 2 || !BRep_Tool::IsClosed(path.getShape()) || vertices.IsEmpty()) {
         return path;
     }
-    auto distance = [&](const TopoDS_Edge& edge) {
-        const gp_Pnt at = BRep_Tool::Pnt(TopExp::FirstVertex(edge, true));
+    auto startOf = [&edges](size_t k) {
+        return BRep_Tool::Pnt(TopExp::FirstVertex(edges[k], true));
+    };
+    auto fromProfile = [&](size_t k) {
         double sum = 0;
         for (int i = 1; i <= vertices.Extent(); ++i) {
-            sum += at.Distance(BRep_Tool::Pnt(TopoDS::Vertex(vertices(i))));
+            sum += startOf(k).Distance(BRep_Tool::Pnt(TopoDS::Vertex(vertices(i))));
         }
         return sum / vertices.Extent();
     };
-    std::vector<double> distances;
-    for (const TopoDS_Edge& edge : edges) {
-        distances.push_back(distance(edge));
-    }
-    const double least = std::ranges::min(distances);
-    std::vector<size_t> tied;
-    for (size_t k = 0; k < edges.size(); ++k) {
-        if (distances[k] < least + Precision::Confusion()) {
-            tied.push_back(k);
+    auto fromStored = [&](size_t k) {
+        return stored->Distance(startOf(k));
+    };
+    // The edges, of \a candidates, whose starts lie nearest by \a distance
+    auto nearestBy = [](const std::vector<size_t>& candidates, const auto& distance) {
+        double least = std::numeric_limits<double>::infinity();
+        for (size_t k : candidates) {
+            least = std::min(least, distance(k));
         }
+        std::vector<size_t> nearest;
+        for (size_t k : candidates) {
+            if (distance(k) < least + Precision::Confusion()) {
+                nearest.push_back(k);
+            }
+        }
+        return nearest;
+    };
+    std::vector<size_t> tied(edges.size());
+    std::iota(tied.begin(), tied.end(), size_t {0});
+    if (stored) {
+        tied = nearestBy(tied, fromStored);
     }
-    size_t nearest = tied.front();
     if (tied.size() > 1) {
-        if (!stored) {
-            return path;
-        }
-        auto fromStored = [&](size_t k) {
-            return stored->Distance(BRep_Tool::Pnt(TopExp::FirstVertex(edges[k], true)));
-        };
-        std::ranges::sort(tied, {}, fromStored);
-        if (fromStored(tied[1]) < fromStored(tied[0]) + Precision::Confusion()) {
-            return path;
-        }
-        nearest = tied.front();
+        tied = nearestBy(tied, fromProfile);
     }
+    const size_t nearest = tied.front();
     if (nearest == 0) {
         return path;
     }
@@ -3488,8 +3496,9 @@ App::DocumentObjectExecReturn* Pipe::execute()
             );
         }
 
-        // A closed spine starts at its vertex nearest the profile, so the profile's names stay
-        // there whichever way its lines are drawn (ops#469). Not with several sections, which
+        // A closed spine starts at its stored start, at first its vertex nearest the profile, so
+        // the profile's names stay there whichever way its lines are drawn and wherever the
+        // profile moves along it (ops#469, startNearest). Not with several sections, which
         // MakePipeShell joins in their order from the spine's start, nor in Auxiliary mode, whose
         // spine is followed from its own start: either would change the result.
         const bool startAtProfile = (Transformation.getValue() != 1 || multisections.empty())
@@ -3533,29 +3542,14 @@ App::DocumentObjectExecReturn* Pipe::execute()
                 : planeNormal(pointsAlong(profileWire));
             path = profileFirst(path, normal, profileAtStart, makeTopoShape(false), storedWay);
         }
-        // The named start: the spine's vertex nearest the stored one, or on a new pipe (or one
-        // whose Spine was set anew, onChanged) the sweep's start, at the profile. The sweep's own
-        // start follows the profile (startNearest), which the solid needs; the corner keyed the
-        // start stays where it was, so a profile moved to the spine's other vertex hands no
-        // corner's key to the other (`notes\naming-class-B.md` 3, M1 (a))
-        // anchor: rung 4 (stored), seeded by rung 3 (the profile's place)
+        // The named start, the corner keyed `start` (makeCornerSource): where the sweep starts, at
+        // the stored start or on a new pipe (or one whose Spine was set anew, onChanged) at the
+        // profile. Both come from storage, so a profile moved to another vertex hands no corner's
+        // key, and no end's names, to another (`notes\naming-class-B.md` 3, M1 (a))
         TopoDS_Shape namedStart;
         const std::vector<TopoDS_Edge> pathEdges = edgesInOrder(TopoDS::Wire(path.getShape()));
         if (startStored && !pathEdges.empty()) {
             namedStart = TopExp::FirstVertex(pathEdges.front(), true);
-            if (storedStart) {
-                double least = storedStart->Distance(BRep_Tool::Pnt(TopoDS::Vertex(namedStart)));
-                TopTools_IndexedMapOfShape vertices;
-                TopExp::MapShapes(path.getShape(), TopAbs_VERTEX, vertices);
-                for (int i = 1; i <= vertices.Extent(); ++i) {
-                    const double d
-                        = storedStart->Distance(BRep_Tool::Pnt(TopoDS::Vertex(vertices(i))));
-                    if (d + Precision::Confusion() < least) {
-                        least = d;
-                        namedStart = vertices(i);
-                    }
-                }
-            }
         }
 
         // "Transformed" with one profile, in a mode that turns it along the spine: the tilt at the
