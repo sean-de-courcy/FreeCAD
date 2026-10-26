@@ -197,7 +197,8 @@ class Anchored(Scenario):
 Z_AXIS = V(0, 0, 1)
 ROW_AXES = {
     "sweep": ("M3", "E3"),
-    "pad": ("M1", "M7", "E3"),
+    "pad": ("M1", "E3"),
+    "revolution": ("M7", "E3"),
     "block": ("M1", "E3"),
     "cross": ("M4", "E3"),
 }
@@ -299,7 +300,7 @@ class PadHole(Anchored):
 class Revolution(Anchored):
     abstract = True
     area = "anchor_line_flips"
-    AXES = ROW_AXES["pad"]
+    AXES = ROW_AXES["revolution"]
     PLACES = ((7, 0, 3), (0, -7, 3))
     PER = (3, 3, 2)
     WHICH = None

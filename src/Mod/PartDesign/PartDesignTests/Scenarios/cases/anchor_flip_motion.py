@@ -231,7 +231,7 @@ class OpenPipeProfileTurnedOver(Spined):
     """A PartDesign Pipe of the square with a round hole."""
 
     abstract = True
-    AXES = ("M1", "M3", "E3")
+    AXES = ("M3", "E3")
     TRANSITION = "Right corner"
 
     def build(self, doc):
@@ -313,7 +313,7 @@ class PadMidplaneReversed(Anchored):
     sketch's plane, so the elements go to their mirror in z."""
 
     area = "anchor_flip_motion"
-    AXES = ("M1", "M3", "E3")
+    AXES = ("M1", "E3")
     PLACES = ((10, 0, 2.5), (10, 0, -2.5), (20, 10, 2.5))
     PER = (3, 3, 2)
     REFS = refNames(3, (3, 3, 2))

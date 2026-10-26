@@ -128,7 +128,7 @@ class OwnPlaceRefs(Scenario):
     abstract = True
     area = "anchor_paths"
     CLASSES = ("B",)
-    AXES = ("M1", "M7", "E8")
+    AXES = ("M1", "E8")
     ISSUE = "ops#501"
     FOUND_BY = "port"
     TIER = "F"
@@ -201,6 +201,7 @@ class RevolutionSecondSideOfAngleZero(OwnPlaceRefs):
     """A Revolution of the rectangle x 5..9, z 0..6 about the sketch's V axis (global Z), 270
     degrees; Angle -> Two sides with side 2 of angle 0: the same solid."""
 
+    AXES = ("M7", "E8")
     REFS = labels((6, 12, 8))
 
     def model(self, doc):
@@ -263,7 +264,7 @@ class RevolutionPath(Scenario):
     abstract = True
     area = "anchor_paths"
     CLASSES = ("B",)
-    AXES = ("M2", "M3", "E8")
+    AXES = ("M2", "E8")
     ISSUE = "ops#501"
     FOUND_BY = "port"
     TIER = "F"
@@ -329,7 +330,7 @@ class RevolutionUpToFaceTypeSwitched(RevolvedUpToFaceEdit):
     """Row 162 (ops#334): the type goes to Angle (90 degrees, so the same solid: the sweep, not
     BRepFeat) and back to UpToFace."""
 
-    AXES = ("M2", "M3", "E8")
+    AXES = ("M2", "E8")
     steps = ("toAngle", "toFace")
 
     def toAngle(self, doc):
@@ -480,7 +481,7 @@ class RevolutionAcrossTheAxisSide2Widened(AcrossTheAxisTwoSidesAngleToFace):
     """Row 210 (ops#263): the same model, only side 2 widened from 30 to 40 degrees (side 1 by
     angle throughout): the fillet follows B's end from 150 to 140 degrees."""
 
-    AXES = ("M2", "M3", "E8")
+    AXES = ("M2", "E8")
     steps = ("wider",)
 
 
@@ -561,7 +562,7 @@ class TransformedAcross90(Scenario):
     abstract = True
     area = "anchor_paths"
     CLASSES = ("B",)
-    AXES = ("M2", "M3", "E8")
+    AXES = ("M3", "E8")
     ISSUE = "ops#501"
     FOUND_BY = "port"
     TIER = "F"
