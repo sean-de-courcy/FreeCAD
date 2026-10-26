@@ -53,10 +53,19 @@ public:
     App::PropertyEnumeration Transformation;
     App::PropertyLinkSubList Sections;
     /// Where the spine started and ended at the last successful recompute, the end that carried
-    /// the profile's names first, where they lie in the body (ops#379); for a closed spine of one
-    /// profile, its named start and a point of its first edge (ops#469). Empty before, and after
-    /// Spine is set to another input (ops#435)
+    /// the profile's names first, where they lie in the body (ops#379). Read for the input they
+    /// were stored for, or where they still are the spine's ends (ops#435)
     App::PropertyVectorList SpineEnds;
+    /// The input SpineEnds was stored for (Spine's object, its elements' mapped names, sorted)
+    App::PropertyStringList SpineEndsOf;
+    /// A closed spine of one profile (not Auxiliary) at the last successful recompute of it, in
+    /// the body, 2n + 1 points for n edges: its start, its first edge's middle, whether its end
+    /// carried the profile's names (1 or 0 in x), its other vertices in the sweep's order and
+    /// their edges' middles (ops#469). Kept while the spine is open or in another mode; read for
+    /// the input it was stored for, or where its points still lie on the spine
+    App::PropertyVectorList SpineStart;
+    /// The input SpineStart was stored for, as SpineEndsOf
+    App::PropertyStringList SpineStartOf;
 
     App::DocumentObjectExecReturn* execute() override;
     short mustExecute() const override;
@@ -81,8 +90,6 @@ public:
     );
 
 protected:
-    void onBeforeChange(const App::Property* prop) override;
-    void onChanged(const App::Property* prop) override;
     /// get the given edges and all their tangent ones
     void getContinuousEdges(Part::TopoShape TopShape, std::vector<std::string>& SubNames);
     void buildPipePath(
@@ -108,12 +115,6 @@ private:
     static const char* TransitionEnums[];
     static const char* ModeEnums[];
     static const char* TransformEnums[];
-
-    /// Spine's object and sub-elements (sorted) before its current change, recorded by
-    /// onBeforeChange() and compared in onChanged()
-    App::DocumentObject* spineBeforeChange {nullptr};
-    std::vector<std::string> spineSubsBeforeChange;
-    bool spineChanging {false};
 };
 
 class PartDesignExport AdditivePipe: public Pipe

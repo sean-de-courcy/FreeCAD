@@ -258,6 +258,54 @@ class ClosedRingTiedStartRecomputed(ClosedRing):
         doc.Pipe.touch()
 
 
+class ClosedRingSlidThenPickedAnew(ClosedRing):
+    """The profile slid from z = 4 to z = 16 and recomputed; then the Spine set from the whole
+    sketch to its four edges listed, or to an equal copy of the sketch: no other input, so the
+    stored start stays (the cloud reading review of fork PR 383 round 2, N1)."""
+
+    abstract = True
+    FOUND_BY = "review pr383-r2"
+    AXES = ("M3", "E4", "E5")
+
+    def edit(self, doc):
+        doc.Profile.Placement = App.Placement(V(0, 0, 16), App.Rotation())
+        doc.recompute()
+        self.pick(doc)
+
+
+class ClosedRingSlidThenEdgesListed(ClosedRingSlidThenPickedAnew):
+    abstract = False
+
+    def pick(self, doc):
+        doc.Pipe.Spine = (doc.Path, ["Edge1", "Edge2", "Edge3", "Edge4"])
+
+
+class ClosedRingSlidThenRelinkedToACopy(ClosedRingSlidThenPickedAnew):
+    abstract = False
+
+    def pick(self, doc):
+        body = doc.Pipe.getParentGeoFeatureGroup()
+        copy = m.sketch(doc, "Copy", doc.Path.Geometry, body, placement=XZ)
+        doc.Pipe.Spine = (copy, [])
+
+
+class ClosedRingSlidThenMultisectionAndBack(ClosedRingSlidThenPickedAnew):
+    """The same, then a recompute in Multisection mode with a section at z = 18, and back to
+    one profile (N2)."""
+
+    abstract = False
+
+    def pick(self, doc):
+        body = doc.Pipe.getParentGeoFeatureGroup()
+        section = m.sketch(doc, "Section", m.rectangle(-1, -1, 1, 1), body)
+        section.Placement = App.Placement(V(0, 0, 18), App.Rotation())
+        doc.Pipe.Transformation = "Multisection"
+        doc.Pipe.Sections = [section]
+        doc.recompute()
+        doc.Pipe.Sections = []
+        doc.Pipe.Transformation = "Constant"
+
+
 class SpineSetAnew(Scenario):
     """A Right corner pipe of a 4 x 4 square with a round hole along an L (up 30, right 20 in
     an XZ sketch), the profile at its start; then the Spine is set to another L, drawn the
