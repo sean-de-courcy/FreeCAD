@@ -99,6 +99,7 @@ class CaseTest(unittest.TestCase):
 
         plain, interned = RUN.results(self.case, "V2s")[1], RUN.results(self.case, "V2si")[1]
         if plain is None or interned is None:
+            RUN.failures.append(f"{self.case.__name__}|{ref} oracle run")
             self.fail(f"{self.case.__name__}: a run failed (its V2s tests say why)")
         a = scenarios._stepRecords(plain[ref])
         b = scenarios._stepRecords(interned[ref])
@@ -111,6 +112,7 @@ class CaseTest(unittest.TestCase):
             ]
             if differ:
                 corpus.say(f"CORPUS ORACLE {corpus.key(self.case.__name__, ref, 'V2si')} {differ}")
+                RUN.failures.append(f"{self.case.__name__}|{ref} oracle")
                 self.fail(f"{ref} after {step}: V2si differs from V2s in {differ}")
 
 

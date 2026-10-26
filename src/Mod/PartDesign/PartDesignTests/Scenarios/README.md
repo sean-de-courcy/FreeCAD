@@ -134,12 +134,22 @@ What a run prints:
   updated by a full run.
 - At the end: `CORPUS tier ...` (counts, time), `CORPUS time <case>` for the slowest cases, and in
   tier F the line for the PR description:
-  `Tier F: <sha> <platform> <time> <cases> <wrong>/<loud>/<right> ledger <fingerprint>`. The
-  fingerprint covers every entry's `expected` as the run's in-place update leaves the ledgers; the
+  `Tier F: <sha> <platform> <time> <cases> <wrong>/<loud>/<right> <n> verdicts ok|failed ledger <fingerprint>`.
+  The fingerprint covers every entry, whole, as the run's in-place update leaves the ledgers; the
   guard recomputes it from the head's ledgers, so a run whose ledgers weren't committed (or were
-  edited after it) doesn't pass.
-- A case module that fails to import, or exits at import, is a failing `Module_<name>` test; CI's step
-  also fails when the run ends without its `CORPUS tier G:` line.
+  edited after it) doesn't pass. `failed` means an `error` or `flaky` verdict, a V2si oracle
+  difference or a module that doesn't import (a REGRESSED key against the old ledger isn't a
+  failure here: the ledger diff shows it). The guard takes only a Windows line that says `ok`, with
+  at least as many verdicts as the head's ledgers have V2s, V2s:thin and random entries.
+- Only a **full** tier F run prints that line: the fork's own folder (no `FREECAD_SCENARIO_MODULES`),
+  V2s among the configurations, the random sequences at their default steps, the second hash seed,
+  the oracle, no `FREECAD_SCENARIO_SHA`, and the build's `corpus.py`, `harness.py`, `randomized.py`
+  and `TestCorpusGate.py` the same as the checkout's. Any other tier F run prints `CORPUS partial
+  tier F run (<why>): no Tier F line`.
+- A case module that fails to import, or exits at import, or whose cases have bad tags (`TIER` not
+  "G" or "F", `CLASSES` or `AXES` not a tuple of names) is a failing `Module_<name>` test; CI's step
+  also fails when the run ends without its `CORPUS tier G:` line. A case defined outside `cases/`
+  fails `TestNamingScenarios.CasesOnlyInCases` (it would run nowhere).
 
 ## The ledger
 

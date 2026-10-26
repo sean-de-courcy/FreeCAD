@@ -220,6 +220,15 @@ def _makeTests():
 globals().update(_makeTests())
 
 
+class CasesOnlyInCases(unittest.TestCase):
+    """A scenario with CLASSES is a corpus case, which only TestCorpusGate runs, and only from
+    Scenarios/cases/: one tagged in an area module would run nowhere."""
+
+    def testNoCasesInAreaModules(self):
+        misplaced = [f"{c.__module__}.{c.__name__}" for c in harness.scenarioClasses(AREAS, cases=True)]
+        self.assertEqual(misplaced, [], "cases outside Scenarios/cases/: move them there")
+
+
 def randomRuns():
     """([seeds], steps) from the environment; FREECAD_SCENARIO_GAP sets the plans' spacing."""
     gap = os.environ.get("FREECAD_SCENARIO_GAP")

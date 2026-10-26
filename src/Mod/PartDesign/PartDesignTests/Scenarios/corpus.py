@@ -160,6 +160,9 @@ def loadModules():
                 sys.modules[unique] = module
                 spec.loader.exec_module(module)
                 found.append(CaseModule(name, folder, module))
+                problems = [p for case in found[-1].cases for p in tagProblems(case)]
+                if problems:
+                    found[-1] = CaseModule(name, folder, error="bad tags: " + "; ".join(problems))
             # SystemExit too: a module that exits at import would end the run green
             except (Exception, SystemExit):
                 found.append(CaseModule(name, folder, error=traceback.format_exc()))
@@ -176,6 +179,18 @@ def loadModules():
                 )
             owner[case.__name__] = m.name
     return found, inTree
+
+
+def tagProblems(case):
+    """What is wrong with a case's tags: TIER "G" or "F", CLASSES and AXES tuples of names."""
+    problems = []
+    if case.TIER not in ("G", "F"):
+        problems.append(f"{case.__name__}.TIER is {case.TIER!r}, not 'G' or 'F'")
+    for field in ("CLASSES", "AXES"):
+        value = getattr(case, field)
+        if not isinstance(value, (tuple, list)) or not all(isinstance(v, str) and v.strip() for v in value):
+            problems.append(f"{case.__name__}.{field} is {value!r}, not a tuple of names")
+    return problems
 
 
 def orphanLedgers(dirs, modules):
@@ -219,13 +234,25 @@ def configsFor(case, which):
 
 def runnable(case, config):
     """Whether the case can still run in the configuration: a `:thin` variant needs THIN, a
-    `:s<mm>` one SIZE. An entry of a configuration it can't run in is stale."""
+    `:s<mm>` one SIZE, and no other variant exists. An entry of a configuration it can't run in
+    is stale."""
     for part in config.split(":")[1:]:
-        if part == "thin" and not case.THIN:
-            return False
-        if part.startswith("s") and part[1:].isdigit() and not case.SIZE:
+        if part == "thin":
+            if not case.THIN:
+                return False
+        elif part.startswith("s") and isNumber(part[1:]):
+            if not case.SIZE:
+                return False
+        else:
             return False
     return True
+
+
+def isNumber(text):
+    try:
+        return float(text) > 0
+    except ValueError:
+        return False
 
 
 def worst(results):
@@ -280,9 +307,10 @@ def runRandom(seed):
         results = randomized.RandomSequence("V2s", plan).run()
     except (Exception, SystemExit):
         return Outcome("error", message=traceback.format_exc())
-    for r in results:
-        if not r.passing:
-            return Outcome(r.verdict, r.record, r.message())
+    failing = [r for r in results if not r.passing]
+    if failing:
+        bad = worst(failing)  # the worst, as for cases: a wrong after a broken is wrong
+        return Outcome(bad.verdict, bad.record, bad.message())
     return Outcome("correct", {}, "")
 
 
@@ -422,6 +450,7 @@ class Run:
         self.caseRuns = {}  # {(case, config): ({ref: Outcome}, seconds)}
         self.timings = {}  # {case: seconds}
         self.lines = []  # the comparison lines (REGRESSED, ...), for the summary
+        self.failures = []  # what fails without a verdict: the V2si oracle (TestCorpusGate)
         self.ledgers = {m.name: readLedger(m.ledgerPath) for m in self.modules}
         self.orphanLedgers = {name: readLedger(path) for name, path in self.orphans.items()}
         if self.tier == "F" and self.inTree:
@@ -646,7 +675,7 @@ class Run:
 
     def fingerprint(self):
         """Tier F in the tree: the fingerprint of the ledgers as an in-place update leaves them
-        (the expected verdict of every entry), so the merge guard can check that the committed
+        (every entry, whole), so the merge guard can check that the committed
         ledgers are this run's. Ledgers the run doesn't write (a module that didn't import, the
         random sequences without seeds) count as they are; those without a module are gone."""
         if self.tier != "F" or not self.inTree:
@@ -656,6 +685,37 @@ class Run:
             if name not in ledgers and ledger:
                 ledgers[name] = ledger.get("entries", {})
         return ledgerFingerprint(ledgers)
+
+    def partial(self):
+        """Why this tier F run isn't the full run whose line the merge guard takes (empty if it is):
+        the fork's own folder, V2s among the configurations, the random sequences at their steps,
+        the second hash seed, the oracle, git's sha, and the build's Python the checkout's."""
+        why = []
+        if not self.inTree:
+            why.append("FREECAD_SCENARIO_MODULES")
+        configs = os.environ.get("FREECAD_SCENARIO_CONFIGS")
+        if configs and "V2s" not in [c.strip() for c in configs.split(",")]:
+            why.append("FREECAD_SCENARIO_CONFIGS without V2s")
+        if not self.seeds:
+            why.append("no random sequences")
+        if os.environ.get("FREECAD_SCENARIO_STEPS", str(RANDOM_STEPS)) != str(RANDOM_STEPS):
+            why.append("FREECAD_SCENARIO_STEPS")
+        if os.environ.get("FREECAD_SCENARIO_CHILD_SEED", CHILD_SEED).lower() == "none":
+            why.append("no second hash seed")
+        if os.environ.get("FREECAD_SCENARIO_ORACLE", "1") == "0":
+            why.append("no oracle")
+        if os.environ.get("FREECAD_SCENARIO_SHA"):
+            why.append("FREECAD_SCENARIO_SHA")
+        source = sourceTree()
+        if source:
+            here = os.path.dirname(os.path.abspath(__file__))
+            tests = os.path.join(source, os.path.dirname(CASES))
+            for name in ("corpus.py", "harness.py", "randomized.py", os.path.join("..", "TestCorpusGate.py")):
+                if not sameFile(os.path.join(here, name), os.path.join(tests, name)):
+                    why.append(f"the build's {os.path.basename(name)} isn't the checkout's")
+        else:
+            why.append("no source tree")
+        return why
 
     def counts(self):
         sets = {"wrong": 0, "loud": 0, "right": 0, "neither": 0}
@@ -687,22 +747,36 @@ class Run:
                 if secs > TIER_G_SECONDS:
                     lines.append(f"CORPUS slow {name} {secs:.1f} s: over {TIER_G_SECONDS} s, move it to tier F")
         if self.tier == "F" and not self.child:
+            partial = self.partial()
+            if partial:
+                # the merge guard takes only a full run's line
+                lines.append(f"CORPUS partial tier F run ({', '.join(partial)}): no Tier F line")
+                return lines
             sha, dirty = gitState(self.modules[0].folder if self.modules else ".")
             neither = f" {sets['neither']} neither" if sets["neither"] else ""
-            fingerprint = self.fingerprint()
+            broken = [m.name for m in self.modules if m.module is None]
+            failed = sets["neither"] or self.failures or broken
             lines.append(
                 f"Tier F: {sha[:10]}{' dirty' if dirty else ''} {platform()} {self.time} {cases} "
-                f"{sets['wrong']}/{sets['loud']}/{sets['right']}{neither}"
-                + (f" ledger {fingerprint}" if fingerprint else "")
+                f"{sets['wrong']}/{sets['loud']}/{sets['right']}{neither} {len(self.verdicts)} verdicts "
+                f"{'failed' if failed else 'ok'} ledger {self.fingerprint()}"
             )
         return lines
 
 
+def sameFile(a, b):
+    try:
+        with open(a, "rb") as x, open(b, "rb") as y:
+            return x.read().replace(b"\r\n", b"\n") == y.read().replace(b"\r\n", b"\n")
+    except OSError:
+        return False
+
+
 def ledgerFingerprint(ledgers):
-    """{module: {key: entry}} -> 12 hex digits over every entry's `expected`. The ops repo's
+    """{module: {key: entry}} -> 12 hex digits over every entry, whole. The ops repo's
     scripts/corpus_guard.py computes the same from the head's ledger files: keep the two equal."""
     lines = sorted(
-        f"{name}|{k}={json.dumps(entry.get('expected'), sort_keys=True)}"
+        f"{name}|{k}={json.dumps(entry, sort_keys=True)}"
         for name, entries in ledgers.items()
         for k, entry in entries.items()
     )
