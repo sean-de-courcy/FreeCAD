@@ -20,32 +20,46 @@
 # *                                                                         *
 # ***************************************************************************
 
-"""Attachment to moving faces: a sketch and a datum plane follow the faces they are attached
-to when the pad under them changes."""
+"""Corpus cases (ops#506): attachment to moving faces. A sketch and a datum plane follow the
+faces they are attached to when the pad under them changes; a sketch on a face that goes must
+break. Converted from the scenario area `attachment` (PR 1 of the corpus, the seed cases):
+scaled to the user's ~600 mm, with a thin variant."""
 
-from .harness import BROKEN, Attached, Scenario, X, Y, Z, face
-from . import models as m
+from PartDesignTests.Scenarios.harness import BROKEN, Attached, Scenario, X, Y, Z, face
+from PartDesignTests.Scenarios import models as m
 
 
 class AttachmentEdit(Scenario):
-    """A rectangle (0..20 x 0..10) padded 10 high; a sketch attached to the right face and a
-    datum plane attached to the top face."""
+    """A rectangle (0..20 x 0..10, at scale 1) padded 10 high; a sketch attached to the right
+    face and a datum plane attached to the top face. Thin: the rectangle is 0.5 deep."""
 
     abstract = True
     area = "attachment"
+    CLASSES = ("D",)
+    AXES = ("M1", "E5", "X4:600")
+    ISSUE = "ops#506"
+    FOUND_BY = "port"
+    TIER = "G"
+    SIZE = 20
+    SCALE = 30
+    THIN = True
     REFS = ("sketch_right_face", "datum_top_face")
-    x0, y0, width, depth, height = 0, 0, 20, 10, 10
+    x0, y0, width, height = 0, 0, 20, 10
+
+    @property
+    def depth(self):
+        return 0.5 if self.thin else 10
 
     def rightFace(self):
-        return face("plane", normal=X, through=(self.x0 + self.width, 0, 0))
+        return face("plane", normal=X, through=self.s(self.x0 + self.width, 0, 0))
 
     def topFace(self):
-        return face("plane", normal=Z, through=(0, 0, self.height))
+        return face("plane", normal=Z, through=self.s(0, 0, self.height))
 
     def build(self, doc):
         body = m.body(doc)
-        profile = m.sketch(doc, "Profile", m.rectangle(0, 0, 20, 10), body)
-        pad = m.pad(body, profile, 10)
+        profile = m.sketch(doc, "Profile", m.rectangle(*self.s(0, 0, 20, self.depth)), body)
+        pad = m.pad(body, profile, self.s(10))
         doc.recompute()
         onSide = body.newObject("Sketcher::SketchObject", "OnSide")
         onSide.AttachmentSupport = [(pad, self.names(pad, self.rightFace())[0])]
@@ -56,12 +70,18 @@ class AttachmentEdit(Scenario):
         self.ref("sketch_right_face", onSide, "AttachmentSupport", self.rightFace, Attached())
         self.ref("datum_top_face", plane, "AttachmentSupport", self.topFace, Attached())
 
+    def corners(self, x0, y0, x1):
+        """The profile's four lines, from (x0, y0) to (x1, y0 + depth), at scale."""
+        y1 = y0 + self.depth
+        points = [self.s(x, y) for x, y in ((x0, y0), (x1, y0), (x1, y1), (x0, y1))]
+        return {i: (points[i], points[(i + 1) % 4]) for i in range(4)}
+
 
 class AttachLength(AttachmentEdit):
     """The pad gets longer: 10 -> 15."""
 
     def edit(self, doc):
-        doc.Pad.Length = 15
+        doc.Pad.Length = self.s(15)
         self.height = 15
 
 
@@ -69,8 +89,8 @@ class AttachWidth(AttachmentEdit):
     """The right side moves from x = 20 to x = 26; its line keeps its geometry ID."""
 
     def edit(self, doc):
-        lines = {0: ((0, 0), (26, 0)), 1: ((26, 0), (26, 10)), 2: ((26, 10), (0, 10))}
-        m.setLines(doc.Profile, lines)
+        lines = self.corners(0, 0, 26)
+        m.setLines(doc.Profile, {i: lines[i] for i in (0, 1, 2)})
         self.width = 26
 
 
@@ -78,8 +98,7 @@ class AttachMove(AttachmentEdit):
     """The whole rectangle moves by (5, 3); every line keeps its geometry ID."""
 
     def edit(self, doc):
-        corners = [(5, 3), (25, 3), (25, 13), (5, 13)]
-        m.setLines(doc.Profile, {i: (corners[i], corners[(i + 1) % 4]) for i in range(4)})
+        m.setLines(doc.Profile, self.corners(5, 3, 25))
         self.x0, self.y0 = 5, 3
 
 
@@ -92,6 +111,13 @@ class AttachProngDeleted(Scenario):
 
     abstract = True
     area = "attachment"
+    CLASSES = ("D",)
+    AXES = ("M1", "E1", "X4:600")
+    ISSUE = "ops#68"
+    FOUND_BY = "port"
+    TIER = "G"
+    SIZE = 30
+    SCALE = 20
     REFS = ("sketch_end_face",)
     U = [(0, 0), (30, 0), (30, 20), (20, 20), (20, 5), (10, 5), (10, 20), (0, 20)]
     prongX = None  # the x of the attached end face's centre
@@ -100,17 +126,20 @@ class AttachProngDeleted(Scenario):
     def endFace(self):
         if self.deleted:
             return BROKEN
-        return face("plane", normal=Y, through=(0, 20, 0), contains=(self.prongX, 20, 5))
+        return face("plane", normal=Y, through=self.s(0, 20, 0), contains=self.s(self.prongX, 20, 5))
 
     def build(self, doc):
         body = m.body(doc)
-        profile = m.sketch(doc, "Profile", m.polygon(self.U), body)
-        pad = m.pad(body, profile, 10)
+        profile = m.sketch(doc, "Profile", m.polygon([self.s(x, y) for x, y in self.U]), body)
+        pad = m.pad(body, profile, self.s(10))
         doc.recompute()
         onEnd = body.newObject("Sketcher::SketchObject", "OnEnd")
         onEnd.AttachmentSupport = [(pad, self.names(pad, self.endFace())[0])]
         onEnd.MapMode = "FlatFace"
         self.ref("sketch_end_face", onEnd, "AttachmentSupport", self.endFace, Attached())
+
+    def line(self, a, b):
+        return (self.s(*a), self.s(*b))
 
 
 class AttachLeftProngDeleted(AttachProngDeleted):
@@ -119,7 +148,7 @@ class AttachLeftProngDeleted(AttachProngDeleted):
     prongX = 5
 
     def edit(self, doc):
-        m.setLines(doc.Profile, {4: ((20, 5), (0, 5)), 7: ((0, 5), (0, 0))})
+        m.setLines(doc.Profile, {4: self.line((20, 5), (0, 5)), 7: self.line((0, 5), (0, 0))})
         doc.Profile.delGeometries([5, 6])
         self.deleted = True
 
@@ -130,6 +159,6 @@ class AttachRightProngDeleted(AttachProngDeleted):
     prongX = 25
 
     def edit(self, doc):
-        m.setLines(doc.Profile, {1: ((30, 0), (30, 5)), 4: ((30, 5), (10, 5))})
+        m.setLines(doc.Profile, {1: self.line((30, 0), (30, 5)), 4: self.line((30, 5), (10, 5))})
         doc.Profile.delGeometries([2, 3])
         self.deleted = True

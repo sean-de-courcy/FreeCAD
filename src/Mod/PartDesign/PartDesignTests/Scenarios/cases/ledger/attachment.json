@@ -1,0 +1,19 @@
+{
+"run": {"cases": 5, "dirty": false, "platform": "win32", "sha": "a2b93c3684112ade3bbdf7c8bb52366adc72c042", "tier": "F", "time": "2026-10-26T17:09:50Z"},
+"entries": {
+"AttachLeftProngDeleted|sketch_end_face|V2s": {"axes": ["M1", "E1", "X4:600"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "port", "issue": "ops#68", "tier": "G"},
+"AttachLength|datum_top_face|V2s": {"axes": ["M1", "E5", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#506", "tier": "G"},
+"AttachLength|datum_top_face|V2s:thin": {"axes": ["M1", "E5", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#506", "tier": "F"},
+"AttachLength|sketch_right_face|V2s": {"axes": ["M1", "E5", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#506", "tier": "G"},
+"AttachLength|sketch_right_face|V2s:thin": {"axes": ["M1", "E5", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#506", "tier": "F"},
+"AttachMove|datum_top_face|V2s": {"axes": ["M1", "E5", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#506", "tier": "G"},
+"AttachMove|datum_top_face|V2s:thin": {"axes": ["M1", "E5", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#506", "tier": "F"},
+"AttachMove|sketch_right_face|V2s": {"axes": ["M1", "E5", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#506", "tier": "G"},
+"AttachMove|sketch_right_face|V2s:thin": {"axes": ["M1", "E5", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#506", "tier": "F"},
+"AttachRightProngDeleted|sketch_end_face|V2s": {"axes": ["M1", "E1", "X4:600"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "port", "issue": "ops#68", "tier": "G"},
+"AttachWidth|datum_top_face|V2s": {"axes": ["M1", "E5", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#506", "tier": "G"},
+"AttachWidth|datum_top_face|V2s:thin": {"axes": ["M1", "E5", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#506", "tier": "F"},
+"AttachWidth|sketch_right_face|V2s": {"axes": ["M1", "E5", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#506", "tier": "G"},
+"AttachWidth|sketch_right_face|V2s:thin": {"axes": ["M1", "E5", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#506", "tier": "F"}
+}
+}

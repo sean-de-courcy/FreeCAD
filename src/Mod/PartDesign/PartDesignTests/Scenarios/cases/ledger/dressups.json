@@ -1,0 +1,17 @@
+{
+"run": {"cases": 3, "dirty": false, "platform": "win32", "sha": "a2b93c3684112ade3bbdf7c8bb52366adc72c042", "tier": "F", "time": "2026-10-26T17:09:50Z"},
+"entries": {
+"DressUpInsertPocket|chamfer_edge|V2s": {"axes": ["M1", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#506", "tier": "G"},
+"DressUpInsertPocket|draft_face|V2s": {"axes": ["M1", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#506", "tier": "G"},
+"DressUpInsertPocket|draft_neutral|V2s": {"axes": ["M1", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#506", "tier": "G"},
+"DressUpInsertPocket|fillet_edge|V2s": {"axes": ["M1", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#506", "tier": "G"},
+"DressUpLength|chamfer_edge|V2s": {"axes": ["M1", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#506", "tier": "G"},
+"DressUpLength|draft_face|V2s": {"axes": ["M1", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#506", "tier": "G"},
+"DressUpLength|draft_neutral|V2s": {"axes": ["M1", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#506", "tier": "G"},
+"DressUpLength|fillet_edge|V2s": {"axes": ["M1", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#506", "tier": "G"},
+"DressUpReorder|chamfer_edge|V2s": {"axes": ["M1", "E2"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#506", "tier": "F"},
+"DressUpReorder|draft_face|V2s": {"axes": ["M1", "E2"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#506", "tier": "F"},
+"DressUpReorder|draft_neutral|V2s": {"axes": ["M1", "E2"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#506", "tier": "F"},
+"DressUpReorder|fillet_edge|V2s": {"axes": ["M1", "E2"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#506", "tier": "F"}
+}
+}

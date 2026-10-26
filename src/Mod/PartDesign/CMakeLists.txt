@@ -68,6 +68,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestNamingSave.py
     PartDesignTests/TestNamingRList.py
     PartDesignTests/TestNamingScenarios.py
+    PartDesignTests/TestCorpusGate.py
     PartDesignTests/TestNamingSolver.py
     PartDesignTests/TestNamingGate.py
     PartDesignTests/TestNamingConsumerPass.py
@@ -115,9 +116,9 @@ set(PartDesign_TestFixtures
 set(PartDesign_TestScenarios
     PartDesignTests/Scenarios/__init__.py
     PartDesignTests/Scenarios/ambiguous.py
-    PartDesignTests/Scenarios/attachment.py
     PartDesignTests/Scenarios/booleans.py
     PartDesignTests/Scenarios/consumers.py
+    PartDesignTests/Scenarios/corpus.py
     PartDesignTests/Scenarios/crossdoc.py
     PartDesignTests/Scenarios/derived.py
     PartDesignTests/Scenarios/pipe_legs.py
@@ -135,9 +136,20 @@ set(PartDesign_TestScenarios
     PartDesignTests/Scenarios/reorder.py
     PartDesignTests/Scenarios/revolve_uptoface.py
     PartDesignTests/Scenarios/rlist.py
+    PartDesignTests/Scenarios/scorecard.py
+    PartDesignTests/Scenarios/README.md
     PartDesignTests/Scenarios/sketch_edits.py
     PartDesignTests/Scenarios/splits.py
     PartDesignTests/Scenarios/uptoface.py
+)
+
+# The naming corpus's case modules and ledgers (TestCorpusGate, ops#506), globbed: a corpus PR
+# adds cases without touching this file (scripts/corpus_guard.sh in the ops repo refuses that)
+file(GLOB PartDesign_CorpusCases RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} CONFIGURE_DEPENDS
+    PartDesignTests/Scenarios/cases/*.py
+)
+file(GLOB PartDesign_CorpusLedger RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} CONFIGURE_DEPENDS
+    PartDesignTests/Scenarios/cases/ledger/*.json
 )
 
 # Golden files of TestNamingDump (regenerate with FREECAD_NAMING_GOLDEN_UPDATE)
@@ -336,6 +348,8 @@ add_custom_target(PartDesignScripts ALL SOURCES
     ${PartDesign_TestScripts}
     ${PartDesign_TestFixtures}
     ${PartDesign_TestScenarios}
+    ${PartDesign_CorpusCases}
+    ${PartDesign_CorpusLedger}
     ${PartDesign_NamingGolden}
     ${PartDesign_Compat}
     ${PartDesign_CompatGen0}
@@ -351,6 +365,8 @@ fc_target_copy_resource(PartDesignScripts
     ${PartDesign_TestScripts}
     ${PartDesign_TestFixtures}
     ${PartDesign_TestScenarios}
+    ${PartDesign_CorpusCases}
+    ${PartDesign_CorpusLedger}
     ${PartDesign_NamingGolden}
     ${PartDesign_Compat}
     ${PartDesign_CompatGen0}
@@ -391,6 +407,20 @@ INSTALL(
         ${PartDesign_TestScenarios}
     DESTINATION
         Mod/PartDesign/PartDesignTests/Scenarios
+       )
+
+INSTALL(
+    FILES
+        ${PartDesign_CorpusCases}
+    DESTINATION
+        Mod/PartDesign/PartDesignTests/Scenarios/cases
+       )
+
+INSTALL(
+    FILES
+        ${PartDesign_CorpusLedger}
+    DESTINATION
+        Mod/PartDesign/PartDesignTests/Scenarios/cases/ledger
        )
 
 INSTALL(

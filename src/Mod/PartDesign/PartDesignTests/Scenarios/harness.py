@@ -52,6 +52,14 @@ reference (App.getReferenceReport).
 
 A scenario edits in `edit(doc)`, or in several steps (`steps`, method names), each recomputed and
 judged: its references pass only if they pass after every step.
+
+In the solver's configurations two verdicts split the others (the naming corpus, ops#506):
+`quiet` is the right element held only through a quieter level (the owner's warning at the
+`same-place` level, or a twin trade in the solver's evidence), and `broken-` is a loud break
+whose candidates leave out the right element (`broken` keeps it among them).
+
+A scenario with `CLASSES` set is a case of the naming corpus (`Scenarios/README.md`): the
+general run leaves it out, and `TestCorpusGate` runs it against its ledger (`corpus.py`).
 """
 
 import json
@@ -90,7 +98,77 @@ VERDICTS = (
     "partial-warned",
     "guessed",
     "guessed-wrong",
+    "quiet",
+    "broken-",
+    "error",
+    "flaky",
 )
+# The corpus's sets (notes/naming-system.md 2.2): right, loud+, loud-, wrong, and neither (a case
+# bug or an issue, red until explained). `error` is a case whose run failed, `flaky` one whose
+# verdict differs between two runs (TestCorpusGate's tier F).
+SETS = {
+    "correct": "right",
+    "equivalent": "right",
+    "guessed": "right",
+    "quiet": "right",
+    "broken": "loud+",
+    "broken-": "loud-",
+    "wrong": "wrong",
+    "guessed-wrong": "wrong",
+    "partial": "wrong",
+    "partial-warned": "wrong",
+    "error": "neither",
+    "flaky": "neither",
+}
+# How bad a verdict is, for the ledger's REGRESSED and IMPROVED: higher is worse. Within the right
+# set a plain `correct` ranks above the others; within the wrong set a silent `wrong` ranks below the
+# warned or partly kept ones, so a change that drops the warning is REGRESSED (the cloud review of
+# fork PR 381, H1).
+RANKS = {
+    "correct": 0,
+    "equivalent": 1,
+    "guessed": 1,
+    "quiet": 1,
+    "broken": 2,
+    "broken-": 3,
+    "error": 4,
+    "flaky": 4,
+    "guessed-wrong": 5,
+    "partial": 5,
+    "partial-warned": 5,
+    "wrong": 6,
+}
+# The kinds of expectation (a record's `expect`, the ledger's `expect`), and the verdicts that are
+# the right answer under a kind though their own set isn't right, with their rank: a break where
+# BROKEN is expected, a reference computed on with a warning where PARTIAL is, a break where the
+# own element or a break is (fork PR 381, H1). scorecard.py and the ops repo's corpus_guard.py keep
+# copies of SETS and EXPECT_RIGHT: keep them equal (TestNamingScenarios checks scorecard's).
+EXPECT_KINDS = ("OWN-OR-BROKEN", "BROKEN", "PARTIAL", "GUESSED", "SETTLED", "WARNED", "CORRECT")
+EXPECT_RIGHT = {
+    "BROKEN": {"broken": 0},
+    "PARTIAL": {"partial-warned": 0},
+    "OWN-OR-BROKEN": {"broken": 1},
+}
+
+
+def expectKind(expect):
+    """The kind of an expectation's repr (a record's `expect`): CORRECT for a plain element."""
+    text = str(expect or "")
+    return next((k for k in EXPECT_KINDS[:-1] if text.startswith(k)), "CORRECT")
+
+
+def verdictSet(verdict, kind=None):
+    """The verdict's set under the expectation kind (SETS, or right where EXPECT_RIGHT says)."""
+    if verdict in EXPECT_RIGHT.get(kind, {}):
+        return "right"
+    return SETS.get(verdict, "neither")
+
+
+def verdictRank(verdict, kind=None):
+    """The verdict's rank under the expectation kind (RANKS, or EXPECT_RIGHT's)."""
+    return EXPECT_RIGHT.get(kind, {}).get(verdict, RANKS.get(verdict, 0))
+# The configurations whose broken references the solver reports with candidates
+SOLVER_CONFIGS = ("V2s", "V2si")
 
 
 class ScenarioError(Exception):
@@ -870,6 +948,24 @@ def pickedWrongSet(stored, verdict, rows):
     return verdict
 
 
+def splitVerdict(verdict, stored, expectation, expected, rows, warned):
+    """`quiet` and `broken-` (the corpus, ops#506), in the solver's configurations.
+    - quiet: the right element (correct or equivalent), held only through a quieter level: the
+      owner's warning is at the `same-place` level (ops#391), or the solver's evidence names a
+      twin trade (decision 121).
+    - broken-: the reference itself broke and the solver's candidates leave out the expected
+      element. A break that is the right answer (BROKEN) stays broken, as does a consumer that
+      fails on a reference that holds its element."""
+    if verdict in ("correct", "equivalent"):
+        samePlace = warned and any(r.get("warning_level") == "same-place" for r in rows)
+        twin = any("twin" in (r.get("evidence") or "") for r in rows if r.get("status") != "broken")
+        return "quiet" if samePlace or twin else verdict
+    if verdict == "broken" and stored == "broken" and expected and not isinstance(expectation, Broken):
+        candidates = {c for r in rows for c in r.get("candidates", [])}
+        return verdict if candidates & set(expected) else "broken-"
+    return verdict
+
+
 class Result:
     def __init__(self, scenario, ref, config, step):
         self.scenario, self.ref, self.config, self.step = scenario, ref, config, step
@@ -879,20 +975,23 @@ class Result:
     @property
     def passing(self):
         expect = str(self.record.get("expect"))
+        # `quiet` and `broken-` split correct and broken (the corpus, ops#506): they pass where
+        # those do
+        verdict = {"quiet": "correct", "broken-": "broken"}.get(self.verdict, self.verdict)
         if expect.startswith("BROKEN"):
             # a loud guess among the listed candidates is the user's policy (ops#127)
-            return self.verdict in ("broken", "guessed")
+            return verdict in ("broken", "guessed")
         if expect.startswith("PARTIAL"):
-            return self.verdict == "partial-warned"
+            return verdict == "partial-warned"
         if expect.startswith("OWN-OR-BROKEN"):
-            return self.verdict in ("correct", "equivalent", "guessed", "broken")
+            return verdict in ("correct", "equivalent", "guessed", "broken")
         if expect.startswith("GUESSED"):
-            return self.verdict == "guessed"
+            return verdict == "guessed"
         if expect.startswith("WARNED"):
-            return self.verdict in ("correct", "equivalent")
+            return verdict in ("correct", "equivalent")
         if expect.startswith("SETTLED"):
-            return self.verdict in ("correct", "equivalent")
-        return self.verdict in ("correct", "equivalent", "guessed")
+            return verdict in ("correct", "equivalent")
+        return verdict in ("correct", "equivalent", "guessed")
 
     def message(self):
         return "SCORE " + json.dumps(self.record, sort_keys=True)
@@ -931,19 +1030,64 @@ class StepResults:
 class Scenario:
     """Subclasses define `build(doc)` (which calls `ref(...)`) and `edit(doc)`, and list their
     reference names in REFS. MULTI marks scenarios whose consumers the multi-match flags touch
-    (dress-ups, Profile): CI runs them in V2multi too."""
+    (dress-ups, Profile): CI runs them in V2multi too.
+
+    The corpus's tags (ops#506; a scenario with CLASSES is a case, `Scenarios/README.md`):
+    CLASSES, the naming classes it belongs to ("A", "D", ...); AXES, the taxonomy's axes and
+    cells ("M2", "E1", "X4:600"); ISSUE, the issue it tracks ("ops#386"); FOUND_BY, who found it
+    ("port", "attacker A", "review pr366-r7"); TIER, "G" for the CI gate's quick set, "F" for
+    the full set only. SIZE is the case's largest extent at scale 1, and SCALE the scale it runs
+    at by default (the user's ~600 mm): a case with SIZE multiplies its lengths by `self.scale`,
+    so tier F can run it at other sizes (`<config>:s<mm>`). THIN marks a case that builds a thin
+    member when `self.thin` is set (`<config>:thin`). ACCEPTED and ALLOWED go into the ledger,
+    keyed by reference and configuration: {"ref|V2": "decision <n>"} accepts a wrong-set verdict
+    in that configuration only, {"ref|V2s": [verdicts]} allows a known flake there.
+    The configuration's suffix (`V2s:thin`) is its variant."""
 
     abstract = True
     area = None
     REFS = ()
     MULTI = False
+    CLASSES = ()
+    AXES = ()
+    ISSUE = None
+    FOUND_BY = None
+    TIER = "F"
+    SIZE = None
+    SCALE = 1.0
+    THIN = False
+    ACCEPTED = {}
+    ALLOWED = {}
 
     def __init__(self, config):
         self.config = config
-        self.mode, self.multi, self.solver, self.interned = CONFIGS[config]
+        base, _, self.variant = config.partition(":")
+        self.mode, self.multi, self.solver, self.interned = CONFIGS[base]
+        self.solverConfig = base in SOLVER_CONFIGS
+        self.scale, self.thin = self.SCALE, False
+        if self.variant == "thin":
+            if not self.THIN:
+                raise ScenarioError(f"{type(self).__name__} has no thin variant (THIN)")
+            self.thin = True
+        elif self.variant.startswith("s"):
+            if not self.SIZE:
+                raise ScenarioError(f"{type(self).__name__} has no SIZE to scale")
+            self.scale = float(self.variant[1:]) / self.SIZE
+        elif self.variant:
+            raise ScenarioError(f"unknown variant {self.variant!r} in {config!r}")
         self.stepName = None  # the step being run, for expectations that change between steps
         self.refs = {}
         self.documents = []
+
+    @classmethod
+    def isCase(cls):
+        """A case of the naming corpus: the general run leaves it out."""
+        return bool(cls.CLASSES)
+
+    def s(self, *lengths):
+        """The lengths at the case's scale: one number, or a tuple of them."""
+        scaled = tuple(x * self.scale for x in lengths)
+        return scaled[0] if len(scaled) == 1 else scaled
 
     # For the scenario's author
 
@@ -962,7 +1106,8 @@ class Scenario:
         the scenario's own (self.doc); others hold the targets of cross-document links.
         `interned` overrides the configuration's InternNames (a document with the other
         setting)."""
-        doc = models.newDocument(f"Scenario{type(self).__name__}{self.config}{suffix}")
+        config = re.sub(r"\W", "_", self.config)  # a variant's `:s60`
+        doc = models.newDocument(f"Scenario{type(self).__name__}{config}{suffix}")
         if hasattr(doc, "HistoryAlgorithm"):
             doc.HistoryAlgorithm = self.mode
         if hasattr(doc, "ReferenceSolver"):
@@ -1179,7 +1324,17 @@ class Scenario:
             # there (the review of fork PR 256, High 1); later edits act on that object
             result.verdict = "guessed-wrong" if liveGuesses(rows) else "wrong"
             detail = "; ".join(d for d in (detail, f"on {misplaced}, not {onName}") if d)
+        if self.solverConfig:
+            result.verdict = splitVerdict(result.verdict, stored, expectation, expected, rows, warned)
         record.update(stored=stored, outcome=outcome, detail=detail, verdict=result.verdict)
+        if self.isCase():
+            record.update(
+                classes=list(self.CLASSES),
+                axes=list(self.AXES),
+                issue=self.ISSUE,
+                found_by=self.FOUND_BY,
+                tier=self.TIER,
+            )
         if result.verdict in ("wrong", "guessed-wrong") and target is not None:
             # Every name of the elements involved, for a failure seen only on another platform
             # (PR 243 round 6: an unmarked far-cap name on macOS)
@@ -1523,8 +1678,9 @@ def assertInstancesDistinct(shape, original, placements):
         )
 
 
-def scenarioClasses(modules):
-    """The concrete Scenario classes defined in the modules, in definition order."""
+def scenarioClasses(modules, cases=False):
+    """The concrete Scenario classes defined in the modules, in definition order: the corpus's
+    cases (CLASSES set) with `cases`, the others without."""
     found = []
     for module in modules:
         for value in vars(module).values():
@@ -1533,6 +1689,7 @@ def scenarioClasses(modules):
                 and issubclass(value, Scenario)
                 and value.__module__ == module.__name__
                 and not value.__dict__.get("abstract", False)
+                and value.isCase() == cases
             ):
                 found.append(value)
     return found

@@ -24,6 +24,8 @@
 reference and configuration, `<Scenario>.test_<ref>_<config>`. A test passes when its reference's
 verdict is correct or equivalent (or broken, where the scenario expects the element to be gone).
 Each scenario is built once per configuration, on its first test. See Scenarios/harness.py.
+The naming corpus's cases (scenarios with CLASSES, Scenarios/cases/) aren't run here:
+TestCorpusGate runs them against their ledgers (ops#506).
 
 Configurations: V2 and V2s (the reference solver on, ops#7) for every scenario, V2multi (the
 multi-match flags on) for the scenarios whose consumers the flags touch.
@@ -58,7 +60,7 @@ import traceback
 import unittest
 
 from PartDesignTests.Scenarios import harness
-from PartDesignTests.Scenarios import attachment, booleans, dressups, patterns, sketch_edits
+from PartDesignTests.Scenarios import booleans, dressups, patterns, sketch_edits
 from PartDesignTests.Scenarios import ambiguous, consumers, crossdoc, derived, external, internal
 from PartDesignTests.Scenarios import issues
 from PartDesignTests.Scenarios import fillet_limit, interning, moves, reorder
@@ -69,7 +71,6 @@ from PartDesignTests.Scenarios import randomized, revolve_uptoface, splits, upto
 AREAS = (
     sketch_edits,
     dressups,
-    attachment,
     uptoface,
     revolve_uptoface,
     patterns,
@@ -217,6 +218,80 @@ def _makeTests():
 
 
 globals().update(_makeTests())
+
+
+class CasesOnlyInCases(unittest.TestCase):
+    """A scenario with CLASSES is a corpus case, which only TestCorpusGate runs, and only from
+    Scenarios/cases/: one tagged in an area module would run nowhere."""
+
+    def testNoCasesInAreaModules(self):
+        misplaced = [f"{c.__module__}.{c.__name__}" for c in harness.scenarioClasses(AREAS, cases=True)]
+        self.assertEqual(misplaced, [], "cases outside Scenarios/cases/: move them there")
+
+
+class CorpusSetsAgree(unittest.TestCase):
+    """scorecard.py's copies of the corpus's sets agree with the harness's (fork PR 381, L8; the
+    ops repo's corpus_guard.py keeps a third copy)."""
+
+    def testScorecardSets(self):
+        from PartDesignTests.Scenarios import scorecard
+
+        self.assertEqual(scorecard.SETS, harness.SETS)
+        self.assertEqual(scorecard.EXPECT_RIGHT, harness.EXPECT_RIGHT)
+        self.assertEqual(sorted(scorecard.VERDICTS), sorted(harness.VERDICTS))
+
+
+class CorpusRules(unittest.TestCase):
+    """The corpus's ledger rules without a run (Scenarios/corpus.py; fork PR 381's reviews)."""
+
+    def testKindJudgesTheVerdict(self):
+        """H1: under PARTIAL, partial-warned is right and its dropped warning REGRESSED; under
+        BROKEN a break is right; inside the wrong set a silent wrong is worse than a warned one."""
+        from PartDesignTests.Scenarios import corpus
+
+        partial = {"expected": "partial-warned", "expect": "PARTIAL"}
+        self.assertEqual(corpus.compare(partial, "partial-warned", "PARTIAL"), "OK")
+        self.assertEqual(corpus.compare(partial, "wrong", "PARTIAL"), "REGRESSED")
+        self.assertEqual(corpus.compare({"expected": "guessed-wrong"}, "wrong"), "REGRESSED")
+        self.assertEqual(corpus.compare({"expected": "wrong"}, "guessed-wrong"), "IMPROVED")
+        self.assertEqual(corpus.compare({"expected": "broken", "expect": "BROKEN"}, "broken", "CORRECT"),
+                         "REGRESSED")
+        self.assertEqual(harness.verdictSet("broken", "BROKEN"), "right")
+        self.assertEqual(harness.verdictSet("partial-warned", "PARTIAL"), "right")
+        self.assertEqual(harness.verdictSet("partial-warned", "CORRECT"), "wrong")
+        for text, kind in (("BROKEN", "BROKEN"), ("BROKEN[pieces(x)]", "BROKEN"), ("PARTIAL[x]", "PARTIAL"),
+                           ("OWN-OR-BROKEN[x]", "OWN-OR-BROKEN"), ("pieces(x)", "CORRECT"), (None, "CORRECT")):
+            self.assertEqual(harness.expectKind(text), kind)
+
+    def testAllowedAndAcceptedPerConfiguration(self):
+        """R3-2 and H2: an allowed set comes from the case's ALLOWED now, not an old entry; ALLOWED
+        and ACCEPTED are keyed by reference and configuration."""
+        from PartDesignTests.Scenarios import corpus
+
+        class Case(harness.Scenario):
+            CLASSES, AXES, TIER, REFS = ("A",), ("M1",), "G", ("r",)
+            ACCEPTED = {"r|V2": "decision 58"}
+            ALLOWED = {"r|V2s": ["correct", "broken"]}
+
+        old = {"expected": ["correct", "broken"]}
+        outcome = corpus.Outcome("broken", {"expect": "face"})
+        self.assertEqual(corpus.entryFor(Case, "r", "V2s", outcome, old)["expected"], ["correct", "broken"])
+        self.assertNotIn("accepted", corpus.entryFor(Case, "r", "V2s", outcome, old))
+        self.assertEqual(corpus.entryFor(Case, "r", "V2", outcome, None)["accepted"], "decision 58")
+        self.assertEqual(corpus.entryFor(Case, "r", "V2", outcome, None)["tier"], "F")
+        Case.ALLOWED = {}
+        self.assertEqual(corpus.entryFor(Case, "r", "V2s", outcome, old)["expected"], "broken")
+        self.assertEqual(corpus.tagProblems(Case), [])
+        Case.ACCEPTED = {"r": "decision 58", "r|V2s": "yes"}
+        self.assertEqual(len(corpus.tagProblems(Case)), 2)
+
+    def testHashSeeds(self):
+        """R3-3: seeds read as NamingHash.h reads them (strtoull, base 0, 0 = off)."""
+        from PartDesignTests.Scenarios import corpus
+
+        for text, value in (("2", 2), ("0x2", 2), (" 2", 2), ("010", 8), ("0", 0), ("", 0), (None, 0),
+                            ("abc", 0), ("2 ", 0), ("08", 0), ("-1", 2**64 - 1)):
+            self.assertEqual(corpus.hashSeed(text), value, text)
 
 
 def randomRuns():
@@ -474,6 +549,50 @@ class HarnessGuessVerdicts(unittest.TestCase):
         self.assertTrue(self.passing(self.EDGE, verdict))
 
 
+class HarnessSplitVerdicts(unittest.TestCase):
+    """The corpus's `quiet` and `broken-` (ops#506), on report rows as App.getReferenceReport
+    gives them: no scenario of the seed corpus reaches them yet."""
+
+    EDGE = harness.edge("line", direction=harness.Z, through=(20, 0, 0))
+
+    def split(self, verdict, stored, rows, warned=False, expectation=None):
+        expectation = expectation or self.EDGE
+        return harness.splitVerdict(verdict, stored, expectation, ["Edge3"], rows, warned)
+
+    def testSamePlaceLevelIsQuiet(self):
+        rows = [{"status": "resolved", "warning_level": "same-place", "evidence": ""}]
+        self.assertEqual(self.split("correct", "correct", rows, warned=True), "quiet")
+        #   a normal warning keeps it correct
+        rows = [{"status": "resolved", "warning_level": "normal", "evidence": ""}]
+        self.assertEqual(self.split("correct", "correct", rows, warned=True), "correct")
+
+    def testTwinTradeIsQuiet(self):
+        rows = [{"status": "resolved", "warning_level": "", "evidence": "moved by 2; its own twin"}]
+        self.assertEqual(self.split("equivalent", "wrong", rows), "quiet")
+
+    def testBreakWithoutTheElementIsBrokenMinus(self):
+        rows = [{"status": "broken", "candidates": ["Edge1", "Edge2"]}]
+        self.assertEqual(self.split("broken", "broken", rows), "broken-")
+        rows = [{"status": "broken", "candidates": ["Edge3", "Edge2"]}]
+        self.assertEqual(self.split("broken", "broken", rows), "broken")
+
+    def testExpectedBreakAndFailedConsumerStayBroken(self):
+        self.assertEqual(self.split("broken", "broken", [], expectation=harness.BROKEN), "broken")
+        #   the reference holds its element, the consumer fails: no candidates to judge
+        self.assertEqual(self.split("broken", "correct", []), "broken")
+
+    def testSplitVerdictsPassWhereTheirsDo(self):
+        for verdict, expectation, passing in (
+            ("quiet", self.EDGE, True),
+            ("broken-", harness.BROKEN, True),
+            ("broken-", self.EDGE, False),
+        ):
+            result = harness.Result(None, None, "V2s", 0)
+            result.record["expect"] = repr(expectation)
+            result.verdict = verdict
+            self.assertEqual(result.passing, passing, verdict)
+
+
 class HarnessPinnedObject(unittest.TestCase):
     """A reference that must be on another object (Ref.on) is wrong there even when its element
     and its consumer's result are right (the review of fork PR 256, High 1)."""
@@ -520,5 +639,6 @@ __all__ = [
     "SolverSeeded",
     "HarnessSameSolid",
     "HarnessGuessVerdicts",
+    "HarnessSplitVerdicts",
     "HarnessPinnedObject",
 ]
