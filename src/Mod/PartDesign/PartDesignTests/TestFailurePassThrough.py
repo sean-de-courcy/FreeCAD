@@ -544,6 +544,134 @@ class FailurePassThroughBase:
         self.assertTrue((centred.Placement.Base - V(15, 15, 10)).Length < TOL)
         self.assertBody(whole)
 
+    # -- ops#487: the base stays where it was ----------------------------------------------------
+
+    def notch(self, name="Notch", at=(-1, 9, 4), degrees=0):
+        """An unattached 2 mm subtractive cube over the block's x = 0 face: its own Placement is
+        the location of its shape, which a feature after it takes as its base."""
+        box = self.body.newObject("PartDesign::SubtractiveBox", name)
+        box.Length = box.Width = box.Height = 2
+        box.Placement = App.Placement(V(*at), App.Rotation(V(0, 0, 1), degrees))
+        return box
+
+    def emptyPad(self):
+        """A pad on a sketch with nothing in it: it fails at once, and never had a Placement of
+        its own (identity)."""
+        sketch = models.sketch(self.doc, "EmptySketch", [], self.body)
+        return models.pad(self.body, sketch, 5, "EmptyPad")
+
+    def assertSameShape(self, actual, expected):
+        """The same solid in the same place: bounding box, volume, and nothing of either outside
+        the other."""
+        a = actual.optimalBoundingBox(False, False)
+        b = expected.optimalBoundingBox(False, False)
+        for x, y in zip(
+            (a.XMin, a.YMin, a.ZMin, a.XMax, a.YMax, a.ZMax),
+            (b.XMin, b.YMin, b.ZMin, b.XMax, b.YMax, b.ZMax),
+        ):
+            self.assertAlmostEqual(x, y, delta=1e-7, msg=f"{a} != {b}")
+        self.assertAlmostEqual(actual.Volume, expected.Volume, delta=1e-4)
+        self.assertLess(actual.cut(expected).Volume, 1e-4)
+        self.assertLess(expected.cut(actual).Volume, 1e-4)
+
+    def assertPassesThrough(self, failed, base):
+        self.assertSameShape(failed.Shape, base.Shape)
+        inBody = base.Shape.transformed(self.body.Placement.toMatrix())
+        self.assertSameShape(self.body.Shape, inBody)
+
+    def testFailureAfterAPlacedFeatureKeepsItsBase(self):
+        """A pad on an empty sketch after a notch fails and passes the notched block on where it
+        is, not moved by minus the notch's Placement; a hole after it cuts the top as it would
+        without the pad (ops#487, the issue's model)."""
+        self.block()
+        notch = self.notch()
+        self.recompute()
+        self.assertBody(BLOCK - 4)
+        pad = self.emptyPad()
+        hole = self.hole()
+        self.recompute()
+        self.assertFailed(pad)
+        self.assertTrue(pad.Placement.isIdentity(), pad.Placement)
+        self.assertSameShape(pad.Shape, notch.Shape)
+        self.assertValid(hole)
+        self.assertBody(BLOCK - 4 - HOLE)
+        shape = self.body.Shape
+        self.assertFalse(shape.isInside(V(10, 10, 8), TOL, True))  # the hole
+        self.assertTrue(shape.isInside(V(10, 10, 6), TOL, True))  # under it
+        self.assertFalse(shape.isInside(V(0.5, 10, 5), TOL, True))  # the notch
+        self.assertTrue(shape.isInside(V(0.5, 5, 5), TOL, True))
+
+    def testFailedPrimitiveAfterATurnedPrimitive(self):
+        """A turned subtractive box elsewhere fails (an expression in error) after a turned notch:
+        its shape is the notched block in place, its own Placement stays (ops#487)."""
+        self.block()
+        notch = self.notch(degrees=30)
+        other = self.notch("Other", (9, -1, 4), 45)
+        self.recompute()
+        self.assertValid(notch, other)
+        placement = App.Placement(other.Placement)
+        other.setExpression("Width", "Block.NoSuchProperty")
+        self.recompute()
+        self.assertFailed(other, "NoSuchProperty")
+        self.assertTrue(other.Placement.isSame(placement, 1e-12), other.Placement)
+        self.assertPassesThrough(other, notch)
+
+    def testFailedBooleanAfterAPlacedFeature(self):
+        """A Boolean's Placement stays at identity; one that fails (an expression in error) after
+        the notch passes the notched block on in place (ops#487)."""
+        self.block()
+        notch = self.notch()
+        tool = models.body(self.doc)
+        toolSketch = models.sketch(self.doc, "ToolSketch", models.rectangle(5, 5, 8, 8), tool, z=10)
+        models.pad(tool, toolSketch, 3, "Tool")
+        boolean = self.body.newObject("PartDesign::Boolean", "Boolean")
+        boolean.addObject(tool)
+        self.recompute()
+        self.assertValid(boolean)
+        self.assertBody(BLOCK - 4 + 27)
+        boolean.setExpression("Refine", "Block.NoSuchProperty")
+        self.recompute()
+        self.assertFailed(boolean, "NoSuchProperty")
+        self.assertPassesThrough(boolean, notch)
+
+    def testFailedDressUpAndPatternThatNeverRan(self):
+        """A fillet and a pattern that fail before they ever computed have no Placement of their
+        own yet: each passes the notched block on in place (ops#487)."""
+        self.block()
+        notch = self.notch()
+        self.recompute()
+        fillet = self.body.newObject("PartDesign::Fillet", "EdgeFillet")
+        edge = elementWhere(notch.Shape, "Edge", lambda e: isVerticalLineAt(e, 20, 20))
+        fillet.Base = (notch, [edge])
+        fillet.setExpression("Radius", "Block.NoSuchProperty")
+        self.recompute()
+        self.assertFailed(fillet, "NoSuchProperty")
+        self.assertPassesThrough(fillet, notch)
+
+        self.doc.removeObject(fillet.Name)
+        self.body.Tip = notch
+        pattern = self.body.newObject("PartDesign::LinearPattern", "Pattern")
+        pattern.Originals = [notch]
+        pattern.Direction = (models.originFeature(self.body, "Y_Axis"), [""])
+        pattern.Occurrences = 2
+        pattern.setExpression("Length", "Block.NoSuchProperty")
+        self.body.Tip = pattern
+        self.recompute()
+        self.assertFailed(pattern, "NoSuchProperty")
+        self.assertPassesThrough(pattern, notch)
+
+    def testFailureInAPlacedBody(self):
+        """The same pad on an empty sketch in a Body that is moved and turned: the pad's shape is
+        the notched block in the Body's coordinates, and the Body's is that moved by the Body
+        (ops#487)."""
+        self.body.Placement = App.Placement(V(100, 0, 0), App.Rotation(V(0, 0, 1), 30))
+        self.block()
+        notch = self.notch()
+        pad = self.emptyPad()
+        self.recompute()
+        self.assertFailed(pad)
+        self.assertPassesThrough(pad, notch)
+
 
 class TestFailurePassThroughV2(FailurePassThroughBase, unittest.TestCase):
     solver = False
