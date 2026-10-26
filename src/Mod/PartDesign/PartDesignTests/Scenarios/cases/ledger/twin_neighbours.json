@@ -1,0 +1,9 @@
+{
+"run": {"cases": 2, "dirty": false, "platform": "win32", "sha": "f1827ac0d581d9b327da5527357bbfbbea9db347", "tier": "F", "time": "2026-10-26T22:16:48Z"},
+"entries": {
+"LoneTwinAlone|left_crossing|V2s": {"axes": ["M1", "E1", "X4:600"], "classes": ["D"], "expect": "BROKEN", "expected": "wrong", "found_by": "review pr379-r1", "issue": "ops#503", "tier": "F"},
+"LoneTwinAlone|right_crossing|V2s": {"axes": ["M1", "E1", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr379-r1", "issue": "ops#503", "tier": "F"},
+"LoneTwinBesideAnotherHole|left_crossing|V2s": {"axes": ["M1", "E1", "X4:600"], "classes": ["D"], "expect": "BROKEN", "expected": "wrong", "found_by": "review pr379-r1", "issue": "ops#503", "tier": "F"},
+"LoneTwinBesideAnotherHole|right_crossing|V2s": {"axes": ["M1", "E1", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr379-r1", "issue": "ops#503", "tier": "F"}
+}
+}

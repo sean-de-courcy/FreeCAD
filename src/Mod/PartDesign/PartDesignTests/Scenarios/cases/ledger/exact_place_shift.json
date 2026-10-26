@@ -1,0 +1,9 @@
+{
+"run": {"cases": 4, "dirty": false, "platform": "win32", "sha": "f1827ac0d581d9b327da5527357bbfbbea9db347", "tier": "F", "time": "2026-10-26T22:16:48Z"},
+"entries": {
+"RimBackEdgeRedrawnInward|chamfer|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "quiet", "found_by": "review pr379-r1", "issue": "ops#394", "tier": "F"},
+"RimRedrawnInPlace|chamfer|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "quiet", "found_by": "review pr379-r1", "issue": "ops#394", "tier": "F"},
+"RimRedrawnOutwardByThickness|chamfer|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "quiet", "found_by": "review pr379-r1", "issue": "ops#394", "tier": "F"},
+"ThinBoardRedrawnAndShiftedByItsThickness|chamfer_front_top|V2s": {"axes": ["M1", "E4", "E5", "X4:3600"], "classes": ["D"], "expect": "CORRECT", "expected": "quiet", "found_by": "review pr379-r1", "issue": "ops#394", "tier": "F"}
+}
+}
