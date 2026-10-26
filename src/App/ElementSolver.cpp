@@ -1824,6 +1824,124 @@ std::vector<std::string> pieceMarks(std::string_view name)
     return {};
 }
 
+// The op code of a Mirror's section (Part's OpCodes::Mirror): its Index says which copy.
+constexpr const char* mirrorOpCode = "MIR";
+
+/* True if \a section is a counter section (ops#503 class D, round 2): one whose Index is the
+ * element's rank among the elements its op made alike, as a hole's two crossings of an edge
+ * (`CUT;0;V` and `CUT;1;V`, numbered along the edge) or a split's pieces. GEN or MOD among its
+ * flags, no connected elements (a marked piece's marks tell it apart), not a copy maker's
+ * section (TRF, CPY, EXT, MIR: the Index says which copy, an identity, I-A7) and none of UPP,
+ * LOW, PRJ and SRC (a fallback list's position, part A's accepted ladder, is no key either).
+ */
+bool isCounterSection(const DecodedMappedSection& section)
+{
+    if ((!section.hasMapperFlag(MAPPER_FLAG_GENERATED) && !section.hasMapperFlag(MAPPER_FLAG_MODIFIED))
+        || !section.connectedElements.empty() || isCopySection(section)
+        || section.opCode == mirrorOpCode) {
+        return false;
+    }
+    for (const char* flag :
+         {MAPPER_FLAG_UPPER, MAPPER_FLAG_LOWER, MAPPER_FLAG_PROJECTION, MAPPER_FLAG_SOURCE}) {
+        if (section.hasMapperFlag(flag)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// A section's mapper flags without ORD, in their order: the survivor of a 2 -> 1 change loses
+// the flag its twins had (ops#503 class D, round 2)
+std::vector<std::string> flagsBesideOrder(const DecodedMappedSection& section)
+{
+    std::vector<std::string> flags;
+    for (const auto& flag : section.mapperFlags) {
+        if (flag != orderedFlag) {
+            flags.push_back(flag);
+        }
+    }
+    return flags;
+}
+
+/* True if \a a and \a b are the same name up to their order keys (ops#503 class D, isTwinName()):
+ * as sameUpToCounter(), with the ORD flag ignored at every level, and the Index of a section
+ * where both values are roles (Data::isRoleValue(): the last section at the top level, any
+ * section below it) or, at the top level (\a top), the Index of a counter section
+ * (isCounterSection(): today's bare ranks, until A2 names the ranks; then this bridging goes).
+ * Below the top level, the names a section links and connects, a pattern instance's number
+ * counts as a counter too, as in sameUpToCounter(); at the top level it doesn't: an instance's
+ * number is its identity (I-A7), and a copy of the old element is the "pattern sibling" guard's.
+ */
+bool sameUpToOrder(std::string_view a, std::string_view b, bool top)
+{
+    if (a == b) {
+        return true;
+    }
+    auto sectionsA = NameAncestry::splitSections(a);
+    auto sectionsB = NameAncestry::splitSections(b);
+    if (sectionsA.empty() || sectionsA.size() != sectionsB.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i < sectionsA.size(); ++i) {
+        if (sectionsA[i] == sectionsB[i]) {
+            continue;
+        }
+        const DecodedMappedName decodedA = MappedName::getDecodedMappedName(std::string(sectionsA[i]));
+        const DecodedMappedName decodedB = MappedName::getDecodedMappedName(std::string(sectionsB[i]));
+        if (decodedA.size() != 1 || decodedB.size() != 1) {
+            return false;
+        }
+        const DecodedMappedSection& x = decodedA.front();
+        const DecodedMappedSection& y = decodedB.front();
+        const bool opCodesAgree = x.opCode == y.opCode || isCounterOpCode(x.opCode)
+            || isCounterOpCode(y.opCode);
+        const bool roles = isRoleValue(x.index) && isRoleValue(y.index)
+            && (!top || i + 1 == sectionsA.size());
+        const bool instances = !top && x.opCode == patternInstanceOpCode
+            && y.opCode == patternInstanceOpCode;
+        const bool ranks = top && isCounterSection(x) && isCounterSection(y);
+        if (!opCodesAgree || x.referenceIDs != y.referenceIDs || x.iterationTag != y.iterationTag
+            || (x.index != y.index && !roles && !instances && !ranks)
+            || x.elementType != y.elementType || flagsBesideOrder(x) != flagsBesideOrder(y)
+            || x.linkedNames.size() != y.linkedNames.size()
+            || x.connectedElements.size() != y.connectedElements.size()) {
+            return false;
+        }
+        for (std::size_t j = 0; j < x.linkedNames.size(); ++j) {
+            if (!sameUpToOrder(x.linkedNames[j], y.linkedNames[j], false)) {
+                return false;
+            }
+        }
+        for (std::size_t j = 0; j < x.connectedElements.size(); ++j) {
+            if (!sameUpToOrder(x.connectedElements[j], y.connectedElements[j], false)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+/* True if \a name is keyed by its order among elements made alike (ops#503 class D, the
+ * record's lone count): a section carries ORD, a duplicate counter (the field, or written over
+ * the op code), or a role, or is a counter section (isCounterSection()) with a non-zero Index.
+ */
+bool isOrderKeyed(std::string_view name)
+{
+    const auto sections = NameAncestry::splitSections(name);
+    for (std::size_t i = 0; i < sections.size(); ++i) {
+        const auto& section = decodeSection(sections[i]);
+        const bool counter = isCounterSection(section);
+        const auto& duplicate = section.duplicateCount;
+        if (section.hasMapperFlag(orderedFlag) || isCounterOpCode(section.opCode)
+            || (!duplicate.empty() && duplicate != "0" && duplicate != Data::EMPTY_VALUE)
+            || (isRoleValue(section.index) && (counter || i + 1 == sections.size()))
+            || (counter && section.index != "0" && section.index != Data::EMPTY_VALUE)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /* True if \a name's element holds \a oldName's, a piece of a far cap that an edit merged with
  * others into one (ops#360, PR 340 round 3): the names are the same but in one section, a marked
  * piece's (PRJ and MOD), where \a name's marks, its connected elements, hold every one of
@@ -2693,6 +2811,58 @@ bool isMarkedPieceName(std::string_view name)
 bool isCounterSiblingName(std::string_view name, std::string_view other, bool copySiblings)
 {
     return isCounterSibling(name, other, copySiblings);
+}
+
+bool isTwinName(std::string_view name, std::string_view other)
+{
+    return name != other && sameUpToOrder(name, other, true);
+}
+
+bool isOrderKeyedName(std::string_view name)
+{
+    return isOrderKeyed(name);
+}
+
+const char* otherOriginOf(const std::vector<std::string>& names,
+                          std::string_view oldName,
+                          bool sameMaker)
+{
+    const auto old = NameAncestry::sourceTags(oldName);
+    const bool shared = std::any_of(names.begin(), names.end(), [&](const auto& name) {
+        const auto tags = NameAncestry::sourceTags(name);
+        return std::any_of(tags.begin(), tags.end(), [&](const auto& tag) {
+            return std::binary_search(old.begin(), old.end(), tag);
+        });
+    });
+    if (!shared) {
+        return "source";
+    }
+    const std::string maker = sameMaker ? NameAncestry::makerTag(oldName) : std::string();
+    if (!maker.empty() && std::none_of(names.begin(), names.end(), [&](const auto& name) {
+            return NameAncestry::hasLineageTag(name, maker);
+        })) {
+        return "maker";
+    }
+    return nullptr;
+}
+
+bool mayBeQuietAtPlace(const std::vector<std::string>& names,
+                       std::string_view oldName,
+                       bool sameMaker)
+{
+    if (oldName.empty()) {
+        return true;
+    }
+    // The twin-pick rule (ops#503 D1): a twin of the old element is never quiet, a pure
+    // renumbering included, though it sits at the old place by definition
+    if (std::any_of(names.begin(), names.end(), [&](const auto& name) {
+            return isTwinName(name, oldName);
+        })) {
+        return false;
+    }
+    // XP's source condition (I-S6): an element of another source at the old place is policy
+    // D's new sketch object, which the quiet level would hide
+    return otherOriginOf(names, oldName, sameMaker) == nullptr;
 }
 
 bool mayBeAtPlace(
@@ -3838,6 +4008,15 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         // generators they aren't made from, each as its type ("edge") and an element holding it.
         std::vector<int> notGenerated;
         std::vector<std::pair<std::string, std::string>> heldGenerators;
+        // The old name's face generator that no face holds, when it dropped tier 1's survivors
+        // (the face-generator net, ops#503 D1); they are in otherGenerator then.
+        std::string faceGenerator;
+        // The twin clause (ops#503 D1): tier 1's one survivor, the old element's twin, which
+        // geometry judged instead (-1: none); and the twin-pick rule's pure renumbering, the pick
+        // (-1: none) and its evidence clause.
+        int twinSurvivor = -1;
+        int renumbered = -1;
+        std::string renumberedClause;
         // The IDX source's elements, and whether they replaced the other candidates (tier 2
         // agreed with one of them at least).
         std::set<int> fromIndex;
@@ -3947,24 +4126,7 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
     // source, but not their maker.
     auto otherOrigin = [&input](const SolveInput::Element& element,
                                 const std::string& oldName) -> const char* {
-        const auto old = NameAncestry::sourceTags(oldName);
-        const auto& names = element.names;
-        const bool shared = std::any_of(names.begin(), names.end(), [&](const auto& name) {
-            const auto tags = NameAncestry::sourceTags(name);
-            return std::any_of(tags.begin(), tags.end(), [&](const auto& tag) {
-                return std::binary_search(old.begin(), old.end(), tag);
-            });
-        });
-        if (!shared) {
-            return "source";
-        }
-        const std::string maker = input.sameMaker ? NameAncestry::makerTag(oldName) : std::string();
-        if (!maker.empty() && std::none_of(names.begin(), names.end(), [&](const auto& name) {
-                return NameAncestry::hasLineageTag(name, maker);
-            })) {
-            return "maker";
-        }
-        return nullptr;
+        return otherOriginOf(element.names, oldName, input.sameMaker);
     };
     // Which faces hold several of the old element's faces, and how many it lost (ops#446). Not
     // whether the edit merged them: a refined pipe's faces were merged when it was saved already
@@ -4001,7 +4163,12 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                          + " survivors lie off the old element's faces")
                 + " (" + facesText(state.mergedFaces, state.lostFaces) + ")";
         }
-        if (const auto n = state.otherGenerator.size()) {
+        if (const auto n = state.otherGenerator.size(); n && !state.faceGenerator.empty()) {
+            text += (n == 1 ? std::string("; tier 1's 1 survivor lacks")
+                            : "; tier 1's " + std::to_string(n) + " survivors lack")
+                + " the old element's face generator (a face, which no face holds)";
+        }
+        else if (n) {
             const std::string type = state.generatorType;
             text += (n == 1 ? std::string("; tier 1's 1 survivor lacks")
                             : "; tier 1's " + std::to_string(n) + " survivors lack")
@@ -4088,6 +4255,11 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             const auto n = state.outcome.candidates.size();
             return n < 8 ? 8 - n : std::size_t(0);
         };
+        // The twin clause's survivor (ops#503 D1), where geometry didn't list it: tier 1's
+        // structure did name it
+        if (state.twinSurvivor >= 0) {
+            listByDistance(state, unlisted({state.twinSurvivor}), "structural", room());
+        }
         listByDistance(state, unlisted(state.otherGenerator), "other generator", room());
         listByDistance(state, unlisted(state.notGenerated), "other generator", room());
         listByDistance(state, unlisted(state.otherFaces), "other faces", room());
@@ -4516,7 +4688,17 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         // 3, G2 under policy D) or the entry breaks, listing them (role `other generator`). It
         // narrows: unlike MN, it reads the survivor's own making section, and a name is held now
         // or it isn't. Not in pattern instances, as MG. A generator nothing holds is MG's, T1''s
-        // and geometry's.
+        // and geometry's, but for a face:
+        // The face-generator net (ops#503 D1, class B's review CC3): a face generator that no face
+        // holds (none carries its name or a same-type descendant of it) drops the survivors that
+        // aren't exempt, as MG does for an edge or a vertex. A Pad's taper sends its caps down the
+        // draft path, whose index names share nothing with the old ones: the top rim arc's
+        // generator, the top cap, was held by nothing, the cylinder was, and HG kept the bottom
+        // rim arc, made from the cylinder too, 5 mm down and silently. Made from a face that is
+        // gone, the old element is none that a held face made; geometry decides (role `other
+        // generator`). A face renamed through MOD is still held: the net fires only where a
+        // face's lineage broke (a renamed cap, a redrawn profile). Off without a face pool, as
+        // HG's test of a face is.
         if (!generators.empty() && !all.empty() && patternInstances(oldName).empty()) {
             struct Held
             {
@@ -4534,6 +4716,22 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 const char type = decodeSection(sections.back()).elementType;
                 const auto holders = holdersOf(generator, type);
                 if (holders.empty()) {
+                    if (type == 'F' && input.pool.count("Face")) {
+                        bool dropped = false;
+                        for (auto it = all.begin(); it != all.end();) {
+                            if (exempt(*it)) {
+                                ++it;
+                            }
+                            else {
+                                state.otherGenerator.push_back(*it);
+                                it = all.erase(it);
+                                dropped = true;
+                            }
+                        }
+                        if (dropped && state.faceGenerator.empty()) {
+                            state.faceGenerator = generator;
+                        }
+                    }
                     continue;
                 }
                 Held h {&generator, type, {}, {}};
@@ -4594,6 +4792,24 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                                                                             : "vertex",
                                                       held[i].holder);
                 }
+            }
+        }
+        // The twin clause (ops#503 class D, D1; I-S5): tier 1's one survivor named as the old
+        // element up to an order key (isTwinName()) is its twin, not the element: they share
+        // every node but the old one's own, so the overlap takes the twin wherever the old
+        // element went. A hole's centre moved onto the edge it crossed made the right crossing
+        // the seam vertex, and tier 1 took the left one, 1.9 mm away, silently. Geometry decides
+        // over the whole pool (the no-candidate branch: the survivor is in it), under the
+        // twin-pick rule. A lone survivor that is no twin stays tier 1's; two or more go to the
+        // tie-break as before, where the rule judges the pick.
+        if (all.size() == 1 && !oldName.empty()) {
+            const int k = *all.begin();
+            const auto& names = pool.elements[k].names;
+            if (std::any_of(names.begin(), names.end(), [&](const auto& n) {
+                    return isTwinName(n, oldName);
+                })) {
+                state.twinSurvivor = k;
+                all.clear();
             }
         }
         // A piece of a far cap merged with others into one (ops#360, PR 340 round 3): the one
@@ -4801,6 +5017,130 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             listByDistance(state, others, role, n < 8 ? 8 - n : std::size_t(0));
             listDropped(state);
         };
+        // The twin-pick rule (ops#503 class D, D1; I-S5, I-S9): a single pick, whatever chose it
+        // (XP, tier 3, G1, G2, tier 2 among the survivors), named as the old element up to an
+        // order key (isTwinName()) is the old element's twin, and never quiet. The name and the
+        // geometry can't tell a twin that took the old place from the old element: CC1, the
+        // circle moved so that the left crossing landed exactly where the right one was, the
+        // right one gone into the seam vertex, and tier 3 took the left one there, quietly. The
+        // record can: the saved fingerprint's twin count (PR 340 round 5) against the pick's
+        // order group now. No count saved (a record older than D1): a trade, the field the rule
+        // needs being missing. One saved and the pick alone: a lone member renumbered (Lone), as
+        // the branch takes it. Two or more: a pure renumbering (Pure, warned with its clause) if
+        // the group has as many now and the pick's offset from their centroid is the saved one
+        // (the twin block's 2 % tie, or its 12 degree band for a turned set); else a trade. The
+        // batch never gives a twin pick the quieter level (mayBeQuietAtPlace()).
+        enum class TwinPick
+        {
+            NotTwin,
+            Lone,
+            Pure,
+            Trade,
+        };
+        int twinsNow = 0;
+        auto twinPick = [&](int position) {
+            const auto& names = pool.elements[position].names;
+            if (oldName.empty() || std::none_of(names.begin(), names.end(), [&](const auto& n) {
+                    return isTwinName(n, oldName);
+                })) {
+                return TwinPick::NotTwin;
+            }
+            // Its order group now: it and the type's elements with a name that is one of its
+            // names up to an order key, as the record counts them (App::elementTwinCentroid())
+            const ElementFingerprint& own = fingerprintOf(pool.elements[position]);
+            std::optional<Base::Vector3d> centroid = own.center;
+            twinsNow = 1;
+            for (std::size_t k = 0; k < pool.elements.size(); ++k) {
+                const auto& other = pool.elements[k].names;
+                if (static_cast<int>(k) == position
+                    || std::none_of(other.begin(), other.end(), [&](const auto& m) {
+                           return std::any_of(names.begin(), names.end(), [&](const auto& n) {
+                               return isTwinName(m, n);
+                           });
+                       })) {
+                    continue;
+                }
+                ++twinsNow;
+                const ElementFingerprint& twin = fingerprintOf(pool.elements[k]);
+                if (centroid && twin.center) {
+                    *centroid += *twin.center;
+                }
+                else {
+                    centroid.reset();
+                }
+            }
+            const int count = saved ? saved->twinCount : 0;
+            if (count == 1 && twinsNow == 1) {
+                return TwinPick::Lone;
+            }
+            if (count < 2 || twinsNow != count || !centroid || !own.center || !saved->center
+                || !saved->twinCentroid) {
+                return TwinPick::Trade;
+            }
+            *centroid /= static_cast<double>(twinsNow);
+            const double eps = input.continuationDistance * std::max(1.0, input.diagonal);
+            const Base::Vector3d old = *saved->center - *saved->twinCentroid;
+            const Base::Vector3d offset = *own.center - *centroid;
+            if (Base::Distance(old, offset) <= old.Length() * 0.02 + eps) {
+                return TwinPick::Pure;
+            }
+            constexpr double degrees = 180.0 / std::numbers::pi;
+            const double shorter = std::min(old.Length(), offset.Length());
+            const double longer = std::max(old.Length(), offset.Length());
+            const bool turned = shorter > eps && shorter >= 0.75 * longer
+                && std::atan2((old % offset).Length(), old * offset) * degrees <= 12.0;
+            return turned ? TwinPick::Pure : TwinPick::Trade;
+        };
+        // The rule applied to the pick at \a position, chosen among \a rest: true if the entry
+        // broke (a trade: the pick first, role `place` where the old element was, else
+        // `geometric`; the twin clause's survivor (`structural`); then \a rest by distance, as
+        // \a role); a pure renumbering keeps its clause for the evidence.
+        auto twinBreaks = [&](int position, const std::vector<int>& rest, const char* role) {
+            const TwinPick verdict = twinPick(position);
+            const auto& index = pool.elements[position].index;
+            if (verdict == TwinPick::Pure) {
+                state.renumbered = position;
+                state.renumberedClause = "; twin renumbered: " + index + " at its place among "
+                    + std::to_string(twinsNow);
+                return false;
+            }
+            if (verdict != TwinPick::Trade) {
+                return false;
+            }
+            state.decided = true;
+            const int count = saved ? saved->twinCount : 0;
+            state.outcome.evidence = "ambiguous: " + index + " is the old element's twin ("
+                + (count ? std::to_string(count) + (count == 1 ? " twin" : " twins") + " saved"
+                         : std::string("no twin record"))
+                + ", " + std::to_string(twinsNow) + " now)" + otherMakerText(state);
+            const bool there = saved
+                && atSamePlace(*saved,
+                               fingerprintOf(pool.elements[position]),
+                               input.diagonal,
+                               input.tolerances,
+                               input.continuationDistance);
+            listByDistance(state, {position}, there ? "place" : "geometric");
+            if (state.twinSurvivor >= 0 && state.twinSurvivor != position) {
+                listByDistance(state, {state.twinSurvivor}, "structural");
+            }
+            std::vector<int> others;
+            for (int k : rest) {
+                if (k != position && k != state.twinSurvivor) {
+                    others.push_back(k);
+                }
+            }
+            const auto n = state.outcome.candidates.size();
+            listByDistance(state, others, role, n < 8 ? 8 - n : std::size_t(0));
+            listDropped(state);
+            return true;
+        };
+        // XP's source condition (ops#503 D1; I-S6, I-P1): the pick at the exact place that lacks
+        // the old name's origin (otherOriginOf(): a new sketch object, policy D's case) says so;
+        // the batch then warns it at the normal level, never the quieter same-place one.
+        auto atPlaceText = [&](int position) {
+            return otherOrigin(pool.elements[position], oldName) ? std::string(", another source")
+                                                                 : std::string();
+        };
         // The guess rules (N2 section 5): never against a failed target (N10), never without a
         // saved fingerprint (N8).
         const bool guessing = input.guess && !input.targetFailed && saved != nullptr;
@@ -4940,12 +5280,16 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 if (place.size() == 1) {
                     pick = place.front();
                 }
+                if (pick >= 0 && twinBreaks(pick, agree, "other faces")) {
+                    continue;
+                }
                 if (pick >= 0) {
                     state.geometric = true;
                     state.geometryEvidence = std::string("no structural candidate, tier 3 among "
                                                          "tier 1's survivors off the old "
                                                          "element's faces")
-                        + (nearest.index >= 0 ? ": " : ", at the same place: ")
+                        + (nearest.index >= 0 ? std::string(": ")
+                                             : ", at the same place" + atPlaceText(pick) + ": ")
                         + describeNearest(nearest);
                     state.candidates = {pick};
                     state.listed = state.candidates;
@@ -4959,6 +5303,9 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             // A derived survivor (ops#335) is evidence only where tier 3 chose it: tier 2 alone
             // narrowing to it isn't enough, so tier 3 runs on it.
             if (agree.size() == 1 && !state.derivedOnly.count(agree.front())) {
+                if (twinBreaks(agree.front(), state.listed, "structural")) {
+                    continue;
+                }
                 state.geometryTier = 2;
                 state.geometryEvidence = "tier 2: 1 of " + std::to_string(state.candidates.size());
                 state.candidates = agree;
@@ -4970,6 +5317,13 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 if (nearest.index < 0 && place.empty() && guessing) {
                     wide = wideNearestOf(agree);
                 }
+                const int single = nearest.index >= 0 ? agree[nearest.index]
+                    : place.size() == 1               ? place.front()
+                    : wide.index >= 0                 ? agree[wide.index]
+                                                      : -1;
+                if (single >= 0 && twinBreaks(single, state.listed, "structural")) {
+                    continue;
+                }
                 if (nearest.index >= 0) {
                     state.geometryTier = 3;
                     state.geometryEvidence = "tier 3: " + describeNearest(nearest);
@@ -4978,8 +5332,8 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 else if (place.size() == 1) {
                     // XP: a thin member's two edges, both tier 1's survivors, within d_max
                     state.geometryTier = 3;
-                    state.geometryEvidence =
-                        "tier 3, at the same place: " + describeNearest(nearest);
+                    state.geometryEvidence = "tier 3, at the same place" + atPlaceText(single)
+                        + ": " + describeNearest(nearest);
                     state.candidates = place;
                 }
                 else if (!place.empty()) {
@@ -5024,13 +5378,17 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 // d_max (ops#394)
                 const auto place = nearest.index < 0 ? atPlaceAmong(agree) : std::vector<int>();
                 if (nearest.index >= 0 || place.size() == 1) {
+                    const int pick = nearest.index >= 0 ? agree[nearest.index] : place.front();
+                    if (twinBreaks(pick, agree, "geometric")) {
+                        continue;
+                    }
                     state.geometric = true;
-                    state.geometryEvidence = std::string(nearest.index >= 0
-                                                             ? "no structural candidate, tier 3: "
-                                                             : "no structural candidate, at the "
-                                                               "same place: ")
+                    state.geometryEvidence = (nearest.index >= 0
+                                                  ? std::string("no structural candidate, tier 3: ")
+                                                  : "no structural candidate, at the same place"
+                                                      + atPlaceText(pick) + ": ")
                         + describeNearest(nearest) + derivedText(state, nullptr);
-                    state.candidates = {nearest.index >= 0 ? agree[nearest.index] : place.front()};
+                    state.candidates = {pick};
                     state.listed = state.candidates;
                 }
                 else if (!place.empty()) {
@@ -5070,6 +5428,9 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                         continue;
                     }
                     const int pick = agree[wide.index];
+                    if (twinBreaks(pick, agree, "geometric")) {
+                        continue;
+                    }
                     state.geometric = true;
                     state.guessKind = "geometric";
                     state.guessRole = "geometric";
@@ -5371,6 +5732,11 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                                : ", " + std::to_string(state.equivalent.size())
                                    + " pieces equivalent for the consumer");
                 }
+                // The twin-pick rule's pure renumbering (ops#503 D1): its own words, which the
+                // batch never warns at the quieter level
+                if (k == state.renumbered) {
+                    state.outcome.evidence += state.renumberedClause;
+                }
             }
             else {
                 state.outcome.evidence = status == MatchStatus::TooLarge ? "too large to solve"
@@ -5384,6 +5750,11 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             if (state.outcome.status == SolveStatus::Broken) {
                 listDropped(state);
             }
+        }
+        if (state.twinSurvivor >= 0) {
+            state.outcome.evidence = "tier 1's one survivor is the old element's twin ("
+                + state.pool->elements[state.twinSurvivor].index + "); geometry decides; "
+                + state.outcome.evidence;
         }
         for (int member : *state.members) {
             outcomes[member] = state.outcome;

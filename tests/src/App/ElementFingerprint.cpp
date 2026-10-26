@@ -265,13 +265,21 @@ TEST(ElementFingerprint, twinCentroidRoundTrip)
     EXPECT_EQ(arc.toString(), arcText);
     EXPECT_EQ(ElementFingerprint::fromString(arcText), arc);
 
-    //   one twin alone is no twin set: written without it
+    //   one twin with a centroid is no twin set: written without it
     ElementFingerprint alone = cap;
     alone.twinCount = 1;
     EXPECT_EQ(alone.toString(), "1|F|BSpline|8.5|3,5.25,10|_|_");
 
-    //   version 4 only with nine fields, a centroid and a whole number of twins of at least 2,
-    //   and the eighth field as versions 2 and 3 have it
+    //   a lone order-keyed element (ops#503 D1): its count alone, `_` for the centroid
+    alone.twinCentroid.reset();
+    const char* loneText = "4|F|BSpline|8.5|3,5.25,10|_|_|_|_,1";
+    EXPECT_EQ(alone.toString(), loneText);
+    EXPECT_EQ(ElementFingerprint::fromString(loneText), alone);
+    alone.twinCount = 2;
+    EXPECT_EQ(alone.toString(), "1|F|BSpline|8.5|3,5.25,10|_|_");
+
+    //   version 4 only with nine fields, a centroid and a whole number of twins of at least 2
+    //   (or no centroid and 1), and the eighth field as versions 2 and 3 have it
     for (const auto& bad : {
              "4|F|BSpline|8.5|3,5.25,10|_|_|_",
              "4|F|BSpline|8.5|3,5.25,10|_|_|3,3.4,10,2",
@@ -279,6 +287,8 @@ TEST(ElementFingerprint, twinCentroidRoundTrip)
              "4|F|BSpline|8.5|3,5.25,10|_|_|_|3,3.4,10,1",
              "4|F|BSpline|8.5|3,5.25,10|_|_|_|3,3.4,10,2.5",
              "4|F|BSpline|8.5|3,5.25,10|_|_|_|_",
+             "4|F|BSpline|8.5|3,5.25,10|_|_|_|_,2",
+             "4|F|BSpline|8.5|3,5.25,10|_|_|_|_,0",
              "4|F|BSpline|8.5|3,5.25,10|_|_|0,0,0|3,3.4,10,2",
              "4|F|Plane|8.5|3,5.25,10|0,0,1|_|0,0,0|3,3.4,10,2",
              "4|E|Line|2|0,1,0|1,0,0|_|0,0,0,1,1,1|0,0.5,0,2",

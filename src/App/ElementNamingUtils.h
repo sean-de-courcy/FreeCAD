@@ -201,5 +201,16 @@ AppExport const std::string indexSuffix(int index, const char *label=ELEMENT_MAP
 /// Given a string and a prefix, return the integer index that follows that prefix, or 0 if not found
 AppExport int indexOfElement(std::string_view s, std::string_view prefix);
 
+/** Whether \a value, a section's Index field, is a role (ops#503, class A's role-sibling clause):
+ * one of a finite set of values that tell apart elements made alike by a sign an edit can
+ * flip, such as the two crossings of one edge and face, `in` and `out`. Never a bare number, a
+ * pattern instance's or a copy's. The reference solver's twin test (Data::isTwinName()) reads
+ * two names equal up to their roles as twins.
+ */
+inline bool isRoleValue(std::string_view value)
+{
+    return value == "in" || value == "out";
+}
+
 }  // namespace Data
 // clang-format on

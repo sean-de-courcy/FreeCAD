@@ -1784,6 +1784,26 @@ bool reboundInPlace(DocumentObject* obj, const std::string& sub, const GuessReco
     if (!here(elementName.oldName)) {
         return false;
     }
+    // Never quiet for the original's twin, nor for an element of another origin (ops#503 D1:
+    // the twin-pick rule, XP's source condition), judged from the names as the solver judged
+    // them
+    if (!guess.origName.empty()) {
+        std::vector<std::string> names;
+        if (const auto prop = geo->getPropertyOfGeometry()) {
+            if (const auto data = prop->getComplexData()) {
+                Data::IndexedName indexed(elementName.oldName.c_str());
+                if (indexed) {
+                    for (const auto& mapped : data->getElementMappedNames(indexed)) {
+                        names.push_back(plainName(mapped.first.toString()));
+                    }
+                }
+            }
+        }
+        const bool sameMaker = solverParameters()->GetBool("Tier1SameMaker", true);
+        if (!Data::mayBeQuietAtPlace(names, plainName(guess.origName), sameMaker)) {
+            return false;
+        }
+    }
     // The only element there: an alternative at the same place makes the pick a choice
     return std::none_of(
         guess.alternatives.begin(),
@@ -1807,18 +1827,17 @@ bool elementTwinCentroid(const GeoFeature* geo, const char* element, Base::Vecto
     if (!indexed) {
         return false;
     }
-    // The element's ordered names, plain, as the solver sees them (poolOf())
-    std::vector<std::string> ordered;
+    // The element's names, plain, as the solver sees them (poolOf())
+    std::vector<std::string> names;
     for (const auto& mapped : data->getElementMappedNames(indexed)) {
-        std::string plain = plainName(mapped.first.toString());
-        if (Data::isOrderedName(plain)) {
-            ordered.push_back(std::move(plain));
-        }
+        names.push_back(plainName(mapped.first.toString()));
     }
-    if (ordered.empty()) {
+    if (names.empty()) {
         return false;
     }
-    // Its twins: the elements of its type with a name that is one of these up to the counter
+    // Its twins: the elements of its type with a name that is one of these up to an order key
+    // (Data::isTwinName(), ops#503 D1: the bare-rank crossings of an edge too, which carry no
+    // ORD flag, and the survivor of a 2 -> 1 change, which lost it)
     std::set<std::string> twins;
     for (const auto& mapped : data->getElementMap()) {
         if (!mapped.index || mapped.index == indexed
@@ -1826,14 +1845,25 @@ bool elementTwinCentroid(const GeoFeature* geo, const char* element, Base::Vecto
             continue;
         }
         const std::string plain = plainName(mapped.name.toString());
-        if (std::any_of(ordered.begin(), ordered.end(), [&](const std::string& name) {
-                return Data::isCounterSiblingName(plain, name, false);  // not another copy's
+        if (std::any_of(names.begin(), names.end(), [&](const std::string& name) {
+                return Data::isTwinName(plain, name);
             })) {
             twins.insert(mapped.index.toString());
         }
     }
+    if (twins.empty()) {
+        // Alone, with a name keyed by its order: one twin, so that the solver tells a later pick
+        // of it renumbered from a trade (the twin-pick rule's lone member)
+        if (std::any_of(names.begin(), names.end(), [](const std::string& name) {
+                return Data::isOrderKeyedName(name);
+            })) {
+            count = 1;
+            return true;
+        }
+        return false;
+    }
     Data::ElementFingerprint own;
-    if (twins.empty() || !geo->getElementFingerprint(element, own) || !own.center) {
+    if (!geo->getElementFingerprint(element, own) || !own.center) {
         return false;
     }
     Base::Vector3d sum = *own.center;

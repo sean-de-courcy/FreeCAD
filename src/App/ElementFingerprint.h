@@ -54,14 +54,18 @@ namespace Data
  *   the rest of it; with it, a face outside the old box can't hold a point of the old face.
  *
  * Version 4 (ops#360, PR 340 round 5), written only for an element told apart from its twins
- * only by its place among them (the ORD flag: a piece of a far cap):
+ * only by its place among them (the ORD flag: a piece of a far cap; since ops#503 D1, any twins
+ * by the solver's twin test, Data::isTwinName()):
  *
  *     4|<type>|<kind>|<size>|<c>|<d>|<r>|<o or x0..z1 or _>|<tx>,<ty>,<tz>,<n>
+ *     4|<type>|<kind>|<size>|<c>|<d>|<r>|<o or x0..z1 or _>|_,1
  *
  * - the eighth field: what versions 2 and 3 have there, or `_`.
  * - t: the mean of the centres of the n twins, the element's included (n >= 2), in the frame of
  *   c. An edit can trade twins' names; the element's offset from it tells the solver which twin
- *   went where, under a move or a turn of them all.
+ *   went where, under a move or a turn of them all. `_` with n = 1: a lone element whose name
+ *   is keyed by its order (Data::isOrderKeyedName()), so that a later pick of its renumbered
+ *   self is told from a trade (ops#503 D1, the twin-pick rule).
  *
  * Version 5 (ops#386, PR 366 round 4), written for every face and edge with an extent, which
  * every one but a degenerated edge has:
@@ -117,8 +121,9 @@ struct AppExport ElementFingerprint
     /// face (versions 1, 2 and 4).
     std::optional<Base::Vector3d> extentMin;
     std::optional<Base::Vector3d> extentMax;
-    /// The mean of the centres of the element's ordered twins, its own included (in the frame
-    /// of `center`), and their number; empty and 0 otherwise.
+    /// The mean of the centres of the element's twins, its own included (in the frame of
+    /// `center`), and their number; 1 without a centroid for a lone order-keyed element (ops#503
+    /// D1); empty and 0 otherwise.
     std::optional<Base::Vector3d> twinCentroid;
     int twinCount = 0;
     /// The element's outline (version 5, PR 366 round 5; in the frame of `center`): a line's two

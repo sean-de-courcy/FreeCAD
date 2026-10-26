@@ -127,7 +127,8 @@ std::string ElementFingerprint::toString() const
             + formatNumber(v->z);
     };
     const bool withExtent = extentMin && extentMax;
-    const bool withTwins = twinCentroid && twinCount >= 2;
+    // Twins with their centroid, or a lone order-keyed element's count alone (ops#503 D1)
+    const bool withTwins = (twinCentroid && twinCount >= 2) || (!twinCentroid && twinCount == 1);
     std::string text = std::to_string(
         withExtent      ? VersionWithBox
             : withTwins ? VersionWithTwins
@@ -259,13 +260,20 @@ ElementFingerprint ElementFingerprint::fromString(std::string_view text)
         else if (!extra.empty()) {
             return {};
         }
-        std::vector<double> twins;
-        if (!parseList(fields[8], twins) || twins.size() != 4 || twins[3] < 2
-            || twins[3] != std::floor(twins[3]) || twins[3] > 1e6) {
-            return {};
+        // A lone order-keyed element: its count alone, 1 (ops#503 D1)
+        const std::string lone = std::string(emptyField) + listDelimiter + "1";
+        if (fields[8] == lone) {
+            result.twinCount = 1;
         }
-        result.twinCentroid = Base::Vector3d(twins[0], twins[1], twins[2]);
-        result.twinCount = static_cast<int>(twins[3]);
+        else {
+            std::vector<double> twins;
+            if (!parseList(fields[8], twins) || twins.size() != 4 || twins[3] < 2
+                || twins[3] != std::floor(twins[3]) || twins[3] > 1e6) {
+                return {};
+            }
+            result.twinCentroid = Base::Vector3d(twins[0], twins[1], twins[2]);
+            result.twinCount = static_cast<int>(twins[3]);
+        }
     }
     if (withBox) {
         // A circle's centre or nothing; the extent, always; the twins or nothing

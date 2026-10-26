@@ -1579,12 +1579,20 @@ TEST(SolveOwner, nameMatchOnTheOtherSideIsNotTaken)
     EXPECT_EQ(outcomes[0].status, SolveStatus::Broken) << outcomes[0].evidence;
 
     //   a name match on the same side is still taken
-    const auto sideOneAgain = generated({profileEdge}, 7, "RVL", 'E', 1);
+    const auto sideOneAgain = generated({profileEdge, sketchEdge(5)}, 7, "RVL", 'E');
     input.pool["Edge"] = {element("Edge4", {sideTwo}), element("Edge5", {sideOneAgain})};
     input.entries = {missing(sideOne, "Edge", {sideTwo, sideOneAgain})};
     outcomes = Data::solveOwner(input);
     EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved) << outcomes[0].evidence;
     EXPECT_EQ(outcomes[0].element, "Edge5");
+
+    //   one told from the old name by its Index alone is its twin (ops#503 D1): no evidence, and
+    //   without a saved fingerprint nothing else decides
+    const auto twin = generated({profileEdge}, 7, "RVL", 'E', 1);
+    input.pool["Edge"] = {element("Edge4", {sideTwo}), element("Edge5", {twin})};
+    input.entries = {missing(sideOne, "Edge", {sideTwo, twin})};
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken) << outcomes[0].evidence;
 }
 
 TEST(SolveOwner, sharedAncestorAloneDoesNotResolve)
@@ -1754,7 +1762,8 @@ TEST(SolveOwner, patternSiblingNeverResolves)
     // A pattern of two: the referenced instance's top face is gone and the other instance's copy
     // is the only survivor. The copy's name is the old name with another duplicate count, so it
     // shares the old name's linked edges (overlap 0.80) and its top section: forced and
-    // evidenced, but another element.
+    // evidenced, but another element. Since ops#503 D1 the copy is the old name's twin, which
+    // the twin clause hands to geometry; without a saved fingerprint, nothing decides.
     const std::vector<std::string> edges {
         sketchEdge(1),
         sketchEdge(2),
@@ -1767,19 +1776,21 @@ TEST(SolveOwner, patternSiblingNeverResolves)
     const auto oldTop = top("FAC", "1");
     SolveInput input;
     input.entries = {missing(oldTop)};
+    const std::string twinOnly =
+        "tier 1's one survivor is the old element's twin (Face4); geometry decides; no candidate";
 
     //   the count field differs
     input.pool["Face"] = {element("Face4", {top("FAC", "2")})};
     auto outcomes = Data::solveOwner(input);
     EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
     EXPECT_EQ(outcomes[0].candidates, std::vector<std::string> {"Face4"});
-    EXPECT_EQ(outcomes[0].evidence, "pattern sibling");
+    EXPECT_EQ(outcomes[0].evidence, twinOnly);
 
     //   the counter written over the op code (ops#55)
     input.pool["Face"] = {element("Face4", {top("_3", "0")})};
     outcomes = Data::solveOwner(input);
     EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
-    EXPECT_EQ(outcomes[0].evidence, "pattern sibling");
+    EXPECT_EQ(outcomes[0].evidence, twinOnly);
 
     //   the counter in an inner section, which a later feature keeps
     const auto later = section({}, {}, 9, "XTR", 0, 'F', {"MOD"});
@@ -1787,13 +1798,13 @@ TEST(SolveOwner, patternSiblingNeverResolves)
     input.pool["Face"] = {element("Face4", {top("FAC", "2") + "|" + later})};
     outcomes = Data::solveOwner(input);
     EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
-    EXPECT_EQ(outcomes[0].evidence, "pattern sibling");
+    EXPECT_EQ(outcomes[0].evidence, twinOnly);
 
     //   a sibling among an element's several names (a refined face) is enough
     input.entries = {missing(oldTop)};
     input.pool["Face"] = {element("Face4", {top("FAC", "2"), top("FAC", "3")})};
     outcomes = Data::solveOwner(input);
-    EXPECT_EQ(outcomes[0].evidence, "pattern sibling");
+    EXPECT_EQ(outcomes[0].evidence, twinOnly);
 
     //   another element with the counter equal still resolves: the outer wire gains an edge
     std::vector<std::string> fiveEdges = edges;
@@ -1815,7 +1826,11 @@ TEST(SolveOwner, patternSiblingThroughAnEmbeddedName)
 {
     // The counter sits in an embedded name: a face built on instance 1's edge and the same face
     // built on instance 2's. Both edges hold sketch line 1, so the other instance's face is the
-    // lone survivor (overlap 1/3), forced, and agrees on the top section.
+    // lone survivor (overlap 1/3), forced, and agrees on the top section. Since ops#503 D1 it is
+    // the old name's twin, which the twin clause hands to geometry; without a saved
+    // fingerprint, nothing decides.
+    const std::string twinOnly =
+        "tier 1's one survivor is the old element's twin (Face4); geometry decides; no candidate";
     auto instanceEdge = [](const char* count) {
         return Data::MappedName::makeEncodedSection(
             {},
@@ -1840,7 +1855,7 @@ TEST(SolveOwner, patternSiblingThroughAnEmbeddedName)
     auto outcomes = Data::solveOwner(input);
     EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
     EXPECT_EQ(outcomes[0].candidates, std::vector<std::string> {"Face4"});
-    EXPECT_EQ(outcomes[0].evidence, "pattern sibling");
+    EXPECT_EQ(outcomes[0].evidence, twinOnly);
 
     //   two levels down, with the counter over the op code
     auto twice = [&](const char* opCode) {
@@ -1859,7 +1874,7 @@ TEST(SolveOwner, patternSiblingThroughAnEmbeddedName)
     };
     input.entries = {missing(twice("XTR"))};
     input.pool["Face"] = {element("Face4", {twice("_2")})};
-    EXPECT_EQ(Data::solveOwner(input)[0].evidence, "pattern sibling");
+    EXPECT_EQ(Data::solveOwner(input)[0].evidence, twinOnly);
 
     //   in a Connected Name of a later section
     const auto base = generated({sketchEdge(1)}, 7, "XTR", 'F');
@@ -1870,7 +1885,7 @@ TEST(SolveOwner, patternSiblingThroughAnEmbeddedName)
     input.pool["Face"] = {element("Face4", {cut("2")})};
     outcomes = Data::solveOwner(input);
     EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
-    EXPECT_EQ(outcomes[0].evidence, "pattern sibling");
+    EXPECT_EQ(outcomes[0].evidence, twinOnly);
 
     //   an embedded name that differs in more than the counter is no sibling: it resolves
     input.entries = {missing(faceOn(instanceEdge("1")))};
@@ -2216,7 +2231,9 @@ TEST(SolveOwner, patternInstanceSiblingNeverResolves)
     EXPECT_EQ(outcomes[0].evidence, "pattern sibling");
 
     //   the same through an embedded name: a face generated from instance 3's edge, and the one
-    //   from instance 2's
+    //   from instance 2's. An instance's number inside a linked name is an order key to the twin
+    //   test (ops#503 D1): geometry's pick is the old name's twin, and without the twins' record
+    //   it breaks
     const auto edge = generated({sketchEdge(1)}, 7, "XTR", 'E');
     auto faceOn = [&](int k) {
         return generated({piece(edge, 9, "TRF", k, 'E')}, 10, "FLT", 'F');
@@ -2227,7 +2244,8 @@ TEST(SolveOwner, patternInstanceSiblingNeverResolves)
     measure(input, {{"Face4", p.top}}, nullptr);
     outcomes = Data::solveOwner(input);
     EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
-    EXPECT_EQ(outcomes[0].evidence, "pattern sibling");
+    EXPECT_EQ(outcomes[0].evidence,
+              "ambiguous: Face4 is the old element's twin (no twin record, 1 now)");
 }
 
 TEST(SolveOwner, copySiblingsAreCounterSiblings)
@@ -4535,9 +4553,10 @@ TEST(NameAncestry, depthWeightedOverlap)
 TEST(SolveOwner, tier1CheckBreaksAPartnerOfAnotherGeometry)
 {
     // ops#87: the reference's element (a B-spline edge) is gone; the only tier-1 survivor
-    // shares its sources and its top section, but is a circle.
+    // shares its sources and its top section, but is a circle. (Not its Index twin, which the
+    // twin clause hands to geometry, ops#503 D1.)
     const auto oldName = generated({sketchEdge(1)}, 6, "XTR", 'E');
-    const auto survivor = generated({sketchEdge(1)}, 6, "XTR", 'E', 2);
+    const auto survivor = generated({sketchEdge(1), sketchEdge(2)}, 6, "XTR", 'E');
     SolveInput input;
     input.diagonal = 30.0;
     input.pool["Edge"] = {element("Edge4", {survivor})};
@@ -8979,12 +8998,14 @@ namespace
 
 // A long board's top edges (ops#394): 3600 along x, 45 apart in y, at z = 235, the target's
 // diagonal 5000 (d_max 50). The old edge's sketch line was deleted and drawn again, so no name
-// relates it to the pool (another geometry ID in another sketch).
+// relates it to the pool (another geometry ID in its sketch). Drawn in another sketch instead,
+// it comes from another source (ops#503 D1: XP's source condition).
 struct LongBoard
 {
     std::string oldEdge = section({}, {sketchEdge(1)}, 7, "XTR", 0, 'E', {"PRJ"});
-    std::string redrawn = section({}, {sketchEdge(9, 6)}, 7, "XTR", 0, 'E', {"PRJ"});
-    std::string otherSide = section({}, {sketchEdge(3, 6)}, 7, "XTR", 0, 'E', {"PRJ"});
+    std::string redrawn = section({}, {sketchEdge(9)}, 7, "XTR", 0, 'E', {"PRJ"});
+    std::string otherSide = section({}, {sketchEdge(3)}, 7, "XTR", 0, 'E', {"PRJ"});
+    std::string otherSketch = section({}, {sketchEdge(9, 6)}, 7, "XTR", 0, 'E', {"PRJ"});
 
     static ElementFingerprint edgeAt(double y, double length = 3600, double x = 1800)
     {
@@ -9299,4 +9320,346 @@ TEST(SolveOwner, heldGeneratorSkipsPatternInstances)
     EXPECT_EQ(outcome.status, SolveStatus::Resolved) << outcome.evidence;
     EXPECT_EQ(outcome.element, "Vertex10");
     EXPECT_EQ(outcome.tier, 1);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Twins (ops#503 class D, D1): the twin clause, the twin-pick rule and the face-generator net
+
+namespace
+{
+
+// HoledBend's hole as it crosses an edge twice (ops#503 round 2's model): the left crossing
+// (hole1, Index 0) and the right one (Index 1), told apart by their place along the edge only;
+// the seam vertex beside them. The places are the model's: the crossings at x = 10 -+ 0.866 on
+// the edge y = 0, z = 5, their centroid at x = 10.
+struct CrossedEdge: HoledBend
+{
+    std::string right = generated({edge1, cyl}, 11, "CUT", 'V', 1);
+
+    static ElementFingerprint at(double x)
+    {
+        return point(x, 0, 5);
+    }
+    // The right crossing's saved fingerprint, with the twins' record: \a count twins (0: no
+    // record), their centroid when there are two or more
+    static ElementFingerprint saved(int count)
+    {
+        ElementFingerprint fp = at(10.866);
+        fp.twinCount = count;
+        if (count >= 2) {
+            fp.twinCentroid = Base::Vector3d(10, 0, 5);
+        }
+        return fp;
+    }
+    // CC1: the right crossing's name missing, its twin (the left crossing's name, Vertex11) at
+    // its saved place, the seam vertex (Vertex10) 2 mm further. No edge holds the joint, so MG
+    // drops tier 1's survivors and geometry decides.
+    SolveInput landed(int count) const
+    {
+        auto input = this->input(right);
+        input.pool["Vertex"].push_back(element("Vertex11", {hole1}));
+        input.entries[0].fingerprint = saved(count);
+        measure(input, {{"Vertex10", at(12.866)}, {"Vertex11", at(10.866)}}, nullptr);
+        return input;
+    }
+};
+
+// A Pad (tag 6) of a sketch face with a through hole (tag 11) whose cylinder crosses the top cap,
+// then tapered (class B's review, CC3): the draft names the caps by index (IDX names of the
+// offset wire), and its seam splits the top rim arc in two. The fillet's top rim arc was
+// generated from the old top cap and the cylinder; no face holds that cap now.
+struct TaperedPad
+{
+    std::string profile = lowFace({sketchEdge(1), sketchEdge(2), sketchEdge(3), sketchEdge(4)});
+    std::string capOld = section({}, {profile}, 6, "XTR", 0, 'F', {"PRJ"});
+    std::string capBottom = generated({profile}, 6, "XTR", 'F');
+    std::string capIndex = section({"Face6"}, {}, 6, "MKR", 0, 'F', {"IDX", "SRC"});
+    std::string cyl = generated({sketchEdge(1, 7)}, 11, "XTR", 'F');
+    std::string topArc = generated({capOld, cyl}, 11, "CUT", 'E');
+    std::string bottomArc = generated({capBottom, cyl}, 11, "CUT", 'E');
+
+    // A piece of the top rim on the draft's cap
+    std::string onIndexCap(int index) const
+    {
+        return generated({capIndex, cyl}, 11, "CUT", 'E', index);
+    }
+    // An arc of the hole's circle (radius 2, axis z), \a length long, its centre at \a centre
+    static ElementFingerprint arc(double length, const Base::Vector3d& centre)
+    {
+        return fingerprint('E', "Circle", length, centre, Base::Vector3d(0, 0, 1), {2.0});
+    }
+    static constexpr double rim = 2 * std::numbers::pi;  // the rim's half circle
+
+    // The faces (the bottom cap, the draft's top cap, the cylinder) and the edges: the bottom
+    // rim arc (Edge5) and the top rim's two pieces (Edge6, nearly all of it, 0.03 mm from the
+    // saved centre; Edge7, the short rest)
+    SolveInput input() const
+    {
+        SolveInput input;
+        input.diagonal = 22.9;
+        input.pool["Face"] = {element("Face1", {capBottom}),
+                              element("Face2", {capIndex}),
+                              element("Face3", {cyl})};
+        input.pool["Edge"] = {element("Edge5", {bottomArc}),
+                              element("Edge6", {onIndexCap(0)}),
+                              element("Edge7", {onIndexCap(1)})};
+        input.entries = {missing(topArc, "Edge")};
+        input.entries[0].fingerprint = arc(rim, Base::Vector3d(10, 1.273, 5));
+        measure(input,
+                {{"Edge5", arc(rim, Base::Vector3d(10, 1.273, 0))},
+                 {"Edge6", arc(6.0, Base::Vector3d(10.03, 1.273, 5))},
+                 {"Edge7", arc(rim - 6.0, Base::Vector3d(11.99, 0.14, 5))}},
+                nullptr);
+        return input;
+    }
+};
+
+}  // namespace
+
+TEST(SolveOwner, twinSurvivorGoesToGeometry)
+{
+    // The hole's centre moved onto the edge, which made one crossing the seam vertex: here the
+    // left crossing (hole1) is gone, the seam vertex 0.134 mm from its place, and its twin
+    // (Index 1) 1.866 mm away is tier 1's one survivor once HG dropped the seam vertex (the
+    // joint is held and didn't generate it). Tier 1 took the twin silently. A twin is no
+    // structural evidence: geometry decides over the whole pool, and the seam vertex is no twin.
+    CrossedEdge c;
+    auto input = c.input(c.hole1);
+    input.pool["Edge"].push_back(element("Edge3", {c.edge1}));
+    input.pool["Vertex"].push_back(element("Vertex11", {c.right}));
+    input.entries[0].fingerprint = CrossedEdge::saved(2);
+    measure(input, {{"Vertex10", CrossedEdge::at(11)}, {"Vertex11", CrossedEdge::at(9)}}, nullptr);
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Resolved) << outcome.evidence;
+    EXPECT_EQ(outcome.element, "Vertex10");
+    EXPECT_EQ(outcome.tier, 3);
+    EXPECT_EQ(outcome.evidence.rfind("tier 1's one survivor is the old element's twin (Vertex11); "
+                                     "geometry decides; no structural candidate, tier 3: nearest "
+                                     "0.134",
+                                     0),
+              0U)
+        << outcome.evidence;
+}
+
+TEST(SolveOwner, twinAtTheSavedPlaceBreaks)
+{
+    // CC1 (ops#503 round 2): the circle moved so that the left crossing lands exactly where the
+    // right one was, and the right one became the seam vertex 2 mm further. The right crossing's
+    // name misses; its twin sits at its saved place, and tier 3 took it, quietly. The record
+    // says 2 twins and the pool holds 1: the set shrank, so the pick is a trade, never quiet.
+    CrossedEdge c;
+    auto outcome = Data::solveOwner(c.landed(2))[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << outcome.evidence;
+    EXPECT_EQ(outcome.evidence.rfind("ambiguous: Vertex11 is the old element's twin (2 twins "
+                                     "saved, 1 now)",
+                                     0),
+              0U)
+        << outcome.evidence;
+    EXPECT_EQ(outcome.candidates, (std::vector<std::string> {"Vertex11", "Vertex10"}));
+    EXPECT_EQ(outcome.candidateRoles, (std::vector<std::string> {"place", "geometric"}));
+}
+
+TEST(SolveOwner, twinWithoutARecordBreaks)
+{
+    // CC1 with a record saved before D1, without the twins' number: the rule needs it and the
+    // pick is a twin, so the entry breaks, the twin first (I-S9: a missing field is a loud
+    // result, never a keep).
+    CrossedEdge c;
+    auto outcome = Data::solveOwner(c.landed(0))[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << outcome.evidence;
+    EXPECT_EQ(outcome.evidence.rfind("ambiguous: Vertex11 is the old element's twin (no twin "
+                                     "record, 1 now)",
+                                     0),
+              0U)
+        << outcome.evidence;
+    ASSERT_FALSE(outcome.candidates.empty());
+    EXPECT_EQ(outcome.candidates.front(), "Vertex11");
+}
+
+TEST(SolveOwner, twinRenumberedIsWarned)
+{
+    // Both crossings unmoved, their Index values swapped: the left crossing's name (Index 0) at
+    // the right one's old place. Tier 3 picks it among tier 1's survivors; the record's two
+    // twins are there and its offset from their centroid is the saved one: a pure renumbering,
+    // resolved with its own clause and warned (the faces apart, so MG and HG don't act).
+    CrossedEdge c;
+    auto input = c.input(c.right);
+    input.faces = {element("Face3", {c.x2}),
+                   element("Face5", {c.x1}),
+                   element("Face6", {c.x0}),
+                   element("Face10", {c.cyl})};
+    input.pool["Vertex"] = {element("Vertex3", {c.hole1}), element("Vertex13", {c.right})};
+    input.entries[0].fingerprint = CrossedEdge::saved(2);
+    measure(input,
+            {{"Vertex3", CrossedEdge::at(10.866)}, {"Vertex13", CrossedEdge::at(9.134)}},
+            nullptr);
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Resolved) << outcome.evidence;
+    EXPECT_EQ(outcome.element, "Vertex3");
+    EXPECT_EQ(outcome.tier, 3);
+    EXPECT_NE(outcome.evidence.find("; twin renumbered: Vertex3 at its place among 2"),
+              std::string::npos)
+        << outcome.evidence;
+    //   the batch's level: never the quieter same-place one for a twin, at its place or not
+    EXPECT_FALSE(Data::mayBeQuietAtPlace({c.hole1}, c.right, true));
+    EXPECT_TRUE(Data::mayBeQuietAtPlace({c.right}, c.right, true));
+}
+
+TEST(SolveOwner, loneTwinRenumberedResolves)
+{
+    // The record of a lone order-keyed name (Index 1, saved alone: 1 twin, no centroid), the name
+    // missing, the element named Index 0 now alone at its place: a lone member renumbered, taken
+    // as the branch takes it.
+    CrossedEdge c;
+    auto outcome = Data::solveOwner(c.landed(1))[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Resolved) << outcome.evidence;
+    EXPECT_EQ(outcome.element, "Vertex11");
+    EXPECT_EQ(outcome.tier, 3);
+
+    //   3 twins saved, 2 now (an Index 2 twin elsewhere): the set shrank, a trade
+    auto input = c.landed(3);
+    input.pool["Vertex"].push_back(
+        element("Vertex12", {generated({c.edge1, c.cyl}, 11, "CUT", 'V', 2)})
+    );
+    measure(input,
+            {{"Vertex10", CrossedEdge::at(12.866)},
+             {"Vertex11", CrossedEdge::at(10.866)},
+             {"Vertex12", CrossedEdge::at(9.134)}},
+            nullptr);
+    outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << outcome.evidence;
+    EXPECT_EQ(outcome.evidence.rfind("ambiguous: Vertex11 is the old element's twin (3 twins "
+                                     "saved, 2 now)",
+                                     0),
+              0U)
+        << outcome.evidence;
+    EXPECT_EQ(outcome.candidates, (std::vector<std::string> {"Vertex11", "Vertex12", "Vertex10"}));
+    EXPECT_EQ(outcome.candidateRoles,
+              (std::vector<std::string> {"place", "geometric", "geometric"}));
+}
+
+TEST(SolveOwner, exactPlaceAnotherSourceIsWarned)
+{
+    // The board's top edge at its saved place, but from another sketch (a new sketch object,
+    // policy D's case): the exact place takes it, warned at the normal level, never the quieter
+    // same-place one (I-S6), and the evidence says so.
+    LongBoard b;
+    auto input = b.input(LongBoard::edgeAt(0), LongBoard::edgeAt(45));
+    input.pool["Edge"][0].names = {b.otherSketch};
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Resolved) << outcome.evidence;
+    EXPECT_EQ(outcome.element, "Edge2");
+    EXPECT_EQ(outcome.tier, 3);
+    EXPECT_EQ(outcome.evidence,
+              "no structural candidate, at the same place, another source: nearest 0.000, second "
+              "45.000, d_max 50.000");
+    //   the batch's level: normal for the other sketch's edge, the quieter one for a redraw in
+    //   the old edge's sketch
+    EXPECT_FALSE(Data::mayBeQuietAtPlace({b.otherSketch}, b.oldEdge, true));
+    EXPECT_TRUE(Data::mayBeQuietAtPlace({b.redrawn}, b.oldEdge, true));
+}
+
+TEST(SolveOwner, faceGeneratorGoneDropsTheSurvivor)
+{
+    // CC3: the taper renamed the top cap, so no face holds the top rim arc's face generator, and
+    // the bottom rim arc (from the bottom cap and the cylinder, overlap 0.70) was tier 1's one
+    // survivor, 5 mm down, silently. Made from a cap that is gone, the old arc can't be one that a
+    // held cap made: the survivors are dropped and geometry decides. The top rim is two pieces
+    // now, neither of the old arc's size: nothing is at the place, and the entry breaks, the
+    // nearest first.
+    TaperedPad t;
+    auto outcome = Data::solveOwner(t.input())[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << outcome.evidence;
+    EXPECT_EQ(outcome.evidence.rfind("no structural candidate, tier 3 found none", 0), 0U)
+        << outcome.evidence;
+    EXPECT_NE(outcome.evidence.find("; tier 1's 1 survivor lacks the old element's face generator "
+                                    "(a face, which no face holds)"),
+              std::string::npos)
+        << outcome.evidence;
+    EXPECT_EQ(outcome.candidates, (std::vector<std::string> {"Edge6", "Edge7", "Edge5"}));
+}
+
+TEST(SolveOwner, faceGeneratorGoneThenTheWholeArcInPlace)
+{
+    // The control: the taper left the top rim whole (on the draft's cap): tier 3 takes it at its
+    // place.
+    TaperedPad t;
+    auto input = t.input();
+    input.pool["Edge"].pop_back();
+    measure(input,
+            {{"Edge5", TaperedPad::arc(TaperedPad::rim, Base::Vector3d(10, 1.273, 0))},
+             {"Edge6", TaperedPad::arc(TaperedPad::rim, Base::Vector3d(10, 1.273, 5))}},
+            nullptr);
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Resolved) << outcome.evidence;
+    EXPECT_EQ(outcome.element, "Edge6");
+    EXPECT_EQ(outcome.tier, 3);
+    EXPECT_EQ(outcome.evidence.rfind("no structural candidate, tier 3: nearest 0.000", 0), 0U)
+        << outcome.evidence;
+}
+
+TEST(SolveOwner, faceGeneratorHeldByADescendantKeepsTheSurvivor)
+{
+    // The control: a later feature (tag 12) modified the top cap, which a face holds as its piece,
+    // and the top rim arc is made from that piece: the cap is held, the net stays off. HG drops
+    // the bottom rim arc (not made from the cap), and tier 1 keeps the arc made from it.
+    TaperedPad t;
+    auto input = t.input();
+    const auto capPiece = piece(t.capOld, 12, "FUS", 0, 'F');
+    input.pool["Face"].push_back(element("Face4", {capPiece}));
+    input.pool["Edge"] = {element("Edge5", {t.bottomArc}),
+                          element("Edge8", {generated({capPiece, t.cyl}, 11, "CUT", 'E')})};
+    measure(input,
+            {{"Edge5", TaperedPad::arc(TaperedPad::rim, Base::Vector3d(10, 1.273, 0))},
+             {"Edge8", TaperedPad::arc(TaperedPad::rim, Base::Vector3d(10, 1.273, 5))}},
+            nullptr);
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Resolved) << outcome.evidence;
+    EXPECT_EQ(outcome.element, "Edge8");
+    EXPECT_EQ(outcome.tier, 1);
+}
+
+TEST(NameAncestry, twinNames)
+{
+    // The twin test (ops#503 D1): names equal up to an order key
+    HoledBend h;
+    const auto rank = [&](int index, const std::vector<std::string>& flags) {
+        return section({}, {h.edge1, h.cyl}, 11, "CUT", index, 'V', flags);
+    };
+    const auto role = [&](const char* value) {
+        return Data::MappedName::makeEncodedSection(
+            std::vector<std::string> {},
+            std::vector<std::string> {h.edge1, h.cyl},
+            "11",
+            "CUT",
+            value,
+            'V',
+            "0",
+            {"PRJ"},
+            std::vector<std::string> {}
+        );
+    };
+    //   the bare ranks of a counter section, the ORD flag ignored, roles
+    EXPECT_TRUE(Data::isTwinName(rank(1, {"GEN"}), rank(0, {"GEN"})));
+    EXPECT_TRUE(Data::isTwinName(rank(1, {"GEN", "ORD"}), rank(0, {"GEN"})));
+    EXPECT_TRUE(Data::isTwinName(role("in"), role("out")));
+    EXPECT_FALSE(Data::isTwinName(rank(0, {"GEN"}), rank(0, {"GEN"})));
+    //   no rank of a projection's section, of a marked piece's, of another op's
+    EXPECT_FALSE(Data::isTwinName(rank(1, {"PRJ"}), rank(0, {"PRJ"})));
+    EXPECT_FALSE(Data::isTwinName(section({}, {h.cyl}, 11, "CUT", 1, 'V', {"GEN"}, {h.x0}),
+                                  section({}, {h.cyl}, 11, "CUT", 0, 'V', {"GEN"}, {h.x0})));
+    EXPECT_FALSE(Data::isTwinName(rank(1, {"GEN"}), section({}, {h.edge1, h.cyl}, 12, "CUT", 0, 'V', {"GEN"})));
+    //   a pattern instance's number is its identity at the top level (the pattern sibling
+    //   guard's), a counter in the names a section links
+    EXPECT_FALSE(Data::isTwinName(stepInstance(h.hole1, 14, "1", 'V'), stepInstance(h.hole1, 14, "2", 'V')));
+    EXPECT_TRUE(Data::isCounterSiblingName(stepInstance(h.hole1, 14, "1", 'V'),
+                                           stepInstance(h.hole1, 14, "2", 'V')));
+    EXPECT_TRUE(Data::isTwinName(generated({stepInstance(h.edge1, 14, "1", 'E')}, 15, "FLT", 'V', 1),
+                                 generated({stepInstance(h.edge1, 14, "2", 'E')}, 15, "FLT", 'V', 0)));
+    //   keyed by order: a non-zero rank, ORD, a role; not rank 0 alone
+    EXPECT_TRUE(Data::isOrderKeyedName(rank(1, {"GEN"})));
+    EXPECT_TRUE(Data::isOrderKeyedName(rank(0, {"GEN", "ORD"})));
+    EXPECT_TRUE(Data::isOrderKeyedName(role("out")));
+    EXPECT_FALSE(Data::isOrderKeyedName(rank(0, {"GEN"})));
+    EXPECT_FALSE(Data::isOrderKeyedName(rank(1, {"PRJ"})));
 }

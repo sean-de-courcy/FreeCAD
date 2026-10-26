@@ -1443,7 +1443,9 @@ class TestNamingSolver(unittest.TestCase):
         and was tier 1's survivor (overlap 0.62), resolved silently 14 mm away; with hole C
         (radius 1 at (15, 4)) too, tier 2 took it with a warning. It comes from another hole:
         the fillet breaks with B's bottom circle first and B's rim circle second. With
-        NamingSolver/Tier1SameMaker off, tier 1 takes B's circle as before."""
+        NamingSolver/Tier1SameMaker and Tier1SameSource off, tier 1 took B's circle as before;
+        since ops#503 D1 the face-generator net breaks it there too: A's cylinder, the old
+        circle's face generator, is held by no face."""
         holeA, holeB = ("HoleA", 8, 10, 2), ("HoleB", 22, 10, 2)
         for holes in ((holeA, holeB), (holeA, holeB, ("HoleC", 15, 4, 1))):
             doc = self.newDocument()
@@ -1458,17 +1460,16 @@ class TestNamingSolver(unittest.TestCase):
             self.assertEqual(entry["candidates"][1], rim)
             self.assertAlmostEqual(entry["candidate_distances"][1], (14**2 + 10**2) ** 0.5, 6)
 
-        #   the switches off (T1 and T1', ops#173)
+        #   the switches off (T1 and T1', ops#173): the face-generator net (ops#503 D1)
         self.guessSwitch("Tier1SameMaker", False)
         self.guessSwitch("Tier1SameSource", False)
         doc = self.newDocument()
         last, fillet = self.filletedHoles(doc, (holeA, holeB), 0.5)
         self.deleteHoleA(doc)
         [bottom] = edge("circle", center=(22, 10, 0), radius=2).one(last.Shape)
-        self.assertTrue(fillet.isValid(), fillet.getStatusString())
-        self.assertEqual(fillet.Base[1], [bottom])
+        self.assertBrokenNearest(fillet, bottom, 14.0)
         [entry] = App.getReferenceReport(fillet)
-        self.assertEqual((entry["status"], entry["tier"]), ("resolved", 1))
+        self.assertIn("lacks the old element's face generator", entry["evidence"])
 
     def testDeletedHoleNearAnotherHoleBreaks(self):
         """ops#167, G2': holes A and B, radius 0.5, at (8, 10) and (9.5, 10), a fillet (radius
@@ -1507,7 +1508,9 @@ class TestNamingSolver(unittest.TestCase):
         circle has the same maker (the pocket) and shares the block's bottom face, so it was
         tier 1's only survivor and the fillet moved to it silently, 14 mm away. It lost the old
         circle's source (its own circle has another geometry ID): the fillet breaks with it first
-        and its rim second. With NamingSolver/Tier1SameSource off, tier 1 takes it as before."""
+        and its rim second. With NamingSolver/Tier1SameSource off, tier 1 took it as before;
+        since ops#503 D1 the face-generator net breaks it there too: the deleted circle's
+        cylinder, the old circle's face generator, is held by no face."""
         for sameSource in (True, False):
             if not sameSource:
                 self.guessSwitch("Tier1SameSource", False)
@@ -1528,9 +1531,8 @@ class TestNamingSolver(unittest.TestCase):
                 self.assertIn("lost the old element's source", entry["evidence"])
                 self.assertNotIn("another maker", entry["evidence"])
             else:
-                self.assertTrue(fillet.isValid(), fillet.getStatusString())
-                self.assertEqual(fillet.Base[1], [bottom])
-                self.assertEqual((entry["status"], entry["tier"]), ("resolved", 1))
+                self.assertBrokenNearest(fillet, bottom, 14.0)
+                self.assertIn("lacks the old element's face generator", entry["evidence"])
 
     def filletedHole(self, doc, size=(30, 20), circles=((8, 10),), height=10):
         """A block 0..size, `height` high, its sketch `Profile`; one pocket through all from
@@ -1609,7 +1611,10 @@ class TestNamingSolver(unittest.TestCase):
         """PR 149's review (Medium 1): the block's whole profile is deleted and drawn again, every
         line a new geometry ID. T1' asks only for the sources of what the pocket made itself (the
         hole's cylinder, from its circle), not of the face it cut: the hole's bottom circle keeps
-        them and stays tier 1's, no warning."""
+        them and stays tier 1's, no warning. Since ops#503 D1: the redraw renames the block's
+        bottom face, the circle's face generator, and no face holds its old name, so the
+        face-generator net drops the circle and geometry finds it in place, with the quieter
+        same-place warning."""
         doc = self.newDocument()
         pocket, fillet = self.filletedHole(doc)
 
@@ -1618,7 +1623,10 @@ class TestNamingSolver(unittest.TestCase):
         doc.Profile.addGeometry(models.rectangle(0, 0, 30, 20), False)
         doc.recompute()
 
-        self.assertHoleCircleKept(pocket, fillet, 1)
+        [bottom] = edge("circle", center=(8, 10, 0), radius=2).one(pocket.Shape)
+        self.assertEqual(fillet.Base[1], [bottom])
+        entry = self.assertWarnedInPlace(fillet, "Edge", bottom)
+        self.assertTrue(entry["evidence"].startswith("no structural candidate"), entry["evidence"])
 
     def testDeletedCircleWithinReachIsAWarnedGuess(self):
         """ops#173 under policy D: the deleted circle's sketch and pocket survive, so another hole
@@ -1665,8 +1673,10 @@ class TestNamingSolver(unittest.TestCase):
         fillet on its entry circle. The block's whole profile is redrawn, every line a new
         geometry ID, which renames both circles. T1' asks only for the hole's own source (its
         circle), which the exit circle keeps too: both survive tier 1 with equal overlap. Tier 3
-        takes the entry circle, in place, with a warning, and lists the exit circle, 20 mm away,
-        as the alternative. Never the exit circle, and never silently."""
+        takes the entry circle, in place, with a warning. Never the exit circle, and never
+        silently. (Before ops#503 D1 the exit circle, 20 mm away, was the pick's alternative; the
+        redraw renames the front face, the entry circle's face generator, so the face-generator
+        net drops both survivors and geometry finds the circle over the whole pool.)"""
         doc = self.newDocument()
         body = models.body(doc)
         profile = models.sketch(doc, "Profile", models.rectangle(0, 0, 30, 20), body)
@@ -1694,7 +1704,8 @@ class TestNamingSolver(unittest.TestCase):
         self.assertNotEqual(pocket.Shape.getElementMappedName(entryEdge), oldName)
         self.assertEqual(fillet.Base[1], [entryEdge])
         row = self.assertWarnedInPlace(fillet, "Edge", entryEdge)
-        self.assertIn(exitCircle, [a["index"] for a in row["alternatives"]])
+        self.assertNotEqual(row["new"], exitCircle)
+        self.assertTrue(row["evidence"].startswith("no structural candidate"), row["evidence"])
 
     def testPatternedHoleUnderARedrawnProfileWarns(self):
         """ops#183: T1''s fallback. A hole pocketed at (8, 10) and patterned 14 mm along x; a
@@ -1702,7 +1713,9 @@ class TestNamingSolver(unittest.TestCase):
         redrawn, which renames the circle. Its maker is the pattern, which made no input of the
         name itself, so T1' asks for every known source, the block's lines among them: the circle
         lost them and isn't tier 1's. Tier 3 takes it in place, with a warning. With
-        NamingSolver/Tier1SameSource off, tier 1 takes it silently (round 0's behaviour there)."""
+        NamingSolver/Tier1SameSource off, tier 1 took it silently (round 0's behaviour there);
+        since ops#503 D1 the face-generator net drops it there too (the block's bottom face, its
+        generator, is renamed by the redraw and held by no face), and tier 3 takes it in place."""
         for sameSource in (True, False):
             if not sameSource:
                 self.guessSwitch("Tier1SameSource", False)
@@ -1733,13 +1746,7 @@ class TestNamingSolver(unittest.TestCase):
 
             [bottom] = circle.one(pattern.Shape)
             self.assertEqual(fillet.Base[1], [bottom])
-            if sameSource:
-                self.assertWarnedInPlace(fillet, "Edge", bottom)
-            else:
-                self.assertTrue(fillet.isValid(), fillet.getStatusString())
-                self.assertNotIn("Warning", fillet.State)
-                [entry] = App.getReferenceReport(fillet)
-                self.assertEqual((entry["status"], entry["tier"]), ("resolved", 1))
+            self.assertWarnedInPlace(fillet, "Edge", bottom)
 
     def refinedBlocks(self, doc):
         """Pad A, 0..20 x 0..20 x 10, from `Profile`, and pad B beside it, 20..40, from
@@ -2813,3 +2820,189 @@ class TestNamingSolver(unittest.TestCase):
         moved = (hole.Placement.Base - App.Vector(2, -0.4, 30.3)).Length
         self.assertLess(moved, 1e-6, hole.AttachmentSupport)
         self.assertNothingMovedSilently(joint, before)
+
+    # Twins (ops#503 class D, D1): a hole across an edge crosses it twice, at two vertices told
+    # apart only by their place along the edge (the Index field), and leaves two vertical lines
+    # on the front face told apart the same way. When one of them goes, the survivor carries the
+    # old name's twin; a pick of it is never quiet.
+
+    def crossedEdge(self, doc, turn=0, fillet=False):
+        """A Pad of 0..20 x 0..10, 5 high, and a Pocket (through all, midplane) of a circle of
+        radius 1 at (10, 0.5), its sketch turned by `turn` degrees about the centre: the circle
+        crosses the top front edge (y = 0, z = 5) at x = 10 -+ 0.866, and its seam lies at its
+        start point, on the right for no turn. A datum point on each crossing, left first; with
+        `fillet`, a Fillet (0.3) on the front face's right vertical line. Returns (hole sketch,
+        points, fillet or None)."""
+        body = models.body(doc)
+        profile = models.sketch(doc, "Profile", models.rectangle(0, 0, 20, 10), body)
+        models.pad(body, profile, 5)
+        hole = models.sketch(doc, "Hole", [models.circle(10, 0.5, 1)], body)
+        if turn:
+            rotation = App.Rotation(App.Vector(0, 0, 1), turn)
+            centre = App.Vector(10, 0.5, 0)
+            hole.Placement = App.Placement(centre - rotation.multVec(centre), rotation)
+        pocket = body.newObject("PartDesign::Pocket", "Pocket")
+        pocket.Profile = hole
+        pocket.Type = 1  # through all
+        pocket.Midplane = True
+        doc.recompute()
+        self.assertTrue(pocket.isValid(), pocket.getStatusString())
+        points = []
+        for x in (10 - 0.75**0.5, 10 + 0.75**0.5):
+            [vertex] = pipes.elementsWhere(
+                pocket.Shape, "Vertex", lambda p: (p - App.Vector(x, 0, 5)).Length < 1e-6
+            )
+            point = body.newObject("PartDesign::Point", "On" + vertex)
+            point.AttachmentSupport = [(pocket, vertex)]
+            point.MapMode = "Vertex"
+            points.append(point)
+        rounded = None
+        if fillet:
+            line = edge("line", direction=Z, through=(10 + 0.75**0.5, 0, 0)).one(pocket.Shape)
+            rounded = body.newObject("PartDesign::Fillet", "Fillet")
+            rounded.Base = (pocket, line)
+            rounded.Radius = 0.3
+        doc.recompute()
+        for point in points:
+            self.assertTrue(point.isValid(), point.getStatusString())
+        if rounded:
+            self.assertTrue(rounded.isValid(), rounded.getStatusString())
+        return hole, points, rounded
+
+    def moveHole(self, hole, x, y):
+        """The hole's circle centred at (x, y) in the world, its sketch's turn kept"""
+        hole.moveGeometry(0, 3, hole.Placement.inverse().multVec(App.Vector(x, y, 0)), False)
+        hole.Document.recompute()
+
+    def assertNeverQuietlyAt(self, point, wrong, right):
+        """The point is broken, or sits at `right` with the normal warning; never at `wrong` and
+        never at `right` quietly (no report row, or the same-place level)"""
+        if not point.isValid():
+            return
+        at = point.Placement.Base
+        levels = [e.get("warning_level") for e in App.getReferenceReport(point)]
+        self.assertGreater((at - App.Vector(*wrong)).Length, 1e-6, (point.Name, levels))
+        self.assertLess((at - App.Vector(*right)).Length, 1e-6, (point.Name, levels))
+        self.assertIn("normal", levels, point.Name)
+
+    def testCrossingThatBecameTheSeamVertexIsNotItsTwin(self):
+        """The circle's centre moved onto the edge (y 0.5 -> 0): the right crossing becomes the
+        seam vertex at (11, 0, 5), named after the seam, and the left one, at (9, 0, 5), keeps
+        its name. The right point's name misses; the left crossing is its twin, the seam vertex
+        the element: the right point at (11, 0, 5) with the normal warning, or broken; never on
+        the left crossing. Builds differ in tier 1's survivors here (the twin alone, taken
+        silently; or both, and tier 3 picks the seam vertex), so this is the end-to-end check,
+        and the gtest twinSurvivorGoesToGeometry the fail-before."""
+        doc = self.newDocument()
+        hole, (left, right), _ = self.crossedEdge(doc)
+
+        self.moveHole(hole, 10, 0)
+
+        self.assertNeverQuietlyAt(right, (9, 0, 5), (11, 0, 5))
+        self.assertTrue(left.isValid(), left.getStatusString())
+        self.assertLess((left.Placement.Base - App.Vector(9, 0, 5)).Length, 1e-6)
+
+    def testTwinLandingOnTheSavedPlaceBreaks(self):
+        """CC1 (ops#503 round 2): the circle moved to (11.866, 0): the left crossing lands exactly
+        where the right one was, and the right one becomes the seam vertex, 2 mm further, at
+        (12.866, 0, 5). The right point's name misses and its twin sits at the saved place; the
+        twins' record says 2 and the shape holds 1 now, so the pick is a trade: the right point
+        breaks (or is warned at 12.866), never at 10.866 quietly. The left point follows its
+        name, or breaks."""
+        doc = self.newDocument()
+        hole, (left, right), _ = self.crossedEdge(doc)
+        landing = 10 + 0.75**0.5
+
+        self.moveHole(hole, landing + 1, 0)
+
+        self.assertNeverQuietlyAt(right, (landing, 0, 5), (landing + 2, 0, 5))
+        if left.isValid():
+            self.assertLess((left.Placement.Base - App.Vector(landing, 0, 5)).Length, 1e-6)
+
+    @unittest.expectedFailure
+    def testCrossingWhoseTwinBecameTheSeamVertexIsLoud(self):
+        """CC2 (ops#503 round 2), the mirrored seam: the hole's sketch turned 180 degrees (seam
+        on the left), then its centre moved onto the edge. The left crossing becomes the seam
+        vertex at (9, 0, 5); the right one, alone, is renumbered and carries the left one's old
+        name, so the left point follows it 1.866 mm by its name, silently (an exact hit, no
+        report row). It must break, or sit at (9, 0, 5) with a warning; never at (11, 0, 5).
+        Fails until D3's vanished-twin net (or A2)."""
+        doc = self.newDocument()
+        hole, (left, right), _ = self.crossedEdge(doc, turn=180)
+
+        self.moveHole(hole, 10, 0)
+
+        self.assertNeverQuietlyAt(left, (11, 0, 5), (9, 0, 5))
+
+    @unittest.expectedFailure
+    def testFilletOnATwinEdgeIsLoudWhenItsTwinGoes(self):
+        """The edge form (ops#503 round 2): a Fillet on the front face's right vertical line, the
+        circle's centre moved onto the edge (seam on the right). The right line becomes the seam's
+        B-spline and the left one, alone, takes the right one's old name: the fillet follows it to
+        x = 9, an exact hit, silently. It must break; never compute on the line at x = 9. Fails
+        until D3's vanished-twin net."""
+        doc = self.newDocument()
+        hole, _, fillet = self.crossedEdge(doc, fillet=True)
+        pocket = doc.Pocket
+
+        self.moveHole(hole, 10, 0)
+
+        if fillet.isValid():
+            [sub] = fillet.Base[1]
+            x = pocket.Shape.getElement(sub).CenterOfMass.x
+            self.assertGreater(abs(x - 9), 1e-3, (sub, App.getReferenceReport(fillet)))
+
+    def testTaperedPadsTopRimArcIsNotItsBottomArc(self):
+        """CC3 (class B's review): a Pad 20 x 10 x 5 with a through hole of radius 2 at (10, 0)
+        and a Fillet (0.3) on the hole's top rim arc; then the Pad tapered by 1 degree. The draft
+        renames the caps (index names of the offset wire), so the top rim arc's face generator,
+        the top cap, is held by no face, and tier 1 kept the bottom rim arc, 5 mm down, silently.
+        The fillet's reference breaks, or lies on an arc at z = 5 with the normal warning; never
+        on the bottom arc."""
+        doc = self.newDocument()
+        body = models.body(doc)
+        profile = models.sketch(doc, "Profile", models.rectangle(0, 0, 20, 10), body)
+        pad = models.pad(body, profile, 5)
+        doc.recompute()
+        hole = models.sketch(doc, "Hole", [models.circle(10, 0, 2)], body, z=5)
+        pocket = body.newObject("PartDesign::Pocket", "Pocket")
+        pocket.Profile = hole
+        pocket.Type = 1  # through all
+        pocket.Midplane = True
+        doc.recompute()
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (pocket, edge("circle", center=(10, 0, 5), radius=2).one(pocket.Shape))
+        fillet.Radius = 0.3
+        doc.recompute()
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+
+        pad.TaperAngle = 1
+        doc.recompute()
+
+        rows = App.getReferenceReport(fillet)
+        if fillet.isValid():
+            [sub] = fillet.Base[1]
+            z = pocket.Shape.getElement(sub).CenterOfMass.z
+            self.assertLess(abs(z - 5), 1e-6, (sub, rows))
+            self.assertIn("normal", [e.get("warning_level") for e in rows], rows)
+        else:
+            self.assertIn("broken", [e["status"] for e in rows], rows)
+
+    def testExactPlaceFromAnotherSketchWarns(self):
+        """XP's source condition (ops#503 D1): the rims padded from a new sketch with the same
+        rectangles. The chamfered edge's name misses, and the one edge at its saved place comes
+        from another sketch, policy D's new sketch object: the pick is warned at the normal
+        level, never the quieter same-place one, and the evidence says so."""
+        doc = self.newDocument()
+        pad, chamfer = self.chamferedRims(doc)
+
+        geometry = models.rectangle(0, 0, 3600, 45) + models.rectangle(0, 4045, 3600, 4090)
+        pad.Profile = models.sketch(doc, "Redrawn", geometry, pad.getParentGeoFeatureGroup())
+        doc.recompute()
+
+        self.assertTrue(chamfer.isValid(), chamfer.getStatusString())
+        self.assertChamferAt(chamfer, pad, (1800, 0, 235))
+        [entry] = App.getReferenceReport(chamfer)
+        self.assertEqual((entry["status"], entry["tier"]), ("resolved", 3), entry["evidence"])
+        self.assertEqual(entry["warning_level"], "normal", entry["evidence"])
+        self.assertIn("another source", entry["evidence"])
