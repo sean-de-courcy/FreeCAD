@@ -226,3 +226,41 @@ TEST_F(PropertyLinkRecords, shadowsPassedOnKeepTheirReferencesRecords)
     EXPECT_TRUE(records[0].empty());
     EXPECT_EQ(records[1], guessed("A"));
 }
+
+TEST_F(PropertyLinkRecords, linkSubListDedupeKeepsTheExactPick)
+{
+    // Arrange: one element twice, as a guess and as an exact pick (the review of fork PR 386,
+    // R2: the guess kept could snap back off the element the user picked)
+    auto prop = addLinks<App::PropertyLinkSubList>("Links");
+    prop->setValues(std::vector<App::DocumentObject*> {_a, _a},
+                    std::vector<std::string> {"Sub.", "Sub."});
+    prop->setElementRecords({guessed("A"), {}});
+
+    // Act
+    prop->setValues(std::vector<App::DocumentObject*> {_a}, std::vector<std::string> {"Sub."});
+
+    // Assert
+    auto records = prop->getElementRecords();
+    ASSERT_EQ(records.size(), 1);
+    EXPECT_TRUE(records[0].empty());
+}
+
+TEST_F(PropertyLinkRecords, linkSubListIndexWithoutMappedNameKeepsTheRecord)
+{
+    // Arrange: an index sub with no mapped name (a target without an element map, an entry a
+    // link re-target left index-only): the index is the whole reference (the review of fork
+    // PR 386, R4)
+    auto prop = addLinks<App::PropertyLinkSubList>("Links");
+    prop->setValue(_a, std::vector<std::string> {"Face1"});
+    ASSERT_TRUE(prop->getShadowSubs()[0].newName.empty());
+    prop->setElementRecords({guessed("A")});
+
+    // Act
+    prop->setValues(std::vector<App::DocumentObject*> {_b, _a},
+                    std::vector<std::string> {"Sub.", "Face1"});
+
+    // Assert
+    auto records = prop->getElementRecords();
+    EXPECT_TRUE(records[0].empty());
+    EXPECT_EQ(records[1], guessed("A"));
+}

@@ -125,6 +125,8 @@ static std::unordered_map<const PropertyLinkBase*,
 // - an index-only sub ("Face6", as Python and the attachment editor write them) only if the old
 //   entry's mapped name gives that index on the target now. The old shadow's index is stale
 //   until the consumer resolves again, so a re-pick by index after an upstream edit is the pick.
+//   An old entry without a mapped name pairs with the same index as written;
+// - of several old entries that are the new one, one without a guess record first.
 // An entry passed with a shadow that pairs with none keeps the old entry at its index when the
 // count is unchanged, as before: the re-target passes the same references with new shadows.
 // An unpaired entry starts fresh. Accept and Repair end records through applyResolutions().
@@ -185,7 +187,8 @@ static Rewrite pairRewrite(const std::vector<App::DocumentObject*>& oldObjs,
                            const std::vector<PropertyLinkBase::ShadowSub>& oldShadows,
                            const std::vector<App::DocumentObject*>& objs,
                            const std::vector<std::string>& subs,
-                           const std::vector<PropertyLinkBase::ShadowSub>& shadows)
+                           const std::vector<PropertyLinkBase::ShadowSub>& shadows,
+                           const std::vector<ElementRecords>& records)
 {
     Rewrite rewrite;
     rewrite.pairs.assign(subs.size(), -1);
@@ -203,12 +206,10 @@ static Rewrite pairRewrite(const std::vector<App::DocumentObject*>& oldObjs,
         rewrite.shadowed[i] = passed && hasShadow(shadows[i]);
         const bool byIndex = !rewrite.shadowed[i] && isIndexOnly(sub);
         std::string index;
-        if (byIndex) {
-            index = indexNow(obj, sub);
-            if (index.empty()) {
-                continue;
-            }
-        }
+        bool indexed = false;
+        // Of the old entries that are this one, one without a guess record first: of a guess and
+        // an exact pick of the same element, a rewrite that keeps one keeps the pick
+        int match = -1;
         for (std::size_t j = 0; j < oldSubs.size(); ++j) {
             if (used[j] || (j < oldObjs.size() ? oldObjs[j] : nullptr) != obj) {
                 continue;
@@ -221,18 +222,37 @@ static Rewrite pairRewrite(const std::vector<App::DocumentObject*>& oldObjs,
             else if (!byIndex) {
                 same = sub == oldSubs[j] || (!old.newName.empty() && sub == old.newName);
             }
-            else if (!old.newName.empty()) {
+            else if (old.newName.empty()) {
+                // No mapped name: the index is the whole reference (a target without an element
+                // map, an entry a link re-target left index-only), and no old name can override
+                // the pick
+                same = sub == oldSubs[j];
+            }
+            else {
+                if (!indexed) {
+                    index = indexNow(obj, sub);
+                    indexed = true;
+                }
                 if (!looked[j]) {
                     oldIndex[j] = indexNow(obj, old.newName);
                     looked[j] = true;
                 }
-                same = oldIndex[j] == index;
+                same = !index.empty() && oldIndex[j] == index;
             }
-            if (same) {
-                rewrite.pairs[i] = static_cast<int>(j);
-                used[j] = true;
+            if (!same) {
+                continue;
+            }
+            if (match < 0) {
+                match = static_cast<int>(j);
+            }
+            if (j >= records.size() || records[j].guess.empty()) {
+                match = static_cast<int>(j);
                 break;
             }
+        }
+        if (match >= 0) {
+            rewrite.pairs[i] = match;
+            used[match] = true;
         }
     }
     if (passed && subs.size() == oldSubs.size()) {
@@ -271,7 +291,7 @@ static Rewrite keepRewritten(const std::vector<App::DocumentObject*>& oldObjs,
                              std::vector<ElementRecords>& records,
                              std::vector<std::string>& fingerprints)
 {
-    auto rewrite = pairRewrite(oldObjs, oldSubs, oldShadows, objs, subs, shadows);
+    auto rewrite = pairRewrite(oldObjs, oldSubs, oldShadows, objs, subs, shadows, records);
     carryPaired(records, rewrite);
     carryPaired(fingerprints, rewrite);
     return rewrite;
@@ -3735,7 +3755,9 @@ Property* PropertyLinkSub::Copy() const
     p->_ShadowSubList = _ShadowSubList;
     p->_Fingerprints = _Fingerprints;
     p->_ExpandedFrom = _ExpandedFrom;
+    p->_ExpandedFrom.resize(_cSubList.size());
     p->_Records = _Records;
+    p->_Records.resize(_cSubList.size());  // one per reference: Paste() tells a copy by it
     return p;
 }
 
@@ -3750,11 +3772,15 @@ void PropertyLinkSub::Paste(const Property& from)
         _Fingerprints = link._Fingerprints;
     }
     // Undo and redo restore a property through Paste: an expansion comes back with its `from`,
-    // a reference with its records (ops#127).
-    _ExpandedFrom = link._ExpandedFrom;
-    _ExpandedFrom.resize(_cSubList.size());
-    _Records = link._Records;
-    _Records.resize(_cSubList.size());
+    // a reference with its records (ops#127). A copy of the values alone (CopyOnLabelChange(),
+    // CopyOnImportExternal(), CopyOnLinkReplace()) holds no records: the setter has kept those
+    // of the references it keeps (ops#504 E2)
+    if (link._Records.size() == link._cSubList.size()) {
+        _ExpandedFrom = link._ExpandedFrom;
+        _ExpandedFrom.resize(_cSubList.size());
+        _Records = link._Records;
+        _Records.resize(_cSubList.size());
+    }
 }
 
 std::vector<RetargetRecord> PropertyLinkSub::getRetargets() const
@@ -5011,6 +5037,7 @@ Property* PropertyLinkSubList::Copy() const
     // with their references (ops#127)
     p->_Fingerprints = _Fingerprints;
     p->_Records = _Records;
+    p->_Records.resize(_lSubList.size());  // one per reference: Paste() tells a copy by it
     return p;
 }
 
@@ -5026,8 +5053,13 @@ void PropertyLinkSubList::Paste(const Property& from)
     if (link._Fingerprints.size() == _lSubList.size()) {
         _Fingerprints = link._Fingerprints;
     }
-    _Records = link._Records;
-    _Records.resize(_lSubList.size());
+    // A copy of the values alone (CopyOnLabelChange(), CopyOnImportExternal(),
+    // CopyOnLinkReplace()) holds no records: the setter has kept those of the references it
+    // keeps (ops#504 E2)
+    if (link._Records.size() == link._lSubList.size()) {
+        _Records = link._Records;
+        _Records.resize(_lSubList.size());
+    }
 }
 
 std::vector<RetargetRecord> PropertyLinkSubList::getRetargets() const
@@ -6988,13 +7020,23 @@ void PropertyXLink::copyTo(PropertyXLink& other,
         other.filePath = filePath;
     }
     if (subs) {
+        // The same references with their subs renamed (a label change, an import of their
+        // paths): their records and fingerprints go with them (ops#504 E2). On another object
+        // they end, as a setter's do
+        const bool same = linked == _pcLink && subs->size() == _SubList.size();
         other._SubList = std::move(*subs);
+        if (same) {
+            other._Fingerprints = _Fingerprints;
+            other._Records = _Records;
+            other._Records.resize(other._SubList.size());
+        }
     }
     else {
         other._SubList = _SubList;
         other._ShadowSubList = _ShadowSubList;
         other._Fingerprints = _Fingerprints;
         other._Records = _Records;
+        other._Records.resize(_SubList.size());  // one per reference: Paste() tells a copy by it
     }
     other._Flags = _Flags;
 }
@@ -7037,9 +7079,13 @@ void PropertyXLink::Paste(const Property& from)
     if (other._Fingerprints.size() == _SubList.size()) {
         _Fingerprints = other._Fingerprints;
     }
-    // Undo and redo restore a reference with its records (ops#127)
-    _Records = other._Records;
-    _Records.resize(_SubList.size());
+    // Undo and redo restore a reference with its records (ops#127). A copy of the values alone
+    // (another object's) holds none: the setter has kept those of the references it keeps
+    // (ops#504 E2)
+    if (other._Records.size() == other._SubList.size()) {
+        _Records = other._Records;
+        _Records.resize(_SubList.size());
+    }
     setFlag(LinkAllowPartial, other.testFlag(LinkAllowPartial));
 }
 

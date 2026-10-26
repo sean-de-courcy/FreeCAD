@@ -271,6 +271,45 @@ class TestNamingRewrite(unittest.TestCase):
 
                 self.assertEqual(self.guesses(holder, name), {})
 
+    def testLabelChangeKeepsTheOtherEntriesGuess(self):
+        """Beside the guessed edge, an entry that names a sketch of the body by its label
+        (`$Aux.Edge1`); the sketch is renamed. The label change rewrites that entry's path
+        (CopyOnLabelChange() and Paste()); the guessed entry keeps its record (the review of
+        fork PR 386, R1: Paste set the copy's empty records over the ones the setter kept). In a
+        LinkSub and an XLinkSub the guessed sub goes through the body too."""
+        doc = self.newDocument()
+        body = models.body(doc)
+        profile = models.sketch(doc, "Profile", models.rectangle(0, 0, 20, 10), body)
+        pad = models.pad(body, profile, 10)
+        aux = models.sketch(doc, "Aux", models.rectangle(0, 20, 5, 25), body)
+        doc.recompute()
+        [corner] = edge("line", direction=Z, through=(20, 0, 0)).one(pad.Shape)
+        holder = doc.addObject("App::FeaturePython", "Holder")
+        for name, typeName in PROPERTIES.items():
+            holder.addProperty(typeName, name)
+            if name in SINGLE:
+                setRefs(holder, name, body, [f"{pad.Name}.{corner}", "$Aux.Edge1"])
+            else:
+                setattr(holder, name, [(pad, (corner,)), (body, ("$Aux.Edge1",))])
+        doc.recompute()
+        profile.deleteAllGeometry()
+        profile.addGeometry(models.polygon([(20, 10), (20, 0), (0, 0), (0, 10)]), False)
+        doc.recompute()
+        #   (an XLinkSubList orders its objects by itself: the pad's entry may come second)
+        before = {name: self.guesses(holder, name) for name in PROPERTIES}
+        for name, guesses in before.items():
+            self.assertEqual(list(guesses.values()), ["tier3"], name)
+
+        aux.Label = "Aux2"
+
+        self.assertEqual(holder.LinkSubList[1][1], ("$Aux2.Edge1",))
+        for name, guesses in before.items():
+            with self.subTest(name):
+                self.assertEqual(self.guesses(holder, name), guesses)
+        doc.recompute()
+        for name, guesses in before.items():
+            self.assertEqual(self.guesses(holder, name), guesses, name)
+
     def missingHolder(self, doc):
         """AmbiguousHalves' model (TestNamingSolver): a pad's top face that a groove across the
         middle splits into two halves. The holder's four properties reference the top face:
