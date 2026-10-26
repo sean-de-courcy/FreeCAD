@@ -61,20 +61,22 @@ def lineOn(sketch, axis, value):
 
 class CircleStaysOnItsLine(Outcome):
     """The sketch computes, its PointOnObject constraint names the projected line on axis =
-    value, and the circle's centre lies on it. With `defining`, that line is also still the one
-    made defining (its flags went with it, row N1)."""
+    value (`on` before the edit, `after` after it), and the circle's centre lies on it. With
+    `defining`, that line is also still the one made defining (its flags went with it, row
+    N1)."""
 
-    def __init__(self, axis, value, defining=False):
-        self.axis, self.value, self.defining = axis, value, defining
+    def __init__(self, on, after, defining=False):
+        self.on, self.after, self.defining = on, after, defining
 
     def compare(self, scenario, consumer, target, expectation):
+        axis, value = self.on if scenario.stepName is None else self.after
         constraint = [c for c in consumer.Constraints if c.Type == "PointOnObject"][0]
         line = consumer.ExternalGeo[-constraint.Second - 1]
         ends = (line.StartPoint, line.EndPoint)
-        if not all(abs(getattr(p, self.axis) - self.value) < TOL for p in ends):
+        if not all(abs(getattr(p, axis) - value) < TOL for p in ends):
             return False, f"the constraint is on the projected line {ends[0]} - {ends[1]}"
         centre = consumer.Geometry[constraint.First].Center
-        if abs(getattr(centre, self.axis) - self.value) > TOL:
+        if abs(getattr(centre, axis) - value) > TOL:
             return False, f"the circle's centre is at {centre}"
         if self.defining:
             facades = [
@@ -101,7 +103,6 @@ class FaceLinkEdit(Scenario):
     on = ("x", 0)
     after = ("x", 0)
     defining = False
-    edited = False
 
     def topFace(self):
         return face("plane", normal=Z, through=(0, 0, 10))
@@ -127,7 +128,7 @@ class FaceLinkEdit(Scenario):
             sketch,
             "ExternalGeometry",
             self.topFace,
-            CircleStaysOnItsLine(*self.after, defining=self.defining),
+            CircleStaysOnItsLine(self.on, self.after, defining=self.defining),
         )
 
 
@@ -205,7 +206,11 @@ class ExternalFaceDimension4m(FaceLinkEdit):
         )
         sketch.addConstraint(Sketcher.Constraint("Radius", circle, k))
         self.ref(
-            "circle_on_x0", sketch, "ExternalGeometry", self.topFace, CircleStaysOnItsLine("x", 0)
+            "circle_on_x0",
+            sketch,
+            "ExternalGeometry",
+            self.topFace,
+            CircleStaysOnItsLine(("x", 0), ("x", 0)),
         )
 
     def edit(self, doc):
