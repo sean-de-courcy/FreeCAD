@@ -511,17 +511,22 @@ class TestNamingSolver(unittest.TestCase):
         self.assertEqual(len(fillet.Base[1]), 2)
         self.assertEqual(self.froms(doc), [name, name])
 
-    def testSetterDropsFrom(self):
-        """Setting the property anew, even to the same subs, drops `from`: the user chose them."""
+    def testSetterKeepsFromOfTheSameSubs(self):
+        """Setting the property again to the same subs keeps `from`, as it keeps the records
+        (ops#504 E2, I-S10, PLAN decision 142); a sub chosen anew starts without it."""
         doc = self.newDocument()
         rib, fillet, name = self.ribAcrossFillet(doc)
         models.moveRectangle(doc.RibSketch, 8, -3, 12, 3)
         doc.recompute()
         self.assertEqual(self.froms(doc), [name, name])
+        pieces = list(fillet.Base[1])
 
-        fillet.Base = (rib, list(fillet.Base[1]))
+        fillet.Base = (rib, pieces)
+        self.assertEqual(self.froms(doc), [name, name])
 
-        self.assertEqual(self.froms(doc), [None, None])
+        other = edge("line", direction=Z, through=(0, 0, 0)).one(rib.Shape)
+        fillet.Base = (rib, pieces[:1] + other)
+        self.assertEqual(self.froms(doc), [name, None])
 
     def notch(self, doc):
         """Cuts a notch (x 8..12, 2 deep) into the front of the profile: the front line ends at
@@ -1001,17 +1006,19 @@ class TestNamingSolver(unittest.TestCase):
         self.assertEqual(entry["guess_kind"], "tier3")
         self.assertEqual(entry["original"]["index"], original)
 
-    def testSetterDropsTheRecord(self):
-        """Setting the property anew, even to the same sub, drops the record: the user chose it."""
+    def testSetterKeepsTheRecordOfTheSameSub(self):
+        """Setting the property again to the same sub keeps the record and the warning: a rewrite
+        keeps what it doesn't change (ops#504 E2, I-S10, PLAN decision 142). The user ends a
+        guess with Accept or Repair. It dropped them, and the guess read as an exact pick."""
         doc, pad, fillet, original = self.redrawnFillet()
 
         fillet.Base = (pad, list(fillet.Base[1]))
         doc.recompute()
 
         self.assertTrue(fillet.isValid())
-        self.assertNotIn("Warning", fillet.State)
+        self.assertIn("Warning", fillet.State)
         [sub] = self.savedSubs(doc, "Fillet", "Base")
-        self.assertNotIn("guess", sub)
+        self.assertEqual(sub.get("guess"), "tier3")
 
     def testFilletComputesOnTheEdgesLeft(self):
         """A fillet on two vertical edges of the pad, at (20, 0) and (0, 10); the corner at

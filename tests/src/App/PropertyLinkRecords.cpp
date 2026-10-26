@@ -138,7 +138,7 @@ TEST_F(PropertyLinkRecords, linkSubListReorderPairsByValueNotPosition)
 TEST_F(PropertyLinkRecords, linkSubSetValueKeepsTheRecords)
 {
     // Arrange
-    auto prop = addLinks<App::PropertyLinkSub>("Link");
+    auto prop = addLinks<App::PropertyLinkSub>("SubLink");
     prop->setValue(_a, std::vector<std::string> {"Sub."});
     prop->setElementRecords({guessed("A")});
     prop->setElementFingerprint(0, "fp-a");
@@ -156,7 +156,7 @@ TEST_F(PropertyLinkRecords, linkSubSetValueKeepsTheRecords)
 TEST_F(PropertyLinkRecords, linkSubAnotherObjectKeepsNoRecord)
 {
     // Arrange
-    auto prop = addLinks<App::PropertyLinkSub>("Link");
+    auto prop = addLinks<App::PropertyLinkSub>("SubLink");
     prop->setValue(_a, std::vector<std::string> {"Sub."});
     prop->setElementRecords({guessed("A")});
 
