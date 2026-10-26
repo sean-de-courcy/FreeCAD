@@ -96,7 +96,7 @@ FREECAD_USER_HOME="$(cygpath -w "${gate_home}")" PYTHONDONTWRITEBYTECODE=1 \
     "${version_name}/bin/${app_cmd_exe}" -t PartDesignTests.Compat.TestCompatCorpus \
     > compat-gate.log 2>&1 || gate_status=$?
 cat compat-gate.log
-rm -rf "${gate_home}"
+rm -rf "${gate_home}" || true    # a scanner's lock on the scratch folder must not fail a passed gate
 if [[ ${gate_status} -ne 0 ]] || ! grep -q '^OK' compat-gate.log || grep -q '^FAILED' compat-gate.log; then
   echo "TestCompatCorpus failed on the packaged build (exit ${gate_status}); refusing to package it."
   exit 1
