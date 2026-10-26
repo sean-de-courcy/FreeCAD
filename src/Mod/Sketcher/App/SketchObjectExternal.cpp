@@ -3374,9 +3374,13 @@ double placeDistance(const Part::Geometry* a, const Part::Geometry* b, double to
 // moved it to the next edge, silently). In turn:
 // - one geometry before and after, of the same type: the link's reference names it (and its
 //   resolution carries any warning);
-// - the source edge's mapped name (Source), unique on both sides;
 // - the same type at the same place: within half the tolerance, and every other candidate either
 //   way beyond it (as carbon copy pairs, PR 260);
+// - among those at the same place with several candidates within the tolerance (collinear
+//   pieces, coincident curves), the source edge's mapped name (Source), unique on both sides. A
+//   name alone is no evidence: the Sketcher gives a line drawn again the Id, and so the name, of
+//   a deleted line whose ends were in the same places (SketchObject::generateId), which is the
+//   edge on the other side when the lines between were reversed (fork PR 384's review, round 1);
 // - by position, only where the link's order is evidence: the same count and types in the same
 //   order, the link's reference resolved by history this recompute (`byHistory`: exactly, or by
 //   the solver at tier 0-1 without a guess; a face found by its place may be a redrawn profile,
@@ -3403,36 +3407,13 @@ std::vector<int> pairGeometries(const std::vector<const Part::Geometry*>& olds,
         return taken;
     }
 
-    auto sourceOf = [](const Part::Geometry* geo) {
-        return geo ? ExternalGeometryFacade::getFacade(geo)->getSource() : std::string();
-    };
-    std::map<std::string, std::vector<std::size_t>> oldSources;
-    std::map<std::string, std::vector<std::size_t>> newSources;
-    for (std::size_t j = 0; j < olds.size(); ++j) {
-        if (auto source = sourceOf(olds[j]); !source.empty()) {
-            oldSources[source].push_back(j);
-        }
-    }
-    for (std::size_t k = 0; k < news.size(); ++k) {
-        if (auto source = sourceOf(news[k]); !source.empty()) {
-            newSources[source].push_back(k);
-        }
-    }
-    for (const auto& [source, ks] : newSources) {
-        auto it = oldSources.find(source);
-        if (ks.size() == 1 && it != oldSources.end() && it->second.size() == 1
-            && sameType(it->second.front(), ks.front())) {
-            match(it->second.front(), ks.front());
-        }
-    }
-
     constexpr double tolerance = 10 * Precision::Confusion();
     std::vector<std::vector<double>> distance(
         olds.size(),
         std::vector<double>(news.size(), std::numeric_limits<double>::infinity()));
     for (std::size_t j = 0; j < olds.size(); ++j) {
         for (std::size_t k = 0; k < news.size(); ++k) {
-            if (!used[j] && taken[k] < 0 && sameType(j, k)) {
+            if (sameType(j, k)) {
                 distance[j][k] = placeDistance(olds[j], news[k], tolerance);
             }
         }
@@ -3457,6 +3438,29 @@ std::vector<int> pairGeometries(const std::vector<const Part::Geometry*>& olds,
     }
     for (const auto& [j, k] : agreed) {
         match(j, k);
+    }
+
+    auto sourceOf = [](const Part::Geometry* geo) {
+        return geo ? ExternalGeometryFacade::getFacade(geo)->getSource() : std::string();
+    };
+    std::map<std::string, std::vector<std::size_t>> oldSources;
+    std::map<std::string, std::vector<std::size_t>> newSources;
+    for (std::size_t j = 0; j < olds.size(); ++j) {
+        if (auto source = sourceOf(olds[j]); !source.empty() && !used[j]) {
+            oldSources[source].push_back(j);
+        }
+    }
+    for (std::size_t k = 0; k < news.size(); ++k) {
+        if (auto source = sourceOf(news[k]); !source.empty() && taken[k] < 0) {
+            newSources[source].push_back(k);
+        }
+    }
+    for (const auto& [source, ks] : newSources) {
+        auto it = oldSources.find(source);
+        if (ks.size() == 1 && it != oldSources.end() && it->second.size() == 1
+            && distance[it->second.front()][ks.front()] <= tolerance / 2) {
+            match(it->second.front(), ks.front());
+        }
     }
 
     if (!byHistory || olds.size() != news.size()) {
