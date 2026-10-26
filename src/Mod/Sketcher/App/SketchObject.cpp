@@ -407,19 +407,24 @@ App::DocumentObjectExecReturn* SketchObject::execute()
             return !Data::hasMissingElement(sub.c_str());
         });
         // FreeCAD-CH (ops#264 e2): but a geometry its link no longer gives, constraints on it, is
-        // lost whatever the other links do: flagged missing while its link's element resolves
-        const bool lost = std::any_of(
-            ExternalGeo.getValues().begin(),
-            ExternalGeo.getValues().end(),
-            [&](const Part::Geometry* geo) {
-                auto egf = ExternalGeometryFacade::getFacade(geo);
-                if (!egf->testFlag(ExternalGeometryExtension::Missing)) {
-                    return false;
-                }
-                auto it = std::find(externalGeoRef.begin(), externalGeoRef.end(), egf->getRef());
-                const auto index = static_cast<std::size_t>(it - externalGeoRef.begin());
-                return index < subs.size() && !Data::hasMissingElement(subs[index].c_str());
-            });
+        // lost whatever the other links do: flagged missing while its link still gives other
+        // geometry (a link whose build failed has all of its geometry missing)
+        const auto& geos = ExternalGeo.getValues();
+        auto missing = [](const Part::Geometry* geo) {
+            return ExternalGeometryFacade::getFacade(geo)->testFlag(
+                ExternalGeometryExtension::Missing);
+        };
+        const bool lost = std::any_of(geos.begin(), geos.end(), [&](const Part::Geometry* geo) {
+            if (!missing(geo)) {
+                return false;
+            }
+            const std::string& ref = ExternalGeometryFacade::getFacade(geo)->getRef();
+            return !ref.empty()
+                && std::any_of(geos.begin(), geos.end(), [&](const Part::Geometry* other) {
+                       return !missing(other)
+                           && ExternalGeometryFacade::getFacade(other)->getRef() == ref;
+                   });
+        });
         if (lost
             || !(isWarning() && anyResolves && ExternalGeometry.isPartialAllowed()
                  && ExternalGeometry.inSolverDocument())) {

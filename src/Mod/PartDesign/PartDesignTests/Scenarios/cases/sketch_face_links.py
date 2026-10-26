@@ -37,6 +37,7 @@ found by a tier 3 guess and the sketch breaks) are scored by `TestSketchFaceLink
 the face is the right one and the break is loud."""
 
 import FreeCAD as App
+import Part
 import Sketcher
 
 from PartDesignTests.Scenarios.harness import Outcome, Reopens, Scenario, Z, face
@@ -299,3 +300,132 @@ class ExternalFaceRedrawSidesNeighboursReversedFront(FaceLinkEdit):
         doc.Profile.Geometry = geometry
         doc.Profile.addGeometry(m.polyline([(25, 0), (25, 20)]), False)
         doc.Profile.addGeometry(m.polyline([(-5, 20), (-5, 0)]), False)
+
+
+class PointOnHoleCentre(Outcome):
+    """The sketch computes, the point's Coincident constraint names a projected circle whose
+    centre is at `on` before the edit and `after` after it, and the point is there."""
+
+    def __init__(self, on, after):
+        self.on, self.after = on, after
+
+    def compare(self, scenario, consumer, target, expectation):
+        x, y = self.on if scenario.stepName is None else self.after
+        constraint = [c for c in consumer.Constraints if c.Type == "Coincident"][0]
+        circle = consumer.ExternalGeo[-constraint.Second - 1]
+        if abs(circle.Center.x - x) > TOL or abs(circle.Center.y - y) > TOL:
+            return False, f"the constraint is on the projected circle at {circle.Center}"
+        point = consumer.Geometry[constraint.First]
+        if abs(point.X - x) > TOL or abs(point.Y - y) > TOL:
+            return False, f"the point is at ({point.X}, {point.Y})"
+        return True, ""
+
+
+class ExternalFaceHoleRowMovedByPitch(Scenario):
+    """The cloud review of fork PR 384 (model A): a 40 x 20 plate with two holes r 3 at (10, 10)
+    and (20, 10), a row at pitch 10, padded 10 high; a sketch at z = 0 projects the top face
+    (four lines and two circles) and has a point Coincident with the right hole's centre. The
+    row moves +10 (holes at (20, 10) and (30, 10)), the circles keeping their IDs: the left hole
+    lands on the right hole's old place. The point must follow its hole to (30, 10), or break;
+    paired by place it stayed on the look-alike at (20, 10). With `noSource` the projected
+    geometry has no source names, as geometry saved before E1."""
+
+    area = "external geometry"
+    CLASSES = ("E",)
+    AXES = ("M8", "E5")
+    ISSUE = "ops#264"
+    FOUND_BY = "review pr384 cloud"
+    TIER = "F"
+    REFS = ("point_on_right_hole",)
+    noSource = False
+
+    def topFace(self):
+        return face("plane", normal=Z, through=(0, 0, 10))
+
+    def build(self, doc):
+        body = m.body(doc)
+        profile = m.sketch(
+            doc, "Profile", m.rectangle(0, 0, 40, 20) + [m.circle(10, 10, 3), m.circle(20, 10, 3)],
+            body,
+        )
+        pad = m.pad(body, profile, 10)
+        doc.recompute()
+        sketch = m.sketch(doc, "OnTop", [], body)
+        sketch.addExternal(pad.Name, self.names(pad, self.topFace())[0])
+        doc.recompute()
+        if self.noSource:
+            geos = list(sketch.ExternalGeo)
+            for geo in geos:
+                Sketcher.ExternalGeometryFacade(geo).Source = ""
+            sketch.ExternalGeo = geos
+        right = [
+            -i - 1
+            for i, g in enumerate(sketch.ExternalGeo)
+            if i >= 2 and hasattr(g, "Radius") and abs(g.Center.x - 20) < TOL
+        ][0]
+        point = sketch.addGeometry(Part.Point(App.Vector(20, 10, 0)), False)
+        sketch.addConstraint(Sketcher.Constraint("Coincident", point, 1, right, 3))
+        self.ref(
+            "point_on_right_hole",
+            sketch,
+            "ExternalGeometry",
+            self.topFace,
+            PointOnHoleCentre((20, 10), (30, 10)),
+        )
+
+    def edit(self, doc):
+        geometry = doc.Profile.Geometry
+        geometry[4].Center = App.Vector(20, 10, 0)
+        geometry[5].Center = App.Vector(30, 10, 0)
+        doc.Profile.Geometry = geometry
+
+
+class ExternalFaceHoleRowMovedByPitchNoSource(ExternalFaceHoleRowMovedByPitch):
+    """The same with the projected geometry's source names cleared (geometry saved before E1)."""
+
+    noSource = True
+
+
+class ExternalFaceNotchMovedByWidth(FaceLinkEdit):
+    """The cloud review of fork PR 384 (model B): a 30 x 20 plate with a notch 8 wide and 5 deep
+    in its back edge (walls at x = 6 and 14), padded 10 high; the circle on the notch's right
+    wall (x = 14). The notch moves 8 to the right (walls at 14 and 22), its lines keeping their
+    IDs: the left wall lands on the right wall's old place. The circle must follow to x = 22."""
+
+    FOUND_BY = "review pr384 cloud"
+    REFS = ("circle_on_notch_wall",)
+    on = ("x", 14)
+    after = ("x", 22)
+
+    def build(self, doc):
+        body = m.body(doc)
+        outline = [(0, 0), (30, 0), (30, 20), (14, 20), (14, 15), (6, 15), (6, 20), (0, 20)]
+        profile = m.sketch(doc, "Profile", m.polygon(outline), body)
+        pad = m.pad(body, profile, 10)
+        doc.recompute()
+        sketch = m.sketch(doc, "OnTop", [], body)
+        sketch.addExternal(pad.Name, self.names(pad, self.topFace())[0])
+        doc.recompute()
+        wall = lineOn(sketch, "x", 14)
+        circle = sketch.addGeometry(m.circle(14, 17.5, 1), False)
+        sketch.addConstraint(Sketcher.Constraint("PointOnObject", circle, 3, wall))
+        sketch.addConstraint(Sketcher.Constraint("Radius", circle, 1))
+        self.ref(
+            "circle_on_notch_wall",
+            sketch,
+            "ExternalGeometry",
+            self.topFace,
+            CircleStaysOnItsLine(self.on, self.after),
+        )
+
+    def edit(self, doc):
+        m.setLines(
+            doc.Profile,
+            {
+                2: ((30, 20), (22, 20)),
+                3: ((22, 20), (22, 15)),
+                4: ((22, 15), (14, 15)),
+                5: ((14, 15), (14, 20)),
+                6: ((14, 20), (0, 20)),
+            },
+        )
