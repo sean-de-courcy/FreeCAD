@@ -4394,7 +4394,18 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
         std::set<long> geoIds;  // the Ids no new geometry takes, whose geometry goes
         if (byKind) {
             const bool byHistory = resolvedByHistory(linkIndexes[n]);
-            auto handOut = [&](const std::vector<long>& ids, std::size_t begin, std::size_t end) {
+            // a kind the link's type no longer builds (a type written from Python, Both to
+            // Intersection) goes with its constraints, as before, with the warning below: the
+            // user's edit, not its source's, took it away (PR 241)
+            const long type = Types[linkIndexes[n]];
+            const bool projected = type == static_cast<long>(ExtType::Projection)
+                || type == static_cast<long>(ExtType::Both);
+            const bool intersected = type == static_cast<long>(ExtType::Intersection)
+                || type == static_cast<long>(ExtType::Both);
+            auto handOut = [&](const std::vector<long>& ids,
+                               std::size_t begin,
+                               std::size_t end,
+                               bool built) {
                 std::vector<const Part::Geometry*> olds;
                 for (long id : ids) {
                     auto it = externalGeoMap.find(id);
@@ -4415,12 +4426,13 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
                 }
                 for (std::size_t j = 0; j < ids.size(); ++j) {
                     if (!kept[j]) {
-                        (constraintsOn({ids[j]}).empty() ? geoIds : lostIds).insert(ids[j]);
+                        (!built || constraintsOn({ids[j]}).empty() ? geoIds : lostIds)
+                            .insert(ids[j]);
                     }
                 }
             };
-            handOut(projectionIds, 0, projCount);
-            handOut(intersectionIds, projCount, geos.size());
+            handOut(projectionIds, 0, projCount, projected);
+            handOut(intersectionIds, projCount, geos.size(), intersected);
             // new geometry goes where the build gives it, a projection added to an intersection
             // link before it too (ops#260), below
             addedProjections[n] = 0;

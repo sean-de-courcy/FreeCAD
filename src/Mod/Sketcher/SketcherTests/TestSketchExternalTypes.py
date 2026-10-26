@@ -1060,9 +1060,11 @@ class TestSketchExternalTypes(unittest.TestCase):
         face.Shape = self.tiltedFace(self.SQUARE)
         self.doc.recompute()
         self.assertFalse(sketch.isValid())
-        self.assertIn(f"ExternalEdge{tip - 1}", sketch.getStatusString())
         self.assertEqual(len(sketch.Constraints), 2)
-        kept = sketch.ExternalGeo[-sketch.Constraints[1].Second - 1]
+        # the pentagon's other new edge, unconstrained, went: the kept one's index moved down
+        index = -sketch.Constraints[1].Second - 1
+        self.assertIn(f"no longer gives ExternalEdge{index - 1}", sketch.getStatusString())
+        kept = sketch.ExternalGeo[index]
         self.assertTrue(Sketcher.ExternalGeometryFacade(kept).testFlag("Missing"))
         self.assertLess((kept.StartPoint - tipLine.StartPoint).Length, TOL)
         self.assertLess((kept.EndPoint - tipLine.EndPoint).Length, TOL)

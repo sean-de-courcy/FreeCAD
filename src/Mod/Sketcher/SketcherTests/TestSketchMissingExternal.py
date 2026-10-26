@@ -482,7 +482,8 @@ class TestSketchFaceLinkPairing(unittest.TestCase):
         self.constrainCircle("x", 0)
         self.cutCorner()
         self.assertStaysOn("x", 0)
-        self.assertTrue(self.sketch.Geometry[self.circle].Center.isEqual(V(0, 5, 0), TOL))
+        centre = self.sketch.Geometry[self.circle].Center
+        self.assertTrue(centre.isEqual(V(0, 5 * self.scale, 0), TOL), centre)
 
     def testCornerCutAfterTheConstrainedEdge(self):
         """The baseline: the front edge comes before the cut, so it kept its Id before too."""
@@ -505,7 +506,7 @@ class TestSketchFaceLinkPairing(unittest.TestCase):
         self.assertTrue(defining(self.lineOn("x", 0)))
         self.cutCorner()
         self.assertTrue(defining(self.lineOn("x", 0)))
-        self.assertFalse(defining(self.lineOn("y", 20)))
+        self.assertFalse(defining(self.lineOn("y", 20 * self.scale)))
 
     def testCornerCutKeepsTheIdsOrderedAsBuilt(self):
         """The cut's line goes between the right and back lines in ExternalGeo, as the face gives
