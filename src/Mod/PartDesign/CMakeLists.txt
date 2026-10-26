@@ -70,6 +70,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestNamingScenarios.py
     PartDesignTests/TestCorpusGate.py
     PartDesignTests/TestNamingSolver.py
+    PartDesignTests/TestNamingRewrite.py
     PartDesignTests/TestNamingGate.py
     PartDesignTests/TestNamingConsumerPass.py
     PartDesignTests/TestFailurePassThrough.py

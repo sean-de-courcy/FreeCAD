@@ -116,32 +116,182 @@ static std::unordered_map<const PropertyLinkBase*,
                           std::vector<std::pair<std::size_t, Data::ElementFingerprint>>>
     _RestoredRetargetChecks;
 
-// The records of each reference (ops#127: the guess and re-target records, ElementRecords.h).
-// A setter's rule, as for `from`: a reference passed on with its shadow (a restore, a paste, the
-// re-target itself) keeps its records; a sub chosen anew (no shadow, or no shadows at all: a
-// re-pick) ends them.
-static void keepElementRecords(std::vector<ElementRecords>& records,
-                               std::size_t count,
-                               const std::vector<PropertyLinkBase::ShadowSub>& shadows)
+// A rewrite keeps the state of each reference it doesn't change (ops#504 E2, invariant I-S10):
+// the records (ops#127: the guess and re-target records, ElementRecords.h), the fingerprint,
+// `from` and the shadow. Every setter pairs each new entry with the old entry it is, by value,
+// never by position or count:
+// - an entry passed with a shadow (a restore, a paste, the Sketcher's kept links), by that shadow;
+// - else by the sub as written: the same object's old sub, or its old shadow's mapped name;
+// - an index-only sub ("Face6", as Python and the attachment editor write them) only if the old
+//   entry's mapped name gives that index on the target now. The old shadow's index is stale
+//   until the consumer resolves again, so a re-pick by index after an upstream edit is the pick.
+// An entry passed with a shadow that pairs with none keeps the old entry at its index when the
+// count is unchanged, as before: the re-target passes the same references with new shadows.
+// An unpaired entry starts fresh. Accept and Repair end records through applyResolutions().
+namespace
 {
-    if (shadows.size() != count || records.size() != count) {
-        records.assign(count, ElementRecords());
-        return;
-    }
-    for (std::size_t i = 0; i < count; ++i) {
-        if (shadows[i].oldName.empty() && shadows[i].newName.empty()) {
-            records[i] = ElementRecords();
-        }
-    }
+struct Rewrite
+{
+    // The old entry each new entry is, or -1
+    std::vector<int> pairs;
+    std::vector<PropertyLinkBase::ShadowSub> oldShadows;
+    // The new entries passed with a shadow: theirs wins
+    std::vector<bool> shadowed;
+};
+}  // namespace
+
+static bool hasShadow(const PropertyLinkBase::ShadowSub& shadow)
+{
+    return !shadow.oldName.empty() || !shadow.newName.empty();
 }
 
-// A value whose shadows go (updateElementReference() without a feature) in a PropertyLinkSub or
-// PropertyXLink: the guess records end; the re-target records stay, since every setter that gets
-// there has applied keepElementRecords() already (ops#127)
-static void clearGuessRecords(std::vector<ElementRecords>& records)
+// Whether sub names its element by index alone ("Face6", "Body.Pad.Edge2")
+static bool isIndexOnly(const std::string& sub)
 {
-    for (auto& record : records) {
-        record.guess = GuessRecord();
+    const char* element = Data::findElementName(sub.c_str());
+    return element && element[0] && !Data::isMappedElement(element)
+        && !Data::hasMissingElement(element);
+}
+
+// The sub with its element as an index that sub gives on obj now, or empty if it gives none
+static std::string indexNow(App::DocumentObject* obj, const std::string& sub)
+{
+    if (!obj || !obj->isAttachedToDocument() || sub.empty()) {
+        return {};
+    }
+    PropertyLinkBase::ShadowSub elementName;
+    const char* element = nullptr;
+    GeoFeature* geo = nullptr;
+    if (!GeoFeature::resolveElement(obj,
+                                    sub.c_str(),
+                                    elementName,
+                                    true,
+                                    GeoFeature::ElementNameType::Export,
+                                    nullptr,
+                                    &element,
+                                    &geo)
+        || !geo || !element || !element[0]) {
+        return {};
+    }
+    const char* index = Data::findElementName(elementName.oldName.c_str());
+    if (!index || !index[0] || Data::hasMissingElement(index)) {
+        return {};
+    }
+    return elementName.oldName;
+}
+
+static Rewrite pairRewrite(const std::vector<App::DocumentObject*>& oldObjs,
+                           const std::vector<std::string>& oldSubs,
+                           const std::vector<PropertyLinkBase::ShadowSub>& oldShadows,
+                           const std::vector<App::DocumentObject*>& objs,
+                           const std::vector<std::string>& subs,
+                           const std::vector<PropertyLinkBase::ShadowSub>& shadows)
+{
+    Rewrite rewrite;
+    rewrite.pairs.assign(subs.size(), -1);
+    rewrite.oldShadows = oldShadows;
+    rewrite.oldShadows.resize(oldSubs.size());
+    rewrite.shadowed.assign(subs.size(), false);
+    const bool passed = shadows.size() == subs.size();
+    std::vector<bool> used(oldSubs.size(), false);
+    // The index each old mapped name gives now, looked up once
+    std::vector<std::string> oldIndex(oldSubs.size());
+    std::vector<bool> looked(oldSubs.size(), false);
+    for (std::size_t i = 0; i < subs.size(); ++i) {
+        auto obj = i < objs.size() ? objs[i] : nullptr;
+        const auto& sub = subs[i];
+        rewrite.shadowed[i] = passed && hasShadow(shadows[i]);
+        const bool byIndex = !rewrite.shadowed[i] && isIndexOnly(sub);
+        std::string index;
+        if (byIndex) {
+            index = indexNow(obj, sub);
+            if (index.empty()) {
+                continue;
+            }
+        }
+        for (std::size_t j = 0; j < oldSubs.size(); ++j) {
+            if (used[j] || (j < oldObjs.size() ? oldObjs[j] : nullptr) != obj) {
+                continue;
+            }
+            const auto& old = rewrite.oldShadows[j];
+            bool same = false;
+            if (rewrite.shadowed[i]) {
+                same = shadows[i] == old;
+            }
+            else if (!byIndex) {
+                same = sub == oldSubs[j] || (!old.newName.empty() && sub == old.newName);
+            }
+            else if (!old.newName.empty()) {
+                if (!looked[j]) {
+                    oldIndex[j] = indexNow(obj, old.newName);
+                    looked[j] = true;
+                }
+                same = oldIndex[j] == index;
+            }
+            if (same) {
+                rewrite.pairs[i] = static_cast<int>(j);
+                used[j] = true;
+                break;
+            }
+        }
+    }
+    if (passed && subs.size() == oldSubs.size()) {
+        for (std::size_t i = 0; i < subs.size(); ++i) {
+            if (rewrite.pairs[i] < 0 && rewrite.shadowed[i] && !used[i]) {
+                rewrite.pairs[i] = static_cast<int>(i);
+                used[i] = true;
+            }
+        }
+    }
+    return rewrite;
+}
+
+// Rearranges values, parallel to the old entries, to the new entries: a paired entry takes its
+// old entry's value, a new one the empty value
+template<class T>
+static void carryPaired(std::vector<T>& values, const Rewrite& rewrite)
+{
+    std::vector<T> carried(rewrite.pairs.size());
+    for (std::size_t i = 0; i < rewrite.pairs.size(); ++i) {
+        auto j = rewrite.pairs[i];
+        if (j >= 0 && static_cast<std::size_t>(j) < values.size()) {
+            carried[i] = std::move(values[j]);
+        }
+    }
+    values = std::move(carried);
+}
+
+// Pairs a rewrite and carries the records and fingerprints of the references it keeps
+static Rewrite keepRewritten(const std::vector<App::DocumentObject*>& oldObjs,
+                             const std::vector<std::string>& oldSubs,
+                             const std::vector<PropertyLinkBase::ShadowSub>& oldShadows,
+                             const std::vector<App::DocumentObject*>& objs,
+                             const std::vector<std::string>& subs,
+                             const std::vector<PropertyLinkBase::ShadowSub>& shadows,
+                             std::vector<ElementRecords>& records,
+                             std::vector<std::string>& fingerprints)
+{
+    auto rewrite = pairRewrite(oldObjs, oldSubs, oldShadows, objs, subs, shadows);
+    carryPaired(records, rewrite);
+    carryPaired(fingerprints, rewrite);
+    return rewrite;
+}
+
+// After the setter resolved the new entries: a paired entry passed without a shadow whose sub
+// gave no mapped name (a missing '?Face3' written by its index name) keeps its old shadow, whose
+// mapped name is all that can find the element again
+static void keepPairedShadows(std::vector<PropertyLinkBase::ShadowSub>& shadows,
+                              const Rewrite& rewrite)
+{
+    for (std::size_t i = 0; i < shadows.size() && i < rewrite.pairs.size(); ++i) {
+        auto j = rewrite.pairs[i];
+        if (j < 0 || rewrite.shadowed[i] || !shadows[i].newName.empty()) {
+            continue;
+        }
+        const auto& old = rewrite.oldShadows[j];
+        if (!old.newName.empty()) {
+            shadows[i] = old;
+        }
     }
 }
 
@@ -2060,20 +2210,17 @@ void PropertyLinkSub::setValue(App::DocumentObject* lValue,
         }
     }
 
-    // `from` (Task 2 PR 7) stays with a reference the caller passes on with its shadow (a
-    // restore, a paste, the relink); a sub chosen anew (no shadow, or no shadows at all) drops it.
-    // So do its records (ops#127).
-    keepElementRecords(_Records, subs.size(), shadows);
-    if (shadows.size() != subs.size() || _ExpandedFrom.size() != subs.size()) {
-        _ExpandedFrom.assign(subs.size(), std::string());
-    }
-    else {
-        for (std::size_t i = 0; i < subs.size(); ++i) {
-            if (shadows[i].oldName.empty() && shadows[i].newName.empty()) {
-                _ExpandedFrom[i].clear();
-            }
-        }
-    }
+    // Each reference the value keeps keeps its records, fingerprint and `from` (Task 2 PR 7)
+    // (ops#504 E2)
+    auto rewrite = keepRewritten(std::vector<DocumentObject*>(_cSubList.size(), _pcLinkSub),
+                                 _cSubList,
+                                 _ShadowSubList,
+                                 std::vector<DocumentObject*>(subs.size(), lValue),
+                                 subs,
+                                 shadows,
+                                 _Records,
+                                 _Fingerprints);
+    carryPaired(_ExpandedFrom, rewrite);
     _pcLinkSub = lValue;
     _cSubList = std::move(subs);
     if (shadows.size() == _cSubList.size()) {
@@ -2083,6 +2230,7 @@ void PropertyLinkSub::setValue(App::DocumentObject* lValue,
     else {
         updateElementReference(nullptr);
     }
+    keepPairedShadows(_ShadowSubList, rewrite);
     checkLabelReferences(_cSubList);
     hasSetValue();
 }
@@ -2769,9 +2917,8 @@ void PropertyLinkSub::onContainerRestored()
 
 void PropertyLinkSub::updateElementReference(DocumentObject* feature, bool reverse, bool notify)
 {
-    if (!feature) {
-        clearGuessRecords(_Records);  // the shadows go too: a sub set anew (ops#127)
-    }
+    // Without a feature, a setter's: it has kept the records of the references it keeps
+    // (ops#504 E2)
     bool changed = updateLinkReference(this,
                                        feature,
                                        reverse,
@@ -3823,19 +3970,19 @@ void PropertyLinkSubList::setValue(DocumentObject* lValue, const char* SubName)
         }
     }
 
+    std::vector<DocumentObject*> objs;
+    std::vector<std::string> subs;
     if (lValue) {
-        aboutToSetValue();
-        _lValueList.resize(1);
-        _lValueList[0] = lValue;
-        _lSubList.resize(1);
-        _lSubList[0] = SubName;
+        objs.push_back(lValue);
+        subs.emplace_back(SubName ? SubName : "");
     }
-    else {
-        aboutToSetValue();
-        _lValueList.clear();
-        _lSubList.clear();
-    }
+    aboutToSetValue();
+    auto rewrite =
+        keepRewritten(_lValueList, _lSubList, _ShadowSubList, objs, subs, {}, _Records, _Fingerprints);
+    _lValueList = std::move(objs);
+    _lSubList = std::move(subs);
     updateElementReference(nullptr);
+    keepPairedShadows(_ShadowSubList, rewrite);
     checkLabelReferences(_lSubList);
     hasSetValue();
 }
@@ -3879,16 +4026,21 @@ void PropertyLinkSubList::setValues(const std::vector<DocumentObject*>& lValue,
     }
 
     aboutToSetValue();
-    _lValueList = lValue;
-    _lSubList.resize(lSubNames.size());
+    auto subs = _lSubList;
+    subs.resize(lSubNames.size());
     int i = 0;
     for (std::vector<const char*>::const_iterator it = lSubNames.begin(); it != lSubNames.end();
          ++it, ++i) {
         if (*it) {
-            _lSubList[i] = *it;
+            subs[i] = *it;
         }
     }
+    auto rewrite =
+        keepRewritten(_lValueList, _lSubList, _ShadowSubList, lValue, subs, {}, _Records, _Fingerprints);
+    _lValueList = lValue;
+    _lSubList = std::move(subs);
     updateElementReference(nullptr);
+    keepPairedShadows(_ShadowSubList, rewrite);
     checkLabelReferences(_lSubList);
     hasSetValue();
 }
@@ -3941,9 +4093,14 @@ void PropertyLinkSubList::setValues(std::vector<DocumentObject*>&& lValue,
     }
 
     aboutToSetValue();
-    // The records (ops#127) stay with references passed on with their shadows (a restore, a
-    // paste); a sub chosen anew drops them.
-    keepElementRecords(_Records, lSubNames.size(), ShadowSubList);
+    auto rewrite = keepRewritten(_lValueList,
+                                 _lSubList,
+                                 _ShadowSubList,
+                                 lValue,
+                                 lSubNames,
+                                 ShadowSubList,
+                                 _Records,
+                                 _Fingerprints);
     _lValueList = std::move(lValue);
     _lSubList = std::move(lSubNames);
     if (ShadowSubList.size() == _lSubList.size()) {
@@ -3953,6 +4110,7 @@ void PropertyLinkSubList::setValues(std::vector<DocumentObject*>&& lValue,
     else {
         updateElementReference(nullptr);
     }
+    keepPairedShadows(_ShadowSubList, rewrite);
     checkLabelReferences(_lSubList);
     hasSetValue();
 }
@@ -3987,19 +4145,24 @@ void PropertyLinkSubList::setValue(DocumentObject* lValue, const std::vector<std
 
     aboutToSetValue();
     std::size_t size = SubList.size();
-    this->_lValueList.clear();
-    this->_lSubList.clear();
+    std::vector<DocumentObject*> objs;
+    std::vector<std::string> subs;
     if (size == 0) {
         if (lValue) {
-            this->_lValueList.push_back(lValue);
-            this->_lSubList.emplace_back();
+            objs.push_back(lValue);
+            subs.emplace_back();
         }
     }
     else {
-        this->_lSubList = SubList;
-        this->_lValueList.insert(this->_lValueList.begin(), size, lValue);
+        subs = SubList;
+        objs.insert(objs.begin(), size, lValue);
     }
+    auto rewrite =
+        keepRewritten(_lValueList, _lSubList, _ShadowSubList, objs, subs, {}, _Records, _Fingerprints);
+    this->_lValueList = std::move(objs);
+    this->_lSubList = std::move(subs);
     updateElementReference(nullptr);
+    keepPairedShadows(_ShadowSubList, rewrite);
     checkLabelReferences(_lSubList);
     hasSetValue();
 }
@@ -4065,9 +4228,18 @@ void PropertyLinkSubList::addValue(App::DocumentObject* obj,
     }
 
     aboutToSetValue();
-    _lValueList = valueList;
-    _lSubList = subList;
+    auto rewrite = keepRewritten(_lValueList,
+                                 _lSubList,
+                                 _ShadowSubList,
+                                 valueList,
+                                 subList,
+                                 {},
+                                 _Records,
+                                 _Fingerprints);
+    _lValueList = std::move(valueList);
+    _lSubList = std::move(subList);
     updateElementReference(nullptr);
+    keepPairedShadows(_ShadowSubList, rewrite);
     checkLabelReferences(_lSubList);
     hasSetValue();
 }
@@ -4406,11 +4578,9 @@ std::vector<GuessRecord> PropertyLinkSubList::getElementGuesses() const
 void PropertyLinkSubList::updateElementReference(DocumentObject* feature, bool reverse, bool notify)
 {
     if (!feature) {
-        // A value set without shadows (setValue(obj, subs), addValue(), ... which don't apply
-        // keepElementRecords()): the subs are chosen anew, so their records end (ops#127; the P2b
-        // review's S2 can't drop this)
+        // A value set without shadows: the setter has kept the records of the references it
+        // keeps (ops#504 E2), and the shadows are taken anew from the subs
         _ShadowSubList.clear();
-        _Records.clear();
         unregisterElementReference();
     }
     _ShadowSubList.resize(_lSubList.size());
@@ -5414,6 +5584,35 @@ public:
         return changed;
     }
 
+    /// PropertyXLink::setSubValues(), where \a xlink's old subs are of \a previous: the
+    /// references it keeps keep their records, fingerprints and shadows (ops#504 E2)
+    static void setSubValues(PropertyXLink* xlink,
+                             App::DocumentObject* previous,
+                             std::vector<std::string>&& subs,
+                             std::vector<PropertyLinkBase::ShadowSub>&& shadows)
+    {
+        auto rewrite =
+            keepRewritten(std::vector<App::DocumentObject*>(xlink->_SubList.size(), previous),
+                          xlink->_SubList,
+                          xlink->_ShadowSubList,
+                          std::vector<App::DocumentObject*>(subs.size(), xlink->_pcLink),
+                          subs,
+                          shadows,
+                          xlink->_Records,
+                          xlink->_Fingerprints);
+        xlink->_SubList = std::move(subs);
+        xlink->_ShadowSubList.clear();
+        if (shadows.size() == xlink->_SubList.size()) {
+            xlink->_ShadowSubList = std::move(shadows);
+            xlink->onContainerRestored();  // re-register element references
+        }
+        else {
+            xlink->updateElementReference(nullptr);
+        }
+        keepPairedShadows(xlink->_ShadowSubList, rewrite);
+        xlink->checkLabelReferences(xlink->_SubList);
+    }
+
     /// Lets \a xlink's references through \a link follow its new target (ops#42): see
     /// App::followLinkRetarget(). Notifies only when a shadow changes.
     static void
@@ -6023,18 +6222,7 @@ void PropertyXLink::setSubName(const char* subname)
 
 void PropertyXLink::setSubValues(std::vector<std::string>&& subs, std::vector<ShadowSub>&& shadows)
 {
-    // The records (ops#127) stay with references passed on with their shadows
-    keepElementRecords(_Records, subs.size(), shadows);
-    _SubList = std::move(subs);
-    _ShadowSubList.clear();
-    if (shadows.size() == _SubList.size()) {
-        _ShadowSubList = std::move(shadows);
-        onContainerRestored();  // re-register element references
-    }
-    else {
-        updateElementReference(nullptr);
-    }
-    checkLabelReferences(_SubList);
+    DocInfo::setSubValues(this, _pcLink, std::move(subs), std::move(shadows));
 }
 
 void PropertyXLink::setValue(App::DocumentObject* lValue)
@@ -6163,12 +6351,13 @@ void PropertyXLink::setValue(App::DocumentObject* lValue,
     if (!docInfo) {
         filePath.clear();
     }
+    auto previous = _pcLink;
     _pcLink = lValue;
     if (docInfo && docInfo->pcDoc) {
         stamp = docInfo->pcDoc->LastModifiedDate.getValue();
     }
     objectName = name;
-    setSubValues(std::move(subs), std::move(shadows));
+    DocInfo::setSubValues(this, previous, std::move(subs), std::move(shadows));
     hasSetValue();
 }
 
@@ -6211,6 +6400,7 @@ void PropertyXLink::setValue(std::string&& filename,
         _pcLink->_removeBackLinkProp(getName(), owner);
     }
 
+    auto previous = _pcLink;
     _pcLink = nullptr;
     if (docInfo != info) {
         unlink();
@@ -6223,7 +6413,7 @@ void PropertyXLink::setValue(std::string&& filename,
         stamp = docInfo->pcDoc->LastModifiedDate.getValue();
     }
     objectName = std::move(name);
-    setSubValues(std::move(subs), std::move(shadows));
+    DocInfo::setSubValues(this, previous, std::move(subs), std::move(shadows));
     hasSetValue();
 }
 
@@ -6342,9 +6532,8 @@ void PropertyXLink::onContainerRestored()
 
 void PropertyXLink::updateElementReference(DocumentObject* feature, bool reverse, bool notify)
 {
-    if (!feature) {
-        clearGuessRecords(_Records);  // the shadows go too: a sub set anew (ops#127)
-    }
+    // Without a feature, a setter's: it has kept the records of the references it keeps
+    // (ops#504 E2)
     bool changed = updateLinkReference(this,
                                        feature,
                                        reverse,
