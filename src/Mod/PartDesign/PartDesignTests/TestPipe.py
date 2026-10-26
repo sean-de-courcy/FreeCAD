@@ -4203,8 +4203,8 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
                 self.doc.recompute()
                 self.assertEqual(self.profileNamed(pipe, profile), named)
                 self.assertNoneMovedSilently(pipe, volume, points, lambda place: True)
-                # The named start and the direction (a point of the first edge) stay as stored
-                self.assertEqual(len(pipe.SpineEnds), 2)
+                # The stored start, way, end and the other vertex and middle stay as they were
+                self.assertEqual(len(pipe.SpineEnds), 5)
                 for before, after in zip(stored, pipe.SpineEnds):
                     self.assertLess((V(after) - before).Length, 1e-6, (stored, pipe.SpineEnds))
 
@@ -4223,7 +4223,7 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
                 named = self.profileNamed(pipe, profile)
                 volume = pipe.Shape.Volume
                 stored = [V(v) for v in pipe.SpineEnds]
-                self.assertEqual(len(stored), 2)
+                self.assertEqual(len(stored), 5)
                 self.assertGreater((stored[1] - stored[0]).Length, 1, stored)
                 points = self.attach(pipe)
                 for _ in range(2):
@@ -4335,6 +4335,78 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
         self.doc.recompute()
         self.assertEqual(list(pipe.SpineEnds), stored)
         self.assertNoneMovedSilently(pipe, volume, points, lambda place: True)
+
+    def testClosedSpineMovedKeepsItsStart(self):
+        """The D moved down along Z (its sketch's placement), the profile left at z = 0: by 8, so
+        its far vertex comes nearer the stored start than its own start, and by 12, past the
+        distance between its vertices. The spine's vertices and edges' middles are paired with
+        the stored ones as a whole, so the start stays the vertex that moved from z = 0, and no
+        corner's key passes to the other: a quiet reference stays or moves with the spine. Paired
+        by the start alone, the far vertex became the start and the two corners' keys traded (the
+        cloud reading review of fork PR 383, F1). Moved by 12, the D no longer passes through the
+        profile, and only the corners' keys are checked."""
+        corners = [V(0, 0, 0), V(0, 0, 10)]
+        for down in (8, 12):
+            self.tearDown()
+            self.setUp()
+            with self.subTest(down=down):
+                profile = self.square()
+                path = self.closedSpine("D")
+                pipe = self.pipe(profile, path, "Transformed")
+                keys = self.cornerKeysAt(pipe, corners)
+                self.assertTrue(keys)
+                points = self.attach(pipe)
+                shift = V(0, 0, -down)
+                path.Placement = App.Placement(shift, XZ.Rotation)
+                self.doc.recompute()
+                self.assertTrue(pipe.isValid(), pipe.getStatusString())
+                moved = [corner + shift for corner in corners]
+                for key, where in self.cornerKeysAt(pipe, moved).items():
+                    if key in keys:
+                        self.assertLessEqual(where, keys[key], key)
+                # Moved by 12, the D no longer passes through the profile, and the sweep's
+                # shape changes: only the keys are checked
+                for point, before in points.items() if down < 10 else ():
+                    levels = [e.get("warning_level") for e in App.getReferenceReport(point)]
+                    if not point.isValid() or any(levels):
+                        continue
+                    now = point.Placement.Base
+                    self.assertLess(
+                        min((now - before).Length, (now - before - shift).Length),
+                        1e-6,
+                        (point.Name, before, now),
+                    )
+
+    def testStoredEndsKeptWhenTheSpinesEdgesAreRenumbered(self):
+        """A pipe on the second L of a sketch (Edge3, Edge4): a line of the first L deleted, so
+        the naming refresh renumbers the Spine's edges while the document recomputes, and the
+        file saved and opened again, whose refresh runs at the end of the open. Neither is
+        another input: the stored ends stay as they were."""
+        path = self.twoPaths()
+        profile = self.holedSquare()
+        profile.Placement = App.Placement(V(120, 0, 30), App.Rotation(V(0, 1, 0), -90))
+        pipe = self.body.newObject("PartDesign::AdditivePipe", "Pipe")
+        pipe.Profile = profile
+        pipe.Spine = (path, ["Edge3", "Edge4"])
+        pipe.Transition = "Right corner"
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        stored = [V(v) for v in pipe.SpineEnds]
+        self.assertEqual(len(stored), 2)
+        path.delGeometry(0)
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        self.assertEqual(sorted(pipe.Spine[1]), ["Edge2", "Edge3"])
+        self.assertEqual([V(v) for v in pipe.SpineEnds], stored)
+        name = self.doc.Name
+        fileName = os.path.join(tempfile.mkdtemp(), name + ".FCStd")
+        self.doc.saveAs(fileName)
+        App.closeDocument(name)
+        self.doc = App.openDocument(fileName)
+        pipe = self.doc.getObject("Pipe")
+        self.assertEqual([V(v) for v in pipe.SpineEnds], stored)
+        self.doc.recompute()
+        self.assertEqual([V(v) for v in pipe.SpineEnds], stored)
 
     def twoPaths(self):
         """One sketch in the XZ plane with two L paths: up 30 from (0, 0) and right 20, and the

@@ -96,6 +96,7 @@
 #include <TopTools_IndexedMapOfShape.hxx>
 
 
+#include <App/Application.h>
 #include <App/Document.h>
 #include <App/DocumentObject.h>
 #include <App/NameTable.h>
@@ -3709,27 +3710,35 @@ Part::TopoShape wireAlong(
     return wire;
 }
 
-/// \a path, a closed spine of more than one edge, restarted at its stored start (\a stored: the
-/// vertex nearest it), or on a new pipe at its vertex nearest \a profile (the mean of the
-/// distances from the profile's vertices): its edges in the same direction, rotated in its order,
-/// made a wire as \a wire with their names (ops#469). The shell starts where the spine does, and
-/// its start keeps the profile's names; built from the sketch's first line, the start followed
-/// that line's direction, and a line drawn the other way moved the profile's names to the spine's
-/// other vertex, silently (the closed spine's two ends tie, so the stored side can't keep them,
-/// ops#379). Neither the stored start nor the profile's place changes with the lines' directions
-/// or order. The start is stored, not taken from the profile each time: a profile moved along a
-/// leg past its middle moved the start to the leg's other vertex, and the profile's names with
-/// it, to the elements there, silently, though the solid hadn't changed (the review of fork PR
-/// 383, round 1). Vertices the stored start ties between fall to the profile's place; a tie left
-/// (a new pipe's profile halfway along a leg) to the first of them in the wire's order, which is
-/// then stored. \a path itself when it isn't such a spine, when it already starts there, or when
-/// the new wire doesn't start there.
-// anchor: rung 4 (the stored start), seeded by rung 3 (the profile's place)
+/// \a path, a closed spine of more than one edge, restarted at its stored start, or on a new pipe
+/// at its vertex nearest \a profile (the mean of the distances from the profile's vertices): its
+/// edges in the same direction, rotated in its order, made a wire as \a wire with their names
+/// (ops#469). The shell starts where the spine does, and its start keeps the profile's names;
+/// built from the sketch's first line, the start followed that line's direction, and a line drawn
+/// the other way moved the profile's names to the spine's other vertex, silently (the closed
+/// spine's two ends tie, so the stored side can't keep them, ops#379). \a stored: the spine's
+/// vertices at the last good recompute, its start first, then in the sweep's order, and \a
+/// middles: its edges' middles (middleOf) in that order. They are paired with the spine's as a
+/// whole, from the start (in either direction) where the pairs' displacements differ least from
+/// one translation (their root mean square about their mean), so a spine moved whole keeps its
+/// start: paired by the start alone, a closed spine of two edges moved by more than half the
+/// distance between its vertices took the other vertex as its start, and the corners' keys passed
+/// between them (the cloud reading review of fork PR 383, F1); by the distances' sum, two
+/// vertices moved along their line by the distance between them tie. With another number of
+/// edges than stored, the vertex nearest the stored start. The start is stored, not taken from the profile each time: a profile
+/// moved along a leg past its middle moved the start to the leg's other vertex, and the profile's
+/// names with it, to the elements there, silently, though the solid hadn't changed (the review of
+/// fork PR 383, round 1). Starts that tie fall to the profile's place, and a tie left (a new
+/// pipe's profile halfway along a leg) to the first of them in the wire's order, which is then
+/// stored. \a path itself when it isn't such a spine, when it already starts there, or when the
+/// new wire doesn't start there.
+// anchor: rung 4 (the stored vertices), seeded by rung 3 (the profile's place)
 Part::TopoShape startNearest(
     const Part::TopoShape& path,
     const TopoDS_Shape& profile,
     const Part::TopoShape& wire,
-    const std::optional<gp_Pnt>& stored
+    const std::vector<gp_Pnt>& stored,
+    const std::vector<gp_Pnt>& middles
 )
 {
     if (path.isNull() || path.getShape().ShapeType() != TopAbs_WIRE || profile.IsNull()) {
@@ -3741,8 +3750,9 @@ Part::TopoShape startNearest(
     if (edges.size() < 2 || !BRep_Tool::IsClosed(path.getShape()) || vertices.IsEmpty()) {
         return path;
     }
-    auto startOf = [&edges](size_t k) {
-        return BRep_Tool::Pnt(TopExp::FirstVertex(edges[k], true));
+    const size_t n = edges.size();
+    auto startOf = [&edges, n](size_t k) {
+        return BRep_Tool::Pnt(TopExp::FirstVertex(edges[k % n], true));
     };
     auto fromProfile = [&](size_t k) {
         double sum = 0;
@@ -3751,8 +3761,33 @@ Part::TopoShape startNearest(
         }
         return sum / vertices.Extent();
     };
+    // How far the stored vertices and middles lie from the spine's, started at the vertex k,
+    // beyond one translation: in either direction, the less; with another number of edges, the
+    // stored start's distance alone
     auto fromStored = [&](size_t k) {
-        return stored->Distance(startOf(k));
+        if (stored.size() != n || middles.size() != n) {
+            return stored.front().Distance(startOf(k));
+        }
+        auto apart = [&](bool forward) {
+            std::vector<gp_Vec> moves;
+            for (size_t i = 0; i < n; ++i) {
+                const size_t at = forward ? k + i : k + n - i;
+                const size_t along = forward ? (k + i) % n : (k + 2 * n - 1 - i) % n;
+                moves.emplace_back(stored[i], startOf(at));
+                moves.emplace_back(middles[i], middleOf(edges[along]));
+            }
+            gp_Vec mean;
+            for (const gp_Vec& move : moves) {
+                mean += move;
+            }
+            mean /= static_cast<double>(moves.size());
+            double sum = 0;
+            for (const gp_Vec& move : moves) {
+                sum += (move - mean).SquareMagnitude();
+            }
+            return std::sqrt(sum / static_cast<double>(moves.size()));
+        };
+        return std::min(apart(true), apart(false));
     };
     // The edges, of \a candidates, whose starts lie nearest by \a distance
     auto nearestBy = [](const std::vector<size_t>& candidates, const auto& distance) {
@@ -3768,9 +3803,9 @@ Part::TopoShape startNearest(
         }
         return nearest;
     };
-    std::vector<size_t> tied(edges.size());
+    std::vector<size_t> tied(n);
     std::iota(tied.begin(), tied.end(), size_t {0});
-    if (stored) {
+    if (!stored.empty()) {
         tied = nearestBy(tied, fromStored);
     }
     if (tied.size() > 1) {
@@ -3781,11 +3816,15 @@ Part::TopoShape startNearest(
         return path;
     }
     std::vector<TopoDS_Edge> rotated;
-    for (size_t k = 0; k < edges.size(); ++k) {
-        rotated.push_back(edges[(nearest + k) % edges.size()]);
+    for (size_t k = 0; k < n; ++k) {
+        rotated.push_back(edges[(nearest + k) % n]);
     }
     const Part::TopoShape restarted = wireAlong(path, rotated, wire);
-    return restarted.isNull() ? path : restarted;
+    if (restarted.isNull()) {
+        FC_WARN("Pipe: the closed spine could not be restarted at its start; it is swept as drawn");
+        return path;
+    }
+    return restarted;
 }
 
 /// \a path, a closed spine of more than one edge, run one way chosen from the profile, from the
@@ -3854,7 +3893,13 @@ Part::TopoShape profileFirst(
         return path;
     }
     const Part::TopoShape reversed = wireAlong(path, back, wire);
-    if (reversed.isNull() || !(turn || profileAtStart(TopoDS::Wire(reversed.getShape())))) {
+    if (reversed.isNull()) {
+        if (turn) {
+            FC_WARN("Pipe: the closed spine could not be run the other way; it is swept as drawn");
+        }
+        return path;
+    }
+    if (!(turn || profileAtStart(TopoDS::Wire(reversed.getShape())))) {
         return path;
     }
     return reversed;
@@ -4074,8 +4119,9 @@ void Pipe::onChanged(const App::Property* prop)
         // ends by distance, and a re-picked L put 22 of 56 names at the end away from the profile,
         // silently (ops#435; the review of `notes\naming-class-B.md` round 1, CC2). Not when the
         // names of the same edges are brought up to date (the naming refresh and the reference
-        // solver, while the document recomputes), on restoring, or on undo and redo, which restore
-        // SpineEnds themselves.
+        // solver while the document recomputes, and the refresh at the end of an open, while the
+        // application restores), on restoring, or on undo and redo, which restore SpineEnds
+        // themselves.
         const bool sameInput = spineChanging && Spine.getValue() == spineBeforeChange
             && sortedSubs(Spine) == spineSubsBeforeChange;
         spineChanging = false;
@@ -4084,7 +4130,8 @@ void Pipe::onChanged(const App::Property* prop)
         const App::Document* doc = getDocument();
         if (!sameInput && SpineEnds.getSize() != 0 && doc && !isRestoring()
             && !doc->testStatus(App::Document::Restoring)
-            && !doc->testStatus(App::Document::Recomputing) && !doc->isPerformingTransaction()) {
+            && !doc->testStatus(App::Document::Recomputing) && !doc->isPerformingTransaction()
+            && !App::GetApplication().isRestoring()) {
             SpineEnds.setValues({});
         }
     }
@@ -4340,21 +4387,47 @@ App::DocumentObjectExecReturn* Pipe::execute()
         const bool startAtProfile = (Transformation.getValue() != 1 || multisections.empty())
             && Mode.getValue() != 3 && profilePoint.isNull() && !wiresections.empty()
             && !wiresections.front().empty();
-        // Such a closed spine's named start and the way it ran at the last good recompute
-        // (SpineEnds, where they lie in the body), here in the pipe's frame
-        const bool startStored = startAtProfile && BRep_Tool::IsClosed(path.getShape());
-        std::optional<gp_Pnt> storedStart;
+        // Such a closed spine of two edges or more as it was at the last good recompute
+        // (SpineEnds, where they lie in the body; here in the pipe's frame), 2n + 1 points for n
+        // edges: its start; its first edge's middle (middleOf: the way it ran); whether its end
+        // carried the profile's names (a flag, 1 or 0 in x); its other vertices in the sweep's
+        // order; their edges' middles. What else may be stored (an older build's
+        // [start, start], an open spine's ends) seeds nothing.
+        const size_t spineEdges = edgesInOrder(TopoDS::Wire(path.getShape())).size();
+        const bool startStored
+            = startAtProfile && BRep_Tool::IsClosed(path.getShape()) && spineEdges > 1;
+        std::vector<gp_Pnt> storedVertices;  // the start first
+        std::vector<gp_Pnt> storedMiddles;
         std::optional<gp_Pnt> storedWay;
-        if (startStored && SpineEnds.getSize() == 2) {
+        std::optional<bool> storedAtEnd;
+        const std::vector<Base::Vector3d>& stored = SpineEnds.getValues();
+        if (startStored && stored.size() >= 5 && stored.size() % 2 == 1) {
             const gp_Trsf inPipe = invObjLoc.Transformation();
-            const std::vector<Base::Vector3d>& stored = SpineEnds.getValues();
-            storedStart = gp_Pnt(stored[0].x, stored[0].y, stored[0].z).Transformed(inPipe);
-            storedWay = gp_Pnt(stored[1].x, stored[1].y, stored[1].z).Transformed(inPipe);
+            auto inThePipe = [&](size_t i) {
+                return gp_Pnt(stored[i].x, stored[i].y, stored[i].z).Transformed(inPipe);
+            };
+            const size_t count = (stored.size() - 1) / 2;
+            storedVertices.push_back(inThePipe(0));
+            storedMiddles.push_back(inThePipe(1));
+            storedWay = inThePipe(1);
+            storedAtEnd = stored[2].x > 0.5;
+            for (size_t i = 1; i < count; ++i) {
+                storedVertices.push_back(inThePipe(2 + i));
+            }
+            for (size_t i = 1; i < count; ++i) {
+                storedMiddles.push_back(inThePipe(1 + count + i));
+            }
         }
         if (startAtProfile) {
             Part::TopoShape located = profileShape;
             located.move(invObjLoc);
-            path = startNearest(path, located.getShape(), makeTopoShape(false), storedStart);
+            path = startNearest(
+                path,
+                located.getShape(),
+                makeTopoShape(false),
+                storedVertices,
+                storedMiddles
+            );
             // and runs the way that sweeps from the profile itself
             Part::TopoShape section = wiresections.front().front();
             section.move(invObjLoc);
@@ -4588,39 +4661,51 @@ App::DocumentObjectExecReturn* Pipe::execute()
             for (gp_Pnt& end : *spineEnds) {
                 end.Transform(inBody);
             }
-            // A closed spine's ends are one place, which can't tell them apart: the sections
-            // decide every time (endsSwapped), by where MakePipeShell put the profile, the shell's
-            // start or its end, which turns on the corners at the start (ops#469). Kept as stored,
-            // the names stayed at the start when an edit put the profile at the end, and went to
-            // a copy of the profile turned to the first edge's tangent.
-            if ((*spineEnds)[0].Distance((*spineEnds)[1]) > Precision::Confusion()) {
+            // A closed spine with a named start: its ends are one place, which the pairing can't
+            // tell apart, so the end it stored (ops#469); a new one's sections decide
+            if (!namedStart.IsNull()) {
+                reversed = storedAtEnd;
+            }
+            else {
                 reversed = storedSideAtEnd(SpineEnds.getValues(), *spineEnds);
             }
         }
         // Once the pipe is good: the spine's ends the next recompute pairs with its own, written
         // only when they moved, so that a recompute that changes nothing leaves the file as it was.
-        // A closed spine with a named start stores that start and a point of its first edge, the
-        // way it ran (ops#469): its ends are one place
+        // A closed spine with a named start stores what the next recompute reads above
         auto storeSpineEnds = [&]() {
             if (!spineEnds) {
                 return;
             }
             const bool atEnd = reversed.value_or(false);
-            gp_Pnt profileSide = (*spineEnds)[atEnd ? 1 : 0];
-            gp_Pnt other = (*spineEnds)[atEnd ? 0 : 1];
+            std::vector<gp_Pnt> points;
             if (!namedStart.IsNull()) {
                 const gp_Trsf inBody = invObjLoc.Inverted().Transformation();
-                profileSide = BRep_Tool::Pnt(TopoDS::Vertex(namedStart)).Transformed(inBody);
-                other = middleOf(pathEdges.front()).Transformed(inBody);
+                points.push_back(BRep_Tool::Pnt(TopoDS::Vertex(namedStart)).Transformed(inBody));
+                points.push_back(middleOf(pathEdges.front()).Transformed(inBody));
+                points.emplace_back(atEnd ? 1 : 0, 0, 0);
+                for (size_t k = 1; k < pathEdges.size(); ++k) {
+                    points.push_back(
+                        BRep_Tool::Pnt(TopExp::FirstVertex(pathEdges[k], true)).Transformed(inBody)
+                    );
+                }
+                for (size_t k = 1; k < pathEdges.size(); ++k) {
+                    points.push_back(middleOf(pathEdges[k]).Transformed(inBody));
+                }
             }
-            const std::vector<Base::Vector3d> values {
-                Base::Vector3d(profileSide.X(), profileSide.Y(), profileSide.Z()),
-                Base::Vector3d(other.X(), other.Y(), other.Z())
-            };
-            const std::vector<Base::Vector3d>& stored = SpineEnds.getValues();
-            const bool same = stored.size() == values.size()
-                && stored[0].IsEqual(values[0], Precision::Confusion())
-                && stored[1].IsEqual(values[1], Precision::Confusion());
+            else {
+                points.push_back((*spineEnds)[atEnd ? 1 : 0]);
+                points.push_back((*spineEnds)[atEnd ? 0 : 1]);
+            }
+            std::vector<Base::Vector3d> values;
+            for (const gp_Pnt& point : points) {
+                values.emplace_back(point.X(), point.Y(), point.Z());
+            }
+            const std::vector<Base::Vector3d>& current = SpineEnds.getValues();
+            const bool same = current.size() == values.size()
+                && std::ranges::equal(current, values, [](const auto& a, const auto& b) {
+                       return a.IsEqual(b, Precision::Confusion());
+                   });
             if (!same) {
                 SpineEnds.setValues(values);
             }
