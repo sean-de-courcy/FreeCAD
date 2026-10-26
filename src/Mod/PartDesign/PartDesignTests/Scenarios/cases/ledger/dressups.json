@@ -1,5 +1,5 @@
 {
-"run": {"cases": 3, "dirty": false, "platform": "win32", "sha": "6a81fe6f2607399464eef33c19a00580249770b7", "tier": "F", "time": "2026-10-26T20:25:16Z"},
+"run": {"cases": 3, "dirty": false, "platform": "win32", "sha": "66b17fbbeafd7511512e5cb9d6d4a9b35d73be6a", "tier": "F", "time": "2026-10-26T20:48:01Z"},
 "entries": {
 "DressUpInsertPocket|chamfer_edge|V2s": {"axes": ["M1", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#506", "tier": "G"},
 "DressUpInsertPocket|draft_face|V2s": {"axes": ["M1", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#506", "tier": "G"},
