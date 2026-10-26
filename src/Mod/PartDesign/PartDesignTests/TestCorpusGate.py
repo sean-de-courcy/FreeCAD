@@ -34,7 +34,8 @@ a line (and a CI warning): the merge guard refuses them until the ledger is upda
 variant or module),
 and last, in tier F, `TierFSeeds` (every verdict the same under a second naming hash seed; one
 that differs is `flaky`). The module's end prints the summary and, in tier F, the `Tier F:` line
-for the PR description.
+for the PR description: `failed` where any test failed or errored other than by a ledger comparison
+(Tracked). Tier F runs every configuration a case's ledger holds (corpus.Run.configsFor).
 
 Environment: FREECAD_SCENARIO_UPDATE_LEDGER=1 writes the ledgers from the run (in place);
 FREECAD_SCENARIO_LEDGER_OUT=<folder> writes them there instead (CI's would-be ledgers);
@@ -81,7 +82,25 @@ def testName(text):
     return re.sub(r"\W", "_", text)
 
 
-class CaseTest(unittest.TestCase):
+class Tracked(unittest.TestCase):
+    """Every test of the gate: one that fails or errors other than by a ledger comparison
+    (REGRESSED, NEW, STALE: the ledger fingerprint covers those) makes the Tier F line say
+    `failed` (fork PR 381 R3-5: a second hash seed's process that crashed)."""
+
+    comparisonFailed = False
+
+    def run(self, result=None):
+        if result is None:
+            return super().run(result)
+        before = len(result.failures) + len(result.errors)
+        self.comparisonFailed = False
+        out = super().run(result)
+        if len(result.failures) + len(result.errors) > before and not self.comparisonFailed:
+            RUN.testFailures.append(self.id())
+        return out
+
+
+class CaseTest(Tracked):
     case = None
     module = None
 
@@ -90,6 +109,7 @@ class CaseTest(unittest.TestCase):
         k = corpus.key(self.case.__name__, ref, config)
         corpus.say(f"CORPUS VERDICT {k} {outcome.verdict}")
         status, line = RUN.judge(self.module, k, outcome)
+        self.comparisonFailed = outcome.verdict != "error" and status in FAILING
         if outcome.verdict == "error" or status in FAILING:
             self.fail(f"{line}\n{outcome.message}")
 
@@ -125,12 +145,12 @@ def _makeTests():
                 self.fail(f"the case module {module.name} doesn't import:\n{module.error}")
 
             classes[f"Module_{testName(module.name)}"] = type(
-                f"Module_{testName(module.name)}", (unittest.TestCase,), {"test_imports": imports}
+                f"Module_{testName(module.name)}", (Tracked,), {"test_imports": imports}
             )
             continue
         for case in module.cases:
             attributes = {"case": case, "module": module.name, "__doc__": case.__doc__}
-            configs = corpus.configsFor(case, RUN.tier)
+            configs = RUN.configsFor(case, module.name)
             for ref in case.REFS:
                 for config in configs:
 
@@ -155,7 +175,7 @@ def _makeTests():
 globals().update(_makeTests())
 
 
-class Random_Sequences(unittest.TestCase):
+class Random_Sequences(Tracked):
     """Tier F: random edit sequences in V2s (Scenarios/randomized.py), one ledger entry each."""
 
 
@@ -166,6 +186,7 @@ def _makeRandomTests():
             k, outcome = RUN.randomOutcome(seed)
             corpus.say(f"CORPUS VERDICT {k} {outcome.verdict}")
             status, line = RUN.judge(corpus.RANDOM_MODULE, k, outcome)
+            self.comparisonFailed = outcome.verdict != "error" and status in FAILING
             if outcome.verdict == "error" or status in FAILING:
                 self.fail(f"{line} (replay with FREECAD_SCENARIO_REPLAY={seed}:"
                           f"{os.environ.get('FREECAD_SCENARIO_STEPS', corpus.RANDOM_STEPS)})\n"
@@ -178,18 +199,19 @@ def _makeRandomTests():
 _makeRandomTests()
 
 
-class Stale_Entries(unittest.TestCase):
+class Stale_Entries(Tracked):
     """No ledger entry has lost its case (a removed or renamed case or reference)."""
 
     def testNoStaleEntries(self):
         stale = RUN.stale()
+        self.comparisonFailed = bool(stale)
         for k in stale:
             RUN.lines.append(("STALE", f"CORPUS STALE {k}"))
             corpus.say(f"CORPUS STALE {k}")
         self.assertEqual(stale, [], "ledger entries without their case")
 
 
-class TierFSeeds(unittest.TestCase):
+class TierFSeeds(Tracked):
     """Tier F: the run under a second naming hash seed gives every verdict this run gives.
     Sorted after the other classes, so this run's verdicts are all in."""
 
@@ -210,5 +232,5 @@ __all__ = [
     name
     for name, value in globals().items()
     if isinstance(value, type) and issubclass(value, unittest.TestCase)
-    and value is not CaseTest and not name.startswith("_")
+    and value not in (CaseTest, Tracked) and not name.startswith("_")
 ]

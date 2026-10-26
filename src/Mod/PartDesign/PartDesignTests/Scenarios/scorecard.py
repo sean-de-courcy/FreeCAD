@@ -87,6 +87,13 @@ SETS = {
     "error": "neither",
     "flaky": "neither",
 }
+# The verdicts that are right under an expectation kind (the ledger's `expect`), as harness.py's
+# EXPECT_RIGHT
+EXPECT_RIGHT = {
+    "BROKEN": {"broken": 0},
+    "PARTIAL": {"partial-warned": 0},
+    "OWN-OR-BROKEN": {"broken": 1},
+}
 SET_ORDER = ("right", "loud+", "loud-", "wrong", "neither")
 PLATFORMS = {"win32": "Windows", "darwin": "macOS", "linux": "Linux"}
 CONFIG_ORDER = ("V2s", "V2", "V2multi", "V1", "1.1.3")
@@ -193,21 +200,30 @@ def randomSection(records, columns):
     return out
 
 
-def setOf(verdict):
+def setOf(verdict, kind=None):
+    if verdict in EXPECT_RIGHT.get(kind, {}):
+        return "right"
     return SETS.get(verdict, "neither")
 
 
+def entrySet(entry, field="expected"):
+    """An entry's set under its expectation kind: an allowed set counts as its worst member."""
+    value = entry.get(field, entry.get("expected"))
+    values = value if isinstance(value, list) else [value]
+    return max((setOf(v, entry.get("expect")) for v in values), key=SET_ORDER.index)
+
+
 def setTables(items, what):
-    """Tables by class and by axis of [(classes, axes, verdict)] items, counted by set."""
+    """Tables by class and by axis of [(classes, axes, set)] items, counted by set."""
     byClass = collections.defaultdict(collections.Counter)
     byAxis = collections.defaultdict(collections.Counter)
     total = collections.Counter()
-    for classes, axes, verdict in items:
+    for classes, axes, kind in items:
         for c in classes or ["-"]:
-            byClass[c][setOf(verdict)] += 1
+            byClass[c][kind] += 1
         for a in axes or ["-"]:
-            byAxis[a][setOf(verdict)] += 1
-        total[setOf(verdict)] += 1
+            byAxis[a][kind] += 1
+        total[kind] += 1
 
     def rows(counts):
         return [[k, sum(n.values())] + [n.get(s, 0) for s in SET_ORDER] for k, n in sorted(counts.items())]
@@ -332,7 +348,7 @@ def expectedVerdict(entry, field="expected"):
     """An entry's verdict for the tables: an allowed set counts as its worst member."""
     value = entry.get(field, entry.get("expected"))
     if isinstance(value, list):
-        return max(value, key=lambda v: SET_ORDER.index(setOf(v)))
+        return max(value, key=lambda v: SET_ORDER.index(setOf(v, entry.get("expect"))))
     return value
 
 
@@ -361,13 +377,13 @@ def renderLedger(ledgers, title, sources, base=None):
     out += ["## Ledgers", ""] + table(["Module", "Entries", "Tier", "Platform", "Sha", "Time"], rows)
     out.append("")
     entries = {k: e for ledger in ledgers.values() for k, e in ledger.get("entries", {}).items()}
-    out += setTables([(e.get("classes"), e.get("axes"), expectedVerdict(e)) for e in entries.values()],
+    out += setTables([(e.get("classes"), e.get("axes"), entrySet(e)) for e in entries.values()],
                      "Windows")
     mac = {k: e for k, e in entries.items() if "macos" in e}
     out += ["## macOS overrides", ""]
     out += [f"- `{k}`: {e['expected']} on Windows, {e['macos']} on macOS" for k, e in sorted(mac.items())]
     out += ([] if mac else ["None."]) + [""]
-    wrong = sorted(k for k, e in entries.items() if setOf(expectedVerdict(e)) == "wrong")
+    wrong = sorted(k for k, e in entries.items() if entrySet(e) == "wrong")
     out += ["## Debt (the wrong set)", ""]
     for k in wrong:
         e = entries[k]
@@ -378,8 +394,8 @@ def renderLedger(ledgers, title, sources, base=None):
         old = {k: e for ledger in base.values() for k, e in ledger.get("entries", {}).items()}
         moves = collections.defaultdict(list)
         for k in sorted(set(old) | set(entries)):
-            a = setOf(expectedVerdict(old[k])) if k in old else None
-            b = setOf(expectedVerdict(entries[k])) if k in entries else None
+            a = entrySet(old[k]) if k in old else None
+            b = entrySet(entries[k]) if k in entries else None
             if a != b:
                 moves[moveKind(a, b)].append(f"`{k}`: {a or '-'} -> {b or '-'}")
         out += ["## Against the base", ""]

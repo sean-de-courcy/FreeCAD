@@ -121,7 +121,9 @@ SETS = {
     "flaky": "neither",
 }
 # How bad a verdict is, for the ledger's REGRESSED and IMPROVED: higher is worse. Within the right
-# set a plain `correct` ranks above the others.
+# set a plain `correct` ranks above the others; within the wrong set a silent `wrong` ranks below the
+# warned or partly kept ones, so a change that drops the warning is REGRESSED (the cloud review of
+# fork PR 381, H1).
 RANKS = {
     "correct": 0,
     "equivalent": 1,
@@ -131,11 +133,40 @@ RANKS = {
     "broken-": 3,
     "error": 4,
     "flaky": 4,
-    "wrong": 5,
     "guessed-wrong": 5,
     "partial": 5,
     "partial-warned": 5,
+    "wrong": 6,
 }
+# The kinds of expectation (a record's `expect`, the ledger's `expect`), and the verdicts that are
+# the right answer under a kind though their own set isn't right, with their rank: a break where
+# BROKEN is expected, a reference computed on with a warning where PARTIAL is, a break where the
+# own element or a break is (fork PR 381, H1). scorecard.py and the ops repo's corpus_guard.py keep
+# copies of SETS and EXPECT_RIGHT: keep them equal (TestNamingScenarios checks scorecard's).
+EXPECT_KINDS = ("OWN-OR-BROKEN", "BROKEN", "PARTIAL", "GUESSED", "SETTLED", "WARNED", "CORRECT")
+EXPECT_RIGHT = {
+    "BROKEN": {"broken": 0},
+    "PARTIAL": {"partial-warned": 0},
+    "OWN-OR-BROKEN": {"broken": 1},
+}
+
+
+def expectKind(expect):
+    """The kind of an expectation's repr (a record's `expect`): CORRECT for a plain element."""
+    text = str(expect or "")
+    return next((k for k in EXPECT_KINDS[:-1] if text.startswith(k)), "CORRECT")
+
+
+def verdictSet(verdict, kind=None):
+    """The verdict's set under the expectation kind (SETS, or right where EXPECT_RIGHT says)."""
+    if verdict in EXPECT_RIGHT.get(kind, {}):
+        return "right"
+    return SETS.get(verdict, "neither")
+
+
+def verdictRank(verdict, kind=None):
+    """The verdict's rank under the expectation kind (RANKS, or EXPECT_RIGHT's)."""
+    return EXPECT_RIGHT.get(kind, {}).get(verdict, RANKS.get(verdict, 0))
 # The configurations whose broken references the solver reports with candidates
 SOLVER_CONFIGS = ("V2s", "V2si")
 
@@ -1008,8 +1039,9 @@ class Scenario:
     the full set only. SIZE is the case's largest extent at scale 1, and SCALE the scale it runs
     at by default (the user's ~600 mm): a case with SIZE multiplies its lengths by `self.scale`,
     so tier F can run it at other sizes (`<config>:s<mm>`). THIN marks a case that builds a thin
-    member when `self.thin` is set (`<config>:thin`). ACCEPTED and ALLOWED go into the ledger:
-    {ref: "decision <n>"} accepts a wrong-set verdict, {ref: [verdicts]} allows a known flake.
+    member when `self.thin` is set (`<config>:thin`). ACCEPTED and ALLOWED go into the ledger,
+    keyed by reference and configuration: {"ref|V2": "decision <n>"} accepts a wrong-set verdict
+    in that configuration only, {"ref|V2s": [verdicts]} allows a known flake there.
     The configuration's suffix (`V2s:thin`) is its variant."""
 
     abstract = True

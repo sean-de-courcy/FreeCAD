@@ -74,8 +74,10 @@ Rules:
   ~600 mm) let tier F run the case at other sizes: the case multiplies its lengths by `self.scale`
   (`self.s(20, 10)` gives them scaled). **Thin**: `THIN = True` and the case builds a thin member
   when `self.thin` is set. `cases/attachment.py` does both.
-- `ACCEPTED = {"ref": "decision <n>"}` accepts a wrong-set verdict (only with the user's decision);
-  `ALLOWED = {"ref": ["correct", "broken"]}` allows a known flake. Both go into the ledger.
+- `ACCEPTED = {"ref|V2": "decision <n>"}` accepts a wrong-set verdict in that configuration (only
+  with the user's decision; a report column's acceptance isn't V2s's);
+  `ALLOWED = {"ref|V2s": ["correct", "broken"]}` allows a known flake there. Both go into the
+  ledger, and a case drops them by deleting them (the next tier F run rewrites the entry).
 - A case imports the harness absolutely (`from PartDesignTests.Scenarios...`): runs import case
   modules by path. A module's file name is its ledger's name (not `random`).
 - A case doesn't run in the general `-t 0` run (`TestNamingScenarios` leaves tagged scenarios out),
@@ -91,6 +93,11 @@ Rules:
 | wrong | `wrong`, `guessed-wrong`, `partial`, `partial-warned` | silent or warned but wrong, or only some pieces kept |
 | neither | `error` (the case's run failed), `flaky` (a different verdict under another hash seed) | red until explained |
 
+A verdict is judged under its expectation's kind (`harness.EXPECT_RIGHT`): `broken` is right where
+`BROKEN` is expected, `partial-warned` where `PartialWarned` is, and `broken` where `OwnOrBroken` is
+(after the own element). Inside the wrong set a silent `wrong` ranks below the warned or partly kept
+verdicts, so a dropped warning is REGRESSED.
+
 ## Running
 
 Every run sets `FREECAD_USER_HOME` to an absolute folder that exists. On Windows run FreeCADCmd from
@@ -105,13 +112,14 @@ pixi run --manifest-path 'D:\CustomFreeCAD\wt\<checkout>\pixi.toml' python -c "i
 
 - **Tier G** (`FREECAD_SCENARIO_TIER=G`, the default): the `TIER = "G"` cases in V2s, one run each.
   CI's gate.
-- **Tier F** (`F`): every case in V2s, its thin variant (`V2s:thin`), the V2si oracle (V2si must give
-  what V2s gives), random sequences (`Random<seed>`), and the same run in a second process under
+- **Tier F** (`F`): every case in V2s, its thin variant (`V2s:thin`), every other configuration its
+  ledger holds (report columns, sizes), the V2si oracle (V2si must give what V2s gives), random sequences (`Random<seed>`), and the same run in a second process under
   another naming hash seed (a verdict that differs is `flaky`). The implementer runs it before every
   push, with `FREECAD_SCENARIO_UPDATE_LEDGER=1`, and commits the ledgers it writes.
 - A run reads the cases and ledgers of the build's source tree (`CMakeCache.txt`), so edits to case
-  modules need no rebuild; edits to `harness.py`, `corpus.py` or `TestCorpusGate.py` are copied into
-  `build/.../Mod/PartDesign/PartDesignTests/` by a build (or by hand).
+  modules need no rebuild; edits to the other Python (`Scenarios/*.py`, `TestCorpusGate.py`,
+  `TestNamingScenarios.py`) are copied into `build/.../Mod/PartDesign/PartDesignTests/` by a build (or
+  by hand).
 - **An attacker's inbox** (no checkout): `FREECAD_SCENARIO_MODULES=D:\CustomFreeCAD\corpus\inbox\<class>`
   (several folders separated by `;`) runs those modules instead, against any build, with their
   ledgers in `<folder>\ledger\` if there are any. Without a ledger every key is printed with its
@@ -138,16 +146,19 @@ What a run prints:
   The fingerprint covers every entry, whole, as the run's in-place update leaves the ledgers; the
   guard recomputes it from the head's ledgers, so a run whose ledgers weren't committed (or were
   edited after it) doesn't pass. `failed` means an `error` or `flaky` verdict, a V2si oracle
-  difference or a module that doesn't import (a REGRESSED key against the old ledger isn't a
-  failure here: the ledger diff shows it). The guard takes only a Windows line that says `ok`, with
-  at least as many verdicts as the head's ledgers have V2s, V2s:thin and random entries.
+  difference, a module that doesn't import, or any other test that failed or errored (the second
+  hash seed's process, say); a REGRESSED, NEW or STALE key against the old ledger isn't a failure
+  here: the ledger diff shows it. The guard takes only a Windows line that says `ok`, with at least
+  as many verdicts as the head's ledgers have entries.
 - Only a **full** tier F run prints that line: the fork's own folder (no `FREECAD_SCENARIO_MODULES`),
-  V2s among the configurations, the random sequences at their default steps, the second hash seed,
-  the oracle, no `FREECAD_SCENARIO_SHA`, and the build's `corpus.py`, `harness.py`, `randomized.py`
-  and `TestCorpusGate.py` the same as the checkout's. Any other tier F run prints `CORPUS partial
+  V2s among the configurations, the random sequences at their default steps, a second hash seed
+  that is on and differs from the run's (`FREECAD_NAMING_HASH_SEED` as `NamingHash.h` reads it), the
+  oracle, no `FREECAD_SCENARIO_SHA`, and the build's `Scenarios/*.py`, `TestCorpusGate.py` and
+  `TestNamingScenarios.py` the same as the checkout's. Any other tier F run prints `CORPUS partial
   tier F run (<why>): no Tier F line`.
 - A case module that fails to import, or exits at import, or whose cases have bad tags (`TIER` not
-  "G" or "F", `CLASSES` or `AXES` not a tuple of names) is a failing `Module_<name>` test; CI's step
+  "G" or "F", `CLASSES` or `AXES` not a tuple of names, `ACCEPTED` or `ALLOWED` not keyed by
+  `<ref>|<configuration>`) is a failing `Module_<name>` test; CI's step
   also fails when the run ends without its `CORPUS tier G:` line. A case defined outside `cases/`
   fails `TestNamingScenarios.CasesOnlyInCases` (it would run nowhere).
 
@@ -159,17 +170,25 @@ What a run prints:
 "AttachLength|datum_top_face|V2s": {"axes": ["M1", "E5", "X4:600"], "classes": ["D"], "expected": "correct", "found_by": "port", "issue": "ops#506", "tier": "G"},
 ```
 
-- `expected` is the Windows verdict (or an allowed set), `macos` a macOS override; `tier`, `classes`,
+- `expected` is the Windows verdict (or an allowed set), `macos` a macOS override, `expect` the kind
+  of expectation it was judged against (`CORRECT`, `BROKEN`, `PARTIAL`, ...); `tier`, `classes`,
   `axes`, `issue`, `found_by`, `accepted` come from the case. The `run` header has the sha (`dirty` when
-  the checkout had other uncommitted changes), platform, time, tier and number of cases.
+  the checkout had other uncommitted changes, or untracked files under `src/`), platform, time,
+  tier and number of cases.
 - **Never edited by hand**: a run with `FREECAD_SCENARIO_UPDATE_LEDGER=1` writes it (tier G only its
   own entries, tier F the module, and tier F removes a ledger whose module is gone). Commit the code first, then run, then commit the ledgers: the
   guard checks that the run's sha is the head commit, or that only ledgers changed since.
 - The merge guard (`scripts/corpus_guard.sh` in the ops repo, run by `merge_pr.sh`) refuses an entry
-  that moves into the wrong set (unless `accepted`), a new wrong-set entry without `issue` and
-  `found_by`, an allowed set or entry in the wrong or neither set, a removed or renamed entry, a change to an existing
-  case module without the label `corpus`, a `corpus` PR touching more than `Scenarios/` and `tests/`,
-  a PR without the `Tier F:` line for its head or whose ledgers don't match its fingerprint, and a Windows gate that reported IMPROVED or CHANGED;
-  it flags right -> loud moves (`decision 120 (4)` in the description lets them through).
+  that moves into the wrong set, or inside it to a silent verdict, unless it is accepted (`accepted`
+  the base's entry had, or set by a `corpus` PR); a new wrong-set entry without `issue` and
+  `found_by`, or without `accepted` or a comment line `Confirmed on integration <sha>: ...` naming a
+  commit of the base; an allowed set or entry in the wrong or neither set, a removed or renamed
+  entry, a ledger without its case module; a change to an existing case module or to the judging
+  code (`harness.py`, `models.py`, `corpus.py`, `randomized.py`, `__init__.py`, `TestCorpusGate.py`,
+  `TestNamingScenarios.py`) without the label `corpus`, a case importing other Scenarios modules than
+  `harness` and `models`, a `corpus` PR touching more than `Scenarios/`, those two test modules and
+  `tests/`; a PR without the `Tier F:` line for its head or whose ledgers don't match its
+  fingerprint, and a Windows gate that reported IMPROVED or CHANGED. It flags right -> loud moves (a
+  description line `Decision 120 (4): <why>` lets them through).
 - `python scorecard.py --ledger cases/ledger [--base <other ledger folder>]` tabulates the ledgers by
   class, axis and set without a run.

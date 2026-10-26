@@ -26,19 +26,22 @@ A case is a Scenario with CLASSES set (harness.py). Case modules live in a case 
 fork's `Scenarios/cases/`, or any folder named in FREECAD_SCENARIO_MODULES. Each module has a
 ledger, `<folder>/ledger/<module>.json`: per (case, reference, configuration) the verdict
 expected on Windows (`expected`, one verdict or an allowed set), an optional `macos` override,
-the case's `tier`, `classes`, `axes`, `issue`, `found_by` and `accepted`, and a `run` header
-(sha, platform, time, tier, cases). Ledgers are written by runs only
-(FREECAD_SCENARIO_UPDATE_LEDGER=1), never by hand.
+the kind of the expectation it was judged against (`expect`: harness.EXPECT_KINDS), the case's
+`tier`, `classes`, `axes`, `issue`, `found_by` and `accepted`, and a `run` header (sha,
+platform, time, tier, cases). Ledgers are written by runs only (FREECAD_SCENARIO_UPDATE_LEDGER=1),
+never by hand.
 
-Each verdict is compared with its entry (`compare`): a worse one is REGRESSED (the gate fails),
-a better one IMPROVED, another one of the same rank CHANGED (both warnings: the ledger needs the
-full run), a key without an entry NEW (a failure, where the module has a ledger), an entry of
-the tier without a run STALE (a failure). `TestCorpusGate` turns this into tests.
+Each verdict is compared with its entry (`compare`, by harness.verdictRank under each one's
+expectation kind): a worse one is REGRESSED (the gate fails), a better one IMPROVED, another one
+of the same rank CHANGED (both warnings: the ledger needs the full run), a key without an entry
+NEW (a failure, where the module has a ledger), an entry of the tier without a run STALE (a
+failure). `TestCorpusGate` turns this into tests.
 
 Tiers (FREECAD_SCENARIO_TIER): G, the cases with TIER "G" in V2s, one run each (the CI gate);
 F, every case in V2s and its variants (`:thin` for THIN cases, `:s<mm>` for the sizes in
-FREECAD_SCENARIO_SCALES), the V2si oracle, a second process under another naming hash seed
-(a verdict that differs is `flaky`) and a range of random sequences.
+FREECAD_SCENARIO_SCALES) and every other configuration its ledger holds (report columns, sizes),
+the V2si oracle, a second process under another naming hash seed (a verdict that differs is
+`flaky`) and a range of random sequences.
 """
 
 import datetime
@@ -48,6 +51,8 @@ import importlib
 import importlib.util
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 import time
@@ -182,7 +187,10 @@ def loadModules():
 
 
 def tagProblems(case):
-    """What is wrong with a case's tags: TIER "G" or "F", CLASSES and AXES tuples of names."""
+    """What is wrong with a case's tags: TIER "G" or "F", CLASSES and AXES tuples of names,
+    ACCEPTED and ALLOWED keyed by "<ref>|<configuration>" (an acceptance of a report column
+    isn't one of V2s: fork PR 381, H2), ACCEPTED's values "decision <n>", ALLOWED's lists of
+    verdicts."""
     problems = []
     if case.TIER not in ("G", "F"):
         problems.append(f"{case.__name__}.TIER is {case.TIER!r}, not 'G' or 'F'")
@@ -190,6 +198,18 @@ def tagProblems(case):
         value = getattr(case, field)
         if not isinstance(value, (tuple, list)) or not all(isinstance(v, str) and v.strip() for v in value):
             problems.append(f"{case.__name__}.{field} is {value!r}, not a tuple of names")
+    for field in ("ACCEPTED", "ALLOWED"):
+        for k, value in getattr(case, field).items():
+            ref, _, config = str(k).partition("|")
+            if ref not in case.REFS or not runnable(case, config):
+                problems.append(f"{case.__name__}.{field} key {k!r} isn't '<ref>|<configuration>' "
+                                "of its REFS and configurations")
+            if field == "ACCEPTED" and not (isinstance(value, str) and re.match(r"decision \d+\b", value)):
+                problems.append(f"{case.__name__}.ACCEPTED[{k!r}] is {value!r}, not 'decision <n>'")
+            if field == "ALLOWED" and not (
+                isinstance(value, (tuple, list)) and value and all(v in harness.VERDICTS for v in value)
+            ):
+                problems.append(f"{case.__name__}.ALLOWED[{k!r}] is {value!r}, not a list of verdicts")
     return problems
 
 
@@ -233,9 +253,12 @@ def configsFor(case, which):
 
 
 def runnable(case, config):
-    """Whether the case can still run in the configuration: a `:thin` variant needs THIN, a
-    `:s<mm>` one SIZE, and no other variant exists. An entry of a configuration it can't run in
-    is stale."""
+    """Whether the case can still run in the configuration: a known one other than the oracle's
+    V2si, a `:thin` variant needs THIN, a `:s<mm>` one SIZE, and no other variant exists. An entry
+    of a configuration it can't run in is stale."""
+    base = config.split(":")[0]
+    if base not in harness.CONFIGS or base == "V2si":
+        return False
     for part in config.split(":")[1:]:
         if part == "thin":
             if not case.THIN:
@@ -256,8 +279,9 @@ def isNumber(text):
 
 
 def worst(results):
-    """The worst of a reference's step Results by harness.RANKS (the first on a tie)."""
-    return max(results, key=lambda r: harness.RANKS.get(r.verdict, 0))
+    """The worst of a reference's step Results by rank under each step's expectation (the first
+    on a tie)."""
+    return max(results, key=lambda r: harness.verdictRank(r.verdict, harness.expectKind(r.record.get("expect"))))
 
 
 class Outcome:
@@ -265,6 +289,11 @@ class Outcome:
 
     def __init__(self, verdict, record=None, message=""):
         self.verdict, self.record, self.message = verdict, record or {}, message
+
+    @property
+    def kind(self):
+        """The kind of expectation the verdict was judged against (CORRECT without a record)."""
+        return harness.expectKind(self.record.get("expect"))
 
 
 def runCase(case, config):
@@ -348,16 +377,23 @@ def expectedOn(entry, where=None):
     return list(value) if isinstance(value, list) else [value]
 
 
-def compare(entry, verdict):
-    """OK, REGRESSED, IMPROVED or CHANGED: the verdict against the entry's allowed verdicts. An
-    error or a flake that isn't allowed is always REGRESSED."""
+def kindOf(entry):
+    """The entry's expectation kind (CORRECT where it has none)."""
+    return entry.get("expect") or "CORRECT"
+
+
+def compare(entry, verdict, kind="CORRECT"):
+    """OK, REGRESSED, IMPROVED or CHANGED: the verdict, under its expectation kind, against the
+    entry's allowed verdicts under the entry's kind (a `partial-warned` that becomes `wrong` under
+    PARTIAL is REGRESSED: fork PR 381, H1). An error or a flake that isn't allowed is always
+    REGRESSED."""
     allowed = expectedOn(entry)
-    if verdict in allowed:
+    if verdict in allowed and kind == kindOf(entry):
         return "OK"
     if verdict in ("error", "flaky"):
         return "REGRESSED"
-    rank = harness.RANKS.get(verdict, 0)
-    ranks = [harness.RANKS.get(v, 0) for v in allowed]
+    rank = harness.verdictRank(verdict, kind)
+    ranks = [harness.verdictRank(v, kindOf(entry)) for v in allowed]
     if rank > max(ranks):
         return "REGRESSED"
     if rank < min(ranks):
@@ -365,29 +401,30 @@ def compare(entry, verdict):
     return "CHANGED"
 
 
-def entryFor(case, ref, config, verdict, old):
+def entryFor(case, ref, config, outcome, old):
     """The ledger entry a run writes for a case's reference: the verdict expected on this
-    platform (macOS writes its override only where it differs), the case's tags, and an
-    allowed set kept (or given by the case's ALLOWED) when the verdict is in it."""
-    # a variant (`V2s:thin`) runs in tier F only
-    tier = case.TIER if ":" not in config else "F"
-    entry = {"tier": tier, "classes": list(case.CLASSES), "axes": list(case.AXES)}
+    platform (macOS writes its override only where it differs), its expectation kind, the case's
+    tags, and the allowed set the case's ALLOWED gives the configuration when the verdict is in
+    it. ACCEPTED and ALLOWED are per reference and configuration (fork PR 381, H2)."""
+    # a variant (`V2s:thin`) or a report column (`V2`, `V1`) runs in tier F only
+    tier = case.TIER if config == "V2s" else "F"
+    entry = {"tier": tier, "expect": outcome.kind, "classes": list(case.CLASSES), "axes": list(case.AXES)}
     for field, value in (
         ("issue", case.ISSUE),
         ("found_by", case.FOUND_BY),
-        ("accepted", case.ACCEPTED.get(ref)),
+        ("accepted", case.ACCEPTED.get(f"{ref}|{config}")),
     ):
         if value:
             entry[field] = value
-    allowed = case.ALLOWED.get(ref)
-    value = list(allowed) if allowed and verdict in allowed else verdict
-    return entry | expectation(value, verdict, old)
+    allowed = case.ALLOWED.get(f"{ref}|{config}")
+    value = list(allowed) if allowed and outcome.verdict in allowed else outcome.verdict
+    return entry | expectation(value, outcome.verdict, old)
 
 
 def expectation(value, verdict, old):
     """The `expected` and `macos` fields a run writes: on macOS the override only, where it
-    differs from the Windows verdict; elsewhere the verdict, or the old allowed set if the
-    verdict is in it, with the old override kept."""
+    differs from the Windows verdict; elsewhere `value` (the verdict, or the case's allowed set:
+    an old set isn't kept once the case drops it, fork PR 381 R3-2), with the old override kept."""
     old = old or {}
     if platform() == "macos":
         base = old.get("expected", value)
@@ -395,23 +432,22 @@ def expectation(value, verdict, old):
         if verdict not in (base if isinstance(base, list) else [base]):
             fields["macos"] = value
         return fields
-    previous = old.get("expected")
-    if isinstance(previous, list) and not isinstance(value, list) and verdict in previous:
-        value = previous
     fields = {"expected": value}
     if "macos" in old:
         fields["macos"] = old["macos"]
     return fields
 
 
-def randomEntry(verdict, old):
-    entry = {"tier": "F", "classes": [], "axes": [], "issue": "ops#506", "found_by": "random"}
-    return entry | expectation(verdict, verdict, old)
+def randomEntry(outcome, old):
+    entry = {"tier": "F", "expect": outcome.kind, "classes": [], "axes": [], "issue": "ops#506",
+             "found_by": "random"}
+    return entry | expectation(outcome.verdict, outcome.verdict, old)
 
 
 def gitState(folder):
     """(sha, dirty) of the checkout holding the folder: dirty when anything but the ledgers
-    differs from HEAD. FREECAD_SCENARIO_SHA overrides the sha (a CI run)."""
+    differs from HEAD, untracked files under `src/` too (a case module that isn't added runs:
+    fork PR 381 R3-4). FREECAD_SCENARIO_SHA overrides the sha (a CI run)."""
     sha = os.environ.get("FREECAD_SCENARIO_SHA")
     if sha:
         return sha, False
@@ -425,10 +461,42 @@ def gitState(folder):
             text=True,
             timeout=60,
         ).stdout.splitlines()
+        status += subprocess.run(
+            ["git", "-C", folder, "status", "--porcelain", "--untracked-files=normal", "--", ":/src"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        ).stdout.splitlines()
     except (OSError, subprocess.SubprocessError):
         return "unknown", False
     dirty = [line for line in status if f"/{LEDGER}/" not in line.replace("\\", "/")]
     return sha or "unknown", bool(dirty)
+
+
+def hashSeed(text):
+    """A naming hash seed as NamingHash.h reads FREECAD_NAMING_HASH_SEED (strtoull, base 0, the
+    whole text): 0, the seed off, when unset, empty, unparsable or 0."""
+    match = re.fullmatch(r"[ \t\n\v\f\r]*([+-]?)(0[xX][0-9a-fA-F]+|0[0-7]*|[1-9][0-9]*)", text or "")
+    if not match:
+        return 0
+    sign, digits = match.groups()
+    if digits[:2].lower() == "0x":
+        value = int(digits[2:], 16)
+    elif digits.startswith("0"):
+        value = int(digits, 8)
+    else:
+        value = int(digits)
+    value = min(value, 2**64 - 1)  # strtoull's ULLONG_MAX on overflow
+    return (-value) % 2**64 if sign == "-" else value
+
+
+def childSeed():
+    """The hash seed of tier F's second process (text), or None without one:
+    FREECAD_SCENARIO_CHILD_SEED (`none`: none), by default 2, or 1 where this process runs under 2."""
+    text = os.environ.get("FREECAD_SCENARIO_CHILD_SEED")
+    if text is None:
+        return "1" if hashSeed(os.environ.get("FREECAD_NAMING_HASH_SEED")) == hashSeed(CHILD_SEED) else CHILD_SEED
+    return None if text.strip().lower() == "none" else text
 
 
 # ---------------------------------------------------------------------------------------------
@@ -451,6 +519,9 @@ class Run:
         self.timings = {}  # {case: seconds}
         self.lines = []  # the comparison lines (REGRESSED, ...), for the summary
         self.failures = []  # what fails without a verdict: the V2si oracle (TestCorpusGate)
+        # every test that failed or errored other than by a ledger comparison (TestCorpusGate's
+        # Tracked): the Tier F line says `failed` (fork PR 381 R3-5)
+        self.testFailures = []
         self.ledgers = {m.name: readLedger(m.ledgerPath) for m in self.modules}
         self.orphanLedgers = {name: readLedger(path) for name, path in self.orphans.items()}
         if self.tier == "F" and self.inTree:
@@ -461,12 +532,24 @@ class Run:
         self.planned = {}
         for module in self.modules:
             for case in module.cases:
-                for config in configsFor(case, self.tier):
+                for config in self.configsFor(case, module.name):
                     for ref in case.REFS:
                         self.planned[key(case.__name__, ref, config)] = (module.name, case, ref, config)
         for seed in self.seeds:
             k = key(f"Random{seed:04d}", "sequence", "V2s")
             self.planned[k] = (RANDOM_MODULE, None, "sequence", "V2s")
+
+    def configsFor(self, case, module):
+        """The configurations the case runs in: the tier's (configsFor) and, in tier F, every
+        other one its module's ledger holds an entry of that the case can still run in (a report
+        column, another size), so that no entry is kept without a run (fork PR 381 R3-1)."""
+        configs = configsFor(case, self.tier)
+        if self.tier == "F":
+            for k in sorted(((self.ledgers.get(module) or {}).get("entries") or {})):
+                name, ref, config = k.split("|")
+                if name == case.__name__ and ref in case.REFS and config not in configs and runnable(case, config):
+                    configs.append(config)
+        return configs
 
     @property
     def randomLedgerPath(self):
@@ -504,8 +587,20 @@ class Run:
             status = "NEW" if ledger or self.inTree else "UNLEDGERED"
             line = f"CORPUS {status} {k} {outcome.verdict}"
         else:
-            status = compare(entry, outcome.verdict)
+            status = compare(entry, outcome.verdict, outcome.kind)
             line = f"CORPUS {status} {k} {'/'.join(expectedOn(entry))} -> {outcome.verdict}"
+            if outcome.kind != kindOf(entry):
+                line += f" (expecting {kindOf(entry)} -> {outcome.kind})"
+            plan = self.planned.get(k)
+            if status == "OK" and plan and plan[1] is not None and platform() != "macos":
+                # an allowed set the case no longer gives (fork PR 381 R3-2): the ledger needs the run
+                _, case, ref, config = plan
+                allowed = case.ALLOWED.get(f"{ref}|{config}")
+                written = list(allowed) if allowed and outcome.verdict in allowed else outcome.verdict
+                if written != entry["expected"]:
+                    status = "CHANGED"
+                    line = (f"CORPUS {status} {k} {'/'.join(expectedOn(entry))} -> {outcome.verdict} "
+                            f"(the case's allowed set is {allowed or 'none'})")
         if status != "OK":
             self.lines.append((status, line))
             say(line)
@@ -518,12 +613,10 @@ class Run:
     def startChild(self):
         """Tier F: the same run in another process under another naming hash seed, started at
         once so the two run side by side. Off in the child itself and with
-        FREECAD_SCENARIO_CHILD_SEED=none."""
-        seed = os.environ.get("FREECAD_SCENARIO_CHILD_SEED", CHILD_SEED)
-        if self.tier != "F" or self.child or seed.lower() == "none":
+        FREECAD_SCENARIO_CHILD_SEED=none (childSeed)."""
+        seed = childSeed()
+        if self.tier != "F" or self.child or seed is None:
             return
-        if os.environ.get("FREECAD_NAMING_HASH_SEED") == seed:
-            seed = "1"
         from PartDesignTests.TestNamingDump import _freecadCmd
         import tempfile
 
@@ -559,7 +652,9 @@ class Run:
         if not os.path.isfile(out):
             raise harness.ScenarioError(f"the hash seed {seed} run wrote no verdicts ({work})")
         with open(out, encoding="utf-8") as fh:
-            return {k: v for line in fh if line.strip() for k, v in json.loads(line).items()}
+            verdicts = {k: v for line in fh if line.strip() for k, v in json.loads(line).items()}
+        shutil.rmtree(work, ignore_errors=True)  # kept above, where it failed, for its log
+        return verdicts
 
     def markFlaky(self, other):
         """Keys whose verdict differs in the second process become `flaky`."""
@@ -582,8 +677,7 @@ class Run:
 
     def kept(self, module, k):
         """Whether tier F keeps a module's ledger entry: its case and reference exist and the case
-        can still run in its configuration (the entries of configurations tier F didn't run, the
-        report columns and other sizes, stay)."""
+        can still run in its configuration (Run.configsFor runs every such entry)."""
         case, ref, config = k.split("|")
         found = self.existing(module).get((case, ref))
         return found is not None and runnable(found, config)
@@ -591,8 +685,8 @@ class Run:
     def stale(self):
         """Entries without their case: a case or reference removed or renamed, a variant its case
         no longer has (THIN or SIZE dropped), every entry of a ledger without its module, and in
-        tier G a tier G entry that didn't run (its case moved to tier F). Tier F keeps the
-        entries of configurations it didn't run (the report columns, other sizes)."""
+        tier G a tier G entry that didn't run (its case moved to tier F). Tier F runs every entry
+        it keeps (report columns and other sizes too)."""
         found = [f"{k} ({name}.json has no module)" for name, ledger in self.orphanLedgers.items()
                  for k in (ledger or {}).get("entries", {})]
         for module, ledger in self.ledgers.items():
@@ -625,11 +719,11 @@ class Run:
             else:
                 entries = dict(old)
             for case in module.cases:
-                for config in configsFor(case, self.tier):
+                for config in self.configsFor(case, module.name):
                     for ref in case.REFS:
                         k = key(case.__name__, ref, config)
                         if k in self.verdicts:
-                            entries[k] = entryFor(case, ref, config, self.verdicts[k].verdict, old.get(k))
+                            entries[k] = entryFor(case, ref, config, self.verdicts[k], old.get(k))
             sha, dirty = gitState(module.folder)
             run = {
                 "sha": sha,
@@ -646,7 +740,7 @@ class Run:
             for seed in self.seeds:
                 k = key(f"Random{seed:04d}", "sequence", "V2s")
                 if k in self.verdicts:
-                    entries[k] = randomEntry(self.verdicts[k].verdict, old.get(k))
+                    entries[k] = randomEntry(self.verdicts[k], old.get(k))
             sha, dirty = gitState(self.modules[0].folder if self.modules else ".")
             run = {"sha": sha, "dirty": dirty, "platform": platform(), "time": self.time,
                    "tier": self.tier, "cases": len(self.seeds)}
@@ -689,7 +783,9 @@ class Run:
     def partial(self):
         """Why this tier F run isn't the full run whose line the merge guard takes (empty if it is):
         the fork's own folder, V2s among the configurations, the random sequences at their steps,
-        the second hash seed, the oracle, git's sha, and the build's Python the checkout's."""
+        a second hash seed that is on and not this run's (fork PR 381 R3-3), the oracle, git's
+        sha, and the build's Python the checkout's: every top-level `Scenarios/*.py`,
+        TestCorpusGate.py and TestNamingScenarios.py (the oracle's comparison)."""
         why = []
         if not self.inTree:
             why.append("FREECAD_SCENARIO_MODULES")
@@ -700,8 +796,13 @@ class Run:
             why.append("no random sequences")
         if os.environ.get("FREECAD_SCENARIO_STEPS", str(RANDOM_STEPS)) != str(RANDOM_STEPS):
             why.append("FREECAD_SCENARIO_STEPS")
-        if os.environ.get("FREECAD_SCENARIO_CHILD_SEED", CHILD_SEED).lower() == "none":
+        seed = childSeed()
+        if seed is None:
             why.append("no second hash seed")
+        elif hashSeed(seed) == 0:
+            why.append(f"the second hash seed {seed!r} is off")
+        elif hashSeed(seed) == hashSeed(os.environ.get("FREECAD_NAMING_HASH_SEED")):
+            why.append(f"the second hash seed {seed!r} is this run's")
         if os.environ.get("FREECAD_SCENARIO_ORACLE", "1") == "0":
             why.append("no oracle")
         if os.environ.get("FREECAD_SCENARIO_SHA"):
@@ -710,7 +811,10 @@ class Run:
         if source:
             here = os.path.dirname(os.path.abspath(__file__))
             tests = os.path.join(source, os.path.dirname(CASES))
-            for name in ("corpus.py", "harness.py", "randomized.py", os.path.join("..", "TestCorpusGate.py")):
+            # the checkout's files (a file left in the build from an older tree imports nowhere)
+            names = {os.path.basename(p) for p in glob.glob(os.path.join(tests, "*.py"))}
+            names |= {os.path.join("..", "TestCorpusGate.py"), os.path.join("..", "TestNamingScenarios.py")}
+            for name in sorted(names):
                 if not sameFile(os.path.join(here, name), os.path.join(tests, name)):
                     why.append(f"the build's {os.path.basename(name)} isn't the checkout's")
         else:
@@ -720,7 +824,7 @@ class Run:
     def counts(self):
         sets = {"wrong": 0, "loud": 0, "right": 0, "neither": 0}
         for outcome in self.verdicts.values():
-            s = harness.SETS.get(outcome.verdict, "neither")
+            s = harness.verdictSet(outcome.verdict, outcome.kind)
             sets["loud" if s.startswith("loud") else s] += 1
         return sets
 
@@ -755,7 +859,7 @@ class Run:
             sha, dirty = gitState(self.modules[0].folder if self.modules else ".")
             neither = f" {sets['neither']} neither" if sets["neither"] else ""
             broken = [m.name for m in self.modules if m.module is None]
-            failed = sets["neither"] or self.failures or broken
+            failed = sets["neither"] or self.failures or broken or self.testFailures
             lines.append(
                 f"Tier F: {sha[:10]}{' dirty' if dirty else ''} {platform()} {self.time} {cases} "
                 f"{sets['wrong']}/{sets['loud']}/{sets['right']}{neither} {len(self.verdicts)} verdicts "
