@@ -3,8 +3,10 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <numbers>
 #include <optional>
 #include <sstream>
+#include <tuple>
 
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepBndLib.hxx>
@@ -58,6 +60,17 @@ double curvatureAt(const BRepAdaptor_Curve& curve, double u)
     return speed > 0 ? d1.Crossed(d2).Magnitude() / (speed * speed * speed) : 0;
 }
 
+/// The law's frame at \a u, whatever the curvature there
+std::optional<Frame> lawFrame(GeomFill_Frenet& law, double u)
+{
+    gp_Vec tangent, normal, binormal;
+    if (!law.D0(u, tangent, normal, binormal) || normal.SquareMagnitude() < 0.25
+        || tangent.SquareMagnitude() < 0.25) {
+        return std::nullopt;
+    }
+    return Frame {tangent.Normalized(), normal.Normalized()};
+}
+
 /// The law's frame at \a u, where the \a curvature is clearly above zero (at least
 /// SweepFrenet::curvatureFloor over the edge's \a length): where it is zero the law's normal is
 /// whatever OCCT makes of a singular point, and a flat point that doesn't reverse the normal was
@@ -67,12 +80,7 @@ std::optional<Frame> frameAt(GeomFill_Frenet& law, double u, double curvature, d
     if (curvature * length <= Part::SweepFrenet::curvatureFloor) {
         return std::nullopt;
     }
-    gp_Vec tangent, normal, binormal;
-    if (!law.D0(u, tangent, normal, binormal) || normal.SquareMagnitude() < 0.25
-        || tangent.SquareMagnitude() < 0.25) {
-        return std::nullopt;
-    }
-    return Frame {tangent.Normalized(), normal.Normalized()};
+    return lawFrame(law, u);
 }
 
 /// The cosine of the angle by which the frame turns about the tangent from \a from to \a to: the
@@ -135,8 +143,12 @@ void addSamples(
 }
 
 /// The parameters of the samples along \a curve: \a factor times sampleCount() even intervals,
-/// halved where the tangent turns fast (addSamples())
-std::vector<double> sampleParameters(const BRepAdaptor_Curve& curve, int factor)
+/// halved where the tangent turns fast (addSamples()), and a quarter and three quarters into each
+/// knot span that is straight (its curvature times the edge's \a length at most
+/// SweepFrenet::straightFloor at a quarter, a half and three quarters of it): a straight span
+/// shorter than a sample interval held no sample, and a rectangle beside a C-shaped spline with
+/// such a middle span turned over there (fork PR 377's review, finding 2)
+std::vector<double> sampleParameters(const BRepAdaptor_Curve& curve, int factor, double length)
 {
     const int samples = factor * sampleCount(curve);
     const double first = curve.FirstParameter();
@@ -152,14 +164,43 @@ std::vector<double> sampleParameters(const BRepAdaptor_Curve& curve, int factor)
         addSamples(curve, parameters.back(), previous, u, tangent, 0, parameters);
         previous = tangent;
     }
+    if (curve.GetType() != GeomAbs_BSplineCurve) {
+        return parameters;
+    }
+    const Handle(Geom_BSplineCurve) spline = curve.BSpline();
+    for (int i = spline->FirstUKnotIndex(); i < spline->LastUKnotIndex(); ++i) {
+        const double from = std::max(first, spline->Knot(i));
+        const double to = std::min(last, spline->Knot(i + 1));
+        const auto straight = [&](double share) {
+            return curvatureAt(curve, from + (to - from) * share) * length
+                <= Part::SweepFrenet::straightFloor;
+        };
+        if (to > from && straight(0.25) && straight(0.5) && straight(0.75)) {
+            parameters.push_back(from + (to - from) / 4);
+            parameters.push_back(from + (to - from) * 3 / 4);
+        }
+    }
+    std::sort(parameters.begin(), parameters.end());
+    parameters.erase(std::unique(parameters.begin(), parameters.end()), parameters.end());
     return parameters;
 }
+
+/// Where OCCT's Frenet trihedron turns over or jumps
+struct Finding
+{
+    gp_Pnt where;
+    /// The angle in degrees by which it jumps where a straight stretch ends, 0 for a turn-over, -1
+    /// where OCCT's frame along a straight stretch isn't steady
+    double jump;
+    /// Whether it was found among samples without a frame (scanRuns())
+    bool run;
+};
 
 /// What scanTurns() found along an edge
 struct Scan
 {
-    /// The first sample where the frame turns over, if any
-    std::optional<gp_Pnt> where;
+    /// The first place where the frame turns over or jumps, if any
+    std::optional<Finding> found;
     /// The median of turnCosine() between neighbouring counted samples (1 with fewer than two)
     double medianCosine;
 };
@@ -305,15 +346,202 @@ bool curvatureDips(
         && (after.empty() || lowest <= Part::SweepFrenet::curvatureDip * median(after));
 }
 
+/// Whether \a curve is straight at \a u: its curvature times the edge's \a length at most
+/// SweepFrenet::straightFloor
+bool straightAt(const BRepAdaptor_Curve& curve, double u, double length)
+{
+    return curvatureAt(curve, u) * length <= Part::SweepFrenet::straightFloor;
+}
+
+/// The end of a straight stretch of \a curve between \a flat, straight, and \a bent, which isn't:
+/// the pair halved SweepFrenet::turnBisections times, the last straight point and the first that
+/// isn't
+std::pair<double, double> stretchEnd(
+    const BRepAdaptor_Curve& curve,
+    double length,
+    double flat,
+    double bent
+)
+{
+    for (int halving = 0; halving < Part::SweepFrenet::turnBisections; ++halving) {
+        const double middle = (flat + bent) / 2;
+        (straightAt(curve, middle, length) ? flat : bent) = middle;
+    }
+    return {flat, bent};
+}
+
+/// The angle in degrees whose cosine is \a cosine
+double degrees(double cosine)
+{
+    return std::acos(std::clamp(cosine, -1.0, 1.0)) * 180 / std::numbers::pi;
+}
+
+/// Where \a law's frame turns over or jumps among the samples of \a curve without a frame (their
+/// \a frames empty, the curvature at the floor), each run of them taken with the samples with a
+/// frame on either side, where no pair of samples with a frame need bracket where it turns.
+/// - Where the curve still bends, OCCT's frame is the curve's, read SweepFrenet::runOffset of the
+///   parameter range from each sample, towards the middle of the run. Neighbours more than a right
+///   angle apart, among these and the samples on either side, are a turn-over: an inflection
+///   between an edge's end and its first sample with a frame, on y = 1e-8 x^3 (fork PR 358 round
+///   8's verification, finding 2).
+/// - Where it is straight (straightAt()), the stretch's ends are found by halving towards the
+///   points on either side that aren't, and OCCT's frame is read at SweepFrenet::stretchPoints
+///   points evenly inside it, none at its middle. Each counts where it agrees with a neighbour's
+///   within SweepFrenet::jumpCosine's angle: at a flat point, OCCT's frame was a quarter turn off
+///   at the point, and 1e-6 of the parameter range from it on a flatter one, while the sweep
+///   followed the curve's (R1). They are taken with the others in turn, and the frames just past
+///   the stretch's ends, the curve's, more than SweepFrenet::jumpCosine's angle from the nearest
+///   of them are a jump: 26.6 and 63.4 degrees after straight spans followed by parts bending out
+///   of their plane (ops#439), 180 on both sides of a straight span between bends the same way,
+///   where the rectangle beside a planar spine turned over and back (round 8's verification,
+///   finding 3). On a straight stretch, OCCT's frame is its own; on a curve that only comes close
+///   to straight (y = 1e-9 x^3 near its inflection), the curve's, turning over within it. Where
+///   none of the readings agrees with a neighbour's on a stretch ending inside the edge, OCCT's
+///   frame isn't steady there.
+std::optional<Finding> scanRuns(
+    GeomFill_Frenet& law,
+    const BRepAdaptor_Curve& curve,
+    double length,
+    const std::vector<double>& parameters,
+    const std::vector<std::optional<Frame>>& frames
+)
+{
+    const double first = curve.FirstParameter();
+    const double last = curve.LastParameter();
+    const double offset = Part::SweepFrenet::runOffset * (last - first);
+    for (std::size_t i = 0; i < parameters.size();) {
+        if (frames[i]) {
+            ++i;
+            continue;
+        }
+        const std::size_t start = i;
+        while (i < parameters.size() && !frames[i]) {
+            ++i;
+        }
+        const std::size_t end = i - 1;
+        // The run's samples, moved towards its middle
+        std::vector<double> run;
+        for (std::size_t j = start; j <= end; ++j) {
+            const bool down = start == end ? parameters[j] >= last : j - start > end - j;
+            run.push_back(down ? parameters[j] - offset : parameters[j] + offset);
+        }
+        // The curve's frames, in order: the samples on either side, the run's points that aren't
+        // straight, and the points just past the ends of its straight stretches
+        std::vector<std::pair<double, std::optional<Frame>>> bends;
+        if (start > 0) {
+            bends.emplace_back(parameters[start - 1], frames[start - 1]);
+        }
+        for (std::size_t j = 0; j < run.size();) {
+            if (!straightAt(curve, run[j], length)) {
+                bends.emplace_back(run[j], lawFrame(law, run[j]));
+                ++j;
+                continue;
+            }
+            std::size_t k = j;
+            while (k + 1 < run.size() && straightAt(curve, run[k + 1], length)) {
+                ++k;
+            }
+            // The stretch's ends, and the points just past them, where it doesn't end the edge
+            std::optional<double> before;
+            if (j > 0) {
+                before = run[j - 1];
+            }
+            else if (start > 0) {
+                before = parameters[start - 1];
+            }
+            std::optional<double> after;
+            if (k + 1 < run.size()) {
+                after = run[k + 1];
+            }
+            else if (i < parameters.size()) {
+                after = parameters[i];
+            }
+            double from = first;
+            double to = last;
+            std::optional<double> pastFrom;
+            std::optional<double> pastTo;
+            if (before) {
+                std::tie(from, pastFrom) = stretchEnd(curve, length, run[j], *before);
+            }
+            if (after) {
+                std::tie(to, pastTo) = stretchEnd(curve, length, run[k], *after);
+            }
+            j = k + 1;
+            // OCCT's frames on the stretch, at the middles of its eighths: each counts where it
+            // agrees with a neighbour's
+            constexpr int count = Part::SweepFrenet::stretchPoints;
+            std::vector<std::pair<double, std::optional<Frame>>> along;
+            for (int m = 0; m < count; ++m) {
+                const double u = from + (to - from) * (2 * m + 1) / (2 * count);
+                along.emplace_back(u, lawFrame(law, u));
+            }
+            const auto agree = [&](std::size_t a, std::size_t b) {
+                return along[a].second && along[b].second
+                    && turnCosine(*along[a].second, *along[b].second)
+                    >= Part::SweepFrenet::jumpCosine;
+            };
+            std::vector<std::pair<double, Frame>> held;
+            for (std::size_t m = 0; m < along.size(); ++m) {
+                if ((m > 0 && agree(m - 1, m)) || (m + 1 < along.size() && agree(m, m + 1))) {
+                    held.emplace_back(along[m].first, *along[m].second);
+                }
+            }
+            if (held.empty()) {
+                // No steady frame along a stretch ending inside the edge: off the main axes, a
+                // straight span's curvature is rounding, and OCCT's normal follows it (the C-shaped
+                // spline with a straight middle, turned 37 degrees about (1, 2, 3): Frenet failed
+                // to build, corrected Frenet left the circle's tube 5.6e-2 mm off; fork PR 377's
+                // review, finding 1). Along a whole straight edge, OCCT's frame stays as it is
+                if (pastFrom || pastTo) {
+                    return Finding {curve.Value(pastFrom ? *pastFrom : *pastTo), -1, true};
+                }
+                continue;
+            }
+            const std::optional<Frame> atFrom = pastFrom ? lawFrame(law, *pastFrom) : std::nullopt;
+            const std::optional<Frame> atTo = pastTo ? lawFrame(law, *pastTo) : std::nullopt;
+            if (atFrom) {
+                const double cosine = turnCosine(*atFrom, held.front().second);
+                if (cosine < Part::SweepFrenet::jumpCosine) {
+                    return Finding {curve.Value(*pastFrom), degrees(cosine), true};
+                }
+                bends.emplace_back(*pastFrom, atFrom);
+            }
+            for (const auto& [u, frame] : held) {
+                bends.emplace_back(u, frame);
+            }
+            if (atTo) {
+                const double cosine = turnCosine(held.back().second, *atTo);
+                if (cosine < Part::SweepFrenet::jumpCosine) {
+                    return Finding {curve.Value(*pastTo), degrees(cosine), true};
+                }
+                bends.emplace_back(*pastTo, atTo);
+            }
+        }
+        if (i < parameters.size()) {
+            bends.emplace_back(parameters[i], frames[i]);
+        }
+        for (std::size_t k = 1; k < bends.size(); ++k) {
+            const std::optional<Frame>& before = bends[k - 1].second;
+            const std::optional<Frame>& after = bends[k].second;
+            if (before && after && turnCosine(*before, *after) < 0) {
+                return Finding {curve.Value(bends[k].first), 0, true};
+            }
+        }
+    }
+    return std::nullopt;
+}
+
 /// Samples \a law along \a curve, \a factor times sampleParameters()'s even intervals, for
 /// turnOver(): the first point where the frame turns by more than a right angle about the tangent
 /// between two counted samples at most two apart, where the curvature dips (curvatureDips()) or the
-/// normal reverses at a knot (knotReverses()), and the median turn between neighbours
+/// normal reverses at a knot (knotReverses()), else where it turns over or jumps among samples
+/// without a frame (scanRuns()); and the median turn between neighbours
 Scan scanTurns(GeomFill_Frenet& law, const BRepAdaptor_Curve& curve, double length, int factor)
 {
     Scan scan {std::nullopt, 1};
-    const std::vector<double> parameters = sampleParameters(curve, factor);
+    const std::vector<double> parameters = sampleParameters(curve, factor, length);
     std::vector<double> curvatures;
+    std::vector<std::optional<Frame>> frames;
     std::vector<std::size_t> counted;
     std::vector<double> cosines;
     // A turn between two counted samples: the first and last of them
@@ -322,7 +550,8 @@ Scan scanTurns(GeomFill_Frenet& law, const BRepAdaptor_Curve& curve, double leng
     std::optional<Frame> beforePrevious;
     for (std::size_t i = 0; i < parameters.size(); ++i) {
         curvatures.push_back(curvatureAt(curve, parameters[i]));
-        const std::optional<Frame> frame = frameAt(law, parameters[i], curvatures.back(), length);
+        frames.push_back(frameAt(law, parameters[i], curvatures.back(), length));
+        const std::optional<Frame>& frame = frames.back();
         if (!frame) {
             continue;
         }
@@ -343,9 +572,13 @@ Scan scanTurns(GeomFill_Frenet& law, const BRepAdaptor_Curve& curve, double leng
         if (knotReverses(curve, parameters[counted[first]], parameters[counted[last]])
             || curvatureDips(law, curve, length, parameters, curvatures, counted, first, last)) {
             // Between neighbours the later sample, two apart the one between them
-            scan.where = curve.Value(parameters[counted[last - (last - first) / 2]]);
+            const gp_Pnt where = curve.Value(parameters[counted[last - (last - first) / 2]]);
+            scan.found = Finding {where, 0, false};
             break;
         }
+    }
+    if (!scan.found) {
+        scan.found = scanRuns(law, curve, length, parameters, frames);
     }
     if (!cosines.empty()) {
         scan.medianCosine = median(cosines);
@@ -372,8 +605,9 @@ Scan scanTurns(GeomFill_Frenet& law, const BRepAdaptor_Curve& curve, double leng
 /// apart to tell a twist from a turn-over, so the edge is sampled again twice as densely, at most
 /// SweepFrenet::maxDoublings times, and a turn-over counts only if it is still found where the
 /// median is below that angle or at the last doubling. Planar spines don't turn about the tangent
-/// (median 0 at the inflections seen), so their samples don't change.
-std::optional<gp_Pnt> turnOver(const TopoDS_Edge& edge)
+/// (median 0 at the inflections seen), so their samples don't change. Among samples without a
+/// frame, the frame turns over or jumps where scanRuns() says.
+std::optional<Finding> turnOver(const TopoDS_Edge& edge)
 {
     if (BRep_Tool::Degenerated(edge)) {
         return std::nullopt;
@@ -397,9 +631,9 @@ std::optional<gp_Pnt> turnOver(const TopoDS_Edge& edge)
     const double length = GCPnts_AbscissaPoint::Length(*curve);
     for (int doublings = 0;; ++doublings) {
         const Scan scan = scanTurns(*law, *curve, length, 1 << doublings);
-        if (!scan.where || scan.medianCosine >= Part::SweepFrenet::steadyTwistCosine
+        if (!scan.found || scan.medianCosine >= Part::SweepFrenet::steadyTwistCosine
             || doublings == Part::SweepFrenet::maxDoublings) {
-            return scan.where;
+            return scan.found;
         }
     }
 }
@@ -555,7 +789,7 @@ bool binormalWithin(const TopoDS_Wire& spine, const gp_Dir& normal)
             continue;
         }
         const double length = GCPnts_AbscissaPoint::Length(*curve);
-        for (const double u : sampleParameters(*curve, 1)) {
+        for (const double u : sampleParameters(*curve, 1, length)) {
             const std::optional<Frame> frame = frameAt(*law, u, curvatureAt(*curve, u), length);
             if (!frame) {
                 continue;
@@ -623,23 +857,45 @@ Part::SweepFrenet::Mode Part::SweepFrenet::setMode(
     if (!frenet) {
         return Mode::Asked;
     }
-    std::optional<gp_Pnt> where;
-    for (TopExp_Explorer xp(spine, TopAbs_EDGE); xp.More() && !where; xp.Next()) {
-        where = turnOver(TopoDS::Edge(xp.Current()));
+    std::optional<Finding> found;
+    for (TopExp_Explorer xp(spine, TopAbs_EDGE); xp.More() && !found; xp.Next()) {
+        found = turnOver(TopoDS::Edge(xp.Current()));
     }
-    if (!where) {
+    if (!found) {
         return Mode::Asked;
     }
+    // "turns over at (x, y, z)", "jumps by a degrees at (x, y, z)" or "isn't steady along a
+    // straight stretch at (x, y, z)"
     std::ostringstream at;
-    at << "(" << where->X() << ", " << where->Y() << ", " << where->Z() << ")";
+    if (found->jump > 0) {
+        at << "jumps by " << std::round(found->jump * 10) / 10 << " degrees";
+    }
+    else if (found->jump < 0) {
+        at << "isn't steady along a straight stretch";
+    }
+    else {
+        at << "turns over";
+    }
+    at << " at (" << found->where.X() << ", " << found->where.Y() << ", " << found->where.Z()
+       << ")";
 
     // A planar curve's Frenet frame doesn't turn about the tangent (its binormal is the plane's
     // normal up to its sign), so on a planar spine the rotation-minimizing frame of corrected
     // Frenet is Frenet's own, kept continuous. A constant binormal, the plane's normal, is the same
-    // frame, but MakePipeShell approximated it worse: edge tolerances of 0.16 mm at 200 spans and
-    // 2 mm at 1000, against 1e-4 (ops#421)
-    if (planeNormal(spine, Precision::Confusion())) {
-        FC_LOG("Sweep: the spine's Frenet frame turns over at " << at.str() << ": corrected Frenet");
+    // frame, but MakePipeShell approximated it worse at OCCT's default degree and segments: edge
+    // tolerances of 0.16 mm at 200 spans and 2 mm at 1000, against 1e-4 (ops#421). Among samples
+    // without a frame, though, it is the binormal: corrected Frenet builds on OCCT's Frenet frame,
+    // and where that is off on a straight stretch (rounding, off the main axes), corrected Frenet
+    // left circles' tubes 6.4e-3 to 9.2e-2 mm off or failed to build ("command not done", also on
+    // macOS's OCCT for the C-shaped spline with a straight middle, bending by 1e-2), where the
+    // binormal gave the tube and kept rectangles on their side (fork PR 377's CI and review)
+    if (const auto normal = planeNormal(spine, Precision::Confusion())) {
+        if (found->run) {
+            FC_LOG("Sweep: the spine's Frenet frame " << at.str() << ": its plane's normal");
+            pipe.SetMode(*normal);
+            return Mode::PlaneNormal;
+        }
+        FC_LOG("Sweep: the spine's Frenet frame " << at.str() << ": corrected Frenet");
         pipe.SetMode(false);
         return Mode::CorrectedFrenet;
     }
@@ -655,8 +911,7 @@ Part::SweepFrenet::Mode Part::SweepFrenet::setMode(
     if (normal && tiltWithin(spine, *normal, sections, tolerance)
         && binormalWithin(spine, *normal)) {
         FC_LOG(
-            "Sweep: the spine's Frenet frame turns over at " << at.str()
-                                                             << ": its plane's normal as binormal"
+            "Sweep: the spine's Frenet frame " << at.str() << ": its plane's normal as binormal"
         );
         pipe.SetMode(*normal);
         return Mode::PlaneNormal;
@@ -669,9 +924,7 @@ Part::SweepFrenet::Mode Part::SweepFrenet::setMode(
             return roundAboutSpine(section, spine, tolerance);
         })) {
         FC_LOG(
-            "Sweep: the spine's Frenet frame turns over at " << at.str()
-                                                             << ": round sections, "
-                                                                "corrected Frenet"
+            "Sweep: the spine's Frenet frame " << at.str() << ": round sections, corrected Frenet"
         );
         pipe.SetMode(false);
         return Mode::CorrectedFrenet;
@@ -679,19 +932,29 @@ Part::SweepFrenet::Mode Part::SweepFrenet::setMode(
     // A Standard_Failure, whose message Part::Sweep reports (it turns other exceptions into
     // "A fatal error occurred when making the sweep")
     std::ostringstream message;
-    message << "Sweep: the spine's Frenet frame turns over at " << at.str()
-            << ", turning by more than a right angle about the spine within a short stretch (as "
-               "where a wave's curvature passes through zero), and a profile that isn't a circle "
-               "about the spine would twist through itself there. Turn Frenet off";
+    message << "Sweep: the spine's Frenet frame " << at.str();
+    if (found->jump != 0) {
+        message << (found->jump > 0 ? ", where a straight stretch of an edge ends" : "")
+                << " (along a straight stretch the frame isn't defined, and OCCT's takes a normal "
+                   "of its own), and a profile that isn't a circle about the spine would turn "
+                   "abruptly there. Turn Frenet off";
+    }
+    else {
+        message << ", turning by more than a right angle about the spine within a short stretch "
+                   "(as where a wave's curvature passes through zero), and a profile that isn't a "
+                   "circle about the spine would twist through itself there. Turn Frenet off";
+    }
     throw Standard_Failure(message.str().c_str());
 }
 
 void Part::SweepFrenet::checkBuilt(const TopoDS_Shape& built, Mode mode, double tolerance)
 {
-    // Corrected Frenet too: on ten exactly planar waves turned 45 degrees about X (a sketch on a
-    // tilted plane) it left vertices of 0.15 mm and the tube 1.6e-2 mm off, where the same waves
-    // in XZ came out within 5e-5 (fork PR 358 round 3's verification, finding 1)
-    if (mode == Mode::Asked) {
+    // Not corrected Frenet: it is what Frenet off sweeps, and on tilted planar waves it was refused
+    // for vertex tolerances of 0.010 to 0.020 mm, OCCT's estimate, with the tube within 1.7e-6
+    // (ops#448's scan, ops#465). Where it does come out loose (0.15 mm on ten planar waves turned
+    // 45 degrees about X at OCCT's default degree and segments: fork PR 358 round 3's
+    // verification, finding 1), the sweep warns, as with Frenet off (ops#448)
+    if (mode != Mode::PlaneNormal) {
         return;
     }
     double largest = 0;
@@ -705,17 +968,8 @@ void Part::SweepFrenet::checkBuilt(const TopoDS_Shape& built, Mode mode, double 
         return;
     }
     std::ostringstream message;
-    if (mode == Mode::PlaneNormal) {
-        message << "Sweep: the spine's Frenet frame turns over on a spine that is only nearly "
-                   "planar, and sweeping with its plane's normal as binormal left a tolerance of "
-                << largest << " mm. Make the spine planar, or turn Frenet off";
-    }
-    else {
-        // Frenet off is corrected Frenet as well, so it isn't suggested
-        message << "Sweep: the spine's Frenet frame turns over, and sweeping with corrected Frenet "
-                   "in its place left a tolerance of "
-                << largest << " mm, more than " << maxToleranceRatio
-                << " times the sweep's own";
-    }
+    message << "Sweep: the spine's Frenet frame turns over or jumps, and sweeping with the "
+               "normal of the spine's plane as binormal in its place left a tolerance of "
+            << largest << " mm. Turn Frenet off";
     throw Standard_Failure(message.str().c_str());
 }

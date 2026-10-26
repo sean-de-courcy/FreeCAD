@@ -402,7 +402,8 @@ names it.
 | `feat/379-pipe-end-names` | feat | ops#379 | - | `feat/370-pipe-corners` `3544e12841` (stacked on fork PR 344) | `4cd3f452d4` (fork PR 356), 2026-10-25 | never (fork feature) |
 | `feat/415-pipe-leg-names` | feat | ops#415, ops#455 | - | `feat/379-pipe-end-names` `76627462b0` (stacked on fork PR 356) | `9a89cbf946` (fork PR 369), 2026-10-25 | never (fork feature) |
 | `fix/472-lost-void-check` | fix | ops#472 | - | `integration` `b42c494538` | `770da0fde7` (fork PR 376), 2026-10-25 | never (fork fix) |
-| `fix/487-failed-feature-base` | fix | ops#487 | - | `integration` `770da0fde7` | (fork PR 378) | never (fork fix) |
+| `fix/487-failed-feature-base` | fix | ops#487 | - | `integration` `770da0fde7` | `677837eddc` (fork PR 378), 2026-10-25 | never (fork fix) |
+| `fix/465-sweep-frenet-followups` | fix | ops#465, ops#439 | - | `integration` `770da0fde7` | (fork PR 377) | SweepFrenet looks at samples without a frame, with two more in each straight knot span: a turn-over, jump or unsteady frame of OCCT's Frenet on a straight or nearly straight stretch inside an edge leaves Frenet as a turn-over does (on planar spines, for the plane's normal as binormal); corrected Frenet is no longer refused for loose tolerances |
 
 ## Fork-only commits in carried topics
 
