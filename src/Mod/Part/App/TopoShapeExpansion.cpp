@@ -197,11 +197,6 @@ static void expandCompound(const TopoShape& shape, std::vector<TopoShape>& res)
 
 namespace
 {
-/// Mapper flag of a far cap told apart from its twins, the pieces of its cap with the same marks,
-/// only by its place among them (the duplicate counter; ops#360, PR 340 round 2). Beside
-/// Data's flags (ElementNamingUtils.h), kept here as only the split's far caps carry it
-constexpr const char* MAPPER_FLAG_ORDERED = "ORD";
-
 /// A name in the form of a map that interns or not (ops#6), as ElementMap::setElementName stores it
 Data::MappedName toMapForm(const Data::MappedName& name, bool interned)
 {
@@ -1740,51 +1735,77 @@ std::string crossingSide(
     if (std::abs(cosine) < alongTheFace) {
         return {};
     }
-    return cosine < 0 ? "in" : "out";
+    return cosine < 0 ? Data::ROLE_CROSSING_IN : Data::ROLE_CROSSING_OUT;
 }
 
-/// The Index fields of the vertexes of a group that a counter tells apart, `vertexes` in the
-/// counter's order, generated from `edge` and `face` (the group's first source, and its first face
-/// source; either may be null) (ops#468). Each is named by its side of the face (crossingSide),
-/// with `<k>of<n>` after it among the vertexes on the same side when there are several. Where a
-/// side can't be told for one of them, each is `<k>of<n>` among all, and a lone one `0`. A change
-/// in how many vertexes the face makes on the edge then never moves a name to another one.
-std::vector<std::string> crossingIndexes(
+/// A member's discriminating fields in its group (`naming-class-A.md` M2, I-A1 and I-A2): its
+/// Index, its DuplicateCount, and whether its name carries ORD.
+struct TwinPlace
+{
+    std::string index = "0";
+    std::string duplicateCount = "0";
+    bool ordered = false;
+};
+
+/// The place `k` among `n` twins as DuplicateCount carries it, `<k>of<n>` (ops#468, the size
+/// rule): the count is in every twin's name, so a change in how many there are renames them all
+/// and never passes a name to another twin.
+std::string placeAmong(std::size_t k, std::size_t n)
+{
+    return std::to_string(k) + "of" + std::to_string(n);
+}
+
+/// The places of `count` members told apart by nothing but their order (twinOrder's), in that
+/// order: a lone member `0`, as before; twins Index `0` and `<k>of<n>`, with ORD, so that the
+/// solver takes them for twins (counter siblings) and re-checks an exact hit that moved.
+std::vector<TwinPlace> twinPlaces(std::size_t count)
+{
+    std::vector<TwinPlace> places(count);
+    if (count > 1) {
+        for (std::size_t k = 0; k < count; ++k) {
+            places[k].duplicateCount = placeAmong(k, count);
+            places[k].ordered = true;
+        }
+    }
+    return places;
+}
+
+/// The places of vertexes generated where `edge` crosses `face` (the group's first source, and its
+/// first face source; the face may be null), `vertexes` in their canonical order (twinOrder's)
+/// (ops#468). Each is named by its side of the face (crossingSide), a role, in Index, lone ones
+/// included, and with `<k>of<n>` among the vertexes on the same side when there are several. Where
+/// a side can't be told for one of them, none has one (I-A6), and they take twinPlaces. Every
+/// name told by a role carries ORD: the role flips when an edit reverses the edge's curve with
+/// the geometry unchanged (a MultiFuse's inputs reordered), and the flag is what sends a moved
+/// exact hit on it to the solver's twin check (the role-sibling clause, `naming-class-A.md` 4.1).
+std::vector<TwinPlace> crossingPlaces(
     const std::vector<TopoDS_Shape>& vertexes,
     const TopoDS_Shape& edge,
     const TopoDS_Shape& face
 )
 {
-    const std::size_t count = vertexes.size();
     std::vector<std::string> sides;
     for (const auto& vertex : vertexes) {
         sides.push_back(crossingSide(vertex, edge, face));
         if (sides.back().empty()) {
-            sides.clear();
-            break;
+            return twinPlaces(vertexes.size());
         }
-    }
-    std::vector<std::string> indexes;
-    if (sides.empty()) {
-        for (std::size_t k = 0; k < count; ++k) {
-            indexes.push_back(
-                count > 1 ? std::to_string(k) + "of" + std::to_string(count) : std::to_string(k)
-            );
-        }
-        return indexes;
     }
     std::map<std::string, std::size_t> onSide;
     for (const auto& side : sides) {
         ++onSide[side];
     }
     std::map<std::string, std::size_t> before;
+    std::vector<TwinPlace> places;
     for (const auto& side : sides) {
         const std::size_t k = before[side]++;
-        indexes.push_back(
-            onSide[side] > 1 ? side + std::to_string(k) + "of" + std::to_string(onSide[side]) : side
-        );
+        TwinPlace place;
+        place.index = side;
+        place.duplicateCount = onSide[side] > 1 ? placeAmong(k, onSide[side]) : "0";
+        place.ordered = true;
+        places.push_back(place);
     }
-    return indexes;
+    return places;
 }
 
 /// The key of a member of a fallback list: its place on the list's `reference` (a face: its `u`
@@ -1877,6 +1898,166 @@ std::vector<std::vector<long>> rankByGaps(const std::vector<OrderValues>& keys)
         }
     }
     return ranks;
+}
+
+/// The members' order by their ranks (rankByGaps), compared lexicographically; ties keep the
+/// order the members are given in.
+std::vector<std::size_t> orderByRanks(const std::vector<std::vector<long>>& ranks)
+{
+    std::vector<std::size_t> order(ranks.size());
+    std::iota(order.begin(), order.end(), 0);
+    std::stable_sort(order.begin(), order.end(), [&ranks](std::size_t left, std::size_t right) {
+        return ranks[left] < ranks[right];
+    });
+    return order;
+}
+
+/// The canonical order of the members of a group told apart by their place alone (I-A3,
+/// `naming-class-A.md` M2 (c)), as indexes into `members`, which come in the maker's order: by
+/// each member's parameter on the first of `sources` if that is an edge (the pave order along it,
+/// made explicit), else by its (u, v) on the first face among `sources`, then by its length or
+/// area and its point in `frame`, the frame of the shape being named. A member is placed on a
+/// source by projecting its point (a vertex's; an edge's or a face's centre of mass) onto the
+/// source's curve or surface: members are the result's elements, not the source's sub-shapes.
+/// Vertexes generated along a closed edge keep the order given (NamingMap::build's exception: the
+/// maker lists them from the edge's seam, which an edit can move past one of them). Ties keep the
+/// order given. Whatever decides the order, the twins' names carry ORD (twinPlaces), so the
+/// solver re-checks a twin's exact hit that moved.
+std::vector<std::size_t> twinOrder(
+    const std::vector<TopoDS_Shape>& members,
+    const std::vector<TopoDS_Shape>& sources,
+    const TopLoc_Location& frame
+)
+{
+    std::vector<std::size_t> given(members.size());
+    std::iota(given.begin(), given.end(), 0);
+    if (members.size() < 2) {
+        return given;
+    }
+    TopoDS_Shape edge;
+    TopoDS_Shape face;
+    if (!sources.empty() && !sources.front().IsNull()
+        && sources.front().ShapeType() == TopAbs_EDGE) {
+        edge = sources.front();
+    }
+    else {
+        for (const auto& source : sources) {
+            if (!source.IsNull() && source.ShapeType() == TopAbs_FACE) {
+                face = source;
+                break;
+            }
+        }
+    }
+    Handle(Geom_Curve) curve;
+    double first = 0;
+    double last = 0;
+    if (!edge.IsNull()) {
+        TopoDS_Vertex start;
+        TopoDS_Vertex end;
+        TopExp::Vertices(TopoDS::Edge(edge), start, end);
+        if (members.front().ShapeType() == TopAbs_VERTEX && !start.IsNull() && start.IsSame(end)) {
+            return given;
+        }
+        curve = BRep_Tool::Curve(TopoDS::Edge(edge), first, last);
+    }
+    Handle(Geom_Surface) surface;
+    if (!face.IsNull()) {
+        surface = BRep_Tool::Surface(TopoDS::Face(face));
+    }
+    const double none = std::numeric_limits<double>::quiet_NaN();
+    std::vector<OrderValues> keys;
+    keys.reserve(members.size());
+    for (const auto& member : members) {
+        double mass = 0;
+        const gp_Pnt point = elementPoint(member, mass);
+        OrderValues values;
+        if (!curve.IsNull()) {
+            GeomAPI_ProjectPointOnCurve onCurve(point, curve, first, last);
+            values.push_back(
+                {onCurve.NbPoints() > 0 ? onCurve.LowerDistanceParameter() : none,
+                 curve->IsPeriodic() ? curve->Period() : 0}
+            );
+        }
+        else if (!surface.IsNull()) {
+            GeomAPI_ProjectPointOnSurf onSurface(point, surface);
+            double u = none;
+            double v = none;
+            if (onSurface.NbPoints() > 0) {
+                onSurface.LowerDistanceParameters(u, v);
+            }
+            values.push_back({u, surface->IsUPeriodic() ? surface->UPeriod() : 0});
+            values.push_back({v, surface->IsVPeriodic() ? surface->VPeriod() : 0});
+        }
+        const gp_Pnt inFrame = point.Transformed(frame.Transformation());
+        values.push_back({mass});
+        values.push_back({inFrame.X()});
+        values.push_back({inFrame.Y()});
+        values.push_back({inFrame.Z()});
+        keys.push_back(std::move(values));
+    }
+    return orderByRanks(rankByGaps(keys));
+}
+
+/// True if the order of a fallback list's members is no key by I-A3, so that their names carry
+/// ORD (`naming-class-A.md` M2 (b) (i) and (ii)): `keys` are the members' elementOrderValues on
+/// `reference`, `ranks` their rankByGaps and `order` the members sorted by them. That is where two
+/// members next to each other in the order are told apart (i) only by their points in the frame
+/// (their places on the reference and their lengths or areas tie), by nothing at all, or on the
+/// reference where one of them has no place on it (no pcurve), or (ii) by a periodic parameter of
+/// a reference closed in that direction (a whole cylinder's or torus's face, a closed edge), where
+/// a member's parameter can jump by the period with the members unmoved. An order told by a
+/// parameter of an open reference, or by length or area, is rigid-motion invariant: the size in
+/// the names is then the whole net.
+bool fallbackOrderIsNoKey(
+    const std::vector<OrderValues>& keys,
+    const std::vector<std::vector<long>>& ranks,
+    const std::vector<std::size_t>& order,
+    const TopoDS_Shape& reference
+)
+{
+    std::size_t onReference = 0;
+    std::array<bool, 2> closed {false, false};
+    if (!reference.IsNull() && reference.ShapeType() == TopAbs_FACE) {
+        onReference = 2;
+        double uMin = 0;
+        double uMax = 0;
+        double vMin = 0;
+        double vMax = 0;
+        BRepTools::UVBounds(TopoDS::Face(reference), uMin, uMax, vMin, vMax);
+        const double tolerance = 10 * Precision::PConfusion();
+        const BRepAdaptor_Surface surface(TopoDS::Face(reference), Standard_False);
+        closed[0] = surface.IsUPeriodic() && uMax - uMin >= surface.UPeriod() - tolerance;
+        closed[1] = surface.IsVPeriodic() && vMax - vMin >= surface.VPeriod() - tolerance;
+    }
+    else if (!reference.IsNull() && reference.ShapeType() == TopAbs_EDGE) {
+        onReference = 1;
+        TopoDS_Vertex start;
+        TopoDS_Vertex end;
+        TopExp::Vertices(TopoDS::Edge(reference), start, end);
+        closed[0] = !start.IsNull() && start.IsSame(end);
+    }
+    for (std::size_t k = 1; k < order.size(); ++k) {
+        const auto& left = ranks[order[k - 1]];
+        const auto& right = ranks[order[k]];
+        std::size_t component = 0;
+        while (component < left.size() && left[component] == right[component]) {
+            ++component;
+        }
+        if (component == left.size() || component > onReference) {
+            return true;  // (i): a tie, or told apart by the frame's coordinates only
+        }
+        if (component < onReference) {
+            const OrderValue& leftValue = keys[order[k - 1]][component];
+            const OrderValue& rightValue = keys[order[k]][component];
+            if (!std::isfinite(leftValue.value) || !std::isfinite(rightValue.value)) {
+                return true;  // (i): a member with no place on the reference
+            }
+            if (leftValue.period > 0 && closed[component]) {
+                return true;  // (ii)
+            }
+        }
+    }
+    return false;
 }
 }  // namespace
 
@@ -2961,6 +3142,19 @@ TopoShape& TopoShape::makeShapeWithElementMap(
         }
 
         std::unordered_multiset<Data::MappedName, Data::MappedNameHasher> usedProjectedLinkedNames;
+        // The projected elements without marks or a counter, named from their source's front name
+        // alone, in the order they were named: the projections of one front name are twins, and
+        // once all are known get the count into their names (I-A2, below the loop)
+        struct ProjectedPiece
+        {
+            Data::IndexedName element;
+            TopoDS_Shape shape;
+            TopoDS_Shape source;
+            Data::MappedName frontName;
+            Data::MappedName given;  ///< the name it was given in the loop
+            std::vector<std::string> flags;
+        };
+        std::vector<ProjectedPiece> projectedPieces;
         std::unordered_set<Data::IndexedName, Data::IndexedNameHasher> allGeneratedShapes;
 
         // A far cap that is one of several pieces of its profile face's cap is told apart by its
@@ -3153,10 +3347,10 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                         // bottom twin left alone when the top one goes), since the top sections'
                         // flags disagree (round 2)
                         if (counter != 0) {
-                            flags.emplace_back(MAPPER_FLAG_ORDERED);
+                            flags.emplace_back(Data::MAPPER_FLAG_ORDERED);
                         }
 
-                        ensureElementMap()->setElementName(
+                        const Data::MappedName given = ensureElementMap()->setElementName(
                             element,
                             Data::MappedName(
                                 Data::MappedName::makeEncodedSection(
@@ -3176,6 +3370,11 @@ TopoShape& TopoShape::makeShapeWithElementMap(
 
                         if (marks.empty()) {
                             usedProjectedLinkedNames.insert(frontName);
+                            if (counter == 0) {
+                                projectedPieces.push_back(
+                                    {element, projectedShape, incomingShapeElement, frontName, given, flags}
+                                );
+                            }
                         }
                     }
 
@@ -3221,12 +3420,71 @@ TopoShape& TopoShape::makeShapeWithElementMap(
             }
         }
 
+        // The projections of one front name without marks (a far cap split by a seam the refine
+        // doesn't join, ops#386) are twins: in twinOrder's order on their source, Index `0`, with
+        // the count in DuplicateCount and ORD, as the generated and modified stages' twins (the
+        // size rule, I-A2). Named in the loop with their arrival count, so that the stages after
+        // see them named; renamed here, the element's other names kept in their order.
+        {
+            std::vector<std::vector<std::size_t>> twins;
+            std::unordered_map<Data::MappedName, std::size_t, Data::MappedNameHasher> twinsOf;
+            for (std::size_t i = 0; i < projectedPieces.size(); ++i) {
+                auto found = twinsOf.try_emplace(projectedPieces[i].frontName, twins.size());
+                if (found.second) {
+                    twins.emplace_back();
+                }
+                twins[found.first->second].push_back(i);
+            }
+            for (const auto& group : twins) {
+                if (group.size() < 2) {
+                    continue;
+                }
+                std::vector<TopoDS_Shape> shapes;
+                for (std::size_t i : group) {
+                    shapes.push_back(projectedPieces[i].shape);
+                }
+                const std::vector<std::size_t> order
+                    = twinOrder(shapes, {projectedPieces[group.front()].source}, frame);
+                const std::vector<TwinPlace> places = twinPlaces(order.size());
+                for (std::size_t k = 0; k < order.size(); ++k) {
+                    const ProjectedPiece& piece = projectedPieces[group[order[k]]];
+                    std::vector<std::string> flags = piece.flags;
+                    if (places[k].ordered) {
+                        flags.emplace_back(Data::MAPPER_FLAG_ORDERED);
+                    }
+                    const Data::MappedName renamed(Data::MappedName::makeEncodedSection(
+                        {},
+                        std::vector<Data::MappedName> {piece.frontName},
+                        std::to_string(static_cast<int>(masterTag)),
+                        op,
+                        places[k].index,
+                        piece.element.getType()[0],
+                        places[k].duplicateCount,
+                        flags,
+                        std::vector<Data::MappedName> {}
+                    ));
+                    auto names = getElementMappedNames(piece.element);
+                    ensureElementMap()->erase(piece.element);
+                    for (auto& [name, sids] : names) {
+                        ensureElementMap()->setElementName(
+                            piece.element,
+                            name == piece.given ? renamed : name,
+                            masterTag,
+                            &sids
+                        );
+                    }
+                }
+            }
+        }
+
         modifiedNamingMap.build();
 
         std::vector<std::pair<const Data::IndexedName*, std::vector<const Data::MappedName*>>>
             modifiedConnectedElementVector;
-        std::unordered_map<const Data::MappedName*, unsigned int> allModifiedConnectedElementNames;
-        unsigned int emptyModifiedConnectedElementsIndex = 0;
+        // Counted by name, not by where the name is kept: two faces with one name are one name,
+        // which tells no piece apart (ops#431). Only looked up, never iterated.
+        std::unordered_map<Data::MappedName, unsigned int, Data::MappedNameHasher>
+            allModifiedConnectedElementNames;
 
         // NamingMap::Group: pair<std::vector<NamingMapKey>, std::vector<NamingMapValue>>
         for (const auto& modifiedShapeEntry : modifiedNamingMap.getGroups()) {
@@ -3270,6 +3528,11 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                             const std::vector<int> ancestors
                                 = findAncestors(lowerShape, upperMapTypeEntry->second);
 
+                            // One upper name per lower element, to keep names short: of the
+                            // ancestors named from another input, the smallest name in
+                            // sortNameSet's order, never the first in the result's order of
+                            // its faces, which OCCT may store in another order (ops#431)
+                            std::vector<const Data::MappedName*> qualifying;
                             for (const int& ancestorIdx : ancestors) {
                                 const TopoDS_Shape& ancestor = upperMap->find(ancestorIdx);
                                 auto upperModifiedShapeMapIterator = includedModifiedNameMap.find(
@@ -3279,11 +3542,22 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                                 if (upperModifiedShapeMapIterator != includedModifiedNameMap.end()
                                     && upperModifiedShapeMapIterator->second.first
                                         != mapValue.incomingParentShapeHash) {
-                                    foundNames.push_back(&upperModifiedShapeMapIterator->second.second);
-                                    break;  // let's avoid more than one upper names to
-                                    //        improve performance by doing less work/generating
-                                    //        shorter names
+                                    qualifying.push_back(&upperModifiedShapeMapIterator->second.second);
                                 }
+                            }
+                            if (!qualifying.empty()) {
+                                std::vector<Data::MappedName> sorted;
+                                for (const Data::MappedName* name : qualifying) {
+                                    sorted.push_back(*name);
+                                }
+                                sortNameSet(sorted);
+                                foundNames.push_back(*std::find_if(
+                                    qualifying.begin(),
+                                    qualifying.end(),
+                                    [&sorted](const Data::MappedName* name) {
+                                        return *name == sorted.front();
+                                    }
+                                ));
                             }
                         }
 
@@ -3293,7 +3567,7 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                                 connectedElements.push_back(foundName);
 
                                 auto allConnectedElementIterator
-                                    = allModifiedConnectedElementNames.try_emplace(foundName, 0);
+                                    = allModifiedConnectedElementNames.try_emplace(*foundName, 0);
 
                                 if (!allConnectedElementIterator.second) {
                                     allConnectedElementIterator.first->second += 1;
@@ -3308,25 +3582,53 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                     );
                 }
 
-                // std::pair<Data::IndexedName, std::vector<Data::MappedName>>
-                for (const auto& modifiedConnectedElementEntry : modifiedConnectedElementVector) {
-                    std::vector<Data::MappedName> filteredConnectedElements;
-                    int index = 0;
-
-                    for (const Data::MappedName* name : modifiedConnectedElementEntry.second) {
-                        auto allConnectedElementIterator = allModifiedConnectedElementNames.find(name);
+                // Each piece's Connected Names that no other piece has. The pieces left without
+                // any are told apart by their place among the group's pieces of their type: in
+                // twinOrder's order on the source, with the count (the size rule, I-A2), and with
+                // ORD; a lone one `0`, as before.
+                std::vector<std::vector<Data::MappedName>> filteredConnectedElementsOf(
+                    modifiedConnectedElementVector.size()
+                );
+                std::map<char, std::vector<std::size_t>> placedMembers;
+                for (std::size_t i = 0; i < modifiedConnectedElementVector.size(); ++i) {
+                    auto& filtered = filteredConnectedElementsOf[i];
+                    for (const Data::MappedName* name : modifiedConnectedElementVector[i].second) {
+                        auto allConnectedElementIterator = allModifiedConnectedElementNames.find(*name);
 
                         if (allConnectedElementIterator != allModifiedConnectedElementNames.end()
                             && allConnectedElementIterator->second == 0) {
-                            filteredConnectedElements.push_back(*name);
+                            filtered.push_back(*name);
                         }
                     }
-
-                    if (filteredConnectedElements.empty()) {
-                        index = emptyModifiedConnectedElementsIndex++;
+                    if (filtered.empty()) {
+                        placedMembers[*modifiedConnectedElementVector[i].first->getType()].push_back(i);
                     }
                     else {
-                        sortNameSet(filteredConnectedElements);
+                        sortNameSet(filtered);
+                    }
+                }
+                std::vector<TwinPlace> places(modifiedConnectedElementVector.size());
+                for (const auto& [type, indexes] : placedMembers) {
+                    std::vector<TopoDS_Shape> shapes;
+                    for (std::size_t i : indexes) {
+                        shapes.push_back(modifiedShapeEntry.first[i].newElementShape);
+                    }
+                    const std::vector<std::size_t> order
+                        = twinOrder(shapes, {mapValue.incomingElementShape}, frame);
+                    const std::vector<TwinPlace> typePlaces = twinPlaces(order.size());
+                    for (std::size_t k = 0; k < order.size(); ++k) {
+                        places[indexes[order[k]]] = typePlaces[k];
+                    }
+                }
+
+                for (std::size_t entry = 0; entry < modifiedConnectedElementVector.size(); ++entry) {
+                    const auto& modifiedConnectedElementEntry = modifiedConnectedElementVector[entry];
+                    const std::vector<Data::MappedName>& filteredConnectedElements
+                        = filteredConnectedElementsOf[entry];
+                    const TwinPlace& place = places[entry];
+                    std::vector<std::string> flags {Data::MAPPER_FLAG_MODIFIED};
+                    if (place.ordered) {
+                        flags.emplace_back(Data::MAPPER_FLAG_ORDERED);
                     }
 
                     // Since indexed names can have multiple MappedNames assigned to them,
@@ -3344,13 +3646,13 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                         newName.append(
                             Data::MappedName::makeEncodedSection(
                                 {},
-                                {},
-                                masterTag,
+                                std::vector<Data::MappedName> {},
+                                std::to_string(static_cast<int>(masterTag)),
                                 op,
-                                index,
+                                place.index,
                                 modifiedConnectedElementEntry.first->getType()[0],
-                                0,
-                                {Data::MAPPER_FLAG_MODIFIED},
+                                place.duplicateCount,
+                                flags,
                                 filteredConnectedElements
                             )
                                 .c_str()
@@ -3366,7 +3668,6 @@ TopoShape& TopoShape::makeShapeWithElementMap(
 
                 modifiedConnectedElementVector.clear();
                 allModifiedConnectedElementNames.clear();
-                emptyModifiedConnectedElementsIndex = 0;
             }
         }
 
@@ -3378,8 +3679,17 @@ TopoShape& TopoShape::makeShapeWithElementMap(
         std::vector<std::pair<std::vector<NamingMapKey>, Data::DecodedMappedSection>>
             delayedGeneratedMap;
         // Per entry of delayedGeneratedMap: the group's first shared source if it is an edge, and
-        // its first face source (null if none), for its vertexes' indexes (crossingIndexes)
+        // its first face source (null if none), for its vertexes' sides (crossingPlaces), and
+        // its sources, for its members' order (twinOrder)
         std::vector<std::pair<TopoDS_Shape, TopoDS_Shape>> delayedCrossingSources;
+        std::vector<std::vector<TopoDS_Shape>> delayedSources;
+        auto sourceShapes = [](const std::vector<NamingMapValue>& sources) {
+            std::vector<TopoDS_Shape> shapes;
+            for (const NamingMapValue& source : sources) {
+                shapes.push_back(source.incomingElementShape);
+            }
+            return shapes;
+        };
         auto crossingSources = [](const std::vector<NamingMapValue>& sources) {
             std::pair<TopoDS_Shape, TopoDS_Shape> result;
             const TopoDS_Shape& first = sources.front().incomingElementShape;
@@ -3428,6 +3738,28 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                 newNameSection.duplicateCount = "0";
                 newNameSection.mapperFlags = {Data::MAPPER_FLAG_GENERATED};
 
+                // A vertex where an edge crosses a face takes its side into this provisional
+                // section too (`naming-class-A.md` M2 (a')): the edges generated from the same
+                // sources are then told apart by their end vertexes' names, not by a counter (a
+                // hole's rim in two pieces split at its seam vertex). Where a side can't be told
+                // for one vertex of the group, none takes one (I-A6).
+                const auto [crossedEdge, crossingFace] = crossingSources(generatedShapeEntry.second);
+                std::vector<std::string> provisionalSides(generatedShapes);
+                if (!crossedEdge.IsNull()) {
+                    for (size_t i = 0; i < generatedShapes; i++) {
+                        const NamingMapKey& member = generatedShapeEntry.first[i];
+                        if (std::strcmp(member.newElementName.getType(), "Vertex") != 0) {
+                            continue;
+                        }
+                        provisionalSides[i]
+                            = crossingSide(member.newElementShape, crossedEdge, crossingFace);
+                        if (provisionalSides[i].empty()) {
+                            provisionalSides.assign(generatedShapes, {});
+                            break;
+                        }
+                    }
+                }
+
                 for (size_t i = 0; i < generatedShapes; i++) {
                     const Data::IndexedName& generatedElementName
                         = generatedShapeEntry.first[i].newElementName;
@@ -3442,7 +3774,11 @@ TopoShape& TopoShape::makeShapeWithElementMap(
 
                     // we put all generated elements in here, even if it was just mapped above.
                     // we do this so we can look up those values later.
-                    namedGeneratedShapes[generatedElementShape] = newNameSection;
+                    Data::DecodedMappedSection provisionalSection = newNameSection;
+                    if (!provisionalSides[i].empty()) {
+                        provisionalSection.index = provisionalSides[i];
+                    }
+                    namedGeneratedShapes[generatedElementShape] = provisionalSection;
                 }
 
                 // if the source shapes create more than one resultant shapes, then wait to map
@@ -3450,14 +3786,16 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                 if (generatedShapes == 1) {
                     newNameSection.elementType
                         = (*generatedShapeEntry.first[0].newElementName.getType());
-                    if (newNameSection.elementType == 'V') {
-                        const auto [edge, face] = crossingSources(generatedShapeEntry.second);
-                        if (!edge.IsNull()) {
-                            newNameSection.index = crossingIndexes(
-                                {generatedShapeEntry.first[0].newElementShape},
-                                edge,
-                                face
-                            ).front();
+                    if (newNameSection.elementType == 'V' && !crossedEdge.IsNull()) {
+                        const TwinPlace place = crossingPlaces(
+                            {generatedShapeEntry.first[0].newElementShape},
+                            crossedEdge,
+                            crossingFace
+                        ).front();
+                        newNameSection.index = place.index;
+                        newNameSection.duplicateCount = place.duplicateCount;
+                        if (place.ordered) {
+                            newNameSection.mapperFlags.emplace_back(Data::MAPPER_FLAG_ORDERED);
                         }
                     }
                     ensureElementMap()->setElementName(
@@ -3468,7 +3806,8 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                 }
                 else if (generatedShapes > 1) {
                     delayedGeneratedMap.emplace_back(generatedShapeEntry.first, newNameSection);
-                    delayedCrossingSources.push_back(crossingSources(generatedShapeEntry.second));
+                    delayedCrossingSources.emplace_back(crossedEdge, crossingFace);
+                    delayedSources.push_back(sourceShapes(generatedShapeEntry.second));
                 }
             }
         }
@@ -3476,9 +3815,6 @@ TopoShape& TopoShape::makeShapeWithElementMap(
         std::unordered_map<TopoDS_Shape, std::vector<std::string>, ShapeHasher, ShapeHasher>
             generatedConnectedElementMap;
         std::unordered_multiset<std::string> allGeneratedConnectedElementNames;
-        // Counted per element type: the type tells a group's members of different types apart
-        // (ops#46). Only looked up, never iterated.
-        std::map<char, unsigned int> emptyConnectedElementsIndex;
 
         // pair<std::vector<NamingMapKey>, Data::DecodedMappedSection>
         for (std::size_t entryIndex = 0; entryIndex < delayedGeneratedMap.size(); ++entryIndex) {
@@ -3539,28 +3875,45 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                 connectedElementKey.second = finalConnectedElementsList;
             }
 
-            // Vertexes generated along one edge (a hole crossing it twice) are named by the side
-            // of the other source they lie on, `in` and `out`, not by the counter alone (ops#468):
-            // when an edit changes how many there are (the hole's seam leaving the edge or
-            // reaching it), a name would pass to the other crossing. The same members as the
-            // counter's below, in its order.
-            std::vector<std::string> vertexIndexes;
-            const auto& [crossedEdge, crossingFace] = delayedCrossingSources[entryIndex];
-            if (!crossedEdge.IsNull()) {
-                std::vector<TopoDS_Shape> counted;
-                for (const Part::NamingMapKey& elementKey : delayedGeneratedEntry.first) {
-                    auto it = generatedConnectedElementMap.find(elementKey.newElementShape);
-                    if (std::strcmp(elementKey.newElementName.getType(), "Vertex") == 0
-                        && (it == generatedConnectedElementMap.end() || it->second.empty())) {
-                        counted.push_back(elementKey.newElementShape);
-                    }
+            // The members without Connected Names are told apart by their place among the
+            // group's members of their type (the type tells types apart, ops#46): in twinOrder's
+            // order, with the count (the size rule, I-A2), and with ORD; a lone one `0`, as
+            // before. Vertexes generated along an edge that a face crosses (a hole crossing it
+            // twice) are named by their side of the face, `in` and `out` (ops#468), lone ones
+            // included: when an edit changes how many there are (the hole's seam leaving the
+            // edge or reaching it), a name never passes to the other crossing.
+            const std::vector<NamingMapKey>& members = delayedGeneratedEntry.first;
+            std::map<char, std::vector<std::size_t>> placedMembers;
+            for (std::size_t i = 0; i < members.size(); ++i) {
+                auto it = generatedConnectedElementMap.find(members[i].newElementShape);
+                if (it == generatedConnectedElementMap.end() || it->second.empty()) {
+                    placedMembers[*members[i].newElementName.getType()].push_back(i);
                 }
-                vertexIndexes = crossingIndexes(counted, crossedEdge, crossingFace);
+            }
+            std::vector<TwinPlace> places(members.size());
+            const auto& [crossedEdge, crossingFace] = delayedCrossingSources[entryIndex];
+            for (const auto& [type, indexes] : placedMembers) {
+                std::vector<TopoDS_Shape> shapes;
+                for (std::size_t i : indexes) {
+                    shapes.push_back(members[i].newElementShape);
+                }
+                const std::vector<std::size_t> order
+                    = twinOrder(shapes, delayedSources[entryIndex], frame);
+                std::vector<TopoDS_Shape> ordered;
+                for (std::size_t k : order) {
+                    ordered.push_back(shapes[k]);
+                }
+                const std::vector<TwinPlace> typePlaces = type == 'V' && !crossedEdge.IsNull()
+                    ? crossingPlaces(ordered, crossedEdge, crossingFace)
+                    : twinPlaces(ordered.size());
+                for (std::size_t k = 0; k < order.size(); ++k) {
+                    places[indexes[order[k]]] = typePlaces[k];
+                }
             }
 
-            for (const Part::NamingMapKey& elementKey : delayedGeneratedEntry.first) {
-                const Data::IndexedName& elementIndexName = elementKey.newElementName;
-                const TopoDS_Shape& elementShape = elementKey.newElementShape;
+            for (std::size_t i = 0; i < members.size(); ++i) {
+                const Data::IndexedName& elementIndexName = members[i].newElementName;
+                const TopoDS_Shape& elementShape = members[i].newElementShape;
                 Data::DecodedMappedSection elementMappedSection = delayedGeneratedEntry.second;
                 std::vector<std::string> connectedElements;
                 auto it = generatedConnectedElementMap.find(elementShape);
@@ -3575,12 +3928,10 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                     elementMappedSection.connectedElements = connectedElements;
                 }
                 else {
-                    const unsigned int k
-                        = emptyConnectedElementsIndex[elementMappedSection.elementType]++;
-                    elementMappedSection.index = std::to_string(k);
-                    if (elementMappedSection.elementType == 'V' && !vertexIndexes.empty()) {
-                        assert(k < vertexIndexes.size());
-                        elementMappedSection.index = vertexIndexes[k];
+                    elementMappedSection.index = places[i].index;
+                    elementMappedSection.duplicateCount = places[i].duplicateCount;
+                    if (places[i].ordered) {
+                        elementMappedSection.mapperFlags.emplace_back(Data::MAPPER_FLAG_ORDERED);
                     }
                 }
 
@@ -3593,12 +3944,16 @@ TopoShape& TopoShape::makeShapeWithElementMap(
 
             generatedConnectedElementMap.clear();
             allGeneratedConnectedElementNames.clear();
-            emptyConnectedElementsIndex.clear();
         }
 
-        std::unordered_multiset<std::vector<Data::MappedName>, Data::MappedNameHasher> usedUpperNames;
-        std::unordered_multiset<std::vector<Data::MappedName>, Data::MappedNameHasher> usedLowerNames;
-        std::unordered_multiset<Data::MappedName, Data::MappedNameHasher> usedPartnerNames;
+        // Per element type: the type tells the members of lists of different types apart. Only
+        // looked up, never iterated.
+        std::map<char, std::unordered_multiset<std::vector<Data::MappedName>, Data::MappedNameHasher>>
+            usedUpperNames;
+        std::map<char, std::unordered_multiset<std::vector<Data::MappedName>, Data::MappedNameHasher>>
+            usedLowerNames;
+        std::map<char, std::unordered_multiset<Data::MappedName, Data::MappedNameHasher>>
+            usedPartnerNames;
         std::array<ShapeInfo*, 3> topologyMapElementOrder = {&faceInfo, &edgeInfo, &vertexInfo};
 
         // Now let's map any unmapped shapes with the IsPartner and ancestor method. A pass names
@@ -3607,15 +3962,18 @@ TopoShape& TopoShape::makeShapeWithElementMap(
         // names what the first left, from the names the first gave; it changes no name (ops#25:
         // one of two coincident pieces of a split face, which has no history).
         //
-        // The index of such a name counts the elements named before from the same partner or
-        // list. An element's partner and lists come only from elements of other types, so each
-        // type's lists are collected first and the indexes given after, per list in the order of
-        // the members' places (elementOrderValues), not of their indexes in the result, which
-        // follow OCCT's sub-shape order (ops#378: a round hole's bend arcs in a Pipe). An UPP
-        // member's place is read on its reference, the first ancestor in the list's name order
-        // that isn't a plane; an UPP list named only from planes keeps the result's order. LOW
-        // and PRJ members have no reference, and are ordered by their length or area and their
-        // coordinates. Vertexes still count on from the edges named from the same faces.
+        // The members of one partner or list (of one type) are twins, told apart by their place
+        // among them: Index `0` and `<k>of<n>` in DuplicateCount (the size rule, I-A2), a lone
+        // member `0`. An element's partner and lists come only from elements of other types, so
+        // each type's lists are collected first and the places given after, per list in the
+        // order of the members' places (elementOrderValues), not of their indexes in the result,
+        // which follow OCCT's sub-shape order (ops#378: a round hole's bend arcs in a Pipe). An
+        // UPP member's place is read on its reference, the first ancestor in the list's name
+        // order that isn't a plane; an UPP list named only from planes keeps the result's order.
+        // LOW and PRJ members have no reference, and are ordered by their length or area and
+        // their coordinates. A list carries ORD only where its order is no key by I-A3
+        // (fallbackOrderIsNoKey; `naming-class-A.md` M2 (b)). A member a second pass names from
+        // a list the first pass named counts on after it.
         enum class Fallback
         {
             Partner,
@@ -3847,10 +4205,12 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                     lists[found.first->second].push_back(i);
                 }
 
+                const char type = *info->shapetype;
                 for (auto& list : lists) {
                     const FallbackName& first = fallbackNames[list.front()];
                     const bool resultOrder = first.kind == Fallback::Upper
                         && first.reference.IsNull();  // named only from planes
+                    bool ordered = false;
                     if (list.size() > 1 && !resultOrder) {
                         std::vector<OrderValues> keys;
                         keys.reserve(list.size());
@@ -3878,41 +4238,56 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                             sorted.push_back(list[k]);
                         }
                         list = std::move(sorted);
+                        ordered = fallbackOrderIsNoKey(keys, ranks, order, first.reference);
                     }
 
-                    for (std::size_t i : list) {
-                        const FallbackName& fallback = fallbackNames[i];
-                        int index = 0;
+                    // The members named before from the list's partner or names (an earlier
+                    // pass's), and with this list's, how many there are
+                    std::size_t before = 0;
+                    switch (first.kind) {
+                        case Fallback::Partner:
+                            before = usedPartnerNames[type].count(first.names.front());
+                            break;
+                        case Fallback::Upper:
+                            before = usedUpperNames[type].count(first.names);
+                            break;
+                        case Fallback::Lower:
+                            before = usedLowerNames[type].count(first.names);
+                            break;
+                    }
+                    const std::size_t count = before + list.size();
+
+                    for (std::size_t position = 0; position < list.size(); ++position) {
+                        const FallbackName& fallback = fallbackNames[list[position]];
                         const char* flag = nullptr;
                         switch (fallback.kind) {
                             case Fallback::Partner:
-                                index = static_cast<int>(
-                                    usedPartnerNames.count(fallback.names.front())
-                                );
-                                usedPartnerNames.insert(fallback.names.front());
+                                usedPartnerNames[type].insert(fallback.names.front());
                                 flag = Data::MAPPER_FLAG_PROJECTION;
                                 break;
                             case Fallback::Upper:
-                                index = static_cast<int>(usedUpperNames.count(fallback.names));
-                                usedUpperNames.insert(fallback.names);
+                                usedUpperNames[type].insert(fallback.names);
                                 flag = Data::MAPPER_FLAG_UPPER;
                                 break;
                             case Fallback::Lower:
-                                index = static_cast<int>(usedLowerNames.count(fallback.names));
-                                usedLowerNames.insert(fallback.names);
+                                usedLowerNames[type].insert(fallback.names);
                                 flag = Data::MAPPER_FLAG_LOWER;
                                 break;
+                        }
+                        std::vector<std::string> flags {flag};
+                        if (count > 1 && ordered) {
+                            flags.emplace_back(Data::MAPPER_FLAG_ORDERED);
                         }
                         Data::MappedName newName = Data::MappedName(
                             Data::MappedName::makeEncodedSection(
                                 {},
                                 fallback.names,
-                                masterTag,
+                                std::to_string(static_cast<int>(masterTag)),
                                 op,
-                                index,
-                                (*info->shapetype),
-                                0,
-                                {flag}
+                                "0",
+                                type,
+                                count > 1 ? placeAmong(before + position, count) : "0",
+                                flags
                             )
                         );
                         ensureElementMap()->setElementName(

@@ -143,6 +143,17 @@ constexpr const char* MAPPER_FLAG_SOURCE                = "SRC";
 constexpr const char* MAPPER_FLAG_INDEX                 = "IDX";
 /// Mapper flag that designates that an element's `LinkedNames` do not share common entries with other names that also have this flag.
 constexpr const char* MAPPER_FLAG_NON_DUPLICATE         = "NDU";
+/// Mapper flag that designates that an element is told apart from its twins by its place among
+/// them, or by a role an edit can flip: the solver re-checks an exact hit that moved.
+constexpr const char* MAPPER_FLAG_ORDERED               = "ORD";
+
+/// The roles: values of a V2 section's Index field that tell the members of a group apart by a
+/// fact about each member's own geometry and its sources, not by a counter (ops#468, the role
+/// set of `notes\naming-class-A.md` 4.1). A vertex where an edge crosses a face is `in` where the
+/// edge enters the face's side of it, `out` where it leaves it. Two names equal up to a role in
+/// the Index of their last section are role siblings: twins to the solver's sibling tests.
+constexpr const char* ROLE_CROSSING_IN                  = "in";
+constexpr const char* ROLE_CROSSING_OUT                 = "out";
 
 // Placement indexes of data in sections of MappedNames used by the V2 Topological Naming System.
 // DO NOT CHANGE THESE VALUES EVER!!! Data should only be added to sections, not removed or otherwise altered.
