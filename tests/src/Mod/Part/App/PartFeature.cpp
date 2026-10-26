@@ -1460,6 +1460,35 @@ TEST_F(FeaturePartTest, fingerprintsOfAnLHaveAPointInside)
     EXPECT_FALSE(squarePrint.inside);
     const std::string squareText = squarePrint.toString();
     EXPECT_EQ(std::count(squareText.begin(), squareText.end(), '|'), 10) << squareText;
+
+    // Round 7: the L x 0.9..2.9, y 0.9..2.9 without x 0.9 + w..2.9, y 0.9 + w..2.9, its arms w
+    // wide: 0.1 and 0.03 have no centre of the 9 x 9 grid in them (the first sits 0.11 in), 0.1
+    // has one of the 27 x 27 grid's (0.037 in), 0.03 one of the 81 x 81 grid's (0.012 in). Its
+    // point lies in an arm. Arms 0.005 wide have none even then: no point, and no twelfth field
+    for (const double w : {0.1, 0.03, 0.005}) {
+        const double a = 0.9 + w;
+        const TopoShape thin = face(
+            {gp_Pnt(0.9, 0.9, 10),
+             gp_Pnt(2.9, 0.9, 10),
+             gp_Pnt(2.9, a, 10),
+             gp_Pnt(a, a, 10),
+             gp_Pnt(a, 2.9, 10),
+             gp_Pnt(0.9, 2.9, 10)}
+        );
+        Data::ElementFingerprint thinPrint;
+        ASSERT_TRUE(Feature::getElementFingerprint(thin, "Face1", thinPrint));
+        const std::string text = thinPrint.toString();
+        if (w < 0.01) {
+            EXPECT_FALSE(thinPrint.inside) << w << ": " << text;
+            EXPECT_EQ(std::count(text.begin(), text.end(), '|'), 10) << text;
+            continue;
+        }
+        ASSERT_TRUE(thinPrint.inside) << w << ": " << text;
+        const Base::Vector3d& in = *thinPrint.inside;
+        EXPECT_NEAR(in.z, 10.0, 1e-9);
+        EXPECT_TRUE(in.x > 0.9 && in.y > 0.9 && (in.x < a || in.y < a))
+            << w << ": " << in.x << "," << in.y;
+    }
 }
 
 TEST_F(FeaturePartTest, fingerprintsIgnoreThePlacement)

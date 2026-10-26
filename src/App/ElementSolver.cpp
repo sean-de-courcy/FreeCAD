@@ -4456,8 +4456,22 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             // of the edge (ops#386). Round 6: a face's saved point inside it when there is one
             // (an L's centre lies outside the L, where a whole cap on the next plate holds it)
             const double eps = input.continuationDistance * std::max(1.0, input.diagonal);
+            // Round 7 (I-S9): a face whose area falls short of its outline's with no saved point
+            // inside it (none found) refuses; its centre may lie outside it, so it can't stand in
+            auto lacksInsidePoint = [&] {
+                if (centred->type != 'F' || centred->inside || !centred->size
+                    || centred->outline.size() < 3) {
+                    return false;
+                }
+                const auto& outline = centred->outline;
+                Base::Vector3d sum;
+                for (std::size_t i = 1; i + 1 < outline.size(); ++i) {
+                    sum += (outline[i] - outline.front()) % (outline[i + 1] - outline.front());
+                }
+                return *centred->size < 0.98 * sum.Length() / 2.0;
+            };
             auto holdsSavedCentre = [&](int k) {
-                if (!centred || !input.holdsPoint) {
+                if (!centred || !input.holdsPoint || lacksInsidePoint()) {
                     return false;
                 }
                 const double size = centred->size ? *centred->size : 0.0;

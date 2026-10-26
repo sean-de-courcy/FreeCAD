@@ -1376,15 +1376,20 @@ def farPieceAt(shape, element, point):
     return names[0]
 
 
-def slideOntoReorderedPlates(test, kind, faces, draw, places, move, order, after):
+def slideOntoReorderedPlates(test, kind, faces, draw, places, move, order, after, reopen=False):
     """PR 366 round 6: as slideOntoReorderedStrips, up to the shell of `faces(z)` (a list of
     B-spline plates; z is the far caps' height where the plates are flat at it): datum points on
     the pieces through the shell's points at `places` ({piece: ("F" or "E", x, y)}), then the
     profile moved by `move` ((dx, dy)) while the shell is rebuilt from its faces in `order`. Each
     point is then on the piece through the shell's point at one of its `after` places (a list)
     or says it lost its piece, never quietly elsewhere; one whose `after` is a single place (a
-    tuple) is on that piece, quietly"""
+    tuple) is on that piece, quietly. Round 7: with `reopen`, the document is saved, opened again
+    and recomputed before the move (the fingerprints read back from the file)"""
+    import os
+    import tempfile
+
     doc = FreeCAD.newDocument("PadUpToReorderedPlates")
+    work = tempfile.mkdtemp(prefix="pad-plates-reopen-") if reopen else None
     try:
         feature, z = profileUpToFreeformStrips(doc, kind, (1, 3), draw)
         replaceUpToShape(feature, Part.Shell(faces(z)))
@@ -1397,6 +1402,18 @@ def slideOntoReorderedPlates(test, kind, faces, draw, places, move, order, after
             sub = farPieceAt(shape, element, shellPointAt(shell, x, y))
             attach = pointOnFarCap if element == "F" else pointOnFarEdge
             points[piece] = attach(feature, sub)
+        if reopen:
+            path = os.path.join(work, "plates.FCStd")
+            doc.saveAs(path)
+            names = {piece: point.Name for piece, point in points.items()}
+            featureName = feature.Name
+            FreeCAD.closeDocument(doc.Name)
+            doc = FreeCAD.openDocument(path)
+            for obj in doc.Objects:
+                obj.touch()
+            doc.recompute()
+            feature = doc.getObject(featureName)
+            points = {piece: doc.getObject(name) for piece, name in names.items()}
         sketch = feature.Profile[0]
         base = sketch.AttachmentOffset.Base
         sketch.AttachmentOffset = FreeCAD.Placement(
@@ -1428,6 +1445,10 @@ def slideOntoReorderedPlates(test, kind, faces, draw, places, move, order, after
                 )
     finally:
         FreeCAD.closeDocument(doc.Name)
+        if work:
+            import shutil
+
+            shutil.rmtree(work, ignore_errors=True)
 
 
 # The child of testPadUpToAFreeformFaceCapsMigrate: opens the saved file, recomputes every object
@@ -3592,6 +3613,59 @@ class TestPad(unittest.TestCase):
                 with self.subTest(kind=kind, case=case):
                     slideOntoReorderedPlates(
                         self, kind, notchedPlates, draw, places, move, order, after
+                    )
+
+    def testPadUpToANotchedPlateThinLPieceNotMadeWholeElsewhere(self):
+        # PR 366 round 7 (ops#386): as the test above, A drawn from (x0, x0) to (x0 + 2, x0 + 2)
+        # with x0 = 0.9 or 0.92: the L piece's arms are 0.1 or 0.08 wide. The point inside the L
+        # was taken from the centres of a 9 x 9 grid over the piece's parameters, none of them in
+        # an arm narrower than a 18th of the span; no point was saved, the L's centre stood in for
+        # it, and with A moved wholly onto the square plate the whole cap there held it: the L
+        # piece's datum went quietly to the whole cap. Its datum says it lost its piece now, for
+        # every move onto the square plate, in the open document and in one saved and opened
+        # again; the square piece's datum is on the whole cap or says it lost its piece. The
+        # first case is the round 6 verdict's (0.1, moved by 0.5). For the Pad and the Pocket
+        cases = [
+            # (x0, the move, saved and opened again)
+            (0.9, 0.5, False),
+            (0.9, 0.1, False),
+            (0.9, 0.12, False),
+            (0.9, 0.2, False),
+            (0.9, 1, False),
+            (0.92, 0.1, False),
+            (0.92, 0.12, False),
+            (0.92, 0.2, False),
+            (0.92, 0.5, False),
+            (0.92, 1, False),
+            (0.9, 0.15, True),
+            (0.95, 0.1, True),
+        ]
+        for kind in ("Pad", "Pocket"):
+            for x0, move, reopen in cases:
+                arm = 1 - x0
+                x1 = x0 + 2
+
+                def draw(sketch, x0=x0, x1=x1):
+                    dimensionedRectangle(sketch, "A", x0, x0, x1, x1)
+                    dimensionedRectangle(sketch, "B", 12, 0, 14, 3)
+
+                places = {
+                    "CA": ("F", x0 + arm / 2, 2),
+                    "CA2": ("F", 2, x0 + arm / 2),
+                    "CB": ("F", 2, 2),
+                }
+                after = {"CA": [], "CA2": [], "CB": [(2, 2)]}
+                with self.subTest(kind=kind, x0=x0, move=move, reopen=reopen):
+                    slideOntoReorderedPlates(
+                        self,
+                        kind,
+                        notchedPlates,
+                        draw,
+                        places,
+                        (move, move),
+                        (0, 1, 2),
+                        after,
+                        reopen,
                     )
 
     def testPadUpToAHoledShellFarEdgePiecesOfAFlippedRectangle(self):

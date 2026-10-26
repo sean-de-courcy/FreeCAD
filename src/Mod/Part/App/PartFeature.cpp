@@ -742,6 +742,10 @@ void outlineFingerprint(const TopoDS_Face& face, Data::ElementFingerprint& fp)
 // field, PR 366 round 6): an L's or a ring's centre may lie outside it. Of the centres of a 9 x 9
 // grid over the face's parameters, the one inside the face farthest from its boundary's points
 // (17 along each edge). None for a face its outline bounds closely, whose centre is inside it.
+// Round 7: when no centre of the 9 x 9 grid is inside (an arm narrower than a 18th of the span),
+// those of a 27 x 27 grid, then of an 81 x 81 one (each holds the coarser one's centres). A face
+// with none inside even then gets no point: the reader refuses it (holdsSavedCentre()), never
+// standing its centre in for one (I-S9).
 void insideFingerprint(const TopoDS_Face& face, Data::ElementFingerprint& fp)
 {
     if (fp.outline.size() < 3 || !fp.size) {
@@ -772,25 +776,29 @@ void insideFingerprint(const TopoDS_Face& face, Data::ElementFingerprint& fp)
     BRepTools::UVBounds(face, u0, u1, v0, v1);
     BRepAdaptor_Surface surface(face);
     BRepClass_FaceClassifier classifier;
-    constexpr int cells = 9;
-    double farthest = -1.0;
-    for (int i = 0; i < cells; ++i) {
-        for (int j = 0; j < cells; ++j) {
-            const double u = u0 + (u1 - u0) * (i + 0.5) / cells;
-            const double v = v0 + (v1 - v0) * (j + 0.5) / cells;
-            classifier.Perform(face, gp_Pnt2d(u, v), Precision::Confusion());
-            if (classifier.State() != TopAbs_IN) {
-                continue;
+    for (const int cells : {9, 27, 81}) {
+        double farthest = -1.0;
+        for (int i = 0; i < cells; ++i) {
+            for (int j = 0; j < cells; ++j) {
+                const double u = u0 + (u1 - u0) * (i + 0.5) / cells;
+                const double v = v0 + (v1 - v0) * (j + 0.5) / cells;
+                classifier.Perform(face, gp_Pnt2d(u, v), Precision::Confusion());
+                if (classifier.State() != TopAbs_IN) {
+                    continue;
+                }
+                const gp_Pnt point = surface.Value(u, v);
+                double nearest = std::numeric_limits<double>::infinity();
+                for (const auto& other : boundary) {
+                    nearest = std::min(nearest, point.Distance(other));
+                }
+                if (nearest > farthest) {
+                    farthest = nearest;
+                    fp.inside = toVector(point.XYZ());
+                }
             }
-            const gp_Pnt point = surface.Value(u, v);
-            double nearest = std::numeric_limits<double>::infinity();
-            for (const auto& other : boundary) {
-                nearest = std::min(nearest, point.Distance(other));
-            }
-            if (nearest > farthest) {
-                farthest = nearest;
-                fp.inside = toVector(point.XYZ());
-            }
+        }
+        if (fp.inside) {
+            return;
         }
     }
 }

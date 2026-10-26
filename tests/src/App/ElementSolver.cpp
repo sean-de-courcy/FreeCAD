@@ -6333,6 +6333,31 @@ TEST(SolveOwner, twinCapPiecesResolveToTheirCapMadeWhole)
     // The control: the whole cap doesn't hold the old centre (A moved away): broken.
     holders.clear();
     EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
+
+    // PR 366 round 7 (I-S9): pieces whose area (0.39) falls short of their outline's (a square of
+    // side 2) saved with no point inside them (none found, an L with arms too thin): their
+    // centres may lie outside them, so the whole cap holding the centre is no evidence. Broken,
+    // although it holds it; with the point saved, it holds that point and takes them again
+    holders = {"Face4"};
+    for (auto& entry : input.entries) {
+        auto& saved = entry.fingerprint;
+        const Base::Vector3d c = *saved.center;
+        saved.size = 0.39;
+        saved.outline = {c + Base::Vector3d(-1, -1, 0),
+                         c + Base::Vector3d(1, -1, 0),
+                         c + Base::Vector3d(1, 1, 0),
+                         c + Base::Vector3d(-1, 1, 0)};
+    }
+    for (const auto& outcome : Data::solveOwner(input)) {
+        EXPECT_EQ(outcome.status, SolveStatus::Broken) << describe(outcome);
+    }
+    for (auto& entry : input.entries) {
+        entry.fingerprint.inside = *entry.fingerprint.center + Base::Vector3d(-0.95, 0, 0);
+    }
+    for (const auto& outcome : Data::solveOwner(input)) {
+        EXPECT_EQ(outcome.status, SolveStatus::Resolved) << describe(outcome);
+        EXPECT_EQ(outcome.element, "Face4") << describe(outcome);
+    }
 }
 
 TEST(Moved, hintKeepsATwinAtTheToleranceEdge)
