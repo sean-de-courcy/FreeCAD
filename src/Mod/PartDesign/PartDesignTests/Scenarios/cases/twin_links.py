@@ -28,7 +28,7 @@ x = 100, are combined by a Part::MultiFuse, a Part::Compound, or an App::Part (t
 group) bound by a PartDesign::SubShapeBinder; the combiner's elements for the two instances have
 the same names but for a count. Three references: `ref_a` (a LinkSub) and `att` (a Part::Box
 attached FlatFace) are on L2's +X face, at x = 110; `ref_b` (a LinkSub) is on L1's +X face, at
-x = 10. The inputs are reordered ([L2, L1]), L1 is removed ([L2]), or an instance L3 at x = 200 is
+x = 10. The inputs are reordered ([L2, L1]), L1 is removed ([L2], or [L2, L3] for the MultiFuse, which needs two), or an instance L3 at x = 200 is
 inserted first ([L3, L1, L2]). Each reference must stay on its face (the one at x = 110 facing
 +X, the one at x = 10), or `ref_b` must break where L1 is gone. A reference on another instance's
 face is a silent move.
@@ -55,6 +55,7 @@ class TwinLinks(Scenario):
     REFS = ("ref_a", "ref_b", "att")
     combiner = None  # "fuse", "compound" or "part"
     gone = False  # the edit removes L1
+    spare = False  # a third instance L3 at x = 200 stays, so that a MultiFuse keeps two inputs
 
     def faceA(self):
         return face("plane", normal=X, through=(110, 0, 0))
@@ -90,6 +91,7 @@ class TwinLinks(Scenario):
         doc.recompute()
         self.l1 = self.link(doc, "L1", 0)
         self.l2 = self.link(doc, "L2", 100)
+        self.rest = [self.link(doc, "L3", 200)] if self.spare else []
         if self.combiner == "fuse":
             self.combined = doc.addObject("Part::MultiFuse", "Combined")
         elif self.combiner == "compound":
@@ -97,7 +99,7 @@ class TwinLinks(Scenario):
         else:
             self.part = doc.addObject("App::Part", "Holder")
             self.combined = doc.addObject("PartDesign::SubShapeBinder", "Combined")
-        self.setInputs([self.l1, self.l2])
+        self.setInputs([self.l1, self.l2] + self.rest)
         if self.combiner == "part":
             self.combined.Support = [(self.part, [""])]
         doc.recompute()
@@ -127,13 +129,15 @@ class TwinLinksFuseReorder(TwinLinks):
 
 
 class TwinLinksFuseRemove(TwinLinks):
-    """A MultiFuse of the links, L1 removed (a MultiFuse of one shape is invalid)."""
+    """A MultiFuse of the links L1, L2 and L3, L1 removed (a MultiFuse of one shape is invalid, so
+    a third instance stays)."""
 
     combiner = "fuse"
+    spare = True
 
     def edit(self, doc):
         self.gone = True
-        self.setInputs([self.l2])
+        self.setInputs([self.l2] + self.rest)
 
 
 class TwinLinksFuseInsert(TwinLinks):
