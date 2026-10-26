@@ -60,6 +60,7 @@ from PartDesignTests.TestPipe import TestBaseAfterAnInvalidPipe  # FreeCAD-CH, o
 from PartDesignTests.TestPipe import TestBaseAfterAnInvalidBaseFeature  # FreeCAD-CH, ops#310
 from PartDesignTests.TestPipe import TestPipeAlongTiltedWaves, TestLoosePipeWarns  # FreeCAD-CH, ops#448
 from PartDesignTests.TestPipe import TestRoundCornerNames  # FreeCAD-CH, ops#455
+from PartDesignTests.TestPipe import TestPipeNamesUnderSpineEdits  # FreeCAD-CH, ops#469, ops#435
 from PartDesignTests.TestLoft import TestLoft
 from PartDesignTests.TestPrimitive import TestPrimitive
 from PartDesignTests.TestPrimitive import TestBaseAfterARefine  # FreeCAD-CH, ops#474
