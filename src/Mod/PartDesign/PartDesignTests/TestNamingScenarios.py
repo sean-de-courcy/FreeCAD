@@ -475,6 +475,50 @@ class HarnessGuessVerdicts(unittest.TestCase):
         self.assertTrue(self.passing(self.EDGE, verdict))
 
 
+class HarnessSplitVerdicts(unittest.TestCase):
+    """The corpus's `quiet` and `broken-` (ops#506), on report rows as App.getReferenceReport
+    gives them: no scenario of the seed corpus reaches them yet."""
+
+    EDGE = harness.edge("line", direction=harness.Z, through=(20, 0, 0))
+
+    def split(self, verdict, stored, rows, warned=False, expectation=None):
+        expectation = expectation or self.EDGE
+        return harness.splitVerdict(verdict, stored, expectation, ["Edge3"], rows, warned)
+
+    def testSamePlaceLevelIsQuiet(self):
+        rows = [{"status": "resolved", "warning_level": "same-place", "evidence": ""}]
+        self.assertEqual(self.split("correct", "correct", rows, warned=True), "quiet")
+        #   a normal warning keeps it correct
+        rows = [{"status": "resolved", "warning_level": "normal", "evidence": ""}]
+        self.assertEqual(self.split("correct", "correct", rows, warned=True), "correct")
+
+    def testTwinTradeIsQuiet(self):
+        rows = [{"status": "resolved", "warning_level": "", "evidence": "moved by 2; its own twin"}]
+        self.assertEqual(self.split("equivalent", "wrong", rows), "quiet")
+
+    def testBreakWithoutTheElementIsBrokenMinus(self):
+        rows = [{"status": "broken", "candidates": ["Edge1", "Edge2"]}]
+        self.assertEqual(self.split("broken", "broken", rows), "broken-")
+        rows = [{"status": "broken", "candidates": ["Edge3", "Edge2"]}]
+        self.assertEqual(self.split("broken", "broken", rows), "broken")
+
+    def testExpectedBreakAndFailedConsumerStayBroken(self):
+        self.assertEqual(self.split("broken", "broken", [], expectation=harness.BROKEN), "broken")
+        #   the reference holds its element, the consumer fails: no candidates to judge
+        self.assertEqual(self.split("broken", "correct", []), "broken")
+
+    def testSplitVerdictsPassWhereTheirsDo(self):
+        for verdict, expectation, passing in (
+            ("quiet", self.EDGE, True),
+            ("broken-", harness.BROKEN, True),
+            ("broken-", self.EDGE, False),
+        ):
+            result = harness.Result(None, None, "V2s", 0)
+            result.record["expect"] = repr(expectation)
+            result.verdict = verdict
+            self.assertEqual(result.passing, passing, verdict)
+
+
 class HarnessPinnedObject(unittest.TestCase):
     """A reference that must be on another object (Ref.on) is wrong there even when its element
     and its consumer's result are right (the review of fork PR 256, High 1)."""
@@ -521,5 +565,6 @@ __all__ = [
     "SolverSeeded",
     "HarnessSameSolid",
     "HarnessGuessVerdicts",
+    "HarnessSplitVerdicts",
     "HarnessPinnedObject",
 ]

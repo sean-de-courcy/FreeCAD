@@ -275,6 +275,27 @@ jobs:
         shellCmd: ${{ env.shellCmd }}
         knownFailuresPlatform: ${{ runner.os }}
 
+    # The naming corpus's gate (ops#506, src/Mod/PartDesign/PartDesignTests/Scenarios/README.md):
+    # tier G's cases against their ledgers, on every PR. Windows judges (a REGRESSED, NEW or STALE
+    # key fails it); macOS is advisory for the first naming cycle and leaves its would-be ledgers
+    # in the logs artifact (corpus-ledger/). IMPROVED and CHANGED are warnings that the merge
+    # guard (the ops repo's scripts/corpus_guard.sh) refuses. Target under 5 minutes.
+    - name: Naming corpus gate
+      if: "!cancelled() && steps.build.outcome == 'success'"
+      timeout-minutes: 10
+      continue-on-error: ${{ runner.os == 'macOS' }}
+      shell: pixi run bash -l {0}
+      env:
+        FREECAD_SCENARIO_TIER: G
+        FREECAD_SCENARIO_LEDGER_OUT: ${{ github.workspace }}/logs/corpus-ledger
+        OPERATING_SYSTEM: ${{ runner.os }}
+      run: |
+        set -o pipefail
+        mkdir -p "$wsdir/logs"
+        # Windows: the build dir (its CLI tests run there); macOS: the install
+        if [[ $OPERATING_SYSTEM == 'Windows' ]]; then exe="$wsdir/build/release/bin/FreeCADCmd"; else exe=FreeCADCmd; fi
+        "$exe" -t PartDesignTests.TestCorpusGate 2>&1 | tee "$wsdir/logs/TestCorpusGate.log"
+
     - name: FreeCAD GUI tests on install
       # if: runner.os == 'Linux' && !inputs.skipBuild
       # currently broken on Qt6 builds

@@ -61,7 +61,7 @@ LEDGER = "ledger"
 CASES = "src/Mod/PartDesign/PartDesignTests/Scenarios/cases"
 RANDOM_MODULE = "random"
 # Seeds and steps of tier F's random sequences (FREECAD_SCENARIO_SEEDS, ..._STEPS)
-RANDOM_SEEDS = "1-12"
+RANDOM_SEEDS = "1-40"
 RANDOM_STEPS = 8
 # The hash seed of tier F's second process (FREECAD_SCENARIO_CHILD_SEED; "none" skips it)
 CHILD_SEED = "2"
@@ -298,11 +298,13 @@ def compare(entry, verdict):
     return "CHANGED"
 
 
-def entryFor(case, ref, verdict, old):
+def entryFor(case, ref, config, verdict, old):
     """The ledger entry a run writes for a case's reference: the verdict expected on this
     platform (macOS writes its override only where it differs), the case's tags, and an
     allowed set kept (or given by the case's ALLOWED) when the verdict is in it."""
-    entry = {"tier": case.TIER, "classes": list(case.CLASSES), "axes": list(case.AXES)}
+    # a variant (`V2s:thin`) runs in tier F only
+    tier = case.TIER if ":" not in config else "F"
+    entry = {"tier": tier, "classes": list(case.CLASSES), "axes": list(case.AXES)}
     for field, value in (
         ("issue", case.ISSUE),
         ("found_by", case.FOUND_BY),
@@ -336,7 +338,8 @@ def expectation(value, verdict, old):
 
 
 def randomEntry(verdict, old):
-    return {"tier": "F", "classes": [], "axes": []} | expectation(verdict, verdict, old)
+    entry = {"tier": "F", "classes": [], "axes": [], "issue": "ops#506", "found_by": "random"}
+    return entry | expectation(verdict, verdict, old)
 
 
 def gitState(folder):
@@ -399,9 +402,6 @@ class Run:
     def randomLedgerPath(self):
         return os.path.join(self.modules[0].folder if self.modules else ".", LEDGER, RANDOM_MODULE + ".json")
 
-    def moduleOf(self, case):
-        return next(m for m in self.modules if case in m.cases)
-
     def outcomes(self, case, config):
         """{ref: Outcome} of the case in the configuration, run once."""
         return self.results(case, config)[0]
@@ -425,16 +425,13 @@ class Run:
             self.timings[f"Random{seed:04d}"] = time.monotonic() - started
         return k, self.verdicts[k]
 
-    def entry(self, module, k):
-        ledger = self.ledgers.get(module)
-        return ledger["entries"].get(k) if ledger else None
-
     def judge(self, module, k, outcome):
         """The comparison of a key's outcome with its ledger entry: (status, line)."""
         ledger = self.ledgers.get(module)
         entry = ledger["entries"].get(k) if ledger else None
         if entry is None:
-            status = "NEW" if ledger else "UNLEDGERED"
+            # An outside folder (an attacker's inbox) may have no ledgers: its verdicts only print
+            status = "NEW" if ledger or self.inTree else "UNLEDGERED"
             line = f"CORPUS {status} {k} {outcome.verdict}"
         else:
             status = compare(entry, outcome.verdict)
@@ -468,6 +465,7 @@ class Run:
         out = os.path.join(work, "verdicts.jsonl")
         env.update({CHILD: out, "FREECAD_NAMING_HASH_SEED": seed, "FREECAD_SCENARIO_ORACLE": "0"})
         env.pop("FREECAD_SCENARIO_UPDATE_LEDGER", None)
+        env.pop("FREECAD_SCENARIO_LEDGER_OUT", None)
         log = open(os.path.join(work, "child.log"), "w", encoding="utf-8")
         self.childProcess = (
             subprocess.Popen(
@@ -554,7 +552,7 @@ class Run:
                     for ref in case.REFS:
                         k = key(case.__name__, ref, config)
                         if k in self.verdicts:
-                            entries[k] = entryFor(case, ref, self.verdicts[k].verdict, old.get(k))
+                            entries[k] = entryFor(case, ref, config, self.verdicts[k].verdict, old.get(k))
             sha, dirty = gitState(module.folder)
             run = {
                 "sha": sha,
@@ -593,7 +591,7 @@ class Run:
         """The run's last lines: the counts, the comparisons, the slow cases and, for tier F,
         the header line the merge guard looks for in the PR description."""
         sets = self.counts()
-        cases = sum(len(m.cases) for m in self.modules)
+        cases = len({k.split("|")[0] for k, plan in self.planned.items() if plan[1] is not None})
         seconds = time.monotonic() - self.started
         statuses = [s for s, _ in self.lines]
         lines = [
