@@ -127,12 +127,19 @@ pixi run --manifest-path 'D:\CustomFreeCAD\wt\<checkout>\pixi.toml' python -c "i
 What a run prints:
 - `CORPUS VERDICT <case>|<ref>|<config> <verdict>` for every key, and the harness's `SCORE` JSON lines.
 - `CORPUS REGRESSED|IMPROVED|CHANGED|NEW|STALE ...` for every key that differs from its ledger entry.
-  REGRESSED (worse), NEW (no entry) and STALE (an entry without its case) fail the run; IMPROVED and
+  REGRESSED (worse), NEW (no entry) and STALE (an entry without its case: a case or reference gone, a
+  `:thin` or `:s<mm>` entry of a case without THIN or SIZE, or any entry of a ledger whose module is
+  gone) fail the run; IMPROVED and
   CHANGED pass with a line (and a CI warning): the merge guard refuses them until the ledger is
   updated by a full run.
 - At the end: `CORPUS tier ...` (counts, time), `CORPUS time <case>` for the slowest cases, and in
   tier F the line for the PR description:
-  `Tier F: <sha> <platform> <time> <cases> <wrong>/<loud>/<right>`.
+  `Tier F: <sha> <platform> <time> <cases> <wrong>/<loud>/<right> ledger <fingerprint>`. The
+  fingerprint covers every entry's `expected` as the run's in-place update leaves the ledgers; the
+  guard recomputes it from the head's ledgers, so a run whose ledgers weren't committed (or were
+  edited after it) doesn't pass.
+- A case module that fails to import, or exits at import, is a failing `Module_<name>` test; CI's step
+  also fails when the run ends without its `CORPUS tier G:` line.
 
 ## The ledger
 
@@ -146,13 +153,13 @@ What a run prints:
   `axes`, `issue`, `found_by`, `accepted` come from the case. The `run` header has the sha (`dirty` when
   the checkout had other uncommitted changes), platform, time, tier and number of cases.
 - **Never edited by hand**: a run with `FREECAD_SCENARIO_UPDATE_LEDGER=1` writes it (tier G only its
-  own entries, tier F the module). Commit the code first, then run, then commit the ledgers: the
+  own entries, tier F the module, and tier F removes a ledger whose module is gone). Commit the code first, then run, then commit the ledgers: the
   guard checks that the run's sha is the head commit, or that only ledgers changed since.
 - The merge guard (`scripts/corpus_guard.sh` in the ops repo, run by `merge_pr.sh`) refuses an entry
   that moves into the wrong set (unless `accepted`), a new wrong-set entry without `issue` and
   `found_by`, an allowed set or entry in the wrong or neither set, a removed or renamed entry, a change to an existing
   case module without the label `corpus`, a `corpus` PR touching more than `Scenarios/` and `tests/`,
-  a PR without the `Tier F:` line for its head, and a Windows gate that reported IMPROVED or CHANGED;
+  a PR without the `Tier F:` line for its head or whose ledgers don't match its fingerprint, and a Windows gate that reported IMPROVED or CHANGED;
   it flags right -> loud moves (`decision 120 (4)` in the description lets them through).
 - `python scorecard.py --ledger cases/ledger [--base <other ledger folder>]` tabulates the ledgers by
   class, axis and set without a run.

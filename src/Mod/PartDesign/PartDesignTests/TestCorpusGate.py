@@ -30,7 +30,8 @@ One test class per case (`Case_<case>`), one test per reference and configuratio
 when the entry is missing (NEW) or the case's run failed (`error`). IMPROVED and CHANGED pass with
 a line (and a CI warning): the merge guard refuses them until the ledger is updated. Then
 `Module_<module>` (the module imports), in tier F `Random_Sequences` (`test_seed<NNNN>`) and
-`test_<ref>_V2siOracle` (V2si gives what V2s gives), `Stale_Entries` (entries without their case),
+`test_<ref>_V2siOracle` (V2si gives what V2s gives), `Stale_Entries` (entries without their case,
+variant or module),
 and last, in tier F, `TierFSeeds` (every verdict the same under a second naming hash seed; one
 that differs is `flaky`). The module's end prints the summary and, in tier F, the `Tier F:` line
 for the PR description.

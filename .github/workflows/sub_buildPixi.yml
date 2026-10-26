@@ -297,6 +297,11 @@ jobs:
         # Windows: the build dir (its CLI tests run there); macOS: the install
         if [[ $OPERATING_SYSTEM == 'Windows' ]]; then exe="${{ env.wsdir }}/build/release/bin/FreeCADCmd"; else exe=FreeCADCmd; fi
         "$exe" -t PartDesignTests.TestCorpusGate 2>&1 | tee "${{ env.wsdir }}/logs/TestCorpusGate.log"
+        # A run that ends early (a case module exiting at import) exits 0 without its summary
+        if ! grep -q '^CORPUS tier G:' "${{ env.wsdir }}/logs/TestCorpusGate.log"; then
+          echo "::error title=Naming corpus gate::the run ended without its CORPUS summary line"
+          exit 1
+        fi
 
     - name: FreeCAD GUI tests on install
       # if: runner.os == 'Linux' && !inputs.skipBuild

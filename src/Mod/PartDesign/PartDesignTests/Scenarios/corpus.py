@@ -43,6 +43,7 @@ FREECAD_SCENARIO_SCALES), the V2si oracle, a second process under another naming
 
 import datetime
 import glob
+import hashlib
 import importlib
 import importlib.util
 import json
@@ -126,7 +127,11 @@ def folders():
     copies), else the build's or install's copy."""
     listed = os.environ.get("FREECAD_SCENARIO_MODULES")
     if listed:
-        return [os.path.abspath(d) for d in listed.split(os.pathsep) if d.strip()], False
+        dirs = [os.path.abspath(d) for d in listed.split(os.pathsep) if d.strip()]
+        missing = [d for d in dirs if not os.path.isdir(d)]
+        if missing:
+            raise harness.ScenarioError(f"FREECAD_SCENARIO_MODULES: no such folder {missing}")
+        return dirs, False
     source = sourceTree()
     if source and os.path.isdir(os.path.join(source, CASES)):
         return [os.path.normpath(os.path.join(source, CASES))], True
@@ -155,12 +160,35 @@ def loadModules():
                 sys.modules[unique] = module
                 spec.loader.exec_module(module)
                 found.append(CaseModule(name, folder, module))
-            except Exception:
+            # SystemExit too: a module that exits at import would end the run green
+            except (Exception, SystemExit):
                 found.append(CaseModule(name, folder, error=traceback.format_exc()))
     names = [m.name for m in found]
     if len(names) != len(set(names)):
         raise harness.ScenarioError(f"two case modules share a name: {sorted(names)}")
+    # Verdicts are keyed by the case's class name, so two modules can't share one
+    owner = {}
+    for m in found:
+        for case in m.cases:
+            if case.__name__ in owner:
+                raise harness.ScenarioError(
+                    f"the case {case.__name__} is in both {owner[case.__name__]} and {m.name}"
+                )
+            owner[case.__name__] = m.name
     return found, inTree
+
+
+def orphanLedgers(dirs, modules):
+    """{name: path} of the ledgers in the case folders that no module has (a module deleted or
+    renamed): their entries are stale. The random sequences' ledger has no module."""
+    names = {m.name for m in modules}
+    found = {}
+    for folder in dirs:
+        for path in sorted(glob.glob(os.path.join(folder, LEDGER, "*.json"))):
+            name = os.path.splitext(os.path.basename(path))[0]
+            if name not in names and name != RANDOM_MODULE:
+                found[name] = path
+    return found
 
 
 # ---------------------------------------------------------------------------------------------
@@ -189,6 +217,17 @@ def configsFor(case, which):
     return configs
 
 
+def runnable(case, config):
+    """Whether the case can still run in the configuration: a `:thin` variant needs THIN, a
+    `:s<mm>` one SIZE. An entry of a configuration it can't run in is stale."""
+    for part in config.split(":")[1:]:
+        if part == "thin" and not case.THIN:
+            return False
+        if part.startswith("s") and part[1:].isdigit() and not case.SIZE:
+            return False
+    return True
+
+
 def worst(results):
     """The worst of a reference's step Results by harness.RANKS (the first on a tie)."""
     return max(results, key=lambda r: harness.RANKS.get(r.verdict, 0))
@@ -207,7 +246,7 @@ def runCase(case, config):
     started = time.monotonic()
     try:
         results = case(config).run()
-    except Exception:
+    except (Exception, SystemExit):
         text = traceback.format_exc()
         outcomes = {ref: Outcome("error", message=text) for ref in case.REFS}
         return outcomes, None, time.monotonic() - started
@@ -239,7 +278,7 @@ def runRandom(seed):
     try:
         plan = randomized.makePlan(seed, steps)
         results = randomized.RandomSequence("V2s", plan).run()
-    except Exception:
+    except (Exception, SystemExit):
         return Outcome("error", message=traceback.format_exc())
     for r in results:
         if not r.passing:
@@ -377,12 +416,14 @@ class Run:
         self.started = time.monotonic()
         self.time = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         self.modules, self.inTree = loadModules()
+        self.orphans = orphanLedgers(folders()[0], self.modules)  # {name: path}
         self.child = os.environ.get(CHILD)  # the score file of tier F's second process
         self.verdicts = {}  # {key: Outcome}
         self.caseRuns = {}  # {(case, config): ({ref: Outcome}, seconds)}
         self.timings = {}  # {case: seconds}
         self.lines = []  # the comparison lines (REGRESSED, ...), for the summary
         self.ledgers = {m.name: readLedger(m.ledgerPath) for m in self.modules}
+        self.orphanLedgers = {name: readLedger(path) for name, path in self.orphans.items()}
         if self.tier == "F" and self.inTree:
             self.ledgers[RANDOM_MODULE] = readLedger(self.randomLedgerPath)
         self.seeds = randomSeeds() if self.tier == "F" and self.inTree else []
@@ -504,47 +545,54 @@ class Run:
     # The end
 
     def existing(self, module):
-        """The (case, ref) pairs of a module's cases."""
+        """{(case, ref): case class} of a module's cases."""
         return {
-            (case.__name__, ref) for m in self.modules if m.name == module for case in m.cases
+            (case.__name__, ref): case for m in self.modules if m.name == module for case in m.cases
             for ref in case.REFS
         }
 
+    def kept(self, module, k):
+        """Whether tier F keeps a module's ledger entry: its case and reference exist and the case
+        can still run in its configuration (the entries of configurations tier F didn't run, the
+        report columns and other sizes, stay)."""
+        case, ref, config = k.split("|")
+        found = self.existing(module).get((case, ref))
+        return found is not None and runnable(found, config)
+
     def stale(self):
-        """Entries without their case: a case or reference removed or renamed, and in tier G a
-        tier G entry that didn't run (its case moved to tier F). Tier F keeps the entries of
-        configurations it didn't run (the report columns, other sizes)."""
-        found = []
+        """Entries without their case: a case or reference removed or renamed, a variant its case
+        no longer has (THIN or SIZE dropped), every entry of a ledger without its module, and in
+        tier G a tier G entry that didn't run (its case moved to tier F). Tier F keeps the
+        entries of configurations it didn't run (the report columns, other sizes)."""
+        found = [f"{k} ({name}.json has no module)" for name, ledger in self.orphanLedgers.items()
+                 for k in (ledger or {}).get("entries", {})]
         for module, ledger in self.ledgers.items():
             if not ledger or (module == RANDOM_MODULE and not self.seeds):
                 continue
             if any(m.name == module and m.module is None for m in self.modules):
                 continue  # the module didn't import: its own test fails
-            pairs = self.existing(module)
             for k, entry in ledger["entries"].items():
-                case, ref, config = k.split("|")
+                config = k.split("|")[2]
                 if module == RANDOM_MODULE:
                     gone = k not in self.planned
                 elif self.tier == "G":
                     gone = entry.get("tier") == "G" and config == "V2s" and k not in self.planned
                 else:
-                    gone = (case, ref) not in pairs
+                    gone = not self.kept(module, k)
                 if gone:
                     found.append(k)
         return sorted(found)
 
-    def updateLedgers(self, where=None):
-        """Writes each module's ledger from the run (FREECAD_SCENARIO_UPDATE_LEDGER=1, in place;
-        or into the folder `where`, FREECAD_SCENARIO_LEDGER_OUT, for CI's artifact). Tier G
-        updates its own entries only; tier F rewrites the module (stale entries go)."""
-        written = []
+    def wouldWrite(self):
+        """[(name, run header, entries)]: the ledgers this run writes. Tier G updates its own
+        entries only; tier F rewrites each module's ledger (stale entries go)."""
+        out = []
         for module in self.modules:
             if module.module is None:
                 continue
             old = (self.ledgers.get(module.name) or {}).get("entries", {})
             if self.tier == "F":
-                pairs = self.existing(module.name)
-                entries = {k: e for k, e in old.items() if tuple(k.split("|")[:2]) in pairs}
+                entries = {k: e for k, e in old.items() if self.kept(module.name, k)}
             else:
                 entries = dict(old)
             for case in module.cases:
@@ -562,9 +610,7 @@ class Run:
                 "tier": self.tier,
                 "cases": len(module.cases),
             }
-            path = os.path.join(where, module.name + ".json") if where else module.ledgerPath
-            writeLedger(path, run, entries)
-            written.append(path)
+            out.append((module.name, run, entries))
         if self.seeds:
             old = (self.ledgers.get(RANDOM_MODULE) or {}).get("entries", {})
             entries = {}
@@ -575,10 +621,41 @@ class Run:
             sha, dirty = gitState(self.modules[0].folder if self.modules else ".")
             run = {"sha": sha, "dirty": dirty, "platform": platform(), "time": self.time,
                    "tier": self.tier, "cases": len(self.seeds)}
-            path = os.path.join(where, RANDOM_MODULE + ".json") if where else self.randomLedgerPath
+            out.append((RANDOM_MODULE, run, entries))
+        return out
+
+    def updateLedgers(self, where=None):
+        """Writes each module's ledger from the run (FREECAD_SCENARIO_UPDATE_LEDGER=1, in place,
+        where tier F also removes the ledgers without a module; or into the folder `where`,
+        FREECAD_SCENARIO_LEDGER_OUT, for CI's artifact)."""
+        written = []
+        for name, run, entries in self.wouldWrite():
+            if where:
+                path = os.path.join(where, name + ".json")
+            elif name == RANDOM_MODULE:
+                path = self.randomLedgerPath
+            else:
+                path = next(m.ledgerPath for m in self.modules if m.name == name)
             writeLedger(path, run, entries)
             written.append(path)
+        if not where and self.tier == "F":
+            for path in self.orphans.values():
+                os.remove(path)
+                say(f"CORPUS ledger removed (no module): {path}")
         return written
+
+    def fingerprint(self):
+        """Tier F in the tree: the fingerprint of the ledgers as an in-place update leaves them
+        (the expected verdict of every entry), so the merge guard can check that the committed
+        ledgers are this run's. Ledgers the run doesn't write (a module that didn't import, the
+        random sequences without seeds) count as they are; those without a module are gone."""
+        if self.tier != "F" or not self.inTree:
+            return None
+        ledgers = {name: entries for name, _, entries in self.wouldWrite()}
+        for name, ledger in self.ledgers.items():
+            if name not in ledgers and ledger:
+                ledgers[name] = ledger.get("entries", {})
+        return ledgerFingerprint(ledgers)
 
     def counts(self):
         sets = {"wrong": 0, "loud": 0, "right": 0, "neither": 0}
@@ -612,11 +689,24 @@ class Run:
         if self.tier == "F" and not self.child:
             sha, dirty = gitState(self.modules[0].folder if self.modules else ".")
             neither = f" {sets['neither']} neither" if sets["neither"] else ""
+            fingerprint = self.fingerprint()
             lines.append(
                 f"Tier F: {sha[:10]}{' dirty' if dirty else ''} {platform()} {self.time} {cases} "
                 f"{sets['wrong']}/{sets['loud']}/{sets['right']}{neither}"
+                + (f" ledger {fingerprint}" if fingerprint else "")
             )
         return lines
+
+
+def ledgerFingerprint(ledgers):
+    """{module: {key: entry}} -> 12 hex digits over every entry's `expected`. The ops repo's
+    scripts/corpus_guard.py computes the same from the head's ledger files: keep the two equal."""
+    lines = sorted(
+        f"{name}|{k}={json.dumps(entry.get('expected'), sort_keys=True)}"
+        for name, entries in ledgers.items()
+        for k, entry in entries.items()
+    )
+    return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()[:12]
 
 
 CHILD_SCRIPT = """import os, traceback, unittest
