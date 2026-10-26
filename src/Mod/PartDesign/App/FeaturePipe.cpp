@@ -2749,7 +2749,10 @@ struct BinormalFold
         /// Every point of the section moves backwards through its plane
         turnBack,
         /// Some points of the section move backwards through its plane
-        fold
+        fold,
+        /// Nothing found, but stretches where e turns more than the places resolve were left as
+        /// sampled: the budget of halvings ran out first
+        unchecked
     };
     Kind kind;
     /// Where on the spine: the first such place, or the largest fold's
@@ -2760,6 +2763,8 @@ struct BinormalFold
     Reach reach;
     /// A corner flip's turn of the section about the spine's tangent (cornerTwist, degrees)
     double twist;
+    /// How many stretches were left unchecked (unchecked)
+    int unchecked = 0;
 };
 
 /// How far Binormal mode's frame (e, B x e, B) turns the section about the spine's tangent at a
@@ -2809,11 +2814,13 @@ double cornerTwist(
 /// where that frame turns it more than a quarter turn about the spine's tangent beyond the
 /// corner's own turn (cornerTwist), nearer half a turn than none, fails there (cornerFlip). A
 /// sharp corner of a spine in a plane square to B doesn't: e is the tangent. The places: 8 in
-/// each C2 piece of a curve (16 to 1024), each interval halved while e turns more than 2 degrees
-/// across it, 2^18 halvings in all (about 1400 turns of e); past them, while e turns more than 45
-/// degrees, 2^20 more, so that e turning steadily round a long helix never reads as a reversal
-/// (ops#406 review pr380-r3: a 300-turn helix failed as a cusp), and e reversing still finds the
-/// cusp. Past those too, the places are 8 per C2 piece.
+/// each C2 piece of a curve (16 to 1024) and 2 in each span of a B-spline, each interval halved
+/// while e turns more than 2 degrees through its middle (turning away and back counts), 2^20
+/// halvings for each edge (about 5800 turns of e); past them, while e turns more than 45
+/// degrees, 2^20 more for the whole spine, so that e turning steadily round a long helix never
+/// reads as a reversal (ops#406 review pr380-r3: a 300-turn helix failed as a cusp), and e
+/// reversing still finds the cusp. Where the fold check had to leave stretches turning more than
+/// 2 degrees and finds nothing, it says how many (unchecked), so the result isn't silent.
 /// BRepCheck passes all of these pipes.
 std::optional<BinormalFold> binormalFolds(
     const TopoDS_Wire& spine,
@@ -2898,14 +2905,18 @@ std::optional<BinormalFold> binormalFolds(
     std::optional<gp_Pnt> foldAt;
     Reach worst;
     std::optional<gp_Vec> previous = e0;
-    int halvings = 0;
-    constexpr int budget = 1 << 18;
+    // Halvings while e turns more than maxTurn, for each edge: a long edge before can't leave a
+    // later one coarse (ops#406 review pr380-r4, "ellipse_after_helix")
+    constexpr int budget = 1 << 20;
     constexpr double maxTurn = 2 * std::numbers::pi / 180;
     // Past the budget, places still come at most this far apart in e, so that e turning steadily
-    // (a long helix) never reads as e reversing; up to a second budget
+    // (a long helix) never reads as e reversing; up to a second budget, for the whole spine
     int coarseHalvings = 0;
     constexpr int coarseBudget = 1 << 20;
     constexpr double coarseTurn = std::numbers::pi / 4;
+    // Stretches the fold check had to leave turning more than maxTurn, and the first of them
+    int unchecked = 0;
+    std::optional<gp_Pnt> uncheckedAt;
     constexpr double still = 1e-9;  // an edge-on end (s = 0 exactly) sweeps correctly
     for (size_t k = 0; k < edges.size(); ++k) {
         const TopoDS_Edge& edge = edges[k];
@@ -2946,27 +2957,73 @@ std::optional<BinormalFold> binormalFolds(
             return squareAxis(reversed ? tangent.Reversed() : tangent);
         };
         const bool line = isLine(edge);
-        const int looks = line ? 1 : std::clamp(8 * curve.NbIntervals(GeomAbs_C2), 16, 1024);
+        // Where the looks start (t): 8 in each C2 piece (16 to 1024), and 2 in each span of a
+        // B-spline (up to 2^16 spans), so that a short stretch of a long C2 curve isn't left
+        // inside one look (ops#406 review pr380-r4, "wiggle_spline")
+        std::vector<double> starts {0};
+        if (!line) {
+            const int even = std::clamp(8 * curve.NbIntervals(GeomAbs_C2), 16, 1024);
+            for (int i = 1; i < even; ++i) {
+                starts.push_back(static_cast<double>(i) / even);
+            }
+            const int spans = curve.NbIntervals(GeomAbs_CN);
+            if (spans > 1 && spans <= 1 << 16) {
+                NCollection_Array1<double> knots(1, spans + 1);
+                curve.Intervals(knots, GeomAbs_CN);
+                for (int i = 1; i <= spans; ++i) {
+                    for (const double u : {knots(i), (knots(i) + knots(i + 1)) / 2}) {
+                        const double t = (u - first) / (last - first);
+                        starts.push_back(std::clamp(reversed ? 1 - t : t, 0.0, 1.0));
+                    }
+                }
+            }
+            std::sort(starts.begin(), starts.end());
+            starts.erase(
+                std::unique(
+                    starts.begin(),
+                    starts.end(),
+                    [](double one, double other) { return other - one < 1e-12; }
+                ),
+                starts.end()
+            );
+            while (starts.size() > 1 && starts.back() > 1 - 1e-12) {
+                starts.pop_back();
+            }
+        }
+        starts.push_back(1);
+        int halvings = 0;
         std::vector<double> places;
-        for (int i = 0; i < looks; ++i) {
-            std::vector<std::pair<double, double>> stack {
-                {static_cast<double>(i) / looks, static_cast<double>(i + 1) / looks}
-            };
+        for (size_t i = 0; i + 1 < starts.size(); ++i) {
+            std::vector<std::pair<double, double>> stack {{starts[i], starts[i + 1]}};
             while (!stack.empty()) {
                 const auto [from, to] = stack.back();
                 stack.pop_back();
+                const double middle = (from + to) / 2;
+                // e's turn through the middle: e turning away and back within the stretch counts.
+                // Where e is undefined at all three, the stretch runs along B and has nothing to
+                // resolve; where it is undefined at some, the edge of that is looked for.
                 const std::optional<gp_Vec> before = axisAt(from);
+                const std::optional<gp_Vec> centre = line ? before : axisAt(middle);
                 const std::optional<gp_Vec> after = axisAt(to);
-                const double turn = before && after ? before->Angle(*after) : std::numbers::pi;
+                const int defined = int(before.has_value()) + int(centre.has_value())
+                    + int(after.has_value());
+                const double turn = defined == 3
+                    ? before->Angle(*centre) + centre->Angle(*after)
+                    : (defined == 0 ? 0 : std::numbers::pi);
                 const bool fine = turn > maxTurn && halvings < budget;
                 const bool coarse = turn > coarseTurn && coarseHalvings < coarseBudget;
                 if ((fine || coarse) && !line && to - from > 1e-12) {
                     ++(fine ? halvings : coarseHalvings);
-                    const double middle = (from + to) / 2;
                     stack.emplace_back(middle, to);
                     stack.emplace_back(from, middle);
                 }
                 else {
+                    if (follow && turn > maxTurn && !line && to - from > 1e-12) {
+                        ++unchecked;
+                        if (!uncheckedAt) {
+                            uncheckedAt = curve.Value(parameter(from));
+                        }
+                    }
                     places.push_back(from);
                 }
             }
@@ -3050,6 +3107,16 @@ std::optional<BinormalFold> binormalFolds(
     }
     if (foldAt) {
         return BinormalFold {BinormalFold::Kind::fold, *foldAt, closest, worst, 0};
+    }
+    if (uncheckedAt) {
+        return BinormalFold {
+            BinormalFold::Kind::unchecked,
+            *uncheckedAt,
+            closest,
+            {},
+            0,
+            unchecked
+        };
     }
     return std::nullopt;
 }
@@ -3935,6 +4002,20 @@ App::DocumentObjectExecReturn* Pipe::execute()
                     return new App::DocumentObjectExecReturn(text);
                 }
                 warn(text);
+            }
+            // Neither silent nor a failure, as most such pipes are sound (as for 'Transformed')
+            if (fold && fold->kind == BinormalFold::Kind::unchecked) {
+                warn(fmt::format(
+                    "Pipe: in 'Binormal' mode the section turns about the binormal {} too often "
+                    "along the spine from {} to check it all for folds: {} stretch{} {} left "
+                    "unchecked, and the result may cross itself there. Use 'Standard' mode, or "
+                    "split the spine, to avoid it.",
+                    binormalText(),
+                    inPlace(fold->at),
+                    fold->unchecked,
+                    fold->unchecked == 1 ? "" : "es",
+                    fold->unchecked == 1 ? "was" : "were"
+                ));
             }
         }
 

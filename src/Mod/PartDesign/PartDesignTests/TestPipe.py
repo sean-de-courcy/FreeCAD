@@ -3461,6 +3461,7 @@ class TestBinormalPipe(unittest.TestCase):
         "square": lambda: models.rectangle(-2, -2, 2, 2),
         "circle": lambda: [models.circle(0, 0, 2)],
         "rectY": lambda: models.rectangle(-1, -4, 1, 4),
+        "small": lambda: models.rectangle(-0.5, -0.5, 0.5, 0.5),
     }
 
     def pipe(self, spine, binormal, profile="square", placement=None, **properties):
@@ -3680,6 +3681,46 @@ class TestBinormalPipe(unittest.TestCase):
         cut = Part.Face(Part.Wire(shape.slice(V(0, 0, 1), 150.3)[0].Edges))
         self.assertAlmostEqual(cut.Area, 0.16, delta=1e-5)
         self.assertAlmostEqual(shape.Volume, 0.16 * turns, delta=1e-4 * 0.16 * turns)
+
+    def testShortWiggleInLongSplineFolds(self):
+        """One interpolated cubic B-spline, 310 mm, in the plane of X and Zt (Z tilted 3 degrees
+        about X): the tangent is 60 degrees from Zt, except on a 10 mm stretch from s = 160 where
+        it swings to -30 degrees and back (60 - 90 sin^2(pi (s - 160) / 10)). With B = Z it
+        passes 3 degrees from B twice there, the section turning about half a turn about B within
+        about a millimetre each time, faster than the 1 x 1 square's width allows: a fold. The
+        curve is one C2 piece, and both passes lie inside one of its 16 looks, whose ends see e
+        alike. Before, it built without a word (review pr380-r4, "wiggle_spline")."""
+        tilt = math.radians(3)
+        across, up = V(1, 0, 0), V(0, math.sin(tilt), math.cos(tilt))
+        start, length, total = 160.0, 10.0, 310.0
+
+        def angle(s):
+            if start <= s <= start + length:
+                return math.radians(60 - 90 * math.sin(math.pi * (s - start) / length) ** 2)
+            return math.radians(60)
+
+        points, x, y, s, last = [V(0, 0, 0)], 0.0, 0.0, 0.0, 0.0
+        wiggle = None
+        while s < total - 1e-9:
+            turn = angle(s + 0.005)
+            x, y, s = x + math.sin(turn) * 0.01, y + math.cos(turn) * 0.01, s + 0.01
+            if wiggle is None and s >= start + length / 2:
+                wiggle = across * x + up * y
+            step = 0.25 if start - 3 <= s <= start + length + 3 else 2.0
+            if s >= last + step - 1e-9:
+                points.append(across * x + up * y)
+                last = s
+        curve = Part.BSplineCurve()
+        curve.interpolate(points)
+        edge = curve.toShape()
+        tangent = unit(edge.derivative1At(edge.FirstParameter))
+        pipe = self.pipe(
+            Part.Wire([edge]),
+            V(0, 0, 1),
+            profile="small",
+            placement=App.Placement(V(0, 0, 0), App.Rotation(V(0, 0, 1), tangent)),
+        )
+        self.assertFailsAt(pipe, wiggle, length / 2, "folds over itself", "within 3")
 
     def testBinormalAlongStartFails(self):
         """B = Z, the spine's tangent where it starts: no section plane there. Before, Valid, 320."""
