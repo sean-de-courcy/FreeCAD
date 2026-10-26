@@ -51,6 +51,7 @@ from parttests.AttachAcrossContainersTest import AttachAcrossContainersTest
 from parttests.TestPartMirror import TestPartMirroringRegression
 from parttests.CompoundFilterTest import CompoundFilterTest
 from parttests.RefineElementMapTest import RefineElementMapTest
+from parttests.SplitEdgeNamesTest import SplitEdgeNamesTest
 from parttests.SweepFrenetTest import SweepFrenetTest, SweepApproximationTest
 from parttests.BooleanLocationsTest import BooleanLocationsTest
 from parttests.BooleanLostToolTest import BooleanLostToolTest
