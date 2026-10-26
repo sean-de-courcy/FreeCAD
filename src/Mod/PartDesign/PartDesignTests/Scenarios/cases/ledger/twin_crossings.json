@@ -1,5 +1,5 @@
 {
-"run": {"cases": 5, "dirty": false, "platform": "win32", "sha": "0e3309d47fa765c30a311517040e679ecd61bbb2", "tier": "F", "time": "2026-10-26T19:52:25Z"},
+"run": {"cases": 5, "dirty": false, "platform": "win32", "sha": "6a81fe6f2607399464eef33c19a00580249770b7", "tier": "F", "time": "2026-10-26T20:25:16Z"},
 "entries": {
 "TwinCrossingAtSavedPlace|left_point|V2s": {"axes": ["M4", "E1"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#503", "tier": "F"},
 "TwinCrossingAtSavedPlace|right_line|V2s": {"axes": ["M4", "E1"], "classes": ["D"], "expect": "CORRECT", "expected": "wrong", "found_by": "port", "issue": "ops#503", "tier": "F"},

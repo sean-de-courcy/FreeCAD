@@ -1,5 +1,5 @@
 {
-"run": {"cases": 5, "dirty": false, "platform": "win32", "sha": "0e3309d47fa765c30a311517040e679ecd61bbb2", "tier": "F", "time": "2026-10-26T19:52:25Z"},
+"run": {"cases": 5, "dirty": false, "platform": "win32", "sha": "6a81fe6f2607399464eef33c19a00580249770b7", "tier": "F", "time": "2026-10-26T20:25:16Z"},
 "entries": {
 "AttachLeftProngDeleted|sketch_end_face|V2s": {"axes": ["M1", "E1", "X4:600"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "port", "issue": "ops#68", "tier": "G"},
 "AttachLength|datum_top_face|V2s": {"axes": ["M1", "E5", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#506", "tier": "G"},

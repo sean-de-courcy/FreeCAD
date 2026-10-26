@@ -1,5 +1,5 @@
 {
-"run": {"cases": 2, "dirty": false, "platform": "win32", "sha": "0e3309d47fa765c30a311517040e679ecd61bbb2", "tier": "F", "time": "2026-10-26T19:52:25Z"},
+"run": {"cases": 2, "dirty": false, "platform": "win32", "sha": "6a81fe6f2607399464eef33c19a00580249770b7", "tier": "F", "time": "2026-10-26T20:25:16Z"},
 "entries": {
 "BlockSeamPadRaisedHoleMoved|seam_vertex|V2s": {"axes": ["M1", "E1"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "port", "issue": "ops#503", "tier": "F"},
 "BlockSeamPadRaised|seam_vertex|V2s": {"axes": ["M1", "E1"], "classes": ["D"], "expect": "CORRECT", "expected": "quiet", "found_by": "port", "issue": "ops#503", "tier": "F"}
