@@ -1,5 +1,5 @@
 > [!IMPORTANT]
-> FreeCAD-CH preview build: FreeCAD with V2 topological naming (upstream FreeCAD PR 31040) and the fork's changes. It is for testing, not for business work. Files saved with V2 naming may not open correctly in other builds, including older FreeCAD-CH builds, so everyone working on a file uses the same build.
+> FreeCAD-CH build: FreeCAD with V2 topological naming (upstream FreeCAD PR 31040) and the fork's changes. Files saved by this release open in later FreeCAD-CH releases and recompute to the same geometry and references. Files saved by earlier preview builds are not covered, and a file saved by this release may not open correctly in an older build, so everyone working on a file uses the same release.
 
 ### How to use
 

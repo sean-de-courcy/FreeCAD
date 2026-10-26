@@ -87,6 +87,21 @@ mv ${copy_dir} ${version_name}
 # Before signing, so a refused bundle is never signed (ops#398), as on macOS.
 python ../../scripts/check_release_env.py --lock ../../../pixi.lock --platform "${TARGET_PLATFORM:-win-64}" --freecadcmd "${version_name}/bin/${app_cmd_exe}" ${GITHUB_STEP_SUMMARY:+--summary "$GITHUB_STEP_SUMMARY"}
 
+# FreeCAD-CH: the packaged build reopens the compat corpus itself (WORKFLOW section 6, "Compat
+# steps": the release build differs from PR builds, ops#294), so neither a dry run nor a release
+# run ships a package the gate refuses. A fresh absolute settings folder, never the runner's.
+gate_home="$(mktemp -d)"
+gate_status=0
+FREECAD_USER_HOME="$(cygpath -w "${gate_home}")" PYTHONDONTWRITEBYTECODE=1 \
+    "${version_name}/bin/${app_cmd_exe}" -t PartDesignTests.Compat.TestCompatCorpus \
+    > compat-gate.log 2>&1 || gate_status=$?
+cat compat-gate.log
+rm -rf "${gate_home}"
+if [[ ${gate_status} -ne 0 ]] || ! grep -q '^OK' compat-gate.log || grep -q '^FAILED' compat-gate.log; then
+  echo "TestCompatCorpus failed on the packaged build (exit ${gate_status}); refusing to package it."
+  exit 1
+fi
+
 
 # Sign the EXE, DLL, and PYD files (if we can access the Azure account for signing):
 set -euo pipefail
