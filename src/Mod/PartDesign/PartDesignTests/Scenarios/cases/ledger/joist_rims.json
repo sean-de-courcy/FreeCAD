@@ -1,0 +1,8 @@
+{
+"run": {"cases": 3, "dirty": false, "platform": "win32", "sha": "66b17fbbeafd7511512e5cb9d6d4a9b35d73be6a", "tier": "F", "time": "2026-10-26T20:48:01Z"},
+"entries": {
+"JoistRimRedrawnInPlaceBeforeJoists|rim_chamfer|V2s": {"axes": ["M2", "E3", "X4:3600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "port", "issue": "ops#503", "tier": "F"},
+"JoistRimRedrawnInPlace|rim_chamfer|V2s": {"axes": ["M2", "E3", "X4:3600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "port", "issue": "ops#503", "tier": "F"},
+"JoistRimRedrawnShorter|rim_chamfer|V2s": {"axes": ["M2", "E3", "X4:3600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "port", "issue": "ops#503", "tier": "F"}
+}
+}

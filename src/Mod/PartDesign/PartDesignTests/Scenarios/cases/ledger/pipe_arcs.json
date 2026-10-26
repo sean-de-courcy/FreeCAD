@@ -1,0 +1,23 @@
+{
+"run": {"cases": 4, "dirty": false, "platform": "win32", "sha": "66b17fbbeafd7511512e5cb9d6d4a9b35d73be6a", "tier": "F", "time": "2026-10-26T20:48:01Z"},
+"entries": {
+"ClosedSpineLineDrawnOtherWay|bottom_edge|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "port", "issue": "ops#500", "tier": "F"},
+"ClosedSpineLineDrawnOtherWay|bottom_vertex|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "port", "issue": "ops#500", "tier": "F"},
+"ClosedSpineLineDrawnOtherWay|line_edge|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#500", "tier": "F"},
+"ClosedSpineLineDrawnOtherWay|top_edge|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "quiet", "found_by": "port", "issue": "ops#500", "tier": "F"},
+"ClosedSpineLineDrawnOtherWay|top_vertex|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "quiet", "found_by": "port", "issue": "ops#500", "tier": "F"},
+"ClosedSpineReversedLineDrawnOtherWay|bottom_edge|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "quiet", "found_by": "port", "issue": "ops#500", "tier": "F"},
+"ClosedSpineReversedLineDrawnOtherWay|bottom_vertex|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "quiet", "found_by": "port", "issue": "ops#500", "tier": "F"},
+"ClosedSpineReversedLineDrawnOtherWay|line_edge|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#500", "tier": "F"},
+"ClosedSpineReversedLineDrawnOtherWay|top_edge|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "port", "issue": "ops#500", "tier": "F"},
+"ClosedSpineReversedLineDrawnOtherWay|top_vertex|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "port", "issue": "ops#500", "tier": "F"},
+"PipeBendMirroredLeg|arc_q1|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#500", "tier": "F"},
+"PipeBendMirroredLeg|arc_q2|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#500", "tier": "F"},
+"PipeBendMirroredLeg|arc_q3|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "wrong", "found_by": "port", "issue": "ops#500", "tier": "F"},
+"PipeBendMirroredLeg|arc_q4|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "port", "issue": "ops#500", "tier": "F"},
+"PipeBendProfileTurned80|arc_q1|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "wrong", "found_by": "port", "issue": "ops#500", "tier": "F"},
+"PipeBendProfileTurned80|arc_q2|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#500", "tier": "F"},
+"PipeBendProfileTurned80|arc_q3|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#500", "tier": "F"},
+"PipeBendProfileTurned80|arc_q4|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#500", "tier": "F"}
+}
+}

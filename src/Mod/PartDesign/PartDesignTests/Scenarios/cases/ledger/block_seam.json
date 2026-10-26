@@ -1,0 +1,7 @@
+{
+"run": {"cases": 2, "dirty": false, "platform": "win32", "sha": "66b17fbbeafd7511512e5cb9d6d4a9b35d73be6a", "tier": "F", "time": "2026-10-26T20:48:01Z"},
+"entries": {
+"BlockSeamPadRaisedHoleMoved|seam_vertex|V2s": {"axes": ["M1", "E1"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "port", "issue": "ops#503", "tier": "F"},
+"BlockSeamPadRaised|seam_vertex|V2s": {"axes": ["M1", "E1"], "classes": ["D"], "expect": "CORRECT", "expected": "quiet", "found_by": "port", "issue": "ops#503", "tier": "F"}
+}
+}

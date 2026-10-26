@@ -1,0 +1,27 @@
+{
+"run": {"cases": 2, "dirty": false, "platform": "win32", "sha": "66b17fbbeafd7511512e5cb9d6d4a9b35d73be6a", "tier": "F", "time": "2026-10-26T20:48:01Z"},
+"entries": {
+"SweepFoldMoveReorder|C_p0|V2s": {"axes": ["M2", "E2", "E4"], "classes": ["A", "D"], "expect": "BROKEN", "expected": "wrong", "found_by": "port", "issue": "ops#500", "tier": "F"},
+"SweepFoldMoveReorder|C_p1|V2s": {"axes": ["M2", "E2", "E4"], "classes": ["A", "D"], "expect": "BROKEN", "expected": "broken", "found_by": "port", "issue": "ops#500", "tier": "F"},
+"SweepFoldMoveReorder|C_p2|V2s": {"axes": ["M2", "E2", "E4"], "classes": ["A", "D"], "expect": "CORRECT", "expected": "guessed", "found_by": "port", "issue": "ops#500", "tier": "F"},
+"SweepFoldMoveReorder|E0_p0|V2s": {"axes": ["M2", "E2", "E4"], "classes": ["A", "D"], "expect": "BROKEN", "expected": "wrong", "found_by": "port", "issue": "ops#500", "tier": "F"},
+"SweepFoldMoveReorder|E0_p1|V2s": {"axes": ["M2", "E2", "E4"], "classes": ["A", "D"], "expect": "BROKEN", "expected": "wrong", "found_by": "port", "issue": "ops#500", "tier": "F"},
+"SweepFoldMoveReorder|E0_p2|V2s": {"axes": ["M2", "E2", "E4"], "classes": ["A", "D"], "expect": "CORRECT", "expected": "guessed", "found_by": "port", "issue": "ops#500", "tier": "F"},
+"SweepFoldMoveReorder|E1_p2|V2s": {"axes": ["M2", "E2", "E4"], "classes": ["A", "D"], "expect": "CORRECT", "expected": "broken", "found_by": "port", "issue": "ops#500", "tier": "F"},
+"SweepFoldMoveReorder|E2_p0|V2s": {"axes": ["M2", "E2", "E4"], "classes": ["A", "D"], "expect": "BROKEN", "expected": "wrong", "found_by": "port", "issue": "ops#500", "tier": "F"},
+"SweepFoldMoveReorder|E2_p1|V2s": {"axes": ["M2", "E2", "E4"], "classes": ["A", "D"], "expect": "BROKEN", "expected": "wrong", "found_by": "port", "issue": "ops#500", "tier": "F"},
+"SweepFoldMoveReorder|E2_p2|V2s": {"axes": ["M2", "E2", "E4"], "classes": ["A", "D"], "expect": "CORRECT", "expected": "guessed", "found_by": "port", "issue": "ops#500", "tier": "F"},
+"SweepFoldMoveReorder|E3_p0|V2s": {"axes": ["M2", "E2", "E4"], "classes": ["A", "D"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#500", "tier": "F"},
+"SweepFoldMove|C_p0|V2s": {"axes": ["M2", "E4"], "classes": ["A", "D"], "expect": "BROKEN", "expected": "broken", "found_by": "port", "issue": "ops#500", "tier": "F"},
+"SweepFoldMove|C_p1|V2s": {"axes": ["M2", "E4"], "classes": ["A", "D"], "expect": "BROKEN", "expected": "broken", "found_by": "port", "issue": "ops#500", "tier": "F"},
+"SweepFoldMove|C_p2|V2s": {"axes": ["M2", "E4"], "classes": ["A", "D"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#500", "tier": "F"},
+"SweepFoldMove|E0_p0|V2s": {"axes": ["M2", "E4"], "classes": ["A", "D"], "expect": "BROKEN", "expected": "wrong", "found_by": "port", "issue": "ops#500", "tier": "F"},
+"SweepFoldMove|E0_p1|V2s": {"axes": ["M2", "E4"], "classes": ["A", "D"], "expect": "BROKEN", "expected": "wrong", "found_by": "port", "issue": "ops#500", "tier": "F"},
+"SweepFoldMove|E0_p2|V2s": {"axes": ["M2", "E4"], "classes": ["A", "D"], "expect": "CORRECT", "expected": "guessed", "found_by": "port", "issue": "ops#500", "tier": "F"},
+"SweepFoldMove|E1_p2|V2s": {"axes": ["M2", "E4"], "classes": ["A", "D"], "expect": "CORRECT", "expected": "broken", "found_by": "port", "issue": "ops#500", "tier": "F"},
+"SweepFoldMove|E2_p0|V2s": {"axes": ["M2", "E4"], "classes": ["A", "D"], "expect": "BROKEN", "expected": "wrong", "found_by": "port", "issue": "ops#500", "tier": "F"},
+"SweepFoldMove|E2_p1|V2s": {"axes": ["M2", "E4"], "classes": ["A", "D"], "expect": "BROKEN", "expected": "wrong", "found_by": "port", "issue": "ops#500", "tier": "F"},
+"SweepFoldMove|E2_p2|V2s": {"axes": ["M2", "E4"], "classes": ["A", "D"], "expect": "CORRECT", "expected": "guessed", "found_by": "port", "issue": "ops#500", "tier": "F"},
+"SweepFoldMove|E3_p0|V2s": {"axes": ["M2", "E4"], "classes": ["A", "D"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#500", "tier": "F"}
+}
+}

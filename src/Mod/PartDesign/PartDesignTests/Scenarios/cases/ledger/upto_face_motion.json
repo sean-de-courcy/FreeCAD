@@ -1,0 +1,15 @@
+{
+"run": {"cases": 7, "dirty": false, "platform": "win32", "sha": "66b17fbbeafd7511512e5cb9d6d4a9b35d73be6a", "tier": "F", "time": "2026-10-26T20:48:01Z"},
+"entries": {
+"ShellFaceAddedUnderCapPieceAndMoved|cl_centre|V2s": {"axes": ["M2", "E4"], "classes": ["D"], "expect": "BROKEN", "expected": "wrong", "found_by": "port", "issue": "ops#503", "tier": "F"},
+"ShellFaceAddedUnderCapPieceCountKept|cl_centre|V2s": {"axes": ["M2", "E4"], "classes": ["D"], "expect": "BROKEN", "expected": "wrong", "found_by": "port", "issue": "ops#503", "tier": "F"},
+"ShellFaceAddedUnderCapPieceLast|cl_centre|V2s": {"axes": ["M2", "E4"], "classes": ["D"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "port", "issue": "ops#503", "tier": "F"},
+"ShellFaceAddedUnderCapPieceQ1|cl_centre|V2s": {"axes": ["M2", "E4"], "classes": ["D"], "expect": "OWN-OR-BROKEN", "expected": "wrong", "found_by": "port", "issue": "ops#503", "tier": "F"},
+"UpToHoleFillShiftedAlongX|fill_piece|V2s": {"axes": ["M2", "E4"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#503", "tier": "F"},
+"UpToHoleFillShiftedAlongX|plate_piece|V2s": {"axes": ["M2", "E4"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#503", "tier": "F"},
+"UpToHoleFillShiftedDiagonally|fill_piece|V2s": {"axes": ["M2", "E4"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#503", "tier": "F"},
+"UpToHoleFillShiftedDiagonally|plate_piece|V2s": {"axes": ["M2", "E4"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#503", "tier": "F"},
+"UpToHoleFillShiftedDown|fill_piece|V2s": {"axes": ["M2", "E4"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#503", "tier": "F"},
+"UpToHoleFillShiftedDown|plate_piece|V2s": {"axes": ["M2", "E4"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#503", "tier": "F"}
+}
+}

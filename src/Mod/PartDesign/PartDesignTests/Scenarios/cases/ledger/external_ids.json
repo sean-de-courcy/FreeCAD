@@ -1,0 +1,6 @@
+{
+"run": {"cases": 1, "dirty": false, "platform": "win32", "sha": "66b17fbbeafd7511512e5cb9d6d4a9b35d73be6a", "tier": "F", "time": "2026-10-26T20:48:01Z"},
+"entries": {
+"SketchExternalIdsAfterChamfer|external_top|V2s": {"axes": ["M8", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "wrong", "found_by": "port", "issue": "ops#500", "tier": "F"}
+}
+}

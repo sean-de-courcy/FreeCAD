@@ -405,7 +405,8 @@ names it.
 | `fix/487-failed-feature-base` | fix | ops#487 | - | `integration` `770da0fde7` | `677837eddc` (fork PR 378), 2026-10-25 | never (fork fix) |
 | `fix/465-sweep-frenet-followups` | fix | ops#465, ops#439 | - | `integration` `770da0fde7` | `f6e81feebb` (fork PR 377), 2026-10-25 | SweepFrenet looks at samples without a frame, with two more in each straight knot span: a turn-over, jump or unsteady frame of OCCT's Frenet on a straight or nearly straight stretch inside an edge leaves Frenet as a turn-over does (on planar spines, for the plane's normal as binormal); corrected Frenet is no longer refused for loose tolerances |
 | `feat/corpus-foundation` | feature | ops#506 | - | `integration` `677837eddc` | `12baa6cda7` (fork PR 381), 2026-10-26 | never (fork tests) |
-| `infra/398-release-followups` | infra | ops#398 | - | `integration` `f6e81feebb` | (fork PR 382) | never (fork infra) |
+| `infra/398-release-followups` | infra | ops#398 | - | `integration` `f6e81feebb` | `95538c7728` (fork PR 382), 2026-10-26 | never (fork infra) |
+| `corpus/ports-a-d` | feature | ops#506 | - | `integration` `12baa6cda7` | (fork PR 385) | never (fork tests) |
 
 ## Fork-only commits in carried topics
 
