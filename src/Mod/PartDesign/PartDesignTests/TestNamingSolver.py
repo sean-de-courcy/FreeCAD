@@ -2919,6 +2919,43 @@ class TestNamingSolver(unittest.TestCase):
         if left.isValid():
             self.assertLess((left.Placement.Base - App.Vector(landing, 0, 5)).Length, 1e-6)
 
+    def testLoneTwinIsNotAnotherHolesCrossing(self):
+        """PR 379 round 1 (R1): a plate 200 x 100 x 5 with two through holes of radius 1 crossing
+        its top front edge, A at (100, 0.5) and B, from another sketch, at (102.5, 0.5); a datum
+        point on A's right crossing (100.866). Hole A moved to (0.3, 0.5): its left crossing
+        falls off the edge's end and the right one, alone, is renumbered. Tier 1's one survivor
+        is the old element's twin, so geometry decides, and B's left crossing (101.634) lies
+        0.77 from the saved place: another hole's vertex, of another sketch and another Pocket,
+        is no pick. The point breaks, or sits on A's crossing (1.166) with the normal warning;
+        never on B's."""
+        doc = self.newDocument()
+        body = models.body(doc)
+        profile = models.sketch(doc, "Profile", models.rectangle(0, 0, 200, 100), body)
+        models.pad(body, profile, 5)
+        holes = []
+        for name, x in (("HoleA", 100), ("HoleB", 102.5)):
+            sketch = models.sketch(doc, name, [models.circle(x, 0.5, 1)], body)
+            pocket = body.newObject("PartDesign::Pocket", "Pocket" + name[-1])
+            pocket.Profile = sketch
+            pocket.Type = 1  # through all
+            pocket.Midplane = True
+            holes.append((sketch, pocket))
+        doc.recompute()
+        [(hole, _), (_, last)] = holes
+        half = 0.75**0.5
+        [vertex] = pipes.elementsWhere(
+            last.Shape, "Vertex", lambda p: (p - App.Vector(100 + half, 0, 5)).Length < 1e-6
+        )
+        point = body.newObject("PartDesign::Point", "OnRight")
+        point.AttachmentSupport = [(last, vertex)]
+        point.MapMode = "Vertex"
+        doc.recompute()
+        self.assertTrue(point.isValid(), point.getStatusString())
+
+        self.moveHole(hole, 0.3, 0.5)
+
+        self.assertNeverQuietlyAt(point, (102.5 - half, 0, 5), (0.3 + half, 0, 5))
+
     @unittest.expectedFailure
     def testCrossingWhoseTwinBecameTheSeamVertexIsLoud(self):
         """CC2 (ops#503 round 2), the mirrored seam: the hole's sketch turned 180 degrees (seam

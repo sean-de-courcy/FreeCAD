@@ -487,6 +487,84 @@ std::string joinCandidates(const std::vector<std::string>& candidates)
     return text;
 }
 
+// What two names must share to be twins (Data::isTwinName()), read off the text without
+// decoding it: the number of sections and each section's reference IDs, iteration tag and
+// element type, which the twin test compares exactly. The fields are read as MappedName's
+// decoder reads them (a character after the escape is no delimiter, one escape comes off, an
+// empty or `_` last item is none), so names the test calls twins always share the key.
+// Decoding every name of the map for each reference made creating references about 8.5 times
+// slower on a 372-edge model (PR 379 round 1).
+std::string twinKey(std::string_view name)
+{
+    std::string key;
+    std::vector<std::string> items;
+    std::string item;
+    int field = 0;
+    int escapeLevel = 0;
+    bool pending = false;
+    auto finishField = [&](bool endOfSection) {
+        if (!item.empty() && item != Data::EMPTY_VALUE) {
+            items.push_back(item);
+        }
+        switch (field) {
+            case Data::SECTION_REFERENCE_ID_INDEX:
+                for (const auto& id : items) {
+                    key += id;
+                    key += *Data::SUB_SECTION_LIST_DELIMINATOR;
+                }
+                break;
+            case Data::SECTION_ITERATION_TAG_INDEX:
+                key += items.empty() ? std::string(Data::EMPTY_VALUE) : items.front();
+                break;
+            case Data::SECTION_ELEMENT_TYPE_INDEX:
+                key += items.empty() || items.front().empty() ? *Data::EMPTY_VALUE
+                                                              : items.front().front();
+                break;
+            default:
+                break;
+        }
+        key += *Data::SECTION_SUB_DELIMINATOR;
+        items.clear();
+        item.clear();
+        if (endOfSection) {
+            key += *Data::NAME_SECTION_DELIMINATOR;
+            field = 0;
+        }
+        else {
+            ++field;
+        }
+    };
+    for (char c : name) {
+        if (escapeLevel == 0) {
+            if (c == *Data::SECTION_SUB_DELIMINATOR || c == *Data::NAME_SECTION_DELIMINATOR) {
+                finishField(c == *Data::NAME_SECTION_DELIMINATOR);
+                pending = false;
+                continue;
+            }
+            if (c == *Data::SUB_SECTION_LIST_DELIMINATOR) {
+                items.push_back(item);
+                item.clear();
+                pending = false;
+                continue;
+            }
+        }
+        pending = true;
+        if (c == *Data::SUB_SECTION_ESCAPE_CHAR) {
+            if (++escapeLevel == 1) {
+                continue;
+            }
+        }
+        else {
+            escapeLevel = 0;
+        }
+        item += c;
+    }
+    if (pending) {
+        finishField(true);
+    }
+    return key;
+}
+
 }  // namespace
 
 bool rebuildSubList(const std::vector<SolverResolution>& resolutions,
@@ -1838,17 +1916,31 @@ bool elementTwinCentroid(const GeoFeature* geo, const char* element, Base::Vecto
     // Its twins: the elements of its type with a name that is one of these up to an order key
     // (Data::isTwinName(), ops#503 D1: the bare-rank crossings of an edge too, which carry no
     // ORD flag, and the survivor of a 2 -> 1 change, which lost it)
+    std::vector<std::string> keys;
+    for (const auto& name : names) {
+        keys.push_back(twinKey(name));
+    }
+    // Only the elements of its type, each name tested only when it shares the twin key: walking
+    // the whole map and decoding every name made creating references about 8.5 times slower on a
+    // 372-edge model (PR 379 round 1)
     std::set<std::string> twins;
-    for (const auto& mapped : data->getElementMap()) {
-        if (!mapped.index || mapped.index == indexed
-            || std::strcmp(mapped.index.getType(), indexed.getType()) != 0) {
+    const auto elements = data->countSubElements(indexed.getType());
+    for (unsigned long i = 1; i <= elements; ++i) {
+        const Data::IndexedName index(indexed.getType(), static_cast<int>(i));
+        if (index == indexed) {
             continue;
         }
-        const std::string plain = plainName(mapped.name.toString());
-        if (std::any_of(names.begin(), names.end(), [&](const std::string& name) {
-                return Data::isTwinName(plain, name);
-            })) {
-            twins.insert(mapped.index.toString());
+        for (const auto& mapped : data->getElementMappedNames(index)) {
+            const std::string plain = plainName(mapped.first.toString());
+            const std::string key = twinKey(plain);
+            bool twin = false;
+            for (std::size_t k = 0; k < names.size() && !twin; ++k) {
+                twin = keys[k] == key && Data::isTwinName(plain, names[k]);
+            }
+            if (twin) {
+                twins.insert(index.toString());
+                break;
+            }
         }
     }
     if (twins.empty()) {

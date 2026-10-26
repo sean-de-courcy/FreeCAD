@@ -5379,6 +5379,38 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 const auto place = nearest.index < 0 ? atPlaceAmong(agree) : std::vector<int>();
                 if (nearest.index >= 0 || place.size() == 1) {
                     const int pick = nearest.index >= 0 ? agree[nearest.index] : place.front();
+                    // After the twin clause, the pool holds what tier 1's filters dropped (another
+                    // generator, another maker), and the pick must share the old name's origin,
+                    // as G2's does (policy D): a hole's crossing whose twin went off the edge's
+                    // end was taken at another hole's crossing, 0.77 away (PR 379 round 1)
+                    const char* lacks = state.twinSurvivor >= 0
+                        ? otherOrigin(pool.elements[pick], oldName)
+                        : nullptr;
+                    if (lacks) {
+                        state.decided = true;
+                        state.outcome.evidence = (nearest.index >= 0
+                                                      ? std::string("no structural candidate, tier 3: ")
+                                                      : "no structural candidate, at the same place: ")
+                            + describeNearest(nearest) + "; the pick " + pool.elements[pick].index
+                            + " has another " + lacks + derivedText(state, &agree)
+                            + otherMakerText(state);
+                        // The pick, then the twin tier 1 named (the user's likelier choice
+                        // when the twin went), then the rest by distance
+                        listByDistance(state, {pick}, "geometric");
+                        if (state.twinSurvivor != pick) {
+                            listByDistance(state, {state.twinSurvivor}, "structural");
+                        }
+                        std::vector<int> others;
+                        for (int k : agree) {
+                            if (k != pick && k != state.twinSurvivor) {
+                                others.push_back(k);
+                            }
+                        }
+                        const auto n = state.outcome.candidates.size();
+                        listByDistance(state, others, "geometric", n < 8 ? 8 - n : std::size_t(0));
+                        listDropped(state);
+                        continue;
+                    }
                     if (twinBreaks(pick, agree, "geometric")) {
                         continue;
                     }
@@ -5410,7 +5442,7 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                         wide = wideNearestOf(agree);
                     }
                     std::string otherSource;
-                    if (wide.index >= 0 && !input.guessAnySource) {
+                    if (wide.index >= 0 && (!input.guessAnySource || state.twinSurvivor >= 0)) {
                         const auto& picked = pool.elements[agree[wide.index]];
                         if (const char* lacks = otherOrigin(picked, oldName)) {
                             otherSource = "; the wide reach's " + picked.index + " has another "
