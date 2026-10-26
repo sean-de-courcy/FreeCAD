@@ -24,6 +24,8 @@
 reference and configuration, `<Scenario>.test_<ref>_<config>`. A test passes when its reference's
 verdict is correct or equivalent (or broken, where the scenario expects the element to be gone).
 Each scenario is built once per configuration, on its first test. See Scenarios/harness.py.
+The naming corpus's cases (scenarios with CLASSES, Scenarios/cases/) aren't run here:
+TestCorpusGate runs them against their ledgers (ops#506).
 
 Configurations: V2 and V2s (the reference solver on, ops#7) for every scenario, V2multi (the
 multi-match flags on) for the scenarios whose consumers the flags touch.
@@ -58,7 +60,7 @@ import traceback
 import unittest
 
 from PartDesignTests.Scenarios import harness
-from PartDesignTests.Scenarios import attachment, booleans, dressups, patterns, sketch_edits
+from PartDesignTests.Scenarios import booleans, dressups, patterns, sketch_edits
 from PartDesignTests.Scenarios import ambiguous, consumers, crossdoc, derived, external, internal
 from PartDesignTests.Scenarios import issues
 from PartDesignTests.Scenarios import fillet_limit, interning, moves, reorder
@@ -69,7 +71,6 @@ from PartDesignTests.Scenarios import randomized, revolve_uptoface, splits, upto
 AREAS = (
     sketch_edits,
     dressups,
-    attachment,
     uptoface,
     revolve_uptoface,
     patterns,
