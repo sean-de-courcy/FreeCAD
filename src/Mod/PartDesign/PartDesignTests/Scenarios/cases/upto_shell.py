@@ -246,25 +246,27 @@ class UptoCapShift(UptoCap):
 
 class UptoCapOntoSeam(UptoCap):
     """A, wholly right of the seam (x 0.5..2.5), moves to x -1..1 across it: one cap becomes two.
-    The piece that carries on the old one is the right piece, where the old cap and the new
-    overlap (x 0.5..1)."""
+    The right piece shares only a quarter of the old cap (x 0.5..1) and the left piece is as
+    new, so a datum on the cap breaks (decision 119 (3): a piece appearing on a cap is loud, as on
+    an edge). The probe (p_seam.off) called the right piece right."""
 
     A = (0.5, 0, 2.5, 2)
     A1 = (-1, 0, 1, 2)
     REFS = ("A",)
     BEFORE = {"A": (1.5, 1)}
-    AFTER = {"A": (0.5, 1)}
+    AFTER = {"A": None}
 
 
 class UptoCapOntoSeamFromLeft(UptoCap):
-    """A, wholly left of the seam (x -2.5..-0.5), moves to x -1..1 across it: the piece that
-    carries on the old cap is the left one."""
+    """A, wholly left of the seam (x -2.5..-0.5), moves to x -1..1 across it: one cap becomes two
+    and neither is the old one, so a datum on the cap breaks (decision 119 (3), as on an edge).
+    The probe (p_seam.off) called the left piece right."""
 
     A = (-2.5, 0, -0.5, 2)
     A1 = (-1, 0, 1, 2)
     REFS = ("A",)
     BEFORE = {"A": (-1.5, 1)}
-    AFTER = {"A": (-0.5, 1)}
+    AFTER = {"A": None}
 
 
 # ---------------------------------------------------------------------------------------------
