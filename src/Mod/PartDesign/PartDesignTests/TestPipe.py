@@ -4253,14 +4253,12 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
         return result
 
     def testClosedSpineProfileSlidToTheOtherVertex(self):
-        """The D's profile moved from one vertex of the spine to the other, and back: the D is
-        symmetric about z = 5, so the solid is its mirror image, of the same volume. The sweep
-        starts at the profile, but the corner named the start stays the one stored (SpineEnds):
-        the profile's own end names go with it, elements generated from the profile follow the
-        mirror, and no corner's key passes to the other vertex. With the named start at the profile, the start's key and the other corner's
-        traded vertices, and the references to the joints there went loud (the review of
-        `notes\\naming-class-B.md` round 1, CC1). From z = 0 and from z = 10; with the square
-        and with a round hole in it."""
+        """The D's profile moved from one vertex of the spine to the other, and back. The sweep
+        keeps its stored start (SpineEnds), so the profile's end names and the corners' keys stay
+        where they were, and no reference moves silently. Keyed from the profile's place each
+        time, the start's key and the other corner's traded vertices, and the references to the
+        joints there went loud (the review of `notes\\naming-class-B.md` round 1, CC1). From
+        z = 0 and from z = 10; with the square and with a round hole in it."""
         corners = [V(0, 0, 0), V(0, 0, 10)]
         hole = models.rectangle(-1, -1, 1, 1) + [Part.Circle(V(0, 0, 0), V(0, 0, 1), 0.4)]
         for start in (0, 1):
@@ -4275,40 +4273,68 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
                     path = self.closedSpine("D")
                     pipe = self.pipe(profile, path, "Transformed")
                     volume = pipe.Shape.Volume
+                    named = self.profileNamed(pipe, profile)
                     keys = self.cornerKeysAt(pipe, corners)
                     self.assertTrue(keys)
                     points = self.attach(pipe)
                     at = start
-                    for back in (False, True):
+                    for _ in range(2):
                         at = 1 - at
                         profile.Placement = App.Placement(corners[at], App.Rotation())
                         self.doc.recompute()
-                        self.assertProfileNamesAtTheProfile(pipe, profile)
+                        self.assertEqual(self.profileNamed(pipe, profile), named)
                         for key, where in self.cornerKeysAt(pipe, corners).items():
                             if key in keys:
                                 self.assertLessEqual(where, keys[key], key)
+                        self.assertNoneMovedSilently(pipe, volume, points)
 
-                        # "Transformed" shears the section at the corners in the order the sweep
-                        # meets them, from the profile: the solid swept from the other vertex is
-                        # the first one's mirror image about z = 5. A quiet reference stays where
-                        # it was or, on an element generated from the profile, goes to the mirror
-                        # image of its place (I-B1's flip clause); none goes elsewhere
-                        self.assertTrue(pipe.isValid(), pipe.getStatusString())
-                        self.assertAlmostEqual(pipe.Shape.Volume, volume, 4)
-                        for point, before in points.items():
-                            levels = [e.get("warning_level") for e in App.getReferenceReport(point)]
-                            if not point.isValid() or any(levels):
-                                continue
-                            now = point.Placement.Base
-                            mirrored = V(before.x, before.y, 10 - before.z)
-                            if back:
-                                self.assertLess((now - before).Length, 1e-6, (point.Name, before, now))
-                            else:
-                                self.assertLess(
-                                    min((now - before).Length, (now - mirrored).Length),
-                                    1e-6,
-                                    (point.Name, before, now),
-                                )
+    def ring(self, start, profileZ):
+        """A Right corner pipe of a 2 x 2 square, at height `profileZ` on the left leg of a closed
+        ring of four lines (a 30 x 20 rectangle in the XZ plane), the ring drawn from its corner
+        `start` (0 bottom left, then counterclockwise as drawn: top left, top right, bottom
+        right)."""
+        corners = [(0, 0), (0, 20), (30, 20), (30, 0)]
+        corners = corners[start:] + corners[:start]
+        lines = [
+            Part.LineSegment(V(*a, 0), V(*b, 0)) for a, b in zip(corners, corners[1:] + corners[:1])
+        ]
+        path = models.sketch(self.doc, "Path", lines, self.body, placement=XZ)
+        profile = self.square()
+        profile.Placement = App.Placement(V(0, 0, profileZ), App.Rotation())
+        return profile, self.pipe(profile, path, "Right corner")
+
+    def testClosedRingProfileSlidAlongALeg(self):
+        """The ring's profile moved along its leg past the leg's middle (from 4 to 16, from 9 to
+        11): the solid is the same, and no reference moves. The sweep starts where it was
+        stored; started each time at the vertex nearest the profile, it moved to the leg's other
+        vertex, and the profile's names went from the elements at the first to those at the
+        second, silently (the review of fork PR 383, round 1:
+        `work\\pr383-r1\\cases\\pr383_closed_ring.py`)."""
+        for before, after in ((4, 16), (9, 11)):
+            self.tearDown()
+            self.setUp()
+            with self.subTest(before=before, after=after):
+                profile, pipe = self.ring(0, before)
+                volume = pipe.Shape.Volume
+                points = self.attach(pipe)
+                profile.Placement = App.Placement(V(0, 0, after), App.Rotation())
+                self.doc.recompute()
+                self.assertNoneMovedSilently(pipe, volume, points)
+
+    def testClosedRingTiedStartIsKept(self):
+        """The ring drawn from its top right corner, the profile at the middle of its left leg, so
+        both left corners lie equally near: the start chosen is stored, and recomputed with
+        nothing changed, the pipe keeps it, and every reference stays where it was, valid and
+        without a warning. The drawn start, no tied vertex, was stored, and the next recompute
+        moved the start to a tied one: 4 references broke (the review of fork PR 383, round 1)."""
+        profile, pipe = self.ring(2, 10)
+        volume = pipe.Shape.Volume
+        stored = list(pipe.SpineEnds)
+        points = self.attach(pipe)
+        pipe.touch()
+        self.doc.recompute()
+        self.assertEqual(list(pipe.SpineEnds), stored)
+        self.assertNoneMovedSilently(pipe, volume, points, lambda place: True)
 
     def twoPaths(self):
         """One sketch in the XZ plane with two L paths: up 30 from (0, 0) and right 20, and the
