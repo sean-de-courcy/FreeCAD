@@ -513,7 +513,9 @@ class TestNamingSolver(unittest.TestCase):
 
     def testSetterKeepsFromOfTheSameSubs(self):
         """Setting the property again to the same subs keeps `from`, as it keeps the records
-        (ops#504 E2, I-S10, PLAN decision 142); a sub chosen anew starts without it."""
+        (ops#504 E2, I-S10, PLAN decision 142). A piece kept without the other loses it, so
+        that no merge widens it back to the whole edge (the review of fork PR 386,
+        PieceKeptThenMergedBack); a sub chosen anew starts without it."""
         doc = self.newDocument()
         rib, fillet, name = self.ribAcrossFillet(doc)
         models.moveRectangle(doc.RibSketch, 8, -3, 12, 3)
@@ -526,7 +528,7 @@ class TestNamingSolver(unittest.TestCase):
 
         other = edge("line", direction=Z, through=(0, 0, 0)).one(rib.Shape)
         fillet.Base = (rib, pieces[:1] + other)
-        self.assertEqual(self.froms(doc), [name, None])
+        self.assertEqual(self.froms(doc), [None, None])
 
     def notch(self, doc):
         """Cuts a notch (x 8..12, 2 deep) into the front of the profile: the front line ends at

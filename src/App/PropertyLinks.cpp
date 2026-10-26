@@ -277,6 +277,33 @@ static Rewrite keepRewritten(const std::vector<App::DocumentObject*>& oldObjs,
     return rewrite;
 }
 
+// `from` (Task 2 PR 7) marks the pieces of one expanded reference, which the solver merges back
+// into the whole when it is whole again. A rewrite keeps it only where it keeps every piece of
+// the expansion: a piece kept alone is the choice of that piece, which a merge would widen to the
+// whole silently (the review of fork PR 386, PieceKeptThenMergedBack)
+static void keepWholeExpansions(std::vector<std::string>& froms,
+                                const std::vector<std::string>& oldFroms,
+                                const Rewrite& rewrite)
+{
+    std::map<std::string, int> pieces;
+    for (const auto& from : oldFroms) {
+        if (!from.empty()) {
+            ++pieces[from];
+        }
+    }
+    std::map<std::string, int> kept;
+    for (auto j : rewrite.pairs) {
+        if (j >= 0 && static_cast<std::size_t>(j) < oldFroms.size() && !oldFroms[j].empty()) {
+            ++kept[oldFroms[j]];
+        }
+    }
+    for (auto& from : froms) {
+        if (!from.empty() && kept[from] < pieces[from]) {
+            from.clear();
+        }
+    }
+}
+
 // After the setter resolved the new entries: a paired entry passed without a shadow whose sub
 // gave no mapped name (a missing '?Face3' written by its index name) keeps its old shadow, whose
 // mapped name is all that can find the element again
@@ -2220,7 +2247,9 @@ void PropertyLinkSub::setValue(App::DocumentObject* lValue,
                                  shadows,
                                  _Records,
                                  _Fingerprints);
+    const auto oldFroms = _ExpandedFrom;
     carryPaired(_ExpandedFrom, rewrite);
+    keepWholeExpansions(_ExpandedFrom, oldFroms, rewrite);
     _pcLinkSub = lValue;
     _cSubList = std::move(subs);
     if (shadows.size() == _cSubList.size()) {
