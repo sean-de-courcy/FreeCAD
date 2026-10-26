@@ -3619,9 +3619,10 @@ class TestBinormalPipe(unittest.TestCase):
         """A helix of radius 10 and pitch 3, 60 turns, B = Z (its axis), the 1 x 1 square square
         to the tangent where it starts: e runs round the axis and never near B, so the pipe is
         the square carried along, area x (alpha L' + gamma dB) = 3774.206, no warning. Its
-        volume is measured in 10-turn slices: BRepGProp's volume of the whole solid (its 1000-span
-        faces) comes out 0.7 % short (3748.61), where a tessellation gives 3773.98 and its lateral
-        area is right (review pr380-r2, "long_helix"; on 150 turns 4 %)."""
+        volume is measured in 10-turn slices: BRepGProp's volume of the whole solid (faces of 64
+        spans of degree 10, about one span a turn) comes out 0.7 % short (3748.61), where a
+        tessellation gives 3773.98 and its lateral area is right (review pr380-r2, "long_helix";
+        on 150 turns 4 %)."""
         turns = 60
         helix = Part.makeHelix(3, 3 * turns, 10)
         spine = helix if isinstance(helix, Part.Wire) else Part.Wire(helix.Edges)
