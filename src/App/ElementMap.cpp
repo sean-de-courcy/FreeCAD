@@ -14,6 +14,8 @@
 #include "ElementSolver.h"
 #include "NameTable.h"
 
+#include <algorithm>
+#include <cctype>
 #include <charconv>
 #include <cstdlib>
 #include <string_view>
@@ -841,7 +843,17 @@ MappedName ElementMap::setElementName(const IndexedName& element,
         Data::MappedName fixedName;
         unsigned long duplicateIndex = 1;
 
-        if (duplicateIndexString.size()
+        // A twin's place, `<k>of<n>` (ops#468, the size rule), is no number to count on from: the
+        // place stays, and the collision's count follows it after a `~`. Two twins with one
+        // place are a defect of the order that gave the places; the names still differ.
+        const bool twinPlace = std::any_of(
+            duplicateIndexString.begin(),
+            duplicateIndexString.end(),
+            [](char c) { return std::isdigit(static_cast<unsigned char>(c)) == 0; }
+        ) && duplicateIndexString != Data::EMPTY_VALUE;
+
+        if (!twinPlace
+            && duplicateIndexString.size()
             && duplicateIndexString != "0"
             && duplicateIndexString != Data::EMPTY_VALUE)
         {
@@ -855,7 +867,10 @@ MappedName ElementMap::setElementName(const IndexedName& element,
         for (size_t i = 0; i < mappedNames.size(); i++) {
             ZoneScopedN("V2 Duplicate Loop");
 
-            fixedName = {mappedNameBeforeDuplicateCount + std::to_string(duplicateIndex) + mappedNameAfterDuplicateCount};
+            const std::string duplicateField = twinPlace
+                ? duplicateIndexString + "~" + std::to_string(duplicateIndex)
+                : std::to_string(duplicateIndex);
+            fixedName = {mappedNameBeforeDuplicateCount + duplicateField + mappedNameAfterDuplicateCount};
             res = this->addName(fixedName, element, *sid, overwrite, &existing);
 
             if (res) {
