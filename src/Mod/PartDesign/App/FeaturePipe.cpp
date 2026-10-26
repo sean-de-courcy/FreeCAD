@@ -2743,7 +2743,8 @@ struct BinormalFold
         startSingular,
         /// It runs along the binormal further on: the section turns half a turn there at once
         cusp,
-        /// It jumps past the binormal at a corner, where the section takes the law's frame again
+        /// At a corner where the section takes the law's frame again, that frame turns it nearer
+        /// half a turn than none about the spine's tangent, beyond the corner's own turn
         cornerFlip,
         /// Every point of the section moves backwards through its plane
         turnBack,
@@ -2757,7 +2758,33 @@ struct BinormalFold
     double degrees;
     /// A fold's reach past the line where the section turns back, and its extent across that line
     Reach reach;
+    /// A corner flip's turn of the section about the spine's tangent (cornerTwist, degrees)
+    double twist;
 };
+
+/// How far Binormal mode's frame (e, B x e, B) turns the section about the spine's tangent at a
+/// corner from \a into to \a out, beyond the corner's own turn (radians, 0 to pi), where "Right
+/// corner" and "Round corner" give it the law's axis \a next in place of \a previous (e on either
+/// side, square to \a b): the angle between B x previous carried round the corner (the shortest
+/// turn from into to out) and B x next, both square to out. A spine in a plane square to B has
+/// e = the tangent, and no such turn at any corner (a miter, ops#406 review pr380-r2); the corner
+/// of (0, 0, 0), (10, 0, 10), (0, 0, 20) with B = Z turns it half a turn (e from +X to -X, where
+/// the tangent turns 90 degrees). At a hairpin, with no shortest turn, e reversing counts as half
+/// a turn.
+double cornerTwist(
+    const gp_Vec& into,
+    const gp_Vec& out,
+    const gp_Vec& b,
+    const gp_Vec& previous,
+    const gp_Vec& next
+)
+{
+    if (into.Angle(out) > std::numbers::pi - tiltTolerance) {
+        return previous.Dot(next) < 0 ? std::numbers::pi : 0;
+    }
+    const gp_Vec carried = gp_Quaternion(into, out).Multiply(b.Crossed(previous));
+    return carried.Angle(b.Crossed(next));
+}
 
 /// What Binormal mode (\a binormal) does wrong along \a spine, none when it does nothing wrong.
 /// OCCT's law (GeomFill_ConstantBiNormal) carries the profile rigidly in the frame (e, B x e, B),
@@ -2779,7 +2806,9 @@ struct BinormalFold
 /// motion is followed only up to the first corner: "Transformed" tilts the section there, and
 /// measureCorners measures what follows. A corner itself is measured there too. With it true
 /// (Right and Round corner) the section takes the law's frame again after a corner, so a corner
-/// where e reverses turns it half a turn there (cornerFlip). The places: 8 in
+/// where that frame turns it more than a quarter turn about the spine's tangent beyond the
+/// corner's own turn (cornerTwist), nearer half a turn than none, fails there (cornerFlip). A
+/// sharp corner of a spine in a plane square to B doesn't: e is the tangent. The places: 8 in
 /// each C2 piece of a curve (16 to 1024), each interval halved while e turns more than 2 degrees
 /// across it, 2^14 halvings in all; where they run out, e reversing still finds the cusp.
 /// BRepCheck passes all of these pipes.
@@ -2833,7 +2862,8 @@ std::optional<BinormalFold> binormalFolds(
             BinormalFold::Kind::startSingular,
             origin,
             degreesFromLine(startTangent),
-            {}
+            {},
+            0
         };
     }
     const gp_Vec n0 = b.Crossed(*e0);
@@ -2858,6 +2888,7 @@ std::optional<BinormalFold> binormalFolds(
 
     std::optional<gp_Pnt> cusp;
     std::optional<gp_Pnt> flip;
+    double flipTwist = 0;
     // Where e was last undefined, until the next place where it is defined tells a pass from a touch
     std::optional<gp_Pnt> along;
     std::optional<gp_Pnt> back;
@@ -2870,16 +2901,21 @@ std::optional<BinormalFold> binormalFolds(
     constexpr double still = 1e-9;  // an edge-on end (s = 0 exactly) sweeps correctly
     for (size_t k = 0; k < edges.size(); ++k) {
         const TopoDS_Edge& edge = edges[k];
-        if (k > 0
-            && tangentAlong(edges[k - 1], false).Angle(tangentAlong(edge, true)) > tiltTolerance) {
+        const gp_Vec into = k > 0 ? gp_Vec(tangentAlong(edges[k - 1], false)) : gp_Vec();
+        const gp_Vec out(tangentAlong(edge, true));
+        if (k > 0 && into.Angle(out) > tiltTolerance) {
             // A corner: e jumps there, and corners are measureCorners'
             if (along && !cusp) {
                 cusp = along;
             }
             along.reset();
-            const std::optional<gp_Vec> next = squareAxis(gp_Vec(tangentAlong(edge, true)));
-            if (pastCorners && previous && next && next->Dot(*previous) < 0 && !flip) {
-                flip = BRep_Tool::Pnt(TopExp::LastVertex(edges[k - 1], true));
+            const std::optional<gp_Vec> next = squareAxis(out);
+            if (pastCorners && previous && next && !flip) {
+                const double twist = cornerTwist(into, out, b, *previous, *next);
+                if (twist > std::numbers::pi / 2) {
+                    flip = BRep_Tool::Pnt(TopExp::LastVertex(edges[k - 1], true));
+                    flipTwist = twist * 180 / std::numbers::pi;
+                }
             }
             previous.reset();
             follow = follow && pastCorners;
@@ -2969,8 +3005,8 @@ std::optional<BinormalFold> binormalFolds(
             const double gn = -curvature * square * alpha;
             double low = std::numeric_limits<double>::infinity();
             double high = -low;
-            for (const auto& [along, across] : local) {
-                const double s = side * (s0 + gt * along + gn * across) / speed;
+            for (const auto& [onE, onN] : local) {
+                const double s = side * (s0 + gt * onE + gn * onN) / speed;
                 low = std::min(low, s);
                 high = std::max(high, s);
             }
@@ -2994,16 +3030,16 @@ std::optional<BinormalFold> binormalFolds(
         cusp = along;
     }
     if (cusp) {
-        return BinormalFold {BinormalFold::Kind::cusp, *cusp, closest, {}};
+        return BinormalFold {BinormalFold::Kind::cusp, *cusp, closest, {}, 0};
     }
     if (flip) {
-        return BinormalFold {BinormalFold::Kind::cornerFlip, *flip, closest, {}};
+        return BinormalFold {BinormalFold::Kind::cornerFlip, *flip, closest, {}, flipTwist};
     }
     if (back) {
-        return BinormalFold {BinormalFold::Kind::turnBack, *back, closest, {}};
+        return BinormalFold {BinormalFold::Kind::turnBack, *back, closest, {}, 0};
     }
     if (foldAt) {
-        return BinormalFold {BinormalFold::Kind::fold, *foldAt, closest, worst};
+        return BinormalFold {BinormalFold::Kind::fold, *foldAt, closest, worst, 0};
     }
     return std::nullopt;
 }
@@ -3563,12 +3599,14 @@ App::DocumentObjectExecReturn* Pipe::execute()
             if (along && along->kind == BinormalFold::Kind::cornerFlip) {
                 return new App::DocumentObjectExecReturn(fmt::format(
                     "Pipe: in 'Binormal' mode every section lies in a plane through the binormal "
-                    "{}, and at the spine's corner at {} the spine's tangent jumps past it: with "
-                    "'Right corner' or 'Round corner' the section turns half a turn there. Use "
-                    "'Transformed', a binormal the spine's tangent never passes, or 'Standard' "
-                    "mode.",
+                    "{}, and at the spine's corner at {} 'Right corner' and 'Round corner' turn "
+                    "the section {:.3g} degrees about the spine's tangent beyond the corner's own "
+                    "turn, nearer half a turn than none: the two sides can't be joined. Use "
+                    "'Transformed', a binormal square to the spine (for a spine in one plane, "
+                    "square to that plane), or 'Standard' mode.",
                     binormalText(),
-                    inPlace(along->at)
+                    inPlace(along->at),
+                    along->twist
                 ));
             }
             if (along) {

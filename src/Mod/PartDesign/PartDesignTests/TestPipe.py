@@ -3554,12 +3554,103 @@ class TestBinormalPipe(unittest.TestCase):
         for transition in ("Right corner", "Round corner"):
             with self.subTest(transition=transition):
                 pipe = self.pipe(spine, V(0, 0, 1), Transition=transition)
-                self.assertFailsAt(pipe, V(10, 0, 10), 1e-6, "jumps past it", "half a turn")
+                self.assertFailsAt(
+                    pipe, V(10, 0, 10), 1e-6, "turn the section 180 degrees", "half a turn"
+                )
                 self.tearDown()
                 self.setUp()
         pipe = self.pipe(spine, V(0, 0, 1), Transition="Transformed")
         self.assertSwept(pipe, 16)
         self.assertAlmostEqual(pipe.Shape.Volume, 320, delta=1e-3)
+
+    def testPlanarSharpCornerBuilds(self):
+        """A spine in XZ, (0, 0, 0) to (0, 0, 20) and 20 further at 91 to 150 degrees from +Z
+        towards +X, and B = Y, square to the spine's plane: on each leg e is the leg's own
+        direction, so the corner turns the section exactly as much as the spine (no turn about
+        the tangent). "Right corner" is the miter join of the two legs, 16 x 40 = 640; "Round
+        corner" is OCCT's own sweep of the same profile in the same mode. Before, every corner
+        past 90 degrees failed as a half turn, since e turns past 90 degrees there (review
+        pr380-r2)."""
+        for theta in (91, 120, 150):
+            turn = math.radians(theta)
+            corner = V(0, 0, 20)
+            spine = Part.makePolygon([V(0, 0, 0), corner, corner + V(math.sin(turn), 0, math.cos(turn)) * 20])
+            for transition, code in (("Right corner", 1), ("Round corner", 2)):
+                with self.subTest(theta=theta, transition=transition):
+                    pipe = self.pipe(spine, V(0, 1, 0), Transition=transition)
+                    self.assertTrue(pipe.isValid(), pipe.getStatusString())
+                    self.assertNotIn("Warning", pipe.State)
+                    shape = pipe.Shape
+                    self.assertTrue(shape.isValid())
+                    if code == 1:
+                        expected = 640
+                    else:
+                        sweep = Part.BRepOffsetAPI.MakePipeShell(spine)
+                        sweep.setBiNormalMode(V(0, 1, 0))
+                        sweep.setTransitionMode(code)
+                        sweep.add(Part.makePolygon([V(-2, -2, 0), V(2, -2, 0), V(2, 2, 0), V(-2, 2, 0), V(-2, -2, 0)]))
+                        sweep.build()
+                        sweep.makeSolid()
+                        expected = sweep.shape().Volume
+                        self.assertLess(expected, 640)
+                    self.assertAlmostEqual(shape.Volume, expected, delta=1e-4 * expected)
+                    shape.check(True)
+                    self.tearDown()
+                    self.setUp()
+
+    def testOffPlaneCornerTurnsOverFails(self):
+        """B = Z, legs 45 degrees off it, the second turned 120 degrees about Z from the first:
+        e turns 120 degrees, the tangent 75.5, and the section 101.5 degrees about the tangent
+        beyond the corner's turn, nearer half a turn than none. Under Right corner it fails
+        naming the corner (OCCT can't join such corners either: integration fails them)."""
+        first = V(1, 0, 1) * (20 / math.sqrt(2))
+        second = V(math.cos(math.radians(120)), math.sin(math.radians(120)), 1) * (20 / math.sqrt(2))
+        rotation = App.Rotation(unit(first), V(0, 0, 1))
+        spine = Part.makePolygon(
+            [V(0, 0, 0), rotation.multVec(first), rotation.multVec(first + second)]
+        )
+        pipe = self.pipe(spine, rotation.multVec(V(0, 0, 1)), Transition="Right corner")
+        self.assertFailsAt(pipe, V(0, 0, 20), 1e-6, "about the spine's tangent", "half a turn")
+        twist = re.search(r"turn the section ([0-9.]+) degrees", pipe.getStatusString())
+        self.assertIsNotNone(twist, pipe.getStatusString())
+        self.assertAlmostEqual(float(twist.group(1)), 101.5, delta=0.6)
+
+    def testLongHelixBuilds(self):
+        """A helix of radius 10 and pitch 3, 60 turns, B = Z (its axis), the 1 x 1 square square
+        to the tangent where it starts: e runs round the axis and never near B, so the pipe is
+        the square carried along, area x (alpha L' + gamma dB) = 3774.206, no warning. Its
+        volume is measured in 10-turn slices: BRepGProp's volume of the whole solid (its 1000-span
+        faces) comes out 0.7 % short (3748.61), where a tessellation gives 3773.98 and its lateral
+        area is right (review pr380-r2, "long_helix"; on 150 turns 4 %)."""
+        turns = 60
+        helix = Part.makeHelix(3, 3 * turns, 10)
+        spine = helix if isinstance(helix, Part.Wire) else Part.Wire(helix.Edges)
+        edge = spine.OrderedEdges[0]
+        tangent = unit(edge.derivative1At(edge.FirstParameter))
+        placement = App.Placement(edge.valueAt(edge.FirstParameter), App.Rotation(V(0, 0, 1), tangent))
+        sketch = models.sketch(
+            self.doc, "Profile", models.rectangle(-0.5, -0.5, 0.5, 0.5), self.body, placement=placement
+        )
+        self.spine = models.feature(self.doc, "Spine", spine)
+        pipe = self.body.newObject("PartDesign::AdditivePipe", "Pipe")
+        pipe.Profile = sketch
+        pipe.Spine = (self.spine, [])
+        pipe.Mode = "Binormal"
+        pipe.Binormal = V(0, 0, 1)
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        self.assertNotIn("Warning", pipe.State)
+        shape = pipe.Shape
+        self.assertTrue(shape.isValid())
+        slope = math.atan2(3, 2 * math.pi * 10)
+        expected = turns * (math.cos(slope) * 2 * math.pi * 10 + math.sin(slope) * 3)
+        self.assertAlmostEqual(expected, 3774.206, delta=1e-3)
+        sliced = 0.0
+        for k in range(turns // 10):
+            low = -5 if k == 0 else 30 * k
+            high = 3 * turns + 5 if k == turns // 10 - 1 else 30 * (k + 1)
+            sliced += shape.common(Part.makeBox(40, 40, high - low, V(-20, -20, low))).Volume
+        self.assertAlmostEqual(sliced, expected, delta=1e-4 * expected)
 
     def testBinormalAlongStartFails(self):
         """B = Z, the spine's tangent where it starts: no section plane there. Before, Valid, 320."""
