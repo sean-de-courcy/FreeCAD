@@ -2743,6 +2743,8 @@ struct BinormalFold
         startSingular,
         /// It runs along the binormal further on: the section turns half a turn there at once
         cusp,
+        /// It jumps past the binormal at a corner, where the section takes the law's frame again
+        cornerFlip,
         /// Every point of the section moves backwards through its plane
         turnBack,
         /// Some points of the section move backwards through its plane
@@ -2764,7 +2766,8 @@ struct BinormalFold
 /// - Where the tangent runs along B, e is undefined, and where it passes B, e reverses: the
 ///   section turns half a turn about B at once and the pipe crosses itself (a cusp), for any
 ///   profile. No law of this mode avoids it: a frame that kept B x e continuous would run the
-///   section backwards through its own plane instead.
+///   section backwards through its own plane instead. A tangent that only touches B keeps e on
+///   both sides and sweeps correctly; one that reaches B at the spine's end or at a corner counts.
 /// - A point of the section at (t, n) in the frame where the spine starts moves through the
 ///   section's plane at s = alpha v' + gamma (C'.B) + k' v' (beta t - alpha n), v' the length of
 ///   e's vector and k' the signed curvature of the spine's projection on the plane square to B.
@@ -2774,7 +2777,9 @@ struct BinormalFold
 ///
 /// Without \a points only the cusps are looked for. With \a pastCorners false the section's
 /// motion is followed only up to the first corner: "Transformed" tilts the section there, and
-/// measureCorners measures what follows. A corner itself is measured there too. The places: 8 in
+/// measureCorners measures what follows. A corner itself is measured there too. With it true
+/// (Right and Round corner) the section takes the law's frame again after a corner, so a corner
+/// where e reverses turns it half a turn there (cornerFlip). The places: 8 in
 /// each C2 piece of a curve (16 to 1024), each interval halved while e turns more than 2 degrees
 /// across it, 2^14 halvings in all; where they run out, e reversing still finds the cusp.
 /// BRepCheck passes all of these pipes.
@@ -2852,6 +2857,9 @@ std::optional<BinormalFold> binormalFolds(
     }
 
     std::optional<gp_Pnt> cusp;
+    std::optional<gp_Pnt> flip;
+    // Where e was last undefined, until the next place where it is defined tells a pass from a touch
+    std::optional<gp_Pnt> along;
     std::optional<gp_Pnt> back;
     std::optional<gp_Pnt> foldAt;
     Reach worst;
@@ -2865,6 +2873,14 @@ std::optional<BinormalFold> binormalFolds(
         if (k > 0
             && tangentAlong(edges[k - 1], false).Angle(tangentAlong(edge, true)) > tiltTolerance) {
             // A corner: e jumps there, and corners are measureCorners'
+            if (along && !cusp) {
+                cusp = along;
+            }
+            along.reset();
+            const std::optional<gp_Vec> next = squareAxis(gp_Vec(tangentAlong(edge, true)));
+            if (pastCorners && previous && next && next->Dot(*previous) < 0 && !flip) {
+                flip = BRep_Tool::Pnt(TopExp::LastVertex(edges[k - 1], true));
+            }
             previous.reset();
             follow = follow && pastCorners;
         }
@@ -2925,15 +2941,22 @@ std::optional<BinormalFold> binormalFolds(
             }
             closest = std::min(closest, degreesFromLine(d1));
             const std::optional<gp_Vec> e = squareAxis(d1);
-            if (!e || (previous && e->Dot(*previous) < 0)) {
-                if (!cusp) {
-                    cusp = point;
-                }
-                if (e) {
-                    previous = e;
+            if (!e) {
+                if (!along) {
+                    along = point;
                 }
                 continue;
             }
+            // Undefined right after a corner counts like at the spine's start
+            if ((previous && e->Dot(*previous) < 0) || (along && !previous)) {
+                if (!cusp) {
+                    cusp = along ? *along : point;
+                }
+                previous = e;
+                along.reset();
+                continue;
+            }
+            along.reset();
             previous = e;
             if (!follow) {
                 continue;
@@ -2967,8 +2990,14 @@ std::optional<BinormalFold> binormalFolds(
             }
         }
     }
+    if (along && !cusp) {
+        cusp = along;
+    }
     if (cusp) {
         return BinormalFold {BinormalFold::Kind::cusp, *cusp, closest, {}};
+    }
+    if (flip) {
+        return BinormalFold {BinormalFold::Kind::cornerFlip, *flip, closest, {}};
     }
     if (back) {
         return BinormalFold {BinormalFold::Kind::turnBack, *back, closest, {}};
@@ -3529,7 +3558,20 @@ App::DocumentObjectExecReturn* Pipe::execute()
                 );
             }
             const TopoDS_Wire& spineWire = TopoDS::Wire(path.getShape());
-            if (const auto along = binormalFolds(spineWire, *binormal, {}, {}, true)) {
+            const bool retakes = Transition.getValue() != 0;
+            const auto along = binormalFolds(spineWire, *binormal, {}, {}, retakes);
+            if (along && along->kind == BinormalFold::Kind::cornerFlip) {
+                return new App::DocumentObjectExecReturn(fmt::format(
+                    "Pipe: in 'Binormal' mode every section lies in a plane through the binormal "
+                    "{}, and at the spine's corner at {} the spine's tangent jumps past it: with "
+                    "'Right corner' or 'Round corner' the section turns half a turn there. Use "
+                    "'Transformed', a binormal the spine's tangent never passes, or 'Standard' "
+                    "mode.",
+                    binormalText(),
+                    inPlace(along->at)
+                ));
+            }
+            if (along) {
                 const bool atStart = along->kind == BinormalFold::Kind::startSingular;
                 return new App::DocumentObjectExecReturn(fmt::format(
                     "Pipe: in 'Binormal' mode every section lies in a plane through the binormal, "

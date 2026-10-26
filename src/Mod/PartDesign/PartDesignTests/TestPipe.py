@@ -3533,6 +3533,34 @@ class TestBinormalPipe(unittest.TestCase):
         pipe = self.pipe(self.arc(), V(1, 0, 0))
         self.assertFailsAt(pipe, V(20, 0, 20), 1e-3, "runs along the binormal")
 
+    def testTangentTouchesBinormal(self):
+        """B = Z, a cubic Bezier in XZ with x' = 30 (1 - 2u)^2: its tangent touches +Z halfway
+        without passing it, so e stays +X on both sides and the section is the square carried
+        straight up, 16 x 60 = 960, crossing nothing. Before, the fix failed it as a cusp: the
+        touch falls on one of its samples (review pr380-r1)."""
+        curve = Part.BezierCurve()
+        curve.setPoles([V(0, 0, 0), V(10, 0, 20), V(0, 0, 40), V(10, 0, 60)])
+        pipe = self.pipe(Part.Wire([curve.toShape()]), V(0, 0, 1))
+        self.assertSwept(pipe, 16)
+        self.assertAlmostEqual(pipe.Shape.Volume, 960, delta=1e-3)
+        pipe.Shape.check(True)
+
+    def testCornerFlipFails(self):
+        """B = Z, a spine from the origin to (10, 0, 10) and back to (0, 0, 20): e turns from +X
+        to -X at the corner. Under Right and Round corner the section takes the law's frame again
+        there and turns half a turn: it fails naming the corner (before, with an empty message).
+        "Transformed" keeps the section's tilt across the corner: the square carried up, 320."""
+        spine = Part.makePolygon([V(0, 0, 0), V(10, 0, 10), V(0, 0, 20)])
+        for transition in ("Right corner", "Round corner"):
+            with self.subTest(transition=transition):
+                pipe = self.pipe(spine, V(0, 0, 1), Transition=transition)
+                self.assertFailsAt(pipe, V(10, 0, 10), 1e-6, "jumps past it", "half a turn")
+                self.tearDown()
+                self.setUp()
+        pipe = self.pipe(spine, V(0, 0, 1), Transition="Transformed")
+        self.assertSwept(pipe, 16)
+        self.assertAlmostEqual(pipe.Shape.Volume, 320, delta=1e-3)
+
     def testBinormalAlongStartFails(self):
         """B = Z, the spine's tangent where it starts: no section plane there. Before, Valid, 320."""
         pipe = self.pipe(self.arc(), V(0, 0, 1))
