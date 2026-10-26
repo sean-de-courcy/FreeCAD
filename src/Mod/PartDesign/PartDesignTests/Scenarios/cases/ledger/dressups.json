@@ -1,0 +1,17 @@
+{
+"run": {"cases": 3, "dirty": false, "platform": "win32", "sha": "1d99d8d7c08b22ca336983907a74624367ce3903", "tier": "F", "time": "2026-10-26T02:07:22Z"},
+"entries": {
+"DressUpInsertPocket|chamfer_edge|V2s": {"axes": ["M1", "E1"], "classes": ["A"], "expected": "correct", "found_by": "port", "issue": "ops#506", "tier": "G"},
+"DressUpInsertPocket|draft_face|V2s": {"axes": ["M1", "E1"], "classes": ["A"], "expected": "correct", "found_by": "port", "issue": "ops#506", "tier": "G"},
+"DressUpInsertPocket|draft_neutral|V2s": {"axes": ["M1", "E1"], "classes": ["A"], "expected": "correct", "found_by": "port", "issue": "ops#506", "tier": "G"},
+"DressUpInsertPocket|fillet_edge|V2s": {"axes": ["M1", "E1"], "classes": ["A"], "expected": "correct", "found_by": "port", "issue": "ops#506", "tier": "G"},
+"DressUpLength|chamfer_edge|V2s": {"axes": ["M1", "E1"], "classes": ["A"], "expected": "correct", "found_by": "port", "issue": "ops#506", "tier": "G"},
+"DressUpLength|draft_face|V2s": {"axes": ["M1", "E1"], "classes": ["A"], "expected": "correct", "found_by": "port", "issue": "ops#506", "tier": "G"},
+"DressUpLength|draft_neutral|V2s": {"axes": ["M1", "E1"], "classes": ["A"], "expected": "correct", "found_by": "port", "issue": "ops#506", "tier": "G"},
+"DressUpLength|fillet_edge|V2s": {"axes": ["M1", "E1"], "classes": ["A"], "expected": "correct", "found_by": "port", "issue": "ops#506", "tier": "G"},
+"DressUpReorder|chamfer_edge|V2s": {"axes": ["M1", "E2"], "classes": ["A"], "expected": "correct", "found_by": "port", "issue": "ops#506", "tier": "F"},
+"DressUpReorder|draft_face|V2s": {"axes": ["M1", "E2"], "classes": ["A"], "expected": "correct", "found_by": "port", "issue": "ops#506", "tier": "F"},
+"DressUpReorder|draft_neutral|V2s": {"axes": ["M1", "E2"], "classes": ["A"], "expected": "correct", "found_by": "port", "issue": "ops#506", "tier": "F"},
+"DressUpReorder|fillet_edge|V2s": {"axes": ["M1", "E2"], "classes": ["A"], "expected": "correct", "found_by": "port", "issue": "ops#506", "tier": "F"}
+}
+}
