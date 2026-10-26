@@ -287,14 +287,16 @@ jobs:
       shell: pixi run bash -l {0}
       env:
         FREECAD_SCENARIO_TIER: G
-        FREECAD_SCENARIO_LEDGER_OUT: ${{ github.workspace }}/logs/corpus-ledger
+        FREECAD_SCENARIO_LEDGER_OUT: ${{ env.wsdir }}/logs/corpus-ledger
         OPERATING_SYSTEM: ${{ runner.os }}
+      # wsdir is expanded by Actions, as in the other test steps: bash under pixi run on
+      # Windows doesn't see the lower-case variable (the first run ran /build/release/bin/...).
       run: |
         set -o pipefail
-        mkdir -p "$wsdir/logs"
+        mkdir -p "${{ env.wsdir }}/logs"
         # Windows: the build dir (its CLI tests run there); macOS: the install
-        if [[ $OPERATING_SYSTEM == 'Windows' ]]; then exe="$wsdir/build/release/bin/FreeCADCmd"; else exe=FreeCADCmd; fi
-        "$exe" -t PartDesignTests.TestCorpusGate 2>&1 | tee "$wsdir/logs/TestCorpusGate.log"
+        if [[ $OPERATING_SYSTEM == 'Windows' ]]; then exe="${{ env.wsdir }}/build/release/bin/FreeCADCmd"; else exe=FreeCADCmd; fi
+        "$exe" -t PartDesignTests.TestCorpusGate 2>&1 | tee "${{ env.wsdir }}/logs/TestCorpusGate.log"
 
     - name: FreeCAD GUI tests on install
       # if: runner.os == 'Linux' && !inputs.skipBuild
