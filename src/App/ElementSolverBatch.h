@@ -226,6 +226,18 @@ using ElementHoldsPointFunction
     = bool (*)(const GeoFeature* geo, const char* element, const Base::Vector3d& point, double distance);
 AppExport void setElementHoldsPointFunction(ElementHoldsPointFunction function);
 
+/** Whether the line through \a point along the unit \a along meets the face \a element of
+ * \a geo's shape inside it, not on its boundary, within \a distance of the point (PR 366 round 8):
+ * the point seen along a Pad's sweep lies over the face. False for another element type, or when
+ * it can't be told. Part sets it; without it ElementHoldsPointFunction stands for it.
+ */
+using ElementHoldsPointAlongFunction = bool (*)(const GeoFeature* geo,
+                                                const char* element,
+                                                const Base::Vector3d& point,
+                                                const Base::Vector3d& along,
+                                                double distance);
+AppExport void setElementHoldsPointAlongFunction(ElementHoldsPointAlongFunction function);
+
 /** The direction \a geo swept its profile along, in the frame its elements' fingerprints are
  * measured in, either sense (PR 366 round 6): a Pad's or Pocket's. False for another feature.
  * PartDesign sets it; without it no feature has one.

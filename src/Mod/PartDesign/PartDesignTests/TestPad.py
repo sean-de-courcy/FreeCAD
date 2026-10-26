@@ -1346,6 +1346,24 @@ def notchedPlates(z):
     return [bsplinePlate([(x, y, z) for x, y in outline]) for outline in outlines]
 
 
+def ridgePlates(planar=False):
+    """PR 366 round 8: the faces, as a function of z, of a ridge seen from below: plate 1 (x -4..0)
+    at z + 2 x and plate 2 (x 0..4.5) at z - 2 x, meeting at x = 0 at 53 degrees; y -10..10. Each
+    a B-spline face, or a plane face if `planar`"""
+
+    def faces(z):
+        def plate(x0, x1, height):
+            corners = [(x, y, height(x)) for x, y in ((x0, -10), (x1, -10), (x1, 10), (x0, 10))]
+            if not planar:
+                return bsplinePlate(corners)
+            points = [FreeCAD.Vector(*corner) for corner in corners]
+            return Part.Face(Part.makePolygon(points + points[:1]))
+
+        return [plate(-4, 0, lambda x: z + 2 * x), plate(0, 4.5, lambda x: z - 2 * x)]
+
+    return faces
+
+
 def shellPointAt(shell, x, y):
     """PR 366 round 6: the point of `shell` above or below (x, y)"""
     line = Part.LineSegment(FreeCAD.Vector(x, y, -100), FreeCAD.Vector(x, y, 100)).toShape()
@@ -1355,15 +1373,16 @@ def shellPointAt(shell, x, y):
     return pairs[0][0]
 
 
-def farPieceAt(shape, element, point):
+def farPieceAt(shape, element, point, capMax=50):
     """PR 366 round 6: the index name of shape's far cap ("F", smaller than the plates) or far
-    edge ("E") through `point`, a point of the up-to shell inside the piece"""
+    edge ("E") through `point`, a point of the up-to shell inside the piece. Round 8: caps up to
+    `capMax` in area (a tilted plate's caps are larger than their plan)"""
     vertex = Part.Vertex(point)
     if element == "F":
         names = [
             "Face%d" % i
             for i, face in enumerate(shape.Faces, 1)
-            if face.Area < 50 and face.distToShape(vertex)[0] < 1e-6
+            if face.Area < capMax and face.distToShape(vertex)[0] < 1e-6
         ]
     else:
         names = [
@@ -1376,7 +1395,26 @@ def farPieceAt(shape, element, point):
     return names[0]
 
 
-def slideOntoReorderedPlates(test, kind, faces, draw, places, move, order, after, reopen=False):
+def savedFingerprints(path, names):
+    """PR 366 round 8: the fingerprint text the saved document at `path` holds for the reference
+    of each datum in `names` ({piece: object name}), as written in the file ("" for none)"""
+    import xml.etree.ElementTree as ElementTree
+    import zipfile
+
+    with zipfile.ZipFile(path) as archive:
+        root = ElementTree.fromstring(archive.read("Document.xml"))
+    found = {}
+    for piece, name in names.items():
+        data = root.find("ObjectData/Object[@name='%s']" % name)
+        support = data.find("Properties/Property[@name='AttachmentSupport']")
+        texts = [node.get("fp") for node in support.iter() if node.get("fp") is not None]
+        found[piece] = texts[0] if texts else ""
+    return found
+
+
+def slideOntoReorderedPlates(
+    test, kind, faces, draw, places, move, order, after, reopen=False, capMax=50, savedInside=()
+):
     """PR 366 round 6: as slideOntoReorderedStrips, up to the shell of `faces(z)` (a list of
     B-spline plates; z is the far caps' height where the plates are flat at it): datum points on
     the pieces through the shell's points at `places` ({piece: ("F" or "E", x, y)}), then the
@@ -1384,7 +1422,11 @@ def slideOntoReorderedPlates(test, kind, faces, draw, places, move, order, after
     point is then on the piece through the shell's point at one of its `after` places (a list)
     or says it lost its piece, never quietly elsewhere; one whose `after` is a single place (a
     tuple) is on that piece, quietly. Round 7: with `reopen`, the document is saved, opened again
-    and recomputed before the move (the fingerprints read back from the file)"""
+    and recomputed before the move (the fingerprints read back from the file). Round 8: with
+    `reopen` "untouched", opened again and moved with nothing touched or recomputed first, so
+    the references are solved from the fingerprints the file holds, not from new ones; the
+    pieces in `savedInside` must have a point inside them in the file (its twelfth field).
+    `capMax`: as farPieceAt()'s"""
     import os
     import tempfile
 
@@ -1399,7 +1441,7 @@ def slideOntoReorderedPlates(test, kind, faces, draw, places, move, order, after
         shell = doc.getObject("Plate").Shape
         points = {}
         for piece, (element, x, y) in places.items():
-            sub = farPieceAt(shape, element, shellPointAt(shell, x, y))
+            sub = farPieceAt(shape, element, shellPointAt(shell, x, y), capMax)
             attach = pointOnFarCap if element == "F" else pointOnFarEdge
             points[piece] = attach(feature, sub)
         if reopen:
@@ -1408,10 +1450,14 @@ def slideOntoReorderedPlates(test, kind, faces, draw, places, move, order, after
             names = {piece: point.Name for piece, point in points.items()}
             featureName = feature.Name
             FreeCAD.closeDocument(doc.Name)
+            saved = savedFingerprints(path, names)
+            for piece in savedInside:
+                test.assertEqual(len(saved[piece].split("|")), 12, (piece, saved[piece]))
             doc = FreeCAD.openDocument(path)
-            for obj in doc.Objects:
-                obj.touch()
-            doc.recompute()
+            if reopen != "untouched":
+                for obj in doc.Objects:
+                    obj.touch()
+                doc.recompute()
             feature = doc.getObject(featureName)
             points = {piece: doc.getObject(name) for piece, name in names.items()}
         sketch = feature.Profile[0]
@@ -1427,7 +1473,7 @@ def slideOntoReorderedPlates(test, kind, faces, draw, places, move, order, after
         shell = doc.getObject("Plate").Shape
 
         def centre(element, x, y):
-            sub = farPieceAt(shape, element, shellPointAt(shell, x, y))
+            sub = farPieceAt(shape, element, shellPointAt(shell, x, y), capMax)
             return shape.getElement(sub).CenterOfMass
 
         for piece, allowed in after.items():
@@ -3666,6 +3712,91 @@ class TestPad(unittest.TestCase):
                         (0, 1, 2),
                         after,
                         reopen,
+                    )
+
+    def testPadUpToARidgeStripNotMadeWholeOnTheNextPlate(self):
+        # PR 366 round 8 (ops#386): a Pad from below up to a ridge, plates z = 10 + 2x (x < 0) and
+        # z = 10 - 2x (x > 0) at 53 degrees, B-spline faces. A (x -0.5..3, y 0..8) has a strip
+        # CL on plate 1 and a piece CR on plate 2. A moved by 0.6, wholly onto plate 2: the strip
+        # is gone, and the whole cap on plate 2 took a name. The cap made whole held CL's saved
+        # centre (-0.25, 4, 9.5) by its nearest point (0.15, 4, 9.7), inside the cap, so CL's
+        # datum went quietly to the whole cap (the round 7 verdict). Seen along the sweep, the
+        # centre lies beside the cap (x -0.25, the cap from x 0.1): CL says it lost its piece now,
+        # in either shell order, in the open document and in one saved and opened again without a
+        # recompute. CR is on the whole cap or says it lost its piece. Moved by 0.3 or 1, as before:
+        # CL keeps its strip or breaks. The Pad only: a Pocket down to it meets the valley's
+        # faces from above, another model
+        places = {"CL": ("F", -0.25, 4), "CR": ("F", 1.5, 4)}
+
+        def draw(sketch):
+            dimensionedRectangle(sketch, "A", -0.5, 0, 3, 8)
+
+        cases = [
+            # (the move, the shell's order, saved and opened again, the datums' places after it)
+            (0.6, (0, 1), False, {"CL": [], "CR": [(2.1, 4)]}),
+            (0.6, (1, 0), False, {"CL": [], "CR": [(2.1, 4)]}),
+            (0.6, (0, 1), "untouched", {"CL": [], "CR": [(2.1, 4)]}),
+            (0.6, (1, 0), "untouched", {"CL": [], "CR": [(2.1, 4)]}),
+            (1, (0, 1), False, {"CL": [], "CR": [(2.5, 4)]}),
+            (0.3, (0, 1), False, {"CL": [(-0.1, 4)], "CR": [(1.8, 4)]}),
+        ]
+        for move, order, reopen, after in cases:
+            with self.subTest(move=move, order=order, reopen=reopen):
+                slideOntoReorderedPlates(
+                    self,
+                    "Pad",
+                    ridgePlates(),
+                    draw,
+                    places,
+                    (move, 0),
+                    order,
+                    after,
+                    reopen,
+                    capMax=200,
+                )
+
+    def testPadUpToANotchedPlateThinLPieceFromTheSavedFile(self):
+        # PR 366 round 8 (ops#386): the round 7 reopen cases above touch and recompute the opened
+        # document before the move, so its references are solved from fingerprints made again,
+        # not from those the file holds. Here the document is opened again and moved with nothing
+        # recomputed: the thin L piece's fingerprint in the file has its point inside the L (the
+        # twelfth field), and with A moved wholly onto the square plate its datums say they lost
+        # their piece, in any shell order; the square piece's datum is on the whole cap or says it
+        # lost its piece. A moved by 0.05, every datum keeps its piece or breaks. For the Pad
+        # and the Pocket
+        cases = [
+            # (x0, the move, the shell's order, the datums' places after it)
+            (0.9, 0.15, (0, 1, 2), {"CA": [], "CA2": [], "CB": [(2, 2)]}),
+            (0.9, 0.15, (1, 2, 0), {"CA": [], "CA2": [], "CB": [(2, 2)]}),
+            (0.95, 0.5, (1, 0, 2), {"CA": [], "CA2": [], "CB": [(2, 2)]}),
+            (0.9, 0.05, (0, 1, 2), {"CA": [(0.97, 2)], "CA2": [(2, 0.97)], "CB": [(2, 2)]}),
+        ]
+        for kind in ("Pad", "Pocket"):
+            for x0, move, order, after in cases:
+                arm = 1 - x0
+                x1 = x0 + 2
+
+                def draw(sketch, x0=x0, x1=x1):
+                    dimensionedRectangle(sketch, "A", x0, x0, x1, x1)
+                    dimensionedRectangle(sketch, "B", 12, 0, 14, 3)
+
+                places = {
+                    "CA": ("F", x0 + arm / 2, 2),
+                    "CA2": ("F", 2, x0 + arm / 2),
+                    "CB": ("F", 2, 2),
+                }
+                with self.subTest(kind=kind, x0=x0, move=move, order=order):
+                    slideOntoReorderedPlates(
+                        self,
+                        kind,
+                        notchedPlates,
+                        draw,
+                        places,
+                        (move, move),
+                        order,
+                        after,
+                        "untouched",
+                        savedInside=("CA", "CA2"),
                     )
 
     def testPadUpToAHoledShellFarEdgePiecesOfAFlippedRectangle(self):

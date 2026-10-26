@@ -41,6 +41,7 @@ namespace
 {
 ElementHintsFunction elementHintsFunction = nullptr;
 ElementHoldsPointFunction elementHoldsPointFunction = nullptr;
+ElementHoldsPointAlongFunction elementHoldsPointAlongFunction = nullptr;
 ElementSweepDirectionFunction elementSweepDirectionFunction = nullptr;
 
 struct MigrationCounts
@@ -61,6 +62,11 @@ void setElementHintsFunction(ElementHintsFunction function)
 void setElementHoldsPointFunction(ElementHoldsPointFunction function)
 {
     elementHoldsPointFunction = function;
+}
+
+void setElementHoldsPointAlongFunction(ElementHoldsPointAlongFunction function)
+{
+    elementHoldsPointAlongFunction = function;
 }
 
 void setElementSweepDirectionFunction(ElementSweepDirectionFunction function)
@@ -1309,6 +1315,14 @@ bool solveElementReferences(DocumentObject* feature,
                 [geo](const std::string& index, const Base::Vector3d& point, double distance) {
                     return elementHoldsPointFunction(geo, index.c_str(), point, distance);
                 };
+        }
+        if (elementHoldsPointAlongFunction) {
+            input.holdsPointAlong = [geo](const std::string& index,
+                                          const Base::Vector3d& point,
+                                          const Base::Vector3d& along,
+                                          double distance) {
+                return elementHoldsPointAlongFunction(geo, index.c_str(), point, along, distance);
+            };
         }
         Base::Vector3d sweep;
         if (elementSweepDirectionFunction && elementSweepDirectionFunction(geo, sweep)

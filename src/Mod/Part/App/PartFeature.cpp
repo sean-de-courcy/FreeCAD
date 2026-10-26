@@ -60,6 +60,7 @@
 #include <gp_Ax2.hxx>
 #include <gp_Ax3.hxx>
 #include <gp_Dir.hxx>
+#include <gp_Lin.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Pnt2d.hxx>
 #include <gp_Trsf.hxx>
@@ -1006,6 +1007,61 @@ bool elementHoldsPoint(
 }
 
 const bool elementHoldsPointRegistered = (App::setElementHoldsPointFunction(&elementHoldsPoint), true);
+
+// Whether the line through a point along a direction meets a face of Shape inside it, not on its
+// boundary, within the distance of the point (App::ElementHoldsPointAlongFunction, PR 366 round
+// 8); or the face's own centre of mass lies within the distance of the point, as for
+// elementHoldsPoint(). Seen along a Pad's sweep: the nearest point of a tilted cap to a point
+// beside it, seen so, may lie inside the cap. An edge as elementHoldsPoint() takes it.
+bool elementHoldsPointAlong(
+    const App::GeoFeature* geo,
+    const char* element,
+    const Base::Vector3d& point,
+    const Base::Vector3d& along,
+    double distance
+)
+{
+    auto feature = dynamic_cast<const Feature*>(geo);
+    if (!feature || !element) {
+        return false;
+    }
+    const TopoShape& shape = feature->Shape.getShape();
+    if (shape.isNull()) {
+        return false;
+    }
+    try {
+        const TopoDS_Shape sub = shape.located(TopLoc_Location()).getSubShape(element, true);
+        if (sub.IsNull()) {
+            return false;
+        }
+        if (sub.ShapeType() == TopAbs_EDGE) {
+            return elementHoldsPoint(geo, element, point, distance);
+        }
+        if (sub.ShapeType() != TopAbs_FACE) {
+            return false;
+        }
+        const gp_Pnt origin(point.x, point.y, point.z);
+        GProp_GProps props;
+        BRepGProp::SurfaceProperties(sub, props);
+        if (props.CentreOfMass().Distance(origin) <= distance) {
+            return true;
+        }
+        BRepIntCurveSurface_Inter hits;
+        hits.Init(sub, gp_Lin(origin, gp_Dir(along.x, along.y, along.z)), Precision::Confusion());
+        for (; hits.More(); hits.Next()) {
+            if (hits.State() == TopAbs_IN && std::abs(hits.W()) <= distance) {
+                return true;
+            }
+        }
+        return false;
+    }
+    catch (const Standard_Failure&) {
+        return false;
+    }
+}
+
+const bool elementHoldsPointAlongRegistered
+    = (App::setElementHoldsPointAlongFunction(&elementHoldsPointAlong), true);
 
 }  // namespace
 

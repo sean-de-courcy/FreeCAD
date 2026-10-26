@@ -695,6 +695,15 @@ struct AppExport SolveInput
     /// distance of the edge \a index, its ends included (ops#386). Unset: no point lies over any
     /// face or on any edge.
     std::function<bool(const std::string& index, const Base::Vector3d& point, double distance)> holdsPoint;
+    /// Whether the line through the point along the unit direction meets the face \a index inside
+    /// it, not on its boundary, within the distance of the point (PR 366 round 8): the point seen
+    /// along a Pad's sweep lies over the face. A tilted face's nearest point to a point beside it
+    /// may still lie inside it. Unset: holdsPoint stands for it.
+    std::function<bool(const std::string& index,
+                       const Base::Vector3d& point,
+                       const Base::Vector3d& along,
+                       double distance)>
+        holdsPointAlong;
     /// The unit direction the target swept its profile along, either sense (PR 366 round 6): a
     /// Pad's or Pocket's, whose far pieces are seen along it to tell whether one left its old
     /// place. Empty: the old piece's own normal stands for it, and a straight far edge's piece

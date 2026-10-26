@@ -6360,6 +6360,83 @@ TEST(SolveOwner, twinCapPiecesResolveToTheirCapMadeWhole)
     }
 }
 
+TEST(SolveOwner, pieceMadeWholeIsSeenAlongTheSweep)
+{
+    // PR 366 round 8: a Pad from below up to a ridge, plates z = 10 + 2x and z = 10 - 2x. A's strip
+    // on the first plate (centre (-0.25, 4, 9.5)) went when A moved wholly onto the second, and
+    // A's cap there is whole again. Its nearest point to the strip's centre, (0.15, 4, 9.7), lies
+    // inside it, but seen along the sweep (z) the centre lies beside it: the strip's reference
+    // breaks. A's piece on the second plate, its centre held seen along the sweep, takes the whole
+    // cap, as before
+    SolveInput input;
+    input.diagonal = 40;
+    input.pool["Face"] = {
+        element("Face4", {farPiece({}, 0, {"PRJ"})}),
+        element("Face9", {sketchEdge(9)}),
+    };
+    const auto whole
+        = fingerprint('F', "BSplineSurface", 62.6, Base::Vector3d(1.85, 4, 6.3));
+    measure(input, {{"Face4", whole}, {"Face9", capAt(20, 3)}}, nullptr);
+    input.sweep = Base::Vector3d(0, 0, 1);
+    // The cap's nearest point to either old centre lies inside it
+    input.holdsPoint = [](const std::string& index, const Base::Vector3d&, double) {
+        return index == "Face4";
+    };
+    // Seen along the sweep: only the second plate's piece's centre (x 1.5) lies over it
+    std::vector<Base::Vector3d> seenAlong;
+    input.holdsPointAlong = [&](const std::string& index,
+                                const Base::Vector3d& point,
+                                const Base::Vector3d& along,
+                                double) {
+        seenAlong.push_back(along);
+        return index == "Face4" && point.x > 0.6;
+    };
+    // The strip x -0.5..0, y 0..8 on the first plate, its outline bounding it closely (B-spline
+    // plates, as in the verdict's case: no normal for tier 2 to tell the plates apart)
+    auto strip = missing(farPiece({plateElement("first", 'F')}));
+    strip.fingerprint
+        = fingerprint('F', "BSplineSurface", 8.94, Base::Vector3d(-0.25, 4, 9.5));
+    strip.fingerprint.outline = {Base::Vector3d(-0.5, 0, 9),
+                                 Base::Vector3d(0, 0, 10),
+                                 Base::Vector3d(0, 8, 10),
+                                 Base::Vector3d(-0.5, 8, 9)};
+    input.entries = {strip};
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
+    ASSERT_FALSE(seenAlong.empty());
+    EXPECT_EQ(seenAlong.front(), Base::Vector3d(0, 0, 1));
+
+    // The piece x 0..3 on the second plate: on the whole cap, quietly
+    auto piece = missing(farPiece({plateElement("second", 'F')}));
+    piece.fingerprint
+        = fingerprint('F', "BSplineSurface", 53.67, Base::Vector3d(1.5, 4, 7));
+    piece.fingerprint.outline = {Base::Vector3d(0, 0, 10),
+                                 Base::Vector3d(3, 0, 4),
+                                 Base::Vector3d(3, 8, 4),
+                                 Base::Vector3d(0, 8, 10)};
+    input.entries = {piece};
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Resolved) << describe(outcome);
+    EXPECT_EQ(outcome.element, "Face4") << describe(outcome);
+
+    // An old face along the sweep (its outline a wall) is seen as before, by its nearest point,
+    // and so is any face without a sweep (another feature): the strip takes the whole cap
+    seenAlong.clear();
+    input.entries = {strip};
+    input.entries[0].fingerprint.outline = {Base::Vector3d(-0.5, 0, 0),
+                                            Base::Vector3d(-0.5, 8, 0),
+                                            Base::Vector3d(-0.5, 8, 9),
+                                            Base::Vector3d(-0.5, 0, 9)};
+    input.entries[0].fingerprint.size = 72;
+    outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Resolved) << describe(outcome);
+    EXPECT_TRUE(seenAlong.empty());
+    input.entries = {strip};
+    input.sweep.reset();
+    outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Resolved) << describe(outcome);
+    EXPECT_TRUE(seenAlong.empty());
+}
+
 TEST(Moved, hintKeepsATwinAtTheToleranceEdge)
 {
     // Twins as far from the saved element as atSamePlace() allows (just inside every

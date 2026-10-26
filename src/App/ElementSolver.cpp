@@ -4477,6 +4477,23 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 const double size = centred->size ? *centred->size : 0.0;
                 const double reach = centred->type == 'E' ? size / 100.0 : std::sqrt(size) / 4.0;
                 const Base::Vector3d& point = centred->inside ? *centred->inside : *centred->center;
+                // Round 8: a face's point seen along the sweep, unless the old face lies along it
+                // (as outlinesApart()). A tilted cap made whole on the next plate of a ridge
+                // held the old strip's centre beside it by its nearest point, inside the cap
+                if (centred->type == 'F' && input.sweep && input.holdsPointAlong) {
+                    Base::Vector3d normal;
+                    const auto& outline = centred->outline;
+                    for (std::size_t i = 1; i + 1 < outline.size(); ++i) {
+                        normal += (outline[i] - outline.front()) % (outline[i + 1] - outline.front());
+                    }
+                    if (outline.size() < 3 || normal.Length() <= eps * eps
+                        || std::abs(normal.Normalize() * *input.sweep) > 0.01) {
+                        return input.holdsPointAlong(pool.elements[k].index,
+                                                     point,
+                                                     *input.sweep,
+                                                     reach + eps);
+                    }
+                }
                 return input.holdsPoint(pool.elements[k].index, point, reach + eps);
             };
             auto holdersOf = [&](bool alone) {
