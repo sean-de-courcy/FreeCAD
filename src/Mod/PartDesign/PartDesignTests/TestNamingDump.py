@@ -781,8 +781,12 @@ os._exit(0)
 
 def _freecadCmd():
     names = ("FreeCADCmd.exe", "FreeCADCmd") if sys.platform == "win32" else ("FreeCADCmd",)
+    # FreeCAD-CH: the Windows package renames it after fork.json (FreeCAD-CHCmd.exe, ops#15)
+    packaged = App.ConfigGet("ExeName") + "Cmd"
+    if sys.platform == "win32":
+        names = (packaged + ".exe",) + names
     base = os.path.basename(sys.executable).lower()
-    if base.startswith("freecadcmd"):
+    if base.startswith("freecadcmd") or base.startswith(packaged.lower()):
         return sys.executable
     for folder in ("bin", "MacOS", ""):
         for name in names:

@@ -83,6 +83,34 @@ sed -i '1s/.*/\nLIST OF PACKAGES:/' ${copy_dir}/packages.txt
 
 mv ${copy_dir} ${version_name}
 
+# FreeCAD-CH: the checks below import modules from the bundle, and FreeCADCmd's interpreter ignores
+# PYTHONDONTWRITEBYTECODE (an isolated PyConfig), so they write __pycache__ into it. The stamp marks
+# what they write; the bundle's own files keep their older times (cp -a). Removed after the gate.
+pyc_stamp="$(mktemp)"
+
+# FreeCAD-CH: refuse a bundle that doesn't run the tested environment, pixi.lock's (ops#388).
+# Before signing, so a refused bundle is never signed (ops#398), as on macOS.
+python ../../scripts/check_release_env.py --lock ../../../pixi.lock --platform "${TARGET_PLATFORM:-win-64}" --freecadcmd "${version_name}/bin/${app_cmd_exe}" ${GITHUB_STEP_SUMMARY:+--summary "$GITHUB_STEP_SUMMARY"}
+
+# FreeCAD-CH: the packaged build reopens the compat corpus itself (WORKFLOW section 6, "Compat
+# steps": the release build differs from PR builds, ops#294), so neither a dry run nor a release
+# run ships a package the gate refuses. A fresh absolute settings folder, never the runner's.
+gate_home="$(mktemp -d)"
+gate_status=0
+FREECAD_USER_HOME="$(cygpath -w "${gate_home}")" \
+    "${version_name}/bin/${app_cmd_exe}" -t PartDesignTests.Compat.TestCompatCorpus \
+    > compat-gate.log 2>&1 || gate_status=$?
+cat compat-gate.log
+rm -rf "${gate_home}" || true    # a scanner's lock on the scratch folder must not fail a passed gate
+if [[ ${gate_status} -ne 0 ]] || ! grep -q '^OK' compat-gate.log || grep -q '^FAILED' compat-gate.log; then
+  echo "TestCompatCorpus failed on the packaged build (exit ${gate_status}); refusing to package it."
+  exit 1
+fi
+# the bytecode the release check and the gate wrote goes; the package ships only what was copied
+find "${version_name}" -name '*.pyc' -newer "${pyc_stamp}" -delete
+find "${version_name}" -type d -name __pycache__ -empty -delete
+rm -f "${pyc_stamp}"
+
 
 # Sign the EXE, DLL, and PYD files (if we can access the Azure account for signing):
 set -euo pipefail
@@ -151,9 +179,6 @@ if ! "$SIGN_DIR/bin/${app_cmd_exe}" --safe-mode --console "import pivy; from piv
   echo "FreeCAD bundled Pivy smoke test failed; the Windows bundle cannot import the bundled Coin/Pivy runtime."
   exit 1
 fi
-
-# FreeCAD-CH: refuse a bundle that doesn't run the tested environment, pixi.lock's (ops#388)
-python ../../scripts/check_release_env.py --lock ../../../pixi.lock --platform "${TARGET_PLATFORM:-win-64}"   --freecadcmd "$SIGN_DIR/bin/${app_cmd_exe}" ${GITHUB_STEP_SUMMARY:+--summary "$GITHUB_STEP_SUMMARY"}
 
 7z a -t7z -mx9 -mmt=${NUMBER_OF_PROCESSORS} ${version_name}.7z ${version_name} -bb
 # create hash
