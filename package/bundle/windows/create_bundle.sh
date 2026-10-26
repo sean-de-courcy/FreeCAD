@@ -83,6 +83,10 @@ sed -i '1s/.*/\nLIST OF PACKAGES:/' ${copy_dir}/packages.txt
 
 mv ${copy_dir} ${version_name}
 
+# FreeCAD-CH: refuse a bundle that doesn't run the tested environment, pixi.lock's (ops#388).
+# Before signing, so a refused bundle is never signed (ops#398), as on macOS.
+python ../../scripts/check_release_env.py --lock ../../../pixi.lock --platform "${TARGET_PLATFORM:-win-64}" --freecadcmd "${version_name}/bin/${app_cmd_exe}" ${GITHUB_STEP_SUMMARY:+--summary "$GITHUB_STEP_SUMMARY"}
+
 
 # Sign the EXE, DLL, and PYD files (if we can access the Azure account for signing):
 set -euo pipefail
@@ -151,9 +155,6 @@ if ! "$SIGN_DIR/bin/${app_cmd_exe}" --safe-mode --console "import pivy; from piv
   echo "FreeCAD bundled Pivy smoke test failed; the Windows bundle cannot import the bundled Coin/Pivy runtime."
   exit 1
 fi
-
-# FreeCAD-CH: refuse a bundle that doesn't run the tested environment, pixi.lock's (ops#388)
-python ../../scripts/check_release_env.py --lock ../../../pixi.lock --platform "${TARGET_PLATFORM:-win-64}"   --freecadcmd "$SIGN_DIR/bin/${app_cmd_exe}" ${GITHUB_STEP_SUMMARY:+--summary "$GITHUB_STEP_SUMMARY"}
 
 7z a -t7z -mx9 -mmt=${NUMBER_OF_PROCESSORS} ${version_name}.7z ${version_name} -bb
 # create hash

@@ -25,8 +25,9 @@ permissions:
   contents: read
 
 concurrency:
-  # a dry run never cancels a release build, nor a release build a dry run
-  group: build-release-${{ github.event_name }}${{ inputs.dry_run && '-dry-run' || '' }}
+  # a dry run never cancels a release build, nor a release build a dry run, and a run on one ref
+  # (a tag, integration, a topic branch) never cancels a run on another
+  group: build-release-${{ github.event_name }}-${{ github.ref }}${{ inputs.dry_run && '-dry-run' || '' }}
   cancel-in-progress: true
 
 jobs:
@@ -195,7 +196,8 @@ jobs:
 
       - name: Install the Apple certificate and provisioning profile
         id: macos_get_cert
-        if: runner.os == 'macOS'
+        # FreeCAD-CH: a dry run never signs or notarizes, even once the secrets exist
+        if: runner.os == 'macOS' && !inputs.dry_run
         env:
           APP_SPECIFIC_PASSWORD: ${{ secrets.APP_SPECIFIC_PASSWORD }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
@@ -268,7 +270,8 @@ jobs:
 
       - name: Azure login for Windows build code signing
         id: azure_login
-        if: runner.os == 'Windows'
+        # FreeCAD-CH: a dry run never signs (skipped: WINDOWS_SIGN_RELEASE becomes 0 below)
+        if: runner.os == 'Windows' && !inputs.dry_run
         continue-on-error: true
         uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43 # v3.0.0
         with:
@@ -356,7 +359,7 @@ jobs:
             echo "<!-- release-env -->"
             echo "## Release environment"
             echo ""
-            echo "Both packages run the tested environment (pixi.lock); their FreeCADCmd reported:"
+            echo "Both packages passed the release check: each one's FreeCADCmd reported pixi.lock's versions, which are:"
             echo ""
             # the build matrix's targets
             for platform in win-64 osx-arm64; do
@@ -368,8 +371,9 @@ jobs:
             echo "Dry run: no draft release to edit"
             exit 0
           fi
-          # A re-run replaces the section instead of adding a second one
-          gh release view "${BUILD_TAG}" --json body --jq .body | sed '/^<!-- release-env -->$/,$d' > notes.md
+          # A re-run replaces the section instead of adding a second one. Notes saved from the web
+          # editor have CRLF line ends, which the marker line would not match: drop the CRs first.
+          gh release view "${BUILD_TAG}" --json body --jq .body | tr -d '\r' | sed '/^<!-- release-env -->$/,$d' > notes.md
           echo "" >> notes.md
           cat release-env.md >> notes.md
           gh release edit "${BUILD_TAG}" --notes-file notes.md --draft=true

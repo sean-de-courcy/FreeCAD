@@ -147,6 +147,15 @@ jobs:
         if: always()
         run: python3 -I -m unittest discover -s package/scripts -p "test_check_release_gen0.py"
 
+    # FreeCAD-CH (ops#398): the release check and the release notes read pixi.lock's OCCT, Python and
+    # Qt per platform; a lock layout they can't read is found here, not in a release run
+      - name: Read the release environment from pixi.lock
+        if: always()
+        run: |
+          for platform in win-64 osx-arm64; do
+            python3 -I package/scripts/check_release_env.py --lock pixi.lock --platform "${platform}" --notes-line
+          done
+
     # Generic lints steps
       - name: Check File Case Sensitivity
         uses: credfeto/action-case-checker@cb652aeab29ed363bbdb7d9ee1bfcc010c46cac5 # v1.3.0
