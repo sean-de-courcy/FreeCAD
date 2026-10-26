@@ -1,0 +1,9 @@
+{
+"run": {"cases": 1, "dirty": false, "platform": "win32", "sha": "0e3309d47fa765c30a311517040e679ecd61bbb2", "tier": "F", "time": "2026-10-26T19:52:25Z"},
+"entries": {
+"PipeHoleFirstLegLonger|vertex_xm_ym|V2s": {"axes": ["M3", "E1"], "classes": ["D"], "expect": "BROKEN", "expected": "guessed-wrong", "found_by": "port", "issue": "ops#503", "tier": "F"},
+"PipeHoleFirstLegLonger|vertex_xm_yp|V2s": {"axes": ["M3", "E1"], "classes": ["D"], "expect": "OWN-OR-BROKEN", "expected": "quiet", "found_by": "port", "issue": "ops#503", "tier": "F"},
+"PipeHoleFirstLegLonger|vertex_xp_ym|V2s": {"axes": ["M3", "E1"], "classes": ["D"], "expect": "BROKEN", "expected": "guessed-wrong", "found_by": "port", "issue": "ops#503", "tier": "F"},
+"PipeHoleFirstLegLonger|vertex_xp_yp|V2s": {"axes": ["M3", "E1"], "classes": ["D"], "expect": "OWN-OR-BROKEN", "expected": "quiet", "found_by": "port", "issue": "ops#503", "tier": "F"}
+}
+}

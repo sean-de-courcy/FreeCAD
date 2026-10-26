@@ -1,0 +1,8 @@
+{
+"run": {"cases": 1, "dirty": false, "platform": "win32", "sha": "0e3309d47fa765c30a311517040e679ecd61bbb2", "tier": "F", "time": "2026-10-26T19:52:25Z"},
+"entries": {
+"PadShortenedPastLeftCrossing|left_point|V2s": {"axes": ["M4", "E1"], "classes": ["D"], "expect": "BROKEN", "expected": "wrong", "found_by": "port", "issue": "ops#503", "tier": "F"},
+"PadShortenedPastLeftCrossing|right_line|V2s": {"axes": ["M4", "E1"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#503", "tier": "F"},
+"PadShortenedPastLeftCrossing|right_point|V2s": {"axes": ["M4", "E1"], "classes": ["D"], "expect": "CORRECT", "expected": "quiet", "found_by": "port", "issue": "ops#503", "tier": "F"}
+}
+}

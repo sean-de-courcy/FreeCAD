@@ -1,0 +1,7 @@
+{
+"run": {"cases": 1, "dirty": false, "platform": "win32", "sha": "0e3309d47fa765c30a311517040e679ecd61bbb2", "tier": "F", "time": "2026-10-26T19:52:25Z"},
+"entries": {
+"ReplacedHoleSamePlace|rim_fillet|V2s": {"axes": ["M1", "E3"], "classes": ["D"], "expect": "GUESSED", "expected": "quiet", "found_by": "port", "issue": "ops#503", "tier": "F"},
+"ReplacedHoleSamePlace|seam_vertex|V2s": {"axes": ["M1", "E3"], "classes": ["D"], "expect": "GUESSED", "expected": "quiet", "found_by": "port", "issue": "ops#503", "tier": "F"}
+}
+}
