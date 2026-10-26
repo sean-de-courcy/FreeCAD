@@ -13,6 +13,7 @@
 #include <Base/Console.h>
 #include <Mod/Part/App/TopoShape.h>
 #include "Mod/Part/App/TopoShapeMapper.h"
+#include "Mod/Part/App/modelRefine.h"
 #include <Mod/Part/App/TopoShapeOpCode.h>
 
 #include "PartTestHelpers.h"
@@ -56,6 +57,7 @@
 #include <gp_Pln.hxx>
 #include <ShapeFix_Wireframe.hxx>
 #include <ShapeBuild_ReShape.hxx>
+#include <ShapeUpgrade_ShapeDivideClosedEdges.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS_Edge.hxx>
 #include <TColgp_Array1OfPnt.hxx>
@@ -4311,14 +4313,15 @@ TEST_F(TopoShapeExpansionTest, makeShapeWithElementMapBendArcsIgnoreChildOrderV2
     EXPECT_EQ(namesDiffer(copy, original), "");
 }
 
-TEST_F(TopoShapeExpansionTest, makeShapeWithElementMapCutCornersIgnoreWireOrderV2)
+TEST_F(TopoShapeExpansionTest, makeShapeWithElementMapCutCornersIgnoreChildOrderV2)
 {
     // Arrange
     //   a compound of two overlapping boxes cut by a cylinder standing on their shared corner
     //   (TestNamingDump's CompoundCut): the cut corners' vertexes are named from the same faces
-    //   and told apart only by their index (UPP, ops#378). Only the wires are reversed: with the
-    //   faces reversed too, two modified edges of the top face take another Connected Name, the
-    //   first named ancestor face in the result's face order (ops#431, not an index)
+    //   and told apart only by their place (UPP, ops#378). Every container is reversed: two
+    //   modified edges of the top face took another Connected Name when the faces were, the
+    //   first named ancestor face in the result's face order; they take the smallest by name
+    //   (ops#431)
     TopoShape box1(App::HistoryAlgorithm::V2, BRepPrimAPI_MakeBox(1.0, 2.0, 2.0).Shape(), 1L);
     TopoShape box2(App::HistoryAlgorithm::V2, BRepPrimAPI_MakeBox(2.0, 1.0, 2.0).Shape(), 2L);
     TopoShape cylinder(App::HistoryAlgorithm::V2, BRepPrimAPI_MakeCylinder(0.5, 2.0).Shape(), 3L);
@@ -4333,7 +4336,7 @@ TEST_F(TopoShapeExpansionTest, makeShapeWithElementMapCutCornersIgnoreWireOrderV
         MapperMaker(cut),
         {compound, cylinder},
         OpCodes::Cut,
-        Reversed::Wires
+        Reversed::All
     );
 
     // Assert
@@ -4903,6 +4906,90 @@ TopoShape namedSplitCylinderOffset(double degrees, bool capFirst)
 }
 }  // namespace
 
+TEST_F(TopoShapeExpansionTest, makeElementOffsetSplitCylinderNamesUpperListsWithTheirCountV2)
+{
+    // Arrange
+    //   the offset split cylinder: the cap vertexes over the split are named from a cap and the
+    //   two half-cylinders (UPP), a list of two
+    for (bool capFirst : {true, false}) {
+        SCOPED_TRACE(capFirst);
+
+        // Act
+        const TopoShape offset = namedSplitCylinderOffset(0, capFirst);
+
+        // Assert
+        //   the members of a list of two carry 0of2 and 1of2 in DuplicateCount, Index 0 (the size
+        //   rule, I-A2); and no ORD: their order is their place on a half-cylinder, a face that
+        //   is a proper part of its period, which a rigid motion or a turn of the profile keeps
+        //   (`naming-class-A.md` M2 (b), CC3 measured right in its section 6)
+        int listed = 0;
+        for (const char* type : {"Face", "Edge", "Vertex"}) {
+            for (int index = 1; index <= static_cast<int>(offset.countSubElements(type)); ++index) {
+                const DecodedMappedSection section
+                    = lastSection(offset.getMappedName(IndexedName::fromConst(type, index)));
+                if (!section.hasMapperFlag(MAPPER_FLAG_UPPER)) {
+                    continue;
+                }
+                EXPECT_EQ(section.index, "0") << type << index;
+                EXPECT_FALSE(section.hasMapperFlag(MAPPER_FLAG_ORDERED)) << type << index;
+                if (section.duplicateCount != "0") {
+                    EXPECT_TRUE(
+                        section.duplicateCount == "0of2" || section.duplicateCount == "1of2"
+                    ) << type
+                      << index << " " << section.duplicateCount;
+                    ++listed;
+                }
+            }
+        }
+        EXPECT_GE(listed, 2);
+        EXPECT_EQ(listed % 2, 0);
+    }
+}
+
+TEST_F(TopoShapeExpansionTest, makeElementOffsetDividedCylinderMarksPeriodicListsOrderedV2)
+{
+    // Arrange
+    //   a cylinder (radius 5, height 10) whose cap circles are each divided into two half arcs at
+    //   u = 0 and u = pi, its side one whole cylindrical face, offset by 1. Each cap's two offset
+    //   vertexes (and arcs) are named from that cap and the cylinder (UPP), a list of two whose
+    //   order is their `u` on the cylinder: a whole period, where `u` can jump by 2 pi with the
+    //   members unmoved (`naming-class-A.md` M2 (b) (ii))
+    ShapeUpgrade_ShapeDivideClosedEdges divide(BRepPrimAPI_MakeCylinder(5, 10).Shape());
+    divide.SetNbSplitPoints(1);
+    ASSERT_TRUE(divide.Perform());
+    const TopoShape cylinder(App::HistoryAlgorithm::V2, divide.Result(), 1L);
+    ASSERT_EQ(cylinder.countSubElements("Face"), 3);
+    ASSERT_EQ(cylinder.countSubElements("Edge"), 5);
+
+    // Act
+    TopoShape offset(App::HistoryAlgorithm::V2, 2L);
+    offset.makeElementOffset(cylinder, 1.0, 1e-7);
+
+    // Assert
+    //   every member of a list of two carries its place (0of2, 1of2) and ORD, Index 0; the
+    //   members of one list differ by their place only
+    std::map<std::string, std::vector<std::string>> lists;
+    for (const char* type : {"Edge", "Vertex"}) {
+        for (int index = 1; index <= static_cast<int>(offset.countSubElements(type)); ++index) {
+            const MappedName name = offset.getMappedName(IndexedName::fromConst(type, index));
+            const DecodedMappedSection section = lastSection(name);
+            if (!section.hasMapperFlag(MAPPER_FLAG_UPPER) || section.duplicateCount == "0") {
+                continue;
+            }
+            EXPECT_EQ(section.index, "0") << type << index;
+            EXPECT_TRUE(section.hasMapperFlag(MAPPER_FLAG_ORDERED)) << type << index;
+            std::string key = name.toString();
+            key.replace(key.rfind(section.duplicateCount), section.duplicateCount.size(), "*");
+            lists[key].push_back(section.duplicateCount);
+        }
+    }
+    EXPECT_FALSE(lists.empty());
+    for (auto& [key, places] : lists) {
+        std::sort(places.begin(), places.end());
+        EXPECT_EQ(places, (std::vector<std::string> {"0of2", "1of2"})) << key;
+    }
+}
+
 TEST_F(TopoShapeExpansionTest, makeElementOffsetSplitCylinderKeepsNamesWhenTurnedV2)
 {
     // Arrange
@@ -5113,22 +5200,28 @@ TEST_F(TopoShapeExpansionTest, makeElementCutNamesTwinVertexesByTheirSideV2)
     const TopoShape lone = boxCutByCylinderAt(0.5);
 
     // Assert
-    //   the twins' names differ only in the side, `in` / `out`; the lone crossing has the side of
-    //   the twin at the larger x
+    //   the twins' names differ only in the side, `in` / `out`, a role in Index (no place among
+    //   twins in DuplicateCount), and carry ORD, so that the solver re-checks an exact hit that
+    //   moved (the role-sibling clause, naming-class-A.md 4.1); the lone crossing has the side of
+    //   the twin at the larger x, with ORD too
     EXPECT_TRUE(allElementsNamed(twins));
     const auto twinSections = vertexSectionsWhere(twins, onBottomEdge);
     ASSERT_EQ(twinSections.size(), 2);
     std::set<std::string> indexes;
     for (const auto& section : twinSections) {
         EXPECT_TRUE(section.hasMapperFlag(MAPPER_FLAG_GENERATED));
+        EXPECT_TRUE(section.hasMapperFlag(MAPPER_FLAG_ORDERED));
+        EXPECT_EQ(section.duplicateCount, "0");
         EXPECT_EQ(section.linkedNames, twinSections.front().linkedNames);
         indexes.insert(section.index);
     }
-    EXPECT_EQ(indexes, (std::set<std::string> {"in", "out"}));
+    EXPECT_EQ(indexes, (std::set<std::string> {ROLE_CROSSING_IN, ROLE_CROSSING_OUT}));
     const auto loneSections = vertexSectionsWhere(lone, onBottomEdge);
     ASSERT_EQ(loneSections.size(), 1);
     EXPECT_TRUE(loneSections.front().hasMapperFlag(MAPPER_FLAG_GENERATED));
+    EXPECT_TRUE(loneSections.front().hasMapperFlag(MAPPER_FLAG_ORDERED));
     EXPECT_EQ(loneSections.front().index, twinSections.back().index);
+    EXPECT_EQ(loneSections.front().duplicateCount, "0");
     //   only vertexes are named by a side: the lines and arcs the cut makes are named as before
     for (const TopoShape* shape : {&twins, &lone}) {
         for (const char* type : {"Edge", "Face"}) {
@@ -5165,20 +5258,26 @@ TEST_F(TopoShapeExpansionTest, makeElementCutNamesRepeatedSidesByTheirOrderV2)
     result.makeElementCut({box, torus});
 
     // Assert
-    //   the four crossings are in0of2, in1of2, out0of2 and out1of2, the sides alternating along X
+    //   the four crossings are `in` 0of2 and 1of2 and `out` 0of2 and 1of2 (the role in Index, the
+    //   place among the crossings on the same side in DuplicateCount, with ORD), the sides
+    //   alternating along X
     EXPECT_TRUE(allElementsNamed(result));
     const auto sections = vertexSectionsWhere(result, [](const gp_Pnt& p) {
         return std::abs(p.Y()) < 1e-6 && std::abs(p.Z() - 0.3) < 1e-6 && std::abs(p.X()) < 10 - 1e-6;
     });
     ASSERT_EQ(sections.size(), 4);
-    std::set<std::string> indexes;
+    std::set<std::string> places;
     for (const auto& section : sections) {
         EXPECT_TRUE(section.hasMapperFlag(MAPPER_FLAG_GENERATED));
-        indexes.insert(section.index);
+        EXPECT_TRUE(section.hasMapperFlag(MAPPER_FLAG_ORDERED));
+        places.insert(section.index + " " + section.duplicateCount);
     }
-    EXPECT_EQ(indexes, (std::set<std::string> {"in0of2", "in1of2", "out0of2", "out1of2"}));
+    EXPECT_EQ(
+        places,
+        (std::set<std::string> {"in 0of2", "in 1of2", "out 0of2", "out 1of2"})
+    );
     for (std::size_t k = 1; k < sections.size(); ++k) {
-        EXPECT_NE(sections[k].index.substr(0, 2), sections[k - 1].index.substr(0, 2));
+        EXPECT_NE(sections[k].index, sections[k - 1].index);
     }
 }
 
@@ -5208,9 +5307,389 @@ TEST_F(TopoShapeExpansionTest, makeElementCutNamesTwinVertexesOnAClosedEdgeByThe
     std::set<std::string> indexes;
     for (const auto& section : sections) {
         EXPECT_TRUE(section.hasMapperFlag(MAPPER_FLAG_GENERATED));
+        EXPECT_TRUE(section.hasMapperFlag(MAPPER_FLAG_ORDERED));
+        EXPECT_EQ(section.duplicateCount, "0");
         indexes.insert(section.index);
     }
-    EXPECT_EQ(indexes, (std::set<std::string> {"in", "out"}));
+    EXPECT_EQ(indexes, (std::set<std::string> {ROLE_CROSSING_IN, ROLE_CROSSING_OUT}));
+}
+
+namespace
+{
+/// The model B of `naming-class-A.md` 4.1 (CC1): box A, 10 mm at the origin, and box B, 10 mm at
+/// (5, -5, 2), fused in the order A, B or (`reordered`) B, A, then cut by a cylinder of radius 1
+/// along Z through (5, 0.3). The fuse's section edge y = 0, z = 2 (A's front face meets B's
+/// bottom face) is crossed twice, at x = 5 -+ 0.954. The crossings' names, by x.
+std::vector<std::string> sectionCrossingNames(bool reordered)
+{
+    TopoShape a(App::HistoryAlgorithm::V2, BRepPrimAPI_MakeBox(10.0, 10.0, 10.0).Shape(), 1L);
+    TopoShape b(
+        App::HistoryAlgorithm::V2,
+        BRepPrimAPI_MakeBox(gp_Pnt(5.0, -5.0, 2.0), 10.0, 10.0, 10.0).Shape(),
+        2L
+    );
+    TopoShape fused(App::HistoryAlgorithm::V2, 3L);
+    fused.makeElementFuse(reordered ? std::vector<TopoShape> {b, a} : std::vector<TopoShape> {a, b});
+    TopoShape cylinder(
+        App::HistoryAlgorithm::V2,
+        BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(5.0, 0.3, -3.0), gp_Dir(0, 0, 1)), 1.0, 20.0).Shape(),
+        4L
+    );
+    TopoShape result(App::HistoryAlgorithm::V2, 5L);
+    result.makeElementCut({fused, cylinder});
+    std::vector<std::pair<double, std::string>> found;
+    int index = 0;
+    for (const auto& vertex : result.getSubShapes(TopAbs_VERTEX)) {
+        ++index;
+        const gp_Pnt p = BRep_Tool::Pnt(TopoDS::Vertex(vertex));
+        if (std::abs(p.Y()) < 1e-6 && std::abs(p.Z() - 2) < 1e-6 && std::abs(p.X() - 5) < 1.5) {
+            found.emplace_back(
+                p.X(),
+                result.getMappedName(IndexedName::fromConst("Vertex", index)).toString()
+            );
+        }
+    }
+    std::sort(found.begin(), found.end());
+    std::vector<std::string> names;
+    for (const auto& entry : found) {
+        names.push_back(entry.second);
+    }
+    return names;
+}
+
+DecodedMappedSection lastSectionOf(const std::string& name)
+{
+    return lastSection(MappedName(name));
+}
+}  // namespace
+
+TEST_F(TopoShapeExpansionTest, makeElementCutNamesFlippedCrossingsByTheirSideV2)
+{
+    // Arrange
+    //   the fuse's inputs reordered reverse its section edge's curve with the geometry unchanged:
+    //   the side of the cylinder's face the edge goes to flips at both crossings (a switch point
+    //   of the role, `naming-class-A.md` 4.1 item 5, measured in `flip2.txt`)
+
+    // Act
+    const auto names = sectionCrossingNames(false);
+    const auto reorderedNames = sectionCrossingNames(true);
+
+    // Assert
+    //   each order names the crossings `in` and `out`, with ORD, which sends a moved exact hit to
+    //   the solver's twin check
+    ASSERT_EQ(names.size(), 2);
+    ASSERT_EQ(reorderedNames.size(), 2);
+    for (const auto* list : {&names, &reorderedNames}) {
+        std::set<std::string> roles;
+        for (const auto& name : *list) {
+            const DecodedMappedSection section = lastSectionOf(name);
+            EXPECT_TRUE(section.hasMapperFlag(MAPPER_FLAG_ORDERED)) << name;
+            EXPECT_EQ(section.duplicateCount, "0") << name;
+            roles.insert(section.index);
+        }
+        EXPECT_EQ(roles, (std::set<std::string> {ROLE_CROSSING_IN, ROLE_CROSSING_OUT}));
+    }
+    //   after the reorder, the two names sit on the swapped crossings: equal up to the role,
+    //   each name reaches the other crossing exactly (role siblings, which the solver takes for
+    //   twins: D1's half of the case)
+    EXPECT_NE(lastSectionOf(names[0]).index, lastSectionOf(reorderedNames[0]).index);
+    EXPECT_EQ(names[0], reorderedNames[1]);
+    EXPECT_EQ(names[1], reorderedNames[0]);
+}
+
+namespace
+{
+/// ops#431's model (`notes\ops431-connected-name.md` 1): box A, 10 mm at the origin, and boxes B
+/// and C, [3, 5] x [-3, 3] x [-1, 1] turned +30 and -30 degrees about the vertical axis through
+/// V = (5, 0, 0). A's edge y = 0, z = 0 leaves B and C's union at V, where B's and C's turned
+/// x = 5 faces meet it: the piece [5, 10] of the edge has two faces from other inputs at V.
+std::array<TopoShape, 3> splitEdgeInputs()
+{
+    auto turned = [](double degrees, long tag) {
+        gp_Trsf turn;
+        turn.SetRotation(gp_Ax1(gp_Pnt(5, 0, 0), gp_Dir(0, 0, 1)), degrees * std::numbers::pi / 180);
+        const TopoDS_Shape box = BRepPrimAPI_MakeBox(gp_Pnt(3, -3, -1), 2.0, 6.0, 2.0).Shape();
+        return TopoShape(
+            App::HistoryAlgorithm::V2,
+            BRepBuilderAPI_Transform(box, turn, Standard_True).Shape(),
+            tag
+        );
+    };
+    return {
+        TopoShape(App::HistoryAlgorithm::V2, BRepPrimAPI_MakeBox(10.0, 10.0, 10.0).Shape(), 1L),
+        turned(30, 2L),
+        turned(-30, 3L)
+    };
+}
+
+/// The names of the pieces of A's edge y = 0, z = 0 in `shape`, by their centre's x.
+std::vector<std::string> splitEdgePieceNames(const TopoShape& shape)
+{
+    std::vector<std::pair<double, std::string>> found;
+    int index = 0;
+    for (const auto& edge : shape.getSubShapes(TopAbs_EDGE)) {
+        ++index;
+        GProp_GProps props;
+        BRepGProp::LinearProperties(edge, props);
+        const gp_Pnt center = props.CentreOfMass();
+        if (std::abs(center.Y()) < 1e-6 && std::abs(center.Z()) < 1e-6) {
+            found.emplace_back(
+                center.X(),
+                shape.getMappedName(IndexedName::fromConst("Edge", index)).toString()
+            );
+        }
+    }
+    std::sort(found.begin(), found.end());
+    std::vector<std::string> names;
+    for (const auto& entry : found) {
+        names.push_back(entry.second);
+    }
+    return names;
+}
+}  // namespace
+
+TEST_F(TopoShapeExpansionTest, makeShapeWithElementMapSplitEdgeIgnoresFaceOrderV2)
+{
+    // Arrange
+    //   A fused with B and C, then named again with every container's children reversed (the
+    //   result's faces in another order)
+    const auto [a, b, c] = splitEdgeInputs();
+    BRepAlgoAPI_Fuse fuse;
+    TopTools_ListOfShape arguments;
+    arguments.Append(a.getShape());
+    TopTools_ListOfShape tools;
+    tools.Append(b.getShape());
+    tools.Append(c.getShape());
+    fuse.SetArguments(arguments);
+    fuse.SetTools(tools);
+    fuse.Build();
+    ASSERT_TRUE(fuse.IsDone());
+
+    // Act
+    auto [original, copy] = nameWithReversedChildren(
+        fuse.Shape(),
+        MapperMaker(fuse),
+        {a, b, c},
+        OpCodes::Fuse,
+        Reversed::All
+    );
+
+    // Assert
+    //   the edge's two pieces are told apart by Connected Names, and each takes the smallest of
+    //   the faces from other inputs at its end by name, whatever the result's face order (ops#431)
+    EXPECT_TRUE(allElementsNamed(original));
+    EXPECT_GT(movedElements(original, copy), 0);
+    EXPECT_EQ(namesDiffer(copy, original), "");
+    const auto pieces = splitEdgePieceNames(original);
+    ASSERT_EQ(pieces.size(), 2);
+    for (const auto& name : pieces) {
+        const DecodedMappedSection section = lastSectionOf(name);
+        EXPECT_TRUE(section.hasMapperFlag(MAPPER_FLAG_MODIFIED)) << name;
+        EXPECT_FALSE(section.connectedElements.empty()) << name;
+        EXPECT_FALSE(section.hasMapperFlag(MAPPER_FLAG_ORDERED)) << name;
+    }
+}
+
+TEST_F(TopoShapeExpansionTest, makeElementFuseSplitEdgeIgnoresInputOrderV2)
+{
+    // Arrange
+    //   ops#431's model fused as A, B, C and as A, C, B (a MultiFuse's Shapes reordered)
+    const auto [a, b, c] = splitEdgeInputs();
+    TopoShape fused(App::HistoryAlgorithm::V2, 4L);
+    TopoShape reordered(App::HistoryAlgorithm::V2, 4L);
+
+    // Act
+    fused.makeElementFuse({a, b, c});
+    reordered.makeElementFuse({a, c, b});
+
+    // Assert
+    //   the edge's pieces keep their names: each piece's Connected Name at V is the smaller of
+    //   B's and C's faces by name, not the one the result lists first
+    const auto pieces = splitEdgePieceNames(fused);
+    ASSERT_EQ(pieces.size(), 2);
+    EXPECT_EQ(splitEdgePieceNames(reordered), pieces);
+}
+
+TEST_F(TopoShapeExpansionTest, genericShapeMapperFallbackFollowsFaceOrderV2)
+{
+    // Arrange
+    //   two 10 mm boxes side by side, fused, and refined: the block's top face merges the boxes'
+    //   top faces, and shares no two edges with one of them (its long edges are merged too), so
+    //   the mapper falls back on geometry: both top faces lie in its plane. It took the first in
+    //   an unordered_map's order, which follows hashes (H1, `naming-class-A.md` M2 (f)); it takes
+    //   the first in the source's order of its faces. The source is also stored with its
+    //   children in reverse order, which reverses its faces' order
+    TopoShape a(App::HistoryAlgorithm::V2, BRepPrimAPI_MakeBox(10.0, 10.0, 10.0).Shape(), 1L);
+    TopoShape b(
+        App::HistoryAlgorithm::V2,
+        BRepPrimAPI_MakeBox(gp_Pnt(10.0, 0.0, 0.0), 10.0, 10.0, 10.0).Shape(),
+        2L
+    );
+    TopoShape fused(App::HistoryAlgorithm::V2, 3L);
+    fused.makeElementFuse({a, b});
+    auto onTop = [](const TopoDS_Shape& face) {
+        GProp_GProps props;
+        BRepGProp::SurfaceProperties(face, props);
+        return std::abs(props.CentreOfMass().Z() - 10) < 1e-6;
+    };
+
+    for (const bool reversed : {false, true}) {
+        SCOPED_TRACE(reversed);
+        TopTools_DataMapOfShapeShape copies;
+        const TopoDS_Shape source = reversed
+            ? reverseChildOrder(fused.getShape(), Reversed::All, TopTools_MapOfShape(), copies)
+            : fused.getShape();
+        const TopoShape src(source);
+        BRepBuilderAPI_RefineModel refine(source);
+        ASSERT_TRUE(refine.IsDone());
+
+        // Act
+        GenericShapeMapper mapper;
+        mapper.init(src, refine.Shape());
+
+        // Assert
+        //   the merged top face is generated from the source's first top face, not the other
+        TopoDS_Shape merged;
+        for (const auto& face : TopoShape(refine.Shape()).getSubShapes(TopAbs_FACE)) {
+            if (onTop(face)) {
+                merged = face;
+            }
+        }
+        ASSERT_FALSE(merged.IsNull());
+        std::vector<TopoDS_Shape> tops;
+        for (const auto& face : src.getSubShapes(TopAbs_FACE)) {
+            if (onTop(face)) {
+                tops.push_back(face);
+            }
+        }
+        ASSERT_EQ(tops.size(), 2);
+        auto generates = [&mapper, &merged](const TopoDS_Shape& face) {
+            const auto& generated = mapper.generated(face);
+            return std::any_of(generated.begin(), generated.end(), [&merged](const TopoDS_Shape& g) {
+                return g.IsSame(merged);
+            });
+        };
+        EXPECT_TRUE(generates(tops[0]));
+        EXPECT_FALSE(generates(tops[1]));
+    }
+}
+
+TEST_F(TopoShapeExpansionTest, makeElementCutNamesTwinLinesByTheirPlaceV2)
+{
+    // Arrange
+    //   a 10 mm box cut by a cylinder of radius 1 along Z from z = 2 to 8, centred at (5, 0.3): it
+    //   breaks out of the box's front face (y = 0) in two vertical lines at x = 5 -+ 0.954, both
+    //   generated from the front face and the cylinder's face, and ending at vertexes generated
+    //   from the front face and the cylinder's circles. With the face first among their sources,
+    //   the vertexes have no side (a crossing's side is told on the edge first: the class note's
+    //   asymmetry), so the lines are told apart by nothing of their own: twins
+    TopoShape box(App::HistoryAlgorithm::V2, BRepPrimAPI_MakeBox(10.0, 10.0, 10.0).Shape(), 1L);
+    TopoShape cylinder(
+        App::HistoryAlgorithm::V2,
+        BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(5.0, 0.3, 2.0), gp_Dir(0, 0, 1)), 1.0, 6.0).Shape(),
+        2L
+    );
+    BRepAlgoAPI_Cut cut(box.getShape(), cylinder.getShape());
+    ASSERT_TRUE(cut.IsDone());
+
+    // Act
+    auto [original, copy] = nameWithReversedChildren(
+        cut.Shape(),
+        MapperMaker(cut),
+        {box, cylinder},
+        OpCodes::Cut,
+        Reversed::All
+    );
+
+    // Assert
+    //   the lines are 0of2 and 1of2 in DuplicateCount (the size rule), Index 0, with ORD; and so
+    //   are the vertexes at each end
+    EXPECT_TRUE(allElementsNamed(original));
+    std::set<std::string> places;
+    int index = 0;
+    for (const auto& edge : original.getSubShapes(TopAbs_EDGE)) {
+        ++index;
+        GProp_GProps props;
+        BRepGProp::LinearProperties(edge, props);
+        const gp_Pnt center = props.CentreOfMass();
+        if (std::abs(center.Y()) < 1e-6 && std::abs(center.Z() - 5) < 1e-6) {
+            const DecodedMappedSection section
+                = lastSection(original.getMappedName(IndexedName::fromConst("Edge", index)));
+            EXPECT_TRUE(section.hasMapperFlag(MAPPER_FLAG_GENERATED));
+            EXPECT_TRUE(section.hasMapperFlag(MAPPER_FLAG_ORDERED));
+            EXPECT_EQ(section.index, "0");
+            places.insert(section.duplicateCount);
+        }
+    }
+    EXPECT_EQ(places, (std::set<std::string> {"0of2", "1of2"}));
+    for (const double z : {2.0, 8.0}) {
+        const auto sections = vertexSectionsWhere(original, [z](const gp_Pnt& p) {
+            return std::abs(p.Y()) < 1e-6 && std::abs(p.Z() - z) < 1e-6;
+        });
+        ASSERT_EQ(sections.size(), 2);
+        std::set<std::string> vertexPlaces;
+        for (const auto& section : sections) {
+            EXPECT_TRUE(section.hasMapperFlag(MAPPER_FLAG_ORDERED));
+            EXPECT_EQ(section.index, "0");
+            vertexPlaces.insert(section.duplicateCount);
+        }
+        EXPECT_EQ(vertexPlaces, (std::set<std::string> {"0of2", "1of2"}));
+    }
+    //   the places follow the twins' canonical order, not the result's: the same names at the
+    //   same places when the result stores its children in reverse order
+    EXPECT_GT(movedElements(original, copy), 0);
+    EXPECT_EQ(namesDiffer(copy, original), "");
+}
+
+TEST_F(TopoShapeExpansionTest, makeElementCutNamesTwinPiecesOfASplitFaceByTheirPlaceV2)
+{
+    // Arrange
+    //   a cylinder (radius 5, height 10, its seam at +X) cut by two slots through its wall along
+    //   its axis, at +X (taking the seam) and at -X: the side face falls into two halves, and each
+    //   rim circle into two arcs. A half's edges are the arcs, whose names both halves share, and
+    //   the slots' lines, which the cut generates: no Connected Name tells the halves apart. The
+    //   modified stage tells them apart by their place on the side face (twinOrder), with the
+    //   count
+    TopoShape cylinder(App::HistoryAlgorithm::V2, BRepPrimAPI_MakeCylinder(5.0, 10.0).Shape(), 1L);
+    TopoDS_Compound slots;
+    BRep_Builder builder;
+    builder.MakeCompound(slots);
+    builder.Add(slots, BRepPrimAPI_MakeBox(gp_Pnt(4.0, -0.5, -1.0), 2.0, 1.0, 12.0).Shape());
+    builder.Add(slots, BRepPrimAPI_MakeBox(gp_Pnt(-6.0, -0.5, -1.0), 2.0, 1.0, 12.0).Shape());
+    TopoShape tool(App::HistoryAlgorithm::V2, slots, 2L);
+    BRepAlgoAPI_Cut cut(cylinder.getShape(), tool.getShape());
+    ASSERT_TRUE(cut.IsDone());
+
+    // Act
+    auto [original, copy] = nameWithReversedChildren(
+        cut.Shape(),
+        MapperMaker(cut),
+        {cylinder, tool},
+        OpCodes::Cut,
+        Reversed::All
+    );
+
+    // Assert
+    //   the halves are MOD, Index 0, 0of2 and 1of2 in DuplicateCount, with ORD
+    EXPECT_TRUE(allElementsNamed(original));
+    std::set<std::string> places;
+    int index = 0;
+    for (const auto& face : original.getSubShapes(TopAbs_FACE)) {
+        ++index;
+        if (BRepAdaptor_Surface(TopoDS::Face(face)).GetType() != GeomAbs_Cylinder) {
+            continue;
+        }
+        const DecodedMappedSection section
+            = lastSection(original.getMappedName(IndexedName::fromConst("Face", index)));
+        EXPECT_TRUE(section.hasMapperFlag(MAPPER_FLAG_MODIFIED));
+        EXPECT_TRUE(section.hasMapperFlag(MAPPER_FLAG_ORDERED));
+        EXPECT_EQ(section.index, "0");
+        EXPECT_TRUE(section.connectedElements.empty());
+        places.insert(section.duplicateCount);
+    }
+    EXPECT_EQ(places, (std::set<std::string> {"0of2", "1of2"}));
+    EXPECT_GT(movedElements(original, copy), 0);
+    EXPECT_EQ(namesDiffer(copy, original), "");
 }
 
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)

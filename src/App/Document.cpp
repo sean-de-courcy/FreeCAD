@@ -153,9 +153,12 @@ namespace
 // piece by the up-to face and edges it lies on and ends at, and by its place along the edge among
 // how many there are (PRJ,MOD,ORD), where the pieces were told apart by a counter in the
 // splitter's order.
-// 10: ops#468, a vertex generated where an edge crosses a face is named by the side of the face
-// the edge goes to there (`in`, `out`), not by a counter alone, so a name doesn't pass to the
-// other crossing when an edit changes how many there are.
+// 10: ops#468 and class A's size rule (`naming-class-A.md` M2): a vertex generated where an edge
+// crosses a face is named by the side of the face the edge goes to there (`in`, `out`, in Index,
+// with ORD), not by a counter; twins told apart by their place carry it with their count,
+// `<k>of<n>` in DuplicateCount, in one canonical order, with ORD (the generated, modified and
+// projected stages; the fallback lists with ORD only where their order is no key); a split
+// edge's piece takes the smallest named face at its vertex, counted by name (ops#431).
 constexpr int ForkNamingRevision = 10;
 
 // The `.N<n>` of the element map version: the form interned names are saved in (ops#6). 2: the

@@ -60,6 +60,25 @@ TEST_F(ElementNamingUtilsTest, findElementName)
     EXPECT_STREQ(name4, "Edge4");
 }
 
+TEST_F(ElementNamingUtilsTest, isRoleValue)
+{
+    // The roles are the named set (ops#468, naming-class-A.md 4.1), tested by value
+    EXPECT_TRUE(Data::isRoleValue(Data::ROLE_CROSSING_IN));
+    EXPECT_TRUE(Data::isRoleValue(Data::ROLE_CROSSING_OUT));
+    EXPECT_TRUE(Data::isRoleValue("in"));
+    EXPECT_TRUE(Data::isRoleValue("out"));
+
+    // Never a counter, a twin place, a pattern instance's number, or another word
+    EXPECT_FALSE(Data::isRoleValue("0"));
+    EXPECT_FALSE(Data::isRoleValue("1"));
+    EXPECT_FALSE(Data::isRoleValue("0of2"));
+    EXPECT_FALSE(Data::isRoleValue("in0of2"));
+    EXPECT_FALSE(Data::isRoleValue("_"));
+    EXPECT_FALSE(Data::isRoleValue(""));
+    EXPECT_FALSE(Data::isRoleValue("IN"));
+    EXPECT_FALSE(Data::isRoleValue("inside"));
+}
+
 TEST_F(ElementNamingUtilsTest, indexOfElement)
 {
     // Valid cases

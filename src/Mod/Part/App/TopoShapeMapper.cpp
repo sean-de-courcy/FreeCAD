@@ -221,16 +221,27 @@ void GenericShapeMapper::init(const TopoShape& src, const TopoDS_Shape& dst)
             continue;
         }
 
-        // if no face matches, try search by geometry surface
+        // if no face matches, try search by geometry surface: the faces met above, in the
+        // source's order of its faces, not the map's, which follows hashes (I-N1)
         std::unique_ptr<Geometry> g(Geometry::fromShape(dstFace));
         if (!g) {
             continue;
         }
 
-        for (auto& v : map) {
-            std::unique_ptr<Geometry> g2(Geometry::fromShape(v.first));
+        const int faces = src.countSubShapes(TopAbs_FACE);
+        for (int index = 1; index <= faces; ++index) {
+            const TopoDS_Shape indexed = src.getSubShape(TopAbs_FACE, index);
+            // The face as the map holds it; the search's result doesn't depend on the map's order
+            auto met = std::find_if(map.begin(), map.end(), [&indexed](const auto& entry) {
+                return entry.first.IsSame(indexed);
+            });
+            if (met == map.end()) {
+                continue;
+            }
+            const TopoDS_Shape& face = met->first;
+            std::unique_ptr<Geometry> g2(Geometry::fromShape(face));
             if (g2 && g2->isSame(*g, 1e-7, 1e-12)) {
-                this->insert(MappingStatus::Generated, v.first, dstFace);
+                this->insert(MappingStatus::Generated, face, dstFace);
                 break;
             }
         }
