@@ -290,6 +290,11 @@ for _spine, _transition in [(s, t) for s in ("L", "Z", "U") for t in ("Right cor
         },
     )
 
+SWEEP_END_SWAPS = {
+    "L": ("p0_e0", "p0_f0", "p2_e1", "p2_f0"),
+    "Z": ("p0_e0", "p0_f0", "p3_e0", "p3_f0"),
+}
+
 for _spine in ("L", "Z"):
     _name = f"PartSweep{_spine}ProfileTurnedOver"
     globals()[_name] = type(
@@ -301,8 +306,9 @@ for _spine in ("L", "Z"):
             "abstract": False,
             "DRAW": SPINES[_spine],
             "REFS": refNames(len(SPINES[_spine]) + 1),
-            # a turned-over Sweep's ends swap names silently: a known silent case (decision 108)
-            "ACCEPTED": {f"{r}|V2s": "decision 108" for r in refNames(len(SPINES[_spine]) + 1)},
+            # a turned-over Sweep's ends swap names silently, a known silent case (decision 108):
+            # accepted on the end references that do so on integration 69d24e907a
+            "ACCEPTED": {f"{r}|V2s": "decision 108" for r in SWEEP_END_SWAPS[_spine]},
         },
     )
 

@@ -26,7 +26,8 @@ at one degree, nearly) by the draft path, which names its caps differently from 
 
 Rows ported:
 - `inboxB|PadTaperSwitchKeepsTheTopRimArc_topRim`: `PadTaperSwitchKeepsTheTopRimArc` (the
-  attacker's case from `corpus/inbox/B/taper_path.py`, as written but for its tags), and two
+  attacker's case from `corpus/inbox/B/taper_path.py`, but for its tags and its hole sketch turned
+  by -90 degrees about Z, see Models), and two
   variants of its model: `PadTaperSwitchTinyKeepsTheTopRimArc` (TaperAngle 1e-9, the same solid:
   `work/501/taper.py`) and `PadTaperSwitchKeepsTheTopRimArcOfABlindHole` (a blind hole, whose
   top rim arc is the only one: `work/501-review/taper_blind.py`).
@@ -198,12 +199,16 @@ class PadTaperSwitchTinyKeepsTheTopRimArc(PadTaperSwitchKeepsTheTopRimArc):
     """The same, with TaperAngle 1e-9: the solid is unchanged, the draft path alone differs
     (`work/501/taper.py`)."""
 
+    FOUND_BY = "port"
+
     TAPER = 1e-9
 
 
 class PadTaperSwitchKeepsTheTopRimArcOfABlindHole(PadTaperSwitchKeepsTheTopRimArc):
     """The same, with a blind hole (the Pocket 3 deep from the top, so the notch has no bottom rim
     arc): the top rim arc is the only one (`work/501-review/taper_blind.py`)."""
+
+    FOUND_BY = "port"
 
     BLIND = True
 

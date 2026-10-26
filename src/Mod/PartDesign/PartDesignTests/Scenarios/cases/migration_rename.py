@@ -191,6 +191,12 @@ class Migrates(Scenario):
     def editAfterOpen(self, doc):
         pass
 
+    def newDocument(self, suffix="", interned=None):
+        # The renames edit the saved map as text, where a plain document keeps its names (an
+        # interned one keeps them in its name table): InternNames stays off in every
+        # configuration, so the V2si oracle reruns the V2s case.
+        return super().newDocument(suffix, False if interned is None else interned)
+
     def cleanup(self):
         super().cleanup()
         shutil.rmtree(getattr(self, "folder", ""), ignore_errors=True)

@@ -22,10 +22,10 @@
 
 """Corpus cases (ops#504, class E; ops#306, row 157): a reorder after an insert at the bar.
 
-Ports `SolverOffReorder|base_link|V2` (`corpus/predicted/E.json`; the report column V2 is the
-solver-off configuration: run the module with `FREECAD_SCENARIO_CONFIGS=V2s,V2`, and the ledger
-holds both). The case also gives `SolverOffReorder|base_link|V2s`, which the design predicts
-correct (fork PRs 270 and 282).
+Ports `SolverOffReorder|base_link|V2` (`corpus/predicted/E.json`). V2, the solver-off
+configuration, is a report column (`notes/naming-system.md` 2.5 in the ops repo): run once at the
+class's exit with `FREECAD_SCENARIO_CONFIGS=V2s,V2`; the ledger holds V2s only until then. The case
+gives `SolverOffReorder|base_link|V2s`, which the design predicts correct (fork PRs 270 and 282).
 
 The model is ops#306's probe (`work/291/cyc/probe_cycle.py`): a 20 x 20 x 10 block, a hole (a
 pocket of a circle, radius 2, at (10, 10), 3 deep), and a fillet of the block's front top edge
@@ -39,8 +39,7 @@ moves the fillet above the block.
 The expectation (PLAN decisions 57 and 58, the user's option A): a reorder that changes a feature's
 base moves its Base link to the new base. Above the block the fillet's base is the block, and the
 front top edge is an edge of the block as well: the fillet holds it, on the block, and its result
-is the block with that edge filleted. A reorder the body refuses (the reorder is a loud no-op) leaves
-the model as it was; the fillet then stays on the hole."""
+is the block with that edge filleted."""
 
 from PartDesignTests.Scenarios.harness import (
     Filleted,
@@ -81,7 +80,6 @@ class SolverOffReorder(Scenario):
     REFS = ("base_link",)
     steps = ("reorder",)
 
-    refused = False
     baseOn = None
 
     def frontTopEdge(self):
@@ -90,7 +88,7 @@ class SolverOffReorder(Scenario):
     def target(self):
         """The object the Base must be on: where the insert at the bar left it before the reorder
         (the hole with the solver off, decision 48), the block after it."""
-        if self.stepName == "reorder" and not self.refused:
+        if self.stepName == "reorder":
             return "Block"
         return self.baseOn
 
@@ -118,7 +116,5 @@ class SolverOffReorder(Scenario):
         self.ref("base_link", fillet, "Base", self.frontTopEdge, Filleted(1), self.target)
 
     def reorder(self, doc):
-        try:
-            self.bodyObject.reorderObject([doc.Fillet], self.block, True)
-        except Exception:
-            self.refused = True
+        # a refused reorder raises: the case errors, never reads it as the model left alone
+        self.bodyObject.reorderObject([doc.Fillet], self.block, True)

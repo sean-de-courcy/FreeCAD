@@ -282,6 +282,8 @@ class PipeEndStaysWhenProfileCrossesTheMiddle(PipeEnds):
     then 16 -> -15, so the profile is nearer the other end: the names stay at the start
     (z = 16), the end at -15 keeps the projections."""
 
+    AXES = ("M3", "E4")
+
     POINTS = ((0, 15), (0, -15))
     PHASES = (
         {"named": 15, "other": -15},
@@ -307,6 +309,8 @@ class PipeEndStaysWhenFarEndShortenedToProfile(PipeEnds):
     """The profile at z = 0, the spine 30 -> -40 (the start is nearer), then shortened to
     30 -> 0, so the profile lies at the other end: the names stay on the unchanged cap at z = 30,
     and the cap at the profile (z = 0) has the projections."""
+
+    AXES = ("M3", "E4")
 
     POINTS = ((0, 30), (0, -40))
     PHASES = (
@@ -369,6 +373,8 @@ class PipeEndStaysWhenABaseFeatureIsInserted(PipeEnds):
     made the body's base feature: the names stay at z = 0 (the pipe's frame is then the base
     feature's)."""
 
+    AXES = ("M3", "E2")
+
     POINTS = ((0, 30), (0, 0))
     PROFILE_Z = 5
     PHASES = (
@@ -382,6 +388,8 @@ class TransformedL(PipeEnds):
     profile at z = 0): the corner at z = 30 is turned from START to OTHER degrees, across 90
     (the union of pieces, ops#370). The names stay at z = 0, the far end's (z = 30 + 20 cos a)
     keeps the projections."""
+
+    AXES = ("M3", "E4")
 
     abstract = True
     TRANSITION = "Transformed"
@@ -444,6 +452,8 @@ class MultisectionPipeEndFollowsExtendedSpine(PipeEnds):
     at z = 12 (more vertices than the profile); the spine's end is extended to z = 60: the start
     keeps the profile's names, the far cap (z = 60) is the section's projection (fork PR 337
     round 3: with distances summed over a section's vertices the ends swapped)."""
+
+    AXES = ("M3", "E4")
 
     REFS = ("named_cap", "other_cap", "named_edge", "named_vertex")
     HOLE = True
