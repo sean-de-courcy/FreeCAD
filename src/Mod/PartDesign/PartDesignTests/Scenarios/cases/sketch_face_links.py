@@ -36,6 +36,7 @@ found by a tier 3 guess and the sketch breaks) are scored by `TestSketchFaceLink
 (Sketcher): the harness reads a broken consumer under a guessed face as `guessed-wrong`, though
 the face is the right one and the break is loud."""
 
+import FreeCAD as App
 import Sketcher
 
 from PartDesignTests.Scenarios.harness import Outcome, Reopens, Scenario, Z, face
@@ -274,3 +275,27 @@ class ExternalFaceEdgeRemoved(FaceLinkEdit):
     def edit(self, doc):
         doc.Profile.delGeometry(1)
         doc.Profile.addGeometry(m.polyline([(20, 0), (25, 10), (20, 20)]), False)
+
+class ExternalFaceRedrawSidesNeighboursReversedFront(FaceLinkEdit):
+    """Round 1's review case (`sketch_face_links_r1.py`), the circle on the front line: the left
+    and right lines redrawn at x = -5 and 25 with the front and back lines left the other way
+    round. The face's edges come in another order (back, right, front, left): by position the
+    front line's circle went to the back line; place pairs it."""
+
+    AXES = ("M8", "E2")
+    FOUND_BY = "review pr384-r1"
+    REFS = ("circle_on_y0",)
+    on = ("y", 0)
+    after = ("y", 0)
+
+    def edit(self, doc):
+        doc.Profile.delGeometries([1, 3])  # 0: front, 1: back
+        geometry = doc.Profile.Geometry
+        for index, start, end in ((0, (25, 0), (-5, 0)), (1, (-5, 20), (25, 20))):
+            line = geometry[index]
+            line.StartPoint = App.Vector(-777, -777, 0)  # away from both ends first
+            line.EndPoint = App.Vector(*end, 0)
+            line.StartPoint = App.Vector(*start, 0)
+        doc.Profile.Geometry = geometry
+        doc.Profile.addGeometry(m.polyline([(25, 0), (25, 20)]), False)
+        doc.Profile.addGeometry(m.polyline([(-5, 20), (-5, 0)]), False)

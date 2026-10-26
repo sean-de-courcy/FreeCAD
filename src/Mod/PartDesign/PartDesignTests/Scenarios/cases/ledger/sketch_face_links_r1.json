@@ -1,0 +1,9 @@
+{
+"run": {"cases": 4, "dirty": false, "platform": "win32", "sha": "96032969e55cdd2f3a721802b0c1335dd9a4dfab", "tier": "F", "time": "2026-10-26T20:24:52Z"},
+"entries": {
+"ExternalFaceRedrawSidesInPlaceFrontReversed|circle_on_x0|V2s": {"axes": ["M8", "E2", "E1"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r1", "issue": "ops#264", "tier": "F"},
+"ExternalFaceRedrawSidesInPlaceNeighboursReversed|circle_on_x20|V2s": {"axes": ["M8", "E2", "E1"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r1", "issue": "ops#264", "tier": "F"},
+"ExternalFaceRedrawSidesNeighboursReversedLeft|circle_on_x0|V2s": {"axes": ["M8", "E2"], "classes": ["E"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr384-r1", "issue": "ops#264", "tier": "F"},
+"ExternalFaceRedrawSidesNeighboursReversed|circle_on_x20|V2s": {"axes": ["M8", "E2"], "classes": ["E"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr384-r1", "issue": "ops#264", "tier": "F"}
+}
+}
