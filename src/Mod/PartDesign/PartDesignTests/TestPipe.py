@@ -3653,6 +3653,34 @@ class TestBinormalPipe(unittest.TestCase):
             sliced += shape.common(Part.makeBox(40, 40, high - low, V(-20, -20, low))).Volume
         self.assertAlmostEqual(sliced, expected, delta=1e-4 * expected)
 
+    def testThreadHelixBuilds(self):
+        """A thread's spine: a helix of radius 10 and pitch 1, 300 turns in one edge, B = Z (its
+        axis), a 0.4 x 0.4 square on XY where it starts. The tangent is 89 degrees from B
+        everywhere and the section stays level, so every horizontal cut of the pipe is the
+        square turned about Z: area 0.16, volume 0.16 x 300 = 48. Before, it failed as a cusp
+        at z = 76.8, where the 2^14 halvings ran out and e, still turning steadily, came 105
+        degrees round between two places (review pr380-r3, "helix_budget")."""
+        turns = 300
+        spine = Part.Wire(Part.makeHelix(1, turns, 10).Edges)
+        sketch = models.sketch(
+            self.doc, "Profile", models.rectangle(9.8, -0.2, 10.2, 0.2), self.body
+        )
+        self.spine = models.feature(self.doc, "Spine", spine)
+        pipe = self.body.newObject("PartDesign::AdditivePipe", "Pipe")
+        pipe.Profile = sketch
+        pipe.Spine = (self.spine, [])
+        pipe.Mode = "Binormal"
+        pipe.Binormal = V(0, 0, 1)
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        self.assertNotIn("Warning", pipe.State)
+        shape = pipe.Shape
+        self.assertTrue(shape.isValid())
+        self.assertEqual(len(shape.Solids), 1)
+        cut = Part.Face(Part.Wire(shape.slice(V(0, 0, 1), 150.3)[0].Edges))
+        self.assertAlmostEqual(cut.Area, 0.16, delta=1e-5)
+        self.assertAlmostEqual(shape.Volume, 0.16 * turns, delta=1e-4 * 0.16 * turns)
+
     def testBinormalAlongStartFails(self):
         """B = Z, the spine's tangent where it starts: no section plane there. Before, Valid, 320."""
         pipe = self.pipe(self.arc(), V(0, 0, 1))

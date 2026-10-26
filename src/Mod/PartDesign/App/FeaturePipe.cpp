@@ -2810,7 +2810,10 @@ double cornerTwist(
 /// corner's own turn (cornerTwist), nearer half a turn than none, fails there (cornerFlip). A
 /// sharp corner of a spine in a plane square to B doesn't: e is the tangent. The places: 8 in
 /// each C2 piece of a curve (16 to 1024), each interval halved while e turns more than 2 degrees
-/// across it, 2^14 halvings in all; where they run out, e reversing still finds the cusp.
+/// across it, 2^18 halvings in all (about 1400 turns of e); past them, while e turns more than 45
+/// degrees, 2^20 more, so that e turning steadily round a long helix never reads as a reversal
+/// (ops#406 review pr380-r3: a 300-turn helix failed as a cusp), and e reversing still finds the
+/// cusp. Past those too, the places are 8 per C2 piece.
 /// BRepCheck passes all of these pipes.
 std::optional<BinormalFold> binormalFolds(
     const TopoDS_Wire& spine,
@@ -2896,8 +2899,13 @@ std::optional<BinormalFold> binormalFolds(
     Reach worst;
     std::optional<gp_Vec> previous = e0;
     int halvings = 0;
-    constexpr int budget = 1 << 14;
+    constexpr int budget = 1 << 18;
     constexpr double maxTurn = 2 * std::numbers::pi / 180;
+    // Past the budget, places still come at most this far apart in e, so that e turning steadily
+    // (a long helix) never reads as e reversing; up to a second budget
+    int coarseHalvings = 0;
+    constexpr int coarseBudget = 1 << 20;
+    constexpr double coarseTurn = std::numbers::pi / 4;
     constexpr double still = 1e-9;  // an edge-on end (s = 0 exactly) sweeps correctly
     for (size_t k = 0; k < edges.size(); ++k) {
         const TopoDS_Edge& edge = edges[k];
@@ -2949,9 +2957,11 @@ std::optional<BinormalFold> binormalFolds(
                 stack.pop_back();
                 const std::optional<gp_Vec> before = axisAt(from);
                 const std::optional<gp_Vec> after = axisAt(to);
-                const bool turns = !before || !after || before->Angle(*after) > maxTurn;
-                if (turns && !line && halvings < budget && to - from > 1e-12) {
-                    ++halvings;
+                const double turn = before && after ? before->Angle(*after) : std::numbers::pi;
+                const bool fine = turn > maxTurn && halvings < budget;
+                const bool coarse = turn > coarseTurn && coarseHalvings < coarseBudget;
+                if ((fine || coarse) && !line && to - from > 1e-12) {
+                    ++(fine ? halvings : coarseHalvings);
                     const double middle = (from + to) / 2;
                     stack.emplace_back(middle, to);
                     stack.emplace_back(from, middle);
