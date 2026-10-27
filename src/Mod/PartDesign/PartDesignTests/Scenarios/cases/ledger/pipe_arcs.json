@@ -1,5 +1,5 @@
 {
-"run": {"cases": 4, "dirty": false, "platform": "win32", "sha": "adce33dd2d9e9a8fd795697b1dbfe3b50006e06b", "tier": "F", "time": "2026-10-26T22:18:52Z"},
+"run": {"cases": 4, "dirty": false, "platform": "win32", "sha": "be22bfdf49835bf42dd55cc16aa20bc68e9da46b", "tier": "F", "time": "2026-10-27T12:46:53Z"},
 "entries": {
 "ClosedSpineLineDrawnOtherWay|bottom_edge|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "port", "issue": "ops#500", "tier": "F"},
 "ClosedSpineLineDrawnOtherWay|bottom_vertex|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "port", "issue": "ops#500", "tier": "F"},
