@@ -955,6 +955,21 @@ class TestSketchFaceLinkPairing(unittest.TestCase):
         self.doc.recompute()
         self.assertBreaks()
 
+    def testRedrawnAcrossTheFaceBreaks(self):
+        """Review pr384-r4s: the square moved 20 left and 1 up, its front line kept and the others
+        deleted and drawn again, the back line first: the new right line (x = 0) takes the deleted
+        left line's ID, and so its name, and lies on the left line's old place facing the other
+        way. The left line's arc around the front line empties while the other fills: loud, never
+        the new right line."""
+        self.constrainCircle("x", 0)
+        self.profile.delGeometries([1, 2, 3])
+        self.moveLines({0: ((0, 1), (-20, 1))})
+        self.addLines([(0, 21), (-20, 21)])
+        self.addLines([(0, 1), (0, 21)])
+        self.addLines([(-20, 21), (-20, 1)])
+        self.doc.recompute()
+        self.assertBreaks()
+
     def testMirroredKeepsTheSide(self):
         """The square mirrored about x = 10, its lines keeping their IDs: the right line's ID is
         now at x = 0 and the left line's at x = 20. Two edges on each other's old places; the
