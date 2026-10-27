@@ -281,10 +281,16 @@ static void carryPaired(std::vector<T>& values, const Rewrite& rewrite)
     values = std::move(carried);
 }
 
-static bool snapsBack(const GuessRecord& guess);
+// Whether a guess record names the original its reference was found for, which a later guess of
+// the reference inherits and a snap-back returns to: every kind but an index carry (a naming
+// migration's, ops#387: E5's to end)
+static bool namesItsOriginal(const GuessRecord& guess)
+{
+    return !guess.empty() && !guess.origName.empty() && guess.kind != "index";
+}
 
-// The original an old entry is a piece of: its `from`, or the original of a guess record that
-// snaps back. Empty for an entry that is no piece of another.
+// The original an old entry is a piece of: its `from`, or the original its guess record names.
+// Empty for an entry that is no piece of another.
 static std::string pieceOf(const std::vector<std::string>* froms,
                            const std::vector<ElementRecords>& records,
                            std::size_t j)
@@ -292,7 +298,7 @@ static std::string pieceOf(const std::vector<std::string>* froms,
     if (froms && j < froms->size() && !(*froms)[j].empty()) {
         return (*froms)[j];
     }
-    if (j < records.size() && snapsBack(records[j].guess)) {
+    if (j < records.size() && namesItsOriginal(records[j].guess)) {
         return records[j].guess.origName;
     }
     return {};
@@ -300,9 +306,11 @@ static std::string pieceOf(const std::vector<std::string>* froms,
 
 // Pairs a rewrite and carries the records and fingerprints of the references it keeps. A piece
 // kept without every other piece of the same original (\a oldFroms: `from`, PropertyLinkSub's)
-// loses its guess record where that snaps back: the record's original is the whole, and a
-// snap-back would widen the piece the user kept alone to the whole silently (the review of fork
-// PR 386, TrimmedPieceKeepsItsGuessRecord). Its re-target record stays.
+// loses its guess record: the record's original is the whole, and a snap-back would widen the
+// piece the user kept alone to the whole silently (the reviews of fork PR 386,
+// TrimmedPieceKeepsItsGuessRecord), as would a later guess of the piece, which inherits the
+// original from an `expanded` or `continued` record (FilletPieceTrimmedEarlyThenSplitMerged).
+// The piece is the user's exact pick then. Its re-target record stays.
 static Rewrite keepRewritten(const std::vector<App::DocumentObject*>& oldObjs,
                              const std::vector<std::string>& oldSubs,
                              const std::vector<PropertyLinkBase::ShadowSub>& oldShadows,
@@ -340,7 +348,7 @@ static Rewrite keepRewritten(const std::vector<App::DocumentObject*>& oldObjs,
     for (std::size_t i = 0; i < rewrite.pairs.size() && i < records.size(); ++i) {
         auto j = rewrite.pairs[i];
         if (j >= 0 && static_cast<std::size_t>(j) < originals.size()
-            && !originals[j].empty() && snapsBack(records[i].guess) && !keepsWhole(j)) {
+            && !originals[j].empty() && namesItsOriginal(records[i].guess) && !keepsWhole(j)) {
             records[i].guess = GuessRecord();
         }
     }

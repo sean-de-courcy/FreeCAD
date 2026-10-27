@@ -530,14 +530,10 @@ class TestNamingSolver(unittest.TestCase):
         fillet.Base = (rib, pieces[:1] + other)
         self.assertEqual(self.froms(doc), [None, None])
 
-    def testSetterEndsTheGuessOfAPieceKeptAlone(self):
-        """A piece kept without the other loses its guess record too, where that snaps back: its
-        original is the whole edge, and when the edge is whole again the record would widen the
-        piece to it silently (the review of fork PR 386, TrimmedPieceKeepsItsGuessRecord). The
-        fillet breaks instead, as it does without the record."""
-        # Arrange: two ribs on a 30 long block's front top edge; the second splits it, the
-        # first splits and joins it again, which leaves the right piece a tier 3 guess
-        doc = self.newDocument()
+    def twoRibsAcrossFillet(self, doc):
+        """A 30 long block (0..30 x 0..10 x 10) with two ribs (x 8..12 and x 20..24, y 3..7, 12
+        high) and a fillet (radius 1) on the block's front top edge. Returns (the second rib,
+        the fillet, the front top edge's predicate)."""
         body = models.body(doc)
         profile = models.sketch(doc, "Profile", models.rectangle(0, 0, 30, 10), body)
         models.pad(body, profile, 10)
@@ -551,6 +547,25 @@ class TestNamingSolver(unittest.TestCase):
         fillet.Base = (rib2, front.one(rib2.Shape))
         fillet.Radius = 1
         doc.recompute()
+        return rib2, fillet, front
+
+    def guesses(self, doc):
+        return [s.get("guess") for s in self.savedSubs(doc, "Fillet", "Base")]
+
+    def rightPiece(self, rib2, front):
+        right = [e for e in front.select(rib2.Shape) if rib2.Shape.getElement(e).CenterOfMass.x > 24]
+        self.assertEqual(len(right), 1)
+        return right
+
+    def testSetterEndsTheGuessOfAPieceKeptAlone(self):
+        """A piece kept without the other loses its guess record too: its original is the whole
+        edge, and when the edge is whole again the record would widen the piece to it silently
+        (the review of fork PR 386, TrimmedPieceKeepsItsGuessRecord). The fillet breaks instead,
+        as it does without the record."""
+        # Arrange: the second rib splits the edge, the first splits and joins it again, which
+        # leaves the right piece a tier 3 guess
+        doc = self.newDocument()
+        rib2, fillet, front = self.twoRibsAcrossFillet(doc)
         for sketch, rectangle in (
             (doc.RibSketch2, (20, -3, 24, 3)),
             (doc.RibSketch, (8, -3, 12, 3)),
@@ -558,22 +573,45 @@ class TestNamingSolver(unittest.TestCase):
         ):
             models.moveRectangle(sketch, *rectangle)
             doc.recompute()
-        right = [e for e in front.select(rib2.Shape) if rib2.Shape.getElement(e).CenterOfMass.x > 24]
-        self.assertEqual(len(right), 1)
+        right = self.rightPiece(rib2, front)
         self.assertEqual(sorted(fillet.Base[1]), sorted(front.select(rib2.Shape)))
-        def guesses():
-            return [s.get("guess") for s in self.savedSubs(doc, "Fillet", "Base")]
-
-        self.assertEqual(sorted(guesses()), ["expanded", "tier3"])
+        self.assertEqual(sorted(self.guesses(doc)), ["expanded", "tier3"])
         fillet.Base = (rib2, list(fillet.Base[1]))
-        self.assertEqual(sorted(guesses()), ["expanded", "tier3"])
+        self.assertEqual(sorted(self.guesses(doc)), ["expanded", "tier3"])
 
         # Act
         fillet.Base = (rib2, right)
 
         # Assert
-        self.assertEqual(guesses(), [None])
+        self.assertEqual(self.guesses(doc), [None])
         self.assertEqual(self.froms(doc), [None])
+        models.moveRectangle(doc.RibSketch2, 20, 3, 24, 7)
+        doc.recompute()
+        self.assertFalse(fillet.isValid())
+        self.assertNotEqual(fillet.Base[1], front.one(rib2.Shape))
+
+    def testSetterEndsTheExpandedRecordOfAPieceKeptAlone(self):
+        """A piece kept alone right after the split loses its `expanded` record too: a later
+        guess of the piece takes the record's original, the whole edge, and snaps back to it
+        when the edge is whole again (the review of fork PR 386 round 3,
+        FilletPieceTrimmedEarlyThenSplitMerged). The fillet breaks instead."""
+        # Arrange
+        doc = self.newDocument()
+        rib2, fillet, front = self.twoRibsAcrossFillet(doc)
+        models.moveRectangle(doc.RibSketch2, 20, -3, 24, 3)
+        doc.recompute()
+        right = self.rightPiece(rib2, front)
+        self.assertEqual(self.guesses(doc), ["expanded", "expanded"])
+
+        # Act
+        fillet.Base = (rib2, right)
+
+        # Assert
+        self.assertEqual(self.guesses(doc), [None])
+        self.assertEqual(self.froms(doc), [None])
+        for rectangle in ((8, -3, 12, 3), (8, 3, 12, 7)):
+            models.moveRectangle(doc.RibSketch, *rectangle)
+            doc.recompute()
         models.moveRectangle(doc.RibSketch2, 20, 3, 24, 7)
         doc.recompute()
         self.assertFalse(fillet.isValid())
