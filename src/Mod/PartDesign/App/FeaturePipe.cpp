@@ -3347,9 +3347,12 @@ std::vector<std::string> spineIdentity(
 )
 {
     std::vector<std::string> edges;
+    // A sub in the mapped style (`;g3;SKT.Edge3`, from a script) by its index part: with the
+    // index kept in it, a renumber changed the input (the pre-push review of round 4)
     auto add = [&](const std::string& sub) {
-        const Data::MappedName mapped = shape.getMappedName(Data::IndexedName(sub.c_str()));
-        edges.push_back(mapped ? mapped.toString() : sub);
+        const std::string indexed = Data::oldElementName(sub.c_str());
+        const Data::MappedName mapped = shape.getMappedName(Data::IndexedName(indexed.c_str()));
+        edges.push_back(mapped ? mapped.toString() : indexed);
     };
     if (subs.empty()) {
         for (int i = 1; i <= static_cast<int>(shape.countSubShapes(TopAbs_EDGE)); ++i) {
@@ -3882,6 +3885,8 @@ App::DocumentObjectExecReturn* Pipe::execute()
                 fill(inPipe);
                 // In the frame only for its own input: another spine elsewhere, the profile moved
                 // onto it, still decides as a new pipe (CC2)
+                // anchor: rung 4 (the stored places), in the body, or exactly in place in the
+                // pipe's stored frame
                 if (inFrame && sameInput(record.of, spineInput)
                     && !closedInPlace(storedVertices, storedMiddles, spineInOrder)) {
                     fill(*inFrame);
@@ -3903,6 +3908,7 @@ App::DocumentObjectExecReturn* Pipe::execute()
                 storedNames.clear();
             };
             // Of the same object, with an edge of the spine
+            // anchor: rung 4 (another sub-element set's record of the same object), warned
             const std::vector<std::string> spineEdgeNames = identityEdges(spineInput);
             auto sharesAnEdge = [&](const StartRecord& record) {
                 return !record.of.empty() && record.of.front() == spineInput.front()
@@ -4000,8 +4006,17 @@ App::DocumentObjectExecReturn* Pipe::execute()
             bool any = false;
             for (size_t k = 0; k < places.size(); ++k) {
                 const size_t at = places[k];
-                if (current[at] == storedNames[k]
-                    || std::ranges::find(storedNames, current[at]) == storedNames.end()) {
+                if (current[at] == storedNames[k]) {
+                    continue;
+                }
+                if (std::ranges::find(storedNames, current[at]) == storedNames.end()) {
+                    // The record keeps the line stored here while that line lies at another
+                    // place, renamed by it there: taking the new line's name, it renamed that
+                    // leg back to the plain name of this one on the next recompute with no edit
+                    // (the pre-push review of round 4, T1)
+                    if (std::ranges::find(current, storedNames[k]) != current.end()) {
+                        lineNames[at] = storedNames[k];
+                    }
                     continue;
                 }
                 const std::string key = hashed(

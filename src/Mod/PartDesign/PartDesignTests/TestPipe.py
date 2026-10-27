@@ -4095,6 +4095,31 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
         names = list(pipe.SpineStartNames)
         self.assertEqual([i for i in range(4) if names[i] != stored[i]], [1])
 
+    def testClosedRingRenamedLegStableAfterAnotherLegsLineIsRedrawn(self):
+        """The ring's top and bottom lines traded places, then the line now on top deleted and
+        drawn again (a new ID): the bottom leg keeps its renamed names on a recompute with no
+        edit. The record took the new line's name at the top's place, so the line stored there,
+        still at the bottom, was no longer stored anywhere, and the bottom leg went back to the
+        plain names the top leg had as built (the pre-push review of round 4, T1)."""
+        profile, pipe = self.ring(0, 4)
+        path = pipe.Spine[0]
+        geometry = path.Geometry
+        geometry[1].StartPoint, geometry[1].EndPoint = V(300, 0, 0), V(300, 5, 0)
+        geometry[3].StartPoint, geometry[3].EndPoint = V(400, 0, 0), V(400, 5, 0)
+        geometry[1].StartPoint, geometry[1].EndPoint = V(30, 0, 0), V(0, 0, 0)
+        geometry[3].StartPoint, geometry[3].EndPoint = V(0, 20, 0), V(30, 20, 0)
+        path.Geometry = geometry
+        self.doc.recompute()
+        path.addGeometry(Part.LineSegment(V(0, 20, 0), V(30, 20, 0)))
+        path.delGeometry(3)
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        redrawn = self.ringNames(pipe)
+        self.assertTrue(all("PLM" in name for name in redrawn["bottom"]), redrawn["bottom"])
+        pipe.touch()
+        self.doc.recompute()
+        self.assertEqual(self.ringNames(pipe), redrawn)
+
     def testClosedRingReorderedAndReversedRenamesNothing(self):
         """The profile slid along its leg (4 to 16), then the lines listed from the top right
         and the left one drawn the other way (round 2's `RingSlidThenReorderedAndReversed`):
