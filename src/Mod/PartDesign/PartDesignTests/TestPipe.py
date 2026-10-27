@@ -4203,8 +4203,9 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
                 self.doc.recompute()
                 self.assertEqual(self.profileNamed(pipe, profile), named)
                 self.assertNoneMovedSilently(pipe, volume, points, lambda place: True)
-                # The stored start, way, end and the other vertex and middle stay as they were
-                self.assertEqual(len(pipe.SpineStart), 5)
+                # The stored start, way, end, the other vertex and middle, and the pipe's frame
+                # stay as they were
+                self.assertEqual(len(pipe.SpineStart), 8)
                 for before, after in zip(stored, pipe.SpineStart):
                     self.assertLess((V(after) - before).Length, 1e-6, (stored, pipe.SpineStart))
 
@@ -4223,7 +4224,7 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
                 named = self.profileNamed(pipe, profile)
                 volume = pipe.Shape.Volume
                 stored = [V(v) for v in pipe.SpineStart]
-                self.assertEqual(len(stored), 5)
+                self.assertEqual(len(stored), 8)
                 self.assertGreater((stored[1] - stored[0]).Length, 1, stored)
                 points = self.attach(pipe)
                 for _ in range(2):
@@ -4569,6 +4570,173 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
         bottom = {key: where for key, where in keys.items() if where & {0, 3}}
         self.assertTrue(bottom)
         self.assertEqual({key: after.get(key) for key in bottom}, bottom)
+
+    LEGS = {"left": V(0, 0, 10), "top": V(15, 0, 20), "right": V(30, 0, 10), "bottom": V(15, 0, 0)}
+
+    def ringNames(self, pipe):
+        """The names of the ring's faces and edges, by where they lie: {leg or corner index: set}"""
+        result = {}
+        shape = pipe.Shape
+        for kind in ("Face", "Edge"):
+            for index, element in enumerate(elementsOf(shape, kind), 1):
+                place = element.CenterOfMass
+                corner = min(range(4), key=lambda i: (place - self.RING_CORNERS[i]).Length)
+                if (place - self.RING_CORNERS[corner]).Length < 2:
+                    where = corner
+                else:
+                    where = min(self.LEGS, key=lambda leg: (place - self.LEGS[leg]).Length)
+                result.setdefault(where, set()).add(firstName(shape, f"{kind}{index}"))
+        return result
+
+    def redrawRing(self, path, corners):
+        """The ring's four lines (IDs kept) moved onto the loop through `corners` (sketch
+        coordinates), line i from corners[i] to the next: first out of the way, so no end lands on
+        another line's end"""
+        geometry = path.Geometry
+        for i in range(4):
+            geometry[i].StartPoint = V(100 + 10 * i, 100, 0)
+            geometry[i].EndPoint = V(105 + 10 * i, 105, 0)
+        for i in range(4):
+            geometry[i].StartPoint = V(*corners[i], 0)
+            geometry[i].EndPoint = V(*corners[(i + 1) % 4], 0)
+        path.Geometry = geometry
+
+    def assertLegsRenamed(self, before, after, legs):
+        """`legs` named anew (no name they had, a `PLM` source), the other legs as they were"""
+        for leg in self.LEGS:
+            if leg in legs:
+                self.assertFalse(after[leg] & before[leg], (leg, after[leg] & before[leg]))
+                self.assertTrue(all("PLM" in name for name in after[leg]), (leg, after[leg]))
+            else:
+                self.assertEqual(after[leg], before[leg], leg)
+
+    RING = [(0, 0), (0, 20), (30, 20), (30, 0)]
+
+    def testClosedRingLineMovedToAnotherLegRenamesBothLegs(self):
+        """The ring's top and bottom lines traded places (each line's points moved onto the other
+        leg, IDs kept): the solid is the same, and each of the two legs is its place named by
+        another line. Their faces and lateral edges, and their corners' joints, are named anew
+        (a `PLM` source of the stored and the current line), the left and right legs as built,
+        and the record keeps the lines it stored. Named by their lines, the top leg's references
+        went to the bottom leg and back, silently (K4b's `RingLinesSwapped` and ring cases,
+        `notes\\naming-class-B.md` 9). The right leg then lengthened keeps the renamed names; the
+        lines traded back give the names as built."""
+        profile, pipe = self.ring(0, 4)
+        path = pipe.Spine[0]
+        volume = pipe.Shape.Volume
+        before = self.ringNames(pipe)
+        stored = list(pipe.SpineStartNames)
+        self.assertEqual(len(stored), 4)
+        geometry = path.Geometry
+        geometry[1].StartPoint, geometry[1].EndPoint = V(300, 0, 0), V(300, 5, 0)
+        geometry[3].StartPoint, geometry[3].EndPoint = V(400, 0, 0), V(400, 5, 0)
+        geometry[1].StartPoint, geometry[1].EndPoint = V(30, 0, 0), V(0, 0, 0)
+        geometry[3].StartPoint, geometry[3].EndPoint = V(0, 20, 0), V(30, 20, 0)
+        path.Geometry = geometry
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        self.assertAlmostEqual(pipe.Shape.Volume, volume, 6)
+        swapped = self.ringNames(pipe)
+        self.assertLegsRenamed(before, swapped, ("top", "bottom"))
+        # The joints at the four corners, each a corner of the top or bottom leg (the profile's
+        # own names, on the start's section, stay)
+        own = {firstName(profile.Shape, f"Edge{i}") for i in range(1, 5)}
+        for corner in range(4):
+            self.assertFalse((swapped[corner] & before[corner]) - own, corner)
+        self.assertEqual(list(pipe.SpineStartNames), stored)
+        # The right leg lengthened: the renamed names stay
+        geometry = path.Geometry
+        geometry[1].StartPoint = V(32, 0, 0)
+        geometry[2].StartPoint, geometry[2].EndPoint = V(32, 20, 0), V(32, 0, 0)
+        geometry[3].EndPoint = V(32, 20, 0)
+        path.Geometry = geometry
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        lengthened = self.ringNames(pipe)
+        for leg in ("top", "bottom", "left"):
+            self.assertEqual(lengthened[leg], swapped[leg], leg)
+        # Traded back, the right leg as built: the names as built
+        geometry = path.Geometry
+        geometry[1].StartPoint, geometry[1].EndPoint = V(300, 0, 0), V(300, 5, 0)
+        geometry[3].StartPoint, geometry[3].EndPoint = V(400, 0, 0), V(400, 5, 0)
+        geometry[2].StartPoint, geometry[2].EndPoint = V(30, 20, 0), V(30, 0, 0)
+        geometry[1].StartPoint, geometry[1].EndPoint = V(0, 20, 0), V(30, 20, 0)
+        geometry[3].StartPoint, geometry[3].EndPoint = V(30, 0, 0), V(0, 0, 0)
+        path.Geometry = geometry
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        self.assertEqual(self.ringNames(pipe), before)
+        self.assertEqual(list(pipe.SpineStartNames), stored)
+
+    def testClosedRingRedrawnFromAnotherStart(self):
+        """The ring redrawn from its top left corner, each line on the next leg (IDs kept: K4b's
+        `RingStartMoved`), and the profile slid along its leg (4 to 16): the solid is the same,
+        the stored start is kept, and every leg is renamed, since each place now holds another
+        place's line. Named by their lines, every reference went one leg on, silently."""
+        profile, pipe = self.ring(0, 4)
+        path = pipe.Spine[0]
+        volume = pipe.Shape.Volume
+        before = self.ringNames(pipe)
+        start = V(pipe.SpineStart[0])
+        self.redrawRing(path, self.RING[1:] + self.RING[:1])
+        profile.Placement = App.Placement(V(0, 0, 16), App.Rotation())
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        self.assertAlmostEqual(pipe.Shape.Volume, volume, 6)
+        self.assertLess((V(pipe.SpineStart[0]) - start).Length, 1e-9)
+        self.assertLegsRenamed(before, self.ringNames(pipe), tuple(self.LEGS))
+
+    def testClosedRingTurnedByItsSymmetryRenames(self):
+        """The ring redrawn from its opposite corner, each line on the opposite leg (K4b's
+        `RingStartMovedTwice`): the loop as drawn is the ring turned by its symmetry. Every leg
+        is renamed: the names don't follow the lines across (the symmetry's reading), nor stay
+        silently (the place's), since the two readings can't be told apart (decision 150)."""
+        profile, pipe = self.ring(0, 4)
+        path = pipe.Spine[0]
+        before = self.ringNames(pipe)
+        self.redrawRing(path, self.RING[2:] + self.RING[:2])
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        self.assertLegsRenamed(before, self.ringNames(pipe), tuple(self.LEGS))
+
+    def testClosedRingLineRedrawnIsNew(self):
+        """The ring's top line deleted and drawn again (drawn first, so it takes a new ID): the
+        top leg is named from the new line, without a `PLM` source; the record takes the new
+        line's name at the top's place; the other legs keep their names."""
+        profile, pipe = self.ring(0, 4)
+        path = pipe.Spine[0]
+        before = self.ringNames(pipe)
+        stored = list(pipe.SpineStartNames)
+        path.addGeometry(Part.LineSegment(V(0, 20, 0), V(30, 20, 0)))
+        path.delGeometry(1)
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        after = self.ringNames(pipe)
+        self.assertFalse(after["top"] & before["top"])
+        self.assertFalse(any("PLM" in name for name in after["top"]), after["top"])
+        for leg in ("left", "right", "bottom"):
+            self.assertEqual(after[leg], before[leg], leg)
+        names = list(pipe.SpineStartNames)
+        self.assertEqual([i for i in range(4) if names[i] != stored[i]], [1])
+
+    def testClosedRingReorderedAndReversedRenamesNothing(self):
+        """The profile slid along its leg (4 to 16), then the lines listed from the top right
+        and the left one drawn the other way (round 2's `RingSlidThenReorderedAndReversed`):
+        every place keeps its line, so no leg is renamed."""
+        profile, pipe = self.ring(0, 4)
+        path = pipe.Spine[0]
+        profile.Placement = App.Placement(V(0, 0, 16), App.Rotation())
+        self.doc.recompute()
+        before = self.ringNames(pipe)
+        geometry = path.Geometry
+        path.Geometry = geometry[2:] + geometry[:2]
+        drawnTheOtherWay(path, [2])
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        after = self.ringNames(pipe)
+        for leg in self.LEGS:
+            self.assertEqual(after[leg], before[leg], leg)
+        self.assertFalse(any("PLM" in name for names in after.values() for name in names))
 
     def testClosedSpineMovedKeepsItsStart(self):
         """The D moved down along Z (its sketch's placement), the profile left at z = 0: by 8, so

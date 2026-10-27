@@ -61,17 +61,23 @@ public:
     /// A closed spine of one profile (not Auxiliary) at the last successful recompute of it, in
     /// the body, 2n + 1 points for n edges: its start, its first edge's middle, whether its end
     /// carried the profile's names (1 or 0 in x), its other vertices in the sweep's order and
-    /// their edges' middles (ops#469). Kept while the spine is open or in another mode; read for
-    /// the input it was stored for, or where its points still lie on the spine
+    /// their edges' middles (ops#469); then the pipe's frame, its origin and the ends of its x and
+    /// y axes. Kept while the spine is open or in another mode; read for the input it was stored
+    /// for, or where its points still lie on the spine, in the body or in that frame
     App::PropertyVectorList SpineStart;
     /// The input SpineStart was stored for, as SpineEndsOf
     App::PropertyStringList SpineStartOf;
+    /// The mapped name of the line at each of SpineStart's places (its edges, the start's first):
+    /// a leg is its place, named by its line, and the two must agree (`notes\naming-class-B.md` 9)
+    App::PropertyStringList SpineStartNames;
     /// The records of SpineStart for the last earlier inputs (at most 3, the latest first), so a
     /// spine set back to one of them starts where it did: each the count of its points (in x),
     /// then its points
     App::PropertyVectorList EarlierSpineStarts;
     /// Their inputs, as SpineStartOf, each followed by an empty string
     App::PropertyStringList EarlierSpineStartsOf;
+    /// Their lines' names, as SpineStartNames, each record's followed by an empty string
+    App::PropertyStringList EarlierSpineStartNames;
 
     App::DocumentObjectExecReturn* execute() override;
     short mustExecute() const override;

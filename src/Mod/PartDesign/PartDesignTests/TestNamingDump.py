@@ -254,14 +254,15 @@ def modelPipeShell(doc):
 
 
 def modelPipeClosedAndUnion(doc):
-    """Two PartDesign Pipes of a square with a round hole, "Transformed". Along a closed D (a
+    """Three PartDesign Pipes, two of a square with a round hole, "Transformed". Along a closed D (a
     line up 10, then a 300 degree arc back): the sweep starts at the spine's vertex nearest the
     profile, and the corner there is the named start, keyed `start` too, so the two corners
     between the same two edges have their own names whichever way the lines are drawn
     (ops#469). Along a U turning 100 and then 20 degrees more: past 90 degrees, the union of two
     pieces, whose caps between them name their edges from the corner and the profile's element
     each copies, listed in the section's order (ops#479), the same in every process
-    (TestNamingSeeded)."""
+    (TestNamingSeeded). And a ring whose top and bottom lines traded places, its two legs renamed
+    (ops#469, the class B ruling of 10-27)."""
     xz = App.Placement(V(0, 0, 0), App.Rotation(V(1, 0, 0), 90))
     holed = models.rectangle(-1, -1, 1, 1) + [models.circle(0, 0, 0.4)]
     arc = Part.ArcOfCircle(V(0, 10, 0), V(-18.66025, 5, 0), V(0, 0, 0))
@@ -286,7 +287,26 @@ def modelPipeClosedAndUnion(doc):
     union.Profile = uprofile
     union.Spine = (upath, [])
     union.Transition = "Transformed"
-    return [closed, union]
+    # A ring of four lines, "Right corner", recomputed, then its top and bottom lines' points
+    # traded (IDs kept): the two legs whose line came from the other place are renamed through
+    # a `PLM` source, a hash of names, the same in every process (`notes\naming-class-B.md` 9)
+    ringBody = models.body(doc)
+    ring = [(0, 0), (0, 20), (30, 20), (30, 0)]
+    rpath = models.sketch(doc, "RingPath", models.polygon(ring), ringBody, placement=xz)
+    rprofile = models.sketch(doc, "RingProfile", models.rectangle(-1, -1, 1, 1), ringBody)
+    rprofile.Placement = App.Placement(V(0, 0, 4), App.Rotation())
+    traded = ringBody.newObject("PartDesign::AdditivePipe", "RingPipe")
+    traded.Profile = rprofile
+    traded.Spine = (rpath, [])
+    traded.Transition = "Right corner"
+    doc.recompute()
+    geometry = rpath.Geometry
+    for i, x in ((1, 300), (3, 400)):
+        geometry[i].StartPoint, geometry[i].EndPoint = V(x, 0, 0), V(x, 5, 0)
+    geometry[1].StartPoint, geometry[1].EndPoint = V(30, 0, 0), V(0, 0, 0)
+    geometry[3].StartPoint, geometry[3].EndPoint = V(0, 20, 0), V(30, 20, 0)
+    rpath.Geometry = geometry
+    return [closed, union, traded]
 
 
 def modelLoftRevolve(doc):

@@ -3674,21 +3674,46 @@ gp_Pnt middleOf(const TopoDS_Edge& edge)
 }
 
 /// \a edges, those of \a path in a new order and orientation, made a wire as \a wire with their
-/// names; null when it doesn't run through them in that order
+/// names, or with \a names[k] for the edge k where it is given (its vertices' names kept); null
+/// when it doesn't run through them in that order
 Part::TopoShape wireAlong(
     const Part::TopoShape& path,
     const std::vector<TopoDS_Edge>& edges,
-    Part::TopoShape wire
+    Part::TopoShape wire,
+    const std::vector<Data::MappedName>& names = {}
 )
 {
     std::vector<Part::TopoShape> named;
-    for (const TopoDS_Edge& edge : edges) {
-        const int index = path.findShape(edge);
+    for (size_t k = 0; k < edges.size(); ++k) {
+        const int index = path.findShape(edges[k]);
         if (index <= 0) {
             return {};
         }
         named.push_back(path.getSubTopoShape(TopAbs_EDGE, index));
-        named.back().setShape(edge, false);
+        named.back().setShape(edges[k], false);
+        if (k < names.size() && names[k]) {
+            // A new shape, with a map of its own (a sub-shape's may be the cache's): the edge's
+            // new name, and its vertices' names as they were
+            const Part::TopoShape& old = named.back();
+            Part::TopoShape renamed(edges[k], old.Tag, old.Hasher, old.getHistoryAlgorithm());
+            renamed.setElementName(Data::IndexedName::fromConst("Edge", 1), names[k], old.Tag);
+            for (int v = 1; v <= old.countSubShapes(TopAbs_VERTEX); ++v) {
+                const int at = renamed.findShape(old.getSubShape(TopAbs_VERTEX, v));
+                if (at <= 0) {
+                    continue;
+                }
+                for (const auto& [name, sids] :
+                     old.getElementMappedNames(Data::IndexedName::fromConst("Vertex", v))) {
+                    renamed.setElementName(
+                        Data::IndexedName::fromConst("Vertex", at),
+                        name,
+                        old.Tag,
+                        &sids
+                    );
+                }
+            }
+            named.back() = renamed;
+        }
     }
     wire.makeElementWires(named);
     if (wire.isNull() || wire.getShape().ShapeType() != TopAbs_WIRE) {
@@ -4104,6 +4129,21 @@ Pipe::Pipe()
         App::PropertyType(App::Prop_Output | App::Prop_Hidden),
         "The inputs EarlierSpineStarts was stored for, each followed by an empty string"
     );
+    ADD_PROPERTY_TYPE(
+        SpineStartNames,
+        (),
+        "Sweep",
+        App::PropertyType(App::Prop_Output | App::Prop_Hidden),
+        "The name of the line at each place of SpineStart: a leg whose line came from another "
+        "place is renamed (ops#469)"
+    );
+    ADD_PROPERTY_TYPE(
+        EarlierSpineStartNames,
+        (),
+        "Sweep",
+        App::PropertyType(App::Prop_Output | App::Prop_Hidden),
+        "SpineStartNames of EarlierSpineStarts' records, each followed by an empty string"
+    );
     Mode.setEnums(ModeEnums);
     Transition.setEnums(TransitionEnums);
     Transformation.setEnums(TransformEnums);
@@ -4189,47 +4229,105 @@ bool sameInput(const std::vector<std::string>& a, const std::vector<std::string>
     return (wholeA && wholeB) || identityEdges(a) == identityEdges(b);
 }
 
-/// A closed spine's stored start (SpineStart's form) and the input it was stored for
+/// A closed spine's stored start (SpineStart's form), the input it was stored for, and the names
+/// of the lines at its places (SpineStartNames; empty when not stored)
 struct StartRecord
 {
     std::vector<std::string> of;
     std::vector<Base::Vector3d> points;
+    std::vector<std::string> names;
 };
 
-/// The records of \a current (SpineStart, SpineStartOf) and of \a earlier (EarlierSpineStarts,
-/// EarlierSpineStartsOf), the latest first; none for an empty or malformed one
+/// The records of \a current (SpineStart, SpineStartOf, SpineStartNames) and of \a earlier
+/// (EarlierSpineStarts, EarlierSpineStartsOf, EarlierSpineStartNames), the latest first; none for
+/// an empty or malformed one, no names where those are malformed
 std::vector<StartRecord> readStartRecords(
     const App::PropertyVectorList& current,
     const App::PropertyStringList& currentOf,
+    const App::PropertyStringList& currentNames,
     const App::PropertyVectorList& earlier,
-    const App::PropertyStringList& earlierOf
+    const App::PropertyStringList& earlierOf,
+    const App::PropertyStringList& earlierNames
 )
 {
     std::vector<StartRecord> records;
     if (!current.getValues().empty()) {
-        records.push_back({currentOf.getValues(), current.getValues()});
+        records.push_back({currentOf.getValues(), current.getValues(), currentNames.getValues()});
     }
+    // The next of \a lists, each followed by an empty string, from \a from
+    auto next = [](const std::vector<std::string>& lists, size_t& from) {
+        const auto start = lists.begin() + static_cast<long>(std::min(from, lists.size()));
+        const auto end = std::ranges::find(start, lists.end(), "");
+        from = static_cast<size_t>(end - lists.begin()) + 1;
+        return end == lists.end() ? std::optional<std::vector<std::string>>()
+                                  : std::vector<std::string>(start, end);
+    };
     std::vector<StartRecord> before;
     const std::vector<Base::Vector3d>& points = earlier.getValues();
-    const std::vector<std::string>& inputs = earlierOf.getValues();
     size_t at = 0;
     size_t of = 0;
+    size_t named = 0;
     while (at < points.size()) {
         const auto count = static_cast<size_t>(std::lround(points[at].x));
-        const auto end = std::ranges::find(inputs.begin() + static_cast<long>(of), inputs.end(), "");
-        if (count == 0 || at + 1 + count > points.size() || end == inputs.end()) {
+        const std::optional<std::vector<std::string>> input = next(earlierOf.getValues(), of);
+        if (count == 0 || at + 1 + count > points.size() || !input) {
             return records;
         }
         before.push_back(
-            {{inputs.begin() + static_cast<long>(of), end},
+            {*input,
              {points.begin() + static_cast<long>(at + 1),
-              points.begin() + static_cast<long>(at + 1 + count)}}
+              points.begin() + static_cast<long>(at + 1 + count)},
+             next(earlierNames.getValues(), named).value_or(std::vector<std::string>())}
         );
         at += 1 + count;
-        of = static_cast<size_t>(end - inputs.begin()) + 1;
     }
     records.insert(records.end(), before.begin(), before.end());
     return records;
+}
+
+/// The places of a closed spine's stored record, \a vertices (the start first) and \a middles in
+/// its order, paired with \a edges (the spine's, in the sweep's order) as startNearest pairs them:
+/// from the start and way whose displacements differ least from one translation. For each place,
+/// the index of its edge; empty with another number of edges
+std::vector<size_t> placesOf(
+    const std::vector<gp_Pnt>& vertices,
+    const std::vector<gp_Pnt>& middles,
+    const std::vector<TopoDS_Edge>& edges
+)
+{
+    const size_t n = edges.size();
+    if (n == 0 || vertices.size() != n || middles.size() != n) {
+        return {};
+    }
+    std::vector<size_t> best;
+    double least = std::numeric_limits<double>::infinity();
+    for (size_t k = 0; k < n; ++k) {
+        for (const bool forward : {true, false}) {
+            std::vector<size_t> places;
+            std::vector<gp_Vec> moves;
+            for (size_t i = 0; i < n; ++i) {
+                const size_t at = forward ? (k + i) % n : (k + n - i) % n;
+                const size_t along = forward ? (k + i) % n : (k + 2 * n - 1 - i) % n;
+                moves.emplace_back(vertices[i], BRep_Tool::Pnt(TopExp::FirstVertex(edges[at], true)));
+                moves.emplace_back(middles[i], middleOf(edges[along]));
+                places.push_back(along);
+            }
+            gp_Vec mean;
+            for (const gp_Vec& move : moves) {
+                mean += move;
+            }
+            mean /= static_cast<double>(moves.size());
+            double sum = 0;
+            for (const gp_Vec& move : moves) {
+                sum += (move - mean).SquareMagnitude();
+            }
+            if (sum < least - Precision::Confusion()) {
+                least = sum;
+                best = places;
+            }
+        }
+    }
+    return best;
 }
 
 /// Whether \a stored, an open spine's stored ends, are \a ends, in either order
@@ -4557,34 +4655,79 @@ App::DocumentObjectExecReturn* Pipe::execute()
         std::vector<gp_Pnt> storedMiddles;
         std::optional<gp_Pnt> storedWay;
         std::optional<bool> storedAtEnd;
+        std::vector<std::string> storedNames;  // the lines at the stored places
         const std::vector<std::string> spineInput = spineIdentity(spine, shape, subedge);
-        const std::vector<StartRecord> startRecords
-            = readStartRecords(SpineStart, SpineStartOf, EarlierSpineStarts, EarlierSpineStartsOf);
+        const std::vector<StartRecord> startRecords = readStartRecords(
+            SpineStart,
+            SpineStartOf,
+            SpineStartNames,
+            EarlierSpineStarts,
+            EarlierSpineStartsOf,
+            EarlierSpineStartNames
+        );
         if (startStored) {
             const gp_Trsf inPipe = invObjLoc.Transformation();
-            // The stored points of \a record, in the pipe's frame; false for a malformed one
+            // The stored points of \a record, in the pipe's frame; false for a malformed one. The
+            // record ends with the pipe's frame at its recompute (its origin and the ends of its
+            // x and y axes, in the body): a loop not at its stored place in the body but at it in
+            // that frame, turned or moved with the profile (the whole model turned, K4b's
+            // `RingTurned`), is read in that frame for its own input. Read in the body, the turned
+            // ring's start went
+            // to the vertex a translation fit least badly, and the start's key and the legs' names
+            // with it (a rectangle turns onto itself four ways, so no fit tells them apart)
             auto read = [&](const StartRecord& record) {
-                const std::vector<Base::Vector3d>& stored = record.points;
+                std::vector<Base::Vector3d> stored = record.points;
+                std::optional<gp_Trsf> inFrame;
+                if (stored.size() >= 8 && stored.size() % 2 == 0) {
+                    auto point = [&](size_t i) {
+                        return gp_Pnt(stored[i].x, stored[i].y, stored[i].z);
+                    };
+                    const size_t f = stored.size() - 3;
+                    const gp_Vec x(point(f), point(f + 1));
+                    const gp_Vec y(point(f), point(f + 2));
+                    if (x.Crossed(y).Magnitude() > Precision::Confusion()) {
+                        gp_Trsf frame;
+                        frame.SetTransformation(gp_Ax3(point(f), gp_Dir(x.Crossed(y)), gp_Dir(x)));
+                        inFrame = frame;
+                    }
+                    stored.resize(f);
+                }
+                auto fill = [&](const gp_Trsf& to) {
+                    auto in = [&](size_t i) {
+                        return gp_Pnt(stored[i].x, stored[i].y, stored[i].z).Transformed(to);
+                    };
+                    const size_t count = (stored.size() - 1) / 2;
+                    storedVertices = {in(0)};
+                    storedMiddles = {in(1)};
+                    storedWay = in(1);
+                    for (size_t i = 1; i < count; ++i) {
+                        storedVertices.push_back(in(2 + i));
+                    }
+                    for (size_t i = 1; i < count; ++i) {
+                        storedMiddles.push_back(in(1 + count + i));
+                    }
+                };
                 storedVertices.clear();
                 storedMiddles.clear();
                 storedWay.reset();
                 storedAtEnd.reset();
+                storedNames.clear();
                 if (stored.size() < 5 || stored.size() % 2 == 0) {
                     return false;
                 }
-                auto inThePipe = [&](size_t i) {
-                    return gp_Pnt(stored[i].x, stored[i].y, stored[i].z).Transformed(inPipe);
-                };
-                const size_t count = (stored.size() - 1) / 2;
-                storedVertices.push_back(inThePipe(0));
-                storedMiddles.push_back(inThePipe(1));
-                storedWay = inThePipe(1);
-                storedAtEnd = stored[2].x > 0.5;
-                for (size_t i = 1; i < count; ++i) {
-                    storedVertices.push_back(inThePipe(2 + i));
+                fill(inPipe);
+                // In the frame only for its own input: another spine elsewhere, the profile moved
+                // onto it, still decides as a new pipe (CC2)
+                if (inFrame && sameInput(record.of, spineInput)
+                    && !closedInPlace(storedVertices, storedMiddles, spineInOrder)) {
+                    fill(*inFrame);
+                    if (!closedInPlace(storedVertices, storedMiddles, spineInOrder)) {
+                        fill(inPipe);
+                    }
                 }
-                for (size_t i = 1; i < count; ++i) {
-                    storedMiddles.push_back(inThePipe(1 + count + i));
+                storedAtEnd = stored[2].x > 0.5;
+                if (record.names.size() == (stored.size() - 1) / 2) {
+                    storedNames = record.names;
                 }
                 return true;
             };
@@ -4593,6 +4736,7 @@ App::DocumentObjectExecReturn* Pipe::execute()
                 storedMiddles.clear();
                 storedWay.reset();
                 storedAtEnd.reset();
+                storedNames.clear();
             };
             // Of the same object, with an edge of the spine
             const std::vector<std::string> spineEdgeNames = identityEdges(spineInput);
@@ -4667,6 +4811,66 @@ App::DocumentObjectExecReturn* Pipe::execute()
                 ? std::nullopt
                 : planeNormal(pointsAlong(profileWire));
             path = profileFirst(path, normal, profileAtStart, makeTopoShape(false), storedWay);
+        }
+        // A closed spine's leg is its place, named by its line, and the two must agree
+        // (`notes\naming-class-B.md` 9, I-B7). The record holds the name of the line at each place
+        // (SpineStartNames). A line whose name another place held (a loop redrawn from another
+        // start, the other way round, or two lines' points traded) renames its leg, through a
+        // `PLM` section of the stored and the current name, so its faces, lateral edges and both
+        // corners' keys change together, and the stored name stays: the names follow their line
+        // to another place silently otherwise (K4b's ring cases, 21 of 24 references). A line no
+        // place held (drawn anew, a copy's) is named from itself, and the record takes its name.
+        // lineNames: what the record stores, in the sweep's order
+        // anchor: rung 1 (the line's name) checked against rung 4 (the stored places)
+        std::vector<std::string> lineNames;
+        if (startStored && makeTopoShape(false).getHistoryAlgorithm() == App::HistoryAlgorithm::V2) {
+            const std::vector<TopoDS_Edge> edges = edgesInOrder(TopoDS::Wire(path.getShape()));
+            for (const TopoDS_Edge& edge : edges) {
+                lineNames.push_back(firstName(path, edge));
+            }
+            const std::vector<std::string> current = lineNames;
+            const std::vector<size_t> places = storedNames.empty()
+                ? std::vector<size_t>()
+                : placesOf(storedVertices, storedMiddles, edges);
+            std::vector<Data::MappedName> renamed(edges.size());
+            bool any = false;
+            for (size_t k = 0; k < places.size(); ++k) {
+                const size_t at = places[k];
+                if (current[at] == storedNames[k]
+                    || std::ranges::find(storedNames, current[at]) == storedNames.end()) {
+                    continue;
+                }
+                const std::string key = hashed(
+                    field(withoutTags(storedNames[k])) + field(withoutTags(current[at]))
+                    + field("moved")
+                );
+                renamed[at] = Data::MappedName(
+                    Data::MappedName::makeEncodedSection(
+                        {key},
+                        {},
+                        static_cast<int>(lastTag(current[at])),
+                        "PLM",
+                        0,
+                        'E',
+                        0,
+                        {Data::MAPPER_FLAG_SOURCE}
+                    )
+                );
+                lineNames[at] = storedNames[k];
+                any = true;
+            }
+            if (any) {
+                const Part::TopoShape legsRenamed
+                    = wireAlong(path, edges, makeTopoShape(false), renamed);
+                if (legsRenamed.isNull()) {
+                    return new App::DocumentObjectExecReturn(QT_TRANSLATE_NOOP(
+                        "Exception",
+                        "Pipe: a leg of the closed spine whose line came from another place "
+                        "could not be renamed"
+                    ));
+                }
+                path = legsRenamed;
+            }
         }
         // The named start, the corner keyed `start` (makeCornerSource): where the sweep starts, at
         // the stored start or on a new pipe (or one whose Spine is another input) at the
@@ -4931,9 +5135,14 @@ App::DocumentObjectExecReturn* Pipe::execute()
             for (size_t k = 1; k < pathEdges.size(); ++k) {
                 points.push_back(middleOf(pathEdges[k]).Transformed(inBody));
             }
+            // and the pipe's frame, its origin and the ends of its x and y axes, in the body
+            for (const gp_Pnt& axis : {gp_Pnt(0, 0, 0), gp_Pnt(1, 0, 0), gp_Pnt(0, 1, 0)}) {
+                points.push_back(axis.Transformed(inBody));
+            }
             // The other inputs' records stay, the latest first, at most 3 (F1)
             std::vector<Base::Vector3d> earlier;
             std::vector<std::string> earlierOf;
+            std::vector<std::string> earlierNames;
             size_t kept = 0;
             for (const StartRecord& record : startRecords) {
                 if (sameInput(record.of, spineInput) || kept == 3) {
@@ -4943,6 +5152,8 @@ App::DocumentObjectExecReturn* Pipe::execute()
                 earlier.insert(earlier.end(), record.points.begin(), record.points.end());
                 earlierOf.insert(earlierOf.end(), record.of.begin(), record.of.end());
                 earlierOf.emplace_back();
+                earlierNames.insert(earlierNames.end(), record.names.begin(), record.names.end());
+                earlierNames.emplace_back();
                 ++kept;
             }
             if (EarlierSpineStarts.getValues() != earlier) {
@@ -4951,9 +5162,15 @@ App::DocumentObjectExecReturn* Pipe::execute()
             if (EarlierSpineStartsOf.getValues() != earlierOf) {
                 EarlierSpineStartsOf.setValues(earlierOf);
             }
+            if (EarlierSpineStartNames.getValues() != earlierNames) {
+                EarlierSpineStartNames.setValues(earlierNames);
+            }
             storeIn(SpineStart, points);
             if (SpineStartOf.getValues() != spineInput) {
                 SpineStartOf.setValues(spineInput);
+            }
+            if (SpineStartNames.getValues() != lineNames) {
+                SpineStartNames.setValues(lineNames);
             }
         };
 
