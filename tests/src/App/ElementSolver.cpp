@@ -9441,6 +9441,61 @@ TEST(SolveOwner, twinSurvivorGoesToGeometry)
         << outcome.evidence;
 }
 
+TEST(SolveOwner, twinSurvivorThenASiblingCirclesCrossingBreaks)
+{
+    // PR 379 round 2's cloud review (F1): another circle of the hole's sketch (g2 of sketch 7),
+    // cut by the same Pocket (tag 11), crosses the edge too, its left crossing (Vertex20) exactly
+    // at the saved place now. Tier 1's one survivor is the old element's twin (Vertex11), so
+    // geometry decides over the whole pool, and tier 3's nearest is Vertex20: it shares the old
+    // name's sketch and maker, so the origin gate passed it, and it was taken at the same place
+    // (the batch's quiet level). It lost the hole's circle (T1''s test): the entry breaks, the
+    // pick first, then the twin.
+    CrossedEdge c;
+    const auto cylB = generated({sketchEdge(2, 7)}, 11, "XTR", 'F');
+    const auto leftB = generated({c.edge1, cylB}, 11, "CUT", 'V');
+    auto input = c.input(c.hole1);
+    input.pool["Edge"].push_back(element("Edge3", {c.edge1}));
+    input.pool["Vertex"].push_back(element("Vertex11", {c.right}));
+    input.pool["Vertex"].push_back(element("Vertex20", {leftB}));
+    input.pool["Vertex"].push_back(
+        element("Vertex21", {generated({c.edge1, cylB}, 11, "CUT", 'V', 1)})
+    );
+    input.entries[0].fingerprint = CrossedEdge::saved(2);
+    measure(input,
+            {{"Vertex10", CrossedEdge::at(40)},
+             {"Vertex11", CrossedEdge::at(1.866)},
+             {"Vertex20", CrossedEdge::at(10.866)},
+             {"Vertex21", CrossedEdge::at(12.598)}},
+            nullptr);
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << outcome.evidence;
+    EXPECT_NE(outcome.evidence.find("; the pick Vertex20 has another source element"),
+              std::string::npos)
+        << outcome.evidence;
+    ASSERT_GE(outcome.candidates.size(), 2U);
+    EXPECT_EQ(outcome.candidates[0], "Vertex20");
+    EXPECT_EQ(outcome.candidates[1], "Vertex11");
+    EXPECT_EQ(outcome.candidateRoles[1], "structural");
+
+    //   R1 (round 1), the other hole cut by another Pocket (tag 12) from the same sketch: the
+    //   origin gate's maker test breaks it first (F2: the evidence R1's Python test gets)
+    const auto cylC = generated({sketchEdge(2, 7)}, 12, "XTR", 'F');
+    input.pool["Vertex"][input.pool["Vertex"].size() - 2].names = {
+        generated({c.edge1, cylC}, 12, "CUT", 'V')
+    };
+    input.pool["Vertex"].back().names = {generated({c.edge1, cylC}, 12, "CUT", 'V', 1)};
+    outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << outcome.evidence;
+    EXPECT_NE(outcome.evidence.find("; the pick Vertex20 has another maker"), std::string::npos)
+        << outcome.evidence;
+
+    //   T1''s test as the batch asks it: the sibling's crossing lost the hole's circle; the twin
+    //   and the seam vertex keep it (the seam is named after the hole's cylinder)
+    EXPECT_TRUE(Data::lostOldSources({leftB}, c.hole1));
+    EXPECT_FALSE(Data::lostOldSources({c.right}, c.hole1));
+    EXPECT_FALSE(Data::lostOldSources({c.seamNow}, c.hole1));
+}
+
 TEST(SolveOwner, twinAtTheSavedPlaceBreaks)
 {
     // CC1 (ops#503 round 2): the circle moved so that the left crossing lands exactly where the
@@ -9557,6 +9612,10 @@ TEST(SolveOwner, exactPlaceAnotherSourceIsWarned)
     //   the old edge's sketch
     EXPECT_FALSE(Data::mayBeQuietAtPlace({b.otherSketch}, b.oldEdge, true));
     EXPECT_TRUE(Data::mayBeQuietAtPlace({b.redrawn}, b.oldEdge, true));
+    //   the redraw lost the old line's ID (T1''s test): the batch keeps the quieter level only
+    //   while no element holds that ID (App::reboundInPlace())
+    EXPECT_TRUE(Data::lostOldSources({b.redrawn}, b.oldEdge));
+    EXPECT_FALSE(Data::lostOldSources({b.oldEdge}, b.oldEdge));
 }
 
 TEST(SolveOwner, faceGeneratorGoneDropsTheSurvivor)

@@ -533,10 +533,17 @@ otherOriginOf(const std::vector<std::string>& names, std::string_view oldName, b
  * (decision 97 D; App::reboundInPlace() asks it): not when one of \a names is \a oldName's twin
  * (isTwinName(): the twin-pick rule's picks are never quiet, ops#503 D1), nor when the element
  * lacks \a oldName's origin (otherOriginOf(): XP's source condition, I-S6). True for an empty
- * \a oldName.
+ * \a oldName. App::reboundInPlace() adds T1''s test (lostOldSources()).
  */
 AppExport bool
 mayBeQuietAtPlace(const std::vector<std::string>& names, std::string_view oldName, bool sameMaker);
+
+/** T1''s test (ops#173) for an element named \a names: true if it lost one of the sources of
+ * what \a oldName's maker made itself (a hole circle's own circle of its sketch, at the
+ * reference-ID level), as another circle of the hole's sketch, cut by the same pocket, did. False
+ * for a piece of the old element, and when \a oldName has no known sources.
+ */
+AppExport bool lostOldSources(const std::vector<std::string>& names, std::string_view oldName);
 
 /** A cheap necessary condition for atSamePlace(\a saved, the element's fingerprint), from the
  * element's \a intrinsic part (type, kind, direction, radii and a circle's centre, measured as

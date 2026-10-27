@@ -205,6 +205,27 @@ std::vector<Data::SolveInput::Element> poolOf(GeoFeature* geo,
     return pool;
 }
 
+// Whether an element of \a geo's shape, of any type, keeps \a oldName's sources (T1''s test,
+// Data::lostOldSources()): a hole's cylinder, made from the hole's circle in its sketch, while
+// the reference to one of its crossings went to another circle's.
+bool sourcesHeld(const GeoFeature* geo, const std::string& oldName)
+{
+    const PropertyComplexGeoData* prop = geo ? geo->getPropertyOfGeometry() : nullptr;
+    const Data::ComplexGeoData* data = prop ? prop->getComplexData() : nullptr;
+    if (!data) {
+        return false;
+    }
+    std::map<std::string, std::vector<std::string>> names;
+    for (const auto& mapped : data->getElementMap()) {
+        if (mapped.index) {
+            names[mapped.index.toString()].push_back(plainName(mapped.name.toString()));
+        }
+    }
+    return std::any_of(names.begin(), names.end(), [&](const auto& element) {
+        return !Data::lostOldSources(element.second, oldName);
+    });
+}
+
 ParameterGrp::handle solverParameters()
 {
     return App::GetApplication().GetParameterGroupByPath(
@@ -1869,16 +1890,28 @@ bool reboundInPlace(DocumentObject* obj, const std::string& sub, const GuessReco
         std::vector<std::string> names;
         if (const auto prop = geo->getPropertyOfGeometry()) {
             if (const auto data = prop->getComplexData()) {
+                // the map's entries, as poolOf() reads them (F4)
                 Data::IndexedName indexed(elementName.oldName.c_str());
                 if (indexed) {
-                    for (const auto& mapped : data->getElementMappedNames(indexed)) {
-                        names.push_back(plainName(mapped.first.toString()));
+                    for (const auto& mapped : data->getElementMap()) {
+                        if (mapped.index == indexed) {
+                            names.push_back(plainName(mapped.name.toString()));
+                        }
                     }
                 }
             }
         }
+        const std::string oldName = plainName(guess.origName);
         const bool sameMaker = solverParameters()->GetBool("Tier1SameMaker", true);
-        if (!Data::mayBeQuietAtPlace(names, plainName(guess.origName), sameMaker)) {
+        if (!Data::mayBeQuietAtPlace(names, oldName, sameMaker)) {
+            return false;
+        }
+        // T1''s test: an element that lost the old name's sources is that element drawn again
+        // (ops#394's board edge, its sketch line deleted and redrawn) only while no element holds
+        // them. Another circle of the hole's sketch at the old place, the hole's circle still
+        // there, isn't (PR 379 round 2's cloud review).
+        if (solverParameters()->GetBool("Tier1SameSource", true)
+            && Data::lostOldSources(names, oldName) && sourcesHeld(geo, oldName)) {
             return false;
         }
     }
@@ -1922,7 +1955,11 @@ bool elementTwinCentroid(const GeoFeature* geo, const char* element, Base::Vecto
     }
     // Only the elements of its type, each name tested only when it shares the twin key: walking
     // the whole map and decoding every name made creating references about 8.5 times slower on a
-    // 372-edge model (PR 379 round 1)
+    // 372-edge model (PR 379 round 1). The names are each index's own (findAll()), where the
+    // solver's pool reads the map's entries (getAll(): a child element's first name): they differ
+    // for child-mapped elements only. Reading the pool's way here cost 3 times more again (round
+    // 3), and no model was found where the difference decides; a count that differs is a trade
+    // (loud), the ORD pieces' desync D3's (round 2's cloud review, F4).
     std::set<std::string> twins;
     const auto elements = data->countSubElements(indexed.getType());
     for (unsigned long i = 1; i <= elements; ++i) {

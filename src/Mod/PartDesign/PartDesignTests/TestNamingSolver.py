@@ -2956,6 +2956,79 @@ class TestNamingSolver(unittest.TestCase):
 
         self.assertNeverQuietlyAt(point, (102.5 - half, 0, 5), (0.3 + half, 0, 5))
 
+    def sameSketchHoles(self, doc):
+        """R1's plate with both circles in one sketch, `Holes`, cut by one Pocket: A at
+        (100, 0.5), B at (102.5, 0.5), and a datum point on A's right crossing (100.866)"""
+        body = models.body(doc)
+        profile = models.sketch(doc, "Profile", models.rectangle(0, 0, 200, 100), body)
+        models.pad(body, profile, 5)
+        holes = models.sketch(
+            doc, "Holes", [models.circle(100, 0.5, 1), models.circle(102.5, 0.5, 1)], body
+        )
+        pocket = body.newObject("PartDesign::Pocket", "Pocket")
+        pocket.Profile = holes
+        pocket.Type = 1  # through all
+        pocket.Midplane = True
+        doc.recompute()
+        half = 0.75**0.5
+        [vertex] = pipes.elementsWhere(
+            pocket.Shape, "Vertex", lambda p: (p - App.Vector(100 + half, 0, 5)).Length < 1e-6
+        )
+        point = body.newObject("PartDesign::Point", "OnRight")
+        point.AttachmentSupport = [(pocket, vertex)]
+        point.MapMode = "Vertex"
+        doc.recompute()
+        self.assertTrue(point.isValid(), point.getStatusString())
+        return holes, point
+
+    def testLoneTwinIsNotASiblingCirclesCrossing(self):
+        """PR 379 round 2's cloud review (F1), R1 with both holes drawn in one sketch: A moved to
+        (0.3, 0.5), its right crossing alone and renumbered. B's crossings share A's sketch and
+        Pocket, so the origin gate passes them, but they come from another circle of the sketch
+        (T1''s test): B's left crossing (101.634), 0.77 from the saved place, is no pick. The
+        point breaks, or sits on A's crossing (1.166) with the normal warning; never on B's."""
+        doc = self.newDocument()
+        holes, point = self.sameSketchHoles(doc)
+        half = 0.75**0.5
+
+        holes.moveGeometry(0, 3, App.Vector(0.3, 0.5, 0), False)
+        doc.recompute()
+
+        self.assertNeverQuietlyAt(point, (102.5 - half, 0, 5), (0.3 + half, 0, 5))
+
+    def testLoneTwinIsNotASiblingCirclesCrossingAtThePlace(self):
+        """F1's quiet form: the same edit also moves B to (100 + 2 * 0.866, 0.5), so its left
+        crossing lies exactly at the saved place (100.866, 0, 5). Taken there, the batch gave it
+        the same-place level, with no warning. The point breaks, or sits on A's crossing (1.166)
+        with the normal warning; never at the saved place."""
+        doc = self.newDocument()
+        holes, point = self.sameSketchHoles(doc)
+        half = 0.75**0.5
+
+        holes.moveGeometry(0, 3, App.Vector(0.3, 0.5, 0), False)
+        holes.moveGeometry(1, 3, App.Vector(100 + 2 * half, 0.5, 0), False)
+        doc.recompute()
+
+        self.assertNeverQuietlyAt(point, (100 + half, 0, 5), (0.3 + half, 0, 5))
+
+    def testSiblingCirclesCrossingAtThePlaceIsNotQuiet(self):
+        """The cloud review's pre-existing path, without the twin clause: A moved off the edge to
+        (100, 10), so both its crossings are gone and T1' drops B's (another circle of the
+        sketch); B moved to (100 + 2 * 0.866, 0.5), its left crossing exactly at the saved place.
+        G2 may guess it (policy D: same sketch and Pocket), with the normal warning; never at the
+        quiet same-place level, which can't tell it from A's circle drawn there again."""
+        doc = self.newDocument()
+        holes, point = self.sameSketchHoles(doc)
+        half = 0.75**0.5
+
+        holes.moveGeometry(0, 3, App.Vector(100, 10, 0), False)
+        holes.moveGeometry(1, 3, App.Vector(100 + 2 * half, 0.5, 0), False)
+        doc.recompute()
+
+        if point.isValid():
+            levels = [e.get("warning_level") for e in App.getReferenceReport(point)]
+            self.assertIn("normal", levels, point.Name)
+
     @unittest.expectedFailure
     def testCrossingWhoseTwinBecameTheSeamVertexIsLoud(self):
         """CC2 (ops#503 round 2), the mirrored seam: the hole's sketch turned 180 degrees (seam

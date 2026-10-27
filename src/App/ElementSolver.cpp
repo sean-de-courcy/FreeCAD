@@ -2865,6 +2865,18 @@ bool mayBeQuietAtPlace(const std::vector<std::string>& names,
     return otherOriginOf(names, oldName, sameMaker) == nullptr;
 }
 
+bool lostOldSources(const std::vector<std::string>& names, std::string_view oldName)
+{
+    if (oldName.empty()
+        || std::any_of(names.begin(), names.end(), [&](const auto& name) {
+               return NameAncestry::isPieceOf(name, oldName)
+                   || NameAncestry::isIndexPieceOf(name, oldName);
+           })) {
+        return false;
+    }
+    return lostASource(names, requiredSourcesOf(oldName));
+}
+
 bool mayBeAtPlace(
     const ElementFingerprint& saved,
     const ElementFingerprint& intrinsic,
@@ -4518,15 +4530,23 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         const auto oldSources = input.sameSource && !oldName.empty()
             ? requiredSourcesOf(oldName)
             : std::vector<SourceSection>();
+        // T1''s test for the pool's element \a k, which the twin clause's geometric pick must pass
+        // too (PR 379 round 2's cloud review, F1)
+        auto lostOldSource = [&](int k) {
+            if (oldSources.empty()) {
+                return false;
+            }
+            const auto& names = pool.elements[k].names;
+            const bool kept = state.inAncestry.count(k) || state.fromIndex.count(k)
+                || std::any_of(names.begin(), names.end(), [&](const auto& n) {
+                       return NameAncestry::isPieceOf(n, oldName)
+                           || NameAncestry::isIndexPieceOf(n, oldName);
+                   });
+            return !kept && lostASource(names, oldSources);
+        };
         if (!oldSources.empty()) {
             for (auto it = all.begin(); it != all.end();) {
-                const auto& names = pool.elements[*it].names;
-                const bool kept = state.inAncestry.count(*it) || state.fromIndex.count(*it)
-                    || std::any_of(names.begin(), names.end(), [&](const auto& n) {
-                           return NameAncestry::isPieceOf(n, oldName)
-                               || NameAncestry::isIndexPieceOf(n, oldName);
-                       });
-                if (!kept && lostASource(names, oldSources)) {
+                if (lostOldSource(*it)) {
                     state.otherSource.push_back(*it);
                     it = all.erase(it);
                 }
@@ -5382,10 +5402,18 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                     // After the twin clause, the pool holds what tier 1's filters dropped (another
                     // generator, another maker), and the pick must share the old name's origin,
                     // as G2's does (policy D): a hole's crossing whose twin went off the edge's
-                    // end was taken at another hole's crossing, 0.77 away (PR 379 round 1)
-                    const char* lacks = state.twinSurvivor >= 0
-                        ? otherOrigin(pool.elements[pick], oldName)
-                        : nullptr;
+                    // end was taken at another hole's crossing, 0.77 away (PR 379 round 1). It must
+                    // keep the old name's sources as well (T1''s test): another circle of the
+                    // hole's own sketch, cut by the same pocket, shares the origin, and was taken
+                    // there, at the same-place level when it lay at the saved place (round 2's
+                    // cloud review, F1).
+                    const char* lacks = nullptr;
+                    if (state.twinSurvivor >= 0) {
+                        lacks = otherOrigin(pool.elements[pick], oldName);
+                        if (!lacks && lostOldSource(pick)) {
+                            lacks = "source element";
+                        }
+                    }
                     if (lacks) {
                         state.decided = true;
                         state.outcome.evidence = (nearest.index >= 0
@@ -5444,7 +5472,12 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                     std::string otherSource;
                     if (wide.index >= 0 && (!input.guessAnySource || state.twinSurvivor >= 0)) {
                         const auto& picked = pool.elements[agree[wide.index]];
-                        if (const char* lacks = otherOrigin(picked, oldName)) {
+                        const char* lacks = otherOrigin(picked, oldName);
+                        // after the twin clause, T1''s test too (F1, as above)
+                        if (!lacks && state.twinSurvivor >= 0 && lostOldSource(agree[wide.index])) {
+                            lacks = "source element";
+                        }
+                        if (lacks) {
                             otherSource = "; the wide reach's " + picked.index + " has another "
                                 + lacks;
                             wide = Nearest();

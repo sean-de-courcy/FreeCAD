@@ -31,7 +31,9 @@ The right point follows A's crossing; the left point's crossing is gone, so it b
 B's left crossing lies 0.77 from the right point's saved place, within tier 3's reach: after the
 twin clause (fork PR 379, D1), geometry decided over the whole pool and took it, warned, until
 the pick had to share the old name's source and maker (PR 379 round 2).
-Found by PR 379's review round 1 (Opus, R1; `work/pr379-r1/cases/twin_lone_neighbour.py`)."""
+Found by PR 379's review round 1 (Opus, R1; `work/pr379-r1/cases/twin_lone_neighbour.py`).
+With both circles in one sketch and one Pocket, B's crossings share that origin too: the pick
+must keep the old name's sources as well (T1''s test; round 2's cloud review, F1)."""
 
 import math
 
@@ -78,6 +80,9 @@ class LoneTwinBesideAnotherHole(Scenario):
         if self.withB:
             last = self.pocket(doc, body, "B", self.bx)
         doc.recompute()
+        self.points(body, last)
+
+    def points(self, body, last):
         self.ax = self.ax0
         for name, side in (("right_crossing", 1), ("left_crossing", -1)):
             point = body.newObject("PartDesign::Point", "On" + name)
@@ -99,3 +104,37 @@ class LoneTwinAlone(LoneTwinBesideAnotherHole):
     twin count 2 -> 1, decision 137 (2)'s cost) or follows its crossing."""
 
     withB = False
+
+
+class LoneTwinBesideASiblingCircle(LoneTwinBesideAnotherHole):
+    """F1 (PR 379 round 2's cloud review): both circles in one sketch, cut by one Pocket. B's
+    left crossing, 0.77 from the right point's saved place, shares the old name's sketch and
+    maker; it comes from another circle of the sketch, so it is no pick."""
+
+    FOUND_BY = "review pr379-r2-cloud"
+    bx1 = None  # hole B's centre after the edit (None: unmoved)
+
+    def build(self, doc):
+        body = m.body(doc)
+        profile = m.sketch(doc, "Profile", m.rectangle(*self.s(0, 0, 200, 100)), body)
+        m.pad(body, profile, self.s(5))
+        circles = [m.circle(*self.s(x, CY, RADIUS)) for x in (self.ax0, self.bx)]
+        sketch = m.sketch(doc, "HoleA", circles, body)
+        pocket = body.newObject("PartDesign::Pocket", "Pocket")
+        pocket.Profile = sketch
+        pocket.Type = 1  # through all
+        pocket.Midplane = True
+        doc.recompute()
+        self.points(body, pocket)
+
+    def edit(self, doc):
+        super().edit(doc)
+        if self.bx1 is not None:
+            doc.HoleA.moveGeometry(1, 3, m.V(*self.s(self.bx1, CY, 0)), False)
+
+
+class LoneTwinBesideASiblingCircleAtThePlace(LoneTwinBesideASiblingCircle):
+    """F1's quiet form: the same edit moves B too, its left crossing exactly at the right point's
+    saved place. Taken there, it was given the same-place level, with no warning."""
+
+    bx1 = 100.0 + 2 * HALF
