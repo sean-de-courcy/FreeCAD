@@ -1,5 +1,4 @@
 {
-"run": {"cases": 29, "dirty": false, "platform": "win32", "sha": "a07084f9cceb033d2ee68892aefdc4bbb8c23f07", "tier": "F", "time": "2026-10-27T12:55:19Z"},
 "entries": {
 "OpenPipeL2TransformedAllLinesReversed|p0_e0|V2s": {"axes": ["M3", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#501", "tier": "F"},
 "OpenPipeL2TransformedAllLinesReversed|p0_e1|V2s": {"axes": ["M3", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#501", "tier": "F"},

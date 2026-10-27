@@ -27,9 +27,10 @@ fork's `Scenarios/cases/`, or any folder named in FREECAD_SCENARIO_MODULES. Each
 ledger, `<folder>/ledger/<module>.json`: per (case, reference, configuration) the verdict
 expected on Windows (`expected`, one verdict or an allowed set), an optional `macos` override,
 the kind of the expectation it was judged against (`expect`: harness.EXPECT_KINDS), the case's
-`tier`, `classes`, `axes`, `issue`, `found_by` and `accepted`, and a `run` header (sha,
-platform, time, tier, cases). Ledgers are written by runs only (FREECAD_SCENARIO_UPDATE_LEDGER=1),
-never by hand.
+`tier`, `classes`, `axes`, `issue`, `found_by` and `accepted`. No run header: the run's record
+is the `Tier F:` line (Run.summary) in the PR description, so that a file shared by several PRs
+changes only where its entries do (ops decision 150). Ledgers are written by runs only
+(FREECAD_SCENARIO_UPDATE_LEDGER=1), never by hand.
 
 Each verdict is compared with its entry (`compare`, by harness.verdictRank under each one's
 expectation kind): a worse one is REGRESSED (the gate fails), a better one IMPROVED, another one
@@ -349,7 +350,8 @@ def runRandom(seed):
 
 
 def readLedger(path):
-    """The ledger's {"run": header, "entries": {key: entry}}, or None if there is none."""
+    """The ledger's {"entries": {key: entry}}, or None if there is none (a `run` header from
+    before ops decision 150 is read and ignored; the next write drops it)."""
     try:
         with open(path, encoding="utf-8") as fh:
             return json.load(fh)
@@ -357,10 +359,11 @@ def readLedger(path):
         return None
 
 
-def writeLedger(path, run, entries):
-    """Sorted, one entry per line, so that a ledger's diff reads entry by entry."""
+def writeLedger(path, entries):
+    """Sorted, one entry per line, so that a ledger's diff reads entry by entry, and nothing
+    else that a run changes: two PRs that change different entries merge (ops decision 150)."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    lines = ["{", f'"run": {json.dumps(run, sort_keys=True)},', '"entries": {']
+    lines = ["{", '"entries": {']
     items = sorted(entries.items())
     for i, (k, entry) in enumerate(items):
         comma = "," if i < len(items) - 1 else ""
@@ -445,12 +448,9 @@ def randomEntry(outcome, old):
 
 
 def gitState(folder):
-    """(sha, dirty) of the checkout holding the folder: dirty when anything but the ledgers
-    differs from HEAD, untracked files under `src/` too (a case module that isn't added runs:
-    fork PR 381 R3-4). FREECAD_SCENARIO_SHA overrides the sha (a CI run)."""
-    sha = os.environ.get("FREECAD_SCENARIO_SHA")
-    if sha:
-        return sha, False
+    """(sha, dirty) of the checkout holding the folder, for the Tier F line: dirty when anything
+    but the ledgers differs from HEAD, untracked files under `src/` too (a case module that isn't
+    added runs: fork PR 381 R3-4)."""
     try:
         sha = subprocess.run(
             ["git", "-C", folder, "rev-parse", "HEAD"], capture_output=True, text=True, timeout=60
@@ -707,7 +707,7 @@ class Run:
         return sorted(found)
 
     def wouldWrite(self):
-        """[(name, run header, entries)]: the ledgers this run writes. Tier G updates its own
+        """[(name, entries)]: the ledgers this run writes. Tier G updates its own
         entries only; tier F rewrites each module's ledger (stale entries go)."""
         out = []
         for module in self.modules:
@@ -724,16 +724,7 @@ class Run:
                         k = key(case.__name__, ref, config)
                         if k in self.verdicts:
                             entries[k] = entryFor(case, ref, config, self.verdicts[k], old.get(k))
-            sha, dirty = gitState(module.folder)
-            run = {
-                "sha": sha,
-                "dirty": dirty,
-                "platform": platform(),
-                "time": self.time,
-                "tier": self.tier,
-                "cases": len(module.cases),
-            }
-            out.append((module.name, run, entries))
+            out.append((module.name, entries))
         if self.seeds:
             old = (self.ledgers.get(RANDOM_MODULE) or {}).get("entries", {})
             entries = {}
@@ -741,10 +732,7 @@ class Run:
                 k = key(f"Random{seed:04d}", "sequence", "V2s")
                 if k in self.verdicts:
                     entries[k] = randomEntry(self.verdicts[k], old.get(k))
-            sha, dirty = gitState(self.modules[0].folder if self.modules else ".")
-            run = {"sha": sha, "dirty": dirty, "platform": platform(), "time": self.time,
-                   "tier": self.tier, "cases": len(self.seeds)}
-            out.append((RANDOM_MODULE, run, entries))
+            out.append((RANDOM_MODULE, entries))
         return out
 
     def updateLedgers(self, where=None):
@@ -752,14 +740,14 @@ class Run:
         where tier F also removes the ledgers without a module; or into the folder `where`,
         FREECAD_SCENARIO_LEDGER_OUT, for CI's artifact)."""
         written = []
-        for name, run, entries in self.wouldWrite():
+        for name, entries in self.wouldWrite():
             if where:
                 path = os.path.join(where, name + ".json")
             elif name == RANDOM_MODULE:
                 path = self.randomLedgerPath
             else:
                 path = next(m.ledgerPath for m in self.modules if m.name == name)
-            writeLedger(path, run, entries)
+            writeLedger(path, entries)
             written.append(path)
         if not where and self.tier == "F":
             for path in self.orphans.values():
@@ -774,7 +762,7 @@ class Run:
         random sequences without seeds) count as they are; those without a module are gone."""
         if self.tier != "F" or not self.inTree:
             return None
-        ledgers = {name: entries for name, _, entries in self.wouldWrite()}
+        ledgers = dict(self.wouldWrite())
         for name, ledger in self.ledgers.items():
             if name not in ledgers and ledger:
                 ledgers[name] = ledger.get("entries", {})
@@ -783,8 +771,8 @@ class Run:
     def partial(self):
         """Why this tier F run isn't the full run whose line the merge guard takes (empty if it is):
         the fork's own folder, V2s among the configurations, the random sequences at their steps,
-        a second hash seed that is on and not this run's (fork PR 381 R3-3), the oracle, git's
-        sha, and the build's Python the checkout's: every top-level `Scenarios/*.py`,
+        a second hash seed that is on and not this run's (fork PR 381 R3-3), the oracle, and the
+        build's Python the checkout's: every top-level `Scenarios/*.py`,
         TestCorpusGate.py and TestNamingScenarios.py (the oracle's comparison)."""
         why = []
         if not self.inTree:
@@ -805,8 +793,6 @@ class Run:
             why.append(f"the second hash seed {seed!r} is this run's")
         if os.environ.get("FREECAD_SCENARIO_ORACLE", "1") == "0":
             why.append("no oracle")
-        if os.environ.get("FREECAD_SCENARIO_SHA"):
-            why.append("FREECAD_SCENARIO_SHA")
         source = sourceTree()
         if source:
             here = os.path.dirname(os.path.abspath(__file__))
