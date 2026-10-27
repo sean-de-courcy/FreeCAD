@@ -129,8 +129,7 @@ pixi run --manifest-path 'D:\CustomFreeCAD\wt\<checkout>\pixi.toml' python -c "i
 - Other settings: `FREECAD_SCENARIO_CONFIGS=V2s,V2` (tier F's configurations: V2 and V1 are report
   columns), `FREECAD_SCENARIO_SCALES=60,4000` (tier F at those sizes, at a class's exit),
   `FREECAD_SCENARIO_SEEDS=1-40` (the default) / `none`, `FREECAD_SCENARIO_STEPS=8`,
-  `FREECAD_SCENARIO_LEDGER_OUT=<folder>` (write the would-be ledgers there, CI's artifact),
-  `FREECAD_SCENARIO_SHA` (the sha for the run header, where git can't tell).
+  `FREECAD_SCENARIO_LEDGER_OUT=<folder>` (write the would-be ledgers there, CI's artifact).
 
 What a run prints:
 - `CORPUS VERDICT <case>|<ref>|<config> <verdict>` for every key, and the harness's `SCORE` JSON lines.
@@ -153,7 +152,7 @@ What a run prints:
 - Only a **full** tier F run prints that line: the fork's own folder (no `FREECAD_SCENARIO_MODULES`),
   V2s among the configurations, the random sequences at their default steps, a second hash seed
   that is on and differs from the run's (`FREECAD_NAMING_HASH_SEED` as `NamingHash.h` reads it), the
-  oracle, no `FREECAD_SCENARIO_SHA`, and the build's `Scenarios/*.py`, `TestCorpusGate.py` and
+  oracle, and the build's `Scenarios/*.py`, `TestCorpusGate.py` and
   `TestNamingScenarios.py` the same as the checkout's. Any other tier F run prints `CORPUS partial
   tier F run (<why>): no Tier F line`.
 - A case module that fails to import, or exits at import, or whose cases have bad tags (`TIER` not
@@ -172,12 +171,17 @@ What a run prints:
 
 - `expected` is the Windows verdict (or an allowed set), `macos` a macOS override, `expect` the kind
   of expectation it was judged against (`CORRECT`, `BROKEN`, `PARTIAL`, ...); `tier`, `classes`,
-  `axes`, `issue`, `found_by`, `accepted` come from the case. The `run` header has the sha (`dirty` when
-  the checkout had other uncommitted changes, or untracked files under `src/`), platform, time,
-  tier and number of cases.
+  `axes`, `issue`, `found_by`, `accepted` come from the case.
+- **No run header** (ops decision 150): a ledger holds its entries only, so a run changes a ledger's
+  lines only where an entry changes, and PRs that change different entries of the same ledger merge
+  without a conflict. The run's record is its `Tier F:` line (sha, `dirty` when the checkout had other
+  uncommitted changes or untracked files under `src/`, platform, time, cases, counts and the ledger
+  fingerprint), which goes into the PR description. A ledger from before the change still reads (its
+  `run` line is ignored) and the next run's write drops it; the guard refuses one back in a PR.
 - **Never edited by hand**: a run with `FREECAD_SCENARIO_UPDATE_LEDGER=1` writes it (tier G only its
   own entries, tier F the module, and tier F removes a ledger whose module is gone). Commit the code first, then run, then commit the ledgers: the
-  guard checks that the run's sha is the head commit, or that only ledgers changed since.
+  guard checks that the `Tier F:` line's sha is the head commit, or that only ledgers changed since,
+  and that the head's ledgers give the line's fingerprint.
 - The merge guard (`scripts/corpus_guard.sh` in the ops repo, run by `merge_pr.sh`) refuses an entry
   that moves into the wrong set, or inside it to a silent verdict, unless it is accepted (`accepted`
   the base's entry had, or set by a `corpus` PR); a new wrong-set entry without `issue` and

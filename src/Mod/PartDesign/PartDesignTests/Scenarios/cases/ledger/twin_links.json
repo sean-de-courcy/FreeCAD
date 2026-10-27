@@ -1,5 +1,4 @@
 {
-"run": {"cases": 9, "dirty": false, "platform": "win32", "sha": "a07084f9cceb033d2ee68892aefdc4bbb8c23f07", "tier": "F", "time": "2026-10-27T12:55:19Z"},
 "entries": {
 "TwinLinksCompoundInsert|att|V2s": {"axes": ["M5", "E1"], "classes": ["A", "D"], "expect": "CORRECT", "expected": "broken", "found_by": "port", "issue": "ops#500", "tier": "F"},
 "TwinLinksCompoundInsert|ref_a|V2s": {"axes": ["M5", "E1"], "classes": ["A", "D"], "expect": "CORRECT", "expected": "broken", "found_by": "port", "issue": "ops#500", "tier": "F"},

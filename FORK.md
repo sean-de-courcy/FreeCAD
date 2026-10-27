@@ -408,7 +408,8 @@ names it.
 | `infra/398-release-followups` | infra | ops#398 | - | `integration` `f6e81feebb` | `95538c7728` (fork PR 382), 2026-10-26 | never (fork infra) |
 | `corpus/ports-a-d` | feature | ops#506 | - | `integration` `12baa6cda7` | `69d24e907a` (fork PR 385), 2026-10-26 | never (fork tests) |
 | `corpus/ports-b-e` | feature | ops#501, ops#504 | - | `integration` `69d24e907a` | `9ede5b31d9` (fork PR 387), 2026-10-27 | never (fork tests) |
-| `infra/macos-cli-timeout` | infra | ops#302 | - | `integration` `69d24e907a` | (fork PR 389) | never |
+| `infra/macos-cli-timeout` | infra | ops#302 | - | `integration` `69d24e907a` | `66e820e0a8` (fork PR 389), 2026-10-27 | never |
+| `infra/ledger-no-run-header` | infra | ops#519 | - | `integration` `69d24e907a` | (fork PR 388) | never (fork tests) |
 
 ## Fork-only commits in carried topics
 

@@ -1,5 +1,4 @@
 {
-"run": {"cases": 3, "dirty": false, "platform": "win32", "sha": "a07084f9cceb033d2ee68892aefdc4bbb8c23f07", "tier": "F", "time": "2026-10-27T12:55:19Z"},
 "entries": {
 "PadCapPieceCoversTheWholeFill|middle|V2s": {"axes": ["M2", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#501", "tier": "F"},
 "PadCapPieceGrowsOnOneSideOnly|middle|V2s": {"axes": ["M2", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#501", "tier": "F"},
