@@ -62,19 +62,6 @@ XZ = App.Placement(V(0, 0, 0), App.Rotation(V(1, 0, 0), 90))
 TOL = 1e-4
 
 
-def drawnTheOtherWay(sketch, indices=None):
-    """The sketch's lines (at `indices`, or all) drawn the other way, their geometry ids kept."""
-    geometry = sketch.Geometry
-    for index in range(len(geometry)) if indices is None else indices:
-        line = geometry[index]
-        if line.TypeId != "Part::GeomLineSegment":
-            continue
-        start, end = V(line.StartPoint), V(line.EndPoint)
-        line.StartPoint, line.EndPoint = V(1e4, 1e4, 0), V(2e4, 2e4, 0)
-        line.StartPoint, line.EndPoint = end, start
-    sketch.Geometry = geometry
-
-
 # ---- elements found by their geometry, as built (copied into each module of the group) ----
 
 

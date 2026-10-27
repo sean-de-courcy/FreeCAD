@@ -48,10 +48,12 @@ also run in V2 with FREECAD_SCENARIO_CONFIGS=V2s,V2: a case can't name a report 
 - VariantBoltHolesSameTopology: hole_wall. The same plates without the fillet (same topology).
 - VariantPocketMoved: pocket_floor. A 10 x 10 x 5 block with a 3 x 3 x 1.5 pocket at (2, 2)
   becomes a 30 x 20 x 8 block with a 4 x 4 x 2 pocket at (13, 8): the floor follows its pocket.
-- VariantOnePocketToTwo: pocket_floor. The block's one pocket becomes two look-alike pockets in
-  the large block: no counterpart a person could name, so a loud break is the answer. (In this
-  numbering the small floor's index, Face11, is a wall of the second pocket and never a floor:
-  no arrangement of two interior pockets puts a floor there, so the kind guard breaks it.)
+- VariantOnePocketToTwo: pocket_floor, pocket_rim_corner, pocket_rim_corner_ne, pocket_wall_edge.
+  The block's one pocket becomes two look-alike pockets in the large block: no counterpart a
+  person could name, so a loud break is the answer. (In this numbering the small floor's index,
+  Face11, is a wall of the second pocket and never a floor: the floors are the last two faces,
+  whatever the arrangement of two interior pockets, so the kind guard breaks `pocket_floor`.
+  The other three land on look-alike elements and reach E3's unique rule.)
 - VariantPocketToLStep: pocket_top_corner. The pocket's top corner (the vertex at (2, 2, 5)) when
   the large block has an L step (from x = 15, 4 above the bottom cut away) and no pocket: the
   pocket is gone, so a loud break. Extras: the pocket's other three top corners.
@@ -88,6 +90,7 @@ from PartDesignTests.Scenarios.harness import (
     Scenario,
     ScenarioError,
     Z,
+    edge,
     expectedNames,
     face,
     vertex,
@@ -357,7 +360,9 @@ class BoltHoles(Variants):
 class VariantBoltHolesFillet(BoltHoles):
     """The plate with four holes becomes the larger plate with four holes and a rounded corner
     (a fillet on the vertical edge at the origin). The holes keep their count but not their
-    face numbers. Each reference must follow its own hole, or break loudly."""
+    face numbers. Each reference must follow its own hole (scored as the counterpart's element: a
+    loud break, which E3's unique rule makes of some, is the accepted cost of decision 142 and
+    moves the entry right -> loud, for the PR that adds the rule to say)."""
 
     AXES = ("M5", "E1")
     FILLET = True
@@ -422,8 +427,17 @@ class VariantPocketMoved(PocketBlock):
 
 class VariantOnePocketToTwo(PocketBlock):
     """The small block's pocket (3 x 3 x 1.5 at (2, 2)) becomes two pockets (4 x 4 x 2 at (3, 3)
-    and (20, 12)) in the large block: two look-alike floors, no counterpart a person could name
-    without looking. The reference must break loudly."""
+    and (20, 12)) in the large block: two look-alike pockets, no counterpart a person could name
+    without looking. The references must break loudly.
+    `pocket_floor` (the pocket's floor face): the floors are the last two faces of the large
+    block, so the small floor's index (Face11) is a wall of the second pocket and the kind
+    guard breaks it, with or without E3's unique rule (S8 of the review of fork PR 387).
+    The other references reach the unique rule: each index lands on an element of the same type,
+    kind, direction and boundary status (checked after the switch), one of the two pockets'
+    look-alikes. `pocket_rim_corner` (the vertex (2, 2, 5)) lands on the first pocket's own
+    corner, `pocket_rim_corner_ne` ((5, 5, 5)) on another corner of it, `pocket_wall_edge` (the
+    vertical edge at (2, 5)) on the first pocket's vertical edge at (3, 3). A system without the
+    unique rule keeps them silently."""
 
     AXES = ("M5", "E1")
     COLUMNS = BOX + (
@@ -434,7 +448,7 @@ class VariantOnePocketToTwo(PocketBlock):
         ("PockH", 1.5, 2),
         ("Pock2X", 40, 20),
     )
-    REFS = ("pocket_floor",)
+    REFS = ("pocket_floor", "pocket_rim_corner", "pocket_rim_corner_ne", "pocket_wall_edge")
 
     def makeFeatures(self, doc):
         self.makeBox()
@@ -449,8 +463,52 @@ class VariantOnePocketToTwo(PocketBlock):
     def floor(self):
         return self.planeUp(self.top() - self.value("PockH"))
 
+    def rimCorner(self, ne):
+        x, y = self.value("PockX"), self.value("PockY")
+        if ne:
+            x, y = x + self.value("PockL"), y + self.value("PockW")
+        return vertex((x, y, self.top()))
+
+    def wallEdge(self):
+        x, y = self.value("PockX"), self.value("PockY") + self.value("PockW")
+        return edge("line", direction=Z, contains=(x, y, self.top() - self.value("PockH") / 2))
+
     def makeReferences(self, doc):
         self.track("pocket_floor", self.floor, lambda: BROKEN if self.edited else self.floor())
+        self.landing = {}
+        for name, locate in (
+            ("pocket_rim_corner", lambda: self.rimCorner(False)),
+            ("pocket_rim_corner_ne", lambda: self.rimCorner(True)),
+            ("pocket_wall_edge", self.wallEdge),
+        ):
+            holder = self.track(
+                name, locate, lambda locate=locate: BROKEN if self.edited else locate()
+            )
+            self.landing[name] = holder.Sub[1][0]
+
+    def precondition(self):
+        """Each reference's index names, on the large block, an element inside a pocket's span
+        (a rim vertex, or a vertical edge, with x and y clear of the block's sides): the guard
+        of type, kind and direction passes it, and only the unique rule can break it."""
+        shape = self.link.Shape
+        box = shape.BoundBox
+        for name, sub in self.landing.items():
+            element = shape.getElement(sub)
+            if name == "pocket_wall_edge":
+                points = [v.Point for v in element.Vertexes]
+                right = len(points) == 2 and abs(points[0].z - points[1].z) > TOL
+                right = right and abs(points[0].x - points[1].x) < TOL
+                right = right and abs(points[0].y - points[1].y) < TOL
+            else:
+                points = [element.Point]
+                right = abs(points[0].z - box.ZMax) < TOL
+            p = points[0]
+            right = right and 1 < p.x < box.XMax - 1 and 1 < p.y < box.YMax - 1
+            if not right:
+                raise ScenarioError(
+                    f"{name}: {sub} on the large block is not inside a pocket's span: the "
+                    "case's numbering precondition no longer holds"
+                )
 
 
 class VariantPocketToLStep(PocketBlock):
@@ -653,7 +711,9 @@ class VariantExpressionArea(FilletBlock):
     """An expression `LinkA.<<Face6>>._shape.Area` (the small block's top face, area 100) across
     the switch to the filleted large block, where the numbering of the faces has changed. The
     value must be the large top face's area (599.14), or the expression must fail (loud). The
-    expression holds no stored reference the harness could read, so `judge` compares the value."""
+    top and the bottom face have the same area, so a second expression reads the face's height
+    (`CenterOfMass.z`: 8 for the top face). The expression holds no stored reference the harness
+    could read, so `judge` compares the values."""
 
     REFS = ("link_face6_area",)
 
@@ -664,6 +724,8 @@ class VariantExpressionArea(FilletBlock):
         holder = doc.addObject("App::FeaturePython", "Ref_link_face6_area")
         holder.addProperty("App::PropertyFloat", "Area")
         holder.setExpression("Area", "LinkA.<<Face6>>._shape.Area")
+        holder.addProperty("App::PropertyFloat", "Height")
+        holder.setExpression("Height", "LinkA.<<Face6>>._shape.CenterOfMass.z")
         self.ref(
             "link_face6_area", holder, "Area", lambda: OwnOrBroken(self.topPredicate())
         )
@@ -672,17 +734,21 @@ class VariantExpressionArea(FilletBlock):
         owner = self.doc.getObject(ref.owner)
         expectation = ref.expect()
         shape = self.link.Shape
-        expected = shape.getElement(expectedNames(expectation.expected, shape)[0]).Area
+        top = shape.getElement(expectedNames(expectation.expected, shape)[0])
+        expected, expectedHeight = top.Area, top.CenterOfMass.z
         result = Result(type(self).__name__, ref.name, self.config, step)
         got = None
         if not owner.isValid():
             verdict, detail = "broken", owner.getStatusString()
         else:
             got = owner.Area
-            if abs(got - expected) < 1e-6:
-                verdict, detail = "correct", ""
-            else:
+            if abs(got - expected) >= 1e-6:
                 verdict, detail = "wrong", f"{owner.Name}.Area is {got}, not {expected}"
+            elif abs(owner.Height - expectedHeight) >= 1e-6:
+                verdict = "wrong"
+                detail = f"{owner.Name}.Height is {owner.Height}, not {expectedHeight}"
+            else:
+                verdict, detail = "correct", ""
         result.verdict = verdict
         result.record.update(
             scenario=type(self).__name__,
@@ -694,9 +760,9 @@ class VariantExpressionArea(FilletBlock):
             consumer=f"{owner.Name}.Area",
             target=self.link.Name,
             subs=[],
-            names=[] if got is None else [f"Area {got:.6f}"],
+            names=[] if got is None else [f"Area {got:.6f} at z {owner.Height:.6f}"],
             expect=repr(expectation),
-            expected_names=[f"Area {expected:.6f}"],
+            expected_names=[f"Area {expected:.6f} at z {expectedHeight:.6f}"],
             stored=None,
             outcome=verdict,
             detail=detail,

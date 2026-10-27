@@ -186,6 +186,7 @@ class PipeEnds(Scenario):
     PROFILE_Z = 0
     TRANSITION = "Right corner"
     HOLE = False
+    ROUND_HOLE = False  # the profile's hole is a circle (the section's stays a square)
     SECTION = None  # (height, half width) of a second section
     OUTER = 1.5  # the end sections' edges and vertices at least this far from the centre
     PHASES = ()
@@ -195,7 +196,9 @@ class PipeEnds(Scenario):
         self.phase = 0
         body = m.body(doc)
         path = m.sketch(doc, "Path", m.polyline(self.POINTS), body, placement=XZ)
-        geometry = m.rectangle(-2, -2, 2, 2) + (m.rectangle(-1, -1, 1, 1) if self.HOLE else [])
+        geometry = m.rectangle(-2, -2, 2, 2)
+        if self.HOLE:
+            geometry += [m.circle(0, 0, 1)] if self.ROUND_HOLE else m.rectangle(-1, -1, 1, 1)
         profile = m.sketch(doc, "Profile", geometry, body, z=self.PROFILE_Z)
         pipe = body.newObject("PartDesign::AdditivePipe", "Pipe")
         pipe.Profile = profile
@@ -448,8 +451,10 @@ class MultisectionPipeEndStaysWhenProfileCrossesTheMiddle(PipeEnds):
 
 
 class MultisectionPipeEndFollowsExtendedSpine(PipeEnds):
-    """Multisection along z = 0 -> 30, a holed 4 x 4 profile at z = 0 and a holed 6 x 6 section
-    at z = 12 (more vertices than the profile); the spine's end is extended to z = 60: the start
+    """Multisection along z = 0 -> 30, a 4 x 4 profile with a round hole at z = 0 (5 vertices) and
+    a 6 x 6 section with a square hole at z = 12 (8 vertices, more than the profile; the source
+    test `testMultisectionLastSectionWithMoreVertices` has the same pair); the spine's end is
+    extended to z = 60: the start
     keeps the profile's names, the far cap (z = 60) is the section's projection (fork PR 337
     round 3: with distances summed over a section's vertices the ends swapped)."""
 
@@ -457,6 +462,7 @@ class MultisectionPipeEndFollowsExtendedSpine(PipeEnds):
 
     REFS = ("named_cap", "other_cap", "named_edge", "named_vertex")
     HOLE = True
+    ROUND_HOLE = True
     SECTION = (12, 3)
     PHASES = (
         {"named": 0, "other": 30},
@@ -468,9 +474,12 @@ class PipeReversedAndShiftedByItsLength(PipeEnds):
     """Row 264: the spine 0 -> 30 with the profile at z = 0 redrawn the other way and shifted up
     by its length, 60 -> 30 (its id kept). The solid is a tube z = 30..60: whether the old start
     (the profile's end) is now its end at z = 30 (a reversal) or its start at z = 60 (the spine's
-    start) can't be told from the model, the two pairings tie. The right answer is a loud break
-    for the references that carried the old names; the end that took the projections is the same
-    either way and isn't judged."""
+    start) is a tie the designers settled (ops#379, I-B3: the moved point says the start is at 60,
+    the redraw says the old start is now the end): the right answer is a loud break for the
+    references that carried the old names. The other end, which took the projections, isn't
+    referenced: under the reversal pairing it goes to 60, under the moved-point pairing it stays
+    at 30 (review of fork PR 387, S7). The row is no PLAN decision: its 3 `wrong` entries are
+    debt."""
 
     AXES = ("M3", "E3", "E4")
     REFS = ("named_cap", "named_edge", "named_vertex")

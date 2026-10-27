@@ -44,12 +44,14 @@ the solid is unchanged, so each reference must hold its element at its own place
   themselves (`Scenarios/randomized.py`) are not imported by a case module, so these are four
   models rebuilt by hand, not the 28 models of seeds 1-4.
 - `CrossedEdge...` (the twin crossings of a hole across an edge, where the twin vertices' roles
-  follow the edge's direction, ops#468 F6a): the pad and hole above with the front line (or every
-  line) drawn the other way, the edge the hole crosses; the Part::MultiFuse of two 10 mm cubes (the
-  second at (5,-5,2)) cut by a cylinder (radius 1, at (7.5, 0.3)) crossing the section edge
-  y = 0, z = 2, with the fuse's Shapes reordered; and a 360 degree Revolution of a ring (radius
-  10..20, 5 high) with a hole across its top rim, Reversed switched on. In each the solid is the
-  same; the places are the crossings."""
+  follow the edge's direction, ops#468 F6a): the Part::MultiFuse of two 10 mm cubes (the second at
+  (5,-5,2)) cut by a cylinder (radius 1, at (7.5, 0.3)) crossing the section edge y = 0, z = 2,
+  with the fuse's Shapes reordered; and a 360 degree Revolution of a ring (radius 10..20, 5 high)
+  with a hole across its top rim, Reversed switched on. In each the solid is the same; the places
+  are the crossings. Row 194's pad-and-hole pair (the front line, or every line, drawn the other
+  way, the edge the hole crosses) is `PadHoleLine0Reversed` and `PadHoleAllLinesReversed`, whose
+  places are the same crossings: a second class with the same model, edit and places was dropped
+  (review of fork PR 387, S6)."""
 
 import FreeCAD as App
 import Part
@@ -471,32 +473,6 @@ class BlockTwoHolesBossFillet(Block):
 # ---------------------------------------------------------------------------------------------
 # row 194: the crossed edge's direction
 # ---------------------------------------------------------------------------------------------
-
-
-class CrossedEdgePadFrontLineReversed(Anchored):
-    """The pad and hole of `PadHole...` (the hole cuts the front edge twice at the top and twice
-    at the bottom); the front line drawn the other way, its id kept (`proto_b.py`, part R). The
-    references are the elements at the 4 crossings."""
-
-    area = "anchor_line_flips"
-    AXES = ROW_AXES["cross"]
-    PLACES = ((10, 0, 5), (10, 0, 0))
-    PER = (4, 4, 2)
-    REFS = refNames(2, (4, 4, 2))
-    WHICH = [0]
-
-    def build(self, doc):
-        body = padHole(doc)
-        self.anchor(doc, body, doc.Pocket)
-
-    def edit(self, doc):
-        drawnTheOtherWay(doc.Base, self.WHICH)
-
-
-class CrossedEdgePadAllLinesReversed(CrossedEdgePadFrontLineReversed):
-    """The same with every line of the rectangle drawn the other way."""
-
-    WHICH = None
 
 
 class CrossedEdgeMultiFuseReordered(Anchored):

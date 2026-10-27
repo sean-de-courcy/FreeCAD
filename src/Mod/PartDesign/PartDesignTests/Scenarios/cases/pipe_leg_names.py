@@ -30,10 +30,10 @@ Ports (one designed representative per rule where the row is a family):
   `UPipeRoundCornersAllLinesDrawnTheOtherWay` (314: Round corner faces from the spine vertex),
   `LPipeHoleAwayFromTheEndsAllLinesDrawnTheOtherWay` (315: the profile away from the path's ends,
   the lines reversed);
-- `rows222_277_302|fixed_pos_rules`: `TransformedLegsAcross90Degrees` (277: PR 344 round 3, side
-  faces and lateral edges of an L whose corner is edited across 90 degrees),
-  `CapBetweenPiecesWhenTheBreakMoves` (302: PR 369 round 4, the cap and its edges between the
-  union's pieces when the break moves to the other corner); row 222 (ops#360 H2, an up-to cap
+- `rows222_277_302|fixed_pos_rules`: `CapBetweenPiecesWhenTheBreakMoves` (302: PR 369 round 4, the cap and its edges between the
+  union's pieces when the break moves to the other corner); row 277 (PR 344 round 3, an L whose
+  corner is edited across 90 degrees) is `TransformedLAcross90` in `anchor_paths.py`, whose datum
+  points on each element can't be fooled by a swap of the two legs; row 222 (ops#360 H2, an up-to cap
   piece that covers a whole face) is in `upto_wall_and_cap_names.py`;
 - `row328|ops485_two_arc_hole_first_line_reversed`: `LPipeHoleOfTwoArcsFirstLineDrawnTheOtherWay`;
 - `row323|ops486_point_inserted_mid_line`: `PointInsertedMidLine<Path><Transition>` (six paths,
@@ -41,8 +41,10 @@ Ports (one designed representative per rule where the row is a family):
   `k_S3left_hole_ins`, `k_Z4_hole_ins` of `work/pr369-r5v/adv2.py`);
 - `rows283_301|redrawn_line_new_identity`: `LPipeFirstLineRedrawn` (301),
   `SweepArcSpineRedrawn` (283);
-- `ops479|pipe_binding_loops_hash_order`: `TransformedUPipeHoleFirstLegLonger`;
-- `ops480|round_hole_bend_arcs_4_to_3`: `RoundHoleBendArcsMirroredLeg`.
+- `ops479|pipe_binding_loops_hash_order`: `TransformedUPipeHoleFirstLegLonger`.
+
+`ops480|round_hole_bend_arcs_4_to_3` is class A's `PipeBendMirroredLeg` (`cases/pipe_arcs.py`), the
+same model, edit and datum points, so it is not ported twice.
 
 The Pipe cases share a model builder (`MarkedPipe`): a PartDesign AdditivePipe of a profile (a
 square, or a square with a round hole, or with a hole of two arcs) along a polyline in an XZ
@@ -61,7 +63,6 @@ import Part
 
 from PartDesignTests.Scenarios.harness import (
     Attached,
-    OwnOrBroken,
     BROKEN,
     Scenario,
     ScenarioError,
@@ -470,66 +471,6 @@ class TransformedUPipeHoleFirstLegLonger(MarkedPipe):
 
 
 # ---------------------------------------------------------------------------------------------
-# The round hole's bend arcs, leg 2 mirrored (ops#480)
-# ---------------------------------------------------------------------------------------------
-
-
-class RoundHoleBendArcsMirroredLeg(Scenario):
-    """ops#480: a 6 x 6 square with a round hole of radius 1 along the L (0,0)-(0,30)-(20,30),
-    "Right corner". The hole's cylinders of the two legs meet in the miter plane (through the
-    corner, its normal the sum of the two legs' directions) in four ellipse arcs, one for each
-    quadrant of the hole. A datum point sits on each arc, at 45, 135, 225 and 315 degrees of the
-    hole. Leg 2 is mirrored to (0,30)-(-20,30): the miter plane turns and the second and third
-    quadrants join into one half ellipse (four arcs become three). A datum point keeps its place
-    on the hole, so each follows the arc that now holds the middle of its old arc (the
-    quadrants 2 and 3 are both on the half ellipse). Ported from `work/pr369-r3v/orderprobe.py`
-    `MODE=edits`, `mirrorLeg2` (the same model as class A's `PipeBendMirroredLeg`)."""
-
-    area = "pipe_leg_names"
-    CLASSES = ("B",)
-    AXES = ("M3", "E1")
-    ISSUE = "ops#501"
-    FOUND_BY = "port"
-    TIER = "F"
-    REFS = ("arc_q1", "arc_q2", "arc_q3", "arc_q4")
-    PLACES = {"arc_q1": 45, "arc_q2": 135, "arc_q3": 225, "arc_q4": 315}
-    RADIUS, CORNER = 1.0, 30.0
-    leg = 1
-
-    def place(self, ref):
-        t = math.radians(self.PLACES[ref])
-        x, y = self.RADIUS * math.cos(t), self.RADIUS * math.sin(t)
-        return (x, y, self.CORNER - self.leg * x)
-
-    def arc(self, ref):
-        return edge(contains=self.place(ref))
-
-    def build(self, doc):
-        self.leg = 1
-        body = m.body(doc)
-        self.path = m.sketch(
-            doc, "Path", m.polyline([(0, 0), (0, 30), (20, 30)]), body, placement=XZ
-        )
-        profile = m.sketch(
-            doc, "Profile", m.rectangle(-3, -3, 3, 3) + [m.circle(0, 0, self.RADIUS)], body
-        )
-        pipe = body.newObject("PartDesign::AdditivePipe", "Pipe")
-        pipe.Profile = profile
-        pipe.Spine = (self.path, [])
-        pipe.Transition = "Right corner"
-        doc.recompute()
-        for ref in self.REFS:
-            point = body.newObject("PartDesign::Point", "On" + ref)
-            point.AttachmentSupport = [(pipe, self.names(pipe, self.arc(ref))[0])]
-            point.MapMode = "CenterOfMass"
-            self.ref(ref, point, "AttachmentSupport", lambda ref=ref: self.arc(ref), Attached())
-
-    def edit(self, doc):
-        m.setLines(self.path, {1: ((0, 30), (-20, 30))})
-        self.leg = -1
-
-
-# ---------------------------------------------------------------------------------------------
 # A line drawn again in place (rows 283, 301)
 # ---------------------------------------------------------------------------------------------
 
@@ -538,8 +479,9 @@ class LPipeFirstLineRedrawn(MarkedPipe):
     """Row 301 (ops#415 round 1): a 4 x 4 square along the L (up 30, +X 20), "Right corner"; the
     first line is deleted and drawn again in the same place: it has a new geometry id. The solid
     is the same. A leg is named from its spine line's id, so the legs of a redrawn line are new
-    elements: that is by design (I-B5, a redrawn line is a new identity), and a reference may
-    break loudly; it never goes to another place silently."""
+    elements: that is by design (I-B5, a redrawn line is a new identity), but the model is the
+    same and each reference must stay on its element; it never goes to another place silently
+    (scored by a plain predicate: a loud break counts as a move out of the right set)."""
 
     AXES = ("M3", "E5")
     CENTRES = (("c1", (0, 0, 30)), ("leg1", (0, 0, 15), {"e": 4, "f": 4}))
@@ -555,9 +497,10 @@ class SweepArcSpineRedrawn(Scenario):
     """Row 283 (PR 352 round 1): a Part::Sweep of a 4 x 4 square along a spine of a line up 10
     and a quarter circle of radius 10 turning to +X (tangent to the line), "Right corner". The
     arc is deleted and drawn again in the same place: a new geometry id. The solid is the same.
-    The sweep's elements along the arc are named from the arc's id, so a reference may break
-    loudly; it never goes to another place silently. Datum points on the four lateral edges
-    and four side faces along the arc."""
+    The sweep's elements along the arc are named from the arc's id, but the model is the same
+    and each reference must stay on its element; it never goes to another place silently (scored
+    by a plain predicate: a loud break counts as a move out of the right set). Datum points on
+    the four lateral edges and four side faces along the arc."""
 
     area = "pipe_leg_names"
     CLASSES = ("B",)
@@ -606,102 +549,6 @@ class SweepArcSpineRedrawn(Scenario):
     def edit(self, doc):
         doc.Path.delGeometry(1)
         doc.Path.addGeometry(self.arcGeometry(), False)
-
-
-# ---------------------------------------------------------------------------------------------
-# "Transformed" along an L, the corner turned across 90 degrees (row 277, PR 344 round 3)
-# ---------------------------------------------------------------------------------------------
-
-SIDES = ("f1", "f2", "f3", "f4", "v1", "v2", "v3", "v4")
-EDGES = {"f1": (0, -2), "f2": (2, 0), "f3": (0, 2), "f4": (-2, 0)}
-VERTICES = {"v1": (-2, -2), "v2": (2, -2), "v3": (2, 2), "v4": (-2, 2)}
-
-
-def point3(pt):
-    return V(pt[0], 0, pt[1])
-
-
-def onLeg(leg, uv):
-    """The point (u, v) of the square's plane carried to the middle of `leg` (id, start, end):
-    "Transformed" keeps the profile's orientation, so u is along X and v along Y"""
-    _, a, b = leg
-    return (point3(a) + point3(b)) * 0.5 + V(1, 0, 0) * uv[0] + V(0, 1, 0) * uv[1]
-
-
-class TransformedLegsAcross90Degrees(Scenario):
-    """Row 277: "Transformed" along an L of 30 up and 20 turned `START` degrees from +Z towards
-    +X; the corner is turned across 90 degrees to `OTHER` (between the one sweep and the union
-    of pieces) by moving the lines (their ids kept), and back. A sketch is attached to each of
-    the four side faces and each of the four lateral edges of each leg. Each stays on its own
-    element or breaks loudly; none moves to another leg or face (fork PR 344 round 3: the
-    union's first piece took the names of the one sweep's far leg: the second leg's references
-    went to the first leg's faces, valid and silent). The union's fuse renames the faces it cuts
-    in the planes both legs share, and a reference to one may go missing."""
-
-    area = "pipe_leg_names"
-    CLASSES = ("B",)
-    AXES = ("M3", "E4")
-    ISSUE = "ops#501"
-    FOUND_BY = "port"
-    TIER = "F"
-    REFS = tuple(f"{leg}.{k}" for leg in "AB" for k in SIDES)
-    START, OTHER = 80, 120
-    steps = ("across", "back")
-
-    def points(self, degrees):
-        return ((0, 0), (0, 30), turned(30, degrees, 20))
-
-    def legs(self, degrees):
-        points = self.points(degrees)
-        return {"A": ("A", points[0], points[1]), "B": ("B", points[1], points[2])}
-
-    def predicate(self, key, degrees):
-        name, what = key.split(".")
-        leg = self.legs(degrees)[name]
-        if what.startswith("f"):
-            return face(contains=onLeg(leg, EDGES[what]))
-        _, a, b = leg
-        return edge(
-            curve="line", direction=point3(b) - point3(a), contains=onLeg(leg, VERTICES[what])
-        )
-
-    def degreesNow(self):
-        if self.stepName == "across":
-            return self.OTHER
-        return self.START
-
-    def expect(self, key):
-        found = self.predicate(key, self.degreesNow())
-        return found if self.stepName is None else OwnOrBroken(found)
-
-    def build(self, doc):
-        body = m.body(doc)
-        path = m.sketch(doc, "Path", m.polyline(self.points(self.START)), body, placement=XZ)
-        profile = m.sketch(doc, "Profile", m.rectangle(-2, -2, 2, 2), body)
-        pipe = body.newObject("PartDesign::AdditivePipe", "Pipe")
-        pipe.Profile = profile
-        pipe.Spine = (path, [])
-        pipe.Transition = "Transformed"
-        pipe.Refine = False
-        doc.recompute()
-        if not pipe.isValid():
-            raise ScenarioError(f"the pipe is invalid: {pipe.getStatusString()}")
-        for key in self.REFS:
-            sketch = body.newObject("Sketcher::SketchObject", "On_" + key.replace(".", "_"))
-            expectation = self.predicate(key, self.START)
-            sketch.AttachmentSupport = [(pipe, self.names(pipe, expectation)[0])]
-            sketch.MapMode = "FlatFace" if ".f" in key else "NormalToEdge"
-            self.ref(key, sketch, "AttachmentSupport", lambda k=key: self.expect(k), Attached())
-
-    def turnTo(self, doc, degrees):
-        points = self.points(degrees)
-        m.setLines(doc.Path, {i: (a, b) for i, (a, b) in enumerate(zip(points, points[1:]))})
-
-    def across(self, doc):
-        self.turnTo(doc, self.OTHER)
-
-    def back(self, doc):
-        self.turnTo(doc, self.START)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -795,7 +642,10 @@ class CapBetweenPiecesWhenTheBreakMoves(Scenario):
         x0, z0 = turned(30, 80, 20)
         x1, z1 = turned(30, 100, 20)
         moved = like(element, kind, V(x1 - x0, 0, z1 - z0))
-        return moved if len(moved.select(self.doc.Pipe.Shape)) == 1 else BROKEN
+        found = len(moved.select(self.doc.Pipe.Shape))
+        if found > 1:
+            raise ScenarioError(f"{found} elements of the edited pipe where {key} moved")
+        return moved if found == 1 else BROKEN
 
     def edit(self, doc):
         points = self.points(100)

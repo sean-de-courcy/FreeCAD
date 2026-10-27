@@ -920,13 +920,15 @@ def liveGuesses(rows):
     return [e for e in rows if e.get("guess_kind") in GUESS_KINDS and e.get("status") != "broken"]
 
 
-def guessVerdict(expectation, stored, verdict, rows):
+def guessVerdict(expectation, stored, verdict, rows, ownOrBroken=False):
     """N2 7.2: the verdict of a reference whose report `rows` show a guess rule's pick. Right if
     the pick is the expected element, or one of an expected break's listed candidates (`stored`
     "partial"); otherwise `guessed-wrong`. A pick whose stored set is wrong is wrong even when the
     consumer's result is the same (ops#286): later edits act on the stored set. Without a live
-    pick, `verdict` stands."""
-    if not liveGuesses(rows):
+    pick, `verdict` stands. Under `OwnOrBroken` (`ownOrBroken`) a `broken` verdict stands too: the
+    pick was the right element and the consumer broke loudly (a wrong stored set never gives
+    `broken`: `combine` makes it `wrong`)."""
+    if not liveGuesses(rows) or (ownOrBroken and verdict == "broken"):
         return verdict
     if isinstance(expectation, Broken):
         right = stored == "partial"
@@ -1311,7 +1313,9 @@ class Scenario:
         rows = self._reportRows(owner, ref.prop)
         if not partialWarned:
             # A guess rule's pick (ops#127, N2 7.2)
-            result.verdict = guessVerdict(expectation, stored, result.verdict, rows)
+            result.verdict = guessVerdict(
+                expectation, stored, result.verdict, rows, ownOrBroken
+            )
             result.verdict = pickedWrongSet(stored, result.verdict, rows)
             if settled and result.verdict == "correct" and warned:
                 # the right element, but still warned: a record left behind

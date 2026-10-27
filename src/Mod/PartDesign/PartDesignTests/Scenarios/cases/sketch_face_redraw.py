@@ -40,7 +40,9 @@ fails loudly (`OwnOrBroken`). The design's choice (E1, CC1) is the loud break: t
 geometry gives no evidence of which new edge is which old edge, so no positional pairing. Today the
 k-th new line takes the k-th old line's Id: the row predicts the circle on the left edge ends on the
 left edge by luck (`correct`) and the circle on the front edge ends on the back edge, 22 mm from
-where it was, silently (`wrong`); the verdicts of a run are in the ledger."""
+where it was, silently (`wrong`); the verdicts of a run are in the ledger. The face link is a live
+guess by place: `harness.guessVerdict` takes the loud break of `OwnOrBroken` for a right answer
+(it scored it `guessed-wrong` until fork PR 387 round 2), so E1's break reads `broken`."""
 
 import Sketcher
 

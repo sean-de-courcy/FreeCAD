@@ -66,6 +66,7 @@ from PartDesignTests.Scenarios.harness import (
     ReachesFace,
     Scenario,
     ScenarioError,
+    Settled,
     edge,
     face,
     vertex,
@@ -188,8 +189,11 @@ class PadLengthToAPlaneAtTheSameHeight(NotchedPadSwitch):
 
 
 class PadSecondSideOfLengthZero(NotchedPadSwitch):
-    """The notched Pad One side -> Two sides with side 2 of length 0: the same solid, the sides
-    built apart."""
+    """The notched Pad One side -> Two sides with side 2 of length 0: the same solid. In V2 a
+    second side of length 0 without a taper takes `fromSide2End` (`FeatureExtrude.cpp`): one
+    prism from the sketch moved by 0, built by the same call as One side. So the case checks that
+    the names survive the switch of `SideType`; whether a zero move could ever change a name only
+    a run shows (review of fork PR 387, S3)."""
 
     def edit(self, doc):
         pad = doc.Pad
@@ -199,7 +203,9 @@ class PadSecondSideOfLengthZero(NotchedPadSwitch):
 
 class RevolutionSecondSideOfAngleZero(OwnPlaceRefs):
     """A Revolution of the rectangle x 5..9, z 0..6 about the sketch's V axis (global Z), 270
-    degrees; Angle -> Two sides with side 2 of angle 0: the same solid."""
+    degrees; Angle -> Two sides with side 2 of angle 0: the same solid. `generateRevolution`
+    turns the profile by 0 and makes the same revolve as for one angle, so, as with
+    `PadSecondSideOfLengthZero`, the case checks the names across the `SideType` switch."""
 
     AXES = ("M7", "E8")
     REFS = labels((6, 12, 8))
@@ -310,7 +316,8 @@ class RevolvedUpToFaceEdit(RevolutionPath):
         revolved.ReferenceAxis = (m.originFeature(body, "Z_Axis"), [""])
         revolved.Type = "UpToFace"
         revolved.UpToFace = (wall, self.names(wall, self.wall()))
-        self.ref("up_to_wall", revolved, "UpToFace", self.wall, ReachesFace())
+        if "up_to_wall" in self.REFS:
+            self.ref("up_to_wall", revolved, "UpToFace", self.wall, ReachesFace())
         doc.recompute()
         onTop = body.newObject("Sketcher::SketchObject", "OnTop")
         onTop.AttachmentSupport = [(revolved, self.names(revolved, self.top())[0])]
@@ -328,9 +335,11 @@ class RevolvedUpToFaceEdit(RevolutionPath):
 
 class RevolutionUpToFaceTypeSwitched(RevolvedUpToFaceEdit):
     """Row 162 (ops#334): the type goes to Angle (90 degrees, so the same solid: the sweep, not
-    BRepFeat) and back to UpToFace."""
+    BRepFeat) and back to UpToFace. The up-to face is left out: it is the wall pad's, which the
+    edit doesn't touch, so it couldn't fail here (review of fork PR 387, S4)."""
 
     AXES = ("M2", "E8")
+    REFS = ("sketch_top", "fillet_outer_arc", "binder_outer")
     steps = ("toAngle", "toFace")
 
     def toAngle(self, doc):
@@ -353,8 +362,10 @@ class RevolutionUpToFaceWallTurned(RevolvedUpToFaceEdit):
 
 class RevolutionUpToFaceProfileChamfered(RevolvedUpToFaceEdit):
     """Row 211 (ops#271): the profile's corner at (20, 5) gets a chamfer 2 x 2 (a new sketch edge,
-    so a new revolved face before or among the others), then the chamfer is removed again."""
+    so a new revolved face before or among the others), then the chamfer is removed again. The
+    up-to face is left out, as in `RevolutionUpToFaceTypeSwitched`."""
 
+    REFS = ("sketch_top", "fillet_outer_arc", "binder_outer")
     steps = ("chamfer", "unchamfer")
     low = 5
 
@@ -390,7 +401,10 @@ class RevolutionOneSideToSymmetricToTwoSides(RevolutionPath):
         return edge("line", contains=ray(self.startAngle, 15, 10))
 
     def followedStartTop(self):
-        return self.startTop()
+        """The edge, held plainly in V2: a warned guess doesn't pass (PR 243 verification 5, L3;
+        `revolve_uptoface.py`)."""
+        expected = self.startTop()
+        return Settled(expected) if self.mode == "V2" else expected
 
     def build(self, doc):
         body = m.body(doc)
@@ -438,7 +452,9 @@ class AcrossTheAxisTwoSidesAngleToFace(RevolutionPath):
         return edge("line", contains=ray(self.startAngle, 20, 10))
 
     def followedStartTop(self):
-        return self.startTop()
+        """The edge, held plainly in V2: a warned guess doesn't pass (`revolve_uptoface.py`)."""
+        expected = self.startTop()
+        return Settled(expected) if self.mode == "V2" else expected
 
     def build(self, doc):
         body = m.body(doc)
