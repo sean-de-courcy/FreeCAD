@@ -66,6 +66,12 @@ public:
     App::PropertyVectorList SpineStart;
     /// The input SpineStart was stored for, as SpineEndsOf
     App::PropertyStringList SpineStartOf;
+    /// The records of SpineStart for the last earlier inputs (at most 3, the latest first), so a
+    /// spine set back to one of them starts where it did: each the count of its points (in x),
+    /// then its points
+    App::PropertyVectorList EarlierSpineStarts;
+    /// Their inputs, as SpineStartOf, each followed by an empty string
+    App::PropertyStringList EarlierSpineStartsOf;
 
     App::DocumentObjectExecReturn* execute() override;
     short mustExecute() const override;

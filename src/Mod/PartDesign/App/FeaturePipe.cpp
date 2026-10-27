@@ -3253,6 +3253,21 @@ Pipe::Pipe()
         App::PropertyType(App::Prop_Output | App::Prop_Hidden),
         "The input SpineStart was stored for: the spine's object and its elements' names"
     );
+    ADD_PROPERTY_TYPE(
+        EarlierSpineStarts,
+        (),
+        "Sweep",
+        App::PropertyType(App::Prop_Output | App::Prop_Hidden),
+        "SpineStart's records for the last earlier inputs of the spine, so that a spine set back "
+        "to one of them starts where it did (ops#469)"
+    );
+    ADD_PROPERTY_TYPE(
+        EarlierSpineStartsOf,
+        (),
+        "Sweep",
+        App::PropertyType(App::Prop_Output | App::Prop_Hidden),
+        "The inputs EarlierSpineStarts was stored for, each followed by an empty string"
+    );
     Mode.setEnums(ModeEnums);
     Transition.setEnums(TransitionEnums);
     Transformation.setEnums(TransformEnums);
@@ -3277,18 +3292,108 @@ short Pipe::mustExecute() const
 
 namespace
 {
-/// \a spine's input, which the stored ends and start are kept for (SpineEndsOf, SpineStartOf):
-/// its object's name, then its sub-elements' mapped names, sorted (the same in another order and
-/// while the naming refresh renumbers them)
-std::vector<std::string> spineIdentity(const App::PropertyLinkSub& spine)
+/// The spine's input, which the stored ends and start are kept for (SpineEndsOf, SpineStartOf):
+/// \a object's name, `*` when the spine is the whole object (no \a subs), then the mapped names
+/// in \a shape (its shape) of the edges the spine uses, sorted: \a subs, or with none every edge
+/// of the shape. Compared by sameInput. Named with the index the refresh writes in the link, a
+/// sketch's line deleted renumbered the input in the recompute that refreshed it; with the spine
+/// moved in the same one, nothing matched the stored start, and the start was taken from the
+/// profile again (the cloud reading review of fork PR 383 round 3, F2). An edge without a mapped
+/// name is named by its index.
+std::vector<std::string> spineIdentity(
+    const App::DocumentObject* object,
+    const Part::TopoShape& shape,
+    const std::vector<std::string>& subs
+)
 {
+    std::vector<std::string> edges;
+    auto add = [&](const std::string& sub) {
+        const Data::MappedName mapped = shape.getMappedName(Data::IndexedName(sub.c_str()));
+        edges.push_back(mapped ? mapped.toString() : sub);
+    };
+    if (subs.empty()) {
+        for (int i = 1; i <= shape.countSubShapes(TopAbs_EDGE); ++i) {
+            add("Edge" + std::to_string(i));
+        }
+    }
+    for (const std::string& sub : subs) {
+        add(sub);
+    }
+    std::ranges::sort(edges);
     std::vector<std::string> identity;
-    const App::DocumentObject* object = spine.getValue();
     identity.emplace_back(object && object->getNameInDocument() ? object->getNameInDocument() : "");
-    std::vector<std::string> subs = spine.getSubValues(true);
-    std::ranges::sort(subs);
-    identity.insert(identity.end(), subs.begin(), subs.end());
+    if (subs.empty()) {
+        identity.emplace_back("*");
+    }
+    identity.insert(identity.end(), edges.begin(), edges.end());
     return identity;
+}
+
+/// The edges' names of \a identity (spineIdentity), without its object and mark
+std::vector<std::string> identityEdges(const std::vector<std::string>& identity)
+{
+    auto first = identity.begin() + std::min<long>(1, static_cast<long>(identity.size()));
+    if (first != identity.end() && *first == "*") {
+        ++first;
+    }
+    return {first, identity.end()};
+}
+
+/// Whether \a a and \a b (spineIdentity) are one input: the same object, and both the whole of it
+/// or the same edges, in another order, listed or whole, and renumbered. The whole object is one
+/// input whatever its edges: a sketch redrawn (its line deleted and drawn again, ops#379's spine
+/// edits) keeps its stored ends and start, as before the input was stored (ops#435)
+bool sameInput(const std::vector<std::string>& a, const std::vector<std::string>& b)
+{
+    if (a.empty() || b.empty() || a.front() != b.front()) {
+        return false;
+    }
+    const bool wholeA = a.size() > 1 && a[1] == "*";
+    const bool wholeB = b.size() > 1 && b[1] == "*";
+    return (wholeA && wholeB) || identityEdges(a) == identityEdges(b);
+}
+
+/// A closed spine's stored start (SpineStart's form) and the input it was stored for
+struct StartRecord
+{
+    std::vector<std::string> of;
+    std::vector<Base::Vector3d> points;
+};
+
+/// The records of \a current (SpineStart, SpineStartOf) and of \a earlier (EarlierSpineStarts,
+/// EarlierSpineStartsOf), the latest first; none for an empty or malformed one
+std::vector<StartRecord> readStartRecords(
+    const App::PropertyVectorList& current,
+    const App::PropertyStringList& currentOf,
+    const App::PropertyVectorList& earlier,
+    const App::PropertyStringList& earlierOf
+)
+{
+    std::vector<StartRecord> records;
+    if (!current.getValues().empty()) {
+        records.push_back({currentOf.getValues(), current.getValues()});
+    }
+    std::vector<StartRecord> before;
+    const std::vector<Base::Vector3d>& points = earlier.getValues();
+    const std::vector<std::string>& inputs = earlierOf.getValues();
+    size_t at = 0;
+    size_t of = 0;
+    while (at < points.size()) {
+        const auto count = static_cast<size_t>(std::lround(points[at].x));
+        const auto end = std::ranges::find(inputs.begin() + static_cast<long>(of), inputs.end(), "");
+        if (count == 0 || at + 1 + count > points.size() || end == inputs.end()) {
+            return records;
+        }
+        before.push_back(
+            {{inputs.begin() + static_cast<long>(of), end},
+             {points.begin() + static_cast<long>(at + 1),
+              points.begin() + static_cast<long>(at + 1 + count)}}
+        );
+        at += 1 + count;
+        of = static_cast<size_t>(end - inputs.begin()) + 1;
+    }
+    records.insert(records.end(), before.begin(), before.end());
+    return records;
 }
 
 /// Whether \a stored, an open spine's stored ends, are \a ends, in either order
@@ -3594,45 +3699,104 @@ App::DocumentObjectExecReturn* Pipe::execute()
         // in another mode: taken from the profile again after a recompute with the spine open,
         // or with an edge left out and picked again, the start moved to the leg's other vertex
         // where the profile had been moved, and the corners' names with it, silently (the review
-        // of fork PR 383, round 2). Read for the input it was stored for (SpineStartOf), or where
-        // its points still lie on the spine (the same edges picked anew, an equal copy: the cloud
-        // reading review of round 2, N1); for another input, a re-picked spine elsewhere, the
-        // pipe decides as a new one does (ops#435).
-        const size_t spineEdges = edgesInOrder(TopoDS::Wire(path.getShape())).size();
-        const bool startStored
-            = startAtProfile && BRep_Tool::IsClosed(path.getShape()) && spineEdges > 1;
+        // of fork PR 383, round 2). One record per input, the last 4 inputs' (SpineStart and
+        // EarlierSpineStarts): with one, a spine set to another closed spine and back found the
+        // other's record, and took the start from the profile again (the cloud reading review of
+        // round 3, F1). Read quietly for the input it was stored for (SpineStartOf), or where its
+        // points still lie on the spine (an equal copy: the cloud reading review of round 2, N1).
+        // Otherwise the start isn't known for certain, and the pipe warns: a record of the same
+        // object sharing an edge with the spine (its edges picked again after a line was drawn
+        // anew) is the spine edited, and is read; with none, the pipe decides as a new one does
+        // (a spine re-picked elsewhere, ops#435).
+        auto warn = [&](const std::string& text) {
+            if (auto doc = getDocument()) {
+                const char* previous = doc->getWarningDescription(this);
+                doc->setWarning(this, previous && *previous ? std::string(previous) + "\n" + text : text);
+            }
+        };
+        const std::vector<TopoDS_Edge> spineInOrder = edgesInOrder(TopoDS::Wire(path.getShape()));
+        const bool startStored = startAtProfile && BRep_Tool::IsClosed(path.getShape())
+            && spineInOrder.size() > 1;
         std::vector<gp_Pnt> storedVertices;  // the start first
         std::vector<gp_Pnt> storedMiddles;
         std::optional<gp_Pnt> storedWay;
         std::optional<bool> storedAtEnd;
-        const std::vector<std::string> spineInput = spineIdentity(Spine);
-        const std::vector<Base::Vector3d>& stored = SpineStart.getValues();
-        if (startStored && stored.size() >= 5 && stored.size() % 2 == 1) {
+        const std::vector<std::string> spineInput = spineIdentity(spine, shape, subedge);
+        const std::vector<StartRecord> startRecords
+            = readStartRecords(SpineStart, SpineStartOf, EarlierSpineStarts, EarlierSpineStartsOf);
+        if (startStored) {
             const gp_Trsf inPipe = invObjLoc.Transformation();
-            auto inThePipe = [&](size_t i) {
-                return gp_Pnt(stored[i].x, stored[i].y, stored[i].z).Transformed(inPipe);
-            };
-            const size_t count = (stored.size() - 1) / 2;
-            storedVertices.push_back(inThePipe(0));
-            storedMiddles.push_back(inThePipe(1));
-            storedWay = inThePipe(1);
-            storedAtEnd = stored[2].x > 0.5;
-            for (size_t i = 1; i < count; ++i) {
-                storedVertices.push_back(inThePipe(2 + i));
-            }
-            for (size_t i = 1; i < count; ++i) {
-                storedMiddles.push_back(inThePipe(1 + count + i));
-            }
-            if (SpineStartOf.getValues() != spineInput
-                && !closedInPlace(
-                    storedVertices,
-                    storedMiddles,
-                    edgesInOrder(TopoDS::Wire(path.getShape()))
-                )) {
+            // The stored points of \a record, in the pipe's frame; false for a malformed one
+            auto read = [&](const StartRecord& record) {
+                const std::vector<Base::Vector3d>& stored = record.points;
                 storedVertices.clear();
                 storedMiddles.clear();
                 storedWay.reset();
                 storedAtEnd.reset();
+                if (stored.size() < 5 || stored.size() % 2 == 0) {
+                    return false;
+                }
+                auto inThePipe = [&](size_t i) {
+                    return gp_Pnt(stored[i].x, stored[i].y, stored[i].z).Transformed(inPipe);
+                };
+                const size_t count = (stored.size() - 1) / 2;
+                storedVertices.push_back(inThePipe(0));
+                storedMiddles.push_back(inThePipe(1));
+                storedWay = inThePipe(1);
+                storedAtEnd = stored[2].x > 0.5;
+                for (size_t i = 1; i < count; ++i) {
+                    storedVertices.push_back(inThePipe(2 + i));
+                }
+                for (size_t i = 1; i < count; ++i) {
+                    storedMiddles.push_back(inThePipe(1 + count + i));
+                }
+                return true;
+            };
+            auto clear = [&]() {
+                storedVertices.clear();
+                storedMiddles.clear();
+                storedWay.reset();
+                storedAtEnd.reset();
+            };
+            // Of the same object, with an edge of the spine
+            const std::vector<std::string> spineEdgeNames = identityEdges(spineInput);
+            auto sharesAnEdge = [&](const StartRecord& record) {
+                return !record.of.empty() && record.of.front() == spineInput.front()
+                    && std::ranges::any_of(identityEdges(record.of), [&](const auto& e) {
+                           return std::ranges::binary_search(spineEdgeNames, e);
+                       });
+            };
+            bool found = false;
+            for (const StartRecord& record : startRecords) {
+                if (!found && sameInput(record.of, spineInput)) {
+                    found = read(record);
+                }
+            }
+            for (const StartRecord& record : startRecords) {
+                if (!found && read(record)) {
+                    found = closedInPlace(storedVertices, storedMiddles, spineInOrder);
+                }
+            }
+            for (const StartRecord& record : startRecords) {
+                if (!found && sharesAnEdge(record) && read(record)) {
+                    found = true;
+                    warn(
+                        "Pipe: the closed spine's edges aren't those its start was stored for; it "
+                        "starts at the vertex that best matches the stored start. Check the "
+                        "references to its corners"
+                    );
+                }
+            }
+            if (!found) {
+                clear();
+                if (std::ranges::any_of(startRecords, read)) {
+                    clear();
+                    warn(
+                        "Pipe: the closed spine isn't one its start was stored for; it starts at "
+                        "its vertex nearest the profile, as a new pipe does. Check the references "
+                        "to its corners"
+                    );
+                }
             }
         }
         if (startAtProfile) {
@@ -3774,12 +3938,6 @@ App::DocumentObjectExecReturn* Pipe::execute()
                 sharpest ? sharpest->degrees : 0
             );
         };
-        auto warn = [&](const std::string& text) {
-            if (auto doc = getDocument()) {
-                const char* previous = doc->getWarningDescription(this);
-                doc->setWarning(this, previous && *previous ? std::string(previous) + "\n" + text : text);
-            }
-        };
         std::vector<TopoDS_Shape> sweptStarts;
 
         // build all shells
@@ -3813,7 +3971,7 @@ App::DocumentObjectExecReturn* Pipe::execute()
             // 1, CC2). The same ends picked anew (the edges listed, an equal copy) are no other
             // input (the cloud reading review of fork PR 383 round 2, N1)
             else if (
-                SpineEndsOf.getValues() == spineInput
+                sameInput(SpineEndsOf.getValues(), spineInput)
                 || endsInPlace(SpineEnds.getValues(), *spineEnds)
             ) {
                 reversed = storedSideAtEnd(SpineEnds.getValues(), *spineEnds);
@@ -3860,6 +4018,26 @@ App::DocumentObjectExecReturn* Pipe::execute()
             }
             for (size_t k = 1; k < pathEdges.size(); ++k) {
                 points.push_back(middleOf(pathEdges[k]).Transformed(inBody));
+            }
+            // The other inputs' records stay, the latest first, at most 3 (F1)
+            std::vector<Base::Vector3d> earlier;
+            std::vector<std::string> earlierOf;
+            size_t kept = 0;
+            for (const StartRecord& record : startRecords) {
+                if (sameInput(record.of, spineInput) || kept == 3) {
+                    continue;
+                }
+                earlier.emplace_back(static_cast<double>(record.points.size()), 0, 0);
+                earlier.insert(earlier.end(), record.points.begin(), record.points.end());
+                earlierOf.insert(earlierOf.end(), record.of.begin(), record.of.end());
+                earlierOf.emplace_back();
+                ++kept;
+            }
+            if (EarlierSpineStarts.getValues() != earlier) {
+                EarlierSpineStarts.setValues(earlier);
+            }
+            if (EarlierSpineStartsOf.getValues() != earlierOf) {
+                EarlierSpineStartsOf.setValues(earlierOf);
             }
             storeIn(SpineStart, points);
             if (SpineStartOf.getValues() != spineInput) {
