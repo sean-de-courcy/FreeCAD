@@ -1,5 +1,5 @@
 {
 "entries": {
-"TaperedPadRimArc|top_rim_fillet|V2s": {"axes": ["M1", "E4"], "classes": ["D"], "expect": "CORRECT", "expected": "wrong", "found_by": "port", "issue": "ops#503", "tier": "F"}
+"TaperedPadRimArc|top_rim_fillet|V2s": {"axes": ["M1", "E4"], "classes": ["D"], "expect": "CORRECT", "expected": "guessed-wrong", "found_by": "port", "issue": "ops#503", "tier": "F"}
 }
 }

@@ -2,6 +2,6 @@
 "entries": {
 "PadShortenedPastLeftCrossing|left_point|V2s": {"axes": ["M4", "E1"], "classes": ["D"], "expect": "BROKEN", "expected": "wrong", "found_by": "port", "issue": "ops#503", "tier": "F"},
 "PadShortenedPastLeftCrossing|right_line|V2s": {"axes": ["M4", "E1"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#503", "tier": "F"},
-"PadShortenedPastLeftCrossing|right_point|V2s": {"axes": ["M4", "E1"], "classes": ["D"], "expect": "CORRECT", "expected": "quiet", "found_by": "port", "issue": "ops#503", "tier": "F"}
+"PadShortenedPastLeftCrossing|right_point|V2s": {"axes": ["M4", "E1"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "port", "issue": "ops#503", "tier": "F"}
 }
 }

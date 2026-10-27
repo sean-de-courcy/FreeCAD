@@ -1,8 +1,12 @@
 {
-"run": {"cases": 2, "dirty": false, "platform": "win32", "sha": "f1827ac0d581d9b327da5527357bbfbbea9db347", "tier": "F", "time": "2026-10-26T22:16:48Z"},
+"run": {"cases": 4, "dirty": false, "platform": "win32", "sha": "57faa4f5144369ca951d666689b66a3f170af56a", "tier": "F", "time": "2026-10-27T12:50:39Z"},
 "entries": {
 "LoneTwinAlone|left_crossing|V2s": {"axes": ["M1", "E1", "X4:600"], "classes": ["D"], "expect": "BROKEN", "expected": "wrong", "found_by": "review pr379-r1", "issue": "ops#503", "tier": "F"},
 "LoneTwinAlone|right_crossing|V2s": {"axes": ["M1", "E1", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr379-r1", "issue": "ops#503", "tier": "F"},
+"LoneTwinBesideASiblingCircleAtThePlace|left_crossing|V2s": {"axes": ["M1", "E1", "X4:600"], "classes": ["D"], "expect": "BROKEN", "expected": "wrong", "found_by": "review pr379-r2-cloud", "issue": "ops#503", "tier": "F"},
+"LoneTwinBesideASiblingCircleAtThePlace|right_crossing|V2s": {"axes": ["M1", "E1", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr379-r2-cloud", "issue": "ops#503", "tier": "F"},
+"LoneTwinBesideASiblingCircle|left_crossing|V2s": {"axes": ["M1", "E1", "X4:600"], "classes": ["D"], "expect": "BROKEN", "expected": "wrong", "found_by": "review pr379-r2-cloud", "issue": "ops#503", "tier": "F"},
+"LoneTwinBesideASiblingCircle|right_crossing|V2s": {"axes": ["M1", "E1", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr379-r2-cloud", "issue": "ops#503", "tier": "F"},
 "LoneTwinBesideAnotherHole|left_crossing|V2s": {"axes": ["M1", "E1", "X4:600"], "classes": ["D"], "expect": "BROKEN", "expected": "wrong", "found_by": "review pr379-r1", "issue": "ops#503", "tier": "F"},
 "LoneTwinBesideAnotherHole|right_crossing|V2s": {"axes": ["M1", "E1", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr379-r1", "issue": "ops#503", "tier": "F"}
 }
