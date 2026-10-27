@@ -16,7 +16,11 @@ Every model is designed geometry: a profile padded 10 high, a sketch at z = 0 pr
 pad's top face, and a circle (or a point) held by one constraint on one projected geometry. The
 reference judged is the sketch's face link; its outcome is where the constraint is."""
 
+import os
+import re
 import shutil
+import tempfile
+import zipfile
 
 import FreeCAD as App
 import Part
@@ -27,6 +31,38 @@ from PartDesignTests.Scenarios import models as m
 
 V = App.Vector
 TOL = 1e-6
+
+
+def reopenWithoutSources(scenario, doc):
+    """The document saved, closed and opened again (scenario.openDocument()) with every external
+    geometry's source name removed from its Document.xml: geometry as a build before ops#264 e2
+    saved it (no `Source` attribute). Setting the facade's Source from Python doesn't reach the
+    geometry a sketch holds, so a file is the only way to get it (the class E ruling, R9). The
+    folder is scenario.folder (the scenario removes it). Returns the opened document."""
+    scenario.folder = tempfile.mkdtemp(prefix="NamingScenario")
+    path = os.path.join(scenario.folder, doc.Name + ".FCStd")
+    doc.saveAs(path)
+    App.closeDocument(doc.Name)
+    with zipfile.ZipFile(path) as archive:
+        files = {name: archive.read(name) for name in archive.namelist()}
+    xml = files["Document.xml"].decode("utf-8")
+    count = 0
+
+    def strip(match):
+        nonlocal count
+        tag, n = re.subn(r' Source="[^"]*"', "", match.group(0))
+        count += n
+        return tag
+
+    xml = re.sub(r'<GeoExtension [^>]*Sketcher::ExternalGeometryExtension[^>]*>', strip, xml)
+    # a build before E1 saves no source names: its file is already one
+    if count == 0 and hasattr(Sketcher.ExternalGeometryFacade, "Source"):
+        raise RuntimeError("no external geometry with a source name in the saved file")
+    files["Document.xml"] = xml.encode("utf-8")
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, data in files.items():
+            archive.writestr(name, data)
+    return scenario.openDocument(path)
 
 SQUARE = [(0, 0), (20, 0), (20, 20), (0, 20)]
 # front (0,0)-(10,0), the step wall x = 10 (0..5), the step y = 5 (10..20), the right line x = 20
@@ -189,7 +225,7 @@ class SavedBeforeE1:
     the case's class: `class XNoSource(SavedBeforeE1, X)`."""
 
     def edit(self, doc):
-        self.doc = doc = m.reopenWithoutSources(self, doc)
+        self.doc = doc = reopenWithoutSources(self, doc)
         super().edit(doc)
 
 

@@ -34,7 +34,11 @@ reference judged is the sketch's face link; its outcome is where the circle is.
 The review's redraw cases f and g (the square redrawn 24 x 24 from another corner: the face is
 found by a tier 3 guess and the sketch breaks) are `sketch_face_redraw.py`'s (fork PR 387)."""
 
+import os
+import re
 import shutil
+import tempfile
+import zipfile
 
 import FreeCAD as App
 import Part
@@ -44,6 +48,38 @@ from PartDesignTests.Scenarios.harness import Outcome, Reopens, Scenario, Z, fac
 from PartDesignTests.Scenarios import models as m
 
 TOL = 1e-6
+
+
+def reopenWithoutSources(scenario, doc):
+    """The document saved, closed and opened again (scenario.openDocument()) with every external
+    geometry's source name removed from its Document.xml: geometry as a build before ops#264 e2
+    saved it (no `Source` attribute). Setting the facade's Source from Python doesn't reach the
+    geometry a sketch holds, so a file is the only way to get it (the class E ruling, R9). The
+    folder is scenario.folder (the scenario removes it). Returns the opened document."""
+    scenario.folder = tempfile.mkdtemp(prefix="NamingScenario")
+    path = os.path.join(scenario.folder, doc.Name + ".FCStd")
+    doc.saveAs(path)
+    App.closeDocument(doc.Name)
+    with zipfile.ZipFile(path) as archive:
+        files = {name: archive.read(name) for name in archive.namelist()}
+    xml = files["Document.xml"].decode("utf-8")
+    count = 0
+
+    def strip(match):
+        nonlocal count
+        tag, n = re.subn(r' Source="[^"]*"', "", match.group(0))
+        count += n
+        return tag
+
+    xml = re.sub(r'<GeoExtension [^>]*Sketcher::ExternalGeometryExtension[^>]*>', strip, xml)
+    # a build before E1 saves no source names: its file is already one
+    if count == 0 and hasattr(Sketcher.ExternalGeometryFacade, "Source"):
+        raise RuntimeError("no external geometry with a source name in the saved file")
+    files["Document.xml"] = xml.encode("utf-8")
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, data in files.items():
+            archive.writestr(name, data)
+    return scenario.openDocument(path)
 
 
 def lineOn(sketch, axis, value):
@@ -383,7 +419,7 @@ class ExternalFaceHoleRowMovedByPitchNoSource(ExternalFaceHoleRowMovedByPitch):
     AXES = ("M8", "E5", "E9")
 
     def edit(self, doc):
-        self.doc = doc = m.reopenWithoutSources(self, doc)
+        self.doc = doc = reopenWithoutSources(self, doc)
         super().edit(doc)
 
     def cleanup(self):
