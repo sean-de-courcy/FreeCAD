@@ -2818,7 +2818,9 @@ class TestJointsWhenABendStraightens(unittest.TestCase):
         side faces; without the fourth leg they are the end cap's, in the same place. The fourth
         leg's faces are gone, and tier 1 took the previous bend's joint vertices (they share the
         third leg's faces), 20 mm away and silently. Now they stay where they are, warned at the
-        same-place level. Drawn towards the profile, the dropped leg is the first: they break.
+        normal level: they lost the fourth leg's sources, and such a pick is never quiet (PLAN
+        decision 165; the same-place level before it). Drawn towards the profile, the dropped leg
+        is the first: they break.
         The leg put back is a new line, whose leg is named from its new geometry id (ops#415):
         then each point is where it was or breaks loudly (the end cap's name it took has moved
         on with the end), never elsewhere silently."""
@@ -2839,7 +2841,7 @@ class TestJointsWhenABendStraightens(unittest.TestCase):
                     for point in joint:
                         levels = [e.get("warning_level") for e in App.getReferenceReport(point)]
                         self.assertTrue(point.isValid(), (point.Name, point.getStatusString()))
-                        self.assertEqual(levels, ["same-place"], point.Name)
+                        self.assertEqual(levels, ["normal"], point.Name)
                 self.assertGoneOrLoud(joint, before, report=True)
                 self.setPath(path, points)
                 self.assertGoneOrLoud(joint, before, report=True)

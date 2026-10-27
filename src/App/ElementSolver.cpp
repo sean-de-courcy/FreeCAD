@@ -5154,6 +5154,66 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             listDropped(state);
             return true;
         };
+        // The order test for a pick no name relates to the old element (tier 3 without structure,
+        // G2), or an empty string. The hole's circle redrawn (its crossings named anew, the
+        // reference broken at their place, PLAN decision 155), then moved by more than half its
+        // crossings' spacing: G2 took the other crossing, the nearer one to the saved place, where
+        // `integration` had followed the name taken at the redraw (PR 379 round 4's attack set,
+        // ACrossings|redrawn-then-move). Where the record saved two twins or more and the pick has
+        // an order group now (its names up to an order key, as twinPick() counts them), the pick
+        // must be the member whose offset from the group's centroid is nearest the saved offset,
+        // and the group the saved size; else the entry breaks. An old element's twin is
+        // twinBreaks()'s.
+        auto orderBreaks = [&](int position) -> std::string {
+            if (!saved || saved->twinCount < 2 || !saved->center || !saved->twinCentroid
+                || twinPick(position) != TwinPick::NotTwin) {
+                return {};
+            }
+            const auto& names = pool.elements[position].names;
+            std::vector<int> group {position};
+            for (std::size_t k = 0; k < pool.elements.size(); ++k) {
+                const auto& other = pool.elements[k].names;
+                if (static_cast<int>(k) != position
+                    && std::any_of(other.begin(), other.end(), [&](const auto& m) {
+                           return std::any_of(names.begin(), names.end(), [&](const auto& n) {
+                               return isTwinName(m, n);
+                           });
+                       })) {
+                    group.push_back(static_cast<int>(k));
+                }
+            }
+            if (group.size() < 2) {
+                return {};
+            }
+            Base::Vector3d centroid;
+            bool measured = true;
+            for (int k : group) {
+                const auto& centre = fingerprintOf(pool.elements[k]).center;
+                if (!centre) {
+                    measured = false;
+                    break;
+                }
+                centroid += *centre;
+            }
+            bool trade = !measured || static_cast<int>(group.size()) != saved->twinCount;
+            if (!trade) {
+                centroid /= static_cast<double>(group.size());
+                const Base::Vector3d old = *saved->center - *saved->twinCentroid;
+                auto miss = [&](int k) {
+                    return Base::Distance(*fingerprintOf(pool.elements[k]).center - centroid, old);
+                };
+                const double own = miss(position);
+                trade = std::any_of(group.begin() + 1, group.end(), [&](int k) {
+                    return miss(k) <= own;
+                });
+            }
+            if (!trade) {
+                return {};
+            }
+            return pool.elements[position].index + " is out of its twins' saved order ("
+                + std::to_string(saved->twinCount) + " twins saved, "
+                + std::to_string(group.size()) + " now)";
+        };
         // XP's source condition (ops#503 D1; I-S6, I-P1): the pick at the exact place that lacks
         // the old name's origin (otherOriginOf(): a new sketch object, policy D's case) says so;
         // the batch then warns it at the normal level, never the quieter same-place one.
@@ -5407,25 +5467,36 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                     // hole's own sketch, cut by the same pocket, shares the origin, and was taken
                     // there, at the same-place level when it lay at the saved place (round 2's
                     // cloud review, F1).
+                    // XP's pick that lost the old name's sources breaks too, twin clause or not
+                    // (PLAN decisions 155 and 165): a sibling of the old element's sketch dragged
+                    // into its vacated place, within d_max of another element, can't be told from
+                    // the element drawn again there (round 3's reviews), so ops#394's redraw
+                    // breaks until D2 (ops#526) tells them apart. Tier 3's own nearest at the
+                    // place resolves as before, never quietly (App::reboundInPlace()).
                     const char* lacks = nullptr;
                     if (state.twinSurvivor >= 0) {
                         lacks = otherOrigin(pool.elements[pick], oldName);
-                        if (!lacks && lostOldSource(pick)) {
-                            lacks = "source element";
-                        }
                     }
-                    if (lacks) {
+                    const bool atPlace = nearest.index < 0 || !atPlaceAmong({pick}).empty();
+                    if (!lacks && (state.twinSurvivor >= 0 || nearest.index < 0)
+                        && lostOldSource(pick)) {
+                        lacks = "source element";
+                    }
+                    const std::string why = lacks
+                        ? pool.elements[pick].index + " has another " + lacks
+                        : orderBreaks(pick);
+                    if (!why.empty()) {
                         state.decided = true;
                         state.outcome.evidence = (nearest.index >= 0
                                                       ? std::string("no structural candidate, tier 3: ")
                                                       : "no structural candidate, at the same place: ")
-                            + describeNearest(nearest) + "; the pick " + pool.elements[pick].index
-                            + " has another " + lacks + derivedText(state, &agree)
-                            + otherMakerText(state);
+                            + describeNearest(nearest) + "; the pick " + why
+                            + derivedText(state, &agree) + otherMakerText(state);
                         // The pick, then the twin tier 1 named (the user's likelier choice
-                        // when the twin went), then the rest by distance
-                        listByDistance(state, {pick}, "geometric");
-                        if (state.twinSurvivor != pick) {
+                        // when the twin went, if one did), then the rest by distance. A pick at
+                        // the saved place is listed as such, so the report says it sits there.
+                        listByDistance(state, {pick}, atPlace ? "place" : "geometric");
+                        if (state.twinSurvivor >= 0 && state.twinSurvivor != pick) {
                             listByDistance(state, {state.twinSurvivor}, "structural");
                         }
                         std::vector<int> others;
@@ -5480,6 +5551,13 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                         if (lacks) {
                             otherSource = "; the wide reach's " + picked.index + " has another "
                                 + lacks;
+                            wide = Nearest();
+                        }
+                    }
+                    if (wide.index >= 0) {
+                        const std::string order = orderBreaks(agree[wide.index]);
+                        if (!order.empty()) {
+                            otherSource = "; the wide reach's " + order;
                             wide = Nearest();
                         }
                     }

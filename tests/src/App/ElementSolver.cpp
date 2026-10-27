@@ -9031,10 +9031,22 @@ TEST(SolveOwner, exactPlaceBeatsTheGapTest)
 {
     // The board's top edge drawn again where it was: the other top edge lies 45 mm away, within
     // d_max, and tier 3's gap test broke the reference. The one element at the saved place, with
-    // the saved size, is the element.
+    // the saved size, is the element, but its line lost the old line's ID (T1''s test), as a
+    // sibling line of the sketch dragged there would: it breaks, the pick first (PLAN decision
+    // 155; D2, ops#526, tells the two apart).
     LongBoard b;
     auto input = b.input(LongBoard::edgeAt(0), LongBoard::edgeAt(45));
     auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << outcome.evidence;
+    EXPECT_EQ(outcome.evidence,
+              "no structural candidate, at the same place: nearest 0.000, second 45.000, d_max "
+              "50.000; the pick Edge2 has another source element");
+    EXPECT_EQ(outcome.candidates, (std::vector<std::string> {"Edge2", "Edge3"}));
+    EXPECT_EQ(outcome.candidateRoles, (std::vector<std::string> {"place", "geometric"}));
+
+    //   T1''s test off: the exact place takes it
+    input.sameSource = false;
+    outcome = Data::solveOwner(input)[0];
     EXPECT_EQ(outcome.status, SolveStatus::Resolved) << outcome.evidence;
     EXPECT_EQ(outcome.element, "Edge2");
     EXPECT_EQ(outcome.tier, 3);
@@ -9042,7 +9054,7 @@ TEST(SolveOwner, exactPlaceBeatsTheGapTest)
               "no structural candidate, at the same place: nearest 0.000, second 45.000, d_max "
               "50.000");
 
-    //   the switch off: tier 3's gap test alone, as before
+    //   the switch off too: tier 3's gap test alone, as before
     input.exactPlace = false;
     outcome = Data::solveOwner(input)[0];
     EXPECT_EQ(outcome.status, SolveStatus::Broken) << outcome.evidence;
@@ -9052,6 +9064,25 @@ TEST(SolveOwner, exactPlaceBeatsTheGapTest)
               0U)
         << outcome.evidence;
     EXPECT_EQ(outcome.candidates, (std::vector<std::string> {"Edge2", "Edge3"}));
+}
+
+TEST(SolveOwner, exactPlaceNearestPickLostSourceResolves)
+{
+    // The redraw with the other top edge 500 mm off, beyond d_max: tier 3's gap test passes and
+    // its nearest is at the saved place. It lost the old line's ID, but tier 3's own pick
+    // resolves as before XP (PLAN decision 165); the batch never gives it the quieter level.
+    LongBoard b;
+    auto input = b.input(LongBoard::edgeAt(0), LongBoard::edgeAt(500));
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Resolved) << outcome.evidence;
+    EXPECT_EQ(outcome.element, "Edge2");
+    EXPECT_EQ(outcome.tier, 3);
+    EXPECT_EQ(outcome.evidence.rfind("no structural candidate, tier 3: nearest 0.000, second "
+                                     "500.000",
+                                     0),
+              0U)
+        << outcome.evidence;
+    EXPECT_TRUE(Data::lostOldSources({b.redrawn}, b.oldEdge));
 }
 
 TEST(SolveOwner, exactPlaceNeedsTheSize)
@@ -9496,6 +9527,64 @@ TEST(SolveOwner, twinSurvivorThenASiblingCirclesCrossingBreaks)
     EXPECT_FALSE(Data::lostOldSources({c.seamNow}, c.hole1));
 }
 
+namespace
+{
+
+// The hole's circle deleted and drawn again (geometry 5 of the hole's sketch, a new ID), its
+// crossings Vertex20 (Index 0) and Vertex21 (Index 1) at \a left and \a right: no name relates
+// them to the right crossing's (PR 379 round 4's attack set, ACrossings)
+SolveInput redrawnCrossings(const CrossedEdge& c, double left, double right)
+{
+    const auto cyl = generated({sketchEdge(5, 7)}, 11, "XTR", 'F');
+    auto input = c.input(c.right);
+    input.pool["Vertex"].push_back(element("Vertex20", {generated({c.edge1, cyl}, 11, "CUT", 'V')}));
+    input.pool["Vertex"].push_back(
+        element("Vertex21", {generated({c.edge1, cyl}, 11, "CUT", 'V', 1)})
+    );
+    input.entries[0].fingerprint = CrossedEdge::saved(2);
+    measure(input,
+            {{"Vertex10", CrossedEdge::at(40)},
+             {"Vertex20", CrossedEdge::at(left)},
+             {"Vertex21", CrossedEdge::at(right)}},
+            nullptr);
+    return input;
+}
+
+}  // namespace
+
+TEST(SolveOwner, redrawnCrossingMovedPastHalfItsSpacingBreaks)
+{
+    // The redrawn circle moved 1.5 mm along the edge: its left crossing lies 0.23 mm from the
+    // right one's saved place, its right crossing 1.5 mm. Geometry took the left one; the record
+    // (2 twins, the right one +0.866 from their centroid) places the right one there: the order
+    // test breaks the entry.
+    CrossedEdge c;
+    auto outcome = Data::solveOwner(redrawnCrossings(c, 10.634, 12.366))[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << outcome.evidence;
+    EXPECT_NE(outcome.evidence.find("Vertex20 is out of its twins' saved order (2 twins saved, 2 "
+                                    "now)"),
+              std::string::npos)
+        << outcome.evidence;
+
+    //   no twin record (an older one): the test doesn't apply, as before
+    auto input = redrawnCrossings(c, 10.634, 12.366);
+    input.entries[0].fingerprint = CrossedEdge::saved(0);
+    outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.evidence.find("saved order"), std::string::npos) << outcome.evidence;
+}
+
+TEST(SolveOwner, redrawnCrossingCloserToTheEdgeKeepsItsSide)
+{
+    // The control (round 4's reading review, T4a): the circle drawn again smaller, in place, its
+    // crossings 0.6 mm from their centroid (0.866 before). The right crossing, nearest the saved
+    // place, is also the member nearest the saved offset: geometry's pick stands.
+    CrossedEdge c;
+    auto outcome = Data::solveOwner(redrawnCrossings(c, 9.4, 10.6))[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Resolved) << outcome.evidence;
+    EXPECT_EQ(outcome.element, "Vertex21");
+    EXPECT_EQ(outcome.evidence.find("saved order"), std::string::npos) << outcome.evidence;
+}
+
 TEST(SolveOwner, twinAtTheSavedPlaceBreaks)
 {
     // CC1 (ops#503 round 2): the circle moved so that the left crossing lands exactly where the
@@ -9593,28 +9682,41 @@ TEST(SolveOwner, loneTwinRenumberedResolves)
               (std::vector<std::string> {"place", "geometric", "geometric"}));
 }
 
-TEST(SolveOwner, exactPlaceAnotherSourceIsWarned)
+TEST(SolveOwner, exactPlaceAnotherSourceBreaks)
 {
     // The board's top edge at its saved place, but from another sketch (a new sketch object,
-    // policy D's case): the exact place takes it, warned at the normal level, never the quieter
-    // same-place one (I-S6), and the evidence says so.
+    // policy D's case): it lost the old line's sources, so it breaks like the redraw (PLAN
+    // decision 155).
     LongBoard b;
     auto input = b.input(LongBoard::edgeAt(0), LongBoard::edgeAt(45));
     input.pool["Edge"][0].names = {b.otherSketch};
     auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << outcome.evidence;
+    EXPECT_EQ(outcome.evidence.rfind("no structural candidate, at the same place: ", 0), 0U)
+        << outcome.evidence;
+    EXPECT_NE(outcome.evidence.find("; the pick Edge2 has another source element"),
+              std::string::npos)
+        << outcome.evidence;
+    ASSERT_FALSE(outcome.candidates.empty());
+    EXPECT_EQ(outcome.candidates.front(), "Edge2");
+
+    //   T1''s test off: the exact place takes it, warned at the normal level, never the quieter
+    //   same-place one (I-S6), and the evidence says so
+    input.sameSource = false;
+    outcome = Data::solveOwner(input)[0];
     EXPECT_EQ(outcome.status, SolveStatus::Resolved) << outcome.evidence;
     EXPECT_EQ(outcome.element, "Edge2");
     EXPECT_EQ(outcome.tier, 3);
     EXPECT_EQ(outcome.evidence,
               "no structural candidate, at the same place, another source: nearest 0.000, second "
               "45.000, d_max 50.000");
-    //   the batch's level: normal for the other sketch's edge, the quieter one for a redraw in
-    //   the old edge's sketch
+    //   the batch's level: normal for the other sketch's edge; the redraw in the old edge's
+    //   sketch passes this test, and the batch's T1' test keeps it from the quieter level
+    //   (App::reboundInPlace())
     EXPECT_FALSE(Data::mayBeQuietAtPlace({b.otherSketch}, b.oldEdge, true));
     EXPECT_TRUE(Data::mayBeQuietAtPlace({b.redrawn}, b.oldEdge, true));
-    //   the redraw lost the old line's ID (T1''s test): the batch keeps the quieter level only
-    //   while no element holds that ID (App::reboundInPlace())
     EXPECT_TRUE(Data::lostOldSources({b.redrawn}, b.oldEdge));
+    EXPECT_TRUE(Data::lostOldSources({b.otherSketch}, b.oldEdge));
     EXPECT_FALSE(Data::lostOldSources({b.oldEdge}, b.oldEdge));
 }
 

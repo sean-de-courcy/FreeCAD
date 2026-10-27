@@ -921,6 +921,7 @@ class TestNamingSolver(unittest.TestCase):
         """The redrawn rectangle's edge, found by tier 3: the fillet computes, with the Warning
         state and, the edge being where it was, the short same-place text (ops#391); the
         reference holds the edge, and its saved record names the original."""
+        self.quietRedraws()
         doc, pad, fillet, original = self.redrawnFillet()
 
         corner = edge("line", direction=Z, through=(20, 0, 0)).one(pad.Shape)
@@ -1201,6 +1202,13 @@ class TestNamingSolver(unittest.TestCase):
         group = App.ParamGet("User parameter:BaseApp/Preferences/Mod/Part/NamingSolver")
         group.SetBool(name, value)
         self.addCleanup(group.RemBool, name)
+
+    def quietRedraws(self):
+        """T1''s test off for this test: a line deleted and drawn again in place lost the old
+        line's ID, so tier 3's pick there is warned at the normal level, never the quieter
+        same-place one (PLAN decisions 155 and 165), until D2 (ops#526) tells a redraw from a
+        sibling moved there. The same-place level's own tests still reach it this way."""
+        self.guessSwitch("Tier1SameSource", False)
 
     def filletedSlot(self, doc):
         """The pad (0..20 x 0..10, 10 high) with a rectangular slot (x 6..14, y 3..7) pocketed
@@ -1656,16 +1664,24 @@ class TestNamingSolver(unittest.TestCase):
             sketch.delGeometry(0)
         sketch.addGeometry(models.rectangle(*corners), False)
 
-    def assertWarnedInPlace(self, owner, kind, expected):
+    def assertWarnedInPlace(self, owner, kind, expected, quiet=True):
         """The reference resolved by geometry at tier 3, on `expected`, with a warning: the
-        short same-place text and the quieter level (ops#391). Returns its report row."""
+        short same-place text and the quieter level (ops#391), or, not `quiet` (the pick lost the
+        old name's sources, PLAN decision 165), the full text and the normal level. Returns its
+        report row."""
         self.assertTrue(owner.isValid(), owner.getStatusString())
         self.assertIn("Warning", owner.State)
         [entry] = App.getReferenceReport(owner)
         self.assertEqual((entry["status"], entry["tier"]), ("resolved", 3), entry)
         self.assertEqual(entry["new"], expected, entry)
-        self.assertIn(f"{kind} reference found again in the same place (", owner.getStatusString())
-        self.assertEqual(entry["warning_level"], "same-place", entry)
+        if quiet:
+            self.assertIn(
+                f"{kind} reference found again in the same place (", owner.getStatusString()
+            )
+            self.assertEqual(entry["warning_level"], "same-place", entry)
+        else:
+            self.assertIn(f"{kind} reference resolved by geometry: ", owner.getStatusString())
+            self.assertEqual(entry["warning_level"], "normal", entry)
         return entry
 
     def testHorizontalHoleKeepsTheEntryCircle(self):
@@ -1746,7 +1762,8 @@ class TestNamingSolver(unittest.TestCase):
 
             [bottom] = circle.one(pattern.Shape)
             self.assertEqual(fillet.Base[1], [bottom])
-            self.assertWarnedInPlace(fillet, "Edge", bottom)
+            #   the circle lost the block's lines: never quiet while T1''s test is on
+            self.assertWarnedInPlace(fillet, "Edge", bottom, quiet=not sameSource)
 
     def refinedBlocks(self, doc):
         """Pad A, 0..20 x 0..20 x 10, from `Profile`, and pad B beside it, 20..40, from
@@ -1790,7 +1807,8 @@ class TestNamingSolver(unittest.TestCase):
                 self.assertNotIn("Warning", sketch.State)
                 self.assertFalse(App.getReferenceReport(sketch))
             else:
-                self.assertWarnedInPlace(sketch, "Face", merged)
+                #   the face lost pad A's lines: never quiet while T1''s test is on
+                self.assertWarnedInPlace(sketch, "Face", merged, quiet=not sameSource)
 
     def testRefinedEdgeAfterAProfileRedrawn(self):
         """ops#183: as testRefinedFaceAfterAProfileRedrawn, with a fillet on the refined front
@@ -1810,7 +1828,8 @@ class TestNamingSolver(unittest.TestCase):
 
         [merged] = frontTop.one(padB.Shape)
         self.assertEqual(fillet.Base[1], [merged])
-        self.assertWarnedInPlace(fillet, "Edge", merged)
+        #   the edge lost pad A's lines: the normal level (PLAN decision 165)
+        self.assertWarnedInPlace(fillet, "Edge", merged, quiet=False)
 
     def testCollarFromExternalGeometry(self):
         """ops#183: a collar padded 3 mm on the block from a sketch of a circle (radius 4) and,
@@ -1862,7 +1881,8 @@ class TestNamingSolver(unittest.TestCase):
                 self.assertNotIn("Warning", fillet.State)
                 self.assertFalse(App.getReferenceReport(fillet))
             else:
-                self.assertWarnedInPlace(fillet, "Edge", circle)
+                #   the external circle's new ID: the normal level (PLAN decision 165)
+                self.assertWarnedInPlace(fillet, "Edge", circle, quiet=False)
 
     def openIndexOnly(self):
         """The fillet's reference saved as an index-only missing reference (`?EdgeN`, no shadow:
@@ -2210,6 +2230,7 @@ class TestNamingSolver(unittest.TestCase):
         (tier 3 within its distance, not the same place), the warning keeps its full form and
         the normal level. Both levels read the same after a save and reopen (derived at load,
         nothing new saved)."""
+        self.quietRedraws()
         doc = self.newDocument()
         pad, fillet = self.padWithFillet(doc)
         self.redraw(doc)
@@ -2295,6 +2316,7 @@ class TestNamingSolver(unittest.TestCase):
         same-place text while its record is now the 0.1 mm one. Saved so and reopened, its level
         comes from the shapes, not the text (decision 102): normal, and the full text after a
         recompute."""
+        self.quietRedraws()
         doc = self.newDocument()
         pad, fillet = self.padWithFillet(doc)
         self.redrawAt(doc, 20)
@@ -2313,6 +2335,7 @@ class TestNamingSolver(unittest.TestCase):
         level), and that undone: the fillet, touched, keeps the same-place text with the 0.1 mm
         record back. Saved so and reopened, its level comes from the shapes (decision 102):
         normal, and the full text after a recompute."""
+        self.quietRedraws()
         doc = self.newDocument()
         doc.UndoMode = 1
         pad, fillet = self.padWithFillet(doc)
@@ -2338,6 +2361,7 @@ class TestNamingSolver(unittest.TestCase):
         writes another record (normal); undone, the first record and its pick come back, but the
         edge is no longer where that record's original was: judged again, the level is normal,
         not the old judgement's quieter one."""
+        self.quietRedraws()
         doc = self.newDocument()
         doc.UndoMode = 1
         pad, fillet = self.padWithFillet(doc)
@@ -2365,6 +2389,7 @@ class TestNamingSolver(unittest.TestCase):
         the pad is made longer. Drawn at 60 mm instead, the edge goes missing; undone, the
         judged record and its pick come back, but the edge is no longer where that record's
         original was: judged again, the level is normal, also after a redo and a second undo."""
+        self.quietRedraws()
         doc = self.newDocument()
         doc.UndoMode = 1
         pad, fillet = self.padWithFillet(doc)
@@ -2390,6 +2415,7 @@ class TestNamingSolver(unittest.TestCase):
         place, then the pad made longer: both quiet (the bottom edge in place now, the vertical
         one by its judgement). The vertical edge's reference removed and the removal undone:
         its record comes back, but the edge has moved since: judged again, the level is normal."""
+        self.quietRedraws()
         doc = self.newDocument()
         doc.UndoMode = 1
         pad, fillet = self.padWithFillet(doc)
@@ -2423,6 +2449,7 @@ class TestNamingSolver(unittest.TestCase):
         redrawn rectangle's two filleted edges, found again in the same place, print no warning
         line; the fillet keeps the Warning state and the quieter level, and the line is in the
         log. Drawn 0.1 mm off, the normal warning still prints."""
+        self.quietRedraws()
         params = App.ParamGet("User parameter:BaseApp/Preferences/TreeView")
         params.SetBool("ShowSamePlaceWarnings", False)
         self.addCleanup(params.RemBool, "ShowSamePlaceWarnings")
@@ -2443,6 +2470,7 @@ class TestNamingSolver(unittest.TestCase):
         """The redrawn rectangle's two filleted edges, found again in the same place: the warning
         prints; both references accepted, with no recompute after, and the rectangle redrawn
         again: the same text comes back, and prints again (it was gone)."""
+        self.quietRedraws()
         doc = self.newDocument()
         pad, fillet = self.twoEdgeFillet(doc)
 
@@ -2578,25 +2606,62 @@ class TestNamingSolver(unittest.TestCase):
         centre = pad.Shape.getElement(sub).CenterOfMass
         self.assertLess((centre - App.Vector(*through)).Length, 1e-6, (sub, centre))
 
-    def testExactPlaceBeatsTheGapInALongPart(self):
+    def assertBrokenAtThePlace(self, feature):
+        """The feature's reference broke at the saved place: the one element there lost the old
+        element's sources (T1''s test), so it may be a sibling of the old element's sketch moved
+        into its place (PLAN decision 155)."""
+        self.assertFalse(feature.isValid(), feature.Name)
+        rows = App.getReferenceReport(feature)
+        self.assertIn("broken", [e["status"] for e in rows], rows)
+        self.assertTrue(
+            any("has another source element" in e.get("evidence", "") for e in rows), rows
+        )
+
+    def testExactPlaceRedrawInPlaceBreaks(self):
         """The first rim drawn again exactly where it was: no name relates the chamfered edge to
         the new rim's, and the board's other top edge lies 45 mm from it, within tier 3's d_max.
-        The gap test broke the reference; the one edge at the saved place, with the saved length,
-        is the element: resolved at tier 3, with the quieter same-place warning (decision 97)."""
+        The one edge at the saved place, with the saved length, is the element, but its line lost
+        the old line's ID, as a sibling line dragged there would (testRimMovedIntoAVacatedPlace):
+        it breaks until D2 (ops#526) tells them apart. Before PLAN decision 155 it was resolved at
+        tier 3 with the quieter same-place warning (decision 97 Q4)."""
         doc = self.newDocument()
         pad, chamfer = self.chamferedRims(doc)
 
         self.redrawFirstRim(doc, [(3600, 45), (3600, 0), (0, 0), (0, 45)])
 
-        self.assertTrue(chamfer.isValid(), chamfer.getStatusString())
-        self.assertChamferAt(chamfer, pad, (1800, 0, 235))
+        self.assertBrokenAtThePlace(chamfer)
         [entry] = App.getReferenceReport(chamfer)
-        self.assertEqual((entry["status"], entry["tier"]), ("resolved", 3), entry["evidence"])
-        self.assertEqual(entry["warning_level"], "same-place")
         self.assertTrue(
             entry["evidence"].startswith("no structural candidate, at the same place:"),
             entry["evidence"],
         )
+
+    def testRimMovedIntoAVacatedPlaceBreaks(self):
+        """PR 379 round 3's Opus review: a third rim at y = 2000 in the same sketch; the first
+        rim's lines deleted and the third rim's moved (IDs kept) onto the first rim's place. Its
+        outer top edge lies at the saved place, a sibling's edge that existed before the edit: the
+        chamfer breaks, never taken there quietly (PLAN decision 155)."""
+        doc = self.newDocument()
+        body = models.body(doc)
+        geometry = (
+            models.rectangle(0, 0, 3600, 45)
+            + models.rectangle(0, 2000, 3600, 2045)
+            + models.rectangle(0, 4045, 3600, 4090)
+        )
+        profile = models.sketch(doc, "Profile", geometry, body)
+        pad = models.pad(body, profile, 235, "Rims")
+        doc.recompute()
+        chamfer = body.newObject("PartDesign::Chamfer", "Chamfer")
+        chamfer.Base = (pad, edge("line", direction=X, through=(0, 0, 235)).one(pad.Shape))
+        chamfer.Size = 5
+        doc.recompute()
+        self.assertTrue(chamfer.isValid(), chamfer.getStatusString())
+
+        models.moveRectangle(profile, 0, 0, 3600, 45, first=4)
+        profile.delGeometries([0, 1, 2, 3])
+        doc.recompute()
+
+        self.assertBrokenAtThePlace(chamfer)
 
     def testExactPlaceNeedsTheSameSize(self):
         """The control: the first rim drawn again 3000 long from the same corner. Its top edge's
@@ -3015,8 +3080,7 @@ class TestNamingSolver(unittest.TestCase):
         """The cloud review's pre-existing path, without the twin clause: A moved off the edge to
         (100, 10), so both its crossings are gone and T1' drops B's (another circle of the
         sketch); B moved to (100 + 2 * 0.866, 0.5), its left crossing exactly at the saved place.
-        G2 may guess it (policy D: same sketch and Pocket), with the normal warning; never at the
-        quiet same-place level, which can't tell it from A's circle drawn there again."""
+        Nothing tells it from A's circle drawn there again: the point breaks (PLAN decision 155)."""
         doc = self.newDocument()
         holes, point = self.sameSketchHoles(doc)
         half = 0.75**0.5
@@ -3025,9 +3089,22 @@ class TestNamingSolver(unittest.TestCase):
         holes.moveGeometry(1, 3, App.Vector(100 + 2 * half, 0.5, 0), False)
         doc.recompute()
 
-        if point.isValid():
-            levels = [e.get("warning_level") for e in App.getReferenceReport(point)]
-            self.assertIn("normal", levels, point.Name)
+        self.assertBrokenAtThePlace(point)
+
+    def testSiblingCirclesCrossingAtThePlaceWithTheHoleOffThePlateBreaks(self):
+        """S1 (PR 379 round 3's cloud review): the same edit with A moved off the plate. A's
+        circle is still in the sketch, but no element of the Pocket's shape holds its ID, so the
+        batch took B's crossing at the saved place quietly, as if A's circle had been drawn there
+        again. The point breaks (PLAN decision 155)."""
+        doc = self.newDocument()
+        holes, point = self.sameSketchHoles(doc)
+        half = 0.75**0.5
+
+        holes.moveGeometry(0, 3, App.Vector(100, -50, 0), False)
+        holes.moveGeometry(1, 3, App.Vector(100 + 2 * half, 0.5, 0), False)
+        doc.recompute()
+
+        self.assertBrokenAtThePlace(point)
 
     @unittest.expectedFailure
     def testCrossingWhoseTwinBecameTheSeamVertexIsLoud(self):
@@ -3098,11 +3175,11 @@ class TestNamingSolver(unittest.TestCase):
         else:
             self.assertIn("broken", [e["status"] for e in rows], rows)
 
-    def testExactPlaceFromAnotherSketchWarns(self):
+    def testExactPlaceFromAnotherSketchBreaks(self):
         """XP's source condition (ops#503 D1): the rims padded from a new sketch with the same
         rectangles. The chamfered edge's name misses, and the one edge at its saved place comes
-        from another sketch, policy D's new sketch object: the pick is warned at the normal
-        level, never the quieter same-place one, and the evidence says so."""
+        from another sketch, policy D's new sketch object: it lost the old edge's sources, so it
+        breaks like a redraw (PLAN decision 155)."""
         doc = self.newDocument()
         pad, chamfer = self.chamferedRims(doc)
 
@@ -3110,9 +3187,4 @@ class TestNamingSolver(unittest.TestCase):
         pad.Profile = models.sketch(doc, "Redrawn", geometry, pad.getParentGeoFeatureGroup())
         doc.recompute()
 
-        self.assertTrue(chamfer.isValid(), chamfer.getStatusString())
-        self.assertChamferAt(chamfer, pad, (1800, 0, 235))
-        [entry] = App.getReferenceReport(chamfer)
-        self.assertEqual((entry["status"], entry["tier"]), ("resolved", 3), entry["evidence"])
-        self.assertEqual(entry["warning_level"], "normal", entry["evidence"])
-        self.assertIn("another source", entry["evidence"])
+        self.assertBrokenAtThePlace(chamfer)
