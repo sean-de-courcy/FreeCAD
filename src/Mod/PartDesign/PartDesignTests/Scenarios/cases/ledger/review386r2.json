@@ -1,0 +1,18 @@
+{
+"run": {"cases": 13, "dirty": false, "platform": "win32", "sha": "83d922433347a2f720bd97f761c8c9f52556ba58", "tier": "F", "time": "2026-10-27T12:34:50Z"},
+"entries": {
+"GoneThenIdentityRewrite|gone|V2s": {"axes": ["M1", "E9"], "classes": ["E"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr386-r2", "issue": "ops#504", "tier": "F"},
+"MissingRewriteThenRestore|missing|V2s": {"axes": ["M1", "E9"], "classes": ["E"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr386-r2", "issue": "ops#504", "tier": "F"},
+"PendingEditAddEntry|pending|V2s": {"axes": ["M1", "E9"], "classes": ["E"], "expect": "WARNED", "expected": "quiet", "found_by": "review pr386-r2", "issue": "ops#504", "tier": "F"},
+"PendingEditRewriteXLinkSub|pending|V2s": {"axes": ["M1", "E9"], "classes": ["E"], "expect": "WARNED", "expected": "quiet", "found_by": "review pr386-r2", "issue": "ops#504", "tier": "F"},
+"PendingEditRewrite|pending|V2s": {"axes": ["M1", "E9"], "classes": ["E"], "expect": "WARNED", "expected": "quiet", "found_by": "review pr386-r2", "issue": "ops#504", "tier": "F"},
+"PendingWidenRewriteLinkSub|pending|V2s": {"axes": ["M1", "E9"], "classes": ["E"], "expect": "WARNED", "expected": "quiet", "found_by": "review pr386-r2", "issue": "ops#504", "tier": "F"},
+"PendingWidenRewrite|pending|V2s": {"axes": ["M1", "E9"], "classes": ["E"], "expect": "WARNED", "expected": "quiet", "found_by": "review pr386-r2", "issue": "ops#504", "tier": "F"},
+"PiecesIdentityThenMerge|fillet_edge|V2s": {"axes": ["M1", "E2", "E9"], "classes": ["E"], "expect": "CORRECT", "expected": "guessed", "found_by": "review pr386-r2", "issue": "ops#504", "tier": "F"},
+"PiecesPlusBackThenMerge|fillet_edge|V2s": {"axes": ["M1", "E2", "E9"], "classes": ["E"], "expect": "CORRECT", "expected": "guessed", "found_by": "review pr386-r2", "issue": "ops#504", "tier": "F"},
+"PiecesReversedThenMerge|fillet_edge|V2s": {"axes": ["M1", "E2", "E9"], "classes": ["E"], "expect": "CORRECT", "expected": "guessed", "found_by": "review pr386-r2", "issue": "ops#504", "tier": "F"},
+"SketchDelExternalKeepsGuess|kept_external|V2s": {"axes": ["M1", "E9"], "classes": ["E"], "expect": "WARNED", "expected": "quiet", "found_by": "review pr386-r2", "issue": "ops#504", "tier": "F"},
+"TargetAheadIdentityRewrite|ahead|V2s": {"axes": ["M1", "E9"], "classes": ["E"], "expect": "WARNED", "expected": "quiet", "found_by": "review pr386-r2", "issue": "ops#504", "tier": "F"},
+"UndoAddedEntry|undone|V2s": {"axes": ["M1", "E9"], "classes": ["E"], "expect": "WARNED", "expected": "quiet", "found_by": "review pr386-r2", "issue": "ops#504", "tier": "F"}
+}
+}
