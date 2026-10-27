@@ -4571,9 +4571,21 @@ private:
     TopoDS_Shape face;
 };
 
-/// The UPP index of each element of `shape` that is named from other elements by `op`, by the
-/// names it is named from and its end: `end(centre)` says which end of the shape an element is
-/// at (0 or 1), or -1 for one to skip.
+/// A twin's place among its group: `k` of the section's `<k>of<n>` DuplicateCount (the size
+/// rule, `naming-class-A.md` M2 (a)), 0 for a lone member (`0`); -1 when the place isn't there
+/// (an Index other than `0`).
+int twinPlaceOf(const DecodedMappedSection& section)
+{
+    if (section.index != "0") {
+        return -1;
+    }
+    const auto of = section.duplicateCount.find("of");
+    return std::stoi(of == std::string::npos ? section.duplicateCount : section.duplicateCount.substr(0, of));
+}
+
+/// The UPP place (twinPlaceOf) of each element of `shape` that is named from other elements by
+/// `op`, by the names it is named from and its end: `end(centre)` says which end of the shape an
+/// element is at (0 or 1), or -1 for one to skip.
 std::map<std::vector<std::string>, std::map<int, int>> upperIndexesByEnd(
     const TopoShape& shape,
     const char* op,
@@ -4608,7 +4620,7 @@ std::map<std::vector<std::string>, std::map<int, int>> upperIndexesByEnd(
             }
             std::vector<std::string> list = section.linkedNames;
             list.insert(list.begin(), typeName);
-            indexes[list][atEnd] = std::stoi(section.index);
+            indexes[list][atEnd] = twinPlaceOf(section);
         }
     }
     return indexes;
@@ -4746,7 +4758,7 @@ TEST_F(TopoShapeExpansionTest, makeShapeWithElementMapPipeShellEndsFollowProfile
                     );
                     EXPECT_EQ(section.opCode, OpCodes::PipeShell);
                     EXPECT_TRUE(section.hasMapperFlag(MAPPER_FLAG_GENERATED));
-                    EXPECT_EQ(section.index, std::to_string(place))
+                    EXPECT_EQ(twinPlaceOf(section), static_cast<int>(place))
                         << degrees << " degrees, z " << z << ", E" << place + 1;
                 }
             }
@@ -4804,9 +4816,9 @@ TEST_F(TopoShapeExpansionTest, makeShapeWithElementMapPipeLegsFollowSpineOrderV2
                 EXPECT_TRUE(section.hasMapperFlag(MAPPER_FLAG_GENERATED)) << leg;
                 EXPECT_EQ(section.linkedNames, legs["up"].linkedNames) << leg;
             }
-            EXPECT_EQ(legs["up"].index, "0") << degrees << " degrees, down " << downLength;
-            EXPECT_EQ(legs["across"].index, "1") << degrees << " degrees, down " << downLength;
-            EXPECT_EQ(legs["down"].index, "2") << degrees << " degrees, down " << downLength;
+            EXPECT_EQ(twinPlaceOf(legs["up"]), 0) << degrees << " degrees, down " << downLength;
+            EXPECT_EQ(twinPlaceOf(legs["across"]), 1) << degrees << " degrees, down " << downLength;
+            EXPECT_EQ(twinPlaceOf(legs["down"]), 2) << degrees << " degrees, down " << downLength;
         }
     }
 }
@@ -4977,7 +4989,7 @@ TEST_F(TopoShapeExpansionTest, makeElementOffsetDividedCylinderMarksPeriodicList
                 continue;
             }
             EXPECT_EQ(section.index, "0") << type << index;
-            EXPECT_TRUE(section.hasMapperFlag(MAPPER_FLAG_ORDERED)) << type << index;
+            EXPECT_TRUE(section.hasMapperFlag(MAPPER_FLAG_ORDERED)) << type << index << " " << name;
             std::string key = name.toString();
             key.replace(key.rfind(section.duplicateCount), section.duplicateCount.size(), "*");
             lists[key].push_back(section.duplicateCount);
@@ -5121,7 +5133,7 @@ TEST_F(TopoShapeExpansionTest, makeElementFuseOfRectangleGridKeepsNamesWhenTurne
             unturned.getMappedName(IndexedName::fromConst("Edge", index))
         );
         upperFromOneFace += section.hasMapperFlag(MAPPER_FLAG_UPPER)
-            && section.linkedNames.size() == 1 && section.index == "1";
+            && section.linkedNames.size() == 1 && twinPlaceOf(section) == 1;
     }
     EXPECT_GT(upperFromOneFace, 0);  // the case is there
 
@@ -5318,8 +5330,8 @@ namespace
 {
 /// The model B of `naming-class-A.md` 4.1 (CC1): box A, 10 mm at the origin, and box B, 10 mm at
 /// (5, -5, 2), fused in the order A, B or (`reordered`) B, A, then cut by a cylinder of radius 1
-/// along Z through (5, 0.3). The fuse's section edge y = 0, z = 2 (A's front face meets B's
-/// bottom face) is crossed twice, at x = 5 -+ 0.954. The crossings' names, by x.
+/// along Z through (7.5, 0.3). The fuse's section edge y = 0, z = 2, x 5 .. 10 (A's front face
+/// meets B's bottom face) is crossed twice, at x = 7.5 -+ 0.954. The crossings' names, by x.
 std::vector<std::string> sectionCrossingNames(bool reordered)
 {
     TopoShape a(App::HistoryAlgorithm::V2, BRepPrimAPI_MakeBox(10.0, 10.0, 10.0).Shape(), 1L);
@@ -5332,7 +5344,7 @@ std::vector<std::string> sectionCrossingNames(bool reordered)
     fused.makeElementFuse(reordered ? std::vector<TopoShape> {b, a} : std::vector<TopoShape> {a, b});
     TopoShape cylinder(
         App::HistoryAlgorithm::V2,
-        BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(5.0, 0.3, -3.0), gp_Dir(0, 0, 1)), 1.0, 20.0).Shape(),
+        BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(7.5, 0.3, -3.0), gp_Dir(0, 0, 1)), 1.0, 20.0).Shape(),
         4L
     );
     TopoShape result(App::HistoryAlgorithm::V2, 5L);
@@ -5342,7 +5354,7 @@ std::vector<std::string> sectionCrossingNames(bool reordered)
     for (const auto& vertex : result.getSubShapes(TopAbs_VERTEX)) {
         ++index;
         const gp_Pnt p = BRep_Tool::Pnt(TopoDS::Vertex(vertex));
-        if (std::abs(p.Y()) < 1e-6 && std::abs(p.Z() - 2) < 1e-6 && std::abs(p.X() - 5) < 1.5) {
+        if (std::abs(p.Y()) < 1e-6 && std::abs(p.Z() - 2) < 1e-6 && std::abs(p.X() - 7.5) < 1.5) {
             found.emplace_back(
                 p.X(),
                 result.getMappedName(IndexedName::fromConst("Vertex", index)).toString()
@@ -5513,64 +5525,76 @@ TEST_F(TopoShapeExpansionTest, makeElementFuseSplitEdgeIgnoresInputOrderV2)
 TEST_F(TopoShapeExpansionTest, genericShapeMapperFallbackFollowsFaceOrderV2)
 {
     // Arrange
-    //   two 10 mm boxes side by side, fused, and refined: the block's top face merges the boxes'
-    //   top faces, and shares no two edges with one of them (its long edges are merged too), so
-    //   the mapper falls back on geometry: both top faces lie in its plane. It took the first in
-    //   an unordered_map's order, which follows hashes (H1, `naming-class-A.md` M2 (f)); it takes
-    //   the first in the source's order of its faces. The source is also stored with its
-    //   children in reverse order, which reverses its faces' order
-    TopoShape a(App::HistoryAlgorithm::V2, BRepPrimAPI_MakeBox(10.0, 10.0, 10.0).Shape(), 1L);
-    TopoShape b(
-        App::HistoryAlgorithm::V2,
-        BRepPrimAPI_MakeBox(gp_Pnt(10.0, 0.0, 0.0), 10.0, 10.0, 10.0).Shape(),
-        2L
-    );
-    TopoShape fused(App::HistoryAlgorithm::V2, 3L);
-    fused.makeElementFuse({a, b});
-    auto onTop = [](const TopoDS_Shape& face) {
-        GProp_GProps props;
-        BRepGProp::SurfaceProperties(face, props);
-        return std::abs(props.CentreOfMass().Z() - 10) < 1e-6;
+    //   two square faces side by side in the plane z = 0, [0, 10] x [0, 10] and [10, 20] x
+    //   [0, 10], sharing their edge x = 10; and the face [0, 20] x [0, 10] in the same plane,
+    //   bounded by the first face's edge x = 0, the second's edge x = 20 and two new long edges.
+    //   It shares one edge with each square, so the mapper falls back on geometry: both squares
+    //   lie in its plane. It took the first square in an unordered_map's order, which follows
+    //   hashes (H1, `naming-class-A.md` M2 (f)); it takes the first in the source's order of its
+    //   faces. The source is also stored with its children in reverse order, which reverses its
+    //   faces' order. (A refine can't reach the fallback: it rebuilds the merged face's edges.)
+    auto vertexAt = [](double x, double y) {
+        return BRepBuilderAPI_MakeVertex(gp_Pnt(x, y, 0)).Vertex();
     };
+    const TopoDS_Vertex v00 = vertexAt(0, 0);
+    const TopoDS_Vertex v10 = vertexAt(10, 0);
+    const TopoDS_Vertex v20 = vertexAt(20, 0);
+    const TopoDS_Vertex v01 = vertexAt(0, 10);
+    const TopoDS_Vertex v11 = vertexAt(10, 10);
+    const TopoDS_Vertex v21 = vertexAt(20, 10);
+    auto edgeFrom = [](const TopoDS_Vertex& start, const TopoDS_Vertex& end) {
+        return BRepBuilderAPI_MakeEdge(start, end).Edge();
+    };
+    const TopoDS_Edge left = edgeFrom(v01, v00);
+    const TopoDS_Edge middle = edgeFrom(v10, v11);
+    const TopoDS_Edge right = edgeFrom(v20, v21);
+    const gp_Pln plane(gp::XOY());
+    auto faceOf = [&plane](std::initializer_list<TopoDS_Edge> edges) {
+        BRepBuilderAPI_MakeWire wire;
+        for (const auto& edge : edges) {
+            wire.Add(edge);
+        }
+        return BRepBuilderAPI_MakeFace(plane, wire.Wire()).Face();
+    };
+    const TopoDS_Face first
+        = faceOf({edgeFrom(v00, v10), middle, edgeFrom(v11, v01), left});
+    const TopoDS_Face second
+        = faceOf({edgeFrom(v10, v20), right, edgeFrom(v21, v11), TopoDS::Edge(middle.Reversed())});
+    const TopoDS_Face merged = faceOf({edgeFrom(v00, v20), right, edgeFrom(v21, v01), left});
+    BRep_Builder builder;
+    TopoDS_Compound squares;
+    builder.MakeCompound(squares);
+    builder.Add(squares, first);
+    builder.Add(squares, second);
+    TopoDS_Compound result;
+    builder.MakeCompound(result);
+    builder.Add(result, merged);
 
     for (const bool reversed : {false, true}) {
         SCOPED_TRACE(reversed);
         TopTools_DataMapOfShapeShape copies;
         const TopoDS_Shape source = reversed
-            ? reverseChildOrder(fused.getShape(), Reversed::All, TopTools_MapOfShape(), copies)
-            : fused.getShape();
+            ? reverseChildOrder(squares, Reversed::All, TopTools_MapOfShape(), copies)
+            : TopoDS_Shape(squares);
         const TopoShape src(source);
-        BRepBuilderAPI_RefineModel refine(source);
-        ASSERT_TRUE(refine.IsDone());
 
         // Act
         GenericShapeMapper mapper;
-        mapper.init(src, refine.Shape());
+        mapper.init(src, result);
 
         // Assert
-        //   the merged top face is generated from the source's first top face, not the other
-        TopoDS_Shape merged;
-        for (const auto& face : TopoShape(refine.Shape()).getSubShapes(TopAbs_FACE)) {
-            if (onTop(face)) {
-                merged = face;
-            }
-        }
-        ASSERT_FALSE(merged.IsNull());
-        std::vector<TopoDS_Shape> tops;
-        for (const auto& face : src.getSubShapes(TopAbs_FACE)) {
-            if (onTop(face)) {
-                tops.push_back(face);
-            }
-        }
-        ASSERT_EQ(tops.size(), 2);
+        //   the face is generated from the source's first square, not the other
+        const std::vector<TopoDS_Shape> faces = src.getSubShapes(TopAbs_FACE);
+        ASSERT_EQ(faces.size(), 2);
         auto generates = [&mapper, &merged](const TopoDS_Shape& face) {
             const auto& generated = mapper.generated(face);
             return std::any_of(generated.begin(), generated.end(), [&merged](const TopoDS_Shape& g) {
                 return g.IsSame(merged);
             });
         };
-        EXPECT_TRUE(generates(tops[0]));
-        EXPECT_FALSE(generates(tops[1]));
+        EXPECT_TRUE(generates(faces[0]));
+        EXPECT_FALSE(generates(faces[1]));
+        EXPECT_TRUE(faces[0].IsSame(reversed ? second : first));
     }
 }
 
@@ -5613,11 +5637,11 @@ TEST_F(TopoShapeExpansionTest, makeElementCutNamesTwinLinesByTheirPlaceV2)
         BRepGProp::LinearProperties(edge, props);
         const gp_Pnt center = props.CentreOfMass();
         if (std::abs(center.Y()) < 1e-6 && std::abs(center.Z() - 5) < 1e-6) {
-            const DecodedMappedSection section
-                = lastSection(original.getMappedName(IndexedName::fromConst("Edge", index)));
-            EXPECT_TRUE(section.hasMapperFlag(MAPPER_FLAG_GENERATED));
-            EXPECT_TRUE(section.hasMapperFlag(MAPPER_FLAG_ORDERED));
-            EXPECT_EQ(section.index, "0");
+            const MappedName name = original.getMappedName(IndexedName::fromConst("Edge", index));
+            const DecodedMappedSection section = lastSection(name);
+            EXPECT_TRUE(section.hasMapperFlag(MAPPER_FLAG_GENERATED)) << name;
+            EXPECT_TRUE(section.hasMapperFlag(MAPPER_FLAG_ORDERED)) << name;
+            EXPECT_EQ(section.index, "0") << name;
             places.insert(section.duplicateCount);
         }
     }
