@@ -3697,7 +3697,7 @@ Part::TopoShape wireAlong(
             const Part::TopoShape& old = named.back();
             Part::TopoShape renamed(edges[k], old.Tag, old.Hasher, old.getHistoryAlgorithm());
             renamed.setElementName(Data::IndexedName::fromConst("Edge", 1), names[k], old.Tag);
-            for (int v = 1; v <= old.countSubShapes(TopAbs_VERTEX); ++v) {
+            for (int v = 1; v <= static_cast<int>(old.countSubShapes(TopAbs_VERTEX)); ++v) {
                 const int at = renamed.findShape(old.getSubShape(TopAbs_VERTEX, v));
                 if (at <= 0) {
                     continue;
@@ -4188,7 +4188,7 @@ std::vector<std::string> spineIdentity(
         edges.push_back(mapped ? mapped.toString() : sub);
     };
     if (subs.empty()) {
-        for (int i = 1; i <= shape.countSubShapes(TopAbs_EDGE); ++i) {
+        for (int i = 1; i <= static_cast<int>(shape.countSubShapes(TopAbs_EDGE)); ++i) {
             add("Edge" + std::to_string(i));
         }
     }
