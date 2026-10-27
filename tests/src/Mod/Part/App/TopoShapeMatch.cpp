@@ -471,6 +471,24 @@ TEST_F(TopoShapeMatchDocument, featureShapeIsNamedByMatch)
     EXPECT_EQ(feature->Shape.getNextElementId(), 27);
 }
 
+// A result with no elements (a Common of shapes that don't touch: an empty compound) has nothing
+// to name: it is set as it is (the hook once called itself on it until the stack ran out)
+TEST_F(TopoShapeMatchDocument, emptyResultIsSetWithoutNames)
+{
+    auto feature = _doc->addObject<Part::Feature>("Thing");
+    feature->Shape.setValue(Part::TopoShape(box(0)));
+    BRep_Builder builder;
+    TopoDS_Compound empty;
+    builder.MakeCompound(empty);
+    feature->Shape.setValue(Part::TopoShape(empty));
+    EXPECT_FALSE(feature->Shape.getShape().isNull());
+    EXPECT_EQ(feature->Shape.getShape().getElementMapSize(), 0U);
+    EXPECT_EQ(feature->Shape.getNextElementId(), 27);
+    // and a later result is still named past the earlier ids
+    feature->Shape.setValue(Part::TopoShape(box(0)));
+    EXPECT_EQ(Part::matchedId(feature->Shape.getShape(), "Vertex1"), 27);
+}
+
 // A primitive whose face count changes keeps its end faces (ops#502's find: a sketch on a Prism's
 // top moved to a side)
 TEST_F(TopoShapeMatchDocument, prismGivenMoreSidesKeepsItsEndFaces)

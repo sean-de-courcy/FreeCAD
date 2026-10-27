@@ -285,8 +285,11 @@ void PropertyPartShape::setValue(const TopoShape& sh)
         auto owner = static_cast<Part::Feature*>(getContainer());
         TopoShape named(sh);
         nameByMatch(named, owner->getID(), owner->isDerivedFrom<Part::Primitive>());
-        setValue(named);
-        return;
+        if (named.getElementMapSize() > 0) {
+            setValue(named);
+            return;
+        }
+        // Nothing to name (an empty compound): set as it is, not through the match again
     }
     aboutToSetValue();
     _Shape = sh;
