@@ -429,10 +429,18 @@ PyObject* ComplexGeoDataPy::setElementName(PyObject* args, PyObject* kwds)
         Data::IndexedName index(element, getComplexGeoDataPtr()->getElementTypes());
         Data::MappedName mapped = Data::MappedName::fromRawData(name);
         std::ostringstream ss;
-        ElementMapPtr map = getComplexGeoDataPtr()->resetElementMap();
+        // The shape's own map, made if it has none (FreeCAD-CH, ops#502): resetElementMap()
+        // took the map away and wrote into the detached one. A map shared with copies of the
+        // shape is copied first, so they keep their names.
+        auto data = getComplexGeoDataPtr();
+        ElementMapPtr map = data->resetElementMap();
         if (!map) {
-            throw Py::RuntimeError("no element map");
+            map = std::make_shared<Data::ElementMap>();
         }
+        else if (map.use_count() > 1) {
+            map = map->copy();
+        }
+        data->resetElementMap(map);
 
         map->encodeElementName(getComplexGeoDataPtr()->elementType(index),
                                mapped,

@@ -53,7 +53,9 @@
 
 #include "PartFeature.h"
 #include "PartPyCXX.h"
+#include "PrimitiveFeature.h"
 #include "PropertyTopoShape.h"
+#include "TopoShapeMatch.h"
 #include "TopoShapePy.h"
 #include "PartFeature.h"
 
@@ -262,8 +264,30 @@ PropertyPartShape::PropertyPartShape() = default;
 
 PropertyPartShape::~PropertyPartShape() = default;
 
+bool PropertyPartShape::namesByMatch(const TopoShape& shape) const
+{
+    auto owner = freecad_cast<Part::Feature*>(getContainer());
+    return owner && owner->isAttachedToDocument() && owner->getPropertyOfGeometry() == this
+        && owner->getSelectedHistoryAlgorithm() == App::HistoryAlgorithm::V2 && !shape.isNull()
+        && shape.getElementMapSize() == 0;
+}
+
+void PropertyPartShape::nameByMatch(TopoShape& shape, long tag, bool fixedOrder)
+{
+    Part::nameByMatch(shape, _Shape, tag, _NextElementId, fixedOrder);
+}
+
 void PropertyPartShape::setValue(const TopoShape& sh)
 {
+    if (namesByMatch(sh)) {
+        // A result without history (a primitive, a Python feature's shape): its elements take
+        // the ids of the elements of the value it replaces that they are (ops#502)
+        auto owner = static_cast<Part::Feature*>(getContainer());
+        TopoShape named(sh);
+        nameByMatch(named, owner->getID(), owner->isDerivedFrom<Part::Primitive>());
+        setValue(named);
+        return;
+    }
     aboutToSetValue();
     _Shape = sh;
     auto obj = freecad_cast<App::DocumentObject*>(getContainer());
@@ -326,6 +350,12 @@ void PropertyPartShape::setValue(const TopoShape& sh)
 
 void PropertyPartShape::setValue(const TopoDS_Shape& sh, bool resetElementMap)
 {
+    if (TopoShape shape {sh}; namesByMatch(shape)) {
+        // Named by a match, not by index: even a map kept for the same topology (a Box's) would
+        // be attached by index (ops#502)
+        setValue(shape);
+        return;
+    }
     aboutToSetValue();
     auto obj = dynamic_cast<App::DocumentObject*>(getContainer());
     if (obj) {
@@ -475,6 +505,7 @@ App::Property* PropertyPartShape::Copy() const
     //        prop->_Shape = this->_Shape;
     prop->_Shape = this->_Shape;
     prop->_Ver = this->_Ver;
+    prop->_NextElementId = this->_NextElementId;
     return prop;
 }
 
@@ -484,6 +515,9 @@ void PropertyPartShape::Paste(const App::Property& from)
     if (prop) {
         setValue(prop->_Shape);
         _Ver = prop->_Ver;
+        // The counter only grows: an undo that brings back an older shape keeps the ids given
+        // since, so none is given twice (ops#502)
+        _NextElementId = std::max(_NextElementId, prop->_NextElementId);
     }
 }
 
@@ -646,6 +680,9 @@ void PropertyPartShape::Save(Base::Writer& writer) const
 
     writer.Stream() << " HistoryAlgorithm=\""
                     << App::getHistoryAlgorithm(_Shape.getHistoryAlgorithm()) << "\"";
+    if (_NextElementId > 0) {
+        writer.Stream() << " ElementIdNext=\"" << _NextElementId << "\"";
+    }
 
     std::string version;
     // If exporting, do not export mapped element name, but still make a mark
@@ -709,6 +746,7 @@ void PropertyPartShape::Restore(Base::XMLReader& reader)
     int hasher_idx = reader.getAttribute<int>("HasherIndex", -1);
     int save_hasher = reader.getAttribute<int>("SaveHasher", 0);
     int history_algorithm = reader.getAttribute<int>("HistoryAlgorithm", 0);
+    _NextElementId = std::max(_NextElementId, reader.getAttribute<long>("ElementIdNext", 0L));
 
     _Shape.setHistoryAlgorithm(App::getHistoryAlgorithm(history_algorithm));
     // The document's properties are restored before its objects
