@@ -157,7 +157,10 @@ namespace
 // `CPY;L` with the link's ID, and a link array's element n `CPY;L<n>` with the array's ID, in
 // either ShowElement mode and across documents too (10 and 11 are reserved by ops#469
 // and ops#468: whichever merges later takes the next number).
-constexpr int ForkNamingRevision = 12;
+// 13: ops#502, a result without history (a Part primitive, a Python feature's shape, a PartDesign
+// primitive's tool) names its elements by a verified match against the result it replaces (`MLN`
+// ids from a counter saved with the shape), where its consumers named them by index.
+constexpr int ForkNamingRevision = 13;
 
 // The `.N<n>` of the element map version: the form interned names are saved in (ops#6). 2: the
 // references are indices into the file's table (NamingFormat 2).
