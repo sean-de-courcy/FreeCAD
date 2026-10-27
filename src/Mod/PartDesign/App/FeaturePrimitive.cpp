@@ -94,6 +94,11 @@ App::DocumentObjectExecReturn* FeaturePrimitive::execute(const TopoDS_Shape& pri
 
         catch (const Base::Exception&) {
 
+            // The tool has no history: its elements take the ids of the previous tool's elements
+            // they are (ops#502), here and before the boolean below
+            if (getSelectedHistoryAlgorithm() == App::HistoryAlgorithm::V2) {
+                AddSubShape.nameByMatch(primitiveShape, this->getID(), true);
+            }
             // as we use this for preview we can add it even if useless for subtractive
             AddSubShape.setValue(primitiveShape);
 
@@ -108,6 +113,9 @@ App::DocumentObjectExecReturn* FeaturePrimitive::execute(const TopoDS_Shape& pri
             }
 
             return App::DocumentObject::StdReturn;
+        }
+        if (getSelectedHistoryAlgorithm() == App::HistoryAlgorithm::V2) {
+            AddSubShape.nameByMatch(primitiveShape, primitiveShape.Tag, true);
         }
         AddSubShape.setValue(primitiveShape);
 
