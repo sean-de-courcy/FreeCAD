@@ -1,5 +1,5 @@
 {
-"run": {"cases": 1, "dirty": false, "platform": "win32", "sha": "be22bfdf49835bf42dd55cc16aa20bc68e9da46b", "tier": "F", "time": "2026-10-27T12:46:53Z"},
+"run": {"cases": 1, "dirty": false, "platform": "win32", "sha": "a07084f9cceb033d2ee68892aefdc4bbb8c23f07", "tier": "F", "time": "2026-10-27T12:55:19Z"},
 "entries": {
 "SketchExternalIdsAfterChamfer|external_top|V2s": {"axes": ["M8", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "wrong", "found_by": "port", "issue": "ops#500", "tier": "F"}
 }

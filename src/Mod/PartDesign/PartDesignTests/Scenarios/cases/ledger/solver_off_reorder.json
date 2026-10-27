@@ -1,5 +1,5 @@
 {
-"run": {"cases": 1, "dirty": false, "platform": "win32", "sha": "be22bfdf49835bf42dd55cc16aa20bc68e9da46b", "tier": "F", "time": "2026-10-27T12:46:53Z"},
+"run": {"cases": 1, "dirty": false, "platform": "win32", "sha": "a07084f9cceb033d2ee68892aefdc4bbb8c23f07", "tier": "F", "time": "2026-10-27T12:55:19Z"},
 "entries": {
 "SolverOffReorder|base_link|V2s": {"axes": ["M1", "E2", "X3"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#504", "tier": "F"}
 }
