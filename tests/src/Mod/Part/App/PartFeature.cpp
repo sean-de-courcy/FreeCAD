@@ -179,7 +179,10 @@ TEST_F(FeaturePartTest, getElementHistory)
     EXPECT_NE(histItem.tag, 0);  // Make sure we have one.  It will vary.
     EXPECT_EQ(histItem.index.getIndex(), 2);
     EXPECT_STREQ(histItem.index.getType(), "Edge");
-    EXPECT_STREQ(histItem.element.toString().c_str(), name2);
+    //   the box is named by a match (MLN, ops#502): its element's name is its own mapped name
+    const auto boxName = _boxes[0]->Shape.getShape().getMappedName(Data::IndexedName(name2));
+    EXPECT_NE(boxName.toString().find(";MLN;"), std::string::npos);
+    EXPECT_EQ(histItem.element.toString(), boxName.toString());
     EXPECT_EQ(histItem.obj, _boxes[0]);
 }
 
@@ -208,7 +211,8 @@ TEST_F(FeaturePartTest, getRelatedElements)
     );
     // Assert
     EXPECT_EQ(result.size(), 1);   // Found the one.
-    EXPECT_EQ(result2.size(), 0);  // No element map, so no related elements
+    // the box is named by a match (MLN, ops#502): its edge is related to itself
+    EXPECT_EQ(result2.size(), 1);
     // The results are always going to vary, so we can't test for specific values:
     // EXPECT_STREQ(result.front().name.toString().c_str(),"Edge3;:M;CMN;:H38d:7,E");
 }
@@ -270,7 +274,11 @@ TEST_F(FeaturePartTest, getRelatedElementsOfAMissingNameV2)
     // Assert
     //   the old piece's history leads to the cube's top face (ops#27)
     EXPECT_EQ(tag, cube->getID());
-    EXPECT_EQ(original.toString(), "Face6");
+    //   (the cube is named by a match since ops#502: the top face's MLN name)
+    EXPECT_EQ(
+        original.toString(),
+        cube->Shape.getShape().getMappedName(Data::IndexedName("Face", 6)).toString()
+    );
     //   but getRelatedElements() can't read a missing V2 name's element type
     //   (ComplexGeoData::elementType() reads V1 postfixes and index names), so it finds nothing
     //   before it looks at the history. Its callers (Attacher, the Sketcher's
@@ -304,7 +312,8 @@ TEST_F(FeaturePartTest, getElementFromSource)
         false
     );
     // Assert
-    EXPECT_EQ(element.size(), 0);
+    //   the boxes are named by a match since ops#502: the box's face is found in the common
+    EXPECT_EQ(element.size(), 1);
 }
 
 TEST_F(FeaturePartTest, getSubObject)
@@ -1344,17 +1353,20 @@ TEST_F(FeaturePartTest, setValueNamesAnotherObjectsShapeWithoutMapV2)
     feature->Shape.setValue(shape);
 
     // Assert
-    //   every element has the name mapSubElement() gives an element of a shape without a map:
-    //   '<element>;_;7;MKR;0;<type>;0;IDX,SRC;_'
+    //   a result without history: its elements are named by a match against the feature's
+    //   previous value (ops#502), here none, so fresh ids under the feature's tag in index order,
+    //   vertexes first: '_;_;<feature>;MLN;<id>;<type>;0;_;_'
     const TopoShape& result = feature->Shape.getShape();
     EXPECT_EQ(result.Tag, feature->getID());
-    for (const char* type : {"Face", "Edge", "Vertex"}) {
+    long id = 1;
+    for (const char* type : {"Vertex", "Edge", "Face"}) {
         const auto count = static_cast<int>(result.countSubElements(type));
-        for (int index = 1; index <= count; ++index) {
+        for (int index = 1; index <= count; ++index, ++id) {
             Data::IndexedName element(type, index);
             EXPECT_EQ(
-                result.getMappedName(element),
-                Data::MappedName::makeUnmappedName({element.toString()}, 7, "MKR", type[0])
+                result.getMappedName(element).toString(),
+                "_;_;" + std::to_string(feature->getID()) + ";MLN;" + std::to_string(id) + ";"
+                    + type[0] + ";0;_;_"
             );
         }
     }
