@@ -1212,12 +1212,14 @@ def placeTurned(x, y, turn):
     )
 
 
-def profileUpToFreeformStrips(doc, kind, cuts, draw, turn=0, cornersTurned=False):
+def profileUpToFreeformStrips(doc, kind, cuts, draw, turn=0, cornersTurned=False, attach="XY"):
     """PR 366 round 4: a Pad from the profile `draw(sketch)` draws in the XY plane up to the
     B-spline strips freeformStripsShape(z, cuts) at z = 10 (UpToShape, Refine off), or a Pocket
     from it on top of the block x -8..18, y -8..9, z 0..10, down to the strips at z = 4. Round 5:
     the whole model turned by `turn` degrees about Z (the strips and the sketches); round 5b:
-    the strips made from turned corners if `cornersTurned`. Returns the feature and the height
+    the strips made from turned corners if `cornersTurned`. Round 9: the profile's sketch is
+    attached to the XY plane (`attach` "XY"), unattached and placed by its Placement ("none"), or
+    attached to a datum plane DP on the XY plane ("datum"). Returns the feature and the height
     of its far caps"""
     body = doc.addObject("PartDesign::Body", "Body")
     xy = [f for f in body.Origin.OriginFeatures if f.Role == "XY_Plane"][0]
@@ -1235,11 +1237,18 @@ def profileUpToFreeformStrips(doc, kind, cuts, draw, turn=0, cornersTurned=False
         blockPad.Profile = blockSketch
         blockPad.Length = 10
     sketch = body.newObject("Sketcher::SketchObject", "Profile")
-    sketch.AttachmentSupport = [(xy, "")]
-    sketch.MapMode = "FlatFace"
-    sketch.AttachmentOffset = FreeCAD.Placement(
-        FreeCAD.Vector(0, 0, 10 if kind == "Pocket" else 0), rotation
-    )
+    placement = FreeCAD.Placement(FreeCAD.Vector(0, 0, 10 if kind == "Pocket" else 0), rotation)
+    if attach == "none":
+        sketch.Placement = placement
+    else:
+        support = xy
+        if attach == "datum":
+            support = body.newObject("PartDesign::Plane", "DP")
+            support.AttachmentSupport = [(xy, "")]
+            support.MapMode = "FlatFace"
+        sketch.AttachmentSupport = [(support, "")]
+        sketch.MapMode = "FlatFace"
+        sketch.AttachmentOffset = placement
     draw(sketch)
     feature = body.newObject("PartDesign::" + kind, kind)
     feature.Profile = sketch
@@ -1364,6 +1373,19 @@ def ridgePlates(planar=False):
     return faces
 
 
+def seamPlates():
+    """PR 366 round 9: the faces, as a function of z, of two plates at z meeting at a seam: x
+    -10..0 and 0..10, y -12..12, each a B-spline face"""
+
+    def faces(z):
+        def plate(x0, x1):
+            return bsplinePlate([(x, y, z) for x, y in ((x0, -12), (x1, -12), (x1, 12), (x0, 12))])
+
+        return [plate(-10, 0), plate(0, 10)]
+
+    return faces
+
+
 def shellPointAt(shell, x, y):
     """PR 366 round 6: the point of `shell` above or below (x, y)"""
     line = Part.LineSegment(FreeCAD.Vector(x, y, -100), FreeCAD.Vector(x, y, 100)).toShape()
@@ -1413,7 +1435,18 @@ def savedFingerprints(path, names):
 
 
 def slideOntoReorderedPlates(
-    test, kind, faces, draw, places, move, order, after, reopen=False, capMax=50, savedInside=()
+    test,
+    kind,
+    faces,
+    draw,
+    places,
+    move,
+    order,
+    after,
+    reopen=False,
+    capMax=50,
+    savedInside=(),
+    mover="offset",
 ):
     """PR 366 round 6: as slideOntoReorderedStrips, up to the shell of `faces(z)` (a list of
     B-spline plates; z is the far caps' height where the plates are flat at it): datum points on
@@ -1426,14 +1459,19 @@ def slideOntoReorderedPlates(
     `reopen` "untouched", opened again and moved with nothing touched or recomputed first, so
     the references are solved from the fingerprints the file holds, not from new ones; the
     pieces in `savedInside` must have a point inside them in the file (its twelfth field).
-    `capMax`: as farPieceAt()'s"""
+    `capMax`: as farPieceAt()'s. Round 9: `mover` says what moves, the profile by its sketch's
+    attachment offset ("offset"), by the Placement of its unattached sketch ("placement") or by
+    the attachment offset of the datum plane its sketch is attached to ("datum"); or the plates
+    the other way, by their feature's Placement ("platesPlacement") or rebuilt there
+    ("platesGeometry"). The places are where the shapes are, with their placements"""
     import os
     import tempfile
 
+    attach = {"placement": "none", "datum": "datum"}.get(mover, "XY")
     doc = FreeCAD.newDocument("PadUpToReorderedPlates")
     work = tempfile.mkdtemp(prefix="pad-plates-reopen-") if reopen else None
     try:
-        feature, z = profileUpToFreeformStrips(doc, kind, (1, 3), draw)
+        feature, z = profileUpToFreeformStrips(doc, kind, (1, 3), draw, attach=attach)
         replaceUpToShape(feature, Part.Shell(faces(z)))
         doc.recompute()
         test.assertTrue(feature.isValid(), feature.getStatusString())
@@ -1461,12 +1499,27 @@ def slideOntoReorderedPlates(
             feature = doc.getObject(featureName)
             points = {piece: doc.getObject(name) for piece, name in names.items()}
         sketch = feature.Profile[0]
-        base = sketch.AttachmentOffset.Base
-        sketch.AttachmentOffset = FreeCAD.Placement(
-            FreeCAD.Vector(base.x + move[0], base.y + move[1], base.z), FreeCAD.Rotation()
-        )
+        shift = FreeCAD.Vector(move[0], move[1], 0)
+
+        def moved(placement, by):
+            return FreeCAD.Placement(placement.Base + by, placement.Rotation)
+
+        if mover == "offset":
+            sketch.AttachmentOffset = moved(sketch.AttachmentOffset, shift)
+        elif mover == "placement":
+            sketch.Placement = moved(sketch.Placement, shift)
+        elif mover == "datum":
+            datum = doc.getObject("DP")
+            datum.AttachmentOffset = moved(datum.AttachmentOffset, shift)
         plates = faces(z)
+        if mover == "platesGeometry":
+            matrix = FreeCAD.Matrix()
+            matrix.move(-shift)
+            plates = [plate.transformGeometry(matrix) for plate in plates]
         replaceUpToShape(feature, Part.Shell([plates[i] for i in order]))
+        if mover == "platesPlacement":
+            plate = doc.getObject("Plate")
+            plate.Placement = moved(plate.Placement, -shift)
         doc.recompute()
         test.assertTrue(feature.isValid(), feature.getStatusString())
         shape = feature.Shape
@@ -3068,9 +3121,10 @@ class TestPad(unittest.TestCase):
         # right pieces quietly when A moved onto the right face, and all four went to the other
         # piece when the shell was rebuilt with its faces in the other order. Marked by their
         # faces, the pieces keep their datums when A moves along the seam or grows; when A moves
-        # onto the right face, the datums of the left pieces, which went, say so, and those of
-        # the right pieces take the edge left in one piece, their centres on it; the swapped
-        # shell moves none quietly. For the Pad and the Pocket
+        # onto the right face, the datums of the left pieces, which went, say so; those of the
+        # right pieces took the edge left in one piece until PR 366 round 9, and now say they lost
+        # their piece or are on it (PLAN decision 152: an edge made whole is no evidence); the
+        # swapped shell moves none quietly. For the Pad and the Pocket
         places = {"TL": (0.5, 2), "TR": (1.5, 2), "BL": (0.5, 0), "BR": (1.5, 0)}
         edits = {
             # edit: the datums' places after it, None for a piece that went
@@ -3105,7 +3159,7 @@ class TestPad(unittest.TestCase):
                         for piece, place in after.items():
                             if place is None:
                                 assertNotQuietlyElsewhere(self, points[piece], z, [])
-                            elif edit == "facesSwapped":
+                            elif edit in ("facesSwapped", "offTheRightFace"):
                                 assertNotQuietlyElsewhere(self, points[piece], z, [place])
                             else:
                                 assertOnCap(self, points[piece], z, *place)
@@ -3753,6 +3807,89 @@ class TestPad(unittest.TestCase):
                     after,
                     reopen,
                     capMax=200,
+                )
+
+    def testPadUpToPlatesMovedUnderTheProfilePieceNotMadeWhole(self):
+        # PR 366 round 9 (ops#386): the ridge strip above and the notch's L piece (A x 0.5..2.5,
+        # moved by (0.5, 0.5) wholly onto the square plate), with the profile moved some other way
+        # than its attachment offset: by its unattached sketch's Placement, or by the datum plane
+        # its sketch is attached to (the Pad's Placement follows both, so in the Pad's own frame
+        # the profile stays and the plates move under it); or with the plates moved the other way,
+        # by their feature's Placement or rebuilt there. In each the gone piece's datum (CL, CA)
+        # went quietly to the cap made whole on the next plate in round 8, its saved point under
+        # that cap in the Pad's frame. It says it lost its piece now; the other piece's datum (CR,
+        # CB) is on the whole cap or says it lost its piece. Either shell order
+        ridge = {
+            "faces": ridgePlates(),
+            "draw": lambda sketch: dimensionedRectangle(sketch, "A", -0.5, 0, 3, 8),
+            "places": {"CL": ("F", -0.25, 4), "CR": ("F", 1.5, 4)},
+            "move": (0.6, 0),
+            "orders": ((0, 1), (1, 0)),
+            "after": {"CL": [], "CR": [(2.1, 4)]},
+            "capMax": 200,
+        }
+        notch = {
+            "faces": notchedPlates,
+            "draw": lambda sketch: dimensionedRectangle(sketch, "A", 0.5, 0.5, 2.5, 2.5),
+            "places": {"CA": ("F", 0.75, 2), "CB": ("F", 2, 2)},
+            "move": (0.5, 0.5),
+            "orders": ((0, 1, 2), (1, 0, 2)),
+            "after": {"CA": [], "CB": [(2, 2)]},
+            "capMax": 50,
+        }
+        for name, case in (("ridge", ridge), ("notch", notch)):
+            for mover in ("placement", "datum", "platesPlacement", "platesGeometry"):
+                for order in case["orders"]:
+                    with self.subTest(model=name, mover=mover, order=order):
+                        slideOntoReorderedPlates(
+                            self,
+                            "Pad",
+                            case["faces"],
+                            case["draw"],
+                            case["places"],
+                            case["move"],
+                            order,
+                            case["after"],
+                            capMax=case["capMax"],
+                            mover=mover,
+                        )
+
+    def testPadUpToASeamRibStripNotMadeWholeByItsCentre(self):
+        # PR 366 round 9 (ops#386, the round 8 cloud review's S1): a Pad from below up to two
+        # plates meeting at a seam x = 0 (B-spline faces; plane faces name the strip's cap by the
+        # bare projection, which the whole cap then takes: ops#513), A a long thin rib x -0.1..0.3,
+        # y -10..10, its cap a strip CS on the first plate (x -0.1..0) and a piece CP on the
+        # second. A moved by 0.12 or 0.2 is wholly on the second plate: the strip is gone. The
+        # whole cap's centre of mass lies within the strip's reach of its saved centre (a quarter
+        # of the side of a 0.1 x 20 strip: 0.35), and round 8 took that as holding it, though the
+        # line through the strip's centre along the sweep misses the cap: CS went quietly to the
+        # whole cap. It says it lost its piece now; CP is on the whole cap or says it lost its
+        # piece. Moved by 0.3, beyond the reach, as before. The same rib, y -9..9, up to the ridge
+        # (B-spline plates at 53 degrees), moved by 0.12
+        def rib(y0, y1):
+            return lambda sketch: dimensionedRectangle(sketch, "A", -0.1, y0, 0.3, y1)
+
+        places = {"CS": ("F", -0.05, 0), "CP": ("F", 0.15, 0)}
+        cases = [
+            # (the plates, the rib, the move, the shell's order, capMax)
+            (seamPlates(), rib(-10, 10), 0.12, (0, 1), 50),
+            (seamPlates(), rib(-10, 10), 0.12, (1, 0), 50),
+            (seamPlates(), rib(-10, 10), 0.2, (0, 1), 50),
+            (seamPlates(), rib(-10, 10), 0.3, (0, 1), 50),
+            (ridgePlates(), rib(-9, 9), 0.12, (0, 1), 200),
+        ]
+        for index, (faces, draw, move, order, capMax) in enumerate(cases):
+            with self.subTest(case=index, move=move, order=order):
+                slideOntoReorderedPlates(
+                    self,
+                    "Pad",
+                    faces,
+                    draw,
+                    places,
+                    (move, 0),
+                    order,
+                    {"CS": [], "CP": [(move + 0.1, 0)]},
+                    capMax=capMax,
                 )
 
     def testPadUpToANotchedPlateThinLPieceFromTheSavedFile(self):

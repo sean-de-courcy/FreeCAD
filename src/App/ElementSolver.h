@@ -843,9 +843,8 @@ struct AppExport SolveOutcome
  *   ancestry: the pieces either side of a hole that became the ring around it resolve to the
  *   ring, together. Without such a candidate, the one marked by the old marks' face alone (the
  *   only far cap on it) counts the same if the saved centre lies over it (\a holdsPoint). The
- *   same for a far edge's pieces (ops#386). Without either, the one element that is the old
- *   piece's far edge or cap made whole again (its section unmarked: PRJ alone) counts the same
- *   if the saved centre lies on it.
+ *   same for a far edge's pieces (ops#386). The far edge or cap made whole again (its section
+ *   unmarked: PRJ alone) never counts (PR 366 round 9, PLAN decision 152).
  * - The IDX source (Task 2 PR 6): when the old name stands for an IDX section
  *   (NameAncestry::indexSource()), the elements named by a section of the same source under any
  *   op code (NameAncestry::sameIndexSource()), and, for a target without an element map whose

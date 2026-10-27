@@ -5808,13 +5808,15 @@ TEST(SolveOwner, markedEdgePieceAloneOnItsFaceNeedsItsPlace)
     EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
 }
 
-TEST(SolveOwner, gonePieceResolvesToTheSingleProjection)
+TEST(SolveOwner, gonePieceBreaksOnTheSingleProjection)
 {
     // ops#386: A's far top edge in two pieces on a shell's two faces, each marked by its face.
     // A moved off the seam onto the right face: the edge is one piece, its name the projection
-    // unmarked (PRJ alone). The right piece's reference, its centre on the edge, resolves to it;
-    // the left piece's, its centre off the edge, breaks. B's far edge, another projection,
-    // doesn't count.
+    // unmarked (PRJ alone). PR 366 rounds 1-8 took the right piece's reference, its centre on
+    // the edge, to it. Round 9 (PLAN decision 152): the edge made whole is no evidence, since the
+    // plates may have moved under a profile that stayed (in the target's frame), the whole edge on
+    // another plate than the piece's: broken, as on integration. The left piece's, its centre
+    // off the edge, breaks as before. B's far edge, another projection, doesn't count.
     const auto left = farEdgePiece({plateElement("left", 'F')});
     const auto right = farEdgePiece({plateElement("right", 'F')});
     SolveInput input;
@@ -5835,10 +5837,9 @@ TEST(SolveOwner, gonePieceResolvesToTheSingleProjection)
     };
     input.entries = {entryAt(right, 1, 2)};
     auto outcome = Data::solveOwner(input)[0];
-    EXPECT_EQ(outcome.status, SolveStatus::Resolved) << describe(outcome);
-    EXPECT_EQ(outcome.element, "Edge3") << describe(outcome);
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << describe(outcome);
 
-    // The control: the left piece's centre is off the edge.
+    // The left piece's centre is off the edge.
     input.entries = {entryAt(left, 0, 1)};
     EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
     // No geometry to ask: broken.
@@ -6293,13 +6294,14 @@ TEST(SolveOwner, mergedFarCapPiecesResolveToTheirWhole)
     EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
 }
 
-TEST(SolveOwner, twinCapPiecesResolveToTheirCapMadeWhole)
+TEST(SolveOwner, twinCapPiecesBreakWhenTheirCapIsMadeWhole)
 {
     // PR 366 round 2, PLAN decision 122 (2): A's cap across an elliptic hole in the plate, two
     // twins (the plate, the ellipse and A's circle; ORD) at (3, 5.5) and (3, 0.5). The hole moved
     // away from under A: A's cap is one face again, the projection unmarked (PRJ alone), and it
-    // holds both old centres. Both references land on it quietly, together, as on a far edge made
-    // whole again.
+    // holds both old centres. Round 9 (decision 152): a far cap made whole is no evidence, since
+    // the plates may have moved under a profile that stayed (in the target's frame), the whole
+    // cap on another plate than the pieces'. Both references break, as without the rule.
     const std::vector<std::string> marks {
         plateElement("plate", 'F'),
         plateElement("ellipse", 'E'),
@@ -6325,64 +6327,40 @@ TEST(SolveOwner, twinCapPiecesResolveToTheirCapMadeWhole)
     };
     input.entries = {entryAt(1, 0.5), entryAt(2, 5.5)};
     for (const auto& outcome : Data::solveOwner(input)) {
-        EXPECT_EQ(outcome.status, SolveStatus::Resolved) << describe(outcome);
-        EXPECT_EQ(outcome.element, "Face4") << describe(outcome);
-        EXPECT_TRUE(outcome.guessKind.empty()) << describe(outcome);
-    }
-
-    // The control: the whole cap doesn't hold the old centre (A moved away): broken.
-    holders.clear();
-    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
-
-    // PR 366 round 7 (I-S9): pieces whose area (0.39) falls short of their outline's (a square of
-    // side 2) saved with no point inside them (none found, an L with arms too thin): their
-    // centres may lie outside them, so the whole cap holding the centre is no evidence. Broken,
-    // although it holds it; with the point saved, it holds that point and takes them again
-    holders = {"Face4"};
-    for (auto& entry : input.entries) {
-        auto& saved = entry.fingerprint;
-        const Base::Vector3d c = *saved.center;
-        saved.size = 0.39;
-        saved.outline = {c + Base::Vector3d(-1, -1, 0),
-                         c + Base::Vector3d(1, -1, 0),
-                         c + Base::Vector3d(1, 1, 0),
-                         c + Base::Vector3d(-1, 1, 0)};
-    }
-    for (const auto& outcome : Data::solveOwner(input)) {
         EXPECT_EQ(outcome.status, SolveStatus::Broken) << describe(outcome);
     }
-    for (auto& entry : input.entries) {
-        entry.fingerprint.inside = *entry.fingerprint.center + Base::Vector3d(-0.95, 0, 0);
-    }
-    for (const auto& outcome : Data::solveOwner(input)) {
-        EXPECT_EQ(outcome.status, SolveStatus::Resolved) << describe(outcome);
-        EXPECT_EQ(outcome.element, "Face4") << describe(outcome);
-    }
+
+    // Nor when the whole cap doesn't hold the old centre (A moved away): broken.
+    holders.clear();
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
 }
 
-TEST(SolveOwner, pieceMadeWholeIsSeenAlongTheSweep)
+TEST(SolveOwner, pieceAloneOnItsFaceIsSeenAlongTheSweep)
 {
-    // PR 366 round 8: a Pad from below up to a ridge, plates z = 10 + 2x and z = 10 - 2x. A's strip
-    // on the first plate (centre (-0.25, 4, 9.5)) went when A moved wholly onto the second, and
-    // A's cap there is whole again. Its nearest point to the strip's centre, (0.15, 4, 9.7), lies
-    // inside it, but seen along the sweep (z) the centre lies beside it: the strip's reference
-    // breaks. A's piece on the second plate, its centre held seen along the sweep, takes the whole
-    // cap, as before
+    // PR 366 round 8, round 9: a Pad from below up to a B-spline plate. A's strip on it (marks:
+    // the plate and a seam edge, centre (-0.25, 4, 9.5)) went, and the only far cap on the plate
+    // left, marked by the plate alone (the alone rule), lies beside it: its nearest point to the
+    // strip's centre lies inside it, but seen along the sweep (z) the centre lies beside it. The
+    // strip's reference breaks. A piece whose centre is held seen along the sweep takes the cap
+    const auto plate = plateElement("plate", 'F');
+    const auto seam = plateElement("seam", 'E');
     SolveInput input;
     input.diagonal = 40;
+    // Another far cap, on another face: structure alone doesn't decide
     input.pool["Face"] = {
-        element("Face4", {farPiece({}, 0, {"PRJ"})}),
+        element("Face4", {farPiece({plate})}),
+        element("Face7", {farPiece({plateElement("other", 'F')})}),
         element("Face9", {sketchEdge(9)}),
     };
-    const auto whole
-        = fingerprint('F', "BSplineSurface", 62.6, Base::Vector3d(1.85, 4, 6.3));
-    measure(input, {{"Face4", whole}, {"Face9", capAt(20, 3)}}, nullptr);
+    const auto cap = fingerprint('F', "BSplineSurface", 62.6, Base::Vector3d(1.85, 4, 6.3));
+    const auto other = fingerprint('F', "BSplineSurface", 62.6, Base::Vector3d(12, 4, 6.3));
+    measure(input, {{"Face4", cap}, {"Face7", other}, {"Face9", capAt(20, 3)}}, nullptr);
     input.sweep = Base::Vector3d(0, 0, 1);
     // The cap's nearest point to either old centre lies inside it
     input.holdsPoint = [](const std::string& index, const Base::Vector3d&, double) {
         return index == "Face4";
     };
-    // Seen along the sweep: only the second plate's piece's centre (x 1.5) lies over it
+    // Seen along the sweep: only a centre at x > 0.6 lies over it
     std::vector<Base::Vector3d> seenAlong;
     input.holdsPointAlong = [&](const std::string& index,
                                 const Base::Vector3d& point,
@@ -6391,35 +6369,54 @@ TEST(SolveOwner, pieceMadeWholeIsSeenAlongTheSweep)
         seenAlong.push_back(along);
         return index == "Face4" && point.x > 0.6;
     };
-    // The strip x -0.5..0, y 0..8 on the first plate, its outline bounding it closely (B-spline
-    // plates, as in the verdict's case: no normal for tier 2 to tell the plates apart)
-    auto strip = missing(farPiece({plateElement("first", 'F')}));
-    strip.fingerprint
-        = fingerprint('F', "BSplineSurface", 8.94, Base::Vector3d(-0.25, 4, 9.5));
+    // The strip x -0.5..0, y 0..8, its outline bounding it closely
+    auto strip = missing(farPiece({plate, seam}));
+    strip.fingerprint = fingerprint('F', "BSplineSurface", 8.94, Base::Vector3d(-0.25, 4, 9.5));
     strip.fingerprint.outline = {Base::Vector3d(-0.5, 0, 9),
                                  Base::Vector3d(0, 0, 10),
                                  Base::Vector3d(0, 8, 10),
                                  Base::Vector3d(-0.5, 8, 9)};
     input.entries = {strip};
-    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << describe(outcome);
     ASSERT_FALSE(seenAlong.empty());
     EXPECT_EQ(seenAlong.front(), Base::Vector3d(0, 0, 1));
 
-    // The piece x 0..3 on the second plate: on the whole cap, quietly
-    auto piece = missing(farPiece({plateElement("second", 'F')}));
-    piece.fingerprint
-        = fingerprint('F', "BSplineSurface", 53.67, Base::Vector3d(1.5, 4, 7));
+    // A piece x 0..3: on the cap, quietly
+    auto piece = missing(farPiece({plate, seam}));
+    piece.fingerprint = fingerprint('F', "BSplineSurface", 53.67, Base::Vector3d(1.5, 4, 7));
     piece.fingerprint.outline = {Base::Vector3d(0, 0, 10),
                                  Base::Vector3d(3, 0, 4),
                                  Base::Vector3d(3, 8, 4),
                                  Base::Vector3d(0, 8, 10)};
     input.entries = {piece};
-    auto outcome = Data::solveOwner(input)[0];
+    outcome = Data::solveOwner(input)[0];
     EXPECT_EQ(outcome.status, SolveStatus::Resolved) << describe(outcome);
     EXPECT_EQ(outcome.element, "Face4") << describe(outcome);
 
+    // Round 7 (I-S9): a piece whose area (0.39 here) falls short of its outline's, saved with no
+    // point inside it, may have its centre outside it: broken although held; with the point
+    // saved, it takes the cap again
+    input.entries = {piece};
+    input.entries[0].fingerprint.size = 0.39;
+    outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << describe(outcome);
+    input.entries[0].fingerprint.inside = Base::Vector3d(2.5, 4, 5);
+    outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Resolved) << describe(outcome);
+
+    // Round 9 (decision 152): the same piece and a far cap made whole (the projection unmarked)
+    // that holds its centre: broken, a far cap made whole being no evidence
+    // (the other plate's cap left out: the only structural survivor then)
+    const auto pool = input.pool["Face"];
+    input.pool["Face"] = {element("Face4", {farPiece({}, 0, {"PRJ"})}), pool[2]};
+    input.entries = {piece};
+    outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << describe(outcome);
+    input.pool["Face"] = pool;
+
     // An old face along the sweep (its outline a wall) is seen as before, by its nearest point,
-    // and so is any face without a sweep (another feature): the strip takes the whole cap
+    // and so is any face without a sweep (another feature): the strip takes the cap
     seenAlong.clear();
     input.entries = {strip};
     input.entries[0].fingerprint.outline = {Base::Vector3d(-0.5, 0, 0),

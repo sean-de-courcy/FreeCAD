@@ -1010,9 +1010,11 @@ const bool elementHoldsPointRegistered = (App::setElementHoldsPointFunction(&ele
 
 // Whether the line through a point along a direction meets a face of Shape inside it, not on its
 // boundary, within the distance of the point (App::ElementHoldsPointAlongFunction, PR 366 round
-// 8); or the face's own centre of mass lies within the distance of the point, as for
-// elementHoldsPoint(). Seen along a Pad's sweep: the nearest point of a tilted cap to a point
-// beside it, seen so, may lie inside the cap. An edge as elementHoldsPoint() takes it.
+// 8). Seen along a Pad's sweep: the nearest point of a tilted cap to a point beside it, seen so,
+// may lie inside the cap. Round 9: the line alone decides. The face's centre of mass within the
+// distance (elementHoldsPoint()'s clause for a piece whose centre lies over its hole) held a long
+// thin strip's centre by the whole cap beside it, across a seam; the saved point of such a piece
+// is a point inside it since round 6. An edge as elementHoldsPoint() takes it.
 bool elementHoldsPointAlong(
     const App::GeoFeature* geo,
     const char* element,
@@ -1041,11 +1043,6 @@ bool elementHoldsPointAlong(
             return false;
         }
         const gp_Pnt origin(point.x, point.y, point.z);
-        GProp_GProps props;
-        BRepGProp::SurfaceProperties(sub, props);
-        if (props.CentreOfMass().Distance(origin) <= distance) {
-            return true;
-        }
         BRepIntCurveSurface_Inter hits;
         hits.Init(sub, gp_Lin(origin, gp_Dir(along.x, along.y, along.z)), Precision::Confusion());
         for (; hits.More(); hits.Next()) {
