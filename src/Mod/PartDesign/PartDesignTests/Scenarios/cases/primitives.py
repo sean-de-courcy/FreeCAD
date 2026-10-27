@@ -149,7 +149,7 @@ class PrimPrism6to8Side(PrimitiveEdit):
     REFS = ("side",)
 
     def before(self):
-        return {"side": (face("plane", normal=(C30, S30, 0), through=(3.75, 2.165, 5)), "FlatFace")}
+        return {"side": (face("plane", normal=(C30, S30, 0), through=(3.75, 1.25 * 3**0.5, 5)), "FlatFace")}
 
     def after(self):
         return {"side": (BROKEN, "FlatFace")}
