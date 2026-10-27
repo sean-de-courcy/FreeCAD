@@ -2814,7 +2814,8 @@ double cornerTwist(
 /// where that frame turns it more than a quarter turn about the spine's tangent beyond the
 /// corner's own turn (cornerTwist), nearer half a turn than none, fails there (cornerFlip). A
 /// sharp corner of a spine in a plane square to B doesn't: e is the tangent. The places: 8 in
-/// each C2 piece of a curve (16 to 1024) and 2 in each span of a B-spline, each interval halved
+/// each C2 piece of a curve (16 to 1024) and 2 in each span of a B-spline (in each run of spans
+/// past 2^16 of them, 2^17 at most), each interval halved
 /// while e turns more than 2 degrees through its middle (turning away and back counts), 2^20
 /// halvings for each edge (about 5800 turns of e); past them, while e turns more than 45
 /// degrees, 2^20 more for the whole spine, so that e turning steadily round a long helix never
@@ -2958,8 +2959,10 @@ std::optional<BinormalFold> binormalFolds(
         };
         const bool line = isLine(edge);
         // Where the looks start (t): 8 in each C2 piece (16 to 1024), and 2 in each span of a
-        // B-spline (up to 2^16 spans), so that a short stretch of a long C2 curve isn't left
-        // inside one look (ops#406 review pr380-r4, "wiggle_spline")
+        // B-spline, so that a short stretch of a long C2 curve isn't left inside one look (ops#406
+        // review pr380-r4, "wiggle_spline"); past 2^16 spans, 2 in each run of k spans, k the
+        // fewest that keeps 2^16 runs at most (review pr380-r5, "wiggle_many_spans": none there
+        // left a 77499-span curve's wiggle inside one look)
         std::vector<double> starts {0};
         if (!line) {
             const int even = std::clamp(8 * curve.NbIntervals(GeomAbs_C2), 16, 1024);
@@ -2967,11 +2970,14 @@ std::optional<BinormalFold> binormalFolds(
                 starts.push_back(static_cast<double>(i) / even);
             }
             const int spans = curve.NbIntervals(GeomAbs_CN);
-            if (spans > 1 && spans <= 1 << 16) {
+            if (spans > 1) {
+                constexpr int runs = 1 << 16;
+                const int run = (spans + runs - 1) / runs;
                 NCollection_Array1<double> knots(1, spans + 1);
                 curve.Intervals(knots, GeomAbs_CN);
-                for (int i = 1; i <= spans; ++i) {
-                    for (const double u : {knots(i), (knots(i) + knots(i + 1)) / 2}) {
+                for (int i = 1; i <= spans; i += run) {
+                    const double end = knots(std::min(i + run, spans + 1));
+                    for (const double u : {knots(i), (knots(i) + end) / 2}) {
                         const double t = (u - first) / (last - first);
                         starts.push_back(std::clamp(reversed ? 1 - t : t, 0.0, 1.0));
                     }
