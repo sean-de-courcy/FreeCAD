@@ -1,5 +1,5 @@
 {
-"run": {"cases": 4, "dirty": false, "platform": "win32", "sha": "2135bd049da87ddd46846ad240e2fa6bc75936b9", "tier": "F", "time": "2026-10-26T22:03:54Z"},
+"run": {"cases": 4, "dirty": false, "platform": "win32", "sha": "2a376a926fb09f87e715521b0f4e51ff0bbda134", "tier": "F", "time": "2026-10-27T14:34:53Z"},
 "entries": {
 "ExternalFaceRedrawSidesInPlaceFrontReversed|circle_on_x0|V2s": {"axes": ["M8", "E2", "E1"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r1", "issue": "ops#264", "tier": "F"},
 "ExternalFaceRedrawSidesInPlaceNeighboursReversed|circle_on_x20|V2s": {"axes": ["M8", "E2", "E1"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r1", "issue": "ops#264", "tier": "F"},
