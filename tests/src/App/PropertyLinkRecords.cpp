@@ -290,3 +290,115 @@ TEST_F(PropertyLinkRecords, xLinkLinkReplaceInsideThePathKeepsNoRecord)
     auto fingerprints = prop->getElementFingerprints();
     EXPECT_TRUE(fingerprints.empty() || fingerprints[0] != "fp-a");
 }
+
+// A guess record of \a kind whose original is \a original, as the solver writes one for a piece
+static App::ElementRecords pieceRecord(const char* kind, const char* original)
+{
+    App::ElementRecords records;
+    records.guess.kind = kind;
+    records.guess.origName = original;
+    records.guess.origIndex = "Edge9";
+    return records;
+}
+
+TEST_F(PropertyLinkRecords, xLinkSubListLinkReplaceInsideThePathKeepsTheOtherSubsRecord)
+{
+    // Arrange: a group C holding A, B and D, one link on C with a sub through A and one through
+    // D, both guessed
+    auto group = _doc->addObject("App::DocumentObjectGroup", "C");
+    auto d = _doc->addObject("App::FeatureTest", "D");
+    auto members = group->getExtensionByType<App::GroupExtension>();
+    members->addObject(_a);
+    members->addObject(_b);
+    members->addObject(d);
+    auto prop = addLinks<App::PropertyXLinkSubList>("XLinks");
+    prop->addValue(group, std::vector<std::string> {"A.Edge1", "D.Edge1"});
+    prop->editLink(0, [](App::PropertyXLinkSub& link) {
+        link.setElementRecords({guessed("A"), guessed("D")});
+        link.setElementFingerprint(0, "fp-a");
+        link.setElementFingerprint(1, "fp-d");
+    });
+
+    // Act: A replaced by B under C (Std_LinkReplace: CopyOnLinkReplace(), then Paste())
+    std::unique_ptr<App::Property> copy(prop->CopyOnLinkReplace(group, _a, _b));
+    ASSERT_TRUE(copy);
+    prop->Paste(*copy);
+
+    // Assert: the sub through D keeps its guess and fingerprint (the cloud review of fork PR 386
+    // round 4, S1); B's starts fresh
+    const auto& links = prop->getSubListValues();
+    ASSERT_EQ(links.size(), 1);
+    const auto& link = links.front();
+    ASSERT_EQ(link.getSubValues(), (std::vector<std::string> {"B.Edge1", "D.Edge1"}));
+    auto records = link.getElementRecords();
+    ASSERT_EQ(records.size(), 2);
+    EXPECT_TRUE(records[0].empty());
+    EXPECT_EQ(records[1], guessed("D"));
+    auto fingerprints = link.getElementFingerprints();
+    ASSERT_EQ(fingerprints.size(), 2);
+    EXPECT_NE(fingerprints[0], "fp-a");
+    EXPECT_EQ(fingerprints[1], "fp-d");
+}
+
+TEST_F(PropertyLinkRecords, xLinkLinkReplaceInsideThePathKeepsTheOtherSubsRecord)
+{
+    // Arrange: as above, in one PropertyXLinkSub
+    auto group = _doc->addObject("App::DocumentObjectGroup", "C");
+    auto d = _doc->addObject("App::FeatureTest", "D");
+    auto members = group->getExtensionByType<App::GroupExtension>();
+    members->addObject(_a);
+    members->addObject(_b);
+    members->addObject(d);
+    auto prop = addLinks<App::PropertyXLinkSub>("XLink");
+    prop->setValue(group, std::vector<std::string> {"A.Edge1", "D.Edge1"});
+    prop->setElementRecords({guessed("A"), guessed("D")});
+    prop->setElementFingerprint(1, "fp-d");
+
+    // Act
+    std::unique_ptr<App::Property> copy(prop->CopyOnLinkReplace(group, _a, _b));
+    ASSERT_TRUE(copy);
+    prop->Paste(*copy);
+
+    // Assert
+    ASSERT_EQ(prop->getSubValues(), (std::vector<std::string> {"B.Edge1", "D.Edge1"}));
+    auto records = prop->getElementRecords();
+    EXPECT_TRUE(records[0].empty());
+    EXPECT_EQ(records[1], guessed("D"));
+    EXPECT_EQ(prop->getElementFingerprints()[1], "fp-d");
+}
+
+TEST_F(PropertyLinkRecords, linkSubPieceKeptAloneLosesAnInheritedIndexRecord)
+{
+    // Arrange: two pieces of the original W, one with an index carry that inherited W from the
+    // piece's record before it (a naming migration after the split)
+    auto prop = addLinks<App::PropertyLinkSub>("SubLink");
+    prop->setValue(_a, std::vector<std::string> {"Edge1", "Edge2"});
+    prop->setElementRecords({pieceRecord("expanded", "W"), pieceRecord("index", "W")});
+
+    // Act: the second piece kept alone
+    prop->setValue(_a, std::vector<std::string> {"Edge2"});
+
+    // Assert: its record ends, or a later guess inherits W and snaps back to it (the cloud
+    // review of fork PR 386 round 4, S2)
+    auto records = prop->getElementRecords();
+    ASSERT_EQ(records.size(), 1);
+    EXPECT_TRUE(records[0].empty());
+}
+
+TEST_F(PropertyLinkRecords, linkSubListDedupeOfAPieceKeepsTheExpansion)
+{
+    // Arrange: two pieces of W, the second also added again as a plain entry
+    auto prop = addLinks<App::PropertyLinkSubList>("Links");
+    prop->setValue(_a, std::vector<std::string> {"Edge1", "Edge2", "Edge2"});
+    prop->setElementRecords({pieceRecord("expanded", "W"), pieceRecord("expanded", "W"), {}});
+
+    // Act: the duplicate removed; every element of the expansion is still held
+    prop->setValue(_a, std::vector<std::string> {"Edge1", "Edge2"});
+
+    // Assert: the first piece keeps its record (the cloud review of fork PR 386 round 4, S3);
+    // the second pairs with the plain entry (R2: the exact pick)
+    auto records = prop->getElementRecords();
+    ASSERT_EQ(records.size(), 2);
+    EXPECT_EQ(records[0], pieceRecord("expanded", "W"));
+    EXPECT_TRUE(records[1].empty());
+}

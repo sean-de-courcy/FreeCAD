@@ -139,6 +139,9 @@ struct Rewrite
     std::vector<PropertyLinkBase::ShadowSub> oldShadows;
     // The new entries passed with a shadow: theirs wins
     std::vector<bool> shadowed;
+    // The old entries whose element the rewrite keeps: paired, or a duplicate of a paired one
+    // (keepRewritten())
+    std::vector<bool> held;
 };
 }  // namespace
 
@@ -282,11 +285,12 @@ static void carryPaired(std::vector<T>& values, const Rewrite& rewrite)
 }
 
 // Whether a guess record names the original its reference was found for, which a later guess of
-// the reference inherits and a snap-back returns to: every kind but an index carry (a naming
-// migration's, ops#387: E5's to end)
+// the reference inherits and a snap-back returns to: every kind, an index carry too where it
+// inherited the original of a record before it (the cloud review of fork PR 386 round 4, S2). A
+// plain index carry names none (its end is E5's, ops#387).
 static bool namesItsOriginal(const GuessRecord& guess)
 {
-    return !guess.empty() && !guess.origName.empty() && guess.kind != "index";
+    return !guess.empty() && !guess.origName.empty();
 }
 
 // The original an old entry is a piece of: its `from`, or the original its guess record names.
@@ -326,18 +330,34 @@ static Rewrite keepRewritten(const std::vector<App::DocumentObject*>& oldObjs,
     for (std::size_t j = 0; j < oldSubs.size(); ++j) {
         originals[j] = pieceOf(oldFroms, records, j);
     }
-    std::vector<bool> kept(oldSubs.size(), false);
+    auto oldObj = [&](std::size_t j) {
+        return j < oldObjs.size() ? oldObjs[j] : nullptr;
+    };
+    auto& held = rewrite.held;
+    held.assign(oldSubs.size(), false);
     for (auto j : rewrite.pairs) {
-        if (j >= 0 && static_cast<std::size_t>(j) < kept.size()) {
-            kept[j] = true;
+        if (j >= 0 && static_cast<std::size_t>(j) < held.size()) {
+            held[j] = true;
+        }
+    }
+    // An old entry left unpaired by a dedupe is still held: a paired one holds its element (the
+    // same sub, or the same mapped name), and the rewrite keeps every element of an expansion
+    // (the cloud review of fork PR 386 round 4, S3)
+    for (std::size_t k = 0; k < oldSubs.size(); ++k) {
+        for (auto j : rewrite.pairs) {
+            if (held[k] || j < 0 || static_cast<std::size_t>(j) >= oldSubs.size()
+                || oldObj(j) != oldObj(k)) {
+                continue;
+            }
+            const auto& shadow = rewrite.oldShadows[j];
+            held[k] = oldSubs[j] == oldSubs[k]
+                || (!shadow.newName.empty() && shadow.newName == rewrite.oldShadows[k].newName);
         }
     }
     // Whether the rewrite keeps every old entry that is a piece of the same original as entry j
     auto keepsWhole = [&](std::size_t j) {
-        auto obj = j < oldObjs.size() ? oldObjs[j] : nullptr;
         for (std::size_t k = 0; k < originals.size(); ++k) {
-            if (!kept[k] && originals[k] == originals[j]
-                && (k < oldObjs.size() ? oldObjs[k] : nullptr) == obj) {
+            if (!held[k] && originals[k] == originals[j] && oldObj(k) == oldObj(j)) {
                 return false;
             }
         }
@@ -363,20 +383,15 @@ static void keepWholeExpansions(std::vector<std::string>& froms,
                                 const std::vector<std::string>& oldFroms,
                                 const Rewrite& rewrite)
 {
-    std::map<std::string, int> pieces;
-    for (const auto& from : oldFroms) {
-        if (!from.empty()) {
-            ++pieces[from];
-        }
-    }
-    std::map<std::string, int> kept;
-    for (auto j : rewrite.pairs) {
-        if (j >= 0 && static_cast<std::size_t>(j) < oldFroms.size() && !oldFroms[j].empty()) {
-            ++kept[oldFroms[j]];
+    // The expansions some piece of which the rewrite drops (a duplicate's dedupe drops none)
+    std::set<std::string> dropped;
+    for (std::size_t j = 0; j < oldFroms.size(); ++j) {
+        if (!oldFroms[j].empty() && (j >= rewrite.held.size() || !rewrite.held[j])) {
+            dropped.insert(oldFroms[j]);
         }
     }
     for (auto& from : froms) {
-        if (!from.empty() && kept[from] < pieces[from]) {
+        if (!from.empty() && dropped.count(from)) {
             from.clear();
         }
     }
@@ -5704,24 +5719,32 @@ public:
         return changed;
     }
 
-    /// A \a copy of \a from on \a linked, made for a link replace or an import, whose subs go
-    /// through another object than \a from's ("A.Face6" -> "B.Face6" under the same link): its
-    /// records and fingerprints end, as a setter's do on another object, and the setter keeps
-    /// those of the references it pairs (the cloud review of fork PR 386 round 3, L2)
+    /// A \a copy of \a from on \a linked, made for a link replace or an import: a reference whose
+    /// sub goes through another object than before ("A.Face6" -> "B.Face6" under the same link)
+    /// loses its records and fingerprint, as a setter's do on another object (the cloud review of
+    /// fork PR 386 round 3, L2). The others keep theirs: an XLinkSubList pastes the copy into a
+    /// fresh link, where no setter pairs them (round 4, S1).
     static void endOnOtherSubObjects(const PropertyXLink& from,
                                      PropertyXLink& copy,
                                      App::DocumentObject* linked)
     {
+        if (copy._Records.empty() && copy._Fingerprints.empty()) {
+            return;  // a copy that carries none (another object)
+        }
         auto subObject = [](App::DocumentObject* obj, const std::string& sub) {
             return obj && obj->isAttachedToDocument()
                 ? obj->getSubObject(Data::noElementName(sub.c_str()).c_str())
                 : nullptr;
         };
-        for (std::size_t i = 0; i < from._SubList.size() && i < copy._SubList.size(); ++i) {
-            if (subObject(from._pcLink, from._SubList[i]) != subObject(linked, copy._SubList[i])) {
-                copy._Records.clear();
-                copy._Fingerprints.clear();
-                return;
+        copy._Records.resize(copy._SubList.size());
+        for (std::size_t i = 0; i < copy._SubList.size(); ++i) {
+            if (i >= from._SubList.size()
+                || subObject(from._pcLink, from._SubList[i])
+                    != subObject(linked, copy._SubList[i])) {
+                copy._Records[i] = ElementRecords();
+                if (i < copy._Fingerprints.size()) {
+                    copy._Fingerprints[i].clear();
+                }
             }
         }
     }
