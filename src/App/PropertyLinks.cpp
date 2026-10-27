@@ -281,7 +281,28 @@ static void carryPaired(std::vector<T>& values, const Rewrite& rewrite)
     values = std::move(carried);
 }
 
-// Pairs a rewrite and carries the records and fingerprints of the references it keeps
+static bool snapsBack(const GuessRecord& guess);
+
+// The original an old entry is a piece of: its `from`, or the original of a guess record that
+// snaps back. Empty for an entry that is no piece of another.
+static std::string pieceOf(const std::vector<std::string>* froms,
+                           const std::vector<ElementRecords>& records,
+                           std::size_t j)
+{
+    if (froms && j < froms->size() && !(*froms)[j].empty()) {
+        return (*froms)[j];
+    }
+    if (j < records.size() && snapsBack(records[j].guess)) {
+        return records[j].guess.origName;
+    }
+    return {};
+}
+
+// Pairs a rewrite and carries the records and fingerprints of the references it keeps. A piece
+// kept without every other piece of the same original (\a oldFroms: `from`, PropertyLinkSub's)
+// loses its guess record where that snaps back: the record's original is the whole, and a
+// snap-back would widen the piece the user kept alone to the whole silently (the review of fork
+// PR 386, TrimmedPieceKeepsItsGuessRecord). Its re-target record stays.
 static Rewrite keepRewritten(const std::vector<App::DocumentObject*>& oldObjs,
                              const std::vector<std::string>& oldSubs,
                              const std::vector<PropertyLinkBase::ShadowSub>& oldShadows,
@@ -289,11 +310,40 @@ static Rewrite keepRewritten(const std::vector<App::DocumentObject*>& oldObjs,
                              const std::vector<std::string>& subs,
                              const std::vector<PropertyLinkBase::ShadowSub>& shadows,
                              std::vector<ElementRecords>& records,
-                             std::vector<std::string>& fingerprints)
+                             std::vector<std::string>& fingerprints,
+                             const std::vector<std::string>* oldFroms = nullptr)
 {
     auto rewrite = pairRewrite(oldObjs, oldSubs, oldShadows, objs, subs, shadows, records);
+    std::vector<std::string> originals(oldSubs.size());
+    for (std::size_t j = 0; j < oldSubs.size(); ++j) {
+        originals[j] = pieceOf(oldFroms, records, j);
+    }
+    std::vector<bool> kept(oldSubs.size(), false);
+    for (auto j : rewrite.pairs) {
+        if (j >= 0 && static_cast<std::size_t>(j) < kept.size()) {
+            kept[j] = true;
+        }
+    }
+    // Whether the rewrite keeps every old entry that is a piece of the same original as entry j
+    auto keepsWhole = [&](std::size_t j) {
+        auto obj = j < oldObjs.size() ? oldObjs[j] : nullptr;
+        for (std::size_t k = 0; k < originals.size(); ++k) {
+            if (!kept[k] && originals[k] == originals[j]
+                && (k < oldObjs.size() ? oldObjs[k] : nullptr) == obj) {
+                return false;
+            }
+        }
+        return true;
+    };
     carryPaired(records, rewrite);
     carryPaired(fingerprints, rewrite);
+    for (std::size_t i = 0; i < rewrite.pairs.size() && i < records.size(); ++i) {
+        auto j = rewrite.pairs[i];
+        if (j >= 0 && static_cast<std::size_t>(j) < originals.size()
+            && !originals[j].empty() && snapsBack(records[i].guess) && !keepsWhole(j)) {
+            records[i].guess = GuessRecord();
+        }
+    }
     return rewrite;
 }
 
@@ -2259,6 +2309,7 @@ void PropertyLinkSub::setValue(App::DocumentObject* lValue,
 
     // Each reference the value keeps keeps its records, fingerprint and `from` (Task 2 PR 7)
     // (ops#504 E2)
+    const auto oldFroms = _ExpandedFrom;
     auto rewrite = keepRewritten(std::vector<DocumentObject*>(_cSubList.size(), _pcLinkSub),
                                  _cSubList,
                                  _ShadowSubList,
@@ -2266,8 +2317,8 @@ void PropertyLinkSub::setValue(App::DocumentObject* lValue,
                                  subs,
                                  shadows,
                                  _Records,
-                                 _Fingerprints);
-    const auto oldFroms = _ExpandedFrom;
+                                 _Fingerprints,
+                                 &oldFroms);
     carryPaired(_ExpandedFrom, rewrite);
     keepWholeExpansions(_ExpandedFrom, oldFroms, rewrite);
     _pcLinkSub = lValue;
@@ -3338,7 +3389,7 @@ void PropertyLinkBase::_getLinksTo(std::vector<App::ObjectIdentifier>& identifie
     }
 }
 
-#define ATTR_SHADOWED "shadowed"
+#define ATTR_SHADOWED "shadowed"
 #define ATTR_FINGERPRINT "fp"
 #define ATTR_FROM "from"
 #define ATTR_RETARGET_TARGET "rt"

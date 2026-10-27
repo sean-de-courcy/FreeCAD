@@ -530,6 +530,55 @@ class TestNamingSolver(unittest.TestCase):
         fillet.Base = (rib, pieces[:1] + other)
         self.assertEqual(self.froms(doc), [None, None])
 
+    def testSetterEndsTheGuessOfAPieceKeptAlone(self):
+        """A piece kept without the other loses its guess record too, where that snaps back: its
+        original is the whole edge, and when the edge is whole again the record would widen the
+        piece to it silently (the review of fork PR 386, TrimmedPieceKeepsItsGuessRecord). The
+        fillet breaks instead, as it does without the record."""
+        # Arrange: two ribs on a 30 long block's front top edge; the second splits it, the
+        # first splits and joins it again, which leaves the right piece a tier 3 guess
+        doc = self.newDocument()
+        body = models.body(doc)
+        profile = models.sketch(doc, "Profile", models.rectangle(0, 0, 30, 10), body)
+        models.pad(body, profile, 10)
+        sketch = models.sketch(doc, "RibSketch", models.rectangle(8, 3, 12, 7), body)
+        models.pad(body, sketch, 12, name="Rib")
+        sketch2 = models.sketch(doc, "RibSketch2", models.rectangle(20, 3, 24, 7), body)
+        rib2 = models.pad(body, sketch2, 12, name="Rib2")
+        doc.recompute()
+        front = edge("line", direction=X, through=(0, 0, 10))
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (rib2, front.one(rib2.Shape))
+        fillet.Radius = 1
+        doc.recompute()
+        for sketch, rectangle in (
+            (doc.RibSketch2, (20, -3, 24, 3)),
+            (doc.RibSketch, (8, -3, 12, 3)),
+            (doc.RibSketch, (8, 3, 12, 7)),
+        ):
+            models.moveRectangle(sketch, *rectangle)
+            doc.recompute()
+        right = [e for e in front.select(rib2.Shape) if rib2.Shape.getElement(e).CenterOfMass.x > 24]
+        self.assertEqual(len(right), 1)
+        self.assertEqual(sorted(fillet.Base[1]), sorted(front.select(rib2.Shape)))
+        def guesses():
+            return [s.get("guess") for s in self.savedSubs(doc, "Fillet", "Base")]
+
+        self.assertEqual(sorted(guesses()), ["expanded", "tier3"])
+        fillet.Base = (rib2, list(fillet.Base[1]))
+        self.assertEqual(sorted(guesses()), ["expanded", "tier3"])
+
+        # Act
+        fillet.Base = (rib2, right)
+
+        # Assert
+        self.assertEqual(guesses(), [None])
+        self.assertEqual(self.froms(doc), [None])
+        models.moveRectangle(doc.RibSketch2, 20, 3, 24, 7)
+        doc.recompute()
+        self.assertFalse(fillet.isValid())
+        self.assertNotEqual(fillet.Base[1], front.one(rib2.Shape))
+
     def notch(self, doc):
         """Cuts a notch (x 8..12, 2 deep) into the front of the profile: the front line ends at
         x = 8, and four new lines follow, the last one the rest of the side (x 12..20)."""
