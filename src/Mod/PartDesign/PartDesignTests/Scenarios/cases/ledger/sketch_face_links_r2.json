@@ -1,5 +1,5 @@
 {
-"run": {"cases": 4, "dirty": false, "platform": "win32", "sha": "2a376a926fb09f87e715521b0f4e51ff0bbda134", "tier": "F", "time": "2026-10-27T14:34:53Z"},
+"run": {"cases": 4, "dirty": false, "platform": "win32", "sha": "a3e80f47c22dbb7f5e658d07d237436c355a7764", "tier": "F", "time": "2026-10-27T15:14:27Z"},
 "entries": {
 "ExternalFaceMovedByWidthLeft|circle_on_left|V2s": {"axes": ["M8", "E5"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r2", "issue": "ops#264", "tier": "F"},
 "ExternalFaceMovedByWidth|circle_on_right|V2s": {"axes": ["M8", "E5"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r2", "issue": "ops#264", "tier": "F"},
