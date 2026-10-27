@@ -84,8 +84,9 @@ class CircleOnLine(Outcome):
         held = consumer.ExternalGeo[-constraint.Second - 1]
         if not self.matches(held, line):
             return False, f"the constraint is on {held.StartPoint} - {held.EndPoint}"
+        # PointOnObject holds the centre on the line through the segment
         centre = consumer.Geometry[constraint.First].Center
-        if held.toShape().distToShape(Part.Vertex(centre))[0] > TOL:
+        if centre.distanceToLine(held.StartPoint, held.EndPoint - held.StartPoint) > TOL:
             return False, f"the circle's centre is at {centre}"
         return True, ""
 
@@ -204,7 +205,6 @@ class ExternalFaceHoleRowMovedByPitchCornerCut(FaceLinkR4):
     reissues a circle's ID only at the same centre): (30, 10)."""
 
     AXES = ("M8", "E1", "E5")
-
     REFS = ("point_on_right_hole",)
     corners = PLATE
     holes = ((10, 10), (20, 10))
@@ -307,7 +307,6 @@ class ExternalFaceRedrawSidesNeighboursReversedMovedOut(SquareCase):
     is rejected and the constrained line breaks (loud; the intent was x = 25)."""
 
     AXES = ("M8", "E2", "E3", "E5")
-
     on = ("x", 20)
 
     def afterEdit(self):
@@ -328,7 +327,6 @@ class ExternalFaceMirroredKeepsTheSide(SquareCase):
     ID across the face."""
 
     AXES = ("M8", "E3", "E5")
-
     on = ("x", 20)
 
     def afterEdit(self):
@@ -352,7 +350,6 @@ class ExternalFaceRightSideSlanted(SquareCase):
     between the front and back lines pairs it (a lone arc): the circle on the slanted line."""
 
     AXES = ("M8", "E5")
-
     on = ("x", 20)
 
     def afterEdit(self):
@@ -388,53 +385,49 @@ class ExternalFaceProfileReversed(SquareCase):
             profile.setGeometryId(i, geometryId)
 
 
-class ExternalFaceMovedByWidthNoSource(SavedBeforeE1, SquareCase):
+class MovedSquare(SquareCase):
+    """The square's lines moved by `moves` ({index: ((x0, y0), (x1, y1))}), keeping their IDs."""
+
+    abstract = True
+    moves = {}
+
+    def edit(self, doc):
+        self.moveLines(doc, self.moves)
+
+
+class ExternalFaceMovedByWidthNoSource(SavedBeforeE1, MovedSquare):
     """Round 2's move by the width on geometry saved before E1: the square moved 20 to the right,
     the left line landing on the old right line's place. Position pairs the unchanged list (its
     loop's order kept), and the arcs drop the slide: the circle on the right line, x = 40."""
 
     AXES = ("M8", "E5", "E9")
-
     on = ("x", 20)
+    moves = {
+        0: ((20, 0), (40, 0)),
+        1: ((40, 0), (40, 20)),
+        2: ((40, 20), (20, 20)),
+        3: ((20, 20), (20, 0)),
+    }
 
     def afterEdit(self):
         return ("x", self.s(40), self.s(0, 20))
 
-    def edit(self, doc):
-        super().edit(doc)
-        self.moveLines(
-            self.doc,
-            {
-                0: ((20, 0), (40, 0)),
-                1: ((40, 0), (40, 20)),
-                2: ((40, 20), (20, 20)),
-                3: ((20, 20), (20, 0)),
-            },
-        )
 
-
-class ExternalFaceDiagonalMoveNoSource(SavedBeforeE1, SquareCase):
+class ExternalFaceDiagonalMoveNoSource(SavedBeforeE1, MovedSquare):
     """The square moved by (20, 20) on geometry saved before E1: no place pairs at all; position
     does. The circle on the right line: x = 40 (20..40)."""
 
     AXES = ("M8", "E5", "E9")
-
     on = ("x", 20)
+    moves = {
+        0: ((20, 20), (40, 20)),
+        1: ((40, 20), (40, 40)),
+        2: ((40, 40), (20, 40)),
+        3: ((20, 40), (20, 20)),
+    }
 
     def afterEdit(self):
         return ("x", self.s(40), self.s(20, 40))
-
-    def edit(self, doc):
-        super().edit(doc)
-        self.moveLines(
-            self.doc,
-            {
-                0: ((20, 20), (40, 20)),
-                1: ((40, 20), (40, 40)),
-                2: ((40, 40), (20, 40)),
-                3: ((20, 40), (20, 20)),
-            },
-        )
 
 
 # ---- the Z profile -----------------------------------------------------------------------------

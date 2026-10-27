@@ -179,7 +179,10 @@ def reopenWithoutSources(scenario, doc):
         return tag
 
     xml = re.sub(r'<GeoExtension [^>]*Sketcher::ExternalGeometryExtension[^>]*>', strip, xml)
-    if count == 0:
+    import Sketcher
+
+    # a build before E1 saves no source names: its file is already one
+    if count == 0 and hasattr(Sketcher.ExternalGeometryFacade, "Source"):
         raise RuntimeError("no external geometry with a source name in the saved file")
     files["Document.xml"] = xml.encode("utf-8")
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
