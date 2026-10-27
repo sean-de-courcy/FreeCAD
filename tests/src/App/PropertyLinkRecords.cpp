@@ -11,6 +11,7 @@
 #include <App/Document.h>
 #include <App/DocumentObject.h>
 #include <App/ElementRecords.h>
+#include <App/GroupExtension.h>
 #include <App/PropertyLinks.h>
 
 #include <src/App/InitApplication.h>
@@ -263,4 +264,29 @@ TEST_F(PropertyLinkRecords, linkSubListIndexWithoutMappedNameKeepsTheRecord)
     auto records = prop->getElementRecords();
     EXPECT_TRUE(records[0].empty());
     EXPECT_EQ(records[1], guessed("A"));
+}
+
+TEST_F(PropertyLinkRecords, xLinkLinkReplaceInsideThePathKeepsNoRecord)
+{
+    // Arrange: a group C holding A and B, the link on C with its sub through A (as a joint's
+    // reference through an assembly link)
+    auto group = _doc->addObject("App::DocumentObjectGroup", "C");
+    auto members = group->getExtensionByType<App::GroupExtension>();
+    members->addObject(_a);
+    members->addObject(_b);
+    auto prop = addLinks<App::PropertyXLinkSub>("XLink");
+    prop->setValue(group, std::vector<std::string> {"A.Edge1"});
+    prop->setElementRecords({guessed("A")});
+    prop->setElementFingerprint(0, "fp-a");
+
+    // Act: A replaced by B under C, as Std_LinkReplace does (CopyOnLinkReplace(), then Paste())
+    std::unique_ptr<App::Property> copy(prop->CopyOnLinkReplace(group, _a, _b));
+    ASSERT_TRUE(copy);
+    prop->Paste(*copy);
+
+    // Assert: B's edge is another object's, so A's records and fingerprint end
+    ASSERT_EQ(prop->getSubValues(), (std::vector<std::string> {"B.Edge1"}));
+    EXPECT_TRUE(prop->getElementRecords()[0].empty());
+    auto fingerprints = prop->getElementFingerprints();
+    EXPECT_TRUE(fingerprints.empty() || fingerprints[0] != "fp-a");
 }

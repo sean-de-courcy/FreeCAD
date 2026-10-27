@@ -5704,6 +5704,28 @@ public:
         return changed;
     }
 
+    /// A \a copy of \a from on \a linked, made for a link replace or an import, whose subs go
+    /// through another object than \a from's ("A.Face6" -> "B.Face6" under the same link): its
+    /// records and fingerprints end, as a setter's do on another object, and the setter keeps
+    /// those of the references it pairs (the cloud review of fork PR 386 round 3, L2)
+    static void endOnOtherSubObjects(const PropertyXLink& from,
+                                     PropertyXLink& copy,
+                                     App::DocumentObject* linked)
+    {
+        auto subObject = [](App::DocumentObject* obj, const std::string& sub) {
+            return obj && obj->isAttachedToDocument()
+                ? obj->getSubObject(Data::noElementName(sub.c_str()).c_str())
+                : nullptr;
+        };
+        for (std::size_t i = 0; i < from._SubList.size() && i < copy._SubList.size(); ++i) {
+            if (subObject(from._pcLink, from._SubList[i]) != subObject(linked, copy._SubList[i])) {
+                copy._Records.clear();
+                copy._Fingerprints.clear();
+                return;
+            }
+        }
+    }
+
     /// PropertyXLink::setSubValues(), where \a xlink's old subs are of \a previous: the
     /// references it keeps keep their records, fingerprints and shadows (ops#504 E2)
     static void setSubValues(PropertyXLink* xlink,
@@ -7026,6 +7048,7 @@ PropertyXLink::CopyOnImportExternal(const std::map<std::string, std::string>& na
 
     std::unique_ptr<PropertyXLink> p(new PropertyXLink);
     copyTo(*p, linked, &subs);
+    DocInfo::endOnOtherSubObjects(*this, *p, linked);
     return p.release();
 }
 
@@ -7039,6 +7062,7 @@ Property* PropertyXLink::CopyOnLinkReplace(const App::DocumentObject* parent,
     }
     std::unique_ptr<PropertyXLink> p(new PropertyXLink);
     copyTo(*p, res.first, &res.second);
+    DocInfo::endOnOtherSubObjects(*this, *p, res.first);
     return p.release();
 }
 
@@ -7081,7 +7105,8 @@ void PropertyXLink::copyTo(PropertyXLink& other,
     if (subs) {
         // The same references with their subs renamed (a label change, an import of their
         // paths): their records and fingerprints go with them (ops#504 E2). On another object
-        // they end, as a setter's do
+        // they end, as a setter's do (and DocInfo::endOnOtherSubObjects() ends them where only an
+        // object inside a sub's path is another)
         const bool same = linked == _pcLink && subs->size() == _SubList.size();
         other._SubList = std::move(*subs);
         if (same) {
