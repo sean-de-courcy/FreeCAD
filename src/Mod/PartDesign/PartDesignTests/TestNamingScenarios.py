@@ -514,6 +514,22 @@ class HarnessGuessVerdicts(unittest.TestCase):
         self.assertEqual(verdict, "broken")
         self.assertTrue(self.passing(harness.BROKEN, verdict))
 
+    def testLoudBreakUnderALiveGuessPassesOwnOrBroken(self):
+        """The consumer fails loudly after a guess rule's pick of the right element: right
+        under `OwnOrBroken`, whose broken answer the guess doesn't turn into `guessed-wrong`;
+        a wrong stored set still is."""
+        expectation = harness.OwnOrBroken(self.EDGE)
+        verdict = harness.guessVerdict(expectation.expected, "correct", "broken", self.rows(), True)
+        self.assertEqual(verdict, "broken")
+        self.assertTrue(self.passing(expectation, verdict))
+        #   a plain expectation still takes the loud break for a wrong guess
+        verdict = self.verdict(self.EDGE, "correct", "broken", self.rows())
+        self.assertEqual(verdict, "guessed-wrong")
+        #   a wrong stored set is `wrong` from `combine`, and a guess of it is guessed-wrong
+        verdict = harness.guessVerdict(self.EDGE, "wrong", "wrong", self.rows(), True)
+        self.assertEqual(verdict, "guessed-wrong")
+        self.assertFalse(self.passing(expectation, verdict))
+
     def testContinuationOntoAnExtraElementIsWrong(self):
         """ops#286: a pick whose stored set is wrong is guessed-wrong even when the consumer's
         result is the same (ops#284: a chamfer continued onto an extra edge it leaves unchanged)."""
