@@ -170,7 +170,10 @@ namespace
 // projected stages; not where the maker's order is kept, decisions 158 Q1 and 173 (2); the
 // fallback lists with ORD only where their order is no key); a split
 // edge's piece takes the smallest named face at its vertex, counted by name (ops#431).
-constexpr int ForkNamingRevision = 15;
+// 16: ops#502, a result without history (a Part primitive, a Python feature's shape, a PartDesign
+// primitive's tool) names its elements by a verified match against the result it replaces (`MLN`
+// ids from a counter saved with the shape), where its consumers named them by index.
+constexpr int ForkNamingRevision = 16;
 
 // The `.N<n>` of the element map version: the form interned names are saved in (ops#6). 2: the
 // references are indices into the file's table (NamingFormat 2).
