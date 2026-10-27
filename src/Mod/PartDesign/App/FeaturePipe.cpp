@@ -2816,7 +2816,9 @@ double cornerTwist(
 /// sharp corner of a spine in a plane square to B doesn't: e is the tangent. The places: 8 in
 /// each C2 piece of a curve (16 to 1024) and 2 in each span of a B-spline (in each run of spans
 /// past 2^16 of them, 2^17 at most), each interval halved
-/// while e turns more than 2 degrees through its middle (turning away and back counts), 2^20
+/// while e turns more than 2 degrees through its middle (turning away and back counts), or q's
+/// rate across it over q's shortest length at the three places does (q the tangent made square
+/// to B: a swing of e within the interval that leaves its ends alike), 2^20
 /// halvings for each edge (about 5800 turns of e); past them, while e turns more than 45
 /// degrees, 2^20 more for the whole spine, so that e turning steadily round a long helix never
 /// reads as a reversal (ops#406 review pr380-r3: a 300-turn helix failed as a cusp), and e
@@ -2948,14 +2950,24 @@ std::optional<BinormalFold> binormalFolds(
         auto parameter = [&](double t) {
             return reversed ? last - t * (last - first) : first + t * (last - first);
         };
-        auto axisAt = [&](double t) -> std::optional<gp_Vec> {
+        // e at t, and the length of q there, q the tangent made square to B (e's vector)
+        auto axisAt = [&](double t, double& away) -> std::optional<gp_Vec> {
             gp_Pnt point;
             gp_Vec tangent;
             curve.D1(parameter(t), point, tangent);
+            away = (tangent - b * tangent.Dot(b)).Magnitude();
             if (tangent.Magnitude() < gp::Resolution()) {
                 return std::nullopt;
             }
             return squareAxis(reversed ? tangent.Reversed() : tangent);
+        };
+        // How fast q changes at t, per unit of t
+        auto squareRate = [&](double t) {
+            gp_Pnt point;
+            gp_Vec d1;
+            gp_Vec d2;
+            curve.D2(parameter(t), point, d1, d2);
+            return (d2 - b * d2.Dot(b)).Magnitude() * (last - first);
         };
         const bool line = isLine(edge);
         // Where the looks start (t): 8 in each C2 piece (16 to 1024), and 2 in each span of a
@@ -3008,14 +3020,25 @@ std::optional<BinormalFold> binormalFolds(
                 // e's turn through the middle: e turning away and back within the stretch counts.
                 // Where e is undefined at all three, the stretch runs along B and has nothing to
                 // resolve; where it is undefined at some, the edge of that is looked for.
-                const std::optional<gp_Vec> before = axisAt(from);
-                const std::optional<gp_Vec> centre = line ? before : axisAt(middle);
-                const std::optional<gp_Vec> after = axisAt(to);
+                double awayBefore = 0;
+                double awayCentre = 0;
+                double awayAfter = 0;
+                const std::optional<gp_Vec> before = axisAt(from, awayBefore);
+                const std::optional<gp_Vec> centre = line ? before : axisAt(middle, awayCentre);
+                const std::optional<gp_Vec> after = axisAt(to, awayAfter);
                 const int defined = int(before.has_value()) + int(centre.has_value())
                     + int(after.has_value());
-                const double turn = defined == 3
-                    ? before->Angle(*centre) + centre->Angle(*after)
-                    : (defined == 0 ? 0 : std::numbers::pi);
+                double turn = defined == 3 ? before->Angle(*centre) + centre->Angle(*after)
+                                           : (defined == 0 ? 0 : std::numbers::pi);
+                // e turns fastest where q is shortest, and a tangent that nears B and leaves it
+                // on the same side swings e away and back between the three places, leaving them
+                // alike: so the turn is also taken as q's rate across the stretch over its
+                // shortest length at the three (ops#406 cloud review of 9234832ed3, S1: a 1 um
+                // drift off a touch, between two looks, folded 1.7 mm unseen)
+                if (defined == 3 && !line) {
+                    const double shortest = std::min({awayBefore, awayCentre, awayAfter});
+                    turn = std::max(turn, (to - from) * squareRate(middle) / shortest);
+                }
                 const bool fine = turn > maxTurn && halvings < budget;
                 const bool coarse = turn > coarseTurn && coarseHalvings < coarseBudget;
                 if ((fine || coarse) && !line && to - from > 1e-12) {
@@ -3095,6 +3118,26 @@ std::optional<BinormalFold> binormalFolds(
                     worst.past = past;
                     worst.across = (high - low) / slope;
                     foldAt = point;
+                }
+            }
+        }
+    }
+    // A closed spine's end joins its start: a corner there is measured like the others (ops#406
+    // cloud review of 9234832ed3, L1: the joint from the last edge to the first went unchecked)
+    const gp_Pnt end = BRep_Tool::Pnt(TopExp::LastVertex(edges.back(), true));
+    if (end.Distance(origin) < Precision::Confusion()) {
+        const gp_Vec into(tangentAlong(edges.back(), false));
+        const gp_Vec out(tangentAlong(edges.front(), true));
+        if (into.Angle(out) > tiltTolerance) {
+            if (along && !cusp) {
+                cusp = along;
+            }
+            along.reset();
+            if (pastCorners && previous && !flip) {
+                const double twist = cornerTwist(into, out, b, *previous, *e0);
+                if (twist > std::numbers::pi / 2) {
+                    flip = end;
+                    flipTwist = twist * 180 / std::numbers::pi;
                 }
             }
         }
@@ -3706,9 +3749,23 @@ App::DocumentObjectExecReturn* Pipe::execute()
                             : "the section turns half a turn there and the pipe crosses itself"
                 ));
             }
+            // Several sections fold like one profile where the tangent passes near B, but OCCT
+            // places them along the spine and blends them in the law's frame, which the fold
+            // check doesn't follow: no check is sound there, so the pipe stops (ops#406 cloud
+            // review of 9234832ed3, S2: a second square at the arc's end folded unseen)
+            if (Transformation.getValue() == 1 && !multisections.empty()) {
+                return new App::DocumentObjectExecReturn(fmt::format(
+                    "Pipe: in 'Binormal' mode every section lies in a plane through the binormal "
+                    "{}, and with several sections the pipe can't be checked for folding over "
+                    "itself where the spine's tangent passes near the binormal. Use one profile "
+                    "in 'Binormal' mode, or another mode.",
+                    binormalText()
+                ));
+            }
         }
         // ...and with one profile, where the profile turns about it faster than its width allows
-        const bool binormalSections = mode == 4 && profilePoint.isNull() && multisections.empty();
+        // (several sections stopped above; Sections without "Multisection" are left out of the sweep)
+        const bool binormalSections = mode == 4 && profilePoint.isNull();
         const std::optional<SpineCorner> sharpest = sharpestCorner(TopoDS::Wire(path.getShape()));
         // A fold fails the pipe; a small one (under smallFold of the section's extent) warns
         auto foldText = [&](const Fold& fold, bool small) {

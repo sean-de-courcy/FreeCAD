@@ -3722,6 +3722,111 @@ class TestBinormalPipe(unittest.TestCase):
         )
         self.assertFailsAt(pipe, wiggle, length / 2, "folds over itself", "within 3")
 
+    @staticmethod
+    def nearTouch(drift):
+        """B = Z, one cubic Bezier with x' = 120 (u - u0)^2 and z' = 60, u0 = 0.5156 between two of
+        the fold check's looks, drifting `drift` in Y over its 60 mm: the tangent touches +Z at u0
+        (drift 0) or comes within about drift / 1.05 degrees of it there."""
+        curve = Part.BezierCurve()
+        xs = (0, 10.633734, 0.643469, 10.029203)
+        curve.setPoles([V(xs[i], drift * i / 3, 20 * i) for i in range(4)])
+        return Part.Wire([curve.toShape()])
+
+    def testNearTouchBetweenLooksFolds(self):
+        """nearTouch(1e-3): e swings a quarter turn to +Y and back within about 3 um of u0, and the
+        4 x 4 square square to the start tangent folds by about 1.7 mm there; OCCT's solid differs
+        from the touch's (BOP SelfIntersect). e is the same at both ends of the look and at its
+        middle, so before it built without a word (cloud review of 9234832ed3, S1)."""
+        spine = self.nearTouch(1e-3)
+        tangent = unit(spine.Edges[0].derivative1At(0))
+        pipe = self.pipe(
+            spine, V(0, 0, 1), placement=App.Placement(V(0, 0, 0), App.Rotation(V(0, 0, 1), tangent))
+        )
+        self.assertFailsAt(pipe, V(5.48, 0, 31), 1.0, "folds over itself", "within 0.00")
+
+    def testTouchBetweenLooksBuilds(self):
+        """nearTouch(0), the control: e is +X on both sides of the touch, so the square is carried
+        without folding, a valid, quiet solid of the mode's volume (922.970). The check halves
+        down to the touch, and finds nothing."""
+        spine = self.nearTouch(0)
+        tangent = unit(spine.Edges[0].derivative1At(0))
+        pipe = self.pipe(
+            spine, V(0, 0, 1), placement=App.Placement(V(0, 0, 0), App.Rotation(V(0, 0, 1), tangent))
+        )
+        self.assertSwept(pipe, 16, normal=tangent)
+        self.assertAlmostEqual(pipe.Shape.Volume, 922.970, delta=1e-3)
+        pipe.Shape.check(True)
+
+    def testClosedSpineSeamFlipFails(self):
+        """A closed spine of two smooth halves, (R sin(pi s), W sin(2 pi s) / 2 pi,
+        H sin(2 pi s) / 2 pi) with R = 10, W = 8, H = 12, B = Z: e turns half a turn steadily along
+        it, and at the seam the tangent turns 131 degrees while e turns back. Under Right corner
+        the section takes the law's frame again there, 107 degrees about the tangent: it fails
+        before the sweep, naming the seam, as at any other corner. Before, the joint from the last
+        edge to the first was never checked; this spine failed only after the sweep, on a 0.61 mm
+        fold the 1 x 1 square makes near the seam (cloud review of 9234832ed3, L1)."""
+        radius, wide, high = 10.0, 8.0, 12.0
+
+        def at(s):
+            return V(
+                radius * math.sin(math.pi * s),
+                wide * math.sin(2 * math.pi * s) / (2 * math.pi),
+                high * math.sin(2 * math.pi * s) / (2 * math.pi),
+            )
+
+        def along(s):
+            c = math.cos(2 * math.pi * s)
+            return V(math.pi * radius * math.cos(math.pi * s), wide * c, high * c)
+
+        halves = []
+        for first in (0.0, 0.5):
+            points = [at(first + 0.5 * i / 8) for i in range(9)]
+            if first:
+                points[-1] = V(0, 0, 0)
+            curve = Part.BSplineCurve()
+            curve.interpolate(points, InitialTangent=along(first), FinalTangent=along(first + 0.5))
+            halves.append(curve.toShape())
+        spine = Part.Wire(halves)
+        self.assertTrue(spine.isClosed())
+        pipe = self.pipe(
+            spine,
+            V(0, 0, 1),
+            profile="small",
+            placement=App.Placement(V(0, 0, 0), App.Rotation(V(0, 0, 1), unit(along(0)))),
+            Transition="Right corner",
+        )
+        self.assertFailsAt(pipe, V(0, 0, 0), 1e-6, "can't be joined")
+
+    def sectionAtArcEnd(self):
+        """The square again, at the arc's end, square to its tangent (+X)."""
+        return models.sketch(
+            self.doc,
+            "Section",
+            self.PROFILES["square"](),
+            self.body,
+            placement=App.Placement(V(20, 0, 20), App.Rotation(V(0, 0, 1), V(1, 0, 0))),
+        )
+
+    def testSectionsFail(self):
+        """testNearBinormalFolds with the square again at the arc's end as a section: every
+        section folds there as the one profile does, but OCCT places and blends them in the law's
+        frame, which the fold check doesn't follow. So several sections stop with an error.
+        Before, Valid and silent (cloud review of 9234832ed3, S2)."""
+        section = self.sectionAtArcEnd()
+        pipe = self.pipe(
+            self.arc(), nearBinormal(2), Transformation="Multisection", Sections=[section]
+        )
+        self.assertFalse(pipe.isValid())
+        self.assertIn("with several sections the pipe can't be checked", pipe.getStatusString())
+
+    def testSectionsLeftOutStillChecked(self):
+        """The same Sections with Transformation "Constant": the sweep leaves them out, and the
+        one profile folds as in testNearBinormalFolds. Before, the fold check skipped any pipe
+        that had Sections."""
+        section = self.sectionAtArcEnd()
+        pipe = self.pipe(self.arc(), nearBinormal(2), Sections=[section])
+        self.assertFailsAt(pipe, arcPoints(steps=3)[1], 1.0, "folds over itself by")
+
     def testBinormalAlongStartFails(self):
         """B = Z, the spine's tangent where it starts: no section plane there. Before, Valid, 320."""
         pipe = self.pipe(self.arc(), V(0, 0, 1))
