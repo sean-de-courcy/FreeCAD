@@ -117,6 +117,7 @@ set(PartDesign_TestFixtures
 set(PartDesign_TestScenarios
     PartDesignTests/Scenarios/__init__.py
     PartDesignTests/Scenarios/ambiguous.py
+    PartDesignTests/Scenarios/audit.py
     PartDesignTests/Scenarios/booleans.py
     PartDesignTests/Scenarios/consumers.py
     PartDesignTests/Scenarios/corpus.py
