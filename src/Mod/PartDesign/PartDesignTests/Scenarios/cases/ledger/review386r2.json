@@ -1,5 +1,5 @@
 {
-"run": {"cases": 13, "dirty": false, "platform": "win32", "sha": "83d922433347a2f720bd97f761c8c9f52556ba58", "tier": "F", "time": "2026-10-27T12:34:50Z"},
+"run": {"cases": 13, "dirty": false, "platform": "win32", "sha": "cc3be109b0b66f3e03b62f0611ce7ab4eab961f5", "tier": "F", "time": "2026-10-27T13:57:42Z"},
 "entries": {
 "GoneThenIdentityRewrite|gone|V2s": {"axes": ["M1", "E9"], "classes": ["E"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr386-r2", "issue": "ops#504", "tier": "F"},
 "MissingRewriteThenRestore|missing|V2s": {"axes": ["M1", "E9"], "classes": ["E"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr386-r2", "issue": "ops#504", "tier": "F"},
