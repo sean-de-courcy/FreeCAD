@@ -1,5 +1,5 @@
 {
-"run": {"cases": 13, "dirty": false, "platform": "win32", "sha": "1659234dedef9728d781e0e7489031d40fb28090", "tier": "F", "time": "2026-10-27T15:10:10Z"},
+"run": {"cases": 13, "dirty": false, "platform": "win32", "sha": "588f892ffec712032acd3e22c6f99383628a7569", "tier": "F", "time": "2026-10-27T15:51:56Z"},
 "entries": {
 "ClosedDLineReversed|a_e0|V2s": {"axes": ["M3", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#469", "tier": "F"},
 "ClosedDLineReversed|a_e1|V2s": {"axes": ["M3", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#469", "tier": "F"},
