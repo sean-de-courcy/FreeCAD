@@ -32,9 +32,9 @@ circle r 1 whose centre is on one projected line (PointOnObject, nothing else ho
 reference judged is the sketch's face link; its outcome is where the circle is.
 
 The review's redraw cases f and g (the square redrawn 24 x 24 from another corner: the face is
-found by a tier 3 guess and the sketch breaks) are scored by `TestSketchFaceLinkPairing`
-(Sketcher): the harness reads a broken consumer under a guessed face as `guessed-wrong`, though
-the face is the right one and the break is loud."""
+found by a tier 3 guess and the sketch breaks) are `sketch_face_redraw.py`'s (fork PR 387)."""
+
+import shutil
 
 import FreeCAD as App
 import Part
@@ -327,8 +327,7 @@ class ExternalFaceHoleRowMovedByPitch(Scenario):
     (four lines and two circles) and has a point Coincident with the right hole's centre. The
     row moves +10 (holes at (20, 10) and (30, 10)), the circles keeping their IDs: the left hole
     lands on the right hole's old place. The point must follow its hole to (30, 10), or break;
-    paired by place it stayed on the look-alike at (20, 10). With `noSource` the projected
-    geometry has no source names, as geometry saved before E1."""
+    paired by place it stayed on the look-alike at (20, 10)."""
 
     area = "external geometry"
     CLASSES = ("E",)
@@ -337,7 +336,6 @@ class ExternalFaceHoleRowMovedByPitch(Scenario):
     FOUND_BY = "review pr384 cloud"
     TIER = "F"
     REFS = ("point_on_right_hole",)
-    noSource = False
 
     def topFace(self):
         return face("plane", normal=Z, through=(0, 0, 10))
@@ -353,11 +351,6 @@ class ExternalFaceHoleRowMovedByPitch(Scenario):
         sketch = m.sketch(doc, "OnTop", [], body)
         sketch.addExternal(pad.Name, self.names(pad, self.topFace())[0])
         doc.recompute()
-        if self.noSource:
-            geos = list(sketch.ExternalGeo)
-            for geo in geos:
-                Sketcher.ExternalGeometryFacade(geo).Source = ""
-            sketch.ExternalGeo = geos
         right = [
             -i - 1
             for i, g in enumerate(sketch.ExternalGeo)
@@ -381,9 +374,21 @@ class ExternalFaceHoleRowMovedByPitch(Scenario):
 
 
 class ExternalFaceHoleRowMovedByPitchNoSource(ExternalFaceHoleRowMovedByPitch):
-    """The same with the projected geometry's source names cleared (geometry saved before E1)."""
+    """The same on geometry saved before E1: the file saved, its projected geometry's source names
+    removed, and opened again before the edit (`models.reopenWithoutSources`). Setting Source from
+    Python doesn't reach the sketch's geometry, so before round 4 this case scored the named
+    geometry (the class E ruling, R9). Position and place disagree and nothing settles them: the
+    point's hole breaks, loud (a listed cost, R7; decision 58)."""
 
-    noSource = True
+    AXES = ("M8", "E5", "E9")
+
+    def edit(self, doc):
+        self.doc = doc = m.reopenWithoutSources(self, doc)
+        super().edit(doc)
+
+    def cleanup(self):
+        super().cleanup()
+        shutil.rmtree(getattr(self, "folder", ""), ignore_errors=True)
 
 
 class ExternalFaceNotchMovedByWidth(FaceLinkEdit):

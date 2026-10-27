@@ -3368,126 +3368,274 @@ double placeDistance(const Part::Geometry* a, const Part::Geometry* b, double to
     return distanceFromSaved(a, b);
 }
 
-// FreeCAD-CH (ops#264 e2, class E's E1; I-R2): which of a link's old geometries of one kind each
-// new one continues, as an index into `olds` (-1: none, it is new). Before, the k-th new one took
-// the k-th old Id, and a constraint followed whatever edge came k-th now (a corner cut before it
-// moved it to the next edge, silently). In turn:
+// FreeCAD-CH (ops#264 e2, class E's E1): a link's geometries of one kind chained by their ends,
+// as the face's wires give them: closed loops (counter-clockwise), open chains, and singles (a
+// geometry with no ends: a circle, an ellipse, a point)
+struct GeometryLoop
+{
+    enum class Kind
+    {
+        Single,
+        Chain,
+        Closed,
+        // closed, without an area to orient it by: its order is no evidence
+        Unoriented
+    };
+    Kind kind;
+    std::vector<std::size_t> members;  // in the loop's order
+};
+
+struct GeometryLoops
+{
+    std::vector<GeometryLoop> loops;
+    std::vector<int> loopOf;            // per geometry, the loop it is on (-1: none)
+    std::vector<std::size_t> position;  // per geometry, its index in that loop's members
+};
+
+GeometryLoops chainGeometries(const std::vector<const Part::Geometry*>& geos, double tolerance)
+{
+    GeometryLoops result;
+    result.loopOf.assign(geos.size(), -1);
+    result.position.assign(geos.size(), 0);
+    auto add = [&](GeometryLoop::Kind kind, std::vector<std::size_t> members) {
+        for (std::size_t p = 0; p < members.size(); ++p) {
+            result.loopOf[members[p]] = static_cast<int>(result.loops.size());
+            result.position[members[p]] = p;
+        }
+        result.loops.push_back({kind, std::move(members)});
+    };
+
+    std::vector<const Part::GeomBoundedCurve*> curves(geos.size(), nullptr);
+    std::vector<std::pair<Base::Vector3d, Base::Vector3d>> ends(geos.size());
+    for (std::size_t i = 0; i < geos.size(); ++i) {
+        if (!geos[i]) {
+            continue;
+        }
+        if (auto* curve = freecad_cast<const Part::GeomBoundedCurve*>(geos[i])) {
+            curves[i] = curve;
+            ends[i] = {curve->getStartPoint(), curve->getEndPoint()};
+        }
+        else {
+            add(GeometryLoop::Kind::Single, {i});
+        }
+    }
+    auto meets = [&](const Base::Vector3d& p, std::size_t j) {
+        return Base::Distance(p, ends[j].first) <= tolerance
+            || Base::Distance(p, ends[j].second) <= tolerance;
+    };
+    auto otherEnd = [&](std::size_t j, const Base::Vector3d& p) {
+        return Base::Distance(p, ends[j].first) <= tolerance ? ends[j].second : ends[j].first;
+    };
+    // the neighbours of each geometry, in increasing order
+    std::vector<std::vector<std::size_t>> links(geos.size());
+    for (std::size_t i = 0; i < geos.size(); ++i) {
+        for (std::size_t j = i + 1; j < geos.size() && curves[i]; ++j) {
+            if (curves[j] && (meets(ends[i].first, j) || meets(ends[i].second, j))) {
+                links[i].push_back(j);
+                links[j].push_back(i);
+            }
+        }
+    }
+
+    std::vector<bool> seen(geos.size(), false);
+    for (std::size_t start = 0; start < geos.size(); ++start) {
+        if (!curves[start] || seen[start]) {
+            continue;
+        }
+        std::vector<std::size_t> component;
+        std::vector<std::size_t> stack {start};
+        while (!stack.empty()) {
+            const auto i = stack.back();
+            stack.pop_back();
+            if (seen[i]) {
+                continue;
+            }
+            seen[i] = true;
+            component.push_back(i);
+            stack.insert(stack.end(), links[i].begin(), links[i].end());
+        }
+        const bool closed = component.size() > 1
+            && std::all_of(component.begin(), component.end(), [&](std::size_t i) {
+                   return links[i].size() == 2;
+               });
+        std::vector<std::size_t> tips;
+        std::copy_if(component.begin(), component.end(), std::back_inserter(tips), [&](auto i) {
+            return links[i].size() <= 1;
+        });
+        const std::size_t first = closed || tips.empty()
+            ? *std::min_element(component.begin(), component.end())
+            : *std::min_element(tips.begin(), tips.end());
+        // walk the chain away from its first geometry's free end
+        Base::Vector3d point = ends[first].second;
+        if (!closed && !tips.empty()) {
+            auto free = [&](const Base::Vector3d& p) {
+                return std::none_of(links[first].begin(), links[first].end(), [&](auto j) {
+                    return meets(p, j);
+                });
+            };
+            if (free(ends[first].first)) {
+                point = ends[first].second;
+            }
+            else if (free(ends[first].second)) {
+                point = ends[first].first;
+            }
+        }
+        std::vector<std::size_t> order {first};
+        std::vector<bool> walked(geos.size(), false);
+        walked[first] = true;
+        while (order.size() < component.size()) {
+            const auto& next = links[order.back()];
+            auto it = std::find_if(next.begin(), next.end(), [&](auto j) {
+                return !walked[j] && meets(point, j);
+            });
+            if (it == next.end()) {
+                break;  // a branch: the rest is on no loop
+            }
+            order.push_back(*it);
+            walked[*it] = true;
+            point = otherEnd(*it, point);
+        }
+        if (!closed) {
+            add(GeometryLoop::Kind::Chain, std::move(order));
+            continue;
+        }
+        // counter-clockwise by the signed area of the corners and the middle of each geometry
+        // (an arc's bulge), in sketch coordinates
+        double area = 0.0;
+        if (order.size() == component.size()) {
+            std::vector<Base::Vector3d> points;
+            Base::Vector3d corner = meets(ends[order[0]].second, order[1]) ? ends[order[0]].first
+                                                                           : ends[order[0]].second;
+            for (auto i : order) {
+                points.push_back(corner);
+                points.push_back(curves[i]->pointAtParameter(
+                    (curves[i]->getFirstParameter() + curves[i]->getLastParameter()) / 2));
+                corner = otherEnd(i, corner);
+            }
+            for (std::size_t p = 0; p < points.size(); ++p) {
+                const auto& a = points[p];
+                const auto& b = points[(p + 1) % points.size()];
+                area += a.x * b.y - b.x * a.y;
+            }
+        }
+        if (std::abs(area) <= tolerance * tolerance) {
+            add(GeometryLoop::Kind::Unoriented, std::move(order));
+            continue;
+        }
+        if (area < 0) {
+            std::reverse(order.begin() + 1, order.end());
+        }
+        add(GeometryLoop::Kind::Closed, std::move(order));
+    }
+    return result;
+}
+
+// Whether `b` is `a` started elsewhere
+bool sameCycle(const std::vector<std::size_t>& a, const std::vector<std::size_t>& b)
+{
+    if (a.size() != b.size()) {
+        return false;
+    }
+    if (a.empty()) {
+        return true;
+    }
+    auto it = std::find(b.begin(), b.end(), a.front());
+    if (it == b.end()) {
+        return false;
+    }
+    const auto shift = static_cast<std::size_t>(it - b.begin());
+    for (std::size_t p = 0; p < a.size(); ++p) {
+        if (a[p] != b[(p + shift) % b.size()]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// FreeCAD-CH (ops#264 e2, class E's E1; I-R2, the class note's ruling of 2026-10-27): which of a
+// link's old geometries of one kind each new one continues, as an index into `olds` (-1: none, it
+// is new). Before, the k-th new one took the k-th old Id, and a constraint followed whatever edge
+// came k-th now (a corner cut before it moved it to the next edge, silently).
+//
+// Three signals, each wrong somewhere, for an old geometry j and a new one k of the same type:
+// - Source: the source edge's mapped name, equal and unique on both sides. Wrong where the
+//   Sketcher gives a line drawn again the Id, and so the name, of a deleted line whose ends were
+//   at the same points (SketchObject::generateId): the line across the face when the lines
+//   between were reversed (fork PR 384's review, round 1);
+// - place: within half the tolerance, and every other candidate of j and of k beyond it (as
+//   carbon copy pairs, PR 260). Wrong where an edit slides an edge onto another's old place: a
+//   profile, slot or hole row moved by its width or pitch, alone or with a corner cut (rounds 2
+//   and 3);
+// - position: j = k, only in an unchanged list (count and types) whose link resolved by history
+//   this recompute (`byHistory`: exactly, or by the solver at tier 0-1 without a guess; a face
+//   found by its place may be a redrawn profile, review CC1), where the k-th to k-th map keeps
+//   every loop's order, and only for old geometry without a Source (saved before E1): the stored
+//   order follows the sketch's Ids as the name does, so beside a Source it is no second vote.
+// A candidate's support is its number of signals, plus one for a Source on a circle or an ellipse
+// (the Sketcher reissues such an Id only at the same centre, so its name can't lie across the
+// face, and it outranks place: a hole row moved by its pitch).
+//
+// What arbitrates is the face's structure, which none of the signals read: the geometries chained
+// by their ends into closed loops, oriented counter-clockwise by their area, which no stored
+// order, Id or line direction can turn. Between two pairs already settled (anchors), the old
+// loop's arc and the new loop's arc correspond. In turn:
 // - one geometry before and after, of the same type: the link's reference names it (and its
 //   resolution carries any warning);
-// - with the same count and types, the link's reference resolved by history this recompute
-//   (`byHistory`), the whole list by position, if each new geometry meets the others at the same
-//   ends as its predecessor did: the face's edges in their old order (an edit can move one edge
-//   onto another's old place, which the place stage below would take: fork PR 384's review,
-//   round 2);
-// - otherwise the same type at the same place: within half the tolerance, and every other candidate either
-//   way beyond it (as carbon copy pairs, PR 260);
-// - among those at the same place with several candidates within the tolerance (collinear
-//   pieces, coincident curves), the source edge's mapped name (Source), unique on both sides. A
-//   name alone is no evidence: the Sketcher gives a line drawn again the Id, and so the name, of
-//   a deleted line whose ends were in the same places (SketchObject::generateId), which is the
-//   edge on the other side when the lines between were reversed (fork PR 384's review, round 1);
-// - by position, only where the link's order is evidence: the same count and types in the same
-//   order, the link's reference resolved by history this recompute (`byHistory`: exactly, or by
-//   the solver at tier 0-1 without a guess; a face found by its place may be a redrawn profile,
-//   whose edges come in another order, review CC1), and the new geometry meeting the lines
-//   paired above at the same ends as the old one did.
-// An old geometry left over is the caller's: it goes, or breaks where constraints are on it.
+// - then, until nothing changes: a candidate whose old geometry lies in an arc and whose new one
+//   isn't in the arc's image is dropped; at the highest support present, the candidates no other
+//   candidate of their j or k matches become anchors together; a batch that puts a closed loop's
+//   anchors out of their cyclic order is rejected with its candidates (the loop's structure
+//   changed under them: edges swapped roles, or Ids reissued across the face); when nothing
+//   anchors, an arc left with one old and one new geometry of a type pairs them.
+// Where the signals disagree and no arc settles it, nothing is paired. An old geometry left over
+// is the caller's: it goes, or breaks where constraints are on it (decision 150).
 std::vector<int> pairGeometries(const std::vector<const Part::Geometry*>& olds,
                                 const std::vector<const Part::Geometry*>& news,
                                 bool byHistory)
 {
     std::vector<int> taken(news.size(), -1);
-    std::vector<bool> used(olds.size(), false);
     auto sameType = [&](std::size_t j, std::size_t k) {
         return olds[j] && olds[j]->getTypeId() == news[k]->getTypeId();
     };
-    auto match = [&](std::size_t j, std::size_t k) {
-        taken[k] = static_cast<int>(j);
-        used[j] = true;
-    };
     if (olds.size() == 1 && news.size() == 1) {
         if (sameType(0, 0)) {
-            match(0, 0);
+            taken[0] = 0;
         }
         return taken;
     }
 
     constexpr double tolerance = 10 * Precision::Confusion();
-    // A wire can come back traversed the other way or from another edge (a profile whose lines
-    // were reversed), its edges in another order though the face resolved by history: a pair by
-    // position must meet the lines paired above at the same ends. Each end of the old geometry on
-    // a paired line, on the side of that line's middle it is (along the old line), has an end of
-    // the new geometry on the same side of the paired new line (fork PR 384's review, round 1)
-    auto endsOf = [](const Part::Geometry* geo) -> std::vector<Base::Vector3d> {
-        if (auto* curve = freecad_cast<const Part::GeomBoundedCurve*>(geo)) {
-            return {curve->getStartPoint(), curve->getEndPoint()};
+    enum Signal : unsigned
+    {
+        BySource = 1,
+        ByPlace = 2,
+        ByPosition = 4
+    };
+    std::map<std::pair<std::size_t, std::size_t>, unsigned> candidates;
+
+    auto sourceOf = [](const Part::Geometry* geo) {
+        return geo ? ExternalGeometryFacade::getFacade(geo)->getSource() : std::string();
+    };
+    std::map<std::string, std::vector<std::size_t>> oldSources;
+    std::map<std::string, std::vector<std::size_t>> newSources;
+    std::vector<bool> oldHasSource(olds.size(), false);
+    for (std::size_t j = 0; j < olds.size(); ++j) {
+        if (auto source = sourceOf(olds[j]); !source.empty()) {
+            oldSources[source].push_back(j);
+            oldHasSource[j] = true;
         }
-        return {};
-    };
-    // the side of p along `line`, measured in the direction `along`
-    auto sideOn = [](const Part::GeomLineSegment* line,
-                     const Base::Vector3d& along,
-                     const Base::Vector3d& p) {
-        const double t = (p - line->getStartPoint()) * along;
-        const double middle = (line->getEndPoint() - line->getStartPoint()) * along / 2;
-        return t > middle;
-    };
-    auto meetsTheSameEnds = [&](std::size_t j, std::size_t k) {
-        const auto oldEnds = endsOf(olds[j]);
-        const auto newEnds = endsOf(news[k]);
-        for (std::size_t other = 0; other < news.size(); ++other) {
-            if (taken[other] < 0) {
-                continue;
-            }
-            auto* oldLine = freecad_cast<const Part::GeomLineSegment*>(olds[taken[other]]);
-            auto* newLine = freecad_cast<const Part::GeomLineSegment*>(news[other]);
-            if (!oldLine || !newLine) {
-                continue;
-            }
-            auto along = oldLine->getEndPoint() - oldLine->getStartPoint();
-            along.Normalize();
-            for (const auto& end : oldEnds) {
-                if (end.DistanceToLine(oldLine->getStartPoint(), along) > tolerance
-                    || std::min(Base::Distance(end, oldLine->getStartPoint()),
-                                Base::Distance(end, oldLine->getEndPoint()))
-                        > tolerance) {
-                    continue;  // not one of this line's ends
-                }
-                const bool side = sideOn(oldLine, along, end);
-                const bool met = std::any_of(newEnds.begin(), newEnds.end(), [&](const auto& p) {
-                    return std::min(Base::Distance(p, newLine->getStartPoint()),
-                                    Base::Distance(p, newLine->getEndPoint()))
-                        <= tolerance
-                        && sideOn(newLine, along, p) == side;
-                });
-                if (!met) {
-                    return false;
-                }
-            }
-        }
-        return true;
-    };
-    // The same count and types, resolved by history: first the whole list by position, if every
-    // pair meets the others at the same ends (the face's edge order kept). Before the place stage,
-    // which an edit moving an edge onto another's old place misleads (a profile moved by its own
-    // width, a slot moved by its width: fork PR 384's review, round 2)
-    bool unchangedList = byHistory && olds.size() == news.size();
-    for (std::size_t k = 0; k < news.size() && unchangedList; ++k) {
-        unchangedList = sameType(k, k);
     }
-    if (unchangedList) {
-        for (std::size_t k = 0; k < news.size(); ++k) {
-            match(k, k);
+    for (std::size_t k = 0; k < news.size(); ++k) {
+        if (auto source = sourceOf(news[k]); !source.empty()) {
+            newSources[source].push_back(k);
         }
-        bool kept = true;
-        for (std::size_t k = 0; k < news.size() && kept; ++k) {
-            kept = meetsTheSameEnds(k, k);
+    }
+    for (const auto& [source, ks] : newSources) {
+        auto it = oldSources.find(source);
+        if (ks.size() == 1 && it != oldSources.end() && it->second.size() == 1
+            && sameType(it->second.front(), ks.front())) {
+            candidates[{it->second.front(), ks.front()}] |= BySource;
         }
-        if (kept) {
-            return taken;
-        }
-        std::fill(taken.begin(), taken.end(), -1);
-        std::fill(used.begin(), used.end(), false);
     }
 
     std::vector<std::vector<double>> distance(
@@ -3500,7 +3648,6 @@ std::vector<int> pairGeometries(const std::vector<const Part::Geometry*>& olds,
             }
         }
     }
-    std::vector<std::pair<std::size_t, std::size_t>> agreed;
     for (std::size_t j = 0; j < olds.size(); ++j) {
         for (std::size_t k = 0; k < news.size(); ++k) {
             if (distance[j][k] > tolerance / 2) {
@@ -3514,43 +3661,295 @@ std::vector<int> pairGeometries(const std::vector<const Part::Geometry*>& olds,
                 clear = other == j || distance[other][k] > tolerance;
             }
             if (clear) {
-                agreed.emplace_back(j, k);
+                candidates[{j, k}] |= ByPlace;
             }
         }
     }
-    for (const auto& [j, k] : agreed) {
-        match(j, k);
-    }
 
-    auto sourceOf = [](const Part::Geometry* geo) {
-        return geo ? ExternalGeometryFacade::getFacade(geo)->getSource() : std::string();
+    const auto oldLoops = chainGeometries(olds, tolerance);
+    const auto newLoops = chainGeometries(news, tolerance);
+    using Kind = GeometryLoop::Kind;
+
+    bool unchangedList = byHistory && olds.size() == news.size();
+    for (std::size_t k = 0; k < news.size() && unchangedList; ++k) {
+        unchangedList = sameType(k, k);
+    }
+    // the k-th to k-th map carries every old loop onto a new one in the same order (a chain
+    // either way)
+    auto positionKeepsLoops = [&] {
+        for (const auto& loop : oldLoops.loops) {
+            if (loop.kind == Kind::Single) {
+                continue;
+            }
+            const int image = newLoops.loopOf[loop.members.front()];
+            if (image < 0) {
+                return false;
+            }
+            const auto& other = newLoops.loops[image];
+            if (other.kind != loop.kind || other.members.size() != loop.members.size()
+                || std::any_of(loop.members.begin(), loop.members.end(), [&](auto i) {
+                       return newLoops.loopOf[i] != image;
+                   })) {
+                return false;
+            }
+            if (loop.kind == Kind::Closed && !sameCycle(loop.members, other.members)) {
+                return false;
+            }
+            if (loop.kind == Kind::Chain && loop.members != other.members
+                && !std::equal(loop.members.begin(), loop.members.end(), other.members.rbegin())) {
+                return false;
+            }
+        }
+        return true;
     };
-    std::map<std::string, std::vector<std::size_t>> oldSources;
-    std::map<std::string, std::vector<std::size_t>> newSources;
-    for (std::size_t j = 0; j < olds.size(); ++j) {
-        if (auto source = sourceOf(olds[j]); !source.empty() && !used[j]) {
-            oldSources[source].push_back(j);
-        }
-    }
-    for (std::size_t k = 0; k < news.size(); ++k) {
-        if (auto source = sourceOf(news[k]); !source.empty() && taken[k] < 0) {
-            newSources[source].push_back(k);
-        }
-    }
-    for (const auto& [source, ks] : newSources) {
-        auto it = oldSources.find(source);
-        if (ks.size() == 1 && it != oldSources.end() && it->second.size() == 1
-            && distance[it->second.front()][ks.front()] <= tolerance / 2) {
-            match(it->second.front(), ks.front());
+    if (unchangedList && positionKeepsLoops()) {
+        for (std::size_t k = 0; k < news.size(); ++k) {
+            if (!oldHasSource[k]) {
+                candidates[{k, k}] |= ByPosition;
+            }
         }
     }
 
-    if (!unchangedList) {
-        return taken;
+    auto support = [&](std::size_t j, unsigned signals) {
+        int count = ((signals & BySource) ? 1 : 0) + ((signals & ByPlace) ? 1 : 0)
+            + ((signals & ByPosition) ? 1 : 0);
+        if ((signals & BySource)
+            && (freecad_cast<const Part::GeomCircle*>(olds[j])
+                || freecad_cast<const Part::GeomEllipse*>(olds[j]))) {
+            ++count;
+        }
+        return count;
+    };
+
+    std::vector<int> anchorOf(olds.size(), -1);
+    std::vector<bool> newPaired(news.size(), false);
+
+    // The anchors on old loop `loop` (in its order) and their images, if the images lie on one
+    // new loop of the same kind: that loop's index, else -1
+    auto anchorsOn = [&](const GeometryLoop& loop,
+                         const std::vector<int>& anchors,
+                         std::vector<std::size_t>& anchored,
+                         std::vector<std::size_t>& images) {
+        anchored.clear();
+        images.clear();
+        for (auto i : loop.members) {
+            if (anchors[i] >= 0) {
+                anchored.push_back(i);
+                images.push_back(static_cast<std::size_t>(anchors[i]));
+            }
+        }
+        if (images.empty()) {
+            return -1;
+        }
+        const int image = newLoops.loopOf[images.front()];
+        if (image < 0 || newLoops.loops[image].kind != loop.kind
+            || std::any_of(images.begin(), images.end(), [&](auto k) {
+                   return newLoops.loopOf[k] != image;
+               })) {
+            return -1;
+        }
+        return image;
+    };
+    // whether the images lie on the closed new loop in the anchors' cyclic order
+    auto inCyclicOrder = [&](const GeometryLoop& other, const std::vector<std::size_t>& images) {
+        const std::size_t size = other.members.size();
+        const std::size_t origin = newLoops.position[images.front()];
+        auto sorted = images;
+        std::sort(sorted.begin(), sorted.end(), [&](auto a, auto b) {
+            return (newLoops.position[a] + size - origin) % size
+                < (newLoops.position[b] + size - origin) % size;
+        });
+        return sorted == images;
+    };
+
+    struct Arc
+    {
+        std::set<std::size_t> olds;
+        std::set<std::size_t> news;
+    };
+    std::vector<std::size_t> anchored;
+    std::vector<std::size_t> images;
+    for (;;) {
+        // the arcs between the anchors so far
+        std::vector<Arc> arcs;
+        std::vector<int> arcOf(olds.size(), -1);
+        auto addArc = [&](Arc arc) {
+            for (auto i : arc.olds) {
+                arcOf[i] = static_cast<int>(arcs.size());
+            }
+            arcs.push_back(std::move(arc));
+        };
+        for (const auto& loop : oldLoops.loops) {
+            if (loop.kind != Kind::Closed && loop.kind != Kind::Chain) {
+                continue;
+            }
+            const int image = anchorsOn(loop, anchorOf, anchored, images);
+            if (image < 0) {
+                continue;
+            }
+            const auto& seq = loop.members;
+            const auto& other = newLoops.loops[image];
+            if (loop.kind == Kind::Closed) {
+                if (!inCyclicOrder(other, images)) {
+                    continue;
+                }
+                // after each anchor, counter-clockwise up to the next (with one anchor, the rest
+                // of the loop)
+                auto steps = [](std::size_t from, std::size_t to, std::size_t size) {
+                    const std::size_t count = (to + size - from) % size;
+                    return count ? count : size;
+                };
+                const std::size_t size = seq.size();
+                const std::size_t otherSize = other.members.size();
+                for (std::size_t a = 0; a < anchored.size(); ++a) {
+                    const std::size_t next = (a + 1) % anchored.size();
+                    const std::size_t i0 = oldLoops.position[anchored[a]];
+                    const std::size_t i1 = oldLoops.position[anchored[next]];
+                    const std::size_t k0 = newLoops.position[images[a]];
+                    const std::size_t k1 = newLoops.position[images[next]];
+                    Arc arc;
+                    for (std::size_t t = 1; t < steps(i0, i1, size); ++t) {
+                        arc.olds.insert(seq[(i0 + t) % size]);
+                    }
+                    for (std::size_t t = 1; t < steps(k0, k1, otherSize); ++t) {
+                        arc.news.insert(other.members[(k0 + t) % otherSize]);
+                    }
+                    addArc(std::move(arc));
+                }
+                continue;
+            }
+            // an open chain with two anchors or more: the stretches between consecutive anchors
+            // and the two ends, the anchors' order found on the new chain either way
+            if (anchored.size() < 2) {
+                continue;
+            }
+            std::vector<std::size_t> at;
+            for (auto k : images) {
+                at.push_back(newLoops.position[k]);
+            }
+            const bool forward = std::is_sorted(at.begin(), at.end(), std::less<>());
+            const bool backward = std::is_sorted(at.begin(), at.end(), std::greater<>());
+            if (!forward && !backward) {
+                continue;
+            }
+            auto newSeq = other.members;
+            if (!forward) {
+                std::reverse(newSeq.begin(), newSeq.end());
+                for (auto& p : at) {
+                    p = newSeq.size() - 1 - p;
+                }
+            }
+            auto stretch = [](const std::vector<std::size_t>& s, std::size_t from, std::size_t to) {
+                return std::set<std::size_t>(s.begin() + static_cast<std::ptrdiff_t>(from),
+                                             s.begin() + static_cast<std::ptrdiff_t>(to));
+            };
+            addArc({stretch(seq, 0, oldLoops.position[anchored.front()]),
+                    stretch(newSeq, 0, at.front())});
+            for (std::size_t a = 0; a + 1 < anchored.size(); ++a) {
+                addArc({stretch(seq,
+                                oldLoops.position[anchored[a]] + 1,
+                                oldLoops.position[anchored[a + 1]]),
+                        stretch(newSeq, at[a] + 1, at[a + 1])});
+            }
+            addArc({stretch(seq, oldLoops.position[anchored.back()] + 1, seq.size()),
+                    stretch(newSeq, at.back() + 1, newSeq.size())});
+        }
+
+        // dropping
+        for (auto it = candidates.begin(); it != candidates.end();) {
+            const auto [j, k] = it->first;
+            const bool paired = anchorOf[j] >= 0 || newPaired[k];
+            const bool outside = arcOf[j] >= 0 && arcs[arcOf[j]].news.count(k) == 0;
+            it = paired || outside ? candidates.erase(it) : std::next(it);
+        }
+
+        // anchoring: at the highest support present, the candidates no other candidate of their
+        // old or new geometry reaches
+        std::map<std::size_t, std::size_t> picked;
+        for (int level = 3; level >= 1 && picked.empty(); --level) {
+            std::map<std::size_t, int> perOld;
+            std::map<std::size_t, int> perNew;
+            for (const auto& [key, signals] : candidates) {
+                if (support(key.first, signals) >= level) {
+                    ++perOld[key.first];
+                    ++perNew[key.second];
+                }
+            }
+            for (const auto& [key, signals] : candidates) {
+                if (support(key.first, signals) >= level && perOld[key.first] == 1
+                    && perNew[key.second] == 1) {
+                    picked[key.first] = key.second;
+                }
+            }
+        }
+        if (picked.empty()) {
+            // lone arcs: one old and one new geometry left between two anchors, of a type; a new
+            // geometry two arcs would take (old loops merged into one) is taken by neither
+            std::map<std::size_t, std::vector<std::size_t>> claims;
+            for (const auto& arc : arcs) {
+                std::vector<std::size_t> oldFree;
+                std::vector<std::size_t> newFree;
+                for (auto i : arc.olds) {
+                    if (anchorOf[i] < 0) {
+                        oldFree.push_back(i);
+                    }
+                }
+                for (auto k : arc.news) {
+                    if (!newPaired[k]) {
+                        newFree.push_back(k);
+                    }
+                }
+                if (oldFree.size() == 1 && newFree.size() == 1 && sameType(oldFree[0], newFree[0])) {
+                    claims[newFree[0]].push_back(oldFree[0]);
+                }
+            }
+            for (const auto& [k, js] : claims) {
+                if (js.size() == 1) {
+                    picked[js.front()] = k;
+                }
+            }
+        }
+        if (picked.empty()) {
+            break;
+        }
+
+        // a batch that puts a closed loop's anchors out of their cyclic order is no evidence
+        auto trial = anchorOf;
+        for (const auto& [j, k] : picked) {
+            trial[j] = static_cast<int>(k);
+        }
+        for (const auto& loop : oldLoops.loops) {
+            if (loop.kind != Kind::Closed
+                || std::none_of(loop.members.begin(), loop.members.end(), [&](auto i) {
+                       return picked.count(i) > 0;
+                   })) {
+                continue;
+            }
+            const int image = anchorsOn(loop, trial, anchored, images);
+            if (image >= 0 && newLoops.loops[image].kind == Kind::Closed
+                && inCyclicOrder(newLoops.loops[image], images)) {
+                continue;
+            }
+            for (auto i : loop.members) {
+                if (picked.erase(i) > 0) {
+                    for (auto it = candidates.begin(); it != candidates.end();) {
+                        it = it->first.first == i ? candidates.erase(it) : std::next(it);
+                    }
+                }
+            }
+        }
+        if (picked.empty()) {
+            break;
+        }
+        for (const auto& [j, k] : picked) {
+            anchorOf[j] = static_cast<int>(k);
+            newPaired[k] = true;
+        }
     }
-    for (std::size_t k = 0; k < news.size(); ++k) {
-        if (taken[k] < 0 && !used[k] && meetsTheSameEnds(k, k)) {
-            match(k, k);
+
+    for (std::size_t j = 0; j < olds.size(); ++j) {
+        if (anchorOf[j] >= 0) {
+            taken[anchorOf[j]] = static_cast<int>(j);
         }
     }
     return taken;

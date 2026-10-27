@@ -152,6 +152,42 @@ def moveRectangle(sketch, x0, y0, x1, y1, first=0):
     setLines(sketch, {first + i: (corners[i], corners[(i + 1) % 4]) for i in range(4)})
 
 
+def reopenWithoutSources(scenario, doc):
+    """The document saved, closed and opened again (scenario.openDocument()) with every external
+    geometry's source name removed from its Document.xml: geometry as a build before ops#264 e2
+    saved it (no `Source` attribute). Setting the facade's Source from Python doesn't reach the
+    geometry a sketch holds, so a file is the only way to get it (the class E ruling, R9). The
+    folder is scenario.folder (the scenario removes it). Returns the opened document."""
+    import os
+    import re
+    import tempfile
+    import zipfile
+
+    scenario.folder = tempfile.mkdtemp(prefix="NamingScenario")
+    path = os.path.join(scenario.folder, doc.Name + ".FCStd")
+    doc.saveAs(path)
+    App.closeDocument(doc.Name)
+    with zipfile.ZipFile(path) as archive:
+        files = {name: archive.read(name) for name in archive.namelist()}
+    xml = files["Document.xml"].decode("utf-8")
+    count = 0
+
+    def strip(match):
+        nonlocal count
+        tag, n = re.subn(r' Source="[^"]*"', "", match.group(0))
+        count += n
+        return tag
+
+    xml = re.sub(r'<GeoExtension [^>]*Sketcher::ExternalGeometryExtension[^>]*>', strip, xml)
+    if count == 0:
+        raise RuntimeError("no external geometry with a source name in the saved file")
+    files["Document.xml"] = xml.encode("utf-8")
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, data in files.items():
+            archive.writestr(name, data)
+    return scenario.openDocument(path)
+
+
 def setLines(sketch, lines):
     """Moves the end points of line geometries {index: ((x0, y0), (x1, y1))}. The lines keep their
     geometry IDs, as when a user drags or re-dimensions them."""

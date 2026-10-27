@@ -349,16 +349,29 @@ class TestSketchFaceLinkPairing(unittest.TestCase):
     def setUp(self):
         if "BUILD_PART_DESIGN" not in App.__cmake__:
             self.skipTest("needs PartDesign")
-        self.doc = App.newDocument("TestSketchFaceLinkPairing")
-        if self.solver and not hasattr(self.doc, "ReferenceSolver"):
+        self.makeModel([(0, 0), (20, 0), (20, 20), (0, 20)])
+
+    def makeModel(self, corners, holes=()):
+        """The profile: a closed polygon through the corners and circles r 3 at the holes'
+        centres (unscaled; the circles' geometry indexes follow the lines'), padded 10 high; the
+        sketch on top projects the pad's top face."""
+        if hasattr(self, "doc"):
+            App.closeDocument(self.doc.Name)
+            del self.doc
+        doc = App.newDocument("TestSketchFaceLinkPairing")
+        if self.solver and not hasattr(doc, "ReferenceSolver"):
+            App.closeDocument(doc.Name)
             self.skipTest("needs the reference solver")
+        self.doc = doc
         if hasattr(self.doc, "ReferenceSolver"):
             # Explicitly, also when off: new documents start with it on (ops#7 Q7).
             self.doc.ReferenceSolver = self.solver
         s = self.scale
         self.body = self.doc.addObject("PartDesign::Body", "Body")
         self.profile = self.body.newObject("Sketcher::SketchObject", "Profile")
-        add_lines(self.profile, [(0, 0), (20 * s, 0), (20 * s, 20 * s), (0, 20 * s), (0, 0)])
+        self.addLines(corners + corners[:1])
+        for x, y in holes:
+            self.profile.addGeometry(Part.Circle(V(x * s, y * s, 0), V(0, 0, 1), 3 * s), False)
         self.pad = self.body.newObject("PartDesign::Pad", "Pad")
         self.pad.Profile = self.profile
         self.pad.Length = 10 * s
@@ -371,7 +384,8 @@ class TestSketchFaceLinkPairing(unittest.TestCase):
         self.doc.recompute()
         self.sketch.addExternal(self.pad.Name, self.topFace())
         self.doc.recompute()
-        self.assertEqual(len(self.lines()), 4)
+        self.assertEqual(len(self.lines()), len(corners))
+        self.assertEqual(len(self.circles()), len(holes))
 
     def tearDown(self):
         if hasattr(self, "doc"):
@@ -393,21 +407,37 @@ class TestSketchFaceLinkPairing(unittest.TestCase):
             if i >= 2 and isinstance(g, Part.LineSegment)
         }
 
-    @staticmethod
-    def onLine(line, axis, value):
-        """Whether the line (start, end) lies on x = value (axis "x") or y = value."""
-        return all(abs(getattr(p, axis) - value) < TOL for p in line)
+    def circles(self):
+        """The projected circles: {geoId: centre} in sketch coordinates."""
+        return {
+            -i - 1: g.Center
+            for i, g in enumerate(self.sketch.ExternalGeo)
+            if i >= 2 and isinstance(g, Part.Circle)
+        }
 
-    def lineOn(self, axis, value):
-        found = [g for g, line in self.lines().items() if self.onLine(line, axis, value)]
+    @staticmethod
+    def onLine(line, axis, value, span=None):
+        """Whether the line (start, end) lies on x = value (axis "x") or y = value, spanning
+        `span` (lo, hi) in the other coordinate if given."""
+        if not all(abs(getattr(p, axis) - value) < TOL for p in line):
+            return False
+        if span is None:
+            return True
+        other = "y" if axis == "x" else "x"
+        lo, hi = sorted(getattr(p, other) for p in line)
+        return abs(lo - span[0]) < TOL and abs(hi - span[1]) < TOL
+
+    def lineOn(self, axis, value, span=None):
+        found = [g for g, line in self.lines().items() if self.onLine(line, axis, value, span)]
         self.assertEqual(len(found), 1, f"projected lines on {axis} = {value}: {self.lines()}")
         return found[0]
 
-    def constrainCircle(self, axis, value):
-        """The circle, its centre on the projected line at axis = value (mid-way along it)."""
+    def constrainCircle(self, axis, value, span=None, at=5):
+        """The circle, its centre on the projected line at axis = value (spanning `span`), `at`
+        along it (unscaled)."""
         s = self.scale
-        geoId = self.lineOn(axis, value * s)
-        centre = V(value * s, 5 * s, 0) if axis == "x" else V(5 * s, value * s, 0)
+        geoId = self.lineOn(axis, value * s, span and (span[0] * s, span[1] * s))
+        centre = V(value * s, at * s, 0) if axis == "x" else V(at * s, value * s, 0)
         self.circle = self.sketch.addGeometry(Part.Circle(centre, V(0, 0, 1), s), False)
         self.sketch.addConstraint(Sketcher.Constraint("PointOnObject", self.circle, 3, geoId))
         self.sketch.addConstraint(Sketcher.Constraint("Radius", self.circle, s))
@@ -418,16 +448,17 @@ class TestSketchFaceLinkPairing(unittest.TestCase):
     def constrainedGeoId(self):
         return [c for c in self.sketch.Constraints if c.Type == "PointOnObject"][0].Second
 
-    def assertStaysOn(self, axis, value):
-        """The sketch computes, its constraint is on the projected line at axis = value, and so is
-        the circle's centre."""
+    def assertStaysOn(self, axis, value, span=None):
+        """The sketch computes, its constraint is on the projected line at axis = value (spanning
+        `span`), and so is the circle's centre."""
         value *= self.scale
+        span = span and (span[0] * self.scale, span[1] * self.scale)
         self.assertTrue(self.sketch.isValid(), self.sketch.getStatusString())
         geoId = self.constrainedGeoId()
         self.assertIn(geoId, self.lines())
         self.assertTrue(
-            self.onLine(self.lines()[geoId], axis, value),
-            f"the constraint is on {self.lines()[geoId]}, not on {axis} = {value}",
+            self.onLine(self.lines()[geoId], axis, value, span),
+            f"the constraint is on {self.lines()[geoId]}, not on {axis} = {value} {span}",
         )
         centre = self.sketch.Geometry[self.circle].Center
         self.assertAlmostEqual(getattr(centre, axis), value, delta=TOL)
@@ -627,6 +658,335 @@ class TestSketchFaceLinkPairing(unittest.TestCase):
             if any(e.isSame(f) for f in top.Edges)
         }
         self.assertEqual(names, edges)
+
+    # Round 4 (the class note's ruling of 2026-10-27): the source name, the place and (for
+    # geometry without a source name) the position are votes, and the face's loops arbitrate
+    # between the pairs already settled.
+
+    Z_PROFILE = [(0, 0), (10, 0), (10, 5), (20, 5), (20, 10), (0, 10)]
+    """Front (0, 0)-(10, 0), the step wall x = 10 (0..5), the step y = 5 (10..20), the right line
+    x = 20 (5..10), the back line y = 10, the left line x = 0: lines 0 to 5."""
+
+    def moveLines(self, lines):
+        """Moves the end points of the profile's lines {index: ((x0, y0), (x1, y1))} (unscaled)
+        in place, so they keep their geometry IDs (a line may turn round)."""
+        s = self.scale
+        geometry = self.profile.Geometry
+        for index, (a, b) in lines.items():
+            line = geometry[index]
+            line.StartPoint = V(-777 * s, -777 * s, 0)  # away from both ends first
+            line.EndPoint = V(b[0] * s, b[1] * s, 0)
+            line.StartPoint = V(a[0] * s, a[1] * s, 0)
+        self.profile.Geometry = geometry
+
+    def stepTurned(self):
+        """The Z profile's step goes down instead of up (the wall x = 10 runs 0..-5, the step is
+        at y = -5), a dimension edit."""
+        self.moveLines({1: ((10, 0), (10, -5)), 2: ((10, -5), (20, -5)), 3: ((20, -5), (20, 10))})
+
+    def stepTurnedMovedByWidth(self):
+        """The Z profile moved 20 to the right and its step turned, in one recompute: the left
+        line (x = 20) lies on the old right line's place."""
+        self.moveLines(
+            {
+                0: ((20, 0), (30, 0)),
+                1: ((30, 0), (30, -5)),
+                2: ((30, -5), (40, -5)),
+                3: ((40, -5), (40, 10)),
+                4: ((40, 10), (20, 10)),
+                5: ((20, 10), (20, 0)),
+            }
+        )
+
+    def cutFrontLeft(self):
+        """The square's front-left corner cut 5 x 5 (a line (0, 5)-(5, 0) appended)."""
+        self.moveLines({0: ((5, 0), (20, 0)), 3: ((0, 20), (0, 5))})
+        self.addLines([(0, 5), (5, 0)])
+
+    def cutBackRight(self):
+        """The square's back-right corner cut 5 x 5 (a line (20, 15)-(15, 20) appended)."""
+        self.moveLines({1: ((20, 0), (20, 15)), 2: ((15, 20), (0, 20))})
+        self.addLines([(20, 15), (15, 20)])
+
+    def testStepTurnedMovedByWidth(self):
+        """Round 3's silent find: the circle on the right line x = 20 (5..10) went to the left
+        line, which slid onto its place. The right line keeps its name; the slide is outside the
+        arc between the anchors. Right: x = 40 (-5..10)."""
+        self.makeModel(self.Z_PROFILE)
+        self.constrainCircle("x", 20, (5, 10), 7.5)
+        self.stepTurnedMovedByWidth()
+        self.doc.recompute()
+        self.assertStaysOn("x", 40, (-5, 10))
+
+    def testStepTurnedMovedByWidthWall(self):
+        """The same edit, the circle on the step wall x = 10 (0..5): the wall x = 30 (-5..0)."""
+        self.makeModel(self.Z_PROFILE)
+        self.constrainCircle("x", 10, (0, 5), 2.5)
+        self.stepTurnedMovedByWidth()
+        self.doc.recompute()
+        self.assertStaysOn("x", 30, (-5, 0))
+
+    def testStepTurned(self):
+        """Round 3: the step turned alone, the circle on the step y = 5 (10..20). Loud on round
+        3's head (the turned wall failed the ends check); the step keeps its name: y = -5."""
+        self.makeModel(self.Z_PROFILE)
+        self.constrainCircle("y", 5, (10, 20), 15)
+        self.stepTurned()
+        self.doc.recompute()
+        self.assertStaysOn("y", -5, (10, 20))
+
+    def testStepTurnedWall(self):
+        """Round 3's control: the same edit, the circle on the wall: x = 10 (-5..0)."""
+        self.makeModel(self.Z_PROFILE)
+        self.constrainCircle("x", 10, (0, 5), 2.5)
+        self.stepTurned()
+        self.doc.recompute()
+        self.assertStaysOn("x", 10, (-5, 0))
+
+    def testCornerCutMovedByWidth(self):
+        """Round 3's silent find: the square moved 20 to the right and its front-left corner cut;
+        the left line (x = 20, 5..20) lies on the old right line's place. Right: x = 40."""
+        self.constrainCircle("x", 20)
+        self.moveLines(
+            {
+                0: ((25, 0), (40, 0)),
+                1: ((40, 0), (40, 20)),
+                2: ((40, 20), (20, 20)),
+                3: ((20, 20), (20, 5)),
+            }
+        )
+        self.addLines([(20, 5), (25, 0)])
+        self.doc.recompute()
+        self.assertStaysOn("x", 40, (0, 20))
+
+    def testCornerCutMovedByWidthBackRight(self):
+        """Round 3's silent find, the cut at the back-right corner: x = 40 (0..15)."""
+        self.constrainCircle("x", 20)
+        self.moveLines(
+            {
+                0: ((20, 0), (40, 0)),
+                1: ((40, 0), (40, 15)),
+                2: ((35, 20), (20, 20)),
+                3: ((20, 20), (20, 0)),
+            }
+        )
+        self.addLines([(40, 15), (35, 20)])
+        self.doc.recompute()
+        self.assertStaysOn("x", 40, (0, 15))
+
+    def testCornerCutWidened(self):
+        """Round 3: the square widened to 30 and its front-left corner cut. Loud on round 3's head
+        (neither place nor position paired the moved right line); its name pairs it: x = 30."""
+        self.constrainCircle("x", 20)
+        self.moveLines(
+            {
+                0: ((5, 0), (30, 0)),
+                1: ((30, 0), (30, 20)),
+                2: ((30, 20), (0, 20)),
+                3: ((0, 20), (0, 5)),
+            }
+        )
+        self.addLines([(0, 5), (5, 0)])
+        self.doc.recompute()
+        self.assertStaysOn("x", 30, (0, 20))
+
+    def preparePath(self, path):
+        """The profile made movable by `path`: its Placement as it is ("placement"), attached to
+        the XY plane ("attachment", its AttachmentOffset then moves it) or attached to a datum
+        plane on the XY plane ("support", the plane then moves it)."""
+        xy = [f for f in self.body.Origin.OriginFeatures if f.Role == "XY_Plane"][0]
+        if path == "attachment":
+            placement = self.profile.Placement
+            self.profile.AttachmentSupport = [(xy, "")]
+            self.profile.MapMode = "FlatFace"
+            self.profile.AttachmentOffset = placement
+        elif path == "support":
+            plane = self.doc.addObject("PartDesign::Plane", "Support")
+            self.body.insertObject(plane, self.profile, False)
+            plane.AttachmentSupport = [(xy, "")]
+            plane.MapMode = "FlatFace"
+            plane.AttachmentOffset = self.profile.Placement
+            self.profile.AttachmentSupport = [(plane, "")]
+            self.profile.MapMode = "FlatFace"
+            self.profile.AttachmentOffset = App.Placement()
+            self.support = plane
+        self.doc.recompute()
+
+    def moveProfile(self, path, dx):
+        """The profile moved dx (unscaled) along x through `path` (preparePath)."""
+        owner, name = {
+            "placement": (self.profile, "Placement"),
+            "attachment": (self.profile, "AttachmentOffset"),
+            "support": (getattr(self, "support", None), "AttachmentOffset"),
+        }[path]
+        placement = getattr(owner, name)
+        placement.Base += V(dx * self.scale, 0, 0)
+        setattr(owner, name, placement)
+
+    def assertComposedEditThrough(self, path, edit, axis, value, span):
+        """Round 3's composed edits with the move of 20 made by the sketch's Placement, its
+        AttachmentOffset or its support instead of its geometry (the attack set's paths, ops#519):
+        the Ids, and so the names, are untouched, and the loops are read from the projection."""
+        self.preparePath(path)
+        self.assertTrue(self.sketch.isValid(), self.sketch.getStatusString())
+        edit()
+        self.moveProfile(path, 20)
+        self.doc.recompute()
+        self.assertStaysOn(axis, value, span)
+
+    def testCornerCutMovedByPlacement(self):
+        self.constrainCircle("x", 20)
+        self.assertComposedEditThrough("placement", self.cutFrontLeft, "x", 40, (0, 20))
+
+    def testCornerCutMovedByAttachmentOffset(self):
+        self.constrainCircle("x", 20)
+        self.assertComposedEditThrough("attachment", self.cutFrontLeft, "x", 40, (0, 20))
+
+    def testCornerCutMovedBySupport(self):
+        self.constrainCircle("x", 20)
+        self.assertComposedEditThrough("support", self.cutFrontLeft, "x", 40, (0, 20))
+
+    def testCornerCutBackRightMovedByPlacement(self):
+        self.constrainCircle("x", 20)
+        self.assertComposedEditThrough("placement", self.cutBackRight, "x", 40, (0, 15))
+
+    def testCornerCutBackRightMovedByAttachmentOffset(self):
+        self.constrainCircle("x", 20)
+        self.assertComposedEditThrough("attachment", self.cutBackRight, "x", 40, (0, 15))
+
+    def testCornerCutBackRightMovedBySupport(self):
+        self.constrainCircle("x", 20)
+        self.assertComposedEditThrough("support", self.cutBackRight, "x", 40, (0, 15))
+
+    def testStepTurnedMovedByPlacement(self):
+        self.makeModel(self.Z_PROFILE)
+        self.constrainCircle("x", 20, (5, 10), 7.5)
+        self.assertComposedEditThrough("placement", self.stepTurned, "x", 40, (-5, 10))
+
+    def testStepTurnedMovedByAttachmentOffset(self):
+        self.makeModel(self.Z_PROFILE)
+        self.constrainCircle("x", 20, (5, 10), 7.5)
+        self.assertComposedEditThrough("attachment", self.stepTurned, "x", 40, (-5, 10))
+
+    def testStepTurnedMovedBySupport(self):
+        self.makeModel(self.Z_PROFILE)
+        self.constrainCircle("x", 20, (5, 10), 7.5)
+        self.assertComposedEditThrough("support", self.stepTurned, "x", 40, (-5, 10))
+
+    def constrainPointOnHole(self, x, y):
+        """A point Coincident with the centre of the projected hole at (x, y) (unscaled)."""
+        s = self.scale
+        hole = [g for g, c in self.circles().items() if c.isEqual(V(x * s, y * s, 0), TOL)]
+        self.assertEqual(len(hole), 1, self.circles())
+        self.point = self.sketch.addGeometry(Part.Point(V(x * s, y * s, 0)), False)
+        self.sketch.addConstraint(Sketcher.Constraint("Coincident", self.point, 1, hole[0], 3))
+        self.doc.recompute()
+        self.assertTrue(self.sketch.isValid(), self.sketch.getStatusString())
+
+    def assertPointOnHole(self, x, y):
+        s = self.scale
+        self.assertTrue(self.sketch.isValid(), self.sketch.getStatusString())
+        constraint = [c for c in self.sketch.Constraints if c.Type == "Coincident"][0]
+        centre = self.circles()[constraint.Second]
+        self.assertTrue(centre.isEqual(V(x * s, y * s, 0), TOL), f"on the hole at {centre}")
+        point = self.sketch.Geometry[self.point]
+        self.assertTrue(V(point.X, point.Y, 0).isEqual(V(x * s, y * s, 0), TOL), point)
+
+    def holeRowMovedByPitch(self):
+        """A 40 x 20 plate's holes r 3 at (10, 10) and (20, 10) moved +10, keeping their IDs: the
+        left hole lands on the right hole's old place."""
+        s = self.scale
+        geometry = self.profile.Geometry
+        geometry[4].Center = V(20 * s, 10 * s, 0)
+        geometry[5].Center = V(30 * s, 10 * s, 0)
+        self.profile.Geometry = geometry
+
+    def testHoleRowMovedByPitch(self):
+        """The cloud review's model A: the point follows its hole to (30, 10)."""
+        self.makeModel([(0, 0), (40, 0), (40, 20), (0, 20)], holes=[(10, 10), (20, 10)])
+        self.constrainPointOnHole(20, 10)
+        self.holeRowMovedByPitch()
+        self.doc.recompute()
+        self.assertPointOnHole(30, 10)
+
+    def testHoleRowMovedByPitchCornerCut(self):
+        """The cloud review's leftover risk: the row moved by its pitch and a corner cut in the
+        same edit (the count changes, so position says nothing). Silent on round 3's head and on
+        integration; a hole's name outranks its look-alike's place: (30, 10)."""
+        self.makeModel([(0, 0), (40, 0), (40, 20), (0, 20)], holes=[(10, 10), (20, 10)])
+        self.constrainPointOnHole(20, 10)
+        self.holeRowMovedByPitch()
+        self.moveLines({1: ((40, 0), (40, 15)), 2: ((35, 20), (0, 20))})
+        self.addLines([(40, 15), (35, 20)])
+        self.doc.recompute()
+        self.assertPointOnHole(30, 10)
+
+    def testFirstLineRedrawnInPlace(self):
+        """The front line deleted and drawn again in place (its ID comes back by the point
+        clusters), so the face's wire may start from another edge. Silent on integration (a new
+        find); the circle on the left line stays at x = 0."""
+        self.constrainCircle("x", 0)
+        self.profile.delGeometry(0)
+        self.addLines([(0, 0), (20, 0)])
+        self.doc.recompute()
+        self.assertStaysOn("x", 0)
+
+    def testVerticalFlipSidesRedrawnBreaks(self):
+        """The front and back lines kept but swapped and reversed, the sides deleted and drawn
+        again in place: the new right line takes the left line's ID. Nothing is where it wasn't
+        and every signal is contested, so nothing settles the left line: loud."""
+        self.constrainCircle("x", 0)
+        self.profile.delGeometries([1, 3])  # 0: front, 1: back
+        self.moveLines({0: ((20, 20), (0, 20)), 1: ((0, 0), (20, 0))})
+        self.addLines([(20, 0), (20, 20)])
+        self.addLines([(0, 20), (0, 0)])
+        self.doc.recompute()
+        self.assertBreaks()
+
+    def testRedrawSidesNeighboursReversedMovedOutBreaks(self):
+        """Round 1's reissue with the front and back lines also moved off their lines (y = -3 and
+        23): nothing is at its old place, and the new right line takes the deleted left line's
+        ID. The names alone put the loop's edges in an order it doesn't have: loud."""
+        self.constrainCircle("x", 20)
+        self.profile.delGeometries([1, 3])
+        self.moveLines({0: ((25, -3), (-5, -3)), 1: ((-5, 23), (25, 23))})
+        self.addLines([(25, -3), (25, 23)])
+        self.addLines([(-5, 23), (-5, -3)])
+        self.doc.recompute()
+        self.assertBreaks()
+
+    def testMirroredKeepsTheSide(self):
+        """The square mirrored about x = 10, its lines keeping their IDs: the right line's ID is
+        now at x = 0 and the left line's at x = 20. Two edges on each other's old places; the
+        face's structure (the front and back lines in place) puts the constraint on the side it
+        was on, x = 20, where integration followed the ID across the face (the ruling's R7
+        reading: a user who meant the line's ID re-picks)."""
+        self.constrainCircle("x", 20)
+        self.moveLines(
+            {
+                0: ((20, 0), (0, 0)),
+                1: ((0, 0), (0, 20)),
+                2: ((0, 20), (20, 20)),
+                3: ((20, 20), (20, 0)),
+            }
+        )
+        self.doc.recompute()
+        self.assertStaysOn("x", 20)
+
+    def testProfileReversed(self):
+        """The attack set's find (ops#519): the square's four lines drawn from their other ends,
+        IDs kept. Silent on integration (the reversed wire lists the edges in another order)."""
+        self.constrainCircle("x", 20)
+        self.moveLines(
+            {
+                0: ((20, 0), (0, 0)),
+                1: ((20, 20), (20, 0)),
+                2: ((0, 20), (20, 20)),
+                3: ((0, 0), (0, 20)),
+            }
+        )
+        self.doc.recompute()
+        self.assertStaysOn("x", 20)
 
 
 class TestSketchFaceLinkPairingNoSolver(TestSketchFaceLinkPairing):
