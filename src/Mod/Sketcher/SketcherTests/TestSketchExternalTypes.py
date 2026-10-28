@@ -273,11 +273,12 @@ class TestSketchExternalTypes(unittest.TestCase):
         """The ball moves half a unit up after its sketch was last rebuilt: its intersection is a
         circle of radius about 7.6, its projection one of radius 10, the saved one has radius 8.
         Neither gives the saved geometry exactly; behind a stale projection type, the repair on
-        open takes the closer one, the intersection."""
+        open takes the closer one, the intersection. The move is a Placement edit: a script shape
+        replaced by a moved copy gets fresh ids (ops#502, R2'), and the link would break."""
         ball = self.addBall()
         self.sketch.delExternal(0)
         self.assertEqual(list(self.sketch.ExternalTypes), [INTERSECTION, INTERSECTION])
-        ball.Shape = Part.makeSphere(10, V(0, 0, 6.5))
+        ball.Placement.Base = V(0, 0, 0.5)
         self.sketch.ExternalTypes = [INTERSECTION, PROJECTION, INTERSECTION]
         sketch = self.saveAndReopen("KindsOnly")
         self.assertEqual(list(sketch.ExternalTypes), [INTERSECTION, INTERSECTION])
@@ -321,10 +322,19 @@ class TestSketchExternalTypes(unittest.TestCase):
         self.doc.recompute()
         self.assertRingPoints(sketch)
 
-    def assertRailRepairedWhenItsEdgeIsBack(self, sketch, path, types):
-        """Gives the rail its edge back, saves and opens again: the rail gets its projection,
-        the stale entry goes."""
+    def assertRailRepairedWhenItsEdgeIsBack(self, sketch, path, pending, types):
+        """Gives the rail its edge back, saves and opens again. The edge back is a new element:
+        a script shape that lost an element and regained it gives the regained one a fresh id
+        (ops#502), so the link stays broken and the rail undecided: the types are `pending`, the
+        stale entry stays. With the reference re-made to the edge, the next open gives the rail
+        its projection, the stale entry goes."""
         self.doc.getObject("Rail").Shape = Part.makeLine(V(-20, 20, 5), V(20, 20, 5))
+        self.doc.save()
+        App.closeDocument(self.doc.Name)
+        self.doc = App.openDocument(path)
+        sketch = self.doc.getObject("Sketch")
+        self.assertEqual(list(sketch.ExternalTypes), pending)
+        App.repairReference(sketch, "ExternalGeometry", 0, "Edge1", True)
         self.doc.save()
         App.closeDocument(self.doc.Name)
         self.doc = App.openDocument(path)
@@ -340,13 +350,16 @@ class TestSketchExternalTypes(unittest.TestCase):
     def testLaterOpenWithTheElementBackRepairsTheType(self):
         """The rail's type can't be told while its edge is missing: it keeps the stale
         intersection at its index, and the list its stale entry. Opened again with the edge
-        back, the rail gets its projection."""
+        back and the reference re-made to it, the rail gets its projection."""
         self.makeRailUndecided()
         self.sketch.ExternalTypes = [INTERSECTION, PROJECTION, INTERSECTION]
         sketch = self.saveAndReopen("ElementBack")
         self.assertEqual(list(sketch.ExternalTypes), [INTERSECTION, INTERSECTION, PENDING])
         self.assertRailRepairedWhenItsEdgeIsBack(
-            sketch, self.doc.FileName, [PROJECTION, INTERSECTION]
+            sketch,
+            self.doc.FileName,
+            [INTERSECTION, INTERSECTION, PENDING],
+            [PROJECTION, INTERSECTION],
         )
 
     def testStaleEntryKeptThroughALinkEdit(self):
@@ -362,15 +375,20 @@ class TestSketchExternalTypes(unittest.TestCase):
             list(sketch.ExternalTypes), [INTERSECTION, INTERSECTION, PROJECTION, PENDING]
         )
         self.assertRailRepairedWhenItsEdgeIsBack(
-            sketch, self.doc.FileName, [PROJECTION, INTERSECTION, PROJECTION]
+            sketch,
+            self.doc.FileName,
+            [INTERSECTION, INTERSECTION, PROJECTION, PENDING],
+            [PROJECTION, INTERSECTION, PROJECTION],
         )
 
     def testUndecidedTypeRepairedWhenTheElementComesBack(self):
         """The ball loses its face, and the stale list gives it a projection by index: on open its
         type can't be told (no type builds, a circle doesn't say which), so it keeps the
         projection, and the list ends in the pending mark. The face comes back in the same
-        session: the recompute matches the ball with its saved circle (radius 8), so it gets its
-        intersection back, not the projection's circle of radius 10, and the mark goes."""
+        session as a new element (a regained face gets a fresh id, ops#502): the link stays
+        broken and the mark stays. With the reference re-made to it, the recompute matches the
+        ball with its saved circle (radius 8), so it gets its intersection back, not the
+        projection's circle of radius 10, and the mark goes."""
         ball = self.addBall()
         ball.Shape = Part.Vertex(V(0, 0, 6))
         self.doc.recompute()
@@ -381,16 +399,22 @@ class TestSketchExternalTypes(unittest.TestCase):
         )
         self.doc.getObject("Ball").Shape = Part.makeSphere(10, V(0, 0, 6))
         self.doc.recompute()
+        self.assertEqual(
+            list(sketch.ExternalTypes), [PROJECTION, INTERSECTION, PROJECTION, PENDING]
+        )
+        App.repairReference(sketch, "ExternalGeometry", 2, "Face1", True)
+        self.doc.recompute()
         self.assertEqual(list(sketch.ExternalTypes), [PROJECTION, INTERSECTION, INTERSECTION])
         self.assertEqual(self.circleRadii(sketch), [8])
         self.assertRingPoints(sketch)
 
     def testUndecidedTypeRepairedAfterAnUndo(self):
-        """ops#237 Q5: as above, but the transaction that brings the face back (and so decides
-        the type) is undone: the list has its stale projection and the mark again, and the link
-        waits for its repair again. The face comes back once more: the recompute matches the
-        ball with its saved circle again, intersection, radius 8. Before, the undo left the link
-        decided, and it was built as the projection at its index, radius 10."""
+        """ops#237 Q5: as above, but the transaction that brings the face back and re-makes the
+        reference (and so decides the type) is undone: the list has its stale projection and the
+        mark again, and the link waits for its repair again. The face comes back once more, the
+        reference re-made: the recompute matches the ball with its saved circle again,
+        intersection, radius 8. Before, the undo left the link decided, and it was built as the
+        projection at its index, radius 10."""
         ball = self.addBall()
         ball.Shape = Part.Vertex(V(0, 0, 6))
         self.doc.recompute()
@@ -403,6 +427,7 @@ class TestSketchExternalTypes(unittest.TestCase):
         ball = self.doc.getObject("Ball")
         self.doc.openTransaction("The face back")
         ball.Shape = Part.makeSphere(10, V(0, 0, 6))
+        App.repairReference(sketch, "ExternalGeometry", 2, "Face1", True)
         self.doc.recompute()
         self.doc.commitTransaction()
         self.assertEqual(list(sketch.ExternalTypes), [PROJECTION, INTERSECTION, INTERSECTION])
@@ -411,6 +436,7 @@ class TestSketchExternalTypes(unittest.TestCase):
             list(sketch.ExternalTypes), [PROJECTION, INTERSECTION, PROJECTION, PENDING]
         )
         ball.Shape = Part.makeSphere(10, V(0, 0, 6))
+        App.repairReference(sketch, "ExternalGeometry", 2, "Face1", True)
         self.doc.recompute()
         self.assertEqual(list(sketch.ExternalTypes), [PROJECTION, INTERSECTION, INTERSECTION])
         self.assertEqual(self.circleRadii(sketch), [8])
@@ -465,12 +491,10 @@ class TestSketchExternalTypes(unittest.TestCase):
     def testKindsOnlyMatchOfARotatedSource(self):
         """As testKindsOnlyMatchTakesTheClosestType, with the ball also turned a quarter about the
         sketch normal, which moves where its circles' parameters start: the repair still takes the
-        intersection."""
+        intersection. The move and the turn are a Placement edit, as there (ops#502, R2')."""
         ball = self.addBall()
         self.sketch.delExternal(0)
-        shape = Part.makeSphere(10, V(0, 0, 6.5))
-        shape.rotate(V(0, 0, 0), V(0, 0, 1), 90)
-        ball.Shape = shape
+        ball.Placement = App.Placement(V(0, 0, 0.5), App.Rotation(V(0, 0, 1), 90))
         self.sketch.ExternalTypes = [INTERSECTION, PROJECTION, INTERSECTION]
         sketch = self.saveAndReopen("Rotated")
         self.assertEqual(list(sketch.ExternalTypes), [INTERSECTION, INTERSECTION])
@@ -579,23 +603,40 @@ class TestSketchExternalTypes(unittest.TestCase):
     def testProjectionAddedToAnIntersectionLinkKeepsItsConstraints(self):
         """ops#260: the ring is an intersection link with both constraints on its points. Adding
         its projection makes it Both. The constraints stay on the points, and the projection is
-        the line (-10, 0)-(10, 0); a later rebuild (the ring grown to radius 12) keeps them so."""
-        self.assertConstraintsOnRingPoints(10)
-        self.sketch.addExternal(self.ring.Name, "Edge1", False, False)
-        self.assertEqual(list(self.sketch.ExternalTypes), [PROJECTION, BOTH])
-        self.assertConstraintsOnRingPoints(10)
-        lines = self.ringProjections()
+        the line (-10, 0)-(10, 0); a later rebuild (the ring grown to radius 12) keeps them so.
+        The ring here is a Part::Circle, grown by its Radius: a primitive keeps its edge's id
+        through it, where a script shape replaced by a grown copy gets a fresh id (ops#502) and
+        the link would break."""
+        ring = self.doc.addObject("Part::Circle", "CircleRing")
+        ring.Radius = 10
+        ring.Placement.Rotation = App.Rotation(V(1, 0, 0), 90)  # in the XZ plane, as the ring
+        sketch = self.doc.addObject("Sketcher::SketchObject", "CircleSketch")
+        self.doc.recompute()
+        sketch.addExternal(ring.Name, "Edge1", False, True)
+        line = sketch.addGeometry(Part.LineSegment(V(-9, 1, 0), V(9, 1, 0)), False)
+        # GeoIds -1, -2 are the axes, -3 and -4 the ring's points
+        sketch.addConstraint(Sketcher.Constraint("Coincident", line, 1, -3, 1))
+        sketch.addConstraint(Sketcher.Constraint("Coincident", line, 2, -4, 1))
+        self.doc.recompute()
+        self.assertRingPoints(sketch)
+        self.ringSides = [round(g.X / 10) for g in self.constrainedExternals(sketch)]
+        self.assertEqual(sorted(self.ringSides), [-1, 1])
+        sketch.addExternal(ring.Name, "Edge1", False, False)
+        self.assertEqual(list(sketch.ExternalTypes), [BOTH])
+        self.assertConstraintsOnRingPoints(10, sketch)
+        lines = self.ringProjections(sketch)
         self.assertEqual(len(lines), 1)
         self.assertEqual(
             sorted(round(p.x, 6) for p in (lines[0].StartPoint, lines[0].EndPoint)), [-10, 10]
         )
         self.doc.recompute()
-        self.assertRingPoints()
-        self.ring.Shape = Part.makeCircle(12, V(0, 0, 0), V(0, 1, 0))
+        self.assertRingPoints(sketch)
+        ring.Radius = 12
         self.doc.recompute()
-        self.assertConstraintsOnRingPoints(12)
-        self.assertEqual(len(self.ringProjections()), 1)
-        sketch = self.saveAndReopen("Both")
+        self.assertConstraintsOnRingPoints(12, sketch)
+        self.assertEqual(len(self.ringProjections(sketch)), 1)
+        self.saveAndReopen("Both")
+        sketch = self.doc.getObject("CircleSketch")
         sketch.touch()
         self.doc.recompute()
         self.assertConstraintsOnRingPoints(12, sketch)
@@ -681,10 +722,12 @@ class TestSketchExternalTypes(unittest.TestCase):
 
     def testProjectionAddedWhileTheIntersectionShrinksIsAccepted(self):
         """PR 269 review L1: a wave crossing the sketch plane three times, linked as an
-        intersection (three points). Its source becomes a line crossing it once, and before a
-        recompute its projection is added: the rebuild gives one point and one projected line,
-        two geometries where there were three. The added projection gives one, so the add is
-        accepted (Both). Counting all of the link's geometries refused it."""
+        intersection (three points). Its source becomes a curve through the same ends crossing it
+        once, and before a recompute its projection is added: the rebuild gives one point and one
+        projected curve, two geometries where there were three. The added projection gives one,
+        so the add is accepted (Both). Counting all of the link's geometries refused it. The new
+        curve is a B-spline with the wave's ends, so the edge keeps its id; a line in its place
+        is another element (ops#502), and the add would make a second link."""
         wave = Part.BSplineCurve()
         wave.interpolate([V(0, -30, -2), V(5, -25, 2), V(10, -30, -2), V(15, -25, 2)])
         source = self.addEdge("Wave", wave.toShape())
@@ -692,13 +735,16 @@ class TestSketchExternalTypes(unittest.TestCase):
         self.sketch.addExternal(source.Name, "Edge1", False, True)
         self.doc.recompute()
         self.assertEqual(len(self.sketch.ExternalGeo), 2 + 3 + 3)
-        source.Shape = Part.makeLine(V(0, -30, -2), V(10, -30, 2))
+        once = Part.BSplineCurve()
+        once.interpolate([V(0, -30, -2), V(7, -27, 1), V(15, -25, 2)])
+        source.Shape = once.toShape()
         self.sketch.addExternal(source.Name, "Edge1", False, False)
         self.assertEqual(list(self.sketch.ExternalTypes), [PROJECTION, INTERSECTION, BOTH])
         self.doc.recompute()
         self.assertEqual(len(self.sketch.ExternalGeo), 2 + 3 + 2)
-        # the ring's two points and the line's crossing at x = 5; the ring's constraints kept
-        self.assertEqual(self.externalPoints(), [-10, 5, 10])
+        # the ring's two points and the curve's one crossing (measured: x = 3.994207); the ring's
+        # constraints kept
+        self.assertEqual(self.externalPoints(), [-10, 3.994207, 10])
         self.assertEqual(len(self.sketch.Constraints), 2)
 
     def testShapesIntersectionAddedToItsProjectionLinksIsAccepted(self):

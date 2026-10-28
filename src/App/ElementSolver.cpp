@@ -1004,6 +1004,37 @@ std::string_view NameAncestry::indexSource(std::string_view name)
     return sections.front();
 }
 
+namespace
+{
+
+// The MLN section \a name stands for (FreeCAD-CH, ops#502): \a name itself if it is a single
+// section of a history-less producer's id (op code `MLN`, no IDX flag), or its first section if
+// that is one and \a name is a modified piece of it (isPieceOf(): a box's top face cut by a
+// slot); otherwise empty. The producer gives an id to one element only (invariant I-C1), so two
+// names standing for the same MLN section name the same element. A view into \a name.
+std::string_view matchSource(std::string_view name)
+{
+    auto single = [](std::string_view section) {
+        if (section.find(";MLN;") == std::string_view::npos
+            || NameAncestry::splitSections(section).size() != 1) {
+            return false;
+        }
+        const auto& decoded = decodeSection(section);
+        return decoded.opCode == "MLN" && !decoded.hasMapperFlag(MAPPER_FLAG_INDEX);
+    };
+    if (single(name)) {
+        return name;
+    }
+    auto sections = NameAncestry::splitSections(name);
+    if (sections.size() < 2 || !single(sections.front())
+        || !NameAncestry::isPieceOf(name, sections.front())) {
+        return {};
+    }
+    return sections.front();
+}
+
+}  // namespace
+
 bool NameAncestry::isIndexPieceOf(std::string_view name, std::string_view oldName)
 {
     if (!indexSection(oldName)) {
@@ -4160,9 +4191,11 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         // result (a primitive, a script's or a Draft object's shape) names its elements by ids
         // its producer carries over by a verified match (`MLN`, Part's TopoShapeMatch.h) and
         // never reuses. The saved name being one such section, and no element of the target,
-        // whose elements carry such names, holding its id, the producer has verified that no
-        // element of its new result is the old one: an element at the same place is another
-        // one (a twin moved onto it, a seam). The reference breaks, never picks by place or by
+        // whose elements carry such names, holding its id, the producer couldn't verify that any
+        // element of its new result is the old one, or a later feature removed it: an element at
+        // the same place may be another one (a twin moved onto it, a seam) or the same one the
+        // match refused as ambiguous (decision 172: loud either way). The reference breaks, never
+        // picks by place or by
         // tier 3; listed are the elements at the saved place, then those of the old element's
         // kind and size nearest its centre without tier 3's distance cap (a twin 20 mm away).
         auto matchSection = [](const std::string& name) -> const DecodedMappedSection* {
@@ -4222,11 +4255,10 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 for (int k : place) {
                     there += (there.empty() ? "" : ", ") + pool.elements[k].index;
                 }
-                state.outcome.evidence = "retired: the producer renamed this element; "
+                state.outcome.evidence = "retired: no element holds its id; "
                     + (there.empty() ? std::string("nothing sits where it was")
                                      : there + (place.size() > 1 ? " sit" : " sits")
-                             + " where it was and " + (place.size() > 1 ? "are" : "is")
-                             + " not it");
+                             + " where it was");
                 listByDistance(state, place, "retired");
                 const auto n = state.outcome.candidates.size();
                 listByDistance(state, alike, "geometric", n < 8 ? 8 - n : std::size_t(0));
@@ -5095,8 +5127,28 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             // A derived survivor among others (ops#335) is evidence only where tier 3 (strict or
             // G1) chose it: its lineage holds the old element's source, not the old element.
             const bool derivedPartner = k >= 0 && state.derivedOnly.count(k) > 0;
+            // The old name's MLN source (ops#502) is evidence, as the IDX source was for the
+            // index names it replaced: a partner standing for the same producer's id is the old
+            // element (a box's top face, modified by a cut, then cut no more). Only where no
+            // other element stands for it: pieces of a split face are told apart by the tiers
+            const std::string_view oldSource = matchSource(state.oldName);
+            bool sameSource = false;
+            if (k >= 0 && !oldSource.empty()) {
+                int standing = 0;
+                for (std::size_t e = 0; e < state.pool->elements.size(); ++e) {
+                    const auto& names = state.pool->elements[e].names;
+                    if (std::any_of(names.begin(), names.end(), [&](const auto& n) {
+                            return matchSource(n) == oldSource;
+                        })) {
+                        ++standing;
+                        sameSource = standing == 1 && static_cast<int>(e) == k;
+                    }
+                }
+                sameSource = sameSource && standing == 1;
+            }
             bool evidenced = k >= 0
-                && (state.geometric || (state.indexed && state.fromIndex.count(k) > 0)
+                && (state.geometric || sameSource
+                    || (state.indexed && state.fromIndex.count(k) > 0)
                     || (derivedPartner
                             ? state.geometryTier == 3
                             : state.inAncestry.count(k) > 0 || !state.equivalent.empty()

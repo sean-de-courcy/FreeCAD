@@ -293,10 +293,15 @@ bool indexNamesOnly(const TopoShape& shape)
 
 bool PropertyPartShape::namesByMatch(const TopoShape& shape) const
 {
+    // Not while the document is read (an open, or an import: a copy-on-change copy, a paste). An
+    // open puts the saved map back after the shape is read, and an import's shape lost its map
+    // in the export: names given then are provisional, burn ids, and gave an imported copy a
+    // map before its first recompute, which a Link's retarget resolved against (ops#502)
     auto owner = freecad_cast<Part::Feature*>(getContainer());
     return owner && owner->isAttachedToDocument() && owner->getPropertyOfGeometry() == this
         && owner->getSelectedHistoryAlgorithm() == App::HistoryAlgorithm::V2 && !shape.isNull()
-        && shape.getElementMapSize() == 0;
+        && shape.getElementMapSize() == 0
+        && !owner->getDocument()->testStatus(App::Document::Restoring);
 }
 
 void PropertyPartShape::nameByMatch(TopoShape& shape, long tag, bool fixedOrder)

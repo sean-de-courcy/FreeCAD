@@ -70,7 +70,8 @@ class TestMaplessNames(unittest.TestCase):
         self.assertEqual(entry["status"], "broken")
         self.assertTrue(entry["evidence"].startswith("retired:"), entry["evidence"])
         self.assertIn(candidate, entry["candidates"])
-        self.assertIn("Renamed face reference", consumer.getStatusString())
+        self.assertIn("Missing face reference", consumer.getStatusString())
+        self.assertIn("couldn't tell it from its neighbours", consumer.getStatusString())
 
     def testFreshIdAtTheSamePlaceBreaks(self):
         """The ruling's probe `Sk`: the same box set again with every face given a new id by its

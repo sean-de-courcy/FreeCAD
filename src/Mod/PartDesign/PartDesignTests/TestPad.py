@@ -1172,6 +1172,30 @@ def replaceUpToShape(feature, shape):
     feature.UpToShape = (plate, ["Face%d" % i for i in range(1, len(shape.Faces) + 1)])
 
 
+def replacePlateBreaksTheUpTo(test, feature, shape):
+    """C2 round 2 (ops#502, decision 172): the up-to Part feature's shape (the plate with a hole
+    and its fill) replaced by `shape`, its hole turned or moved. A script's shape is named by a
+    verified match (MLN): the plate is the same face at its place, but the match can't tell it
+    from the fill, whose old inner point it now covers, so it gets a fresh id. The up-to
+    reference breaks on it, loud, with the plate (Face1) as its nearest candidate. Then the user
+    picks the faces again, and the feature is recomputed"""
+    plate = feature.Document.getObject("Plate")
+    plate.Shape = shape
+    feature.Document.recompute()
+    test.assertFalse(feature.isValid())
+    test.assertIn("couldn't tell it from its neighbours", feature.getStatusString())
+    report = FreeCAD.getReferenceReport(feature)
+    broken = [entry for entry in report if entry["status"] == "broken"]
+    for entry in broken:
+        test.assertTrue(entry["evidence"].startswith("retired:"), entry["evidence"])
+    plateEntry = [entry for entry in broken if entry["sub"] == "Face1"]
+    test.assertEqual(len(plateEntry), 1, report)
+    test.assertEqual(plateEntry[0]["candidates"][0], "Face1", plateEntry[0])
+    test.assertLess(plateEntry[0]["candidate_distances"][0], 0.1, plateEntry[0])
+    feature.UpToShape = (plate, ["Face1", "Face2"])
+    feature.Document.recompute()
+
+
 def dimensionedCircle(sketch, tag, x, y, radius):
     """PR 366 round 4: a circle in sketch, its radius named r<tag>, its centre's place x<tag> and
     y<tag>"""
@@ -3012,8 +3036,7 @@ class TestPad(unittest.TestCase):
                     topPoint = pointOnFarCap(pad, farCapAt(shape, z, 3, 5.5))
                     bottomPoint = pointOnFarCap(pad, farCapAt(shape, z, 3, 0.5))
                     if edit == "turnedEllipse":
-                        doc.getObject("Plate").Shape = ellipticHoleShell(z, turn=180)
-                        doc.recompute()
+                        replacePlateBreaksTheUpTo(self, pad, ellipticHoleShell(z, turn=180))
                         self.assertTrue(pad.isValid(), pad.getStatusString())
                         shape = pad.Shape
                         assertOnCap(self, topPoint, z, *centreOfFarCapAt(shape, z, 3, 5.5))
@@ -3101,8 +3124,11 @@ class TestPad(unittest.TestCase):
                                 tag, FreeCAD.Units.Quantity(value, FreeCAD.Units.Length)
                             )
                         if turn:
-                            doc.getObject("Plate").Shape = ellipticHoleShell(z, turn=turn)
-                        doc.recompute()
+                            replacePlateBreaksTheUpTo(
+                                self, feature, ellipticHoleShell(z, turn=turn)
+                            )
+                        else:
+                            doc.recompute()
                         self.assertTrue(feature.isValid(), feature.getStatusString())
                         shape = feature.Shape
                         self.assertEqual(len(farCaps(shape, z)), 4)
@@ -3997,11 +4023,13 @@ class TestPad(unittest.TestCase):
                             feature.Profile[0].setDatum(
                                 "yA", FreeCAD.Units.Quantity(0.8, FreeCAD.Units.Length)
                             )
+                            doc.recompute()
                         else:
-                            doc.getObject("Plate").Shape = ellipticHoleShell(
-                                z, turn=0.01 if edit == "tilt" else 180
+                            replacePlateBreaksTheUpTo(
+                                self,
+                                feature,
+                                ellipticHoleShell(z, turn=0.01 if edit == "tilt" else 180),
                             )
-                        doc.recompute()
                         self.assertTrue(feature.isValid(), feature.getStatusString())
                         shape = feature.Shape
                         if edit == "topGone":
@@ -4093,8 +4121,11 @@ class TestPad(unittest.TestCase):
                                 tag, FreeCAD.Units.Quantity(value, FreeCAD.Units.Length)
                             )
                         if edit == "move":
-                            doc.getObject("Plate").Shape = ellipticHoleShell(z, centre=(3, 0))
-                        doc.recompute()
+                            replacePlateBreaksTheUpTo(
+                                self, feature, ellipticHoleShell(z, centre=(3, 0))
+                            )
+                        else:
+                            doc.recompute()
                         self.assertTrue(feature.isValid(), feature.getStatusString())
                         shape = feature.Shape
                         assertOnCap(self, topPoint, z, *centreAt(shape, z, *topAfter))
@@ -4125,8 +4156,9 @@ class TestPad(unittest.TestCase):
                         self.assertTrue(feature.isValid(), feature.getStatusString())
                         self.assertEqual(len(farCaps(feature.Shape, z)), lobes + 2)
                         point = pointOnFarCap(feature, farCapAt(feature.Shape, z, *before))
-                        doc.getObject("Plate").Shape = lobedHoleShell(z, lobes, turn=turn)
-                        doc.recompute()
+                        replacePlateBreaksTheUpTo(
+                            self, feature, lobedHoleShell(z, lobes, turn=turn)
+                        )
                         self.assertTrue(feature.isValid(), feature.getStatusString())
                         own = centreOfFarCapAt(feature.Shape, z, *after)
                         assertNotQuietlyElsewhere(self, point, z, [own])
@@ -4177,8 +4209,9 @@ class TestPad(unittest.TestCase):
                             pointOnFarCap(feature, farCapAt(feature.Shape, z, *place))
                             for place in places
                         ]
-                        doc.getObject("Plate").Shape = ellipticHoleShell(z, turn=turn, a=6)
-                        doc.recompute()
+                        replacePlateBreaksTheUpTo(
+                            self, feature, ellipticHoleShell(z, turn=turn, a=6)
+                        )
                         self.assertTrue(feature.isValid(), feature.getStatusString())
                         for point, place in zip(points, places):
                             if case.startswith("unequal"):
@@ -4227,8 +4260,7 @@ class TestPad(unittest.TestCase):
                     self.assertEqual(len(set(names)), 4)
                     centres = [centreOfFarCapAt(feature.Shape, z, *place) for place in places]
                     points = [pointOnFarCap(feature, name) for name in names]
-                    doc.getObject("Plate").Shape = lobedHoleShell(z, 4, turn=45)
-                    doc.recompute()
+                    replacePlateBreaksTheUpTo(self, feature, lobedHoleShell(z, 4, turn=45))
                     self.assertTrue(feature.isValid(), feature.getStatusString())
                     for point, centre in zip(points, centres):
                         own = centreOfFarCapAt(feature.Shape, z, *turned(*centre, 45))
@@ -4280,8 +4312,7 @@ class TestPad(unittest.TestCase):
                     self.assertEqual(len(set(names)), 4)
                     centres = [centreOfFarCapAt(feature.Shape, z, *place) for place in places]
                     points = [pointOnFarCap(feature, name) for name in names]
-                    doc.getObject("Plate").Shape = lobedHoleShell(z, 4, turn=45)
-                    doc.recompute()
+                    replacePlateBreaksTheUpTo(self, feature, lobedHoleShell(z, 4, turn=45))
                     self.assertTrue(feature.isValid(), feature.getStatusString())
                     # the twin at 225 degrees went to the piece at 270
                     self.assertEqual(
