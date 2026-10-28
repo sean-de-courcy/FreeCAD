@@ -4176,15 +4176,24 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 : nullptr;
         };
         if (const DecodedMappedSection* section = matchSection(oldName)) {
+            // The producer's elements are in the target (its tag: two producers count ids from 1
+            // alike, so another's id is no evidence), and none holds the id, itself or as the
+            // source of a later name (a piece of it after a split, a modification)
             bool named = false;
             bool held = false;
             for (const auto& element : pool.elements) {
                 for (const auto& name : element.names) {
                     const DecodedMappedSection* other = matchSection(name);
-                    named = named || other != nullptr;
+                    const bool producer = other && other->iterationTag == section->iterationTag;
+                    named = named || producer;
                     held = held
-                        || (other && other->index == section->index
+                        || (producer && other->index == section->index
                             && other->elementType == section->elementType);
+                    if (!held && !other && name.find(oldName) != std::string::npos) {
+                        const auto sections = NameAncestry::splitSections(name);
+                        held = std::find(sections.begin(), sections.end(), oldName)
+                            != sections.end();
+                    }
                 }
             }
             if (named && !held) {

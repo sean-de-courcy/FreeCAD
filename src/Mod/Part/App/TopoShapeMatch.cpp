@@ -6,6 +6,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <iterator>
 #include <memory>
 #include <optional>
 #include <set>
@@ -836,7 +837,8 @@ private:
                     found.push_back(j);
                 }
             }
-            if (found.empty()) {
+            const bool overlapping = found.empty();
+            if (overlapping) {
                 // Rung 4: mutual inner points, uncontested and anchored
                 // (a face's inner point lies in its box: faces whose boxes don't meet are skipped
                 // before their inner points are computed)
@@ -866,10 +868,14 @@ private:
                 }
             }
             candidates[i] = found;
+            if (overlapping) {
+                overlap.insert(i);
+            }
         }
         for (const auto& [i, j] : uniquePairs(candidates)) {
             fmap[i] = j;
         }
+        std::erase_if(overlap, [this](int i) { return !fmap.count(i); });
     }
 
     // Whether the new face \a i has as many vertices as the old face \a j, each at a place of one
@@ -1002,6 +1008,10 @@ private:
     std::vector<bool> weak;
     std::map<int, int> emap;
     std::map<int, int> fmap;
+
+public:
+    // The new faces rung 4 matched (from 0)
+    std::set<int> overlap;
 };
 
 // The class C ruling of 10-28 (the ops repo's `notes/naming-class-C.md` section 9.2): rules that
@@ -1065,7 +1075,9 @@ std::vector<Piece> piecesOf(const Topology& topology)
 // Two sizes alike, generously: congruence over-approximated only adds loud
 bool sizesAlike(double a, double b)
 {
-    return std::abs(a - b) <= std::max(1e-4, 1e-6 * std::max(std::abs(a), std::abs(b)));
+    // (twins built apart, a B-spline's or a cylinder's with another seam, measure a little apart:
+    // the review's T3)
+    return std::abs(a - b) <= std::max(1e-3, 1e-4 * std::max(std::abs(a), std::abs(b)));
 }
 
 // What congruence compares of a set of elements: the vertex count, and the edges' and faces'
@@ -1141,10 +1153,14 @@ bool movedFrom(const Bnd_Box& a, const Bnd_Box& b, double tolerance)
 class Ruling
 {
 public:
-    Ruling(const Topology& before, const Topology& after, ElementMatches& result)
+    Ruling(const Topology& before,
+           const Topology& after,
+           ElementMatches& result,
+           const std::set<int>& overlap)
         : before(before)
         , after(after)
         , result(result)
+        , overlap(overlap)
         , tolerance(std::max(before.tolerance, after.tolerance))
         , oldPieces(piecesOf(before))
         , newPieces(piecesOf(after))
@@ -1240,12 +1256,52 @@ private:
     // edge counts where an adjacent edge matched (an edge with no adjacent edge stands alone), a
     // vertex where an edge at it counts. A place match nothing confirms is a seam: elements at
     // the old places of other faces' elements (a shape moved by its own width).
+    //
+    // The anchor of a face matched by rung 4 (its old and new pieces linked by another match) must
+    // survive R1 without it: a match R1 withdraws anchors nothing (decision 150; the review's T4).
     void confirmByFaces()
     {
         std::set<int> faces;
         for (const auto& [i, j] : result.faces) {
             faces.insert(i - 1);
         }
+        std::set<int> overlapping;
+        for (const int f : overlap) {
+            if (faces.count(f)) {
+                overlapping.insert(f);
+            }
+        }
+        if (!overlapping.empty()) {
+            std::set<int> others;
+            std::set_difference(faces.begin(), faces.end(), overlapping.begin(), overlapping.end(),
+                                std::inserter(others, others.end()));
+            const auto [vertexes, edges] = keptBy(others);
+            std::set<std::pair<int, int>> links;
+            for (const int v : vertexes) {
+                links.emplace(before.vertexPiece[result.vertexes.at(v + 1) - 1], after.vertexPiece[v]);
+            }
+            for (const int f : others) {
+                links.emplace(before.facePiece[result.faces.at(f + 1) - 1], after.facePiece[f]);
+            }
+            for (const int f : overlapping) {
+                if (!links.count({before.facePiece[result.faces.at(f + 1) - 1], after.facePiece[f]})) {
+                    result.faces.erase(f + 1);
+                    faces.erase(f);
+                }
+            }
+        }
+        const auto [vertexes, edges] = keptBy(faces);
+        std::erase_if(result.vertexes, [&](const auto& match) {
+            return !vertexes.count(match.first - 1);
+        });
+        std::erase_if(result.edges, [&](const auto& match) {
+            return !edges.count(match.first - 1);
+        });
+    }
+
+    // The matched vertices and edges R1 keeps (from 0) when the matched faces are those given
+    std::pair<std::set<int>, std::set<int>> keptBy(const std::set<int>& faces) const
+    {
         std::vector<std::vector<int>> facesAtVertex(after.points.size());
         for (int f = 0; f < static_cast<int>(after.faceVertexes.size()); ++f) {
             for (const int v : after.faceVertexes[f]) {
@@ -1318,12 +1374,7 @@ private:
                 vertexes.insert(v);
             }
         }
-        std::erase_if(result.vertexes, [&](const auto& match) {
-            return !vertexes.count(match.first - 1);
-        });
-        std::erase_if(result.edges, [&](const auto& match) {
-            return !edges.count(match.first - 1);
-        });
+        return {vertexes, edges};
     }
 
     // R2' (decision 169, in place of the ruling's 2b): a piece that moved as a whole keeps no
@@ -1388,6 +1439,7 @@ private:
     const Topology& before;
     const Topology& after;
     ElementMatches& result;
+    std::set<int> overlap;  // the new faces rung 4 matched, from 0
     double tolerance;
     std::vector<Piece> oldPieces;
     std::vector<Piece> newPieces;
@@ -1445,8 +1497,9 @@ ElementMatches matchElements(const TopoDS_Shape& before, const TopoDS_Shape& aft
         result.byIndex = true;
         return result;
     }
-    ElementMatches result = Matcher(old, now).run();
-    Ruling(old, now, result).run();
+    Matcher matcher(old, now);
+    ElementMatches result = matcher.run();
+    Ruling(old, now, result, matcher.overlap).run();
     return result;
 }
 
