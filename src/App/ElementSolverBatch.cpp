@@ -41,6 +41,8 @@ namespace
 {
 ElementHintsFunction elementHintsFunction = nullptr;
 ElementHoldsPointFunction elementHoldsPointFunction = nullptr;
+ElementHoldsPointAlongFunction elementHoldsPointAlongFunction = nullptr;
+ElementSweepDirectionFunction elementSweepDirectionFunction = nullptr;
 
 struct MigrationCounts
 {
@@ -60,6 +62,16 @@ void setElementHintsFunction(ElementHintsFunction function)
 void setElementHoldsPointFunction(ElementHoldsPointFunction function)
 {
     elementHoldsPointFunction = function;
+}
+
+void setElementHoldsPointAlongFunction(ElementHoldsPointAlongFunction function)
+{
+    elementHoldsPointAlongFunction = function;
+}
+
+void setElementSweepDirectionFunction(ElementSweepDirectionFunction function)
+{
+    elementSweepDirectionFunction = function;
 }
 
 void countReferenceMigration(const DocumentObject* owner, MigrationOutcome outcome)
@@ -379,9 +391,14 @@ bool exactNeedsSolving(const SolverEntry& entry,
         return true;
     }
     // A twin (ops#360, PR 340 round 3) that moved may have traded names with another twin that
-    // moved too: nothing at its old place, solveOwner() compares the twins' distances
+    // moved too: nothing at its old place, solveOwner() compares the twins' distances. A marked
+    // far cap may have taken another's name from a reordered up-to shell (ops#386, PR 366 round
+    // 2): solveOwner() checks that it holds its old centre. Any marked piece may have, while the
+    // pieces slid onto the next face (round 3): solveOwner() checks that it overlaps its old place
+    const std::string plain = plainName(entry.exactName);
     return !Data::atSamePlace(saved, now, diagonal, tolerances, distance)
-        && (occupied() || Data::isOrderedName(plainName(entry.exactName)));
+        && (occupied() || Data::isOrderedName(plain) || Data::isMarkedCapName(plain)
+            || Data::isMarkedPieceName(plain));
 }
 
 // Whether an exact hit is still the saved element in a naming migration (ops#103, rule 3): at
@@ -1298,6 +1315,19 @@ bool solveElementReferences(DocumentObject* feature,
                 [geo](const std::string& index, const Base::Vector3d& point, double distance) {
                     return elementHoldsPointFunction(geo, index.c_str(), point, distance);
                 };
+        }
+        if (elementHoldsPointAlongFunction) {
+            input.holdsPointAlong = [geo](const std::string& index,
+                                          const Base::Vector3d& point,
+                                          const Base::Vector3d& along,
+                                          double distance) {
+                return elementHoldsPointAlongFunction(geo, index.c_str(), point, along, distance);
+            };
+        }
+        Base::Vector3d sweep;
+        if (elementSweepDirectionFunction && elementSweepDirectionFunction(geo, sweep)
+            && sweep.Length() > 0.0) {
+            input.sweep = sweep.Normalize();
         }
         for (const auto* entry : entries) {
             Data::SolveInput::Entry item;

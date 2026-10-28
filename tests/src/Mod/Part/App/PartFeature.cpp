@@ -15,6 +15,8 @@
 #include <App/Link.h>
 #include <src/App/InitApplication.h>
 #include <BRep_Builder.hxx>
+#include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepBuilderAPI_MakePolygon.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
@@ -1273,6 +1275,33 @@ TEST_F(FeaturePartTest, fingerprintsOfABox)
     EXPECT_FALSE(none.isValid());
 }
 
+namespace
+{
+
+// A fingerprint's bounding box, within 1e-7 of the given corners
+void expectExtent(
+    const Data::ElementFingerprint& fp,
+    const Base::Vector3d& low,
+    const Base::Vector3d& high
+)
+{
+    ASSERT_TRUE(fp.extentMin && fp.extentMax) << fp.toString();
+    EXPECT_LT(Base::Distance(*fp.extentMin, low), 1e-7) << fp.toString();
+    EXPECT_LT(Base::Distance(*fp.extentMax, high), 1e-7) << fp.toString();
+}
+
+// Every point at radius 2 from the z axis, at height z (PR 366 round 5)
+void expectOnCircle(const std::vector<Base::Vector3d>& points, double z)
+{
+    ASSERT_FALSE(points.empty());
+    for (const auto& point : points) {
+        EXPECT_NEAR(std::hypot(point.x, point.y), 2.0, 1e-9);
+        EXPECT_NEAR(point.z, z, 1e-9);
+    }
+}
+
+}  // namespace
+
 TEST_F(FeaturePartTest, fingerprintsOfACylinder)
 {
     // Arrange
@@ -1291,7 +1320,9 @@ TEST_F(FeaturePartTest, fingerprintsOfACylinder)
         );
         if (fp.kind == "Cylinder") {
             ++lateral;
-            EXPECT_EQ(fp.toString(), "1|F|Cylinder|62.8318530718|0,0,2.5|0,0,1|2");
+            //   with its bounding box, in version 5 (PR 366 round 4)
+            EXPECT_EQ(fp.toString().substr(0, 45), "5|F|Cylinder|62.8318530718|0,0,2.5|0,0,1|2|_|");
+            expectExtent(fp, Base::Vector3d(-2, -2, 0), Base::Vector3d(2, 2, 5));
         }
         else {
             ++planes;
@@ -1300,6 +1331,11 @@ TEST_F(FeaturePartTest, fingerprintsOfACylinder)
             //   top faces up, bottom faces down
             EXPECT_DOUBLE_EQ(fp.direction->z, fp.center->z > 2.5 ? 1.0 : -1.0);
             EXPECT_NEAR(*fp.size, 4.0 * std::numbers::pi, 1e-9);
+            const double z = fp.center->z;
+            expectExtent(fp, Base::Vector3d(-2, -2, z), Base::Vector3d(2, 2, z));
+            //   its outline (PR 366 round 5): points of its circle, convex round it
+            expectOnCircle(fp.outline, z);
+            EXPECT_GE(fp.outline.size(), 8u);
         }
     }
     for (int index = 1; index <= static_cast<int>(cylinder.countSubShapes(TopAbs_EDGE)); ++index) {
@@ -1316,14 +1352,27 @@ TEST_F(FeaturePartTest, fingerprintsOfACylinder)
             //   a full circle's centre of mass is its centre
             EXPECT_NEAR(fp.center->x, 0.0, 1e-9);
             EXPECT_NEAR(fp.center->y, 0.0, 1e-9);
-            //   a circle carries its centre, in version 2 (Task 2 PR 7b)
+            //   a circle carries its centre (Task 2 PR 7b), and its box, in version 5
             ASSERT_TRUE(fp.location);
             EXPECT_NEAR(Base::Distance(*fp.location, *fp.center), 0.0, 1e-9);
-            EXPECT_EQ(fp.toString().substr(0, 11), "2|E|Circle|");
+            EXPECT_EQ(fp.toString().substr(0, 11), "5|E|Circle|");
+            const double z = fp.center->z;
+            expectExtent(fp, Base::Vector3d(-2, -2, z), Base::Vector3d(2, 2, z));
+            //   its outline: 17 points along it, its ends on its vertex
+            expectOnCircle(fp.outline, z);
+            ASSERT_EQ(fp.outline.size(), 17u);
+            EXPECT_LT(Base::Distance(fp.outline.front(), fp.outline.back()), 1e-9);
         }
         else {
             ++seams;
-            EXPECT_EQ(fp.toString(), "1|E|Line|5|2,0,2.5|0,0,1|_");
+            EXPECT_EQ(fp.toString().substr(0, 29), "5|E|Line|5|2,0,2.5|0,0,1|_|_|");
+            expectExtent(fp, Base::Vector3d(2, 0, 0), Base::Vector3d(2, 0, 5));
+            //   a line's outline: its two ends
+            ASSERT_EQ(fp.outline.size(), 2u);
+            EXPECT_NEAR(std::abs(fp.outline[0].z - fp.outline[1].z), 5.0, 1e-9);
+            for (const auto& point : fp.outline) {
+                EXPECT_LT(Base::Distance(Base::Vector3d(2, 0, point.z), point), 1e-9);
+            }
         }
     }
     EXPECT_EQ(lateral, 1);
@@ -1363,6 +1412,83 @@ TEST_F(FeaturePartTest, fingerprintOfAnArcLocatesItsCircle)
         EXPECT_EQ(parsed.location.has_value(), true);
     }
     EXPECT_EQ(arcs, 2);
+}
+
+TEST_F(FeaturePartTest, fingerprintsOfAnLHaveAPointInside)
+{
+    // Arrange
+    //   the L x 0.5..2.5, y 0.5..2.5 without x 1..2.5, y 1..2.5 at z = 10 (PR 366 round 6): its
+    //   centre (1.18, 1.18) lies outside it; and the square x 0..2, y 0..2
+    auto face = [](const std::vector<gp_Pnt>& corners) {
+        BRepBuilderAPI_MakePolygon polygon;
+        for (const auto& corner : corners) {
+            polygon.Add(corner);
+        }
+        polygon.Close();
+        return TopoShape(BRepBuilderAPI_MakeFace(polygon.Wire()).Face());
+    };
+    const TopoShape lFace = face(
+        {gp_Pnt(0.5, 0.5, 10),
+         gp_Pnt(2.5, 0.5, 10),
+         gp_Pnt(2.5, 1, 10),
+         gp_Pnt(1, 1, 10),
+         gp_Pnt(1, 2.5, 10),
+         gp_Pnt(0.5, 2.5, 10)}
+    );
+    const TopoShape square = face(
+        {gp_Pnt(0, 0, 10), gp_Pnt(2, 0, 10), gp_Pnt(2, 2, 10), gp_Pnt(0, 2, 10)}
+    );
+
+    // Act
+    Data::ElementFingerprint lPrint;
+    Data::ElementFingerprint squarePrint;
+    ASSERT_TRUE(Feature::getElementFingerprint(lFace, "Face1", lPrint));
+    ASSERT_TRUE(Feature::getElementFingerprint(square, "Face1", squarePrint));
+
+    // Assert
+    //   the L's point lies in the L, half its arm's width from its sides at most; its text keeps it
+    ASSERT_TRUE(lPrint.inside) << lPrint.toString();
+    const Base::Vector3d& point = *lPrint.inside;
+    EXPECT_NEAR(point.z, 10.0, 1e-9);
+    EXPECT_TRUE(point.x >= 0.5 && point.y >= 0.5 && (point.x <= 1 || point.y <= 1))
+        << point.x << "," << point.y;
+    EXPECT_GT(std::min({point.x - 0.5, point.y - 0.5}), 0.1) << point.x << "," << point.y;
+    const auto parsed = Data::ElementFingerprint::fromString(lPrint.toString());
+    ASSERT_TRUE(parsed.inside) << lPrint.toString();
+    EXPECT_LT(Base::Distance(*parsed.inside, point), 1e-9);
+    //   a square's centre is inside it: no point, and no twelfth field
+    EXPECT_FALSE(squarePrint.inside);
+    const std::string squareText = squarePrint.toString();
+    EXPECT_EQ(std::count(squareText.begin(), squareText.end(), '|'), 10) << squareText;
+
+    // Round 7: the L x 0.9..2.9, y 0.9..2.9 without x 0.9 + w..2.9, y 0.9 + w..2.9, its arms w
+    // wide: 0.1 and 0.03 have no centre of the 9 x 9 grid in them (the first sits 0.11 in), 0.1
+    // has one of the 27 x 27 grid's (0.037 in), 0.03 one of the 81 x 81 grid's (0.012 in). Its
+    // point lies in an arm. Arms 0.005 wide have none even then: no point, and no twelfth field
+    for (const double w : {0.1, 0.03, 0.005}) {
+        const double a = 0.9 + w;
+        const TopoShape thin = face(
+            {gp_Pnt(0.9, 0.9, 10),
+             gp_Pnt(2.9, 0.9, 10),
+             gp_Pnt(2.9, a, 10),
+             gp_Pnt(a, a, 10),
+             gp_Pnt(a, 2.9, 10),
+             gp_Pnt(0.9, 2.9, 10)}
+        );
+        Data::ElementFingerprint thinPrint;
+        ASSERT_TRUE(Feature::getElementFingerprint(thin, "Face1", thinPrint));
+        const std::string text = thinPrint.toString();
+        if (w < 0.01) {
+            EXPECT_FALSE(thinPrint.inside) << w << ": " << text;
+            EXPECT_EQ(std::count(text.begin(), text.end(), '|'), 10) << text;
+            continue;
+        }
+        ASSERT_TRUE(thinPrint.inside) << w << ": " << text;
+        const Base::Vector3d& in = *thinPrint.inside;
+        EXPECT_NEAR(in.z, 10.0, 1e-9);
+        EXPECT_TRUE(in.x > 0.9 && in.y > 0.9 && (in.x < a || in.y < a))
+            << w << ": " << in.x << "," << in.y;
+    }
 }
 
 TEST_F(FeaturePartTest, fingerprintsIgnoreThePlacement)

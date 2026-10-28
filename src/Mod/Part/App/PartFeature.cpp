@@ -23,7 +23,9 @@
  ***************************************************************************/
 
 
+#include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <sstream>
@@ -43,10 +45,14 @@
 #include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepBuilderAPI_MakeShape.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
+#include <BRepClass_FaceClassifier.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepGProp.hxx>
 #include <BRepGProp_Face.hxx>
 #include <BRepIntCurveSurface_Inter.hxx>
+#include <BRepTools.hxx>
+#include <BRepTools_WireExplorer.hxx>
+#include <GCPnts_QuasiUniformAbscissa.hxx>
 #include <gce_MakeCirc.hxx>
 #include <gce_MakeDir.hxx>
 #include <gce_MakeLin.hxx>
@@ -54,7 +60,9 @@
 #include <gp_Ax2.hxx>
 #include <gp_Ax3.hxx>
 #include <gp_Dir.hxx>
+#include <gp_Lin.hxx>
 #include <gp_Pln.hxx>
+#include <gp_Pnt2d.hxx>
 #include <gp_Trsf.hxx>
 #include <GProp_GProps.hxx>
 #include <IntCurveSurface_IntersectionPoint.hxx>
@@ -641,26 +649,171 @@ void faceIntrinsic(const TopoDS_Face& face,
     }
 }
 
+// An element's extent: its tight bounding box, without tolerances or gaps. A planar face's since
+// fingerprint version 3 (Task 2 PR 8), every face's and edge's since version 5 (ops#386, PR 366
+// round 4: a thin or curved piece's place, bounded).
+void extentFingerprint(const TopoDS_Shape& shape, Data::ElementFingerprint& fp)
+{
+    Bnd_Box box;
+    BRepBndLib::AddOptimal(shape, box, false, false);
+    if (!box.IsVoid()) {
+        box.SetGap(0.0);
+        double x0 {}, y0 {}, z0 {}, x1 {}, y1 {}, z1 {};
+        box.Get(x0, y0, z0, x1, y1, z1);
+        fp.extentMin = Base::Vector3d(x0, y0, z0);
+        fp.extentMax = Base::Vector3d(x1, y1, z1);
+    }
+}
+
+// An edge's points along it, from its start to its end as the edge runs: a line's two ends, any
+// other curve's 17, evenly along its length (ops#386, PR 366 round 5).
+std::vector<Base::Vector3d> pointsAlong(const TopoDS_Edge& edge)
+{
+    std::vector<Base::Vector3d> points;
+    if (BRep_Tool::Degenerated(edge)) {
+        return points;
+    }
+    BRepAdaptor_Curve curve(edge);
+    const double first = curve.FirstParameter();
+    const double last = curve.LastParameter();
+    std::vector<double> parameters;
+    if (curve.GetType() == GeomAbs_Line) {
+        parameters = {first, last};
+    }
+    else {
+        constexpr int count = 17;
+        GCPnts_QuasiUniformAbscissa abscissa(curve, count);
+        if (abscissa.IsDone() && abscissa.NbPoints() >= 2) {
+            for (int i = 1; i <= abscissa.NbPoints(); ++i) {
+                parameters.push_back(abscissa.Parameter(i));
+            }
+        }
+        else {
+            for (int i = 0; i < count; ++i) {
+                parameters.push_back(first + (last - first) * i / (count - 1));
+            }
+        }
+    }
+    for (double parameter : parameters) {
+        points.push_back(toVector(curve.Value(parameter).XYZ()));
+    }
+    if (edge.Orientation() == TopAbs_REVERSED) {
+        std::reverse(points.begin(), points.end());
+    }
+    return points;
+}
+
+// A face's outline (fingerprint version 5, ops#386, PR 366 round 5): its outer boundary's points,
+// convex about its plane, in order round it. A plane's normal; any other face's, its boundary's
+// own (Newell's sum). None when the boundary has no direction across it.
+void outlineFingerprint(const TopoDS_Face& face, Data::ElementFingerprint& fp)
+{
+    const TopoDS_Wire wire = BRepTools::OuterWire(face);
+    if (wire.IsNull()) {
+        return;
+    }
+    std::vector<Base::Vector3d> boundary;
+    for (BRepTools_WireExplorer explorer(wire, face); explorer.More(); explorer.Next()) {
+        const auto points = pointsAlong(explorer.Current());
+        boundary.insert(boundary.end(), points.begin(), points.end());
+    }
+    if (boundary.size() < 2) {
+        return;
+    }
+    Base::Vector3d normal;
+    if (fp.kind == "Plane" && fp.direction) {
+        normal = *fp.direction;
+    }
+    else {
+        const Base::Vector3d origin = boundary.front();
+        for (std::size_t i = 1; i + 1 < boundary.size(); ++i) {
+            normal += (boundary[i] - origin) % (boundary[i + 1] - origin);
+        }
+    }
+    if (normal.Length() <= Precision::Confusion() * Precision::Confusion()) {
+        return;
+    }
+    // Round 6: at most the points the text holds, every k-th of more
+    fp.outline = Data::ElementFingerprint::thinOutline(
+        Data::ElementFingerprint::convexOutline(boundary, normal)
+    );
+}
+
+// A point inside a face whose area falls short of its outline's (fingerprint version 5's twelfth
+// field, PR 366 round 6): an L's or a ring's centre may lie outside it. Of the centres of a 9 x 9
+// grid over the face's parameters, the one inside the face farthest from its boundary's points
+// (17 along each edge). None for a face its outline bounds closely, whose centre is inside it.
+// Round 7: when no centre of the 9 x 9 grid is inside (an arm narrower than a 18th of the span),
+// those of a 27 x 27 grid, then of an 81 x 81 one (each holds the coarser one's centres). A face
+// with none inside even then gets no point: the reader refuses it (holdsSavedCentre()), never
+// standing its centre in for one (I-S9).
+void insideFingerprint(const TopoDS_Face& face, Data::ElementFingerprint& fp)
+{
+    if (fp.outline.size() < 3 || !fp.size) {
+        return;
+    }
+    Base::Vector3d sum;
+    for (std::size_t i = 1; i + 1 < fp.outline.size(); ++i) {
+        sum += (fp.outline[i] - fp.outline.front()) % (fp.outline[i + 1] - fp.outline.front());
+    }
+    if (*fp.size >= 0.98 * sum.Length() / 2.0) {
+        return;
+    }
+    std::vector<gp_Pnt> boundary;
+    for (TopExp_Explorer explorer(face, TopAbs_EDGE); explorer.More(); explorer.Next()) {
+        const TopoDS_Edge& edge = TopoDS::Edge(explorer.Current());
+        if (BRep_Tool::Degenerated(edge)) {
+            continue;
+        }
+        BRepAdaptor_Curve curve(edge);
+        constexpr int count = 17;
+        const double first = curve.FirstParameter();
+        const double last = curve.LastParameter();
+        for (int i = 0; i < count; ++i) {
+            boundary.push_back(curve.Value(first + (last - first) * i / (count - 1)));
+        }
+    }
+    double u0 {}, u1 {}, v0 {}, v1 {};
+    BRepTools::UVBounds(face, u0, u1, v0, v1);
+    BRepAdaptor_Surface surface(face);
+    BRepClass_FaceClassifier classifier;
+    for (const int cells : {9, 27, 81}) {
+        double farthest = -1.0;
+        for (int i = 0; i < cells; ++i) {
+            for (int j = 0; j < cells; ++j) {
+                const double u = u0 + (u1 - u0) * (i + 0.5) / cells;
+                const double v = v0 + (v1 - v0) * (j + 0.5) / cells;
+                classifier.Perform(face, gp_Pnt2d(u, v), Precision::Confusion());
+                if (classifier.State() != TopAbs_IN) {
+                    continue;
+                }
+                const gp_Pnt point = surface.Value(u, v);
+                double nearest = std::numeric_limits<double>::infinity();
+                for (const auto& other : boundary) {
+                    nearest = std::min(nearest, point.Distance(other));
+                }
+                if (nearest > farthest) {
+                    farthest = nearest;
+                    fp.inside = toVector(point.XYZ());
+                }
+            }
+        }
+        if (fp.inside) {
+            return;
+        }
+    }
+}
+
 void faceFingerprint(const TopoDS_Face& face, Data::ElementFingerprint& fp)
 {
     faceIntrinsic(face, fp);
-    if (fp.kind == "Plane") {
-        // Its extent (fingerprint version 3, Task 2 PR 8): the tight bounding box of the face's
-        // boundary, without tolerances or gaps.
-        Bnd_Box box;
-        BRepBndLib::AddOptimal(face, box, false, false);
-        if (!box.IsVoid()) {
-            box.SetGap(0.0);
-            double x0 {}, y0 {}, z0 {}, x1 {}, y1 {}, z1 {};
-            box.Get(x0, y0, z0, x1, y1, z1);
-            fp.extentMin = Base::Vector3d(x0, y0, z0);
-            fp.extentMax = Base::Vector3d(x1, y1, z1);
-        }
-    }
+    extentFingerprint(face, fp);
+    outlineFingerprint(face, fp);
     GProp_GProps props;
     BRepGProp::SurfaceProperties(face, props);
     fp.size = props.Mass();
     fp.center = toVector(props.CentreOfMass().XYZ());
+    insideFingerprint(face, fp);
 }
 
 // An edge's kind, direction, radii and a circle's centre, the cheap part of its fingerprint;
@@ -720,6 +873,8 @@ void edgeFingerprint(const TopoDS_Edge& edge, Data::ElementFingerprint& fp)
     fp.size = props.Mass();
     if (props.Mass() > 0.0) {
         fp.center = toVector(props.CentreOfMass().XYZ());
+        extentFingerprint(edge, fp);
+        fp.outline = pointsAlong(edge);
     }
     else {
         // A degenerated edge has no length: its vertex stands for it.
@@ -796,6 +951,8 @@ const bool elementHintsRegistered = (App::setElementHintsFunction(&elementHints)
 // round 4): within the distance, and every nearest point inside the face, none on its boundary;
 // or the face's own centre of mass within the distance of the point (round 5: a piece shaped
 // like an n or a ring has its centre over the hole it wraps, its nearest point on its edge).
+// Or whether it lies within the distance of an edge, its ends included (ops#386: a piece of a far
+// edge whose centre sits at the end of the piece left in its place).
 // In the frame getElementFingerprint() measures in (without the shape's placement).
 bool elementHoldsPoint(
     const App::GeoFeature* geo,
@@ -814,7 +971,16 @@ bool elementHoldsPoint(
     }
     try {
         const TopoDS_Shape sub = shape.located(TopLoc_Location()).getSubShape(element, true);
-        if (sub.IsNull() || sub.ShapeType() != TopAbs_FACE) {
+        if (sub.IsNull()) {
+            return false;
+        }
+        if (sub.ShapeType() == TopAbs_EDGE) {
+            const TopoDS_Vertex vertex
+                = BRepBuilderAPI_MakeVertex(gp_Pnt(point.x, point.y, point.z)).Vertex();
+            BRepExtrema_DistShapeShape extrema(vertex, sub);
+            return extrema.IsDone() && extrema.NbSolution() > 0 && extrema.Value() <= distance;
+        }
+        if (sub.ShapeType() != TopAbs_FACE) {
             return false;
         }
         GProp_GProps props;
@@ -841,6 +1007,58 @@ bool elementHoldsPoint(
 }
 
 const bool elementHoldsPointRegistered = (App::setElementHoldsPointFunction(&elementHoldsPoint), true);
+
+// Whether the line through a point along a direction meets a face of Shape inside it, not on its
+// boundary, within the distance of the point (App::ElementHoldsPointAlongFunction, PR 366 round
+// 8). Seen along a Pad's sweep: the nearest point of a tilted cap to a point beside it, seen so,
+// may lie inside the cap. Round 9: the line alone decides. The face's centre of mass within the
+// distance (elementHoldsPoint()'s clause for a piece whose centre lies over its hole) held a long
+// thin strip's centre by the whole cap beside it, across a seam; the saved point of such a piece
+// is a point inside it since round 6. An edge as elementHoldsPoint() takes it.
+bool elementHoldsPointAlong(
+    const App::GeoFeature* geo,
+    const char* element,
+    const Base::Vector3d& point,
+    const Base::Vector3d& along,
+    double distance
+)
+{
+    auto feature = dynamic_cast<const Feature*>(geo);
+    if (!feature || !element) {
+        return false;
+    }
+    const TopoShape& shape = feature->Shape.getShape();
+    if (shape.isNull()) {
+        return false;
+    }
+    try {
+        const TopoDS_Shape sub = shape.located(TopLoc_Location()).getSubShape(element, true);
+        if (sub.IsNull()) {
+            return false;
+        }
+        if (sub.ShapeType() == TopAbs_EDGE) {
+            return elementHoldsPoint(geo, element, point, distance);
+        }
+        if (sub.ShapeType() != TopAbs_FACE) {
+            return false;
+        }
+        const gp_Pnt origin(point.x, point.y, point.z);
+        BRepIntCurveSurface_Inter hits;
+        hits.Init(sub, gp_Lin(origin, gp_Dir(along.x, along.y, along.z)), Precision::Confusion());
+        for (; hits.More(); hits.Next()) {
+            if (hits.State() == TopAbs_IN && std::abs(hits.W()) <= distance) {
+                return true;
+            }
+        }
+        return false;
+    }
+    catch (const Standard_Failure&) {
+        return false;
+    }
+}
+
+const bool elementHoldsPointAlongRegistered
+    = (App::setElementHoldsPointAlongFunction(&elementHoldsPointAlong), true);
 
 }  // namespace
 

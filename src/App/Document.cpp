@@ -149,7 +149,11 @@ namespace
 // 8: ops#415, a PartDesign Pipe's side faces and lateral edges are named from their spine edge
 // too, and the edges and vertices named from them follow; the union's pieces and the caps
 // between them are named from the profile and the spine, not from the piece before.
-constexpr int ForkNamingRevision = 8;
+// 9: ops#386, a Pad's or Pocket's far edge cut into several pieces by the up-to shape names each
+// piece by the up-to face and edges it lies on and ends at, and by its place along the edge among
+// how many there are (PRJ,MOD,ORD), where the pieces were told apart by a counter in the
+// splitter's order.
+constexpr int ForkNamingRevision = 9;
 
 // The `.N<n>` of the element map version: the form interned names are saved in (ops#6). 2: the
 // references are indices into the file's table (NamingFormat 2).

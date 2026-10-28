@@ -885,23 +885,46 @@ def dimensionedRectangle(sketch, tag, x0, y0, x1, y1):
     sketch.renameConstraint(bottom, "y" + tag)
 
 
-def freeformPlate(doc, z, seam=None):
-    """A Part feature holding the rectangle x -10..20, y -10..10 of the plane z = `z` as a B-spline
-    face (not elementary, so a prism up to it is built by the split), or with `seam`, a shell of
-    two such faces meeting at x = `seam`"""
+def freeformPlateShape(z, seam=None, swapped=False):
+    """The rectangle x -10..20, y -10..10 of the plane z = `z` as a B-spline face (not elementary,
+    so a prism up to it is built by the split), or with `seam`, a shell of two such faces meeting
+    at x = `seam`, the right one first if `swapped`"""
     V = FreeCAD.Vector
     faces = []
     for x0, x1 in ((-10, seam), (seam, 20)) if seam is not None else ((-10, 20),):
         corners = [V(x0, -10, z), V(x1, -10, z), V(x1, 10, z), V(x0, 10, z)]
         faces.append(Part.Face(Part.makePolygon(corners + corners[:1])).toNurbs().Faces[0])
+    if swapped:
+        faces.reverse()
+    return faces[0] if len(faces) == 1 else Part.Shell(faces)
+
+
+def freeformStripsShape(z, cuts, order=None, turn=0):
+    """PR 366 round 2: the rectangle x -10..20, y -10..10 of the plane z = `z` as a shell of
+    B-spline faces meeting at x = each of `cuts`, left to right, or in the order of `order`'s
+    indexes. Round 5b: each face made from its corners turned by `turn` degrees about Z (its
+    surface's parameters stay in the world's axes, unlike a shell turned once made)"""
+    V = FreeCAD.Vector
+    xs = [-10] + list(cuts) + [20]
+    faces = []
+    for x0, x1 in zip(xs, xs[1:]):
+        corners = [
+            V(*placeTurned(x, y, turn), z) for x, y in ((x0, -10), (x1, -10), (x1, 10), (x0, 10))
+        ]
+        faces.append(Part.Face(Part.makePolygon(corners + corners[:1])).toNurbs().Faces[0])
+    return Part.Shell([faces[i] for i in order] if order else faces)
+
+
+def freeformPlate(doc, z, seam=None):
+    """A Part feature holding freeformPlateShape(z, seam)"""
     plate = doc.addObject("Part::Feature", "Plate")
-    plate.Shape = faces[0] if len(faces) == 1 else Part.Shell(faces)
+    plate.Shape = freeformPlateShape(z, seam)
     return plate
 
 
-def freeformHoleShell(doc, z):
+def freeformHoleShellShape(z, swapped=False):
     """ops#360 round 1: a shell of two B-spline faces at height z: the rectangle x -10..20,
-    y -10..10 with the hole x -1..1, y -2..2, and the hole's fill"""
+    y -10..10 with the hole x -1..1, y -2..2, and the hole's fill, first if `swapped`"""
     V = FreeCAD.Vector
     outer = [V(-10, -10, z), V(20, -10, z), V(20, 10, z), V(-10, 10, z)]
     hole = [V(-1, -2, z), V(-1, 2, z), V(1, 2, z), V(1, -2, z)]
@@ -909,8 +932,13 @@ def freeformHoleShell(doc, z):
     plate = Part.Face(Part.Plane(V(0, 0, z), V(0, 0, 1)), wires).toNurbs().Faces[0]
     fill = [V(-1, -2, z), V(1, -2, z), V(1, 2, z), V(-1, 2, z)]
     fillFace = Part.Face(Part.makePolygon(fill + fill[:1])).toNurbs().Faces[0]
+    return Part.Shell([fillFace, plate] if swapped else [plate, fillFace])
+
+
+def freeformHoleShell(doc, z):
+    """A Part feature holding freeformHoleShellShape(z)"""
     shell = doc.addObject("Part::Feature", "Plate")
-    shell.Shape = Part.Shell([plate, fillFace])
+    shell.Shape = freeformHoleShellShape(z)
     return shell
 
 
@@ -1100,6 +1128,426 @@ def assertNotQuietlyElsewhere(test, point, z, allowed):
             any((base - FreeCAD.Vector(x, y, z)).Length < 1e-6 for x, y in allowed),
             "quietly at %s, not at one of %s" % (base, allowed),
         )
+
+
+def farEdgeAt(shape, z, x, y):
+    """ops#386: the index name of shape's edge at height z through the point (x, y, z): a far
+    edge's piece, given a point on it away from the up-to shape's edges"""
+    point = Part.Vertex(FreeCAD.Vector(x, y, z))
+    names = [
+        "Edge%d" % i
+        for i, e in enumerate(shape.Edges, 1)
+        if abs(e.BoundBox.ZMin - z) < 1e-6
+        and abs(e.BoundBox.ZMax - z) < 1e-6
+        and e.distToShape(point)[0] < 1e-6
+    ]
+    if len(names) != 1:
+        raise AssertionError("far edges at (%g, %g, %g): %s" % (x, y, z, names))
+    return names[0]
+
+
+def centreOfFarEdgeAt(shape, z, x, y):
+    """The (x, y) of the centre of mass of the far edge at height z through (x, y, z)"""
+    centre = shape.getElement(farEdgeAt(shape, z, x, y)).CenterOfMass
+    return centre.x, centre.y
+
+
+def pointOnFarEdge(feature, sub):
+    """A datum point at the centre of mass of feature's edge `sub`, the feature kept as the Tip"""
+    body = feature.getParentGeoFeatureGroup()
+    point = body.newObject("PartDesign::Point", "EdgePoint")
+    point.AttachmentSupport = [(feature, sub)]
+    point.MapMode = "CenterOfMass"
+    body.Tip = feature
+    feature.Document.recompute()
+    return point
+
+
+def replaceUpToShape(feature, shape):
+    """The up-to Part feature's shape replaced by `shape`, the feature pointed at all its faces"""
+    plate = feature.Document.getObject("Plate")
+    plate.Shape = shape
+    feature.UpToShape = (plate, ["Face%d" % i for i in range(1, len(shape.Faces) + 1)])
+
+
+def dimensionedCircle(sketch, tag, x, y, radius):
+    """PR 366 round 4: a circle in sketch, its radius named r<tag>, its centre's place x<tag> and
+    y<tag>"""
+    import Sketcher
+
+    circle = sketch.addGeometry(
+        Part.Circle(FreeCAD.Vector(x, y, 0), FreeCAD.Vector(0, 0, 1), radius)
+    )
+    for kind, arguments, value, name in (
+        ("Radius", (circle,), radius, "r"),
+        ("DistanceX", (-1, 1, circle, 3), x, "x"),
+        ("DistanceY", (-1, 1, circle, 3), y, "y"),
+    ):
+        constraint = sketch.addConstraint(Sketcher.Constraint(kind, *arguments, value))
+        sketch.renameConstraint(constraint, name + tag)
+
+
+def turnedAboutZ(shape, turn):
+    """PR 366 round 5: a copy of `shape` turned by `turn` degrees about the Z axis"""
+    turned = shape.copy()
+    if turn:
+        turned.rotate(FreeCAD.Vector(0, 0, 0), FreeCAD.Vector(0, 0, 1), turn)
+    return turned
+
+
+def turnedStripsShape(z, cuts, order, turn, cornersTurned):
+    """PR 366 round 5b: freeformStripsShape(z, cuts, order) turned by `turn` degrees about Z, or
+    made from its turned corners if `cornersTurned`"""
+    if cornersTurned:
+        return freeformStripsShape(z, cuts, order, turn)
+    return turnedAboutZ(freeformStripsShape(z, cuts, order), turn)
+
+
+def placeTurned(x, y, turn):
+    """PR 366 round 5: the point (x, y) turned by `turn` degrees about the origin"""
+    angle = math.radians(turn)
+    return (
+        x * math.cos(angle) - y * math.sin(angle),
+        x * math.sin(angle) + y * math.cos(angle),
+    )
+
+
+def profileUpToFreeformStrips(doc, kind, cuts, draw, turn=0, cornersTurned=False, attach="XY"):
+    """PR 366 round 4: a Pad from the profile `draw(sketch)` draws in the XY plane up to the
+    B-spline strips freeformStripsShape(z, cuts) at z = 10 (UpToShape, Refine off), or a Pocket
+    from it on top of the block x -8..18, y -8..9, z 0..10, down to the strips at z = 4. Round 5:
+    the whole model turned by `turn` degrees about Z (the strips and the sketches); round 5b:
+    the strips made from turned corners if `cornersTurned`. Round 9: the profile's sketch is
+    attached to the XY plane (`attach` "XY"), unattached and placed by its Placement ("none"), or
+    attached to a datum plane DP on the XY plane ("datum"). Returns the feature and the height
+    of its far caps"""
+    body = doc.addObject("PartDesign::Body", "Body")
+    xy = [f for f in body.Origin.OriginFeatures if f.Role == "XY_Plane"][0]
+    capZ = 10 if kind == "Pad" else 4
+    rotation = FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), turn)
+    plate = doc.addObject("Part::Feature", "Plate")
+    plate.Shape = turnedStripsShape(capZ, cuts, None, turn, cornersTurned)
+    if kind == "Pocket":
+        blockSketch = body.newObject("Sketcher::SketchObject", "BlockSketch")
+        blockSketch.AttachmentSupport = [(xy, "")]
+        blockSketch.MapMode = "FlatFace"
+        blockSketch.AttachmentOffset = FreeCAD.Placement(FreeCAD.Vector(), rotation)
+        dimensionedRectangle(blockSketch, "Block", -8, -8, 18, 9)
+        blockPad = body.newObject("PartDesign::Pad", "Block")
+        blockPad.Profile = blockSketch
+        blockPad.Length = 10
+    sketch = body.newObject("Sketcher::SketchObject", "Profile")
+    placement = FreeCAD.Placement(FreeCAD.Vector(0, 0, 10 if kind == "Pocket" else 0), rotation)
+    if attach == "none":
+        sketch.Placement = placement
+    else:
+        support = xy
+        if attach == "datum":
+            support = body.newObject("PartDesign::Plane", "DP")
+            support.AttachmentSupport = [(xy, "")]
+            support.MapMode = "FlatFace"
+        sketch.AttachmentSupport = [(support, "")]
+        sketch.MapMode = "FlatFace"
+        sketch.AttachmentOffset = placement
+    draw(sketch)
+    feature = body.newObject("PartDesign::" + kind, kind)
+    feature.Profile = sketch
+    feature.Type = "UpToShape"
+    feature.UpToShape = (plate, ["Face%d" % i for i in range(1, len(plate.Shape.Faces) + 1)])
+    feature.Refine = False
+    doc.recompute()
+    return feature, capZ
+
+
+def slideOntoReorderedStrips(
+    test, kind, cuts, draw, places, datums, order, after, turn=0, cornersTurned=False
+):
+    """PR 366 round 4: datum points on the pieces of profileUpToFreeformStrips(cuts, draw) at
+    `places` ({piece: ("F" or "E", x, y)}), then A's `datums` ({name: value}) set while the
+    strips are rebuilt in `order`; each point is then on the piece through one of its `after`
+    places or says it lost its piece, never quietly elsewhere. Round 5: the model turned by
+    `turn` degrees about Z, the places given unturned; round 5b: the strips made from turned
+    corners if `cornersTurned`"""
+    doc = FreeCAD.newDocument("PadUpToReorderedStrips")
+    try:
+        feature, z = profileUpToFreeformStrips(doc, kind, cuts, draw, turn, cornersTurned)
+        test.assertTrue(feature.isValid(), feature.getStatusString())
+        shape = feature.Shape
+        points = {}
+        for piece, (element, x, y) in places.items():
+            x, y = placeTurned(x, y, turn)
+            if element == "F":
+                points[piece] = pointOnFarCap(feature, farCapAt(shape, z, x, y))
+            else:
+                points[piece] = pointOnFarEdge(feature, farEdgeAt(shape, z, x, y))
+        for name, value in datums.items():
+            feature.Profile[0].setDatum(name, FreeCAD.Units.Quantity(value, FreeCAD.Units.Length))
+        replaceUpToShape(feature, turnedStripsShape(z, cuts, order, turn, cornersTurned))
+        doc.recompute()
+        test.assertTrue(feature.isValid(), feature.getStatusString())
+        shape = feature.Shape
+        for piece, allowed in after.items():
+            centre = centreOfFarCapAt if places[piece][0] == "F" else centreOfFarEdgeAt
+            assertNotQuietlyElsewhere(
+                test,
+                points[piece],
+                z,
+                [centre(shape, z, *placeTurned(x, y, turn)) for x, y in allowed],
+            )
+    finally:
+        FreeCAD.closeDocument(doc.Name)
+
+
+def polygonInSketch(sketch, corners):
+    """PR 366 round 6: the closed polygon through `corners` ((x, y) pairs) in sketch"""
+    import Sketcher
+
+    start = sketch.GeometryCount
+    count = len(corners)
+    for i in range(count):
+        sketch.addGeometry(
+            Part.LineSegment(
+                FreeCAD.Vector(*corners[i], 0), FreeCAD.Vector(*corners[(i + 1) % count], 0)
+            )
+        )
+    for i in range(count):
+        sketch.addConstraint(
+            Sketcher.Constraint("Coincident", start + i, 2, start + (i + 1) % count, 1)
+        )
+
+
+def bsplinePlate(corners):
+    """PR 366 round 6: the plane polygon through the (x, y, z) `corners` as a B-spline face"""
+    points = [FreeCAD.Vector(*corner) for corner in corners]
+    return Part.Face(Part.makePolygon(points + points[:1])).toNurbs().Faces[0]
+
+
+def foldedPlates(slope, step):
+    """PR 366 round 6: the faces at height z, as a function of z, of plate 1 (x -3..1) tilted,
+    at z + slope (x - 1); a steep ramp (x 1..1.2) from z to z + step; and plates 2 and 3 (x 1.2..3
+    and 3..20) flat at z + step; y -10..10, each a B-spline face"""
+
+    def faces(z):
+        def plate(x0, x1, height):
+            return bsplinePlate(
+                [(x, y, height(x)) for x, y in ((x0, -10), (x1, -10), (x1, 10), (x0, 10))]
+            )
+
+        return [
+            plate(-3, 1, lambda x: z + slope * (x - 1)),
+            plate(1, 1.2, lambda x: z + step * (x - 1) / 0.2),
+            plate(1.2, 3, lambda x: z + step),
+            plate(3, 20, lambda x: z + step),
+        ]
+
+    return faces
+
+
+def notchedPlates(z):
+    """PR 366 round 6: the faces at height z of the L-shaped plate x -10..4, y -10..10 without
+    the square x 1..4, y 1..10; that square, in its notch; and the plate x 4..20, y -10..10; each
+    a B-spline face"""
+    outlines = (
+        ((-10, -10), (4, -10), (4, 1), (1, 1), (1, 10), (-10, 10)),
+        ((1, 1), (4, 1), (4, 10), (1, 10)),
+        ((4, -10), (20, -10), (20, 10), (4, 10)),
+    )
+    return [bsplinePlate([(x, y, z) for x, y in outline]) for outline in outlines]
+
+
+def ridgePlates(planar=False):
+    """PR 366 round 8: the faces, as a function of z, of a ridge seen from below: plate 1 (x -4..0)
+    at z + 2 x and plate 2 (x 0..4.5) at z - 2 x, meeting at x = 0 at 53 degrees; y -10..10. Each
+    a B-spline face, or a plane face if `planar`"""
+
+    def faces(z):
+        def plate(x0, x1, height):
+            corners = [(x, y, height(x)) for x, y in ((x0, -10), (x1, -10), (x1, 10), (x0, 10))]
+            if not planar:
+                return bsplinePlate(corners)
+            points = [FreeCAD.Vector(*corner) for corner in corners]
+            return Part.Face(Part.makePolygon(points + points[:1]))
+
+        return [plate(-4, 0, lambda x: z + 2 * x), plate(0, 4.5, lambda x: z - 2 * x)]
+
+    return faces
+
+
+def seamPlates():
+    """PR 366 round 9: the faces, as a function of z, of two plates at z meeting at a seam: x
+    -10..0 and 0..10, y -12..12, each a B-spline face"""
+
+    def faces(z):
+        def plate(x0, x1):
+            return bsplinePlate([(x, y, z) for x, y in ((x0, -12), (x1, -12), (x1, 12), (x0, 12))])
+
+        return [plate(-10, 0), plate(0, 10)]
+
+    return faces
+
+
+def shellPointAt(shell, x, y):
+    """PR 366 round 6: the point of `shell` above or below (x, y)"""
+    line = Part.LineSegment(FreeCAD.Vector(x, y, -100), FreeCAD.Vector(x, y, 100)).toShape()
+    distance, pairs, _ = shell.distToShape(line)
+    if distance > 1e-6:
+        raise AssertionError("no point of the shell at (%g, %g)" % (x, y))
+    return pairs[0][0]
+
+
+def farPieceAt(shape, element, point, capMax=50):
+    """PR 366 round 6: the index name of shape's far cap ("F", smaller than the plates) or far
+    edge ("E") through `point`, a point of the up-to shell inside the piece. Round 8: caps up to
+    `capMax` in area (a tilted plate's caps are larger than their plan)"""
+    vertex = Part.Vertex(point)
+    if element == "F":
+        names = [
+            "Face%d" % i
+            for i, face in enumerate(shape.Faces, 1)
+            if face.Area < capMax and face.distToShape(vertex)[0] < 1e-6
+        ]
+    else:
+        names = [
+            "Edge%d" % i
+            for i, edge in enumerate(shape.Edges, 1)
+            if edge.distToShape(vertex)[0] < 1e-6
+        ]
+    if len(names) != 1:
+        raise AssertionError("far pieces (%s) at %s: %s" % (element, point, names))
+    return names[0]
+
+
+def savedFingerprints(path, names):
+    """PR 366 round 8: the fingerprint text the saved document at `path` holds for the reference
+    of each datum in `names` ({piece: object name}), as written in the file ("" for none)"""
+    import xml.etree.ElementTree as ElementTree
+    import zipfile
+
+    with zipfile.ZipFile(path) as archive:
+        root = ElementTree.fromstring(archive.read("Document.xml"))
+    found = {}
+    for piece, name in names.items():
+        data = root.find("ObjectData/Object[@name='%s']" % name)
+        support = data.find("Properties/Property[@name='AttachmentSupport']")
+        texts = [node.get("fp") for node in support.iter() if node.get("fp") is not None]
+        found[piece] = texts[0] if texts else ""
+    return found
+
+
+def slideOntoReorderedPlates(
+    test,
+    kind,
+    faces,
+    draw,
+    places,
+    move,
+    order,
+    after,
+    reopen=False,
+    capMax=50,
+    savedInside=(),
+    mover="offset",
+):
+    """PR 366 round 6: as slideOntoReorderedStrips, up to the shell of `faces(z)` (a list of
+    B-spline plates; z is the far caps' height where the plates are flat at it): datum points on
+    the pieces through the shell's points at `places` ({piece: ("F" or "E", x, y)}), then the
+    profile moved by `move` ((dx, dy)) while the shell is rebuilt from its faces in `order`. Each
+    point is then on the piece through the shell's point at one of its `after` places (a list)
+    or says it lost its piece, never quietly elsewhere; one whose `after` is a single place (a
+    tuple) is on that piece, quietly. Round 7: with `reopen`, the document is saved, opened again
+    and recomputed before the move (the fingerprints read back from the file). Round 8: with
+    `reopen` "untouched", opened again and moved with nothing touched or recomputed first, so
+    the references are solved from the fingerprints the file holds, not from new ones; the
+    pieces in `savedInside` must have a point inside them in the file (its twelfth field).
+    `capMax`: as farPieceAt()'s. Round 9: `mover` says what moves, the profile by its sketch's
+    attachment offset ("offset"), by the Placement of its unattached sketch ("placement") or by
+    the attachment offset of the datum plane its sketch is attached to ("datum"); or the plates
+    the other way, by their feature's Placement ("platesPlacement") or rebuilt there
+    ("platesGeometry"). The places are where the shapes are, with their placements"""
+    import os
+    import tempfile
+
+    attach = {"placement": "none", "datum": "datum"}.get(mover, "XY")
+    doc = FreeCAD.newDocument("PadUpToReorderedPlates")
+    work = tempfile.mkdtemp(prefix="pad-plates-reopen-") if reopen else None
+    try:
+        feature, z = profileUpToFreeformStrips(doc, kind, (1, 3), draw, attach=attach)
+        replaceUpToShape(feature, Part.Shell(faces(z)))
+        doc.recompute()
+        test.assertTrue(feature.isValid(), feature.getStatusString())
+        shape = feature.Shape
+        shell = doc.getObject("Plate").Shape
+        points = {}
+        for piece, (element, x, y) in places.items():
+            sub = farPieceAt(shape, element, shellPointAt(shell, x, y), capMax)
+            attach = pointOnFarCap if element == "F" else pointOnFarEdge
+            points[piece] = attach(feature, sub)
+        if reopen:
+            path = os.path.join(work, "plates.FCStd")
+            doc.saveAs(path)
+            names = {piece: point.Name for piece, point in points.items()}
+            featureName = feature.Name
+            FreeCAD.closeDocument(doc.Name)
+            saved = savedFingerprints(path, names)
+            for piece in savedInside:
+                test.assertEqual(len(saved[piece].split("|")), 12, (piece, saved[piece]))
+            doc = FreeCAD.openDocument(path)
+            if reopen != "untouched":
+                for obj in doc.Objects:
+                    obj.touch()
+                doc.recompute()
+            feature = doc.getObject(featureName)
+            points = {piece: doc.getObject(name) for piece, name in names.items()}
+        sketch = feature.Profile[0]
+        shift = FreeCAD.Vector(move[0], move[1], 0)
+
+        def moved(placement, by):
+            return FreeCAD.Placement(placement.Base + by, placement.Rotation)
+
+        if mover == "offset":
+            sketch.AttachmentOffset = moved(sketch.AttachmentOffset, shift)
+        elif mover == "placement":
+            sketch.Placement = moved(sketch.Placement, shift)
+        elif mover == "datum":
+            datum = doc.getObject("DP")
+            datum.AttachmentOffset = moved(datum.AttachmentOffset, shift)
+        plates = faces(z)
+        if mover == "platesGeometry":
+            matrix = FreeCAD.Matrix()
+            matrix.move(-shift)
+            plates = [plate.transformGeometry(matrix) for plate in plates]
+        replaceUpToShape(feature, Part.Shell([plates[i] for i in order]))
+        if mover == "platesPlacement":
+            plate = doc.getObject("Plate")
+            plate.Placement = moved(plate.Placement, -shift)
+        doc.recompute()
+        test.assertTrue(feature.isValid(), feature.getStatusString())
+        shape = feature.Shape
+        shell = doc.getObject("Plate").Shape
+
+        def centre(element, x, y):
+            sub = farPieceAt(shape, element, shellPointAt(shell, x, y), capMax)
+            return shape.getElement(sub).CenterOfMass
+
+        for piece, allowed in after.items():
+            element = places[piece][0]
+            point = points[piece]
+            base = point.Placement.Base
+            if isinstance(allowed, tuple):
+                test.assertTrue(point.isValid(), "%s: %s" % (piece, point.getStatusString()))
+                test.assertEqual(point.getStatusString(), "Valid", piece)
+                test.assertLess((base - centre(element, *allowed)).Length, 1e-6, piece)
+            elif point.isValid() and point.getStatusString() == "Valid":
+                test.assertTrue(
+                    any((base - centre(element, x, y)).Length < 1e-6 for x, y in allowed),
+                    "%s quietly at %s, not at one of %s" % (piece, base, allowed),
+                )
+    finally:
+        FreeCAD.closeDocument(doc.Name)
+        if work:
+            import shutil
+
+            shutil.rmtree(work, ignore_errors=True)
 
 
 # The child of testPadUpToAFreeformFaceCapsMigrate: opens the saved file, recomputes every object
@@ -2665,6 +3113,934 @@ class TestPad(unittest.TestCase):
                             assertNotQuietlyElsewhere(self, bottomPoint, z, [bottomCentre])
                     finally:
                         FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToAFreeformShellFarEdgePiecesStay(self):
+        # ops#386: up to a shell of two B-spline faces meeting at x = 1, under A's middle, A's
+        # far top and bottom edges are two pieces each, on the left and the right face. Told
+        # apart by a counter in the splitter's order alone, the left pieces' datums followed the
+        # right pieces quietly when A moved onto the right face, and all four went to the other
+        # piece when the shell was rebuilt with its faces in the other order. Marked by their
+        # faces, the pieces keep their datums when A moves along the seam or grows; when A moves
+        # onto the right face, the datums of the left pieces, which went, say so; those of the
+        # right pieces took the edge left in one piece until PR 366 round 9, and now say they lost
+        # their piece or are on it (PLAN decision 152: an edge made whole is no evidence); the
+        # swapped shell moves none quietly. For the Pad and the Pocket
+        places = {"TL": (0.5, 2), "TR": (1.5, 2), "BL": (0.5, 0), "BR": (1.5, 0)}
+        edits = {
+            # edit: the datums' places after it, None for a piece that went
+            "shift": {"TL": (0.75, 2), "TR": (1.75, 2), "BL": (0.75, 0), "BR": (1.75, 0)},
+            "grow": {"TL": (0.5, 4), "TR": (2.5, 4), "BL": (0.5, 0), "BR": (2.5, 0)},
+            "offTheRightFace": {"TL": None, "TR": (2.5, 2), "BL": None, "BR": (2.5, 0)},
+            "facesSwapped": places,
+        }
+        for kind in ("Pad", "Pocket"):
+            for edit, after in edits.items():
+                with self.subTest(kind=kind, edit=edit):
+                    doc = FreeCAD.newDocument("PadUpToAFreeformShellFarEdgePieces")
+                    try:
+                        feature, z = capsUpToAFreeformPlate(doc, kind, seam=1)
+                        self.assertTrue(feature.isValid(), feature.getStatusString())
+                        shape = feature.Shape
+                        points = {
+                            piece: pointOnFarEdge(feature, farEdgeAt(shape, z, x, y))
+                            for piece, (x, y) in places.items()
+                        }
+                        sketch = feature.Profile[0]
+                        if edit == "shift":
+                            sketch.setDatum("xA", FreeCAD.Units.Quantity(0.5, FreeCAD.Units.Length))
+                        elif edit == "grow":
+                            growCapA(sketch)
+                        elif edit == "offTheRightFace":
+                            sketch.setDatum("xA", FreeCAD.Units.Quantity(1.5, FreeCAD.Units.Length))
+                        else:
+                            replaceUpToShape(feature, freeformPlateShape(z, 1, swapped=True))
+                        doc.recompute()
+                        self.assertTrue(feature.isValid(), feature.getStatusString())
+                        for piece, place in after.items():
+                            if place is None:
+                                assertNotQuietlyElsewhere(self, points[piece], z, [])
+                            elif edit in ("facesSwapped", "offTheRightFace"):
+                                assertNotQuietlyElsewhere(self, points[piece], z, [place])
+                            else:
+                                assertOnCap(self, points[piece], z, *place)
+                    finally:
+                        FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToAHoledShellFarEdgePiecesStay(self):
+        # ops#386: up to the B-spline plate with the hole x -1..1, y -2..2 and the hole's fill,
+        # A (x -3..3, y 1..3) has its far bottom edge in three pieces: left and right on the
+        # plate (marked by it and the hole's edge through their ends, since they share it), the
+        # middle on the fill (marked by the fill alone). Told apart by a counter
+        # in the splitter's order (right, left, middle), the left one's datum went to the
+        # middle piece when the left piece went, and the right one's to the left piece when the
+        # right piece went, quietly; with the shell's faces swapped all three moved. Now a
+        # datum on a piece that went says so, and the others are on their pieces or say they
+        # lost them: the pieces are counted too (PR 366 round 2), so one going renames them all.
+        # A piece going with the shell's faces swapped in the same recompute gave the
+        # middle's marks (the fill's index) to a plate piece: the middle's datum followed it
+        # quietly (round 1's marks alone). For the Pad and the Pocket
+        places = {"L": (-2, 1), "M": (0, 1), "R": (2, 1)}
+        edits = {
+            # edit: (A's x and width after it, or None; the shell's faces swapped; the datums'
+            # places after it, None for a piece that went)
+            "leftGone": ((-0.5, 3.5), False, {"L": None, "M": (0.25, 1), "R": (2, 1)}),
+            "rightGone": ((-3, 3.5), False, {"L": (-2, 1), "M": (-0.25, 1), "R": None}),
+            "facesSwapped": (None, True, places),
+            "leftGoneFacesSwapped": ((-0.5, 3.5), True, {"L": None, "M": (0.25, 1), "R": (2, 1)}),
+            "rightGoneFacesSwapped": ((-3, 3.5), True, {"L": (-2, 1), "M": (-0.25, 1), "R": None}),
+        }
+        # Round 3: the middle piece, alone on the fill (the one piece with its marks, the saved
+        # centre on it), follows it quietly when a piece beside it went, the shell unchanged
+        quiet = {"leftGone": ("M",), "rightGone": ("M",)}
+        for kind in ("Pad", "Pocket"):
+            for edit, (dimensions, swapped, after) in edits.items():
+                with self.subTest(kind=kind, edit=edit):
+                    doc = FreeCAD.newDocument("PadUpToAHoledShellFarEdgePieces")
+                    try:
+                        feature, z = capsUpToAFreeformPlate(
+                            doc, kind, hole=True, capA=(-3, 1, 3, 3), block=(-8, -8, 18, 9)
+                        )
+                        self.assertTrue(feature.isValid(), feature.getStatusString())
+                        shape = feature.Shape
+                        points = {
+                            piece: pointOnFarEdge(feature, farEdgeAt(shape, z, x, y))
+                            for piece, (x, y) in places.items()
+                        }
+                        if dimensions:
+                            sketch = feature.Profile[0]
+                            xA, wA = dimensions
+                            sketch.setDatum("wA", FreeCAD.Units.Quantity(wA, FreeCAD.Units.Length))
+                            sketch.setDatum("xA", FreeCAD.Units.Quantity(xA, FreeCAD.Units.Length))
+                        if swapped:
+                            replaceUpToShape(feature, freeformHoleShellShape(z, swapped=True))
+                        doc.recompute()
+                        self.assertTrue(feature.isValid(), feature.getStatusString())
+                        for piece, place in after.items():
+                            if piece in quiet.get(edit, ()):
+                                assertOnCap(self, points[piece], z, *place)
+                            else:
+                                assertNotQuietlyElsewhere(
+                                    self, points[piece], z, [place] if place else []
+                                )
+                    finally:
+                        FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToThreePlatesFarEdgePieceGone(self):
+        # PR 366 round 2: up to a shell of three B-spline plates meeting at x = 1 and x = 3, A
+        # (x 0..5) has its far top edge in three pieces, P1 to P3 left to right, each alone on its
+        # plate, so marked by it alone: by its index in a shell without names. A shortened to
+        # x 0..2.5 so that P3 went, with the shell's last two plates swapped (or its plates
+        # turned by one) in the same recompute: the right plate's index went to the middle one,
+        # and P3's datum followed the middle piece quietly to (1.75, 2). Counted by their place
+        # and how many there are, the pieces are renamed when one goes: P3's datum says it lost
+        # its piece, and P1's and P2's are on theirs or say they lost them. A shortened from the
+        # left so that P1 went, the shell unchanged: P3, where it was and renumbered, keeps its
+        # datum (a counted piece in its old place is no pattern's copy). For the Pad and the
+        # Pocket
+        places = {"P1": (0.5, 2), "P2": (2, 2), "P3": (4, 2)}
+        edits = {
+            # edit: (A's x and width after it; the plates' order; each datum's place after it,
+            # or a list of the places it may be at unless it says it lost its piece)
+            "rightGoneSwapped": (
+                (0, 2.5),
+                (0, 2, 1),
+                {"P1": [(0.5, 2)], "P2": [(1.75, 2)], "P3": []},
+            ),
+            "rightGoneTurned": (
+                (0, 2.5),
+                (2, 0, 1),
+                {"P1": [(0.5, 2)], "P2": [(1.75, 2)], "P3": []},
+            ),
+            "leftGone": ((1.5, 3.5), None, {"P1": [], "P2": [(2.25, 2)], "P3": (4, 2)}),
+        }
+        for kind in ("Pad", "Pocket"):
+            for edit, ((xA, wA), order, after) in edits.items():
+                with self.subTest(kind=kind, edit=edit):
+                    doc = FreeCAD.newDocument("PadUpToThreePlatesFarEdgePieceGone")
+                    try:
+                        feature, z = capsUpToAFreeformPlate(
+                            doc, kind, seam=1, capA=(0, 0, 5, 2), block=(-8, -8, 18, 9), withB=False
+                        )
+                        replaceUpToShape(feature, freeformStripsShape(z, (1, 3)))
+                        doc.recompute()
+                        self.assertTrue(feature.isValid(), feature.getStatusString())
+                        shape = feature.Shape
+                        points = {
+                            piece: pointOnFarEdge(feature, farEdgeAt(shape, z, x, y))
+                            for piece, (x, y) in places.items()
+                        }
+                        sketch = feature.Profile[0]
+                        sketch.setDatum("wA", FreeCAD.Units.Quantity(wA, FreeCAD.Units.Length))
+                        sketch.setDatum("xA", FreeCAD.Units.Quantity(xA, FreeCAD.Units.Length))
+                        if order:
+                            replaceUpToShape(feature, freeformStripsShape(z, (1, 3), order))
+                        doc.recompute()
+                        self.assertTrue(feature.isValid(), feature.getStatusString())
+                        for piece, place in after.items():
+                            if isinstance(place, list):
+                                assertNotQuietlyElsewhere(self, points[piece], z, place)
+                            else:
+                                assertOnCap(self, points[piece], z, *place)
+                    finally:
+                        FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToAReorderedShellFarEdgePiecesNotQuietlyElsewhere(self):
+        # PR 366 round 2: A's far top and bottom edges across the seam of a two-face shell
+        # without names, each piece marked by its face's index alone. The shell rebuilt with its
+        # faces swapped while A moved along the seam (x 0.5..2.5), or with the seam moved to
+        # x = 0.3: every piece's marks went to the other piece, which moved too, with nothing
+        # left at the old place, and each datum followed the other piece quietly. A third face
+        # put first in the shell, under A's middle (x 0.7..1.3): the left face's index went to
+        # it, and TL's and BL's datums followed the new middle piece quietly. Counted by their
+        # place along the edge too, the pieces' names are no piece's then, or the same place's:
+        # each datum is on its own piece or says it lost it. For the Pad and the Pocket
+        places = {"TL": (0.5, 2), "TR": (1.5, 2), "BL": (0.5, 0), "BR": (1.5, 0)}
+        edits = {
+            # edit: (A's x after it, or None; the shell after it (its cuts and their order); the
+            # datums' right places after it)
+            "swappedAndShifted": (
+                0.5,
+                ((1,), (1, 0)),
+                {"TL": (0.75, 2), "TR": (1.75, 2), "BL": (0.75, 0), "BR": (1.75, 0)},
+            ),
+            "swappedSeamMoved": (
+                None,
+                ((0.3,), (1, 0)),
+                {"TL": (0.15, 2), "TR": (1.15, 2), "BL": (0.15, 0), "BR": (1.15, 0)},
+            ),
+            "middleFaceFirst": (
+                None,
+                ((0.7, 1.3), (1, 0, 2)),
+                {"TL": (0.35, 2), "TR": (1.65, 2), "BL": (0.35, 0), "BR": (1.65, 0)},
+            ),
+        }
+        for kind in ("Pad", "Pocket"):
+            for edit, (xA, (cuts, order), after) in edits.items():
+                with self.subTest(kind=kind, edit=edit):
+                    doc = FreeCAD.newDocument("PadUpToAReorderedShellFarEdgePieces")
+                    try:
+                        feature, z = capsUpToAFreeformPlate(doc, kind, seam=1)
+                        self.assertTrue(feature.isValid(), feature.getStatusString())
+                        shape = feature.Shape
+                        points = {
+                            piece: pointOnFarEdge(feature, farEdgeAt(shape, z, x, y))
+                            for piece, (x, y) in places.items()
+                        }
+                        if xA is not None:
+                            feature.Profile[0].setDatum(
+                                "xA", FreeCAD.Units.Quantity(xA, FreeCAD.Units.Length)
+                            )
+                        replaceUpToShape(feature, freeformStripsShape(z, cuts, order))
+                        doc.recompute()
+                        self.assertTrue(feature.isValid(), feature.getStatusString())
+                        for piece, place in after.items():
+                            assertNotQuietlyElsewhere(self, points[piece], z, [place])
+                    finally:
+                        FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToThreePlatesPiecesSlidOntoTheNextPlate(self):
+        # PR 366 round 3: up to a shell of three B-spline plates without names meeting at x = 1
+        # and x = 3, A (x 0..2) has its far cap and far edges in two pieces each, on plates 1
+        # and 2, marked by their plate's index. A moved to x 2.5..4.5, over plates 2 and 3, with
+        # the shell rebuilt in the order 2, 3, 1: plate 2 took plate 1's index and plate 3 plate
+        # 2's, while the count and the places along the edges stayed. The old names lay exactly
+        # on the new pieces: the left datums followed plate 2's pieces quietly, the right ones
+        # plate 3's. Now a marked piece that moved off its old place, with nothing there,
+        # breaks: the left datums say they lost their pieces, the right ones are on plate 2's
+        # or say they lost them. For the Pad and the Pocket
+        places = {
+            "CL": (farCapAt, pointOnFarCap, 0.5, 1),
+            "CR": (farCapAt, pointOnFarCap, 1.5, 1),
+            "TL": (farEdgeAt, pointOnFarEdge, 0.5, 2),
+            "TR": (farEdgeAt, pointOnFarEdge, 1.5, 2),
+            "BL": (farEdgeAt, pointOnFarEdge, 0.5, 0),
+            "BR": (farEdgeAt, pointOnFarEdge, 1.5, 0),
+        }
+        after = {
+            "CL": [],
+            "CR": [(2.75, 1)],
+            "TL": [],
+            "TR": [(2.75, 2)],
+            "BL": [],
+            "BR": [(2.75, 0)],
+        }
+        for kind in ("Pad", "Pocket"):
+            with self.subTest(kind=kind):
+                doc = FreeCAD.newDocument("PadUpToThreePlatesPiecesSlid")
+                try:
+                    feature, z = capsUpToAFreeformPlate(
+                        doc, kind, seam=1, capA=(0, 0, 2, 2), block=(-8, -8, 18, 9), withB=False
+                    )
+                    replaceUpToShape(feature, freeformStripsShape(z, (1, 3)))
+                    doc.recompute()
+                    self.assertTrue(feature.isValid(), feature.getStatusString())
+                    shape = feature.Shape
+                    points = {
+                        piece: attach(feature, find(shape, z, x, y))
+                        for piece, (find, attach, x, y) in places.items()
+                    }
+                    feature.Profile[0].setDatum(
+                        "xA", FreeCAD.Units.Quantity(2.5, FreeCAD.Units.Length)
+                    )
+                    replaceUpToShape(feature, freeformStripsShape(z, (1, 3), (1, 2, 0)))
+                    doc.recompute()
+                    self.assertTrue(feature.isValid(), feature.getStatusString())
+                    for piece, allowed in after.items():
+                        assertNotQuietlyElsewhere(self, points[piece], z, allowed)
+                finally:
+                    FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToThreePlatesTallCapPiecesSlidOntoTheNextPlate(self):
+        # PR 366 round 4: as testPadUpToThreePlatesPiecesSlidOntoTheNextPlate, with A 8 high
+        # (x 0..2, y 0..8): its far cap's pieces are 1 x 8, on plates 1 and 2 of the strips meeting
+        # at x = 1 and 3. A moved by 2 or 2.5 onto plates 2 and 3, the strips rebuilt in the order
+        # 2, 1, 3 or 2, 3, 1: the left piece's name lay on plate 2's piece. B-spline caps had no
+        # box, and the overlap guessed from their sizes (centres about 2 apart, half their sides
+        # together 2.4 to 2.8) kept the left datum quietly on plate 2's piece. Every fingerprint
+        # has a box now, and the two boxes share no width: the left datums say they lost their
+        # pieces, the right ones are on plate 2's or say they lost them. For the Pad and the
+        # Pocket
+        def draw(sketch):
+            dimensionedRectangle(sketch, "A", 0, 0, 2, 8)
+            dimensionedRectangle(sketch, "B", 12, 0, 14, 3)
+
+        places = {
+            "CL": ("F", 0.5, 4),
+            "CR": ("F", 1.5, 4),
+            "TL": ("E", 0.5, 8),
+            "TR": ("E", 1.5, 8),
+        }
+        for kind in ("Pad", "Pocket"):
+            for x in (2, 2.5):
+                for order in ((1, 0, 2), (1, 2, 0)):
+                    with self.subTest(kind=kind, x=x, order=order):
+                        middle = (x + 3) / 2
+                        after = {"CL": [], "TL": [], "CR": [(middle, 4)], "TR": [(middle, 8)]}
+                        slideOntoReorderedStrips(
+                            self, kind, (1, 3), draw, places, {"xA": x}, order, after
+                        )
+
+    def testPadUpToThreePlatesArcsSlidOntoTheNextPlate(self):
+        # PR 366 round 4: the disc A (radius 1, centre (1, 1)) up to the strips meeting at x = 1
+        # and 3: its far circle in two arcs, on plates 1 and 2. A moved to x 3 (arcs on plates 2
+        # and 3), the strips rebuilt in the order 2, 1, 3 or 2, 3, 1: the left arc's name lay on
+        # plate 2's arc. The overlap along the edge compared the chord to the other arc (2) with
+        # half the arcs' lengths together (3.1): the left datum stayed quietly on plate 2's arc.
+        # Seen in the arcs' boxes, the two share no length along the edge: it says it lost its
+        # arc. The right piece of the cap is on plate 2's piece or says it lost it. For the Pad
+        # and the Pocket
+        def draw(sketch):
+            dimensionedCircle(sketch, "A", 1, 1, 1)
+            dimensionedCircle(sketch, "B", 14, 3, 1)
+
+        places = {"L": ("E", 0, 1), "CL": ("F", 0.5, 1), "CR": ("F", 1.5, 1)}
+        after = {"L": [], "CL": [], "CR": [(2.5, 1)]}
+        for kind in ("Pad", "Pocket"):
+            for order in ((1, 0, 2), (1, 2, 0)):
+                with self.subTest(kind=kind, order=order):
+                    slideOntoReorderedStrips(
+                        self, kind, (1, 3), draw, places, {"xA": 3}, order, after
+                    )
+
+    def testPadUpToThreePlatesCapPiecesSwapOnAPartialSlide(self):
+        # PR 366 round 4: the disc A (radius 1.2, centre (1, 1)) up to the strips meeting at x = 1
+        # and 3: its cap in two pieces, on plates 1 and 2. A moved by 1 (x 0.8..3.2), the strips
+        # rebuilt in the order 2, 1, 3: each piece's name lay on the other plate's piece, and
+        # both old places were bare. The pieces' sizes said they still overlapped them: the left
+        # datum went quietly to plate 2's piece, the right one to plate 1's sliver. The boxes
+        # only touch at x = 1: each datum is on its plate's piece now or says it lost it. For
+        # the Pad and the Pocket
+        def draw(sketch):
+            dimensionedCircle(sketch, "A", 1, 1, 1.2)
+            dimensionedCircle(sketch, "B", 14, 3, 1)
+
+        places = {"L": ("E", -0.2, 1), "CL": ("F", 0.4, 1), "CR": ("F", 1.6, 1)}
+        after = {"L": [], "CL": [(0.9, 1)], "CR": [(2, 1)]}
+        for kind in ("Pad", "Pocket"):
+            with self.subTest(kind=kind):
+                slideOntoReorderedStrips(
+                    self, kind, (1, 3), draw, places, {"xA": 2}, (1, 0, 2), after
+                )
+
+    def testPadUpToThreePlatesTurnedCapPiecesSlidOntoTheNextPlate(self):
+        # PR 366 round 5: round 4's slides onto the next plate (A 2 x 2 or 2 x 8, the disc of
+        # radius 1.2 moved by 1) with the whole model turned about Z, the strips and the sketch
+        # alike. A turned piece's box in the world's axes is wider than the piece: a 1 x 2 piece
+        # at 45 degrees has sides of 2.12 against a slide of 1.41 on each axis. The old and new
+        # boxes kept sharing a length on both axes, and the left datum stayed quietly on plate 2's
+        # piece (on the partial slide, each went to the other plate's). Seen along the pieces'
+        # own outlines, the left piece left its old place: its datum says it lost it, and the
+        # right one's is on plate 2's piece or says it lost it. For the Pad and the Pocket
+        def rectangle(height):
+            def draw(sketch):
+                dimensionedRectangle(sketch, "A", 0, 0, 2, height)
+                dimensionedRectangle(sketch, "B", 12, 0, 14, 3)
+
+            return draw
+
+        def disc(sketch):
+            dimensionedCircle(sketch, "A", 1, 1, 1.2)
+            dimensionedCircle(sketch, "B", 14, 3, 1)
+
+        cases = {
+            # case: (draw, turn, A's x after it, the strips' order, the datums' places before,
+            # their places after them)
+            "square30": (
+                rectangle(2),
+                30,
+                2,
+                (1, 2, 0),
+                {"CL": ("F", 0.5, 1), "CR": ("F", 1.5, 1)},
+                {"CL": [], "CR": [(2.5, 1)]},
+            ),
+            "square45": (
+                rectangle(2),
+                45,
+                2.5,
+                (1, 0, 2),
+                {"CL": ("F", 0.5, 1), "CR": ("F", 1.5, 1)},
+                {"CL": [], "CR": [(2.75, 1)]},
+            ),
+            "tall15": (
+                rectangle(8),
+                15,
+                2,
+                (1, 0, 2),
+                {"CL": ("F", 0.5, 4), "CR": ("F", 1.5, 4)},
+                {"CL": [], "CR": [(2.5, 4)]},
+            ),
+            "tall45": (
+                rectangle(8),
+                45,
+                2,
+                (1, 2, 0),
+                {"CL": ("F", 0.5, 4), "CR": ("F", 1.5, 4)},
+                {"CL": [], "CR": [(2.5, 4)]},
+            ),
+            "partial30": (
+                disc,
+                30,
+                2,
+                (1, 0, 2),
+                {"CL": ("F", 0.4, 1), "CR": ("F", 1.6, 1)},
+                {"CL": [(0.9, 1)], "CR": [(2, 1)]},
+            ),
+        }
+        for kind in ("Pad", "Pocket"):
+            for case, (draw, turn, x, order, places, after) in cases.items():
+                with self.subTest(kind=kind, case=case):
+                    slideOntoReorderedStrips(
+                        self, kind, (1, 3), draw, places, {"xA": x}, order, after, turn
+                    )
+
+    def testPadUpToThreePlatesArcsSlidDiagonally(self):
+        # PR 366 round 5: round 4's disc A (radius 1, centre (1, 1)) up to the strips meeting at
+        # x = 1 and 3, its far circle in a half circle on plate 1 and two quarter arcs on plate 2
+        # (the circle's vertex at angle 0 splits it). A moved to x 3 and y 1.5 or 2, the strips
+        # rebuilt in the order 2, 1, 3 or 2, 3, 1: the left arc's name lay on plate 2's half
+        # circle. The way along the edge, to the nearest other arc, was diagonal, and the arcs'
+        # box corners seen along it shared 0.22 where the arcs themselves don't meet: the left
+        # datum stayed quietly on plate 2's half circle. So did it with A moved to x 3 in the
+        # model turned by 45 degrees about Z. Seen along their outlines, the arcs share no length:
+        # the left datum says it lost its arc, and the right piece of the cap is on plate 2's piece
+        # or says it lost it. For the Pad and the Pocket
+        def draw(sketch):
+            dimensionedCircle(sketch, "A", 1, 1, 1)
+            dimensionedCircle(sketch, "B", 14, 3, 1)
+
+        places = {"L": ("E", 0, 1), "CL": ("F", 0.5, 1), "CR": ("F", 1.5, 1)}
+        cases = {
+            # case: (A's datums after it, the strips' order, the turn)
+            "up0.5": ({"xA": 3, "yA": 1.5}, (1, 0, 2), 0),
+            "up1": ({"xA": 3, "yA": 2}, (1, 2, 0), 0),
+            "turned45": ({"xA": 3}, (1, 0, 2), 45),
+        }
+        for kind in ("Pad", "Pocket"):
+            for case, (datums, order, turn) in cases.items():
+                with self.subTest(kind=kind, case=case):
+                    y = datums.get("yA", 1)
+                    after = {"L": [], "CL": [], "CR": [(2.5, y)]}
+                    slideOntoReorderedStrips(
+                        self, kind, (1, 3), draw, places, datums, order, after, turn
+                    )
+
+    def testPadUpToThreePlatesArcTwinsSlidOntoTheNextPlate(self):
+        # PR 366 round 5b: round 4's disc A (radius 1, centre (1, 1)) up to the strips meeting at
+        # x = 1 and 3, the model turned by 20 degrees about Z, each strip made from its turned
+        # corners: the left half circle comes out in two pieces on plate 1 (lengths 1.98 and
+        # 1.16), twins told apart only by their order. A moved to x 3 (its arcs on
+        # plates 2 and 3), the strips rebuilt in the order 2, 1, 3 or 2, 3, 1: the left arc's name
+        # lay on plate 2's upper-left arc. Twins went only by their places among them, which a
+        # slide of them all keeps, and the left datum stayed quietly on plate 2's arc. The twins
+        # left together, none of them where the left arc was: the left datum says it lost its
+        # arc, and the right piece of the cap is on plate 2's piece or says it lost it. For the
+        # Pad and the Pocket
+        def draw(sketch):
+            dimensionedCircle(sketch, "A", 1, 1, 1)
+            dimensionedCircle(sketch, "B", 14, 3, 1)
+
+        places = {"L": ("E", 0, 1), "CL": ("F", 0.5, 1), "CR": ("F", 1.5, 1)}
+        after = {"L": [], "CL": [], "CR": [(2.5, 1)]}
+        for kind in ("Pad", "Pocket"):
+            for order in ((1, 0, 2), (1, 2, 0)):
+                with self.subTest(kind=kind, order=order):
+                    slideOntoReorderedStrips(
+                        self, kind, (1, 3), draw, places, {"xA": 3}, order, after, 20, True
+                    )
+
+    def testPadUpToThreePlatesSlantedEdgesSlidOntoTheNextPlate(self):
+        # PR 366 round 6: the parallelogram A (-1, -1) (1, -1) (4, 2) (2, 2) up to the strips
+        # meeting at x = 1 and 3: its left edge (y = x) in two pieces, on plates 1 and 2, its
+        # right edge (y = x - 2) on plates 2 and 3. A moved by 2 along x, the strips rebuilt in
+        # the order 2, 1, 3 or 2, 3, 1: plate 1 has no piece of the left edge any more, and the
+        # left edge's piece on plate 2, (1, -1) to (3, 1), took plate 1's piece's name. Seen
+        # along the edge, the way across the seams, the old and new pieces shared 1.41, and with
+        # the corner on the seam the edge's pieces kept their shape, as if moved with the plates:
+        # the datum on plate 1's piece stayed quietly on plate 2's. Seen along the Pad's
+        # direction, the old piece lies beyond the seam where the cap beside plate 2's piece
+        # ends: it says it lost its piece now, and the other datums are on their plate's piece or
+        # say they lost theirs. A moved by 0.2, each piece stays on its plate, and every datum
+        # keeps its piece. For the Pad and the Pocket
+        def draw(sketch):
+            polygonInSketch(sketch, ((-1, -1), (1, -1), (4, 2), (2, 2)))
+            dimensionedRectangle(sketch, "B", 12, 0, 14, 3)
+
+        def strips(z):
+            return freeformStripsShape(z, (1, 3)).Faces
+
+        places = {
+            "EL0": ("E", 0, 0),
+            "EL1": ("E", 1.5, 1.5),
+            "ER1": ("E", 2, 0),
+            "ER2": ("E", 3.5, 1.5),
+        }
+        moved = {"EL0": [], "EL1": [(2, 0)], "ER1": [], "ER2": [(4.5, 0.5)]}
+        kept = {"EL0": (0.2, 0), "EL1": (1.7, 1.5), "ER1": (2.2, 0), "ER2": (3.7, 1.5)}
+        cases = {
+            # case: (the move, the strips' order, the datums' places after it)
+            "order213": ((2, 0), (1, 0, 2), moved),
+            "order231": ((2, 0), (1, 2, 0), moved),
+            "kept": ((0.2, 0), (0, 1, 2), kept),
+        }
+        for kind in ("Pad", "Pocket"):
+            for case, (move, order, after) in cases.items():
+                with self.subTest(kind=kind, case=case):
+                    slideOntoReorderedPlates(self, kind, strips, draw, places, move, order, after)
+
+    def testPadUpToATiltedPlateCapPiecesSlidOntoALowerPlate(self):
+        # PR 366 round 6: up to a shell of plate 1 tilted (slope 1, -1 or 2 along x, x -3..1), a
+        # steep ramp (x 1..1.2) up or down by 1.5 or 2, and plates 2 and 3 flat (x 1.2..3, 3..20),
+        # A (x 0..2) has its far cap and top edge in pieces on plates 1, the ramp and 2. A moved
+        # by 2 along x, onto plates 2 and 3, the shell rebuilt in the order 2, ramp, 1, 3 or 2, 1,
+        # ramp, 3: plate 1 has no piece of A any more, and plate 2's cap piece took plate 1's
+        # name. Seen along the tilted plate's normal, the old piece and plate 2's new one
+        # overlapped (about 0.7) although they lie side by side, and the datum on plate 1's
+        # piece stayed quietly on plate 2's. Seen along the Pad's direction, they share nothing:
+        # it says it lost its piece, and the other datums are on plate 2's pieces or say they lost
+        # theirs. A moved by 0.5 along y, along the seams, with the shell rebuilt in the order 2,
+        # ramp, 1, 3: plate 2's piece took plate 1's name again, and the datum on plate 1's piece
+        # followed it quietly (seen along the tilted plate's normal, the old piece overlapped it
+        # too); each datum is on its plate's piece now or says it lost it. The same move with
+        # the shell as it was: every datum keeps its piece. For the Pad and the Pocket
+        def draw(sketch):
+            dimensionedRectangle(sketch, "A", 0, 0, 2, 2)
+            dimensionedRectangle(sketch, "B", 12, 0, 14, 3)
+
+        places = {
+            "CL": ("F", 0.5, 1),
+            "CR": ("F", 1.5, 1),
+            "TL": ("E", 0.5, 2),
+            "TR": ("E", 1.5, 2),
+        }
+        moved = {"CL": [], "CR": [(2.5, 1)], "TL": [], "TR": [(2.5, 2)]}
+        kept = {"CL": (0.5, 1.5), "CR": (1.5, 1.5), "TL": (0.5, 2.5), "TR": (1.5, 2.5)}
+        slid = {piece: [place] for piece, place in kept.items()}
+        for kind in ("Pad", "Pocket"):
+            for slope, step in ((1, -2), (-1, 2), (2, -1.5)):
+                cases = {
+                    # case: (the move, the shell's order, the datums' places after it)
+                    "order2r13": ((2, 0), (2, 1, 0, 3), moved),
+                    "order21r3": ((2, 0), (2, 0, 1, 3), moved),
+                    "slidAlong": ((0, 0.5), (2, 1, 0, 3), slid),
+                    "kept": ((0, 0.5), (0, 1, 2, 3), kept),
+                }
+                for case, (move, order, after) in cases.items():
+                    with self.subTest(kind=kind, slope=slope, step=step, case=case):
+                        slideOntoReorderedPlates(
+                            self, kind, foldedPlates(slope, step), draw, places, move, order, after
+                        )
+
+    def testPadUpToANotchedPlateLPieceNotMadeWholeElsewhere(self):
+        # PR 366 round 6: up to a shell of an L-shaped plate (x < 1 or y < 1), the square plate in
+        # its notch (x 1..4, y 1..10) and a plate beyond (x 4..20), the square A (x 0.5..2.5,
+        # y 0.5..2.5) has an L-shaped cap piece on the L plate and a square one on the square
+        # plate. A moved by 0.5 along x and y, wholly onto the square plate, the shell in any
+        # order: the L plate has no piece of A any more, and the whole cap took a name. The L's
+        # centre (1.18, 1.18) lies outside the L, and the whole cap holding it made the L piece
+        # look whole again: its datum went quietly to the whole cap. It says it lost its piece
+        # now, and the other datums are on their pieces or say they lost them. A moved by 0.2,
+        # the L piece is a thinner L, and every datum keeps its piece. For the Pad and the Pocket
+        def draw(sketch):
+            dimensionedRectangle(sketch, "A", 0.5, 0.5, 2.5, 2.5)
+            dimensionedRectangle(sketch, "B", 12, 0, 14, 3)
+
+        places = {
+            "CA": ("F", 0.75, 0.75),
+            "CB": ("F", 2, 2),
+            "TA": ("E", 0.75, 2.5),
+            "TB": ("E", 1.75, 2.5),
+            "RA": ("E", 2.5, 0.75),
+            "RB": ("E", 2.5, 1.75),
+        }
+        moved = {"CA": [], "CB": [(2, 2)], "TA": [], "TB": [(2, 3)], "RA": [], "RB": [(3, 2)]}
+        kept = {
+            "CA": (0.85, 0.85),
+            "CB": (2.2, 2.2),
+            "TA": (0.85, 2.7),
+            "TB": (1.85, 2.7),
+            "RA": (2.7, 0.85),
+            "RB": (2.7, 1.85),
+        }
+        cases = {
+            # case: (the move, the shell's order, the datums' places after it)
+            "order123": ((0.5, 0.5), (0, 1, 2), moved),
+            "order213": ((0.5, 0.5), (1, 0, 2), moved),
+            "order231": ((0.5, 0.5), (1, 2, 0), moved),
+            "kept": ((0.2, 0.2), (0, 1, 2), kept),
+        }
+        for kind in ("Pad", "Pocket"):
+            for case, (move, order, after) in cases.items():
+                with self.subTest(kind=kind, case=case):
+                    slideOntoReorderedPlates(
+                        self, kind, notchedPlates, draw, places, move, order, after
+                    )
+
+    def testPadUpToANotchedPlateThinLPieceNotMadeWholeElsewhere(self):
+        # PR 366 round 7 (ops#386): as the test above, A drawn from (x0, x0) to (x0 + 2, x0 + 2)
+        # with x0 = 0.9 or 0.92: the L piece's arms are 0.1 or 0.08 wide. The point inside the L
+        # was taken from the centres of a 9 x 9 grid over the piece's parameters, none of them in
+        # an arm narrower than a 18th of the span; no point was saved, the L's centre stood in for
+        # it, and with A moved wholly onto the square plate the whole cap there held it: the L
+        # piece's datum went quietly to the whole cap. Its datum says it lost its piece now, for
+        # every move onto the square plate, in the open document and in one saved and opened
+        # again; the square piece's datum is on the whole cap or says it lost its piece. The
+        # first case is the round 6 verdict's (0.1, moved by 0.5). For the Pad and the Pocket
+        cases = [
+            # (x0, the move, saved and opened again)
+            (0.9, 0.5, False),
+            (0.9, 0.1, False),
+            (0.9, 0.12, False),
+            (0.9, 0.2, False),
+            (0.9, 1, False),
+            (0.92, 0.1, False),
+            (0.92, 0.12, False),
+            (0.92, 0.2, False),
+            (0.92, 0.5, False),
+            (0.92, 1, False),
+            (0.9, 0.15, True),
+            (0.95, 0.1, True),
+        ]
+        for kind in ("Pad", "Pocket"):
+            for x0, move, reopen in cases:
+                arm = 1 - x0
+                x1 = x0 + 2
+
+                def draw(sketch, x0=x0, x1=x1):
+                    dimensionedRectangle(sketch, "A", x0, x0, x1, x1)
+                    dimensionedRectangle(sketch, "B", 12, 0, 14, 3)
+
+                places = {
+                    "CA": ("F", x0 + arm / 2, 2),
+                    "CA2": ("F", 2, x0 + arm / 2),
+                    "CB": ("F", 2, 2),
+                }
+                after = {"CA": [], "CA2": [], "CB": [(2, 2)]}
+                with self.subTest(kind=kind, x0=x0, move=move, reopen=reopen):
+                    slideOntoReorderedPlates(
+                        self,
+                        kind,
+                        notchedPlates,
+                        draw,
+                        places,
+                        (move, move),
+                        (0, 1, 2),
+                        after,
+                        reopen,
+                    )
+
+    def testPadUpToARidgeStripNotMadeWholeOnTheNextPlate(self):
+        # PR 366 round 8 (ops#386): a Pad from below up to a ridge, plates z = 10 + 2x (x < 0) and
+        # z = 10 - 2x (x > 0) at 53 degrees, B-spline faces. A (x -0.5..3, y 0..8) has a strip
+        # CL on plate 1 and a piece CR on plate 2. A moved by 0.6, wholly onto plate 2: the strip
+        # is gone, and the whole cap on plate 2 took a name. The cap made whole held CL's saved
+        # centre (-0.25, 4, 9.5) by its nearest point (0.15, 4, 9.7), inside the cap, so CL's
+        # datum went quietly to the whole cap (the round 7 verdict). Seen along the sweep, the
+        # centre lies beside the cap (x -0.25, the cap from x 0.1): CL says it lost its piece now,
+        # in either shell order, in the open document and in one saved and opened again without a
+        # recompute. CR is on the whole cap or says it lost its piece. Moved by 0.3 or 1, as before:
+        # CL keeps its strip or breaks. The Pad only: a Pocket down to it meets the valley's
+        # faces from above, another model
+        places = {"CL": ("F", -0.25, 4), "CR": ("F", 1.5, 4)}
+
+        def draw(sketch):
+            dimensionedRectangle(sketch, "A", -0.5, 0, 3, 8)
+
+        cases = [
+            # (the move, the shell's order, saved and opened again, the datums' places after it)
+            (0.6, (0, 1), False, {"CL": [], "CR": [(2.1, 4)]}),
+            (0.6, (1, 0), False, {"CL": [], "CR": [(2.1, 4)]}),
+            (0.6, (0, 1), "untouched", {"CL": [], "CR": [(2.1, 4)]}),
+            (0.6, (1, 0), "untouched", {"CL": [], "CR": [(2.1, 4)]}),
+            (1, (0, 1), False, {"CL": [], "CR": [(2.5, 4)]}),
+            (0.3, (0, 1), False, {"CL": [(-0.1, 4)], "CR": [(1.8, 4)]}),
+        ]
+        for move, order, reopen, after in cases:
+            with self.subTest(move=move, order=order, reopen=reopen):
+                slideOntoReorderedPlates(
+                    self,
+                    "Pad",
+                    ridgePlates(),
+                    draw,
+                    places,
+                    (move, 0),
+                    order,
+                    after,
+                    reopen,
+                    capMax=200,
+                )
+
+    def testPadUpToPlatesMovedUnderTheProfilePieceNotMadeWhole(self):
+        # PR 366 round 9 (ops#386): the ridge strip above and the notch's L piece (A x 0.5..2.5,
+        # moved by (0.5, 0.5) wholly onto the square plate), with the profile moved some other way
+        # than its attachment offset: by its unattached sketch's Placement, or by the datum plane
+        # its sketch is attached to (the Pad's Placement follows both, so in the Pad's own frame
+        # the profile stays and the plates move under it); or with the plates moved the other way,
+        # by their feature's Placement or rebuilt there. In each the gone piece's datum (CL, CA)
+        # went quietly to the cap made whole on the next plate in round 8, its saved point under
+        # that cap in the Pad's frame. It says it lost its piece now; the other piece's datum (CR,
+        # CB) is on the whole cap or says it lost its piece. Either shell order
+        ridge = {
+            "faces": ridgePlates(),
+            "draw": lambda sketch: dimensionedRectangle(sketch, "A", -0.5, 0, 3, 8),
+            "places": {"CL": ("F", -0.25, 4), "CR": ("F", 1.5, 4)},
+            "move": (0.6, 0),
+            "orders": ((0, 1), (1, 0)),
+            "after": {"CL": [], "CR": [(2.1, 4)]},
+            "capMax": 200,
+        }
+        notch = {
+            "faces": notchedPlates,
+            "draw": lambda sketch: dimensionedRectangle(sketch, "A", 0.5, 0.5, 2.5, 2.5),
+            "places": {"CA": ("F", 0.75, 2), "CB": ("F", 2, 2)},
+            "move": (0.5, 0.5),
+            "orders": ((0, 1, 2), (1, 0, 2)),
+            "after": {"CA": [], "CB": [(2, 2)]},
+            "capMax": 50,
+        }
+        for name, case in (("ridge", ridge), ("notch", notch)):
+            for mover in ("placement", "datum", "platesPlacement", "platesGeometry"):
+                for order in case["orders"]:
+                    with self.subTest(model=name, mover=mover, order=order):
+                        slideOntoReorderedPlates(
+                            self,
+                            "Pad",
+                            case["faces"],
+                            case["draw"],
+                            case["places"],
+                            case["move"],
+                            order,
+                            case["after"],
+                            capMax=case["capMax"],
+                            mover=mover,
+                        )
+
+    def testPadUpToASeamRibStripNotMadeWholeByItsCentre(self):
+        # PR 366 round 9 (ops#386, the round 8 cloud review's S1): a Pad from below up to two
+        # plates meeting at a seam x = 0 (B-spline faces; plane faces name the strip's cap by the
+        # bare projection, which the whole cap then takes: ops#513), A a long thin rib x -0.1..0.3,
+        # y -10..10, its cap a strip CS on the first plate (x -0.1..0) and a piece CP on the
+        # second. A moved by 0.12 or 0.2 is wholly on the second plate: the strip is gone. The
+        # whole cap's centre of mass lies within the strip's reach of its saved centre (a quarter
+        # of the side of a 0.1 x 20 strip: 0.35), and round 8 took that as holding it, though the
+        # line through the strip's centre along the sweep misses the cap: CS went quietly to the
+        # whole cap. It says it lost its piece now; CP is on the whole cap or says it lost its
+        # piece. Moved by 0.3, beyond the reach, as before. The same rib, y -9..9, up to the ridge
+        # (B-spline plates at 53 degrees), moved by 0.12
+        def rib(y0, y1):
+            return lambda sketch: dimensionedRectangle(sketch, "A", -0.1, y0, 0.3, y1)
+
+        places = {"CS": ("F", -0.05, 0), "CP": ("F", 0.15, 0)}
+        cases = [
+            # (the plates, the rib, the move, the shell's order, capMax)
+            (seamPlates(), rib(-10, 10), 0.12, (0, 1), 50),
+            (seamPlates(), rib(-10, 10), 0.12, (1, 0), 50),
+            (seamPlates(), rib(-10, 10), 0.2, (0, 1), 50),
+            (seamPlates(), rib(-10, 10), 0.3, (0, 1), 50),
+            (ridgePlates(), rib(-9, 9), 0.12, (0, 1), 200),
+        ]
+        for index, (faces, draw, move, order, capMax) in enumerate(cases):
+            with self.subTest(case=index, move=move, order=order):
+                slideOntoReorderedPlates(
+                    self,
+                    "Pad",
+                    faces,
+                    draw,
+                    places,
+                    (move, 0),
+                    order,
+                    {"CS": [], "CP": [(move + 0.1, 0)]},
+                    capMax=capMax,
+                )
+
+    def testPadUpToANotchedPlateThinLPieceFromTheSavedFile(self):
+        # PR 366 round 8 (ops#386): the round 7 reopen cases above touch and recompute the opened
+        # document before the move, so its references are solved from fingerprints made again,
+        # not from those the file holds. Here the document is opened again and moved with nothing
+        # recomputed: the thin L piece's fingerprint in the file has its point inside the L (the
+        # twelfth field), and with A moved wholly onto the square plate its datums say they lost
+        # their piece, in any shell order; the square piece's datum is on the whole cap or says it
+        # lost its piece. A moved by 0.05, every datum keeps its piece or breaks. For the Pad
+        # and the Pocket
+        cases = [
+            # (x0, the move, the shell's order, the datums' places after it)
+            (0.9, 0.15, (0, 1, 2), {"CA": [], "CA2": [], "CB": [(2, 2)]}),
+            (0.9, 0.15, (1, 2, 0), {"CA": [], "CA2": [], "CB": [(2, 2)]}),
+            (0.95, 0.5, (1, 0, 2), {"CA": [], "CA2": [], "CB": [(2, 2)]}),
+            (0.9, 0.05, (0, 1, 2), {"CA": [(0.97, 2)], "CA2": [(2, 0.97)], "CB": [(2, 2)]}),
+        ]
+        for kind in ("Pad", "Pocket"):
+            for x0, move, order, after in cases:
+                arm = 1 - x0
+                x1 = x0 + 2
+
+                def draw(sketch, x0=x0, x1=x1):
+                    dimensionedRectangle(sketch, "A", x0, x0, x1, x1)
+                    dimensionedRectangle(sketch, "B", 12, 0, 14, 3)
+
+                places = {
+                    "CA": ("F", x0 + arm / 2, 2),
+                    "CA2": ("F", 2, x0 + arm / 2),
+                    "CB": ("F", 2, 2),
+                }
+                with self.subTest(kind=kind, x0=x0, move=move, order=order):
+                    slideOntoReorderedPlates(
+                        self,
+                        kind,
+                        notchedPlates,
+                        draw,
+                        places,
+                        (move, move),
+                        order,
+                        after,
+                        "untouched",
+                        savedInside=("CA", "CA2"),
+                    )
+
+    def testPadUpToAHoledShellFarEdgePiecesOfAFlippedRectangle(self):
+        # PR 366 round 3: A (x -3..3, y 1..3) across the plate's hole and its fill, its far bottom
+        # edge in three pieces, ordered along A's edge. A drawn again from its other corner (x 3,
+        # width -6), the geometry the same: the edge runs the other way, and the pieces' order
+        # along it flipped, so the left and right pieces' datums warned that they were found
+        # again in the same place. The order no longer depends on the edge's direction: each
+        # datum stays on its piece, quietly. For the Pad and the Pocket
+        places = {"L": (-2, 1), "M": (0, 1), "R": (2, 1)}
+        for kind in ("Pad", "Pocket"):
+            with self.subTest(kind=kind):
+                doc = FreeCAD.newDocument("PadUpToAHoledShellFlippedRectangle")
+                try:
+                    feature, z = capsUpToAFreeformPlate(
+                        doc, kind, hole=True, capA=(-3, 1, 3, 3), block=(-8, -8, 18, 9)
+                    )
+                    self.assertTrue(feature.isValid(), feature.getStatusString())
+                    shape = feature.Shape
+                    points = {
+                        piece: pointOnFarEdge(feature, farEdgeAt(shape, z, x, y))
+                        for piece, (x, y) in places.items()
+                    }
+                    sketch = feature.Profile[0]
+                    sketch.setDatum("xA", FreeCAD.Units.Quantity(3, FreeCAD.Units.Length))
+                    sketch.setDatum("wA", FreeCAD.Units.Quantity(-6, FreeCAD.Units.Length))
+                    doc.recompute()
+                    self.assertTrue(feature.isValid(), feature.getStatusString())
+                    for piece, (x, y) in places.items():
+                        assertOnCap(self, points[piece], z, x, y)
+                finally:
+                    FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToAnEllipticHoleFarEdgeTwins(self):
+        # ops#386: the disc's far circle across the elliptic hole: its top and bottom arcs lie on
+        # the plate, each bounded by the ellipse alone, with no vertex of the circle (it sits on
+        # the fill): twins, told apart by their places. The ellipse turned 0.01 degrees, or
+        # rebuilt turned 180 (the same faces, its edge starting on the other side): each datum
+        # stays on its arc. The disc moved down so that the top arc is gone: its datum says so,
+        # and the bottom one's isn't quietly elsewhere
+        for kind in ("Pad", "Pocket"):
+            for edit in ("tilt", "turn180", "topGone"):
+                with self.subTest(kind=kind, edit=edit):
+                    doc = FreeCAD.newDocument("PadUpToAnEllipticHoleFarEdgeTwins")
+                    try:
+                        feature, z = discUpToAnEllipticHole(doc, kind)
+                        self.assertTrue(feature.isValid(), feature.getStatusString())
+                        shape = feature.Shape
+                        top = shape.getElementMappedName(farEdgeAt(shape, z, 3, 6))
+                        bottom = shape.getElementMappedName(farEdgeAt(shape, z, 3, 0))
+                        self.assertNotEqual(top, bottom)
+                        for name in (top, bottom):
+                            flags = FreeCAD.getDecodedMappedName(name)[-1]["mapperFlags"]
+                            self.assertEqual(set(flags), {"PRJ", "MOD", "ORD"}, name)
+                        topPoint = pointOnFarEdge(feature, farEdgeAt(shape, z, 3, 6))
+                        bottomPoint = pointOnFarEdge(feature, farEdgeAt(shape, z, 3, 0))
+                        if edit == "topGone":
+                            feature.Profile[0].setDatum(
+                                "yA", FreeCAD.Units.Quantity(0.8, FreeCAD.Units.Length)
+                            )
+                        else:
+                            doc.getObject("Plate").Shape = ellipticHoleShell(
+                                z, turn=0.01 if edit == "tilt" else 180
+                            )
+                        doc.recompute()
+                        self.assertTrue(feature.isValid(), feature.getStatusString())
+                        shape = feature.Shape
+                        if edit == "topGone":
+                            assertNotQuietlyElsewhere(self, topPoint, z, [])
+                            assertNotQuietlyElsewhere(
+                                self, bottomPoint, z, [centreOfFarEdgeAt(shape, z, 3, -2.2)]
+                            )
+                        else:
+                            assertOnCap(self, topPoint, z, *centreOfFarEdgeAt(shape, z, 3, 6))
+                            assertOnCap(self, bottomPoint, z, *centreOfFarEdgeAt(shape, z, 3, 0))
+                    finally:
+                        FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToAFreeformFarEdgePieceNames(self):
+        # ops#386: each piece of a far edge the up-to shape cuts (A's top edge across the
+        # shell's seam at x = 1) is a projection of the profile edge marked by what tells it
+        # apart, PRJ with MOD, and counted by its place along the edge (ORD, PR 366 round 2),
+        # and the pieces' names differ; a far edge in one piece (B's top edge, on the right
+        # face) stays the projection alone, PRJ with index 0
+        for kind in ("Pad", "Pocket"):
+            with self.subTest(kind=kind):
+                doc = FreeCAD.newDocument("PadUpToAFreeformFarEdgePieceNames")
+                try:
+                    feature, z = capsUpToAFreeformPlate(doc, kind, seam=1)
+                    self.assertTrue(feature.isValid(), feature.getStatusString())
+                    shape = feature.Shape
+                    names = [
+                        shape.getElementMappedName(farEdgeAt(shape, z, x, y))
+                        for x, y in ((0.5, 2), (1.5, 2), (0.5, 0), (1.5, 0))
+                    ]
+                    self.assertEqual(len(set(names)), 4, names)
+                    for name in names:
+                        top = FreeCAD.getDecodedMappedName(name)[-1]
+                        self.assertEqual(set(top["mapperFlags"]), {"PRJ", "MOD", "ORD"}, name)
+                        self.assertTrue(top["connectedElements"], name)
+                    single = shape.getElementMappedName(farEdgeAt(shape, z, 6.5, 3))
+                    top = FreeCAD.getDecodedMappedName(single)[-1]
+                    self.assertEqual(top["mapperFlags"], ["PRJ"], single)
+                    self.assertEqual(top["index"], "0", single)
+                    self.assertFalse(top["connectedElements"], single)
+                finally:
+                    FreeCAD.closeDocument(doc.Name)
 
     def testPadUpToAnEllipticHoleTwinsMovedOrGrownStay(self):
         # PR 340 round 4 (N2): round 3's traded-twin check broke a reference whenever a counter

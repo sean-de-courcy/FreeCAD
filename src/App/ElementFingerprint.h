@@ -63,6 +63,27 @@ namespace Data
  *   c. An edit can trade twins' names; the element's offset from it tells the solver which twin
  *   went where, under a move or a turn of them all.
  *
+ * Version 5 (ops#386, PR 366 round 4), written for every face and edge with an extent, which
+ * every one but a degenerated edge has:
+ *
+ *     5|<type>|<kind>|<size>|<c>|<d>|<r>|<o or _>|<x0>,<y0>,<z0>,<x1>,<y1>,<z1>|<t,n or _>|<p or _>
+ *
+ * and, for a face with a point inside it (round 6), a twelfth field: `|<i>`.
+ *
+ * - o: a circle's centre, as in version 2; `_` for anything else.
+ * - x0..z1: the element's bounding box, as in version 3, for any kind of face or edge. Without it
+ *   a curved or thin piece's place can't be bounded: whether a piece that moved still overlaps
+ *   its old place was guessed from its size.
+ * - t, n: the twins' centroid and number, as in version 4, or `_`.
+ * - p: the element's outline (round 5), the points' coordinates one after another: an edge's
+ *   points along it, a face's convex outer boundary in its plane. A box is bounded along the
+ *   world's axes only: a turned piece's box is wider than the piece, and an arc's corners seen
+ *   along a slanted direction reach past the arc. At most 256 points: a longer outline keeps
+ *   every k-th point (round 6), still convex.
+ * - i: a point inside the face (round 6), only for a face whose area falls short of its outline's
+ *   (an L, a ring): its centre may lie outside it.
+ * Versions 3 and 4 are still read; an element with an extent is written as version 5.
+ *
  * Numbers have 12 significant digits, in the classic locale, so the text is the same on every
  * platform and in every locale. A reader takes a version it doesn't know as no fingerprint.
  */
@@ -78,6 +99,9 @@ struct AppExport ElementFingerprint
     /// The text form of a fingerprint with its twins' centroid (ops#360, PR 340 round 5): a
     /// ninth field. Only ordered twins have one.
     static constexpr int VersionWithTwins = 4;
+    /// The text form of a fingerprint with an extent of any kind (ops#386, PR 366 round 4): the
+    /// location, the extent and the twins in fields eight to ten. Every face and edge has one.
+    static constexpr int VersionWithBox = 5;
 
     /// `F`, `E` or `V`; 0 for no fingerprint.
     char type = 0;
@@ -88,14 +112,32 @@ struct AppExport ElementFingerprint
     std::vector<double> radii;
     /// The centre of a circle edge (in the frame of `center`); empty otherwise.
     std::optional<Base::Vector3d> location;
-    /// The bounding box of a planar face, its lower and upper corners (in the frame of
-    /// `center`); both empty otherwise.
+    /// The bounding box of a face or an edge, its lower and upper corners (in the frame of
+    /// `center`); both empty for a vertex and in an older fingerprint of anything but a planar
+    /// face (versions 1, 2 and 4).
     std::optional<Base::Vector3d> extentMin;
     std::optional<Base::Vector3d> extentMax;
     /// The mean of the centres of the element's ordered twins, its own included (in the frame
     /// of `center`), and their number; empty and 0 otherwise.
     std::optional<Base::Vector3d> twinCentroid;
     int twinCount = 0;
+    /// The element's outline (version 5, PR 366 round 5; in the frame of `center`): a line's two
+    /// ends, a curve's points along it from end to end, a face's outer boundary convex about its
+    /// plane, in order round it. Empty for a vertex and in an older fingerprint.
+    std::vector<Base::Vector3d> outline;
+    /// A point inside the face (version 5's twelfth field, PR 366 round 6; in the frame of
+    /// `center`), for a face its outline doesn't bound closely (an L, a ring), whose centre may
+    /// lie outside it. Empty otherwise.
+    std::optional<Base::Vector3d> inside;
+
+    /// At most this many points in an outline: the reader takes more as a malformed field.
+    static constexpr std::size_t MaxOutline = 256;
+
+    /** \a points with every k-th kept, k the least that leaves at most MaxOutline (PR 366 round 6):
+     * a convex outline stays convex, in its order. At most MaxOutline points are returned as
+     * they are.
+     */
+    static std::vector<Base::Vector3d> thinOutline(const std::vector<Base::Vector3d>& points);
 
     bool isValid() const
     {
@@ -114,12 +156,22 @@ struct AppExport ElementFingerprint
     /// for magnitudes below 1e-12 (numerical noise) and for -0.
     static std::string formatNumber(double value);
 
+    /** The convex hull of \a points seen along \a normal (PR 366 round 5): the points on it, in
+     * order round it, without those on a straight run between two others. Fewer than three points,
+     * or all in a row, give the two ends of the row.
+     */
+    static std::vector<Base::Vector3d> convexOutline(
+        const std::vector<Base::Vector3d>& points,
+        const Base::Vector3d& normal
+    );
+
     friend bool operator==(const ElementFingerprint& a, const ElementFingerprint& b)
     {
         return a.type == b.type && a.kind == b.kind && a.size == b.size && a.center == b.center
             && a.direction == b.direction && a.radii == b.radii && a.location == b.location
             && a.extentMin == b.extentMin && a.extentMax == b.extentMax
-            && a.twinCentroid == b.twinCentroid && a.twinCount == b.twinCount;
+            && a.twinCentroid == b.twinCentroid && a.twinCount == b.twinCount
+            && a.outline == b.outline && a.inside == b.inside;
     }
     friend bool operator!=(const ElementFingerprint& a, const ElementFingerprint& b)
     {

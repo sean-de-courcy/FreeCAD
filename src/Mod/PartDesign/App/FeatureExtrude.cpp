@@ -53,6 +53,7 @@
 #include <App/Datums.h>
 #include <App/Document.h>
 #include <App/ElementNamingUtils.h>
+#include <App/ElementSolverBatch.h>
 #include <App/ObjectIdentifier.h>
 #include <Base/Converter.h>
 #include <Base/Tools.h>
@@ -205,6 +206,23 @@ bool sideReachesPlane(
     }
     return box.CornerMax().Z() > -Precision::Confusion();
 }
+
+// The direction a Pad or Pocket swept its profile along, for the reference solver (PR 366 round
+// 6): Direction holds the one computeDirection() last used, in the body's frame. Turned into the
+// feature's own frame, without its placement, where its elements' fingerprints are measured.
+bool sweepDirection(const App::GeoFeature* geo, Base::Vector3d& direction)
+{
+    const auto extrude = dynamic_cast<const FeatureExtrude*>(geo);
+    if (!extrude) {
+        return false;
+    }
+    direction = extrude->Placement.getValue().getRotation().inverse().multVec(
+        extrude->Direction.getValue()
+    );
+    return direction.Length() > Precision::Confusion();
+}
+
+const bool sweepDirectionRegistered = (App::setElementSweepDirectionFunction(&sweepDirection), true);
 }  // namespace
 
 FeatureExtrude::FeatureExtrude()

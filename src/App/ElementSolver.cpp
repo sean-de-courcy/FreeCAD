@@ -268,6 +268,40 @@ bool piecesOfOne(std::string_view a, std::string_view b)
     return NameAncestry::isPieceOf(a, whole) && NameAncestry::isPieceOf(b, whole);
 }
 
+// True if \a a and \a b are two marked pieces of one projection (ops#386): the names are the same
+// but in one section, where both are a far cap's or far edge's piece (PRJ and MOD) told apart by
+// their marks (connected elements) or their duplicate counters. They share every source, but are
+// no twins: an up-to shell rebuilt with its faces in another order trades their marks, and the
+// piece left at the old place is the element the reference held.
+bool markedPiecesOfOne(std::string_view a, std::string_view b)
+{
+    const auto as = NameAncestry::splitSections(a);
+    const auto bs = NameAncestry::splitSections(b);
+    if (as.empty() || as.size() != bs.size()) {
+        return false;
+    }
+    bool marked = false;
+    for (std::size_t i = 0; i < as.size(); ++i) {
+        if (as[i] == bs[i]) {
+            continue;
+        }
+        if (marked) {
+            return false;
+        }
+        const DecodedMappedSection& x = decodeSection(as[i]);
+        const DecodedMappedSection& y = decodeSection(bs[i]);
+        if (!x.hasMapperFlag(MAPPER_FLAG_PROJECTION) || !x.hasMapperFlag(MAPPER_FLAG_MODIFIED)
+            || !y.hasMapperFlag(MAPPER_FLAG_PROJECTION) || !y.hasMapperFlag(MAPPER_FLAG_MODIFIED)
+            || x.opCode != y.opCode || x.referenceIDs != y.referenceIDs
+            || x.iterationTag != y.iterationTag || x.index != y.index
+            || x.elementType != y.elementType || x.linkedNames != y.linkedNames) {
+            return false;
+        }
+        marked = true;
+    }
+    return marked;
+}
+
 // An innermost source section (walkLineage()): its tag, element type and reference IDs.
 struct SourceSection
 {
@@ -1655,6 +1689,65 @@ bool isOrdered(std::string_view name)
     });
 }
 
+/* True if a section of \a name is a far cap's piece marked by its marks (PRJ and MOD with
+ * connected elements, a face), and none is ordered (isMarkedCapName()). With \a faceAlone, marked
+ * by one face of the up-to shape alone (the only piece on it): an up-to shell without names,
+ * rebuilt in another order, trades such marks between pieces.
+ */
+bool isMarkedCap(std::string_view name, bool faceAlone = false)
+{
+    if (isOrdered(name)) {
+        return false;
+    }
+    const auto sections = NameAncestry::splitSections(name);
+    return std::any_of(sections.begin(), sections.end(), [faceAlone](std::string_view section) {
+        const DecodedMappedSection& decoded = decodeSection(section);
+        if (decoded.elementType != 'F' || !decoded.hasMapperFlag(MAPPER_FLAG_PROJECTION)
+            || !decoded.hasMapperFlag(MAPPER_FLAG_MODIFIED) || decoded.connectedElements.empty()) {
+            return false;
+        }
+        if (!faceAlone) {
+            return true;
+        }
+        if (decoded.connectedElements.size() != 1) {
+            return false;
+        }
+        const auto markSections = NameAncestry::splitSections(decoded.connectedElements.front());
+        return !markSections.empty() && decodeSection(markSections.back()).elementType == 'F';
+    });
+}
+
+/* True if a section of \a name is a marked piece of a far edge or a far cap: PRJ and MOD with
+ * connected elements, ordered or not (PR 366 round 3).
+ */
+bool isMarkedPiece(std::string_view name)
+{
+    const auto sections = NameAncestry::splitSections(name);
+    return std::any_of(sections.begin(), sections.end(), [](std::string_view section) {
+        const DecodedMappedSection& decoded = decodeSection(section);
+        return (decoded.elementType == 'F' || decoded.elementType == 'E')
+            && decoded.hasMapperFlag(MAPPER_FLAG_PROJECTION)
+            && decoded.hasMapperFlag(MAPPER_FLAG_MODIFIED) && !decoded.connectedElements.empty();
+    });
+}
+
+/* The marks of \a name's marked piece, the connected elements of its first section that is one
+ * (PR 366 round 5); empty for none. Two pieces of one edge on one face of the up-to shape share
+ * them, told apart by their counters.
+ */
+std::vector<std::string> pieceMarks(std::string_view name)
+{
+    for (const auto section : NameAncestry::splitSections(name)) {
+        const DecodedMappedSection& decoded = decodeSection(section);
+        if ((decoded.elementType == 'F' || decoded.elementType == 'E')
+            && decoded.hasMapperFlag(MAPPER_FLAG_PROJECTION)
+            && decoded.hasMapperFlag(MAPPER_FLAG_MODIFIED) && !decoded.connectedElements.empty()) {
+            return decoded.connectedElements;
+        }
+    }
+    return {};
+}
+
 /* True if \a name's element holds \a oldName's, a piece of a far cap that an edit merged with
  * others into one (ops#360, PR 340 round 3): the names are the same but in one section, a marked
  * piece's (PRJ and MOD), where \a name's marks, its connected elements, hold every one of
@@ -1720,6 +1813,65 @@ bool holdsMarkedPiece(std::string_view name, std::string_view oldName, bool alon
         held = true;
     }
     return held;
+}
+
+/* True if \a name's element is \a oldName's piece of a far edge after others of its pieces went
+ * (PR 366 round 3): the names are the same but in one section, a marked piece's in both (PRJ,
+ * MOD, ORD), with the same marks, where the duplicate counter (count (count - 1) / 2 + place,
+ * TopoShapeMapper.cpp) counts fewer pieces in \a name. The count renames every piece, so a
+ * piece left alone on its face of the up-to shape (the hole's fill piece when the piece left of
+ * the hole goes) has the old name nowhere. A piece coming instead may take a face's index, the
+ * marks, from another face (a face added to an up-to shell without names): never this rule's.
+ * The caller corroborates by geometry.
+ */
+bool isFewerPiecesOf(std::string_view name, std::string_view oldName)
+{
+    const auto sections = NameAncestry::splitSections(name);
+    const auto oldSections = NameAncestry::splitSections(oldName);
+    if (sections.empty() || sections.size() != oldSections.size()) {
+        return false;
+    }
+    // The count from a counter: the largest n with n (n - 1) / 2 <= counter
+    auto countOf = [](const std::string& counter) {
+        int value = 0;
+        for (const char c : counter) {
+            if (c < '0' || c > '9' || value > 1000000) {
+                return 0;
+            }
+            value = value * 10 + (c - '0');
+        }
+        int count = 1;
+        while ((count + 1) * count / 2 <= value) {
+            ++count;
+        }
+        return value > 0 ? count : 0;
+    };
+    bool fewer = false;
+    for (std::size_t i = 0; i < sections.size(); ++i) {
+        if (sections[i] == oldSections[i]) {
+            continue;
+        }
+        if (fewer) {
+            return false;
+        }
+        const DecodedMappedSection& x = decodeSection(sections[i]);
+        const DecodedMappedSection& y = decodeSection(oldSections[i]);
+        if (!y.hasMapperFlag(MAPPER_FLAG_PROJECTION) || !y.hasMapperFlag(MAPPER_FLAG_MODIFIED)
+            || !y.hasMapperFlag(orderedFlag) || y.connectedElements.empty()
+            || sortedFlags(x) != sortedFlags(y) || x.opCode != y.opCode
+            || x.referenceIDs != y.referenceIDs || x.iterationTag != y.iterationTag
+            || x.index != y.index || x.elementType != y.elementType
+            || x.linkedNames != y.linkedNames || x.connectedElements != y.connectedElements) {
+            return false;
+        }
+        const int count = countOf(x.duplicateCount);
+        const int oldCount = countOf(y.duplicateCount);
+        if (count == 0 || oldCount == 0 || count >= oldCount) {
+            return false;
+        }
+        fewer = true;
+    }
+    return fewer;
 }
 
 // The element of a target without an element map that the IDX section \a section names, when it
@@ -2173,6 +2325,136 @@ bool isPlane(const ElementFingerprint& fp)
         && fp.direction && fp.direction->Length() > 0.0;
 }
 
+// An outline's span seen along the unit direction (PR 366 round 5)
+std::pair<double, double> spanAlong(
+    const std::vector<Base::Vector3d>& outline,
+    const Base::Vector3d& direction
+)
+{
+    double low = std::numeric_limits<double>::infinity();
+    double high = -low;
+    for (const auto& point : outline) {
+        low = std::min(low, point * direction);
+        high = std::max(high, point * direction);
+    }
+    return {low, high};
+}
+
+// Whether two faces' outlines share no area, seen along the old one's normal (PR 366 round 5):
+// on an axis across a side of either, their spans share no length (two convex outlines that
+// don't overlap have such an axis). A face lifted along the normal keeps its place. Empty when
+// the old outline spans no area. Round 6: seen along the unit \a sweep instead when there is one
+// (the direction a Pad or Pocket swept its profile along, which made the pieces), unless the old
+// face lies along it: the tilted plate's normal, beside lower plates, made two pieces side by
+// side overlap. A piece lifted along the sweep keeps its place.
+std::optional<bool> outlinesApart(
+    const std::vector<Base::Vector3d>& old,
+    const std::vector<Base::Vector3d>& now,
+    double eps,
+    const std::optional<Base::Vector3d>& sweep = std::nullopt
+)
+{
+    if (old.size() < 3 || now.size() < 2) {
+        return std::nullopt;
+    }
+    Base::Vector3d normal;
+    for (std::size_t i = 1; i + 1 < old.size(); ++i) {
+        normal += (old[i] - old[0]) % (old[i + 1] - old[0]);
+    }
+    if (normal.Length() <= eps * eps) {
+        return std::nullopt;
+    }
+    normal.Normalize();
+    if (sweep && std::abs(normal * *sweep) > 0.01) {
+        normal = *sweep;
+    }
+    const auto oldOutline = ElementFingerprint::convexOutline(old, normal);
+    const auto outline = ElementFingerprint::convexOutline(now, normal);
+    auto separates = [&](const std::vector<Base::Vector3d>& sides) {
+        const std::size_t count = sides.size() > 2 ? sides.size() : 1;
+        for (std::size_t i = 0; i < count && sides.size() >= 2; ++i) {
+            Base::Vector3d axis = normal % (sides[(i + 1) % sides.size()] - sides[i]);
+            if (axis.Length() <= eps) {
+                continue;
+            }
+            axis.Normalize();
+            const auto [oldLow, oldHigh] = spanAlong(oldOutline, axis);
+            const auto [low, high] = spanAlong(outline, axis);
+            if (std::min(oldHigh, high) - std::max(oldLow, low) <= eps) {
+                return true;
+            }
+        }
+        return false;
+    };
+    return separates(oldOutline) || separates(outline);
+}
+
+// Whether an old straight piece of a far edge lies apart from a face beside the piece that took
+// its name (PR 366 round 6), seen along the unit \a sweep: on an axis across a side of the face's
+// outline other than the piece's own line, the old piece's span and the face's share no length.
+// Along its own line, the way across the seams, a slanted piece slid onto the next plate still
+// shares a length with the old one; the cap beside it ends at the seam the old piece lies
+// beyond. A piece moved across its line, A grown taller or shorter, is apart from that cap, if
+// at all, only beyond the piece's own line. False when the face spans no area seen so, and when
+// either piece isn't straight (a B-spline plate's far edge may be a straight B-spline curve).
+bool apartBesideLine(
+    const std::vector<Base::Vector3d>& old,
+    const std::vector<Base::Vector3d>& face,
+    const std::vector<Base::Vector3d>& piece,
+    const Base::Vector3d& sweep,
+    double eps
+)
+{
+    auto straight = [&](const std::vector<Base::Vector3d>& points) {
+        if (points.size() < 2) {
+            return false;
+        }
+        Base::Vector3d chord = points.back() - points.front();
+        const double length = chord.Length();
+        if (length <= eps) {
+            return false;
+        }
+        chord /= length;
+        const double tolerance = std::max(eps, length * 1e-6);
+        return std::all_of(points.begin(), points.end(), [&](const Base::Vector3d& point) {
+            const Base::Vector3d offset = point - points.front();
+            return (offset - chord * (offset * chord)).Length() <= tolerance;
+        });
+    };
+    if (face.size() < 3 || !straight(old) || !straight(piece)) {
+        return false;
+    }
+    // The piece's line, seen along the sweep
+    auto flat = [&](const Base::Vector3d& vector) {
+        return vector - sweep * (vector * sweep);
+    };
+    Base::Vector3d along = flat(piece.back() - piece.front());
+    if (along.Length() <= eps) {
+        return false;
+    }
+    along.Normalize();
+    const auto outline = ElementFingerprint::convexOutline(face, sweep);
+    for (std::size_t i = 0; outline.size() >= 3 && i < outline.size(); ++i) {
+        const Base::Vector3d side = flat(outline[(i + 1) % outline.size()] - outline[i]);
+        // A side along the piece's line, or parallel to it (a parallelogram's other side), is seen
+        // across the line, as the piece's own is
+        if (side.Length() <= eps || (side % along).Length() <= eps * std::max(1.0, side.Length())) {
+            continue;
+        }
+        Base::Vector3d axis = sweep % side;
+        if (axis.Length() <= eps) {
+            continue;
+        }
+        axis.Normalize();
+        const auto [oldLow, oldHigh] = spanAlong(old, axis);
+        const auto [low, high] = spanAlong(outline, axis);
+        if (std::min(oldHigh, high) - std::max(oldLow, low) <= eps) {
+            return true;
+        }
+    }
+    return false;
+}
+
 }  // namespace
 
 bool planeAgrees(
@@ -2320,6 +2602,16 @@ bool atSamePlace(
 bool isOrderedName(std::string_view name)
 {
     return isOrdered(name);
+}
+
+bool isMarkedCapName(std::string_view name)
+{
+    return isMarkedCap(name, true);
+}
+
+bool isMarkedPieceName(std::string_view name)
+{
+    return isMarkedPiece(name);
 }
 
 bool isCounterSiblingName(std::string_view name, std::string_view other)
@@ -2560,6 +2852,8 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             // another number of twins) compares the centres themselves (round 3), which breaks
             // a move of the pair too: loud, never a pick.
             bool nearerTwin = false;
+            std::vector<int> twins;
+            bool twinsKeptShape = false;
             if (place.empty() && saved.center && now.center && isOrdered(hitName)) {
                 const double eps = input.continuationDistance * std::max(1.0, input.diagonal);
                 std::vector<std::pair<int, Base::Vector3d>> siblings;
@@ -2627,12 +2921,265 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                     }
                 }
                 nearerTwin = !place.empty();
+                for (const auto& sibling : siblings) {
+                    twins.push_back(sibling.first);
+                }
+                // The hit's size and its offset from the twins' centroid as they were: the set
+                // moved as one, with whatever cut it
+                twinsKeptShape = offsets && hitDistance <= eps && saved.size && now.size
+                    && relativelyEqual(*saved.size, *now.size, 0.01);
             }
-            if (place.empty()) {
+            // A far cap marked by one face of the up-to shape alone (ops#386, PR 366 round 2) that
+            // moved with nothing at its old place, off its old centre, while another piece of the
+            // same projection marked by a face alone holds that centre, is ambiguous. The marks of
+            // an up-to shape without names are its faces' indexes: rebuilt with a face more, or
+            // in another order, it gives the name to another piece, and the piece the reference
+            // held shrank around its old centre. A piece that moved off its old centre onto
+            // another kind of piece (the hole's fill piece onto a twin, the disc and the hole
+            // moved together) keeps its name. Round 3: so does one whose neighbour holding the
+            // centre reaches out of the old place (box), a seam moved across the old piece, the
+            // neighbour's plate grown over it; the piece that shrank around its old centre lies
+            // within it
+            bool offCentre = false;
+            if (place.empty() && isMarkedCap(hitName, true)) {
+                const double eps = input.continuationDistance * std::max(1.0, input.diagonal);
+                const double reach = (saved.size ? std::sqrt(*saved.size) / 4.0 : 0.0) + eps;
+                const bool centreLeft = saved.center && input.holdsPoint
+                    && !input.holdsPoint(hit, *saved.center, reach);
+                // Within the old piece's box; an older fingerprint without one (a face not planar),
+                // no larger than the old piece (a plate grown over the old centre is larger)
+                auto withinOldPlace = [&](const ElementFingerprint& other) {
+                    if (!saved.extentMin || !saved.extentMax || !other.extentMin || !other.extentMax) {
+                        return !saved.size || !other.size || *other.size <= *saved.size * 1.01;
+                    }
+                    const Base::Vector3d& low = *saved.extentMin;
+                    const Base::Vector3d& high = *saved.extentMax;
+                    const Base::Vector3d& otherLow = *other.extentMin;
+                    const Base::Vector3d& otherHigh = *other.extentMax;
+                    return otherLow.x >= low.x - eps && otherLow.y >= low.y - eps
+                        && otherLow.z >= low.z - eps && otherHigh.x <= high.x + eps
+                        && otherHigh.y <= high.y + eps && otherHigh.z <= high.z + eps;
+                };
+                for (std::size_t k = 0; centreLeft && k < pool.elements.size(); ++k) {
+                    const auto& names = pool.elements[k].names;
+                    if (static_cast<int>(k) != hitPosition
+                        && std::any_of(names.begin(), names.end(), [&](const auto& name) {
+                               return markedPiecesOfOne(name, hitName) && isMarkedCap(name, true);
+                           })
+                        && input.holdsPoint(pool.elements[k].index, *saved.center, reach)
+                        && withinOldPlace(fingerprintOfIndex(pool.elements[k].index))) {
+                        place.push_back(static_cast<int>(k));
+                    }
+                }
+                offCentre = !place.empty();
+            }
+            // A marked piece of a far edge or far cap (PR 366 round 3) that moved with nothing at
+            // its old place and no longer overlaps it: an up-to shell without names, rebuilt in
+            // another order while the pieces slid onto the next face, gives the old face's index
+            // to that face, and the name to its piece, with the same count and place along the
+            // edge. Overlapping (round 5, from the outlines every face and edge fingerprint has
+            // since version 5): two pieces of one edge whose points, seen along the edge, share a
+            // length (a seam moved may leave a sliver of the old piece); two faces whose outlines,
+            // seen along the old one's normal, share an area (a cap lifted with its plate keeps
+            // its place). Sizes alone over-count the overlap of a tall or thin piece, and of an
+            // arc, whose length runs round its chord; boxes in the world's axes (round 4) that of
+            // a turned piece, and an arc's box corners seen along a slanted way that of the arc.
+            // An older fingerprint, without an outline, keeps round 3's tests: edges by their
+            // centres' distance along the edge against half their lengths together, planes by
+            // their boxes, other faces by their centres' distance against half their sides
+            // together. A piece shifted within its old place keeps its name; twins went by their
+            // places above. The piece on a hole's fill, the disc and the hole moved together
+            // further than its size, breaks too: its old place left bare, it can't be told from a
+            // cap whose pieces slid onto the next faces of a reordered shell, its other pieces
+            // sharing their faces with another profile's caps (round 3, three plates). Round 5b:
+            // so do twins whose set left together, none of them where the old piece was (each
+            // outline apart from the old one, seen the same way), and changed shape: a half
+            // circle that a B-spline plate cut in two, the pieces slid onto the next plate of a
+            // reordered shell, where the plate cuts them elsewhere. Twins of one shape as before
+            // (the hit's size and offset from their centroid) moved with what cut them, a hole
+            // moved with its disc: their places above decide. So do twins without outlines (an
+            // older record)
+            const auto outlineOf = [&](int k) -> const std::vector<Base::Vector3d>& {
+                return fingerprintOfIndex(pool.elements[k].index).outline;
+            };
+            const bool twinOutlines = !saved.outline.empty()
+                && std::none_of(twins.begin(), twins.end(), [&](int k) {
+                       return outlineOf(k).empty();
+                   });
+            // Round 6: a far edge's pieces whose set kept its shape, seen along the sweep, may
+            // still have left their plate: a slanted edge slid by one plate with its corner on a
+            // seam cuts into pieces of the same shape there. A set moved with the plates that cut
+            // it can't be told from that by the target alone; only the cap beside the hit (below)
+            // decides then, loudly when the old piece lies beyond it
+            const bool keptShapeBeside = twinOutlines && twinsKeptShape && saved.type == 'E'
+                && input.sweep && input.facesOf;
+            const bool twinsMayDepart = twins.empty() || (twinOutlines && !twinsKeptShape)
+                || keptShapeBeside;
+            bool departed = false;
+            if (place.empty() && twinsMayDepart && saved.center && now.center && saved.size
+                && now.size && isMarkedPiece(hitName)) {
+                const double eps = input.continuationDistance * std::max(1.0, input.diagonal);
+                const double apart = Base::Distance(*saved.center, *now.center);
+                const bool outlines = !saved.outline.empty() && !now.outline.empty();
+                std::optional<bool> outlinesSay;
+                // Whether an outline lies apart from the old one: an edge's span along the way
+                // (set below), a face's outline seen along the old one's normal or the sweep
+                std::optional<Base::Vector3d> edgeWay;
+                auto apartFromOld = [&](const std::vector<Base::Vector3d>& outline) {
+                    if (saved.type != 'E') {
+                        return outlinesApart(saved.outline, outline, eps, input.sweep).value_or(false);
+                    }
+                    if (!edgeWay) {
+                        return false;
+                    }
+                    const auto [oldLow, oldHigh] = spanAlong(saved.outline, *edgeWay);
+                    const auto [low, high] = spanAlong(outline, *edgeWay);
+                    return std::min(oldHigh, high) - std::max(oldLow, low) <= eps;
+                };
+                // Round 6: whether the old straight piece lies beyond the cap beside the edge piece
+                // \a index (apartBesideLine()), seen along the sweep; set when it decided the hit
+                bool besideDecided = false;
+                auto apartBeside = [&](const std::string& index) {
+                    if (saved.type != 'E' || !input.sweep || !input.facesOf) {
+                        return false;
+                    }
+                    const auto& piece = fingerprintOfIndex(index).outline;
+                    for (const auto& face : input.facesOf(index)) {
+                        const auto& outline = fingerprintOfIndex(face).outline;
+                        if (apartBesideLine(saved.outline, outline, piece, *input.sweep, eps)) {
+                            return true;
+                        }
+                    }
+                    return false;
+                };
+                if (saved.type == 'E') {
+                    // Along the edge only: the far edge moved across itself (A grown taller) still
+                    // holds its old span. A line's direction; a curve's (a B-spline plate's far
+                    // edge, an arc), round 5, the way across the seams: to the middle of the edge's
+                    // pieces on other faces (marked otherwise), or, when that is short (the hit
+                    // between them), to the nearest of them. Round 3's test, for an older
+                    // fingerprint, takes the way to the nearest other piece, which is slanted
+                    // when a disc slid diagonally has two quarter arcs beside its half circle.
+                    // Without one, the way it moved, or the distance itself
+                    std::optional<Base::Vector3d> direction;
+                    std::optional<Base::Vector3d> across;
+                    if (saved.kind == "Line" && saved.direction && saved.direction->Length() > eps) {
+                        direction = *saved.direction;
+                        across = direction;
+                    }
+                    else {
+                        const auto hitMarks = pieceMarks(hitName);
+                        double nearest = std::numeric_limits<double>::infinity();
+                        double nearestElsewhere = std::numeric_limits<double>::infinity();
+                        std::optional<Base::Vector3d> wayElsewhere;
+                        Base::Vector3d sum;
+                        int elsewhere = 0;
+                        for (std::size_t k = 0; k < pool.elements.size(); ++k) {
+                            const auto& names = pool.elements[k].names;
+                            const auto piece = std::find_if(
+                                names.begin(),
+                                names.end(),
+                                [&](const auto& name) { return markedPiecesOfOne(name, hitName); }
+                            );
+                            if (static_cast<int>(k) == hitPosition || piece == names.end()) {
+                                continue;
+                            }
+                            const ElementFingerprint& other = fingerprintOfIndex(
+                                pool.elements[k].index
+                            );
+                            if (other.center) {
+                                const Base::Vector3d way = *other.center - *now.center;
+                                if (way.Length() > eps && way.Length() < nearest) {
+                                    nearest = way.Length();
+                                    direction = way;
+                                }
+                                if (pieceMarks(*piece) != hitMarks) {
+                                    sum += *other.center;
+                                    ++elsewhere;
+                                    if (way.Length() > eps && way.Length() < nearestElsewhere) {
+                                        nearestElsewhere = way.Length();
+                                        wayElsewhere = way;
+                                    }
+                                }
+                            }
+                        }
+                        if (elsewhere > 0) {
+                            const Base::Vector3d middle = sum / static_cast<double>(elsewhere)
+                                - *now.center;
+                            across = middle.Length() >= nearestElsewhere / 2.0
+                                ? std::optional<Base::Vector3d>(middle)
+                                : wayElsewhere;
+                        }
+                        if (!across) {
+                            across = direction;
+                        }
+                    }
+                    const Base::Vector3d way = across ? *across : *now.center - *saved.center;
+                    if (outlines && way.Length() > eps) {
+                        // Each piece's points seen along the way: their span
+                        edgeWay = Base::Vector3d(way).Normalize();
+                        outlinesSay = !keptShapeBeside && apartFromOld(now.outline);
+                        // Round 6: a straight piece's way is its line (a line's direction, or the
+                        // way to its other pieces along it), which a slanted piece slid onto the
+                        // next plate still shares with the old one; seen along the sweep, the old
+                        // piece lies beyond a side of the cap beside the hit, the seam it ends at
+                        if (!*outlinesSay && apartBeside(hit)) {
+                            outlinesSay = true;
+                            besideDecided = true;
+                        }
+                    }
+                    else if (!outlines) {
+                        double along = apart;
+                        if (direction) {
+                            along = std::abs(
+                                (*now.center - *saved.center)
+                                * Base::Vector3d(*direction).Normalize()
+                            );
+                        }
+                        departed = along >= (*saved.size + *now.size) / 2.0 - eps;
+                    }
+                }
+                else if (outlines) {
+                    outlinesSay = outlinesApart(saved.outline, now.outline, eps, input.sweep);
+                }
+                if (outlinesSay) {
+                    departed = *outlinesSay;
+                }
+                else if (saved.type != 'E' && saved.kind == "Plane" && now.kind == "Plane"
+                         && saved.extentMin && saved.extentMax && now.extentMin && now.extentMax) {
+                    // The boxes' common part, on each axis; a flat face's box is flat on one
+                    const Base::Vector3d low(
+                        std::max(saved.extentMin->x, now.extentMin->x),
+                        std::max(saved.extentMin->y, now.extentMin->y),
+                        std::max(saved.extentMin->z, now.extentMin->z)
+                    );
+                    const Base::Vector3d high(
+                        std::min(saved.extentMax->x, now.extentMax->x),
+                        std::min(saved.extentMax->y, now.extentMax->y),
+                        std::min(saved.extentMax->z, now.extentMax->z)
+                    );
+                    const Base::Vector3d common = high - low;
+                    const int shared = (common.x > eps) + (common.y > eps) + (common.z > eps);
+                    const bool apartOnAxis = common.x < -eps || common.y < -eps || common.z < -eps;
+                    departed = apartOnAxis || shared < 2;
+                }
+                else if (saved.type != 'E') {
+                    departed = apart >= (std::sqrt(*saved.size) + std::sqrt(*now.size)) / 2.0 - eps;
+                }
+                // Twins apart the way the hit was found apart: round 6, beside their caps too
+                if (departed && !twins.empty()) {
+                    departed = outlinesSay.has_value()
+                        && std::all_of(twins.begin(), twins.end(), [&](int k) {
+                               return apartFromOld(outlineOf(k))
+                                   || (besideDecided && apartBeside(pool.elements[k].index));
+                           });
+                }
+            }
+            if (place.empty() && !departed) {
                 continue;  // moved alone
             }
-            if (entry.policy == SolvePolicy::Equivalent && entry.equivalent
-                && std::all_of(place.begin(), place.end(), [&](int k) {
+            if (!offCentre && !departed && entry.policy == SolvePolicy::Equivalent
+                && entry.equivalent && std::all_of(place.begin(), place.end(), [&](int k) {
                        return entry.equivalent(hit, pool.elements[k].index);
                    })) {
                 // Every element there gives the consumer the hit's result: the entry is exact,
@@ -2658,7 +3205,8 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             // geometry, e.g. a pad's bottom edge where its top edge was after a lift by the pad's
             // length. The element moved with its feature; nothing else took its place. The hit's
             // name is the one the reference holds; copies count in the whole lineage, so a
-            // later feature's edges on a boss and on its mirror copy are no twins.
+            // later feature's edges on a boss and on its mirror copy are no twins. Nor are two
+            // marked pieces of one far edge or cap (ops#386: a reordered up-to shell).
             const auto hitSources = NameAncestry::sourceSections(hitName);
             const auto hitCopies = copyContexts(hitName);
             auto ownTwin = [&](int k) {
@@ -2669,10 +3217,10 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 return std::any_of(names.begin(), names.end(), [&](const auto& name) {
                     return NameAncestry::sourceSections(name) == hitSources
                         && copyContexts(name) == hitCopies && !isCounterSibling(name, hitName)
-                        && !piecesOfOne(name, hitName);
+                        && !piecesOfOne(name, hitName) && !markedPiecesOfOne(name, hitName);
                 });
             };
-            if (std::all_of(place.begin(), place.end(), ownTwin)) {
+            if (!departed && std::all_of(place.begin(), place.end(), ownTwin)) {
                 outcomes[i].evidence = movedBy() + "; its own twin" + (place.size() > 1 ? "s " : " ")
                     + there + sit + " where it was";
                 continue;
@@ -2694,9 +3242,18 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 list(k, "place");
             }
             list(hitPosition, "name");
-            outcome.evidence = movedBy() + "; "
-                + (nearerTwin ? (place.size() > 1 ? "its twins " : "its twin ") : "") + there + sit
-                + (nearerTwin ? " nearer where it was" : " where it was");
+            if (departed) {
+                outcome.evidence = movedBy() + " off where it was, and nothing sits there";
+            }
+            else if (offCentre) {
+                outcome.evidence = movedBy() + " off its old centre; " + there
+                    + (place.size() > 1 ? " hold it" : " holds it");
+            }
+            else {
+                outcome.evidence = movedBy() + "; "
+                    + (nearerTwin ? (place.size() > 1 ? "its twins " : "its twin ") : "") + there
+                    + sit + (nearerTwin ? " nearer where it was" : " where it was");
+            }
         }
         // The elements at an old place are as ambiguous as the moved one: no other entry of the
         // owner takes them.
@@ -3173,6 +3730,9 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         std::set<int> fromNames;
         std::set<std::string> matchedNames;  // the names the name match found them by
         std::set<int> inAncestry;
+        // The far edge's piece left after others of its pieces went (isFewerPiecesOf(), PR 366
+        // round 3), or -1: the old piece renumbered, no pattern's copy
+        int fewerPieces = -1;
         // Under Tier1Derived::Place: the elements that reach the old name only through a node of
         // another type or a GEN section (ops#335, ops#358), and the survivors of tier 1 that were
         // all such elements, which the no-candidate branch then got instead (listed first on a
@@ -3841,7 +4401,61 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         // piece's face alone (the only far cap on it) counts too, if the saved centre lies over
         // it: a strip across a hole made taller, with no other cap on its face. A renamed face
         // of a reordered up-to shell holds the name but not the old piece's centre.
+        // The single-piece rule (ops#386, rounds 1-8: the far edge or cap made whole again took
+        // the piece) is gone since round 9 (below).
         if (!oldName.empty()) {
+            const ElementFingerprint* centred = nullptr;
+            for (const auto member : members) {
+                const ElementFingerprint& fingerprint = input.entries[member].fingerprint;
+                if (fingerprint.isValid() && fingerprint.center) {
+                    centred = &fingerprint;
+                    break;
+                }
+            }
+            // Within a quarter of a face's side of its inside, or a hundredth of an edge's length
+            // of the edge (ops#386). Round 6: a face's saved point inside it when there is one
+            // (an L's centre lies outside the L, where a whole cap on the next plate holds it)
+            const double eps = input.continuationDistance * std::max(1.0, input.diagonal);
+            // Round 7 (I-S9): a face whose area falls short of its outline's with no saved point
+            // inside it (none found) refuses; its centre may lie outside it, so it can't stand in
+            auto lacksInsidePoint = [&] {
+                if (centred->type != 'F' || centred->inside || !centred->size
+                    || centred->outline.size() < 3) {
+                    return false;
+                }
+                const auto& outline = centred->outline;
+                Base::Vector3d sum;
+                for (std::size_t i = 1; i + 1 < outline.size(); ++i) {
+                    sum += (outline[i] - outline.front()) % (outline[i + 1] - outline.front());
+                }
+                return *centred->size < 0.98 * sum.Length() / 2.0;
+            };
+            auto holdsSavedCentre = [&](int k) {
+                if (!centred || !input.holdsPoint || lacksInsidePoint()) {
+                    return false;
+                }
+                const double size = centred->size ? *centred->size : 0.0;
+                const double reach = centred->type == 'E' ? size / 100.0 : std::sqrt(size) / 4.0;
+                const Base::Vector3d& point = centred->inside ? *centred->inside : *centred->center;
+                // Round 8: a face's point seen along the sweep, unless the old face lies along it
+                // (as outlinesApart()). A tilted cap made whole on the next plate of a ridge
+                // held the old strip's centre beside it by its nearest point, inside the cap
+                if (centred->type == 'F' && input.sweep && input.holdsPointAlong) {
+                    Base::Vector3d normal;
+                    const auto& outline = centred->outline;
+                    for (std::size_t i = 1; i + 1 < outline.size(); ++i) {
+                        normal += (outline[i] - outline.front()) % (outline[i + 1] - outline.front());
+                    }
+                    if (outline.size() < 3 || normal.Length() <= eps * eps
+                        || std::abs(normal.Normalize() * *input.sweep) > 0.01) {
+                        return input.holdsPointAlong(pool.elements[k].index,
+                                                     point,
+                                                     *input.sweep,
+                                                     reach + eps);
+                    }
+                }
+                return input.holdsPoint(pool.elements[k].index, point, reach + eps);
+            };
             auto holdersOf = [&](bool alone) {
                 std::vector<int> holders;
                 for (int k : all) {
@@ -3857,24 +4471,45 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             std::vector<int> holders = holdersOf(false);
             if (holders.empty() && input.holdsPoint) {
                 holders = holdersOf(true);
-                const ElementFingerprint* saved = nullptr;
-                for (const auto member : members) {
-                    const ElementFingerprint& fingerprint = input.entries[member].fingerprint;
-                    if (fingerprint.isValid() && fingerprint.center) {
-                        saved = &fingerprint;
-                        break;
-                    }
-                }
-                const double eps = input.continuationDistance * std::max(1.0, input.diagonal);
-                if (holders.size() != 1 || !saved
-                    || !input.holdsPoint(
-                        pool.elements[holders.front()].index,
-                        *saved->center,
-                        (saved->size ? std::sqrt(*saved->size) / 4.0 : 0.0) + eps
-                    )) {
+                if (holders.size() != 1 || !holdsSavedCentre(holders.front())) {
                     holders.clear();
                 }
             }
+            // Round 3: a far edge's piece after others of its pieces went, its marks the same
+            // (isFewerPiecesOf()), is the element if it is the only piece with those marks and the
+            // saved centre lies on it: the hole's fill piece left alone on its face when the piece
+            // left of the hole goes. Pieces coming never count, since a face added to an up-to
+            // shell without names may take another's index
+            if (holders.empty() && input.holdsPoint) {
+                int marked = 0;
+                for (std::size_t k = 0; k < pool.elements.size(); ++k) {
+                    const auto& names = pool.elements[k].names;
+                    if (std::any_of(names.begin(), names.end(), [&](const auto& n) {
+                            return isCounterSibling(n, oldName);
+                        })) {
+                        ++marked;
+                        if (allowed[k] && std::any_of(names.begin(), names.end(), [&](const auto& n) {
+                                return isFewerPiecesOf(n, oldName);
+                            })) {
+                            holders.push_back(static_cast<int>(k));
+                        }
+                    }
+                }
+                if (marked != 1 || holders.size() != 1 || !holdsSavedCentre(holders.front())) {
+                    holders.clear();
+                }
+                else {
+                    state.fewerPieces = holders.front();
+                }
+            }
+            // No far edge or far cap made whole again takes a piece (PR 366 round 9, PLAN decision
+            // 152): in the target's own frame the profile may stay while the up-to plates move
+            // under it (its sketch's Placement or the datum plane it is attached to moved, or the
+            // plates themselves), and the edge or cap made whole on the next plate then holds a
+            // gone piece's saved point. Which plate it lies on can't be told from the target
+            // (coplanar plates, a reordered shell). The piece's reference breaks, as on
+            // integration; decision 122 (2)'s twins across an elliptic hole that moved away from
+            // under them break too (right -> loud) until ops#522 tells the plate under it
             if (holders.size() == 1) {
                 all = {holders.front()};
                 state.inAncestry.insert(holders.front());
@@ -4248,7 +4883,24 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                     return isCounterSibling(n, state.oldName);
                 });
             };
-            bool sibling = k >= 0
+            // But a piece of a far edge or cap counted by its place among the pieces (ORD) that
+            // sits where the old piece was is the old piece, renumbered because another piece
+            // went or came (PR 366 round 2); a pattern's copy never sits there. So is the one
+            // piece with its marks after others went, the saved centre on it (round 3)
+            auto renumbered = [&](int position) {
+                if (position == state.fewerPieces) {
+                    return true;
+                }
+                return state.saved && isOrdered(state.oldName)
+                    && atSamePlace(
+                           *state.saved,
+                           fingerprintOf(state.pool->elements[position]),
+                           input.diagonal,
+                           input.tolerances,
+                           input.continuationDistance
+                    );
+            };
+            bool sibling = k >= 0 && !renumbered(k)
                 && (state.expanded.empty() ? siblingElement(k)
                                            : std::any_of(state.expanded.begin(),
                                                          state.expanded.end(),
