@@ -157,7 +157,8 @@ namespace
 // crosses a face is named by the side of the face the edge goes to there (`in`, `out`, in Index,
 // with ORD), not by a counter; twins told apart by their place carry it with their count,
 // `<k>of<n>` in DuplicateCount, in one canonical order, with ORD (the generated, modified and
-// projected stages; the fallback lists with ORD only where their order is no key); a split
+// projected stages; not where the maker's order is kept, decisions 158 Q1 and 173 (2); the
+// fallback lists with ORD only where their order is no key); a split
 // edge's piece takes the smallest named face at its vertex, counted by name (ops#431).
 constexpr int ForkNamingRevision = 10;
 
