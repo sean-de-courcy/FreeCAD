@@ -1230,6 +1230,8 @@ TEST_F(FeaturePartTest, linkCopiesOfOneObjectHaveTheirOwnNamesV2)
     _doc->InternNames.setValue(false);
     auto cylinder = _doc->addObject<Part::Cylinder>("Cylinder");
     auto plane = _doc->addObject<Part::Plane>("Plane");
+    plane->Length.setValue(10.0);  // the copies 20 apart don't touch
+    plane->Width.setValue(10.0);
     auto extrusion = _doc->addObject<Part::Extrusion>("Extrusion");
     extrusion->Base.setValue(plane);
     extrusion->DirMode.setValue("Custom");

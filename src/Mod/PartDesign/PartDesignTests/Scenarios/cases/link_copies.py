@@ -477,8 +477,9 @@ class LinkCopySameLinkTwice(Copies):
 
 
 class ScaleCase(Copies):
-    """Copy 0 is a Part::Scale of the pin (factor 1, its names `X|CPY;1`), the pin placed at
-    x = 10; copy 1 is a link to the pin at x = 20 (`X|CPY;L`)."""
+    """Copy 0 is a Part::Scale of the pin (factor 1, its names `X|CPY;1`) at x = 10, placed by its
+    own Placement (a Scale takes the pin's shape without the pin's placement); copy 1 is a link to
+    the pin at x = 20 (`X|CPY;L`)."""
 
     abstract = True
     AXES = ("M5", "E1", "E4")
@@ -486,11 +487,11 @@ class ScaleCase(Copies):
 
     def makeCopy(self, doc, k, x):
         if k == 0:
-            doc.Pin.Placement.Base = V(x, 10, 10)
             scale = doc.addObject("Part::Scale", "Copy0")
             scale.Base = doc.Pin
             scale.Uniform = True
             scale.UniformScale = 1
+            scale.Placement.Base = V(x, 10, 10)
             return scale
         return super().makeCopy(doc, k, x)
 
@@ -508,35 +509,18 @@ class LinkCopyScaleAndLinkNeighbourMoved(ScaleCase):
 
 # Not run before: silent on integration by the review's trace
 class LinkCopyScaleBesideBaseMoved(ScaleCase):
-    """The pin itself at x = 20 is copy 1, beside its Scale copy (copy 0) at x = 10, placed by the
-    Scale's own Placement (-10 in x: the Scale takes the pin's shape where the pin is). The Scale
+    """The pin itself at x = 20 is copy 1, beside its Scale copy (copy 0) at x = 10. The Scale
     leaves the inputs and the pin moves onto its place: the Scale's point must break, never land
     on the pin."""
 
     def makeCopy(self, doc, k, x):
         if k == 0:
-            scale = doc.addObject("Part::Scale", "Copy0")
-            scale.Base = doc.Pin
-            scale.Uniform = True
-            scale.UniformScale = 1
-            return scale
+            return super().makeCopy(doc, k, x)
         doc.Pin.Placement.Base = V(x, 10, 10)
         return doc.Pin
 
     def inputs(self, doc):
         return [doc.Plate, doc.Copy0, doc.Pin]
-
-    def build(self, doc):
-        self.at = dict(enumerate(self.start))
-        m.box(doc, "Plate", (40, 20, 10))
-        self.makePin(doc)
-        for k, x in reversed(list(enumerate(self.start))):
-            self.makeCopy(doc, k, x)
-        doc.recompute()
-        doc.Copy0.Placement.Base = doc.Copy0.Placement.Base + V(self.start[0] - self.start[1], 0, 0)
-        doc.addObject(self.maker, "Maker")
-        self.setInputs(doc, self.inputs(doc))
-        self.refer(doc)
 
     def edit(self, doc):
         self.setInputs(doc, [doc.Plate, doc.Pin])
@@ -566,10 +550,20 @@ class ArrayCase(Copies):
         array.ElementCount = len(self.start)
         array.ShowElement = self.showElement
         doc.recompute()  # the first recompute resets PlacementList
-        array.PlacementList = [App.Placement(V(x, 10, 10), App.Rotation()) for x in self.start]
+        self.place(array, self.start)
         doc.addObject(self.maker, "Maker")
         self.setInputs(doc, [doc.Plate, array])
         self.refer(doc)
+
+    def place(self, array, xs):
+        """The elements at x = xs: through PlacementList, or each element's own Placement when the
+        array shows them as objects (PlacementList set later doesn't reach them)."""
+        placements = [App.Placement(V(x, 10, 10), App.Rotation()) for x in xs]
+        if array.ShowElement:
+            for element, placement in zip(array.ElementList, placements):
+                element.Placement = placement
+        else:
+            array.PlacementList = placements
 
 
 # point_copy0 correct, point_copy1 correct, point_copy2 broken
@@ -601,7 +595,7 @@ class LinkArrayFirstPlacementDropped(ArrayCase):
     def edit(self, doc):
         doc.Array.ElementCount = 2
         doc.recompute()
-        doc.Array.PlacementList = [App.Placement(V(x, 10, 10), App.Rotation()) for x in self.start[1:]]
+        self.place(doc.Array, self.start[1:])
         self.at = {0: 20, 1: 32, 2: None}
 
 
@@ -643,7 +637,7 @@ class LinkArrayCountDownUp(ArrayCase):
     def up(self, doc):
         doc.Array.ElementCount = 3
         doc.recompute()
-        doc.Array.PlacementList = [App.Placement(V(x, 10, 10), App.Rotation()) for x in self.start]
+        self.place(doc.Array, self.start)
         self.at = dict(enumerate(self.start))
 
 
