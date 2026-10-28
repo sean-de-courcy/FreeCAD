@@ -46,8 +46,8 @@ class TopoShape;
  *   pair them otherwise than the producer's order are all retired (a trade of twins);
  * - R1: a vertex or edge match counts only where a matched face at it confirms it (in a wire,
  *   where an adjacent edge matched): a seam at old places of other faces' elements is retired;
- * - R2: a piece whose unmatched old and new elements are congruent (a periodic piece slid by its
- *   pitch) is retired.
+ * - R2' (decision 169): a piece that moved as a whole (congruent with its old piece, its box's
+ *   centre elsewhere) keeps nothing by place: a periodic piece slid by its pitch is retired.
  * Matches are by index from 1.
  */
 struct PartExport ElementMatches
