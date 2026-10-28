@@ -2292,6 +2292,12 @@ TEST(SolveOwner, copySiblingsAreCounterSiblings)
         false
     ));
     EXPECT_TRUE(Data::isCounterSiblingName(ext(twin0, 11, 0), ext(twin1, 11, 0), false));
+    //   ... also inside the names made from them (the flag goes down into linked names)
+    EXPECT_FALSE(Data::isCounterSiblingName(
+        generated({copied(x, 11, "L", 'E')}, 30, "FLT", 'F'),
+        generated({copied(x, 12, "L", 'E')}, 30, "FLT", 'F'),
+        false
+    ));
 }
 
 TEST(SolveOwner, linkCopySiblingNeverResolves)
@@ -6305,6 +6311,35 @@ TEST(Moved, orderedEdgePiecesMovedTogetherStand)
     input.entries = {entryOn("Edge24", left, 0, 1), entryOn("Edge26", right, 1, 2)};
     for (const auto& outcome : Data::solveOwner(input)) {
         EXPECT_EQ(outcome.status, SolveStatus::Exact) << describe(outcome);
+    }
+}
+
+TEST(SolveOwner, otherCopysOrderedPieceIsNoRenumbering)
+{
+    // ops#523 (the A3 pre-push review's T2): renumberedEdgePieceInItsPlaceResolves's right piece
+    // inside link copies. In the same copy (link 11) it is still the old piece renumbered; but
+    // copy 11 gone and copy 12's piece at its place is another copy's: a pattern sibling, broken.
+    const auto plate3 = plateElement("Face3", 'F');
+    const auto oldPiece = copied(farEdgePiece({plate3}, 5, {"PRJ", "MOD", "ORD"}), 11, "L", 'E');
+    SolveInput input;
+    input.diagonal = 30;
+    auto entry = missing(oldPiece, "Edge");
+    entry.fingerprint = farEdgeAt(3, 5, 1);
+    input.entries = {entry};
+    for (int link : {11, 12}) {
+        const auto copyPiece
+            = copied(farEdgePiece({plate3}, 2, {"PRJ", "MOD", "ORD"}), link, "L", 'E');
+        input.pool["Edge"] = {element("Edge12", {copyPiece})};
+        measure(input, {{"Edge12", farEdgeAt(3, 5, 1)}}, nullptr);
+        const auto outcome = Data::solveOwner(input)[0];
+        if (link == 11) {
+            EXPECT_EQ(outcome.status, SolveStatus::Resolved) << describe(outcome);
+            EXPECT_EQ(outcome.element, "Edge12") << describe(outcome);
+        }
+        else {
+            EXPECT_EQ(outcome.status, SolveStatus::Broken) << describe(outcome);
+            EXPECT_EQ(outcome.evidence, "pattern sibling") << describe(outcome);
+        }
     }
 }
 
