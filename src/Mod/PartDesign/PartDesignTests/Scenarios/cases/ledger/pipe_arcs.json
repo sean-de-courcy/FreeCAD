@@ -15,8 +15,8 @@
 "PipeBendMirroredLeg|arc_q3|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "port", "issue": "ops#500", "tier": "F"},
 "PipeBendMirroredLeg|arc_q4|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "port", "issue": "ops#500", "tier": "F"},
 "PipeBendProfileTurned80|arc_q1|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "wrong", "found_by": "port", "issue": "ops#500", "tier": "F"},
-"PipeBendProfileTurned80|arc_q2|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "port", "issue": "ops#500", "tier": "F"},
+"PipeBendProfileTurned80|arc_q2|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#500", "tier": "F"},
 "PipeBendProfileTurned80|arc_q3|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#500", "tier": "F"},
-"PipeBendProfileTurned80|arc_q4|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "port", "issue": "ops#500", "tier": "F"}
+"PipeBendProfileTurned80|arc_q4|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#500", "tier": "F"}
 }
 }
