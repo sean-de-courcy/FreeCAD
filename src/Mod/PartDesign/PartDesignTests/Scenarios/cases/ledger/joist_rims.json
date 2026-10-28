@@ -1,7 +1,7 @@
 {
 "entries": {
-"JoistRimRedrawnInPlaceBeforeJoists|rim_chamfer|V2s": {"axes": ["M2", "E3", "X4:3600"], "classes": ["D"], "expect": "CORRECT", "expected": "quiet", "found_by": "port", "issue": "ops#503", "tier": "F"},
-"JoistRimRedrawnInPlace|rim_chamfer|V2s": {"axes": ["M2", "E3", "X4:3600"], "classes": ["D"], "expect": "CORRECT", "expected": "quiet", "found_by": "port", "issue": "ops#503", "tier": "F"},
+"JoistRimRedrawnInPlaceBeforeJoists|rim_chamfer|V2s": {"axes": ["M2", "E3", "X4:3600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "port", "issue": "ops#503", "tier": "F"},
+"JoistRimRedrawnInPlace|rim_chamfer|V2s": {"axes": ["M2", "E3", "X4:3600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "port", "issue": "ops#503", "tier": "F"},
 "JoistRimRedrawnShorter|rim_chamfer|V2s": {"axes": ["M2", "E3", "X4:3600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "port", "issue": "ops#503", "tier": "F"}
 }
 }

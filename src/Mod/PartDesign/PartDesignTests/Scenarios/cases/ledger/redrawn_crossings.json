@@ -1,0 +1,12 @@
+{
+"entries": {
+"HoleRedrawnThenMovedAlongALongEdge|hi_z0|V2s": {"axes": ["M1", "E1", "E5"], "classes": ["D"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "attack pr379-r4", "issue": "ops#394", "tier": "F"},
+"HoleRedrawnThenMovedAlongALongEdge|hi_z5|V2s": {"axes": ["M1", "E1", "E5"], "classes": ["D"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "attack pr379-r4", "issue": "ops#394", "tier": "F"},
+"HoleRedrawnThenMovedAlongALongEdge|lo_z0|V2s": {"axes": ["M1", "E1", "E5"], "classes": ["D"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "attack pr379-r4", "issue": "ops#394", "tier": "F"},
+"HoleRedrawnThenMovedAlongALongEdge|lo_z5|V2s": {"axes": ["M1", "E1", "E5"], "classes": ["D"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "attack pr379-r4", "issue": "ops#394", "tier": "F"},
+"HoleRedrawnThenMovedAlongTheEdge|hi_z0|V2s": {"axes": ["M1", "E1", "E5"], "classes": ["D"], "expect": "OWN-OR-BROKEN", "expected": "correct", "found_by": "attack pr379-r4", "issue": "ops#394", "tier": "F"},
+"HoleRedrawnThenMovedAlongTheEdge|hi_z5|V2s": {"axes": ["M1", "E1", "E5"], "classes": ["D"], "expect": "OWN-OR-BROKEN", "expected": "correct", "found_by": "attack pr379-r4", "issue": "ops#394", "tier": "F"},
+"HoleRedrawnThenMovedAlongTheEdge|lo_z0|V2s": {"axes": ["M1", "E1", "E5"], "classes": ["D"], "expect": "OWN-OR-BROKEN", "expected": "correct", "found_by": "attack pr379-r4", "issue": "ops#394", "tier": "F"},
+"HoleRedrawnThenMovedAlongTheEdge|lo_z5|V2s": {"axes": ["M1", "E1", "E5"], "classes": ["D"], "expect": "OWN-OR-BROKEN", "expected": "correct", "found_by": "attack pr379-r4", "issue": "ops#394", "tier": "F"}
+}
+}
