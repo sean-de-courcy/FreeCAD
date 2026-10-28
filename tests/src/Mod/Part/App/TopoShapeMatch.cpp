@@ -21,6 +21,7 @@
 #include <vector>
 
 #include <BRep_Builder.hxx>
+#include <BRepAlgoAPI_Cut.hxx>
 #include <BRep_Tool.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
@@ -31,6 +32,7 @@
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <GProp_GProps.hxx>
+#include <gp_Ax2.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Vec.hxx>
@@ -243,15 +245,40 @@ TEST(TopoShapeMatch, movedEndPointKeepsItsId)
     );
 }
 
-// Rung 2's direction term (CC1): a point moved across its neighbour is not the same point
+// Rung 2's direction term (CC1): a point moved across its neighbour is not the same point. Then
+// R1 (ruling 10-28): the edge left at its place has no matched edge beside it, so nothing confirms
+// it, and the wire is new
 TEST(TopoShapeMatch, pointMovedAcrossItsNeighbourTakesAFreshId)
 {
     const auto before = polyline({gp_Pnt(0, 0, 0), gp_Pnt(10, 0, 0), gp_Pnt(10, 10, 0)});
     const auto after = polyline({gp_Pnt(0, 0, 0), gp_Pnt(10, 0, 0), gp_Pnt(10, -10, 0)});
     const auto matches = Part::matchElements(before, after, false);
-    EXPECT_EQ(matches.vertexes.size(), 2);
     EXPECT_FALSE(matches.vertexes.count(vertexAt(after, gp_Pnt(10, -10, 0))));
-    EXPECT_EQ(matches.edges.size(), 1);
+    EXPECT_TRUE(matches.vertexes.empty());
+    EXPECT_TRUE(matches.edges.empty());
+}
+
+// R1 in a wire: a moved end keeps the wire, each edge beside a matched one
+TEST(TopoShapeMatch, wireWithAMovedEndKeepsItsOtherEdges)
+{
+    const auto before = polyline({gp_Pnt(0, 0, 0), gp_Pnt(10, 0, 0), gp_Pnt(10, 10, 0), gp_Pnt(0, 10, 0)});
+    const auto after = polyline({gp_Pnt(0, 0, 0), gp_Pnt(10, 0, 0), gp_Pnt(10, 10, 0), gp_Pnt(0, 30, 0)});
+    const auto matches = Part::matchElements(before, after, false);
+    EXPECT_EQ(matches.edges.at(edgeThrough(after, gp_Pnt(5, 0, 0))), edgeThrough(before, gp_Pnt(5, 0, 0)));
+    EXPECT_EQ(matches.edges.at(edgeThrough(after, gp_Pnt(10, 5, 0))), edgeThrough(before, gp_Pnt(10, 5, 0)));
+    EXPECT_EQ(matches.vertexes.at(vertexAt(after, gp_Pnt(10, 10, 0))), vertexAt(before, gp_Pnt(10, 10, 0)));
+}
+
+// R1 in a wire: a closed square shifted by its own side leaves one edge at an old edge's place,
+// with no matched edge beside it: every id is fresh
+TEST(TopoShapeMatch, squareWireShiftedByItsSideTakesFreshIds)
+{
+    auto square = [](double x) {
+        return polyline({gp_Pnt(x, 0, 0), gp_Pnt(x + 10, 0, 0), gp_Pnt(x + 10, 10, 0), gp_Pnt(x, 10, 0)}, true);
+    };
+    const auto matches = Part::matchElements(square(0), square(10), false);
+    EXPECT_TRUE(matches.vertexes.empty());
+    EXPECT_TRUE(matches.edges.empty());
 }
 
 // Rung 1: a wire drawn the other way keeps every element, each at its place
@@ -278,19 +305,15 @@ TEST(TopoShapeMatch, reversedFaceTakesAFreshId)
     EXPECT_TRUE(matches.faces.empty());
 }
 
-// CC1 and CC2 together: a box moved by its own width keeps only what stays at its place (the
-// shared side's corners and edges); the shared side faces the other way, and the far corners
-// would be the near ones turned
-TEST(TopoShapeMatch, boxMovedByItsOwnWidthKeepsOnlyTheSharedPlaces)
+// The seam (ruling 10-28, R1): a box moved by its own width leaves the shared side's corners and
+// edges at old places, but the side faces the other way (CC2) and the far corners would be the
+// near ones turned (CC1): no face matches, so nothing confirms the seam, and every id is fresh
+TEST(TopoShapeMatch, boxMovedByItsOwnWidthTakesFreshIds)
 {
-    const TopoDS_Shape after = box(10);
-    const auto matches = Part::matchElements(box(0), after, false);
+    const auto matches = Part::matchElements(box(0), box(10), false);
     EXPECT_TRUE(matches.faces.empty());
-    ASSERT_EQ(matches.vertexes.size(), 4);
-    for (const auto& [now, old] : matches.vertexes) {
-        EXPECT_NEAR(pointOf(after, now).X(), 10, tolerance);
-    }
-    EXPECT_EQ(matches.edges.size(), 4);
+    EXPECT_TRUE(matches.vertexes.empty());
+    EXPECT_TRUE(matches.edges.empty());
 }
 
 // Rung 4: an end face of a prism given more sides overlaps the old one at both inner points;
@@ -363,6 +386,149 @@ TEST(TopoShapeMatch, slidCopiesWithoutAnAnchorTakeFreshIds)
     const auto matches = Part::matchElements(compound({box(0), box(20)}), compound({box(5), box(25)}), false);
     EXPECT_TRUE(matches.vertexes.empty());
     EXPECT_TRUE(matches.edges.empty());
+    EXPECT_TRUE(matches.faces.empty());
+}
+
+// P1 (ruling 10-28): twins traded in the producer's order are the same shapes as twins reordered;
+// neither reading is verified, so the class takes fresh ids
+TEST(TopoShapeMatch, tradedTwinsTakeFreshIds)
+{
+    const auto matches =
+        Part::matchElements(compound({box(0), box(20)}), compound({box(20), box(0)}), false);
+    EXPECT_TRUE(matches.vertexes.empty());
+    EXPECT_TRUE(matches.edges.empty());
+    EXPECT_TRUE(matches.faces.empty());
+}
+
+// P1: twins slid by their pitch: the first lands on the second's place
+TEST(TopoShapeMatch, twinsSlidByTheirPitchTakeFreshIds)
+{
+    const auto matches =
+        Part::matchElements(compound({box(0), box(20)}), compound({box(20), box(40)}), false);
+    EXPECT_TRUE(matches.vertexes.empty());
+    EXPECT_TRUE(matches.edges.empty());
+    EXPECT_TRUE(matches.faces.empty());
+}
+
+// P1: touching twins are separate pieces, because the producer made them so
+TEST(TopoShapeMatch, touchingTwinsTradedTakeFreshIds)
+{
+    const auto matches =
+        Part::matchElements(compound({box(0), box(10)}), compound({box(10), box(0)}), false);
+    EXPECT_TRUE(matches.faces.empty());
+    EXPECT_TRUE(matches.edges.empty());
+}
+
+// P1 doesn't fire on a count change: a copy inserted first leaves the others at their places
+TEST(TopoShapeMatch, copyInsertedFirstKeepsTheOthers)
+{
+    const TopoDS_Shape before = compound({box(0), box(20)});
+    const TopoDS_Shape after = compound({box(40), box(0), box(20)});
+    const auto matches = Part::matchElements(before, after, false);
+    EXPECT_EQ(matches.faces.size(), 12);
+    EXPECT_EQ(matches.edges.size(), 24);
+    EXPECT_EQ(matches.vertexes.size(), 16);
+    EXPECT_FALSE(matches.vertexes.count(vertexAt(after, gp_Pnt(50, 10, 10))));
+}
+
+// P1 doesn't fire on pieces that aren't congruent: reordered, each keeps its ids by place
+TEST(TopoShapeMatch, reorderedPiecesThatDifferKeepTheirIds)
+{
+    const TopoDS_Shape before = compound({box(0), box(20, 20)});
+    const TopoDS_Shape after = compound({box(20, 20), box(0)});
+    const auto matches = Part::matchElements(before, after, false);
+    EXPECT_EQ(matches.faces.size(), 12);
+    EXPECT_EQ(matches.edges.size(), 24);
+    EXPECT_EQ(matches.vertexes.size(), 16);
+    EXPECT_EQ(matches.vertexes.at(vertexAt(after, gp_Pnt(30, 10, 20))), vertexAt(before, gp_Pnt(30, 10, 20)));
+}
+
+// P1 doesn't fire on a twin moved to a free place: the other keeps its ids
+TEST(TopoShapeMatch, twinMovedToAFreePlaceLeavesTheOther)
+{
+    const TopoDS_Shape after = compound({box(0), box(50)});
+    const auto matches = Part::matchElements(compound({box(0), box(20)}), after, false);
+    EXPECT_EQ(matches.faces.size(), 6);
+    EXPECT_EQ(matches.vertexes.at(vertexAt(after, gp_Pnt(10, 10, 10))), vertexAt(compound({box(0), box(20)}), gp_Pnt(10, 10, 10)));
+}
+
+namespace
+{
+
+// A comb in the XY plane, 2 deep: a base 2 high from \a x to \a x + 12 and three teeth 2 wide,
+// 5 high, at a pitch of 4, 1 in from each end of the base
+TopoDS_Shape comb(double x)
+{
+    std::vector<gp_Pnt> points {gp_Pnt(x, 0, 0), gp_Pnt(x + 12, 0, 0), gp_Pnt(x + 12, 2, 0)};
+    for (int tooth = 2; tooth >= 0; --tooth) {
+        const double left = x + 1 + 4 * tooth;
+        points.insert(
+            points.end(),
+            {gp_Pnt(left + 2, 2, 0), gp_Pnt(left + 2, 7, 0), gp_Pnt(left, 7, 0), gp_Pnt(left, 2, 0)}
+        );
+    }
+    points.emplace_back(x, 2, 0);
+    const TopoDS_Face profile = BRepBuilderAPI_MakeFace(polyline(points, true)).Face();
+    return BRepPrimAPI_MakePrism(profile, gp_Vec(0, 0, 2)).Shape();
+}
+
+// A square-wave wire of \a periods periods of 4 from \a x: up 2 at x + 2, down at x + 4, ...
+TopoDS_Wire squareWave(double x, int periods)
+{
+    std::vector<gp_Pnt> points {gp_Pnt(x, 0, 0)};
+    for (int p = 0; p < periods; ++p) {
+        const double left = x + 4 * p;
+        points.insert(
+            points.end(),
+            {gp_Pnt(left + 2, 0, 0), gp_Pnt(left + 2, 2, 0), gp_Pnt(left + 4, 2, 0), gp_Pnt(left + 4, 0, 0)}
+        );
+    }
+    points.emplace_back(x + 4 * periods + 2, 0, 0);
+    return polyline(points);
+}
+
+}  // namespace
+
+// R2 (ruling 10-28, to be measured): a periodic piece slid by its pitch puts each tooth on the
+// next tooth's old place; its unmatched old and new elements are congruent (the first tooth left,
+// a last one arrived), so the piece takes fresh ids
+TEST(TopoShapeMatch, combSlidByItsPitchTakesFreshIds)
+{
+    const auto matches = Part::matchElements(comb(0), comb(4), false);
+    EXPECT_TRUE(matches.faces.empty());
+    EXPECT_TRUE(matches.edges.empty());
+    EXPECT_TRUE(matches.vertexes.empty());
+}
+
+TEST(TopoShapeMatch, squareWaveSlidByItsPeriodTakesFreshIds)
+{
+    const auto matches = Part::matchElements(squareWave(0, 3), squareWave(4, 3), false);
+    EXPECT_TRUE(matches.edges.empty());
+    EXPECT_TRUE(matches.vertexes.empty());
+}
+
+// R2 against the designed splits: a plate split into two plates of other sizes keeps neither
+// (rung 4 refuses), and the rest of the shell keeps its ids (R2's sizes don't fit)
+TEST(TopoShapeMatch, shellWithASplitPlateKeepsTheOtherPlates)
+{
+    auto shell = [](std::initializer_list<TopoDS_Shape> plates) { return compound(plates); };
+    const TopoDS_Shape before = shell({square(0, 10), square(10, 30)});
+    const TopoDS_Shape after = shell({square(0, 10), square(10, 18), square(18, 30)});
+    const auto matches = Part::matchElements(before, after, false);
+    ASSERT_EQ(matches.faces.size(), 1);
+    EXPECT_EQ(matches.faces.begin()->first, matches.faces.begin()->second);
+}
+
+// R2's cost, measured: a hole moved in a script plate leaves a hole's faces unmatched on both
+// sides, congruent; the plate is retired, every reference to it breaks (loud)
+TEST(TopoShapeMatch, plateWithAMovedHoleIsRetired)
+{
+    auto plate = [](double hole) {
+        const TopoDS_Shape block = BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0), 40, 20, 2).Shape();
+        const TopoDS_Shape pin = BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(hole, 10, -1), gp_Dir(0, 0, 1)), 3, 4).Shape();
+        return BRepAlgoAPI_Cut(block, pin).Shape();
+    };
+    const auto matches = Part::matchElements(plate(10), plate(25), false);
     EXPECT_TRUE(matches.faces.empty());
 }
 
@@ -487,6 +653,29 @@ TEST_F(TopoShapeMatchDocument, emptyResultIsSetWithoutNames)
     // and a later result is still named past the earlier ids
     feature->Shape.setValue(Part::TopoShape(box(0)));
     EXPECT_EQ(Part::matchedId(feature->Shape.getShape(), "Vertex1"), 27);
+}
+
+// The ruling's A4: after an empty result (a bad input), a rebuilt one takes ids from the saved
+// counter, never from 1, across a save and a reopen too
+TEST_F(TopoShapeMatchDocument, idsAfterAnEmptyResultComeFromTheSavedCounter)
+{
+    auto feature = _doc->addObject<Part::Feature>("Thing");
+    feature->Shape.setValue(Part::TopoShape(box(0)));
+    BRep_Builder builder;
+    TopoDS_Compound empty;
+    builder.MakeCompound(empty);
+    feature->Shape.setValue(Part::TopoShape(empty));
+    const std::string path = App::Application::getTempFileName("counter") + ".FCStd";
+    ASSERT_TRUE(_doc->saveAs(path.c_str()));
+    App::GetApplication().closeDocument(_docName.c_str());
+    _doc = App::GetApplication().openDocument(path.c_str());
+    ASSERT_NE(_doc, nullptr);
+    _docName = _doc->getName();
+    auto restored = freecad_cast<Part::Feature*>(_doc->getObject("Thing"));
+    ASSERT_NE(restored, nullptr);
+    EXPECT_EQ(restored->Shape.getNextElementId(), 27);
+    restored->Shape.setValue(Part::TopoShape(box(0)));
+    EXPECT_EQ(Part::matchedId(restored->Shape.getShape(), "Vertex1"), 27);
 }
 
 // A primitive whose face count changes keeps its end faces (ops#502's find: a sketch on a Prism's
