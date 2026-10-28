@@ -4886,7 +4886,8 @@ TEST_F(TopoShapeExpansionTest, makeShapeWithElementMapPipeLegsFollowSpineOrderV2
     //   them in the spine's order, so the up leg is 0, the across leg 1 and the down leg 2 in
     //   every state. Round 1's key (X first) put the down leg before the across leg once turned;
     //   a key on the place along the circle's axis did at every length (ops#378 section 9,
-    //   probe B)
+    //   probe B). The legs don't lie on the circle, so they keep the maker's order without ORD
+    //   (decisions 158 Q1 and 173 (2))
     for (double degrees : {0.0, 127.0}) {
         const gp_Trsf turn = rotationAboutZ(degrees);
         for (double downLength : {10.0, 30.0, 60.0}) {
@@ -4922,6 +4923,7 @@ TEST_F(TopoShapeExpansionTest, makeShapeWithElementMapPipeLegsFollowSpineOrderV2
             for (const auto& [leg, section] : legs) {
                 EXPECT_EQ(section.opCode, OpCodes::PipeShell) << leg;
                 EXPECT_TRUE(section.hasMapperFlag(MAPPER_FLAG_GENERATED)) << leg;
+                EXPECT_FALSE(section.hasMapperFlag(MAPPER_FLAG_ORDERED)) << leg;
                 EXPECT_EQ(section.linkedNames, legs["up"].linkedNames) << leg;
             }
             EXPECT_EQ(twinPlaceOf(legs["up"]), 0) << degrees << " degrees, down " << downLength;

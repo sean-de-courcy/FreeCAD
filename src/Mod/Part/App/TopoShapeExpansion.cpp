@@ -3545,8 +3545,8 @@ TopoShape& TopoShape::makeShapeWithElementMap(
 
         // The projections of one front name without marks (a far cap split by a seam the refine
         // doesn't join, ops#386) are twins: in twinOrder's order on their source, Index `0`, with
-        // the count in DuplicateCount and ORD, as the generated and modified stages' twins (the
-        // size rule, I-A2). Named in the loop with their arrival count, so that the stages after
+        // the count in DuplicateCount and ORD (none in the maker's order: twinPlaces), as the
+        // generated and modified stages' twins (the size rule, I-A2). Named in the loop with their arrival count, so that the stages after
         // see them named; renamed here, the element's other names kept in their order.
         {
             std::vector<std::vector<std::size_t>> twins;
@@ -3713,7 +3713,7 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                 // Each piece's Connected Names that no other piece has. The pieces left without
                 // any are told apart by their place among the group's pieces of their type: in
                 // twinOrder's order on the source, with the count (the size rule, I-A2), and with
-                // ORD; a lone one `0`, as before.
+                // ORD unless that is the maker's order (twinPlaces); a lone one `0`, as before.
                 std::vector<std::vector<Data::MappedName>> filteredConnectedElementsOf(
                     modifiedConnectedElementVector.size()
                 );
@@ -4007,8 +4007,8 @@ TopoShape& TopoShape::makeShapeWithElementMap(
 
             // The members without Connected Names are told apart by their place among the
             // group's members of their type (the type tells types apart, ops#46): in twinOrder's
-            // order, with the count (the size rule, I-A2), and with ORD; a lone one `0`, as
-            // before. Vertexes generated along an edge that a face crosses (a hole crossing it
+            // order, with the count (the size rule, I-A2), and with ORD unless that is the
+            // maker's order (twinPlaces); a lone one `0`, as before. Vertexes generated along an edge that a face crosses (a hole crossing it
             // twice) are named by their side of the face, `in` and `out` (ops#468), lone ones
             // included: when an edit changes how many there are (the hole's seam leaving the
             // edge or reaching it), a name never passes to the other crossing.
