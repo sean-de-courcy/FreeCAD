@@ -1,0 +1,6 @@
+{
+"entries": {
+"R5LonePieceAndBackThenMerge|ref|V2s": {"axes": ["M1", "E2", "E9"], "classes": ["E"], "expect": "CORRECT", "expected": "guessed", "found_by": "review pr386-r5s", "issue": "ops#504", "tier": "F"},
+"R5PiecesPlusBackThenMerge|ref|V2s": {"axes": ["M1", "E2", "E9"], "classes": ["E"], "expect": "CORRECT", "expected": "guessed", "found_by": "review pr386-r5s", "issue": "ops#504", "tier": "F"}
+}
+}
