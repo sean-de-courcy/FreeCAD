@@ -1817,7 +1817,7 @@ bool elementTwinCentroid(const GeoFeature* geo, const char* element, Base::Vecto
         }
         const std::string plain = plainName(mapped.name.toString());
         if (std::any_of(ordered.begin(), ordered.end(), [&](const std::string& name) {
-                return Data::isCounterSiblingName(plain, name);
+                return Data::isCounterSiblingName(plain, name, false);  // not another copy's
             })) {
             twins.insert(mapped.index.toString());
         }

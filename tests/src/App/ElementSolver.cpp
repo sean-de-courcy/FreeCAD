@@ -2267,6 +2267,31 @@ TEST(SolveOwner, copySiblingsAreCounterSiblings)
     EXPECT_FALSE(Data::isCounterSiblingName(copied(x, 11, "L", 'E'), copied(y, 12, "L", 'E')));
     EXPECT_FALSE(Data::isCounterSiblingName(x, copied(copied(x, 11, "L", 'E'), 12, "L", 'E')));
     EXPECT_FALSE(Data::isCounterSiblingName(y, copied(x, 11, "L", 'E')));
+    //   the twin sites (copySiblings false; the A3 pre-push review's T1): another copy's twins
+    //   are no twins of this one, but one copy's own counter siblings still are
+    EXPECT_FALSE(
+        Data::isCounterSiblingName(copied(x, 11, "L", 'E'), copied(x, 12, "L", 'E'), false)
+    );
+    EXPECT_FALSE(Data::isCounterSiblingName(ext(x, 11, 0), ext(x, 12, 0), false));
+    EXPECT_FALSE(Data::isCounterSiblingName(x, copied(x, 11, "1", 'E'), false));
+    const auto twin0 = section({}, {sketchEdge(1)}, 7, "XTR", 0, 'E', {"GEN"});
+    const auto twin1 = Data::MappedName::makeEncodedSection(
+        std::vector<std::string> {},
+        std::vector<std::string> {sketchEdge(1)},
+        "7",
+        "XTR",
+        "0",
+        'E',
+        "1",
+        {"GEN"},
+        std::vector<std::string> {}
+    );
+    EXPECT_TRUE(Data::isCounterSiblingName(
+        copied(twin0, 11, "L", 'E'),
+        copied(twin1, 11, "L", 'E'),
+        false
+    ));
+    EXPECT_TRUE(Data::isCounterSiblingName(ext(twin0, 11, 0), ext(twin1, 11, 0), false));
 }
 
 TEST(SolveOwner, linkCopySiblingNeverResolves)

@@ -49,9 +49,11 @@ import FreeCAD as App
 from PartDesignTests.Scenarios.harness import (
     Attached,
     BROKEN,
+    OwnOrBroken,
     Reopens,
     Scenario,
     edge,
+    face,
 )
 from PartDesignTests.Scenarios import models as m
 
@@ -673,6 +675,176 @@ class CrossDoc(Copies):
         except Exception:
             pass
         shutil.rmtree(getattr(self, "folder", ""), ignore_errors=True)
+
+
+# Twins inside copies (the A3 pre-push review's T1): a Pad of a disc r = 2.3 about (3.3, 3) up to
+# a plate at z = 10 with a hole of four lobes about (3, 3) (PR 340 round 6's N9 model): the disc's
+# far cap is four ordered twins on the plate, between the lobes. Two copies of the pad sit 100
+# apart. Turning the hole 45 degrees (its symmetry) trades the twins' names; each copy's twins
+# must stay a set of their own, so that the tie between the +45 and -45 readings breaks the
+# reference, never picks one quietly.
+
+
+def lobedHoleShell(z, turn=0):
+    import math
+
+    import Part
+
+    points = []
+    for k in range(60):
+        t = 2 * math.pi * k / 60
+        r = 2 + 0.8 * math.cos(4 * t)
+        points.append(V(3 + r * math.cos(t), 3 + r * math.sin(t), z))
+    curve = Part.BSplineCurve()
+    curve.interpolate(points, PeriodicFlag=True)
+    edge = curve.toShape()
+    if turn:
+        edge.rotate(V(3, 3, z), V(0, 0, 1), turn)
+    outer = [V(-10, -10, z), V(20, -10, z), V(20, 10, z), V(-10, 10, z)]
+    plane = Part.Plane(V(0, 0, z), V(0, 0, 1))
+    plate = Part.Face(plane, [Part.makePolygon(outer + outer[:1]), Part.Wire([edge])])
+    fill = Part.Face(Part.Wire([edge]))
+    return Part.Shell([plate.toNurbs().Faces[0], fill.toNurbs().Faces[0]])
+
+
+class LobedCopies(Scenario):
+    """Copy 0 at the origin and copy 1 at x = 100; datum points at the centres of copy 0's four
+    twins (between the lobes at 45, 135, 225, 315 degrees); the hole turned 45 degrees."""
+
+    abstract = True
+    area = "link-copies"
+    CLASSES = ("A", "D")
+    ISSUE = "ops#523"
+    FOUND_BY = "review pr523-r1"
+    TIER = "F"
+    AXES = ("M5", "E4")
+    REFS = ("twin45", "twin135", "twin225", "twin315")
+    maker = "Part::MultiFuse"
+    turn = 0
+
+    def twin(self, angle):
+        import math
+
+        a = math.radians(angle + self.turn)
+        point = (3 + 1.7 * math.cos(a), 3 + 1.7 * math.sin(a), 10)
+        found = face(contains=point)
+        return OwnOrBroken(found) if self.turn else found
+
+    def makePad(self, doc):
+        body = m.body(doc)
+        plate = doc.addObject("Part::Feature", "Plate")
+        plate.Shape = lobedHoleShell(10)
+        sketch = m.sketch(doc, "Profile", [m.circle(3.3, 3, 2.3)], body)
+        pad = body.newObject("PartDesign::Pad", "Pad")
+        pad.Profile = sketch
+        pad.Type = "UpToShape"
+        pad.UpToShape = (plate, ["Face1", "Face2"])
+        pad.Refine = False
+        doc.recompute()
+        return body
+
+    def copies(self, doc, body):
+        raise NotImplementedError
+
+    def build(self, doc):
+        source = self.sourceDocument(doc)
+        body = self.makePad(source)
+        maker = doc.addObject(self.maker, "Maker")
+        inputs = self.copies(doc, body)
+        if self.maker == "Part::MultiFuse":
+            maker.Shapes = inputs
+        else:
+            maker.Links = inputs
+        target = m.body(doc)
+        target.BaseFeature = doc.Maker
+        doc.recompute()
+        base = featureBase(target)
+        for angle in (45, 135, 225, 315):
+            point = target.newObject("PartDesign::Point", f"Twin{angle}")
+            point.AttachmentSupport = [(base, self.names(base, self.twin(angle))[0])]
+            point.MapMode = "CenterOfMass"
+            self.ref(f"twin{angle}", point, "AttachmentSupport", lambda a=angle: self.twin(a), Attached())
+
+    def sourceDocument(self, doc):
+        return doc
+
+    def edit(self, doc):
+        source = self.sourceDocument(doc)
+        source.Plate.Shape = lobedHoleShell(10, turn=45)
+        source.recompute()
+        self.turn = 45
+
+
+class LinkCopyCrossDocLobesTurned45(LobedCopies):
+    """Two links to the pad's body in another document (EXT copies)."""
+
+    def sourceDocument(self, doc):
+        if not hasattr(self, "source"):
+            self.folder = os.path.realpath(tempfile.mkdtemp(prefix="NamingScenario"))
+            self.source = App.newDocument("LobesSource")
+            self.source.saveAs(os.path.join(self.folder, "LobesSource.FCStd"))
+            doc.saveAs(os.path.join(self.folder, doc.Name + ".FCStd"))
+        return self.source
+
+    def copies(self, doc, body):
+        body.Document.save()
+        links = []
+        for k, x in enumerate((0, 100)):
+            link = doc.addObject("App::Link", f"Copy{k}")
+            link.LinkedObject = body
+            link.Placement.Base = V(x, 0, 0)
+            links.append(link)
+        return links
+
+    def cleanup(self):
+        super().cleanup()
+        try:
+            App.closeDocument(self.source.Name)
+        except Exception:
+            pass
+        shutil.rmtree(getattr(self, "folder", ""), ignore_errors=True)
+
+
+class LinkCopyLobesRemovedNeighbourMoved(LobedCopies):
+    """Two links to the pad's body in one document; link 0 leaves the fuse and link 1 moves onto
+    its place (the A3 pre-push review's T2): copy 0's twins are gone, so every point must break,
+    never land on copy 1's twin there (an ordered name's renumbering is within one copy)."""
+
+    AXES = ("M5", "E1", "E4")
+    maker = "Part::Compound"  # a MultiFuse needs two inputs
+    gone = False
+
+    def twin(self, angle):
+        return BROKEN if self.gone else super().twin(angle)
+
+    def copies(self, doc, body):
+        links = []
+        for k, x in enumerate((0, 100)):
+            link = doc.addObject("App::Link", f"Copy{k}")
+            link.LinkedObject = body
+            link.Placement.Base = V(x, 0, 0)
+            links.append(link)
+        return links
+
+    def edit(self, doc):
+        doc.Maker.Links = [doc.Copy1]
+        doc.Copy1.Placement.Base = V(0, 0, 0)
+        self.gone = True
+
+
+class ScaleCopiesLobesTurned45(LobedCopies):
+    """Two Part::Scale copies of the pad's body in one document (`CPY;1` copies)."""
+
+    def copies(self, doc, body):
+        scales = []
+        for k, x in enumerate((0, 100)):
+            scale = doc.addObject("Part::Scale", f"Copy{k}")
+            scale.Base = body
+            scale.Uniform = True
+            scale.UniformScale = 1
+            scale.Placement.Base = V(x, 0, 0)
+            scales.append(scale)
+        return scales
 
 
 # point_copy0 broken, point_copy1 correct

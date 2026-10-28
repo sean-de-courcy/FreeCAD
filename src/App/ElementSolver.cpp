@@ -1611,7 +1611,8 @@ std::string formatOverlap(double value)
 
 bool sameSectionsUpToCounter(
     const std::vector<std::string_view>& sectionsA,
-    const std::vector<std::string_view>& sectionsB
+    const std::vector<std::string_view>& sectionsB,
+    bool copySiblings
 );
 
 /* Copies of one element by two copy makers of one kind (ops#523, decision 157): two copy or
@@ -1650,10 +1651,12 @@ bool isOriginalsCopySection(std::string_view section)
  * instance number of a pattern instance's TRF section: two instances of one pattern are siblings.
  * So are two copies of one element by two copy makers of one kind (copySiblingSections()), and
  * an element and its copy: a name and the same name with one more copy section
- * (isOriginalsCopySection(); ops#523, decision 157).
+ * (isOriginalsCopySection(); ops#523, decision 157). Those two only with \a copySiblings: a
+ * site that refuses a sibling takes them, but one that gathers an element's twins or pieces
+ * doesn't, since another copy's twins are no twins of this one (the A3 pre-push review's T1).
  * A section that doesn't decode must be equal as text.
  */
-bool sameUpToCounter(std::string_view a, std::string_view b)
+bool sameUpToCounter(std::string_view a, std::string_view b, bool copySiblings = true)
 {
     if (a == b) {
         return true;
@@ -1661,7 +1664,10 @@ bool sameUpToCounter(std::string_view a, std::string_view b)
     auto sectionsA = NameAncestry::splitSections(a);
     auto sectionsB = NameAncestry::splitSections(b);
     if (sectionsA.size() == sectionsB.size()) {
-        return sameSectionsUpToCounter(sectionsA, sectionsB);
+        return sameSectionsUpToCounter(sectionsA, sectionsB, copySiblings);
+    }
+    if (!copySiblings) {
+        return false;
     }
     // The original and its copy
     const auto& longer = sectionsA.size() > sectionsB.size() ? sectionsA : sectionsB;
@@ -1675,7 +1681,7 @@ bool sameUpToCounter(std::string_view a, std::string_view b)
         }
         std::vector<std::string_view> without(longer);
         without.erase(without.begin() + static_cast<std::ptrdiff_t>(i));
-        if (sameSectionsUpToCounter(without, shorter)) {
+        if (sameSectionsUpToCounter(without, shorter, copySiblings)) {
             return true;
         }
     }
@@ -1685,7 +1691,8 @@ bool sameUpToCounter(std::string_view a, std::string_view b)
 // sameUpToCounter() of two names' sections, pairwise
 bool sameSectionsUpToCounter(
     const std::vector<std::string_view>& sectionsA,
-    const std::vector<std::string_view>& sectionsB
+    const std::vector<std::string_view>& sectionsB,
+    bool copySiblings
 )
 {
     if (sectionsA.empty() || sectionsA.size() != sectionsB.size()) {
@@ -1710,7 +1717,7 @@ bool sameSectionsUpToCounter(
         bool instanceSections
             = x.opCode == patternInstanceOpCode && y.opCode == patternInstanceOpCode;
         // So are its copies by two copy makers of one kind, whatever their tags (ops#523)
-        bool copySections = copySiblingSections(x, y);
+        bool copySections = copySiblings && copySiblingSections(x, y);
         if (!opCodesAgree || x.referenceIDs != y.referenceIDs
             || (x.iterationTag != y.iterationTag && !copySections)
             || (x.index != y.index && !instanceSections && !copySections)
@@ -1720,12 +1727,12 @@ bool sameSectionsUpToCounter(
             return false;
         }
         for (std::size_t j = 0; j < x.linkedNames.size(); ++j) {
-            if (!sameUpToCounter(x.linkedNames[j], y.linkedNames[j])) {
+            if (!sameUpToCounter(x.linkedNames[j], y.linkedNames[j], copySiblings)) {
                 return false;
             }
         }
         for (std::size_t j = 0; j < x.connectedElements.size(); ++j) {
-            if (!sameUpToCounter(x.connectedElements[j], y.connectedElements[j])) {
+            if (!sameUpToCounter(x.connectedElements[j], y.connectedElements[j], copySiblings)) {
                 return false;
             }
         }
@@ -1735,11 +1742,12 @@ bool sameSectionsUpToCounter(
 
 /* True if \a name is \a oldName up to the duplicate counter (sameUpToCounter()), and not
  * \a oldName itself: a pattern instance's copy of the old element, or another element the
- * element map told apart only by the counter.
+ * element map told apart only by the counter. With \a copySiblings, also another copy of it or
+ * its original (ops#523): for the sites that refuse a sibling, not those that gather twins.
  */
-bool isCounterSibling(std::string_view name, std::string_view oldName)
+bool isCounterSibling(std::string_view name, std::string_view oldName, bool copySiblings = true)
 {
-    return name != oldName && sameUpToCounter(name, oldName);
+    return name != oldName && sameUpToCounter(name, oldName, copySiblings);
 }
 
 // Part's mapper flag of a far cap told apart from its twins only by its place among them
@@ -2682,9 +2690,9 @@ bool isMarkedPieceName(std::string_view name)
     return isMarkedPiece(name);
 }
 
-bool isCounterSiblingName(std::string_view name, std::string_view other)
+bool isCounterSiblingName(std::string_view name, std::string_view other, bool copySiblings)
 {
-    return isCounterSibling(name, other);
+    return isCounterSibling(name, other, copySiblings);
 }
 
 bool mayBeAtPlace(
@@ -2931,7 +2939,8 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                     const auto& names = element.names;
                     if (static_cast<int>(k) == hitPosition
                         || std::none_of(names.begin(), names.end(), [&](const auto& name) {
-                               return isCounterSibling(name, hitName);
+                               // the hit's own twins: no other copy's (ops#523)
+                               return isCounterSibling(name, hitName, false);
                            })) {
                         continue;
                     }
@@ -4553,7 +4562,7 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 for (std::size_t k = 0; k < pool.elements.size(); ++k) {
                     const auto& names = pool.elements[k].names;
                     if (std::any_of(names.begin(), names.end(), [&](const auto& n) {
-                            return isCounterSibling(n, oldName);
+                            return isCounterSibling(n, oldName, false);  // no other copy's
                         })) {
                         ++marked;
                         if (allowed[k] && std::any_of(names.begin(), names.end(), [&](const auto& n) {
@@ -4959,7 +4968,17 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 if (position == state.fewerPieces) {
                     return true;
                 }
-                return state.saved && isOrdered(state.oldName)
+                // Another copy's piece at the old place is no renumbering of this one: copy 0
+                // gone and copy 1 moved onto its place (ops#523, the A3 pre-push review's T2)
+                const auto& names = state.pool->elements[position].names;
+                const bool otherCopy
+                    = std::any_of(names.begin(), names.end(), [&](const auto& n) {
+                          return isCounterSibling(n, state.oldName);
+                      })
+                    && std::none_of(names.begin(), names.end(), [&](const auto& n) {
+                           return isCounterSibling(n, state.oldName, false);
+                       });
+                return !otherCopy && state.saved && isOrdered(state.oldName)
                     && atSamePlace(
                            *state.saved,
                            fingerprintOf(state.pool->elements[position]),
