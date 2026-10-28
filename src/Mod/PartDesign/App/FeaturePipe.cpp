@@ -4378,28 +4378,36 @@ bool closedInPlace(
     return false;
 }
 
-/// The frame of \a profile's geometry, from its local coordinates into those it lies in: at its
-/// first wire's first point (pointsAlong), the normal of its plane, its x axis towards the next
-/// point off that one; its shape's placement where it has no plane. It turns with the profile
-/// however the profile is placed: a face of a feature keeps the feature's placement while the
-/// feature's sketch turns through its offset (the pre-push review of round 5, T1)
-gp_Trsf profileFrameOf(const TopoDS_Shape& profile)
+/// The frames of \a profile, each from its local coordinates into those it lies in:
+/// - its shape's placement (a sketch's Placement, with its support and its offset), exact and
+///   whatever its lines are: a sketch resized or redrawn as it turns;
+/// - its geometry's: at the middle of its first wire's points (pointsAlong), the normal of their
+///   plane, its x axis towards the first of them; the placement where they have no plane. A face
+///   of a feature has the feature's placement, which doesn't turn when the feature's sketch turns
+///   through its offset (the pre-push review of round 5, T1), nor does its plane's position. From
+///   the middle, the frame stays as the profile grows about it, and its axis is as long as the
+///   profile is wide: towards the next point, it moved with a line resized, and a short first
+///   line rounded it out of place (the second pre-push review of round 5, F1, F3)
+std::array<gp_Trsf, 2> profileFramesOf(const TopoDS_Shape& profile)
 {
+    const gp_Trsf placement = profile.Location().Transformation();
     const TopoDS_Wire wire = firstWire(profile);
     const std::vector<gp_Pnt> points = wire.IsNull() ? std::vector<gp_Pnt>() : pointsAlong(wire);
     if (const std::optional<gp_Dir> normal = planeNormal(points)) {
-        const gp_Vec up(normal->XYZ());
+        gp_XYZ middle(0, 0, 0);
         for (const gp_Pnt& point : points) {
-            gp_Vec along(points.front(), point);
-            along -= up * along.Dot(up);
-            if (along.Magnitude() > Precision::Confusion()) {
-                gp_Trsf frame;
-                frame.SetTransformation(gp_Ax3(points.front(), *normal, gp_Dir(along)));
-                return frame.Inverted();
-            }
+            middle += point.XYZ();
+        }
+        middle /= static_cast<double>(points.size());
+        gp_Vec along(gp_Pnt(middle), points.front());
+        along -= gp_Vec(normal->XYZ()) * along.Dot(gp_Vec(normal->XYZ()));
+        if (along.Magnitude() > Precision::Confusion()) {
+            gp_Trsf frame;
+            frame.SetTransformation(gp_Ax3(gp_Pnt(middle), *normal, gp_Dir(along)));
+            return {placement, frame.Inverted()};
         }
     }
-    return profile.Location().Transformation();
+    return {placement, placement};
 }
 }  // namespace
 
@@ -4692,14 +4700,14 @@ App::DocumentObjectExecReturn* Pipe::execute()
             EarlierSpineStartsOf,
             EarlierSpineStartNames
         );
-        // The profile's frame, in the body (profileFrameOf: its geometry's)
-        const gp_Trsf profileFrame = profileFrameOf(profileShape.getShape());
+        // The profile's frames, in the body (profileFramesOf)
+        const std::array<gp_Trsf, 2> frames = profileFramesOf(profileShape.getShape());
         if (startStored) {
             const gp_Trsf inPipe = invObjLoc.Transformation();
             // The stored points of \a record, in the pipe's frame; false for a malformed one. The
-            // record ends with the profile's frame at its recompute (its origin and the ends of its
-            // x and y axes, in the body): a loop not at its stored place in the body but at it in
-            // that frame, turned or moved with the profile (the whole model turned, K4b's
+            // record ends with the profile's frames at its recompute (each its origin and the ends
+            // of its x and y axes, in the body): a loop not at its stored place in the body but at
+            // it in one of them, turned or moved with the profile (the whole model turned, K4b's
             // `RingTurned`), is read in that frame for its own input. Read in the body, the turned
             // ring's start went to the vertex a translation fit least badly, and the start's key
             // and the legs' names with it (a rectangle turns onto itself four ways, so no fit
@@ -4736,29 +4744,36 @@ App::DocumentObjectExecReturn* Pipe::execute()
                 storedWay.reset();
                 storedAtEnd.reset();
                 storedNames.clear();
-                // 2n + 1 points and the frame's 3
-                if (stored.size() < 8 || stored.size() % 2 == 1) {
+                // 2n + 1 points and each frame's 3
+                const size_t framed = 3 * frames.size();
+                if (stored.size() < 5 + framed || stored.size() % 2 == 0) {
                     return false;
                 }
-                const size_t f = stored.size() - 3;
-                const gp_Vec x(point(f), point(f + 1));
-                const gp_Vec y(point(f), point(f + 2));
-                if (x.Crossed(y).Magnitude() <= Precision::Confusion()) {
-                    return false;
+                // From the body into each stored frame
+                std::vector<gp_Trsf> into;
+                for (size_t f = stored.size() - framed; f < stored.size(); f += 3) {
+                    const gp_Vec x(point(f), point(f + 1));
+                    const gp_Vec y(point(f), point(f + 2));
+                    if (x.Crossed(y).Magnitude() <= Precision::Confusion()) {
+                        return false;
+                    }
+                    into.emplace_back();
+                    into.back().SetTransformation(gp_Ax3(point(f), gp_Dir(x.Crossed(y)), gp_Dir(x)));
                 }
-                // From the body into the stored frame
-                gp_Trsf intoFrame;
-                intoFrame.SetTransformation(gp_Ax3(point(f), gp_Dir(x.Crossed(y)), gp_Dir(x)));
-                stored.resize(f);
+                stored.resize(stored.size() - framed);
                 fill(inPipe);
-                // In the frame only for its own input: another spine elsewhere, the profile moved
+                // In a frame only for its own input: another spine elsewhere, the profile moved
                 // onto it, still decides as a new pipe (CC2)
-                // anchor: rung 4 (the stored places), in the body, or exactly in place in the
-                // profile's stored frame
+                // anchor: rung 4 (the stored places), in the body, or exactly in place in one of
+                // the profile's stored frames
                 if (sameInput(record.of, spineInput)
                     && !closedInPlace(storedVertices, storedMiddles, spineInOrder)) {
-                    fill(inPipe * profileFrame * intoFrame);
-                    if (!closedInPlace(storedVertices, storedMiddles, spineInOrder)) {
+                    bool inFrame = false;
+                    for (size_t i = 0; i < frames.size() && !inFrame; ++i) {
+                        fill(inPipe * frames[i] * into[i]);
+                        inFrame = closedInPlace(storedVertices, storedMiddles, spineInOrder);
+                    }
+                    if (!inFrame) {
                         fill(inPipe);
                     }
                 }
@@ -5182,9 +5197,12 @@ App::DocumentObjectExecReturn* Pipe::execute()
             for (size_t k = 1; k < pathEdges.size(); ++k) {
                 points.push_back(middleOf(pathEdges[k]).Transformed(inBody));
             }
-            // and the profile's frame, its origin and the ends of its x and y axes, in the body
-            for (const gp_Pnt& axis : {gp_Pnt(0, 0, 0), gp_Pnt(1, 0, 0), gp_Pnt(0, 1, 0)}) {
-                points.push_back(axis.Transformed(profileFrame));
+            // and the profile's frames, each its origin and the ends of its x and y axes, in the
+            // body
+            for (const gp_Trsf& frame : frames) {
+                for (const gp_Pnt& axis : {gp_Pnt(0, 0, 0), gp_Pnt(1, 0, 0), gp_Pnt(0, 1, 0)}) {
+                    points.push_back(axis.Transformed(frame));
+                }
             }
             // The other inputs' records stay, the latest first, at most 3 (F1)
             std::vector<Base::Vector3d> earlier;

@@ -4203,9 +4203,9 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
                 self.doc.recompute()
                 self.assertEqual(self.profileNamed(pipe, profile), named)
                 self.assertNoneMovedSilently(pipe, volume, points, lambda place: True)
-                # The stored start, way, end, the other vertex and middle, and the profile's frame
-                # stay as they were
-                self.assertEqual(len(pipe.SpineStart), 8)
+                # The stored start, way, end, the other vertex and middle, and the profile's two
+                # frames stay as they were
+                self.assertEqual(len(pipe.SpineStart), 11)
                 for before, after in zip(stored, pipe.SpineStart):
                     self.assertLess((V(after) - before).Length, 1e-6, (stored, pipe.SpineStart))
 
@@ -4224,7 +4224,7 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
                 named = self.profileNamed(pipe, profile)
                 volume = pipe.Shape.Volume
                 stored = [V(v) for v in pipe.SpineStart]
-                self.assertEqual(len(stored), 8)
+                self.assertEqual(len(stored), 11)
                 self.assertGreater((stored[1] - stored[0]).Length, 1, stored)
                 points = self.attach(pipe)
                 for _ in range(2):
@@ -4823,6 +4823,53 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
                     self.assertLess(
                         (now - rotation.multVec(before)).Length, 1e-6, (point.Name, before, now)
                     )
+
+    def testClosedRingTurnedWithItsProfileResizedKeepsStart(self):
+        """The ring and its profile turned 120 degrees about Z while the profile's square grows
+        about its centre (2 x 2 to 3 x 3, its lines' IDs kept): the profile a sketch, or a face of
+        a Pad of the sketch (its offset turned). The stored start turns with the ring. A frame at
+        the profile's first point and towards its next one moved with the resize, the ring was
+        read in the body, and the start went to the bottom right corner silently (the second
+        pre-push review of fork PR 383 round 5, F1)."""
+        for kind in ("sketch", "face"):
+            self.tearDown()
+            self.setUp()
+            with self.subTest(kind=kind):
+                if kind == "face":
+                    xy = [
+                        f
+                        for f in self.body.Origin.OriginFeatures
+                        if "XY_Plane" in (getattr(f, "Role", ""), f.Name)
+                    ][0]
+                    profile = self.square()
+                    profile.AttachmentSupport = [(xy, "")]
+                    profile.MapMode = "FlatFace"
+                    pad = models.pad(self.body, profile, 0.5)
+                    pad.Reversed = True
+                    self.doc.recompute()
+                    top = [
+                        f"Face{i}"
+                        for i, f in enumerate(pad.Shape.Faces, 1)
+                        if abs(f.CenterOfMass.z) < 1e-9 and abs(f.normalAt(0, 0).z) > 0.99
+                    ]
+                    _, pipe = self.ring(0, 0, (pad, top))
+                else:
+                    profile, pipe = self.ring(0, 0)
+                start = V(pipe.SpineStart[0])
+                rotation = App.Rotation(V(0, 0, 1), 120)
+                geometry = profile.Geometry
+                for line in geometry:
+                    line.StartPoint, line.EndPoint = line.StartPoint * 1.5, line.EndPoint * 1.5
+                profile.Geometry = geometry
+                pipe.Spine[0].Placement = App.Placement(V(), rotation.multiply(XZ.Rotation))
+                turned = App.Placement(V(), rotation)
+                if kind == "face":
+                    profile.AttachmentOffset = turned
+                else:
+                    profile.Placement = turned
+                self.doc.recompute()
+                self.assertTrue(pipe.isValid(), pipe.getStatusString())
+                self.assertLess((V(pipe.SpineStart[0]) - rotation.multVec(start)).Length, 1e-6)
 
     def testClosedRingReorderedAndReversedRenamesNothing(self):
         """The profile slid along its leg (4 to 16), then the lines listed from the top right

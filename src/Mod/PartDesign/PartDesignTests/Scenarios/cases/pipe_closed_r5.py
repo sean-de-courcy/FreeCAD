@@ -477,3 +477,81 @@ class RingTurnedInPlaneProfileOnRing(Ring):
     def edit(self, doc):
         self.spun = self.TURN
         self.spine.Placement = self.spinePlacement()
+
+
+# The profile edited in the recompute that turns the model: the frame of the profile's geometry
+# (its first point and the chord to the next) changed with the edit, so the turned ring was read in
+# the body (the second pre-push review of round 5, F1, F2). Integration starts at the drawn first
+# line. The frame is the profile's placement for a sketch: drawn and sized as it may be.
+class RingTurnedProfileResized(Ring):
+    """The whole model turns 120 degrees about Z, and the profile's square grows from 4 x 4 to
+    5 x 5 about its centre (its lines' IDs kept), in one recompute. Every reference follows the
+    turn, on the bigger tube."""
+
+    AXES = ("M3", "E7", "E1")
+    half = 2
+
+    @property
+    def A(self):
+        return self.s(self.half)
+
+    def resize(self, factor):
+        g = self.profile.Geometry
+        for line in g:
+            line.StartPoint, line.EndPoint = line.StartPoint * factor, line.EndPoint * factor
+        self.profile.Geometry = g
+        self.half *= factor
+
+    def edit(self, doc):
+        self.resize(1.25)
+        self.turn = 120
+        self.spine.Placement = self.spinePlacement()
+        self.profile.Placement = self.profilePlacement()
+
+
+class RingTurnedOnAnLCSProfileResized(RingTurnedProfileResized):
+    """As RingTurnedOnAnLCS (both sketches on one LCS, which turns 120 degrees), and the profile's
+    square grows from 4 x 4 to 5 x 5 in the same recompute."""
+
+    def build(self, doc):
+        RingTurnedOnAnLCS.build(self, doc)
+
+    def edit(self, doc):
+        self.resize(1.25)
+        self.turn = 120
+        self.lcs.Placement = App.Placement(V(), App.Rotation(Z, 120))
+
+
+class RingTurnedProfileLineReversed(Ring):
+    """The whole model turns 120 degrees about Z, and the profile's first line is drawn the other
+    way (its ID kept), in one recompute. The solid turns; every reference follows the turn."""
+
+    AXES = ("M3", "E7", "E3")
+
+    def edit(self, doc):
+        g = self.profile.Geometry
+        start, end = V(g[0].StartPoint), V(g[0].EndPoint)
+        g[0].StartPoint = V(1e3, 0, 0)  # out of the way: the two ends can't meet
+        g[0].EndPoint = start
+        g[0].StartPoint = end
+        self.profile.Geometry = g
+        self.turn = 120
+        self.spine.Placement = self.spinePlacement()
+        self.profile.Placement = self.profilePlacement()
+
+
+class RingTurnedFaceProfileResized(RingTurnedFaceProfile):
+    """As RingTurnedFaceProfile (the profile a Pad's top face), and the Pad's square grows from
+    4 x 4 to 5 x 5 about its centre (its lines' IDs kept) in the recompute that turns the model:
+    the frame is the face's plane, not its drawing."""
+
+    AXES = ("M3", "E7", "E1")
+    half = 2
+
+    @property
+    def A(self):
+        return self.s(self.half)
+
+    def edit(self, doc):
+        RingTurnedProfileResized.resize(self, 1.25)
+        RingTurnedFaceProfile.edit(self, doc)

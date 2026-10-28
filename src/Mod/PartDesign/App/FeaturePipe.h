@@ -61,10 +61,10 @@ public:
     /// A closed spine of one profile (not Auxiliary) at the last successful recompute of it, in
     /// the body, 2n + 1 points for n edges: its start, its first edge's middle, whether its end
     /// carried the profile's names (1 or 0 in x), its other vertices in the sweep's order and
-    /// their edges' middles (ops#469); then the frame of the profile's geometry, its origin and
-    /// the ends of its x and y axes. Kept while the spine is open or in another mode; read for the
-    /// input it was stored for, or where its points still lie on the spine, in the body or in that
-    /// frame
+    /// their edges' middles (ops#469); then the profile's frames (its placement, its geometry's),
+    /// each its origin and the ends of its x and y axes. Kept while the spine is open or in another
+    /// mode; read for the input it was stored for, or where its points still lie on the spine, in
+    /// the body or in one of those frames
     App::PropertyVectorList SpineStart;
     /// The input SpineStart was stored for, as SpineEndsOf
     App::PropertyStringList SpineStartOf;
