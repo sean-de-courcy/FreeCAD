@@ -69,6 +69,32 @@ class TopoShapeAssertions:
                 msg = f"Elements without a mapped name: {unmapped}"
             raise AssertionError(msg)
 
+    def assertMatchNamed(self, shape, tag, msg=None):
+        """Every face, edge and vertex of the shape has one name: one MLN section with the
+        producer's tag, the element's type and an id no other element has. A result without
+        history (a primitive's, a script's) is named so, by a verified match against the result
+        it replaces (ops#502), where it had index names before."""
+        reverse_map = shape.ElementReverseMap
+        ids = set()
+        for kind, elements in (
+            ("Face", shape.Faces),
+            ("Edge", shape.Edges),
+            ("Vertex", shape.Vertexes),
+        ):
+            for index in range(1, len(elements) + 1):
+                name = reverse_map.get(f"{kind}{index}")
+                self.assertIsInstance(name, str, msg or f"{kind}{index}: {name}")
+                sections = App.getDecodedMappedName(App.expandMappedName(name))
+                self.assertEqual(len(sections), 1, msg or name)
+                section = sections[0]
+                self.assertEqual(
+                    (section["opCode"], section["iterationTag"], section["elementType"]),
+                    ("MLN", str(tag), kind[0]),
+                    msg or name,
+                )
+                ids.add(section["index"])
+        self.assertEqual(len(ids), len(shape.Faces) + len(shape.Edges) + len(shape.Vertexes), msg)
+
     def assertBounds(self, shape, bounds, msg=None, precision=App.Base.Precision.confusion() * 100):
         shape_bounds = shape.BoundBox
         shape_bounds_max = App.BoundBox(shape_bounds)
@@ -291,12 +317,7 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
             ["CenterOfMass", App.Vector(1, 0.5, 1)],
             ["CompSolids", []],
             ["Compounds", []],
-            [
-                "Content",
-                "<ElementMap/>\n",
-            ],  # Our element map is empty, or there would be more here.
-            ["ElementMap", {}],
-            ["ElementReverseMap", {}],
+            # the element map: assertMatchNamed below
             ["Hasher", None],
             [
                 "MatrixOfInertia",
@@ -340,7 +361,7 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
         # Arrange list of attributes and values to match within 5 decimal places
         attr_value_list = [
             ["Area", 16.0],
-            ["ElementMapSize", 0],
+            ["ElementMapSize", 26],
             ["Length", 40.0],  # Sum of all edges of each face, so some redundancy.
             ["Mass", 4.0],
             # ['MemSize', 13824],  # Platform variations in this size.
@@ -361,6 +382,8 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
         ]
         # Assert all the expected values match
         self.assertAttrCount(box2_toposhape, attr_value_list)
+        # a primitive's elements are named by a verified match, not by their indexes (ops#502)
+        self.assertMatchNamed(box2_toposhape, self.doc.Box2.ID)
 
     def testTopoShapeElementMap(self):
         """Tests TopoShape elementMap"""
@@ -384,9 +407,11 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
         self.assertBounds(compound2, App.BoundBox(0, 0, 0, 2, 2, 2))
 
     def testPartCompoundOfUnmappedShapesNames(self):
-        """In V2, each element of a Part::Compound of two boxes (no element maps) is named as
-        an unmapped element of its box: '<box element>;_;<box ID>;MKR;0;<type>;0;IDX,SRC;_'.
-        The second box's elements follow the first box's (ops#24)."""
+        """In V2, each element of a Part::Compound of two boxes has its box's name for it, and
+        the second box's elements follow the first box's (ops#24). The boxes had no element maps,
+        so the names were '<box element>;_;<box ID>;MKR;0;<type>;0;IDX,SRC;_'; a primitive's
+        elements are now named by a verified match, '_;_;<box ID>;MLN;<id>;<type>;0;_;_'
+        (ops#502), and the compound passes those on."""
         doc = App.newDocument("CompoundOfBoxes")
         try:
             doc.HistoryAlgorithm = "V2"
@@ -398,26 +423,26 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
             doc.recompute()
             shape = compound.Shape
             reverse_map = shape.ElementReverseMap
+            for box in (box1, box2):
+                self.assertMatchNamed(box.Shape, box.ID)
             for kind, count in (("Face", 6), ("Edge", 12), ("Vertex", 8)):
                 for offset, box in ((0, box1), (count, box2)):
                     for index in range(1, count + 1):
                         with self.subTest(element=f"{kind}{offset + index}"):
-                            expected = App.makeEncodedSection(
-                                referenceIDs=[f"{kind}{index}"],
-                                iterationTag=str(box.ID),
-                                opCode="MKR",
-                                elementType=kind[0],
-                                mapperFlags=["IDX", "SRC"],
-                            )
+                            expected = box.Shape.ElementReverseMap[f"{kind}{index}"]
                             self.assertEqual(reverse_map.get(f"{kind}{offset + index}"), expected)
         finally:
             App.closeDocument(doc.Name)
 
     @staticmethod
     def _nameSource(name, algorithm):
-        """The element and object ID a name starts from: its first section's reference and tag."""
+        """The element and object ID a name starts from: its first section's reference and tag.
+        A first section without a reference is the source's own name for the element (an MLN
+        id, ops#502), which the source's map turns into the element."""
         if algorithm == "V2":
             section = App.getDecodedMappedName(name)[0]
+            if not section["referenceIDs"]:
+                return App.makeEncodedSection(**section), int(section["iterationTag"])
             return section["referenceIDs"][0], int(section["iterationTag"])
         element = re.match(r"(Face|Edge|Vertex)\d+", name)
         tag = re.search(r";:H(-?[0-9a-f]+)", name)
@@ -464,7 +489,9 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
                                 with self.subTest(algorithm=algorithm, shape=label, name=name):
                                     reference, tag = self._nameSource(name, algorithm)
                                     source = Part.getShape(objects[tag])
-                                    named = source.getElement(reference)
+                                    named = source.getElement(
+                                        source.ElementMap.get(reference, reference)
+                                    )
                                     self.assertEqual(key(named), key(element))
             finally:
                 App.closeDocument(doc.Name)
@@ -655,7 +682,8 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
         """A Part Sweep along a line between a square and a point (a Part::Vertex), either order,
         Solid off and on: the apex vertex is named after the point, with the point's own name
         when it is the first section and its projection (PRJ) when it is the last (fork PR 352
-        round 1; with Solid on, the sweep crashed)."""
+        round 1; with Solid on, the sweep crashed). The point's name for its vertex is an MLN id
+        (ops#502), where it was its index."""
         spine = self.doc.addObject("Part::Line", "SweepSpine")
         spine.X2, spine.Y2, spine.Z2 = 0, 0, 30
         point = self.doc.addObject("Part::Vertex", "SweepPoint")
@@ -683,14 +711,15 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
                     self.assertEqual(len(apex), 1)
                     name = shape.ElementReverseMap[apex[0]]
                     sections = App.getDecodedMappedName(name)
+                    pointName = point.Shape.ElementReverseMap["Vertex1"]
                     if pointFirst:
-                        self.assertEqual(sections[0]["referenceIDs"], ["Vertex1"])
+                        self.assertEqual(App.makeEncodedSection(**sections[0]), pointName)
                         self.assertEqual(int(sections[0]["iterationTag"]), point.ID)
                     else:
                         self.assertEqual(sections[-1]["opCode"], "SWP")
                         self.assertIn("PRJ", sections[-1]["mapperFlags"])
                         source = App.getDecodedMappedName(sections[-1]["linkedNames"][0])[0]
-                        self.assertEqual(source["referenceIDs"], ["Vertex1"])
+                        self.assertEqual(App.makeEncodedSection(**source), pointName)
                         self.assertEqual(int(source["iterationTag"]), point.ID)
                     self.doc.removeObject(sweep.Name)
 
@@ -860,15 +889,11 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
                         and abs(face.CenterOfMass.z - 10) < 1e-7
                     ]
                     self.assertEqual(len(top), 1)
-                    # The plane's face has no name of its own, so the linked name is the
-                    # unmapped name of the extrusion's input face.
-                    base = App.makeEncodedSection(
-                        referenceIDs=["Face1"],
-                        iterationTag=str(extrusion.ID),
-                        opCode="XTR",
-                        elementType="F",
-                        mapperFlags=["IDX", "SRC"],
-                    )
+                    # The linked name is the plane's name for its face, an MLN id (ops#502).
+                    # Before, the plane named nothing, and it was the unmapped name of the
+                    # extrusion's input face.
+                    self.assertMatchNamed(plane.Shape, plane.ID)
+                    base = plane.Shape.ElementReverseMap["Face1"]
                     expected = App.makeEncodedSection(
                         linkedNames=[base],
                         iterationTag=str(extrusion.ID),
@@ -910,9 +935,9 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
             self.assertEqual(len(boxTop), 1)
             names = [cut.Shape.ElementReverseMap[name] for name in facesAt(cut.Shape, 10)]
             self.assertEqual(len(names), 2)
-            # the box has no element map: the incoming name is its top face's unmapped name
+            # the incoming name is the box's name for its top face (an MLN id, ops#502)
             prefix = names[0].split("|")[0]
-            self.assertTrue(prefix.startswith(boxTop[0] + ";"), prefix)
+            self.assertEqual(prefix, box.Shape.ElementReverseMap[boxTop[0]])
             for name in names:
                 self.assertTrue(App.isPieceOf(name, prefix), name)
                 self.assertIn(prefix, App.getNameAncestors(name))
@@ -1206,8 +1231,12 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
         compSolid = Part.CompSolid([self.doc.Box1.Shape, self.doc.Box2.Shape])  # list of subobjects
         box1ts = self.doc.Box1.Shape
         compSolid.add(box1ts.Solids[0])
-        # Assert elementMap
-        self.assertEqual(compSolid.ElementMapSize, 78)
+        # Assert elementMap: 2 solids of 26 elements each, as the solid added again adds none.
+        # Its names are Box1's own (MLN ids, ops#502), so they count once; map-less boxes gave
+        # each copy of an element a name of its own (78)
+        self.assertEqual(len(compSolid.Solids), 2)
+        self.assertAllElementsMapped(compSolid)
+        self.assertEqual(compSolid.ElementMapSize, 52)
 
     def testTopoShapeFaceOffset(self):
         # Arrange
