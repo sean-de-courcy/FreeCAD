@@ -60,11 +60,13 @@
 #include <BRep_Tool.hxx>
 #include <ElCLib.hxx>
 #include <Geom2d_Curve.hxx>
+#include <Geom_BezierCurve.hxx>
 #include <Geom_BSplineCurve.hxx>
 #include <Geom_Curve.hxx>
 #include <Geom_Surface.hxx>
 #include <Geom_TrimmedCurve.hxx>
 #include <GeomAdaptor_Curve.hxx>
+#include <GeomConvert_BSplineCurveToBezierCurve.hxx>
 #include <GeomFill_Frenet.hxx>
 #include <GeomAPI_ProjectPointOnCurve.hxx>
 #include <GeomAPI_ProjectPointOnSurf.hxx>
@@ -72,6 +74,10 @@
 #include <GProp_GProps.hxx>
 #include <gp_Ax2.hxx>
 #include <gp_Ax3.hxx>
+#include <gp_Circ.hxx>
+#include <gp_Elips.hxx>
+#include <gp_Hypr.hxx>
+#include <gp_Parab.hxx>
 #include <gp_Quaternion.hxx>
 #include <gp_Trsf.hxx>
 #include <Law_Function.hxx>
@@ -2752,7 +2758,10 @@ struct BinormalFold
         fold,
         /// Nothing found, but stretches where e turns more than the places resolve were left as
         /// sampled: the budget of halvings ran out first
-        unchecked
+        unchecked,
+        /// An edge of a kind of curve whose turn of e the check can't bound (TurnBound), such as
+        /// an offset curve: nothing else is looked for
+        unbounded
     };
     Kind kind;
     /// Where on the spine: the first such place, or the largest fold's
@@ -2791,6 +2800,379 @@ double cornerTwist(
     return carried.Angle(b.Crossed(next));
 }
 
+/// \a n choose \a k, as a double (the degrees here stay under 100)
+double binomial(int n, int k)
+{
+    double value = 1;
+    for (int i = 1; i <= k; ++i) {
+        value = value * (n - k + i) / i;
+    }
+    return value;
+}
+
+/// A bound on how far e, the spine's tangent made square to the binormal B, turns along a stretch
+/// of an edge (radians). With q any vector along the tangent made square to B, e turns by the
+/// integral of |q x q'| / |q|^2, at most sup |q x q'| / inf |q|^2 and sup |q'| / inf |q| over the
+/// stretch, for the stretch's own parameter from 0 to 1 (decision 162; ops#406 cloud review of
+/// 828d0d5f28, S1': a turn estimated at a stretch's three places missed two near-touches placed
+/// symmetrically about its middle).
+/// - Bezier and B-spline edges, cut into Bezier pieces: q comes from the hodograph (for a rational
+///   piece, N'w - Nw', N the weighted poles' polynomial and w the weights'), cut to the stretch.
+///   The convex hull of a polynomial's control points holds it: sup |q'| and sup |q x q'| are at
+///   most their largest control point, and inf |q| at least the least extent of q's control
+///   points along their sum. Where that reaches the origin there's no bound.
+/// - Circles, ellipses, hyperbolas and parabolas: q x q' is constant along them, sup |q'| has a
+///   closed form, and inf |q| is at least |q| at the middle less half the stretch times sup |q'|.
+/// - Lines: e doesn't turn.
+/// - Other curves (an offset curve, say): no bound (bounded() is false).
+class TurnBound
+{
+public:
+    TurnBound(const BRepAdaptor_Curve& curve, const gp_Vec& binormal)
+        : b(binormal.XYZ())
+    {
+        try {
+            setUp(curve);
+        }
+        catch (const Standard_Failure&) {
+            kind = Kind::none;
+        }
+    }
+
+    bool bounded() const
+    {
+        return kind != Kind::none;
+    }
+
+    /// The bound between the curve's parameters \a u0 and \a u1, infinite where there's none, and
+    /// zero where the tangent runs along B throughout (e is undefined there, as in squareAxis)
+    double operator()(double u0, double u1) const
+    {
+        const double low = std::min(u0, u1);
+        const double high = std::max(u0, u1);
+        switch (kind) {
+            case Kind::line:
+                return 0;
+            case Kind::pieces:
+                return acrossPieces(low, high);
+            case Kind::ellipse:
+            case Kind::hyperbola:
+            case Kind::parabola:
+                return acrossConic(low, high);
+            case Kind::none:
+                break;
+        }
+        return std::numeric_limits<double>::infinity();
+    }
+
+private:
+    enum class Kind
+    {
+        none,
+        line,
+        pieces,
+        ellipse,
+        hyperbola,
+        parabola
+    };
+
+    gp_XYZ square(const gp_XYZ& v) const
+    {
+        return v - b * v.Dot(b);
+    }
+
+    void setUp(const BRepAdaptor_Curve& curve)
+    {
+        switch (curve.GetType()) {
+            case GeomAbs_Line:
+                kind = Kind::line;
+                return;
+            case GeomAbs_BezierCurve:
+                breaks = {0, 1};
+                pieces.push_back(hodograph(*curve.Bezier()));
+                kind = Kind::pieces;
+                break;
+            case GeomAbs_BSplineCurve: {
+                GeomConvert_BSplineCurveToBezierCurve split(
+                    curve.BSpline(),
+                    curve.FirstParameter(),
+                    curve.LastParameter(),
+                    Precision::PConfusion()
+                );
+                NCollection_Array1<double> knots(1, split.NbArcs() + 1);
+                split.Knots(knots);
+                for (int i = 1; i <= split.NbArcs(); ++i) {
+                    pieces.push_back(hodograph(*split.Arc(i)));
+                }
+                for (int i = knots.Lower(); i <= knots.Upper(); ++i) {
+                    breaks.push_back(knots(i));
+                }
+                kind = Kind::pieces;
+                break;
+            }
+            // q = x f(u) + y g(u), x and y the conic's axes, scaled, made square to B
+            case GeomAbs_Circle: {
+                const gp_Circ circle = curve.Circle();
+                setConic(Kind::ellipse, circle.Position(), circle.Radius(), circle.Radius());
+                return;
+            }
+            case GeomAbs_Ellipse: {
+                const gp_Elips ellipse = curve.Ellipse();
+                setConic(
+                    Kind::ellipse,
+                    ellipse.Position(),
+                    ellipse.MajorRadius(),
+                    ellipse.MinorRadius()
+                );
+                return;
+            }
+            case GeomAbs_Hyperbola: {
+                const gp_Hypr hyperbola = curve.Hyperbola();
+                setConic(
+                    Kind::hyperbola,
+                    hyperbola.Position(),
+                    hyperbola.MajorRadius(),
+                    hyperbola.MinorRadius()
+                );
+                return;
+            }
+            case GeomAbs_Parabola: {
+                const gp_Parab parabola = curve.Parabola();
+                setConic(Kind::parabola, parabola.Position(), 1 / (2 * parabola.Focal()), 1);
+                return;
+            }
+            default:
+                return;
+        }
+        // The pieces must give the edge's own tangent, in its own place and parameters: where
+        // they don't (a curve OCCT hands over transformed or cut differently), no bound. Inside
+        // the pieces, away from knots, where a C0 curve's tangent depends on the side.
+        const size_t middle = pieces.size() / 2;
+        for (const double u : {curve.FirstParameter(),
+                               (breaks[middle] + breaks[middle + 1]) / 2,
+                               curve.LastParameter()}) {
+            gp_Pnt point;
+            gp_Vec tangent;
+            curve.D1(u, point, tangent);
+            const gp_XYZ along = tangentAt(u);
+            if (tangent.Magnitude() > gp::Resolution() && along.Modulus() > gp::Resolution()
+                && tangent.Angle(gp_Vec(along)) > 1e-6) {
+                kind = Kind::none;
+                return;
+            }
+        }
+    }
+
+    void setConic(Kind conic, const gp_Ax2& axes, double alongX, double alongY)
+    {
+        kind = conic;
+        x = square(axes.XDirection().XYZ() * alongX);
+        y = square(axes.YDirection().XYZ() * alongY);
+        cross = std::abs(x.Crossed(y).Dot(b));
+    }
+
+    /// A Bezier curve's hodograph, or for a rational one N'w - Nw', along its tangent
+    static std::vector<gp_XYZ> hodograph(const Geom_BezierCurve& bezier)
+    {
+        const int n = bezier.Degree();
+        std::vector<gp_XYZ> along;
+        if (!bezier.IsRational()) {
+            for (int i = 1; i <= n; ++i) {
+                along.push_back(bezier.Pole(i + 1).XYZ() - bezier.Pole(i).XYZ());
+            }
+            return along;
+        }
+        // N' (degree n - 1) times w (degree n), less N times w', in Bernstein form of degree
+        // 2n - 1 (the factor n dropped)
+        along.assign(2 * n, gp_XYZ());
+        for (int i = 0; i < n; ++i) {
+            const gp_XYZ rise = bezier.Pole(i + 2).XYZ() * bezier.Weight(i + 2)
+                - bezier.Pole(i + 1).XYZ() * bezier.Weight(i + 1);
+            const double weightRise = bezier.Weight(i + 2) - bezier.Weight(i + 1);
+            for (int j = 0; j <= n; ++j) {
+                const double factor = binomial(n - 1, i) * binomial(n, j)
+                    / binomial(2 * n - 1, i + j);
+                const gp_XYZ weighted = bezier.Pole(j + 1).XYZ() * bezier.Weight(j + 1);
+                along[i + j] += (rise * bezier.Weight(j + 1) - weighted * weightRise) * factor;
+            }
+        }
+        return along;
+    }
+
+    /// The control points of a polynomial in Bernstein form cut to its parameters [s0, s1] of
+    /// [0, 1] (de Casteljau)
+    static std::vector<gp_XYZ> cut(std::vector<gp_XYZ> points, double s0, double s1)
+    {
+        const size_t n = points.size();
+        if (s1 < 1) {
+            for (size_t r = 1; r < n; ++r) {
+                for (size_t i = n - 1; i >= r; --i) {
+                    points[i] = points[i - 1] * (1 - s1) + points[i] * s1;
+                }
+            }
+        }
+        if (s0 > 0) {
+            const double t = s0 / s1;
+            for (size_t r = 1; r < n; ++r) {
+                for (size_t i = 0; i + r < n; ++i) {
+                    points[i] = points[i] * (1 - t) + points[i + 1] * t;
+                }
+            }
+        }
+        return points;
+    }
+
+    /// The pieces' vector along the tangent at the curve's parameter \a u (de Casteljau)
+    gp_XYZ tangentAt(double u) const
+    {
+        const size_t i = pieceAt(u);
+        const double s = std::clamp((u - breaks[i]) / (breaks[i + 1] - breaks[i]), 0.0, 1.0);
+        std::vector<gp_XYZ> points = pieces[i];
+        for (size_t r = points.size() - 1; r > 0; --r) {
+            for (size_t k = 0; k < r; ++k) {
+                points[k] = points[k] * (1 - s) + points[k + 1] * s;
+            }
+        }
+        return points.front();
+    }
+
+    size_t pieceAt(double u) const
+    {
+        const auto after = std::upper_bound(breaks.begin(), breaks.end(), u);
+        const size_t i = after == breaks.begin() ? 0 : size_t(after - breaks.begin()) - 1;
+        return std::min(i, pieces.size() - 1);
+    }
+
+    /// Across several pieces (a look over a run of spans), e's jumps at the knots between them
+    /// count too: none where the curve is G1 there
+    double acrossPieces(double low, double high) const
+    {
+        double total = 0;
+        const size_t start = pieceAt(low);
+        for (size_t i = start; i < pieces.size() && breaks[i] < high; ++i) {
+            const double from = std::max(low, breaks[i]);
+            const double to = std::min(high, breaks[i + 1]);
+            if (i > start) {
+                const gp_XYZ into = square(pieces[i - 1].back());
+                const gp_XYZ out = square(pieces[i].front());
+                if (into.Modulus() <= gp::Resolution() || out.Modulus() <= gp::Resolution()) {
+                    return std::numeric_limits<double>::infinity();
+                }
+                total += gp_Vec(into).Angle(gp_Vec(out));
+            }
+            if (to <= from) {
+                continue;
+            }
+            const double span = breaks[i + 1] - breaks[i];
+            total += onPiece(pieces[i], (from - breaks[i]) / span, (to - breaks[i]) / span);
+        }
+        return total;
+    }
+
+    double onPiece(const std::vector<gp_XYZ>& piece, double s0, double s1) const
+    {
+        const std::vector<gp_XYZ> points = cut(piece, s0, s1);
+        std::vector<gp_XYZ> q;
+        gp_XYZ sum;
+        double widest = 0;
+        double alongLeast = std::numeric_limits<double>::infinity();
+        bool above = false;
+        bool below = false;
+        for (const gp_XYZ& point : points) {
+            const double along = point.Dot(b);
+            q.push_back(point - b * along);
+            sum += q.back();
+            widest = std::max(widest, q.back().Modulus());
+            alongLeast = std::min(alongLeast, std::abs(along));
+            above = above || along > 0;
+            below = below || along < 0;
+        }
+        // The tangent within squareAxis' angle of B throughout, one way along it: e is undefined
+        // there
+        if (!(above && below) && widest < std::sin(1e-6) * alongLeast) {
+            return 0;
+        }
+        const double length = sum.Modulus();
+        if (length <= 0) {
+            return std::numeric_limits<double>::infinity();
+        }
+        double shortest = std::numeric_limits<double>::infinity();
+        for (const gp_XYZ& one : q) {
+            shortest = std::min(shortest, one.Dot(sum) / length);
+        }
+        if (shortest <= 0) {
+            return std::numeric_limits<double>::infinity();
+        }
+        const int degree = int(q.size()) - 1;
+        double rate = 0;
+        for (int i = 0; i < degree; ++i) {
+            rate = std::max(rate, (q[i + 1] - q[i]).Modulus() * degree);
+        }
+        // q x q' along B, of degree 2 degree - 1
+        std::vector<double> rows;
+        for (int i = 0; i <= degree; ++i) {
+            rows.push_back(binomial(degree, i));
+        }
+        std::vector<double> lower;
+        for (int j = 0; j < degree; ++j) {
+            lower.push_back(binomial(degree - 1, j));
+        }
+        double turning = 0;
+        double whole = 1;  // binomial(2 degree - 1, l)
+        for (int l = 0; l < 2 * degree; ++l) {
+            if (l > 0) {
+                whole = whole * (2 * degree - l) / l;
+            }
+            double coefficient = 0;
+            for (int i = std::max(0, l - degree + 1); i <= std::min(l, degree); ++i) {
+                const int j = l - i;
+                coefficient += rows[i] * lower[j] * q[i].Crossed(q[j + 1] - q[j]).Dot(b);
+            }
+            turning = std::max(turning, std::abs(coefficient) * degree / whole);
+        }
+        return std::min(rate / shortest, turning / (shortest * shortest));
+    }
+
+    double acrossConic(double low, double high) const
+    {
+        const double middle = (low + high) / 2;
+        const double half = (high - low) / 2;
+        gp_XYZ q;
+        double rate = 0;
+        switch (kind) {
+            case Kind::ellipse:
+                q = x * -std::sin(middle) + y * std::cos(middle);
+                rate = x.Modulus() + y.Modulus();
+                break;
+            case Kind::hyperbola:
+                q = x * std::sinh(middle) + y * std::cosh(middle);
+                rate = std::cosh(std::max(std::abs(low), std::abs(high)))
+                    * (x.Modulus() + y.Modulus());
+                break;
+            default:
+                q = x * middle + y;
+                rate = x.Modulus();
+                break;
+        }
+        const double shortest = q.Modulus() - half * rate;
+        if (shortest <= 0) {
+            return std::numeric_limits<double>::infinity();
+        }
+        return 2 * half * std::min(rate / shortest, cross / (shortest * shortest));
+    }
+
+    gp_XYZ b;
+    Kind kind = Kind::none;
+    /// Bezier pieces of the curve, from breaks[i] to breaks[i + 1], by their vectors along the
+    /// tangent's control points
+    std::vector<double> breaks;
+    std::vector<std::vector<gp_XYZ>> pieces;
+    /// A conic's q = x f(u) + y g(u), and |q x q'| along B, constant along it
+    gp_XYZ x;
+    gp_XYZ y;
+    double cross = 0;
+};
+
 /// What Binormal mode (\a binormal) does wrong along \a spine, none when it does nothing wrong.
 /// OCCT's law (GeomFill_ConstantBiNormal) carries the profile rigidly in the frame (e, B x e, B),
 /// e the spine's tangent C' made square to the binormal B (measured, ops#406): every section lies
@@ -2816,14 +3198,14 @@ double cornerTwist(
 /// sharp corner of a spine in a plane square to B doesn't: e is the tangent. The places: 8 in
 /// each C2 piece of a curve (16 to 1024) and 2 in each span of a B-spline (in each run of spans
 /// past 2^16 of them, 2^17 at most), each interval halved
-/// while e turns more than 2 degrees through its middle (turning away and back counts), or q's
-/// rate across it over q's shortest length at the three places does (q the tangent made square
-/// to B: a swing of e within the interval that leaves its ends alike), 2^20
+/// while e turns more than 2 degrees through its middle, or TurnBound can't keep e's turn across
+/// it under 2 degrees (a swing of e within the interval that leaves its ends alike), 2^20
 /// halvings for each edge (about 5800 turns of e); past them, while e turns more than 45
 /// degrees, 2^20 more for the whole spine, so that e turning steadily round a long helix never
 /// reads as a reversal (ops#406 review pr380-r3: a 300-turn helix failed as a cusp), and e
 /// reversing still finds the cusp. Where the fold check had to leave stretches turning more than
-/// 2 degrees and finds nothing, it says how many (unchecked), so the result isn't silent.
+/// 2 degrees and finds nothing, it says how many (unchecked), so the result isn't silent. An edge
+/// TurnBound can't bound (an offset curve) is all it says (unbounded).
 /// BRepCheck passes all of these pipes.
 std::optional<BinormalFold> binormalFolds(
     const TopoDS_Wire& spine,
@@ -2838,6 +3220,19 @@ std::optional<BinormalFold> binormalFolds(
         return std::nullopt;
     }
     const gp_Vec b(binormal);
+    std::vector<TurnBound> bounds;
+    for (const TopoDS_Edge& edge : edges) {
+        bounds.emplace_back(BRepAdaptor_Curve(edge), b);
+        if (!bounds.back().bounded()) {
+            return BinormalFold {
+                BinormalFold::Kind::unbounded,
+                BRep_Tool::Pnt(TopExp::FirstVertex(edge, true)),
+                90,
+                {},
+                0
+            };
+        }
+    }
     double closest = 90;
     auto degreesFromLine = [&](const gp_Vec& tangent) {
         const double cosine = std::min(1.0, std::abs(tangent.Dot(b)) / tangent.Magnitude());
@@ -2950,25 +3345,17 @@ std::optional<BinormalFold> binormalFolds(
         auto parameter = [&](double t) {
             return reversed ? last - t * (last - first) : first + t * (last - first);
         };
-        // e at t, and the length of q there, q the tangent made square to B (e's vector)
-        auto axisAt = [&](double t, double& away) -> std::optional<gp_Vec> {
+        // e at t
+        auto axisAt = [&](double t) -> std::optional<gp_Vec> {
             gp_Pnt point;
             gp_Vec tangent;
             curve.D1(parameter(t), point, tangent);
-            away = (tangent - b * tangent.Dot(b)).Magnitude();
             if (tangent.Magnitude() < gp::Resolution()) {
                 return std::nullopt;
             }
             return squareAxis(reversed ? tangent.Reversed() : tangent);
         };
-        // How fast q changes at t, per unit of t
-        auto squareRate = [&](double t) {
-            gp_Pnt point;
-            gp_Vec d1;
-            gp_Vec d2;
-            curve.D2(parameter(t), point, d1, d2);
-            return (d2 - b * d2.Dot(b)).Magnitude() * (last - first);
-        };
+        const TurnBound& bound = bounds[k];
         const bool line = isLine(edge);
         // Where the looks start (t): 8 in each C2 piece (16 to 1024), and 2 in each span of a
         // B-spline, so that a short stretch of a long C2 curve isn't left inside one look (ops#406
@@ -3017,27 +3404,23 @@ std::optional<BinormalFold> binormalFolds(
                 const auto [from, to] = stack.back();
                 stack.pop_back();
                 const double middle = (from + to) / 2;
-                // e's turn through the middle: e turning away and back within the stretch counts.
-                // Where e is undefined at all three, the stretch runs along B and has nothing to
-                // resolve; where it is undefined at some, the edge of that is looked for.
-                double awayBefore = 0;
-                double awayCentre = 0;
-                double awayAfter = 0;
-                const std::optional<gp_Vec> before = axisAt(from, awayBefore);
-                const std::optional<gp_Vec> centre = line ? before : axisAt(middle, awayCentre);
-                const std::optional<gp_Vec> after = axisAt(to, awayAfter);
+                // e's turn through the middle; where e is undefined at some of the three, the
+                // edge of that is looked for
+                const std::optional<gp_Vec> before = axisAt(from);
+                const std::optional<gp_Vec> centre = line ? before : axisAt(middle);
+                const std::optional<gp_Vec> after = axisAt(to);
                 const int defined = int(before.has_value()) + int(centre.has_value())
                     + int(after.has_value());
                 double turn = defined == 3 ? before->Angle(*centre) + centre->Angle(*after)
                                            : (defined == 0 ? 0 : std::numbers::pi);
-                // e turns fastest where q is shortest, and a tangent that nears B and leaves it
-                // on the same side swings e away and back between the three places, leaving them
-                // alike: so the turn is also taken as q's rate across the stretch over its
-                // shortest length at the three (ops#406 cloud review of 9234832ed3, S1: a 1 um
-                // drift off a touch, between two looks, folded 1.7 mm unseen)
-                if (defined == 3 && !line) {
-                    const double shortest = std::min({awayBefore, awayCentre, awayAfter});
-                    turn = std::max(turn, (to - from) * squareRate(middle) / shortest);
+                // ...and at least what e may turn within the stretch, which leaves the three
+                // alike where e swings away and back between them (ops#406 cloud reviews of
+                // 9234832ed3, S1, and 828d0d5f28, S1': near-touches of B between two looks, and
+                // two placed symmetrically about a look's middle, folded unseen). Zero where the
+                // tangent runs along B throughout, where e is undefined. Not needed where the
+                // stretch is halved anyway.
+                if (!line && !(turn > maxTurn && halvings < budget)) {
+                    turn = std::max(turn, bound(parameter(from), parameter(to)));
                 }
                 const bool fine = turn > maxTurn && halvings < budget;
                 const bool coarse = turn > coarseTurn && coarseHalvings < coarseBudget;
@@ -3123,9 +3506,12 @@ std::optional<BinormalFold> binormalFolds(
         }
     }
     // A closed spine's end joins its start: a corner there is measured like the others (ops#406
-    // cloud review of 9234832ed3, L1: the joint from the last edge to the first went unchecked)
-    const gp_Pnt end = BRep_Tool::Pnt(TopExp::LastVertex(edges.back(), true));
-    if (end.Distance(origin) < Precision::Confusion()) {
+    // cloud review of 9234832ed3, L1: the joint from the last edge to the first went unchecked).
+    // Closed as sharpestCorner takes it, by its vertices, not by distance: a vertex
+    // whose tolerance spans the gap closes it too (cloud review of 828d0d5f28, L3).
+    const TopoDS_Vertex endVertex = TopExp::LastVertex(edges.back(), true);
+    if (!endVertex.IsNull() && endVertex.IsSame(TopExp::FirstVertex(edges.front(), true))) {
+        const gp_Pnt end = BRep_Tool::Pnt(endVertex);
         const gp_Vec into(tangentAlong(edges.back(), false));
         const gp_Vec out(tangentAlong(edges.front(), true));
         if (into.Angle(out) > tiltTolerance) {
@@ -3722,6 +4108,17 @@ App::DocumentObjectExecReturn* Pipe::execute()
             const TopoDS_Wire& spineWire = TopoDS::Wire(path.getShape());
             const bool retakes = Transition.getValue() != 0;
             const auto along = binormalFolds(spineWire, *binormal, {}, {}, retakes);
+            if (along && along->kind == BinormalFold::Kind::unbounded) {
+                return new App::DocumentObjectExecReturn(fmt::format(
+                    "Pipe: in 'Binormal' mode every section lies in a plane through the binormal "
+                    "{}, and the spine's edge that starts at {} is a kind of curve (an offset "
+                    "curve, say) that can't be checked for the section folding over itself where "
+                    "its tangent passes near the binormal. Make the spine of lines, arcs and "
+                    "B-splines, or use 'Standard' mode.",
+                    binormalText(),
+                    inPlace(along->at)
+                ));
+            }
             if (along && along->kind == BinormalFold::Kind::cornerFlip) {
                 return new App::DocumentObjectExecReturn(fmt::format(
                     "Pipe: in 'Binormal' mode every section lies in a plane through the binormal "
