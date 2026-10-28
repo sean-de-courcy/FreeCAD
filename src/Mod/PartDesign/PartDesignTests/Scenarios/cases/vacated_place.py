@@ -204,3 +204,18 @@ class SiblingCrossingAtThePlaceHoleAsConstruction(SiblingCrossingAtThePlaceHoleO
 
     def leave(self, sketch):
         sketch.setConstruction(0, True)
+
+
+class RimMovedIntoAVacatedPlaceThick(RimMovedIntoAVacatedPlace):
+    """D2's debt (PLAN decision 165): rims 100 thick, beyond tier 3's d_max (~55), so tier 3's own
+    nearest takes the moved rim's edge at the place, warned `normal`, on both builds."""
+
+    thickness = 100
+    rims = (0, 2000, 3990)
+
+
+class HoleMovedIntoAVacatedPlaceThick(HoleMovedIntoAVacatedPlace):
+    """D2's debt (PLAN decision 165): the plate 10 thick, so B's bottom rim lies beyond d_max and
+    tier 3's own nearest takes B's top rim at the place, warned `normal`, on both builds."""
+
+    thick = 10
