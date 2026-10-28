@@ -4261,42 +4261,78 @@ std::vector<int> pairGeometries(const std::vector<const Part::Geometry*>& olds,
                 return false;
             });
         };
+        // An arc gained a geometry of j's type where it has more of them than before, or one, other
+        // than k, whose name no old geometry of the arc has (or no name): one edge removed and one
+        // added leaves the count as it was (the coordinator's ruling on the 5p review's F3)
+        auto gained = [&](std::size_t j,
+                          std::size_t k,
+                          const auto& oldMembers,
+                          const auto& newMembers) {
+            if (ofType(news, newMembers, olds[j]) > ofType(olds, oldMembers, olds[j])) {
+                return true;
+            }
+            std::set<std::string> names;
+            for (auto i : oldMembers) {
+                if (auto source = sourceOf(olds[i]); !source.empty()) {
+                    names.insert(source);
+                }
+            }
+            return std::any_of(newMembers.begin(), newMembers.end(), [&](auto other) {
+                return other != k && news[other]
+                    && news[other]->getTypeId() == olds[j]->getTypeId()
+                    && names.count(sourceOf(news[other])) == 0;
+            });
+        };
+        // Over the loop's picks together, until none is dropped: a name kept earlier in the walk
+        // exempts no other, and the order of the loop's members doesn't matter
         for (const auto& loop : oldLoops.loops) {
             if (loop.kind != Kind::Closed) {
                 continue;
             }
-            for (auto j : loop.members) {
-                auto pick = picked.find(j);
-                if (pick == picked.end()) {
-                    continue;
+            for (bool dropped = true; dropped;) {
+                dropped = false;
+                const auto snapshot = trial;
+                const bool moved = movedTogether(loop, snapshot);
+                std::vector<std::size_t> drops;
+                for (auto j : loop.members) {
+                    auto pick = picked.find(j);
+                    if (pick == picked.end()) {
+                        continue;
+                    }
+                    const auto k = pick->second;
+                    auto vote = candidates.find({j, k});
+                    if (moved || vote == candidates.end() || vote->second != BySource
+                        || support(j, vote->second) > 1) {
+                        continue;
+                    }
+                    auto others = snapshot;
+                    others[j] = -1;
+                    bool gains = false;
+                    const auto arcs = closedArcs(loop, others);
+                    auto arc = std::find_if(arcs.begin(), arcs.end(), [&](const Arc& a) {
+                        return a.olds.count(j) > 0;
+                    });
+                    if (arc != arcs.end()) {
+                        gains = gained(j, k, arc->olds, arc->news);
+                    }
+                    else if (std::none_of(loop.members.begin(), loop.members.end(),
+                                          [&](auto i) { return others[i] >= 0; })
+                             && newLoops.loopOf[k] >= 0) {
+                        // no other anchor on the loop: the whole loop is its arc
+                        gains = gained(j,
+                                       k,
+                                       loop.members,
+                                       newLoops.loops[newLoops.loopOf[k]].members);
+                    }
+                    if (gains) {
+                        drops.push_back(j);
+                    }
                 }
-                const auto k = pick->second;
-                auto vote = candidates.find({j, k});
-                if (vote == candidates.end() || vote->second != BySource
-                    || support(j, vote->second) > 1) {
-                    continue;
-                }
-                auto others = trial;
-                others[j] = -1;
-                bool gains = false;
-                const auto arcs = closedArcs(loop, others);
-                auto arc = std::find_if(arcs.begin(), arcs.end(), [&](const Arc& a) {
-                    return a.olds.count(j) > 0;
-                });
-                if (arc != arcs.end()) {
-                    gains = ofType(news, arc->news, olds[j]) > ofType(olds, arc->olds, olds[j]);
-                }
-                else if (std::none_of(loop.members.begin(), loop.members.end(),
-                                      [&](auto i) { return others[i] >= 0; })
-                         && newLoops.loopOf[k] >= 0) {
-                    // no other anchor on the loop: the whole loop is its arc
-                    gains = ofType(news, newLoops.loops[newLoops.loopOf[k]].members, olds[j])
-                        > ofType(olds, loop.members, olds[j]);
-                }
-                if (gains && !movedTogether(loop, trial)) {
-                    picked.erase(pick);
-                    candidates.erase(vote);
+                for (auto j : drops) {
+                    candidates.erase({j, picked[j]});
+                    picked.erase(j);
                     trial[j] = -1;
+                    dropped = true;
                 }
             }
         }

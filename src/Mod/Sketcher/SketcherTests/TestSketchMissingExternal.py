@@ -997,6 +997,32 @@ class TestSketchFaceLinkPairing(unittest.TestCase):
         self.doc.recompute()
         self.assertBreaks()
 
+    def testCutSwappedLeftRedrawnMovedBreaks(self):
+        """Review pr384-r5p (F3; the coordinator's ruling on decision 167): the square with its
+        back-left corner cut (5 x 5), moved (20, 5); the front, right and back lines kept (the
+        right and back ones turned round), the cut and the left line deleted, the left line
+        drawn again and a front-left cut drawn last, from the front line to the left one. The
+        left line's arc keeps its count (one cut removed, one added), but gains a line whose name
+        no old line of the arc has; a name there settles nothing. The constraint on the left line
+        stays on it (x = 20) or breaks, never the new cut."""
+        self.makeModel([(0, 0), (20, 0), (20, 20), (5, 20), (0, 15)])
+        self.constrainCircle("x", 0)
+        self.profile.delGeometries([3, 4])
+        self.moveLines(
+            {
+                0: ((23, 5), (40, 5)),
+                1: ((40, 25), (40, 5)),
+                2: ((20, 25), (40, 25)),
+            }
+        )
+        self.addLines([(20, 25), (20, 8)])
+        self.addLines([(23, 5), (20, 8)])
+        self.doc.recompute()
+        if self.sketch.isValid():
+            self.assertStaysOn("x", 20)
+        else:
+            self.assertBreaks()
+
     def testLeftRedrawnThenCutBreaks(self):
         self.redrawLeftThenCut(True)
 
