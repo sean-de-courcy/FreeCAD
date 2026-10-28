@@ -74,13 +74,10 @@ void swapJCS(const App::DocumentObject* joint)
     auto pRef1 = joint->getPropertyByName<App::PropertyXLinkSub>("Reference1");
     auto pRef2 = joint->getPropertyByName<App::PropertyXLinkSub>("Reference2");
     if (pRef1 && pRef2) {
-        auto temp = pRef1->getValue();
-        auto subs1 = pRef1->getSubValues();
-        auto subs2 = pRef2->getSubValues();
-        pRef1->setValue(pRef2->getValue());
-        pRef1->setSubValues(std::move(subs2));
-        pRef2->setValue(temp);
-        pRef2->setSubValues(std::move(subs1));
+        // Each reference moves with its shadows, records and fingerprints (ops#504 E2)
+        std::unique_ptr<App::Property> ref1(pRef1->Copy());
+        pRef1->Paste(*pRef2);
+        pRef2->Paste(*ref1);
     }
 }
 

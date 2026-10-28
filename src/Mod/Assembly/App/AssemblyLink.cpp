@@ -53,6 +53,28 @@ namespace PartApp = Part;
 
 using namespace Assembly;
 
+namespace
+{
+// Points a joint's reference at obj with subs, as one value with its shadows re-rooted by
+// reroot: the reference keeps its records and fingerprints (ops#504 E2)
+template<class Reroot>
+void rerootReference(App::PropertyXLinkSub& prop,
+                     App::DocumentObject* obj,
+                     std::vector<std::string>&& subs,
+                     const Reroot& reroot)
+{
+    std::vector<App::PropertyLinkBase::ShadowSub> shadows;
+    for (const auto& shadow : prop.getShadowSubs()) {
+        shadows.emplace_back(shadow.newName.empty() ? std::string() : reroot(shadow.newName),
+                             shadow.oldName.empty() ? std::string() : reroot(shadow.oldName));
+    }
+    if (shadows.size() != subs.size()) {
+        shadows.clear();
+    }
+    prop.setValue(obj, std::move(subs), std::move(shadows));
+}
+}  // namespace
+
 // ================================ Assembly Object ============================
 
 PROPERTY_SOURCE(Assembly::AssemblyLink, App::Part)
@@ -271,8 +293,9 @@ void AssemblyLink::updateParentJoints()
                     for (const auto& s : subs) {
                         newSubs.push_back(prefix + s);
                     }
-                    prop->setValue(this);
-                    prop->setSubValues(std::move(newSubs));
+                    rerootReference(*prop, this, std::move(newSubs), [&](const std::string& name) {
+                        return prefix + name;
+                    });
                 }
             }
             else {  // Rigid -> Flexible
@@ -301,8 +324,10 @@ void AssemblyLink::updateParentJoints()
                                 newSubs.push_back(s);
                             }
                         }
-                        prop->setValue(child);
-                        prop->setSubValues(std::move(newSubs));
+                        const std::string prefix = childName + ".";
+                        rerootReference(*prop, child, std::move(newSubs), [&](const std::string& name) {
+                            return name.starts_with(prefix) ? name.substr(prefix.size()) : name;
+                        });
                     }
                 }
             }

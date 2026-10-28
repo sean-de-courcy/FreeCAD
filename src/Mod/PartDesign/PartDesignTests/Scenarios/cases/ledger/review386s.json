@@ -1,0 +1,6 @@
+{
+"entries": {
+"ReplacedPieceMergedBack|fillet_edge|V2s": {"axes": ["M1", "E2", "E9"], "classes": ["E"], "expect": "CORRECT", "expected": "guessed", "found_by": "review pr386-r1s", "issue": "ops#504", "tier": "F"},
+"TrimmedPieceMergedBack|fillet_edge|V2s": {"axes": ["M1", "E2", "E9"], "classes": ["E"], "expect": "CORRECT", "expected": "guessed", "found_by": "review pr386-r1s", "issue": "ops#504", "tier": "F"}
+}
+}

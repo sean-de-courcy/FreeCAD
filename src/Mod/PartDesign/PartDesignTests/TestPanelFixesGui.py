@@ -4341,3 +4341,95 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertTrue(self.modals[0].startswith("Legacy"), self.modals)
         self.assertEqual(sketch.MapMode, "FlatFace")
         self.assertOnTopWithTheBodyOrigin(sketch, cylinder, top)
+
+    # -- ops#504 E2: a panel's rewrite keeps the records of the references it doesn't change ----
+
+    def guessedPad(self):
+        """A pad of the rectangle 0..20 x 0..10, 10 high, in a document with the reference solver
+        on. Returns (pad, redraw): redraw() draws the profile again from another corner
+        (TestNamingSolver.redraw()), so references into the pad become tier 3 guesses."""
+        from PartDesignTests.Scenarios.harness import vertex
+
+        self.vertex = vertex
+        self.doc.HistoryAlgorithm = "V2"
+        self.doc.ReferenceSolver = True
+        self.body = models.body(self.doc)
+        profile = models.sketch(self.doc, "Profile", models.rectangle(0, 0, 20, 10), self.body)
+        pad = models.pad(self.body, profile, 10)
+        self.doc.recompute()
+
+        def redraw():
+            profile.deleteAllGeometry()
+            profile.addGeometry(models.polygon([(20, 10), (20, 0), (0, 0), (0, 10)]), False)
+            self.doc.recompute()
+
+        Gui.activateWorkbench("PartDesignWorkbench")
+        App.setActiveDocument(self.doc.Name)
+        Gui.setActiveDocument(self.doc.Name)
+        pump(0.2)
+        return pad, redraw
+
+    def guesses(self, obj, propertyName):
+        return {
+            entry["index"]: entry["guess_kind"]
+            for entry in App.getReferenceReport(obj)
+            if entry["property"] == propertyName and entry.get("guess_kind")
+        }
+
+    def testAttacherRepickKeepsTheOtherReferencesGuess(self):
+        """A datum line through two of the pad's top corners, both guessed after the redraw: in
+        its attachment panel the second reference re-picked to another corner, then OK. The
+        first keeps its guess and warning; the re-picked one has none (TaskAttacher sets the
+        whole list without shadows: it dropped both)."""
+        pad, redraw = self.guessedPad()
+        datum = self.body.newObject("PartDesign::Line", "Datum")
+        first = self.vertex((20, 0, 10)).one(pad.Shape)[0]
+        second = self.vertex((20, 10, 10)).one(pad.Shape)[0]
+        datum.AttachmentSupport = [(pad, first), (pad, second)]
+        datum.MapMode = "TwoPointLine"
+        self.doc.recompute()
+        redraw()
+        self.assertEqual(self.guesses(datum, "AttachmentSupport"), {0: "tier3", 1: "tier3"})
+        held = datum.AttachmentSupport[0][1][0]
+        other = self.vertex((0, 10, 10)).one(pad.Shape)[0]
+
+        self.edit(datum)
+        self.widget(QtWidgets.QPushButton, "buttonRef2").click()
+        pump(0.2)
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.doc.Name, pad.Name, other)
+        pump(0.3)
+        self.close(ok=True)
+
+        self.assertEqual(datum.AttachmentSupport, [(pad, (held, other))])
+        self.assertEqual(self.guesses(datum, "AttachmentSupport"), {0: "tier3"})
+        self.doc.recompute()
+        self.assertEqual(self.guesses(datum, "AttachmentSupport"), {0: "tier3"})
+        self.assertIn("Warning", datum.State)
+
+    def testThicknessFacesDoneUnchangedKeepsTheGuess(self):
+        """A Part Thickness of the pad without its top face, guessed after the redraw: in its
+        panel Faces pressed and released with nothing changed, then OK. The panel writes the
+        faces back (Faces = ...), and the reference keeps its guess (it dropped it)."""
+        pad, redraw = self.guessedPad()
+        thickness = self.doc.addObject("Part::Thickness", "Thickness")
+        top = face("plane", normal=Z, through=(0, 0, 10)).one(pad.Shape)
+        thickness.Faces = (pad, top)
+        thickness.Value = 1
+        self.doc.recompute()
+        redraw()
+        self.assertEqual(self.guesses(thickness, "Faces"), {0: "tier3"})
+        held = thickness.Faces[1]
+
+        self.edit(thickness)
+        faces = self.widget(QtWidgets.QPushButton, "facesButton")
+        faces.click()
+        pump(0.2)
+        Gui.Selection.clearSelection()
+        faces.click()
+        pump(0.2)
+        self.close(ok=True)
+
+        self.assertEqual(thickness.Faces, (pad, held))
+        self.assertEqual(self.guesses(thickness, "Faces"), {0: "tier3"})
+        self.assertIn("Warning", thickness.State)
