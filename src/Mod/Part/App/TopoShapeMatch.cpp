@@ -6,7 +6,6 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
-#include <iterator>
 #include <memory>
 #include <optional>
 #include <set>
@@ -1258,7 +1257,8 @@ private:
     // the old places of other faces' elements (a shape moved by its own width).
     //
     // The anchor of a face matched by rung 4 (its old and new pieces linked by another match) must
-    // survive R1 without it: a match R1 withdraws anchors nothing (decision 150; the review's T4).
+    // survive R1 without it: a match R1 withdraws anchors nothing (decision 150; the review's T4;
+    // decision 174: without that one face).
     void confirmByFaces()
     {
         std::set<int> faces;
@@ -1271,23 +1271,65 @@ private:
                 overlapping.insert(f);
             }
         }
-        if (!overlapping.empty()) {
-            std::set<int> others;
-            std::set_difference(faces.begin(), faces.end(), overlapping.begin(), overlapping.end(),
-                                std::inserter(others, others.end()));
-            const auto [vertexes, edges] = keptBy(others);
-            std::set<std::pair<int, int>> links;
-            for (const int v : vertexes) {
-                links.emplace(before.vertexPiece[result.vertexes.at(v + 1) - 1], after.vertexPiece[v]);
-            }
-            for (const int f : others) {
-                links.emplace(before.facePiece[result.faces.at(f + 1) - 1], after.facePiece[f]);
-            }
-            for (const int f : overlapping) {
-                if (!links.count({before.facePiece[result.faces.at(f + 1) - 1], after.facePiece[f]})) {
-                    result.faces.erase(f + 1);
-                    faces.erase(f);
+        // Each one left out (decision 174): the faces R1 keeps without it, other rung-4 faces
+        // among them, must still link its pieces. An end face of a prism given more sides is
+        // anchored by corners the other end face confirms, as that one's by its own. A face
+        // with a twin on its surface (another new face there, or another old face on its
+        // partner's: a comb's tooth tops) is left out with every rung-4 face: twins slid onto
+        // one another's places confirm one another through the seams. Until no more go: a face
+        // withdrawn confirms nothing.
+        const int newCount = static_cast<int>(after.faceVertexes.size());
+        const int oldCount = static_cast<int>(before.faceVertexes.size());
+        auto twinned = [&](int f) {
+            const int j = result.faces.at(f + 1) - 1;
+            for (int k = 0; k < newCount; ++k) {
+                if (k != f && after.surface(k).same(after.surface(f), tolerance)) {
+                    return true;
                 }
+            }
+            for (int k = 0; k < oldCount; ++k) {
+                if (k != j && before.surface(k).same(before.surface(j), tolerance)) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        std::set<int> strict;
+        for (const int f : overlapping) {
+            if (twinned(f)) {
+                strict.insert(f);
+            }
+        }
+        for (bool withdrawn = true; withdrawn;) {
+            withdrawn = false;
+            for (auto it = overlapping.begin(); it != overlapping.end();) {
+                const int f = *it;
+                std::set<int> others(faces);
+                if (strict.count(f)) {
+                    for (const int o : overlapping) {
+                        others.erase(o);
+                    }
+                }
+                others.erase(f);
+                const auto kept = keptBy(others);
+                std::set<std::pair<int, int>> links;
+                for (const int v : kept.first) {
+                    links.emplace(before.vertexPiece[result.vertexes.at(v + 1) - 1],
+                                  after.vertexPiece[v]);
+                }
+                for (const int o : others) {
+                    links.emplace(before.facePiece[result.faces.at(o + 1) - 1],
+                                  after.facePiece[o]);
+                }
+                if (links.count(
+                        {before.facePiece[result.faces.at(f + 1) - 1], after.facePiece[f]})) {
+                    ++it;
+                    continue;
+                }
+                result.faces.erase(f + 1);
+                faces.erase(f);
+                it = overlapping.erase(it);
+                withdrawn = true;
             }
         }
         const auto [vertexes, edges] = keptBy(faces);
