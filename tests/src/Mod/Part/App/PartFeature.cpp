@@ -11,6 +11,9 @@
 
 #include <boost/core/ignore_unused.hpp>
 #include "Mod/Part/App/FeaturePartCommon.h"
+#include "Mod/Part/App/FeatureExtrusion.h"
+#include "Mod/Part/App/FeaturePartFuse.h"
+#include "Mod/Part/App/PrimitiveFeature.h"
 #include "Mod/Part/App/TopoShapeOpCode.h"
 #include <App/Link.h>
 #include <src/App/InitApplication.h>
@@ -1129,21 +1132,201 @@ TEST_F(FeaturePartTest, linksKeepTheSourcesNamesV2)
     const TopoShape& sourceShape = source->Shape.getShape();
     EXPECT_EQ(sourceShape.getMappedName(face1).toString(), faceNameWithTag(0));
     EXPECT_EQ(sourceShape.getMappedName(edge1), edgeName);
-    //   a plain link returns the source's shape as it is (through getSubObject(), no retag)
-    EXPECT_FALSE(linkShape.isNull());
-    //   an array's elements have their own tags (the box has 6 faces: the second element's
-    //   first face is Face7)
+    //   a plain link keys its copy by its ID: a link copy section (ops#523)
+    auto copy = [](long tag, const std::string& index) {
+        return std::string(Data::NAME_SECTION_DELIMINATOR) + "_;_;" + std::to_string(tag)
+            + ";CPY;" + index + ";F;0;MOD;_";
+    };
+    EXPECT_EQ(
+        linkShape.getMappedName(face1).toString(),
+        faceNameWithTag(link->getID()) + copy(link->getID(), "L")
+    );
+    //   an array's elements are keyed by the array and their numbers, whether it shows them as
+    //   objects or not (the box has 6 faces: the second element's first face is Face7)
     auto elements = array->ElementList.getValues();
     ASSERT_EQ(elements.size(), 2);
     Data::IndexedName face7("Face", 7);
-    EXPECT_EQ(arrayShape.getMappedName(face1).toString(), faceNameWithTag(elements[0]->getID()));
-    EXPECT_EQ(arrayShape.getMappedName(face7).toString(), faceNameWithTag(elements[1]->getID()));
-    //   an array that hides its elements gives both copies its own tag
-    EXPECT_EQ(hiddenArrayShape.getMappedName(face1).toString(), faceNameWithTag(hiddenArray->getID()));
+    EXPECT_EQ(
+        arrayShape.getMappedName(face1).toString(),
+        faceNameWithTag(array->getID()) + copy(array->getID(), "L0")
+    );
+    EXPECT_EQ(
+        arrayShape.getMappedName(face7).toString(),
+        faceNameWithTag(array->getID()) + copy(array->getID(), "L1")
+    );
+    EXPECT_EQ(
+        hiddenArrayShape.getMappedName(face1).toString(),
+        faceNameWithTag(hiddenArray->getID()) + copy(hiddenArray->getID(), "L0")
+    );
     EXPECT_EQ(
         hiddenArrayShape.getMappedName(face7).toString(),
-        faceNameWithTag(hiddenArray->getID(), 1)
+        faceNameWithTag(hiddenArray->getID()) + copy(hiddenArray->getID(), "L1")
     );
+    //   an element taken as an object (its LinkElement) has the array's names for it
+    auto elementShape
+        = Feature::getTopoShape(elements[1], ShapeOption::ResolveLink | ShapeOption::Transform);
+    EXPECT_EQ(
+        elementShape.getMappedName(face1).toString(),
+        faceNameWithTag(array->getID()) + copy(array->getID(), "L1")
+    );
+}
+
+TEST_F(FeaturePartTest, linkArrayElementsKeepTheirNamesV2)
+{
+    // ops#523 (Fable review finding 2): toggling ShowElement, a hidden element, or the count
+    // going down and up again renames no element of a link array
+    // Arrange
+    _doc->InternNames.setValue(false);
+    auto box = _doc->addObject<Part::Box>("Box");
+    auto array = _doc->addObject<App::Link>("Array");
+    array->setLink(-1, box);
+    array->ElementCount.setValue(3);
+    _doc->recompute();
+    auto names = [&]() {
+        auto shape = Feature::getTopoShape(array, ShapeOption::ResolveLink | ShapeOption::Transform);
+        std::vector<std::string> result;
+        for (int i = 1; i <= static_cast<int>(shape.countSubElements("Face")); ++i) {
+            result.push_back(shape.getMappedName(Data::IndexedName("Face", i)).toString());
+        }
+        return result;
+    };
+    const auto shown = names();
+    ASSERT_EQ(shown.size(), 18);
+    const std::string arrayKey = std::string(Data::NAME_SECTION_DELIMINATOR) + "_;_;"
+        + std::to_string(array->getID()) + ";CPY;";
+    EXPECT_NE(shown[0].find(arrayKey + "L0;"), std::string::npos) << shown[0];
+    EXPECT_NE(shown[6].find(arrayKey + "L1;"), std::string::npos) << shown[6];
+    EXPECT_NE(shown[12].find(arrayKey + "L2;"), std::string::npos) << shown[12];
+
+    // Act and assert
+    //   ShowElement off and on again
+    array->ShowElement.setValue(false);
+    _doc->recompute();
+    EXPECT_EQ(names(), shown);
+    array->ShowElement.setValue(true);
+    _doc->recompute();
+    EXPECT_EQ(names(), shown);
+    //   element 0 hidden: elements 1 and 2 keep their names
+    array->setElementVisible("0", false);
+    _doc->recompute();
+    const auto withoutFirst = names();
+    EXPECT_EQ(withoutFirst, std::vector<std::string>(shown.begin() + 6, shown.end()));
+    array->setElementVisible("0", true);
+    _doc->recompute();
+    //   the count down and up again (new LinkElements)
+    array->ElementCount.setValue(1);
+    _doc->recompute();
+    array->ElementCount.setValue(3);
+    _doc->recompute();
+    EXPECT_EQ(names(), shown);
+}
+
+TEST_F(FeaturePartTest, linkCopiesOfOneObjectHaveTheirOwnNamesV2)
+{
+    // ops#523: two links to one object in a fuse give its elements names that differ only by
+    // their link copy sections, for a source without an element map (a primitive) and one with
+    // (an extrusion). The source's own names don't change.
+    // Arrange
+    _doc->InternNames.setValue(false);
+    auto cylinder = _doc->addObject<Part::Cylinder>("Cylinder");
+    auto plane = _doc->addObject<Part::Plane>("Plane");
+    auto extrusion = _doc->addObject<Part::Extrusion>("Extrusion");
+    extrusion->Base.setValue(plane);
+    extrusion->DirMode.setValue("Custom");
+    extrusion->Dir.setValue(Base::Vector3d(0, 0, 1));
+    extrusion->LengthFwd.setValue(2.0);
+    _doc->recompute();
+    for (App::DocumentObject* source : std::vector<App::DocumentObject*> {cylinder, extrusion}) {
+        auto copy0 = _doc->addObject<App::Link>("Copy0");
+        copy0->setLink(-1, source);
+        auto copy1 = _doc->addObject<App::Link>("Copy1");
+        copy1->setLink(-1, source);
+        copy1->Placement.setValue(Base::Placement(Base::Vector3d(20, 0, 0), Base::Rotation()));
+        _doc->recompute();
+        const auto sourceShape = Feature::getTopoShape(source, ShapeOption::ResolveLink);
+        const auto shape0 = Feature::getTopoShape(copy0, ShapeOption::ResolveLink | ShapeOption::Transform);
+        const auto shape1 = Feature::getTopoShape(copy1, ShapeOption::ResolveLink | ShapeOption::Transform);
+        ASSERT_EQ(shape0.countSubElements("Edge"), shape1.countSubElements("Edge"));
+
+        // Act and assert
+        auto copyOf = [](long tag) {
+            return std::string(Data::NAME_SECTION_DELIMINATOR) + "_;_;" + std::to_string(tag)
+                + ";CPY;L;";
+        };
+        for (int i = 1; i <= static_cast<int>(shape0.countSubElements("Edge")); ++i) {
+            Data::IndexedName edge("Edge", i);
+            const auto name0 = shape0.getMappedName(edge).toString();
+            const auto name1 = shape1.getMappedName(edge).toString();
+            const auto at0 = name0.rfind(copyOf(copy0->getID()));
+            const auto at1 = name1.rfind(copyOf(copy1->getID()));
+            ASSERT_NE(at0, std::string::npos) << name0;
+            ASSERT_NE(at1, std::string::npos) << name1;
+            //   the same name before the section: the source's, retagged by the link
+            EXPECT_EQ(name0.substr(0, at0), name1.substr(0, at1));
+            EXPECT_TRUE(Data::isCounterSiblingName(name0, name1));
+        }
+        //   the source's own names keep no link's section
+        for (int i = 1; i <= static_cast<int>(sourceShape.countSubElements("Edge")); ++i) {
+            const auto name = sourceShape.getMappedName(Data::IndexedName("Edge", i)).toString();
+            EXPECT_EQ(name.find(";CPY;L"), std::string::npos) << name;
+        }
+
+        //   in a fuse, each copy's elements keep their link's key: no name told apart only by
+        //   the collision counter
+        auto fuse = _doc->addObject<Part::MultiFuse>("Fuse");
+        fuse->Shapes.setValues({copy0, copy1});
+        _doc->recompute();
+        const auto fused = fuse->Shape.getShape();
+        int keyed0 = 0;
+        int keyed1 = 0;
+        for (int i = 1; i <= static_cast<int>(fused.countSubElements("Edge")); ++i) {
+            const auto name = fused.getMappedName(Data::IndexedName("Edge", i)).toString();
+            keyed0 += name.find(copyOf(copy0->getID())) != std::string::npos ? 1 : 0;
+            keyed1 += name.find(copyOf(copy1->getID())) != std::string::npos ? 1 : 0;
+        }
+        EXPECT_EQ(keyed0, static_cast<int>(shape0.countSubElements("Edge")));
+        EXPECT_EQ(keyed1, static_cast<int>(shape1.countSubElements("Edge")));
+    }
+}
+
+TEST_F(FeaturePartTest, linkCopyPostfix)
+{
+    // ops#523: the retag postfix of a shape a link hands over
+    // Arrange
+    auto& app = App::GetApplication();
+    const std::string otherName = app.getUniqueDocumentName("LinkCopyOther");
+    auto other = app.newDocument(otherName.c_str(), "testUser");
+    auto box = _doc->addObject<Part::Box>("Box");
+    auto link = _doc->addObject<App::Link>("Link");
+    auto array = _doc->addObject<App::Link>("Array");
+    array->setLink(-1, box);
+    array->ElementCount.setValue(2);
+    auto there = other->addObject<App::Link>("There");
+    _doc->recompute();
+    const std::string linkCopy(Data::POSTFIX_LINK_COPY);
+    const std::string index(Data::POSTFIX_INDEX);
+
+    // Act and assert
+    //   within one document: the link copy postfix, the element's number after it
+    const App::DocumentObject* obj = link;
+    EXPECT_EQ(App::LinkBaseExtension::copyPostfix(obj, box, nullptr), linkCopy);
+    EXPECT_EQ(obj, link);
+    EXPECT_EQ(App::LinkBaseExtension::copyPostfix(obj, box, (index + "3").c_str()), linkCopy + index + "3");
+    //   across documents: the external postfix, as before, with an element's number
+    obj = there;
+    EXPECT_EQ(App::LinkBaseExtension::copyPostfix(obj, box, nullptr), Data::POSTFIX_EXTERNAL_TAG);
+    EXPECT_EQ(
+        App::LinkBaseExtension::copyPostfix(obj, box, (index + "1").c_str()),
+        std::string(Data::POSTFIX_EXTERNAL_TAG) + index + "1"
+    );
+    //   an array's element shown as an object: the array and the element's number
+    auto elements = array->ElementList.getValues();
+    ASSERT_EQ(elements.size(), 2);
+    obj = elements[1];
+    EXPECT_EQ(App::LinkBaseExtension::copyPostfix(obj, box, nullptr), linkCopy + index + "1");
+    EXPECT_EQ(obj, array);
+
+    app.closeDocument(otherName.c_str());
 }
 
 TEST_F(FeaturePartTest, setValueNamesAnotherObjectsShapeWithoutMapV2)

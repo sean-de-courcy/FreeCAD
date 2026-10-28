@@ -127,5 +127,10 @@ PartExport std::string boundaryIndex(const App::Document& owner, const App::Docu
 PartExport std::string boundaryPostfix(const std::string& index);
 /// The index a postfix of boundaryPostfix()'s form gives, or "0"
 PartExport std::string boundaryIndexOf(const char* postfix);
+/** The index of the link copy section (OpCodes::Copy, ops#523) a retag \a postfix asks for:
+ * `L` for a link in the same document (POSTFIX_LINK_COPY), `L<n>` for element n of a link array
+ * (POSTFIX_INDEX and n after the link copy or the external postfix); empty for none.
+ */
+PartExport std::string linkCopyIndexOf(const char* postfix);
 
 }  // namespace Part

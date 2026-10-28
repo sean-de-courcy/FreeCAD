@@ -484,6 +484,23 @@ public:
 
     bool extensionGetSubObjects(std::vector<std::string>& ret, int reason) const override;
 
+    /**
+     * @brief The postfix of the retag of a shape that @p obj hands over from @p linked.
+     *
+     * Across documents the external postfix; within one document the link copy postfix, so
+     * two links to one object give its elements different names (ops#523). An element of a
+     * link array shown as an object is keyed by the array and its number, as when the array
+     * hides its elements: @p obj becomes the array, and the number follows the postfix.
+     *
+     * @param[in,out] obj The object handing the shape over, whose ID the retag uses.
+     * @param[in] linked The object whose shape it is.
+     * @param[in] postfix An array element's postfix (POSTFIX_INDEX and its number), or null.
+     * @return The postfix for reTagElementMap().
+     */
+    static std::string copyPostfix(const DocumentObject*& obj,
+                                   const DocumentObject* linked,
+                                   const char* postfix);
+
     bool extensionGetLinkedObject(DocumentObject*& ret,
                                   bool recurse,
                                   Base::Matrix4D* mat,

@@ -94,6 +94,9 @@ constexpr size_t      POSTFIX_TAG_SIZE                  = 3;
 constexpr const char* POSTFIX_DECIMAL_TAG               = ";:T";
 /// Postfix to mark an external tag.
 constexpr const char* POSTFIX_EXTERNAL_TAG              = ";:X";
+/// Postfix of a retag by a link in the same document: its copy of the linked shape. A link
+/// array's element number may follow it (ops#523).
+constexpr const char* POSTFIX_LINK_COPY                 = ";:K";
 /// Postfix to mark a child element.
 constexpr const char* POSTFIX_CHILD                     = ";:C";
 

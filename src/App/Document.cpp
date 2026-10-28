@@ -153,7 +153,11 @@ namespace
 // piece by the up-to face and edges it lies on and ends at, and by its place along the edge among
 // how many there are (PRJ,MOD,ORD), where the pieces were told apart by a counter in the
 // splitter's order.
-constexpr int ForkNamingRevision = 9;
+// 12: ops#523, a shape a link hands over within one document carries a link copy section
+// `CPY;L` with the link's ID, and a link array's element n `CPY;L<n>` with the array's ID, in
+// either ShowElement mode and across documents too (10 and 11 are reserved by ops#469
+// and ops#468: whichever merges later takes the next number).
+constexpr int ForkNamingRevision = 12;
 
 // The `.N<n>` of the element map version: the form interned names are saved in (ops#6). 2: the
 // references are indices into the file's table (NamingFormat 2).

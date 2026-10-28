@@ -1774,10 +1774,9 @@ bool LinkBaseExtension::extensionGetSubObject(DocumentObject*& ret,
             ret = const_cast<DocumentObject*>(obj);
         }
         else {
-            if (idx) {
-                postfix = Data::POSTFIX_INDEX;
-                postfix += std::to_string(idx);
-            }
+            // Element 0 too: an element's names carry its number (ops#523)
+            postfix = Data::POSTFIX_INDEX;
+            postfix += std::to_string(idx);
             if (mat) {
                 *mat = matNext;
             }
@@ -1792,27 +1791,70 @@ void LinkBaseExtension::checkGeoElementMap(const App::DocumentObject* obj,
                                            PyObject** pyObj,
                                            const char* postfix) const
 {
-    if (!pyObj || !*pyObj || (!postfix && obj->getDocument() == linked->getDocument())
-        || !PyObject_TypeCheck(*pyObj, &Data::ComplexGeoDataPy::Type)) {
+    if (!pyObj || !*pyObj || !obj || !PyObject_TypeCheck(*pyObj, &Data::ComplexGeoDataPy::Type)) {
         return;
     }
 
-    //     auto geoData = static_cast<Data::ComplexGeoDataPy*>(*pyObj)->getComplexGeoDataPtr();
-    //     geoData->reTagElementMap(obj->getID(),obj->getDocument()->Hasher,postfix);
-
     auto geoData = static_cast<Data::ComplexGeoDataPy*>(*pyObj)->getComplexGeoDataPtr();
     std::string _postfix;
-    if (linked && obj && linked->getDocument() != obj->getDocument()) {
-        _postfix = Data::POSTFIX_EXTERNAL_TAG;
-        if (postfix) {
-            if (!boost::starts_with(postfix, Data::ComplexGeoData::elementMapPrefix())) {
-                _postfix += Data::ComplexGeoData::elementMapPrefix();
-            }
-            _postfix += postfix;
+    if (geoData->getHistoryAlgorithm() != App::HistoryAlgorithm::V2) {
+        // V1 names are kept as they were: element 0 carries no number, and within one document
+        // only an element is retagged
+        const std::string first = std::string(Data::POSTFIX_INDEX) + "0";
+        if (postfix && first == postfix) {
+            postfix = nullptr;
         }
-        postfix = _postfix.c_str();
+        if (!postfix && obj->getDocument() == linked->getDocument()) {
+            return;
+        }
+        if (linked->getDocument() != obj->getDocument()) {
+            _postfix = Data::POSTFIX_EXTERNAL_TAG;
+            if (postfix) {
+                if (!boost::starts_with(postfix, Data::ComplexGeoData::elementMapPrefix())) {
+                    _postfix += Data::ComplexGeoData::elementMapPrefix();
+                }
+                _postfix += postfix;
+            }
+            postfix = _postfix.c_str();
+        }
+        geoData->reTagElementMap(obj->getID(), obj->getDocument()->getStringHasher(), postfix);
+        return;
     }
-    geoData->reTagElementMap(obj->getID(), obj->getDocument()->getStringHasher(), postfix);
+
+    // Within one document too: two links to one object hand over one shape, whose elements the
+    // maker they meet in would tell apart only by their order (ops#523)
+    _postfix = copyPostfix(obj, linked, postfix);
+    geoData->reTagElementMap(obj->getID(), obj->getDocument()->getStringHasher(), _postfix.c_str());
+}
+
+std::string LinkBaseExtension::copyPostfix(const DocumentObject*& obj,
+                                           const DocumentObject* linked,
+                                           const char* postfix)
+{
+    std::string element(postfix ? postfix : "");
+    if (element.empty()) {
+        if (auto linkElement = dynamic_cast<const LinkElement*>(obj)) {
+            if (auto array = linkElement->getLinkGroup()) {
+                const auto& elements = array->ElementList.getValues();
+                auto it = std::find(elements.begin(), elements.end(), obj);
+                if (it != elements.end()) {
+                    element = Data::POSTFIX_INDEX + std::to_string(it - elements.begin());
+                    obj = array;
+                }
+            }
+        }
+    }
+    if (linked && obj && linked->getDocument() != obj->getDocument()) {
+        std::string res = Data::POSTFIX_EXTERNAL_TAG;
+        if (!element.empty()) {
+            if (!boost::starts_with(element, Data::ComplexGeoData::elementMapPrefix())) {
+                res += Data::ComplexGeoData::elementMapPrefix();
+            }
+            res += element;
+        }
+        return res;
+    }
+    return Data::POSTFIX_LINK_COPY + element;
 }
 
 void LinkBaseExtension::onExtendedUnsetupObject()

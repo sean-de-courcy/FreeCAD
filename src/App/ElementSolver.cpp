@@ -1609,12 +1609,48 @@ std::string formatOverlap(double value)
     return ss.str();
 }
 
+bool sameSectionsUpToCounter(
+    const std::vector<std::string_view>& sectionsA,
+    const std::vector<std::string_view>& sectionsB
+);
+
+/* Copies of one element by two copy makers of one kind (ops#523, decision 157): two copy or
+ * second side sections `CPY` of any index (a link's `L`, a link array element's `L<n>`, a
+ * Scale's or Reverse's `1`, a second side's `2`), or two boundary sections `EXT` of one index,
+ * whatever their tags. Each copy's section is tagged with its own copy maker, so without this
+ * two links to one object give names that differ in more than the counter, and the sibling
+ * guards don't see one copy put in another's place.
+ */
+bool copySiblingSections(const DecodedMappedSection& x, const DecodedMappedSection& y)
+{
+    if (x.opCode == secondSideOpCode && y.opCode == secondSideOpCode) {
+        return true;
+    }
+    return x.opCode == boundaryOpCode && y.opCode == boundaryOpCode && x.index == y.index;
+}
+
+// The section a copy adds to its original's names (ops#523, decision 157): a link copy's
+// `CPY;L` or `CPY;L<n>`, or a Scale's or Reverse's `CPY;1`. A pattern instance's TRF isn't one:
+// a pattern's original keeps its own names.
+bool isOriginalsCopySection(std::string_view section)
+{
+    if (section.find(";CPY;") == std::string_view::npos) {
+        return false;
+    }
+    DecodedMappedName decoded = MappedName::getDecodedMappedName(std::string(section));
+    return decoded.size() == 1 && decoded.front().opCode == secondSideOpCode
+        && (decoded.front().index == "1" || decoded.front().index.starts_with('L'));
+}
+
 /* True if \a a and \a b are the same name up to the duplicate counter of any section, at any
  * depth: the sections of the embedded Linked and Connected Names are compared the same way, so a
  * face built on instance 1's edges and one built on instance 2's are equal up to the counter.
  * Both forms of the counter are ignored, as harness.py's withoutCounter() does: the duplicate
  * count field, and a counter written over the op code, which then matches any op code. So is the
  * instance number of a pattern instance's TRF section: two instances of one pattern are siblings.
+ * So are two copies of one element by two copy makers of one kind (copySiblingSections()), and
+ * an element and its copy: a name and the same name with one more copy section
+ * (isOriginalsCopySection(); ops#523, decision 157).
  * A section that doesn't decode must be equal as text.
  */
 bool sameUpToCounter(std::string_view a, std::string_view b)
@@ -1624,6 +1660,34 @@ bool sameUpToCounter(std::string_view a, std::string_view b)
     }
     auto sectionsA = NameAncestry::splitSections(a);
     auto sectionsB = NameAncestry::splitSections(b);
+    if (sectionsA.size() == sectionsB.size()) {
+        return sameSectionsUpToCounter(sectionsA, sectionsB);
+    }
+    // The original and its copy
+    const auto& longer = sectionsA.size() > sectionsB.size() ? sectionsA : sectionsB;
+    const auto& shorter = sectionsA.size() > sectionsB.size() ? sectionsB : sectionsA;
+    if (shorter.empty() || longer.size() != shorter.size() + 1) {
+        return false;
+    }
+    for (std::size_t i = 1; i < longer.size(); ++i) {
+        if (!isOriginalsCopySection(longer[i])) {
+            continue;
+        }
+        std::vector<std::string_view> without(longer);
+        without.erase(without.begin() + static_cast<std::ptrdiff_t>(i));
+        if (sameSectionsUpToCounter(without, shorter)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// sameUpToCounter() of two names' sections, pairwise
+bool sameSectionsUpToCounter(
+    const std::vector<std::string_view>& sectionsA,
+    const std::vector<std::string_view>& sectionsB
+)
+{
     if (sectionsA.empty() || sectionsA.size() != sectionsB.size()) {
         return false;
     }
@@ -1645,9 +1709,13 @@ bool sameUpToCounter(std::string_view a, std::string_view b)
         // number in a TRF section's index counts as a counter here (ops#55).
         bool instanceSections
             = x.opCode == patternInstanceOpCode && y.opCode == patternInstanceOpCode;
-        if (!opCodesAgree || x.referenceIDs != y.referenceIDs || x.iterationTag != y.iterationTag
-            || (x.index != y.index && !instanceSections) || x.elementType != y.elementType
-            || x.mapperFlags != y.mapperFlags || x.linkedNames.size() != y.linkedNames.size()
+        // So are its copies by two copy makers of one kind, whatever their tags (ops#523)
+        bool copySections = copySiblingSections(x, y);
+        if (!opCodesAgree || x.referenceIDs != y.referenceIDs
+            || (x.iterationTag != y.iterationTag && !copySections)
+            || (x.index != y.index && !instanceSections && !copySections)
+            || x.elementType != y.elementType || x.mapperFlags != y.mapperFlags
+            || x.linkedNames.size() != y.linkedNames.size()
             || x.connectedElements.size() != y.connectedElements.size()) {
             return false;
         }
