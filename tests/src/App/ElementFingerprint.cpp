@@ -345,6 +345,15 @@ TEST(ElementFingerprint, boxRoundTrip)
     EXPECT_EQ(twin.toString(), twinText);
     EXPECT_EQ(ElementFingerprint::fromString(twinText), twin);
 
+    //   a lone order-keyed element (ops#503 D1): its count alone, as version 4 writes it; the
+    //   record read no fingerprint at all when version 5 met D1 (PR 379 round 4's rebase)
+    ElementFingerprint lone = arc;
+    lone.twinCount = 1;
+    const char* loneText =
+        "5|E|Circle|3.14159265359|0.363380227632,1,10|0,0,1|1|1,1,10|0,0,10,1,2,10|_,1|_";
+    EXPECT_EQ(lone.toString(), loneText);
+    EXPECT_EQ(ElementFingerprint::fromString(loneText), lone);
+
     ElementFingerprint line;
     line.type = 'E';
     line.kind = "Line";
@@ -375,6 +384,8 @@ TEST(ElementFingerprint, boxRoundTrip)
              "5|F|BSpline|8|0.5,4,10|_|_|_|0,0,10,1,8,10|1,1,10,1|_",
              "5|F|BSpline|8|0.5,4,10|_|_|_|0,0,10,1,8,10|1,1,10|_",
              "5|F|BSpline|8|0.5,4,10|_|_|_|0,0,10,1,8,10|1,1,10,2.5|_",
+             "5|F|BSpline|8|0.5,4,10|_|_|_|0,0,10,1,8,10|_,2|_",
+             "5|F|BSpline|8|0.5,4,10|_|_|_|0,0,10,1,8,10|_,0|_",
              "4|F|BSpline|8|0.5,4,10|_|_|_|0,0,10,1,8,10|_",
          }) {
         EXPECT_FALSE(ElementFingerprint::fromString(bad).isValid()) << bad;

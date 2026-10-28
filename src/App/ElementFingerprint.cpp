@@ -286,8 +286,12 @@ ElementFingerprint ElementFingerprint::fromString(std::string_view text)
         }
         result.extentMin = Base::Vector3d(corners[0], corners[1], corners[2]);
         result.extentMax = Base::Vector3d(corners[3], corners[4], corners[5]);
+        // A lone order-keyed element: its count alone, 1, as in version 4 (ops#503 D1)
         std::vector<double> twins;
-        if (!parseList(fields[9], twins)) {
+        if (fields[9] == std::string(emptyField) + listDelimiter + "1") {
+            result.twinCount = 1;
+        }
+        else if (!parseList(fields[9], twins)) {
             return {};
         }
         if (!twins.empty()) {
