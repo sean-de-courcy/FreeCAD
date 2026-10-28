@@ -332,11 +332,14 @@ class ElementReferenceTest(unittest.TestCase):
         self._assertFace(compound.Shape, subs[0], 20)
 
     def testLinkInAnotherDocumentNamesMaplessSourceV2(self):
-        """In V2, an App::Link in another document names every element of a source without an
-        element map (a Part::Box) as mapSubElement names an element of a single shape, then adds
-        the boundary section with the Link's ID (ops#56):
-        '<element>;_;<source ID>;MKR;0;<type>;0;IDX,SRC;_|_;_;<Link ID>;EXT;0;<type>;0;_;_'.
-        The cross-document retag named nothing; FreeCAD 1.1.3's V1 names them all (ops#41)."""
+        """In V2, an App::Link in another document names every element of a source whose
+        shape has no history (a Part::Box) by the source's name for it, then adds the boundary
+        section with the Link's ID (ops#56):
+        '_;_;<source ID>;MLN;<id>;<type>;0;_;_|_;_;<Link ID>;EXT;0;<type>;0;_;_'. The cross-document
+        retag named nothing; FreeCAD 1.1.3's V1 names them all (ops#41). The box had no element
+        map, and the first section was the index name
+        '<element>;_;<source ID>;MKR;0;<type>;0;IDX,SRC;_'; a primitive's elements are now named
+        by a verified match (ops#502)."""
         # Arrange
         docB = self._newDocument("ElementRefB")
         docB.HistoryAlgorithm = "V2"
@@ -354,8 +357,9 @@ class ElementReferenceTest(unittest.TestCase):
         shape = Part.getShape(link)
 
         # Assert
-        # the premise: the source names nothing (use another map-less source if this changes)
-        self.assertEqual(box.Shape.ElementMapSize, 0)
+        # the premise: the source names each element by an MLN id
+        self.assertEqual(box.Shape.ElementMapSize, 26)
+        boxNames = box.Shape.ElementReverseMap
         reverseMap = shape.ElementReverseMap
         for kind, elements in (
             ("Face", shape.Faces),
@@ -366,15 +370,14 @@ class ElementReferenceTest(unittest.TestCase):
                 element = f"{kind}{index}"
                 with self.subTest(element=element):
                     # an interned name in its full form (V2i)
+                    source = App.expandMappedName(boxNames[element])
+                    (section,) = App.getDecodedMappedName(source)
+                    self.assertEqual(
+                        (section["opCode"], section["iterationTag"]), ("MLN", str(box.ID))
+                    )
                     self.assertEqual(
                         App.expandMappedName(reverseMap.get(element)),
-                        App.makeEncodedSection(
-                            referenceIDs=[element],
-                            iterationTag=str(box.ID),
-                            opCode="MKR",
-                            elementType=element[0],
-                            mapperFlags=["IDX", "SRC"],
-                        )
+                        source
                         + "|"
                         + App.makeEncodedSection(
                             iterationTag=str(link.ID),
@@ -738,7 +741,8 @@ class ElementReferenceTest(unittest.TestCase):
     def testCrossDocumentCutOnLinkWithTheSourcesId(self):
         """A Part::Cut of an App::Link that has the same ID as the box it links to in another
         document (the Link is object 1 of its document): the box's faces keep the form they have
-        under any other ID, `<face>;_;<box ID>;MKR;...|_;_;<Link ID>;EXT;...`, and trace back
+        under any other ID, `_;_;<box ID>;MLN;<id>;...|_;_;<Link ID>;EXT;...` (the box's own
+        names, MLN ids since ops#502; `<face>;_;<box ID>;MKR;...` before), and trace back
         through the Link to the box. Before, with equal IDs the Link's shape reached the Cut
         unnamed and the Cut named those faces with its own op (ops#56, the MKR/CUT flip)."""
         # Arrange
@@ -778,7 +782,7 @@ class ElementReferenceTest(unittest.TestCase):
             with self.subTest(face=sub, sections=sections, history=history):
                 self.assertEqual(len(sections), 2)
                 self.assertEqual(
-                    (sections[0]["opCode"], sections[0]["iterationTag"]), ("MKR", str(box.ID))
+                    (sections[0]["opCode"], sections[0]["iterationTag"]), ("MLN", str(box.ID))
                 )
                 self.assertEqual(
                     (sections[1]["opCode"], sections[1]["iterationTag"]), ("EXT", str(link.ID))
@@ -846,7 +850,11 @@ class ElementReferenceTest(unittest.TestCase):
         history = binder.getElementHistory("Face1", True, False, True)
         objects = [item[0][0] if isinstance(item[0], tuple) else item[0] for item in history]
         self.assertEqual(objects, ["Asm56#B", "Src56#Src"])
-        self.assertEqual(history[-1][1], "Face6")
+        # the box's name for its Face6, an MLN id (ops#502)
+        self.assertEqual(
+            App.expandMappedName(history[-1][1]),
+            App.expandMappedName(box.Shape.ElementReverseMap["Face6"]),
+        )
 
     # ops#112: one binder, two supports from twin documents (one a Save As copy of the other,
     # so their objects have the same IDs and the same names)

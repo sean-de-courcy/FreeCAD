@@ -457,19 +457,23 @@ TEST(TopoShapeMatch, twinMovedToAFreePlaceLeavesTheOther)
 namespace
 {
 
-// A comb in the XY plane, 2 deep: a base 2 high from \a x to \a x + 12 and three teeth 2 wide,
-// 5 high, at a pitch of 4, 1 in from each end of the base
-TopoDS_Shape comb(double x)
+// A comb in the XY plane, 2 deep: a base 2 high (or  base) from  x to  x + 12 and three
+// teeth 2 wide (or  width, from their left sides), up to y = 7, at a pitch of 4, their left
+// sides 1 in from the base's left end
+TopoDS_Shape comb(double x, double width = 2, double base = 2)
 {
-    std::vector<gp_Pnt> points {gp_Pnt(x, 0, 0), gp_Pnt(x + 12, 0, 0), gp_Pnt(x + 12, 2, 0)};
+    std::vector<gp_Pnt> points {gp_Pnt(x, 0, 0), gp_Pnt(x + 12, 0, 0), gp_Pnt(x + 12, base, 0)};
     for (int tooth = 2; tooth >= 0; --tooth) {
         const double left = x + 1 + 4 * tooth;
         points.insert(
             points.end(),
-            {gp_Pnt(left + 2, 2, 0), gp_Pnt(left + 2, 7, 0), gp_Pnt(left, 7, 0), gp_Pnt(left, 2, 0)}
+            {gp_Pnt(left + width, base, 0),
+             gp_Pnt(left + width, 7, 0),
+             gp_Pnt(left, 7, 0),
+             gp_Pnt(left, base, 0)}
         );
     }
-    points.emplace_back(x, 2, 0);
+    points.emplace_back(x, base, 0);
     const TopoDS_Face profile = BRepBuilderAPI_MakeFace(polyline(points, true)).Face();
     return BRepPrimAPI_MakePrism(profile, gp_Vec(0, 0, 2)).Shape();
 }
@@ -500,6 +504,37 @@ TEST(TopoShapeMatch, combSlidByItsPitchTakesFreshIds)
     EXPECT_TRUE(matches.faces.empty());
     EXPECT_TRUE(matches.edges.empty());
     EXPECT_TRUE(matches.vertexes.empty());
+}
+
+// Decision 174's risk case: the comb slid by its pitch, its teeth narrowed from their left
+// sides and its base thinned. Nothing is where it was but the teeth's top left corners, each at
+// the next tooth's old corner (seams), and each tooth top overlaps the next tooth's old top
+// alone (rung 4). The front and back faces (rung 4 too) confirm the seams: left out one at a
+// time, the tops would anchor one another and keep the neighbouring tooth's ids. The tops have
+// twins on their plane, so their anchor must hold without any rung-4 face: none keeps the id
+// of the old top at its place
+TEST(TopoShapeMatch, combTeethSlidAndNarrowedKeepNoNeighboursTop)
+{
+    const TopoDS_Shape before = comb(0);
+    const TopoDS_Shape after = comb(4, 1.8, 1.5);
+    auto faceCentredAt = [](const TopoDS_Shape& shape, const gp_Pnt& point) {
+        const auto map = elements(shape, TopAbs_FACE);
+        for (int i = 1; i <= map.Extent(); ++i) {
+            if (centreOf(map(i)).Distance(point) < 1e-6) {
+                return i;
+            }
+        }
+        return 0;
+    };
+    const auto matches = Part::matchElements(before, after, false);
+    for (const double left : {5.0, 9.0}) {
+        const int top = faceCentredAt(after, gp_Pnt(left + 0.9, 7, 1));
+        const int oldTop = faceCentredAt(before, gp_Pnt(left + 1, 7, 1));
+        ASSERT_NE(top, 0);
+        ASSERT_NE(oldTop, 0);
+        const auto it = matches.faces.find(top);
+        EXPECT_FALSE(it != matches.faces.end() && it->second == oldTop) << left;
+    }
 }
 
 TEST(TopoShapeMatch, squareWaveSlidByItsPeriodTakesFreshIds)
