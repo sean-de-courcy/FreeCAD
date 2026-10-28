@@ -51,8 +51,8 @@ Edge c=(18.0000,0.0000,2.0000) m=4.0000 : ~3vb408784fg3o|_;_;12;TRF;3;E;0;MOD;_
 Edge c=(18.0000,2.0000,0.0000) m=4.0000 : ~u843krupe286e|_;_;12;TRF;3;E;0;MOD;_
 Edge c=(18.0000,2.0000,4.0000) m=4.0000 : ~qcgvpf6l30lm2|_;_;12;TRF;3;E;0;MOD;_
 Edge c=(18.0000,4.0000,2.0000) m=4.0000 : ~o5qhgv9jhulpa|_;_;12;TRF;3;E;0;MOD;_
-Edge c=(2.5000,0.0000,0.0000) m=5.0000 : ~lm246vv68i38c|_;_;12;FUS;0;E;0;MOD;~rfrjt6b66gkog,~1rs7ds54chr7g,~8p1736l2v05tq,~lf7qk4nq382m6
-Edge c=(2.5000,0.0000,4.0000) m=5.0000 : ~phf3m0e65r5se|_;_;12;FUS;0;E;0;MOD;~rfrjt6b66gkog,~v6v778ku4md9u,~hj2e32tnj2k28,~1rs7ds54chr7g
+Edge c=(2.5000,0.0000,0.0000) m=5.0000 : ~lm246vv68i38c|_;_;12;FUS;0;E;0;MOD;~jpfq4ael8l73i,~1rs7ds54chr7g,~8p1736l2v05tq,~lf7qk4nq382m6
+Edge c=(2.5000,0.0000,4.0000) m=5.0000 : ~phf3m0e65r5se|_;_;12;FUS;0;E;0;MOD;~2frmlimsblgcm,~v6v778ku4md9u,~hj2e32tnj2k28,~1rs7ds54chr7g
 Edge c=(2.5000,4.0000,0.0000) m=5.0000 : ~aa11mlh1i5cti|_;_;12;FUS;0;E;0;MOD;~jpfq4ael8l73i,~1rs7ds54chr7g,~lft06nf6n356s,~gf57ldevbdbfa
 Edge c=(2.5000,4.0000,4.0000) m=5.0000 : ~ia9akld73ivrq|_;_;12;FUS;0;E;0;MOD;~2frmlimsblgcm,~f6k0342t0852e,~3i36ndocqf848,~1rs7ds54chr7g
 Edge c=(5.0000,0.0000,2.0000) m=4.0000 : ~mbg79or9e47t6|_;_;12;TRF;2;E;0;MOD;_
@@ -67,8 +67,8 @@ Edge c=(8.0000,0.0000,2.0000) m=4.0000 : _;~dlsjd49katat2;11;XTR;0;E;0;GEN;_
 Edge c=(8.0000,2.0000,0.0000) m=4.0000 : g2;_;10;SKT;0;E;0;SRC;_
 Edge c=(8.0000,2.0000,4.0000) m=4.0000 : _;~u843krupe286e;11;XTR;0;E;0;PRJ;_
 Edge c=(8.0000,4.0000,2.0000) m=4.0000 : _;~7vp3rasglmhrs;11;XTR;0;E;0;GEN;_
-Edge c=(9.0000,0.0000,0.0000) m=2.0000 : ~lf9j04fe2rktq|_;_;12;FUS;0;E;0;MOD;~gq8607f37loea,~ubb29dlcnd34m,~dlsjd49katat2
-Edge c=(9.0000,0.0000,4.0000) m=2.0000 : ~lk4qjn54b658m|_;_;12;FUS;0;E;0;MOD;~gq8607f37loea,~7rumj0imfjp3e,~jlba9iqn7k3sk
+Edge c=(9.0000,0.0000,0.0000) m=2.0000 : ~lf9j04fe2rktq|_;_;12;FUS;0;E;0;MOD;~9u0d9m38kllqo,~ubb29dlcnd34m,~dlsjd49katat2
+Edge c=(9.0000,0.0000,4.0000) m=2.0000 : ~lk4qjn54b658m|_;_;12;FUS;0;E;0;MOD;~bc1ang8a3q0j2,~7rumj0imfjp3e,~jlba9iqn7k3sk
 Edge c=(9.0000,4.0000,0.0000) m=2.0000 : ~qjupjhgfuqkne|_;_;12;FUS;0;E;0;MOD;~9u0d9m38kllqo,~7vp3rasglmhrs,~ej2ol5fflsceg
 Edge c=(9.0000,4.0000,4.0000) m=2.0000 : ~95ifsa9fe7bpm|_;_;12;FUS;0;E;0;MOD;~bc1ang8a3q0j2,~v8t41tug1mvu0,~1uvj0h7ct8af2
 Face c=(0.0000,2.0000,2.0000) m=16.0000 : _;~580bhi7km08fm;11;XTR;0;F;0;GEN;_
