@@ -1615,12 +1615,13 @@ class TestTopologicalNamingProblem(unittest.TestCase):
         plane.Length = 10
         plane.Width = 10
         self.Doc.recompute()
-        self.assertEqual(plane.Shape.ElementMapSize, 0)
+        # a primitive's face, edges and vertexes are named by MLN ids (ops#502): 1 + 4 + 4
+        self.assertEqual(plane.Shape.ElementMapSize, 9)
         pad = self.Doc.addObject("PartDesign::Pad", "Pad")
         pad.Profile = plane
         self.Doc.recompute()
         # Assert
-        self.assertEqual(plane.Shape.ElementMapSize, 0)
+        self.assertEqual(plane.Shape.ElementMapSize, 9)
         self.assertEqual(pad.Shape.ElementMapSize, 26)
 
     def testChangeSketch(self):
@@ -3719,9 +3720,9 @@ class TestTopologicalNamingProblem(unittest.TestCase):
         finally:
             App.closeDocument(doc.Name)
 
-    def assertBodyNamesMaplessTip(self, algorithm, expectedName):
-        """A Body whose tip has no element map names each element of its shape
-        expectedName(element, tip) (ops#35)."""
+    def assertBodyNamesMaplessTip(self, algorithm, expectedName, tipNames=0):
+        """A Body whose tip's shape has no history names each element of its shape
+        expectedName(element, tip) (ops#35). The tip has `tipNames` names of its own."""
         # Arrange
         doc = App.newDocument(f"BodyMaplessTip{algorithm}")
         try:
@@ -3735,8 +3736,8 @@ class TestTopologicalNamingProblem(unittest.TestCase):
             doc.recompute()
 
             # Assert
-            # the premise: the tip names nothing (use another map-less tip if this changes)
-            self.assertEqual(box.Shape.ElementMapSize, 0)
+            # the premise: the tip names nothing in V1, each element by an MLN id in V2
+            self.assertEqual(box.Shape.ElementMapSize, tipNames)
             shape = body.Shape
             reverseMap = shape.ElementReverseMap
             for kind, elements in (
@@ -3761,19 +3762,19 @@ class TestTopologicalNamingProblem(unittest.TestCase):
         )
 
     def testV2BodyNamesMaplessTip(self):
-        """In V2, a Body names each element of a tip without an element map as mapSubElement
-        names an element of a single shape: '<element>;_;<tip ID>;MKR;0;<type>;0;IDX,SRC;_'
-        (ops#35)."""
-        self.assertBodyNamesMaplessTip(
-            "V2",
-            lambda element, tip: App.makeEncodedSection(
-                referenceIDs=[element],
-                iterationTag=str(tip.ID),
-                opCode="MKR",
-                elementType=element[0],
-                mapperFlags=["IDX", "SRC"],
-            ),
-        )
+        """In V2, a Body names each element of a tip whose shape has no history by the tip's
+        name for it, an MLN id: '_;_;<tip ID>;MLN;<id>;<type>;0;_;_' (ops#35). The tip had no
+        element map, and the Body named the element as mapSubElement names an element of a
+        single shape, '<element>;_;<tip ID>;MKR;0;<type>;0;IDX,SRC;_'; a primitive's elements are
+        now named by a verified match (ops#502)."""
+
+        def expectedName(element, tip):
+            name = tip.Shape.ElementReverseMap[element]
+            (section,) = App.getDecodedMappedName(App.expandMappedName(name))
+            self.assertEqual((section["opCode"], section["iterationTag"]), ("MLN", str(tip.ID)))
+            return name
+
+        self.assertBodyNamesMaplessTip("V2", expectedName, tipNames=26)
 
     def tearDown(self):
         """Clean up our test, optionally preserving the test document"""
