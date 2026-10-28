@@ -1756,15 +1756,18 @@ std::string placeAmong(std::size_t k, std::size_t n)
 }
 
 /// The places of `count` members told apart by nothing but their order (twinOrder's), in that
-/// order: a lone member `0`, as before; twins Index `0` and `<k>of<n>`, with ORD, so that the
-/// solver takes them for twins (counter siblings) and re-checks an exact hit that moved.
-std::vector<TwinPlace> twinPlaces(std::size_t count)
+/// order: a lone member `0`, as before; twins Index `0` and `<k>of<n>`, with ORD if `ordered`, so
+/// that the solver takes them for twins (counter siblings) and re-checks an exact hit that moved.
+/// Twins in the maker's order (twinOrder's `makerOrder`, decision 158 Q1) go without ORD
+/// (decision 173 (2)): that order follows the profile and the spine through a rigid motion, so a
+/// moved exact hit on one of them is the same twin, as on `integration`.
+std::vector<TwinPlace> twinPlaces(std::size_t count, bool ordered = true)
 {
     std::vector<TwinPlace> places(count);
     if (count > 1) {
         for (std::size_t k = 0; k < count; ++k) {
             places[k].duplicateCount = placeAmong(k, count);
-            places[k].ordered = true;
+            places[k].ordered = ordered;
         }
     }
     return places;
@@ -2018,14 +2021,19 @@ bool liesOn(const TopoDS_Shape& member, const TopoDS_Shape& source)
 /// circle), as for vertexes generated along a closed edge (NamingMap::build's exception: the
 /// maker lists them from the edge's seam, which an edit can move past one of them). Ordering such
 /// members by their coordinates would rename them under a rigid motion; the maker's order is
-/// the profile's and the spine's. Ties keep the order given. Whatever decides the order, the
-/// twins' names carry ORD (twinPlaces), so the solver re-checks a twin's exact hit that moved.
+/// the profile's and the spine's; `makerOrder`, if given, is set for these two cases. Ties keep
+/// the order given. Elsewhere the twins' names carry ORD (twinPlaces), so the solver re-checks a
+/// twin's exact hit that moved.
 std::vector<std::size_t> twinOrder(
     const std::vector<TopoDS_Shape>& members,
     const std::vector<TopoDS_Shape>& sources,
-    const TopLoc_Location& frame
+    const TopLoc_Location& frame,
+    bool* makerOrder = nullptr
 )
 {
+    if (makerOrder) {
+        *makerOrder = false;
+    }
     std::vector<std::size_t> given(members.size());
     std::iota(given.begin(), given.end(), 0);
     if (members.size() < 2) {
@@ -2033,6 +2041,9 @@ std::vector<std::size_t> twinOrder(
     }
     if (!sources.empty() && !sources.front().IsNull()
         && sources.front().ShapeType() == TopAbs_VERTEX) {
+        if (makerOrder) {
+            *makerOrder = true;
+        }
         return given;
     }
     TopoDS_Shape edge;
@@ -2053,6 +2064,9 @@ std::vector<std::size_t> twinOrder(
     if (!placedOn.IsNull()) {
         for (const auto& member : members) {
             if (!liesOn(member, placedOn)) {
+                if (makerOrder) {
+                    *makerOrder = true;
+                }
                 return given;
             }
         }
@@ -3552,9 +3566,14 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                 for (std::size_t i : group) {
                     shapes.push_back(projectedPieces[i].shape);
                 }
-                const std::vector<std::size_t> order
-                    = twinOrder(shapes, {projectedPieces[group.front()].source}, frame);
-                const std::vector<TwinPlace> places = twinPlaces(order.size());
+                bool makerOrder = false;
+                const std::vector<std::size_t> order = twinOrder(
+                    shapes,
+                    {projectedPieces[group.front()].source},
+                    frame,
+                    &makerOrder
+                );
+                const std::vector<TwinPlace> places = twinPlaces(order.size(), !makerOrder);
                 for (std::size_t k = 0; k < order.size(); ++k) {
                     const ProjectedPiece& piece = projectedPieces[group[order[k]]];
                     std::vector<std::string> flags = piece.flags;
@@ -3722,9 +3741,11 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                     for (std::size_t i : indexes) {
                         shapes.push_back(modifiedShapeEntry.first[i].newElementShape);
                     }
+                    bool makerOrder = false;
                     const std::vector<std::size_t> order
-                        = twinOrder(shapes, {mapValue.incomingElementShape}, frame);
-                    const std::vector<TwinPlace> typePlaces = twinPlaces(order.size());
+                        = twinOrder(shapes, {mapValue.incomingElementShape}, frame, &makerOrder);
+                    const std::vector<TwinPlace> typePlaces
+                        = twinPlaces(order.size(), !makerOrder);
                     for (std::size_t k = 0; k < order.size(); ++k) {
                         places[indexes[order[k]]] = typePlaces[k];
                     }
@@ -4006,15 +4027,16 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                 for (std::size_t i : indexes) {
                     shapes.push_back(members[i].newElementShape);
                 }
+                bool makerOrder = false;
                 const std::vector<std::size_t> order
-                    = twinOrder(shapes, delayedSources[entryIndex], frame);
+                    = twinOrder(shapes, delayedSources[entryIndex], frame, &makerOrder);
                 std::vector<TopoDS_Shape> ordered;
                 for (std::size_t k : order) {
                     ordered.push_back(shapes[k]);
                 }
                 const std::vector<TwinPlace> typePlaces = type == 'V' && !crossedEdge.IsNull()
                     ? crossingPlaces(ordered, crossedEdge, crossingFace)
-                    : twinPlaces(ordered.size());
+                    : twinPlaces(ordered.size(), !makerOrder);
                 for (std::size_t k = 0; k < order.size(); ++k) {
                     places[indexes[order[k]]] = typePlaces[k];
                 }
