@@ -3832,33 +3832,28 @@ App::DocumentObjectExecReturn* Pipe::execute()
             EarlierSpineStartsOf,
             EarlierSpineStartNames
         );
+        // The profile's frame, in the body (its shape's placement: a sketch's, with its support's
+        // and its offset)
+        const gp_Trsf profileFrame = profileShape.getShape().Location().Transformation();
         if (startStored) {
             const gp_Trsf inPipe = invObjLoc.Transformation();
             // The stored points of \a record, in the pipe's frame; false for a malformed one. The
-            // record ends with the pipe's frame at its recompute (its origin and the ends of its
+            // record ends with the profile's frame at its recompute (its origin and the ends of its
             // x and y axes, in the body): a loop not at its stored place in the body but at it in
             // that frame, turned or moved with the profile (the whole model turned, K4b's
             // `RingTurned`), is read in that frame for its own input. Read in the body, the turned
-            // ring's start went
-            // to the vertex a translation fit least badly, and the start's key and the legs' names
-            // with it (a rectangle turns onto itself four ways, so no fit tells them apart)
+            // ring's start went to the vertex a translation fit least badly, and the start's key
+            // and the legs' names with it (a rectangle turns onto itself four ways, so no fit
+            // tells them apart). The profile's frame, not the pipe's: that is its base's
+            // placement, or the profile's support's, and turns with the ring only for a first
+            // pipe with an unattached profile (the review of round 4, R1). A loop turned in no
+            // stored frame (its lines turned in their sketch) is read in the body, and every
+            // leg whose line came from another place is renamed: loud (`RingTurned180InItsSketch`)
             auto read = [&](const StartRecord& record) {
                 std::vector<Base::Vector3d> stored = record.points;
-                std::optional<gp_Trsf> inFrame;
-                if (stored.size() >= 8 && stored.size() % 2 == 0) {
-                    auto point = [&](size_t i) {
-                        return gp_Pnt(stored[i].x, stored[i].y, stored[i].z);
-                    };
-                    const size_t f = stored.size() - 3;
-                    const gp_Vec x(point(f), point(f + 1));
-                    const gp_Vec y(point(f), point(f + 2));
-                    if (x.Crossed(y).Magnitude() > Precision::Confusion()) {
-                        gp_Trsf frame;
-                        frame.SetTransformation(gp_Ax3(point(f), gp_Dir(x.Crossed(y)), gp_Dir(x)));
-                        inFrame = frame;
-                    }
-                    stored.resize(f);
-                }
+                auto point = [&](size_t i) {
+                    return gp_Pnt(stored[i].x, stored[i].y, stored[i].z);
+                };
                 auto fill = [&](const gp_Trsf& to) {
                     auto in = [&](size_t i) {
                         return gp_Pnt(stored[i].x, stored[i].y, stored[i].z).Transformed(to);
@@ -3879,17 +3874,28 @@ App::DocumentObjectExecReturn* Pipe::execute()
                 storedWay.reset();
                 storedAtEnd.reset();
                 storedNames.clear();
-                if (stored.size() < 5 || stored.size() % 2 == 0) {
+                // 2n + 1 points and the frame's 3
+                if (stored.size() < 8 || stored.size() % 2 == 1) {
                     return false;
                 }
+                const size_t f = stored.size() - 3;
+                const gp_Vec x(point(f), point(f + 1));
+                const gp_Vec y(point(f), point(f + 2));
+                if (x.Crossed(y).Magnitude() <= Precision::Confusion()) {
+                    return false;
+                }
+                // From the body into the stored frame
+                gp_Trsf intoFrame;
+                intoFrame.SetTransformation(gp_Ax3(point(f), gp_Dir(x.Crossed(y)), gp_Dir(x)));
+                stored.resize(f);
                 fill(inPipe);
                 // In the frame only for its own input: another spine elsewhere, the profile moved
                 // onto it, still decides as a new pipe (CC2)
                 // anchor: rung 4 (the stored places), in the body, or exactly in place in the
-                // pipe's stored frame
-                if (inFrame && sameInput(record.of, spineInput)
+                // profile's stored frame
+                if (sameInput(record.of, spineInput)
                     && !closedInPlace(storedVertices, storedMiddles, spineInOrder)) {
-                    fill(*inFrame);
+                    fill(inPipe * profileFrame * intoFrame);
                     if (!closedInPlace(storedVertices, storedMiddles, spineInOrder)) {
                         fill(inPipe);
                     }
@@ -4238,9 +4244,9 @@ App::DocumentObjectExecReturn* Pipe::execute()
             for (size_t k = 1; k < pathEdges.size(); ++k) {
                 points.push_back(middleOf(pathEdges[k]).Transformed(inBody));
             }
-            // and the pipe's frame, its origin and the ends of its x and y axes, in the body
+            // and the profile's frame, its origin and the ends of its x and y axes, in the body
             for (const gp_Pnt& axis : {gp_Pnt(0, 0, 0), gp_Pnt(1, 0, 0), gp_Pnt(0, 1, 0)}) {
-                points.push_back(axis.Transformed(inBody));
+                points.push_back(axis.Transformed(profileFrame));
             }
             // The other inputs' records stay, the latest first, at most 3 (F1)
             std::vector<Base::Vector3d> earlier;

@@ -3579,7 +3579,7 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
                 self.doc.recompute()
                 self.assertEqual(self.profileNamed(pipe, profile), named)
                 self.assertNoneMovedSilently(pipe, volume, points, lambda place: True)
-                # The stored start, way, end, the other vertex and middle, and the pipe's frame
+                # The stored start, way, end, the other vertex and middle, and the profile's frame
                 # stay as they were
                 self.assertEqual(len(pipe.SpineStart), 8)
                 for before, after in zip(stored, pipe.SpineStart):
@@ -4119,6 +4119,65 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
         pipe.touch()
         self.doc.recompute()
         self.assertEqual(self.ringNames(pipe), redrawn)
+
+    def testClosedRingTurnedWithAttachedProfileKeepsStart(self):
+        """The ring and its profile (at the bottom left corner) turned about Z, 120 and 150
+        degrees: with the profile sketch attached to the XY plane (its offset turned), or after a
+        base feature (a Pad of a circle about Z, which the turn leaves as it was). The pipe's own
+        frame (its base's placement, or the profile's support's) doesn't turn; the profile's does,
+        and the record is read in it: the start turns with the ring, and every point on the pipe
+        follows the turn, valid and without a warning. Read in the body, the start went to the
+        vertex a translation fit picked (the bottom right), and the profile's names at the start
+        with it, silently (the review of fork PR 383 round 4, R1)."""
+        for kind, turn in (("attached", 120), ("attached", 150), ("base", 120)):
+            self.tearDown()
+            self.setUp()
+            with self.subTest(kind=kind, turn=turn):
+                if kind == "base":
+                    circle = [Part.Circle(V(0, 0, 0), V(0, 0, 1), 3)]
+                    pad = models.pad(self.body, models.sketch(self.doc, "Base", circle, self.body), 3)
+                    self.doc.recompute()
+                    self.assertTrue(pad.isValid(), pad.getStatusString())
+                profile, pipe = self.ring(0, 0)
+                path = pipe.Spine[0]
+                offset = App.Placement(profile.Placement)
+                if kind == "attached":
+                    xy = [
+                        f
+                        for f in self.body.Origin.OriginFeatures
+                        if "XY_Plane" in (getattr(f, "Role", ""), f.Name)
+                    ][0]
+                    profile.AttachmentSupport = [(xy, "")]
+                    profile.MapMode = "FlatFace"
+                    profile.AttachmentOffset = offset
+                    self.doc.recompute()
+                    self.assertTrue(pipe.isValid(), pipe.getStatusString())
+                start = V(pipe.SpineStart[0])
+                volume = pipe.Shape.Volume
+                points = self.attach(pipe)
+                rotation = App.Rotation(V(0, 0, 1), turn)
+                path.Placement = App.Placement(V(), rotation.multiply(XZ.Rotation))
+                turned = App.Placement(V(), rotation).multiply(offset)
+                if kind == "attached":
+                    profile.AttachmentOffset = turned
+                else:
+                    profile.Placement = turned
+                self.doc.recompute()
+                self.assertTrue(pipe.isValid(), pipe.getStatusString())
+                self.assertAlmostEqual(pipe.Shape.Volume, volume, 4)
+                self.assertLess((V(pipe.SpineStart[0]) - rotation.multVec(start)).Length, 1e-6)
+                for point, before in points.items():
+                    levels = [e.get("warning_level") for e in App.getReferenceReport(point)]
+                    now = point.Placement.Base
+                    # Within the base: its edges where the pipe's corner meets it change (its seam
+                    # stays at x = 3 as the corner turns), so they aren't checked
+                    if kind == "base" and V(before.x, before.y, 0).Length < 3 + 1e-6 and before.z < 3 + 1e-6:
+                        continue
+                    self.assertTrue(point.isValid(), (point.Name, before))
+                    self.assertFalse(any(levels), (point.Name, before, levels))
+                    self.assertLess(
+                        (now - rotation.multVec(before)).Length, 1e-6, (point.Name, before, now)
+                    )
 
     def testClosedRingReorderedAndReversedRenamesNothing(self):
         """The profile slid along its leg (4 to 16), then the lines listed from the top right
