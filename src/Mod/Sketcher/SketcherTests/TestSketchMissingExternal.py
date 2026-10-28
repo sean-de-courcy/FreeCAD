@@ -1021,6 +1021,57 @@ class TestSketchFaceLinkPairing(unittest.TestCase):
         self.doc.recompute()
         self.assertBreaks()
 
+    def splineBackModel(self, hole=False):
+        """The square with its back side a B-spline (poles (20, 20), (10, 23), (0, 20), degree
+        2: geometry 2), and a 10 x 7 rectangular hole (5..15 x 5..12) if `hole`."""
+        s = self.scale
+        spline = Part.BSplineCurve()
+        spline.buildFromPoles([V(20 * s, 20 * s, 0), V(10 * s, 23 * s, 0), V(0, 20 * s, 0)])
+        geometry = [
+            Part.LineSegment(V(0, 0, 0), V(20 * s, 0, 0)),
+            Part.LineSegment(V(20 * s, 0, 0), V(20 * s, 20 * s, 0)),
+            spline,
+            Part.LineSegment(V(0, 20 * s, 0), V(0, 0, 0)),
+        ]
+        if hole:
+            corners = [(5, 5), (15, 5), (15, 12), (5, 12)]
+            for a, b in zip(corners, corners[1:] + corners[:1]):
+                start, end = V(a[0] * s, a[1] * s, 0), V(b[0] * s, b[1] * s, 0)
+                geometry.append(Part.LineSegment(start, end))
+        self.makeModel([], geometry=geometry)
+
+    def testMovedByWidthWithASplineSide(self):
+        """Review pr384-r5p (F1): round 3's moved-by-width family with the back side a B-spline:
+        the square moved 20 to the right, every geometry keeping its ID, and its front-right
+        corner cut. The B-spline is its old one moved by the same v: the left line stays."""
+        s = self.scale
+        self.splineBackModel()
+        self.constrainCircle("x", 0)
+        geometry = self.profile.Geometry
+        geometry[2].translate(V(20 * s, 0, 0))
+        self.profile.Geometry = geometry
+        self.moveLines(
+            {
+                0: ((20, 0), (35, 0)),
+                1: ((40, 5), (40, 20)),
+                3: ((20, 20), (20, 0)),
+            }
+        )
+        self.addLines([(35, 0), (40, 5)])
+        self.doc.recompute()
+        self.assertStaysOn("x", 20)
+
+    def testCornerCutWithASplineSideAndAHole(self):
+        """Review pr384-r5p (F2): the square with a B-spline back side and a rectangular hole,
+        its front-right corner cut. The outer loop's area is exact (a polynomial B-spline), so
+        the place votes hold and the front line stays."""
+        self.splineBackModel(hole=True)
+        self.constrainCircle("y", 0, (0, 20))
+        self.moveLines({0: ((0, 0), (15, 0)), 1: ((20, 5), (20, 20))})
+        self.addLines([(15, 0), (20, 5)])
+        self.doc.recompute()
+        self.assertStaysOn("y", 0, (0, 15))
+
     def testMovedWithOnlyParallelNamesBreaks(self):
         """PLAN decision 167: a stadium (the left line x = 0 and the right line x = 20, 0..20,
         joined by arcs r 10 below and above) moved 30 to the right, every geometry keeping its

@@ -3427,6 +3427,53 @@ double sweptArea(const Part::GeomBoundedCurve* curve, bool& exact)
         return cross(centre, curve->pointAtParameter(t1) - curve->pointAtParameter(t0))
             + cross(a, b) * (t1 - t0);
     }
+    // a polynomial B-spline: on each knot span x y' - y x' is a polynomial of degree 2p - 1,
+    // which Gauss-Legendre with p + 1 points integrates exactly
+    auto* spline = freecad_cast<const Part::GeomBSplineCurve*>(curve);
+    if (spline && !spline->isRational()) {
+        const int n = spline->getDegree() + 1;
+        // the nodes on [-1, 1] (Newton's method on the Legendre polynomial P_n) and weights
+        auto legendre = [n](double z, double& derivative) {
+            double previous = 1.0;
+            double value = z;
+            for (int j = 2; j <= n; ++j) {
+                const double next = ((2 * j - 1) * z * value - (j - 1) * previous) / j;
+                previous = value;
+                value = next;
+            }
+            derivative = n * (z * value - previous) / (z * z - 1.0);
+            return value;
+        };
+        std::vector<std::pair<double, double>> nodes;
+        for (int i = 0; i < n; ++i) {
+            double z = std::cos(std::numbers::pi * (i + 0.75) / (n + 0.5));
+            double derivative = 1.0;
+            for (int step = 0; step < 100; ++step) {
+                const double change = legendre(z, derivative) / derivative;
+                z -= change;
+                if (std::abs(change) < 1e-15) {
+                    break;
+                }
+            }
+            legendre(z, derivative);
+            nodes.emplace_back(z, 2.0 / ((1.0 - z * z) * derivative * derivative));
+        }
+        double sum = 0.0;
+        const auto knots = spline->getKnots();
+        for (std::size_t s = 0; s + 1 < knots.size(); ++s) {
+            const double lo = std::max(knots[s], t0);
+            const double hi = std::min(knots[s + 1], t1);
+            if (hi <= lo) {
+                continue;
+            }
+            for (const auto& [z, weight] : nodes) {
+                const double t = (lo + hi) / 2 + z * (hi - lo) / 2;
+                sum += weight * (hi - lo) / 2
+                    * cross(curve->pointAtParameter(t), curve->firstDerivativeAtParameter(t));
+            }
+        }
+        return sum;
+    }
     exact = false;
     constexpr int samples = 32;
     double sum = 0.0;
@@ -4085,8 +4132,9 @@ std::vector<int> pairGeometries(const std::vector<const Part::Geometry*>& olds,
         // breaks where nothing else settles it (PLAN decision 167). A circle's or an ellipse's
         // name can't lie (the support's bonus). Except where the whole loop moved: every pair on
         // it that keeps its name is its old geometry moved by one translation v (a line on its
-        // old line's supporting line shifted by v, an arc on its old circle shifted by v, within
-        // the tolerance), and v is fixed by two of those lines that aren't parallel. A face moved
+        // old line's supporting line shifted by v, an arc on its old circle shifted by v, an arc of
+        // an ellipse or a B-spline its old one shifted by v whole, within the tolerance), and v is
+        // fixed by two of those lines that aren't parallel. A face moved
         // with a new corner edge (by its width, or through a Placement, an AttachmentOffset or
         // its support) keeps its lines. What remains: an Id reissued to a line exactly on the
         // moved line's place pairs with it.
@@ -4166,6 +4214,49 @@ std::vector<int> pairGeometries(const std::vector<const Part::Geometry*>& olds,
                         && Base::Distance(a->getCenter() + v, b->getCenter())
                                 + std::abs(a->getRadius() - b->getRadius())
                             <= tolerance;
+                }
+                if (auto* a = freecad_cast<const Part::GeomArcOfEllipse*>(olds[i])) {
+                    auto* b = freecad_cast<const Part::GeomArcOfEllipse*>(news[k]);
+                    if (!b) {
+                        return false;
+                    }
+                    const auto axis = a->getMajorAxisDir();
+                    const auto other = b->getMajorAxisDir();
+                    return Base::Distance(a->getCenter() + v, b->getCenter())
+                        + std::abs(a->getMajorRadius() - b->getMajorRadius())
+                        + std::abs(a->getMinorRadius() - b->getMinorRadius())
+                        + a->getMajorRadius() * std::abs(axis.x * other.y - axis.y * other.x)
+                        <= tolerance;
+                }
+                // a B-spline: the same degree, knots and weights, each pole moved by v (one
+                // turned round doesn't count: it breaks)
+                if (auto* a = freecad_cast<const Part::GeomBSplineCurve*>(olds[i])) {
+                    auto* b = freecad_cast<const Part::GeomBSplineCurve*>(news[k]);
+                    if (!b || a->getDegree() != b->getDegree()
+                        || a->getMultiplicities() != b->getMultiplicities()) {
+                        return false;
+                    }
+                    const auto knots = a->getKnots();
+                    const auto otherKnots = b->getKnots();
+                    const auto weights = a->getWeights();
+                    const auto otherWeights = b->getWeights();
+                    const auto poles = a->getPoles();
+                    const auto otherPoles = b->getPoles();
+                    if (knots.size() != otherKnots.size() || poles.size() != otherPoles.size()) {
+                        return false;
+                    }
+                    for (std::size_t q = 0; q < knots.size(); ++q) {
+                        if (std::abs(knots[q] - otherKnots[q]) > Precision::PConfusion()) {
+                            return false;
+                        }
+                    }
+                    for (std::size_t q = 0; q < poles.size(); ++q) {
+                        if (std::abs(weights[q] - otherWeights[q]) > Precision::PConfusion()
+                            || Base::Distance(poles[q] + v, otherPoles[q]) > tolerance) {
+                            return false;
+                        }
+                    }
+                    return true;
                 }
                 return false;
             });
