@@ -4156,6 +4156,75 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         Pool& pool = *state.pool;
         const std::string& oldName = state.oldName;
 
+        // A retired id (I-C5, FreeCAD-CH, the class C ruling of 10-28, ops#502). A history-less
+        // result (a primitive, a script's or a Draft object's shape) names its elements by ids
+        // its producer carries over by a verified match (`MLN`, Part's TopoShapeMatch.h) and
+        // never reuses. The saved name being one such section, and no element of the target,
+        // whose elements carry such names, holding its id, the producer has verified that no
+        // element of its new result is the old one: an element at the same place is another
+        // one (a twin moved onto it, a seam). The reference breaks, never picks by place or by
+        // tier 3; listed are the elements at the saved place, then those of the old element's
+        // kind and size nearest its centre without tier 3's distance cap (a twin 20 mm away).
+        auto matchSection = [](const std::string& name) -> const DecodedMappedSection* {
+            if (name.find(";MLN;") == std::string::npos
+                || NameAncestry::splitSections(name).size() != 1) {
+                return nullptr;
+            }
+            const DecodedMappedSection& section = decodeSection(name);
+            return section.opCode == "MLN" && !section.hasMapperFlag(MAPPER_FLAG_INDEX)
+                ? &section
+                : nullptr;
+        };
+        if (const DecodedMappedSection* section = matchSection(oldName)) {
+            bool named = false;
+            bool held = false;
+            for (const auto& element : pool.elements) {
+                for (const auto& name : element.names) {
+                    const DecodedMappedSection* other = matchSection(name);
+                    named = named || other != nullptr;
+                    held = held
+                        || (other && other->index == section->index
+                            && other->elementType == section->elementType);
+                }
+            }
+            if (named && !held) {
+                state.decided = true;
+                const ElementFingerprint* saved = savedFingerprint(members);
+                state.saved = saved;
+                std::vector<int> place;
+                std::vector<int> alike;
+                for (std::size_t k = 0; saved && k < pool.elements.size(); ++k) {
+                    const ElementFingerprint& now = fingerprintOf(pool.elements[k]);
+                    if (!now.isValid()) {
+                        continue;
+                    }
+                    if (atSamePlace(*saved,
+                                    now,
+                                    input.diagonal,
+                                    input.tolerances,
+                                    input.continuationDistance)) {
+                        place.push_back(static_cast<int>(k));
+                    }
+                    else if (intrinsicAgrees(*saved, now, input.tolerances)) {
+                        alike.push_back(static_cast<int>(k));
+                    }
+                }
+                std::string there;
+                for (int k : place) {
+                    there += (there.empty() ? "" : ", ") + pool.elements[k].index;
+                }
+                state.outcome.evidence = "retired: the producer renamed this element; "
+                    + (there.empty() ? std::string("nothing sits where it was")
+                                     : there + (place.size() > 1 ? " sit" : " sits")
+                             + " where it was and " + (place.size() > 1 ? "are" : "is")
+                             + " not it");
+                listByDistance(state, place, "retired");
+                const auto n = state.outcome.candidates.size();
+                listByDistance(state, alike, "geometric", n < 8 ? 8 - n : std::size_t(0));
+                continue;
+            }
+        }
+
         // The pool for this entry: tier-0 elements only as proven merges, and never an element
         // the user rejected for one of the members (ops#127).
         std::set<std::string> rejected;

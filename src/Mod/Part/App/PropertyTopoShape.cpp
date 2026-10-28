@@ -40,8 +40,10 @@
 #include <App/Document.h>
 #include <App/DocumentObject.h>
 #include <App/ElementMapOrder.h>
+#include <App/ElementNamingUtils.h>
 #include <App/ForkRelease.h>
 #include <App/GeoFeature.h>
+#include <App/MappedName.h>
 #include <App/NameTable.h>
 #include <App/ObjectIdentifier.h>
 #include <Base/Console.h>
@@ -264,6 +266,31 @@ PropertyPartShape::PropertyPartShape() = default;
 
 PropertyPartShape::~PropertyPartShape() = default;
 
+namespace
+{
+
+// Whether every name of \a shape's map is one section with the IDX flag: an element named by its
+// index in a map-less input, which says nothing of its identity
+bool indexNamesOnly(const TopoShape& shape)
+{
+    if (shape.getElementMapSize() == 0) {
+        return false;
+    }
+    for (const auto& mapped : shape.getElementMap()) {
+        const std::string name = mapped.name.toString();
+        if (name.find(Data::MAPPER_FLAG_INDEX) == std::string::npos) {
+            return false;  // a history name, not decoded
+        }
+        const auto& sections = Data::MappedName::getDecodedMappedName(name);
+        if (sections.size() != 1 || !sections.front().hasMapperFlag(Data::MAPPER_FLAG_INDEX)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+}  // namespace
+
 bool PropertyPartShape::namesByMatch(const TopoShape& shape) const
 {
     auto owner = freecad_cast<Part::Feature*>(getContainer());
@@ -461,6 +488,13 @@ void PropertyPartShape::setPyObject(PyObject* value)
     if (PyObject_TypeCheck(value, &(TopoShapePy::Type))) {
         auto shape = *static_cast<TopoShapePy*>(value)->getTopoShapePtr();
         auto owner = dynamic_cast<App::DocumentObject*>(getContainer());
+        if (owner && owner->getDocument() && indexNamesOnly(shape)) {
+            // A script builder's index map (`Part.makeCompound`, `Part.makeShell` of map-less
+            // inputs) is no map: the shape is named by the match as if it had none (the class C
+            // ruling of 10-28, ops#502)
+            shape.resetElementMap();
+            shape.Tag = 0;
+        }
         if (owner && owner->getDocument()) {
             if (shape.Tag || shape.getElementMapSize()) {
                 // We can't trust the meaning of the input shape tag, so we
