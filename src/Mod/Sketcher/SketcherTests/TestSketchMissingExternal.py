@@ -7,6 +7,7 @@ The sketch fails, names the source and the missing element, and keeps the link i
 shows, and the constraints on it still solve). Before, it stayed valid on the frozen geometry and
 dropped the link. Every model is designed geometry; results are judged geometrically."""
 
+import math
 import os
 import unittest
 
@@ -351,10 +352,10 @@ class TestSketchFaceLinkPairing(unittest.TestCase):
             self.skipTest("needs PartDesign")
         self.makeModel([(0, 0), (20, 0), (20, 20), (0, 20)])
 
-    def makeModel(self, corners, holes=()):
+    def makeModel(self, corners, holes=(), geometry=None):
         """The profile: a closed polygon through the corners and circles r 3 at the holes'
-        centres (unscaled; the circles' geometry indexes follow the lines'), padded 10 high; the
-        sketch on top projects the pad's top face."""
+        centres (unscaled; the circles' geometry indexes follow the lines'), or the `geometry`
+        given (scaled), padded 10 high; the sketch on top projects the pad's top face."""
         if hasattr(self, "doc"):
             App.closeDocument(self.doc.Name)
             del self.doc
@@ -369,7 +370,10 @@ class TestSketchFaceLinkPairing(unittest.TestCase):
         s = self.scale
         self.body = self.doc.addObject("PartDesign::Body", "Body")
         self.profile = self.body.newObject("Sketcher::SketchObject", "Profile")
-        self.addLines(corners + corners[:1])
+        if geometry is None:
+            self.addLines(corners + corners[:1])
+        else:
+            self.profile.addGeometry(geometry, False)
         for x, y in holes:
             self.profile.addGeometry(Part.Circle(V(x * s, y * s, 0), V(0, 0, 1), 3 * s), False)
         self.pad = self.body.newObject("PartDesign::Pad", "Pad")
@@ -384,7 +388,8 @@ class TestSketchFaceLinkPairing(unittest.TestCase):
         self.doc.recompute()
         self.sketch.addExternal(self.pad.Name, self.topFace())
         self.doc.recompute()
-        self.assertEqual(len(self.lines()), len(corners))
+        if geometry is None:
+            self.assertEqual(len(self.lines()), len(corners))
         self.assertEqual(len(self.circles()), len(holes))
 
     def tearDown(self):
@@ -969,6 +974,197 @@ class TestSketchFaceLinkPairing(unittest.TestCase):
         self.addLines([(-20, 21), (-20, 1)])
         self.doc.recompute()
         self.assertBreaks()
+
+    def redrawLeftThenCut(self, flip):
+        """Review pr384-r4vs: the square moved (20, 5), the front, right and back lines kept (the
+        right and back ones turned round if `flip`), the left line deleted and drawn again, then
+        the front-left corner cut by a line drawn last, from the front line to the left one. The
+        Sketcher gives the cut line the deleted left line's ID, and so its name; the arc between
+        the back and front lines gains a line. The left line's name alone settles nothing: it
+        breaks (PLAN decision 167), never the cut line (silent before, right on integration by
+        position)."""
+        self.constrainCircle("x", 0)
+        self.profile.delGeometries([3])
+        self.moveLines(
+            {
+                0: ((23, 5), (40, 5)),
+                1: ((40, 25), (40, 5)) if flip else ((40, 5), (40, 25)),
+                2: ((20, 25), (40, 25)) if flip else ((40, 25), (20, 25)),
+            }
+        )
+        self.addLines([(20, 25), (20, 8)])
+        self.addLines([(23, 5), (20, 8)])
+        self.doc.recompute()
+        self.assertBreaks()
+
+    def testLeftRedrawnThenCutBreaks(self):
+        self.redrawLeftThenCut(True)
+
+    def testLeftRedrawnThenCutNoFlipBreaks(self):
+        self.redrawLeftThenCut(False)
+
+    def testMovedWithAnAngleEditAndACutBreaks(self):
+        """PLAN decision 167: the square moved 20 to the right, its right line slanted (its top
+        end to (35, 20)) and the front-right corner cut. The right line keeps only its name, its
+        arc gains the cut, and it isn't its old line moved with the others: loud, never a
+        guess."""
+        self.constrainCircle("x", 20)
+        self.moveLines(
+            {
+                0: ((20, 0), (35, 0)),
+                1: ((40, 5), (35, 20)),
+                2: ((35, 20), (20, 20)),
+                3: ((20, 20), (20, 0)),
+            }
+        )
+        self.addLines([(35, 0), (40, 5)])
+        self.doc.recompute()
+        self.assertBreaks()
+
+    def testMovedWithOnlyParallelNamesBreaks(self):
+        """PLAN decision 167: a stadium (the left line x = 0 and the right line x = 20, 0..20,
+        joined by arcs r 10 below and above) moved 30 to the right, every geometry keeping its
+        ID, the right line shortened to (50, 9)-(50, 20) and new lines below it with a notch:
+        (50, 0)-(50, 5)-(48, 7)-(50, 9). The only lines with names are parallel, so the move
+        isn't fixed (arcs don't fix it), and the right line, whose arc gains the new lines,
+        breaks."""
+        s = self.scale
+
+        def arc(cx, cy, a0, a1):
+            return Part.ArcOfCircle(Part.Circle(V(cx * s, cy * s, 0), V(0, 0, 1), 10 * s), a0, a1)
+
+        self.makeModel(
+            [],
+            geometry=[
+                Part.LineSegment(V(0, 20 * s, 0), V(0, 0, 0)),
+                arc(10, 0, math.pi, 2 * math.pi),
+                Part.LineSegment(V(20 * s, 0, 0), V(20 * s, 20 * s, 0)),
+                arc(10, 20, 0, math.pi),
+            ],
+        )
+        self.constrainCircle("x", 20)
+        geometry = self.profile.Geometry
+        geometry[1].Center = V(40 * s, 0, 0)
+        geometry[3].Center = V(40 * s, 20 * s, 0)
+        self.profile.Geometry = geometry
+        self.moveLines({0: ((30, 20), (30, 0)), 2: ((50, 9), (50, 20))})
+        self.addLines([(50, 0), (50, 5), (48, 7), (50, 9)])
+        self.doc.recompute()
+        self.assertBreaks()
+
+    def cutCornerMoved(self, side, lines):
+        """The square with its corner at (20, 20) cut (line 2), the circle on the side x = side;
+        the profile's lines then moved to `lines`, keeping their IDs."""
+        self.makeModel([(0, 0), (20, 0), (20, 15), (15, 20), (0, 20)])
+        self.constrainCircle("x", side)
+        self.moveLines(lines)
+        self.doc.recompute()
+        self.assertEqual(len(self.lines()), 5)
+
+    def testCornerCutMovedToTheOppositeCorner(self):
+        """Review pr384-r4v (T1): the cut moved from (20, 20) to (0, 0), every line keeping its ID.
+        The sides keep their names and places while the cut's arc empties and another fills: no
+        swap, and the circle stays on the left side."""
+        self.cutCornerMoved(
+            0,
+            {
+                0: ((5, 0), (20, 0)),
+                1: ((20, 0), (20, 20)),
+                2: ((0, 5), (5, 0)),
+                3: ((20, 20), (0, 20)),
+                4: ((0, 20), (0, 5)),
+            },
+        )
+        self.assertStaysOn("x", 0)
+
+    def testCornerCutMovedToTheOppositeCornerRight(self):
+        """The same with the circle on the right side, x = 20 (right on integration)."""
+        self.cutCornerMoved(
+            20,
+            {
+                0: ((5, 0), (20, 0)),
+                1: ((20, 0), (20, 20)),
+                2: ((0, 5), (5, 0)),
+                3: ((20, 20), (0, 20)),
+                4: ((0, 20), (0, 5)),
+            },
+        )
+        self.assertStaysOn("x", 20)
+
+    def testCornerCutMovedToTheNextCorner(self):
+        """Review pr384-r4v (T1): the cut slid from (20, 20) to (20, 0), the circle on the left
+        side (right on integration)."""
+        self.cutCornerMoved(
+            0,
+            {
+                0: ((0, 0), (15, 0)),
+                1: ((20, 5), (20, 20)),
+                2: ((15, 0), (20, 5)),
+                3: ((20, 20), (0, 20)),
+                4: ((0, 20), (0, 0)),
+            },
+        )
+        self.assertStaysOn("x", 0)
+
+    def testUnmappedSlotClosedFloor(self):
+        """Review pr384-r4v (T2): a Part::Feature's planar face without names, a 30 x 30 U whose
+        slot (10..20, from y = 10 to the back) gets its mouth closed: the square with a 10 x 15
+        hole. The slot's floor y = 10 keeps its place and the face's side, but moves from the
+        outer loop to the hole's, which runs the other way round the face: the circle on it
+        stays (right on integration)."""
+        s = self.scale
+
+        def wire(points):
+            return Part.makePolygon([V(x * s, y * s, 10 * s) for x, y in points + points[:1]])
+
+        plate = self.doc.addObject("Part::Feature", "Plate")
+        plate.Shape = Part.Face(
+            wire([(0, 0), (30, 0), (30, 30), (20, 30), (20, 10), (10, 10), (10, 30), (0, 30)])
+        )
+        self.doc.recompute()
+        self.sketch = self.doc.addObject("Sketcher::SketchObject", "OnPlate")
+        self.sketch.addExternal(plate.Name, "Face1")
+        self.doc.recompute()
+        self.assertEqual(len(self.lines()), 8)
+        self.constrainCircle("y", 10, (10, 20), at=15)
+        plate.Shape = Part.makeFace(
+            [
+                wire([(0, 0), (30, 0), (30, 30), (0, 30)]),
+                wire([(10, 10), (20, 10), (20, 25), (10, 25)]),
+            ],
+            "Part::FaceMakerBullseye",
+        )
+        self.doc.recompute()
+        self.assertEqual(len(self.lines()), 8)
+        self.assertStaysOn("y", 10, (10, 20))
+
+    def slotClosed(self, axis, value, at):
+        """The pad's profile a 30 x 30 U, its slot (10..20) from y = 10 to the back, the circle on
+        the projected line at axis = value; then the profile's lines moved, keeping their IDs, to
+        the square with a 10 x 15 hole (10..20 x 10..25): the top face's one loop splits in two."""
+        self.makeModel([(0, 0), (30, 0), (30, 30), (20, 30), (20, 10), (10, 10), (10, 30), (0, 30)])
+        self.constrainCircle(axis, value, at=at)
+        self.moveLines(
+            {
+                2: ((30, 30), (0, 30)),
+                3: ((20, 25), (20, 10)),
+                5: ((10, 10), (10, 25)),
+                6: ((10, 25), (20, 25)),
+            }
+        )
+        self.doc.recompute()
+        self.assertEqual(len(self.lines()), 8)
+
+    def testSlotClosedKeepsTheWall(self):
+        """Review pr384-r4v: the slot's right wall (x = 20) becomes the hole's right line; the
+        circle stays on it (silent on integration, which gives the wall's ID to the left side)."""
+        self.slotClosed("x", 20, 20)
+        self.assertStaysOn("x", 20, (10, 25))
+
+    def testSlotClosedKeepsTheOuterSide(self):
+        """The same with the circle on the left side (x = 0), on the outer loop throughout."""
+        self.slotClosed("x", 0, 5)
+        self.assertStaysOn("x", 0, (0, 30))
 
     def testMirroredKeepsTheSide(self):
         """The square mirrored about x = 10, its lines keeping their IDs: the right line's ID is

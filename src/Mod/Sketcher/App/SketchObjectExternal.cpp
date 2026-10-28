@@ -3372,8 +3372,9 @@ double placeDistance(const Part::Geometry* a, const Part::Geometry* b, double to
 }
 
 // FreeCAD-CH (ops#264 e2, class E's E1): a link's geometries of one kind chained by their ends,
-// as the face's wires give them: closed loops (counter-clockwise), open chains, and singles (a
-// geometry with no ends: a circle, an ellipse, a point)
+// as the face's wires give them: closed loops (with the face on their left: the outer one
+// counter-clockwise, holes clockwise), open chains, and singles (a geometry with no ends: a
+// circle, an ellipse, a point)
 struct GeometryLoop
 {
     enum class Kind
@@ -3386,6 +3387,10 @@ struct GeometryLoop
     };
     Kind kind;
     std::vector<std::size_t> members;  // in the loop's order
+    // a closed loop's area (twice it), and whether that is exact (lines and arcs of circles and
+    // ellipses only)
+    double area = 0.0;
+    bool exact = true;
 };
 
 struct GeometryLoops
@@ -3393,10 +3398,46 @@ struct GeometryLoops
     std::vector<GeometryLoop> loops;
     std::vector<int> loopOf;            // per geometry, the loop it is on (-1: none)
     std::vector<std::size_t> position;  // per geometry, its index in that loop's members
-    // per geometry on a closed loop, the unit normal at its middle toward the loop's inside (the
-    // left of its counter-clockwise traversal); null elsewhere
+    // per geometry on a closed loop, the unit normal at its middle toward the face (the left of
+    // the loop's run); null elsewhere
     std::vector<Base::Vector3d> inside;
+    // per geometry, whether the face's side of it is unknown: closed loops of a link with more
+    // than one, one of them with an area that isn't exact (which loop is the outer one is a guess)
+    std::vector<bool> sideUnknown;
 };
+
+// x dy - y dx along a curve from its first parameter to its last (twice the area it sweeps about
+// the origin): exact for a line and an arc of a circle or an ellipse (centre + A cos t + B sin t,
+// so c x (P(t1) - P(t0)) + (A x B)(t1 - t0)), else summed over a polygon of samples and `exact`
+// cleared
+double sweptArea(const Part::GeomBoundedCurve* curve, bool& exact)
+{
+    auto cross = [](const Base::Vector3d& a, const Base::Vector3d& b) {
+        return a.x * b.y - a.y * b.x;
+    };
+    const double t0 = curve->getFirstParameter();
+    const double t1 = curve->getLastParameter();
+    if (curve->is<Part::GeomLineSegment>()) {
+        return cross(curve->getStartPoint(), curve->getEndPoint());
+    }
+    if (curve->is<Part::GeomArcOfCircle>() || curve->is<Part::GeomArcOfEllipse>()) {
+        const auto centre = static_cast<const Part::GeomArcOfConic*>(curve)->getCenter();
+        const auto a = curve->pointAtParameter(0.0) - centre;
+        const auto b = curve->pointAtParameter(std::numbers::pi / 2) - centre;
+        return cross(centre, curve->pointAtParameter(t1) - curve->pointAtParameter(t0))
+            + cross(a, b) * (t1 - t0);
+    }
+    exact = false;
+    constexpr int samples = 32;
+    double sum = 0.0;
+    auto previous = curve->pointAtParameter(t0);
+    for (int s = 1; s <= samples; ++s) {
+        const auto point = curve->pointAtParameter(t0 + (t1 - t0) * s / samples);
+        sum += cross(previous, point);
+        previous = point;
+    }
+    return sum;
+}
 
 GeometryLoops chainGeometries(const std::vector<const Part::Geometry*>& geos, double tolerance)
 {
@@ -3404,12 +3445,16 @@ GeometryLoops chainGeometries(const std::vector<const Part::Geometry*>& geos, do
     result.loopOf.assign(geos.size(), -1);
     result.position.assign(geos.size(), 0);
     result.inside.assign(geos.size(), Base::Vector3d());
-    auto add = [&](GeometryLoop::Kind kind, std::vector<std::size_t> members) {
+    result.sideUnknown.assign(geos.size(), false);
+    auto add = [&](GeometryLoop::Kind kind,
+                   std::vector<std::size_t> members,
+                   double area = 0.0,
+                   bool exact = true) {
         for (std::size_t p = 0; p < members.size(); ++p) {
             result.loopOf[members[p]] = static_cast<int>(result.loops.size());
             result.position[members[p]] = p;
         }
-        result.loops.push_back({kind, std::move(members)});
+        result.loops.push_back({kind, std::move(members), area, exact});
     };
 
     std::vector<const Part::GeomBoundedCurve*> curves(geos.size(), nullptr);
@@ -3506,23 +3551,20 @@ GeometryLoops chainGeometries(const std::vector<const Part::Geometry*>& geos, do
             add(GeometryLoop::Kind::Chain, std::move(order));
             continue;
         }
-        // counter-clockwise by the signed area of the corners and the middle of each geometry
-        // (an arc's bulge), in sketch coordinates
+        // counter-clockwise by its signed area, in sketch coordinates, walked from the first
+        // geometry's end that doesn't meet the second (its start where both do: a loop of two),
+        // each geometry from where the one before it ends
         double area = 0.0;
+        bool exact = true;
+        std::vector<bool> forward(geos.size(), false);
         if (order.size() == component.size()) {
-            std::vector<Base::Vector3d> points;
             Base::Vector3d corner = meets(ends[order[0]].second, order[1]) ? ends[order[0]].first
                                                                            : ends[order[0]].second;
             for (auto i : order) {
-                points.push_back(corner);
-                points.push_back(curves[i]->pointAtParameter(
-                    (curves[i]->getFirstParameter() + curves[i]->getLastParameter()) / 2));
+                forward[i] = Base::Distance(corner, ends[i].first) <= tolerance;
+                const double swept = sweptArea(curves[i], exact);
+                area += forward[i] ? swept : -swept;
                 corner = otherEnd(i, corner);
-            }
-            for (std::size_t p = 0; p < points.size(); ++p) {
-                const auto& a = points[p];
-                const auto& b = points[(p + 1) % points.size()];
-                area += a.x * b.y - b.x * a.y;
             }
         }
         if (std::abs(area) <= tolerance * tolerance) {
@@ -3530,26 +3572,65 @@ GeometryLoops chainGeometries(const std::vector<const Part::Geometry*>& geos, do
             continue;
         }
         if (area < 0) {
+            // run the other way: the same first geometry, the rest reversed, each one turned (a
+            // loop of two only turns)
             std::reverse(order.begin() + 1, order.end());
+            for (auto i : order) {
+                forward[i] = !forward[i];
+            }
         }
-        // each geometry's inside, from the direction the loop runs through it: it starts where the
-        // geometry before it in the loop ends
-        Base::Vector3d corner = meets(ends[order[0]].first, order.back()) ? ends[order[0]].first
-                                                                          : ends[order[0]].second;
+        // each geometry's inside: the left of the direction the loop runs through it
         for (auto i : order) {
-            const bool forward = Base::Distance(corner, ends[i].first) <= tolerance;
             auto along = curves[i]->firstDerivativeAtParameter(
                 (curves[i]->getFirstParameter() + curves[i]->getLastParameter()) / 2);
-            if (!forward) {
+            if (!forward[i]) {
                 along = -along;
             }
             Base::Vector3d left(-along.y, along.x, 0.0);
             if (left.Length() > tolerance) {
                 result.inside[i] = left.Normalize();
             }
-            corner = otherEnd(i, corner);
         }
-        add(GeometryLoop::Kind::Closed, std::move(order));
+        add(GeometryLoop::Kind::Closed, std::move(order), std::abs(area), exact);
+    }
+
+    // A face's holes run clockwise, so that the face is on the left of every loop: its outer loop
+    // encloses every other, so it has the largest area. An edge keeps its side and its place in
+    // the loops' order where an edit moves it between the outer loop and a hole (fork PR 384's
+    // review, round 4v: a slot whose mouth is closed becomes a hole). Where an area is sampled,
+    // which loop is the outer one is a guess: each loop stays counter-clockwise and the side is
+    // unknown.
+    std::vector<std::size_t> closed;
+    for (std::size_t p = 0; p < result.loops.size(); ++p) {
+        if (result.loops[p].kind == GeometryLoop::Kind::Closed) {
+            closed.push_back(p);
+        }
+    }
+    if (closed.size() > 1) {
+        const bool exact = std::all_of(closed.begin(), closed.end(), [&](auto p) {
+            return result.loops[p].exact;
+        });
+        const auto outer = *std::max_element(closed.begin(), closed.end(), [&](auto a, auto b) {
+            return result.loops[a].area < result.loops[b].area;
+        });
+        for (auto p : closed) {
+            auto& members = result.loops[p].members;
+            if (!exact) {
+                for (auto i : members) {
+                    result.inside[i] = Base::Vector3d();
+                    result.sideUnknown[i] = true;
+                }
+                continue;
+            }
+            if (p == outer) {
+                continue;
+            }
+            std::reverse(members.begin() + 1, members.end());
+            for (std::size_t q = 0; q < members.size(); ++q) {
+                result.position[members[q]] = q;
+                result.inside[members[q]] = -result.inside[members[q]];
+            }
+        }
     }
     return result;
 }
@@ -3601,8 +3682,8 @@ bool sameCycle(const std::vector<std::size_t>& a, const std::vector<std::size_t>
 // its name can't lie; it outranks place (a hole row moved by its pitch).
 //
 // What arbitrates is the face's structure, which none of the signals read: the geometries chained
-// by their ends into closed loops, oriented counter-clockwise by their area, which no stored
-// order, Id or line direction can turn. Between two pairs already settled (anchors), the old
+// by their ends into closed loops, oriented by their areas with the face on their left, which no
+// stored order, Id or line direction can turn. Between two pairs already settled (anchors), the old
 // loop's arc and the new loop's arc correspond. In turn:
 // - one geometry before and after, of the same type: the link's reference names it (and its
 //   resolution carries any warning);
@@ -3679,11 +3760,30 @@ std::vector<int> pairGeometries(const std::vector<const Part::Geometry*>& olds,
     }
     // The same place is the same boundary only with the face on the same side: an edge an edit
     // slides onto another edge's old place across the face (a profile moved by its own width)
-    // has the face on the other side of it (fork PR 384's review, round 4)
+    // has the face on the other side of it (fork PR 384's review, round 4); where the side is
+    // unknown, the place is no vote
+    // (arcs of one circle by whether the face is on the centre's side of each: their middles'
+    // normals differ by as much as the arc turned, review round 4v)
     auto sameSide = [&](std::size_t j, std::size_t k) {
+        if (oldLoops.sideUnknown[j] || newLoops.sideUnknown[k]) {
+            return false;
+        }
         const auto& a = oldLoops.inside[j];
         const auto& b = newLoops.inside[k];
-        return a.Length() == 0.0 || b.Length() == 0.0 || a * b > 0.0;
+        if (a.Length() == 0.0 || b.Length() == 0.0) {
+            return true;
+        }
+        auto* oldArc = freecad_cast<const Part::GeomArcOfCircle*>(olds[j]);
+        auto* newArc = freecad_cast<const Part::GeomArcOfCircle*>(news[k]);
+        if (oldArc && newArc) {
+            auto towardCentre = [](const Part::GeomArcOfCircle* arc, const Base::Vector3d& in) {
+                const auto middle = arc->pointAtParameter(
+                    (arc->getFirstParameter() + arc->getLastParameter()) / 2);
+                return in * (arc->getCenter() - middle) > 0.0;
+            };
+            return towardCentre(oldArc, a) == towardCentre(newArc, b);
+        }
+        return a * b > 0.0;
     };
     for (std::size_t j = 0; j < olds.size(); ++j) {
         for (std::size_t k = 0; k < news.size(); ++k) {
@@ -3802,7 +3902,23 @@ std::vector<int> pairGeometries(const std::vector<const Part::Geometry*>& olds,
     };
     std::vector<std::size_t> anchored;
     std::vector<std::size_t> images;
-    // A closed old loop's arcs under `anchors`: after each anchor, counter-clockwise up to the next
+    // whether the anchors' images lie on two closed new loops or more, each holding its share in
+    // the anchors' cyclic order: the loop was split (a slot's mouth closed makes a hole of it)
+    auto splitInOrder = [&](const GeometryLoop& loop, const std::vector<int>& anchors) {
+        std::map<int, std::vector<std::size_t>> shares;
+        for (auto i : loop.members) {
+            if (anchors[i] >= 0) {
+                const auto k = static_cast<std::size_t>(anchors[i]);
+                shares[newLoops.loopOf[k]].push_back(k);
+            }
+        }
+        return shares.size() > 1 && std::all_of(shares.begin(), shares.end(), [&](const auto& s) {
+                   return s.first >= 0 && newLoops.loops[s.first].kind == Kind::Closed
+                       && inCyclicOrder(newLoops.loops[s.first], s.second);
+               });
+    };
+
+    // A closed old loop's arcs under `anchors`: after each anchor, along the loop up to the next
     // (with one anchor, the rest of the loop), and the same on the new loop after its image. None
     // where the images aren't on one new closed loop in the anchors' cyclic order
     auto closedArcs = [&](const GeometryLoop& loop, const std::vector<int>& anchors) {
@@ -3962,6 +4078,140 @@ std::vector<int> pairGeometries(const std::vector<const Part::Geometry*>& olds,
         for (const auto& [j, k] : picked) {
             trial[j] = static_cast<int>(k);
         }
+        // Nor is a name alone (no place vote) where the arc it lies in between the loop's other
+        // anchors gains geometries of its type: the Sketcher gives a line drawn after a deleted
+        // one that line's Id, and so its name (a corner cut drawn after the side it meets was
+        // drawn again, review pr384-r4vs), and a line moved beside a new one looks the same. It
+        // breaks where nothing else settles it (PLAN decision 167). A circle's or an ellipse's
+        // name can't lie (the support's bonus). Except where the whole loop moved: every pair on
+        // it that keeps its name is its old geometry moved by one translation v (a line on its
+        // old line's supporting line shifted by v, an arc on its old circle shifted by v, within
+        // the tolerance), and v is fixed by two of those lines that aren't parallel. A face moved
+        // with a new corner edge (by its width, or through a Placement, an AttachmentOffset or
+        // its support) keeps its lines. What remains: an Id reissued to a line exactly on the
+        // moved line's place pairs with it.
+        auto ofType = [](const auto& geometries, const auto& members, const Part::Geometry* like) {
+            return std::count_if(members.begin(), members.end(), [&](auto i) {
+                return geometries[i] && geometries[i]->getTypeId() == like->getTypeId();
+            });
+        };
+        auto movedTogether = [&](const GeometryLoop& loop, const std::vector<int>& anchors) {
+            std::vector<std::pair<std::size_t, std::size_t>> named;
+            for (auto i : loop.members) {
+                if (anchors[i] < 0) {
+                    continue;
+                }
+                const auto k = static_cast<std::size_t>(anchors[i]);
+                const auto source = sourceOf(olds[i]);
+                if (!source.empty() && source == sourceOf(news[k])) {
+                    named.emplace_back(i, k);
+                }
+            }
+            // the old line's unit normal and the new line's offset along it
+            struct Offset
+            {
+                Base::Vector3d normal;
+                double distance;
+            };
+            std::vector<Offset> offsets;
+            for (const auto& [i, k] : named) {
+                auto* a = freecad_cast<const Part::GeomLineSegment*>(olds[i]);
+                auto* b = freecad_cast<const Part::GeomLineSegment*>(news[k]);
+                if (a && b) {
+                    auto along = a->getEndPoint() - a->getStartPoint();
+                    if (along.Length() <= tolerance) {
+                        return false;
+                    }
+                    along.Normalize();
+                    const Base::Vector3d normal(-along.y, along.x, 0.0);
+                    offsets.push_back({normal, normal * (b->getStartPoint() - a->getStartPoint())});
+                }
+            }
+            // v from the first line and the one least parallel to it
+            if (offsets.empty()) {
+                return false;
+            }
+            const auto& first = offsets.front();
+            const auto second =
+                std::max_element(offsets.begin(), offsets.end(), [&](const auto& p, const auto& q) {
+                    return std::abs(first.normal.x * p.normal.y - first.normal.y * p.normal.x)
+                        < std::abs(first.normal.x * q.normal.y - first.normal.y * q.normal.x);
+                });
+            const double det =
+                first.normal.x * second->normal.y - first.normal.y * second->normal.x;
+            if (std::abs(det) <= Precision::Angular()) {
+                return false;  // only parallel lines: v isn't fixed
+            }
+            const Base::Vector3d v(
+                (first.distance * second->normal.y - second->distance * first.normal.y) / det,
+                (first.normal.x * second->distance - second->normal.x * first.distance) / det,
+                0.0);
+            auto onShifted = [&](const Base::Vector3d& p,
+                                 const Base::Vector3d& from,
+                                 const Base::Vector3d& to) {
+                return p.DistanceToLine(from + v, to - from) <= tolerance;
+            };
+            return std::all_of(named.begin(), named.end(), [&](const auto& pair) {
+                const auto& [i, k] = pair;
+                if (auto* a = freecad_cast<const Part::GeomLineSegment*>(olds[i])) {
+                    auto* b = freecad_cast<const Part::GeomLineSegment*>(news[k]);
+                    const auto from = a->getStartPoint();
+                    const auto to = a->getEndPoint();
+                    return b && onShifted(b->getStartPoint(), from, to)
+                        && onShifted(b->getEndPoint(), from, to);
+                }
+                if (auto* a = freecad_cast<const Part::GeomArcOfCircle*>(olds[i])) {
+                    auto* b = freecad_cast<const Part::GeomArcOfCircle*>(news[k]);
+                    return b
+                        && Base::Distance(a->getCenter() + v, b->getCenter())
+                                + std::abs(a->getRadius() - b->getRadius())
+                            <= tolerance;
+                }
+                return false;
+            });
+        };
+        for (const auto& loop : oldLoops.loops) {
+            if (loop.kind != Kind::Closed) {
+                continue;
+            }
+            for (auto j : loop.members) {
+                auto pick = picked.find(j);
+                if (pick == picked.end()) {
+                    continue;
+                }
+                const auto k = pick->second;
+                auto vote = candidates.find({j, k});
+                if (vote == candidates.end() || vote->second != BySource
+                    || support(j, vote->second) > 1) {
+                    continue;
+                }
+                auto others = trial;
+                others[j] = -1;
+                bool gains = false;
+                const auto arcs = closedArcs(loop, others);
+                auto arc = std::find_if(arcs.begin(), arcs.end(), [&](const Arc& a) {
+                    return a.olds.count(j) > 0;
+                });
+                if (arc != arcs.end()) {
+                    gains = ofType(news, arc->news, olds[j]) > ofType(olds, arc->olds, olds[j]);
+                }
+                else if (std::none_of(loop.members.begin(), loop.members.end(),
+                                      [&](auto i) { return others[i] >= 0; })
+                         && newLoops.loopOf[k] >= 0) {
+                    // no other anchor on the loop: the whole loop is its arc
+                    gains = ofType(news, newLoops.loops[newLoops.loopOf[k]].members, olds[j])
+                        > ofType(olds, loop.members, olds[j]);
+                }
+                if (gains && !movedTogether(loop, trial)) {
+                    picked.erase(pick);
+                    candidates.erase(vote);
+                    trial[j] = -1;
+                }
+            }
+        }
+        if (picked.empty()) {
+            continue;  // the candidates left, without the names dropped
+        }
         for (const auto& loop : oldLoops.loops) {
             if (loop.kind != Kind::Closed
                 || std::none_of(loop.members.begin(), loop.members.end(), [&](auto i) {
@@ -3969,16 +4219,31 @@ std::vector<int> pairGeometries(const std::vector<const Part::Geometry*>& olds,
                    })) {
                 continue;
             }
-            // Nor is one that empties an arc while another, empty before, fills: the anchors' sides
-            // were swapped (a line drawn again took the Id of the line across the face, and its two
-            // anchors can't be out of cyclic order), where an edit cuts, notches or removes in
-            // place (fork PR 384's review, round 4)
+            // Nor is one that empties an arc while another, empty before, fills, where one of its
+            // anchors on the loop has no place vote: the anchors' sides were swapped (a line drawn
+            // again took the Id, and so the name, of the line across the face, and its two anchors
+            // can't be out of cyclic order), where an edit cuts, notches or removes in place (fork
+            // PR 384's review, round 4). Anchors that each keep their place stay where they were:
+            // the cut or notch between them moved (a corner cut moved to another corner, review
+            // round 4v).
+            // A loop split into several (a slot closed into a hole) has no arcs; its anchors go
+            // where each new loop holds its share in order, and only anchors that each keep their
+            // place (review round 4v).
             const auto arcs = closedArcs(loop, trial);
             auto emptied = [](const Arc& arc) { return !arc.olds.empty() && arc.news.empty(); };
             auto filled = [](const Arc& arc) { return arc.olds.empty() && !arc.news.empty(); };
-            if (!arcs.empty()
-                && !(std::any_of(arcs.begin(), arcs.end(), emptied)
-                     && std::any_of(arcs.begin(), arcs.end(), filled))) {
+            const bool placeless =
+                std::any_of(loop.members.begin(), loop.members.end(), [&](auto i) {
+                    auto it = picked.find(i);
+                    if (it == picked.end()) {
+                        return false;
+                    }
+                    auto vote = candidates.find({i, it->second});
+                    return vote == candidates.end() || (vote->second & ByPlace) == 0;
+                });
+            if (arcs.empty() ? !placeless && splitInOrder(loop, trial)
+                             : !(placeless && std::any_of(arcs.begin(), arcs.end(), emptied)
+                                 && std::any_of(arcs.begin(), arcs.end(), filled))) {
                 continue;
             }
             for (auto i : loop.members) {
