@@ -27,8 +27,8 @@ Vertex c=(4.0000,0.0000,20.0000) m=0.0000 : _;~93g67u0nsesl0;3;SWP;0;V;0;PRJ;_
 Vertex c=(4.0000,2.0000,0.0000) m=0.0000 : Vertex3;_;1;SWP;0;V;0;IDX,SRC;_
 Vertex c=(4.0000,2.0000,20.0000) m=0.0000 : _;~n8n42ie4fq4se;3;SWP;0;V;0;PRJ;_
 [Pipe PartDesign::AdditivePipe] faces=10 edges=26 vertexes=18 names=56
-Edge c=(-0.6009,-0.6729,30.6009) m=1.9101 : _;~634e1kfvbvmus,~bkb0juv3oiqjo;15;PSH;2;E;0;GEN;_
-Edge c=(-0.6009,0.6729,30.6009) m=1.9101 : _;~634e1kfvbvmus,~bkb0juv3oiqjo;15;PSH;1;E;0;GEN;_
+Edge c=(-0.6009,-0.6729,30.6009) m=1.9101 : _;~634e1kfvbvmus,~bkb0juv3oiqjo;15;PSH;0;E;2of4;GEN;_
+Edge c=(-0.6009,0.6729,30.6009) m=1.9101 : _;~634e1kfvbvmus,~bkb0juv3oiqjo;15;PSH;0;E;1of4;GEN;_
 Edge c=(-3.0000,-3.0000,16.5000) m=33.0000 : _;~dti5s1u5i52tm,~2o1pom7re9hfa;15;PSH;0;E;0;GEN;_
 Edge c=(-3.0000,0.0000,0.0000) m=6.0000 : g4;_;14;SKT;0;E;0;SRC;_
 Edge c=(-3.0000,0.0000,33.0000) m=6.0000 : _;~634e1kfvbvmus,~4hf20vheulg5s;15;PSH;0;E;0;GEN;_
@@ -36,8 +36,8 @@ Edge c=(-3.0000,3.0000,16.5000) m=33.0000 : _;~dti5s1u5i52tm,~jthsnad44bp9g;15;P
 Edge c=(0.0000,-3.0000,0.0000) m=6.0000 : g1;_;14;SKT;0;E;0;SRC;_
 Edge c=(0.0000,0.0000,0.0000) m=6.2832 : g5;_;14;SKT;0;E;0;SRC;_
 Edge c=(0.0000,3.0000,0.0000) m=6.0000 : g3;_;14;SKT;0;E;0;SRC;_
-Edge c=(0.6009,-0.6729,29.3991) m=1.9101 : _;~634e1kfvbvmus,~bkb0juv3oiqjo;15;PSH;3;E;0;GEN;_
-Edge c=(0.6009,0.6729,29.3991) m=1.9101 : _;~634e1kfvbvmus,~bkb0juv3oiqjo;15;PSH;0;E;0;GEN;_
+Edge c=(0.6009,-0.6729,29.3991) m=1.9101 : _;~634e1kfvbvmus,~bkb0juv3oiqjo;15;PSH;0;E;3of4;GEN;_
+Edge c=(0.6009,0.6729,29.3991) m=1.9101 : _;~634e1kfvbvmus,~bkb0juv3oiqjo;15;PSH;0;E;0of4;GEN;_
 Edge c=(1.0000,0.0000,14.5000) m=29.0000 : _;~dti5s1u5i52tm,~1l683d8cn0dfi;15;PSH;0;E;0;GEN;_
 Edge c=(10.5000,0.0000,29.0000) m=19.0000 : _;~m7elr7kv26qo8,~1l683d8cn0dfi;15;PSH;0;E;0;GEN;_
 Edge c=(11.5000,-3.0000,27.0000) m=17.0000 : _;~14cptai1kcs18,~m7elr7kv26qo8;15;PSH;0;E;0;GEN;_
@@ -65,13 +65,13 @@ Face c=(3.9100,3.0000,21.0900) m=300.0000 : _;~dti5s1u5i52tm,~jej7qu9ocdpli;15;P
 Face c=(3.9100,3.0000,21.0900) m=300.0000 : _;~m7elr7kv26qo8,~jej7qu9ocdpli;15;PSH;0;F;0;GEN;_
 Face c=(8.5000,0.0000,33.0000) m=138.0000 : _;~m7elr7kv26qo8,~4hf20vheulg5s;15;PSH;0;F;0;GEN;_
 Face c=(9.9875,0.0000,30.0250) m=125.6637 : _;~m7elr7kv26qo8,~bkb0juv3oiqjo;15;PSH;0;F;0;GEN;_
-Vertex c=(-1.0000,0.0000,31.0000) m=0.0000 : _;~634e1kfvbvmus,~bkb0juv3oiqjo;15;PSH;1;V;0;GEN;_
+Vertex c=(-1.0000,0.0000,31.0000) m=0.0000 : _;~634e1kfvbvmus,~bkb0juv3oiqjo;15;PSH;0;V;1of3;GEN;_
 Vertex c=(-3.0000,-3.0000,0.0000) m=0.0000 : g1v1,g4v2;_;14;SKT;0;V;0;SRC;_
 Vertex c=(-3.0000,-3.0000,33.0000) m=0.0000 : _;~634e1kfvbvmus,~2o1pom7re9hfa;15;PSH;0;V;0;GEN;_
 Vertex c=(-3.0000,3.0000,0.0000) m=0.0000 : g3v2,g4v1;_;14;SKT;0;V;0;SRC;_
 Vertex c=(-3.0000,3.0000,33.0000) m=0.0000 : _;~634e1kfvbvmus,~jthsnad44bp9g;15;PSH;0;V;0;GEN;_
-Vertex c=(0.0000,-1.0000,30.0000) m=0.0000 : _;~634e1kfvbvmus,~bkb0juv3oiqjo;15;PSH;2;V;0;GEN;_
-Vertex c=(0.0000,1.0000,30.0000) m=0.0000 : _;~634e1kfvbvmus,~bkb0juv3oiqjo;15;PSH;0;V;0;GEN;_
+Vertex c=(0.0000,-1.0000,30.0000) m=0.0000 : _;~634e1kfvbvmus,~bkb0juv3oiqjo;15;PSH;0;V;2of3;GEN;_
+Vertex c=(0.0000,1.0000,30.0000) m=0.0000 : _;~634e1kfvbvmus,~bkb0juv3oiqjo;15;PSH;0;V;0of3;GEN;_
 Vertex c=(1.0000,0.0000,0.0000) m=0.0000 : g5v1;_;14;SKT;0;V;0;SRC;_
 Vertex c=(1.0000,0.0000,29.0000) m=0.0000 : _;~634e1kfvbvmus,~1l683d8cn0dfi;15;PSH;0;V;0;GEN;_
 Vertex c=(20.0000,-3.0000,27.0000) m=0.0000 : _;~14cptai1kcs18;15;PSH;0;V;0;PRJ;_

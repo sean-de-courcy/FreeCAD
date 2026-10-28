@@ -95,7 +95,7 @@ Edge c=(0.0000,10.0000,8.0000) m=4.0000 : _;~b4c0dfcoucsne;30;RVL;0;E;0;PRJ;_
 Edge c=(0.0000,15.0000,0.0000) m=30.0000 : _;~7f4sjmha1ambe,~2k61fsjo0enl2;28;CUT;0;E;0;GEN;_
 Edge c=(0.0000,15.0000,6.0000) m=10.0000 : _;~981nu5g63mch4;30;RVL;0;E;0;PRJ;_
 Edge c=(0.0000,20.0000,8.0000) m=4.0000 : _;~6hra9outcc1cs;30;RVL;0;E;0;PRJ;_
-Edge c=(0.0000,25.0000,10.0000) m=10.0000 : ~cbmjpkg92tpos|_;_;30;CUT;0;E;0;MOD;~5gujc321tpnnu,~unt1kif74korq,~kv643qqn1gfhu,~u6cl238iplmoa
+Edge c=(0.0000,25.0000,10.0000) m=10.0000 : ~cbmjpkg92tpos|_;_;30;CUT;0;E;0;MOD;~5gujc321tpnnu,~unt1kif74korq,~ounpqtr5fbo8q,~u6cl238iplmoa
 Edge c=(0.0000,30.0000,5.0000) m=10.0000 : _;~u6cl238iplmoa;28;XTR;0;E;0;GEN;_
 Edge c=(0.0000,5.0000,10.0000) m=10.0000 : ~cbmjpkg92tpos|_;_;30;CUT;0;E;0;MOD;~n4sn1t8624eqg,~2k0sjppu0oj1k,~gdfb0lbf47768,~i5r05re3p5mma
 Edge c=(10.0000,0.0000,8.0000) m=4.0000 : g4;_;29;SKT;0;E;0;SRC;_
@@ -113,7 +113,7 @@ Edge c=(30.0000,30.0000,5.0000) m=10.0000 : _;~hbqd6tmvn9elm;26;XTR;0;E;0;GEN;_
 Edge c=(6.3662,6.3662,10.0000) m=15.7080 : _;~pj00f4r6bo3me;30;RVL;0;E;0;GEN;_
 Edge c=(6.3662,6.3662,6.0000) m=15.7080 : _;~kc63hjfdlcn2m;30;RVL;0;E;0;GEN;_
 Face c=(-0.6092,-1.4259,10.0000) m=3214.3806 : _;~7f4sjmha1ambe;26;XTR;0;F;0;PRJ;_
-Face c=(-17.5000,30.0000,5.0000) m=250.0000 : ~b08t0fdn4k8mm|_;_;28;CUT;0;F;0;MOD;~44ko2jel9ko20,~h57gfll9ho9kk,~plh77kk1prdt2,~vp2tv9h6i48k6
+Face c=(-17.5000,30.0000,5.0000) m=250.0000 : ~b08t0fdn4k8mm|_;_;28;CUT;0;F;0;MOD;~44ko2jel9ko20,~plh77kk1prdt2
 Face c=(-2.5000,0.0000,5.0000) m=50.0000 : _;~n8kcp0r380qfo;28;XTR;0;F;0;GEN;_
 Face c=(-30.0000,0.0000,5.0000) m=600.0000 : _;~8ovigfg6mclum;26;XTR;0;F;0;GEN;_
 Face c=(-5.0000,15.0000,5.0000) m=300.0000 : _;~4995ggt70gbnq;28;XTR;0;F;0;GEN;_
@@ -122,7 +122,7 @@ Face c=(0.0000,15.0000,4.5385) m=260.0000 : _;~cbmjpkg92tpos;28;XTR;0;F;0;GEN;_
 Face c=(0.1087,-0.6522,0.0000) m=3450.0000 : _;~ak5j58maukpro,~ka7hvpt07teng,~vp2tv9h6i48k6,~8ovigfg6mclum;25;FAC;0;F;0;LOW,NDU;_
 Face c=(12.7324,12.7324,8.0000) m=125.6637 : _;~6hra9outcc1cs;30;RVL;0;F;0;GEN;_
 Face c=(15.0000,0.0000,8.0000) m=40.0000 : _;~981nu5g63mch4,~6hra9outcc1cs,~4v1ali7bm455o,~b4c0dfcoucsne;29;FAC;0;F;0;LOW,NDU;_
-Face c=(15.0000,30.0000,5.0000) m=300.0000 : ~b08t0fdn4k8mm|_;_;28;CUT;0;F;0;MOD;~dbmc2o9kje8ts,~aivi7llf9vnhm,~h57gfll9ho9kk,~vp2tv9h6i48k6
+Face c=(15.0000,30.0000,5.0000) m=300.0000 : ~b08t0fdn4k8mm|_;_;28;CUT;0;F;0;MOD;~dbmc2o9kje8ts,~aivi7llf9vnhm
 Face c=(30.0000,0.0000,5.0000) m=600.0000 : _;~ka7hvpt07teng;26;XTR;0;F;0;GEN;_
 Face c=(6.3662,6.3662,8.0000) m=62.8319 : _;~b4c0dfcoucsne;30;RVL;0;F;0;GEN;_
 Face c=(9.9030,9.9030,6.0000) m=235.6194 : _;~981nu5g63mch4;30;RVL;0;F;0;GEN;_
@@ -130,11 +130,11 @@ Vertex c=(-30.0000,-30.0000,0.0000) m=0.0000 : g1v1,g4v2;_;25;SKT;0;V;0;SRC;_
 Vertex c=(-30.0000,-30.0000,10.0000) m=0.0000 : _;~jsm32gah7t1uk;26;XTR;0;V;0;PRJ;_
 Vertex c=(-30.0000,30.0000,0.0000) m=0.0000 : g3v2,g4v1;_;25;SKT;0;V;0;SRC;_
 Vertex c=(-30.0000,30.0000,10.0000) m=0.0000 : _;~adiuglrg8290o;26;XTR;0;V;0;PRJ;_
-Vertex c=(-5.0000,0.0000,0.0000) m=0.0000 : _;~7f4sjmha1ambe,~8fliq1nvm6pme;28;CUT;0;V;0;GEN;_
+Vertex c=(-5.0000,0.0000,0.0000) m=0.0000 : _;~7f4sjmha1ambe,~8fliq1nvm6pme;28;CUT;out;V;0;GEN,ORD;_
 Vertex c=(-5.0000,0.0000,10.0000) m=0.0000 : g3v2,g4v1;_;27;SKT;0;V;0;SRC;_
 Vertex c=(-5.0000,30.0000,0.0000) m=0.0000 : _;~44ko2jel9ko20,~vp2tv9h6i48k6;28;CUT;0;V;0;GEN;_
 Vertex c=(-5.0000,30.0000,10.0000) m=0.0000 : g2v2,g3v1;_;27;SKT;0;V;0;SRC;_
-Vertex c=(0.0000,0.0000,0.0000) m=0.0000 : _;~7f4sjmha1ambe,~iigl0ime6klsc;28;CUT;0;V;0;GEN;_
+Vertex c=(0.0000,0.0000,0.0000) m=0.0000 : _;~7f4sjmha1ambe,~iigl0ime6klsc;28;CUT;out;V;0;GEN,ORD;_
 Vertex c=(0.0000,0.0000,10.0000) m=0.0000 : g1v1,g4v2;_;27;SKT;0;V;0;SRC;_
 Vertex c=(0.0000,10.0000,10.0000) m=0.0000 : _;~pj00f4r6bo3me;30;RVL;0;V;0;PRJ;_
 Vertex c=(0.0000,10.0000,6.0000) m=0.0000 : _;~kc63hjfdlcn2m;30;RVL;0;V;0;PRJ;_
@@ -201,7 +201,7 @@ Face c=(-0.3571,-30.0000,3.5714) m=350.0000 : _;~lpmnovhlprum6;41;XTR;0;F;0;GEN;
 Face c=(-0.3571,-30.0000,3.5714) m=350.0000 : _;~oj64t3ivuft54;42;XTR;0;F;0;GEN;_
 Face c=(-0.3571,30.0000,3.5714) m=350.0000 : _;~7068pkrv2j6cg;41;XTR;0;F;0;GEN;_
 Face c=(-0.3571,30.0000,3.5714) m=350.0000 : _;~7oueq35ahmal4;42;XTR;0;F;0;GEN;_
-Face c=(-17.5000,0.0000,5.0000) m=1500.0000 : ~98andpbephanm|_;_;42;FUS;0;F;0;MOD;~us445sb70oh6u,~leuugtdp0acv6,~n0jbccgsk08vq,~nigkb9gv5tfj6
+Face c=(-17.5000,0.0000,5.0000) m=1500.0000 : ~98andpbephanm|_;_;42;FUS;0;F;0;MOD;~n0jbccgsk08vq,~nigkb9gv5tfj6
 Face c=(-2.5000,0.0000,15.0000) m=300.0000 : _;~nmomd2230pf88;42;XTR;0;F;0;PRJ;_
 Face c=(-30.0000,0.0000,2.5000) m=300.0000 : _;~1sc5di5ek1nug;41;XTR;0;F;0;GEN;_
 Face c=(-5.0000,0.0000,10.0000) m=600.0000 : _;~nigkb9gv5tfj6;42;XTR;0;F;0;GEN;_
@@ -209,9 +209,9 @@ Face c=(0.0000,0.0000,0.0000) m=3600.0000 : _;~lpmnovhlprum6,~cklaon0miiila,~706
 Face c=(0.0000,0.0000,10.5000) m=500.0000 : _;~5334fhk155mcs;42;XTR;0;F;0;GEN;_
 Face c=(12.7324,-12.7324,7.5000) m=157.0796 : _;~a5av64s84njm2;45;RVL;0;F;0;GEN;_
 Face c=(12.7324,12.7324,7.5000) m=157.0796 : _;~usprns7a4smlc;45;RVL;0;F;0;GEN;_
-Face c=(18.4919,0.0000,5.0000) m=1171.6815 : ~k3h53otlta0t2|_;_;45;FUS;0;F;0;MOD;~7hk4mmbc8i9ta,~bq68dkaplgeb0,~4ikfuja0vi74q,~8mlilu1lf9t40,~n0affvqm766do,~5334fhk155mcs
+Face c=(18.4919,0.0000,5.0000) m=1171.6815 : ~g79nkve4d9p42|_;_;45;FUS;0;F;0;MOD;~7hk4mmbc8i9ta,~bq68dkaplgeb0,~4ikfuja0vi74q,~8mlilu1lf9t40,~n0affvqm766do
 Face c=(30.0000,0.0000,2.5000) m=300.0000 : _;~cklaon0miiila;41;XTR;0;F;0;GEN;_
-Face c=(4.2441,0.0000,5.0000) m=157.0796 : ~k3h53otlta0t2|_;_;45;FUS;0;F;0;MOD;~i68jc6vn1v9nm,~0pghiorea1goo,~5334fhk155mcs
+Face c=(4.2441,0.0000,5.0000) m=157.0796 : ~g79nkve4d9p42|_;_;45;FUS;0;F;0;MOD;~i68jc6vn1v9nm,~0pghiorea1goo
 Face c=(6.3662,-6.3662,7.5000) m=78.5398 : _;~e9imr490iicca;45;RVL;0;F;0;GEN;_
 Face c=(6.3662,6.3662,7.5000) m=78.5398 : _;~5od9d5a3u3nce;45;RVL;0;F;0;GEN;_
 Face c=(9.9030,-9.9030,10.0000) m=235.6194 : _;~i7kukoaic8frm;45;RVL;0;F;0;GEN;_
