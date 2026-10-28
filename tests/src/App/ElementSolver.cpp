@@ -6379,9 +6379,13 @@ TEST(SolveOwner, renumberedEdgePieceInItsPlaceResolves)
         element("Edge14", {farEdgePiece({plate2}, 1, {"PRJ", "MOD", "ORD"})}),
     };
     measure(input, {{"Edge12", farEdgeAt(3, 5, 1)}, {"Edge14", farEdgeAt(1.5, 3, 1)}}, nullptr);
+    // Each saved piece's record has D1's lone count (twinCount 1, App::elementTwinCentroid()):
+    // its marks set it apart from the other pieces, so it is the only one of its order group.
+    // Without the count the twin-pick rule takes the renumbered piece as a trade (I-S9).
     auto entryAt = [](const std::string& name, double x0, double x1) {
         auto entry = missing(name, "Edge");
         entry.fingerprint = farEdgeAt(x0, x1, 1);
+        entry.fingerprint.twinCount = 1;
         return entry;
     };
     input.entries = {entryAt(farEdgePiece({plate3}, 5, {"PRJ", "MOD", "ORD"}), 3, 5)};
