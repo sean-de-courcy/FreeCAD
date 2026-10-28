@@ -22,6 +22,7 @@
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
+#include <BRepGProp.hxx>
 #include <BRepLProp_SLProps.hxx>
 #include <BRepTools.hxx>
 #include <Geom_BSplineSurface.hxx>
@@ -39,6 +40,7 @@
 #include <TopoDS.hxx>
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
+#include <TopoDS_Iterator.hxx>
 #include <TopoDS_Shape.hxx>
 #include <TopoDS_Vertex.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
@@ -283,6 +285,7 @@ private:
 // A shape's elements, from 0, and how they bound each other
 struct Topology
 {
+    TopoDS_Shape shape;
     TopTools_IndexedMapOfShape vertexes;
     TopTools_IndexedMapOfShape edges;
     TopTools_IndexedMapOfShape faces;
@@ -301,7 +304,8 @@ struct Topology
     double tolerance;
 
     explicit Topology(const TopoDS_Shape& shape)
-        : tolerance(placeTolerance(shape))
+        : shape(shape)
+        , tolerance(placeTolerance(shape))
     {
         TopExp::MapShapes(shape, TopAbs_VERTEX, vertexes);
         TopExp::MapShapes(shape, TopAbs_EDGE, edges);
@@ -1000,6 +1004,397 @@ private:
     std::map<int, int> fmap;
 };
 
+// The class C ruling of 10-28 (the ops repo's `notes/naming-class-C.md` section 9.2): rules that
+// only withdraw matches, run on the matcher's result.
+
+// The producer's top-level units (P1): a compound's children, compounds flattened; any other
+// shape is one piece
+void collectUnits(const TopoDS_Shape& shape, std::vector<TopoDS_Shape>& units)
+{
+    if (shape.ShapeType() != TopAbs_COMPOUND) {
+        units.push_back(shape);
+        return;
+    }
+    for (TopoDS_Iterator it(shape); it.More(); it.Next()) {
+        collectUnits(it.Value(), units);
+    }
+}
+
+// A piece: its elements' indexes in the shape's maps (from 0) and its bounding box
+struct Piece
+{
+    std::array<std::vector<int>, 3> elements;  // vertices, edges, faces
+    Bnd_Box box;
+};
+
+std::vector<Piece> piecesOf(const Topology& topology)
+{
+    std::vector<TopoDS_Shape> units;
+    if (!topology.shape.IsNull()) {
+        collectUnits(topology.shape, units);
+    }
+    const std::array<std::pair<TopAbs_ShapeEnum, const TopTools_IndexedMapOfShape*>, 3> types {
+        {{TopAbs_VERTEX, &topology.vertexes},
+         {TopAbs_EDGE, &topology.edges},
+         {TopAbs_FACE, &topology.faces}}
+    };
+    std::vector<Piece> pieces;
+    for (const auto& unit : units) {
+        Piece piece;
+        for (std::size_t t = 0; t < types.size(); ++t) {
+            TopTools_IndexedMapOfShape own;
+            TopExp::MapShapes(unit, types[t].first, own);
+            for (int k = 1; k <= own.Extent(); ++k) {
+                const int index = types[t].second->FindIndex(own(k)) - 1;
+                if (index >= 0) {
+                    piece.elements[t].push_back(index);
+                }
+            }
+        }
+        try {
+            BRepBndLib::AddOptimal(unit, piece.box, false, false);
+        }
+        catch (const Standard_Failure&) {
+            BRepBndLib::Add(unit, piece.box);
+        }
+        pieces.push_back(std::move(piece));
+    }
+    return pieces;
+}
+
+// Two sizes alike, generously: congruence over-approximated only adds loud
+bool sizesAlike(double a, double b)
+{
+    return std::abs(a - b) <= std::max(1e-4, 1e-6 * std::max(std::abs(a), std::abs(b)));
+}
+
+// What congruence compares of a set of elements: the vertex count, and the edges' and faces'
+// kinds and sizes (lengths, areas), sorted
+struct Congruence
+{
+    std::size_t vertexes = 0;
+    std::vector<std::pair<int, double>> edges;
+    std::vector<std::pair<int, double>> faces;
+
+    Congruence(const Topology& topology, const std::array<std::vector<int>, 3>& elements)
+        : vertexes(elements[0].size())
+    {
+        for (const int e : elements[1]) {
+            GProp_GProps props;
+            BRepGProp::LinearProperties(topology.edge(e), props);
+            edges.emplace_back(curveKind(topology.edge(e)), props.Mass());
+        }
+        for (const int f : elements[2]) {
+            GProp_GProps props;
+            MassProperties::surfaceProperties(topology.face(f), props);
+            faces.emplace_back(topology.surface(f).kind, props.Mass());
+        }
+        std::sort(edges.begin(), edges.end());
+        std::sort(faces.begin(), faces.end());
+    }
+
+    bool same(const Congruence& other) const
+    {
+        auto alike = [](const auto& a, const auto& b) {
+            return a.size() == b.size()
+                && std::equal(a.begin(), a.end(), b.begin(), [](const auto& x, const auto& y) {
+                       return x.first == y.first && sizesAlike(x.second, y.second);
+                   });
+        };
+        return vertexes == other.vertexes && alike(edges, other.edges) && alike(faces, other.faces);
+    }
+
+    bool empty() const
+    {
+        return edges.empty() && faces.empty();
+    }
+};
+
+// Whether two pieces' boxes have the same centre and size
+bool samePlace(const Bnd_Box& a, const Bnd_Box& b, double tolerance)
+{
+    if (a.IsVoid() || b.IsVoid()) {
+        return false;
+    }
+    const double diagonal = std::sqrt(std::max(a.SquareExtent(), b.SquareExtent()));
+    const double allowed = std::max(tolerance, 1e-6 * diagonal);
+    auto centre = [](const Bnd_Box& box) {
+        return gp_Pnt((box.CornerMin().XYZ() + box.CornerMax().XYZ()) / 2);
+    };
+    return centre(a).Distance(centre(b)) <= allowed
+        && std::abs(std::sqrt(a.SquareExtent()) - std::sqrt(b.SquareExtent())) <= allowed;
+}
+
+class Ruling
+{
+public:
+    Ruling(const Topology& before, const Topology& after, ElementMatches& result)
+        : before(before)
+        , after(after)
+        , result(result)
+        , tolerance(std::max(before.tolerance, after.tolerance))
+        , oldPieces(piecesOf(before))
+        , newPieces(piecesOf(after))
+    {}
+
+    void run()
+    {
+        retirePermutedTwins();
+        confirmByFaces();
+        retirePeriodSlides();
+    }
+
+private:
+    std::map<int, int>& matchesOf(std::size_t type)
+    {
+        return type == 0 ? result.vertexes : type == 1 ? result.edges : result.faces;
+    }
+
+    // Every element of a new piece takes a fresh id
+    void retire(const Piece& piece)
+    {
+        for (std::size_t t = 0; t < 3; ++t) {
+            for (const int i : piece.elements[t]) {
+                matchesOf(t).erase(i + 1);
+            }
+        }
+    }
+
+    // P1: congruent pieces whose places pair them otherwise than the producer's order are
+    // retired as a class. The pieces of a class (the old pieces congruent with its first, and
+    // the new pieces congruent with it) are paired by their order in the class; when the counts
+    // are equal and some old piece's place holds a new piece of the class other than its partner,
+    // no reading is verified: a trade, a reorder and a slide by the pitch are the same shapes.
+    // Added or removed pieces, and a twin moved to a free place, are no permutation.
+    void retirePermutedTwins()
+    {
+        if (oldPieces.size() < 2 || newPieces.empty()) {
+            return;
+        }
+        struct Class
+        {
+            Congruence shape;
+            std::vector<int> olds;
+            std::vector<int> news;
+        };
+        std::vector<Class> classes;
+        for (int k = 0; k < static_cast<int>(oldPieces.size()); ++k) {
+            Congruence congruence(before, oldPieces[k].elements);
+            auto found = std::find_if(classes.begin(), classes.end(), [&](const Class& c) {
+                return c.shape.same(congruence);
+            });
+            if (found == classes.end()) {
+                classes.push_back({std::move(congruence), {k}, {}});
+            }
+            else {
+                found->olds.push_back(k);
+            }
+        }
+        for (int n = 0; n < static_cast<int>(newPieces.size()); ++n) {
+            Congruence congruence(after, newPieces[n].elements);
+            auto found = std::find_if(classes.begin(), classes.end(), [&](const Class& c) {
+                return c.shape.same(congruence);
+            });
+            if (found != classes.end()) {
+                found->news.push_back(n);
+            }
+        }
+        for (const auto& c : classes) {
+            if (c.olds.size() < 2 || c.olds.size() != c.news.size()) {
+                continue;
+            }
+            bool permuted = false;
+            for (std::size_t p = 0; p < c.olds.size() && !permuted; ++p) {
+                std::vector<int> there;
+                for (const int n : c.news) {
+                    if (samePlace(oldPieces[c.olds[p]].box, newPieces[n].box, tolerance)) {
+                        there.push_back(n);
+                    }
+                }
+                permuted = there.size() == 1 && there.front() != c.news[p];
+            }
+            if (permuted) {
+                for (const int n : c.news) {
+                    retire(newPieces[n]);
+                }
+            }
+        }
+    }
+
+    // R1: identity flows down from faces. A matched vertex counts only where a face at it
+    // matched; a matched edge where a face at it matched or both its vertices are so confirmed
+    // (a prism's vertical edge between its matched caps). An element at no face, in a wire: an
+    // edge counts where an adjacent edge matched (an edge with no adjacent edge stands alone), a
+    // vertex where an edge at it counts. A place match nothing confirms is a seam: elements at
+    // the old places of other faces' elements (a shape moved by its own width).
+    void confirmByFaces()
+    {
+        std::set<int> faces;
+        for (const auto& [i, j] : result.faces) {
+            faces.insert(i - 1);
+        }
+        std::vector<std::vector<int>> facesAtVertex(after.points.size());
+        for (int f = 0; f < static_cast<int>(after.faceVertexes.size()); ++f) {
+            for (const int v : after.faceVertexes[f]) {
+                if (v >= 0) {
+                    facesAtVertex[v].push_back(f);
+                }
+            }
+        }
+        std::vector<std::vector<int>> facesAtEdge(after.edgeVertexes.size());
+        for (int f = 0; f < static_cast<int>(after.faceEdges.size()); ++f) {
+            for (const int e : after.faceEdges[f]) {
+                if (e >= 0) {
+                    facesAtEdge[e].push_back(f);
+                }
+            }
+        }
+        std::vector<std::vector<int>> edgesAtVertex(after.points.size());
+        for (int e = 0; e < static_cast<int>(after.edgeVertexes.size()); ++e) {
+            for (const int v : after.edgeVertexes[e]) {
+                if (v >= 0) {
+                    edgesAtVertex[v].push_back(e);
+                }
+            }
+        }
+        auto anyMatchedFace = [&](const std::vector<int>& at) {
+            return std::any_of(at.begin(), at.end(), [&](int f) { return faces.count(f) > 0; });
+        };
+        std::set<int> vertexes;  // confirmed through a face
+        for (const auto& [i, j] : result.vertexes) {
+            if (anyMatchedFace(facesAtVertex[i - 1])) {
+                vertexes.insert(i - 1);
+            }
+        }
+        std::set<int> edges;
+        for (const auto& [i, j] : result.edges) {
+            const int e = i - 1;
+            if (!facesAtEdge[e].empty()) {
+                const auto& ends = after.edgeVertexes[e];
+                if (anyMatchedFace(facesAtEdge[e])
+                    || (!ends.empty() && std::all_of(ends.begin(), ends.end(), [&](int v) {
+                           return vertexes.count(v) > 0;
+                       }))) {
+                    edges.insert(e);
+                }
+                continue;
+            }
+            bool adjacent = false;
+            bool matched = false;
+            for (const int v : after.edgeVertexes[e]) {
+                if (v < 0) {
+                    continue;
+                }
+                for (const int other : edgesAtVertex[v]) {
+                    if (other != e) {
+                        adjacent = true;
+                        matched = matched || result.edges.count(other + 1) > 0;
+                    }
+                }
+            }
+            if (!adjacent || matched) {
+                edges.insert(e);
+            }
+        }
+        for (const auto& [i, j] : result.vertexes) {
+            const int v = i - 1;
+            if (facesAtVertex[v].empty()
+                && std::any_of(edgesAtVertex[v].begin(), edgesAtVertex[v].end(), [&](int e) {
+                       return edges.count(e) > 0;
+                   })) {
+                vertexes.insert(v);
+            }
+        }
+        std::erase_if(result.vertexes, [&](const auto& match) {
+            return !vertexes.count(match.first - 1);
+        });
+        std::erase_if(result.edges, [&](const auto& match) {
+            return !edges.count(match.first - 1);
+        });
+    }
+
+    // R2 (to be measured, the ruling's 2b): a piece with an internal period slid by its pitch
+    // (a comb of teeth, a square-wave wire) puts each tooth's elements on the next tooth's old
+    // places, every match verified. Its signature: the old piece's unmatched elements and the
+    // new piece's are congruent, the first tooth's left and the last tooth's arrived. Such a
+    // piece is retired. A split (one old element, two new) and a count change don't fit it.
+    void retirePeriodSlides()
+    {
+        auto pieceOf = [](const std::vector<Piece>& pieces, std::size_t type, std::size_t count) {
+            std::vector<int> owner(count, -1);
+            for (int k = 0; k < static_cast<int>(pieces.size()); ++k) {
+                for (const int i : pieces[k].elements[type]) {
+                    if (owner[i] < 0) {
+                        owner[i] = k;
+                    }
+                }
+            }
+            return owner;
+        };
+        const std::array<std::size_t, 3> oldCounts {
+            before.points.size(),
+            before.edgeVertexes.size(),
+            before.faceVertexes.size()
+        };
+        const std::array<std::size_t, 3> newCounts {
+            after.points.size(),
+            after.edgeVertexes.size(),
+            after.faceVertexes.size()
+        };
+        // The pieces the matches link: a new piece with the one old piece its matches reach, and
+        // no other new piece's matches reach that one
+        std::map<int, std::set<int>> reached;  // new piece -> old pieces
+        std::map<int, std::set<int>> reachedBy;  // old piece -> new pieces
+        std::array<std::set<int>, 3> held;  // old elements matched
+        for (std::size_t t = 0; t < 3; ++t) {
+            const auto oldOwner = pieceOf(oldPieces, t, oldCounts[t]);
+            const auto newOwner = pieceOf(newPieces, t, newCounts[t]);
+            for (const auto& [i, j] : matchesOf(t)) {
+                held[t].insert(j - 1);
+                const int n = newOwner[i - 1];
+                const int k = oldOwner[j - 1];
+                if (n >= 0 && k >= 0) {
+                    reached[n].insert(k);
+                    reachedBy[k].insert(n);
+                }
+            }
+        }
+        for (const auto& [n, olds] : reached) {
+            if (olds.size() != 1 || reachedBy[*olds.begin()].size() != 1) {
+                continue;
+            }
+            const Piece& oldPiece = oldPieces[*olds.begin()];
+            const Piece& newPiece = newPieces[n];
+            std::array<std::vector<int>, 3> left;
+            std::array<std::vector<int>, 3> arrived;
+            for (std::size_t t = 0; t < 3; ++t) {
+                for (const int j : oldPiece.elements[t]) {
+                    if (!held[t].count(j)) {
+                        left[t].push_back(j);
+                    }
+                }
+                for (const int i : newPiece.elements[t]) {
+                    if (!matchesOf(t).count(i + 1)) {
+                        arrived[t].push_back(i);
+                    }
+                }
+            }
+            const Congruence gone(before, left);
+            const Congruence come(after, arrived);
+            if (!gone.empty() && gone.same(come)) {
+                retire(newPiece);
+            }
+        }
+    }
+
+    const Topology& before;
+    const Topology& after;
+    ElementMatches& result;
+    double tolerance;
+    std::vector<Piece> oldPieces;
+    std::vector<Piece> newPieces;
+};
+
 long idOf(const TopoShape& shape, const Data::IndexedName& element)
 {
     for (const auto& [name, sids] : shape.getElementMappedNames(element)) {
@@ -1052,7 +1447,9 @@ ElementMatches matchElements(const TopoDS_Shape& before, const TopoDS_Shape& aft
         result.byIndex = true;
         return result;
     }
-    return Matcher(old, now).run();
+    ElementMatches result = Matcher(old, now).run();
+    Ruling(old, now, result).run();
+    return result;
 }
 
 long matchedId(const TopoShape& shape, const char* element)
