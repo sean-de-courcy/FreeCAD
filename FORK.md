@@ -411,7 +411,8 @@ names it.
 | `infra/macos-cli-timeout` | infra | ops#302 | - | `integration` `69d24e907a` | `66e820e0a8` (fork PR 389), 2026-10-27 | never |
 | `infra/ledger-no-run-header` | infra | ops#519 | - | `integration` `69d24e907a` | `79fc35ff14` (fork PR 388), 2026-10-27 | never (fork tests) |
 | `fix/386-far-edge-pieces` | fix | ops#386 | - | `integration` `79fc35ff14` | `d1ba818039` (fork PR 366), 2026-10-28 | never (fork fix) |
-| `fix/504-e2-link-records` | fix | ops#504 | - | `integration` @ `79fc35ff14` | (fork PR 386) | never (fork fix) |
+| `fix/504-e2-link-records` | fix | ops#504 | - | `integration` @ `79fc35ff14` | `0ee24f4ed8` (fork PR 386), 2026-10-28 | never (fork fix) |
+| `fix/406-binormal-fold` | fix | ops#406, ops#458 | - | `integration` `0ee24f4ed8` | (fork PR 380) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 

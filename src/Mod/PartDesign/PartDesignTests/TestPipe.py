@@ -3387,3 +3387,625 @@ class TestRoundCornerNames(unittest.TestCase):
             True,
             self.firstBend,
         )
+
+
+def unit(vector):
+    return V(vector).normalize()
+
+
+def arcPoints(radius=20, steps=3):
+    """A quarter circle of `radius` about (radius, 0, 0) in XZ, from the origin along +Z to
+    (radius, 0, radius) along +X: its tangent is (sin s, 0, cos s)."""
+    angles = [math.pi / 2 * i / (steps - 1) for i in range(steps)]
+    return [V(radius - radius * math.cos(s), 0, radius * math.sin(s)) for s in angles]
+
+
+def nearBinormal(degrees):
+    """(1, 0, 1) turned `degrees` towards +Y: the arc's tangent passes within `degrees` of it."""
+    turn = math.radians(degrees)
+    return unit(V(1, 0, 1)) * math.cos(turn) + V(0, 1, 0) * math.sin(turn)
+
+
+def binormalVolume(spine, binormal, normal, area):
+    """The volume a profile of `area` centred on the spine's start, in the plane of `normal`
+    there, sweeps in Binormal mode where nothing folds. The mode carries the profile rigidly in
+    the frame (e, B x e, B), e the spine's tangent made square to the binormal B, so each section
+    lies in a plane through B and keeps its normal's parts (alpha, beta, gamma) on that frame: the
+    volume is area * (alpha L' + gamma dB), L' the length of the spine's projection on the plane
+    square to B and dB its travel along B (Simpson's rule along each edge)."""
+    edges = spine.OrderedEdges
+    first = edges[0].derivative1At(edges[0].FirstParameter)
+    along = first - binormal * first.dot(binormal)
+    alpha = normal.dot(unit(along))
+    gamma = normal.dot(binormal)
+    total = 0.0
+    for edge in edges:
+        steps = 2000
+        u0, u1 = edge.FirstParameter, edge.LastParameter
+        for i in range(steps + 1):
+            tangent = edge.derivative1At(u0 + (u1 - u0) * i / steps)
+            square = tangent - binormal * tangent.dot(binormal)
+            speed = alpha * square.Length + gamma * tangent.dot(binormal)
+            weight = 1 if i in (0, steps) else (4 if i % 2 else 2)
+            total += weight * speed * (u1 - u0) / steps / 3
+    return abs(area * total)
+
+
+def pointAfter(text, before):
+    """The point "(x, y, z)" that follows `before` in `text`, none when there is none."""
+    number = r"(-?[0-9.]+(?:e-?[0-9]+)?)"
+    found = re.search(re.escape(before) + rf"\({number}, {number}, {number}\)", text)
+    return V(*(float(found.group(i)) for i in (1, 2, 3))) if found else None
+
+
+class TestBinormalPipe(unittest.TestCase):
+    """ops#406 and ops#458: a Pipe in Binormal mode. Every section lies in a plane through the
+    binormal B, the profile carried rigidly in (e, B x e, B) with e the spine's tangent made square
+    to B. Where the tangent runs along B the section turns half a turn about B at once (a cusp)
+    and the pipe crosses itself; where it passes within a few degrees of B the section turns about
+    B faster than the profile's width allows and folds. Both used to build a solid that BRepCheck
+    passes, of the wrong volume or crossing itself, silently. Now a cusp fails, a fold fails, and a
+    fold under 5 % of the profile's extent warns. The binormal is in the Body's coordinates. The
+    spine is a quarter circle of radius 20 from the origin along +Z, unless stated; the profile
+    a 16 mm^2 shape on XY at the origin. Expected volumes come from the mode's definition
+    (binormalVolume), not from OCCT."""
+
+    def setUp(self):
+        self.doc = models.newDocument("PartDesignTestBinormalPipe")
+        self.body = models.body(self.doc)
+
+    def tearDown(self):
+        App.closeDocument(self.doc.Name)
+
+    PROFILES = {
+        "square": lambda: models.rectangle(-2, -2, 2, 2),
+        "circle": lambda: [models.circle(0, 0, 2)],
+        "rectY": lambda: models.rectangle(-1, -4, 1, 4),
+        "small": lambda: models.rectangle(-0.5, -0.5, 0.5, 0.5),
+    }
+
+    def pipe(self, spine, binormal, profile="square", placement=None, turned=None, **properties):
+        """`turned`: a rotation for the spine's Part feature, so that its edges carry a location."""
+        sketch = models.sketch(
+            self.doc, "Profile", self.PROFILES[profile](), self.body, placement=placement
+        )
+        self.spine = models.feature(self.doc, "Spine", spine)
+        if turned is not None:
+            self.spine.Placement = App.Placement(V(0, 0, 0), turned)
+        pipe = self.body.newObject("PartDesign::AdditivePipe", "Pipe")
+        pipe.Profile = sketch
+        pipe.Spine = (self.spine, [])
+        pipe.Mode = "Binormal"
+        pipe.Binormal = binormal
+        for name, value in properties.items():
+            setattr(pipe, name, value)
+        self.doc.recompute()
+        return pipe
+
+    @staticmethod
+    def arc():
+        return Part.Wire([Part.Arc(*arcPoints()).toShape()])
+
+    def assertFailsAt(self, pipe, at, within, *phrases):
+        """Invalid, the status names the point `at` (within `within`) and every phrase."""
+        if pipe.isValid():
+            shape = pipe.Shape
+            self.fail("built: %s" % (shape.Volume if shape.isValid() else "an invalid solid"))
+        status = pipe.getStatusString()
+        for phrase in phrases:
+            self.assertIn(phrase, status)
+        point = pointAfter(status, "at ")
+        self.assertIsNotNone(point, status)
+        self.assertLess(point.distanceToPoint(at), within, status)
+
+    def assertSwept(self, pipe, area, warns=False, normal=V(0, 0, 1)):
+        """A valid solid of the mode's volume, with a small fold's warning only if `warns`."""
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        self.assertEqual(len(pipe.Shape.Solids), 1)
+        self.assertTrue(pipe.Shape.isValid())
+        expected = binormalVolume(self.spine.Shape, unit(pipe.Binormal), normal, area)
+        self.assertAlmostEqual(pipe.Shape.Volume, expected, delta=1e-4 * expected)
+        if warns:
+            self.assertIn("Warning", pipe.State)
+            self.assertIn("folds slightly over itself", pipe.getStatusString())
+        else:
+            self.assertNotIn("Warning", pipe.State)
+
+    # The tangent along the binormal ---------------------------------------------------------
+
+    def testTangentAlongBinormalFails(self):
+        """B = (1, 0, 1): the arc's tangent runs along it halfway, at (5.858, 0, 14.142). Before,
+        Valid, 408.325 where the arc without the cusp would give 452.4, crossing itself (BOP
+        SelfIntersect, tolerance 1.76 mm)."""
+        pipe = self.pipe(self.arc(), unit(V(1, 0, 1)))
+        self.assertFailsAt(
+            pipe, V(20 - 20 * math.sqrt(0.5), 0, 20 * math.sqrt(0.5)), 1e-3, "runs along the binormal"
+        )
+
+    def testTangentAlongBinormalFailsCircle(self):
+        """The same arc as a B-spline through 13 points, a circle: the same cusp, for any profile.
+        Before, Valid and crossing itself."""
+        curve = Part.BSplineCurve()
+        curve.interpolate(arcPoints(steps=13), InitialTangent=V(0, 0, 1), FinalTangent=V(1, 0, 0))
+        pipe = self.pipe(Part.Wire([curve.toShape()]), unit(V(1, 0, 1)), "circle")
+        self.assertFailsAt(
+            pipe, V(20 - 20 * math.sqrt(0.5), 0, 20 * math.sqrt(0.5)), 1e-2, "runs along the binormal"
+        )
+
+    def testBinormalReachedAtEndFails(self):
+        """B = X: the arc's tangent reaches it at the end, (20, 0, 20). Before, Valid, 266.667."""
+        pipe = self.pipe(self.arc(), V(1, 0, 0))
+        self.assertFailsAt(pipe, V(20, 0, 20), 1e-3, "runs along the binormal")
+
+    def testTangentTouchesBinormal(self):
+        """B = Z, a cubic Bezier in XZ with x' = 30 (1 - 2u)^2: its tangent touches +Z halfway
+        without passing it, so e stays +X on both sides and the section is the square carried
+        straight up, 16 x 60 = 960, crossing nothing. Before, the fix failed it as a cusp: the
+        touch falls on one of its samples (review pr380-r1)."""
+        curve = Part.BezierCurve()
+        curve.setPoles([V(0, 0, 0), V(10, 0, 20), V(0, 0, 40), V(10, 0, 60)])
+        pipe = self.pipe(Part.Wire([curve.toShape()]), V(0, 0, 1))
+        self.assertSwept(pipe, 16)
+        self.assertAlmostEqual(pipe.Shape.Volume, 960, delta=1e-3)
+        pipe.Shape.check(True)
+
+    def testCornerFlipFails(self):
+        """B = Z, a spine from the origin to (10, 0, 10) and back to (0, 0, 20): e turns from +X
+        to -X at the corner. Under Right and Round corner the section takes the law's frame again
+        there and turns half a turn: it fails naming the corner (before, with an empty message).
+        "Transformed" keeps the section's tilt across the corner: the square carried up, 320."""
+        spine = Part.makePolygon([V(0, 0, 0), V(10, 0, 10), V(0, 0, 20)])
+        for transition in ("Right corner", "Round corner"):
+            with self.subTest(transition=transition):
+                pipe = self.pipe(spine, V(0, 0, 1), Transition=transition)
+                self.assertFailsAt(
+                    pipe, V(10, 0, 10), 1e-6, "turn the section 180 degrees", "half a turn"
+                )
+                self.tearDown()
+                self.setUp()
+        pipe = self.pipe(spine, V(0, 0, 1), Transition="Transformed")
+        self.assertSwept(pipe, 16)
+        self.assertAlmostEqual(pipe.Shape.Volume, 320, delta=1e-3)
+
+    def testPlanarSharpCornerBuilds(self):
+        """A spine in XZ, (0, 0, 0) to (0, 0, 20) and 20 further at 91 to 150 degrees from +Z
+        towards +X, and B = Y, square to the spine's plane: on each leg e is the leg's own
+        direction, so the corner turns the section exactly as much as the spine (no turn about
+        the tangent). "Right corner" is the miter join of the two legs, 16 x 40 = 640; "Round
+        corner" is OCCT's own sweep of the same profile in the same mode. Before, every corner
+        past 90 degrees failed as a half turn, since e turns past 90 degrees there (review
+        pr380-r2)."""
+        for theta in (91, 120, 150):
+            turn = math.radians(theta)
+            corner = V(0, 0, 20)
+            spine = Part.makePolygon([V(0, 0, 0), corner, corner + V(math.sin(turn), 0, math.cos(turn)) * 20])
+            for transition, code in (("Right corner", 1), ("Round corner", 2)):
+                with self.subTest(theta=theta, transition=transition):
+                    pipe = self.pipe(spine, V(0, 1, 0), Transition=transition)
+                    self.assertTrue(pipe.isValid(), pipe.getStatusString())
+                    self.assertNotIn("Warning", pipe.State)
+                    shape = pipe.Shape
+                    self.assertTrue(shape.isValid())
+                    if code == 1:
+                        expected = 640
+                    else:
+                        sweep = Part.BRepOffsetAPI.MakePipeShell(spine)
+                        sweep.setBiNormalMode(V(0, 1, 0))
+                        sweep.setTransitionMode(code)
+                        sweep.add(Part.makePolygon([V(-2, -2, 0), V(2, -2, 0), V(2, 2, 0), V(-2, 2, 0), V(-2, -2, 0)]))
+                        sweep.build()
+                        sweep.makeSolid()
+                        expected = sweep.shape().Volume
+                        self.assertLess(expected, 640)
+                    self.assertAlmostEqual(shape.Volume, expected, delta=1e-4 * expected)
+                    shape.check(True)
+                    self.tearDown()
+                    self.setUp()
+
+    def testOffPlaneCornerTurnsOverFails(self):
+        """B = Z, legs 45 degrees off it, the second turned 120 degrees about Z from the first:
+        e turns 120 degrees, the tangent 75.5, and the section 101.5 degrees about the tangent
+        beyond the corner's turn, nearer half a turn than none. Under Right corner it fails
+        naming the corner (OCCT can't join such corners either: integration fails them)."""
+        first = V(1, 0, 1) * (20 / math.sqrt(2))
+        second = V(math.cos(math.radians(120)), math.sin(math.radians(120)), 1) * (20 / math.sqrt(2))
+        rotation = App.Rotation(unit(first), V(0, 0, 1))
+        spine = Part.makePolygon(
+            [V(0, 0, 0), rotation.multVec(first), rotation.multVec(first + second)]
+        )
+        pipe = self.pipe(spine, rotation.multVec(V(0, 0, 1)), Transition="Right corner")
+        self.assertFailsAt(pipe, V(0, 0, 20), 1e-6, "about the spine's tangent", "half a turn")
+        twist = re.search(r"turn the section ([0-9.]+) degrees", pipe.getStatusString())
+        self.assertIsNotNone(twist, pipe.getStatusString())
+        self.assertAlmostEqual(float(twist.group(1)), 101.5, delta=0.6)
+
+    def testLongHelixBuilds(self):
+        """A helix of radius 10 and pitch 3, 60 turns, B = Z (its axis), the 1 x 1 square square
+        to the tangent where it starts: e runs round the axis and never near B, so the pipe is
+        the square carried along, area x (alpha L' + gamma dB) = 3774.206, no warning. Its
+        volume is measured in 10-turn slices: BRepGProp's volume of the whole solid (faces of 64
+        spans of degree 10, about one span a turn) comes out 0.7 % short (3748.61), where a
+        tessellation gives 3773.98 and its lateral area is right (review pr380-r2, "long_helix";
+        on 150 turns 4 %)."""
+        turns = 60
+        helix = Part.makeHelix(3, 3 * turns, 10)
+        spine = helix if isinstance(helix, Part.Wire) else Part.Wire(helix.Edges)
+        edge = spine.OrderedEdges[0]
+        tangent = unit(edge.derivative1At(edge.FirstParameter))
+        placement = App.Placement(edge.valueAt(edge.FirstParameter), App.Rotation(V(0, 0, 1), tangent))
+        sketch = models.sketch(
+            self.doc, "Profile", models.rectangle(-0.5, -0.5, 0.5, 0.5), self.body, placement=placement
+        )
+        self.spine = models.feature(self.doc, "Spine", spine)
+        pipe = self.body.newObject("PartDesign::AdditivePipe", "Pipe")
+        pipe.Profile = sketch
+        pipe.Spine = (self.spine, [])
+        pipe.Mode = "Binormal"
+        pipe.Binormal = V(0, 0, 1)
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        self.assertNotIn("Warning", pipe.State)
+        shape = pipe.Shape
+        self.assertTrue(shape.isValid())
+        slope = math.atan2(3, 2 * math.pi * 10)
+        expected = turns * (math.cos(slope) * 2 * math.pi * 10 + math.sin(slope) * 3)
+        self.assertAlmostEqual(expected, 3774.206, delta=1e-3)
+        sliced = 0.0
+        for k in range(turns // 10):
+            low = -5 if k == 0 else 30 * k
+            high = 3 * turns + 5 if k == turns // 10 - 1 else 30 * (k + 1)
+            sliced += shape.common(Part.makeBox(40, 40, high - low, V(-20, -20, low))).Volume
+        self.assertAlmostEqual(sliced, expected, delta=1e-4 * expected)
+
+    def testThreadHelixBuilds(self):
+        """A thread's spine: a helix of radius 10 and pitch 1, 300 turns in one edge, B = Z (its
+        axis), a 0.4 x 0.4 square on XY where it starts. The tangent is 89 degrees from B
+        everywhere and the section stays level, so every horizontal cut of the pipe is the
+        square turned about Z: area 0.16, volume 0.16 x 300 = 48. Before, it failed as a cusp
+        at z = 76.8, where the 2^14 halvings ran out and e, still turning steadily, came 105
+        degrees round between two places (review pr380-r3, "helix_budget")."""
+        turns = 300
+        spine = Part.Wire(Part.makeHelix(1, turns, 10).Edges)
+        sketch = models.sketch(
+            self.doc, "Profile", models.rectangle(9.8, -0.2, 10.2, 0.2), self.body
+        )
+        self.spine = models.feature(self.doc, "Spine", spine)
+        pipe = self.body.newObject("PartDesign::AdditivePipe", "Pipe")
+        pipe.Profile = sketch
+        pipe.Spine = (self.spine, [])
+        pipe.Mode = "Binormal"
+        pipe.Binormal = V(0, 0, 1)
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        self.assertNotIn("Warning", pipe.State)
+        shape = pipe.Shape
+        self.assertTrue(shape.isValid())
+        self.assertEqual(len(shape.Solids), 1)
+        cut = Part.Face(Part.Wire(shape.slice(V(0, 0, 1), 150.3)[0].Edges))
+        self.assertAlmostEqual(cut.Area, 0.16, delta=1e-5)
+        self.assertAlmostEqual(shape.Volume, 0.16 * turns, delta=1e-4 * 0.16 * turns)
+
+    def testShortWiggleInLongSplineFolds(self):
+        """One interpolated cubic B-spline, 310 mm, in the plane of X and Zt (Z tilted 3 degrees
+        about X): the tangent is 60 degrees from Zt, except on a 10 mm stretch from s = 160 where
+        it swings to -30 degrees and back (60 - 90 sin^2(pi (s - 160) / 10)). With B = Z it
+        passes 3 degrees from B twice there, the section turning about half a turn about B within
+        about a millimetre each time, faster than the 1 x 1 square's width allows: a fold. The
+        curve is one C2 piece, and both passes lie inside one of its 16 looks, whose ends see e
+        alike. Before, it built without a word (review pr380-r4, "wiggle_spline")."""
+        tilt = math.radians(3)
+        across, up = V(1, 0, 0), V(0, math.sin(tilt), math.cos(tilt))
+        start, length, total = 160.0, 10.0, 310.0
+
+        def angle(s):
+            if start <= s <= start + length:
+                return math.radians(60 - 90 * math.sin(math.pi * (s - start) / length) ** 2)
+            return math.radians(60)
+
+        points, x, y, s, last = [V(0, 0, 0)], 0.0, 0.0, 0.0, 0.0
+        wiggle = None
+        while s < total - 1e-9:
+            turn = angle(s + 0.005)
+            x, y, s = x + math.sin(turn) * 0.01, y + math.cos(turn) * 0.01, s + 0.01
+            if wiggle is None and s >= start + length / 2:
+                wiggle = across * x + up * y
+            step = 0.25 if start - 3 <= s <= start + length + 3 else 2.0
+            if s >= last + step - 1e-9:
+                points.append(across * x + up * y)
+                last = s
+        curve = Part.BSplineCurve()
+        curve.interpolate(points)
+        edge = curve.toShape()
+        tangent = unit(edge.derivative1At(edge.FirstParameter))
+        pipe = self.pipe(
+            Part.Wire([edge]),
+            V(0, 0, 1),
+            profile="small",
+            placement=App.Placement(V(0, 0, 0), App.Rotation(V(0, 0, 1), tangent)),
+        )
+        self.assertFailsAt(pipe, wiggle, length / 2, "folds over itself", "within 3")
+
+    @staticmethod
+    def nearTouch(drift):
+        """B = Z, one cubic Bezier with x' = 120 (u - u0)^2 and z' = 60, u0 = 0.5156 between two of
+        the fold check's looks, drifting `drift` in Y over its 60 mm: the tangent touches +Z at u0
+        (drift 0) or comes within about drift / 1.05 degrees of it there."""
+        curve = Part.BezierCurve()
+        xs = (0, 10.633734, 0.643469, 10.029203)
+        curve.setPoles([V(xs[i], drift * i / 3, 20 * i) for i in range(4)])
+        return Part.Wire([curve.toShape()])
+
+    def testNearTouchBetweenLooksFolds(self):
+        """nearTouch(1e-3): e swings a quarter turn to +Y and back within about 3 um of u0, and the
+        4 x 4 square square to the start tangent folds by about 1.7 mm there; OCCT's solid differs
+        from the touch's (BOP SelfIntersect). e is the same at both ends of the look and at its
+        middle, so before it built without a word (cloud review of 9234832ed3, S1)."""
+        spine = self.nearTouch(1e-3)
+        tangent = unit(spine.Edges[0].derivative1At(0))
+        pipe = self.pipe(
+            spine, V(0, 0, 1), placement=App.Placement(V(0, 0, 0), App.Rotation(V(0, 0, 1), tangent))
+        )
+        self.assertFailsAt(pipe, V(5.48, 0, 31), 1.0, "folds over itself", "within 0.00")
+
+    def testTouchBetweenLooksBuilds(self):
+        """nearTouch(0), the control: e is +X on both sides of the touch, so the square is carried
+        without folding, a valid, quiet solid of the mode's volume (922.970). The check halves
+        down to the touch, and finds nothing."""
+        spine = self.nearTouch(0)
+        tangent = unit(spine.Edges[0].derivative1At(0))
+        pipe = self.pipe(
+            spine, V(0, 0, 1), placement=App.Placement(V(0, 0, 0), App.Rotation(V(0, 0, 1), tangent))
+        )
+        self.assertSwept(pipe, 16, normal=tangent)
+        self.assertAlmostEqual(pipe.Shape.Volume, 922.970, delta=1e-3)
+        pipe.Shape.check(True)
+
+    @staticmethod
+    def doubleNearTouch(drift):
+        """B = Z, one quintic Bezier with x' = A ((u - m)^2 - c^2)^2, A = 3e5, m = 17/32 (the middle
+        of the fold check's look [0.5, 0.5625] before round 8) and c = 1/80, and z' = 60, drifting
+        `drift` in Y over its 60 mm: the tangent nears +Z at m - c and m + c, near
+        (2534.22, 0, 31.13) and (2534.22, 0, 32.63), and leaves it on the same side both times. It
+        touches +Z there (drift 0), or comes within about drift / 60 radians of it."""
+        curve = Part.BezierCurve()
+        xs = (0, 4773.819672, 556.648132, 4278.954132, 996.206421, 3888.873749)
+        curve.setPoles([V(xs[i], drift * i / 5, 12 * i) for i in range(6)])
+        return Part.Wire([curve.toShape()])
+
+    def doubleTouchPipe(self, drift, turned):
+        """doubleNearTouch(drift), the 4 x 4 square square to its start tangent, the spine's Part
+        feature and the profile turned by `turned`, and B with them; and the profile's normal."""
+        spine = self.doubleNearTouch(drift)
+        tangent = unit(spine.Edges[0].derivative1At(0))
+        placement = App.Placement(V(0, 0, 0), turned.multiply(App.Rotation(V(0, 0, 1), tangent)))
+        pipe = self.pipe(spine, turned.multVec(V(0, 0, 1)), placement=placement, turned=turned)
+        return pipe, turned.multVec(tangent)
+
+    def testDoubleNearTouchAboutLookMiddleFolds(self):
+        """doubleNearTouch(1e-4): at each near-touch e swings a quarter turn to +Y and back, and the
+        square folds by about 2 mm. e is the same at the look's three places, and q' is 0 at its
+        middle, so round 7's rate rule (q' at the middle over |q| at the three) read 0 and it
+        built without a word, Valid and crossing itself (BOP SelfIntersect). Also with the spine
+        and profile turned, so that the spine's edge carries a location (cloud review of
+        828d0d5f28, S1')."""
+        for turned in (App.Rotation(), App.Rotation(V(1, 2, 3), 40)):
+            with self.subTest(turned=turned.Angle):
+                pipe, _ = self.doubleTouchPipe(1e-4, turned)
+                self.assertFailsAt(
+                    pipe, turned.multVec(V(2534.22, 0, 31.875)), 1.0, "folds over itself"
+                )
+                self.tearDown()
+                self.setUp()
+
+    def testDoubleTouchAboutLookMiddleBuilds(self):
+        """doubleNearTouch(0), the control: e stays +X through both touches, so the square is
+        carried without folding, a valid, quiet solid of the mode's volume (62224.197), turned or
+        not."""
+        for turned in (App.Rotation(), App.Rotation(V(1, 2, 3), 40)):
+            with self.subTest(turned=turned.Angle):
+                pipe, normal = self.doubleTouchPipe(0, turned)
+                self.assertSwept(pipe, 16, normal=normal)
+                self.assertAlmostEqual(pipe.Shape.Volume, 62224.197, delta=1e-2)
+                self.tearDown()
+                self.setUp()
+
+    def testClosedSpineSeamFlipFails(self):
+        """A closed spine of two smooth halves, (R sin(pi s), W sin(2 pi s) / 2 pi,
+        H sin(2 pi s) / 2 pi) with R = 10, W = 8, H = 12, B = Z: e turns half a turn steadily along
+        it, and at the seam the tangent turns 131 degrees while e turns back. Under Right corner
+        the section takes the law's frame again there, 107 degrees about the tangent: it fails
+        before the sweep, naming the seam, as at any other corner. Before, the joint from the last
+        edge to the first was never checked; this spine failed only after the sweep, on a 0.61 mm
+        fold the 1 x 1 square makes near the seam (cloud review of 9234832ed3, L1)."""
+        pipe = self.seamPipe(self.seamSpine(0))
+        self.assertFailsAt(pipe, V(0, 0, 0), 1e-6, "can't be joined")
+
+    SEAM = (10.0, 8.0, 12.0)
+
+    @classmethod
+    def seamAlong(cls, s):
+        radius, wide, high = cls.SEAM
+        c = math.cos(2 * math.pi * s)
+        return V(math.pi * radius * math.cos(math.pi * s), wide * c, high * c)
+
+    @classmethod
+    def seamSpine(cls, gap, tolerance=None):
+        """testClosedSpineSeamFlipFails' spine, its end `gap` along X from its start, its edges'
+        tolerance raised to `tolerance` before they make the wire."""
+        radius, wide, high = cls.SEAM
+
+        def at(s):
+            return V(
+                radius * math.sin(math.pi * s),
+                wide * math.sin(2 * math.pi * s) / (2 * math.pi),
+                high * math.sin(2 * math.pi * s) / (2 * math.pi),
+            )
+
+        halves = []
+        for first in (0.0, 0.5):
+            points = [at(first + 0.5 * i / 8) for i in range(9)]
+            if first:
+                points[-1] = V(gap, 0, 0)
+            curve = Part.BSplineCurve()
+            curve.interpolate(
+                points, InitialTangent=cls.seamAlong(first), FinalTangent=cls.seamAlong(first + 0.5)
+            )
+            halves.append(curve.toShape())
+            if tolerance is not None:
+                halves[-1].fixTolerance(tolerance)
+        return Part.Wire(halves)
+
+    def seamPipe(self, spine):
+        self.assertTrue(spine.isClosed())
+        return self.pipe(
+            spine,
+            V(0, 0, 1),
+            profile="small",
+            placement=App.Placement(V(0, 0, 0), App.Rotation(V(0, 0, 1), unit(self.seamAlong(0)))),
+            Transition="Right corner",
+        )
+
+    def testClosedSpineSeamWithinToleranceFails(self):
+        """The same spine with its end 5e-5 from its start, its vertices' tolerance 1e-4: the wire
+        is closed (its last vertex is its first), and the seam is measured as before. Before, the
+        seam counted as closed only within 1e-7, so this one was skipped, and the pipe failed only
+        on the 0.61 mm fold near the seam (cloud review of 828d0d5f28, L3)."""
+        pipe = self.seamPipe(self.seamSpine(5e-5, tolerance=1e-4))
+        self.assertFailsAt(pipe, V(0, 0, 0), 1e-3, "can't be joined")
+
+    def sectionAtArcEnd(self):
+        """The square again, at the arc's end, square to its tangent (+X)."""
+        return models.sketch(
+            self.doc,
+            "Section",
+            self.PROFILES["square"](),
+            self.body,
+            placement=App.Placement(V(20, 0, 20), App.Rotation(V(0, 0, 1), V(1, 0, 0))),
+        )
+
+    def testSectionsFail(self):
+        """testNearBinormalFolds with the square again at the arc's end as a section: every
+        section folds there as the one profile does, but OCCT places and blends them in the law's
+        frame, which the fold check doesn't follow. So several sections stop with an error.
+        Before, Valid and silent (cloud review of 9234832ed3, S2)."""
+        section = self.sectionAtArcEnd()
+        pipe = self.pipe(
+            self.arc(), nearBinormal(2), Transformation="Multisection", Sections=[section]
+        )
+        self.assertFalse(pipe.isValid())
+        self.assertIn("with several sections the pipe can't be checked", pipe.getStatusString())
+
+    def testSectionsLeftOutStillChecked(self):
+        """The same Sections with Transformation "Constant": the sweep leaves them out, and the
+        one profile folds as in testNearBinormalFolds. Before, the fold check skipped any pipe
+        that had Sections."""
+        section = self.sectionAtArcEnd()
+        pipe = self.pipe(self.arc(), nearBinormal(2), Sections=[section])
+        self.assertFailsAt(pipe, arcPoints(steps=3)[1], 1.0, "folds over itself by")
+
+    def testBinormalAlongStartFails(self):
+        """B = Z, the spine's tangent where it starts: no section plane there. Before, Valid, 320."""
+        pipe = self.pipe(self.arc(), V(0, 0, 1))
+        self.assertFailsAt(pipe, V(0, 0, 0), 1e-6, "runs along the binormal", "start")
+
+    def testIssueCaseFails(self):
+        """The issue's spine: 30 along Z, a 60 degree corner towards +X, then a B-spline bending
+        40 degrees more over 10 mm, B = X: the tangent passes along X in the B-spline, near
+        (7.147, 0, 31.92), under every transition. Before, Valid, 403.166 under all three."""
+        start = V(0, 0, 30)
+        leg = V(math.sin(math.radians(60)), 0, math.cos(math.radians(60)))
+        across = V(0, 1, 0).cross(leg).normalize()
+        points = [start]
+        for i in range(1, 9):
+            bend = math.radians(40 * (i - 0.5) / 8)
+            points.append(points[-1] + (leg * math.cos(bend) + across * math.sin(bend)) * 1.25)
+        end = leg * math.cos(math.radians(40)) + across * math.sin(math.radians(40))
+        curve = Part.BSplineCurve()
+        curve.interpolate(points, InitialTangent=leg, FinalTangent=end)
+        spine = Part.Wire([Part.makeLine(V(0, 0, 0), start), curve.toShape()])
+        for transition in ("Transformed", "Right corner", "Round corner"):
+            with self.subTest(transition=transition):
+                pipe = self.pipe(spine, V(1, 0, 0), Transition=transition)
+                self.assertFailsAt(pipe, V(7.147, 0, 31.92), 0.05, "runs along the binormal")
+                self.tearDown()
+                self.setUp()
+
+    # The tangent near the binormal ----------------------------------------------------------
+
+    def testNearBinormalFolds(self):
+        """B within 2 degrees of the arc's tangent at its middle: the square turns about B
+        faster than its width allows and folds by about a third of its extent. Before, Valid,
+        crossing itself (BOP SelfIntersect)."""
+        pipe = self.pipe(self.arc(), nearBinormal(2))
+        self.assertFailsAt(pipe, arcPoints(steps=3)[1], 1.0, "folds over itself by")
+
+    def testNearBinormalSmallFoldWarns(self):
+        """B within 10 degrees, the 2 x 8 rectangle across the arc's plane: it folds by 0.2 mm of
+        its 8.25 mm (2.4 %), under 5 %: the pipe builds with a warning. Before, no warning."""
+        pipe = self.pipe(self.arc(), nearBinormal(10), "rectY")
+        self.assertSwept(pipe, 16, warns=True)
+
+    def testBinormalTurnsBackFails(self):
+        """A 120 degree arc of radius 20 turning from +Z towards -X, B 10 degrees off +Z towards
+        +X: the sections stay near-level while the spine turns down, and past 90 degrees they run
+        back through the pipe (every point of the profile moves backwards through its plane).
+        The status names the first place sampled past it, within a sample's spacing (2.6 mm).
+        Before, Valid, a solid that isn't valid."""
+        centre = V(-20, 0, 0)
+        points = [centre + V(20 * math.cos(a), 0, 20 * math.sin(a)) for a in (0, math.pi / 3, 2 * math.pi / 3)]
+        binormal = V(math.sin(math.radians(10)), 0, math.cos(math.radians(10)))
+        pipe = self.pipe(Part.Wire([Part.Arc(*points).toShape()]), binormal)
+        self.assertFailsAt(pipe, V(-20, 0, 20), 2.7, "edge-on to the section or past")
+
+    # Clear of the binormal: as before -------------------------------------------------------
+
+    def testBinormalClear(self):
+        """B within 20 degrees: no fold, the mode's volume, no warning (square and rectangle)."""
+        for profile in ("square", "rectY"):
+            with self.subTest(profile=profile):
+                pipe = self.pipe(self.arc(), nearBinormal(20), profile)
+                self.assertSwept(pipe, 16)
+                pipe.Shape.check(True)
+                self.tearDown()
+                self.setUp()
+
+    def testBinormalAxis(self):
+        """B = Y, the arc's axis: the profile turns with the arc, 16 x 20 x pi / 2."""
+        pipe = self.pipe(self.arc(), V(0, 1, 0))
+        self.assertSwept(pipe, 16)
+        self.assertAlmostEqual(pipe.Shape.Volume, 16 * 20 * math.pi / 2, delta=1e-3)
+
+    def testOffsetCurveSpineFails(self):
+        """The arc offset 1 mm outwards as an offset curve, B = Y (its axis): the fold check bounds
+        e's turn only on lines, conics, Bezier curves and B-splines, so the pipe stops with an
+        error naming the edge's start, (-1, 0, 0). Before, it was checked by sampling alone (decision
+        162)."""
+        arc = Part.Arc(*arcPoints())
+        edge = Part.OffsetCurve(arc, 1, V(0, 1, 0)).toShape(arc.FirstParameter, arc.LastParameter)
+        self.assertLess(edge.Vertexes[0].Point.distanceToPoint(V(-1, 0, 0)), 1e-9)
+        pipe = self.pipe(Part.Wire([edge]), V(0, 1, 0))
+        self.assertFailsAt(pipe, edge.Vertexes[0].Point, 1e-6, "can't be checked for the section")
+
+    def testZeroBinormalFails(self):
+        """A zero binormal: a clear message, not OCCT's "gp_Dir() - input vector has zero norm"."""
+        pipe = self.pipe(self.arc(), V(0, 0, 0))
+        self.assertFalse(pipe.isValid())
+        self.assertIn("needs a non-zero binormal", pipe.getStatusString())
+
+    # ops#458: the binormal in the Body's coordinates ----------------------------------------
+
+    def testBinormalInBodyCoordinates(self):
+        """An arc of radius 20 about the origin over a hilltop, from 135 to 45 degrees in XZ, the
+        square's sketch at its start square to it (its Placement turned 45 degrees about Y), and
+        B = (1, 1, 0) in the Body: the mode's volume, 493.917. Before, the Pipe read B in its own
+        placement, the sketch's, and swept another pipe (432.206)."""
+        angles = [math.radians(a) for a in (135, 90, 45)]
+        spine = Part.Wire([Part.Arc(*[V(20 * math.cos(a), 0, 20 * math.sin(a)) for a in angles]).toShape()])
+        edge = spine.Edges[0]
+        start = edge.valueAt(edge.FirstParameter)
+        tangent = unit(edge.derivative1At(edge.FirstParameter))
+        placement = App.Placement(start, App.Rotation(V(0, 0, 1), tangent))
+        pipe = self.pipe(spine, unit(V(1, 1, 0)), placement=placement)
+        self.assertFalse(pipe.Placement.isIdentity())
+        self.assertSwept(pipe, 16, normal=tangent)
+        self.assertAlmostEqual(pipe.Shape.Volume, 493.917, delta=1e-2)
