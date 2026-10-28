@@ -4938,7 +4938,7 @@ TEST_F(TopoShapeExpansionTest, makeShapeWithElementMapPipeShellEndArcsAreTwinsOf
     //   127 degrees. Each end's two arcs are generated from the spine's end vertex alone and told
     //   apart by nothing of their own: a group of two edges (A1, `naming-class-A.md` M2 (b)),
     //   whose first source is a vertex, so they keep the maker's order, the profile's (decision
-    //   158 Q1)
+    //   158 Q1), without ORD (decision 173 (2))
 
     for (double degrees : {0.0, 90.0, 127.0}) {
         // Act
@@ -4947,7 +4947,7 @@ TEST_F(TopoShapeExpansionTest, makeShapeWithElementMapPipeShellEndArcsAreTwinsOf
         const TopoShape unturned = namedSweptHalfArcs(gp_Trsf());
 
         // Assert
-        //   each end arc is 0of2 or 1of2 by its profile arc's place, E1 or E2, Index 0, with ORD
+        //   each end arc is 0of2 or 1of2 by its profile arc's place, E1 or E2, Index 0, without ORD
         EXPECT_TRUE(allElementsNamed(swept)) << degrees << " degrees";
         const std::array<gp_Pnt, 2> profileArcPoints {gp_Pnt(0, 2, 0), gp_Pnt(0, -2, 0)};
         int endArcs = 0;
@@ -4971,7 +4971,7 @@ TEST_F(TopoShapeExpansionTest, makeShapeWithElementMapPipeShellEndArcsAreTwinsOf
                     const DecodedMappedSection section = lastSection(name);
                     EXPECT_EQ(section.opCode, OpCodes::PipeShell) << name;
                     EXPECT_TRUE(section.hasMapperFlag(MAPPER_FLAG_GENERATED)) << name;
-                    EXPECT_TRUE(section.hasMapperFlag(MAPPER_FLAG_ORDERED)) << name;
+                    EXPECT_FALSE(section.hasMapperFlag(MAPPER_FLAG_ORDERED)) << name;
                     EXPECT_EQ(section.index, "0") << name;
                     EXPECT_EQ(section.duplicateCount, place == 0 ? "0of2" : "1of2")
                         << degrees << " degrees, z " << z << ", E" << place + 1 << " " << name;
