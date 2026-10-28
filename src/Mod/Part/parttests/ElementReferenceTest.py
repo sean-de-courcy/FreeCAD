@@ -778,11 +778,12 @@ class ElementReferenceTest(unittest.TestCase):
                 self.assertEqual(history, ["Asm56#Cut", "Asm56#L", "Src56#Src"])
         self.assertEqual(fromBox, 6)
 
-    def testLinkInTheSameDocumentKeepsTheNames(self):
-        """An App::Link to a Body in the same document has the Body's names, with no boundary
-        section, and a fusion of the Body and the Link gives the copies the same names told
-        apart by duplicate counts, as in FreeCAD 1.1.3 (ops#104: same-document links are left
-        as they are; ops#56's section is for links across documents only)."""
+    def testLinkInTheSameDocumentKeysItsCopy(self):
+        """An App::Link to a Body in the same document has the Body's names, each followed by a
+        link copy section with the link's ID (`|_;_;<link>;CPY;L;...`, ops#523) and no boundary
+        section (ops#56's is for links across documents only). In a fusion of the Body and the
+        Link the copy's names keep the link's key, so the two copies are no longer told apart by
+        duplicate counts alone, as in FreeCAD 1.1.3 (ops#104)."""
         # Arrange
         doc = self._numberedFromOne("Same56")
         pad = self._paddedSquare(doc, 0)
@@ -799,13 +800,19 @@ class ElementReferenceTest(unittest.TestCase):
         # Assert
         self.assertAlmostEqual(fuse.Shape.Volume, 2000)
         expand = App.expandMappedName
-        linkNames = sorted(expand(n) for n in link.Shape.ElementMap)
-        self.assertEqual(linkNames, sorted(expand(n) for n in body.Shape.ElementMap))
+        section = f"|_;_;{link.ID};CPY;L;"
+        linkNames = [expand(n) for n in link.Shape.ElementMap]
+        self.assertTrue(linkNames)
+        self.assertFalse([n for n in linkNames if section not in n])
+        self.assertEqual(
+            sorted(n[: n.rindex(section)] for n in linkNames),
+            sorted(expand(n) for n in body.Shape.ElementMap),
+        )
         names = [expand(n) for n in fuse.Shape.ElementMap]
         self.assertTrue(names)
         self.assertFalse([n for n in names if ";EXT;" in n])
-        counts = {App.getDecodedMappedName(n)[-1]["duplicateCount"] for n in names}
-        self.assertIn("1", counts)
+        self.assertTrue([n for n in names if section in n])
+        self.assertTrue([n for n in names if section not in n])
 
     def testCrossDocumentBinderOfAFace(self):
         """A SubShapeBinder of one face of a box in another document, where a local box has the

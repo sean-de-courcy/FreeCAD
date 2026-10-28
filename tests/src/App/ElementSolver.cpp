@@ -128,6 +128,29 @@ std::string stepInstance(
         );
 }
 
+// A copy of \a incoming by copy maker \a tag, `_;_;<tag>;CPY;<index>;<type>;0;MOD;_`: a link's
+// (`L`, a link array element's `L<n>`; ops#523), a Scale's or Reverse's (`1`), a second side's (`2`)
+std::string copied(
+    const std::string& incoming,
+    int tag,
+    const std::string& index,
+    char elementType = 'F'
+)
+{
+    return incoming + "|"
+        + Data::MappedName::makeEncodedSection(
+               std::vector<std::string> {},
+               std::vector<std::string> {},
+               std::to_string(tag),
+               "CPY",
+               index,
+               elementType,
+               "0",
+               {"MOD"},
+               std::vector<std::string> {}
+        );
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------------------------
@@ -2201,6 +2224,106 @@ TEST(SolveOwner, patternInstanceSiblingNeverResolves)
     input.entries = {missing(faceOn(3))};
     input.entries[0].fingerprint = p.top;
     input.pool["Face"] = {element("Face4", {faceOn(2)})};
+    measure(input, {{"Face4", p.top}}, nullptr);
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[0].evidence, "pattern sibling");
+}
+
+TEST(SolveOwner, copySiblingsAreCounterSiblings)
+{
+    // ops#523, decision 157 (S1): copies of one element by copy makers of one kind are counter
+    // siblings whatever their tags, and so are an element and its copy
+    const auto x = generated({sketchEdge(1)}, 7, "XTR", 'E');
+    auto ext = [](const std::string& name, int link, int index) {
+        return name + "|" + section({}, {}, link, "EXT", index, 'E', {});
+    };
+    //   (a) two copy sections of any index, two boundary sections of one index
+    EXPECT_TRUE(Data::isCounterSiblingName(copied(x, 11, "L", 'E'), copied(x, 12, "L", 'E')));
+    EXPECT_TRUE(Data::isCounterSiblingName(copied(x, 11, "L1", 'E'), copied(x, 11, "L2", 'E')));
+    EXPECT_TRUE(Data::isCounterSiblingName(copied(x, 11, "L1", 'E'), copied(x, 12, "L0", 'E')));
+    EXPECT_TRUE(Data::isCounterSiblingName(ext(x, 11, 0), ext(x, 12, 0)));
+    EXPECT_TRUE(Data::isCounterSiblingName(copied(x, 11, "1", 'E'), copied(x, 12, "1", 'E')));
+    EXPECT_TRUE(Data::isCounterSiblingName(copied(x, 11, "L", 'E'), copied(x, 12, "1", 'E')));
+    EXPECT_FALSE(Data::isCounterSiblingName(ext(x, 11, 0), ext(x, 12, 3)));
+    EXPECT_FALSE(Data::isCounterSiblingName(ext(x, 11, 0), copied(x, 12, "L", 'E')));
+    //   (b) the original and its copy by a link or a Scale; not by a pattern or a second side
+    EXPECT_TRUE(Data::isCounterSiblingName(x, copied(x, 11, "L", 'E')));
+    EXPECT_TRUE(Data::isCounterSiblingName(copied(x, 11, "L3", 'E'), x));
+    EXPECT_TRUE(Data::isCounterSiblingName(x, copied(x, 11, "1", 'E')));
+    EXPECT_FALSE(Data::isCounterSiblingName(x, copied(x, 11, "2", 'E')));
+    EXPECT_FALSE(Data::isCounterSiblingName(x, piece(x, 9, "TRF", 1, 'E')));
+    EXPECT_FALSE(Data::isCounterSiblingName(x, x));
+    //   ... also inside the names made from them: a fuse's piece of each, a face on each
+    const auto fusedOriginal = piece(x, 20, "FUS", 0, 'E');
+    const auto fusedCopy = piece(copied(x, 11, "L", 'E'), 20, "FUS", 0, 'E');
+    EXPECT_TRUE(Data::isCounterSiblingName(fusedOriginal, fusedCopy));
+    EXPECT_TRUE(Data::isCounterSiblingName(
+        generated({copied(x, 11, "L", 'E')}, 30, "FLT", 'F'),
+        generated({copied(x, 12, "L", 'E')}, 30, "FLT", 'F')
+    ));
+    //   but not two copies of different elements, nor a copy with two more sections
+    const auto y = generated({sketchEdge(2)}, 7, "XTR", 'E');
+    EXPECT_FALSE(Data::isCounterSiblingName(copied(x, 11, "L", 'E'), copied(y, 12, "L", 'E')));
+    EXPECT_FALSE(Data::isCounterSiblingName(x, copied(copied(x, 11, "L", 'E'), 12, "L", 'E')));
+    EXPECT_FALSE(Data::isCounterSiblingName(y, copied(x, 11, "L", 'E')));
+    //   the twin sites (copySiblings false; the A3 pre-push review's T1): another copy's twins
+    //   are no twins of this one, but one copy's own counter siblings still are
+    EXPECT_FALSE(
+        Data::isCounterSiblingName(copied(x, 11, "L", 'E'), copied(x, 12, "L", 'E'), false)
+    );
+    EXPECT_FALSE(Data::isCounterSiblingName(ext(x, 11, 0), ext(x, 12, 0), false));
+    EXPECT_FALSE(Data::isCounterSiblingName(x, copied(x, 11, "1", 'E'), false));
+    const auto twin0 = section({}, {sketchEdge(1)}, 7, "XTR", 0, 'E', {"GEN"});
+    const auto twin1 = Data::MappedName::makeEncodedSection(
+        std::vector<std::string> {},
+        std::vector<std::string> {sketchEdge(1)},
+        "7",
+        "XTR",
+        "0",
+        'E',
+        "1",
+        {"GEN"},
+        std::vector<std::string> {}
+    );
+    EXPECT_TRUE(Data::isCounterSiblingName(
+        copied(twin0, 11, "L", 'E'),
+        copied(twin1, 11, "L", 'E'),
+        false
+    ));
+    EXPECT_TRUE(Data::isCounterSiblingName(ext(twin0, 11, 0), ext(twin1, 11, 0), false));
+    //   ... also inside the names made from them (the flag goes down into linked names)
+    EXPECT_FALSE(Data::isCounterSiblingName(
+        generated({copied(x, 11, "L", 'E')}, 30, "FLT", 'F'),
+        generated({copied(x, 12, "L", 'E')}, 30, "FLT", 'F'),
+        false
+    ));
+}
+
+TEST(SolveOwner, linkCopySiblingNeverResolves)
+{
+    // ops#523: two links to one object in a fuse; copy 0 removed and copy 1 moved onto its place.
+    // The reference to copy 0's top face (`X|CPY;L{11}`) has no structural candidate, and
+    // geometry alone finds copy 1's (`X|CPY;L{12}`) in place: another element. The same when the
+    // original itself is gone and its link copy moved onto its place (Fable review finding 1).
+    Placed p;
+    const auto x = p.names.oldTop;
+    SolveInput input;
+    input.diagonal = 30.0;
+    input.entries = {missing(copied(x, 11, "L"))};
+    input.entries[0].fingerprint = p.top;
+    input.pool["Face"] = {element("Face4", {copied(x, 12, "L")})};
+    measure(input, {{"Face4", p.top}}, nullptr);
+
+    auto outcomes = Data::solveOwner(input);
+
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[0].evidence, "pattern sibling");
+
+    //   the original gone, its copy in its place
+    input.entries = {missing(x)};
+    input.entries[0].fingerprint = p.top;
+    input.pool["Face"] = {element("Face4", {copied(x, 12, "L")})};
     measure(input, {{"Face4", p.top}}, nullptr);
     outcomes = Data::solveOwner(input);
     EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
@@ -6188,6 +6311,35 @@ TEST(Moved, orderedEdgePiecesMovedTogetherStand)
     input.entries = {entryOn("Edge24", left, 0, 1), entryOn("Edge26", right, 1, 2)};
     for (const auto& outcome : Data::solveOwner(input)) {
         EXPECT_EQ(outcome.status, SolveStatus::Exact) << describe(outcome);
+    }
+}
+
+TEST(SolveOwner, otherCopysOrderedPieceIsNoRenumbering)
+{
+    // ops#523 (the A3 pre-push review's T2): renumberedEdgePieceInItsPlaceResolves's right piece
+    // inside link copies. In the same copy (link 11) it is still the old piece renumbered; but
+    // copy 11 gone and copy 12's piece at its place is another copy's: a pattern sibling, broken.
+    const auto plate3 = plateElement("Face3", 'F');
+    const auto oldPiece = copied(farEdgePiece({plate3}, 5, {"PRJ", "MOD", "ORD"}), 11, "L", 'E');
+    SolveInput input;
+    input.diagonal = 30;
+    auto entry = missing(oldPiece, "Edge");
+    entry.fingerprint = farEdgeAt(3, 5, 1);
+    input.entries = {entry};
+    for (int link : {11, 12}) {
+        const auto copyPiece
+            = copied(farEdgePiece({plate3}, 2, {"PRJ", "MOD", "ORD"}), link, "L", 'E');
+        input.pool["Edge"] = {element("Edge12", {copyPiece})};
+        measure(input, {{"Edge12", farEdgeAt(3, 5, 1)}}, nullptr);
+        const auto outcome = Data::solveOwner(input)[0];
+        if (link == 11) {
+            EXPECT_EQ(outcome.status, SolveStatus::Resolved) << describe(outcome);
+            EXPECT_EQ(outcome.element, "Edge12") << describe(outcome);
+        }
+        else {
+            EXPECT_EQ(outcome.status, SolveStatus::Broken) << describe(outcome);
+            EXPECT_EQ(outcome.evidence, "pattern sibling") << describe(outcome);
+        }
     }
 }
 

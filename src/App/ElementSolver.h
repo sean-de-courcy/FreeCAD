@@ -494,8 +494,12 @@ AppExport bool isMarkedPieceName(std::string_view name);
 
 /** True if \a name is \a other up to the duplicate counter and not \a other itself: for ordered
  * names (isOrderedName()), twins (ops#360, PR 340 round 5, the fingerprint's twin centroid).
+ * With \a copySiblings, also another copy of it by a copy maker of the same kind, or its
+ * original (ops#523, decision 157); the twin centroid passes false, as another copy's twins are
+ * no twins of this one.
  */
-AppExport bool isCounterSiblingName(std::string_view name, std::string_view other);
+AppExport bool
+isCounterSiblingName(std::string_view name, std::string_view other, bool copySiblings = true);
 
 /** A cheap necessary condition for atSamePlace(\a saved, the element's fingerprint), from the
  * element's \a intrinsic part (type, kind, direction, radii and a circle's centre, measured as

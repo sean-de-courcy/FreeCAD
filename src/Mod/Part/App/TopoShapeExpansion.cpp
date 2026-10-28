@@ -9687,8 +9687,12 @@ void TopoShape::reTagElementMap(long tag, App::StringHasherRef hasher, const cha
     }
 
     const App::HistoryAlgorithm& selectedHistoryAlgorithm = getHistoryAlgorithm();
+    const bool linkCopy = postfix && std::string_view(postfix).starts_with(Data::POSTFIX_LINK_COPY);
 
     if (selectedHistoryAlgorithm == App::HistoryAlgorithm::V1) {
+        if (linkCopy) {
+            return;  // V1 names don't key a copy by its link (ops#523)
+        }
         // Copy before retagging, as upstream does: copyElementMap() names the elements as
         // children of the copy's tag, so a shape without an element map got empty tags (ops#35)
         TopoShape tmp(*this);
@@ -9712,9 +9716,15 @@ void TopoShape::reTagElementMap(long tag, App::StringHasherRef hasher, const cha
     const bool external = selectedHistoryAlgorithm == App::HistoryAlgorithm::V2 && postfix
         && std::string_view(postfix).starts_with(Data::POSTFIX_EXTERNAL_TAG);
     const std::string boundary = external ? Part::boundaryIndexOf(postfix) : std::string("0");
+    // A shape a link hands over within one document (POSTFIX_LINK_COPY), or a link array's
+    // element across documents, gets a link copy section after any boundary section:
+    // `<name>|_;_;<tag>;CPY;L<n>;<type>;0;MOD;_`, n the element's number, none for a plain link.
+    // Copies of one object through two links had the same names otherwise, told apart only by
+    // their order in the maker they meet in (ops#523)
+    const std::string copy = linkCopy || external ? Part::linkCopyIndexOf(postfix) : std::string();
 
-    if (selectedHistoryAlgorithm == App::HistoryAlgorithm::V2 && Tag && (Tag != tag || external)
-        && !getElementMapSize()) {
+    if (selectedHistoryAlgorithm == App::HistoryAlgorithm::V2 && Tag
+        && (Tag != tag || external || linkCopy) && !getElementMapSize()) {
         // Another object's shape without an element map (e.g. a primitive reached through a
         // Link in another document, or a Body's tip): a V2 retag only fills untagged sections,
         // so it would name nothing. Name the elements as mapSubElement() names a single
@@ -9725,6 +9735,9 @@ void TopoShape::reTagElementMap(long tag, App::StringHasherRef hasher, const cha
         *this = res;
         if (external) {
             appendSection(*this, tag, Part::OpCodes::External, boundary, {});
+        }
+        if (!copy.empty()) {
+            appendSection(*this, tag, Part::OpCodes::Copy, copy, {Data::MAPPER_FLAG_MODIFIED});
         }
         return;
     }
@@ -9744,6 +9757,9 @@ void TopoShape::reTagElementMap(long tag, App::StringHasherRef hasher, const cha
         map->retagElementMap(tag);
         if (external) {
             appendSection(*this, tag, Part::OpCodes::External, boundary, {});
+        }
+        if (!copy.empty()) {
+            appendSection(*this, tag, Part::OpCodes::Copy, copy, {Data::MAPPER_FLAG_MODIFIED});
         }
     }
 }

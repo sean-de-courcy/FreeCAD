@@ -413,7 +413,8 @@ names it.
 | `fix/386-far-edge-pieces` | fix | ops#386 | - | `integration` `79fc35ff14` | `d1ba818039` (fork PR 366), 2026-10-28 | never (fork fix) |
 | `fix/504-e2-link-records` | fix | ops#504 | - | `integration` @ `79fc35ff14` | `0ee24f4ed8` (fork PR 386), 2026-10-28 | never (fork fix) |
 | `fix/406-binormal-fold` | fix | ops#406, ops#458 | - | `integration` `0ee24f4ed8` | `1afc652c4a` (fork PR 380), 2026-10-28 | never (fork fix) |
-| `fix/468-harness-twin-counter` | fix | ops#468 | - | `integration` `1afc652c4a` | (fork PR 391) | never (fork tests) |
+| `fix/468-harness-twin-counter` | fix | ops#468 | - | `integration` `1afc652c4a` | `86812406ca` (fork PR 391), 2026-10-28 | never (fork tests) |
+| `fix/523-link-copy-names` | fix | ops#523 | - | `integration` `0ee24f4ed8` | (fork PR 392) | never (fork naming) |
 
 ## Fork-only commits in carried topics
 

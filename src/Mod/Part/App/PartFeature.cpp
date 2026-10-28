@@ -1530,6 +1530,33 @@ std::string Part::boundaryIndexOf(const char* postfix)
     return std::string(rest);
 }
 
+std::string Part::linkCopyIndexOf(const char* postfix)
+{
+    std::string_view rest(postfix ? postfix : "");
+    const bool linkCopy = rest.starts_with(Data::POSTFIX_LINK_COPY);
+    if (linkCopy) {
+        rest.remove_prefix(std::string_view(Data::POSTFIX_LINK_COPY).size());
+    }
+    else if (rest.starts_with(Data::POSTFIX_EXTERNAL_TAG)) {
+        rest.remove_prefix(std::string_view(Data::POSTFIX_EXTERNAL_TAG).size());
+    }
+    else {
+        return {};
+    }
+    std::string_view number;
+    if (rest.starts_with(Data::POSTFIX_INDEX)) {
+        number = rest.substr(std::string_view(Data::POSTFIX_INDEX).size());
+        if (number.empty()
+            || !std::all_of(number.begin(), number.end(), [](char c) { return c >= '0' && c <= '9'; })) {
+            number = {};
+        }
+    }
+    if (!linkCopy && number.empty()) {
+        return {};  // a plain Link or a binder across documents: its boundary section is its key
+    }
+    return "L" + std::string(number);
+}
+
 // The name before the boundary section if \a name, in a shape tagged \a shapeTag, ends in one of
 // the shape's own object (`<prefix>|_;_;<shapeTag>;EXT;<index>;...`, ops#56), in its plain form:
 // the history step from \a name reaches that name, which came from another document, and its tag
@@ -2325,7 +2352,19 @@ static TopoShape _getTopoShape(
         else {
             shape.transformShape(linkMat, false, true);
         }
-        shape.reTagElementMap(tag, hasher, boundary(linked, owner));
+        if (shape.getHistoryAlgorithm() == App::HistoryAlgorithm::V2) {
+            // Keyed by the link within one document too, as a link's shape is (ops#523)
+            const App::DocumentObject* copier = owner;
+            const std::string postfix = App::LinkBaseExtension::copyPostfix(copier, linked, nullptr);
+            shape.reTagElementMap(
+                copier->getID(),
+                copier->getDocument()->getStringHasher(),
+                postfix.c_str()
+            );
+        }
+        else {
+            shape.reTagElementMap(tag, hasher, boundary(linked, owner));
+        }
     }
     else {
         // Construct a compound of sub objects
@@ -2337,11 +2376,16 @@ static TopoShape _getTopoShape(
         TopoShape baseShape = Feature::makeTopoShape(obj);
         Base::Matrix4D baseMat;
         std::string op;
+        // V2 keys an array's elements by the array and their numbers whether it shows them as
+        // objects or not, so toggling ShowElement renames nothing (ops#523)
+        bool keyedByArray = false;
         if (link && link->getElementCountValue()) {
             linked = link->getTrueLinkedObject(false, &baseMat);
             if (linked && linked != owner) {
                 baseShape = Feature::getTopoShape(linked, ShapeOption::NoFlag);
-                if (!link->getShowElementValue()) {
+                keyedByArray = !link->getShowElementValue()
+                    || baseShape.getHistoryAlgorithm() == App::HistoryAlgorithm::V2;
+                if (keyedByArray) {
                     baseShape.reTagElementMap(
                         owner->getID(),
                         owner->getDocument()->getStringHasher(),
@@ -2415,11 +2459,14 @@ static TopoShape _getTopoShape(
                 }
             }
             else {
-                if (link && !link->getShowElementValue()) {
+                if (keyedByArray) {
                     shape = baseShape.makeElementTransform(
                         mat,
                         (Data::POSTFIX_INDEX + childName).c_str()
                     );
+                    // V2 drops the op's postfix: the element's number goes in a link copy
+                    // section, `CPY;L<n>` with the array's ID (none in V1)
+                    shape.appendElementSection(owner->getID(), OpCodes::Copy, "L" + childName);
                 }
                 else {
                     shape = baseShape.makeElementTransform(mat);

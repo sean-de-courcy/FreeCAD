@@ -436,12 +436,16 @@ TEST_F(TopoShapeTest, retagAppendsBoundarySectionV2)
     EXPECT_EQ(names[1].first.toString(), second.toString() + boundary(7, 'F'));
     //   the shape it was copied from keeps its names
     EXPECT_EQ(mapped.getMappedName(face1), name);
-    //   with a link array's postfix after the external one, as a Link passes it
+    //   with a link array's postfix after the external one, as a Link passes it: the element's
+    //   link copy section after the boundary section (ops#523)
     Part::TopoShape element(mapped);
     const std::string arrayPostfix =
         std::string(Data::POSTFIX_EXTERNAL_TAG) + Data::ELEMENT_MAP_PREFIX + ":I2";
     element.reTagElementMap(7, nullptr, arrayPostfix.c_str());
-    EXPECT_EQ(element.getMappedName(face1).toString(), name.toString() + boundary(7, 'F'));
+    EXPECT_EQ(
+        element.getMappedName(face1).toString(),
+        name.toString() + boundary(7, 'F') + Data::NAME_SECTION_DELIMINATOR + "_;_;7;CPY;L2;F;0;MOD;_"
+    );
     //   within a document, without a postfix or with a link array's: unchanged
     Part::TopoShape local(mapped);
     local.reTagElementMap(7, nullptr);
@@ -479,6 +483,69 @@ TEST_F(TopoShapeTest, retagAppendsBoundarySectionV2)
     Part::TopoShape v1(App::HistoryAlgorithm::V1, BRepPrimAPI_MakeBox(1.0, 2.0, 3.0).Shape(), 1L);
     v1.reTagElementMap(7, nullptr, Data::POSTFIX_EXTERNAL_TAG);
     EXPECT_EQ(v1.getMappedName(face1).toString().find("EXT"), std::string::npos);
+}
+
+TEST_F(TopoShapeTest, retagAppendsLinkCopySectionV2)
+{
+    // ops#523: a shape a link hands over within one document (the link copy postfix) gets a link
+    // copy section on every name, tagged with the link: `<name>|_;_;<tag>;CPY;L;<type>;0;MOD;_`,
+    // and `L<n>` for element n of a link array
+    auto copy = [](long tag, const std::string& index, char type) {
+        return std::string(Data::NAME_SECTION_DELIMINATOR) + "_;_;" + std::to_string(tag)
+            + ";CPY;" + index + ";" + type + ";0;MOD;_";
+    };
+    const std::string linkCopy(Data::POSTFIX_LINK_COPY);
+    const std::string external(Data::POSTFIX_EXTERNAL_TAG);
+    const std::string index(Data::POSTFIX_INDEX);
+    //   the postfixes
+    EXPECT_EQ(Part::linkCopyIndexOf(linkCopy.c_str()), "L");
+    EXPECT_EQ(Part::linkCopyIndexOf((linkCopy + index + "0").c_str()), "L0");
+    EXPECT_EQ(Part::linkCopyIndexOf((linkCopy + index + "12").c_str()), "L12");
+    EXPECT_EQ(Part::linkCopyIndexOf((external + index + "3").c_str()), "L3");
+    EXPECT_EQ(Part::linkCopyIndexOf(external.c_str()), "");
+    EXPECT_EQ(Part::linkCopyIndexOf(Part::boundaryPostfix("123").c_str()), "");
+    EXPECT_EQ(Part::linkCopyIndexOf((index + "2").c_str()), "");
+    EXPECT_EQ(Part::linkCopyIndexOf(nullptr), "");
+
+    //   a shape with a map (tag 5): every name gets the section
+    Part::TopoShape mapped(App::HistoryAlgorithm::V2, BRepPrimAPI_MakeBox(1.0, 2.0, 3.0).Shape(), 5L);
+    auto name = Data::MappedName::makeUnmappedName({"Face1"}, 5, "XTR", 'F');
+    mapped.setElementName(face1, name, 5);
+    Part::TopoShape first(mapped);
+    first.reTagElementMap(7, nullptr, linkCopy.c_str());
+    Part::TopoShape second(mapped);
+    second.reTagElementMap(8, nullptr, linkCopy.c_str());
+    EXPECT_EQ(first.Tag, 7);
+    EXPECT_EQ(first.getMappedName(face1).toString(), name.toString() + copy(7, "L", 'F'));
+    //   two links' copies differ only by their sections' tags
+    EXPECT_EQ(second.getMappedName(face1).toString(), name.toString() + copy(8, "L", 'F'));
+    EXPECT_EQ(mapped.getMappedName(face1), name);
+    //   a link array's element
+    Part::TopoShape element(mapped);
+    element.reTagElementMap(9, nullptr, (linkCopy + index + "2").c_str());
+    EXPECT_EQ(element.getMappedName(face1).toString(), name.toString() + copy(9, "L2", 'F'));
+
+    //   a shape without a map (tag 1, a primitive): named first, then the section
+    Part::TopoShape box(App::HistoryAlgorithm::V2, BRepPrimAPI_MakeBox(1.0, 2.0, 3.0).Shape(), 1L);
+    box.reTagElementMap(7, nullptr, linkCopy.c_str());
+    EXPECT_EQ(box.getElementMapSize(), 26);
+    for (const char* type : {"Face", "Edge", "Vertex"}) {
+        const auto count = static_cast<int>(box.countSubElements(type));
+        for (int i = 1; i <= count; ++i) {
+            Data::IndexedName boxElement(type, i);
+            EXPECT_EQ(
+                box.getMappedName(boxElement).toString(),
+                Data::MappedName::makeUnmappedName({boxElement.toString()}, 1, "MKR", type[0]).toString()
+                    + copy(7, "L", type[0])
+            );
+        }
+    }
+
+    //   V1 keeps its names: a link copy is no retag there
+    Part::TopoShape v1(App::HistoryAlgorithm::V1, BRepPrimAPI_MakeBox(1.0, 2.0, 3.0).Shape(), 1L);
+    v1.reTagElementMap(7, nullptr, linkCopy.c_str());
+    EXPECT_EQ(v1.Tag, 1);
+    EXPECT_EQ(v1.getElementMapSize(), 0);
 }
 
 TEST_F(TopoShapeTest, retagWritesTheBoundaryIndexV2)
