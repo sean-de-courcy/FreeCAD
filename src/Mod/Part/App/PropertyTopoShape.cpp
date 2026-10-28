@@ -492,8 +492,8 @@ void PropertyPartShape::setPyObject(PyObject* value)
             // A script builder's index map (`Part.makeCompound`, `Part.makeShell` of map-less
             // inputs) is no map: the shape is named by the match as if it had none (the class C
             // ruling of 10-28, ops#502)
-            shape.resetElementMap();
-            shape.Tag = 0;
+            // (a new shape: the cache would bring the names back at the next flush)
+            shape = TopoShape(shape.getShape());
         }
         if (owner && owner->getDocument()) {
             if (shape.Tag || shape.getElementMapSize()) {
