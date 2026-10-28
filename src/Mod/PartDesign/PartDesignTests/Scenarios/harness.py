@@ -1462,6 +1462,9 @@ def emit(result):
 # ---------------------------------------------------------------------------------------------
 
 COUNTER_OPCODE = re.compile(r"_[0-9]+")
+# A twin's place in its group, `<k>of<n>` (ops#468, `naming-class-A.md` M2 (b)), with the element
+# map's tie-breaker `~<m>` when two names collided (M2 (e))
+TWIN_PLACE = re.compile(r"([0-9]+of[0-9]+)(~[0-9]+)?")
 
 
 def elementNames(shape):
@@ -1485,7 +1488,9 @@ def withoutCounter(name):
     map's tie-breaker between names that are otherwise equal (`ElementMap::setElementName`), not
     part of what the element is (ops#54). Both of its forms are taken out, in every section (a
     later feature keeps the counter of the name it builds on):
-    - the duplicate count field (`...;F;1;IDX,SRC;_`): set to 0;
+    - the duplicate count field (`...;F;1;IDX,SRC;_`): set to 0. A twin's place there
+      (`<k>of<n>`, ops#468) is what tells twins apart, not a tie-breaker: it stays, without the
+      tie-breaker `~<m>` a collision appends to it;
     - a `_<n>` op code (`...;_2;0;F;0;...`): the op code becomes None, which matches any op code
       (`sameUpToCounter`). It isn't the counter but an index suffix (`Data::indexSuffix`), which
       V2 uses as the op code of an element without a name. PartDesign's Transformed passed it for
@@ -1499,7 +1504,8 @@ def withoutCounter(name):
     stripped = []
     for section in sections:
         fields = dict(section)
-        fields["duplicateCount"] = "0"
+        place = TWIN_PLACE.fullmatch(fields["duplicateCount"])
+        fields["duplicateCount"] = place.group(1) if place else "0"
         if COUNTER_OPCODE.fullmatch(fields["opCode"]):
             fields["opCode"] = None
         stripped.append(
