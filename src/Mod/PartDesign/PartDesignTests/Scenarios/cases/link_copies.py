@@ -72,6 +72,17 @@ def featureBase(body):
     return next(o for o in body.Group if o.TypeId == "PartDesign::FeatureBase")
 
 
+def sourceDocument(case, doc, name):
+    """The document a cross-document link's target lives in, with `doc`'s naming settings, closed
+    after the run."""
+    source = App.newDocument(name)
+    for prop in ("HistoryAlgorithm", "ReferenceSolver", "InternNames"):
+        if hasattr(doc, prop) and hasattr(source, prop):
+            setattr(source, prop, getattr(doc, prop))
+    case.documents.append(source.Name)
+    return source
+
+
 class Copies(Scenario):
     """Copies k = 0.. of one pin at x = start[k]; references to each copy's top rim."""
 
@@ -643,7 +654,10 @@ class LinkArrayCountDownUp(ArrayCase):
         self.at = dict(enumerate(self.start))
 
 
-# Cross-document links (the EXT section carries the link's ID)
+# Cross-document links (the EXT section carries the link's ID). Abstract here: the V2si oracle
+# can't compare their names, since the masker names the scenario document's objects only and the
+# other document's tags differ between the V2s and V2si runs (object IDs are process-wide). The
+# concrete cases run from the ops repo's `corpus/inbox/A/ops523/a3/a3_crossdoc.py`.
 
 
 class CrossDoc(Copies):
@@ -651,7 +665,7 @@ class CrossDoc(Copies):
 
     def makePin(self, doc):
         self.folder = os.path.realpath(tempfile.mkdtemp(prefix="NamingScenario"))
-        source = App.newDocument("PinSource")
+        source = sourceDocument(self, doc, "PinSource")
         self.source = source
         source.saveAs(os.path.join(self.folder, "PinSource.FCStd"))
         pin = source.addObject("Part::Cylinder", "Pin")
@@ -670,10 +684,6 @@ class CrossDoc(Copies):
 
     def cleanup(self):
         super().cleanup()
-        try:
-            App.closeDocument(self.source.Name)
-        except Exception:
-            pass
         shutil.rmtree(getattr(self, "folder", ""), ignore_errors=True)
 
 
@@ -776,12 +786,14 @@ class LobedCopies(Scenario):
 
 
 class LinkCopyCrossDocLobesTurned45(LobedCopies):
-    """Two links to the pad's body in another document (EXT copies)."""
+    """Two links to the pad's body in another document (EXT copies). Abstract: see CrossDoc."""
+
+    abstract = True
 
     def sourceDocument(self, doc):
         if not hasattr(self, "source"):
             self.folder = os.path.realpath(tempfile.mkdtemp(prefix="NamingScenario"))
-            self.source = App.newDocument("LobesSource")
+            self.source = sourceDocument(self, doc, "LobesSource")
             self.source.saveAs(os.path.join(self.folder, "LobesSource.FCStd"))
             doc.saveAs(os.path.join(self.folder, doc.Name + ".FCStd"))
         return self.source
@@ -798,10 +810,6 @@ class LinkCopyCrossDocLobesTurned45(LobedCopies):
 
     def cleanup(self):
         super().cleanup()
-        try:
-            App.closeDocument(self.source.Name)
-        except Exception:
-            pass
         shutil.rmtree(getattr(self, "folder", ""), ignore_errors=True)
 
 
@@ -851,6 +859,8 @@ class ScaleCopiesLobesTurned45(LobedCopies):
 class LinkCopyCrossDocRemoved(CrossDoc):
     """Two links to a pin in another document; link 0 leaves the fuse."""
 
+    abstract = True
+
     def edit(self, doc):
         self.removeCopy0(doc)
 
@@ -859,6 +869,8 @@ class LinkCopyCrossDocRemoved(CrossDoc):
 class LinkCopyCrossDocRemovedNeighbourMoved(CrossDoc):
     """Two links to a pin in another document; link 0 leaves the fuse, link 1 moves onto its
     place."""
+
+    abstract = True
 
     AXES = ("M5", "E1", "E4")
 
