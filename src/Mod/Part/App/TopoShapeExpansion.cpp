@@ -1912,6 +1912,68 @@ std::vector<std::size_t> orderByRanks(const std::vector<std::vector<long>>& rank
     return order;
 }
 
+/// True if `member` lies on the curve or surface of `source` (an edge or a face): a point of the
+/// member itself (a vertex's point, an edge's at the middle of its range, a face's at the middle
+/// of its (u, v) bounds) is on the source's geometry within their tolerances. A member of a higher
+/// dimension than the source (a face swept from an edge) never lies on it.
+bool liesOn(const TopoDS_Shape& member, const TopoDS_Shape& source)
+{
+    gp_Pnt point;
+    double tolerance = 10 * Precision::Confusion();
+    switch (member.ShapeType()) {
+        case TopAbs_VERTEX:
+            point = BRep_Tool::Pnt(TopoDS::Vertex(member));
+            tolerance += BRep_Tool::Tolerance(TopoDS::Vertex(member));
+            break;
+        case TopAbs_EDGE: {
+            if (source.ShapeType() != TopAbs_EDGE && source.ShapeType() != TopAbs_FACE) {
+                return false;
+            }
+            const BRepAdaptor_Curve curve(TopoDS::Edge(member));
+            point = curve.Value((curve.FirstParameter() + curve.LastParameter()) / 2);
+            tolerance += BRep_Tool::Tolerance(TopoDS::Edge(member));
+            break;
+        }
+        case TopAbs_FACE: {
+            if (source.ShapeType() != TopAbs_FACE) {
+                return false;
+            }
+            double uMin = 0;
+            double uMax = 0;
+            double vMin = 0;
+            double vMax = 0;
+            BRepTools::UVBounds(TopoDS::Face(member), uMin, uMax, vMin, vMax);
+            const BRepAdaptor_Surface surface(TopoDS::Face(member));
+            point = surface.Value((uMin + uMax) / 2, (vMin + vMax) / 2);
+            tolerance += BRep_Tool::Tolerance(TopoDS::Face(member));
+            break;
+        }
+        default:
+            return false;
+    }
+    if (!std::isfinite(point.X()) || !std::isfinite(point.Y()) || !std::isfinite(point.Z())) {
+        return false;
+    }
+    if (source.ShapeType() == TopAbs_EDGE) {
+        double first = 0;
+        double last = 0;
+        const Handle(Geom_Curve) curve = BRep_Tool::Curve(TopoDS::Edge(source), first, last);
+        if (curve.IsNull()) {
+            return false;
+        }
+        GeomAPI_ProjectPointOnCurve onCurve(point, curve);
+        tolerance += BRep_Tool::Tolerance(TopoDS::Edge(source));
+        return onCurve.NbPoints() > 0 && onCurve.LowerDistance() <= tolerance;
+    }
+    const Handle(Geom_Surface) surface = BRep_Tool::Surface(TopoDS::Face(source));
+    if (surface.IsNull()) {
+        return false;
+    }
+    GeomAPI_ProjectPointOnSurf onSurface(point, surface);
+    tolerance += BRep_Tool::Tolerance(TopoDS::Face(source));
+    return onSurface.NbPoints() > 0 && onSurface.LowerDistance() <= tolerance;
+}
+
 /// The canonical order of the members of a group told apart by their place alone (I-A3,
 /// `naming-class-A.md` M2 (c)), as indexes into `members`, which come in the maker's order: by
 /// each member's parameter on the first of `sources` if that is an edge (the pave order along it,
@@ -1919,10 +1981,14 @@ std::vector<std::size_t> orderByRanks(const std::vector<std::vector<long>>& rank
 /// area and its point in `frame`, the frame of the shape being named. A member is placed on a
 /// source by projecting its point (a vertex's; an edge's or a face's centre of mass) onto the
 /// source's curve or surface: members are the result's elements, not the source's sub-shapes.
-/// Vertexes generated along a closed edge keep the order given (NamingMap::build's exception: the
-/// maker lists them from the edge's seam, which an edit can move past one of them). Ties keep the
-/// order given. Whatever decides the order, the twins' names carry ORD (twinPlaces), so the
-/// solver re-checks a twin's exact hit that moved.
+/// The maker's order is kept where a place on the source means nothing (decision 158 Q1): the
+/// first source is a vertex (PipeShell's end edges, swept from the spine's end), or a member
+/// doesn't lie on the source's curve or surface (a pipe's leg faces, swept from the profile
+/// circle), as for vertexes generated along a closed edge (NamingMap::build's exception: the
+/// maker lists them from the edge's seam, which an edit can move past one of them). Ordering such
+/// members by their coordinates would rename them under a rigid motion; the maker's order is
+/// the profile's and the spine's. Ties keep the order given. Whatever decides the order, the
+/// twins' names carry ORD (twinPlaces), so the solver re-checks a twin's exact hit that moved.
 std::vector<std::size_t> twinOrder(
     const std::vector<TopoDS_Shape>& members,
     const std::vector<TopoDS_Shape>& sources,
@@ -1932,6 +1998,10 @@ std::vector<std::size_t> twinOrder(
     std::vector<std::size_t> given(members.size());
     std::iota(given.begin(), given.end(), 0);
     if (members.size() < 2) {
+        return given;
+    }
+    if (!sources.empty() && !sources.front().IsNull()
+        && sources.front().ShapeType() == TopAbs_VERTEX) {
         return given;
     }
     TopoDS_Shape edge;
@@ -1945,6 +2015,14 @@ std::vector<std::size_t> twinOrder(
             if (!source.IsNull() && source.ShapeType() == TopAbs_FACE) {
                 face = source;
                 break;
+            }
+        }
+    }
+    const TopoDS_Shape& placedOn = edge.IsNull() ? face : edge;
+    if (!placedOn.IsNull()) {
+        for (const auto& member : members) {
+            if (!liesOn(member, placedOn)) {
+                return given;
             }
         }
     }
