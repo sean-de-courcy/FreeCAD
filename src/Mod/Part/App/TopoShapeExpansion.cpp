@@ -1912,26 +1912,34 @@ std::vector<std::size_t> orderByRanks(const std::vector<std::vector<long>>& rank
     return order;
 }
 
-/// True if `member` lies on the curve or surface of `source` (an edge or a face): a point of the
-/// member itself (a vertex's point, an edge's at the middle of its range, a face's at the middle
-/// of its (u, v) bounds) is on the source's geometry within their tolerances. A member of a higher
-/// dimension than the source (a face swept from an edge) never lies on it.
+/// True if `member` lies on the curve or surface of `source` (an edge or a face): points of the
+/// member itself are on the source's geometry within their tolerances, at its ends as well as
+/// inside it, so that a member that only crosses the source doesn't pass (a vertex: its point; an
+/// edge: its ends and the middle of its range; a face: its vertexes and the middle of its (u, v)
+/// bounds). A member of a higher dimension than the source (a face swept from an edge) never lies
+/// on it.
 bool liesOn(const TopoDS_Shape& member, const TopoDS_Shape& source)
 {
-    gp_Pnt point;
-    double tolerance = 10 * Precision::Confusion();
+    std::vector<std::pair<gp_Pnt, double>> points;  // with the member's tolerance there
     switch (member.ShapeType()) {
         case TopAbs_VERTEX:
-            point = BRep_Tool::Pnt(TopoDS::Vertex(member));
-            tolerance += BRep_Tool::Tolerance(TopoDS::Vertex(member));
+            points.emplace_back(
+                BRep_Tool::Pnt(TopoDS::Vertex(member)),
+                BRep_Tool::Tolerance(TopoDS::Vertex(member))
+            );
             break;
         case TopAbs_EDGE: {
             if (source.ShapeType() != TopAbs_EDGE && source.ShapeType() != TopAbs_FACE) {
                 return false;
             }
             const BRepAdaptor_Curve curve(TopoDS::Edge(member));
-            point = curve.Value((curve.FirstParameter() + curve.LastParameter()) / 2);
-            tolerance += BRep_Tool::Tolerance(TopoDS::Edge(member));
+            const double tolerance = BRep_Tool::Tolerance(TopoDS::Edge(member));
+            for (double parameter :
+                 {curve.FirstParameter(),
+                  (curve.FirstParameter() + curve.LastParameter()) / 2,
+                  curve.LastParameter()}) {
+                points.emplace_back(curve.Value(parameter), tolerance);
+            }
             break;
         }
         case TopAbs_FACE: {
@@ -1944,34 +1952,57 @@ bool liesOn(const TopoDS_Shape& member, const TopoDS_Shape& source)
             double vMax = 0;
             BRepTools::UVBounds(TopoDS::Face(member), uMin, uMax, vMin, vMax);
             const BRepAdaptor_Surface surface(TopoDS::Face(member));
-            point = surface.Value((uMin + uMax) / 2, (vMin + vMax) / 2);
-            tolerance += BRep_Tool::Tolerance(TopoDS::Face(member));
+            points.emplace_back(
+                surface.Value((uMin + uMax) / 2, (vMin + vMax) / 2),
+                BRep_Tool::Tolerance(TopoDS::Face(member))
+            );
+            for (TopExp_Explorer it(member, TopAbs_VERTEX); it.More(); it.Next()) {
+                const TopoDS_Vertex& vertex = TopoDS::Vertex(it.Current());
+                points.emplace_back(BRep_Tool::Pnt(vertex), BRep_Tool::Tolerance(vertex));
+            }
             break;
         }
         default:
             return false;
     }
-    if (!std::isfinite(point.X()) || !std::isfinite(point.Y()) || !std::isfinite(point.Z())) {
-        return false;
-    }
+    Handle(Geom_Curve) curve;
+    Handle(Geom_Surface) surface;
+    double sourceTolerance = 0;
     if (source.ShapeType() == TopAbs_EDGE) {
         double first = 0;
         double last = 0;
-        const Handle(Geom_Curve) curve = BRep_Tool::Curve(TopoDS::Edge(source), first, last);
+        curve = BRep_Tool::Curve(TopoDS::Edge(source), first, last);
+        sourceTolerance = BRep_Tool::Tolerance(TopoDS::Edge(source));
         if (curve.IsNull()) {
             return false;
         }
-        GeomAPI_ProjectPointOnCurve onCurve(point, curve);
-        tolerance += BRep_Tool::Tolerance(TopoDS::Edge(source));
-        return onCurve.NbPoints() > 0 && onCurve.LowerDistance() <= tolerance;
     }
-    const Handle(Geom_Surface) surface = BRep_Tool::Surface(TopoDS::Face(source));
-    if (surface.IsNull()) {
-        return false;
+    else {
+        surface = BRep_Tool::Surface(TopoDS::Face(source));
+        sourceTolerance = BRep_Tool::Tolerance(TopoDS::Face(source));
+        if (surface.IsNull()) {
+            return false;
+        }
     }
-    GeomAPI_ProjectPointOnSurf onSurface(point, surface);
-    tolerance += BRep_Tool::Tolerance(TopoDS::Face(source));
-    return onSurface.NbPoints() > 0 && onSurface.LowerDistance() <= tolerance;
+    for (const auto& [point, memberTolerance] : points) {
+        if (!std::isfinite(point.X()) || !std::isfinite(point.Y()) || !std::isfinite(point.Z())) {
+            return false;
+        }
+        const double tolerance = 10 * Precision::Confusion() + memberTolerance + sourceTolerance;
+        if (!curve.IsNull()) {
+            GeomAPI_ProjectPointOnCurve onCurve(point, curve);
+            if (onCurve.NbPoints() == 0 || onCurve.LowerDistance() > tolerance) {
+                return false;
+            }
+        }
+        else {
+            GeomAPI_ProjectPointOnSurf onSurface(point, surface);
+            if (onSurface.NbPoints() == 0 || onSurface.LowerDistance() > tolerance) {
+                return false;
+            }
+        }
+    }
+    return true;
 }
 
 /// The canonical order of the members of a group told apart by their place alone (I-A3,
