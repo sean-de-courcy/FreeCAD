@@ -3665,17 +3665,19 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
                                 self.assertLessEqual(where, keys[key], key)
                         self.assertNoneMovedSilently(pipe, volume, points)
 
-    def ring(self, start, profileZ):
+    def ring(self, start, profileZ, link=None):
         """A Right corner pipe of a 2 x 2 square, at height `profileZ` on the left leg of a closed
         ring of four lines (a 30 x 20 rectangle in the XZ plane), the ring drawn from its corner
         `start` (0 bottom left, then counterclockwise as drawn: top left, top right, bottom
-        right)."""
+        right). With `link`, that is the pipe's Profile (the square is returned as built)."""
         corners = [(0, 0), (0, 20), (30, 20), (30, 0)]
         corners = corners[start:] + corners[:start]
         lines = [
             Part.LineSegment(V(*a, 0), V(*b, 0)) for a, b in zip(corners, corners[1:] + corners[:1])
         ]
         path = models.sketch(self.doc, "Path", lines, self.body, placement=XZ)
+        if link is not None:
+            return None, self.pipe(link, path, "Right corner")
         profile = self.square()
         profile.Placement = App.Placement(V(0, 0, profileZ), App.Rotation())
         return profile, self.pipe(profile, path, "Right corner")
@@ -4122,31 +4124,50 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
 
     def testClosedRingTurnedWithAttachedProfileKeepsStart(self):
         """The ring and its profile (at the bottom left corner) turned about Z, 120 and 150
-        degrees: with the profile sketch attached to the XY plane (its offset turned), or after a
-        base feature (a Pad of a circle about Z, which the turn leaves as it was). The pipe's own
-        frame (its base's placement, or the profile's support's) doesn't turn; the profile's does,
-        and the record is read in it: the start turns with the ring, and every point on the pipe
-        follows the turn, valid and without a warning. Read in the body, the start went to the
-        vertex a translation fit picked (the bottom right), and the profile's names at the start
-        with it, silently (the review of fork PR 383 round 4, R1)."""
-        for kind, turn in (("attached", 120), ("attached", 150), ("base", 120)):
+        degrees: with the profile sketch attached to the XY plane (its offset turned), after a
+        base feature (a Pad of a circle about Z, which the turn leaves as it was), or with the
+        profile a face of a Pad of the square (its sketch attached, its offset turned). The
+        pipe's own frame (its base's placement, or the profile's support's) doesn't turn, nor
+        does the Pad's; the profile's geometry does, and the record is read in its frame: the
+        start turns with the ring, and every point on the pipe follows the turn, valid and
+        without a warning. Read in the body, the start went to the vertex a translation fit
+        picked (the bottom right), and the profile's names at the start with it, silently (the
+        review of fork PR 383 round 4, R1; the face, its pre-push review of round 5, T1)."""
+        for kind, turn in (("attached", 120), ("attached", 150), ("base", 120), ("face", 120)):
             self.tearDown()
             self.setUp()
             with self.subTest(kind=kind, turn=turn):
+                xy = [
+                    f
+                    for f in self.body.Origin.OriginFeatures
+                    if "XY_Plane" in (getattr(f, "Role", ""), f.Name)
+                ][0]
                 if kind == "base":
                     circle = [Part.Circle(V(0, 0, 0), V(0, 0, 1), 3)]
                     pad = models.pad(self.body, models.sketch(self.doc, "Base", circle, self.body), 3)
                     self.doc.recompute()
                     self.assertTrue(pad.isValid(), pad.getStatusString())
-                profile, pipe = self.ring(0, 0)
+                if kind == "face":
+                    # A Pad of the square, 1 down from the XY plane, inside the pipe's corner:
+                    # the pipe sweeps its top face
+                    profile = self.square()
+                    profile.AttachmentSupport = [(xy, "")]
+                    profile.MapMode = "FlatFace"
+                    pad = models.pad(self.body, profile, 1)
+                    pad.Reversed = True
+                    self.doc.recompute()
+                    self.assertTrue(pad.isValid(), pad.getStatusString())
+                    top = [
+                        f"Face{i}"
+                        for i, f in enumerate(pad.Shape.Faces, 1)
+                        if abs(f.CenterOfMass.z) < 1e-9 and abs(f.normalAt(0, 0).z) > 0.99
+                    ]
+                    _, pipe = self.ring(0, 0, (pad, top))
+                else:
+                    profile, pipe = self.ring(0, 0)
                 path = pipe.Spine[0]
                 offset = App.Placement(profile.Placement)
                 if kind == "attached":
-                    xy = [
-                        f
-                        for f in self.body.Origin.OriginFeatures
-                        if "XY_Plane" in (getattr(f, "Role", ""), f.Name)
-                    ][0]
                     profile.AttachmentSupport = [(xy, "")]
                     profile.MapMode = "FlatFace"
                     profile.AttachmentOffset = offset
@@ -4158,7 +4179,7 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
                 rotation = App.Rotation(V(0, 0, 1), turn)
                 path.Placement = App.Placement(V(), rotation.multiply(XZ.Rotation))
                 turned = App.Placement(V(), rotation).multiply(offset)
-                if kind == "attached":
+                if kind in ("attached", "face"):
                     profile.AttachmentOffset = turned
                 else:
                     profile.Placement = turned

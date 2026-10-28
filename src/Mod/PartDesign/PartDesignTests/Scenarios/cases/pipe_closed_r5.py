@@ -116,8 +116,9 @@ class Ring(Scenario):
         self.spine = m.sketch(doc, "Spine", m.polygon(self.corners()), body, placement=self.spinePlacement())
         a = self.A
         self.profile = m.sketch(doc, "Square", m.rectangle(-a, -a, a, a), body, placement=self.profilePlacement())
+        link = self.profileLink(doc)
         pipe = body.newObject("PartDesign::AdditivePipe", "Pipe")
-        pipe.Profile = self.profile
+        pipe.Profile = link
         pipe.Spine = (self.spine, ["Edge1", "Edge2", "Edge3", "Edge4"] if self.LISTED else [])
         pipe.Transition = "Right corner"
         pipe.Refine = False
@@ -141,6 +142,10 @@ class Ring(Scenario):
             fillet.Base = (pipe, self.names(pipe, self.topFront()))
             fillet.Radius = self.s(0.5)
             self.ref("fillet_top_front", fillet, "Base", self.topFront, Filleted(self.s(0.5)))
+
+    def profileLink(self, doc):
+        """The pipe's Profile: the square sketch"""
+        return self.profile
 
     def attachments(self):
         return (
@@ -387,3 +392,88 @@ class RingTurned180InItsSketch(Ring):
 
     def bottomInner(self):
         return face("plane", normal=self.along(Z), contains=self.at(self.W / 2, 0, self.A))
+
+
+def xyPlane(body):
+    return [
+        f for f in body.Origin.OriginFeatures if "XY_Plane" in (getattr(f, "Role", ""), f.Name)
+    ][0]
+
+
+# The profile a face of a feature: the square sketch attached to the XY plane (an offset) and
+# padded 1 down, the pipe sweeping the Pad's top face (inside the pipe's corner). The face's
+# placement is the Pad's, which doesn't turn with the sketch's offset (the pre-push review of
+# round 5, T1): the record is read in the frame of the profile's geometry.
+class RingTurnedFaceProfile(Ring):
+    """The profile is the top face of a Pad (1 down) of the square, whose sketch is attached to
+    the XY plane through its offset; the ring's placement and the sketch's offset turn 120
+    degrees about Z. Every reference follows the turn."""
+
+    AXES = ("M3", "E7")
+    TURN = 120
+
+    def profileLink(self, doc):
+        self.profile.AttachmentSupport = [(xyPlane(self.body), "")]
+        self.profile.MapMode = "FlatFace"
+        self.profile.AttachmentOffset = self.profilePlacement()
+        pad = m.pad(self.body, self.profile, self.s(1))
+        pad.Reversed = True
+        doc.recompute()
+        top = [
+            f"Face{i}"
+            for i, f in enumerate(pad.Shape.Faces, 1)
+            if abs(f.CenterOfMass.z) < 1e-6 and abs(f.normalAt(0, 0).z) > 0.99
+        ]
+        return (pad, top)
+
+    def edit(self, doc):
+        self.turn = self.TURN
+        self.spine.Placement = self.spinePlacement()
+        self.profile.AttachmentOffset = self.profilePlacement()
+
+
+class RingTurned150FaceProfile(RingTurnedFaceProfile):
+    """As RingTurnedFaceProfile, turned 150 degrees."""
+
+    TURN = 150
+
+
+# The profile attached normal to the ring's left line at its bottom left corner, the ring turned
+# in its own plane (its placement, about the sketch's normal): the attacher keeps the profile's y
+# axis vertical, so the profile turns with the ring and half a turn more about its own normal
+# (the pre-push review of round 5, T2). In no stored frame, the record is read in the body: five
+# references quiet, one broken; integration breaks all six. Read in the spine's frame (tried), all
+# six broke.
+class RingTurnedInPlaneProfileOnRing(Ring):
+    """The profile sketch attached NormalToEdge to the ring's left line (Edge1) at its bottom
+    left corner; the ring's placement turns 120 degrees about the sketch's normal (global -Y)
+    about that corner. Every reference follows the turn."""
+
+    AXES = ("M3", "E7")
+    TURN = 120
+    spun = 0
+
+    def at(self, x, y, z):
+        return App.Rotation(-Y, self.spun).multVec(V(x, y, z))
+
+    def along(self, d):
+        return App.Rotation(-Y, self.spun).multVec(d)
+
+    def topOuter(self):
+        return face("plane", normal=self.along(Z), contains=self.at(self.W / 2, 0, self.H + self.A))
+
+    def bottomInner(self):
+        return face("plane", normal=self.along(Z), contains=self.at(self.W / 2, 0, self.A))
+
+    def profileLink(self, doc):
+        self.profile.AttachmentSupport = [(self.spine, "Edge1"), (self.spine, "Vertex1")]
+        self.profile.MapMode = "NormalToEdge"
+        doc.recompute()
+        return self.profile
+
+    def spinePlacement(self):
+        return App.Placement(V(), App.Rotation(X, 90).multiply(App.Rotation(Z, self.spun)))
+
+    def edit(self, doc):
+        self.spun = self.TURN
+        self.spine.Placement = self.spinePlacement()

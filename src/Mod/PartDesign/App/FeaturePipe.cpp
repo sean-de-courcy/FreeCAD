@@ -3541,6 +3541,30 @@ bool closedInPlace(
     }
     return false;
 }
+
+/// The frame of \a profile's geometry, from its local coordinates into those it lies in: at its
+/// first wire's first point (pointsAlong), the normal of its plane, its x axis towards the next
+/// point off that one; its shape's placement where it has no plane. It turns with the profile
+/// however the profile is placed: a face of a feature keeps the feature's placement while the
+/// feature's sketch turns through its offset (the pre-push review of round 5, T1)
+gp_Trsf profileFrameOf(const TopoDS_Shape& profile)
+{
+    const TopoDS_Wire wire = firstWire(profile);
+    const std::vector<gp_Pnt> points = wire.IsNull() ? std::vector<gp_Pnt>() : pointsAlong(wire);
+    if (const std::optional<gp_Dir> normal = planeNormal(points)) {
+        const gp_Vec up(normal->XYZ());
+        for (const gp_Pnt& point : points) {
+            gp_Vec along(points.front(), point);
+            along -= up * along.Dot(up);
+            if (along.Magnitude() > Precision::Confusion()) {
+                gp_Trsf frame;
+                frame.SetTransformation(gp_Ax3(points.front(), *normal, gp_Dir(along)));
+                return frame.Inverted();
+            }
+        }
+    }
+    return profile.Location().Transformation();
+}
 }  // namespace
 
 App::DocumentObjectExecReturn* Pipe::execute()
@@ -3832,9 +3856,8 @@ App::DocumentObjectExecReturn* Pipe::execute()
             EarlierSpineStartsOf,
             EarlierSpineStartNames
         );
-        // The profile's frame, in the body (its shape's placement: a sketch's, with its support's
-        // and its offset)
-        const gp_Trsf profileFrame = profileShape.getShape().Location().Transformation();
+        // The profile's frame, in the body (profileFrameOf: its geometry's)
+        const gp_Trsf profileFrame = profileFrameOf(profileShape.getShape());
         if (startStored) {
             const gp_Trsf inPipe = invObjLoc.Transformation();
             // The stored points of \a record, in the pipe's frame; false for a malformed one. The
@@ -3848,7 +3871,10 @@ App::DocumentObjectExecReturn* Pipe::execute()
             // placement, or the profile's support's, and turns with the ring only for a first
             // pipe with an unattached profile (the review of round 4, R1). A loop turned in no
             // stored frame (its lines turned in their sketch) is read in the body, and every
-            // leg whose line came from another place is renamed: loud (`RingTurned180InItsSketch`)
+            // leg whose line came from another place is renamed: loud (`RingTurned180InItsSketch`).
+            // Not the spine's frame too: a profile attached normal to the ring's line turns half a
+            // turn more than the ring does in its plane, and read in the spine's frame, all six
+            // references broke where the body's read keeps five (`RingTurnedInPlaneProfileOnRing`)
             auto read = [&](const StartRecord& record) {
                 std::vector<Base::Vector3d> stored = record.points;
                 auto point = [&](size_t i) {
