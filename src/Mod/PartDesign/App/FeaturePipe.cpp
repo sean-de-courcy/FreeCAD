@@ -3734,6 +3734,88 @@ Part::TopoShape wireAlong(
     return wire;
 }
 
+/// How far \a stored and \a middles, a closed spine's stored vertices (the start first) and its
+/// edges' middles (startNearest), lie from \a edges (the spine's, in its order) started at the
+/// vertex \a k, beyond one translation: the root mean square of the pairs' displacements about
+/// their mean, in either direction, the less; with another number of edges, the stored start's
+/// distance alone
+double fromStoredAt(
+    const std::vector<gp_Pnt>& stored,
+    const std::vector<gp_Pnt>& middles,
+    const std::vector<TopoDS_Edge>& edges,
+    size_t k
+)
+{
+    const size_t n = edges.size();
+    auto startOf = [&edges, n](size_t at) {
+        return BRep_Tool::Pnt(TopExp::FirstVertex(edges[at % n], true));
+    };
+    if (stored.size() != n || middles.size() != n) {
+        return stored.front().Distance(startOf(k));
+    }
+    auto apart = [&](bool forward) {
+        std::vector<gp_Vec> moves;
+        for (size_t i = 0; i < n; ++i) {
+            const size_t at = forward ? k + i : k + n - i;
+            const size_t along = forward ? (k + i) % n : (k + 2 * n - 1 - i) % n;
+            moves.emplace_back(stored[i], startOf(at));
+            moves.emplace_back(middles[i], middleOf(edges[along]));
+        }
+        gp_Vec mean;
+        for (const gp_Vec& move : moves) {
+            mean += move;
+        }
+        mean /= static_cast<double>(moves.size());
+        double sum = 0;
+        for (const gp_Vec& move : moves) {
+            sum += (move - mean).SquareMagnitude();
+        }
+        return std::sqrt(sum / static_cast<double>(moves.size()));
+    };
+    return std::min(apart(true), apart(false));
+}
+
+/// Whether startNearest's fit (fromStoredAt) pairs \a stored and \a middles with \a edges, the
+/// spine's, clearly: the least residual over the starts small beside the stored loop's size (the
+/// root mean square distance of its vertices from their middle) and clearly below the next
+/// start's (decision 171). A loop turned while something else changes in the same recompute
+/// (a line moved, a face profile stretched) lies in no stored frame, and read in the body, its
+/// best start was the vertex a translation fits least badly: the start moved to another corner
+/// with the profile's names, silently (the post-push review of fork PR 383 round 5, T-A). A turn
+/// leaves a residual of the order of the loop's size at every start (measured, the ring turned
+/// 30 to 150 degrees: 0.37 to 1.0 of the size, 0.36 to 1.0 of the next start's); a line moved
+/// by d, about d / 2.3 at the right start (a leg of the 30 x 20 ring moved by 4: 0.1 of the
+/// size). True with nothing stored
+bool fitIsClear(
+    const std::vector<gp_Pnt>& stored,
+    const std::vector<gp_Pnt>& middles,
+    const std::vector<TopoDS_Edge>& edges
+)
+{
+    constexpr double ofSize = 0.25;
+    constexpr double ofNext = 0.5;
+    const size_t n = edges.size();
+    if (stored.empty() || n < 2) {
+        return true;
+    }
+    gp_XYZ middle(0, 0, 0);
+    for (const gp_Pnt& point : stored) {
+        middle += point.XYZ();
+    }
+    middle /= static_cast<double>(stored.size());
+    double spread = 0;
+    for (const gp_Pnt& point : stored) {
+        spread += point.SquareDistance(gp_Pnt(middle));
+    }
+    const double size = std::sqrt(spread / static_cast<double>(stored.size()));
+    std::vector<double> residuals;
+    for (size_t k = 0; k < n; ++k) {
+        residuals.push_back(fromStoredAt(stored, middles, edges, k));
+    }
+    std::ranges::sort(residuals);
+    return residuals[0] <= ofSize * size && residuals[0] <= ofNext * residuals[1];
+}
+
 /// \a path, a closed spine of more than one edge, restarted at its stored start, or on a new pipe
 /// at its vertex nearest \a profile (the mean of the distances from the profile's vertices): its
 /// edges in the same direction, rotated in its order, made a wire as \a wire with their names
@@ -3785,33 +3867,10 @@ Part::TopoShape startNearest(
         }
         return sum / vertices.Extent();
     };
-    // How far the stored vertices and middles lie from the spine's, started at the vertex k,
-    // beyond one translation: in either direction, the less; with another number of edges, the
-    // stored start's distance alone
+    // How far the stored vertices and middles lie from the spine's, started at the vertex k
+    // (fromStoredAt; the caller reads them only where the fit is clear, fitIsClear)
     auto fromStored = [&](size_t k) {
-        if (stored.size() != n || middles.size() != n) {
-            return stored.front().Distance(startOf(k));
-        }
-        auto apart = [&](bool forward) {
-            std::vector<gp_Vec> moves;
-            for (size_t i = 0; i < n; ++i) {
-                const size_t at = forward ? k + i : k + n - i;
-                const size_t along = forward ? (k + i) % n : (k + 2 * n - 1 - i) % n;
-                moves.emplace_back(stored[i], startOf(at));
-                moves.emplace_back(middles[i], middleOf(edges[along]));
-            }
-            gp_Vec mean;
-            for (const gp_Vec& move : moves) {
-                mean += move;
-            }
-            mean /= static_cast<double>(moves.size());
-            double sum = 0;
-            for (const gp_Vec& move : moves) {
-                sum += (move - mean).SquareMagnitude();
-            }
-            return std::sqrt(sum / static_cast<double>(moves.size()));
-        };
-        return std::min(apart(true), apart(false));
+        return fromStoredAt(stored, middles, edges, k);
     };
     // The edges, of \a candidates, whose starts lie nearest by \a distance
     auto nearestBy = [](const std::vector<size_t>& candidates, const auto& distance) {
@@ -4691,6 +4750,8 @@ App::DocumentObjectExecReturn* Pipe::execute()
         std::optional<gp_Pnt> storedWay;
         std::optional<bool> storedAtEnd;
         std::vector<std::string> storedNames;  // the lines at the stored places
+        // The record of the same input read in the body, where its fit is not clear (fitIsClear)
+        bool unpaired = false;
         const std::vector<std::string> spineInput = spineIdentity(spine, shape, subedge);
         const std::vector<StartRecord> startRecords = readStartRecords(
             SpineStart,
@@ -4744,6 +4805,7 @@ App::DocumentObjectExecReturn* Pipe::execute()
                 storedWay.reset();
                 storedAtEnd.reset();
                 storedNames.clear();
+                unpaired = false;
                 // 2n + 1 points and each frame's 3
                 const size_t framed = 3 * frames.size();
                 if (stored.size() < 5 + framed || stored.size() % 2 == 0) {
@@ -4775,6 +4837,7 @@ App::DocumentObjectExecReturn* Pipe::execute()
                     }
                     if (!inFrame) {
                         fill(inPipe);
+                        unpaired = !fitIsClear(storedVertices, storedMiddles, spineInOrder);
                     }
                 }
                 storedAtEnd = stored[2].x > 0.5;
@@ -4789,6 +4852,7 @@ App::DocumentObjectExecReturn* Pipe::execute()
                 storedWay.reset();
                 storedAtEnd.reset();
                 storedNames.clear();
+                unpaired = false;
             };
             // Of the same object, with an edge of the spine
             // anchor: rung 4 (another sub-element set's record of the same object), warned
@@ -4830,6 +4894,22 @@ App::DocumentObjectExecReturn* Pipe::execute()
                         "to its corners"
                     );
                 }
+            }
+            // A record of this input that no stored frame puts in place and the body's fit
+            // doesn't pair clearly (a turn with another edit): the start isn't picked by the fit
+            // but at the profile, as a new pipe's, and the way by the profile's normal; the lines'
+            // names are then checked place by place from that start, so a start or way that isn't
+            // the stored one renames the legs, loud (decision 171)
+            // anchor: rung 3 (the profile's place) checked by rung 1 (the lines' names), warned
+            if (unpaired) {
+                storedVertices.clear();
+                storedMiddles.clear();
+                storedWay.reset();
+                warn(
+                    "Pipe: the closed spine moved in a way its stored start can't be matched to (a "
+                    "turn with another change); it starts at its vertex nearest the profile, as a "
+                    "new pipe does. Check the references to its corners"
+                );
             }
         }
         if (startAtProfile) {
@@ -4882,9 +4962,15 @@ App::DocumentObjectExecReturn* Pipe::execute()
                 lineNames.push_back(firstName(path, edge));
             }
             const std::vector<std::string> current = lineNames;
-            const std::vector<size_t> places = storedNames.empty()
-                ? std::vector<size_t>()
-                : placesOf(storedVertices, storedMiddles, edges);
+            // Unpaired: place k is the k-th edge from the profile's start (decision 171)
+            std::vector<size_t> places;
+            if (unpaired && storedNames.size() == edges.size()) {
+                places.resize(edges.size());
+                std::iota(places.begin(), places.end(), size_t {0});
+            }
+            else if (!storedNames.empty()) {
+                places = placesOf(storedVertices, storedMiddles, edges);
+            }
             std::vector<Data::MappedName> renamed(edges.size());
             bool any = false;
             for (size_t k = 0; k < places.size(); ++k) {
