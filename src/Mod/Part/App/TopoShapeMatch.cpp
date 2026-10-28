@@ -1125,6 +1125,19 @@ bool samePlace(const Bnd_Box& a, const Bnd_Box& b, double tolerance)
         && std::abs(std::sqrt(a.SquareExtent()) - std::sqrt(b.SquareExtent())) <= allowed;
 }
 
+// Whether a box's centre moved by more than the tolerance
+bool movedFrom(const Bnd_Box& a, const Bnd_Box& b, double tolerance)
+{
+    if (a.IsVoid() || b.IsVoid()) {
+        return false;
+    }
+    const double diagonal = std::sqrt(std::max(a.SquareExtent(), b.SquareExtent()));
+    auto centre = [](const Bnd_Box& box) {
+        return gp_Pnt((box.CornerMin().XYZ() + box.CornerMax().XYZ()) / 2);
+    };
+    return centre(a).Distance(centre(b)) > std::max(tolerance, 1e-6 * diagonal);
+}
+
 class Ruling
 {
 public:
@@ -1141,7 +1154,7 @@ public:
     {
         retirePermutedTwins();
         confirmByFaces();
-        retirePeriodSlides();
+        retireMovedPieces();
     }
 
 private:
@@ -1313,12 +1326,12 @@ private:
         });
     }
 
-    // R2 (to be measured, the ruling's 2b): a piece with an internal period slid by its pitch
-    // (a comb of teeth, a square-wave wire) puts each tooth's elements on the next tooth's old
-    // places, every match verified. Its signature: the old piece's unmatched elements and the
-    // new piece's are congruent, the first tooth's left and the last tooth's arrived. Such a
-    // piece is retired. A split (one old element, two new) and a count change don't fit it.
-    void retirePeriodSlides()
+    // R2' (decision 169, in place of the ruling's 2b): a piece that moved as a whole keeps no
+    // element by place. A periodic piece slid by its pitch (a comb of teeth, a square-wave wire)
+    // puts each tooth's elements on the next tooth's old places, every match verified. The new
+    // piece the matches link to one old piece, congruent with it as a whole and with its box's
+    // centre moved, is retired. A piece that stayed (a hole moved inside a plate) keeps its box.
+    void retireMovedPieces()
     {
         auto pieceOf = [](const std::vector<Piece>& pieces, std::size_t type, std::size_t count) {
             std::vector<int> owner(count, -1);
@@ -1345,12 +1358,10 @@ private:
         // no other new piece's matches reach that one
         std::map<int, std::set<int>> reached;  // new piece -> old pieces
         std::map<int, std::set<int>> reachedBy;  // old piece -> new pieces
-        std::array<std::set<int>, 3> held;  // old elements matched
         for (std::size_t t = 0; t < 3; ++t) {
             const auto oldOwner = pieceOf(oldPieces, t, oldCounts[t]);
             const auto newOwner = pieceOf(newPieces, t, newCounts[t]);
             for (const auto& [i, j] : matchesOf(t)) {
-                held[t].insert(j - 1);
                 const int n = newOwner[i - 1];
                 const int k = oldOwner[j - 1];
                 if (n >= 0 && k >= 0) {
@@ -1365,23 +1376,10 @@ private:
             }
             const Piece& oldPiece = oldPieces[*olds.begin()];
             const Piece& newPiece = newPieces[n];
-            std::array<std::vector<int>, 3> left;
-            std::array<std::vector<int>, 3> arrived;
-            for (std::size_t t = 0; t < 3; ++t) {
-                for (const int j : oldPiece.elements[t]) {
-                    if (!held[t].count(j)) {
-                        left[t].push_back(j);
-                    }
-                }
-                for (const int i : newPiece.elements[t]) {
-                    if (!matchesOf(t).count(i + 1)) {
-                        arrived[t].push_back(i);
-                    }
-                }
+            if (!movedFrom(oldPiece.box, newPiece.box, tolerance)) {
+                continue;
             }
-            const Congruence gone(before, left);
-            const Congruence come(after, arrived);
-            if (!gone.empty() && gone.same(come)) {
+            if (Congruence(before, oldPiece.elements).same(Congruence(after, newPiece.elements))) {
                 retire(newPiece);
             }
         }

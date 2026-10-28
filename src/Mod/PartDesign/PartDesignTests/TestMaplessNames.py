@@ -6,6 +6,9 @@ solver (invariant I-C5), an element that comes back is a new element, an undone 
 again, and a script builder's index map counts as no map. Designed models in documents with the
 reference solver on."""
 
+import os
+import shutil
+import tempfile
 import unittest
 
 import FreeCAD as App
@@ -35,11 +38,13 @@ def topFace(shape, x):
 class TestMaplessNames(unittest.TestCase):
     def setUp(self):
         self.documents = []
+        self.folder = tempfile.mkdtemp(prefix="MaplessNames")
 
     def tearDown(self):
         for name in self.documents:
             if name in App.listDocuments():
                 App.closeDocument(name)
+        shutil.rmtree(self.folder, ignore_errors=True)
 
     def newDocument(self):
         doc = models.newDocument("MaplessNames")
@@ -131,6 +136,9 @@ class TestMaplessNames(unittest.TestCase):
         doc.recompute()
         top = topFace(target.Shape, 24)
         other = self.newDocument()
+        # a cross-document link needs both documents saved
+        doc.saveAs(os.path.join(self.folder, "target.FCStd"))
+        other.saveAs(os.path.join(self.folder, "binder.FCStd"))
         binder = other.addObject("PartDesign::SubShapeBinder", "Binder")
         binder.Support = [(target, (top,))]
         other.recompute()

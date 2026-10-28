@@ -295,14 +295,16 @@ TEST(TopoShapeMatch, reversedWireKeepsEveryElement)
     EXPECT_EQ(matches.edges.size(), 3);
 }
 
-// Every face rung's side term (CC2): a face at its place facing the other way is another face
+// Every face rung's side term (CC2): a face at its place facing the other way is another face;
+// then R1 (ruling 10-28): its corners and edges at their places have no matched face to confirm
+// them, so they are new too
 TEST(TopoShapeMatch, reversedFaceTakesAFreshId)
 {
     const TopoDS_Face before = square(0, 10);
     const auto matches = Part::matchElements(before, before.Reversed(), false);
-    EXPECT_EQ(matches.vertexes.size(), 4);
-    EXPECT_EQ(matches.edges.size(), 4);
     EXPECT_TRUE(matches.faces.empty());
+    EXPECT_TRUE(matches.vertexes.empty());
+    EXPECT_TRUE(matches.edges.empty());
 }
 
 // The seam (ruling 10-28, R1): a box moved by its own width leaves the shared side's corners and
@@ -489,9 +491,9 @@ TopoDS_Wire squareWave(double x, int periods)
 
 }  // namespace
 
-// R2 (ruling 10-28, to be measured): a periodic piece slid by its pitch puts each tooth on the
-// next tooth's old place; its unmatched old and new elements are congruent (the first tooth left,
-// a last one arrived), so the piece takes fresh ids
+// R2' (decision 169): a periodic piece slid by its pitch puts each tooth on the next tooth's old
+// place, every match verified; the piece moved as a whole (congruent, its box elsewhere), so it
+// takes fresh ids
 TEST(TopoShapeMatch, combSlidByItsPitchTakesFreshIds)
 {
     const auto matches = Part::matchElements(comb(0), comb(4), false);
@@ -507,33 +509,47 @@ TEST(TopoShapeMatch, squareWaveSlidByItsPeriodTakesFreshIds)
     EXPECT_TRUE(matches.vertexes.empty());
 }
 
-// R2 against the designed splits: a plate split into two plates of other sizes keeps neither
-// (rung 4 refuses), and the rest of the shell keeps its ids (R2's sizes don't fit)
+// R2 against a split: a loose shell's second plate becomes two. The matcher reads the far piece as
+// the plate with its near side moved (rung 2 on the corners, rung 3) and the near piece as new;
+// R2 doesn't fire (the unmatched elements differ), so the first plate keeps its id
 TEST(TopoShapeMatch, shellWithASplitPlateKeepsTheOtherPlates)
 {
-    auto shell = [](std::initializer_list<TopoDS_Shape> plates) { return compound(plates); };
-    const TopoDS_Shape before = shell({square(0, 10), square(10, 30)});
-    const TopoDS_Shape after = shell({square(0, 10), square(10, 18), square(18, 30)});
+    const TopoDS_Shape before = compound({square(0, 10), square(10, 30)});
+    const TopoDS_Shape after = compound({square(0, 10), square(10, 18), square(18, 30)});
     const auto matches = Part::matchElements(before, after, false);
-    ASSERT_EQ(matches.faces.size(), 1);
-    EXPECT_EQ(matches.faces.begin()->first, matches.faces.begin()->second);
+    EXPECT_EQ(matches.faces.size(), 2);
+    EXPECT_EQ(matches.faces.at(1), 1);
 }
 
-// R2's cost, measured: a hole moved in a script plate leaves a hole's faces unmatched on both
-// sides, congruent; the plate is retired, every reference to it breaks (loud)
-TEST(TopoShapeMatch, plateWithAMovedHoleIsRetired)
+// R2' leaves a piece that stayed alone: a hole moved in a script plate is a new hole, and the
+// plate keeps its faces (the ruling's 2b retired the whole plate here)
+TEST(TopoShapeMatch, plateWithAMovedHoleKeepsItsFaces)
 {
     auto plate = [](double hole) {
         const TopoDS_Shape block = BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0), 40, 20, 2).Shape();
         const TopoDS_Shape pin = BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(hole, 10, -1), gp_Dir(0, 0, 1)), 3, 4).Shape();
         return BRepAlgoAPI_Cut(block, pin).Shape();
     };
-    const auto matches = Part::matchElements(plate(10), plate(25), false);
-    EXPECT_TRUE(matches.faces.empty());
+    const TopoDS_Shape before = plate(10);
+    const TopoDS_Shape after = plate(25);
+    const auto matches = Part::matchElements(before, after, false);
+    EXPECT_EQ(matches.faces.at(planarFace(after, gp_Dir(1, 0, 0), 40)), planarFace(before, gp_Dir(1, 0, 0), 40));
+    EXPECT_EQ(matches.faces.at(planarFace(after, gp_Dir(0, 0, 1), 2)), planarFace(before, gp_Dir(0, 0, 1), 2));
+    EXPECT_FALSE(matches.faces.count(faceOfKind(after, GeomAbs_Cylinder)));
 }
 
+// The names nameByMatch() gives need the application's types (a filtered run starts here)
+class TopoShapeMatchNames: public ::testing::Test
+{
+protected:
+    static void SetUpTestSuite()
+    {
+        tests::initApplication();
+    }
+};
+
 // The first result of an object takes ids in index order: vertices, edges, faces
-TEST(TopoShapeMatch, firstResultTakesIdsInIndexOrder)
+TEST_F(TopoShapeMatchNames, firstResultTakesIdsInIndexOrder)
 {
     Part::TopoShape shape(box(0));
     long counter = 0;
@@ -546,14 +562,16 @@ TEST(TopoShapeMatch, firstResultTakesIdsInIndexOrder)
     EXPECT_EQ(Part::matchedId(shape, "Face6"), 26);
     EXPECT_EQ(counter, 27);
     // one section, the MLN op code, no IDX flag: identity evidence like any other name
-    const std::string name =
-        shape.getMappedName(Data::IndexedName::fromConst("Face", 1)).toString();
+    const auto names =
+        shape.getElementMappedNames(Data::IndexedName("Face1", shape.getElementTypes()));
+    ASSERT_EQ(names.size(), 1);
+    const std::string name = names.front().first.toString();
     EXPECT_NE(name.find(";MLN;"), std::string::npos) << name;
     EXPECT_EQ(name.find("IDX"), std::string::npos) << name;
 }
 
 // A matched element keeps its id, and the counter gives none
-TEST(TopoShapeMatch, matchedElementsKeepTheirIds)
+TEST_F(TopoShapeMatchNames, matchedElementsKeepTheirIds)
 {
     Part::TopoShape before(box(0));
     long counter = 0;
@@ -568,7 +586,7 @@ TEST(TopoShapeMatch, matchedElementsKeepTheirIds)
 }
 
 // An element that matches nothing takes a fresh id; an id is never given twice
-TEST(TopoShapeMatch, freshIdsAreNeverReused)
+TEST_F(TopoShapeMatchNames, freshIdsAreNeverReused)
 {
     Part::TopoShape before(box(0));
     long counter = 0;
@@ -581,7 +599,7 @@ TEST(TopoShapeMatch, freshIdsAreNeverReused)
 }
 
 // The counter rises past every id of the previous result, whatever counter it is given
-TEST(TopoShapeMatch, counterRisesPastThePreviousIds)
+TEST_F(TopoShapeMatchNames, counterRisesPastThePreviousIds)
 {
     Part::TopoShape before(box(0));
     long counter = 100;
