@@ -402,3 +402,24 @@ TEST_F(PropertyLinkRecords, linkSubListDedupeOfAPieceKeepsTheExpansion)
     EXPECT_EQ(records[0], pieceRecord("expanded", "W"));
     EXPECT_TRUE(records[1].empty());
 }
+
+TEST_F(PropertyLinkRecords, linkSubDedupeOfAPieceKeepsItsFrom)
+{
+    // Arrange: two pieces of W, the second also added again as a plain entry
+    auto prop = addLinks<App::PropertyLinkSub>("SubLink");
+    prop->setValue(_a, std::vector<std::string> {"Edge1", "Edge2", "Edge2"});
+    prop->setElementRecords({pieceRecord("expanded", "W"), pieceRecord("expanded", "W"), {}});
+    prop->setExpandedFroms({"W", "W", ""});
+
+    // Act: the duplicate removed; the second piece pairs with the plain entry (R2)
+    prop->setValue(_a, std::vector<std::string> {"Edge1", "Edge2"});
+
+    // Assert: both pieces keep `from`, or the merge collapses the first alone and leaves the
+    // second missing, without the whole among its candidates (the review of fork PR 386 round 5,
+    // R5FilletDupDedupeMerge)
+    EXPECT_EQ(prop->getExpandedFroms(), (std::vector<std::string> {"W", "W"}));
+    auto records = prop->getElementRecords();
+    ASSERT_EQ(records.size(), 2);
+    EXPECT_EQ(records[0], pieceRecord("expanded", "W"));
+    EXPECT_TRUE(records[1].empty());
+}

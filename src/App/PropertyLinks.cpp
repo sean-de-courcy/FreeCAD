@@ -142,6 +142,8 @@ struct Rewrite
     // The old entries whose element the rewrite keeps: paired, or a duplicate of a paired one
     // (keepRewritten())
     std::vector<bool> held;
+    // The paired old entry that holds each held one (itself if paired), or -1
+    std::vector<int> heldBy;
 };
 }  // namespace
 
@@ -335,9 +337,11 @@ static Rewrite keepRewritten(const std::vector<App::DocumentObject*>& oldObjs,
     };
     auto& held = rewrite.held;
     held.assign(oldSubs.size(), false);
+    rewrite.heldBy.assign(oldSubs.size(), -1);
     for (auto j : rewrite.pairs) {
         if (j >= 0 && static_cast<std::size_t>(j) < held.size()) {
             held[j] = true;
+            rewrite.heldBy[j] = j;
         }
     }
     // An old entry left unpaired by a dedupe is still held: a paired one holds its element (the
@@ -352,6 +356,9 @@ static Rewrite keepRewritten(const std::vector<App::DocumentObject*>& oldObjs,
             const auto& shadow = rewrite.oldShadows[j];
             held[k] = oldSubs[j] == oldSubs[k]
                 || (!shadow.newName.empty() && shadow.newName == rewrite.oldShadows[k].newName);
+            if (held[k]) {
+                rewrite.heldBy[k] = j;
+            }
         }
     }
     // Whether the rewrite keeps every old entry that is a piece of the same original as entry j
@@ -378,11 +385,29 @@ static Rewrite keepRewritten(const std::vector<App::DocumentObject*>& oldObjs,
 // `from` (Task 2 PR 7) marks the pieces of one expanded reference, which the solver merges back
 // into the whole when it is whole again. A rewrite keeps it only where it keeps every piece of
 // the expansion: a piece kept alone is the choice of that piece, which a merge would widen to the
-// whole silently (the review of fork PR 386, PieceKeptThenMergedBack)
+// whole silently (the review of fork PR 386, PieceKeptThenMergedBack). A new entry paired with a
+// plain duplicate of a piece (R2: the exact pick pairs first) takes the piece's `from`: it holds
+// that piece, and without it the merge leaves the piece's name missing and the whole out of the
+// candidates (the review of fork PR 386 round 5, R5FilletDupDedupeMerge)
 static void keepWholeExpansions(std::vector<std::string>& froms,
                                 const std::vector<std::string>& oldFroms,
                                 const Rewrite& rewrite)
 {
+    std::vector<bool> taken(oldFroms.size(), false);
+    for (std::size_t i = 0; i < froms.size() && i < rewrite.pairs.size(); ++i) {
+        auto j = rewrite.pairs[i];
+        if (j < 0 || !froms[i].empty()) {
+            continue;
+        }
+        for (std::size_t k = 0; k < oldFroms.size() && k < rewrite.heldBy.size(); ++k) {
+            if (rewrite.heldBy[k] == j && static_cast<int>(k) != j && !taken[k]
+                && !oldFroms[k].empty()) {
+                froms[i] = oldFroms[k];
+                taken[k] = true;
+                break;
+            }
+        }
+    }
     // The expansions some piece of which the rewrite drops (a duplicate's dedupe drops none)
     std::set<std::string> dropped;
     for (std::size_t j = 0; j < oldFroms.size(); ++j) {
