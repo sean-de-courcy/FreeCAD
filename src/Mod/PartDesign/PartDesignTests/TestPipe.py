@@ -2848,10 +2848,6 @@ class TestJointsWhenABendStraightens(unittest.TestCase):
         the part's size (ops#468, the review of the counter with the group's size)."""
         self.holeVerticesOnTheJoint(0, ("leg", 30.2), strict=lambda was: was.y < 0, longLeg=True)
 
-    # The solver's half of the role-sibling clause is D1's (fork PR 379, `naming-class-A.md` 4.1):
-    # without it, tier 1 takes the other side's crossing when this one's name goes. A2 merges after
-    # D1 (decision 158 Q2); remove the mark when A2 is rebased over D1 (an unexpected pass fails).
-    @unittest.expectedFailure
     def testHoleVerticesOnTheJointWhenOneReachesTheSeam(self):
         """The reverse: two vertices generated from the joint edge and the hole's face, and the
         edit brings the joint to the hole's centre, where the y > 0 crossing is the seam's vertex.
@@ -2860,10 +2856,6 @@ class TestJointsWhenABendStraightens(unittest.TestCase):
         vertex are warned or follow it."""
         self.holeVerticesOnTheJoint(0.2, ("leg", 30.2), strict=lambda was: was.y < 0)
 
-    # The solver's half of the role-sibling clause is D1's (fork PR 379, `naming-class-A.md` 4.1):
-    # without it, tier 1 takes the other side's crossing when this one's name goes. A2 merges after
-    # D1 (decision 158 Q2); remove the mark when A2 is rebased over D1 (an unexpected pass fails).
-    @unittest.expectedFailure
     def testHoleVerticesOnTheJointWhenTheSeamTurnsOntoOne(self):
         """Nothing moves: the hole's sketch is turned about the hole's axis until its seam lies on
         the y > 0 crossings. Those become the seam's vertexes, under another name, and the y < 0
