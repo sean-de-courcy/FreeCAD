@@ -40,7 +40,15 @@ class TopoShape;
  *    by index, when the counts, the vertices of each edge and the edges of each face are the same
  *    under the index map and every face keeps its surface kind and side.
  * Every face match compares the surface kind and the oriented normals at the inner points (dot >
- * 0). Rung 6 is the only one that matches by position. Matches are by index from 1.
+ * 0). Rung 6 is the only one that matches by position. Then the class C ruling of 10-28
+ * (section 9.2 of the note) withdraws matches, never adds one:
+ * - P1: congruent pieces (the producer's top-level units: a compound's children) whose places
+ *   pair them otherwise than the producer's order are all retired (a trade of twins);
+ * - R1: a vertex or edge match counts only where a matched face at it confirms it (in a wire,
+ *   where an adjacent edge matched): a seam at old places of other faces' elements is retired;
+ * - R2: a piece whose unmatched old and new elements are congruent (a periodic piece slid by its
+ *   pitch) is retired.
+ * Matches are by index from 1.
  */
 struct PartExport ElementMatches
 {

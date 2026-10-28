@@ -338,6 +338,11 @@ std::string missingText(const ReferenceReport::Slot& slot, const ReferenceReport
     if (entry && !entry->headline.empty()) {
         ss << entry->headline;
     }
+    else if (entry && entry->evidence.rfind("retired:", 0) == 0) {
+        // An id its producer retired (I-C5, ops#502): what sits at its place is another element
+        ss << "Renamed " << (type.empty() ? "element" : type) << " reference: " << element
+           << ", the producer renamed this element; it is not the one at the same place";
+    }
     else if (guess.kind == "rejected" && guess.origIndex.empty() && guess.origName.empty()) {
         // Mark broken on a record that lost its original (ops#268): the missing link holds the
         // rejected pick, and "Missing edge reference: Edge3, rejected: Edge3" read as a
