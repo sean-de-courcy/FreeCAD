@@ -3387,3 +3387,1117 @@ class TestRoundCornerNames(unittest.TestCase):
             True,
             self.firstBend,
         )
+
+
+def reversedBSpline(curve):
+    """The B-spline `curve` running the other way, its geometry the same."""
+    knots = list(curve.getKnots())
+    curve.buildFromPolesMultsKnots(
+        list(curve.getPoles())[::-1],
+        list(curve.getMultiplicities())[::-1],
+        [knots[0] + knots[-1] - k for k in knots[::-1]],
+        False,
+        curve.Degree,
+        list(curve.getWeights())[::-1],
+    )
+    return curve
+
+
+def drawnTheOtherWay(sketch, indices):
+    """The sketch's lines and B-splines at `indices` drawn the other way, their ids kept."""
+    geometry = sketch.Geometry
+    for index in indices:
+        curve = geometry[index]
+        if curve.TypeId == "Part::GeomLineSegment":
+            start, end = V(curve.StartPoint), V(curve.EndPoint)
+            curve.StartPoint, curve.EndPoint = V(1e4, 1e4, 0), V(2e4, 2e4, 0)
+            curve.StartPoint, curve.EndPoint = end, start
+        else:
+            reversedBSpline(curve)
+    sketch.Geometry = geometry
+
+
+class TestPipeNamesUnderSpineEdits(unittest.TestCase):
+    """Edits of a pipe's spine that leave the solid the same: datum points on every edge and
+    vertex of the pipe, then the edit. Each point goes missing, warns, or stays where it was;
+    none moves silently."""
+
+    def setUp(self):
+        self.doc = models.newDocument("PartDesignTestPipeSpineEdits")
+        self.doc.HistoryAlgorithm = "V2"
+        self.doc.InternNames = False
+        self.body = models.body(self.doc)
+
+    def tearDown(self):
+        App.closeDocument(self.doc.Name)
+
+    def pipe(self, profile, path, transition, refine=False):
+        pipe = self.body.newObject("PartDesign::AdditivePipe", "Pipe")
+        pipe.Profile = profile
+        pipe.Spine = (path, [])
+        pipe.Transition = transition
+        pipe.Refine = refine
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        return pipe
+
+    def attach(self, pipe):
+        """A datum point on each edge (its centre) and vertex of the pipe: {point: its place}"""
+        points = []
+        for kind in ("Edge", "Vertex"):
+            for index in range(1, len(elementsOf(pipe.Shape, kind)) + 1):
+                point = self.body.newObject("PartDesign::Point", f"On{kind}{index}")
+                point.AttachmentSupport = [(pipe, f"{kind}{index}")]
+                point.MapMode = "Vertex" if kind == "Vertex" else "CenterOfMass"
+                points.append(point)
+        self.doc.recompute()
+        self.assertEqual([p.Name for p in points if not p.isValid()], [])
+        return {point: V(point.Placement.Base) for point in points}
+
+    def assertNoneMovedSilently(
+        self, pipe, volume, points, quiet=lambda place: False, skip=lambda place: False
+    ):
+        """After the edit: the same solid, and no point moved silently; those whose place
+        `quiet` holds stayed where they were, valid and without a warning; those whose place
+        `skip` holds aren't checked."""
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        self.assertAlmostEqual(pipe.Shape.Volume, volume, 4)
+        for point, before in points.items():
+            if skip(before):
+                continue
+            levels = [e.get("warning_level") for e in App.getReferenceReport(point)]
+            if quiet(before):
+                self.assertTrue(point.isValid(), (point.Name, before))
+                self.assertFalse(any(levels), (point.Name, before, levels))
+            if point.isValid() and not any(levels):
+                moved = (point.Placement.Base - before).Length
+                self.assertLess(moved, 1e-6, (point.Name, before, point.Placement.Base))
+
+    def closedSpine(self, kind):
+        """A closed spine of two edges in the XZ plane, both corners between them:
+        - "D": a line up 10 along Z, then a 300-degree arc back to its start;
+        - "DBS": the same with the arc a B-spline;
+        - "lens": two B-spline arcs up 30 and back."""
+        if kind in ("D", "DBS"):
+            arc = Part.ArcOfCircle(V(0, 10, 0), V(-18.66025, 5, 0), V(0, 0, 0))
+            geometry = [
+                Part.LineSegment(V(0, 0, 0), V(0, 10, 0)),
+                arc.toBSpline() if kind == "DBS" else arc,
+            ]
+        else:
+            geometry = [
+                Part.ArcOfCircle(V(0, 0, 0), V(11.51, 15, 0), V(0, 30, 0)).toBSpline(),
+                Part.ArcOfCircle(V(0, 30, 0), V(-11.51, 15, 0), V(0, 0, 0)).toBSpline(),
+            ]
+        return models.sketch(self.doc, "Path", geometry, self.body, placement=XZ)
+
+    def square(self):
+        return models.sketch(self.doc, "Profile", models.rectangle(-1, -1, 1, 1), self.body)
+
+    @staticmethod
+    def profileNamed(pipe, profile):
+        """The places of the pipe's edges named as the profile's, rounded"""
+        own = {
+            firstName(profile.Shape, f"Edge{index}")
+            for index in range(1, len(profile.Shape.Edges) + 1)
+        }
+        return sorted(
+            tuple(round(c, 6) + 0.0 for c in edge.CenterOfMass)
+            for index, edge in enumerate(pipe.Shape.Edges, 1)
+            if firstName(pipe.Shape, f"Edge{index}") in own
+        )
+
+    def assertProfileNamesAtTheProfile(self, pipe, profile):
+        """The square's names are on the square itself, where it lies at the spine's vertex (not
+        on a copy turned to an edge's tangent there)."""
+        own = sorted(
+            tuple(round(c, 6) + 0.0 for c in edge.CenterOfMass) for edge in profile.Shape.Edges
+        )
+        self.assertEqual(self.profileNamed(pipe, profile), own)
+
+    def testClosedSpineOfTwoEdgesStartsAtTheProfile(self):
+        """A closed spine starts at its vertex nearest the profile, whichever way its lines are
+        drawn and in whatever order the sketch lists them (ops#469). The square lies at the
+        spine's lower vertex. Before, the spine started where the sketch's first line does: drawn
+        the other way, the line moved the start, the profile's names and the seam 10 mm to the top
+        vertex, and 12 references with them, silently (`work\\pr369-r1v\\closedD_Tr2.out`).
+        "Transformed" (the D can't be swept with "Right corner" or "Round corner"), refined and
+        not; edits: the line drawn the other way, the arc listed first."""
+
+        def flipLine(path):
+            drawnTheOtherWay(path, [0])
+
+        def reorder(path):
+            geometry = path.Geometry
+            path.Geometry = [geometry[1], geometry[0]]
+
+        for edit in (flipLine, reorder):
+            for refine in (False, True):
+                self.tearDown()
+                self.setUp()
+                with self.subTest(edit=edit.__name__, refine=refine):
+                    profile = self.square()
+                    path = self.closedSpine("D")
+                    pipe = self.pipe(profile, path, "Transformed", refine)
+                    self.assertProfileNamesAtTheProfile(pipe, profile)
+                    volume = pipe.Shape.Volume
+                    points = self.attach(pipe)
+                    edit(path)
+                    self.doc.recompute()
+                    self.assertProfileNamesAtTheProfile(pipe, profile)
+                    self.assertNoneMovedSilently(pipe, volume, points, lambda place: True)
+
+    def testClosedSpineOfTwoEdgesDrawnTheOtherWay(self):
+        """Both edges of a closed spine of two drawn the other way (B-splines, which a sketch can
+        reverse): the corners swap ends, which no name of the edges tells from the corners trading
+        places. The joint's corner is the one that isn't the spine's start, which lies at the
+        profile, so nothing moves (decision 122 (3)). Before, each corner was told by which end of
+        each edge it was: all 24 references of the two B-spline arcs with "Right corner" moved 30
+        mm, silently, and the joints of the line and B-spline swept "Transformed" broke or moved
+        (`work\\pr369-r2v\\lensBS_both_R.out`, `closedBS_both_Tr.out`). Also one edge drawn the
+        other way, which broke the joint's references."""
+        cases = [
+            ("lens", "Right corner", [0, 1]),
+            ("lens", "Right corner", [0]),
+            ("lens", "Transformed", [0, 1]),
+            ("lens", "Transformed", [1]),
+            ("DBS", "Transformed", [0, 1]),
+            ("DBS", "Transformed", [1]),
+        ]
+        for kind, transition, flipped in cases:
+            self.tearDown()
+            self.setUp()
+            with self.subTest(spine=kind, transition=transition, flipped=flipped):
+                profile = self.square()
+                path = self.closedSpine(kind)
+                pipe = self.pipe(profile, path, transition)
+                named = self.profileNamed(pipe, profile)
+                volume = pipe.Shape.Volume
+                points = self.attach(pipe)
+                stored = [V(v) for v in pipe.SpineStart]
+                drawnTheOtherWay(path, flipped)
+                self.doc.recompute()
+                self.assertEqual(self.profileNamed(pipe, profile), named)
+                self.assertNoneMovedSilently(pipe, volume, points, lambda place: True)
+                # The stored start, way, end, the other vertex and middle, and the profile's two
+                # frames stay as they were
+                self.assertEqual(len(pipe.SpineStart), 11)
+                for before, after in zip(stored, pipe.SpineStart):
+                    self.assertLess((V(after) - before).Length, 1e-6, (stored, pipe.SpineStart))
+
+    def testClosedLensRunsTheStoredWayWhereBothWaysTie(self):
+        """The lens's two arcs leave the profile at mirror angles to its normal, so neither way
+        leaves more nearly along it: inside a band of 1e-6 the stored way decides (a point of the
+        first edge, SpineStart), not the rounding of the two cosines, which an arc drawn the other
+        way changes. "Transformed"; each arc and both drawn the other way, and back."""
+        for flipped in ([0], [1], [0, 1]):
+            self.tearDown()
+            self.setUp()
+            with self.subTest(flipped=flipped):
+                profile = self.square()
+                path = self.closedSpine("lens")
+                pipe = self.pipe(profile, path, "Transformed")
+                named = self.profileNamed(pipe, profile)
+                volume = pipe.Shape.Volume
+                stored = [V(v) for v in pipe.SpineStart]
+                self.assertEqual(len(stored), 11)
+                self.assertGreater((stored[1] - stored[0]).Length, 1, stored)
+                points = self.attach(pipe)
+                for _ in range(2):
+                    drawnTheOtherWay(path, flipped)
+                    self.doc.recompute()
+                    self.assertEqual(self.profileNamed(pipe, profile), named)
+                    self.assertNoneMovedSilently(pipe, volume, points, lambda place: True)
+                    for before, after in zip(stored, pipe.SpineStart):
+                        self.assertLess((V(after) - before).Length, 1e-6, (stored, pipe.SpineStart))
+
+    @staticmethod
+    def cornerKeysAt(pipe, vertices):
+        """{each corner key the pipe's names hold (the hashed key of CornerSource): the indices
+        of `vertices` nearest the elements that hold it}"""
+        shape = pipe.Shape
+        result = {}
+        for kind in ("Face", "Edge", "Vertex"):
+            for index, element in enumerate(elementsOf(shape, kind), 1):
+                name = firstName(shape, f"{kind}{index}")
+                keys = set(re.findall(r"(?<![0-9a-f])[0-9a-f]{16}(?![0-9a-f])", name))
+                if not keys:
+                    continue
+                place = element.Point if kind == "Vertex" else element.CenterOfMass
+                nearest = min(range(len(vertices)), key=lambda i: (place - vertices[i]).Length)
+                for key in keys:
+                    result.setdefault(key, set()).add(nearest)
+        return result
+
+    def testClosedSpineProfileSlidToTheOtherVertex(self):
+        """The D's profile moved from one vertex of the spine to the other, and back. The sweep
+        keeps its stored start (SpineStart), so the profile's end names and the corners' keys stay
+        where they were, and no reference moves silently. Keyed from the profile's place each
+        time, the start's key and the other corner's traded vertices, and the references to the
+        joints there went loud (the review of `notes\\naming-class-B.md` round 1, CC1). From
+        z = 0 and from z = 10; with the square and with a round hole in it."""
+        corners = [V(0, 0, 0), V(0, 0, 10)]
+        hole = models.rectangle(-1, -1, 1, 1) + [Part.Circle(V(0, 0, 0), V(0, 0, 1), 0.4)]
+        for start in (0, 1):
+            for holed in (False, True):
+                self.tearDown()
+                self.setUp()
+                with self.subTest(start=corners[start], hole=holed):
+                    profile = models.sketch(
+                        self.doc, "Profile", hole if holed else models.rectangle(-1, -1, 1, 1), self.body
+                    )
+                    profile.Placement = App.Placement(corners[start], App.Rotation())
+                    path = self.closedSpine("D")
+                    pipe = self.pipe(profile, path, "Transformed")
+                    volume = pipe.Shape.Volume
+                    named = self.profileNamed(pipe, profile)
+                    keys = self.cornerKeysAt(pipe, corners)
+                    self.assertTrue(keys)
+                    points = self.attach(pipe)
+                    at = start
+                    for _ in range(2):
+                        at = 1 - at
+                        profile.Placement = App.Placement(corners[at], App.Rotation())
+                        self.doc.recompute()
+                        self.assertEqual(self.profileNamed(pipe, profile), named)
+                        for key, where in self.cornerKeysAt(pipe, corners).items():
+                            if key in keys:
+                                self.assertLessEqual(where, keys[key], key)
+                        self.assertNoneMovedSilently(pipe, volume, points)
+
+    def ring(self, start, profileZ, link=None):
+        """A Right corner pipe of a 2 x 2 square, at height `profileZ` on the left leg of a closed
+        ring of four lines (a 30 x 20 rectangle in the XZ plane), the ring drawn from its corner
+        `start` (0 bottom left, then counterclockwise as drawn: top left, top right, bottom
+        right). With `link`, that is the pipe's Profile (the square is returned as built)."""
+        corners = [(0, 0), (0, 20), (30, 20), (30, 0)]
+        corners = corners[start:] + corners[:start]
+        lines = [
+            Part.LineSegment(V(*a, 0), V(*b, 0)) for a, b in zip(corners, corners[1:] + corners[:1])
+        ]
+        path = models.sketch(self.doc, "Path", lines, self.body, placement=XZ)
+        if link is not None:
+            return None, self.pipe(link, path, "Right corner")
+        profile = self.square()
+        profile.Placement = App.Placement(V(0, 0, profileZ), App.Rotation())
+        return profile, self.pipe(profile, path, "Right corner")
+
+    def testClosedRingProfileSlidAlongALeg(self):
+        """The ring's profile moved along its leg past the leg's middle (from 4 to 16, from 9 to
+        11): the solid is the same, and no reference moves. The sweep starts where it was
+        stored; started each time at the vertex nearest the profile, it moved to the leg's other
+        vertex, and the profile's names went from the elements at the first to those at the
+        second, silently (the review of fork PR 383, round 1:
+        `work\\pr383-r1\\cases\\pr383_closed_ring.py`)."""
+        for before, after in ((4, 16), (9, 11)):
+            self.tearDown()
+            self.setUp()
+            with self.subTest(before=before, after=after):
+                profile, pipe = self.ring(0, before)
+                volume = pipe.Shape.Volume
+                points = self.attach(pipe)
+                profile.Placement = App.Placement(V(0, 0, after), App.Rotation())
+                self.doc.recompute()
+                self.assertNoneMovedSilently(pipe, volume, points)
+
+    def testClosedRingTiedStartIsKept(self):
+        """The ring drawn from its top right corner, the profile at the middle of its left leg, so
+        both left corners lie equally near: the start chosen is stored, and recomputed with
+        nothing changed, the pipe keeps it, and every reference stays where it was, valid and
+        without a warning. The drawn start, no tied vertex, was stored, and the next recompute
+        moved the start to a tied one: 4 references broke (the review of fork PR 383, round 1)."""
+        profile, pipe = self.ring(2, 10)
+        volume = pipe.Shape.Volume
+        stored = list(pipe.SpineStart)
+        points = self.attach(pipe)
+        pipe.touch()
+        self.doc.recompute()
+        self.assertEqual(list(pipe.SpineStart), stored)
+        self.assertNoneMovedSilently(pipe, volume, points, lambda place: True)
+
+    def testClosedRingStartKeptThroughAnOpenSpine(self):
+        """The ring's profile moved along its leg past the leg's middle (4 to 16), then the spine
+        opened for one recompute and closed again: the bottom line's end moved off the bottom left
+        corner and back, or the Spine's bottom edge left out and picked again (as the task panel
+        does it). The solid is as built, and no reference moves: the closed spine's start is
+        stored apart (SpineStart), for its input, and the open spine's recompute leaves it. Stored
+        in SpineEnds, the open spine's ends replaced it, the start was taken from the profile
+        again, and 6 references at the bottom left went to the top left, silently (the review of
+        fork PR 383, round 2: `work\\pr383-r2\\cases\\pr383r2_closed.py`). The same for a
+        recompute in Multisection mode and back, and for the same spine picked anew: its four
+        edges listed, or an equal copy of the sketch, where a new input's start was taken from the
+        profile (the cloud reading review of round 2, N1, N2)."""
+
+        def moveTheLine(pipe, path):
+            for end in (V(5, -5, 0), V(0, 0, 0)):
+                geometry = path.Geometry
+                geometry[3].EndPoint = end
+                path.Geometry = geometry
+                self.doc.recompute()
+
+        def leaveTheEdgeOut(pipe, path):
+            for edges in (["Edge1", "Edge2", "Edge3"], ["Edge1", "Edge2", "Edge3", "Edge4"]):
+                pipe.Spine = (path, edges)
+                self.doc.recompute()
+
+        def multisectionAndBack(pipe, path):
+            section = models.sketch(self.doc, "Section", models.rectangle(-1, -1, 1, 1), self.body)
+            section.Placement = App.Placement(V(0, 0, 18), App.Rotation())
+            pipe.Transformation = "Multisection"
+            pipe.Sections = [section]
+            self.doc.recompute()
+            pipe.Sections = []
+            pipe.Transformation = "Constant"
+            self.doc.recompute()
+
+        def pickTheEdges(pipe, path):
+            pipe.Spine = (path, ["Edge1", "Edge2", "Edge3", "Edge4"])
+            self.doc.recompute()
+
+        def relinkToACopy(pipe, path):
+            copy = models.sketch(self.doc, "Copy", path.Geometry, self.body, placement=XZ)
+            pipe.Spine = (copy, [])
+            self.doc.recompute()
+
+        for edit in (moveTheLine, leaveTheEdgeOut, multisectionAndBack, pickTheEdges, relinkToACopy):
+            self.tearDown()
+            self.setUp()
+            with self.subTest(edit=edit.__name__):
+                profile, pipe = self.ring(0, 4)
+                path = pipe.Spine[0]
+                if edit is leaveTheEdgeOut:
+                    pipe.Spine = (path, ["Edge1", "Edge2", "Edge3", "Edge4"])
+                    self.doc.recompute()
+                volume = pipe.Shape.Volume
+                points = self.attach(pipe)
+                profile.Placement = App.Placement(V(0, 0, 16), App.Rotation())
+                self.doc.recompute()
+                edit(pipe, path)
+                self.assertNoneMovedSilently(pipe, volume, points)
+
+    RING_CORNERS = [V(0, 0, 0), V(0, 0, 20), V(30, 0, 20), V(30, 0, 0)]
+
+    def testClosedRingStartKeptThroughAnotherSpine(self):
+        """The ring's profile moved along its leg past the leg's middle (4 to 16), then the Spine
+        set to another closed ring elsewhere (the profile moved onto it) and back (the profile
+        too): the solid is as before, the corners' keys are where they were, and no reference
+        moves. With one stored start, the other ring's replaced the first's, the start came back
+        from the profile, at the top left, and the 4 references at the bottom left went there,
+        silently (the cloud reading review of fork PR 383 round 3, F1). The other ring: a copy of
+        the sketch 50 along y; a second ring in the same sketch, 50 along x (Edge1-4, then
+        Edge5-8); the copy, the change undone after its recompute, which the undo doesn't record.
+        Set to the other ring, which has no start stored, the pipe decides as a new one does, and
+        warns."""
+
+        def otherSketch(path):
+            other = models.sketch(
+                self.doc,
+                "Other",
+                path.Geometry,
+                self.body,
+                placement=App.Placement(V(0, 50, 0), XZ.Rotation),
+            )
+            return (other, []), V(0, 50, 0)
+
+        def otherLoop(path):
+            return (path, ["Edge5", "Edge6", "Edge7", "Edge8"]), V(50, 0, 0)
+
+        for other, undone in ((otherSketch, False), (otherLoop, False), (otherSketch, True)):
+            self.tearDown()
+            self.setUp()
+            with self.subTest(other=other.__name__, undone=undone):
+                profile, pipe = self.ring(0, 4)
+                path = pipe.Spine[0]
+                spine = (path, [])
+                if other is otherLoop:
+                    for line in path.Geometry:
+                        shift = V(50, 0, 0)
+                        path.addGeometry(
+                            Part.LineSegment(line.StartPoint + shift, line.EndPoint + shift)
+                        )
+                    spine = (path, ["Edge1", "Edge2", "Edge3", "Edge4"])
+                    pipe.Spine = spine
+                    self.doc.recompute()
+                volume = pipe.Shape.Volume
+                points = self.attach(pipe)
+                profile.Placement = App.Placement(V(0, 0, 16), App.Rotation())
+                self.doc.recompute()
+                keys = self.cornerKeysAt(pipe, self.RING_CORNERS)
+                self.assertTrue(keys)
+                elsewhere, shift = other(path)
+                if undone:
+                    self.doc.UndoMode = 1
+                    self.doc.openTransaction("Other")
+                pipe.Spine = elsewhere
+                profile.Placement = App.Placement(V(0, 0, 16) + shift, App.Rotation())
+                if undone:
+                    self.doc.commitTransaction()
+                self.doc.recompute()
+                self.assertTrue(pipe.isValid(), pipe.getStatusString())
+                self.assertIn("Warning", pipe.State)
+                if undone:
+                    self.doc.undo()
+                    self.assertEqual(pipe.Spine[0], path)
+                else:
+                    pipe.Spine = spine
+                    profile.Placement = App.Placement(V(0, 0, 16), App.Rotation())
+                self.doc.recompute()
+                self.assertNotIn("Warning", pipe.State)
+                self.assertEqual(self.cornerKeysAt(pipe, self.RING_CORNERS), keys)
+                self.assertNoneMovedSilently(pipe, volume, points)
+
+    def testClosedRingStartKeptWhenTheSpineIsRenumberedAndMoved(self):
+        """The ring's profile moved along its leg past the leg's middle (4 to 16), then in one
+        recompute the Spine's edges renumbered and the ring's right leg moved from x = 30 to 32:
+        the left leg and its corners don't move, so neither do their keys nor the references
+        there. The input was told by the indices the naming refresh writes in the link: it changed
+        with the renumber, the moved leg kept the stored start from lying in place, the start came
+        back from the profile, at the top left, and the references at the bottom left went there,
+        silently (the cloud reading review of fork PR 383 round 3, F2). Renumbered: a line before
+        the ring deleted (the Spine lists the ring's edges); the Spine's whole sketch set to its
+        edges listed."""
+
+        def ring(extra):
+            corners = [(0, 0), (0, 20), (30, 20), (30, 0)]
+            lines = [
+                Part.LineSegment(V(*a, 0), V(*b, 0))
+                for a, b in zip(corners, corners[1:] + corners[:1])
+            ]
+            if extra:
+                lines.insert(0, Part.LineSegment(V(-20, 0, 0), V(-20, 10, 0)))
+            return models.sketch(self.doc, "Path", lines, self.body, placement=XZ)
+
+        def moveTheRightLeg(path, first):
+            geometry = path.Geometry
+            geometry[first].EndPoint = V(32, 20, 0)
+            geometry[first + 1].StartPoint = V(32, 20, 0)
+            geometry[first + 1].EndPoint = V(32, 0, 0)
+            geometry[first + 2].StartPoint = V(32, 0, 0)
+            path.Geometry = geometry
+
+        for listed in (False, True):
+            self.tearDown()
+            self.setUp()
+            with self.subTest(edit="spine listed" if listed else "line deleted"):
+                path = ring(not listed)
+                profile = self.square()
+                profile.Placement = App.Placement(V(0, 0, 4), App.Rotation())
+                pipe = self.body.newObject("PartDesign::AdditivePipe", "Pipe")
+                pipe.Profile = profile
+                pipe.Spine = (path, []) if listed else (path, ["Edge2", "Edge3", "Edge4", "Edge5"])
+                pipe.Transition = "Right corner"
+                self.doc.recompute()
+                self.assertTrue(pipe.isValid(), pipe.getStatusString())
+                points = self.attach(pipe)
+                profile.Placement = App.Placement(V(0, 0, 16), App.Rotation())
+                self.doc.recompute()
+                keys = self.cornerKeysAt(pipe, self.RING_CORNERS)
+                self.assertTrue(keys)
+                if listed:
+                    pipe.Spine = (path, ["Edge1", "Edge2", "Edge3", "Edge4"])
+                    moveTheRightLeg(path, 1)
+                else:
+                    path.delGeometry(0)
+                    moveTheRightLeg(path, 1)
+                self.doc.recompute()
+                self.assertTrue(pipe.isValid(), pipe.getStatusString())
+                self.assertEqual(sorted(pipe.Spine[1]), ["Edge1", "Edge2", "Edge3", "Edge4"])
+                self.assertNotIn("Warning", pipe.State)
+                moved = self.RING_CORNERS[:2] + [V(32, 0, 20), V(32, 0, 0)]
+                self.assertEqual(self.cornerKeysAt(pipe, moved), keys)
+                # The vertices on the left, which didn't move
+                for point, before in points.items():
+                    levels = [e.get("warning_level") for e in App.getReferenceReport(point)]
+                    if before.x > 1 or not point.Name.startswith("OnVertex"):
+                        continue
+                    self.assertTrue(point.isValid() and not any(levels), (point.Name, before))
+                    distance = (point.Placement.Base - before).Length
+                    self.assertLess(distance, 1e-6, (point.Name, before))
+
+    def testClosedRingWithALineDrawnAnewWarns(self):
+        """The ring's edges listed in the Spine, its profile moved along its leg past the leg's
+        middle (4 to 16), then in one recompute its top line deleted and drawn again (a new line
+        of the sketch), its right leg moved from x = 30 to 32, and the Spine's edges picked again:
+        another input, whose stored start doesn't lie on the spine, so the start isn't known for
+        certain. The record of the same sketch, which shares three of the ring's lines, is read,
+        and the pipe warns (decision 150): the keys of the bottom corners, between lines kept,
+        stay where they were (the top corners' keys hold the new line's name). The whole sketch
+        as the Spine is one input whatever its lines (ops#379), and keeps its start quietly."""
+        profile, pipe = self.ring(0, 4)
+        path = pipe.Spine[0]
+        pipe.Spine = (path, ["Edge1", "Edge2", "Edge3", "Edge4"])
+        profile.Placement = App.Placement(V(0, 0, 16), App.Rotation())
+        self.doc.recompute()
+        keys = self.cornerKeysAt(pipe, self.RING_CORNERS)
+        self.assertTrue(keys)
+        # Drawn before the old one is deleted, the new line takes a new ID (after, it takes the
+        # deleted one's, the lowest free, and is the same input)
+        path.addGeometry(Part.LineSegment(V(0, 20, 0), V(32, 20, 0)))
+        path.delGeometry(1)
+        geometry = path.Geometry
+        geometry[1].StartPoint = V(32, 20, 0)
+        geometry[1].EndPoint = V(32, 0, 0)
+        geometry[2].StartPoint = V(32, 0, 0)
+        path.Geometry = geometry
+        pipe.Spine = (path, ["Edge1", "Edge2", "Edge3", "Edge4"])
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        self.assertIn("Warning", pipe.State)
+        moved = self.RING_CORNERS[:2] + [V(32, 0, 20), V(32, 0, 0)]
+        after = self.cornerKeysAt(pipe, moved)
+        bottom = {key: where for key, where in keys.items() if where & {0, 3}}
+        self.assertTrue(bottom)
+        self.assertEqual({key: after.get(key) for key in bottom}, bottom)
+
+    LEGS = {"left": V(0, 0, 10), "top": V(15, 0, 20), "right": V(30, 0, 10), "bottom": V(15, 0, 0)}
+
+    def ringNames(self, pipe):
+        """The names of the ring's faces and edges, by where they lie: {leg or corner index: set}"""
+        result = {}
+        shape = pipe.Shape
+        for kind in ("Face", "Edge"):
+            for index, element in enumerate(elementsOf(shape, kind), 1):
+                place = element.CenterOfMass
+                corner = min(range(4), key=lambda i: (place - self.RING_CORNERS[i]).Length)
+                if (place - self.RING_CORNERS[corner]).Length < 2:
+                    where = corner
+                else:
+                    where = min(self.LEGS, key=lambda leg: (place - self.LEGS[leg]).Length)
+                result.setdefault(where, set()).add(firstName(shape, f"{kind}{index}"))
+        return result
+
+    def redrawRing(self, path, corners):
+        """The ring's four lines (IDs kept) moved onto the loop through `corners` (sketch
+        coordinates), line i from corners[i] to the next: first out of the way, so no end lands on
+        another line's end"""
+        geometry = path.Geometry
+        for i in range(4):
+            geometry[i].StartPoint = V(100 + 10 * i, 100, 0)
+            geometry[i].EndPoint = V(105 + 10 * i, 105, 0)
+        for i in range(4):
+            geometry[i].StartPoint = V(*corners[i], 0)
+            geometry[i].EndPoint = V(*corners[(i + 1) % 4], 0)
+        path.Geometry = geometry
+
+    def assertLegsRenamed(self, before, after, legs):
+        """`legs` named anew (no name they had, a `PLM` source), the other legs as they were"""
+        for leg in self.LEGS:
+            if leg in legs:
+                self.assertFalse(after[leg] & before[leg], (leg, after[leg] & before[leg]))
+                self.assertTrue(all("PLM" in name for name in after[leg]), (leg, after[leg]))
+            else:
+                self.assertEqual(after[leg], before[leg], leg)
+
+    RING = [(0, 0), (0, 20), (30, 20), (30, 0)]
+
+    def testClosedRingLineMovedToAnotherLegRenamesBothLegs(self):
+        """The ring's top and bottom lines traded places (each line's points moved onto the other
+        leg, IDs kept): the solid is the same, and each of the two legs is its place named by
+        another line. Their faces and lateral edges, and their corners' joints, are named anew
+        (a `PLM` source of the stored and the current line), the left and right legs as built,
+        and the record keeps the lines it stored. Named by their lines, the top leg's references
+        went to the bottom leg and back, silently (K4b's `RingLinesSwapped` and ring cases,
+        `notes\\naming-class-B.md` 9). The right leg then lengthened keeps the renamed names; the
+        lines traded back give the names as built."""
+        profile, pipe = self.ring(0, 4)
+        path = pipe.Spine[0]
+        volume = pipe.Shape.Volume
+        before = self.ringNames(pipe)
+        stored = list(pipe.SpineStartNames)
+        self.assertEqual(len(stored), 4)
+        geometry = path.Geometry
+        geometry[1].StartPoint, geometry[1].EndPoint = V(300, 0, 0), V(300, 5, 0)
+        geometry[3].StartPoint, geometry[3].EndPoint = V(400, 0, 0), V(400, 5, 0)
+        geometry[1].StartPoint, geometry[1].EndPoint = V(30, 0, 0), V(0, 0, 0)
+        geometry[3].StartPoint, geometry[3].EndPoint = V(0, 20, 0), V(30, 20, 0)
+        path.Geometry = geometry
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        self.assertAlmostEqual(pipe.Shape.Volume, volume, 6)
+        swapped = self.ringNames(pipe)
+        self.assertLegsRenamed(before, swapped, ("top", "bottom"))
+        # The joints at the four corners, each a corner of the top or bottom leg (the profile's
+        # own names, on the start's section, stay)
+        own = {firstName(profile.Shape, f"Edge{i}") for i in range(1, 5)}
+        for corner in range(4):
+            self.assertFalse((swapped[corner] & before[corner]) - own, corner)
+        self.assertEqual(list(pipe.SpineStartNames), stored)
+        # The right leg lengthened: the renamed names stay
+        geometry = path.Geometry
+        geometry[1].StartPoint = V(32, 0, 0)
+        geometry[2].StartPoint, geometry[2].EndPoint = V(32, 20, 0), V(32, 0, 0)
+        geometry[3].EndPoint = V(32, 20, 0)
+        path.Geometry = geometry
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        lengthened = self.ringNames(pipe)
+        for leg in ("top", "bottom", "left"):
+            self.assertEqual(lengthened[leg], swapped[leg], leg)
+        # Traded back, the right leg as built: the names as built
+        geometry = path.Geometry
+        geometry[1].StartPoint, geometry[1].EndPoint = V(300, 0, 0), V(300, 5, 0)
+        geometry[3].StartPoint, geometry[3].EndPoint = V(400, 0, 0), V(400, 5, 0)
+        geometry[2].StartPoint, geometry[2].EndPoint = V(30, 20, 0), V(30, 0, 0)
+        geometry[1].StartPoint, geometry[1].EndPoint = V(0, 20, 0), V(30, 20, 0)
+        geometry[3].StartPoint, geometry[3].EndPoint = V(30, 0, 0), V(0, 0, 0)
+        path.Geometry = geometry
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        self.assertEqual(self.ringNames(pipe), before)
+        self.assertEqual(list(pipe.SpineStartNames), stored)
+
+    def testClosedRingRedrawnFromAnotherStart(self):
+        """The ring redrawn from its top left corner, each line on the next leg (IDs kept: K4b's
+        `RingStartMoved`), and the profile slid along its leg (4 to 16): the solid is the same,
+        the stored start is kept, and every leg is renamed, since each place now holds another
+        place's line. Named by their lines, every reference went one leg on, silently."""
+        profile, pipe = self.ring(0, 4)
+        path = pipe.Spine[0]
+        volume = pipe.Shape.Volume
+        before = self.ringNames(pipe)
+        start = V(pipe.SpineStart[0])
+        self.redrawRing(path, self.RING[1:] + self.RING[:1])
+        profile.Placement = App.Placement(V(0, 0, 16), App.Rotation())
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        self.assertAlmostEqual(pipe.Shape.Volume, volume, 6)
+        self.assertLess((V(pipe.SpineStart[0]) - start).Length, 1e-9)
+        self.assertLegsRenamed(before, self.ringNames(pipe), tuple(self.LEGS))
+
+    def testClosedRingTurnedByItsSymmetryRenames(self):
+        """The ring redrawn from its opposite corner, each line on the opposite leg (K4b's
+        `RingStartMovedTwice`): the loop as drawn is the ring turned by its symmetry. Every leg
+        is renamed: the names don't follow the lines across (the symmetry's reading), nor stay
+        silently (the place's), since the two readings can't be told apart (decision 150)."""
+        profile, pipe = self.ring(0, 4)
+        path = pipe.Spine[0]
+        before = self.ringNames(pipe)
+        self.redrawRing(path, self.RING[2:] + self.RING[:2])
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        self.assertLegsRenamed(before, self.ringNames(pipe), tuple(self.LEGS))
+
+    def testClosedRingLineRedrawnIsNew(self):
+        """The ring's top line deleted and drawn again (drawn first, so it takes a new ID): the
+        top leg is named from the new line, without a `PLM` source; the record takes the new
+        line's name at the top's place; the other legs keep their names."""
+        profile, pipe = self.ring(0, 4)
+        path = pipe.Spine[0]
+        before = self.ringNames(pipe)
+        stored = list(pipe.SpineStartNames)
+        path.addGeometry(Part.LineSegment(V(0, 20, 0), V(30, 20, 0)))
+        path.delGeometry(1)
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        after = self.ringNames(pipe)
+        self.assertFalse(after["top"] & before["top"])
+        self.assertFalse(any("PLM" in name for name in after["top"]), after["top"])
+        for leg in ("left", "right", "bottom"):
+            self.assertEqual(after[leg], before[leg], leg)
+        names = list(pipe.SpineStartNames)
+        self.assertEqual([i for i in range(4) if names[i] != stored[i]], [1])
+
+    def testClosedRingRenamedLegStableAfterAnotherLegsLineIsRedrawn(self):
+        """The ring's top and bottom lines traded places, then the line now on top deleted and
+        drawn again (a new ID): the bottom leg keeps its renamed names on a recompute with no
+        edit. The record took the new line's name at the top's place, so the line stored there,
+        still at the bottom, was no longer stored anywhere, and the bottom leg went back to the
+        plain names the top leg had as built (the pre-push review of round 4, T1)."""
+        profile, pipe = self.ring(0, 4)
+        path = pipe.Spine[0]
+        geometry = path.Geometry
+        geometry[1].StartPoint, geometry[1].EndPoint = V(300, 0, 0), V(300, 5, 0)
+        geometry[3].StartPoint, geometry[3].EndPoint = V(400, 0, 0), V(400, 5, 0)
+        geometry[1].StartPoint, geometry[1].EndPoint = V(30, 0, 0), V(0, 0, 0)
+        geometry[3].StartPoint, geometry[3].EndPoint = V(0, 20, 0), V(30, 20, 0)
+        path.Geometry = geometry
+        self.doc.recompute()
+        path.addGeometry(Part.LineSegment(V(0, 20, 0), V(30, 20, 0)))
+        path.delGeometry(3)
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        redrawn = self.ringNames(pipe)
+        self.assertTrue(all("PLM" in name for name in redrawn["bottom"]), redrawn["bottom"])
+        pipe.touch()
+        self.doc.recompute()
+        self.assertEqual(self.ringNames(pipe), redrawn)
+
+    def testClosedRingTurnedWithAttachedProfileKeepsStart(self):
+        """The ring and its profile (at the bottom left corner) turned about Z, 120 and 150
+        degrees: with the profile sketch attached to the XY plane (its offset turned), after a
+        base feature (a Pad of a circle about Z, which the turn leaves as it was), or with the
+        profile a face of a Pad of the square (its sketch attached, its offset turned). The
+        pipe's own frame (its base's placement, or the profile's support's) doesn't turn, nor
+        does the Pad's; the profile's geometry does, and the record is read in its frame: the
+        start turns with the ring, and every point on the pipe follows the turn, valid and
+        without a warning. Read in the body, the start went to the vertex a translation fit
+        picked (the bottom right), and the profile's names at the start with it, silently (the
+        review of fork PR 383 round 4, R1; the face, its pre-push review of round 5, T1)."""
+        for kind, turn in (("attached", 120), ("attached", 150), ("base", 120), ("face", 120)):
+            self.tearDown()
+            self.setUp()
+            with self.subTest(kind=kind, turn=turn):
+                xy = [
+                    f
+                    for f in self.body.Origin.OriginFeatures
+                    if "XY_Plane" in (getattr(f, "Role", ""), f.Name)
+                ][0]
+                if kind == "base":
+                    circle = [Part.Circle(V(0, 0, 0), V(0, 0, 1), 3)]
+                    pad = models.pad(self.body, models.sketch(self.doc, "Base", circle, self.body), 3)
+                    self.doc.recompute()
+                    self.assertTrue(pad.isValid(), pad.getStatusString())
+                if kind == "face":
+                    # A Pad of the square, 1 down from the XY plane, inside the pipe's corner:
+                    # the pipe sweeps its top face
+                    profile = self.square()
+                    profile.AttachmentSupport = [(xy, "")]
+                    profile.MapMode = "FlatFace"
+                    pad = models.pad(self.body, profile, 1)
+                    pad.Reversed = True
+                    self.doc.recompute()
+                    self.assertTrue(pad.isValid(), pad.getStatusString())
+                    top = [
+                        f"Face{i}"
+                        for i, f in enumerate(pad.Shape.Faces, 1)
+                        if abs(f.CenterOfMass.z) < 1e-9 and abs(f.normalAt(0, 0).z) > 0.99
+                    ]
+                    _, pipe = self.ring(0, 0, (pad, top))
+                else:
+                    profile, pipe = self.ring(0, 0)
+                path = pipe.Spine[0]
+                offset = App.Placement(profile.Placement)
+                if kind == "attached":
+                    profile.AttachmentSupport = [(xy, "")]
+                    profile.MapMode = "FlatFace"
+                    profile.AttachmentOffset = offset
+                    self.doc.recompute()
+                    self.assertTrue(pipe.isValid(), pipe.getStatusString())
+                start = V(pipe.SpineStart[0])
+                volume = pipe.Shape.Volume
+                points = self.attach(pipe)
+                rotation = App.Rotation(V(0, 0, 1), turn)
+                path.Placement = App.Placement(V(), rotation.multiply(XZ.Rotation))
+                turned = App.Placement(V(), rotation).multiply(offset)
+                if kind in ("attached", "face"):
+                    profile.AttachmentOffset = turned
+                else:
+                    profile.Placement = turned
+                self.doc.recompute()
+                self.assertTrue(pipe.isValid(), pipe.getStatusString())
+                self.assertAlmostEqual(pipe.Shape.Volume, volume, 4)
+                self.assertLess((V(pipe.SpineStart[0]) - rotation.multVec(start)).Length, 1e-6)
+                for point, before in points.items():
+                    levels = [e.get("warning_level") for e in App.getReferenceReport(point)]
+                    now = point.Placement.Base
+                    # Within the base: its edges where the pipe's corner meets it change (its seam
+                    # stays at x = 3 as the corner turns), so they aren't checked
+                    if kind == "base" and V(before.x, before.y, 0).Length < 3 + 1e-6 and before.z < 3 + 1e-6:
+                        continue
+                    self.assertTrue(point.isValid(), (point.Name, before))
+                    self.assertFalse(any(levels), (point.Name, before, levels))
+                    self.assertLess(
+                        (now - rotation.multVec(before)).Length, 1e-6, (point.Name, before, now)
+                    )
+
+    def testClosedRingTurnedWithItsProfileResizedKeepsStart(self):
+        """The ring and its profile turned 120 degrees about Z while the profile's square grows
+        about its centre (2 x 2 to 3 x 3, its lines' IDs kept): the profile a sketch, or a face of
+        a Pad of the sketch (its offset turned). The stored start turns with the ring. A frame at
+        the profile's first point and towards its next one moved with the resize, the ring was
+        read in the body, and the start went to the bottom right corner silently (the second
+        pre-push review of fork PR 383 round 5, F1)."""
+        for kind in ("sketch", "face"):
+            self.tearDown()
+            self.setUp()
+            with self.subTest(kind=kind):
+                if kind == "face":
+                    xy = [
+                        f
+                        for f in self.body.Origin.OriginFeatures
+                        if "XY_Plane" in (getattr(f, "Role", ""), f.Name)
+                    ][0]
+                    profile = self.square()
+                    profile.AttachmentSupport = [(xy, "")]
+                    profile.MapMode = "FlatFace"
+                    pad = models.pad(self.body, profile, 0.5)
+                    pad.Reversed = True
+                    self.doc.recompute()
+                    top = [
+                        f"Face{i}"
+                        for i, f in enumerate(pad.Shape.Faces, 1)
+                        if abs(f.CenterOfMass.z) < 1e-9 and abs(f.normalAt(0, 0).z) > 0.99
+                    ]
+                    _, pipe = self.ring(0, 0, (pad, top))
+                else:
+                    profile, pipe = self.ring(0, 0)
+                start = V(pipe.SpineStart[0])
+                rotation = App.Rotation(V(0, 0, 1), 120)
+                geometry = profile.Geometry
+                for line in geometry:
+                    line.StartPoint, line.EndPoint = line.StartPoint * 1.5, line.EndPoint * 1.5
+                profile.Geometry = geometry
+                pipe.Spine[0].Placement = App.Placement(V(), rotation.multiply(XZ.Rotation))
+                turned = App.Placement(V(), rotation)
+                if kind == "face":
+                    profile.AttachmentOffset = turned
+                else:
+                    profile.Placement = turned
+                self.doc.recompute()
+                self.assertTrue(pipe.isValid(), pipe.getStatusString())
+                self.assertLess((V(pipe.SpineStart[0]) - rotation.multVec(start)).Length, 1e-6)
+
+    def testClosedRingReorderedAndReversedRenamesNothing(self):
+        """The profile slid along its leg (4 to 16), then the lines listed from the top right
+        and the left one drawn the other way (round 2's `RingSlidThenReorderedAndReversed`):
+        every place keeps its line, so no leg is renamed."""
+        profile, pipe = self.ring(0, 4)
+        path = pipe.Spine[0]
+        profile.Placement = App.Placement(V(0, 0, 16), App.Rotation())
+        self.doc.recompute()
+        before = self.ringNames(pipe)
+        geometry = path.Geometry
+        path.Geometry = geometry[2:] + geometry[:2]
+        drawnTheOtherWay(path, [2])
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        after = self.ringNames(pipe)
+        for leg in self.LEGS:
+            self.assertEqual(after[leg], before[leg], leg)
+        self.assertFalse(any("PLM" in name for names in after.values() for name in names))
+
+    def testClosedSpineMovedKeepsItsStart(self):
+        """The D moved down along Z (its sketch's placement), the profile left at z = 0: by 8, so
+        its far vertex comes nearer the stored start than its own start, and by 12, past the
+        distance between its vertices. The spine's vertices and edges' middles are paired with
+        the stored ones as a whole, so the start stays the vertex that moved from z = 0, and no
+        corner's key passes to the other: a quiet reference stays or moves with the spine. Paired
+        by the start alone, the far vertex became the start and the two corners' keys traded (the
+        cloud reading review of fork PR 383, F1). Moved by 12, the D no longer passes through the
+        profile, and only the corners' keys are checked."""
+        corners = [V(0, 0, 0), V(0, 0, 10)]
+        for down in (8, 12):
+            self.tearDown()
+            self.setUp()
+            with self.subTest(down=down):
+                profile = self.square()
+                path = self.closedSpine("D")
+                pipe = self.pipe(profile, path, "Transformed")
+                keys = self.cornerKeysAt(pipe, corners)
+                self.assertTrue(keys)
+                points = self.attach(pipe)
+                shift = V(0, 0, -down)
+                path.Placement = App.Placement(shift, XZ.Rotation)
+                self.doc.recompute()
+                self.assertTrue(pipe.isValid(), pipe.getStatusString())
+                moved = [corner + shift for corner in corners]
+                for key, where in self.cornerKeysAt(pipe, moved).items():
+                    if key in keys:
+                        self.assertLessEqual(where, keys[key], key)
+                # Moved by 12, the D no longer passes through the profile, and the sweep's
+                # shape changes: only the keys are checked
+                for point, before in points.items() if down < 10 else ():
+                    levels = [e.get("warning_level") for e in App.getReferenceReport(point)]
+                    if not point.isValid() or any(levels):
+                        continue
+                    now = point.Placement.Base
+                    self.assertLess(
+                        min((now - before).Length, (now - before - shift).Length),
+                        1e-6,
+                        (point.Name, before, now),
+                    )
+
+    def testStoredEndsKeptWhenTheSpinesEdgesAreRenumbered(self):
+        """A pipe on the second L of a sketch (Edge3, Edge4): a line of the first L deleted, so
+        the naming refresh renumbers the Spine's edges while the document recomputes, and the
+        file saved and opened again, whose refresh runs at the end of the open. Neither is
+        another input: the stored ends stay as they were."""
+        path = self.twoPaths()
+        profile = self.holedSquare()
+        profile.Placement = App.Placement(V(120, 0, 30), App.Rotation(V(0, 1, 0), -90))
+        pipe = self.body.newObject("PartDesign::AdditivePipe", "Pipe")
+        pipe.Profile = profile
+        pipe.Spine = (path, ["Edge3", "Edge4"])
+        pipe.Transition = "Right corner"
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        stored = [V(v) for v in pipe.SpineEnds]
+        self.assertEqual(len(stored), 2)
+        path.delGeometry(0)
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        self.assertEqual(sorted(pipe.Spine[1]), ["Edge2", "Edge3"])
+        self.assertEqual([V(v) for v in pipe.SpineEnds], stored)
+        name = self.doc.Name
+        fileName = os.path.join(tempfile.mkdtemp(), name + ".FCStd")
+        self.doc.saveAs(fileName)
+        App.closeDocument(name)
+        self.doc = App.openDocument(fileName)
+        pipe = self.doc.getObject("Pipe")
+        self.assertEqual([V(v) for v in pipe.SpineEnds], stored)
+        self.doc.recompute()
+        self.assertEqual([V(v) for v in pipe.SpineEnds], stored)
+
+    def twoPaths(self):
+        """One sketch in the XZ plane with two L paths: up 30 from (0, 0) and right 20, and the
+        same moved 100 along x and drawn the other way, from (120, 30) left 20 and down 30."""
+        geometry = models.polyline([(0, 0), (0, 30), (20, 30)]) + models.polyline(
+            [(120, 30), (100, 30), (100, 0)]
+        )
+        return models.sketch(self.doc, "Path", geometry, self.body, placement=XZ)
+
+    def holedSquare(self):
+        geometry = models.rectangle(-2, -2, 2, 2) + [Part.Circle(V(0, 0, 0), V(0, 0, 1), 0.8)]
+        return models.sketch(self.doc, "Profile", geometry, self.body)
+
+    def assertDecidesAsANewPipe(self, pipe, profile, end):
+        """The profile's names on the profile, and the end stored as the profile's `end`"""
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        self.assertProfileNamesAtTheProfile(pipe, profile)
+        self.assertLess((V(pipe.SpineEnds[0]) - end).Length, 1e-6, pipe.SpineEnds)
+
+    def testSpineRepickedDecidesAsANewPipe(self):
+        """A pipe on one L of a sketch, its Spine re-picked to the other L of the same sketch
+        (drawn the other way, 100 mm along x), the profile moved to that L's drawn start: the
+        pipe decides which end carries the profile's names as a new pipe does, at the profile.
+        The stored ends (SpineEnds) are for edits of one spine's geometry: kept, they paired
+        with the new L's ends by distance, and 22 of the 56 names went to the end 36 mm from the
+        profile, silently (ops#435, the review of `notes\\naming-class-B.md` round 1, CC2). Set
+        to the same edges again, the Spine keeps them."""
+        path = self.twoPaths()
+        profile = self.holedSquare()
+        pipe = self.body.newObject("PartDesign::AdditivePipe", "Pipe")
+        pipe.Profile = profile
+        pipe.Spine = (path, ["Edge1", "Edge2"])
+        pipe.Transition = "Right corner"
+        pipe.Refine = False
+        self.doc.recompute()
+        self.assertDecidesAsANewPipe(pipe, profile, V(0, 0, 0))
+        stored = list(pipe.SpineEnds)
+        pipe.Spine = (path, ["Edge2", "Edge1"])
+        self.assertEqual(list(pipe.SpineEnds), stored)
+        pipe.Spine = (path, ["Edge3", "Edge4"])
+        profile.Placement = App.Placement(V(120, 0, 30), App.Rotation(V(0, 1, 0), -90))
+        self.doc.recompute()
+        self.assertDecidesAsANewPipe(pipe, profile, V(120, 0, 30))
+
+    def testSpineRelinkedDecidesAsANewPipe(self):
+        """The same with the Spine linked to another sketch holding the other L (ops#435)."""
+        path = models.sketch(
+            self.doc, "Path", models.polyline([(0, 0), (0, 30), (20, 30)]), self.body, placement=XZ
+        )
+        other = models.sketch(
+            self.doc,
+            "Other",
+            models.polyline([(120, 30), (100, 30), (100, 0)]),
+            self.body,
+            placement=XZ,
+        )
+        profile = self.holedSquare()
+        pipe = self.pipe(profile, path, "Right corner")
+        self.assertDecidesAsANewPipe(pipe, profile, V(0, 0, 0))
+        pipe.Spine = (other, [])
+        profile.Placement = App.Placement(V(120, 0, 30), App.Rotation(V(0, 1, 0), -90))
+        self.doc.recompute()
+        self.assertDecidesAsANewPipe(pipe, profile, V(120, 0, 30))
+
+    def testClosedWireKeepsItsSolidWhenDrawnTheOtherWay(self):
+        """The closed D as a wire without names (a Part::Feature through a SubShapeBinder), its
+        line and arc both run the other way, then also listed in the other order: "Transformed"
+        sweeps the same solid, and no reference moves silently. A closed spine is run the way
+        whose first edge leaves the profile most nearly along its normal; run the way the wire is
+        drawn, the sweep sheared the section at the corners in the other order and the solid came
+        out 201.38 instead of 221.38 (ops#469, `work\\469\\r2v\\closedPF_bothswap_Tr.out` on
+        integration). The legs of a wire without names are told apart by their order, so the
+        listed-the-other-way edit may break or warn."""
+        top, side = V(0, 0, 10), V(-18.66025, 0, 5)
+
+        def wire(runBack, listBack):
+            line = Part.LineSegment(top, V()) if runBack else Part.LineSegment(V(), top)
+            arc = Part.Arc(V(), side, top) if runBack else Part.Arc(top, side, V())
+            edges = [line.toShape(), arc.toShape()]
+            return Part.Wire(edges[::-1] if listBack else edges)
+
+        for listBack in (False, True):
+            self.tearDown()
+            self.setUp()
+            with self.subTest(listedTheOtherWay=listBack):
+                feature = self.doc.addObject("Part::Feature", "Wire")
+                feature.Shape = wire(False, False)
+                path = self.body.newObject("PartDesign::SubShapeBinder", "Binder")
+                path.Support = [(feature, ())]
+                path.MakeFace = False
+                self.doc.recompute()
+                pipe = self.pipe(self.square(), path, "Transformed")
+                volume = pipe.Shape.Volume
+                points = self.attach(pipe)
+                feature.Shape = wire(True, listBack)
+                self.doc.recompute()
+                self.assertNoneMovedSilently(pipe, volume, points)
+
+    def testCornerAfterASplitLineIsLoudNotSilent(self):
+        """A square with a round hole along a polyline with several corners: a point inserted in
+        the middle of the line between the first two corners (the line shortened to it, a new
+        collinear line after it). The second corner lies between the new line and the next, and
+        its key holds both edges' names, so its joints are renamed: with "Right corner" some of
+        their references warn or break (ops#486, `work\\pr369-r5v\\k_ZZ_hole_ins_R.out`), and
+        none moves silently. A key of the one edge a corner leads into, counted from the
+        profile's end, kept them, but handed each corner's key to its neighbour when the end
+        carrying the profile's names changed (`notes\\naming-class-B.md` 3, M1 (b)); the
+        elements there don't move, and the solver's exact place (fork PR 379) is to re-bind
+        them quietly. The split line's own elements away from the corners (its sides, now in two
+        pieces) aren't checked. "Right corner" and "Round corner"; a Z of two corners up and
+        right, the same turning left, and an S of two corners."""
+        hole = models.rectangle(-1, -1, 1, 1) + [Part.Circle(V(0, 0, 0), V(0, 0, 1), 0.4)]
+        paths = {
+            "ZZ": [(0, 0), (0, 30), (20, 30), (20, 60), (40, 60), (40, 90)],
+            "ZZleft": [(0, 0), (0, 30), (-20, 30), (-20, 60), (-40, 60), (-40, 90)],
+            "S3": [(0, 0), (0, 30), (20, 30), (20, 60)],
+        }
+        for name, points in paths.items():
+            for transition in ("Right corner", "Round corner"):
+                self.tearDown()
+                self.setUp()
+                with self.subTest(path=name, transition=transition):
+                    profile = models.sketch(self.doc, "Profile", hole, self.body)
+                    path = models.sketch(
+                        self.doc, "Path", models.polyline(points), self.body, placement=XZ
+                    )
+                    pipe = self.pipe(profile, path, transition)
+                    volume = pipe.Shape.Volume
+                    attached = self.attach(pipe)
+                    (ax, az), (bx, bz) = points[1], points[2]
+                    middle = ((ax + bx) / 2, (az + bz) / 2)
+                    models.setLines(path, {1: ((ax, az), middle)})
+                    path.addGeometry(Part.LineSegment(V(*middle, 0), V(bx, bz, 0)), False)
+                    self.doc.recompute()
+                    first, second = V(ax, 0, az), V(bx, 0, bz)
+
+                    def nearCorner(place):
+                        return min((place - first).Length, (place - second).Length) < 3
+
+                    def onTheSplitLine(place):
+                        along = (place - first).dot((second - first).normalize())
+                        across = (place - first - (second - first).normalize() * along).Length
+                        return 0 < along < (second - first).Length and across < 2
+
+                    self.assertNoneMovedSilently(
+                        pipe,
+                        volume,
+                        attached,
+                        skip=lambda place: onTheSplitLine(place) and not nearCorner(place),
+                    )
+                    if transition == "Right corner":
+                        loud = [
+                            point.Name
+                            for point, before in attached.items()
+                            if (before - second).Length < 3
+                            and (
+                                not point.isValid()
+                                or any(
+                                    e.get("warning_level")
+                                    for e in App.getReferenceReport(point)
+                                )
+                            )
+                        ]
+                        self.assertTrue(loud, "the second corner's joints were renamed")
