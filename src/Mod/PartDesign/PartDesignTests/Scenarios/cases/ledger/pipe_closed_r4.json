@@ -1,5 +1,4 @@
 {
-"run": {"cases": 7, "dirty": false, "platform": "win32", "sha": "588f892ffec712032acd3e22c6f99383628a7569", "tier": "F", "time": "2026-10-27T15:51:56Z"},
 "entries": {
 "RingLinesSwapped|datum_left_outer|V2s": {"axes": ["M3", "E2"], "classes": ["B"], "expect": "CORRECT", "expected": "correct", "found_by": "K4b attacker pass 1b", "issue": "ops#469", "tier": "F"},
 "RingLinesSwapped|datum_right_outer|V2s": {"axes": ["M3", "E2"], "classes": ["B"], "expect": "CORRECT", "expected": "correct", "found_by": "K4b attacker pass 1b", "issue": "ops#469", "tier": "F"},
