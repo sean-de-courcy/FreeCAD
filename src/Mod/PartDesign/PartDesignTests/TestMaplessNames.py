@@ -197,3 +197,58 @@ class TestMaplessNames(unittest.TestCase):
         # Assert
         self.assertTrue(sketch.isValid(), sketch.getStatusString())
         self.assertEqual(sketch.AttachmentSupport[0][1][0], topFace(target.Shape, 24))
+
+    def testRetiredIdInACompoundOfTwoProducers(self):
+        """The review's T1: a Part::Compound of two script compounds A and B with the same
+        structure (each producer counts its ids from 1). A's twin cubes are traded, so P1 retires
+        A's ids; B holds the same id numbers under its own tag, which is no evidence for A's: the
+        reference to A's first cube's top breaks as retired, never resolves at the same place."""
+        # Arrange
+        doc = self.newDocument()
+
+        def cubes(y, swapped=False):
+            solids = [Part.makeBox(4, 4, 4, V(0, y, 0)), Part.makeBox(4, 4, 4, V(10, y, 0))]
+            return Part.makeCompound(solids[::-1] if swapped else solids)
+
+        a = models.feature(doc, "A", cubes(0))
+        models.feature(doc, "B", cubes(20))
+        both = doc.addObject("Part::Compound", "Both")
+        both.Links = [a, doc.getObject("B")]
+        doc.recompute()
+        top = topFace(both.Shape, 2)
+        sketch = self.attach(doc, both, top)
+
+        # Act
+        a.Shape = cubes(0, swapped=True)
+        doc.recompute()
+
+        # Assert
+        self.assertRetired(sketch, topFace(both.Shape, 2))
+
+    def testSplitPieceOfAnMlnElementIsNotRetired(self):
+        """The review's T2: a Part::Cut of a 10 mm Part::Box by a slot pocketing its top face, a
+        sketch on the cut's top face. The slot lengthened across the top splits the face in two:
+        the pieces carry the old name as their source, so the old id is held, and the split's
+        own handling decides (never a `retired` break)."""
+        # Arrange
+        doc = self.newDocument()
+        box = models.box(doc, "Box", (10, 10, 10))
+        slot = models.box(doc, "Slot", (4, 2, 4), (3, 4, 8))
+        cut = doc.addObject("Part::Cut", "Cut")
+        cut.Base, cut.Tool = box, slot
+        doc.recompute()
+        top = [
+            "Face%d" % i
+            for i, f in enumerate(cut.Shape.Faces, 1)
+            if abs(f.CenterOfMass.z - 10) < 1e-6 and f.normalAt(0, 0).z > 0.5
+        ][0]
+        sketch = self.attach(doc, cut, top)
+
+        # Act
+        slot.Length = 12
+        slot.Placement.Base = V(-1, 4, 8)
+        doc.recompute()
+
+        # Assert
+        for entry in App.getReferenceReport(sketch):
+            self.assertFalse(entry["evidence"].startswith("retired:"), entry["evidence"])
