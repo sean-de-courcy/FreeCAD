@@ -209,7 +209,7 @@
 "ReviewShiftedCutOldKeepNoneDraw3201OnR|circle_on_line|V2s": {"axes": ["M8", "E2", "E5", "E3"], "classes": ["E"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr384-r4v", "issue": "ops#264", "tier": "F"},
 "ReviewShiftedCutOldKeepNoneDraw3210OnL|circle_on_line|V2s": {"axes": ["M8", "E2", "E5", "E3"], "classes": ["E"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr384-r4v", "issue": "ops#264", "tier": "F"},
 "ReviewShiftedCutOldKeepNoneDraw3210OnR|circle_on_line|V2s": {"axes": ["M8", "E2", "E5", "E3"], "classes": ["E"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr384-r4v", "issue": "ops#264", "tier": "F"},
-"ReviewUnmappedSlotClosedFloor|circle_on_line|V2s": {"axes": ["M8", "E1", "E5"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r4v", "issue": "ops#264", "tier": "F"},
-"ReviewUnmappedSlotClosedLeftWall|circle_on_line|V2s": {"axes": ["M8", "E1", "E5"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r4v", "issue": "ops#264", "tier": "F"}
+"ReviewUnmappedSlotClosedFloor|circle_on_line|V2s": {"axes": ["M8", "E1", "E5"], "classes": ["E"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr384-r4v", "issue": "ops#264", "tier": "F"},
+"ReviewUnmappedSlotClosedLeftWall|circle_on_line|V2s": {"axes": ["M8", "E1", "E5"], "classes": ["E"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr384-r4v", "issue": "ops#264", "tier": "F"}
 }
 }
