@@ -239,8 +239,9 @@ const bool sweepDirectionRegistered = (App::setElementSweepDirectionFunction(&sw
 // current placement, so it moves with a profile moved by placement; then into each face owner's
 // own frame, where the face's box, area, normal and outer wire are measured, so a plate moved by
 // its owner's placement is the same plate. With `all`, every up-to face too (its normal: none). A datum plane or another unbounded face, UpToFirst and UpToLast
-// (the base's faces), an empty shape list (the base), two sides, and a face whose normal can't
-// be taken at the point can't be told.
+// (the base's faces), an empty shape list (the base), two sides, a face whose normal can't be
+// taken at the point, and a shape not made under the current Placement (between a recompute's
+// positionByPrevious() and its new shape: review prA1b-r1) can't be told.
 bool upToFaces(
     const App::GeoFeature* geo,
     const Base::Vector3d& point,
@@ -253,7 +254,8 @@ bool upToFaces(
         all->clear();
     }
     const auto extrude = dynamic_cast<const FeatureExtrude*>(geo);
-    if (!extrude || std::strcmp(extrude->SideType.getValueAsString(), "One side") != 0) {
+    if (!extrude || std::strcmp(extrude->SideType.getValueAsString(), "One side") != 0
+        || !extrude->shapeMadeUnderPlacement()) {
         return false;
     }
     // Each up-to object with the face it names, or none for all of its faces
@@ -1280,6 +1282,7 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
                     "Result has multiple solids: enable 'Allow Compound' in the active body."
                 ));
             }
+            madeUnder = Placement.getValue();
             this->Shape.setValue(getSolid(solRes));
         }
         else if (prism.hasSubShape(TopAbs_SOLID)) {
@@ -1297,6 +1300,7 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
                 ));
             }
             prism = getSolid(prism);
+            madeUnder = Placement.getValue();
             this->Shape.setValue(prism);
         }
         else {
@@ -1309,6 +1313,7 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
                     "Result has multiple solids: enable 'Allow Compound' in the active body."
                 ));
             }
+            madeUnder = Placement.getValue();
             this->Shape.setValue(prism);
         }
 
@@ -1526,4 +1531,11 @@ void FeatureExtrude::onDocumentRestored()
     }
 
     ProfileBased::onDocumentRestored();
+    // The restored shape was saved with its placement (ops#522)
+    madeUnder = Placement.getValue();
+}
+
+bool FeatureExtrude::shapeMadeUnderPlacement() const
+{
+    return madeUnder && madeUnder->isSame(Placement.getValue(), Precision::Confusion());
 }
