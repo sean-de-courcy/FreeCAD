@@ -3785,7 +3785,8 @@ double fromStoredAt(
 /// leaves a residual of the order of the loop's size at every start (measured, the ring turned
 /// 30 to 150 degrees: 0.37 to 1.0 of the size, 0.36 to 1.0 of the next start's); a line moved
 /// by d, about d / 2.3 at the right start (a leg of the 30 x 20 ring moved by 4: 0.1 of the
-/// size). True with nothing stored
+/// size). A turn by the loop's own symmetry fits a translation exactly; the caller doesn't read the
+/// fit where a frame of the profile turned (decision 180). True with nothing stored
 bool fitIsClear(
     const std::vector<gp_Pnt>& stored,
     const std::vector<gp_Pnt>& middles,
@@ -4750,8 +4751,15 @@ App::DocumentObjectExecReturn* Pipe::execute()
         std::optional<gp_Pnt> storedWay;
         std::optional<bool> storedAtEnd;
         std::vector<std::string> storedNames;  // the lines at the stored places
-        // The record of the same input read in the body, where its fit is not clear (fitIsClear)
+        // The record of the same input read in the body, where its fit is not clear (fitIsClear) or
+        // a frame of the profile turned (decision 180)
         bool unpaired = false;
+        // Unpaired: the stored start and the next vertex, carried by each of the profile's frames
+        // from the record to now, in the pipe's frame
+        std::vector<std::pair<gp_Pnt, gp_Pnt>> carried;
+        // A frame turned, or a direction kept, within it: far above a rounded coordinate's turn,
+        // far below an edit's
+        constexpr double turnedBy = 1e-6;
         const std::vector<std::string> spineInput = spineIdentity(spine, shape, subedge);
         const std::vector<StartRecord> startRecords = readStartRecords(
             SpineStart,
@@ -4806,6 +4814,7 @@ App::DocumentObjectExecReturn* Pipe::execute()
                 storedAtEnd.reset();
                 storedNames.clear();
                 unpaired = false;
+                carried.clear();
                 // 2n + 1 points and each frame's 3
                 const size_t framed = 3 * frames.size();
                 if (stored.size() < 5 + framed || stored.size() % 2 == 0) {
@@ -4837,7 +4846,26 @@ App::DocumentObjectExecReturn* Pipe::execute()
                     }
                     if (!inFrame) {
                         fill(inPipe);
-                        unpaired = !fitIsClear(storedVertices, storedMiddles, spineInOrder);
+                        // The fit is a translation's: with a stored frame of the profile turned
+                        // since the record, the loop turned, and a turn that still fits by a
+                        // translation is the loop's own symmetry (a rectangle turned half a
+                        // turn, a square a quarter), whose twin start the fit called clear: the
+                        // start moved to another corner with the profile's names, silently (the
+                        // pre-push reviews of round 6, T-1 and T-C; decision 180)
+                        bool turned = false;
+                        for (size_t i = 0; i < frames.size(); ++i) {
+                            const gp_Trsf moved = frames[i] * into[i];
+                            turned = turned || std::abs(moved.GetRotation().GetRotationAngle()) > turnedBy;
+                        }
+                        unpaired = turned
+                            || !fitIsClear(storedVertices, storedMiddles, spineInOrder);
+                        for (size_t i = 0; unpaired && i < frames.size(); ++i) {
+                            const gp_Trsf by = inPipe * frames[i] * into[i];
+                            carried.emplace_back(
+                                point(0).Transformed(by),
+                                point(3).Transformed(by)
+                            );
+                        }
                     }
                 }
                 storedAtEnd = stored[2].x > 0.5;
@@ -4853,6 +4881,7 @@ App::DocumentObjectExecReturn* Pipe::execute()
                 storedAtEnd.reset();
                 storedNames.clear();
                 unpaired = false;
+                carried.clear();
             };
             // Of the same object, with an edge of the spine
             // anchor: rung 4 (another sub-element set's record of the same object), warned
@@ -4896,20 +4925,82 @@ App::DocumentObjectExecReturn* Pipe::execute()
                 }
             }
             // A record of this input that no stored frame puts in place and the body's fit
-            // doesn't pair clearly (a turn with another edit): the start isn't picked by the fit
-            // but at the profile, as a new pipe's, and the way by the profile's normal; the lines'
-            // names are then checked place by place from that start, so a start or way that isn't
-            // the stored one renames the legs, loud (decision 171)
-            // anchor: rung 3 (the profile's place) checked by rung 1 (the lines' names), warned
+            // doesn't pair (a turn with another edit, decisions 171 and 180): the stored places
+            // are those of the lines the record names, where every stored name is on the spine in
+            // the stored cyclic order or its reverse; the start is then the first name's line's
+            // and the way the second's. Only where a frame of the profile carries the stored start
+            // and its first edge's direction there: a redraw that shifts or reverses the lines'
+            // order (their IDs kept) keeps their cyclic order, and by the names alone the start
+            // and the legs' names followed the lines to other places, silently, as on
+            // integration (`RingTurnedRedrawnAndWidened`). Otherwise the pipe stops (decision 150).
+            // Taken at the profile, as a new pipe's, the start went to the profile's nearest
+            // vertex: with the profile slid along a leg past its middle, another corner, and the
+            // profile's own names at the start went with it, silently (the pre-push review of
+            // round 6, T-B)
+            // anchor: rung 1 (the lines' names) placing rung 4 (the stored places)
             if (unpaired) {
+                const size_t n = spineInOrder.size();
+                std::vector<std::string> names;
+                if (makeTopoShape(false).getHistoryAlgorithm() == App::HistoryAlgorithm::V2) {
+                    for (const TopoDS_Edge& edge : spineInOrder) {
+                        names.push_back(firstName(path, edge));
+                    }
+                }
+                std::vector<std::string> distinct = names;
+                std::ranges::sort(distinct);
+                const bool namesApart = std::ranges::adjacent_find(distinct) == distinct.end();
+                const auto first = storedNames.empty()
+                    ? names.end()
+                    : std::ranges::find(names, storedNames.front());
+                const size_t j = static_cast<size_t>(first - names.begin());
+                auto inOrder = [&](bool forward) {
+                    for (size_t i = 0; i < n; ++i) {
+                        if (names[forward ? (j + i) % n : (j + n - i) % n] != storedNames[i]) {
+                            return false;
+                        }
+                    }
+                    return true;
+                };
+                const bool paired = n > 1 && names.size() == n && storedNames.size() == n
+                    && namesApart && first != names.end();
+                const bool forward = paired && inOrder(true);
+                auto unmatched = []() {
+                    return new App::DocumentObjectExecReturn(QT_TRANSLATE_NOOP(
+                        "Exception",
+                        "Pipe: the closed spine's stored start can't be matched to its lines (a "
+                        "turn or a redraw with another change in one recompute); undo, and make "
+                        "the changes one at a time"
+                    ));
+                };
+                if (!(forward || (paired && inOrder(false)))) {
+                    return unmatched();
+                }
+                // The stored points at the named lines' places, as fromStoredAt pairs them from
+                // the start k: forward, edge k first; the other way, edge j first, run backwards
+                // from its far end
+                const size_t k = forward ? j : j + 1;
+                auto startOf = [&](size_t at) {
+                    return BRep_Tool::Pnt(TopExp::FirstVertex(spineInOrder[at % n], true));
+                };
                 storedVertices.clear();
                 storedMiddles.clear();
-                storedWay.reset();
-                warn(
-                    "Pipe: the closed spine moved in a way its stored start can't be matched to (a "
-                    "turn with another change); it starts at its vertex nearest the profile, as a "
-                    "new pipe does. Check the references to its corners"
-                );
+                for (size_t i = 0; i < n; ++i) {
+                    storedVertices.push_back(startOf(forward ? k + i : k + n - i));
+                    storedMiddles.push_back(
+                        middleOf(spineInOrder[forward ? (k + i) % n : (k + 2 * n - 1 - i) % n])
+                    );
+                }
+                auto carriedHere = [&](const std::pair<gp_Pnt, gp_Pnt>& was) {
+                    const gp_Vec along(was.first, was.second);
+                    const gp_Vec now(storedVertices[0], storedVertices[1]);
+                    return was.first.Distance(storedVertices[0]) <= Precision::Confusion()
+                        && along.Magnitude() > Precision::Confusion()
+                        && now.Magnitude() > Precision::Confusion() && along.Angle(now) <= turnedBy;
+                };
+                if (!std::ranges::any_of(carried, carriedHere)) {
+                    return unmatched();
+                }
+                storedWay = storedMiddles.front();
             }
         }
         if (startAtProfile) {
@@ -4962,13 +5053,8 @@ App::DocumentObjectExecReturn* Pipe::execute()
                 lineNames.push_back(firstName(path, edge));
             }
             const std::vector<std::string> current = lineNames;
-            // Unpaired: place k is the k-th edge from the profile's start (decision 171)
             std::vector<size_t> places;
-            if (unpaired && storedNames.size() == edges.size()) {
-                places.resize(edges.size());
-                std::iota(places.begin(), places.end(), size_t {0});
-            }
-            else if (!storedNames.empty()) {
+            if (!storedNames.empty()) {
                 places = placesOf(storedVertices, storedMiddles, edges);
             }
             std::vector<Data::MappedName> renamed(edges.size());
