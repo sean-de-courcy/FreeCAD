@@ -2046,25 +2046,33 @@ bool isWholeProjectionOf(std::string_view name, std::string_view oldName)
 }
 
 /* True if \a now, the up-to faces under a far piece's saved point now, are \a saved, those its
- * fingerprint lists (ops#522, PLAN decision 168), each matched by exactly one: the same owner,
- * the box's corners within \a eps, the area within \a tolerances.placeSize relative, and the
- * normal at the point within \a tolerances.angle either way (a face's orientation may flip on a
- * rebuild). These are coincidence tolerances, as atSamePlace()'s. No face saved, or none now (the
- * face under the point is gone), is false; so are two faces now that one saved one matches.
+ * fingerprint lists (ops#522, PLAN decision 168), each matched by exactly one, and each saved one
+ * by exactly one of \a all, every up-to face now: the same owner, the box's corners and the outer
+ * wire's centre within \a eps, the area within \a tolerances.placeSize relative, and the normal at
+ * the point within \a tolerances.angle either way (a face's orientation may flip on a rebuild).
+ * These are coincidence tolerances, as atSamePlace()'s. No face saved, or none now (the face
+ * under the point is gone), is false; so are two faces now that one saved one matches, under the
+ * point or elsewhere (two halves of a square, one where the other was).
  */
 bool sameUpToFaces(
     const std::vector<ElementFingerprint::UpToFace>& saved,
     const std::vector<ElementFingerprint::UpToFace>& now,
+    const std::vector<ElementFingerprint::UpToFace>& all,
     double eps,
     const GeometryTolerances& tolerances
 )
 {
     using Face = ElementFingerprint::UpToFace;
+    // The face alone; with the normal at the point too, for the faces under it
+    auto alike = [&](const Face& a, const Face& b) {
+        return a.owner == b.owner && Base::Distance(a.boxMin, b.boxMin) <= eps
+            && Base::Distance(a.boxMax, b.boxMax) <= eps
+            && Base::Distance(a.wireCentre, b.wireCentre) <= eps
+            && std::abs(a.area - b.area)
+            <= tolerances.placeSize * std::max({std::abs(a.area), std::abs(b.area), eps});
+    };
     auto same = [&](const Face& a, const Face& b) {
-        if (a.owner != b.owner || Base::Distance(a.boxMin, b.boxMin) > eps
-            || Base::Distance(a.boxMax, b.boxMax) > eps
-            || std::abs(a.area - b.area)
-                > tolerances.placeSize * std::max({std::abs(a.area), std::abs(b.area), eps})) {
+        if (!alike(a, b)) {
             return false;
         }
         Base::Vector3d u = a.normal;
@@ -2080,15 +2088,16 @@ bool sameUpToFaces(
     if (saved.empty() || saved.size() != now.size()) {
         return false;
     }
-    auto matchedOnce = [&](const std::vector<Face>& these, const std::vector<Face>& those) {
+    auto matchedOnce = [&](const std::vector<Face>& these, const std::vector<Face>& those, auto match) {
         return std::all_of(these.begin(), these.end(), [&](const Face& face) {
             return std::count_if(those.begin(), those.end(), [&](const Face& other) {
-                       return same(face, other);
+                       return match(face, other);
                    })
                 == 1;
         });
     };
-    return matchedOnce(saved, now) && matchedOnce(now, saved);
+    return matchedOnce(saved, now, same) && matchedOnce(now, saved, same)
+        && matchedOnce(saved, all, alike);
 }
 
 /* True if \a name's element is \a oldName's piece of a far edge after others of its pieces went
@@ -5035,9 +5044,10 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             // the edge or cap made whole on the next plate then holds a gone piece's saved point.
             // So the faces under the saved point now, the point carried by the target's current
             // placement into each face owner's own frame, must be those the fingerprint saved:
-            // the same box, area and normal there. A plate rebuilt elsewhere, a face gone from
-            // under the point, a datum plane (no box), or two faces that match one break the
-            // reference, as on integration (decision 150)
+            // the same box, area, normal and outer wire there, and no other up-to face like
+            // them. A plate rebuilt elsewhere, a face gone from under the point, a datum plane
+            // (no box), or two faces that match one break the reference, as on integration
+            // (decision 150)
             if (holders.empty() && input.holdsPoint && input.upToFacesAt) {
                 for (std::size_t k = 0; k < pool.elements.size(); ++k) {
                     const auto& names = pool.elements[k].names;
@@ -5049,10 +5059,12 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 }
                 auto onSameUpToFaces = [&] {
                     std::vector<ElementFingerprint::UpToFace> now;
+                    std::vector<ElementFingerprint::UpToFace> every;
                     return centred && !centred->upToFaces.empty()
                         && input.upToFacesAt(centred->inside ? *centred->inside : *centred->center,
-                                             now)
-                        && sameUpToFaces(centred->upToFaces, now, eps, input.tolerances);
+                                             now,
+                                             every)
+                        && sameUpToFaces(centred->upToFaces, now, every, eps, input.tolerances);
                 };
                 if (holders.size() != 1 || !holdsSavedCentre(holders.front())
                     || !onSameUpToFaces()) {

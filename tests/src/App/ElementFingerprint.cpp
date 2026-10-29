@@ -515,7 +515,8 @@ TEST(ElementFingerprint, insideRoundTrip)
 TEST(ElementFingerprint, upToFacesRoundTrip)
 {
     // ops#522 (PLAN decision 168): a far piece's up-to faces, version 6's thirteenth field, after
-    // the inside point or `_`: each its owner, box, area and normal. Written only with an extent
+    // the inside point or `_`: each its owner, box, area, normal and outer wire's centre. Written
+    // only with an extent
     // and one or two faces; read back, and a malformed field gives no fingerprint
     ElementFingerprint cap;
     cap.type = 'F';
@@ -530,9 +531,10 @@ TEST(ElementFingerprint, upToFacesRoundTrip)
     plate.boxMax = Base::Vector3d(4, 10, 10);
     plate.area = 191;
     plate.normal = Base::Vector3d(0, 0, 1);
+    plate.wireCentre = Base::Vector3d(-3, 0, 10);
     cap.upToFaces = {plate};
     const char* capText = "6|F|BSpline|1.75|1.18,1.18,10|_|_|_|0.5,0.5,10,2.5,2.5,10|_|_|_|"
-                          "Plate001,-10,-10,10,4,10,10,191,0,0,1";
+                          "Plate001,-10,-10,10,4,10,10,191,0,0,1,-3,0,10";
     EXPECT_EQ(cap.toString(), capText);
     auto parsed = ElementFingerprint::fromString(capText);
     ASSERT_TRUE(parsed.isValid());
@@ -547,7 +549,7 @@ TEST(ElementFingerprint, upToFacesRoundTrip)
     const std::string twoText = cap.toString();
     EXPECT_EQ(twoText,
               "6|F|BSpline|1.75|1.18,1.18,10|_|_|_|0.5,0.5,10,2.5,2.5,10|_|_|0.75,0.75,10|"
-              "Plate001,-10,-10,10,4,10,10,191,0,0,1;Plate,-10,-10,10,4,10,10,191,0.6,0,0.8");
+              "Plate001,-10,-10,10,4,10,10,191,0,0,1,-3,0,10;Plate,-10,-10,10,4,10,10,191,0.6,0,0.8,-3,0,10");
     EXPECT_EQ(ElementFingerprint::fromString(twoText), cap);
 
     //   the faces differ from none, which is version 5 as before
@@ -567,23 +569,24 @@ TEST(ElementFingerprint, upToFacesRoundTrip)
     for (const std::string& bad : {
              head,                                                   // no face
              head + "_",                                             // none
-             head + "Plate001,-10,-10,10,4,10,10,191,0,0",           // nine numbers
-             head + "Plate001,-10,-10,10,4,10,10,191,0,0,1,2",       // eleven
-             head + "1Plate,-10,-10,10,4,10,10,191,0,0,1",           // not a name
-             head + ",-10,-10,10,4,10,10,191,0,0,1",                 // no owner
+             head + "Plate001,-10,-10,10,4,10,10,191,0,0,1",         // ten numbers (no wire)
+             head + "Plate001,-10,-10,10,4,10,10,191,0,0,1,-3,0",    // twelve
+             head + "Plate001,-10,-10,10,4,10,10,191,0,0,1,-3,0,10,1",  // fourteen
+             head + "1Plate,-10,-10,10,4,10,10,191,0,0,1,-3,0,10",   // not a name
+             head + ",-10,-10,10,4,10,10,191,0,0,1,-3,0,10",         // no owner
              head + "Plate001",                                      // no numbers
              head + "Plate001,_",
-             head + "P,0,0,0,1,1,1,1,0,0,1;P,0,0,0,1,1,1,1,0,0,1;P,0,0,0,1,1,1,1,0,0,1",  // three
-             head + "P,0,0,0,1,1,1,1,0,0,1;",                        // an empty second
+             head + "P,0,0,0,1,1,1,1,0,0,1,0.5,0.5,0;P,0,0,0,1,1,1,1,0,0,1,0.5,0.5,0;P,0,0,0,1,1,1,1,0,0,1,0.5,0.5,0",  // three
+             head + "P,0,0,0,1,1,1,1,0,0,1,0.5,0.5,0;",  // an empty second
              // twelve fields, version 6; an edge with an inside point
              std::string("6|F|BSpline|1.75|1.18,1.18,10|_|_|_|0.5,0.5,10,2.5,2.5,10|_|_|_"),
-             std::string("6|E|Line|2|1,8,10|1,0,0|_|_|0,8,10,2,8,10|_|_|1,8,10|P,0,0,0,1,1,1,1,0,0,1"),
+             std::string("6|E|Line|2|1,8,10|1,0,0|_|_|0,8,10,2,8,10|_|_|1,8,10|P,0,0,0,1,1,1,1,0,0,1,0.5,0.5,0"),
          }) {
         EXPECT_FALSE(ElementFingerprint::fromString(bad).isValid()) << bad;
     }
     //   an edge's, without an inside point, reads
     EXPECT_TRUE(ElementFingerprint::fromString(
-                    "6|E|Line|2|1,8,10|1,0,0|_|_|0,8,10,2,8,10|_|_|_|P,0,0,0,1,1,1,1,0,0,1"
+                    "6|E|Line|2|1,8,10|1,0,0|_|_|0,8,10,2,8,10|_|_|_|P,0,0,0,1,1,1,1,0,0,1,0.5,0.5,0"
     )
                     .isValid());
 }

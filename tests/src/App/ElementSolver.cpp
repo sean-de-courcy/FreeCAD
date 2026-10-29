@@ -6005,6 +6005,7 @@ ElementFingerprint::UpToFace upToPlate(double x0, double x1, const char* owner =
     face.boxMax = Base::Vector3d(x1, 10, 10);
     face.area = (x1 - x0) * 20;
     face.normal = Base::Vector3d(0, 0, 1);
+    face.wireCentre = Base::Vector3d((x0 + x1) / 2, 0, 10);
     return face;
 }
 
@@ -6031,8 +6032,11 @@ TEST(SolveOwner, farEdgePieceResolvesToItsEdgeMadeWholeOnTheSameFace)
     const auto rightPlate = upToPlate(0, 10);
     const auto leftPlate = upToPlate(-10, 0);
     std::vector<ElementFingerprint::UpToFace> under {rightPlate};
-    input.upToFacesAt = [&](const Base::Vector3d&, std::vector<ElementFingerprint::UpToFace>& faces) {
+    input.upToFacesAt = [&](const Base::Vector3d&,
+                            std::vector<ElementFingerprint::UpToFace>& faces,
+                            std::vector<ElementFingerprint::UpToFace>& all) {
         faces = under;
+        all = {leftPlate, rightPlate};
         return true;
     };
     auto entryWith = [&](std::vector<ElementFingerprint::UpToFace> saved) {
@@ -6573,9 +6577,14 @@ TEST(SolveOwner, twinCapPiecesResolveToTheirCapMadeWholeOnTheSamePlate)
     std::vector<ElementFingerprint::UpToFace> under {plate};
     bool told = true;
     std::vector<Base::Vector3d> asked;
-    input.upToFacesAt = [&](const Base::Vector3d& point, std::vector<ElementFingerprint::UpToFace>& faces) {
+    // Every up-to face: the plate, and others unlike it
+    std::vector<ElementFingerprint::UpToFace> every {plate, upToPlate(10, 20), upToPlate(-20, -10)};
+    input.upToFacesAt = [&](const Base::Vector3d& point,
+                            std::vector<ElementFingerprint::UpToFace>& faces,
+                            std::vector<ElementFingerprint::UpToFace>& all) {
         asked.push_back(point);
         faces = under;
+        all = every;
         return told;
     };
     auto entryAt = [&](int counter, double y) {
@@ -6622,12 +6631,24 @@ TEST(SolveOwner, twinCapPiecesResolveToTheirCapMadeWholeOnTheSamePlate)
     auto taller = plate;
     taller.boxMax.z = 10.01;
     breaks({taller}, "the plate's box taller");
+    auto reshaped = plate;
+    reshaped.wireCentre.y = 0.5;
+    breaks({reshaped}, "the plate's outer wire moved (the other half of a split square)");
     breaks({}, "the face under the point gone");
     breaks({plate, plate}, "two faces that match");
     breaks({plate, upToPlate(0, 10)}, "two faces, one matching");
     told = false;
     breaks({plate}, "can't be told");
     told = true;
+    // Another up-to face like it elsewhere (the two halves of a square split along a diagonal,
+    // seen alike): broken
+    every.push_back(plate);
+    breaks({plate}, "another face like it elsewhere");
+    every.pop_back();
+    //   and the saved face not among them at all (the list doesn't hold what is under the point)
+    every = {upToPlate(10, 20)};
+    breaks({plate}, "the saved face not among the up-to faces");
+    every = {plate, upToPlate(10, 20), upToPlate(-20, -10)};
 
     // No faces saved (a fingerprint before ops#522, a datum plane): broken
     under = {plate};
@@ -6638,8 +6659,11 @@ TEST(SolveOwner, twinCapPiecesResolveToTheirCapMadeWholeOnTheSamePlate)
     // Nothing to ask: broken
     input.upToFacesAt = nullptr;
     EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
-    input.upToFacesAt = [&](const Base::Vector3d&, std::vector<ElementFingerprint::UpToFace>& faces) {
+    input.upToFacesAt = [&](const Base::Vector3d&,
+                            std::vector<ElementFingerprint::UpToFace>& faces,
+                            std::vector<ElementFingerprint::UpToFace>& all) {
         faces = under;
+        all = every;
         return true;
     };
     EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Resolved);

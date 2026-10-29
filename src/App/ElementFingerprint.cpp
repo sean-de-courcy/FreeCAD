@@ -112,7 +112,8 @@ bool validOwner(std::string_view name)
            });
 }
 
-// Version 6's up-to faces: one or two, each its owner and ten numbers (box, area, normal)
+// Version 6's up-to faces: one or two, each its owner and 13 numbers (box, area, normal, the
+// outer wire's centre)
 bool parseUpToFaces(std::string_view text, std::vector<ElementFingerprint::UpToFace>& faces)
 {
     faces.clear();
@@ -123,7 +124,7 @@ bool parseUpToFaces(std::string_view text, std::vector<ElementFingerprint::UpToF
         }
         std::vector<double> values;
         if (!validOwner(part.substr(0, comma)) || part.substr(comma + 1) == emptyField
-            || !parseList(part.substr(comma + 1), values) || values.size() != 10) {
+            || !parseList(part.substr(comma + 1), values) || values.size() != 13) {
             return false;
         }
         ElementFingerprint::UpToFace face;
@@ -132,6 +133,7 @@ bool parseUpToFaces(std::string_view text, std::vector<ElementFingerprint::UpToF
         face.boxMax = Base::Vector3d(values[3], values[4], values[5]);
         face.area = values[6];
         face.normal = Base::Vector3d(values[7], values[8], values[9]);
+        face.wireCentre = Base::Vector3d(values[10], values[11], values[12]);
         faces.push_back(std::move(face));
     }
     return !faces.empty() && faces.size() <= ElementFingerprint::MaxUpToFaces;
@@ -237,6 +239,7 @@ std::string ElementFingerprint::toString() const
                 text += listDelimiter;
                 text += vector(face.boxMin) + listDelimiter + vector(face.boxMax) + listDelimiter;
                 text += formatNumber(face.area) + listDelimiter + vector(face.normal);
+                text += listDelimiter + vector(face.wireCentre);
             }
         }
         return text;

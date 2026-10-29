@@ -96,10 +96,11 @@ namespace Data
  * - i: the inside point, as in version 5, or `_`.
  * - u: the up-to faces that the line along the sweep through the piece's point (its inside
  *   point, else its centre) meets, one or two (a seam), separated by `;`. Each is
- *   `<owner>,<x0>,<y0>,<z0>,<x1>,<y1>,<z1>,<a>,<nx>,<ny>,<nz>`: the name of the object that owns
- *   the face, the face's bounding box and area in that object's own frame (its placement
- *   removed), and the face's unit normal there at the point. The solver lets a far cap or edge
- *   made whole again take the piece only when the same faces lie under the point now.
+ *   `<owner>,<x0>,<y0>,<z0>,<x1>,<y1>,<z1>,<a>,<nx>,<ny>,<nz>,<wx>,<wy>,<wz>`: the name of the
+ *   object that owns the face, the face's bounding box and area in that object's own frame (its
+ *   placement removed), the face's unit normal there at the point, and the centre of mass of its
+ *   outer wire (holes left out). The solver lets a far cap or edge made whole again take the
+ *   piece only when the same faces lie under the point now, each the only up-to face like it.
  *
  * Numbers have 12 significant digits, in the classic locale, so the text is the same on every
  * platform and in every locale. A reader takes a version it doesn't know as no fingerprint.
@@ -125,7 +126,9 @@ struct AppExport ElementFingerprint
 
     /// An up-to face a far piece lies on (version 6): the object that owns it, by its name in its
     /// document, the face's bounding box and area in that object's own frame (its placement
-    /// removed), and its unit normal there at the piece's point.
+    /// removed), its unit normal there at the piece's point, and the centre of mass of its outer
+    /// wire there (the two halves of a square split along a diagonal have the same box, area and
+    /// normal; a plate whose hole moved keeps its outer wire).
     struct UpToFace
     {
         std::string owner;
@@ -133,11 +136,12 @@ struct AppExport ElementFingerprint
         Base::Vector3d boxMax;
         double area = 0.0;
         Base::Vector3d normal;
+        Base::Vector3d wireCentre;
 
         friend bool operator==(const UpToFace& a, const UpToFace& b)
         {
             return a.owner == b.owner && a.boxMin == b.boxMin && a.boxMax == b.boxMax
-                && a.area == b.area && a.normal == b.normal;
+                && a.area == b.area && a.normal == b.normal && a.wireCentre == b.wireCentre;
         }
     };
 
