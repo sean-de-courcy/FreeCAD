@@ -46,8 +46,9 @@ sequences in two child processes under two naming hash seeds, and their SCORE re
 
 Randomized edit sequences (Scenarios/randomized.py): `RandomSequences.test_seed<NNNN>_<config>`,
 one test per seed and configuration, V2s; with FREECAD_SCENARIO_CONFIGS set, every
-listed configuration, V1, V2i and V2si included (no oracle there: their verdicts must be correct,
-and their known failures need entries). It passes when every reference is as expected after
+listed configuration, V1, V2i and V2si included (no oracle there: their verdicts must be correct;
+the solver-off ones have no known-failure entries since decision 179, so a local run of V1, V2,
+V2multi or V2i shows unlisted failures). It passes when every reference is as expected after
 every step. By default seeds 1-4 with 8 steps each (CI); FREECAD_SCENARIO_SEEDS
 ("1-500", "3,7") and FREECAD_SCENARIO_STEPS change them, FREECAD_SCENARIO_REPLAY=<seed>:<steps>
 runs one seed, and FREECAD_SCENARIO_GAP=1 plans the close-spaced series (ops#127, N3 6.2).
