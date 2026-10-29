@@ -468,6 +468,20 @@ TEST(TopoShapeMatch, twinsTradedNearTwinDroppedTakeFreshIds)
     EXPECT_TRUE(matches.faces.empty());
 }
 
+// P1's generous classes (the review's T3) test the places as generously: a near-pair 0.5 µm apart
+// traded sits at no partner's place by the strict test (the fix review's T1)
+TEST(TopoShapeMatch, nearPairTradedTakesFreshIds)
+{
+    const auto matches = Part::matchElements(
+        compound({box(0), box(20, 10.0005)}),
+        compound({box(20), box(0, 10.0005)}),
+        false
+    );
+    EXPECT_TRUE(matches.vertexes.empty());
+    EXPECT_TRUE(matches.edges.empty());
+    EXPECT_TRUE(matches.faces.empty());
+}
+
 namespace
 {
 
