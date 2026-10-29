@@ -23,7 +23,10 @@
 """The CI reopen gate (FreeCAD-CH ops#323, notes/beta-compatibility.md 3.3, 3.4).
 
 Every committed generation (`gen<k>/`, saved by `make_generation.py`) is reopened by this build
-and compared with the records saved with it (`<model>.oracle.json`, Part's `CompatRecord`):
+and compared with the records saved with it (`<model>.oracle.json`, Part's `CompatRecord`). A
+generation has two halves, `gen<k>/` saved on Windows and `gen<k>-macos/` saved on macOS (PLAN
+decision 181, ops#538: files are shared between the two systems), and each half is a generation of
+its own in every pass below, so a file saved on either system is reopened on both:
 
 1. **open:** at the open, no recompute: properties, references by geometry, shapes, names;
 2. **recompute:** after touching every object and recomputing: the full record, sketches'
@@ -108,19 +111,25 @@ ANSI = re.compile(r"\x1b\[[0-9;]*m")
 # One deadline for both children (they run in parallel): well inside CI's test step limits.
 CHILD_TIMEOUT = 600
 
+# A generation's two halves (make_generation.HALVES, ops#538): gen<k> saved on Windows,
+# gen<k>-macos on macOS, each its own generation in every pass.
+HALVES = {"": "win32", "-macos": "darwin"}
+GENERATION_FOLDER = re.compile(r"gen(\d+)(-macos)?")
+
 
 def corpusFolder():
     return os.environ.get("FREECAD_COMPAT_CORPUS") or os.path.dirname(os.path.abspath(__file__))
 
 
 def generations():
-    """{"gen<k>": folder} of the corpus's generations: every gen<k> folder, so one that lost its
-    MANIFEST fails instead of dropping out."""
+    """{"gen<k>": folder} of the corpus's generations: every gen<k> and gen<k>-macos folder (the
+    halves saved on Windows and on macOS), so one that lost its MANIFEST fails instead of dropping
+    out."""
     found = {}
     folder = corpusFolder()
     for name in sorted(os.listdir(folder)):
         path = os.path.join(folder, name)
-        if re.fullmatch(r"gen\d+", name) and os.path.isdir(path):
+        if GENERATION_FOLDER.fullmatch(name) and os.path.isdir(path):
             found[name] = path
     return found
 
@@ -727,7 +736,9 @@ class TestCompatCorpus(unittest.TestCase):
 
     def testGenerationsAreIntact(self):
         """Every gen<k> folder has a MANIFEST; its files are exactly the ones of its models, byte
-        for byte (3.5): a committed file or record is never edited, and no model drops out."""
+        for byte (3.5): a committed file or record is never edited, and no model drops out. Each
+        generation has both halves, each saved on its own platform, with the same models, naming
+        revision and fork release (ops#538)."""
         gens = generations()
         self.assertTrue(gens, f"no generation in {corpusFolder()}")
         for gen, folder in gens.items():
@@ -747,6 +758,29 @@ class TestCompatCorpus(unittest.TestCase):
             self.assertEqual(
                 set(info["files"]), ofModels, f"{gen}: listed files and its models' files differ"
             )
+            k, suffix = GENERATION_FOLDER.fullmatch(gen).groups()
+            self.assertEqual(
+                info.get("platform"), HALVES[suffix or ""], f"{gen}: saved on the wrong platform"
+            )
+            self.assertEqual(info.get("generation"), int(k), f"{gen}: its MANIFEST's generation")
+        # Both halves of each generation, saved from the same models at the same revisions: a
+        # half that is missing (its CMake list dropped, so the build or the install lacks it) or
+        # regenerated alone would leave files of one system untested on the other.
+        byNumber = {}
+        for gen in gens:
+            k, suffix = GENERATION_FOLDER.fullmatch(gen).groups()
+            byNumber.setdefault(int(k), {})[suffix or ""] = gen
+        for k, halves in sorted(byNumber.items()):
+            self.assertEqual(
+                sorted(halves), sorted(HALVES), f"gen{k}: halves {sorted(halves.values())}"
+            )
+            windows, macos = (manifest(gens[halves[s]]) for s in ("", "-macos"))
+            for field in ("models", "namingRevision", "forkRelease", "format"):
+                self.assertEqual(
+                    windows.get(field),
+                    macos.get(field),
+                    f"gen{k} and gen{k}-macos differ in {field}: regenerate both halves together",
+                )
         # A model not yet in any generation is pinned by the next one (a release's partial
         # generation, 3.5), so it isn't a failure: said, so a model dropped from every
         # generation shows (PR C's merge guard refuses that).

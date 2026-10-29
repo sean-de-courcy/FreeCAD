@@ -7,7 +7,8 @@
 #   regen_gen0.sh [options]            generate gen0 into a scratch folder and report how it differs
 #                                      from the committed one; writes nothing in the checkout
 #   regen_gen0.sh --check              the same, and exit 1 if it differs (no difference: exit 0)
-#   regen_gen0.sh --install            generate, then replace the checkout's gen0 with the result
+#   regen_gen0.sh --install            generate, then replace the checkout's half of gen0 (below)
+#                                      with the result
 #
 # What it does: starts the build's FreeCADCmd (pixi environment on PATH, QT_QPA_PLATFORM=offscreen,
 # FREECAD_USER_HOME a new absolute scratch folder, checked again inside FreeCAD) on
@@ -17,6 +18,12 @@
 # Uids, dates, the build string, file hashes). The model list is read from the committed gen0's
 # MANIFEST; a model that isn't in gen0 yet is added with --add.
 #
+# gen0 has two halves (ops#538): gen0/, saved on Windows, and gen0-macos/, saved on macOS, with the
+# same models. The script makes the half of the platform it runs on. The Windows half sets the model
+# list: the macOS half takes gen0/MANIFEST's (the checkout's, or REV's with --against-rev), so --add
+# goes to the Windows half. Without a Mac, the macOS half comes from CI: every macOS run uploads
+# it as the artifact compat-gen0-macos (sub_buildPixi.yml), and --from installs the download.
+#
 # Options:
 #   --checkout DIR       the source checkout whose gen0 is compared or replaced
 #                        (default: the checkout this script is in)
@@ -25,7 +32,11 @@
 #                        doesn't exist, the PATH is used as it is)
 #   --out DIR            keep the generation in DIR/gen0 (default: a new temporary folder, removed
 #                        at the end unless the check differs or --keep)
-#   --against DIR        compare with this gen0 folder instead of the checkout's
+#   --from DIR           don't generate: take the half in DIR (a folder with its MANIFEST, e.g. the
+#                        downloaded compat-gen0-macos artifact), whose MANIFEST's platform says
+#                        which half it is; the checks, the comparison and --install are the same,
+#                        and no build is needed
+#   --against DIR        compare with this folder instead of the checkout's half
 #   --against-rev REV    compare with the gen0 committed in git revision REV (extracted with
 #                        git archive; with it the model list is that revision's), e.g. the commit
 #                        the build was made from
@@ -56,6 +67,7 @@ checkout=$(cd "$here/../../../../.." && pwd)
 build=
 envdir=
 outdir=
+fromDir=
 against=
 againstRev=
 addModels=
@@ -81,6 +93,7 @@ while [ $# -gt 0 ]; do
         --build) [ $# -ge 2 ] || die "$1 needs a value"; build=$(cd "$2" && pwd) || die "no such folder: $2"; shift ;;
         --env) [ $# -ge 2 ] || die "$1 needs a value"; envdir=$(cd "$2" && pwd) || die "no such folder: $2"; shift ;;
         --out) [ $# -ge 2 ] || die "$1 needs a value"; mkdir -p "$2" && outdir=$(cd "$2" && pwd) || die "can't use $2"; shift ;;
+        --from) [ $# -ge 2 ] || die "$1 needs a value"; fromDir=$(cd "$2" && pwd) || die "no such folder: $2"; shift ;;
         --against) [ $# -ge 2 ] || die "$1 needs a value"; against=$(cd "$2" && pwd) || die "no such folder: $2"; shift ;;
         --against-rev) [ $# -ge 2 ] || die "$1 needs a value"; againstRev=$2; shift ;;
         --add) [ $# -ge 2 ] || die "$1 needs a value"; addModels="$addModels $2"; shift ;;
@@ -99,23 +112,22 @@ while [ $# -gt 0 ]; do
 done
 
 compat=src/Mod/PartDesign/PartDesignTests/Compat
-gen0src="$checkout/$compat/gen0"
 [ -f "$checkout/$compat/make_generation.py" ] || die "$checkout is not a FreeCAD-CH checkout (no $compat/make_generation.py)"
 [ -n "$build" ] || build="$checkout/build/relWithDebInfo"
 [ -n "$envdir" ] || envdir="$checkout/.pixi/envs/default"
 [ -z "$against" ] || [ -z "$againstRev" ] || die "--against and --against-rev exclude each other"
-[ "$mode" != install ] || [ -z "$against$againstRev" ] || die "--install replaces the checkout's gen0: no --against"
+[ "$mode" != install ] || [ -z "$against$againstRev" ] || die "--install replaces the checkout's half of gen0: no --against"
+if [ -n "$fromDir" ] && { [ -n "$outdir$addModels$onlyModels" ] || [ $allModels = 1 ]; }; then
+    die "--from takes a half already made: no --out, --add, --models or --all"
+fi
 
 windows=0
 case "$(uname -s)" in MINGW* | MSYS* | CYGWIN*) windows=1 ;; esac
 if [ $windows = 1 ]; then
-    cmd="$build/bin/FreeCADCmd.exe"
     native() { cygpath -w "$1"; }
 else
-    cmd="$build/bin/FreeCADCmd"
     native() { printf '%s\n' "$1"; }
 fi
-[ -x "$cmd" ] || die "no FreeCADCmd at $cmd (--build)"
 
 # The python that reads the MANIFEST and compares: the environment's, else the system's.
 py=
@@ -124,16 +136,40 @@ for candidate in "$envdir/python.exe" "$envdir/bin/python" python3 python; do
 done
 [ -n "$py" ] || die "no python found"
 
-# The build must be this checkout's: the models it builds are its own copies of the Compat files.
-stale=
-for f in make_generation.py models.py models_assembly.py models_part.py models_partdesign.py \
-    models_sketcher.py models_studio.py __init__.py; do
-    cmp -s "$checkout/$compat/$f" "$build/Mod/PartDesign/PartDesignTests/Compat/$f" || stale="$stale $f"
-done
-cmp -s "$checkout/src/Mod/Part/CompatRecord.py" "$build/Mod/Part/CompatRecord.py" || stale="$stale CompatRecord.py"
-if [ -n "$stale" ]; then
-    echo "regen_gen0: the build's copies of$stale differ from the checkout's: the build isn't this checkout's" >&2
-    [ $forceStale = 1 ] && echo "regen_gen0: going on (--force-stale)" >&2 || exit 5
+# Which half: the platform this runs on, or with --from the one the half's MANIFEST names.
+if [ -n "$fromDir" ]; then
+    [ -f "$fromDir/MANIFEST" ] || die "no MANIFEST in $fromDir (--from takes the half's own folder)"
+    platform=$("$py" -c 'import json, sys; print(json.load(open(sys.argv[1]))["platform"])' "$(native "$fromDir/MANIFEST")" | tr -d '\r') ||
+        die "can't read the platform of $fromDir/MANIFEST"
+elif [ $windows = 1 ]; then
+    platform=win32
+else
+    platform=$(uname -s)
+    [ "$platform" != Darwin ] || platform=darwin
+fi
+case "$platform" in
+    win32) half=gen0 ;;
+    darwin) half=gen0-macos ;;
+    *) die "gen0 has a Windows half and a macOS half, none for $platform" ;;
+esac
+halfsrc="$checkout/$compat/$half"
+
+if [ -z "$fromDir" ]; then
+    cmd="$build/bin/FreeCADCmd"
+    [ $windows = 0 ] || cmd="$cmd.exe"
+    [ -x "$cmd" ] || die "no FreeCADCmd at $cmd (--build)"
+
+    # The build must be this checkout's: the models it builds are its own copies of the Compat files.
+    stale=
+    for f in make_generation.py models.py models_assembly.py models_part.py models_partdesign.py \
+        models_sketcher.py models_studio.py __init__.py; do
+        cmp -s "$checkout/$compat/$f" "$build/Mod/PartDesign/PartDesignTests/Compat/$f" || stale="$stale $f"
+    done
+    cmp -s "$checkout/src/Mod/Part/CompatRecord.py" "$build/Mod/Part/CompatRecord.py" || stale="$stale CompatRecord.py"
+    if [ -n "$stale" ]; then
+        echo "regen_gen0: the build's copies of$stale differ from the checkout's: the build isn't this checkout's" >&2
+        [ $forceStale = 1 ] && echo "regen_gen0: going on (--force-stale)" >&2 || exit 5
+    fi
 fi
 
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/regen_gen0.XXXXXX") || die "can't make a scratch folder"
@@ -144,17 +180,27 @@ cleanup() {
 trap cleanup EXIT
 failed=0
 
-# What to compare with.
+# What to compare with, and where the model list comes from: the Windows half's MANIFEST.
 if [ -n "$againstRev" ]; then
     mkdir -p "$scratch/against"
     git -C "$checkout" archive "$againstRev" "$compat/gen0" | tar -x -C "$scratch/against" ||
         die "can't extract gen0 of $againstRev"
-    old="$scratch/against/$compat/gen0"
+    if [ "$half" != gen0 ]; then
+        # REV may not have this half yet: the comparison then says so
+        git -C "$checkout" archive "$againstRev" "$compat/$half" 2> /dev/null | tar -x -C "$scratch/against" 2> /dev/null
+    fi
+    old="$scratch/against/$compat/$half"
+    listFrom="$scratch/against/$compat/gen0"
 elif [ -n "$against" ]; then
     old=$against
+    listFrom=$against
 else
-    old=$gen0src
+    old=$halfsrc
+    listFrom="$checkout/$compat/gen0"
 fi
+modelsOf() {
+    "$py" -c 'import json, sys; print(" ".join(json.load(open(sys.argv[1]))["models"]))' "$(native "$1/MANIFEST")"
+}
 
 # The models.
 if [ -n "$onlyModels" ]; then
@@ -162,53 +208,57 @@ if [ -n "$onlyModels" ]; then
 elif [ $allModels = 1 ]; then
     models=
 else
-    [ -f "$old/MANIFEST" ] || die "no MANIFEST in $old: say which models with --models or --all"
-    models=$("$py" -c 'import json, sys; print(" ".join(json.load(open(sys.argv[1]))["models"]))' "$(native "$old/MANIFEST")") ||
-        die "can't read $old/MANIFEST"
+    [ -f "$listFrom/MANIFEST" ] || die "no MANIFEST in $listFrom: say which models with --models or --all"
+    models=$(modelsOf "$listFrom") || die "can't read $listFrom/MANIFEST"
 fi
 [ $allModels = 1 ] || models="$models$addModels"
 
-gen="${outdir:-$scratch/out}/gen0"
-[ ! -e "$gen/MANIFEST" ] || die "$gen already holds a generation (generations are immutable): another --out, or delete it"
-mkdir -p "$gen"
 result="$scratch/result.txt"
 log="$scratch/FreeCADCmd.log"
+if [ -n "$fromDir" ]; then
+    gen=$fromDir
+    echo "regen_gen0: the $half half in $gen (--from: nothing generated)"
+else
+    gen="${outdir:-$scratch/out}/$half"
+    [ ! -e "$gen/MANIFEST" ] || die "$gen already holds a generation (generations are immutable): another --out, or delete it"
+    mkdir -p "$gen"
 
-if [ -d "$envdir" ]; then
-    if [ $windows = 1 ]; then
-        export PATH="$envdir/Library/bin:$envdir:$envdir/Scripts:$PATH"
-        [ -d "$envdir/Library/lib/qt6/plugins" ] && export QT_PLUGIN_PATH="$(native "$envdir/Library/lib/qt6/plugins")"
-    else
-        export PATH="$envdir/bin:$PATH"
-        [ -d "$envdir/lib/qt6/plugins" ] && export QT_PLUGIN_PATH="$envdir/lib/qt6/plugins"
+    if [ -d "$envdir" ]; then
+        if [ $windows = 1 ]; then
+            export PATH="$envdir/Library/bin:$envdir:$envdir/Scripts:$PATH"
+            [ -d "$envdir/Library/lib/qt6/plugins" ] && export QT_PLUGIN_PATH="$(native "$envdir/Library/lib/qt6/plugins")"
+        else
+            export PATH="$envdir/bin:$PATH"
+            [ -d "$envdir/lib/qt6/plugins" ] && export QT_PLUGIN_PATH="$envdir/lib/qt6/plugins"
+        fi
+        export CONDA_PREFIX
+        CONDA_PREFIX=$(native "$envdir")
     fi
-    export CONDA_PREFIX
-    CONDA_PREFIX=$(native "$envdir")
-fi
-export QT_QPA_PLATFORM=offscreen
-export FREECAD_USER_HOME
-FREECAD_USER_HOME=$(native "$scratch/home")
-export FREECAD_COMPAT_OUT
-FREECAD_COMPAT_OUT=$(native "$gen")
-export FREECAD_COMPAT_MODELS="${models# }"
-export FREECAD_COMPAT_RESULT
-FREECAD_COMPAT_RESULT=$(native "$result")
+    export QT_QPA_PLATFORM=offscreen
+    export FREECAD_USER_HOME
+    FREECAD_USER_HOME=$(native "$scratch/home")
+    export FREECAD_COMPAT_OUT
+    FREECAD_COMPAT_OUT=$(native "$gen")
+    export FREECAD_COMPAT_MODELS="${models# }"
+    export FREECAD_COMPAT_RESULT
+    FREECAD_COMPAT_RESULT=$(native "$result")
 
-echo "regen_gen0: build $build"
-echo "regen_gen0: models: ${models:-all of models.py}" | cut -c1-300
-echo "regen_gen0: scratch $scratch"
-withTimeout=
-command -v timeout > /dev/null 2>&1 && withTimeout="timeout $timeoutSec"
-$withTimeout "$cmd" "$(native "$here/regen_gen0_drive.py")" > "$log" 2>&1
-rc=$?
-if [ ! -f "$result" ] || [ "$(head -n 1 "$result")" != OK ] || [ ! -f "$gen/MANIFEST" ]; then
-    failed=1
-    echo "regen_gen0: the generation failed (FreeCADCmd exit $rc); log $log" >&2
-    [ -f "$result" ] && cat "$result" >&2
-    tail -n 15 "$log" >&2
-    exit 3
+    echo "regen_gen0: build $build"
+    echo "regen_gen0: the $half half, models: ${models:-all of models.py}" | cut -c1-300
+    echo "regen_gen0: scratch $scratch"
+    withTimeout=
+    command -v timeout > /dev/null 2>&1 && withTimeout="timeout $timeoutSec"
+    $withTimeout "$cmd" "$(native "$here/regen_gen0_drive.py")" > "$log" 2>&1
+    rc=$?
+    if [ ! -f "$result" ] || [ "$(head -n 1 "$result")" != OK ] || [ ! -f "$gen/MANIFEST" ]; then
+        failed=1
+        echo "regen_gen0: the generation failed (FreeCADCmd exit $rc); log $log" >&2
+        [ -f "$result" ] && cat "$result" >&2
+        tail -n 15 "$log" >&2
+        exit 3
+    fi
+    tail -n 1 "$log"
 fi
-tail -n 1 "$log"
 
 # The generation must come from the checkout's own source, not only its Compat files: a naming PR
 # changes C++ and goldens, and a gen0 saved by a build from before it would carry the old naming
@@ -238,9 +288,9 @@ elif [ "$genRev" != "$sourceRev" ]; then
   - the generation's namingRevision is $genRev, the source's ForkNamingRevision is $sourceRev"
 fi
 if [ -n "$againstRev" ]; then
-    git -C "$checkout" diff --quiet "$genHash" "$againstRev" -- src ":!$compat/gen0" 2> /dev/null
+    git -C "$checkout" diff --quiet "$genHash" "$againstRev" -- src ":!$compat/gen0" ":!$compat/gen0-macos" 2> /dev/null
 else
-    git -C "$checkout" diff --quiet "$genHash" -- src ":!$compat/gen0" 2> /dev/null
+    git -C "$checkout" diff --quiet "$genHash" -- src ":!$compat/gen0" ":!$compat/gen0-macos" 2> /dev/null
 fi
 case $? in
     0) ;;
@@ -249,6 +299,11 @@ case $? in
     *) genStale="$genStale
   - the build's commit $genHash is not in this checkout's history (fetch it, or the build isn't from this repository)" ;;
 esac
+# A half made elsewhere (--from) must hold the Windows half's models: they are generated from its list.
+if [ -n "$fromDir" ] && [ -f "$listFrom/MANIFEST" ] && [ "$(modelsOf "$gen")" != "$(modelsOf "$listFrom")" ]; then
+    genStale="$genStale
+  - its models differ from $listFrom's (the Windows half sets the list): regenerate it from that list"
+fi
 if [ -n "$genStale" ]; then
     echo "regen_gen0: the generation was not made from this checkout's source:$genStale" >&2
     if [ $forceStale = 1 ]; then
@@ -262,32 +317,44 @@ if [ -n "$genStale" ]; then
     fi
 fi
 
-echo "regen_gen0: comparing $gen with $old"
-"$py" -I "$here/compare_generations.py" "$(native "$old")" "$(native "$gen")" $strict
-cmpStatus=$?
+if [ -f "$old/MANIFEST" ]; then
+    echo "regen_gen0: comparing $gen with $old"
+    "$py" -I "$here/compare_generations.py" "$(native "$old")" "$(native "$gen")" $strict
+    cmpStatus=$?
+else
+    echo "regen_gen0: there is no $half to compare with at $old (a half not committed yet): a difference"
+    cmpStatus=1
+fi
 
 if [ "$mode" = install ]; then
-    rm -rf "$gen0src"
-    mkdir -p "$gen0src"
-    cp "$gen"/* "$gen0src"/
-    echo "regen_gen0: installed into $gen0src"
+    # the MANIFEST and the files it lists, nothing else the folder holds (a download may)
+    listed=$("$py" -c 'import json, sys; print(" ".join(json.load(open(sys.argv[1]))["files"]))' "$(native "$gen/MANIFEST")" | tr -d '\r') ||
+        die "can't read $gen/MANIFEST"
+    rm -rf "$halfsrc"
+    mkdir -p "$halfsrc"
+    for f in MANIFEST $listed; do
+        cp "$gen/$f" "$halfsrc/" || { failed=1; echo "regen_gen0: $gen lacks $f, which its MANIFEST lists" >&2; exit 3; }
+    done
+    echo "regen_gen0: installed into $halfsrc"
+    cmakeList=PartDesign_CompatGen0
+    [ "$half" = gen0 ] || cmakeList=PartDesign_CompatGen0Macos
     missing=
-    for f in $(cd "$gen0src" && ls); do
-        grep -qF "PartDesignTests/Compat/gen0/$f" "$checkout/src/Mod/PartDesign/CMakeLists.txt" ||
+    for f in $(cd "$halfsrc" && ls); do
+        grep -qF "PartDesignTests/Compat/$half/$f" "$checkout/src/Mod/PartDesign/CMakeLists.txt" ||
             missing="$missing $f"
     done
     stale=
-    for f in $(grep -o "PartDesignTests/Compat/gen0/[A-Za-z0-9_.]*" "$checkout/src/Mod/PartDesign/CMakeLists.txt" | sed 's|.*/||'); do
-        [ -e "$gen0src/$f" ] || stale="$stale $f"
+    for f in $(grep -o "PartDesignTests/Compat/$half/[A-Za-z0-9_.]*" "$checkout/src/Mod/PartDesign/CMakeLists.txt" | sed 's|.*/||'); do
+        [ -e "$halfsrc/$f" ] || stale="$stale $f"
     done
     if [ -n "$missing$stale" ]; then
         failed=1
-        [ -z "$missing" ] || echo "regen_gen0: src/Mod/PartDesign/CMakeLists.txt (PartDesign_CompatGen0) lacks:$missing" >&2
-        [ -z "$stale" ] || echo "regen_gen0: src/Mod/PartDesign/CMakeLists.txt lists files gen0 no longer has:$stale" >&2
+        [ -z "$missing" ] || echo "regen_gen0: src/Mod/PartDesign/CMakeLists.txt ($cmakeList) lacks:$missing" >&2
+        [ -z "$stale" ] || echo "regen_gen0: src/Mod/PartDesign/CMakeLists.txt lists files $half no longer has:$stale" >&2
         echo "regen_gen0: the build copies only the listed files, so TestCompatCorpus fails until it matches (ops#378)" >&2
         exit 4
     fi
-    echo "regen_gen0: CMakeLists.txt lists exactly gen0's files"
+    echo "regen_gen0: CMakeLists.txt lists exactly $half's files"
     exit 0
 fi
 

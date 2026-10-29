@@ -8,14 +8,17 @@ user's older file, and then does not compare element names. Naming PRs no longer
 (PLAN decision 120 (1)); the coordinator does it once per merge batch. A release built from a batch
 whose gen0 is still older would ship with the name check off, so it is refused here, before the
 draft release exists. The newest generation in `src/Mod/PartDesign/PartDesignTests/Compat/gen<k>`
-must carry the same `namingRevision` as `ForkNamingRevision` in `src/App/Document.cpp`.
+must carry the same `namingRevision` as `ForkNamingRevision` in `src/App/Document.cpp`, in both of
+its halves: `gen<k>` saved on Windows and `gen<k>-macos` saved on macOS (ops#538); a missing half
+is an error.
 
     check_release_gen0.py --source .                    refuse (exit 1) when gen0 is older
     check_release_gen0.py --source . --warn-only        report it, exit 0 (a dry run)
 
 Exit codes: 0 current (or --warn-only), 1 refused, 2 can't read the revision or a MANIFEST.
 To fix a refusal: merge the batch into integration, build it, run
-`src/Mod/PartDesign/PartDesignTests/Compat/regen_gen0.sh --install` from that checkout, land the
+`src/Mod/PartDesign/PartDesignTests/Compat/regen_gen0.sh --install` from that checkout (the macOS
+half: `--install --from` the compat-gen0-macos artifact of integration's macOS run), land the
 result as a PR, and cut the release from the commit after it (notes/beta-compatibility.md 3.9).
 """
 
@@ -27,11 +30,14 @@ import sys
 
 COMPAT = os.path.join("src", "Mod", "PartDesign", "PartDesignTests", "Compat")
 DOCUMENT = os.path.join("src", "App", "Document.cpp")
+# A generation's halves, by folder suffix (make_generation.HALVES): Windows, macOS.
+HALVES = ("", "-macos")
 
 HOW_TO_FIX = (
     "Merge the batch into integration, build it, run "
-    "src/Mod/PartDesign/PartDesignTests/Compat/regen_gen0.sh --install from that checkout, "
-    "land the result as a PR, and release from the commit after it "
+    "src/Mod/PartDesign/PartDesignTests/Compat/regen_gen0.sh --install from that checkout "
+    "(the macOS half: --install --from the compat-gen0-macos artifact of integration's macOS "
+    "run), land both halves as one PR, and release from the commit after it "
     "(notes/beta-compatibility.md 3.9)."
 )
 
@@ -55,45 +61,63 @@ def build_revision(source):
 
 
 def newest_generation(source):
-    """(name, namingRevision, build) of the highest-numbered gen<k> folder.
+    """[(name, namingRevision, build)] of both halves of the highest-numbered generation: gen<k>,
+    then gen<k>-macos.
 
-    The newest folder counts even without a MANIFEST: that is an error (exit 2), never a
-    fall back to an older generation."""
+    The newest number counts even when a half has no folder or no MANIFEST: that is an error (exit
+    2), never a fall back to an older generation."""
     compat = os.path.join(source, COMPAT)
     try:
         entries = os.listdir(compat)
     except OSError as error:
         raise CheckError(f"can't list {compat}: {error}")
-    numbers = sorted(int(m.group(1)) for m in map(re.compile(r"^gen(\d+)$").match, entries) if m)
+    folder = re.compile(r"^gen(\d+)(?:-macos)?$")
+    numbers = sorted({int(m.group(1)) for m in map(folder.match, entries) if m})
     if not numbers:
         raise CheckError(f"no gen<k> folder in {compat}")
-    name = f"gen{numbers[-1]}"
-    path = os.path.join(compat, name, "MANIFEST")
-    try:
-        with open(path, encoding="utf-8") as manifest:
-            data = json.load(manifest)
-        naming = data["namingRevision"]
-        # TestCompatCorpus compares an exact int: "6", 6.0 and true are not a revision
-        if type(naming) is not int:
-            raise ValueError(f"namingRevision is {naming!r}, not an integer")
-        return name, naming, str(data.get("build", "")).split()[-1:]
-    except (OSError, ValueError, KeyError, TypeError) as error:
-        raise CheckError(f"can't read namingRevision from {path}: {error!r}")
+    halves = []
+    for suffix in HALVES:
+        name = f"gen{numbers[-1]}{suffix}"
+        if not os.path.isdir(os.path.join(compat, name)):
+            raise CheckError(
+                f"no {name} folder in {compat}: each generation has a Windows half (gen<k>) and a "
+                f"macOS half (gen<k>-macos), ops#538"
+            )
+        path = os.path.join(compat, name, "MANIFEST")
+        try:
+            with open(path, encoding="utf-8") as manifest:
+                data = json.load(manifest)
+            naming = data["namingRevision"]
+            # TestCompatCorpus compares an exact int: "6", 6.0 and true are not a revision
+            if type(naming) is not int:
+                raise ValueError(f"namingRevision is {naming!r}, not an integer")
+            halves.append((name, naming, str(data.get("build", "")).split()[-1:]))
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            raise CheckError(f"can't read namingRevision from {path}: {error!r}")
+    return halves
 
 
 def check(source):
     """(ok, message) for a source tree."""
     revision = build_revision(source)
-    name, generation, built = newest_generation(source)
-    built = f" (made by a build of {built[0][:10]})" if built else ""
-    if generation == revision:
-        return True, f"Compat corpus: {name} is current (naming revision {revision})."
-    relation = "older than" if generation < revision else "newer than"
+    halves = newest_generation(source)
+    stale = []
+    for name, generation, built in halves:
+        if generation == revision:
+            continue
+        built = f" (made by a build of {built[0][:10]})" if built else ""
+        relation = "older than" if generation < revision else "newer than"
+        stale.append(
+            f"{name} has naming revision {generation}{built}, {relation} this source's "
+            f"ForkNamingRevision {revision}"
+        )
+    names = " and ".join(name for name, _, _ in halves)
+    if not stale:
+        return True, f"Compat corpus: {names} are current (naming revision {revision})."
     return False, (
-        f"Compat corpus: {name} has naming revision {generation}{built}, {relation} this "
-        f"source's ForkNamingRevision {revision}. TestCompatCorpus reads such a generation as an "
-        f"older file and does not compare element names, so a release from this commit would "
-        f"ship with the name check off (ops#460). {HOW_TO_FIX}"
+        f"Compat corpus: {'; '.join(stale)}. TestCompatCorpus reads such a generation as an older file and does not compare element "
+        f"names, so a release from this commit would ship with the name check off (ops#460). "
+        f"{HOW_TO_FIX}"
     )
 
 
