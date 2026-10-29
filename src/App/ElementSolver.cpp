@@ -5475,8 +5475,11 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                     // place resolves as before, never quietly (App::reboundInPlace()).
                     // So does XP's pick of another origin under T1' (PLAN decision 184): another
                     // link's copy of the old element's sketch, put where a copy that left the
-                    // fuse had it, keeps the sketch source but not the old element's maker. T1'
-                    // off, it resolves with XP's warning (I-S6).
+                    // fuse had it, keeps the sketch source but not the old element's maker; a
+                    // body's pad deleted and padded again from its sketch likewise. And so does
+                    // its pick made in other copies than the old name's (decision 185, tier 1's
+                    // test for name matches): the other copy's pad rim where a gone copy had its
+                    // sketch's edge holds both. T1' off, it resolves with XP's warning (I-S6).
                     const char* lacks = nullptr;
                     if (state.twinSurvivor >= 0) {
                         lacks = otherOrigin(pool.elements[pick], oldName);
@@ -5486,8 +5489,16 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                         && lostOldSource(pick)) {
                         lacks = "source element";
                     }
-                    if (!lacks && nearest.index < 0 && input.sameSource) {
+                    if (!lacks && nearest.index < 0 && input.sameSource && !oldName.empty()) {
                         lacks = otherOrigin(pool.elements[pick], oldName);
+                        const auto oldCopies = copyContexts(oldName);
+                        const auto& names = pool.elements[pick].names;
+                        if (!lacks && !names.empty()
+                            && std::none_of(names.begin(), names.end(), [&](const auto& n) {
+                                return copyContexts(n) == oldCopies;
+                            })) {
+                            lacks = "copy";
+                        }
                     }
                     const std::string why = lacks
                         ? pool.elements[pick].index + " has another " + lacks

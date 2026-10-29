@@ -9758,6 +9758,54 @@ TEST(SolveOwner, exactPlaceAnotherCopysElementBreaks)
               "45.000, d_max 50.000");
 }
 
+TEST(SolveOwner, exactPlaceAnotherCopysPadRimBreaks)
+{
+    // The mirror of exactPlaceAnotherCopysElementBreaks (the fix review's FloatLowered): the old
+    // element is copy 0's bottom rim, the sketch's own edge, and copy 1, moved down by the pad's
+    // height after copy 0 left the fuse, has its pad-made top rim there. The pick holds the old
+    // name's sketch, its source and its maker, but in another link's copy: XP's pick in other
+    // copies than the old name's breaks (tier 1's test for name matches, PR 243 round 3).
+    LongBoard b;
+    auto input = b.input(LongBoard::edgeAt(0), LongBoard::edgeAt(45));
+    input.entries[0].oldName = copied(sketchEdge(1), 11, "L", 'E');
+    input.pool["Edge"][0].names = {copied(b.oldEdge, 12, "L", 'E')};
+    input.pool["Edge"][1].names = {copied(b.otherSide, 12, "L", 'E')};
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << outcome.evidence;
+    EXPECT_EQ(outcome.evidence,
+              "no structural candidate, at the same place: nearest 0.000, second 45.000, d_max "
+              "50.000; the pick Edge2 has another copy");
+
+    //   a link array's two elements (one array, `L1` and `L0`): the same
+    input.entries[0].oldName = copied(sketchEdge(1), 11, "L1", 'E');
+    input.pool["Edge"][0].names = {copied(b.oldEdge, 11, "L0", 'E')};
+    input.pool["Edge"][1].names = {copied(b.otherSide, 11, "L0", 'E')};
+    outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << outcome.evidence;
+    EXPECT_NE(outcome.evidence.find("; the pick Edge2 has another copy"), std::string::npos)
+        << outcome.evidence;
+
+    //   the same copy's element at the place (the sketch line drawn again in copy 0's body, its
+    //   pad rim): no copy test fires; T1''s test decides, as without copies
+    input.entries[0].oldName = copied(b.oldEdge, 11, "L", 'E');
+    input.pool["Edge"][0].names = {copied(b.redrawn, 11, "L", 'E')};
+    input.pool["Edge"][1].names = {copied(b.otherSide, 11, "L", 'E')};
+    outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << outcome.evidence;
+    EXPECT_NE(outcome.evidence.find("; the pick Edge2 has another source element"),
+              std::string::npos)
+        << outcome.evidence;
+
+    //   T1''s test off: XP takes the other copy's rim, warned (I-S6)
+    input.entries[0].oldName = copied(sketchEdge(1), 11, "L", 'E');
+    input.pool["Edge"][0].names = {copied(b.oldEdge, 12, "L", 'E')};
+    input.pool["Edge"][1].names = {copied(b.otherSide, 12, "L", 'E')};
+    input.sameSource = false;
+    outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Resolved) << outcome.evidence;
+    EXPECT_EQ(outcome.element, "Edge2");
+}
+
 TEST(SolveOwner, faceGeneratorGoneDropsTheSurvivor)
 {
     // CC3: the taper renamed the top cap, so no face holds the top rim arc's face generator, and
