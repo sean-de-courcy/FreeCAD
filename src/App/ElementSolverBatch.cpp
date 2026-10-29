@@ -43,6 +43,7 @@ ElementHintsFunction elementHintsFunction = nullptr;
 ElementHoldsPointFunction elementHoldsPointFunction = nullptr;
 ElementHoldsPointAlongFunction elementHoldsPointAlongFunction = nullptr;
 ElementSweepDirectionFunction elementSweepDirectionFunction = nullptr;
+ElementUpToFacesFunction elementUpToFacesFunction = nullptr;
 
 struct MigrationCounts
 {
@@ -72,6 +73,11 @@ void setElementHoldsPointAlongFunction(ElementHoldsPointAlongFunction function)
 void setElementSweepDirectionFunction(ElementSweepDirectionFunction function)
 {
     elementSweepDirectionFunction = function;
+}
+
+void setElementUpToFacesFunction(ElementUpToFacesFunction function)
+{
+    elementUpToFacesFunction = function;
 }
 
 void countReferenceMigration(const DocumentObject* owner, MigrationOutcome outcome)
@@ -1329,6 +1335,12 @@ bool solveElementReferences(DocumentObject* feature,
             && sweep.Length() > 0.0) {
             input.sweep = sweep.Normalize();
         }
+        if (elementUpToFacesFunction) {
+            input.upToFacesAt = [geo](const Base::Vector3d& point,
+                                      std::vector<Data::ElementFingerprint::UpToFace>& faces) {
+                return elementUpToFacesFunction(geo, point, faces);
+            };
+        }
         for (const auto* entry : entries) {
             Data::SolveInput::Entry item;
             item.type = indexType(entry->oldIndex);
@@ -1841,6 +1853,36 @@ bool elementTwinCentroid(const GeoFeature* geo, const char* element, Base::Vecto
     centroid = sum / static_cast<double>(number);
     count = number;
     return true;
+}
+
+bool elementUpToFaces(
+    const GeoFeature* geo,
+    const char* element,
+    const Data::ElementFingerprint& fingerprint,
+    std::vector<Data::ElementFingerprint::UpToFace>& faces
+)
+{
+    faces.clear();
+    const PropertyComplexGeoData* prop = geo ? geo->getPropertyOfGeometry() : nullptr;
+    const Data::ComplexGeoData* data = prop ? prop->getComplexData() : nullptr;
+    if (!elementUpToFacesFunction || !data || !element || !element[0]
+        || (fingerprint.type != 'F' && fingerprint.type != 'E')
+        || (!fingerprint.inside && !fingerprint.center)) {
+        return false;
+    }
+    Data::IndexedName indexed(element);
+    if (!indexed) {
+        return false;
+    }
+    // A far piece: a marked projection, as the made-whole rule's old name is (solveOwner())
+    const auto names = data->getElementMappedNames(indexed);
+    if (std::none_of(names.begin(), names.end(), [](const auto& mapped) {
+            return Data::isMarkedPieceName(plainName(mapped.first.toString()));
+        })) {
+        return false;
+    }
+    const Base::Vector3d& point = fingerprint.inside ? *fingerprint.inside : *fingerprint.center;
+    return elementUpToFacesFunction(geo, point, faces);
 }
 
 }  // namespace App

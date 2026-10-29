@@ -1018,6 +1018,12 @@ std::string PropertyLinkBase::_getElementFingerprint(App::DocumentObject* featur
         fingerprint.twinCentroid = centroid;
         fingerprint.twinCount = count;
     }
+    // A far piece of a Pad up to a face or a shape: the up-to faces under its point, for the
+    // solver to tell whether the cap or edge made whole again lies on the same ones (ops#522)
+    std::vector<Data::ElementFingerprint::UpToFace> upToFaces;
+    if (elementUpToFaces(geo, elementName.oldName.c_str(), fingerprint, upToFaces)) {
+        fingerprint.upToFaces = std::move(upToFaces);
+    }
     return fingerprint.toString();
 }
 

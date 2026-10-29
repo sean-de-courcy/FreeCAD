@@ -491,6 +491,82 @@ TEST(ElementFingerprint, insideRoundTrip)
     }
 }
 
+TEST(ElementFingerprint, upToFacesRoundTrip)
+{
+    // ops#522 (PLAN decision 168): a far piece's up-to faces, version 6's thirteenth field, after
+    // the inside point or `_`: each its owner, box, area and normal. Written only with an extent
+    // and one or two faces; read back, and a malformed field gives no fingerprint
+    ElementFingerprint cap;
+    cap.type = 'F';
+    cap.kind = "BSpline";
+    cap.size = 1.75;
+    cap.center = Base::Vector3d(1.18, 1.18, 10);
+    cap.extentMin = Base::Vector3d(0.5, 0.5, 10);
+    cap.extentMax = Base::Vector3d(2.5, 2.5, 10);
+    ElementFingerprint::UpToFace plate;
+    plate.owner = "Plate001";
+    plate.boxMin = Base::Vector3d(-10, -10, 10);
+    plate.boxMax = Base::Vector3d(4, 10, 10);
+    plate.area = 191;
+    plate.normal = Base::Vector3d(0, 0, 1);
+    cap.upToFaces = {plate};
+    const char* capText = "6|F|BSpline|1.75|1.18,1.18,10|_|_|_|0.5,0.5,10,2.5,2.5,10|_|_|_|"
+                          "Plate001,-10,-10,10,4,10,10,191,0,0,1";
+    EXPECT_EQ(cap.toString(), capText);
+    auto parsed = ElementFingerprint::fromString(capText);
+    ASSERT_TRUE(parsed.isValid());
+    EXPECT_EQ(parsed, cap);
+
+    //   with the inside point, and two faces (an edge piece on a seam has two)
+    cap.inside = Base::Vector3d(0.75, 0.75, 10);
+    ElementFingerprint::UpToFace other = plate;
+    other.owner = "Plate";
+    other.normal = Base::Vector3d(0.6, 0, 0.8);
+    cap.upToFaces = {plate, other};
+    const std::string twoText = cap.toString();
+    EXPECT_EQ(twoText,
+              "6|F|BSpline|1.75|1.18,1.18,10|_|_|_|0.5,0.5,10,2.5,2.5,10|_|_|0.75,0.75,10|"
+              "Plate001,-10,-10,10,4,10,10,191,0,0,1;Plate,-10,-10,10,4,10,10,191,0.6,0,0.8");
+    EXPECT_EQ(ElementFingerprint::fromString(twoText), cap);
+
+    //   the faces differ from none, which is version 5 as before
+    ElementFingerprint without = cap;
+    without.upToFaces.clear();
+    EXPECT_NE(without, cap);
+    EXPECT_EQ(without.toString().substr(0, 2), "5|");
+    //   an owner that isn't an object's name, or more than two faces, writes version 5
+    ElementFingerprint badOwner = cap;
+    badOwner.upToFaces[0].owner = "Plate|1";
+    EXPECT_EQ(badOwner.toString().substr(0, 2), "5|");
+    ElementFingerprint three = cap;
+    three.upToFaces.push_back(plate);
+    EXPECT_EQ(three.toString().substr(0, 2), "5|");
+
+    const std::string head = "6|F|BSpline|1.75|1.18,1.18,10|_|_|_|0.5,0.5,10,2.5,2.5,10|_|_|_|";
+    for (const std::string& bad : {
+             head,                                                   // no face
+             head + "_",                                             // none
+             head + "Plate001,-10,-10,10,4,10,10,191,0,0",           // nine numbers
+             head + "Plate001,-10,-10,10,4,10,10,191,0,0,1,2",       // eleven
+             head + "1Plate,-10,-10,10,4,10,10,191,0,0,1",           // not a name
+             head + ",-10,-10,10,4,10,10,191,0,0,1",                 // no owner
+             head + "Plate001",                                      // no numbers
+             head + "Plate001,_",
+             head + "P,0,0,0,1,1,1,1,0,0,1;P,0,0,0,1,1,1,1,0,0,1;P,0,0,0,1,1,1,1,0,0,1",  // three
+             head + "P,0,0,0,1,1,1,1,0,0,1;",                        // an empty second
+             // twelve fields, version 6; an edge with an inside point
+             std::string("6|F|BSpline|1.75|1.18,1.18,10|_|_|_|0.5,0.5,10,2.5,2.5,10|_|_|_"),
+             std::string("6|E|Line|2|1,8,10|1,0,0|_|_|0,8,10,2,8,10|_|_|1,8,10|P,0,0,0,1,1,1,1,0,0,1"),
+         }) {
+        EXPECT_FALSE(ElementFingerprint::fromString(bad).isValid()) << bad;
+    }
+    //   an edge's, without an inside point, reads
+    EXPECT_TRUE(ElementFingerprint::fromString(
+                    "6|E|Line|2|1,8,10|1,0,0|_|_|0,8,10,2,8,10|_|_|_|P,0,0,0,1,1,1,1,0,0,1"
+    )
+                    .isValid());
+}
+
 TEST(ElementFingerprint, convexOutline)
 {
     // The hull of points seen along a normal (PR 366 round 5): an L's corners and a point inside

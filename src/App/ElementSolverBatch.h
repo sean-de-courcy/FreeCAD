@@ -245,6 +245,33 @@ AppExport void setElementHoldsPointAlongFunction(ElementHoldsPointAlongFunction 
 using ElementSweepDirectionFunction = bool (*)(const GeoFeature* geo, Base::Vector3d& direction);
 AppExport void setElementSweepDirectionFunction(ElementSweepDirectionFunction function);
 
+/** The up-to faces that the line through \a point along \a geo's sweep meets, inside them or on
+ * their boundary (ops#522, PLAN decision 168), each as Data::ElementFingerprint::UpToFace has it:
+ * its owner, and its box, area and normal at the point in the owner's own frame. \a point is in
+ * the frame \a geo's fingerprints are measured in, carried by \a geo's current placement, so a
+ * point saved before a profile moved by placement moves with it. False when it can't be told:
+ * not a one-sided extrusion up to a face or a shape, or an up-to face that is unbounded (a datum
+ * plane). True with no face when the line meets none. PartDesign sets it; without it no point
+ * has an up-to face.
+ */
+using ElementUpToFacesFunction
+    = bool (*)(const GeoFeature* geo,
+               const Base::Vector3d& point,
+               std::vector<Data::ElementFingerprint::UpToFace>& faces);
+AppExport void setElementUpToFacesFunction(ElementUpToFacesFunction function);
+
+/** ElementUpToFacesFunction's answer for the far piece \a element (`Face7`) of \a geo's shape,
+ * whose fingerprint is \a fingerprint, at its inside point or else its centre: false when the
+ * element isn't a far piece (none of its names is a marked projection, PRJ and MOD), has no
+ * such point, or no function is set.
+ */
+AppExport bool elementUpToFaces(
+    const GeoFeature* geo,
+    const char* element,
+    const Data::ElementFingerprint& fingerprint,
+    std::vector<Data::ElementFingerprint::UpToFace>& faces
+);
+
 /** The mean of the centres of \a element (`Face7`) of \a geo's shape and of its twins, and their
  * number (ops#360, PR 340 round 5): the elements of its type with a name that is one of its
  * ordered names (Data::isOrderedName()) up to the duplicate counter. Each centre as the element's

@@ -23,6 +23,7 @@
  ***************************************************************************/
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -33,11 +34,15 @@
 #include <BRepBndLib.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepGProp.hxx>
+#include <BRepIntCurveSurface_Inter.hxx>
 #include <BRepProj_Projection.hxx>
 #include <BRepFeat_MakePrism.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <Bnd_Box.hxx>
+#include <gp.hxx>
 #include <gp_Dir.hxx>
+#include <gp_Lin.hxx>
+#include <GProp_GProps.hxx>
 #include <TopoDS.hxx>
 #include <gp_Ax2.hxx>
 #include <gp_Ax3.hxx>
@@ -57,6 +62,7 @@
 #include <App/ObjectIdentifier.h>
 #include <Base/Converter.h>
 #include <Base/Tools.h>
+#include <Mod/Part/App/DatumFeature.h>
 #include <Mod/Part/App/ExtrusionHelper.h>
 #include <Mod/Part/App/MassProperties.h>
 #include <Mod/Part/App/Tools.h>
@@ -223,6 +229,145 @@ bool sweepDirection(const App::GeoFeature* geo, Base::Vector3d& direction)
 }
 
 const bool sweepDirectionRegistered = (App::setElementSweepDirectionFunction(&sweepDirection), true);
+
+// The up-to faces under a far piece's point, for the reference solver (ops#522, PLAN decision
+// 168; App::ElementUpToFacesFunction): the faces of a one-sided Pad's or Pocket's UpToFace or
+// UpToShape, as generateSingleExtrusionSide() takes them, that the line through the point along
+// the sweep meets, inside them or on their boundary. The point comes in the feature's own frame
+// and goes to the frame the up-to shapes are taken in (with their placements) by the feature's
+// current placement, so it moves with a profile moved by placement; then into each face owner's
+// own frame, where the face's box, area and normal are measured, so a plate moved by its owner's
+// placement is the same plate. A datum plane or another unbounded face, UpToFirst and UpToLast
+// (the base's faces), an empty shape list (the base), two sides, and a face whose normal can't
+// be taken at the point can't be told.
+bool upToFaces(
+    const App::GeoFeature* geo,
+    const Base::Vector3d& point,
+    std::vector<Data::ElementFingerprint::UpToFace>& faces
+)
+{
+    faces.clear();
+    const auto extrude = dynamic_cast<const FeatureExtrude*>(geo);
+    if (!extrude || std::strcmp(extrude->SideType.getValueAsString(), "One side") != 0) {
+        return false;
+    }
+    // Each up-to object with the face it names, or none for all of its faces
+    std::vector<std::pair<const App::DocumentObject*, std::string>> refs;
+    const std::string method = extrude->Type.getValueAsString();
+    if (method == "UpToFace") {
+        const auto& subs = extrude->UpToFace.getSubValues();
+        if (subs.size() > 1) {
+            return false;
+        }
+        refs.emplace_back(extrude->UpToFace.getValue(), subs.empty() ? std::string() : subs[0]);
+    }
+    else if (method == "UpToShape") {
+        for (const auto& [ref, subs] : extrude->UpToShape.getSubListValues()) {
+            if (subs.empty() || (subs.size() == 1 && subs[0].empty())) {
+                refs.emplace_back(ref, std::string());
+            }
+            for (const auto& sub : subs) {
+                if (!sub.empty()) {
+                    refs.emplace_back(ref, sub);
+                }
+            }
+        }
+    }
+    const Base::Vector3d along = extrude->Direction.getValue();
+    if (refs.empty() || along.Length() <= Precision::Confusion()) {
+        return false;
+    }
+    const Base::Placement placement = extrude->Placement.getValue();
+    Base::Vector3d at;
+    placement.multVec(point, at);
+    try {
+        for (const auto& [ref, sub] : refs) {
+            if (!ref || !ref->getNameInDocument() || ref->isDerivedFrom<App::Plane>()
+                || ref->isDerivedFrom<Part::Datum>()) {
+                return false;
+            }
+            // The owner's placement, as Part::Feature::getTopoShape() applies it (Transform)
+            Base::Matrix4D matrix;
+            ref->getSubObject(nullptr, nullptr, &matrix);
+            const Base::Placement inverse = Base::Placement(matrix).inverse();
+            const TopoShape shape = Part::Feature::getTopoShape(
+                ref,
+                Part::ShapeOption::NeedSubElement | Part::ShapeOption::ResolveLink,
+                sub.empty() ? nullptr : sub.c_str()
+            );
+            if (shape.isNull() || !shape.hasSubShape(TopAbs_FACE)) {
+                return false;
+            }
+            Base::Vector3d origin;
+            Base::Vector3d direction;
+            inverse.multVec(at, origin);
+            inverse.getRotation().multVec(along, direction);
+            const gp_Lin line(
+                gp_Pnt(origin.x, origin.y, origin.z),
+                gp_Dir(direction.x, direction.y, direction.z)
+            );
+            for (const auto& face : shape.getSubTopoShapes(TopAbs_FACE)) {
+                const TopoDS_Face& topoFace = TopoDS::Face(face.getShape());
+                Bnd_Box box;
+                BRepBndLib::AddOptimal(topoFace, box, false, false);
+                if (box.IsVoid() || box.IsOpen()) {
+                    return false;
+                }
+                box.SetGap(0.0);
+                double x0 {}, y0 {}, z0 {}, x1 {}, y1 {}, z1 {};
+                box.Get(x0, y0, z0, x1, y1, z1);
+                const std::array<double, 6> corners {x0, y0, z0, x1, y1, z1};
+                if (std::any_of(corners.begin(), corners.end(), [](double v) {
+                        return Precision::IsInfinite(v);
+                    })) {
+                    return false;
+                }
+                // The meeting nearest to the point
+                BRepIntCurveSurface_Inter hits;
+                hits.Init(topoFace, line, Precision::Confusion());
+                std::optional<std::pair<double, double>> uv;
+                double nearest = 0.0;
+                for (; hits.More(); hits.Next()) {
+                    if ((hits.State() == TopAbs_IN || hits.State() == TopAbs_ON)
+                        && (!uv || std::abs(hits.W()) < nearest)) {
+                        uv = std::make_pair(hits.U(), hits.V());
+                        nearest = std::abs(hits.W());
+                    }
+                }
+                if (!uv) {
+                    continue;
+                }
+                BRepAdaptor_Surface surface(topoFace);
+                gp_Pnt on;
+                gp_Vec du;
+                gp_Vec dv;
+                surface.D1(uv->first, uv->second, on, du, dv);
+                const gp_Vec normal = du.Crossed(dv);
+                if (normal.Magnitude() <= gp::Resolution()) {
+                    return false;
+                }
+                GProp_GProps props;
+                BRepGProp::SurfaceProperties(topoFace, props);
+                Data::ElementFingerprint::UpToFace upTo;
+                upTo.owner = ref->getNameInDocument();
+                upTo.boxMin = Base::Vector3d(x0, y0, z0);
+                upTo.boxMax = Base::Vector3d(x1, y1, z1);
+                upTo.area = props.Mass();
+                upTo.normal = Base::Vector3d(normal.X(), normal.Y(), normal.Z()).Normalize();
+                faces.push_back(std::move(upTo));
+            }
+        }
+    }
+    catch (const Standard_Failure&) {
+        return false;
+    }
+    catch (const Base::Exception&) {
+        return false;
+    }
+    return true;
+}
+
+const bool upToFacesRegistered = (App::setElementUpToFacesFunction(&upToFaces), true);
 }  // namespace
 
 FeatureExtrude::FeatureExtrude()
