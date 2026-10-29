@@ -48,7 +48,8 @@ def elementMap(shape, placeholders):
     def rename(match):
         return ";" + tags.get(match.group(1).lstrip("-"), match.group(1)) + ";"
 
-    return {k: re.sub(r";(-?\d+);", rename, str(v)) for k, v in shape.ElementReverseMap.items()}
+    # (an MLN section's id is a counter, not a tag: ops#502; it may equal an object's ID)
+    return {k: re.sub(r"(?<!MLN);(-?\d+);", rename, str(v)) for k, v in shape.ElementReverseMap.items()}
 
 
 class BooleanLocationsTest(unittest.TestCase):
