@@ -1225,6 +1225,18 @@ class Scenario:
             expect=repr(expectation),
         )
 
+        # 0. A target that stops with an error after the edit (a closed spine's stored start no
+        # longer matched, decision 180) has no shape of its own: a null one, whose bound box
+        # threw, or on a base feature its base's, passed through, where the expectation found
+        # nothing and threw. Where the expectation throws on such a target, no element is the
+        # expected one (bare): a reference still held on the passed-through shape by a valid
+        # owner is wrong, silently (the review of decision 186's change, T1); an invalid owner
+        # breaks, loudly, with the target's error (decision 186). Judged without an exception, a
+        # stopped target's verdict stands. It was valid at the build, whose references must be
+        # correct; one invalid there still throws, as a model's bug
+        stopped = step != "build" and target is not None and not target.isValid()
+        bare = False
+
         # 1. The stored reference. A partly resolved one (ops#127) is judged on the references
         # that resolve; its missing ones are expected.
         partialWarned = isinstance(expectation, PartialWarned)
@@ -1258,7 +1270,12 @@ class Scenario:
                 record["candidate_subs"] = candidates
                 stored = "partial" if candidates and set(subs) <= set(candidates) else "wrong"
         elif target is not None:
-            expected = expectedNames(expectation, shapeFor(target, expectation))
+            try:
+                expected = expectedNames(expectation, shapeFor(target, expectation))
+            except Exception:
+                if not stopped:
+                    raise
+                bare = True
             record["expected_subs"] = expected
             record["expected_names"] = [self._name(masker, mode, target, s) for s in expected]
             if stored is None:
@@ -1288,7 +1305,11 @@ class Scenario:
 
         # 2. The consumer's result
         outcome, detail = None, ""
-        if (
+        if bare:
+            # no outcome check can find its element either
+            outcome = None if owner.isValid() else "broken"
+            detail = f"{target.Name} stopped: {target.getStatusString()}"
+        elif (
             isinstance(expectation, Broken)
             or target is None
             or (ownOrBroken and stored == "broken")
@@ -1303,6 +1324,9 @@ class Scenario:
         elif not owner.isValid():
             outcome = "broken"
         result.verdict = combine(stored, outcome)
+        if bare and outcome == "broken":
+            # the owner reports it, whatever it held
+            result.verdict = "broken"
         warned = "Warning" in owner.State
         if partialWarned and result.verdict == "correct":
             if warned:
