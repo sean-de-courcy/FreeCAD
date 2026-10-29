@@ -27,7 +27,7 @@
 "PrimPrism6to5|bottom|V2s": {"axes": ["M4", "E1"], "classes": ["C"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#502", "tier": "F"},
 "PrimPrism6to5|top|V2s": {"axes": ["M4", "E1"], "classes": ["C"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#502", "tier": "F"},
 "PrimPrism6to8Side|side|V2s": {"axes": ["M4", "E1"], "classes": ["C"], "expect": "BROKEN", "expected": "broken", "found_by": "port", "issue": "ops#502", "tier": "F"},
-"PrimPrism6to8Taller|bottom|V2s": {"axes": ["M4", "E1"], "classes": ["C"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#502", "tier": "F"},
+"PrimPrism6to8Taller|bottom|V2s": {"axes": ["M4", "E1"], "classes": ["C"], "expect": "CORRECT", "expected": "broken", "found_by": "port", "issue": "ops#502", "tier": "F"},
 "PrimPrism6to8Taller|top|V2s": {"axes": ["M4", "E1"], "classes": ["C"], "expect": "CORRECT", "expected": "broken", "found_by": "port", "issue": "ops#502", "tier": "F"},
 "PrimPrism6to8|bottom|V2s": {"axes": ["M4", "E1"], "classes": ["C"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#502", "tier": "G"},
 "PrimPrism6to8|top|V2s": {"axes": ["M4", "E1"], "classes": ["C"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#502", "tier": "G"},
