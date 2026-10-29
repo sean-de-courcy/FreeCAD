@@ -1,0 +1,16 @@
+# Each platform's generation is migrated on the other: gen0 was saved on Windows and gen0-macos on
+# macOS (ops#538), both at naming revision 8. ops#468's revision gives IndexToldGroups' bend arcs and
+# their vertexes `<k>of<n>`, so ArcChamfer's Edge21 and BendPoint's Vertex17 are Missing at the open,
+# and the migration keeps a Missing reference only by its stored index checked against the saved
+# fingerprint, with no search by place (ElementSolverBatch.cpp, "index carry"). OCCT stores those arcs
+# at other indexes on the other platform, so there the two references break (loud): gen0 on macOS,
+# gen0-macos on Windows. Remove the entries when both generations are regenerated at ops#468's
+# revision or later (PLAN decision 120 (1): once per merge batch), or when ops#475 gives the carry a
+# place fallback.
+
+issue: ops#475
+
+reason: one platform's IndexToldGroups generation migrates on the other with 2 of 3 references broken (index carry without a place fallback)
+cli  PartDesignTests.Compat.TestCompatCorpus.TestCompatCorpus.testOlderGenerationMigration
+cli  PartDesignTests.Compat.TestCompatCorpus.TestCompatCorpus.testRecompute
+cli  PartDesignTests.Compat.TestCompatCorpus.TestCompatCorpus.testRoundTrip
