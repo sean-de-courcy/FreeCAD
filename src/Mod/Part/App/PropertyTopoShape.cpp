@@ -40,8 +40,10 @@
 #include <App/Document.h>
 #include <App/DocumentObject.h>
 #include <App/ElementMapOrder.h>
+#include <App/ElementNamingUtils.h>
 #include <App/ForkRelease.h>
 #include <App/GeoFeature.h>
+#include <App/MappedName.h>
 #include <App/NameTable.h>
 #include <App/ObjectIdentifier.h>
 #include <Base/Console.h>
@@ -53,7 +55,9 @@
 
 #include "PartFeature.h"
 #include "PartPyCXX.h"
+#include "PrimitiveFeature.h"
 #include "PropertyTopoShape.h"
+#include "TopoShapeMatch.h"
 #include "TopoShapePy.h"
 #include "PartFeature.h"
 
@@ -262,8 +266,63 @@ PropertyPartShape::PropertyPartShape() = default;
 
 PropertyPartShape::~PropertyPartShape() = default;
 
+namespace
+{
+
+// Whether every name of \a shape's map is one section with the IDX flag: an element named by its
+// index in a map-less input, which says nothing of its identity
+bool indexNamesOnly(const TopoShape& shape)
+{
+    if (shape.getElementMapSize() == 0) {
+        return false;
+    }
+    for (const auto& mapped : shape.getElementMap()) {
+        const std::string name = mapped.name.toString();
+        if (name.find(Data::MAPPER_FLAG_INDEX) == std::string::npos) {
+            return false;  // a history name, not decoded
+        }
+        const auto& sections = Data::MappedName::getDecodedMappedName(name);
+        if (sections.size() != 1 || !sections.front().hasMapperFlag(Data::MAPPER_FLAG_INDEX)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+}  // namespace
+
+bool PropertyPartShape::namesByMatch(const TopoShape& shape) const
+{
+    // Not while the document is read (an open, or an import: a copy-on-change copy, a paste). An
+    // open puts the saved map back after the shape is read, and an import's shape lost its map
+    // in the export: names given then are provisional, burn ids, and gave an imported copy a
+    // map before its first recompute, which a Link's retarget resolved against (ops#502)
+    auto owner = freecad_cast<Part::Feature*>(getContainer());
+    return owner && owner->isAttachedToDocument() && owner->getPropertyOfGeometry() == this
+        && owner->getSelectedHistoryAlgorithm() == App::HistoryAlgorithm::V2 && !shape.isNull()
+        && shape.getElementMapSize() == 0
+        && !owner->getDocument()->testStatus(App::Document::Restoring);
+}
+
+void PropertyPartShape::nameByMatch(TopoShape& shape, long tag, bool fixedOrder)
+{
+    Part::nameByMatch(shape, _Shape, tag, _NextElementId, fixedOrder);
+}
+
 void PropertyPartShape::setValue(const TopoShape& sh)
 {
+    if (namesByMatch(sh)) {
+        // A result without history (a primitive, a Python feature's shape): its elements take
+        // the ids of the elements of the value it replaces that they are (ops#502)
+        auto owner = static_cast<Part::Feature*>(getContainer());
+        TopoShape named(sh);
+        nameByMatch(named, owner->getID(), owner->isDerivedFrom<Part::Primitive>());
+        if (named.getElementMapSize() > 0) {
+            setValue(named);
+            return;
+        }
+        // Nothing to name (an empty compound): set as it is, not through the match again
+    }
     aboutToSetValue();
     _Shape = sh;
     auto obj = freecad_cast<App::DocumentObject*>(getContainer());
@@ -326,6 +385,12 @@ void PropertyPartShape::setValue(const TopoShape& sh)
 
 void PropertyPartShape::setValue(const TopoDS_Shape& sh, bool resetElementMap)
 {
+    if (TopoShape shape {sh}; namesByMatch(shape)) {
+        // Named by a match, not by index: even a map kept for the same topology (a Box's) would
+        // be attached by index (ops#502)
+        setValue(shape);
+        return;
+    }
     aboutToSetValue();
     auto obj = dynamic_cast<App::DocumentObject*>(getContainer());
     if (obj) {
@@ -428,6 +493,13 @@ void PropertyPartShape::setPyObject(PyObject* value)
     if (PyObject_TypeCheck(value, &(TopoShapePy::Type))) {
         auto shape = *static_cast<TopoShapePy*>(value)->getTopoShapePtr();
         auto owner = dynamic_cast<App::DocumentObject*>(getContainer());
+        if (owner && owner->getDocument() && indexNamesOnly(shape)) {
+            // A script builder's index map (`Part.makeCompound`, `Part.makeShell` of map-less
+            // inputs) is no map: the shape is named by the match as if it had none (the class C
+            // ruling of 10-28, ops#502)
+            // (a new shape: the cache would bring the names back at the next flush)
+            shape = TopoShape(shape.getShape());
+        }
         if (owner && owner->getDocument()) {
             if (shape.Tag || shape.getElementMapSize()) {
                 // We can't trust the meaning of the input shape tag, so we
@@ -475,6 +547,7 @@ App::Property* PropertyPartShape::Copy() const
     //        prop->_Shape = this->_Shape;
     prop->_Shape = this->_Shape;
     prop->_Ver = this->_Ver;
+    prop->_NextElementId = this->_NextElementId;
     return prop;
 }
 
@@ -484,6 +557,9 @@ void PropertyPartShape::Paste(const App::Property& from)
     if (prop) {
         setValue(prop->_Shape);
         _Ver = prop->_Ver;
+        // The counter only grows: an undo that brings back an older shape keeps the ids given
+        // since, so none is given twice (ops#502)
+        _NextElementId = std::max(_NextElementId, prop->_NextElementId);
     }
 }
 
@@ -646,6 +722,9 @@ void PropertyPartShape::Save(Base::Writer& writer) const
 
     writer.Stream() << " HistoryAlgorithm=\""
                     << App::getHistoryAlgorithm(_Shape.getHistoryAlgorithm()) << "\"";
+    if (_NextElementId > 0) {
+        writer.Stream() << " ElementIdNext=\"" << _NextElementId << "\"";
+    }
 
     std::string version;
     // If exporting, do not export mapped element name, but still make a mark
@@ -709,6 +788,7 @@ void PropertyPartShape::Restore(Base::XMLReader& reader)
     int hasher_idx = reader.getAttribute<int>("HasherIndex", -1);
     int save_hasher = reader.getAttribute<int>("SaveHasher", 0);
     int history_algorithm = reader.getAttribute<int>("HistoryAlgorithm", 0);
+    _NextElementId = std::max(_NextElementId, reader.getAttribute<long>("ElementIdNext", 0L));
 
     _Shape.setHistoryAlgorithm(App::getHistoryAlgorithm(history_algorithm));
     // The document's properties are restored before its objects

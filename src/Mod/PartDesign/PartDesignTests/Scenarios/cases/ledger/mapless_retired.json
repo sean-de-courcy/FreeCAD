@@ -1,0 +1,16 @@
+{
+"entries": {
+"BaseFeatureIndexShiftCornerCutMovedByWidth|circle_on_line|V2s": {"axes": ["M8", "E1", "E5"], "classes": ["C"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr384-r4", "issue": "ops#502", "tier": "F"},
+"MaplessFaceCornerCutMovedByWidth|circle_on_line|V2s": {"axes": ["M8", "E1", "E5"], "classes": ["C"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr384-r4", "issue": "ops#502", "tier": "F"},
+"MaplessFaceMovedByWidth|circle_on_line|V2s": {"axes": ["M8", "E5"], "classes": ["C"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr384-r4", "issue": "ops#502", "tier": "F"},
+"RetiredIdAtTheSamePlace|top|V2s": {"axes": ["M2"], "classes": ["C"], "expect": "BROKEN", "expected": "broken", "found_by": "ruling 10-28 (probe_names Sk)", "issue": "ops#502", "tier": "F"},
+"ScriptBoardsNearPairTraded|a_top|V2s": {"axes": ["M2", "X4"], "classes": ["C"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr502-r2c", "issue": "ops#502", "tier": "F"},
+"ScriptBoardsNearPairTraded|b_top|V2s": {"axes": ["M2", "X4"], "classes": ["C"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr502-r2c", "issue": "ops#502", "tier": "F"},
+"ScriptBoardsTradedNearTwinDeleted|a_top|V2s": {"axes": ["M2", "X4"], "classes": ["C"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr502-r2c", "issue": "ops#502", "tier": "F"},
+"ScriptBoardsTradedNearTwinDeleted|b_top|V2s": {"axes": ["M2", "X4"], "classes": ["C"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr502-r2c", "issue": "ops#502", "tier": "F"},
+"ScriptBoardsTradedOtherBoardDeleted|a_top|V2s": {"axes": ["M2", "X4"], "classes": ["C"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr502-r2c", "issue": "ops#502", "tier": "F"},
+"ScriptBoardsTradedOtherBoardDeleted|b_top|V2s": {"axes": ["M2", "X4"], "classes": ["C"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr502-r2c", "issue": "ops#502", "tier": "F"},
+"ScriptTwinsTraded|a_top|V2s": {"axes": ["M2", "X4"], "classes": ["C"], "expect": "CORRECT", "expected": "broken", "found_by": "attack set c_script trade", "issue": "ops#502", "tier": "F"},
+"ScriptTwinsTraded|b_top|V2s": {"axes": ["M2", "X4"], "classes": ["C"], "expect": "CORRECT", "expected": "broken", "found_by": "attack set c_script trade", "issue": "ops#502", "tier": "F"}
+}
+}

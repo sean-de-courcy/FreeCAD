@@ -42,23 +42,13 @@ TEST_F(FeatureMirroringTest, testXMirror)
     // Mirrored it around X from 0,0,0 -> 1,2,3  to  0,0,-3 -> 1,2,0
     EXPECT_TRUE(boxesMatch(bb, Base::BoundBox3d(0, 0, -3, 1, 2, 0)));
     // Assert correct element Map
-    //   the box has no names: each mirrored element gets its source element's unmapped name
-    //   under the box's tag, op MIR. Mirroring adds no section of its own.
+    //   the box's elements are named by a match (MLN, ops#502): a mirror keeps them as they are
     const auto& shape = _mirror->Shape.getShape();
-    auto boxTag = _boxes[0]->getID();
-    EXPECT_EQ(
-        unmappedName("Edge3", boxTag, "MIR").toString(),
-        "Edge3;_;" + std::to_string(boxTag) + ";MIR;0;E;0;IDX,SRC;_"
-    );
+    const auto& box = _boxes[0]->Shape.getShape();
     EXPECT_EQ(shape.getElementMapSize(), 26);
-    for (const char* type : {"Vertex", "Edge", "Face"}) {
-        for (int index = 1; index <= static_cast<int>(shape.countSubElements(type)); ++index) {
-            auto element = std::string(type) + std::to_string(index);
-            EXPECT_TRUE(
-                elementHasNames(shape, element.c_str(), {unmappedName(element, boxTag, "MIR")})
-            );
-        }
-    }
+    EXPECT_TRUE(allElementsNamed(box));
+    EXPECT_NE(box.getElementName("Edge3").name.toString().find(";MLN;"), std::string::npos);
+    EXPECT_TRUE(sameNamesPerElement(shape, box));
 }
 
 TEST_F(FeatureMirroringTest, testYMirrorWithExistingElementMap)

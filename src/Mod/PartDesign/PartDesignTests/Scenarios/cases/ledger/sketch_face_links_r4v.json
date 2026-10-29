@@ -1,10 +1,10 @@
 {
 "entries": {
 "ExternalFaceSlotClosedOuterSide|circle_on_line|V2s": {"axes": ["M8", "E1", "E5"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "design pr384-r4v", "issue": "ops#264", "tier": "F"},
-"ExternalFaceSlotClosedUnmappedWall|circle_on_line|V2s": {"axes": ["M8", "E1", "E5"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "design pr384-r4v", "issue": "ops#264", "tier": "F"},
+"ExternalFaceSlotClosedUnmappedWall|circle_on_line|V2s": {"axes": ["M8", "E1", "E5"], "classes": ["E"], "expect": "CORRECT", "expected": "broken", "found_by": "design pr384-r4v", "issue": "ops#264", "tier": "F"},
 "ExternalFaceSlotClosedWall|circle_on_line|V2s": {"axes": ["M8", "E1", "E5"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "design pr384-r4v", "issue": "ops#264", "tier": "F"},
 "ExternalFaceSlotOpenedFloor|circle_on_line|V2s": {"axes": ["M8", "E1", "E5"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "design pr384-r4v", "issue": "ops#264", "tier": "F"},
-"ExternalFaceSlotOpenedUnmappedFloor|circle_on_line|V2s": {"axes": ["M8", "E1", "E5"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "design pr384-r4v", "issue": "ops#264", "tier": "F"},
+"ExternalFaceSlotOpenedUnmappedFloor|circle_on_line|V2s": {"axes": ["M8", "E1", "E5"], "classes": ["E"], "expect": "CORRECT", "expected": "broken", "found_by": "design pr384-r4v", "issue": "ops#264", "tier": "F"},
 "ExternalFaceSlotOpenedWall|circle_on_line|V2s": {"axes": ["M8", "E1", "E5"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "design pr384-r4v", "issue": "ops#264", "tier": "F"}
 }
 }

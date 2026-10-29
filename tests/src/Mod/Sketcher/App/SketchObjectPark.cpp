@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <memory>
 
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
@@ -18,6 +19,7 @@
 #include <TopoDS_Edge.hxx>
 
 #include <App/Application.h>
+#include <App/ElementMap.h>
 #include <App/Document.h>
 #include <Base/Console.h>
 #include <Base/FileInfo.h>
@@ -179,6 +181,32 @@ public:
     std::vector<std::string> warnings;
     std::vector<std::string> errors;
 };
+
+// The ball's shapes named by index, as a producer whose names follow the index would name them.
+// The tests' ball loses its face and gets it back under the same name; a Part::Feature's
+// map-less shape is named by a match (ops#502), where a face that comes back after a vertex
+// takes a fresh id and its links stay missing
+void setNamedByIndex(Part::Feature* ball, const TopoDS_Shape& shape)
+{
+    Part::TopoShape named(shape);
+    named.Tag = ball->getID();
+    named.setHistoryAlgorithm(App::HistoryAlgorithm::V2);
+    named.initCache(1);
+    named.resetElementMap(std::make_shared<Data::ElementMap>());
+    const std::vector<Data::MappedName> noNames;
+    for (const auto type : {TopAbs_VERTEX, TopAbs_EDGE, TopAbs_FACE}) {
+        const std::string typeName = Part::TopoShape::shapeName(type);
+        for (int i = 1; i <= static_cast<int>(named.countSubShapes(type)); ++i) {
+            const std::string section = Data::MappedName::makeEncodedSection(
+                {}, noNames, std::to_string(named.Tag), "BALL", std::to_string(i),
+                typeName[0], std::string("0"), {}, noNames);
+            named.setElementName(Data::IndexedName::fromConst(typeName.c_str(), i),
+                                 Data::MappedName(section),
+                                 named.Tag);
+        }
+    }
+    ball->Shape.setValue(named);
+}
 
 }  // namespace
 
@@ -715,14 +743,14 @@ void SketchObjectParkTest::reopenWithPendingRepair(Sketcher::SketchObject*& sket
     sketch = getObject();
     // a sphere of radius 10 about (0, 0, 6) crosses the sketch plane in a circle of radius 8
     auto* ball = static_cast<Part::Feature*>(doc->addObject("Part::Feature", "Ball"));
-    ball->Shape.setValue(BRepPrimAPI_MakeSphere(gp_Pnt(0, 0, 6), 10).Shape());
+    setNamedByIndex(ball, BRepPrimAPI_MakeSphere(gp_Pnt(0, 0, 6), 10).Shape());
     doc->recompute();
     ASSERT_GE(sketch->addExternal(box, edge.c_str(), false, false), 0);
     ASSERT_GE(sketch->addExternal(ball, "Face1", false, true), 0);
     doc->recompute();
     ASSERT_EQ(sketch->ExternalTypes.getValues(), std::vector<long>({0, 1}));
     // the ball loses its face: its saved circle can't tell its type
-    ball->Shape.setValue(BRepBuilderAPI_MakeVertex(gp_Pnt(0, 0, 6)).Shape());
+    setNamedByIndex(ball, BRepBuilderAPI_MakeVertex(gp_Pnt(0, 0, 6)).Shape());
     doc->recompute();
     // a list saved before ops#140: the ball reads a projection by index
     sketch->ExternalTypes.setValues({0, 0, 1});
@@ -755,11 +783,16 @@ TEST_F(SketchObjectParkTest, linkAppendedWhileARepairIsPendingIsAProjection)
     }
     ASSERT_EQ(sketch->ExternalTypes.getValues(), std::vector<long>({0, 0, -1}));
 
+    // with the links' mapped names (shadows): without them the ball's missing face, which has a
+    // mapped name, would be re-set by its index name alone, and the old links would read as
+    // changed
     auto objs = sketch->ExternalGeometry.getValues();
     auto subs = sketch->ExternalGeometry.getSubValues();
+    auto shadows = sketch->ExternalGeometry.getShadowSubs();
     objs.push_back(box);
     subs.push_back(otherEdge);
-    sketch->ExternalGeometry.setValues(objs, subs);
+    shadows.emplace_back();
+    sketch->ExternalGeometry.setValues(std::move(objs), std::move(subs), std::move(shadows));
     EXPECT_EQ(sketch->ExternalTypes.getValues(), std::vector<long>({0, 0, 0, -1}));
     doc->recompute();
     ASSERT_EQ(sketch->externalGeometryIds(2).size(), 1U);
@@ -1190,14 +1223,14 @@ TEST_F(SketchObjectParkTest, failedAddOfTheOtherKindKeepsEveryLinkWaiting)
     ASSERT_FALSE(above.empty());
     // a sphere of radius 10 about (0, 0, 6) crosses the sketch plane in a circle of radius 8
     auto* ball = static_cast<Part::Feature*>(doc->addObject("Part::Feature", "Ball"));
-    ball->Shape.setValue(BRepPrimAPI_MakeSphere(gp_Pnt(0, 0, 6), 10).Shape());
+    setNamedByIndex(ball, BRepPrimAPI_MakeSphere(gp_Pnt(0, 0, 6), 10).Shape());
     doc->recompute();
     ASSERT_GE(sketch->addExternal(box, above.c_str(), false, false), 0);
     ASSERT_GE(sketch->addExternal(ball, "Face1", false, true), 0);
     doc->recompute();
     ASSERT_EQ(sketch->ExternalTypes.getValues(), std::vector<long>({0, 1}));
     // the ball loses its face: its saved circle is missing and can't tell its type
-    ball->Shape.setValue(BRepBuilderAPI_MakeVertex(gp_Pnt(0, 0, 6)).Shape());
+    setNamedByIndex(ball, BRepBuilderAPI_MakeVertex(gp_Pnt(0, 0, 6)).Shape());
     doc->recompute();
     ASSERT_EQ(sketch->ExternalGeo.getSize(), 4);
     // the box edge's line as an earlier open saved it, built from a guess
@@ -1214,7 +1247,7 @@ TEST_F(SketchObjectParkTest, failedAddOfTheOtherKindKeepsEveryLinkWaiting)
     ASSERT_EQ(sketch->ExternalGeo.getSize(), 4);
     ASSERT_TRUE(ExternalGeometryFacade::getFacade(sketch->getGeometry(GeoEnum::RefExt - 1))
                     ->testFlag(ExternalGeometryExtension::Missing));
-    ball->Shape.setValue(BRepPrimAPI_MakeSphere(gp_Pnt(0, 0, 6), 10).Shape());
+    setNamedByIndex(ball, BRepPrimAPI_MakeSphere(gp_Pnt(0, 0, 6), 10).Shape());
 
     doc->openTransaction("Intersection");
     EXPECT_EQ(sketch->addExternal(box, above.c_str(), false, true), -1);
@@ -1578,12 +1611,13 @@ App::DocumentObject* openWithItsElementAbsent(App::Document*& doc,
                                               App::DocumentObject*& box)
 {
     auto* rod = static_cast<Part::Feature*>(doc->addObject("Part::Feature", "Rod"));
-    rod->Shape.setValue(BRepBuilderAPI_MakeEdge(gp_Pnt(0, 0, 5), gp_Pnt(10, 0, 5)).Edge());
+    // named by index, as the ball (setNamedByIndex: ops#502)
+    setNamedByIndex(rod, BRepBuilderAPI_MakeEdge(gp_Pnt(0, 0, 5), gp_Pnt(10, 0, 5)).Edge());
     doc->recompute();
     EXPECT_GE(sketch->addExternal(rod, "Edge1", false, false), 0);
     doc->recompute();
     EXPECT_EQ(sketch->ExternalGeo.getSize(), 3);
-    rod->Shape.setValue(BRepBuilderAPI_MakeVertex(gp_Pnt(0, 0, 5)).Shape());
+    setNamedByIndex(rod, BRepBuilderAPI_MakeVertex(gp_Pnt(0, 0, 5)).Shape());
     sketch->ExternalTypes.setValues({0, 0});
     doc->purgeTouched();
     auto warnings = saveAndReopen(doc, sketch, box);
@@ -1599,8 +1633,8 @@ App::DocumentObject* openWithItsElementAbsent(App::Document*& doc,
 
 void giveTheRodItsEdge(App::DocumentObject* rod)
 {
-    static_cast<Part::Feature*>(rod)->Shape.setValue(
-        BRepBuilderAPI_MakeEdge(gp_Pnt(0, 0, 5), gp_Pnt(10, 0, 5)).Edge());
+    setNamedByIndex(static_cast<Part::Feature*>(rod),
+                    BRepBuilderAPI_MakeEdge(gp_Pnt(0, 0, 5), gp_Pnt(10, 0, 5)).Edge());
 }
 }  // namespace
 
@@ -1808,7 +1842,7 @@ TEST_F(SketchObjectParkTest, missingLinkAnOpenCouldntTellDroppedSavedAndLinkedAg
     ASSERT_NE(sketch, nullptr);
     auto* ball = static_cast<Part::Feature*>(doc->getObject("Ball"));
     ASSERT_NE(ball, nullptr);
-    ball->Shape.setValue(BRepPrimAPI_MakeSphere(gp_Pnt(0, 0, 6), 10).Shape());
+    setNamedByIndex(ball, BRepPrimAPI_MakeSphere(gp_Pnt(0, 0, 6), 10).Shape());
     sketch->touch();
     doc->recompute();
 
@@ -1862,7 +1896,7 @@ void appendTheBallAgainAndExpectItMatched(App::Document* doc,
 {
     auto* ball = static_cast<Part::Feature*>(doc->getObject("Ball"));
     ASSERT_NE(ball, nullptr);
-    ball->Shape.setValue(BRepPrimAPI_MakeSphere(gp_Pnt(0, 0, 6), 10).Shape());
+    setNamedByIndex(ball, BRepPrimAPI_MakeSphere(gp_Pnt(0, 0, 6), 10).Shape());
     sketch->ExternalGeometry.setValues(std::vector<App::DocumentObject*> {box, ball},
                                        std::vector<std::string> {boxSub, "Face1"});
     sketch->touch();

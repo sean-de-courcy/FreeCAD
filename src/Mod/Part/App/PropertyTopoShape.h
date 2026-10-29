@@ -113,18 +113,36 @@ public:
 
     void afterRestore() override;
 
+    /** Names \a shape, a result without an element map, by a verified match against this
+     * property's value (Part::nameByMatch(), FreeCAD-CH, ops#502), with ids from this property's
+     * counter. setValue() does it for an owner's geometry; a PartDesign primitive names its tool
+     * with it before the boolean.
+     * @param tag The tag of the names and of \a shape
+     * @param fixedOrder Whether the producer's construction order is fixed (a primitive)
+     */
+    void nameByMatch(TopoShape& shape, long tag, bool fixedOrder);
+
+    /// The next id the counter of nameByMatch() gives: it only grows, across undo and restore too
+    long getNextElementId() const
+    {
+        return _NextElementId;
+    }
+
     friend class Feature;
 
 private:
     void saveToFile(Base::Writer& writer) const;
     void loadFromFile(Base::Reader& reader);
     void loadFromStream(Base::Reader& reader);
+    /// Whether setValue() names \a shape by nameByMatch(): the owner's geometry, without a map
+    bool namesByMatch(const TopoShape& shape) const;
 
 private:
     TopoShape _Shape;
     std::string _Ver;
     mutable int _HasherIndex = 0;
     mutable bool _SaveHasher = false;
+    long _NextElementId = 0;
 };
 
 struct PartExport ShapeHistory

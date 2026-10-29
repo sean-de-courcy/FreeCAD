@@ -1080,12 +1080,14 @@ class PartOffsetCavityCorner(Scenario):
     """Part workbench: a Box 20 x 10 x 10 and its Part::Offset by 2 (Join=Intersection; every
     element a same-type GEN of the box's), the box cut out of it (Part::Cut: a closed hollow), and
     a second Part::Cut with a slot box. The edit moves the slot onto x 19.5..21, which removes the
-    cavity's corner (20, 0, 10); the slot's corner (19.5, 0, 10) stands 0.5 mm away: a warned
-    guess to it. The cut names the cavity from the box, so the offset's corner
+    cavity's corner (20, 0, 10); the slot's corner (19.5, 0, 10) stands 0.5 mm away: the solver
+    made a warned guess to it while the box was index-named. The cut names the cavity from the box, so the offset's corner
     (`<box corner>;OFS;V;GEN`, 3.46 mm away) never held the cavity corner's name, and the guess
     was the same before ops#358: a Part::Offset alone holds only the copy, and with Fill it is
     invalid in this build (`notes/solver-offset-gen.md` section 2), so Part::Offset meets the
-    rule only through models like this one."""
+    rule only through models like this one. Since the box is named by a verified match (MLN,
+    ops#502), the cavity corner's name is the box's vertex id, which no element of the cut holds
+    after the edit: the solver breaks it (invariant I-C5), never guesses by place."""
 
     area = "OffsetCopies"
     REFS = ("sketch_corner",)
@@ -1120,4 +1122,4 @@ class PartOffsetCavityCorner(Scenario):
     def expectCorner(self):
         if self.stepName is None:
             return vertex((20, 0, 10))
-        return Guessed(vertex((19.5, 0, 10))) if self.solver else BROKEN
+        return BROKEN

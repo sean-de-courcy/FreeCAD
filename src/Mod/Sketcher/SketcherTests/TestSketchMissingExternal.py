@@ -1276,6 +1276,13 @@ class TestSketchFaceLinkPairing(unittest.TestCase):
             "Part::FaceMakerBullseye",
         )
         self.doc.recompute()
+        # C2 (ops#502): the face is named by a verified match; edited in place it matches only by
+        # overlap, and no other face anchors it (decision 174), so it gets a fresh id and the link
+        # breaks with the face as its candidate (right -> loud); picked again, the pairing runs
+        self.assertFalse(self.sketch.isValid())
+        self.assertIn("Missing", self.sketch.getStatusString())  # (the solver says the id is gone)
+        App.repairReference(self.sketch, "ExternalGeometry", 0, "Face1", True)
+        self.doc.recompute()
         self.assertEqual(len(self.lines()), 8)
         self.assertStaysOn("y", 10, (10, 20))
 

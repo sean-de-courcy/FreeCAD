@@ -35,6 +35,7 @@ add_executable(Part_tests_run
         TopoShapeMakeShapeWithElementMap.cpp
         TopoShapeMapper.cpp
         TopoShapeMakeShape.cpp
+        TopoShapeMatch.cpp
         TopoShapeRepair.cpp
         WireJoiner.cpp
 )
