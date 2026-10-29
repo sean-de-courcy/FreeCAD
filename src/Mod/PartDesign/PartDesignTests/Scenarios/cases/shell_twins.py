@@ -85,10 +85,11 @@ def ellipseShell(z, cx=3, cy=3, a=4, b=1, rot=0.0, border=(-10, -10, 20, 10)):
     edge_ = Part.Ellipse(V(cx, cy, z), a, b).toShape()
     if rot:
         edge_.rotate(V(cx, cy, z), V(0, 0, 1), rot)
-    # Cut, as slotShell()'s plate (ops#522): a face made from both wires as they run kept the
-    # hole as material and the plate around it as none (its area 600 + 4 pi, the point (-9, 9)
-    # outside it)
-    plate = Part.Face(outer(z, *border)).cut(Part.Face(Part.Wire([edge_]))).Faces[0].toNurbs().Faces[0]
+    plate = (
+        Part.Face(Part.Plane(V(0, 0, z), V(0, 0, 1)), [outer(z, *border), Part.Wire([edge_])])
+        .toNurbs()
+        .Faces[0]
+    )
     fill = Part.Face(Part.Wire([edge_])).toNurbs().Faces[0]
     return Part.Shell([plate, fill])
 
