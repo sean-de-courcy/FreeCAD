@@ -1071,12 +1071,14 @@ std::vector<Piece> piecesOf(const Topology& topology)
     return pieces;
 }
 
-// Two sizes alike, generously: congruence over-approximated only adds loud
-bool sizesAlike(double a, double b)
+// Two sizes alike. Generously where congruence over-approximated only adds loud (R2': twins built
+// apart, a B-spline's or a cylinder's with another seam, measure a little apart: the review's T3).
+// Strictly for P1's classes (decision 188): a near-twin taken into a class unbalances its counts,
+// and P1 then retires nothing (a trade with the near-twin deleted stayed silent)
+bool sizesAlike(double a, double b, bool strict = false)
 {
-    // (twins built apart, a B-spline's or a cylinder's with another seam, measure a little apart:
-    // the review's T3)
-    return std::abs(a - b) <= std::max(1e-3, 1e-4 * std::max(std::abs(a), std::abs(b)));
+    const double size = std::max(std::abs(a), std::abs(b));
+    return std::abs(a - b) <= (strict ? std::max(1e-4, 1e-6 * size) : std::max(1e-3, 1e-4 * size));
 }
 
 // What congruence compares of a set of elements: the vertex count, and the edges' and faces'
@@ -1104,12 +1106,12 @@ struct Congruence
         std::sort(faces.begin(), faces.end());
     }
 
-    bool same(const Congruence& other) const
+    bool same(const Congruence& other, bool strict = false) const
     {
-        auto alike = [](const auto& a, const auto& b) {
+        auto alike = [strict](const auto& a, const auto& b) {
             return a.size() == b.size()
-                && std::equal(a.begin(), a.end(), b.begin(), [](const auto& x, const auto& y) {
-                       return x.first == y.first && sizesAlike(x.second, y.second);
+                && std::equal(a.begin(), a.end(), b.begin(), [strict](const auto& x, const auto& y) {
+                       return x.first == y.first && sizesAlike(x.second, y.second, strict);
                    });
         };
         return vertexes == other.vertexes && alike(edges, other.edges) && alike(faces, other.faces);
@@ -1193,8 +1195,16 @@ private:
     // the new pieces congruent with it) are paired by their order in the class; when the counts
     // are equal and some old piece's place holds a new piece of the class other than its partner,
     // no reading is verified: a trade, a reorder and a slide by the pitch are the same shapes.
-    // Added or removed pieces, and a twin moved to a free place, are no permutation.
+    // Added or removed pieces, and a twin moved to a free place, are no permutation. The classes
+    // are formed twice, strictly (a near-twin is no twin: decision 188) and generously (twins built
+    // apart measure a little apart: the review's T3); either one's permutation retires.
     void retirePermutedTwins()
+    {
+        retirePermutedTwins(true);
+        retirePermutedTwins(false);
+    }
+
+    void retirePermutedTwins(bool strict)
     {
         if (oldPieces.size() < 2 || newPieces.empty()) {
             return;
@@ -1209,7 +1219,7 @@ private:
         for (int k = 0; k < static_cast<int>(oldPieces.size()); ++k) {
             Congruence congruence(before, oldPieces[k].elements);
             auto found = std::find_if(classes.begin(), classes.end(), [&](const Class& c) {
-                return c.shape.same(congruence);
+                return c.shape.same(congruence, strict);
             });
             if (found == classes.end()) {
                 classes.push_back({std::move(congruence), {k}, {}});
@@ -1221,7 +1231,7 @@ private:
         for (int n = 0; n < static_cast<int>(newPieces.size()); ++n) {
             Congruence congruence(after, newPieces[n].elements);
             auto found = std::find_if(classes.begin(), classes.end(), [&](const Class& c) {
-                return c.shape.same(congruence);
+                return c.shape.same(congruence, strict);
             });
             if (found != classes.end()) {
                 found->news.push_back(n);
