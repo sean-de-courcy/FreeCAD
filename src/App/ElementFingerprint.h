@@ -128,7 +128,9 @@ struct AppExport ElementFingerprint
     /// document, the face's bounding box and area in that object's own frame (its placement
     /// removed), its unit normal there at the piece's point, and the centre of mass of its outer
     /// wire there (the two halves of a square split along a diagonal have the same box, area and
-    /// normal; a plate whose hole moved keeps its outer wire).
+    /// normal; a plate whose hole moved keeps its outer wire). ops#524 (PLAN decision 182): the
+    /// foot, where the line along the sweep through the piece's point meets the face, in the
+    /// owner's frame too; empty in a record before it.
     struct UpToFace
     {
         std::string owner;
@@ -137,11 +139,13 @@ struct AppExport ElementFingerprint
         double area = 0.0;
         Base::Vector3d normal;
         Base::Vector3d wireCentre;
+        std::optional<Base::Vector3d> foot;
 
         friend bool operator==(const UpToFace& a, const UpToFace& b)
         {
             return a.owner == b.owner && a.boxMin == b.boxMin && a.boxMax == b.boxMax
-                && a.area == b.area && a.normal == b.normal && a.wireCentre == b.wireCentre;
+                && a.area == b.area && a.normal == b.normal && a.wireCentre == b.wireCentre
+                && a.foot == b.foot;
         }
     };
 
