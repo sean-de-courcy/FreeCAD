@@ -2127,6 +2127,51 @@ bool sameUpToFaces(
         && matchedOnce(saved, all, alike);
 }
 
+/* True if the far piece named \a name, whose saved fingerprint is \a saved and whose current one
+ * is \a now, slid within the one up-to face it lay on (ops#524, PLAN decision 182, N1): it is
+ * marked by that face alone (a cap: isMarkedCap() with faceAlone; an edge piece: its one mark a
+ * face), one up-to face was saved with its foot, exactly one lies under its point now and it is
+ * the saved one (sameUpToFaces()), and the straight path from the saved foot to the point now,
+ * seen along the sweep in that face's owner's frame, stays inside it (\a input.upToPathInside).
+ * A same-face test alone is wrong: a piece on the plate left of a hole, replaced by the one right
+ * of it (the same plate, alone on it, the same name), crosses the hole. The caller checks the
+ * twins.
+ */
+bool slidWithinUpToFace(
+    const SolveInput& input,
+    const ElementFingerprint& saved,
+    const std::string& name,
+    const ElementFingerprint& now,
+    double eps
+)
+{
+    if (!input.upToFacesAt || !input.upToPathInside || saved.upToFaces.size() != 1
+        || !saved.upToFaces.front().foot || saved.type != now.type) {
+        return false;
+    }
+    if (saved.type == 'F') {
+        if (!isMarkedCap(name, true)) {
+            return false;
+        }
+    }
+    else {
+        const auto marks = pieceMarks(name);
+        if (saved.type != 'E' || marks.size() != 1) {
+            return false;
+        }
+        const auto markSections = NameAncestry::splitSections(marks.front());
+        if (markSections.empty() || decodeSection(markSections.back()).elementType != 'F') {
+            return false;
+        }
+    }
+    const auto point = upToPointOf(now);
+    std::vector<ElementFingerprint::UpToFace> under;
+    std::vector<ElementFingerprint::UpToFace> every;
+    return point && input.upToFacesAt(name, *point, under, every) && under.size() == 1
+        && sameUpToFaces(saved.upToFaces, under, every, eps, input.tolerances)
+        && input.upToPathInside(name, saved.upToFaces.front(), *point);
+}
+
 /* True if \a name's element is \a oldName's piece of a far edge after others of its pieces went
  * (PR 366 round 3): the names are the same but in one section, a marked piece's in both (PRJ,
  * MOD, ORD), with the same marks, where the duplicate counter (count (count - 1) / 2 + place,
@@ -2943,6 +2988,40 @@ bool isMarkedPieceOf(std::string_view name, long tag)
     });
 }
 
+long projectionTag(std::string_view name)
+{
+    for (const auto section : NameAncestry::splitSections(name)) {
+        const DecodedMappedSection& decoded = decodeSection(section);
+        if (!decoded.hasMapperFlag(MAPPER_FLAG_PROJECTION) || !hasTag(decoded)) {
+            continue;
+        }
+        long tag = 0;
+        for (const char c : decoded.iterationTag) {
+            if (c < '0' || c > '9' || tag > 100000000L) {
+                return 0;
+            }
+            tag = tag * 10 + (c - '0');
+        }
+        return tag;
+    }
+    return 0;
+}
+
+std::optional<Base::Vector3d> upToPointOf(const ElementFingerprint& fingerprint)
+{
+    if (fingerprint.type == 'E' && !fingerprint.outline.empty()) {
+        const auto& outline = fingerprint.outline;
+        if (outline.size() == 2) {
+            return (outline.front() + outline.back()) / 2.0;
+        }
+        return outline[outline.size() / 2];
+    }
+    if (fingerprint.inside) {
+        return fingerprint.inside;
+    }
+    return fingerprint.center;
+}
+
 bool isCounterSiblingName(std::string_view name, std::string_view other, bool copySiblings)
 {
     return isCounterSibling(name, other, copySiblings);
@@ -3410,8 +3489,16 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             // seam cuts into pieces of the same shape there. A set moved with the plates that cut
             // it can't be told from that by the target alone; only the cap beside the hit (below)
             // decides then, loudly when the old piece lies beyond it
+            // ops#524 (PLAN decision 182, N2): the sweep of the extrusion that made the hit, which
+            // a later feature (the Tip) passes on without one of its own
+            std::optional<Base::Vector3d> sweep = input.sweep;
+            if (input.sweepOf && isMarkedPiece(hitName)) {
+                if (auto own = input.sweepOf(hitName)) {
+                    sweep = own;
+                }
+            }
             const bool keptShapeBeside = twinOutlines && twinsKeptShape && saved.type == 'E'
-                && input.sweep && input.facesOf;
+                && sweep && input.facesOf;
             const bool twinsMayDepart = twins.empty() || (twinOutlines && !twinsKeptShape)
                 || keptShapeBeside;
             bool departed = false;
@@ -3426,7 +3513,7 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 std::optional<Base::Vector3d> edgeWay;
                 auto apartFromOld = [&](const std::vector<Base::Vector3d>& outline) {
                     if (saved.type != 'E') {
-                        return outlinesApart(saved.outline, outline, eps, input.sweep).value_or(false);
+                        return outlinesApart(saved.outline, outline, eps, sweep).value_or(false);
                     }
                     if (!edgeWay) {
                         return false;
@@ -3439,13 +3526,13 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 // \a index (apartBesideLine()), seen along the sweep; set when it decided the hit
                 bool besideDecided = false;
                 auto apartBeside = [&](const std::string& index) {
-                    if (saved.type != 'E' || !input.sweep || !input.facesOf) {
+                    if (saved.type != 'E' || !sweep || !input.facesOf) {
                         return false;
                     }
                     const auto& piece = fingerprintOfIndex(index).outline;
                     for (const auto& face : input.facesOf(index)) {
                         const auto& outline = fingerprintOfIndex(face).outline;
-                        if (apartBesideLine(saved.outline, outline, piece, *input.sweep, eps)) {
+                        if (apartBesideLine(saved.outline, outline, piece, *sweep, eps)) {
                             return true;
                         }
                     }
@@ -3539,7 +3626,7 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                     }
                 }
                 else if (outlines) {
-                    outlinesSay = outlinesApart(saved.outline, now.outline, eps, input.sweep);
+                    outlinesSay = outlinesApart(saved.outline, now.outline, eps, sweep);
                 }
                 if (outlinesSay) {
                     departed = *outlinesSay;
@@ -3572,6 +3659,13 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                                return apartFromOld(outlineOf(k))
                                    || (besideDecided && apartBeside(pool.elements[k].index));
                            });
+                }
+                // ops#524 (PLAN decision 182, N1): a lone piece, without twins and alone on its
+                // up-to face, that slid within that face (the same face, the path from its old
+                // foot to its point inside it) is the piece the name held: the name stands
+                // quietly (decision 127 (3)). Its old place left bare, nothing else sits there
+                if (departed && twins.empty()) {
+                    departed = !slidWithinUpToFace(input, saved, hitName, now, eps);
                 }
             }
             if (place.empty() && !departed && !closedTwin) {
@@ -5165,7 +5259,22 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                         }
                     }
                 }
-                if (marked != 1 || holders.size() != 1 || !holdsSavedCentre(holders.front())) {
+                // ops#524 (PLAN decision 182, N2): or the piece slid within its up-to face (N1),
+                // off the saved centre: an edge piece that moved with its profile along its plate
+                auto slidWithinFace = [&](int k) {
+                    const auto& names = pool.elements[k].names;
+                    const auto name = std::find_if(names.begin(), names.end(), [&](const auto& n) {
+                        return isFewerPiecesOf(n, oldName);
+                    });
+                    return centred && name != names.end()
+                        && slidWithinUpToFace(input,
+                                              *centred,
+                                              *name,
+                                              fingerprintOfIndex(pool.elements[k].index),
+                                              eps);
+                };
+                if (marked != 1 || holders.size() != 1
+                    || !(holdsSavedCentre(holders.front()) || slidWithinFace(holders.front()))) {
                     holders.clear();
                 }
                 else {
@@ -5198,11 +5307,10 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 auto onSameUpToFaces = [&] {
                     std::vector<ElementFingerprint::UpToFace> now;
                     std::vector<ElementFingerprint::UpToFace> every;
-                    return centred && !centred->upToFaces.empty()
+                    const auto point = centred ? upToPointOf(*centred) : std::nullopt;
+                    return point && !centred->upToFaces.empty()
                         && isMarkedPieceOf(oldName, input.targetTag)
-                        && input.upToFacesAt(centred->inside ? *centred->inside : *centred->center,
-                                             now,
-                                             every)
+                        && input.upToFacesAt(oldName, *point, now, every)
                         && sameUpToFaces(centred->upToFaces, now, every, eps, input.tolerances);
                 };
                 // The edge or cap made whole holds the saved point itself, as the save took it on

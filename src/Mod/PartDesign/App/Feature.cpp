@@ -41,7 +41,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <mutex>
 #include <set>
+#include <unordered_set>
 #include <vector>
 
 #include "App/Datums.h"
@@ -59,6 +61,7 @@
 #include "FeaturePy.h"
 #include "Body.h"
 #include "FeatureBoolean.h"
+#include "FeatureExtrude.h"
 #include "ShapeBinder.h"
 
 #include <BRep_Builder.hxx>
@@ -106,7 +109,23 @@ Base::Placement getDisplayedObjectPlacement(const App::DocumentObject* object)
     return getContainingGeoFeatureGroupPlacement(object) * getObjectPlacement(object);
 }
 
+// ops#524 (PLAN decision 182, N2): the features whose Placement was set during their own
+// recompute (positionByPrevious(), positionByBaseFeature(), an attachment) before the shape made
+// under it. Part::Feature::onChanged() gives the old shape the new placement, and the references to
+// the feature are solved in between (ops#522's window). By address: an entry left by a deleted
+// feature only makes a later one at its address refuse until its first shape.
+std::mutex placedAheadMutex;
+std::unordered_set<const Feature*> placedAhead;
+// The feature whose Placement change is being passed to its shape (its nested Shape change)
+thread_local const Feature* placingShape = nullptr;
+
 }  // namespace
+
+bool placedAheadOfShape(const Feature* feature)
+{
+    std::lock_guard<std::mutex> lock(placedAheadMutex);
+    return placedAhead.count(feature) > 0;
+}
 
 bool getPDRefineModelParameter()
 {
@@ -677,7 +696,28 @@ void Feature::onChanged(const App::Property* prop)
             }
         }
     }
-    Part::Feature::onChanged(prop);
+    // ops#524: a Placement set while recomputing runs ahead of the shape until the next shape
+    // made (placedAheadOfShape()); the shape's own transform, set from it, isn't one
+    if (prop == &Placement && isRecomputing()) {
+        std::lock_guard<std::mutex> lock(placedAheadMutex);
+        placedAhead.insert(this);
+    }
+    else if (prop == &Shape && placingShape != this) {
+        std::lock_guard<std::mutex> lock(placedAheadMutex);
+        placedAhead.erase(this);
+    }
+    const Feature* outer = placingShape;
+    if (prop == &Placement) {
+        placingShape = this;
+    }
+    try {
+        Part::Feature::onChanged(prop);
+    }
+    catch (...) {
+        placingShape = outer;
+        throw;
+    }
+    placingShape = outer;
 }
 
 int Feature::countSolids(const TopoDS_Shape& shape, TopAbs_ShapeEnum type)

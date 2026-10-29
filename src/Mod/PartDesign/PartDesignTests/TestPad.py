@@ -3346,6 +3346,74 @@ class TestPad(unittest.TestCase):
                     finally:
                         FreeCAD.closeDocument(doc.Name)
 
+    def testPadUpToAHoledShellLonePieceSlidAlongItsFace(self):
+        # ops#524 (PLAN decision 182): shell_twins' MoveAcrossHalf. Up to the plate with the hole
+        # x -1..1, y -2..2 and its fill, A (x -3..0, y -0.5..0.5) has a far cap piece on the plate
+        # (L, x -3..-1) and one on the fill (M, x -1..0), each alone on its face. A moves to x
+        # 0.5..3.5, by its geometry or by its sketch's attachment offset: M's piece carries on in
+        # the fill at x 0.5..1, the path from its old place staying on the fill (N1), and its datum
+        # follows it quietly; L's piece is gone (the plate's piece right of the hole takes its
+        # name, but the path crosses the hole), and its datum says so. The datums on the Pad
+        # itself (N1), and on a later SubtractiveBox, the Tip, which passes the pieces on with
+        # their names and has no up-to faces of its own (N2). B (x 8..14, y -5..-3) holds the
+        # box. For the Pad and the Pocket
+        for kind in ("Pad", "Pocket"):
+            for edit in ("geometry", "offset"):
+                for onTip in (False, True):
+                    with self.subTest(kind=kind, edit=edit, onTip=onTip):
+                        doc = FreeCAD.newDocument("PadUpToAHoledShellLonePieceSlidAlongItsFace")
+                        try:
+                            feature, z = capsUpToAFreeformPlate(
+                                doc,
+                                kind,
+                                hole=True,
+                                capA=(-3, -0.5, 0, 0.5),
+                                block=(-8, -8, 18, 9),
+                                withB=False,
+                            )
+                            sketch = feature.Profile[0]
+                            dimensionedRectangle(sketch, "B", 8, -5, 14, -3)
+                            doc.recompute()
+                            self.assertTrue(feature.isValid(), feature.getStatusString())
+                            target = feature
+                            body = feature.getParentGeoFeatureGroup()
+                            if onTip:
+                                target = body.newObject("PartDesign::SubtractiveBox", "Tip")
+                                target.Length = target.Width = target.Height = 1
+                                target.MapMode = "Deactivated"
+                                target.AttachmentOffset = FreeCAD.Placement()
+                                target.Placement = FreeCAD.Placement(
+                                    FreeCAD.Vector(12, -4.5, 2), FreeCAD.Rotation()
+                                )
+                                doc.recompute()
+                                self.assertTrue(target.isValid(), target.getStatusString())
+                            points = {}
+                            for piece, (x, y) in {"L": (-2, 0), "M": (-0.5, 0)}.items():
+                                point = body.newObject("PartDesign::Point", "On" + piece)
+                                point.AttachmentSupport = [
+                                    (target, farCapAt(target.Shape, z, x, y))
+                                ]
+                                point.MapMode = "CenterOfMass"
+                                points[piece] = point
+                            body.Tip = target
+                            doc.recompute()
+                            if edit == "geometry":
+                                sketch.setDatum(
+                                    "xA", FreeCAD.Units.Quantity(0.5, FreeCAD.Units.Length)
+                                )
+                            else:
+                                sketch.AttachmentOffset = FreeCAD.Placement(
+                                    FreeCAD.Vector(3.5, 0, 0) + sketch.AttachmentOffset.Base,
+                                    FreeCAD.Rotation(),
+                                )
+                            doc.recompute()
+                            self.assertTrue(feature.isValid(), feature.getStatusString())
+                            self.assertTrue(target.isValid(), target.getStatusString())
+                            assertOnCap(self, points["M"], z, 0.75, 0)
+                            assertNotQuietlyElsewhere(self, points["L"], z, [])
+                        finally:
+                            FreeCAD.closeDocument(doc.Name)
+
     def testPadUpToThreePlatesPiecesSlidOntoTheNextPlate(self):
         # PR 366 round 3: up to a shell of three B-spline plates without names meeting at x = 1
         # and x = 3, A (x 0..2) has its far cap and far edges in two pieces each, on plates 1
