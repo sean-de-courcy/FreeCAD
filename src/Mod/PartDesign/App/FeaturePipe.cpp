@@ -3737,15 +3737,14 @@ Part::TopoShape wireAlong(
 /// How far \a stored and \a middles, a closed spine's stored vertices (the start first) and its
 /// edges' middles (startNearest), lie from \a edges (the spine's, in its order) started at the
 /// vertex \a k and run \a forward (in the edges' order) or the other way, beyond one
-/// translation: the root mean square of the pairs' displacements about their mean; not \a
-/// translated, about none (where they lie, not only their shape). Of as many points as edges
+/// translation: the root mean square of the pairs' displacements about their mean. Of as many
+/// points as edges
 double fromStoredAlong(
     const std::vector<gp_Pnt>& stored,
     const std::vector<gp_Pnt>& middles,
     const std::vector<TopoDS_Edge>& edges,
     size_t k,
-    bool forward,
-    bool translated = true
+    bool forward
 )
 {
     const size_t n = edges.size();
@@ -3760,12 +3759,10 @@ double fromStoredAlong(
         moves.emplace_back(middles[i], middleOf(edges[along]));
     }
     gp_Vec mean;
-    if (translated) {
-        for (const gp_Vec& move : moves) {
-            mean += move;
-        }
-        mean /= static_cast<double>(moves.size());
+    for (const gp_Vec& move : moves) {
+        mean += move;
     }
+    mean /= static_cast<double>(moves.size());
     double sum = 0;
     for (const gp_Vec& move : moves) {
         sum += (move - mean).SquareMagnitude();
@@ -3793,13 +3790,12 @@ double fromStoredAt(
 }
 
 /// The start and the way (forward: in \a edges' order) where fromStoredAlong's fit of \a stored
-/// and \a middles is least (\a translated as there), where it is least by more than the rounding;
-/// none otherwise, or with another number of points than edges
+/// and \a middles is least, where it is least by more than the rounding; none otherwise, or with
+/// another number of points than edges
 std::optional<std::pair<size_t, bool>> bestFitOf(
     const std::vector<gp_Pnt>& stored,
     const std::vector<gp_Pnt>& middles,
-    const std::vector<TopoDS_Edge>& edges,
-    bool translated = true
+    const std::vector<TopoDS_Edge>& edges
 )
 {
     const size_t n = edges.size();
@@ -3811,8 +3807,7 @@ std::optional<std::pair<size_t, bool>> bestFitOf(
     double next = least;
     for (size_t k = 0; k < n; ++k) {
         for (const bool forward : {true, false}) {
-            const double residual
-                = fromStoredAlong(stored, middles, edges, k, forward, translated);
+            const double residual = fromStoredAlong(stored, middles, edges, k, forward);
             if (residual < least) {
                 next = least;
                 least = residual;
@@ -4808,9 +4803,15 @@ App::DocumentObjectExecReturn* Pipe::execute()
         // The record of the same input read in the body, where its fit is not clear (fitIsClear) or
         // a frame of the profile turned (decision 180)
         bool unpaired = false;
-        // Unpaired: the fit's best start and way (bestFitOf), read in the body where no frame of
-        // the profile turned, else in each frame that turned
+        // Unpaired where no frame of the profile turned: the body's fit's best start and way
+        // (bestFitOf)
         std::vector<std::pair<size_t, bool>> readings;
+        // Unpaired where a frame turned: the stored start and the next vertex, carried by each of
+        // the profile's frames from the record to now, in the pipe's frame
+        std::vector<std::pair<gp_Pnt, gp_Pnt>> carried;
+        // A frame turned, or a direction kept, within it: far above a rounded coordinate's turn,
+        // far below an edit's
+        constexpr double turnedBy = 1e-6;
         const std::vector<std::string> spineInput = spineIdentity(spine, shape, subedge);
         const std::vector<StartRecord> startRecords = readStartRecords(
             SpineStart,
@@ -4866,6 +4867,7 @@ App::DocumentObjectExecReturn* Pipe::execute()
                 storedNames.clear();
                 unpaired = false;
                 readings.clear();
+                carried.clear();
                 // 2n + 1 points and each frame's 3
                 const size_t framed = 3 * frames.size();
                 if (stored.size() < 5 + framed || stored.size() % 2 == 0) {
@@ -4903,41 +4905,35 @@ App::DocumentObjectExecReturn* Pipe::execute()
                         // turn, a square a quarter), whose twin start the fit called clear: the
                         // start moved to another corner with the profile's names, silently (the
                         // pre-push reviews of round 6, T-1 and T-C; decision 180)
-                        // Turned: by more than a rounded coordinate's turn, far less than an edit's
-                        constexpr double turnedBy = 1e-6;
-                        std::vector<size_t> turned;
+                        bool turned = false;
                         for (size_t i = 0; i < frames.size(); ++i) {
                             const gp_Trsf moved = frames[i] * into[i];
-                            if (std::abs(moved.GetRotation().GetRotationAngle()) > turnedBy) {
-                                turned.push_back(i);
-                            }
+                            turned = turned
+                                || std::abs(moved.GetRotation().GetRotationAngle()) > turnedBy;
                         }
-                        unpaired = !turned.empty()
+                        unpaired = turned
                             || !fitIsClear(storedVertices, storedMiddles, spineInOrder);
-                        // In a turned frame, where the stored loop lies, not only its shape: with a
-                        // translation free, the profile turned half a turn on itself (or its lines
-                        // cycled) read the stored ring onto its mirror image, the ring's lines
-                        // mirrored in their sketch, and the names' start agreed with it, silently
-                        // (the review of round 6's second fix, R-1; decision 187)
-                        auto readFit = [&](bool translated) {
-                            const auto best = bestFitOf(
-                                storedVertices,
-                                storedMiddles,
-                                spineInOrder,
-                                translated
-                            );
-                            if (best) {
+                        // Where a frame turned, no fit: the stored start must be carried exactly by
+                        // one of the profile's frames. Read in a turned frame, the fit made two
+                        // silent families in turn: translation-free, the profile turned half a turn
+                        // on itself (or its lines cycled) read the stored ring onto its mirror
+                        // image, the ring's lines mirrored in their sketch, and the names' start
+                        // agreed with it (the review of round 6's second fix, R-1); read by
+                        // absolute residual, the mirrored ring still fit best from its own start
+                        // (decision 187 (2)). Where no frame turned, the body's fit (decision 180)
+                        if (unpaired && !turned) {
+                            if (const auto best
+                                = bestFitOf(storedVertices, storedMiddles, spineInOrder)) {
                                 readings.push_back(*best);
                             }
-                        };
-                        if (unpaired && turned.empty()) {
-                            readFit(true);
                         }
-                        for (size_t i : turned) {
-                            fill(inPipe * frames[i] * into[i]);
-                            readFit(false);
+                        for (size_t i = 0; turned && i < frames.size(); ++i) {
+                            const gp_Trsf by = inPipe * frames[i] * into[i];
+                            carried.emplace_back(
+                                point(0).Transformed(by),
+                                point(3).Transformed(by)
+                            );
                         }
-                        fill(inPipe);
                     }
                 }
                 storedAtEnd = stored[2].x > 0.5;
@@ -4954,6 +4950,7 @@ App::DocumentObjectExecReturn* Pipe::execute()
                 storedNames.clear();
                 unpaired = false;
                 readings.clear();
+                carried.clear();
             };
             // Of the same object, with an edge of the spine
             // anchor: rung 4 (another sub-element set's record of the same object), warned
@@ -5001,14 +4998,15 @@ App::DocumentObjectExecReturn* Pipe::execute()
             // are those of the lines the record names, where the stored names on the spine (two at
             // least; a line drawn anew leaves its place to the others' order) lie in the stored
             // cyclic order or its reverse; the start is then the first place's line's and the way
-            // the second's. Only where the fit reads the same start and way, in the
-            // body where no frame of the profile turned, else in a frame that turned (readings):
-            // a redraw that shifts or reverses the lines' order (their IDs kept) keeps their
-            // cyclic order, and by the names alone the start and the legs' names followed the
-            // lines to other places, silently, as on integration (`RingTurnedRedrawnAndWidened`).
-            // An exact carry by a frame instead stopped the pipe where the start corner moved
-            // along its leg or the profile was stretched (the review of the fix, L-1, L-2).
-            // Otherwise the pipe stops (decision 150).
+            // the second's. Only where the body's fit reads the same start and way, where no frame
+            // of the profile turned (readings), or where a frame of the profile carries the stored
+            // start and its next vertex there, where one turned (carried): a redraw that shifts or
+            // reverses the lines' order (their IDs kept) keeps their cyclic order, and by the names
+            // alone the start and the legs' names followed the lines to other places, silently, as
+            // on integration (`RingTurnedRedrawnAndWidened`). With a frame turned, a start corner
+            // moved along its leg or a profile stretched (its geometry frame turns) stops the pipe
+            // (the review of decision 180's fix, L-1 and L-2b; decision 187 (2)). Otherwise the
+            // pipe stops (decision 150).
             // Taken at the profile, as a new pipe's, the start went to the profile's nearest
             // vertex: with the profile slid along a leg past its middle, another corner, and the
             // profile's own names at the start went with it, silently (the pre-push review of
@@ -5050,17 +5048,33 @@ App::DocumentObjectExecReturn* Pipe::execute()
                 };
                 const std::optional<size_t> ahead = paired ? edgeOfFirst(true) : std::nullopt;
                 const std::optional<size_t> back = paired ? edgeOfFirst(false) : std::nullopt;
-                // The order the fit reads too (readings: its start k and way, the edge of place 0
-                // run backwards from its far end). Where both orders fit the names (a spine of two
-                // edges, or the two found at opposite places), the fit tells them apart: required
-                // to agree with one order alone, such a spine stopped (the review of round 6's
-                // second fix, T-1 and T-3)
+                auto startOf = [&](size_t at) {
+                    return BRep_Tool::Pnt(TopExp::FirstVertex(spineInOrder[at % n], true));
+                };
+                // The order the body's fit reads too (readings: its start k and way, the edge of
+                // place 0 run backwards from its far end), or a frame carries (the start k and the
+                // next vertex). Where both orders fit the names (a spine of two edges, or the two
+                // found at opposite places), the fit tells them apart: required to agree with one
+                // order alone, such a spine stopped (the review of round 6's second fix, T-1 and
+                // T-3)
                 auto agrees = [&](bool forward, const std::optional<size_t>& edge) {
-                    return edge
-                        && std::ranges::find(
-                               readings,
-                               std::make_pair((forward ? *edge : *edge + 1) % n, forward)
-                           ) != readings.end();
+                    if (!edge) {
+                        return false;
+                    }
+                    const size_t k = forward ? *edge : *edge + 1;
+                    if (carried.empty()) {
+                        return std::ranges::find(readings, std::make_pair(k % n, forward))
+                            != readings.end();
+                    }
+                    const gp_Pnt start = startOf(k);
+                    const gp_Vec now(start, startOf(forward ? k + 1 : k + n - 1));
+                    return std::ranges::any_of(carried, [&](const std::pair<gp_Pnt, gp_Pnt>& was) {
+                        const gp_Vec along(was.first, was.second);
+                        return was.first.Distance(start) <= Precision::Confusion()
+                            && along.Magnitude() > Precision::Confusion()
+                            && now.Magnitude() > Precision::Confusion()
+                            && along.Angle(now) <= turnedBy;
+                    });
                 };
                 const bool viaAhead = agrees(true, ahead);
                 const bool viaBack = agrees(false, back);
@@ -5081,9 +5095,6 @@ App::DocumentObjectExecReturn* Pipe::execute()
                 // the start k: forward, edge k first; the other way, edge j first, run backwards
                 // from its far end
                 const size_t k = forward ? j : j + 1;
-                auto startOf = [&](size_t at) {
-                    return BRep_Tool::Pnt(TopExp::FirstVertex(spineInOrder[at % n], true));
-                };
                 storedVertices.clear();
                 storedMiddles.clear();
                 for (size_t i = 0; i < n; ++i) {

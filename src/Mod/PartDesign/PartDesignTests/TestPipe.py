@@ -4235,6 +4235,43 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
                     for before, after in zip(stored, pipe.SpineStart):
                         self.assertLess((V(after) - before).Length, 1e-6, (stored, pipe.SpineStart))
 
+    def testClosedDScaledKeepsItsStartAndWay(self):
+        """The D scaled about its start from 10 to 20 (the line lengthened, the arc's radius with
+        it), one edit: the fit isn't clear, so the start is taken by the lines' names, and with two
+        edges both cyclic orders fit them; the fit's reading tells them apart and keeps the stored
+        start and way. Required to agree with one order alone, the pipe stopped (the review of
+        fork PR 383 round 6's second fix, T-1; integration is right). From 10 to 11 the fit is
+        clear."""
+        for length in (20, 11):
+            self.tearDown()
+            self.setUp()
+            with self.subTest(length=length):
+                profile = self.square()
+                # closedSpine's D, its arc's middle exact: scaled, its ends stay on the line's
+                arc = Part.ArcOfCircle(V(0, 10, 0), V(-18.660254037844386, 5, 0), V(0, 0, 0))
+                path = models.sketch(
+                    self.doc,
+                    "Path",
+                    [Part.LineSegment(V(0, 0, 0), V(0, 10, 0)), arc],
+                    self.body,
+                    placement=XZ,
+                )
+                pipe = self.pipe(profile, path, "Transformed")
+                start, way = V(pipe.SpineStart[0]), V(pipe.SpineStart[1])
+                self.assertLess(start.Length, 1e-6)
+                geometry = path.Geometry
+                geometry[0].EndPoint = V(0, length, 0)
+                geometry[1].Center = V(-0.8660254037844386 * length, length / 2, 0)
+                geometry[1].Radius = length
+                path.Geometry = geometry
+                self.doc.recompute()
+                self.assertTrue(pipe.isValid(), pipe.getStatusString())
+                self.assertProfileNamesAtTheProfile(pipe, profile)
+                self.assertLess(V(pipe.SpineStart[0]).Length, 1e-6)
+                # Scaled about the start, the way leaves it in the same direction
+                after = V(pipe.SpineStart[1]) - V(pipe.SpineStart[0])
+                self.assertLess((after.normalize() - (way - start).normalize()).Length, 1e-6)
+
     @staticmethod
     def cornerKeysAt(pipe, vertices):
         """{each corner key the pipe's names hold (the hashed key of CornerSource): the indices
@@ -5026,15 +5063,17 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
         self.doc.recompute()
         self.assertTrue(pipe.isValid(), pipe.getStatusString())
 
-    def testClosedRingStartCornerMovedKeepsTheStart(self):
+    def testClosedRingStartCornerMovedKeepsTheStartOrStops(self):
         """The ring's bottom line moved down (lines 0 and 2 lengthened, IDs kept), so the start
         corner moves down the left leg away from the profile, which stays at z = 0: by 15 alone,
         by 4 with the whole model turned 120 degrees about Z, by 4 with the profile stretched to
         2 x 3 (which turns its geometry frame: its x axis points at the first vertex). The fit
-        isn't clear or isn't read, so the start is taken by the lines' names, and the fit (in the
-        body, or in the frame that turned) reads the same start: the moved corner, valid. An exact
-        carry of the stored start by a frame stopped the pipe in all three (the review of fork PR
-        383 round 6's fix, L-1, L-2 and L-2b; integration is right)."""
+        isn't clear, so the start is taken by the lines' names. With no frame turned, the body's
+        fit reads the same start: the moved corner, valid (an exact carry of the stored start by a
+        frame stopped the pipe: the review of fork PR 383 round 6's fix, L-2; integration is
+        right). With a frame turned, no frame carries the stored start to the moved corner, and the
+        pipe stops: the fit read in a turned frame made two silent families in turn (decision 187
+        (2); L-1 and L-2b, integration right, are accepted loud)."""
         for kind, drop in (("far", -15), ("turned", -4), ("stretched", -4)):
             self.tearDown()
             self.setUp()
@@ -5058,6 +5097,10 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
                         line.StartPoint, line.EndPoint = V(s.x, s.y * 1.5, 0), V(e.x, e.y * 1.5, 0)
                     profile.Geometry = geometry
                 self.doc.recompute()
+                if kind != "far":
+                    self.assertFalse(pipe.isValid())
+                    self.assertIn("can't be matched", pipe.getStatusString())
+                    continue
                 self.assertTrue(pipe.isValid(), pipe.getStatusString())
                 corner = rotation.multVec(V(0, 0, drop))
                 self.assertLess((V(pipe.SpineStart[0]) - corner).Length, 1e-6)
@@ -5089,6 +5132,44 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
                     lines.append(top)
                 path.Geometry = lines
                 self.doc.recompute()
+                self.assertTrue(pipe.isValid(), pipe.getStatusString())
+                self.assertLess(V(pipe.SpineStart[0]).Length, 1e-6)
+                self.assertLess((V(pipe.SpineStart[3]) - V(0, 0, 20)).Length, 1e-6)
+
+    def testClosedRingMirroredWithItsProfileTurnedHalfATurnStops(self):
+        """The profile's sketch turned half a turn about its normal (the square the same in the
+        body), the ring's lines mirrored about its middle line (IDs kept: line 0 is the right leg
+        drawn upward) and the right leg moved out to x = 34, in one recompute. Both profile frames
+        turned half a turn about the left leg's line, which carries the stored ring onto its mirror
+        image: read without its translation there, the fit agreed with the names' start, the
+        bottom right corner, and every leg followed its line to the mirrored place, silently
+        (the review of fork PR 383 round 6's second fix, R-1; integration is loud). Read where the
+        stored loop lies, the fit keeps the bottom left and the names don't: the pipe stops
+        (decision 187). Without the profile's turn, the fit in the body keeps the stored start."""
+        for turned in (True, False):
+            self.tearDown()
+            self.setUp()
+            with self.subTest(turned=turned):
+                profile, pipe = self.ring(0, 0)
+                path = pipe.Spine[0]
+                self.assertTrue(pipe.isValid(), pipe.getStatusString())
+                corners = [(34, 0), (34, 20), (0, 20), (0, 0)]
+                geometry = path.Geometry
+                for i, line in enumerate(geometry):
+                    # Away first, so that no line has both ends at one point on the way
+                    line.StartPoint = V(100 + 10 * i, 100, 0)
+                    line.EndPoint = V(105 + 10 * i, 105, 0)
+                for i, line in enumerate(geometry):
+                    line.StartPoint = V(*corners[i], 0)
+                    line.EndPoint = V(*corners[(i + 1) % 4], 0)
+                path.Geometry = geometry
+                if turned:
+                    profile.Placement = App.Placement(V(), App.Rotation(V(0, 0, 1), 180))
+                self.doc.recompute()
+                if turned:
+                    self.assertFalse(pipe.isValid())
+                    self.assertIn("can't be matched", pipe.getStatusString())
+                    continue
                 self.assertTrue(pipe.isValid(), pipe.getStatusString())
                 self.assertLess(V(pipe.SpineStart[0]).Length, 1e-6)
                 self.assertLess((V(pipe.SpineStart[3]) - V(0, 0, 20)).Length, 1e-6)
