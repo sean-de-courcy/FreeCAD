@@ -759,6 +759,8 @@ class TestCompatCorpus(unittest.TestCase):
                 set(info["files"]), ofModels, f"{gen}: listed files and its models' files differ"
             )
             k, suffix = GENERATION_FOLDER.fullmatch(gen).groups()
+            # one folder per half: gen00 would pair with gen0-macos as a second Windows half
+            self.assertEqual(gen, f"gen{int(k)}{suffix or ''}", f"{gen}: not a generation's name")
             self.assertEqual(
                 info.get("platform"), HALVES[suffix or ""], f"{gen}: saved on the wrong platform"
             )

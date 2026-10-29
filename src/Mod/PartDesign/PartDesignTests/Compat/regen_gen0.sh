@@ -153,6 +153,9 @@ case "$platform" in
     *) die "gen0 has a Windows half and a macOS half, none for $platform" ;;
 esac
 halfsrc="$checkout/$compat/$half"
+if [ -n "$fromDir" ] && [ "$fromDir" = "$(cd "$halfsrc" 2> /dev/null && pwd)" ]; then
+    die "--from $fromDir is the checkout's own $half: give the downloaded half's folder"
+fi
 
 if [ -z "$fromDir" ]; then
     cmd="$build/bin/FreeCADCmd"
