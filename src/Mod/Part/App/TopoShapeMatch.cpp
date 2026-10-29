@@ -1241,6 +1241,11 @@ private:
                 found->news.push_back(n);
             }
         }
+        // Where an old piece's matched elements went: pieces that share a box (twin wedges ripped
+        // from one board, turned) sit at every old place by their boxes (the fix review's T2, T3)
+        std::map<int, std::set<int>> reached;
+        std::map<int, std::set<int>> reachedBy;
+        reach(reached, reachedBy);
         for (const auto& c : classes) {
             if (c.olds.size() < 2 || c.olds.size() != c.news.size()) {
                 continue;
@@ -1248,12 +1253,17 @@ private:
             bool permuted = false;
             for (std::size_t p = 0; p < c.olds.size() && !permuted; ++p) {
                 std::vector<int> there;
+                std::vector<int> went;
                 for (const int n : c.news) {
                     if (samePlace(oldPieces[c.olds[p]].box, newPieces[n].box, tolerance, strict)) {
                         there.push_back(n);
                     }
+                    if (reachedBy[c.olds[p]].count(n)) {
+                        went.push_back(n);
+                    }
                 }
-                permuted = there.size() == 1 && there.front() != c.news[p];
+                permuted = (there.size() == 1 && there.front() != c.news[p])
+                    || (went.size() == 1 && went.front() != c.news[p]);
             }
             if (permuted) {
                 for (const int n : c.news) {
@@ -1438,7 +1448,9 @@ private:
     // puts each tooth's elements on the next tooth's old places, every match verified. The new
     // piece the matches link to one old piece, congruent with it as a whole and with its box's
     // centre moved, is retired. A piece that stayed (a hole moved inside a plate) keeps its box.
-    void retireMovedPieces()
+    // The pieces the matches link: for each new piece the old pieces its matched elements came
+    // from (reached), and for each old piece the new pieces its elements went to (reachedBy)
+    void reach(std::map<int, std::set<int>>& reached, std::map<int, std::set<int>>& reachedBy)
     {
         auto pieceOf = [](const std::vector<Piece>& pieces, std::size_t type, std::size_t count) {
             std::vector<int> owner(count, -1);
@@ -1461,10 +1473,6 @@ private:
             after.edgeVertexes.size(),
             after.faceVertexes.size()
         };
-        // The pieces the matches link: a new piece with the one old piece its matches reach, and
-        // no other new piece's matches reach that one
-        std::map<int, std::set<int>> reached;  // new piece -> old pieces
-        std::map<int, std::set<int>> reachedBy;  // old piece -> new pieces
         for (std::size_t t = 0; t < 3; ++t) {
             const auto oldOwner = pieceOf(oldPieces, t, oldCounts[t]);
             const auto newOwner = pieceOf(newPieces, t, newCounts[t]);
@@ -1477,6 +1485,15 @@ private:
                 }
             }
         }
+    }
+
+    void retireMovedPieces()
+    {
+        // The pieces the matches link: a new piece with the one old piece its matches reach, and
+        // no other new piece's matches reach that one
+        std::map<int, std::set<int>> reached;  // new piece -> old pieces
+        std::map<int, std::set<int>> reachedBy;  // old piece -> new pieces
+        reach(reached, reachedBy);
         for (const auto& [n, olds] : reached) {
             if (olds.size() != 1 || reachedBy[*olds.begin()].size() != 1) {
                 continue;
