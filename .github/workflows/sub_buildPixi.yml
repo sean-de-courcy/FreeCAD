@@ -32,6 +32,11 @@ on:
       artifactBasename:
         type: string
         required: true
+      # The runner images to build on, as a JSON list: CI_primary.yml passes Windows,
+      # CI_macos.yml macOS (ops#533).
+      platforms:
+        type: string
+        required: true
       testOnBuildDir:
         default: false
         type: boolean
@@ -84,9 +89,10 @@ jobs:
       max-parallel: 6
       fail-fast: false
       matrix:
-        # FreeCAD-CH ships Windows x64 and macOS arm64 only. The macOS image is pinned
-        # (macos-latest was macos-26 in September 2026); build_release.yml uses the same one.
-        os: [windows-2022, macos-26]
+        # FreeCAD-CH ships Windows x64 (windows-2022) and macOS arm64 (macos-26) only. The macOS
+        # image is pinned (macos-latest was macos-26 in September 2026); build_release.yml uses the
+        # same one.
+        os: ${{ fromJSON(inputs.platforms) }}
 
     steps:
     - name: Harden the runner (Audit all outbound calls)

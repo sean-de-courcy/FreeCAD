@@ -1,0 +1,74 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# ***************************************************************************
+# *                                                                         *
+# *   Copyright (c) 2023 0penBrain.                                         *
+# *                                                                         *
+# *   This file is part of FreeCAD.                                         *
+# *                                                                         *
+# *   FreeCAD is free software: you can redistribute it and/or modify it    *
+# *   under the terms of the GNU Lesser General Public License as           *
+# *   published by the Free Software Foundation, either version 2.1 of the  *
+# *   License, or (at your option) any later version.                       *
+# *                                                                         *
+# *   FreeCAD is distributed in the hope that it will be useful, but        *
+# *   WITHOUT ANY WARRANTY; without even the implied warranty of            *
+# *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU      *
+# *   Lesser General Public License for more details.                       *
+# *                                                                         *
+# *   You should have received a copy of the GNU Lesser General Public      *
+# *   License along with FreeCAD. If not, see                               *
+# *   <https://www.gnu.org/licenses/>.                                      *
+# *                                                                         *
+# ***************************************************************************
+
+# The macOS half of FreeCAD-CH's CI; CI_primary.yml runs Windows and Lint.
+# GitHub drops about 1 in 5 macOS arm64 jobs ("not acquired by Runner") after
+# about 15 minutes in the queue, and a run can be rerun only once it has
+# completed. In its own workflow a dropped macOS run completes at once and is
+# rerun without waiting for the Windows build (ops#533).
+
+name: FreeCAD CI macOS
+
+on:
+  workflow_dispatch: ~
+  push:
+    branches:
+      - integration
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches:
+      - integration
+
+permissions:
+  contents: read
+
+# As in CI_primary.yml, under a group of its own: the two workflows never cancel each other.
+concurrency:
+  group: FC-CI-macos-${{ github.head_ref || (github.event_name == 'push' && github.ref) || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  Prepare:
+    uses: ./.github/workflows/sub_prepare.yml
+    with:
+      artifactBasename: Prepare-${{ github.run_id }}
+
+  # The job keeps the name Pixi, so its check stays "Pixi / build_with_pixi (macos-26)", the name
+  # the ops repo's merge and rerun scripts read.
+  Pixi:
+    needs: [Prepare]
+    if: needs.Prepare.outputs.docsOnly != 'true'
+    uses: ./.github/workflows/sub_buildPixi.yml
+    with:
+      artifactBasename: Pixi-${{ github.run_id }}
+      platforms: '["macos-26"]'
+
+  WrapUp:
+    needs: [
+        Prepare,
+        Pixi
+      ]
+    if: always()
+    uses: ./.github/workflows/sub_wrapup.yml
+    with:
+      previousSteps: ${{ toJSON(needs) }}
