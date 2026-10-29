@@ -1,6 +1,6 @@
 {
 "entries": {
 "BlockSeamPadRaisedHoleMoved|seam_vertex|V2s": {"axes": ["M1", "E1"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "port", "issue": "ops#503", "tier": "F"},
-"BlockSeamPadRaised|seam_vertex|V2s": {"axes": ["M1", "E1"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "port", "issue": "ops#503", "tier": "F"}
+"BlockSeamPadRaised|seam_vertex|V2s": {"axes": ["M1", "E1"], "classes": ["D"], "expect": "CORRECT", "expected": "quiet", "found_by": "port", "issue": "ops#503", "tier": "F"}
 }
 }
