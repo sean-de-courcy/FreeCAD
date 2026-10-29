@@ -1,0 +1,7 @@
+{
+"entries": {
+"ReviewAllRedrawnNotch10A|circles_on_geometry|V2s": {"axes": ["M8", "E5", "E2"], "classes": ["E"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "review pr384-r5s", "issue": "ops#264", "tier": "F"},
+"ReviewAllRedrawnNotch10B|circles_on_geometry|V2s": {"axes": ["M8", "E5", "E2"], "classes": ["E"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "review pr384-r5s", "issue": "ops#264", "tier": "F"},
+"ReviewAllRedrawnNotch10C|circles_on_geometry|V2s": {"axes": ["M8", "E5", "E2"], "classes": ["E"], "expect": "OWN-OR-BROKEN", "expected": "guessed", "found_by": "review pr384-r5s", "issue": "ops#264", "tier": "F"}
+}
+}

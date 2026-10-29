@@ -1,0 +1,13 @@
+{
+"entries": {
+"ReviewR5S101_035_SqHcw_dx7_dy3_c7_7_k014c_fc_o62753_r237|circles_on_geometry|V2s": {"axes": ["M8", "E5", "E2"], "classes": ["E"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr384-r5", "issue": "ops#264", "tier": "F"},
+"ReviewR5S101_243_L_dx0_dy0_c5_N_k0_fN_o42135_r5|circles_on_geometry|V2s": {"axes": ["M8", "E5", "E2"], "classes": ["E"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr384-r5", "issue": "ops#264", "tier": "F"},
+"ReviewR5S101_272_L_dx10_dy0_cN_N_k025_f5_o314_rN|circles_on_geometry|V2s": {"axes": ["M8", "E5", "E2"], "classes": ["E"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr384-r5", "issue": "ops#264", "tier": "F"},
+"ReviewR5S202_026_RH2_dx0_dy10_c2_2_k02346911c_f11_o810715_r7|circles_on_geometry|V2s": {"axes": ["M8", "E5", "E2"], "classes": ["E"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr384-r5", "issue": "ops#264", "tier": "F"},
+"ReviewR5S202_141_Sq_dx40_dy0_cN_N_k13_f3_o20_r2|circles_on_geometry|V2s": {"axes": ["M8", "E5", "E2"], "classes": ["E"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr384-r5", "issue": "ops#264", "tier": "F"},
+"ReviewR5S303_064_RH2_dx20_dy0_cN_11_k01234567891011_f1591011_oc_rN|circles_on_geometry|V2s": {"axes": ["M8", "E5", "E2"], "classes": ["E"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr384-r5", "issue": "ops#264", "tier": "F"},
+"ReviewR5S303_098_L_dxm20_dy0_cN_5_k23_fN_o5140c_r4c|circles_on_geometry|V2s": {"axes": ["M8", "E5", "E2"], "classes": ["E"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr384-r5", "issue": "ops#264", "tier": "F"},
+"ReviewR5S303_124_U_dxm20_dy0_c6_6_k16_fN_o274c530_r457|circles_on_geometry|V2s": {"axes": ["M8", "E5", "E2"], "classes": ["E"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr384-r5", "issue": "ops#264", "tier": "F"},
+"ReviewR5S303_164_SqHcw_dx30_dy0_cN_N_k02345_f3_o176_r67|circles_on_geometry|V2s": {"axes": ["M8", "E5", "E2"], "classes": ["E"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr384-r5", "issue": "ops#264", "tier": "F"}
+}
+}

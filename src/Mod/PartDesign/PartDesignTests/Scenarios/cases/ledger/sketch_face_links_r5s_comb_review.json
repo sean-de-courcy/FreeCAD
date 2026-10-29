@@ -1,0 +1,8 @@
+{
+"entries": {
+"ReviewCombMovedStretchedCut120|circles_on_geometry|V2s": {"axes": ["M8", "E5"], "classes": ["E"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr384-r5s", "issue": "ops#264", "tier": "F"},
+"ReviewCombMovedStretchedCut200|circles_on_geometry|V2s": {"axes": ["M8", "E5"], "classes": ["E"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr384-r5s", "issue": "ops#264", "tier": "F"},
+"ReviewCombMovedStretchedCut30|circles_on_geometry|V2s": {"axes": ["M8", "E5"], "classes": ["E"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr384-r5s", "issue": "ops#264", "tier": "F"},
+"ReviewCombMovedStretchedCut|circles_on_geometry|V2s": {"axes": ["M8", "E5"], "classes": ["E"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr384-r5s", "issue": "ops#264", "tier": "F"}
+}
+}
