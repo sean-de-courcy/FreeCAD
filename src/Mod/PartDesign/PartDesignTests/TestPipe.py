@@ -4235,6 +4235,51 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
                     for before, after in zip(stored, pipe.SpineStart):
                         self.assertLess((V(after) - before).Length, 1e-6, (stored, pipe.SpineStart))
 
+    def testClosedLensArcsTradedWithProfileReparameterisedStops(self):
+        """The lens's two arcs trade places (their IDs kept: arc 0 is now the left arc, drawn from
+        the bottom vertex up), the lens widens (11.51 to 14) and the profile is reparameterised
+        (its placement turned 90 or 180 degrees about its normal, its lines turned back: the same
+        square in the body), in one recompute. The turn is about the first arc's chord, so a frame
+        of the profile carries the stored start and the other vertex onto themselves, and with two
+        edges both ways from the start reach that vertex: the carry took the names' way along the
+        left arc, and every reference on the legs followed it there, silently (the review of fork
+        PR 383 round 6's third fix, F-1; integration is wrong too). With a frame turned, a spine of
+        two edges stops (decision 190)."""
+        for degrees in (90, 180):
+            self.tearDown()
+            self.setUp()
+            with self.subTest(degrees=degrees):
+                profile = self.square()
+                path = self.closedSpine("lens")
+                pipe = self.pipe(profile, path, "Transformed")
+                back = App.Rotation(V(0, 0, 1), -degrees)
+                geometry = profile.Geometry
+                for line in geometry:
+                    s, e = back.multVec(V(line.StartPoint)), back.multVec(V(line.EndPoint))
+                    line.StartPoint, line.EndPoint = V(1e3, 1e3, 0), V(2e3, 2e3, 0)
+                    line.StartPoint, line.EndPoint = s, e
+                profile.Geometry = geometry
+                profile.Placement = App.Placement(V(), App.Rotation(V(0, 0, 1), degrees))
+                traded = (
+                    Part.ArcOfCircle(V(0, 0, 0), V(-14, 15, 0), V(0, 30, 0)).toBSpline(),
+                    Part.ArcOfCircle(V(0, 30, 0), V(14, 15, 0), V(0, 0, 0)).toBSpline(),
+                )
+                geometry = path.Geometry
+                for curve, new in zip(geometry, traded):
+                    # Rebuilt in place: the geometry's ID kept
+                    curve.buildFromPolesMultsKnots(
+                        new.getPoles(),
+                        new.getMultiplicities(),
+                        new.getKnots(),
+                        new.isPeriodic(),
+                        new.Degree,
+                        new.getWeights(),
+                    )
+                path.Geometry = geometry
+                self.doc.recompute()
+                self.assertFalse(pipe.isValid())
+                self.assertIn("can't be matched", pipe.getStatusString())
+
     def testClosedDScaledKeepsItsStartAndWay(self):
         """The D scaled about its start from 10 to 20 (the line lengthened, the arc's radius with
         it), one edit: the fit isn't clear, so the start is taken by the lines' names, and with two
@@ -5173,6 +5218,37 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
                 self.assertTrue(pipe.isValid(), pipe.getStatusString())
                 self.assertLess(V(pipe.SpineStart[0]).Length, 1e-6)
                 self.assertLess((V(pipe.SpineStart[3]) - V(0, 0, 20)).Length, 1e-6)
+
+    def testClosedRingTwoOppositeNamesWithTheProfileTurnedStops(self):
+        """The ring's top and bottom lines drawn anew (the left and right legs keep their names),
+        the right leg moved out to x = 50, and the profile's sketch moved to the top of the left
+        leg, placed half a turn about Y with its lines at x negated (the same square in the body),
+        in one recompute. The two names left lie at opposite places, so both cyclic orders fit
+        them, and the profile's frames turned: the placement frame carried the stored start to the
+        top left corner, which chose the other order, and the start corner's key went there
+        quietly (the review of fork PR 383 round 6's third fix, F-A; integration is right). A
+        frame's carry never chooses between two orders of the names: the pipe stops."""
+        profile, pipe = self.ring(0, 0)
+        path = pipe.Spine[0]
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        left, top, right, bottom = path.Geometry
+        right.StartPoint, right.EndPoint = V(50, 20, 0), V(50, 0, 0)
+        path.Geometry = [
+            left,
+            right,
+            Part.LineSegment(V(0, 20, 0), V(50, 20, 0)),
+            Part.LineSegment(V(50, 0, 0), V(0, 0, 0)),
+        ]
+        geometry = profile.Geometry
+        for line in geometry:
+            s, e = V(line.StartPoint), V(line.EndPoint)
+            line.StartPoint, line.EndPoint = V(1e3, 1e3, 0), V(2e3, 2e3, 0)
+            line.StartPoint, line.EndPoint = V(-s.x, s.y, 0), V(-e.x, e.y, 0)
+        profile.Geometry = geometry
+        profile.Placement = App.Placement(V(0, 0, 20), App.Rotation(V(0, 1, 0), 180))
+        self.doc.recompute()
+        self.assertFalse(pipe.isValid())
+        self.assertIn("can't be matched", pipe.getStatusString())
 
     def testClosedRingReorderedAndReversedRenamesNothing(self):
         """The profile slid along its leg (4 to 16), then the lines listed from the top right

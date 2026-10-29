@@ -5053,10 +5053,10 @@ App::DocumentObjectExecReturn* Pipe::execute()
                 };
                 // The order the body's fit reads too (readings: its start k and way, the edge of
                 // place 0 run backwards from its far end), or a frame carries (the start k and the
-                // next vertex). Where both orders fit the names (a spine of two edges, or the two
-                // found at opposite places), the fit tells them apart: required to agree with one
-                // order alone, such a spine stopped (the review of round 6's second fix, T-1 and
-                // T-3)
+                // next vertex; never a spine of two edges). Where both orders fit the names (a
+                // spine of two edges, or the two found at opposite places), the body's fit tells
+                // them apart: required to agree with one order alone, such a spine stopped (the
+                // review of round 6's second fix, T-1 and T-3)
                 auto agrees = [&](bool forward, const std::optional<size_t>& edge) {
                     if (!edge) {
                         return false;
@@ -5065,6 +5065,16 @@ App::DocumentObjectExecReturn* Pipe::execute()
                     if (carried.empty()) {
                         return std::ranges::find(readings, std::make_pair(k % n, forward))
                             != readings.end();
+                    }
+                    // A frame's carry never chooses between two orders of the names. A spine of two
+                    // edges: both ways from the start reach the one other vertex, so no carry tells
+                    // which edge the way runs along, and arcs traded with the profile
+                    // reparameterised went quietly along the other (the review of round 6's third
+                    // fix, F-1; decision 190). Two names left at opposite places: the profile moved
+                    // to the far end of the start leg, placed half a turn about it, carried the
+                    // start there, and the start corner's key followed quietly (F-A)
+                    if (n == 2 || (ahead && back)) {
+                        return false;
                     }
                     const gp_Pnt start = startOf(k);
                     const gp_Vec now(start, startOf(forward ? k + 1 : k + n - 1));
