@@ -391,9 +391,9 @@ class TestParkedMarkingGui(unittest.TestCase):
         )
 
     def runAndCount(self, name, counts):
-        """TestBodyReorderV2's test name run, passing, and the Report view's new lines holding
+        """TestBodyReorderV2s's test name run, passing, and the Report view's new lines holding
         each text of counts, as many as given."""
-        from PartDesignTests.TestBodyReorder import TestBodyReorderV2
+        from PartDesignTests.TestBodyReorder import TestBodyReorderV2s
 
         def lines(text):
             return [line for line in (reportText() or "").splitlines() if text in line]
@@ -401,7 +401,7 @@ class TestParkedMarkingGui(unittest.TestCase):
         self.assertIsNotNone(reportText(), "no Report view")
         before = {text: len(lines(text)) for text in counts}
         result = unittest.TestResult()
-        TestBodyReorderV2(name).run(result)
+        TestBodyReorderV2s(name).run(result)
         self.assertEqual(result.errors + result.failures, [])
         self.assertEqual(result.testsRun, 1)
         processEvents(0.2)

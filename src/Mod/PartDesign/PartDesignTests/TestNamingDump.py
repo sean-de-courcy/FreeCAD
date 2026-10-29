@@ -234,7 +234,8 @@ def modelPipeShell(doc):
     side faces (ops#351). At the bend the hole's side face meets the next leg's in four arcs,
     named `UPP` from the same faces and told apart only by an index. OCCT stores the arcs in
     opposite orders on Windows and macOS; the V2 index follows their places, so it is the same
-    on both (ops#378). V1's follows OCCT's order and differs on macOS (a known failure)."""
+    on both (ops#378). V1's follows OCCT's order and differs on macOS (ops#430; V1 runs
+    only with FREECAD_OLD_FILE_TESTS set)."""
     profile = models.feature(doc, "Profile", models.closedWire([(0, 0, 0), (4, 0, 0), (4, 2, 0), (0, 2, 0)]))
     spine = models.feature(doc, "Spine", Part.makeLine(V(0, 0, 0), V(0, 0, 20)))
     sweep = doc.addObject("Part::Sweep", "Sweep")
@@ -764,7 +765,7 @@ def _save(model, mode, label, text):
 
 
 def childMain(outPath):
-    """Dumps every model in both modes into a JSON file. Run in a child process."""
+    """Dumps every model in every mode of MODES into a JSON file. Run in a child process."""
     result = {}
     for model in MODELS:
         for mode in MODES:

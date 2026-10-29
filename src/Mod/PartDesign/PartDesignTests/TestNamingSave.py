@@ -39,8 +39,9 @@ in a child `FreeCADCmd` that has built nothing.
   the names are the same again, and a new save holds the same entries (numbered in save order).
 - TestNamingSaveMerge: another child merges each file into a new document (File > Merge
   project, `Document.importObjects`): every reference resolves and the names are the saved ones.
-- TestNamingSavePlain: plain V2 and V1 files don't change by a byte once the process has interned
-  names: the child saves each model before and after it has opened an interned file. And the
+- TestNamingSavePlain: plain V2 files (and V1 ones with FREECAD_OLD_FILE_TESTS set) don't change
+  by a byte once the process has interned names: the child saves each model before and after it
+  has opened an interned file. And the
   V2i file is no bigger than the V2 one: its Document.xml and maps, deflated, within 2 % and
   a fixed allowance.
 - TestNamingSaveCrossDoc: the cross-document scenarios (Scenarios/crossdoc.py) in V2i, and the
@@ -547,9 +548,9 @@ class TestNamingSaveMerge(unittest.TestCase):
 
 
 class TestNamingSavePlain(unittest.TestCase):
-    """A plain V2 or V1 file is the same, byte for byte, whether the process's table is empty or
-    not: no NameTable element, nothing else changed. It reopens with the same names. The V2i
-    file of the same model is no bigger than the V2 one."""
+    """A plain V2 file (or V1, with FREECAD_OLD_FILE_TESTS set) is the same, byte for byte, whether
+    the process's table is empty or not: no NameTable element, nothing else changed. It reopens
+    with the same names. The V2i file of the same model is no bigger than the V2 one."""
 
     def check(self, model, mode):
         result = child(self, "plain", f"{model}.{mode}")

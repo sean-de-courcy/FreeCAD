@@ -26,7 +26,8 @@
 Every model is designed here: a 20 x 20 x 10 block (4000 mm^3) and features whose effect on the
 volume and the geometry is known. A feature is made to fail by itself (a pocket of length zero, a
 sketch with conflicting constraints, a split the Body doesn't allow, an expression in error), never
-by a user's file. Each test runs in plain V2 and with the reference solver (V2s)."""
+by a user's file. Each test runs with the reference solver (V2s), and in plain V2 (a file saved
+before the solver) with FREECAD_OLD_FILE_TESTS set (decision 179)."""
 
 import math
 import os
