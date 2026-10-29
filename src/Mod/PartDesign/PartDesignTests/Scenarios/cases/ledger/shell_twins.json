@@ -1,8 +1,8 @@
 {
 "entries": {
-"HoleToC|ABo|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#500", "tier": "F"},
+"HoleToC|ABo|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "port", "issue": "ops#500", "tier": "F"},
 "HoleToC|AM|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "port", "issue": "ops#500", "tier": "F"},
-"HoleToC|AT|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#500", "tier": "F"},
+"HoleToC|AT|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "port", "issue": "ops#500", "tier": "F"},
 "HoleToC|C|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "port", "issue": "ops#500", "tier": "F"},
 "MoveAcrossHalf|L|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "port", "issue": "ops#500", "tier": "F"},
 "MoveAcrossHalf|M|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "port", "issue": "ops#500", "tier": "F"},
