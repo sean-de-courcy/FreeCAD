@@ -1123,14 +1123,17 @@ struct Congruence
     }
 };
 
-// Whether two pieces' boxes have the same centre and size
-bool samePlace(const Bnd_Box& a, const Bnd_Box& b, double tolerance)
+// Whether two pieces' boxes have the same centre and size; generously as sizesAlike (pieces
+// congruent only generously, a near-pair, differ in their boxes as much as in their sizes: the
+// fix review's T1)
+bool samePlace(const Bnd_Box& a, const Bnd_Box& b, double tolerance, bool strict = true)
 {
     if (a.IsVoid() || b.IsVoid()) {
         return false;
     }
     const double diagonal = std::sqrt(std::max(a.SquareExtent(), b.SquareExtent()));
-    const double allowed = std::max(tolerance, 1e-6 * diagonal);
+    const double allowed = strict ? std::max(tolerance, 1e-6 * diagonal)
+                                  : std::max({tolerance, 1e-3, 1e-4 * diagonal});
     auto centre = [](const Bnd_Box& box) {
         return gp_Pnt((box.CornerMin().XYZ() + box.CornerMax().XYZ()) / 2);
     };
@@ -1197,7 +1200,8 @@ private:
     // no reading is verified: a trade, a reorder and a slide by the pitch are the same shapes.
     // Added or removed pieces, and a twin moved to a free place, are no permutation. The classes
     // are formed twice, strictly (a near-twin is no twin: decision 188) and generously (twins built
-    // apart measure a little apart: the review's T3); either one's permutation retires.
+    // apart measure a little apart: the review's T3, their places tested as generously: the fix
+    // review's T1); either one's permutation retires.
     void retirePermutedTwins()
     {
         retirePermutedTwins(true);
@@ -1245,7 +1249,7 @@ private:
             for (std::size_t p = 0; p < c.olds.size() && !permuted; ++p) {
                 std::vector<int> there;
                 for (const int n : c.news) {
-                    if (samePlace(oldPieces[c.olds[p]].box, newPieces[n].box, tolerance)) {
+                    if (samePlace(oldPieces[c.olds[p]].box, newPieces[n].box, tolerance, strict)) {
                         there.push_back(n);
                     }
                 }
