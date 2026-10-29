@@ -142,9 +142,10 @@ class ScriptBoardsTradedNearTwinDeleted(Scenario):
     REFS = ("a_top", "b_top")
     a, b = 0, 100
     third = 600.04
+    bLength = 600.0
 
     def boards(self):
-        parts = [Part.makeBox(600, 50, 20, V(0, 0, self.a)), Part.makeBox(600, 50, 20, V(0, 0, self.b))]
+        parts = [Part.makeBox(600, 50, 20, V(0, 0, self.a)), Part.makeBox(self.bLength, 50, 20, V(0, 0, self.b))]
         if self.third is not None:
             parts.append(Part.makeBox(self.third, 50, 20, V(0, 0, 200)))
         shape = Part.Shape()
@@ -175,6 +176,15 @@ class ScriptBoardsTradedOtherBoardDeleted(ScriptBoardsTradedNearTwinDeleted):
     """The control: C 700 long, clearly no twin; the same trade with C dropped: loud+."""
 
     third = 700.0
+
+
+class ScriptBoardsNearPairTraded(ScriptBoardsTradedNearTwinDeleted):
+    """A and B a near-pair (B 1 µm longer), no third board; the script trades them. P1's generous
+    class holds both, and its places are tested as generously: retired, loud+ (review pr502-r2d's
+    T1: tested strictly, neither board sat at the other's place, and the trade went silent)."""
+
+    third = None
+    bLength = 600.001
 
 
 # ---- E1's index-shift case and its controls (review pr384-r4) ----------------------------------
