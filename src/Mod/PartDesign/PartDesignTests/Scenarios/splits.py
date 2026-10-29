@@ -393,7 +393,7 @@ class ChamferBesideFilletEndRedrawn(ChamferBesideFilletEnd):
     """ChamferBesideFilletEnd, with the back line drawn again at y = 11.5 and the old one deleted
     (a new geometry ID), as in seed 57: the fillet's edge is guessed in place of the old one, and
     the chamfer still keeps the rim edge alone. Without the solver (V1, V2, V2multi) the fillet
-    breaks (listed); in V2 and V2multi the chamfer's references then pass against the invalid
+    breaks (local runs only, decision 179); in V2 and V2multi the chamfer's references then pass against the invalid
     fillet's last shape, so only V2s and V2si judge the chamfer here."""
 
     def edit(self, doc):

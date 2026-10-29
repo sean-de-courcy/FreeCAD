@@ -1032,7 +1032,7 @@ class StepResults:
 class Scenario:
     """Subclasses define `build(doc)` (which calls `ref(...)`) and `edit(doc)`, and list their
     reference names in REFS. MULTI marks scenarios whose consumers the multi-match flags touch
-    (dress-ups, Profile): CI runs them in V2multi too.
+    (dress-ups, Profile): the ones a local V2multi run matters for (CI runs V2s only, decision 179).
 
     The corpus's tags (ops#506; a scenario with CLASSES is a case, `Scenarios/README.md`):
     CLASSES, the naming classes it belongs to ("A", "D", ...); AXES, the taxonomy's axes and

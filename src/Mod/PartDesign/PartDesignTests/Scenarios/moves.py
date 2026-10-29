@@ -6,7 +6,7 @@ ambiguous (its name says one, the geometry the other), and the reference solver 
 naming both. An element that moved alone keeps its reference, and so does one whose old place
 only its own twin holds, another copy of the same sketch geometry (ops#168: a lift by a feature's
 own height). Without the solver the name decides: the reference follows the moved element
-(listed in ops105-moved-exact.txt)."""
+(V2 and V2multi fail; local runs only, decision 179)."""
 
 import os
 import shutil

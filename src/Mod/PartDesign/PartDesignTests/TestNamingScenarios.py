@@ -27,26 +27,28 @@ Each scenario is built once per configuration, on its first test. See Scenarios/
 The naming corpus's cases (scenarios with CLASSES, Scenarios/cases/) aren't run here:
 TestCorpusGate runs them against their ledgers (ops#506).
 
-Configurations: V2 and V2s (the reference solver on, ops#7) for every scenario, V2multi (the
-multi-match flags on) for the scenarios whose consumers the flags touch.
-FREECAD_SCENARIO_CONFIGS=V1,V2,V2multi,V2s runs the listed ones for every scenario instead (the
-scorecard's local run). Every verdict is printed as a `SCORE` line.
+Configurations: V2s (the reference solver on, ops#7) for every scenario. The solver-off ones
+(V1, V2, V2multi) don't run by default, in CI or locally (PLAN decision 179, ops#537: solver-off
+and upstream files are deferred compatibility, decision 58); FREECAD_SCENARIO_CONFIGS=V1,V2,V2multi,V2s
+runs the listed ones for every scenario instead (the scorecard's local run, or a change to the
+solver-off path). MULTI marks the scenarios whose consumers V2multi's flags touch. Every verdict is
+printed as a `SCORE` line.
 
-The interning oracle (ops#6, Task 1): `test_<ref>_V2iOracle` runs the scenario in V2 and in V2i
-(V2 with InternNames on) and requires the same verdict, stored subs and expanded names after every
-step. It asserts equality with V2, not a correct verdict, so V2's known failures need no V2i
-entries. It runs by default, or when FREECAD_SCENARIO_CONFIGS lists V2i (the random sequences
-then run V2i as a configuration of their own, below).
-`test_<ref>_V2siOracle` does the same for the reference solver (V2s against V2si, the solver's
-tiers included); it runs only when FREECAD_SCENARIO_CONFIGS lists V2si (local runs).
+The interning oracles (ops#6, Task 1): `test_<ref>_V2siOracle` runs the scenario in V2s and in V2si
+(V2s with InternNames on) and requires the same verdict, stored subs, expanded names and solver tier
+after every step. It asserts equality with V2s, not a correct verdict, so V2s's known failures need
+no V2si entries. It runs by default, or when FREECAD_SCENARIO_CONFIGS lists V2si (the random
+sequences then run V2si as a configuration of their own, below). `test_<ref>_V2iOracle` does the
+same without the solver (V2i against V2); it runs only when FREECAD_SCENARIO_CONFIGS lists V2i.
 
 The reference solver's determinism (ops#7): `SolverSeeded` runs the V2s scenarios and random
 sequences in two child processes under two naming hash seeds, and their SCORE records must be equal.
 
 Randomized edit sequences (Scenarios/randomized.py): `RandomSequences.test_seed<NNNN>_<config>`,
-one test per seed and configuration, V2, V2multi and V2s; with FREECAD_SCENARIO_CONFIGS set, every
-listed configuration, V1, V2i and V2si included (no oracle there: their verdicts must be correct,
-and their known failures need entries). It passes when every reference is as expected after
+one test per seed and configuration, V2s; with FREECAD_SCENARIO_CONFIGS set, every
+listed configuration, V1, V2i and V2si included (no oracle there: their verdicts must be correct;
+the solver-off ones have no known-failure entries since decision 179, so a local run of V1, V2,
+V2multi or V2i shows unlisted failures). It passes when every reference is as expected after
 every step. By default seeds 1-4 with 8 steps each (CI); FREECAD_SCENARIO_SEEDS
 ("1-500", "3,7") and FREECAD_SCENARIO_STEPS change them, FREECAD_SCENARIO_REPLAY=<seed>:<steps>
 runs one seed, and FREECAD_SCENARIO_GAP=1 plans the close-spaced series (ops#127, N3 6.2).
@@ -96,7 +98,7 @@ def configsFor(scenario):
     listed = os.environ.get("FREECAD_SCENARIO_CONFIGS")
     if listed:
         return [c.strip() for c in listed.split(",") if c.strip() and c.strip() not in ORACLES]
-    return ["V2", "V2s", "V2multi"] if scenario.MULTI else ["V2", "V2s"]
+    return ["V2s"]
 
 
 # The interning oracles (ops#6): {interned configuration: the configuration it must equal}
@@ -104,11 +106,11 @@ ORACLES = {"V2i": "V2", "V2si": "V2s"}
 
 
 def oracles():
-    """The interned configurations whose oracle tests run: V2i by default; those listed in
+    """The interned configurations whose oracle tests run: V2si by default; those listed in
     FREECAD_SCENARIO_CONFIGS when it is set."""
     listed = os.environ.get("FREECAD_SCENARIO_CONFIGS")
     if not listed:
-        return ["V2i"]
+        return ["V2si"]
     return [c.strip() for c in listed.split(",") if c.strip() in ORACLES]
 
 
@@ -340,7 +342,7 @@ def _makeRandomTests():
     seeds, steps = randomRuns()
     listed = os.environ.get("FREECAD_SCENARIO_CONFIGS")
     configs = (
-        [c.strip() for c in listed.split(",") if c.strip()] if listed else ["V2", "V2multi", "V2s"]
+        [c.strip() for c in listed.split(",") if c.strip()] if listed else ["V2s"]
     )
     for seed in seeds:
         for config in configs:
