@@ -5026,6 +5026,73 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
         self.doc.recompute()
         self.assertTrue(pipe.isValid(), pipe.getStatusString())
 
+    def testClosedRingStartCornerMovedKeepsTheStart(self):
+        """The ring's bottom line moved down (lines 0 and 2 lengthened, IDs kept), so the start
+        corner moves down the left leg away from the profile, which stays at z = 0: by 15 alone,
+        by 4 with the whole model turned 120 degrees about Z, by 4 with the profile stretched to
+        2 x 3 (which turns its geometry frame: its x axis points at the first vertex). The fit
+        isn't clear or isn't read, so the start is taken by the lines' names, and the fit (in the
+        body, or in the frame that turned) reads the same start: the moved corner, valid. An exact
+        carry of the stored start by a frame stopped the pipe in all three (the review of fork PR
+        383 round 6's fix, L-1, L-2 and L-2b; integration is right)."""
+        for kind, drop in (("far", -15), ("turned", -4), ("stretched", -4)):
+            self.tearDown()
+            self.setUp()
+            with self.subTest(kind=kind):
+                profile, pipe = self.ring(0, 0)
+                path = pipe.Spine[0]
+                self.assertTrue(pipe.isValid(), pipe.getStatusString())
+                geometry = path.Geometry
+                geometry[0].StartPoint = V(0, drop, 0)
+                geometry[2].EndPoint = V(30, drop, 0)
+                geometry[3].StartPoint, geometry[3].EndPoint = V(30, drop, 0), V(0, drop, 0)
+                path.Geometry = geometry
+                rotation = App.Rotation(V(0, 0, 1), 120 if kind == "turned" else 0)
+                if kind == "turned":
+                    path.Placement = App.Placement(V(), rotation.multiply(XZ.Rotation))
+                    profile.Placement = App.Placement(V(), rotation)
+                if kind == "stretched":
+                    geometry = profile.Geometry
+                    for line in geometry:
+                        s, e = line.StartPoint, line.EndPoint
+                        line.StartPoint, line.EndPoint = V(s.x, s.y * 1.5, 0), V(e.x, e.y * 1.5, 0)
+                    profile.Geometry = geometry
+                self.doc.recompute()
+                self.assertTrue(pipe.isValid(), pipe.getStatusString())
+                corner = rotation.multVec(V(0, 0, drop))
+                self.assertLess((V(pipe.SpineStart[0]) - corner).Length, 1e-6)
+                self.assertLess(
+                    (V(pipe.SpineStart[3]) - rotation.multVec(V(0, 0, 20))).Length, 1e-6
+                )
+
+    def testClosedRingLegDrawnAnewFarKeepsTheStart(self):
+        """The ring's right leg deleted and drawn anew 20 further out (x = 50), the top and bottom
+        lines lengthened to meet it, one edit: the fit isn't clear, so the start is taken by the
+        lines' names; the new line's place is left to the order of the three stored names still
+        on the spine, and the fit reads the same start: the stored one, valid. Requiring every
+        stored name stopped the pipe (the review of fork PR 383 round 6's fix, S-1; integration
+        is right). With a second line drawn anew too, two names are left, which still place it."""
+        for anew in (1, 2):
+            self.tearDown()
+            self.setUp()
+            with self.subTest(anew=anew):
+                profile, pipe = self.ring(0, 0)
+                path = pipe.Spine[0]
+                self.assertTrue(pipe.isValid(), pipe.getStatusString())
+                left, top, right, bottom = path.Geometry
+                top.EndPoint = V(50, 20, 0)
+                bottom.StartPoint = V(50, 0, 0)
+                lines = [left, bottom, Part.LineSegment(V(50, 20, 0), V(50, 0, 0))]
+                if anew == 2:
+                    lines.append(Part.LineSegment(V(0, 20, 0), V(50, 20, 0)))
+                else:
+                    lines.append(top)
+                path.Geometry = lines
+                self.doc.recompute()
+                self.assertTrue(pipe.isValid(), pipe.getStatusString())
+                self.assertLess(V(pipe.SpineStart[0]).Length, 1e-6)
+                self.assertLess((V(pipe.SpineStart[3]) - V(0, 0, 20)).Length, 1e-6)
+
     def testClosedRingReorderedAndReversedRenamesNothing(self):
         """The profile slid along its leg (4 to 16), then the lines listed from the top right
         and the left one drawn the other way (round 2's `RingSlidThenReorderedAndReversed`):
