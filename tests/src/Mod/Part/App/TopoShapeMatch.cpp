@@ -454,6 +454,20 @@ TEST(TopoShapeMatch, twinMovedToAFreePlaceLeavesTheOther)
     EXPECT_EQ(matches.vertexes.at(vertexAt(after, gp_Pnt(10, 10, 10))), vertexAt(compound({box(0), box(20)}), gp_Pnt(10, 10, 10)));
 }
 
+// P1 (decision 188): a near-twin 0.5 µm taller is no twin. Twins traded with the near-twin deleted
+// are a permutation of the twins' class; taken into it, the near-twin would unbalance its counts
+TEST(TopoShapeMatch, twinsTradedNearTwinDroppedTakeFreshIds)
+{
+    const auto matches = Part::matchElements(
+        compound({box(0), box(20), box(40, 10.0005)}),
+        compound({box(20), box(0)}),
+        false
+    );
+    EXPECT_TRUE(matches.vertexes.empty());
+    EXPECT_TRUE(matches.edges.empty());
+    EXPECT_TRUE(matches.faces.empty());
+}
+
 namespace
 {
 
