@@ -27,7 +27,7 @@ code iterates a hash container, whose order differs between standard libraries (
 for pointer keys, between runs, or when OCCT's own result order varies (parallel booleans, an
 offset's faces: ops#49).
 
-Each model is built in a V1 and in a V2 document. A dump lists every element of the model's
+Each model is built in a V2 document (and a V1 one with FREECAD_OLD_FILE_TESTS set). A dump lists every element of the model's
 features with its names, one line per element and name, sorted. An element is keyed by its type,
 centroid and mass (length or area; a vertex by its point), not by its index, and the object IDs
 (tags) in its names are replaced with object names. A V2 name's Linked and Connected Names are sets,
@@ -55,9 +55,12 @@ small tag that is no object's ID can't be masked as an object's name; TestNaming
 forces that case (ops#52).
 
 Environment variables:
+- FREECAD_OLD_FILE_TESTS=1: the V1 checks run too (by default only V2 and V2i, in CI and locally:
+  PLAN decision 179, ops#537).
 - FREECAD_NAMING_GOLDEN_UPDATE=<dir>: TestNamingGolden writes the golden files into <dir> (the
-  source tree's NamingGolden folder) instead of comparing. When V2 files change, bump the naming
-  revision and record REVISION as TestNamingRevision's message says.
+  source tree's NamingGolden folder) instead of comparing; the V1 files only with
+  FREECAD_OLD_FILE_TESTS set. When V2 files change, bump the naming revision and record REVISION as
+  TestNamingRevision's message says.
 - FREECAD_NAMING_DUMP_DIR=<dir>: where a failing test writes its dumps (default: the temp dir).
 """
 
@@ -82,7 +85,13 @@ from PartDesignTests.Scenarios.harness import Masker, face
 V = App.Vector
 
 GOLDEN_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "NamingGolden")
-MODES = ("V1", "V2", "V2i")
+# Tests whose only purpose is files from upstream FreeCAD (V1 names) or from fork builds before the
+# reference solver (the solver off) run only with FREECAD_OLD_FILE_TESTS set, in CI and locally
+# alike: such files are deferred compatibility (PLAN decisions 58 and 179, ops#537). The other
+# PartDesign naming tests take the flag from here.
+OLD_FILE_TESTS = bool(os.environ.get("FREECAD_OLD_FILE_TESTS"))
+OLD_FILE_SKIP = "a solver-off or V1 file only: FREECAD_OLD_FILE_TESTS=1 runs it (decision 179)"
+MODES = ("V1", "V2", "V2i") if OLD_FILE_TESTS else ("V2", "V2i")
 REPEATS = 5
 SEEDS = ("0x5eed0001", "0x9e3779b97f4a7c15")
 
@@ -225,7 +234,8 @@ def modelPipeShell(doc):
     side faces (ops#351). At the bend the hole's side face meets the next leg's in four arcs,
     named `UPP` from the same faces and told apart only by an index. OCCT stores the arcs in
     opposite orders on Windows and macOS; the V2 index follows their places, so it is the same
-    on both (ops#378). V1's follows OCCT's order and differs on macOS (a known failure)."""
+    on both (ops#378). V1's follows OCCT's order and differs on macOS (ops#430; V1 runs
+    only with FREECAD_OLD_FILE_TESTS set)."""
     profile = models.feature(doc, "Profile", models.closedWire([(0, 0, 0), (4, 0, 0), (4, 2, 0), (0, 2, 0)]))
     spine = models.feature(doc, "Spine", Part.makeLine(V(0, 0, 0), V(0, 0, 20)))
     sweep = doc.addObject("Part::Sweep", "Sweep")
@@ -755,7 +765,7 @@ def _save(model, mode, label, text):
 
 
 def childMain(outPath):
-    """Dumps every model in both modes into a JSON file. Run in a child process."""
+    """Dumps every model in every mode of MODES into a JSON file. Run in a child process."""
     result = {}
     for model in MODELS:
         for mode in MODES:

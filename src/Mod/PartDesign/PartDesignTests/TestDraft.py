@@ -27,6 +27,8 @@ import unittest
 import FreeCAD
 import Part
 
+from PartDesignTests import TestNamingDump as dump
+
 App = FreeCAD
 
 
@@ -229,6 +231,7 @@ class TestDressUpFaces(unittest.TestCase):
         self.assertEqual(draft.Base[1][0], "?" + right)
         return draft, right, left
 
+    @unittest.skipUnless(dump.OLD_FILE_TESTS, dump.OLD_FILE_SKIP)
     def testMissingFaceIsNamed(self):
         """Without the reference solver the draft fails, and its error names the right face,
         not the left one (the left face used to be looked up under the right face's name)."""

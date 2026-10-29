@@ -24,8 +24,9 @@
 notes/reorder-rollback-design.md sections 1-3).
 
 Every model is designed here: a 20 x 20 x 10 block (4000 mm^3), 4 x 4 x 5 bosses on its top and a
-hole in it, whose volumes are known, so each step has a volume oracle. Each test runs in plain V2
-and with the reference solver (V2s)."""
+hole in it, whose volumes are known, so each step has a volume oracle. Each test runs with the
+reference solver (V2s), and in plain V2 (a file saved before the solver) with FREECAD_OLD_FILE_TESTS
+set (decision 179)."""
 
 import math
 import os
@@ -39,6 +40,7 @@ import FreeCAD as App
 import Part
 import Sketcher
 
+from PartDesignTests import TestNamingDump as dump
 from PartDesignTests.Scenarios import models
 
 V = App.Vector
@@ -2919,6 +2921,7 @@ class SplitFace:
         return dressUp, slot
 
 
+@unittest.skipUnless(dump.OLD_FILE_TESTS, dump.OLD_FILE_SKIP)
 class TestBodyReorderV2(SplitFace, BodyReorderBase, unittest.TestCase):
     solver = False
 

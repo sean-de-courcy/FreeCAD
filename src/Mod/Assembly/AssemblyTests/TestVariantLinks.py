@@ -11,7 +11,9 @@ Tracking) shows a copy of the Body in its own configuration, made in the assembl
 The expectations are geometric: the face a reference names is the top face of the box the link
 shows (z = its height), and a link's bounding box is that box.
 
-Each case runs with V1 names, V2 names, and V2 names with the reference solver on.
+Each case runs with V2 names and the reference solver on; with FREECAD_OLD_FILE_TESTS set, also with
+V1 names and with V2 names without the solver (files from upstream FreeCAD and from fork builds
+before the solver: PLAN decision 179, ops#537).
 """
 
 import os
@@ -27,6 +29,9 @@ import JointObject
 CONFIGS = {"Small": (10.0, 10.0, 5.0), "Large": (30.0, 20.0, 8.0)}
 # Configuration: (history algorithm, reference solver).
 NAMINGS = {"V1": ("V1", False), "V2": ("V2", False), "V2s": ("V2", True)}
+# The configurations the cases run in: the solver-off ones only with FREECAD_OLD_FILE_TESTS set
+OLD_FILE_TESTS = bool(os.environ.get("FREECAD_OLD_FILE_TESTS"))
+RUN_NAMINGS = [n for n, (_, solver) in NAMINGS.items() if solver or OLD_FILE_TESTS]
 TOL = 1e-6
 
 
@@ -212,7 +217,7 @@ class TestLinkRetargetJoints(VariantLinkTestBase):
         self.assertEqual(_bbox(linkB.Shape), box, msg + ": LinkB, the joint didn't hold")
 
     def runCase(self, variant, jointConfig, config, change=None):
-        for naming in NAMINGS:
+        for naming in RUN_NAMINGS:
             with self.subTest(naming=naming):
                 self.build(naming, variant, jointConfig)
                 if change:
@@ -279,7 +284,7 @@ class TestLinkRetargetProperties(VariantLinkTestBase):
     doesn't pass through the retargeted link keeps its name."""
 
     def test_retarget_link_properties(self):
-        for naming in NAMINGS:
+        for naming in RUN_NAMINGS:
             with self.subTest(naming=naming):
                 self.start(naming)
                 body = self.part.getObject("Body")
@@ -345,7 +350,7 @@ class TestLinkRetargetProperties(VariantLinkTestBase):
     def test_target_document_closed(self):
         """Closing the part document while the assembly stays open detaches the link's target,
         which is not a retarget: the saved reference keeps its mapped name (ops#40, ops#42)."""
-        for naming in NAMINGS:
+        for naming in RUN_NAMINGS:
             with self.subTest(naming=naming):
                 self.start(naming)
                 link = self.doc.addObject("App::Link", "LinkA")
@@ -384,7 +389,7 @@ class TestLinkRetargetProperties(VariantLinkTestBase):
         then or reopened in between, each reference names the top face again: the same face,
         never another one."""
         height = CONFIGS["Small"][2]
-        for naming in NAMINGS:
+        for naming in RUN_NAMINGS:
             for reopenPart in (False, True):
                 with self.subTest(naming=naming, reopenPart=reopenPart):
                     self.start(naming)
@@ -452,7 +457,10 @@ REOPEN_CONFIGS = {
     "V2": ("V2", False, False),
     "V2s": ("V2", True, False),
     "V2i": ("V2", False, True),
+    "V2si": ("V2", True, True),
 }
+# Solver off (V1, V2, V2i) only with FREECAD_OLD_FILE_TESTS set; V2si keeps the interned names in CI
+RUN_REOPEN = [c for c, (_, solver, _) in REOPEN_CONFIGS.items() if solver or OLD_FILE_TESTS]
 
 
 class TestLinkTargetReopened(VariantLinkTestBase):
@@ -540,7 +548,7 @@ class TestLinkTargetReopened(VariantLinkTestBase):
         self.docs.append(part.Name)
         return part
 
-    def runCase(self, change, configs=("V1", "V2", "V2s", "V2i")):
+    def runCase(self, change, configs=RUN_REOPEN):
         """`change(part, doc, link, refs, top)` returns the part document to edit, and the
         assembly, its Link and its Refs (they change when the assembly is reopened)."""
         for config in configs:
@@ -603,7 +611,7 @@ class TestLinkTargetReopened(VariantLinkTestBase):
         """The fillet made and followed, then the part reverted to its file without the fillet
         (File > Revert): before any recompute, each reference names the top face of the box
         again or is broken loudly (ops#120)."""
-        for config in ("V1", "V2", "V2s", "V2i"):
+        for config in RUN_REOPEN:
             with self.subTest(config=config):
                 part, doc, link, refs, top = self.build(config)
                 self.fillet(part, doc)
@@ -617,7 +625,9 @@ class TestLinkTargetReopened(VariantLinkTestBase):
     def test_pasted(self):
         """An XLink into the part copied into another assembly (a paste: exportObjects, then
         importObjects): the copy names the top face at once, before any recompute (ops#120)."""
-        for config in ("V2", "V2s", "V2i"):
+        for config in RUN_REOPEN:
+            if config == "V1":
+                continue
             with self.subTest(config=config):
                 part, doc, link, refs, top = self.build(config)
                 body = part.getObject("Body")
@@ -672,7 +682,7 @@ class TestVariantLinkRecompute(VariantLinkTestBase):
     pass, not left touched with the source's default configuration."""
 
     def test_source_edit_one_recompute(self):
-        for naming in NAMINGS:
+        for naming in RUN_NAMINGS:
             with self.subTest(naming=naming):
                 self.start(naming)
                 link = self.doc.addObject("App::Link", "L")
@@ -828,7 +838,7 @@ class TestVariantTopologyChanged(VariantLinkTestBase):
 
 
 def _addTopologyCases():
-    for naming in NAMINGS:
+    for naming in RUN_NAMINGS:
         for feature in ("fillet", "pocket"):
             for move in ("variant", "retarget"):
 
@@ -952,7 +962,7 @@ class TestRetargetCheckSaved(VariantLinkTestBase):
         return link, {name: get(refs) for name, (_, get) in REFERENCE_PROPS.items()}
 
     def test_changed_topology_goes_missing(self):
-        for naming in NAMINGS:
+        for naming in RUN_NAMINGS:
             for feature in ("fillet", "pocket"):
                 with self.subTest(naming=naming, feature=feature):
                     msg = "%s, %s" % (naming, feature)
@@ -971,7 +981,7 @@ class TestRetargetCheckSaved(VariantLinkTestBase):
         re-derives references from geometry, which leaves the check alone (it runs only on a
         lookup by name); the check runs after it and passes, and the references name the top
         face."""
-        for naming in NAMINGS:
+        for naming in RUN_NAMINGS:
             with self.subTest(naming=naming):
                 path = self.saveInWindow(naming, None)
                 _ageStamps(path)
@@ -988,7 +998,7 @@ class TestRetargetCheckSaved(VariantLinkTestBase):
         """Control: the Large variant has the Small one's faces; the check passes and the
         references name the top face, with the check in the file and without it (a file from a
         build without ops#109)."""
-        for naming in NAMINGS:
+        for naming in RUN_NAMINGS:
             for saved in (True, False):
                 with self.subTest(naming=naming, saved=saved):
                     msg = "%s, check %s" % (naming, "saved" if saved else "stripped")

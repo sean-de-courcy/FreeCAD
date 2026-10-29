@@ -7,11 +7,17 @@ The sketch fails, names the source and the missing element, and keeps the link i
 shows, and the constraints on it still solve). Before, it stayed valid on the frozen geometry and
 dropped the link. Every model is designed geometry; results are judged geometrically."""
 
+import os
 import unittest
 
 import FreeCAD
 import Part
 import Sketcher
+
+# Tests whose only purpose is files from upstream FreeCAD (V1 names) or from fork builds before the
+# reference solver (the solver off) run only with FREECAD_OLD_FILE_TESTS set (PLAN decision 179)
+OLD_FILE_TESTS = bool(os.environ.get("FREECAD_OLD_FILE_TESTS"))
+OLD_FILE_SKIP = "a solver-off or V1 file only: FREECAD_OLD_FILE_TESTS=1 runs it (decision 179)"
 
 App = FreeCAD
 V = App.Vector
@@ -64,10 +70,14 @@ class TestSketchMissingExternal(unittest.TestCase):
     edges are gone."""
 
     solver = False
+    # Run without the solver also when FREECAD_OLD_FILE_TESTS isn't set: the solver's class skips them
+    OFF_ONLY = ("testFaceLinkNamesEachGeometry",)
 
     def setUp(self):
         if "BUILD_PART_DESIGN" not in App.__cmake__:
             self.skipTest("needs PartDesign")
+        if not self.solver and not OLD_FILE_TESTS and self._testMethodName not in self.OFF_ONLY:
+            self.skipTest(OLD_FILE_SKIP)
         self.doc = App.newDocument("TestSketchMissingExternal")
         if self.solver and not hasattr(self.doc, "ReferenceSolver"):
             self.skipTest("needs the reference solver")
@@ -251,10 +261,13 @@ class TestSketchMissingExternalReturns(unittest.TestCase):
     is pointed at the element again and the sketch is valid."""
 
     solver = False
+    OFF_ONLY = ()
 
     def setUp(self):
         if "BUILD_PART_DESIGN" not in App.__cmake__:
             self.skipTest("needs PartDesign")
+        if not self.solver and not OLD_FILE_TESTS and self._testMethodName not in self.OFF_ONLY:
+            self.skipTest(OLD_FILE_SKIP)
         self.doc = App.newDocument("TestSketchMissingExternalReturns")
         if self.solver and not hasattr(self.doc, "ReferenceSolver"):
             self.skipTest("needs the reference solver")

@@ -33,6 +33,7 @@ import FreeCAD as App
 import Part
 import Sketcher
 import TestSketcherApp
+from PartDesignTests import TestNamingDump as dump
 from PartDesignTests.Scenarios import harness, models
 
 
@@ -3675,6 +3676,7 @@ class TestTopologicalNamingProblem(unittest.TestCase):
         finally:
             App.closeDocument(doc.Name)
 
+    @unittest.skipUnless(dump.OLD_FILE_TESTS, dump.OLD_FILE_SKIP)
     def testV1OwnResultNamesAreV1(self):
         """In a V1 document, a Revolution, a Groove, a Defeaturing (ops#30), a Boolean, a
         pattern, a Mirrored and a Pipe (ops#39) name their results in V1 grammar only."""
@@ -3750,6 +3752,7 @@ class TestTopologicalNamingProblem(unittest.TestCase):
         finally:
             App.closeDocument(doc.Name)
 
+    @unittest.skipUnless(dump.OLD_FILE_TESTS, dump.OLD_FILE_SKIP)
     def testV1BodyNamesMaplessTip(self):
         """In V1, a Body names each element of a tip without an element map as a child of the
         tip: '<element>;:H<tip ID, hex>,<type>', as FreeCAD 1.1.3 does (ops#35)."""

@@ -415,7 +415,8 @@ names it.
 | `fix/406-binormal-fold` | fix | ops#406, ops#458 | - | `integration` `0ee24f4ed8` | `1afc652c4a` (fork PR 380), 2026-10-28 | never (fork fix) |
 | `fix/468-harness-twin-counter` | fix | ops#468 | - | `integration` `1afc652c4a` | `86812406ca` (fork PR 391), 2026-10-28 | never (fork tests) |
 | `fix/523-link-copy-names` | fix | ops#523 | - | `integration` `0ee24f4ed8` | `e088a46a99` (fork PR 392), 2026-10-28 | never (fork naming) |
-| `infra/533-macos-workflow` | infra | ops#533 | - | `integration` `e088a46a99` | (fork PR 393) | never |
+| `infra/533-macos-workflow` | infra | ops#533 | - | `integration` `e088a46a99` | `381cbaf445` (fork PR 393), 2026-10-29 | never |
+| `infra/537-old-file-tests` | infra | ops#537 | - | `integration` `e088a46a99` | (fork PR 394) | never (fork tests) |
 
 ## Fork-only commits in carried topics
 

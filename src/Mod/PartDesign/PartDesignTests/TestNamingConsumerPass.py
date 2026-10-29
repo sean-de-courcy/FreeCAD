@@ -41,7 +41,7 @@ import FreeCAD as App
 
 from PartDesignTests.Scenarios import models
 from PartDesignTests.TestNamingGate import (
-    CONFIGS,
+    RUN_CONFIGS,
     NamingGateTestBase,
     ageStamps,
     currentRevision,
@@ -714,7 +714,7 @@ def _addConfigTests():
         "alreadyBroken",
         "currentFiles",
     ):
-        for config in CONFIGS:
+        for config in RUN_CONFIGS:
 
             def test(self, method=method, config=config):
                 getattr(self, method)(config)

@@ -3,8 +3,16 @@
 import FreeCAD as App
 import Part
 
+import os
 import re
 import unittest
+
+# Tests whose only purpose is files from upstream FreeCAD (V1 names) or from fork builds before the
+# reference solver (the solver off) run only with FREECAD_OLD_FILE_TESTS set (PLAN decision 179)
+OLD_FILE_TESTS = bool(os.environ.get("FREECAD_OLD_FILE_TESTS"))
+OLD_FILE_SKIP = "a solver-off or V1 file only: FREECAD_OLD_FILE_TESTS=1 runs it (decision 179)"
+# The algorithms the V1-and-V2 loops run
+ALGORITHMS = ("V1", "V2") if OLD_FILE_TESTS else ("V2",)
 
 
 class TopoShapeAssertions:
@@ -426,7 +434,7 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
             point = element.Point if hasattr(element, "Point") else element.CenterOfMass
             return tuple(round(c, 6) for c in point)
 
-        for algorithm in ("V1", "V2"):
+        for algorithm in ALGORITHMS:
             doc = App.newDocument("GroupOfSharedChildren")
             try:
                 doc.HistoryAlgorithm = algorithm
@@ -826,7 +834,7 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
         """Every element of a Part::Extrusion of a face without an element map (a Part::Plane)
         is named. In V2 the top face, a moved copy of the base face, is named as its
         projection (PRJ), like a Pad's top face (ops#28)."""
-        for algorithm in ("V1", "V2"):
+        for algorithm in ALGORITHMS:
             with self.subTest(algorithm=algorithm):
                 doc = App.newDocument("ExtrusionOfPlane")
                 try:
@@ -1270,7 +1278,7 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
                 for one, other in ((a, b), (b, a))
             )
 
-        for algorithm in ("V1", "V2"):
+        for algorithm in ALGORITHMS:
             with self.subTest(algorithm=algorithm):
                 doc = App.newDocument("GetElementHistory")
                 try:
@@ -1598,6 +1606,7 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
                             untagged.ElementReverseMap[f"Edge{index}"],
                         )
 
+    @unittest.skipUnless(OLD_FILE_TESTS, OLD_FILE_SKIP)
     def testV1SketchExtrusionFaceNames(self):
         """In a V1 document, every face of an extrusion of a rectangle sketch has a V1 face name
         (element type F), and the two end faces are named from the sketch's face (FAC). The end
@@ -1696,6 +1705,7 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
         finally:
             App.closeDocument(doc.Name)
 
+    @unittest.skipUnless(OLD_FILE_TESTS, OLD_FILE_SKIP)
     def testV1FeatureNamesAreV1(self):
         """In a V1 document, Part features name their results in V1 grammar only. They
         built their results with the V2 default of TopoShape (ops#30)."""
@@ -1781,6 +1791,7 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
         finally:
             App.closeDocument(doc.Name)
 
+    @unittest.skipUnless(OLD_FILE_TESTS, OLD_FILE_SKIP)
     def testV1MirrorOfPlacedSourceKeepsNames(self):
         """ops#39, V1: a mirror of a source with a Placement had no element names."""
         self.assertMirrorOfPlacedSourceKeepsNames("V1")

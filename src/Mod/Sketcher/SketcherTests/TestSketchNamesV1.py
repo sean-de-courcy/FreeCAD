@@ -17,7 +17,13 @@ import Sketcher  # noqa: F401
 App = FreeCAD
 V = App.Vector
 
+# Tests whose only purpose is files from upstream FreeCAD (V1 names) or from fork builds before the
+# reference solver (the solver off) run only with FREECAD_OLD_FILE_TESTS set (PLAN decision 179)
+OLD_FILE_TESTS = bool(os.environ.get("FREECAD_OLD_FILE_TESTS"))
+OLD_FILE_SKIP = "a solver-off or V1 file only: FREECAD_OLD_FILE_TESTS=1 runs it (decision 179)"
 
+
+@unittest.skipUnless(OLD_FILE_TESTS, OLD_FILE_SKIP)
 class TestSketchNamesV1(unittest.TestCase):
     def setUp(self):
         self.doc = App.newDocument("TestSketchNamesV1")

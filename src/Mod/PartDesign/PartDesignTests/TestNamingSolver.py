@@ -37,6 +37,7 @@ from xml.etree import ElementTree
 import FreeCAD as App
 import Part
 
+from PartDesignTests import TestNamingDump as dump
 from PartDesignTests.Scenarios import models
 from PartDesignTests.Scenarios.moves import moveCircles
 from PartDesignTests.Scenarios.harness import X, Z, edge, face
@@ -280,6 +281,7 @@ class TestNamingSolver(unittest.TestCase):
         self.assertEqual(report[0]["candidates"], [index])
         self.assertEqual(report[0]["evidence"], "index carry, fingerprint differs")
 
+    @unittest.skipUnless(dump.OLD_FILE_TESTS, dump.OLD_FILE_SKIP)
     def testSolverOffChangesNothing(self):
         """The report and the recompute check need the switch: the same broken fillet in a V2
         document without it reports nothing, and its owner isn't failed by the check."""
@@ -703,6 +705,7 @@ class TestNamingSolver(unittest.TestCase):
             self.assertAlmostEqual(x, ex, places=6)
             self.assertAlmostEqual(y, ey, places=6)
 
+    @unittest.skipUnless(dump.OLD_FILE_TESTS, dump.OLD_FILE_SKIP)
     def testSolverOffSavesNoFrom(self):
         """Without the switch, nothing saves `from`, and the fillet keeps one reference (the
         solver-off behaviour)."""
@@ -2477,6 +2480,7 @@ class TestNamingSolver(unittest.TestCase):
         printed = self.consoleOutput(lambda: setRadius(30))
         self.assertEqual(lines(printed), [error])
 
+    @unittest.skipUnless(dump.OLD_FILE_TESTS, dump.OLD_FILE_SKIP)
     def testMissingElementReferenceStaysAWarningWithoutTheSolver(self):
         """Without the reference solver, the fillet's edge gone (the profile drawn as a triangle
         without it): `PropertyLinks`' "missing element reference" stays a warning (upstream's);
