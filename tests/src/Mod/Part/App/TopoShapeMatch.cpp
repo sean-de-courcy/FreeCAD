@@ -26,15 +26,18 @@
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
+#include <BRepBuilderAPI_Transform.hxx>
 #include <BRepGProp.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCone.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <GProp_GProps.hxx>
+#include <gp_Ax1.hxx>
 #include <gp_Ax2.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Pnt.hxx>
+#include <gp_Trsf.hxx>
 #include <gp_Vec.hxx>
 #include <TopExp.hxx>
 #include <TopoDS.hxx>
@@ -475,6 +478,42 @@ TEST(TopoShapeMatch, nearPairTradedTakesFreshIds)
     const auto matches = Part::matchElements(
         compound({box(0), box(20, 10.0005)}),
         compound({box(20), box(0, 10.0005)}),
+        false
+    );
+    EXPECT_TRUE(matches.vertexes.empty());
+    EXPECT_TRUE(matches.edges.empty());
+    EXPECT_TRUE(matches.faces.empty());
+}
+
+namespace
+{
+
+// A board 60 x 10 x 5 ripped along its diagonal: the wedge below the diagonal, or above it
+TopoDS_Shape wedge(bool below)
+{
+    const TopoDS_Wire outline = below
+        ? polyline({gp_Pnt(0, 0, 0), gp_Pnt(60, 0, 0), gp_Pnt(60, 10, 0)}, true)
+        : polyline({gp_Pnt(0, 0, 0), gp_Pnt(60, 10, 0), gp_Pnt(0, 10, 0)}, true);
+    return BRepPrimAPI_MakePrism(BRepBuilderAPI_MakeFace(outline).Face(), gp_Vec(0, 0, 5)).Shape();
+}
+
+// The shape turned half a turn about the board's vertical axis: each wedge onto the other's place
+TopoDS_Shape halfTurned(const TopoDS_Shape& shape)
+{
+    gp_Trsf turn;
+    turn.SetRotation(gp_Ax1(gp_Pnt(30, 5, 0), gp_Dir(0, 0, 1)), pi);
+    return BRepBuilderAPI_Transform(shape, turn, true).Shape();
+}
+
+}  // namespace
+
+// P1: twin wedges share the board's box, so by their boxes both sit at every old place; turned
+// half a turn, each old wedge's matched elements went to the other (the fix review's T3)
+TEST(TopoShapeMatch, wedgeTwinsTurnedTakeFreshIds)
+{
+    const auto matches = Part::matchElements(
+        compound({wedge(true), wedge(false)}),
+        compound({halfTurned(wedge(true)), halfTurned(wedge(false))}),
         false
     );
     EXPECT_TRUE(matches.vertexes.empty());
