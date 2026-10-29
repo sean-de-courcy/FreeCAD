@@ -6626,8 +6626,13 @@ TEST(SolveOwner, twinCapPiecesResolveToTheirCapMadeWholeOnTheSamePlate)
     tilted.normal = Base::Vector3d(0.1, 0, 1);
     breaks({tilted}, "the plate tilted");
     auto smaller = plate;
-    smaller.area = 399;
-    breaks({smaller}, "a hole grown in the plate");
+    smaller.area = 390;
+    breaks({smaller}, "a hole grown in the plate (2.5 % of its area)");
+    // An area within tier 3's 1 %: the same plate (a trimmed B-spline face's area moves a little
+    // when its hole moves)
+    under = {plate};
+    under[0].area = 399;
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Resolved);
     auto taller = plate;
     taller.boxMax.z = 10.01;
     breaks({taller}, "the plate's box taller");
