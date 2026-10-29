@@ -1,0 +1,8 @@
+{
+"entries": {
+"NotchBackAgainDatum|l_piece|V2s": {"axes": ["M2", "E5"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review prA1b-r1", "issue": "ops#522", "tier": "F"},
+"NotchBackAgainDatum|square|V2s": {"axes": ["M2", "E5"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review prA1b-r1", "issue": "ops#522", "tier": "F"},
+"NotchBackAgainPlacement|l_piece|V2s": {"axes": ["M2", "E5"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review prA1b-r1", "issue": "ops#522", "tier": "F"},
+"NotchBackAgainPlacement|square|V2s": {"axes": ["M2", "E5"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review prA1b-r1", "issue": "ops#522", "tier": "F"}
+}
+}
