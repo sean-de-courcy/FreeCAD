@@ -1337,8 +1337,9 @@ bool solveElementReferences(DocumentObject* feature,
         }
         if (elementUpToFacesFunction) {
             input.upToFacesAt = [geo](const Base::Vector3d& point,
-                                      std::vector<Data::ElementFingerprint::UpToFace>& faces) {
-                return elementUpToFacesFunction(geo, point, faces);
+                                      std::vector<Data::ElementFingerprint::UpToFace>& faces,
+                                      std::vector<Data::ElementFingerprint::UpToFace>& all) {
+                return elementUpToFacesFunction(geo, point, faces, &all);
             };
         }
         for (const auto* entry : entries) {
@@ -1882,7 +1883,7 @@ bool elementUpToFaces(
         return false;
     }
     const Base::Vector3d& point = fingerprint.inside ? *fingerprint.inside : *fingerprint.center;
-    return elementUpToFacesFunction(geo, point, faces);
+    return elementUpToFacesFunction(geo, point, faces, nullptr);
 }
 
 }  // namespace App

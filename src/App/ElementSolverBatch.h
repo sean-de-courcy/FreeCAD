@@ -249,15 +249,16 @@ AppExport void setElementSweepDirectionFunction(ElementSweepDirectionFunction fu
  * their boundary (ops#522, PLAN decision 168), each as Data::ElementFingerprint::UpToFace has it:
  * its owner, and its box, area and normal at the point in the owner's own frame. \a point is in
  * the frame \a geo's fingerprints are measured in, carried by \a geo's current placement, so a
- * point saved before a profile moved by placement moves with it. False when it can't be told:
- * not a one-sided extrusion up to a face or a shape, or an up-to face that is unbounded (a datum
- * plane). True with no face when the line meets none. PartDesign sets it; without it no point
- * has an up-to face.
+ * point saved before a profile moved by placement moves with it. With \a all, every up-to face
+ * too, under the point or not. False when it can't be told: not a one-sided extrusion up to a
+ * face or a shape, or an up-to face that is unbounded (a datum plane). True with no face when
+ * the line meets none. PartDesign sets it; without it no point has an up-to face.
  */
 using ElementUpToFacesFunction
     = bool (*)(const GeoFeature* geo,
                const Base::Vector3d& point,
-               std::vector<Data::ElementFingerprint::UpToFace>& faces);
+               std::vector<Data::ElementFingerprint::UpToFace>& faces,
+               std::vector<Data::ElementFingerprint::UpToFace>* all);
 AppExport void setElementUpToFacesFunction(ElementUpToFacesFunction function);
 
 /** ElementUpToFacesFunction's answer for the far piece \a element (`Face7`) of \a geo's shape,

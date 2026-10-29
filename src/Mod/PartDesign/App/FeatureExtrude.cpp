@@ -36,6 +36,7 @@
 #include <BRepGProp.hxx>
 #include <BRepIntCurveSurface_Inter.hxx>
 #include <BRepProj_Projection.hxx>
+#include <BRepTools.hxx>
 #include <BRepFeat_MakePrism.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <Bnd_Box.hxx>
@@ -236,17 +237,21 @@ const bool sweepDirectionRegistered = (App::setElementSweepDirectionFunction(&sw
 // the sweep meets, inside them or on their boundary. The point comes in the feature's own frame
 // and goes to the frame the up-to shapes are taken in (with their placements) by the feature's
 // current placement, so it moves with a profile moved by placement; then into each face owner's
-// own frame, where the face's box, area and normal are measured, so a plate moved by its owner's
-// placement is the same plate. A datum plane or another unbounded face, UpToFirst and UpToLast
+// own frame, where the face's box, area, normal and outer wire are measured, so a plate moved by
+// its owner's placement is the same plate. With `all`, every up-to face too (its normal: none). A datum plane or another unbounded face, UpToFirst and UpToLast
 // (the base's faces), an empty shape list (the base), two sides, and a face whose normal can't
 // be taken at the point can't be told.
 bool upToFaces(
     const App::GeoFeature* geo,
     const Base::Vector3d& point,
-    std::vector<Data::ElementFingerprint::UpToFace>& faces
+    std::vector<Data::ElementFingerprint::UpToFace>& faces,
+    std::vector<Data::ElementFingerprint::UpToFace>* all
 )
 {
     faces.clear();
+    if (all) {
+        all->clear();
+    }
     const auto extrude = dynamic_cast<const FeatureExtrude*>(geo);
     if (!extrude || std::strcmp(extrude->SideType.getValueAsString(), "One side") != 0) {
         return false;
@@ -322,6 +327,27 @@ bool upToFaces(
                     })) {
                     return false;
                 }
+                GProp_GProps props;
+                BRepGProp::SurfaceProperties(topoFace, props);
+                const TopoDS_Wire outer = BRepTools::OuterWire(topoFace);
+                GProp_GProps wireProps;
+                if (outer.IsNull()) {
+                    return false;
+                }
+                BRepGProp::LinearProperties(outer, wireProps);
+                if (wireProps.Mass() <= Precision::Confusion()) {
+                    return false;
+                }
+                const gp_Pnt wire = wireProps.CentreOfMass();
+                Data::ElementFingerprint::UpToFace upTo;
+                upTo.owner = ref->getNameInDocument();
+                upTo.boxMin = Base::Vector3d(x0, y0, z0);
+                upTo.boxMax = Base::Vector3d(x1, y1, z1);
+                upTo.area = props.Mass();
+                upTo.wireCentre = Base::Vector3d(wire.X(), wire.Y(), wire.Z());
+                if (all) {
+                    all->push_back(upTo);
+                }
                 // The meeting nearest to the point
                 BRepIntCurveSurface_Inter hits;
                 hits.Init(topoFace, line, Precision::Confusion());
@@ -346,13 +372,6 @@ bool upToFaces(
                 if (normal.Magnitude() <= gp::Resolution()) {
                     return false;
                 }
-                GProp_GProps props;
-                BRepGProp::SurfaceProperties(topoFace, props);
-                Data::ElementFingerprint::UpToFace upTo;
-                upTo.owner = ref->getNameInDocument();
-                upTo.boxMin = Base::Vector3d(x0, y0, z0);
-                upTo.boxMax = Base::Vector3d(x1, y1, z1);
-                upTo.area = props.Mass();
                 upTo.normal = Base::Vector3d(normal.X(), normal.Y(), normal.Z()).Normalize();
                 faces.push_back(std::move(upTo));
             }
