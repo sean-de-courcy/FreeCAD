@@ -124,6 +124,59 @@ class ScriptTwinsTraded(Scenario):
         self.target.Shape = self.boxes()
 
 
+class ScriptBoardsTradedNearTwinDeleted(Scenario):
+    """A script's compound of three 600 x 50 x 20 boards, A at z = 0, B at z = 100 and C at
+    z = 200, C 0.04 mm longer (a near-twin), as a fresh shape; a sketch on A's top face, another on
+    B's. The script puts A at 100 and B at 0 and drops C. Right by the producer's order: A's top at
+    z = 120, B's at z = 20, or a break. P1's strict classes leave C out, so A and B are a class of
+    two traded: retired, loud+ (review pr502-r2c; decision 188: a looser congruence took C in, 3
+    against 2, and the trade went silent). The same trade with C an exact twin is a known silent
+    (corpus inbox C, with remove-slide)."""
+
+    area = "history-less results"
+    CLASSES = ("C",)
+    ISSUE = "ops#502"
+    FOUND_BY = "review pr502-r2c"
+    TIER = "F"
+    AXES = ("M2", "X4")
+    REFS = ("a_top", "b_top")
+    a, b = 0, 100
+    third = 600.04
+
+    def boards(self):
+        parts = [Part.makeBox(600, 50, 20, V(0, 0, self.a)), Part.makeBox(600, 50, 20, V(0, 0, self.b))]
+        if self.third is not None:
+            parts.append(Part.makeBox(self.third, 50, 20, V(0, 0, 200)))
+        shape = Part.Shape()
+        shape.importBrepFromString(Part.makeCompound(parts).exportBrepToString())
+        return shape
+
+    def aTop(self):
+        return face("plane", normal=Z, contains=V(300, 25, self.a + 20))
+
+    def bTop(self):
+        return face("plane", normal=Z, contains=V(300, 25, self.b + 20))
+
+    def build(self, doc):
+        self.target = m.feature(doc, "Boards", self.boards())
+        doc.recompute()
+        for key, expect in (("a_top", self.aTop), ("b_top", self.bTop)):
+            sketch = doc.addObject("Sketcher::SketchObject", "On_" + key)
+            sketch.AttachmentSupport = [(self.target, self.names(self.target, expect())[0])]
+            sketch.MapMode = "FlatFace"
+            self.ref(key, sketch, "AttachmentSupport", expect, Attached())
+
+    def edit(self, doc):
+        self.a, self.b, self.third = 100, 0, None
+        self.target.Shape = self.boards()
+
+
+class ScriptBoardsTradedOtherBoardDeleted(ScriptBoardsTradedNearTwinDeleted):
+    """The control: C 700 long, clearly no twin; the same trade with C dropped: loud+."""
+
+    third = 700.0
+
+
 # ---- E1's index-shift case and its controls (review pr384-r4) ----------------------------------
 
 

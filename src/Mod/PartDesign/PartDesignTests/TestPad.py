@@ -1188,7 +1188,8 @@ def replacePlateBreaksTheUpTo(test, feature, shape):
     broken = [entry for entry in report if entry["status"] == "broken"]
     for entry in broken:
         test.assertTrue(entry["evidence"].startswith("retired:"), entry["evidence"])
-    plateEntry = [entry for entry in broken if entry["sub"] == "Face1"]
+    # (a broken reference's sub carries the missing-element mark: "?Face1")
+    plateEntry = [entry for entry in broken if entry["sub"].lstrip("?") == "Face1"]
     test.assertEqual(len(plateEntry), 1, report)
     test.assertEqual(plateEntry[0]["candidates"][0], "Face1", plateEntry[0])
     test.assertLess(plateEntry[0]["candidate_distances"][0], 0.1, plateEntry[0])
