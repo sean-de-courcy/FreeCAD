@@ -1930,11 +1930,12 @@ bool isWholeProjectionOf(std::string_view name, std::string_view oldName)
 /* True if \a now, the up-to faces under a far piece's saved point now, are \a saved, those its
  * fingerprint lists (ops#522, PLAN decision 168), each matched by exactly one, and each saved one
  * by exactly one of \a all, every up-to face now: the same owner, the box's corners and the outer
- * wire's centre within \a eps, the area within \a tolerances.placeSize relative, and the normal at
- * the point within \a tolerances.angle either way (a face's orientation may flip on a rebuild).
- * These are coincidence tolerances, as atSamePlace()'s. No face saved, or none now (the face
- * under the point is gone), is false; so are two faces now that one saved one matches, under the
- * point or elsewhere (two halves of a square, one where the other was).
+ * wire's centre within \a eps (coincidence, as atSamePlace()), the normal at the point within
+ * \a tolerances.angle either way (a face's orientation may flip on a rebuild), and the area within
+ * \a tolerances.size relative (tier 3's: a trimmed B-spline plate's area moved by 4e-5 of itself
+ * when only its hole moved). No face saved, or none now (the face under the point is gone), is
+ * false; so are two faces now that one saved one matches, under the point or elsewhere (two halves
+ * of a square, one where the other was).
  */
 bool sameUpToFaces(
     const std::vector<ElementFingerprint::UpToFace>& saved,
@@ -1951,7 +1952,7 @@ bool sameUpToFaces(
             && Base::Distance(a.boxMax, b.boxMax) <= eps
             && Base::Distance(a.wireCentre, b.wireCentre) <= eps
             && std::abs(a.area - b.area)
-            <= tolerances.placeSize * std::max({std::abs(a.area), std::abs(b.area), eps});
+            <= tolerances.size * std::max({std::abs(a.area), std::abs(b.area), eps});
     };
     auto same = [&](const Face& a, const Face& b) {
         if (!alike(a, b)) {
