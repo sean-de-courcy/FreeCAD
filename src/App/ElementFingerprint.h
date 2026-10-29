@@ -88,6 +88,19 @@ namespace Data
  *   (an L, a ring): its centre may lie outside it.
  * Versions 3 and 4 are still read; an element with an extent is written as version 5.
  *
+ * Version 6 (ops#522, PLAN decision 168), written for a far piece of a Pad up to a face or a
+ * shape (a marked projection) whose point lies over an up-to face:
+ *
+ *     6|<type>|<kind>|<size>|<c>|<d>|<r>|<o or _>|<x0..z1>|<t,n or _>|<p or _>|<i or _>|<u>
+ *
+ * - i: the inside point, as in version 5, or `_`.
+ * - u: the up-to faces that the line along the sweep through the piece's point (its inside
+ *   point, else its centre) meets, one or two (a seam), separated by `;`. Each is
+ *   `<owner>,<x0>,<y0>,<z0>,<x1>,<y1>,<z1>,<a>,<nx>,<ny>,<nz>`: the name of the object that owns
+ *   the face, the face's bounding box and area in that object's own frame (its placement
+ *   removed), and the face's unit normal there at the point. The solver lets a far cap or edge
+ *   made whole again take the piece only when the same faces lie under the point now.
+ *
  * Numbers have 12 significant digits, in the classic locale, so the text is the same on every
  * platform and in every locale. A reader takes a version it doesn't know as no fingerprint.
  */
@@ -106,6 +119,27 @@ struct AppExport ElementFingerprint
     /// The text form of a fingerprint with an extent of any kind (ops#386, PR 366 round 4): the
     /// location, the extent and the twins in fields eight to ten. Every face and edge has one.
     static constexpr int VersionWithBox = 5;
+    /// The text form of a far piece's fingerprint with the up-to faces under it (ops#522, PLAN
+    /// decision 168): version 5's fields, the inside point or `_`, and the up-to faces.
+    static constexpr int VersionWithUpTo = 6;
+
+    /// An up-to face a far piece lies on (version 6): the object that owns it, by its name in its
+    /// document, the face's bounding box and area in that object's own frame (its placement
+    /// removed), and its unit normal there at the piece's point.
+    struct UpToFace
+    {
+        std::string owner;
+        Base::Vector3d boxMin;
+        Base::Vector3d boxMax;
+        double area = 0.0;
+        Base::Vector3d normal;
+
+        friend bool operator==(const UpToFace& a, const UpToFace& b)
+        {
+            return a.owner == b.owner && a.boxMin == b.boxMin && a.boxMax == b.boxMax
+                && a.area == b.area && a.normal == b.normal;
+        }
+    };
 
     /// `F`, `E` or `V`; 0 for no fingerprint.
     char type = 0;
@@ -134,9 +168,14 @@ struct AppExport ElementFingerprint
     /// `center`), for a face its outline doesn't bound closely (an L, a ring), whose centre may
     /// lie outside it. Empty otherwise.
     std::optional<Base::Vector3d> inside;
+    /// The up-to faces under a far piece's point (version 6, ops#522): one, or two on a seam.
+    /// Empty otherwise, and for an element without an extent.
+    std::vector<UpToFace> upToFaces;
 
     /// At most this many points in an outline: the reader takes more as a malformed field.
     static constexpr std::size_t MaxOutline = 256;
+    /// At most this many up-to faces: the reader takes more as a malformed field.
+    static constexpr std::size_t MaxUpToFaces = 2;
 
     /** \a points with every k-th kept, k the least that leaves at most MaxOutline (PR 366 round 6):
      * a convex outline stays convex, in its order. At most MaxOutline points are returned as
@@ -176,7 +215,7 @@ struct AppExport ElementFingerprint
             && a.direction == b.direction && a.radii == b.radii && a.location == b.location
             && a.extentMin == b.extentMin && a.extentMax == b.extentMax
             && a.twinCentroid == b.twinCentroid && a.twinCount == b.twinCount
-            && a.outline == b.outline && a.inside == b.inside;
+            && a.outline == b.outline && a.inside == b.inside && a.upToFaces == b.upToFaces;
     }
     friend bool operator!=(const ElementFingerprint& a, const ElementFingerprint& b)
     {

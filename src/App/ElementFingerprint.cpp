@@ -17,6 +17,7 @@ namespace
 constexpr char fieldDelimiter = '|';
 constexpr char listDelimiter = ',';
 constexpr const char* emptyField = "_";
+constexpr char faceDelimiter = ';';
 constexpr int fieldCount = 7;
 
 std::vector<std::string_view> split(std::string_view text, char delimiter)
@@ -98,6 +99,44 @@ bool validKind(char type, std::string_view kind)
     return std::find(list.begin(), list.end(), kind) != list.end();
 }
 
+// An object's name in its document: letters, digits and underscores, not starting with a digit
+// (version 6's owner of an up-to face)
+bool validOwner(std::string_view name)
+{
+    auto alpha = [](char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
+    };
+    return !name.empty() && alpha(name.front())
+        && std::all_of(name.begin(), name.end(), [&](char c) {
+               return alpha(c) || (c >= '0' && c <= '9');
+           });
+}
+
+// Version 6's up-to faces: one or two, each its owner and ten numbers (box, area, normal)
+bool parseUpToFaces(std::string_view text, std::vector<ElementFingerprint::UpToFace>& faces)
+{
+    faces.clear();
+    for (auto part : split(text, faceDelimiter)) {
+        const auto comma = part.find(listDelimiter);
+        if (comma == std::string_view::npos) {
+            return false;
+        }
+        std::vector<double> values;
+        if (!validOwner(part.substr(0, comma)) || part.substr(comma + 1) == emptyField
+            || !parseList(part.substr(comma + 1), values) || values.size() != 10) {
+            return false;
+        }
+        ElementFingerprint::UpToFace face;
+        face.owner = std::string(part.substr(0, comma));
+        face.boxMin = Base::Vector3d(values[0], values[1], values[2]);
+        face.boxMax = Base::Vector3d(values[3], values[4], values[5]);
+        face.area = values[6];
+        face.normal = Base::Vector3d(values[7], values[8], values[9]);
+        faces.push_back(std::move(face));
+    }
+    return !faces.empty() && faces.size() <= ElementFingerprint::MaxUpToFaces;
+}
+
 }  // namespace
 
 std::string ElementFingerprint::formatNumber(double value)
@@ -129,9 +168,14 @@ std::string ElementFingerprint::toString() const
     const bool withExtent = extentMin && extentMax;
     // Twins with their centroid, or a lone order-keyed element's count alone (ops#503 D1)
     const bool withTwins = (twinCentroid && twinCount >= 2) || (!twinCentroid && twinCount == 1);
+    const bool withUpTo = withExtent && !upToFaces.empty() && upToFaces.size() <= MaxUpToFaces
+        && std::all_of(upToFaces.begin(), upToFaces.end(), [](const UpToFace& face) {
+               return validOwner(face.owner);
+           });
     std::string text = std::to_string(
-        withExtent      ? VersionWithBox
-            : withTwins ? VersionWithTwins
+        withUpTo         ? VersionWithUpTo
+            : withExtent ? VersionWithBox
+            : withTwins  ? VersionWithTwins
             : location  ? VersionWithLocation
                         : Version
     );
@@ -176,10 +220,24 @@ std::string ElementFingerprint::toString() const
             }
             text += vector(points[i]);
         }
-        // Round 6: a point inside the face, a twelfth field only when there is one
-        if (inside) {
+        // Round 6: a point inside the face, a twelfth field only when there is one; version 6
+        // always has it, `_` for none, and the up-to faces
+        if (inside || withUpTo) {
             text += fieldDelimiter;
             text += vector(inside);
+        }
+        if (withUpTo) {
+            text += fieldDelimiter;
+            for (std::size_t i = 0; i < upToFaces.size(); ++i) {
+                const UpToFace& face = upToFaces[i];
+                if (i) {
+                    text += faceDelimiter;
+                }
+                text += face.owner;
+                text += listDelimiter;
+                text += vector(face.boxMin) + listDelimiter + vector(face.boxMax) + listDelimiter;
+                text += formatNumber(face.area) + listDelimiter + vector(face.normal);
+            }
         }
         return text;
     }
@@ -209,9 +267,12 @@ ElementFingerprint ElementFingerprint::fromString(std::string_view text)
         && fields[0] == std::to_string(VersionWithExtent) && plane;
     const bool withTwins = fields.size() == fieldCount + 2
         && fields[0] == std::to_string(VersionWithTwins);
-    // Version 5 with or without the inside point (round 6)
-    const bool withBox = (fields.size() == fieldCount + 4 || fields.size() == fieldCount + 5)
-        && fields[0] == std::to_string(VersionWithBox) && (fields[1] == "F" || fields[1] == "E");
+    // Version 5 with or without the inside point (round 6); version 6 with both fields (ops#522)
+    const bool withUpTo = fields.size() == fieldCount + 6
+        && fields[0] == std::to_string(VersionWithUpTo) && (fields[1] == "F" || fields[1] == "E");
+    const bool withBox = withUpTo
+        || ((fields.size() == fieldCount + 4 || fields.size() == fieldCount + 5)
+            && fields[0] == std::to_string(VersionWithBox) && (fields[1] == "F" || fields[1] == "E"));
     if (!withLocation && !withExtent && !withTwins && !withBox
         && (fields.size() != fieldCount || fields[0] != std::to_string(Version))) {
         return {};
@@ -311,9 +372,13 @@ ElementFingerprint ElementFingerprint::fromString(std::string_view text)
         for (std::size_t i = 0; i < points.size(); i += 3) {
             result.outline.emplace_back(points[i], points[i + 1], points[i + 2]);
         }
-        // The inside point, a face's, when its field is there
-        if (fields.size() == fieldCount + 5
-            && (fields[1] != "F" || !parseVector(fields[11], result.inside) || !result.inside)) {
+        // The inside point, a face's, when its field is there (version 6: or `_`)
+        if (fields.size() >= fieldCount + 5
+            && (!parseVector(fields[11], result.inside) || (!withUpTo && !result.inside)
+                || (result.inside && fields[1] != "F"))) {
+            return {};
+        }
+        if (withUpTo && !parseUpToFaces(fields[12], result.upToFaces)) {
             return {};
         }
     }
