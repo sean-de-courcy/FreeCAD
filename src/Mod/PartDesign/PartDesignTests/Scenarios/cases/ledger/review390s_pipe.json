@@ -1,0 +1,12 @@
+{
+"entries": {
+"PipeLegAddedAtTheEnd|leg1|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r1s", "issue": "ops#468", "tier": "F"},
+"PipeLegAddedAtTheEnd|leg2|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r1s", "issue": "ops#468", "tier": "F"},
+"PipeLegAddedOneToTwo|leg1|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r1s", "issue": "ops#468", "tier": "F"},
+"PipeLegRemovedFromTheEnd|leg1|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r1s", "issue": "ops#468", "tier": "F"},
+"PipeLegRemovedFromTheEnd|leg2|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r1s", "issue": "ops#468", "tier": "F"},
+"PipeLegRemovedFromTheEnd|leg3|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr390-r1s", "issue": "ops#468", "tier": "F"},
+"PipeLegRemovedTwoToOne|leg1|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r1s", "issue": "ops#468", "tier": "F"},
+"PipeLegRemovedTwoToOne|leg2|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr390-r1s", "issue": "ops#468", "tier": "F"}
+}
+}

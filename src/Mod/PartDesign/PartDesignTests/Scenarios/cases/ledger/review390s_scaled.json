@@ -1,0 +1,15 @@
+{
+"entries": {
+"ScaledJointCrossingsStayNear|xm_ym|V2s": {"axes": ["M3", "E1", "X4:80"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r1s", "issue": "ops#468", "tier": "F"},
+"ScaledJointCrossingsStayNear|xm_yp|V2s": {"axes": ["M3", "E1", "X4:80"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r1s", "issue": "ops#468", "tier": "F"},
+"ScaledJointCrossingsStayNear|xp_ym|V2s": {"axes": ["M3", "E1", "X4:80"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r1s", "issue": "ops#468", "tier": "F"},
+"ScaledJointCrossingsStayNear|xp_yp|V2s": {"axes": ["M3", "E1", "X4:80"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r1s", "issue": "ops#468", "tier": "F"},
+"ScaledJointCrossingsStay|xm_ym|V2s": {"axes": ["M3", "E1", "X4:80"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r1s", "issue": "ops#468", "tier": "F"},
+"ScaledJointCrossingsStay|xm_yp|V2s": {"axes": ["M3", "E1", "X4:80"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r1s", "issue": "ops#468", "tier": "F"},
+"ScaledJointCrossingsStay|xp_ym|V2s": {"axes": ["M3", "E1", "X4:80"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r1s", "issue": "ops#468", "tier": "F"},
+"ScaledJointCrossingsStay|xp_yp|V2s": {"axes": ["M3", "E1", "X4:80"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r1s", "issue": "ops#468", "tier": "F"},
+"ScaledJointSeamLeavesTheJoint|xm_ym|V2s": {"axes": ["M3", "E1", "X4:80"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r1s", "issue": "ops#468", "tier": "F"},
+"ScaledJointSeamLeavesTheJoint|xp_ym|V2s": {"axes": ["M3", "E1", "X4:80"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r1s", "issue": "ops#468", "tier": "F"},
+"ScaledJointSeamLeavesTheJoint|xp_yp|V2s": {"axes": ["M3", "E1", "X4:80"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr390-r1s", "issue": "ops#468", "tier": "F"}
+}
+}

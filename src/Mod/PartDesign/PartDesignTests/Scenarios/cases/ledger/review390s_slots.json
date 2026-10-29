@@ -1,0 +1,14 @@
+{
+"entries": {
+"SecondSlotDrawnAtTheLeft|R|V2s": {"axes": ["M4", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r1s", "issue": "ops#468", "tier": "F"},
+"SecondSlotDrawn|L|V2s": {"axes": ["M4", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r1s", "issue": "ops#468", "tier": "F"},
+"SlotPastTheCentre|L|V2s": {"axes": ["M4", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r1s", "issue": "ops#468", "tier": "F"},
+"SlotPastTheCentre|R|V2s": {"axes": ["M4", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r1s", "issue": "ops#468", "tier": "F"},
+"SlotToTheLeftEdge|L|V2s": {"axes": ["M4", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr390-r1s", "issue": "ops#468", "tier": "F"},
+"SlotToTheLeftEdge|R|V2s": {"axes": ["M4", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr390-r1s", "issue": "ops#468", "tier": "F"},
+"SlotToTheRightEdge|L|V2s": {"axes": ["M4", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr390-r1s", "issue": "ops#468", "tier": "F"},
+"SlotToTheRightEdge|R|V2s": {"axes": ["M4", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr390-r1s", "issue": "ops#468", "tier": "F"},
+"SlotWider|L|V2s": {"axes": ["M4", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r1s", "issue": "ops#468", "tier": "F"},
+"SlotWider|R|V2s": {"axes": ["M4", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r1s", "issue": "ops#468", "tier": "F"}
+}
+}
