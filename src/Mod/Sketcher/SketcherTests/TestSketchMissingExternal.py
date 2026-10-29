@@ -1047,16 +1047,36 @@ class TestSketchFaceLinkPairing(unittest.TestCase):
         self.doc.recompute()
         self.assertBreaks()
 
-    def splineBackModel(self, hole=False):
-        """The square with its back side a B-spline (poles (20, 20), (10, 23), (0, 20), degree
-        2: geometry 2), and a 10 x 7 rectangular hole (5..15 x 5..12) if `hole`."""
+    def splineBackModel(self, hole=False, curve="spline"):
+        """The square with its back side a curve from (20, 20) to (0, 20) bulging to y = 23
+        (geometry 2): a B-spline (poles (20, 20), (10, 23), (0, 20), degree 2), an arc of a
+        parabola or of a hyperbola (vertex (10, 23), opening toward -y), and a 10 x 7 rectangular
+        hole (5..15 x 5..12) if `hole`."""
         s = self.scale
-        spline = Part.BSplineCurve()
-        spline.buildFromPoles([V(20 * s, 20 * s, 0), V(10 * s, 23 * s, 0), V(0, 20 * s, 0)])
+        if curve == "spline":
+            back = Part.BSplineCurve()
+            back.buildFromPoles([V(20 * s, 20 * s, 0), V(10 * s, 23 * s, 0), V(0, 20 * s, 0)])
+        elif curve == "parabola":
+            # vertex + u^2 / 4f X + u Y, X = -y, Y = x: y = 3 at u = +-10 for f = 25 / 3
+            parabola = Part.Parabola()
+            parabola.Focal = 25 / 3 * s
+            parabola.Center = V(10 * s, 23 * s, 0)
+            parabola.XAxis = V(0, -1, 0)
+            back = Part.ArcOfParabola(parabola, -10 * s, 10 * s)
+        else:
+            # centre + a cosh t X + b sinh t Y, X = -y, Y = x: a (cosh t - 1) = 3, b sinh t = 10
+            # at the ends, for a = 20
+            t = math.acosh(1.15)
+            hyperbola = Part.Hyperbola()
+            hyperbola.MajorRadius = 20 * s
+            hyperbola.MinorRadius = 10 / math.sinh(t) * s
+            hyperbola.Center = V(10 * s, 43 * s, 0)
+            hyperbola.XAxis = V(0, -1, 0)
+            back = Part.ArcOfHyperbola(hyperbola, -t, t)
         geometry = [
             Part.LineSegment(V(0, 0, 0), V(20 * s, 0, 0)),
             Part.LineSegment(V(20 * s, 0, 0), V(20 * s, 20 * s, 0)),
-            spline,
+            back,
             Part.LineSegment(V(0, 20 * s, 0), V(0, 0, 0)),
         ]
         if hole:
@@ -1097,6 +1117,50 @@ class TestSketchFaceLinkPairing(unittest.TestCase):
         self.addLines([(15, 0), (20, 5)])
         self.doc.recompute()
         self.assertStaysOn("y", 0, (0, 15))
+
+    def conicBackMovedByWidth(self, curve):
+        self.splineBackModel(curve=curve)
+        self.constrainCircle("x", 0)
+        geometry = self.profile.Geometry
+        geometry[2].translate(V(20 * self.scale, 0, 0))
+        self.profile.Geometry = geometry
+        self.moveLines(
+            {
+                0: ((20, 0), (35, 0)),
+                1: ((40, 5), (40, 20)),
+                3: ((20, 20), (20, 0)),
+            }
+        )
+        self.addLines([(35, 0), (40, 5)])
+        self.doc.recompute()
+        self.assertStaysOn("x", 20)
+
+    def testMovedByWidthWithAParabolaSide(self):
+        """Review pr384-r5 (A): testMovedByWidthWithASplineSide with the back side an arc of a
+        parabola. It is its old one moved by the same v (decision 167's common move): the left
+        line stays."""
+        self.conicBackMovedByWidth("parabola")
+
+    def testMovedByWidthWithAHyperbolaSide(self):
+        """Review pr384-r5 (A): the same with the back side an arc of a hyperbola."""
+        self.conicBackMovedByWidth("hyperbola")
+
+    def conicBackHoleCornerCut(self, curve):
+        self.splineBackModel(hole=True, curve=curve)
+        self.constrainCircle("y", 0, (0, 20))
+        self.moveLines({0: ((0, 0), (15, 0)), 1: ((20, 5), (20, 20))})
+        self.addLines([(15, 0), (20, 5)])
+        self.doc.recompute()
+        self.assertStaysOn("y", 0, (0, 15))
+
+    def testCornerCutWithAParabolaSideAndAHole(self):
+        """Review pr384-r5 (A): testCornerCutWithASplineSideAndAHole with the back side an arc
+        of a parabola: its area is exact, so the outer loop is known and the place votes hold."""
+        self.conicBackHoleCornerCut("parabola")
+
+    def testCornerCutWithAHyperbolaSideAndAHole(self):
+        """Review pr384-r5 (A): the same with the back side an arc of a hyperbola."""
+        self.conicBackHoleCornerCut("hyperbola")
 
     def testMovedWithOnlyParallelNamesBreaks(self):
         """PLAN decision 167: a stadium (the left line x = 0 and the right line x = 20, 0..20,

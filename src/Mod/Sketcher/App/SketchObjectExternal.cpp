@@ -3387,8 +3387,8 @@ struct GeometryLoop
     };
     Kind kind;
     std::vector<std::size_t> members;  // in the loop's order
-    // a closed loop's area (twice it), and whether that is exact (lines and arcs of circles and
-    // ellipses only)
+    // a closed loop's area (twice it), and whether that is exact (lines, arcs of conics and
+    // polynomial B-splines)
     double area = 0.0;
     bool exact = true;
 };
@@ -3407,9 +3407,10 @@ struct GeometryLoops
 };
 
 // x dy - y dx along a curve from its first parameter to its last (twice the area it sweeps about
-// the origin): exact for a line and an arc of a circle or an ellipse (centre + A cos t + B sin t,
-// so c x (P(t1) - P(t0)) + (A x B)(t1 - t0)), else summed over a polygon of samples and `exact`
-// cleared
+// the origin): exact for a line, an arc of a circle or an ellipse (centre + A cos t + B sin t,
+// so c x (P(t1) - P(t0)) + (A x B)(t1 - t0)), of a hyperbola (centre + A cosh t + B sinh t: the
+// same, as cosh^2 - sinh^2 = 1), of a parabola and a polynomial B-spline (Gauss-Legendre), else
+// summed over a polygon of samples and `exact` cleared
 double sweptArea(const Part::GeomBoundedCurve* curve, bool& exact)
 {
     auto cross = [](const Base::Vector3d& a, const Base::Vector3d& b) {
@@ -3420,18 +3421,17 @@ double sweptArea(const Part::GeomBoundedCurve* curve, bool& exact)
     if (curve->is<Part::GeomLineSegment>()) {
         return cross(curve->getStartPoint(), curve->getEndPoint());
     }
-    if (curve->is<Part::GeomArcOfCircle>() || curve->is<Part::GeomArcOfEllipse>()) {
+    if (curve->is<Part::GeomArcOfCircle>() || curve->is<Part::GeomArcOfEllipse>()
+        || curve->is<Part::GeomArcOfHyperbola>()) {
         const auto centre = static_cast<const Part::GeomArcOfConic*>(curve)->getCenter();
         const auto a = curve->pointAtParameter(0.0) - centre;
-        const auto b = curve->pointAtParameter(std::numbers::pi / 2) - centre;
+        const auto b = curve->firstDerivativeAtParameter(0.0);
         return cross(centre, curve->pointAtParameter(t1) - curve->pointAtParameter(t0))
             + cross(a, b) * (t1 - t0);
     }
-    // a polynomial B-spline: on each knot span x y' - y x' is a polynomial of degree 2p - 1,
-    // which Gauss-Legendre with p + 1 points integrates exactly
-    auto* spline = freecad_cast<const Part::GeomBSplineCurve*>(curve);
-    if (spline && !spline->isRational()) {
-        const int n = spline->getDegree() + 1;
+    // x y' - y x' over [lo, hi] by Gauss-Legendre with n points: exact where it is a polynomial
+    // of degree 2n - 1 or less
+    auto gauss = [&](int n, const std::vector<std::pair<double, double>>& spans) {
         // the nodes on [-1, 1] (Newton's method on the Legendre polynomial P_n) and weights
         auto legendre = [n](double z, double& derivative) {
             double previous = 1.0;
@@ -3459,13 +3459,7 @@ double sweptArea(const Part::GeomBoundedCurve* curve, bool& exact)
             nodes.emplace_back(z, 2.0 / ((1.0 - z * z) * derivative * derivative));
         }
         double sum = 0.0;
-        const auto knots = spline->getKnots();
-        for (std::size_t s = 0; s + 1 < knots.size(); ++s) {
-            const double lo = std::max(knots[s], t0);
-            const double hi = std::min(knots[s + 1], t1);
-            if (hi <= lo) {
-                continue;
-            }
+        for (const auto& [lo, hi] : spans) {
             for (const auto& [z, weight] : nodes) {
                 const double t = (lo + hi) / 2 + z * (hi - lo) / 2;
                 sum += weight * (hi - lo) / 2
@@ -3473,6 +3467,24 @@ double sweptArea(const Part::GeomBoundedCurve* curve, bool& exact)
             }
         }
         return sum;
+    };
+    // a parabola (vertex + t^2 / 4f X + t Y): x y' - y x' is a polynomial of degree 3
+    if (curve->is<Part::GeomArcOfParabola>()) {
+        return gauss(2, {{t0, t1}});
+    }
+    // a polynomial B-spline: on each knot span x y' - y x' is a polynomial of degree 2p - 1
+    auto* spline = freecad_cast<const Part::GeomBSplineCurve*>(curve);
+    if (spline && !spline->isRational()) {
+        std::vector<std::pair<double, double>> spans;
+        const auto knots = spline->getKnots();
+        for (std::size_t s = 0; s + 1 < knots.size(); ++s) {
+            const double lo = std::max(knots[s], t0);
+            const double hi = std::min(knots[s + 1], t1);
+            if (hi > lo) {
+                spans.emplace_back(lo, hi);
+            }
+        }
+        return gauss(spline->getDegree() + 1, spans);
     }
     exact = false;
     constexpr int samples = 32;
@@ -4228,6 +4240,40 @@ std::vector<int> pairGeometries(const std::vector<const Part::Geometry*>& olds,
                         + a->getMajorRadius() * std::abs(axis.x * other.y - axis.y * other.x)
                         <= tolerance;
                 }
+                // the farthest of an arc's ends from its centre (or vertex), at least `least`: a
+                // turn of the axis by a small angle moves the arc's points by up to that times it
+                auto reach = [](const Part::GeomArcOfConic* arc, double least) {
+                    const auto centre = arc->getCenter();
+                    return std::max({least,
+                                     Base::Distance(centre, arc->getStartPoint()),
+                                     Base::Distance(centre, arc->getEndPoint())});
+                };
+                // a hyperbola's branch opens along its major axis, so the axis keeps its sense
+                if (auto* a = freecad_cast<const Part::GeomArcOfHyperbola*>(olds[i])) {
+                    auto* b = freecad_cast<const Part::GeomArcOfHyperbola*>(news[k]);
+                    return b
+                        && Base::Distance(a->getCenter() + v, b->getCenter())
+                                + std::abs(a->getMajorRadius() - b->getMajorRadius())
+                                + std::abs(a->getMinorRadius() - b->getMinorRadius())
+                                + reach(a, a->getMajorRadius())
+                                    * Base::Distance(a->getMajorAxisDir(), b->getMajorAxisDir())
+                            <= tolerance;
+                }
+                // a parabola: its vertex moved by v and the same second derivative, constant along
+                // it (its axis toward the focus over 2f): a turn by a small angle changes it by
+                // that over 2f, a focal length by its change over 2f^2
+                if (auto* a = freecad_cast<const Part::GeomArcOfParabola*>(olds[i])) {
+                    auto* b = freecad_cast<const Part::GeomArcOfParabola*>(news[k]);
+                    if (!b) {
+                        return false;
+                    }
+                    const double focal = a->getFocal();
+                    const auto bend = a->secondDerivativeAtParameter(a->getFirstParameter());
+                    const auto otherBend = b->secondDerivativeAtParameter(b->getFirstParameter());
+                    return Base::Distance(a->getCenter() + v, b->getCenter())
+                            + 2 * focal * reach(a, focal) * Base::Distance(bend, otherBend)
+                        <= tolerance;
+                }
                 // a B-spline: the same degree, knots and weights, each pole moved by v (one
                 // turned round doesn't count: it breaks)
                 if (auto* a = freecad_cast<const Part::GeomBSplineCurve*>(olds[i])) {
@@ -4293,6 +4339,12 @@ std::vector<int> pairGeometries(const std::vector<const Part::Geometry*>& olds,
                 dropped = false;
                 const auto snapshot = trial;
                 const bool moved = movedTogether(loop, snapshot);
+                // With every anchor's image on one new loop in their cyclic order, leaving one out
+                // joins the two arcs beside it, through it and its image; otherwise the arcs
+                // without it are found afresh. Once per pass, not per pick: a cascade of drops
+                // round a large face made it cubic (review pr384-r5s, T-A).
+                const auto around = closedArcs(loop, snapshot);
+                const auto order = anchored;
                 std::vector<std::size_t> drops;
                 for (auto j : loop.members) {
                     auto pick = picked.find(j);
@@ -4305,9 +4357,24 @@ std::vector<int> pairGeometries(const std::vector<const Part::Geometry*>& olds,
                         || support(j, vote->second) > 1) {
                         continue;
                     }
+                    bool gains = false;
+                    if (!around.empty()) {
+                        const auto at = static_cast<std::size_t>(
+                            std::find(order.begin(), order.end(), j) - order.begin());
+                        const auto& after = around[at];
+                        const auto& before = around[(at + order.size() - 1) % order.size()];
+                        Arc joined {before.olds, before.news};
+                        joined.olds.insert(after.olds.begin(), after.olds.end());
+                        joined.olds.insert(j);
+                        joined.news.insert(after.news.begin(), after.news.end());
+                        joined.news.insert(k);
+                        if (gained(j, k, joined.olds, joined.news)) {
+                            drops.push_back(j);
+                        }
+                        continue;
+                    }
                     auto others = snapshot;
                     others[j] = -1;
-                    bool gains = false;
                     const auto arcs = closedArcs(loop, others);
                     auto arc = std::find_if(arcs.begin(), arcs.end(), [&](const Arc& a) {
                         return a.olds.count(j) > 0;
