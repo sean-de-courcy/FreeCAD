@@ -2803,9 +2803,10 @@ class TestPad(unittest.TestCase):
                 self.assertIn(";PRJ;", prism.getElementMappedName("Edge%d" % i), "Edge%d" % i)
         for i, vertex in enumerate(prism.Vertexes, 1):
             if any(vertex.isSame(v) for v in capFace.Vertexes):
-                # Where the loft's seam crosses the far edges, the vertices are generated
+                # Where the loft's seam crosses the far edges, the vertices are generated, and
+                # named by the side of the face the edge goes to there, with ORD (ops#468)
                 name = prism.getElementMappedName("Vertex%d" % i)
-                self.assertTrue(";PRJ;" in name or ";GEN;" in name, name)
+                self.assertTrue(";PRJ;" in name or ";GEN;" in name or ";GEN,ORD;" in name, name)
 
     def testPadUpToAFreeformFaceCapsStayOnTheirFaces(self):
         # ops#360: the split named the far caps from the plate alone (MOD), told apart by a

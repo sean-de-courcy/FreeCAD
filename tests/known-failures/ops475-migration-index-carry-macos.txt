@@ -1,0 +1,14 @@
+# gen0 was saved on Windows at naming revision 8. ops#468's revision gives IndexToldGroups'
+# bend arcs and their vertexes `<k>of<n>`, so ArcChamfer's Edge21 and BendPoint's Vertex17 are
+# Missing at the open, and the migration keeps a Missing reference only by its stored index checked
+# against the saved fingerprint, with no search by place (ElementSolverBatch.cpp, "index carry").
+# OCCT stores those arcs at other indexes on macOS, so there the two references break (loud); on
+# Windows they move back. Remove the entries when gen0 is regenerated at ops#468's revision or later
+# (PLAN decision 120 (1): once per merge batch), or when ops#475 gives the carry a place fallback.
+
+issue: ops#475
+
+reason: macOS migrates Windows' gen0 IndexToldGroups with 2 of 3 references broken (index carry without a place fallback)
+cli  PartDesignTests.Compat.TestCompatCorpus.TestCompatCorpus.testOlderGenerationMigration   macos
+cli  PartDesignTests.Compat.TestCompatCorpus.TestCompatCorpus.testRecompute   macos
+cli  PartDesignTests.Compat.TestCompatCorpus.TestCompatCorpus.testRoundTrip   macos
