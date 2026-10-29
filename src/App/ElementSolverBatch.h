@@ -238,28 +238,49 @@ using ElementHoldsPointAlongFunction = bool (*)(const GeoFeature* geo,
                                                 double distance);
 AppExport void setElementHoldsPointAlongFunction(ElementHoldsPointAlongFunction function);
 
-/** The direction \a geo swept its profile along, in the frame its elements' fingerprints are
- * measured in, either sense (PR 366 round 6): a Pad's or Pocket's. False for another feature.
- * PartDesign sets it; without it no feature has one.
+/** The direction the element named \a name (a mapped name; null: \a geo itself) was swept along,
+ * in the frame \a geo's fingerprints are measured in, either sense (PR 366 round 6): a Pad's or
+ * Pocket's. ops#524 (PLAN decision 182, N2): a far piece's name names the extrusion that made it
+ * (its projection's tag), which may be an earlier feature of \a geo's BaseFeature chain; its
+ * direction is turned into \a geo's frame. False for another feature. PartDesign sets it; without
+ * it no feature has one.
  */
-using ElementSweepDirectionFunction = bool (*)(const GeoFeature* geo, Base::Vector3d& direction);
+using ElementSweepDirectionFunction
+    = bool (*)(const GeoFeature* geo, const char* name, Base::Vector3d& direction);
 AppExport void setElementSweepDirectionFunction(ElementSweepDirectionFunction function);
 
-/** The up-to faces that the line through \a point along \a geo's sweep meets, inside them or on
- * their boundary (ops#522, PLAN decision 168), each as Data::ElementFingerprint::UpToFace has it:
- * its owner, and its box, area and normal at the point in the owner's own frame. \a point is in
- * the frame \a geo's fingerprints are measured in, carried by \a geo's current placement, so a
- * point saved before a profile moved by placement moves with it. With \a all, every up-to face
- * too, under the point or not. False when it can't be told: not a one-sided extrusion up to a
- * face or a shape, or an up-to face that is unbounded (a datum plane). True with no face when
- * the line meets none. PartDesign sets it; without it no point has an up-to face.
+/** The up-to faces that the line through \a point along the sweep of the far piece named \a name
+ * meets, inside them or on their boundary (ops#522, PLAN decision 168), each as
+ * Data::ElementFingerprint::UpToFace has it: its owner, and its box, area and normal at the point,
+ * its outer wire's centre and the foot (where the line meets it) in the owner's own frame. The up-to
+ * faces are those of the extrusion that made the piece (ElementSweepDirectionFunction), on \a geo
+ * or before it (ops#524, N2). \a point is in the frame \a geo's fingerprints are measured in,
+ * carried by \a geo's current placement, so a point saved before a profile moved by placement
+ * moves with it. With \a all, every up-to face too, under the point or not. False when it can't
+ * be told: no such extrusion, not a one-sided extrusion up to a face or a shape, an up-to face that
+ * is unbounded (a datum plane), or \a geo's shape not made under its current placement. True with
+ * no face when the line meets none. PartDesign sets it; without it no point has an up-to face.
  */
 using ElementUpToFacesFunction
     = bool (*)(const GeoFeature* geo,
+               const char* name,
                const Base::Vector3d& point,
                std::vector<Data::ElementFingerprint::UpToFace>& faces,
                std::vector<Data::ElementFingerprint::UpToFace>* all);
 AppExport void setElementUpToFacesFunction(ElementUpToFacesFunction function);
+
+/** Whether a lone far piece named \a name moved within its up-to face (ops#524, PLAN decision 182,
+ * N1): the line through \a point (as ElementUpToFacesFunction's) meets one face of \a saved's
+ * owner inside it, not on its boundary, and so does the line through \a saved's foot, and no
+ * boundary edge of that face meets the strip the segment between the two meetings spans along the
+ * sweep, seen in the owner's own frame. False when it can't be told, or without the foot.
+ * PartDesign sets it; without it no piece moved within its face.
+ */
+using ElementUpToPathFunction = bool (*)(const GeoFeature* geo,
+                                         const char* name,
+                                         const Data::ElementFingerprint::UpToFace& saved,
+                                         const Base::Vector3d& point);
+AppExport void setElementUpToPathFunction(ElementUpToPathFunction function);
 
 /** ElementUpToFacesFunction's answer for the far piece \a element (`Face7`) of \a geo's shape,
  * whose fingerprint is \a fingerprint, at its inside point or else its centre: false when the
