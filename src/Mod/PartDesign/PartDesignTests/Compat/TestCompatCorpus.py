@@ -737,8 +737,8 @@ class TestCompatCorpus(unittest.TestCase):
     def testGenerationsAreIntact(self):
         """Every gen<k> folder has a MANIFEST; its files are exactly the ones of its models, byte
         for byte (3.5): a committed file or record is never edited, and no model drops out. Each
-        generation has both halves, each saved on its own platform, with the same models, naming
-        revision and fork release (ops#538)."""
+        generation has both halves, each saved on its own platform, with the same models and fork
+        release (ops#538)."""
         gens = generations()
         self.assertTrue(gens, f"no generation in {corpusFolder()}")
         for gen, folder in gens.items():
@@ -763,9 +763,11 @@ class TestCompatCorpus(unittest.TestCase):
                 info.get("platform"), HALVES[suffix or ""], f"{gen}: saved on the wrong platform"
             )
             self.assertEqual(info.get("generation"), int(k), f"{gen}: its MANIFEST's generation")
-        # Both halves of each generation, saved from the same models at the same revisions: a
-        # half that is missing (its CMake list dropped, so the build or the install lacks it) or
-        # regenerated alone would leave files of one system untested on the other.
+        # Both halves of each generation, saved from the same models by the same fork release: a
+        # half that is missing (its CMake list dropped, so the build or the install lacks it) would
+        # leave files of one system untested on the other. Their naming revisions may differ for a
+        # while (a batch that regenerated one half): each half is then read by its own revision,
+        # and check_release_gen0.py refuses a release until both are current.
         byNumber = {}
         for gen in gens:
             k, suffix = GENERATION_FOLDER.fullmatch(gen).groups()
@@ -775,11 +777,16 @@ class TestCompatCorpus(unittest.TestCase):
                 sorted(halves), sorted(HALVES), f"gen{k}: halves {sorted(halves.values())}"
             )
             windows, macos = (manifest(gens[halves[s]]) for s in ("", "-macos"))
-            for field in ("models", "namingRevision", "forkRelease", "format"):
+            for field in ("models", "forkRelease", "format"):
                 self.assertEqual(
                     windows.get(field),
                     macos.get(field),
                     f"gen{k} and gen{k}-macos differ in {field}: regenerate both halves together",
+                )
+            if windows.get("namingRevision") != macos.get("namingRevision"):
+                print(
+                    f"COMPAT-HALVES gen{k} at naming revision {windows.get('namingRevision')}, "
+                    f"gen{k}-macos at {macos.get('namingRevision')}: regenerate the older half"
                 )
         # A model not yet in any generation is pinned by the next one (a release's partial
         # generation, 3.5), so it isn't a failure: said, so a model dropped from every
