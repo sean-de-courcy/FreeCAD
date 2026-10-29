@@ -39,7 +39,7 @@ name: FreeCAD CI cleaner
 
 on:
   workflow_run:
-    workflows: [FreeCAD CI primary]
+    workflows: [FreeCAD CI primary, FreeCAD CI macOS]
     types:
       - completed
 

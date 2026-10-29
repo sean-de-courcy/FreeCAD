@@ -26,6 +26,7 @@
 # FreeCAD's label-gated CI_approved.yml and its Linux build are not carried:
 # the fork builds and tests on the two platforms it ships, Windows and
 # macOS arm64, with the same pixi environment as the release builds.
+# This workflow runs Windows and Lint; macOS runs in CI_macos.yml (ops#533).
 
 name: FreeCAD CI primary
 
@@ -64,6 +65,7 @@ jobs:
     uses: ./.github/workflows/sub_buildPixi.yml
     with:
       artifactBasename: Pixi-${{ github.run_id }}
+      platforms: '["windows-2022"]'
 
   Lint:
     needs: [Prepare]
