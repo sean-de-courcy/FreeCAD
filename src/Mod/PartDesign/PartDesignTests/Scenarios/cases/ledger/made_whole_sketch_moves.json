@@ -1,0 +1,12 @@
+{
+"entries": {
+"NotchSketchLGone|l_piece|V2s": {"axes": ["M2", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review prA1b-r1", "issue": "ops#522", "tier": "F"},
+"NotchSketchLGone|square|V2s": {"axes": ["M2", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prA1b-r1", "issue": "ops#522", "tier": "F"},
+"RidgeSketchStripGone|piece|V2s": {"axes": ["M2", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prA1b-r1", "issue": "ops#522", "tier": "F"},
+"RidgeSketchStripGone|strip|V2s": {"axes": ["M2", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review prA1b-r1", "issue": "ops#522", "tier": "F"},
+"SeamRibSketchStripGoneFar|piece|V2s": {"axes": ["M2", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review prA1b-r1", "issue": "ops#522", "tier": "F"},
+"SeamRibSketchStripGoneFar|strip|V2s": {"axes": ["M2", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review prA1b-r1", "issue": "ops#522", "tier": "F"},
+"SeamRibSketchStripGone|piece|V2s": {"axes": ["M2", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prA1b-r1", "issue": "ops#522", "tier": "F"},
+"SeamRibSketchStripGone|strip|V2s": {"axes": ["M2", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review prA1b-r1", "issue": "ops#522", "tier": "F"}
+}
+}
