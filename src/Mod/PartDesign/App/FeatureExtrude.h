@@ -25,6 +25,9 @@
 
 #pragma once
 
+#include <optional>
+
+#include <Base/Placement.h>
 #include <App/PropertyStandard.h>
 #include <App/PropertyUnits.h>
 #include "FeatureSketchBased.h"
@@ -66,6 +69,15 @@ public:
     static App::PropertyAngle::Constraints floatAngle;
 
     double getStartOffset() const;
+
+    /** Whether the shape was made under the current Placement (ops#522): false from a
+     * recompute's positionByPrevious(), which sets the Placement first, to its new shape (the old
+     * shape then lies under the new placement), after a recompute that failed in between, and
+     * after an undo that restored the Placement alone. The reference solver's up-to faces need
+     * both to agree: a gone piece's point carried by the new placement over the old shape lies
+     * where the piece was, under the cap that made it whole.
+     */
+    bool shapeMadeUnderPlacement() const;
 
     /** @name methods override feature */
     //@{
@@ -125,6 +137,10 @@ protected:
         const TopoShape& base,      // The base shape for context (global CS)
         TopLoc_Location& invObjLoc  // MUST be passed. Cannot be re-accessed, see #26677
     );
+
+    /// The Placement the shape was last made under (shapeMadeUnderPlacement()); empty before the
+    /// first recompute.
+    std::optional<Base::Placement> madeUnder;
 };
 
 }  // namespace PartDesign
