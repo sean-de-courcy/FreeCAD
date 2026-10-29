@@ -38,6 +38,7 @@ import FreeCAD as App
 import Part
 import Sketcher
 
+from PartDesignTests import TestNamingDump as dump
 from PartDesignTests.Scenarios import models
 
 V = App.Vector
@@ -673,6 +674,7 @@ class FailurePassThroughBase:
         self.assertPassesThrough(pad, notch)
 
 
+@unittest.skipUnless(dump.OLD_FILE_TESTS, dump.OLD_FILE_SKIP)
 class TestFailurePassThroughV2(FailurePassThroughBase, unittest.TestCase):
     solver = False
 

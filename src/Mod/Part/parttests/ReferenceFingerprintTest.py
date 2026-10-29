@@ -12,6 +12,11 @@ import zipfile
 import FreeCAD as App
 import Part
 
+# Tests whose only purpose is files from upstream FreeCAD (V1 names) or from fork builds before the
+# reference solver (the solver off) run only with FREECAD_OLD_FILE_TESTS set (PLAN decision 179)
+OLD_FILE_TESTS = bool(os.environ.get("FREECAD_OLD_FILE_TESTS"))
+OLD_FILE_SKIP = "a solver-off or V1 file only: FREECAD_OLD_FILE_TESTS=1 runs it (decision 179)"
+
 
 def _documentXml(path):
     with zipfile.ZipFile(path) as archive:
@@ -136,6 +141,7 @@ class ReferenceFingerprintTest(unittest.TestCase):
         self.assertNotIn("ReferenceSolver", after)
         self.assertEqual(_objectData(after), _objectData(before))
 
+    @unittest.skipUnless(OLD_FILE_TESTS, OLD_FILE_SKIP)
     def testSwitchIgnoredInV1(self):
         doc, _, _ = self._model("FingerprintV1", algorithm="V1", solver=True)
         xml = _documentXml(self._save(doc, "v1"))

@@ -29,6 +29,8 @@ import Part
 from FreeCAD import Base
 import TestSketcherApp
 
+from PartDesignTests import TestNamingDump as dump
+
 
 # A Pad made from two regions of a sketch (ops#125): a 30 x 20 x 2 plate, and two bosses of
 # radius 2 and height 5 from a sketch at z = 2, each with a 0.5 fillet on its top edge.
@@ -2300,8 +2302,9 @@ class TestPad(unittest.TestCase):
         """ops#125: a Pad made from two sketch regions breaks when the sketch's circles are
         drawn again elsewhere, and setting its Profile to the new regions repairs it. The fillet
         on it then breaks loudly. The property editor's link dialog sets the Profile this way
-        (TestProfileLinkDialog checks the dialog)."""
-        for solver in (True, False):
+        (TestProfileLinkDialog checks the dialog). Without the solver (a file saved before it)
+        only with FREECAD_OLD_FILE_TESTS set (decision 179)."""
+        for solver in (True, False) if dump.OLD_FILE_TESTS else (True,):
             with self.subTest(solver=solver):
                 doc = FreeCAD.newDocument("PartDesignTestPadRegions")
                 try:

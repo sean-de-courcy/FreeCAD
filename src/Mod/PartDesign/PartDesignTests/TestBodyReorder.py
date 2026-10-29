@@ -39,6 +39,7 @@ import FreeCAD as App
 import Part
 import Sketcher
 
+from PartDesignTests import TestNamingDump as dump
 from PartDesignTests.Scenarios import models
 
 V = App.Vector
@@ -2919,6 +2920,7 @@ class SplitFace:
         return dressUp, slot
 
 
+@unittest.skipUnless(dump.OLD_FILE_TESTS, dump.OLD_FILE_SKIP)
 class TestBodyReorderV2(SplitFace, BodyReorderBase, unittest.TestCase):
     solver = False
 

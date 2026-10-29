@@ -46,6 +46,7 @@ import zipfile
 
 import FreeCAD as App
 
+from PartDesignTests import TestNamingDump as dump
 from PartDesignTests.Scenarios import models
 from PartDesignTests.Scenarios.harness import face
 
@@ -56,6 +57,9 @@ CONFIGS = {
     "V2s": (True, False),
     "V2is": (True, True),
 }
+# The configurations the generated tests run in: the solver-off ones (files saved before the
+# solver) only with FREECAD_OLD_FILE_TESTS set (decision 179)
+RUN_CONFIGS = [c for c, (solver, _) in CONFIGS.items() if solver or dump.OLD_FILE_TESTS]
 
 # The face pad model: Pad1 a box 20 x 10 x 10, Pad2 its top face padded by 3, Pad3 Pad2's side
 # face at x = 20 (FaceC) padded by 2. FaceD is Pad2's side face at x = 0, the same kind of face.
@@ -414,7 +418,7 @@ def _addConfigTests():
         "brokenStaysAtTheNextMigration",
         "unmovedNamesStay",
     ):
-        for config in CONFIGS:
+        for config in RUN_CONFIGS:
 
             def test(self, method=method, config=config):
                 getattr(self, method)(config)
@@ -604,6 +608,7 @@ class TestNamingGateFile(NamingGateTestBase):
         self.assertEqual(pad3.Profile[1], [faceC])
         self.assertAlmostEqual(pad3.Shape.BoundBox.XMax, 27, places=6)
 
+    @unittest.skipUnless(dump.OLD_FILE_TESTS, dump.OLD_FILE_SKIP)
     def testMovedAloneIsKept(self):
         """Review F4, solver off (V2)"""
         self.movedAloneIsKept("V2")
@@ -655,6 +660,7 @@ class TestNamingGateFile(NamingGateTestBase):
         # Assert
         self.assertEqual(doc.getObject("Refs").Ref[1], [stored])
 
+    @unittest.skipUnless(dump.OLD_FILE_TESTS, dump.OLD_FILE_SKIP)
     def testCoincidentFacesTakeTheStoredIndex(self):
         """Rule 2, solver off (V2)"""
         self.coincidentCompound("V2")
