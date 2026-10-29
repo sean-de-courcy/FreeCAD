@@ -394,7 +394,30 @@ def _filletEdge(base, index, doc):
     return entry
 
 
+# An edge shorter than this (OCCT's Precision::Confusion) has no defined centre of mass: a
+# degenerate edge, e.g. the zero-radius circle at a cone's apex. Its CenterOfMass is then whatever
+# OCCT returns for zero mass, which differs by platform for the same file (ops#538: a macOS-saved
+# Hole's apex edge reads as length 2.8e-15 there and exactly 0 on Windows, centre (10,10,10)).
+# Such an edge is keyed by its vertexes' mean, which equals its centre of mass wherever that is
+# defined, so records saved before keep matching.
+DEGENERATE_LENGTH = 1e-7
+
+
+def _degeneratePoint(shape):
+    """The vertexes' mean of a zero-length edge, else None."""
+    if shape.ShapeType != "Edge" or not shape.Vertexes or shape.Length >= DEGENERATE_LENGTH:
+        return None
+    points = [v.Point for v in shape.Vertexes]
+    mean = points[0]
+    for point in points[1:]:
+        mean = mean + point
+    return mean * (1.0 / len(points))
+
+
 def _centre(shape):
+    point = _degeneratePoint(shape)
+    if point is not None:
+        return _vector(point)
     for attribute in ("CenterOfMass", "CenterOfGravity"):
         try:
             return _vector(getattr(shape, attribute))
@@ -612,8 +635,9 @@ def _nameKey(kind, element):
     if kind == "Vertex":
         point, mass = element.Point, 0.0
     else:
+        point = _degeneratePoint(element)
         try:
-            point = element.CenterOfMass
+            point = point if point is not None else element.CenterOfMass
         except Exception:
             point = element.BoundBox.Center
         mass = element.Area if kind == "Face" else element.Length
