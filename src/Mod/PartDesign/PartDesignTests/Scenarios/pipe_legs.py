@@ -339,8 +339,8 @@ class TransformedAcross90(Legs):
     cuts in the planes the two legs share (y = +-2), and a reference to one may go missing. It
     never moves to another leg or face (ops#415, the design's Transformed test). Without the
     solver (V2), a lateral edge the fuse splits where the legs overlap gives its name to both
-    pieces, and V2's name match takes the short one at the corner: those are listed known
-    failures (tests/known-failures/ops7-scenarios-broken.txt)."""
+    pieces, and V2's name match takes the short one at the corner: V2 fails there (local runs
+    only, decision 179)."""
 
     abstract = True
     TRANSITION = "Transformed"

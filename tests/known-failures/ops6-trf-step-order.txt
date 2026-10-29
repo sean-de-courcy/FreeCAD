@@ -5,28 +5,17 @@
 # step feature that isn't the newest (the later digits move left), and deleting a feature and
 # making it again (its digit moves to the end). A reference to a block then lands on another
 # block that now has its old number, silently, in V2s too (tier 0 takes the exact name). Remove
-# the entries if the digits are ever keyed to their features.
+# the entries if the digits are ever keyed to their features. V2 and V2multi fail the same way;
+# they run only locally (PLAN decision 179, ops#537).
 
 issue: ops#6
 
-reason: LinY, the middle of LinX, LinY, LinZ, is removed: LinZ's digit moves into its place, so the sketches on the lost y = 30 row land on the blocks above the y = 0 row whose numbers they had (V2, V2s)
-cli  PartDesignTests.TestNamingScenarios.MultiTransformRemoveStep.test_sketch_00_30_face_V2
+reason: LinY, the middle of LinX, LinY, LinZ, is removed: LinZ's digit moves into its place, so the sketches on the lost y = 30 row land on the blocks above the y = 0 row whose numbers they had
 cli  PartDesignTests.TestNamingScenarios.MultiTransformRemoveStep.test_sketch_00_30_face_V2s
-cli  PartDesignTests.TestNamingScenarios.MultiTransformRemoveStep.test_sketch_30_30_face_V2
 cli  PartDesignTests.TestNamingScenarios.MultiTransformRemoveStep.test_sketch_30_30_face_V2s
-cli  PartDesignTests.TestNamingScenarios.MultiTransformRemoveStep.test_sketch_60_30_face_V2
 cli  PartDesignTests.TestNamingScenarios.MultiTransformRemoveStep.test_sketch_60_30_face_V2s
 
-reason: LinX is deleted and made again: its digit now comes after LinY's, so the sketches on (0, 30) (`1:2`) and (30, 0) (`2`) trade blocks (V2, V2s); (60, 30)'s `3:2` is gone, and V2s breaks it with the pattern-sibling guard (V2 finds it by geometry)
-cli  PartDesignTests.TestNamingScenarios.MultiTransformRecreateStep.test_sketch_00_30_face_V2
+reason: LinX is deleted and made again: its digit now comes after LinY's, so the sketches on (0, 30) (`1:2`) and (30, 0) (`2`) trade blocks; (60, 30)'s `3:2` is gone, and V2s breaks it with the pattern-sibling guard
 cli  PartDesignTests.TestNamingScenarios.MultiTransformRecreateStep.test_sketch_00_30_face_V2s
-cli  PartDesignTests.TestNamingScenarios.MultiTransformRecreateStep.test_sketch_30_00_face_V2
 cli  PartDesignTests.TestNamingScenarios.MultiTransformRecreateStep.test_sketch_30_00_face_V2s
 cli  PartDesignTests.TestNamingScenarios.MultiTransformRecreateStep.test_sketch_60_30_face_V2s
-
-reason: the V2 entries above with the multi-match flags on (V2multi): the flags touch only dress-ups and Profile, not these consumers, so the verdict is V2's at every step; CI runs V2multi only for dress-up and Profile scenarios, so these are local all-configuration runs only (ops#92)
-cli  PartDesignTests.TestNamingScenarios.MultiTransformRecreateStep.test_sketch_00_30_face_V2multi
-cli  PartDesignTests.TestNamingScenarios.MultiTransformRecreateStep.test_sketch_30_00_face_V2multi
-cli  PartDesignTests.TestNamingScenarios.MultiTransformRemoveStep.test_sketch_00_30_face_V2multi
-cli  PartDesignTests.TestNamingScenarios.MultiTransformRemoveStep.test_sketch_30_30_face_V2multi
-cli  PartDesignTests.TestNamingScenarios.MultiTransformRemoveStep.test_sketch_60_30_face_V2multi
