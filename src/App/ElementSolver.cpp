@@ -5489,11 +5489,13 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                         && lostOldSource(pick)) {
                         lacks = "source element";
                     }
-                    if (!lacks && nearest.index < 0 && input.sameSource && !oldName.empty()) {
+                    if (!lacks && nearest.index < 0 && input.sameSource) {
+                        // An index-only reference (no old name) has no origin to share: it breaks
+                        // here, as at tier 3's gap
                         lacks = otherOrigin(pool.elements[pick], oldName);
                         const auto oldCopies = copyContexts(oldName);
                         const auto& names = pool.elements[pick].names;
-                        if (!lacks && !names.empty()
+                        if (!lacks && !oldName.empty() && !names.empty()
                             && std::none_of(names.begin(), names.end(), [&](const auto& n) {
                                 return copyContexts(n) == oldCopies;
                             })) {

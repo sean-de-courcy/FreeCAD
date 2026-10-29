@@ -9806,6 +9806,26 @@ TEST(SolveOwner, exactPlaceAnotherCopysPadRimBreaks)
     EXPECT_EQ(outcome.element, "Edge2");
 }
 
+TEST(SolveOwner, exactPlaceIndexOnlyReference)
+{
+    // An index-only reference (a legacy file's, no old name) to an element of a long part, and
+    // one element at its saved place, another copy's (PR 379 round 5's last review, T2): no name
+    // relates the pick to the reference, so XP's pick has no origin to share and breaks, as
+    // tier 3's gap test breaks it on `integration`; never the quiet resolution an empty name
+    // would get at the batch's same-place level (Data::mayBeQuietAtPlace()).
+    LongBoard b;
+    auto input = b.input(LongBoard::edgeAt(0), LongBoard::edgeAt(45));
+    input.entries[0].oldName.clear();
+    input.pool["Edge"][0].names = {copied(b.oldEdge, 12, "L", 'E')};
+    input.pool["Edge"][1].names = {copied(b.otherSide, 12, "L", 'E')};
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << outcome.evidence;
+    EXPECT_EQ(outcome.evidence,
+              "no structural candidate, at the same place: nearest 0.000, second 45.000, d_max "
+              "50.000; the pick Edge2 has another source");
+    EXPECT_TRUE(Data::mayBeQuietAtPlace({b.oldEdge}, "", true));
+}
+
 TEST(SolveOwner, faceGeneratorGoneDropsTheSurvivor)
 {
     // CC3: the taper renamed the top cap, so no face holds the top rim arc's face generator, and
