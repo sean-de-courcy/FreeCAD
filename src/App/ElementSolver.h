@@ -501,6 +501,50 @@ AppExport bool isMarkedPieceName(std::string_view name);
 AppExport bool
 isCounterSiblingName(std::string_view name, std::string_view other, bool copySiblings = true);
 
+/** The twin test (ops#503 class D, D1): true if \a name is \a other up to an order key and not
+ * \a other itself, so that their elements are twins, told apart only by their order among
+ * elements made alike, which an edit can change. Up to: the duplicate counter (as
+ * isCounterSiblingName(), but a pattern instance's number only inside linked and connected
+ * names), the ORD flag at every level, two roles (Data::isRoleValue()) in the Index of the last
+ * section or of any section below it, and, until A2 names the ranks, the Index of a counter
+ * section: GEN or MOD among its flags, no connected elements, no copy maker's section (TRF, CPY,
+ * EXT, MIR), none of UPP, LOW, PRJ and SRC. A hole's two crossings of an edge, `CUT;0;V` and
+ * `CUT;1;V`, are twins.
+ */
+AppExport bool isTwinName(std::string_view name, std::string_view other);
+
+/** True if \a name is keyed by its order (ops#503 class D, D1): a section carries the ORD flag,
+ * a duplicate counter or a role, or is a counter section (isTwinName()) with a non-zero Index.
+ * An element with such a name and no twin (isTwinName()) is saved as a lone twin (twinCount 1).
+ */
+AppExport bool isOrderKeyedName(std::string_view name);
+
+/** What an element with \a names lacks to come from \a oldName's origin, or nullptr: `source`
+ * when none of them shares an innermost source with \a oldName (NameAncestry::sourceTags()),
+ * `maker` when, with \a sameMaker, none has \a oldName's maker (NameAncestry::makerTag()) in
+ * its lineage. Policy D's test for G2's pick (ops#127, ops#167) and XP's source condition
+ * (ops#503 D1).
+ */
+AppExport const char*
+otherOriginOf(const std::vector<std::string>& names, std::string_view oldName, bool sameMaker);
+
+/** Whether a reference to \a oldName that geometry resolved to an element named \a names may be
+ * warned at the quieter same-place level when that element sits where the old one was
+ * (decision 97 D; App::reboundInPlace() asks it): not when one of \a names is \a oldName's twin
+ * (isTwinName(): the twin-pick rule's picks are never quiet, ops#503 D1), nor when the element
+ * lacks \a oldName's origin (otherOriginOf(): XP's source condition, I-S6). True for an empty
+ * \a oldName. App::reboundInPlace() adds T1''s test (lostOldSources()).
+ */
+AppExport bool
+mayBeQuietAtPlace(const std::vector<std::string>& names, std::string_view oldName, bool sameMaker);
+
+/** T1''s test (ops#173) for an element named \a names: true if it lost one of the sources of
+ * what \a oldName's maker made itself (a hole circle's own circle of its sketch, at the
+ * reference-ID level), as another circle of the hole's sketch, cut by the same pocket, did. False
+ * for a piece of the old element, and when \a oldName has no known sources.
+ */
+AppExport bool lostOldSources(const std::vector<std::string>& names, std::string_view oldName);
+
 /** A cheap necessary condition for atSamePlace(\a saved, the element's fingerprint), from the
  * element's \a intrinsic part (type, kind, direction, radii and a circle's centre, measured as
  * its fingerprint measures them) and \a anchor, a point of its plane (a plane face), its line (a
@@ -615,7 +659,8 @@ struct AppExport SolveInput
     };
 
     std::vector<Entry> entries;
-    /// The target's named elements, by type.
+    /// The target's named elements, by type. The held-generator test (ops#467) reads the pools
+    /// of the old name's generators' types, and is off for a generator whose type has none.
     std::map<std::string, std::vector<Element>> pool;
     /// Tier 1's overlap gap (NameAncestry::structuralSurvivors()).
     double gap = 0.25;
@@ -672,6 +717,15 @@ struct AppExport SolveInput
     /// (sourceTags(), a line redrawn in the same sketch); with this, any pick is. For comparison
     /// runs.
     bool guessAnySource = false;
+    /// The exact place (XP, ops#394): wherever geometry decides (no structural candidate, a tie
+    /// among tier 1's survivors, the survivors the merged-neighbour test dropped), the one
+    /// element of those tier 2 keeps that lies at the saved place (atSamePlace(): kind,
+    /// direction and radii, the size within GeometryTolerances::placeSize, the centre within
+    /// the continuation's ε) is the element, however near the second nearest is; two or more
+    /// there break the entry as ambiguous (role `place`). Without it, tier 3's gap test decides
+    /// alone, and a long board's other edge within d_max breaks a reference found in its place.
+    /// The batch sets it from the NamingSolver parameter ExactPlace (default on).
+    bool exactPlace = true;
     /// Tier 1 keeps only candidates made by the old element's maker (ops#167): a candidate that
     /// isn't in the old name's ancestry needs the old name's maker (NameAncestry::makerTag())
     /// in the lineage of one of its names (NameAncestry::hasLineageTag()), and so does G2's
@@ -841,6 +895,23 @@ struct AppExport SolveOutcome
  *   every candidate but those in the old name's ancestry, its pieces and its IDX source's is
  *   dropped: geometry and the guess rules decide as for no candidate, and a break lists them
  *   last (role `other generator`). Not for names in pattern instances.
+ * - A held generator (ops#467): an edge or vertex whose making section carries GEN, for each
+ *   name L it links (a face, an edge or a vertex) that an element of L's type in
+ *   SolveInput::pool holds, or a same-type descendant of it (a trimmed piece): a candidate fits
+ *   L if one of its names has a making section with GEN that links L, a same-type descendant of
+ *   L, or another name of an element holding L (a merged face's other leg). The candidates that
+ *   don't fit every held L are dropped, except those in the old name's ancestry, its pieces and
+ *   its IDX source's: a hole's vertex where a pipe's joint edge entered the hole, the joint
+ *   moved off it, isn't the seam vertex on the same hole, which the joint didn't generate.
+ *   Geometry and the guess rules decide as for no candidate, and a break lists them last (role
+ *   `other generator`). Not for names in pattern instances, nor when a missing generator
+ *   dropped them already. A face generator that no face of SolveInput::pool holds (neither its
+ *   name nor a same-type descendant of it: a Pad's taper renamed its cap) drops every candidate
+ *   that isn't exempt, as a missing generator does (ops#503 D1, the face-generator net).
+ * - The twin clause (ops#503 D1): when one candidate is left and one of its names is the old
+ *   name's twin (isTwinName()), it is no structural evidence: the entry runs the no-candidate
+ *   branch over the whole pool, and the evidence starts `tier 1's one survivor is the old
+ *   element's twin (<index>); geometry decides; `. A break lists it (role `structural`).
  * - A merged far-cap piece (ops#360): when exactly one candidate's name is the old name with,
  *   in one marked section (PRJ and MOD), more marks (connected elements) holding all of the old
  *   ones, an edge among them, it is the only candidate, as if the old name were in its
@@ -871,6 +942,22 @@ struct AppExport SolveOutcome
  * - No candidates: tiers 2 and 3 run on every pool element of the type (tier-0 elements
  *   excluded), and both must pass: the element extrinsicNearest() chooses among those tier 2
  *   keeps, or nothing ("no candidate").
+ * - The exact place (ops#394, SolveInput::exactPlace): before tier 3 decides among several
+ *   candidates, among those the merged-neighbour test dropped, or without a candidate, the one
+ *   that lies at the saved place (atSamePlace()) is the element (tier 3, evidence `... at the
+ *   same place: ...`), whatever lies within the gap; two or more there break the entry
+ *   (`ambiguous: N elements at the saved place`, role `place`). One that lacks the old name's
+ *   origin (otherOriginOf()) says `at the same place, another source: ...` (ops#503 D1).
+ * - The twin-pick rule (ops#503 D1): a single pick of geometry (XP, tier 3, G1, G2, tier 2
+ *   among the candidates) one of whose names is the old name's twin (isTwinName()) is judged by
+ *   the saved fingerprint's twin count n and the pick's order group now (it and the elements of
+ *   the type with a name that is one of its names' twins): n = 1 and the pick alone resolves as
+ *   before; n >= 2, as many now, and the pick's offset from their centroid the saved one (within
+ *   2 % or 12 degrees, as the moved check's twins) resolves with the clause `; twin renumbered:
+ *   <index> at its place among <n>`; anything else, no count saved included, breaks:
+ *   `ambiguous: <index> is the old element's twin (<n> twins saved, <m> now)`, the pick first
+ *   (role `place` at the saved place, else `geometric`), the twin clause's survivor
+ *   (`structural`), then the others nearest first.
  * - The entry then goes into one MatchGraph per owner, one candidate per element, and
  *   forcedMatching() decides.
  * - A partner one of whose names equals the old name up to the duplicate counter of any section

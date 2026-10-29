@@ -1,0 +1,13 @@
+{
+"entries": {
+"R5bArrayRaisedOntoTopRimFused|point_copy0|V2s": {"axes": ["M5", "E1", "E4", "X4:4000"], "classes": ["D"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "review pr379-r5b", "issue": "ops#503", "tier": "F"},
+"R5bArrayRaisedOntoTopRimFused|point_copy1|V2s": {"axes": ["M5", "E1", "E4", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr379-r5b", "issue": "ops#503", "tier": "F"},
+"R5bArrayRaisedOntoTopRim|point_copy0|V2s": {"axes": ["M5", "E1", "E4", "X4:4000"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr379-r5b", "issue": "ops#503", "tier": "F"},
+"R5bArrayRaisedOntoTopRim|point_copy1|V2s": {"axes": ["M5", "E1", "E4", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr379-r5b", "issue": "ops#503", "tier": "F"},
+"R5bBinderRaisedOntoTopRim|point_copy0|V2s": {"axes": ["M5", "E1", "E4", "X4:4000"], "classes": ["D"], "expect": "BROKEN", "expected": "wrong", "found_by": "review pr379-r5b", "issue": "ops#503", "tier": "F"},
+"R5bBinderRaisedOntoTopRim|point_copy1|V2s": {"axes": ["M5", "E1", "E4", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr379-r5b", "issue": "ops#503", "tier": "F"},
+"R5bPinPadReplaced|top_rim|V2s": {"axes": ["M1", "E1", "X4:4000"], "classes": ["D"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "review pr379-r5b", "issue": "ops#503", "tier": "F"},
+"R5bSameMakerOffRaisedOntoTopRim|point_copy0|V2s": {"axes": ["M5", "E1", "E4", "X4:4000"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr379-r5b", "issue": "ops#503", "tier": "F"},
+"R5bSameMakerOffRaisedOntoTopRim|point_copy1|V2s": {"axes": ["M5", "E1", "E4", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr379-r5b", "issue": "ops#503", "tier": "F"}
+}
+}

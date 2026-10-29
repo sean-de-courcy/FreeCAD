@@ -1,6 +1,6 @@
 {
 "entries": {
-"ReplacedHoleSamePlace|rim_fillet|V2s": {"axes": ["M1", "E3"], "classes": ["D"], "expect": "GUESSED", "expected": "quiet", "found_by": "port", "issue": "ops#503", "tier": "F"},
-"ReplacedHoleSamePlace|seam_vertex|V2s": {"axes": ["M1", "E3"], "classes": ["D"], "expect": "GUESSED", "expected": "quiet", "found_by": "port", "issue": "ops#503", "tier": "F"}
+"ReplacedHoleSamePlace|rim_fillet|V2s": {"axes": ["M1", "E3"], "classes": ["D"], "expect": "GUESSED", "expected": "correct", "found_by": "port", "issue": "ops#503", "tier": "F"},
+"ReplacedHoleSamePlace|seam_vertex|V2s": {"axes": ["M1", "E3"], "classes": ["D"], "expect": "GUESSED", "expected": "correct", "found_by": "port", "issue": "ops#503", "tier": "F"}
 }
 }

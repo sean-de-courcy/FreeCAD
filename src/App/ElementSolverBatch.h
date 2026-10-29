@@ -247,8 +247,10 @@ AppExport void setElementSweepDirectionFunction(ElementSweepDirectionFunction fu
 
 /** The mean of the centres of \a element (`Face7`) of \a geo's shape and of its twins, and their
  * number (ops#360, PR 340 round 5): the elements of its type with a name that is one of its
- * ordered names (Data::isOrderedName()) up to the duplicate counter. Each centre as the element's
- * fingerprint measures it. False when the element has no ordered name or no twin.
+ * names up to an order key (Data::isTwinName(), ops#503 D1). Each centre as the element's
+ * fingerprint measures it. Without twins, \a count 1 and \a centroid untouched if one of its
+ * names is keyed by its order (Data::isOrderKeyedName()): a lone member. False otherwise, and
+ * when the twins can't be measured.
  */
 AppExport bool elementTwinCentroid(
     const GeoFeature* geo,

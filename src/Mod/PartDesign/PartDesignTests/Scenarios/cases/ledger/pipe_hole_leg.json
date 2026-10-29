@@ -1,8 +1,8 @@
 {
 "entries": {
-"PipeHoleFirstLegLonger|vertex_xm_ym|V2s": {"axes": ["M3", "E1"], "classes": ["D"], "expect": "BROKEN", "expected": "guessed-wrong", "found_by": "port", "issue": "ops#503", "tier": "F"},
-"PipeHoleFirstLegLonger|vertex_xm_yp|V2s": {"axes": ["M3", "E1"], "classes": ["D"], "expect": "OWN-OR-BROKEN", "expected": "quiet", "found_by": "port", "issue": "ops#503", "tier": "F"},
-"PipeHoleFirstLegLonger|vertex_xp_ym|V2s": {"axes": ["M3", "E1"], "classes": ["D"], "expect": "BROKEN", "expected": "guessed-wrong", "found_by": "port", "issue": "ops#503", "tier": "F"},
-"PipeHoleFirstLegLonger|vertex_xp_yp|V2s": {"axes": ["M3", "E1"], "classes": ["D"], "expect": "OWN-OR-BROKEN", "expected": "quiet", "found_by": "port", "issue": "ops#503", "tier": "F"}
+"PipeHoleFirstLegLonger|vertex_xm_ym|V2s": {"axes": ["M3", "E1"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "port", "issue": "ops#503", "tier": "F"},
+"PipeHoleFirstLegLonger|vertex_xm_yp|V2s": {"axes": ["M3", "E1"], "classes": ["D"], "expect": "OWN-OR-BROKEN", "expected": "correct", "found_by": "port", "issue": "ops#503", "tier": "F"},
+"PipeHoleFirstLegLonger|vertex_xp_ym|V2s": {"axes": ["M3", "E1"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "port", "issue": "ops#503", "tier": "F"},
+"PipeHoleFirstLegLonger|vertex_xp_yp|V2s": {"axes": ["M3", "E1"], "classes": ["D"], "expect": "OWN-OR-BROKEN", "expected": "correct", "found_by": "port", "issue": "ops#503", "tier": "F"}
 }
 }

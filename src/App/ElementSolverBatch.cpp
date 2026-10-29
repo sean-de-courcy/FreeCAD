@@ -487,6 +487,84 @@ std::string joinCandidates(const std::vector<std::string>& candidates)
     return text;
 }
 
+// What two names must share to be twins (Data::isTwinName()), read off the text without
+// decoding it: the number of sections and each section's reference IDs, iteration tag and
+// element type, which the twin test compares exactly. The fields are read as MappedName's
+// decoder reads them (a character after the escape is no delimiter, one escape comes off, an
+// empty or `_` last item is none), so names the test calls twins always share the key.
+// Decoding every name of the map for each reference made creating references about 8.5 times
+// slower on a 372-edge model (PR 379 round 1).
+std::string twinKey(std::string_view name)
+{
+    std::string key;
+    std::vector<std::string> items;
+    std::string item;
+    int field = 0;
+    int escapeLevel = 0;
+    bool pending = false;
+    auto finishField = [&](bool endOfSection) {
+        if (!item.empty() && item != Data::EMPTY_VALUE) {
+            items.push_back(item);
+        }
+        switch (field) {
+            case Data::SECTION_REFERENCE_ID_INDEX:
+                for (const auto& id : items) {
+                    key += id;
+                    key += *Data::SUB_SECTION_LIST_DELIMINATOR;
+                }
+                break;
+            case Data::SECTION_ITERATION_TAG_INDEX:
+                key += items.empty() ? std::string(Data::EMPTY_VALUE) : items.front();
+                break;
+            case Data::SECTION_ELEMENT_TYPE_INDEX:
+                key += items.empty() || items.front().empty() ? *Data::EMPTY_VALUE
+                                                              : items.front().front();
+                break;
+            default:
+                break;
+        }
+        key += *Data::SECTION_SUB_DELIMINATOR;
+        items.clear();
+        item.clear();
+        if (endOfSection) {
+            key += *Data::NAME_SECTION_DELIMINATOR;
+            field = 0;
+        }
+        else {
+            ++field;
+        }
+    };
+    for (char c : name) {
+        if (escapeLevel == 0) {
+            if (c == *Data::SECTION_SUB_DELIMINATOR || c == *Data::NAME_SECTION_DELIMINATOR) {
+                finishField(c == *Data::NAME_SECTION_DELIMINATOR);
+                pending = false;
+                continue;
+            }
+            if (c == *Data::SUB_SECTION_LIST_DELIMINATOR) {
+                items.push_back(item);
+                item.clear();
+                pending = false;
+                continue;
+            }
+        }
+        pending = true;
+        if (c == *Data::SUB_SECTION_ESCAPE_CHAR) {
+            if (++escapeLevel == 1) {
+                continue;
+            }
+        }
+        else {
+            escapeLevel = 0;
+        }
+        item += c;
+    }
+    if (pending) {
+        finishField(true);
+    }
+    return key;
+}
+
 }  // namespace
 
 bool rebuildSubList(const std::vector<SolverResolution>& resolutions,
@@ -771,6 +849,8 @@ bool solveElementReferences(DocumentObject* feature,
     bool guess = true;
     bool guessNoStructure = true;
     bool guessAnySource = false;
+    // The exact place (ops#394), on by default
+    bool exactPlace = true;
     // T1 and G2' (ops#167), T1' (ops#173), on by default
     bool sameMaker = true;
     bool sameSource = true;
@@ -957,6 +1037,8 @@ bool solveElementReferences(DocumentObject* feature,
             guessNoStructure = solverParameters()->GetBool("GuessNoStructure", true);
             // G2 without the same-source test (N3 5.2), for comparison runs
             guessAnySource = solverParameters()->GetBool("GuessAnySource", false);
+            // The one element at the saved place, whatever lies within tier 3's gap (ops#394)
+            exactPlace = solverParameters()->GetBool("ExactPlace", true);
             // Tier 1 and G2 only from the old element's maker (ops#167), off for comparison runs
             sameMaker = solverParameters()->GetBool("Tier1SameMaker", true);
             // Tier 1 only from elements that kept the old element's sources (ops#173), off for
@@ -1293,6 +1375,7 @@ bool solveElementReferences(DocumentObject* feature,
         input.guess = guess;
         input.guessNoStructure = guessNoStructure;
         input.guessAnySource = guessAnySource;
+        input.exactPlace = exactPlace;
         input.sameMaker = sameMaker;
         input.sameSource = sameSource;
         // Nothing is guessed against a failed feature passing its input through (N2's N10)
@@ -1380,7 +1463,8 @@ bool solveElementReferences(DocumentObject* feature,
                 // first): the merged-neighbour test needs the target's faces (ops#446). One
                 // generated from such an edge or vertex (GEN, the linked name's making section
                 // UPP with two linked names at least): the missing-generator test needs them
-                // and the pool of the linked name's type (ops#454).
+                // and the pool of the linked name's type (ops#454). Any generated one: the
+                // held-generator test needs the pools of its linked names' types (ops#467).
                 if (!item.oldName.empty() && (item.type == "Edge" || item.type == "Vertex")) {
                     // The first (making) or last section of a name, decoded
                     auto sectionOf = [](std::string_view name, bool making) {
@@ -1402,20 +1486,24 @@ bool solveElementReferences(DocumentObject* feature,
                     }
                     else if (making.hasMapperFlag(Data::MAPPER_FLAG_GENERATED)) {
                         for (const auto& linked : making.linkedNames) {
+                            // The held-generator test (ops#467) reads the pool of every
+                            // generator's type
+                            const char type = sectionOf(linked, false).elementType;
+                            if (type != 'F' && type != 'E' && type != 'V') {
+                                continue;
+                            }
+                            const std::string typeName = type == 'F' ? "Face"
+                                : type == 'E'                        ? "Edge"
+                                                                     : "Vertex";
+                            if (input.pool.find(typeName) == input.pool.end()) {
+                                input.pool[typeName] = pool(typeName);
+                            }
                             const auto generator = sectionOf(linked, true);
                             const std::set<std::string> faces(generator.linkedNames.begin(),
                                                               generator.linkedNames.end());
-                            const char type = sectionOf(linked, false).elementType;
-                            if (!generator.hasMapperFlag(Data::MAPPER_FLAG_UPPER)
-                                || faces.size() < 2 || (type != 'E' && type != 'V')) {
-                                continue;
-                            }
-                            if (input.faces.empty()) {
+                            if (generator.hasMapperFlag(Data::MAPPER_FLAG_UPPER)
+                                && faces.size() >= 2 && type != 'F' && input.faces.empty()) {
                                 input.faces = pool("Face");
-                            }
-                            const std::string typeName = type == 'E' ? "Edge" : "Vertex";
-                            if (input.pool.find(typeName) == input.pool.end()) {
-                                input.pool[typeName] = pool(typeName);
                             }
                         }
                     }
@@ -1774,6 +1862,39 @@ bool reboundInPlace(DocumentObject* obj, const std::string& sub, const GuessReco
     if (!here(elementName.oldName)) {
         return false;
     }
+    // Never quiet for the original's twin, nor for an element of another origin (ops#503 D1:
+    // the twin-pick rule, XP's source condition), judged from the names as the solver judged
+    // them
+    if (!guess.origName.empty()) {
+        std::vector<std::string> names;
+        if (const auto prop = geo->getPropertyOfGeometry()) {
+            if (const auto data = prop->getComplexData()) {
+                // the map's entries, as poolOf() reads them (F4)
+                Data::IndexedName indexed(elementName.oldName.c_str());
+                if (indexed) {
+                    for (const auto& mapped : data->getElementMap()) {
+                        if (mapped.index == indexed) {
+                            names.push_back(plainName(mapped.name.toString()));
+                        }
+                    }
+                }
+            }
+        }
+        const std::string oldName = plainName(guess.origName);
+        const bool sameMaker = solverParameters()->GetBool("Tier1SameMaker", true);
+        if (!Data::mayBeQuietAtPlace(names, oldName, sameMaker)) {
+            return false;
+        }
+        // T1''s test: an element that lost the old name's sources is never quiet (PLAN decisions
+        // 155 and 165). It may be the element drawn again there, or a sibling of its sketch that
+        // was already in the model: nothing here tells them apart (D2, ops#526). The solver's own
+        // form of the test also exempts tier 1's ancestry and IDX survivors; this one doesn't,
+        // which can only warn where the solver would have kept the quieter level.
+        if (solverParameters()->GetBool("Tier1SameSource", true)
+            && Data::lostOldSources(names, oldName)) {
+            return false;
+        }
+    }
     // The only element there: an alternative at the same place makes the pick a choice
     return std::none_of(
         guess.alternatives.begin(),
@@ -1797,33 +1918,61 @@ bool elementTwinCentroid(const GeoFeature* geo, const char* element, Base::Vecto
     if (!indexed) {
         return false;
     }
-    // The element's ordered names, plain, as the solver sees them (poolOf())
-    std::vector<std::string> ordered;
+    // The element's names, plain, as the solver sees them (poolOf())
+    std::vector<std::string> names;
     for (const auto& mapped : data->getElementMappedNames(indexed)) {
-        std::string plain = plainName(mapped.first.toString());
-        if (Data::isOrderedName(plain)) {
-            ordered.push_back(std::move(plain));
-        }
+        names.push_back(plainName(mapped.first.toString()));
     }
-    if (ordered.empty()) {
+    if (names.empty()) {
         return false;
     }
-    // Its twins: the elements of its type with a name that is one of these up to the counter
+    // Its twins: the elements of its type with a name that is one of these up to an order key
+    // (Data::isTwinName(), ops#503 D1: the bare-rank crossings of an edge too, which carry no
+    // ORD flag, and the survivor of a 2 -> 1 change, which lost it)
+    std::vector<std::string> keys;
+    for (const auto& name : names) {
+        keys.push_back(twinKey(name));
+    }
+    // Only the elements of its type, each name tested only when it shares the twin key: walking
+    // the whole map and decoding every name made creating references about 8.5 times slower on a
+    // 372-edge model (PR 379 round 1). The names are each index's own (findAll()), where the
+    // solver's pool reads the map's entries (getAll(): a child element's first name): they differ
+    // for child-mapped elements only. Reading the pool's way here cost 3 times more again (round
+    // 3), and no model was found where the difference decides; a count that differs is a trade
+    // (loud), the ORD pieces' desync D3's (round 2's cloud review, F4).
     std::set<std::string> twins;
-    for (const auto& mapped : data->getElementMap()) {
-        if (!mapped.index || mapped.index == indexed
-            || std::strcmp(mapped.index.getType(), indexed.getType()) != 0) {
+    const auto elements = data->countSubElements(indexed.getType());
+    for (unsigned long i = 1; i <= elements; ++i) {
+        const Data::IndexedName index(indexed.getType(), static_cast<int>(i));
+        if (index == indexed) {
             continue;
         }
-        const std::string plain = plainName(mapped.name.toString());
-        if (std::any_of(ordered.begin(), ordered.end(), [&](const std::string& name) {
-                return Data::isCounterSiblingName(plain, name, false);  // not another copy's
-            })) {
-            twins.insert(mapped.index.toString());
+        for (const auto& mapped : data->getElementMappedNames(index)) {
+            const std::string plain = plainName(mapped.first.toString());
+            const std::string key = twinKey(plain);
+            bool twin = false;
+            for (std::size_t k = 0; k < names.size() && !twin; ++k) {
+                twin = keys[k] == key && Data::isTwinName(plain, names[k]);
+            }
+            if (twin) {
+                twins.insert(index.toString());
+                break;
+            }
         }
     }
+    if (twins.empty()) {
+        // Alone, with a name keyed by its order: one twin, so that the solver tells a later pick
+        // of it renumbered from a trade (the twin-pick rule's lone member)
+        if (std::any_of(names.begin(), names.end(), [](const std::string& name) {
+                return Data::isOrderKeyedName(name);
+            })) {
+            count = 1;
+            return true;
+        }
+        return false;
+    }
     Data::ElementFingerprint own;
-    if (twins.empty() || !geo->getElementFingerprint(element, own) || !own.center) {
+    if (!geo->getElementFingerprint(element, own) || !own.center) {
         return false;
     }
     Base::Vector3d sum = *own.center;

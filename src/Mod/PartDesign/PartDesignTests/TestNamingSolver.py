@@ -38,6 +38,7 @@ import FreeCAD as App
 import Part
 
 from PartDesignTests import TestNamingDump as dump
+from PartDesignTests import TestPipe as pipes
 from PartDesignTests.Scenarios import models
 from PartDesignTests.Scenarios.moves import moveCircles
 from PartDesignTests.Scenarios.harness import X, Z, edge, face
@@ -237,13 +238,15 @@ class TestNamingSolver(unittest.TestCase):
         """A reference whose mapped name is gone after an element-map version change is
         re-derived by its index, checked against its saved fingerprint: the same geometry
         resolves ("index"). With tier 3 kept from deciding (NamingSolver/Tier3Distance so large
-        that every other edge is within d_max) and the guess rules off (their wider tier 3 would
-        decide), reopening the stale-name file breaks the reference, and the version change then
-        restores it."""
+        that every other edge is within d_max), the exact place off (the edge is at its place,
+        ops#394) and the guess rules off (their wider tier 3 would decide), reopening the
+        stale-name file breaks the reference, and the version change then restores it."""
         # Arrange
         group = App.ParamGet("User parameter:BaseApp/Preferences/Mod/Part/NamingSolver")
         group.SetFloat("Tier3Distance", 100.0)
         self.addCleanup(group.RemFloat, "Tier3Distance")
+        group.SetBool("ExactPlace", False)
+        self.addCleanup(group.RemBool, "ExactPlace")
         group.SetBool("Guess", False)
         self.addCleanup(group.RemBool, "Guess")
         doc, index = self.openWithStaleName()
@@ -918,6 +921,7 @@ class TestNamingSolver(unittest.TestCase):
         """The redrawn rectangle's edge, found by tier 3: the fillet computes, with the Warning
         state and, the edge being where it was, the short same-place text (ops#391); the
         reference holds the edge, and its saved record names the original."""
+        self.quietRedraws()
         doc, pad, fillet, original = self.redrawnFillet()
 
         corner = edge("line", direction=Z, through=(20, 0, 0)).one(pad.Shape)
@@ -1199,6 +1203,13 @@ class TestNamingSolver(unittest.TestCase):
         group.SetBool(name, value)
         self.addCleanup(group.RemBool, name)
 
+    def quietRedraws(self):
+        """T1''s test off for this test: a line deleted and drawn again in place lost the old
+        line's ID, so tier 3's pick there is warned at the normal level, never the quieter
+        same-place one (PLAN decisions 155 and 165), until D2 (ops#526) tells a redraw from a
+        sibling moved there. The same-place level's own tests still reach it this way."""
+        self.guessSwitch("Tier1SameSource", False)
+
     def filletedSlot(self, doc):
         """The pad (0..20 x 0..10, 10 high) with a rectangular slot (x 6..14, y 3..7) pocketed
         through it, and a fillet, radius 0.5, on the slot's bottom edge at y = 3. The edge's
@@ -1440,7 +1451,9 @@ class TestNamingSolver(unittest.TestCase):
         and was tier 1's survivor (overlap 0.62), resolved silently 14 mm away; with hole C
         (radius 1 at (15, 4)) too, tier 2 took it with a warning. It comes from another hole:
         the fillet breaks with B's bottom circle first and B's rim circle second. With
-        NamingSolver/Tier1SameMaker off, tier 1 takes B's circle as before."""
+        NamingSolver/Tier1SameMaker and Tier1SameSource off, tier 1 took B's circle as before;
+        since ops#503 D1 the face-generator net breaks it there too: A's cylinder, the old
+        circle's face generator, is held by no face."""
         holeA, holeB = ("HoleA", 8, 10, 2), ("HoleB", 22, 10, 2)
         for holes in ((holeA, holeB), (holeA, holeB, ("HoleC", 15, 4, 1))):
             doc = self.newDocument()
@@ -1455,17 +1468,16 @@ class TestNamingSolver(unittest.TestCase):
             self.assertEqual(entry["candidates"][1], rim)
             self.assertAlmostEqual(entry["candidate_distances"][1], (14**2 + 10**2) ** 0.5, 6)
 
-        #   the switches off (T1 and T1', ops#173)
+        #   the switches off (T1 and T1', ops#173): the face-generator net (ops#503 D1)
         self.guessSwitch("Tier1SameMaker", False)
         self.guessSwitch("Tier1SameSource", False)
         doc = self.newDocument()
         last, fillet = self.filletedHoles(doc, (holeA, holeB), 0.5)
         self.deleteHoleA(doc)
         [bottom] = edge("circle", center=(22, 10, 0), radius=2).one(last.Shape)
-        self.assertTrue(fillet.isValid(), fillet.getStatusString())
-        self.assertEqual(fillet.Base[1], [bottom])
+        self.assertBrokenNearest(fillet, bottom, 14.0)
         [entry] = App.getReferenceReport(fillet)
-        self.assertEqual((entry["status"], entry["tier"]), ("resolved", 1))
+        self.assertIn("lacks the old element's face generator", entry["evidence"])
 
     def testDeletedHoleNearAnotherHoleBreaks(self):
         """ops#167, G2': holes A and B, radius 0.5, at (8, 10) and (9.5, 10), a fillet (radius
@@ -1504,7 +1516,9 @@ class TestNamingSolver(unittest.TestCase):
         circle has the same maker (the pocket) and shares the block's bottom face, so it was
         tier 1's only survivor and the fillet moved to it silently, 14 mm away. It lost the old
         circle's source (its own circle has another geometry ID): the fillet breaks with it first
-        and its rim second. With NamingSolver/Tier1SameSource off, tier 1 takes it as before."""
+        and its rim second. With NamingSolver/Tier1SameSource off, tier 1 took it as before;
+        since ops#503 D1 the face-generator net breaks it there too: the deleted circle's
+        cylinder, the old circle's face generator, is held by no face."""
         for sameSource in (True, False):
             if not sameSource:
                 self.guessSwitch("Tier1SameSource", False)
@@ -1525,9 +1539,8 @@ class TestNamingSolver(unittest.TestCase):
                 self.assertIn("lost the old element's source", entry["evidence"])
                 self.assertNotIn("another maker", entry["evidence"])
             else:
-                self.assertTrue(fillet.isValid(), fillet.getStatusString())
-                self.assertEqual(fillet.Base[1], [bottom])
-                self.assertEqual((entry["status"], entry["tier"]), ("resolved", 1))
+                self.assertBrokenNearest(fillet, bottom, 14.0)
+                self.assertIn("lacks the old element's face generator", entry["evidence"])
 
     def filletedHole(self, doc, size=(30, 20), circles=((8, 10),), height=10):
         """A block 0..size, `height` high, its sketch `Profile`; one pocket through all from
@@ -1606,7 +1619,10 @@ class TestNamingSolver(unittest.TestCase):
         """PR 149's review (Medium 1): the block's whole profile is deleted and drawn again, every
         line a new geometry ID. T1' asks only for the sources of what the pocket made itself (the
         hole's cylinder, from its circle), not of the face it cut: the hole's bottom circle keeps
-        them and stays tier 1's, no warning."""
+        them and stays tier 1's, no warning. Since ops#503 D1: the redraw renames the block's
+        bottom face, the circle's face generator, and no face holds its old name, so the
+        face-generator net drops the circle and geometry finds it in place, with the quieter
+        same-place warning."""
         doc = self.newDocument()
         pocket, fillet = self.filletedHole(doc)
 
@@ -1615,7 +1631,10 @@ class TestNamingSolver(unittest.TestCase):
         doc.Profile.addGeometry(models.rectangle(0, 0, 30, 20), False)
         doc.recompute()
 
-        self.assertHoleCircleKept(pocket, fillet, 1)
+        [bottom] = edge("circle", center=(8, 10, 0), radius=2).one(pocket.Shape)
+        self.assertEqual(fillet.Base[1], [bottom])
+        entry = self.assertWarnedInPlace(fillet, "Edge", bottom)
+        self.assertTrue(entry["evidence"].startswith("no structural candidate"), entry["evidence"])
 
     def testDeletedCircleWithinReachIsAWarnedGuess(self):
         """ops#173 under policy D: the deleted circle's sketch and pocket survive, so another hole
@@ -1645,16 +1664,24 @@ class TestNamingSolver(unittest.TestCase):
             sketch.delGeometry(0)
         sketch.addGeometry(models.rectangle(*corners), False)
 
-    def assertWarnedInPlace(self, owner, kind, expected):
+    def assertWarnedInPlace(self, owner, kind, expected, quiet=True):
         """The reference resolved by geometry at tier 3, on `expected`, with a warning: the
-        short same-place text and the quieter level (ops#391). Returns its report row."""
+        short same-place text and the quieter level (ops#391), or, not `quiet` (the pick lost the
+        old name's sources, PLAN decision 165), the full text and the normal level. Returns its
+        report row."""
         self.assertTrue(owner.isValid(), owner.getStatusString())
         self.assertIn("Warning", owner.State)
         [entry] = App.getReferenceReport(owner)
         self.assertEqual((entry["status"], entry["tier"]), ("resolved", 3), entry)
         self.assertEqual(entry["new"], expected, entry)
-        self.assertIn(f"{kind} reference found again in the same place (", owner.getStatusString())
-        self.assertEqual(entry["warning_level"], "same-place", entry)
+        if quiet:
+            self.assertIn(
+                f"{kind} reference found again in the same place (", owner.getStatusString()
+            )
+            self.assertEqual(entry["warning_level"], "same-place", entry)
+        else:
+            self.assertIn(f"{kind} reference resolved by geometry: ", owner.getStatusString())
+            self.assertEqual(entry["warning_level"], "normal", entry)
         return entry
 
     def testHorizontalHoleKeepsTheEntryCircle(self):
@@ -1662,8 +1689,10 @@ class TestNamingSolver(unittest.TestCase):
         fillet on its entry circle. The block's whole profile is redrawn, every line a new
         geometry ID, which renames both circles. T1' asks only for the hole's own source (its
         circle), which the exit circle keeps too: both survive tier 1 with equal overlap. Tier 3
-        takes the entry circle, in place, with a warning, and lists the exit circle, 20 mm away,
-        as the alternative. Never the exit circle, and never silently."""
+        takes the entry circle, in place, with a warning. Never the exit circle, and never
+        silently. (Before ops#503 D1 the exit circle, 20 mm away, was the pick's alternative; the
+        redraw renames the front face, the entry circle's face generator, so the face-generator
+        net drops both survivors and geometry finds the circle over the whole pool.)"""
         doc = self.newDocument()
         body = models.body(doc)
         profile = models.sketch(doc, "Profile", models.rectangle(0, 0, 30, 20), body)
@@ -1691,7 +1720,8 @@ class TestNamingSolver(unittest.TestCase):
         self.assertNotEqual(pocket.Shape.getElementMappedName(entryEdge), oldName)
         self.assertEqual(fillet.Base[1], [entryEdge])
         row = self.assertWarnedInPlace(fillet, "Edge", entryEdge)
-        self.assertIn(exitCircle, [a["index"] for a in row["alternatives"]])
+        self.assertNotEqual(row["new"], exitCircle)
+        self.assertTrue(row["evidence"].startswith("no structural candidate"), row["evidence"])
 
     def testPatternedHoleUnderARedrawnProfileWarns(self):
         """ops#183: T1''s fallback. A hole pocketed at (8, 10) and patterned 14 mm along x; a
@@ -1699,7 +1729,9 @@ class TestNamingSolver(unittest.TestCase):
         redrawn, which renames the circle. Its maker is the pattern, which made no input of the
         name itself, so T1' asks for every known source, the block's lines among them: the circle
         lost them and isn't tier 1's. Tier 3 takes it in place, with a warning. With
-        NamingSolver/Tier1SameSource off, tier 1 takes it silently (round 0's behaviour there)."""
+        NamingSolver/Tier1SameSource off, tier 1 took it silently (round 0's behaviour there);
+        since ops#503 D1 the face-generator net drops it there too (the block's bottom face, its
+        generator, is renamed by the redraw and held by no face), and tier 3 takes it in place."""
         for sameSource in (True, False):
             if not sameSource:
                 self.guessSwitch("Tier1SameSource", False)
@@ -1730,13 +1762,8 @@ class TestNamingSolver(unittest.TestCase):
 
             [bottom] = circle.one(pattern.Shape)
             self.assertEqual(fillet.Base[1], [bottom])
-            if sameSource:
-                self.assertWarnedInPlace(fillet, "Edge", bottom)
-            else:
-                self.assertTrue(fillet.isValid(), fillet.getStatusString())
-                self.assertNotIn("Warning", fillet.State)
-                [entry] = App.getReferenceReport(fillet)
-                self.assertEqual((entry["status"], entry["tier"]), ("resolved", 1))
+            #   the circle lost the block's lines: never quiet while T1''s test is on
+            self.assertWarnedInPlace(fillet, "Edge", bottom, quiet=not sameSource)
 
     def refinedBlocks(self, doc):
         """Pad A, 0..20 x 0..20 x 10, from `Profile`, and pad B beside it, 20..40, from
@@ -1780,7 +1807,8 @@ class TestNamingSolver(unittest.TestCase):
                 self.assertNotIn("Warning", sketch.State)
                 self.assertFalse(App.getReferenceReport(sketch))
             else:
-                self.assertWarnedInPlace(sketch, "Face", merged)
+                #   the face lost pad A's lines: never quiet while T1''s test is on
+                self.assertWarnedInPlace(sketch, "Face", merged, quiet=not sameSource)
 
     def testRefinedEdgeAfterAProfileRedrawn(self):
         """ops#183: as testRefinedFaceAfterAProfileRedrawn, with a fillet on the refined front
@@ -1800,7 +1828,8 @@ class TestNamingSolver(unittest.TestCase):
 
         [merged] = frontTop.one(padB.Shape)
         self.assertEqual(fillet.Base[1], [merged])
-        self.assertWarnedInPlace(fillet, "Edge", merged)
+        #   the edge lost pad A's lines: the normal level (PLAN decision 165)
+        self.assertWarnedInPlace(fillet, "Edge", merged, quiet=False)
 
     def testCollarFromExternalGeometry(self):
         """ops#183: a collar padded 3 mm on the block from a sketch of a circle (radius 4) and,
@@ -1852,7 +1881,8 @@ class TestNamingSolver(unittest.TestCase):
                 self.assertNotIn("Warning", fillet.State)
                 self.assertFalse(App.getReferenceReport(fillet))
             else:
-                self.assertWarnedInPlace(fillet, "Edge", circle)
+                #   the external circle's new ID: the normal level (PLAN decision 165)
+                self.assertWarnedInPlace(fillet, "Edge", circle, quiet=False)
 
     def openIndexOnly(self):
         """The fillet's reference saved as an index-only missing reference (`?EdgeN`, no shadow:
@@ -2200,6 +2230,7 @@ class TestNamingSolver(unittest.TestCase):
         (tier 3 within its distance, not the same place), the warning keeps its full form and
         the normal level. Both levels read the same after a save and reopen (derived at load,
         nothing new saved)."""
+        self.quietRedraws()
         doc = self.newDocument()
         pad, fillet = self.padWithFillet(doc)
         self.redraw(doc)
@@ -2285,6 +2316,7 @@ class TestNamingSolver(unittest.TestCase):
         same-place text while its record is now the 0.1 mm one. Saved so and reopened, its level
         comes from the shapes, not the text (decision 102): normal, and the full text after a
         recompute."""
+        self.quietRedraws()
         doc = self.newDocument()
         pad, fillet = self.padWithFillet(doc)
         self.redrawAt(doc, 20)
@@ -2303,6 +2335,7 @@ class TestNamingSolver(unittest.TestCase):
         level), and that undone: the fillet, touched, keeps the same-place text with the 0.1 mm
         record back. Saved so and reopened, its level comes from the shapes (decision 102):
         normal, and the full text after a recompute."""
+        self.quietRedraws()
         doc = self.newDocument()
         doc.UndoMode = 1
         pad, fillet = self.padWithFillet(doc)
@@ -2328,6 +2361,7 @@ class TestNamingSolver(unittest.TestCase):
         writes another record (normal); undone, the first record and its pick come back, but the
         edge is no longer where that record's original was: judged again, the level is normal,
         not the old judgement's quieter one."""
+        self.quietRedraws()
         doc = self.newDocument()
         doc.UndoMode = 1
         pad, fillet = self.padWithFillet(doc)
@@ -2355,6 +2389,7 @@ class TestNamingSolver(unittest.TestCase):
         the pad is made longer. Drawn at 60 mm instead, the edge goes missing; undone, the
         judged record and its pick come back, but the edge is no longer where that record's
         original was: judged again, the level is normal, also after a redo and a second undo."""
+        self.quietRedraws()
         doc = self.newDocument()
         doc.UndoMode = 1
         pad, fillet = self.padWithFillet(doc)
@@ -2380,6 +2415,7 @@ class TestNamingSolver(unittest.TestCase):
         place, then the pad made longer: both quiet (the bottom edge in place now, the vertical
         one by its judgement). The vertical edge's reference removed and the removal undone:
         its record comes back, but the edge has moved since: judged again, the level is normal."""
+        self.quietRedraws()
         doc = self.newDocument()
         doc.UndoMode = 1
         pad, fillet = self.padWithFillet(doc)
@@ -2413,6 +2449,7 @@ class TestNamingSolver(unittest.TestCase):
         redrawn rectangle's two filleted edges, found again in the same place, print no warning
         line; the fillet keeps the Warning state and the quieter level, and the line is in the
         log. Drawn 0.1 mm off, the normal warning still prints."""
+        self.quietRedraws()
         params = App.ParamGet("User parameter:BaseApp/Preferences/TreeView")
         params.SetBool("ShowSamePlaceWarnings", False)
         self.addCleanup(params.RemBool, "ShowSamePlaceWarnings")
@@ -2433,6 +2470,7 @@ class TestNamingSolver(unittest.TestCase):
         """The redrawn rectangle's two filleted edges, found again in the same place: the warning
         prints; both references accepted, with no recompute after, and the rectangle redrawn
         again: the same text comes back, and prints again (it was gone)."""
+        self.quietRedraws()
         doc = self.newDocument()
         pad, fillet = self.twoEdgeFillet(doc)
 
@@ -2535,3 +2573,618 @@ class TestNamingSolver(unittest.TestCase):
         for feature in body.Group:
             self.assertTrue(feature.isValid(), (feature.Name, feature.getStatusString()))
         self.assertEqual([o.Name for o in body.Group][-4:], ["OutletSketch", "Outlet", "SlotSketch", "Slot"])
+
+    # The exact place (ops#394): an element found again where it was, in a long part
+
+    def chamferedRims(self, doc):
+        """A floor frame's two rims, 3600 x 45 and 235 high, 4045 apart, padded from one sketch
+        (the target's diagonal 5454, so tier 3's d_max is 54.5 mm), and a Chamfer of 5 mm on the
+        first rim's outer top edge (y = 0, z = 235). The rim's other top edge lies 45 mm away."""
+        body = models.body(doc)
+        geometry = models.rectangle(0, 0, 3600, 45) + models.rectangle(0, 4045, 3600, 4090)
+        profile = models.sketch(doc, "Profile", geometry, body)
+        pad = models.pad(body, profile, 235, "Rims")
+        doc.recompute()
+        chamfer = body.newObject("PartDesign::Chamfer", "Chamfer")
+        chamfer.Base = (pad, edge("line", direction=X, through=(0, 0, 235)).one(pad.Shape))
+        chamfer.Size = 5
+        doc.recompute()
+        self.assertTrue(chamfer.isValid(), chamfer.getStatusString())
+        return pad, chamfer
+
+    def redrawFirstRim(self, doc, corners):
+        """The first rim's four lines deleted and the rim drawn again through `corners`: new
+        geometry IDs, so no name relates its old edges to the new ones."""
+        doc.Profile.delGeometries([0, 1, 2, 3])
+        doc.Profile.addGeometry(models.polygon(corners), False)
+        doc.recompute()
+
+    def assertChamferAt(self, chamfer, pad, through):
+        base, subs = chamfer.Base
+        self.assertEqual(base, pad)
+        [sub] = subs
+        centre = pad.Shape.getElement(sub).CenterOfMass
+        self.assertLess((centre - App.Vector(*through)).Length, 1e-6, (sub, centre))
+
+    def assertBrokenAtThePlace(self, feature):
+        """The feature's reference broke at the saved place: the one element there lost the old
+        element's sources (T1''s test), so it may be a sibling of the old element's sketch moved
+        into its place (PLAN decision 155)."""
+        self.assertFalse(feature.isValid(), feature.Name)
+        rows = App.getReferenceReport(feature)
+        self.assertIn("broken", [e["status"] for e in rows], rows)
+        self.assertTrue(
+            any("has another source element" in e.get("evidence", "") for e in rows), rows
+        )
+
+    def testExactPlaceRedrawInPlaceBreaks(self):
+        """The first rim drawn again exactly where it was: no name relates the chamfered edge to
+        the new rim's, and the board's other top edge lies 45 mm from it, within tier 3's d_max.
+        The one edge at the saved place, with the saved length, is the element, but its line lost
+        the old line's ID, as a sibling line dragged there would (testRimMovedIntoAVacatedPlace):
+        it breaks until D2 (ops#526) tells them apart. Before PLAN decision 155 it was resolved at
+        tier 3 with the quieter same-place warning (decision 97 Q4)."""
+        doc = self.newDocument()
+        pad, chamfer = self.chamferedRims(doc)
+
+        self.redrawFirstRim(doc, [(3600, 45), (3600, 0), (0, 0), (0, 45)])
+
+        self.assertBrokenAtThePlace(chamfer)
+        [entry] = App.getReferenceReport(chamfer)
+        self.assertTrue(
+            entry["evidence"].startswith("no structural candidate, at the same place:"),
+            entry["evidence"],
+        )
+
+    def testRimMovedIntoAVacatedPlaceBreaks(self):
+        """PR 379 round 3's Opus review: a third rim at y = 2000 in the same sketch; the first
+        rim's lines deleted and the third rim's moved (IDs kept) onto the first rim's place. Its
+        outer top edge lies at the saved place, a sibling's edge that existed before the edit: the
+        chamfer breaks, never taken there quietly (PLAN decision 155)."""
+        doc = self.newDocument()
+        body = models.body(doc)
+        geometry = (
+            models.rectangle(0, 0, 3600, 45)
+            + models.rectangle(0, 2000, 3600, 2045)
+            + models.rectangle(0, 4045, 3600, 4090)
+        )
+        profile = models.sketch(doc, "Profile", geometry, body)
+        pad = models.pad(body, profile, 235, "Rims")
+        doc.recompute()
+        chamfer = body.newObject("PartDesign::Chamfer", "Chamfer")
+        chamfer.Base = (pad, edge("line", direction=X, through=(0, 0, 235)).one(pad.Shape))
+        chamfer.Size = 5
+        doc.recompute()
+        self.assertTrue(chamfer.isValid(), chamfer.getStatusString())
+
+        models.moveRectangle(profile, 0, 0, 3600, 45, first=4)
+        profile.delGeometries([0, 1, 2, 3])
+        doc.recompute()
+
+        self.assertBrokenAtThePlace(chamfer)
+
+    def testExactPlaceNeedsTheSameSize(self):
+        """The control: the first rim drawn again 3000 long from the same corner. Its top edge's
+        centre is 300 mm from the saved one and its length differs: nothing is at the saved place,
+        and the reference is never taken quietly (broken, or a guess with the full warning)."""
+        doc = self.newDocument()
+        pad, chamfer = self.chamferedRims(doc)
+
+        self.redrawFirstRim(doc, [(3000, 45), (3000, 0), (0, 0), (0, 45)])
+
+        if chamfer.isValid():
+            [entry] = App.getReferenceReport(chamfer)
+            self.assertEqual(entry["warning_level"], "normal", entry["evidence"])
+        else:
+            [entry] = App.getReferenceReport(chamfer)
+            self.assertEqual(entry["status"], "broken")
+
+    # A held generator (ops#467): a hole across an edge, the edge moved off it
+
+    def holedBlock(self, doc):
+        """A Pad of 0..20 x 0..10, 10 high, and a refined Pocket (through all, midplane, along y)
+        of a circle of radius 0.5 centred at x = 10 on the top edges' height, in an XZ sketch.
+        The hole's vertices on the front top edge, at (9.5, 0, 10) and (10.5, 0, 10), are
+        generated from that edge and the hole's cylinder, the second (where the circle's seam
+        lies) from the edge and the seam. A datum point on each; returns (pad, hole sketch,
+        points, their places)."""
+        body = models.body(doc)
+        profile = models.sketch(doc, "Profile", models.rectangle(0, 0, 20, 10), body)
+        pad = models.pad(body, profile, 10)
+        xz = App.Placement(App.Vector(), App.Rotation(App.Vector(1, 0, 0), 90))
+        hole = models.sketch(doc, "Hole", [models.circle(10, 10, 0.5)], body, placement=xz)
+        pocket = body.newObject("PartDesign::Pocket", "Pocket")
+        pocket.Profile = hole
+        pocket.Type = 1  # through all
+        pocket.Midplane = True
+        pocket.Refine = True
+        doc.recompute()
+        self.assertTrue(pocket.isValid(), pocket.getStatusString())
+        points = []
+        for x in (9.5, 10.5):
+            [vertex] = pipes.elementsWhere(
+                pocket.Shape, "Vertex", lambda p: (p - App.Vector(x, 0, 10)).Length < 1e-6
+            )
+            point = body.newObject("PartDesign::Point", "On" + vertex)
+            point.AttachmentSupport = [(pocket, vertex)]
+            point.MapMode = "Vertex"
+            points.append(point)
+        doc.recompute()
+        return pad, hole, points, {p.Name: App.Vector(p.Placement.Base) for p in points}
+
+    def moveCircle(self, sketch, x):
+        geometry = sketch.Geometry
+        geometry[0].Center = App.Vector(x, 10, 0)
+        sketch.Geometry = geometry
+
+    def testSeamVertexLeftByAMovedHole(self):
+        """The Pad made 3 mm taller and the hole moved 2 mm along x: the front top edge, still
+        there under its name, no longer meets the hole, which lies wholly in the front face. The
+        seam vertex there links the seam and the front face; it shares most of the old seam
+        vertex's ancestry, the maker and the sources, and tier 1 took it, 2 mm away and silently,
+        so the reference didn't come back when the edit was undone. The front top edge didn't
+        generate it: the references break or warn, and are in their place again once the Pad and
+        the hole are back."""
+        doc = self.newDocument()
+        pad, hole, points, before = self.holedBlock(doc)
+
+        pad.Length = 13
+        self.moveCircle(hole, 12)
+        doc.recompute()
+
+        for point in points:
+            if point.isValid():
+                levels = [e.get("warning_level") for e in App.getReferenceReport(point)]
+                self.assertIn("normal", levels, (point.Name, point.AttachmentSupport))
+
+        pad.Length = 10
+        self.moveCircle(hole, 10)
+        doc.recompute()
+        self.assertBackInPlace(points, before)
+
+    # The same on a refined pipe's joint (ops#454's model). Since the Pipe's leg names (ops#415),
+    # each leg's face has its own spine line as a source, so T1' keeps these loud without the
+    # held-generator test; they pin that they stay so.
+
+    def holedPipe(self, doc, heights):
+        """ops#454's model: a refined "Transformed" pipe of the 4 x 4 square along TestPipe's U
+        (legs 30, 20 and 20, turned 40 and 20 degrees), and a refined Pocket, through all and
+        midplane along x, of circles of radius 0.5 at the `heights`, in a sketch on the plane
+        x = 0 (sketch x is world y, sketch y world z). Returns (body, spine sketch, its points,
+        pocket)."""
+        body = models.body(doc)
+        profile = models.sketch(doc, "Profile", models.rectangle(-2, -2, 2, 2), body)
+        points = pipes.bendPoints(40, 20)
+        path = models.sketch(doc, "Path", models.polyline(points), body, placement=pipes.XZ)
+        pipe = body.newObject("PartDesign::AdditivePipe", "Pipe")
+        pipe.Profile = profile
+        pipe.Spine = (path, [])
+        pipe.Transition = "Transformed"
+        pipe.Refine = True
+        placement = App.Placement(App.Vector(), App.Rotation(App.Vector(1, 1, 1), 120))
+        circles = [models.circle(0, z, 0.5) for z in heights]
+        hole = models.sketch(doc, "Hole", circles, body, placement=placement)
+        pocket = body.newObject("PartDesign::Pocket", "Pocket")
+        pocket.Profile = hole
+        pocket.Type = 1  # through all
+        pocket.Midplane = True
+        pocket.Refine = True
+        doc.recompute()
+        self.assertTrue(pocket.isValid(), pocket.getStatusString())
+        return body, path, points, pocket
+
+    def pointsAt(self, body, target, at):
+        """A datum point on each of the target's edges and vertices lying wholly in the square at
+        the spine vertex `at`, with their places"""
+        points = []
+        for kind in ("Edge", "Vertex"):
+            for element in pipes.elementsWhere(target.Shape, kind, pipes.inSquareAt(at)):
+                point = body.newObject("PartDesign::Point", "On" + element)
+                point.AttachmentSupport = [(target, element)]
+                point.MapMode = "Vertex" if kind == "Vertex" else "CenterOfMass"
+                points.append(point)
+        body.Document.recompute()
+        self.assertEqual([p.Name for p in points if not p.isValid()], [])
+        return points, {p.Name: App.Vector(p.Placement.Base) for p in points}
+
+    def setSpine(self, path, points):
+        """The spine's lines moved through `points`, keeping their geometry IDs (a drag)"""
+        models.setLines(path, {i: (p, q) for i, (p, q) in enumerate(zip(points, points[1:]))})
+        path.Document.recompute()
+
+    def assertNothingMovedSilently(self, points, before):
+        """No point the solver re-bound lies elsewhere than it was without the normal warning: a
+        point is invalid, at its place, warned, or follows its element by its exact name"""
+        for point in points:
+            if not point.isValid():
+                continue
+            for entry in App.getReferenceReport(point):
+                if entry["status"] == "broken" or entry["tier"] == 0:
+                    continue
+                if entry.get("warning_level") == "normal":
+                    continue
+                moved = (point.Placement.Base - before[point.Name]).Length
+                self.assertLess(moved, 1e-6, (point.Name, point.AttachmentSupport, entry))
+
+    def assertBackInPlace(self, points, before):
+        for point in points:
+            self.assertTrue(point.isValid(), (point.Name, point.getStatusString()))
+            moved = (point.Placement.Base - before[point.Name]).Length
+            self.assertLess(moved, 1e-6, (point.Name, point.AttachmentSupport))
+
+    def testHoleLeftByAMovedJoint(self):
+        """Leg 0 made 1 mm longer: the first bend's joint rises off the hole, keeping its name.
+        The hole's vertices where the joint entered it, at (+-2, -0.5, 30), were generated from
+        the joint and the cylinder; the seam vertex on the same hole is 1 mm away (before the
+        leg names, tier 1 took it silently, ops#467). Those references break or warn. The seam
+        vertices at (+-2, 0.5, 30) are found at their place (the hole's seam is there still).
+        Leg 0 back at 30: every point is in its place."""
+        doc = self.newDocument()
+        body, path, points, pocket = self.holedPipe(doc, [30])
+        joint, before = self.pointsAt(body, pocket, App.Vector(0, 0, 30))
+        # the joint edges' four pieces beside the hole and the hole's seam; the four corners, and
+        # the hole's and the seam's vertices on the joint edges
+        self.assertEqual(len(joint), 13, [p.Name for p in joint])
+
+        self.setSpine(path, points[:1] + [(x, z + 1) for x, z in points[1:]])
+
+        self.assertNothingMovedSilently(joint, before)
+        onHole = [p for p in joint if p.MapMode == "Vertex" and abs(before[p.Name].z - 30) < 1e-6]
+        holeVertices = [p for p in onHole if abs(before[p.Name].y + 0.5) < 1e-6]
+        seamVertices = [p for p in onHole if abs(before[p.Name].y - 0.5) < 1e-6]
+        self.assertEqual((len(holeVertices), len(seamVertices)), (2, 2), [p.Name for p in onHole])
+        for point in holeVertices:
+            if point.isValid():
+                levels = [e.get("warning_level") for e in App.getReferenceReport(point)]
+                self.assertIn("normal", levels, point.Name)
+        for point in seamVertices:
+            self.assertTrue(point.isValid(), (point.Name, point.getStatusString()))
+            moved = (point.Placement.Base - before[point.Name]).Length
+            self.assertLess(moved, 1e-6, point.Name)
+
+        self.setSpine(path, points)
+        self.assertBackInPlace(joint, before)
+
+    def testSeamVertexLeftByAStraightenedBend(self):
+        """Holes across both bends' joints, the first bend made straight: the second bend moves
+        12.9 mm, away from its hole, which now crosses leg 1. The seam vertices of that hole on the
+        second bend's joint were generated from the joint and the seam; the hole's seam vertex now
+        on leg 1 links the seam but not the joint, which is still there (before the leg names,
+        tier 1 took it silently, ops#467). Those references break or warn; the bend turned back,
+        every point is in its place."""
+        doc = self.newDocument()
+        bends = pipes.bendPoints(40, 20)[1:3]
+        body, path, points, pocket = self.holedPipe(doc, [z for _, z in bends])
+        x, z = points[2]
+        joint, before = self.pointsAt(body, pocket, App.Vector(x, 0, z))
+        self.assertGreater(len(joint), 4, [p.Name for p in joint])
+
+        self.setSpine(path, pipes.bendPoints(0, 20))
+
+        self.assertNothingMovedSilently(joint, before)
+
+        self.setSpine(path, points)
+        self.assertBackInPlace(joint, before)
+
+    def testHoleVertexFollowsAJointStillCrossingIt(self):
+        """The control: leg 0 made 0.3 mm longer, so the joint still crosses the hole, at
+        y = +-0.4. The hole vertex at (2, -0.5, 30) follows it by its name to (2, -0.4, 30.3).
+        Only the x = +2 side: on the other, the two crossings' names can swap (ops#468)."""
+        doc = self.newDocument()
+        body, path, points, pocket = self.holedPipe(doc, [30])
+        joint, before = self.pointsAt(body, pocket, App.Vector(0, 0, 30))
+        [hole] = [
+            p
+            for p in joint
+            if p.MapMode == "Vertex" and (before[p.Name] - App.Vector(2, -0.5, 30)).Length < 1e-6
+        ]
+
+        self.setSpine(path, points[:1] + [(x, z + 0.3) for x, z in points[1:]])
+
+        self.assertTrue(hole.isValid(), hole.getStatusString())
+        moved = (hole.Placement.Base - App.Vector(2, -0.4, 30.3)).Length
+        self.assertLess(moved, 1e-6, hole.AttachmentSupport)
+        self.assertNothingMovedSilently(joint, before)
+
+    # Twins (ops#503 class D, D1): a hole across an edge crosses it twice, at two vertices told
+    # apart only by their place along the edge (the Index field), and leaves two vertical lines
+    # on the front face told apart the same way. When one of them goes, the survivor carries the
+    # old name's twin; a pick of it is never quiet.
+
+    def crossedEdge(self, doc, turn=0, fillet=False):
+        """A Pad of 0..20 x 0..10, 5 high, and a Pocket (through all, midplane) of a circle of
+        radius 1 at (10, 0.5), its sketch turned by `turn` degrees about the centre: the circle
+        crosses the top front edge (y = 0, z = 5) at x = 10 -+ 0.866, and its seam lies at its
+        start point, on the right for no turn. A datum point on each crossing, left first; with
+        `fillet`, a Fillet (0.3) on the front face's right vertical line. Returns (hole sketch,
+        points, fillet or None)."""
+        body = models.body(doc)
+        profile = models.sketch(doc, "Profile", models.rectangle(0, 0, 20, 10), body)
+        models.pad(body, profile, 5)
+        hole = models.sketch(doc, "Hole", [models.circle(10, 0.5, 1)], body)
+        if turn:
+            rotation = App.Rotation(App.Vector(0, 0, 1), turn)
+            centre = App.Vector(10, 0.5, 0)
+            hole.Placement = App.Placement(centre - rotation.multVec(centre), rotation)
+        pocket = body.newObject("PartDesign::Pocket", "Pocket")
+        pocket.Profile = hole
+        pocket.Type = 1  # through all
+        pocket.Midplane = True
+        doc.recompute()
+        self.assertTrue(pocket.isValid(), pocket.getStatusString())
+        points = []
+        for x in (10 - 0.75**0.5, 10 + 0.75**0.5):
+            [vertex] = pipes.elementsWhere(
+                pocket.Shape, "Vertex", lambda p: (p - App.Vector(x, 0, 5)).Length < 1e-6
+            )
+            point = body.newObject("PartDesign::Point", "On" + vertex)
+            point.AttachmentSupport = [(pocket, vertex)]
+            point.MapMode = "Vertex"
+            points.append(point)
+        rounded = None
+        if fillet:
+            line = edge("line", direction=Z, through=(10 + 0.75**0.5, 0, 0)).one(pocket.Shape)
+            rounded = body.newObject("PartDesign::Fillet", "Fillet")
+            rounded.Base = (pocket, line)
+            rounded.Radius = 0.3
+        doc.recompute()
+        for point in points:
+            self.assertTrue(point.isValid(), point.getStatusString())
+        if rounded:
+            self.assertTrue(rounded.isValid(), rounded.getStatusString())
+        return hole, points, rounded
+
+    def moveHole(self, hole, x, y):
+        """The hole's circle centred at (x, y) in the world, its sketch's turn kept"""
+        hole.moveGeometry(0, 3, hole.Placement.inverse().multVec(App.Vector(x, y, 0)), False)
+        hole.Document.recompute()
+
+    def assertNeverQuietlyAt(self, point, wrong, right):
+        """The point is broken, or sits at `right` with the normal warning; never at `wrong` and
+        never at `right` quietly (no report row, or the same-place level)"""
+        if not point.isValid():
+            return
+        at = point.Placement.Base
+        levels = [e.get("warning_level") for e in App.getReferenceReport(point)]
+        self.assertGreater((at - App.Vector(*wrong)).Length, 1e-6, (point.Name, levels))
+        self.assertLess((at - App.Vector(*right)).Length, 1e-6, (point.Name, levels))
+        self.assertIn("normal", levels, point.Name)
+
+    def testCrossingThatBecameTheSeamVertexIsNotItsTwin(self):
+        """The circle's centre moved onto the edge (y 0.5 -> 0): the right crossing becomes the
+        seam vertex at (11, 0, 5), named after the seam, and the left one, at (9, 0, 5), keeps
+        its name. The right point's name misses; the left crossing is its twin, the seam vertex
+        the element: the right point at (11, 0, 5) with the normal warning, or broken; never on
+        the left crossing. Builds differ in tier 1's survivors here (the twin alone, taken
+        silently; or both, and tier 3 picks the seam vertex), so this is the end-to-end check,
+        and the gtest twinSurvivorGoesToGeometry the fail-before."""
+        doc = self.newDocument()
+        hole, (left, right), _ = self.crossedEdge(doc)
+
+        self.moveHole(hole, 10, 0)
+
+        self.assertNeverQuietlyAt(right, (9, 0, 5), (11, 0, 5))
+        self.assertTrue(left.isValid(), left.getStatusString())
+        self.assertLess((left.Placement.Base - App.Vector(9, 0, 5)).Length, 1e-6)
+
+    def testTwinLandingOnTheSavedPlaceBreaks(self):
+        """CC1 (ops#503 round 2): the circle moved to (11.866, 0): the left crossing lands exactly
+        where the right one was, and the right one becomes the seam vertex, 2 mm further, at
+        (12.866, 0, 5). The right point's name misses and its twin sits at the saved place; the
+        twins' record says 2 and the shape holds 1 now, so the pick is a trade: the right point
+        breaks (or is warned at 12.866), never at 10.866 quietly. The left point follows its
+        name, or breaks."""
+        doc = self.newDocument()
+        hole, (left, right), _ = self.crossedEdge(doc)
+        landing = 10 + 0.75**0.5
+
+        self.moveHole(hole, landing + 1, 0)
+
+        self.assertNeverQuietlyAt(right, (landing, 0, 5), (landing + 2, 0, 5))
+        if left.isValid():
+            self.assertLess((left.Placement.Base - App.Vector(landing, 0, 5)).Length, 1e-6)
+
+    def testLoneTwinIsNotAnotherHolesCrossing(self):
+        """PR 379 round 1 (R1): a plate 200 x 100 x 5 with two through holes of radius 1 crossing
+        its top front edge, A at (100, 0.5) and B, from another sketch, at (102.5, 0.5); a datum
+        point on A's right crossing (100.866). Hole A moved to (0.3, 0.5): its left crossing
+        falls off the edge's end and the right one, alone, is renumbered. Tier 1's one survivor
+        is the old element's twin, so geometry decides, and B's left crossing (101.634) lies
+        0.77 from the saved place: another hole's vertex, of another sketch and another Pocket,
+        is no pick. The point breaks, or sits on A's crossing (1.166) with the normal warning;
+        never on B's."""
+        doc = self.newDocument()
+        body = models.body(doc)
+        profile = models.sketch(doc, "Profile", models.rectangle(0, 0, 200, 100), body)
+        models.pad(body, profile, 5)
+        holes = []
+        for name, x in (("HoleA", 100), ("HoleB", 102.5)):
+            sketch = models.sketch(doc, name, [models.circle(x, 0.5, 1)], body)
+            pocket = body.newObject("PartDesign::Pocket", "Pocket" + name[-1])
+            pocket.Profile = sketch
+            pocket.Type = 1  # through all
+            pocket.Midplane = True
+            holes.append((sketch, pocket))
+        doc.recompute()
+        [(hole, _), (_, last)] = holes
+        half = 0.75**0.5
+        [vertex] = pipes.elementsWhere(
+            last.Shape, "Vertex", lambda p: (p - App.Vector(100 + half, 0, 5)).Length < 1e-6
+        )
+        point = body.newObject("PartDesign::Point", "OnRight")
+        point.AttachmentSupport = [(last, vertex)]
+        point.MapMode = "Vertex"
+        doc.recompute()
+        self.assertTrue(point.isValid(), point.getStatusString())
+
+        self.moveHole(hole, 0.3, 0.5)
+
+        self.assertNeverQuietlyAt(point, (102.5 - half, 0, 5), (0.3 + half, 0, 5))
+
+    def sameSketchHoles(self, doc):
+        """R1's plate with both circles in one sketch, `Holes`, cut by one Pocket: A at
+        (100, 0.5), B at (102.5, 0.5), and a datum point on A's right crossing (100.866)"""
+        body = models.body(doc)
+        profile = models.sketch(doc, "Profile", models.rectangle(0, 0, 200, 100), body)
+        models.pad(body, profile, 5)
+        holes = models.sketch(
+            doc, "Holes", [models.circle(100, 0.5, 1), models.circle(102.5, 0.5, 1)], body
+        )
+        pocket = body.newObject("PartDesign::Pocket", "Pocket")
+        pocket.Profile = holes
+        pocket.Type = 1  # through all
+        pocket.Midplane = True
+        doc.recompute()
+        half = 0.75**0.5
+        [vertex] = pipes.elementsWhere(
+            pocket.Shape, "Vertex", lambda p: (p - App.Vector(100 + half, 0, 5)).Length < 1e-6
+        )
+        point = body.newObject("PartDesign::Point", "OnRight")
+        point.AttachmentSupport = [(pocket, vertex)]
+        point.MapMode = "Vertex"
+        doc.recompute()
+        self.assertTrue(point.isValid(), point.getStatusString())
+        return holes, point
+
+    def testLoneTwinIsNotASiblingCirclesCrossing(self):
+        """PR 379 round 2's cloud review (F1), R1 with both holes drawn in one sketch: A moved to
+        (0.3, 0.5), its right crossing alone and renumbered. B's crossings share A's sketch and
+        Pocket, so the origin gate passes them, but they come from another circle of the sketch
+        (T1''s test): B's left crossing (101.634), 0.77 from the saved place, is no pick. The
+        point breaks, or sits on A's crossing (1.166) with the normal warning; never on B's."""
+        doc = self.newDocument()
+        holes, point = self.sameSketchHoles(doc)
+        half = 0.75**0.5
+
+        holes.moveGeometry(0, 3, App.Vector(0.3, 0.5, 0), False)
+        doc.recompute()
+
+        self.assertNeverQuietlyAt(point, (102.5 - half, 0, 5), (0.3 + half, 0, 5))
+
+    def testLoneTwinIsNotASiblingCirclesCrossingAtThePlace(self):
+        """F1's quiet form: the same edit also moves B to (100 + 2 * 0.866, 0.5), so its left
+        crossing lies exactly at the saved place (100.866, 0, 5). Taken there, the batch gave it
+        the same-place level, with no warning. The point breaks, or sits on A's crossing (1.166)
+        with the normal warning; never at the saved place."""
+        doc = self.newDocument()
+        holes, point = self.sameSketchHoles(doc)
+        half = 0.75**0.5
+
+        holes.moveGeometry(0, 3, App.Vector(0.3, 0.5, 0), False)
+        holes.moveGeometry(1, 3, App.Vector(100 + 2 * half, 0.5, 0), False)
+        doc.recompute()
+
+        self.assertNeverQuietlyAt(point, (100 + half, 0, 5), (0.3 + half, 0, 5))
+
+    def testSiblingCirclesCrossingAtThePlaceIsNotQuiet(self):
+        """The cloud review's pre-existing path, without the twin clause: A moved off the edge to
+        (100, 10), so both its crossings are gone and T1' drops B's (another circle of the
+        sketch); B moved to (100 + 2 * 0.866, 0.5), its left crossing exactly at the saved place.
+        Nothing tells it from A's circle drawn there again: the point breaks (PLAN decision 155)."""
+        doc = self.newDocument()
+        holes, point = self.sameSketchHoles(doc)
+        half = 0.75**0.5
+
+        holes.moveGeometry(0, 3, App.Vector(100, 10, 0), False)
+        holes.moveGeometry(1, 3, App.Vector(100 + 2 * half, 0.5, 0), False)
+        doc.recompute()
+
+        self.assertBrokenAtThePlace(point)
+
+    def testSiblingCirclesCrossingAtThePlaceWithTheHoleOffThePlateBreaks(self):
+        """S1 (PR 379 round 3's cloud review): the same edit with A moved off the plate. A's
+        circle is still in the sketch, but no element of the Pocket's shape holds its ID, so the
+        batch took B's crossing at the saved place quietly, as if A's circle had been drawn there
+        again. The point breaks (PLAN decision 155)."""
+        doc = self.newDocument()
+        holes, point = self.sameSketchHoles(doc)
+        half = 0.75**0.5
+
+        holes.moveGeometry(0, 3, App.Vector(100, -50, 0), False)
+        holes.moveGeometry(1, 3, App.Vector(100 + 2 * half, 0.5, 0), False)
+        doc.recompute()
+
+        self.assertBrokenAtThePlace(point)
+
+    @unittest.expectedFailure
+    def testCrossingWhoseTwinBecameTheSeamVertexIsLoud(self):
+        """CC2 (ops#503 round 2), the mirrored seam: the hole's sketch turned 180 degrees (seam
+        on the left), then its centre moved onto the edge. The left crossing becomes the seam
+        vertex at (9, 0, 5); the right one, alone, is renumbered and carries the left one's old
+        name, so the left point follows it 1.866 mm by its name, silently (an exact hit, no
+        report row). It must break, or sit at (9, 0, 5) with a warning; never at (11, 0, 5).
+        Fails until D3's vanished-twin net (or A2)."""
+        doc = self.newDocument()
+        hole, (left, right), _ = self.crossedEdge(doc, turn=180)
+
+        self.moveHole(hole, 10, 0)
+
+        self.assertNeverQuietlyAt(left, (11, 0, 5), (9, 0, 5))
+
+    @unittest.expectedFailure
+    def testFilletOnATwinEdgeIsLoudWhenItsTwinGoes(self):
+        """The edge form (ops#503 round 2): a Fillet on the front face's right vertical line, the
+        circle's centre moved onto the edge (seam on the right). The right line becomes the seam's
+        B-spline and the left one, alone, takes the right one's old name: the fillet follows it to
+        x = 9, an exact hit, silently. It must break; never compute on the line at x = 9. Fails
+        until D3's vanished-twin net."""
+        doc = self.newDocument()
+        hole, _, fillet = self.crossedEdge(doc, fillet=True)
+        pocket = doc.Pocket
+
+        self.moveHole(hole, 10, 0)
+
+        if fillet.isValid():
+            [sub] = fillet.Base[1]
+            x = pocket.Shape.getElement(sub).CenterOfMass.x
+            self.assertGreater(abs(x - 9), 1e-3, (sub, App.getReferenceReport(fillet)))
+
+    def testTaperedPadsTopRimArcIsNotItsBottomArc(self):
+        """CC3 (class B's review): a Pad 20 x 10 x 5 with a through hole of radius 2 at (10, 0)
+        and a Fillet (0.3) on the hole's top rim arc; then the Pad tapered by 1 degree. The draft
+        renames the caps (index names of the offset wire), so the top rim arc's face generator,
+        the top cap, is held by no face, and tier 1 kept the bottom rim arc, 5 mm down, silently.
+        The fillet's reference breaks, or lies on an arc at z = 5 with the normal warning; never
+        on the bottom arc."""
+        doc = self.newDocument()
+        body = models.body(doc)
+        profile = models.sketch(doc, "Profile", models.rectangle(0, 0, 20, 10), body)
+        pad = models.pad(body, profile, 5)
+        doc.recompute()
+        hole = models.sketch(doc, "Hole", [models.circle(10, 0, 2)], body, z=5)
+        pocket = body.newObject("PartDesign::Pocket", "Pocket")
+        pocket.Profile = hole
+        pocket.Type = 1  # through all
+        pocket.Midplane = True
+        doc.recompute()
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (pocket, edge("circle", center=(10, 0, 5), radius=2).one(pocket.Shape))
+        fillet.Radius = 0.3
+        doc.recompute()
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+
+        pad.TaperAngle = 1
+        doc.recompute()
+
+        rows = App.getReferenceReport(fillet)
+        if fillet.isValid():
+            [sub] = fillet.Base[1]
+            z = pocket.Shape.getElement(sub).CenterOfMass.z
+            self.assertLess(abs(z - 5), 1e-6, (sub, rows))
+            self.assertIn("normal", [e.get("warning_level") for e in rows], rows)
+        else:
+            self.assertIn("broken", [e["status"] for e in rows], rows)
+
+    def testExactPlaceFromAnotherSketchBreaks(self):
+        """XP's source condition (ops#503 D1): the rims padded from a new sketch with the same
+        rectangles. The chamfered edge's name misses, and the one edge at its saved place comes
+        from another sketch, policy D's new sketch object: it lost the old edge's sources, so it
+        breaks like a redraw (PLAN decision 155)."""
+        doc = self.newDocument()
+        pad, chamfer = self.chamferedRims(doc)
+
+        geometry = models.rectangle(0, 0, 3600, 45) + models.rectangle(0, 4045, 3600, 4090)
+        pad.Profile = models.sketch(doc, "Redrawn", geometry, pad.getParentGeoFeatureGroup())
+        doc.recompute()
+
+        self.assertBrokenAtThePlace(chamfer)

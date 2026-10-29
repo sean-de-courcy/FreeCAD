@@ -1,0 +1,8 @@
+{
+"entries": {
+"RimBackEdgeRedrawnInward|chamfer|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr379-r1", "issue": "ops#394", "tier": "F"},
+"RimRedrawnInPlace|chamfer|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr379-r1", "issue": "ops#394", "tier": "F"},
+"RimRedrawnOutwardByThickness|chamfer|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr379-r1", "issue": "ops#394", "tier": "F"},
+"ThinBoardRedrawnAndShiftedByItsThickness|chamfer_front_top|V2s": {"axes": ["M1", "E4", "E5", "X4:3600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr379-r1", "issue": "ops#394", "tier": "F"}
+}
+}
