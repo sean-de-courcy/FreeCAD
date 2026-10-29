@@ -28,6 +28,10 @@ beta B1's own build for gen0):
 
     FREECAD_COMPAT_OUT=<folder>/gen<k> FreeCADCmd make_generation.py
 
+A generation has two halves, one saved on each platform the fork ships (PLAN decision 181, ops#538):
+`gen<k>` on Windows and `gen<k>-macos` on macOS, with the same models. The folder's name says which
+platform must save it (`HALVES`), and a folder saved on the other one is refused.
+
 Optionally FREECAD_COMPAT_MODELS="A B" for a partial generation (only those models). For each
 model it builds the documents (`models.py`), checks them (every object valid, the stated
 volumes), records them (`CompatRecord.record`) and saves `<stem>.FCStd` per document and
@@ -51,6 +55,11 @@ from PartDesignTests.Compat import models
 from PartDesignTests.Scenarios import models as m
 
 FORMAT = 1
+# The halves of a generation: the folder's suffix and the platform (`sys.platform`) that saves it.
+# TestCompatCorpus, regen_gen0.sh, check_release_gen0.py and the ops repo's compat_guard.sh read
+# the same names.
+HALVES = {"": "win32", "-macos": "darwin"}
+FOLDER = re.compile(r"gen(\d+)(-macos)?")
 VOLUME_TOLERANCE = 1e-7  # relative: the stated volumes are exact
 
 # Where the saving build's reopened record may differ from its live one, each with the reason:
@@ -238,8 +247,13 @@ def generate(folder, names=None):
     folder = os.path.realpath(folder)
     if os.path.exists(os.path.join(folder, "MANIFEST")):
         raise RuntimeError(f"{folder} already holds a generation")
+    generation = FOLDER.fullmatch(os.path.basename(folder))
+    if generation and HALVES[generation.group(2) or ""] != sys.platform:
+        raise RuntimeError(
+            f"{os.path.basename(folder)} is the half saved on {HALVES[generation.group(2) or '']}, "
+            f"and this build runs on {sys.platform}"
+        )
     os.makedirs(folder, exist_ok=True)
-    generation = re.fullmatch(r"gen(\d+)", os.path.basename(folder))
     manifest = {
         "format": FORMAT,
         "generation": int(generation.group(1)) if generation else None,

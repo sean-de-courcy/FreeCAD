@@ -30,7 +30,16 @@
 name: FreeCAD CI macOS
 
 on:
-  workflow_dispatch: ~
+  workflow_dispatch:
+    inputs:
+      # ops#538: the compat generation whose macOS half the run saves and uploads
+      # (compat-gen<k>-macos). 0: gen0-macos from gen0's models; the beta's gen1 is
+      # `gh workflow run CI_macos.yml --ref <tag> -f compat_generation=1`, every model.
+      compat_generation:
+        description: "Compat generation to save on macOS (0 = gen0's models; k > 0 = every model)"
+        default: "0"
+        required: false
+        type: string
   push:
     branches:
       - integration
@@ -62,6 +71,7 @@ jobs:
     with:
       artifactBasename: Pixi-${{ github.run_id }}
       platforms: '["macos-26"]'
+      compatGeneration: ${{ inputs.compat_generation || '0' }}
 
   WrapUp:
     needs: [

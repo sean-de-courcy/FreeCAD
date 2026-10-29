@@ -86,6 +86,25 @@ class TestCompatRecord(unittest.TestCase):
         moved = self.recordOf(Part.Compound([Part.makeBox(10, 20, 30, V(1, 0, 0)), plane]))
         self.assertTrue(self.differences(rec, moved))
 
+    def testDegenerateEdgeIsKeyedByItsVertex(self):
+        # ops#538: a cone's apex edge has zero length, so no defined centre of mass: OCCT gives
+        # (0, 0, 0) for it here, and gen0-macos/HoleFeature's apex edge read as (10, 10, 10) on
+        # Windows and as its vertex on macOS. It is keyed (and named) at its vertex, the apex at
+        # (3, 4, 15), away from the origin so an undefined centre can't match it by chance.
+        cone = Part.makeCone(5, 0, 10, V(3, 4, 5))
+        apex = [e for e in cone.Edges if e.Length < 1e-7]
+        self.assertEqual(len(apex), 1)
+        for actual, expected in zip(CompatRecord.elementKey(apex[0])["centre"], (3, 4, 15)):
+            self.assertAlmostEqual(actual, expected, places=9)
+        names = self.recordOf(cone)["objects"]["Shape"]["names"]
+        apexLine = "Edge c=(3.0000,4.0000,15.0000) m=0.0000"
+        self.assertTrue(any(line.startswith(apexLine) for line in names), names)
+        # an edge with a length keeps its centre of mass
+        rim = [e for e in cone.Edges if abs(e.Length - 10 * 3.141592653589793) < 1e-9]
+        self.assertEqual(len(rim), 1)
+        for actual, expected in zip(CompatRecord.elementKey(rim[0])["centre"], (3, 4, 5)):
+            self.assertAlmostEqual(actual, expected, places=9)
+
     def testInfinitePlaneIsRecordedWithItsPlane(self):
         # An infinite plane on an object other than a datum (a binder of a datum plane): its
         # position is in no property of its own, so the record keeps the plane

@@ -53,6 +53,12 @@ on:
         default: false
         type: boolean
         required: false
+      # The compat generation the macOS job saves (ops#538): 0 is gen0-macos from gen0's models,
+      # k above 0 gen<k>-macos from every model (CI_macos.yml's dispatch input).
+      compatGeneration:
+        default: "0"
+        type: string
+        required: false
     outputs:
       reportFile:
         value: ${{ jobs.Build.outputs.reportFile }}
@@ -309,6 +315,52 @@ jobs:
           echo "::error title=Naming corpus gate::the run ended without its CORPUS summary line"
           exit 1
         fi
+
+    # The macOS half of the compat corpus (ops#538, PLAN decision 181: files are shared between
+    # Windows and macOS, so each generation has a half saved on each). With no Mac at hand, every
+    # macOS run saves the half from its install and uploads it as compat-gen<k>-macos; regen_gen0.sh
+    # --from installs the download (the ops repo's notes/beta-compatibility.md 3.9). gen0's half
+    # takes gen0/MANIFEST's models and is compared with the committed one, for the log only; a
+    # dispatch with compat_generation=<k> saves gen<k>-macos from every model (the beta's gen1).
+    # Advisory: the gate (TestCompatCorpus) judges the corpus, this only makes the next half.
+    - name: Compat generation (macOS half)
+      id: compatgen
+      if: runner.os == 'macOS' && !cancelled() && steps.build.outcome == 'success'
+      timeout-minutes: 15
+      continue-on-error: true
+      shell: pixi run bash -l {0}
+      env:
+        COMPAT_GENERATION: ${{ inputs.compatGeneration }}
+      run: |
+        set -o pipefail
+        C="${{ env.wsdir }}/src/Mod/PartDesign/PartDesignTests/Compat"
+        out="${{ env.wsdir }}/compat-generation"
+        mkdir -p "$out" "${{ env.wsdir }}/logs"
+        if [[ "$COMPAT_GENERATION" == 0 ]]; then
+          bash "$C/regen_gen0.sh" --checkout "${{ env.wsdir }}" --build "$CONDA_PREFIX" --env "$CONDA_PREFIX" \
+            --out "$out" --timeout 780 2>&1 | tee "${{ env.wsdir }}/logs/compat-generation.log" || rc=$?
+        else
+          [[ "$COMPAT_GENERATION" =~ ^[1-9][0-9]*$ ]] || { echo "::error::compat_generation '$COMPAT_GENERATION' is not a number"; exit 2; }
+          home=$(mktemp -d)
+          FREECAD_USER_HOME="$home" QT_QPA_PLATFORM=offscreen FREECAD_COMPAT_OUT="$out/gen${COMPAT_GENERATION}-macos" \
+            FREECAD_COMPAT_RESULT="$out/result.txt" FreeCADCmd "$C/regen_gen0_drive.py" 2>&1 |
+            tee "${{ env.wsdir }}/logs/compat-generation.log" || rc=$?
+          [[ "$(head -n 1 "$out/result.txt" 2> /dev/null)" == OK ]] || { cat "$out/result.txt" 2> /dev/null; rc=3; }
+        fi
+        if [[ "${rc:-0}" != 0 ]]; then
+          echo "::warning title=Compat generation (macOS half)::gen${COMPAT_GENERATION}-macos was not saved (exit $rc): logs/compat-generation.log"
+          exit 1
+        fi
+
+    - name: Upload the compat generation (macOS half)
+      if: runner.os == 'macOS' && !cancelled() && steps.compatgen.outcome == 'success'
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: compat-gen${{ inputs.compatGeneration }}-macos
+        path: ${{ env.wsdir }}/compat-generation/gen${{ inputs.compatGeneration }}-macos/
+        if-no-files-found: error
+        retention-days: 14
+        overwrite: true
 
     - name: FreeCAD GUI tests on install
       # if: runner.os == 'Linux' && !inputs.skipBuild

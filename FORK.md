@@ -418,7 +418,8 @@ names it.
 | `infra/533-macos-workflow` | infra | ops#533 | - | `integration` `e088a46a99` | `381cbaf445` (fork PR 393), 2026-10-29 | never |
 | `infra/537-old-file-tests` | infra | ops#537 | - | `integration` `e088a46a99` | `56b13d5b20` (fork PR 394), 2026-10-29 | never (fork tests) |
 | `infra/537-solver-on-ci` | infra | ops#537 | - | `integration` `e088a46a99` | `c40c6023dd` (fork PR 395), 2026-10-29 | never (fork tests) |
-| `fix/264-sketch-face-links` | fix | ops#264 | - | `integration` `56b13d5b20` | (fork PR 384) | never (fork fix) |
+| `fix/264-sketch-face-links` | fix | ops#264 | - | `integration` `56b13d5b20` | `72514ac84c` (fork PR 384), 2026-10-29 | never (fork fix) |
+| `infra/538-macos-generation` | infra | ops#538 | - | `integration` `381cbaf445` | (fork PR 396) | never |
 
 ## Fork-only commits in carried topics
 
