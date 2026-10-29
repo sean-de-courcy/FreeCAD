@@ -1611,12 +1611,13 @@ App::DocumentObject* openWithItsElementAbsent(App::Document*& doc,
                                               App::DocumentObject*& box)
 {
     auto* rod = static_cast<Part::Feature*>(doc->addObject("Part::Feature", "Rod"));
-    rod->Shape.setValue(BRepBuilderAPI_MakeEdge(gp_Pnt(0, 0, 5), gp_Pnt(10, 0, 5)).Edge());
+    // named by index, as the ball (setNamedByIndex: ops#502)
+    setNamedByIndex(rod, BRepBuilderAPI_MakeEdge(gp_Pnt(0, 0, 5), gp_Pnt(10, 0, 5)).Edge());
     doc->recompute();
     EXPECT_GE(sketch->addExternal(rod, "Edge1", false, false), 0);
     doc->recompute();
     EXPECT_EQ(sketch->ExternalGeo.getSize(), 3);
-    rod->Shape.setValue(BRepBuilderAPI_MakeVertex(gp_Pnt(0, 0, 5)).Shape());
+    setNamedByIndex(rod, BRepBuilderAPI_MakeVertex(gp_Pnt(0, 0, 5)).Shape());
     sketch->ExternalTypes.setValues({0, 0});
     doc->purgeTouched();
     auto warnings = saveAndReopen(doc, sketch, box);
@@ -1632,8 +1633,8 @@ App::DocumentObject* openWithItsElementAbsent(App::Document*& doc,
 
 void giveTheRodItsEdge(App::DocumentObject* rod)
 {
-    static_cast<Part::Feature*>(rod)->Shape.setValue(
-        BRepBuilderAPI_MakeEdge(gp_Pnt(0, 0, 5), gp_Pnt(10, 0, 5)).Edge());
+    setNamedByIndex(static_cast<Part::Feature*>(rod),
+                    BRepBuilderAPI_MakeEdge(gp_Pnt(0, 0, 5), gp_Pnt(10, 0, 5)).Edge());
 }
 }  // namespace
 
