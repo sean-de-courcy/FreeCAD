@@ -1083,9 +1083,22 @@ bool PropertyLinkBase::_updateElementFingerprints(App::DocumentObject* feature,
                                            subs[i],
                                            i < shadows.size() ? shadows[i] : ShadowSub());
         // A reference that doesn't resolve keeps its last fingerprint, for the next retry.
-        if (!text.empty()) {
-            fingerprints[i] = std::move(text);
+        if (text.empty()) {
+            continue;
         }
+        // The same element in its target's frame keeps the up-to faces it was saved with (ops#522):
+        // a Pad's Placement set before its shape is made again (positionByPrevious()) gives the old
+        // shape the new placement, and a gone piece's point, carried by it, already lies over the
+        // next plate
+        const auto old = Data::ElementFingerprint::fromString(fingerprints[i]);
+        if (!old.upToFaces.empty()) {
+            auto now = Data::ElementFingerprint::fromString(text);
+            now.upToFaces = old.upToFaces;
+            if (now == old) {
+                continue;
+            }
+        }
+        fingerprints[i] = std::move(text);
     }
     return holdsElements;
 }
