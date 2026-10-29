@@ -606,6 +606,30 @@ TEST(ElementFingerprint, upToFacesRoundTrip)
                     "6|E|Line|2|1,8,10|1,0,0|_|_|0,8,10,2,8,10|_|_|_|P,0,0,0,1,1,1,1,0,0,1,0.5,0.5,0"
     )
                     .isValid());
+
+    // ops#524 (PLAN decision 182, N1): a face's foot, where the line along the sweep through the
+    // piece's point meets it, three numbers more; a record without it reads without one
+    ElementFingerprint footed = cap;
+    footed.upToFaces = {plate};
+    footed.upToFaces[0].foot = Base::Vector3d(0.75, 0.75, 10);
+    const std::string footText = footed.toString();
+    EXPECT_EQ(footText,
+              "6|F|BSpline|1.75|1.18,1.18,10|_|_|_|0.5,0.5,10,2.5,2.5,10|_|_|0.75,0.75,10|"
+              "Plate001,-10,-10,10,4,10,10,191,0,0,1,-3,0,10,0.75,0.75,10");
+    EXPECT_EQ(ElementFingerprint::fromString(footText), footed);
+    ElementFingerprint unfooted = footed;
+    unfooted.upToFaces[0].foot.reset();
+    EXPECT_NE(unfooted, footed);
+    EXPECT_FALSE(
+        ElementFingerprint::fromString(unfooted.toString()).upToFaces.front().foot.has_value()
+    );
+    //   fifteen or seventeen numbers don't
+    for (const std::string& bad : {
+             head + "Plate001,-10,-10,10,4,10,10,191,0,0,1,-3,0,10,0.75,0.75",
+             head + "Plate001,-10,-10,10,4,10,10,191,0,0,1,-3,0,10,0.75,0.75,10,1",
+         }) {
+        EXPECT_FALSE(ElementFingerprint::fromString(bad).isValid()) << bad;
+    }
 }
 
 TEST(ElementFingerprint, convexOutline)
