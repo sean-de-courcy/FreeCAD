@@ -6344,6 +6344,9 @@ TEST(SolveOwner, otherCopysOrderedPieceIsNoRenumbering)
     input.diagonal = 30;
     auto entry = missing(oldPiece, "Edge");
     entry.fingerprint = farEdgeAt(3, 5, 1);
+    // D1's twin record as the batch writes it: a lone order-keyed piece (no other copy's piece
+    // is its twin, isTwinName()), so the renumbered one isn't read as a trade (I-S9)
+    entry.fingerprint.twinCount = 1;
     input.entries = {entry};
     for (int link : {11, 12}) {
         const auto copyPiece
