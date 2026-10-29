@@ -6896,6 +6896,56 @@ TEST(Moved, lonePieceThatSlidWithinItsUpToFaceKeepsItsName)
     breaks("no path hook");
 }
 
+TEST(Moved, lonePieceThatMovedAloneOffItsPlaceOnItsFaceBreaks)
+{
+    // ops#524: the attack set's ALonePiece L, silent on integration. The profile moved by its
+    // sketch's Placement across a hole: the plate's piece right of the hole has L's name, and in
+    // the Pad's own frame (moved with the sketch) it overlaps L's old place, x -3..-1 against
+    // -2.5..0, so the piece "moved alone" and the name stood. Seen on the plate, the path from
+    // L's saved foot to the piece crosses the hole: broken. The same with the path on the face
+    // stands; so does a piece whose up-to faces can't be told now
+    const auto plate = plateElement("plate", 'F');
+    SolveInput input;
+    input.diagonal = 40;
+    input.pool["Face"] = {element("Face4", {farPiece({plate})}), element("Face9", {sketchEdge(9)})};
+    measure(input, {{"Face4", capBox(-2.5, 0, -0.5, 0.5)}, {"Face9", capAt(20, 3)}}, nullptr);
+    const auto plateFace = upToPlate(-10, 20, "Plate");
+    auto entry = exact("Face4");
+    entry.exactName = farPiece({plate});
+    entry.fingerprint = capBox(-3, -1, -0.5, 0.5);
+    entry.fingerprint.upToFaces = {plateFace};
+    entry.fingerprint.upToFaces[0].foot = Base::Vector3d(-2, 0, 10);
+    input.entries = {entry};
+    bool told = true;
+    input.upToFacesAt = [&](const std::string&,
+                            const Base::Vector3d&,
+                            std::vector<ElementFingerprint::UpToFace>& faces,
+                            std::vector<ElementFingerprint::UpToFace>& all) {
+        faces = {plateFace};
+        all = {plateFace};
+        return told;
+    };
+    bool inside = false;
+    input.upToPathInside = [&](const std::string&,
+                               const ElementFingerprint::UpToFace&,
+                               const Base::Vector3d&) {
+        return inside;
+    };
+    EXPECT_EQ(
+        describe(Data::solveOwner(input)[0]),
+        "broken  -1 [Face4 ] moved 0.750 mm off its place on its up-to face, and nothing sits there"
+    );
+    inside = true;
+    EXPECT_EQ(describe(Data::solveOwner(input)[0]), "exact Face4 0 [] ");
+    inside = false;
+    told = false;
+    EXPECT_EQ(describe(Data::solveOwner(input)[0]), "exact Face4 0 [] ");
+    //   a record without the foot, as before
+    told = true;
+    input.entries[0].fingerprint.upToFaces[0].foot.reset();
+    EXPECT_EQ(describe(Data::solveOwner(input)[0]), "exact Face4 0 [] ");
+}
+
 TEST(SolveOwner, edgePieceAfterFewerPiecesThatSlidWithinItsFaceResolves)
 {
     // ops#524 (PLAN decision 182, N2): sweep_later_feature's SweepFoldMove E0_p2. A square's
