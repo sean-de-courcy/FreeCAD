@@ -1,0 +1,14 @@
+{
+"entries": {
+"ReviewBaseFeatureCornerCutMovedByWidth|circle_on_line|V2s": {"axes": ["M8", "E1", "E5"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r4", "issue": "ops#264", "tier": "F"},
+"ReviewBaseFeatureCornerCut|circle_on_line|V2s": {"axes": ["M8", "E1"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r4", "issue": "ops#264", "tier": "F"},
+"ReviewBaseFeatureMovedByWidth|circle_on_line|V2s": {"axes": ["M8", "E5"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r4", "issue": "ops#264", "tier": "F"},
+"ReviewHoleLoopMovedByWidthCornerCut|circle_on_line|V2s": {"axes": ["M8", "E1", "E5"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r4", "issue": "ops#264", "tier": "F"},
+"ReviewHoleLoopMovedByWidth|circle_on_line|V2s": {"axes": ["M8", "E5"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r4", "issue": "ops#264", "tier": "F"},
+"ReviewRoundedSquareMovedByWidth|circle_on_line|V2s": {"axes": ["M8", "E5"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r4", "issue": "ops#264", "tier": "F"},
+"ReviewThinChannelMovedByWall|circle_on_line|V2s": {"axes": ["M8", "E5"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r4", "issue": "ops#264", "tier": "F"},
+"ReviewUnmappedFaceCornerCutMovedByWidth|circle_on_line|V2s": {"axes": ["M8", "E1", "E5"], "classes": ["E"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr384-r4", "issue": "ops#264", "tier": "F"},
+"ReviewUnmappedFaceCornerCut|circle_on_line|V2s": {"axes": ["M8", "E1"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r4", "issue": "ops#264", "tier": "F"},
+"ReviewUnmappedFaceMovedByWidth|circle_on_line|V2s": {"axes": ["M8", "E5"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r4", "issue": "ops#264", "tier": "F"}
+}
+}

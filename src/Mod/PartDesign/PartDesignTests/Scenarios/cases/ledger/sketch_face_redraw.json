@@ -1,6 +1,6 @@
 {
 "entries": {
-"ExternalFaceRedrawCentred|circle_on_x0|V2s": {"axes": ["M8", "E5"], "classes": ["E"], "expect": "OWN-OR-BROKEN", "expected": "guessed", "found_by": "port", "issue": "ops#504", "tier": "F"},
-"ExternalFaceRedrawCentred|circle_on_y0|V2s": {"axes": ["M8", "E5"], "classes": ["E"], "expect": "OWN-OR-BROKEN", "expected": "guessed-wrong", "found_by": "port", "issue": "ops#504", "tier": "F"}
+"ExternalFaceRedrawCentred|circle_on_x0|V2s": {"axes": ["M8", "E5"], "classes": ["E"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "port", "issue": "ops#504", "tier": "F"},
+"ExternalFaceRedrawCentred|circle_on_y0|V2s": {"axes": ["M8", "E5"], "classes": ["E"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "port", "issue": "ops#504", "tier": "F"}
 }
 }

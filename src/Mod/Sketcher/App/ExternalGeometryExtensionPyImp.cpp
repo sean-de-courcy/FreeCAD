@@ -152,6 +152,16 @@ void ExternalGeometryExtensionPy::setRef(Py::String value)
     this->getExternalGeometryExtensionPtr()->setRef(value.as_std_string());
 }
 
+Py::String ExternalGeometryExtensionPy::getSource() const
+{
+    return Py::String(this->getExternalGeometryExtensionPtr()->getSource());
+}
+
+void ExternalGeometryExtensionPy::setSource(Py::String value)
+{
+    this->getExternalGeometryExtensionPtr()->setSource(value.as_std_string());
+}
+
 
 PyObject* ExternalGeometryExtensionPy::getCustomAttributes(const char* /*attr*/) const
 {

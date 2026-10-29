@@ -33,3 +33,5 @@ class ExternalGeometryExtension(GeometryExtension):
         ...
     Ref: str = ""
     """Returns the reference string of this external geometry."""
+    Source: str = ""
+    """The mapped name of the source edge a face link's geometry was projected from, or empty."""

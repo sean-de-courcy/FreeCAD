@@ -1,0 +1,26 @@
+{
+"entries": {
+"ExternalFaceCornerCutBackRightMovedByAttachmentOffset|circle_on_line|V2s": {"axes": ["M8", "E1", "E5", "E7"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "design pr384-r4", "issue": "ops#264", "tier": "F"},
+"ExternalFaceCornerCutBackRightMovedByPlacement|circle_on_line|V2s": {"axes": ["M8", "E1", "E5", "E7"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "design pr384-r4", "issue": "ops#264", "tier": "F"},
+"ExternalFaceCornerCutBackRightMovedBySupport|circle_on_line|V2s": {"axes": ["M8", "E1", "E5", "E7"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "design pr384-r4", "issue": "ops#264", "tier": "F"},
+"ExternalFaceCornerCutMovedByAttachmentOffset|circle_on_line|V2s": {"axes": ["M8", "E1", "E5", "E7"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "design pr384-r4", "issue": "ops#264", "tier": "F"},
+"ExternalFaceCornerCutMovedByPlacement|circle_on_line|V2s": {"axes": ["M8", "E1", "E5", "E7"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "design pr384-r4", "issue": "ops#264", "tier": "F"},
+"ExternalFaceCornerCutMovedBySupport|circle_on_line|V2s": {"axes": ["M8", "E1", "E5", "E7"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "design pr384-r4", "issue": "ops#264", "tier": "F"},
+"ExternalFaceDiagonalMoveNoSource|circle_on_line|V2s": {"axes": ["M8", "E5", "E9"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "design pr384-r4", "issue": "ops#264", "tier": "F"},
+"ExternalFaceFirstLineRedrawnInPlaceNoSource|circle_on_line|V2s": {"axes": ["M8", "E2", "E5", "E9"], "classes": ["E"], "expect": "CORRECT", "expected": "broken", "found_by": "design pr384-r4", "issue": "ops#264", "tier": "F"},
+"ExternalFaceFirstLineRedrawnInPlace|circle_on_line|V2s": {"axes": ["M8", "E2", "E5"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "design pr384-r4", "issue": "ops#264", "tier": "F"},
+"ExternalFaceHoleRowMovedByPitchCornerCutNoSource|point_on_right_hole|V2s": {"accepted": "decision 58 (the class E ruling 2026-10-27, R7: geometry saved before E1, its first rebuild, a hole slid onto its neighbour's place with a count change)", "axes": ["M8", "E1", "E5", "E9"], "classes": ["E"], "expect": "CORRECT", "expected": "wrong", "found_by": "design pr384-r4", "issue": "ops#264", "tier": "F"},
+"ExternalFaceHoleRowMovedByPitchCornerCut|point_on_right_hole|V2s": {"axes": ["M8", "E1", "E5"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "design pr384-r4", "issue": "ops#264", "tier": "F"},
+"ExternalFaceMirroredKeepsTheSide|circle_on_line|V2s": {"axes": ["M8", "E3", "E5"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "design pr384-r4", "issue": "ops#264", "tier": "F"},
+"ExternalFaceMovedByWidthNoSource|circle_on_line|V2s": {"axes": ["M8", "E5", "E9"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "design pr384-r4", "issue": "ops#264", "tier": "F"},
+"ExternalFaceProfileReversed|circle_on_line|V2s": {"axes": ["M8", "E3"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "attack set (ops#519) reversed", "issue": "ops#264", "tier": "F"},
+"ExternalFaceRedrawSidesNeighboursReversedMovedOut|circle_on_line|V2s": {"axes": ["M8", "E2", "E3", "E5"], "classes": ["E"], "expect": "CORRECT", "expected": "broken", "found_by": "design pr384-r4", "issue": "ops#264", "tier": "F"},
+"ExternalFaceRightSideSlanted|circle_on_line|V2s": {"axes": ["M8", "E5"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "design pr384-r4", "issue": "ops#264", "tier": "F"},
+"ExternalFaceStepTurnedMovedByAttachmentOffset|circle_on_line|V2s": {"axes": ["M8", "E3", "E5", "E7"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "design pr384-r4", "issue": "ops#264", "tier": "F"},
+"ExternalFaceStepTurnedMovedByPlacement|circle_on_line|V2s": {"axes": ["M8", "E3", "E5", "E7"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "design pr384-r4", "issue": "ops#264", "tier": "F"},
+"ExternalFaceStepTurnedMovedBySupport|circle_on_line|V2s": {"axes": ["M8", "E3", "E5", "E7"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "design pr384-r4", "issue": "ops#264", "tier": "F"},
+"ExternalFaceStepTurnedMovedByWidthWall|circle_on_line|V2s": {"axes": ["M8", "E3", "E5"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "design pr384-r4", "issue": "ops#264", "tier": "F"},
+"ExternalFaceVerticalFlipSidesRedrawn|circle_on_line|V2s": {"axes": ["M8", "E2", "E3", "E5"], "classes": ["E"], "expect": "CORRECT", "expected": "broken", "found_by": "design pr384-r4", "issue": "ops#264", "tier": "F"},
+"ExternalFaceZMirrored|circle_on_line|V2s": {"axes": ["M8", "E3", "E5"], "classes": ["E"], "expect": "CORRECT", "expected": "broken", "found_by": "design pr384-r4", "issue": "ops#264", "tier": "F"}
+}
+}

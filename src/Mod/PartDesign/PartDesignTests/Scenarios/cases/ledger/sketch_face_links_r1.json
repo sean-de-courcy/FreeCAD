@@ -1,0 +1,8 @@
+{
+"entries": {
+"ExternalFaceRedrawSidesInPlaceFrontReversed|circle_on_x0|V2s": {"axes": ["M8", "E2", "E1"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r1", "issue": "ops#264", "tier": "F"},
+"ExternalFaceRedrawSidesInPlaceNeighboursReversed|circle_on_x20|V2s": {"axes": ["M8", "E2", "E1"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r1", "issue": "ops#264", "tier": "F"},
+"ExternalFaceRedrawSidesNeighboursReversedLeft|circle_on_x0|V2s": {"axes": ["M8", "E2"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r1", "issue": "ops#264", "tier": "F"},
+"ExternalFaceRedrawSidesNeighboursReversed|circle_on_x20|V2s": {"axes": ["M8", "E2"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r1", "issue": "ops#264", "tier": "F"}
+}
+}

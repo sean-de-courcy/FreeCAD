@@ -406,8 +406,28 @@ App::DocumentObjectExecReturn* SketchObject::execute()
         const bool anyResolves = std::any_of(subs.begin(), subs.end(), [](const std::string& sub) {
             return !Data::hasMissingElement(sub.c_str());
         });
-        if (!(isWarning() && anyResolves && ExternalGeometry.isPartialAllowed()
-              && ExternalGeometry.inSolverDocument())) {
+        // FreeCAD-CH (ops#264 e2): but a geometry its link no longer gives, constraints on it, is
+        // lost whatever the other links do: flagged missing while its link still gives other
+        // geometry (a link whose build failed has all of its geometry missing)
+        const auto& geos = ExternalGeo.getValues();
+        auto missing = [](const Part::Geometry* geo) {
+            return ExternalGeometryFacade::getFacade(geo)->testFlag(
+                ExternalGeometryExtension::Missing);
+        };
+        const bool lost = std::any_of(geos.begin(), geos.end(), [&](const Part::Geometry* geo) {
+            if (!missing(geo)) {
+                return false;
+            }
+            const std::string& ref = ExternalGeometryFacade::getFacade(geo)->getRef();
+            return !ref.empty()
+                && std::any_of(geos.begin(), geos.end(), [&](const Part::Geometry* other) {
+                       return !missing(other)
+                           && ExternalGeometryFacade::getFacade(other)->getRef() == ref;
+                   });
+        });
+        if (lost
+            || !(isWarning() && anyResolves && ExternalGeometry.isPartialAllowed()
+                 && ExternalGeometry.inSolverDocument())) {
             return new App::DocumentObjectExecReturn(externalError, this);
         }
         FC_LOG(getFullName() << ": " << externalError);
@@ -1332,6 +1352,7 @@ void SketchObject::onExternalGeoChanged()
             if (!egf->getRef().empty()) {
                 detached.insert(egf->getRef());
                 egf->setRef(std::string());
+                egf->setSource(std::string());  // (ops#264 e2)
             }
             egf->setFlag(ExternalGeometryExtension::Detached,false);
             egf->setFlag(ExternalGeometryExtension::Missing,false);
@@ -1386,6 +1407,7 @@ void SketchObject::onExternalGeoChanged()
             if (it!=externalGeoMap.end()) {
                 auto geo = ExternalGeo[it->second];
                 ExternalGeometryFacade::getFacade(geo)->setRef(std::string());
+                ExternalGeometryFacade::getFacade(geo)->setSource(std::string());
             }
         }
         refs.clear();

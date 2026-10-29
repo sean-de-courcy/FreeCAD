@@ -43,6 +43,7 @@ void ExternalGeometryExtension::copyAttributes(Part::GeometryExtension* cpy) con
     static_cast<ExternalGeometryExtension*>(cpy)->Ref = this->Ref;
     static_cast<ExternalGeometryExtension*>(cpy)->RefIndex = this->RefIndex;
     static_cast<ExternalGeometryExtension*>(cpy)->Flags = this->Flags;
+    static_cast<ExternalGeometryExtension*>(cpy)->Source = this->Source;
 }
 
 void ExternalGeometryExtension::restoreAttributes(Base::XMLReader& reader)
@@ -52,6 +53,7 @@ void ExternalGeometryExtension::restoreAttributes(Base::XMLReader& reader)
     Ref = reader.getAttribute<const char*>("Ref", "");
     RefIndex = reader.getAttribute<long>("RefIndex", -1);
     Flags = FlagType(reader.getAttribute<unsigned long>("Flags", 0));
+    Source = reader.getAttribute<const char*>("Source", "");
 }
 
 void ExternalGeometryExtension::saveAttributes(Base::Writer& writer) const
@@ -61,6 +63,10 @@ void ExternalGeometryExtension::saveAttributes(Base::Writer& writer) const
     writer.Stream() << "\" Flags=\"" << Flags.to_ulong();
     if (RefIndex >= 0) {
         writer.Stream() << "\" RefIndex=\"" << RefIndex;
+    }
+    // FreeCAD-CH (ops#264 e2): only where there is one; a build before ignores it
+    if (!Source.empty()) {
+        writer.Stream() << "\" Source=\"" << Base::Persistence::encodeAttribute(Source);
     }
 }
 

@@ -1,0 +1,17 @@
+{
+"entries": {
+"ReviewEllipseFaceMovedCut|circles_on_geometry|V2s": {"axes": ["M8", "E5", "E2"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r5s", "issue": "ops#264", "tier": "F"},
+"ReviewEllipseFaceMovedNoCut|circles_on_geometry|V2s": {"axes": ["M8", "E5", "E2"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r5s", "issue": "ops#264", "tier": "F"},
+"ReviewEllipseHoleFaceMovedCut|circles_on_geometry|V2s": {"axes": ["M8", "E5", "E2"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r5s", "issue": "ops#264", "tier": "F"},
+"ReviewEllipseHoleFaceMovedNoCut|circles_on_geometry|V2s": {"axes": ["M8", "E5", "E2"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r5s", "issue": "ops#264", "tier": "F"},
+"ReviewParabolaFaceMovedCut|circles_on_geometry|V2s": {"axes": ["M8", "E5", "E2"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r5s", "issue": "ops#264", "tier": "F"},
+"ReviewParabolaFaceMovedNoCut|circles_on_geometry|V2s": {"axes": ["M8", "E5", "E2"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r5s", "issue": "ops#264", "tier": "F"},
+"ReviewParabolaHoleFaceMovedCut|circles_on_geometry|V2s": {"axes": ["M8", "E5", "E2"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r5s", "issue": "ops#264", "tier": "F"},
+"ReviewRationalFaceMovedCut|circles_on_geometry|V2s": {"axes": ["M8", "E5", "E2"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r5s", "issue": "ops#264", "tier": "F"},
+"ReviewRationalHoleFaceMovedCut|circles_on_geometry|V2s": {"axes": ["M8", "E5", "E2"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r5s", "issue": "ops#264", "tier": "F"},
+"ReviewRationalHoleFaceMovedNoCut|circles_on_geometry|V2s": {"axes": ["M8", "E5", "E2"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r5s", "issue": "ops#264", "tier": "F"},
+"ReviewSplineFaceMovedCut|circles_on_geometry|V2s": {"axes": ["M8", "E5", "E2"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r5s", "issue": "ops#264", "tier": "F"},
+"ReviewSplineFaceMovedNoCut|circles_on_geometry|V2s": {"axes": ["M8", "E5", "E2"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r5s", "issue": "ops#264", "tier": "F"},
+"ReviewSplineHoleFaceMovedCut|circles_on_geometry|V2s": {"axes": ["M8", "E5", "E2"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r5s", "issue": "ops#264", "tier": "F"}
+}
+}

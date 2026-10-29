@@ -37,6 +37,9 @@ from SketcherTests.TestSketchMissingExternal import (
     TestSketchMissingExternalSolver,
     TestSketchMissingExternalReturns,
     TestSketchMissingExternalReturnsSolver,
+    TestSketchFaceLinkPairing,
+    TestSketchFaceLinkPairingNoSolver,
+    TestSketchFaceLinkPairing4m,
 )
 from SketcherTests.TestSketchExternalTypes import TestSketchExternalTypes
 from SketcherTests.TestSketchCarbonCopyElements import TestSketchCarbonCopyElements

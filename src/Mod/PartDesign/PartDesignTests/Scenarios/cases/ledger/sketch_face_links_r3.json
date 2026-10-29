@@ -1,0 +1,10 @@
+{
+"entries": {
+"ExternalFaceCornerCutMovedByWidthBackRight|circle_on_right|V2s": {"axes": ["M8", "E5"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r3", "issue": "ops#264", "tier": "F"},
+"ExternalFaceCornerCutMovedByWidth|circle_on_right|V2s": {"axes": ["M8", "E5"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r3", "issue": "ops#264", "tier": "F"},
+"ExternalFaceCornerCutWidened|circle_on_right|V2s": {"axes": ["M8", "E5"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r3", "issue": "ops#264", "tier": "F"},
+"ExternalFaceStepTurnedMovedByWidth|circle_on_right|V2s": {"axes": ["M8", "E5"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r3", "issue": "ops#264", "tier": "F"},
+"ExternalFaceStepTurnedWall|circle_on_wall|V2s": {"axes": ["M8", "E5"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r3", "issue": "ops#264", "tier": "F"},
+"ExternalFaceStepTurned|circle_on_step|V2s": {"axes": ["M8", "E5"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r3", "issue": "ops#264", "tier": "F"}
+}
+}

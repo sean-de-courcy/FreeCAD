@@ -1,0 +1,6 @@
+{
+"entries": {
+"ExternalFaceCornerCut4mThenNotch|circle_on_bottom_x0|V2s": {"axes": ["M8", "E1", "X4:4000"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r1", "issue": "ops#264", "tier": "F"},
+"ExternalTwoFaceLinksCornerCut|circle_on_bottom_x0|V2s": {"axes": ["M8", "E1"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r1", "issue": "ops#264", "tier": "F"}
+}
+}

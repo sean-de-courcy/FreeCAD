@@ -1,0 +1,8 @@
+{
+"entries": {
+"ExternalFaceMovedByWidthLeft|circle_on_left|V2s": {"axes": ["M8", "E5"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r2", "issue": "ops#264", "tier": "F"},
+"ExternalFaceMovedByWidth|circle_on_right|V2s": {"axes": ["M8", "E5"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r2", "issue": "ops#264", "tier": "F"},
+"ExternalFaceMovedPartWidth|circle_on_right|V2s": {"axes": ["M8", "E5"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r2", "issue": "ops#264", "tier": "F"},
+"ExternalFaceSlotMovedByWidth|circle_on_slot_right_wall|V2s": {"axes": ["M8", "E5"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r2", "issue": "ops#264", "tier": "F"}
+}
+}

@@ -1,0 +1,18 @@
+{
+"entries": {
+"ExternalFaceConstructionFlag|flag_on_x0|V2s": {"axes": ["M8", "E1"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "attacker E", "issue": "ops#264", "tier": "F"},
+"ExternalFaceCornerCutReopened|circle_on_x0|V2s": {"axes": ["M8", "E1", "E9"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "attacker E", "issue": "ops#264", "tier": "F"},
+"ExternalFaceCornerCut|circle_on_x0|V2s": {"axes": ["M8", "E1"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "attacker E", "issue": "ops#264", "tier": "G"},
+"ExternalFaceDimension4m|circle_on_x0|V2s": {"axes": ["M8", "E5", "X4:4000"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "attacker E", "issue": "ops#264", "tier": "F"},
+"ExternalFaceDimensionMovedEdge|circle_on_x20|V2s": {"axes": ["M8", "E5"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "attacker E", "issue": "ops#264", "tier": "F"},
+"ExternalFaceDimension|circle_on_x0|V2s": {"axes": ["M8", "E5"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "attacker E", "issue": "ops#264", "tier": "F"},
+"ExternalFaceEdgeRemoved|constrained_edge|V2s": {"axes": ["M8", "E5"], "classes": ["E"], "expect": "CORRECT", "expected": "broken", "found_by": "attacker E", "issue": "ops#264", "tier": "F"},
+"ExternalFaceHoleRowMovedByPitchNoSource|point_on_right_hole|V2s": {"axes": ["M8", "E5", "E9"], "classes": ["E"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr384 cloud", "issue": "ops#264", "tier": "F"},
+"ExternalFaceHoleRowMovedByPitch|point_on_right_hole|V2s": {"axes": ["M8", "E5"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384 cloud", "issue": "ops#264", "tier": "F"},
+"ExternalFaceNotchMovedByWidth|circle_on_notch_wall|V2s": {"axes": ["M8", "E5"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384 cloud", "issue": "ops#264", "tier": "F"},
+"ExternalFaceNotch|circle_on_x0|V2s": {"axes": ["M8", "E1"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "attacker E", "issue": "ops#264", "tier": "F"},
+"ExternalFaceRedrawResize|circle_on_x0|V2s": {"axes": ["M8", "E5"], "classes": ["E"], "expect": "CORRECT", "expected": "broken", "found_by": "attacker E", "issue": "ops#264", "tier": "F"},
+"ExternalFaceRedrawSame|circle_on_x0|V2s": {"axes": ["M8", "E5", "E2"], "classes": ["E"], "expect": "CORRECT", "expected": "quiet", "found_by": "attacker E", "issue": "ops#264", "tier": "F"},
+"ExternalFaceRedrawSidesNeighboursReversedFront|circle_on_y0|V2s": {"axes": ["M8", "E2"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r1", "issue": "ops#264", "tier": "F"}
+}
+}

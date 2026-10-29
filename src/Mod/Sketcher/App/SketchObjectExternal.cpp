@@ -80,6 +80,7 @@
 #include <App/Datums.h>
 #include <App/Part.h>
 #include <App/RecomputeThread.h>
+#include <App/ReferenceReport.h>
 #include <Base/Console.h>
 #include <Base/Tools.h>
 #include <Base/Vector3D.h>
@@ -1909,6 +1910,8 @@ int SketchObject::attachExternal(
         auto &geo = geos[-geoId-1];
         geo = geo->clone();
         ExternalGeometryFacade::getFacade(geo)->setRef(ref);
+        // drawn, not projected: no source edge (ops#264 e2)
+        ExternalGeometryFacade::getFacade(geo)->setSource(std::string());
     }
 
     ExternalGeo.setValues(std::move(geos));
@@ -3063,7 +3066,8 @@ void processFace (const Rotation& invRot,
                   gp_Ax3& sketchAx3,
                   TopoDS_Shape& aProjFace,
                   std::vector<std::unique_ptr<Part::Geometry>>& geos,
-                  TopoDS_Shape& refSubShape)
+                  TopoDS_Shape& refSubShape,
+                  const std::vector<std::string>& edgeSources)
 {
     const TopoDS_Face& face = TopoDS::Face(refSubShape);
     BRepAdaptor_Surface surface(face);
@@ -3075,10 +3079,19 @@ void processFace (const Rotation& invRot,
 
         // Extract all edges from the face
         TopExp_Explorer edgeExp;
-        for (edgeExp.Init(face, TopAbs_EDGE); edgeExp.More(); edgeExp.Next()) {
+        std::size_t n = 0;
+        for (edgeExp.Init(face, TopAbs_EDGE); edgeExp.More(); edgeExp.Next(), ++n) {
             TopoDS_Edge edge = TopoDS::Edge(edgeExp.Current());
             // Process each edge
+            const std::size_t first = geos.size();
             processEdge(edge, geos, gPlane, invPlm, mov, sketchPlane, invRot, sketchAx3, aProjFace);
+            // FreeCAD-CH (ops#264 e2): each geometry records the edge it came from (the
+            // explorer's order on the unmoved face, which the names were read in)
+            if (n < edgeSources.size()) {
+                for (std::size_t k = first; k < geos.size(); ++k) {
+                    ExternalGeometryFacade::getFacade(geos[k].get())->setSource(edgeSources[n]);
+                }
+            }
         }
 
         if (fabs(dnormal.Angle(snormal) - std::numbers::pi/2) < Precision::Confusion()) {
@@ -3158,13 +3171,22 @@ void processFace (const Rotation& invRot,
     }
 }
 
-// the error of a sketch whose external geometry lost its element (ops#72); defined below
+// the error of a sketch whose external geometry lost its element (ops#72), or whose link no
+// longer gives a geometry with constraints on it (ops#264 e2); defined below
 std::string missingReferenceMessage(
     const App::Document* doc,
     const std::vector<std::pair<std::string, std::vector<std::size_t>>>& missingRefs,
+    const std::vector<std::pair<std::string, std::vector<std::size_t>>>& lostRefs,
     const std::vector<App::DocumentObject*>& objects,
     const std::vector<std::string>& subElements,
     const std::vector<std::string>& keys);
+std::string referenceText(const App::Document* doc,
+                          const std::string& ref,
+                          const std::vector<std::size_t>& indexes,
+                          const std::vector<App::DocumentObject*>& objects,
+                          const std::vector<std::string>& subElements,
+                          const std::vector<std::string>& keys,
+                          bool lost = false);
 
 }  // anonymous namespace
 
@@ -3278,6 +3300,1169 @@ std::string typeList(const std::vector<long>& types)
         text += std::to_string(types[k]);
     }
     return text;
+}
+
+// How far apart two geometries of the same type lie, for pairing a link's geometries (ops#264
+// e2): lines by their supporting lines (each end of one from the other's line), only where they
+// overlap (a chamfer shortens its neighbours, so their ends move); arcs of circles by centre and
+// radius, only where they overlap; anything else as distanceFromSaved() compares it
+double placeDistance(const Part::Geometry* a, const Part::Geometry* b, double tolerance)
+{
+    constexpr double apart = std::numeric_limits<double>::infinity();
+    if (auto* line = freecad_cast<const Part::GeomLineSegment*>(a)) {
+        auto* other = static_cast<const Part::GeomLineSegment*>(b);
+        const auto a0 = line->getStartPoint();
+        const auto b0 = other->getStartPoint();
+        const auto b1 = other->getEndPoint();
+        const auto along = line->getEndPoint() - a0;
+        const auto otherAlong = b1 - b0;
+        if (along.Length() < tolerance || otherAlong.Length() < tolerance) {
+            return apart;
+        }
+        const double distance = std::max({b0.DistanceToLine(a0, along),
+                                          b1.DistanceToLine(a0, along),
+                                          a0.DistanceToLine(b0, otherAlong),
+                                          line->getEndPoint().DistanceToLine(b0, otherAlong)});
+        auto unit = along;
+        unit.Normalize();
+        const double s0 = (b0 - a0) * unit;
+        const double s1 = (b1 - a0) * unit;
+        const double overlap =
+            std::min(along.Length(), std::max(s0, s1)) - std::max(0.0, std::min(s0, s1));
+        return overlap > tolerance ? distance : apart;
+    }
+    if (auto* arc = freecad_cast<const Part::GeomArcOfCircle*>(a)) {
+        auto* other = static_cast<const Part::GeomArcOfCircle*>(b);
+        const double distance = Base::Distance(arc->getCenter(), other->getCenter())
+            + std::abs(arc->getRadius() - other->getRadius());
+        // beyond the tolerance it is apart whatever the overlap, which projects: too slow for every
+        // pair of a large link
+        if (distance > tolerance) {
+            return distance;
+        }
+        // the middle of one on the other
+        auto onOther = [tolerance](const Part::GeomArcOfCircle* from,
+                                   const Part::GeomArcOfCircle* to) {
+            const auto middle =
+                from->pointAtParameter((from->getFirstParameter() + from->getLastParameter()) / 2);
+            double u = 0.0;
+            return to->closestParameter(middle, u)
+                && Base::Distance(middle, to->pointAtParameter(u)) <= tolerance;
+        };
+        return onOther(arc, other) || onOther(other, arc) ? distance : apart;
+    }
+    // other open curves (B-splines and arcs of conics, many of them from a face projected through
+    // hidden lines) only with the same ends, either way round: distanceFromSaved() samples both
+    // curves, too slow to try every pair of a large link
+    if (auto* curve = freecad_cast<const Part::GeomBoundedCurve*>(a)) {
+        auto* other = static_cast<const Part::GeomBoundedCurve*>(b);
+        const auto a0 = curve->getStartPoint();
+        const auto a1 = curve->getEndPoint();
+        const auto b0 = other->getStartPoint();
+        const auto b1 = other->getEndPoint();
+        const bool same =
+            Base::Distance(a0, b0) <= tolerance && Base::Distance(a1, b1) <= tolerance;
+        const bool reversed =
+            Base::Distance(a0, b1) <= tolerance && Base::Distance(a1, b0) <= tolerance;
+        if (!same && !reversed) {
+            return apart;
+        }
+    }
+    return distanceFromSaved(a, b);
+}
+
+// FreeCAD-CH (ops#264 e2, class E's E1): a link's geometries of one kind chained by their ends,
+// as the face's wires give them: closed loops (with the face on their left: the outer one
+// counter-clockwise, holes clockwise), open chains, and singles (a geometry with no ends: a
+// circle, an ellipse, a point)
+struct GeometryLoop
+{
+    enum class Kind
+    {
+        Single,
+        Chain,
+        Closed,
+        // closed, without an area to orient it by: its order is no evidence
+        Unoriented
+    };
+    Kind kind;
+    std::vector<std::size_t> members;  // in the loop's order
+    // a closed loop's area (twice it), and whether that is exact (lines, arcs of conics and
+    // polynomial B-splines)
+    double area = 0.0;
+    bool exact = true;
+};
+
+struct GeometryLoops
+{
+    std::vector<GeometryLoop> loops;
+    std::vector<int> loopOf;            // per geometry, the loop it is on (-1: none)
+    std::vector<std::size_t> position;  // per geometry, its index in that loop's members
+    // per geometry on a closed loop, the unit normal at its middle toward the face (the left of
+    // the loop's run); null elsewhere
+    std::vector<Base::Vector3d> inside;
+    // per geometry, whether the face's side of it is unknown: closed loops of a link with more
+    // than one, one of them with an area that isn't exact (which loop is the outer one is a guess)
+    std::vector<bool> sideUnknown;
+};
+
+// x dy - y dx along a curve from its first parameter to its last (twice the area it sweeps about
+// the origin): exact for a line, an arc of a circle or an ellipse (centre + A cos t + B sin t,
+// so c x (P(t1) - P(t0)) + (A x B)(t1 - t0)), of a hyperbola (centre + A cosh t + B sinh t: the
+// same, as cosh^2 - sinh^2 = 1), of a parabola and a polynomial B-spline (Gauss-Legendre), else
+// summed over a polygon of samples and `exact` cleared
+double sweptArea(const Part::GeomBoundedCurve* curve, bool& exact)
+{
+    auto cross = [](const Base::Vector3d& a, const Base::Vector3d& b) {
+        return a.x * b.y - a.y * b.x;
+    };
+    const double t0 = curve->getFirstParameter();
+    const double t1 = curve->getLastParameter();
+    if (curve->is<Part::GeomLineSegment>()) {
+        return cross(curve->getStartPoint(), curve->getEndPoint());
+    }
+    if (curve->is<Part::GeomArcOfCircle>() || curve->is<Part::GeomArcOfEllipse>()
+        || curve->is<Part::GeomArcOfHyperbola>()) {
+        const auto centre = static_cast<const Part::GeomArcOfConic*>(curve)->getCenter();
+        const auto a = curve->pointAtParameter(0.0) - centre;
+        const auto b = curve->firstDerivativeAtParameter(0.0);
+        return cross(centre, curve->pointAtParameter(t1) - curve->pointAtParameter(t0))
+            + cross(a, b) * (t1 - t0);
+    }
+    // x y' - y x' over [lo, hi] by Gauss-Legendre with n points: exact where it is a polynomial
+    // of degree 2n - 1 or less
+    auto gauss = [&](int n, const std::vector<std::pair<double, double>>& spans) {
+        // the nodes on [-1, 1] (Newton's method on the Legendre polynomial P_n) and weights
+        auto legendre = [n](double z, double& derivative) {
+            double previous = 1.0;
+            double value = z;
+            for (int j = 2; j <= n; ++j) {
+                const double next = ((2 * j - 1) * z * value - (j - 1) * previous) / j;
+                previous = value;
+                value = next;
+            }
+            derivative = n * (z * value - previous) / (z * z - 1.0);
+            return value;
+        };
+        std::vector<std::pair<double, double>> nodes;
+        for (int i = 0; i < n; ++i) {
+            double z = std::cos(std::numbers::pi * (i + 0.75) / (n + 0.5));
+            double derivative = 1.0;
+            for (int step = 0; step < 100; ++step) {
+                const double change = legendre(z, derivative) / derivative;
+                z -= change;
+                if (std::abs(change) < 1e-15) {
+                    break;
+                }
+            }
+            legendre(z, derivative);
+            nodes.emplace_back(z, 2.0 / ((1.0 - z * z) * derivative * derivative));
+        }
+        double sum = 0.0;
+        for (const auto& [lo, hi] : spans) {
+            for (const auto& [z, weight] : nodes) {
+                const double t = (lo + hi) / 2 + z * (hi - lo) / 2;
+                sum += weight * (hi - lo) / 2
+                    * cross(curve->pointAtParameter(t), curve->firstDerivativeAtParameter(t));
+            }
+        }
+        return sum;
+    };
+    // a parabola (vertex + t^2 / 4f X + t Y): x y' - y x' is a polynomial of degree 3
+    if (curve->is<Part::GeomArcOfParabola>()) {
+        return gauss(2, {{t0, t1}});
+    }
+    // a polynomial B-spline: on each knot span x y' - y x' is a polynomial of degree 2p - 1
+    auto* spline = freecad_cast<const Part::GeomBSplineCurve*>(curve);
+    if (spline && !spline->isRational()) {
+        std::vector<std::pair<double, double>> spans;
+        const auto knots = spline->getKnots();
+        for (std::size_t s = 0; s + 1 < knots.size(); ++s) {
+            const double lo = std::max(knots[s], t0);
+            const double hi = std::min(knots[s + 1], t1);
+            if (hi > lo) {
+                spans.emplace_back(lo, hi);
+            }
+        }
+        return gauss(spline->getDegree() + 1, spans);
+    }
+    exact = false;
+    constexpr int samples = 32;
+    double sum = 0.0;
+    auto previous = curve->pointAtParameter(t0);
+    for (int s = 1; s <= samples; ++s) {
+        const auto point = curve->pointAtParameter(t0 + (t1 - t0) * s / samples);
+        sum += cross(previous, point);
+        previous = point;
+    }
+    return sum;
+}
+
+GeometryLoops chainGeometries(const std::vector<const Part::Geometry*>& geos, double tolerance)
+{
+    GeometryLoops result;
+    result.loopOf.assign(geos.size(), -1);
+    result.position.assign(geos.size(), 0);
+    result.inside.assign(geos.size(), Base::Vector3d());
+    result.sideUnknown.assign(geos.size(), false);
+    auto add = [&](GeometryLoop::Kind kind,
+                   std::vector<std::size_t> members,
+                   double area = 0.0,
+                   bool exact = true) {
+        for (std::size_t p = 0; p < members.size(); ++p) {
+            result.loopOf[members[p]] = static_cast<int>(result.loops.size());
+            result.position[members[p]] = p;
+        }
+        result.loops.push_back({kind, std::move(members), area, exact});
+    };
+
+    std::vector<const Part::GeomBoundedCurve*> curves(geos.size(), nullptr);
+    std::vector<std::pair<Base::Vector3d, Base::Vector3d>> ends(geos.size());
+    for (std::size_t i = 0; i < geos.size(); ++i) {
+        if (!geos[i]) {
+            continue;
+        }
+        if (auto* curve = freecad_cast<const Part::GeomBoundedCurve*>(geos[i])) {
+            curves[i] = curve;
+            ends[i] = {curve->getStartPoint(), curve->getEndPoint()};
+        }
+        else {
+            add(GeometryLoop::Kind::Single, {i});
+        }
+    }
+    auto meets = [&](const Base::Vector3d& p, std::size_t j) {
+        return Base::Distance(p, ends[j].first) <= tolerance
+            || Base::Distance(p, ends[j].second) <= tolerance;
+    };
+    auto otherEnd = [&](std::size_t j, const Base::Vector3d& p) {
+        return Base::Distance(p, ends[j].first) <= tolerance ? ends[j].second : ends[j].first;
+    };
+    // the neighbours of each geometry, in increasing order
+    std::vector<std::vector<std::size_t>> links(geos.size());
+    for (std::size_t i = 0; i < geos.size(); ++i) {
+        for (std::size_t j = i + 1; j < geos.size() && curves[i]; ++j) {
+            if (curves[j] && (meets(ends[i].first, j) || meets(ends[i].second, j))) {
+                links[i].push_back(j);
+                links[j].push_back(i);
+            }
+        }
+    }
+
+    std::vector<bool> seen(geos.size(), false);
+    for (std::size_t start = 0; start < geos.size(); ++start) {
+        if (!curves[start] || seen[start]) {
+            continue;
+        }
+        std::vector<std::size_t> component;
+        std::vector<std::size_t> stack {start};
+        while (!stack.empty()) {
+            const auto i = stack.back();
+            stack.pop_back();
+            if (seen[i]) {
+                continue;
+            }
+            seen[i] = true;
+            component.push_back(i);
+            stack.insert(stack.end(), links[i].begin(), links[i].end());
+        }
+        const bool closed = component.size() > 1
+            && std::all_of(component.begin(), component.end(), [&](std::size_t i) {
+                   return links[i].size() == 2;
+               });
+        std::vector<std::size_t> tips;
+        std::copy_if(component.begin(), component.end(), std::back_inserter(tips), [&](auto i) {
+            return links[i].size() <= 1;
+        });
+        const std::size_t first = closed || tips.empty()
+            ? *std::min_element(component.begin(), component.end())
+            : *std::min_element(tips.begin(), tips.end());
+        // walk the chain away from its first geometry's free end
+        Base::Vector3d point = ends[first].second;
+        if (!closed && !tips.empty()) {
+            auto free = [&](const Base::Vector3d& p) {
+                return std::none_of(links[first].begin(), links[first].end(), [&](auto j) {
+                    return meets(p, j);
+                });
+            };
+            if (free(ends[first].first)) {
+                point = ends[first].second;
+            }
+            else if (free(ends[first].second)) {
+                point = ends[first].first;
+            }
+        }
+        std::vector<std::size_t> order {first};
+        std::vector<bool> walked(geos.size(), false);
+        walked[first] = true;
+        while (order.size() < component.size()) {
+            const auto& next = links[order.back()];
+            auto it = std::find_if(next.begin(), next.end(), [&](auto j) {
+                return !walked[j] && meets(point, j);
+            });
+            if (it == next.end()) {
+                break;  // a branch: the rest is on no loop
+            }
+            order.push_back(*it);
+            walked[*it] = true;
+            point = otherEnd(*it, point);
+        }
+        if (!closed) {
+            add(GeometryLoop::Kind::Chain, std::move(order));
+            continue;
+        }
+        // counter-clockwise by its signed area, in sketch coordinates, walked from the first
+        // geometry's end that doesn't meet the second (its start where both do: a loop of two),
+        // each geometry from where the one before it ends
+        double area = 0.0;
+        bool exact = true;
+        std::vector<bool> forward(geos.size(), false);
+        if (order.size() == component.size()) {
+            Base::Vector3d corner = meets(ends[order[0]].second, order[1]) ? ends[order[0]].first
+                                                                           : ends[order[0]].second;
+            for (auto i : order) {
+                forward[i] = Base::Distance(corner, ends[i].first) <= tolerance;
+                const double swept = sweptArea(curves[i], exact);
+                area += forward[i] ? swept : -swept;
+                corner = otherEnd(i, corner);
+            }
+        }
+        if (std::abs(area) <= tolerance * tolerance) {
+            add(GeometryLoop::Kind::Unoriented, std::move(order));
+            continue;
+        }
+        if (area < 0) {
+            // run the other way: the same first geometry, the rest reversed, each one turned (a
+            // loop of two only turns)
+            std::reverse(order.begin() + 1, order.end());
+            for (auto i : order) {
+                forward[i] = !forward[i];
+            }
+        }
+        // each geometry's inside: the left of the direction the loop runs through it
+        for (auto i : order) {
+            auto along = curves[i]->firstDerivativeAtParameter(
+                (curves[i]->getFirstParameter() + curves[i]->getLastParameter()) / 2);
+            if (!forward[i]) {
+                along = -along;
+            }
+            Base::Vector3d left(-along.y, along.x, 0.0);
+            if (left.Length() > tolerance) {
+                result.inside[i] = left.Normalize();
+            }
+        }
+        add(GeometryLoop::Kind::Closed, std::move(order), std::abs(area), exact);
+    }
+
+    // A face's holes run clockwise, so that the face is on the left of every loop: its outer loop
+    // encloses every other, so it has the largest area. An edge keeps its side and its place in
+    // the loops' order where an edit moves it between the outer loop and a hole (fork PR 384's
+    // review, round 4v: a slot whose mouth is closed becomes a hole). Where an area is sampled,
+    // which loop is the outer one is a guess: each loop stays counter-clockwise and the side is
+    // unknown.
+    std::vector<std::size_t> closed;
+    for (std::size_t p = 0; p < result.loops.size(); ++p) {
+        if (result.loops[p].kind == GeometryLoop::Kind::Closed) {
+            closed.push_back(p);
+        }
+    }
+    if (closed.size() > 1) {
+        const bool exact = std::all_of(closed.begin(), closed.end(), [&](auto p) {
+            return result.loops[p].exact;
+        });
+        const auto outer = *std::max_element(closed.begin(), closed.end(), [&](auto a, auto b) {
+            return result.loops[a].area < result.loops[b].area;
+        });
+        for (auto p : closed) {
+            auto& members = result.loops[p].members;
+            if (!exact) {
+                for (auto i : members) {
+                    result.inside[i] = Base::Vector3d();
+                    result.sideUnknown[i] = true;
+                }
+                continue;
+            }
+            if (p == outer) {
+                continue;
+            }
+            std::reverse(members.begin() + 1, members.end());
+            for (std::size_t q = 0; q < members.size(); ++q) {
+                result.position[members[q]] = q;
+                result.inside[members[q]] = -result.inside[members[q]];
+            }
+        }
+    }
+    return result;
+}
+
+// Whether `b` is `a` started elsewhere
+bool sameCycle(const std::vector<std::size_t>& a, const std::vector<std::size_t>& b)
+{
+    if (a.size() != b.size()) {
+        return false;
+    }
+    if (a.empty()) {
+        return true;
+    }
+    auto it = std::find(b.begin(), b.end(), a.front());
+    if (it == b.end()) {
+        return false;
+    }
+    const auto shift = static_cast<std::size_t>(it - b.begin());
+    for (std::size_t p = 0; p < a.size(); ++p) {
+        if (a[p] != b[(p + shift) % b.size()]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// FreeCAD-CH (ops#264 e2, class E's E1; I-R2, the class note's ruling of 2026-10-27): which of a
+// link's old geometries of one kind each new one continues, as an index into `olds` (-1: none, it
+// is new). Before, the k-th new one took the k-th old Id, and a constraint followed whatever edge
+// came k-th now (a corner cut before it moved it to the next edge, silently).
+//
+// Three signals, each wrong somewhere, for an old geometry j and a new one k of the same type:
+// - Source: the source edge's mapped name, equal and unique on both sides. Wrong where the
+//   Sketcher gives a line drawn again the Id, and so the name, of a deleted line whose ends were
+//   at the same points (SketchObject::generateId): the line across the face when the lines
+//   between were reversed (fork PR 384's review, round 1);
+// - place: within half the tolerance, and every other candidate of j and of k beyond it (as
+//   carbon copy pairs, PR 260), with the face on the same side of both (on a closed loop). Wrong
+//   where an edit slides an edge onto another's old place facing the same way: a slot or hole row
+//   moved by its width or pitch, a comb by its period (rounds 2 and 3);
+// - position: j = k, only in an unchanged list (count and types) whose link resolved by history
+//   this recompute (`byHistory`: exactly, or by the solver at tier 0-1 without a guess; a face
+//   found by its place may be a redrawn profile, review CC1), where the k-th to k-th map keeps
+//   every loop's order, and only for old geometry without a Source (saved before E1): the stored
+//   order follows the sketch's Ids as the name does, so beside a Source it is no second vote.
+// A candidate's support is its number of signals, plus one for a Source on a circle or an ellipse:
+// the Sketcher reuses a deleted geometry's Id only for one whose two ends are that geometry's
+// (`geoHistoryLevel` 1), and a closed curve's ends are one point, so its Id is never reissued and
+// its name can't lie; it outranks place (a hole row moved by its pitch).
+//
+// What arbitrates is the face's structure, which none of the signals read: the geometries chained
+// by their ends into closed loops, oriented by their areas with the face on their left, which no
+// stored order, Id or line direction can turn. Between two pairs already settled (anchors), the old
+// loop's arc and the new loop's arc correspond. In turn:
+// - one geometry before and after, of the same type: the link's reference names it (and its
+//   resolution carries any warning);
+// - then, until nothing changes: a candidate whose old geometry lies in an arc and whose new one
+//   isn't in the arc's image is dropped; at the highest support present, the candidates no other
+//   candidate of their j or k matches become anchors together; a batch that puts a closed loop's
+//   anchors out of their cyclic order is rejected with its candidates (the loop's structure
+//   changed under them: edges swapped roles, or Ids reissued across the face); when nothing
+//   anchors, an arc left with one old and one new geometry of a type pairs them.
+// Where the signals disagree and no arc settles it, nothing is paired. An old geometry left over
+// is the caller's: it goes, or breaks where constraints are on it (decision 150).
+std::vector<int> pairGeometries(const std::vector<const Part::Geometry*>& olds,
+                                const std::vector<const Part::Geometry*>& news,
+                                bool byHistory)
+{
+    std::vector<int> taken(news.size(), -1);
+    auto sameType = [&](std::size_t j, std::size_t k) {
+        return olds[j] && olds[j]->getTypeId() == news[k]->getTypeId();
+    };
+    if (olds.size() == 1 && news.size() == 1) {
+        if (sameType(0, 0)) {
+            taken[0] = 0;
+        }
+        return taken;
+    }
+
+    constexpr double tolerance = 10 * Precision::Confusion();
+    enum Signal : unsigned
+    {
+        BySource = 1,
+        ByPlace = 2,
+        ByPosition = 4
+    };
+    std::map<std::pair<std::size_t, std::size_t>, unsigned> candidates;
+
+    auto sourceOf = [](const Part::Geometry* geo) {
+        return geo ? ExternalGeometryFacade::getFacade(geo)->getSource() : std::string();
+    };
+    std::map<std::string, std::vector<std::size_t>> oldSources;
+    std::map<std::string, std::vector<std::size_t>> newSources;
+    std::vector<bool> oldHasSource(olds.size(), false);
+    for (std::size_t j = 0; j < olds.size(); ++j) {
+        if (auto source = sourceOf(olds[j]); !source.empty()) {
+            oldSources[source].push_back(j);
+            oldHasSource[j] = true;
+        }
+    }
+    for (std::size_t k = 0; k < news.size(); ++k) {
+        if (auto source = sourceOf(news[k]); !source.empty()) {
+            newSources[source].push_back(k);
+        }
+    }
+    for (const auto& [source, ks] : newSources) {
+        auto it = oldSources.find(source);
+        if (ks.size() == 1 && it != oldSources.end() && it->second.size() == 1
+            && sameType(it->second.front(), ks.front())) {
+            candidates[{it->second.front(), ks.front()}] |= BySource;
+        }
+    }
+
+    const auto oldLoops = chainGeometries(olds, tolerance);
+    const auto newLoops = chainGeometries(news, tolerance);
+    using Kind = GeometryLoop::Kind;
+
+    std::vector<std::vector<double>> distance(
+        olds.size(),
+        std::vector<double>(news.size(), std::numeric_limits<double>::infinity()));
+    for (std::size_t j = 0; j < olds.size(); ++j) {
+        for (std::size_t k = 0; k < news.size(); ++k) {
+            if (sameType(j, k)) {
+                distance[j][k] = placeDistance(olds[j], news[k], tolerance);
+            }
+        }
+    }
+    // The same place is the same boundary only with the face on the same side: an edge an edit
+    // slides onto another edge's old place across the face (a profile moved by its own width)
+    // has the face on the other side of it (fork PR 384's review, round 4); where the side is
+    // unknown, the place is no vote
+    // (arcs of one circle by whether the face is on the centre's side of each: their middles'
+    // normals differ by as much as the arc turned, review round 4v)
+    auto sameSide = [&](std::size_t j, std::size_t k) {
+        if (oldLoops.sideUnknown[j] || newLoops.sideUnknown[k]) {
+            return false;
+        }
+        const auto& a = oldLoops.inside[j];
+        const auto& b = newLoops.inside[k];
+        if (a.Length() == 0.0 || b.Length() == 0.0) {
+            return true;
+        }
+        auto* oldArc = freecad_cast<const Part::GeomArcOfCircle*>(olds[j]);
+        auto* newArc = freecad_cast<const Part::GeomArcOfCircle*>(news[k]);
+        if (oldArc && newArc) {
+            auto towardCentre = [](const Part::GeomArcOfCircle* arc, const Base::Vector3d& in) {
+                const auto middle = arc->pointAtParameter(
+                    (arc->getFirstParameter() + arc->getLastParameter()) / 2);
+                return in * (arc->getCenter() - middle) > 0.0;
+            };
+            return towardCentre(oldArc, a) == towardCentre(newArc, b);
+        }
+        return a * b > 0.0;
+    };
+    for (std::size_t j = 0; j < olds.size(); ++j) {
+        for (std::size_t k = 0; k < news.size(); ++k) {
+            if (distance[j][k] > tolerance / 2 || !sameSide(j, k)) {
+                continue;
+            }
+            bool clear = true;
+            for (std::size_t other = 0; other < news.size() && clear; ++other) {
+                clear = other == k || distance[j][other] > tolerance;
+            }
+            for (std::size_t other = 0; other < olds.size() && clear; ++other) {
+                clear = other == j || distance[other][k] > tolerance;
+            }
+            if (clear) {
+                candidates[{j, k}] |= ByPlace;
+            }
+        }
+    }
+
+    bool unchangedList = byHistory && olds.size() == news.size();
+    for (std::size_t k = 0; k < news.size() && unchangedList; ++k) {
+        unchangedList = sameType(k, k);
+    }
+    // the k-th to k-th map carries every old loop onto a new one in the same order (a chain
+    // either way)
+    auto positionKeepsLoops = [&] {
+        for (const auto& loop : oldLoops.loops) {
+            if (loop.kind == Kind::Single) {
+                continue;
+            }
+            const int image = newLoops.loopOf[loop.members.front()];
+            if (image < 0) {
+                return false;
+            }
+            const auto& other = newLoops.loops[image];
+            if (other.kind != loop.kind || other.members.size() != loop.members.size()
+                || std::any_of(loop.members.begin(), loop.members.end(), [&](auto i) {
+                       return newLoops.loopOf[i] != image;
+                   })) {
+                return false;
+            }
+            if (loop.kind == Kind::Closed && !sameCycle(loop.members, other.members)) {
+                return false;
+            }
+            if (loop.kind == Kind::Chain && loop.members != other.members
+                && !std::equal(loop.members.begin(), loop.members.end(), other.members.rbegin())) {
+                return false;
+            }
+        }
+        return true;
+    };
+    if (unchangedList && positionKeepsLoops()) {
+        for (std::size_t k = 0; k < news.size(); ++k) {
+            if (!oldHasSource[k]) {
+                candidates[{k, k}] |= ByPosition;
+            }
+        }
+    }
+
+    auto support = [&](std::size_t j, unsigned signals) {
+        int count = ((signals & BySource) ? 1 : 0) + ((signals & ByPlace) ? 1 : 0)
+            + ((signals & ByPosition) ? 1 : 0);
+        if ((signals & BySource)
+            && (freecad_cast<const Part::GeomCircle*>(olds[j])
+                || freecad_cast<const Part::GeomEllipse*>(olds[j]))) {
+            ++count;
+        }
+        return count;
+    };
+
+    std::vector<int> anchorOf(olds.size(), -1);
+    std::vector<bool> newPaired(news.size(), false);
+
+    // The anchors on old loop `loop` (in its order) and their images, if the images lie on one
+    // new loop of the same kind: that loop's index, else -1
+    auto anchorsOn = [&](const GeometryLoop& loop,
+                         const std::vector<int>& anchors,
+                         std::vector<std::size_t>& anchored,
+                         std::vector<std::size_t>& images) {
+        anchored.clear();
+        images.clear();
+        for (auto i : loop.members) {
+            if (anchors[i] >= 0) {
+                anchored.push_back(i);
+                images.push_back(static_cast<std::size_t>(anchors[i]));
+            }
+        }
+        if (images.empty()) {
+            return -1;
+        }
+        const int image = newLoops.loopOf[images.front()];
+        if (image < 0 || newLoops.loops[image].kind != loop.kind
+            || std::any_of(images.begin(), images.end(), [&](auto k) {
+                   return newLoops.loopOf[k] != image;
+               })) {
+            return -1;
+        }
+        return image;
+    };
+    // whether the images lie on the closed new loop in the anchors' cyclic order
+    auto inCyclicOrder = [&](const GeometryLoop& other, const std::vector<std::size_t>& images) {
+        const std::size_t size = other.members.size();
+        const std::size_t origin = newLoops.position[images.front()];
+        auto sorted = images;
+        std::sort(sorted.begin(), sorted.end(), [&](auto a, auto b) {
+            return (newLoops.position[a] + size - origin) % size
+                < (newLoops.position[b] + size - origin) % size;
+        });
+        return sorted == images;
+    };
+
+    struct Arc
+    {
+        std::set<std::size_t> olds;
+        std::set<std::size_t> news;
+    };
+    std::vector<std::size_t> anchored;
+    std::vector<std::size_t> images;
+    // whether the anchors' images lie on two closed new loops or more, each holding its share in
+    // the anchors' cyclic order: the loop was split (a slot's mouth closed makes a hole of it)
+    auto splitInOrder = [&](const GeometryLoop& loop, const std::vector<int>& anchors) {
+        std::map<int, std::vector<std::size_t>> shares;
+        for (auto i : loop.members) {
+            if (anchors[i] >= 0) {
+                const auto k = static_cast<std::size_t>(anchors[i]);
+                shares[newLoops.loopOf[k]].push_back(k);
+            }
+        }
+        return shares.size() > 1 && std::all_of(shares.begin(), shares.end(), [&](const auto& s) {
+                   return s.first >= 0 && newLoops.loops[s.first].kind == Kind::Closed
+                       && inCyclicOrder(newLoops.loops[s.first], s.second);
+               });
+    };
+
+    // A closed old loop's arcs under `anchors`: after each anchor, along the loop up to the next
+    // (with one anchor, the rest of the loop), and the same on the new loop after its image. None
+    // where the images aren't on one new closed loop in the anchors' cyclic order
+    auto closedArcs = [&](const GeometryLoop& loop, const std::vector<int>& anchors) {
+        std::vector<Arc> arcs;
+        const int image = anchorsOn(loop, anchors, anchored, images);
+        if (image < 0 || !inCyclicOrder(newLoops.loops[image], images)) {
+            return arcs;
+        }
+        const auto& seq = loop.members;
+        const auto& other = newLoops.loops[image];
+        auto steps = [](std::size_t from, std::size_t to, std::size_t size) {
+            const std::size_t count = (to + size - from) % size;
+            return count ? count : size;
+        };
+        const std::size_t size = seq.size();
+        const std::size_t otherSize = other.members.size();
+        for (std::size_t a = 0; a < anchored.size(); ++a) {
+            const std::size_t next = (a + 1) % anchored.size();
+            const std::size_t i0 = oldLoops.position[anchored[a]];
+            const std::size_t i1 = oldLoops.position[anchored[next]];
+            const std::size_t k0 = newLoops.position[images[a]];
+            const std::size_t k1 = newLoops.position[images[next]];
+            Arc arc;
+            for (std::size_t t = 1; t < steps(i0, i1, size); ++t) {
+                arc.olds.insert(seq[(i0 + t) % size]);
+            }
+            for (std::size_t t = 1; t < steps(k0, k1, otherSize); ++t) {
+                arc.news.insert(other.members[(k0 + t) % otherSize]);
+            }
+            arcs.push_back(std::move(arc));
+        }
+        return arcs;
+    };
+    for (;;) {
+        // the arcs between the anchors so far
+        std::vector<Arc> arcs;
+        std::vector<int> arcOf(olds.size(), -1);
+        auto addArc = [&](Arc arc) {
+            for (auto i : arc.olds) {
+                arcOf[i] = static_cast<int>(arcs.size());
+            }
+            arcs.push_back(std::move(arc));
+        };
+        for (const auto& loop : oldLoops.loops) {
+            if (loop.kind != Kind::Closed && loop.kind != Kind::Chain) {
+                continue;
+            }
+            const int image = anchorsOn(loop, anchorOf, anchored, images);
+            if (image < 0) {
+                continue;
+            }
+            const auto& seq = loop.members;
+            const auto& other = newLoops.loops[image];
+            if (loop.kind == Kind::Closed) {
+                for (auto& arc : closedArcs(loop, anchorOf)) {
+                    addArc(std::move(arc));
+                }
+                continue;
+            }
+            // an open chain with two anchors or more: the stretches between consecutive anchors
+            // and the two ends, the anchors' order found on the new chain either way
+            if (anchored.size() < 2) {
+                continue;
+            }
+            std::vector<std::size_t> at;
+            for (auto k : images) {
+                at.push_back(newLoops.position[k]);
+            }
+            const bool forward = std::is_sorted(at.begin(), at.end(), std::less<>());
+            const bool backward = std::is_sorted(at.begin(), at.end(), std::greater<>());
+            if (!forward && !backward) {
+                continue;
+            }
+            auto newSeq = other.members;
+            if (!forward) {
+                std::reverse(newSeq.begin(), newSeq.end());
+                for (auto& p : at) {
+                    p = newSeq.size() - 1 - p;
+                }
+            }
+            auto stretch = [](const std::vector<std::size_t>& s, std::size_t from, std::size_t to) {
+                return std::set<std::size_t>(s.begin() + static_cast<std::ptrdiff_t>(from),
+                                             s.begin() + static_cast<std::ptrdiff_t>(to));
+            };
+            addArc({stretch(seq, 0, oldLoops.position[anchored.front()]),
+                    stretch(newSeq, 0, at.front())});
+            for (std::size_t a = 0; a + 1 < anchored.size(); ++a) {
+                addArc({stretch(seq,
+                                oldLoops.position[anchored[a]] + 1,
+                                oldLoops.position[anchored[a + 1]]),
+                        stretch(newSeq, at[a] + 1, at[a + 1])});
+            }
+            addArc({stretch(seq, oldLoops.position[anchored.back()] + 1, seq.size()),
+                    stretch(newSeq, at.back() + 1, newSeq.size())});
+        }
+
+        // dropping
+        for (auto it = candidates.begin(); it != candidates.end();) {
+            const auto [j, k] = it->first;
+            const bool paired = anchorOf[j] >= 0 || newPaired[k];
+            const bool outside = arcOf[j] >= 0 && arcs[arcOf[j]].news.count(k) == 0;
+            it = paired || outside ? candidates.erase(it) : std::next(it);
+        }
+
+        // anchoring: at the highest support present, the candidates no other candidate of their
+        // old or new geometry reaches
+        std::map<std::size_t, std::size_t> picked;
+        for (int level = 3; level >= 1 && picked.empty(); --level) {
+            std::map<std::size_t, int> perOld;
+            std::map<std::size_t, int> perNew;
+            for (const auto& [key, signals] : candidates) {
+                if (support(key.first, signals) >= level) {
+                    ++perOld[key.first];
+                    ++perNew[key.second];
+                }
+            }
+            for (const auto& [key, signals] : candidates) {
+                if (support(key.first, signals) >= level && perOld[key.first] == 1
+                    && perNew[key.second] == 1) {
+                    picked[key.first] = key.second;
+                }
+            }
+        }
+        if (picked.empty()) {
+            // lone arcs: one old and one new geometry left between two anchors, of a type; a new
+            // geometry two arcs would take (old loops merged into one) is taken by neither
+            std::map<std::size_t, std::vector<std::size_t>> claims;
+            for (const auto& arc : arcs) {
+                std::vector<std::size_t> oldFree;
+                std::vector<std::size_t> newFree;
+                for (auto i : arc.olds) {
+                    if (anchorOf[i] < 0) {
+                        oldFree.push_back(i);
+                    }
+                }
+                for (auto k : arc.news) {
+                    if (!newPaired[k]) {
+                        newFree.push_back(k);
+                    }
+                }
+                if (oldFree.size() == 1 && newFree.size() == 1 && sameType(oldFree[0], newFree[0])) {
+                    claims[newFree[0]].push_back(oldFree[0]);
+                }
+            }
+            for (const auto& [k, js] : claims) {
+                if (js.size() == 1) {
+                    picked[js.front()] = k;
+                }
+            }
+        }
+        if (picked.empty()) {
+            break;
+        }
+
+        // A batch that puts a closed loop's anchors out of their cyclic order is no evidence.
+        auto trial = anchorOf;
+        for (const auto& [j, k] : picked) {
+            trial[j] = static_cast<int>(k);
+        }
+        // Nor is a name alone (no place vote) where the arc it lies in between the loop's other
+        // anchors gains geometries of its type: the Sketcher gives a line drawn after a deleted
+        // one that line's Id, and so its name (a corner cut drawn after the side it meets was
+        // drawn again, review pr384-r4vs), and a line moved beside a new one looks the same. It
+        // breaks where nothing else settles it (PLAN decision 167). A circle's or an ellipse's
+        // name can't lie (the support's bonus). Except where the whole loop moved: every pair on
+        // it that keeps its name is its old geometry moved by one translation v (a line on its
+        // old line's supporting line shifted by v, an arc on its old circle shifted by v, an arc of
+        // an ellipse or a B-spline its old one shifted by v whole, within the tolerance), and v is
+        // fixed by two of those lines that aren't parallel. A face moved
+        // with a new corner edge (by its width, or through a Placement, an AttachmentOffset or
+        // its support) keeps its lines. What remains: an Id reissued to a line exactly on the
+        // moved line's place pairs with it.
+        auto ofType = [](const auto& geometries, const auto& members, const Part::Geometry* like) {
+            return std::count_if(members.begin(), members.end(), [&](auto i) {
+                return geometries[i] && geometries[i]->getTypeId() == like->getTypeId();
+            });
+        };
+        auto movedTogether = [&](const GeometryLoop& loop, const std::vector<int>& anchors) {
+            std::vector<std::pair<std::size_t, std::size_t>> named;
+            for (auto i : loop.members) {
+                if (anchors[i] < 0) {
+                    continue;
+                }
+                const auto k = static_cast<std::size_t>(anchors[i]);
+                const auto source = sourceOf(olds[i]);
+                if (!source.empty() && source == sourceOf(news[k])) {
+                    named.emplace_back(i, k);
+                }
+            }
+            // the old line's unit normal and the new line's offset along it
+            struct Offset
+            {
+                Base::Vector3d normal;
+                double distance;
+            };
+            std::vector<Offset> offsets;
+            for (const auto& [i, k] : named) {
+                auto* a = freecad_cast<const Part::GeomLineSegment*>(olds[i]);
+                auto* b = freecad_cast<const Part::GeomLineSegment*>(news[k]);
+                if (a && b) {
+                    auto along = a->getEndPoint() - a->getStartPoint();
+                    if (along.Length() <= tolerance) {
+                        return false;
+                    }
+                    along.Normalize();
+                    const Base::Vector3d normal(-along.y, along.x, 0.0);
+                    offsets.push_back({normal, normal * (b->getStartPoint() - a->getStartPoint())});
+                }
+            }
+            // v from the first line and the one least parallel to it
+            if (offsets.empty()) {
+                return false;
+            }
+            const auto& first = offsets.front();
+            const auto second =
+                std::max_element(offsets.begin(), offsets.end(), [&](const auto& p, const auto& q) {
+                    return std::abs(first.normal.x * p.normal.y - first.normal.y * p.normal.x)
+                        < std::abs(first.normal.x * q.normal.y - first.normal.y * q.normal.x);
+                });
+            const double det =
+                first.normal.x * second->normal.y - first.normal.y * second->normal.x;
+            if (std::abs(det) <= Precision::Angular()) {
+                return false;  // only parallel lines: v isn't fixed
+            }
+            const Base::Vector3d v(
+                (first.distance * second->normal.y - second->distance * first.normal.y) / det,
+                (first.normal.x * second->distance - second->normal.x * first.distance) / det,
+                0.0);
+            auto onShifted = [&](const Base::Vector3d& p,
+                                 const Base::Vector3d& from,
+                                 const Base::Vector3d& to) {
+                return p.DistanceToLine(from + v, to - from) <= tolerance;
+            };
+            return std::all_of(named.begin(), named.end(), [&](const auto& pair) {
+                const auto& [i, k] = pair;
+                if (auto* a = freecad_cast<const Part::GeomLineSegment*>(olds[i])) {
+                    auto* b = freecad_cast<const Part::GeomLineSegment*>(news[k]);
+                    const auto from = a->getStartPoint();
+                    const auto to = a->getEndPoint();
+                    return b && onShifted(b->getStartPoint(), from, to)
+                        && onShifted(b->getEndPoint(), from, to);
+                }
+                if (auto* a = freecad_cast<const Part::GeomArcOfCircle*>(olds[i])) {
+                    auto* b = freecad_cast<const Part::GeomArcOfCircle*>(news[k]);
+                    return b
+                        && Base::Distance(a->getCenter() + v, b->getCenter())
+                                + std::abs(a->getRadius() - b->getRadius())
+                            <= tolerance;
+                }
+                if (auto* a = freecad_cast<const Part::GeomArcOfEllipse*>(olds[i])) {
+                    auto* b = freecad_cast<const Part::GeomArcOfEllipse*>(news[k]);
+                    if (!b) {
+                        return false;
+                    }
+                    const auto axis = a->getMajorAxisDir();
+                    const auto other = b->getMajorAxisDir();
+                    return Base::Distance(a->getCenter() + v, b->getCenter())
+                        + std::abs(a->getMajorRadius() - b->getMajorRadius())
+                        + std::abs(a->getMinorRadius() - b->getMinorRadius())
+                        + a->getMajorRadius() * std::abs(axis.x * other.y - axis.y * other.x)
+                        <= tolerance;
+                }
+                // the farthest of an arc's ends from its centre (or vertex), at least `least`: a
+                // turn of the axis by a small angle moves the arc's points by up to that times it
+                auto reach = [](const Part::GeomArcOfConic* arc, double least) {
+                    const auto centre = arc->getCenter();
+                    return std::max({least,
+                                     Base::Distance(centre, arc->getStartPoint()),
+                                     Base::Distance(centre, arc->getEndPoint())});
+                };
+                // a hyperbola's branch opens along its major axis, so the axis keeps its sense
+                if (auto* a = freecad_cast<const Part::GeomArcOfHyperbola*>(olds[i])) {
+                    auto* b = freecad_cast<const Part::GeomArcOfHyperbola*>(news[k]);
+                    return b
+                        && Base::Distance(a->getCenter() + v, b->getCenter())
+                                + std::abs(a->getMajorRadius() - b->getMajorRadius())
+                                + std::abs(a->getMinorRadius() - b->getMinorRadius())
+                                + reach(a, a->getMajorRadius())
+                                    * Base::Distance(a->getMajorAxisDir(), b->getMajorAxisDir())
+                            <= tolerance;
+                }
+                // a parabola: its vertex moved by v and the same second derivative, constant along
+                // it (its axis toward the focus over 2f): a turn by a small angle changes it by
+                // that over 2f, a focal length by its change over 2f^2
+                if (auto* a = freecad_cast<const Part::GeomArcOfParabola*>(olds[i])) {
+                    auto* b = freecad_cast<const Part::GeomArcOfParabola*>(news[k]);
+                    if (!b) {
+                        return false;
+                    }
+                    const double focal = a->getFocal();
+                    const auto bend = a->secondDerivativeAtParameter(a->getFirstParameter());
+                    const auto otherBend = b->secondDerivativeAtParameter(b->getFirstParameter());
+                    return Base::Distance(a->getCenter() + v, b->getCenter())
+                            + 2 * focal * reach(a, focal) * Base::Distance(bend, otherBend)
+                        <= tolerance;
+                }
+                // a B-spline: the same degree, knots and weights, each pole moved by v (one
+                // turned round doesn't count: it breaks)
+                if (auto* a = freecad_cast<const Part::GeomBSplineCurve*>(olds[i])) {
+                    auto* b = freecad_cast<const Part::GeomBSplineCurve*>(news[k]);
+                    if (!b || a->getDegree() != b->getDegree()
+                        || a->getMultiplicities() != b->getMultiplicities()) {
+                        return false;
+                    }
+                    const auto knots = a->getKnots();
+                    const auto otherKnots = b->getKnots();
+                    const auto weights = a->getWeights();
+                    const auto otherWeights = b->getWeights();
+                    const auto poles = a->getPoles();
+                    const auto otherPoles = b->getPoles();
+                    if (knots.size() != otherKnots.size() || poles.size() != otherPoles.size()) {
+                        return false;
+                    }
+                    for (std::size_t q = 0; q < knots.size(); ++q) {
+                        if (std::abs(knots[q] - otherKnots[q]) > Precision::PConfusion()) {
+                            return false;
+                        }
+                    }
+                    for (std::size_t q = 0; q < poles.size(); ++q) {
+                        if (std::abs(weights[q] - otherWeights[q]) > Precision::PConfusion()
+                            || Base::Distance(poles[q] + v, otherPoles[q]) > tolerance) {
+                            return false;
+                        }
+                    }
+                    return true;
+                }
+                return false;
+            });
+        };
+        // An arc gained a geometry of j's type where it has more of them than before, or one, other
+        // than k, whose name no old geometry of the arc has (or no name): one edge removed and one
+        // added leaves the count as it was (the coordinator's ruling on the 5p review's F3)
+        auto gained = [&](std::size_t j,
+                          std::size_t k,
+                          const auto& oldMembers,
+                          const auto& newMembers) {
+            if (ofType(news, newMembers, olds[j]) > ofType(olds, oldMembers, olds[j])) {
+                return true;
+            }
+            std::set<std::string> names;
+            for (auto i : oldMembers) {
+                if (auto source = sourceOf(olds[i]); !source.empty()) {
+                    names.insert(source);
+                }
+            }
+            return std::any_of(newMembers.begin(), newMembers.end(), [&](auto other) {
+                return other != k && news[other]
+                    && news[other]->getTypeId() == olds[j]->getTypeId()
+                    && names.count(sourceOf(news[other])) == 0;
+            });
+        };
+        // Over the loop's picks together, until none is dropped: a name kept earlier in the walk
+        // exempts no other, and the order of the loop's members doesn't matter
+        for (const auto& loop : oldLoops.loops) {
+            if (loop.kind != Kind::Closed) {
+                continue;
+            }
+            for (bool dropped = true; dropped;) {
+                dropped = false;
+                const auto snapshot = trial;
+                const bool moved = movedTogether(loop, snapshot);
+                // With every anchor's image on one new loop in their cyclic order, leaving one out
+                // joins the two arcs beside it, through it and its image; otherwise the arcs
+                // without it are found afresh. Once per pass, not per pick: a cascade of drops
+                // round a large face made it cubic (review pr384-r5s, T-A).
+                const auto around = closedArcs(loop, snapshot);
+                const auto order = anchored;
+                std::vector<std::size_t> drops;
+                for (auto j : loop.members) {
+                    auto pick = picked.find(j);
+                    if (pick == picked.end()) {
+                        continue;
+                    }
+                    const auto k = pick->second;
+                    auto vote = candidates.find({j, k});
+                    if (moved || vote == candidates.end() || vote->second != BySource
+                        || support(j, vote->second) > 1) {
+                        continue;
+                    }
+                    bool gains = false;
+                    if (!around.empty()) {
+                        const auto at = static_cast<std::size_t>(
+                            std::find(order.begin(), order.end(), j) - order.begin());
+                        const auto& after = around[at];
+                        const auto& before = around[(at + order.size() - 1) % order.size()];
+                        Arc joined {before.olds, before.news};
+                        joined.olds.insert(after.olds.begin(), after.olds.end());
+                        joined.olds.insert(j);
+                        joined.news.insert(after.news.begin(), after.news.end());
+                        joined.news.insert(k);
+                        if (gained(j, k, joined.olds, joined.news)) {
+                            drops.push_back(j);
+                        }
+                        continue;
+                    }
+                    auto others = snapshot;
+                    others[j] = -1;
+                    const auto arcs = closedArcs(loop, others);
+                    auto arc = std::find_if(arcs.begin(), arcs.end(), [&](const Arc& a) {
+                        return a.olds.count(j) > 0;
+                    });
+                    if (arc != arcs.end()) {
+                        gains = gained(j, k, arc->olds, arc->news);
+                    }
+                    else if (std::none_of(loop.members.begin(), loop.members.end(),
+                                          [&](auto i) { return others[i] >= 0; })
+                             && newLoops.loopOf[k] >= 0) {
+                        // no other anchor on the loop: the whole loop is its arc
+                        gains = gained(j,
+                                       k,
+                                       loop.members,
+                                       newLoops.loops[newLoops.loopOf[k]].members);
+                    }
+                    if (gains) {
+                        drops.push_back(j);
+                    }
+                }
+                for (auto j : drops) {
+                    candidates.erase({j, picked[j]});
+                    picked.erase(j);
+                    trial[j] = -1;
+                    dropped = true;
+                }
+            }
+        }
+        if (picked.empty()) {
+            continue;  // the candidates left, without the names dropped
+        }
+        for (const auto& loop : oldLoops.loops) {
+            if (loop.kind != Kind::Closed
+                || std::none_of(loop.members.begin(), loop.members.end(), [&](auto i) {
+                       return picked.count(i) > 0;
+                   })) {
+                continue;
+            }
+            // Nor is one that empties an arc while another, empty before, fills, where one of its
+            // anchors on the loop has no place vote: the anchors' sides were swapped (a line drawn
+            // again took the Id, and so the name, of the line across the face, and its two anchors
+            // can't be out of cyclic order), where an edit cuts, notches or removes in place (fork
+            // PR 384's review, round 4). Anchors that each keep their place stay where they were:
+            // the cut or notch between them moved (a corner cut moved to another corner, review
+            // round 4v).
+            // A loop split into several (a slot closed into a hole) has no arcs; its anchors go
+            // where each new loop holds its share in order, and only anchors that each keep their
+            // place (review round 4v).
+            const auto arcs = closedArcs(loop, trial);
+            auto emptied = [](const Arc& arc) { return !arc.olds.empty() && arc.news.empty(); };
+            auto filled = [](const Arc& arc) { return arc.olds.empty() && !arc.news.empty(); };
+            const bool placeless =
+                std::any_of(loop.members.begin(), loop.members.end(), [&](auto i) {
+                    auto it = picked.find(i);
+                    if (it == picked.end()) {
+                        return false;
+                    }
+                    auto vote = candidates.find({i, it->second});
+                    return vote == candidates.end() || (vote->second & ByPlace) == 0;
+                });
+            if (arcs.empty() ? !placeless && splitInOrder(loop, trial)
+                             : !(placeless && std::any_of(arcs.begin(), arcs.end(), emptied)
+                                 && std::any_of(arcs.begin(), arcs.end(), filled))) {
+                continue;
+            }
+            for (auto i : loop.members) {
+                if (picked.erase(i) > 0) {
+                    for (auto it = candidates.begin(); it != candidates.end();) {
+                        it = it->first.first == i ? candidates.erase(it) : std::next(it);
+                    }
+                }
+            }
+        }
+        if (picked.empty()) {
+            break;
+        }
+        for (const auto& [j, k] : picked) {
+            anchorOf[j] = static_cast<int>(k);
+            newPaired[k] = true;
+        }
+    }
+
+    for (std::size_t j = 0; j < olds.size(); ++j) {
+        if (anchorOf[j] >= 0) {
+            taken[anchorOf[j]] = static_cast<int>(j);
+        }
+    }
+    return taken;
 }
 }  // namespace
 
@@ -3505,6 +4690,8 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
     std::vector<std::size_t> addedProjections;
     // for each entry of newGeos, how many of its geometries are the projection's (ops#264)
     std::vector<std::size_t> projSizes;
+    // and its link's index in ExternalGeometry (ops#264 e2)
+    std::vector<int> linkIndexes;
     // the key of the link that is being added to, whose new geometries keep the flags it gives
     std::string createdKey;
     for (int i=0; i < int(Objects.size()); i++) {
@@ -3557,6 +4744,8 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
         // builds the link's geometries into geos, as `projection` and `intersection` say
         auto build = [&]() {
             TopoDS_Shape refSubShape;
+            // a face's edges' mapped names, in the face's order (ops#264 e2)
+            std::vector<std::string> edgeSources;
 
             // Handles LCS ,resolve to actual datum object
             const App::DocumentObject* resolvedObj = Obj;
@@ -3575,6 +4764,17 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
             else if (auto* refObj = freecad_cast<const Part::Feature*>(resolvedObj)) {
                 const Part::TopoShape& refShape = refObj->Shape.getShape();
                 refSubShape = refShape.getSubShape(SubElement.c_str());
+                // FreeCAD-CH (ops#264 e2): the shape drops the names; read them here, on the
+                // unmoved shape, so a projected face's geometries can be paired by their source
+                if (!refSubShape.IsNull() && refSubShape.ShapeType() == TopAbs_FACE) {
+                    for (TopExp_Explorer exp(refSubShape, TopAbs_EDGE); exp.More(); exp.Next()) {
+                        const int index = refShape.findShape(exp.Current());
+                        const auto mapped = index > 0
+                            ? refShape.getMappedName(Data::IndexedName::fromConst("Edge", index))
+                            : Data::MappedName();
+                        edgeSources.push_back(mapped ? mapped.toString() : std::string());
+                    }
+                }
             }
             else if (auto* pl = freecad_cast<const App::Plane*>(resolvedObj)) {
                 Base::Vector3d base = pl->getBasePoint();
@@ -3657,7 +4857,8 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
             if (projection && !refSubShape.IsNull()) {
                 switch (refSubShape.ShapeType()) {
                 case TopAbs_FACE: {
-                    processFace(invRot, invPlm, mov, sketchPlane, gPlane, sketchAx3, aProjFace, geos, refSubShape);
+                    processFace(invRot, invPlm, mov, sketchPlane, gPlane, sketchAx3, aProjFace, geos,
+                                refSubShape, edgeSources);
                 } break;
                 case TopAbs_EDGE: {
                     const TopoDS_Edge& edge = TopoDS::Edge(refSubShape);
@@ -4051,6 +5252,7 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
         const bool projectionAdded = beingCreated && !extToAdd->intersection && intersection;
         addedProjections.push_back(projectionAdded ? projSize : 0);
         projSizes.push_back(projSize);
+        linkIndexes.push_back(i);
         if (beingCreated) {
             createdKey = key;
         }
@@ -4130,6 +5332,28 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
         return names;
     };
 
+    // FreeCAD-CH (ops#264 e2): whether link `index`'s reference resolved by history this
+    // recompute: exactly (no report entry), or by the solver at tier 0-1 without a guess record.
+    // A face found by geometry (tiers 2-3, a guess, a place keep) may be a redrawn profile: the
+    // order of its edges is no evidence (review CC1). A link added back after an older version
+    // dropped it has no entry of its own.
+    auto resolvedByHistory = [&](int index) {
+        if (index < 0 || static_cast<std::size_t>(index) >= linkCount) {
+            return false;
+        }
+        const auto* entry = App::ReferenceReport::find(&ExternalGeometry, index);
+        return !entry
+            || (entry->status == App::ReferenceReport::Status::Resolved && entry->tier >= 0
+                && entry->tier <= 1);
+    };
+    // the Ids of old geometry without a counterpart that carries constraints: kept where it is,
+    // flagged missing, and the sketch fails naming it; its constraints never move to another
+    // geometry (ops#264 e2, I-R2)
+    std::set<long> lostIds;
+    // the entries of newGeos whose Ids were paired by source, place or position (ops#264 e2): their
+    // geometries take their slots in build order (below)
+    std::vector<bool> pairedLinks(newGeos.size(), false);
+
     // allocate unique geometry id
     for (std::size_t n = 0; n < newGeos.size(); ++n) {
         auto& geos = newGeos[n];
@@ -4140,8 +5364,9 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
         // FreeCAD-CH (ops#264): the Ids go per kind, the projection's to the projection and the
         // intersection's to the intersection, so a Both link whose projection changes in number,
         // or a type written from Python, doesn't move constraints from one kind to the other.
-        // Within a kind they still go by position. Geometry saved before has no kind: such a link
-        // gets its Ids by position, as before, once, and has kinds from then on.
+        // Within a kind they go by source, place, then position (pairGeometries(), ops#264 e2).
+        // Geometry saved before has no kind: such a link gets its Ids by position, as before,
+        // once, and has kinds from then on.
         std::vector<long> projectionIds;
         std::vector<long> intersectionIds;
         bool byKind = !refs.empty();
@@ -4158,20 +5383,50 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
 
         std::set<long> geoIds;  // the Ids no new geometry takes, whose geometry goes
         if (byKind) {
-            auto handOut = [&](const std::vector<long>& ids, std::size_t begin, std::size_t end) {
-                std::size_t k = 0;
-                for (std::size_t g = begin; g < end; ++g, ++k) {
-                    GeometryFacade::setId(geos[g].get(), k < ids.size() ? ids[k] : ++geoLastId);
+            const bool byHistory = resolvedByHistory(linkIndexes[n]);
+            // a kind the link's type no longer builds (a type written from Python, Both to
+            // Intersection) goes with its constraints, as before, with the warning below: the
+            // user's edit, not its source's, took it away (PR 241)
+            const long type = Types[linkIndexes[n]];
+            const bool projected = type == static_cast<long>(ExtType::Projection)
+                || type == static_cast<long>(ExtType::Both);
+            const bool intersected = type == static_cast<long>(ExtType::Intersection)
+                || type == static_cast<long>(ExtType::Both);
+            auto handOut = [&](const std::vector<long>& ids,
+                               std::size_t begin,
+                               std::size_t end,
+                               bool built) {
+                std::vector<const Part::Geometry*> olds;
+                for (long id : ids) {
+                    auto it = externalGeoMap.find(id);
+                    olds.push_back(it != externalGeoMap.end() ? ExternalGeo[it->second] : nullptr);
                 }
-                geoIds.insert(ids.begin() + static_cast<std::ptrdiff_t>(std::min(k, ids.size())),
-                              ids.end());
+                std::vector<const Part::Geometry*> news;
+                for (std::size_t g = begin; g < end; ++g) {
+                    news.push_back(geos[g].get());
+                }
+                const auto taken = pairGeometries(olds, news, byHistory);
+                std::vector<bool> kept(ids.size(), false);
+                for (std::size_t k = 0; k < news.size(); ++k) {
+                    if (taken[k] >= 0) {
+                        kept[taken[k]] = true;
+                    }
+                    GeometryFacade::setId(geos[begin + k].get(),
+                                          taken[k] >= 0 ? ids[taken[k]] : ++geoLastId);
+                }
+                for (std::size_t j = 0; j < ids.size(); ++j) {
+                    if (!kept[j]) {
+                        (!built || constraintsOn({ids[j]}).empty() ? geoIds : lostIds)
+                            .insert(ids[j]);
+                    }
+                }
             };
-            handOut(projectionIds, 0, projCount);
-            handOut(intersectionIds, projCount, geos.size());
-            // a projection added to an intersection link goes before it, as below (ops#260)
-            if (!(addedProjections[n] > 0 && projectionIds.empty() && !intersectionIds.empty())) {
-                addedProjections[n] = 0;
-            }
+            handOut(projectionIds, 0, projCount, projected);
+            handOut(intersectionIds, projCount, geos.size(), intersected);
+            // new geometry goes where the build gives it, a projection added to an intersection
+            // link before it too (ops#260), below
+            addedProjections[n] = 0;
+            pairedLinks[n] = true;
             refs.clear();
             for (const auto& geo : geos) {
                 refs.push_back(GeometryFacade::getId(geo.get()));
@@ -4236,8 +5491,11 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
     auto geoms = ExternalGeo.getValues();
 
     // now update the geometries
-    // projections added to an intersection link, each with the Id of the geometry it goes before
+    // projections added to an intersection link, each with the Id of the geometry it goes before;
+    // and a paired link's new geometries (ops#264 e2)
     std::vector<std::pair<long, std::vector<Part::Geometry*>>> projectionsBefore;
+    // the slots of geometries a paired link's build order moved: old index -> new (ops#264 e2)
+    std::map<int, int> movedSlots;
     for (std::size_t n = 0; n < newGeos.size(); ++n) {
         auto& geos = newGeos[n];
         if (geos.empty()) {
@@ -4260,6 +5518,31 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
                                            std::vector<Part::Geometry*> {});
             front = &projectionsBefore.back().second;
         }
+        // FreeCAD-CH (ops#264 e2): a link whose Ids were paired by source or place keeps its
+        // geometry in build order in ExternalGeo, as the Ids by position did (externalGeoRefMap,
+        // and so the next pairing by position, reads that order): the geometries that keep an Id
+        // take those Ids' slots in build order, and each new one goes before the next of them
+        // (or at the end, after them all). A lost geometry keeps its slot.
+        std::vector<int> slots;
+        std::vector<long> anchors(geos.size(), 0);  // a new geometry goes before this Id (0: end)
+        if (pairedLinks[n]) {
+            long next = 0;
+            for (std::size_t k = geos.size(); k-- > 0;) {
+                const long id = GeometryFacade::getId(geos[k].get());
+                auto it = externalGeoMap.find(id);
+                if (it != externalGeoMap.end()) {
+                    slots.push_back(it->second);
+                    next = id;
+                }
+                else {
+                    anchors[k] = next;
+                }
+            }
+            std::sort(slots.begin(), slots.end());
+        }
+        std::size_t nextSlot = 0;
+        std::vector<Part::Geometry*>* group = nullptr;  // the new ones going before `groupAnchor`
+        long groupAnchor = 0;
         for (std::size_t k = 0; k < geos.size(); ++k) {
             auto& geo = geos[k];
             auto it = externalGeoMap.find(GeometryFacade::getId(geo.get()));
@@ -4276,15 +5559,29 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
                 if (front && k < before) {
                     front->push_back(geo.release());
                 }
+                else if (anchors[k] != 0) {
+                    if (!group || groupAnchor != anchors[k]) {
+                        projectionsBefore.emplace_back(anchors[k], std::vector<Part::Geometry*> {});
+                        group = &projectionsBefore.back().second;
+                        groupAnchor = anchors[k];
+                    }
+                    group->push_back(geo.release());
+                }
                 else {
                     geoms.push_back(geo.release());
                 }
                 continue;
             }
+            const int from = it->second;
+            const int to = pairedLinks[n] ? slots[nextSlot++] : from;
+            if (to != from) {
+                movedSlots[from] = to;
+            }
             // This is an existing geometry. Update it while keeping the old flags, but the kind
-            // the build gave (ops#264; geometry saved before has none)
+            // the build gave (ops#264; geometry saved before has none). The old one is read from
+            // ExternalGeo: its slot in geoms may hold another geometry of the link by now
             const auto kind = kindOf(geo.get());
-            ExternalGeometryFacade::copyFlags(geoms[it->second], geo.get());
+            ExternalGeometryFacade::copyFlags(ExternalGeo[from], geo.get());
             if (kind) {
                 setKind(geo.get(), *kind);
             }
@@ -4296,7 +5593,7 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
             // again (PR 277 verification 5)
             ExternalGeometryFacade::getFacade(geo.get())
                 ->setFlag(ExternalGeometryExtension::TypeGuessed, guessed);
-            geoms[it->second] = geo.release();
+            geoms[to] = geo.release();
         }
     }
     // externalGeoRefMap is rebuilt from ExternalGeo's order, which must be the build order: the
@@ -4317,6 +5614,17 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
     bool hasError = false;
     // the missing references, in order, with the indexes of their geometries in geoms
     std::vector<std::pair<std::string, std::vector<std::size_t>>> missingRefs;
+    // and the links whose lost geometries (above) are flagged missing, alike (ops#264 e2)
+    std::vector<std::pair<std::string, std::vector<std::size_t>>> lostRefs;
+    auto addIndex = [](auto& refs, const std::string& ref, std::size_t index) {
+        auto it = std::find_if(refs.begin(), refs.end(), [&](const auto& entry) {
+            return entry.first == ref;
+        });
+        if (it == refs.end()) {
+            it = refs.emplace(refs.end(), ref, std::vector<std::size_t> {});
+        }
+        it->second.push_back(index);
+    };
     for (std::size_t index = 0; index < geoms.size(); ++index) {
         auto egf = ExternalGeometryFacade::getFacade(geoms[index]);
         egf->setFlag(ExternalGeometryExtension::Sync,false);
@@ -4341,15 +5649,16 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
                     << " missing reference: " << egf->getRef());
             hasError = true;
             egf->setFlag(ExternalGeometryExtension::Missing,true);
-            const std::string& ref = egf->getRef();
-            auto it = std::find_if(missingRefs.begin(), missingRefs.end(), [&](const auto& entry) {
-                return entry.first == ref;
-            });
-            if (it == missingRefs.end()) {
-                it = missingRefs.emplace(missingRefs.end(), ref, std::vector<std::size_t> {});
-            }
-            it->second.push_back(index);
-        } else {
+            addIndex(missingRefs, egf->getRef(), index);
+        }
+        else if (lostIds.count(egf->getId()) != 0) {
+            FC_ERR("External geometry " << getFullName() << ".e" << egf->getId()
+                   << " lost its source in " << egf->getRef());
+            hasError = true;
+            egf->setFlag(ExternalGeometryExtension::Missing, true);
+            addIndex(lostRefs, egf->getRef(), index);
+        }
+        else {
             egf->setFlag(ExternalGeometryExtension::Missing,false);
         }
     }
@@ -4368,12 +5677,22 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
     }
 
     ExternalGeo.setValues(std::move(geoms));
-    if (!inserted.empty()) {
+    if (!inserted.empty() || !movedSlots.empty()) {
         // getValuesForce(): getValues() is empty while the list is flagged invalid, and writing
         // that back would delete every constraint (as in unparkExternalGeometry)
         std::vector<Constraint*> constraints;
         for (const auto& cstr : Constraints.getValuesForce()) {
             auto shifted = cstr->clone();
+            // the geometries a paired link's build order moved, first (ops#264 e2)
+            for (int i = 0; shifted->hasElement(i); ++i) {
+                const int given = shifted->getGeoId(i);
+                auto moved = given <= GeoEnum::RefExt && given != GeoEnum::GeoUndef
+                    ? movedSlots.find(-given - 1)
+                    : movedSlots.end();
+                if (moved != movedSlots.end()) {
+                    shifted->setGeoId(i, -moved->second - 1);
+                }
+            }
             for (int at : inserted) {
                 const int geoId = -at - 1;
                 for (int i = 0; shifted->hasElement(i); ++i) {
@@ -4448,7 +5767,8 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
 
     if (hasError && this->isRecomputing()) {
         throw Base::RuntimeError(
-            missingReferenceMessage(getDocument(), missingRefs, Objects, SubElements, keys));
+            missingReferenceMessage(getDocument(), missingRefs, lostRefs, Objects, SubElements,
+                                    keys));
     }
 }
 
@@ -4457,54 +5777,88 @@ namespace
 std::string missingReferenceMessage(
     const App::Document* doc,
     const std::vector<std::pair<std::string, std::vector<std::size_t>>>& missingRefs,
+    const std::vector<std::pair<std::string, std::vector<std::size_t>>>& lostRefs,
     const std::vector<App::DocumentObject*>& objects,
     const std::vector<std::string>& subElements,
     const std::vector<std::string>& keys)
 {
     // Names each missing reference as the user sees it, Label.Element, with the external
     // geometry it gave (ExternalEdgeN, as the sketcher selects it; the first two are the axes)
-    std::string message = missingRefs.size() == 1 ? "Missing external geometry reference: "
-                                                  : "Missing external geometry references: ";
+    std::string message;
+    if (!missingRefs.empty()) {
+        message = missingRefs.size() == 1 ? "Missing external geometry reference: "
+                                          : "Missing external geometry references: ";
+    }
+    // FreeCAD-CH (ops#264 e2): and each link whose element is there but no longer gives the
+    // geometry the constraints are on (pairGeometries() found no counterpart)
+    if (!lostRefs.empty()) {
+        message += (message.empty() ? "" : "; ") + std::string("External geometry lost: ");
+    }
     bool first = true;
     for (const auto& [ref, indexes] : missingRefs) {
         if (!first) {
             message += "; ";
         }
         first = false;
-
-        std::string source;
-        std::string element;
-        auto it = std::find(keys.begin(), keys.end(), ref);
-        if (it != keys.end() && objects[it - keys.begin()]) {
-            const auto* obj = objects[it - keys.begin()];
-            source = obj->Label.getValue();
-            element = Data::oldElementName(subElements[it - keys.begin()].c_str());
-        }
-        else {
-            // a link dropped by an older version: only the geometry's reference is left
-            auto pos = ref.find('.');
-            std::string objName = ref.substr(0, pos);
-            auto obj = doc ? doc->getObject(objName.c_str()) : nullptr;
-            source = obj ? obj->Label.getValue() : objName;
-            if (pos != std::string::npos) {
-                element = Data::oldElementName(ref.c_str() + pos + 1);
-            }
-        }
-        if (boost::starts_with(element, Data::MISSING_PREFIX)) {
-            element.erase(0, std::strlen(Data::MISSING_PREFIX));
-        }
-        message += source;
-        if (!element.empty()) {
-            message += "." + element;
-        }
-
-        message += " (";
-        for (std::size_t i = 0; i < indexes.size(); ++i) {
-            message += (i ? ", " : "") + std::string("ExternalEdge")
-                + std::to_string(static_cast<long>(indexes[i]) - 1);
-        }
-        message += ")";
+        message += referenceText(doc, ref, indexes, objects, subElements, keys);
     }
+    first = true;
+    for (const auto& [ref, indexes] : lostRefs) {
+        if (!first) {
+            message += "; ";
+        }
+        first = false;
+        message += referenceText(doc, ref, indexes, objects, subElements, keys, true);
+    }
+    return message;
+}
+
+// "Label.Element (ExternalEdgeN, ...)", or for lost geometry "Label.Element no longer gives
+// ExternalEdgeN, ... (...)"
+std::string referenceText(const App::Document* doc,
+                          const std::string& ref,
+                          const std::vector<std::size_t>& indexes,
+                          const std::vector<App::DocumentObject*>& objects,
+                          const std::vector<std::string>& subElements,
+                          const std::vector<std::string>& keys,
+                          bool lost)
+{
+    std::string message;
+    std::string source;
+    std::string element;
+    auto it = std::find(keys.begin(), keys.end(), ref);
+    if (it != keys.end() && objects[it - keys.begin()]) {
+        const auto* obj = objects[it - keys.begin()];
+        source = obj->Label.getValue();
+        element = Data::oldElementName(subElements[it - keys.begin()].c_str());
+    }
+    else {
+        // a link dropped by an older version: only the geometry's reference is left
+        auto pos = ref.find('.');
+        std::string objName = ref.substr(0, pos);
+        auto obj = doc ? doc->getObject(objName.c_str()) : nullptr;
+        source = obj ? obj->Label.getValue() : objName;
+        if (pos != std::string::npos) {
+            element = Data::oldElementName(ref.c_str() + pos + 1);
+        }
+    }
+    if (boost::starts_with(element, Data::MISSING_PREFIX)) {
+        element.erase(0, std::strlen(Data::MISSING_PREFIX));
+    }
+    message += source;
+    if (!element.empty()) {
+        message += "." + element;
+    }
+
+    message += lost ? " no longer gives " : " (";
+    for (std::size_t i = 0; i < indexes.size(); ++i) {
+        message += (i ? ", " : "") + std::string("ExternalEdge")
+            + std::to_string(static_cast<long>(indexes[i]) - 1);
+    }
+    message += lost ? (indexes.size() == 1
+                           ? " (its source edge is gone; its constraints stay on it)"
+                           : " (their source edges are gone; their constraints stay on them)")
+                    : ")";
     return message;
 }
 }  // namespace
@@ -4571,6 +5925,7 @@ void SketchObject::fixExternalGeometry(const std::vector<int> &geoIds) {
                           .getMappedName(elements.front().index);
         (mapped ? mapped : elements.front().name).appendToBuffer(ref);
         egf->setRef(ref);
+        egf->setSource(std::string());  // linked anew (ops#264 e2)
         objs.push_back(obj);
         subs.emplace_back();
         elements.front().index.appendToStringBuffer(subs.back());
@@ -4877,6 +6232,8 @@ int SketchObject::unparkExternalGeometry(App::DocumentObject* obj,
             // The rebuild keeps the placeholder's flags on the projection: give it the entry's
             auto egf = ExternalGeometryFacade::getFacade(placeholder);
             egf->setRef(key);
+            // a copy of another geometry: not from that one's source edge (ops#264 e2)
+            egf->setSource(std::string());
             egf->setFlag(ExternalGeometryExtension::Defining, defining);
             egf->setFlag(ExternalGeometryExtension::Frozen, false);
             egf->setFlag(ExternalGeometryExtension::Sync, false);
@@ -4996,6 +6353,7 @@ int SketchObject::markExternalGeometryMissing(const std::vector<long>& ids, cons
         auto& geo = geos[it->second];
         geo = geo->clone();
         ExternalGeometryFacade::getFacade(geo)->setRef(ref);
+        ExternalGeometryFacade::getFacade(geo)->setSource(std::string());  // (ops#264 e2)
         ++marked;
     }
     if (marked) {
