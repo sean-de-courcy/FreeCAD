@@ -1032,6 +1032,20 @@ class TestSketchExternalTypes(unittest.TestCase):
                     assert count > 0
                 archive.writestr(info, data)
 
+    def reshape(self, face, outline, sketch):
+        """C2 round 2c (ops#502): a script's face given another outline is named by a verified
+        match, and the match can't verify it: the face gets a fresh id (I-C5), and the sketch's
+        links to it break, loud, with the face as their candidate. App.repairReference picks it
+        again; the sketch then pairs its geometry with the old as before"""
+        face.Shape = self.tiltedFace(outline)
+        self.doc.recompute()
+        self.assertFalse(sketch.isValid())
+        self.assertIn("no element holds its id", sketch.getStatusString())
+        for k, (obj, sub) in enumerate(sketch.ExternalGeometry):
+            if obj == face:
+                App.repairReference(sketch, "ExternalGeometry", k, "Face1", True)
+        self.doc.recompute()
+
     @staticmethod
     def tiltedFace(outline):
         """A face from `outline`, (u, v) points in its plane, tilted 45 degrees about the X axis:
@@ -1085,8 +1099,7 @@ class TestSketchExternalTypes(unittest.TestCase):
             self.assertLess((start - section[0][1].StartPoint).Length, TOL)
 
         assertOnTheSection()
-        face.Shape = self.tiltedFace(self.PENTAGON)
-        self.doc.recompute()
+        self.reshape(face, self.PENTAGON, sketch)
         section, projections = self.sectionAndProjections(sketch)
         self.assertEqual((len(section), len(projections)), (1, 5))
         assertOnTheSection()
@@ -1103,8 +1116,7 @@ class TestSketchExternalTypes(unittest.TestCase):
         self.doc.recompute()
         self.assertEqual(len(sketch.Constraints), 2)
         tipLine = sketch.ExternalGeo[tip]
-        face.Shape = self.tiltedFace(self.SQUARE)
-        self.doc.recompute()
+        self.reshape(face, self.SQUARE, sketch)
         self.assertFalse(sketch.isValid())
         self.assertEqual(len(sketch.Constraints), 2)
         # the pentagon's other new edge, unconstrained, went: the kept one's index moved down
@@ -1145,8 +1157,7 @@ class TestSketchExternalTypes(unittest.TestCase):
         line = sketch.addGeometry(Part.LineSegment(V(-4, 1, 0), V(4, 2, 0)), False)
         sketch.addConstraint(Sketcher.Constraint("PointOnObject", line, 1, -left() - 1))
         self.doc.recompute()
-        face.Shape = self.tiltedFace(self.PENTAGON)
-        self.doc.recompute()
+        self.reshape(face, self.PENTAGON, sketch)
         self.assertTrue(sketch.isValid(), sketch.getStatusString())
         _, projections = self.sectionAndProjections(sketch)
         self.assertEqual(len(projections), 5)

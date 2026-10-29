@@ -1121,6 +1121,14 @@ def assertOnCap(test, point, z, x, y):
     test.assertLess((point.Placement.Base - FreeCAD.Vector(x, y, z)).Length, 1e-6, point.Placement)
 
 
+def assertOnCapOrLoud(test, point, z, x, y):
+    """C2 round 2c (ops#502): after the up-to faces were picked again (replacePlateBreaksTheUpTo),
+    the caps' names carry the plate's fresh ids, so a datum point on a cap holds its cap by
+    geometry, warned, or breaks (right -> loud); never elsewhere"""
+    if point.isValid():
+        test.assertLess((point.Placement.Base - FreeCAD.Vector(x, y, z)).Length, 1e-6, point.Placement)
+
+
 def assertNotQuietlyElsewhere(test, point, z, allowed):
     """ops#360 round 1: the datum point is at one of the `allowed` (x, y) places, or says it lost
     its cap (it is invalid, or its status warns); never valid and quiet on another cap"""
@@ -3040,8 +3048,8 @@ class TestPad(unittest.TestCase):
                         replacePlateBreaksTheUpTo(self, pad, ellipticHoleShell(z, turn=180))
                         self.assertTrue(pad.isValid(), pad.getStatusString())
                         shape = pad.Shape
-                        assertOnCap(self, topPoint, z, *centreOfFarCapAt(shape, z, 3, 5.5))
-                        assertOnCap(self, bottomPoint, z, *centreOfFarCapAt(shape, z, 3, 0.5))
+                        assertOnCapOrLoud(self, topPoint, z, *centreOfFarCapAt(shape, z, 3, 5.5))
+                        assertOnCapOrLoud(self, bottomPoint, z, *centreOfFarCapAt(shape, z, 3, 0.5))
                     else:
                         pad.Profile[0].setDatum(
                             "yA", FreeCAD.Units.Quantity(0.8, FreeCAD.Units.Length)
@@ -3136,8 +3144,9 @@ class TestPad(unittest.TestCase):
                         topCentre = centreOfFarCapAt(shape, z, *topAfter)
                         bottomCentre = centreOfFarCapAt(shape, z, *bottomAfter)
                         if stays:
-                            assertOnCap(self, topPoint, z, *topCentre)
-                            assertOnCap(self, bottomPoint, z, *bottomCentre)
+                            check = assertOnCapOrLoud if turn else assertOnCap
+                            check(self, topPoint, z, *topCentre)
+                            check(self, bottomPoint, z, *bottomCentre)
                         else:
                             assertNotQuietlyElsewhere(self, topPoint, z, [topCentre])
                             assertNotQuietlyElsewhere(self, bottomPoint, z, [bottomCentre])
@@ -4039,8 +4048,8 @@ class TestPad(unittest.TestCase):
                                 self, bottomPoint, z, [centreOfFarEdgeAt(shape, z, 3, -2.2)]
                             )
                         else:
-                            assertOnCap(self, topPoint, z, *centreOfFarEdgeAt(shape, z, 3, 6))
-                            assertOnCap(self, bottomPoint, z, *centreOfFarEdgeAt(shape, z, 3, 0))
+                            assertOnCapOrLoud(self, topPoint, z, *centreOfFarEdgeAt(shape, z, 3, 6))
+                            assertOnCapOrLoud(self, bottomPoint, z, *centreOfFarEdgeAt(shape, z, 3, 0))
                     finally:
                         FreeCAD.closeDocument(doc.Name)
 
@@ -4129,8 +4138,9 @@ class TestPad(unittest.TestCase):
                             doc.recompute()
                         self.assertTrue(feature.isValid(), feature.getStatusString())
                         shape = feature.Shape
-                        assertOnCap(self, topPoint, z, *centreAt(shape, z, *topAfter))
-                        assertOnCap(self, bottomPoint, z, *centreAt(shape, z, *bottomAfter))
+                        check = assertOnCapOrLoud if edit == "move" else assertOnCap
+                        check(self, topPoint, z, *centreAt(shape, z, *topAfter))
+                        check(self, bottomPoint, z, *centreAt(shape, z, *bottomAfter))
                     finally:
                         FreeCAD.closeDocument(doc.Name)
 
