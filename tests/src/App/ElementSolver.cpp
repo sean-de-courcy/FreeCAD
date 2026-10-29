@@ -5938,8 +5938,10 @@ TEST(SolveOwner, gonePieceBreaksOnTheSingleProjection)
     // unmarked (PRJ alone). PR 366 rounds 1-8 took the right piece's reference, its centre on
     // the edge, to it. Round 9 (PLAN decision 152): the edge made whole is no evidence, since the
     // plates may have moved under a profile that stayed (in the target's frame), the whole edge on
-    // another plate than the piece's: broken, as on integration. The left piece's, its centre
-    // off the edge, breaks as before. B's far edge, another projection, doesn't count.
+    // another plate than the piece's: broken, as on integration, unless the fingerprint saved the
+    // up-to face under the piece (ops#522, the next test), which this one's doesn't. The left
+    // piece's, its centre off the edge, breaks as before. B's far edge, another projection,
+    // doesn't count.
     const auto left = farEdgePiece({plateElement("left", 'F')});
     const auto right = farEdgePiece({plateElement("right", 'F')});
     SolveInput input;
@@ -5968,6 +5970,78 @@ TEST(SolveOwner, gonePieceBreaksOnTheSingleProjection)
     // No geometry to ask: broken.
     input.holdsPoint = nullptr;
     input.entries = {entryAt(right, 1, 2)};
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
+}
+
+namespace
+{
+
+// An up-to face as a far piece's fingerprint saves it (ops#522): the plate at z = 10 owned by
+// `Plates`, from (x0, -10) to (x1, 10), its normal z.
+ElementFingerprint::UpToFace upToPlate(double x0, double x1, const char* owner = "Plates")
+{
+    ElementFingerprint::UpToFace face;
+    face.owner = owner;
+    face.boxMin = Base::Vector3d(x0, -10, 10);
+    face.boxMax = Base::Vector3d(x1, 10, 10);
+    face.area = (x1 - x0) * 20;
+    face.normal = Base::Vector3d(0, 0, 1);
+    face.wireCentre = Base::Vector3d((x0 + x1) / 2, 0, 10);
+    return face;
+}
+
+}  // namespace
+
+TEST(SolveOwner, farEdgePieceResolvesToItsEdgeMadeWholeOnTheSameFace)
+{
+    // ops#522 (PLAN decision 168): gonePieceBreaksOnTheSingleProjection's right piece, whose
+    // fingerprint saved the up-to face its centre lay on (the right plate, x 0..10). The edge
+    // made whole takes it when the same face lies under the centre now; another face, or the two
+    // of a seam where one was, or a seam's two where only one is now, break it.
+    const auto right = farEdgePiece({plateElement("right", 'F')});
+    SolveInput input;
+    input.diagonal = 30;
+    input.pool["Edge"] = {
+        element("Edge3", {farEdgePiece({}, 0, {"PRJ"})}),
+        element("Edge5", {farEdgePiece({}, 0, {"PRJ"}, 10)}),
+    };
+    measure(input, {{"Edge3", farEdgeAt(1.5, 3.5, 1)}, {"Edge5", farEdgeAt(5, 8, 1)}}, nullptr);
+    input.holdsPoint = [](const std::string& index, const Base::Vector3d& point, double distance) {
+        return (index == "Edge3" && onEdgeAt(point, distance, 1.5, 3.5))
+            || (index == "Edge5" && onEdgeAt(point, distance, 5, 8));
+    };
+    const auto rightPlate = upToPlate(0, 10);
+    const auto leftPlate = upToPlate(-10, 0);
+    std::vector<ElementFingerprint::UpToFace> under {rightPlate};
+    input.upToFacesAt = [&](const Base::Vector3d&,
+                            std::vector<ElementFingerprint::UpToFace>& faces,
+                            std::vector<ElementFingerprint::UpToFace>& all) {
+        faces = under;
+        all = {leftPlate, rightPlate};
+        return true;
+    };
+    auto entryWith = [&](std::vector<ElementFingerprint::UpToFace> saved) {
+        auto entry = missing(right, "Edge");
+        entry.fingerprint = farEdgeAt(1, 2, 1);
+        entry.fingerprint.upToFaces = std::move(saved);
+        return entry;
+    };
+    input.entries = {entryWith({rightPlate})};
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Resolved) << describe(outcome);
+    EXPECT_EQ(outcome.element, "Edge3") << describe(outcome);
+
+    under = {leftPlate};
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
+    under = {leftPlate, rightPlate};
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
+    // On the seam when saved: the two faces, in either order, and only both
+    input.entries = {entryWith({leftPlate, rightPlate})};
+    under = {rightPlate, leftPlate};
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Resolved);
+    under = {rightPlate};
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
+    under = {rightPlate, rightPlate};
     EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
 }
 
@@ -6446,14 +6520,15 @@ TEST(SolveOwner, mergedFarCapPiecesResolveToTheirWhole)
     EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
 }
 
-TEST(SolveOwner, twinCapPiecesBreakWhenTheirCapIsMadeWhole)
+TEST(SolveOwner, twinCapPiecesResolveToTheirCapMadeWholeOnTheSamePlate)
 {
     // PR 366 round 2, PLAN decision 122 (2): A's cap across an elliptic hole in the plate, two
     // twins (the plate, the ellipse and A's circle; ORD) at (3, 5.5) and (3, 0.5). The hole moved
     // away from under A: A's cap is one face again, the projection unmarked (PRJ alone), and it
-    // holds both old centres. Round 9 (decision 152): a far cap made whole is no evidence, since
-    // the plates may have moved under a profile that stayed (in the target's frame), the whole
-    // cap on another plate than the pieces'. Both references break, as without the rule.
+    // holds both old centres. Round 9 (decision 152) refused the rule: the plates may have moved
+    // under a profile that stayed (in the target's frame), the whole cap on another plate than
+    // the pieces'. ops#522 (decision 168): it takes them, together, when the up-to face under each
+    // saved point is the one the piece lay on: the same owner, box, area and normal.
     const std::vector<std::string> marks {
         plateElement("plate", 'F'),
         plateElement("ellipse", 'E'),
@@ -6472,18 +6547,113 @@ TEST(SolveOwner, twinCapPiecesBreakWhenTheirCapIsMadeWhole)
     input.holdsPoint = [&](const std::string& index, const Base::Vector3d&, double) {
         return holders.count(index) > 0;
     };
+    const auto plate = upToPlate(-10, 10);
+    std::vector<ElementFingerprint::UpToFace> under {plate};
+    bool told = true;
+    std::vector<Base::Vector3d> asked;
+    // Every up-to face: the plate, and others unlike it
+    std::vector<ElementFingerprint::UpToFace> every {plate, upToPlate(10, 20), upToPlate(-20, -10)};
+    input.upToFacesAt = [&](const Base::Vector3d& point,
+                            std::vector<ElementFingerprint::UpToFace>& faces,
+                            std::vector<ElementFingerprint::UpToFace>& all) {
+        asked.push_back(point);
+        faces = under;
+        all = every;
+        return told;
+    };
     auto entryAt = [&](int counter, double y) {
         auto entry = missing(farPiece(marks, counter, {"PRJ", "MOD", "ORD"}));
         entry.fingerprint = capAt(3, y);
+        entry.fingerprint.upToFaces = {plate};
         return entry;
     };
     input.entries = {entryAt(1, 0.5), entryAt(2, 5.5)};
     for (const auto& outcome : Data::solveOwner(input)) {
-        EXPECT_EQ(outcome.status, SolveStatus::Broken) << describe(outcome);
+        EXPECT_EQ(outcome.status, SolveStatus::Resolved) << describe(outcome);
+        EXPECT_EQ(outcome.element, "Face4") << describe(outcome);
     }
+    //   asked at each saved centre
+    EXPECT_EQ(asked, (std::vector<Base::Vector3d> {Base::Vector3d(3, 0.5, 10), Base::Vector3d(3, 5.5, 10)}));
+    //   and at the inside point, when the fingerprint has one
+    asked.clear();
+    input.entries = {entryAt(1, 0.5)};
+    input.entries[0].fingerprint.inside = Base::Vector3d(3, 0.25, 10);
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Resolved);
+    EXPECT_EQ(asked, (std::vector<Base::Vector3d> {Base::Vector3d(3, 0.25, 10)}));
+    input.entries = {entryAt(1, 0.5)};
+
+    // Its normal flipped (the plate rebuilt the other way round): the same plate
+    under = {plate};
+    under[0].normal = Base::Vector3d(0, 0, -1);
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Resolved);
+
+    // Another plate under the point, or the same one changed, or none: broken, as on integration
+    auto breaks = [&](std::vector<ElementFingerprint::UpToFace> now, const char* why) {
+        under = std::move(now);
+        auto outcome = Data::solveOwner(input)[0];
+        EXPECT_EQ(outcome.status, SolveStatus::Broken) << why << ": " << describe(outcome);
+    };
+    breaks({upToPlate(0, 10)}, "the next plate");
+    breaks({upToPlate(-9.5, 10.5)}, "the plate rebuilt shifted");
+    breaks({upToPlate(-10, 10, "Plates001")}, "another object's plate");
+    auto tilted = plate;
+    tilted.normal = Base::Vector3d(0.1, 0, 1);
+    breaks({tilted}, "the plate tilted");
+    auto smaller = plate;
+    smaller.area = 390;
+    breaks({smaller}, "a hole grown in the plate (2.5 % of its area)");
+    // An area within tier 3's 1 %: the same plate (a trimmed B-spline face's area moves a little
+    // when its hole moves)
+    under = {plate};
+    under[0].area = 399;
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Resolved);
+    auto taller = plate;
+    taller.boxMax.z = 10.01;
+    breaks({taller}, "the plate's box taller");
+    auto reshaped = plate;
+    reshaped.wireCentre.y = 0.5;
+    breaks({reshaped}, "the plate's outer wire moved (the other half of a split square)");
+    breaks({}, "the face under the point gone");
+    breaks({plate, plate}, "two faces that match");
+    breaks({plate, upToPlate(0, 10)}, "two faces, one matching");
+    told = false;
+    breaks({plate}, "can't be told");
+    told = true;
+    // Another up-to face like it elsewhere (the two halves of a square split along a diagonal,
+    // seen alike): broken
+    every.push_back(plate);
+    breaks({plate}, "another face like it elsewhere");
+    every.pop_back();
+    //   and the saved face not among them at all (the list doesn't hold what is under the point)
+    every = {upToPlate(10, 20)};
+    breaks({plate}, "the saved face not among the up-to faces");
+    every = {plate, upToPlate(10, 20), upToPlate(-20, -10)};
+
+    // No faces saved (a fingerprint before ops#522, a datum plane): broken
+    under = {plate};
+    input.entries[0].fingerprint.upToFaces.clear();
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
+    input.entries = {entryAt(1, 0.5)};
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Resolved);
+    // Nothing to ask: broken
+    input.upToFacesAt = nullptr;
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
+    input.upToFacesAt = [&](const Base::Vector3d&,
+                            std::vector<ElementFingerprint::UpToFace>& faces,
+                            std::vector<ElementFingerprint::UpToFace>& all) {
+        faces = under;
+        all = every;
+        return true;
+    };
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Resolved);
 
     // Nor when the whole cap doesn't hold the old centre (A moved away): broken.
     holders.clear();
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
+    // Nor when two candidates are made whole
+    holders = {"Face4", "Face5"};
+    input.pool["Face"].push_back(element("Face5", {farPiece({}, 0, {"PRJ"})}));
+    measure(input, {{"Face4", whole}, {"Face5", whole}, {"Face9", capAt(20, 3)}}, nullptr);
     EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
 }
 

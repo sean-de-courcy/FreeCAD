@@ -713,6 +713,14 @@ struct AppExport SolveInput
     /// place. Empty: the old piece's own normal stands for it, and a straight far edge's piece
     /// is seen along its line only.
     std::optional<Base::Vector3d> sweep;
+    /// The up-to faces that the line along the sweep through the point meets now, as a far
+    /// piece's fingerprint saves them, and every up-to face in \a all (ops#522, PLAN decision
+    /// 168): false when it can't be told. Unset: none, so no far cap or edge made whole again
+    /// takes a piece.
+    std::function<bool(const Base::Vector3d& point,
+                       std::vector<ElementFingerprint::UpToFace>& faces,
+                       std::vector<ElementFingerprint::UpToFace>& all)>
+        upToFacesAt;
 };
 
 enum class SolveStatus
@@ -848,7 +856,13 @@ struct AppExport SolveOutcome
  *   ring, together. Without such a candidate, the one marked by the old marks' face alone (the
  *   only far cap on it) counts the same if the saved centre lies over it (\a holdsPoint). The
  *   same for a far edge's pieces (ops#386). The far edge or cap made whole again (its section
- *   unmarked: PRJ alone) never counts (PR 366 round 9, PLAN decision 152).
+ *   unmarked: PRJ alone) counts the same, if it is the only one, the saved centre lies on it, and
+ *   the up-to faces under the saved point (\a upToFacesAt) are the ones the saved fingerprint
+ *   lists, each matched by exactly one, and by no other up-to face anywhere (ops#522, PLAN
+ *   decision 168: the same owner, box and area in the owner's frame, normal at the point, and
+ *   outer wire's centre). A fingerprint without up-to faces, an up-to
+ *   face gone from under the point, or one that can't be told never counts (PR 366 round 9,
+ *   decision 152).
  * - The IDX source (Task 2 PR 6): when the old name stands for an IDX section
  *   (NameAncestry::indexSource()), the elements named by a section of the same source under any
  *   op code (NameAncestry::sameIndexSource()), and, for a target without an element map whose

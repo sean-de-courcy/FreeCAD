@@ -1891,6 +1891,98 @@ bool holdsMarkedPiece(std::string_view name, std::string_view oldName, bool alon
     return held;
 }
 
+/* True if \a name's element is \a oldName's far edge or far cap made whole again (ops#386): the
+ * names are the same but in one section, a marked piece's in \a oldName (PRJ and MOD), which in
+ * \a name is the same projection unmarked: PRJ alone, no marks, no duplicate counter. A far edge
+ * that an edit moved off the up-to shell's seam, or out of a hole, is one projection again. The
+ * old piece's place on it, and the up-to face under it, are the caller's to check (ops#522).
+ */
+bool isWholeProjectionOf(std::string_view name, std::string_view oldName)
+{
+    const auto sections = NameAncestry::splitSections(name);
+    const auto oldSections = NameAncestry::splitSections(oldName);
+    if (sections.empty() || sections.size() != oldSections.size()) {
+        return false;
+    }
+    bool whole = false;
+    for (std::size_t i = 0; i < sections.size(); ++i) {
+        if (sections[i] == oldSections[i]) {
+            continue;
+        }
+        if (whole) {
+            return false;
+        }
+        const DecodedMappedSection& x = decodeSection(sections[i]);
+        const DecodedMappedSection& y = decodeSection(oldSections[i]);
+        if (!y.hasMapperFlag(MAPPER_FLAG_PROJECTION) || !y.hasMapperFlag(MAPPER_FLAG_MODIFIED)
+            || y.connectedElements.empty() || !x.connectedElements.empty()
+            || sortedFlags(x) != std::vector<std::string> {MAPPER_FLAG_PROJECTION}
+            || x.duplicateCount != "0" || x.opCode != y.opCode || x.referenceIDs != y.referenceIDs
+            || x.iterationTag != y.iterationTag || x.index != y.index
+            || x.elementType != y.elementType || x.linkedNames != y.linkedNames) {
+            return false;
+        }
+        whole = true;
+    }
+    return whole;
+}
+
+/* True if \a now, the up-to faces under a far piece's saved point now, are \a saved, those its
+ * fingerprint lists (ops#522, PLAN decision 168), each matched by exactly one, and each saved one
+ * by exactly one of \a all, every up-to face now: the same owner, the box's corners and the outer
+ * wire's centre within \a eps (coincidence, as atSamePlace()), the normal at the point within
+ * \a tolerances.angle either way (a face's orientation may flip on a rebuild), and the area within
+ * \a tolerances.size relative (tier 3's: a trimmed B-spline plate's area moved by 4e-5 of itself
+ * when only its hole moved). No face saved, or none now (the face under the point is gone), is
+ * false; so are two faces now that one saved one matches, under the point or elsewhere (two halves
+ * of a square, one where the other was).
+ */
+bool sameUpToFaces(
+    const std::vector<ElementFingerprint::UpToFace>& saved,
+    const std::vector<ElementFingerprint::UpToFace>& now,
+    const std::vector<ElementFingerprint::UpToFace>& all,
+    double eps,
+    const GeometryTolerances& tolerances
+)
+{
+    using Face = ElementFingerprint::UpToFace;
+    // The face alone; with the normal at the point too, for the faces under it
+    auto alike = [&](const Face& a, const Face& b) {
+        return a.owner == b.owner && Base::Distance(a.boxMin, b.boxMin) <= eps
+            && Base::Distance(a.boxMax, b.boxMax) <= eps
+            && Base::Distance(a.wireCentre, b.wireCentre) <= eps
+            && std::abs(a.area - b.area)
+            <= tolerances.size * std::max({std::abs(a.area), std::abs(b.area), eps});
+    };
+    auto same = [&](const Face& a, const Face& b) {
+        if (!alike(a, b)) {
+            return false;
+        }
+        Base::Vector3d u = a.normal;
+        Base::Vector3d v = b.normal;
+        if (u.Length() <= 0.0 || v.Length() <= 0.0) {
+            return false;
+        }
+        u.Normalize();
+        v.Normalize();
+        // The angle from the cross product, as intrinsicAgrees(): acos loses precision near 0
+        return std::atan2((u % v).Length(), std::abs(u * v)) <= tolerances.angle;
+    };
+    if (saved.empty() || saved.size() != now.size()) {
+        return false;
+    }
+    auto matchedOnce = [&](const std::vector<Face>& these, const std::vector<Face>& those, auto match) {
+        return std::all_of(these.begin(), these.end(), [&](const Face& face) {
+            return std::count_if(those.begin(), those.end(), [&](const Face& other) {
+                       return match(face, other);
+                   })
+                == 1;
+        });
+    };
+    return matchedOnce(saved, now, same) && matchedOnce(now, saved, same)
+        && matchedOnce(saved, all, alike);
+}
+
 /* True if \a name's element is \a oldName's piece of a far edge after others of its pieces went
  * (PR 366 round 3): the names are the same but in one section, a marked piece's in both (PRJ,
  * MOD, ORD), with the same marks, where the duplicate counter (count (count - 1) / 2 + place,
@@ -4478,8 +4570,10 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         // piece's face alone (the only far cap on it) counts too, if the saved centre lies over
         // it: a strip across a hole made taller, with no other cap on its face. A renamed face
         // of a reordered up-to shell holds the name but not the old piece's centre.
-        // The single-piece rule (ops#386, rounds 1-8: the far edge or cap made whole again took
-        // the piece) is gone since round 9 (below).
+        // The single-piece rule (ops#386): when no name holds the old piece's, the one element
+        // that is its far edge or far cap made whole again (the same projection unmarked,
+        // isWholeProjectionOf()) is the element if the saved centre lies on it and it lies on
+        // the up-to faces the piece did (ops#522, below).
         if (!oldName.empty()) {
             const ElementFingerprint* centred = nullptr;
             for (const auto member : members) {
@@ -4579,14 +4673,41 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                     state.fewerPieces = holders.front();
                 }
             }
-            // No far edge or far cap made whole again takes a piece (PR 366 round 9, PLAN decision
-            // 152): in the target's own frame the profile may stay while the up-to plates move
-            // under it (its sketch's Placement or the datum plane it is attached to moved, or the
-            // plates themselves), and the edge or cap made whole on the next plate then holds a
-            // gone piece's saved point. Which plate it lies on can't be told from the target
-            // (coplanar plates, a reordered shell). The piece's reference breaks, as on
-            // integration; decision 122 (2)'s twins across an elliptic hole that moved away from
-            // under them break too (right -> loud) until ops#522 tells the plate under it
+            // A far edge or far cap made whole again takes its piece quietly, twins together,
+            // like the ring rule above (PLAN decision 122 (2): a disc across an elliptic hole
+            // that moves away from under it, both twins onto the whole cap), only on the up-to
+            // faces the piece lay on (ops#522, decision 168). In the target's own frame the
+            // profile may stay while the up-to plates move under it (round 9, decision 152), and
+            // the edge or cap made whole on the next plate then holds a gone piece's saved point.
+            // So the faces under the saved point now, the point carried by the target's current
+            // placement into each face owner's own frame, must be those the fingerprint saved:
+            // the same box, area, normal and outer wire there, and no other up-to face like
+            // them. A plate rebuilt elsewhere, a face gone from under the point, a datum plane
+            // (no box), or two faces that match one break the reference, as on integration
+            // (decision 150)
+            if (holders.empty() && input.holdsPoint && input.upToFacesAt) {
+                for (std::size_t k = 0; k < pool.elements.size(); ++k) {
+                    const auto& names = pool.elements[k].names;
+                    if (allowed[k] && std::any_of(names.begin(), names.end(), [&](const auto& n) {
+                            return isWholeProjectionOf(n, oldName);
+                        })) {
+                        holders.push_back(static_cast<int>(k));
+                    }
+                }
+                auto onSameUpToFaces = [&] {
+                    std::vector<ElementFingerprint::UpToFace> now;
+                    std::vector<ElementFingerprint::UpToFace> every;
+                    return centred && !centred->upToFaces.empty()
+                        && input.upToFacesAt(centred->inside ? *centred->inside : *centred->center,
+                                             now,
+                                             every)
+                        && sameUpToFaces(centred->upToFaces, now, every, eps, input.tolerances);
+                };
+                if (holders.size() != 1 || !holdsSavedCentre(holders.front())
+                    || !onSameUpToFaces()) {
+                    holders.clear();
+                }
+            }
             if (holders.size() == 1) {
                 all = {holders.front()};
                 state.inAncestry.insert(holders.front());
