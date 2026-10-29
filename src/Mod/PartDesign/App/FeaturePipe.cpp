@@ -3737,14 +3737,15 @@ Part::TopoShape wireAlong(
 /// How far \a stored and \a middles, a closed spine's stored vertices (the start first) and its
 /// edges' middles (startNearest), lie from \a edges (the spine's, in its order) started at the
 /// vertex \a k and run \a forward (in the edges' order) or the other way, beyond one
-/// translation: the root mean square of the pairs' displacements about their mean. Of as many
-/// points as edges
+/// translation: the root mean square of the pairs' displacements about their mean; not \a
+/// translated, about none (where they lie, not only their shape). Of as many points as edges
 double fromStoredAlong(
     const std::vector<gp_Pnt>& stored,
     const std::vector<gp_Pnt>& middles,
     const std::vector<TopoDS_Edge>& edges,
     size_t k,
-    bool forward
+    bool forward,
+    bool translated = true
 )
 {
     const size_t n = edges.size();
@@ -3759,10 +3760,12 @@ double fromStoredAlong(
         moves.emplace_back(middles[i], middleOf(edges[along]));
     }
     gp_Vec mean;
-    for (const gp_Vec& move : moves) {
-        mean += move;
+    if (translated) {
+        for (const gp_Vec& move : moves) {
+            mean += move;
+        }
+        mean /= static_cast<double>(moves.size());
     }
-    mean /= static_cast<double>(moves.size());
     double sum = 0;
     for (const gp_Vec& move : moves) {
         sum += (move - mean).SquareMagnitude();
@@ -3790,12 +3793,13 @@ double fromStoredAt(
 }
 
 /// The start and the way (forward: in \a edges' order) where fromStoredAlong's fit of \a stored
-/// and \a middles is least, where it is least by more than the rounding; none otherwise, or with
-/// another number of points than edges
+/// and \a middles is least (\a translated as there), where it is least by more than the rounding;
+/// none otherwise, or with another number of points than edges
 std::optional<std::pair<size_t, bool>> bestFitOf(
     const std::vector<gp_Pnt>& stored,
     const std::vector<gp_Pnt>& middles,
-    const std::vector<TopoDS_Edge>& edges
+    const std::vector<TopoDS_Edge>& edges,
+    bool translated = true
 )
 {
     const size_t n = edges.size();
@@ -3807,7 +3811,8 @@ std::optional<std::pair<size_t, bool>> bestFitOf(
     double next = least;
     for (size_t k = 0; k < n; ++k) {
         for (const bool forward : {true, false}) {
-            const double residual = fromStoredAlong(stored, middles, edges, k, forward);
+            const double residual
+                = fromStoredAlong(stored, middles, edges, k, forward, translated);
             if (residual < least) {
                 next = least;
                 least = residual;
@@ -4909,19 +4914,28 @@ App::DocumentObjectExecReturn* Pipe::execute()
                         }
                         unpaired = !turned.empty()
                             || !fitIsClear(storedVertices, storedMiddles, spineInOrder);
-                        auto readFit = [&]() {
-                            const auto best
-                                = bestFitOf(storedVertices, storedMiddles, spineInOrder);
+                        // In a turned frame, where the stored loop lies, not only its shape: with a
+                        // translation free, the profile turned half a turn on itself (or its lines
+                        // cycled) read the stored ring onto its mirror image, the ring's lines
+                        // mirrored in their sketch, and the names' start agreed with it, silently
+                        // (the review of round 6's second fix, R-1; decision 187)
+                        auto readFit = [&](bool translated) {
+                            const auto best = bestFitOf(
+                                storedVertices,
+                                storedMiddles,
+                                spineInOrder,
+                                translated
+                            );
                             if (best) {
                                 readings.push_back(*best);
                             }
                         };
                         if (unpaired && turned.empty()) {
-                            readFit();
+                            readFit(true);
                         }
                         for (size_t i : turned) {
                             fill(inPipe * frames[i] * into[i]);
-                            readFit();
+                            readFit(false);
                         }
                         fill(inPipe);
                     }
@@ -5036,7 +5050,21 @@ App::DocumentObjectExecReturn* Pipe::execute()
                 };
                 const std::optional<size_t> ahead = paired ? edgeOfFirst(true) : std::nullopt;
                 const std::optional<size_t> back = paired ? edgeOfFirst(false) : std::nullopt;
-                const bool forward = ahead.has_value();
+                // The order the fit reads too (readings: its start k and way, the edge of place 0
+                // run backwards from its far end). Where both orders fit the names (a spine of two
+                // edges, or the two found at opposite places), the fit tells them apart: required
+                // to agree with one order alone, such a spine stopped (the review of round 6's
+                // second fix, T-1 and T-3)
+                auto agrees = [&](bool forward, const std::optional<size_t>& edge) {
+                    return edge
+                        && std::ranges::find(
+                               readings,
+                               std::make_pair((forward ? *edge : *edge + 1) % n, forward)
+                           ) != readings.end();
+                };
+                const bool viaAhead = agrees(true, ahead);
+                const bool viaBack = agrees(false, back);
+                const bool forward = viaAhead;
                 auto unmatched = []() {
                     return new App::DocumentObjectExecReturn(QT_TRANSLATE_NOOP(
                         "Exception",
@@ -5045,7 +5073,7 @@ App::DocumentObjectExecReturn* Pipe::execute()
                         "recompute); undo, and make the changes one at a time"
                     ));
                 };
-                if (ahead.has_value() == back.has_value()) {
+                if (viaAhead == viaBack) {
                     return unmatched();
                 }
                 const size_t j = forward ? *ahead : *back;
@@ -5063,10 +5091,6 @@ App::DocumentObjectExecReturn* Pipe::execute()
                     storedMiddles.push_back(
                         middleOf(spineInOrder[forward ? (k + i) % n : (k + 2 * n - 1 - i) % n])
                     );
-                }
-                const std::pair<size_t, bool> named {k % n, forward};
-                if (std::ranges::find(readings, named) == readings.end()) {
-                    return unmatched();
                 }
                 storedWay = storedMiddles.front();
             }
