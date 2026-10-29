@@ -294,6 +294,9 @@ class RingSlidThenTurnedFaceProfileWidened(RingSlidFace):
     line moves out to x = 34 and the whole model turns 120 degrees about Z, in one recompute
     (pipe_closed_r6's RingTurnedFaceProfileWidened after a slide). Every reference follows the
     turn, on the wider ring."""
+    # The Pipe stops and passes its Pad's shape through: the point lands on the Pad's
+    # vertex, which carries the profile sketch's name (ops#549, decision 193)
+    ACCEPTED = {"point_bottom_left|V2": "decision 193", "point_bottom_left|V2s": "decision 193"}
 
     AXES = ("M3", "E7", "E2")
 
@@ -307,6 +310,9 @@ class RingSlidThenTurnedFaceProfileStretched(RingSlidFace):
     """The face profile slid up the left leg to z = 14, the references made; then the square is
     stretched in sketch y (B from 2 to 3) and the whole model turns 120 degrees about Z, in one
     recompute. Every reference follows the turn, on the deeper tube."""
+    # The Pipe stops and passes its Pad's shape through: the point lands on the Pad's
+    # vertex, which carries the profile sketch's name (ops#549, decision 193)
+    ACCEPTED = {"point_bottom_left|V2": "decision 193", "point_bottom_left|V2s": "decision 193"}
 
     AXES = ("M3", "E7", "E1")
 

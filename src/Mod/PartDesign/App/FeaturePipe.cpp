@@ -4804,13 +4804,9 @@ App::DocumentObjectExecReturn* Pipe::execute()
         // a frame of the profile turned (decision 180)
         bool unpaired = false;
         // Unpaired where no frame of the profile turned: the body's fit's best start and way
-        // (bestFitOf)
+        // (bestFitOf); none where one turned
         std::vector<std::pair<size_t, bool>> readings;
-        // Unpaired where a frame turned: the stored start and the next vertex, carried by each of
-        // the profile's frames from the record to now, in the pipe's frame
-        std::vector<std::pair<gp_Pnt, gp_Pnt>> carried;
-        // A frame turned, or a direction kept, within it: far above a rounded coordinate's turn,
-        // far below an edit's
+        // A frame turned: far above a rounded coordinate's turn, far below an edit's
         constexpr double turnedBy = 1e-6;
         const std::vector<std::string> spineInput = spineIdentity(spine, shape, subedge);
         const std::vector<StartRecord> startRecords = readStartRecords(
@@ -4867,7 +4863,6 @@ App::DocumentObjectExecReturn* Pipe::execute()
                 storedNames.clear();
                 unpaired = false;
                 readings.clear();
-                carried.clear();
                 // 2n + 1 points and each frame's 3
                 const size_t framed = 3 * frames.size();
                 if (stored.size() < 5 + framed || stored.size() % 2 == 0) {
@@ -4913,26 +4908,26 @@ App::DocumentObjectExecReturn* Pipe::execute()
                         }
                         unpaired = turned
                             || !fitIsClear(storedVertices, storedMiddles, spineInOrder);
-                        // Where a frame turned, no fit: the stored start must be carried exactly by
-                        // one of the profile's frames. Read in a turned frame, the fit made two
-                        // silent families in turn: translation-free, the profile turned half a turn
-                        // on itself (or its lines cycled) read the stored ring onto its mirror
-                        // image, the ring's lines mirrored in their sketch, and the names' start
-                        // agreed with it (the review of round 6's second fix, R-1); read by
-                        // absolute residual, the mirrored ring still fit best from its own start
-                        // (decision 187 (2)). Where no frame turned, the body's fit (decision 180)
+                        // Where no frame turned, the body's fit reads the start and way (decision
+                        // 180). Where one turned, nothing does, and the pipe stops (decision 195's
+                        // bound): every reading in a turned frame made a silent family in turn.
+                        // The fit, translation-free: a profile turned half a turn on itself (or
+                        // its lines cycled) read the stored ring onto its mirror image, the
+                        // ring's lines mirrored in their sketch, and the names' start agreed with
+                        // it (R-1); by absolute residual, the mirrored ring still fit best from
+                        // its own start (decision 187 (2)). The frames' exact carry of the stored
+                        // start and next vertex: it chose between two orders of the names on a
+                        // spine of two edges (F-1, decision 190) and with two names left at
+                        // opposite places (F-A, decision 192); where the frames disagreed, the
+                        // names chose between them (a triangle mirrored under its lines' IDs);
+                        // and where both frames turned alike, a triangle mirrored with its profile
+                        // flipped half a turn took the mirrored order, and its legs traded places
+                        // quietly (the reviews of round 6's third and fourth fixes)
                         if (unpaired && !turned) {
                             if (const auto best
                                 = bestFitOf(storedVertices, storedMiddles, spineInOrder)) {
                                 readings.push_back(*best);
                             }
-                        }
-                        for (size_t i = 0; turned && i < frames.size(); ++i) {
-                            const gp_Trsf by = inPipe * frames[i] * into[i];
-                            carried.emplace_back(
-                                point(0).Transformed(by),
-                                point(3).Transformed(by)
-                            );
                         }
                     }
                 }
@@ -4950,7 +4945,6 @@ App::DocumentObjectExecReturn* Pipe::execute()
                 storedNames.clear();
                 unpaired = false;
                 readings.clear();
-                carried.clear();
             };
             // Of the same object, with an edge of the spine
             // anchor: rung 4 (another sub-element set's record of the same object), warned
@@ -4999,14 +4993,11 @@ App::DocumentObjectExecReturn* Pipe::execute()
             // least; a line drawn anew leaves its place to the others' order) lie in the stored
             // cyclic order or its reverse; the start is then the first place's line's and the way
             // the second's. Only where the body's fit reads the same start and way, where no frame
-            // of the profile turned (readings), or where a frame of the profile carries the stored
-            // start and its next vertex there, where one turned (carried): a redraw that shifts or
-            // reverses the lines' order (their IDs kept) keeps their cyclic order, and by the names
-            // alone the start and the legs' names followed the lines to other places, silently, as
-            // on integration (`RingTurnedRedrawnAndWidened`). With a frame turned, a start corner
-            // moved along its leg or a profile stretched (its geometry frame turns) stops the pipe
-            // (the review of decision 180's fix, L-1 and L-2b; decision 187 (2)). Otherwise the
-            // pipe stops (decision 150).
+            // of the profile turned (readings): a redraw that shifts or reverses the lines' order
+            // (their IDs kept) keeps their cyclic order, and by the names alone the start and the
+            // legs' names followed the lines to other places, silently, as on integration
+            // (`RingTurnedRedrawnAndWidened`). With a frame turned there is no reading, and the
+            // pipe stops (decision 195). Otherwise the pipe stops (decision 150).
             // Taken at the profile, as a new pipe's, the start went to the profile's nearest
             // vertex: with the profile slid along a leg past its middle, another corner, and the
             // profile's own names at the start went with it, silently (the pre-push review of
@@ -5052,39 +5043,16 @@ App::DocumentObjectExecReturn* Pipe::execute()
                     return BRep_Tool::Pnt(TopExp::FirstVertex(spineInOrder[at % n], true));
                 };
                 // The order the body's fit reads too (readings: its start k and way, the edge of
-                // place 0 run backwards from its far end), or a frame carries (the start k and the
-                // next vertex; never a spine of two edges). Where both orders fit the names (a
-                // spine of two edges, or the two found at opposite places), the body's fit tells
-                // them apart: required to agree with one order alone, such a spine stopped (the
-                // review of round 6's second fix, T-1 and T-3)
+                // place 0 run backwards from its far end). Where both orders fit the names (a spine
+                // of two edges, or the two found at opposite places), the fit tells them apart:
+                // required to agree with one order alone, such a spine stopped (the review of round
+                // 6's second fix, T-1 and T-3)
                 auto agrees = [&](bool forward, const std::optional<size_t>& edge) {
-                    if (!edge) {
-                        return false;
-                    }
-                    const size_t k = forward ? *edge : *edge + 1;
-                    if (carried.empty()) {
-                        return std::ranges::find(readings, std::make_pair(k % n, forward))
-                            != readings.end();
-                    }
-                    // A frame's carry never chooses between two orders of the names. A spine of two
-                    // edges: both ways from the start reach the one other vertex, so no carry tells
-                    // which edge the way runs along, and arcs traded with the profile
-                    // reparameterised went quietly along the other (the review of round 6's third
-                    // fix, F-1; decision 190). Two names left at opposite places: the profile moved
-                    // to the far end of the start leg, placed half a turn about it, carried the
-                    // start there, and the start corner's key followed quietly (F-A)
-                    if (n == 2 || (ahead && back)) {
-                        return false;
-                    }
-                    const gp_Pnt start = startOf(k);
-                    const gp_Vec now(start, startOf(forward ? k + 1 : k + n - 1));
-                    return std::ranges::any_of(carried, [&](const std::pair<gp_Pnt, gp_Pnt>& was) {
-                        const gp_Vec along(was.first, was.second);
-                        return was.first.Distance(start) <= Precision::Confusion()
-                            && along.Magnitude() > Precision::Confusion()
-                            && now.Magnitude() > Precision::Confusion()
-                            && along.Angle(now) <= turnedBy;
-                    });
+                    return edge
+                        && std::ranges::find(
+                               readings,
+                               std::make_pair((forward ? *edge : *edge + 1) % n, forward)
+                           ) != readings.end();
                 };
                 const bool viaAhead = agrees(true, ahead);
                 const bool viaBack = agrees(false, back);

@@ -271,6 +271,9 @@ class Ring180FaceProfileStretched(PostRing):
     """The profile is the top face of a Pad of the square (as pipe_closed_r6.py's
     RingTurnedFaceProfileStretched), stretched in sketch y (B from 2 to 3) as the model turns
     180 degrees about Z. Every reference follows the turn."""
+    # The Pipe stops and passes its Pad's shape through: the point lands on the Pad's
+    # vertex, which carries the profile sketch's name (ops#549, decision 193)
+    ACCEPTED = {"point_bottom_left|V2": "decision 193", "point_bottom_left|V2s": "decision 193"}
 
     AXES = ("M3", "E7", "E1")
     TURN = 180
@@ -290,6 +293,9 @@ class Square180Widened(Ring180Widened):
 class Ring180FaceProfileWidened(PostRing):
     """The face profile of Ring180FaceProfileStretched, unstretched; the ring's right line moves
     out to x = 34 as the model turns 180 degrees about Z. Every reference follows the turn."""
+    # The Pipe stops and passes its Pad's shape through: the point lands on the Pad's
+    # vertex, which carries the profile sketch's name (ops#549, decision 193)
+    ACCEPTED = {"point_bottom_left|V2": "decision 193", "point_bottom_left|V2s": "decision 193"}
 
     AXES = ("M3", "E7", "E2")
     TURN = 180
@@ -314,12 +320,18 @@ class Ring180ProfileStretched(PostRing):
 
 class Ring175FaceProfileStretched(Ring180FaceProfileStretched):
     """As Ring180FaceProfileStretched, turned 175 degrees."""
+    # The Pipe stops and passes its Pad's shape through: the point lands on the Pad's
+    # vertex, which carries the profile sketch's name (ops#549, decision 193)
+    ACCEPTED = {"point_bottom_left|V2": "decision 193", "point_bottom_left|V2s": "decision 193"}
 
     TURN = 175
 
 
 class Square180FaceProfileWidened(Ring180FaceProfileWidened):
     """A 20 x 20 ring (the right line from x = 20 to x = 24), face profile, turned 180 degrees."""
+    # The Pipe stops and passes its Pad's shape through: the point lands on the Pad's
+    # vertex, which carries the profile sketch's name (ops#549, decision 193)
+    ACCEPTED = {"point_bottom_left|V2": "decision 193", "point_bottom_left|V2s": "decision 193"}
 
     width = 20
 

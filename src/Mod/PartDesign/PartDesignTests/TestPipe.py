@@ -4953,20 +4953,21 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
                 self.assertTrue(pipe.isValid(), pipe.getStatusString())
                 self.assertLess((V(pipe.SpineStart[0]) - rotation.multVec(start)).Length, 1e-6)
 
-    def testClosedRingTurnedWithAnotherEditKeepsTheStoredStart(self):
+    def testClosedRingTurnedWithAnotherEditStops(self):
         """The ring and its profile (at the bottom left corner) turned about Z while something
         else changes in the same recompute: the ring's right line moved out (x = 30 to 34), with
         the profile a sketch or a face of a Pad of the square (its offset turned), or that face
         stretched (its square 2 x 3); turned 120 degrees, or 180 (the ring's own symmetry: turned
         by half a turn, it lies on its mirror image, a translated copy from the opposite corner),
         or with the face profile slid up the left leg past its middle first (to z = 14: the stored
-        start stays at the bottom left). No stored frame puts the ring in place, so the start is
-        taken by the lines' stored names: the turned bottom left, quietly. The translation fit
-        picked the bottom right (the post-push review of fork PR 383 round 5, T-A), the fit's
-        bound passed the half-turned ring's twin corner (the pre-push reviews of round 6, T-1 and
-        T-C), and the start taken at the profile went to the slid profile's top left (T-B): the
-        profile's names at the start with it, silently (decision 180). Without the turn, a leg
-        moved by 4 keeps the stored start by the fit."""
+        start stays at the bottom left). No stored frame puts the ring in place, and a frame of
+        the profile turned: the pipe stops (decision 195). The translation fit picked the bottom
+        right (the post-push review of fork PR 383 round 5, T-A), the fit's bound passed the
+        half-turned ring's twin corner (the pre-push reviews of round 6, T-1 and T-C), and the
+        start taken at the profile went to the slid profile's top left (T-B): the profile's names
+        at the start with it, silently; every later reading in a turned frame made another silent
+        family (decisions 187, 190, 192 and 195). Without the turn, a leg moved by 4 keeps the
+        stored start by the fit."""
         kinds = (
             ("widened", 120),
             ("face widened", 120),
@@ -5040,6 +5041,10 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
                 else:
                     profile.Placement = turned
                 self.doc.recompute()
+                if angle:
+                    self.assertFalse(pipe.isValid())
+                    self.assertIn("can't be matched", pipe.getStatusString())
+                    continue
                 self.assertTrue(pipe.isValid(), pipe.getStatusString())
                 self.assertLess((V(pipe.SpineStart[0]) - rotation.multVec(start)).Length, 1e-6)
                 # The bottom left corner's place along the ring is kept: the start's next vertex
@@ -5249,6 +5254,45 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
         self.doc.recompute()
         self.assertFalse(pipe.isValid())
         self.assertIn("can't be matched", pipe.getStatusString())
+
+    def testClosedTriangleMirroredWithTheProfileTurnedStops(self):
+        """An isosceles triangle A (0, 0), B (10, 30), C (-10, 30) in the XZ plane, the profile at
+        A, grown 1.25 about A, its lines redrawn as their mirror images (IDs kept: line 0 now runs
+        from A to C) and the profile turned half a turn on itself (reparameterised: its lines
+        turned back, the same square in the body; or flipped: its placement alone), in one
+        recompute. The profile's geometry frame carries the stored next vertex to B, its
+        placement frame to C: only the order the names fit was taken, through the frame that
+        agreed, and the two legs traded places quietly (the review of fork PR 383 round 6's fourth
+        fix; integration is wrong too). With a frame turned, the frames' carries must agree:
+        the pipe stops (decision 195)."""
+        for kind in ("reparameterised", "flipped"):
+            self.tearDown()
+            self.setUp()
+            with self.subTest(kind=kind):
+                a, b, c = V(0, 0, 0), V(10, 30, 0), V(-10, 30, 0)
+                lines = [Part.LineSegment(a, b), Part.LineSegment(b, c), Part.LineSegment(c, a)]
+                path = models.sketch(self.doc, "Path", lines, self.body, placement=XZ)
+                profile = self.square()
+                pipe = self.pipe(profile, path, "Right corner")
+                a, b, c = a * 1.25, b * 1.25, c * 1.25
+                geometry = path.Geometry
+                for i, line in enumerate(geometry):
+                    line.StartPoint, line.EndPoint = V(100 + 10 * i, 100, 0), V(105 + 10 * i, 105, 0)
+                for line, (p, q) in zip(geometry, ((a, c), (c, b), (b, a))):
+                    line.StartPoint, line.EndPoint = p, q
+                path.Geometry = geometry
+                if kind == "reparameterised":
+                    back = App.Rotation(V(0, 0, 1), -180)
+                    square = profile.Geometry
+                    for line in square:
+                        s, e = back.multVec(V(line.StartPoint)), back.multVec(V(line.EndPoint))
+                        line.StartPoint, line.EndPoint = V(1e3, 1e3, 0), V(2e3, 2e3, 0)
+                        line.StartPoint, line.EndPoint = s, e
+                    profile.Geometry = square
+                profile.Placement = App.Placement(V(), App.Rotation(V(0, 0, 1), 180))
+                self.doc.recompute()
+                self.assertFalse(pipe.isValid())
+                self.assertIn("can't be matched", pipe.getStatusString())
 
     def testClosedRingReorderedAndReversedRenamesNothing(self):
         """The profile slid along its leg (4 to 16), then the lines listed from the top right

@@ -247,6 +247,9 @@ class ProfileAcrossIdsCycled2(OppositeCorner):
 class ProfileAcrossIdsCycled2Face(ProfileAcrossIdsCycled2):
     """The same with a face profile (the top face of a Pad of the square; its placement frame stays,
     its geometry's turns)."""
+    # The Pipe stops and passes its Pad's shape through: the point lands on the Pad's
+    # vertex, which carries the profile sketch's name (ops#549, decision 193)
+    ACCEPTED = {"point_bottom_left|V2s": "decision 193"}
 
     faceProfile = True
 
@@ -262,6 +265,9 @@ class ProfileBottomRightMirrored(OppositeCorner):
 
 
 class ProfileBottomRightMirroredFace(ProfileBottomRightMirrored):
+    # The Pipe stops and passes its Pad's shape through: the point lands on the Pad's
+    # vertex, which carries the profile sketch's name (ops#549, decision 193)
+    ACCEPTED = {"point_bottom_left|V2s": "decision 193"}
     faceProfile = True
 
 
@@ -433,7 +439,13 @@ class SlidToLegEndFlippedPartialNames(Ring):
 
 
 class SlidToLegEndFlippedPartialNamesFace(SlidToLegEndFlippedPartialNames):
+    # The Pipe stops and passes its Pad's shape through: the point lands on the Pad's
+    # vertex, which carries the profile sketch's name (ops#549, decision 193)
+    ACCEPTED = {"point_bottom_left|V2s": "decision 193"}
     faceProfile = True
+    # The Pipe stops (decision 192) and passes its Pad's shape through: the point lands on the
+    # Pad's vertex, which carries the profile sketch's name (ops#549; integration breaks it)
+    ACCEPTED = {"point_bottom_left|V2s": "decision 193"}
 
 
 class SlidToLegEndFlipped(Ring):

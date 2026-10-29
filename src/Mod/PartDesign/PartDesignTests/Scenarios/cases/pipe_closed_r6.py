@@ -205,6 +205,9 @@ class RingTurnedFaceProfileStretched(PostRing):
     the XY plane through its offset. The square is stretched in sketch y (B from 2 to 3, about its
     centre, IDs kept), and the ring's placement and the sketch's offset turn 120 degrees about Z, in
     one recompute. Every reference follows the turn, on the deeper tube."""
+    # The Pipe stops and passes its Pad's shape through: the point lands on the Pad's
+    # vertex, which carries the profile sketch's name (ops#549, decision 193)
+    ACCEPTED = {"point_bottom_left|V2": "decision 193", "point_bottom_left|V2s": "decision 193"}
 
     AXES = ("M3", "E7", "E1")
 
@@ -241,6 +244,9 @@ class RingTurnedProfileStretched(PostRing):
 class RingTurnedFaceProfileWidened(RingTurnedFaceProfileStretched):
     """The face profile of RingTurnedFaceProfileStretched, unstretched; the ring's right line moves
     out to x = 34 as the model turns 120 degrees (both frames turn; the ring is in place in none)."""
+    # The Pipe stops and passes its Pad's shape through: the point lands on the Pad's
+    # vertex, which carries the profile sketch's name (ops#549, decision 193)
+    ACCEPTED = {"point_bottom_left|V2": "decision 193", "point_bottom_left|V2s": "decision 193"}
 
     AXES = ("M3", "E7", "E2")
 
