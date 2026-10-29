@@ -9727,6 +9727,37 @@ TEST(SolveOwner, exactPlaceAnotherSourceBreaks)
     EXPECT_FALSE(Data::lostOldSources({b.oldEdge}, b.oldEdge));
 }
 
+TEST(SolveOwner, exactPlaceAnotherCopysElementBreaks)
+{
+    // Two links to one pin body in a fuse (PR 379 round 5's review, R5PinBottomRimOntoTopRimLong):
+    // copy 0 leaves the fuse and copy 1 moves up onto its place, so copy 1's bottom rim, the
+    // sketch's own edge, lies where copy 0's top rim was. It holds the old rim's sketch source
+    // through another link's copy, so T1''s test passes it, but not the pad that made the old
+    // rim: XP's pick of another origin breaks (PLAN decision 155), as on `integration`.
+    LongBoard b;
+    auto input = b.input(LongBoard::edgeAt(0), LongBoard::edgeAt(45));
+    const auto oldRim = copied(b.oldEdge, 11, "L", 'E');
+    input.entries[0].oldName = oldRim;
+    input.pool["Edge"][0].names = {copied(sketchEdge(1), 12, "L", 'E')};
+    input.pool["Edge"][1].names = {copied(b.otherSide, 12, "L", 'E')};
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << outcome.evidence;
+    EXPECT_EQ(outcome.evidence,
+              "no structural candidate, at the same place: nearest 0.000, second 45.000, d_max "
+              "50.000; the pick Edge2 has another maker");
+    ASSERT_FALSE(outcome.candidates.empty());
+    EXPECT_EQ(outcome.candidates.front(), "Edge2");
+
+    //   T1''s test off: the exact place takes it, warned, as I-S6 records for the switch-off
+    input.sameSource = false;
+    outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Resolved) << outcome.evidence;
+    EXPECT_EQ(outcome.element, "Edge2");
+    EXPECT_EQ(outcome.evidence,
+              "no structural candidate, at the same place, another source: nearest 0.000, second "
+              "45.000, d_max 50.000");
+}
+
 TEST(SolveOwner, faceGeneratorGoneDropsTheSurvivor)
 {
     // CC3: the taper renamed the top cap, so no face holds the top rim arc's face generator, and

@@ -5473,6 +5473,10 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                     // the element drawn again there (round 3's reviews), so ops#394's redraw
                     // breaks until D2 (ops#526) tells them apart. Tier 3's own nearest at the
                     // place resolves as before, never quietly (App::reboundInPlace()).
+                    // So does XP's pick of another origin under T1' (PLAN decision 184): another
+                    // link's copy of the old element's sketch, put where a copy that left the
+                    // fuse had it, keeps the sketch source but not the old element's maker. T1'
+                    // off, it resolves with XP's warning (I-S6).
                     const char* lacks = nullptr;
                     if (state.twinSurvivor >= 0) {
                         lacks = otherOrigin(pool.elements[pick], oldName);
@@ -5481,6 +5485,9 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                     if (!lacks && (state.twinSurvivor >= 0 || nearest.index < 0)
                         && lostOldSource(pick)) {
                         lacks = "source element";
+                    }
+                    if (!lacks && nearest.index < 0 && input.sameSource) {
+                        lacks = otherOrigin(pool.elements[pick], oldName);
                     }
                     const std::string why = lacks
                         ? pool.elements[pick].index + " has another " + lacks
