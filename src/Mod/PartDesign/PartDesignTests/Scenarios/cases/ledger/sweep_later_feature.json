@@ -1,6 +1,6 @@
 {
 "entries": {
-"SweepFoldMoveReorder|C_p0|V2s": {"axes": ["M2", "E2", "E4"], "classes": ["A", "D"], "expect": "BROKEN", "expected": "wrong", "found_by": "port", "issue": "ops#500", "tier": "F"},
+"SweepFoldMoveReorder|C_p0|V2s": {"axes": ["M2", "E2", "E4"], "classes": ["A", "D"], "expect": "BROKEN", "expected": "broken", "found_by": "port", "issue": "ops#500", "tier": "F"},
 "SweepFoldMoveReorder|C_p1|V2s": {"axes": ["M2", "E2", "E4"], "classes": ["A", "D"], "expect": "BROKEN", "expected": "broken", "found_by": "port", "issue": "ops#500", "tier": "F"},
 "SweepFoldMoveReorder|C_p2|V2s": {"axes": ["M2", "E2", "E4"], "classes": ["A", "D"], "expect": "CORRECT", "expected": "guessed", "found_by": "port", "issue": "ops#500", "tier": "F"},
 "SweepFoldMoveReorder|E0_p0|V2s": {"axes": ["M2", "E2", "E4"], "classes": ["A", "D"], "expect": "BROKEN", "expected": "broken", "found_by": "port", "issue": "ops#500", "tier": "F"},
