@@ -552,6 +552,23 @@ TEST(ElementFingerprint, upToFacesRoundTrip)
               "Plate001,-10,-10,10,4,10,10,191,0,0,1,-3,0,10;Plate,-10,-10,10,4,10,10,191,0.6,0,0.8,-3,0,10");
     EXPECT_EQ(ElementFingerprint::fromString(twoText), cap);
 
+    //   with the twins: a lone order-keyed element's count alone (ops#503 D1), or the twins'
+    //   centroid and count, next to the faces (the rebase onto D1, review pr398-r3)
+    ElementFingerprint lone = cap;
+    lone.twinCount = 1;
+    const std::string loneText = lone.toString();
+    EXPECT_EQ(loneText,
+              "6|F|BSpline|1.75|1.18,1.18,10|_|_|_|0.5,0.5,10,2.5,2.5,10|_,1|_|0.75,0.75,10|"
+              "Plate001,-10,-10,10,4,10,10,191,0,0,1,-3,0,10;Plate,-10,-10,10,4,10,10,191,0.6,0,0.8,-3,0,10");
+    EXPECT_EQ(ElementFingerprint::fromString(loneText), lone);
+    ElementFingerprint twins = cap;
+    twins.twinCentroid = Base::Vector3d(1.5, 1.5, 10);
+    twins.twinCount = 2;
+    const std::string twinsText = twins.toString();
+    EXPECT_EQ(twinsText.substr(0, 2), "6|");
+    EXPECT_NE(twinsText.find("|1.5,1.5,10,2|"), std::string::npos) << twinsText;
+    EXPECT_EQ(ElementFingerprint::fromString(twinsText), twins);
+
     //   the faces differ from none, which is version 5 as before
     ElementFingerprint without = cap;
     without.upToFaces.clear();

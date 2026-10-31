@@ -1424,6 +1424,7 @@ bool solveElementReferences(DocumentObject* feature,
                                       std::vector<Data::ElementFingerprint::UpToFace>& all) {
                 return elementUpToFacesFunction(geo, point, faces, &all);
             };
+            input.targetTag = geo->getID();
         }
         for (const auto* entry : entries) {
             Data::SolveInput::Entry item;
@@ -2024,14 +2025,25 @@ bool elementUpToFaces(
     if (!indexed) {
         return false;
     }
-    // A far piece: a marked projection, as the made-whole rule's old name is (solveOwner())
+    // A far piece: a marked projection, as the made-whole rule's old name is (solveOwner()), made
+    // by this feature. A later Pad's shape keeps an earlier Pad's pieces under their names, and
+    // its own up-to faces aren't theirs (review pr398-r3)
+    const long tag = geo->getID();
     const auto names = data->getElementMappedNames(indexed);
-    if (std::none_of(names.begin(), names.end(), [](const auto& mapped) {
-            return Data::isMarkedPieceName(plainName(mapped.first.toString()));
+    if (std::none_of(names.begin(), names.end(), [tag](const auto& mapped) {
+            return Data::isMarkedPieceOf(plainName(mapped.first.toString()), tag);
         })) {
         return false;
     }
     const Base::Vector3d& point = fingerprint.inside ? *fingerprint.inside : *fingerprint.center;
+    // An edge's point, its centre of mass, must lie on the edge: an arc's lies off it, over
+    // another plate than the one the arc lies on (review pr398-r3). Can't be told otherwise.
+    if (fingerprint.type == 'E') {
+        const double distance = 1e-6 * std::max(1.0, data->getBoundBox().CalcDiagonalLength());
+        if (!elementHoldsPointFunction || !elementHoldsPointFunction(geo, element, point, distance)) {
+            return false;
+        }
+    }
     return elementUpToFacesFunction(geo, point, faces, nullptr);
 }
 

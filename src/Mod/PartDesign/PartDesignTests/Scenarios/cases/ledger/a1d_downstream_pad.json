@@ -1,0 +1,10 @@
+{
+"entries": {
+"DownstreamPadBFace|piece|V2s": {"axes": ["M2", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr398-r3", "issue": "ops#522", "tier": "F"},
+"DownstreamPadBFace|strip|V2s": {"axes": ["M2", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr398-r3", "issue": "ops#522", "tier": "F"},
+"DownstreamPadBSamePlates|piece|V2s": {"axes": ["M2", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr398-r3", "issue": "ops#522", "tier": "F"},
+"DownstreamPadBSamePlates|strip|V2s": {"axes": ["M2", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr398-r3", "issue": "ops#522", "tier": "F"},
+"DownstreamPadBShape|piece|V2s": {"axes": ["M2", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr398-r3", "issue": "ops#522", "tier": "F"},
+"DownstreamPadBShape|strip|V2s": {"axes": ["M2", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr398-r3", "issue": "ops#522", "tier": "F"}
+}
+}

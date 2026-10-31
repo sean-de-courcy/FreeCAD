@@ -492,6 +492,13 @@ AppExport bool isMarkedCapName(std::string_view name);
  */
 AppExport bool isMarkedPieceName(std::string_view name);
 
+/** True if a section of \a name is a marked piece (isMarkedPieceName()) made by the feature
+ * whose tag is \a tag (the section's tag, either sign). A later feature's shape keeps an earlier
+ * one's far pieces under their names, and only their maker's up-to faces are theirs (ops#522,
+ * review pr398-r3). False for tag 0.
+ */
+AppExport bool isMarkedPieceOf(std::string_view name, long tag);
+
 /** True if \a name is \a other up to the duplicate counter and not \a other itself: for ordered
  * names (isOrderedName()), twins (ops#360, PR 340 round 5, the fingerprint's twin centroid).
  * With \a copySiblings, also another copy of it by a copy maker of the same kind, or its
@@ -775,6 +782,11 @@ struct AppExport SolveInput
                        std::vector<ElementFingerprint::UpToFace>& faces,
                        std::vector<ElementFingerprint::UpToFace>& all)>
         upToFacesAt;
+    /// The target's own tag (its object's ID), as the sections it makes carry it. The made-whole
+    /// rule takes a far piece only when its marked section is the target's (isMarkedPieceOf()):
+    /// a later Pad's shape keeps an earlier Pad's far pieces, and upToFacesAt measures the later
+    /// Pad's up-to faces (ops#522, review pr398-r3). 0: no piece is the target's.
+    long targetTag = 0;
 };
 
 enum class SolveStatus

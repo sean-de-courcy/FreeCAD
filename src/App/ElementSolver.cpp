@@ -2900,6 +2900,23 @@ bool isMarkedPieceName(std::string_view name)
     return isMarkedPiece(name);
 }
 
+bool isMarkedPieceOf(std::string_view name, long tag)
+{
+    if (tag == 0) {
+        return false;
+    }
+    const std::string own = std::to_string(tag);
+    const std::string negated = std::to_string(-tag);
+    const auto sections = NameAncestry::splitSections(name);
+    return std::any_of(sections.begin(), sections.end(), [&](std::string_view section) {
+        const DecodedMappedSection& decoded = decodeSection(section);
+        return (decoded.elementType == 'F' || decoded.elementType == 'E')
+            && decoded.hasMapperFlag(MAPPER_FLAG_PROJECTION)
+            && decoded.hasMapperFlag(MAPPER_FLAG_MODIFIED) && !decoded.connectedElements.empty()
+            && (decoded.iterationTag == own || decoded.iterationTag == negated);
+    });
+}
+
 bool isCounterSiblingName(std::string_view name, std::string_view other, bool copySiblings)
 {
     return isCounterSibling(name, other, copySiblings);
@@ -5048,7 +5065,9 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             // the same box, area, normal and outer wire there, and no other up-to face like
             // them. A plate rebuilt elsewhere, a face gone from under the point, a datum plane
             // (no box), or two faces that match one break the reference, as on integration
-            // (decision 150)
+            // (decision 150). Only a piece the target made itself (its marked section's tag): a
+            // later Pad keeps an earlier one's pieces, while its own up-to faces may stay put
+            // when the earlier one's move (review pr398-r3)
             if (holders.empty() && input.holdsPoint && input.upToFacesAt) {
                 for (std::size_t k = 0; k < pool.elements.size(); ++k) {
                     const auto& names = pool.elements[k].names;
@@ -5062,6 +5081,7 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                     std::vector<ElementFingerprint::UpToFace> now;
                     std::vector<ElementFingerprint::UpToFace> every;
                     return centred && !centred->upToFaces.empty()
+                        && isMarkedPieceOf(oldName, input.targetTag)
                         && input.upToFacesAt(centred->inside ? *centred->inside : *centred->center,
                                              now,
                                              every)

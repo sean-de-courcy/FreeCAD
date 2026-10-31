@@ -6039,6 +6039,7 @@ TEST(SolveOwner, farEdgePieceResolvesToItsEdgeMadeWholeOnTheSameFace)
         all = {leftPlate, rightPlate};
         return true;
     };
+    input.targetTag = 7;
     auto entryWith = [&](std::vector<ElementFingerprint::UpToFace> saved) {
         auto entry = missing(right, "Edge");
         entry.fingerprint = farEdgeAt(1, 2, 1);
@@ -6049,6 +6050,15 @@ TEST(SolveOwner, farEdgePieceResolvesToItsEdgeMadeWholeOnTheSameFace)
     auto outcome = Data::solveOwner(input)[0];
     EXPECT_EQ(outcome.status, SolveStatus::Resolved) << describe(outcome);
     EXPECT_EQ(outcome.element, "Edge3") << describe(outcome);
+    // A piece another feature made (a later Pad keeps an earlier one's pieces, review
+    // pr398-r3), or no target tag: broken
+    input.targetTag = 9;
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
+    input.targetTag = 0;
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
+    input.targetTag = -7;
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Resolved);
+    input.targetTag = 7;
 
     under = {leftPlate};
     EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
@@ -6587,6 +6597,7 @@ TEST(SolveOwner, twinCapPiecesResolveToTheirCapMadeWholeOnTheSamePlate)
         all = every;
         return told;
     };
+    input.targetTag = 7;
     auto entryAt = [&](int counter, double y) {
         auto entry = missing(farPiece(marks, counter, {"PRJ", "MOD", "ORD"}));
         entry.fingerprint = capAt(3, y);
@@ -6620,6 +6631,9 @@ TEST(SolveOwner, twinCapPiecesResolveToTheirCapMadeWholeOnTheSamePlate)
         EXPECT_EQ(outcome.status, SolveStatus::Broken) << why << ": " << describe(outcome);
     };
     breaks({upToPlate(0, 10)}, "the next plate");
+    input.targetTag = 9;
+    breaks({plate}, "a piece another feature made");
+    input.targetTag = 7;
     breaks({upToPlate(-9.5, 10.5)}, "the plate rebuilt shifted");
     breaks({upToPlate(-10, 10, "Plates001")}, "another object's plate");
     auto tilted = plate;

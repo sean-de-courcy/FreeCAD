@@ -1,0 +1,6 @@
+{
+"entries": {
+"ArcCentroidOverIslandControl|arc_piece|V2s": {"axes": ["M2", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr398-r3", "issue": "ops#522", "tier": "F"},
+"ArcCentroidOverIsland|arc_piece|V2s": {"axes": ["M2", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr398-r3", "issue": "ops#522", "tier": "F"}
+}
+}
