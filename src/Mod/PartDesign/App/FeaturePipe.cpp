@@ -4887,25 +4887,50 @@ App::DocumentObjectExecReturn* Pipe::execute()
                 // the profile's stored frames
                 if (sameInput(record.of, spineInput)
                     && !closedInPlace(storedVertices, storedMiddles, spineInOrder)) {
+                    // The fit is a translation's: with a stored frame of the profile turned
+                    // since the record, the loop turned, and a turn that still fits by a
+                    // translation is the loop's own symmetry (a rectangle turned half a
+                    // turn, a square a quarter), whose twin start the fit called clear: the
+                    // start moved to another corner with the profile's names, silently (the
+                    // pre-push reviews of round 6, T-1 and T-C; decision 180)
+                    bool turned = false;
+                    for (size_t i = 0; i < frames.size(); ++i) {
+                        const gp_Trsf moved = frames[i] * into[i];
+                        turned = turned
+                            || std::abs(moved.GetRotation().GetRotationAngle()) > turnedBy;
+                    }
                     bool inFrame = false;
                     for (size_t i = 0; i < frames.size() && !inFrame; ++i) {
                         fill(inPipe * frames[i] * into[i]);
                         inFrame = closedInPlace(storedVertices, storedMiddles, spineInOrder);
                     }
+                    // With a frame turned, the loop in place in a stored frame stands only where
+                    // every stored line found on the spine lies at the place that frame carries
+                    // it to, and the lines' names can be read: a scalene triangle mirrored, each
+                    // line keeping its side, with its profile reparameterised half a turn, lies
+                    // exactly in place in the placement frame turned half a turn, and two legs'
+                    // faces went to their mirror places, silently (the pre-push review of round
+                    // 6's fifth fix, R6J-1; decision 198). Otherwise the pipe stops, as below
+                    if (inFrame && turned) {
+                        const size_t n = spineInOrder.size();
+                        std::vector<std::string> names;
+                        if (makeTopoShape(false).getHistoryAlgorithm()
+                            == App::HistoryAlgorithm::V2) {
+                            for (const TopoDS_Edge& edge : spineInOrder) {
+                                names.push_back(firstName(path, edge));
+                            }
+                        }
+                        const std::vector<size_t> places
+                            = placesOf(storedVertices, storedMiddles, spineInOrder);
+                        inFrame = names.size() == n && record.names.size() == n
+                            && places.size() == n;
+                        for (size_t k = 0; k < n && inFrame; ++k) {
+                            inFrame = names[places[k]] == record.names[k]
+                                || std::ranges::find(names, record.names[k]) == names.end();
+                        }
+                    }
                     if (!inFrame) {
                         fill(inPipe);
-                        // The fit is a translation's: with a stored frame of the profile turned
-                        // since the record, the loop turned, and a turn that still fits by a
-                        // translation is the loop's own symmetry (a rectangle turned half a
-                        // turn, a square a quarter), whose twin start the fit called clear: the
-                        // start moved to another corner with the profile's names, silently (the
-                        // pre-push reviews of round 6, T-1 and T-C; decision 180)
-                        bool turned = false;
-                        for (size_t i = 0; i < frames.size(); ++i) {
-                            const gp_Trsf moved = frames[i] * into[i];
-                            turned = turned
-                                || std::abs(moved.GetRotation().GetRotationAngle()) > turnedBy;
-                        }
                         unpaired = turned
                             || !fitIsClear(storedVertices, storedMiddles, spineInOrder);
                         // Where no frame turned, the body's fit reads the start and way (decision

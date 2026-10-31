@@ -5294,6 +5294,50 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
                 self.assertFalse(pipe.isValid())
                 self.assertIn("can't be matched", pipe.getStatusString())
 
+    def testClosedScaleneMirroredWithTheProfileReparameterisedStops(self):
+        """A scalene triangle A (0, 0), R (10, 30), L (-16, 24) in the XZ plane, the profile at A,
+        mirrored about Z with each line keeping its side (line 0 runs from A to R' (16, 24)), and
+        the profile reparameterised half a turn (its lines turned back, the same square in the
+        body), in one recompute. The placement frame's half turn carries the stored triangle
+        exactly onto the mirrored one: read in that frame, the start's next vertex went to L'
+        while line 0 lies at the right, and the right and left legs' faces went to the mirror
+        places, silently (the review of fork PR 383 round 6's fifth fix, R6J-1; integration is
+        right). With a frame turned, the loop in place in a frame stands only where the lines'
+        names lie at the places it carries them to: the pipe stops (decision 198). Mirrored under
+        the lines' IDs (line 0 runs from A to L'), names and places agree, and it resolves."""
+        for idsFollow in (False, True):
+            self.tearDown()
+            self.setUp()
+            with self.subTest(idsFollow=idsFollow):
+                a, r, l = V(0, 0, 0), V(10, 30, 0), V(-16, 24, 0)
+                lines = [Part.LineSegment(a, r), Part.LineSegment(r, l), Part.LineSegment(l, a)]
+                path = models.sketch(self.doc, "Path", lines, self.body, placement=XZ)
+                profile = self.square()
+                pipe = self.pipe(profile, path, "Right corner")
+                r, l = V(-l.x, l.y, 0), V(-r.x, r.y, 0)
+                drawn = ((a, l), (l, r), (r, a)) if idsFollow else ((a, r), (r, l), (l, a))
+                geometry = path.Geometry
+                for i, line in enumerate(geometry):
+                    line.StartPoint, line.EndPoint = V(100 + 10 * i, 100, 0), V(105 + 10 * i, 105, 0)
+                for line, (p, q) in zip(geometry, drawn):
+                    line.StartPoint, line.EndPoint = p, q
+                path.Geometry = geometry
+                back = App.Rotation(V(0, 0, 1), -180)
+                square = profile.Geometry
+                for line in square:
+                    s, e = back.multVec(V(line.StartPoint)), back.multVec(V(line.EndPoint))
+                    line.StartPoint, line.EndPoint = V(1e3, 1e3, 0), V(2e3, 2e3, 0)
+                    line.StartPoint, line.EndPoint = s, e
+                profile.Geometry = square
+                profile.Placement = App.Placement(V(), App.Rotation(V(0, 0, 1), 180))
+                self.doc.recompute()
+                if not idsFollow:
+                    self.assertFalse(pipe.isValid())
+                    self.assertIn("can't be matched", pipe.getStatusString())
+                    continue
+                self.assertTrue(pipe.isValid(), pipe.getStatusString())
+                self.assertLess(V(pipe.SpineStart[0]).Length, 1e-6)
+
     def testClosedRingReorderedAndReversedRenamesNothing(self):
         """The profile slid along its leg (4 to 16), then the lines listed from the top right
         and the left one drawn the other way (round 2's `RingSlidThenReorderedAndReversed`):
