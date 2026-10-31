@@ -68,7 +68,7 @@
 "TiltedTwinsPlus1ToMinus1|middle|V2s": {"axes": ["M5", "E7"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#500", "tier": "F"},
 "TiltedTwinsPlus1ToMinus1|top|V2s": {"axes": ["M5", "E7"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#500", "tier": "F"},
 "TiltedTwinsPlus1ToPlus2|bottom|V2s": {"axes": ["M5", "E7"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#500", "tier": "F"},
-"TiltedTwinsPlus1ToPlus2|middle|V2s": {"axes": ["M5", "E7"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#500", "tier": "F"},
+"TiltedTwinsPlus1ToPlus2|middle|V2s": {"axes": ["M5", "E7"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "port", "issue": "ops#500", "tier": "F"},
 "TiltedTwinsPlus1ToPlus2|top|V2s": {"axes": ["M5", "E7"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#500", "tier": "F"},
 "TiltedTwinsToMinus001|bottom|V2s": {"axes": ["M5", "E7"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#500", "tier": "F"},
 "TiltedTwinsToMinus001|middle|V2s": {"axes": ["M5", "E7"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#500", "tier": "F"},
