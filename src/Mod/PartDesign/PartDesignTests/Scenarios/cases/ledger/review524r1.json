@@ -1,0 +1,18 @@
+{
+"entries": {
+"EdgeFewerPiecesAroundHole|P0|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "guessed", "found_by": "review prA1c-r1", "issue": "ops#524", "tier": "F"},
+"EdgeFewerPiecesAroundHole|P1|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "guessed-wrong", "found_by": "review prA1c-r1", "issue": "ops#524", "tier": "F"},
+"MirrorCopyAcrossHole|Lc|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review prA1c-r1", "issue": "ops#524", "tier": "F"},
+"MirrorCopyAcrossHole|L|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review prA1c-r1", "issue": "ops#524", "tier": "F"},
+"MirrorCopyAcrossHole|Mc|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review prA1c-r1", "issue": "ops#524", "tier": "F"},
+"MirrorCopyAcrossHole|M|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review prA1c-r1", "issue": "ops#524", "tier": "F"},
+"PadOnUpToCapAcrossHole|L|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review prA1c-r1", "issue": "ops#524", "tier": "F"},
+"PadOnUpToCapAcrossHole|M|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review prA1c-r1", "issue": "ops#524", "tier": "F"},
+"SlideWhilePlateGrows|L|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review prA1c-r1", "issue": "ops#524", "tier": "F"},
+"SlideWhilePlateGrows|M|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prA1c-r1", "issue": "ops#524", "tier": "F"},
+"UArmSwapRedraw|L|V2s": {"axes": ["M5", "E2"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review prA1c-r1", "issue": "ops#524", "tier": "F"},
+"UArmSwapRedraw|M|V2s": {"axes": ["M5", "E2"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prA1c-r1", "issue": "ops#524", "tier": "F"},
+"UTranslatedOverSteppedHole|L|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "ops#524 A1e (PLAN decision 202)", "issue": "ops#524", "tier": "F"},
+"UTranslatedOverSteppedHole|M|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "ops#524 A1e (PLAN decision 202)", "issue": "ops#524", "tier": "F"}
+}
+}
