@@ -30,6 +30,7 @@
 #include <optional>
 #include <Mod/Part/App/FCBRepAlgoAPI_Fuse.h>
 #include <BRep_Builder.hxx>
+#include <BRep_Tool.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepAlgoAPI_Section.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
@@ -488,14 +489,15 @@ bool upToFaces(
 const bool upToFacesRegistered = (App::setElementUpToFacesFunction(&upToFaces), true);
 
 // Whether a lone far piece slid within its up-to face, for the reference solver (ops#524, PLAN
-// decision 182, N1; App::ElementUpToPathFunction). In the saved face's owner's own frame: the line
-// along the sweep through the piece's point now (carried as upToFaces() carries it) meets exactly
-// one of that owner's up-to faces, inside it and not on its boundary, and so does the line
-// through the saved foot, on the same face; and no boundary edge of the face (its holes', and
-// its seam's, included) meets the strip that the segment between the two meetings spans along
-// the sweep: an exact section, no sampling. Seen along the sweep, the straight path from the old
-// place to the new stays on the face. A piece moved along the sweep alone stays at its place.
-bool upToPath(
+// decisions 182 and 199 (3); App::ElementUpToPathFunction). In the saved face's owner's own frame:
+// the line along the sweep through the piece's point now (carried as upToFaces() carries it) meets
+// exactly one of that owner's up-to faces, inside it and not on its boundary, and so does the line
+// through the saved foot, on the same face; then the path stays on the face when no boundary edge
+// of it (its holes' included) meets the strip that the segment between the two meetings spans
+// along the sweep: an exact section, no sampling. A piece moved along the sweep alone stays at its
+// place. A seam edge met, and nothing else, can't be told (the path may go round a periodic face
+// through it); nor can the rest that isn't one meeting inside the face at each end.
+std::optional<bool> upToPath(
     const App::GeoFeature* geo,
     const char* name,
     const Data::ElementFingerprint::UpToFace& saved,
@@ -504,7 +506,7 @@ bool upToPath(
 {
     UpToContext context;
     if (!saved.foot || !upToContext(geo, name, context)) {
-        return false;
+        return std::nullopt;
     }
     Base::Vector3d at;
     context.placement.multVec(point, at);
@@ -519,7 +521,7 @@ bool upToPath(
             std::vector<TopoShape> shapeFaces;
             gp_Lin line;
             if (!upToFacesOf(context, ref, sub, at, shapeFaces, line)) {
-                return false;
+                return std::nullopt;
             }
             along = line.Direction();
             for (const auto& face : shapeFaces) {
@@ -529,19 +531,19 @@ bool upToPath(
                     continue;
                 }
                 if (under || met->second != TopAbs_IN) {
-                    return false;  // two faces, or on the boundary
+                    return std::nullopt;  // two faces, or on the boundary
                 }
                 under = topoFace;
                 now = BRepAdaptor_Surface(topoFace).Value(met->first.X(), met->first.Y());
             }
         }
         if (!under) {
-            return false;
+            return std::nullopt;
         }
         const gp_Pnt foot(saved.foot->x, saved.foot->y, saved.foot->z);
         const auto old = meeting(*under, gp_Lin(foot, along));
         if (!old || old->second != TopAbs_IN) {
-            return false;
+            return std::nullopt;
         }
         const gp_Pnt from = BRepAdaptor_Surface(*under).Value(old->first.X(), old->first.Y());
         // The segment's part across the sweep; none: the piece stayed where it was, seen along it
@@ -555,7 +557,7 @@ bool upToPath(
         Bnd_Box box;
         BRepBndLib::AddOptimal(*under, box, false, false);
         if (box.IsVoid() || box.IsOpen()) {
-            return false;
+            return std::nullopt;
         }
         const double reach = std::sqrt(box.SquareExtent())
             + from.Distance(box.CornerMin()) + from.Distance(box.CornerMax()) + 1.0;
@@ -563,27 +565,48 @@ bool upToPath(
         const gp_Ax3 frame(from, x.Crossed(along), x);  // its Y axis is the sweep
         BRepBuilderAPI_MakeFace strip(gp_Pln(frame), 0.0, length, -reach, reach);
         if (!strip.IsDone()) {
-            return false;
+            return std::nullopt;
         }
+        // Whether the strip meets any of `edges`; empty when the section fails
+        auto meets = [&](const TopoDS_Compound& edges) -> std::optional<bool> {
+            BRepAlgoAPI_Section section(strip.Face(), edges, false);
+            section.Build();
+            if (!section.IsDone()) {
+                return std::nullopt;
+            }
+            const TopoDS_Shape& met = section.Shape();
+            return TopExp_Explorer(met, TopAbs_VERTEX).More()
+                || TopExp_Explorer(met, TopAbs_EDGE).More();
+        };
         TopoDS_Compound boundary;
+        TopoDS_Compound seams;
         BRep_Builder builder;
         builder.MakeCompound(boundary);
+        builder.MakeCompound(seams);
+        bool anySeam = false;
         for (TopExp_Explorer edges(*under, TopAbs_EDGE); edges.More(); edges.Next()) {
-            builder.Add(boundary, edges.Current());
+            const TopoDS_Edge& edge = TopoDS::Edge(edges.Current());
+            const bool seam = BRep_Tool::IsClosed(edge, *under);
+            builder.Add(seam ? seams : boundary, edge);
+            anySeam = anySeam || seam;
         }
-        BRepAlgoAPI_Section section(strip.Face(), boundary, false);
-        section.Build();
-        if (!section.IsDone()) {
-            return false;
+        const auto crosses = meets(boundary);
+        if (!crosses || *crosses) {
+            return crosses ? std::optional<bool>(false) : std::nullopt;
         }
-        const TopoDS_Shape& met = section.Shape();
-        return !TopExp_Explorer(met, TopAbs_VERTEX).More() && !TopExp_Explorer(met, TopAbs_EDGE).More();
+        if (anySeam) {
+            const auto throughSeam = meets(seams);
+            if (!throughSeam || *throughSeam) {
+                return std::nullopt;
+            }
+        }
+        return true;
     }
     catch (const Standard_Failure&) {
-        return false;
+        return std::nullopt;
     }
     catch (const Base::Exception&) {
-        return false;
+        return std::nullopt;
     }
 }
 
