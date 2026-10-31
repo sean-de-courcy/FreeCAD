@@ -409,6 +409,11 @@ class RingTurnedFaceProfile(Ring):
     the XY plane through its offset; the ring's placement and the sketch's offset turn 120
     degrees about Z. Every reference follows the turn."""
 
+    # With a frame of the profile turned, the Pipe stops (decision 195's bound) and passes its
+    # Pad's shape through: the point lands on the Pad's vertex, which carries the profile
+    # sketch's name (ops#549, decision 193)
+    ACCEPTED = {"point_bottom_left|V2": "decision 193", "point_bottom_left|V2s": "decision 193"}
+
     AXES = ("M3", "E7")
     TURN = 120
 
