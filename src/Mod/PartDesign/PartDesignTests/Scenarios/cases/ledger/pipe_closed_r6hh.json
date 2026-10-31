@@ -1,0 +1,6 @@
+{
+"entries": {
+"StoppedPipeOnPadPointCorner|datum_top_outer|V2s": {"axes": ["M3", "E7", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6hh", "issue": "ops#469", "tier": "F"},
+"StoppedPipeOnPadPointCorner|point_bottom_left|V2s": {"axes": ["M3", "E7", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "wrong", "found_by": "review pr383-r6hh", "issue": "ops#469", "tier": "F"}
+}
+}
