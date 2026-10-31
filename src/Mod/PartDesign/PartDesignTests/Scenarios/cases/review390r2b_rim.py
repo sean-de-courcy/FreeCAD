@@ -204,6 +204,9 @@ class EllipseCutDiskTurned(CutRim):
     __doc__ = CutRim.__doc__ + " Cutter: the ellipse. The disk turns 180 degrees."
     cutter = "ellipse"
     end = dict(turn=180.0)
+    # The disk's turn goes into the Pad's and the Pocket's Placement, and the solver measures
+    # without it: the arcs trade unseen (ops#557, a solver debt shared by integration; decision 209)
+    ACCEPTED = {"rim_p|V2s": "decision 209", "rim_m|V2s": "decision 209"}
 
 
 class EllipseCutToolTurned(CutRim):
@@ -216,6 +219,9 @@ class EllipseCutBothTurned(CutRim):
     __doc__ = CutRim.__doc__ + " Cutter: the ellipse. Both sketches turn 180 degrees."
     cutter = "ellipse"
     end = dict(turn=180.0, et=180.0)
+    # The disk's turn goes into the Pad's and the Pocket's Placement, and the solver measures
+    # without it: the arcs trade unseen (ops#557, a solver debt shared by integration; decision 209)
+    ACCEPTED = {"rim_p|V2s": "decision 209", "rim_m|V2s": "decision 209"}
 
 
 class EllipseCutShiftedDiskTurned(CutRim):
