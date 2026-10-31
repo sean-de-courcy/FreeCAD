@@ -1,0 +1,6 @@
+{
+"entries": {
+"EdgeReachAcrossSeamFar|p1_piece|V2s": {"axes": ["M2", "E5"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr398-r4", "issue": "ops#522", "tier": "F"},
+"EdgeReachAcrossSeam|p1_piece|V2s": {"axes": ["M2", "E5"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr398-r4", "issue": "ops#522", "tier": "F"}
+}
+}
