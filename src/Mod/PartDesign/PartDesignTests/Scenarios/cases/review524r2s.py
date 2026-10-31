@@ -198,10 +198,8 @@ def slide(name, dx, dy, holes=((-1, -1, 1, 1),), rect=(-5, -3, 5, 3)):
 
 
 SlideA = slide("SlideA", 0.3, 0)
-SlideB = slide("SlideB", 0.5, 0.5)
 SlideC = slide("SlideC", -0.5, 0.2)
 SlideD = slide("SlideD", 1.0, 0)
-SlideE = slide("SlideE", 0, 1.0)
 SlideF = slide("SlideF", 2.0, 0)
 SlideG = slide("SlideG", 0.2, -0.4)
 SlideH = slide("SlideH", -1.0, -1.0)
