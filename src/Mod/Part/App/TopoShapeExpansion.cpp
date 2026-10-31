@@ -2018,8 +2018,9 @@ bool liesOn(const TopoDS_Shape& member, const TopoDS_Shape& source)
 /// The maker's order is kept where a place on the source means nothing (decision 158 Q1): the
 /// first source is a vertex (PipeShell's end edges, swept from the spine's end), or a member
 /// doesn't lie on the source's curve or surface (a pipe's leg faces, swept from the profile
-/// circle), as for vertexes generated along a closed edge (NamingMap::build's exception: the
-/// maker lists them from the edge's seam, which an edit can move past one of them). Ordering such
+/// circle), as for members placed on a closed edge, its vertexes (NamingMap::build's exception)
+/// and its pieces (decision 204): their parameter counts from the edge's seam, which an edit can
+/// move past one of them, so they keep the maker's order, with ORD. Ordering such
 /// members by their coordinates would rename them under a rigid motion; the maker's order is
 /// the profile's and the spine's; `makerOrder`, if given, is set for these two cases. Ties keep
 /// the order given. Elsewhere the twins' names carry ORD (twinPlaces), so the solver re-checks a
@@ -2078,7 +2079,10 @@ std::vector<std::size_t> twinOrder(
         TopoDS_Vertex start;
         TopoDS_Vertex end;
         TopExp::Vertices(TopoDS::Edge(edge), start, end);
-        if (members.front().ShapeType() == TopAbs_VERTEX && !start.IsNull() && start.IsSame(end)) {
+        // A closed edge's parameter counts from its seam, which an edit moves without moving the
+        // members (a sketch's circle turned): its vertexes and its pieces keep the maker's order,
+        // with ORD (PLAN decision 204; PR 390 round 2's groove across a pad's rim)
+        if (!start.IsNull() && start.IsSame(end)) {
             return given;
         }
         curve = BRep_Tool::Curve(TopoDS::Edge(edge), first, last);
