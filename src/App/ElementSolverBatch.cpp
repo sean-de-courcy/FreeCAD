@@ -1437,6 +1437,7 @@ bool solveElementReferences(DocumentObject* feature,
                 FC_LOG(referenceName(entry->prop)
                        << "[" << entry->index << "]: Expand read as One (not a PropertyLinkSub)");
                 item.policy = Data::SolvePolicy::One;
+                item.listHolder = true;
             }
             item.fingerprint = Data::ElementFingerprint::fromString(entry->oldFingerprint);
             if (item.policy == Data::SolvePolicy::Equivalent) {
@@ -1876,10 +1877,14 @@ bool reboundInPlace(DocumentObject* obj, const std::string& sub, const GuessReco
     if (!here(elementName.oldName)) {
         return false;
     }
+    // An index-only reference has no origin to share: never quiet (ops#550 (1), ops#526 D2)
+    if (guess.origName.empty()) {
+        return false;
+    }
     // Never quiet for the original's twin, nor for an element of another origin (ops#503 D1:
     // the twin-pick rule, XP's source condition), judged from the names as the solver judged
     // them
-    if (!guess.origName.empty()) {
+    {
         std::vector<std::string> names;
         if (const auto prop = geo->getPropertyOfGeometry()) {
             if (const auto data = prop->getComplexData()) {
@@ -1899,14 +1904,24 @@ bool reboundInPlace(DocumentObject* obj, const std::string& sub, const GuessReco
         if (!Data::mayBeQuietAtPlace(names, oldName, sameMaker)) {
             return false;
         }
-        // T1''s test: an element that lost the old name's sources is never quiet (PLAN decisions
-        // 155 and 165). It may be the element drawn again there, or a sibling of its sketch that
-        // was already in the model: nothing here tells them apart (D2, ops#526). The solver's own
-        // form of the test also exempts tier 1's ancestry and IDX survivors; this one doesn't,
-        // which can only warn where the solver would have kept the quieter level.
-        if (solverParameters()->GetBool("Tier1SameSource", true)
-            && Data::lostOldSources(names, oldName)) {
-            return false;
+        // T1''s test: an element that lost the old name's sources is quiet only when the record
+        // says it is the element drawn again there (ops#526 D2, placeVerdict(): its sides the
+        // old element's, every source it doesn't share new to a sketch the target was built
+        // from); a sibling moved onto the place, or a record without the marks, is never quiet
+        // (PLAN decisions 155 and 165). Judged on the record the solver judged (the guess's
+        // snapshot), never on a refreshed one. The solver's own form of the test also exempts
+        // tier 1's ancestry and IDX survivors; this one doesn't, which can only warn where the
+        // solver would have kept the quieter level.
+        if (solverParameters()->GetBool("Tier1SameSource", true)) {
+            const bool lost = Data::lostOldSources(names, oldName);
+            Data::ElementFingerprint now;
+            const Data::PlaceVerdict verdict = geo->getElementFingerprint(elementName.oldName.c_str(), now)
+                ? Data::placeVerdict(saved, now, names, oldName, lost, tolerances)
+                : Data::PlaceVerdict::Unjudged;
+            if (verdict == Data::PlaceVerdict::OtherSide
+                || (lost && verdict != Data::PlaceVerdict::Quiet)) {
+                return false;
+            }
         }
     }
     // The only element there: an alternative at the same place makes the pick a choice
