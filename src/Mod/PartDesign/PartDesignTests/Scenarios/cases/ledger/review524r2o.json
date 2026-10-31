@@ -1,0 +1,14 @@
+{
+"entries": {
+"SlantedPadPlateSwappedUnderBoxTip|C_R|V2s": {"axes": ["M2", "E2"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review prA1e-r2", "issue": "ops#524", "tier": "F"},
+"SlantedPadPlateSwappedUnderBoxTip|C_T|V2s": {"axes": ["M2", "E2"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review prA1e-r2", "issue": "ops#524", "tier": "F"},
+"TiltedPlateSwappedOnPad|C_R|V2s": {"axes": ["M2", "E2"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prA1e-r2", "issue": "ops#524", "tier": "F"},
+"TiltedPlateSwappedOnPad|C_T|V2s": {"axes": ["M2", "E2"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review prA1e-r2", "issue": "ops#524", "tier": "F"},
+"TiltedPlateSwappedUnderBoxTip|C_R|V2s": {"axes": ["M2", "E2"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prA1e-r2", "issue": "ops#524", "tier": "F"},
+"TiltedPlateSwappedUnderBoxTip|C_T|V2s": {"axes": ["M2", "E2"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review prA1e-r2", "issue": "ops#524", "tier": "F"},
+"TiltedPlateSwappedUnderFilletTip|C_R|V2s": {"axes": ["M2", "E2"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prA1e-r2", "issue": "ops#524", "tier": "F"},
+"TiltedPlateSwappedUnderFilletTip|C_T|V2s": {"axes": ["M2", "E2"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review prA1e-r2", "issue": "ops#524", "tier": "F"},
+"TiltedPlateSwappedUnderXPocketTip|C_R|V2s": {"axes": ["M2", "E2"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prA1e-r2", "issue": "ops#524", "tier": "F"},
+"TiltedPlateSwappedUnderXPocketTip|C_T|V2s": {"axes": ["M2", "E2"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review prA1e-r2", "issue": "ops#524", "tier": "F"}
+}
+}
