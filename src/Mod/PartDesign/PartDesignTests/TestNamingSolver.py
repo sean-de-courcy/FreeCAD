@@ -199,10 +199,12 @@ class TestNamingSolver(unittest.TestCase):
         feature.touch()
         doc.recompute()
 
-    def openWithStaleName(self):
+    def openWithStaleName(self, savedIndex=None):
         """The fillet's reference with a stale mapped name written into the saved file (no name
-        relates it to the pad's edges), its fingerprint kept; the file opened again. Returns
-        (document, the reference's index name)."""
+        relates it to the pad's edges), its fingerprint kept; the file opened again. With
+        `savedIndex`, the file stores that index for it instead of its own, as a file saved where
+        OCCT orders the edges differently (ops#475). Returns (document, the reference's index
+        name)."""
         doc = self.newDocument()
         pad, fillet = self.padWithFillet(doc)
         index = fillet.Base[1][0]
@@ -211,13 +213,15 @@ class TestNamingSolver(unittest.TestCase):
         path = os.path.join(folder, "Reverse.FCStd")
         doc.saveAs(path)
         App.closeDocument(doc.Name)
-        stale = ";_;g9;_;1;SKT;0;E;0;SRC;_." + index
+        stored = savedIndex or index
+        stale = ";_;g9;_;1;SKT;0;E;0;SRC;_." + stored
         with zipfile.ZipFile(path) as archive:
             files = {name: archive.read(name) for name in archive.namelist()}
         xml = files["Document.xml"].decode("utf-8")
         found = re.findall(r'(<Sub value="%s" shadow=")([^"]*)(" fp=")' % index, xml)
         self.assertEqual(len(found), 1)  # the setup: the fillet's reference, with a fingerprint
-        xml = xml.replace("".join(found[0]), found[0][0] + stale + found[0][2])
+        start = found[0][0].replace('"%s"' % index, '"%s"' % stored)
+        xml = xml.replace("".join(found[0]), start + stale + found[0][2])
         files["Document.xml"] = xml.encode("utf-8")
         with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
             for name, data in files.items():
@@ -261,6 +265,72 @@ class TestNamingSolver(unittest.TestCase):
         self.assertEqual(fillet.Base[1], [index])
         report = App.getReferenceReport(fillet)
         self.assertEqual([(e["status"], e["new"]) for e in report], [("index", index)])
+
+    def keepBrokenOnOpen(self):
+        """The forward solve on opening kept from deciding, as in
+        testReverseUpdateCarriesTheIndexWhenTheFingerprintAgrees: the reference stays broken
+        until the version change."""
+        group = App.ParamGet("User parameter:BaseApp/Preferences/Mod/Part/NamingSolver")
+        group.SetFloat("Tier3Distance", 100.0)
+        self.addCleanup(group.RemFloat, "Tier3Distance")
+        group.SetBool("ExactPlace", False)
+        self.addCleanup(group.RemBool, "ExactPlace")
+        group.SetBool("Guess", False)
+        self.addCleanup(group.RemBool, "Guess")
+
+    def testReverseUpdateFindsThePlaceWhenTheIndexIsAnotherEdge(self):
+        """ops#475: the file stores another index for the reference, the edge at the opposite
+        vertical corner (x = 0, y = 0), as where OCCT orders the pad's edges differently. The
+        index carry finds that edge, whose fingerprint differs; the one edge at the saved place,
+        the fillet's own at x = 20, y = 0, is taken, with a warning ("index")."""
+        # Arrange
+        self.keepBrokenOnOpen()
+        probe = self.newDocument()
+        other = edge("line", direction=Z, through=(0, 0, 0)).one(self.padWithFillet(probe)[0].Shape)
+        App.closeDocument(probe.Name)
+        doc, index = self.openWithStaleName(savedIndex=other[0])
+        pad, fillet = doc.Pad, doc.Fillet
+        self.assertNotEqual(other[0], index)
+        self.assertEqual(fillet.Base[1], ["?" + other[0]])
+
+        # Act
+        self.stale(doc, pad)
+
+        # Assert
+        self.assertTrue(fillet.isValid())
+        self.assertEqual(fillet.Base[1], [index])
+        self.assertEqual(edge("line", direction=Z, through=(20, 0, 0)).one(pad.Shape), [index])
+        report = App.getReferenceReport(fillet)
+        self.assertEqual([(e["status"], e["new"]) for e in report], [("index", index)])
+        self.assertEqual(
+            report[0]["evidence"], "index carry, fingerprint differs; %s sits where it was" % index
+        )
+
+    def testReverseUpdateBreaksWhenTheIndexIsAnotherEdgeAndNothingIsAtThePlace(self):
+        """ops#475's boundary: the stored index is another edge, as above, and the corner the
+        fillet's edge stood on is cut (FilletCornerCut's model) in the recompute of the version
+        change. Neither the index nor the place gives the edge: the reference breaks, with the
+        index's edge as its only candidate, never another edge."""
+        # Arrange
+        self.keepBrokenOnOpen()
+        probe = self.newDocument()
+        other = edge("line", direction=Z, through=(0, 0, 0)).one(self.padWithFillet(probe)[0].Shape)
+        App.closeDocument(probe.Name)
+        doc, index = self.openWithStaleName(savedIndex=other[0])
+        self.assertEqual(doc.Fillet.Base[1], ["?" + other[0]])
+
+        # Act
+        models.setLines(doc.Profile, {0: ((0, 0), (19, 0)), 1: ((20, 1), (20, 10))})
+        doc.Profile.addGeometry(models.polyline([(19, 0), (20, 1)]), False)
+        self.stale(doc, doc.Pad)
+
+        # Assert
+        self.assertFalse(doc.Fillet.isValid())
+        report = App.getReferenceReport(doc.Fillet)
+        self.assertEqual(len(report), 1)
+        self.assertEqual(report[0]["status"], "broken")
+        self.assertEqual(report[0]["candidates"], [other[0]])
+        self.assertEqual(report[0]["evidence"], "index carry, fingerprint differs")
 
     def testReverseUpdateBreaksWhenTheFingerprintDiffers(self):
         """FilletCornerCut's model, with the version change in the same recompute: the edge at

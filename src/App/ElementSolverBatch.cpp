@@ -1303,7 +1303,10 @@ bool solveElementReferences(DocumentObject* feature,
                 }
                 report(*entry, std::move(item));
             }
-            // Missing references: index carry, verified by the saved fingerprint.
+            // Missing references: index carry, verified by the saved fingerprint. When it fails,
+            // the one element at the saved place (ops#475): OCCT's storage order differs between
+            // platforms, so a file saved on one may have the element at another index on the
+            // other. The index's own element at the place, or several there, break it.
             for (const auto* entry : entries) {
                 if (entry->kind != SolverEntry::Kind::Missing) {
                     continue;
@@ -1319,7 +1322,50 @@ bool solveElementReferences(DocumentObject* feature,
                     }
                 }
                 ReferenceReport::Entry item;
-                if (exists && saved.isValid() && fingerprintsAgree(saved, now, diagonal)) {
+                const bool carried =
+                    exists && saved.isValid() && fingerprintsAgree(saved, now, diagonal);
+                const std::string carryEvidence = !saved.isValid() ? "index carry, no fingerprint"
+                    : !exists ? "index carry, no such element"
+                              : "index carry, fingerprint differs";
+                std::optional<std::vector<std::string>> places;
+                bool indexAtPlace = false;
+                std::string pick;
+                if (!carried && saved.isValid()) {
+                    places = elementsAt(saved, index, false);
+                    indexAtPlace = exists
+                        && Data::atSamePlace(saved, now, diagonal, tolerances, continuationDistance);
+                    if (places && places->size() == 1 && !indexAtPlace) {
+                        pick = places->front();
+                    }
+                }
+                if (!pick.empty()) {
+                    countReferenceMigration(entry->owner, MigrationOutcome::Moved);
+                    SolverResolution resolution;
+                    resolutionFor(*entry, pick, nameAt(pick), resolution);
+                    // Kept by its place, with a warning, as the index carry below
+                    resolution.status = SolverResolution::Status::Guessed;
+                    if (!entry->guess.empty()) {
+                        resolution.guess = guessRecordFor(*entry, "index");
+                    }
+                    else {
+                        resolution.guess.kind = "index";
+                        resolution.guess.origIndex = index;
+                    }
+                    resolutions[entry->prop].push_back(resolution);
+                    item.status = ReferenceReport::Status::Index;
+                    item.kind = resolution.guess.kind;
+                    item.newIndex = pick;
+                    item.evidence = carryEvidence + "; " + pick + " sits where it was";
+                    item.candidates.emplace_back(pick, nameAt(pick));
+                    item.candidateRoles.emplace_back("place");
+                    item.candidateDistances.push_back(std::numeric_limits<double>::quiet_NaN());
+                    FC_LOG(
+                        referenceName(entry->prop)
+                        << "[" << entry->index << "]: " << entry->oldName << " -> " << pick
+                        << " (" << item.evidence << ")"
+                    );
+                }
+                else if (carried) {
                     countReferenceMigration(entry->owner, MigrationOutcome::Moved);
                     SolverResolution resolution;
                     resolutionFor(*entry, index, mapForm(name), resolution);
@@ -1347,9 +1393,24 @@ bool solveElementReferences(DocumentObject* feature,
                 else {
                     countReferenceMigration(entry->owner, MigrationOutcome::Broken);
                     item.status = ReferenceReport::Status::Broken;
-                    item.evidence = !saved.isValid() ? "index carry, no fingerprint"
-                        : !exists                    ? "index carry, no such element"
-                                                     : "index carry, fingerprint differs";
+                    item.evidence = carryEvidence;
+                    std::string where;
+                    if (places) {
+                        for (const auto& place : *places) {
+                            item.candidates.emplace_back(place, nameAt(place));
+                            item.candidateRoles.emplace_back("place");
+                            item.candidateDistances.push_back(
+                                std::numeric_limits<double>::quiet_NaN()
+                            );
+                            where += (where.empty() ? "" : " and ") + place;
+                        }
+                    }
+                    if (!where.empty()) {
+                        // Several elements at the place, or the index's own one with another
+                        // (rule 2's counterpart): never one of them by its index
+                        item.evidence += "; " + where + (indexAtPlace ? " and " + index : "")
+                            + " sit where it was";
+                    }
                     if (exists) {
                         item.candidates.emplace_back(index, mapForm(name));
                         item.candidateRoles.emplace_back("index");
@@ -1357,10 +1418,16 @@ bool solveElementReferences(DocumentObject* feature,
                             std::numeric_limits<double>::quiet_NaN()
                         );
                     }
+                    std::vector<std::string> candidates;
+                    for (const auto& candidate : item.candidates) {
+                        candidates.push_back(candidate.first);
+                    }
                     FC_LOG(
                         referenceName(entry->prop)
                         << "[" << entry->index << "]: " << entry->oldName << " broken ("
-                        << item.evidence << (exists ? ", candidates: " + index : "") << ")"
+                        << item.evidence
+                        << (candidates.empty() ? "" : ", candidates: " + joinCandidates(candidates))
+                        << ")"
                     );
                 }
                 report(*entry, std::move(item));
