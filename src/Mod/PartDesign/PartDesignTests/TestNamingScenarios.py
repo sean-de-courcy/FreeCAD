@@ -129,15 +129,21 @@ ORACLE_FIELDS = (
 
 
 GEOMETRY_ID = re.compile(r"\bg[0-9]+\b")
+# The key of a Pipe's spine corner (`<key>;_;<tag>;PCV;...` and `PCR`, ops#415), at any escape
+# level: a hash of the names of the lines at the corner, so of their geometry IDs too
+CORNER_KEY = re.compile(r"\b[0-9a-f]{16}(?=\^*;_\^*;[^;]*;PC[VR]\^*;)")
 
 
 def _oracleValue(record, field):
     """A record's field as the oracle compares it. Sketch geometry IDs in names are masked: a
     new geometry's ID comes from a process-wide counter, so it differs between two runs of a
-    scenario (`models.notchDiscCircle`); `subs` still tells the elements apart."""
+    scenario (`models.notchDiscCircle`); `subs` still tells the elements apart. So are the keys
+    of a Pipe's spine corners, which hash such IDs where a line was drawn anew (ops#551)."""
     value = record.get(field)
     if field in ("names", "names_before") and value:
-        return [GEOMETRY_ID.sub("g#", name) if name else name for name in value]
+        return [
+            CORNER_KEY.sub("k#", GEOMETRY_ID.sub("g#", name)) if name else name for name in value
+        ]
     return value
 
 
@@ -609,6 +615,38 @@ class HarnessSplitVerdicts(unittest.TestCase):
             result.record["expect"] = repr(expectation)
             result.verdict = verdict
             self.assertEqual(result.passing, passing, verdict)
+
+
+class HarnessOracleMask(unittest.TestCase):
+    """The interning oracle compares names with sketch geometry IDs and spine corner keys masked
+    (ops#551), and nothing else."""
+
+    PIPE = "_;g1^;_^;{Spine}^;SKT^;0^;E^;0^;SRC^;_;{Pipe};PSH;0;F;0;GEN;_"
+
+    def masked(self, *names):
+        return _oracleValue({"names": list(names)}, "names")
+
+    def testCornerKeysAreMasked(self):
+        for opCode in ("PCV", "PCR"):
+            for name in (
+                f"455f11a62c460362;_;{{Spine}};{opCode};0;V;0;SRC;_",
+                f"_;_;{{Pipe}};FUS;0;F;0;MOD;_^;455f11a62c460362^^;_^^;{{Spine}}^^;{opCode}^^;0",
+            ):
+                other = name.replace("455f11a62c460362", "f86b35e64b0e82ca")
+                self.assertEqual(self.masked(name), self.masked(other), name)
+                self.assertNotIn("455f11a62c460362", self.masked(name)[0])
+
+    def testOtherKeysAndNamesStay(self):
+        for name in (
+            "455f11a62c460362;_;{Spine};PLM;0;E;0;SRC;_",
+            "455f11a62c460362;_;{Spine};PCX;0;V;0;SRC;_",
+            "455f11a62c460362",
+            self.PIPE + ";455f11a62c460362",
+        ):
+            self.assertIn("455f11a62c460362", self.masked(name)[0], name)
+        self.assertNotEqual(self.masked(self.PIPE), self.masked(self.PIPE.replace("E^;0", "F^;0")))
+        self.assertEqual(self.masked(self.PIPE), self.masked(self.PIPE.replace("g1", "g580675")))
+        self.assertEqual(_oracleValue({"subs": ["Face6"]}, "subs"), ["Face6"])
 
 
 class HarnessPinnedObject(unittest.TestCase):
