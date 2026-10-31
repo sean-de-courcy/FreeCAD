@@ -3230,6 +3230,9 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             // place: its place among its twins counts from the edge's seam, and an edit that turns
             // the seam past them gives its name to another twin, which may sit anywhere, the old
             // place included, or nowhere near it. Its own twin there (below) is no proof either.
+            // One case is: the twins moved as one set with the hit at its own offset from their
+            // centroid, its size kept (twinsKeptShape, below; a pad made taller): a traded name
+            // lands on another twin's offset, so this is the same twin (PR 390 round 2c's T1)
             const bool closedTwin = isClosedTwin(hitName);
             // Twins (ops#360, PR 340 round 3): pieces of one far cap told apart only by their
             // place among them (the ORD flag and the duplicate counter) can trade names when an
@@ -3567,7 +3570,7 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                            });
                 }
             }
-            if (place.empty() && !departed && !closedTwin) {
+            if (place.empty() && !departed && (!closedTwin || twinsKeptShape)) {
                 continue;  // moved alone
             }
             if (!offCentre && !departed && !(closedTwin && place.empty())
