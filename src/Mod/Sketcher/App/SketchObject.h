@@ -115,6 +115,10 @@ public:
     // Internal-face pipeline: 1 = legacy FaceMakerRing (<= 1.1), 2 = FaceMakerBuildFace.
     // Kept so old documents' internal-face names stay stable and references resolve.
     App::PropertyInteger _InternalFaceVersion;
+    // The highest geometry ID given so far (geoLastId), saved so that a reload never gives a
+    // deleted geometry's ID again (ops#526 D2: a reference's record tells geometry drawn later
+    // by its ID)
+    App::PropertyInteger _GeoLastId;
     /** @name methods override Feature */
     //@{
     short mustExecute() const override;
@@ -782,6 +786,11 @@ public:
     unsigned int getMemSize() const override;
     void Save(Base::Writer& /*writer*/) const override;
     void Restore(Base::XMLReader& /*reader*/) override;
+    /// The highest geometry ID given so far, external geometry's included (ops#526 D2)
+    long elementIdMark() const override
+    {
+        return geoLastId;
+    }
     void handleChangedPropertyType(
         Base::XMLReader& reader,
         const char* TypeName,
@@ -1350,6 +1359,8 @@ private:
     const int geoHistoryLevel = 1;
     std::vector<long> geoIdHistory;
     long geoLastId;
+    // Raises _GeoLastId to geoLastId (ops#526 D2)
+    void syncGeoLastId();
 
     class GeoHistory;
     std::unique_ptr<GeoHistory> geoHistory;
