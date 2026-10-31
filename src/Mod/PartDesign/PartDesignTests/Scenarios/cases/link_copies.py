@@ -654,10 +654,10 @@ class LinkArrayCountDownUp(ArrayCase):
         self.at = dict(enumerate(self.start))
 
 
-# Cross-document links (the EXT section carries the link's ID). Abstract here: the V2si oracle
-# can't compare their names, since the masker names the scenario document's objects only and the
-# other document's tags differ between the V2s and V2si runs (object IDs are process-wide). The
-# concrete cases run from the ops repo's `corpus/inbox/A/ops523/a3/a3_crossdoc.py`.
+# Cross-document links (the EXT section carries the link's ID). Their names carry the other
+# document's tags, which differ between the V2s and V2si runs (object IDs are process-wide): the
+# masker names the objects of every document the case opened (ops#523), so the V2si oracle
+# compares them.
 
 
 class CrossDoc(Copies):
@@ -786,9 +786,7 @@ class LobedCopies(Scenario):
 
 
 class LinkCopyCrossDocLobesTurned45(LobedCopies):
-    """Two links to the pad's body in another document (EXT copies). Abstract: see CrossDoc."""
-
-    abstract = True
+    """Two links to the pad's body in another document (EXT copies)."""
 
     def sourceDocument(self, doc):
         if not hasattr(self, "source"):
@@ -859,8 +857,6 @@ class ScaleCopiesLobesTurned45(LobedCopies):
 class LinkCopyCrossDocRemoved(CrossDoc):
     """Two links to a pin in another document; link 0 leaves the fuse."""
 
-    abstract = True
-
     def edit(self, doc):
         self.removeCopy0(doc)
 
@@ -869,8 +865,6 @@ class LinkCopyCrossDocRemoved(CrossDoc):
 class LinkCopyCrossDocRemovedNeighbourMoved(CrossDoc):
     """Two links to a pin in another document; link 0 leaves the fuse, link 1 moves onto its
     place."""
-
-    abstract = True
 
     AXES = ("M5", "E1", "E4")
 
