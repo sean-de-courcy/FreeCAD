@@ -539,11 +539,59 @@ otherOriginOf(const std::vector<std::string>& names, std::string_view oldName, b
  * warned at the quieter same-place level when that element sits where the old one was
  * (decision 97 D; App::reboundInPlace() asks it): not when one of \a names is \a oldName's twin
  * (isTwinName(): the twin-pick rule's picks are never quiet, ops#503 D1), nor when the element
- * lacks \a oldName's origin (otherOriginOf(): XP's source condition, I-S6). True for an empty
- * \a oldName. App::reboundInPlace() adds T1''s test (lostOldSources()).
+ * lacks \a oldName's origin (otherOriginOf(): XP's source condition, I-S6). False for an empty
+ * \a oldName: an index-only reference has no origin to share (ops#550 (1), ops#526 D2).
+ * App::reboundInPlace() adds T1''s test (lostOldSources()) and placeVerdict().
  */
 AppExport bool
 mayBeQuietAtPlace(const std::vector<std::string>& names, std::string_view oldName, bool sameMaker);
+
+/** True if \a name is \a oldName with only the size of A2's `<k>of<n>` duplicate counter changed
+ * (ops#536, ops#526 D2): the same rank `<k>` among twins whose number changed, e.g. a helix's
+ * crossings after a turn more. False when no section carries the counter.
+ */
+AppExport bool sameRankName(std::string_view name, std::string_view oldName);
+
+/// What the record says of a pick at the saved place (placeVerdict(), ops#526 D2).
+enum class PlaceVerdict
+{
+    /// The record can't tell: no marks (saved before D2), or a lost source's object it has no
+    /// mark of. The caller does what it did before D2.
+    Unjudged,
+    /// The element drawn again there: its sides are the record's and every source it doesn't
+    /// share with the old name is new, in an object the target was built from (decision 97 Q3).
+    Quiet,
+    /// None of its unshared sources was there, but one is in an object the target wasn't built
+    /// from (policy D's replaced source, I-S6): warned, never quiet.
+    Normal,
+    /// Its sides aren't the record's: another element of the same size at the same place (the
+    /// other edge of a member drawn again beside itself, a hole's other crossing).
+    OtherSide,
+    /// One of its unshared sources was in the model when the record was taken: a sibling moved
+    /// onto the vacated place.
+    WasThere,
+};
+
+/** The record's verdict on \a pick, an element at \a saved's place named \a names, for a
+ * reference to \a oldName (ops#526 D2, `notes\naming-class-D.md` 9.2). First the sides: when
+ * both fingerprints have them, they must agree as unordered sets (directions within
+ * \a tolerances.angle, `c+`, `c-`, `c0` exactly), or OtherSide. Then, when \a lostSource (T1''s
+ * test: the pick lost a source of the old name's maker), the marks: every source section of
+ * \a names that \a oldName doesn't share is judged, an ID against its object's mark (above it:
+ * new), an object without IDs by whether the record lists it; WasThere if any was there, Normal
+ * if none was but one's object isn't listed, Quiet otherwise. Unjudged without marks, without
+ * an unshared source to judge, or when a source of the old name's maker has no mark. Without
+ * \a lostSource: Unjudged unless the sides disagree. \a why, if given, gets the evidence.
+ */
+AppExport PlaceVerdict placeVerdict(
+    const ElementFingerprint& saved,
+    const ElementFingerprint& pick,
+    const std::vector<std::string>& names,
+    std::string_view oldName,
+    bool lostSource,
+    const GeometryTolerances& tolerances,
+    std::string* why = nullptr
+);
 
 /** T1''s test (ops#173) for an element named \a names: true if it lost one of the sources of
  * what \a oldName's maker made itself (a hole circle's own circle of its sketch, at the
@@ -634,6 +682,10 @@ struct AppExport SolveInput
         /// The element type of the reference.
         std::string type;
         SolvePolicy policy = SolvePolicy::One;
+        /// A list holder's reference whose Expand policy is read as One (ops#525, ops#526 D2):
+        /// the person asked for the whole element, so a split breaks with the pieces listed,
+        /// never G3's one piece.
+        bool listHolder = false;
         /// Resolved exactly (tier 0) to exactElement, e.g. `Face3`, whose mapped name is
         /// exactName (the name the reference holds).
         bool exact = false;
