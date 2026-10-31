@@ -3546,12 +3546,15 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             if (place.empty() && !departed) {
                 continue;  // moved alone
             }
-            if (!offCentre && !departed && entry.policy == SolvePolicy::Equivalent
+            if (!offCentre && !departed && !nearerTwin && entry.policy == SolvePolicy::Equivalent
                 && entry.equivalent && std::all_of(place.begin(), place.end(), [&](int k) {
                        return entry.equivalent(hit, pool.elements[k].index);
                    })) {
                 // Every element there gives the consumer the hit's result: the entry is exact,
-                // as if unmoved, and reserves nothing.
+                // as if unmoved, and reserves nothing. Not a twin nearer the old place (ops#516):
+                // twins' names are their order, so the hit holds the traded name, not the old
+                // piece. Coplanar twins give a FlatFace sketch one placement, so it kept the
+                // other twin where a datum on the same twin breaks
                 continue;
             }
             auto distanceOf = [&](const ElementFingerprint& fp) {
