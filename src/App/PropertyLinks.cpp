@@ -1027,6 +1027,31 @@ std::string PropertyLinkBase::_getElementFingerprint(App::DocumentObject* featur
     if (elementUpToFaces(geo, elementName.oldName.c_str(), fingerprint, upToFaces)) {
         fingerprint.upToFaces = std::move(upToFaces);
     }
+    // The marks (ops#526 D2): every object the target is built from, the target and the element's
+    // holder included, by its ID and its highest geometry ID now. Geometry with a higher ID is
+    // drawn later; an object listed was feeding the target.
+    std::vector<App::DocumentObject*> closure {obj, geo};
+    for (auto from : {obj, static_cast<App::DocumentObject*>(geo)}) {
+        auto out = from->getOutListRecursive();
+        closure.insert(closure.end(), out.begin(), out.end());
+    }
+    for (auto object : closure) {
+        if (object && object->isAttachedToDocument()) {
+            fingerprint.marks.push_back({object->getID(), std::max(object->elementIdMark(), -1L)});
+        }
+    }
+    std::sort(fingerprint.marks.begin(), fingerprint.marks.end(), [](const auto& a, const auto& b) {
+        return a.tag < b.tag || (a.tag == b.tag && a.mark > b.mark);
+    });
+    fingerprint.marks.erase(std::unique(fingerprint.marks.begin(),
+                                        fingerprint.marks.end(),
+                                        [](const auto& a, const auto& b) {
+                                            return a.tag == b.tag;
+                                        }),
+                            fingerprint.marks.end());
+    if (fingerprint.marks.size() > Data::ElementFingerprint::MaxMarks) {
+        fingerprint.marks.clear();
+    }
     return fingerprint.toString();
 }
 
