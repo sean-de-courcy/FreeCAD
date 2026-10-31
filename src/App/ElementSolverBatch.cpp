@@ -43,6 +43,7 @@ ElementHintsFunction elementHintsFunction = nullptr;
 ElementHoldsPointFunction elementHoldsPointFunction = nullptr;
 ElementHoldsPointAlongFunction elementHoldsPointAlongFunction = nullptr;
 ElementSweepDirectionFunction elementSweepDirectionFunction = nullptr;
+ElementUpToFacesFunction elementUpToFacesFunction = nullptr;
 
 struct MigrationCounts
 {
@@ -72,6 +73,11 @@ void setElementHoldsPointAlongFunction(ElementHoldsPointAlongFunction function)
 void setElementSweepDirectionFunction(ElementSweepDirectionFunction function)
 {
     elementSweepDirectionFunction = function;
+}
+
+void setElementUpToFacesFunction(ElementUpToFacesFunction function)
+{
+    elementUpToFacesFunction = function;
 }
 
 void countReferenceMigration(const DocumentObject* owner, MigrationOutcome outcome)
@@ -1412,6 +1418,14 @@ bool solveElementReferences(DocumentObject* feature,
             && sweep.Length() > 0.0) {
             input.sweep = sweep.Normalize();
         }
+        if (elementUpToFacesFunction) {
+            input.upToFacesAt = [geo](const Base::Vector3d& point,
+                                      std::vector<Data::ElementFingerprint::UpToFace>& faces,
+                                      std::vector<Data::ElementFingerprint::UpToFace>& all) {
+                return elementUpToFacesFunction(geo, point, faces, &all);
+            };
+            input.targetTag = geo->getID();
+        }
         for (const auto* entry : entries) {
             Data::SolveInput::Entry item;
             item.type = indexType(entry->oldIndex);
@@ -1990,6 +2004,58 @@ bool elementTwinCentroid(const GeoFeature* geo, const char* element, Base::Vecto
     centroid = sum / static_cast<double>(number);
     count = number;
     return true;
+}
+
+bool elementUpToFaces(
+    const GeoFeature* geo,
+    const char* element,
+    const Data::ElementFingerprint& fingerprint,
+    std::vector<Data::ElementFingerprint::UpToFace>& faces
+)
+{
+    faces.clear();
+    const PropertyComplexGeoData* prop = geo ? geo->getPropertyOfGeometry() : nullptr;
+    const Data::ComplexGeoData* data = prop ? prop->getComplexData() : nullptr;
+    if (!elementUpToFacesFunction || !data || !element || !element[0]
+        || (fingerprint.type != 'F' && fingerprint.type != 'E')
+        || (!fingerprint.inside && !fingerprint.center)) {
+        return false;
+    }
+    Data::IndexedName indexed(element);
+    if (!indexed) {
+        return false;
+    }
+    // A far piece: a marked projection, as the made-whole rule's old name is (solveOwner()), made
+    // by this feature. A later Pad's shape keeps an earlier Pad's pieces under their names, and
+    // its own up-to faces aren't theirs (review pr398-r3)
+    const long tag = geo->getID();
+    const auto names = data->getElementMappedNames(indexed);
+    if (std::none_of(names.begin(), names.end(), [tag](const auto& mapped) {
+            return Data::isMarkedPieceOf(plainName(mapped.first.toString()), tag);
+        })) {
+        return false;
+    }
+    const Base::Vector3d& point = fingerprint.inside ? *fingerprint.inside : *fingerprint.center;
+    // An edge's point, its centre of mass, must lie on the edge: an arc's lies off it, over
+    // another plate than the one the arc lies on (review pr398-r3). Can't be told otherwise.
+    const double diagonal = std::max(1.0, data->getBoundBox().CalcDiagonalLength());
+    if (fingerprint.type == 'E') {
+        if (!elementHoldsPointFunction
+            || !elementHoldsPointFunction(geo, element, point, 1e-6 * diagonal)) {
+            return false;
+        }
+    }
+    // A face's point, seen along the sweep as the up-to faces are, must lie inside the face: a
+    // centre of mass kept for a face with a small hole around it (no inside point) lies in the
+    // hole, over another plate (review pr398-r4)
+    Base::Vector3d sweep;
+    if (fingerprint.type == 'F'
+        && (!elementSweepDirectionFunction || !elementHoldsPointAlongFunction
+            || !elementSweepDirectionFunction(geo, sweep) || sweep.Length() <= 0.0
+            || !elementHoldsPointAlongFunction(geo, element, point, sweep.Normalize(), diagonal))) {
+        return false;
+    }
+    return elementUpToFacesFunction(geo, point, faces, nullptr);
 }
 
 }  // namespace App

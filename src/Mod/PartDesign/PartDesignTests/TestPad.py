@@ -1492,7 +1492,10 @@ def slideOntoReorderedPlates(
             FreeCAD.closeDocument(doc.Name)
             saved = savedFingerprints(path, names)
             for piece in savedInside:
-                test.assertEqual(len(saved[piece].split("|")), 12, (piece, saved[piece]))
+                # Version 6 (ops#522): the inside point, then the up-to faces
+                fields = saved[piece].split("|")
+                test.assertEqual(len(fields), 13, (piece, saved[piece]))
+                test.assertNotEqual(fields[11], "_", (piece, saved[piece]))
             doc = FreeCAD.openDocument(path)
             if reopen != "untouched":
                 for obj in doc.Objects:
@@ -3125,9 +3128,10 @@ class TestPad(unittest.TestCase):
         # piece when the shell was rebuilt with its faces in the other order. Marked by their
         # faces, the pieces keep their datums when A moves along the seam or grows; when A moves
         # onto the right face, the datums of the left pieces, which went, say so; those of the
-        # right pieces took the edge left in one piece until PR 366 round 9, and now say they lost
-        # their piece or are on it (PLAN decision 152: an edge made whole is no evidence); the
-        # swapped shell moves none quietly. For the Pad and the Pocket
+        # right pieces take the edge left in one piece (PR 366 round 1; refused in round 9, PLAN
+        # decision 152; again since ops#522, decision 168: the up-to face under the piece's saved
+        # point is the one it lay on); the swapped shell moves none quietly. For the Pad and the
+        # Pocket
         places = {"TL": (0.5, 2), "TR": (1.5, 2), "BL": (0.5, 0), "BR": (1.5, 0)}
         edits = {
             # edit: the datums' places after it, None for a piece that went
@@ -3162,7 +3166,7 @@ class TestPad(unittest.TestCase):
                         for piece, place in after.items():
                             if place is None:
                                 assertNotQuietlyElsewhere(self, points[piece], z, [])
-                            elif edit in ("facesSwapped", "offTheRightFace"):
+                            elif edit == "facesSwapped":
                                 assertNotQuietlyElsewhere(self, points[piece], z, [place])
                             else:
                                 assertOnCap(self, points[piece], z, *place)
@@ -3820,8 +3824,11 @@ class TestPad(unittest.TestCase):
         # the profile stays and the plates move under it); or with the plates moved the other way,
         # by their feature's Placement or rebuilt there. In each the gone piece's datum (CL, CA)
         # went quietly to the cap made whole on the next plate in round 8, its saved point under
-        # that cap in the Pad's frame. It says it lost its piece now; the other piece's datum (CR,
-        # CB) is on the whole cap or says it lost its piece. Either shell order
+        # that cap in the Pad's frame. It says it lost its piece now. ops#522 (PLAN decision 168):
+        # the other piece's datum (CR, CB) is on the whole cap, quietly, since the plate under its
+        # saved point (carried by the Pad's placement, in the plates' own frame) is its own; with
+        # the plates rebuilt elsewhere every plate's box changed, and it says it lost its piece
+        # (decision 150). Either shell order
         ridge = {
             "faces": ridgePlates(),
             "draw": lambda sketch: dimensionedRectangle(sketch, "A", -0.5, 0, 3, 8),
@@ -3842,6 +3849,13 @@ class TestPad(unittest.TestCase):
         }
         for name, case in (("ridge", ridge), ("notch", notch)):
             for mover in ("placement", "datum", "platesPlacement", "platesGeometry"):
+                # The piece that stays: on the whole cap (a tuple), or broken (no place)
+                after = {
+                    piece: (places[0] if mover != "platesGeometry" else [])
+                    if places
+                    else []
+                    for piece, places in case["after"].items()
+                }
                 for order in case["orders"]:
                     with self.subTest(model=name, mover=mover, order=order):
                         slideOntoReorderedPlates(
@@ -3852,7 +3866,7 @@ class TestPad(unittest.TestCase):
                             case["places"],
                             case["move"],
                             order,
-                            case["after"],
+                            after,
                             capMax=case["capMax"],
                             mover=mover,
                         )

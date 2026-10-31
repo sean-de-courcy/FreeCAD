@@ -1021,6 +1021,12 @@ std::string PropertyLinkBase::_getElementFingerprint(App::DocumentObject* featur
         }
         fingerprint.twinCount = count;
     }
+    // A far piece of a Pad up to a face or a shape: the up-to faces under its point, for the
+    // solver to tell whether the cap or edge made whole again lies on the same ones (ops#522)
+    std::vector<Data::ElementFingerprint::UpToFace> upToFaces;
+    if (elementUpToFaces(geo, elementName.oldName.c_str(), fingerprint, upToFaces)) {
+        fingerprint.upToFaces = std::move(upToFaces);
+    }
     return fingerprint.toString();
 }
 
@@ -1077,9 +1083,23 @@ bool PropertyLinkBase::_updateElementFingerprints(App::DocumentObject* feature,
                                            subs[i],
                                            i < shadows.size() ? shadows[i] : ShadowSub());
         // A reference that doesn't resolve keeps its last fingerprint, for the next retry.
-        if (!text.empty()) {
-            fingerprints[i] = std::move(text);
+        if (text.empty()) {
+            continue;
         }
+        // The same element in its target's frame keeps the up-to faces it was saved with, none
+        // included (ops#522): a Pad's Placement set before its shape is made again
+        // (positionByPrevious()) gives the old shape the new placement, and a gone piece's point,
+        // carried by it, already lies over the next plate. A piece saved without up-to faces (three
+        // under its point, or a fingerprint from before them) gained that plate's (review prA1b-r1)
+        const auto old = Data::ElementFingerprint::fromString(fingerprints[i]);
+        if (old.isValid()) {
+            auto now = Data::ElementFingerprint::fromString(text);
+            now.upToFaces = old.upToFaces;
+            if (now == old) {
+                continue;
+            }
+        }
+        fingerprints[i] = std::move(text);
     }
     return holdsElements;
 }

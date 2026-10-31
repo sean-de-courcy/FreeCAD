@@ -1,0 +1,15 @@
+{
+"entries": {
+"RidgeMoveBackAgainDatum|piece|V2s": {"axes": ["M2", "E5", "X4:20"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review prA1b-r1", "issue": "ops#522", "tier": "F"},
+"RidgeMoveBackAgainDatum|strip|V2s": {"axes": ["M2", "E5", "X4:20"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review prA1b-r1", "issue": "ops#522", "tier": "F"},
+"RidgeMoveBackAgainOffset|piece|V2s": {"axes": ["M2", "E5", "X4:20"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review prA1b-r1", "issue": "ops#522", "tier": "F"},
+"RidgeMoveBackAgainOffset|strip|V2s": {"axes": ["M2", "E5", "X4:20"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review prA1b-r1", "issue": "ops#522", "tier": "F"},
+"RidgeMoveBackAgainReordered|piece|V2s": {"axes": ["M2", "E5", "X4:20"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review prA1b-r1", "issue": "ops#522", "tier": "F"},
+"RidgeMoveBackAgainReordered|strip|V2s": {"axes": ["M2", "E5", "X4:20"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review prA1b-r1", "issue": "ops#522", "tier": "F"},
+"RidgeMoveBackAgainSketch|piece|V2s": {"axes": ["M2", "E5", "X4:20"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review prA1b-r1", "issue": "ops#522", "tier": "F"},
+"RidgeMoveBackAgainSketch|strip|V2s": {"axes": ["M2", "E5", "X4:20"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review prA1b-r1", "issue": "ops#522", "tier": "F"},
+"RidgeMoveBackAgainStripOnly|strip|V2s": {"axes": ["M2", "E5", "X4:20"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review prA1b-r1", "issue": "ops#522", "tier": "F"},
+"RidgeMoveBackAgain|piece|V2s": {"axes": ["M2", "E5", "X4:20"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review prA1b-r1", "issue": "ops#522", "tier": "F"},
+"RidgeMoveBackAgain|strip|V2s": {"axes": ["M2", "E5", "X4:20"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review prA1b-r1", "issue": "ops#522", "tier": "F"}
+}
+}
