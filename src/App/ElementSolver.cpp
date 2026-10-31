@@ -2101,18 +2101,27 @@ bool sameUpToFaces(
         && matchedOnce(saved, all, alike);
 }
 
-/* Whether the far piece named \a name, whose saved fingerprint is \a saved and whose current one
- * is \a now, slid within the one up-to face it lay on (ops#524, PLAN decision 182, N1): it is
+// Where a lone far piece that moved alone stands on the up-to face it lay on (ops#524, PLAN
+// decisions 199 (4) and 202): placeOnUpToFace()
+enum class OnUpToFace
+{
+    Kept,      // the saved face is the one under it, and the path from its foot stays inside it
+    Left,      // another face, none or two under it, or the path leaves the face
+    CantTell,  // the path can't be told (an end on the face's boundary, a seam, a failed section)
+};
+
+/* Where the far piece named \a name, whose saved fingerprint is \a saved and whose current one is
+ * \a now, stands on the one up-to face it lay on (ops#524, PLAN decisions 182, 199 and 202): it is
  * marked by that face alone (a cap: isMarkedCap() with faceAlone; an edge piece: its one mark a
- * face), one up-to face was saved with its foot, exactly one lies under its point now and it is
- * the saved one (sameUpToFaces()), and the straight path from the saved foot to the point now,
- * seen along the sweep in that face's owner's frame, stays inside it (\a input.upToPathInside).
- * A same-face test alone is wrong: a piece on the plate left of a hole, replaced by the one right
- * of it (the same plate, alone on it, the same name), crosses the hole. Empty when the test
- * doesn't apply (another kind of piece, no foot saved, no hooks) or the up-to faces can't be told
- * now (a datum plane; a shape not made under its placement). The caller checks the twins.
+ * face) and one up-to face was saved with its foot. Kept when exactly one face lies under its
+ * point now, the saved one (sameUpToFaces()), and the straight path from the saved foot to the
+ * point now, seen along the sweep in that face's owner's frame, stays inside it
+ * (\a input.upToPathInside); CantTell when that path can't be told; else Left. Empty when the test
+ * doesn't apply (another kind of piece, no foot saved, no hooks, a copy of the piece: a copy
+ * section after its projection, review prA1c-r1) or the up-to faces can't be told now (a datum
+ * plane; a shape not made under its placement). The caller checks the twins.
  */
-std::optional<bool> slidWithinUpToFace(
+std::optional<OnUpToFace> placeOnUpToFace(
     const SolveInput& input,
     const ElementFingerprint& saved,
     const std::string& name,
@@ -2121,7 +2130,7 @@ std::optional<bool> slidWithinUpToFace(
 )
 {
     if (!input.upToFacesAt || !input.upToPathInside || saved.upToFaces.size() != 1
-        || !saved.upToFaces.front().foot || saved.type != now.type) {
+        || !saved.upToFaces.front().foot || saved.type != now.type || projectionTag(name) <= 0) {
         return std::nullopt;
     }
     if (saved.type == 'F') {
@@ -2145,8 +2154,11 @@ std::optional<bool> slidWithinUpToFace(
     if (!point || !input.upToFacesAt(name, *point, under, every)) {
         return std::nullopt;
     }
-    return under.size() == 1 && sameUpToFaces(saved.upToFaces, under, every, eps, input.tolerances)
-        && input.upToPathInside(name, saved.upToFaces.front(), *point);
+    if (under.size() != 1 || !sameUpToFaces(saved.upToFaces, under, every, eps, input.tolerances)) {
+        return OnUpToFace::Left;
+    }
+    const auto inside = input.upToPathInside(name, saved.upToFaces.front(), *point);
+    return !inside ? OnUpToFace::CantTell : *inside ? OnUpToFace::Kept : OnUpToFace::Left;
 }
 
 /* True if \a name's element is \a oldName's piece of a far edge after others of its pieces went
@@ -2967,10 +2979,18 @@ bool isMarkedPieceOf(std::string_view name, long tag)
 
 long projectionTag(std::string_view name)
 {
-    for (const auto section : NameAncestry::splitSections(name)) {
-        const DecodedMappedSection& decoded = decodeSection(section);
+    const auto sections = NameAncestry::splitSections(name);
+    for (auto section = sections.begin(); section != sections.end(); ++section) {
+        const DecodedMappedSection& decoded = decodeSection(*section);
         if (!decoded.hasMapperFlag(MAPPER_FLAG_PROJECTION) || !hasTag(decoded)) {
             continue;
+        }
+        // A copy of the piece (a pattern's or a mirror's instance, a boundary, a second side):
+        // its place isn't the one the extrusion made (review prA1c-r1's MirrorCopyAcrossHole)
+        if (std::any_of(std::next(section), sections.end(), [](const auto later) {
+                return isCopySection(decodeSection(later));
+            })) {
+            return 0;
         }
         long tag = 0;
         for (const char c : decoded.iterationTag) {
@@ -3474,7 +3494,6 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             const bool twinsMayDepart = twins.empty() || (twinOutlines && !twinsKeptShape)
                 || keptShapeBeside;
             bool departed = false;
-            std::optional<bool> slid;  // N1's answer, when asked (below)
             if (place.empty() && twinsMayDepart && saved.center && now.center && saved.size
                 && now.size && isMarkedPiece(hitName)) {
                 const double eps = input.continuationDistance * std::max(1.0, input.diagonal);
@@ -3633,29 +3652,24 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                                    || (besideDecided && apartBeside(pool.elements[k].index));
                            });
                 }
-                // ops#524 (PLAN decision 182, N1): a lone piece, without twins and alone on its
-                // up-to face, that slid within that face (the same face, the path from its old
-                // foot to its point inside it) is the piece the name held: the name stands
-                // quietly (decision 127 (3)). Its old place left bare, nothing else sits there
-                if (departed && twins.empty()) {
-                    slid = slidWithinUpToFace(input, saved, hitName, now, eps);
-                    departed = !slid.value_or(false);
-                }
+                // ops#524: no departed piece is taken back for having slid within its up-to face
+                // (PLAN decision 202): a piece of another part of a reshaped or moved profile,
+                // reborn alone on the same face, can't be told from it by the face and the path
+                // (review prA1c-r1's UArmSwapRedraw)
             }
-            // ops#524: a lone piece that moved alone, still overlapping its old place, left the
-            // place on its up-to face all the same when the face under it now isn't the saved one
-            // or the path from its saved foot leaves the face: the profile moved by placement or
-            // by its support, or the plates under it, across a hole, gave the plate's piece beyond
-            // it the name, at a place that overlaps the old one in the target's frame (the attack
-            // set's ALonePiece L, silent on integration). Only when the up-to faces can be told
-            bool leftItsFace = false;
+            // ops#524 (PLAN decisions 199 (4) and 202): a lone piece that moved alone, still
+            // overlapping its old place, left the place on its up-to face all the same when the
+            // face under it now isn't the saved one, or the path from its saved foot leaves the
+            // face or can't be told: the profile moved by placement or by its support, or the
+            // plates under it, across a hole, gave the plate's piece beyond it the name, at a place
+            // that overlaps the old one in the target's frame (the attack set's ALonePiece L, silent
+            // on integration). Only when the up-to faces can be told
+            std::optional<OnUpToFace> onFace;
             if (place.empty() && !departed && twins.empty() && isMarkedPiece(hitName)) {
                 const double eps = input.continuationDistance * std::max(1.0, input.diagonal);
-                if (!slid) {
-                    slid = slidWithinUpToFace(input, saved, hitName, now, eps);
-                }
-                leftItsFace = slid == false;
+                onFace = placeOnUpToFace(input, saved, hitName, now, eps);
             }
+            const bool leftItsFace = onFace && *onFace != OnUpToFace::Kept;
             if (place.empty() && !departed && !leftItsFace) {
                 continue;  // moved alone
             }
@@ -3726,8 +3740,10 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             list(hitPosition, "name");
             if (departed) {
                 outcome.evidence = movedBy()
-                    + (leftItsFace ? " off its place on its up-to face, and nothing sits there"
-                                   : " off where it was, and nothing sits there");
+                    + (!leftItsFace ? " off where it was, and nothing sits there"
+                           : *onFace == OnUpToFace::Left
+                           ? " off its place on its up-to face, and nothing sits there"
+                           : " off its place, and its way on its up-to face can't be told");
             }
             else if (offCentre) {
                 outcome.evidence = movedBy() + " off its old centre; " + there
@@ -5163,23 +5179,7 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                         }
                     }
                 }
-                // ops#524 (PLAN decision 182, N2): or the piece slid within its up-to face (N1),
-                // off the saved centre: an edge piece that moved with its profile along its plate
-                auto slidWithinFace = [&](int k) {
-                    const auto& names = pool.elements[k].names;
-                    const auto name = std::find_if(names.begin(), names.end(), [&](const auto& n) {
-                        return isFewerPiecesOf(n, oldName);
-                    });
-                    return centred && name != names.end()
-                        && slidWithinUpToFace(input,
-                                              *centred,
-                                              *name,
-                                              fingerprintOfIndex(pool.elements[k].index),
-                                              eps)
-                               .value_or(false);
-                };
-                if (marked != 1 || holders.size() != 1
-                    || !(holdsSavedCentre(holders.front()) || slidWithinFace(holders.front()))) {
+                if (marked != 1 || holders.size() != 1 || !holdsSavedCentre(holders.front())) {
                     holders.clear();
                 }
                 else {

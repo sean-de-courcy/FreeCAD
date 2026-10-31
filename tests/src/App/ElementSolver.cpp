@@ -6723,15 +6723,16 @@ TEST(SolveOwner, twinCapPiecesResolveToTheirCapMadeWholeOnTheSamePlate)
     EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
 }
 
-TEST(Moved, lonePieceThatSlidWithinItsUpToFaceKeepsItsName)
+TEST(Moved, lonePieceThatSlidWithinItsUpToFaceStaysDeparted)
 {
-    // ops#524 (PLAN decision 182, N1): shell_twins' MoveAcrossHalf M. A rectangle's piece on a
-    // hole's fill (x -1..0, marked by the fill alone, no twins) moved with its profile to x
-    // 0.5..1: it left its old place and nothing sits there, so the departed rule (PR 366 round 3)
-    // broke it. Its fingerprint saved the fill as its one up-to face, with the foot (-0.5, 0); the
-    // same fill is the one face under its point now, and the path from the foot stays on it: the
-    // name stands quietly. Another face under it, two, a path off the face, no foot, marks beyond
-    // the face, or no hooks: broken, as before.
+    // ops#524 (PLAN decision 202, which takes back decision 182's N1): shell_twins' MoveAcrossHalf
+    // M. A rectangle's piece on a hole's fill (x -1..0, marked by the fill alone, no twins) moved
+    // with its profile to x 0.5..1: it left its old place and nothing sits there, so the departed
+    // rule (PR 366 round 3) breaks it. Its fingerprint saved the fill as its one up-to face, with
+    // the foot (-0.5, 0); the same fill is the one face under its point now, and the path from the
+    // foot stays on it, but that doesn't make it the piece the name held: review prA1c-r1's
+    // UArmSwapRedraw has another arm's tip of a reshaped U reborn alone on the same plate, the path
+    // between them on the plate. It stays broken, and the hooks aren't asked.
     const auto fill = plateElement("fill", 'F');
     SolveInput input;
     input.diagonal = 40;
@@ -6759,55 +6760,19 @@ TEST(Moved, lonePieceThatSlidWithinItsUpToFaceKeepsItsName)
         all = every;
         return true;
     };
-    bool inside = true;
-    std::vector<Base::Vector3d> feet;
+    int paths = 0;
     input.upToPathInside = [&](const std::string&,
-                               const ElementFingerprint::UpToFace& saved,
-                               const Base::Vector3d&) {
-        feet.push_back(saved.foot.value_or(Base::Vector3d(-99, -99, -99)));
-        return inside;
+                               const ElementFingerprint::UpToFace&,
+                               const Base::Vector3d&) -> std::optional<bool> {
+        ++paths;
+        return true;
     };
-    EXPECT_EQ(describe(Data::solveOwner(input)[0]), "exact Face5 0 [] ");
-    //   asked for the hit by its name, at its point now, from the saved foot
-    ASSERT_EQ(asked.size(), 1U);
-    EXPECT_EQ(asked[0].first, farPiece({fill}));
-    EXPECT_EQ(asked[0].second, Base::Vector3d(0.75, 0, 10));
-    EXPECT_EQ(feet, (std::vector<Base::Vector3d> {Base::Vector3d(-0.5, 0, 10)}));
-
-    const std::string departed = "broken  -1 [Face5 ] moved 1.250 mm off where it was, and nothing "
-                                 "sits there";
-    auto breaks = [&](const char* why) {
-        EXPECT_EQ(describe(Data::solveOwner(input)[0]), departed) << why;
-    };
-    // The path crosses the face's boundary (MoveAcrossHalf L: the plate's piece left of the hole
-    // replaced by the one right of it, on the same plate, alone, by the same name)
-    inside = false;
-    breaks("the path leaves the face");
-    inside = true;
-    under = {upToPlate(-10, 20, "Plate")};
-    breaks("another face under it");
-    under = {fillFace, upToPlate(-10, 20, "Plate")};
-    breaks("two faces under it");
-    under = {};
-    breaks("no face under it");
-    under = {fillFace};
-    EXPECT_EQ(describe(Data::solveOwner(input)[0]), "exact Face5 0 [] ");
-    //   a record without the foot (ops#522's), or with two faces saved (a seam)
-    input.entries[0].fingerprint.upToFaces[0].foot.reset();
-    breaks("no foot saved");
-    input.entries = {entryOf(farPiece({fill}))};
-    input.entries[0].fingerprint.upToFaces.push_back(upToPlate(-10, 20, "Plate"));
-    breaks("two faces saved");
-    //   marked by more than its face (an edge of the up-to shape through it: not alone there)
-    const auto edged = farPiece({fill, plateElement("rim", 'E')});
-    input.pool["Face"][0] = element("Face5", {edged});
-    input.entries = {entryOf(edged)};
-    breaks("marks beyond the face");
-    input.pool["Face"][0] = element("Face5", {farPiece({fill})});
-    input.entries = {entryOf(farPiece({fill}))};
-    //   no hooks
-    input.upToPathInside = nullptr;
-    breaks("no path hook");
+    EXPECT_EQ(
+        describe(Data::solveOwner(input)[0]),
+        "broken  -1 [Face5 ] moved 1.250 mm off where it was, and nothing sits there"
+    );
+    EXPECT_TRUE(asked.empty());
+    EXPECT_EQ(paths, 0);
 }
 
 TEST(Moved, lonePieceThatMovedAloneOffItsPlaceOnItsFaceBreaks)
@@ -6839,7 +6804,7 @@ TEST(Moved, lonePieceThatMovedAloneOffItsPlaceOnItsFaceBreaks)
         all = {plateFace};
         return told;
     };
-    bool inside = false;
+    std::optional<bool> inside = false;
     input.upToPathInside = [&](const std::string&,
                                const ElementFingerprint::UpToFace&,
                                const Base::Vector3d&) {
@@ -6851,6 +6816,13 @@ TEST(Moved, lonePieceThatMovedAloneOffItsPlaceOnItsFaceBreaks)
     );
     inside = true;
     EXPECT_EQ(describe(Data::solveOwner(input)[0]), "exact Face4 0 [] ");
+    //   the path can't be told (an end on the face's boundary, a seam, a failed section): broken
+    //   too (PLAN decision 199 (3)), and the evidence says so
+    inside.reset();
+    EXPECT_EQ(
+        describe(Data::solveOwner(input)[0]),
+        "broken  -1 [Face4 ] moved 0.750 mm off its place, and its way on its up-to face can't be told"
+    );
     inside = false;
     told = false;
     EXPECT_EQ(describe(Data::solveOwner(input)[0]), "exact Face4 0 [] ");
@@ -6860,15 +6832,63 @@ TEST(Moved, lonePieceThatMovedAloneOffItsPlaceOnItsFaceBreaks)
     EXPECT_EQ(describe(Data::solveOwner(input)[0]), "exact Face4 0 [] ");
 }
 
-TEST(SolveOwner, edgePieceAfterFewerPiecesThatSlidWithinItsFaceResolves)
+TEST(Moved, slidWithinUpToFaceRefusesCopySection)
 {
-    // ops#524 (PLAN decision 182, N2): sweep_later_feature's SweepFoldMove E0_p2. A square's
-    // bottom edge in three pieces on three plates (ORD, counters 3-5), each marked by its plate;
-    // the piece on the third plate, x 1.2..2. The profile moved by 2: the edge has two pieces now
+    // ops#524, review prA1c-r1's MirrorCopyAcrossHole (PLAN decision 199 (2)): a Mirrored copy of
+    // a far piece keeps the Pad's projection in its name, `X|<TRF>`, so projectionTag() led the
+    // hooks to the Pad, and they read the copy's point against the Pad's up-to face, where the
+    // copy never lay. A copy section after the projection: no tag, and the up-to face tests don't
+    // ask the hooks. The lone copy that moved alone stands as it did before ops#524.
+    const auto plate = plateElement("plate", 'F');
+    const auto original = farPiece({plate});
+    const auto copy = piece(original, 9, "TRF", 2, 'F');
+    EXPECT_GT(Data::projectionTag(original), 0);
+    EXPECT_EQ(Data::projectionTag(copy), 0);
+    EXPECT_EQ(Data::projectionTag(copied(original, 9, "L")), 0);
+    //   a copy made before the projection (a Pad from a pattern's face) is the Pad's own piece
+    EXPECT_GT(Data::projectionTag(farPiece({piece(plate, 9, "TRF", 2, 'F')})), 0);
+
+    SolveInput input;
+    input.diagonal = 40;
+    input.pool["Face"] = {element("Face4", {copy}), element("Face9", {sketchEdge(9)})};
+    measure(input, {{"Face4", capBox(-2.5, 0, -0.5, 0.5)}, {"Face9", capAt(20, 3)}}, nullptr);
+    const auto plateFace = upToPlate(-10, 20, "Plate");
+    auto entry = exact("Face4");
+    entry.exactName = copy;
+    entry.fingerprint = capBox(-3, -1, -0.5, 0.5);
+    entry.fingerprint.upToFaces = {plateFace};
+    entry.fingerprint.upToFaces[0].foot = Base::Vector3d(-2, 0, 10);
+    input.entries = {entry};
+    int asked = 0;
+    input.upToFacesAt = [&](const std::string&,
+                            const Base::Vector3d&,
+                            std::vector<ElementFingerprint::UpToFace>& faces,
+                            std::vector<ElementFingerprint::UpToFace>& all) {
+        ++asked;
+        faces = {plateFace};
+        all = {plateFace};
+        return true;
+    };
+    input.upToPathInside = [&](const std::string&,
+                               const ElementFingerprint::UpToFace&,
+                               const Base::Vector3d&) -> std::optional<bool> {
+        ++asked;
+        return false;
+    };
+    EXPECT_EQ(describe(Data::solveOwner(input)[0]), "exact Face4 0 [] ");
+    EXPECT_EQ(asked, 0);
+}
+
+TEST(SolveOwner, edgePieceAfterFewerPiecesThatSlidWithinItsFaceStaysBroken)
+{
+    // ops#524 (PLAN decision 202): sweep_later_feature's SweepFoldMove E0_p2. A square's bottom
+    // edge in three pieces on three plates (ORD, counters 3-5), each marked by its plate; the
+    // piece on the third plate, x 1.2..2. The profile moved by 2: the edge has two pieces now
     // (counters 1-2), x 2..3 on that plate and x 3..4 on the next. No name holds the old one; the
     // one piece with its marks (isFewerPiecesOf()) doesn't hold the saved centre, so the
-    // fewer-pieces rule (PR 366 round 3) broke it. The same test as N1 lets it take the piece: its
-    // one up-to face, saved with the foot, is the one under it now, and the path stays on it.
+    // fewer-pieces rule (PR 366 round 3) breaks it. Its one up-to face, saved with the foot, is the
+    // one under it now and the path stays on it, but that doesn't make it the old piece (decision
+    // 182's N1, taken back): broken.
     const auto plate2 = plateElement("plate2", 'F');
     const auto plate3 = plateElement("plate3", 'F');
     const std::vector<std::string> ord {"PRJ", "MOD", "ORD"};
@@ -6900,25 +6920,13 @@ TEST(SolveOwner, edgePieceAfterFewerPiecesThatSlidWithinItsFaceResolves)
         all = {plate2Face, upToPlate(3, 20, "Plates")};
         return true;
     };
-    bool inside = true;
     input.upToPathInside = [&](const std::string&,
                                const ElementFingerprint::UpToFace&,
-                               const Base::Vector3d&) {
-        return inside;
+                               const Base::Vector3d&) -> std::optional<bool> {
+        return true;
     };
-    auto outcome = Data::solveOwner(input)[0];
-    EXPECT_EQ(outcome.status, SolveStatus::Resolved) << describe(outcome);
-    EXPECT_EQ(outcome.element, "Edge3") << describe(outcome);
-    //   the path off the face, or another face under it: broken, as before
-    inside = false;
-    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
-    inside = true;
-    under = {upToPlate(3, 20, "Plates")};
-    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
-    under = {plate2Face};
-    //   without the hooks, as before
-    input.upToPathInside = nullptr;
-    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
+    const auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << describe(outcome);
 }
 
 TEST(Moved, departedRuleSeesAlongThePiecesOwnSweep)
