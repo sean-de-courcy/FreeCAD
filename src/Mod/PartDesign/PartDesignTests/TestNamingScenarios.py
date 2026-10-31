@@ -62,7 +62,7 @@ import tempfile
 import traceback
 import unittest
 
-from PartDesignTests.Scenarios import harness
+from PartDesignTests.Scenarios import harness, models
 from PartDesignTests.Scenarios import booleans, dressups, patterns, sketch_edits
 from PartDesignTests.Scenarios import ambiguous, consumers, crossdoc, derived, external, internal
 from PartDesignTests.Scenarios import issues
@@ -654,8 +654,8 @@ class HarnessMaskerDocuments(unittest.TestCase):
     """The masker names the objects of every document the scenario opened (ops#523). Document B:
     a 10 mm box "Src". Document A (the scenario's): an App::Link "L" to Src, a 10 mm box "Local"
     at x = 100, "F" their Part::MultiFuse, and a sketch on F's face at z = 10 over Src. That
-    face's names carry Src's ID, which is another one in each run (object IDs are process-wide),
-    so the interning oracle can compare them only masked."""
+    face's names carry Src's ID, which is another one in each run (each new document starts its
+    object IDs at a random number), so the interning oracle can compare them only masked."""
 
     TOP = harness.face("plane", normal=harness.Z, contains=(5, 5, 10))
 
@@ -664,7 +664,12 @@ class HarnessMaskerDocuments(unittest.TestCase):
         folder = os.path.realpath(tempfile.mkdtemp(prefix="NamingScenario"))
         scenario.doc = doc = scenario.newDocument("Masked")
         try:
-            source = scenario.newDocument("Source")
+            for _ in range(100):  # Src's ID apart from doc's objects' (the masker prefers doc's)
+                source = scenario.newDocument("Source")
+                if abs(models.nextObjectId(source) - models.nextObjectId(doc)) > 500:
+                    break
+                scenario.documents.remove(source.Name)
+                harness.App.closeDocument(source.Name)
             source.saveAs(os.path.join(folder, source.Name + ".FCStd"))
             src = source.addObject("Part::Box", "Src")
             source.recompute()
@@ -700,7 +705,10 @@ class HarnessMaskerDocuments(unittest.TestCase):
 
     def testNamesCompareEqualBetweenRuns(self):
         first, firstId = self.judge()
-        second, secondId = self.judge()
+        for _ in range(5):  # Src's ID is random: the same in two runs about once in 4000
+            second, secondId = self.judge()
+            if secondId != firstId:
+                break
         self.assertNotEqual(firstId, secondId)
         self.assertEqual(_oracleValue(first, "names"), _oracleValue(second, "names"))
 
