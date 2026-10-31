@@ -40,6 +40,7 @@
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <gp_Ax1.hxx>
 #include <gp_Circ.hxx>
+#include <gp_Elips.hxx>
 #include <gp_Trsf.hxx>
 #include <gp_Vec.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
@@ -4068,6 +4069,50 @@ TEST_F(TopoShapeExpansionTest, makeElementCutNamesBothCoincidentPiecesV2)
     EXPECT_TRUE(pieces[0]);
     EXPECT_TRUE(pieces[1]);
     EXPECT_NE(pieces[0], pieces[1]);
+}
+
+TEST_F(TopoShapeExpansionTest, makeElementCutMarksClosedEdgeTwinsV2)
+{
+    // Arrange
+    //   a cylinder of radius 10 and height 20, and a prism of an ellipse of semi-axes 14 (x) and 6
+    //   (y) through it: its one side face crosses the top circle, a closed edge, four times and
+    //   leaves two arcs, at +y and -y, each ending on that face (`review390r2b_rim.py`'s cutter)
+    TopoShape cylinder(App::HistoryAlgorithm::V2, BRepPrimAPI_MakeCylinder(10.0, 20.0).Shape(), 1L);
+    const gp_Elips ellipse(gp_Ax2(gp_Pnt(0.0, 0.0, -5.0), gp_Dir(0.0, 0.0, 1.0)), 14.0, 6.0);
+    const TopoDS_Face base
+        = BRepBuilderAPI_MakeFace(BRepBuilderAPI_MakeWire(BRepBuilderAPI_MakeEdge(ellipse).Edge()).Wire())
+              .Face();
+    TopoShape cutter(
+        App::HistoryAlgorithm::V2,
+        BRepPrimAPI_MakePrism(base, gp_Vec(0.0, 0.0, 30.0)).Shape(),
+        2L
+    );
+    TopoShape result(3L);
+
+    // Act
+    result.makeElementCut({cylinder, cutter});
+
+    // Assert
+    //   the arcs are twins on the closed circle, placed from its seam (their ends lie on the same
+    //   face, so Connected Names don't tell them apart): `0of2` and `1of2`, with ORD and the closed
+    //   edge's flag, CLS (PLAN decision 206), which makes the solver break a reference to one that
+    //   moved
+    std::set<std::string> places;
+    int index = 0;
+    for (const auto& edge : result.getSubTopoShapes(TopAbs_EDGE)) {
+        ++index;
+        const BRepAdaptor_Curve curve(TopoDS::Edge(edge.getShape()));
+        const gp_Pnt middle = curve.Value((curve.FirstParameter() + curve.LastParameter()) / 2);
+        if (curve.GetType() != GeomAbs_Circle || std::abs(middle.Z() - 20.0) > 1e-6) {
+            continue;
+        }
+        const MappedName name = result.getMappedName(IndexedName::fromConst("Edge", index));
+        const DecodedMappedSection section = lastSection(name);
+        EXPECT_TRUE(section.hasMapperFlag(MAPPER_FLAG_ORDERED)) << name.toString();
+        EXPECT_TRUE(section.hasMapperFlag("CLS")) << name.toString();
+        places.insert(section.duplicateCount);
+    }
+    EXPECT_EQ(places, (std::set<std::string> {"0of2", "1of2"}));
 }
 
 namespace

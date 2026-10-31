@@ -1738,14 +1738,33 @@ std::string crossingSide(
     return cosine < 0 ? Data::ROLE_CROSSING_IN : Data::ROLE_CROSSING_OUT;
 }
 
+/// The mapper flag of a twin placed on a closed first-source edge (PLAN decision 206): its place
+/// counts from the edge's seam, which an edit can turn past the twins with the geometry unchanged,
+/// so the solver keeps a reference to it only where its element holds the old place unchanged
+/// (`closedTwinFlag`, ElementSolver.cpp). Kept out of ElementNamingUtils.h, which rebuilds the tree.
+constexpr const char* closedTwinFlag = "CLS";
+
 /// A member's discriminating fields in its group (`naming-class-A.md` M2, I-A1 and I-A2): its
-/// Index, its DuplicateCount, and whether its name carries ORD.
+/// Index, its DuplicateCount, whether its name carries ORD, and whether it carries the closed
+/// edge's flag (closedTwinFlag).
 struct TwinPlace
 {
     std::string index = "0";
     std::string duplicateCount = "0";
     bool ordered = false;
+    bool closed = false;
 };
+
+/// The mapper flags a place adds after the stage's own: ORD, then the closed edge's flag.
+void addPlaceFlags(const TwinPlace& place, std::vector<std::string>& flags)
+{
+    if (place.ordered) {
+        flags.emplace_back(Data::MAPPER_FLAG_ORDERED);
+    }
+    if (place.closed) {
+        flags.emplace_back(closedTwinFlag);
+    }
+}
 
 /// The place `k` among `n` twins as DuplicateCount carries it, `<k>of<n>` (ops#468, the size
 /// rule): the count is in every twin's name, so a change in how many there are renames them all
@@ -1760,14 +1779,16 @@ std::string placeAmong(std::size_t k, std::size_t n)
 /// that the solver takes them for twins (counter siblings) and re-checks an exact hit that moved.
 /// Twins in the maker's order (twinOrder's `makerOrder`, decision 158 Q1) go without ORD
 /// (decision 173 (2)): that order follows the profile and the spine through a rigid motion, so a
-/// moved exact hit on one of them is the same twin, as on `integration`.
-std::vector<TwinPlace> twinPlaces(std::size_t count, bool ordered = true)
+/// moved exact hit on one of them is the same twin, as on `integration`. Twins placed on a closed
+/// first-source edge (twinOrder's `closedSource`) carry the closed edge's flag too.
+std::vector<TwinPlace> twinPlaces(std::size_t count, bool ordered = true, bool closed = false)
 {
     std::vector<TwinPlace> places(count);
     if (count > 1) {
         for (std::size_t k = 0; k < count; ++k) {
             places[k].duplicateCount = placeAmong(k, count);
             places[k].ordered = ordered;
+            places[k].closed = closed;
         }
     }
     return places;
@@ -1781,17 +1802,20 @@ std::vector<TwinPlace> twinPlaces(std::size_t count, bool ordered = true)
 /// name told by a role carries ORD: the role flips when an edit reverses the edge's curve with
 /// the geometry unchanged (a MultiFuse's inputs reordered), and the flag is what sends a moved
 /// exact hit on it to the solver's twin check (the role-sibling clause, `naming-class-A.md` 4.1).
+/// On a closed edge (`closed`, twinOrder's `closedSource`), the vertexes on one side with others
+/// carry the closed edge's flag, as twins (PLAN decision 206).
 std::vector<TwinPlace> crossingPlaces(
     const std::vector<TopoDS_Shape>& vertexes,
     const TopoDS_Shape& edge,
-    const TopoDS_Shape& face
+    const TopoDS_Shape& face,
+    bool closed = false
 )
 {
     std::vector<std::string> sides;
     for (const auto& vertex : vertexes) {
         sides.push_back(crossingSide(vertex, edge, face));
         if (sides.back().empty()) {
-            return twinPlaces(vertexes.size());
+            return twinPlaces(vertexes.size(), true, closed);
         }
     }
     std::map<std::string, std::size_t> onSide;
@@ -1806,6 +1830,7 @@ std::vector<TwinPlace> crossingPlaces(
         place.index = side;
         place.duplicateCount = onSide[side] > 1 ? placeAmong(k, onSide[side]) : "0";
         place.ordered = true;
+        place.closed = closed && onSide[side] > 1;
         places.push_back(place);
     }
     return places;
@@ -2024,16 +2049,21 @@ bool liesOn(const TopoDS_Shape& member, const TopoDS_Shape& source)
 /// members by their coordinates would rename them under a rigid motion; the maker's order is
 /// the profile's and the spine's; `makerOrder`, if given, is set for these two cases. Ties keep
 /// the order given. Elsewhere the twins' names carry ORD (twinPlaces), so the solver re-checks a
-/// twin's exact hit that moved.
+/// twin's exact hit that moved. `closedSource`, if given, is set for members on a closed edge:
+/// their names carry the closed edge's flag too (PLAN decision 206).
 std::vector<std::size_t> twinOrder(
     const std::vector<TopoDS_Shape>& members,
     const std::vector<TopoDS_Shape>& sources,
     const TopLoc_Location& frame,
-    bool* makerOrder = nullptr
+    bool* makerOrder = nullptr,
+    bool* closedSource = nullptr
 )
 {
     if (makerOrder) {
         *makerOrder = false;
+    }
+    if (closedSource) {
+        *closedSource = false;
     }
     std::vector<std::size_t> given(members.size());
     std::iota(given.begin(), given.end(), 0);
@@ -2081,8 +2111,12 @@ std::vector<std::size_t> twinOrder(
         TopExp::Vertices(TopoDS::Edge(edge), start, end);
         // A closed edge's parameter counts from its seam, which an edit moves without moving the
         // members (a sketch's circle turned): its vertexes and its pieces keep the maker's order,
-        // with ORD (PLAN decision 204; PR 390 round 2's groove across a pad's rim)
+        // with ORD (PLAN decision 204; PR 390 round 2's groove across a pad's rim) and the
+        // closed edge's flag (decision 206)
         if (!start.IsNull() && start.IsSame(end)) {
+            if (closedSource) {
+                *closedSource = true;
+            }
             return given;
         }
         curve = BRep_Tool::Curve(TopoDS::Edge(edge), first, last);
@@ -3571,19 +3605,20 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                     shapes.push_back(projectedPieces[i].shape);
                 }
                 bool makerOrder = false;
+                bool closed = false;
                 const std::vector<std::size_t> order = twinOrder(
                     shapes,
                     {projectedPieces[group.front()].source},
                     frame,
-                    &makerOrder
+                    &makerOrder,
+                    &closed
                 );
-                const std::vector<TwinPlace> places = twinPlaces(order.size(), !makerOrder);
+                const std::vector<TwinPlace> places
+                    = twinPlaces(order.size(), !makerOrder, closed);
                 for (std::size_t k = 0; k < order.size(); ++k) {
                     const ProjectedPiece& piece = projectedPieces[group[order[k]]];
                     std::vector<std::string> flags = piece.flags;
-                    if (places[k].ordered) {
-                        flags.emplace_back(Data::MAPPER_FLAG_ORDERED);
-                    }
+                    addPlaceFlags(places[k], flags);
                     const Data::MappedName renamed(Data::MappedName::makeEncodedSection(
                         {},
                         std::vector<Data::MappedName> {piece.frontName},
@@ -3746,10 +3781,16 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                         shapes.push_back(modifiedShapeEntry.first[i].newElementShape);
                     }
                     bool makerOrder = false;
-                    const std::vector<std::size_t> order
-                        = twinOrder(shapes, {mapValue.incomingElementShape}, frame, &makerOrder);
+                    bool closed = false;
+                    const std::vector<std::size_t> order = twinOrder(
+                        shapes,
+                        {mapValue.incomingElementShape},
+                        frame,
+                        &makerOrder,
+                        &closed
+                    );
                     const std::vector<TwinPlace> typePlaces
-                        = twinPlaces(order.size(), !makerOrder);
+                        = twinPlaces(order.size(), !makerOrder, closed);
                     for (std::size_t k = 0; k < order.size(); ++k) {
                         places[indexes[order[k]]] = typePlaces[k];
                     }
@@ -3761,9 +3802,7 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                         = filteredConnectedElementsOf[entry];
                     const TwinPlace& place = places[entry];
                     std::vector<std::string> flags {Data::MAPPER_FLAG_MODIFIED};
-                    if (place.ordered) {
-                        flags.emplace_back(Data::MAPPER_FLAG_ORDERED);
-                    }
+                    addPlaceFlags(place, flags);
 
                     // Since indexed names can have multiple MappedNames assigned to them,
                     // we want to make sure we include as many as three of them in the new
@@ -4032,15 +4071,16 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                     shapes.push_back(members[i].newElementShape);
                 }
                 bool makerOrder = false;
+                bool closed = false;
                 const std::vector<std::size_t> order
-                    = twinOrder(shapes, delayedSources[entryIndex], frame, &makerOrder);
+                    = twinOrder(shapes, delayedSources[entryIndex], frame, &makerOrder, &closed);
                 std::vector<TopoDS_Shape> ordered;
                 for (std::size_t k : order) {
                     ordered.push_back(shapes[k]);
                 }
                 const std::vector<TwinPlace> typePlaces = type == 'V' && !crossedEdge.IsNull()
-                    ? crossingPlaces(ordered, crossedEdge, crossingFace)
-                    : twinPlaces(ordered.size(), !makerOrder);
+                    ? crossingPlaces(ordered, crossedEdge, crossingFace, closed)
+                    : twinPlaces(ordered.size(), !makerOrder, closed);
                 for (std::size_t k = 0; k < order.size(); ++k) {
                     places[indexes[order[k]]] = typePlaces[k];
                 }
@@ -4065,9 +4105,7 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                 else {
                     elementMappedSection.index = places[i].index;
                     elementMappedSection.duplicateCount = places[i].duplicateCount;
-                    if (places[i].ordered) {
-                        elementMappedSection.mapperFlags.emplace_back(Data::MAPPER_FLAG_ORDERED);
-                    }
+                    addPlaceFlags(places[i], elementMappedSection.mapperFlags);
                 }
 
                 ensureElementMap()->setElementName(
