@@ -4824,12 +4824,13 @@ App::DocumentObjectExecReturn* Pipe::execute()
             // The stored points of \a record, in the pipe's frame; false for a malformed one. The
             // record ends with the profile's frames at its recompute (each its origin and the ends
             // of its x and y axes, in the body): a loop not at its stored place in the body but at
-            // it in one of them, turned or moved with the profile (the whole model turned, K4b's
-            // `RingTurned`), is read in that frame for its own input. Read in the body, the turned
-            // ring's start went to the vertex a translation fit least badly, and the start's key
-            // and the legs' names with it (a rectangle turns onto itself four ways, so no fit
-            // tells them apart). The profile's frame, not the pipe's: that is its base's
-            // placement, or the profile's support's, and turns with the ring only for a first
+            // it in one of them, moved with the profile (the whole model moved), is read in that
+            // frame for its own input; where a frame of the profile turned, the pipe stops (the
+            // whole model turned, K4b's `RingTurned`, included: decision 195's bound). Read in the
+            // body, the turned ring's start went to the vertex a translation fit least badly, and
+            // the start's key and the legs' names with it (a rectangle turns onto itself four
+            // ways, so no fit tells them apart). The profile's frame, not the pipe's: that is its
+            // base's placement, or the profile's support's, and turns with the ring only for a first
             // pipe with an unattached profile (the review of round 4, R1). A loop turned in no
             // stored frame (its lines turned in their sketch) is read in the body, and every
             // leg whose line came from another place is renamed: loud (`RingTurned180InItsSketch`).
@@ -4899,35 +4900,20 @@ App::DocumentObjectExecReturn* Pipe::execute()
                         turned = turned
                             || std::abs(moved.GetRotation().GetRotationAngle()) > turnedBy;
                     }
+                    // Read in a stored frame only where no frame of the profile turned (the whole
+                    // model moved): with one turned, the pipe stops, as below (decision 195's
+                    // bound). The loop in place in a turned frame stood for other reasons than the
+                    // loop's motion: a scalene triangle mirrored, each line keeping its side, with
+                    // its profile reparameterised half a turn, lies exactly in place in the
+                    // placement frame turned half a turn, and two legs' faces went to their mirror
+                    // places, silently (R6J-1, decision 198); required to agree with the lines'
+                    // names, the same mirror with every line drawn anew left no name to check, and
+                    // the legs' references went to their back faces (the pre-push review of round
+                    // 6's sixth fix): the whole model turned stops too
                     bool inFrame = false;
-                    for (size_t i = 0; i < frames.size() && !inFrame; ++i) {
+                    for (size_t i = 0; i < frames.size() && !inFrame && !turned; ++i) {
                         fill(inPipe * frames[i] * into[i]);
                         inFrame = closedInPlace(storedVertices, storedMiddles, spineInOrder);
-                    }
-                    // With a frame turned, the loop in place in a stored frame stands only where
-                    // every stored line found on the spine lies at the place that frame carries
-                    // it to, and the lines' names can be read: a scalene triangle mirrored, each
-                    // line keeping its side, with its profile reparameterised half a turn, lies
-                    // exactly in place in the placement frame turned half a turn, and two legs'
-                    // faces went to their mirror places, silently (the pre-push review of round
-                    // 6's fifth fix, R6J-1; decision 198). Otherwise the pipe stops, as below
-                    if (inFrame && turned) {
-                        const size_t n = spineInOrder.size();
-                        std::vector<std::string> names;
-                        if (makeTopoShape(false).getHistoryAlgorithm()
-                            == App::HistoryAlgorithm::V2) {
-                            for (const TopoDS_Edge& edge : spineInOrder) {
-                                names.push_back(firstName(path, edge));
-                            }
-                        }
-                        const std::vector<size_t> places
-                            = placesOf(storedVertices, storedMiddles, spineInOrder);
-                        inFrame = names.size() == n && record.names.size() == n
-                            && places.size() == n;
-                        for (size_t k = 0; k < n && inFrame; ++k) {
-                            inFrame = names[places[k]] == record.names[k]
-                                || std::ranges::find(names, record.names[k]) == names.end();
-                        }
                     }
                     if (!inFrame) {
                         fill(inPipe);
@@ -5085,9 +5071,9 @@ App::DocumentObjectExecReturn* Pipe::execute()
                 auto unmatched = []() {
                     return new App::DocumentObjectExecReturn(QT_TRANSLATE_NOOP(
                         "Exception",
-                        "Pipe: the closed spine's stored start can't be matched to its lines (a "
-                        "turn, a redraw or another number of lines with another change in one "
-                        "recompute); undo, and make the changes one at a time"
+                        "Pipe: the closed spine's stored start can't be matched to its lines (its "
+                        "profile turned, or a redraw or another number of lines with another "
+                        "change in one recompute); undo, or make the changes one at a time"
                     ));
                 };
                 if (viaAhead == viaBack) {

@@ -4828,17 +4828,19 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
         self.doc.recompute()
         self.assertEqual(self.ringNames(pipe), redrawn)
 
-    def testClosedRingTurnedWithAttachedProfileKeepsStart(self):
+    def testClosedRingTurnedWithAttachedProfileStops(self):
         """The ring and its profile (at the bottom left corner) turned about Z, 120 and 150
         degrees: with the profile sketch attached to the XY plane (its offset turned), after a
         base feature (a Pad of a circle about Z, which the turn leaves as it was), or with the
         profile a face of a Pad of the square (its sketch attached, its offset turned). The
         pipe's own frame (its base's placement, or the profile's support's) doesn't turn, nor
-        does the Pad's; the profile's geometry does, and the record is read in its frame: the
-        start turns with the ring, and every point on the pipe follows the turn, valid and
-        without a warning. Read in the body, the start went to the vertex a translation fit
-        picked (the bottom right), and the profile's names at the start with it, silently (the
-        review of fork PR 383 round 4, R1; the face, its pre-push review of round 5, T1)."""
+        does the Pad's; the profile's geometry does. Read in the body, the start went to the
+        vertex a translation fit picked (the bottom right), and the profile's names at the start
+        with it, silently (the review of fork PR 383 round 4, R1; the face, its pre-push review
+        of round 5, T1). Read in the profile's turned frame, the loop in place there stood for
+        other reasons than its motion too (R6J-1, and with every line drawn anew the pre-push
+        review of round 6's sixth fix): with a frame of the profile turned, the pipe stops
+        (decision 195's bound)."""
         for kind, turn in (("attached", 120), ("attached", 150), ("base", 120), ("face", 120)):
             self.tearDown()
             self.setUp()
@@ -4879,9 +4881,6 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
                     profile.AttachmentOffset = offset
                     self.doc.recompute()
                     self.assertTrue(pipe.isValid(), pipe.getStatusString())
-                start = V(pipe.SpineStart[0])
-                volume = pipe.Shape.Volume
-                points = self.attach(pipe)
                 rotation = App.Rotation(V(0, 0, 1), turn)
                 path.Placement = App.Placement(V(), rotation.multiply(XZ.Rotation))
                 turned = App.Placement(V(), rotation).multiply(offset)
@@ -4890,29 +4889,16 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
                 else:
                     profile.Placement = turned
                 self.doc.recompute()
-                self.assertTrue(pipe.isValid(), pipe.getStatusString())
-                self.assertAlmostEqual(pipe.Shape.Volume, volume, 4)
-                self.assertLess((V(pipe.SpineStart[0]) - rotation.multVec(start)).Length, 1e-6)
-                for point, before in points.items():
-                    levels = [e.get("warning_level") for e in App.getReferenceReport(point)]
-                    now = point.Placement.Base
-                    # Within the base: its edges where the pipe's corner meets it change (its seam
-                    # stays at x = 3 as the corner turns), so they aren't checked
-                    if kind == "base" and V(before.x, before.y, 0).Length < 3 + 1e-6 and before.z < 3 + 1e-6:
-                        continue
-                    self.assertTrue(point.isValid(), (point.Name, before))
-                    self.assertFalse(any(levels), (point.Name, before, levels))
-                    self.assertLess(
-                        (now - rotation.multVec(before)).Length, 1e-6, (point.Name, before, now)
-                    )
+                self.assertFalse(pipe.isValid())
+                self.assertIn("can't be matched", pipe.getStatusString())
 
-    def testClosedRingTurnedWithItsProfileResizedKeepsStart(self):
+    def testClosedRingTurnedWithItsProfileResizedStops(self):
         """The ring and its profile turned 120 degrees about Z while the profile's square grows
         about its centre (2 x 2 to 3 x 3, its lines' IDs kept): the profile a sketch, or a face of
-        a Pad of the sketch (its offset turned). The stored start turns with the ring. A frame at
-        the profile's first point and towards its next one moved with the resize, the ring was
-        read in the body, and the start went to the bottom right corner silently (the second
-        pre-push review of fork PR 383 round 5, F1)."""
+        a Pad of the sketch (its offset turned). A frame at the profile's first point and towards
+        its next one moved with the resize, the ring was read in the body, and the start went to
+        the bottom right corner silently (the second pre-push review of fork PR 383 round 5, F1).
+        With a frame of the profile turned, the pipe stops (decision 195's bound)."""
         for kind in ("sketch", "face"):
             self.tearDown()
             self.setUp()
@@ -4937,7 +4923,6 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
                     _, pipe = self.ring(0, 0, (pad, top))
                 else:
                     profile, pipe = self.ring(0, 0)
-                start = V(pipe.SpineStart[0])
                 rotation = App.Rotation(V(0, 0, 1), 120)
                 geometry = profile.Geometry
                 for line in geometry:
@@ -4950,8 +4935,8 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
                 else:
                     profile.Placement = turned
                 self.doc.recompute()
-                self.assertTrue(pipe.isValid(), pipe.getStatusString())
-                self.assertLess((V(pipe.SpineStart[0]) - rotation.multVec(start)).Length, 1e-6)
+                self.assertFalse(pipe.isValid())
+                self.assertIn("can't be matched", pipe.getStatusString())
 
     def testClosedRingTurnedWithAnotherEditStops(self):
         """The ring and its profile (at the bottom left corner) turned about Z while something
@@ -5066,8 +5051,9 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
         their cyclic order, but taken by them the start goes to the top left, which no frame of the
         profile carries the stored start to: the pipe stops (decision 180). By the names alone,
         the start and the legs' names followed the lines to other places, silently, as on
-        integration (`RingTurnedRedrawnAndWidened`). Undone, it recomputes; the same changes one
-        at a time recompute too."""
+        integration (`RingTurnedRedrawnAndWidened`). Undone, it recomputes; the redraw and the
+        widening alone recompute too, and the turn after them stops (with a frame of the profile
+        turned the pipe stops: decision 195's bound)."""
         profile, pipe = self.ring(0, 0)
         path = pipe.Spine[0]
         self.assertTrue(pipe.isValid(), pipe.getStatusString())
@@ -5111,7 +5097,8 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
         self.assertTrue(pipe.isValid(), pipe.getStatusString())
         turn(120)
         self.doc.recompute()
-        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        self.assertFalse(pipe.isValid())
+        self.assertIn("can't be matched", pipe.getStatusString())
 
     def testClosedRingStartCornerMovedKeepsTheStartOrStops(self):
         """The ring's bottom line moved down (lines 0 and 2 lengthened, IDs kept), so the start
@@ -5302,26 +5289,34 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
         exactly onto the mirrored one: read in that frame, the start's next vertex went to L'
         while line 0 lies at the right, and the right and left legs' faces went to the mirror
         places, silently (the review of fork PR 383 round 6's fifth fix, R6J-1; integration is
-        right). With a frame turned, the loop in place in a frame stands only where the lines'
-        names lie at the places it carries them to: the pipe stops (decision 198). Mirrored under
-        the lines' IDs (line 0 runs from A to L'), names and places agree, and it resolves."""
-        for idsFollow in (False, True):
+        right). With a frame of the profile turned, the pipe stops (decisions 195 and 198), also
+        mirrored under the lines' IDs (line 0 runs from A to L'), where names and places agree, and
+        with every line drawn anew, where no name is left to check (the pre-push review of round
+        6's sixth fix: there the legs' references went to their back faces quietly, where
+        integration breaks)."""
+        for drawn in ("sides kept", "ids follow", "all anew"):
             self.tearDown()
             self.setUp()
-            with self.subTest(idsFollow=idsFollow):
+            with self.subTest(drawn=drawn):
                 a, r, l = V(0, 0, 0), V(10, 30, 0), V(-16, 24, 0)
                 lines = [Part.LineSegment(a, r), Part.LineSegment(r, l), Part.LineSegment(l, a)]
                 path = models.sketch(self.doc, "Path", lines, self.body, placement=XZ)
                 profile = self.square()
                 pipe = self.pipe(profile, path, "Right corner")
                 r, l = V(-l.x, l.y, 0), V(-r.x, r.y, 0)
-                drawn = ((a, l), (l, r), (r, a)) if idsFollow else ((a, r), (r, l), (l, a))
-                geometry = path.Geometry
-                for i, line in enumerate(geometry):
-                    line.StartPoint, line.EndPoint = V(100 + 10 * i, 100, 0), V(105 + 10 * i, 105, 0)
-                for line, (p, q) in zip(geometry, drawn):
-                    line.StartPoint, line.EndPoint = p, q
-                path.Geometry = geometry
+                ends = ((a, r), (r, l), (l, a))
+                if drawn == "ids follow":
+                    ends = ((a, l), (l, r), (r, a))
+                if drawn == "all anew":
+                    path.Geometry = [Part.LineSegment(p, q) for p, q in ends]
+                else:
+                    geometry = path.Geometry
+                    for i, line in enumerate(geometry):
+                        line.StartPoint = V(100 + 10 * i, 100, 0)
+                        line.EndPoint = V(105 + 10 * i, 105, 0)
+                    for line, (p, q) in zip(geometry, ends):
+                        line.StartPoint, line.EndPoint = p, q
+                    path.Geometry = geometry
                 back = App.Rotation(V(0, 0, 1), -180)
                 square = profile.Geometry
                 for line in square:
@@ -5331,12 +5326,8 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
                 profile.Geometry = square
                 profile.Placement = App.Placement(V(), App.Rotation(V(0, 0, 1), 180))
                 self.doc.recompute()
-                if not idsFollow:
-                    self.assertFalse(pipe.isValid())
-                    self.assertIn("can't be matched", pipe.getStatusString())
-                    continue
-                self.assertTrue(pipe.isValid(), pipe.getStatusString())
-                self.assertLess(V(pipe.SpineStart[0]).Length, 1e-6)
+                self.assertFalse(pipe.isValid())
+                self.assertIn("can't be matched", pipe.getStatusString())
 
     def testClosedRingReorderedAndReversedRenamesNothing(self):
         """The profile slid along its leg (4 to 16), then the lines listed from the top right
