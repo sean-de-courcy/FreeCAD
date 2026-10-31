@@ -6796,11 +6796,15 @@ TEST(Moved, lonePieceThatMovedAloneOffItsPlaceOnItsFaceBreaks)
     entry.fingerprint.upToFaces[0].foot = Base::Vector3d(-2, 0, 10);
     input.entries = {entry};
     bool told = true;
+    // The Pad's frame moved by 2.5 along x against the plate's: a point's foot on the plate
+    double shift = 2.5;
     input.upToFacesAt = [&](const std::string&,
-                            const Base::Vector3d&,
+                            const Base::Vector3d& point,
                             std::vector<ElementFingerprint::UpToFace>& faces,
                             std::vector<ElementFingerprint::UpToFace>& all) {
-        faces = {plateFace};
+        auto onPlate = plateFace;
+        onPlate.foot = Base::Vector3d(point.x + shift, point.y, 10);
+        faces = {onPlate};
         all = {plateFace};
         return told;
     };
@@ -6823,7 +6827,17 @@ TEST(Moved, lonePieceThatMovedAloneOffItsPlaceOnItsFaceBreaks)
         describe(Data::solveOwner(input)[0]),
         "broken  -1 [Face4 ] moved 0.750 mm off its place, and its way on its up-to face can't be told"
     );
+    //   frames that didn't move against each other where the piece was (the old point meets the
+    //   plate at the saved foot): the overlap in the Pad's frame is one on the plate, and the
+    //   piece stands with the path off the face. A ring around a hole, resized: its inside point
+    //   jumps across the hole (review prA1e-r2's ResizeRight)
     inside = false;
+    shift = 0;
+    EXPECT_EQ(describe(Data::solveOwner(input)[0]), "exact Face4 0 [] ");
+    //     moved by less than the continuation distance: the same
+    shift = 1e-9;
+    EXPECT_EQ(describe(Data::solveOwner(input)[0]), "exact Face4 0 [] ");
+    shift = 2.5;
     told = false;
     EXPECT_EQ(describe(Data::solveOwner(input)[0]), "exact Face4 0 [] ");
     //   a record without the foot, as before
@@ -6952,6 +6966,54 @@ TEST(Moved, departedRuleSeesAlongThePiecesOwnSweep)
         "broken  -1 [Face5 ] moved 1.250 mm off where it was, and nothing sits there"
     );
     EXPECT_EQ(askedNames, (std::vector<std::string> {farPiece({fill})}));
+}
+
+TEST(Moved, makerSweepOverlapOnLaterFeatureStillDeparts)
+{
+    // ops#524 (review prA1e-r2's TiltedPlateSwappedUnderBoxTip): the piece's own sweep only adds
+    // departures. A unit square cap at z 10, x -1..0; now one at z 3, x -8..-7: apart seen along
+    // its normal, overlapping seen along the Pad's slanted sweep (1, 0, 1). On a later feature no
+    // up-to face is saved to catch it after
+    auto square = [](double x0, double z) {
+        ElementFingerprint fp = fingerprint(
+            'F',
+            "Plane",
+            1.0,
+            Base::Vector3d(x0 + 0.5, 0.5, z),
+            Base::Vector3d(0, 0, 1)
+        );
+        fp.outline = {Base::Vector3d(x0, 0, z),
+                      Base::Vector3d(x0 + 1, 0, z),
+                      Base::Vector3d(x0 + 1, 1, z),
+                      Base::Vector3d(x0, 1, z)};
+        return fp;
+    };
+    const auto fill = plateElement("fill", 'F');
+    SolveInput input;
+    input.diagonal = 40;
+    input.pool["Face"] = {element("Face5", {farPiece({fill})}), element("Face9", {sketchEdge(9)})};
+    measure(input, {{"Face5", square(-8, 3)}, {"Face9", capAt(20, 3)}}, nullptr);
+    auto entry = exact("Face5");
+    entry.exactName = farPiece({fill});
+    entry.fingerprint = square(-1, 10);
+    input.entries = {entry};
+    input.sweepOf = [](const std::string&) -> std::optional<Base::Vector3d> {
+        return Base::Vector3d(1, 0, 1).Normalize();
+    };
+    EXPECT_EQ(
+        describe(Data::solveOwner(input)[0]),
+        "broken  -1 [Face5 ] moved 9.899 mm off where it was, and nothing sits there"
+    );
+
+    // And the other way: dropped straight down by 7, overlapping seen along its normal, apart
+    // seen along the Pad's sweep: departed, as N2 has it (SweepFoldMoveReorder C_p0)
+    measure(input, {{"Face5", square(-1, 3)}, {"Face9", capAt(20, 3)}}, nullptr);
+    EXPECT_EQ(
+        describe(Data::solveOwner(input)[0]),
+        "broken  -1 [Face5 ] moved 7.000 mm off where it was, and nothing sits there"
+    );
+    input.sweepOf = nullptr;
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Exact);
 }
 
 TEST(SolveOwner, pieceAloneOnItsFaceIsSeenAlongTheSweep)
