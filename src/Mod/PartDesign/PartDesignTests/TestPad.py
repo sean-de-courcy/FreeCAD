@@ -3346,22 +3346,24 @@ class TestPad(unittest.TestCase):
                     finally:
                         FreeCAD.closeDocument(doc.Name)
 
-    def testPadUpToAHoledShellLonePieceSlidAlongItsFace(self):
-        # ops#524 (PLAN decision 182): shell_twins' MoveAcrossHalf. Up to the plate with the hole
-        # x -1..1, y -2..2 and its fill, A (x -3..0, y -0.5..0.5) has a far cap piece on the plate
-        # (L, x -3..-1) and one on the fill (M, x -1..0), each alone on its face. A moves to x
-        # 0.5..3.5, by its geometry or by its sketch's attachment offset: M's piece carries on in
-        # the fill at x 0.5..1, the path from its old place staying on the fill (N1), and its datum
-        # follows it quietly; L's piece is gone (the plate's piece right of the hole takes its
-        # name, but the path crosses the hole), and its datum says so. The datums on the Pad
-        # itself (N1), and on a later SubtractiveBox, the Tip, which passes the pieces on with
-        # their names and has no up-to faces of its own (N2). B (x 8..14, y -5..-3) holds the
+    def testPadUpToAHoledShellLonePiecesMovedAcrossTheHoleBreak(self):
+        # ops#524 (PLAN decisions 199 and 202): shell_twins' MoveAcrossHalf. Up to the plate with the
+        # hole x -1..1, y -2..2 and its fill, A (x -3..0, y -0.5..0.5) has a far cap piece on the
+        # plate (L, x -3..-1) and one on the fill (M, x -1..0), each alone on its face. A moves to x
+        # 0.5..3.5, by its geometry or by its sketch's attachment offset. L's piece is gone: the
+        # plate's piece right of the hole takes its name, and moved by the offset it overlaps L's
+        # old place in the Pad's own frame (the attack set's ALonePiece, silent before), but the
+        # path from L's saved foot crosses the hole: its datum says so. M's piece carries on in the
+        # fill at x 0.5..1, but a piece slid within its face can't be told from one reborn there
+        # (review prA1c-r1's UArmSwapRedraw), so its datum says it lost its piece too. The datums
+        # on the Pad itself, and on a later SubtractiveBox, the Tip, which passes the pieces on
+        # with their names and has no up-to faces of its own (N2). B (x 8..14, y -5..-3) holds the
         # box. For the Pad and the Pocket
         for kind in ("Pad", "Pocket"):
             for edit in ("geometry", "offset"):
                 for onTip in (False, True):
                     with self.subTest(kind=kind, edit=edit, onTip=onTip):
-                        doc = FreeCAD.newDocument("PadUpToAHoledShellLonePieceSlidAlongItsFace")
+                        doc = FreeCAD.newDocument("PadUpToAHoledShellLonePiecesMovedAcrossTheHole")
                         try:
                             feature, z = capsUpToAFreeformPlate(
                                 doc,
@@ -3409,8 +3411,12 @@ class TestPad(unittest.TestCase):
                             doc.recompute()
                             self.assertTrue(feature.isValid(), feature.getStatusString())
                             self.assertTrue(target.isValid(), target.getStatusString())
-                            assertOnCap(self, points["M"], z, 0.75, 0)
-                            assertNotQuietlyElsewhere(self, points["L"], z, [])
+                            for piece in ("L", "M"):
+                                point = points[piece]
+                                self.assertFalse(
+                                    point.isValid() and point.getStatusString() == "Valid",
+                                    "%s quiet at %s" % (piece, point.Placement.Base),
+                                )
                         finally:
                             FreeCAD.closeDocument(doc.Name)
 

@@ -501,7 +501,10 @@ AppExport bool isMarkedPieceOf(std::string_view name, long tag);
 
 /** The tag of the feature that made \a name's far piece or far element (ops#524, PLAN decision
  * 182, N2): its first projection's section's (PRJ), marked or not; 0 for none. A later feature of
- * a body passes the piece's name on, so the tag names the extrusion up to the faces.
+ * a body passes the piece's name on, so the tag names the extrusion up to the faces. 0 too for a
+ * copy of the piece, a copy section (a pattern's or a mirror's instance, a boundary, a second
+ * side) after the projection's: the copy's place isn't the one the extrusion made, so no up-to
+ * face of the extrusion tells anything about it (review prA1c-r1, PLAN decision 199 (2)).
  */
 AppExport long projectionTag(std::string_view name);
 
@@ -807,13 +810,13 @@ struct AppExport SolveInput
     long targetTag = 0;
 
     /// Whether the far piece named \a name, whose point is \a point now, moved within the up-to
-    /// face \a saved from the foot saved with it (ops#524, PLAN decision 182, N1): the straight
-    /// path between them, seen along the sweep, stays inside that one face
-    /// (App::ElementUpToPathFunction). Unset: no piece did, and a lone piece that left its old
-    /// place breaks.
-    std::function<bool(const std::string& name,
-                       const ElementFingerprint::UpToFace& saved,
-                       const Base::Vector3d& point)>
+    /// face \a saved from the foot saved with it (ops#524, PLAN decisions 182 and 199 (3)): true
+    /// when the straight path between them, seen along the sweep, stays inside that one face,
+    /// false when it leaves it, empty when that can't be told (App::ElementUpToPathFunction).
+    /// Unset: a lone piece that moved alone stands as before.
+    std::function<std::optional<bool>(const std::string& name,
+                                      const ElementFingerprint::UpToFace& saved,
+                                      const Base::Vector3d& point)>
         upToPathInside;
 };
 

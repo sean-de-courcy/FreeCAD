@@ -4,6 +4,7 @@
 
 #include <FCConfig.h>
 
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -269,17 +270,19 @@ using ElementUpToFacesFunction
                std::vector<Data::ElementFingerprint::UpToFace>* all);
 AppExport void setElementUpToFacesFunction(ElementUpToFacesFunction function);
 
-/** Whether a lone far piece named \a name moved within its up-to face (ops#524, PLAN decision 182,
- * N1): the line through \a point (as ElementUpToFacesFunction's) meets one face of \a saved's
- * owner inside it, not on its boundary, and so does the line through \a saved's foot, and no
- * boundary edge of that face meets the strip the segment between the two meetings spans along the
- * sweep, seen in the owner's own frame. False when it can't be told, or without the foot.
- * PartDesign sets it; without it no piece moved within its face.
+/** Whether a lone far piece named \a name moved within its up-to face (ops#524, PLAN decisions 182
+ * and 199 (3)): the line through \a point (as ElementUpToFacesFunction's) meets one face of
+ * \a saved's owner inside it, not on its boundary, and so does the line through \a saved's foot;
+ * then true when no boundary edge of that face meets the strip the segment between the two
+ * meetings spans along the sweep, seen in the owner's own frame, and false when one does. Empty
+ * when it can't be told: no foot, no such meeting or two, an end on the boundary, only a seam
+ * edge met, a failed section. PartDesign sets it; without it nothing can be told.
  */
-using ElementUpToPathFunction = bool (*)(const GeoFeature* geo,
-                                         const char* name,
-                                         const Data::ElementFingerprint::UpToFace& saved,
-                                         const Base::Vector3d& point);
+using ElementUpToPathFunction
+    = std::optional<bool> (*)(const GeoFeature* geo,
+                              const char* name,
+                              const Data::ElementFingerprint::UpToFace& saved,
+                              const Base::Vector3d& point);
 AppExport void setElementUpToPathFunction(ElementUpToPathFunction function);
 
 /** ElementUpToFacesFunction's answer for the far piece \a element (`Face7`) of \a geo's shape,
