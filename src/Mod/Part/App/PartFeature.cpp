@@ -49,6 +49,11 @@
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepGProp.hxx>
 #include <BRepGProp_Face.hxx>
+#include <BRepLProp_CLProps.hxx>
+#include <GeomAPI_ProjectPointOnSurf.hxx>
+#include <Geom_Surface.hxx>
+#include <gp.hxx>
+#include <gp_Torus.hxx>
 #include <BRepIntCurveSurface_Inter.hxx>
 #include <BRepTools.hxx>
 #include <BRepTools_WireExplorer.hxx>
@@ -885,6 +890,204 @@ void edgeFingerprint(const TopoDS_Edge& edge, Data::ElementFingerprint& fp)
     }
 }
 
+// The sides' tolerance (ops#526 D2): a curved face whose normal is within this of square to an
+// edge's principal normal (a fillet's boundary arc, where the normals meet at 6e-17) is tangent,
+// `c0`; the solver's angle tolerance, 1e-6 rad.
+constexpr double sideTolerance = 1e-6;
+
+// A face's unit normal at \a point, with the face's orientation (outward on a solid), from the
+// face's surface at the point's projection; false where it has none.
+bool faceNormalAt(const TopoDS_Face& face, const gp_Pnt& point, gp_Dir& normal)
+{
+    // With the face's location, as the edge's point
+    Handle(Geom_Surface) geometry = BRep_Tool::Surface(face);
+    if (geometry.IsNull()) {
+        return false;
+    }
+    GeomAPI_ProjectPointOnSurf projection(point, geometry);
+    if (projection.NbPoints() == 0) {
+        return false;
+    }
+    double u = 0.0;
+    double v = 0.0;
+    projection.LowerDistanceParameters(u, v);
+    gp_Pnt at;
+    gp_Vec du;
+    gp_Vec dv;
+    geometry->D1(u, v, at, du, dv);
+    const gp_Vec n = du.Crossed(dv);
+    if (n.Magnitude() <= gp::Resolution()) {
+        return false;
+    }
+    normal = gp_Dir(n);
+    if (face.Orientation() == TopAbs_REVERSED) {
+        normal.Reverse();
+    }
+    return true;
+}
+
+bool isAnalyticCurved(GeomAbs_SurfaceType type)
+{
+    return type == GeomAbs_Cylinder || type == GeomAbs_Cone || type == GeomAbs_Sphere
+        || type == GeomAbs_Torus;
+}
+
+Data::ElementFingerprint::Side directionSide(const gp_Dir& direction)
+{
+    Data::ElementFingerprint::Side side;
+    side.direction = toVector(direction.XYZ());
+    return side;
+}
+
+// The sides of an element (ops#526 D2, Data::ElementFingerprint's version 7) of \a shape:
+// - an edge: its planar faces' outward normals at its middle; a straight edge's cylinders and
+//   cones the same way (their normal is constant along a ruling); a curved edge's analytic
+//   curved faces by the side of its principal normal their normal points to (`c+`, `c-`, or `c0`
+//   when square to it); freeform faces left out;
+// - a vertex: its edges' unit directions away from it, a closed edge's both;
+// - a cylinder, cone, sphere or torus face: `c+` when its normal at its middle points away from
+//   its axis or centre, `c-` toward it; nothing for another face.
+// Nothing for an element whose sides the shape doesn't give (a free wire's edge).
+void sidesFingerprint(const TopoShape& shape, const TopoDS_Shape& sub, Data::ElementFingerprint& fp)
+{
+    using Side = Data::ElementFingerprint::Side;
+    std::vector<Side> sides;
+    if (sub.ShapeType() == TopAbs_EDGE) {
+        const TopoDS_Edge& edge = TopoDS::Edge(sub);
+        if (BRep_Tool::Degenerated(edge)) {
+            return;
+        }
+        BRepAdaptor_Curve curve(edge);
+        const double middle = (curve.FirstParameter() + curve.LastParameter()) / 2.0;
+        const gp_Pnt point = curve.Value(middle);
+        const bool straight = curve.GetType() == GeomAbs_Line;
+        std::optional<gp_Dir> principal;
+        if (!straight) {
+            BRepLProp_CLProps props(curve, middle, 2, Precision::Confusion());
+            if (props.IsTangentDefined() && props.Curvature() > Precision::Confusion()) {
+                gp_Dir n;
+                props.Normal(n);
+                principal = n;
+            }
+        }
+        for (const auto& ancestor : shape.findAncestorsShapes(sub, TopAbs_FACE)) {
+            const TopoDS_Face& face = TopoDS::Face(ancestor);
+            const auto type = BRepAdaptor_Surface(face, Standard_False).GetType();
+            const bool planar = type == GeomAbs_Plane;
+            if (!planar && !isAnalyticCurved(type)) {
+                continue;
+            }
+            gp_Dir normal;
+            if (!faceNormalAt(face, point, normal)) {
+                continue;
+            }
+            if (planar || (straight && (type == GeomAbs_Cylinder || type == GeomAbs_Cone))) {
+                sides.push_back(directionSide(normal));
+            }
+            else if (!straight && principal) {
+                const double along = normal.Dot(*principal);
+                Side side;
+                side.curve = std::abs(along) <= sideTolerance ? '0' : along > 0.0 ? '+' : '-';
+                sides.push_back(side);
+            }
+        }
+    }
+    else if (sub.ShapeType() == TopAbs_VERTEX) {
+        const TopoDS_Vertex& vertex = TopoDS::Vertex(sub);
+        for (const auto& ancestor : shape.findAncestorsShapes(sub, TopAbs_EDGE)) {
+            const TopoDS_Edge& edge = TopoDS::Edge(ancestor);
+            if (BRep_Tool::Degenerated(edge)) {
+                continue;
+            }
+            BRepAdaptor_Curve curve(edge);
+            const double first = curve.FirstParameter();
+            const double last = curve.LastParameter();
+            // Which ends of the edge the vertex is, a closed edge's both. Without the edge's
+            // orientation, TopExp::Vertices() gives them in the curve's parameter order.
+            TopoDS_Vertex v1;
+            TopoDS_Vertex v2;
+            TopExp::Vertices(edge, v1, v2);
+            const bool atFirst = !v1.IsNull() && v1.IsSame(vertex);
+            const bool atLast = !v2.IsNull() && v2.IsSame(vertex);
+            auto away = [&](double parameter, bool forward) {
+                gp_Pnt at;
+                gp_Vec tangent;
+                curve.D1(parameter, at, tangent);
+                if (tangent.Magnitude() > gp::Resolution()) {
+                    sides.push_back(directionSide(gp_Dir(forward ? tangent : -tangent)));
+                }
+            };
+            if (atFirst) {
+                away(first, true);
+            }
+            if (atLast) {
+                away(last, false);
+            }
+        }
+    }
+    else if (sub.ShapeType() == TopAbs_FACE) {
+        const TopoDS_Face& face = TopoDS::Face(sub);
+        BRepAdaptor_Surface surface(face);
+        if (!isAnalyticCurved(surface.GetType())) {
+            return;
+        }
+        const double u = (surface.FirstUParameter() + surface.LastUParameter()) / 2.0;
+        const double v = (surface.FirstVParameter() + surface.LastVParameter()) / 2.0;
+        gp_Pnt point;
+        gp_Vec du;
+        gp_Vec dv;
+        surface.D1(u, v, point, du, dv);
+        gp_Vec normal = du.Crossed(dv);
+        if (normal.Magnitude() <= gp::Resolution()) {
+            return;
+        }
+        if (face.Orientation() == TopAbs_REVERSED) {
+            normal.Reverse();
+        }
+        // From the axis or the centre to the point
+        gp_Vec outward;
+        auto fromAxis = [&](const gp_Ax1& axis) {
+            const gp_Vec q(axis.Location(), point);
+            const gp_Vec a(axis.Direction());
+            return q - a * q.Dot(a);
+        };
+        switch (surface.GetType()) {
+            case GeomAbs_Cylinder:
+                outward = fromAxis(surface.Cylinder().Axis());
+                break;
+            case GeomAbs_Cone:
+                outward = fromAxis(surface.Cone().Axis());
+                break;
+            case GeomAbs_Sphere:
+                outward = gp_Vec(surface.Sphere().Location(), point);
+                break;
+            default: {
+                // A torus: from the nearest point of its major circle
+                const gp_Torus torus = surface.Torus();
+                gp_Vec radial = fromAxis(torus.Axis());
+                if (radial.Magnitude() <= gp::Resolution()) {
+                    return;
+                }
+                radial.Normalize();
+                const gp_Pnt onCircle
+                    = torus.Location().Translated(radial * torus.MajorRadius());
+                outward = gp_Vec(onCircle, point);
+                break;
+            }
+        }
+        const double along = normal.Dot(outward);
+        if (std::abs(along) <= sideTolerance * normal.Magnitude() * outward.Magnitude()) {
+            return;
+        }
+        Side side;
+        side.curve = along > 0.0 ? '+' : '-';
+        sides.push_back(side);
+    }
+    if (sides.size() <= Data::ElementFingerprint::MaxSides) {
+        fp.sides = std::move(sides);
+    }
+}
+
 // The reference solver's cheap element descriptions (App::ElementHintsFunction, ops#105): for
 // every element of a type of Shape, the intrinsic part of its fingerprint, measured as
 // getElementFingerprint() measures it, and a point of its plane, line or vertex. The shape is
@@ -1107,6 +1310,14 @@ bool Feature::getElementFingerprint(
     }
     catch (const Standard_Failure&) {
         return false;
+    }
+    // The sides (ops#526 D2), from the shape's cached ancestor maps: a failure leaves them out,
+    // which loses discrimination only
+    try {
+        sidesFingerprint(located, sub, fp);
+    }
+    catch (const Standard_Failure&) {
+        fp.sides.clear();
     }
     fingerprint = std::move(fp);
     return true;
