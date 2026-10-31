@@ -102,6 +102,27 @@ namespace Data
  *   outer wire (holes left out). The solver lets a far cap or edge made whole again take the
  *   piece only when the same faces lie under the point now, each the only up-to face like it.
  *
+ * Version 7 (ops#526 D2, PLAN decisions 207 and 208), written for any element with sides or marks,
+ * a vertex included:
+ *
+ *     7|<type>|<kind>|<size>|<c>|<d>|<r>|<o or _>|<x0..z1 or _>|<t,n or _>|<p or _>|<i or _>|<u or _>|<s or _>|<m or _>
+ *
+ * - the fields up to u: version 6's, each of them `_` where the element has none (a vertex's box
+ *   and outline; the up-to faces of anything but a far piece).
+ * - s: the element's sides, separated by `/`, in no order: an edge's planar faces' and straight
+ *   edge's analytic curved faces' outward normals at its middle (`x,y,z`), a curved edge's curved
+ *   faces by the side of its principal normal they lie on (`c+`: the face's normal points along
+ *   it, a hole's cylinder at its rim; `c-`, a boss's; `c0` within the angle tolerance, a tangent
+ *   face), a vertex's edges' directions away from it (both of a closed edge's), a cylinder's,
+ *   cone's, sphere's or torus's own side (`c+` when its normal at its middle points away from the
+ *   axis or centre, `c-` toward it). The solver tells another element of the same size at the same
+ *   place by them (another edge of a member drawn again beside itself, a hole's other crossing).
+ * - m: the marks of the objects the target is built from, separated by `/`: `<tag>:<mark>`, the
+ *   object's ID as the names carry it and its highest geometry ID when the record was taken (a
+ *   sketch's), or `_` for an object without geometry IDs. Only a reference's record has them. The
+ *   solver tells an element drawn again at a vacated place (its sources new) from a sibling moved
+ *   there (its sources were in the model before) by them.
+ *
  * Numbers have 12 significant digits, in the classic locale, so the text is the same on every
  * platform and in every locale. A reader takes a version it doesn't know as no fingerprint.
  */
@@ -123,6 +144,9 @@ struct AppExport ElementFingerprint
     /// The text form of a far piece's fingerprint with the up-to faces under it (ops#522, PLAN
     /// decision 168): version 5's fields, the inside point or `_`, and the up-to faces.
     static constexpr int VersionWithUpTo = 6;
+    /// The text form of a fingerprint with the element's sides and its sources' marks (ops#526
+    /// D2): version 6's fields, each of them `_` where empty, then the sides and the marks.
+    static constexpr int VersionWithSides = 7;
 
     /// An up-to face a far piece lies on (version 6): the object that owns it, by its name in its
     /// document, the face's bounding box and area in that object's own frame (its placement
@@ -176,10 +200,49 @@ struct AppExport ElementFingerprint
     /// Empty otherwise, and for an element without an extent.
     std::vector<UpToFace> upToFaces;
 
+    /// One side of an element (version 7, ops#526 D2), in the frame of `center`.
+    struct Side
+    {
+        /// 0 for a direction; `+`, `-` or `0` for a curved side (`c+`, `c-`, `c0`).
+        char curve = 0;
+        /// A unit direction when `curve` is 0.
+        Base::Vector3d direction;
+
+        friend bool operator==(const Side& a, const Side& b)
+        {
+            return a.curve == b.curve && a.direction == b.direction;
+        }
+    };
+    /// The element's sides (version 7): empty for an element whose sides tell nothing (a plane, a
+    /// free wire's edge) and in an older fingerprint.
+    std::vector<Side> sides;
+
+    /// An object the target is built from and its highest geometry ID when the record was taken
+    /// (version 7, ops#526 D2).
+    struct Mark
+    {
+        /// The object's ID, as a name's sections carry it.
+        long tag = 0;
+        /// Its highest geometry ID (App::DocumentObject::elementIdMark()); -1 for an object
+        /// without geometry IDs.
+        long mark = -1;
+
+        friend bool operator==(const Mark& a, const Mark& b)
+        {
+            return a.tag == b.tag && a.mark == b.mark;
+        }
+    };
+    /// The marks of the target's closure (version 7): only a reference's record has them; empty
+    /// otherwise and in an older fingerprint.
+    std::vector<Mark> marks;
+
     /// At most this many points in an outline: the reader takes more as a malformed field.
     static constexpr std::size_t MaxOutline = 256;
     /// At most this many up-to faces: the reader takes more as a malformed field.
     static constexpr std::size_t MaxUpToFaces = 2;
+    /// At most this many sides and marks (version 7): the reader takes more as a malformed field.
+    static constexpr std::size_t MaxSides = 64;
+    static constexpr std::size_t MaxMarks = 4096;
 
     /** \a points with every k-th kept, k the least that leaves at most MaxOutline (PR 366 round 6):
      * a convex outline stays convex, in its order. At most MaxOutline points are returned as
@@ -219,7 +282,8 @@ struct AppExport ElementFingerprint
             && a.direction == b.direction && a.radii == b.radii && a.location == b.location
             && a.extentMin == b.extentMin && a.extentMax == b.extentMax
             && a.twinCentroid == b.twinCentroid && a.twinCount == b.twinCount
-            && a.outline == b.outline && a.inside == b.inside && a.upToFaces == b.upToFaces;
+            && a.outline == b.outline && a.inside == b.inside && a.upToFaces == b.upToFaces
+            && a.sides == b.sides && a.marks == b.marks;
     }
     friend bool operator!=(const ElementFingerprint& a, const ElementFingerprint& b)
     {
