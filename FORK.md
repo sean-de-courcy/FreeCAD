@@ -422,7 +422,8 @@ names it.
 | `infra/538-macos-generation` | infra | ops#538 | - | `integration` `381cbaf445` | `6aa7153a62` (fork PR 396), 2026-10-29 | never |
 | `infra/469-stopped-target` | infra | ops#469 | - | `integration` `6aa7153a62` | `5422b1a35d` (fork PR 397), 2026-10-29 | never (fork tests) |
 | `fix/394-exact-place` | fix | ops#394, ops#467, ops#503 | - | `integration` @ `72514ac84c` | `23e8c4ae5b` (fork PR 379), 2026-10-29 | never (fork fix) |
-| `infra/522-ellipse-plate` | infra | ops#522 | - | `integration` `5422b1a35d` | (fork PR 400) | never (fork tests) |
+| `infra/522-ellipse-plate` | infra | ops#522 | - | `integration` `5422b1a35d` | `a54ea8c2c7` (fork PR 400), 2026-10-29 | never (fork tests) |
+| `infra/469-oracle-pcv-mask` | infra | ops#551, ops#469 | - | `integration` `a54ea8c2c7` | (fork PR 401) | never (fork tests) |
 
 ## Fork-only commits in carried topics
 
