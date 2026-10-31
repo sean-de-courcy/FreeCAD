@@ -2105,7 +2105,8 @@ bool sameUpToFaces(
 // decisions 199 (4) and 202): placeOnUpToFace()
 enum class OnUpToFace
 {
-    Kept,      // the saved face is the one under it, and the path from its foot stays inside it
+    Kept,      // the saved face is the one under it, and its frame didn't move against the
+               // face's or the path from its foot stays inside it
     Left,      // another face, none or two under it, or the path leaves the face
     CantTell,  // the path can't be told (an end on the face's boundary, a seam, a failed section)
 };
@@ -2114,9 +2115,10 @@ enum class OnUpToFace
  * \a now, stands on the one up-to face it lay on (ops#524, PLAN decisions 182, 199 and 202): it is
  * marked by that face alone (a cap: isMarkedCap() with faceAlone; an edge piece: its one mark a
  * face) and one up-to face was saved with its foot. Kept when exactly one face lies under its
- * point now, the saved one (sameUpToFaces()), and the straight path from the saved foot to the
- * point now, seen along the sweep in that face's owner's frame, stays inside it
- * (\a input.upToPathInside); CantTell when that path can't be told; else Left. Empty when the test
+ * point now, the saved one (sameUpToFaces()), and either its old point still meets that face at
+ * the saved foot (nothing moved the target against the face's owner there) or the straight path
+ * from the saved foot to the point now, seen along the sweep in that face's owner's frame, stays
+ * inside it (\a input.upToPathInside); CantTell when that path can't be told; else Left. Empty when the test
  * doesn't apply (another kind of piece, no foot saved, no hooks, a copy of the piece: a copy
  * section after its projection, review prA1c-r1) or the up-to faces can't be told now (a datum
  * plane; a shape not made under its placement). The caller checks the twins.
@@ -2156,6 +2158,21 @@ std::optional<OnUpToFace> placeOnUpToFace(
     }
     if (under.size() != 1 || !sameUpToFaces(saved.upToFaces, under, every, eps, input.tolerances)) {
         return OnUpToFace::Left;
+    }
+    // Nothing moved the target against the face's owner where the piece was: the old point,
+    // carried to the owner's frame as both lie now, meets the same face at the saved foot. The
+    // piece's overlap with its old place in the target's frame (moved alone) is one on the face
+    // too, as the rule takes it without this test. The path is for a target or a face moved by
+    // placement or support (ALonePiece); between the inside points of a ring around a hole,
+    // resized, it crosses the hole (review prA1e-r2's ResizeRight)
+    if (const auto old = upToPointOf(saved)) {
+        std::vector<ElementFingerprint::UpToFace> then;
+        std::vector<ElementFingerprint::UpToFace> everyThen;
+        if (input.upToFacesAt(name, *old, then, everyThen) && then.size() == 1 && then.front().foot
+            && sameUpToFaces(saved.upToFaces, then, everyThen, eps, input.tolerances)
+            && Base::Distance(*then.front().foot, *saved.upToFaces.front().foot) <= eps) {
+            return OnUpToFace::Kept;
+        }
     }
     const auto inside = input.upToPathInside(name, saved.upToFaces.front(), *point);
     return !inside ? OnUpToFace::CantTell : *inside ? OnUpToFace::Kept : OnUpToFace::Left;
@@ -3482,180 +3499,190 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             // it can't be told from that by the target alone; only the cap beside the hit (below)
             // decides then, loudly when the old piece lies beyond it
             // ops#524 (PLAN decision 182, N2): the sweep of the extrusion that made the hit, which
-            // a later feature (the Tip) passes on without one of its own
-            std::optional<Base::Vector3d> sweep = input.sweep;
+            // a later feature (the Tip) passes on without one of its own. It only adds departures:
+            // two pieces on different plates may lie apart along the old normal or the target's own
+            // sweep and overlap along the maker's, and on a later feature no up-to face is saved to
+            // catch it after (review prA1e-r2's TiltedPlateSwappedUnderBoxTip)
+            std::optional<Base::Vector3d> ownSweep;
             if (input.sweepOf && isMarkedPiece(hitName)) {
-                if (auto own = input.sweepOf(hitName)) {
-                    sweep = own;
-                }
+                ownSweep = input.sweepOf(hitName);
             }
-            const bool keptShapeBeside = twinOutlines && twinsKeptShape && saved.type == 'E'
-                && sweep && input.facesOf;
-            const bool twinsMayDepart = twins.empty() || (twinOutlines && !twinsKeptShape)
-                || keptShapeBeside;
-            bool departed = false;
-            if (place.empty() && twinsMayDepart && saved.center && now.center && saved.size
-                && now.size && isMarkedPiece(hitName)) {
-                const double eps = input.continuationDistance * std::max(1.0, input.diagonal);
-                const double apart = Base::Distance(*saved.center, *now.center);
-                const bool outlines = !saved.outline.empty() && !now.outline.empty();
-                std::optional<bool> outlinesSay;
-                // Whether an outline lies apart from the old one: an edge's span along the way
-                // (set below), a face's outline seen along the old one's normal or the sweep
-                std::optional<Base::Vector3d> edgeWay;
-                auto apartFromOld = [&](const std::vector<Base::Vector3d>& outline) {
-                    if (saved.type != 'E') {
-                        return outlinesApart(saved.outline, outline, eps, sweep).value_or(false);
-                    }
-                    if (!edgeWay) {
-                        return false;
-                    }
-                    const auto [oldLow, oldHigh] = spanAlong(saved.outline, *edgeWay);
-                    const auto [low, high] = spanAlong(outline, *edgeWay);
-                    return std::min(oldHigh, high) - std::max(oldLow, low) <= eps;
-                };
-                // Round 6: whether the old straight piece lies beyond the cap beside the edge piece
-                // \a index (apartBesideLine()), seen along the sweep; set when it decided the hit
-                bool besideDecided = false;
-                auto apartBeside = [&](const std::string& index) {
-                    if (saved.type != 'E' || !sweep || !input.facesOf) {
-                        return false;
-                    }
-                    const auto& piece = fingerprintOfIndex(index).outline;
-                    for (const auto& face : input.facesOf(index)) {
-                        const auto& outline = fingerprintOfIndex(face).outline;
-                        if (apartBesideLine(saved.outline, outline, piece, *sweep, eps)) {
-                            return true;
+            // Whether the hit left its old place, its pieces seen along \a sweep
+            auto departedAlong = [&](const std::optional<Base::Vector3d>& sweep) {
+                const bool keptShapeBeside = twinOutlines && twinsKeptShape && saved.type == 'E'
+                    && sweep && input.facesOf;
+                const bool twinsMayDepart = twins.empty() || (twinOutlines && !twinsKeptShape)
+                    || keptShapeBeside;
+                bool departed = false;
+                if (place.empty() && twinsMayDepart && saved.center && now.center && saved.size
+                    && now.size && isMarkedPiece(hitName)) {
+                    const double eps = input.continuationDistance * std::max(1.0, input.diagonal);
+                    const double apart = Base::Distance(*saved.center, *now.center);
+                    const bool outlines = !saved.outline.empty() && !now.outline.empty();
+                    std::optional<bool> outlinesSay;
+                    // Whether an outline lies apart from the old one: an edge's span along the way
+                    // (set below), a face's outline seen along the old one's normal or the sweep
+                    std::optional<Base::Vector3d> edgeWay;
+                    auto apartFromOld = [&](const std::vector<Base::Vector3d>& outline) {
+                        if (saved.type != 'E') {
+                            return outlinesApart(saved.outline, outline, eps, sweep).value_or(false);
                         }
-                    }
-                    return false;
-                };
-                if (saved.type == 'E') {
-                    // Along the edge only: the far edge moved across itself (A grown taller) still
-                    // holds its old span. A line's direction; a curve's (a B-spline plate's far
-                    // edge, an arc), round 5, the way across the seams: to the middle of the edge's
-                    // pieces on other faces (marked otherwise), or, when that is short (the hit
-                    // between them), to the nearest of them. Round 3's test, for an older
-                    // fingerprint, takes the way to the nearest other piece, which is slanted
-                    // when a disc slid diagonally has two quarter arcs beside its half circle.
-                    // Without one, the way it moved, or the distance itself
-                    std::optional<Base::Vector3d> direction;
-                    std::optional<Base::Vector3d> across;
-                    if (saved.kind == "Line" && saved.direction && saved.direction->Length() > eps) {
-                        direction = *saved.direction;
-                        across = direction;
-                    }
-                    else {
-                        const auto hitMarks = pieceMarks(hitName);
-                        double nearest = std::numeric_limits<double>::infinity();
-                        double nearestElsewhere = std::numeric_limits<double>::infinity();
-                        std::optional<Base::Vector3d> wayElsewhere;
-                        Base::Vector3d sum;
-                        int elsewhere = 0;
-                        for (std::size_t k = 0; k < pool.elements.size(); ++k) {
-                            const auto& names = pool.elements[k].names;
-                            const auto piece = std::find_if(
-                                names.begin(),
-                                names.end(),
-                                [&](const auto& name) { return markedPiecesOfOne(name, hitName); }
-                            );
-                            if (static_cast<int>(k) == hitPosition || piece == names.end()) {
-                                continue;
+                        if (!edgeWay) {
+                            return false;
+                        }
+                        const auto [oldLow, oldHigh] = spanAlong(saved.outline, *edgeWay);
+                        const auto [low, high] = spanAlong(outline, *edgeWay);
+                        return std::min(oldHigh, high) - std::max(oldLow, low) <= eps;
+                    };
+                    // Round 6: whether the old straight piece lies beyond the cap beside the edge piece
+                    // \a index (apartBesideLine()), seen along the sweep; set when it decided the hit
+                    bool besideDecided = false;
+                    auto apartBeside = [&](const std::string& index) {
+                        if (saved.type != 'E' || !sweep || !input.facesOf) {
+                            return false;
+                        }
+                        const auto& piece = fingerprintOfIndex(index).outline;
+                        for (const auto& face : input.facesOf(index)) {
+                            const auto& outline = fingerprintOfIndex(face).outline;
+                            if (apartBesideLine(saved.outline, outline, piece, *sweep, eps)) {
+                                return true;
                             }
-                            const ElementFingerprint& other = fingerprintOfIndex(
-                                pool.elements[k].index
-                            );
-                            if (other.center) {
-                                const Base::Vector3d way = *other.center - *now.center;
-                                if (way.Length() > eps && way.Length() < nearest) {
-                                    nearest = way.Length();
-                                    direction = way;
+                        }
+                        return false;
+                    };
+                    if (saved.type == 'E') {
+                        // Along the edge only: the far edge moved across itself (A grown taller) still
+                        // holds its old span. A line's direction; a curve's (a B-spline plate's far
+                        // edge, an arc), round 5, the way across the seams: to the middle of the edge's
+                        // pieces on other faces (marked otherwise), or, when that is short (the hit
+                        // between them), to the nearest of them. Round 3's test, for an older
+                        // fingerprint, takes the way to the nearest other piece, which is slanted
+                        // when a disc slid diagonally has two quarter arcs beside its half circle.
+                        // Without one, the way it moved, or the distance itself
+                        std::optional<Base::Vector3d> direction;
+                        std::optional<Base::Vector3d> across;
+                        if (saved.kind == "Line" && saved.direction && saved.direction->Length() > eps) {
+                            direction = *saved.direction;
+                            across = direction;
+                        }
+                        else {
+                            const auto hitMarks = pieceMarks(hitName);
+                            double nearest = std::numeric_limits<double>::infinity();
+                            double nearestElsewhere = std::numeric_limits<double>::infinity();
+                            std::optional<Base::Vector3d> wayElsewhere;
+                            Base::Vector3d sum;
+                            int elsewhere = 0;
+                            for (std::size_t k = 0; k < pool.elements.size(); ++k) {
+                                const auto& names = pool.elements[k].names;
+                                const auto piece = std::find_if(
+                                    names.begin(),
+                                    names.end(),
+                                    [&](const auto& name) { return markedPiecesOfOne(name, hitName); }
+                                );
+                                if (static_cast<int>(k) == hitPosition || piece == names.end()) {
+                                    continue;
                                 }
-                                if (pieceMarks(*piece) != hitMarks) {
-                                    sum += *other.center;
-                                    ++elsewhere;
-                                    if (way.Length() > eps && way.Length() < nearestElsewhere) {
-                                        nearestElsewhere = way.Length();
-                                        wayElsewhere = way;
+                                const ElementFingerprint& other = fingerprintOfIndex(
+                                    pool.elements[k].index
+                                );
+                                if (other.center) {
+                                    const Base::Vector3d way = *other.center - *now.center;
+                                    if (way.Length() > eps && way.Length() < nearest) {
+                                        nearest = way.Length();
+                                        direction = way;
+                                    }
+                                    if (pieceMarks(*piece) != hitMarks) {
+                                        sum += *other.center;
+                                        ++elsewhere;
+                                        if (way.Length() > eps && way.Length() < nearestElsewhere) {
+                                            nearestElsewhere = way.Length();
+                                            wayElsewhere = way;
+                                        }
                                     }
                                 }
                             }
+                            if (elsewhere > 0) {
+                                const Base::Vector3d middle = sum / static_cast<double>(elsewhere)
+                                    - *now.center;
+                                across = middle.Length() >= nearestElsewhere / 2.0
+                                    ? std::optional<Base::Vector3d>(middle)
+                                    : wayElsewhere;
+                            }
+                            if (!across) {
+                                across = direction;
+                            }
                         }
-                        if (elsewhere > 0) {
-                            const Base::Vector3d middle = sum / static_cast<double>(elsewhere)
-                                - *now.center;
-                            across = middle.Length() >= nearestElsewhere / 2.0
-                                ? std::optional<Base::Vector3d>(middle)
-                                : wayElsewhere;
+                        const Base::Vector3d way = across ? *across : *now.center - *saved.center;
+                        if (outlines && way.Length() > eps) {
+                            // Each piece's points seen along the way: their span
+                            edgeWay = Base::Vector3d(way).Normalize();
+                            outlinesSay = !keptShapeBeside && apartFromOld(now.outline);
+                            // Round 6: a straight piece's way is its line (a line's direction, or the
+                            // way to its other pieces along it), which a slanted piece slid onto the
+                            // next plate still shares with the old one; seen along the sweep, the old
+                            // piece lies beyond a side of the cap beside the hit, the seam it ends at
+                            if (!*outlinesSay && apartBeside(hit)) {
+                                outlinesSay = true;
+                                besideDecided = true;
+                            }
                         }
-                        if (!across) {
-                            across = direction;
+                        else if (!outlines) {
+                            double along = apart;
+                            if (direction) {
+                                along = std::abs(
+                                    (*now.center - *saved.center)
+                                    * Base::Vector3d(*direction).Normalize()
+                                );
+                            }
+                            departed = along >= (*saved.size + *now.size) / 2.0 - eps;
                         }
                     }
-                    const Base::Vector3d way = across ? *across : *now.center - *saved.center;
-                    if (outlines && way.Length() > eps) {
-                        // Each piece's points seen along the way: their span
-                        edgeWay = Base::Vector3d(way).Normalize();
-                        outlinesSay = !keptShapeBeside && apartFromOld(now.outline);
-                        // Round 6: a straight piece's way is its line (a line's direction, or the
-                        // way to its other pieces along it), which a slanted piece slid onto the
-                        // next plate still shares with the old one; seen along the sweep, the old
-                        // piece lies beyond a side of the cap beside the hit, the seam it ends at
-                        if (!*outlinesSay && apartBeside(hit)) {
-                            outlinesSay = true;
-                            besideDecided = true;
-                        }
+                    else if (outlines) {
+                        outlinesSay = outlinesApart(saved.outline, now.outline, eps, sweep);
                     }
-                    else if (!outlines) {
-                        double along = apart;
-                        if (direction) {
-                            along = std::abs(
-                                (*now.center - *saved.center)
-                                * Base::Vector3d(*direction).Normalize()
-                            );
-                        }
-                        departed = along >= (*saved.size + *now.size) / 2.0 - eps;
+                    if (outlinesSay) {
+                        departed = *outlinesSay;
                     }
+                    else if (saved.type != 'E' && saved.kind == "Plane" && now.kind == "Plane"
+                             && saved.extentMin && saved.extentMax && now.extentMin && now.extentMax) {
+                        // The boxes' common part, on each axis; a flat face's box is flat on one
+                        const Base::Vector3d low(
+                            std::max(saved.extentMin->x, now.extentMin->x),
+                            std::max(saved.extentMin->y, now.extentMin->y),
+                            std::max(saved.extentMin->z, now.extentMin->z)
+                        );
+                        const Base::Vector3d high(
+                            std::min(saved.extentMax->x, now.extentMax->x),
+                            std::min(saved.extentMax->y, now.extentMax->y),
+                            std::min(saved.extentMax->z, now.extentMax->z)
+                        );
+                        const Base::Vector3d common = high - low;
+                        const int shared = (common.x > eps) + (common.y > eps) + (common.z > eps);
+                        const bool apartOnAxis = common.x < -eps || common.y < -eps || common.z < -eps;
+                        departed = apartOnAxis || shared < 2;
+                    }
+                    else if (saved.type != 'E') {
+                        departed = apart >= (std::sqrt(*saved.size) + std::sqrt(*now.size)) / 2.0 - eps;
+                    }
+                    // Twins apart the way the hit was found apart: round 6, beside their caps too
+                    if (departed && !twins.empty()) {
+                        departed = outlinesSay.has_value()
+                            && std::all_of(twins.begin(), twins.end(), [&](int k) {
+                                   return apartFromOld(outlineOf(k))
+                                       || (besideDecided && apartBeside(pool.elements[k].index));
+                               });
+                    }
+                    // ops#524: no departed piece is taken back for having slid within its up-to
+                    // face (PLAN decision 202): a piece of another part of a reshaped or moved
+                    // profile, reborn alone on the same face, can't be told from it by the face and
+                    // the path (review prA1c-r1's UArmSwapRedraw)
                 }
-                else if (outlines) {
-                    outlinesSay = outlinesApart(saved.outline, now.outline, eps, sweep);
-                }
-                if (outlinesSay) {
-                    departed = *outlinesSay;
-                }
-                else if (saved.type != 'E' && saved.kind == "Plane" && now.kind == "Plane"
-                         && saved.extentMin && saved.extentMax && now.extentMin && now.extentMax) {
-                    // The boxes' common part, on each axis; a flat face's box is flat on one
-                    const Base::Vector3d low(
-                        std::max(saved.extentMin->x, now.extentMin->x),
-                        std::max(saved.extentMin->y, now.extentMin->y),
-                        std::max(saved.extentMin->z, now.extentMin->z)
-                    );
-                    const Base::Vector3d high(
-                        std::min(saved.extentMax->x, now.extentMax->x),
-                        std::min(saved.extentMax->y, now.extentMax->y),
-                        std::min(saved.extentMax->z, now.extentMax->z)
-                    );
-                    const Base::Vector3d common = high - low;
-                    const int shared = (common.x > eps) + (common.y > eps) + (common.z > eps);
-                    const bool apartOnAxis = common.x < -eps || common.y < -eps || common.z < -eps;
-                    departed = apartOnAxis || shared < 2;
-                }
-                else if (saved.type != 'E') {
-                    departed = apart >= (std::sqrt(*saved.size) + std::sqrt(*now.size)) / 2.0 - eps;
-                }
-                // Twins apart the way the hit was found apart: round 6, beside their caps too
-                if (departed && !twins.empty()) {
-                    departed = outlinesSay.has_value()
-                        && std::all_of(twins.begin(), twins.end(), [&](int k) {
-                               return apartFromOld(outlineOf(k))
-                                   || (besideDecided && apartBeside(pool.elements[k].index));
-                           });
-                }
-                // ops#524: no departed piece is taken back for having slid within its up-to face
-                // (PLAN decision 202): a piece of another part of a reshaped or moved profile,
-                // reborn alone on the same face, can't be told from it by the face and the path
-                // (review prA1c-r1's UArmSwapRedraw)
+                return departed;
+            };
+            bool departed = departedAlong(input.sweep);
+            if (!departed && ownSweep
+                && (!input.sweep || Base::Distance(*ownSweep, *input.sweep) > 1e-12)) {
+                departed = departedAlong(ownSweep);
             }
             // ops#524 (PLAN decisions 199 (4) and 202): a lone piece that moved alone, still
             // overlapping its old place, left the place on its up-to face all the same when the
