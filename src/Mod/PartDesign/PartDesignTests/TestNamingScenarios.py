@@ -56,12 +56,13 @@ runs one seed, and FREECAD_SCENARIO_GAP=1 plans the close-spaced series (ops#127
 
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import traceback
 import unittest
 
-from PartDesignTests.Scenarios import harness
+from PartDesignTests.Scenarios import harness, models
 from PartDesignTests.Scenarios import booleans, dressups, patterns, sketch_edits
 from PartDesignTests.Scenarios import ambiguous, consumers, crossdoc, derived, external, internal
 from PartDesignTests.Scenarios import issues
@@ -649,6 +650,90 @@ class HarnessOracleMask(unittest.TestCase):
         self.assertEqual(_oracleValue({"subs": ["Face6"]}, "subs"), ["Face6"])
 
 
+class HarnessMaskerDocuments(unittest.TestCase):
+    """The masker names the objects of every document the scenario opened (ops#523). Document B:
+    a 10 mm box "Src". Document A (the scenario's): an App::Link "L" to Src, a 10 mm box "Local"
+    at x = 100, "F" their Part::MultiFuse, and a sketch on F's face at z = 10 over Src. That
+    face's names carry Src's ID, which is another one in each run (each new document starts its
+    object IDs at a random number), so the interning oracle can compare them only masked."""
+
+    TOP = harness.face("plane", normal=harness.Z, contains=(5, 5, 10))
+
+    def judge(self):
+        scenario = harness.Scenario("V2")
+        folder = os.path.realpath(tempfile.mkdtemp(prefix="NamingScenario"))
+        scenario.doc = doc = scenario.newDocument("Masked")
+        try:
+            for _ in range(100):  # Src's ID apart from doc's objects' (the masker prefers doc's)
+                source = scenario.newDocument("Source")
+                if abs(models.nextObjectId(source) - models.nextObjectId(doc)) > 500:
+                    break
+                scenario.documents.remove(source.Name)
+                harness.App.closeDocument(source.Name)
+            source.saveAs(os.path.join(folder, source.Name + ".FCStd"))
+            src = source.addObject("Part::Box", "Src")
+            source.recompute()
+            source.save()
+            doc.saveAs(os.path.join(folder, doc.Name + ".FCStd"))  # a link needs a saved owner
+            local = doc.addObject("Part::Box", "Local")
+            local.Placement.Base = harness.V(100, 0, 0)
+            link = doc.addObject("App::Link", "L")
+            link.LinkedObject = src
+            fuse = doc.addObject("Part::MultiFuse", "F")
+            fuse.Shapes = [link, local]
+            doc.recompute()
+            sketch = doc.addObject("Sketcher::SketchObject", "Sketch")
+            sketch.AttachmentSupport = [(fuse, scenario.names(fuse, self.TOP)[0])]
+            sketch.MapMode = "FlatFace"
+            doc.recompute()
+            ref = harness.Ref(
+                "support", "Sketch", "AttachmentSupport", lambda: self.TOP, harness.Attached()
+            )
+            result = scenario.judge(ref, "edit")
+            self.assertEqual(result.verdict, "correct", result.message())
+            return result.record, src.ID
+        finally:
+            scenario.cleanup()
+            shutil.rmtree(folder, ignore_errors=True)
+
+    def testAnotherDocumentsObjectIsNamed(self):
+        record, srcId = self.judge()
+        self.assertTrue(record["names"] and all(record["names"]), record)
+        for name in record["names"]:
+            self.assertIn("{Src@1}", name)
+            self.assertNotIn(f"#{srcId}", name)
+
+    def testNamesCompareEqualBetweenRuns(self):
+        first, firstId = self.judge()
+        for _ in range(5):  # Src's ID is random: the same in two runs about once in 4000
+            second, secondId = self.judge()
+            if secondId != firstId:
+                break
+        self.assertNotEqual(firstId, secondId)
+        self.assertEqual(_oracleValue(first, "names"), _oracleValue(second, "names"))
+
+    def testTheMaskedDocumentsObjectsComeFirst(self):
+        """Each document numbers its own objects, so an ID can be an object's in both."""
+        App = harness.App
+        first, second = App.newDocument("MaskerFirst"), App.newDocument("MaskerSecond")
+        try:
+            first.clearDocument()
+            second.clearDocument()
+            mine = first.addObject("App::FeaturePython", "Mine")
+            theirs = second.addObject("App::FeaturePython", "Theirs")
+            only = second.addObject("App::FeaturePython", "Only")
+            self.assertEqual(mine.ID, theirs.ID)
+            masker = harness.Masker(first, [first, second])
+            self.assertEqual(masker.tag(str(mine.ID)), "{Mine}")
+            self.assertEqual(masker.tag(str(only.ID)), "{Only@1}")
+            self.assertEqual(masker.tag(f"-{only.ID}"), "{-Only@1}")
+            self.assertEqual(harness.Masker(first).tag(str(only.ID)), f"#{only.ID}")
+            self.assertEqual(harness.Masker(first, [None, second]).tag(str(only.ID)), "{Only@1}")
+        finally:
+            App.closeDocument(first.Name)
+            App.closeDocument(second.Name)
+
+
 class HarnessPinnedObject(unittest.TestCase):
     """A reference that must be on another object (Ref.on) is wrong there even when its element
     and its consumer's result are right (the review of fork PR 256, High 1)."""
@@ -696,5 +781,7 @@ __all__ = [
     "HarnessSameSolid",
     "HarnessGuessVerdicts",
     "HarnessSplitVerdicts",
+    "HarnessOracleMask",
+    "HarnessMaskerDocuments",
     "HarnessPinnedObject",
 ]

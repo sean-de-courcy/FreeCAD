@@ -72,10 +72,24 @@ def featureBase(body):
     return next(o for o in body.Group if o.TypeId == "PartDesign::FeatureBase")
 
 
+# The least distance between a source document's first object ID and its owner's next one: far
+# more than either document's objects
+ID_GAP = 500
+
+
 def sourceDocument(case, doc, name):
     """The document a cross-document link's target lives in, with `doc`'s naming settings, closed
-    after the run."""
-    source = App.newDocument(name)
+    after the run. Each document starts its object IDs at a random number: the source's are kept
+    above models.MIN_OBJECT_ID and apart from `doc`'s, or a tag of one would read as the other's
+    object in the masked names, in some runs only (the review of ops#523's masker PR, P1)."""
+    first = m.nextObjectId(doc)
+    for _ in range(100):
+        source = m.newDocument(name)
+        if abs(m.nextObjectId(source) - first) > ID_GAP:
+            break
+        App.closeDocument(source.Name)
+    else:
+        raise RuntimeError(f"no source document with object IDs apart from {doc.Name}'s")
     for prop in ("HistoryAlgorithm", "ReferenceSolver", "InternNames"):
         if hasattr(doc, prop) and hasattr(source, prop):
             setattr(source, prop, getattr(doc, prop))
@@ -654,10 +668,10 @@ class LinkArrayCountDownUp(ArrayCase):
         self.at = dict(enumerate(self.start))
 
 
-# Cross-document links (the EXT section carries the link's ID). Abstract here: the V2si oracle
-# can't compare their names, since the masker names the scenario document's objects only and the
-# other document's tags differ between the V2s and V2si runs (object IDs are process-wide). The
-# concrete cases run from the ops repo's `corpus/inbox/A/ops523/a3/a3_crossdoc.py`.
+# Cross-document links (the EXT section carries the link's ID). Their names carry the other
+# document's tags, which differ between the V2s and V2si runs (each new document starts its object
+# IDs at a random number): the masker names the objects of every document the case opened
+# (ops#523), so the V2si oracle compares them.
 
 
 class CrossDoc(Copies):
@@ -786,9 +800,7 @@ class LobedCopies(Scenario):
 
 
 class LinkCopyCrossDocLobesTurned45(LobedCopies):
-    """Two links to the pad's body in another document (EXT copies). Abstract: see CrossDoc."""
-
-    abstract = True
+    """Two links to the pad's body in another document (EXT copies)."""
 
     def sourceDocument(self, doc):
         if not hasattr(self, "source"):
@@ -859,8 +871,6 @@ class ScaleCopiesLobesTurned45(LobedCopies):
 class LinkCopyCrossDocRemoved(CrossDoc):
     """Two links to a pin in another document; link 0 leaves the fuse."""
 
-    abstract = True
-
     def edit(self, doc):
         self.removeCopy0(doc)
 
@@ -869,8 +879,6 @@ class LinkCopyCrossDocRemoved(CrossDoc):
 class LinkCopyCrossDocRemovedNeighbourMoved(CrossDoc):
     """Two links to a pin in another document; link 0 leaves the fuse, link 1 moves onto its
     place."""
-
-    abstract = True
 
     AXES = ("M5", "E1", "E4")
 

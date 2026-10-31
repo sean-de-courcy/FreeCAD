@@ -195,13 +195,21 @@ class Masker:
     included, so it depends on the tags' values: it is written `:L`.
     A tag that is no object's ID is written `#<tag>` (e.g. a slice's number), a negative object ID
     `{-ObjectName}`; 0 stays 0.
+    `documents` (a scenario's, in the order it opened them) adds the objects of the others than
+    `doc`, written `{ObjectName@k}` with k the document's position there: a cross-document link's
+    names carry its target's tag, and object IDs differ between runs (ops#523). A tag that is an ID
+    in `doc` and in another document (each numbers its own objects) is `doc`'s.
     """
 
     V1_TAG = re.compile(r":H(-?)([0-9a-f]*)(:[0-9a-f]+)?")
     V1_SID = re.compile(r"#([0-9a-f]+)")
 
-    def __init__(self, doc):
+    def __init__(self, doc, documents=()):
         self.names = {str(obj.ID): obj.Name for obj in doc.Objects}
+        for k, other in enumerate(documents):
+            if other is not None and other.Name != doc.Name:
+                for obj in other.Objects:
+                    self.names.setdefault(str(obj.ID), f"{obj.Name}@{k}")
 
     def tag(self, tag):
         if tag in ("", "0"):
@@ -1210,7 +1218,11 @@ class Scenario:
         expectation = ref.expect()
         result = Result(type(self).__name__, ref.name, self.config, step)
         record = result.record
-        masker = Masker(target.Document if target else doc)  # the names' tags are its IDs
+        # the names' tags are its IDs, and the other documents' the scenario opened (ops#523)
+        opened = App.listDocuments()
+        masker = Masker(
+            target.Document if target else doc, [opened.get(name) for name in self.documents]
+        )
         mode = "V2" if self.mode == "V2" and hasattr(doc, "HistoryAlgorithm") else "V1"
         record.update(
             scenario=type(self).__name__,
