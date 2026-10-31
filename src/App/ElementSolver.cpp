@@ -5087,7 +5087,32 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                                              every)
                         && sameUpToFaces(centred->upToFaces, now, every, eps, input.tolerances);
                 };
-                if (holders.size() != 1 || !holdsSavedCentre(holders.front())
+                // The edge or cap made whole holds the saved point itself, as the save took it on
+                // the piece (elementUpToFaces()): an edge within its reach of the point may lie on
+                // the next plate, past a seam, while the saved face is still under the point; a
+                // cap is seen along the sweep, as the up-to faces are, never by its nearest point
+                // (review pr398-r4)
+                auto holdsSavedPoint = [&](int k) {
+                    if (!centred) {
+                        return false;
+                    }
+                    const auto& index = pool.elements[k].index;
+                    if (centred->type == 'E') {
+                        const double coincidence = 1e-6 * std::max(1.0, input.diagonal);
+                        return centred->center
+                            && input.holdsPoint(index, *centred->center, coincidence);
+                    }
+                    if (centred->type != 'F' || !input.sweep || !input.holdsPointAlong
+                        || lacksInsidePoint() || !centred->size) {
+                        return false;
+                    }
+                    const Base::Vector3d& point = centred->inside ? *centred->inside : *centred->center;
+                    return input.holdsPointAlong(index,
+                                                 point,
+                                                 *input.sweep,
+                                                 std::sqrt(*centred->size) / 4.0 + eps);
+                };
+                if (holders.size() != 1 || !holdsSavedPoint(holders.front())
                     || !onSameUpToFaces()) {
                     holders.clear();
                 }

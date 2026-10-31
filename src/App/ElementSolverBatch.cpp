@@ -2038,11 +2038,22 @@ bool elementUpToFaces(
     const Base::Vector3d& point = fingerprint.inside ? *fingerprint.inside : *fingerprint.center;
     // An edge's point, its centre of mass, must lie on the edge: an arc's lies off it, over
     // another plate than the one the arc lies on (review pr398-r3). Can't be told otherwise.
+    const double diagonal = std::max(1.0, data->getBoundBox().CalcDiagonalLength());
     if (fingerprint.type == 'E') {
-        const double distance = 1e-6 * std::max(1.0, data->getBoundBox().CalcDiagonalLength());
-        if (!elementHoldsPointFunction || !elementHoldsPointFunction(geo, element, point, distance)) {
+        if (!elementHoldsPointFunction
+            || !elementHoldsPointFunction(geo, element, point, 1e-6 * diagonal)) {
             return false;
         }
+    }
+    // A face's point, seen along the sweep as the up-to faces are, must lie inside the face: a
+    // centre of mass kept for a face with a small hole around it (no inside point) lies in the
+    // hole, over another plate (review pr398-r4)
+    Base::Vector3d sweep;
+    if (fingerprint.type == 'F'
+        && (!elementSweepDirectionFunction || !elementHoldsPointAlongFunction
+            || !elementSweepDirectionFunction(geo, sweep) || sweep.Length() <= 0.0
+            || !elementHoldsPointAlongFunction(geo, element, point, sweep.Normalize(), diagonal))) {
+        return false;
     }
     return elementUpToFacesFunction(geo, point, faces, nullptr);
 }

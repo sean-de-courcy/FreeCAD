@@ -6059,6 +6059,13 @@ TEST(SolveOwner, farEdgePieceResolvesToItsEdgeMadeWholeOnTheSameFace)
     input.targetTag = -7;
     EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Resolved);
     input.targetTag = 7;
+    // The edge within its reach (a hundredth of its length) of the saved centre but not on it:
+    // broken. An edge made whole past a seam lies on the next plate while the saved face is still
+    // under the point (review pr398-r4)
+    input.entries = {entryWith({rightPlate})};
+    input.entries[0].fingerprint.center = Base::Vector3d(1.495, 1, 10);
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
+    input.entries = {entryWith({rightPlate})};
 
     under = {leftPlate};
     EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
@@ -6583,6 +6590,15 @@ TEST(SolveOwner, twinCapPiecesResolveToTheirCapMadeWholeOnTheSamePlate)
     input.holdsPoint = [&](const std::string& index, const Base::Vector3d&, double) {
         return holders.count(index) > 0;
     };
+    // Seen along the sweep, as the up-to faces are (review pr398-r4)
+    bool alongToo = true;
+    input.sweep = Base::Vector3d(0, 0, 1);
+    input.holdsPointAlong = [&](const std::string& index,
+                                const Base::Vector3d&,
+                                const Base::Vector3d&,
+                                double) {
+        return alongToo && holders.count(index) > 0;
+    };
     const auto plate = upToPlate(-10, 10);
     std::vector<ElementFingerprint::UpToFace> under {plate};
     bool told = true;
@@ -6631,6 +6647,13 @@ TEST(SolveOwner, twinCapPiecesResolveToTheirCapMadeWholeOnTheSamePlate)
         EXPECT_EQ(outcome.status, SolveStatus::Broken) << why << ": " << describe(outcome);
     };
     breaks({upToPlate(0, 10)}, "the next plate");
+    // The cap holding the point by its nearest point only, not seen along the sweep: broken
+    alongToo = false;
+    breaks({plate}, "the cap not under the point along the sweep");
+    alongToo = true;
+    input.sweep.reset();
+    breaks({plate}, "no sweep to see it along");
+    input.sweep = Base::Vector3d(0, 0, 1);
     input.targetTag = 9;
     breaks({plate}, "a piece another feature made");
     input.targetTag = 7;
