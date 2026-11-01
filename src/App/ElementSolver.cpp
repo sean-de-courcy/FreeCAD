@@ -3035,51 +3035,32 @@ bool sameRankName(std::string_view name, std::string_view oldName)
 namespace
 {
 
-// Two sides' sets agree (ops#526 D2) unless they contradict: after matching what is the same (a
-// direction within \a angle of the other with its sense, a curved side by its sign), a side left
-// in one points the other way from a side left in the other (more than 90 degrees apart), or a
-// curved side is `c+` in one and `c-` in the other. That is another element at the place: the
-// other top edge of a member (its face looks the other way), the other crossing of a hole (the
-// pad's edge leaves it the other way), a bottom rim at a top rim's place, a pin's wall at a
-// hole's. A side added, gone or turned less than that is the element's neighbourhood changed
-// (a neighbour redrawn at another angle, a corner swept another way: Tier F's anchor and pipe
-// cases), not another element.
+// Two sides' sets agree (ops#526 D2): as many entries, each matched once, a direction within
+// \a angle of the other with its sense, a curved side by its sign. Exact, the design's literal
+// rule (decision 219): a neighbour turned or a side added counts as other sides, loud.
 bool sidesAgree(const std::vector<ElementFingerprint::Side>& a,
                 const std::vector<ElementFingerprint::Side>& b,
                 double angle)
 {
-    std::vector<bool> usedA(a.size(), false);
-    std::vector<bool> usedB(b.size(), false);
-    for (std::size_t j = 0; j < a.size(); ++j) {
-        const auto& x = a[j];
-        for (std::size_t i = 0; i < b.size(); ++i) {
+    if (a.size() != b.size()) {
+        return false;
+    }
+    std::vector<bool> used(b.size(), false);
+    for (const auto& x : a) {
+        bool found = false;
+        for (std::size_t i = 0; i < b.size() && !found; ++i) {
             const auto& y = b[i];
-            if (usedB[i] || x.curve != y.curve) {
+            if (used[i] || x.curve != y.curve) {
                 continue;
             }
             if (x.curve || std::atan2((x.direction % y.direction).Length(), x.direction * y.direction)
                     <= angle) {
-                usedA[j] = true;
-                usedB[i] = true;
-                break;
+                used[i] = true;
+                found = true;
             }
         }
-    }
-    for (std::size_t j = 0; j < a.size(); ++j) {
-        for (std::size_t i = 0; i < b.size() && !usedA[j]; ++i) {
-            if (usedB[i]) {
-                continue;
-            }
-            const auto& x = a[j];
-            const auto& y = b[i];
-            if (x.curve && y.curve) {
-                if ((x.curve == '+' && y.curve == '-') || (x.curve == '-' && y.curve == '+')) {
-                    return false;
-                }
-            }
-            else if (!x.curve && !y.curve && x.direction * y.direction < -std::sin(angle)) {
-                return false;
-            }
+        if (!found) {
+            return false;
         }
     }
     return true;
@@ -3091,7 +3072,7 @@ std::optional<long> geometryIdNumber(std::string_view id)
 {
     auto digitsFrom = [&](std::size_t i) {
         std::size_t end = i;
-        while (end < id.size() && end - i < 15
+        while (end < id.size() && end - i < 9
                && std::isdigit(static_cast<unsigned char>(id[end]))) {
             ++end;
         }
@@ -3114,17 +3095,6 @@ std::optional<long> geometryIdNumber(std::string_view id)
         }
     }
     return std::stol(std::string(id.substr(1, end - 1)));
-}
-
-// The geometry a geometry ID names: its letter and number (`g5v1` and `g5`: `g5`; `e3`: `e3`),
-// or empty.
-std::string geometryOfId(std::string_view id)
-{
-    const auto number = geometryIdNumber(id);
-    if (!number) {
-        return {};
-    }
-    return std::string(1, id[0]) + std::to_string(*number);
 }
 
 std::optional<long> tagNumber(std::string_view tag)
@@ -3203,20 +3173,15 @@ PlaceVerdict placeVerdict(const ElementFingerprint& saved,
         }
     }
     // The marks (the "drawn again"): every source of the pick the old name doesn't share
-    // An ID is shared when the old name has the same geometry of the same object, of any
-    // element: `g1v2` and `g1v1` are the ends of one line, its vertex names traded when the line
-    // is drawn the other way (anchor_line_flips): the old element's own geometry, never another
-    // element that was there.
+    // An ID is shared only when the old name has the same ID (decision 219: a line drawn the
+    // other way, its vertex names traded, reads as another element that was there, loud)
     const auto old = taggedSourcesOf(oldName);
     auto shared = [&](const SourceSection& section, const std::string* id) {
-        const std::string geometry = id ? geometryOfId(*id) : std::string();
         return std::any_of(old.begin(), old.end(), [&](const SourceSection& o) {
             return o.tag == section.tag
-                && (!id
-                    || std::any_of(o.ids.begin(), o.ids.end(), [&](const std::string& other) {
-                           return other == *id
-                               || (!geometry.empty() && geometryOfId(other) == geometry);
-                       }));
+                && (id ? o.type == section.type
+                             && std::find(o.ids.begin(), o.ids.end(), *id) != o.ids.end()
+                       : true);
         });
     };
     bool judged = false;
