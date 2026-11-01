@@ -2652,14 +2652,15 @@ class TestNamingSolver(unittest.TestCase):
         )
 
     def testRecordSavesSidesAndMarks(self):
-        """Fingerprint version 7 (ops#526 D2): the fillet's record of the pad's vertical edge at
-        (20, 0) saves its faces' outward normals (+x, -y) and the marks of what the pad is built
-        from: the profile with its highest geometry ID, the pad without IDs."""
+        """Fingerprint version 7 (ops#526 D2), written as version 8 (ops#557: v7's fields, the
+        frame and the sources): the fillet's record of the pad's vertical edge at (20, 0) saves its
+        faces' outward normals (+x, -y) and the marks of what the pad is built from: the profile
+        with its highest geometry ID, the pad without IDs."""
         doc = self.newDocument()
         pad, fillet = self.padWithFillet(doc)
         [sub] = self.savedSubs(doc, "Fillet", "Base")
         fields = sub["fp"].split("|")
-        self.assertEqual((fields[0], fields[1], len(fields)), ("7", "E", 15), sub["fp"])
+        self.assertEqual((fields[0], fields[1], len(fields)), ("8", "E", 17), sub["fp"])
         self.assertEqual(sorted(fields[13].split("/")), ["0,-1,0", "1,0,0"], sub["fp"])
         marks = dict(m.split(":") for m in fields[14].split("/"))
         ids = [doc.Profile.getGeometryId(i) for i in range(doc.Profile.GeometryCount)]
