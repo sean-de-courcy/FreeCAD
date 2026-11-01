@@ -1,0 +1,32 @@
+{
+"entries": {
+"R2cCircleDoubleDSides|rim_m|V2s": {"axes": ["M4", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r2c", "issue": "ops#468", "tier": "F"},
+"R2cCircleDoubleDSides|rim_p|V2s": {"axes": ["M4", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r2c", "issue": "ops#468", "tier": "F"},
+"R2cCircleDoubleDSides|side_m|V2s": {"axes": ["M4", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r2c", "issue": "ops#468", "tier": "F"},
+"R2cCircleDoubleDSides|side_p|V2s": {"axes": ["M4", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r2c", "issue": "ops#468", "tier": "F"},
+"R2cDoubleDChamferTaller|chamfer_p|V2s": {"axes": ["M4", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r2c", "issue": "ops#468", "tier": "F"},
+"R2cDoubleDChamferTaller|rim_m|V2s": {"axes": ["M4", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr390-r2c", "issue": "ops#468", "tier": "F"},
+"R2cDoubleDTaller|rim_m|V2s": {"axes": ["M4", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r2c", "issue": "ops#468", "tier": "F"},
+"R2cDoubleDTaller|rim_p|V2s": {"axes": ["M4", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r2c", "issue": "ops#468", "tier": "F"},
+"R2cEllipseDoubleDFlipTaller|rim_m|V2s": {"axes": ["M4", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r2c", "issue": "ops#468", "tier": "F"},
+"R2cEllipseDoubleDFlipTaller|rim_p|V2s": {"axes": ["M4", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r2c", "issue": "ops#468", "tier": "F"},
+"R2cEllipseDoubleDFlipTaller|side_m|V2s": {"axes": ["M4", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r2c", "issue": "ops#468", "tier": "F"},
+"R2cEllipseDoubleDFlipTaller|side_p|V2s": {"axes": ["M4", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r2c", "issue": "ops#468", "tier": "F"},
+"R2cEllipseDoubleDFlip|rim_m|V2s": {"axes": ["M4", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r2c", "issue": "ops#468", "tier": "F"},
+"R2cEllipseDoubleDFlip|rim_p|V2s": {"axes": ["M4", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r2c", "issue": "ops#468", "tier": "F"},
+"R2cEllipseDoubleDFlip|side_m|V2s": {"axes": ["M4", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r2c", "issue": "ops#468", "tier": "F"},
+"R2cEllipseDoubleDFlip|side_p|V2s": {"axes": ["M4", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r2c", "issue": "ops#468", "tier": "F"},
+"R2cEllipseGrooveFlipShifted|rim_m|V2s": {"axes": ["M4", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr390-r2c", "issue": "ops#468", "tier": "F"},
+"R2cEllipseGrooveFlipShifted|rim_p|V2s": {"axes": ["M4", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr390-r2c", "issue": "ops#468", "tier": "F"},
+"R2cEllipseGrooveFlipTaller|rim_m|V2s": {"axes": ["M4", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r2c", "issue": "ops#468", "tier": "F"},
+"R2cEllipseGrooveFlipTaller|rim_p|V2s": {"axes": ["M4", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r2c", "issue": "ops#468", "tier": "F"},
+"R2cEllipseGrooveFlip|rim_m|V2s": {"axes": ["M4", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r2c", "issue": "ops#468", "tier": "F"},
+"R2cEllipseGrooveFlip|rim_p|V2s": {"axes": ["M4", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r2c", "issue": "ops#468", "tier": "F"},
+"R2cGrooveFilletFaceRadius|fillet_face|V2s": {"axes": ["M4", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r2c", "issue": "ops#468", "tier": "F"},
+"R2cGrooveFilletFaceTaller|fillet_face|V2s": {"axes": ["M4", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r2c", "issue": "ops#468", "tier": "F"},
+"R2cGroovePadTaller|rim_m|V2s": {"axes": ["M4", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r2c", "issue": "ops#468", "tier": "F"},
+"R2cGroovePadTaller|rim_p|V2s": {"axes": ["M4", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r2c", "issue": "ops#468", "tier": "F"},
+"R2cGrooveWider|rim_m|V2s": {"axes": ["M4", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr390-r2c", "issue": "ops#468", "tier": "F"},
+"R2cGrooveWider|rim_p|V2s": {"axes": ["M4", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr390-r2c", "issue": "ops#468", "tier": "F"}
+}
+}
