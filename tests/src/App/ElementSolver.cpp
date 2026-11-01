@@ -10228,6 +10228,37 @@ TEST(SolveOwner, indexMadePickIsUnjudged)
               Data::PlaceVerdict::WasThere);
 }
 
+TEST(SolveOwner, indexMadeOldNameIsJudgedByItsObject)
+{
+    // BoxMovedIntoAVacatedPlaceThick (design 9.2's own example, 9.5; ops#526 D2d): two boxes
+    // fused, box 1 deleted and box 2 moved onto its place. The old name was made from box 1's
+    // index (`Edge10;_;<Box1>;MKR;...;IDX,SRC`), so T1''s test sees no lost source, and the pick,
+    // box 2's edge by index, was skipped by the marks. Box 2 is in the closure without IDs: it
+    // was there.
+    const auto oldEdge = indexed("Edge10", 10, "MKR");
+    ElementFingerprint record = LongBoard::edgeAt(0);
+    record.marks = {{10, -1}, {11, -1}, {12, -1}};
+    const auto now = LongBoard::edgeAt(0);
+    const auto moved = indexed("Edge10", 11, "MKR");
+    std::string why;
+    EXPECT_EQ(Data::placeVerdict(record, now, {moved}, oldEdge, false, {}, &why),
+              Data::PlaceVerdict::WasThere);
+    EXPECT_EQ(why, "its source 11 was in the model before");
+    //   whether or not T1''s test saw a lost source
+    EXPECT_EQ(Data::placeVerdict(record, now, {moved}, oldEdge, true, {}),
+              Data::PlaceVerdict::WasThere);
+    //   the same object renumbered: shared, D1's lines
+    EXPECT_EQ(Data::placeVerdict(record, now, {indexed("Edge12", 10, "MKR")}, oldEdge, false, {}),
+              Data::PlaceVerdict::Unjudged);
+    //   an object the record has no mark of (made since): D1's lines, never another level
+    EXPECT_EQ(Data::placeVerdict(record, now, {indexed("Edge10", 13, "MKR")}, oldEdge, false, {}),
+              Data::PlaceVerdict::Unjudged);
+    //   an old name with a lineage keeps T1''s gate: unjudged while no source is lost
+    const auto mapped = section({"Edge10"}, {}, 10, "XTR", 0, 'E', {"SRC"});
+    EXPECT_EQ(Data::placeVerdict(record, now, {moved}, mapped, false, {}),
+              Data::PlaceVerdict::Unjudged);
+}
+
 TEST(SolveOwner, recordWithoutMarksKeepsD1)
 {
     // A record saved before D2 (version 6 or older, no marks), or a lost source's object the
