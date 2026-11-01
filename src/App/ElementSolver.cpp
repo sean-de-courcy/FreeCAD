@@ -3274,12 +3274,13 @@ PlaceVerdict placeVerdict(const ElementFingerprint& saved,
         return say(PlaceVerdict::Normal, "its source " + outside + " is another object's");
     }
     // Drawn again, but in other copies than the old element (a pattern's copy of the redrawn
-    // hole on the vacated place, review prd2o-r1 T2): never quiet, D1's warned level
+    // hole on the vacated place, review prd2o-r1 T2; a revolution's side two, the twin tier 1
+    // kept, RevolutionSideTwoOuterEdgeAfterSideOneToFace): never quiet, D1's lines
     const auto oldCopies = copyContexts(oldName);
     if (!names.empty() && std::none_of(names.begin(), names.end(), [&](const std::string& n) {
             return copyContexts(n) == oldCopies;
         })) {
-        return say(PlaceVerdict::Normal, "it is made in another copy");
+        return say(PlaceVerdict::Unjudged, {});
     }
     return say(PlaceVerdict::Quiet, "drawn again there");
 }

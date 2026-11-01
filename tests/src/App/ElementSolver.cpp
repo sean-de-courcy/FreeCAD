@@ -10036,13 +10036,11 @@ TEST(SolveOwner, redrawnAtThePlaceIsQuiet)
               "50.000; drawn again there");
     EXPECT_EQ(Data::placeVerdict(boardRecord(), now, {b.redrawn}, b.oldEdge, true, {}),
               Data::PlaceVerdict::Quiet);
-    //   a pattern's copy of the redrawn element on the place (review prd2o-r1 T2): warned, never
-    //   quiet
-    std::string why;
+    //   a pattern's copy of the redrawn element on the place (review prd2o-r1 T2): never quiet,
+    //   D1's lines
     const auto copy = piece(b.redrawn, 9, "CPY", 1, 'E');
-    EXPECT_EQ(Data::placeVerdict(boardRecord(), now, {copy}, b.oldEdge, true, {}, &why),
-              Data::PlaceVerdict::Normal);
-    EXPECT_EQ(why, "it is made in another copy");
+    EXPECT_EQ(Data::placeVerdict(boardRecord(), now, {copy}, b.oldEdge, true, {}),
+              Data::PlaceVerdict::Unjudged);
 }
 
 TEST(SolveOwner, siblingAtTheVacatedPlaceBreaks)
