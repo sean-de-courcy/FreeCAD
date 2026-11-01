@@ -78,7 +78,8 @@ void noteChangeSinceOpen(const DocumentObject* obj, const Property* prop)
     const Document* doc = obj ? obj->getDocument() : nullptr;
     if (!doc || !prop || solving > 0 || doc->testStatus(Document::Restoring)
         || doc->testStatus(Document::Recomputing) || obj->isRecomputing()
-        || (prop->getType() & (Prop_Output | Prop_Transient)) != 0) {
+        || (prop->getType() & (Prop_Output | Prop_Transient)) != 0
+        || prop->testStatus(Property::Output) || prop->testStatus(Property::Transient)) {
         return;
     }
     // The element map version is the migration's own stamp
@@ -101,9 +102,11 @@ bool editedSinceOpen(const DocumentObject* feature)
     if (edited(feature)) {
         return true;
     }
+    // Another document's object may have been edited and saved before this one was opened,
+    // which no record here shows: an edit (decision 217 (3), review pr475b-r3)
     const auto chain = feature->getOutListRecursive();
     return std::any_of(chain.begin(), chain.end(), [&](const DocumentObject* obj) {
-        return obj && obj->getDocument() && edited(obj);
+        return obj && (obj->getDocument() != feature->getDocument() || edited(obj));
     });
 }
 
@@ -1095,6 +1098,14 @@ bool solveElementReferences(DocumentObject* feature,
     // place (ops#475). An edit the references don't show is caught by editedSinceOpen() below.
     // Read once, after the tolerances.
     std::optional<bool> placesHold;
+    // editedSinceOpen(feature), read once
+    std::optional<bool> edited;
+    auto featureEdited = [&]() {
+        if (!edited) {
+            edited = editedSinceOpen(feature);
+        }
+        return *edited;
+    };
     auto editedBy = [&](const SolverEntry& entry) {
         if (entry.guessed) {
             return false;
@@ -1473,7 +1484,7 @@ bool solveElementReferences(DocumentObject* feature,
                     else if (!missingPlacesHold()) {
                         refusal = "but the migration had an edit";
                     }
-                    else if (editedSinceOpen(feature)) {
+                    else if (featureEdited()) {
                         // An edit before the migration recompute may have moved another element
                         // there (decision 217, at its literal rule after review pr475b-r2)
                         refusal = "but the feature changed since the file was opened";
