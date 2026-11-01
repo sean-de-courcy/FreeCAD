@@ -4819,14 +4819,19 @@ App::DocumentObjectExecReturn* Pipe::execute()
         );
         // The profile's frames, in the body (profileFramesOf)
         const std::array<gp_Trsf, 2> frames = profileFramesOf(profileShape.getShape());
+        // The spine object's placement, in the body: with the profile's geometry frame, it tells
+        // the whole model turned from the profile turned alone about a symmetric ring's centre,
+        // where both read the stored places onto the ring (ops#546)
+        const gp_Trsf spineFrame = shape.getShape().Location().Transformation();
         if (startStored) {
             const gp_Trsf inPipe = invObjLoc.Transformation();
             // The stored points of \a record, in the pipe's frame; false for a malformed one. The
             // record ends with the profile's frames at its recompute (each its origin and the ends
             // of its x and y axes, in the body): a loop not at its stored place in the body but at
             // it in one of them, moved with the profile (the whole model moved), is read in that
-            // frame for its own input; where a frame of the profile turned, the pipe stops (the
-            // whole model turned, K4b's `RingTurned`, included: decision 195's bound). Read in the
+            // frame for its own input; where a frame of the profile turned, the pipe stops
+            // (decision 195's bound), unless the whole model turned as one piece (K4b's
+            // `RingTurned`), which the spine's stored frame tells (turnedWhole, ops#546). Read in the
             // body, the turned ring's start went to the vertex a translation fit least badly, and
             // the start's key and the legs' names with it (a rectangle turns onto itself four
             // ways, so no fit tells them apart). The profile's frame, not the pipe's: that is its
@@ -4864,12 +4869,14 @@ App::DocumentObjectExecReturn* Pipe::execute()
                 storedNames.clear();
                 unpaired = false;
                 readings.clear();
-                // 2n + 1 points and each frame's 3
-                const size_t framed = 3 * frames.size();
-                if (stored.size() < 5 + framed || stored.size() % 2 == 0) {
+                // 2n + 1 points, each frame's 3 and, an even count, the spine's frame's 3 (none
+                // in a record from before ops#546)
+                const bool spineFramed = stored.size() % 2 == 0;
+                const size_t framed = 3 * (frames.size() + (spineFramed ? 1 : 0));
+                if (stored.size() < 5 + framed) {
                     return false;
                 }
-                // From the body into each stored frame
+                // From the body into each stored frame, the profile's, then the spine's
                 std::vector<gp_Trsf> into;
                 for (size_t f = stored.size() - framed; f < stored.size(); f += 3) {
                     const gp_Vec x(point(f), point(f + 1));
@@ -4882,11 +4889,65 @@ App::DocumentObjectExecReturn* Pipe::execute()
                 }
                 stored.resize(stored.size() - framed);
                 fill(inPipe);
+                // The whole model turned as one piece (decision 212): the turn of the profile's
+                // geometry frame (a face's placement is its feature's, which stays as the
+                // feature's sketch turns through its offset) moves the stored spine frame onto
+                // the spine object's placement and the stored places exactly onto the spine, and
+                // every stored line still on the spine lies at its turned place (two lines traded
+                // as the model turns, `RingTurnedAndSwapped`; none left to check, decision 150).
+                // The record is then read turned, quietly. Before the in-place test: a ring
+                // turned onto itself lies in place in the body, and read there its legs were
+                // renamed (`notes\naming-class-D.md` 11.2, 11.9 F3). Not where the spine's frame
+                // stays (a mirror in the spine's sketch with the profile turned, R6J-1: the spine
+                // object didn't turn), nor where the profile's first point moved otherwise
+                // anchor: rung 4 (the stored places), moved with the whole model
+                auto turnedWhole = [&]() {
+                    const gp_Trsf motion = frames[1] * into[1];
+                    if (!spineFramed || !sameInput(record.of, spineInput)
+                        || std::abs(motion.GetRotation().GetRotationAngle()) <= turnedBy) {
+                        return false;
+                    }
+                    // The spine's turn since the record, less the profile's: none
+                    const gp_Trsf spineLess = spineFrame * into.back() * motion.Inverted();
+                    const gp_Pnt spineOrigin = gp_Pnt().Transformed(spineFrame);
+                    if (spineOrigin.Transformed(spineLess).Distance(spineOrigin)
+                            >= Precision::Confusion()
+                        || std::abs(spineLess.GetRotation().GetRotationAngle()) > turnedBy) {
+                        return false;
+                    }
+                    fill(inPipe * motion);
+                    const size_t n = spineInOrder.size();
+                    bool rigid = closedInPlace(storedVertices, storedMiddles, spineInOrder)
+                        && record.names.size() == n
+                        && makeTopoShape(false).getHistoryAlgorithm() == App::HistoryAlgorithm::V2;
+                    std::vector<std::string> names;
+                    for (size_t i = 0; rigid && i < n; ++i) {
+                        names.push_back(firstName(path, spineInOrder[i]));
+                    }
+                    bool checked = false;
+                    for (size_t i = 0; rigid && i < n; ++i) {
+                        if (std::ranges::find(names, record.names[i]) == names.end()) {
+                            continue;
+                        }
+                        const auto at = std::ranges::find_if(spineInOrder, [&](const TopoDS_Edge& e) {
+                            return middleOf(e).Distance(storedMiddles[i]) < Precision::Confusion();
+                        });
+                        rigid = at != spineInOrder.end()
+                            && names[static_cast<size_t>(at - spineInOrder.begin())]
+                                == record.names[i];
+                        checked = true;
+                    }
+                    if (!rigid || !checked) {
+                        fill(inPipe);
+                        return false;
+                    }
+                    return true;
+                };
                 // In a frame only for its own input: another spine elsewhere, the profile moved
                 // onto it, still decides as a new pipe (CC2)
                 // anchor: rung 4 (the stored places), in the body, or exactly in place in one of
                 // the profile's stored frames
-                if (sameInput(record.of, spineInput)
+                if (!turnedWhole() && sameInput(record.of, spineInput)
                     && !closedInPlace(storedVertices, storedMiddles, spineInOrder)) {
                     // The fit is a translation's: with a stored frame of the profile turned
                     // since the record, the loop turned, and a turn that still fits by a
@@ -5461,9 +5522,9 @@ App::DocumentObjectExecReturn* Pipe::execute()
             for (size_t k = 1; k < pathEdges.size(); ++k) {
                 points.push_back(middleOf(pathEdges[k]).Transformed(inBody));
             }
-            // and the profile's frames, each its origin and the ends of its x and y axes, in the
-            // body
-            for (const gp_Trsf& frame : frames) {
+            // and the profile's frames and the spine's, each its origin and the ends of its x and
+            // y axes, in the body
+            for (const gp_Trsf& frame : {frames[0], frames[1], spineFrame}) {
                 for (const gp_Pnt& axis : {gp_Pnt(0, 0, 0), gp_Pnt(1, 0, 0), gp_Pnt(0, 1, 0)}) {
                     points.push_back(axis.Transformed(frame));
                 }

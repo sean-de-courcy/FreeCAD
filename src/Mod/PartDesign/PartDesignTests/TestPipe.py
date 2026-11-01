@@ -4828,7 +4828,28 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
         self.doc.recompute()
         self.assertEqual(self.ringNames(pipe), redrawn)
 
-    def testClosedRingTurnedWithAttachedProfileStops(self):
+    def placesByName(self, pipe):
+        """Where the pipe's faces, edges and vertices lie, by name: {name: [places]}"""
+        result = {}
+        shape = pipe.Shape
+        for kind in ("Face", "Edge", "Vertex"):
+            for index, element in enumerate(elementsOf(shape, kind), 1):
+                result.setdefault(firstName(shape, f"{kind}{index}"), []).append(V(place(element)))
+        return result
+
+    def assertNamesFollow(self, before, after, motion):
+        """Each name of `before` (placesByName) lies at its places moved by `motion`, and the pipe
+        has no other name"""
+        self.assertEqual(set(after), set(before))
+        for name, places in before.items():
+            self.assertEqual(len(after[name]), len(places), name)
+            for at in places:
+                moved = motion.multVec(at)
+                self.assertTrue(
+                    any((p - moved).Length < 1e-6 for p in after[name]), (name, at, after[name])
+                )
+
+    def testClosedRingTurnedWithAttachedProfileKeepsTheStart(self):
         """The ring and its profile (at the bottom left corner) turned about Z, 120 and 150
         degrees: with the profile sketch attached to the XY plane (its offset turned), after a
         base feature (a Pad of a circle about Z, which the turn leaves as it was), or with the
@@ -4837,10 +4858,12 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
         does the Pad's; the profile's geometry does. Read in the body, the start went to the
         vertex a translation fit picked (the bottom right), and the profile's names at the start
         with it, silently (the review of fork PR 383 round 4, R1; the face, its pre-push review
-        of round 5, T1). Read in the profile's turned frame, the loop in place there stood for
-        other reasons than its motion too (R6J-1, and with every line drawn anew the pre-push
-        review of round 6's sixth fix): with a frame of the profile turned, the pipe stops
-        (decision 195's bound)."""
+        of round 5, T1); read in the profile's turned frame alone, the loop in place there stood
+        for other reasons than its motion too (R6J-1), and fork PR 383 stopped. The whole model
+        turned as one piece (decision 212): the profile's geometry frame, the spine's frame and
+        the stored points on the spine all moved by one turn, and the lines at the turned places
+        are those stored, so the start and every name follow the turn (ops#546,
+        `notes\\naming-class-D.md` 11.2's Pipe rung)."""
         for kind, turn in (("attached", 120), ("attached", 150), ("base", 120), ("face", 120)):
             self.tearDown()
             self.setUp()
@@ -4881,6 +4904,8 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
                     profile.AttachmentOffset = offset
                     self.doc.recompute()
                     self.assertTrue(pipe.isValid(), pipe.getStatusString())
+                before = self.placesByName(pipe)
+                start, following = V(pipe.SpineStart[0]), V(pipe.SpineStart[3])
                 rotation = App.Rotation(V(0, 0, 1), turn)
                 path.Placement = App.Placement(V(), rotation.multiply(XZ.Rotation))
                 turned = App.Placement(V(), rotation).multiply(offset)
@@ -4889,16 +4914,28 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
                 else:
                     profile.Placement = turned
                 self.doc.recompute()
-                self.assertFalse(pipe.isValid())
-                self.assertIn("can't be matched", pipe.getStatusString())
+                self.assertTrue(pipe.isValid(), pipe.getStatusString())
+                self.assertNotIn("Warning", pipe.State)
+                self.assertLess((V(pipe.SpineStart[0]) - rotation.multVec(start)).Length, 1e-6)
+                self.assertLess(
+                    (V(pipe.SpineStart[3]) - rotation.multVec(following)).Length, 1e-6
+                )
+                # The base's cylinder doesn't turn; everything else turned as one piece
+                if kind != "base":
+                    self.assertNamesFollow(
+                        before, self.placesByName(pipe), App.Placement(V(), rotation)
+                    )
 
-    def testClosedRingTurnedWithItsProfileResizedStops(self):
+    def testClosedRingTurnedWithItsProfileResizedKeepsTheStart(self):
         """The ring and its profile turned 120 degrees about Z while the profile's square grows
         about its centre (2 x 2 to 3 x 3, its lines' IDs kept): the profile a sketch, or a face of
         a Pad of the sketch (its offset turned). A frame at the profile's first point and towards
         its next one moved with the resize, the ring was read in the body, and the start went to
-        the bottom right corner silently (the second pre-push review of fork PR 383 round 5, F1).
-        With a frame of the profile turned, the pipe stops (decision 195's bound)."""
+        the bottom right corner silently (the second pre-push review of fork PR 383 round 5, F1);
+        fork PR 383 stopped. The profile's geometry frame (at its middle, towards its first point)
+        turns with the ring as the square grows about it, the spine's frame and the stored points
+        on the spine moved by the same turn: the start follows, and the pipe computes on the
+        bigger square (ops#546, `notes\\naming-class-D.md` 11.5)."""
         for kind in ("sketch", "face"):
             self.tearDown()
             self.setUp()
@@ -4923,6 +4960,8 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
                     _, pipe = self.ring(0, 0, (pad, top))
                 else:
                     profile, pipe = self.ring(0, 0)
+                volume = pipe.Shape.Volume
+                start, following = V(pipe.SpineStart[0]), V(pipe.SpineStart[3])
                 rotation = App.Rotation(V(0, 0, 1), 120)
                 geometry = profile.Geometry
                 for line in geometry:
@@ -4935,8 +4974,98 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
                 else:
                     profile.Placement = turned
                 self.doc.recompute()
-                self.assertFalse(pipe.isValid())
-                self.assertIn("can't be matched", pipe.getStatusString())
+                self.assertTrue(pipe.isValid(), pipe.getStatusString())
+                self.assertNotIn("Warning", pipe.State)
+                self.assertGreater(pipe.Shape.Volume, volume)
+                self.assertLess((V(pipe.SpineStart[0]) - rotation.multVec(start)).Length, 1e-6)
+                self.assertLess(
+                    (V(pipe.SpineStart[3]) - rotation.multVec(following)).Length, 1e-6
+                )
+
+    def testClosedRingTurnedAboutItsCentreKeepsTheStart(self):
+        """The ring and its profile turned half a turn about the ring's centre, normal to its
+        plane: the ring lies on itself, each line on the opposite leg. In place in the body, the
+        record was read there and every leg renamed through the PLM sections, and the start
+        stayed at the bottom left corner, now the top right line's place (`RingTurned180AboutCentre`,
+        `notes\\naming-class-D.md` 11.9 F3). The spine's frame tells the whole model turned from
+        the profile turned alone: the start and every name follow the turn (ops#546)."""
+        profile, pipe = self.ring(0, 4)
+        path = pipe.Spine[0]
+        before = self.placesByName(pipe)
+        start, following = V(pipe.SpineStart[0]), V(pipe.SpineStart[3])
+        motion = App.Placement(V(), App.Rotation(V(0, 1, 0), 180), V(15, 0, 10))
+        path.Placement = motion.multiply(path.Placement)
+        profile.Placement = motion.multiply(profile.Placement)
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        self.assertNotIn("Warning", pipe.State)
+        self.assertLess((V(pipe.SpineStart[0]) - motion.multVec(start)).Length, 1e-6)
+        self.assertLess((V(pipe.SpineStart[3]) - motion.multVec(following)).Length, 1e-6)
+        self.assertNamesFollow(before, self.placesByName(pipe), motion)
+        # The next recompute reads the record it stored, in place, and changes nothing
+        after = self.placesByName(pipe)
+        stored = list(pipe.SpineStart)
+        pipe.touch()
+        self.doc.recompute()
+        self.assertEqual(list(pipe.SpineStart), stored)
+        self.assertNamesFollow(after, self.placesByName(pipe), App.Placement())
+
+    def testClosedRingTurnedWithItsLinesTradedStopsOrRenames(self):
+        """The ring's top and bottom lines traded (each line's points moved onto the other leg,
+        IDs kept) and the whole model turned in the same recompute: 120 degrees about Z, or half a
+        turn about the ring's centre (onto itself). At the turned places, two of the four lines
+        aren't those stored (`RingTurnedAndSwapped`): not a turn of the whole model, and the rung
+        doesn't read it. Turned 120 degrees, the pipe stops (decision 195); onto itself, the ring
+        is in place in the body, read there, and the legs whose line changed are renamed. Neither
+        follows the names silently."""
+        for angle in (120, 180):
+            self.tearDown()
+            self.setUp()
+            with self.subTest(angle=angle):
+                profile, pipe = self.ring(0, 4)
+                path = pipe.Spine[0]
+                before = self.ringNames(pipe)
+                geometry = path.Geometry
+                geometry[1].StartPoint, geometry[1].EndPoint = V(300, 0, 0), V(300, 5, 0)
+                geometry[3].StartPoint, geometry[3].EndPoint = V(400, 0, 0), V(400, 5, 0)
+                geometry[1].StartPoint, geometry[1].EndPoint = V(30, 0, 0), V(0, 0, 0)
+                geometry[3].StartPoint, geometry[3].EndPoint = V(0, 20, 0), V(30, 20, 0)
+                path.Geometry = geometry
+                if angle == 180:
+                    motion = App.Placement(V(), App.Rotation(V(0, 1, 0), 180), V(15, 0, 10))
+                else:
+                    motion = App.Placement(V(), App.Rotation(V(0, 0, 1), angle))
+                path.Placement = motion.multiply(path.Placement)
+                profile.Placement = motion.multiply(profile.Placement)
+                self.doc.recompute()
+                if angle != 180:
+                    self.assertFalse(pipe.isValid())
+                    self.assertIn("can't be matched", pipe.getStatusString())
+                    continue
+                self.assertTrue(pipe.isValid(), pipe.getStatusString())
+                # The top and bottom places hold their stored lines again (traded, then turned
+                # half a turn); the left and right each hold the other's
+                self.assertLegsRenamed(before, self.ringNames(pipe), ("left", "right"))
+
+    def testClosedRingTurnedInTwoRecomputesKeepsTheStart(self):
+        """The ring's spine turned 120 degrees about Z alone (the pipe stops: the profile didn't
+        turn), then its profile by the same turn. The record is written only when the pipe
+        computes, so the second recompute reads the record from before the stop: the whole model
+        turned, and the start follows without a reset (`notes\\naming-class-D.md` 11.9 F3)."""
+        profile, pipe = self.ring(0, 0)
+        path = pipe.Spine[0]
+        before = self.placesByName(pipe)
+        start = V(pipe.SpineStart[0])
+        motion = App.Placement(V(), App.Rotation(V(0, 0, 1), 120))
+        path.Placement = motion.multiply(path.Placement)
+        self.doc.recompute()
+        self.assertFalse(pipe.isValid())
+        profile.Placement = motion.multiply(profile.Placement)
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        self.assertNotIn("Warning", pipe.State)
+        self.assertLess((V(pipe.SpineStart[0]) - motion.multVec(start)).Length, 1e-6)
+        self.assertNamesFollow(before, self.placesByName(pipe), motion)
 
     def testClosedRingTurnedWithAnotherEditStops(self):
         """The ring and its profile (at the bottom left corner) turned about Z while something
