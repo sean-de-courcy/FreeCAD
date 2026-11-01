@@ -1606,10 +1606,38 @@ TEST_F(FeaturePartTest, fingerprintsOfACylinder)
             }
         }
     }
+    //   the seam's two vertices (ops#526 D2): each edge once though the solid lists them once per
+    //   face and the circle closes on the vertex: the circle's both ends (along +y and -y) and the
+    //   seam away from the vertex
+    int vertices = 0;
+    for (int index = 1; index <= static_cast<int>(cylinder.countSubShapes(TopAbs_VERTEX)); ++index) {
+        Data::ElementFingerprint fp;
+        ASSERT_TRUE(
+            Feature::getElementFingerprint(cylinder, ("Vertex" + std::to_string(index)).c_str(), fp)
+        );
+        ++vertices;
+        ASSERT_TRUE(fp.center);
+        const double z = fp.center->z;
+        ASSERT_EQ(fp.sides.size(), 3U) << fp.toString();
+        std::vector<Base::Vector3d> expected {
+            Base::Vector3d(0, 1, 0),
+            Base::Vector3d(0, -1, 0),
+            Base::Vector3d(0, 0, z > 2.5 ? -1.0 : 1.0)
+        };
+        for (const auto& side : fp.sides) {
+            EXPECT_EQ(side.curve, 0) << fp.toString();
+            auto found = std::find_if(expected.begin(), expected.end(), [&](const auto& d) {
+                return Base::Distance(side.direction, d) < 1e-9;
+            });
+            ASSERT_NE(found, expected.end()) << fp.toString();
+            expected.erase(found);
+        }
+    }
     EXPECT_EQ(lateral, 1);
     EXPECT_EQ(planes, 2);
     EXPECT_EQ(circles, 2);
     EXPECT_EQ(seams, 1);
+    EXPECT_EQ(vertices, 2);
 }
 
 TEST_F(FeaturePartTest, fingerprintOfAnArcLocatesItsCircle)

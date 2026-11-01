@@ -10128,6 +10128,34 @@ TEST(SolveOwner, primitiveMovedOntoThePlaceBreaks)
     EXPECT_EQ(why, "its source 11;Edge3 was in the model before");
 }
 
+TEST(SolveOwner, indexMadePickIsUnjudged)
+{
+    // The attack set's BRing|reversed (D2b): the ring's spine line reversed, its faces renamed
+    // by index (the MKR fallback, `Face16;_;{Pipe};MKR;0;F;0;IDX,SRC;_`). The pick's only
+    // unshared source is the Pipe itself, ID-less and in the closure: no lineage to date, neither
+    // drawn again nor there before. Unjudged keeps D1's lines.
+    const auto oldFace = section({"Face3"}, {}, 10, "XTR", 0, 'F', {"SRC"});
+    const auto byIndex = indexed("Face16", 12, "MKR");
+    ElementFingerprint record = LongBoard::edgeAt(0);
+    record.marks = {{10, -1}, {12, -1}};
+    const auto now = LongBoard::edgeAt(0);
+    ASSERT_TRUE(Data::lostOldSources({byIndex}, oldFace));
+    EXPECT_EQ(Data::placeVerdict(record, now, {byIndex}, oldFace, true, {}),
+              Data::PlaceVerdict::Unjudged);
+    //   a piece of it the same
+    const auto split = piece(byIndex, 11, "CUT", 1, 'F');
+    ASSERT_EQ(NameAncestry::indexSource(split), byIndex);
+    EXPECT_EQ(Data::placeVerdict(record, now, {split}, oldFace, true, {}),
+              Data::PlaceVerdict::Unjudged);
+    //   the control: the same source named with a lineage was there
+    const auto withLineage = section({"Face16"}, {}, 12, "XTR", 0, 'F', {"SRC"});
+    EXPECT_EQ(Data::placeVerdict(record, now, {withLineage}, oldFace, true, {}),
+              Data::PlaceVerdict::WasThere);
+    //   another name of the pick still judges it
+    EXPECT_EQ(Data::placeVerdict(record, now, {byIndex, withLineage}, oldFace, true, {}),
+              Data::PlaceVerdict::WasThere);
+}
+
 TEST(SolveOwner, recordWithoutMarksKeepsD1)
 {
     // A record saved before D2 (version 6 or older, no marks), or a lost source's object the
