@@ -3170,6 +3170,13 @@ PlaceVerdict placeVerdict(const ElementFingerprint& saved,
     bool judged = false;
     std::string outside;
     for (const auto& name : names) {
+        // A name made from an index (IDX, the MKR fallback: `Face16;_;{Pipe};MKR;...`) has no
+        // lineage: its source is the target's own element by number, which tells neither
+        // "drawn again" nor "was there" (attack set's BRing|reversed, the ring's faces renamed by
+        // index after its spine line was reversed). Such a pick is unjudged by the marks.
+        if (!NameAncestry::indexSource(name).empty()) {
+            continue;
+        }
         for (const auto& section : taggedSourcesOf(name)) {
             std::vector<const std::string*> unshared;
             if (section.ids.empty()) {
@@ -3366,18 +3373,41 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
     std::vector<char> decidedEntry(input.entries.size(), 0);
     const double nan = std::numeric_limits<double>::quiet_NaN();
 
+    // Whether the pool element \a index may sit at \a saved's place, from its cheap hint
+    // (ops#105): false only where atSamePlace() would be false too, so that a scan for the
+    // elements at a place fingerprints only the rest. True without hints.
+    struct Hint
+    {
+        bool valid = false;
+        ElementFingerprint intrinsic;
+        std::optional<Base::Vector3d> anchor;
+    };
+    std::map<std::string, Hint> hints;  // by index, on first use
+    auto mayBeAtSavedPlace = [&](const ElementFingerprint& saved, const std::string& index) {
+        if (!input.hintOf) {
+            return true;
+        }
+        auto it = hints.find(index);
+        if (it == hints.end()) {
+            Hint hint;
+            hint.valid = input.hintOf(index, hint.intrinsic, hint.anchor);
+            it = hints.emplace(index, std::move(hint)).first;
+        }
+        const Hint& hint = it->second;
+        return !hint.valid
+            || mayBeAtPlace(saved,
+                            hint.intrinsic,
+                            hint.anchor,
+                            input.diagonal,
+                            input.tolerances,
+                            input.continuationDistance);
+    };
+
     // Moved (ops#105): an exact element that no longer sits where its saved fingerprint was,
     // while another element of its type sits there now. The name says one, the geometry the
     // other: never a pick. Moved alone (nothing at the old place), the name stands.
     {
         std::map<std::string, std::set<std::string>> reserved;  // by type: the places taken
-        struct Hint
-        {
-            bool valid = false;
-            ElementFingerprint intrinsic;
-            std::optional<Base::Vector3d> anchor;
-        };
-        std::map<std::string, Hint> hints;  // by index, on first use
         for (std::size_t i = 0; i < input.entries.size(); ++i) {
             const auto& entry = input.entries[i];
             const ElementFingerprint& saved = entry.fingerprint;
@@ -3400,29 +3430,10 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             }
             // The elements there: a cheap hint first rules most out, so that only the rest are
             // fingerprinted.
-            auto mayBeHere = [&](const std::string& index) {
-                if (!input.hintOf) {
-                    return true;
-                }
-                auto it = hints.find(index);
-                if (it == hints.end()) {
-                    Hint hint;
-                    hint.valid = input.hintOf(index, hint.intrinsic, hint.anchor);
-                    it = hints.emplace(index, std::move(hint)).first;
-                }
-                const Hint& hint = it->second;
-                return !hint.valid
-                    || mayBeAtPlace(saved,
-                                    hint.intrinsic,
-                                    hint.anchor,
-                                    input.diagonal,
-                                    input.tolerances,
-                                    input.continuationDistance);
-            };
             std::vector<int> place;
             for (std::size_t k = 0; k < pool.elements.size(); ++k) {
                 const auto& index = pool.elements[k].index;
-                if (static_cast<int>(k) != hitPosition && mayBeHere(index)
+                if (static_cast<int>(k) != hitPosition && mayBeAtSavedPlace(saved, index)
                     && here(fingerprintOfIndex(index))) {
                     place.push_back(static_cast<int>(k));
                 }
@@ -5427,10 +5438,13 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             if (!exempt && intrinsicAgrees(*saved, own, input.tolerances)) {
                 const bool there
                     = atSamePlace(*saved, own, input.diagonal, input.tolerances, input.continuationDistance);
+                // The other allowed elements that may sit at the saved place (the hint first,
+                // as the moved check scans: only those are fingerprinted)
                 std::vector<int> open;
                 if (!there) {
                     for (std::size_t j = 0; j < pool.elements.size(); ++j) {
-                        if (allowed[j] && static_cast<int>(j) != k) {
+                        if (allowed[j] && static_cast<int>(j) != k
+                            && mayBeAtSavedPlace(*saved, pool.elements[j].index)) {
                             open.push_back(static_cast<int>(j));
                         }
                     }
