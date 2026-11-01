@@ -3151,7 +3151,13 @@ PlaceVerdict placeVerdict(const ElementFingerprint& saved,
         && !sidesAgree(saved.sides, pick.sides, tolerances.angle)) {
         return say(PlaceVerdict::OtherSide, "its sides are not the old element's");
     }
-    if (!lostSource || saved.marks.empty() || oldName.empty()) {
+    // An old name made from an index (a primitive's `Edge10;_;<Box1>;MKR;...;IDX`) has no source
+    // with IDs, so T1''s test never sees it lost; its object is its source, and the pick's object
+    // judges it by the marks (9.2's own example, design 9.5: box 2 moved onto box 1's vacated
+    // place was there, BoxMovedIntoAVacatedPlaceThick, K8FusePinRemovedNeighbourMoved; ops#526
+    // D2d). Judged that way only to break: any other verdict keeps D1's lines.
+    const bool byIndex = !NameAncestry::indexSource(oldName).empty();
+    if ((!lostSource && !byIndex) || saved.marks.empty() || oldName.empty()) {
         return say(PlaceVerdict::Unjudged, {});
     }
     auto markOf = [&](std::string_view tag) -> const ElementFingerprint::Mark* {
@@ -3192,11 +3198,17 @@ PlaceVerdict placeVerdict(const ElementFingerprint& saved,
         // A name made from an index (IDX, the MKR fallback: `Face16;_;{Pipe};MKR;...`) has no
         // lineage: its source is the target's own element by number, which tells neither
         // "drawn again" nor "was there" (attack set's BRing|reversed, the ring's faces renamed by
-        // index after its spine line was reversed). Such a pick is unjudged by the marks.
-        if (!NameAncestry::indexSource(name).empty()) {
+        // index after its spine line was reversed). Such a pick is unjudged by the marks, unless
+        // the old name was made from an index too: then its object is what tells.
+        const bool indexMade = !NameAncestry::indexSource(name).empty();
+        if (!byIndex && indexMade) {
             continue;
         }
-        for (const auto& section : taggedSourcesOf(name)) {
+        for (auto section : taggedSourcesOf(name)) {
+            if (indexMade) {
+                // Its ID is the element's number, no geometry: the object alone is the source
+                section.ids.clear();
+            }
             std::vector<const std::string*> unshared;
             if (section.ids.empty()) {
                 if (shared(section, nullptr)) {
@@ -3233,7 +3245,7 @@ PlaceVerdict placeVerdict(const ElementFingerprint& saved,
             }
         }
     }
-    if (!judged || undated) {
+    if (!judged || undated || byIndex) {
         return say(PlaceVerdict::Unjudged, {});
     }
     if (!outside.empty()) {
