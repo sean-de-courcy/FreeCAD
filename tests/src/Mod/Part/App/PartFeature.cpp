@@ -1431,22 +1431,41 @@ TEST_F(FeaturePartTest, fingerprintsOfABox)
         double length = d.x > 0.5 ? 1.0 : d.y > 0.5 ? 2.0 : 3.0;
         EXPECT_NEAR(*fp.size, length, 1e-9) << index;
     }
-    //   the vertices are the eight corners
+    //   the vertices are the eight corners, in version 7 with their sides (ops#526 D2): the
+    //   three edges' directions away from the corner, each edge once, along the box's edges
     std::set<std::string> corners;
     for (int index = 1; index <= 8; ++index) {
         Data::ElementFingerprint vertex;
         ASSERT_TRUE(
             Feature::getElementFingerprint(box, ("Vertex" + std::to_string(index)).c_str(), vertex)
         );
-        corners.insert(vertex.toString());
+        ASSERT_TRUE(vertex.center);
+        const Base::Vector3d corner = *vertex.center;
+        const std::string text = vertex.toString();
+        corners.insert(text.substr(0, text.find("|_|_|_|_|_|_|_|_|")));
+        ASSERT_EQ(vertex.sides.size(), 3U) << text;
+        std::set<std::string> axes;
+        for (const auto& side : vertex.sides) {
+            EXPECT_EQ(side.curve, 0) << text;
+            const Base::Vector3d& d = side.direction;
+            EXPECT_NEAR(std::abs(d.x) + std::abs(d.y) + std::abs(d.z), 1.0, 1e-12) << text;
+            //   into the box: the corner moved along it stays on the box
+            const Base::Vector3d inside = corner + d * 0.5;
+            EXPECT_TRUE(inside.x > -1e-9 && inside.x < 1.0 + 1e-9 && inside.y > -1e-9
+                        && inside.y < 2.0 + 1e-9 && inside.z > -1e-9 && inside.z < 3.0 + 1e-9)
+                << text;
+            axes.insert(std::abs(d.x) > 0.5 ? "x" : std::abs(d.y) > 0.5 ? "y" : "z");
+        }
+        EXPECT_EQ(axes.size(), 3U) << text;
+        EXPECT_TRUE(vertex.marks.empty()) << text;
     }
     std::set<std::string> expectedCorners;
     for (int x : {0, 1}) {
         for (int y : {0, 2}) {
             for (int z : {0, 3}) {
                 expectedCorners.insert(
-                    "1|V|Point|_|" + std::to_string(x) + "," + std::to_string(y) + ","
-                    + std::to_string(z) + "|_|_"
+                    "7|V|Point|_|" + std::to_string(x) + "," + std::to_string(y) + ","
+                    + std::to_string(z)
                 );
             }
         }
@@ -1505,8 +1524,11 @@ TEST_F(FeaturePartTest, fingerprintsOfACylinder)
         );
         if (fp.kind == "Cylinder") {
             ++lateral;
-            //   with its bounding box, in version 5 (PR 366 round 4)
-            EXPECT_EQ(fp.toString().substr(0, 45), "5|F|Cylinder|62.8318530718|0,0,2.5|0,0,1|2|_|");
+            //   with its bounding box (PR 366 round 4), in version 7 with its side (ops#526 D2):
+            //   its normal points away from the axis
+            EXPECT_EQ(fp.toString().substr(0, 45), "7|F|Cylinder|62.8318530718|0,0,2.5|0,0,1|2|_|");
+            ASSERT_EQ(fp.sides.size(), 1U);
+            EXPECT_EQ(fp.sides[0].curve, '+');
             expectExtent(fp, Base::Vector3d(-2, -2, 0), Base::Vector3d(2, 2, 5));
         }
         else {
@@ -1540,8 +1562,26 @@ TEST_F(FeaturePartTest, fingerprintsOfACylinder)
             //   a circle carries its centre (Task 2 PR 7b), and its box, in version 5
             ASSERT_TRUE(fp.location);
             EXPECT_NEAR(Base::Distance(*fp.location, *fp.center), 0.0, 1e-9);
-            EXPECT_EQ(fp.toString().substr(0, 11), "5|E|Circle|");
             const double z = fp.center->z;
+            EXPECT_EQ(fp.toString().substr(0, 11), "7|E|Circle|");
+            //   its sides (version 7, ops#526 D2): the cap's normal, and the cylinder on the
+            //   side away from its principal normal (a boss's rim, `c-`)
+            ASSERT_EQ(fp.sides.size(), 2U) << fp.toString();
+            int capSides = 0;
+            int curvedSides = 0;
+            for (const auto& side : fp.sides) {
+                if (side.curve) {
+                    ++curvedSides;
+                    EXPECT_EQ(side.curve, '-') << fp.toString();
+                }
+                else {
+                    ++capSides;
+                    EXPECT_EQ(side.direction, Base::Vector3d(0, 0, z > 2.5 ? 1.0 : -1.0))
+                        << fp.toString();
+                }
+            }
+            EXPECT_EQ(capSides, 1);
+            EXPECT_EQ(curvedSides, 1);
             expectExtent(fp, Base::Vector3d(-2, -2, z), Base::Vector3d(2, 2, z));
             //   its outline: 17 points along it, its ends on its vertex
             expectOnCircle(fp.outline, z);
@@ -1550,7 +1590,13 @@ TEST_F(FeaturePartTest, fingerprintsOfACylinder)
         }
         else {
             ++seams;
-            EXPECT_EQ(fp.toString().substr(0, 29), "5|E|Line|5|2,0,2.5|0,0,1|_|_|");
+            EXPECT_EQ(fp.toString().substr(0, 29), "7|E|Line|5|2,0,2.5|0,0,1|_|_|");
+            //   its side: the cylinder's normal at its middle, once though the seam lies in the
+            //   cylinder twice (ops#526 D2)
+            ASSERT_EQ(fp.sides.size(), 1U) << fp.toString();
+            EXPECT_EQ(fp.sides[0].curve, 0);
+            EXPECT_LT(Base::Distance(fp.sides[0].direction, Base::Vector3d(1, 0, 0)), 1e-9)
+                << fp.toString();
             expectExtent(fp, Base::Vector3d(2, 0, 0), Base::Vector3d(2, 0, 5));
             //   a line's outline: its two ends
             ASSERT_EQ(fp.outline.size(), 2u);

@@ -2135,6 +2135,56 @@ void measure(SolveInput& input, std::map<std::string, ElementFingerprint> finger
     };
 }
 
+// An element's hint, as Part gives it: its fingerprint without size, centre and extent, and a
+// point of its plane, line or vertex away from its centre.
+struct Hinted
+{
+    ElementFingerprint intrinsic;
+    std::optional<Base::Vector3d> anchor;
+};
+
+Hinted hintOf(const ElementFingerprint& fp)
+{
+    Hinted hint;
+    hint.intrinsic = fp;
+    hint.intrinsic.size.reset();
+    hint.intrinsic.center.reset();
+    hint.intrinsic.extentMin.reset();
+    hint.intrinsic.extentMax.reset();
+    if (fp.type == 'V') {
+        hint.anchor = fp.center;
+    }
+    else if (fp.direction && fp.kind == "Line") {
+        hint.anchor = *fp.center + *fp.direction * 7.0;
+    }
+    else if (fp.direction && fp.kind == "Plane") {
+        // a point of the plane: the centre moved along a direction in it
+        Base::Vector3d inPlane = *fp.direction % Base::Vector3d(0.3, 0.5, 0.7);
+        hint.anchor = *fp.center + inPlane * 5.0;
+    }
+    return hint;
+}
+
+// Gives the pool the hints of these fingerprints (hintOf()), and counts them in \a calls if set.
+void hint(SolveInput& input, std::map<std::string, ElementFingerprint> fingerprints, int* calls)
+{
+    input.hintOf = [fingerprints, calls](const std::string& index,
+                                         ElementFingerprint& intrinsic,
+                                         std::optional<Base::Vector3d>& anchor) {
+        if (calls) {
+            ++*calls;
+        }
+        auto it = fingerprints.find(index);
+        if (it == fingerprints.end()) {
+            return false;
+        }
+        Hinted hinted = hintOf(it->second);
+        intrinsic = hinted.intrinsic;
+        anchor = hinted.anchor;
+        return true;
+    };
+}
+
 }  // namespace
 
 TEST(SolveOwner, geometryBreaksTiesAmongSurvivors)
@@ -2189,21 +2239,28 @@ TEST(SolveOwner, geometryNeverOverridesASingleSurvivor)
     // The outer wire gains an edge: the top face changed size and centre, which is what the
     // edit did. Tier 1's one survivor resolves; tiers 2 and 3 don't run. Since Task 2 PR 8 the
     // partner is measured once, for the tier-1 check (still a plane, the same normal: ops#87).
-    Placed p;
-    SolveInput input;
-    input.diagonal = 30.0;
-    input.pool["Face"] = {element("Face1", {p.names.side}), element("Face2", {p.names.newTop})};
-    input.entries = {missing(p.names.oldTop)};
-    input.entries[0].fingerprint = p.top;
-    int calls = 0;
-    measure(input, {{"Face1", p.side}, {"Face2", p.topAt(9)}}, &calls);
+    // Since D2 (ops#526) the survivor moved, so tier 1's gate (ii) looks for an element at the
+    // saved place: with hints the side face is ruled out unmeasured; without, it is measured.
+    for (bool hinted : {true, false}) {
+        Placed p;
+        SolveInput input;
+        input.diagonal = 30.0;
+        input.pool["Face"] = {element("Face1", {p.names.side}), element("Face2", {p.names.newTop})};
+        input.entries = {missing(p.names.oldTop)};
+        input.entries[0].fingerprint = p.top;
+        int calls = 0;
+        measure(input, {{"Face1", p.side}, {"Face2", p.topAt(9)}}, &calls);
+        if (hinted) {
+            hint(input, {{"Face1", p.side}, {"Face2", p.topAt(9)}}, nullptr);
+        }
 
-    auto outcomes = Data::solveOwner(input);
+        auto outcomes = Data::solveOwner(input);
 
-    EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved);
-    EXPECT_EQ(outcomes[0].element, "Face2");
-    EXPECT_EQ(outcomes[0].tier, 1);
-    EXPECT_EQ(calls, 1);
+        EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved) << hinted;
+        EXPECT_EQ(outcomes[0].element, "Face2") << hinted;
+        EXPECT_EQ(outcomes[0].tier, 1) << hinted;
+        EXPECT_EQ(calls, hinted ? 1 : 2) << hinted;
+    }
 }
 
 TEST(SolveOwner, patternInstanceSiblingNeverResolves)
@@ -5176,40 +5233,6 @@ TEST(Moved, faceUnderOneBreaks)
     EXPECT_EQ(describe(Data::solveOwner(input)[0]), "exact Face1 0 [] ");
 }
 
-namespace
-{
-
-// An element's hint, as Part gives it: its fingerprint without size, centre and extent, and a
-// point of its plane, line or vertex away from its centre.
-struct Hinted
-{
-    ElementFingerprint intrinsic;
-    std::optional<Base::Vector3d> anchor;
-};
-
-Hinted hintOf(const ElementFingerprint& fp)
-{
-    Hinted hint;
-    hint.intrinsic = fp;
-    hint.intrinsic.size.reset();
-    hint.intrinsic.center.reset();
-    hint.intrinsic.extentMin.reset();
-    hint.intrinsic.extentMax.reset();
-    if (fp.type == 'V') {
-        hint.anchor = fp.center;
-    }
-    else if (fp.direction && fp.kind == "Line") {
-        hint.anchor = *fp.center + *fp.direction * 7.0;
-    }
-    else if (fp.direction && fp.kind == "Plane") {
-        // a point of the plane: the centre moved along a direction in it
-        Base::Vector3d inPlane = *fp.direction % Base::Vector3d(0.3, 0.5, 0.7);
-        hint.anchor = *fp.center + inPlane * 5.0;
-    }
-    return hint;
-}
-
-}  // namespace
 
 TEST(Moved, hintRulesOutOnlyWhatIsNotThere)
 {
@@ -10264,8 +10287,8 @@ TEST(SolveOwner, exactPlaceIndexOnlyReference)
     // An index-only reference (a legacy file's, no old name) to an element of a long part, and
     // one element at its saved place, another copy's (PR 379 round 5's last review, T2): no name
     // relates the pick to the reference, so XP's pick has no origin to share and breaks, as
-    // tier 3's gap test breaks it on `integration`; never the quiet resolution an empty name
-    // would get at the batch's same-place level (Data::mayBeQuietAtPlace()).
+    // tier 3's gap test breaks it on `integration`. And an empty name never gets the batch's
+    // same-place level (Data::mayBeQuietAtPlace(), ops#550 (1), D2).
     LongBoard b;
     auto input = b.input(LongBoard::edgeAt(0), LongBoard::edgeAt(45));
     input.entries[0].oldName.clear();
@@ -10276,7 +10299,7 @@ TEST(SolveOwner, exactPlaceIndexOnlyReference)
     EXPECT_EQ(outcome.evidence,
               "no structural candidate, at the same place: nearest 0.000, second 45.000, d_max "
               "50.000; the pick Edge2 has another source");
-    EXPECT_TRUE(Data::mayBeQuietAtPlace({b.oldEdge}, "", true));
+    EXPECT_FALSE(Data::mayBeQuietAtPlace({b.oldEdge}, "", true));
 }
 
 TEST(SolveOwner, faceGeneratorGoneDropsTheSurvivor)
