@@ -1122,14 +1122,15 @@ bool PropertyLinkBase::_updateElementFingerprints(App::DocumentObject* feature,
         // (positionByPrevious()) gives the old shape the new placement, and a gone piece's point,
         // carried by it, already lies over the next plate. A piece saved without up-to faces (three
         // under its point, or a fingerprint from before them) gained that plate's (review prA1b-r1).
-        // The marks too (ops#526 D2): they date the model the element was taken from, so they
-        // change only with the element. A Body recompute before the solve, the element unchanged
-        // and a sketch line redrawn, took the redraw's new line as there before.
+        // The marks are taken again (ops#526 D2, design 9.8 Q3: the record refreshes at every
+        // resolution): kept with the element, they would date everything drawn since its last
+        // change as drawn again (review prd2dopus-r3 R3-1, a rim drawn after the chamfer and
+        // dragged onto the vacated place, quiet). A recompute between an edit and its solve
+        // (TestJointRecords' redraw) takes the redraw too, and the solve then breaks: loud.
         const auto old = Data::ElementFingerprint::fromString(fingerprints[i]);
         if (old.isValid()) {
             auto now = Data::ElementFingerprint::fromString(text);
             now.upToFaces = old.upToFaces;
-            now.marks = old.marks;
             if (now == old) {
                 continue;
             }
