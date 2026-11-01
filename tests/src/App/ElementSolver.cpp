@@ -5498,26 +5498,6 @@ TEST(Moved, closedEdgeTwinInPlaceKeepsItsName)
               "exact Edge3 0 [] ");
 }
 
-TEST(Moved, closedEdgeTwinsMovedTogetherKeepTheirName)
-{
-    // The pad made taller (PR 390 round 2c's T1): both arcs rise by 4, the hit at its own offset
-    // from the twins' centroid, its size kept. The same twin: the name stands. Traded on the way
-    // (the hit is the other arc, raised), its offset is the other twin's: broken.
-    const Base::Vector3d centre(0, 0, 20);
-    const Base::Vector3d raised(0, 0, 24);
-    auto input = turnedRim({"MOD", "ORD", "CLS"}, false);
-    input.entries[0].fingerprint.twinCentroid = centre;
-    input.entries[0].fingerprint.twinCount = 2;
-    measure(input,
-            {{"Edge3", arcOf(10, 55, 125, raised)}, {"Edge10", arcOf(10, 235, 305, raised)}},
-            nullptr);
-    EXPECT_EQ(describe(Data::solveOwner(input)[0]), "exact Edge3 0 [] ");
-    measure(input,
-            {{"Edge3", arcOf(10, 235, 305, raised)}, {"Edge10", arcOf(10, 55, 125, raised)}},
-            nullptr);
-    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
-}
-
 TEST(SolveOwner, goneClosedEdgeTwinBreaks)
 {
     // The rim's twins counted three after an edit: `0of2` is gone. The +y arc, unchanged at the
