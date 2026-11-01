@@ -6932,6 +6932,93 @@ TEST(Moved, lonePieceThatMovedAloneOffItsPlaceOnItsFaceBreaks)
     EXPECT_EQ(describe(Data::solveOwner(input)[0]), "exact Face4 0 [] ");
 }
 
+TEST(Moved, closedEdgeTwinOffItsPlaceOnItsUpToFaceBreaksAsATwin)
+{
+    // ops#524 on fork PR 390 (ops#468): both stops on one reference. A far edge piece on its
+    // up-to plate, marked by it alone, later cut into twins on a closed edge (decision 206:
+    // `...;E;0of2;MOD,ORD,CLS`), its other twin gone, moved alone along itself, still overlapping
+    // its old place. No twin is left, so the up-to face test is asked; the closed twin breaks it
+    // whatever that test says, with the twin's evidence. The same name without the closed edge's
+    // flag follows the up-to face test alone.
+    const auto plate = plateElement("plate", 'F');
+    auto twinOf = [&](const std::vector<std::string>& flags) {
+        return farEdgePiece({plate}) + "|"
+            + Data::MappedName::makeEncodedSection(
+                   std::vector<std::string> {},
+                   std::vector<std::string> {},
+                   "9",
+                   "CUT",
+                   "0",
+                   'E',
+                   "0of2",
+                   flags,
+                   std::vector<std::string> {}
+            );
+    };
+    const auto plateFace = upToPlate(-10, 20, "Plate");
+    int asked = 0;
+    std::optional<bool> inside = false;
+    auto solve = [&](const std::vector<std::string>& flags) {
+        SolveInput input;
+        input.diagonal = 40;
+        input.pool["Edge"] = {element("Edge3", {twinOf(flags)}), element("Edge9", {sketchEdge(9)})};
+        measure(input, {{"Edge3", farEdgeAt(-2.5, -0.5, 0)}, {"Edge9", farEdgeAt(15, 18, 5)}}, nullptr);
+        auto entry = exact("Edge3", "Edge");
+        entry.exactName = twinOf(flags);
+        entry.fingerprint = farEdgeAt(-3, -1, 0);
+        entry.fingerprint.upToFaces = {plateFace};
+        entry.fingerprint.upToFaces[0].foot = Base::Vector3d(-2, 0, 10);
+        input.entries = {entry};
+        // The frames moved by 2.5 along x against each other, as in the test above
+        input.upToFacesAt = [&](const std::string&,
+                                const Base::Vector3d& point,
+                                std::vector<ElementFingerprint::UpToFace>& faces,
+                                std::vector<ElementFingerprint::UpToFace>& all) {
+            ++asked;
+            auto onPlate = plateFace;
+            onPlate.foot = Base::Vector3d(point.x + 2.5, point.y, 10);
+            faces = {onPlate};
+            all = {plateFace};
+            return true;
+        };
+        input.upToPathInside = [&](const std::string&,
+                                   const ElementFingerprint::UpToFace&,
+                                   const Base::Vector3d&) {
+            return inside;
+        };
+        asked = 0;
+        return Data::solveOwner(input)[0];
+    };
+    const std::vector<std::string> closed {"MOD", "ORD", "CLS"};
+    const std::vector<std::string> open {"MOD", "ORD"};
+    auto evidenceHas = [](const SolveOutcome& outcome, const char* text) {
+        return outcome.evidence.find(text) != std::string::npos;
+    };
+    //   the path leaves the face: broken by both, the twin's evidence first
+    auto outcome = solve(closed);
+    EXPECT_GT(asked, 0);
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << describe(outcome);
+    EXPECT_TRUE(evidenceHas(outcome, "a twin on a closed edge")) << describe(outcome);
+    outcome = solve(open);
+    EXPECT_GT(asked, 0);
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << describe(outcome);
+    EXPECT_TRUE(evidenceHas(outcome, "off its place on its up-to face")) << describe(outcome);
+    //   it stays on the face: the closed twin still breaks; without the flag it stands
+    inside = true;
+    outcome = solve(closed);
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << describe(outcome);
+    EXPECT_TRUE(evidenceHas(outcome, "a twin on a closed edge")) << describe(outcome);
+    EXPECT_EQ(describe(solve(open)), "exact Edge3 0 [] ");
+    //   the path can't be told: the same as off it
+    inside.reset();
+    outcome = solve(closed);
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << describe(outcome);
+    EXPECT_TRUE(evidenceHas(outcome, "a twin on a closed edge")) << describe(outcome);
+    outcome = solve(open);
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << describe(outcome);
+    EXPECT_TRUE(evidenceHas(outcome, "can't be told")) << describe(outcome);
+}
+
 TEST(Moved, slidWithinUpToFaceRefusesCopySection)
 {
     // ops#524, review prA1c-r1's MirrorCopyAcrossHole (PLAN decision 199 (2)): a Mirrored copy of
