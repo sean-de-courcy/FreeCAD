@@ -1492,9 +1492,11 @@ def slideOntoReorderedPlates(
             FreeCAD.closeDocument(doc.Name)
             saved = savedFingerprints(path, names)
             for piece in savedInside:
-                # Version 6 (ops#522): the inside point, then the up-to faces
+                # Version 6 (ops#522): the inside point, then the up-to faces; version 7 (ops#526
+                # D2) adds the sides and the marks
                 fields = saved[piece].split("|")
-                test.assertEqual(len(fields), 13, (piece, saved[piece]))
+                test.assertEqual(len(fields), 15, (piece, saved[piece]))
+                test.assertEqual(fields[0], "7", (piece, saved[piece]))
                 test.assertNotEqual(fields[11], "_", (piece, saved[piece]))
             doc = FreeCAD.openDocument(path)
             if reopen != "untouched":

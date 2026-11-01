@@ -10036,6 +10036,13 @@ TEST(SolveOwner, redrawnAtThePlaceIsQuiet)
               "50.000; drawn again there");
     EXPECT_EQ(Data::placeVerdict(boardRecord(), now, {b.redrawn}, b.oldEdge, true, {}),
               Data::PlaceVerdict::Quiet);
+    //   a pattern's copy of the redrawn element on the place (review prd2o-r1 T2): warned, never
+    //   quiet
+    std::string why;
+    const auto copy = piece(b.redrawn, 9, "CPY", 1, 'E');
+    EXPECT_EQ(Data::placeVerdict(boardRecord(), now, {copy}, b.oldEdge, true, {}, &why),
+              Data::PlaceVerdict::Normal);
+    EXPECT_EQ(why, "it is made in another copy");
 }
 
 TEST(SolveOwner, siblingAtTheVacatedPlaceBreaks)
@@ -10128,6 +10135,42 @@ TEST(SolveOwner, primitiveMovedOntoThePlaceBreaks)
     EXPECT_EQ(why, "its source 11;Edge3 was in the model before");
 }
 
+TEST(SolveOwner, lineDrawnTheOtherWayIsUnjudged)
+{
+    // anchor_line_flips' BlockBossHole (Tier F, D2c): every line drawn the other way, IDs kept.
+    // The corner's vertical edge was made from the vertex g1v1/g4v2 and is now made from
+    // g1v2/g4v1: the same two lines, their ends traded. Neither line is another element that
+    // was there: unjudged, D1's lines (integration's tier 3 at the place).
+    auto corner = [](const std::vector<std::string>& ids) {
+        return section({}, {sketchVertex(ids)}, 7, "XTR", 0, 'E', {"GEN"});
+    };
+    const auto oldEdge = corner({"g1v1", "g4v2"});
+    const auto now = LongBoard::edgeAt(0);
+    auto verdict = [&](const std::string& pick, std::string* why = nullptr) {
+        return Data::placeVerdict(boardRecord(), now, {pick}, oldEdge, true, {}, why);
+    };
+    ASSERT_TRUE(Data::lostOldSources({corner({"g1v2", "g4v1"})}, oldEdge));
+    EXPECT_EQ(verdict(corner({"g1v2", "g4v1"})), Data::PlaceVerdict::Unjudged);
+    //   the controls: another line of the sketch there before, a line drawn since
+    std::string why;
+    EXPECT_EQ(verdict(corner({"g2v1", "g4v1"}), &why), Data::PlaceVerdict::WasThere);
+    EXPECT_EQ(why, "its source 5;g2v1 was in the model before");
+    EXPECT_EQ(verdict(corner({"g9v1", "g4v1"})), Data::PlaceVerdict::Quiet);
+    //   external geometry with the same number is other geometry
+    EXPECT_EQ(verdict(corner({"e1v1", "g4v1"})), Data::PlaceVerdict::WasThere);
+    //   a redraw that got its old ID back names the edge `g1`, the old vertex `g1v1` (review
+    //   prd2s-r1 L1): the same geometry
+    EXPECT_EQ(verdict(section({}, {sketchEdge(1)}, 7, "XTR", 0, 'E', {"GEN"})),
+              Data::PlaceVerdict::Unjudged);
+    //   a hashed ID (a long source's, Tier F's LPipe and PointInsertedMidLine cases) can't be
+    //   dated: unjudged, though its letters and digits would read as `dca2`, and never quiet
+    //   beside a new ID
+    EXPECT_EQ(verdict(corner({"dca2f6a0f89cd772"})), Data::PlaceVerdict::Unjudged);
+    EXPECT_EQ(verdict(corner({"6b064769961c5b64", "g9v1"})), Data::PlaceVerdict::Unjudged);
+    //   but a source there before still breaks beside it
+    EXPECT_EQ(verdict(corner({"6b064769961c5b64", "g2v1"})), Data::PlaceVerdict::WasThere);
+}
+
 TEST(SolveOwner, indexMadePickIsUnjudged)
 {
     // The attack set's BRing|reversed (D2b): the ring's spine line reversed, its faces renamed
@@ -10180,17 +10223,38 @@ TEST(SolveOwner, recordWithoutMarksKeepsD1)
 TEST(SolveOwner, sidesAreAnUnorderedSet)
 {
     // The sides compare as sets, a direction with its sense within the angle tolerance, a curved
-    // side by its sign; only both fingerprints' sides are compared
+    // side by its sign; only both fingerprints' sides are compared, and they disagree only where
+    // a side left over in one points the other way from one left over in the other (D2c)
     LongBoard b;
     ElementFingerprint record = boardRecord();
     ElementFingerprint now = LongBoard::edgeAt(0);
     now.sides = {sideAlong(0, -1, 0), sideAlong(0, 0, 1)};
     EXPECT_EQ(Data::placeVerdict(record, now, {b.oldEdge}, b.oldEdge, false, {}),
               Data::PlaceVerdict::Unjudged);
-    now.sides = {sideAlong(0, -1, 0), sideAlong(0, 1e-5, 1)};
+    //   the other top edge: its front face looks the other way
+    now.sides = {sideAlong(0, 1, 0), sideAlong(0, 0, 1)};
     EXPECT_EQ(Data::placeVerdict(record, now, {b.oldEdge}, b.oldEdge, false, {}),
               Data::PlaceVerdict::OtherSide);
+    //   a mirrored face (a tapered member's other edge) points the other way too
+    now.sides = {sideAlong(0, 0.6, 0.8), sideAlong(0, 0, 1)};
+    EXPECT_EQ(Data::placeVerdict(record, now, {b.oldEdge}, b.oldEdge, false, {}),
+              Data::PlaceVerdict::OtherSide);
+    //   the neighbourhood changed, not the element (Tier F's anchor and pipe cases, the reviews'
+    //   CornerAngleRedrawn): a neighbour turned, a side gone or added
+    now.sides = {sideAlong(0, -1, 0), sideAlong(0, 1e-5, 1)};
+    EXPECT_EQ(Data::placeVerdict(record, now, {b.oldEdge}, b.oldEdge, false, {}),
+              Data::PlaceVerdict::Unjudged);
+    now.sides = {sideAlong(0, -0.98, 0.2), sideAlong(0, 0, 1)};
+    EXPECT_EQ(Data::placeVerdict(record, now, {b.oldEdge}, b.oldEdge, false, {}),
+              Data::PlaceVerdict::Unjudged);
     now.sides = {sideAlong(0, -1, 0)};
+    EXPECT_EQ(Data::placeVerdict(record, now, {b.oldEdge}, b.oldEdge, false, {}),
+              Data::PlaceVerdict::Unjudged);
+    now.sides = {sideAlong(0, -1, 0), sideAlong(0, 0, 1), sideAlong(1, 0, 0)};
+    EXPECT_EQ(Data::placeVerdict(record, now, {b.oldEdge}, b.oldEdge, false, {}),
+              Data::PlaceVerdict::Unjudged);
+    //   but a side added that looks the other way from one gone is another element
+    now.sides = {sideAlong(0, 0, 1), sideAlong(0, 1, 0), sideAlong(1, 0, 0)};
     EXPECT_EQ(Data::placeVerdict(record, now, {b.oldEdge}, b.oldEdge, false, {}),
               Data::PlaceVerdict::OtherSide);
     now.sides.clear();
