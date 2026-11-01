@@ -1,0 +1,21 @@
+{
+"entries": {
+"BigHoleProfileShifted|A|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review prA1e-r3", "issue": "ops#524", "tier": "F"},
+"BigHoleResizeAndShift|A|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review prA1e-r3", "issue": "ops#524", "tier": "F"},
+"PlateHoleMovedUnderPiece|A|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prA1e-r3", "issue": "ops#524", "tier": "F"},
+"PlateShiftedAlone|A|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prA1e-r3", "issue": "ops#524", "tier": "F"},
+"ProfileShiftedAlone|A|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review prA1e-r3", "issue": "ops#524", "tier": "F"},
+"ProfileShiftedUp|A|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prA1e-r3", "issue": "ops#524", "tier": "F"},
+"RaisedAlongSweep|A|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prA1e-r3", "issue": "ops#524", "tier": "F"},
+"ResizeRightPlateShifted|A|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review prA1e-r3", "issue": "ops#524", "tier": "F"},
+"ResizeRightProfileShifted|A|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review prA1e-r3", "issue": "ops#524", "tier": "F"},
+"ResizeRightRaised|A|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prA1e-r3", "issue": "ops#524", "tier": "F"},
+"SlotCrossGeometry|A|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review prA1e-r3", "issue": "ops#524", "tier": "F"},
+"SlotCrossPlacementSmall|A|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prA1e-r3", "issue": "ops#524", "tier": "F"},
+"SlotCrossSmall|A|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review prA1e-r3", "issue": "ops#524", "tier": "F"},
+"TurnedAboutPivotA|A|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prA1e-r3", "issue": "ops#524", "tier": "F"},
+"TurnedAboutPivotB|A|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prA1e-r3", "issue": "ops#524", "tier": "F"},
+"TurnedHalfAboutHole|A|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prA1e-r3", "issue": "ops#524", "tier": "F"},
+"TwoRectsDeleteFirst|A|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review prA1e-r3", "issue": "ops#524", "tier": "F"}
+}
+}
