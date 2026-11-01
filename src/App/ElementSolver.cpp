@@ -3035,51 +3035,96 @@ bool sameRankName(std::string_view name, std::string_view oldName)
 namespace
 {
 
-// Two sides' sets agree (ops#526 D2): as many entries, each matched once, a direction within
-// \a angle of the other with its sense, a curved side by its sign.
+// Two sides' sets agree (ops#526 D2) unless they contradict: after matching what is the same (a
+// direction within \a angle of the other with its sense, a curved side by its sign), a side left
+// in one points the other way from a side left in the other (more than 90 degrees apart), or a
+// curved side is `c+` in one and `c-` in the other. That is another element at the place: the
+// other top edge of a member (its face looks the other way), the other crossing of a hole (the
+// pad's edge leaves it the other way), a bottom rim at a top rim's place, a pin's wall at a
+// hole's. A side added, gone or turned less than that is the element's neighbourhood changed
+// (a neighbour redrawn at another angle, a corner swept another way: Tier F's anchor and pipe
+// cases), not another element.
 bool sidesAgree(const std::vector<ElementFingerprint::Side>& a,
                 const std::vector<ElementFingerprint::Side>& b,
                 double angle)
 {
-    if (a.size() != b.size()) {
-        return false;
-    }
-    std::vector<bool> used(b.size(), false);
-    for (const auto& x : a) {
-        bool found = false;
-        for (std::size_t i = 0; i < b.size() && !found; ++i) {
+    std::vector<bool> usedA(a.size(), false);
+    std::vector<bool> usedB(b.size(), false);
+    for (std::size_t j = 0; j < a.size(); ++j) {
+        const auto& x = a[j];
+        for (std::size_t i = 0; i < b.size(); ++i) {
             const auto& y = b[i];
-            if (used[i] || x.curve != y.curve) {
+            if (usedB[i] || x.curve != y.curve) {
                 continue;
             }
             if (x.curve || std::atan2((x.direction % y.direction).Length(), x.direction * y.direction)
                     <= angle) {
-                used[i] = true;
-                found = true;
+                usedA[j] = true;
+                usedB[i] = true;
+                break;
             }
         }
-        if (!found) {
-            return false;
+    }
+    for (std::size_t j = 0; j < a.size(); ++j) {
+        for (std::size_t i = 0; i < b.size() && !usedA[j]; ++i) {
+            if (usedB[i]) {
+                continue;
+            }
+            const auto& x = a[j];
+            const auto& y = b[i];
+            if (x.curve && y.curve) {
+                if ((x.curve == '+' && y.curve == '-') || (x.curve == '-' && y.curve == '+')) {
+                    return false;
+                }
+            }
+            else if (!x.curve && !y.curve && x.direction * y.direction < -std::sin(angle)) {
+                return false;
+            }
         }
     }
     return true;
 }
 
-// The number in a geometry ID (`g5`, `g5v1`, `e3`: 5, 5, 3), or none.
+// The number in a geometry ID (`g5`, `g5v1`, `e3`: 5, 5, 3), or none: one letter, the number,
+// and a vertex's `v<n>`, the whole ID. A hashed ID (`dca2f6a0f89cd772`) is none.
 std::optional<long> geometryIdNumber(std::string_view id)
 {
-    std::size_t i = 0;
-    while (i < id.size() && std::isalpha(static_cast<unsigned char>(id[i]))) {
-        ++i;
-    }
-    const std::size_t start = i;
-    while (i < id.size() && i - start < 15 && std::isdigit(static_cast<unsigned char>(id[i]))) {
-        ++i;
-    }
-    if (start == 0 || i == start) {
+    auto digitsFrom = [&](std::size_t i) {
+        std::size_t end = i;
+        while (end < id.size() && end - i < 15
+               && std::isdigit(static_cast<unsigned char>(id[end]))) {
+            ++end;
+        }
+        return end;
+    };
+    if (id.empty() || !std::isalpha(static_cast<unsigned char>(id[0]))) {
         return std::nullopt;
     }
-    return std::stol(std::string(id.substr(start, i - start)));
+    const std::size_t end = digitsFrom(1);
+    if (end == 1) {
+        return std::nullopt;
+    }
+    if (end < id.size()) {
+        if (id[end] != 'v') {
+            return std::nullopt;
+        }
+        const std::size_t vertexEnd = digitsFrom(end + 1);
+        if (vertexEnd == end + 1 || vertexEnd != id.size()) {
+            return std::nullopt;
+        }
+    }
+    return std::stol(std::string(id.substr(1, end - 1)));
+}
+
+// The geometry a geometry ID names: its letter and number (`g5v1` and `g5`: `g5`; `e3`: `e3`),
+// or empty.
+std::string geometryOfId(std::string_view id)
+{
+    const auto number = geometryIdNumber(id);
+    if (!number) {
+        return {};
+    }
+    return std::string(1, id[0]) + std::to_string(*number);
 }
 
 std::optional<long> tagNumber(std::string_view tag)
@@ -3158,16 +3203,24 @@ PlaceVerdict placeVerdict(const ElementFingerprint& saved,
         }
     }
     // The marks (the "drawn again"): every source of the pick the old name doesn't share
+    // An ID is shared when the old name has the same geometry of the same object, of any
+    // element: `g1v2` and `g1v1` are the ends of one line, its vertex names traded when the line
+    // is drawn the other way (anchor_line_flips): the old element's own geometry, never another
+    // element that was there.
     const auto old = taggedSourcesOf(oldName);
     auto shared = [&](const SourceSection& section, const std::string* id) {
+        const std::string geometry = id ? geometryOfId(*id) : std::string();
         return std::any_of(old.begin(), old.end(), [&](const SourceSection& o) {
             return o.tag == section.tag
-                && (id ? o.type == section.type
-                             && std::find(o.ids.begin(), o.ids.end(), *id) != o.ids.end()
-                       : true);
+                && (!id
+                    || std::any_of(o.ids.begin(), o.ids.end(), [&](const std::string& other) {
+                           return other == *id
+                               || (!geometry.empty() && geometryOfId(other) == geometry);
+                       }));
         });
     };
     bool judged = false;
+    bool undated = false;
     std::string outside;
     for (const auto& name : names) {
         // A name made from an index (IDX, the MKR fallback: `Face16;_;{Pipe};MKR;...`) has no
@@ -3199,19 +3252,34 @@ PlaceVerdict placeVerdict(const ElementFingerprint& saved,
                     outside = what;
                     continue;
                 }
-                // An object without IDs, or an ID at or below its object's mark: it was there
                 const auto number = id ? geometryIdNumber(*id) : std::nullopt;
+                if (mark->mark >= 0 && id && !number) {
+                    // An ID the mark can't date (a hashed one, as long sources are named:
+                    // `6b064769961c5b64` in Tier F's LPipe and PointInsertedMidLine cases):
+                    // neither drawn again nor there before
+                    undated = true;
+                    continue;
+                }
+                // An object without IDs, or an ID at or below its object's mark: it was there
                 if (mark->mark < 0 || !number || *number <= mark->mark) {
                     return say(PlaceVerdict::WasThere, "its source " + what + " was in the model before");
                 }
             }
         }
     }
-    if (!judged) {
+    if (!judged || undated) {
         return say(PlaceVerdict::Unjudged, {});
     }
     if (!outside.empty()) {
         return say(PlaceVerdict::Normal, "its source " + outside + " is another object's");
+    }
+    // Drawn again, but in other copies than the old element (a pattern's copy of the redrawn
+    // hole on the vacated place, review prd2o-r1 T2): never quiet, D1's warned level
+    const auto oldCopies = copyContexts(oldName);
+    if (!names.empty() && std::none_of(names.begin(), names.end(), [&](const std::string& n) {
+            return copyContexts(n) == oldCopies;
+        })) {
+        return say(PlaceVerdict::Normal, "it is made in another copy");
     }
     return say(PlaceVerdict::Quiet, "drawn again there");
 }

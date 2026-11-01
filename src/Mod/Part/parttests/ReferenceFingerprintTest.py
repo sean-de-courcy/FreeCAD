@@ -47,15 +47,16 @@ def _vector(v):
 def _outlines(fingerprints):
     """{text without its outline: the outline's points} of version 5 fingerprints, the outline
     being the eleventh field (PR 366 round 5); other versions' texts map to None. The points as a
-    set: their order round the element is the writer's own."""
+    set: their order round the element is the writer's own. Version 7 (ops#526 D2: version 5's
+    fields, then the sides and the marks) is read as version 5, its key written as one."""
     result = {}
     for text in fingerprints:
         fields = text.split("|")
-        if fields[0] != "5":
+        if fields[0] not in ("5", "7"):
             result[text] = None
             continue
         numbers = [] if fields[10] == "_" else [float(n) for n in fields[10].split(",")]
-        result["|".join(fields[:10])] = {
+        result["|".join(["5"] + fields[1:10])] = {
             tuple(round(c, 9) + 0.0 for c in numbers[i : i + 3]) for i in range(0, len(numbers), 3)
         }
     return result
@@ -189,7 +190,9 @@ class ReferenceFingerprintTest(unittest.TestCase):
         self.assertIn(edgeText, outlines)
         #   and its outline, its two ends (PR 366 round 5)
         self.assertEqual(outlines[edgeText], _points(edge))
-        self.assertIn("1|V|Point|_|%s|_|_" % _vector(local.Vertexes[0].Point), fingerprints)
+        #   a vertex in version 7 (ops#526 D2), with its sides and marks
+        vertexText = "7|V|Point|_|%s|" % _vector(local.Vertexes[0].Point)
+        self.assertTrue(any(t.startswith(vertexText) for t in fingerprints), fingerprints)
         # nothing global: the moved box gives the same text as the local one
         self.assertNotIn(_vector(box.Shape.Vertexes[0].Point), "".join(fingerprints))
 

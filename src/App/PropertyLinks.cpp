@@ -1030,10 +1030,16 @@ std::string PropertyLinkBase::_getElementFingerprint(App::DocumentObject* featur
     // The marks (ops#526 D2): every object the target is built from, the target and the element's
     // holder included, by its ID and its highest geometry ID now. Geometry with a higher ID is
     // drawn later; an object listed was feeding the target.
+    // A dependency cycle (getOutListRecursive() throws) has no closure: no marks, unjudged.
     std::vector<App::DocumentObject*> closure {obj, geo};
-    for (auto from : {obj, static_cast<App::DocumentObject*>(geo)}) {
-        auto out = from->getOutListRecursive();
-        closure.insert(closure.end(), out.begin(), out.end());
+    try {
+        for (auto from : {obj, static_cast<App::DocumentObject*>(geo)}) {
+            auto out = from->getOutListRecursive();
+            closure.insert(closure.end(), out.begin(), out.end());
+        }
+    }
+    catch (const Base::Exception&) {
+        closure.clear();
     }
     for (auto object : closure) {
         if (object && object->isAttachedToDocument()) {
