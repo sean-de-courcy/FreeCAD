@@ -79,6 +79,7 @@
 #include <TopoDS.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopTools_ListOfShape.hxx>
+#include <TopTools_MapOfShape.hxx>
 #include <Base/Profiler.h>
 
 
@@ -952,6 +953,19 @@ void sidesFingerprint(const TopoShape& shape, const TopoDS_Shape& sub, Data::Ele
 {
     using Side = Data::ElementFingerprint::Side;
     std::vector<Side> sides;
+    // Each ancestor once: the shape's map lists an ancestor once per occurrence of the element
+    // in it (a solid's edge in both of its faces, a seam twice in its face), and the sides are
+    // compared as multisets
+    auto ancestorsOnce = [&](TopAbs_ShapeEnum type) {
+        std::vector<TopoDS_Shape> once;
+        TopTools_MapOfShape seen;
+        for (const auto& ancestor : shape.findAncestorsShapes(sub, type)) {
+            if (seen.Add(ancestor)) {
+                once.push_back(ancestor);
+            }
+        }
+        return once;
+    };
     if (sub.ShapeType() == TopAbs_EDGE) {
         const TopoDS_Edge& edge = TopoDS::Edge(sub);
         if (BRep_Tool::Degenerated(edge)) {
@@ -970,7 +984,7 @@ void sidesFingerprint(const TopoShape& shape, const TopoDS_Shape& sub, Data::Ele
                 principal = n;
             }
         }
-        for (const auto& ancestor : shape.findAncestorsShapes(sub, TopAbs_FACE)) {
+        for (const auto& ancestor : ancestorsOnce(TopAbs_FACE)) {
             const TopoDS_Face& face = TopoDS::Face(ancestor);
             const auto type = BRepAdaptor_Surface(face, Standard_False).GetType();
             const bool planar = type == GeomAbs_Plane;
@@ -994,7 +1008,7 @@ void sidesFingerprint(const TopoShape& shape, const TopoDS_Shape& sub, Data::Ele
     }
     else if (sub.ShapeType() == TopAbs_VERTEX) {
         const TopoDS_Vertex& vertex = TopoDS::Vertex(sub);
-        for (const auto& ancestor : shape.findAncestorsShapes(sub, TopAbs_EDGE)) {
+        for (const auto& ancestor : ancestorsOnce(TopAbs_EDGE)) {
             const TopoDS_Edge& edge = TopoDS::Edge(ancestor);
             if (BRep_Tool::Degenerated(edge)) {
                 continue;
