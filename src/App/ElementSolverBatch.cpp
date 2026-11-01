@@ -995,6 +995,60 @@ bool solveElementReferences(DocumentObject* feature,
         }
         return mapForm(name);
     };
+    // A Missing reference's index carry, and the elements at its saved place when the carry
+    // fails (ops#475)
+    struct MissingPlace
+    {
+        Data::ElementFingerprint saved;
+        Data::ElementFingerprint now;
+        bool exists = false;
+        bool carried = false;
+        std::optional<std::vector<std::string>> places;
+        bool indexAtPlace = false;
+        // The one element at the place, the index's own not there too
+        std::string one() const
+        {
+            return places && places->size() == 1 && !indexAtPlace ? places->front() : std::string();
+        }
+    };
+    auto missingPlace = [&](const SolverEntry& entry) {
+        MissingPlace place;
+        const std::string& index = entry.oldIndex;
+        place.exists = geo->getElementFingerprint(index.c_str(), place.now);
+        place.saved = Data::ElementFingerprint::fromString(entry.oldFingerprint);
+        place.carried = place.exists && place.saved.isValid()
+            && fingerprintsAgree(place.saved, place.now, diagonal);
+        if (!place.carried && place.saved.isValid()) {
+            place.places = elementsAt(place.saved, index, false);
+            place.indexAtPlace = place.exists
+                && Data::atSamePlace(place.saved, place.now, diagonal, tolerances, continuationDistance);
+        }
+        return place;
+    };
+    // OCCT's storage order moves no element: where a migration only reorders, every Missing
+    // reference to the feature with a saved fingerprint keeps its index or finds its one element
+    // at its place. When one doesn't, the migration recompute had an edit, which may have moved
+    // another element onto a saved place (the attack set's slides): then no Missing reference is
+    // kept by its place (ops#475). Read once, after the tolerances.
+    std::optional<bool> placesHold;
+    auto missingPlacesHold = [&]() {
+        if (!placesHold) {
+            placesHold = true;
+            for (const auto& owner : owners) {
+                for (const auto* entry : owner.second) {
+                    if (entry->kind != SolverEntry::Kind::Missing) {
+                        continue;
+                    }
+                    MissingPlace place = missingPlace(*entry);
+                    if (place.saved.isValid() && !place.carried && place.one().empty()) {
+                        placesHold = false;
+                        return false;
+                    }
+                }
+            }
+        }
+        return *placesHold;
+    };
 
     for (auto& [ownerName, entries] : owners) {
         std::stable_sort(entries.begin(), entries.end(), [](const auto* a, const auto* b) {
@@ -1306,15 +1360,18 @@ bool solveElementReferences(DocumentObject* feature,
             // Missing references: index carry, verified by the saved fingerprint. When it fails,
             // the one element at the saved place (ops#475): OCCT's storage order differs between
             // platforms, so a file saved on one may have the element at another index on the
-            // other. The index's own element at the place, or several there, break it.
+            // other. The index's own element at the place, or several there, break it, and so
+            // does another Missing reference not at its place (missingPlacesHold).
             for (const auto* entry : entries) {
                 if (entry->kind != SolverEntry::Kind::Missing) {
                     continue;
                 }
                 const std::string& index = entry->oldIndex;
-                Data::ElementFingerprint now;
-                bool exists = geo->getElementFingerprint(index.c_str(), now);
-                auto saved = Data::ElementFingerprint::fromString(entry->oldFingerprint);
+                const MissingPlace place = missingPlace(*entry);
+                const bool exists = place.exists;
+                const auto& saved = place.saved;
+                const auto& places = place.places;
+                const bool indexAtPlace = place.indexAtPlace;
                 std::string name;
                 for (const auto& element : pool(indexType(index))) {
                     if (element.index == index && !element.names.empty()) {
@@ -1322,21 +1379,14 @@ bool solveElementReferences(DocumentObject* feature,
                     }
                 }
                 ReferenceReport::Entry item;
-                const bool carried =
-                    exists && saved.isValid() && fingerprintsAgree(saved, now, diagonal);
+                const bool carried = place.carried;
                 const std::string carryEvidence = !saved.isValid() ? "index carry, no fingerprint"
                     : !exists ? "index carry, no such element"
                               : "index carry, fingerprint differs";
-                std::optional<std::vector<std::string>> places;
-                bool indexAtPlace = false;
-                std::string pick;
-                if (!carried && saved.isValid()) {
-                    places = elementsAt(saved, index, false);
-                    indexAtPlace = exists
-                        && Data::atSamePlace(saved, now, diagonal, tolerances, continuationDistance);
-                    if (places && places->size() == 1 && !indexAtPlace) {
-                        pick = places->front();
-                    }
+                std::string pick = place.one();
+                const bool refused = !pick.empty() && !missingPlacesHold();
+                if (refused) {
+                    pick.clear();
                 }
                 if (!pick.empty()) {
                     countReferenceMigration(entry->owner, MigrationOutcome::Moved);
@@ -1405,7 +1455,13 @@ bool solveElementReferences(DocumentObject* feature,
                             where += (where.empty() ? "" : " and ") + place;
                         }
                     }
-                    if (!where.empty()) {
+                    if (refused) {
+                        // The one element at the place, but the migration had an edit
+                        item.evidence += "; " + where
+                            + " sits where it was, but another reference has no one element at "
+                              "its place";
+                    }
+                    else if (!where.empty()) {
                         // Several elements at the place, or the index's own one with another
                         // (rule 2's counterpart): never one of them by its index
                         item.evidence += "; " + where + (indexAtPlace ? " and " + index : "")
