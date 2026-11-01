@@ -26,6 +26,7 @@
 #include "ElementFingerprint.h"
 #include "ElementNamingUtils.h"
 #include "ElementSolver.h"
+#include "ElementSolverEdits.h"
 #include "GeoFeature.h"
 #include "NameTable.h"
 #include "MappedElement.h"
@@ -53,7 +54,58 @@ struct MigrationCounts
 };
 // By the owner document's name: a document may be closed before the counts are reported.
 std::map<std::string, MigrationCounts> migrationCounts;
+
+// The objects edited since their document was opened (ElementSolverEdits.h), and the depth of
+// solveElementReferences() calls, whose writes aren't edits.
+std::map<const Document*, std::set<const DocumentObject*>> editsSinceOpen;
+int solving = 0;
 }  // namespace
+
+void forgetEditsSinceOpen(const Document* doc)
+{
+    editsSinceOpen.erase(doc);
+}
+
+void noteEditSinceOpen(const DocumentObject* obj)
+{
+    if (obj && obj->getDocument()) {
+        editsSinceOpen[obj->getDocument()].insert(obj);
+    }
+}
+
+void noteChangeSinceOpen(const DocumentObject* obj, const Property* prop)
+{
+    const Document* doc = obj ? obj->getDocument() : nullptr;
+    if (!doc || !prop || solving > 0 || doc->testStatus(Document::Restoring)
+        || doc->testStatus(Document::Recomputing) || obj->isRecomputing()
+        || (prop->getType() & (Prop_Output | Prop_NoRecompute | Prop_Transient)) != 0) {
+        return;
+    }
+    // The element map version is the migration's own stamp
+    const char* name = prop->getName();
+    if (name && std::strcmp(name, "_ElementMapVersion") == 0) {
+        return;
+    }
+    editsSinceOpen[doc].insert(obj);
+}
+
+bool editedSinceOpen(const DocumentObject* feature)
+{
+    if (!feature || !feature->getDocument()) {
+        return false;
+    }
+    auto edited = [](const DocumentObject* obj) {
+        auto it = editsSinceOpen.find(obj->getDocument());
+        return it != editsSinceOpen.end() && it->second.count(obj) != 0;
+    };
+    if (edited(feature)) {
+        return true;
+    }
+    const auto chain = feature->getOutListRecursive();
+    return std::any_of(chain.begin(), chain.end(), [&](const DocumentObject* obj) {
+        return obj && obj->getDocument() && edited(obj);
+    });
+}
 
 void setElementHintsFunction(ElementHintsFunction function)
 {
@@ -784,6 +836,15 @@ bool solveElementReferences(DocumentObject* feature,
     if (!geo || !feature->isAttachedToDocument()) {
         return false;
     }
+    // The solver's own writes aren't edits (ElementSolverEdits.h)
+    ++solving;
+    struct SolvingGuard
+    {
+        ~SolvingGuard()
+        {
+            --solving;
+        }
+    } solvingGuard;
 
     // Pass 1: the exact lookup, per property.
     SolverBatch batch;
@@ -1025,22 +1086,44 @@ bool solveElementReferences(DocumentObject* feature,
         }
         return place;
     };
-    // OCCT's storage order moves no element: where a migration only reorders, every Missing
-    // reference to the feature with a saved fingerprint keeps its index or finds its one element
-    // at its place. When one doesn't, the migration recompute had an edit, which may have moved
-    // another element onto a saved place (the attack set's slides): then no Missing reference is
-    // kept by its place (ops#475). Read once, after the tolerances.
+    // OCCT's storage order moves no element and keeps their count: where a migration only
+    // reorders, every Missing reference to the feature keeps an index that exists and, with a
+    // saved fingerprint, keeps its element there or finds its one element at its place, and every
+    // exact reference's element agrees with its saved fingerprint. When one doesn't, the
+    // migration recompute had an edit, which may have moved another element onto a saved place
+    // (the attack set's slides, review pr475b-s-r1's remove-slides): then no Missing reference is
+    // kept by its place (ops#475). An edit that keeps the count and moves an element's twin onto
+    // its place, with no other reference to tell, can't be told from a reorder. Read once, after
+    // the tolerances.
     std::optional<bool> placesHold;
+    // Two elements alike but for their place: the kind, direction, radii and size
+    auto twins = [&](const Data::ElementFingerprint& a, const Data::ElementFingerprint& b) {
+        if (!Data::intrinsicAgrees(a, b, tolerances) || a.size.has_value() != b.size.has_value()) {
+            return false;
+        }
+        return !a.size
+            || std::abs(*a.size - *b.size)
+            <= tolerances.placeSize * std::max({std::abs(*a.size), std::abs(*b.size), 1e-12});
+    };
+    auto editedBy = [&](const SolverEntry& entry) {
+        if (entry.guessed) {
+            return false;
+        }
+        if (entry.kind == SolverEntry::Kind::Exact) {
+            auto saved = Data::ElementFingerprint::fromString(entry.oldFingerprint);
+            Data::ElementFingerprint now;
+            return saved.isValid() && geo->getElementFingerprint(entry.oldIndex.c_str(), now)
+                && !fingerprintsAgree(saved, now, diagonal);
+        }
+        MissingPlace place = missingPlace(entry);
+        return !place.exists || (place.saved.isValid() && !place.carried && place.one().empty());
+    };
     auto missingPlacesHold = [&]() {
         if (!placesHold) {
             placesHold = true;
             for (const auto& owner : owners) {
                 for (const auto* entry : owner.second) {
-                    if (entry->kind != SolverEntry::Kind::Missing) {
-                        continue;
-                    }
-                    MissingPlace place = missingPlace(*entry);
-                    if (place.saved.isValid() && !place.carried && place.one().empty()) {
+                    if (editedBy(*entry)) {
                         placesHold = false;
                         return false;
                     }
@@ -1384,7 +1467,24 @@ bool solveElementReferences(DocumentObject* feature,
                     : !exists ? "index carry, no such element"
                               : "index carry, fingerprint differs";
                 std::string pick = place.one();
-                const bool refused = !pick.empty() && !missingPlacesHold();
+                // Why the one element at the place isn't taken (decision 217), else empty
+                std::string refusal;
+                if (!pick.empty()) {
+                    if (entry->owner && entry->owner->getDocument() != feature->getDocument()) {
+                        // The consumer pass: the feature's file may have had its own edits
+                        refusal = "but it is another document's";
+                    }
+                    else if (!missingPlacesHold()) {
+                        refusal = "but the migration had an edit";
+                    }
+                    else if (editedSinceOpen(feature)
+                             && twins(place.now, fingerprintOf(pick))) {
+                        // An edit before the migration recompute may have moved the twin there
+                        refusal = "but the feature changed since the file was opened and " + index
+                            + " is its twin";
+                    }
+                }
+                const bool refused = !refusal.empty();
                 if (refused) {
                     pick.clear();
                 }
@@ -1456,10 +1556,8 @@ bool solveElementReferences(DocumentObject* feature,
                         }
                     }
                     if (refused) {
-                        // The one element at the place, but the migration had an edit
-                        item.evidence += "; " + where
-                            + " sits where it was, but another reference has no one element at "
-                              "its place";
+                        // The one element at the place, refused
+                        item.evidence += "; " + where + " sits where it was, " + refusal;
                     }
                     else if (!where.empty()) {
                         // Several elements at the place, or the index's own one with another

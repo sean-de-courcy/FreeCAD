@@ -394,7 +394,7 @@ class TestNamingSolver(unittest.TestCase):
     def openWithStaleNames(self, corners, stored):
         """openWithStaleName's file with a fillet on the vertical edges at `corners`, every one of
         its references given a stale name, and the vertical edge at the matching corner of
-        `stored` as its stored index. Returns (document, the references' index names, the stored
+        `stored` (or the index name given there) as its stored index. Returns (document, the references' index names, the stored
         ones)."""
         doc = self.newDocument()
         body = models.body(doc)
@@ -402,7 +402,10 @@ class TestNamingSolver(unittest.TestCase):
         pad = models.pad(body, profile, 10)
         doc.recompute()
         indexes = [edge("line", direction=Z, through=c).one(pad.Shape)[0] for c in corners]
-        others = [edge("line", direction=Z, through=c).one(pad.Shape)[0] for c in stored]
+        others = [
+            s if isinstance(s, str) else edge("line", direction=Z, through=s).one(pad.Shape)[0]
+            for s in stored
+        ]
         fillet = body.newObject("PartDesign::Fillet", "Fillet")
         fillet.Base = (pad, indexes)
         fillet.Radius = 1
@@ -458,8 +461,63 @@ class TestNamingSolver(unittest.TestCase):
         self.assertEqual(report[1]["candidates"][0], moved)
         self.assertEqual(
             report[1]["evidence"],
-            "index carry, fingerprint differs; %s sits where it was, but another reference has no "
-            "one element at its place" % moved,
+            "index carry, fingerprint differs; %s sits where it was, but the migration had an edit"
+            % moved,
+        )
+
+    def testReverseUpdateBreaksWhenAnEditMayHaveMovedATwinOntoThePlace(self):
+        """Decision 217 (the reviews' residual, pr475b-r1 and pr475b-s-r1): a fillet on the
+        vertical edge at (20, 0) alone, the back left edge's index stored, and the profile moved
+        by 20 along x before the migration recompute. The edge at (0, 0) lands on the saved
+        place, the stored index's edge is its twin, and nothing else tells the edit from OCCT's
+        storage order; but the pad's profile changed since the file was opened. Broken, the
+        edge at the place a candidate, never taken (testReverseUpdateFindsThePlaceWhenTheIndexIs
+        AnotherEdge is the open without an edit, kept)."""
+        # Arrange
+        self.keepBrokenOnOpen()
+        doc, _, stored = self.openWithStaleNames([(20, 0, 0)], [(0, 10, 0)])
+        self.assertEqual(doc.Fillet.Base[1], ["?" + stored[0]])
+
+        # Act
+        corners = [(20, 0), (40, 0), (40, 10), (20, 10)]
+        models.setLines(doc.Profile, {k: (corners[k], corners[(k + 1) % 4]) for k in range(4)})
+        self.stale(doc, doc.Pad)
+
+        # Assert
+        moved = edge("line", direction=Z, through=(20, 0, 0)).one(doc.Pad.Shape)[0]
+        self.assertFalse(doc.Fillet.isValid())
+        report = App.getReferenceReport(doc.Fillet)
+        self.assertEqual([e["status"] for e in report], ["broken"])
+        self.assertNotEqual(moved, stored[0])  # the setup: the index carry doesn't give it
+        self.assertEqual(report[0]["candidates"][0], moved)
+        self.assertEqual(
+            report[0]["evidence"],
+            "index carry, fingerprint differs; %s sits where it was, but the feature changed "
+            "since the file was opened and %s is its twin" % (moved, stored[0]),
+        )
+
+    def testReverseUpdateBreaksWhenTheStoredIndexIsGone(self):
+        """Decision 217, review pr475b-s-r1's remove-slide: the fillet's reference stores an index
+        the pad doesn't have (Edge99). OCCT's storage order keeps the elements' count, so a gone
+        index means an edit: the edge at the saved place, the fillet's own here, isn't taken by
+        its place. Broken, with it as the candidate."""
+        # Arrange
+        self.keepBrokenOnOpen()
+        doc, (index,), _ = self.openWithStaleNames([(20, 0, 0)], ["Edge99"])
+        self.assertEqual(doc.Fillet.Base[1], ["?Edge99"])
+
+        # Act
+        self.stale(doc, doc.Pad)
+
+        # Assert
+        self.assertFalse(doc.Fillet.isValid())
+        report = App.getReferenceReport(doc.Fillet)
+        self.assertEqual([e["status"] for e in report], ["broken"])
+        self.assertEqual(report[0]["candidates"], [index])
+        self.assertEqual(
+            report[0]["evidence"],
+            "index carry, no such element; %s sits where it was, but the migration had an edit"
+            % index,
         )
 
     def testReverseUpdateBreaksWhenTheFingerprintDiffers(self):
