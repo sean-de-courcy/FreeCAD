@@ -2839,9 +2839,13 @@ class TestJointsWhenABendStraightens(unittest.TestCase):
                 self.setPath(path, points[1:] if towards else points[:-1])
                 if not towards:
                     for point in joint:
-                        levels = [e.get("warning_level") for e in App.getReferenceReport(point)]
-                        self.assertTrue(point.isValid(), (point.Name, point.getStatusString()))
-                        self.assertEqual(levels, ["normal"], point.Name)
+                        #   the end cap's corner has other edges than the joint vertex had: it
+                        #   breaks, the corner at the place listed first (ops#526 D2, decision 219)
+                        [entry] = App.getReferenceReport(point)
+                        self.assertEqual(entry["status"], "broken", (point.Name, entry))
+                        self.assertIn("sides are not the old element's", entry["evidence"])
+                        first = pipe.Shape.getElement(entry["candidates"][0])
+                        self.assertLess((first.Point - before[point.Name]).Length, 1e-6, point.Name)
                 self.assertGoneOrLoud(joint, before, report=True)
                 self.setPath(path, points)
                 self.assertGoneOrLoud(joint, before, report=True)

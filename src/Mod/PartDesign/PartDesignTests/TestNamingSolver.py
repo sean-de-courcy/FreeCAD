@@ -1762,8 +1762,9 @@ class TestNamingSolver(unittest.TestCase):
 
             [bottom] = circle.one(pattern.Shape)
             self.assertEqual(fillet.Base[1], [bottom])
-            #   the circle lost the block's lines: never quiet while T1''s test is on
-            self.assertWarnedInPlace(fillet, "Edge", bottom, quiet=not sameSource)
+            #   the circle lost the block's lines, but the new lines are newer than the record's
+            #   mark of the sketch: drawn again there, the same-place level (ops#526 D2, design 9.5)
+            self.assertWarnedInPlace(fillet, "Edge", bottom)
 
     def refinedBlocks(self, doc):
         """Pad A, 0..20 x 0..20 x 10, from `Profile`, and pad B beside it, 20..40, from
@@ -1801,6 +1802,15 @@ class TestNamingSolver(unittest.TestCase):
             doc.recompute()
 
             [merged] = top.one(padB.Shape)
+            if redrawn == "Profile" and sameSource:
+                #   the merged face is now named from pad B's profile, whose line was in the model
+                #   before: it breaks, the face listed first (ops#526 D2, decision 219)
+                self.assertEqual(sketch.AttachmentSupport[0][1], ("?" + merged,))
+                [entry] = App.getReferenceReport(sketch)
+                self.assertEqual(entry["status"], "broken", entry)
+                self.assertEqual(entry["candidates"][0], merged, entry)
+                self.assertIn("was in the model before", entry["evidence"])
+                continue
             self.assertEqual(sketch.AttachmentSupport[0][1], (merged,))
             if redrawn == "ProfileB":
                 self.assertTrue(sketch.isValid(), sketch.getStatusString())
@@ -1827,9 +1837,13 @@ class TestNamingSolver(unittest.TestCase):
         doc.recompute()
 
         [merged] = frontTop.one(padB.Shape)
-        self.assertEqual(fillet.Base[1], [merged])
-        #   the edge lost pad A's lines: the normal level (PLAN decision 165)
-        self.assertWarnedInPlace(fillet, "Edge", merged, quiet=False)
+        #   the edge lost pad A's lines and is now named from pad B's, which was in the model
+        #   before: it breaks, the edge listed first (ops#526 D2, decision 219)
+        self.assertEqual(fillet.Base[1], ["?" + merged])
+        [entry] = App.getReferenceReport(fillet)
+        self.assertEqual(entry["status"], "broken", entry)
+        self.assertEqual(entry["candidates"][0], merged, entry)
+        self.assertIn("was in the model before", entry["evidence"])
 
     def testCollarFromExternalGeometry(self):
         """ops#183: a collar padded 3 mm on the block from a sketch of a circle (radius 4) and,
@@ -1881,8 +1895,9 @@ class TestNamingSolver(unittest.TestCase):
                 self.assertNotIn("Warning", fillet.State)
                 self.assertFalse(App.getReferenceReport(fillet))
             else:
-                #   the external circle's new ID: the normal level (PLAN decision 165)
-                self.assertWarnedInPlace(fillet, "Edge", circle, quiet=False)
+                #   the external circle's new ID, newer than the record's mark of the sketch: drawn
+                #   again there, the same-place level (ops#526 D2, design 9.5)
+                self.assertWarnedInPlace(fillet, "Edge", circle)
 
     def openIndexOnly(self):
         """The fillet's reference saved as an index-only missing reference (`?EdgeN`, no shadow:
@@ -2890,9 +2905,14 @@ class TestNamingSolver(unittest.TestCase):
                 levels = [e.get("warning_level") for e in App.getReferenceReport(point)]
                 self.assertIn("normal", levels, point.Name)
         for point in seamVertices:
-            self.assertTrue(point.isValid(), (point.Name, point.getStatusString()))
-            moved = (point.Placement.Base - before[point.Name]).Length
-            self.assertLess(moved, 1e-6, point.Name)
+            #   the seam vertex left the joint edge: its edges are not the old vertex's, so it
+            #   breaks, the vertex at its place listed first (ops#526 D2, decision 219)
+            self.assertFalse(point.isValid(), point.Name)
+            [entry] = App.getReferenceReport(point)
+            self.assertEqual(entry["status"], "broken", entry)
+            self.assertIn("sides are not the old element's", entry["evidence"])
+            first = pocket.Shape.getElement(entry["candidates"][0])
+            self.assertLess((first.Point - before[point.Name]).Length, 1e-6, (point.Name, entry))
 
         self.setSpine(path, points)
         self.assertBackInPlace(joint, before)
