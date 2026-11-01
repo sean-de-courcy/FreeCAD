@@ -26,6 +26,7 @@
 #include "ElementFingerprint.h"
 #include "ElementNamingUtils.h"
 #include "ElementSolver.h"
+#include "ElementSolverEdits.h"
 #include "GeoFeature.h"
 #include "NameTable.h"
 #include "MappedElement.h"
@@ -53,7 +54,61 @@ struct MigrationCounts
 };
 // By the owner document's name: a document may be closed before the counts are reported.
 std::map<std::string, MigrationCounts> migrationCounts;
+
+// The objects edited since their document was opened (ElementSolverEdits.h), and the depth of
+// solveElementReferences() calls, whose writes aren't edits.
+std::map<const Document*, std::set<const DocumentObject*>> editsSinceOpen;
+int solving = 0;
 }  // namespace
+
+void forgetEditsSinceOpen(const Document* doc)
+{
+    editsSinceOpen.erase(doc);
+}
+
+void noteEditSinceOpen(const DocumentObject* obj)
+{
+    if (obj && obj->getDocument()) {
+        editsSinceOpen[obj->getDocument()].insert(obj);
+    }
+}
+
+void noteChangeSinceOpen(const DocumentObject* obj, const Property* prop)
+{
+    const Document* doc = obj ? obj->getDocument() : nullptr;
+    if (!doc || !prop || solving > 0 || doc->testStatus(Document::Restoring)
+        || doc->testStatus(Document::Recomputing) || obj->isRecomputing()
+        || (prop->getType() & (Prop_Output | Prop_Transient)) != 0
+        || prop->testStatus(Property::Output) || prop->testStatus(Property::Transient)) {
+        return;
+    }
+    // The element map version is the migration's own stamp
+    const char* name = prop->getName();
+    if (name && std::strcmp(name, "_ElementMapVersion") == 0) {
+        return;
+    }
+    editsSinceOpen[doc].insert(obj);
+}
+
+bool editedSinceOpen(const DocumentObject* feature)
+{
+    if (!feature || !feature->getDocument()) {
+        return false;
+    }
+    auto edited = [](const DocumentObject* obj) {
+        auto it = editsSinceOpen.find(obj->getDocument());
+        return it != editsSinceOpen.end() && it->second.count(obj) != 0;
+    };
+    if (edited(feature)) {
+        return true;
+    }
+    // Another document's object may have been edited and saved before this one was opened,
+    // which no record here shows: an edit (decision 217 (3), review pr475b-r3)
+    const auto chain = feature->getOutListRecursive();
+    return std::any_of(chain.begin(), chain.end(), [&](const DocumentObject* obj) {
+        return obj && (obj->getDocument() != feature->getDocument() || edited(obj));
+    });
+}
 
 void setElementHintsFunction(ElementHintsFunction function)
 {
@@ -784,6 +839,15 @@ bool solveElementReferences(DocumentObject* feature,
     if (!geo || !feature->isAttachedToDocument()) {
         return false;
     }
+    // The solver's own writes aren't edits (ElementSolverEdits.h)
+    ++solving;
+    struct SolvingGuard
+    {
+        ~SolvingGuard()
+        {
+            --solving;
+        }
+    } solvingGuard;
 
     // Pass 1: the exact lookup, per property.
     SolverBatch batch;
@@ -994,6 +1058,86 @@ bool solveElementReferences(DocumentObject* feature,
             }
         }
         return mapForm(name);
+    };
+    // A Missing reference's index carry, and the elements at its saved place when the carry
+    // fails (ops#475)
+    struct MissingPlace
+    {
+        Data::ElementFingerprint saved;
+        Data::ElementFingerprint now;
+        bool exists = false;
+        bool carried = false;
+        std::optional<std::vector<std::string>> places;
+        bool indexAtPlace = false;
+        // The one element at the place, the index's own not there too
+        std::string one() const
+        {
+            return places && places->size() == 1 && !indexAtPlace ? places->front() : std::string();
+        }
+    };
+    auto missingPlace = [&](const SolverEntry& entry) {
+        MissingPlace place;
+        const std::string& index = entry.oldIndex;
+        place.exists = geo->getElementFingerprint(index.c_str(), place.now);
+        place.saved = Data::ElementFingerprint::fromString(entry.oldFingerprint);
+        place.carried = place.exists && place.saved.isValid()
+            && fingerprintsAgree(place.saved, place.now, diagonal);
+        if (!place.carried && place.saved.isValid()) {
+            place.places = elementsAt(place.saved, index, false);
+            place.indexAtPlace = place.exists
+                && Data::atSamePlace(place.saved, place.now, diagonal, tolerances, continuationDistance);
+        }
+        return place;
+    };
+    // OCCT's storage order moves no element and keeps their count: where a migration only
+    // reorders, every Missing reference to the feature keeps an index that exists and, with a
+    // saved fingerprint, keeps its element there or finds its one element at its place, and every
+    // exact reference has an element at its saved place. When one doesn't, the migration
+    // recompute had an edit, which may have moved another element onto a saved place (the attack
+    // set's slides, review pr475b-s-r1's remove-slides): then no Missing reference is kept by its
+    // place (ops#475). An edit the references don't show is caught by editedSinceOpen() below.
+    // Read once, after the tolerances.
+    std::optional<bool> placesHold;
+    // editedSinceOpen(feature), read once
+    std::optional<bool> edited;
+    auto featureEdited = [&]() {
+        if (!edited) {
+            edited = editedSinceOpen(feature);
+        }
+        return *edited;
+    };
+    auto editedBy = [&](const SolverEntry& entry) {
+        if (entry.guessed) {
+            return false;
+        }
+        if (entry.kind == SolverEntry::Kind::Exact) {
+            // Nothing where it was, neither its element nor another (a reorder empties no place;
+            // a name that moved to another element is rule 3's, not an edit)
+            auto saved = Data::ElementFingerprint::fromString(entry.oldFingerprint);
+            Data::ElementFingerprint now;
+            if (!saved.isValid() || !geo->getElementFingerprint(entry.oldIndex.c_str(), now)
+                || Data::atSamePlace(saved, now, diagonal, tolerances, continuationDistance)) {
+                return false;
+            }
+            auto others = elementsAt(saved, entry.oldIndex, true);
+            return others && others->empty();
+        }
+        MissingPlace place = missingPlace(entry);
+        return !place.exists || (place.saved.isValid() && !place.carried && place.one().empty());
+    };
+    auto missingPlacesHold = [&]() {
+        if (!placesHold) {
+            placesHold = true;
+            for (const auto& owner : owners) {
+                for (const auto* entry : owner.second) {
+                    if (editedBy(*entry)) {
+                        placesHold = false;
+                        return false;
+                    }
+                }
+            }
+        }
+        return *placesHold;
     };
 
     for (auto& [ownerName, entries] : owners) {
@@ -1303,15 +1447,21 @@ bool solveElementReferences(DocumentObject* feature,
                 }
                 report(*entry, std::move(item));
             }
-            // Missing references: index carry, verified by the saved fingerprint.
+            // Missing references: index carry, verified by the saved fingerprint. When it fails,
+            // the one element at the saved place (ops#475): OCCT's storage order differs between
+            // platforms, so a file saved on one may have the element at another index on the
+            // other. The index's own element at the place, or several there, break it, and so
+            // does another Missing reference not at its place (missingPlacesHold).
             for (const auto* entry : entries) {
                 if (entry->kind != SolverEntry::Kind::Missing) {
                     continue;
                 }
                 const std::string& index = entry->oldIndex;
-                Data::ElementFingerprint now;
-                bool exists = geo->getElementFingerprint(index.c_str(), now);
-                auto saved = Data::ElementFingerprint::fromString(entry->oldFingerprint);
+                const MissingPlace place = missingPlace(*entry);
+                const bool exists = place.exists;
+                const auto& saved = place.saved;
+                const auto& places = place.places;
+                const bool indexAtPlace = place.indexAtPlace;
                 std::string name;
                 for (const auto& element : pool(indexType(index))) {
                     if (element.index == index && !element.names.empty()) {
@@ -1319,7 +1469,59 @@ bool solveElementReferences(DocumentObject* feature,
                     }
                 }
                 ReferenceReport::Entry item;
-                if (exists && saved.isValid() && fingerprintsAgree(saved, now, diagonal)) {
+                const bool carried = place.carried;
+                const std::string carryEvidence = !saved.isValid() ? "index carry, no fingerprint"
+                    : !exists ? "index carry, no such element"
+                              : "index carry, fingerprint differs";
+                std::string pick = place.one();
+                // Why the one element at the place isn't taken (decision 217), else empty
+                std::string refusal;
+                if (!pick.empty()) {
+                    if (entry->owner && entry->owner->getDocument() != feature->getDocument()) {
+                        // The consumer pass: the feature's file may have had its own edits
+                        refusal = "but it is another document's";
+                    }
+                    else if (!missingPlacesHold()) {
+                        refusal = "but the migration had an edit";
+                    }
+                    else if (featureEdited()) {
+                        // An edit before the migration recompute may have moved another element
+                        // there (decision 217, at its literal rule after review pr475b-r2)
+                        refusal = "but the feature changed since the file was opened";
+                    }
+                }
+                const bool refused = !refusal.empty();
+                if (refused) {
+                    pick.clear();
+                }
+                if (!pick.empty()) {
+                    countReferenceMigration(entry->owner, MigrationOutcome::Moved);
+                    SolverResolution resolution;
+                    resolutionFor(*entry, pick, nameAt(pick), resolution);
+                    // Kept by its place, with a warning, as the index carry below
+                    resolution.status = SolverResolution::Status::Guessed;
+                    if (!entry->guess.empty()) {
+                        resolution.guess = guessRecordFor(*entry, "index");
+                    }
+                    else {
+                        resolution.guess.kind = "index";
+                        resolution.guess.origIndex = index;
+                    }
+                    resolutions[entry->prop].push_back(resolution);
+                    item.status = ReferenceReport::Status::Index;
+                    item.kind = resolution.guess.kind;
+                    item.newIndex = pick;
+                    item.evidence = carryEvidence + "; " + pick + " sits where it was";
+                    item.candidates.emplace_back(pick, nameAt(pick));
+                    item.candidateRoles.emplace_back("place");
+                    item.candidateDistances.push_back(std::numeric_limits<double>::quiet_NaN());
+                    FC_LOG(
+                        referenceName(entry->prop)
+                        << "[" << entry->index << "]: " << entry->oldName << " -> " << pick
+                        << " (" << item.evidence << ")"
+                    );
+                }
+                else if (carried) {
                     countReferenceMigration(entry->owner, MigrationOutcome::Moved);
                     SolverResolution resolution;
                     resolutionFor(*entry, index, mapForm(name), resolution);
@@ -1347,9 +1549,28 @@ bool solveElementReferences(DocumentObject* feature,
                 else {
                     countReferenceMigration(entry->owner, MigrationOutcome::Broken);
                     item.status = ReferenceReport::Status::Broken;
-                    item.evidence = !saved.isValid() ? "index carry, no fingerprint"
-                        : !exists                    ? "index carry, no such element"
-                                                     : "index carry, fingerprint differs";
+                    item.evidence = carryEvidence;
+                    std::string where;
+                    if (places) {
+                        for (const auto& place : *places) {
+                            item.candidates.emplace_back(place, nameAt(place));
+                            item.candidateRoles.emplace_back("place");
+                            item.candidateDistances.push_back(
+                                std::numeric_limits<double>::quiet_NaN()
+                            );
+                            where += (where.empty() ? "" : " and ") + place;
+                        }
+                    }
+                    if (refused) {
+                        // The one element at the place, refused
+                        item.evidence += "; " + where + " sits where it was, " + refusal;
+                    }
+                    else if (!where.empty()) {
+                        // Several elements at the place, or the index's own one with another
+                        // (rule 2's counterpart): never one of them by its index
+                        item.evidence += "; " + where + (indexAtPlace ? " and " + index : "")
+                            + " sit where it was";
+                    }
                     if (exists) {
                         item.candidates.emplace_back(index, mapForm(name));
                         item.candidateRoles.emplace_back("index");
@@ -1357,10 +1578,16 @@ bool solveElementReferences(DocumentObject* feature,
                             std::numeric_limits<double>::quiet_NaN()
                         );
                     }
+                    std::vector<std::string> candidates;
+                    for (const auto& candidate : item.candidates) {
+                        candidates.push_back(candidate.first);
+                    }
                     FC_LOG(
                         referenceName(entry->prop)
                         << "[" << entry->index << "]: " << entry->oldName << " broken ("
-                        << item.evidence << (exists ? ", candidates: " + index : "") << ")"
+                        << item.evidence
+                        << (candidates.empty() ? "" : ", candidates: " + joinCandidates(candidates))
+                        << ")"
                     );
                 }
                 report(*entry, std::move(item));

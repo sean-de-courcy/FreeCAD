@@ -18,6 +18,7 @@
 #include <App/Link.h>
 #include <src/App/InitApplication.h>
 #include <BRep_Builder.hxx>
+#include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
@@ -27,6 +28,8 @@
 #include <TopoDS_Compound.hxx>
 #include <gp.hxx>
 #include <gp_Ax1.hxx>
+#include <gp_Ax2.hxx>
+#include <gp_Circ.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Trsf.hxx>
@@ -35,6 +38,7 @@
 #include "PartTestHelpers.h"
 #include "App/ElementFingerprint.h"
 #include "App/ElementSolver.h"
+#include "App/ElementSolverBatch.h"
 #include "App/MappedElement.h"
 #include "App/NameTable.h"
 #include <Base/Interpreter.h>
@@ -1597,6 +1601,37 @@ TEST_F(FeaturePartTest, fingerprintOfAnArcLocatesItsCircle)
         EXPECT_EQ(parsed.location.has_value(), true);
     }
     EXPECT_EQ(arcs, 2);
+}
+
+TEST_F(FeaturePartTest, fingerprintsOfAnEdgeWithinConfusionHaveNoLength)
+{
+    // Arrange
+    //   circles at (3, 4, 15), radius 0 and 1e-12: a cone's apex measures 0 on one platform and
+    //   about 1e-15 on another (ops#544)
+    const gp_Ax2 axis(gp_Pnt(3.0, 4.0, 15.0), gp::DZ());
+    TopoShape none(BRepBuilderAPI_MakeEdge(gp_Circ(axis, 0.0)).Edge());
+    TopoShape tiny(BRepBuilderAPI_MakeEdge(gp_Circ(axis, 1e-12)).Edge());
+    const Base::Vector3d apex(3.0, 4.0, 15.0);
+
+    // Act
+    Data::ElementFingerprint fromNone;
+    Data::ElementFingerprint fromTiny;
+    ASSERT_TRUE(Feature::getElementFingerprint(none, "Edge1", fromNone));
+    ASSERT_TRUE(Feature::getElementFingerprint(tiny, "Edge1", fromTiny));
+
+    // Assert
+    //   both stand for their vertex, with no extent or outline: the same fields either way
+    for (const auto* fp : {&fromNone, &fromTiny}) {
+        ASSERT_TRUE(fp->size && fp->center) << fp->toString();
+        EXPECT_EQ(*fp->size, 0.0) << fp->toString();
+        EXPECT_LT(Base::Distance(*fp->center, apex), 1e-9) << fp->toString();
+        EXPECT_FALSE(fp->extentMin || fp->extentMax) << fp->toString();
+        EXPECT_TRUE(fp->outline.empty()) << fp->toString();
+    }
+    EXPECT_TRUE(App::fingerprintsAgree(fromNone, fromTiny, 1.0))
+        << fromNone.toString() << " / " << fromTiny.toString();
+    EXPECT_TRUE(App::fingerprintsAgree(fromTiny, fromNone, 1.0))
+        << fromTiny.toString() << " / " << fromNone.toString();
 }
 
 TEST_F(FeaturePartTest, fingerprintsOfAnLHaveAPointInside)

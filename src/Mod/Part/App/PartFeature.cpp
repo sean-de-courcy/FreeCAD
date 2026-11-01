@@ -870,14 +870,17 @@ void edgeFingerprint(const TopoDS_Edge& edge, Data::ElementFingerprint& fp)
     edgeIntrinsic(edge, fp);
     GProp_GProps props;
     BRepGProp::LinearProperties(edge, props);
-    fp.size = props.Mass();
-    if (props.Mass() > 0.0) {
+    // A length within OCCT's confusion is none (ops#544): a cone's or a hole's apex circle
+    // measures 0 on one platform and about 1e-15 on another, from the same file.
+    if (props.Mass() > Precision::Confusion()) {
+        fp.size = props.Mass();
         fp.center = toVector(props.CentreOfMass().XYZ());
         extentFingerprint(edge, fp);
         fp.outline = pointsAlong(edge);
     }
     else {
         // A degenerated edge has no length: its vertex stands for it.
+        fp.size = 0.0;
         TopoDS_Vertex first = TopExp::FirstVertex(edge);
         if (!first.IsNull()) {
             fp.center = toVector(BRep_Tool::Pnt(first).XYZ());
