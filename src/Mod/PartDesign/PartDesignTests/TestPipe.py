@@ -1813,6 +1813,90 @@ class TestPipeCorners(unittest.TestCase):
                 else:
                     self.assertFails(pipe, "isn't a valid solid", "sections may twist or cross")
 
+    def testProbe396(self):
+        """PROBE for ops#396, not a test: fails with a report of the multisection pipe's inputs
+        and OCCT's raw sweep, for comparing macOS with Windows."""
+
+        def short(p):
+            return "(%g,%g,%g)" % tuple(round(c, 6) + 0.0 for c in (p.x, p.y, p.z))
+
+        def full(p):
+            return "(%r,%r,%r)" % (p.x, p.y, p.z)
+
+        def sweep(spineWire, prof, sect, shell=False):
+            ps = Part.BRepOffsetAPI.MakePipeShell(spineWire)
+            ps.setTransitionMode(0)
+            ps.setMaxDegree(14)
+            ps.setMaxSegments(1000)
+            ps.add(prof, False, False)
+            ps.add(sect, False, False)
+            ps.build()
+            raw = ps.shape()
+            ps.makeSolid()
+            return (raw, ps.shape()) if shell else ps.shape()
+
+        def polygon(points, k=0, rev=False):
+            pts = list(points)[::-1] if rev else list(points)
+            pts = pts[k:] + pts[:k]
+            return Part.makePolygon(pts + pts[:1])
+
+        def grid(spineWire, prof, sect):
+            rows = []
+            for prev in (False, True):
+                for pk in range(4):
+                    row = ""
+                    for srev in (False, True):
+                        for sk in range(4):
+                            try:
+                                v = sweep(spineWire, polygon(prof, pk, prev), polygon(sect, sk, srev)).Volume
+                                row += "+" if abs(v - 920) < 0.01 else ("-" if abs(v + 161.6) < 0.01 else "[%.1f]" % v)
+                            except Exception:
+                                row += "E"
+                    rows.append(row)
+            return " ".join(rows)
+
+        def edges(w):
+            return " ".join(
+                "%s>%s%s" % (short(e.Vertexes[0].Point), short(e.Vertexes[-1].Point), e.Orientation[0])
+                for e in w.OrderedEdges
+            )
+
+        lines = [""]
+        for turn in (0, 90, 180, 270):
+            self.renew()
+            pipe = self.multisection("Transformed", turn)
+            profile, section = self.doc.getObject("Profile"), self.doc.getObject("Section")
+            pw, sw = profile.Shape.Wires[0], section.Shape.Wires[0]
+            spw = self.doc.getObject("Path").Shape.Wires[0]
+            lines.append("turn %d: pipe %s %s" % (turn, pipe.isValid(),
+                "%.3f" % pipe.Shape.Volume if pipe.isValid() else pipe.getStatusString()[:40]))
+            lines.append(" profile %s edges %s %s" % (
+                " ".join(short(v.Point) for v in pw.OrderedVertexes), edges(pw), pw.Orientation))
+            lines.append(" section %s edges %s %s" % (
+                " ".join(short(v.Point) for v in sw.OrderedVertexes), edges(sw), sw.Orientation))
+            raw, solid = sweep(spw, pw, sw, shell=True)
+            lines.append(" raw sketch wires %.3f valid %s faces %d" % (solid.Volume, solid.isValid(), len(raw.Faces)))
+            if turn == 0:
+                lines.append(" spine " + " ".join(full(v.Point) for v in spw.OrderedVertexes))
+                lines.append(" section full " + " ".join(full(v.Point) for v in sw.OrderedVertexes))
+                for i, f in enumerate(raw.Faces, 1):
+                    u0, u1, v0, v1 = f.ParameterRange
+                    lines.append("  F%d %s n=%s %s" % (i, f.Surface.__class__.__name__,
+                        short(f.normalAt((u0 + u1) / 2, (v0 + v1) / 2)), " ".join(short(v.Point) for v in f.Vertexes)))
+                pts = [v.Point for v in pw.OrderedVertexes], [v.Point for v in sw.OrderedVertexes]
+                lines.append(" grid sketch wires: " + grid(spw, *pts))
+        exact = Part.makePolygon([V(0, 0, 0), V(0, 0, 30), V(20, 0, 30)])
+        eps = -6.661338147750939e-15
+        noisy = Part.makePolygon([V(0, 0, 0), V(0, eps, 30.000000000000007), V(20.000000000000004, eps, 30.000000000000007)])
+        prof = [V(-2, -2, 0), V(2, -2, 0), V(2, 2, 0), V(-2, 2, 0)]
+        sect = [V(20, -3, 33), V(20, -3, 27), V(20, 3, 27), V(20, 3, 33)]
+        lines.append("grid exact spine: " + grid(exact, prof, sect))
+        lines.append("grid noisy spine: " + grid(noisy, prof, sect))
+        lines.append("Windows (wt/feature2 build): turn 0 True 920, turns 90-270 fail; grid exact")
+        lines.append(" +-++---+ -+--+++- +++--+-- ---++-++ ---++-++ +++--+-- -+--+++- +-++---+; noisy")
+        lines.append(" -------- -+--+++- +++--+-- ++++++++ ---++-++ -------- ++++++++ +-++---+")
+        self.fail("\n".join(lines))
+
     def testHairpinFails(self):
         """A 170 degree hairpin: "Right corner" and "Round corner" gave invalid solids
         (ops#381). Both fail now, naming the corner."""
