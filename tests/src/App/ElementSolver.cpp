@@ -10204,6 +10204,17 @@ TEST(NameAncestry, twinNames)
     EXPECT_TRUE(Data::isTwinName(rank(1, {"GEN", "ORD"}), rank(0, {"GEN"})));
     EXPECT_TRUE(Data::isTwinName(role("in"), role("out")));
     EXPECT_FALSE(Data::isTwinName(rank(0, {"GEN"}), rank(0, {"GEN"})));
+    //   a twin told apart by a connected vertex and the lone member its twin left (decision 214,
+    //   PR 390's ANotch move-leftGoes): either way round; not below the top level, not two
+    //   different connected vertexes
+    const auto told = [&](const std::vector<std::string>& connected) {
+        return section({}, {h.edge1, h.cyl}, 11, "CUT", 0, 'E', {"GEN"}, connected);
+    };
+    EXPECT_TRUE(Data::isTwinName(told({}), told({h.x0})));
+    EXPECT_TRUE(Data::isTwinName(told({h.x0}), told({})));
+    EXPECT_FALSE(Data::isTwinName(told({h.x0}), told({h.edge1})));
+    EXPECT_FALSE(Data::isTwinName(generated({told({})}, 15, "FLT", 'V', 0),
+                                  generated({told({h.x0})}, 15, "FLT", 'V', 0)));
     //   no rank of a projection's section, of a marked piece's, of another op's
     EXPECT_FALSE(Data::isTwinName(rank(1, {"PRJ"}), rank(0, {"PRJ"})));
     EXPECT_FALSE(Data::isTwinName(section({}, {h.cyl}, 11, "CUT", 1, 'V', {"GEN"}, {h.x0}),

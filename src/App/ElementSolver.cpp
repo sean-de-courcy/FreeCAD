@@ -1886,7 +1886,9 @@ std::vector<std::string> flagsBesideOrder(const DecodedMappedSection& section)
  * every level, and the Index of a section
  * where both values are roles (Data::isRoleValue(): the last section at the top level, any
  * section below it) or, at the top level (\a top), the Index of a counter section
- * (isCounterSection(): today's bare ranks, until A2 names the ranks; then this bridging goes).
+ * (isCounterSection(): today's bare ranks, until A2 names the ranks; then this bridging goes),
+ * and the connected elements of the top level's last section when only one name has them (the
+ * vertexes that told a generated twin apart, which its lone survivor lacks: decision 214).
  * Below the top level, the names a section links and connects, a pattern instance's number
  * counts as a counter too, as in sameUpToCounter(); at the top level it doesn't: an instance's
  * number is its identity (I-A7), and a copy of the old element is the "pattern sibling" guard's.
@@ -1919,11 +1921,16 @@ bool sameUpToOrder(std::string_view a, std::string_view b, bool top)
         const bool instances = !top && x.opCode == patternInstanceOpCode
             && y.opCode == patternInstanceOpCode;
         const bool ranks = top && isCounterSection(x) && isCounterSection(y);
+        // The connected elements that told a twin apart, on one side only (PLAN decision 214):
+        // a generated twin keeps the vertexes no other twin has as its key, and the lone member
+        // left when its twins went has none, so the two are the same element up to that key
+        const bool toldApart = top && i + 1 == sectionsA.size()
+            && x.connectedElements.empty() != y.connectedElements.empty();
         if (!opCodesAgree || x.referenceIDs != y.referenceIDs || x.iterationTag != y.iterationTag
             || (x.index != y.index && !roles && !instances && !ranks)
             || x.elementType != y.elementType || flagsBesideOrder(x) != flagsBesideOrder(y)
             || x.linkedNames.size() != y.linkedNames.size()
-            || x.connectedElements.size() != y.connectedElements.size()) {
+            || (x.connectedElements.size() != y.connectedElements.size() && !toldApart)) {
             return false;
         }
         for (std::size_t j = 0; j < x.linkedNames.size(); ++j) {
@@ -1931,7 +1938,7 @@ bool sameUpToOrder(std::string_view a, std::string_view b, bool top)
                 return false;
             }
         }
-        for (std::size_t j = 0; j < x.connectedElements.size(); ++j) {
+        for (std::size_t j = 0; j < x.connectedElements.size() && !toldApart; ++j) {
             if (!sameUpToOrder(x.connectedElements[j], y.connectedElements[j], false)) {
                 return false;
             }
