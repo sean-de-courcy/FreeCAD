@@ -71,8 +71,15 @@ public:
     Part::PropertyPartShape SuppressedShape;
     /// Keep a copy of the placement before suppression to restore it back when unsuppressed, fix #20205
     Base::Placement SuppressedPlacement;
+    /// The last recompute wrote the base as the output because the feature is suppressed
+    /// (ops#549 PS): the shape's own state, which Suppressed alone isn't until the recompute
+    App::PropertyBool _PassedThrough;
 
     App::DocumentObjectExecReturn* recompute() override;
+    bool passesBaseThrough() const override
+    {
+        return _PassedThrough.getValue();
+    }
     App::DocumentObjectExecReturn* recomputePreview() override;
 
     short mustExecute() const override;

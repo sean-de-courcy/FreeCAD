@@ -642,6 +642,32 @@ AppExport bool coversExtent(
     double continuation
 );
 
+/** Rule PT's keep (ops#549, PT1 and PT1s): whether a pick \a now, on a target built on a
+ * pass-through, may stand for a reference whose record is \a saved. At the saved place
+ * (atSamePlace()); or a plane, a line or an arc agreeing with the saved surface or curve
+ * (intrinsicAgrees(), and planeAgrees() for a plane) that covers the saved element's extent
+ * (coversExtent()) or, if \a within (a suppression switch, PT1s), lies within it. Vertices and
+ * other surfaces and curves only at the place. False if either fingerprint is invalid.
+ */
+AppExport bool passThroughKeeps(
+    const ElementFingerprint& saved,
+    const ElementFingerprint& now,
+    double diagonal,
+    const GeometryTolerances& tolerances,
+    double continuation,
+    bool within
+);
+
+/** Rule PS's switch (ops#549): whether the world \a marks were taken in (each object's suppressed
+ * flag) differs from \a chain's now, the (ID, suppressed now) of the features a target's shape is
+ * built on. A chain feature without a mark counts as not flagged; a flagged object out of the
+ * chain doesn't count; an ID marked both flagged and not (two documents' objects) is a switch.
+ */
+AppExport bool passThroughWorldSwitched(
+    const std::vector<ElementFingerprint::Mark>& marks,
+    const std::vector<std::pair<long, bool>>& chain
+);
+
 /// Where a face lies against an old face's extent (fingerprint version 3, Task 2 PR 8).
 enum class ExtentRelation
 {

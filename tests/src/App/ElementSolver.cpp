@@ -10406,3 +10406,81 @@ TEST(NameAncestry, twinNames)
     EXPECT_FALSE(Data::isOrderKeyedName(rank(0, {"GEN"})));
     EXPECT_FALSE(Data::isOrderKeyedName(rank(1, {"PRJ"})));
 }
+
+TEST(PassThroughKeeps, atThePlaceOrCoveringIt)
+{
+    // ops#549 PT1: on a pass-through a pick stands at the saved place or covering the saved
+    // element on its surface or curve (a failure's veto)
+    const Data::GeometryTolerances tolerances;
+    const auto top = planeFingerprint(0, 20, 10);
+    EXPECT_TRUE(Data::passThroughKeeps(top, planeFingerprint(0, 20, 10), 20, tolerances, 1e-7, false));
+    //   the base's whole face round the failed feature's cut one
+    EXPECT_TRUE(Data::passThroughKeeps(top, planeFingerprint(-2, 26, 12), 20, tolerances, 1e-7, false));
+    //   a smaller face (a top the failed feature had grown) only on a suppression switch (PT1s)
+    EXPECT_FALSE(Data::passThroughKeeps(top, planeFingerprint(0, 12, 10), 20, tolerances, 1e-7, false));
+    EXPECT_TRUE(Data::passThroughKeeps(top, planeFingerprint(0, 12, 10), 20, tolerances, 1e-7, true));
+    //   a face of the plane elsewhere: neither covers the other
+    EXPECT_FALSE(Data::passThroughKeeps(top, planeFingerprint(30, 40, 10), 20, tolerances, 1e-7, true));
+    //   a parallel plane (C2's thin slab 0.1 off)
+    auto slab = planeFingerprint(-2, 26, 12);
+    *slab.center += Base::Vector3d(0, -0.1, 0);
+    *slab.extentMin += Base::Vector3d(0, -0.1, 0);
+    *slab.extentMax += Base::Vector3d(0, -0.1, 0);
+    EXPECT_FALSE(Data::passThroughKeeps(top, slab, 20, tolerances, 1e-7, true));
+    //   an invalid record: broken (PT1's precondition)
+    EXPECT_FALSE(Data::passThroughKeeps(Data::ElementFingerprint(),
+                                        planeFingerprint(0, 20, 10),
+                                        20,
+                                        tolerances,
+                                        1e-7,
+                                        true));
+}
+
+TEST(PassThroughKeeps, linesArcsAndVertices)
+{
+    const Data::GeometryTolerances tolerances;
+    //   a line: the whole base edge covers a piece of it; a piece lies within the whole only on
+    //   a switch; an overlap is neither
+    const auto edge = lineFingerprint(0, 20);
+    EXPECT_TRUE(Data::passThroughKeeps(lineFingerprint(4, 12), edge, 20, tolerances, 1e-7, false));
+    EXPECT_FALSE(Data::passThroughKeeps(edge, lineFingerprint(4, 12), 20, tolerances, 1e-7, false));
+    EXPECT_TRUE(Data::passThroughKeeps(edge, lineFingerprint(4, 12), 20, tolerances, 1e-7, true));
+    EXPECT_FALSE(Data::passThroughKeeps(edge, lineFingerprint(12, 30), 20, tolerances, 1e-7, true));
+    //   an arc on the same circle
+    const auto arc = arcFingerprint(0, 1);
+    EXPECT_TRUE(Data::passThroughKeeps(arc, arcFingerprint(-0.5, 1.5), 2, tolerances, 1e-7, false));
+    EXPECT_FALSE(Data::passThroughKeeps(arc, arcFingerprint(0.2, 0.6), 2, tolerances, 1e-7, false));
+    EXPECT_TRUE(Data::passThroughKeeps(arc, arcFingerprint(0.2, 0.6), 2, tolerances, 1e-7, true));
+    //   a vertex only at its place (C1: the bare name on the plate's corner)
+    Data::ElementFingerprint corner;
+    corner.type = 'V';
+    corner.kind = "Point";
+    corner.center = Base::Vector3d(-2, -2, -2);
+    auto plate = corner;
+    plate.center = Base::Vector3d(2, 2, 0);
+    EXPECT_TRUE(Data::passThroughKeeps(corner, corner, 10, tolerances, 1e-7, true));
+    EXPECT_FALSE(Data::passThroughKeeps(corner, plate, 10, tolerances, 1e-7, true));
+}
+
+TEST(PassThroughWorldSwitched, theRecordsSuppressedSetAgainstTheChain)
+{
+    // ops#549 PS: a switch is a chain feature suppressed now and not flagged in the record (an
+    // absent mark counts as not flagged), or flagged and no longer suppressed
+    using Mark = Data::ElementFingerprint::Mark;
+    const std::vector<Mark> marks {{3, -1, true}, {5, 2, false}, {9, -1, true}};
+    EXPECT_FALSE(Data::passThroughWorldSwitched(marks, {{3, true}, {5, false}}));
+    EXPECT_TRUE(Data::passThroughWorldSwitched(marks, {{3, false}}));
+    EXPECT_TRUE(Data::passThroughWorldSwitched(marks, {{5, true}}));
+    EXPECT_FALSE(Data::passThroughWorldSwitched(marks, {{7, false}}));
+    EXPECT_TRUE(Data::passThroughWorldSwitched(marks, {{7, true}}));
+    //   a flagged object out of the chain (9) doesn't count
+    EXPECT_FALSE(Data::passThroughWorldSwitched(marks, {{3, true}}));
+    //   an ID both flagged and not (two documents' objects share it): a switch either way
+    const std::vector<Mark> shared {{3, -1, true}, {3, -1, false}};
+    EXPECT_TRUE(Data::passThroughWorldSwitched(shared, {{3, true}}));
+    EXPECT_TRUE(Data::passThroughWorldSwitched(shared, {{3, false}}));
+    //   a record without marks flags nothing
+    EXPECT_FALSE(Data::passThroughWorldSwitched({}, {{3, false}}));
+    EXPECT_TRUE(Data::passThroughWorldSwitched({}, {{3, true}}));
+    EXPECT_FALSE(Data::passThroughWorldSwitched({}, {}));
+}

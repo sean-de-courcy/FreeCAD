@@ -269,6 +269,16 @@ public:
         return -1;
     }
 
+    /** Whether the object's output is its base passed through because it is suppressed: the
+     * state its last recompute wrote, not its Suppressed property (ops#549 PS; PartDesign's
+     * features). A reference's record saves it for every object its target is built from (the
+     * marks' flag), the world the record was taken in.
+     */
+    virtual bool passesBaseThrough() const
+    {
+        return false;
+    }
+
     /**
      * @brief Get the export name of the object.
      *

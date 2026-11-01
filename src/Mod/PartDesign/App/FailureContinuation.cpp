@@ -2,6 +2,7 @@
 
 #include "FailureContinuation.h"
 
+#include <set>
 #include <utility>
 #include <vector>
 
@@ -21,6 +22,7 @@
 #include "Feature.h"
 #include "FeatureBase.h"
 #include "Retarget.h"
+#include "ShapeBinder.h"
 
 FC_LOG_LEVEL_INIT("PartDesign", true, true)
 
@@ -229,6 +231,63 @@ public:
     {
         // A reference a reorder set aside (ops#127)
         return bodyOf(obj) && parkedReason(obj, why);
+    }
+
+    void shapeInputChain(const App::DocumentObject* target,
+                         std::vector<ChainFeature>& out) const override
+    {
+        // Breadth first, so the nearest come first. Not getOutListRecursive(): expression links,
+        // a sketch's external geometry and a Body's members after its Tip don't feed the shape
+        // (ops#549 r2), and its order is by address
+        out.clear();
+        std::set<const App::DocumentObject*> seen;
+        std::vector<const App::DocumentObject*> queue {target};
+        std::vector<InputLink> links;
+        auto follow = [&](const App::Property* prop) {
+            links.clear();
+            collectLinks(prop, links);
+            for (const auto& link : links) {
+                queue.push_back(link.object);
+            }
+        };
+        for (std::size_t i = 0; i < queue.size(); ++i) {
+            const App::DocumentObject* obj = queue[i];
+            if (!obj || !obj->isAttachedToDocument() || !seen.insert(obj).second) {
+                continue;
+            }
+            if (auto body = freecad_cast<const Body*>(obj)) {
+                queue.push_back(body->Tip.getValue());
+            }
+            else if (auto feature = freecad_cast<const Feature*>(obj);
+                     feature && Body::isSolidFeature(feature)) {
+                // What its shape is now, not its Suppressed property: set before the recompute
+                // that passes the base through, it describes no shape yet
+                const bool suppressed = feature->passesBaseThrough();
+                const bool claimed = bodyOf(feature) != nullptr;
+                if (claimed || suppressed) {
+                    out.push_back({feature, claimed && feature->isError(), suppressed});
+                }
+                std::vector<App::Property*> props;
+                feature->getPropertyList(props);
+                for (auto prop : props) {
+                    if (!prop->isDerivedFrom<App::PropertyLinkBase>()
+                        || prop == &feature->ExpressionEngine || prop == &feature->_Body
+                        || static_cast<App::PropertyLinkBase*>(prop)->getScope()
+                            == App::LinkScope::Hidden) {
+                        continue;
+                    }
+                    follow(prop);
+                }
+            }
+            else if (obj->isDerivedFrom<ShapeBinder>() || obj->isDerivedFrom<SubShapeBinder>()) {
+                if (auto support = obj->getPropertyByName("Support")) {
+                    follow(support);
+                }
+            }
+            else if (auto linked = obj->getLinkedObject(true); linked && linked != obj) {
+                queue.push_back(linked);
+            }
+        }
     }
 };
 

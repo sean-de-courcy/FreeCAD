@@ -226,10 +226,14 @@ struct AppExport ElementFingerprint
         /// Its highest geometry ID (App::DocumentObject::elementIdMark()); -1 for an object
         /// without geometry IDs.
         long mark = -1;
+        /// The object's output was its base, passed through while suppressed, when the record was
+        /// taken (App::DocumentObject::passesBaseThrough()): the record's world (ops#549 PS).
+        /// Written `<tag>:<mark>:s`.
+        bool suppressed = false;
 
         friend bool operator==(const Mark& a, const Mark& b)
         {
-            return a.tag == b.tag && a.mark == b.mark;
+            return a.tag == b.tag && a.mark == b.mark && a.suppressed == b.suppressed;
         }
     };
     /// The marks of the target's closure (version 7): only a reference's record has them; empty

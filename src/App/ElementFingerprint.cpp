@@ -21,6 +21,8 @@ constexpr char faceDelimiter = ';';
 // Version 7's sides and marks (ops#526 D2)
 constexpr char entryDelimiter = '/';
 constexpr char markDelimiter = ':';
+// A mark's suppressed flag (ops#549 PS)
+constexpr std::string_view suppressedFlag = "s";
 constexpr int fieldCount = 7;
 
 std::vector<std::string_view> split(std::string_view text, char delimiter)
@@ -180,7 +182,8 @@ bool parseSides(std::string_view text, std::vector<ElementFingerprint::Side>& si
     return sides.size() <= ElementFingerprint::MaxSides;
 }
 
-// Version 7's marks: `_`, or entries separated by `/`, each `<tag>:<mark>` or `<tag>:_`
+// Version 7's marks: `_`, or entries separated by `/`, each `<tag>:<mark>` or `<tag>:_`, and
+// `:s` after either for an object suppressed when the record was taken (ops#549 PS)
 bool parseMarks(std::string_view text, std::vector<ElementFingerprint::Mark>& marks)
 {
     marks.clear();
@@ -193,12 +196,20 @@ bool parseMarks(std::string_view text, std::vector<ElementFingerprint::Mark>& ma
             return false;
         }
         const auto tag = parseWhole(part.substr(0, colon));
-        const auto value = part.substr(colon + 1);
+        auto value = part.substr(colon + 1);
+        bool suppressed = false;
+        if (const auto flag = value.find(markDelimiter); flag != std::string_view::npos) {
+            if (value.substr(flag + 1) != suppressedFlag) {
+                return false;
+            }
+            suppressed = true;
+            value = value.substr(0, flag);
+        }
         const auto mark = value == emptyField ? std::optional<long>(-1) : parseWhole(value);
         if (!tag || *tag < 0 || !mark || *mark < -1) {
             return false;
         }
-        marks.push_back({*tag, *mark});
+        marks.push_back({*tag, *mark, suppressed});
     }
     return marks.size() <= ElementFingerprint::MaxMarks;
 }
@@ -337,6 +348,10 @@ std::string ElementFingerprint::toString() const
                 text += std::to_string(marks[i].tag);
                 text += markDelimiter;
                 text += marks[i].mark < 0 ? std::string(emptyField) : std::to_string(marks[i].mark);
+                if (marks[i].suppressed) {
+                    text += markDelimiter;
+                    text += suppressedFlag;
+                }
             }
             if (marks.empty()) {
                 text += emptyField;

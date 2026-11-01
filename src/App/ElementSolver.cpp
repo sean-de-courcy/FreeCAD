@@ -2366,6 +2366,49 @@ bool coversExtent(const ElementFingerprint& saved,
     return false;
 }
 
+bool passThroughKeeps(const ElementFingerprint& saved,
+                      const ElementFingerprint& now,
+                      double diagonal,
+                      const GeometryTolerances& tolerances,
+                      double continuation,
+                      bool within)
+{
+    if (!saved.isValid() || !now.isValid()) {
+        return false;
+    }
+    if (atSamePlace(saved, now, diagonal, tolerances, continuation)) {
+        return true;
+    }
+    const bool plane = saved.type == 'F' && saved.kind == "Plane";
+    const bool curve = saved.type == 'E' && (saved.kind == "Line" || saved.kind == "Circle");
+    if ((!plane && !curve) || !intrinsicAgrees(saved, now, tolerances)
+        || (plane && !planeAgrees(saved, now, diagonal, tolerances, continuation))) {
+        return false;
+    }
+    return coversExtent(saved, now, diagonal, continuation)
+        || (within && coversExtent(now, saved, diagonal, continuation));
+}
+
+bool passThroughWorldSwitched(const std::vector<ElementFingerprint::Mark>& marks,
+                              const std::vector<std::pair<long, bool>>& chain)
+{
+    for (const auto& [tag, suppressed] : chain) {
+        bool flagged = false;
+        bool unflagged = false;
+        for (const auto& mark : marks) {
+            if (mark.tag == tag) {
+                (mark.suppressed ? flagged : unflagged) = true;
+            }
+        }
+        // Both: two objects share the ID (another document's, F5), and the record can't tell
+        // which was the chain's
+        if ((flagged && unflagged) || flagged != suppressed) {
+            return true;
+        }
+    }
+    return false;
+}
+
 namespace
 {
 

@@ -1029,7 +1029,8 @@ std::string PropertyLinkBase::_getElementFingerprint(App::DocumentObject* featur
     }
     // The marks (ops#526 D2): every object the target is built from, the target and the element's
     // holder included, by its ID and its highest geometry ID now. Geometry with a higher ID is
-    // drawn later; an object listed was feeding the target.
+    // drawn later; an object listed was feeding the target. Each says whether it was suppressed:
+    // the world the record is taken in (ops#549 PS).
     std::vector<App::DocumentObject*> closure {obj, geo};
     for (auto from : {obj, static_cast<App::DocumentObject*>(geo)}) {
         auto out = from->getOutListRecursive();
@@ -1037,16 +1038,21 @@ std::string PropertyLinkBase::_getElementFingerprint(App::DocumentObject* featur
     }
     for (auto object : closure) {
         if (object && object->isAttachedToDocument()) {
-            fingerprint.marks.push_back({object->getID(), std::max(object->elementIdMark(), -1L)});
+            fingerprint.marks.push_back({object->getID(),
+                                         std::max(object->elementIdMark(), -1L),
+                                         object->passesBaseThrough()});
         }
     }
+    // One entry per ID and flag: two objects of different documents can share an ID (F5), and
+    // their flags, if they differ, both stay, which the solver reads as a switch (ops#549 PS)
     std::sort(fingerprint.marks.begin(), fingerprint.marks.end(), [](const auto& a, const auto& b) {
-        return a.tag < b.tag || (a.tag == b.tag && a.mark > b.mark);
+        return a.tag < b.tag || (a.tag == b.tag && a.suppressed < b.suppressed)
+            || (a.tag == b.tag && a.suppressed == b.suppressed && a.mark > b.mark);
     });
     fingerprint.marks.erase(std::unique(fingerprint.marks.begin(),
                                         fingerprint.marks.end(),
                                         [](const auto& a, const auto& b) {
-                                            return a.tag == b.tag;
+                                            return a.tag == b.tag && a.suppressed == b.suppressed;
                                         }),
                             fingerprint.marks.end());
     if (fingerprint.marks.size() > Data::ElementFingerprint::MaxMarks) {
@@ -1117,6 +1123,26 @@ bool PropertyLinkBase::_updateElementFingerprints(App::DocumentObject* feature,
         // carried by it, already lies over the next plate. A piece saved without up-to faces (three
         // under its point, or a fingerprint from before them) gained that plate's (review prA1b-r1)
         const auto old = Data::ElementFingerprint::fromString(fingerprints[i]);
+        // The record's world (ops#549 PS) changes only where the solver judged the reference
+        // against its target (feature given: the batch's veto ran). A setter's refresh keeps
+        // each object's suppressed flag as the record had it, so the next solve still sees the
+        // switch.
+        if (!feature && old.isValid()) {
+            auto fresh = Data::ElementFingerprint::fromString(text);
+            bool kept = false;
+            for (auto& mark : fresh.marks) {
+                const bool was = std::any_of(old.marks.begin(), old.marks.end(), [&](const auto& m) {
+                    return m.tag == mark.tag && m.suppressed;
+                });
+                if (mark.suppressed != was) {
+                    mark.suppressed = was;
+                    kept = true;
+                }
+            }
+            if (kept && fresh.isValid()) {
+                text = fresh.toString();
+            }
+        }
         if (old.isValid()) {
             auto now = Data::ElementFingerprint::fromString(text);
             now.upToFaces = old.upToFaces;

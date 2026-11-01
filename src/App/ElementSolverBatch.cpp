@@ -30,6 +30,7 @@
 #include "NameTable.h"
 #include "MappedElement.h"
 #include "PropertyGeo.h"
+#include "RecomputeContinuation.h"
 #include "ReferenceReport.h"
 
 FC_LOG_LEVEL_INIT("PropertyLinks", true, true)
@@ -996,6 +997,113 @@ bool solveElementReferences(DocumentObject* feature,
         return mapForm(name);
     };
 
+    // Rule PT (ops#549): the features this target's shape is built on that can pass their base
+    // through, read once. A failure among them puts every entry under the veto (PT1: kept only
+    // at the saved place or covering it); a suppression only an entry whose record was taken
+    // with another set suppressed (PS, a switch: PT1s, within it too). A record taken in the
+    // current world is judged by the ordinary rules.
+    enum class PassThrough
+    {
+        None,
+        Failure,
+        Switch
+    };
+    std::optional<std::vector<RecomputeContinuation::ChainFeature>> chain;
+    std::vector<std::pair<long, bool>> chainWorld;
+    const DocumentObject* chainFailure = nullptr;
+    auto readChain = [&]() -> const std::vector<RecomputeContinuation::ChainFeature>& {
+        if (!chain) {
+            chain.emplace();
+            if (auto rule = recomputeContinuation()) {
+                rule->shapeInputChain(feature, *chain);
+            }
+            for (const auto& link : *chain) {
+                if (link.failed && !chainFailure) {
+                    chainFailure = link.object;
+                }
+                chainWorld.emplace_back(link.object->getID(), link.suppressed);
+            }
+        }
+        return *chain;
+    };
+    auto passThroughOf = [&](const SolverEntry& entry) {
+        if (readChain().empty()) {
+            return PassThrough::None;
+        }
+        if (chainFailure) {
+            return PassThrough::Failure;
+        }
+        const auto saved = Data::ElementFingerprint::fromString(entry.oldFingerprint);
+        return Data::passThroughWorldSwitched(saved.marks, chainWorld) ? PassThrough::Switch
+                                                                       : PassThrough::None;
+    };
+    // PT1 or PT1s for the pick `index` of `entry`, under `rule`. Any pick at the saved place.
+    // Covering or within the saved element only for the saved name's own element (tier 0: the
+    // same element as the feature changed it; review saa46-r1, 4); covering it, it holds the
+    // saved inside point (r2); within it, no other element of its type lies on the saved surface
+    // or curve inside the saved extent (a split or an island is no proof).
+    auto passThroughKeeps = [&](const SolverEntry& entry, PassThrough rule, const std::string& index) {
+        const auto saved = Data::ElementFingerprint::fromString(entry.oldFingerprint);
+        const auto& now = fingerprintOf(index);
+        if (!saved.isValid() || !now.isValid()) {
+            return false;
+        }
+        if (Data::atSamePlace(saved, now, diagonal, tolerances, continuationDistance)) {
+            return true;
+        }
+        if (entry.kind != SolverEntry::Kind::Exact || index != entry.oldIndex) {
+            return false;
+        }
+        const double eps = continuationDistance * std::max(1.0, diagonal);
+        if (Data::passThroughKeeps(saved, now, diagonal, tolerances, continuationDistance, false)) {
+            const auto point = saved.inside ? saved.inside : saved.center;
+            return point && elementHoldsPointFunction
+                && elementHoldsPointFunction(geo, index.c_str(), *point, eps);
+        }
+        if (rule != PassThrough::Switch
+            || !Data::passThroughKeeps(saved, now, diagonal, tolerances, continuationDistance, true)) {
+            return false;
+        }
+        const PropertyComplexGeoData* prop = geo->getPropertyOfGeometry();
+        const Data::ComplexGeoData* data = prop ? prop->getComplexData() : nullptr;
+        if (!data) {
+            return false;
+        }
+        const std::string type = indexType(index);
+        const unsigned long count = data->countSubElements(type.c_str());
+        for (unsigned long k = 1; k <= count; ++k) {
+            const std::string other = type + std::to_string(k);
+            if (other != index
+                && Data::passThroughKeeps(saved,
+                                          fingerprintOf(other),
+                                          diagonal,
+                                          tolerances,
+                                          continuationDistance,
+                                          true)) {
+                return false;
+            }
+        }
+        return true;
+    };
+    // The veto's evidence: the nearest feature that failed, or whose suppression changed since
+    // the record
+    auto passThroughEvidence = [&](const SolverEntry& entry, PassThrough rule) {
+        if (rule == PassThrough::Failure) {
+            return "'" + std::string(chainFailure->Label.getValue())
+                + "' failed and passes its base through: kept only where it was";
+        }
+        const auto saved = Data::ElementFingerprint::fromString(entry.oldFingerprint);
+        for (const auto& link : readChain()) {
+            if (Data::passThroughWorldSwitched(saved.marks, {{link.object->getID(), link.suppressed}})) {
+                return "'" + std::string(link.object->Label.getValue()) + "' was "
+                    + (link.suppressed ? "suppressed" : "unsuppressed")
+                    + " since the reference was taken: kept only where it was";
+            }
+        }
+        return std::string("a suppression changed since the reference was taken: kept only where "
+                           "it was");
+    };
+
     for (auto& [ownerName, entries] : owners) {
         std::stable_sort(entries.begin(), entries.end(), [](const auto* a, const auto* b) {
             auto na = referenceName(a->prop);
@@ -1021,11 +1129,16 @@ bool solveElementReferences(DocumentObject* feature,
                         || (reverse && !e->storedIndex.empty() && e->storedIndex != e->oldIndex));
             });
         };
-        if (!anyMissing && !anyGuessed && !exactMayNeedSolving()) {
+        // Under rule PT an entry the batch would skip is checked too: a hit held by its name alone
+        // (no fingerprint, moved alone, unmeasurable) is what the veto is for (ops#549)
+        const bool ownerPassThrough = std::any_of(entries.begin(), entries.end(), [&](const auto* e) {
+            return passThroughOf(*e) != PassThrough::None;
+        });
+        if (!anyMissing && !anyGuessed && !exactMayNeedSolving() && !ownerPassThrough) {
             continue;
         }
 
-        auto report = [&](const SolverEntry& entry, ReferenceReport::Entry item) {
+        auto report =[&](const SolverEntry& entry, ReferenceReport::Entry item) {
             item.index = entry.index;
             item.oldName = entry.oldName.empty() ? entry.exactName : entry.oldName;
             item.oldIndex = entry.oldIndex;
@@ -1088,7 +1201,9 @@ bool solveElementReferences(DocumentObject* feature,
                     entry->guess.origFingerprint
                 );
                 if (!original.isValid()) {
-                    back = entry->guess.origFingerprint.empty() && entry->guess.kind != "piece";
+                    // By its name alone: not on a pass-through (ops#549)
+                    back = entry->guess.origFingerprint.empty() && entry->guess.kind != "piece"
+                        && passThroughOf(*entry) == PassThrough::None;
                 }
                 else {
                     const auto& now = fingerprintOf(entry->oldIndex);
@@ -1129,7 +1244,7 @@ bool solveElementReferences(DocumentObject* feature,
             anyMissing = std::any_of(entries.begin(), entries.end(), [](const auto* e) {
                 return e->kind == SolverEntry::Kind::Missing;
             });
-            if (!anyMissing && !exactMayNeedSolving()) {
+            if (!anyMissing && !exactMayNeedSolving() && !ownerPassThrough) {
                 continue;
             }
         }
@@ -1137,7 +1252,18 @@ bool solveElementReferences(DocumentObject* feature,
             // Every entry, not up to the first: each unmeasurable one is logged.
             bool needed = false;
             for (const auto* e : entries) {
-                if (e->kind != SolverEntry::Kind::Exact || e->oldFingerprint.empty()) {
+                if (e->kind != SolverEntry::Kind::Exact) {
+                    continue;
+                }
+                // Rule PT: solved unless its hit stands by PT1 (or PT1s); the veto after
+                // solveOwner() judges the outcome (ops#549)
+                if (const auto rule = passThroughOf(*e); rule != PassThrough::None) {
+                    if (!passThroughKeeps(*e, rule, e->oldIndex)) {
+                        needed = true;
+                    }
+                    continue;
+                }
+                if (e->oldFingerprint.empty()) {
                     continue;
                 }
                 const auto saved = Data::ElementFingerprint::fromString(e->oldFingerprint);
@@ -1172,6 +1298,28 @@ bool solveElementReferences(DocumentObject* feature,
                 }
                 const auto saved = Data::ElementFingerprint::fromString(entry->oldFingerprint);
                 const std::string& hit = entry->oldIndex;
+                // Rule PT: kept only by PT1 (or PT1s), never by its name alone (ops#549)
+                if (const auto rule = passThroughOf(*entry); rule != PassThrough::None) {
+                    if (passThroughKeeps(*entry, rule, hit)) {
+                        countReferenceMigration(entry->owner, MigrationOutcome::Kept);
+                        continue;
+                    }
+                    SolverResolution resolution;
+                    migrationBrokenFor(*entry, resolution);
+                    resolutions[entry->prop].push_back(resolution);
+                    ReferenceReport::Entry item;
+                    item.status = ReferenceReport::Status::Broken;
+                    item.evidence = passThroughEvidence(*entry, rule);
+                    item.candidates.emplace_back(hit, nameAt(hit));
+                    item.candidateRoles.emplace_back("pass-through");
+                    item.candidateDistances.push_back(std::numeric_limits<double>::quiet_NaN());
+                    FC_LOG(referenceName(entry->prop) << "[" << entry->index << "]: "
+                                                      << entry->exactName << " broken ("
+                                                      << item.evidence << ")");
+                    countReferenceMigration(entry->owner, MigrationOutcome::Broken);
+                    report(*entry, std::move(item));
+                    continue;
+                }
                 if (!saved.isValid()) {
                     if (entry->storedIndex.empty() || hit == entry->storedIndex) {
                         countReferenceMigration(entry->owner, MigrationOutcome::Kept);
@@ -1384,8 +1532,9 @@ bool solveElementReferences(DocumentObject* feature,
         input.exactPlace = exactPlace;
         input.sameMaker = sameMaker;
         input.sameSource = sameSource;
-        // Nothing is guessed against a failed feature passing its input through (N2's N10)
-        input.targetFailed = feature->isError();
+        // Nothing is guessed against a failed feature passing its input through (N2's N10), nor
+        // under rule PT's veto (PT3, ops#549: tier 3 and XP picks stand only by PT1)
+        input.targetFailed = feature->isError() || ownerPassThrough;
         input.fingerprintOf = fingerprintOf;
         input.hintOf = hintOf;
         // The solver's only topology: the faces an edge bounds, for the continuation.
@@ -1547,6 +1696,50 @@ bool solveElementReferences(DocumentObject* feature,
             const auto& entry = *entries[i];
             const auto& outcome = outcomes[i];
             const std::string& oldName = entry.oldName.empty() ? entry.exactName : entry.oldName;
+            // Rule PT (ops#549): on a pass-through, whatever the solver picks (tier 0 included)
+            // stands only by PT1 (or PT1s): otherwise the entry breaks, its pick listed, and the
+            // reference keeps its record. A collapse and a removal are left alone; an expansion's
+            // pieces are judged one by one.
+            if (const auto rule = passThroughOf(entry); rule != PassThrough::None) {
+                std::vector<std::string> picks;
+                if (outcome.status == Data::SolveStatus::Exact) {
+                    picks.push_back(outcome.element.empty() ? entry.oldIndex : outcome.element);
+                }
+                else if (outcome.status == Data::SolveStatus::Resolved && !outcome.elements.empty()) {
+                    picks = outcome.elements;
+                }
+                else if ((outcome.status == Data::SolveStatus::Resolved && !outcome.collapsed)
+                         || outcome.status == Data::SolveStatus::Guessed) {
+                    picks.push_back(outcome.element);
+                }
+                std::vector<std::string> vetoed;
+                for (const auto& pick : picks) {
+                    if (!passThroughKeeps(entry, rule, pick)) {
+                        vetoed.push_back(pick);
+                    }
+                }
+                if (!vetoed.empty()) {
+                    if (entry.kind == SolverEntry::Kind::Exact) {
+                        SolverResolution resolution;
+                        brokenFor(entry, resolution);
+                        resolutions[entry.prop].push_back(resolution);
+                    }
+                    ReferenceReport::Entry item;
+                    item.status = ReferenceReport::Status::Broken;
+                    item.tier = outcome.tier;
+                    item.evidence = passThroughEvidence(entry, rule);
+                    for (const auto& pick : vetoed) {
+                        item.candidates.emplace_back(pick, nameAt(pick));
+                        item.candidateRoles.emplace_back("pass-through");
+                        item.candidateDistances.push_back(std::numeric_limits<double>::quiet_NaN());
+                    }
+                    FC_LOG(referenceName(entry.prop)
+                           << "[" << entry.index << "]: " << oldName << " broken (" << item.evidence
+                           << ", candidates: " << joinCandidates(vetoed) << ")");
+                    report(entry, std::move(item));
+                    continue;
+                }
+            }
             if (outcome.status == Data::SolveStatus::Exact) {
                 if (!outcome.evidence.empty()) {
                     // Kept by its name, with a reason the solver gives (e.g. its own twin sits
