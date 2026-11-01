@@ -264,7 +264,7 @@ bool parseSources(std::string_view text, std::vector<ElementFingerprint::Source>
         }
         ElementFingerprint::Source source;
         std::string_view key = part.substr(0, colon);
-        if (key.front() == 'L' || key.front() == 'P') {
+        if (key.front() == 'L' || key.front() == 'P' || key.front() == 'M') {
             source.locus = key.front();
             key.remove_prefix(1);
         }
@@ -785,8 +785,11 @@ std::optional<Base::Placement> ElementFingerprint::rigidMotion(
         }
     }
     const Base::Rotation& rotation = motion.getRotation();
-    auto parallel = [&](const Base::Vector3d& a, const Base::Vector3d& b) {
-        return std::atan2((a % b).Length(), std::abs(a * b)) <= angle;
+    // With its sense: a revolve short of a full turn, a pattern, a draft's pull or a pad's
+    // direction reads it (ReviewQuarterRevolveFlipped); a mirror plane's normal has none
+    auto parallel = [&](const Base::Vector3d& a, const Base::Vector3d& b, bool sense) {
+        const double along = a * b;
+        return std::atan2((a % b).Length(), sense ? along : std::abs(along)) <= angle;
     };
     for (std::size_t i = 0; i < saved.size(); ++i) {
         const Source& before = saved[i];
@@ -799,8 +802,9 @@ std::optional<Base::Placement> ElementFingerprint::rigidMotion(
         }
         // A locus stays where it was, and the motion maps it onto itself: a line's direction
         // and a point on it, a plane's normal and a point in it
+        const bool sense = before.locus != 'M';
         if (Base::Distance(before.point, after.point) > distance
-            || !parallel(before.direction, after.direction)) {
+            || !parallel(before.direction, after.direction, sense)) {
             return std::nullopt;
         }
         const Base::Vector3d direction = rotation.multVec(before.direction);
@@ -809,7 +813,7 @@ std::optional<Base::Placement> ElementFingerprint::rigidMotion(
         const Base::Vector3d offset = point - before.point;
         const double off = before.locus == 'L' ? (offset % before.direction).Length()
                                                : std::abs(offset * before.direction);
-        if (!parallel(direction, before.direction) || off > distance) {
+        if (!parallel(direction, before.direction, sense) || off > distance) {
             return std::nullopt;
         }
     }
