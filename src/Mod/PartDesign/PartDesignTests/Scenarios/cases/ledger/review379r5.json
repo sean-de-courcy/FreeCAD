@@ -38,7 +38,7 @@
 "R5LinkedTwinSeam|c1_right|V2s": {"axes": ["M5", "E1"], "classes": ["A", "D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr379-r5", "issue": "ops#503", "tier": "F"},
 "R5PinBottomRimOntoTopRimLong|point_copy0|V2s": {"axes": ["M5", "E1", "E4"], "classes": ["A", "D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr379-r5", "issue": "ops#503", "tier": "F"},
 "R5PinBottomRimOntoTopRimLong|point_copy1|V2s": {"axes": ["M5", "E1", "E4"], "classes": ["A", "D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr379-r5", "issue": "ops#503", "tier": "F"},
-"R5PinBottomRimOntoTopRim|point_copy0|V2s": {"axes": ["M5", "E1", "E4"], "classes": ["A", "D"], "expect": "BROKEN", "expected": "wrong", "found_by": "review pr379-r5", "issue": "ops#503", "tier": "F"},
+"R5PinBottomRimOntoTopRim|point_copy0|V2s": {"axes": ["M5", "E1", "E4"], "classes": ["A", "D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr379-r5", "issue": "ops#503", "tier": "F"},
 "R5PinBottomRimOntoTopRim|point_copy1|V2s": {"axes": ["M5", "E1", "E4"], "classes": ["A", "D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr379-r5", "issue": "ops#503", "tier": "F"},
 "R5TwoPinBodiesBottomRimOntoTopRimLong|point_copy0|V2s": {"axes": ["M5", "E1", "E4"], "classes": ["A", "D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr379-r5", "issue": "ops#503", "tier": "F"},
 "R5TwoPinBodiesBottomRimOntoTopRimLong|point_copy1|V2s": {"axes": ["M5", "E1", "E4"], "classes": ["A", "D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr379-r5", "issue": "ops#503", "tier": "F"}

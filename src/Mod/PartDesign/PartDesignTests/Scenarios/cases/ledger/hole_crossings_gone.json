@@ -1,0 +1,28 @@
+{
+"entries": {
+"HoleBaseWindingReversedLoGone|hi_z0|V2s": {"axes": ["M3", "E1"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r2s", "issue": "ops#553", "tier": "F"},
+"HoleBaseWindingReversedLoGone|hi_z5|V2s": {"axes": ["M3", "E1"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r2s", "issue": "ops#553", "tier": "F"},
+"HoleBaseWindingReversedLoGone|lo_z0|V2s": {"axes": ["M3", "E1"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr390-r2s", "issue": "ops#553", "tier": "F"},
+"HoleBaseWindingReversedLoGone|lo_z5|V2s": {"axes": ["M3", "E1"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr390-r2s", "issue": "ops#553", "tier": "F"},
+"HoleClockwise|hi_z0|V2s": {"axes": ["M3", "E1"], "classes": ["D"], "expect": "CORRECT", "expected": "quiet", "found_by": "review pr390-r2s", "issue": "ops#553", "tier": "F"},
+"HoleClockwise|hi_z5|V2s": {"axes": ["M3", "E1"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr390-r2s", "issue": "ops#553", "tier": "F"},
+"HoleClockwise|lo_z0|V2s": {"axes": ["M3", "E1"], "classes": ["D"], "expect": "CORRECT", "expected": "quiet", "found_by": "review pr390-r2s", "issue": "ops#553", "tier": "F"},
+"HoleClockwise|lo_z5|V2s": {"axes": ["M3", "E1"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r2s", "issue": "ops#553", "tier": "F"},
+"HoleHiGoneLoLandsOnHi|hi_z0|V2s": {"axes": ["M3", "E1"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr390-r2s", "issue": "ops#553", "tier": "F"},
+"HoleHiGoneLoLandsOnHi|hi_z5|V2s": {"axes": ["M3", "E1"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr390-r2s", "issue": "ops#553", "tier": "F"},
+"HoleHiGoneLoLandsOnHi|lo_z0|V2s": {"axes": ["M3", "E1"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r2s", "issue": "ops#553", "tier": "F"},
+"HoleHiGoneLoLandsOnHi|lo_z5|V2s": {"axes": ["M3", "E1"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r2s", "issue": "ops#553", "tier": "F"},
+"HoleLoGoneHiLandsOnLo|hi_z0|V2s": {"axes": ["M3", "E1"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r2s", "issue": "ops#553", "tier": "F"},
+"HoleLoGoneHiLandsOnLo|hi_z5|V2s": {"axes": ["M3", "E1"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r2s", "issue": "ops#553", "tier": "F"},
+"HoleLoGoneHiLandsOnLo|lo_z0|V2s": {"axes": ["M3", "E1"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr390-r2s", "issue": "ops#553", "tier": "F"},
+"HoleLoGoneHiLandsOnLo|lo_z5|V2s": {"axes": ["M3", "E1"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr390-r2s", "issue": "ops#553", "tier": "F"},
+"HoleObliqueLoGone|hi_z0|V2s": {"axes": ["M3", "E1"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr390-r2s", "issue": "ops#553", "tier": "F"},
+"HoleObliqueLoGone|hi_z5|V2s": {"axes": ["M3", "E1"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr390-r2s", "issue": "ops#553", "tier": "F"},
+"HoleObliqueLoGone|lo_z0|V2s": {"axes": ["M3", "E1"], "classes": ["D"], "expect": "BROKEN", "expected": "wrong", "found_by": "review pr390-r2s", "issue": "ops#553", "tier": "F"},
+"HoleObliqueLoGone|lo_z5|V2s": {"axes": ["M3", "E1"], "classes": ["D"], "expect": "BROKEN", "expected": "wrong", "found_by": "review pr390-r2s", "issue": "ops#553", "tier": "F"},
+"HoleRedrawnLoGone|hi_z0|V2s": {"axes": ["M3", "E1"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr390-r2s", "issue": "ops#553", "tier": "F"},
+"HoleRedrawnLoGone|hi_z5|V2s": {"axes": ["M3", "E1"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr390-r2s", "issue": "ops#553", "tier": "F"},
+"HoleRedrawnLoGone|lo_z0|V2s": {"axes": ["M3", "E1"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr390-r2s", "issue": "ops#553", "tier": "F"},
+"HoleRedrawnLoGone|lo_z5|V2s": {"axes": ["M3", "E1"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr390-r2s", "issue": "ops#553", "tier": "F"}
+}
+}
