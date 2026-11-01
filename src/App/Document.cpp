@@ -82,6 +82,7 @@
 #include "AutoTransaction.h"
 #include "BackupPolicy.h"
 #include "ElementSolverBatch.h"
+#include "ElementSolverEdits.h"
 #include "ExpressionParser.h"
 #include "GeoFeature.h"
 #include "GroupExtension.h"
@@ -1677,6 +1678,8 @@ void Document::onBeforeChangeProperty(const TransactionalObject* Who, const Prop
 
 void Document::onChangedProperty(const DocumentObject* Who, const Property* What)
 {
+    // An edit since the open, for the naming migration (ops#475)
+    App::noteChangeSinceOpen(Who, What);
     signalChangedObject(*Who, *What);
 }
 
@@ -1816,6 +1819,7 @@ Document::Document(const char* documentName)
 
 Document::~Document()
 {
+    App::forgetEditsSinceOpen(this);
 #ifdef FC_LOGUPDATECHAIN
     Console().log("-App::Document: %s %p\n", getName(), this);
 #endif
@@ -2612,6 +2616,8 @@ std::vector<DocumentObject*> Document::readObjects(Base::XMLReader& reader)
                 if (reader.hasAttribute("Touched")) {
                     if (reader.getAttribute<long>("Touched") != 0) {
                         d->touchedObjs.insert(obj);
+                        // Saved touched: an edit the file brings (ops#475)
+                        App::noteEditSinceOpen(obj);
                     }
                 }
                 if (reader.hasAttribute("Invalid")) {
@@ -3270,6 +3276,7 @@ void Document::restore(const char* filename,
     }
 
     GetApplication().signalStartRestoreDocument(*this);
+    App::forgetEditsSinceOpen(this);
     setStatus(Document::Restoring, true);
 
     d->partialLoadObjects.clear();
