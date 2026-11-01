@@ -10483,4 +10483,9 @@ TEST(PassThroughWorldSwitched, theRecordsSuppressedSetAgainstTheChain)
     EXPECT_FALSE(Data::passThroughWorldSwitched({}, {{3, false}}));
     EXPECT_TRUE(Data::passThroughWorldSwitched({}, {{3, true}}));
     EXPECT_FALSE(Data::passThroughWorldSwitched({}, {}));
+    //   a closure too large keeps only the flagged marks (decision 216): read the same way
+    const std::vector<Mark> partial {{3, -1, true}};
+    EXPECT_FALSE(Data::passThroughWorldSwitched(partial, {{3, true}, {5, false}}));
+    EXPECT_TRUE(Data::passThroughWorldSwitched(partial, {{3, false}, {5, false}}));
+    EXPECT_TRUE(Data::passThroughWorldSwitched(partial, {{3, true}, {5, true}}));
 }

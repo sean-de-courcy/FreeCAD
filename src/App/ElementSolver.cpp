@@ -14,6 +14,7 @@
 #include <set>
 #include <sstream>
 #include <tuple>
+#include <unordered_map>
 #include <utility>
 
 #include <Base/Console.h>
@@ -2392,14 +2393,19 @@ bool passThroughKeeps(const ElementFingerprint& saved,
 bool passThroughWorldSwitched(const std::vector<ElementFingerprint::Mark>& marks,
                               const std::vector<std::pair<long, bool>>& chain)
 {
+    if (chain.empty()) {
+        return false;
+    }
+    // Per ID: flagged, unflagged
+    std::unordered_map<long, std::pair<bool, bool>> flags;
+    for (const auto& mark : marks) {
+        auto& [flagged, unflagged] = flags[mark.tag];
+        (mark.suppressed ? flagged : unflagged) = true;
+    }
     for (const auto& [tag, suppressed] : chain) {
-        bool flagged = false;
-        bool unflagged = false;
-        for (const auto& mark : marks) {
-            if (mark.tag == tag) {
-                (mark.suppressed ? flagged : unflagged) = true;
-            }
-        }
+        const auto it = flags.find(tag);
+        const bool flagged = it != flags.end() && it->second.first;
+        const bool unflagged = it != flags.end() && it->second.second;
         // Both: two objects share the ID (another document's, F5), and the record can't tell
         // which was the chain's
         if ((flagged && unflagged) || flagged != suppressed) {
@@ -3178,7 +3184,9 @@ PlaceVerdict placeVerdict(const ElementFingerprint& saved,
         && !sidesAgree(saved.sides, pick.sides, tolerances.angle)) {
         return say(PlaceVerdict::OtherSide, "its sides are not the old element's");
     }
-    if (!lostSource || saved.marks.empty() || oldName.empty()) {
+    // A closure too large has the suppressed objects' marks alone (ops#549, decision 216): as
+    // without marks
+    if (!lostSource || saved.marks.empty() || saved.marksPartial || oldName.empty()) {
         return say(PlaceVerdict::Unjudged, {});
     }
     auto markOf = [&](std::string_view tag) -> const ElementFingerprint::Mark* {

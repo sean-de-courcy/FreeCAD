@@ -1026,6 +1026,8 @@ bool solveElementReferences(DocumentObject* feature,
         }
         return *chain;
     };
+    // Per entry, read once: the record's marks can list thousands of objects
+    std::map<const SolverEntry*, PassThrough> passThroughs;
     auto passThroughOf = [&](const SolverEntry& entry) {
         if (readChain().empty()) {
             return PassThrough::None;
@@ -1033,9 +1035,14 @@ bool solveElementReferences(DocumentObject* feature,
         if (chainFailure) {
             return PassThrough::Failure;
         }
-        const auto saved = Data::ElementFingerprint::fromString(entry.oldFingerprint);
-        return Data::passThroughWorldSwitched(saved.marks, chainWorld) ? PassThrough::Switch
-                                                                       : PassThrough::None;
+        auto [it, added] = passThroughs.emplace(&entry, PassThrough::None);
+        if (added) {
+            const auto saved = Data::ElementFingerprint::fromString(entry.oldFingerprint);
+            if (Data::passThroughWorldSwitched(saved.marks, chainWorld)) {
+                it->second = PassThrough::Switch;
+            }
+        }
+        return it->second;
     };
     // PT1 or PT1s for the pick `index` of `entry`, under `rule`. Any pick at the saved place.
     // Covering or within the saved element only for the saved name's own element (tier 0: the
@@ -1138,7 +1145,7 @@ bool solveElementReferences(DocumentObject* feature,
             continue;
         }
 
-        auto report =[&](const SolverEntry& entry, ReferenceReport::Entry item) {
+        auto report = [&](const SolverEntry& entry, ReferenceReport::Entry item) {
             item.index = entry.index;
             item.oldName = entry.oldName.empty() ? entry.exactName : entry.oldName;
             item.oldIndex = entry.oldIndex;

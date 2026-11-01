@@ -783,3 +783,39 @@ TEST(ElementFingerprint, aMarksSuppressedFlag)
     other.replace(other.find("12:16:s"), 7, "12:16:x");
     EXPECT_FALSE(ElementFingerprint::fromString(other).isValid());
 }
+
+TEST(ElementFingerprint, aClosureTooLargeKeepsItsSuppressedMarks)
+{
+    // ops#549, PLAN decision 216: a closure of more than MaxMarks objects writes `+` and only the
+    // suppressed objects' marks, so the record's world survives; D2 judges by none of them
+    ElementFingerprint corner;
+    corner.type = 'V';
+    corner.kind = "Point";
+    corner.center = Base::Vector3d(0, 0, 10);
+    corner.marksPartial = true;
+    corner.marks = {{12, 16, true}, {14, -1, true}};
+    const std::string text = corner.toString();
+    EXPECT_NE(text.find("|+/12:16:s/14:_:s"), std::string::npos) << text;
+    auto parsed = ElementFingerprint::fromString(text);
+    ASSERT_TRUE(parsed.isValid());
+    EXPECT_TRUE(parsed.marksPartial);
+    EXPECT_EQ(parsed, corner);
+    auto whole = corner;
+    whole.marksPartial = false;
+    EXPECT_FALSE(whole == corner);
+    //   nothing suppressed: `+` alone
+    corner.marks.clear();
+    const std::string none = corner.toString();
+    EXPECT_EQ(none.substr(none.size() - 2), "|+") << none;
+    parsed = ElementFingerprint::fromString(none);
+    ASSERT_TRUE(parsed.isValid());
+    EXPECT_TRUE(parsed.marksPartial);
+    EXPECT_TRUE(parsed.marks.empty());
+    //   an unsuppressed object's mark in a cut-down list, or `+` after an entry: malformed
+    std::string unflagged = text;
+    unflagged.replace(unflagged.find("14:_:s"), 6, "14:_");
+    EXPECT_FALSE(ElementFingerprint::fromString(unflagged).isValid());
+    std::string late = text;
+    late.replace(late.find("+/12:16:s"), 9, "12:16:s/+");
+    EXPECT_FALSE(ElementFingerprint::fromString(late).isValid());
+}
