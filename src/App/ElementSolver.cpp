@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <deque>
 #include <iterator>
 #include <limits>
 #include <locale>
@@ -4436,18 +4437,57 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         const char* guessRole = "structural";
     };
 
-    // The members' saved fingerprint, if they all hold the same valid one.
+    // The members' saved fingerprint, if they all hold the same valid one. Their marks may differ
+    // by the root they were taken from (ops#526 D2: one owner holding the edge through the Pad
+    // and through the Body, whose closure adds the Body and its Origin): the members are
+    // compared without them and judged on their union, per object the highest mark (a source is
+    // "there before" if any member's record had it). A member without marks leaves none (D1's
+    // lines).
+    std::deque<ElementFingerprint> mergedRecords;
     auto savedFingerprint = [&](const std::vector<int>& members) -> const ElementFingerprint* {
         const ElementFingerprint& first = input.entries[members.front()].fingerprint;
         if (!first.isValid()) {
             return nullptr;
         }
+        bool sameMarks = true;
         for (int member : members) {
-            if (input.entries[member].fingerprint != first) {
+            const ElementFingerprint& other = input.entries[member].fingerprint;
+            if (other.marks == first.marks) {
+                if (other != first) {
+                    return nullptr;
+                }
+                continue;
+            }
+            sameMarks = false;
+            auto unmarked = other;
+            unmarked.marks = first.marks;
+            if (unmarked != first) {
                 return nullptr;
             }
         }
-        return &first;
+        if (sameMarks) {
+            return &first;
+        }
+        auto& merged = mergedRecords.emplace_back(first);
+        std::map<long, long> highest;
+        for (int member : members) {
+            const auto& marks = input.entries[member].fingerprint.marks;
+            if (marks.empty()) {
+                merged.marks.clear();
+                return &merged;
+            }
+            for (const auto& mark : marks) {
+                auto [it, added] = highest.emplace(mark.tag, mark.mark);
+                if (!added) {
+                    it->second = std::max(it->second, mark.mark);
+                }
+            }
+        }
+        merged.marks.clear();
+        for (const auto& [tag, mark] : highest) {
+            merged.marks.push_back({tag, mark});
+        }
+        return &merged;
     };
     std::vector<GroupState> states;
     states.reserve(groups.size());
@@ -5473,12 +5513,21 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 const bool there
                     = atSamePlace(*saved, own, input.diagonal, input.tolerances, input.continuationDistance);
                 // The other allowed elements that may sit at the saved place (the hint first,
-                // as the moved check scans: only those are fingerprinted)
+                // as the moved check scans: only those are fingerprinted), made in the old
+                // name's copies: another copy's element there (a revolution's side two, marked
+                // CPY, under side one's far edge that tier 1 kept) is no occupant of the place,
+                // and geometry would take it, quietly, where D1 breaks
+                // (RevolutionSideTwoOuterEdgeAfterSideOneToFace, ops#526 D2d)
                 std::vector<int> open;
                 if (!there) {
+                    const auto oldCopies = copyContexts(oldName);
                     for (std::size_t j = 0; j < pool.elements.size(); ++j) {
+                        const auto& others = pool.elements[j].names;
                         if (allowed[j] && static_cast<int>(j) != k
-                            && mayBeAtSavedPlace(*saved, pool.elements[j].index)) {
+                            && mayBeAtSavedPlace(*saved, pool.elements[j].index)
+                            && std::any_of(others.begin(), others.end(), [&](const auto& n) {
+                                   return copyContexts(n) == oldCopies;
+                               })) {
                             open.push_back(static_cast<int>(j));
                         }
                     }
