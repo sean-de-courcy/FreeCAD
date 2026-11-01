@@ -499,6 +499,22 @@ AppExport bool isMarkedPieceName(std::string_view name);
  */
 AppExport bool isMarkedPieceOf(std::string_view name, long tag);
 
+/** The tag of the feature that made \a name's far piece or far element (ops#524, PLAN decision
+ * 182, N2): its first projection's section's (PRJ), marked or not; 0 for none. A later feature of
+ * a body passes the piece's name on, so the tag names the extrusion up to the faces. 0 too for a
+ * copy of the piece, a copy section (a pattern's or a mirror's instance, a boundary, a second
+ * side) after the projection's: the copy's place isn't the one the extrusion made, so no up-to
+ * face of the extrusion tells anything about it (review prA1c-r1, PLAN decision 199 (2)).
+ */
+AppExport long projectionTag(std::string_view name);
+
+/** The point of \a fingerprint whose up-to faces a far piece's fingerprint saves (ops#522, ops#524):
+ * a face's inside point, else its centre; an edge's point on it, the middle of its outline (a
+ * line's two ends: their middle; a curve's points: the middle one), else its centre. Empty without
+ * one. An arc's centre of mass lies off the arc.
+ */
+AppExport std::optional<Base::Vector3d> upToPointOf(const ElementFingerprint& fingerprint);
+
 /** True if \a name is \a other up to the duplicate counter and not \a other itself: for ordered
  * names (isOrderedName()), twins (ops#360, PR 340 round 5, the fingerprint's twin centroid).
  * With \a copySiblings, also another copy of it by a copy maker of the same kind, or its
@@ -774,11 +790,16 @@ struct AppExport SolveInput
     /// place. Empty: the old piece's own normal stands for it, and a straight far edge's piece
     /// is seen along its line only.
     std::optional<Base::Vector3d> sweep;
+    /// The unit direction the far piece named \a name was swept along, either sense (ops#524, PLAN
+    /// decision 182, N2): the extrusion's that made it, which may come before the target (a later
+    /// feature passes its pieces on). Empty when there is none. Unset: \a sweep stands for it.
+    std::function<std::optional<Base::Vector3d>(const std::string& name)> sweepOf;
     /// The up-to faces that the line along the sweep through the point meets now, as a far
     /// piece's fingerprint saves them, and every up-to face in \a all (ops#522, PLAN decision
-    /// 168): false when it can't be told. Unset: none, so no far cap or edge made whole again
-    /// takes a piece.
-    std::function<bool(const Base::Vector3d& point,
+    /// 168), for the far piece named \a name (ops#524: its extrusion's up-to faces): false when it
+    /// can't be told. Unset: none, so no far cap or edge made whole again takes a piece.
+    std::function<bool(const std::string& name,
+                       const Base::Vector3d& point,
                        std::vector<ElementFingerprint::UpToFace>& faces,
                        std::vector<ElementFingerprint::UpToFace>& all)>
         upToFacesAt;
@@ -787,6 +808,16 @@ struct AppExport SolveInput
     /// a later Pad's shape keeps an earlier Pad's far pieces, and upToFacesAt measures the later
     /// Pad's up-to faces (ops#522, review pr398-r3). 0: no piece is the target's.
     long targetTag = 0;
+
+    /// Whether the far piece named \a name, whose point is \a point now, moved within the up-to
+    /// face \a saved from the foot saved with it (ops#524, PLAN decisions 182 and 199 (3)): true
+    /// when the straight path between them, seen along the sweep, stays inside that one face,
+    /// false when it leaves it, empty when that can't be told (App::ElementUpToPathFunction).
+    /// Unset: a lone piece that moved alone stands as before.
+    std::function<std::optional<bool>(const std::string& name,
+                                      const ElementFingerprint::UpToFace& saved,
+                                      const Base::Vector3d& point)>
+        upToPathInside;
 };
 
 enum class SolveStatus

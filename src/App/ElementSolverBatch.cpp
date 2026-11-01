@@ -44,6 +44,7 @@ ElementHoldsPointFunction elementHoldsPointFunction = nullptr;
 ElementHoldsPointAlongFunction elementHoldsPointAlongFunction = nullptr;
 ElementSweepDirectionFunction elementSweepDirectionFunction = nullptr;
 ElementUpToFacesFunction elementUpToFacesFunction = nullptr;
+ElementUpToPathFunction elementUpToPathFunction = nullptr;
 
 struct MigrationCounts
 {
@@ -78,6 +79,11 @@ void setElementSweepDirectionFunction(ElementSweepDirectionFunction function)
 void setElementUpToFacesFunction(ElementUpToFacesFunction function)
 {
     elementUpToFacesFunction = function;
+}
+
+void setElementUpToPathFunction(ElementUpToPathFunction function)
+{
+    elementUpToPathFunction = function;
 }
 
 void countReferenceMigration(const DocumentObject* owner, MigrationOutcome outcome)
@@ -1414,17 +1420,36 @@ bool solveElementReferences(DocumentObject* feature,
             };
         }
         Base::Vector3d sweep;
-        if (elementSweepDirectionFunction && elementSweepDirectionFunction(geo, sweep)
+        if (elementSweepDirectionFunction && elementSweepDirectionFunction(geo, nullptr, sweep)
             && sweep.Length() > 0.0) {
             input.sweep = sweep.Normalize();
         }
+        if (elementSweepDirectionFunction) {
+            // A far piece's own: the extrusion that made it, maybe before the target (ops#524)
+            input.sweepOf = [geo](const std::string& name) -> std::optional<Base::Vector3d> {
+                Base::Vector3d direction;
+                if (!elementSweepDirectionFunction(geo, name.c_str(), direction)
+                    || direction.Length() <= 0.0) {
+                    return std::nullopt;
+                }
+                return direction.Normalize();
+            };
+        }
         if (elementUpToFacesFunction) {
-            input.upToFacesAt = [geo](const Base::Vector3d& point,
+            input.upToFacesAt = [geo](const std::string& name,
+                                      const Base::Vector3d& point,
                                       std::vector<Data::ElementFingerprint::UpToFace>& faces,
                                       std::vector<Data::ElementFingerprint::UpToFace>& all) {
-                return elementUpToFacesFunction(geo, point, faces, &all);
+                return elementUpToFacesFunction(geo, name.c_str(), point, faces, &all);
             };
             input.targetTag = geo->getID();
+        }
+        if (elementUpToPathFunction) {
+            input.upToPathInside = [geo](const std::string& name,
+                                         const Data::ElementFingerprint::UpToFace& saved,
+                                         const Base::Vector3d& point) {
+                return elementUpToPathFunction(geo, name.c_str(), saved, point);
+            };
         }
         for (const auto* entry : entries) {
             Data::SolveInput::Entry item;
@@ -2016,9 +2041,9 @@ bool elementUpToFaces(
     faces.clear();
     const PropertyComplexGeoData* prop = geo ? geo->getPropertyOfGeometry() : nullptr;
     const Data::ComplexGeoData* data = prop ? prop->getComplexData() : nullptr;
+    const auto point = Data::upToPointOf(fingerprint);
     if (!elementUpToFacesFunction || !data || !element || !element[0]
-        || (fingerprint.type != 'F' && fingerprint.type != 'E')
-        || (!fingerprint.inside && !fingerprint.center)) {
+        || (fingerprint.type != 'F' && fingerprint.type != 'E') || !point) {
         return false;
     }
     Data::IndexedName indexed(element);
@@ -2027,21 +2052,26 @@ bool elementUpToFaces(
     }
     // A far piece: a marked projection, as the made-whole rule's old name is (solveOwner()), made
     // by this feature. A later Pad's shape keeps an earlier Pad's pieces under their names, and
-    // its own up-to faces aren't theirs (review pr398-r3)
+    // its own up-to faces aren't theirs (review pr398-r3). The piece's name names the extrusion
+    // that made it (ops#524)
     const long tag = geo->getID();
-    const auto names = data->getElementMappedNames(indexed);
-    if (std::none_of(names.begin(), names.end(), [tag](const auto& mapped) {
-            return Data::isMarkedPieceOf(plainName(mapped.first.toString()), tag);
-        })) {
+    std::string own;
+    for (const auto& mapped : data->getElementMappedNames(indexed)) {
+        std::string name = plainName(mapped.first.toString());
+        if (Data::isMarkedPieceOf(name, tag)) {
+            own = std::move(name);
+            break;
+        }
+    }
+    if (own.empty()) {
         return false;
     }
-    const Base::Vector3d& point = fingerprint.inside ? *fingerprint.inside : *fingerprint.center;
-    // An edge's point, its centre of mass, must lie on the edge: an arc's lies off it, over
-    // another plate than the one the arc lies on (review pr398-r3). Can't be told otherwise.
+    // An edge's point must lie on the edge: an arc's centre of mass lies off it, over another
+    // plate than the one the arc lies on (review pr398-r3). Can't be told otherwise.
     const double diagonal = std::max(1.0, data->getBoundBox().CalcDiagonalLength());
     if (fingerprint.type == 'E') {
         if (!elementHoldsPointFunction
-            || !elementHoldsPointFunction(geo, element, point, 1e-6 * diagonal)) {
+            || !elementHoldsPointFunction(geo, element, *point, 1e-6 * diagonal)) {
             return false;
         }
     }
@@ -2051,11 +2081,11 @@ bool elementUpToFaces(
     Base::Vector3d sweep;
     if (fingerprint.type == 'F'
         && (!elementSweepDirectionFunction || !elementHoldsPointAlongFunction
-            || !elementSweepDirectionFunction(geo, sweep) || sweep.Length() <= 0.0
-            || !elementHoldsPointAlongFunction(geo, element, point, sweep.Normalize(), diagonal))) {
+            || !elementSweepDirectionFunction(geo, own.c_str(), sweep) || sweep.Length() <= 0.0
+            || !elementHoldsPointAlongFunction(geo, element, *point, sweep.Normalize(), diagonal))) {
         return false;
     }
-    return elementUpToFacesFunction(geo, point, faces, nullptr);
+    return elementUpToFacesFunction(geo, own.c_str(), *point, faces, nullptr);
 }
 
 }  // namespace App
