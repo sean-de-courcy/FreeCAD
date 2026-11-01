@@ -121,7 +121,10 @@ namespace Data
  *   object's ID as the names carry it and its highest geometry ID when the record was taken (a
  *   sketch's), or `_` for an object without geometry IDs. Only a reference's record has them. The
  *   solver tells an element drawn again at a vacated place (its sources new) from a sibling moved
- *   there (its sources were in the model before) by them.
+ *   there (its sources were in the model before) by them. `<tag>:<mark>:s` (ops#549 PS): the
+ *   object's output was its base, passed through while suppressed. A closure of more than MaxMarks
+ *   objects writes `+`, then `/` and only the `:s` entries: the record's world without the rest
+ *   (ops#549, PLAN decision 216).
  *
  * Numbers have 12 significant digits, in the classic locale, so the text is the same on every
  * platform and in every locale. A reader takes a version it doesn't know as no fingerprint.
@@ -239,6 +242,10 @@ struct AppExport ElementFingerprint
     /// The marks of the target's closure (version 7): only a reference's record has them; empty
     /// otherwise and in an older fingerprint.
     std::vector<Mark> marks;
+    /// The closure had more than MaxMarks objects: `marks` holds only the suppressed ones, the
+    /// record's world (ops#549, PLAN decision 216). The marks then say nothing of the others, and
+    /// D2 judges by none.
+    bool marksPartial = false;
 
     /// At most this many points in an outline: the reader takes more as a malformed field.
     static constexpr std::size_t MaxOutline = 256;
@@ -287,7 +294,7 @@ struct AppExport ElementFingerprint
             && a.extentMin == b.extentMin && a.extentMax == b.extentMax
             && a.twinCentroid == b.twinCentroid && a.twinCount == b.twinCount
             && a.outline == b.outline && a.inside == b.inside && a.upToFaces == b.upToFaces
-            && a.sides == b.sides && a.marks == b.marks;
+            && a.sides == b.sides && a.marks == b.marks && a.marksPartial == b.marksPartial;
     }
     friend bool operator!=(const ElementFingerprint& a, const ElementFingerprint& b)
     {

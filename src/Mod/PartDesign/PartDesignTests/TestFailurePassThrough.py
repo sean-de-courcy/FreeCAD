@@ -52,8 +52,8 @@ TOL = 1e-6
 
 
 def elementWhere(shape, kind, test):
-    """The name of the one element of the kind ("Face", "Edge") that passes the test."""
-    elements = shape.Faces if kind == "Face" else shape.Edges
+    """The name of the one element of the kind ("Face", "Edge", "Vertex") that passes the test."""
+    elements = {"Face": shape.Faces, "Edge": shape.Edges, "Vertex": shape.Vertexes}[kind]
     found = [i + 1 for i, e in enumerate(elements) if test(e)]
     if len(found) != 1:
         raise AssertionError(f"{len(found)} {kind}s match, expected one")
@@ -682,7 +682,7 @@ class FailurePassThroughBase:
         top = elementWhere(
             target.Shape,
             "Face",
-            lambda f: f.normalAt(0, 0).z > 1 - TOL and abs(f.CenterOfMass.x - 10) < 1,
+            lambda f: f.normalAt(0, 0).z > 1 - TOL and abs(f.CenterOfMass.z - 10) < TOL,
         )
         sketch = models.sketch(self.doc, name, models.rectangle(1, 1, 3, 3))
         self.body.addObject(sketch)
@@ -760,6 +760,8 @@ class FailurePassThroughBase:
         """A sketch on the top a suppressed hole cut into stays on the block's top, follows the
         block while the hole stays suppressed, and stays on the top when the hole is back
         (ops#549 PS, decision 213: suppression doesn't stop editing)."""
+        if not self.solver:
+            self.skipTest("rule PS is the reference solver's")
         self.block()
         hole = self.hole()
         sketch = self.topSketch(hole)
@@ -776,6 +778,8 @@ class FailurePassThroughBase:
         self.recompute()
         self.assertAt(sketch, 14)
 
+        # The hole's sketch follows the top, and the hole is back in it
+        self.doc.getObject("HoleSketch").Placement = App.Placement(V(0, 0, 14), App.Rotation())
         hole.Suppressed = False
         self.recompute()
         self.assertValid(hole)
@@ -812,9 +816,42 @@ class FailurePassThroughBase:
         self.assertValid(sweep, point)
         self.assertLess((point.Placement.Base - V(-2, -2, -2)).Length, 1e-6)
 
+    def testHugeClosureKeepsTheRecordsWorld(self):
+        """PLAN decision 216: a record whose target is built from more objects than its marks hold
+        (4096) keeps the suppressed ones' flags. A datum taken on the Plate's corner while the
+        Pipe is suppressed (the vertex whose bare name the Pipe's corner carries) breaks when the
+        Pipe is back, not quietly onto the Pipe's corner (C1 reversed)."""
+        if not self.solver:
+            self.skipTest("rule PS is the reference solver's")
+        plate, sweep, point = self.ringSweep()
+        many = self.doc.addObject("App::DocumentObjectGroup", "Many")
+        many.Group = [self.doc.addObject("App::DocumentObjectGroup", f"M{i}") for i in range(4100)]
+        sweep.addProperty("App::PropertyLinkGlobal", "Extra")
+        sweep.Extra = many
+        sweep.Suppressed = True
+        self.recompute()
+        self.assertValid(sweep)
+        corner = elementWhere(sweep.Shape, "Vertex", lambda v: (v.Point - V(2, 2, 0)).Length < TOL)
+        late = self.body.newObject("PartDesign::Point", "LatePoint")
+        late.AttachmentSupport = [(sweep, corner)]
+        late.MapMode = "Vertex"
+        self.recompute()
+        self.assertValid(late)
+
+        sweep.Suppressed = False
+        self.recompute()
+        self.assertValid(sweep)
+        self.assertFalse(
+            late.isValid() and (late.Placement.Base - V(-2, -2, -2)).Length < 1e-6,
+            "the datum taken on the Plate's corner moved to the Pipe's corner",
+        )
+        self.assertFalse(late.isValid(), "the Plate's corner is gone with the Pipe back")
+
     def testReopenedWhileSuppressed(self):
         """Saved and reopened with the hole suppressed, a sketch on the top still follows the
         block: the record keeps the world it was taken in (ops#549 PS)."""
+        if not self.solver:
+            self.skipTest("rule PS is the reference solver's")
         self.block()
         hole = self.hole()
         self.topSketch(hole)
@@ -827,10 +864,11 @@ class FailurePassThroughBase:
         self.doc.saveAs(path)
         App.closeDocument(self.doc.Name)
         self.doc = App.openDocument(path)
+        name = self.doc.Name
+        self.addCleanup(lambda: name in App.listDocuments() and App.closeDocument(name))
         self.doc.getObject("Block").Length = 12
         self.recompute()
         self.assertAt(self.doc.getObject("TopSketch"), 12)
-        App.closeDocument(self.doc.Name)
 
 
 @unittest.skipUnless(dump.OLD_FILE_TESTS, dump.OLD_FILE_SKIP)
