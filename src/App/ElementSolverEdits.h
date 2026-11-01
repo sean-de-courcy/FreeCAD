@@ -21,7 +21,8 @@ void noteEditSinceOpen(const DocumentObject* obj);
 /// \a prop of \a obj changed: an edit unless restored, recomputed, written by the reference
 /// solver, an output or transient (a placement counts, though it needs no recompute).
 void noteChangeSinceOpen(const DocumentObject* obj, const Property* prop);
-/// Whether \a feature or anything it depends on was edited since its document was opened.
+/// Whether \a feature or anything it depends on was edited since its document was opened, or
+/// depends on another document's object (whose edits no record here shows).
 bool editedSinceOpen(const DocumentObject* feature);
 
 }  // namespace App
