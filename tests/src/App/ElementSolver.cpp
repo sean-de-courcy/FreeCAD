@@ -2263,6 +2263,35 @@ TEST(SolveOwner, geometryNeverOverridesASingleSurvivor)
     }
 }
 
+TEST(SolveOwner, survivorMovedLeavesTierOneOnlyForAnOccupantOfItsCopies)
+{
+    // Tier 1's gate (ii) (ops#526 D2): the lone survivor moved while an element of the record's
+    // kind and size sits at the saved place, so it leaves tier 1 for geometry. An occupant made in
+    // another copy than the old name (a revolution's side two, marked CPY, under side one's far
+    // edge: RevolutionSideTwoOuterEdgeAfterSideOneToFace, quiet wrong where D1 breaks) doesn't
+    // count: tier 1 keeps its survivor, D1's lines.
+    Placed p;
+    auto input = [&](const std::string& occupant) {
+        SolveInput input;
+        input.diagonal = 30.0;
+        input.pool["Face"] = {element("Face1", {p.names.side}),
+                              element("Face2", {p.names.newTop}),
+                              element("Face3", {occupant})};
+        input.entries = {missing(p.names.oldTop)};
+        input.entries[0].fingerprint = p.top;
+        measure(input, {{"Face1", p.side}, {"Face2", p.topAt(9)}, {"Face3", p.top}}, nullptr);
+        return input;
+    };
+
+    auto outcome = Data::solveOwner(input(p.names.unrelated))[0];
+    EXPECT_FALSE(outcome.status == SolveStatus::Resolved && outcome.tier == 1) << outcome.evidence;
+
+    outcome = Data::solveOwner(input(piece(p.names.unrelated, 9, "CPY", 1, 'F')))[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Resolved) << outcome.evidence;
+    EXPECT_EQ(outcome.element, "Face2");
+    EXPECT_EQ(outcome.tier, 1);
+}
+
 TEST(SolveOwner, patternInstanceSiblingNeverResolves)
 {
     // ops#55, a LinearPattern in Extent mode: 3 occurrences -> 2 moves instance 2 onto instance
@@ -2648,6 +2677,14 @@ TEST(SolveOwner, geometryNeedsOneFingerprintForSameNamedReferences)
 
     input.entries[1].fingerprint = p.top;
     EXPECT_EQ(Data::solveOwner(input)[1].element, "Face2");
+
+    //   the same fingerprint with other marks (ops#526 D2: one owner holding the face through the
+    //   Pad and through the Body, whose closure adds the Body and its Origin): one record
+    input.entries[0].fingerprint.marks = {{5, 4}, {7, -1}};
+    input.entries[1].fingerprint.marks = {{5, 4}, {7, -1}, {8, -1}};
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].element, "Face2") << outcomes[0].evidence;
+    EXPECT_EQ(outcomes[1].element, "Face2") << outcomes[1].evidence;
 }
 
 // ---------------------------------------------------------------------------------------------

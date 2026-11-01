@@ -1121,11 +1121,15 @@ bool PropertyLinkBase::_updateElementFingerprints(App::DocumentObject* feature,
         // included (ops#522): a Pad's Placement set before its shape is made again
         // (positionByPrevious()) gives the old shape the new placement, and a gone piece's point,
         // carried by it, already lies over the next plate. A piece saved without up-to faces (three
-        // under its point, or a fingerprint from before them) gained that plate's (review prA1b-r1)
+        // under its point, or a fingerprint from before them) gained that plate's (review prA1b-r1).
+        // The marks too (ops#526 D2): they date the model the element was taken from, so they
+        // change only with the element. A Body recompute before the solve, the element unchanged
+        // and a sketch line redrawn, took the redraw's new line as there before.
         const auto old = Data::ElementFingerprint::fromString(fingerprints[i]);
         if (old.isValid()) {
             auto now = Data::ElementFingerprint::fromString(text);
             now.upToFaces = old.upToFaces;
+            now.marks = old.marks;
             if (now == old) {
                 continue;
             }
