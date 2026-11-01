@@ -1,0 +1,14 @@
+{
+"entries": {
+"BothStay|left|V2s": {"axes": ["M2", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr390-r2gs", "issue": "ops#468", "tier": "F"},
+"BothStay|right|V2s": {"axes": ["M2", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r2gs", "issue": "ops#468", "tier": "F"},
+"LeftPieceGoesLoneRef|right|V2s": {"axes": ["M2", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr390-r2gs", "issue": "ops#468", "tier": "F"},
+"LeftPieceGoes|left|V2s": {"axes": ["M2", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr390-r2gs", "issue": "ops#468", "tier": "F"},
+"LeftPieceGoes|right|V2s": {"axes": ["M2", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr390-r2gs", "issue": "ops#468", "tier": "F"},
+"LoneBuiltLeftAppears|left|V2s": {"axes": ["M2", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "equivalent", "found_by": "review pr390-r2gs", "issue": "ops#468", "tier": "F"},
+"LoneBuiltPieceAppears|right|V2s": {"axes": ["M2", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r2gs", "issue": "ops#468", "tier": "F"},
+"RightPieceGoesLoneRef|left|V2s": {"axes": ["M2", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr390-r2gs", "issue": "ops#468", "tier": "F"},
+"RightPieceGoes|left|V2s": {"axes": ["M2", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr390-r2gs", "issue": "ops#468", "tier": "F"},
+"RightPieceGoes|right|V2s": {"axes": ["M2", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr390-r2gs", "issue": "ops#468", "tier": "F"}
+}
+}

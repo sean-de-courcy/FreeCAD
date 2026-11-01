@@ -1,0 +1,13 @@
+{
+"entries": {
+"R2fNotchLeftGoesByPlacement|datum_left_line|V2s": {"axes": ["M1", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "attack set, fork PR 390 round 2c (A2f)", "issue": "ops#468", "tier": "F"},
+"R2fNotchLeftGoesByPlacement|datum_right_line|V2s": {"axes": ["M1", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "attack set, fork PR 390 round 2c (A2f)", "issue": "ops#468", "tier": "F"},
+"R2fNotchLeftGoesByPlacement|fillet_line|V2s": {"axes": ["M1", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "attack set, fork PR 390 round 2c (A2f)", "issue": "ops#468", "tier": "F"},
+"R2fNotchLeftGoes|datum_left_line|V2s": {"axes": ["M1", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "attack set, fork PR 390 round 2c (A2f)", "issue": "ops#468", "tier": "F"},
+"R2fNotchLeftGoes|datum_right_line|V2s": {"axes": ["M1", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "attack set, fork PR 390 round 2c (A2f)", "issue": "ops#468", "tier": "F"},
+"R2fNotchLeftGoes|fillet_line|V2s": {"axes": ["M1", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "attack set, fork PR 390 round 2c (A2f)", "issue": "ops#468", "tier": "F"},
+"R2fNotchRightFilletLeftGoes|datum_left_line|V2s": {"axes": ["M1", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "attack set, fork PR 390 round 2c (A2f)", "issue": "ops#468", "tier": "F"},
+"R2fNotchRightFilletLeftGoes|datum_right_line|V2s": {"axes": ["M1", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "attack set, fork PR 390 round 2c (A2f)", "issue": "ops#468", "tier": "F"},
+"R2fNotchRightFilletLeftGoes|fillet_line|V2s": {"axes": ["M1", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "attack set, fork PR 390 round 2c (A2f)", "issue": "ops#468", "tier": "F"}
+}
+}

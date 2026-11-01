@@ -83,6 +83,7 @@ set(Part_tests
     parttests/part_test_objects.py
     parttests/regression_tests.py
     parttests/RefineElementMapTest.py
+    parttests/SplitEdgeNamesTest.py
     parttests/TopoShapeListTest.py
     parttests/ColorPerFaceTest.py
     parttests/ColorTransparencyTest.py

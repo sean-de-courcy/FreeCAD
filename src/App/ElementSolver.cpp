@@ -1765,6 +1765,24 @@ bool isOrdered(std::string_view name)
     });
 }
 
+// Part's mapper flag of a twin placed on a closed edge (closedTwinFlag, TopoShapeExpansion.cpp;
+// PLAN decision 206)
+constexpr const char* closedTwinFlag = "CLS";
+
+/* True if a section of \a name carries the closed edge's twin flag: its element is told apart
+ * from its twins by its place counted from the edge's seam, which an edit can turn past them with
+ * the geometry unchanged (a sketch's circle turned 180 degrees under a symmetric cut). The stop
+ * (decision 206): a reference to it stands only where its element holds the old place unchanged;
+ * moved or gone, it breaks.
+ */
+bool isClosedTwin(std::string_view name)
+{
+    const auto sections = NameAncestry::splitSections(name);
+    return std::any_of(sections.begin(), sections.end(), [](std::string_view section) {
+        return decodeSection(section).hasMapperFlag(closedTwinFlag);
+    });
+}
+
 /* True if a section of \a name is a far cap's piece marked by its marks (PRJ and MOD with
  * connected elements, a face), and none is ordered (isMarkedCapName()). With \a faceAlone, marked
  * by one face of the up-to shape alone (the only piece on it): an up-to shell without names,
@@ -1850,13 +1868,13 @@ bool isCounterSection(const DecodedMappedSection& section)
     return true;
 }
 
-// A section's mapper flags without ORD, in their order: the survivor of a 2 -> 1 change loses
-// the flag its twins had (ops#503 class D, round 2)
+// A section's mapper flags without ORD and the closed edge's flag, in their order: the survivor
+// of a 2 -> 1 change loses the flags its twins had (ops#503 class D, round 2; decision 206)
 std::vector<std::string> flagsBesideOrder(const DecodedMappedSection& section)
 {
     std::vector<std::string> flags;
     for (const auto& flag : section.mapperFlags) {
-        if (flag != orderedFlag) {
+        if (flag != orderedFlag && flag != closedTwinFlag) {
             flags.push_back(flag);
         }
     }
@@ -1864,10 +1882,13 @@ std::vector<std::string> flagsBesideOrder(const DecodedMappedSection& section)
 }
 
 /* True if \a a and \a b are the same name up to their order keys (ops#503 class D, isTwinName()):
- * as sameUpToCounter(), with the ORD flag ignored at every level, and the Index of a section
+ * as sameUpToCounter(), with the ORD flag and the closed edge's flag (decision 206) ignored at
+ * every level, and the Index of a section
  * where both values are roles (Data::isRoleValue(): the last section at the top level, any
  * section below it) or, at the top level (\a top), the Index of a counter section
- * (isCounterSection(): today's bare ranks, until A2 names the ranks; then this bridging goes).
+ * (isCounterSection(): today's bare ranks, until A2 names the ranks; then this bridging goes),
+ * and the connected elements of the top level's last section when only one name has them (the
+ * vertexes that told a generated twin apart, which its lone survivor lacks: decision 214).
  * Below the top level, the names a section links and connects, a pattern instance's number
  * counts as a counter too, as in sameUpToCounter(); at the top level it doesn't: an instance's
  * number is its identity (I-A7), and a copy of the old element is the "pattern sibling" guard's.
@@ -1900,11 +1921,16 @@ bool sameUpToOrder(std::string_view a, std::string_view b, bool top)
         const bool instances = !top && x.opCode == patternInstanceOpCode
             && y.opCode == patternInstanceOpCode;
         const bool ranks = top && isCounterSection(x) && isCounterSection(y);
+        // The connected elements that told a twin apart, on one side only (PLAN decision 214):
+        // a generated twin keeps the vertexes no other twin has as its key, and the lone member
+        // left when its twins went has none, so the two are the same element up to that key
+        const bool toldApart = top && i + 1 == sectionsA.size()
+            && x.connectedElements.empty() != y.connectedElements.empty();
         if (!opCodesAgree || x.referenceIDs != y.referenceIDs || x.iterationTag != y.iterationTag
             || (x.index != y.index && !roles && !instances && !ranks)
             || x.elementType != y.elementType || flagsBesideOrder(x) != flagsBesideOrder(y)
             || x.linkedNames.size() != y.linkedNames.size()
-            || x.connectedElements.size() != y.connectedElements.size()) {
+            || (x.connectedElements.size() != y.connectedElements.size() && !toldApart)) {
             return false;
         }
         for (std::size_t j = 0; j < x.linkedNames.size(); ++j) {
@@ -1912,7 +1938,7 @@ bool sameUpToOrder(std::string_view a, std::string_view b, bool top)
                 return false;
             }
         }
-        for (std::size_t j = 0; j < x.connectedElements.size(); ++j) {
+        for (std::size_t j = 0; j < x.connectedElements.size() && !toldApart; ++j) {
             if (!sameUpToOrder(x.connectedElements[j], y.connectedElements[j], false)) {
                 return false;
             }
@@ -3207,6 +3233,11 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             const std::string& hitName = entry.exactName.empty()
                 ? firstName(pool.elements[hitPosition])
                 : entry.exactName;
+            // A twin on a closed edge (decision 206) that moved breaks, whatever sits at its old
+            // place: its place among its twins counts from the edge's seam, and an edit that turns
+            // the seam past them gives its name to another twin, which may sit anywhere, the old
+            // place included, or nowhere near it. Its own twin there (below) is no proof either.
+            const bool closedTwin = isClosedTwin(hitName);
             // Twins (ops#360, PR 340 round 3): pieces of one far cap told apart only by their
             // place among them (the ORD flag and the duplicate counter) can trade names when an
             // edit turns them, so nothing sits at the old place. Round 5: the saved fingerprint
@@ -3543,10 +3574,11 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                            });
                 }
             }
-            if (place.empty() && !departed) {
+            if (place.empty() && !departed && !closedTwin) {
                 continue;  // moved alone
             }
-            if (!offCentre && !departed && entry.policy == SolvePolicy::Equivalent
+            if (!offCentre && !departed && !(closedTwin && place.empty())
+                && entry.policy == SolvePolicy::Equivalent
                 && entry.equivalent && std::all_of(place.begin(), place.end(), [&](int k) {
                        return entry.equivalent(hit, pool.elements[k].index);
                    })) {
@@ -3588,7 +3620,7 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                         && !piecesOfOne(name, hitName) && !markedPiecesOfOne(name, hitName);
                 });
             };
-            if (!departed && std::all_of(place.begin(), place.end(), ownTwin)) {
+            if (!departed && !closedTwin && std::all_of(place.begin(), place.end(), ownTwin)) {
                 outcomes[i].evidence = movedBy() + "; its own twin" + (place.size() > 1 ? "s " : " ")
                     + there + sit + " where it was";
                 continue;
@@ -3609,8 +3641,26 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             for (int k : place) {
                 list(k, "place");
             }
+            if (closedTwin) {
+                // The hit's twins, wherever they are: one of them holds the old member
+                for (std::size_t k = 0; k < pool.elements.size(); ++k) {
+                    const auto& names = pool.elements[k].names;
+                    if (static_cast<int>(k) != hitPosition
+                        && std::find(place.begin(), place.end(), static_cast<int>(k)) == place.end()
+                        && std::any_of(names.begin(), names.end(), [&](const auto& name) {
+                               return name != hitName && sameUpToOrder(name, hitName, true);
+                           })) {
+                        list(static_cast<int>(k), "twin");
+                    }
+                }
+            }
             list(hitPosition, "name");
-            if (departed) {
+            if (closedTwin) {
+                outcome.evidence = movedBy() + "; a twin on a closed edge, placed from its seam"
+                    + (place.empty() ? std::string()
+                                     : "; " + there + sit + " where it was");
+            }
+            else if (departed) {
                 outcome.evidence = movedBy() + " off where it was, and nothing sits there";
             }
             else if (offCentre) {
@@ -4073,6 +4123,74 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             }
             decidedEntry[i] = 1;
         }
+    }
+
+    // A twin on a closed edge whose name is gone (decision 206) breaks: no element holds its old
+    // place by its name, and the twins' places count from the seam, so neither the structure nor
+    // the geometry tells which one it was. The elements at its old place are its candidates.
+    for (std::size_t i = 0; i < input.entries.size(); ++i) {
+        const auto& entry = input.entries[i];
+        if (entry.exact || decidedEntry[i] || !isClosedTwin(entry.oldName)) {
+            continue;
+        }
+        decidedEntry[i] = 1;
+        auto& outcome = outcomes[i];
+        outcome = SolveOutcome();
+        outcome.evidence = "a twin on a closed edge, placed from its seam; its name is gone";
+        const ElementFingerprint& saved = entry.fingerprint;
+        const Pool& pool = pools[entry.type];
+        // After those at its old place, its twins (the same name up to their places)
+        std::vector<const SolveInput::Element*> twins;
+        for (const auto& element : pool.elements) {
+            if (std::any_of(element.names.begin(), element.names.end(), [&](const auto& name) {
+                    return sameUpToOrder(name, entry.oldName, true);
+                })) {
+                twins.push_back(&element);
+            }
+        }
+        auto listTwins = [&]() {
+            for (const auto* element : twins) {
+                if (std::find(outcome.candidates.begin(), outcome.candidates.end(), element->index)
+                    == outcome.candidates.end()) {
+                    outcome.candidates.push_back(element->index);
+                    outcome.candidateNames.push_back(firstName(*element));
+                    outcome.candidateRoles.emplace_back("twin");
+                    outcome.candidateDistances.push_back(nan);
+                }
+            }
+        };
+        if (!saved.isValid()) {
+            listTwins();
+            continue;
+        }
+        for (const auto& element : pool.elements) {
+            ElementFingerprint intrinsic;
+            std::optional<Base::Vector3d> anchor;
+            if (input.hintOf && input.hintOf(element.index, intrinsic, anchor)
+                && !mayBeAtPlace(saved,
+                                 intrinsic,
+                                 anchor,
+                                 input.diagonal,
+                                 input.tolerances,
+                                 input.continuationDistance)) {
+                continue;
+            }
+            const ElementFingerprint& now = fingerprintOfIndex(element.index);
+            if (now.isValid()
+                && atSamePlace(saved,
+                               now,
+                               input.diagonal,
+                               input.tolerances,
+                               input.continuationDistance)) {
+                outcome.candidates.push_back(element.index);
+                outcome.candidateNames.push_back(firstName(element));
+                outcome.candidateRoles.emplace_back("place");
+                outcome.candidateDistances.push_back(
+                    saved.center && now.center ? Base::Distance(*saved.center, *now.center) : nan
+                );
+            }
+        }
+        listTwins();
     }
 
     // Missing entries, grouped: one solve per (old name, type, policy).

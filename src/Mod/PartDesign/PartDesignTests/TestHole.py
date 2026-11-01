@@ -1144,9 +1144,10 @@ class TestHole(unittest.TestCase):
         A counterbored Hole with an angled drill point in a 40 x 20 x 10 block, its sketch
         tilted about Y from -1 to +1 degree (an attachment edit), then on the block's bottom
         face drilling up (Reversed). The four faces generated from the one circle are told apart
-        only by an index (ops#378); it follows the order the Hole lists them in, its drilled
-        profile's from the top: counterbore wall 1, counterbore floor 2, cylinder 3, cone 4 (0 is
-        the drilled shape's top disc, named before the cut removes it), in every state. A key in
+        only by their place k, `<k>of<n>` (ops#378, ops#468); it follows the order the Hole lists
+        them in, its drilled profile's from the top: counterbore wall 1, counterbore floor 2,
+        cylinder 3, cone 4 (0 is the drilled shape's top disc, named before the cut removes it),
+        in every state. A key in
         the shape's coordinates renumbered them when the axis passed vertical and when the Hole
         drilled the other way (fork PR 355 round 1, finding 2)."""
         self.Box.Length = 40
@@ -1185,7 +1186,8 @@ class TestHole(unittest.TestCase):
                 name = shape.getElementMappedName(f"Face{i + 1}")
                 name = str(name[0] if isinstance(name, tuple) else name)
                 self.assertIn(";MAK;", name, f"{state}: {k} has no Hole name: {name}")
-                result[k] = int(name.split(";MAK;")[1].split(";")[0])
+                # `<op>;MAK;<index>;F;<k>of<n>;...`
+                result[k] = int(name.split(";MAK;")[1].split(";")[2].split("of")[0])
             return result
 
         expected = {"wall": 1, "floor": 2, "cylinder": 3, "cone": 4}

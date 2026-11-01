@@ -5433,6 +5433,92 @@ TEST(Moved, counterSiblingsWithoutTheOrderFlagMoveAlone)
 namespace
 {
 
+// PLAN decision 206: a pad's top rim (a circle of radius 10 about (0, 0, 20)) cut by a vertical
+// elliptic pocket keeps two arcs, twins placed on the closed rim from its seam:
+// `...|_;_;9;CUT;0;E;<k>of2;MOD,ORD[,CLS];_`. The disk's sketch turned 180 degrees leaves the
+// geometry as it was and moves the seam, so `0of2` passes from the +y arc (Edge3 before) to the
+// -y arc. \a flags are the twins' flags; \a turned: Edge3 is the -y arc now, Edge10 the +y arc.
+std::string rimTwin(int k, const std::vector<std::string>& flags, int count = 2)
+{
+    const std::string rim = section({}, {sketchEdge(1)}, 7, "XTR", 0, 'E', {"PRJ"});
+    return rim + "|"
+        + Data::MappedName::makeEncodedSection(
+               std::vector<std::string> {},
+               std::vector<std::string> {},
+               "9",
+               "CUT",
+               "0",
+               'E',
+               std::to_string(k) + "of" + std::to_string(count),
+               flags,
+               std::vector<std::string> {}
+        );
+}
+
+SolveInput turnedRim(const std::vector<std::string>& flags, bool turned)
+{
+    const Base::Vector3d centre(0, 0, 20);
+    const ElementFingerprint plusY = arcOf(10, 55, 125, centre);
+    const ElementFingerprint minusY = arcOf(10, 235, 305, centre);
+    SolveInput input;
+    input.diagonal = std::sqrt(20.0 * 20 + 20 * 20 + 20 * 20);
+    input.pool["Edge"] = {
+        element("Edge3", {rimTwin(0, flags)}),
+        element("Edge10", {rimTwin(1, flags)}),
+    };
+    auto entry = exact("Edge3", "Edge");
+    entry.exactName = rimTwin(0, flags);
+    entry.fingerprint = plusY;
+    input.entries = {entry};
+    measure(input,
+            {{"Edge3", turned ? minusY : plusY}, {"Edge10", turned ? plusY : minusY}},
+            nullptr);
+    return input;
+}
+
+}  // namespace
+
+TEST(Moved, closedEdgeTwinsTradedBySeamTurnBreak)
+{
+    // The +y arc is where it was, named `1of2` now; the reference's `0of2` gives the -y arc. The
+    // closed edge's flag stops it: broken, the arc at the old place first (decision 206). Without
+    // the stop the +y arc passed for the hit's own twin (ops#168) and the name stood, silently.
+    auto outcome = Data::solveOwner(turnedRim({"MOD", "ORD", "CLS"}, true))[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken);
+    EXPECT_EQ(outcome.candidates, (std::vector<std::string> {"Edge10", "Edge3"}));
+    EXPECT_EQ(outcome.candidateRoles, (std::vector<std::string> {"place", "name"}));
+    EXPECT_NE(outcome.evidence.find("a twin on a closed edge"), std::string::npos)
+        << outcome.evidence;
+}
+
+TEST(Moved, closedEdgeTwinInPlaceKeepsItsName)
+{
+    // The arc the name gives holds its old place unchanged: the reference stands.
+    EXPECT_EQ(describe(Data::solveOwner(turnedRim({"MOD", "ORD", "CLS"}, false))[0]),
+              "exact Edge3 0 [] ");
+}
+
+TEST(SolveOwner, goneClosedEdgeTwinBreaks)
+{
+    // The rim's twins counted three after an edit: `0of2` is gone. The +y arc, unchanged at the
+    // old place, is the first candidate, then its twin; nothing is picked (decision 206).
+    auto input = turnedRim({"MOD", "ORD", "CLS"}, false);
+    input.pool["Edge"] = {
+        element("Edge3", {rimTwin(0, {"MOD", "ORD", "CLS"}, 3)}),
+        element("Edge10", {rimTwin(1, {"MOD", "ORD", "CLS"}, 3)}),
+    };
+    input.entries = {missing(rimTwin(0, {"MOD", "ORD", "CLS"}), "Edge")};
+    input.entries[0].fingerprint = arcOf(10, 55, 125, Base::Vector3d(0, 0, 20));
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(describe(outcome),
+              "broken  -1 [Edge3 Edge10 ] a twin on a closed edge, placed from its seam; its name "
+              "is gone");
+    EXPECT_EQ(outcome.candidateRoles, (std::vector<std::string> {"place", "twin"}));
+}
+
+namespace
+{
+
 // PR 340 round 4: twins of one far cap (the ORD flag), told apart by the duplicate counter
 // `count (count - 1) / 2 + place`, each at its place now; the reference was saved on the twin
 // with counter \a savedCounter at \a saved, and its name now holds the twin with that counter.
@@ -10118,6 +10204,17 @@ TEST(NameAncestry, twinNames)
     EXPECT_TRUE(Data::isTwinName(rank(1, {"GEN", "ORD"}), rank(0, {"GEN"})));
     EXPECT_TRUE(Data::isTwinName(role("in"), role("out")));
     EXPECT_FALSE(Data::isTwinName(rank(0, {"GEN"}), rank(0, {"GEN"})));
+    //   a twin told apart by a connected vertex and the lone member its twin left (decision 214,
+    //   PR 390's ANotch move-leftGoes): either way round; not below the top level, not two
+    //   different connected vertexes
+    const auto told = [&](const std::vector<std::string>& connected) {
+        return section({}, {h.edge1, h.cyl}, 11, "CUT", 0, 'E', {"GEN"}, connected);
+    };
+    EXPECT_TRUE(Data::isTwinName(told({}), told({h.x0})));
+    EXPECT_TRUE(Data::isTwinName(told({h.x0}), told({})));
+    EXPECT_FALSE(Data::isTwinName(told({h.x0}), told({h.edge1})));
+    EXPECT_FALSE(Data::isTwinName(generated({told({})}, 15, "FLT", 'V', 0),
+                                  generated({told({h.x0})}, 15, "FLT", 'V', 0)));
     //   no rank of a projection's section, of a marked piece's, of another op's
     EXPECT_FALSE(Data::isTwinName(rank(1, {"PRJ"}), rank(0, {"PRJ"})));
     EXPECT_FALSE(Data::isTwinName(section({}, {h.cyl}, 11, "CUT", 1, 'V', {"GEN"}, {h.x0}),
