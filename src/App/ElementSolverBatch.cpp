@@ -564,6 +564,18 @@ bool movesFrame(const Base::Placement& motion, double diagonal, double angle, do
     return motion.getPosition().Length() > distance * std::max(1.0, diagonal) || turn > angle;
 }
 
+// Whether \a geo's shape is its old one under a new frame (ops#557): a PartDesign feature's
+// Placement set in its execute before the shape is made again (positionByPrevious()), which
+// Part::Feature::onChanged() passes on to the old shape with the Shape marked NoRecompute. A frame
+// move judged on it would compare the old shape with the old place, and keep and refresh what the
+// new shape trades.
+bool shapeAwaitsFrame(const GeoFeature* geo)
+{
+    const PropertyComplexGeoData* prop = geo->getPropertyOfGeometry();
+    return geo->placementIsDerived() && geo->isRecomputing() && prop
+        && prop->testStatus(Property::NoRecompute);
+}
+
 // A reference's record as the solve reads it: mapped to where the element is now when the
 // target's chain moved as one piece (decision 218, the entry's rigid motion)
 Data::ElementFingerprint recordOf(const SolverEntry& entry, const std::string& text, double angle)
@@ -1019,6 +1031,13 @@ bool solveElementReferences(DocumentObject* feature,
                         entry.frame = turned;
                     }
                 }
+            }
+            // The old shape under the new frame: the update after the shape is made judges the
+            // move, with the record as it was (its refresh is skipped too)
+            if ((entry.frame || entry.rigid) && shapeAwaitsFrame(geo)) {
+                entry.frame.reset();
+                entry.rigid.reset();
+                continue;
             }
         }
         owners[entry.owner->getFullName()].push_back(&entry);

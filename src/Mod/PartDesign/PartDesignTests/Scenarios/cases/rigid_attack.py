@@ -62,7 +62,9 @@ class AttackBase(Scenario):
         owner = body.newObject("PartDesign::Point", name)
         owner.AttachmentSupport = [(target, element)]
         owner.MapMode = "Vertex" if kind == "vertex" else "CenterOfMass"
-        return owner, None
+        # the point's place checked: a coaxial wall or a concentric rim gives the same point, and
+        # the solver keeps such a trade as equivalent
+        return owner, Attached()
 
     def build(self, doc):
         self.body = doc.addObject("PartDesign::Body", "Body")
@@ -215,6 +217,7 @@ class AttackMirrorTurnedAboutCentre(AttackBase):
         self.mirror = body.newObject("PartDesign::Mirrored", "Mirror")
         self.mirror.Originals = [self.block, self.pocket]
         self.mirror.MirrorPlane = (originFeature(body, "XZ_Plane"), [""])
+        body.Tip = self.mirror  # newObject() leaves a Mirrored out of the chain: it never computes
         return self.mirror
 
     def move(self, doc):

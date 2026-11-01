@@ -1006,6 +1006,14 @@ std::string PropertyLinkBase::_getElementFingerprint(App::DocumentObject* featur
         || GeoFeature::hasMissingElement(elementName.oldName.c_str())) {
         return {};
     }
+    // A PartDesign feature's old shape under the new frame its execute set before making the shape
+    // again (ops#557; Part::Feature marks the Shape NoRecompute while it re-places it): a record
+    // taken now would pair the old shape with the new frame and hide the move from the update
+    // after the shape is made. The record stays as it was until then.
+    if (auto prop = geo->getPropertyOfGeometry(); prop && geo->placementIsDerived()
+        && geo->isRecomputing() && prop->testStatus(Property::NoRecompute)) {
+        return {};
+    }
     Data::ElementFingerprint fingerprint;
     if (!geo->getElementFingerprint(elementName.oldName.c_str(), fingerprint)) {
         return {};
