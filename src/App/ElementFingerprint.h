@@ -9,6 +9,7 @@
 #include <string_view>
 #include <vector>
 
+#include <Base/Placement.h>
 #include <Base/Vector3D.h>
 
 namespace Data
@@ -123,6 +124,25 @@ namespace Data
  *   solver tells an element drawn again at a vacated place (its sources new) from a sibling moved
  *   there (its sources were in the model before) by them.
  *
+ * Version 8 (ops#557, PLAN decision 211), written for a reference's record whose target's
+ * placement is its chain's frame (App::GeoFeature::placementIsDerived(): a PartDesign feature):
+ *
+ *     8|<version 7's fields, each of them `_` where empty>|<p or _>|<q or _>
+ *
+ * - p: the frame the fingerprint was measured in, the placement it was stripped of:
+ *   `<x>,<y>,<z>,<q0>,<q1>,<q2>,<q3>`, its position and its rotation's quaternion (q3 the real
+ *   part, made not negative). A turn of the frame under a tool fixed in the body can leave the
+ *   local shape and its names as they were while the elements trade places globally; with the
+ *   frame, the solver finds where the element was.
+ * - q: the target's placement sources and loci (decision 218), separated by `/`, sorted:
+ *   `<key>:<x>,<y>,<z>,<q0>,<q1>,<q2>,<q3>` for an object of the target's chain whose placement is
+ *   its own (a sketch, a datum, a primitive, a Part feature, an up-to shape's owner), its Placement
+ *   in body coordinates; `L<key>:<x>,<y>,<z>,<dx>,<dy>,<dz>` and `P<key>:...` for an origin line or
+ *   plane the chain names as geometry (a revolve's axis, a mirror plane, a sketch's external
+ *   geometry), a point and its direction or normal. The key is the object's ID, with
+ *   `@<document>` for another document's. The part moved as one piece when one motion takes every
+ *   source to its place now and leaves every locus where it is.
+ *
  * Numbers have 12 significant digits, in the classic locale, so the text is the same on every
  * platform and in every locale. A reader takes a version it doesn't know as no fingerprint.
  */
@@ -147,6 +167,9 @@ struct AppExport ElementFingerprint
     /// The text form of a fingerprint with the element's sides and its sources' marks (ops#526
     /// D2): version 6's fields, each of them `_` where empty, then the sides and the marks.
     static constexpr int VersionWithSides = 7;
+    /// The text form of a reference's record with its target's frame (ops#557): version 7's
+    /// fields, then the frame.
+    static constexpr int VersionWithFrame = 8;
 
     /// An up-to face a far piece lies on (version 6): the object that owns it, by its name in its
     /// document, the face's bounding box and area in that object's own frame (its placement
@@ -236,6 +259,59 @@ struct AppExport ElementFingerprint
     /// otherwise and in an older fingerprint.
     std::vector<Mark> marks;
 
+    /// The frame the record was measured in (version 8, ops#557): the target's placement, which
+    /// the fingerprint is taken without. Only a reference's record into a target whose placement
+    /// is its chain's frame has one; empty otherwise and in an older fingerprint.
+    std::optional<Base::Placement> frame;
+
+    /// A placement source or a locus of the target's chain (version 8, decision 218).
+    struct Source
+    {
+        /// The object's ID, with `@<document>` for an object of another document.
+        std::string key;
+        /// 0 for a placement source; `L` for a line locus, `P` for a plane locus.
+        char locus = 0;
+        /// A placement source's Placement, in body coordinates.
+        Base::Placement placement;
+        /// A locus's point, and its direction (a line) or normal (a plane), in body coordinates.
+        Base::Vector3d point;
+        Base::Vector3d direction;
+
+        friend bool operator==(const Source& a, const Source& b)
+        {
+            return a.key == b.key && a.locus == b.locus && a.placement == b.placement
+                && a.point == b.point && a.direction == b.direction;
+        }
+    };
+    /// The target's placement sources and loci (version 8), sorted by locus and key: only a
+    /// reference's record has them; empty otherwise and in an older fingerprint.
+    std::vector<Source> sources;
+    /// At most this many sources: the reader takes more as a malformed field.
+    static constexpr std::size_t MaxSources = 4096;
+
+    /** The one rigid motion that took the chain from \a saved to \a now (decision 218,
+     * `notes\naming-class-D.md` 11.2), in body coordinates: the same keys, one motion M taking
+     * every saved placement to its current one (positions within \a distance, rotations within
+     * \a angle), and every locus as it was and mapped onto itself by M. The identity when nothing
+     * moved; none when the keys differ, a source moved otherwise, or a locus doesn't stay.
+     */
+    static std::optional<Base::Placement> rigidMotion(
+        const std::vector<Source>& saved,
+        const std::vector<Source>& now,
+        double distance,
+        double angle
+    );
+
+    /** This fingerprint moved by \a motion (ops#557): the old global place in the current frame
+     * when \a motion is P_now.inverse() * P_saved. Points, directions and the sides' directions are
+     * moved; axes and line directions are sign-normalized again as the producer does, a plane's
+     * normal and the sides keep their sense. The box is moved when the rotation is a signed axis
+     * permutation (within \a angle), else dropped: a turned box is wider than the element. The
+     * up-to faces (another object's frame), the frame and the sources go; the marks (no place)
+     * stay.
+     */
+    ElementFingerprint transformed(const Base::Placement& motion, double angle) const;
+
     /// At most this many points in an outline: the reader takes more as a malformed field.
     static constexpr std::size_t MaxOutline = 256;
     /// At most this many up-to faces: the reader takes more as a malformed field.
@@ -283,7 +359,8 @@ struct AppExport ElementFingerprint
             && a.extentMin == b.extentMin && a.extentMax == b.extentMax
             && a.twinCentroid == b.twinCentroid && a.twinCount == b.twinCount
             && a.outline == b.outline && a.inside == b.inside && a.upToFaces == b.upToFaces
-            && a.sides == b.sides && a.marks == b.marks;
+            && a.sides == b.sides && a.marks == b.marks && a.frame == b.frame
+            && a.sources == b.sources;
     }
     friend bool operator!=(const ElementFingerprint& a, const ElementFingerprint& b)
     {
