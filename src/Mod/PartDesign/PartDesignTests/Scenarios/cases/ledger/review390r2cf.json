@@ -1,0 +1,10 @@
+{
+"entries": {
+"R2cfLobesTurnedTaller|rim_a|V2s": {"axes": ["M4", "E2"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr390-r2cf", "issue": "ops#468", "tier": "F"},
+"R2cfLobesTurnedTaller|rim_b|V2s": {"axes": ["M4", "E2"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr390-r2cf", "issue": "ops#468", "tier": "F"},
+"R2cfLobesTurnedTaller|rim_c|V2s": {"axes": ["M4", "E2"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr390-r2cf", "issue": "ops#468", "tier": "F"},
+"R2cfLobesTurned|rim_a|V2s": {"axes": ["M4", "E2"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr390-r2cf", "issue": "ops#468", "tier": "F"},
+"R2cfLobesTurned|rim_b|V2s": {"axes": ["M4", "E2"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr390-r2cf", "issue": "ops#468", "tier": "F"},
+"R2cfLobesTurned|rim_c|V2s": {"axes": ["M4", "E2"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr390-r2cf", "issue": "ops#468", "tier": "F"}
+}
+}
