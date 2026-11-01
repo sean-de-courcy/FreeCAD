@@ -59,6 +59,7 @@
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <ElCLib.hxx>
+#include <Extrema_ExtPC.hxx>
 #include <Geom2d_Curve.hxx>
 #include <Geom_BezierCurve.hxx>
 #include <Geom_BSplineCurve.hxx>
@@ -1195,6 +1196,116 @@ std::optional<gp_Dir> planeNormal(const std::vector<gp_Pnt>& points)
         }
     }
     return normal;
+}
+
+/// The direction of \a spine (its edges in order) where it passes nearest \a point, the way it
+/// runs: none at a corner, where its edges' directions differ
+std::optional<gp_Dir> spineDirectionNear(const std::vector<TopoDS_Edge>& spine, const gp_Pnt& point)
+{
+    std::vector<std::pair<double, gp_Dir>> candidates;  // distance, direction
+    for (const TopoDS_Edge& edge : spine) {
+        BRepAdaptor_Curve curve(edge);
+        const bool reversed = edge.Orientation() == TopAbs_REVERSED;
+        auto add = [&](double at) {
+            gp_Pnt on;
+            gp_Vec tangent;
+            curve.D1(at, on, tangent);
+            if (tangent.Magnitude() > gp::Resolution()) {
+                candidates.emplace_back(on.Distance(point), reversed ? -tangent : tangent);
+            }
+        };
+        add(curve.FirstParameter());
+        add(curve.LastParameter());
+        Extrema_ExtPC extrema(point, curve);
+        for (int i = 1; extrema.IsDone() && i <= extrema.NbExt(); ++i) {
+            if (extrema.IsMin(i)) {
+                add(extrema.Point(i).Parameter());
+            }
+        }
+    }
+    if (candidates.empty()) {
+        return std::nullopt;
+    }
+    const auto nearest = std::ranges::min_element(candidates, {}, [](const auto& c) { return c.first; });
+    for (const auto& [distance, direction] : candidates) {
+        if (distance < nearest->first + Precision::Confusion()
+            && direction.Angle(nearest->second) > 1e-6) {
+            return std::nullopt;
+        }
+    }
+    return nearest->second;
+}
+
+/// ops#396: the turn of each section of a pipe with several (\a sections, the first the profile,
+/// as they are swept along \a spine) that decides how OCCT matches it with the one before, where
+/// rounding would. OCCT pairs each section's vertices with the previous section's by the least sum
+/// of their distances, in the sweep's frame, and looks at neither one's facing
+/// (BRepFill_CompatibleWires::ComputeOrigin). Along lines joined "Transformed" that frame doesn't
+/// turn, so two sections in perpendicular planes, each symmetric about the line they share
+/// (squares, rectangles), give two pairings with exactly the same sum: the section turned with the
+/// spine (the corner's limit from below 90 degrees), or against it, an inside-out solid. Rounding
+/// chose, and Windows and macOS built different solids from one file. Such a section, facing the
+/// spine's way within 1e-8 mm of perpendicular to the one before (at its farthest point), is
+/// turned towards it until its farthest point is 1e-9 mm past perpendicular, the pairing then as
+/// at a corner slightly under 90 degrees on every system. Past that, the pairing against the
+/// spine is the only one OCCT finds, and the result gate stops the pipe. None for the others.
+std::vector<std::optional<gp_Trsf>> sectionTiltsAlong(
+    const std::vector<TopoDS_Shape>& sections,
+    const TopoDS_Wire& spine
+)
+{
+    constexpr double past = 1e-9;   // mm, at the section's farthest point
+    constexpr double reach = 1e-8;  // mm: within it the two sections are perpendicular
+    struct Facing
+    {
+        gp_Dir normal;  // the spine's way
+        gp_Pnt centre;
+        double radius;
+    };
+    const std::vector<TopoDS_Edge> edges = edgesInOrder(spine);
+    auto facingOf = [&](const TopoDS_Shape& section) -> std::optional<Facing> {
+        if (section.IsNull() || section.ShapeType() != TopAbs_WIRE) {
+            return std::nullopt;
+        }
+        const std::vector<gp_Pnt> points = pointsAlong(TopoDS::Wire(section));
+        const std::optional<gp_Dir> normal = planeNormal(points);
+        if (!normal) {
+            return std::nullopt;
+        }
+        gp_XYZ centre(0, 0, 0);
+        for (const gp_Pnt& point : points) {
+            centre += point.XYZ();
+        }
+        centre /= static_cast<double>(points.size());
+        double radius = 0;
+        for (const gp_Pnt& point : points) {
+            radius = std::max(radius, point.Distance(gp_Pnt(centre)));
+        }
+        const std::optional<gp_Dir> along = spineDirectionNear(edges, gp_Pnt(centre));
+        // edge-on to the spine, or at its corner, the section's facing isn't known
+        if (!along || std::abs(normal->Dot(*along)) < 1e-6 || radius < Precision::Confusion()) {
+            return std::nullopt;
+        }
+        return Facing {normal->Dot(*along) > 0 ? *normal : normal->Reversed(), gp_Pnt(centre), radius};
+    };
+    std::vector<std::optional<gp_Trsf>> tilts(sections.size());
+    std::optional<Facing> previous;
+    for (size_t i = 0; i < sections.size(); ++i) {
+        const std::optional<Facing> current = facingOf(sections[i]);
+        if (previous && current) {
+            const double offset = current->normal.Dot(previous->normal) * current->radius;
+            const double angle = (past - offset) / current->radius;
+            if (offset > -reach && offset < past && angle < 1e-6) {
+                // turning the normal about (normal x previous) turns it towards the previous
+                const gp_Dir axis = current->normal.Crossed(previous->normal);
+                gp_Trsf tilt;
+                tilt.SetRotation(gp_Ax1(current->centre, axis), angle);
+                tilts[i] = tilt;
+            }
+        }
+        previous = current;
+    }
+    return tilts;
 }
 
 /// How far \a points reach along \a direction
@@ -5503,6 +5614,24 @@ App::DocumentObjectExecReturn* Pipe::execute()
             }
         };
 
+        // Each section in perpendicular planes with the one before turned the least that decides
+        // OCCT's pairing as rounding would (ops#396, sectionTiltsAlong); its outer wire's turn
+        // for its inner wires too, which stay in its plane
+        std::vector<std::optional<gp_Trsf>> sectionTilts;
+        if (!wiresections.empty() && wiresections.front().size() > 1) {
+            std::vector<TopoDS_Shape> placed;
+            for (const Part::TopoShape& wire : wiresections.front()) {
+                placed.push_back(wire.getShape().Moved(invObjLoc));
+            }
+            sectionTilts = sectionTiltsAlong(placed, TopoDS::Wire(path.getShape()));
+        }
+        auto place = [&](Part::TopoShape& wire, size_t index) {
+            wire.move(invObjLoc);
+            if (index < sectionTilts.size() && sectionTilts[index]) {
+                wire.move(*sectionTilts[index]);
+            }
+        };
+
         std::vector<Part::TopoShape> frontwires, backwires;
         for (auto& wires : wiresections) {
             BRepOffsetAPI_MakePipeShell mkPS(TopoDS::Wire(path.getShape()));
@@ -5513,9 +5642,9 @@ App::DocumentObjectExecReturn* Pipe::execute()
                     mkPS.Add(copyProfilePoint.getShape());
                 }
 
-                for (auto& wire : wires) {
-                    wire.move(invObjLoc);
-                    mkPS.Add(wire.getShape());
+                for (size_t i = 0; i < wires.size(); ++i) {
+                    place(wires[i], i);
+                    mkPS.Add(wires[i].getShape());
                 }
             }
             else {
@@ -5523,9 +5652,9 @@ App::DocumentObjectExecReturn* Pipe::execute()
                     mkPS.SetLaw(copyProfilePoint.getShape(), scalinglaw);
                 }
 
-                for (auto& wire : wires) {
-                    wire.move(invObjLoc);
-                    mkPS.SetLaw(wire.getShape(), scalinglaw);
+                for (size_t i = 0; i < wires.size(); ++i) {
+                    place(wires[i], i);
+                    mkPS.SetLaw(wires[i].getShape(), scalinglaw);
                 }
             }
 

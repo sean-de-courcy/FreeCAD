@@ -1498,6 +1498,23 @@ class TestPipeEndNames(unittest.TestCase):
 SQUARE = [V(-2, -2, 0), V(2, -2, 0), V(2, 2, 0), V(-2, 2, 0)]
 
 
+# The multisection pipe along the L (TestPipeCorners.multisection: up 30, then 20 at 90 degrees,
+# from the square -2..2 to a 6 x 6 section normal to the last leg, joined "Transformed"): the
+# square grows linearly (half-width 2 + t, t = s / 50 along the spine) and turns with the spine in
+# a frame that doesn't turn at the corner, so its area's component along the first leg is
+# 8(1 - t)(2 + t), and along the second 12t(2 + t): the volume is 50 times their integrals over
+# each leg's stretch of t (920)
+def _alongFirst(t):
+    return 8 * (2 * t - t**2 / 2 - t**3 / 3)
+
+
+def _alongSecond(t):
+    return 12 * (t**2 + t**3 / 3)
+
+
+MULTISECTION_VOLUME = 50 * (_alongFirst(0.6) - _alongFirst(0) + _alongSecond(1) - _alongSecond(0.6))
+
+
 def extrusions(points, face=None):
     """What "Transformed" means along a polyline: the profile isn't turned at the corners, only
     moved along each segment, so the pipe is the union of its extrusions along the segments.
@@ -1788,114 +1805,73 @@ class TestPipeCorners(unittest.TestCase):
                 self.assertFails(self.multisection(transition), "isn't a valid solid")
 
     def testMultisectionTransformedUnchanged(self):
-        """With "Transformed" the sections join at the corner: valid, the volume integration's
-        build gave (920; the sections set the orientation, no tilt test)."""
+        """With "Transformed" the sections join at the corner: valid, the volume of the square
+        growing from 4 to 6 along the 50 mm spine (half-width 2 + t, t from 0 to 1) and turning
+        with it, in a frame that doesn't turn at the corner: its area's components along the
+        legs, 8(1 - t)(2 + t) and 12t(2 + t), over each leg (MULTISECTION_VOLUME, 920)."""
         pipe = self.multisection("Transformed")
         self.assertValidSolid(pipe)
-        self.assertAlmostEqual(pipe.Shape.Volume, 920, 2)
+        self.assertAlmostEqual(pipe.Shape.Volume, MULTISECTION_VOLUME, 2)
         self.assertWarns(pipe, False)
 
-    def testMultisectionInsideOutFails(self):
-        """The same pipe with the section's sketch turned about the last leg: which corner its
-        wire starts at changes OCCT's sweep. On Windows, turned 90 or 180 degrees, it gave the
-        solid that macOS gives unturned (ops#396): BRepCheck passes it, its volume is -161.6, the
-        boolean check finds faults, and OCCT's solid classifier took it for an outward solid, so
-        round 7 accepted it. Its caps now tell its orientation, and disagree with the classifier
-        or each other: the pipe fails. Every turn gives the valid 920 or fails, never another
-        solid."""
-        for turn in (0, 90, 180, 270):
-            with self.subTest(turn=turn):
-                self.renew()
-                pipe = self.multisection("Transformed", turn)
-                if pipe.isValid():
+    def multisectionTowards(self, direction, turn=0, holes=False):
+        """Up 30, then 20 along `direction` (a unit vector), to the 6 x 6 section normal to it at
+        the end, its sketch turned `turn` degrees about that leg; with `holes`, the profile and
+        the section each with a centred square hole of half their width."""
+        end = V(0, 0, 30) + direction * 20
+        spine = models.feature(self.doc, "Path", Part.makePolygon([V(0, 0, 0), V(0, 0, 30), end]))
+        rotation = App.Rotation(direction, turn).multiply(App.Rotation(V(0, 0, 1), direction))
+        geometry = models.rectangle(-3, -3, 3, 3)
+        profile = models.rectangle(-2, -2, 2, 2)
+        if holes:
+            geometry += models.rectangle(-1.5, -1.5, 1.5, 1.5)
+            profile += models.rectangle(-1, -1, 1, 1)
+        section = models.sketch(
+            self.doc, "Section", geometry, self.body, placement=App.Placement(end, rotation)
+        )
+        return self.pipe(
+            spine,
+            self.profile(profile),
+            Transformation="Multisection",
+            Sections=[section],
+            Transition="Transformed",
+        )
+
+    def testMultisectionAtARightAngleTurnsWithTheSpine(self):
+        """ops#396: OCCT pairs each section's vertices with the previous one's by the least sum of
+        their distances, in a frame that doesn't turn at the corner. For squares in perpendicular
+        planes that ties between the far section turned with the spine and against it (an
+        inside-out solid, volume -161.6), and rounding chose: macOS gave the inside-out one, and
+        Windows too with the section's sketch turned 90, 180 or 270 degrees. The pipe takes the
+        pairing turned with the spine, as at a corner slightly under 90 degrees, whichever corner
+        the section's wire starts at, with the L turning towards +X, -X or +Y: the volume
+        MULTISECTION_VOLUME; with holes of half the width, 3/4 of it."""
+        for direction in (V(1, 0, 0), V(-1, 0, 0), V(0, 1, 0)):
+            for turn in (0, 90, 180, 270):
+                with self.subTest(direction=direction, turn=turn):
+                    self.renew()
+                    pipe = self.multisectionTowards(direction, turn)
                     self.assertValidSolid(pipe)
-                    self.assertAlmostEqual(pipe.Shape.Volume, 920, 2)
-                else:
-                    self.assertFails(pipe, "isn't a valid solid", "sections may twist or cross")
+                    self.assertAlmostEqual(pipe.Shape.Volume, MULTISECTION_VOLUME, 2)
+        for turn in (0, 90):
+            with self.subTest(holes=True, turn=turn):
+                self.renew()
+                pipe = self.multisectionTowards(V(1, 0, 0), turn, holes=True)
+                self.assertValidSolid(pipe)
+                self.assertAlmostEqual(pipe.Shape.Volume, MULTISECTION_VOLUME * 3 / 4, 2)
 
-    def testProbe396(self):
-        """PROBE for ops#396, not a test: fails with a report of the multisection pipe's inputs
-        and OCCT's raw sweep, for comparing macOS with Windows."""
-
-        def short(p):
-            return "(%g,%g,%g)" % tuple(round(c, 6) + 0.0 for c in (p.x, p.y, p.z))
-
-        def full(p):
-            return "(%r,%r,%r)" % (p.x, p.y, p.z)
-
-        def sweep(spineWire, prof, sect, shell=False):
-            ps = Part.BRepOffsetAPI.MakePipeShell(spineWire)
-            ps.setTransitionMode(0)
-            ps.setMaxDegree(14)
-            ps.setMaxSegments(1000)
-            ps.add(prof, False, False)
-            ps.add(sect, False, False)
-            ps.build()
-            raw = ps.shape()
-            ps.makeSolid()
-            return (raw, ps.shape()) if shell else ps.shape()
-
-        def polygon(points, k=0, rev=False):
-            pts = list(points)[::-1] if rev else list(points)
-            pts = pts[k:] + pts[:k]
-            return Part.makePolygon(pts + pts[:1])
-
-        def grid(spineWire, prof, sect):
-            rows = []
-            for prev in (False, True):
-                for pk in range(4):
-                    row = ""
-                    for srev in (False, True):
-                        for sk in range(4):
-                            try:
-                                v = sweep(spineWire, polygon(prof, pk, prev), polygon(sect, sk, srev)).Volume
-                                row += "+" if abs(v - 920) < 0.01 else ("-" if abs(v + 161.6) < 0.01 else "[%.1f]" % v)
-                            except Exception:
-                                row += "E"
-                    rows.append(row)
-            return " ".join(rows)
-
-        def edges(w):
-            return " ".join(
-                "%s>%s%s" % (short(e.Vertexes[0].Point), short(e.Vertexes[-1].Point), e.Orientation[0])
-                for e in w.OrderedEdges
-            )
-
-        lines = [""]
-        for turn in (0, 90, 180, 270):
-            self.renew()
-            pipe = self.multisection("Transformed", turn)
-            profile, section = self.doc.getObject("Profile"), self.doc.getObject("Section")
-            pw, sw = profile.Shape.Wires[0], section.Shape.Wires[0]
-            spw = self.doc.getObject("Path").Shape.Wires[0]
-            lines.append("turn %d: pipe %s %s" % (turn, pipe.isValid(),
-                "%.3f" % pipe.Shape.Volume if pipe.isValid() else pipe.getStatusString()[:40]))
-            lines.append(" profile %s edges %s %s" % (
-                " ".join(short(v.Point) for v in pw.OrderedVertexes), edges(pw), pw.Orientation))
-            lines.append(" section %s edges %s %s" % (
-                " ".join(short(v.Point) for v in sw.OrderedVertexes), edges(sw), sw.Orientation))
-            raw, solid = sweep(spw, pw, sw, shell=True)
-            lines.append(" raw sketch wires %.3f valid %s faces %d" % (solid.Volume, solid.isValid(), len(raw.Faces)))
-            if turn == 0:
-                lines.append(" spine " + " ".join(full(v.Point) for v in spw.OrderedVertexes))
-                lines.append(" section full " + " ".join(full(v.Point) for v in sw.OrderedVertexes))
-                for i, f in enumerate(raw.Faces, 1):
-                    u0, u1, v0, v1 = f.ParameterRange
-                    lines.append("  F%d %s n=%s %s" % (i, f.Surface.__class__.__name__,
-                        short(f.normalAt((u0 + u1) / 2, (v0 + v1) / 2)), " ".join(short(v.Point) for v in f.Vertexes)))
-                pts = [v.Point for v in pw.OrderedVertexes], [v.Point for v in sw.OrderedVertexes]
-                lines.append(" grid sketch wires: " + grid(spw, *pts))
-        exact = Part.makePolygon([V(0, 0, 0), V(0, 0, 30), V(20, 0, 30)])
-        eps = -6.661338147750939e-15
-        noisy = Part.makePolygon([V(0, 0, 0), V(0, eps, 30.000000000000007), V(20.000000000000004, eps, 30.000000000000007)])
-        prof = [V(-2, -2, 0), V(2, -2, 0), V(2, 2, 0), V(-2, 2, 0)]
-        sect = [V(20, -3, 33), V(20, -3, 27), V(20, 3, 27), V(20, 3, 33)]
-        lines.append("grid exact spine: " + grid(exact, prof, sect))
-        lines.append("grid noisy spine: " + grid(noisy, prof, sect))
-        lines.append("Windows (wt/feature2 build): turn 0 True 920, turns 90-270 fail; grid exact")
-        lines.append(" +-++---+ -+--+++- +++--+-- ---++-++ ---++-++ +++--+-- -+--+++- +-++---+; noisy")
-        lines.append(" -------- -+--+++- +++--+-- ++++++++ ---++-++ -------- ++++++++ +-++---+")
-        self.fail("\n".join(lines))
+    def testMultisectionPast90DegreesFails(self):
+        """Just under 90 degrees (1e-4 degrees) the pipe nears the right angle's; just past it,
+        the only pairing OCCT finds is the section turned against the spine, an inside-out solid:
+        the pipe fails, never another solid."""
+        under = math.radians(90 - 1e-4)
+        pipe = self.multisectionTowards(V(math.sin(under), 0, math.cos(under)))
+        self.assertValidSolid(pipe)
+        self.assertAlmostEqual(pipe.Shape.Volume, MULTISECTION_VOLUME, 2)
+        self.renew()
+        past = math.radians(90 + 1e-4)
+        pipe = self.multisectionTowards(V(math.sin(past), 0, math.cos(past)))
+        self.assertFails(pipe, "isn't a valid solid", "sections may twist or cross")
 
     def testHairpinFails(self):
         """A 170 degree hairpin: "Right corner" and "Round corner" gave invalid solids
