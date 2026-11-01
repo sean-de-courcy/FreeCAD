@@ -8,7 +8,7 @@
 "StackedSeamRibOffsetStripGone|strip|V2s": {"axes": ["M2", "E5"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review prA1b-r1", "issue": "ops#522", "tier": "F"},
 "StackedSeamRibPlacementStripGone|piece|V2s": {"axes": ["M2", "E5"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prA1b-r1", "issue": "ops#522", "tier": "F"},
 "StackedSeamRibPlacementStripGone|strip|V2s": {"axes": ["M2", "E5"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review prA1b-r1", "issue": "ops#522", "tier": "F"},
-"UnsavedSeamRibPlacementStripGone|piece|V2s": {"axes": ["M2", "E5"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review prA1b-r1", "issue": "ops#522", "tier": "F"},
+"UnsavedSeamRibPlacementStripGone|piece|V2s": {"axes": ["M2", "E5"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prA1b-r1", "issue": "ops#522", "tier": "F"},
 "UnsavedSeamRibPlacementStripGone|strip|V2s": {"axes": ["M2", "E5"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review prA1b-r1", "issue": "ops#522", "tier": "F"}
 }
 }

@@ -1,11 +1,11 @@
 {
 "entries": {
-"AddThenRemoveThenWiden|moved_entry|V2s": {"axes": ["M1", "E9"], "classes": ["E"], "expect": "WARNED", "expected": "correct", "found_by": "review pr386-r1", "issue": "ops#504", "tier": "F"},
+"AddThenRemoveThenWiden|moved_entry|V2s": {"axes": ["M1", "E9"], "classes": ["E"], "expect": "WARNED", "expected": "quiet", "found_by": "review pr386-r1", "issue": "ops#504", "tier": "F"},
 "PieceKeptThenMergedBack|kept_piece|V2s": {"axes": ["M1", "E9", "SPM"], "classes": ["E"], "expect": "CORRECT", "expected": "guessed", "found_by": "review pr386-r1", "issue": "ops#504", "tier": "F"},
-"ReorderTwoGuessed|both|V2s": {"axes": ["M1", "E9"], "classes": ["E"], "expect": "WARNED", "expected": "correct", "found_by": "review pr386-r1", "issue": "ops#504", "tier": "F"},
-"RepickAnotherStartsFresh|repicked|V2s": {"axes": ["M1", "E9"], "classes": ["E"], "expect": "WARNED", "expected": "correct", "found_by": "review pr386-r1", "issue": "ops#504", "tier": "F"},
-"RewriteThenWidenLinkSub|followed|V2s": {"axes": ["M1", "E9"], "classes": ["E"], "expect": "WARNED", "expected": "correct", "found_by": "review pr386-r1", "issue": "ops#504", "tier": "F"},
-"RewriteThenWidenXLinkSub|followed|V2s": {"axes": ["M1", "E9"], "classes": ["E"], "expect": "WARNED", "expected": "correct", "found_by": "review pr386-r1", "issue": "ops#504", "tier": "F"},
-"RewriteThenWiden|followed|V2s": {"axes": ["M1", "E9"], "classes": ["E"], "expect": "WARNED", "expected": "correct", "found_by": "review pr386-r1", "issue": "ops#504", "tier": "F"}
+"ReorderTwoGuessed|both|V2s": {"axes": ["M1", "E9"], "classes": ["E"], "expect": "WARNED", "expected": "quiet", "found_by": "review pr386-r1", "issue": "ops#504", "tier": "F"},
+"RepickAnotherStartsFresh|repicked|V2s": {"axes": ["M1", "E9"], "classes": ["E"], "expect": "WARNED", "expected": "quiet", "found_by": "review pr386-r1", "issue": "ops#504", "tier": "F"},
+"RewriteThenWidenLinkSub|followed|V2s": {"axes": ["M1", "E9"], "classes": ["E"], "expect": "WARNED", "expected": "quiet", "found_by": "review pr386-r1", "issue": "ops#504", "tier": "F"},
+"RewriteThenWidenXLinkSub|followed|V2s": {"axes": ["M1", "E9"], "classes": ["E"], "expect": "WARNED", "expected": "quiet", "found_by": "review pr386-r1", "issue": "ops#504", "tier": "F"},
+"RewriteThenWiden|followed|V2s": {"axes": ["M1", "E9"], "classes": ["E"], "expect": "WARNED", "expected": "quiet", "found_by": "review pr386-r1", "issue": "ops#504", "tier": "F"}
 }
 }

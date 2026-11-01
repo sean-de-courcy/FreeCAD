@@ -1,0 +1,24 @@
+{
+"entries": {
+"K8ExternalHoleNeighbourMoved|external_hole0|V2s": {"axes": ["M8", "E1", "E4"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "K8 attacker pass 1", "issue": "ops#503", "tier": "F"},
+"K8ExternalHoleNeighbourMoved|external_hole1|V2s": {"axes": ["M8", "E1", "E4"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "K8 attacker pass 1", "issue": "ops#503", "tier": "F"},
+"K8FusePinRemovedNeighbourMoved|point_pin0|V2s": {"axes": ["M4", "E1", "E4"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "K8 attacker pass 1", "issue": "ops#503", "tier": "F"},
+"K8FusePinRemovedNeighbourMoved|point_pin1|V2s": {"axes": ["M4", "E1", "E4"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "K8 attacker pass 1", "issue": "ops#503", "tier": "F"},
+"K8HoleDeletedNeighbourMoved|point_hole0|V2s": {"axes": ["M1", "E1", "E4"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "K8 attacker pass 1", "issue": "ops#503", "tier": "F"},
+"K8HoleDeletedNeighbourMoved|point_hole1|V2s": {"axes": ["M1", "E1", "E4"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "K8 attacker pass 1", "issue": "ops#503", "tier": "F"},
+"K8HoleRedrawnNeighbourMoved|chamfer_hole0|V2s": {"axes": ["M1", "E5", "E4"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "K8 attacker pass 1", "issue": "ops#503", "tier": "F"},
+"K8HoleRedrawnNeighbourMoved|point_hole0|V2s": {"axes": ["M1", "E5", "E4"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "K8 attacker pass 1", "issue": "ops#503", "tier": "F"},
+"K8HoleRedrawnNeighbourMoved|point_hole1|V2s": {"axes": ["M1", "E5", "E4"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "K8 attacker pass 1", "issue": "ops#503", "tier": "F"},
+"K8OffsetHoleRemovedNeighbourMoved|point_hole0|V2s": {"axes": ["M6", "E1", "E4"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "K8 attacker pass 1", "issue": "ops#503", "tier": "F"},
+"K8OffsetHoleRemovedNeighbourMoved|point_hole1|V2s": {"axes": ["M6", "E1", "E4"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "K8 attacker pass 1", "issue": "ops#503", "tier": "F"},
+"K8RevolvedRidgeRemovedNeighbourMoved|external_ridgeB|V2s": {"axes": ["M7", "E1", "E4"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "K8 attacker pass 1", "issue": "ops#503", "tier": "F"},
+"K8RevolvedRidgeRemovedNeighbourMoved|fillet_ridgeA|V2s": {"axes": ["M7", "E1", "E4"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "K8 attacker pass 1", "issue": "ops#503", "tier": "F"},
+"K8SquareRedrawnBesideItself|fillet_corner|V2s": {"axes": ["M1", "E4", "E5"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "K8 attacker pass 1", "issue": "ops#503", "tier": "F"},
+"K8SquareRedrawnBesideItself|plane_right|V2s": {"axes": ["M1", "E4", "E5"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "K8 attacker pass 1", "issue": "ops#503", "tier": "F"},
+"K8SweptRidgeRemovedNeighbourMoved|fillet_ridgeA|V2s": {"axes": ["M3", "E1", "E4"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "K8 attacker pass 1", "issue": "ops#503", "tier": "F"},
+"K8SweptRidgeRemovedNeighbourMoved|point_ridgeB|V2s": {"axes": ["M3", "E1", "E4"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "K8 attacker pass 1", "issue": "ops#503", "tier": "F"},
+"K8TwinTradeThenRedraw|fillet_boss1|V2s": {"axes": ["M1", "E4", "E5"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "K8 attacker pass 1", "issue": "ops#503", "tier": "F"},
+"K8TwinTradeThenRedraw|point_boss0|V2s": {"axes": ["M1", "E4", "E5"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "K8 attacker pass 1", "issue": "ops#503", "tier": "F"},
+"K8TwinTradeThenRedraw|point_boss1|V2s": {"axes": ["M1", "E4", "E5"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "K8 attacker pass 1", "issue": "ops#503", "tier": "F"}
+}
+}
