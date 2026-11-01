@@ -1,0 +1,8 @@
+{
+"entries": {
+"QuadMirroredAllRedrawnProfileReparameterised180|leg0|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6ks", "issue": "ops#469", "tier": "F"},
+"QuadMirroredAllRedrawnProfileReparameterised180|leg1|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6ks", "issue": "ops#469", "tier": "F"},
+"QuadMirroredAllRedrawnProfileReparameterised180|leg2|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6ks", "issue": "ops#469", "tier": "F"},
+"QuadMirroredAllRedrawnProfileReparameterised180|leg3|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6ks", "issue": "ops#469", "tier": "F"}
+}
+}
