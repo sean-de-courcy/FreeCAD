@@ -757,3 +757,29 @@ TEST(ElementFingerprint, convexOutline)
     EXPECT_TRUE(ElementFingerprint::convexOutline(points, Base::Vector3d()).empty());
     EXPECT_TRUE(ElementFingerprint::convexOutline({}, Base::Vector3d(0, 0, 1)).empty());
 }
+
+TEST(ElementFingerprint, aMarksSuppressedFlag)
+{
+    // ops#549 PS: an object suppressed when the record was taken writes `<tag>:<mark>:s`, and the
+    // flag is part of the record's equality
+    ElementFingerprint corner;
+    corner.type = 'V';
+    corner.kind = "Point";
+    corner.center = Base::Vector3d(0, 0, 10);
+    corner.marks = {{12, 16, true}, {14, -1, true}, {15, 3}};
+    const std::string text = corner.toString();
+    EXPECT_NE(text.find("|12:16:s/14:_:s/15:3"), std::string::npos) << text;
+    auto parsed = ElementFingerprint::fromString(text);
+    ASSERT_TRUE(parsed.isValid());
+    EXPECT_EQ(parsed, corner);
+    ASSERT_EQ(parsed.marks.size(), 3u);
+    EXPECT_TRUE(parsed.marks[0].suppressed);
+    EXPECT_FALSE(parsed.marks[2].suppressed);
+    auto unflagged = corner;
+    unflagged.marks[0].suppressed = false;
+    EXPECT_FALSE(unflagged == corner);
+    //   any other flag is a malformed field
+    std::string other = text;
+    other.replace(other.find("12:16:s"), 7, "12:16:x");
+    EXPECT_FALSE(ElementFingerprint::fromString(other).isValid());
+}

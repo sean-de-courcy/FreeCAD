@@ -134,6 +134,12 @@ Feature::Feature()
         0
     );
     ADD_PROPERTY(SuppressedShape, (TopoShape()));
+    ADD_PROPERTY_TYPE(_PassedThrough,
+                      (false),
+                      "Base",
+                      (App::PropertyType)(App::Prop_Hidden | App::Prop_ReadOnly | App::Prop_Output
+                                          | App::Prop_NoRecompute),
+                      "The output is the base, passed through while suppressed");
     Placement.setStatus(App::Property::Hidden, true);
     BaseFeature.setStatus(App::Property::Hidden, true);
 
@@ -228,12 +234,18 @@ App::DocumentObjectExecReturn* Feature::recompute()
         if (auto doc = getDocument()) {
             doc->clearWarning(this);  // it computes nothing of its own (ops#127)
         }
+        // Before the shape: setting it solves the references to it, which judge by this state
+        // (ops#549 PS)
+        _PassedThrough.setValue(true);
         Shape.setValue(getBaseTopoShape(true));
         updateSuppressedShape();
         return App::DocumentObject::StdReturn;
     }
 
     SuppressedShape.setValue(TopoShape());
+    // The output is the feature's own from here (or a failure's pass-through, which rule PT
+    // judges by the error)
+    _PassedThrough.setValue(false);
 
     // Its Body is merged into another part, at an earlier feature (FreeCAD-CH ops#325, design
     // 2.6): it doesn't reach the Merge. Checked here, as every path that adds or moves a solid

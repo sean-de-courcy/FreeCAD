@@ -6,6 +6,7 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace App
 {
@@ -65,6 +66,26 @@ public:
         (void)obj;
         (void)why;
         return false;
+    }
+
+    /// A feature of a target's shape-input chain that can pass its base through (ops#549)
+    struct ChainFeature
+    {
+        const DocumentObject* object = nullptr;
+        /// In error and claimed (continuesAfter()): its output is its base, until it computes
+        bool failed = false;
+        /// Suppressed: its output is its base, as if it were removed
+        bool suppressed = false;
+    };
+
+    /// The features whose output 'target''s shape is built on and that can pass their base
+    /// through, nearest first, from their current state (ops#549; PartDesign: the Body solid
+    /// features of the BaseFeature chain and of the solid features' links, through a Body's Tip,
+    /// binders and links). Empty without a rule.
+    virtual void shapeInputChain(const DocumentObject* target, std::vector<ChainFeature>& out) const
+    {
+        (void)target;
+        out.clear();
     }
 };
 

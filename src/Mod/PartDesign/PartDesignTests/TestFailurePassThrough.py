@@ -674,6 +674,164 @@ class FailurePassThroughBase:
         self.assertFailed(pad)
         self.assertPassesThrough(pad, notch)
 
+    # -- ops#549: rule PT and suppression as an editing state (PS) --------------------------------
+
+    def topSketch(self, target, name="TopSketch"):
+        """A sketch on `target`'s top face (z = 10 on the block)."""
+        self.recompute()
+        top = elementWhere(
+            target.Shape,
+            "Face",
+            lambda f: f.normalAt(0, 0).z > 1 - TOL and abs(f.CenterOfMass.x - 10) < 1,
+        )
+        sketch = models.sketch(self.doc, name, models.rectangle(1, 1, 3, 3))
+        self.body.addObject(sketch)
+        sketch.AttachmentSupport = [(target, top)]
+        sketch.MapMode = "FlatFace"
+        self.recompute()
+        return sketch
+
+    def assertAt(self, sketch, z):
+        self.assertValid(sketch)
+        self.assertAlmostEqual(sketch.Placement.Base.z, z, delta=1e-6)
+
+    def ringSweep(self):
+        """ops#549's C1 shape: a 4 x 4 plate padded 1 down; a Pipe sweeps its top face round a
+        closed 30 x 20 ring in the XZ plane. The Pipe's corner (-2, -2, -2) carries the square
+        sketch's bare vertex name, which the plate's corner (2, 2, 0) carries too. A datum point
+        on the corner."""
+        spine = models.sketch(
+            self.doc,
+            "Spine",
+            models.polygon([(0, 0), (0, 20), (30, 20), (30, 0)]),
+            self.body,
+            placement=App.Placement(V(), App.Rotation(V(1, 0, 0), 90)),
+        )
+        square = models.sketch(self.doc, "Square", models.rectangle(-2, -2, 2, 2), self.body)
+        plate = models.pad(self.body, square, 1, "Plate")
+        plate.Reversed = True
+        self.recompute()
+        top = elementWhere(
+            plate.Shape,
+            "Face",
+            lambda f: abs(f.CenterOfMass.z) < TOL and abs(f.normalAt(0, 0).z) > 1 - TOL,
+        )
+        sweep = self.body.newObject("PartDesign::AdditivePipe", "Sweep")
+        sweep.Profile = (plate, [top])
+        sweep.Spine = (spine, [])
+        sweep.Transition = "Right corner"
+        sweep.Refine = False
+        self.recompute()
+        self.assertValid(sweep)
+        corner = elementWhere(
+            sweep.Shape, "Vertex", lambda v: (v.Point - V(-2, -2, -2)).Length < TOL
+        )
+        point = self.body.newObject("PartDesign::Point", "CornerPoint")
+        point.AttachmentSupport = [(sweep, corner)]
+        point.MapMode = "Vertex"
+        self.recompute()
+        self.assertValid(point)
+        return plate, sweep, point
+
+    def testSuppressedFeaturesOwnElementsBreakAndReturn(self):
+        """A fillet on a suppressed hole's rim breaks, as if the hole were removed; the hole back,
+        it finds the same rim (ops#549 PS)."""
+        self.block()
+        hole = self.hole()
+        self.recompute()
+        fillet = self.body.newObject("PartDesign::Fillet", "RimFillet")
+        rim = elementWhere(hole.Shape, "Edge", lambda e: isCircle(e, V(10, 10, 10), 3))
+        fillet.Base = (hole, [rim])
+        fillet.Radius = 1
+        self.recompute()
+        self.assertValid(fillet)
+
+        hole.Suppressed = True
+        self.recompute()
+        self.assertFalse(fillet.isValid(), "the fillet holds an edge of the suppressed hole")
+
+        hole.Suppressed = False
+        self.recompute()
+        self.assertValid(hole, fillet)
+        sub = fillet.Base[1][0]
+        self.assertTrue(isCircle(hole.Shape.getElement(sub), V(10, 10, 10), 3), sub)
+
+    def testEditingWhileSuppressed(self):
+        """A sketch on the top a suppressed hole cut into stays on the block's top, follows the
+        block while the hole stays suppressed, and stays on the top when the hole is back
+        (ops#549 PS, decision 213: suppression doesn't stop editing)."""
+        self.block()
+        hole = self.hole()
+        sketch = self.topSketch(hole)
+        self.assertAt(sketch, 10)
+
+        hole.Suppressed = True
+        self.recompute()
+        self.assertAt(sketch, 10)
+        block = self.doc.getObject("Block")
+        block.Length = 12
+        self.recompute()
+        self.assertAt(sketch, 12)
+        block.Length = 14
+        self.recompute()
+        self.assertAt(sketch, 14)
+
+        hole.Suppressed = False
+        self.recompute()
+        self.assertValid(hole)
+        self.assertAt(sketch, 14)
+
+    def testBareNameOnASuppressedOrFailedFeatureBreaks(self):
+        """C1 (ops#549): the datum on the Pipe's corner, whose bare name the plate's corner
+        carries, breaks while the Pipe is suppressed (and stays broken through an edit), or while
+        it fails; it is back on the corner when the Pipe computes."""
+        if not self.solver:
+            self.skipTest("rule PT is the reference solver's")
+        plate, sweep, point = self.ringSweep()
+        spine = sweep.Spine[0]
+
+        sweep.Suppressed = True
+        self.recompute()
+        self.assertFalse(point.isValid(), "the datum holds the plate's corner")
+        plate.Length = 2
+        self.recompute()
+        self.assertFalse(point.isValid(), "the datum holds the plate's corner after an edit")
+        plate.Length = 1
+        sweep.Suppressed = False
+        self.recompute()
+        self.assertValid(sweep, point)
+        self.assertLess((point.Placement.Base - V(-2, -2, -2)).Length, 1e-6)
+
+        empty = models.sketch(self.doc, "Empty", [], self.body)
+        sweep.Spine = (empty, [])
+        self.recompute()
+        self.assertFalse(sweep.isValid())
+        self.assertFalse(point.isValid(), "the datum holds the plate's corner")
+        sweep.Spine = (spine, [])
+        self.recompute()
+        self.assertValid(sweep, point)
+        self.assertLess((point.Placement.Base - V(-2, -2, -2)).Length, 1e-6)
+
+    def testReopenedWhileSuppressed(self):
+        """Saved and reopened with the hole suppressed, a sketch on the top still follows the
+        block: the record keeps the world it was taken in (ops#549 PS)."""
+        self.block()
+        hole = self.hole()
+        self.topSketch(hole)
+        hole.Suppressed = True
+        self.recompute()
+
+        folder = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, folder, True)
+        path = os.path.join(folder, "suppressed.FCStd")
+        self.doc.saveAs(path)
+        App.closeDocument(self.doc.Name)
+        self.doc = App.openDocument(path)
+        self.doc.getObject("Block").Length = 12
+        self.recompute()
+        self.assertAt(self.doc.getObject("TopSketch"), 12)
+        App.closeDocument(self.doc.Name)
+
 
 @unittest.skipUnless(dump.OLD_FILE_TESTS, dump.OLD_FILE_SKIP)
 class TestFailurePassThroughV2(FailurePassThroughBase, unittest.TestCase):
