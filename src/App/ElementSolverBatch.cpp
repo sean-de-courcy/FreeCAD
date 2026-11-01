@@ -169,29 +169,39 @@ void placementSources(const GeoFeature* geo, std::vector<Data::ElementFingerprin
         }
         return key;
     };
-    // What the chain and the target name: up-to owners (always sources, 11.9 F6) and geometry
-    // (loci, 11.9 F1/F2)
+    // What the chain and the target name: up-to owners and a Split's tool (always sources,
+    // 11.9 F6) and geometry (loci, 11.9 F1/F2). Every link but the attachment's names geometry
+    // (decision 150: a name left out read rigid, ReviewDraftedBoxFlipped); a locus named only
+    // as a mirror plane keeps no sense, the reflection is the same
     std::set<const DocumentObject*> upTo;
-    std::set<const DocumentObject*> named;
+    std::map<const DocumentObject*, bool> named;
     std::vector<const DocumentObject*> namers(chain.begin(), chain.end());
     namers.push_back(geo);
     for (const DocumentObject* object : namers) {
         if (!object || !object->isAttachedToDocument()) {
             continue;
         }
-        for (const char* name : {"UpToFace", "UpToShape"}) {
-            if (auto link = dynamic_cast<PropertyLinkBase*>(object->getPropertyByName(name))) {
-                std::vector<DocumentObject*> linked;
-                link->getLinks(linked, true);
+        std::vector<Property*> properties;
+        object->getPropertyList(properties);
+        for (Property* property : properties) {
+            auto link = dynamic_cast<PropertyLinkBase*>(property);
+            const char* name = property->getName();
+            if (!link || !name || std::strcmp(name, "AttachmentSupport") == 0) {
+                continue;
+            }
+            std::vector<DocumentObject*> linked;
+            link->getLinks(linked, true);
+            const std::string_view which(name);
+            if (which == "UpToFace" || which == "UpToFace2" || which == "UpToShape"
+                || which == "UpToShape2" || which == "Tool") {
                 upTo.insert(linked.begin(), linked.end());
             }
-        }
-        for (const char* name :
-             {"ExternalGeometry", "ReferenceAxis", "MirrorPlane", "Axis", "Direction"}) {
-            if (auto link = dynamic_cast<PropertyLinkBase*>(object->getPropertyByName(name))) {
-                std::vector<DocumentObject*> linked;
-                link->getLinks(linked, true);
-                named.insert(linked.begin(), linked.end());
+            const bool mirror = which == "MirrorPlane";
+            for (const DocumentObject* target : linked) {
+                auto [at, added] = named.emplace(target, mirror);
+                if (!added) {
+                    at->second = at->second && mirror;
+                }
             }
         }
     }
@@ -212,7 +222,7 @@ void placementSources(const GeoFeature* geo, std::vector<Data::ElementFingerprin
         }
     }
     // The origin lines and planes named as geometry: loci
-    for (const DocumentObject* object : named) {
+    for (const auto& [object, mirror] : named) {
         auto datum = dynamic_cast<const DatumElement*>(object);
         const bool line = dynamic_cast<const Line*>(object) != nullptr;
         if (!datum || !datum->isAttachedToDocument()
@@ -221,7 +231,7 @@ void placementSources(const GeoFeature* geo, std::vector<Data::ElementFingerprin
         }
         Data::ElementFingerprint::Source source;
         source.key = keyOf(object);
-        source.locus = line ? 'L' : 'P';
+        source.locus = line ? 'L' : (mirror ? 'M' : 'P');
         source.point = datum->getBasePoint();
         source.direction = datum->getDirection();
         source.direction.Normalize();

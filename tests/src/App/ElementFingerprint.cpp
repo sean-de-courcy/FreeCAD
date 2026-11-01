@@ -970,6 +970,12 @@ TEST(ElementFingerprint, sourcesRoundTrip)
     EXPECT_FALSE(ElementFingerprint::fromString(fields + "7@1doc:0,0,0,0,0,0,1").isValid());
     EXPECT_FALSE(ElementFingerprint::fromString(fields + "L3:0,0,0,0,0").isValid());
     EXPECT_FALSE(ElementFingerprint::fromString(fields + "L3:0,0,0,0,0,2").isValid());
+    //   a mirror plane's locus reads back as one
+    const auto mirrored = ElementFingerprint::fromString(fields + "M4:0,0,0,0,1,0");
+    ASSERT_TRUE(mirrored.isValid());
+    ASSERT_EQ(mirrored.sources.size(), 1U);
+    EXPECT_EQ(mirrored.sources.front().locus, 'M');
+    EXPECT_EQ(ElementFingerprint::fromString(mirrored.toString()), mirrored);
     //   moved to another frame, the sources go with the frame
     EXPECT_TRUE(face.transformed(Base::Placement(), 1e-6).sources.empty());
 }
@@ -1033,4 +1039,33 @@ TEST(ElementFingerprint, rigidMotion)
     auto turnedPlane = turned;
     turnedPlane.push_back(plane);
     EXPECT_TRUE(ElementFingerprint::rigidMotion(savedPlane, turnedPlane, tolerance, angle).has_value());
+
+    //   a half turn about x maps the z axis onto itself reversed: a revolve or a draft's pull
+    //   reads the sense, not rigid (ReviewQuarterRevolveFlipped); the XY plane as a mirror plane
+    //   has no sense and stays, as a pull's plane it doesn't
+    const Base::Placement flip(
+        Base::Vector3d(),
+        Base::Rotation(Base::Vector3d(1, 0, 0), std::numbers::pi)
+    );
+    const std::vector<ElementFingerprint::Source> flipped {
+        placed("1", flip * base),
+        placed("2", flip * holes)
+    };
+    auto with = [](std::vector<ElementFingerprint::Source> sources,
+                   const ElementFingerprint::Source& extra) {
+        sources.push_back(extra);
+        return sources;
+    };
+    const auto axis = locus('L', "9", Base::Vector3d(0, 0, 1));
+    const auto mirror = locus('M', "8", Base::Vector3d(0, 0, 1));
+    ASSERT_TRUE(ElementFingerprint::rigidMotion(saved, flipped, tolerance, angle).has_value());
+    const auto axisFlipped =
+        ElementFingerprint::rigidMotion(with(saved, axis), with(flipped, axis), tolerance, angle);
+    EXPECT_FALSE(axisFlipped.has_value());
+    const auto planeFlipped =
+        ElementFingerprint::rigidMotion(with(saved, plane), with(flipped, plane), tolerance, angle);
+    EXPECT_FALSE(planeFlipped.has_value());
+    const auto mirrorFlipped =
+        ElementFingerprint::rigidMotion(with(saved, mirror), with(flipped, mirror), tolerance, angle);
+    EXPECT_TRUE(mirrorFlipped.has_value());
 }
