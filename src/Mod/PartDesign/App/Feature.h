@@ -77,6 +77,13 @@ public:
 
     short mustExecute() const override;
 
+    /// The Placement is the chain's frame, copied from the first sketch's support or the base
+    /// feature (ops#557)
+    bool placementIsDerived() const override
+    {
+        return true;
+    }
+
     /**
      * The properties whose links place this feature's result: each is read in its own Body's
      * coordinates as if they were this feature's (FreeCAD-CH ops#308 T4, ops#325). None by

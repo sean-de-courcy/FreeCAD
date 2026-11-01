@@ -21,6 +21,7 @@
 
 #include "Application.h"
 #include "ComplexGeoData.h"
+#include "Datums.h"
 #include "Document.h"
 #include "DocumentObject.h"
 #include "ElementFingerprint.h"
@@ -130,6 +131,108 @@ std::string bareMappedName(const std::string& newStyleName)
         name.resize(dot);
     }
     return name;
+}
+
+void placementSources(const GeoFeature* geo, std::vector<Data::ElementFingerprint::Source>& sources)
+{
+    sources.clear();
+    if (!geo || !geo->isAttachedToDocument()) {
+        return;
+    }
+    // PartDesign's types by name: App can't name them
+    static const Base::Type bodyType = Base::Type::fromName("PartDesign::Body");
+    static const Base::Type featureType = Base::Type::fromName("PartDesign::Feature");
+    static const Base::Type primitiveType = Base::Type::fromName("PartDesign::FeaturePrimitive");
+    auto isA = [](const DocumentObject* object, const Base::Type& type) {
+        return !type.isBad() && object->getTypeId().isDerivedFrom(type);
+    };
+    // The chain: the target's out-list (11.9 F4), a Body's from its Tip
+    std::vector<DocumentObject*> chain;
+    const DocumentObject* top = geo;
+    if (isA(geo, bodyType)) {
+        auto tip = dynamic_cast<PropertyLink*>(geo->getPropertyByName("Tip"));
+        top = tip ? tip->getValue() : nullptr;
+        if (top) {
+            chain.push_back(const_cast<DocumentObject*>(top));
+        }
+    }
+    if (top) {
+        auto out = top->getOutListRecursive();
+        chain.insert(chain.end(), out.begin(), out.end());
+    }
+    const Document* doc = geo->getDocument();
+    auto keyOf = [doc](const DocumentObject* object) {
+        std::string key = std::to_string(object->getID());
+        if (object->getDocument() != doc) {
+            key += "@";
+            key += object->getDocument()->getName();
+        }
+        return key;
+    };
+    // What the chain and the target name: up-to owners (always sources, 11.9 F6) and geometry
+    // (loci, 11.9 F1/F2)
+    std::set<const DocumentObject*> upTo;
+    std::set<const DocumentObject*> named;
+    std::vector<const DocumentObject*> namers(chain.begin(), chain.end());
+    namers.push_back(geo);
+    for (const DocumentObject* object : namers) {
+        if (!object || !object->isAttachedToDocument()) {
+            continue;
+        }
+        for (const char* name : {"UpToFace", "UpToShape"}) {
+            if (auto link = dynamic_cast<PropertyLinkBase*>(object->getPropertyByName(name))) {
+                std::vector<DocumentObject*> linked;
+                link->getLinks(linked, true);
+                upTo.insert(linked.begin(), linked.end());
+            }
+        }
+        for (const char* name :
+             {"ExternalGeometry", "ReferenceAxis", "MirrorPlane", "Axis", "Direction"}) {
+            if (auto link = dynamic_cast<PropertyLinkBase*>(object->getPropertyByName(name))) {
+                std::vector<DocumentObject*> linked;
+                link->getLinks(linked, true);
+                named.insert(linked.begin(), linked.end());
+            }
+        }
+    }
+    std::set<const DocumentObject*> seen;
+    for (const DocumentObject* object : chain) {
+        auto feature = dynamic_cast<const GeoFeature*>(object);
+        if (!feature || !feature->isAttachedToDocument() || !seen.insert(object).second) {
+            continue;
+        }
+        const std::string typeName(object->getTypeId().getName());
+        const bool own = typeName.rfind("App::", 0) != 0 && !isA(object, bodyType)
+            && (!isA(object, featureType) || isA(object, primitiveType));
+        if (own || upTo.count(object) > 0) {
+            Data::ElementFingerprint::Source source;
+            source.key = keyOf(object);
+            source.placement = feature->Placement.getValue();
+            sources.push_back(std::move(source));
+        }
+    }
+    // The origin lines and planes named as geometry: loci
+    for (const DocumentObject* object : named) {
+        auto datum = dynamic_cast<const DatumElement*>(object);
+        const bool line = dynamic_cast<const Line*>(object) != nullptr;
+        if (!datum || !datum->isAttachedToDocument()
+            || (!line && !dynamic_cast<const Plane*>(object))) {
+            continue;
+        }
+        Data::ElementFingerprint::Source source;
+        source.key = keyOf(object);
+        source.locus = line ? 'L' : 'P';
+        source.point = datum->getBasePoint();
+        source.direction = datum->getDirection();
+        source.direction.Normalize();
+        sources.push_back(std::move(source));
+    }
+    std::sort(sources.begin(), sources.end(), [](const auto& a, const auto& b) {
+        return a.locus != b.locus ? a.locus < b.locus : a.key < b.key;
+    });
+    if (sources.size() > Data::ElementFingerprint::MaxSources) {
+        sources.clear();
+    }
 }
 
 namespace
@@ -387,6 +490,12 @@ bool exactNeedsSolving(const SolverEntry& entry,
         logUnmeasured(entry);
         return false;
     }
+    // The target's frame moved since the record (ops#557): the local shape and its names can be
+    // as they were while the elements traded places globally. solveOwner() judges the hit against
+    // the old global place.
+    if (entry.frame) {
+        return true;
+    }
     const std::string type = indexType(entry.oldIndex);
     if (type == "Edge" && saved.type == 'E' && (saved.kind == "Line" || saved.kind == "Circle")
         && Data::hitWithinOldEdge(saved, now, diagonal, tolerances, distance)) {
@@ -439,6 +548,31 @@ void migrationBrokenFor(const SolverEntry& entry, SolverResolution& resolution)
     const std::string& index = entry.storedIndex.empty() ? entry.oldIndex : entry.storedIndex;
     resolution.shadow.oldName = entry.prefix + Data::MISSING_PREFIX + index;
     resolution.sub = resolution.shadow.oldName;
+}
+
+// Whether \a motion moves anything (ops#557, decision 218): its position beyond ε (\a distance
+// times max(1, \a diagonal)) or its rotation beyond \a angle. A frame or a chain that didn't move
+// leaves the record as it is.
+bool movesFrame(const Base::Placement& motion, double diagonal, double angle, double distance)
+{
+    double q0 = 0.0;
+    double q1 = 0.0;
+    double q2 = 0.0;
+    double q3 = 1.0;
+    motion.getRotation().getValue(q0, q1, q2, q3);
+    const double turn = 2.0 * std::acos(std::min(1.0, std::abs(q3)));
+    return motion.getPosition().Length() > distance * std::max(1.0, diagonal) || turn > angle;
+}
+
+// A reference's record as the solve reads it: mapped to where the element is now when the
+// target's chain moved as one piece (decision 218, the entry's rigid motion)
+Data::ElementFingerprint recordOf(const SolverEntry& entry, const std::string& text, double angle)
+{
+    auto record = Data::ElementFingerprint::fromString(text);
+    if (record.isValid() && entry.rigid) {
+        record = record.transformed(*entry.rigid, angle);
+    }
+    return record;
 }
 
 // Two results of an equivalence probe are the same as the attacher compares placements
@@ -806,7 +940,19 @@ bool solveElementReferences(DocumentObject* feature,
 
     // Pass 2. Keep the references to feature's elements, by owner.
     std::map<std::string, std::vector<const SolverEntry*>> owners;  // by full name
-    for (const auto& entry : batch.entries) {
+    // The target's frame now and the solver's tolerances, for the entries' frames (ops#557): read
+    // at the first record that has a frame
+    bool frameRead = false;
+    std::optional<Base::Placement> frameNow;
+    double frameDiagonal = 0.0;
+    Data::GeometryTolerances frameTolerances;
+    double frameDistance = Data::SolveInput().continuationDistance;
+    const std::string framedVersion = std::to_string(Data::ElementFingerprint::VersionWithFrame)
+        + "|";
+    const bool targetIsBody = geo->getTypeId().isDerivedFrom(Base::Type::fromName("PartDesign::Body"));
+    bool sourcesRead = false;
+    std::vector<Data::ElementFingerprint::Source> sourcesNow;
+    for (auto& entry : batch.entries) {
         if (!entry.owner || !entry.obj) {
             continue;
         }
@@ -822,6 +968,58 @@ bool solveElementReferences(DocumentObject* feature,
                                         &target)
             || target != geo) {
             continue;
+        }
+        // Whether the target's frame moved since the record, for every entry (a missing one's
+        // picks are judged by it too): the reference's record, a snap-back probe's original
+        const std::string& record = entry.guessed ? entry.guess.origFingerprint
+                                                  : entry.oldFingerprint;
+        if (record.rfind(framedVersion, 0) == 0) {
+            if (!frameRead) {
+                frameRead = true;
+                const PropertyComplexGeoData* prop = geo->getPropertyOfGeometry();
+                if (const Data::ComplexGeoData* data = prop ? prop->getComplexData() : nullptr) {
+                    frameNow = data->getPlacement();
+                    frameDiagonal = data->getBoundBox().CalcDiagonalLength();
+                    double unusedGap = 0.0;
+                    readTolerances(unusedGap, frameTolerances, frameDistance);
+                }
+            }
+            if (frameNow) {
+                // The chain moved as one piece (decision 218): the record is read mapped to where
+                // the element is now, and the frame's check (211) is skipped. A feature-held
+                // record maps by its frames, a Body-held one (body coordinates) by the motion
+                const auto saved = Data::ElementFingerprint::fromString(record);
+                std::optional<Base::Placement> motion;
+                if (saved.isValid() && !saved.sources.empty() && (saved.frame || targetIsBody)) {
+                    if (!sourcesRead) {
+                        sourcesRead = true;
+                        placementSources(geo, sourcesNow);
+                    }
+                    motion = Data::ElementFingerprint::rigidMotion(
+                        saved.sources,
+                        sourcesNow,
+                        frameDistance * std::max(1.0, frameDiagonal),
+                        frameTolerances.angle
+                    );
+                }
+                auto moves = [&](const Base::Placement& placement) {
+                    return movesFrame(placement, frameDiagonal, frameTolerances.angle, frameDistance);
+                };
+                if (motion && moves(*motion)) {
+                    const Base::Placement mapped = saved.frame
+                        ? frameNow->inverse() * *motion * *saved.frame
+                        : *motion;
+                    if (moves(mapped)) {
+                        entry.rigid = mapped;
+                    }
+                }
+                else if (saved.isValid() && saved.frame) {
+                    const Base::Placement turned = frameNow->inverse() * *saved.frame;
+                    if (moves(turned)) {
+                        entry.frame = turned;
+                    }
+                }
+            }
         }
         owners[entry.owner->getFullName()].push_back(&entry);
     }
@@ -1084,15 +1282,20 @@ bool solveElementReferences(DocumentObject* feature,
                     originalNow[{entry->prop, entry->index}] = entry->oldIndex;
                 }
                 bool back = false;
-                const auto original = Data::ElementFingerprint::fromString(
-                    entry->guess.origFingerprint
-                );
+                // (read mapped when the chain moved as one piece, decision 218)
+                const auto original = recordOf(*entry, entry->guess.origFingerprint, tolerances.angle);
                 if (!original.isValid()) {
                     back = entry->guess.origFingerprint.empty() && entry->guess.kind != "piece";
                 }
                 else {
+                    // The target's frame moved (ops#557): the original as saved is the record
+                    // mapped to where it was globally; the name's element after a hidden turn
+                    // isn't it
                     const auto& now = fingerprintOf(entry->oldIndex);
-                    back = now.isValid() && fingerprintsAgree(original, now, diagonal);
+                    const auto expected = entry->frame
+                        ? original.transformed(*entry->frame, tolerances.angle)
+                        : original;
+                    back = now.isValid() && fingerprintsAgree(expected, now, diagonal);
                 }
                 if (!back) {
                     FC_LOG(
@@ -1140,7 +1343,7 @@ bool solveElementReferences(DocumentObject* feature,
                 if (e->kind != SolverEntry::Kind::Exact || e->oldFingerprint.empty()) {
                     continue;
                 }
-                const auto saved = Data::ElementFingerprint::fromString(e->oldFingerprint);
+                const auto saved = recordOf(*e, e->oldFingerprint, tolerances.angle);
                 // Another element of its type where it was. Solving the owner (its pools) costs
                 // more than this scan.
                 auto occupied = [&]() {
@@ -1170,7 +1373,12 @@ bool solveElementReferences(DocumentObject* feature,
                 if (entry->kind != SolverEntry::Kind::Exact) {
                     continue;
                 }
-                const auto saved = Data::ElementFingerprint::fromString(entry->oldFingerprint);
+                // The target's frame moved (ops#557): the element is looked for where it was
+                // globally, the record mapped into the current frame
+                auto saved = recordOf(*entry, entry->oldFingerprint, tolerances.angle);
+                if (saved.isValid() && entry->frame) {
+                    saved = saved.transformed(*entry->frame, tolerances.angle);
+                }
                 const std::string& hit = entry->oldIndex;
                 if (!saved.isValid()) {
                     if (entry->storedIndex.empty() || hit == entry->storedIndex) {
@@ -1311,7 +1519,10 @@ bool solveElementReferences(DocumentObject* feature,
                 const std::string& index = entry->oldIndex;
                 Data::ElementFingerprint now;
                 bool exists = geo->getElementFingerprint(index.c_str(), now);
-                auto saved = Data::ElementFingerprint::fromString(entry->oldFingerprint);
+                auto saved = recordOf(*entry, entry->oldFingerprint, tolerances.angle);
+                if (saved.isValid() && entry->frame) {
+                    saved = saved.transformed(*entry->frame, tolerances.angle);  // ops#557
+                }
                 std::string name;
                 for (const auto& element : pool(indexType(index))) {
                     if (element.index == index && !element.names.empty()) {
@@ -1439,7 +1650,8 @@ bool solveElementReferences(DocumentObject* feature,
                 item.policy = Data::SolvePolicy::One;
                 item.listHolder = true;
             }
-            item.fingerprint = Data::ElementFingerprint::fromString(entry->oldFingerprint);
+            item.fingerprint = recordOf(*entry, entry->oldFingerprint, tolerances.angle);
+            item.frame = entry->frame;
             if (item.policy == Data::SolvePolicy::Equivalent) {
                 item.equivalent = equivalenceOf(*entry);
             }

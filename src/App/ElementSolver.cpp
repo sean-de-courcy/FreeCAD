@@ -3267,7 +3267,9 @@ int extrinsicNearest(
     return findNearest(saved, candidates, diagonal, tolerances).index;
 }
 
-std::vector<SolveOutcome> solveOwner(const SolveInput& input)
+// solveOwner() in the target's frame as it is: every saved place is read in it. solveOwner()
+// judges the entries whose frame moved first (ops#557).
+static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
 {
     NameAncestry ancestry(input.measure);
     std::vector<SolveOutcome> outcomes(input.entries.size());
@@ -6467,6 +6469,331 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 const auto& from = input.entries[member].from;
                 outcomes[member].from = from.empty() ? state.oldName : from;
             }
+        }
+    }
+    return outcomes;
+}
+
+namespace
+{
+
+// An element's extent: its box, or, where a turned record lost its box, the box of its outline.
+// None without either.
+std::optional<std::pair<Base::Vector3d, Base::Vector3d>> extentOf(const ElementFingerprint& fp)
+{
+    if (fp.extentMin && fp.extentMax) {
+        return std::make_pair(*fp.extentMin, *fp.extentMax);
+    }
+    if (fp.outline.empty()) {
+        return std::nullopt;
+    }
+    Base::Vector3d low = fp.outline.front();
+    Base::Vector3d high = low;
+    for (const auto& p : fp.outline) {
+        low = Base::Vector3d(std::min(low.x, p.x), std::min(low.y, p.y), std::min(low.z, p.z));
+        high = Base::Vector3d(std::max(high.x, p.x), std::max(high.y, p.y), std::max(high.z, p.z));
+    }
+    return std::make_pair(low, high);
+}
+
+// Two outlines are the same points within \a eps, in any order: a turned record's against an
+// element's, which the producer may start elsewhere (ops#557, 10.9 F6)
+bool sameOutline(const std::vector<Base::Vector3d>& a, const std::vector<Base::Vector3d>& b, double eps)
+{
+    if (a.size() != b.size()) {
+        return false;
+    }
+    auto covers = [eps](const std::vector<Base::Vector3d>& x, const std::vector<Base::Vector3d>& y) {
+        return std::all_of(x.begin(), x.end(), [&](const Base::Vector3d& p) {
+            return std::any_of(y.begin(), y.end(), [&](const Base::Vector3d& q) {
+                return Base::Distance(p, q) <= eps;
+            });
+        });
+    };
+    return covers(a, b) && covers(b, a);
+}
+
+// Whether \a element is at \a mapped, the old global place of a record whose target's frame moved
+// (ops#557, `notes\naming-class-D.md` 10.2 (1)): at the place as atSamePlace() reads it, with the
+// same sides where both have them, and with the same outline where the turn dropped the record's
+// box (10.9 F6: centre, size, direction and sides alone can coincide for two coplanar faces).
+bool atMappedPlace(
+    const ElementFingerprint& mapped,
+    const ElementFingerprint& element,
+    bool boxDropped,
+    const SolveInput& input
+)
+{
+    if (!atSamePlace(mapped, element, input.diagonal, input.tolerances, input.continuationDistance)) {
+        return false;
+    }
+    if (!mapped.sides.empty() && !element.sides.empty()
+        && !sidesAgree(mapped.sides, element.sides, input.tolerances.angle)) {
+        return false;
+    }
+    if (boxDropped && !mapped.outline.empty() && !element.outline.empty()) {
+        const double eps = input.continuationDistance * std::max(1.0, input.diagonal);
+        return sameOutline(mapped.outline, element.outline, eps);
+    }
+    return true;
+}
+
+// Whether \a element overlaps \a mapped, the old global place (ops#557, 10.9 F1): the same kind,
+// direction and radii (intrinsicAgrees()) and the same sides where both have them, on the same
+// carrier within ε (a plane's plane, a line's line, a circle's centre), and their extents
+// overlapping by more than ε on each axis where both are longer than ε. A vertex, or an element
+// without a centre, overlaps only at the place; one without an extent, anywhere on its carrier.
+// It errs toward an overlap, which can only break.
+bool overlapsMappedPlace(
+    const ElementFingerprint& mapped,
+    const ElementFingerprint& element,
+    const SolveInput& input
+)
+{
+    if (!intrinsicAgrees(mapped, element, input.tolerances)) {
+        return false;
+    }
+    if (!mapped.sides.empty() && !element.sides.empty()
+        && !sidesAgree(mapped.sides, element.sides, input.tolerances.angle)) {
+        return false;
+    }
+    if (mapped.type == 'V' || !mapped.center || !element.center) {
+        return atSamePlace(mapped, element, input.diagonal, input.tolerances, input.continuationDistance);
+    }
+    const double eps = input.continuationDistance * std::max(1.0, input.diagonal);
+    if (mapped.type == 'F' && mapped.kind == "Plane") {
+        if (!planeAgrees(mapped, element, input.diagonal, input.tolerances, input.continuationDistance)) {
+            return false;
+        }
+    }
+    else if (
+        mapped.type == 'E' && mapped.kind == "Line" && mapped.direction
+        && mapped.direction->Length() > 0.0
+    ) {
+        const Base::Vector3d way = Base::Vector3d(*mapped.direction).Normalize();
+        const Base::Vector3d offset = *element.center - *mapped.center;
+        if ((offset - way * (offset * way)).Length() > eps) {
+            return false;
+        }
+    }
+    else if (
+        mapped.location && element.location && Base::Distance(*mapped.location, *element.location) > eps
+    ) {
+        return false;
+    }
+    const auto a = extentOf(mapped);
+    const auto b = extentOf(element);
+    if (!a || !b) {
+        return true;
+    }
+    const Base::Vector3d aLow = a->first;
+    const Base::Vector3d aHigh = a->second;
+    const Base::Vector3d bLow = b->first;
+    const Base::Vector3d bHigh = b->second;
+    const double lows[2][3] = {{aLow.x, aLow.y, aLow.z}, {bLow.x, bLow.y, bLow.z}};
+    const double highs[2][3] = {{aHigh.x, aHigh.y, aHigh.z}, {bHigh.x, bHigh.y, bHigh.z}};
+    for (int k = 0; k < 3; ++k) {
+        const double common = std::min(highs[0][k], highs[1][k]) - std::max(lows[0][k], lows[1][k]);
+        const bool bothLong = highs[0][k] - lows[0][k] > eps && highs[1][k] - lows[1][k] > eps;
+        if (common < -eps || (bothLong && common <= eps)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+}  // namespace
+
+// The frame rule (ops#557, `notes\naming-class-D.md` 10.2 and 10.9) over solveOwnerInFrame(): an
+// entry whose target's frame moved since its record is judged against the old global place, the
+// record mapped into the current frame. Nothing there, or overlapping it: the part moved with its
+// frame, and the entry is solved as before. An exact hit at it, with nothing else there: the
+// element where it was, kept quietly whatever its local place. Another element there or
+// overlapping it: the name and the old place disagree, and the entry breaks, those elements
+// listed first (role `frame`), the hit second (`name`). A hit that only overlaps it (a piece of
+// the old element) is solved with the mapped record (10.9 F2). A missing entry is solved as
+// before, and its pick must lie at or overlap the old place when anything does; else it breaks
+// the same way.
+std::vector<SolveOutcome> solveOwner(const SolveInput& input)
+{
+    const bool framed = std::any_of(input.entries.begin(), input.entries.end(), [](const auto& e) {
+        return e.frame && e.fingerprint.isValid();
+    });
+    if (!framed) {
+        return solveOwnerInFrame(input);
+    }
+    SolveInput local = input;
+    // Per type, the elements with their names, merged by index as the pools are
+    std::map<std::string, std::map<std::string, std::vector<std::string>>> elementsOf;
+    for (const auto& [type, elements] : input.pool) {
+        auto& merged = elementsOf[type];
+        for (const auto& element : elements) {
+            auto& names = merged[element.index];
+            names.insert(names.end(), element.names.begin(), element.names.end());
+        }
+    }
+    for (auto& [type, merged] : elementsOf) {
+        for (auto& [index, names] : merged) {
+            std::sort(names.begin(), names.end());
+            names.erase(std::unique(names.begin(), names.end()), names.end());
+        }
+    }
+    std::map<std::string, ElementFingerprint> measured;
+    auto fingerprintOf = [&](const std::string& index) -> const ElementFingerprint& {
+        auto it = measured.find(index);
+        if (it == measured.end()) {
+            it = measured
+                     .emplace(
+                         index,
+                         input.fingerprintOf ? input.fingerprintOf(index) : ElementFingerprint()
+                     )
+                     .first;
+        }
+        return it->second;
+    };
+    struct Judged
+    {
+        ElementFingerprint mapped;
+        // At the old place, then overlapping it
+        std::vector<std::string> place;
+        std::size_t at = 0;
+    };
+    std::map<std::size_t, Judged> judged;
+    std::map<std::size_t, SolveOutcome> decided;
+    // The break: the elements at and overlapping the old place first (`frame`), nearest the old
+    // centre first, then those \a named (`name`)
+    auto frameBreak = [&](std::size_t i, const Judged& judge, const std::vector<std::string>& named) {
+        const auto& entry = input.entries[i];
+        SolveOutcome outcome;
+        outcome.status = SolveStatus::Broken;
+        const auto& names = elementsOf[entry.type];
+        auto list = [&](const std::string& index, const char* role) {
+            const auto it = names.find(index);
+            const ElementFingerprint& fp = fingerprintOf(index);
+            outcome.candidates.push_back(index);
+            outcome.candidateNames.push_back(
+                it == names.end() || it->second.empty() ? std::string() : it->second.front()
+            );
+            outcome.candidateRoles.emplace_back(role);
+            outcome.candidateDistances.push_back(
+                judge.mapped.center && fp.center ? Base::Distance(*judge.mapped.center, *fp.center)
+                                                 : std::numeric_limits<double>::quiet_NaN()
+            );
+        };
+        for (const auto& index : judge.place) {
+            list(index, "frame");
+        }
+        for (const auto& index : named) {
+            if (std::find(judge.place.begin(), judge.place.end(), index) == judge.place.end()) {
+                list(index, "name");
+            }
+        }
+        double q0 = 0.0;
+        double q1 = 0.0;
+        double q2 = 0.0;
+        double q3 = 1.0;
+        entry.frame->getRotation().getValue(q0, q1, q2, q3);
+        const double turn = 2.0 * std::acos(std::min(1.0, std::abs(q3))) * 180.0 / std::numbers::pi;
+        outcome.evidence = "the target's frame moved by "
+            + formatDistance(entry.frame->getPosition().Length()) + " mm / " + formatDistance(turn)
+            + " deg; " + judge.place.front() + (judge.at > 0 ? " is where" : " overlaps where")
+            + " the element was";
+        return outcome;
+    };
+    for (std::size_t i = 0; i < input.entries.size(); ++i) {
+        const auto& entry = input.entries[i];
+        if (!entry.frame || !entry.fingerprint.isValid()) {
+            local.entries[i].frame.reset();
+            continue;
+        }
+        Judged judge;
+        judge.mapped = entry.fingerprint.transformed(*entry.frame, input.tolerances.angle);
+        const bool boxDropped = entry.fingerprint.extentMin && !judge.mapped.extentMin;
+        // The elements of its type there: the cheap hint first (its kind, direction and radii), so
+        // that only the rest are fingerprinted
+        std::vector<std::string> over;
+        for (const auto& [index, names] : elementsOf[entry.type]) {
+            if (std::find(entry.excluded.begin(), entry.excluded.end(), index)
+                != entry.excluded.end()) {
+                continue;
+            }
+            ElementFingerprint intrinsic;
+            std::optional<Base::Vector3d> anchor;
+            if (input.hintOf && input.hintOf(index, intrinsic, anchor)
+                && !intrinsicAgrees(judge.mapped, intrinsic, input.tolerances)) {
+                continue;
+            }
+            const ElementFingerprint& fp = fingerprintOf(index);
+            if (!fp.isValid()) {
+                continue;
+            }
+            if (atMappedPlace(judge.mapped, fp, boxDropped, input)) {
+                judge.place.push_back(index);
+            }
+            else if (overlapsMappedPlace(judge.mapped, fp, input)) {
+                over.push_back(index);
+            }
+        }
+        judge.at = judge.place.size();
+        judge.place.insert(judge.place.end(), over.begin(), over.end());
+        if (judge.place.empty()) {
+            // Nothing where it was: the part moved with its frame (10.2 (3))
+            local.entries[i].frame.reset();
+            continue;
+        }
+        if (!entry.exact) {
+            judged.emplace(i, std::move(judge));
+            continue;
+        }
+        const std::string& hit = entry.exactElement;
+        const bool hitAt = std::find(judge.place.begin(), judge.place.begin() + judge.at, hit)
+            != judge.place.begin() + judge.at;
+        std::vector<std::string> others;
+        for (const auto& index : judge.place) {
+            if (index != hit) {
+                others.push_back(index);
+            }
+        }
+        const bool equivalent = entry.policy == SolvePolicy::Equivalent && entry.equivalent
+            && std::all_of(others.begin(), others.end(), [&](const std::string& index) {
+                                    return entry.equivalent(hit, index);
+                                });
+        if (others.empty() || equivalent) {
+            // The element where it was (10.2 (1)), or a piece of it (10.9 F2): judged by the
+            // mapped record, which finds it unmoved, or within the old element
+            local.entries[i].fingerprint = judge.mapped;
+            local.entries[i].frame.reset();
+            if (!hitAt && !equivalent) {
+                judged.emplace(i, std::move(judge));
+            }
+            continue;
+        }
+        // The name and the old place disagree (10.2 (2)): no geometric check of it runs below
+        decided.emplace(i, frameBreak(i, judge, {hit}));
+        local.entries[i].fingerprint = ElementFingerprint();
+        local.entries[i].frame.reset();
+    }
+    auto outcomes = solveOwnerInFrame(local);
+    for (auto& [i, outcome] : decided) {
+        outcomes[i] = std::move(outcome);
+    }
+    // The picks of the entries judged after the solve: each at or overlapping the old place
+    for (const auto& [i, judge] : judged) {
+        auto& outcome = outcomes[i];
+        if (outcome.status != SolveStatus::Resolved && outcome.status != SolveStatus::Guessed
+            && outcome.status != SolveStatus::Exact) {
+            continue;
+        }
+        std::vector<std::string> picks = outcome.elements;
+        if (picks.empty() && !outcome.element.empty()) {
+            picks.push_back(outcome.element);
+        }
+        const bool there = !picks.empty()
+            && std::all_of(picks.begin(), picks.end(), [&](const auto& k) {
+                   return std::find(judge.place.begin(), judge.place.end(), k) != judge.place.end();
+               });
+        if (!there) {
+            outcome = frameBreak(i, judge, picks);
         }
     }
     return outcomes;

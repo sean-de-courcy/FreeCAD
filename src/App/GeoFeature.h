@@ -165,6 +165,19 @@ public:
     }
 
     /**
+     * @brief Whether this feature's Placement is its chain's frame rather than a move of its own
+     * (ops#557).
+     *
+     * A PartDesign feature takes its Placement from its first sketch's support or from its base
+     * feature, and a reference's record saves that frame. Any other object's Placement moves the
+     * object as a whole, and a reference into it follows the object.
+     */
+    virtual bool placementIsDerived() const
+    {
+        return false;
+    }
+
+    /**
      * @brief Deprecated. Calculates the placement in the global reference coordinate system
      *
      * Deprecated: This does not handle App::Links correctly. Use getGlobalPlacement() instead.

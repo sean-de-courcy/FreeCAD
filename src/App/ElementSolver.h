@@ -709,6 +709,10 @@ struct AppExport SolveInput
         /// Elements the user rejected for this reference (ops#127, App::markReferenceBroken()):
         /// never its candidates, at any tier.
         std::vector<std::string> excluded;
+        /// The target's frame moved since the record (ops#557, `notes\naming-class-D.md` 10):
+        /// the motion that takes the record to the element's old global place in the current
+        /// frame (ElementFingerprint::transformed()). Empty: the frame is the same, or unknown.
+        std::optional<Base::Placement> frame;
     };
     /// An element of the target with all its mapped names.
     struct Element
