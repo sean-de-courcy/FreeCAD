@@ -465,13 +465,13 @@ class TestNamingSolver(unittest.TestCase):
             % moved,
         )
 
-    def testReverseUpdateBreaksWhenAnEditMayHaveMovedATwinOntoThePlace(self):
-        """Decision 217 (the reviews' residual, pr475b-r1 and pr475b-s-r1): a fillet on the
-        vertical edge at (20, 0) alone, the back left edge's index stored, and the profile moved
-        by 20 along x before the migration recompute. The edge at (0, 0) lands on the saved
-        place, the stored index's edge is its twin, and nothing else tells the edit from OCCT's
-        storage order; but the pad's profile changed since the file was opened. Broken, the
-        edge at the place a candidate, never taken (testReverseUpdateFindsThePlaceWhenTheIndexIs
+    def testReverseUpdateBreaksWhenAnEditMayHaveMovedAnotherOntoThePlace(self):
+        """Decision 217 (the reviews' residual, pr475b-r1, pr475b-s-r1 and pr475b-r2): a fillet on
+        the vertical edge at (20, 0) alone, the back left edge's index stored, and the profile
+        moved by 20 along x before the migration recompute. The edge at (0, 0) lands on the saved
+        place, and nothing in the references tells the edit from OCCT's storage order; but the
+        pad's profile changed since the file was opened. Broken, the edge at the place a
+        candidate, never taken (testReverseUpdateFindsThePlaceWhenTheIndexIs
         AnotherEdge is the open without an edit, kept)."""
         # Arrange
         self.keepBrokenOnOpen()
@@ -493,7 +493,7 @@ class TestNamingSolver(unittest.TestCase):
         self.assertEqual(
             report[0]["evidence"],
             "index carry, fingerprint differs; %s sits where it was, but the feature changed "
-            "since the file was opened and %s is its twin" % (moved, stored[0]),
+            "since the file was opened" % moved,
         )
 
     def testReverseUpdateBreaksWhenTheStoredIndexIsGone(self):

@@ -78,7 +78,7 @@ void noteChangeSinceOpen(const DocumentObject* obj, const Property* prop)
     const Document* doc = obj ? obj->getDocument() : nullptr;
     if (!doc || !prop || solving > 0 || doc->testStatus(Document::Restoring)
         || doc->testStatus(Document::Recomputing) || obj->isRecomputing()
-        || (prop->getType() & (Prop_Output | Prop_NoRecompute | Prop_Transient)) != 0) {
+        || (prop->getType() & (Prop_Output | Prop_Transient)) != 0) {
         return;
     }
     // The element map version is the migration's own stamp
@@ -1089,31 +1089,27 @@ bool solveElementReferences(DocumentObject* feature,
     // OCCT's storage order moves no element and keeps their count: where a migration only
     // reorders, every Missing reference to the feature keeps an index that exists and, with a
     // saved fingerprint, keeps its element there or finds its one element at its place, and every
-    // exact reference's element agrees with its saved fingerprint. When one doesn't, the
-    // migration recompute had an edit, which may have moved another element onto a saved place
-    // (the attack set's slides, review pr475b-s-r1's remove-slides): then no Missing reference is
-    // kept by its place (ops#475). An edit that keeps the count and moves an element's twin onto
-    // its place, with no other reference to tell, can't be told from a reorder. Read once, after
-    // the tolerances.
+    // exact reference has an element at its saved place. When one doesn't, the migration
+    // recompute had an edit, which may have moved another element onto a saved place (the attack
+    // set's slides, review pr475b-s-r1's remove-slides): then no Missing reference is kept by its
+    // place (ops#475). An edit the references don't show is caught by editedSinceOpen() below.
+    // Read once, after the tolerances.
     std::optional<bool> placesHold;
-    // Two elements alike but for their place: the kind, direction, radii and size
-    auto twins = [&](const Data::ElementFingerprint& a, const Data::ElementFingerprint& b) {
-        if (!Data::intrinsicAgrees(a, b, tolerances) || a.size.has_value() != b.size.has_value()) {
-            return false;
-        }
-        return !a.size
-            || std::abs(*a.size - *b.size)
-            <= tolerances.placeSize * std::max({std::abs(*a.size), std::abs(*b.size), 1e-12});
-    };
     auto editedBy = [&](const SolverEntry& entry) {
         if (entry.guessed) {
             return false;
         }
         if (entry.kind == SolverEntry::Kind::Exact) {
+            // Nothing where it was, neither its element nor another (a reorder empties no place;
+            // a name that moved to another element is rule 3's, not an edit)
             auto saved = Data::ElementFingerprint::fromString(entry.oldFingerprint);
             Data::ElementFingerprint now;
-            return saved.isValid() && geo->getElementFingerprint(entry.oldIndex.c_str(), now)
-                && !fingerprintsAgree(saved, now, diagonal);
+            if (!saved.isValid() || !geo->getElementFingerprint(entry.oldIndex.c_str(), now)
+                || Data::atSamePlace(saved, now, diagonal, tolerances, continuationDistance)) {
+                return false;
+            }
+            auto others = elementsAt(saved, entry.oldIndex, true);
+            return others && others->empty();
         }
         MissingPlace place = missingPlace(entry);
         return !place.exists || (place.saved.isValid() && !place.carried && place.one().empty());
@@ -1477,11 +1473,10 @@ bool solveElementReferences(DocumentObject* feature,
                     else if (!missingPlacesHold()) {
                         refusal = "but the migration had an edit";
                     }
-                    else if (editedSinceOpen(feature)
-                             && twins(place.now, fingerprintOf(pick))) {
-                        // An edit before the migration recompute may have moved the twin there
-                        refusal = "but the feature changed since the file was opened and " + index
-                            + " is its twin";
+                    else if (editedSinceOpen(feature)) {
+                        // An edit before the migration recompute may have moved another element
+                        // there (decision 217, at its literal rule after review pr475b-r2)
+                        refusal = "but the feature changed since the file was opened";
                     }
                 }
                 const bool refused = !refusal.empty();
