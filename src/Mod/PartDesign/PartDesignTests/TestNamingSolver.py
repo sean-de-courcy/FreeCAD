@@ -2939,15 +2939,21 @@ class TestNamingSolver(unittest.TestCase):
         hole.moveGeometry(0, 3, hole.Placement.inverse().multVec(App.Vector(x, y, 0)), False)
         hole.Document.recompute()
 
-    def assertNeverQuietlyAt(self, point, wrong, right):
+    def assertNeverQuietlyAt(self, point, wrong, right, held=None):
         """The point is broken, or sits at `right` with the normal warning; never at `wrong` and
-        never at `right` quietly (no report row, or the same-place level)"""
+        never at `right` quietly (no report row, or the same-place level). `held` is the saved
+        name of the point's vertex: an exact hit on it may be quiet (A2's crossing roles, ops#468:
+        a lone crossing keeps its side, `in` or `out`, when the other one goes)"""
         if not point.isValid():
             return
         at = point.Placement.Base
         levels = [e.get("warning_level") for e in App.getReferenceReport(point)]
         self.assertGreater((at - App.Vector(*wrong)).Length, 1e-6, (point.Name, levels))
         self.assertLess((at - App.Vector(*right)).Length, 1e-6, (point.Name, levels))
+        if held and not levels:
+            [(feature, [sub])] = point.AttachmentSupport
+            self.assertEqual(feature.Shape.getElementMappedName(sub), held, point.Name)
+            return
         self.assertIn("normal", levels, point.Name)
 
     def testCrossingThatBecameTheSeamVertexIsNotItsTwin(self):
@@ -2991,8 +2997,8 @@ class TestNamingSolver(unittest.TestCase):
         falls off the edge's end and the right one, alone, is renumbered. Tier 1's one survivor
         is the old element's twin, so geometry decides, and B's left crossing (101.634) lies
         0.77 from the saved place: another hole's vertex, of another sketch and another Pocket,
-        is no pick. The point breaks, or sits on A's crossing (1.166) with the normal warning;
-        never on B's."""
+        is no pick. The point breaks, or sits on A's crossing (1.166) with the normal warning, or
+        quietly by its exact name (A2: the crossing keeps its side, ops#468); never on B's."""
         doc = self.newDocument()
         body = models.body(doc)
         profile = models.sketch(doc, "Profile", models.rectangle(0, 0, 200, 100), body)
@@ -3016,10 +3022,11 @@ class TestNamingSolver(unittest.TestCase):
         point.MapMode = "Vertex"
         doc.recompute()
         self.assertTrue(point.isValid(), point.getStatusString())
+        held = last.Shape.getElementMappedName(vertex)
 
         self.moveHole(hole, 0.3, 0.5)
 
-        self.assertNeverQuietlyAt(point, (102.5 - half, 0, 5), (0.3 + half, 0, 5))
+        self.assertNeverQuietlyAt(point, (102.5 - half, 0, 5), (0.3 + half, 0, 5), held)
 
     def sameSketchHoles(self, doc):
         """R1's plate with both circles in one sketch, `Holes`, cut by one Pocket: A at
@@ -3051,15 +3058,18 @@ class TestNamingSolver(unittest.TestCase):
         (0.3, 0.5), its right crossing alone and renumbered. B's crossings share A's sketch and
         Pocket, so the origin gate passes them, but they come from another circle of the sketch
         (T1''s test): B's left crossing (101.634), 0.77 from the saved place, is no pick. The
-        point breaks, or sits on A's crossing (1.166) with the normal warning; never on B's."""
+        point breaks, or sits on A's crossing (1.166) with the normal warning, or quietly by its
+        exact name (A2's side role); never on B's."""
         doc = self.newDocument()
         holes, point = self.sameSketchHoles(doc)
         half = 0.75**0.5
+        [(pocket, [sub])] = point.AttachmentSupport
+        held = pocket.Shape.getElementMappedName(sub)
 
         holes.moveGeometry(0, 3, App.Vector(0.3, 0.5, 0), False)
         doc.recompute()
 
-        self.assertNeverQuietlyAt(point, (102.5 - half, 0, 5), (0.3 + half, 0, 5))
+        self.assertNeverQuietlyAt(point, (102.5 - half, 0, 5), (0.3 + half, 0, 5), held)
 
     def testLoneTwinIsNotASiblingCirclesCrossingAtThePlace(self):
         """F1's quiet form: the same edit also moves B to (100 + 2 * 0.866, 0.5), so its left
@@ -3106,14 +3116,14 @@ class TestNamingSolver(unittest.TestCase):
 
         self.assertBrokenAtThePlace(point)
 
-    @unittest.expectedFailure
     def testCrossingWhoseTwinBecameTheSeamVertexIsLoud(self):
         """CC2 (ops#503 round 2), the mirrored seam: the hole's sketch turned 180 degrees (seam
         on the left), then its centre moved onto the edge. The left crossing becomes the seam
         vertex at (9, 0, 5); the right one, alone, is renumbered and carries the left one's old
         name, so the left point follows it 1.866 mm by its name, silently (an exact hit, no
         report row). It must break, or sit at (9, 0, 5) with a warning; never at (11, 0, 5).
-        Fails until D3's vanished-twin net (or A2)."""
+        With A2 (ops#468) the right crossing keeps its side, so the left name misses: tier 3,
+        warned, at (9, 0, 5)."""
         doc = self.newDocument()
         hole, (left, right), _ = self.crossedEdge(doc, turn=180)
 
@@ -3121,13 +3131,13 @@ class TestNamingSolver(unittest.TestCase):
 
         self.assertNeverQuietlyAt(left, (11, 0, 5), (9, 0, 5))
 
-    @unittest.expectedFailure
     def testFilletOnATwinEdgeIsLoudWhenItsTwinGoes(self):
         """The edge form (ops#503 round 2): a Fillet on the front face's right vertical line, the
         circle's centre moved onto the edge (seam on the right). The right line becomes the seam's
-        B-spline and the left one, alone, takes the right one's old name: the fillet follows it to
-        x = 9, an exact hit, silently. It must break; never compute on the line at x = 9. Fails
-        until D3's vanished-twin net."""
+        B-spline and the left one, alone, took the right one's old name: the fillet followed it to
+        x = 9, an exact hit, silently. It must break; never compute on the line at x = 9. With A2
+        (ops#468) the survivor is named apart, the old name misses, and the twin clause breaks
+        it."""
         doc = self.newDocument()
         hole, _, fillet = self.crossedEdge(doc, fillet=True)
         pocket = doc.Pocket
