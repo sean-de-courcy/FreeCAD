@@ -1136,6 +1136,19 @@ static std::string elementFingerprint(App::DocumentObject* feature,
             return {};
         }
     }
+    // The frame (ops#557): for a target whose placement is its chain's frame (a PartDesign
+    // feature), the placement the fingerprint was taken without. A turn of it under a tool
+    // fixed in the body can leave the local shape and its names as they were.
+    if (geo->placementIsDerived()) {
+        if (auto prop = geo->getPropertyOfGeometry()) {
+            if (auto data = prop->getComplexData()) {
+                fingerprint.frame = data->getPlacement();
+            }
+        }
+    }
+    // The chain's placement sources and loci (decision 218): the solver tells a part moved as
+    // one piece from an edit that moved some of it by them
+    placementSources(geo, fingerprint.sources);
     if (closureOut) {
         *closureOut = std::move(closure);
     }
