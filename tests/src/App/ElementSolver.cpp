@@ -10225,6 +10225,9 @@ TEST(SolveOwner, twinSurvivorGoesToGeometry)
     // (Index 1) 1.866 mm away is tier 1's one survivor once HG dropped the seam vertex (the
     // joint is held and didn't generate it). Tier 1 took the twin silently. A twin is no
     // structural evidence: geometry decides over the whole pool, and the seam vertex is no twin.
+    // With the twins' record (2 saved), the seam vertex is a lone pick that is no twin of the
+    // old element: PR 390 round 2e's literal stop breaks the entry, the pick first, then the
+    // twin.
     CrossedEdge c;
     auto input = c.input(c.hole1);
     input.pool["Edge"].push_back(element("Edge3", {c.edge1}));
@@ -10232,6 +10235,18 @@ TEST(SolveOwner, twinSurvivorGoesToGeometry)
     input.entries[0].fingerprint = CrossedEdge::saved(2);
     measure(input, {{"Vertex10", CrossedEdge::at(11)}, {"Vertex11", CrossedEdge::at(9)}}, nullptr);
     auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << outcome.evidence;
+    EXPECT_NE(outcome.evidence.find("the pick Vertex10 is no twin of the old element (2 twins "
+                                    "saved)"),
+              std::string::npos)
+        << outcome.evidence;
+    ASSERT_GE(outcome.candidates.size(), 2U);
+    EXPECT_EQ(outcome.candidates[0], "Vertex10");
+    EXPECT_EQ(outcome.candidates[1], "Vertex11");
+
+    //   no twin record (an older one): tier 3's pick, as before the stop
+    input.entries[0].fingerprint = CrossedEdge::saved(0);
+    outcome = Data::solveOwner(input)[0];
     EXPECT_EQ(outcome.status, SolveStatus::Resolved) << outcome.evidence;
     EXPECT_EQ(outcome.element, "Vertex10");
     EXPECT_EQ(outcome.tier, 3);
@@ -10328,17 +10343,25 @@ TEST(SolveOwner, redrawnCrossingMovedPastHalfItsSpacingBreaks)
     // The redrawn circle moved 1.5 mm along the edge: its left crossing lies 0.23 mm from the
     // right one's saved place, its right crossing 1.5 mm. Geometry took the left one; the record
     // (2 twins, the right one +0.866 from their centroid) places the right one there: the order
-    // test breaks the entry.
+    // test breaks the entry (T1' off: with it on, round 2f's source check breaks it first, the
+    // redrawn circle being another source).
     CrossedEdge c;
-    auto outcome = Data::solveOwner(redrawnCrossings(c, 10.634, 12.366))[0];
+    auto input = redrawnCrossings(c, 10.634, 12.366);
+    input.sameSource = false;
+    auto outcome = Data::solveOwner(input)[0];
     EXPECT_EQ(outcome.status, SolveStatus::Broken) << outcome.evidence;
     EXPECT_NE(outcome.evidence.find("Vertex20 is out of its twins' saved order (2 twins saved, 2 "
                                     "now)"),
               std::string::npos)
         << outcome.evidence;
+    input.sameSource = true;
+    outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << outcome.evidence;
+    EXPECT_NE(outcome.evidence.find("the pick Vertex20 has another source element"),
+              std::string::npos)
+        << outcome.evidence;
 
     //   no twin record (an older one): the test doesn't apply, as before
-    auto input = redrawnCrossings(c, 10.634, 12.366);
     input.entries[0].fingerprint = CrossedEdge::saved(0);
     outcome = Data::solveOwner(input)[0];
     EXPECT_EQ(outcome.evidence.find("saved order"), std::string::npos) << outcome.evidence;
@@ -10350,6 +10373,8 @@ TEST(SolveOwner, loneNearestPickOfASavedTwinBreaks)
     // right crossing's name missing, the record saying 2 twins, and geometry's nearest pick
     // (Vertex20, 0.232 mm from the saved place) a lone vertex with no twin of its own and no name
     // relating it to the old element: it breaks. Without the stop the pick stood, silently.
+    // Vertex20 lost the old circle (another geometry ID), so round 2f's source check breaks it
+    // first; the seam vertex, which keeps the hole's sources, meets round 2e's stop itself.
     CrossedEdge c;
     auto input = c.input(c.right);
     const auto cyl = generated({sketchEdge(5, 7)}, 11, "XTR", 'F');
@@ -10360,7 +10385,17 @@ TEST(SolveOwner, loneNearestPickOfASavedTwinBreaks)
             nullptr);
     auto outcome = Data::solveOwner(input)[0];
     EXPECT_EQ(outcome.status, SolveStatus::Broken) << outcome.evidence;
-    EXPECT_NE(outcome.evidence.find("Vertex20 is no twin of the old element (2 twins saved)"),
+    EXPECT_NE(outcome.evidence.find("the pick Vertex20 has another source element"),
+              std::string::npos)
+        << outcome.evidence;
+
+    //   the seam vertex there instead
+    measure(input,
+            {{"Vertex10", CrossedEdge::at(10.634)}, {"Vertex20", CrossedEdge::at(40)}},
+            nullptr);
+    outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << outcome.evidence;
+    EXPECT_NE(outcome.evidence.find("Vertex10 is no twin of the old element (2 twins saved)"),
               std::string::npos)
         << outcome.evidence;
 
@@ -10371,16 +10406,131 @@ TEST(SolveOwner, loneNearestPickOfASavedTwinBreaks)
         << outcome.evidence;
 }
 
+TEST(SolveOwner, loneAtPlacePickOfASavedTwinBreaks)
+{
+    // The Sonnet review of round 2e (pr390-r2es): round 2e's stop at the saved place. The right
+    // crossing's name missing, the record saying 2 twins, and the seam vertex (Vertex10, which
+    // keeps the hole's sources) exactly where the crossing was: no twin of the old element, it
+    // breaks, at the saved place.
+    CrossedEdge c;
+    auto input = c.input(c.right);
+    input.entries[0].fingerprint = CrossedEdge::saved(2);
+    measure(input, {{"Vertex10", CrossedEdge::at(10.866)}}, nullptr);
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << outcome.evidence;
+    EXPECT_NE(outcome.evidence.find("Vertex10 is no twin of the old element (2 twins saved)"),
+              std::string::npos)
+        << outcome.evidence;
+    ASSERT_FALSE(outcome.candidates.empty());
+    EXPECT_EQ(outcome.candidates[0], "Vertex10");
+    EXPECT_EQ(outcome.candidateRoles[0], "place");
+}
+
+TEST(SolveOwner, loneWideReachPickOfASavedTwinBreaks)
+{
+    // The Sonnet review of round 2e (pr390-r2es): round 2e's stop on G2's wide reach. The seam
+    // vertex 1 mm from the saved place, beyond tier 3's strict reach (0.6) and within the wide
+    // one (3): with the guess rules on, G2 took it; it is no twin of the old element, and the
+    // entry breaks with it as a candidate.
+    CrossedEdge c;
+    auto input = c.input(c.right);
+    input.entries[0].fingerprint = CrossedEdge::saved(2);
+    input.guess = true;
+    input.guessNoStructure = true;
+    measure(input, {{"Vertex10", CrossedEdge::at(11.866)}}, nullptr);
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << outcome.evidence;
+    EXPECT_NE(outcome.evidence.find("the wide reach's Vertex10 is no twin of the old element (2 "
+                                    "twins saved)"),
+              std::string::npos)
+        << outcome.evidence;
+
+    //   no twin record (an older one): G2's guess, as before
+    input.entries[0].fingerprint = CrossedEdge::saved(0);
+    outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Guessed) << outcome.evidence;
+    EXPECT_EQ(outcome.element, "Vertex10");
+}
+
+TEST(SolveOwner, nearestPickOfAnotherCircleTwinGroupBreaks)
+{
+    // The literal stop of PR 390 round 2f (review pr390-r2e, R2eRSecondHoleTakesPlace): two
+    // circles of one sketch (7), one Pocket (11). The hole's circle moved off the edge, and the
+    // sibling circle's crossings (Vertex20, Vertex21) came 0.232 mm from the old ones. No name
+    // holds a twin of the old element, so no survivor ran the twin clause's source checks, and
+    // tier 3's nearest, Vertex21, is a member of an order group of the saved size at the saved
+    // offset (+0.866 from its centroid): it stood, silently. The record saved 2 twins: the source
+    // checks run, and Vertex21 lost the hole's circle.
+    CrossedEdge c;
+    const auto cylB = generated({sketchEdge(2, 7)}, 11, "XTR", 'F');
+    auto input = c.input(c.right);
+    input.pool["Vertex"].push_back(element("Vertex20", {generated({c.edge1, cylB}, 11, "CUT", 'V')}));
+    input.pool["Vertex"].push_back(
+        element("Vertex21", {generated({c.edge1, cylB}, 11, "CUT", 'V', 1)})
+    );
+    input.entries[0].fingerprint = CrossedEdge::saved(2);
+    measure(input,
+            {{"Vertex10", CrossedEdge::at(40)},
+             {"Vertex20", CrossedEdge::at(8.902)},
+             {"Vertex21", CrossedEdge::at(10.634)}},
+            nullptr);
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << outcome.evidence;
+    EXPECT_NE(outcome.evidence.find("the pick Vertex21 has another source element"),
+              std::string::npos)
+        << outcome.evidence;
+    ASSERT_FALSE(outcome.candidates.empty());
+    EXPECT_EQ(outcome.candidates[0], "Vertex21");
+
+    //   the same on G2's wide reach (1 mm away, the guess rules on; Vertex20 far, for the gap)
+    measure(input,
+            {{"Vertex10", CrossedEdge::at(40)},
+             {"Vertex20", CrossedEdge::at(30)},
+             {"Vertex21", CrossedEdge::at(9.866)}},
+            nullptr);
+    input.guess = true;
+    input.guessNoStructure = true;
+    outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << outcome.evidence;
+    EXPECT_NE(outcome.evidence.find("the wide reach's Vertex21 has another source element"),
+              std::string::npos)
+        << outcome.evidence;
+
+    //   no twin record (an older one): tier 3's pick, as before
+    input.guess = false;
+    input.guessNoStructure = false;
+    measure(input,
+            {{"Vertex10", CrossedEdge::at(40)},
+             {"Vertex20", CrossedEdge::at(8.902)},
+             {"Vertex21", CrossedEdge::at(10.634)}},
+            nullptr);
+    input.entries[0].fingerprint = CrossedEdge::saved(0);
+    outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Resolved) << outcome.evidence;
+    EXPECT_EQ(outcome.element, "Vertex21");
+}
+
 TEST(SolveOwner, redrawnCrossingCloserToTheEdgeKeepsItsSide)
 {
     // The control (round 4's reading review, T4a): the circle drawn again smaller, in place, its
     // crossings 0.6 mm from their centroid (0.866 before). The right crossing, nearest the saved
-    // place, is also the member nearest the saved offset: geometry's pick stands.
+    // place, is also the member nearest the saved offset: geometry's pick stands, T1' off.
+    // With T1' on, the redrawn circle lost the old one's source (a new geometry ID), and round
+    // 2f's literal stop breaks the entry: the stop's cost.
     CrossedEdge c;
-    auto outcome = Data::solveOwner(redrawnCrossings(c, 9.4, 10.6))[0];
+    auto input = redrawnCrossings(c, 9.4, 10.6);
+    input.sameSource = false;
+    auto outcome = Data::solveOwner(input)[0];
     EXPECT_EQ(outcome.status, SolveStatus::Resolved) << outcome.evidence;
     EXPECT_EQ(outcome.element, "Vertex21");
     EXPECT_EQ(outcome.evidence.find("saved order"), std::string::npos) << outcome.evidence;
+
+    input.sameSource = true;
+    outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << outcome.evidence;
+    EXPECT_NE(outcome.evidence.find("the pick Vertex21 has another source element"),
+              std::string::npos)
+        << outcome.evidence;
 }
 
 TEST(SolveOwner, twinAtTheSavedPlaceBreaks)

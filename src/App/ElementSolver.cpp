@@ -6172,11 +6172,12 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
         // reference broken at their place, PLAN decision 155), then moved by more than half its
         // crossings' spacing: G2 took the other crossing, the nearer one to the saved place, where
         // `integration` had followed the name taken at the redraw (PR 379 round 4's attack set,
-        // ACrossings|redrawn-then-move). Where the record saved two twins or more and the pick has
-        // an order group now (its names up to an order key, as twinPick() counts them), the pick
-        // must be the member whose offset from the group's centroid is nearest the saved offset,
-        // and the group the saved size; else the entry breaks. An old element's twin is
-        // twinBreaks()'s.
+        // ACrossings|redrawn-then-move). Where the record saved two twins or more, the pick must
+        // have an order group now (its names up to an order key, as twinPick() counts them), the
+        // group the saved size, and the pick the member whose offset from the group's centroid
+        // is nearest the saved offset; else the entry breaks (a pick with no group too, round
+        // 2e). An old element's twin is twinBreaks()'s. The callers run the twin clause's source
+        // checks first.
         auto orderBreaks = [&](int position) -> std::string {
             if (!saved || saved->twinCount < 2 || !saved->center || !saved->twinCentroid
                 || twinPick(position) != TwinPick::NotTwin) {
@@ -6480,6 +6481,13 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
                 }
             }
             std::vector<int> agree = intrinsicSurvivors(open);
+            // The twin clause's source checks below (the origin, T1''s test) run for a twin
+            // record of two or more as well, as if tier 1 had kept a twin: the literal stop of
+            // PR 390 round 2f, its fifth silent find. Two circles of one sketch, one Pocket, one
+            // edit: A moved off its crossings and B's put 0.1 from A's old ones. A's names hold
+            // no twin now, so no survivor ran the checks, and tier 3 took B's crossing, an order
+            // group of the saved size at the saved offset; `integration`'s survivor broke it.
+            const bool twinClause = state.twinSurvivor >= 0 || saved->twinCount >= 2;
             if (!agree.empty()) {
                 Nearest nearest = nearestOf(agree);
                 // XP: the board's top edge drawn again where it was, its other top edge within
@@ -6519,11 +6527,14 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
                     }
                     const bool redrawn = !placeClause.empty();
                     const char* lacks = nullptr;
-                    if (state.twinSurvivor >= 0) {
+                    if (twinClause) {
                         lacks = otherOrigin(pool.elements[pick], oldName);
                     }
                     const bool atPlace = nearest.index < 0 || !atPlaceAmong({pick}).empty();
-                    if (!lacks && !redrawn && (state.twinSurvivor >= 0 || nearest.index < 0)
+                    // D2's verdict that the pick is the old element drawn again at the place stands
+                    // for a saved twin as for a twin survivor: it breaks a sibling or a former
+                    // element put there itself (OtherSide, WasThere, SourceGone above)
+                    if (!lacks && !redrawn && (twinClause || nearest.index < 0)
                         && lostOldSource(pick)) {
                         lacks = "source element";
                     }
@@ -6599,11 +6610,11 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
                         wide = wideNearestOf(agree);
                     }
                     std::string otherSource;
-                    if (wide.index >= 0 && (!input.guessAnySource || state.twinSurvivor >= 0)) {
+                    if (wide.index >= 0 && (!input.guessAnySource || twinClause)) {
                         const auto& picked = pool.elements[agree[wide.index]];
                         const char* lacks = otherOrigin(picked, oldName);
                         // after the twin clause, T1''s test too (F1, as above)
-                        if (!lacks && state.twinSurvivor >= 0 && lostOldSource(agree[wide.index])) {
+                        if (!lacks && twinClause && lostOldSource(agree[wide.index])) {
                             lacks = "source element";
                         }
                         if (lacks) {

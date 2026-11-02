@@ -3208,15 +3208,17 @@ class TestJointsWhenABendStraightens(unittest.TestCase):
     def testHoleVerticesOnTheJointWhenTheSeamTurnsOntoOne(self):
         """Nothing moves: the hole's sketch is turned about the hole's axis until its seam lies on
         the y > 0 crossings. Those become the seam's vertexes, under another name, and the y < 0
-        ones keep theirs. Every point stays where it is, the y < 0 ones by name; the others by
-        geometry, which needs the naming solver to keep the seam's vertex among the candidates
-        (ops#468, the review's point 1, the held-generator rule of ops#467)."""
+        ones keep theirs. The y < 0 points stay where they are, by name. The others' crossings
+        were saved as twins, and the seam's vertex is no twin of them: they break (PR 390 round
+        2e's literal stop, its intended cost; geometry kept them before, which needed the naming
+        solver to keep the seam's vertex among the candidates: ops#468, the review's point 1, the
+        held-generator rule of ops#467). A point still valid is never warned at the normal
+        level."""
         self.holeVerticesOnTheJoint(
             0.2, ("hole", -math.degrees(math.asin(0.2 / 0.5))), strict=lambda was: was.y < 0
         )
         for point in self.doc.Objects:
-            if point.TypeId == "PartDesign::Point":
-                self.assertTrue(point.isValid(), point.Name)
+            if point.TypeId == "PartDesign::Point" and point.isValid():
                 levels = [e.get("warning_level") for e in App.getReferenceReport(point)]
                 self.assertNotIn("normal", levels, point.Name)
 
