@@ -2032,17 +2032,17 @@ class TestPipeCorners(unittest.TestCase):
             with self.subTest(helix=True, turn=turn):
                 self.renew()
                 pipe = self.multisectionChain(sizes=(3, 3, 3), turn=turn, sides=6, **helix)
-                self.assertFails(pipe, "right angle", "isn't in one plane aren't supported")
+                self.assertFails(pipe, "right angle", "about different axes aren't supported")
         with self.subTest(helix=True, transition="Round corner"):
             self.renew()
             pipe = self.multisectionChain(
                 sizes=(3, 3, 3), turn=30, sides=6, transition="Round corner", **helix
             )
-            self.assertFails(pipe, "right angle", "isn't in one plane aren't supported")
+            self.assertFails(pipe, "right angle", "about different axes aren't supported")
         with self.subTest("Z-X-Y"):
             self.renew()
             pipe = self.multisectionChain((V(1, 0, 0), V(0, 1, 0)), (30, 20, 30), (2.5, 3))
-            self.assertFails(pipe, "right angle", "isn't in one plane aren't supported")
+            self.assertFails(pipe, "right angle", "about different axes aren't supported")
         zigzag = dict(axes=(V(1, 0, 0), V(0, 0, 1)), lengths=(30, 20, 30), sizes=(2.5, 3))
         with self.subTest("Z-X-Z", under=1e-4):
             self.renew()
@@ -2106,7 +2106,7 @@ class TestPipeCorners(unittest.TestCase):
                 self.assertValidSolid(pipe)
                 self.renew()
                 pipe = self.multisectionSmooth(mode=mode)
-                self.assertFails(pipe, "right angle", "isn't in one plane aren't supported")
+                self.assertFails(pipe, "right angle", "about different axes aren't supported")
         with self.subTest("corner then arc"):
             self.renew()
             r = 15 / math.sqrt(2)
@@ -2128,7 +2128,7 @@ class TestPipeCorners(unittest.TestCase):
                 Sections=[square("Middle", 3, middle), square("Section", 3, end)],
                 Transition="Round corner",
             )
-            self.assertFails(pipe, "right angle", "isn't in one plane aren't supported")
+            self.assertFails(pipe, "right angle", "about different axes aren't supported")
 
     def testMultisectionPast90DegreesFails(self):
         """Just under 90 degrees (1e-4 degrees) the pipe nears the right angle's; just past it,

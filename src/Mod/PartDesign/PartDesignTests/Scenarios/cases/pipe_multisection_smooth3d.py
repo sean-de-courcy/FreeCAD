@@ -37,8 +37,8 @@ With squares integration builds the solid, the same within 1e-8 relative as the 
 middle section 1e-4 rad off, but with hexagons (the last turned 30 degrees) OCCT gives a valid solid
 2.5 % to 2.8 % off at some scales and right at others, in every mode, on integration and the PR
 alike (review pr404-r5s): the spine has no corner, but rounding still decides the pairing. So the
-PR stops these too, with "Sections at right angles along a spine that isn't in one plane aren't
-supported" (decision 228, the round 6 build: the corner gate of round 5, review pr404-r4 L1, is
+PR stops these too, with "Sections at right angles to the ones before them about different axes
+aren't supported" (decision 228, round 6: the corner gate of round 5, review pr404-r4 L1, is
 withdrawn): right -> loud for the squares.
 
 References: a sketch on the far cap and datum points on its vertices, each expected at the last

@@ -1296,13 +1296,15 @@ std::optional<double> positionAlong(const std::vector<TopoDS_Edge>& spine, const
 /// each pair of a chain in the sections' order along the spine. Beyond the far side, the pairing
 /// against the spine is the only one OCCT finds, and the result gate stops the pipe. None for the
 /// others. Sections turned about axes more than 1e-6 rad apart (right angles along a spine not in
-/// one plane) set \a outOfPlane to the centre of the first turned about another: there OCCT
-/// changes its pairing by itself within about 1e-7 rad under 90 degrees, so no turn decides it
-/// (review pr404-r3: a valid solid 9 % short; with "Round corner" too, review pr404-r4s), and the
-/// pipe stops (decision 228), whatever the transition and the spine's mode. So it does with no
-/// corner between the sections: along a smooth spine out of one plane OCCT gave a valid solid up
-/// to 2.8 % off in every mode, depending on the scale (review pr404-r5s, hexagons the last turned
-/// 30 degrees), and with a corner then an arc 0.3 % off ("Round corner", squares).
+/// one plane, or a section tilted out of a planar spine's plane while at a right angle to the one
+/// before, review pr404-r6) set \a outOfPlane to the centre of the first turned about another:
+/// there OCCT changes its pairing by itself within about 1e-7 rad under 90 degrees, so no turn
+/// decides it (review pr404-r3: a valid solid 9 % short; with "Round corner" too, review
+/// pr404-r4s), and the pipe stops (decision 228), whatever the transition and the spine's mode.
+/// So it does with no corner between the sections: along a smooth spine out of one plane OCCT
+/// gave a valid solid up to 2.8 % off in every mode, depending on the scale (review pr404-r5s,
+/// hexagons the last turned 30 degrees), and with a corner then an arc 0.3 % off ("Round
+/// corner", squares).
 std::vector<std::optional<gp_Trsf>> sectionTiltsAlong(
     const std::vector<TopoDS_Shape>& sections,
     const TopoDS_Wire& spine,
@@ -5741,11 +5743,11 @@ App::DocumentObjectExecReturn* Pipe::execute()
             sectionTilts = sectionTiltsAlong(placed, TopoDS::Wire(path.getShape()), outOfPlane);
             if (outOfPlane) {
                 return new App::DocumentObjectExecReturn(fmt::format(
-                    "Pipe: the section at {} lies at a right angle to the one before it, as other "
-                    "sections do to theirs, about another axis. Sections at right angles along a "
-                    "spine that isn't in one plane aren't supported: the solid would depend on "
-                    "rounding. Turn the sections there away from 90 degrees to each other, or keep "
-                    "the spine's right angles in one plane.",
+                    "Pipe: the section at {} lies at a right angle to the one before it, as "
+                    "another section does to its own, but about another axis. Sections at right "
+                    "angles to the ones before them about different axes aren't supported: the "
+                    "solid would depend on rounding. Turn the sections there away from 90 degrees "
+                    "to each other, or keep the spine and its sections' right angles in one plane.",
                     inPlace(*outOfPlane)
                 ));
             }
