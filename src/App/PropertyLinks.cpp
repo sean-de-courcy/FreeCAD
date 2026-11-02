@@ -1027,6 +1027,37 @@ std::string PropertyLinkBase::_getElementFingerprint(App::DocumentObject* featur
     if (elementUpToFaces(geo, elementName.oldName.c_str(), fingerprint, upToFaces)) {
         fingerprint.upToFaces = std::move(upToFaces);
     }
+    // The marks (ops#526 D2): every object the target is built from, the target and the element's
+    // holder included, by its ID and its highest geometry ID now. Geometry with a higher ID is
+    // drawn later; an object listed was feeding the target.
+    // A dependency cycle (getOutListRecursive() throws) has no closure: no marks, unjudged.
+    std::vector<App::DocumentObject*> closure {obj, geo};
+    try {
+        for (auto from : {obj, static_cast<App::DocumentObject*>(geo)}) {
+            auto out = from->getOutListRecursive();
+            closure.insert(closure.end(), out.begin(), out.end());
+        }
+    }
+    catch (const Base::Exception&) {
+        closure.clear();
+    }
+    for (auto object : closure) {
+        if (object && object->isAttachedToDocument()) {
+            fingerprint.marks.push_back({object->getID(), std::max(object->elementIdMark(), -1L)});
+        }
+    }
+    std::sort(fingerprint.marks.begin(), fingerprint.marks.end(), [](const auto& a, const auto& b) {
+        return a.tag < b.tag || (a.tag == b.tag && a.mark > b.mark);
+    });
+    fingerprint.marks.erase(std::unique(fingerprint.marks.begin(),
+                                        fingerprint.marks.end(),
+                                        [](const auto& a, const auto& b) {
+                                            return a.tag == b.tag;
+                                        }),
+                            fingerprint.marks.end());
+    if (fingerprint.marks.size() > Data::ElementFingerprint::MaxMarks) {
+        fingerprint.marks.clear();
+    }
     return fingerprint.toString();
 }
 
@@ -1090,7 +1121,12 @@ bool PropertyLinkBase::_updateElementFingerprints(App::DocumentObject* feature,
         // included (ops#522): a Pad's Placement set before its shape is made again
         // (positionByPrevious()) gives the old shape the new placement, and a gone piece's point,
         // carried by it, already lies over the next plate. A piece saved without up-to faces (three
-        // under its point, or a fingerprint from before them) gained that plate's (review prA1b-r1)
+        // under its point, or a fingerprint from before them) gained that plate's (review prA1b-r1).
+        // The marks are taken again (ops#526 D2, design 9.8 Q3: the record refreshes at every
+        // resolution): kept with the element, they would date everything drawn since its last
+        // change as drawn again (review prd2dopus-r3 R3-1, a rim drawn after the chamfer and
+        // dragged onto the vacated place, quiet). A recompute between an edit and its solve
+        // (TestJointRecords' redraw) takes the redraw too, and the solve then breaks: loud.
         const auto old = Data::ElementFingerprint::fromString(fingerprints[i]);
         if (old.isValid()) {
             auto now = Data::ElementFingerprint::fromString(text);

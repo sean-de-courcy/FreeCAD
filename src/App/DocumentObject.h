@@ -260,6 +260,15 @@ public:
         return _Id;
     }
 
+    /** The highest ID the object has given its geometry so far, or -1 for an object that gives
+     * none (ops#526 D2). A sketch's: an ID above it is geometry drawn later. A reference's record
+     * saves it for every object its target is built from (Data::ElementFingerprint's marks).
+     */
+    virtual long elementIdMark() const
+    {
+        return -1;
+    }
+
     /**
      * @brief Get the export name of the object.
      *

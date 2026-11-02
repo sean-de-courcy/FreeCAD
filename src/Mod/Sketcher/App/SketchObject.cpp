@@ -258,6 +258,12 @@ SketchObject::SketchObject() : geoLastId(0)
                       "Base",
                       (App::PropertyType)(App::Prop_Hidden | App::Prop_ReadOnly),
                       "");
+    ADD_PROPERTY_TYPE(_GeoLastId,
+                      (0),
+                      "Base",
+                      (App::PropertyType)(App::Prop_Hidden | App::Prop_ReadOnly
+                                          | App::Prop_Output | App::Prop_NoRecompute),
+                      "The highest geometry ID given so far");
 
     Geometry.setOrderRelevant(true);
 
@@ -1118,6 +1124,13 @@ void SketchObject::Restore(XMLReader& reader)
     Part::Part2DObject::Restore(reader);
 }
 
+void SketchObject::syncGeoLastId()
+{
+    if (_GeoLastId.getValue() < geoLastId) {
+        _GeoLastId.setValue(geoLastId);
+    }
+}
+
 void SketchObject::handleChangedPropertyType(Base::XMLReader &reader,
         const char *TypeName, App::Property *prop)
 {
@@ -1156,6 +1169,13 @@ void SketchObject::onChanged(const App::Property* prop)
     }
     else if (prop == &ExpressionEngine) {
         onExpressionEngineChanged();
+    }
+    else if (prop == &_GeoLastId) {
+        // Restored: an ID given before the save is never given again (ops#526 D2)
+        geoLastId = std::max<long>(geoLastId, _GeoLastId.getValue());
+    }
+    if ((prop == &Geometry || prop == &ExternalGeo) && !isRestoring()) {
+        syncGeoLastId();
     }
 #if 0
     // For now do not delete anything (#0001791). When changing the support
@@ -1561,6 +1581,9 @@ void SketchObject::onUndoRedoFinished()
     // prevents solve() from working before such a recompute in case it is redoing an operation with
     // invalid data.
     Constraints.checkConstraintIndices(getHighestCurveIndex(), -getExternalGeometryCount());
+    // An undone mark never lowers the IDs given (ops#526 D2)
+    geoLastId = std::max<long>(geoLastId, _GeoLastId.getValue());
+    syncGeoLastId();
 
     // FreeCAD-CH (ops#237 Q5): undo/redo restores ExternalTypes, with the entries after the links'
     // types that wait for a repair, but not which links wait (a deciding rebuild undone left them
@@ -1640,6 +1663,7 @@ void SketchObject::onDocumentRestored()
 {
     try {
         onSketchRestore();
+        geoLastId = std::max<long>(geoLastId, _GeoLastId.getValue());
         Part::Part2DObject::onDocumentRestored();
         // Built in other frames: saved before ops#331 (the source in another container read as
         // if in this one), or a source moved without a recompute. Queued, so the GUI asks for a

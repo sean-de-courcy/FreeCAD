@@ -1762,8 +1762,9 @@ class TestNamingSolver(unittest.TestCase):
 
             [bottom] = circle.one(pattern.Shape)
             self.assertEqual(fillet.Base[1], [bottom])
-            #   the circle lost the block's lines: never quiet while T1''s test is on
-            self.assertWarnedInPlace(fillet, "Edge", bottom, quiet=not sameSource)
+            #   the circle lost the block's lines, but the new lines are newer than the record's
+            #   mark of the sketch: drawn again there, the same-place level (ops#526 D2, design 9.5)
+            self.assertWarnedInPlace(fillet, "Edge", bottom)
 
     def refinedBlocks(self, doc):
         """Pad A, 0..20 x 0..20 x 10, from `Profile`, and pad B beside it, 20..40, from
@@ -1801,6 +1802,15 @@ class TestNamingSolver(unittest.TestCase):
             doc.recompute()
 
             [merged] = top.one(padB.Shape)
+            if redrawn == "Profile" and sameSource:
+                #   the merged face is now named from pad B's profile, whose line was in the model
+                #   before: it breaks, the face listed first (ops#526 D2, decision 219)
+                self.assertEqual(sketch.AttachmentSupport[0][1], ("?" + merged,))
+                [entry] = App.getReferenceReport(sketch)
+                self.assertEqual(entry["status"], "broken", entry)
+                self.assertEqual(entry["candidates"][0], merged, entry)
+                self.assertIn("was in the model before", entry["evidence"])
+                continue
             self.assertEqual(sketch.AttachmentSupport[0][1], (merged,))
             if redrawn == "ProfileB":
                 self.assertTrue(sketch.isValid(), sketch.getStatusString())
@@ -1827,9 +1837,13 @@ class TestNamingSolver(unittest.TestCase):
         doc.recompute()
 
         [merged] = frontTop.one(padB.Shape)
-        self.assertEqual(fillet.Base[1], [merged])
-        #   the edge lost pad A's lines: the normal level (PLAN decision 165)
-        self.assertWarnedInPlace(fillet, "Edge", merged, quiet=False)
+        #   the edge lost pad A's lines and is now named from pad B's, which was in the model
+        #   before: it breaks, the edge listed first (ops#526 D2, decision 219)
+        self.assertEqual(fillet.Base[1], ["?" + merged])
+        [entry] = App.getReferenceReport(fillet)
+        self.assertEqual(entry["status"], "broken", entry)
+        self.assertEqual(entry["candidates"][0], merged, entry)
+        self.assertIn("was in the model before", entry["evidence"])
 
     def testCollarFromExternalGeometry(self):
         """ops#183: a collar padded 3 mm on the block from a sketch of a circle (radius 4) and,
@@ -1881,8 +1895,9 @@ class TestNamingSolver(unittest.TestCase):
                 self.assertNotIn("Warning", fillet.State)
                 self.assertFalse(App.getReferenceReport(fillet))
             else:
-                #   the external circle's new ID: the normal level (PLAN decision 165)
-                self.assertWarnedInPlace(fillet, "Edge", circle, quiet=False)
+                #   the external circle's new ID, newer than the record's mark of the sketch: drawn
+                #   again there, the same-place level (ops#526 D2, design 9.5)
+                self.assertWarnedInPlace(fillet, "Edge", circle)
 
     def openIndexOnly(self):
         """The fillet's reference saved as an index-only missing reference (`?EdgeN`, no shadow:
@@ -2608,39 +2623,91 @@ class TestNamingSolver(unittest.TestCase):
 
     def assertBrokenAtThePlace(self, feature):
         """The feature's reference broke at the saved place: the one element there lost the old
-        element's sources (T1''s test), so it may be a sibling of the old element's sketch moved
-        into its place (PLAN decision 155)."""
+        element's sources (T1''s test), and the record says it was in the model before (a sibling
+        of the old element's sketch moved into its place, ops#526 D2), or comes from another
+        object (PLAN decisions 155 and 184)."""
         self.assertFalse(feature.isValid(), feature.Name)
         rows = App.getReferenceReport(feature)
         self.assertIn("broken", [e["status"] for e in rows], rows)
         self.assertTrue(
-            any("has another source element" in e.get("evidence", "") for e in rows), rows
+            any(
+                re.search(
+                    "has another source|was in the model before|sides are not the old element's",
+                    e.get("evidence", ""),
+                )
+                for e in rows
+            ),
+            rows,
         )
 
-    def testExactPlaceRedrawInPlaceBreaks(self):
+    def testExactPlaceRedrawInPlaceIsQuiet(self):
         """The first rim drawn again exactly where it was: no name relates the chamfered edge to
         the new rim's, and the board's other top edge lies 45 mm from it, within tier 3's d_max.
-        The one edge at the saved place, with the saved length, is the element, but its line lost
-        the old line's ID, as a sibling line dragged there would (testRimMovedIntoAVacatedPlace):
-        it breaks until D2 (ops#526) tells them apart. Before PLAN decision 155 it was resolved at
-        tier 3 with the quieter same-place warning (decision 97 Q4)."""
+        The one edge at the saved place, with the saved length, lost the old line's ID, but its
+        line is newer than the record's mark of the sketch and its faces are the old edge's: the
+        element drawn again there, at the quieter same-place level (decision 97 Q3, restored by D2,
+        ops#526; broken under PLAN decision 155 until then)."""
         doc = self.newDocument()
         pad, chamfer = self.chamferedRims(doc)
 
         self.redrawFirstRim(doc, [(3600, 45), (3600, 0), (0, 0), (0, 45)])
 
-        self.assertBrokenAtThePlace(chamfer)
+        self.assertTrue(chamfer.isValid(), chamfer.getStatusString())
+        self.assertChamferAt(chamfer, pad, (1800, 0, 235))
         [entry] = App.getReferenceReport(chamfer)
+        self.assertEqual((entry["status"], entry["tier"]), ("resolved", 3), entry)
         self.assertTrue(
             entry["evidence"].startswith("no structural candidate, at the same place:"),
             entry["evidence"],
         )
+        self.assertIn("drawn again there", entry["evidence"])
+        self.assertEqual(
+            chamfer.getStatusString(),
+            "Warning: Edge reference found again in the same place (Base[0])",
+        )
+
+    def testRecordSavesSidesAndMarks(self):
+        """Fingerprint version 7 (ops#526 D2): the fillet's record of the pad's vertical edge at
+        (20, 0) saves its faces' outward normals (+x, -y) and the marks of what the pad is built
+        from: the profile with its highest geometry ID, the pad without IDs."""
+        doc = self.newDocument()
+        pad, fillet = self.padWithFillet(doc)
+        [sub] = self.savedSubs(doc, "Fillet", "Base")
+        fields = sub["fp"].split("|")
+        self.assertEqual((fields[0], fields[1], len(fields)), ("7", "E", 15), sub["fp"])
+        self.assertEqual(sorted(fields[13].split("/")), ["0,-1,0", "1,0,0"], sub["fp"])
+        marks = dict(m.split(":") for m in fields[14].split("/"))
+        ids = [doc.Profile.getGeometryId(i) for i in range(doc.Profile.GeometryCount)]
+        self.assertGreaterEqual(int(marks[str(doc.Profile.ID)]), max(ids), marks)
+        self.assertEqual(marks[str(pad.ID)], "_", marks)
+
+    def testSketchNeverGivesAnIdAgainAfterAReload(self):
+        """A sketch's highest geometry ID is saved (ops#526 D2, review F4): the last line deleted,
+        the file saved and opened again, a new line gets an ID above the deleted one's, where the
+        sketch used to give the deleted ID again."""
+        doc = self.newDocument()
+        profile = models.sketch(doc, "Profile", models.rectangle(0, 0, 20, 10), models.body(doc))
+        doc.recompute()
+        last = profile.getGeometryId(3)
+        profile.delGeometries([3])
+        doc.recompute()
+        folder = tempfile.mkdtemp(prefix="NamingSolver")
+        self.addCleanup(shutil.rmtree, folder, True)
+        path = os.path.join(folder, "Ids.FCStd")
+        doc.saveAs(path)
+        App.closeDocument(doc.Name)
+        doc = App.openDocument(path)
+        self.documents.append(doc.Name)
+
+        index = doc.Profile.addGeometry(Part.LineSegment(App.Vector(0, 10, 0), App.Vector(0, 0, 0)))
+        self.assertGreater(doc.Profile.getGeometryId(index), last)
 
     def testRimMovedIntoAVacatedPlaceBreaks(self):
         """PR 379 round 3's Opus review: a third rim at y = 2000 in the same sketch; the first
         rim's lines deleted and the third rim's moved (IDs kept) onto the first rim's place. Its
         outer top edge lies at the saved place, a sibling's edge that existed before the edit: the
-        chamfer breaks, never taken there quietly (PLAN decision 155)."""
+        chamfer breaks, never taken there quietly (PLAN decision 155); the record says its line
+        was in the model before (ops#526 D2)."""
         doc = self.newDocument()
         body = models.body(doc)
         geometry = (
@@ -2838,9 +2905,14 @@ class TestNamingSolver(unittest.TestCase):
                 levels = [e.get("warning_level") for e in App.getReferenceReport(point)]
                 self.assertIn("normal", levels, point.Name)
         for point in seamVertices:
-            self.assertTrue(point.isValid(), (point.Name, point.getStatusString()))
-            moved = (point.Placement.Base - before[point.Name]).Length
-            self.assertLess(moved, 1e-6, point.Name)
+            #   the seam vertex left the joint edge: its edges are not the old vertex's, so it
+            #   breaks, the vertex at its place listed first (ops#526 D2, decision 219)
+            self.assertFalse(point.isValid(), point.Name)
+            [entry] = App.getReferenceReport(point)
+            self.assertEqual(entry["status"], "broken", entry)
+            self.assertIn("sides are not the old element's", entry["evidence"])
+            first = pocket.Shape.getElement(entry["candidates"][0])
+            self.assertLess((first.Point - before[point.Name]).Length, 1e-6, (point.Name, entry))
 
         self.setSpine(path, points)
         self.assertBackInPlace(joint, before)

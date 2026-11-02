@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <deque>
 #include <iterator>
 #include <limits>
 #include <locale>
@@ -2959,8 +2960,9 @@ bool mayBeQuietAtPlace(const std::vector<std::string>& names,
                        std::string_view oldName,
                        bool sameMaker)
 {
+    // An index-only reference has no origin to share (ops#550 (1), ops#526 D2)
     if (oldName.empty()) {
-        return true;
+        return false;
     }
     // The twin-pick rule (ops#503 D1): a twin of the old element is never quiet, a pure
     // renumbering included, though it sits at the old place by definition
@@ -2984,6 +2986,301 @@ bool lostOldSources(const std::vector<std::string>& names, std::string_view oldN
         return false;
     }
     return lostASource(names, requiredSourcesOf(oldName));
+}
+
+namespace
+{
+
+// The rank and the size of A2's `<k>of<n>` duplicate counter (ops#468), or none.
+std::optional<std::pair<long, long>> rankOf(const std::string& count)
+{
+    const auto of = count.find("of");
+    if (of == std::string::npos || of == 0 || of + 2 >= count.size() || count.size() > 30
+        || !std::all_of(count.begin(), count.begin() + of, ::isdigit)
+        || !std::all_of(count.begin() + of + 2, count.end(), ::isdigit)) {
+        return std::nullopt;
+    }
+    return std::make_pair(std::stol(count.substr(0, of)), std::stol(count.substr(of + 2)));
+}
+
+}  // namespace
+
+bool sameRankName(std::string_view name, std::string_view oldName)
+{
+    const auto as = NameAncestry::splitSections(name);
+    const auto bs = NameAncestry::splitSections(oldName);
+    if (as.empty() || as.size() != bs.size()) {
+        return false;
+    }
+    bool ranked = false;
+    for (std::size_t i = 0; i < as.size(); ++i) {
+        if (as[i] == bs[i]) {
+            continue;
+        }
+        DecodedMappedSection x = decodeSection(as[i]);
+        const DecodedMappedSection& y = decodeSection(bs[i]);
+        const auto rx = rankOf(x.duplicateCount);
+        const auto ry = rankOf(y.duplicateCount);
+        if (!rx || !ry || rx->first != ry->first) {
+            return false;
+        }
+        x.duplicateCount = y.duplicateCount;
+        if (!(x == y)) {
+            return false;
+        }
+        ranked = true;
+    }
+    return ranked;
+}
+
+namespace
+{
+
+// Two sides' sets agree (ops#526 D2): as many entries, each matched once, a direction within
+// \a angle of the other with its sense, a curved side by its sign. Exact, the design's literal
+// rule (decision 219): a neighbour turned or a side added counts as other sides, loud.
+bool sidesAgree(const std::vector<ElementFingerprint::Side>& a,
+                const std::vector<ElementFingerprint::Side>& b,
+                double angle)
+{
+    if (a.size() != b.size()) {
+        return false;
+    }
+    std::vector<bool> used(b.size(), false);
+    for (const auto& x : a) {
+        bool found = false;
+        for (std::size_t i = 0; i < b.size() && !found; ++i) {
+            const auto& y = b[i];
+            if (used[i] || x.curve != y.curve) {
+                continue;
+            }
+            if (x.curve || std::atan2((x.direction % y.direction).Length(), x.direction * y.direction)
+                    <= angle) {
+                used[i] = true;
+                found = true;
+            }
+        }
+        if (!found) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// The number in a geometry ID (`g5`, `g5v1`, `e3`: 5, 5, 3), or none: one letter, the number,
+// and a vertex's `v<n>`, the whole ID. A hashed ID (`dca2f6a0f89cd772`) is none.
+std::optional<long> geometryIdNumber(std::string_view id)
+{
+    auto digitsFrom = [&](std::size_t i) {
+        std::size_t end = i;
+        while (end < id.size() && end - i < 9
+               && std::isdigit(static_cast<unsigned char>(id[end]))) {
+            ++end;
+        }
+        return end;
+    };
+    if (id.empty() || !std::isalpha(static_cast<unsigned char>(id[0]))) {
+        return std::nullopt;
+    }
+    const std::size_t end = digitsFrom(1);
+    if (end == 1) {
+        return std::nullopt;
+    }
+    if (end < id.size()) {
+        if (id[end] != 'v') {
+            return std::nullopt;
+        }
+        const std::size_t vertexEnd = digitsFrom(end + 1);
+        if (vertexEnd == end + 1 || vertexEnd != id.size()) {
+            return std::nullopt;
+        }
+    }
+    return std::stol(std::string(id.substr(1, end - 1)));
+}
+
+std::optional<long> tagNumber(std::string_view tag)
+{
+    // A negative tag is the same object's: a Body's second and later features name their own
+    // elements `-<ID>` (a box after the first, `Edge10;_;{-Box2};MKR;...;IDX`), and the first
+    // feature after the one before it is deleted names them `<ID>` (review prd2eson-r5 F1)
+    if (!tag.empty() && tag.front() == '-') {
+        tag.remove_prefix(1);
+    }
+    if (tag.empty() || tag.size() > 15
+        || !std::all_of(tag.begin(), tag.end(), [](char c) {
+               return std::isdigit(static_cast<unsigned char>(c));
+           })) {
+        return std::nullopt;
+    }
+    return std::stol(std::string(tag));
+}
+
+// The innermost source sections of \a name (walkLineage()) with a tag, their reference IDs
+// whether or not they have any (knownSourcesOf() leaves the ID-less out).
+std::vector<SourceSection> taggedSourcesOf(std::string_view name)
+{
+    std::vector<SourceSection> sources;
+    walkLineage(name, true, [&](const DecodedMappedSection& section, bool source) {
+        if (!source || !hasTag(section)) {
+            return false;
+        }
+        std::vector<std::string> ids;
+        for (const auto& id : section.referenceIDs) {
+            if (!id.empty() && id != Data::EMPTY_VALUE) {
+                ids.push_back(id);
+            }
+        }
+        sources.push_back({section.iterationTag, section.elementType, std::move(ids)});
+        return false;
+    });
+    return sources;
+}
+
+}  // namespace
+
+PlaceVerdict placeVerdict(const ElementFingerprint& saved,
+                          const ElementFingerprint& pick,
+                          const std::vector<std::string>& names,
+                          std::string_view oldName,
+                          bool lostSource,
+                          const GeometryTolerances& tolerances,
+                          std::string* why)
+{
+    auto say = [&](PlaceVerdict verdict, std::string text) {
+        if (why) {
+            *why = std::move(text);
+        }
+        return verdict;
+    };
+    // The sides (the "as it was" of I-S6): another element of the same size at the same place
+    if (!saved.sides.empty() && !pick.sides.empty()
+        && !sidesAgree(saved.sides, pick.sides, tolerances.angle)) {
+        return say(PlaceVerdict::OtherSide, "its sides are not the old element's");
+    }
+    // An old name made from an index (a primitive's `Edge10;_;<Box1>;MKR;...;IDX`) has no source
+    // with IDs, so T1''s test never sees it lost; its object is its source, and the pick's object
+    // judges it by the marks (9.2's own example, design 9.5: box 2 moved onto box 1's vacated
+    // place was there, BoxMovedIntoAVacatedPlaceThick, K8FusePinRemovedNeighbourMoved; ops#526
+    // D2d). Judged that way only to break: any other verdict keeps D1's lines.
+    const bool byIndex = !NameAncestry::indexSource(oldName).empty();
+    if ((!lostSource && !byIndex) || saved.marks.empty() || oldName.empty()) {
+        return say(PlaceVerdict::Unjudged, {});
+    }
+    auto markOf = [&](std::string_view tag) -> const ElementFingerprint::Mark* {
+        const auto number = tagNumber(tag);
+        if (!number) {
+            return nullptr;
+        }
+        auto it = std::lower_bound(saved.marks.begin(),
+                                   saved.marks.end(),
+                                   *number,
+                                   [](const ElementFingerprint::Mark& mark, long tag) {
+                                       return mark.tag < tag;
+                                   });
+        return it != saved.marks.end() && it->tag == *number ? &*it : nullptr;
+    };
+    // A lost source's object the record has no mark of: a gap in the closure, never quiet. An
+    // index-made old name's object is the old element's only source, so a record without it was
+    // taken after the object had left the model: the target's recompute refreshes the record from
+    // the element the old index now gives, before the solve (box 1 deleted, the record taken from
+    // box 2's edge at its place, BoxMovedIntoAVacatedPlaceThick). Nothing of the old element
+    // survives: it breaks (policy D).
+    for (const auto& source : requiredSourcesOf(oldName)) {
+        if (!markOf(source.tag)) {
+            if (byIndex) {
+                return say(PlaceVerdict::SourceGone,
+                           "its old source " + source.tag + " had left the model");
+            }
+            return say(PlaceVerdict::Unjudged, {});
+        }
+    }
+    // The marks (the "drawn again"): every source of the pick the old name doesn't share
+    // An ID is shared only when the old name has the same ID (decision 219: a line drawn the
+    // other way, its vertex names traded, reads as another element that was there, loud)
+    const auto old = taggedSourcesOf(oldName);
+    // One object whatever the tag's sign (tagNumber())
+    auto sameTag = [](const std::string& a, const std::string& b) {
+        const auto x = tagNumber(a);
+        return x ? x == tagNumber(b) : a == b;
+    };
+    auto shared = [&](const SourceSection& section, const std::string* id) {
+        return std::any_of(old.begin(), old.end(), [&](const SourceSection& o) {
+            return sameTag(o.tag, section.tag)
+                && (id ? o.type == section.type
+                             && std::find(o.ids.begin(), o.ids.end(), *id) != o.ids.end()
+                       : true);
+        });
+    };
+    bool judged = false;
+    bool undated = false;
+    std::string outside;
+    for (const auto& name : names) {
+        // A name made from an index (IDX, the MKR fallback: `Face16;_;{Pipe};MKR;...`) has no
+        // lineage: its source is the target's own element by number, which tells neither
+        // "drawn again" nor "was there" (attack set's BRing|reversed, the ring's faces renamed by
+        // index after its spine line was reversed). Such a pick is unjudged by the marks, unless
+        // the old name was made from an index too: then its object is what tells.
+        const bool indexMade = !NameAncestry::indexSource(name).empty();
+        if (!byIndex && indexMade) {
+            continue;
+        }
+        for (auto section : taggedSourcesOf(name)) {
+            if (indexMade) {
+                // Its ID is the element's number, no geometry: the object alone is the source
+                section.ids.clear();
+            }
+            std::vector<const std::string*> unshared;
+            if (section.ids.empty()) {
+                if (shared(section, nullptr)) {
+                    continue;
+                }
+                unshared.push_back(nullptr);
+            }
+            for (const auto& id : section.ids) {
+                if (!shared(section, &id)) {
+                    unshared.push_back(&id);
+                }
+            }
+            for (const std::string* id : unshared) {
+                judged = true;
+                const std::string what = section.tag + (id ? ";" + *id : std::string());
+                const auto* mark = markOf(section.tag);
+                if (!mark) {
+                    // An object the target wasn't built from: policy D's replaced source
+                    outside = what;
+                    continue;
+                }
+                const auto number = id ? geometryIdNumber(*id) : std::nullopt;
+                if (mark->mark >= 0 && id && !number) {
+                    // An ID the mark can't date (a hashed one, as long sources are named:
+                    // `6b064769961c5b64` in Tier F's LPipe and PointInsertedMidLine cases):
+                    // neither drawn again nor there before
+                    undated = true;
+                    continue;
+                }
+                // An object without IDs, or an ID at or below its object's mark: it was there
+                if (mark->mark < 0 || !number || *number <= mark->mark) {
+                    return say(PlaceVerdict::WasThere, "its source " + what + " was in the model before");
+                }
+            }
+        }
+    }
+    if (!judged || undated || byIndex) {
+        return say(PlaceVerdict::Unjudged, {});
+    }
+    if (!outside.empty()) {
+        return say(PlaceVerdict::Normal, "its source " + outside + " is another object's");
+    }
+    // Drawn again, but in other copies than the old element (a pattern's copy of the redrawn
+    // hole on the vacated place, review prd2o-r1 T2; a revolution's side two, the twin tier 1
+    // kept, RevolutionSideTwoOuterEdgeAfterSideOneToFace): never quiet, D1's lines
+    const auto oldCopies = copyContexts(oldName);
+    if (!names.empty() && std::none_of(names.begin(), names.end(), [&](const std::string& n) {
+            return copyContexts(n) == oldCopies;
+        })) {
+        return say(PlaceVerdict::Unjudged, {});
+    }
+    return say(PlaceVerdict::Quiet, "drawn again there");
 }
 
 bool mayBeAtPlace(
@@ -3143,18 +3440,41 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
     std::vector<char> decidedEntry(input.entries.size(), 0);
     const double nan = std::numeric_limits<double>::quiet_NaN();
 
+    // Whether the pool element \a index may sit at \a saved's place, from its cheap hint
+    // (ops#105): false only where atSamePlace() would be false too, so that a scan for the
+    // elements at a place fingerprints only the rest. True without hints.
+    struct Hint
+    {
+        bool valid = false;
+        ElementFingerprint intrinsic;
+        std::optional<Base::Vector3d> anchor;
+    };
+    std::map<std::string, Hint> hints;  // by index, on first use
+    auto mayBeAtSavedPlace = [&](const ElementFingerprint& saved, const std::string& index) {
+        if (!input.hintOf) {
+            return true;
+        }
+        auto it = hints.find(index);
+        if (it == hints.end()) {
+            Hint hint;
+            hint.valid = input.hintOf(index, hint.intrinsic, hint.anchor);
+            it = hints.emplace(index, std::move(hint)).first;
+        }
+        const Hint& hint = it->second;
+        return !hint.valid
+            || mayBeAtPlace(saved,
+                            hint.intrinsic,
+                            hint.anchor,
+                            input.diagonal,
+                            input.tolerances,
+                            input.continuationDistance);
+    };
+
     // Moved (ops#105): an exact element that no longer sits where its saved fingerprint was,
     // while another element of its type sits there now. The name says one, the geometry the
     // other: never a pick. Moved alone (nothing at the old place), the name stands.
     {
         std::map<std::string, std::set<std::string>> reserved;  // by type: the places taken
-        struct Hint
-        {
-            bool valid = false;
-            ElementFingerprint intrinsic;
-            std::optional<Base::Vector3d> anchor;
-        };
-        std::map<std::string, Hint> hints;  // by index, on first use
         for (std::size_t i = 0; i < input.entries.size(); ++i) {
             const auto& entry = input.entries[i];
             const ElementFingerprint& saved = entry.fingerprint;
@@ -3177,29 +3497,10 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             }
             // The elements there: a cheap hint first rules most out, so that only the rest are
             // fingerprinted.
-            auto mayBeHere = [&](const std::string& index) {
-                if (!input.hintOf) {
-                    return true;
-                }
-                auto it = hints.find(index);
-                if (it == hints.end()) {
-                    Hint hint;
-                    hint.valid = input.hintOf(index, hint.intrinsic, hint.anchor);
-                    it = hints.emplace(index, std::move(hint)).first;
-                }
-                const Hint& hint = it->second;
-                return !hint.valid
-                    || mayBeAtPlace(saved,
-                                    hint.intrinsic,
-                                    hint.anchor,
-                                    input.diagonal,
-                                    input.tolerances,
-                                    input.continuationDistance);
-            };
             std::vector<int> place;
             for (std::size_t k = 0; k < pool.elements.size(); ++k) {
                 const auto& index = pool.elements[k].index;
-                if (static_cast<int>(k) != hitPosition && mayBeHere(index)
+                if (static_cast<int>(k) != hitPosition && mayBeAtSavedPlace(saved, index)
                     && here(fingerprintOfIndex(index))) {
                     place.push_back(static_cast<int>(k));
                 }
@@ -4171,18 +4472,57 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         const char* guessRole = "structural";
     };
 
-    // The members' saved fingerprint, if they all hold the same valid one.
+    // The members' saved fingerprint, if they all hold the same valid one. Their marks may differ
+    // by the root they were taken from (ops#526 D2: one owner holding the edge through the Pad
+    // and through the Body, whose closure adds the Body and its Origin): the members are
+    // compared without them and judged on their union, per object the highest mark (a source is
+    // "there before" if any member's record had it). A member without marks leaves none (D1's
+    // lines).
+    std::deque<ElementFingerprint> mergedRecords;
     auto savedFingerprint = [&](const std::vector<int>& members) -> const ElementFingerprint* {
         const ElementFingerprint& first = input.entries[members.front()].fingerprint;
         if (!first.isValid()) {
             return nullptr;
         }
+        bool sameMarks = true;
         for (int member : members) {
-            if (input.entries[member].fingerprint != first) {
+            const ElementFingerprint& other = input.entries[member].fingerprint;
+            if (other.marks == first.marks) {
+                if (other != first) {
+                    return nullptr;
+                }
+                continue;
+            }
+            sameMarks = false;
+            auto unmarked = other;
+            unmarked.marks = first.marks;
+            if (unmarked != first) {
                 return nullptr;
             }
         }
-        return &first;
+        if (sameMarks) {
+            return &first;
+        }
+        auto& merged = mergedRecords.emplace_back(first);
+        std::map<long, long> highest;
+        for (int member : members) {
+            const auto& marks = input.entries[member].fingerprint.marks;
+            if (marks.empty()) {
+                merged.marks.clear();
+                return &merged;
+            }
+            for (const auto& mark : marks) {
+                auto [it, added] = highest.emplace(mark.tag, mark.mark);
+                if (!added) {
+                    it->second = std::max(it->second, mark.mark);
+                }
+            }
+        }
+        merged.marks.clear();
+        for (const auto& [tag, mark] : highest) {
+            merged.marks.push_back({tag, mark});
+        }
+        return &merged;
     };
     std::vector<GroupState> states;
     states.reserve(groups.size());
@@ -5186,6 +5526,58 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             }
             return found;
         };
+        // Tier 1's two gates (ops#526 D2, the two-witness rule of 1.2 at tier 1; I-S5's D2
+        // paragraph), under T1', for a lone survivor no ancestry, IDX source or piece holds: (i)
+        // one at the saved place whose sides aren't the record's (the other crossing of a hole,
+        // where the referenced one was) and (ii) one that moved while an element of the record's
+        // kind and size sits at the saved place (ops#553: the base rectangle's lines replaced,
+        // tier 1 took the circle's crossing with another edge 480 mm away, `overlap 0.50`, while
+        // the other crossing of the same edge sat at the place) leave tier 1, as the twin clause's
+        // survivor does: geometry decides over the pool, and the record's verdict at the place.
+        if (saved && input.sameSource && saved->center && state.candidates.size() == 1
+            && state.twinSurvivor < 0) {
+            const int k = state.candidates.front();
+            const auto& names = pool.elements[k].names;
+            const bool exempt = state.inAncestry.count(k) || state.fromIndex.count(k)
+                || std::any_of(names.begin(), names.end(), [&](const auto& n) {
+                       return NameAncestry::isPieceOf(n, oldName)
+                           || NameAncestry::isIndexPieceOf(n, oldName);
+                   });
+            const ElementFingerprint& own = fingerprintOf(pool.elements[k]);
+            if (!exempt && intrinsicAgrees(*saved, own, input.tolerances)) {
+                const bool there
+                    = atSamePlace(*saved, own, input.diagonal, input.tolerances, input.continuationDistance);
+                // The other allowed elements that may sit at the saved place (the hint first,
+                // as the moved check scans: only those are fingerprinted), made in the old
+                // name's copies: another copy's element there (a revolution's side two, marked
+                // CPY, under side one's far edge that tier 1 kept) is no occupant of the place,
+                // and geometry would take it, quietly, where D1 breaks
+                // (RevolutionSideTwoOuterEdgeAfterSideOneToFace, ops#526 D2d)
+                std::vector<int> open;
+                if (!there) {
+                    const auto oldCopies = copyContexts(oldName);
+                    for (std::size_t j = 0; j < pool.elements.size(); ++j) {
+                        const auto& others = pool.elements[j].names;
+                        if (allowed[j] && static_cast<int>(j) != k
+                            && mayBeAtSavedPlace(*saved, pool.elements[j].index)
+                            && std::any_of(others.begin(), others.end(), [&](const auto& n) {
+                                   return copyContexts(n) == oldCopies;
+                               })) {
+                            open.push_back(static_cast<int>(j));
+                        }
+                    }
+                }
+                std::string why;
+                const bool otherSide = there
+                    && placeVerdict(*saved, own, names, oldName, false, input.tolerances, &why)
+                        == PlaceVerdict::OtherSide;
+                const bool moved = !there && !atPlaceAmong(intrinsicSurvivors(open)).empty();
+                if (otherSide || moved) {
+                    state.twinSurvivor = k;
+                    state.candidates.clear();
+                }
+            }
+        }
         // Several elements at the saved place (coincident twins of a compound): the entry breaks,
         // listing them first (role `place`), then the others of \a rest nearest first
         auto breakAtPlace = [&](const std::vector<int>& place,
@@ -5224,6 +5616,9 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             NotTwin,
             Lone,
             Pure,
+            // The pick kept the old name's rank among twins whose number changed (A2's `<k>of<n>`,
+            // ops#536, ops#526 D2), at the identical place: warned as Pure is
+            SameRank,
             Trade,
         };
         int twinsNow = 0;
@@ -5262,6 +5657,13 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             if (count == 1 && twinsNow == 1) {
                 return TwinPick::Lone;
             }
+            if (count >= 1 && twinsNow != count
+                && std::any_of(names.begin(), names.end(), [&](const auto& n) {
+                       return sameRankName(n, oldName);
+                   })
+                && atSamePlace(*saved, own, input.diagonal, input.tolerances, input.continuationDistance)) {
+                return TwinPick::SameRank;
+            }
             if (count < 2 || twinsNow != count || !centroid || !own.center || !saved->center
                 || !saved->twinCentroid) {
                 return TwinPick::Trade;
@@ -5293,6 +5695,11 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                     + std::to_string(twinsNow);
                 return false;
             }
+            if (verdict == TwinPick::SameRank) {
+                state.renumbered = position;
+                state.renumberedClause = "; twin kept its rank among " + std::to_string(twinsNow);
+                return false;
+            }
             if (verdict != TwinPick::Trade) {
                 return false;
             }
@@ -5309,6 +5716,66 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                                input.tolerances,
                                input.continuationDistance);
             listByDistance(state, {position}, there ? "place" : "geometric");
+            if (state.twinSurvivor >= 0 && state.twinSurvivor != position) {
+                listByDistance(state, {state.twinSurvivor}, "structural");
+            }
+            std::vector<int> others;
+            for (int k : rest) {
+                if (k != position && k != state.twinSurvivor) {
+                    others.push_back(k);
+                }
+            }
+            const auto n = state.outcome.candidates.size();
+            listByDistance(state, others, role, n < 8 ? 8 - n : std::size_t(0));
+            listDropped(state);
+            return true;
+        };
+        // The record's verdict on a pick at the saved place (ops#526 D2, placeVerdict()): its
+        // sides, and, when it lost the old name's sources (T1''s test), its sources' marks. Under
+        // T1' only; Unjudged for a pick elsewhere. \a why gets the evidence.
+        auto verdictAt = [&](int position, std::string& why) {
+            why.clear();
+            if (!saved || !input.sameSource
+                || !atSamePlace(*saved,
+                                fingerprintOf(pool.elements[position]),
+                                input.diagonal,
+                                input.tolerances,
+                                input.continuationDistance)) {
+                return PlaceVerdict::Unjudged;
+            }
+            return placeVerdict(*saved,
+                                fingerprintOf(pool.elements[position]),
+                                pool.elements[position].names,
+                                oldName,
+                                lostOldSource(position),
+                                input.tolerances,
+                                &why);
+        };
+        // The record's verdict applied to a single pick at \a position, chosen among \a rest: true
+        // if the entry broke (another element at the old place: other sides, or a source that was
+        // in the model before), the pick listed first (role `place`), the twin clause's survivor
+        // (`structural`), then \a rest by distance as \a role. A pick drawn again there keeps the
+        // clause for the evidence (\a clause).
+        auto placeBreaks = [&](int position,
+                               const std::vector<int>& rest,
+                               const char* role,
+                               std::string* clause = nullptr) {
+            std::string why;
+            const PlaceVerdict verdict = verdictAt(position, why);
+            if (verdict == PlaceVerdict::Quiet || verdict == PlaceVerdict::Normal) {
+                if (clause) {
+                    *clause = "; " + why;
+                }
+                return false;
+            }
+            if (verdict != PlaceVerdict::OtherSide && verdict != PlaceVerdict::WasThere
+                && verdict != PlaceVerdict::SourceGone) {
+                return false;
+            }
+            state.decided = true;
+            state.outcome.evidence = "ambiguous: " + pool.elements[position].index
+                + " sits where the old element was, but " + why + otherMakerText(state);
+            listByDistance(state, {position}, "place");
             if (state.twinSurvivor >= 0 && state.twinSurvivor != position) {
                 listByDistance(state, {state.twinSurvivor}, "structural");
             }
@@ -5475,8 +5942,13 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             state.listed = pieces;
         }
         else if (!pieces.empty()) {
-            // G3: under One, the piece whose extent holds the saved centre, if exactly one does
-            const int piece = guessing ? pieceAtSavedCentre(pieces) : -1;
+            // G3: under One, the piece whose extent holds the saved centre, if exactly one does.
+            // Not for a list holder's reference read as One (ops#525, PLAN decision 208): it
+            // asked for the whole element, and breaks with the pieces listed.
+            const bool listHolder = std::any_of(members.begin(), members.end(), [&](int member) {
+                return input.entries[member].listHolder;
+            });
+            const int piece = guessing && !listHolder ? pieceAtSavedCentre(pieces) : -1;
             if (piece < 0) {
                 state.decided = true;
                 state.outcome.evidence = "split into " + std::to_string(pieces.size()) + " pieces";
@@ -5529,7 +6001,9 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 if (place.size() == 1) {
                     pick = place.front();
                 }
-                if (pick >= 0 && twinBreaks(pick, agree, "other faces")) {
+                if (pick >= 0
+                    && (twinBreaks(pick, agree, "other faces")
+                        || placeBreaks(pick, agree, "other faces"))) {
                     continue;
                 }
                 if (pick >= 0) {
@@ -5570,7 +6044,9 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                     : place.size() == 1               ? place.front()
                     : wide.index >= 0                 ? agree[wide.index]
                                                       : -1;
-                if (single >= 0 && twinBreaks(single, state.listed, "structural")) {
+                if (single >= 0
+                    && (twinBreaks(single, state.listed, "structural")
+                        || placeBreaks(single, state.listed, "structural"))) {
                     continue;
                 }
                 if (nearest.index >= 0) {
@@ -5649,12 +6125,22 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                     // its pick made in other copies than the old name's (decision 185, tier 1's
                     // test for name matches): the other copy's pad rim where a gone copy had its
                     // sketch's edge holds both. T1' off, it resolves with XP's warning (I-S6).
+                    // D2 (ops#526): the record tells the element drawn again at the place (its
+                    // sides the old element's, its unshared sources new: quiet, decision 97 Q3)
+                    // from a sibling moved onto it or another element of the redrawn geometry
+                    // there (a break), at XP and at tier 3's nearest alike; without its fields,
+                    // D1's lines stand.
+                    std::string placeClause;
+                    if (placeBreaks(pick, agree, "geometric", &placeClause)) {
+                        continue;
+                    }
+                    const bool redrawn = !placeClause.empty();
                     const char* lacks = nullptr;
                     if (state.twinSurvivor >= 0) {
                         lacks = otherOrigin(pool.elements[pick], oldName);
                     }
                     const bool atPlace = nearest.index < 0 || !atPlaceAmong({pick}).empty();
-                    if (!lacks && (state.twinSurvivor >= 0 || nearest.index < 0)
+                    if (!lacks && !redrawn && (state.twinSurvivor >= 0 || nearest.index < 0)
                         && lostOldSource(pick)) {
                         lacks = "source element";
                     }
@@ -5707,7 +6193,7 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                                                   ? std::string("no structural candidate, tier 3: ")
                                                   : "no structural candidate, at the same place"
                                                       + atPlaceText(pick) + ": ")
-                        + describeNearest(nearest) + derivedText(state, nullptr);
+                        + describeNearest(nearest) + placeClause + derivedText(state, nullptr);
                     state.candidates = {pick};
                     state.listed = state.candidates;
                 }
@@ -5760,7 +6246,7 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                         continue;
                     }
                     const int pick = agree[wide.index];
-                    if (twinBreaks(pick, agree, "geometric")) {
+                    if (twinBreaks(pick, agree, "geometric") || placeBreaks(pick, agree, "geometric")) {
                         continue;
                     }
                     state.geometric = true;
@@ -5872,7 +6358,12 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                     && std::none_of(names.begin(), names.end(), [&](const auto& n) {
                            return isCounterSibling(n, state.oldName, false);
                        });
-                return !otherCopy && state.saved && isOrdered(state.oldName)
+                // A2's rank kept among twins whose number changed (ops#536, ops#526 D2), as an
+                // ordered name renumbered
+                const bool ranked = std::any_of(names.begin(), names.end(), [&](const auto& n) {
+                    return sameRankName(n, state.oldName);
+                });
+                return !otherCopy && state.saved && (isOrdered(state.oldName) || ranked)
                     && atSamePlace(
                            *state.saved,
                            fingerprintOf(state.pool->elements[position]),

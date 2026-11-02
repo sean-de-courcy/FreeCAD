@@ -428,7 +428,8 @@ names it.
 | `infra/523-masker-all-docs` | infra | ops#523, ops#264 | - | `integration` `d80cbc73f9` | `2f06170041` (fork PR 402), 2026-10-31 | never (fork tests) |
 | `infra/526-accept-220` | infra | ops#526 | - | `integration` `2f06170041` | `49082b8f4c` (fork PR 406), 2026-11-02 | never (fork tests) |
 | `fix/516-sketch-attach-twin` | fix | ops#516 | - | `integration` `2f06170041` | `26e73821ca` (fork PR 407), 2026-11-02 | never (fork naming) |
-| `fix/469-closed-spine-names` | fix | ops#469, ops#435, ops#479 | - | `integration` `a54ea8c2c7` (with fork PR 401, merged as d80cbc73f9) | (fork PR 383) | never (fork fix) |
+| `fix/469-closed-spine-names` | fix | ops#469, ops#435, ops#479 | - | `integration` `a54ea8c2c7` (with fork PR 401, merged as d80cbc73f9) | `434a64bda7` (fork PR 383), 2026-11-02 | never (fork fix) |
+| `fix/526-vacated-place` | fix | ops#526 | - | `integration` `434a64bda7` | (fork PR 408) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 

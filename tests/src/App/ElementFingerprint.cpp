@@ -608,6 +608,110 @@ TEST(ElementFingerprint, upToFacesRoundTrip)
                     .isValid());
 }
 
+TEST(ElementFingerprint, sidesAndMarksRoundTrip)
+{
+    // ops#526 D2: version 7, version 6's fields with `_` where empty, the sides and the marks.
+    // An edge with its two faces' normals and the marks of two objects, one without IDs
+    ElementFingerprint rim;
+    rim.type = 'E';
+    rim.kind = "Line";
+    rim.size = 2;
+    rim.center = Base::Vector3d(1, 8, 10);
+    rim.direction = Base::Vector3d(1, 0, 0);
+    rim.extentMin = Base::Vector3d(0, 8, 10);
+    rim.extentMax = Base::Vector3d(2, 8, 10);
+    rim.outline = {Base::Vector3d(0, 8, 10), Base::Vector3d(2, 8, 10)};
+    ElementFingerprint::Side top;
+    top.direction = Base::Vector3d(0, 0, 1);
+    ElementFingerprint::Side front;
+    front.direction = Base::Vector3d(0, -1, 0);
+    rim.sides = {top, front};
+    rim.marks = {{12, 16}, {14, -1}};
+    const char* rimText = "7|E|Line|2|1,8,10|1,0,0|_|_|0,8,10,2,8,10|_|0,8,10,2,8,10|_|_|"
+                          "0,0,1/0,-1,0|12:16/14:_";
+    EXPECT_EQ(rim.toString(), rimText);
+    auto parsed = ElementFingerprint::fromString(rimText);
+    ASSERT_TRUE(parsed.isValid());
+    EXPECT_EQ(parsed, rim);
+
+    //   a curved edge's curved sides, the twins and the up-to faces kept (PR 398's field)
+    ElementFingerprint circle = rim;
+    circle.kind = "Circle";
+    circle.direction = Base::Vector3d(0, 0, 1);
+    circle.radii = {3};
+    circle.location = Base::Vector3d(1, 5, 10);
+    ElementFingerprint::Side hole;
+    hole.curve = '+';
+    ElementFingerprint::Side tangent;
+    tangent.curve = '0';
+    circle.sides = {hole, tangent, top};
+    circle.twinCount = 1;
+    ElementFingerprint::UpToFace plate;
+    plate.owner = "Plate";
+    plate.boxMin = Base::Vector3d(-10, -10, 10);
+    plate.boxMax = Base::Vector3d(4, 10, 10);
+    plate.area = 191;
+    plate.normal = Base::Vector3d(0, 0, 1);
+    plate.wireCentre = Base::Vector3d(-3, 0, 10);
+    circle.upToFaces = {plate};
+    const std::string circleText = circle.toString();
+    EXPECT_EQ(circleText,
+              "7|E|Circle|2|1,8,10|0,0,1|3|1,5,10|0,8,10,2,8,10|_,1|0,8,10,2,8,10|_|"
+              "Plate,-10,-10,10,4,10,10,191,0,0,1,-3,0,10|c+/c0/0,0,1|12:16/14:_");
+    EXPECT_EQ(ElementFingerprint::fromString(circleText), circle);
+
+    //   a vertex: no box, no outline (version 5 never wrote one); its edges' directions
+    ElementFingerprint corner;
+    corner.type = 'V';
+    corner.kind = "Point";
+    corner.center = Base::Vector3d(0, 8, 10);
+    ElementFingerprint::Side along;
+    along.direction = Base::Vector3d(1, 0, 0);
+    ElementFingerprint::Side down;
+    down.direction = Base::Vector3d(0, 0, -1);
+    corner.sides = {along, down};
+    corner.marks = {{12, 16}};
+    const char* cornerText = "7|V|Point|_|0,8,10|_|_|_|_|_|_|_|_|1,0,0/0,0,-1|12:16";
+    EXPECT_EQ(corner.toString(), cornerText);
+    EXPECT_EQ(ElementFingerprint::fromString(cornerText), corner);
+
+    //   a plane's record: no sides, its marks; the pool's fingerprint of a plane: no version 7
+    ElementFingerprint face;
+    face.type = 'F';
+    face.kind = "Plane";
+    face.size = 4;
+    face.center = Base::Vector3d(1, 1, 10);
+    face.direction = Base::Vector3d(0, 0, 1);
+    face.extentMin = Base::Vector3d(0, 0, 10);
+    face.extentMax = Base::Vector3d(2, 2, 10);
+    EXPECT_EQ(face.toString().substr(0, 2), "5|");
+    face.marks = {{3, -1}};
+    const std::string faceText = face.toString();
+    EXPECT_EQ(faceText, "7|F|Plane|4|1,1,10|0,0,1|_|_|0,0,10,2,2,10|_|_|_|_|_|3:_");
+    EXPECT_EQ(ElementFingerprint::fromString(faceText), face);
+
+    //   versions 5 and 6 still read, without sides or marks
+    auto five = ElementFingerprint::fromString("5|E|Line|2|1,8,10|1,0,0|_|_|0,8,10,2,8,10|_|_");
+    ASSERT_TRUE(five.isValid());
+    EXPECT_TRUE(five.sides.empty());
+    EXPECT_TRUE(five.marks.empty());
+
+    //   malformed
+    for (const std::string bad : {
+             std::string("7|E|Line|2|1,8,10|1,0,0|_|_|0,8,10,2,8,10|_|_|_|_|0,0,1"),  // 14 fields
+             std::string("7|E|Line|2|1,8,10|1,0,0|_|_|0,8,10,2,8,10|_|_|_|_|0,0,2|_"),  // not unit
+             std::string("7|E|Line|2|1,8,10|1,0,0|_|_|0,8,10,2,8,10|_|_|_|_|c1|_"),
+             std::string("7|E|Line|2|1,8,10|1,0,0|_|_|0,8,10,2,8,10|_|_|_|_|_|12"),
+             std::string("7|E|Line|2|1,8,10|1,0,0|_|_|0,8,10,2,8,10|_|_|_|_|_|12:x"),
+             std::string("7|E|Line|2|1,8,10|1,0,0|_|_|0,8,10,2,8,10|_|_|_|_|_|-2:3"),
+             std::string("7|E|Line|2|1,8,10|1,0,0|_|_|0,8,10,2,8,10|_|_|_|_|_|1:2/"),
+             std::string("7|V|Point|_|0,8,10|_|_|_|_|_|_|_|Plate,-10,-10,10,4,10,10,191,0,0,1,-3,0,10|_|_"),
+             std::string("7|E|Line|2|1,8,10|1,0,0|_|_|0,8,10,2,8,10|_|_|1,8,10|_|_|_"),  // inside
+         }) {
+        EXPECT_FALSE(ElementFingerprint::fromString(bad).isValid()) << bad;
+    }
+}
+
 TEST(ElementFingerprint, convexOutline)
 {
     // The hull of points seen along a normal (PR 366 round 5): an L's corners and a point inside

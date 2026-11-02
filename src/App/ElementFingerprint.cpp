@@ -18,6 +18,9 @@ constexpr char fieldDelimiter = '|';
 constexpr char listDelimiter = ',';
 constexpr const char* emptyField = "_";
 constexpr char faceDelimiter = ';';
+// Version 7's sides and marks (ops#526 D2)
+constexpr char entryDelimiter = '/';
+constexpr char markDelimiter = ':';
 constexpr int fieldCount = 7;
 
 std::vector<std::string_view> split(std::string_view text, char delimiter)
@@ -139,6 +142,67 @@ bool parseUpToFaces(std::string_view text, std::vector<ElementFingerprint::UpToF
     return !faces.empty() && faces.size() <= ElementFingerprint::MaxUpToFaces;
 }
 
+// A whole number, the whole text: digits with an optional minus sign.
+std::optional<long> parseWhole(std::string_view text)
+{
+    const std::size_t start = !text.empty() && text.front() == '-' ? 1 : 0;
+    if (text.size() <= start || text.size() - start > 15
+        || !std::all_of(text.begin() + start, text.end(), [](char c) {
+               return c >= '0' && c <= '9';
+           })) {
+        return std::nullopt;
+    }
+    return std::stol(std::string(text));
+}
+
+// Version 7's sides: `_`, or entries separated by `/`, each a unit direction or `c+`, `c-`, `c0`
+bool parseSides(std::string_view text, std::vector<ElementFingerprint::Side>& sides)
+{
+    sides.clear();
+    if (text == emptyField) {
+        return true;
+    }
+    for (auto part : split(text, entryDelimiter)) {
+        ElementFingerprint::Side side;
+        if (part == "c+" || part == "c-" || part == "c0") {
+            side.curve = part[1];
+        }
+        else {
+            std::optional<Base::Vector3d> direction;
+            if (!parseVector(part, direction) || !direction
+                || std::abs(direction->Length() - 1.0) > 1e-6) {
+                return false;
+            }
+            side.direction = *direction;
+        }
+        sides.push_back(side);
+    }
+    return sides.size() <= ElementFingerprint::MaxSides;
+}
+
+// Version 7's marks: `_`, or entries separated by `/`, each `<tag>:<mark>` or `<tag>:_`
+bool parseMarks(std::string_view text, std::vector<ElementFingerprint::Mark>& marks)
+{
+    marks.clear();
+    if (text == emptyField) {
+        return true;
+    }
+    for (auto part : split(text, entryDelimiter)) {
+        const auto colon = part.find(markDelimiter);
+        if (colon == std::string_view::npos) {
+            return false;
+        }
+        const auto tag = parseWhole(part.substr(0, colon));
+        const auto value = part.substr(colon + 1);
+        const auto mark = value == emptyField ? std::optional<long>(-1) : parseWhole(value);
+        if (!tag || *tag < 0 || !mark || *mark < -1) {
+            return false;
+        }
+        marks.push_back({*tag, *mark});
+    }
+    return marks.size() <= ElementFingerprint::MaxMarks;
+}
+
 }  // namespace
 
 std::string ElementFingerprint::formatNumber(double value)
@@ -174,8 +238,11 @@ std::string ElementFingerprint::toString() const
         && std::all_of(upToFaces.begin(), upToFaces.end(), [](const UpToFace& face) {
                return validOwner(face.owner);
            });
+    // Version 7 for any element with sides or marks (ops#526 D2), a vertex included
+    const bool withSides = !sides.empty() || !marks.empty();
     std::string text = std::to_string(
-        withUpTo         ? VersionWithUpTo
+        withSides        ? VersionWithSides
+            : withUpTo   ? VersionWithUpTo
             : withExtent ? VersionWithBox
             : withTwins  ? VersionWithTwins
             : location  ? VersionWithLocation
@@ -201,12 +268,14 @@ std::string ElementFingerprint::toString() const
         }
         text += formatNumber(radii[i]);
     }
-    if (withExtent) {
+    if (withExtent || withSides) {
         // Version 5: the location, the extent, the twins and the outline, each field always there
+        // (version 7: `_` for an element without an extent)
         text += fieldDelimiter;
         text += vector(location);
         text += fieldDelimiter;
-        text += vector(extentMin) + listDelimiter + vector(extentMax);
+        text += withExtent ? vector(extentMin) + listDelimiter + vector(extentMax)
+                           : std::string(emptyField);
         text += fieldDelimiter;
         text += withTwins ? vector(twinCentroid) + listDelimiter + std::to_string(twinCount)
                           : std::string(emptyField);
@@ -224,9 +293,13 @@ std::string ElementFingerprint::toString() const
         }
         // Round 6: a point inside the face, a twelfth field only when there is one; version 6
         // always has it, `_` for none, and the up-to faces
-        if (inside || withUpTo) {
+        if (inside || withUpTo || withSides) {
             text += fieldDelimiter;
             text += vector(inside);
+        }
+        if (withSides && !withUpTo) {
+            text += fieldDelimiter;
+            text += emptyField;
         }
         if (withUpTo) {
             text += fieldDelimiter;
@@ -240,6 +313,33 @@ std::string ElementFingerprint::toString() const
                 text += vector(face.boxMin) + listDelimiter + vector(face.boxMax) + listDelimiter;
                 text += formatNumber(face.area) + listDelimiter + vector(face.normal);
                 text += listDelimiter + vector(face.wireCentre);
+            }
+        }
+        if (withSides) {
+            // Version 7: the sides, then the marks (ops#526 D2)
+            text += fieldDelimiter;
+            for (std::size_t i = 0; i < sides.size(); ++i) {
+                if (i) {
+                    text += entryDelimiter;
+                }
+                const Side& side = sides[i];
+                text += side.curve ? std::string("c") + side.curve
+                                   : vector(std::optional<Base::Vector3d>(side.direction));
+            }
+            if (sides.empty()) {
+                text += emptyField;
+            }
+            text += fieldDelimiter;
+            for (std::size_t i = 0; i < marks.size(); ++i) {
+                if (i) {
+                    text += entryDelimiter;
+                }
+                text += std::to_string(marks[i].tag);
+                text += markDelimiter;
+                text += marks[i].mark < 0 ? std::string(emptyField) : std::to_string(marks[i].mark);
+            }
+            if (marks.empty()) {
+                text += emptyField;
             }
         }
         return text;
@@ -273,7 +373,12 @@ ElementFingerprint ElementFingerprint::fromString(std::string_view text)
     // Version 5 with or without the inside point (round 6); version 6 with both fields (ops#522)
     const bool withUpTo = fields.size() == fieldCount + 6
         && fields[0] == std::to_string(VersionWithUpTo) && (fields[1] == "F" || fields[1] == "E");
-    const bool withBox = withUpTo
+    // Version 7: version 6's fields, any of them `_`, the sides and the marks (ops#526 D2); a
+    // vertex too
+    const bool withSides = fields.size() == fieldCount + 8
+        && fields[0] == std::to_string(VersionWithSides)
+        && (fields[1] == "F" || fields[1] == "E" || fields[1] == "V");
+    const bool withBox = withUpTo || withSides
         || ((fields.size() == fieldCount + 4 || fields.size() == fieldCount + 5)
             && fields[0] == std::to_string(VersionWithBox) && (fields[1] == "F" || fields[1] == "E"));
     if (!withLocation && !withExtent && !withTwins && !withBox
@@ -344,12 +449,16 @@ ElementFingerprint ElementFingerprint::fromString(std::string_view text)
         if (!parseVector(fields[7], result.location) || (result.location && !circle)) {
             return {};
         }
+        // (version 7: or `_`, a vertex's)
         std::vector<double> corners;
-        if (!parseList(fields[8], corners) || corners.size() != 6) {
+        if (!parseList(fields[8], corners)
+            || (corners.size() != 6 && !(withSides && corners.empty()))) {
             return {};
         }
-        result.extentMin = Base::Vector3d(corners[0], corners[1], corners[2]);
-        result.extentMax = Base::Vector3d(corners[3], corners[4], corners[5]);
+        if (!corners.empty()) {
+            result.extentMin = Base::Vector3d(corners[0], corners[1], corners[2]);
+            result.extentMax = Base::Vector3d(corners[3], corners[4], corners[5]);
+        }
         // A lone order-keyed element: its count alone, 1, as in version 4 (ops#503 D1)
         std::vector<double> twins;
         if (fields[9] == std::string(emptyField) + listDelimiter + "1") {
@@ -377,11 +486,20 @@ ElementFingerprint ElementFingerprint::fromString(std::string_view text)
         }
         // The inside point, a face's, when its field is there (version 6: or `_`)
         if (fields.size() >= fieldCount + 5
-            && (!parseVector(fields[11], result.inside) || (!withUpTo && !result.inside)
+            && (!parseVector(fields[11], result.inside)
+                || (!withUpTo && !withSides && !result.inside)
                 || (result.inside && fields[1] != "F"))) {
             return {};
         }
         if (withUpTo && !parseUpToFaces(fields[12], result.upToFaces)) {
+            return {};
+        }
+        // Version 7: the up-to faces or `_` (only an element with an extent has them), the sides
+        // and the marks
+        if (withSides
+            && ((fields[12] != emptyField
+                 && (!result.extentMin || !parseUpToFaces(fields[12], result.upToFaces)))
+                || !parseSides(fields[13], result.sides) || !parseMarks(fields[14], result.marks))) {
             return {};
         }
     }

@@ -2135,6 +2135,56 @@ void measure(SolveInput& input, std::map<std::string, ElementFingerprint> finger
     };
 }
 
+// An element's hint, as Part gives it: its fingerprint without size, centre and extent, and a
+// point of its plane, line or vertex away from its centre.
+struct Hinted
+{
+    ElementFingerprint intrinsic;
+    std::optional<Base::Vector3d> anchor;
+};
+
+Hinted hintOf(const ElementFingerprint& fp)
+{
+    Hinted hint;
+    hint.intrinsic = fp;
+    hint.intrinsic.size.reset();
+    hint.intrinsic.center.reset();
+    hint.intrinsic.extentMin.reset();
+    hint.intrinsic.extentMax.reset();
+    if (fp.type == 'V') {
+        hint.anchor = fp.center;
+    }
+    else if (fp.direction && fp.kind == "Line") {
+        hint.anchor = *fp.center + *fp.direction * 7.0;
+    }
+    else if (fp.direction && fp.kind == "Plane") {
+        // a point of the plane: the centre moved along a direction in it
+        Base::Vector3d inPlane = *fp.direction % Base::Vector3d(0.3, 0.5, 0.7);
+        hint.anchor = *fp.center + inPlane * 5.0;
+    }
+    return hint;
+}
+
+// Gives the pool the hints of these fingerprints (hintOf()), and counts them in \a calls if set.
+void hint(SolveInput& input, std::map<std::string, ElementFingerprint> fingerprints, int* calls)
+{
+    input.hintOf = [fingerprints, calls](const std::string& index,
+                                         ElementFingerprint& intrinsic,
+                                         std::optional<Base::Vector3d>& anchor) {
+        if (calls) {
+            ++*calls;
+        }
+        auto it = fingerprints.find(index);
+        if (it == fingerprints.end()) {
+            return false;
+        }
+        Hinted hinted = hintOf(it->second);
+        intrinsic = hinted.intrinsic;
+        anchor = hinted.anchor;
+        return true;
+    };
+}
+
 }  // namespace
 
 TEST(SolveOwner, geometryBreaksTiesAmongSurvivors)
@@ -2189,21 +2239,57 @@ TEST(SolveOwner, geometryNeverOverridesASingleSurvivor)
     // The outer wire gains an edge: the top face changed size and centre, which is what the
     // edit did. Tier 1's one survivor resolves; tiers 2 and 3 don't run. Since Task 2 PR 8 the
     // partner is measured once, for the tier-1 check (still a plane, the same normal: ops#87).
+    // Since D2 (ops#526) the survivor moved, so tier 1's gate (ii) looks for an element at the
+    // saved place: with hints the side face is ruled out unmeasured; without, it is measured.
+    for (bool hinted : {true, false}) {
+        Placed p;
+        SolveInput input;
+        input.diagonal = 30.0;
+        input.pool["Face"] = {element("Face1", {p.names.side}), element("Face2", {p.names.newTop})};
+        input.entries = {missing(p.names.oldTop)};
+        input.entries[0].fingerprint = p.top;
+        int calls = 0;
+        measure(input, {{"Face1", p.side}, {"Face2", p.topAt(9)}}, &calls);
+        if (hinted) {
+            hint(input, {{"Face1", p.side}, {"Face2", p.topAt(9)}}, nullptr);
+        }
+
+        auto outcomes = Data::solveOwner(input);
+
+        EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved) << hinted;
+        EXPECT_EQ(outcomes[0].element, "Face2") << hinted;
+        EXPECT_EQ(outcomes[0].tier, 1) << hinted;
+        EXPECT_EQ(calls, hinted ? 1 : 2) << hinted;
+    }
+}
+
+TEST(SolveOwner, survivorMovedLeavesTierOneOnlyForAnOccupantOfItsCopies)
+{
+    // Tier 1's gate (ii) (ops#526 D2): the lone survivor moved while an element of the record's
+    // kind and size sits at the saved place, so it leaves tier 1 for geometry. An occupant made in
+    // another copy than the old name (a revolution's side two, marked CPY, under side one's far
+    // edge: RevolutionSideTwoOuterEdgeAfterSideOneToFace, quiet wrong where D1 breaks) doesn't
+    // count: tier 1 keeps its survivor, D1's lines.
     Placed p;
-    SolveInput input;
-    input.diagonal = 30.0;
-    input.pool["Face"] = {element("Face1", {p.names.side}), element("Face2", {p.names.newTop})};
-    input.entries = {missing(p.names.oldTop)};
-    input.entries[0].fingerprint = p.top;
-    int calls = 0;
-    measure(input, {{"Face1", p.side}, {"Face2", p.topAt(9)}}, &calls);
+    auto input = [&](const std::string& occupant) {
+        SolveInput input;
+        input.diagonal = 30.0;
+        input.pool["Face"] = {element("Face1", {p.names.side}),
+                              element("Face2", {p.names.newTop}),
+                              element("Face3", {occupant})};
+        input.entries = {missing(p.names.oldTop)};
+        input.entries[0].fingerprint = p.top;
+        measure(input, {{"Face1", p.side}, {"Face2", p.topAt(9)}, {"Face3", p.top}}, nullptr);
+        return input;
+    };
 
-    auto outcomes = Data::solveOwner(input);
+    auto outcome = Data::solveOwner(input(p.names.unrelated))[0];
+    EXPECT_FALSE(outcome.status == SolveStatus::Resolved && outcome.tier == 1) << outcome.evidence;
 
-    EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved);
-    EXPECT_EQ(outcomes[0].element, "Face2");
-    EXPECT_EQ(outcomes[0].tier, 1);
-    EXPECT_EQ(calls, 1);
+    outcome = Data::solveOwner(input(piece(p.names.unrelated, 9, "CPY", 1, 'F')))[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Resolved) << outcome.evidence;
+    EXPECT_EQ(outcome.element, "Face2");
+    EXPECT_EQ(outcome.tier, 1);
 }
 
 TEST(SolveOwner, patternInstanceSiblingNeverResolves)
@@ -2591,6 +2677,14 @@ TEST(SolveOwner, geometryNeedsOneFingerprintForSameNamedReferences)
 
     input.entries[1].fingerprint = p.top;
     EXPECT_EQ(Data::solveOwner(input)[1].element, "Face2");
+
+    //   the same fingerprint with other marks (ops#526 D2: one owner holding the face through the
+    //   Pad and through the Body, whose closure adds the Body and its Origin): one record
+    input.entries[0].fingerprint.marks = {{5, 4}, {7, -1}};
+    input.entries[1].fingerprint.marks = {{5, 4}, {7, -1}, {8, -1}};
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].element, "Face2") << outcomes[0].evidence;
+    EXPECT_EQ(outcomes[1].element, "Face2") << outcomes[1].evidence;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -5176,40 +5270,6 @@ TEST(Moved, faceUnderOneBreaks)
     EXPECT_EQ(describe(Data::solveOwner(input)[0]), "exact Face1 0 [] ");
 }
 
-namespace
-{
-
-// An element's hint, as Part gives it: its fingerprint without size, centre and extent, and a
-// point of its plane, line or vertex away from its centre.
-struct Hinted
-{
-    ElementFingerprint intrinsic;
-    std::optional<Base::Vector3d> anchor;
-};
-
-Hinted hintOf(const ElementFingerprint& fp)
-{
-    Hinted hint;
-    hint.intrinsic = fp;
-    hint.intrinsic.size.reset();
-    hint.intrinsic.center.reset();
-    hint.intrinsic.extentMin.reset();
-    hint.intrinsic.extentMax.reset();
-    if (fp.type == 'V') {
-        hint.anchor = fp.center;
-    }
-    else if (fp.direction && fp.kind == "Line") {
-        hint.anchor = *fp.center + *fp.direction * 7.0;
-    }
-    else if (fp.direction && fp.kind == "Plane") {
-        // a point of the plane: the centre moved along a direction in it
-        Base::Vector3d inPlane = *fp.direction % Base::Vector3d(0.3, 0.5, 0.7);
-        hint.anchor = *fp.center + inPlane * 5.0;
-    }
-    return hint;
-}
-
-}  // namespace
 
 TEST(Moved, hintRulesOutOnlyWhatIsNotThere)
 {
@@ -7560,6 +7620,39 @@ TEST(SolveOwner, guessThePieceAtTheSavedCentre)
     measure(input, {{"Edge2", lineX(0, 6)}, {"Edge3", lineX(8, 20)}}, nullptr);
     input.guess = false;
     EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
+}
+
+TEST(SolveOwner, listHolderSplitBreaks)
+{
+    // ops#525 (PLAN decision 208): a list holder's reference, its Expand read as One, asked for
+    // the whole edge; the split breaks with the pieces listed, never G3's one piece.
+    const auto old = generated({sketchEdge(1)}, 7, "Extrude", 'E');
+    auto lineX = [](double from, double to) {
+        return fingerprint('E',
+                           "Line",
+                           to - from,
+                           Base::Vector3d((from + to) / 2, 0, 10),
+                           Base::Vector3d(1, 0, 0));
+    };
+    SolveInput input;
+    input.diagonal = 30.0;
+    input.guess = true;
+    input.pool["Edge"] = {
+        element("Edge2", {piece(old, 9, "CUT", 0, 'E')}),
+        element("Edge3", {piece(old, 9, "CUT", 1, 'E')}),
+    };
+    input.entries = {missing(old, "Edge")};
+    input.entries[0].fingerprint = lineX(0, 20);
+    input.entries[0].listHolder = true;
+    measure(input, {{"Edge2", lineX(0, 6)}, {"Edge3", lineX(8, 20)}}, nullptr);
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << outcome.evidence;
+    EXPECT_EQ(outcome.evidence, "split into 2 pieces");
+    EXPECT_EQ(outcome.candidates.size(), 2U);
+
+    //   the control: a plain One reference takes G3's piece
+    input.entries[0].listHolder = false;
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Guessed);
 }
 
 TEST(SolveOwner, guessThePieceOfASplitFace)
@@ -9934,6 +10027,353 @@ TEST(SolveOwner, exactPlaceAnotherSourceBreaks)
     EXPECT_FALSE(Data::lostOldSources({b.oldEdge}, b.oldEdge));
 }
 
+// ---------------------------------------------------------------------------------------------
+// D2 (ops#526): the record's verdict at the vacated place, from fingerprint version 7's sides
+// and marks
+
+namespace
+{
+
+ElementFingerprint::Side sideAlong(double x, double y, double z)
+{
+    ElementFingerprint::Side side;
+    side.direction = Base::Vector3d(x, y, z);
+    return side;
+}
+
+// LongBoard's record with the marks: the sketch (tag 5) had given IDs up to g4, the pad (tag 7)
+// gives none; the edge's faces are the top (+z) and the front (-y)
+ElementFingerprint boardRecord()
+{
+    ElementFingerprint record = LongBoard::edgeAt(0);
+    record.sides = {sideAlong(0, 0, 1), sideAlong(0, -1, 0)};
+    record.marks = {{5, 4}, {7, -1}};
+    return record;
+}
+
+}  // namespace
+
+TEST(SolveOwner, redrawnAtThePlaceIsQuiet)
+{
+    // ops#394's redraw (decision 97 Q3, restored by D2): the old line g1 deleted, drawn again
+    // where it was as g9, above the sketch's mark 4: the element drawn again there. XP takes it,
+    // its evidence says so, and the batch's level is the quieter one.
+    LongBoard b;
+    auto input = b.input(LongBoard::edgeAt(0), LongBoard::edgeAt(45));
+    input.entries[0].fingerprint = boardRecord();
+    auto now = boardRecord();
+    now.marks.clear();
+    measure(input, {{"Edge2", now}, {"Edge3", LongBoard::edgeAt(45)}}, nullptr);
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Resolved) << outcome.evidence;
+    EXPECT_EQ(outcome.element, "Edge2");
+    EXPECT_EQ(outcome.tier, 3);
+    EXPECT_EQ(outcome.evidence,
+              "no structural candidate, at the same place: nearest 0.000, second 45.000, d_max "
+              "50.000; drawn again there");
+    EXPECT_EQ(Data::placeVerdict(boardRecord(), now, {b.redrawn}, b.oldEdge, true, {}),
+              Data::PlaceVerdict::Quiet);
+    //   a pattern's copy of the redrawn element on the place (review prd2o-r1 T2): never quiet,
+    //   D1's lines
+    const auto copy = piece(b.redrawn, 9, "CPY", 1, 'E');
+    EXPECT_EQ(Data::placeVerdict(boardRecord(), now, {copy}, b.oldEdge, true, {}),
+              Data::PlaceVerdict::Unjudged);
+}
+
+TEST(SolveOwner, siblingAtTheVacatedPlaceBreaks)
+{
+    // The fail-before of ops#526: rim 1's line deleted and rim 2's (g2, in the sketch when the
+    // record was taken) dragged onto its place. Same sides, but its source was there before:
+    // broken, the pick first as `place`.
+    LongBoard b;
+    auto input = b.input(LongBoard::edgeAt(0), LongBoard::edgeAt(45));
+    const auto sibling = section({}, {sketchEdge(2)}, 7, "XTR", 0, 'E', {"PRJ"});
+    input.pool["Edge"][0].names = {sibling};
+    input.entries[0].fingerprint = boardRecord();
+    auto now = boardRecord();
+    now.marks.clear();
+    measure(input, {{"Edge2", now}, {"Edge3", LongBoard::edgeAt(45)}}, nullptr);
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << outcome.evidence;
+    EXPECT_EQ(outcome.evidence,
+              "ambiguous: Edge2 sits where the old element was, but its source 5;g2 was in the "
+              "model before");
+    ASSERT_FALSE(outcome.candidates.empty());
+    EXPECT_EQ(outcome.candidates.front(), "Edge2");
+    EXPECT_EQ(outcome.candidateRoles.front(), "place");
+
+    //   beyond the other edge's reach (tier 3's own nearest at the place): broken too, where D1
+    //   resolved it warned (the thick form, wrong on D1)
+    measure(input, {{"Edge2", now}, {"Edge3", LongBoard::edgeAt(500)}}, nullptr);
+    outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << outcome.evidence;
+    EXPECT_EQ(outcome.candidates.front(), "Edge2");
+}
+
+TEST(SolveOwner, otherSideAtThePlaceBreaks)
+{
+    // The member drawn again one thickness over (policy question 1, decision 208): its back top
+    // edge lands where the front one was, its line new, but its face looks the other way.
+    LongBoard b;
+    auto input = b.input(LongBoard::edgeAt(0), LongBoard::edgeAt(500));
+    input.entries[0].fingerprint = boardRecord();
+    auto back = boardRecord();
+    back.marks.clear();
+    back.sides = {sideAlong(0, 0, 1), sideAlong(0, 1, 0)};
+    measure(input, {{"Edge2", back}, {"Edge3", LongBoard::edgeAt(500)}}, nullptr);
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << outcome.evidence;
+    EXPECT_EQ(outcome.evidence,
+              "ambiguous: Edge2 sits where the old element was, but its sides are not the old "
+              "element's");
+    EXPECT_EQ(outcome.candidates.front(), "Edge2");
+    EXPECT_EQ(outcome.candidateRoles.front(), "place");
+
+    //   T1' off: D1's results, the record's fields unread
+    input.sameSource = false;
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Resolved);
+}
+
+TEST(SolveOwner, replacedSourceOutsideTheClosureIsWarned)
+{
+    // Policy D's replaced source (ReplacedHoleSamePlace's form, I-S6): the edge at the place
+    // from a sketch the target wasn't built from. Tier 3's nearest resolves it, warned, never
+    // quiet.
+    LongBoard b;
+    auto input = b.input(LongBoard::edgeAt(0), LongBoard::edgeAt(500));
+    input.pool["Edge"][0].names = {b.otherSketch};
+    input.entries[0].fingerprint = boardRecord();
+    auto now = boardRecord();
+    now.marks.clear();
+    measure(input, {{"Edge2", now}, {"Edge3", LongBoard::edgeAt(500)}}, nullptr);
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Resolved) << outcome.evidence;
+    EXPECT_NE(outcome.evidence.find("; its source 6;g9 is another object's"), std::string::npos)
+        << outcome.evidence;
+    EXPECT_EQ(Data::placeVerdict(boardRecord(), now, {b.otherSketch}, b.oldEdge, true, {}),
+              Data::PlaceVerdict::Normal);
+}
+
+TEST(SolveOwner, primitiveMovedOntoThePlaceBreaks)
+{
+    // Box 1 deleted and box 2, fused with it, moved onto its place: their elements' sources carry
+    // no geometry IDs a mark could date; box 2 was feeding the target, so it was there.
+    const auto oldEdge = section({"Edge3"}, {}, 10, "BOX", 0, 'E', {"SRC"});
+    const auto moved = section({"Edge3"}, {}, 11, "BOX", 0, 'E', {"SRC"});
+    ElementFingerprint record = LongBoard::edgeAt(0);
+    record.marks = {{10, -1}, {11, -1}, {12, -1}};
+    const auto now = LongBoard::edgeAt(0);
+    EXPECT_TRUE(Data::lostOldSources({moved}, oldEdge));
+    std::string why;
+    EXPECT_EQ(Data::placeVerdict(record, now, {moved}, oldEdge, true, {}, &why),
+              Data::PlaceVerdict::WasThere);
+    EXPECT_EQ(why, "its source 11;Edge3 was in the model before");
+}
+
+TEST(SolveOwner, lineDrawnTheOtherWayBreaks)
+{
+    // anchor_line_flips' BlockBossHole (Tier F, D2c): every line drawn the other way, IDs kept.
+    // The corner's vertical edge was made from the vertex g1v1/g4v2 and is now made from
+    // g1v2/g4v1. The record compares source IDs exactly (decision 219, the design's literal
+    // rule): g1v2 was in the model before, a break, where integration resolves it at tier 3.
+    auto corner = [](const std::vector<std::string>& ids) {
+        return section({}, {sketchVertex(ids)}, 7, "XTR", 0, 'E', {"GEN"});
+    };
+    const auto oldEdge = corner({"g1v1", "g4v2"});
+    const auto now = LongBoard::edgeAt(0);
+    auto verdict = [&](const std::string& pick, std::string* why = nullptr) {
+        return Data::placeVerdict(boardRecord(), now, {pick}, oldEdge, true, {}, why);
+    };
+    ASSERT_TRUE(Data::lostOldSources({corner({"g1v2", "g4v1"})}, oldEdge));
+    std::string why;
+    EXPECT_EQ(verdict(corner({"g1v2", "g4v1"}), &why), Data::PlaceVerdict::WasThere);
+    EXPECT_EQ(why, "its source 5;g1v2 was in the model before");
+    //   a line drawn since: drawn again there
+    EXPECT_EQ(verdict(corner({"g9v1", "g10v2"})), Data::PlaceVerdict::Quiet);
+    //   a hashed ID (a long source's, Tier F's LPipe and PointInsertedMidLine cases) can't be
+    //   dated: unjudged, though its letters and digits would read as `dca2`, and never quiet
+    //   beside a new ID; a source there before still breaks beside it
+    EXPECT_EQ(verdict(corner({"dca2f6a0f89cd772"})), Data::PlaceVerdict::Unjudged);
+    EXPECT_EQ(verdict(corner({"6b064769961c5b64", "g9v1"})), Data::PlaceVerdict::Unjudged);
+    EXPECT_EQ(verdict(corner({"6b064769961c5b64", "g2v1"})), Data::PlaceVerdict::WasThere);
+    //   a letter and 15 digits (a hash, review prd2s-r2 T4) is no geometry ID either
+    EXPECT_EQ(verdict(corner({"a123456789012345"})), Data::PlaceVerdict::Unjudged);
+}
+
+TEST(SolveOwner, indexMadePickIsUnjudged)
+{
+    // The attack set's BRing|reversed (D2b): the ring's spine line reversed, its faces renamed
+    // by index (the MKR fallback, `Face16;_;{Pipe};MKR;0;F;0;IDX,SRC;_`). The pick's only
+    // unshared source is the Pipe itself, ID-less and in the closure: no lineage to date, neither
+    // drawn again nor there before. Unjudged keeps D1's lines.
+    const auto oldFace = section({"Face3"}, {}, 10, "XTR", 0, 'F', {"SRC"});
+    const auto byIndex = indexed("Face16", 12, "MKR");
+    ElementFingerprint record = LongBoard::edgeAt(0);
+    record.marks = {{10, -1}, {12, -1}};
+    const auto now = LongBoard::edgeAt(0);
+    ASSERT_TRUE(Data::lostOldSources({byIndex}, oldFace));
+    EXPECT_EQ(Data::placeVerdict(record, now, {byIndex}, oldFace, true, {}),
+              Data::PlaceVerdict::Unjudged);
+    //   a piece of it the same
+    const auto split = piece(byIndex, 11, "CUT", 1, 'F');
+    ASSERT_EQ(NameAncestry::indexSource(split), byIndex);
+    EXPECT_EQ(Data::placeVerdict(record, now, {split}, oldFace, true, {}),
+              Data::PlaceVerdict::Unjudged);
+    //   the control: the same source named with a lineage was there
+    const auto withLineage = section({"Face16"}, {}, 12, "XTR", 0, 'F', {"SRC"});
+    EXPECT_EQ(Data::placeVerdict(record, now, {withLineage}, oldFace, true, {}),
+              Data::PlaceVerdict::WasThere);
+    //   another name of the pick still judges it
+    EXPECT_EQ(Data::placeVerdict(record, now, {byIndex, withLineage}, oldFace, true, {}),
+              Data::PlaceVerdict::WasThere);
+}
+
+TEST(SolveOwner, indexMadeOldNameIsJudgedByItsObject)
+{
+    // BoxMovedIntoAVacatedPlaceThick (design 9.2's own example, 9.5; ops#526 D2d): two boxes
+    // fused, box 1 deleted and box 2 moved onto its place. The old name was made from box 1's
+    // index (`Edge10;_;<Box1>;MKR;...;IDX,SRC`), so T1''s test sees no lost source, and the pick,
+    // box 2's edge by index, was skipped by the marks. Box 2 is in the closure without IDs: it
+    // was there.
+    const auto oldEdge = indexed("Edge10", 10, "MKR");
+    ElementFingerprint record = LongBoard::edgeAt(0);
+    record.marks = {{10, -1}, {11, -1}, {12, -1}};
+    const auto now = LongBoard::edgeAt(0);
+    const auto moved = indexed("Edge10", 11, "MKR");
+    std::string why;
+    EXPECT_EQ(Data::placeVerdict(record, now, {moved}, oldEdge, false, {}, &why),
+              Data::PlaceVerdict::WasThere);
+    EXPECT_EQ(why, "its source 11 was in the model before");
+    //   whether or not T1''s test saw a lost source
+    EXPECT_EQ(Data::placeVerdict(record, now, {moved}, oldEdge, true, {}),
+              Data::PlaceVerdict::WasThere);
+    //   the same object renumbered: shared, D1's lines
+    EXPECT_EQ(Data::placeVerdict(record, now, {indexed("Edge12", 10, "MKR")}, oldEdge, false, {}),
+              Data::PlaceVerdict::Unjudged);
+    //   an object the record has no mark of (made since): D1's lines, never another level
+    EXPECT_EQ(Data::placeVerdict(record, now, {indexed("Edge10", 13, "MKR")}, oldEdge, false, {}),
+              Data::PlaceVerdict::Unjudged);
+    //   a record without the old name's object: taken after box 1 left the model (box 3's
+    //   recompute refreshed it from box 2's edge under the old index, before the solve; D2e)
+    ElementFingerprint refreshed = LongBoard::edgeAt(0);
+    refreshed.marks = {{11, -1}, {12, -1}};
+    EXPECT_EQ(Data::placeVerdict(refreshed, now, {moved}, oldEdge, false, {}, &why),
+              Data::PlaceVerdict::SourceGone);
+    EXPECT_EQ(why, "its old source 10 had left the model");
+    //   an old name with a lineage keeps T1''s gate: unjudged while no source is lost
+    const auto mapped = section({"Edge10"}, {}, 10, "XTR", 0, 'E', {"SRC"});
+    EXPECT_EQ(Data::placeVerdict(record, now, {moved}, mapped, false, {}),
+              Data::PlaceVerdict::Unjudged);
+}
+
+TEST(SolveOwner, indexMadeOldNameNegativeTagKeepsMark)
+{
+    // Review prd2eson-r5 F1: a Body's second box names its elements with its tag negated
+    // (`Edge10;_;{-Box2};MKR;...;IDX`); box 1 deleted, box 2 is the first feature and names them
+    // with the positive tag. One object: the record's mark of it is found and the pick shares it,
+    // so D1's lines (integration's warned guess), not SourceGone.
+    const auto oldEdge = indexed("Edge10", -11, "MKR");
+    ElementFingerprint record = LongBoard::edgeAt(0);
+    record.marks = {{11, -1}, {12, -1}};
+    const auto now = LongBoard::edgeAt(0);
+    EXPECT_EQ(Data::placeVerdict(record, now, {indexed("Edge10", 11, "MKR")}, oldEdge, false, {}),
+              Data::PlaceVerdict::Unjudged);
+    //   and the other way round (box 2 moved behind another feature)
+    EXPECT_EQ(Data::placeVerdict(record,
+                                 now,
+                                 {indexed("Edge10", -11, "MKR")},
+                                 indexed("Edge10", 11, "MKR"),
+                                 false,
+                                 {}),
+              Data::PlaceVerdict::Unjudged);
+    //   another box there, negated too: it was there
+    std::string why;
+    const auto other = indexed("Edge10", -12, "MKR");
+    EXPECT_EQ(Data::placeVerdict(record, now, {other}, oldEdge, false, {}, &why),
+              Data::PlaceVerdict::WasThere);
+    EXPECT_EQ(why, "its source -12 was in the model before");
+    //   a negated tag the record has no mark of: gone
+    ElementFingerprint gone = LongBoard::edgeAt(0);
+    gone.marks = {{12, -1}};
+    EXPECT_EQ(Data::placeVerdict(gone, now, {indexed("Edge10", -12, "MKR")}, oldEdge, false, {}),
+              Data::PlaceVerdict::SourceGone);
+}
+
+TEST(SolveOwner, recordWithoutMarksKeepsD1)
+{
+    // A record saved before D2 (version 6 or older, no marks), or a lost source's object the
+    // record has no mark of: unjudged, D1's results (exactPlaceBeatsTheGapTest)
+    LongBoard b;
+    const auto now = LongBoard::edgeAt(0);
+    EXPECT_EQ(Data::placeVerdict(LongBoard::edgeAt(0), now, {b.redrawn}, b.oldEdge, true, {}),
+              Data::PlaceVerdict::Unjudged);
+    ElementFingerprint gap = LongBoard::edgeAt(0);
+    gap.marks = {{7, -1}};
+    EXPECT_EQ(Data::placeVerdict(gap, now, {b.redrawn}, b.oldEdge, true, {}),
+              Data::PlaceVerdict::Unjudged);
+    //   a pick that kept the sources: the marks aren't read
+    EXPECT_EQ(Data::placeVerdict(boardRecord(), now, {b.oldEdge}, b.oldEdge, false, {}),
+              Data::PlaceVerdict::Unjudged);
+    //   an index-only reference is never quiet (ops#550 (1))
+    EXPECT_EQ(Data::placeVerdict(boardRecord(), now, {b.redrawn}, "", true, {}),
+              Data::PlaceVerdict::Unjudged);
+    EXPECT_FALSE(Data::mayBeQuietAtPlace({b.redrawn}, "", true));
+}
+
+TEST(SolveOwner, sidesAreAnUnorderedSet)
+{
+    // The sides compare as sets, a direction with its sense within the angle tolerance, a curved
+    // side by its sign; only both fingerprints' sides are compared
+    LongBoard b;
+    ElementFingerprint record = boardRecord();
+    ElementFingerprint now = LongBoard::edgeAt(0);
+    now.sides = {sideAlong(0, -1, 0), sideAlong(0, 0, 1)};
+    EXPECT_EQ(Data::placeVerdict(record, now, {b.oldEdge}, b.oldEdge, false, {}),
+              Data::PlaceVerdict::Unjudged);
+    now.sides = {sideAlong(0, -1, 0), sideAlong(0, 1e-5, 1)};
+    EXPECT_EQ(Data::placeVerdict(record, now, {b.oldEdge}, b.oldEdge, false, {}),
+              Data::PlaceVerdict::OtherSide);
+    now.sides = {sideAlong(0, -1, 0)};
+    EXPECT_EQ(Data::placeVerdict(record, now, {b.oldEdge}, b.oldEdge, false, {}),
+              Data::PlaceVerdict::OtherSide);
+    now.sides.clear();
+    EXPECT_EQ(Data::placeVerdict(record, now, {b.oldEdge}, b.oldEdge, false, {}),
+              Data::PlaceVerdict::Unjudged);
+    ElementFingerprint::Side hole;
+    hole.curve = '+';
+    ElementFingerprint::Side boss;
+    boss.curve = '-';
+    record.sides = {hole, sideAlong(0, 0, 1)};
+    now.sides = {sideAlong(0, 0, 1), hole};
+    EXPECT_EQ(Data::placeVerdict(record, now, {b.oldEdge}, b.oldEdge, false, {}),
+              Data::PlaceVerdict::Unjudged);
+    now.sides = {sideAlong(0, 0, 1), boss};
+    EXPECT_EQ(Data::placeVerdict(record, now, {b.oldEdge}, b.oldEdge, false, {}),
+              Data::PlaceVerdict::OtherSide);
+}
+
+TEST(SolveOwner, sameRankNames)
+{
+    // A2's `<k>of<n>` counter (ops#536): the same rank among more twins is the same rank; another
+    // rank, or another field, is not
+    auto vertex = [](const char* count, const char* index = "0") {
+        return Data::MappedName::makeEncodedSection({},
+                                                    {sketchEdge(1)},
+                                                    "7",
+                                                    "CUT",
+                                                    index,
+                                                    'V',
+                                                    count,
+                                                    {"ORD"},
+                                                    {});
+    };
+    EXPECT_TRUE(Data::sameRankName(vertex("1of3"), vertex("1of2")));
+    EXPECT_FALSE(Data::sameRankName(vertex("2of3"), vertex("1of2")));
+    EXPECT_FALSE(Data::sameRankName(vertex("1of2"), vertex("1of2")));
+    EXPECT_FALSE(Data::sameRankName(vertex("1of3", "1"), vertex("1of2")));
+    EXPECT_FALSE(Data::sameRankName(vertex("1"), vertex("2")));
+}
+
 TEST(SolveOwner, exactPlaceAnotherCopysElementBreaks)
 {
     // Two links to one pin body in a fuse (PR 379 round 5's review, R5PinBottomRimOntoTopRimLong):
@@ -10018,8 +10458,8 @@ TEST(SolveOwner, exactPlaceIndexOnlyReference)
     // An index-only reference (a legacy file's, no old name) to an element of a long part, and
     // one element at its saved place, another copy's (PR 379 round 5's last review, T2): no name
     // relates the pick to the reference, so XP's pick has no origin to share and breaks, as
-    // tier 3's gap test breaks it on `integration`; never the quiet resolution an empty name
-    // would get at the batch's same-place level (Data::mayBeQuietAtPlace()).
+    // tier 3's gap test breaks it on `integration`. And an empty name never gets the batch's
+    // same-place level (Data::mayBeQuietAtPlace(), ops#550 (1), D2).
     LongBoard b;
     auto input = b.input(LongBoard::edgeAt(0), LongBoard::edgeAt(45));
     input.entries[0].oldName.clear();
@@ -10030,7 +10470,7 @@ TEST(SolveOwner, exactPlaceIndexOnlyReference)
     EXPECT_EQ(outcome.evidence,
               "no structural candidate, at the same place: nearest 0.000, second 45.000, d_max "
               "50.000; the pick Edge2 has another source");
-    EXPECT_TRUE(Data::mayBeQuietAtPlace({b.oldEdge}, "", true));
+    EXPECT_FALSE(Data::mayBeQuietAtPlace({b.oldEdge}, "", true));
 }
 
 TEST(SolveOwner, faceGeneratorGoneDropsTheSurvivor)

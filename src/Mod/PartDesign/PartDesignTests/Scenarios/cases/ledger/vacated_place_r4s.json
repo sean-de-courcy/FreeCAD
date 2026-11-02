@@ -1,0 +1,12 @@
+{
+"entries": {
+"R4HoleSeamVertexThick|seam|V2s": {"axes": ["M1", "E4", "E5", "X4:600"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr379-r4s", "issue": "ops#526", "tier": "F"},
+"R4HoleSeamVertex|seam|V2s": {"axes": ["M1", "E4", "E5", "X4:600"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr379-r4s", "issue": "ops#526", "tier": "F"},
+"R4RimVertexFaceThick|corner|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr379-r4s", "issue": "ops#526", "tier": "F"},
+"R4RimVertexFaceThick|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr379-r4s", "issue": "ops#526", "tier": "F"},
+"R4RimVertexFace|corner|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr379-r4s", "issue": "ops#526", "tier": "F"},
+"R4RimVertexFace|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr379-r4s", "issue": "ops#526", "tier": "F"},
+"R4SlotMovedIntoAVacatedPlaceThick|chamfer|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr379-r4s", "issue": "ops#526", "tier": "F"},
+"R4SlotMovedIntoAVacatedPlace|chamfer|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr379-r4s", "issue": "ops#526", "tier": "F"}
+}
+}
