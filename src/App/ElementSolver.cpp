@@ -6196,7 +6196,13 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
                 }
             }
             if (group.size() < 2) {
-                return {};
+                // The literal stop (PR 390 round 2e, its fourth silent find): the old element was
+                // one of two twins or more, and the pick is none of them and has no twins of its
+                // own, a nearest pick by geometry alone while the twins' count changed (a far
+                // edge's crossings, one left on the piece, the other's name taken by a corner
+                // 0.28 away). It breaks.
+                return pool.elements[position].index + " is no twin of the old element ("
+                    + std::to_string(saved->twinCount) + " twins saved)";
             }
             Base::Vector3d centroid;
             bool measured = true;

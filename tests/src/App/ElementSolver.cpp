@@ -10344,6 +10344,33 @@ TEST(SolveOwner, redrawnCrossingMovedPastHalfItsSpacingBreaks)
     EXPECT_EQ(outcome.evidence.find("saved order"), std::string::npos) << outcome.evidence;
 }
 
+TEST(SolveOwner, loneNearestPickOfASavedTwinBreaks)
+{
+    // The literal stop (PR 390 round 2e, review pr403-r5's CrossingTwinGoneOnFarEdgeAndSlid): the
+    // right crossing's name missing, the record saying 2 twins, and geometry's nearest pick
+    // (Vertex20, 0.232 mm from the saved place) a lone vertex with no twin of its own and no name
+    // relating it to the old element: it breaks. Without the stop the pick stood, silently.
+    CrossedEdge c;
+    auto input = c.input(c.right);
+    const auto cyl = generated({sketchEdge(5, 7)}, 11, "XTR", 'F');
+    input.pool["Vertex"].push_back(element("Vertex20", {generated({c.edge1, cyl}, 11, "CUT", 'V')}));
+    input.entries[0].fingerprint = CrossedEdge::saved(2);
+    measure(input,
+            {{"Vertex10", CrossedEdge::at(40)}, {"Vertex20", CrossedEdge::at(10.634)}},
+            nullptr);
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << outcome.evidence;
+    EXPECT_NE(outcome.evidence.find("Vertex20 is no twin of the old element (2 twins saved)"),
+              std::string::npos)
+        << outcome.evidence;
+
+    //   no twin record (an older one): the test doesn't apply, as before
+    input.entries[0].fingerprint = CrossedEdge::saved(0);
+    outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.evidence.find("no twin of the old element"), std::string::npos)
+        << outcome.evidence;
+}
+
 TEST(SolveOwner, redrawnCrossingCloserToTheEdgeKeepsItsSide)
 {
     // The control (round 4's reading review, T4a): the circle drawn again smaller, in place, its
