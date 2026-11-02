@@ -32,7 +32,7 @@
 "PipeJointHoleCrossingReachesTheSeam|xm_ym|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "port", "issue": "ops#468", "tier": "F"},
 "PipeJointHoleCrossingReachesTheSeam|xm_yp|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "port", "issue": "ops#468", "tier": "F"},
 "PipeJointHoleCrossingReachesTheSeam|xp_ym|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "port", "issue": "ops#468", "tier": "F"},
-"PipeJointHoleCrossingReachesTheSeam|xp_yp|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "quiet", "found_by": "port", "issue": "ops#468", "tier": "F"},
+"PipeJointHoleCrossingReachesTheSeam|xp_yp|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "port", "issue": "ops#468", "tier": "F"},
 "PipeJointHoleCrossingsStayNear|xm_ym|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#468", "tier": "F"},
 "PipeJointHoleCrossingsStayNear|xm_yp|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#468", "tier": "F"},
 "PipeJointHoleCrossingsStayNear|xp_ym|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#468", "tier": "F"},

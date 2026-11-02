@@ -1,0 +1,8 @@
+{
+"entries": {
+"R2eCrossingTwinGoneOnFarEdgeAndSlid|first|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr403-r5", "issue": "ops#468", "tier": "F"},
+"R2eCrossingTwinGoneOnFarEdgeAndSlid|second|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr403-r5", "issue": "ops#468", "tier": "F"},
+"R2eCrossingTwinGoneOnFarEdge|first|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr403-r5", "issue": "ops#468", "tier": "F"},
+"R2eCrossingTwinGoneOnFarEdge|second|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr403-r5", "issue": "ops#468", "tier": "F"}
+}
+}
