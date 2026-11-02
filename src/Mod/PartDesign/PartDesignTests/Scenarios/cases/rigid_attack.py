@@ -458,3 +458,116 @@ class ReviewPadCustomDirectionFlippedPlacement(ReviewPadCustomDirectionFlipped):
         doc.recompute()
         box = self.pad.Shape.BoundBox
         assert abs(box.ZMin) < 1e-6 and abs(box.ZMax - 10) < 1e-6, box
+
+
+class ReviewPadCustomDirectionFlippedAtZ1(Scenario):
+    """A rectangle x -10..10, y -5..5 on the Body's XY plane lifted to z 1 (AttachmentOffset
+    (0, 0, 1)), padded 10 along a CUSTOM direction (0, 0, 1) fixed in the Body (UseCustomVector,
+    AlongSketchNormal off): the pad is z 1..11. The edit turns the sketch over about its own X axis
+    (AttachmentOffset (0, 0, 1), 180 about X): the rectangle lands on itself (its +y line at -y),
+    the custom direction stays, so the pad is the same solid z 1..11 (globally unchanged, the part
+    did not move as one piece). The sketch's motion M is the half turn about the line y 0, z 1; the
+    direction's tip (0, 0, 1) lies on that line, so M v = v and the vector check passes as a point.
+    Convention 10.1: every reference stays (the +y wall is still the +y wall)."""
+    area = "rigid-review"
+    CLASSES = ("D",)
+    AXES = ("E5",)
+    ISSUE = "ops#557"
+    FOUND_BY = "review pr557o-r2b"
+    TIER = "F"
+    lift = 1.0
+    direction = (0, 0, 1)
+    REFS = ("side_py", "side_my", "top", "bottom")
+
+    def points(self):
+        h = self.lift
+        return {"side_py": (0, 5, h + 5), "side_my": (0, -5, h + 5), "top": (0, 0, h + 10),
+                "bottom": (0, 0, h)}
+
+    def expect(self, name):
+        return face(surface="plane", contains=V(*self.points()[name]))
+
+    def check(self):
+        box = self.pad.Shape.BoundBox
+        assert abs(box.ZMin - self.lift) < 1e-6 and abs(box.ZMax - self.lift - 10) < 1e-6, box
+        assert abs(box.YMin + 5) < 1e-6 and abs(box.YMax - 5) < 1e-6, box
+
+    def build(self, doc):
+        body = doc.addObject("PartDesign::Body", "Body")
+        self.base = doc.addObject("Sketcher::SketchObject", "Base")
+        body.addObject(self.base)
+        self.base.AttachmentSupport = [(originFeature(body, "XY_Plane"), "")]
+        self.base.MapMode = "FlatFace"
+        self.base.AttachmentOffset = App.Placement(V(0, 0, self.lift), App.Rotation())
+        pts = [V(-10, -5, 0), V(10, -5, 0), V(10, 5, 0), V(-10, 5, 0), V(-10, -5, 0)]
+        for i in range(4):
+            self.base.addGeometry(Part.LineSegment(pts[i], pts[i + 1]), False)
+        pad = body.newObject("PartDesign::Pad", "Pad")
+        pad.Profile = self.base
+        pad.Length = 10
+        pad.UseCustomVector = True
+        pad.AlongSketchNormal = False
+        pad.Direction = V(*self.direction)
+        doc.recompute()
+        self.pad = pad
+        self.check()
+        for name in self.REFS:
+            element = self.names(pad, self.expect(name))[0]
+            owner = doc.addObject("Sketcher::SketchObject", name)
+            body.addObject(owner)
+            owner.AttachmentSupport = [(pad, element)]
+            owner.MapMode = "FlatFace"
+            doc.recompute()
+            self.ref(name, owner, "AttachmentSupport", (lambda n=name: self.expect(n)), Attached())
+
+    def edit(self, doc):
+        self.base.AttachmentOffset = App.Placement(V(0, 0, self.lift), App.Rotation(X, 180))
+        doc.recompute()
+        self.check()
+
+
+class ReviewPadTiltedDirectionFlippedAtZ06(ReviewPadCustomDirectionFlippedAtZ1):
+    """The same with a tilted custom direction (0.8, 0, 0.6) (unit) and the sketch at z 0.6: the
+    tip lies on the turn's line (y 0, z 0.6). The pad is a slanted prism; its y walls stay y +-5,
+    its bottom stays z 0.6. Convention 10.1: the references stay."""
+    lift = 0.6
+    direction = (0.8, 0, 0.6)
+    REFS = ("side_py", "side_my", "bottom")
+
+    def points(self):
+        h = self.lift
+        return {"side_py": (4, 5, h + 3), "side_my": (4, -5, h + 3), "bottom": (0, 0, h)}
+
+    def check(self):
+        box = self.pad.Shape.BoundBox
+        assert abs(box.ZMin - self.lift) < 1e-6, box
+        assert abs(box.YMin + 5) < 1e-6 and abs(box.YMax - 5) < 1e-6, box
+
+
+class ReviewPadCustomDirectionFlippedAtZ0(ReviewPadCustomDirectionFlippedAtZ1):
+    """Control: the PR's own ReviewPadCustomDirectionFlipped shape (sketch at z 0, built here the
+    same way): M v = -v, the vector check fails."""
+    lift = 0.0
+
+
+class ReviewPadCustomDirectionFlippedAtZ1Free(ReviewPadCustomDirectionFlippedAtZ1):
+    """The same with the base sketch unattached (MapMode Deactivated, Placement (0, 0, 1)) and the
+    edit turning its own Placement 180 about its X axis."""
+
+    def build(self, doc):
+        ReviewPadCustomDirectionFlippedAtZ1.build(self, doc)
+        self.base.AttachmentSupport = []
+        self.base.MapMode = "Deactivated"
+        self.base.Placement = App.Placement(V(0, 0, self.lift), App.Rotation())
+        doc.recompute()
+        self.check()
+
+    def edit(self, doc):
+        self.base.Placement = App.Placement(V(0, 0, self.lift), App.Rotation(X, 180))
+        doc.recompute()
+        self.check()
+
+
+class ReviewPadCustomDirectionFlippedAtZ0Free(ReviewPadCustomDirectionFlippedAtZ1Free):
+    """Control for the unattached route: the sketch at z 0 (M v = -v)."""
+    lift = 0.0

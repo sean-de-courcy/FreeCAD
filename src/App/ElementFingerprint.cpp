@@ -825,16 +825,14 @@ std::optional<Base::Placement> ElementFingerprint::rigidMotion(
             }
             continue;
         }
-        // A vector input goes with the part, as a direction (a pad's, a revolve's axis) or as a
-        // point (a revolve's base): a custom direction left in the body isn't one piece
-        // (RevPadCustomDirectionFlipped)
+        // A vector input turns with the part, as a direction: a custom direction left in the body
+        // isn't one piece (ReviewPadCustomDirectionFlipped). Never also as a point: a direction
+        // whose tip the motion fixes passed that way (ReviewPadCustomDirectionFlippedAtZ1)
         if (before.locus == 'V') {
             const Base::Vector3d turned = rotation.multVec(before.point);
-            Base::Vector3d moved;
-            motion.multVec(before.point, moved);
-            const double scale = std::max(1.0, before.point.Length());
-            if (Base::Distance(turned, after.point) > distance * scale
-                && Base::Distance(moved, after.point) > distance) {
+            const double length = turned.Length();
+            if (std::abs(length - after.point.Length()) > distance * std::max(1.0, length)
+                || (length > 0.0 && !parallel(turned, after.point, true))) {
                 return std::nullopt;
             }
             continue;
