@@ -74,22 +74,26 @@ public:
     /// The last recompute wrote the base as the output because the feature is suppressed
     /// (ops#549 PS): the shape's own state, which Suppressed alone isn't until the recompute
     App::PropertyBool _PassedThrough;
+    /// The last recompute failed and the failure rule wrote the base as the output (ops#549 PT):
+    /// the shape's own state, which the error alone isn't (it stays set while the next recompute
+    /// runs, and that recompute's own shape solves the references to it). Saved with the shape,
+    /// as the error is: an opened file judges by both.
+    App::PropertyBool _FailurePassedThrough;
 
     App::DocumentObjectExecReturn* recompute() override;
     bool passesBaseThrough() const override
     {
         return _PassedThrough.getValue();
     }
-    /// The output is the base, written by the failure rule after a recompute failed (ops#549
-    /// PT): the shape's state, which the error alone isn't. The error stays set while the next
-    /// recompute runs, and that recompute's own shape solves the references to it.
     bool failurePassedThrough() const
     {
-        return failedThrough;
+        return _FailurePassedThrough.getValue();
     }
     void setFailurePassedThrough(bool on)
     {
-        failedThrough = on;
+        if (_FailurePassedThrough.getValue() != on) {
+            _FailurePassedThrough.setValue(on);
+        }
     }
     App::DocumentObjectExecReturn* recomputePreview() override;
 
@@ -268,8 +272,6 @@ private:
     // Not read from the error text in mustExecute(): a recompute sets the texts aside while it
     // runs (ops#126)
     bool failedElsewhere = false;
-    // failurePassedThrough(): not saved, as the error isn't
-    bool failedThrough = false;
     // The Shape the last recompute vouched for (booleanInputsValid); a later Shape (undo, a reopen,
     // a pass-through) isn't the same TShape, and is checked again (ops#310)
     TopoDS_Shape vouchedShape;
