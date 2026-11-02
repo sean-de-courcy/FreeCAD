@@ -80,6 +80,17 @@ public:
     {
         return _PassedThrough.getValue();
     }
+    /// The output is the base, written by the failure rule after a recompute failed (ops#549
+    /// PT): the shape's state, which the error alone isn't. The error stays set while the next
+    /// recompute runs, and that recompute's own shape solves the references to it.
+    bool failurePassedThrough() const
+    {
+        return failedThrough;
+    }
+    void setFailurePassedThrough(bool on)
+    {
+        failedThrough = on;
+    }
     App::DocumentObjectExecReturn* recomputePreview() override;
 
     short mustExecute() const override;
@@ -257,6 +268,8 @@ private:
     // Not read from the error text in mustExecute(): a recompute sets the texts aside while it
     // runs (ops#126)
     bool failedElsewhere = false;
+    // failurePassedThrough(): not saved, as the error isn't
+    bool failedThrough = false;
     // The Shape the last recompute vouched for (booleanInputsValid); a later Shape (undo, a reopen,
     // a pass-through) isn't the same TShape, and is checked again (ops#310)
     TopoDS_Shape vouchedShape;

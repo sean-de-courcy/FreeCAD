@@ -239,17 +239,19 @@ App::DocumentObjectExecReturn* Feature::recompute()
         if (!_PassedThrough.getValue()) {
             _PassedThrough.setValue(true);
         }
+        failedThrough = false;
         Shape.setValue(getBaseTopoShape(true));
         updateSuppressedShape();
         return App::DocumentObject::StdReturn;
     }
 
     SuppressedShape.setValue(TopoShape());
-    // The output is the feature's own from here (or a failure's pass-through, which rule PT
-    // judges by the error)
+    // The output is the feature's own from here: a failure's pass-through, written after this
+    // recompute if it fails, sets its own state then (ops#549 PT)
     if (_PassedThrough.getValue()) {
         _PassedThrough.setValue(false);
     }
+    failedThrough = false;
 
     // Its Body is merged into another part, at an earlier feature (FreeCAD-CH ops#325, design
     // 2.6): it doesn't reach the Merge. Checked here, as every path that adds or moves a solid

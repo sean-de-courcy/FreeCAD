@@ -162,6 +162,9 @@ void passThroughBase(Feature& feature)
     // Inside the Recompute status, as an execute() writes it: the shape takes the feature's
     // placement and the Placement isn't overwritten (Part::Feature::onChanged)
     Base::ObjectStatusLocker<App::ObjectStatus, App::DocumentObject> exe(App::Recompute, &feature);
+    // Before the shape: setting it solves the references to it, which rule PT judges by this state
+    // (ops#549)
+    feature.setFailurePassedThrough(true);
     feature.Shape.setValue(pass);
 }
 
@@ -265,7 +268,11 @@ public:
                 const bool suppressed = feature->passesBaseThrough();
                 const bool claimed = bodyOf(feature) != nullptr;
                 if (claimed || suppressed) {
-                    out.push_back({feature, claimed && feature->isError(), suppressed});
+                    // Failed while its output is the failure's pass-through: the error alone
+                    // stays set while the recompute that fixes it writes its own shape
+                    out.push_back({feature,
+                                   claimed && feature->isError() && feature->failurePassedThrough(),
+                                   suppressed});
                 }
                 std::vector<App::Property*> props;
                 feature->getPropertyList(props);

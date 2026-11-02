@@ -42,7 +42,16 @@ rule: `notes\\naming-ops549.md`.
 import FreeCAD as App
 import Part
 
-from PartDesignTests.Scenarios.harness import BROKEN, Attached, Reopens, Scenario, edge, face, vertex
+from PartDesignTests.Scenarios.harness import (
+    BROKEN,
+    Attached,
+    Reopens,
+    Scenario,
+    edge,
+    face,
+    pieces,
+    vertex,
+)
 from PartDesignTests.Scenarios import models as m
 
 V = App.Vector
@@ -584,13 +593,20 @@ class SplitEdgeThenStops(FailedFeatureBase):
             "line", direction=X, through=(0, 0, self.height), contains=(1, 0, self.height)
         )
 
+    def frontExpected(self):
+        # Cut in two by the slot across the block (`split`, and `fix` once the Slot computes):
+        # both pieces. Whole before, and while the Slot fails
+        if self.stepName in ("split", "fix"):
+            return pieces(edge("line", direction=X, through=(0, 0, self.height)))
+        return self.frontEdge()
+
     def build(self, doc):
         self.buildBlock(doc)
         self.slotSketch = m.sketch(doc, "SlotSketch", m.rectangle(8, 3, 12, 7), self.body, z=10)
         self.slot = m.pocket(self.body, self.slotSketch, self.depth, "Slot")
         self.slot.Refine = False
         doc.recompute()
-        self.addConsumers(doc, self.slot, [("front_fillet", "fillet", self.frontEdge)])
+        self.addConsumers(doc, self.slot, [("front_fillet", "fillet", self.frontExpected)])
 
     def split(self, doc):
         moves = {(0, 1): (8, -1), (0, 2): (12, -1), (1, 1): (12, -1), (1, 2): (12, 11),
