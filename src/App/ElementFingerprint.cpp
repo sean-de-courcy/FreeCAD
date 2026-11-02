@@ -3,6 +3,7 @@
 #include "ElementFingerprint.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <iomanip>
 #include <locale>
@@ -275,8 +276,8 @@ bool parsePlacement(std::string_view text, Base::Placement& placement)
 }
 
 // Version 8's sources (decision 218): `_`, or entries separated by `/`, each `<key>:<placement>`
-// or `L<key>:` / `P<key>:` and a point and a unit direction; a key is an ID, `@<document>` after
-// it for another document's object
+// or `L<key>:` / `P<key>:` / `M<key>:` and a point and a unit direction, or `V<key>.<property>:`
+// and a vector; a key is an ID, `@<document>` after it for another document's object
 bool parseSources(std::string_view text, std::vector<ElementFingerprint::Source>& sources)
 {
     sources.clear();
@@ -290,18 +291,37 @@ bool parseSources(std::string_view text, std::vector<ElementFingerprint::Source>
         }
         ElementFingerprint::Source source;
         std::string_view key = part.substr(0, colon);
-        if (key.front() == 'L' || key.front() == 'P' || key.front() == 'M') {
+        if (key.front() == 'L' || key.front() == 'P' || key.front() == 'M' || key.front() == 'V') {
             source.locus = key.front();
             key.remove_prefix(1);
         }
-        const auto at = key.find('@');
-        const auto tag = parseWhole(key.substr(0, at));
-        if (!tag || *tag < 0 || (at != std::string_view::npos && !validOwner(key.substr(at + 1)))) {
+        std::string_view object = key;
+        if (source.locus == 'V') {
+            const auto dot = key.rfind('.');
+            if (dot == std::string_view::npos || dot + 1 == key.size()
+                || !std::all_of(key.begin() + dot + 1, key.end(), [](char c) {
+                       return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
+                   })) {
+                return false;
+            }
+            object = key.substr(0, dot);
+        }
+        const auto at = object.find('@');
+        const auto tag = parseWhole(object.substr(0, at));
+        if (!tag || *tag < 0
+            || (at != std::string_view::npos && !validOwner(object.substr(at + 1)))) {
             return false;
         }
         source.key = std::string(key);
         const auto value = part.substr(colon + 1);
-        if (source.locus) {
+        if (source.locus == 'V') {
+            std::vector<double> values;
+            if (!parseList(value, values) || values.size() != 3) {
+                return false;
+            }
+            source.point = Base::Vector3d(values[0], values[1], values[2]);
+        }
+        else if (source.locus) {
             std::vector<double> values;
             if (!parseList(value, values) || values.size() != 6) {
                 return false;
@@ -488,9 +508,14 @@ std::string ElementFingerprint::toString() const
                 }
                 text += source.key;
                 text += markDelimiter;
-                text += source.locus
-                    ? vector(source.point) + listDelimiter + vector(source.direction)
-                    : placementText(source.placement);
+                if (source.locus == 'V') {
+                    text += vector(source.point);
+                }
+                else {
+                    text += source.locus
+                        ? vector(source.point) + listDelimiter + vector(source.direction)
+                        : placementText(source.placement);
+                }
             }
             if (sources.empty()) {
                 text += emptyField;
@@ -832,6 +857,20 @@ std::optional<Base::Placement> ElementFingerprint::rigidMotion(
         const Source& after = now[i];
         if (!before.locus) {
             if (!same(motion * before.placement, after.placement)) {
+                return std::nullopt;
+            }
+            continue;
+        }
+        // A vector input goes with the part, as a direction (a pad's, a revolve's axis) or as a
+        // point (a revolve's base): a custom direction left in the body isn't one piece
+        // (RevPadCustomDirectionFlipped)
+        if (before.locus == 'V') {
+            const Base::Vector3d turned = rotation.multVec(before.point);
+            Base::Vector3d moved;
+            motion.multVec(before.point, moved);
+            const double scale = std::max(1.0, before.point.Length());
+            if (Base::Distance(turned, after.point) > distance * scale
+                && Base::Distance(moved, after.point) > distance) {
                 return std::nullopt;
             }
             continue;
