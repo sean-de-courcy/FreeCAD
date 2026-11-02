@@ -429,7 +429,8 @@ names it.
 | `infra/526-accept-220` | infra | ops#526 | - | `integration` `2f06170041` | `49082b8f4c` (fork PR 406), 2026-11-02 | never (fork tests) |
 | `fix/516-sketch-attach-twin` | fix | ops#516 | - | `integration` `2f06170041` | `26e73821ca` (fork PR 407), 2026-11-02 | never (fork naming) |
 | `fix/469-closed-spine-names` | fix | ops#469, ops#435, ops#479 | - | `integration` `a54ea8c2c7` (with fork PR 401, merged as d80cbc73f9) | `434a64bda7` (fork PR 383), 2026-11-02 | never (fork fix) |
-| `fix/526-vacated-place` | fix | ops#526 | - | `integration` `434a64bda7` | (fork PR 408) | never (fork fix) |
+| `fix/526-vacated-place` | fix | ops#526 | - | `integration` `434a64bda7` | `6fd04a6c64` (fork PR 408), 2026-11-02 | never (fork fix) |
+| `infra/564-accept-229` | corpus | ops#564 | - | `fix/526-vacated-place` `74d6586162` (fork PR 408) | (fork PR 409) | never (fork corpus) |
 
 ## Fork-only commits in carried topics
 

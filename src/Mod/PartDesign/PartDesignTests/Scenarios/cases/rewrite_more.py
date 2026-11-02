@@ -165,6 +165,9 @@ class JointSwapJCS(RewriteCase):
     holds the edge at (0, 0) on LinkB, and the record of the guess goes with the entry."""
 
     REFS = ("guessed_entry",)
+    # wrong as on integration once the refresh is gated (ops#564): the redraw's warning is dropped
+    # by the swap (class E, ops#504); D2's loud result came from its early refresh
+    ACCEPTED = {"guessed_entry|V2s": "decision 229"}
 
     def swapped(self):
         return self.stepName == "rewrite"
