@@ -1,0 +1,11 @@
+{
+"entries": {
+"TwinARedrawnNoSetter|chamfer|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "quiet", "found_by": "review pr564son-r3", "issue": "ops#564", "tier": "F"},
+"TwinARedrawnPadSingle|chamfer|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr564son-r3", "issue": "ops#564", "tier": "F"},
+"TwinARedrawnSketchSingle|chamfer|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr564son-r3", "issue": "ops#564", "tier": "F"},
+"TwinBothRedrawnNoSetter|chamfer|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "quiet", "found_by": "review pr564son-r3", "issue": "ops#564", "tier": "F"},
+"TwinBothRedrawnPadSingle|chamfer|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr564son-r3", "issue": "ops#564", "tier": "F"},
+"TwinBothRedrawnSketchSingle|chamfer|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr564son-r3", "issue": "ops#564", "tier": "F"},
+"TwinSwapSketchSingle|chamfer|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr564son-r3", "issue": "ops#564", "tier": "F"}
+}
+}

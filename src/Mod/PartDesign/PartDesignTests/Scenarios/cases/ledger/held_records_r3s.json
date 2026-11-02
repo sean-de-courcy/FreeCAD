@@ -1,0 +1,11 @@
+{
+"entries": {
+"BarSetThenDrawThenSlide|chamfer|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr564son-r3", "issue": "ops#564", "tier": "F"},
+"BarSlideAfterDraw|chamfer|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr564son-r3", "issue": "ops#564", "tier": "F"},
+"HolderBehindBarNoSetter|chamfer|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "quiet", "found_by": "review pr564son-r3", "issue": "ops#564", "tier": "F"},
+"HolderBehindBarSetBase|chamfer|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "quiet", "found_by": "review pr564son-r3", "issue": "ops#564", "tier": "F"},
+"HolderBehindBarThenSlide|chamfer|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr564son-r3", "issue": "ops#564", "tier": "F"},
+"RedrawSetBasePadSingle|chamfer|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr564son-r3", "issue": "ops#564", "tier": "F"},
+"SlideAfterPadSingle|chamfer|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr564son-r3", "issue": "ops#564", "tier": "F"}
+}
+}
