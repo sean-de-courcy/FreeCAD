@@ -536,9 +536,9 @@ protected:
         return holder;
     }
 
-    std::string frontBottomEdge() const
+    std::string frontBottomEdge(const Part::Feature* feature = nullptr) const
     {
-        const auto& shape = _body->Shape.getShape();
+        const auto& shape = (feature ? feature : _body)->Shape.getShape();
         for (unsigned long i = 1; i <= shape.countSubShapes(TopAbs_EDGE); ++i) {
             const auto name = "Edge" + std::to_string(i);
             const auto box = shape.getSubTopoShape(name.c_str()).getBoundBox();
@@ -700,6 +700,53 @@ TEST_F(RecordRefreshChain, aFeatureRecomputedAloneTakesTheHeldRecord)
     // pr564opus-r1 T2: a record held past it would date a sibling dragged onto the place as drawn
     // again)
     EXPECT_TRUE(sketchOf(p(4))->isTouched());
+    EXPECT_GT(markOf(record(link), sketchOf(p(4))), markOf(before, sketchOf(p(4))));
+}
+
+TEST_F(RecordRefreshChain, aFeatureRecomputedOutsideTheClosureKeepsTheRecordHeld)
+{
+    // Arrange: the redraw and the reference set again, held
+    auto link = holder();
+    const auto before = record(link);
+    auto spare = _doc->addObject<App::FeatureTest>("Spare");
+    redrawBoss(4);
+    link->LinkSub.setValue(_body, link->LinkSub.getSubValues());
+    ASSERT_EQ(record(link), before);
+
+    // Act: another object recomputed alone (a task dialog's preview of an unrelated feature)
+    _doc->recomputeFeature(spare, false);
+
+    // Assert: the Body isn't made yet, so the record is still held (review pr564opus-r2 R2-1)
+    EXPECT_EQ(record(link), before);
+    //   and the document's recompute takes it, the redraw included
+    _doc->recompute();
+    EXPECT_GT(markOf(record(link), sketchOf(p(4))), markOf(before, sketchOf(p(4))));
+}
+
+TEST_F(RecordRefreshChain, aTargetHeldByTheRollBackBarKeepsTheRecordHeld)
+{
+    // Arrange: a holder of P4's front bottom edge, the Body rolled back to P3
+    auto link = _doc->addObject<App::FeatureTest>("Holder");
+    link->LinkSub.setValue(p(4), {frontBottomEdge(p(4))});
+    _doc->recompute();
+    _body->rollTo(p(3));
+    _doc->recompute();
+    const auto before = record(link);
+    ASSERT_GE(markOf(before, sketchOf(p(4))), 0);
+
+    // Act: P4's boss redrawn, the reference set again, the document recomputed
+    redrawBoss(4);
+    link->LinkSub.setValue(p(4), link->LinkSub.getSubValues());
+    _doc->recompute();
+
+    // Assert: P4 is held by the bar, not made, so the record is still held (review pr564opus-r2
+    // R2-2)
+    EXPECT_TRUE(_body->holds(p(4)));
+    EXPECT_TRUE(p(4)->isTouched());
+    EXPECT_EQ(record(link), before);
+    //   and once the Tip comes forward, the recompute takes it, the redraw included
+    _body->rollToEnd();
+    _doc->recompute();
     EXPECT_GT(markOf(record(link), sketchOf(p(4))), markOf(before, sketchOf(p(4))));
 }
 
