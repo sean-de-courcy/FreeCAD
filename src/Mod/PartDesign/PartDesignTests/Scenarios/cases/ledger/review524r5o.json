@@ -1,0 +1,24 @@
+{
+"entries": {
+"RoofPlaced|P|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr403-r5", "issue": "ops#524", "tier": "F"},
+"RoofRedrawnAlongAxis|P|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr403-r5", "issue": "ops#524", "tier": "F"},
+"RoofRedrawnSmall|P|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr403-r5", "issue": "ops#524", "tier": "F"},
+"RoofRedrawn|P|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr403-r5", "issue": "ops#524", "tier": "F"},
+"TubeNurbsCentredPlacedAlongAxis|P|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr403-r5", "issue": "ops#524", "tier": "F"},
+"TubeNurbsCentredRedrawnAlongAxis|P|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr403-r5", "issue": "ops#524", "tier": "F"},
+"TubeNurbsSeamBelowPlaced|P|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr403-r5", "issue": "ops#524", "tier": "F"},
+"TubeNurbsSeamBelowRedrawn|P|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr403-r5", "issue": "ops#524", "tier": "F"},
+"TwinsPlacedOnly|datum_bottom|V2s": {"axes": ["M5", "E7"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr403-r5", "issue": "ops#524", "tier": "F"},
+"TwinsPlacedOnly|datum_top|V2s": {"axes": ["M5", "E7"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr403-r5", "issue": "ops#524", "tier": "F"},
+"TwinsPlacedOnly|sketch_bottom|V2s": {"axes": ["M5", "E7"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr403-r5", "issue": "ops#524", "tier": "F"},
+"TwinsPlacedOnly|sketch_top|V2s": {"axes": ["M5", "E7"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr403-r5", "issue": "ops#524", "tier": "F"},
+"TwinsTurned30Placed|datum_bottom|V2s": {"axes": ["M5", "E7"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr403-r5", "issue": "ops#524", "tier": "F"},
+"TwinsTurned30Placed|datum_top|V2s": {"axes": ["M5", "E7"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr403-r5", "issue": "ops#524", "tier": "F"},
+"TwinsTurned30Placed|sketch_bottom|V2s": {"axes": ["M5", "E7"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr403-r5", "issue": "ops#524", "tier": "F"},
+"TwinsTurned30Placed|sketch_top|V2s": {"axes": ["M5", "E7"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr403-r5", "issue": "ops#524", "tier": "F"},
+"TwinsTurned60Placed|datum_bottom|V2s": {"axes": ["M5", "E7"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr403-r5", "issue": "ops#524", "tier": "F"},
+"TwinsTurned60Placed|datum_top|V2s": {"axes": ["M5", "E7"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr403-r5", "issue": "ops#524", "tier": "F"},
+"TwinsTurned60Placed|sketch_bottom|V2s": {"axes": ["M5", "E7"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr403-r5", "issue": "ops#524", "tier": "F"},
+"TwinsTurned60Placed|sketch_top|V2s": {"axes": ["M5", "E7"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr403-r5", "issue": "ops#524", "tier": "F"}
+}
+}
