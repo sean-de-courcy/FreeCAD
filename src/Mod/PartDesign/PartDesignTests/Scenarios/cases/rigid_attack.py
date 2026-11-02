@@ -390,3 +390,71 @@ class ReviewDraftedBoxFlipped(Scenario):
         faces = [f for f in self.draft.Shape.Faces if abs(f.CenterOfMass.z - z) < 1e-6]
         assert len(faces) == 1, faces
         return faces[0].Area
+
+
+class ReviewPadCustomDirectionFlipped(Scenario):
+    """A rectangle x -10..10, y -5..5 on the Body's XY plane (FlatFace, AttachmentOffset), padded
+    10 high along a CUSTOM direction (0, 0, 1) fixed in the Body (UseCustomVector, not the sketch's
+    normal). The edit turns the AttachmentOffset 180 degrees about the X axis: the rectangle lands
+    on itself (its +y line at -y), the custom direction does not turn, so the pad is the same solid
+    (z 0..10): the model is unchanged globally and the part was not moved as one piece (the pad's
+    direction stayed). Convention 10.1: the references stay (the +y wall is still the +y wall)."""
+    area = "rigid-review"
+    CLASSES = ("D",)
+    AXES = ("E5",)
+    ISSUE = "ops#557"
+    FOUND_BY = "review pr557s-r2"
+    TIER = "F"
+    REFS = ("side_py", "side_my", "top", "bottom")
+    POINTS = {"side_py": (0, 5, 5), "side_my": (0, -5, 5), "top": (0, 0, 10), "bottom": (0, 0, 0)}
+
+    def expect(self, name):
+        return face(surface="plane", contains=V(*self.POINTS[name]))
+
+    def build(self, doc):
+        body = doc.addObject("PartDesign::Body", "Body")
+        self.base = doc.addObject("Sketcher::SketchObject", "Base")
+        body.addObject(self.base)
+        self.base.AttachmentSupport = [(originFeature(body, "XY_Plane"), "")]
+        self.base.MapMode = "FlatFace"
+        pts = [V(-10, -5, 0), V(10, -5, 0), V(10, 5, 0), V(-10, 5, 0), V(-10, -5, 0)]
+        for i in range(4):
+            self.base.addGeometry(Part.LineSegment(pts[i], pts[i + 1]), False)
+        pad = body.newObject("PartDesign::Pad", "Pad")
+        pad.Profile = self.base
+        pad.Length = 10
+        pad.UseCustomVector = True
+        pad.AlongSketchNormal = False
+        pad.Direction = V(0, 0, 1)
+        doc.recompute()
+        box = pad.Shape.BoundBox
+        assert abs(box.ZMin) < 1e-6 and abs(box.ZMax - 10) < 1e-6, box
+        self.pad = pad
+        for name in self.REFS:
+            element = self.names(pad, self.expect(name))[0]
+            owner = doc.addObject("Sketcher::SketchObject", name)
+            body.addObject(owner)
+            owner.AttachmentSupport = [(pad, element)]
+            owner.MapMode = "FlatFace"
+            doc.recompute()
+            self.ref(name, owner, "AttachmentSupport", (lambda n=name: self.expect(n)), Attached())
+
+    def edit(self, doc):
+        self.base.AttachmentOffset = App.Placement(V(), App.Rotation(X, 180))
+        doc.recompute()
+        box = self.pad.Shape.BoundBox
+        assert abs(box.ZMin) < 1e-6 and abs(box.ZMax - 10) < 1e-6, box
+
+
+class ReviewPadCustomDirectionFlippedPlacement(ReviewPadCustomDirectionFlipped):
+    """The same with the base sketch unattached and its own Placement turned 180 about the X axis
+    (the chain's frame turns: M_local = I)."""
+
+    def build(self, doc):
+        ReviewPadCustomDirectionFlipped.build(self, doc)
+
+    def edit(self, doc):
+        self.base.Placement = App.Placement(V(), App.Rotation(X, 180))
+        doc.recompute()
+        box = self.pad.Shape.BoundBox
+        assert abs(box.ZMin) < 1e-6 and abs(box.ZMax - 10) < 1e-6, box

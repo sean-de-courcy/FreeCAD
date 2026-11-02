@@ -139,9 +139,12 @@ namespace Data
  *   its own (a sketch, a datum, a primitive, a Part feature, an up-to shape's owner), its Placement
  *   in body coordinates; `L<key>:<x>,<y>,<z>,<dx>,<dy>,<dz>` and `P<key>:...` for an origin line or
  *   plane the chain names as geometry (a revolve's axis, a mirror plane, a sketch's external
- *   geometry), a point and its direction or normal. The key is the object's ID, with
- *   `@<document>` for another document's. The part moved as one piece when one motion takes every
- *   source to its place now and leaves every locus where it is.
+ *   geometry), a point and its direction or normal (`M<key>:...` a plane named only as a mirror
+ *   plane, whose normal has no sense); `V<key>.<property>:<x>,<y>,<z>` for a vector property of
+ *   the chain or the target (a pad's custom direction, a revolve's axis), its value. The key is
+ *   the object's ID, with `@<document>` for another document's. The part moved as one piece when
+ *   one motion takes every source to its place now, leaves every locus where it is, and carries
+ *   every vector with it, as a direction or as a point.
  *
  * Numbers have 12 significant digits, in the classic locale, so the text is the same on every
  * platform and in every locale. A reader takes a version it doesn't know as no fingerprint.
@@ -269,7 +272,8 @@ struct AppExport ElementFingerprint
     {
         /// The object's ID, with `@<document>` for an object of another document.
         std::string key;
-        /// 0 for a placement source; `L` for a line locus, `P` for a plane locus.
+        /// 0 for a placement source; `L` for a line locus, `P` for a plane locus, `M` for a mirror
+        /// plane's; `V` for a vector input (its key `<ID>.<property>`, its value in  point).
         char locus = 0;
         /// A placement source's Placement, in body coordinates.
         Base::Placement placement;
