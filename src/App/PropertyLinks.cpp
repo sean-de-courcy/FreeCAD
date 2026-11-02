@@ -99,6 +99,13 @@ static void registerAtNextAttach(PropertyLinkBase* prop, const char* sub)
 // resolveReregisteredReferences(). A destroyed property leaves the set.
 static std::unordered_set<PropertyLinkBase*> _ResolveAfterRestore;
 
+// The properties whose record a refresh held back while the reference's target was still to be
+// recomputed (ops#564): taken again at the end of their document's recompute
+// (updateHeldElementFingerprints()). A destroyed property leaves the set.
+static std::unordered_set<PropertyLinkBase*> _HeldFingerprints;
+// Set while updateHeldElementFingerprints() runs: the recompute is over
+static bool _RecomputeEnded = false;
+
 // The element a reference named before a link retarget made it index-only (ops#106): the sub,
 // the object it is a sub of (compared by address only), and the old element's fingerprint. The
 // sub's first resolution on the new target checks the element there against it
@@ -591,6 +598,7 @@ PropertyLinkBase::~PropertyLinkBase()
     _RestoredRetargetChecks.erase(this);
     _LostElementRefs.erase(this);
     _ResolveAfterRestore.erase(this);
+    _HeldFingerprints.erase(this);
     _PassedRefs.erase(this);
     for (auto destroyed : _DestroyedWatches) {
         destroyed->insert(this);
@@ -1035,11 +1043,15 @@ static bool keepWorld(const Data::ElementFingerprint& old, Data::ElementFingerpr
     return true;
 }
 
-std::string PropertyLinkBase::_getElementFingerprint(App::DocumentObject* feature,
-                                                     App::DocumentObject* obj,
-                                                     const std::string& sub,
-                                                     const ShadowSub& shadow)
+// _getElementFingerprint(), and the objects the marks are taken from in \a closureOut (if given):
+// the reference's object and the element's holder first (ops#564)
+static std::string elementFingerprint(App::DocumentObject* feature,
+                                      App::DocumentObject* obj,
+                                      const std::string& sub,
+                                      const PropertyLinkBase::ShadowSub& shadow,
+                                      std::vector<App::DocumentObject*>* closureOut)
 {
+    using ShadowSub = PropertyLinkBase::ShadowSub;
     // A broken reference keeps its fingerprint, even when the name it holds is found again: an
     // exact reference the solver broke (Task 2 PR 7) still holds its element's name.
     if (!obj || !obj->isAttachedToDocument() || Data::hasMissingElement(shadow.oldName.c_str())) {
@@ -1122,7 +1134,38 @@ std::string PropertyLinkBase::_getElementFingerprint(App::DocumentObject* featur
             return {};
         }
     }
+    if (closureOut) {
+        *closureOut = std::move(closure);
+    }
     return fingerprint.toString();
+}
+
+std::string PropertyLinkBase::_getElementFingerprint(App::DocumentObject* feature,
+                                                     App::DocumentObject* obj,
+                                                     const std::string& sub,
+                                                     const ShadowSub& shadow)
+{
+    return elementFingerprint(feature, obj, sub, shadow, nullptr);
+}
+
+// Whether the model a record would be taken from now is still to be recomputed (ops#564): an
+// object of the record's closure is touched (the one executing stays touched until it is done,
+// and the next one is touched only then, so a target downstream of it counts through it). Once
+// the recompute is over, only the reference's object or the element's holder still touched holds
+// it: what else is left touched (a Body's members held by its roll-back bar, behind a binder) didn't
+// make the target's shape, and a record kept past the recompute would date what was drawn since
+// as drawn again (review prd2dopus-r3 R3-1). Taken too early, it can only date the edit as there
+// before, and break.
+static bool recordPending(const std::vector<App::DocumentObject*>& closure)
+{
+    const auto count = _RecomputeEnded ? std::min<std::size_t>(closure.size(), 2) : closure.size();
+    for (std::size_t i = 0; i < count; ++i) {
+        auto object = closure[i];
+        if (object && object->isAttachedToDocument() && object->isTouched()) {
+            return true;
+        }
+    }
+    return false;
 }
 
 // Whether a reference with this record snaps back to its original when the original's name gives
@@ -1173,10 +1216,12 @@ bool PropertyLinkBase::_updateElementFingerprints(App::DocumentObject* feature,
             continue;
         }
         auto target = objs ? (i < objs->size() ? (*objs)[i] : nullptr) : obj;
-        auto text = _getElementFingerprint(feature,
-                                           target,
-                                           subs[i],
-                                           i < shadows.size() ? shadows[i] : ShadowSub());
+        std::vector<App::DocumentObject*> closure;
+        auto text = elementFingerprint(feature,
+                                       target,
+                                       subs[i],
+                                       i < shadows.size() ? shadows[i] : ShadowSub(),
+                                       &closure);
         // A reference that doesn't resolve keeps its last fingerprint, for the next retry.
         if (text.empty()) {
             continue;
@@ -1189,8 +1234,11 @@ bool PropertyLinkBase::_updateElementFingerprints(App::DocumentObject* feature,
         // The marks are taken again (ops#526 D2, design 9.8 Q3: the record refreshes at every
         // resolution): kept with the element, they would date everything drawn since its last
         // change as drawn again (review prd2dopus-r3 R3-1, a rim drawn after the chamfer and
-        // dragged onto the vacated place, quiet). A recompute between an edit and its solve
-        // (TestJointRecords' redraw) takes the redraw too, and the solve then breaks: loud.
+        // dragged onto the vacated place, quiet). But not while the model they would come from is
+        // still to be recomputed (ops#564): an upstream shape changed, a setter, an open, before
+        // the target is made again, the element is the old one and the marks would already hold
+        // the edit, so a sketch line redrawn in place would read as there before. The record is
+        // held, and taken again at the end of the recompute (updateHeldElementFingerprints()).
         const auto old = Data::ElementFingerprint::fromString(fingerprints[i]);
         // The record's world (ops#549 PS) changes only where the solver judged the reference
         // against its target (feature given: the batch's veto ran). A setter's refresh keeps
@@ -1206,6 +1254,13 @@ bool PropertyLinkBase::_updateElementFingerprints(App::DocumentObject* feature,
             auto now = Data::ElementFingerprint::fromString(text);
             now.upToFaces = old.upToFaces;
             if (now == old) {
+                continue;
+            }
+            now.marks = old.marks;
+            if (now == old && recordPending(closure)) {
+                _HeldFingerprints.insert(this);
+                FC_LOG("record held while its target is to be recomputed: " << propertyName(this)
+                                                                             << " " << subs[i]);
                 continue;
             }
         }
@@ -6332,6 +6387,32 @@ void App::queueReferencesIntoOtherDocuments(const Document* doc)
             if (owner && owner->getDocument() == doc) {
                 _ResolveAfterRestore.insert(prop);
             }
+        }
+    }
+}
+
+void App::updateHeldElementFingerprints(const Document* doc)
+{
+    std::vector<PropertyLinkBase*> held;
+    for (auto prop : _HeldFingerprints) {
+        auto owner = freecad_cast<DocumentObject*>(prop->getContainer());
+        if (owner && owner->isAttachedToDocument() && owner->getDocument() == doc) {
+            held.push_back(prop);
+        }
+    }
+    // One at a time: taking one can destroy a later one, which leaves the set. One whose target
+    // is still touched puts itself back.
+    Base::StateLocker ended(_RecomputeEnded);
+    for (auto prop : held) {
+        if (_HeldFingerprints.erase(prop) == 0) {
+            continue;
+        }
+        try {
+            prop->updateElementFingerprints();
+        }
+        catch (Base::Exception& e) {
+            e.reportException();
+            FC_ERR("Failed to update the records of " << propertyName(prop));
         }
     }
 }

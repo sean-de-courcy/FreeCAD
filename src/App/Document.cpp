@@ -4271,6 +4271,9 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
     }
     carried.clear();
 
+    // The records held back while their targets were still to be recomputed (ops#564)
+    updateHeldElementFingerprints(this);
+
     for (auto obj : topoSortedObjects) {
         if (!obj->isAttachedToDocument()) {
             continue;

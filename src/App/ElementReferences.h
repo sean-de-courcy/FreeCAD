@@ -31,4 +31,10 @@ void resolveReregisteredReferences();
  */
 void queueReferencesIntoOtherDocuments(const Document* doc);
 
+/** Takes again the records of \a doc's references that a refresh held back while their target
+ * was still to be recomputed (ops#564), those whose target isn't touched any more. Called at the
+ * end of Document::recompute(); defined in PropertyLinks.cpp.
+ */
+void updateHeldElementFingerprints(const Document* doc);
+
 }  // namespace App

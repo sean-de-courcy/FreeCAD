@@ -7,12 +7,14 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <sstream>
 #include "src/App/InitApplication.h"
 
 #include <App/Application.h>
 #include <App/Document.h>
+#include <App/ElementFingerprint.h>
 #include <App/ElementRecords.h>
 #include <App/ElementRetarget.h>
 #include <App/ElementSolverBatch.h>
@@ -26,6 +28,7 @@
 #include <Mod/PartDesign/App/Body.h>
 #include <Mod/PartDesign/App/FeatureLinearPattern.h>
 #include <Mod/PartDesign/App/FeaturePad.h>
+#include <Mod/PartDesign/App/ShapeBinder.h>
 #include <Mod/Sketcher/App/SketchObject.h>
 
 // NOLINTBEGIN(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
@@ -258,11 +261,18 @@ protected:
         App::GetApplication().closeDocument(_docName.c_str());
     }
 
-    PartDesign::Pad* pad(const char* name, double x, double y, double size, double z, double height)
+    PartDesign::Pad* pad(const char* name,
+                         double x,
+                         double y,
+                         double size,
+                         double z,
+                         double height,
+                         PartDesign::Body* body = nullptr)
     {
+        body = body ? body : _body;
         auto sketch =
             _doc->addObject<Sketcher::SketchObject>((std::string(name) + "Sketch").c_str());
-        _body->addObject(sketch);
+        body->addObject(sketch);
         sketch->Placement.setValue(Base::Placement(Base::Vector3d(0, 0, z), Base::Rotation()));
         const Base::Vector3d corners[] = {Base::Vector3d(x, y, 0),
                                           Base::Vector3d(x + size, y, 0),
@@ -274,7 +284,7 @@ protected:
             sketch->addGeometry(&line, false);
         }
         auto feature = _doc->addObject<PartDesign::Pad>(name);
-        _body->addObject(feature);
+        body->addObject(feature);
         feature->Profile.setValue(sketch, {""});
         feature->Length.setValue(height);
         return feature;
@@ -509,6 +519,148 @@ TEST_F(BodyReorderChain, aParkedGuessRecordKeepsItsOriginalFingerprint)
     auto old = records.guess;
     old.origFingerprint.clear();
     EXPECT_EQ(parkedGuess(), old);
+}
+
+// A reference's record while its target is still to be recomputed (ops#564): on the chain of
+// BodyReorderChain, a holder outside the Body on the Body's own edge, (Body, "EdgeN"), the form a
+// joint or an outside datum uses. The edge is P0's front bottom edge, which no boss touches.
+class RecordRefreshChain: public BodyReorderChain
+{
+protected:
+    /// The holder of (Body, the front bottom edge), its record taken by a recompute
+    App::FeatureTest* holder()
+    {
+        auto holder = _doc->addObject<App::FeatureTest>("Holder");
+        holder->LinkSub.setValue(_body, {frontBottomEdge()});
+        _doc->recompute();
+        return holder;
+    }
+
+    std::string frontBottomEdge() const
+    {
+        const auto& shape = _body->Shape.getShape();
+        for (unsigned long i = 1; i <= shape.countSubShapes(TopAbs_EDGE); ++i) {
+            const auto name = "Edge" + std::to_string(i);
+            const auto box = shape.getSubTopoShape(name.c_str()).getBoundBox();
+            if (std::abs(box.MinX) < 1e-6 && std::abs(box.MaxX - 20) < 1e-6
+                && std::abs(box.MaxY - box.MinY) < 1e-6 && std::abs(box.MinY) < 1e-6
+                && std::abs(box.MaxZ - box.MinZ) < 1e-6 && std::abs(box.MinZ) < 1e-6) {
+                return name;
+            }
+        }
+        return {};
+    }
+
+    static std::string record(App::FeatureTest* holder)
+    {
+        const auto& records = holder->LinkSub.getElementFingerprints();
+        return records.empty() ? std::string() : records[0];
+    }
+
+    /// The mark the record holds for \a obj; -2 if none
+    static long markOf(const std::string& record, const App::DocumentObject* obj)
+    {
+        for (const auto& mark : Data::ElementFingerprint::fromString(record).marks) {
+            if (mark.tag == obj->getID()) {
+                return mark.mark;
+            }
+        }
+        return -2;
+    }
+
+    /// Pi's square deleted and drawn again the other way round at the same place: new geometry
+    /// IDs, the sketch touched
+    void redrawBoss(int i)
+    {
+        auto sketch = static_cast<Sketcher::SketchObject*>(sketchOf(p(i)));
+        const double x = 4.0 * i - 2;
+        const double y = 2;
+        const double size = 2;
+        const Base::Vector3d corners[] = {Base::Vector3d(x, y + size, 0),
+                                          Base::Vector3d(x + size, y + size, 0),
+                                          Base::Vector3d(x + size, y, 0),
+                                          Base::Vector3d(x, y, 0)};
+        sketch->deleteAllGeometry();
+        for (int k = 0; k < 4; ++k) {
+            Part::GeomLineSegment line;
+            line.setPoints(corners[k], corners[(k + 1) % 4]);
+            sketch->addGeometry(&line, false);
+        }
+    }
+};
+
+TEST_F(RecordRefreshChain, aSetterBeforeTheRecomputeKeepsTheRecord)
+{
+    // Arrange
+    auto link = holder();
+    const auto before = record(link);
+    ASSERT_FALSE(before.empty());
+    const auto mark = markOf(before, sketchOf(p(4)));
+    ASSERT_GE(mark, 0);
+
+    // Act: the redraw, and the reference set again before the recompute (a dialog's OK)
+    redrawBoss(4);
+    link->LinkSub.setValue(_body, link->LinkSub.getSubValues());
+
+    // Assert: the Body isn't made again yet, so its record stays as the solve will need it
+    EXPECT_EQ(record(link), before);
+    //   and the recompute takes it again, the redraw included
+    _doc->recompute();
+    EXPECT_GT(markOf(record(link), sketchOf(p(4))), mark);
+}
+
+TEST_F(RecordRefreshChain, theTargetsRecomputeTakesTheRecordOnlyAtItsEnd)
+{
+    // Arrange
+    auto link = holder();
+    const auto before = record(link);
+    std::string afterTheBody;
+    fastsignals::scoped_connection connection =
+        _doc->signalRecomputedObject.connect([&](const App::DocumentObject& obj) {
+            if (&obj == _body) {
+                afterTheBody = record(link);
+            }
+        });
+
+    // Act
+    redrawBoss(4);
+    _doc->recompute();
+
+    // Assert: while the Body was made again (still touched) the record was held, and the end of
+    // the recompute took it
+    EXPECT_EQ(afterTheBody, before);
+    EXPECT_GT(markOf(record(link), sketchOf(p(4))), markOf(before, sketchOf(p(4))));
+}
+
+TEST_F(RecordRefreshChain, anObjectLeftTouchedDoesntHoldTheRecordPastTheRecompute)
+{
+    // Arrange: a second Body, rolled back after Q0, its Q1 changed and held by the bar (left
+    // touched), and a binder of it in the chain's Body: in the closure of every record into it
+    auto other = _doc->addObject<PartDesign::Body>("Other");
+    auto q0 = pad("Q0", 40, 0, 10, 0, 10, other);
+    auto q1 = pad("Q1", 42, 2, 2, 10, 2, other);
+    _doc->recompute();
+    other->rollTo(q0);
+    auto binder = _doc->addObject<PartDesign::ShapeBinder>("Binder");
+    _body->addObject(binder);
+    binder->Support.setValue(other);
+    _doc->recompute();
+    auto link = holder();
+    const auto before = record(link);
+    ASSERT_GE(markOf(before, q1), -1);
+    q1->Length.setValue(3.0);
+
+    // Act: P4's boss redrawn and the document recomputed
+    redrawBoss(4);
+    _doc->recompute();
+
+    // Assert: Q1 is still touched, but the chain's Body was made again: its record is taken
+    // again, the redraw in it (a record kept would date what is drawn since as drawn again,
+    // review prd2dopus-r3 R3-1)
+    EXPECT_TRUE(other->holds(q1));
+    EXPECT_TRUE(q1->isTouched());
+    EXPECT_FALSE(_body->isTouched());
+    EXPECT_GT(markOf(record(link), sketchOf(p(4))), markOf(before, sketchOf(p(4))));
 }
 
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
