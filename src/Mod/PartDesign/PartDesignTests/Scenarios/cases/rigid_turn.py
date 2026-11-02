@@ -242,3 +242,49 @@ class RigidBoxMixedTools(RigidBox):
         self.notch.Profile = self.square
         self.notch.Type = 1
         return self.notch
+
+
+class ReviewFixedHolesSwapped(RigidBox):
+    """The box turns 180 about its centre (the base sketch's Placement) while the holes' sketch is
+    fixed in the body (unattached, at z 10), and in the same recompute the two circles swap
+    places (circle 0 to x 15, circle 1 to x 5): globally the model is unchanged, each rim stays at
+    its circle's new place. The box's references stay too (the box lands on itself, references
+    stay by 10.1). Loud on this PR (decision 150): the holes' sketch is fixed in the body,
+    so the turn isn't one piece and the frame rule breaks hole 1 where hole 2 now sits."""
+    FOUND_BY = "review pr557s-r2"
+    AXES = ("E5",)
+    baseOn = "placement"
+    motion = App.Placement(V(20, 10, 0), App.Rotation(Z, 180))
+    follow = False
+    REFS = ("hole1_rim", "hole1_wall", "hole2_rim", "end_x0", "corner_000")
+    ELEMENTS = {
+        "hole1_rim": ("arc", (6.5, 5, 10)),
+        "hole1_wall": ("cylinder", (6.5, 5, 5)),
+        "hole2_rim": ("arc", (13.5, 5, 10)),
+        "end_x0": ("plane", (0, 5, 5)),
+        "corner_000": ("vertex", (0, 0, 0)),
+    }
+
+    def model(self, doc, body):
+        last = RigidBox.model(self, doc, body)
+        self.holes.AttachmentSupport = []
+        self.holes.MapMode = "Deactivated"
+        self.holes.Placement = App.Placement(V(0, 0, 10), App.Rotation())
+        return last
+
+    def where(self, pt, name=None):
+        # the circle moved: hole 1's rim is at circle 0's new place (centre 15), hole 2's at 5
+        if self.stepName and name == "hole1_rim":
+            return V(16.5, 5, 10)
+        if self.stepName and name == "hole1_wall":
+            return V(16.5, 5, 5)
+        if self.stepName and name == "hole2_rim":
+            return V(3.5, 5, 10)
+        return V(*pt)
+
+    def move(self, doc):
+        RigidBox.move(self, doc)
+        g = self.holes.Geometry
+        g[0].Center = V(15, 5, 0)
+        g[1].Center = V(5, 5, 0)
+        self.holes.Geometry = g

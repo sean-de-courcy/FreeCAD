@@ -184,6 +184,7 @@ void placementSources(const GeoFeature* geo, std::vector<Data::ElementFingerprin
     // as a mirror plane keeps no sense, the reflection is the same
     std::set<const DocumentObject*> upTo;
     std::map<const DocumentObject*, bool> named;
+    std::vector<Data::ElementFingerprint::Source> vectors;
     std::vector<const DocumentObject*> namers(chain.begin(), chain.end());
     namers.push_back(geo);
     for (const DocumentObject* object : namers) {
@@ -193,8 +194,19 @@ void placementSources(const GeoFeature* geo, std::vector<Data::ElementFingerprin
         std::vector<Property*> properties;
         object->getPropertyList(properties);
         for (Property* property : properties) {
-            auto link = dynamic_cast<PropertyLinkBase*>(property);
             const char* name = property->getName();
+            // A vector input (a pad's custom direction, kept in body coordinates): it must go with
+            // the part (decision 150: a second silent in the closure, RevPadCustomDirectionFlipped,
+            // takes every vector, not a list of names)
+            if (auto value = dynamic_cast<PropertyVector*>(property); value && name) {
+                Data::ElementFingerprint::Source source;
+                source.key = keyOf(object) + "." + name;
+                source.locus = 'V';
+                source.point = value->getValue();
+                vectors.push_back(std::move(source));
+                continue;
+            }
+            auto link = dynamic_cast<PropertyLinkBase*>(property);
             if (!link || !name || std::strcmp(name, "AttachmentSupport") == 0) {
                 continue;
             }
@@ -246,6 +258,7 @@ void placementSources(const GeoFeature* geo, std::vector<Data::ElementFingerprin
         source.direction.Normalize();
         sources.push_back(std::move(source));
     }
+    sources.insert(sources.end(), vectors.begin(), vectors.end());
     std::sort(sources.begin(), sources.end(), [](const auto& a, const auto& b) {
         return a.locus != b.locus ? a.locus < b.locus : a.key < b.key;
     });

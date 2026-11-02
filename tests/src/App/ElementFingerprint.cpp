@@ -1038,6 +1038,19 @@ TEST(ElementFingerprint, sourcesRoundTrip)
     ASSERT_EQ(mirrored.sources.size(), 1U);
     EXPECT_EQ(mirrored.sources.front().locus, 'M');
     EXPECT_EQ(ElementFingerprint::fromString(mirrored.toString()), mirrored);
+    //   a vector input reads back with its property; one without a property, with a name that
+    //   isn't one, or of two numbers doesn't
+    const auto vectors = ElementFingerprint::fromString(fields + "V5.Direction:0,0,1/V5@Other.Axis:1,0,0");
+    ASSERT_TRUE(vectors.isValid());
+    ASSERT_EQ(vectors.sources.size(), 2U);
+    EXPECT_EQ(vectors.sources.front().locus, 'V');
+    EXPECT_EQ(vectors.sources.front().key, "5.Direction");
+    EXPECT_EQ(vectors.sources.back().key, "5@Other.Axis");
+    EXPECT_TRUE(vectors.sources.front().point.IsEqual(Base::Vector3d(0, 0, 1), 1e-12));
+    EXPECT_EQ(ElementFingerprint::fromString(vectors.toString()), vectors);
+    EXPECT_FALSE(ElementFingerprint::fromString(fields + "V5:0,0,1").isValid());
+    EXPECT_FALSE(ElementFingerprint::fromString(fields + "V5.Dir-x:0,0,1").isValid());
+    EXPECT_FALSE(ElementFingerprint::fromString(fields + "V5.Direction:0,1").isValid());
     //   moved to another frame, the sources go with the frame
     EXPECT_TRUE(face.transformed(Base::Placement(), 1e-6).sources.empty());
 }
@@ -1130,4 +1143,39 @@ TEST(ElementFingerprint, rigidMotion)
     const auto mirrorFlipped =
         ElementFingerprint::rigidMotion(with(saved, mirror), with(flipped, mirror), tolerance, angle);
     EXPECT_TRUE(mirrorFlipped.has_value());
+
+    //   a vector input goes with the part: a pad's direction turned with its sketch (as a
+    //   direction), a revolve's base point moved (as a point) keep it rigid; a custom direction
+    //   left in the body under the flip doesn't (RevPadCustomDirectionFlipped)
+    auto vectorInput = [](const std::string& key, const Base::Vector3d& value) {
+        ElementFingerprint::Source source;
+        source.key = key;
+        source.locus = 'V';
+        source.point = value;
+        return source;
+    };
+    const Base::Vector3d up(0, 0, 1);
+    const auto padSaved = vectorInput("2.Direction", up);
+    EXPECT_TRUE(ElementFingerprint::rigidMotion(
+                    with(saved, padSaved),
+                    with(flipped, vectorInput("2.Direction", flip.getRotation().multVec(up))),
+                    tolerance,
+                    angle
+    )
+                    .has_value());
+    EXPECT_FALSE(ElementFingerprint::rigidMotion(with(saved, padSaved), with(flipped, padSaved), tolerance, angle)
+                     .has_value());
+    const Base::Vector3d basePoint(0, 3, 4);
+    Base::Vector3d basePointTurned;
+    turn.multVec(basePoint, basePointTurned);
+    EXPECT_TRUE(ElementFingerprint::rigidMotion(
+                    with(saved, vectorInput("2.Base", basePoint)),
+                    with(turned, vectorInput("2.Base", basePointTurned)),
+                    tolerance,
+                    angle
+    )
+                    .has_value());
+    //   a direction the turn maps onto itself stays rigid when it stays (z under the turn about z)
+    EXPECT_TRUE(ElementFingerprint::rigidMotion(with(saved, padSaved), with(turned, padSaved), tolerance, angle)
+                    .has_value());
 }
