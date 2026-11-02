@@ -1860,6 +1860,66 @@ class TestPipeCorners(unittest.TestCase):
                 self.assertValidSolid(pipe)
                 self.assertAlmostEqual(pipe.Shape.Volume, MULTISECTION_VOLUME * 3 / 4, 2)
 
+    def multisectionU(self, middle, turn=0, under=0):
+        """Up 30, then 20 along +X, then 30 down, each corner `under` radians under 90 degrees: a
+        section of half-width `middle` normal to the second leg at its middle, and a 6 x 6 one
+        normal to the last leg at its end, its sketch turned `turn` degrees about that leg"""
+
+        def frame(normal, degrees=0):
+            return App.Rotation(normal, degrees).multiply(App.Rotation(V(0, 0, 1), normal))
+
+        second = V(math.cos(under), 0, math.sin(under))
+        last = V(math.sin(2 * under), 0, -math.cos(2 * under))
+        corner = V(0, 0, 30) + second * 20
+        end = corner + last * 30
+        spine = models.feature(
+            self.doc, "Path", Part.makePolygon([V(0, 0, 0), V(0, 0, 30), corner, end])
+        )
+        h = middle
+        sections = [
+            models.sketch(
+                self.doc,
+                "Middle",
+                models.rectangle(-h, -h, h, h),
+                self.body,
+                placement=App.Placement(V(0, 0, 30) + second * 10, frame(second)),
+            ),
+            models.sketch(
+                self.doc,
+                "Section",
+                models.rectangle(-3, -3, 3, 3),
+                self.body,
+                placement=App.Placement(end, frame(last, turn)),
+            ),
+        ]
+        return self.pipe(
+            spine,
+            self.profile(),
+            Transformation="Multisection",
+            Sections=sections,
+            Transition="Transformed",
+        )
+
+    def testMultisectionTwoRightAnglesInOnePlaneTurnWithTheSpine(self):
+        """ops#396, review pr404-r1: a U with a middle section, both corners right angles. Each
+        section is turned towards the one before as that one was turned, so every pair keeps its
+        margin: turned against the middle section's plane before its own turn, a last section
+        larger than the middle one was past 90 degrees to it (the pipe failed), and one as large
+        tied again. The last section is the same square whichever way its sketch is turned, so
+        every turn gives the same solid, the limit of corners slightly under 90 degrees."""
+        for middle in (2.5, 3, 3.5):
+            with self.subTest(middle=middle, under=1e-4):
+                self.renew()
+                pipe = self.multisectionU(middle, under=1e-4)
+                self.assertValidSolid(pipe)
+                limit = pipe.Shape.Volume
+            for turn in (0, 90, 180, 270):
+                with self.subTest(middle=middle, turn=turn):
+                    self.renew()
+                    pipe = self.multisectionU(middle, turn)
+                    self.assertValidSolid(pipe)
+                    self.assertAlmostEqual(pipe.Shape.Volume, limit, delta=0.2)
+
     def testMultisectionPast90DegreesFails(self):
         """Just under 90 degrees (1e-4 degrees) the pipe nears the right angle's; just past it,
         the only pairing OCCT finds is the section turned against the spine, an inside-out solid:

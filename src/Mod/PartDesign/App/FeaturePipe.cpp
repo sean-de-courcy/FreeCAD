@@ -1245,10 +1245,11 @@ std::optional<gp_Dir> spineDirectionNear(const std::vector<TopoDS_Edge>& spine, 
 /// (squares, rectangles), give two pairings with exactly the same sum: the section turned with the
 /// spine (the corner's limit from below 90 degrees), or against it, an inside-out solid. Rounding
 /// chose, and Windows and macOS built different solids from one file. Such a section, facing the
-/// spine's way within 1e-8 mm of perpendicular to the one before (at its farthest point), is
-/// turned towards it until its farthest point is 1e-9 mm past perpendicular, the pairing then as
-/// at a corner slightly under 90 degrees on every system. Past that, the pairing against the
-/// spine is the only one OCCT finds, and the result gate stops the pipe. None for the others.
+/// spine's way within 1e-8 mm of perpendicular to the one before as that one was turned (at its
+/// farthest point), is turned towards it until its farthest point is 1e-9 mm past perpendicular,
+/// the pairing then as at a corner slightly under 90 degrees on every system. Past that, the
+/// pairing against the spine is the only one OCCT finds, and the result gate stops the pipe. None
+/// for the others.
 std::vector<std::optional<gp_Trsf>> sectionTiltsAlong(
     const std::vector<TopoDS_Shape>& sections,
     const TopoDS_Wire& spine
@@ -1268,8 +1269,7 @@ std::vector<std::optional<gp_Trsf>> sectionTiltsAlong(
             return std::nullopt;
         }
         const std::vector<gp_Pnt> points = pointsAlong(TopoDS::Wire(section));
-        const std::optional<gp_Dir> normal = planeNormal(points);
-        if (!normal) {
+        if (points.empty()) {
             return std::nullopt;
         }
         gp_XYZ centre(0, 0, 0);
@@ -1277,6 +1277,17 @@ std::vector<std::optional<gp_Trsf>> sectionTiltsAlong(
             centre += point.XYZ();
         }
         centre /= static_cast<double>(points.size());
+        // about the centre, so the normal's rounding doesn't grow with the section's distance
+        // from the origin, against the absolute reach and margin
+        std::vector<gp_Pnt> centred;
+        centred.reserve(points.size());
+        for (const gp_Pnt& point : points) {
+            centred.emplace_back(point.XYZ() - centre);
+        }
+        const std::optional<gp_Dir> normal = planeNormal(centred);
+        if (!normal) {
+            return std::nullopt;
+        }
         double radius = 0;
         for (const gp_Pnt& point : points) {
             radius = std::max(radius, point.Distance(gp_Pnt(centre)));
@@ -1291,7 +1302,7 @@ std::vector<std::optional<gp_Trsf>> sectionTiltsAlong(
     std::vector<std::optional<gp_Trsf>> tilts(sections.size());
     std::optional<Facing> previous;
     for (size_t i = 0; i < sections.size(); ++i) {
-        const std::optional<Facing> current = facingOf(sections[i]);
+        std::optional<Facing> current = facingOf(sections[i]);
         if (previous && current) {
             const double offset = current->normal.Dot(previous->normal) * current->radius;
             const double angle = (past - offset) / current->radius;
@@ -1301,6 +1312,9 @@ std::vector<std::optional<gp_Trsf>> sectionTiltsAlong(
                 gp_Trsf tilt;
                 tilt.SetRotation(gp_Ax1(current->centre, axis), angle);
                 tilts[i] = tilt;
+                // the next section is paired with this one as turned: against its plane before
+                // the turn, a next one as large or larger would be at or past perpendicular
+                current->normal.Transform(tilt);
             }
         }
         previous = current;
