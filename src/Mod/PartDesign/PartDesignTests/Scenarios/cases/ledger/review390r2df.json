@@ -1,0 +1,23 @@
+{
+"entries": {
+"R2dfCornerHole|front|V2s": {"axes": ["M4", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr390-r2df", "issue": "ops#468", "tier": "F"},
+"R2dfCornerHole|left|V2s": {"axes": ["M4", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr390-r2df", "issue": "ops#468", "tier": "F"},
+"R2dfFlipMovedFar|left|V2s": {"axes": ["M1", "E1", "E4", "X4:600"], "classes": ["A"], "expect": "CORRECT", "expected": "wrong", "found_by": "review pr390-r2df", "issue": "ops#468", "tier": "F"},
+"R2dfFlipMovedFar|right|V2s": {"axes": ["M1", "E1", "E4", "X4:600"], "classes": ["A"], "expect": "CORRECT", "expected": "wrong", "found_by": "review pr390-r2df", "issue": "ops#468", "tier": "F"},
+"R2dfFlipMovedNear|left|V2s": {"axes": ["M1", "E1", "E4", "X4:600"], "classes": ["A"], "expect": "CORRECT", "expected": "wrong", "found_by": "review pr390-r2df", "issue": "ops#468", "tier": "F"},
+"R2dfFlipMovedNear|right|V2s": {"axes": ["M1", "E1", "E4", "X4:600"], "classes": ["A"], "expect": "CORRECT", "expected": "wrong", "found_by": "review pr390-r2df", "issue": "ops#468", "tier": "F"},
+"R2dfLoneRightMoved|left|V2s": {"axes": ["M1", "E1", "E4", "X4:600"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr390-r2df", "issue": "ops#468", "tier": "F"},
+"R2dfLoneRightMoved|right|V2s": {"axes": ["M1", "E1", "E4", "X4:600"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr390-r2df", "issue": "ops#468", "tier": "F"},
+"R2dfMovedFar|left|V2s": {"axes": ["M1", "E1", "E4", "X4:600"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r2df", "issue": "ops#468", "tier": "F"},
+"R2dfMovedFar|right|V2s": {"axes": ["M1", "E1", "E4", "X4:600"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r2df", "issue": "ops#468", "tier": "F"},
+"R2dfSeamFlipMovedFilletLeft|left_point|V2s": {"axes": ["M4", "E1", "E4"], "classes": ["A"], "expect": "CORRECT", "expected": "wrong", "found_by": "review pr390-r2df", "issue": "ops#468", "tier": "F"},
+"R2dfSeamFlipMovedFilletLeft|line|V2s": {"axes": ["M4", "E1", "E4"], "classes": ["A"], "expect": "CORRECT", "expected": "wrong", "found_by": "review pr390-r2df", "issue": "ops#468", "tier": "F"},
+"R2dfSeamFlipMovedFilletLeft|right_point|V2s": {"axes": ["M4", "E1", "E4"], "classes": ["A"], "expect": "CORRECT", "expected": "wrong", "found_by": "review pr390-r2df", "issue": "ops#468", "tier": "F"},
+"R2dfSeamFlipMoved|left_point|V2s": {"axes": ["M4", "E1", "E4"], "classes": ["A"], "expect": "CORRECT", "expected": "wrong", "found_by": "review pr390-r2df", "issue": "ops#468", "tier": "F"},
+"R2dfSeamFlipMoved|line|V2s": {"axes": ["M4", "E1", "E4"], "classes": ["A"], "expect": "CORRECT", "expected": "wrong", "found_by": "review pr390-r2df", "issue": "ops#468", "tier": "F"},
+"R2dfSeamFlipMoved|right_point|V2s": {"axes": ["M4", "E1", "E4"], "classes": ["A"], "expect": "CORRECT", "expected": "wrong", "found_by": "review pr390-r2df", "issue": "ops#468", "tier": "F"},
+"R2dfSeamMoved|left_point|V2s": {"axes": ["M4", "E1", "E4"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r2df", "issue": "ops#468", "tier": "F"},
+"R2dfSeamMoved|line|V2s": {"axes": ["M4", "E1", "E4"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r2df", "issue": "ops#468", "tier": "F"},
+"R2dfSeamMoved|right_point|V2s": {"axes": ["M4", "E1", "E4"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r2df", "issue": "ops#468", "tier": "F"}
+}
+}
