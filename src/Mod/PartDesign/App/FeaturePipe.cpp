@@ -1295,12 +1295,14 @@ std::optional<double> positionAlong(const std::vector<TopoDS_Edge>& spine, const
 /// perpendicular, the pairing then as at a corner slightly under 90 degrees on every system, for
 /// each pair of a chain in the sections' order along the spine. Beyond the far side, the pairing
 /// against the spine is the only one OCCT finds, and the result gate stops the pipe. None for the
-/// others. Sections turned across corners of the spine about axes more than 1e-6 rad apart
-/// (right angles at corners not in one plane) set \a outOfPlane to the centre of the first turned
-/// about another: there OCCT changes its pairing by itself within about 1e-7 rad under 90 degrees,
-/// so no turn decides it (review pr404-r3: a valid solid 9 % short; with "Round corner" too,
-/// review pr404-r4s), and the pipe stops (decision 228). Along a smooth stretch, whose frame turns
-/// with it, the pairing has no such tie (review pr404-r4 L1).
+/// others. Sections turned about axes more than 1e-6 rad apart (right angles along a spine not in
+/// one plane) set \a outOfPlane to the centre of the first turned about another: there OCCT
+/// changes its pairing by itself within about 1e-7 rad under 90 degrees, so no turn decides it
+/// (review pr404-r3: a valid solid 9 % short; with "Round corner" too, review pr404-r4s), and the
+/// pipe stops (decision 228), whatever the transition and the spine's mode. So it does with no
+/// corner between the sections: along a smooth spine out of one plane OCCT gave a valid solid up
+/// to 2.8 % off in every mode, depending on the scale (review pr404-r5s, hexagons the last turned
+/// 30 degrees), and with a corner then an arc 0.3 % off ("Round corner", squares).
 std::vector<std::optional<gp_Trsf>> sectionTiltsAlong(
     const std::vector<TopoDS_Shape>& sections,
     const TopoDS_Wire& spine,
@@ -1384,22 +1386,9 @@ std::vector<std::optional<gp_Trsf>> sectionTiltsAlong(
         }
     }
     std::optional<Facing> previous;
-    // the spine's corners, at their positions along it: the vertex between edges k - 1 and k is
-    // at k, a corner where their directions differ
-    std::vector<double> corners;
-    for (size_t k = 1; k < edges.size(); ++k) {
-        if (tangentAlong(edges[k - 1], false).Angle(tangentAlong(edges[k], true)) > 1e-6) {
-            corners.push_back(static_cast<double>(k));
-        }
-    }
-    std::optional<gp_Dir> turnedAbout;  // the axis of the latest turn across a corner
-    double previousAt = 0;
+    std::optional<gp_Dir> turnedAbout;  // the axis of the latest turn
     for (const auto& [position, i] : order) {
         std::optional<Facing> current = facingOf(sections[i]);
-        const bool acrossCorner = std::ranges::any_of(corners, [&](double at) {
-            return at > previousAt && at < position;
-        });
-        previousAt = position;
         if (previous && current) {
             // whether the two are perpendicular is read from the sections as placed, so the band
             // doesn't move with the previous one's turn; how far to turn this one is measured
@@ -1417,13 +1406,11 @@ std::vector<std::optional<gp_Trsf>> sectionTiltsAlong(
                 // the turns themselves (1e-6 rad), so a section tilted out of the plane by
                 // rounding of its placement (5e-9 rad for a sketch turned about a leg nearly
                 // along -Z) still counts as in it
-                if (acrossCorner) {
-                    if (turnedAbout && !axis.IsParallel(*turnedAbout, 1e-6)) {
-                        outOfPlane = current->centre;
-                        return tilts;
-                    }
-                    turnedAbout = axis;
+                if (turnedAbout && !axis.IsParallel(*turnedAbout, 1e-6)) {
+                    outOfPlane = current->centre;
+                    return tilts;
                 }
+                turnedAbout = axis;
                 gp_Trsf tilt;
                 tilt.SetRotation(gp_Ax1(current->centre, axis), angle);
                 tilts[i] = tilt;
@@ -5757,8 +5744,8 @@ App::DocumentObjectExecReturn* Pipe::execute()
                     "Pipe: the section at {} lies at a right angle to the one before it, as other "
                     "sections do to theirs, about another axis. Sections at right angles along a "
                     "spine that isn't in one plane aren't supported: the solid would depend on "
-                    "rounding. Turn the spine's corners there away from 90 degrees, or keep its "
-                    "right-angled corners in one plane.",
+                    "rounding. Turn the sections there away from 90 degrees to each other, or keep "
+                    "the spine's right angles in one plane.",
                     inPlace(*outOfPlane)
                 ));
             }

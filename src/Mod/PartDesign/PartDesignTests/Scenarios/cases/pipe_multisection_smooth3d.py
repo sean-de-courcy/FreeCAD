@@ -33,10 +33,13 @@ normal to the spine there (+Y, +Z). Built with the middle section's sketch turne
 about Z off the spine's normal plane; the edit turns it back, normal to the spine: the three
 sections are then pairwise at right angles, the turns from one to the next about Z and then X.
 
-The spine has no corner, so no corner of 90 degrees and no tie: integration builds the solid, the
-same within 1e-8 relative as the pipe with the middle section 1e-4 rad off. The first build of
-round 4 stopped it with "Sections at right angles along a spine that isn't in one plane aren't
-supported"; the stop is for right angles at corners now (review pr404-r4 L1).
+With squares integration builds the solid, the same within 1e-8 relative as the pipe with the
+middle section 1e-4 rad off, but with hexagons (the last turned 30 degrees) OCCT gives a valid solid
+2.5 % to 2.8 % off at some scales and right at others, in every mode, on integration and the PR
+alike (review pr404-r5s): the spine has no corner, but rounding still decides the pairing. So the
+PR stops these too, with "Sections at right angles along a spine that isn't in one plane aren't
+supported" (decision 228, the round 6 build: the corner gate of round 5, review pr404-r4 L1, is
+withdrawn): right -> loud for the squares.
 
 References: a sketch on the far cap and datum points on its vertices, each expected at the last
 section's place; and `cap_solid`, as in `pipe_multisection_helix`: the far cap only if the pipe's

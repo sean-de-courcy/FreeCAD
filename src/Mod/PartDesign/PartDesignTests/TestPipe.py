@@ -2056,12 +2056,13 @@ class TestPipeCorners(unittest.TestCase):
                 self.assertValidSolid(pipe)
                 self.assertAlmostEqual(pipe.Shape.Volume, limit, delta=0.2)
 
-    def multisectionSmooth(self, tilt=0):
+    def multisectionSmooth(self, tilt=0, mode="Standard"):
         """ops#396, review pr404-r4 L1: a spine with no corner out of one plane: a quarter circle
         of radius 20 from +X to +Y about (0, 20, 0), 20 along +Y, and a quarter circle from +Y to
         +Z about (20, 40, 20); a square of half width 2 at the origin, one of 2.5 at the line's
         middle and one of 3 at the end, each normal to the spine (the middle one turned `tilt`
-        radians about X off it), so each section is at a right angle to the one before"""
+        radians about X off it), so each section is at a right angle to the one before; the
+        spine's `mode`"""
 
         def square(name, h, placement):
             return models.sketch(
@@ -2088,20 +2089,46 @@ class TestPipeCorners(unittest.TestCase):
             Transformation="Multisection",
             Sections=sections,
             Transition="Transformed",
+            Mode=mode,
         )
 
-    def testMultisectionRightAnglesAlongASmoothSpineBuild(self):
-        """ops#396, review pr404-r4 L1: along a smooth spine OCCT's frame turns with it and the
-        pairing has no tie, so sections at right angles to each other in different planes don't
-        stop the pipe (decision 228 is for right angles at corners): the solid of the middle
-        section slightly off normal, as on integration"""
-        pipe = self.multisectionSmooth(tilt=1e-4)
-        self.assertValidSolid(pipe)
-        limit = pipe.Shape.Volume
-        self.renew()
-        pipe = self.multisectionSmooth()
-        self.assertValidSolid(pipe)
-        self.assertAlmostEqual(pipe.Shape.Volume, limit, delta=0.2)
+    def testMultisectionRightAnglesAlongASmoothSpineFail(self):
+        """ops#396, review pr404-r5s: with no corner between them, sections at right angles to
+        each other in different planes leave OCCT's pairing to rounding too (hexagons, the last
+        turned 30 degrees, gave a valid solid 2.5 % to 2.8 % off at some scales and right at
+        others, in every mode), so the pipe stops as at corners (decision 228): along the smooth
+        spine in each mode, and along a corner then a quarter circle joined "Round corner"
+        (squares 0.3 % off). The middle section 1e-4 rad off normal still builds."""
+        for mode in ("Standard", "Frenet", "Fixed"):
+            with self.subTest(mode=mode):
+                self.renew()
+                pipe = self.multisectionSmooth(tilt=1e-4, mode=mode)
+                self.assertValidSolid(pipe)
+                self.renew()
+                pipe = self.multisectionSmooth(mode=mode)
+                self.assertFails(pipe, "right angle", "isn't in one plane aren't supported")
+        with self.subTest("corner then arc"):
+            self.renew()
+            r = 15 / math.sqrt(2)
+            corner = Part.makePolygon([V(0, 0, 0), V(0, 0, 30), V(20, 0, 30)])
+            arc = Part.Arc(V(20, 0, 30), V(20 + r, 15 - r, 30), V(35, 15, 30)).toShape()
+            spine = models.feature(self.doc, "Path", Part.Wire([*corner.Edges, arc]))
+
+            def square(name, h, placement):
+                return models.sketch(
+                    self.doc, name, models.rectangle(-h, -h, h, h), self.body, placement=placement
+                )
+
+            middle = App.Placement(V(10, 0, 30), App.Rotation(V(0, 0, 1), V(1, 0, 0)))
+            end = App.Placement(V(35, 15, 30), App.Rotation(V(0, 0, 1), V(0, 1, 0)))
+            pipe = self.pipe(
+                spine,
+                square("Start", 2, App.Placement()),
+                Transformation="Multisection",
+                Sections=[square("Middle", 3, middle), square("Section", 3, end)],
+                Transition="Round corner",
+            )
+            self.assertFails(pipe, "right angle", "isn't in one plane aren't supported")
 
     def testMultisectionPast90DegreesFails(self):
         """Just under 90 degrees (1e-4 degrees) the pipe nears the right angle's; just past it,
