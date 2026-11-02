@@ -1,0 +1,10 @@
+{
+"entries": {
+"RingFailedAttachThenFix|new_point|V2s": {"axes": [], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review props549-r1", "issue": "ops#549", "tier": "F"},
+"RingFailedLugLonger|corner_point|V2s": {"axes": [], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review props549-r1", "issue": "ops#549", "tier": "F"},
+"RingFailedReopenLugLonger|corner_point|V2s": {"axes": [], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review props549-r1", "issue": "ops#549", "tier": "F"},
+"RingSuppressedAttachThenFailsBack|new_point|V2s": {"axes": [], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review props549-r1", "issue": "ops#549", "tier": "F"},
+"SlabFailedCapTaller|slab_top_plane|V2s": {"axes": [], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review props549-r1", "issue": "ops#549", "tier": "F"},
+"SlabFailedReopenCapTaller|slab_top_plane|V2s": {"axes": [], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review props549-r1", "issue": "ops#549", "tier": "F"}
+}
+}
