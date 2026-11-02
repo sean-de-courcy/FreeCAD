@@ -76,6 +76,8 @@ class RightAngleSections(Scenario):
     TURN = 0  # the last section's sketch turned about its leg
     END = 3  # the last section's half width
     MIDDLE = None  # the middle section's half width (the U only)
+    EDITED = 90  # the corner's angle after the edit
+    LAST_FIRST = False  # the Sections list holds the last section first (the U only)
 
     def points(self, deg):
         """The spine's points in the XZ sketch (x, z), unscaled"""
@@ -119,6 +121,8 @@ class RightAngleSections(Scenario):
                 placement=self.endPlacement(self.deg),
             )
         )
+        if self.LAST_FIRST:
+            sections.reverse()
         pipe = body.newObject("PartDesign::AdditivePipe", "Pipe")
         pipe.Profile = profile
         pipe.Spine = (path, [])
@@ -173,7 +177,7 @@ class RightAngleSections(Scenario):
         return vertex(self.local(*CORNERS[i]))
 
     def edit(self, doc):
-        self.deg = 90
+        self.deg = self.EDITED
         pts = [self.s(*p) for p in self.points(self.deg)]
         m.setLines(doc.Path, {i: (a, b) for i, (a, b) in enumerate(zip(pts, pts[1:]))})
         doc.Section.Placement = self.endPlacement(self.deg)
@@ -257,3 +261,28 @@ class UMiddleSectionFiveTimesSmallerTurnedToRightAngles(U):
 
     FOUND_BY = "review pr404-r2"
     MIDDLE = 0.6
+
+
+class UMiddleSectionTwelveTimesSmallerTurnedNearlyToRightAngles(U):
+    """The U with a middle section of half width 0.25, the last 3 with its sketch turned 90
+    degrees, its last corner turned to 1e-9 rad under 90 degrees (as a sketch's solver leaves a
+    right angle). The middle section, turned towards the profile, brings the last one, placed
+    about 4e-9 mm past perpendicular to it, short of the margin against it as turned: round 3 left
+    it as placed (it read the band's near side as placed too) and the pipe failed. It is turned: the
+    solid turned with the spine."""
+
+    FOUND_BY = "review pr404-r3s"
+    MIDDLE = 0.25
+    TURN = 90
+    EDITED = 90 - math.degrees(1e-9)
+
+
+class USectionsListedLastFirstTurnedToRightAngles(U):
+    """The U with a middle section of half width 2.5, the Sections list holding the last section
+    first. OCCT sweeps the sections in their order along the spine; round 3 paired them as
+    listed, turned the wrong pairs and the pipe failed at 90 degrees. Each is turned against the
+    one before it along the spine: the solid of the U listed in order."""
+
+    FOUND_BY = "review pr404-r3s"
+    MIDDLE = 2.5
+    LAST_FIRST = True

@@ -1236,6 +1236,50 @@ std::optional<gp_Dir> spineDirectionNear(const std::vector<TopoDS_Edge>& spine, 
     return nearest->second;
 }
 
+/// Where \a spine (its edges in order) passes nearest \a point, as the edge's index plus the
+/// fraction of its parameter range covered the way the spine runs, so a corner is one place: none
+/// where two places along it are as near (the start and end of a closed spine)
+std::optional<double> positionAlong(const std::vector<TopoDS_Edge>& spine, const gp_Pnt& point)
+{
+    std::vector<std::pair<double, double>> candidates;  // distance, position
+    for (size_t i = 0; i < spine.size(); ++i) {
+        BRepAdaptor_Curve curve(spine[i]);
+        const bool reversed = spine[i].Orientation() == TopAbs_REVERSED;
+        const double first = curve.FirstParameter();
+        const double last = curve.LastParameter();
+        if (last - first < gp::Resolution()) {
+            continue;
+        }
+        auto add = [&](double at) {
+            const double fraction = (reversed ? last - at : at - first) / (last - first);
+            candidates.emplace_back(
+                curve.Value(at).Distance(point),
+                static_cast<double>(i) + fraction
+            );
+        };
+        add(first);
+        add(last);
+        Extrema_ExtPC extrema(point, curve);
+        for (int j = 1; extrema.IsDone() && j <= extrema.NbExt(); ++j) {
+            if (extrema.IsMin(j)) {
+                add(extrema.Point(j).Parameter());
+            }
+        }
+    }
+    if (candidates.empty()) {
+        return std::nullopt;
+    }
+    const auto nearest =
+        std::ranges::min_element(candidates, {}, [](const auto& c) { return c.first; });
+    for (const auto& [distance, position] : candidates) {
+        if (distance < nearest->first + Precision::Confusion()
+            && std::abs(position - nearest->second) > 1e-6) {
+            return std::nullopt;
+        }
+    }
+    return nearest->second;
+}
+
 /// ops#396: the turn of each section of a pipe with several (\a sections, the first the profile,
 /// as they are swept along \a spine) that decides how OCCT matches it with the one before, where
 /// rounding would. OCCT pairs each section's vertices with the previous section's by the least sum
@@ -1245,11 +1289,13 @@ std::optional<gp_Dir> spineDirectionNear(const std::vector<TopoDS_Edge>& spine, 
 /// (squares, rectangles), give two pairings with exactly the same sum: the section turned with the
 /// spine (the corner's limit from below 90 degrees), or against it, an inside-out solid. Rounding
 /// chose, and Windows and macOS built different solids from one file. Such a section, facing the
-/// spine's way within 1e-8 mm of perpendicular to the one before (at its farthest point, both as
-/// placed), is turned towards that one as it was turned until its farthest point is 1e-9 mm past
+/// spine's way, at most 1e-8 mm the far side of perpendicular to the one before (at its farthest
+/// point, both as placed) and less than 1e-9 mm past perpendicular towards that one as it was
+/// turned, is turned towards that one as turned until its farthest point is 1e-9 mm past
 /// perpendicular, the pairing then as at a corner slightly under 90 degrees on every system, for
-/// each pair of a chain. Past that, the pairing against the spine is the only one OCCT finds, and
-/// the result gate stops the pipe. None for the others.
+/// each pair of a chain in the sections' order along the spine. Beyond the far side, the pairing
+/// against the spine is the only one OCCT finds, and the result gate stops the pipe. None for the
+/// others.
 std::vector<std::optional<gp_Trsf>> sectionTiltsAlong(
     const std::vector<TopoDS_Shape>& sections,
     const TopoDS_Wire& spine
@@ -1302,18 +1348,49 @@ std::vector<std::optional<gp_Trsf>> sectionTiltsAlong(
         return Facing {facing, facing, gp_Pnt(centre), radius};
     };
     std::vector<std::optional<gp_Trsf>> tilts(sections.size());
-    std::optional<Facing> previous;
+    // OCCT sweeps the sections in their order along the spine, whatever their order in the list,
+    // and pairs each with the one before it there; where that order can't be told (a section
+    // that isn't a wire, one as near two places of the spine, two at one place) none is turned
+    std::vector<std::pair<double, size_t>> order;  // position along the spine, index
     for (size_t i = 0; i < sections.size(); ++i) {
+        if (sections[i].IsNull() || sections[i].ShapeType() != TopAbs_WIRE) {
+            return tilts;
+        }
+        const std::vector<gp_Pnt> points = pointsAlong(TopoDS::Wire(sections[i]));
+        if (points.empty()) {
+            return tilts;
+        }
+        gp_XYZ centre(0, 0, 0);
+        for (const gp_Pnt& point : points) {
+            centre += point.XYZ();
+        }
+        const std::optional<double> position =
+            positionAlong(edges, gp_Pnt(centre / static_cast<double>(points.size())));
+        if (!position) {
+            return tilts;
+        }
+        order.emplace_back(*position, i);
+    }
+    std::ranges::sort(order);
+    for (size_t k = 1; k < order.size(); ++k) {
+        if (order[k].first - order[k - 1].first < 1e-6) {
+            return tilts;
+        }
+    }
+    std::optional<Facing> previous;
+    for (const auto& [position, i] : order) {
         std::optional<Facing> current = facingOf(sections[i]);
         if (previous && current) {
             // whether the two are perpendicular is read from the sections as placed, so the band
             // doesn't move with the previous one's turn; how far to turn this one is measured
             // against the previous one as turned: against its plane before the turn, a section as
-            // large or larger would be at or past perpendicular
+            // large or larger would be on its far side, and one placed less than the margin past
+            // perpendicular can be short of it against the previous one as turned (review
+            // pr404-r3s T1)
             const double placedOffset = current->placed.Dot(previous->placed) * current->radius;
             const double offset = current->placed.Dot(previous->normal) * current->radius;
             const double angle = (past - offset) / current->radius;
-            if (placedOffset > -reach && placedOffset < past && offset < past && angle < 1e-6) {
+            if (placedOffset > -reach && offset < past && angle < 1e-6) {
                 // turning the normal about (normal x previous) turns it towards the previous
                 const gp_Dir axis = current->placed.Crossed(previous->normal);
                 gp_Trsf tilt;
