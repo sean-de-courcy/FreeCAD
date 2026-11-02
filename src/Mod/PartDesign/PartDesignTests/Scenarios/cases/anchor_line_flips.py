@@ -431,6 +431,9 @@ class BlockPocketFillet(Block):
     abstract = False
     PLACES = ((0, 0, 8), (11, 10, 8), (36, 24, 0), (6, 6, 5))
     REFS = refNames(4)
+    # the datums on the fillet's faces: the fillet stops under decision 219 ("Ambiguous edge
+    # reference") and the document shows its error, so its dependants are accepted with it
+    ACCEPTED = {f"{r}|V2s": "decision 220" for r in ("p0_f1", "p2_f1")}
 
     def features(self, doc, body):
         self.block(doc, body, [(0, 0), (36, 0), (36, 24), (0, 24)], 8)
@@ -461,6 +464,8 @@ class BlockTwoHolesBossFillet(Block):
     abstract = False
     PLACES = ((10, 13, 6), (30, 13, 6), (20, 13, 11), (40, 26, 3))
     REFS = refNames(4)
+    # as in BlockPocketFillet: datums on faces of a fillet that stops under decision 219
+    ACCEPTED = {f"{r}|V2s": "decision 220" for r in ("p0_f1", "p1_f0", "p3_f1")}
 
     def features(self, doc, body):
         self.block(doc, body, [(0, 0), (40, 0), (40, 26), (0, 26)], 6)
