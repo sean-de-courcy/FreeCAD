@@ -1,0 +1,25 @@
+{
+"entries": {
+"TwoEdgeSplineMirroredProfileReparameterised180|a_corner|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6k", "issue": "ops#469", "tier": "F"},
+"TwoEdgeSplineMirroredProfileReparameterised180|a_edge|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6k", "issue": "ops#469", "tier": "F"},
+"TwoEdgeSplineMirroredProfileReparameterised180|b_corner|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6k", "issue": "ops#469", "tier": "F"},
+"TwoEdgeSplineMirroredProfileReparameterised180|b_edge|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6k", "issue": "ops#469", "tier": "F"},
+"TwoEdgeSplineMirroredProfileReparameterised180|line_front|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6k", "issue": "ops#469", "tier": "F"},
+"TwoEdgeSplineMirroredProfileReparameterised180|line_outer|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6k", "issue": "ops#469", "tier": "F"},
+"TwoEdgeSplineMirroredProfileReparameterised180|spline_front|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6k", "issue": "ops#469", "tier": "F"},
+"TwoEdgeSplineMirrored|a_corner|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr383-r6k", "issue": "ops#469", "tier": "F"},
+"TwoEdgeSplineMirrored|a_edge|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr383-r6k", "issue": "ops#469", "tier": "F"},
+"TwoEdgeSplineMirrored|b_corner|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr383-r6k", "issue": "ops#469", "tier": "F"},
+"TwoEdgeSplineMirrored|b_edge|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr383-r6k", "issue": "ops#469", "tier": "F"},
+"TwoEdgeSplineMirrored|line_front|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr383-r6k", "issue": "ops#469", "tier": "F"},
+"TwoEdgeSplineMirrored|line_outer|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr383-r6k", "issue": "ops#469", "tier": "F"},
+"TwoEdgeSplineMirrored|spline_front|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr383-r6k", "issue": "ops#469", "tier": "F"},
+"TwoEdgeTurned180AboutMiddle|a_corner|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6k", "issue": "ops#469", "tier": "F"},
+"TwoEdgeTurned180AboutMiddle|a_edge|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6k", "issue": "ops#469", "tier": "F"},
+"TwoEdgeTurned180AboutMiddle|b_corner|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6k", "issue": "ops#469", "tier": "F"},
+"TwoEdgeTurned180AboutMiddle|b_edge|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6k", "issue": "ops#469", "tier": "F"},
+"TwoEdgeTurned180AboutMiddle|line_front|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6k", "issue": "ops#469", "tier": "F"},
+"TwoEdgeTurned180AboutMiddle|line_outer|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6k", "issue": "ops#469", "tier": "F"},
+"TwoEdgeTurned180AboutMiddle|spline_front|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6k", "issue": "ops#469", "tier": "F"}
+}
+}

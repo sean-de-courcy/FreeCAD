@@ -1,0 +1,24 @@
+{
+"entries": {
+"LensArcsTradedWidenedProfileReplaced180Far|left_back|V2s": {"axes": ["M3", "E2", "E7"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6hs", "issue": "ops#469", "tier": "F"},
+"LensArcsTradedWidenedProfileReplaced180Far|left_front|V2s": {"axes": ["M3", "E2", "E7"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6hs", "issue": "ops#469", "tier": "F"},
+"LensArcsTradedWidenedProfileReplaced180Far|right_back|V2s": {"axes": ["M3", "E2", "E7"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6hs", "issue": "ops#469", "tier": "F"},
+"LensArcsTradedWidenedProfileReplaced180Far|right_front|V2s": {"axes": ["M3", "E2", "E7"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6hs", "issue": "ops#469", "tier": "F"},
+"LensArcsTradedWidenedProfileReplaced180|left_back|V2s": {"axes": ["M3", "E2", "E7"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6hs", "issue": "ops#469", "tier": "F"},
+"LensArcsTradedWidenedProfileReplaced180|left_front|V2s": {"axes": ["M3", "E2", "E7"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6hs", "issue": "ops#469", "tier": "F"},
+"LensArcsTradedWidenedProfileReplaced180|right_back|V2s": {"axes": ["M3", "E2", "E7"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6hs", "issue": "ops#469", "tier": "F"},
+"LensArcsTradedWidenedProfileReplaced180|right_front|V2s": {"axes": ["M3", "E2", "E7"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6hs", "issue": "ops#469", "tier": "F"},
+"LensArcsTradedWidenedProfileReplaced90|left_back|V2s": {"axes": ["M3", "E2", "E7"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6hs", "issue": "ops#469", "tier": "F"},
+"LensArcsTradedWidenedProfileReplaced90|left_front|V2s": {"axes": ["M3", "E2", "E7"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6hs", "issue": "ops#469", "tier": "F"},
+"LensArcsTradedWidenedProfileReplaced90|right_back|V2s": {"axes": ["M3", "E2", "E7"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6hs", "issue": "ops#469", "tier": "F"},
+"LensArcsTradedWidenedProfileReplaced90|right_front|V2s": {"axes": ["M3", "E2", "E7"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6hs", "issue": "ops#469", "tier": "F"},
+"LensArcsTradedWidened|left_back|V2s": {"axes": ["M3", "E2", "E7"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6hs", "issue": "ops#469", "tier": "F"},
+"LensArcsTradedWidened|left_front|V2s": {"axes": ["M3", "E2", "E7"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6hs", "issue": "ops#469", "tier": "F"},
+"LensArcsTradedWidened|right_back|V2s": {"axes": ["M3", "E2", "E7"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6hs", "issue": "ops#469", "tier": "F"},
+"LensArcsTradedWidened|right_front|V2s": {"axes": ["M3", "E2", "E7"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6hs", "issue": "ops#469", "tier": "F"},
+"LensWidenedProfileReplaced|left_back|V2s": {"axes": ["M3", "E2", "E7"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6hs", "issue": "ops#469", "tier": "F"},
+"LensWidenedProfileReplaced|left_front|V2s": {"axes": ["M3", "E2", "E7"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6hs", "issue": "ops#469", "tier": "F"},
+"LensWidenedProfileReplaced|right_back|V2s": {"axes": ["M3", "E2", "E7"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6hs", "issue": "ops#469", "tier": "F"},
+"LensWidenedProfileReplaced|right_front|V2s": {"axes": ["M3", "E2", "E7"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6hs", "issue": "ops#469", "tier": "F"}
+}
+}

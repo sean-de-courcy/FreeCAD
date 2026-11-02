@@ -194,6 +194,9 @@ set(PartDesign_NamingGolden
     PartDesignTests/NamingGolden/PatternSteps.V1.txt
     PartDesignTests/NamingGolden/PatternSteps.V2.txt
     PartDesignTests/NamingGolden/PatternSteps.V2i-ids.txt
+    PartDesignTests/NamingGolden/PipeClosedAndUnion.V1.txt
+    PartDesignTests/NamingGolden/PipeClosedAndUnion.V2.txt
+    PartDesignTests/NamingGolden/PipeClosedAndUnion.V2i-ids.txt
     PartDesignTests/NamingGolden/PipeShell.V1.txt
     PartDesignTests/NamingGolden/PipeShell.V2.txt
     PartDesignTests/NamingGolden/PipeShell.V2i-ids.txt

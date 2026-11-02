@@ -1,0 +1,16 @@
+{
+"entries": {
+"TopAndBottomRedrawnFarProfileReparameterised180|datum_left_outer|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6i", "issue": "ops#469", "tier": "F"},
+"TopAndBottomRedrawnFarProfileReparameterised180|datum_right_outer|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6i", "issue": "ops#469", "tier": "F"},
+"TopAndBottomRedrawnFarProfileReparameterised180|datum_top_outer|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6i", "issue": "ops#469", "tier": "F"},
+"TopAndBottomRedrawnFarProfileReparameterised180|point_bottom_left|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6i", "issue": "ops#469", "tier": "F"},
+"TopAndBottomRedrawnFarProfileReparameterised90|datum_left_outer|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6i", "issue": "ops#469", "tier": "F"},
+"TopAndBottomRedrawnFarProfileReparameterised90|datum_right_outer|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6i", "issue": "ops#469", "tier": "F"},
+"TopAndBottomRedrawnFarProfileReparameterised90|datum_top_outer|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6i", "issue": "ops#469", "tier": "F"},
+"TopAndBottomRedrawnFarProfileReparameterised90|point_bottom_left|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6i", "issue": "ops#469", "tier": "F"},
+"TopRedrawnFarProfileReparameterised180|datum_left_outer|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6i", "issue": "ops#469", "tier": "F"},
+"TopRedrawnFarProfileReparameterised180|datum_right_outer|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6i", "issue": "ops#469", "tier": "F"},
+"TopRedrawnFarProfileReparameterised180|datum_top_outer|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6i", "issue": "ops#469", "tier": "F"},
+"TopRedrawnFarProfileReparameterised180|point_bottom_left|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6i", "issue": "ops#469", "tier": "F"}
+}
+}

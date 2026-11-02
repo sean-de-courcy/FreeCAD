@@ -1,0 +1,13 @@
+{
+"entries": {
+"ScaleneMirroredIdsFollowProfileReparameterised180|left_front|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6j", "issue": "ops#469", "tier": "F"},
+"ScaleneMirroredIdsFollowProfileReparameterised180|right_front|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6j", "issue": "ops#469", "tier": "F"},
+"ScaleneMirroredIdsFollowProfileReparameterised180|top_front|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6j", "issue": "ops#469", "tier": "F"},
+"ScaleneMirroredSidesKeptProfileReparameterised180|left_front|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6j", "issue": "ops#469", "tier": "F"},
+"ScaleneMirroredSidesKeptProfileReparameterised180|right_front|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6j", "issue": "ops#469", "tier": "F"},
+"ScaleneMirroredSidesKeptProfileReparameterised180|top_front|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6j", "issue": "ops#469", "tier": "F"},
+"ScaleneMirroredSidesKept|left_front|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr383-r6j", "issue": "ops#469", "tier": "F"},
+"ScaleneMirroredSidesKept|right_front|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6j", "issue": "ops#469", "tier": "F"},
+"ScaleneMirroredSidesKept|top_front|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr383-r6j", "issue": "ops#469", "tier": "F"}
+}
+}

@@ -1,0 +1,10 @@
+{
+"entries": {
+"ScaleneMirroredAllRedrawnProfileReparameterised180|left_front|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6k", "issue": "ops#469", "tier": "F"},
+"ScaleneMirroredAllRedrawnProfileReparameterised180|right_front|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6k", "issue": "ops#469", "tier": "F"},
+"ScaleneMirroredAllRedrawnProfileReparameterised180|top_front|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6k", "issue": "ops#469", "tier": "F"},
+"ScaleneMirroredAllRedrawn|left_front|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6k", "issue": "ops#469", "tier": "F"},
+"ScaleneMirroredAllRedrawn|right_front|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6k", "issue": "ops#469", "tier": "F"},
+"ScaleneMirroredAllRedrawn|top_front|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6k", "issue": "ops#469", "tier": "F"}
+}
+}

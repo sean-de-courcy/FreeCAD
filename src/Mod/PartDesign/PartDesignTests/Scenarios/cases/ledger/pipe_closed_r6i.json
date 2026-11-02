@@ -1,0 +1,19 @@
+{
+"entries": {
+"TriangleGrownProfileReparameterised180|left_front|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6i", "issue": "ops#469", "tier": "F"},
+"TriangleGrownProfileReparameterised180|right_front|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6i", "issue": "ops#469", "tier": "F"},
+"TriangleGrownProfileReparameterised180|top_front|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6i", "issue": "ops#469", "tier": "F"},
+"TriangleMirroredGrownProfileFlipped|left_front|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6i", "issue": "ops#469", "tier": "F"},
+"TriangleMirroredGrownProfileFlipped|right_front|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6i", "issue": "ops#469", "tier": "F"},
+"TriangleMirroredGrownProfileFlipped|top_front|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6i", "issue": "ops#469", "tier": "F"},
+"TriangleMirroredGrownProfileReparameterised180|left_front|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6i", "issue": "ops#469", "tier": "F"},
+"TriangleMirroredGrownProfileReparameterised180|right_front|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6i", "issue": "ops#469", "tier": "F"},
+"TriangleMirroredGrownProfileReparameterised180|top_front|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6i", "issue": "ops#469", "tier": "F"},
+"TriangleMirroredGrownProfileReparameterised90|left_front|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6i", "issue": "ops#469", "tier": "F"},
+"TriangleMirroredGrownProfileReparameterised90|right_front|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6i", "issue": "ops#469", "tier": "F"},
+"TriangleMirroredGrownProfileReparameterised90|top_front|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6i", "issue": "ops#469", "tier": "F"},
+"TriangleMirroredGrown|left_front|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6i", "issue": "ops#469", "tier": "F"},
+"TriangleMirroredGrown|right_front|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6i", "issue": "ops#469", "tier": "F"},
+"TriangleMirroredGrown|top_front|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr383-r6i", "issue": "ops#469", "tier": "F"}
+}
+}
