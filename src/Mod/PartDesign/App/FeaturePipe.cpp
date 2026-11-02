@@ -1295,10 +1295,12 @@ std::optional<double> positionAlong(const std::vector<TopoDS_Edge>& spine, const
 /// perpendicular, the pairing then as at a corner slightly under 90 degrees on every system, for
 /// each pair of a chain in the sections' order along the spine. Beyond the far side, the pairing
 /// against the spine is the only one OCCT finds, and the result gate stops the pipe. None for the
-/// others. Sections turned about axes more than 1e-6 rad apart (right angles along a spine not in
-/// one plane) set  outOfPlane to the centre of the first turned about another: there OCCT
-/// changes its pairing by itself within about 1e-7 rad under 90 degrees, so no turn decides it
-/// (review pr404-r3: a valid solid 9 % short), and the pipe stops (decision 228).
+/// others. Sections turned across corners of the spine about axes more than 1e-6 rad apart
+/// (right angles at corners not in one plane) set \a outOfPlane to the centre of the first turned
+/// about another: there OCCT changes its pairing by itself within about 1e-7 rad under 90 degrees,
+/// so no turn decides it (review pr404-r3: a valid solid 9 % short; with "Round corner" too,
+/// review pr404-r4s), and the pipe stops (decision 228). Along a smooth stretch, whose frame turns
+/// with it, the pairing has no such tie (review pr404-r4 L1).
 std::vector<std::optional<gp_Trsf>> sectionTiltsAlong(
     const std::vector<TopoDS_Shape>& sections,
     const TopoDS_Wire& spine,
@@ -1382,9 +1384,22 @@ std::vector<std::optional<gp_Trsf>> sectionTiltsAlong(
         }
     }
     std::optional<Facing> previous;
-    std::optional<gp_Dir> turnedAbout;  // the axis of the latest turn
+    // the spine's corners, at their positions along it: the vertex between edges k - 1 and k is
+    // at k, a corner where their directions differ
+    std::vector<double> corners;
+    for (size_t k = 1; k < edges.size(); ++k) {
+        if (tangentAlong(edges[k - 1], false).Angle(tangentAlong(edges[k], true)) > 1e-6) {
+            corners.push_back(static_cast<double>(k));
+        }
+    }
+    std::optional<gp_Dir> turnedAbout;  // the axis of the latest turn across a corner
+    double previousAt = 0;
     for (const auto& [position, i] : order) {
         std::optional<Facing> current = facingOf(sections[i]);
+        const bool acrossCorner = std::ranges::any_of(corners, [&](double at) {
+            return at > previousAt && at < position;
+        });
+        previousAt = position;
         if (previous && current) {
             // whether the two are perpendicular is read from the sections as placed, so the band
             // doesn't move with the previous one's turn; how far to turn this one is measured
@@ -1402,11 +1417,13 @@ std::vector<std::optional<gp_Trsf>> sectionTiltsAlong(
                 // the turns themselves (1e-6 rad), so a section tilted out of the plane by
                 // rounding of its placement (5e-9 rad for a sketch turned about a leg nearly
                 // along -Z) still counts as in it
-                if (turnedAbout && !axis.IsParallel(*turnedAbout, 1e-6)) {
-                    outOfPlane = current->centre;
-                    return tilts;
+                if (acrossCorner) {
+                    if (turnedAbout && !axis.IsParallel(*turnedAbout, 1e-6)) {
+                        outOfPlane = current->centre;
+                        return tilts;
+                    }
+                    turnedAbout = axis;
                 }
-                turnedAbout = axis;
                 gp_Trsf tilt;
                 tilt.SetRotation(gp_Ax1(current->centre, axis), angle);
                 tilts[i] = tilt;

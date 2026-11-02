@@ -20,9 +20,9 @@
 # *                                                                         *
 # ***************************************************************************
 
-"""Corpus cases (review pr404-r3, class B): a multisection Pipe ("Transformed") of hexagons along
-a spine whose right angles don't lie in one plane (ops#396, fork PR 404's `sectionTiltsAlong`;
-found by its round 3 review).
+"""Corpus cases (review pr404-r3, class B): a multisection Pipe ("Transformed", or "Round
+corner") of hexagons along a spine whose right angles don't lie in one plane (ops#396, fork PR
+404's `sectionTiltsAlong`; found by its round 3 review).
 
 The spine is a Part feature's polygon of four legs, 30, 20, 20 and 40 long, from +Z at the
 origin, each corner turning `deg` degrees towards +X, +Y and -Z in turn (80 when built). The edit
@@ -88,6 +88,7 @@ class HexagonHelix(Scenario):
     START = 80.0  # each corner's angle when built
     TURN = 30.0  # the last section's sketch turned about its leg
     SIZES = (3.0, 3.0, 3.0)  # the sections' circumradii
+    TRANSITION = "Transformed"
 
     def directions(self, deg, under=0.0):
         """The legs' directions, each corner turning `deg` degrees less `under` radians (exact
@@ -133,7 +134,7 @@ class HexagonHelix(Scenario):
         pipe.Spine = (path, [])
         pipe.Transformation = "Multisection"
         pipe.Sections = sections
-        pipe.Transition = "Transformed"
+        pipe.Transition = self.TRANSITION
         pipe.Refine = False
         doc.recompute()
         return pipe
@@ -248,3 +249,19 @@ class HexagonHelixGrowingToRightAngles(HexagonHelix):
     wrong solid at 600 mm)."""
 
     SIZES = (2.5, 3.0, 3.5)
+
+
+class HexagonHelixRoundCornerToRightAngles(HexagonHelix):
+    """The helix with its corners joined "Round corner" (review pr404-r4s, whose own hexagon
+    helix integration builds right, and the sections turned 1e-9 mm wrong): integration builds a
+    wrong solid here; decision 228's stop holds for every transition, and the PR stops."""
+
+    FOUND_BY = "review pr404-r4s"
+    TRANSITION = "Round corner"
+
+
+class HexagonHelixRoundCornerSquareTurnedToRightAngles(HexagonHelixRoundCornerToRightAngles):
+    """The same with the last sketch turned 0 degrees: integration builds the limit's solid, the
+    PR stops: right -> loud, under the PR's Decision 120 (4) line."""
+
+    TURN = 0.0

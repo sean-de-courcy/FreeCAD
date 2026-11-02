@@ -1967,12 +1967,15 @@ class TestPipeCorners(unittest.TestCase):
                     self.assertValidSolid(pipe)
                     self.assertAlmostEqual(pipe.Shape.Volume, limit, delta=0.2)
 
-    def multisectionChain(self, axes, lengths, sizes, under=0, turn=0, sides=4):
+    def multisectionChain(
+        self, axes, lengths, sizes, under=0, turn=0, sides=4, transition="Transformed"
+    ):
         """From the origin up along +Z, then each leg turning towards the next of `axes` by 90
         degrees less `under` radians, the legs `lengths` long: a regular polygon of `sides` sides
         and circumradius 2 for the profile, one of circumradius `sizes[i]` at the middle of each
         leg after the first and at the spine's end (the last of `sizes`), each normal to its leg,
-        the last one's sketch turned `turn` degrees about its leg"""
+        the last one's sketch turned `turn` degrees about its leg, the corners joined by
+        `transition`"""
 
         def polygon(radius):
             return models.polygon(
@@ -2012,7 +2015,7 @@ class TestPipeCorners(unittest.TestCase):
             self.profile(polygon(2)),
             Transformation="Multisection",
             Sections=sections,
-            Transition="Transformed",
+            Transition=transition,
         )
 
     def testMultisectionRightAnglesOutOfOnePlaneFail(self):
@@ -2020,14 +2023,22 @@ class TestPipeCorners(unittest.TestCase):
         plane, OCCT's pairing of the sections changes by itself within about 1e-7 rad under 90
         degrees, so no turn of the sections decides it: turned 1e-9 mm, hexagons along the helix
         +Z, +X, +Y, -Z gave a valid solid 9 % short. Such a pipe stops, the same on every system,
-        also along +Z, +X, +Y with squares. Right angles in one plane turning both ways (+Z, +X,
-        +Z) still give the solid of corners slightly under 90 degrees."""
+        also along +Z, +X, +Y with squares, and with the corners joined "Round corner" (review
+        pr404-r4s: turned 1e-9 mm, the helix's last sketch turned 30 degrees gave a wrong solid
+        too). Right angles in one plane turning both ways (+Z, +X, +Z) still give the solid of
+        corners slightly under 90 degrees."""
         helix = dict(axes=(V(1, 0, 0), V(0, 1, 0), V(0, 0, -1)), lengths=(30, 20, 20, 40))
         for turn in (0, 30, 90):
             with self.subTest(helix=True, turn=turn):
                 self.renew()
                 pipe = self.multisectionChain(sizes=(3, 3, 3), turn=turn, sides=6, **helix)
                 self.assertFails(pipe, "right angle", "isn't in one plane aren't supported")
+        with self.subTest(helix=True, transition="Round corner"):
+            self.renew()
+            pipe = self.multisectionChain(
+                sizes=(3, 3, 3), turn=30, sides=6, transition="Round corner", **helix
+            )
+            self.assertFails(pipe, "right angle", "isn't in one plane aren't supported")
         with self.subTest("Z-X-Y"):
             self.renew()
             pipe = self.multisectionChain((V(1, 0, 0), V(0, 1, 0)), (30, 20, 30), (2.5, 3))
@@ -2044,6 +2055,53 @@ class TestPipeCorners(unittest.TestCase):
                 pipe = self.multisectionChain(turn=turn, **zigzag)
                 self.assertValidSolid(pipe)
                 self.assertAlmostEqual(pipe.Shape.Volume, limit, delta=0.2)
+
+    def multisectionSmooth(self, tilt=0):
+        """ops#396, review pr404-r4 L1: a spine with no corner out of one plane: a quarter circle
+        of radius 20 from +X to +Y about (0, 20, 0), 20 along +Y, and a quarter circle from +Y to
+        +Z about (20, 40, 20); a square of half width 2 at the origin, one of 2.5 at the line's
+        middle and one of 3 at the end, each normal to the spine (the middle one turned `tilt`
+        radians about X off it), so each section is at a right angle to the one before"""
+
+        def square(name, h, placement):
+            return models.sketch(
+                self.doc, name, models.rectangle(-h, -h, h, h), self.body, placement=placement
+            )
+
+        r = 20 / math.sqrt(2)
+        edges = [
+            Part.Arc(V(0, 0, 0), V(r, 20 - r, 0), V(20, 20, 0)).toShape(),
+            Part.LineSegment(V(20, 20, 0), V(20, 40, 0)).toShape(),
+            Part.Arc(V(20, 40, 0), V(20, 40 + r, 20 - r), V(20, 60, 20)).toShape(),
+        ]
+        spine = models.feature(self.doc, "Path", Part.Wire(edges))
+        middle = App.Rotation(V(1, 0, 0), math.degrees(tilt)).multiply(
+            App.Rotation(V(0, 0, 1), V(0, 1, 0))
+        )
+        sections = [
+            square("Middle", 2.5, App.Placement(V(20, 30, 0), middle)),
+            square("Section", 3, App.Placement(V(20, 60, 20), App.Rotation())),
+        ]
+        return self.pipe(
+            spine,
+            square("Start", 2, App.Placement(V(0, 0, 0), App.Rotation(V(0, 0, 1), V(1, 0, 0)))),
+            Transformation="Multisection",
+            Sections=sections,
+            Transition="Transformed",
+        )
+
+    def testMultisectionRightAnglesAlongASmoothSpineBuild(self):
+        """ops#396, review pr404-r4 L1: along a smooth spine OCCT's frame turns with it and the
+        pairing has no tie, so sections at right angles to each other in different planes don't
+        stop the pipe (decision 228 is for right angles at corners): the solid of the middle
+        section slightly off normal, as on integration"""
+        pipe = self.multisectionSmooth(tilt=1e-4)
+        self.assertValidSolid(pipe)
+        limit = pipe.Shape.Volume
+        self.renew()
+        pipe = self.multisectionSmooth()
+        self.assertValidSolid(pipe)
+        self.assertAlmostEqual(pipe.Shape.Volume, limit, delta=0.2)
 
     def testMultisectionPast90DegreesFails(self):
         """Just under 90 degrees (1e-4 degrees) the pipe nears the right angle's; just past it,
