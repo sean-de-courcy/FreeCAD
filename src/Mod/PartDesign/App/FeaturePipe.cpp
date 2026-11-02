@@ -1245,11 +1245,11 @@ std::optional<gp_Dir> spineDirectionNear(const std::vector<TopoDS_Edge>& spine, 
 /// (squares, rectangles), give two pairings with exactly the same sum: the section turned with the
 /// spine (the corner's limit from below 90 degrees), or against it, an inside-out solid. Rounding
 /// chose, and Windows and macOS built different solids from one file. Such a section, facing the
-/// spine's way within 1e-8 mm of perpendicular to the one before as that one was turned (at its
-/// farthest point), is turned towards it until its farthest point is 1e-9 mm past perpendicular,
-/// the pairing then as at a corner slightly under 90 degrees on every system. Past that, the
-/// pairing against the spine is the only one OCCT finds, and the result gate stops the pipe. None
-/// for the others.
+/// spine's way within 1e-8 mm of perpendicular to the one before (at its farthest point, both as
+/// placed), is turned towards that one as it was turned until its farthest point is 1e-9 mm past
+/// perpendicular, the pairing then as at a corner slightly under 90 degrees on every system, for
+/// each pair of a chain. Past that, the pairing against the spine is the only one OCCT finds, and
+/// the result gate stops the pipe. None for the others.
 std::vector<std::optional<gp_Trsf>> sectionTiltsAlong(
     const std::vector<TopoDS_Shape>& sections,
     const TopoDS_Wire& spine
@@ -1259,7 +1259,8 @@ std::vector<std::optional<gp_Trsf>> sectionTiltsAlong(
     constexpr double reach = 1e-8;  // mm: within it the two sections are perpendicular
     struct Facing
     {
-        gp_Dir normal;  // the spine's way
+        gp_Dir placed;  // the spine's way, as the section is placed
+        gp_Dir normal;  // the same once the section is turned
         gp_Pnt centre;
         double radius;
     };
@@ -1297,23 +1298,27 @@ std::vector<std::optional<gp_Trsf>> sectionTiltsAlong(
         if (!along || std::abs(normal->Dot(*along)) < 1e-6 || radius < Precision::Confusion()) {
             return std::nullopt;
         }
-        return Facing {normal->Dot(*along) > 0 ? *normal : normal->Reversed(), gp_Pnt(centre), radius};
+        const gp_Dir facing = normal->Dot(*along) > 0 ? *normal : normal->Reversed();
+        return Facing {facing, facing, gp_Pnt(centre), radius};
     };
     std::vector<std::optional<gp_Trsf>> tilts(sections.size());
     std::optional<Facing> previous;
     for (size_t i = 0; i < sections.size(); ++i) {
         std::optional<Facing> current = facingOf(sections[i]);
         if (previous && current) {
-            const double offset = current->normal.Dot(previous->normal) * current->radius;
+            // whether the two are perpendicular is read from the sections as placed, so the band
+            // doesn't move with the previous one's turn; how far to turn this one is measured
+            // against the previous one as turned: against its plane before the turn, a section as
+            // large or larger would be at or past perpendicular
+            const double placedOffset = current->placed.Dot(previous->placed) * current->radius;
+            const double offset = current->placed.Dot(previous->normal) * current->radius;
             const double angle = (past - offset) / current->radius;
-            if (offset > -reach && offset < past && angle < 1e-6) {
+            if (placedOffset > -reach && placedOffset < past && offset < past && angle < 1e-6) {
                 // turning the normal about (normal x previous) turns it towards the previous
-                const gp_Dir axis = current->normal.Crossed(previous->normal);
+                const gp_Dir axis = current->placed.Crossed(previous->normal);
                 gp_Trsf tilt;
                 tilt.SetRotation(gp_Ax1(current->centre, axis), angle);
                 tilts[i] = tilt;
-                // the next section is paired with this one as turned: against its plane before
-                // the turn, a next one as large or larger would be at or past perpendicular
                 current->normal.Transform(tilt);
             }
         }

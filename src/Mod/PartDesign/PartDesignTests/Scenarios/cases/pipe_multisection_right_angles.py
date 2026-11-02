@@ -230,3 +230,30 @@ class LSectionTurnedToRightAngle(L):
     on Windows with the sketch turned 90, 180 or 270 degrees)."""
 
     TURN = 90
+
+
+class UMiddleSectionTwelveTimesSmallerTurnedToRightAngles(U):
+    """The U with a middle section of half width 0.25 and the last 3 (12 times larger). Measured
+    against the middle section as turned, the last one starts 1e-9 * 12 mm past perpendicular,
+    beyond the 1e-8 mm reach: round 2 left it unturned and the pipe failed. The reach is read
+    from the sections as placed, the turn against the middle one as turned: the solid turned with
+    the spine (the limit of 567.716 at 1e-4 rad under each corner)."""
+
+    FOUND_BY = "review pr404-r2"
+    MIDDLE = 0.25
+
+
+class UMiddleSectionTenTimesSmallerTurnedToRightAngles(U):
+    """The same with the middle section 0.3 (the last exactly 10 times larger): on round 2 the
+    last section sat on the reach's edge and rounding decided (the pipe failed at 600 mm)."""
+
+    FOUND_BY = "review pr404-r2"
+    MIDDLE = 0.3
+
+
+class UMiddleSectionFiveTimesSmallerTurnedToRightAngles(U):
+    """Control: the middle section 0.6 (the last 5 times larger), inside the reach on every
+    round: the solid turned with the spine."""
+
+    FOUND_BY = "review pr404-r2"
+    MIDDLE = 0.6

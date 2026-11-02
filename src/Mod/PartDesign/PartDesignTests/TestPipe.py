@@ -1905,9 +1905,12 @@ class TestPipeCorners(unittest.TestCase):
         section is turned towards the one before as that one was turned, so every pair keeps its
         margin: turned against the middle section's plane before its own turn, a last section
         larger than the middle one was past 90 degrees to it (the pipe failed), and one as large
-        tied again. The last section is the same square whichever way its sketch is turned, so
-        every turn gives the same solid, the limit of corners slightly under 90 degrees."""
-        for middle in (2.5, 3, 3.5):
+        tied again. Whether two sections are perpendicular is read as they are placed (review
+        pr404-r2: against the middle section as turned, a last one more than 10 times larger
+        started past the reach and stayed unturned). The last section is the same square whichever
+        way its sketch is turned, so every turn gives the same solid, the limit of corners
+        slightly under 90 degrees."""
+        for middle in (0.1, 0.2, 0.25, 0.3, 2.5, 3, 3.5):
             with self.subTest(middle=middle, under=1e-4):
                 self.renew()
                 pipe = self.multisectionU(middle, under=1e-4)
