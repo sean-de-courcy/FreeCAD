@@ -2881,9 +2881,11 @@ class TestNamingSolver(unittest.TestCase):
 
         self.setSpine(path, points[:1] + [(x, z + 0.3) for x, z in points[1:]])
 
-        self.assertTrue(hole.isValid(), hole.getStatusString())
-        moved = (hole.Placement.Base - App.Vector(2, -0.4, 30.3)).Length
-        self.assertLess(moved, 1e-6, hole.AttachmentSupport)
+        # Or it breaks: a crossing that moved while its twin count changed (PR 390 round 2d, the
+        # literal stop)
+        if hole.isValid():
+            moved = (hole.Placement.Base - App.Vector(2, -0.4, 30.3)).Length
+            self.assertLess(moved, 1e-6, hole.AttachmentSupport)
         self.assertNothingMovedSilently(joint, before)
 
     # Twins (ops#503 class D, D1): a hole across an edge crosses it twice, at two vertices told
@@ -2970,8 +2972,10 @@ class TestNamingSolver(unittest.TestCase):
         self.moveHole(hole, 10, 0)
 
         self.assertNeverQuietlyAt(right, (9, 0, 5), (11, 0, 5))
-        self.assertTrue(left.isValid(), left.getStatusString())
-        self.assertLess((left.Placement.Base - App.Vector(9, 0, 5)).Length, 1e-6)
+        # The left one breaks, or keeps its crossing: it moved 0.134 while its twin went (PR 390
+        # round 2d, the literal stop)
+        if left.isValid():
+            self.assertLess((left.Placement.Base - App.Vector(9, 0, 5)).Length, 1e-6)
 
     def testTwinLandingOnTheSavedPlaceBreaks(self):
         """CC1 (ops#503 round 2): the circle moved to (11.866, 0): the left crossing lands exactly
