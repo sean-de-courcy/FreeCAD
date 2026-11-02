@@ -24,7 +24,7 @@
 "RingReversed|fillet_top_front|V2s": {"axes": ["M3", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken-", "found_by": "K4b attacker pass 1b", "issue": "ops#469", "tier": "F"},
 "RingReversed|point_top_right|V2s": {"axes": ["M3", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken-", "found_by": "K4b attacker pass 1b", "issue": "ops#469", "tier": "F"},
 "RingReversed|sketch_bottom_inner|V2s": {"axes": ["M3", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken-", "found_by": "K4b attacker pass 1b", "issue": "ops#469", "tier": "F"},
-"RingStartMovedTwice|datum_left_outer|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "guessed-wrong", "found_by": "K4b attacker pass 1b", "issue": "ops#469", "tier": "F"},
+"RingStartMovedTwice|datum_left_outer|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "K4b attacker pass 1b", "issue": "ops#469", "tier": "F"},
 "RingStartMovedTwice|datum_right_outer|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "K4b attacker pass 1b", "issue": "ops#469", "tier": "F"},
 "RingStartMovedTwice|datum_top_outer|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken-", "found_by": "K4b attacker pass 1b", "issue": "ops#469", "tier": "F"},
 "RingStartMovedTwice|fillet_top_front|V2s": {"axes": ["M3", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "K4b attacker pass 1b", "issue": "ops#469", "tier": "F"},
