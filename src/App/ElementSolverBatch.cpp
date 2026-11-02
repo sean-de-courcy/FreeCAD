@@ -219,7 +219,15 @@ void placementSources(const GeoFeature* geo, std::vector<Data::ElementFingerprin
         }
     }
     if (top) {
-        auto out = top->getOutListRecursive();
+        // A link set into a cycle writes its record before the recompute reports the cycle:
+        // no sources, so the record never reads rigid (decision 150)
+        std::vector<DocumentObject*> out;
+        try {
+            out = top->getOutListRecursive();
+        }
+        catch (const Base::BadGraphError&) {
+            return;
+        }
         chain.insert(chain.end(), out.begin(), out.end());
     }
     const Document* doc = geo->getDocument();
