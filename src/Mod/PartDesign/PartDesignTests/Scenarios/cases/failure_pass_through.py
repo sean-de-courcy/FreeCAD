@@ -1058,3 +1058,46 @@ class PatternSuppressedOriginal(Suppresses, FailedFeatureBase):
         self.body.addObject(pattern)
         doc.recompute()
         self.addConsumers(doc, pattern, [("top_sketch", "sketch", self.blockTop)])
+
+
+# The pre-push review's cases (review props549-r1, Sonnet): a failed feature's pass-through across
+# a save and reopen. The error is saved and restored; the pass-through state must be too, or the
+# open's own solve judges the consumers by today's rules (C1 silent, C2 warned)
+
+
+class RevThinSlabUnderCapReopen(Reopens, ThinSlabUnderCap):
+    """ThinSlabUnderCap: the Boss (the whole top, 0.1 high) fails; the Cap's consumers of the
+    Boss's top break. The document is saved and reopened (the Boss still in error), then the Cap
+    is made 5 high: they stay broken (the block's top 0.1 below is another face)."""
+
+    FOUND_BY = "review props549-r1"
+    steps = ("edit", "reopen", "capTaller")
+
+    def bossTop(self):
+        if self.stepName in ("edit", "reopen", "capTaller"):
+            return BROKEN
+        return ThinBossStops.bossTop(self)
+
+    def capTaller(self, doc):
+        self.cap = doc.getObject("Cap")
+        self.cap.Length = 5
+
+
+class RevThinSlabUnderCapControl(RevThinSlabUnderCapReopen):
+    """RevThinSlabUnderCapReopen without the reopen."""
+
+    steps = ("edit", "capTaller")
+
+
+class RevRingSweepReopen(Reopens, RingSweepStops):
+    """RingSweepStops (C1): the Sweep fails, and the document is saved and reopened. The corner
+    point (the Pipe's corner, named by the square's vertex the Plate carries too) stays broken."""
+
+    FOUND_BY = "review props549-r1"
+    steps = ("edit", "reopen")
+
+    def corner(self):
+        return BROKEN if self.stepName in ("edit", "reopen") else super().corner()
+
+    def topOuter(self):
+        return BROKEN if self.stepName in ("edit", "reopen") else super().topOuter()
