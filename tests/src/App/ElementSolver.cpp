@@ -5498,6 +5498,88 @@ TEST(Moved, closedEdgeTwinInPlaceKeepsItsName)
               "exact Edge3 0 [] ");
 }
 
+namespace
+{
+
+// PR 390 round 2d: a pocket's circle of radius 1 crossing a 20 x 10 x 5 pad's top front edge, its
+// two crossings named by the side the edge goes to (A2's roles, `...;in|out;V;0;GEN,ORD;_`), the
+// right one `out` at (10.866, 0, 5) when saved. \a saved is the twins' count saved with it.
+std::string crossing(const char* role)
+{
+    return Data::MappedName::makeEncodedSection(
+        std::vector<std::string> {},
+        std::vector<std::string> {sketchEdge(1), sketchEdge(2, 7)},
+        "9",
+        "CUT",
+        role,
+        'V',
+        "0",
+        {"GEN", "ORD"},
+        std::vector<std::string> {}
+    );
+}
+
+SolveInput crossingsNow(const std::vector<std::pair<std::string, Base::Vector3d>>& now, int saved)
+{
+    SolveInput input;
+    input.diagonal = std::sqrt(20.0 * 20 + 10 * 10 + 5 * 5);
+    std::map<std::string, ElementFingerprint> fingerprints;
+    for (std::size_t k = 0; k < now.size(); ++k) {
+        const std::string index = "Vertex" + std::to_string(k + 1);
+        input.pool["Vertex"].push_back(element(index, {now[k].first}));
+        fingerprints[index] = fingerprint('V', "Point", {}, now[k].second);
+    }
+    auto entry = exact("Vertex1", "Vertex");
+    entry.exactName = crossing("out");
+    entry.fingerprint = fingerprint('V', "Point", {}, Base::Vector3d(10.866, 0, 5));
+    entry.fingerprint.twinCount = saved;
+    if (saved >= 2) {
+        entry.fingerprint.twinCentroid = Base::Vector3d(10, 0, 5);
+    }
+    input.entries = {entry};
+    measure(input, fingerprints, nullptr);
+    return input;
+}
+
+}  // namespace
+
+TEST(Moved, flippedLoneCrossingHitBreaks)
+{
+    // The pad's front line drawn the other way and the circle's centre moved onto the edge, in
+    // one edit: the right crossing becomes the seam vertex at (11, 0, 5), and the left one, alone
+    // at (9, 0, 5), takes the role `out` its gone twin had. The exact hit moved 1.866 mm with
+    // nothing at the old place: without the stop the name stood, silently, on the wrong crossing.
+    const std::string seam = section({}, {sketchEdge(3, 7)}, 9, "CUT", 0, 'V', {"GEN"});
+    auto outcome = Data::solveOwner(crossingsNow(
+        {{crossing("out"), Base::Vector3d(9, 0, 5)}, {seam, Base::Vector3d(11, 0, 5)}},
+        2
+    ))[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken);
+    EXPECT_EQ(outcome.candidates, (std::vector<std::string> {"Vertex1"}));
+    EXPECT_NE(outcome.evidence.find("2 saved, 1 now"), std::string::npos) << outcome.evidence;
+}
+
+TEST(Moved, loneCrossingMovedAloneBreaks)
+{
+    // Saved alone (one crossing on the edge), moved alone: a role name with no twin can be one an
+    // edit flipped, so it breaks too (the literal stop).
+    auto outcome =
+        Data::solveOwner(crossingsNow({{crossing("out"), Base::Vector3d(12, 0, 5)}}, 1))[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken);
+    EXPECT_NE(outcome.evidence.find("1 saved, 1 now"), std::string::npos) << outcome.evidence;
+}
+
+TEST(Moved, crossingsMovedTogetherKeepTheirNames)
+{
+    // Both crossings moved 1 mm along the edge, their count kept: the name stands.
+    EXPECT_EQ(describe(Data::solveOwner(crossingsNow(
+                  {{crossing("out"), Base::Vector3d(11.866, 0, 5)},
+                   {crossing("in"), Base::Vector3d(10.134, 0, 5)}},
+                  2
+              ))[0]),
+              "exact Vertex1 0 [] ");
+}
+
 TEST(SolveOwner, goneClosedEdgeTwinBreaks)
 {
     // The rim's twins counted three after an edit: `0of2` is gone. The +y arc, unchanged at the

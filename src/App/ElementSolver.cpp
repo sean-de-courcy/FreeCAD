@@ -1783,6 +1783,16 @@ bool isClosedTwin(std::string_view name)
     });
 }
 
+/* True if the last section of \a name carries a role in its Index (A2's crossing roles, `in` and
+ * `out`: Data::isRoleValue()): the side its edge goes to, which an edit that draws the edge the
+ * other way flips, so that a lone crossing takes its twin's role (PR 390 round 2d).
+ */
+bool endsInRole(std::string_view name)
+{
+    const auto sections = NameAncestry::splitSections(name);
+    return !sections.empty() && isRoleValue(decodeSection(sections.back()).index);
+}
+
 /* True if a section of \a name is a far cap's piece marked by its marks (PRJ and MOD with
  * connected elements, a face), and none is ordered (isMarkedCapName()). With \a faceAlone, marked
  * by one face of the up-to shape alone (the only piece on it): an up-to shell without names,
@@ -3574,10 +3584,34 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                            });
                 }
             }
-            if (place.empty() && !departed && !closedTwin) {
+            // A twin whose count changed (PR 390 round 2d, the literal stop: the third silent find
+            // in this path): a crossing told apart by its role, or a member of a group saved with
+            // two or more, that moved with nothing at its old place, while its twins now are none
+            // or another number than were saved. Its name may be a twin's: a lone crossing whose
+            // edge was drawn the other way takes the role its gone twin had. It breaks.
+            int twinsNow = 0;
+            if (place.empty() && !departed && !closedTwin
+                && (endsInRole(hitName) || saved.twinCount >= 2)) {
+                const auto& names = pool.elements[hitPosition].names;
+                twinsNow = 1;
+                for (std::size_t k = 0; k < pool.elements.size(); ++k) {
+                    const auto& other = pool.elements[k].names;
+                    if (static_cast<int>(k) != hitPosition
+                        && std::any_of(other.begin(), other.end(), [&](const auto& m) {
+                               return std::any_of(names.begin(), names.end(), [&](const auto& n) {
+                                   return isTwinName(m, n);
+                               });
+                           })) {
+                        ++twinsNow;
+                    }
+                }
+            }
+            const bool countChanged = twinsNow == 1
+                || (twinsNow > 1 && saved.twinCount > 0 && twinsNow != saved.twinCount);
+            if (place.empty() && !departed && !closedTwin && !countChanged) {
                 continue;  // moved alone
             }
-            if (!offCentre && !departed && !(closedTwin && place.empty())
+            if (!offCentre && !departed && !countChanged && !(closedTwin && place.empty())
                 && entry.policy == SolvePolicy::Equivalent
                 && entry.equivalent && std::all_of(place.begin(), place.end(), [&](int k) {
                        return entry.equivalent(hit, pool.elements[k].index);
@@ -3620,7 +3654,8 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                         && !piecesOfOne(name, hitName) && !markedPiecesOfOne(name, hitName);
                 });
             };
-            if (!departed && !closedTwin && std::all_of(place.begin(), place.end(), ownTwin)) {
+            if (!departed && !closedTwin && !countChanged
+                && std::all_of(place.begin(), place.end(), ownTwin)) {
                 outcomes[i].evidence = movedBy() + "; its own twin" + (place.size() > 1 ? "s " : " ")
                     + there + sit + " where it was";
                 continue;
@@ -3659,6 +3694,11 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 outcome.evidence = movedBy() + "; a twin on a closed edge, placed from its seam"
                     + (place.empty() ? std::string()
                                      : "; " + there + sit + " where it was");
+            }
+            else if (countChanged) {
+                outcome.evidence = movedBy() + "; a twin, " + std::to_string(saved.twinCount)
+                    + " saved, " + std::to_string(twinsNow)
+                    + " now: its name may be a twin's, and nothing sits where it was";
             }
             else if (departed) {
                 outcome.evidence = movedBy() + " off where it was, and nothing sits there";
