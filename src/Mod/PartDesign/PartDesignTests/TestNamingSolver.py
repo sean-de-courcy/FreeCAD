@@ -3188,3 +3188,60 @@ class TestNamingSolver(unittest.TestCase):
         doc.recompute()
 
         self.assertBrokenAtThePlace(chamfer)
+
+    @staticmethod
+    def ellipseShell(degrees):
+        """A plate x -10..20, y -10..10 at z = 10 with an elliptic hole (a = 4, b = 1, centre
+        (3, 3)) turned by `degrees` about its centre, and the hole's fill."""
+        c = [App.Vector(-10, -10, 10), App.Vector(20, -10, 10), App.Vector(20, 10, 10),
+             App.Vector(-10, 10, 10)]
+        ellipse = Part.Ellipse(App.Vector(3, 3, 10), 4, 1).toShape()
+        ellipse.rotate(App.Vector(3, 3, 10), Z, degrees)
+        hole = Part.Face(Part.Wire([ellipse]))
+        plate = Part.Face(Part.makePolygon(c + c[:1])).cut(hole).Faces[0]
+        return Part.Shell([plate.toNurbs().Faces[0], hole.toNurbs().Faces[0]])
+
+    def twinCapSketches(self, doc):
+        """A Pad of a disc of radius 3 at (3, 3) up to ellipseShell(0): the far cap's twin pieces
+        above and below the hole, told apart by their order only. A sketch attached FlatFace and a
+        datum point (centre of mass) on the twin above. Returns the plate, the pad, the sketch
+        and the point."""
+        body = models.body(doc)
+        plate = models.feature(doc, "Plate", self.ellipseShell(0))
+        profile = models.sketch(doc, "Profile", [models.circle(3, 3, 3)], body)
+        pad = body.newObject("PartDesign::Pad", "Pad")
+        pad.Profile = profile
+        pad.Type = "UpToShape"
+        pad.UpToShape = (plate, ["Face1", "Face2"])
+        pad.Refine = False
+        doc.recompute()
+        sub = face(contains=App.Vector(3, 5.5, 10)).one(pad.Shape)
+        sketch = body.newObject("Sketcher::SketchObject", "OnTwin")
+        sketch.AttachmentSupport = [(pad, sub)]
+        sketch.MapMode = "FlatFace"
+        point = body.newObject("PartDesign::Point", "PointOnTwin")
+        point.AttachmentSupport = [(pad, sub)]
+        point.MapMode = "CenterOfMass"
+        body.Tip = pad
+        doc.recompute()
+        self.assertTrue(sketch.isValid() and point.isValid())
+        return plate, pad, sketch, point
+
+    def testFlatFaceSketchOnATradedTwinBreaks(self):
+        """ops#516: the hole turned 60 degrees about its centre: the twins trade names, and the
+        piece the sketch was on lies 1.8 mm from its old place, nearer than the traded name's.
+        Both twins give a FlatFace sketch the same placement, but the name is the twins' order,
+        not the piece: the sketch breaks with the datum point, never holds the other twin
+        quietly. Fails before ops#516's fix (the sketch kept the other twin, no report row)."""
+        doc = self.newDocument()
+        plate, pad, sketch, point = self.twinCapSketches(doc)
+
+        plate.Shape = self.ellipseShell(60)
+        pad.UpToShape = (plate, ["Face1", "Face2"])
+        doc.recompute()
+
+        for owner in (point, sketch):
+            rows = App.getReferenceReport(owner)
+            self.assertFalse(owner.isValid(), (owner.Name, owner.AttachmentSupport, rows))
+            self.assertIn("broken", [e["status"] for e in rows], rows)
+            self.assertIn("nearer where it was", rows[0].get("evidence") or "", rows)

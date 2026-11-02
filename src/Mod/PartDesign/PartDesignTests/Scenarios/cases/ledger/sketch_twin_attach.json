@@ -1,0 +1,16 @@
+{
+"entries": {
+"TwinSketchTurned30|datum_top|V2s": {"axes": ["M5", "E7"], "classes": ["E", "A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr379-r2", "issue": "ops#516", "tier": "F"},
+"TwinSketchTurned30|sketch_bottom|V2s": {"axes": ["M5", "E7"], "classes": ["E", "A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr379-r2", "issue": "ops#516", "tier": "F"},
+"TwinSketchTurned30|sketch_top|V2s": {"axes": ["M5", "E7"], "classes": ["E", "A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr379-r2", "issue": "ops#516", "tier": "F"},
+"TwinSketchTurned60|datum_top|V2s": {"axes": ["M5", "E7"], "classes": ["E", "A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr379-r2", "issue": "ops#516", "tier": "G"},
+"TwinSketchTurned60|sketch_bottom|V2s": {"axes": ["M5", "E7"], "classes": ["E", "A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr379-r2", "issue": "ops#516", "tier": "G"},
+"TwinSketchTurned60|sketch_top|V2s": {"axes": ["M5", "E7"], "classes": ["E", "A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr379-r2", "issue": "ops#516", "tier": "G"},
+"TwinSketchTurned80|datum_top|V2s": {"axes": ["M5", "E7"], "classes": ["E", "A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr379-r2", "issue": "ops#516", "tier": "F"},
+"TwinSketchTurned80|sketch_bottom|V2s": {"axes": ["M5", "E7"], "classes": ["E", "A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr379-r2", "issue": "ops#516", "tier": "F"},
+"TwinSketchTurned80|sketch_top|V2s": {"axes": ["M5", "E7"], "classes": ["E", "A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr379-r2", "issue": "ops#516", "tier": "F"},
+"TwinSketchTurned90|datum_top|V2s": {"axes": ["M5", "E7"], "classes": ["E", "A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr379-r2", "issue": "ops#516", "tier": "G"},
+"TwinSketchTurned90|sketch_bottom|V2s": {"axes": ["M5", "E7"], "classes": ["E", "A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr379-r2", "issue": "ops#516", "tier": "G"},
+"TwinSketchTurned90|sketch_top|V2s": {"axes": ["M5", "E7"], "classes": ["E", "A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr379-r2", "issue": "ops#516", "tier": "G"}
+}
+}
