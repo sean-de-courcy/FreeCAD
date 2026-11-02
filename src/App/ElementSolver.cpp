@@ -3100,6 +3100,12 @@ std::optional<long> geometryIdNumber(std::string_view id)
 
 std::optional<long> tagNumber(std::string_view tag)
 {
+    // A negative tag is the same object's: a Body's second and later features name their own
+    // elements `-<ID>` (a box after the first, `Edge10;_;{-Box2};MKR;...;IDX`), and the first
+    // feature after the one before it is deleted names them `<ID>` (review prd2eson-r5 F1)
+    if (!tag.empty() && tag.front() == '-') {
+        tag.remove_prefix(1);
+    }
     if (tag.empty() || tag.size() > 15
         || !std::all_of(tag.begin(), tag.end(), [](char c) {
                return std::isdigit(static_cast<unsigned char>(c));
@@ -3192,9 +3198,14 @@ PlaceVerdict placeVerdict(const ElementFingerprint& saved,
     // An ID is shared only when the old name has the same ID (decision 219: a line drawn the
     // other way, its vertex names traded, reads as another element that was there, loud)
     const auto old = taggedSourcesOf(oldName);
+    // One object whatever the tag's sign (tagNumber())
+    auto sameTag = [](const std::string& a, const std::string& b) {
+        const auto x = tagNumber(a);
+        return x ? x == tagNumber(b) : a == b;
+    };
     auto shared = [&](const SourceSection& section, const std::string* id) {
         return std::any_of(old.begin(), old.end(), [&](const SourceSection& o) {
-            return o.tag == section.tag
+            return sameTag(o.tag, section.tag)
                 && (id ? o.type == section.type
                              && std::find(o.ids.begin(), o.ids.end(), *id) != o.ids.end()
                        : true);

@@ -10266,6 +10266,39 @@ TEST(SolveOwner, indexMadeOldNameIsJudgedByItsObject)
               Data::PlaceVerdict::Unjudged);
 }
 
+TEST(SolveOwner, indexMadeOldNameNegativeTagKeepsMark)
+{
+    // Review prd2eson-r5 F1: a Body's second box names its elements with its tag negated
+    // (`Edge10;_;{-Box2};MKR;...;IDX`); box 1 deleted, box 2 is the first feature and names them
+    // with the positive tag. One object: the record's mark of it is found and the pick shares it,
+    // so D1's lines (integration's warned guess), not SourceGone.
+    const auto oldEdge = indexed("Edge10", -11, "MKR");
+    ElementFingerprint record = LongBoard::edgeAt(0);
+    record.marks = {{11, -1}, {12, -1}};
+    const auto now = LongBoard::edgeAt(0);
+    EXPECT_EQ(Data::placeVerdict(record, now, {indexed("Edge10", 11, "MKR")}, oldEdge, false, {}),
+              Data::PlaceVerdict::Unjudged);
+    //   and the other way round (box 2 moved behind another feature)
+    EXPECT_EQ(Data::placeVerdict(record,
+                                 now,
+                                 {indexed("Edge10", -11, "MKR")},
+                                 indexed("Edge10", 11, "MKR"),
+                                 false,
+                                 {}),
+              Data::PlaceVerdict::Unjudged);
+    //   another box there, negated too: it was there
+    std::string why;
+    const auto other = indexed("Edge10", -12, "MKR");
+    EXPECT_EQ(Data::placeVerdict(record, now, {other}, oldEdge, false, {}, &why),
+              Data::PlaceVerdict::WasThere);
+    EXPECT_EQ(why, "its source -12 was in the model before");
+    //   a negated tag the record has no mark of: gone
+    ElementFingerprint gone = LongBoard::edgeAt(0);
+    gone.marks = {{12, -1}};
+    EXPECT_EQ(Data::placeVerdict(gone, now, {indexed("Edge10", -12, "MKR")}, oldEdge, false, {}),
+              Data::PlaceVerdict::SourceGone);
+}
+
 TEST(SolveOwner, recordWithoutMarksKeepsD1)
 {
     // A record saved before D2 (version 6 or older, no marks), or a lost source's object the
