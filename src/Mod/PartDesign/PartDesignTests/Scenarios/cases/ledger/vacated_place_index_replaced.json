@@ -1,0 +1,25 @@
+{
+"entries": {
+"AdditiveBoxReplacedSamePlace|chamfer|V2s": {"axes": ["M1", "E5"], "classes": ["D"], "expect": "GUESSED", "expected": "broken", "found_by": "review prd2eopus-r5", "issue": "ops#564", "tier": "F"},
+"CompoundBoxReplacedSamePlace|chamfer|V2s": {"axes": ["M4", "E5"], "classes": ["D"], "expect": "GUESSED", "expected": "correct", "found_by": "review prd2eopus-r5", "issue": "ops#526", "tier": "F"},
+"CompoundBoxReplacedSamePlace|corner|V2s": {"axes": ["M4", "E5"], "classes": ["D"], "expect": "GUESSED", "expected": "correct", "found_by": "review prd2eopus-r5", "issue": "ops#526", "tier": "F"},
+"CopiedFusionBox1EdgeCut|chamfer|V2s": {"axes": ["M4", "E2"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review prd2eopus-r5", "issue": "ops#526", "tier": "F"},
+"CopiedFusionBox1EdgeCut|corner|V2s": {"axes": ["M4", "E2"], "classes": ["D"], "expect": "BROKEN", "expected": "guessed-wrong", "found_by": "review prd2eopus-r5", "issue": "ops#526", "tier": "F"},
+"CopiedFusionBox2Moved|chamfer|V2s": {"axes": ["M4", "E5"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review prd2eopus-r5", "issue": "ops#526", "tier": "F"},
+"CopiedFusionBox2Moved|corner|V2s": {"axes": ["M4", "E5"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review prd2eopus-r5", "issue": "ops#526", "tier": "F"},
+"CopiedFusionReplacedSamePlace|chamfer|V2s": {"axes": ["M4", "E5"], "classes": ["D"], "expect": "GUESSED", "expected": "broken", "found_by": "review prd2eopus-r5", "issue": "ops#565", "tier": "F"},
+"CopiedFusionReplacedSamePlace|corner|V2s": {"axes": ["M4", "E5"], "classes": ["D"], "expect": "GUESSED", "expected": "broken", "found_by": "review prd2eopus-r5", "issue": "ops#565", "tier": "F"},
+"FusedBox1EdgeCut|chamfer|V2s": {"axes": ["M4", "E2"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review prd2eopus-r5", "issue": "ops#526", "tier": "F"},
+"FusedBox1EdgeCut|corner|V2s": {"axes": ["M4", "E2"], "classes": ["D"], "expect": "BROKEN", "expected": "guessed-wrong", "found_by": "review prd2eopus-r5", "issue": "ops#526", "tier": "F"},
+"FusedBoxInputsSwapped|chamfer|V2s": {"axes": ["M4", "E5"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review prd2eopus-r5", "issue": "ops#526", "tier": "F"},
+"FusedBoxInputsSwapped|corner|V2s": {"axes": ["M4", "E5"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review prd2eopus-r5", "issue": "ops#526", "tier": "F"},
+"FusedBoxReplacedSamePlaceKept|chamfer|V2s": {"axes": ["M4", "E5"], "classes": ["D"], "expect": "GUESSED", "expected": "correct", "found_by": "review prd2eopus-r5", "issue": "ops#526", "tier": "F"},
+"FusedBoxReplacedSamePlaceKept|corner|V2s": {"axes": ["M4", "E5"], "classes": ["D"], "expect": "GUESSED", "expected": "correct", "found_by": "review prd2eopus-r5", "issue": "ops#526", "tier": "F"},
+"FusedBoxReplacedSamePlace|chamfer|V2s": {"axes": ["M4", "E5"], "classes": ["D"], "expect": "GUESSED", "expected": "correct", "found_by": "review prd2eopus-r5", "issue": "ops#526", "tier": "F"},
+"FusedBoxReplacedSamePlace|corner|V2s": {"axes": ["M4", "E5"], "classes": ["D"], "expect": "GUESSED", "expected": "correct", "found_by": "review prd2eopus-r5", "issue": "ops#526", "tier": "F"},
+"NotchToolMoved|chamfer|V2s": {"axes": ["M4", "E5"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review prd2eopus-r5", "issue": "ops#526", "tier": "F"},
+"NotchToolMoved|corner|V2s": {"axes": ["M4", "E5"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review prd2eopus-r5", "issue": "ops#526", "tier": "F"},
+"NotchToolReplacedSamePlace|chamfer|V2s": {"axes": ["M4", "E5"], "classes": ["D"], "expect": "GUESSED", "expected": "correct", "found_by": "review prd2eopus-r5", "issue": "ops#526", "tier": "F"},
+"NotchToolReplacedSamePlace|corner|V2s": {"axes": ["M4", "E5"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review prd2eopus-r5", "issue": "ops#526", "tier": "F"}
+}
+}
