@@ -134,6 +134,18 @@ Feature::Feature()
         0
     );
     ADD_PROPERTY(SuppressedShape, (TopoShape()));
+    ADD_PROPERTY_TYPE(_PassedThrough,
+                      (false),
+                      "Base",
+                      (App::PropertyType)(App::Prop_Hidden | App::Prop_ReadOnly | App::Prop_Output
+                                          | App::Prop_NoRecompute),
+                      "The output is the base, passed through while suppressed");
+    ADD_PROPERTY_TYPE(_FailurePassedThrough,
+                      (false),
+                      "Base",
+                      (App::PropertyType)(App::Prop_Hidden | App::Prop_ReadOnly | App::Prop_Output
+                                          | App::Prop_NoRecompute),
+                      "The output is the base, passed through after the last recompute failed");
     Placement.setStatus(App::Property::Hidden, true);
     BaseFeature.setStatus(App::Property::Hidden, true);
 
@@ -228,12 +240,24 @@ App::DocumentObjectExecReturn* Feature::recompute()
         if (auto doc = getDocument()) {
             doc->clearWarning(this);  // it computes nothing of its own (ops#127)
         }
+        // Before the shape: setting it solves the references to it, which judge by this state
+        // (ops#549 PS)
+        if (!_PassedThrough.getValue()) {
+            _PassedThrough.setValue(true);
+        }
+        setFailurePassedThrough(false);
         Shape.setValue(getBaseTopoShape(true));
         updateSuppressedShape();
         return App::DocumentObject::StdReturn;
     }
 
     SuppressedShape.setValue(TopoShape());
+    // The output is the feature's own from here: a failure's pass-through, written after this
+    // recompute if it fails, sets its own state then (ops#549 PT)
+    if (_PassedThrough.getValue()) {
+        _PassedThrough.setValue(false);
+    }
+    setFailurePassedThrough(false);
 
     // Its Body is merged into another part, at an earlier feature (FreeCAD-CH ops#325, design
     // 2.6): it doesn't reach the Merge. Checked here, as every path that adds or moves a solid

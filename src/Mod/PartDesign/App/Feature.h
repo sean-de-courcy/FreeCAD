@@ -71,8 +71,30 @@ public:
     Part::PropertyPartShape SuppressedShape;
     /// Keep a copy of the placement before suppression to restore it back when unsuppressed, fix #20205
     Base::Placement SuppressedPlacement;
+    /// The last recompute wrote the base as the output because the feature is suppressed
+    /// (ops#549 PS): the shape's own state, which Suppressed alone isn't until the recompute
+    App::PropertyBool _PassedThrough;
+    /// The last recompute failed and the failure rule wrote the base as the output (ops#549 PT):
+    /// the shape's own state, which the error alone isn't (it stays set while the next recompute
+    /// runs, and that recompute's own shape solves the references to it). Saved with the shape,
+    /// as the error is: an opened file judges by both.
+    App::PropertyBool _FailurePassedThrough;
 
     App::DocumentObjectExecReturn* recompute() override;
+    bool passesBaseThrough() const override
+    {
+        return _PassedThrough.getValue();
+    }
+    bool failurePassedThrough() const
+    {
+        return _FailurePassedThrough.getValue();
+    }
+    void setFailurePassedThrough(bool on)
+    {
+        if (_FailurePassedThrough.getValue() != on) {
+            _FailurePassedThrough.setValue(on);
+        }
+    }
     App::DocumentObjectExecReturn* recomputePreview() override;
 
     short mustExecute() const override;

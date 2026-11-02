@@ -21,6 +21,10 @@ constexpr char faceDelimiter = ';';
 // Version 7's sides and marks (ops#526 D2)
 constexpr char entryDelimiter = '/';
 constexpr char markDelimiter = ':';
+// A mark's suppressed flag (ops#549 PS)
+constexpr std::string_view suppressedFlag = "s";
+// A closure's marks cut down to its suppressed objects (ops#549, decision 216)
+constexpr std::string_view partialMarks = "+";
 constexpr int fieldCount = 7;
 
 std::vector<std::string_view> split(std::string_view text, char delimiter)
@@ -180,25 +184,43 @@ bool parseSides(std::string_view text, std::vector<ElementFingerprint::Side>& si
     return sides.size() <= ElementFingerprint::MaxSides;
 }
 
-// Version 7's marks: `_`, or entries separated by `/`, each `<tag>:<mark>` or `<tag>:_`
-bool parseMarks(std::string_view text, std::vector<ElementFingerprint::Mark>& marks)
+// Version 7's marks: `_`, or entries separated by `/`, each `<tag>:<mark>` or `<tag>:_`, and
+// `:s` after either for an object suppressed when the record was taken (ops#549 PS); a first entry
+// `+` for a closure too large, whose entries are only the suppressed ones (decision 216)
+bool parseMarks(std::string_view text, std::vector<ElementFingerprint::Mark>& marks, bool& partial)
 {
     marks.clear();
+    partial = false;
     if (text == emptyField) {
         return true;
     }
     for (auto part : split(text, entryDelimiter)) {
+        if (part == partialMarks && marks.empty() && !partial) {
+            partial = true;
+            continue;
+        }
         const auto colon = part.find(markDelimiter);
         if (colon == std::string_view::npos) {
             return false;
         }
         const auto tag = parseWhole(part.substr(0, colon));
-        const auto value = part.substr(colon + 1);
+        auto value = part.substr(colon + 1);
+        bool suppressed = false;
+        if (const auto flag = value.find(markDelimiter); flag != std::string_view::npos) {
+            if (value.substr(flag + 1) != suppressedFlag) {
+                return false;
+            }
+            suppressed = true;
+            value = value.substr(0, flag);
+        }
         const auto mark = value == emptyField ? std::optional<long>(-1) : parseWhole(value);
         if (!tag || *tag < 0 || !mark || *mark < -1) {
             return false;
         }
-        marks.push_back({*tag, *mark});
+        if (partial && !suppressed) {
+            return false;
+        }
+        marks.push_back({*tag, *mark, suppressed});
     }
     return marks.size() <= ElementFingerprint::MaxMarks;
 }
@@ -239,7 +261,7 @@ std::string ElementFingerprint::toString() const
                return validOwner(face.owner);
            });
     // Version 7 for any element with sides or marks (ops#526 D2), a vertex included
-    const bool withSides = !sides.empty() || !marks.empty();
+    const bool withSides = !sides.empty() || !marks.empty() || marksPartial;
     std::string text = std::to_string(
         withSides        ? VersionWithSides
             : withUpTo   ? VersionWithUpTo
@@ -330,15 +352,22 @@ std::string ElementFingerprint::toString() const
                 text += emptyField;
             }
             text += fieldDelimiter;
+            if (marksPartial) {
+                text += partialMarks;
+            }
             for (std::size_t i = 0; i < marks.size(); ++i) {
-                if (i) {
+                if (i || marksPartial) {
                     text += entryDelimiter;
                 }
                 text += std::to_string(marks[i].tag);
                 text += markDelimiter;
                 text += marks[i].mark < 0 ? std::string(emptyField) : std::to_string(marks[i].mark);
+                if (marks[i].suppressed) {
+                    text += markDelimiter;
+                    text += suppressedFlag;
+                }
             }
-            if (marks.empty()) {
+            if (marks.empty() && !marksPartial) {
                 text += emptyField;
             }
         }
@@ -499,7 +528,7 @@ ElementFingerprint ElementFingerprint::fromString(std::string_view text)
         if (withSides
             && ((fields[12] != emptyField
                  && (!result.extentMin || !parseUpToFaces(fields[12], result.upToFaces)))
-                || !parseSides(fields[13], result.sides) || !parseMarks(fields[14], result.marks))) {
+                || !parseSides(fields[13], result.sides) || !parseMarks(fields[14], result.marks, result.marksPartial))) {
             return {};
         }
     }

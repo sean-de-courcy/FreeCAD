@@ -15,6 +15,7 @@
 #include <set>
 #include <sstream>
 #include <tuple>
+#include <unordered_map>
 #include <utility>
 
 #include <Base/Console.h>
@@ -2367,6 +2368,54 @@ bool coversExtent(const ElementFingerprint& saved,
     return false;
 }
 
+bool passThroughKeeps(const ElementFingerprint& saved,
+                      const ElementFingerprint& now,
+                      double diagonal,
+                      const GeometryTolerances& tolerances,
+                      double continuation,
+                      bool within)
+{
+    if (!saved.isValid() || !now.isValid()) {
+        return false;
+    }
+    if (atSamePlace(saved, now, diagonal, tolerances, continuation)) {
+        return true;
+    }
+    const bool plane = saved.type == 'F' && saved.kind == "Plane";
+    const bool curve = saved.type == 'E' && (saved.kind == "Line" || saved.kind == "Circle");
+    if ((!plane && !curve) || !intrinsicAgrees(saved, now, tolerances)
+        || (plane && !planeAgrees(saved, now, diagonal, tolerances, continuation))) {
+        return false;
+    }
+    return coversExtent(saved, now, diagonal, continuation)
+        || (within && coversExtent(now, saved, diagonal, continuation));
+}
+
+bool passThroughWorldSwitched(const std::vector<ElementFingerprint::Mark>& marks,
+                              const std::vector<std::pair<long, bool>>& chain)
+{
+    if (chain.empty()) {
+        return false;
+    }
+    // Per ID: flagged, unflagged
+    std::unordered_map<long, std::pair<bool, bool>> flags;
+    for (const auto& mark : marks) {
+        auto& [flagged, unflagged] = flags[mark.tag];
+        (mark.suppressed ? flagged : unflagged) = true;
+    }
+    for (const auto& [tag, suppressed] : chain) {
+        const auto it = flags.find(tag);
+        const bool flagged = it != flags.end() && it->second.first;
+        const bool unflagged = it != flags.end() && it->second.second;
+        // Both: two objects share the ID (another document's, F5), and the record can't tell
+        // which was the chain's
+        if ((flagged && unflagged) || flagged != suppressed) {
+            return true;
+        }
+    }
+    return false;
+}
+
 namespace
 {
 
@@ -3162,8 +3211,10 @@ PlaceVerdict placeVerdict(const ElementFingerprint& saved,
     // judges it by the marks (9.2's own example, design 9.5: box 2 moved onto box 1's vacated
     // place was there, BoxMovedIntoAVacatedPlaceThick, K8FusePinRemovedNeighbourMoved; ops#526
     // D2d). Judged that way only to break: any other verdict keeps D1's lines.
+    // A closure too large has the suppressed objects' marks alone (ops#549, decision 216): as
+    // without marks (an object it doesn't list isn't gone)
     const bool byIndex = !NameAncestry::indexSource(oldName).empty();
-    if ((!lostSource && !byIndex) || saved.marks.empty() || oldName.empty()) {
+    if ((!lostSource && !byIndex) || saved.marks.empty() || saved.marksPartial || oldName.empty()) {
         return say(PlaceVerdict::Unjudged, {});
     }
     auto markOf = [&](std::string_view tag) -> const ElementFingerprint::Mark* {

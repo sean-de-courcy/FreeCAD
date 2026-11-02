@@ -1,0 +1,11 @@
+{
+"entries": {
+"RingFailReopenFixUndo|corner_point|V2s": {"axes": [], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review props549-r2", "issue": "ops#549", "tier": "F"},
+"RingFailUndoRedo|corner_point|V2s": {"axes": [], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review props549-r2", "issue": "ops#549", "tier": "F"},
+"SlabFailReopenFixUndo|slab_top_plane|V2s": {"axes": [], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review props549-r2", "issue": "ops#549", "tier": "F"},
+"SlabFailReopenTwice4m|slab_top_plane|V2s": {"axes": [], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review props549-r2", "issue": "ops#549", "tier": "F"},
+"SlabFailReopenTwice|slab_top_plane|V2s": {"axes": [], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review props549-r2", "issue": "ops#549", "tier": "F"},
+"SlabFailUndoRedo|slab_top_plane|V2s": {"axes": [], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review props549-r2", "issue": "ops#549", "tier": "F"},
+"SlabStaleUndo|slab_top_plane|V2s": {"axes": [], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review props549-r2", "issue": "ops#549", "tier": "F"}
+}
+}

@@ -76,7 +76,7 @@
 "TopBottomRedrawnTurnedFace|leg1|V2s": {"axes": ["M3", "E7", "E2"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6is", "issue": "ops#469", "tier": "F"},
 "TopBottomRedrawnTurnedFace|leg2|V2s": {"axes": ["M3", "E7", "E2"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6is", "issue": "ops#469", "tier": "F"},
 "TopBottomRedrawnTurnedFace|leg3|V2s": {"axes": ["M3", "E7", "E2"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6is", "issue": "ops#469", "tier": "F"},
-"TopBottomRedrawnTurnedFace|start_pt|V2s": {"accepted": "decision 193", "axes": ["M3", "E7", "E2"], "classes": ["B"], "expect": "CORRECT", "expected": "wrong", "found_by": "review pr383-r6is", "issue": "ops#469", "tier": "F"},
+"TopBottomRedrawnTurnedFace|start_pt|V2s": {"accepted": "decision 193", "axes": ["M3", "E7", "E2"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6is", "issue": "ops#469", "tier": "F"},
 "TopBottomRedrawnTurnedSmallWiden|leg0|V2s": {"axes": ["M3", "E7", "E2"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6is", "issue": "ops#469", "tier": "F"},
 "TopBottomRedrawnTurnedSmallWiden|leg1|V2s": {"axes": ["M3", "E7", "E2"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6is", "issue": "ops#469", "tier": "F"},
 "TopBottomRedrawnTurnedSmallWiden|leg2|V2s": {"axes": ["M3", "E7", "E2"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6is", "issue": "ops#469", "tier": "F"},
