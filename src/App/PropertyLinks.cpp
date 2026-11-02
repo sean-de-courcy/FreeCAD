@@ -100,11 +100,13 @@ static void registerAtNextAttach(PropertyLinkBase* prop, const char* sub)
 static std::unordered_set<PropertyLinkBase*> _ResolveAfterRestore;
 
 // The properties whose record a refresh held back while the reference's target was still to be
-// recomputed (ops#564): taken again at the end of their document's recompute
-// (updateHeldElementFingerprints()). A destroyed property leaves the set.
+// recomputed (ops#564): taken again at the end of a document's recompute, or after a feature's
+// recompute outside one (updateHeldElementFingerprints()). A destroyed property leaves the set.
 static std::unordered_set<PropertyLinkBase*> _HeldFingerprints;
-// Set while updateHeldElementFingerprints() runs: the recompute is over
-static bool _RecomputeEnded = false;
+// Set while updateHeldElementFingerprints() runs: the document whose recompute is over, or
+// _TakeHeld after a feature's recompute outside one (every held record is taken)
+static const App::Document* _RecomputeEnded = nullptr;
+static bool _TakeHeld = false;
 
 // The element a reference named before a link retarget made it index-only (ops#106): the sub,
 // the object it is a sub of (compared by address only), and the old element's fingerprint. The
@@ -1150,20 +1152,27 @@ std::string PropertyLinkBase::_getElementFingerprint(App::DocumentObject* featur
 
 // Whether the model a record would be taken from now is still to be recomputed (ops#564): an
 // object of the record's closure is touched (the one executing stays touched until it is done,
-// and the next one is touched only then, so a target downstream of it counts through it). Once
-// the recompute is over, only the reference's object or the element's holder still touched holds
-// it: what else is left touched (a Body's members held by its roll-back bar, behind a binder) didn't
-// make the target's shape, and a record kept past the recompute would date what was drawn since
-// as drawn again (review prd2dopus-r3 R3-1). Taken too early, it can only date the edit as there
-// before, and break.
+// and the next one is touched only then, so a target downstream of it counts through it). Once a
+// recompute is over, only what it didn't include holds it (a partial recompute, another
+// document): what it passed over and left touched (a Body's members held by its roll-back bar, a
+// feature that failed) won't be made before the next edit, and a record kept past the recompute
+// would date what was drawn since as drawn again (review prd2dopus-r3 R3-1). After a feature's
+// recompute outside a document's, which leaves it touched, nothing holds it (review pr564opus-r1
+// T2). Taken too early, a record can only date the edit as there before, and break.
 static bool recordPending(const std::vector<App::DocumentObject*>& closure)
 {
-    const auto count = _RecomputeEnded ? std::min<std::size_t>(closure.size(), 2) : closure.size();
-    for (std::size_t i = 0; i < count; ++i) {
-        auto object = closure[i];
-        if (object && object->isAttachedToDocument() && object->isTouched()) {
-            return true;
+    if (_TakeHeld) {
+        return false;
+    }
+    for (auto object : closure) {
+        if (!object || !object->isAttachedToDocument() || !object->isTouched()) {
+            continue;
         }
+        if (_RecomputeEnded && object->getDocument() == _RecomputeEnded
+            && object->testStatus(ObjectStatus::PendingRecompute)) {
+            continue;
+        }
+        return true;
     }
     return false;
 }
@@ -6393,16 +6402,37 @@ void App::queueReferencesIntoOtherDocuments(const Document* doc)
 
 void App::updateHeldElementFingerprints(const Document* doc)
 {
+    // Every document's: a holder in another document than its target is solved in the target's
+    // recompute (review pr564opus-r1 T1). Not one whose own document is in a recompute still
+    // running (this one nested in it): its end takes it.
     std::vector<PropertyLinkBase*> held;
     for (auto prop : _HeldFingerprints) {
         auto owner = freecad_cast<DocumentObject*>(prop->getContainer());
-        if (owner && owner->isAttachedToDocument() && owner->getDocument() == doc) {
+        if (owner && owner->isAttachedToDocument()
+            && (owner->getDocument() == doc
+                || !owner->getDocument()->testStatus(Document::Recomputing))) {
             held.push_back(prop);
         }
     }
     // One at a time: taking one can destroy a later one, which leaves the set. One whose target
-    // is still touched puts itself back.
-    Base::StateLocker ended(_RecomputeEnded);
+    // is still to be recomputed puts itself back.
+    struct Ended
+    {
+        const Document* previous = _RecomputeEnded;
+        bool took = _TakeHeld;
+        explicit Ended(const Document* doc)
+        {
+            _RecomputeEnded = doc;
+            _TakeHeld = !doc;
+        }
+        ~Ended()
+        {
+            _RecomputeEnded = previous;
+            _TakeHeld = took;
+        }
+        Ended(const Ended&) = delete;
+        Ended& operator=(const Ended&) = delete;
+    } ended(doc);
     for (auto prop : held) {
         if (_HeldFingerprints.erase(prop) == 0) {
             continue;

@@ -4692,6 +4692,12 @@ bool Document::recomputeFeature(DocumentObject* feature, bool recursive)
         }
     }
     signalRecomputedObject(*feature);
+    // The records held back while its target was to be recomputed (ops#564): a feature's
+    // recompute alone leaves it touched, so the gating can't tell them apart: taken (review
+    // pr564opus-r1 T2)
+    if (!isRecomputingOnThisThread()) {
+        updateHeldElementFingerprints(nullptr);
+    }
     return feature->isValid();
 }
 

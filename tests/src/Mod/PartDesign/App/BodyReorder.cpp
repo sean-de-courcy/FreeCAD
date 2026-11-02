@@ -663,4 +663,44 @@ TEST_F(RecordRefreshChain, anObjectLeftTouchedDoesntHoldTheRecordPastTheRecomput
     EXPECT_GT(markOf(record(link), sketchOf(p(4))), markOf(before, sketchOf(p(4))));
 }
 
+TEST_F(RecordRefreshChain, aPartialRecomputeWithoutTheTargetKeepsTheRecordHeld)
+{
+    // Arrange: the redraw and the reference set again, held (review pr564opus-r1 T3)
+    auto link = holder();
+    const auto before = record(link);
+    auto spare = _doc->addObject<App::FeatureTest>("Spare");
+    redrawBoss(4);
+    link->LinkSub.setValue(_body, link->LinkSub.getSubValues());
+
+    // Act: a recompute of another object only
+    _doc->recompute({spare});
+
+    // Assert: P4's sketch wasn't in it and is still to be recomputed, so the record is still held
+    EXPECT_TRUE(sketchOf(p(4))->isTouched());
+    EXPECT_EQ(record(link), before);
+    //   and the document's recompute takes it, the redraw included
+    _doc->recompute();
+    EXPECT_GT(markOf(record(link), sketchOf(p(4))), markOf(before, sketchOf(p(4))));
+}
+
+TEST_F(RecordRefreshChain, aFeatureRecomputedAloneTakesTheHeldRecord)
+{
+    // Arrange: the redraw and the reference set again, held
+    auto link = holder();
+    const auto before = record(link);
+    redrawBoss(4);
+    link->LinkSub.setValue(_body, link->LinkSub.getSubValues());
+    ASSERT_EQ(record(link), before);
+
+    // Act: the sketch recomputed alone (obj.recompute(), a task dialog's preview), which leaves
+    // it touched
+    _doc->recomputeFeature(sketchOf(p(4)), false);
+
+    // Assert: the gating can't tell what is still to come there, so the record is taken (review
+    // pr564opus-r1 T2: a record held past it would date a sibling dragged onto the place as drawn
+    // again)
+    EXPECT_TRUE(sketchOf(p(4))->isTouched());
+    EXPECT_GT(markOf(record(link), sketchOf(p(4))), markOf(before, sketchOf(p(4))));
+}
+
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
