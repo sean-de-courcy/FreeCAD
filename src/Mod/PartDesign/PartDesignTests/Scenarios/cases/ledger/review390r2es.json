@@ -1,0 +1,10 @@
+{
+"entries": {
+"R2esSlidReopenedFirst|first|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr390-r2es", "issue": "ops#468", "tier": "F"},
+"R2esSlidReopenedFirst|second|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r2es", "issue": "ops#468", "tier": "F"},
+"R2esSlidThenReopen|first|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr390-r2es", "issue": "ops#468", "tier": "F"},
+"R2esSlidThenReopen|second|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr390-r2es", "issue": "ops#468", "tier": "F"},
+"R2esSlidTwoStepsCircleFirst|first|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr390-r2es", "issue": "ops#468", "tier": "F"},
+"R2esSlidTwoStepsCircleFirst|second|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr390-r2es", "issue": "ops#468", "tier": "F"}
+}
+}
