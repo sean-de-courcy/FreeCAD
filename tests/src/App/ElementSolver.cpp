@@ -7101,6 +7101,83 @@ TEST(Moved, closedEdgeTwinOffItsPlaceOnItsUpToFaceBreaksAsATwin)
     EXPECT_TRUE(evidenceHas(outcome, "can't be told")) << describe(outcome);
 }
 
+TEST(Moved, lonePieceSavedAsATwinOffItsUpToFaceBreaksOnItsCount)
+{
+    // ops#524 on fork PR 390's round 2d (ops#468): the literal stop (a moved twin whose count
+    // changed) and the up-to face test on one reference. A far piece on its up-to plate, saved as
+    // one of two twins, now alone and moved alone, still overlapping its old place: no twin is
+    // left, so the up-to face test is asked, and the count changed (2 saved, 1 now). Either stop
+    // breaks it; the count's evidence comes first. Saved without twins, the up-to face test alone
+    // decides, as in lonePieceThatMovedAloneOffItsPlaceOnItsFaceBreaks.
+    const auto plate = plateElement("plate", 'F');
+    const auto plateFace = upToPlate(-10, 20, "Plate");
+    int asked = 0;
+    std::optional<bool> inside = false;
+    auto solve = [&](int savedTwins) {
+        SolveInput input;
+        input.diagonal = 40;
+        input.pool["Face"] = {element("Face4", {farPiece({plate})}),
+                              element("Face9", {sketchEdge(9)})};
+        measure(input, {{"Face4", capBox(-2.5, 0, -0.5, 0.5)}, {"Face9", capAt(20, 3)}}, nullptr);
+        auto entry = exact("Face4");
+        entry.exactName = farPiece({plate});
+        entry.fingerprint = capBox(-3, -1, -0.5, 0.5);
+        entry.fingerprint.twinCount = savedTwins;
+        if (savedTwins >= 2) {
+            entry.fingerprint.twinCentroid = Base::Vector3d(0, 0, 0);
+        }
+        entry.fingerprint.upToFaces = {plateFace};
+        entry.fingerprint.upToFaces[0].foot = Base::Vector3d(-2, 0, 10);
+        input.entries = {entry};
+        // The Pad's frame moved by 2.5 along x against the plate's, as in the test above
+        input.upToFacesAt = [&](const std::string&,
+                                const Base::Vector3d& point,
+                                std::vector<ElementFingerprint::UpToFace>& faces,
+                                std::vector<ElementFingerprint::UpToFace>& all) {
+            ++asked;
+            auto onPlate = plateFace;
+            onPlate.foot = Base::Vector3d(point.x + 2.5, point.y, 10);
+            faces = {onPlate};
+            all = {plateFace};
+            return true;
+        };
+        input.upToPathInside = [&](const std::string&,
+                                   const ElementFingerprint::UpToFace&,
+                                   const Base::Vector3d&) {
+            return inside;
+        };
+        asked = 0;
+        return Data::solveOwner(input)[0];
+    };
+    auto evidenceHas = [](const SolveOutcome& outcome, const char* text) {
+        return outcome.evidence.find(text) != std::string::npos;
+    };
+    //   the path leaves the face: broken by both, the count's evidence first
+    auto outcome = solve(2);
+    EXPECT_GT(asked, 0);
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << describe(outcome);
+    EXPECT_TRUE(evidenceHas(outcome, "2 saved, 1 now")) << describe(outcome);
+    outcome = solve(0);
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << describe(outcome);
+    EXPECT_TRUE(evidenceHas(outcome, "off its place on its up-to face")) << describe(outcome);
+    //   it stays on the face (the up-to face test keeps it): the count still breaks it; saved
+    //   without twins, or alone, it stands
+    inside = true;
+    outcome = solve(2);
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << describe(outcome);
+    EXPECT_TRUE(evidenceHas(outcome, "2 saved, 1 now")) << describe(outcome);
+    EXPECT_EQ(describe(solve(0)), "exact Face4 0 [] ");
+    EXPECT_EQ(describe(solve(1)), "exact Face4 0 [] ");
+    //   the path can't be told: broken by both, the count's evidence first
+    inside.reset();
+    outcome = solve(2);
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << describe(outcome);
+    EXPECT_TRUE(evidenceHas(outcome, "2 saved, 1 now")) << describe(outcome);
+    outcome = solve(0);
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << describe(outcome);
+    EXPECT_TRUE(evidenceHas(outcome, "can't be told")) << describe(outcome);
+}
+
 TEST(Moved, slidWithinUpToFaceRefusesCopySection)
 {
     // ops#524, review prA1c-r1's MirrorCopyAcrossHole (PLAN decision 199 (2)): a Mirrored copy of
