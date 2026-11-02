@@ -3173,9 +3173,18 @@ PlaceVerdict placeVerdict(const ElementFingerprint& saved,
                                    });
         return it != saved.marks.end() && it->tag == *number ? &*it : nullptr;
     };
-    // A lost source's object the record has no mark of: a gap in the closure, never quiet
+    // A lost source's object the record has no mark of: a gap in the closure, never quiet. An
+    // index-made old name's object is the old element's only source, so a record without it was
+    // taken after the object had left the model: the target's recompute refreshes the record from
+    // the element the old index now gives, before the solve (box 1 deleted, the record taken from
+    // box 2's edge at its place, BoxMovedIntoAVacatedPlaceThick). Nothing of the old element
+    // survives: it breaks (policy D).
     for (const auto& source : requiredSourcesOf(oldName)) {
         if (!markOf(source.tag)) {
+            if (byIndex) {
+                return say(PlaceVerdict::SourceGone,
+                           "its old source " + source.tag + " had left the model");
+            }
             return say(PlaceVerdict::Unjudged, {});
         }
     }
@@ -5748,7 +5757,8 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 }
                 return false;
             }
-            if (verdict != PlaceVerdict::OtherSide && verdict != PlaceVerdict::WasThere) {
+            if (verdict != PlaceVerdict::OtherSide && verdict != PlaceVerdict::WasThere
+                && verdict != PlaceVerdict::SourceGone) {
                 return false;
             }
             state.decided = true;

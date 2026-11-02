@@ -1907,7 +1907,8 @@ bool reboundInPlace(DocumentObject* obj, const std::string& sub, const GuessReco
         // T1''s test: an element that lost the old name's sources is quiet only when the record
         // says it is the element drawn again there (ops#526 D2, placeVerdict(): its sides the
         // old element's, every source it doesn't share new to a sketch the target was built
-        // from); a sibling moved onto the place, or a record without the marks, is never quiet
+        // from); a sibling moved onto the place, a record without the marks, or one taken after
+        // an index-made old element's object left the model (SourceGone), is never quiet
         // (PLAN decisions 155 and 165). Judged on the record the solver judged (the guess's
         // snapshot), never on a refreshed one. The solver's own form of the test also exempts
         // tier 1's ancestry and IDX survivors; this one doesn't, which can only warn where the
@@ -1918,7 +1919,7 @@ bool reboundInPlace(DocumentObject* obj, const std::string& sub, const GuessReco
             const Data::PlaceVerdict verdict = geo->getElementFingerprint(elementName.oldName.c_str(), now)
                 ? Data::placeVerdict(saved, now, names, oldName, lost, tolerances)
                 : Data::PlaceVerdict::Unjudged;
-            if (verdict == Data::PlaceVerdict::OtherSide
+            if (verdict == Data::PlaceVerdict::OtherSide || verdict == Data::PlaceVerdict::SourceGone
                 || (lost && verdict != Data::PlaceVerdict::Quiet)) {
                 return false;
             }

@@ -10253,6 +10253,13 @@ TEST(SolveOwner, indexMadeOldNameIsJudgedByItsObject)
     //   an object the record has no mark of (made since): D1's lines, never another level
     EXPECT_EQ(Data::placeVerdict(record, now, {indexed("Edge10", 13, "MKR")}, oldEdge, false, {}),
               Data::PlaceVerdict::Unjudged);
+    //   a record without the old name's object: taken after box 1 left the model (box 3's
+    //   recompute refreshed it from box 2's edge under the old index, before the solve; D2e)
+    ElementFingerprint refreshed = LongBoard::edgeAt(0);
+    refreshed.marks = {{11, -1}, {12, -1}};
+    EXPECT_EQ(Data::placeVerdict(refreshed, now, {moved}, oldEdge, false, {}, &why),
+              Data::PlaceVerdict::SourceGone);
+    EXPECT_EQ(why, "its old source 10 had left the model");
     //   an old name with a lineage keeps T1''s gate: unjudged while no source is lost
     const auto mapped = section({"Edge10"}, {}, 10, "XTR", 0, 'E', {"SRC"});
     EXPECT_EQ(Data::placeVerdict(record, now, {moved}, mapped, false, {}),

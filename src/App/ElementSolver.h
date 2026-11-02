@@ -570,6 +570,10 @@ enum class PlaceVerdict
     /// One of its unshared sources was in the model when the record was taken: a sibling moved
     /// onto the vacated place.
     WasThere,
+    /// The old name was made from an index and the record has no mark of its object, the old
+    /// element's only source: the record was taken after that object had left the model, so
+    /// nothing of the old element survives (policy D): never quiet.
+    SourceGone,
 };
 
 /** The record's verdict on \a pick, an element at \a saved's place named \a names, for a
@@ -580,8 +584,9 @@ enum class PlaceVerdict
  * \a names that \a oldName doesn't share is judged, an ID against its object's mark (above it:
  * new), an object without IDs by whether the record lists it; WasThere if any was there, Normal
  * if none was but one's object isn't listed, Quiet otherwise. Unjudged without marks, without
- * an unshared source to judge, or when a source of the old name's maker has no mark. Without
- * \a lostSource: Unjudged unless the sides disagree. \a why, if given, gets the evidence.
+ * an unshared source to judge, or when a source of the old name's maker has no mark; SourceGone
+ * there when \a oldName was made from an index. Without \a lostSource: Unjudged unless the sides
+ * disagree. \a why, if given, gets the evidence.
  */
 AppExport PlaceVerdict placeVerdict(
     const ElementFingerprint& saved,
