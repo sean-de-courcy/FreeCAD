@@ -425,7 +425,8 @@ names it.
 | `infra/522-ellipse-plate` | infra | ops#522 | - | `integration` `5422b1a35d` | `a54ea8c2c7` (fork PR 400), 2026-10-29 | never (fork tests) |
 | `infra/469-oracle-pcv-mask` | infra | ops#551, ops#469 | - | `integration` `a54ea8c2c7` | `d80cbc73f9` (fork PR 401), 2026-10-31 | never (fork tests) |
 | `fix/522-made-whole-same-face` | fix | ops#522 | - | `integration` `a54ea8c2c7` | `4f8f40d9bc` (fork PR 398), 2026-10-31 | never (fork fix) |
-| `infra/523-masker-all-docs` | infra | ops#523, ops#264 | - | `integration` `d80cbc73f9` | (fork PR 402) | never (fork tests) |
+| `infra/523-masker-all-docs` | infra | ops#523, ops#264 | - | `integration` `d80cbc73f9` | `2f06170041` (fork PR 402), 2026-10-31 | never (fork tests) |
+| `infra/526-accept-220` | infra | ops#526 | - | `integration` `2f06170041` | (fork PR 406) | never (fork tests) |
 
 ## Fork-only commits in carried topics
 
