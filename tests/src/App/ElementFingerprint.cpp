@@ -1168,9 +1168,10 @@ TEST(ElementFingerprint, rigidMotion)
         ElementFingerprint::rigidMotion(with(saved, mirror), with(flipped, mirror), tolerance, angle);
     EXPECT_TRUE(mirrorFlipped.has_value());
 
-    //   a vector input goes with the part: a pad's direction turned with its sketch (as a
-    //   direction), a revolve's base point moved (as a point) keep it rigid; a custom direction
-    //   left in the body under the flip doesn't (RevPadCustomDirectionFlipped)
+    //   a vector input turns with the part as a direction: a pad's direction turned with its
+    //   sketch keeps it rigid; a custom direction left in the body under the flip doesn't
+    //   (ReviewPadCustomDirectionFlipped), nor under a half turn about a line through its tip
+    //   (ReviewPadCustomDirectionFlippedAtZ1: as a point it would stay)
     auto vectorInput = [](const std::string& key, const Base::Vector3d& value) {
         ElementFingerprint::Source source;
         source.key = key;
@@ -1189,16 +1190,16 @@ TEST(ElementFingerprint, rigidMotion)
                     .has_value());
     EXPECT_FALSE(ElementFingerprint::rigidMotion(with(saved, padSaved), with(flipped, padSaved), tolerance, angle)
                      .has_value());
-    const Base::Vector3d basePoint(0, 3, 4);
-    Base::Vector3d basePointTurned;
-    turn.multVec(basePoint, basePointTurned);
-    EXPECT_TRUE(ElementFingerprint::rigidMotion(
-                    with(saved, vectorInput("2.Base", basePoint)),
-                    with(turned, vectorInput("2.Base", basePointTurned)),
-                    tolerance,
-                    angle
-    )
-                    .has_value());
+    const Base::Placement flipAtZ1 = Base::Placement(Base::Vector3d(0, 0, 1), Base::Rotation())
+        * flip * Base::Placement(Base::Vector3d(0, 0, -1), Base::Rotation());
+    const std::vector<ElementFingerprint::Source> flippedAtZ1 {
+        placed("1", flipAtZ1 * base),
+        placed("2", flipAtZ1 * holes)
+    };
+    EXPECT_FALSE(
+        ElementFingerprint::rigidMotion(with(saved, padSaved), with(flippedAtZ1, padSaved), tolerance, angle)
+            .has_value()
+    );
     //   a direction the turn maps onto itself stays rigid when it stays (z under the turn about z)
     EXPECT_TRUE(ElementFingerprint::rigidMotion(with(saved, padSaved), with(turned, padSaved), tolerance, angle)
                     .has_value());

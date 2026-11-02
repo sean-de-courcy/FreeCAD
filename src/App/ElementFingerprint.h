@@ -143,11 +143,12 @@ namespace Data
  *   in body coordinates; `L<key>:<x>,<y>,<z>,<dx>,<dy>,<dz>` and `P<key>:...` for an origin line or
  *   plane the chain names as geometry (a revolve's axis, a mirror plane, a sketch's external
  *   geometry), a point and its direction or normal (`M<key>:...` a plane named only as a mirror
- *   plane, whose normal has no sense); `V<key>.<property>:<x>,<y>,<z>` for a vector property of
- *   the chain or the target (a pad's custom direction, a revolve's axis), its value. The key is
- *   the object's ID, with `@<document>` for another document's. The part moved as one piece when
- *   one motion takes every source to its place now, leaves every locus where it is, and carries
- *   every vector with it, as a direction or as a point.
+ *   plane, whose normal has no sense); `V<key>.<property>:<x>,<y>,<z>` for a vector input of the
+ *   chain or the target (a vector property neither read-only nor an output: a pad's custom
+ *   direction, a pipe's binormal), its value. The key is the object's ID, with `@<document>` for
+ *   another document's. The part moved as one piece when one motion takes every source to its
+ *   place now, leaves every locus where it is, and turns every vector input with it as a
+ *   direction.
  *
  * Numbers have 12 significant digits, in the classic locale, so the text is the same on every
  * platform and in every locale. A reader takes a version it doesn't know as no fingerprint.

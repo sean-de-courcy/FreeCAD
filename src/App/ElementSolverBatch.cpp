@@ -256,10 +256,16 @@ void placementSources(const GeoFeature* geo, std::vector<Data::ElementFingerprin
         object->getPropertyList(properties);
         for (Property* property : properties) {
             const char* name = property->getName();
-            // A vector input (a pad's custom direction, kept in body coordinates): it must go with
-            // the part (decision 150: a second silent in the closure, RevPadCustomDirectionFlipped,
-            // takes every vector, not a list of names)
+            // A vector input (a pad's custom direction, a pipe's binormal, kept in body
+            // coordinates): it must turn with the part (decision 150: a second silent in the
+            // closure, ReviewPadCustomDirectionFlipped, takes every input, not a list of names).
+            // A read-only or output vector (a revolve's axis, a pad's own direction) is made from
+            // what the closure holds
             if (auto value = dynamic_cast<PropertyVector*>(property); value && name) {
+                if (object->isReadOnly(property)
+                    || (object->getPropertyType(property) & Prop_Output) != 0) {
+                    continue;
+                }
                 Data::ElementFingerprint::Source source;
                 source.key = keyOf(object) + "." + name;
                 source.locus = 'V';
