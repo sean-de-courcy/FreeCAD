@@ -2055,14 +2055,17 @@ bool isWholeProjectionOf(std::string_view name, std::string_view oldName)
  * \a tolerances.size relative (tier 3's: a trimmed B-spline plate's area moved by 4e-5 of itself
  * when only its hole moved). No face saved, or none now (the face under the point is gone), is
  * false; so are two faces now that one saved one matches, under the point or elsewhere (two halves
- * of a square, one where the other was).
+ * of a square, one where the other was). Without \a normals the normal isn't compared: \a now was
+ * taken at another point than the saved one (a piece that slid), where a curved face's normal
+ * differs (review pr403-r5's RoofRedrawn: every slide on a B-spline roof broke).
  */
 bool sameUpToFaces(
     const std::vector<ElementFingerprint::UpToFace>& saved,
     const std::vector<ElementFingerprint::UpToFace>& now,
     const std::vector<ElementFingerprint::UpToFace>& all,
     double eps,
-    const GeometryTolerances& tolerances
+    const GeometryTolerances& tolerances,
+    bool normals = true
 )
 {
     using Face = ElementFingerprint::UpToFace;
@@ -2077,6 +2080,9 @@ bool sameUpToFaces(
     auto same = [&](const Face& a, const Face& b) {
         if (!alike(a, b)) {
             return false;
+        }
+        if (!normals) {
+            return true;
         }
         Base::Vector3d u = a.normal;
         Base::Vector3d v = b.normal;
@@ -2158,7 +2164,9 @@ std::optional<OnUpToFace> placeOnUpToFace(
     if (!point || !input.upToFacesAt(name, *point, under, every)) {
         return std::nullopt;
     }
-    if (under.size() != 1 || !sameUpToFaces(saved.upToFaces, under, every, eps, input.tolerances)) {
+    // The face itself: under the point now, its normal is another point's (a curved face)
+    if (under.size() != 1
+        || !sameUpToFaces(saved.upToFaces, under, every, eps, input.tolerances, false)) {
         return OnUpToFace::Left;
     }
     // Nothing moved the target against the face's owner where the piece was: the old point,
