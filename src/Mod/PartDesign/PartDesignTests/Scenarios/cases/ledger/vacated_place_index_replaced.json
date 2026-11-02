@@ -1,6 +1,6 @@
 {
 "entries": {
-"AdditiveBoxReplacedSamePlace|chamfer|V2s": {"axes": ["M1", "E5"], "classes": ["D"], "expect": "GUESSED", "expected": "broken", "found_by": "review prd2eopus-r5", "issue": "ops#564", "tier": "F"},
+"AdditiveBoxReplacedSamePlace|chamfer|V2s": {"axes": ["M1", "E5"], "classes": ["D"], "expect": "GUESSED", "expected": "correct", "found_by": "review prd2eopus-r5", "issue": "ops#564", "tier": "F"},
 "CompoundBoxReplacedSamePlace|chamfer|V2s": {"axes": ["M4", "E5"], "classes": ["D"], "expect": "GUESSED", "expected": "correct", "found_by": "review prd2eopus-r5", "issue": "ops#526", "tier": "F"},
 "CompoundBoxReplacedSamePlace|corner|V2s": {"axes": ["M4", "E5"], "classes": ["D"], "expect": "GUESSED", "expected": "correct", "found_by": "review prd2eopus-r5", "issue": "ops#526", "tier": "F"},
 "CopiedFusionBox1EdgeCut|chamfer|V2s": {"axes": ["M4", "E2"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review prd2eopus-r5", "issue": "ops#526", "tier": "F"},

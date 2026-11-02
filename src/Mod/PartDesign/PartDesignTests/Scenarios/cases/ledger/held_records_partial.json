@@ -1,0 +1,5 @@
+{
+"entries": {
+"RedrawSetBasePartial|chamfer|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "quiet", "found_by": "review pr564opus-r1", "issue": "ops#564", "tier": "F"}
+}
+}

@@ -1,0 +1,21 @@
+{
+"entries": {
+"OtherPadSlidSingle|inner|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr564son-r1", "issue": "ops#564", "tier": "F"},
+"OtherPadSlidSingle|plane|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr564son-r1", "issue": "ops#564", "tier": "F"},
+"OtherPadSlid|inner|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr564son-r1", "issue": "ops#564", "tier": "F"},
+"OtherPadSlid|plane|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr564son-r1", "issue": "ops#564", "tier": "F"},
+"RollBackHeldSlideRedraw|s2|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "quiet", "found_by": "review pr564son-r1", "issue": "ops#564", "tier": "F"},
+"RollBackHeldSlideThick|s2|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr564son-r1", "issue": "ops#564", "tier": "F"},
+"RollBackHeldSlide|s2|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr564son-r1", "issue": "ops#564", "tier": "F"},
+"SingleRecomputeOfHoldersOnlyThick|inner|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr564son-r1", "issue": "ops#564", "tier": "F"},
+"SingleRecomputeOfHoldersOnlyThick|plane|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "BROKEN", "expected": "wrong", "found_by": "review pr564son-r1", "issue": "ops#564", "tier": "F"},
+"SingleRecomputeOfHoldersOnly|inner|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr564son-r1", "issue": "ops#564", "tier": "F"},
+"SingleRecomputeOfHoldersOnly|plane|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "BROKEN", "expected": "wrong", "found_by": "review pr564son-r1", "issue": "ops#564", "tier": "F"},
+"SingleRecomputeSetterSlideThick|inner|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr564son-r1", "issue": "ops#564", "tier": "F"},
+"SingleRecomputeSetterSlideThick|plane|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "BROKEN", "expected": "wrong", "found_by": "review pr564son-r1", "issue": "ops#564", "tier": "F"},
+"SingleRecomputeThenSlideThick|inner|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr564son-r1", "issue": "ops#564", "tier": "F"},
+"SingleRecomputeThenSlideThick|plane|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "BROKEN", "expected": "wrong", "found_by": "review pr564son-r1", "issue": "ops#564", "tier": "F"},
+"SingleRecomputeThenSlide|inner|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr564son-r1", "issue": "ops#564", "tier": "F"},
+"SingleRecomputeThenSlide|plane|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "BROKEN", "expected": "wrong", "found_by": "review pr564son-r1", "issue": "ops#564", "tier": "F"}
+}
+}

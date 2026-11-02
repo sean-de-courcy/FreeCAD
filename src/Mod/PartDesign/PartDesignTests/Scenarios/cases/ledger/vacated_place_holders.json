@@ -1,15 +1,15 @@
 {
 "entries": {
-"BodyEdgeRedrawn|ext|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review prd2eson-r4", "issue": "ops#564", "tier": "F"},
+"BodyEdgeRedrawn|ext|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "quiet", "found_by": "review prd2eson-r4", "issue": "ops#564", "tier": "F"},
 "BodyEdgeSiblingDraggedIn|ext|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review prd2eson-r4", "issue": "ops#526", "tier": "F"},
-"RedrawThenReopen|chamfer|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review prd2eson-r4", "issue": "ops#564", "tier": "F"},
-"RedrawThenSetBase|chamfer|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review prd2eson-r4", "issue": "ops#564", "tier": "F"},
+"RedrawThenReopen|chamfer|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "quiet", "found_by": "review prd2eson-r4", "issue": "ops#564", "tier": "F"},
+"RedrawThenSetBase|chamfer|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "quiet", "found_by": "review prd2eson-r4", "issue": "ops#564", "tier": "F"},
 "SketchSwitchedAwayThenBackRedrawn|inner|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "quiet", "found_by": "review prd2eopus-r4", "issue": "ops#564", "tier": "F"},
-"SketchSwitchedAwayThenBackRedrawn|plane|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review prd2eopus-r4", "issue": "ops#564", "tier": "F"},
+"SketchSwitchedAwayThenBackRedrawn|plane|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "quiet", "found_by": "review prd2eopus-r4", "issue": "ops#564", "tier": "F"},
 "SketchSwitchedAwayThenBackSlid|inner|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "BROKEN", "expected": "wrong", "found_by": "review prd2eopus-r4", "issue": "ops#526", "tier": "F"},
-"SketchSwitchedAwayThenBackSlid|plane|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review prd2eopus-r4", "issue": "ops#526", "tier": "F"},
+"SketchSwitchedAwayThenBackSlid|plane|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review prd2eopus-r4", "issue": "ops#526", "tier": "F"},
 "SketchSwitchedAwayThenBack|inner|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review prd2eopus-r4", "issue": "ops#564", "tier": "F"},
-"SketchSwitchedAwayThenBack|plane|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review prd2eopus-r4", "issue": "ops#564", "tier": "F"},
+"SketchSwitchedAwayThenBack|plane|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review prd2eopus-r4", "issue": "ops#564", "tier": "F"},
 "TwoHoldersLaterRimSlidAfterUndo|inner|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review prd2eopus-r4", "issue": "ops#526", "tier": "F"},
 "TwoHoldersLaterRimSlidAfterUndo|plane|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review prd2eopus-r4", "issue": "ops#526", "tier": "F"},
 "TwoHoldersLaterRimSlidThick|inner|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review prd2eopus-r4", "issue": "ops#526", "tier": "F"},
@@ -17,8 +17,8 @@
 "TwoHoldersLaterRimSlid|inner|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review prd2eopus-r4", "issue": "ops#526", "tier": "F"},
 "TwoHoldersLaterRimSlid|plane|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review prd2eopus-r4", "issue": "ops#526", "tier": "F"},
 "TwoHoldersRimRedrawnInPlace|inner|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "quiet", "found_by": "review prd2eopus-r4", "issue": "ops#564", "tier": "F"},
-"TwoHoldersRimRedrawnInPlace|plane|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review prd2eopus-r4", "issue": "ops#564", "tier": "F"},
+"TwoHoldersRimRedrawnInPlace|plane|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "quiet", "found_by": "review prd2eopus-r4", "issue": "ops#564", "tier": "F"},
 "TwoHoldersSpareDrawnAndSlidOneEdit|inner|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "quiet", "found_by": "review prd2eopus-r4", "issue": "ops#564", "tier": "F"},
-"TwoHoldersSpareDrawnAndSlidOneEdit|plane|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review prd2eopus-r4", "issue": "ops#564", "tier": "F"}
+"TwoHoldersSpareDrawnAndSlidOneEdit|plane|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "quiet", "found_by": "review prd2eopus-r4", "issue": "ops#564", "tier": "F"}
 }
 }
