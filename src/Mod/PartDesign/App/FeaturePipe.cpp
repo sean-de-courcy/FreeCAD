@@ -1295,10 +1295,14 @@ std::optional<double> positionAlong(const std::vector<TopoDS_Edge>& spine, const
 /// perpendicular, the pairing then as at a corner slightly under 90 degrees on every system, for
 /// each pair of a chain in the sections' order along the spine. Beyond the far side, the pairing
 /// against the spine is the only one OCCT finds, and the result gate stops the pipe. None for the
-/// others.
+/// others. Sections turned about axes more than 1e-6 rad apart (right angles along a spine not in
+/// one plane) set  outOfPlane to the centre of the first turned about another: there OCCT
+/// changes its pairing by itself within about 1e-7 rad under 90 degrees, so no turn decides it
+/// (review pr404-r3: a valid solid 9 % short), and the pipe stops (decision 228).
 std::vector<std::optional<gp_Trsf>> sectionTiltsAlong(
     const std::vector<TopoDS_Shape>& sections,
-    const TopoDS_Wire& spine
+    const TopoDS_Wire& spine,
+    std::optional<gp_Pnt>& outOfPlane
 )
 {
     constexpr double past = 1e-9;   // mm, at the section's farthest point
@@ -1378,6 +1382,7 @@ std::vector<std::optional<gp_Trsf>> sectionTiltsAlong(
         }
     }
     std::optional<Facing> previous;
+    std::optional<gp_Dir> turnedAbout;  // the axis of the latest turn
     for (const auto& [position, i] : order) {
         std::optional<Facing> current = facingOf(sections[i]);
         if (previous && current) {
@@ -1393,6 +1398,15 @@ std::vector<std::optional<gp_Trsf>> sectionTiltsAlong(
             if (placedOffset > -reach && offset < past && angle < 1e-6) {
                 // turning the normal about (normal x previous) turns it towards the previous
                 const gp_Dir axis = current->placed.Crossed(previous->normal);
+                // in one plane the turns' axes are parallel, either way; within the bound of
+                // the turns themselves (1e-6 rad), so a section tilted out of the plane by
+                // rounding of its placement (5e-9 rad for a sketch turned about a leg nearly
+                // along -Z) still counts as in it
+                if (turnedAbout && !axis.IsParallel(*turnedAbout, 1e-6)) {
+                    outOfPlane = current->centre;
+                    return tilts;
+                }
+                turnedAbout = axis;
                 gp_Trsf tilt;
                 tilt.SetRotation(gp_Ax1(current->centre, axis), angle);
                 tilts[i] = tilt;
@@ -5719,7 +5733,18 @@ App::DocumentObjectExecReturn* Pipe::execute()
             for (const Part::TopoShape& wire : wiresections.front()) {
                 placed.push_back(wire.getShape().Moved(invObjLoc));
             }
-            sectionTilts = sectionTiltsAlong(placed, TopoDS::Wire(path.getShape()));
+            std::optional<gp_Pnt> outOfPlane;
+            sectionTilts = sectionTiltsAlong(placed, TopoDS::Wire(path.getShape()), outOfPlane);
+            if (outOfPlane) {
+                return new App::DocumentObjectExecReturn(fmt::format(
+                    "Pipe: the section at {} lies at a right angle to the one before it, as other "
+                    "sections do to theirs, about another axis. Sections at right angles along a "
+                    "spine that isn't in one plane aren't supported: the solid would depend on "
+                    "rounding. Turn the spine's corners there away from 90 degrees, or keep its "
+                    "right-angled corners in one plane.",
+                    inPlace(*outOfPlane)
+                ));
+            }
         }
         auto place = [&](Part::TopoShape& wire, size_t index) {
             wire.move(invObjLoc);

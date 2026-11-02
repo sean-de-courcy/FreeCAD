@@ -1967,6 +1967,84 @@ class TestPipeCorners(unittest.TestCase):
                     self.assertValidSolid(pipe)
                     self.assertAlmostEqual(pipe.Shape.Volume, limit, delta=0.2)
 
+    def multisectionChain(self, axes, lengths, sizes, under=0, turn=0, sides=4):
+        """From the origin up along +Z, then each leg turning towards the next of `axes` by 90
+        degrees less `under` radians, the legs `lengths` long: a regular polygon of `sides` sides
+        and circumradius 2 for the profile, one of circumradius `sizes[i]` at the middle of each
+        leg after the first and at the spine's end (the last of `sizes`), each normal to its leg,
+        the last one's sketch turned `turn` degrees about its leg"""
+
+        def polygon(radius):
+            return models.polygon(
+                [
+                    (
+                        radius * math.cos(math.radians(45 * (sides == 4) + 360 * k / sides)),
+                        radius * math.sin(math.radians(45 * (sides == 4) + 360 * k / sides)),
+                    )
+                    for k in range(sides)
+                ]
+            )
+
+        def frame(normal, degrees=0):
+            return App.Rotation(normal, degrees).multiply(App.Rotation(V(0, 0, 1), normal))
+
+        directions = [V(0, 0, 1)]
+        for axis in axes:
+            d = directions[-1]
+            e = (axis - d * axis.dot(d)).normalize()
+            a = math.pi / 2 - under
+            directions.append(d * math.cos(a) + e * math.sin(a) if under else axis)
+        points = [V(0, 0, 0)]
+        for d, length in zip(directions, lengths):
+            points.append(points[-1] + d * length)
+        spine = models.feature(self.doc, "Path", Part.makePolygon(points))
+        placements = [
+            App.Placement(points[i] + directions[i] * lengths[i] / 2, frame(directions[i]))
+            for i in range(1, len(directions) - 1)
+        ]
+        placements.append(App.Placement(points[-1], frame(directions[-1], turn)))
+        sections = [
+            models.sketch(self.doc, f"Section{i}", polygon(size), self.body, placement=placement)
+            for i, (placement, size) in enumerate(zip(placements, sizes))
+        ]
+        return self.pipe(
+            spine,
+            self.profile(polygon(2)),
+            Transformation="Multisection",
+            Sections=sections,
+            Transition="Transformed",
+        )
+
+    def testMultisectionRightAnglesOutOfOnePlaneFail(self):
+        """ops#396, review pr404-r3, decision 228: along a spine whose right angles aren't in one
+        plane, OCCT's pairing of the sections changes by itself within about 1e-7 rad under 90
+        degrees, so no turn of the sections decides it: turned 1e-9 mm, hexagons along the helix
+        +Z, +X, +Y, -Z gave a valid solid 9 % short. Such a pipe stops, the same on every system,
+        also along +Z, +X, +Y with squares. Right angles in one plane turning both ways (+Z, +X,
+        +Z) still give the solid of corners slightly under 90 degrees."""
+        helix = dict(axes=(V(1, 0, 0), V(0, 1, 0), V(0, 0, -1)), lengths=(30, 20, 20, 40))
+        for turn in (0, 30, 90):
+            with self.subTest(helix=True, turn=turn):
+                self.renew()
+                pipe = self.multisectionChain(sizes=(3, 3, 3), turn=turn, sides=6, **helix)
+                self.assertFails(pipe, "right angle", "isn't in one plane aren't supported")
+        with self.subTest("Z-X-Y"):
+            self.renew()
+            pipe = self.multisectionChain((V(1, 0, 0), V(0, 1, 0)), (30, 20, 30), (2.5, 3))
+            self.assertFails(pipe, "right angle", "isn't in one plane aren't supported")
+        zigzag = dict(axes=(V(1, 0, 0), V(0, 0, 1)), lengths=(30, 20, 30), sizes=(2.5, 3))
+        with self.subTest("Z-X-Z", under=1e-4):
+            self.renew()
+            pipe = self.multisectionChain(under=1e-4, **zigzag)
+            self.assertValidSolid(pipe)
+            limit = pipe.Shape.Volume
+        for turn in (0, 90, 180, 270):
+            with self.subTest("Z-X-Z", turn=turn):
+                self.renew()
+                pipe = self.multisectionChain(turn=turn, **zigzag)
+                self.assertValidSolid(pipe)
+                self.assertAlmostEqual(pipe.Shape.Volume, limit, delta=0.2)
+
     def testMultisectionPast90DegreesFails(self):
         """Just under 90 degrees (1e-4 degrees) the pipe nears the right angle's; just past it,
         the only pairing OCCT finds is the section turned against the spine, an inside-out solid:
