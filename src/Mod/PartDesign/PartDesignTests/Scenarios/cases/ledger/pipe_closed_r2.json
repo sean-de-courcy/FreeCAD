@@ -1,11 +1,11 @@
 {
 "entries": {
-"DSlidThenReorderedAndReversed|a_e0|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r2", "issue": "ops#469", "tier": "F"},
+"DSlidThenReorderedAndReversed|a_e0|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr383-r2", "issue": "ops#469", "tier": "F"},
 "DSlidThenReorderedAndReversed|a_e1|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr383-r2", "issue": "ops#469", "tier": "F"},
-"DSlidThenReorderedAndReversed|a_e2|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r2", "issue": "ops#469", "tier": "F"},
+"DSlidThenReorderedAndReversed|a_e2|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr383-r2", "issue": "ops#469", "tier": "F"},
 "DSlidThenReorderedAndReversed|a_e3|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr383-r2", "issue": "ops#469", "tier": "F"},
-"DSlidThenReorderedAndReversed|a_v0|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r2", "issue": "ops#469", "tier": "F"},
-"DSlidThenReorderedAndReversed|a_v1|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r2", "issue": "ops#469", "tier": "F"},
+"DSlidThenReorderedAndReversed|a_v0|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr383-r2", "issue": "ops#469", "tier": "F"},
+"DSlidThenReorderedAndReversed|a_v1|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr383-r2", "issue": "ops#469", "tier": "F"},
 "DSlidThenReorderedAndReversed|a_v2|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr383-r2", "issue": "ops#469", "tier": "F"},
 "DSlidThenReorderedAndReversed|a_v3|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr383-r2", "issue": "ops#469", "tier": "F"},
 "DSlidThenReorderedAndReversed|b_e0|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr383-r2", "issue": "ops#469", "tier": "F"},
