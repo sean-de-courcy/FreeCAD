@@ -1153,12 +1153,13 @@ std::string PropertyLinkBase::_getElementFingerprint(App::DocumentObject* featur
 // Whether the model a record would be taken from now is still to be recomputed (ops#564): an
 // object of the record's closure is touched (the one executing stays touched until it is done,
 // and the next one is touched only then, so a target downstream of it counts through it). Once a
-// recompute is over, what it didn't include holds it (a partial recompute, another document,
-// review pr564opus-r1 T3), and so do the reference's object and the element's holder (closure[0]
-// and [1]) left touched: a target held by a Body's roll-back bar isn't made yet (review
-// pr564opus-r2 R2-2). What else it passed over and left touched (a Body's members behind a
-// binder) didn't make the target's shape, and a record kept past the recompute would date what
-// was drawn since as drawn again (review prd2dopus-r3 R3-1). After a feature's recompute outside
+// recompute is over, only what it didn't include holds it (a partial recompute, another document,
+// review pr564opus-r1 T3). What it included and left touched is taken: a Body's members behind a
+// binder didn't make the target's shape, and a target that made its shape and then failed (a
+// sketch losing an external link) can't be told from one never made (the roll-back bar's: taken
+// early, it breaks, review pr564opus-r2 R2-2). A record kept past the recompute would date what
+// was drawn since as drawn again (reviews prd2dopus-r3 R3-1, pr564opus-r3 T-R3-1, the second silent
+// find here: the literal rule, decision 150). After a feature's recompute outside
 // a document's, which leaves it touched, the records whose closure holds it are taken (review
 // pr564opus-r1 T2), and only those (review pr564opus-r2 R2-1). Taken too early, a record can only
 // date the edit as there before, and break.
@@ -1168,12 +1169,11 @@ static bool recordPending(const std::vector<App::DocumentObject*>& closure)
         && std::find(closure.begin(), closure.end(), _RecomputedAlone) != closure.end()) {
         return false;
     }
-    for (std::size_t i = 0; i < closure.size(); ++i) {
-        auto object = closure[i];
+    for (auto object : closure) {
         if (!object || !object->isAttachedToDocument() || !object->isTouched()) {
             continue;
         }
-        if (i >= 2 && _RecomputeEnded && object->getDocument() == _RecomputeEnded
+        if (_RecomputeEnded && object->getDocument() == _RecomputeEnded
             && object->testStatus(ObjectStatus::PendingRecompute)) {
             continue;
         }

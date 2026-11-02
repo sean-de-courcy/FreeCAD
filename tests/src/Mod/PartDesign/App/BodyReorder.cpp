@@ -723,7 +723,7 @@ TEST_F(RecordRefreshChain, aFeatureRecomputedOutsideTheClosureKeepsTheRecordHeld
     EXPECT_GT(markOf(record(link), sketchOf(p(4))), markOf(before, sketchOf(p(4))));
 }
 
-TEST_F(RecordRefreshChain, aTargetHeldByTheRollBackBarKeepsTheRecordHeld)
+TEST_F(RecordRefreshChain, aTargetLeftTouchedByTheRecomputeDoesntHoldTheRecordPastIt)
 {
     // Arrange: a holder of P4's front bottom edge, the Body rolled back to P3
     auto link = _doc->addObject<App::FeatureTest>("Holder");
@@ -739,14 +739,12 @@ TEST_F(RecordRefreshChain, aTargetHeldByTheRollBackBarKeepsTheRecordHeld)
     link->LinkSub.setValue(p(4), link->LinkSub.getSubValues());
     _doc->recompute();
 
-    // Assert: P4 is held by the bar, not made, so the record is still held (review pr564opus-r2
-    // R2-2)
+    // Assert: P4 is held by the bar, not made, but the run included it and left it touched, as
+    // one that made its shape and then failed: the record is taken, the redraw included (the
+    // loud side: held, a target made then failed dated what was drawn since as drawn again,
+    // review pr564opus-r3 T-R3-1)
     EXPECT_TRUE(_body->holds(p(4)));
     EXPECT_TRUE(p(4)->isTouched());
-    EXPECT_EQ(record(link), before);
-    //   and once the Tip comes forward, the recompute takes it, the redraw included
-    _body->rollToEnd();
-    _doc->recompute();
     EXPECT_GT(markOf(record(link), sketchOf(p(4))), markOf(before, sketchOf(p(4))));
 }
 
