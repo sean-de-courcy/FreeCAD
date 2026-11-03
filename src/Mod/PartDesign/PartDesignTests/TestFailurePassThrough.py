@@ -490,6 +490,40 @@ class FailurePassThroughBase:
         self.assertEqual([o.Name for o in everything if "Touched" in o.State], [])
         self.assertVolume(prism, 45 * math.pi)
 
+    def testReadersOfAContainerOfAFailureFail(self):
+        """An App::Part holds a 2 x 3 x 4 box. A compound of the Part, a binder of the box's top
+        face through the Part's subname path, and a Link to the Part each read the box. The box
+        fails (length zero) and keeps its shape: each reader fails naming the box and keeps its
+        shape, and the Part itself isn't failed. Repaired, everything computes (decision 253)."""
+        assy = self.doc.addObject("App::Part", "Assy")
+        box = models.box(self.doc, "Crate", (2, 3, 4))
+        assy.addObject(box)
+        self.recompute()
+        top = elementWhere(box.Shape, "Face", lambda f: abs(f.CenterOfMass.z - 4) < TOL)
+        compound = self.doc.addObject("Part::Compound", "OfAssy")
+        compound.Links = [assy]
+        binder = self.doc.addObject("PartDesign::SubShapeBinder", "TopBinder")
+        binder.Support = [(assy, (f"{box.Name}.{top}",))]
+        link = self.doc.addObject("App::Link", "AssyLink")
+        link.LinkedObject = assy
+        self.recompute()
+        readers = (compound, binder, link)
+        self.assertValid(assy, box, *readers)
+        self.assertVolume(compound, 24)
+
+        box.Length = 0
+        self.recompute()
+        self.assertStopped(box)
+        self.assertValid(assy)
+        for reader in readers:
+            self.assertStopped(reader, f"'{assy.Label}', and '{box.Label}' in it has an error")
+        self.assertVolume(compound, 24)
+
+        box.Length = 2
+        self.recompute()
+        self.assertValid(assy, box, *readers)
+        self.assertEqual([o.Name for o in readers if "Touched" in o.State], [])
+
     def testBodyMemberOfAFailureOutsideItPassesThrough(self):
         """The hole's depth is an expression on a Part box outside the Body. The box fails (length
         zero): the hole fails naming it, passes the block through, and the boss after it computes
