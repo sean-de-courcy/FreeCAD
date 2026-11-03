@@ -26,6 +26,8 @@ constexpr char markDelimiter = ':';
 constexpr std::string_view suppressedFlag = "s";
 // A closure's marks cut down to its suppressed objects (ops#549, decision 216)
 constexpr std::string_view partialMarks = "+";
+// An object's digest of its other inputs in version 8's sources (decision 231): 64 bits in hex
+constexpr int digestDigits = 16;
 constexpr int fieldCount = 7;
 
 std::vector<std::string_view> split(std::string_view text, char delimiter)
@@ -273,7 +275,8 @@ bool parsePlacement(std::string_view text, Base::Placement& placement)
 
 // Version 8's sources (decision 218): `_`, or entries separated by `/`, each `<key>:<placement>`
 // or `L<key>:` / `P<key>:` / `M<key>:` and a point and a unit direction, or `V<key>.<property>:`
-// and a vector; a key is an ID, `@<document>` after it for another document's object
+// and a vector, or `D<key>:` and a digest in 16 hex digits; a key is an ID, `@<document>` after it
+// for another document's object
 bool parseSources(std::string_view text, std::vector<ElementFingerprint::Source>& sources)
 {
     sources.clear();
@@ -287,7 +290,8 @@ bool parseSources(std::string_view text, std::vector<ElementFingerprint::Source>
         }
         ElementFingerprint::Source source;
         std::string_view key = part.substr(0, colon);
-        if (key.front() == 'L' || key.front() == 'P' || key.front() == 'M' || key.front() == 'V') {
+        if (key.front() == 'L' || key.front() == 'P' || key.front() == 'M' || key.front() == 'V'
+            || key.front() == 'D') {
             source.locus = key.front();
             key.remove_prefix(1);
         }
@@ -310,7 +314,18 @@ bool parseSources(std::string_view text, std::vector<ElementFingerprint::Source>
         }
         source.key = std::string(key);
         const auto value = part.substr(colon + 1);
-        if (source.locus == 'V') {
+        if (source.locus == 'D') {
+            if (value.size() != static_cast<std::size_t>(digestDigits)
+                || !std::all_of(value.begin(), value.end(), [](char c) {
+                       return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+                   })) {
+                return false;
+            }
+            for (char c : value) {
+                source.digest = source.digest * 16 + (c <= '9' ? c - '0' : c - 'a' + 10);
+            }
+        }
+        else if (source.locus == 'V') {
             std::vector<double> values;
             if (!parseList(value, values) || values.size() != 3) {
                 return false;
@@ -350,6 +365,77 @@ std::string ElementFingerprint::formatNumber(double value)
     stream.imbue(std::locale::classic());
     stream << std::setprecision(12) << value;
     return stream.str();
+}
+
+void ElementFingerprint::foldDigest(std::uint64_t& digest, std::string_view text)
+{
+    auto fold = [&digest](std::string_view part) {
+        for (char c : part) {
+            digest ^= static_cast<unsigned char>(c);
+            digest *= 1099511628211ULL;
+        }
+    };
+    auto digit = [&text](std::size_t i) {
+        return i < text.size() && text[i] >= '0' && text[i] <= '9';
+    };
+    auto word = [&text](std::size_t i) {
+        const char c = text[i];
+        return std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '.';
+    };
+    std::size_t done = 0;
+    std::size_t i = 0;
+    while (i < text.size()) {
+        // A number starts at a digit, a sign or a point before one, and not inside a name
+        std::size_t end = i;
+        if (text[end] == '-' || text[end] == '+') {
+            ++end;
+        }
+        if (end < text.size() && text[end] == '.') {
+            ++end;
+        }
+        if (!digit(end) || (i > 0 && word(i - 1))) {
+            ++i;
+            continue;
+        }
+        end = i;
+        if (text[end] == '-' || text[end] == '+') {
+            ++end;
+        }
+        bool fraction = false;
+        while (digit(end)) {
+            ++end;
+        }
+        if (end < text.size() && text[end] == '.') {
+            fraction = true;
+            ++end;
+            while (digit(end)) {
+                ++end;
+            }
+        }
+        if (end < text.size() && (text[end] == 'e' || text[end] == 'E')) {
+            std::size_t exponent = end + 1;
+            if (exponent < text.size() && (text[exponent] == '-' || text[exponent] == '+')) {
+                ++exponent;
+            }
+            if (digit(exponent)) {
+                fraction = true;
+                end = exponent;
+                while (digit(end)) {
+                    ++end;
+                }
+            }
+        }
+        const auto value = fraction && (end == text.size() || !word(end))
+            ? parseNumber(text.substr(i, end - i))
+            : std::nullopt;
+        if (value) {
+            fold(text.substr(done, i - done));
+            fold(formatNumber(*value));
+            done = end;
+        }
+        i = end;
+    }
+    fold(text.substr(done));
 }
 
 std::string ElementFingerprint::toString() const
@@ -501,7 +587,13 @@ std::string ElementFingerprint::toString() const
                 }
                 text += source.key;
                 text += markDelimiter;
-                if (source.locus == 'V') {
+                if (source.locus == 'D') {
+                    static constexpr char hex[] = "0123456789abcdef";
+                    for (int shift = 4 * (digestDigits - 1); shift >= 0; shift -= 4) {
+                        text += hex[(source.digest >> shift) & 0xf];
+                    }
+                }
+                else if (source.locus == 'V') {
                     text += vector(source.point);
                 }
                 else {
@@ -813,7 +905,9 @@ std::optional<Base::Placement> ElementFingerprint::rigidMotion(
         return std::nullopt;
     }
     for (std::size_t i = 0; i < saved.size(); ++i) {
-        if (saved[i].key != now[i].key || saved[i].locus != now[i].locus) {
+        // Nothing else changed (decision 231): a turn made with another edit isn't one piece
+        if (saved[i].key != now[i].key || saved[i].locus != now[i].locus
+            || saved[i].digest != now[i].digest) {
             return std::nullopt;
         }
     }
@@ -848,6 +942,9 @@ std::optional<Base::Placement> ElementFingerprint::rigidMotion(
     for (std::size_t i = 0; i < saved.size(); ++i) {
         const Source& before = saved[i];
         const Source& after = now[i];
+        if (before.locus == 'D') {
+            continue;
+        }
         if (!before.locus) {
             if (!same(motion * before.placement, after.placement)) {
                 return std::nullopt;
