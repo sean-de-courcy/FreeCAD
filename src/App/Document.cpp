@@ -834,6 +834,106 @@ bool failedInputText(const DocumentObject* dependant, const DocumentObject* inpu
     }
     return byExpression;
 }
+
+// FreeCAD-CH (ops#579, decision 253): an object in error that no rule claims, which @p reader
+// reads through its link to @p root with @p sub: an object on the subname's path, or, from where
+// the path ends, a container's member (Group, recursively) or what an App::Link links to. Neither
+// @p reader nor @p root (a direct input, judged as such)
+const DocumentObject* failedReadThrough(const DocumentObject* reader,
+                                        const DocumentObject* root,
+                                        const std::string& sub,
+                                        const RecomputeContinuation* rule)
+{
+    auto failed = [&](const DocumentObject* obj) {
+        return obj && obj != reader && obj != root && obj->isAttachedToDocument() && obj->isError()
+            && !(rule && rule->continuesAfter(obj));
+    };
+    const DocumentObject* end = root;
+    if (sub.find('.') != std::string::npos) {
+        // getSubObject() may run a Python proxy: then only the root is read
+        try {
+            auto path = root->getSubObjectList(sub.c_str());
+            for (auto obj : path) {
+                if (failed(obj)) {
+                    return obj;
+                }
+            }
+            if (!path.empty() && path.back()) {
+                end = path.back();
+            }
+        }
+        catch (...) {
+            FC_ERR("Subname path " << sub << " of " << root->getFullName() << " not read");
+        }
+    }
+    std::set<const DocumentObject*> seen {end};
+    std::vector<const DocumentObject*> queue {end};
+    for (std::size_t i = 0; i < queue.size(); ++i) {
+        auto obj = queue[i];
+        if (failed(obj)) {
+            return obj;
+        }
+        auto linked = obj->getLinkedObject(true);
+        if (linked && seen.insert(linked).second) {
+            queue.push_back(linked);
+        }
+        if (auto group = obj->getExtensionByType<GroupExtension>(true)) {
+            for (auto member : group->Group.getValues()) {
+                if (member && seen.insert(member).second) {
+                    queue.push_back(member);
+                }
+            }
+        }
+    }
+    return nullptr;
+}
+
+// FreeCAD-CH (ops#579, decision 253): @p reader reads an object in error that no rule claims
+// through one of its links (failedReadThrough): the text it fails with, naming both. A container's
+// own Group, hidden links and expressions don't count
+bool failedReadText(const DocumentObject* reader, const RecomputeContinuation* rule, std::string& why)
+{
+    auto group = reader->getExtensionByType<GroupExtension>(true);
+    std::vector<Property*> props;
+    reader->getPropertyList(props);
+    std::vector<DocumentObject*> objects;
+    std::vector<std::string> subs;
+    const std::vector<std::string> whole {std::string()};
+    for (auto prop : props) {
+        auto link = freecad_cast<PropertyLinkBase*>(prop);
+        if (!link || link->getScope() == LinkScope::Hidden || prop == &reader->ExpressionEngine
+            || (group && prop == &group->Group)) {
+            continue;
+        }
+        objects.clear();
+        subs.clear();
+        link->getLinks(objects, true, &subs);
+        for (std::size_t i = 0; i < objects.size(); ++i) {
+            auto root = objects[i];
+            if (!root || root == reader) {
+                continue;
+            }
+            // One object with all the subs (PropertyLinkSub), or one sub per object
+            const std::vector<std::string>* paths = &whole;
+            std::vector<std::string> one;
+            if (subs.size() == objects.size()) {
+                one.push_back(subs[i]);
+                paths = &one;
+            }
+            else if (objects.size() == 1 && !subs.empty()) {
+                paths = &subs;
+            }
+            for (const auto& sub : *paths) {
+                if (auto failed = failedReadThrough(reader, root, sub, rule)) {
+                    why = std::string(prop->getName()) + " links to '" + root->Label.getValue()
+                        + "', and '" + failed->Label.getValue() + "' in it has an error";
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
 }  // namespace
 
 namespace App
@@ -4132,22 +4232,35 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
     // FreeCAD-CH (ops#579): 'failed' failed and no rule claims it. Its dependants are touched; one
     // this recompute won't come to (in another document, or outside a partial recompute) fails
     // now, unless the rule holds it, in its own document's log, which its tree icon and status
-    // read
+    // read. So do those reading it through the containers holding it, and Links to them, which
+    // aren't failed themselves (decision 253)
     auto failDependantsOutside = [&continuation](DocumentObject* failed) {
-        for (auto inObj : failed->getInList()) {
-            if (!inObj || !inObj->isAttachedToDocument()) {
-                continue;
+        std::vector<DocumentObject*> climb {failed};
+        std::set<DocumentObject*> seen {failed};
+        for (std::size_t i = 0; i < climb.size(); ++i) {
+            auto through = climb[i];
+            for (auto inObj : through->getInList()) {
+                if (!inObj || !inObj->isAttachedToDocument() || !seen.insert(inObj).second) {
+                    continue;
+                }
+                std::string why;
+                bool outside = !inObj->testStatus(ObjectStatus::PendingRecompute)
+                    && !(continuation && continuation->holds(inObj));
+                if (outside
+                    && (through == failed ? failedInputText(inObj, failed, why)
+                                          : failedReadText(inObj, continuation.get(), why))) {
+                    auto doc = inObj->getDocument();
+                    doc->clearWarning(inObj);
+                    ReferenceReport::forgetPrintedWarning(inObj);
+                    doc->d->addRecomputeLog(why, inObj);
+                }
+                inObj->enforceRecompute();
+                auto group = inObj->getExtensionByType<GroupExtension>(true);
+                if ((group && group->hasObject(through))
+                    || inObj->getLinkedObject(false) == through) {
+                    climb.push_back(inObj);
+                }
             }
-            std::string why;
-            if (!inObj->testStatus(ObjectStatus::PendingRecompute)
-                && !(continuation && continuation->holds(inObj))
-                && failedInputText(inObj, failed, why)) {
-                auto doc = inObj->getDocument();
-                doc->clearWarning(inObj);
-                ReferenceReport::forgetPrintedWarning(inObj);
-                doc->d->addRecomputeLog(why, inObj);
-            }
-            inObj->enforceRecompute();
         }
     };
 
@@ -4204,6 +4317,11 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
                         if (verdict != AfterInputFailure::Run) {
                             break;
                         }
+                    }
+                    if (verdict == AfterInputFailure::Run
+                        && failedReadText(obj, continuation.get(), why)) {
+                        // One read through a subname path, a container or a Link (decision 253)
+                        verdict = AfterInputFailure::Fail;
                     }
                     if (verdict == AfterInputFailure::Fail) {
                         // It doesn't run: its warning from the last recompute goes (ops#127,

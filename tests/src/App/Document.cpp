@@ -865,6 +865,103 @@ TEST_F(RecomputeContinuationTest, aContainerOfAFailureIsNotFailed)
     EXPECT_EQ(doc()->getErrorDescription(folder), nullptr);
 }
 
+TEST_F(RecomputeContinuationTest, aReaderOfAContainerOfAFailureFailsNamingIt)
+{
+    // Arrange: readers of a folder holding the failure: whole, through a subname path, through a
+    // Link to the folder
+    installRule();
+    auto other = addFailing("Other");
+    auto folder = static_cast<App::DocumentObjectGroup*>(
+        doc()->addObject("App::DocumentObjectGroup", "Folder"));
+    folder->addObject(other);
+    auto whole = add("Whole", folder);
+    auto path = add("Path");
+    path->LinkSub.setValue(folder, std::vector<std::string> {"Other."});
+    auto link = static_cast<App::Link*>(doc()->addObject("App::Link", "FolderLink"));
+    link->LinkedObject.setValue(folder);
+    auto viaLink = add("ViaLink", link);
+
+    // Act
+    doc()->recompute();
+
+    // Assert: the folder itself isn't failed (decision 250 (5)); every reader is (decision 253)
+    EXPECT_FALSE(folder->isError());
+    for (auto [obj, text] :
+         {std::pair<App::DocumentObject*, const char*> {
+              whole, "Source1 links to 'Folder', and 'Other' in it has an error"},
+          {path, "LinkSub links to 'Folder', and 'Other' in it has an error"},
+          // A Link to a group lists its children itself (_ChildCache): a direct input
+          {link, "_ChildCache links to 'Other', which has an error"},
+          {viaLink, "Source1 links to 'FolderLink', which has an error"}}) {
+        EXPECT_TRUE(obj->isError()) << obj->getNameInDocument();
+        ASSERT_NE(doc()->getErrorDescription(obj), nullptr) << obj->getNameInDocument();
+        EXPECT_STREQ(doc()->getErrorDescription(obj), text);
+    }
+    EXPECT_EQ(whole->ExecCount.getValue(), 0);
+
+    // Act: repaired
+    other->ExceptionType.setValue(0);
+    doc()->recompute();
+
+    // Assert
+    for (App::DocumentObject* obj : {static_cast<App::DocumentObject*>(whole),
+                                     static_cast<App::DocumentObject*>(path),
+                                     static_cast<App::DocumentObject*>(link),
+                                     static_cast<App::DocumentObject*>(viaLink)}) {
+        EXPECT_TRUE(obj->isValid()) << obj->getNameInDocument();
+    }
+    EXPECT_EQ(whole->ExecCount.getValue(), 1);
+}
+
+TEST_F(RecomputeContinuationTest, aReaderInAnotherDocumentOfAContainerOfAFailureFailsAtOnce)
+{
+    // Arrange
+    auto& app = App::GetApplication();
+    const std::string otherName = app.getUniqueDocumentName("OtherDocument");
+    App::Document* other = app.newDocument(otherName.c_str(), "testUser");
+    const std::string path = App::Application::getTempFileName() + ".FCStd";
+    const std::string otherPath = App::Application::getTempFileName() + ".FCStd";
+    ASSERT_TRUE(doc()->saveAs(path.c_str()));
+    ASSERT_TRUE(other->saveAs(otherPath.c_str()));
+    auto input = add("Input");
+    auto folder = static_cast<App::DocumentObjectGroup*>(
+        doc()->addObject("App::DocumentObjectGroup", "Folder"));
+    folder->addObject(input);
+    // An App::Link refuses a group in another document (its _ChildCache): a plain XLink reads it
+    auto link = other->addObject("App::FeatureTest", "Reader");
+    auto watched = static_cast<App::PropertyXLink*>(
+        link->addDynamicProperty("App::PropertyXLink", "Watched"));
+    watched->setValue(folder);
+    doc()->recompute();
+    other->recompute();
+    ASSERT_TRUE(link->isValid());
+
+    // Act: only the input's document recomputes
+    input->ExceptionType.setValue(2);
+    doc()->recompute();
+
+    // Assert: the folder isn't failed; the Link reading it fails at once in its own document
+    EXPECT_FALSE(folder->isError());
+    EXPECT_TRUE(link->isError());
+    EXPECT_TRUE(link->isTouched());
+    ASSERT_NE(other->getErrorDescription(link), nullptr);
+    EXPECT_STREQ(other->getErrorDescription(link),
+                 "Watched links to 'Folder', and 'Input' in it has an error");
+
+    // Act: repaired, then the other document recomputes
+    input->ExceptionType.setValue(0);
+    doc()->recompute();
+    other->recompute();
+
+    // Assert
+    EXPECT_TRUE(link->isValid());
+    EXPECT_EQ(other->getErrorDescription(link), nullptr);
+
+    app.closeDocument(otherName.c_str());
+    std::remove(path.c_str());
+    std::remove(otherPath.c_str());
+}
+
 TEST_F(RecomputeContinuationTest, aHeldDependantOfAFailureIsNotFailed)
 {
     // Arrange
