@@ -1410,6 +1410,49 @@ void PropertyLinkBase::restoreLabelReference(const DocumentObject* obj,
     subname = newSub + sub;
 }
 
+// P-beta (FreeCAD-CH, ops#502, PLAN decision 247): a reference that found its element by one of the
+// IDX names an element of a beta file's history-less result keeps as aliases, beside its MLN name,
+// takes the MLN name: the aliases are given at one naming only, so the next one would lose it.
+// \a name is the resolved pair (`<prefix>;<mapped>.<index>` in newName).
+static void takeMatchName(const GeoFeature* geo, ElementNamePair& name)
+{
+    const char* element = Data::findElementName(name.newName.c_str());
+    const char* mapped = element ? Data::isMappedElement(element) : nullptr;
+    if (!mapped || !strstr(mapped, Data::MAPPER_FLAG_INDEX)) {
+        return;
+    }
+    std::string bare(mapped);
+    const auto dot = bare.rfind('.');
+    if (dot == std::string::npos) {
+        return;
+    }
+    const std::string index = bare.substr(dot + 1);
+    bare.resize(dot);
+    const auto& sections = Data::MappedName::getDecodedMappedName(bare);
+    if (sections.size() != 1 || !sections.front().hasMapperFlag(Data::MAPPER_FLAG_INDEX)) {
+        return;
+    }
+    auto prop = geo->getPropertyOfGeometry();
+    auto data = prop ? prop->getComplexData() : nullptr;
+    if (!data) {
+        return;
+    }
+    for (const auto& other :
+         data->getElementMappedNames(Data::IndexedName(index.c_str(), data->getElementTypes()))) {
+        const std::string candidate = other.first.toString();
+        if (candidate.find(";MLN;") == std::string::npos) {
+            continue;
+        }
+        const auto& decoded = Data::MappedName::getDecodedMappedName(candidate);
+        if (decoded.size() == 1 && decoded.front().opCode == "MLN"
+            && !decoded.front().hasMapperFlag(Data::MAPPER_FLAG_INDEX)) {
+            name.newName = std::string(name.newName.c_str(), element)
+                + Data::ComplexGeoData::elementMapPrefix() + candidate + "." + index;
+            return;
+        }
+    }
+}
+
 bool PropertyLinkBase::_updateElementReference(DocumentObject* feature,
                                                App::DocumentObject* obj,
                                                std::string& sub,
@@ -1472,6 +1515,7 @@ bool PropertyLinkBase::_updateElementReference(DocumentObject* feature,
             shadow.oldName.swap(elementName.oldName);
             return false;
         }
+        takeMatchName(geo, elementName);
         if (shadow == elementName) {
             return false;
         }
