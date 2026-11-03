@@ -6531,10 +6531,12 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
                         lacks = otherOrigin(pool.elements[pick], oldName);
                     }
                     const bool atPlace = nearest.index < 0 || !atPlaceAmong({pick}).empty();
-                    // D2's verdict that the pick is the old element drawn again at the place stands
-                    // for a saved twin as for a twin survivor: it breaks a sibling or a former
-                    // element put there itself (OtherSide, WasThere, SourceGone above)
-                    if (!lacks && !redrawn && (twinClause || nearest.index < 0)
+                    // Under the twin clause, T1''s test whatever D2's verdict (decision 227's literal
+                    // stop, review pr390-r2g): a new circle drawn at a twin's old place while the
+                    // old circle moved on, its other crossing tier 1's survivor, gives a pick D2
+                    // calls drawn again, with the old circle's source lost. Outside the clause, D2's
+                    // verdict stands for XP's pick at the place
+                    if (!lacks && (twinClause || (nearest.index < 0 && !redrawn))
                         && lostOldSource(pick)) {
                         lacks = "source element";
                     }

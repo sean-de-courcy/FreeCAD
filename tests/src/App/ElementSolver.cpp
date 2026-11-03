@@ -10721,6 +10721,28 @@ TEST(SolveOwner, redrawnAtThePlaceIsQuiet)
               Data::PlaceVerdict::Unjudged);
 }
 
+TEST(SolveOwner, drawnAgainPickOfASavedTwinHasAnotherSource)
+{
+    // Review pr390-r2g (PR 390's rebase onto D2, decision 227's literal stop): the redraw above,
+    // its record one of two twins. D2 calls the pick drawn again there, but under the twin clause
+    // T1''s test stands: a new circle drawn at a twin's old place while the old circle moved on
+    // is drawn again there too. It breaks, the pick first.
+    LongBoard b;
+    auto input = b.input(LongBoard::edgeAt(0), LongBoard::edgeAt(45));
+    input.entries[0].fingerprint = boardRecord();
+    input.entries[0].fingerprint.twinCount = 2;
+    auto now = boardRecord();
+    now.marks.clear();
+    measure(input, {{"Edge2", now}, {"Edge3", LongBoard::edgeAt(45)}}, nullptr);
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << outcome.evidence;
+    EXPECT_NE(outcome.evidence.find("; the pick Edge2 has another source element"),
+              std::string::npos)
+        << outcome.evidence;
+    ASSERT_FALSE(outcome.candidates.empty());
+    EXPECT_EQ(outcome.candidates.front(), "Edge2");
+}
+
 TEST(SolveOwner, siblingAtTheVacatedPlaceBreaks)
 {
     // The fail-before of ops#526: rim 1's line deleted and rim 2's (g2, in the sketch when the
