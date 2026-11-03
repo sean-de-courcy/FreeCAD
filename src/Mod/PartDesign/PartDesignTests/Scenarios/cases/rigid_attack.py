@@ -571,3 +571,608 @@ class ReviewPadCustomDirectionFlippedAtZ1Free(ReviewPadCustomDirectionFlippedAtZ
 class ReviewPadCustomDirectionFlippedAtZ0Free(ReviewPadCustomDirectionFlippedAtZ1Free):
     """Control for the unattached route: the sketch at z 0 (M v = -v)."""
     lift = 0.0
+
+
+# Round 2c's review cases (pr557s-r2c, pr557o-r2c, at 4fb8af4bbe): a turn made in the same recompute
+# as another edit the record didn't see. A pad's Reversed ticked (R2), the axis line of a revolve or
+# of a pad's ReferenceAxis redrawn or dragged to keep its old sense (F-A, R1), UseCustomVector
+# switched: the part did not move as one piece. Decision 231: a turn reads rigid only if nothing else
+# changed, every object's digest of its other inputs as it was; otherwise the frame rule (211)
+# decides, loud. Expectations follow convention 10.1 (global geometry unchanged: the references stay)
+# or, for a part turned as one piece, decision 212 (they follow).
+
+FLIP_X = App.Placement(V(0, 0, 0), App.Rotation(X, 180))
+
+
+def flipped(p):
+    """A point after the half turn about the global X axis."""
+    return (p[0], -p[1], -p[2])
+
+
+class R2cPadBase(Scenario):
+    """A rectangle x -10..10, y -5..5 on the Body's XY plane (FlatFace), padded 10 (the pad's own
+    direction: the sketch normal, or a sketch line's). The edit turns the base sketch (and any
+    other change the case names). References: the +y wall, the top and the bottom cap, each a
+    sketch attached to the face. Expectations follow convention 10.1 (global geometry unchanged:
+    the references stay) or, for a part turned as one piece, decision 212 (they follow)."""
+
+    abstract = True
+    area = "rigid-review"
+    CLASSES = ("D",)
+    AXES = ("E5",)
+    ISSUE = "ops#557"
+    FOUND_BY = "review pr557s-r2c"
+    TIER = "F"
+    REFS = ("side_py", "top", "bottom")
+    BEFORE = {"side_py": (0, 5, 5), "top": (0, 0, 10), "bottom": (0, 0, 0)}
+    AFTER = None  # None: the references stay
+
+    def point(self, name):
+        if self.stepName and self.AFTER is not None:
+            return V(*self.AFTER[name])
+        return V(*self.BEFORE[name])
+
+    def expect(self, name):
+        return face(surface="plane", contains=self.point(name))
+
+    def profile(self, doc, body):
+        self.base = doc.addObject("Sketcher::SketchObject", "Base")
+        body.addObject(self.base)
+        self.base.AttachmentSupport = [(originFeature(body, "XY_Plane"), "")]
+        self.base.MapMode = "FlatFace"
+        pts = [V(-10, -5, 0), V(10, -5, 0), V(10, 5, 0), V(-10, 5, 0), V(-10, -5, 0)]
+        for i in range(4):
+            self.base.addGeometry(Part.LineSegment(pts[i], pts[i + 1]), False)
+
+    def pad(self, doc, body):
+        pad = body.newObject("PartDesign::Pad", "Pad")
+        pad.Profile = self.base
+        pad.Length = 10
+        return pad
+
+    def build(self, doc):
+        body = doc.addObject("PartDesign::Body", "Body")
+        self.profile(doc, body)
+        self.pad_ = self.pad(doc, body)
+        doc.recompute()
+        assert self.pad_.isValid(), self.pad_.getStatusString()
+        box = self.pad_.Shape.BoundBox
+        assert abs(box.ZMin) < 1e-6 and abs(box.ZMax - 10) < 1e-6, box
+        for name in self.REFS:
+            element = self.names(self.pad_, self.expect(name))[0]
+            owner = doc.addObject("Sketcher::SketchObject", name)
+            body.addObject(owner)
+            owner.AttachmentSupport = [(self.pad_, element)]
+            owner.MapMode = "FlatFace"
+            doc.recompute()
+            self.ref(name, owner, "AttachmentSupport", (lambda n=name: self.expect(n)), Attached())
+
+    def edit(self, doc):
+        self.base.AttachmentOffset = FLIP_X
+        self.edited(doc)
+        doc.recompute()
+        if not self.pad_.isValid():
+            return  # its axis reference broke (the line drawn again): the references show it
+        box = self.pad_.Shape.BoundBox
+        top = 10 if self.AFTER is None else max(self.AFTER["top"][2], self.AFTER["bottom"][2])
+        assert abs(box.ZMax - top) < 1e-6, (box, top)
+
+    def edited(self, doc):
+        pass
+
+
+class R2cPadAxisLineBase(R2cPadBase):
+    """The pad's direction from a sketch line (ReferenceAxis = AxisSketch Edge1), the line drawn
+    local (0, -5) -> (0, 5) on a sketch attached to the XZ plane: global +Z."""
+
+    abstract = True
+    redraw = True
+    construction = False
+    sub = "Edge1"
+
+    def pad(self, doc, body):
+        self.axis = doc.addObject("Sketcher::SketchObject", "AxisSketch")
+        body.addObject(self.axis)
+        self.axis.AttachmentSupport = [(originFeature(body, "XZ_Plane"), "")]
+        self.axis.MapMode = "FlatFace"
+        self.axis.addGeometry(Part.LineSegment(V(0, -5, 0), V(0, 5, 0)), self.construction)
+        doc.recompute()
+        pad = R2cPadBase.pad(self, doc, body)
+        pad.UseCustomVector = False
+        pad.ReferenceAxis = (self.axis, [self.sub])
+        return pad
+
+    def edited(self, doc):
+        self.axis.AttachmentOffset = FLIP_X
+        if self.redraw:
+            self.axis.deleteAllGeometry()
+            self.axis.addGeometry(Part.LineSegment(V(0, 5, 0), V(0, -5, 0)), self.construction)
+
+
+class R2cPadAxisLineFlipRedrawn(R2cPadAxisLineBase):  # the line is a real one on AxisSketch
+    """Both sketches' AttachmentOffsets turn 180 about X (one motion for every placement source)
+    and the axis line is redrawn reversed: the axis stays global +Z while the base sketch's normal
+    turns to -Z. The pad is the same solid (z 0..10), the walls and caps stay."""
+
+
+class R2cPadAxisLineFlipOnly(R2cPadAxisLineBase):
+    """Control: the same turn without the redraw: the axis turns to -Z with the sketch, the pad is
+    z -10..0: the part turned as one piece. The references follow the turn (decision 212)."""
+
+    redraw = False
+    AFTER = {
+        "side_py": flipped((0, 5, 5)),
+        "top": flipped((0, 0, 10)),
+        "bottom": flipped((0, 0, 0)),
+    }
+
+
+class R2cPadReversedFlip(R2cPadBase):
+    """The pad's own direction is the sketch normal. The edit turns the base sketch 180 about X
+    (the normal becomes -Z) and sets Reversed: the pad still goes up, the same solid (z 0..10)."""
+
+    def edited(self, doc):
+        self.pad_.Reversed = True
+
+
+class R2cPadCustomOn(R2cPadBase):
+    """The pad starts on the sketch normal. The edit turns the base sketch 180 about X and turns
+    UseCustomVector on with the direction (0, 0, 1): the pad goes up, the same solid."""
+
+    def edited(self, doc):
+        self.pad_.UseCustomVector = True
+        self.pad_.AlongSketchNormal = False
+        self.pad_.Direction = Z
+
+
+class R2cPadCustomOff(R2cPadBase):
+    """The pad starts with the custom direction (0, 0, 1). The edit turns the base sketch 180 about
+    X and turns UseCustomVector off: the pad goes along the new normal (-Z), z -10..0: the part
+    turned as one piece. The references follow the turn (decision 212)."""
+
+    AFTER = {
+        "side_py": flipped((0, 5, 5)),
+        "top": flipped((0, 0, 10)),
+        "bottom": flipped((0, 0, 0)),
+    }
+
+    def pad(self, doc, body):
+        pad = R2cPadBase.pad(self, doc, body)
+        pad.UseCustomVector = True
+        pad.AlongSketchNormal = False
+        pad.Direction = Z
+        return pad
+
+    def edited(self, doc):
+        self.pad_.UseCustomVector = False
+
+
+class R2cRevAxisBase(Scenario):
+    """A rectangle x 2..4, y -5..5 on the XZ plane (FlatFace), revolved 90 degrees about the line
+    of an axis sketch (attached to the XZ plane, drawn local (0, -5) -> (0, 5): the global Z axis).
+    The edit turns both sketches 180 about X; the quarter's references: the caps and the walls."""
+
+    abstract = True
+    area = "rigid-review"
+    CLASSES = ("D",)
+    AXES = ("E5",)
+    ISSUE = "ops#557"
+    FOUND_BY = "review pr557s-r2c"
+    TIER = "F"
+    REFS = ("top", "bottom", "inner_wall", "outer_wall")
+    redraw = True
+    follows = False
+    construction = True
+    sub = "Axis0"
+    inSketch = True
+
+    def point(self, name):
+        c, s = math.cos(math.radians(45)), math.sin(math.radians(45)) * self.sy
+        p = {
+            "top": ("plane", (3 * c, 3 * s, 5)),
+            "bottom": ("plane", (3 * c, 3 * s, -5)),
+            "inner_wall": ("cylinder", (2 * c, 2 * s, 0)),
+            "outer_wall": ("cylinder", (4 * c, 4 * s, 0)),
+        }[name]
+        if self.stepName and self.follows:
+            return p[0], V(*flipped(p[1]))
+        return p[0], V(*p[1])
+
+    def expect(self, name):
+        kind, p = self.point(name)
+        return face(surface=kind, contains=p)
+
+    def build(self, doc):
+        body = doc.addObject("PartDesign::Body", "Body")
+        self.base = doc.addObject("Sketcher::SketchObject", "Base")
+        body.addObject(self.base)
+        self.base.AttachmentSupport = [(originFeature(body, "XZ_Plane"), "")]
+        self.base.MapMode = "FlatFace"
+        pts = [V(2, -5, 0), V(4, -5, 0), V(4, 5, 0), V(2, 5, 0), V(2, -5, 0)]
+        for i in range(4):
+            self.base.addGeometry(Part.LineSegment(pts[i], pts[i + 1]), False)
+        if self.inSketch:
+            self.axis = self.base
+        else:
+            self.axis = doc.addObject("Sketcher::SketchObject", "AxisSketch")
+            body.addObject(self.axis)
+            self.axis.AttachmentSupport = [(originFeature(body, "XZ_Plane"), "")]
+            self.axis.MapMode = "FlatFace"
+        self.axisIndex = self.axis.addGeometry(
+            Part.LineSegment(V(0, -5, 0), V(0, 5, 0)), self.construction
+        )
+        doc.recompute()
+        self.rev = body.newObject("PartDesign::Revolution", "Rev")
+        self.rev.Profile = self.base
+        self.rev.ReferenceAxis = (self.axis, [self.sub])
+        self.rev.Angle = 90
+        doc.recompute()
+        assert self.rev.isValid(), self.rev.getStatusString()
+        box = self.rev.Shape.BoundBox
+        self.sy = 1.0 if box.YMax > 1.0 else -1.0
+        assert abs(box.ZMin + 5) < 1e-6 and abs(box.ZMax - 5) < 1e-6, box
+        for name in self.REFS:
+            kind = self.point(name)[0]
+            element = self.names(self.rev, self.expect(name))[0]
+            if kind == "plane":
+                owner = doc.addObject("Sketcher::SketchObject", name)
+                body.addObject(owner)
+                owner.AttachmentSupport = [(self.rev, element)]
+                owner.MapMode = "FlatFace"
+            else:
+                owner = body.newObject("PartDesign::Point", name)
+                owner.AttachmentSupport = [(self.rev, element)]
+                owner.MapMode = "CenterOfMass"
+            doc.recompute()
+            self.ref(name, owner, "AttachmentSupport", (lambda n=name: self.expect(n)), Attached())
+
+    def edit(self, doc):
+        self.base.AttachmentOffset = FLIP_X
+        self.axis.AttachmentOffset = FLIP_X
+        if self.redraw:
+            self.axis.delGeometry(self.axisIndex)
+            self.axisIndex = self.axis.addGeometry(
+                Part.LineSegment(V(0, 5, 0), V(0, -5, 0)), self.construction
+            )
+        doc.recompute()
+        if not self.rev.isValid():
+            return  # its axis reference broke (the line drawn again): the references show it
+        box = self.rev.Shape.BoundBox
+        if not self.follows:
+            assert (box.YMax > 1.0) == (self.sy > 0) and abs(box.ZMax - 5) < 1e-6, box
+        else:
+            assert (box.YMax > 1.0) == (self.sy < 0), box
+
+
+class R2cRevAxisLineFlipRedrawn(R2cRevAxisBase):
+    """The axis line is redrawn reversed as both sketches turn: the axis stays global +Z while the
+    profile's sketch turns over (ReviewQuarterRevolveFlipped through a sketch line instead of the
+    origin axis). The solid is unchanged: the references stay."""
+
+
+class R2cRevAxisLineFlipOnly(R2cRevAxisBase):
+    """Control: the same turn without the redraw: the axis turns with the profile, the quarter is
+    the mirrored one (the part turned as one piece): the references follow."""
+
+    redraw = False
+    follows = True
+
+
+class R2cRevAxisEdgeFlipRedrawn(R2cRevAxisLineFlipRedrawn):
+    """The same with the axis a real line on a second sketch (AxisSketch), the revolve's
+    ReferenceAxis its Edge1: the reference to the line is an element reference of its own."""
+
+    construction = False
+    sub = "Edge1"
+    inSketch = False
+
+
+class RevPadAxisLineRedrawnBothFlipped(Scenario):
+    """A rectangle x -10..10, y -5..5 in an unattached sketch Base at the body's origin, padded 10
+    along a REFERENCE AXIS (UseCustomVector off): the line (0,0,0)->(0,0,10) of a second unattached
+    sketch AxisSketch lying in the XZ plane (Placement 90 about X). The pad is z 0..10. The edit
+    turns BOTH sketches over by the same half turn M about the global X axis (Base's Placement,
+    AxisSketch's Placement M*P) and redraws the axis line's end point so that the line still runs
+    (0,0,0)->(0,0,10) globally: the pad is the same solid z 0..10 (the part did not move as one
+    piece: its direction stayed in the body). Every placement source moved by M; the pad's
+    Direction (0,0,1) stayed, but it is read-only and left out of the record.
+    Convention 10.1: every reference stays (the +y wall is still the +y wall)."""
+    area = "rigid-review"
+    CLASSES = ("D",)
+    AXES = ("E5",)
+    ISSUE = "ops#557"
+    FOUND_BY = "review pr557o-r2c"
+    TIER = "F"
+    REFS = ("side_py", "side_my", "top", "bottom")
+    redraw = "move"  # move the line's end point; "replace": delete the line and draw it again
+
+    def points(self):
+        return {"side_py": (0, 5, 5), "side_my": (0, -5, 5), "top": (0, 0, 10), "bottom": (0, 0, 0)}
+
+    def expect(self, name):
+        return face(surface="plane", contains=V(*self.points()[name]))
+
+    def check(self):
+        box = self.pad.Shape.BoundBox
+        assert abs(box.ZMin) < 1e-6 and abs(box.ZMax - 10) < 1e-6, box
+        assert abs(box.YMin + 5) < 1e-6 and abs(box.YMax - 5) < 1e-6, box
+
+    def placeSketches(self, doc, turned):
+        motion = FLIP_X if turned else App.Placement()
+        self.base.Placement = motion
+        self.axis.Placement = motion.multiply(App.Placement(V(0, 0, 0), App.Rotation(X, 90)))
+
+    def build(self, doc):
+        body = doc.addObject("PartDesign::Body", "Body")
+        self.base = doc.addObject("Sketcher::SketchObject", "Base")
+        body.addObject(self.base)
+        self.base.MapMode = "Deactivated"
+        pts = [V(-10, -5, 0), V(10, -5, 0), V(10, 5, 0), V(-10, 5, 0), V(-10, -5, 0)]
+        for i in range(4):
+            self.base.addGeometry(Part.LineSegment(pts[i], pts[i + 1]), False)
+        self.axis = doc.addObject("Sketcher::SketchObject", "AxisSketch")
+        body.addObject(self.axis)
+        self.axis.MapMode = "Deactivated"
+        self.axis.addGeometry(Part.LineSegment(V(0, 0, 0), V(0, 10, 0)), False)
+        self.placeSketches(doc, False)
+        doc.recompute()
+        pad = body.newObject("PartDesign::Pad", "Pad")
+        pad.Profile = self.base
+        pad.Length = 10
+        pad.ReferenceAxis = (self.axis, ["Edge1"])
+        doc.recompute()
+        self.pad = pad
+        assert pad.getEditorMode("Direction") == ["ReadOnly"], pad.getEditorMode("Direction")
+        self.check()
+        for name in self.REFS:
+            element = self.names(pad, self.expect(name))[0]
+            owner = doc.addObject("Sketcher::SketchObject", name)
+            body.addObject(owner)
+            owner.AttachmentSupport = [(pad, element)]
+            owner.MapMode = "FlatFace"
+            doc.recompute()
+            self.ref(name, owner, "AttachmentSupport", (lambda n=name: self.expect(n)), Attached())
+
+    def edit(self, doc):
+        self.placeSketches(doc, True)
+        # In AxisSketch's turned frame, local (0, -10) is global (0, 0, 10)
+        if self.redraw == "move":
+            self.axis.moveGeometry(0, 2, V(0, -10, 0))
+        else:
+            self.axis.delGeometry(0)
+            self.axis.addGeometry(Part.LineSegment(V(0, 0, 0), V(0, -10, 0)), False)
+        doc.recompute()
+        self.check()
+
+
+class RevPadAxisLineBothFlippedRigid(RevPadAxisLineRedrawnBothFlipped):
+    """Control: the same turn with the axis line left as drawn (it turns with its sketch): the pad
+    goes -z, z -10..0, the whole part turned by M. Convention: the references follow the part, the
+    +y wall's reference lands on the wall now at y -5 (z -10..0)."""
+
+    def points(self):
+        return {"side_py": (0, -5, -5), "side_my": (0, 5, -5), "top": (0, 0, -10),
+                "bottom": (0, 0, 0)}
+
+    def build(self, doc):
+        self.turned = False
+        RevPadAxisLineRedrawnBothFlipped.build(self, doc)
+
+    def expect(self, name):
+        pts = self.points() if self.turned else RevPadAxisLineRedrawnBothFlipped.points(self)
+        return face(surface="plane", contains=V(*pts[name]))
+
+    def check(self):
+        box = self.pad.Shape.BoundBox
+        z0, z1 = (-10, 0) if getattr(self, "turned", False) else (0, 10)
+        assert abs(box.ZMin - z0) < 1e-6 and abs(box.ZMax - z1) < 1e-6, box
+
+    def edit(self, doc):
+        self.turned = True
+        self.placeSketches(doc, True)
+        doc.recompute()
+        self.check()
+
+
+class RevPadAxisLineRedrawnBaseFlippedOnly(RevPadAxisLineRedrawnBothFlipped):
+    """Control: only the profile sketch turned (AxisSketch stays, not redrawn): the sources don't
+    move by one motion, so the rigid reading is off. Same solid, the references stay."""
+
+    def edit(self, doc):
+        self.base.Placement = FLIP_X
+        doc.recompute()
+        self.check()
+
+
+class RevRevolveAxisLineRedrawnBothFlipped(Scenario):
+    """A rectangle x 5..10, z -5..5 in an unattached sketch Profile lying in the XZ plane
+    (Placement 90 about X), revolved 90 degrees about a REFERENCE AXIS: the line
+    (0,0,-5)->(0,0,5) of a second unattached sketch AxisSketch with the same placement. The
+    Revolution's Base/Axis are Prop_ReadOnly (left out of the record). The edit turns BOTH sketches
+    by the same half turn M about the global X axis (the rectangle lands on itself, its top line at
+    the bottom) and redraws the axis line's end point so that the line runs +z again globally
+    ((0,0,5)->(0,0,15) in the turned frame's terms: local (0,-5)->(0,-15)): the revolve sweeps the
+    same quarter as before, the same solid (the part did not move as one piece: M would have swept
+    the other quarter, y < 0). Convention 10.1: every reference stays (the top face is the top
+    face, the end face at angle 90 is still there)."""
+    area = "rigid-review"
+    CLASSES = ("D",)
+    AXES = ("E5",)
+    ISSUE = "ops#557"
+    FOUND_BY = "review pr557o-r2c"
+    TIER = "F"
+    REFS = ("top", "bottom", "start", "end")
+    feature = "PartDesign::Revolution"
+
+    def points(self):
+        c = 7.5 * 0.7071067811865476
+        return {"top": (c, c, 5), "bottom": (c, c, -5), "start": (7.5, 0, 0), "end": (0, 7.5, 0)}
+
+    def expect(self, name):
+        return face(surface="plane", contains=V(*self.points()[name]))
+
+    def check(self):
+        box = self.rev.Shape.BoundBox
+        assert abs(box.ZMin + 5) < 1e-6 and abs(box.ZMax - 5) < 1e-6, box
+        assert abs(box.XMin) < 1e-6 and abs(box.XMax - 10) < 1e-6, box
+        assert abs(box.YMin) < 1e-6 and abs(box.YMax - 10) < 1e-6, box
+
+    def placeSketches(self, turned):
+        motion = FLIP_X if turned else App.Placement()
+        frame = motion.multiply(App.Placement(V(0, 0, 0), App.Rotation(X, 90)))
+        self.profile.Placement = frame
+        self.axis.Placement = frame
+
+    def build(self, doc):
+        body = doc.addObject("PartDesign::Body", "Body")
+        self.profile = doc.addObject("Sketcher::SketchObject", "Profile")
+        body.addObject(self.profile)
+        self.profile.MapMode = "Deactivated"
+        pts = [V(5, -5, 0), V(10, -5, 0), V(10, 5, 0), V(5, 5, 0), V(5, -5, 0)]
+        for i in range(4):
+            self.profile.addGeometry(Part.LineSegment(pts[i], pts[i + 1]), False)
+        self.axis = doc.addObject("Sketcher::SketchObject", "AxisSketch")
+        body.addObject(self.axis)
+        self.axis.MapMode = "Deactivated"
+        self.axis.addGeometry(Part.LineSegment(V(0, -5, 0), V(0, 5, 0)), False)
+        self.placeSketches(False)
+        doc.recompute()
+        rev = body.newObject(self.feature, "Rev")
+        rev.Profile = self.profile
+        rev.ReferenceAxis = (self.axis, ["Edge1"])
+        rev.Angle = 90
+        doc.recompute()
+        self.rev = rev
+        if self.rev.Shape.BoundBox.YMin < -1:
+            rev.Reversed = True
+            doc.recompute()
+        self.check()
+        for name in self.REFS:
+            element = self.names(rev, self.expect(name))[0]
+            owner = doc.addObject("Sketcher::SketchObject", name)
+            body.addObject(owner)
+            owner.AttachmentSupport = [(rev, element)]
+            owner.MapMode = "FlatFace"
+            doc.recompute()
+            self.ref(name, owner, "AttachmentSupport", (lambda n=name: self.expect(n)), Attached())
+
+    def edit(self, doc):
+        self.placeSketches(True)
+        self.axis.moveGeometry(0, 2, V(0, -15, 0))
+        doc.recompute()
+        self.check()
+
+
+class RevRevolveAxisLineBothFlippedRigid(RevRevolveAxisLineRedrawnBothFlipped):
+    """Control: the same turn, the axis line left as drawn: the revolve sweeps the y < 0 quarter,
+    M of the old solid (top and bottom traded, the end face at angle -90). The references follow
+    the part."""
+
+    def build(self, doc):
+        self.turned = False
+        RevRevolveAxisLineRedrawnBothFlipped.build(self, doc)
+
+    def expect(self, name):
+        c = 7.5 * 0.7071067811865476
+        pts = RevRevolveAxisLineRedrawnBothFlipped.points(self)
+        if self.turned:
+            pts = {"top": (c, -c, -5), "bottom": (c, -c, 5), "start": (7.5, 0, 0),
+                   "end": (0, -7.5, 0)}
+        return face(surface="plane", contains=V(*pts[name]))
+
+    def check(self):
+        box = self.rev.Shape.BoundBox
+        if getattr(self, "turned", False):
+            assert abs(box.YMin + 10) < 1e-6 and abs(box.YMax) < 1e-6, box
+        else:
+            RevRevolveAxisLineRedrawnBothFlipped.check(self)
+
+    def edit(self, doc):
+        self.turned = True
+        self.placeSketches(True)
+        doc.recompute()
+        self.check()
+
+
+class RevRevolveAxisLineRedrawnBothFlippedAttached(RevRevolveAxisLineRedrawnBothFlipped):
+    """The same with both sketches attached FlatFace to the Body's XZ plane, the motion made by
+    their AttachmentOffsets (offset = plane^-1 * the placement above)."""
+
+    def placeSketches(self, turned):
+        motion = FLIP_X if turned else App.Placement()
+        frame = motion.multiply(App.Placement(V(0, 0, 0), App.Rotation(X, 90)))
+        body = self.profile.getParentGeoFeatureGroup()
+        plane = originFeature(body, "XZ_Plane")
+        for sketch in (self.profile, self.axis):
+            if sketch.MapMode != "FlatFace":
+                sketch.AttachmentSupport = [(plane, "")]
+                sketch.MapMode = "FlatFace"
+            sketch.AttachmentOffset = plane.Placement.inverse().multiply(frame)
+
+
+class RevRevolveAxisLineBothFlippedRigidAttached(RevRevolveAxisLineBothFlippedRigid):
+    """Control for the attached route."""
+
+    placeSketches = RevRevolveAxisLineRedrawnBothFlippedAttached.placeSketches
+
+
+class RevPadAxisLineRedrawnBothFlippedAttached(RevPadAxisLineRedrawnBothFlipped):
+    """The Pad case with both sketches attached FlatFace (Base to XY, AxisSketch to XZ), the motion
+    made by their AttachmentOffsets."""
+
+    def placeSketches(self, doc, turned):
+        motion = FLIP_X if turned else App.Placement()
+        body = self.base.getParentGeoFeatureGroup()
+        frames = ((self.base, "XY_Plane", motion),
+                  (self.axis, "XZ_Plane",
+                   motion.multiply(App.Placement(V(0, 0, 0), App.Rotation(X, 90)))))
+        for sketch, role, frame in frames:
+            plane = originFeature(body, role)
+            if sketch.MapMode != "FlatFace":
+                sketch.AttachmentSupport = [(plane, "")]
+                sketch.MapMode = "FlatFace"
+            sketch.AttachmentOffset = plane.Placement.inverse().multiply(frame)
+
+
+class RevRevolveOwnAxisLineRedrawnFlipped(RevRevolveAxisLineRedrawnBothFlippedAttached):
+    """The common form: the axis is a construction line in the profile sketch itself
+    (ReferenceAxis Axis0), the sketch attached FlatFace to the XZ plane. The edit turns the sketch
+    by M (half turn about the global X axis, its AttachmentOffset) and drags the axis line's end
+    point so that it runs +z again: the same quarter, the same solid. One placement source, moved
+    by M; the Revolution's Base/Axis are left out of the record."""
+
+    def build(self, doc):
+        body = doc.addObject("PartDesign::Body", "Body")
+        self.profile = doc.addObject("Sketcher::SketchObject", "Profile")
+        body.addObject(self.profile)
+        pts = [V(5, -5, 0), V(10, -5, 0), V(10, 5, 0), V(5, 5, 0), V(5, -5, 0)]
+        for i in range(4):
+            self.profile.addGeometry(Part.LineSegment(pts[i], pts[i + 1]), False)
+        self.lineId = self.profile.addGeometry(Part.LineSegment(V(0, -5, 0), V(0, 5, 0)), True)
+        self.axis = self.profile
+        self.placeSketches(False)
+        doc.recompute()
+        rev = body.newObject(self.feature, "Rev")
+        rev.Profile = self.profile
+        rev.ReferenceAxis = (self.profile, ["Axis0"])
+        rev.Angle = 90
+        doc.recompute()
+        self.rev = rev
+        if self.rev.Shape.BoundBox.YMin < -1:
+            rev.Reversed = True
+            doc.recompute()
+        self.check()
+        for name in self.REFS:
+            element = self.names(rev, self.expect(name))[0]
+            owner = doc.addObject("Sketcher::SketchObject", name)
+            body.addObject(owner)
+            owner.AttachmentSupport = [(rev, element)]
+            owner.MapMode = "FlatFace"
+            doc.recompute()
+            self.ref(name, owner, "AttachmentSupport", (lambda n=name: self.expect(n)), Attached())
+
+    def edit(self, doc):
+        self.placeSketches(True)
+        self.profile.moveGeometry(self.lineId, 2, V(0, -15, 0))
+        doc.recompute()
+        self.check()
