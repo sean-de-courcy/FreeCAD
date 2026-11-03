@@ -55,6 +55,20 @@ def dropB(doc):
     # the script runs again without B
     doc.getObject("Plate").Shape = slabs("A", 60)
 
+def dropBSlotted(doc):
+    # the script runs again without B, A with two through slots: 14 faces, so B's old index
+    # (Face7 or later) gives one of A's faces now
+    a = Part.makeBox(40, 30, 5)
+    for x in (10, 25):
+        a = a.cut(Part.makeBox(2, 20, 7, V(x, 5, -1)))
+    doc.getObject("Plate").Shape = Part.makeCompound([a])
+
+def solverOff(doc):
+    # the reference solver off (the corpus's V2 column): the name match alone
+    doc.ReferenceSolver = False
+    for obj in doc.Objects:
+        obj.touch()
+
 def reopen(doc):
     # saved and opened again: what an alias left unused is in the file
     path = os.path.join(os.path.dirname(out), "reopened.FCStd")
@@ -115,7 +129,8 @@ try:
         elif step == "reopen":
             doc = reopen(doc)
         else:
-            {"same": same, "edit": edit, "dropB": dropB}[step](doc)
+            {"same": same, "edit": edit, "dropB": dropB, "dropBSlotted": dropBSlotted,
+             "solverOff": solverOff}[step](doc)
         doc.recompute()
         result["steps"].append(record(doc))
     saved = os.path.join(os.path.dirname(out), "saved.FCStd")
@@ -299,6 +314,20 @@ class TestBetaMapless(unittest.TestCase):
         self.assertBroken(dropped["DatumPlateB"])
         self.assertFace(dropped["DatumTop"], (5, 10, 30))
         self.assertFace(dropped["DatumCutTop"], centreOfTop(15, 15))
+
+    def testMissingAliasIsNotRetakenWithoutTheSolver(self):
+        """Review r3 T1: with the solver off, recomputed (the migration), then the script runs
+        again without B and with two slots in A, so that B's old index gives one of A's faces. The
+        datum's IDX name is missing: it keeps it and breaks, and never takes the MLN name of the
+        face now at that index (the name match would then find that face, silently)."""
+        # Act
+        result, migration, log = self.run_child("solverOff,dropBSlotted")
+
+        # Assert
+        off, dropped = result["steps"]
+        self.assertSaved(off)
+        self.assertBroken(dropped["DatumPlateB"])
+        self.assertFace(dropped["DatumTop"], (5, 10, 30))
 
     def testIndexMadeVertexNameIsKeptQuietly(self):
         """P-beta 2, recursive (decision 247): CornerBall's saved name is a Cut's vertex made from
