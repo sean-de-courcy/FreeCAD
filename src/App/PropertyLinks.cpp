@@ -1294,6 +1294,10 @@ bool PropertyLinkBase::_updateElementFingerprints(App::DocumentObject* feature,
                 continue;
             }
             now.marks = old.marks;
+            // The frame and the sources (ops#557) would come from the model still to be
+            // recomputed too: a digest already holds the edit
+            now.frame = old.frame;
+            now.sources = old.sources;
             if (now == old && recordPending(closure)) {
                 _HeldFingerprints.insert(this);
                 FC_LOG("record held while its target is to be recomputed: " << propertyName(this)
