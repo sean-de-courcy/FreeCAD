@@ -1,0 +1,10 @@
+{
+"entries": {
+"JudgedTakeSlabAloneBack|slab_top_cap|V2s": {"axes": ["M1", "E4"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr564opus-r5b", "issue": "ops#564", "tier": "F"},
+"JudgedTakeSlabAlone|slab_top_cap|V2s": {"axes": ["M1", "E4"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr564opus-r5b", "issue": "ops#564", "tier": "F"},
+"JudgedTakeSlabControl|slab_top_cap|V2s": {"axes": ["M1", "E4"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr564opus-r5b", "issue": "ops#564", "tier": "F"},
+"JudgedTakeSlabPartialThenBlock|slab_top_cap|V2s": {"axes": ["M1", "E4"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr564opus-r5b", "issue": "ops#564", "tier": "F"},
+"JudgedTakeSlabPartial|slab_top_cap|V2s": {"axes": ["M1", "E4"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr564opus-r5b", "issue": "ops#564", "tier": "F"},
+"JudgedTakeSlabSingle|slab_top_cap|V2s": {"axes": ["M1", "E4"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr564opus-r5b", "issue": "ops#564", "tier": "F"}
+}
+}

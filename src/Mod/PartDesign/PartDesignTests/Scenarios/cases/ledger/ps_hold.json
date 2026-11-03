@@ -1,0 +1,16 @@
+{
+"entries": {
+"PsCornerSuppressTallerBack|corner|V2s": {"axes": ["M1", "E4"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr564son-r5", "issue": "ops#564", "tier": "F"},
+"PsCornerSuppressTallerSameStep|corner|V2s": {"axes": ["M1", "E4"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr564son-r5", "issue": "ops#564", "tier": "F"},
+"PsCornerSuppressTaller|corner|V2s": {"axes": ["M1", "E4"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr564son-r5", "issue": "ops#564", "tier": "F"},
+"PsCornerTallerThenSuppress|corner|V2s": {"axes": ["M1", "E4"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr564son-r5", "issue": "ops#564", "tier": "F"},
+"PsRimsSlideControl|chamfer|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr564son-r5", "issue": "ops#564", "tier": "F"},
+"PsRimsSlideSuppressedThenBack|chamfer|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr564son-r5", "issue": "ops#564", "tier": "F"},
+"PsRimsSuppressSetBaseSlideSameStep|chamfer|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr564son-r5", "issue": "ops#564", "tier": "F"},
+"PsRimsSuppressSlideSameStep|chamfer|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr564son-r5", "issue": "ops#564", "tier": "F"},
+"PsRimsSuppressThenRedraw|chamfer|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "quiet", "found_by": "review pr564son-r5", "issue": "ops#564", "tier": "F"},
+"PsRimsSuppressThenSetBaseSlide|chamfer|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr564son-r5", "issue": "ops#564", "tier": "F"},
+"PsRimsSuppressThenSlide|chamfer|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr564son-r5", "issue": "ops#564", "tier": "F"},
+"PsRimsSuppressUnsuppressSlide|chamfer|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr564son-r5", "issue": "ops#564", "tier": "F"}
+}
+}
