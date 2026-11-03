@@ -199,10 +199,12 @@ class TestNamingSolver(unittest.TestCase):
         feature.touch()
         doc.recompute()
 
-    def openWithStaleName(self):
+    def openWithStaleName(self, savedIndex=None):
         """The fillet's reference with a stale mapped name written into the saved file (no name
-        relates it to the pad's edges), its fingerprint kept; the file opened again. Returns
-        (document, the reference's index name)."""
+        relates it to the pad's edges), its fingerprint kept; the file opened again. With
+        `savedIndex`, the file stores that index for it instead of its own, as a file saved where
+        OCCT orders the edges differently (ops#475). Returns (document, the reference's index
+        name)."""
         doc = self.newDocument()
         pad, fillet = self.padWithFillet(doc)
         index = fillet.Base[1][0]
@@ -211,13 +213,15 @@ class TestNamingSolver(unittest.TestCase):
         path = os.path.join(folder, "Reverse.FCStd")
         doc.saveAs(path)
         App.closeDocument(doc.Name)
-        stale = ";_;g9;_;1;SKT;0;E;0;SRC;_." + index
+        stored = savedIndex or index
+        stale = ";_;g9;_;1;SKT;0;E;0;SRC;_." + stored
         with zipfile.ZipFile(path) as archive:
             files = {name: archive.read(name) for name in archive.namelist()}
         xml = files["Document.xml"].decode("utf-8")
         found = re.findall(r'(<Sub value="%s" shadow=")([^"]*)(" fp=")' % index, xml)
         self.assertEqual(len(found), 1)  # the setup: the fillet's reference, with a fingerprint
-        xml = xml.replace("".join(found[0]), found[0][0] + stale + found[0][2])
+        start = found[0][0].replace('"%s"' % index, '"%s"' % stored)
+        xml = xml.replace("".join(found[0]), start + stale + found[0][2])
         files["Document.xml"] = xml.encode("utf-8")
         with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
             for name, data in files.items():
@@ -261,6 +265,260 @@ class TestNamingSolver(unittest.TestCase):
         self.assertEqual(fillet.Base[1], [index])
         report = App.getReferenceReport(fillet)
         self.assertEqual([(e["status"], e["new"]) for e in report], [("index", index)])
+
+    def keepBrokenOnOpen(self):
+        """The forward solve on opening kept from deciding, as in
+        testReverseUpdateCarriesTheIndexWhenTheFingerprintAgrees: the reference stays broken
+        until the version change."""
+        group = App.ParamGet("User parameter:BaseApp/Preferences/Mod/Part/NamingSolver")
+        group.SetFloat("Tier3Distance", 100.0)
+        self.addCleanup(group.RemFloat, "Tier3Distance")
+        group.SetBool("ExactPlace", False)
+        self.addCleanup(group.RemBool, "ExactPlace")
+        group.SetBool("Guess", False)
+        self.addCleanup(group.RemBool, "Guess")
+
+    def testReverseUpdateFindsThePlaceWhenTheIndexIsAnotherEdge(self):
+        """ops#475: the file stores another index for the reference, the edge at the opposite
+        vertical corner (x = 0, y = 0), as where OCCT orders the pad's edges differently. The
+        index carry finds that edge, whose fingerprint differs; the one edge at the saved place,
+        the fillet's own at x = 20, y = 0, is taken, with a warning ("index")."""
+        # Arrange
+        self.keepBrokenOnOpen()
+        probe = self.newDocument()
+        other = edge("line", direction=Z, through=(0, 0, 0)).one(self.padWithFillet(probe)[0].Shape)
+        App.closeDocument(probe.Name)
+        doc, index = self.openWithStaleName(savedIndex=other[0])
+        pad, fillet = doc.Pad, doc.Fillet
+        self.assertNotEqual(other[0], index)
+        self.assertEqual(fillet.Base[1], ["?" + other[0]])
+
+        # Act
+        self.stale(doc, pad)
+
+        # Assert
+        self.assertTrue(fillet.isValid())
+        self.assertEqual(fillet.Base[1], [index])
+        self.assertEqual(edge("line", direction=Z, through=(20, 0, 0)).one(pad.Shape), [index])
+        report = App.getReferenceReport(fillet)
+        self.assertEqual([(e["status"], e["new"]) for e in report], [("index", index)])
+        self.assertEqual(
+            report[0]["evidence"], "index carry, fingerprint differs; %s sits where it was" % index
+        )
+
+    def testReverseUpdateBreaksWhenTheIndexIsAnotherEdgeAndNothingIsAtThePlace(self):
+        """ops#475's boundary: the stored index is another edge, as above, and the corner the
+        fillet's edge stood on is cut (FilletCornerCut's model) in the recompute of the version
+        change. Neither the index nor the place gives the edge: the reference breaks, with the
+        index's edge as its only candidate, never another edge."""
+        # Arrange
+        self.keepBrokenOnOpen()
+        probe = self.newDocument()
+        other = edge("line", direction=Z, through=(0, 0, 0)).one(self.padWithFillet(probe)[0].Shape)
+        App.closeDocument(probe.Name)
+        doc, index = self.openWithStaleName(savedIndex=other[0])
+        self.assertEqual(doc.Fillet.Base[1], ["?" + other[0]])
+
+        # Act
+        models.setLines(doc.Profile, {0: ((0, 0), (19, 0)), 1: ((20, 1), (20, 10))})
+        doc.Profile.addGeometry(models.polyline([(19, 0), (20, 1)]), False)
+        self.stale(doc, doc.Pad)
+
+        # Assert
+        self.assertFalse(doc.Fillet.isValid())
+        report = App.getReferenceReport(doc.Fillet)
+        self.assertEqual(len(report), 1)
+        self.assertEqual(report[0]["status"], "broken")
+        self.assertEqual(report[0]["candidates"], [other[0]])
+        self.assertEqual(report[0]["evidence"], "index carry, fingerprint differs")
+
+    def breakWithSeveralAtThePlace(self, continuation):
+        """The stored index is the edge at the opposite vertical corner (x = 0, y = 0), as in
+        testReverseUpdateFindsThePlaceWhenTheIndexIsAnotherEdge, with the place widened to
+        `continuation` times the pad's diagonal (about 24.5) before the version change. Returns
+        (the fillet's report, the vertical edges at y = 0 and at x = 20, y = 10, the stored
+        index)."""
+        self.keepBrokenOnOpen()
+        probe = self.newDocument()
+        other = edge("line", direction=Z, through=(0, 0, 0)).one(self.padWithFillet(probe)[0].Shape)
+        App.closeDocument(probe.Name)
+        doc, index = self.openWithStaleName(savedIndex=other[0])
+        self.assertEqual(doc.Fillet.Base[1], ["?" + other[0]])
+        group = App.ParamGet("User parameter:BaseApp/Preferences/Mod/Part/NamingSolver")
+        group.SetFloat("ContinuationDistance", continuation)
+        self.addCleanup(group.RemFloat, "ContinuationDistance")
+        beside = edge("line", direction=Z, through=(20, 10, 0)).one(doc.Pad.Shape)
+
+        self.stale(doc, doc.Pad)
+
+        self.assertFalse(doc.Fillet.isValid())
+        self.assertEqual(doc.Fillet.Base[1], ["?" + other[0]])
+        report = App.getReferenceReport(doc.Fillet)
+        self.assertEqual(len(report), 1)
+        self.assertEqual(report[0]["status"], "broken")
+        return report[0], index, beside[0], other[0]
+
+    def testReverseUpdateBreaksWhenTheIndexIsAnotherEdgeAndTwoAreAtThePlace(self):
+        """ops#475's other boundary: the stored index is another edge, and the place is widened to
+        about 14.7, so the fillet's own edge (x = 20, y = 0) and its neighbour 10 away (x = 20,
+        y = 10) both sit where the edge was; the index's edge, 20 away, doesn't. The place doesn't
+        tell them apart: the reference breaks, with both places and then the index as
+        candidates, never one of them."""
+        # Arrange, Act
+        entry, index, beside, other = self.breakWithSeveralAtThePlace(0.6)
+
+        # Assert
+        places = sorted([index, beside], key=lambda name: int(name[4:]))
+        self.assertEqual(entry["candidates"], places + [other])
+        self.assertEqual(
+            entry["evidence"],
+            "index carry, fingerprint differs; %s and %s sit where it was" % tuple(places),
+        )
+
+    def testReverseUpdateBreaksWhenTheIndexIsAnotherEdgeAndAtThePlaceToo(self):
+        """As above, with the place widened to about 21: the index's own edge, 20 away, sits
+        there too (x = 0, y = 10 is 22.4 away, outside). Still broken, the index named among the
+        edges at the place."""
+        # Arrange, Act
+        entry, index, beside, other = self.breakWithSeveralAtThePlace(0.86)
+
+        # Assert
+        places = sorted([index, beside], key=lambda name: int(name[4:]))
+        self.assertEqual(entry["candidates"], places + [other])
+        self.assertEqual(
+            entry["evidence"],
+            "index carry, fingerprint differs; %s and %s and %s sit where it was"
+            % (places[0], places[1], other),
+        )
+
+    def openWithStaleNames(self, corners, stored):
+        """openWithStaleName's file with a fillet on the vertical edges at `corners`, every one of
+        its references given a stale name, and the vertical edge at the matching corner of
+        `stored` (or the index name given there) as its stored index. Returns (document, the references' index names, the stored
+        ones)."""
+        doc = self.newDocument()
+        body = models.body(doc)
+        profile = models.sketch(doc, "Profile", models.rectangle(0, 0, 20, 10), body)
+        pad = models.pad(body, profile, 10)
+        doc.recompute()
+        indexes = [edge("line", direction=Z, through=c).one(pad.Shape)[0] for c in corners]
+        others = [
+            s if isinstance(s, str) else edge("line", direction=Z, through=s).one(pad.Shape)[0]
+            for s in stored
+        ]
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (pad, indexes)
+        fillet.Radius = 1
+        doc.recompute()
+        self.assertTrue(fillet.isValid())
+        folder = tempfile.mkdtemp(prefix="NamingSolver")
+        self.addCleanup(shutil.rmtree, folder, True)
+        path = os.path.join(folder, "Reverse.FCStd")
+        doc.saveAs(path)
+        App.closeDocument(doc.Name)
+        with zipfile.ZipFile(path) as archive:
+            files = {name: archive.read(name) for name in archive.namelist()}
+        xml = files["Document.xml"].decode("utf-8")
+        for index, other in zip(indexes, others):
+            found = re.findall(r'(<Sub value="%s" shadow=")([^"]*)(" fp=")' % index, xml)
+            self.assertEqual(len(found), 1)  # the setup: one reference, with a fingerprint
+            start = found[0][0].replace('"%s"' % index, '"%s"' % other)
+            stale = ";_;g9;_;1;SKT;0;E;0;SRC;_." + other
+            xml = xml.replace("".join(found[0]), start + stale + found[0][2])
+        files["Document.xml"] = xml.encode("utf-8")
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+            for name, data in files.items():
+                archive.writestr(name, data)
+        doc = App.openDocument(path)
+        self.documents.append(doc.Name)
+        return doc, indexes, others
+
+    def testReverseUpdateKeepsNoPlaceWhenAnotherReferenceIsNotAtItsPlace(self):
+        """ops#475's batch rule: a fillet on the vertical edges at (0, 0) and (20, 0), both
+        references with stale names and the back edges' indexes stored, as in
+        testReverseUpdateFindsThePlaceWhenTheIndexIsAnotherEdge, and the profile moved by 20 along
+        x in the recompute of the version change (an edit before the first recompute, ops#417).
+        The left edge lands on the right one's saved place, and nothing is at the left one's:
+        OCCT's storage order moves nothing, so the migration had an edit, and the edge at the
+        right reference's place may have been moved there. Both break; the right one lists that
+        edge as its candidate, never takes it."""
+        # Arrange
+        self.keepBrokenOnOpen()
+        doc, _, stored = self.openWithStaleNames([(0, 0, 0), (20, 0, 0)], [(0, 10, 0), (20, 10, 0)])
+        self.assertEqual(doc.Fillet.Base[1], ["?" + s for s in stored])
+
+        # Act
+        corners = [(20, 0), (40, 0), (40, 10), (20, 10)]
+        models.setLines(doc.Profile, {k: (corners[k], corners[(k + 1) % 4]) for k in range(4)})
+        self.stale(doc, doc.Pad)
+
+        # Assert
+        moved = edge("line", direction=Z, through=(20, 0, 0)).one(doc.Pad.Shape)[0]
+        self.assertFalse(doc.Fillet.isValid())
+        report = App.getReferenceReport(doc.Fillet)
+        self.assertEqual([e["status"] for e in report], ["broken", "broken"])
+        self.assertNotIn(moved, stored)  # the setup: the index carry doesn't give it
+        self.assertEqual(report[1]["candidates"][0], moved)
+        self.assertEqual(
+            report[1]["evidence"],
+            "index carry, fingerprint differs; %s sits where it was, but the migration had an edit"
+            % moved,
+        )
+
+    def testReverseUpdateBreaksWhenAnEditMayHaveMovedAnotherOntoThePlace(self):
+        """Decision 217 (the reviews' residual, pr475b-r1, pr475b-s-r1 and pr475b-r2): a fillet on
+        the vertical edge at (20, 0) alone, the back left edge's index stored, and the profile
+        moved by 20 along x before the migration recompute. The edge at (0, 0) lands on the saved
+        place, and nothing in the references tells the edit from OCCT's storage order; but the
+        pad's profile changed since the file was opened. Broken, the edge at the place a
+        candidate, never taken (testReverseUpdateFindsThePlaceWhenTheIndexIs
+        AnotherEdge is the open without an edit, kept)."""
+        # Arrange
+        self.keepBrokenOnOpen()
+        doc, _, stored = self.openWithStaleNames([(20, 0, 0)], [(0, 10, 0)])
+        self.assertEqual(doc.Fillet.Base[1], ["?" + stored[0]])
+
+        # Act
+        corners = [(20, 0), (40, 0), (40, 10), (20, 10)]
+        models.setLines(doc.Profile, {k: (corners[k], corners[(k + 1) % 4]) for k in range(4)})
+        self.stale(doc, doc.Pad)
+
+        # Assert
+        moved = edge("line", direction=Z, through=(20, 0, 0)).one(doc.Pad.Shape)[0]
+        self.assertFalse(doc.Fillet.isValid())
+        report = App.getReferenceReport(doc.Fillet)
+        self.assertEqual([e["status"] for e in report], ["broken"])
+        self.assertNotEqual(moved, stored[0])  # the setup: the index carry doesn't give it
+        self.assertEqual(report[0]["candidates"][0], moved)
+        self.assertEqual(
+            report[0]["evidence"],
+            "index carry, fingerprint differs; %s sits where it was, but the feature changed "
+            "since the file was opened" % moved,
+        )
+
+    def testReverseUpdateBreaksWhenTheStoredIndexIsGone(self):
+        """Decision 217, review pr475b-s-r1's remove-slide: the fillet's reference stores an index
+        the pad doesn't have (Edge99). OCCT's storage order keeps the elements' count, so a gone
+        index means an edit: the edge at the saved place, the fillet's own here, isn't taken by
+        its place. Broken, with it as the candidate."""
+        # Arrange
+        self.keepBrokenOnOpen()
+        doc, (index,), _ = self.openWithStaleNames([(20, 0, 0)], ["Edge99"])
+        self.assertEqual(doc.Fillet.Base[1], ["?Edge99"])
+
+        # Act
+        self.stale(doc, doc.Pad)
+
+        # Assert
+        self.assertFalse(doc.Fillet.isValid())
+        report = App.getReferenceReport(doc.Fillet)
+        self.assertEqual([e["status"] for e in report], ["broken"])
+        self.assertEqual(report[0]["candidates"], [index])
+        self.assertEqual(
+            report[0]["evidence"],
+            "index carry, no such element; %s sits where it was, but the migration had an edit"
+            % index,
+        )
 
     def testReverseUpdateBreaksWhenTheFingerprintDiffers(self):
         """FilletCornerCut's model, with the version change in the same recompute: the edge at
