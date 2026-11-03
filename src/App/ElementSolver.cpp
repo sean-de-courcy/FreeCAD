@@ -4827,6 +4827,9 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
         SolveOutcome outcome;
         bool decided = false;
         int graphEntry = -1;
+        // A pick the twin clause broke, which `integration` took (-1: none): it still contests
+        // its element in the matching, so that no other entry takes it unopposed (review pr390-r2h)
+        int contested = -1;
         // Tiers 2-3: the survivors of tier 1 before geometry narrowed them (what a broken entry
         // lists), the tier that narrowed them (0: none), whether geometry alone found the
         // candidate, and what it found.
@@ -6558,6 +6561,9 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
                         : orderBreaks(pick);
                     if (!why.empty()) {
                         state.decided = true;
+                        if (twinClause) {
+                            state.contested = pick;
+                        }
                         state.outcome.evidence = (nearest.index >= 0
                                                       ? std::string("no structural candidate, tier 3: ")
                                                       : "no structural candidate, at the same place: ")
@@ -6622,6 +6628,9 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
                         if (lacks) {
                             otherSource = "; the wide reach's " + picked.index + " has another "
                                 + lacks;
+                            if (twinClause) {
+                                state.contested = agree[wide.index];
+                            }
                             wide = Nearest();
                         }
                     }
@@ -6629,6 +6638,7 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
                         const std::string order = orderBreaks(agree[wide.index]);
                         if (!order.empty()) {
                             otherSource = "; the wide reach's " + order;
+                            state.contested = agree[wide.index];
                             wide = Nearest();
                         }
                     }
@@ -6711,6 +6721,20 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
                 it->second = graph.addCandidate({id});
             }
             graph.addEdge(state.graphEntry, it->second, state.inAncestry.count(k) > 0);
+        }
+    }
+
+    // A pick the twin clause broke still contests its element (review pr390-r2h): an entry of
+    // another circle's crossing that wanted it too stays ambiguous, as on `integration`, instead
+    // of taking it unopposed. The broken entry's own outcome stands.
+    for (auto& state : states) {
+        if (state.decided && state.contested >= 0 && state.graphEntry < 0) {
+            const int id = state.pool->ids[state.contested];
+            auto [it, inserted] = nodeOfId.emplace(id, 0);
+            if (inserted) {
+                it->second = graph.addCandidate({id});
+            }
+            graph.addEdge(graph.entryCount++, it->second, false);
         }
     }
 
