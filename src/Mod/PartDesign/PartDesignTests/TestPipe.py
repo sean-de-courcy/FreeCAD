@@ -4552,9 +4552,9 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
                 self.doc.recompute()
                 self.assertEqual(self.profileNamed(pipe, profile), named)
                 self.assertNoneMovedSilently(pipe, volume, points, lambda place: True)
-                # The stored start, way, end, the other vertex and middle, and the profile's two
-                # frames stay as they were
-                self.assertEqual(len(pipe.SpineStart), 11)
+                # The stored start, way, end, the other vertex and middle, the profile's two
+                # frames and the spine's frame stay as they were
+                self.assertEqual(len(pipe.SpineStart), 14)
                 for before, after in zip(stored, pipe.SpineStart):
                     self.assertLess((V(after) - before).Length, 1e-6, (stored, pipe.SpineStart))
 
@@ -4573,7 +4573,7 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
                 named = self.profileNamed(pipe, profile)
                 volume = pipe.Shape.Volume
                 stored = [V(v) for v in pipe.SpineStart]
-                self.assertEqual(len(stored), 11)
+                self.assertEqual(len(stored), 14)
                 self.assertGreater((stored[1] - stored[0]).Length, 1, stored)
                 points = self.attach(pipe)
                 for _ in range(2):
