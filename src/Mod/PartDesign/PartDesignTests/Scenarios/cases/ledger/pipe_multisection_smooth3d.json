@@ -1,0 +1,32 @@
+{
+"entries": {
+"CornerChainHexagonsRoundCornerToRightAngles|cap_solid|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr404-r4", "issue": "ops#396", "tier": "F"},
+"CornerChainHexagonsRoundCornerToRightAngles|cap_v0|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr404-r4", "issue": "ops#396", "tier": "F"},
+"CornerChainHexagonsRoundCornerToRightAngles|cap_v1|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr404-r4", "issue": "ops#396", "tier": "F"},
+"CornerChainHexagonsRoundCornerToRightAngles|cap_v2|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr404-r4", "issue": "ops#396", "tier": "F"},
+"CornerChainHexagonsRoundCornerToRightAngles|cap_v3|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr404-r4", "issue": "ops#396", "tier": "F"},
+"CornerChainHexagonsRoundCornerToRightAngles|cap_v4|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr404-r4", "issue": "ops#396", "tier": "F"},
+"CornerChainHexagonsRoundCornerToRightAngles|cap_v5|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr404-r4", "issue": "ops#396", "tier": "F"},
+"CornerChainHexagonsRoundCornerToRightAngles|cap|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr404-r4", "issue": "ops#396", "tier": "F"},
+"SmoothSpineHexagonsToRightAngles|cap_solid|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr404-r4", "issue": "ops#396", "tier": "F"},
+"SmoothSpineHexagonsToRightAngles|cap_v0|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr404-r4", "issue": "ops#396", "tier": "F"},
+"SmoothSpineHexagonsToRightAngles|cap_v1|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr404-r4", "issue": "ops#396", "tier": "F"},
+"SmoothSpineHexagonsToRightAngles|cap_v2|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr404-r4", "issue": "ops#396", "tier": "F"},
+"SmoothSpineHexagonsToRightAngles|cap_v3|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr404-r4", "issue": "ops#396", "tier": "F"},
+"SmoothSpineHexagonsToRightAngles|cap_v4|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr404-r4", "issue": "ops#396", "tier": "F"},
+"SmoothSpineHexagonsToRightAngles|cap_v5|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr404-r4", "issue": "ops#396", "tier": "F"},
+"SmoothSpineHexagonsToRightAngles|cap|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr404-r4", "issue": "ops#396", "tier": "F"},
+"SmoothSpineSquaresFrenetToRightAngles|cap_solid|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr404-r4", "issue": "ops#396", "tier": "F"},
+"SmoothSpineSquaresFrenetToRightAngles|cap_v0|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr404-r4", "issue": "ops#396", "tier": "F"},
+"SmoothSpineSquaresFrenetToRightAngles|cap_v1|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr404-r4", "issue": "ops#396", "tier": "F"},
+"SmoothSpineSquaresFrenetToRightAngles|cap_v2|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr404-r4", "issue": "ops#396", "tier": "F"},
+"SmoothSpineSquaresFrenetToRightAngles|cap_v3|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr404-r4", "issue": "ops#396", "tier": "F"},
+"SmoothSpineSquaresFrenetToRightAngles|cap|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr404-r4", "issue": "ops#396", "tier": "F"},
+"SmoothSpineSquaresToRightAngles|cap_solid|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr404-r4", "issue": "ops#396", "tier": "F"},
+"SmoothSpineSquaresToRightAngles|cap_v0|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr404-r4", "issue": "ops#396", "tier": "F"},
+"SmoothSpineSquaresToRightAngles|cap_v1|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr404-r4", "issue": "ops#396", "tier": "F"},
+"SmoothSpineSquaresToRightAngles|cap_v2|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr404-r4", "issue": "ops#396", "tier": "F"},
+"SmoothSpineSquaresToRightAngles|cap_v3|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr404-r4", "issue": "ops#396", "tier": "F"},
+"SmoothSpineSquaresToRightAngles|cap|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr404-r4", "issue": "ops#396", "tier": "F"}
+}
+}

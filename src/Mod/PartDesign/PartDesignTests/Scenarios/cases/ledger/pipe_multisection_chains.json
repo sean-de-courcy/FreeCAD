@@ -1,0 +1,7 @@
+{
+"entries": {
+"HelixRoundCornerSquareTurn0|cap_solid|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr404-r4s", "issue": "ops#396", "tier": "F"},
+"HelixRoundCornerTurned30|cap_solid|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr404-r4s", "issue": "ops#396", "tier": "F"},
+"ZRotatedSquaresTurned30|cap_solid|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr404-r4s", "issue": "ops#396", "tier": "F"}
+}
+}
