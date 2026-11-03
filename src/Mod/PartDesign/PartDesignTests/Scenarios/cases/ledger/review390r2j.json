@@ -1,0 +1,26 @@
+{
+"entries": {
+"R2jForcedOntoTwinOneOwner|a_left|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "OWN-OR-BROKEN", "expected": "broken-", "found_by": "review pr390-r2j", "issue": "ops#468", "tier": "F"},
+"R2jForcedOntoTwinOneOwner|b_left|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "review pr390-r2j", "issue": "ops#468", "tier": "F"},
+"R2jForcedOntoTwinSwapped|a_left|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "OWN-OR-BROKEN", "expected": "broken-", "found_by": "review pr390-r2j", "issue": "ops#468", "tier": "F"},
+"R2jForcedOntoTwinSwapped|b_left|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "review pr390-r2j", "issue": "ops#468", "tier": "F"},
+"R2jForcedOntoTwinTwoOwners|a_left|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "OWN-OR-BROKEN", "expected": "broken-", "found_by": "review pr390-r2j", "issue": "ops#468", "tier": "F"},
+"R2jForcedOntoTwinTwoOwners|b_left|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "review pr390-r2j", "issue": "ops#468", "tier": "F"},
+"R2jForcedPickOneOwner|a_left|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "OWN-OR-BROKEN", "expected": "broken-", "found_by": "review pr390-r2j", "issue": "ops#468", "tier": "F"},
+"R2jForcedPickOneOwner|b_left|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "review pr390-r2j", "issue": "ops#468", "tier": "F"},
+"R2jForcedPickSwapped|a_left|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "OWN-OR-BROKEN", "expected": "broken-", "found_by": "review pr390-r2j", "issue": "ops#468", "tier": "F"},
+"R2jForcedPickSwapped|b_left|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "review pr390-r2j", "issue": "ops#468", "tier": "F"},
+"R2jForcedPickTwoOwners|a_left|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "OWN-OR-BROKEN", "expected": "broken-", "found_by": "review pr390-r2j", "issue": "ops#468", "tier": "F"},
+"R2jForcedPickTwoOwners|b_left|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "review pr390-r2j", "issue": "ops#468", "tier": "F"},
+"R2jLoneLeftOneOwner|a_right|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "review pr390-r2j", "issue": "ops#468", "tier": "F"},
+"R2jLoneLeftOneOwner|b_left|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr390-r2j", "issue": "ops#468", "tier": "F"},
+"R2jLoneLeftTwoOwners|a_right|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "review pr390-r2j", "issue": "ops#468", "tier": "F"},
+"R2jLoneLeftTwoOwners|b_left|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "wrong", "found_by": "review pr390-r2j", "issue": "ops#468", "tier": "F"},
+"R2jNoSurvivorContestOneOwner|a_right|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr390-r2j", "issue": "ops#468", "tier": "F"},
+"R2jNoSurvivorContestOneOwner|b_left|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr390-r2j", "issue": "ops#468", "tier": "F"},
+"R2jNoSurvivorContestSwapped|a_right|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr390-r2j", "issue": "ops#468", "tier": "F"},
+"R2jNoSurvivorContestSwapped|b_left|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr390-r2j", "issue": "ops#468", "tier": "F"},
+"R2jNoSurvivorContestTwoOwners|a_right|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr390-r2j", "issue": "ops#468", "tier": "F"},
+"R2jNoSurvivorContestTwoOwners|b_left|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "wrong", "found_by": "review pr390-r2j", "issue": "ops#468", "tier": "F"}
+}
+}

@@ -853,6 +853,32 @@ TEST_F(ElementMapTest, setElementNameDuplicateCountsV2)
     EXPECT_EQ(map->find(fromCount2), Data::IndexedName("Face", 5));
 }
 
+TEST_F(ElementMapTest, setElementNameKeepsATwinPlaceV2)
+{
+    // Arrange
+    //   a twin's name carries its place among n twins in the duplicate count, `<k>of<n>` (ops#468,
+    //   the size rule): the same name set on two elements, as two members given one place would be
+    auto map = std::make_shared<Data::ElementMap>();
+    map->hasher = _hasher;
+    const std::string before = "Face6;_;7;MKR;0;F;";
+    const std::string after = ";IDX,SRC,ORD;_";
+    const Data::MappedName name(before + "1of2" + after);
+
+    // Act
+    const auto first = map->setElementName(Data::IndexedName("Face", 1), name, 7L);
+    const auto second = map->setElementName(Data::IndexedName("Face", 2), name, 7L);
+    const auto third = map->setElementName(Data::IndexedName("Face", 3), name, 7L);
+
+    // Assert
+    //   the place is no number to count on from (stoul would read 1 and write 2, which drops the
+    //   count): it stays, and the collision's count follows it after a `~`
+    EXPECT_EQ(first.toString(), before + "1of2" + after);
+    EXPECT_EQ(second.toString(), before + "1of2~1" + after);
+    EXPECT_EQ(third.toString(), before + "1of2~2" + after);
+    EXPECT_EQ(map->find(second), Data::IndexedName("Face", 2));
+    EXPECT_EQ(map->find(third), Data::IndexedName("Face", 3));
+}
+
 TEST_F(ElementMapTest, addChildElementsPatternInstancesV2)
 {
     // Arrange

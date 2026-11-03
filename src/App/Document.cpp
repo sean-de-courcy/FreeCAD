@@ -158,13 +158,19 @@ namespace
 // `CPY;L` with the link's ID, and a link array's element n `CPY;L<n>` with the array's ID, in
 // either ShowElement mode and across documents too (10 and 11 are reserved by ops#469
 // and ops#468: whichever merges later takes the next number).
-// 13 is reserved by ops#468 (fork PR 390): whichever merges later takes the next number.
 // 14: ops#469, a PartDesign Pipe's closed spine (one profile, not Auxiliary) is swept from its
 // vertex nearest the profile, and its corners are keyed by its stored named start, not by which
 // end of each edge they are as drawn (`start` added to the start's key); ops#479, the corners of a
 // union's caps listed in the section's order; ops#469, a closed spine's leg whose line came from
 // another place renamed through a `PLM` source (I-B7).
-constexpr int ForkNamingRevision = 14;
+// 15: ops#468 and class A's size rule (`naming-class-A.md` M2): a vertex generated where an edge
+// crosses a face is named by the side of the face the edge goes to there (`in`, `out`, in Index,
+// with ORD), not by a counter; twins told apart by their place carry it with their count,
+// `<k>of<n>` in DuplicateCount, in one canonical order, with ORD (the generated, modified and
+// projected stages; not where the maker's order is kept, decisions 158 Q1 and 173 (2); the
+// fallback lists with ORD only where their order is no key); a split
+// edge's piece takes the smallest named face at its vertex, counted by name (ops#431).
+constexpr int ForkNamingRevision = 15;
 
 // The `.N<n>` of the element map version: the form interned names are saved in (ops#6). 2: the
 // references are indices into the file's table (NamingFormat 2).

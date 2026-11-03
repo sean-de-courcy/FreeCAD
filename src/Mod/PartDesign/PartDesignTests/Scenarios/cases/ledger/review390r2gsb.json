@@ -1,0 +1,28 @@
+{
+"entries": {
+"R2gsbMovedAwayNewCircleAtPlace|first|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr390-r2gs", "issue": "ops#468", "tier": "F"},
+"R2gsbMovedAwayNewCircleAtPlace|second|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr390-r2gs", "issue": "ops#468", "tier": "F"},
+"R2gsbNewSketchProfile|first|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr390-r2gs", "issue": "ops#468", "tier": "F"},
+"R2gsbNewSketchProfile|second|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr390-r2gs", "issue": "ops#468", "tier": "F"},
+"R2gsbRedrawLeavesEnd|first|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr390-r2gs", "issue": "ops#468", "tier": "F"},
+"R2gsbRedrawLeavesEnd|second|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "review pr390-r2gs", "issue": "ops#468", "tier": "F"},
+"R2gsbRedrawShiftHalf|first|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "review pr390-r2gs", "issue": "ops#468", "tier": "F"},
+"R2gsbRedrawShiftHalf|second|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "review pr390-r2gs", "issue": "ops#468", "tier": "F"},
+"R2gsbRedrawShiftQuarter|first|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "review pr390-r2gs", "issue": "ops#468", "tier": "F"},
+"R2gsbRedrawShiftQuarter|second|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "review pr390-r2gs", "issue": "ops#468", "tier": "F"},
+"R2gsbRedrawShiftSpacingEdges|first|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "review pr390-r2gs", "issue": "ops#468", "tier": "F"},
+"R2gsbRedrawShiftSpacingEdges|second|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "review pr390-r2gs", "issue": "ops#468", "tier": "F"},
+"R2gsbRedrawShiftSpacingReopen|first|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "review pr390-r2gs", "issue": "ops#468", "tier": "F"},
+"R2gsbRedrawShiftSpacingReopen|second|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "review pr390-r2gs", "issue": "ops#468", "tier": "F"},
+"R2gsbRedrawShiftSpacingRight|first|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "review pr390-r2gs", "issue": "ops#468", "tier": "F"},
+"R2gsbRedrawShiftSpacingRight|second|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "review pr390-r2gs", "issue": "ops#468", "tier": "F"},
+"R2gsbRedrawShiftSpacingThenReopen|first|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "review pr390-r2gs", "issue": "ops#468", "tier": "F"},
+"R2gsbRedrawShiftSpacingThenReopen|second|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "review pr390-r2gs", "issue": "ops#468", "tier": "F"},
+"R2gsbRedrawShiftSpacing|first|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "review pr390-r2gs", "issue": "ops#468", "tier": "F"},
+"R2gsbRedrawShiftSpacing|second|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "review pr390-r2gs", "issue": "ops#468", "tier": "F"},
+"R2gsbSiblingNewIdSameSketch|first|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr390-r2gs", "issue": "ops#468", "tier": "F"},
+"R2gsbSiblingNewIdSameSketch|second|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr390-r2gs", "issue": "ops#468", "tier": "F"},
+"R2gsbTwoStepsRedrawThenBack|first|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "review pr390-r2gs", "issue": "ops#468", "tier": "F"},
+"R2gsbTwoStepsRedrawThenBack|second|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "review pr390-r2gs", "issue": "ops#468", "tier": "F"}
+}
+}

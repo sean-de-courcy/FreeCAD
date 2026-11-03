@@ -1767,6 +1767,34 @@ bool isOrdered(std::string_view name)
     });
 }
 
+// Part's mapper flag of a twin placed on a closed edge (closedTwinFlag, TopoShapeExpansion.cpp;
+// PLAN decision 206)
+constexpr const char* closedTwinFlag = "CLS";
+
+/* True if a section of \a name carries the closed edge's twin flag: its element is told apart
+ * from its twins by its place counted from the edge's seam, which an edit can turn past them with
+ * the geometry unchanged (a sketch's circle turned 180 degrees under a symmetric cut). The stop
+ * (decision 206): a reference to it stands only where its element holds the old place unchanged;
+ * moved or gone, it breaks.
+ */
+bool isClosedTwin(std::string_view name)
+{
+    const auto sections = NameAncestry::splitSections(name);
+    return std::any_of(sections.begin(), sections.end(), [](std::string_view section) {
+        return decodeSection(section).hasMapperFlag(closedTwinFlag);
+    });
+}
+
+/* True if the last section of \a name carries a role in its Index (A2's crossing roles, `in` and
+ * `out`: Data::isRoleValue()): the side its edge goes to, which an edit that draws the edge the
+ * other way flips, so that a lone crossing takes its twin's role (PR 390 round 2d).
+ */
+bool endsInRole(std::string_view name)
+{
+    const auto sections = NameAncestry::splitSections(name);
+    return !sections.empty() && isRoleValue(decodeSection(sections.back()).index);
+}
+
 /* True if a section of \a name is a far cap's piece marked by its marks (PRJ and MOD with
  * connected elements, a face), and none is ordered (isMarkedCapName()). With \a faceAlone, marked
  * by one face of the up-to shape alone (the only piece on it): an up-to shell without names,
@@ -1852,13 +1880,13 @@ bool isCounterSection(const DecodedMappedSection& section)
     return true;
 }
 
-// A section's mapper flags without ORD, in their order: the survivor of a 2 -> 1 change loses
-// the flag its twins had (ops#503 class D, round 2)
+// A section's mapper flags without ORD and the closed edge's flag, in their order: the survivor
+// of a 2 -> 1 change loses the flags its twins had (ops#503 class D, round 2; decision 206)
 std::vector<std::string> flagsBesideOrder(const DecodedMappedSection& section)
 {
     std::vector<std::string> flags;
     for (const auto& flag : section.mapperFlags) {
-        if (flag != orderedFlag) {
+        if (flag != orderedFlag && flag != closedTwinFlag) {
             flags.push_back(flag);
         }
     }
@@ -1866,10 +1894,13 @@ std::vector<std::string> flagsBesideOrder(const DecodedMappedSection& section)
 }
 
 /* True if \a a and \a b are the same name up to their order keys (ops#503 class D, isTwinName()):
- * as sameUpToCounter(), with the ORD flag ignored at every level, and the Index of a section
+ * as sameUpToCounter(), with the ORD flag and the closed edge's flag (decision 206) ignored at
+ * every level, and the Index of a section
  * where both values are roles (Data::isRoleValue(): the last section at the top level, any
  * section below it) or, at the top level (\a top), the Index of a counter section
- * (isCounterSection(): today's bare ranks, until A2 names the ranks; then this bridging goes).
+ * (isCounterSection(): today's bare ranks, until A2 names the ranks; then this bridging goes),
+ * and the connected elements of the top level's last section when only one name has them (the
+ * vertexes that told a generated twin apart, which its lone survivor lacks: decision 214).
  * Below the top level, the names a section links and connects, a pattern instance's number
  * counts as a counter too, as in sameUpToCounter(); at the top level it doesn't: an instance's
  * number is its identity (I-A7), and a copy of the old element is the "pattern sibling" guard's.
@@ -1902,11 +1933,16 @@ bool sameUpToOrder(std::string_view a, std::string_view b, bool top)
         const bool instances = !top && x.opCode == patternInstanceOpCode
             && y.opCode == patternInstanceOpCode;
         const bool ranks = top && isCounterSection(x) && isCounterSection(y);
+        // The connected elements that told a twin apart, on one side only (PLAN decision 214):
+        // a generated twin keeps the vertexes no other twin has as its key, and the lone member
+        // left when its twins went has none, so the two are the same element up to that key
+        const bool toldApart = top && i + 1 == sectionsA.size()
+            && x.connectedElements.empty() != y.connectedElements.empty();
         if (!opCodesAgree || x.referenceIDs != y.referenceIDs || x.iterationTag != y.iterationTag
             || (x.index != y.index && !roles && !instances && !ranks)
             || x.elementType != y.elementType || flagsBesideOrder(x) != flagsBesideOrder(y)
             || x.linkedNames.size() != y.linkedNames.size()
-            || x.connectedElements.size() != y.connectedElements.size()) {
+            || (x.connectedElements.size() != y.connectedElements.size() && !toldApart)) {
             return false;
         }
         for (std::size_t j = 0; j < x.linkedNames.size(); ++j) {
@@ -1914,7 +1950,7 @@ bool sameUpToOrder(std::string_view a, std::string_view b, bool top)
                 return false;
             }
         }
-        for (std::size_t j = 0; j < x.connectedElements.size(); ++j) {
+        for (std::size_t j = 0; j < x.connectedElements.size() && !toldApart; ++j) {
             if (!sameUpToOrder(x.connectedElements[j], y.connectedElements[j], false)) {
                 return false;
             }
@@ -3672,8 +3708,20 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
                                    input.continuationDistance);
             };
             const ElementFingerprint& now = fingerprintOfIndex(hit);
-            if (hitPosition < 0 || !now.isValid() || here(now)) {
-                continue;  // unmoved, or nothing to compare
+            if (hitPosition < 0 || !now.isValid()) {
+                continue;  // nothing to compare
+            }
+            // Unmoved, the name stands, unless it is a crossing told apart by its role and saved
+            // among two twins or more (PR 390 round 2k, decision 241: the literal stop, the fourth
+            // silent find in round 2d's path). An edit that draws the edge the other way and moves
+            // the circle can set the lone crossing left exactly where its gone twin was, with the
+            // twin's role: the count stop below decides, as for a moved hit.
+            const std::string& hitName = entry.exactName.empty()
+                ? firstName(pool.elements[hitPosition])
+                : entry.exactName;
+            const bool unmoved = here(now);
+            if (unmoved && !(saved.twinCount >= 2 && endsInRole(hitName))) {
+                continue;  // unmoved
             }
             // The elements there: a cheap hint first rules most out, so that only the rest are
             // fingerprinted.
@@ -3685,9 +3733,11 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
                     place.push_back(static_cast<int>(k));
                 }
             }
-            const std::string& hitName = entry.exactName.empty()
-                ? firstName(pool.elements[hitPosition])
-                : entry.exactName;
+            // A twin on a closed edge (decision 206) that moved breaks, whatever sits at its old
+            // place: its place among its twins counts from the edge's seam, and an edit that turns
+            // the seam past them gives its name to another twin, which may sit anywhere, the old
+            // place included, or nowhere near it. Its own twin there (below) is no proof either.
+            const bool closedTwin = isClosedTwin(hitName);
             // Twins (ops#360, PR 340 round 3): pieces of one far cap told apart only by their
             // place among them (the ORD flag and the duplicate counter) can trade names when an
             // edit turns them, so nothing sits at the old place. Round 5: the saved fingerprint
@@ -4059,11 +4109,39 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
                 onFace = placeOnUpToFace(input, saved, hitName, now, eps);
             }
             const bool leftItsFace = onFace && *onFace != OnUpToFace::Kept;
-            if (place.empty() && !departed && !leftItsFace) {
+            departed = departed || leftItsFace;
+            // A twin whose count changed (PR 390 round 2d, the literal stop: the third silent find
+            // in this path): a crossing told apart by its role, or a member of a group saved with
+            // two or more, that moved with nothing at its old place, while its twins now are none
+            // or another number than were saved. Its name may be a twin's: a lone crossing whose
+            // edge was drawn the other way takes the role its gone twin had. It breaks.
+            int twinsNow = 0;
+            if (place.empty() && !departed && !closedTwin
+                && (endsInRole(hitName) || saved.twinCount >= 2)) {
+                const auto& names = pool.elements[hitPosition].names;
+                twinsNow = 1;
+                for (std::size_t k = 0; k < pool.elements.size(); ++k) {
+                    const auto& other = pool.elements[k].names;
+                    if (static_cast<int>(k) != hitPosition
+                        && std::any_of(other.begin(), other.end(), [&](const auto& m) {
+                               return std::any_of(names.begin(), names.end(), [&](const auto& n) {
+                                   return isTwinName(m, n);
+                               });
+                           })) {
+                        ++twinsNow;
+                    }
+                }
+            }
+            const bool countChanged = twinsNow == 1
+                || (twinsNow > 1 && saved.twinCount > 0 && twinsNow != saved.twinCount);
+            if (unmoved && !countChanged) {
+                continue;  // unmoved, its twins as many as were saved
+            }
+            if (place.empty() && !departed && !closedTwin && !countChanged) {
                 continue;  // moved alone
             }
-            departed = departed || leftItsFace;
-            if (!offCentre && !departed && !nearerTwin && entry.policy == SolvePolicy::Equivalent
+            if (!offCentre && !departed && !nearerTwin && !countChanged
+                && !(closedTwin && place.empty()) && entry.policy == SolvePolicy::Equivalent
                 && entry.equivalent && std::all_of(place.begin(), place.end(), [&](int k) {
                        return entry.equivalent(hit, pool.elements[k].index);
                    })) {
@@ -4108,7 +4186,8 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
                         && !piecesOfOne(name, hitName) && !markedPiecesOfOne(name, hitName);
                 });
             };
-            if (!departed && std::all_of(place.begin(), place.end(), ownTwin)) {
+            if (!departed && !closedTwin && !countChanged
+                && std::all_of(place.begin(), place.end(), ownTwin)) {
                 outcomes[i].evidence = movedBy() + "; its own twin" + (place.size() > 1 ? "s " : " ")
                     + there + sit + " where it was";
                 continue;
@@ -4129,8 +4208,33 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
             for (int k : place) {
                 list(k, "place");
             }
+            if (closedTwin) {
+                // The hit's twins, wherever they are: one of them holds the old member
+                for (std::size_t k = 0; k < pool.elements.size(); ++k) {
+                    const auto& names = pool.elements[k].names;
+                    if (static_cast<int>(k) != hitPosition
+                        && std::find(place.begin(), place.end(), static_cast<int>(k)) == place.end()
+                        && std::any_of(names.begin(), names.end(), [&](const auto& name) {
+                               return name != hitName && sameUpToOrder(name, hitName, true);
+                           })) {
+                        list(static_cast<int>(k), "twin");
+                    }
+                }
+            }
             list(hitPosition, "name");
-            if (departed) {
+            if (closedTwin) {
+                outcome.evidence = movedBy() + "; a twin on a closed edge, placed from its seam"
+                    + (place.empty() ? std::string()
+                                     : "; " + there + sit + " where it was");
+            }
+            else if (countChanged) {
+                outcome.evidence = (unmoved ? std::string("where it was") : movedBy())
+                    + "; a twin, " + std::to_string(saved.twinCount) + " saved, "
+                    + std::to_string(twinsNow)
+                    + " now: its name may be a twin's"
+                    + (unmoved ? "" : ", and nothing sits where it was");
+            }
+            else if (departed) {
                 outcome.evidence = movedBy()
                     + (!leftItsFace ? " off where it was, and nothing sits there"
                            : *onFace == OnUpToFace::Left
@@ -4599,6 +4703,78 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
         }
     }
 
+    // A twin on a closed edge whose name is gone (decision 206) breaks: no element holds its old
+    // place by its name, and the twins' places count from the seam, so neither the structure nor
+    // the geometry tells which one it was. The elements at its old place are its candidates.
+    for (std::size_t i = 0; i < input.entries.size(); ++i) {
+        const auto& entry = input.entries[i];
+        if (entry.exact || decidedEntry[i] || !isClosedTwin(entry.oldName)) {
+            continue;
+        }
+        decidedEntry[i] = 1;
+        auto& outcome = outcomes[i];
+        outcome = SolveOutcome();
+        outcome.evidence = "a twin on a closed edge, placed from its seam; its name is gone";
+        const ElementFingerprint& saved = entry.fingerprint;
+        const Pool& pool = pools[entry.type];
+        // After those at its old place, its twins (the same name up to their places)
+        std::vector<const SolveInput::Element*> twins;
+        for (const auto& element : pool.elements) {
+            if (std::any_of(element.names.begin(), element.names.end(), [&](const auto& name) {
+                    return sameUpToOrder(name, entry.oldName, true);
+                })) {
+                twins.push_back(&element);
+            }
+        }
+        auto listTwins = [&]() {
+            for (const auto* element : twins) {
+                if (std::find(outcome.candidates.begin(), outcome.candidates.end(), element->index)
+                    == outcome.candidates.end()) {
+                    outcome.candidates.push_back(element->index);
+                    outcome.candidateNames.push_back(firstName(*element));
+                    outcome.candidateRoles.emplace_back("twin");
+                    outcome.candidateDistances.push_back(nan);
+                }
+            }
+        };
+        if (!saved.isValid()) {
+            listTwins();
+            continue;
+        }
+        for (const auto& element : pool.elements) {
+            ElementFingerprint intrinsic;
+            std::optional<Base::Vector3d> anchor;
+            if (input.hintOf && input.hintOf(element.index, intrinsic, anchor)
+                && !mayBeAtPlace(saved,
+                                 intrinsic,
+                                 anchor,
+                                 input.diagonal,
+                                 input.tolerances,
+                                 input.continuationDistance)) {
+                continue;
+            }
+            const ElementFingerprint& now = fingerprintOfIndex(element.index);
+            if (now.isValid()
+                && atSamePlace(saved,
+                               now,
+                               input.diagonal,
+                               input.tolerances,
+                               input.continuationDistance)) {
+                outcome.candidates.push_back(element.index);
+                outcome.candidateNames.push_back(firstName(element));
+                outcome.candidateRoles.emplace_back("place");
+                outcome.candidateDistances.push_back(
+                    saved.center && now.center ? Base::Distance(*saved.center, *now.center) : nan
+                );
+            }
+        }
+        // As at a moved hit's old place, no other entry of the owner takes them (review
+        // pr390-r2j T2): a later pocket's corner 0.17 away took the lone crossing's place at
+        // tier 3, silently, where `integration` held it by its name.
+        pools[entry.type].exact.insert(outcome.candidates.begin(), outcome.candidates.end());
+        listTwins();
+    }
+
     // Missing entries, grouped: one solve per (old name, type, policy).
     std::map<std::tuple<std::string, std::string, int>, std::vector<int>> groups;
     for (std::size_t i = 0; i < input.entries.size(); ++i) {
@@ -4669,6 +4845,9 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
         SolveOutcome outcome;
         bool decided = false;
         int graphEntry = -1;
+        // A pick the twin clause broke, which `integration` took (-1: none): it still contests
+        // its element in the matching, so that no other entry takes it unopposed (review pr390-r2h)
+        int contested = -1;
         // Tiers 2-3: the survivors of tier 1 before geometry narrowed them (what a broken entry
         // lists), the tier that narrowed them (0: none), whether geometry alone found the
         // candidate, and what it found.
@@ -6014,12 +6193,15 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
         // reference broken at their place, PLAN decision 155), then moved by more than half its
         // crossings' spacing: G2 took the other crossing, the nearer one to the saved place, where
         // `integration` had followed the name taken at the redraw (PR 379 round 4's attack set,
-        // ACrossings|redrawn-then-move). Where the record saved two twins or more and the pick has
-        // an order group now (its names up to an order key, as twinPick() counts them), the pick
-        // must be the member whose offset from the group's centroid is nearest the saved offset,
-        // and the group the saved size; else the entry breaks. An old element's twin is
-        // twinBreaks()'s.
-        auto orderBreaks = [&](int position) -> std::string {
+        // ACrossings|redrawn-then-move). Where the record saved two twins or more, the pick must
+        // have an order group now (its names up to an order key, as twinPick() counts them), the
+        // group the saved size, and the pick the member whose offset from the group's centroid
+        // is nearest the saved offset; else the entry breaks (a pick with no group too, round
+        // 2e). An old element's twin is twinBreaks()'s. The callers run the twin clause's source
+        // checks first.
+        // \a noTwin, if given, is set where the break is round 2e's stop below, which
+        // `integration` lacks.
+        auto orderBreaks = [&](int position, bool* noTwin = nullptr) -> std::string {
             if (!saved || saved->twinCount < 2 || !saved->center || !saved->twinCentroid
                 || twinPick(position) != TwinPick::NotTwin) {
                 return {};
@@ -6038,7 +6220,16 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
                 }
             }
             if (group.size() < 2) {
-                return {};
+                // The literal stop (PR 390 round 2e, its fourth silent find): the old element was
+                // one of two twins or more, and the pick is none of them and has no twins of its
+                // own, a nearest pick by geometry alone while the twins' count changed (a far
+                // edge's crossings, one left on the piece, the other's name taken by a corner
+                // 0.28 away). It breaks.
+                if (noTwin) {
+                    *noTwin = true;
+                }
+                return pool.elements[position].index + " is no twin of the old element ("
+                    + std::to_string(saved->twinCount) + " twins saved)";
             }
             Base::Vector3d centroid;
             bool measured = true;
@@ -6075,6 +6266,55 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
         auto atPlaceText = [&](int position) {
             return otherOrigin(pool.elements[position], oldName) ? std::string(", another source")
                                                                  : std::string();
+        };
+        // What an index-only reference's pick at the place lacks, or nullptr: it has no origin to
+        // share, so it breaks there, as at tier 3's gap
+        auto indexOnlyLacks = [&](int position) -> const char* {
+            const char* lacks = otherOrigin(pool.elements[position], oldName);
+            const auto oldCopies = copyContexts(oldName);
+            const auto& names = pool.elements[position].names;
+            if (!lacks && !oldName.empty() && !names.empty()
+                && std::none_of(names.begin(), names.end(), [&](const auto& n) {
+                       return copyContexts(n) == oldCopies;
+                   })) {
+                lacks = "copy";
+            }
+            return lacks;
+        };
+        // Whether `integration`'s rule took the pick at \a position that this PR's twin checks
+        // break (reviews pr390-r2i, Opus T2 and Sonnet T1): only such a pick contests its element
+        // in the matching (review pr390-r2h). A pick `integration` broke as well had no entry
+        // there, and a contender it never had forced another entry with candidates {X, Y} onto Y
+        // silently (SolveOwner.twinSurvivorBreakDoesNotContestItsPick). Its tests as `integration`
+        // runs them: the origin and T1''s source test under a twin survivor only, D2's redraw
+        // exempt from the latter, the index-only ones at the place, the order's trade (not round
+        // 2e's stop) and the twin-pick rule's; at G2's wide reach (\a reach), the origin outside
+        // GuessAnySource and D2's verdict at the place. \a redrawn: D2's verdict; \a gap: tier 3
+        // found no nearest.
+        auto takenOnIntegration = [&](int position, bool reach, bool redrawn, bool gap) {
+            const bool survivor = state.twinSurvivor >= 0;
+            if ((reach ? !input.guessAnySource || survivor : survivor)
+                && otherOrigin(pool.elements[position], oldName)) {
+                return false;
+            }
+            if ((reach ? survivor : !redrawn && (survivor || gap)) && lostOldSource(position)) {
+                return false;
+            }
+            if (!reach && gap && input.sameSource && indexOnlyLacks(position)) {
+                return false;
+            }
+            bool noTwin = false;
+            if (!orderBreaks(position, &noTwin).empty() && !noTwin) {
+                return false;
+            }
+            if (twinPick(position) == TwinPick::Trade) {
+                return false;
+            }
+            std::string why;
+            const PlaceVerdict verdict = verdictAt(position, why);
+            return !reach
+                || (verdict != PlaceVerdict::OtherSide && verdict != PlaceVerdict::WasThere
+                    && verdict != PlaceVerdict::SourceGone);
         };
         // The guess rules (N2 section 5): never against a failed target (N10), never without a
         // saved fingerprint (N8).
@@ -6316,6 +6556,13 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
                 }
             }
             std::vector<int> agree = intrinsicSurvivors(open);
+            // The twin clause's source checks below (the origin, T1''s test) run for a twin
+            // record of two or more as well, as if tier 1 had kept a twin: the literal stop of
+            // PR 390 round 2f, its fifth silent find. Two circles of one sketch, one Pocket, one
+            // edit: A moved off its crossings and B's put 0.1 from A's old ones. A's names hold
+            // no twin now, so no survivor ran the checks, and tier 3 took B's crossing, an order
+            // group of the saved size at the saved offset; `integration`'s survivor broke it.
+            const bool twinClause = state.twinSurvivor >= 0 || saved->twinCount >= 2;
             if (!agree.empty()) {
                 Nearest nearest = nearestOf(agree);
                 // XP: the board's top edge drawn again where it was, its other top edge within
@@ -6353,34 +6600,51 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
                     if (placeBreaks(pick, agree, "geometric", &placeClause)) {
                         continue;
                     }
-                    const bool redrawn = !placeClause.empty();
+                    // D2's verdict, as `integration` reads it (takenOnIntegration())
+                    const bool drawnAgain = !placeClause.empty();
+                    bool redrawn = drawnAgain;
+                    // Not drawn again while another element still holds the old name's sources
+                    // (review pr390-r2js): the old circle moved off, its crossings named anew,
+                    // and a new circle drawn where it was. D2 calls the new crossing at the place
+                    // drawn again, and XP took it, silently; T1''s test now breaks it.
+                    if (redrawn && !oldSources.empty()) {
+                        for (std::size_t k = 0; k < pool.elements.size() && redrawn; ++k) {
+                            if (static_cast<int>(k) == pick) {
+                                continue;
+                            }
+                            for (const auto& n : pool.elements[k].names) {
+                                if (!knownSourcesOf(n).empty() && !lostASource({n}, oldSources)) {
+                                    redrawn = false;
+                                    break;
+                                }
+                            }
+                        }
+                    }
                     const char* lacks = nullptr;
-                    if (state.twinSurvivor >= 0) {
+                    if (twinClause) {
                         lacks = otherOrigin(pool.elements[pick], oldName);
                     }
                     const bool atPlace = nearest.index < 0 || !atPlaceAmong({pick}).empty();
-                    if (!lacks && !redrawn && (state.twinSurvivor >= 0 || nearest.index < 0)
+                    // Under the twin clause, T1''s test whatever D2's verdict (decision 227's literal
+                    // stop, review pr390-r2g): a new circle drawn at a twin's old place while the
+                    // old circle moved on, its other crossing tier 1's survivor, gives a pick D2
+                    // calls drawn again, with the old circle's source lost. Outside the clause, D2's
+                    // verdict stands for XP's pick at the place
+                    if (!lacks && (twinClause || (nearest.index < 0 && !redrawn))
                         && lostOldSource(pick)) {
                         lacks = "source element";
                     }
                     if (!lacks && nearest.index < 0 && input.sameSource) {
-                        // An index-only reference (no old name) has no origin to share: it breaks
-                        // here, as at tier 3's gap
-                        lacks = otherOrigin(pool.elements[pick], oldName);
-                        const auto oldCopies = copyContexts(oldName);
-                        const auto& names = pool.elements[pick].names;
-                        if (!lacks && !oldName.empty() && !names.empty()
-                            && std::none_of(names.begin(), names.end(), [&](const auto& n) {
-                                return copyContexts(n) == oldCopies;
-                            })) {
-                            lacks = "copy";
-                        }
+                        lacks = indexOnlyLacks(pick);
                     }
                     const std::string why = lacks
                         ? pool.elements[pick].index + " has another " + lacks
                         : orderBreaks(pick);
                     if (!why.empty()) {
                         state.decided = true;
+                        if (takenOnIntegration(pick, false, drawnAgain, nearest.index < 0)) {
+                            state.contested = pick;
+                        }
                         state.outcome.evidence = (nearest.index >= 0
                                                       ? std::string("no structural candidate, tier 3: ")
                                                       : "no structural candidate, at the same place: ")
@@ -6435,16 +6699,19 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
                         wide = wideNearestOf(agree);
                     }
                     std::string otherSource;
-                    if (wide.index >= 0 && (!input.guessAnySource || state.twinSurvivor >= 0)) {
+                    if (wide.index >= 0 && (!input.guessAnySource || twinClause)) {
                         const auto& picked = pool.elements[agree[wide.index]];
                         const char* lacks = otherOrigin(picked, oldName);
                         // after the twin clause, T1''s test too (F1, as above)
-                        if (!lacks && state.twinSurvivor >= 0 && lostOldSource(agree[wide.index])) {
+                        if (!lacks && twinClause && lostOldSource(agree[wide.index])) {
                             lacks = "source element";
                         }
                         if (lacks) {
                             otherSource = "; the wide reach's " + picked.index + " has another "
                                 + lacks;
+                            if (takenOnIntegration(agree[wide.index], true, false, false)) {
+                                state.contested = agree[wide.index];
+                            }
                             wide = Nearest();
                         }
                     }
@@ -6452,6 +6719,9 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
                         const std::string order = orderBreaks(agree[wide.index]);
                         if (!order.empty()) {
                             otherSource = "; the wide reach's " + order;
+                            if (takenOnIntegration(agree[wide.index], true, false, false)) {
+                                state.contested = agree[wide.index];
+                            }
                             wide = Nearest();
                         }
                     }
@@ -6534,6 +6804,20 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
                 it->second = graph.addCandidate({id});
             }
             graph.addEdge(state.graphEntry, it->second, state.inAncestry.count(k) > 0);
+        }
+    }
+
+    // A pick the twin clause broke still contests its element (review pr390-r2h): an entry of
+    // another circle's crossing that wanted it too stays ambiguous, as on `integration`, instead
+    // of taking it unopposed. The broken entry's own outcome stands.
+    for (auto& state : states) {
+        if (state.decided && state.contested >= 0 && state.graphEntry < 0) {
+            const int id = state.pool->ids[state.contested];
+            auto [it, inserted] = nodeOfId.emplace(id, 0);
+            if (inserted) {
+                it->second = graph.addCandidate({id});
+            }
+            graph.addEdge(graph.entryCount++, it->second, false);
         }
     }
 

@@ -1,0 +1,12 @@
+{
+"entries": {
+"R2eRSecondHoleTakesPlaceTwoPockets|first|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr390-r2e", "issue": "ops#468", "tier": "F"},
+"R2eRSecondHoleTakesPlaceTwoPockets|second|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr390-r2e", "issue": "ops#468", "tier": "F"},
+"R2eRSecondHoleTakesPlace|first|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr390-r2e", "issue": "ops#468", "tier": "F"},
+"R2eRSecondHoleTakesPlace|second|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr390-r2e", "issue": "ops#468", "tier": "F"},
+"R2eRSmallMoveCountChangesTopRedrawn|first|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr390-r2e", "issue": "ops#468", "tier": "F"},
+"R2eRSmallMoveCountChangesTopRedrawn|second|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr390-r2e", "issue": "ops#468", "tier": "F"},
+"R2eRSmallMoveCountChanges|first|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr390-r2e", "issue": "ops#468", "tier": "F"},
+"R2eRSmallMoveCountChanges|second|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr390-r2e", "issue": "ops#468", "tier": "F"}
+}
+}

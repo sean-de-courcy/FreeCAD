@@ -2,6 +2,6 @@
 "entries": {
 "PadCapPieceCoversTheWholeFill|middle|V2s": {"axes": ["M2", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#501", "tier": "F"},
 "PadCapPieceGrowsOnOneSideOnly|middle|V2s": {"axes": ["M2", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#501", "tier": "F"},
-"RevolutionUpToHookWallProfileTaller|wall_binder|V2s": {"axes": ["M2", "E5"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "port", "issue": "ops#501", "tier": "F"}
+"RevolutionUpToHookWallProfileTaller|wall_binder|V2s": {"axes": ["M2", "E5"], "classes": ["B"], "expect": "CORRECT", "expected": "guessed", "found_by": "port", "issue": "ops#501", "tier": "F"}
 }
 }

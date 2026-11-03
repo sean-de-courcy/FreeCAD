@@ -719,6 +719,13 @@ bool exactNeedsSolving(const SolverEntry& entry,
     // 2): solveOwner() checks that it holds its old centre. Any marked piece may have, while the
     // pieces slid onto the next face (round 3): solveOwner() checks that it overlaps its old place
     const std::string plain = plainName(entry.exactName);
+    // An ordered hit saved among two twins or more that holds its old place (PR 390 round 2k,
+    // decision 241): a lone crossing may have taken its gone twin's role exactly there.
+    // solveOwner() counts its twins
+    if (saved.twinCount >= 2 && Data::isOrderedName(plain)
+        && Data::atSamePlace(saved, now, diagonal, tolerances, distance)) {
+        return true;
+    }
     return !Data::atSamePlace(saved, now, diagonal, tolerances, distance)
         && (occupied() || Data::isOrderedName(plain) || Data::isMarkedCapName(plain)
             || Data::isMarkedPieceName(plain));
