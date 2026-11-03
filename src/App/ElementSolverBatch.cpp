@@ -2061,6 +2061,10 @@ bool solveElementReferences(DocumentObject* feature,
                     if (turnedThere) {
                         refusal = "but the part moved as one piece with another edit";
                     }
+                    else if (entry->frame) {
+                        // Where it was, a part turned onto itself has a twin (decision 236)
+                        refusal = "but the target's frame moved";
+                    }
                     else if (entry->owner && entry->owner->getDocument() != feature->getDocument()) {
                         // The consumer pass: the feature's file may have had its own edits
                         refusal = "but it is another document's";
