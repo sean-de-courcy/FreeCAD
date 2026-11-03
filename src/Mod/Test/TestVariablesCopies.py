@@ -563,7 +563,10 @@ class TestVariablesCopies(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertEqual(copy.getTypeIdOfProperty(name), kind)
         self.assertTrue(copy.isDerivedFrom("App::VarSet"))
-        self.assertEqual(copy.ViewObject, None)  # no GUI here; VarSet's view provider in the GUI
+        if App.GuiUp:  # VarSet's view provider in the GUI
+            self.assertEqual(copy.ViewObject.TypeId, "Gui::ViewProviderVarSet")
+        else:
+            self.assertEqual(copy.ViewObject, None)
 
     def test_format_round_trip(self):
         """Every source property, non-empty and with the characters XML and maps must escape,
