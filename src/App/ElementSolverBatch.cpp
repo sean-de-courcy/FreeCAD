@@ -1235,20 +1235,24 @@ bool solveElementReferences(DocumentObject* feature,
                     return movesFrame(placement, frameDiagonal, frameTolerances.angle, frameDistance);
                 };
                 if (piece && moves(piece->motion)) {
-                    const Base::Placement mapped = saved.frame
-                        ? frameNow->inverse() * piece->motion * *saved.frame
-                        : piece->motion;
-                    if (moves(mapped)) {
-                        entry.rigid = mapped;
-                    }
                     // The rigid follow is off for the beta (decision 237, after the closure's
                     // eighth silent: a record taken early, its sources from the edited model, read
-                    // "nothing else changed"): a part moved as one piece breaks, with another edit
-                    // or without (decisions 234 and 236), where it went listed first. The old global
-                    // place is the record itself where the frame stayed
-                    entry.turned = saved.frame ? frameNow->inverse() * *saved.frame
-                                               : Base::Placement();
-                    entry.turnMotion = piece->motion;
+                    // "nothing else changed"): no record is read mapped by the motion. Where the
+                    // frame moved, the frame rule judges it (211 with 236's guard: a twin where it
+                    // was breaks). Where it stayed (an AttachmentOffset, a Body-held record),
+                    // anything where the element was breaks, and nothing there leaves it to today's
+                    // rules
+                    const Base::Placement old = saved.frame
+                        ? frameNow->inverse() * *saved.frame
+                        : Base::Placement();
+                    if (saved.frame && moves(old)) {
+                        entry.frame = old;
+                    }
+                    else {
+                        entry.turned = old;
+                        entry.turnMotion = piece->motion;
+                        entry.turnFollowed = false;
+                    }
                 }
                 else if (saved.isValid() && saved.frame) {
                     const Base::Placement turned = frameNow->inverse() * *saved.frame;

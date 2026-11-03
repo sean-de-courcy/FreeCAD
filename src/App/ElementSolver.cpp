@@ -6956,8 +6956,9 @@ bool overlapsMappedPlace(
 // (decision 236): anything else there breaks, listed first (role `turned`). A part turned onto
 // itself by its own symmetry has a twin where each element was, whatever the closure read.
 //
-// A part moved as one piece breaks (decisions 234 and 236, 10.11's literal stop; with the rigid
-// follow off for the beta, decision 237, without another edit too): the elements where it is if it went with the part (FOLLOWED, the entry's fingerprint)
+// A part moved as one piece where its frame stayed (with the rigid follow off for the beta,
+// decision 237) breaks where anything sits where the element was, and is otherwise left to today's
+// rules; one with followed sources (the rigid follow on, decisions 234 and 236) breaks: the elements where it is if it went with the part (FOLLOWED, the entry's fingerprint)
 // listed first (`turned`), those where it was (OLD) second (`frame`), the hit third (`name`).
 // 211's keep never runs on such a turn. A record without sources breaks only where something
 // sits where it was.
@@ -7089,8 +7090,9 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         double q3 = 1.0;
         motion.getRotation().getValue(q0, q1, q2, q3);
         const double turn = 2.0 * std::acos(std::min(1.0, std::abs(q3))) * 180.0 / std::numbers::pi;
-        outcome.evidence = std::string(piece ? "the part moved as one piece by "
-                                             : "the target's frame moved by ")
+        outcome.evidence = std::string(piece           ? "the part moved as one piece by "
+                                       : judge.turned ? "the target moved by "
+                                                      : "the target's frame moved by ")
             + formatDistance(motion.getPosition().Length()) + " mm / " + formatDistance(turn)
             + " deg";
         if (!judge.place.empty()) {
