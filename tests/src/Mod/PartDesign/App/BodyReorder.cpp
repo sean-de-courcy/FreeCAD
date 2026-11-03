@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
 #include <limits>
 #include <sstream>
 #include "src/App/InitApplication.h"
@@ -22,6 +23,7 @@
 #include <App/Origin.h>
 #include <App/PropertyLinks.h>
 #include <App/PropertyStandard.h>
+#include <Base/FileInfo.h>
 #include <Base/Reader.h>
 #include <Base/Writer.h>
 #include <Mod/Part/App/Geometry.h>
@@ -746,6 +748,60 @@ TEST_F(RecordRefreshChain, aTargetLeftTouchedByTheRecomputeDoesntHoldTheRecordPa
     EXPECT_TRUE(_body->holds(p(4)));
     EXPECT_TRUE(p(4)->isTouched());
     EXPECT_GT(markOf(record(link), sketchOf(p(4))), markOf(before, sketchOf(p(4))));
+}
+
+TEST_F(RecordRefreshChain, anObjectOfAnotherDocumentLeftTouchedDoesntHoldTheRecordPastTheRecompute)
+{
+    // Arrange: as anObjectLeftTouchedDoesntHoldTheRecordPastTheRecompute, the holder in a second
+    // document (both saved: a link into another document needs its file)
+    auto otherBody = _doc->addObject<PartDesign::Body>("Other");
+    auto q0 = pad("Q0", 40, 0, 10, 0, 10, otherBody);
+    auto q1 = pad("Q1", 42, 2, 2, 10, 2, otherBody);
+    _doc->recompute();
+    otherBody->rollTo(q0);
+    auto binder = _doc->addObject<PartDesign::ShapeBinder>("Binder");
+    _body->addObject(binder);
+    binder->Support.setValue(otherBody);
+    _doc->recompute();
+    namespace fs = std::filesystem;
+    const fs::path base = fs::temp_directory_path() / "RecordRefreshChainOtherDocument";
+    std::error_code error;
+    fs::remove_all(base, error);
+    fs::create_directories(base);
+    auto& app = App::GetApplication();
+    const std::string holdersName = app.getUniqueDocumentName("holders");
+    auto holders = app.newDocument(holdersName.c_str(), "testUser");
+    ASSERT_TRUE(_doc->saveAs(Base::FileInfo::pathToString(base / "Target.FCStd").c_str()));
+    ASSERT_TRUE(holders->saveAs(Base::FileInfo::pathToString(base / "Holders.FCStd").c_str()));
+    auto holder = holders->addObject<App::FeatureTest>("Holder");
+    auto link = freecad_cast<App::PropertyXLinkSub*>(
+        holder->addDynamicProperty(App::PropertyXLinkSub::getClassTypeId().getName(), "XLink"));
+    ASSERT_NE(link, nullptr);
+    link->setValue(_body, std::vector<std::string> {frontBottomEdge()});
+    holders->recompute();
+    auto record = [&]() {
+        const auto records = link->getElementFingerprints();
+        return records.empty() ? std::string() : records[0];
+    };
+    const auto before = record();
+    ASSERT_GE(markOf(before, q1), -1);
+    q1->Length.setValue(3.0);
+
+    // Act: P4's boss redrawn, and only the holder's document recomputed
+    redrawBoss(4);
+    holders->recompute();
+
+    // Assert: the holder's recompute made the chain's Body again (its dependency list crosses into
+    // the target's document) and included Q1, held by its bar and left touched: the record is
+    // taken, the redraw in it (review pr564son-r4 T-R4-1: an object of another document left
+    // touched held it past the recompute)
+    EXPECT_TRUE(otherBody->holds(q1));
+    EXPECT_TRUE(q1->isTouched());
+    EXPECT_FALSE(_body->isTouched());
+    EXPECT_GT(markOf(record(), sketchOf(p(4))), markOf(before, sketchOf(p(4))));
+
+    app.closeDocument(holdersName.c_str());
+    fs::remove_all(base, error);
 }
 
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)

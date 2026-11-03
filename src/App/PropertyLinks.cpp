@@ -1153,8 +1153,11 @@ std::string PropertyLinkBase::_getElementFingerprint(App::DocumentObject* featur
 // Whether the model a record would be taken from now is still to be recomputed (ops#564): an
 // object of the record's closure is touched (the one executing stays touched until it is done,
 // and the next one is touched only then, so a target downstream of it counts through it). Once a
-// recompute is over, only what it didn't include holds it (a partial recompute, another document,
-// review pr564opus-r1 T3). What it included and left touched is taken: a Body's members behind a
+// recompute is over, only what it didn't include holds it (a partial recompute, review pr564opus-r1
+// T3). What it included is what it marked PendingRecompute, of any document: its dependency list
+// takes another document's objects too, and one of them left touched held the record past the
+// recompute (review pr564son-r4 T-R4-1, the third silent find here: the literal rule, the stop
+// widened). What it included and left touched is taken: a Body's members behind a
 // binder didn't make the target's shape, and a target that made its shape and then failed (a
 // sketch losing an external link) can't be told from one never made (the roll-back bar's: taken
 // early, it breaks, review pr564opus-r2 R2-2). A record kept past the recompute would date what
@@ -1173,8 +1176,7 @@ static bool recordPending(const std::vector<App::DocumentObject*>& closure)
         if (!object || !object->isAttachedToDocument() || !object->isTouched()) {
             continue;
         }
-        if (_RecomputeEnded && object->getDocument() == _RecomputeEnded
-            && object->testStatus(ObjectStatus::PendingRecompute)) {
+        if (_RecomputeEnded && object->testStatus(ObjectStatus::PendingRecompute)) {
             continue;
         }
         return true;
