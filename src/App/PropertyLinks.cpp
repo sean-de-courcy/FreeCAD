@@ -1412,9 +1412,15 @@ void PropertyLinkBase::restoreLabelReference(const DocumentObject* obj,
 // P-beta (FreeCAD-CH, ops#502, PLAN decision 247): a reference that found its element by one of the
 // IDX names an element of a beta file's history-less result keeps as aliases, beside its MLN name,
 // takes the MLN name: the aliases are given at one naming only, so the next one would lose it.
-// \a name is the resolved pair (`<prefix>;<mapped>.<index>` in newName).
+// \a name is the resolved pair (`<prefix>;<mapped>.<index>` in newName). Only a reference that
+// found its element: a missing one keeps its IDX name for the missing check, and the MLN name is
+// taken only from an element that holds the IDX name itself (review r3 T1: a missing reference's
+// stored index gives whatever element sits there now).
 static void takeMatchName(const GeoFeature* geo, ElementNamePair& name)
 {
+    if (GeoFeature::hasMissingElement(name.oldName.c_str())) {
+        return;
+    }
     const char* element = Data::findElementName(name.newName.c_str());
     const char* mapped = element ? Data::isMappedElement(element) : nullptr;
     if (!mapped || !strstr(mapped, Data::MAPPER_FLAG_INDEX)) {
@@ -1436,19 +1442,24 @@ static void takeMatchName(const GeoFeature* geo, ElementNamePair& name)
     if (!data) {
         return;
     }
+    std::string match;
+    bool holdsAlias = false;
     for (const auto& other :
          data->getElementMappedNames(Data::IndexedName(index.c_str(), data->getElementTypes()))) {
         const std::string candidate = other.first.toString();
-        if (candidate.find(";MLN;") == std::string::npos) {
+        holdsAlias = holdsAlias || candidate == bare;
+        if (!match.empty() || candidate.find(";MLN;") == std::string::npos) {
             continue;
         }
         const auto& decoded = Data::MappedName::getDecodedMappedName(candidate);
         if (decoded.size() == 1 && decoded.front().opCode == "MLN"
             && !decoded.front().hasMapperFlag(Data::MAPPER_FLAG_INDEX)) {
-            name.newName = std::string(name.newName.c_str(), element)
-                + Data::ComplexGeoData::elementMapPrefix() + candidate + "." + index;
-            return;
+            match = candidate;
         }
+    }
+    if (holdsAlias && !match.empty()) {
+        name.newName = std::string(name.newName.c_str(), element)
+            + Data::ComplexGeoData::elementMapPrefix() + match + "." + index;
     }
 }
 
