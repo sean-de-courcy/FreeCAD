@@ -1,0 +1,13 @@
+{
+"entries": {
+"MixedFixedHexagons|cap_solid|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr404-r5s", "issue": "ops#396", "tier": "F"},
+"MixedFixedSquares|cap_solid|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr404-r5s", "issue": "ops#396", "tier": "F"},
+"MixedRoundCornerSquares|cap_solid|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr404-r5s", "issue": "ops#396", "tier": "F"},
+"MixedStandardHexagons|cap_solid|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr404-r5s", "issue": "ops#396", "tier": "F"},
+"MixedStandardSquares|cap_solid|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr404-r5s", "issue": "ops#396", "tier": "F"},
+"SmoothFixedHexagons|cap_solid|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr404-r5s", "issue": "ops#396", "tier": "F"},
+"SmoothFixedSquares|cap_solid|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr404-r5s", "issue": "ops#396", "tier": "F"},
+"SmoothFrenetHexagons|cap_solid|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr404-r5s", "issue": "ops#396", "tier": "F"},
+"SmoothStandardHexagons|cap_solid|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr404-r5s", "issue": "ops#396", "tier": "F"}
+}
+}
