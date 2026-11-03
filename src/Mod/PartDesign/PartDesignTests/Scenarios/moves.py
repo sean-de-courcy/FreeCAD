@@ -565,10 +565,11 @@ class PadReversedAndShifted(Scenario):
     """A pad (0..10 x 0..10, 5 high) with a chamfer (0.5) on its top right edge (x = 10, z = 5),
     the sketch line's `XTR;PRJ` copy. The pad is reversed and its sketch raised by the pad's
     length: the solid is the same, the copy now lies at z = 0 and the sketch line itself where it
-    was. The line is the copy's own twin, so the reference keeps its name and the chamfer moves
-    to the bottom edge, silently (ops#168, the PR 143 review's finding 2). Nothing in the names
-    or the saved geometry tells this from a lift by the pad's own length (BossRaisedByItsHeight):
-    pinned as an accepted risk of the own-twin rule, an open question for the user."""
+    was. The line is the copy's own twin, so the reference kept its name and the chamfer moved
+    to the bottom edge, silently (ops#168, the PR 143 review's finding 2), pinned as an accepted
+    risk of the own-twin rule. Since ops#557 the record knows the sketch moved as one piece with
+    another edit (Reversed): the top edge at its old place and the name's bottom edge disagree,
+    and the reference breaks with both listed (decisions 231 and 234)."""
 
     area = "moves"
     MULTI = True
@@ -579,7 +580,9 @@ class PadReversedAndShifted(Scenario):
         return edge("line", direction=Y, through=(10, 0, z), contains=(10, 5, z))
 
     def topEdge(self):
-        return self.rightEdgeAt(0 if self.edited else 5)
+        if self.edited:
+            return Broken(self.rightEdgeAt(5), self.rightEdgeAt(0))
+        return self.rightEdgeAt(5)
 
     def build(self, doc):
         body = m.body(doc)

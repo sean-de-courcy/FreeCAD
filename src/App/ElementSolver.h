@@ -756,6 +756,26 @@ struct AppExport SolveInput
         /// Elements the user rejected for this reference (ops#127, App::markReferenceBroken()):
         /// never its candidates, at any tier.
         std::vector<std::string> excluded;
+        /// The target's frame moved since the record (ops#557, `notes\naming-class-D.md` 10):
+        /// the motion that takes the record to the element's old global place in the current
+        /// frame (ElementFingerprint::transformed()). Empty: the frame is the same, or unknown.
+        std::optional<Base::Placement> frame;
+        /// The target's chain moved as one piece with another edit (decision 234,
+        /// `notes\naming-class-D.md` 10.11.2): \a fingerprint is the record where the element is
+        /// if it went with the part (FOLLOWED), \a oldPlace the record at its old global place
+        /// (OLD). solveOwner() reads both.
+        struct Turn
+        {
+            ElementFingerprint oldPlace;
+            /// The mapping dropped the record's box (ElementFingerprint::transformed())
+            bool oldBoxDropped = false;
+            bool followedBoxDropped = false;
+            /// The motion, for the evidence
+            Base::Placement motion;
+            /// False for a record without sources: no followed reading, anything at OLD breaks
+            bool followed = true;
+        };
+        std::optional<Turn> turned;
     };
     /// An element of the target with all its mapped names.
     struct Element

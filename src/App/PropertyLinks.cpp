@@ -1077,6 +1077,14 @@ static std::string elementFingerprint(App::DocumentObject* feature,
         || GeoFeature::hasMissingElement(elementName.oldName.c_str())) {
         return {};
     }
+    // A PartDesign feature's old shape under the new frame its execute set before making the shape
+    // again (ops#557; Part::Feature marks the Shape NoRecompute while it re-places it): a record
+    // taken now would pair the old shape with the new frame and hide the move from the update
+    // after the shape is made. The record stays as it was until then.
+    if (auto prop = geo->getPropertyOfGeometry(); prop && geo->placementIsDerived()
+        && geo->isRecomputing() && prop->testStatus(Property::NoRecompute)) {
+        return {};
+    }
     Data::ElementFingerprint fingerprint;
     if (!geo->getElementFingerprint(elementName.oldName.c_str(), fingerprint)) {
         return {};
@@ -1136,6 +1144,19 @@ static std::string elementFingerprint(App::DocumentObject* feature,
             return {};
         }
     }
+    // The frame (ops#557): for a target whose placement is its chain's frame (a PartDesign
+    // feature), the placement the fingerprint was taken without. A turn of it under a tool
+    // fixed in the body can leave the local shape and its names as they were.
+    if (geo->placementIsDerived()) {
+        if (auto prop = geo->getPropertyOfGeometry()) {
+            if (auto data = prop->getComplexData()) {
+                fingerprint.frame = data->getPlacement();
+            }
+        }
+    }
+    // The chain's placement sources and loci (decision 218): the solver tells a part moved as
+    // one piece from an edit that moved some of it by them
+    placementSources(geo, fingerprint.sources);
     if (closureOut) {
         *closureOut = std::move(closure);
     }
@@ -1273,6 +1294,10 @@ bool PropertyLinkBase::_updateElementFingerprints(App::DocumentObject* feature,
                 continue;
             }
             now.marks = old.marks;
+            // The frame and the sources (ops#557) would come from the model still to be
+            // recomputed too: a digest already holds the edit
+            now.frame = old.frame;
+            now.sources = old.sources;
             if (now == old && recordPending(closure)) {
                 _HeldFingerprints.insert(this);
                 FC_LOG("record held while its target is to be recomputed: " << propertyName(this)

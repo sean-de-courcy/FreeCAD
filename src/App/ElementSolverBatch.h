@@ -75,6 +75,26 @@ struct AppExport SolverEntry
     bool guessed = false;
     std::string guessedIndex;
     GuessRecord guess;
+    /// The target's frame moved since the reference's record was taken (ops#557): the motion
+    /// that takes the record to the element's old global place in the target's current frame,
+    /// P_now.inverse() * P_saved. Empty when the record has no frame or the frame is the same.
+    /// Set by pass 2 for every entry of the target.
+    std::optional<Base::Placement> frame;
+    /// The target's chain moved as one piece since the record (decision 218,
+    /// `notes\naming-class-D.md` 11.2): the motion that takes the record to where the element is
+    /// now in the target's frame, P_now.inverse() * M * P_saved. The record is read mapped by it,
+    /// and \a frame stays empty. Empty when the chain didn't move as one piece, or the mapping is
+    /// the identity.
+    std::optional<Base::Placement> rigid;
+    /// The chain moved as one piece with another edit (decision 234, `notes\naming-class-D.md`
+    /// 10.11.2): T = P_now.inverse() * P_saved, the identity where the frame stayed, which takes
+    /// the record to the element's old global place, while \a rigid reads it where the element is
+    /// if it went with the part. solveOwner() reads both; \a frame stays empty. Also set where the
+    /// frame moved for a record without sources, with no followed reading (\a turnFollowed false).
+    std::optional<Base::Placement> turned;
+    /// The turn's motion M in body coordinates (T without sources), for the evidence.
+    Base::Placement turnMotion;
+    bool turnFollowed = true;
 };
 
 /// What pass 1 gathers for one update of one feature.
@@ -309,6 +329,20 @@ AppExport bool elementTwinCentroid(
     const char* element,
     Base::Vector3d& centroid,
     int& count
+);
+
+/** The placement sources and loci of \a geo's chain (decision 218, `notes\naming-class-D.md` 11.3
+ * and 11.9), sorted as the record keeps them. The chain is \a geo's out-list (a Body's: its Tip and
+ * the Tip's out-list). A source is an object whose placement is its own: a sketch, a datum, a
+ * primitive, a Part feature, a binder; not an `App::` object, a Body or another PartDesign
+ * feature, whose placement is its chain's. An up-to face's or shape's owner is always one. A
+ * locus is an origin line or plane that an object of the chain or \a geo names as geometry (a
+ * revolve's or pattern's axis, a mirror plane, a sketch's external geometry). Placements and
+ * loci are in body coordinates.
+ */
+AppExport void placementSources(
+    const GeoFeature* geo,
+    std::vector<Data::ElementFingerprint::Source>& sources
 );
 
 /// The bare mapped name in a shadow's new-style name (`Body.;<name>.Face3` -> `<name>`), or an

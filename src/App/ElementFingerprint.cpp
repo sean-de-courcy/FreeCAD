@@ -3,6 +3,7 @@
 #include "ElementFingerprint.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <iomanip>
 #include <locale>
@@ -25,6 +26,8 @@ constexpr char markDelimiter = ':';
 constexpr std::string_view suppressedFlag = "s";
 // A closure's marks cut down to its suppressed objects (ops#549, decision 216)
 constexpr std::string_view partialMarks = "+";
+// An object's digest of its other inputs in version 8's sources (decision 231): 64 bits in hex
+constexpr int digestDigits = 16;
 constexpr int fieldCount = 7;
 
 std::vector<std::string_view> split(std::string_view text, char delimiter)
@@ -229,6 +232,129 @@ bool parseMarks(std::string_view text, std::vector<ElementFingerprint::Mark>& ma
     return marks.size() <= ElementFingerprint::MaxMarks;
 }
 
+// Version 8's placements: a position and a unit quaternion, its real part not negative when
+// written, so that one rotation has one text (ops#557)
+std::string placementText(const Base::Placement& placement)
+{
+    double q0 = 0.0;
+    double q1 = 0.0;
+    double q2 = 0.0;
+    double q3 = 1.0;
+    placement.getRotation().getValue(q0, q1, q2, q3);
+    if (q3 < 0.0) {
+        q0 = -q0;
+        q1 = -q1;
+        q2 = -q2;
+        q3 = -q3;
+    }
+    const Base::Vector3d& position = placement.getPosition();
+    std::string text;
+    for (double value : {position.x, position.y, position.z, q0, q1, q2, q3}) {
+        if (!text.empty()) {
+            text += listDelimiter;
+        }
+        text += ElementFingerprint::formatNumber(value);
+    }
+    return text;
+}
+
+bool parsePlacement(std::string_view text, Base::Placement& placement)
+{
+    std::vector<double> values;
+    if (text == emptyField || !parseList(text, values) || values.size() != 7) {
+        return false;
+    }
+    const double norm = std::sqrt(
+        values[3] * values[3] + values[4] * values[4] + values[5] * values[5] + values[6] * values[6]
+    );
+    if (std::abs(norm - 1.0) > 1e-6) {
+        return false;
+    }
+    placement = Base::Placement(
+        Base::Vector3d(values[0], values[1], values[2]),
+        Base::Rotation(values[3] / norm, values[4] / norm, values[5] / norm, values[6] / norm)
+    );
+    return true;
+}
+
+// Version 8's sources (decision 218): `_`, or entries separated by `/`, each `<key>:<placement>`
+// or `L<key>:` / `P<key>:` / `M<key>:` and a point and a unit direction, or `V<key>.<property>:`
+// and a vector, or `D<key>:` and a digest in 16 hex digits; a key is an ID, `@<document>` after it
+// for another document's object
+bool parseSources(std::string_view text, std::vector<ElementFingerprint::Source>& sources)
+{
+    sources.clear();
+    if (text == emptyField) {
+        return true;
+    }
+    for (auto part : split(text, entryDelimiter)) {
+        const auto colon = part.find(markDelimiter);
+        if (colon == std::string_view::npos || colon == 0) {
+            return false;
+        }
+        ElementFingerprint::Source source;
+        std::string_view key = part.substr(0, colon);
+        if (key.front() == 'L' || key.front() == 'P' || key.front() == 'M' || key.front() == 'V'
+            || key.front() == 'D') {
+            source.locus = key.front();
+            key.remove_prefix(1);
+        }
+        std::string_view object = key;
+        if (source.locus == 'V') {
+            const auto dot = key.rfind('.');
+            if (dot == std::string_view::npos || dot + 1 == key.size()
+                || !std::all_of(key.begin() + dot + 1, key.end(), [](char c) {
+                       return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
+                   })) {
+                return false;
+            }
+            object = key.substr(0, dot);
+        }
+        const auto at = object.find('@');
+        const auto tag = parseWhole(object.substr(0, at));
+        if (!tag || *tag < 0
+            || (at != std::string_view::npos && !validOwner(object.substr(at + 1)))) {
+            return false;
+        }
+        source.key = std::string(key);
+        const auto value = part.substr(colon + 1);
+        if (source.locus == 'D') {
+            if (value.size() != static_cast<std::size_t>(digestDigits)
+                || !std::all_of(value.begin(), value.end(), [](char c) {
+                       return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+                   })) {
+                return false;
+            }
+            for (char c : value) {
+                source.digest = source.digest * 16 + (c <= '9' ? c - '0' : c - 'a' + 10);
+            }
+        }
+        else if (source.locus == 'V') {
+            std::vector<double> values;
+            if (!parseList(value, values) || values.size() != 3) {
+                return false;
+            }
+            source.point = Base::Vector3d(values[0], values[1], values[2]);
+        }
+        else if (source.locus) {
+            std::vector<double> values;
+            if (!parseList(value, values) || values.size() != 6) {
+                return false;
+            }
+            source.point = Base::Vector3d(values[0], values[1], values[2]);
+            source.direction = Base::Vector3d(values[3], values[4], values[5]);
+            if (std::abs(source.direction.Length() - 1.0) > 1e-6) {
+                return false;
+            }
+        }
+        else if (!parsePlacement(value, source.placement)) {
+            return false;
+        }
+        sources.push_back(std::move(source));
+    }
+    return sources.size() <= ElementFingerprint::MaxSources;
+}
+
 }  // namespace
 
 std::string ElementFingerprint::formatNumber(double value)
@@ -243,6 +369,77 @@ std::string ElementFingerprint::formatNumber(double value)
     stream.imbue(std::locale::classic());
     stream << std::setprecision(12) << value;
     return stream.str();
+}
+
+void ElementFingerprint::foldDigest(std::uint64_t& digest, std::string_view text)
+{
+    auto fold = [&digest](std::string_view part) {
+        for (char c : part) {
+            digest ^= static_cast<unsigned char>(c);
+            digest *= 1099511628211ULL;
+        }
+    };
+    auto digit = [&text](std::size_t i) {
+        return i < text.size() && text[i] >= '0' && text[i] <= '9';
+    };
+    auto word = [&text](std::size_t i) {
+        const char c = text[i];
+        return std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '.';
+    };
+    std::size_t done = 0;
+    std::size_t i = 0;
+    while (i < text.size()) {
+        // A number starts at a digit, a sign or a point before one, and not inside a name
+        std::size_t end = i;
+        if (text[end] == '-' || text[end] == '+') {
+            ++end;
+        }
+        if (end < text.size() && text[end] == '.') {
+            ++end;
+        }
+        if (!digit(end) || (i > 0 && word(i - 1))) {
+            ++i;
+            continue;
+        }
+        end = i;
+        if (text[end] == '-' || text[end] == '+') {
+            ++end;
+        }
+        bool fraction = false;
+        while (digit(end)) {
+            ++end;
+        }
+        if (end < text.size() && text[end] == '.') {
+            fraction = true;
+            ++end;
+            while (digit(end)) {
+                ++end;
+            }
+        }
+        if (end < text.size() && (text[end] == 'e' || text[end] == 'E')) {
+            std::size_t exponent = end + 1;
+            if (exponent < text.size() && (text[exponent] == '-' || text[exponent] == '+')) {
+                ++exponent;
+            }
+            if (digit(exponent)) {
+                fraction = true;
+                end = exponent;
+                while (digit(end)) {
+                    ++end;
+                }
+            }
+        }
+        const auto value = fraction && (end == text.size() || !word(end))
+            ? parseNumber(text.substr(i, end - i))
+            : std::nullopt;
+        if (value) {
+            fold(text.substr(done, i - done));
+            fold(formatNumber(*value));
+            done = end;
+        }
+        i = end;
+    }
+    fold(text.substr(done));
 }
 
 std::string ElementFingerprint::toString() const
@@ -264,10 +461,14 @@ std::string ElementFingerprint::toString() const
         && std::all_of(upToFaces.begin(), upToFaces.end(), [](const UpToFace& face) {
                return validOwner(face.owner);
            });
+    // Version 8 for a record with its target's frame or sources (ops#557): version 7's fields,
+    // the frame and the sources
+    const bool withFrame = frame.has_value() || !sources.empty();
     // Version 7 for any element with sides or marks (ops#526 D2), a vertex included
-    const bool withSides = !sides.empty() || !marks.empty() || marksPartial;
+    const bool withSides = !sides.empty() || !marks.empty() || marksPartial || withFrame;
     std::string text = std::to_string(
-        withSides        ? VersionWithSides
+        withFrame        ? VersionWithFrame
+            : withSides  ? VersionWithSides
             : withUpTo   ? VersionWithUpTo
             : withExtent ? VersionWithBox
             : withTwins  ? VersionWithTwins
@@ -378,6 +579,40 @@ std::string ElementFingerprint::toString() const
                 text += emptyField;
             }
         }
+        if (withFrame) {
+            // Version 8: the frame, then the placement sources and loci (ops#557, decision 218)
+            text += fieldDelimiter;
+            text += frame ? placementText(*frame) : std::string(emptyField);
+            text += fieldDelimiter;
+            for (std::size_t i = 0; i < sources.size(); ++i) {
+                const Source& source = sources[i];
+                if (i) {
+                    text += entryDelimiter;
+                }
+                if (source.locus) {
+                    text += source.locus;
+                }
+                text += source.key;
+                text += markDelimiter;
+                if (source.locus == 'D') {
+                    static constexpr char hex[] = "0123456789abcdef";
+                    for (int shift = 4 * (digestDigits - 1); shift >= 0; shift -= 4) {
+                        text += hex[(source.digest >> shift) & 0xf];
+                    }
+                }
+                else if (source.locus == 'V') {
+                    text += vector(source.point);
+                }
+                else {
+                    text += source.locus
+                        ? vector(source.point) + listDelimiter + vector(source.direction)
+                        : placementText(source.placement);
+                }
+            }
+            if (sources.empty()) {
+                text += emptyField;
+            }
+        }
         return text;
     }
     if (location) {
@@ -409,11 +644,15 @@ ElementFingerprint ElementFingerprint::fromString(std::string_view text)
     // Version 5 with or without the inside point (round 6); version 6 with both fields (ops#522)
     const bool withUpTo = fields.size() == fieldCount + 6
         && fields[0] == std::to_string(VersionWithUpTo) && (fields[1] == "F" || fields[1] == "E");
+    // Version 8: version 7's fields and the frame (ops#557)
+    const bool withFrame = fields.size() == fieldCount + 10
+        && fields[0] == std::to_string(VersionWithFrame)
+        && (fields[1] == "F" || fields[1] == "E" || fields[1] == "V");
     // Version 7: version 6's fields, any of them `_`, the sides and the marks (ops#526 D2); a
     // vertex too
-    const bool withSides = fields.size() == fieldCount + 8
-        && fields[0] == std::to_string(VersionWithSides)
-        && (fields[1] == "F" || fields[1] == "E" || fields[1] == "V");
+    const bool withSides = withFrame
+        || (fields.size() == fieldCount + 8 && fields[0] == std::to_string(VersionWithSides)
+            && (fields[1] == "F" || fields[1] == "E" || fields[1] == "V"));
     const bool withBox = withUpTo || withSides
         || ((fields.size() == fieldCount + 4 || fields.size() == fieldCount + 5)
             && fields[0] == std::to_string(VersionWithBox) && (fields[1] == "F" || fields[1] == "E"));
@@ -538,6 +777,19 @@ ElementFingerprint ElementFingerprint::fromString(std::string_view text)
                 || !parseSides(fields[13], result.sides) || !parseMarks(fields[14], result.marks, result.marksPartial))) {
             return {};
         }
+        // Version 8: the frame or `_`, then the sources or `_` (ops#557, decision 218)
+        if (withFrame) {
+            if (fields[15] != emptyField) {
+                Base::Placement placement;
+                if (!parsePlacement(fields[15], placement)) {
+                    return {};
+                }
+                result.frame = placement;
+            }
+            if (!parseSources(fields[16], result.sources)) {
+                return {};
+            }
+        }
     }
     result.type = fields[1][0];
     return result;
@@ -554,6 +806,217 @@ std::vector<Base::Vector3d> ElementFingerprint::thinOutline(const std::vector<Ba
         kept.push_back(points[i]);
     }
     return kept;
+}
+
+ElementFingerprint ElementFingerprint::transformed(const Base::Placement& motion, double angle) const
+{
+    ElementFingerprint result = *this;
+    auto move = [&](Base::Vector3d& point) {
+        motion.multVec(point, point);
+    };
+    const Base::Rotation& rotation = motion.getRotation();
+    for (auto* point : {&result.center, &result.location, &result.twinCentroid, &result.inside}) {
+        if (*point) {
+            move(**point);
+        }
+    }
+    for (auto& point : result.outline) {
+        move(point);
+    }
+    if (result.direction) {
+        rotation.multVec(*result.direction, *result.direction);
+        // An axis or a line direction up to its sign, as the producer writes it: the first
+        // component that isn't zero positive. A plane's normal keeps its sense.
+        if (type != 'F' || kind != "Plane") {
+            constexpr double zero = 1e-12;
+            Base::Vector3d& d = *result.direction;
+            for (double c : {d.x, d.y, d.z}) {
+                if (std::abs(c) > zero) {
+                    if (c < 0.0) {
+                        d = -d;
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    // The sides are oriented: an outward normal, an edge's direction away from a vertex
+    for (auto& side : result.sides) {
+        if (!side.curve) {
+            rotation.multVec(side.direction, side.direction);
+        }
+    }
+    // The box, when the rotation takes each axis onto an axis: its eight corners moved and boxed
+    // again. Turned otherwise, a box is wider than the element: none.
+    if (result.extentMin && result.extentMax) {
+        const double cosine = std::cos(angle);
+        bool permutation = true;
+        for (int k = 0; k < 3; ++k) {
+            const Base::Vector3d image = rotation.multVec(
+                Base::Vector3d(k == 0 ? 1.0 : 0.0, k == 1 ? 1.0 : 0.0, k == 2 ? 1.0 : 0.0)
+            );
+            permutation = permutation
+                && std::max({std::abs(image.x), std::abs(image.y), std::abs(image.z)}) >= cosine;
+        }
+        if (permutation) {
+            const Base::Vector3d low = *result.extentMin;
+            const Base::Vector3d high = *result.extentMax;
+            std::optional<Base::Vector3d> newLow;
+            std::optional<Base::Vector3d> newHigh;
+            for (int corner = 0; corner < 8; ++corner) {
+                Base::Vector3d point(
+                    (corner & 1) ? high.x : low.x,
+                    (corner & 2) ? high.y : low.y,
+                    (corner & 4) ? high.z : low.z
+                );
+                move(point);
+                if (!newLow) {
+                    newLow = point;
+                    newHigh = point;
+                    continue;
+                }
+                newLow = Base::Vector3d(
+                    std::min(newLow->x, point.x),
+                    std::min(newLow->y, point.y),
+                    std::min(newLow->z, point.z)
+                );
+                newHigh = Base::Vector3d(
+                    std::max(newHigh->x, point.x),
+                    std::max(newHigh->y, point.y),
+                    std::max(newHigh->z, point.z)
+                );
+            }
+            result.extentMin = newLow;
+            result.extentMax = newHigh;
+        }
+        else {
+            result.extentMin.reset();
+            result.extentMax.reset();
+        }
+    }
+    // The up-to faces are in their owners' frames; the marks have no place and stay
+    result.upToFaces.clear();
+    result.frame.reset();
+    result.sources.clear();
+    return result;
+}
+
+std::optional<Base::Placement> ElementFingerprint::rigidMotion(
+    const std::vector<Source>& saved,
+    const std::vector<Source>& now,
+    double distance,
+    double angle
+)
+{
+    // Nothing else changed (decision 231): a turn made with another edit isn't rigid
+    const auto piece = pieceMotion(saved, now, distance, angle);
+    if (!piece || piece->changed) {
+        return std::nullopt;
+    }
+    return piece->motion;
+}
+
+std::optional<ElementFingerprint::PieceMotion> ElementFingerprint::pieceMotion(
+    const std::vector<Source>& saved,
+    const std::vector<Source>& now,
+    double distance,
+    double angle
+)
+{
+    // The keys both lists have, paired in their order (by locus, then key); a key in one list
+    // only, or a digest that differs, is another edit (decision 234)
+    PieceMotion result;
+    std::vector<std::pair<const Source*, const Source*>> shared;
+    auto precedes = [](const Source& a, const Source& b) {
+        return a.locus != b.locus ? a.locus < b.locus : a.key < b.key;
+    };
+    for (std::size_t i = 0, j = 0; i < saved.size() || j < now.size();) {
+        if (j == now.size() || (i < saved.size() && precedes(saved[i], now[j]))) {
+            result.changed = true;
+            ++i;
+        }
+        else if (i == saved.size() || precedes(now[j], saved[i])) {
+            result.changed = true;
+            ++j;
+        }
+        else {
+            result.changed = result.changed || saved[i].digest != now[j].digest;
+            shared.emplace_back(&saved[i], &now[j]);
+            ++i;
+            ++j;
+        }
+    }
+    // The rotation between two placements, as an angle
+    auto turnOf = [](const Base::Rotation& rotation) {
+        double q0 = 0.0;
+        double q1 = 0.0;
+        double q2 = 0.0;
+        double q3 = 1.0;
+        rotation.getValue(q0, q1, q2, q3);
+        return 2.0 * std::acos(std::min(1.0, std::abs(q3)));
+    };
+    auto same = [&](const Base::Placement& a, const Base::Placement& b) {
+        return Base::Distance(a.getPosition(), b.getPosition()) <= distance
+            && turnOf(a.getRotation().inverse() * b.getRotation()) <= angle;
+    };
+    // The motion from the first source that moved
+    Base::Placement motion;
+    for (const auto& [was, is] : shared) {
+        if (!was->locus && !same(was->placement, is->placement)) {
+            motion = is->placement * was->placement.inverse();
+            break;
+        }
+    }
+    const Base::Rotation& rotation = motion.getRotation();
+    // With its sense: a revolve short of a full turn, a pattern, a draft's pull or a pad's
+    // direction reads it (ReviewQuarterRevolveFlipped); a mirror plane's normal has none
+    auto parallel = [&](const Base::Vector3d& a, const Base::Vector3d& b, bool sense) {
+        const double along = a * b;
+        return std::atan2((a % b).Length(), sense ? along : std::abs(along)) <= angle;
+    };
+    for (const auto& [was, is] : shared) {
+        const Source& before = *was;
+        const Source& after = *is;
+        if (before.locus == 'D') {
+            continue;
+        }
+        if (!before.locus) {
+            if (!same(motion * before.placement, after.placement)) {
+                return std::nullopt;
+            }
+            continue;
+        }
+        // A vector input turns with the part, as a direction: a custom direction left in the body
+        // isn't one piece (ReviewPadCustomDirectionFlipped). Never also as a point: a direction
+        // whose tip the motion fixes passed that way (ReviewPadCustomDirectionFlippedAtZ1)
+        if (before.locus == 'V') {
+            const Base::Vector3d turned = rotation.multVec(before.point);
+            const double length = turned.Length();
+            if (std::abs(length - after.point.Length()) > distance * std::max(1.0, length)
+                || (length > 0.0 && !parallel(turned, after.point, true))) {
+                return std::nullopt;
+            }
+            continue;
+        }
+        // A locus stays where it was, and the motion maps it onto itself: a line's direction
+        // and a point on it, a plane's normal and a point in it
+        const bool sense = before.locus != 'M';
+        if (Base::Distance(before.point, after.point) > distance
+            || !parallel(before.direction, after.direction, sense)) {
+            return std::nullopt;
+        }
+        const Base::Vector3d direction = rotation.multVec(before.direction);
+        Base::Vector3d point;
+        motion.multVec(before.point, point);
+        const Base::Vector3d offset = point - before.point;
+        const double off = before.locus == 'L' ? (offset % before.direction).Length()
+                                               : std::abs(offset * before.direction);
+        if (!parallel(direction, before.direction, sense) || off > distance) {
+            return std::nullopt;
+        }
+    }
+    result.motion = motion;
+    return result;
 }
 
 std::vector<Base::Vector3d> ElementFingerprint::convexOutline(

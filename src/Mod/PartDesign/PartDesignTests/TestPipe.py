@@ -625,13 +625,26 @@ class TestPipeEndNames(unittest.TestCase):
         profile.Placement = App.Placement(V(0, 0, z), App.Rotation())
         self.doc.recompute()
 
-    def assertNamesAt(self, model, z, other):
+    def assertNamesAt(self, model, z, other, loudReferences=False):
         """Each edge of the profile names a cap edge at height `z` (the sketch's own name) and
         one at `other` (its projection, PRJ); the fillet's edge and the attached sketch lie at
-        `z`."""
+        `z`. With `loudReferences`, the fillet and the sketch may also stop with an error
+        instead (never lie elsewhere)."""
         profile, _, pipe, fillet, onCap = model
-        for obj in (pipe, fillet, onCap):
-            self.assertTrue(obj.isValid(), (obj.Name, obj.getStatusString()))
+        self.assertTrue(pipe.isValid(), (pipe.Name, pipe.getStatusString()))
+        if loudReferences:
+            for obj in (fillet, onCap):
+                if obj.isValid():
+                    at = (
+                        pipe.Shape.getElement(fillet.Base[1][0]).CenterOfMass.z
+                        if obj is fillet
+                        else obj.Placement.Base.z
+                    )
+                    self.assertAlmostEqual(at, z, 6, obj.Name)
+            fillet = onCap = None
+        for obj in (fillet, onCap):
+            if obj is not None:
+                self.assertTrue(obj.isValid(), (obj.Name, obj.getStatusString()))
         shape = pipe.Shape
         edges = [f"Edge{index}" for index in range(1, len(shape.Edges) + 1)]
         for index in range(1, len(profile.Shape.Edges) + 1):
@@ -647,9 +660,10 @@ class TestPipeEndNames(unittest.TestCase):
             self.assertEqual(len(projected), 1, (name, projected))
             self.assertAlmostEqual(shape.getElement(own[0]).CenterOfMass.z, z, 6, name)
             self.assertAlmostEqual(shape.getElement(projected[0]).CenterOfMass.z, other, 6, name)
-        self.assertEqual(len(fillet.Base[1]), 1, fillet.Base[1])
-        self.assertAlmostEqual(shape.getElement(fillet.Base[1][0]).CenterOfMass.z, z, 6)
-        self.assertAlmostEqual(onCap.Placement.Base.z, z, 6)
+        if fillet is not None:
+            self.assertEqual(len(fillet.Base[1]), 1, fillet.Base[1])
+            self.assertAlmostEqual(shape.getElement(fillet.Base[1][0]).CenterOfMass.z, z, 6)
+            self.assertAlmostEqual(onCap.Placement.Base.z, z, 6)
 
     def assertPointsAt(self, points, expected):
         self.assertEqual(len(points), len(expected), points)
@@ -767,12 +781,13 @@ class TestPipeEndNames(unittest.TestCase):
         """The spine 0 -> 30, the profile at z = 10, then its sketch turned over in place (180
         degrees about X; the solid is the same): the names stay at z = 0. The pipe's own frame
         is the profile sketch's; with the ends stored in it (fork PR 356 round 1), the turn read
-        as a reversed spine and the names went to z = 30."""
+        as a reversed spine and the names went to z = 30. The profile turns alone, so the
+        references into the pipe may break by the frame rule (ops#557, decisions 211 and 222)."""
         model = self.endModel(0, 30, z=10)
         self.assertNamesAt(model, 0, 30)
         model[0].Placement = App.Placement(V(0, 0, 10), App.Rotation(V(1, 0, 0), 180))
         self.doc.recompute()
-        self.assertNamesAt(model, 0, 30)
+        self.assertNamesAt(model, 0, 30, loudReferences=True)
 
     def testEndStaysWhenABaseFeatureIsInserted(self):
         """The spine drawn towards the profile (30 -> 0, the profile at z = 5), then a box 100 mm
@@ -5224,7 +5239,9 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
                     profile.Placement = turned
                 self.doc.recompute()
                 self.assertFalse(pipe.isValid())
-                self.assertIn("can't be matched", pipe.getStatusString())
+                # A face profile's own reference may break first: its Pad moved as one piece, a
+                # twin where its face was (ops#557, decisions 211, 236 and 237)
+                self.assertRegex(pipe.getStatusString(), "can't be matched|Missing face reference")
 
     def testClosedRingTurnedWithItsProfileResizedStops(self):
         """The ring and its profile turned 120 degrees about Z while the profile's square grows
@@ -5270,7 +5287,9 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
                     profile.Placement = turned
                 self.doc.recompute()
                 self.assertFalse(pipe.isValid())
-                self.assertIn("can't be matched", pipe.getStatusString())
+                # A face profile's own reference breaks first: the part moved as one piece with
+                # another edit (ops#557, decisions 231, 234 and 236)
+                self.assertRegex(pipe.getStatusString(), "can't be matched|Missing face reference")
 
     def testClosedRingTurnedWithAnotherEditStops(self):
         """The ring and its profile (at the bottom left corner) turned about Z while something
@@ -5362,7 +5381,10 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
                 self.doc.recompute()
                 if angle:
                     self.assertFalse(pipe.isValid())
-                    self.assertIn("can't be matched", pipe.getStatusString())
+                    # A face profile's own reference breaks first (ops#557, decisions 231, 234, 236)
+                    self.assertRegex(
+                        pipe.getStatusString(), "can't be matched|Missing face reference"
+                    )
                     continue
                 self.assertTrue(pipe.isValid(), pipe.getStatusString())
                 self.assertLess((V(pipe.SpineStart[0]) - rotation.multVec(start)).Length, 1e-6)

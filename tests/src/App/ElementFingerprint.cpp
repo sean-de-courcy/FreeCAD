@@ -6,6 +6,7 @@
 
 #include <clocale>
 #include <locale>
+#include <numbers>
 #include <string>
 #include <vector>
 
@@ -842,4 +843,545 @@ TEST(ElementFingerprint, aClosureTooLargeKeepsItsSuppressedMarks)
     std::string late = text;
     late.replace(late.find("+/12:16:s"), 9, "12:16:s/+");
     EXPECT_FALSE(ElementFingerprint::fromString(late).isValid());
+}
+
+TEST(ElementFingerprint, frameRoundTrip)
+{
+    // ops#557: version 8, version 7's fields and the frame the record was measured in. The
+    // rotation's real part is written not negative: q and -q are one rotation
+    ElementFingerprint rim;
+    rim.type = 'E';
+    rim.kind = "Line";
+    rim.size = 2;
+    rim.center = Base::Vector3d(1, 8, 10);
+    rim.direction = Base::Vector3d(1, 0, 0);
+    rim.extentMin = Base::Vector3d(0, 8, 10);
+    rim.extentMax = Base::Vector3d(2, 8, 10);
+    rim.outline = {Base::Vector3d(0, 8, 10), Base::Vector3d(2, 8, 10)};
+    ElementFingerprint::Side top;
+    top.direction = Base::Vector3d(0, 0, 1);
+    ElementFingerprint::Side front;
+    front.direction = Base::Vector3d(0, -1, 0);
+    rim.sides = {top, front};
+    rim.marks = {{12, 16}, {14, -1}};
+    rim.frame = Base::Placement(Base::Vector3d(0, 0, 5), Base::Rotation(0, 0, -0.6, -0.8));
+    const char* rimText = "8|E|Line|2|1,8,10|1,0,0|_|_|0,8,10,2,8,10|_|0,8,10,2,8,10|_|_|"
+                          "0,0,1/0,-1,0|12:16/14:_|0,0,5,0,0,0.6,0.8|_";
+    EXPECT_EQ(rim.toString(), rimText);
+    auto parsed = ElementFingerprint::fromString(rimText);
+    ASSERT_TRUE(parsed.isValid());
+    ASSERT_TRUE(parsed.frame.has_value());
+    EXPECT_EQ(parsed, rim);
+
+    //   7 -> 8 -> 7: without the frame, version 7's text again, read as it was
+    auto seven = parsed;
+    seven.frame.reset();
+    const char* sevenText = "7|E|Line|2|1,8,10|1,0,0|_|_|0,8,10,2,8,10|_|0,8,10,2,8,10|_|_|"
+                            "0,0,1/0,-1,0|12:16/14:_";
+    EXPECT_EQ(seven.toString(), sevenText);
+    EXPECT_EQ(ElementFingerprint::fromString(sevenText), seven);
+    EXPECT_NE(seven, rim);
+
+    //   a frame alone: version 7's fields `_` where empty, then the frame (a plane's record)
+    ElementFingerprint face;
+    face.type = 'F';
+    face.kind = "Plane";
+    face.size = 4;
+    face.center = Base::Vector3d(1, 1, 10);
+    face.direction = Base::Vector3d(0, 0, 1);
+    face.extentMin = Base::Vector3d(0, 0, 10);
+    face.extentMax = Base::Vector3d(2, 2, 10);
+    face.frame = Base::Placement();
+    const std::string faceText = face.toString();
+    EXPECT_EQ(faceText, "8|F|Plane|4|1,1,10|0,0,1|_|_|0,0,10,2,2,10|_|_|_|_|_|_|0,0,0,0,0,0,1|_");
+    EXPECT_EQ(ElementFingerprint::fromString(faceText), face);
+
+    //   `_` for no frame is read; six numbers, or a quaternion that isn't a unit, are no
+    //   fingerprint; the sixteenth and seventeenth fields only with version 8
+    const std::string fields = "|F|Plane|4|1,1,10|0,0,1|_|_|0,0,10,2,2,10|_|_|_|_|_|_|";
+    const auto none = ElementFingerprint::fromString("8" + fields + "_|_");
+    ASSERT_TRUE(none.isValid());
+    EXPECT_FALSE(none.frame.has_value());
+    EXPECT_FALSE(ElementFingerprint::fromString("8" + fields + "0,0,0,0,0,0|_").isValid());
+    EXPECT_FALSE(ElementFingerprint::fromString("8" + fields + "0,0,0,0,0,0,2|_").isValid());
+    EXPECT_FALSE(ElementFingerprint::fromString("7" + fields + "0,0,0,0,0,0,1|_").isValid());
+}
+
+TEST(ElementFingerprint, transformed)
+{
+    // ops#557: a record moved to its old global place in another frame. A half turn about z
+    // with a lift of 20
+    ElementFingerprint rim;
+    rim.type = 'E';
+    rim.kind = "Line";
+    rim.size = 2;
+    rim.center = Base::Vector3d(1, 8, 10);
+    rim.direction = Base::Vector3d(1, 0, 0);
+    rim.extentMin = Base::Vector3d(0, 8, 10);
+    rim.extentMax = Base::Vector3d(2, 8, 10);
+    rim.outline = {Base::Vector3d(0, 8, 10), Base::Vector3d(2, 8, 10)};
+    rim.twinCentroid = Base::Vector3d(1, 0, 10);
+    rim.twinCount = 2;
+    ElementFingerprint::Side top;
+    top.direction = Base::Vector3d(0, 0, 1);
+    ElementFingerprint::Side front;
+    front.direction = Base::Vector3d(0, -1, 0);
+    ElementFingerprint::Side curved;
+    curved.curve = '+';
+    rim.sides = {top, front, curved};
+    rim.marks = {{12, 16}};
+    rim.frame = Base::Placement(Base::Vector3d(0, 0, 5), Base::Rotation());
+    const Base::Placement half(
+        Base::Vector3d(0, 0, 20),
+        Base::Rotation(Base::Vector3d(0, 0, 1), std::numbers::pi)
+    );
+    const auto moved = rim.transformed(half, 1e-6);
+    ASSERT_TRUE(moved.isValid());
+    EXPECT_TRUE(moved.center->IsEqual(Base::Vector3d(-1, -8, 30), 1e-9));
+    EXPECT_TRUE(moved.twinCentroid->IsEqual(Base::Vector3d(-1, 0, 30), 1e-9));
+    EXPECT_EQ(moved.twinCount, 2);
+    //   a line's direction up to its sign, as the producer writes it: (-1, 0, 0) is (1, 0, 0)
+    EXPECT_TRUE(moved.direction->IsEqual(Base::Vector3d(1, 0, 0), 1e-9));
+    //   the sides keep their sense, a curved side its sign
+    ASSERT_EQ(moved.sides.size(), 3u);
+    EXPECT_TRUE(moved.sides[0].direction.IsEqual(Base::Vector3d(0, 0, 1), 1e-9));
+    EXPECT_TRUE(moved.sides[1].direction.IsEqual(Base::Vector3d(0, 1, 0), 1e-9));
+    EXPECT_EQ(moved.sides[2].curve, '+');
+    //   a half turn takes each axis onto an axis: the box moved
+    ASSERT_TRUE(moved.extentMin && moved.extentMax);
+    EXPECT_TRUE(moved.extentMin->IsEqual(Base::Vector3d(-2, -8, 30), 1e-9));
+    EXPECT_TRUE(moved.extentMax->IsEqual(Base::Vector3d(0, -8, 30), 1e-9));
+    ASSERT_EQ(moved.outline.size(), 2u);
+    EXPECT_TRUE(moved.outline[0].IsEqual(Base::Vector3d(0, -8, 30), 1e-9));
+    EXPECT_TRUE(moved.outline[1].IsEqual(Base::Vector3d(-2, -8, 30), 1e-9));
+    //   the size, the kind and the marks as they were (no place); no frame (another frame)
+    EXPECT_EQ(moved.size, rim.size);
+    EXPECT_EQ(moved.kind, rim.kind);
+    EXPECT_EQ(moved.marks, rim.marks);
+    EXPECT_FALSE(moved.frame.has_value());
+
+    //   a plane's normal keeps its sense: a half turn about x takes up to down
+    ElementFingerprint face;
+    face.type = 'F';
+    face.kind = "Plane";
+    face.size = 4;
+    face.center = Base::Vector3d(1, 1, 10);
+    face.direction = Base::Vector3d(0, 0, 1);
+    face.extentMin = Base::Vector3d(0, 0, 10);
+    face.extentMax = Base::Vector3d(2, 2, 10);
+    const Base::Placement over(
+        Base::Vector3d(),
+        Base::Rotation(Base::Vector3d(1, 0, 0), std::numbers::pi)
+    );
+    const auto flipped = face.transformed(over, 1e-6);
+    EXPECT_TRUE(flipped.direction->IsEqual(Base::Vector3d(0, 0, -1), 1e-9));
+    EXPECT_TRUE(flipped.center->IsEqual(Base::Vector3d(1, -1, -10), 1e-9));
+    EXPECT_TRUE(flipped.extentMin->IsEqual(Base::Vector3d(0, -2, -10), 1e-9));
+    EXPECT_TRUE(flipped.extentMax->IsEqual(Base::Vector3d(2, 0, -10), 1e-9));
+
+    //   37 degrees about z: a turned box is wider than the element, so it goes; the outline is
+    //   moved point by point, and the inverse motion gives the places back
+    const double angle = 37.0 * std::numbers::pi / 180.0;
+    const Base::Placement slant(Base::Vector3d(3, 4, 0), Base::Rotation(Base::Vector3d(0, 0, 1), angle));
+    const auto slanted = rim.transformed(slant, 1e-6);
+    EXPECT_FALSE(slanted.extentMin.has_value());
+    EXPECT_FALSE(slanted.extentMax.has_value());
+    const Base::Vector3d centre(
+        3 + std::cos(angle) - 8 * std::sin(angle),
+        4 + std::sin(angle) + 8 * std::cos(angle),
+        10
+    );
+    EXPECT_TRUE(slanted.center->IsEqual(centre, 1e-9));
+    const Base::Vector3d along(std::cos(angle), std::sin(angle), 0);
+    EXPECT_TRUE(slanted.direction->IsEqual(along, 1e-9));
+    const auto back = slanted.transformed(slant.inverse(), 1e-6);
+    EXPECT_TRUE(back.center->IsEqual(*rim.center, 1e-9));
+    EXPECT_TRUE(back.outline[1].IsEqual(rim.outline[1], 1e-9));
+    EXPECT_TRUE(back.sides[1].direction.IsEqual(front.direction, 1e-9));
+}
+
+namespace
+{
+
+ElementFingerprint::Source placed(const std::string& key, const Base::Placement& placement)
+{
+    ElementFingerprint::Source source;
+    source.key = key;
+    source.placement = placement;
+    return source;
+}
+
+ElementFingerprint::Source locus(char kind, const std::string& key, Base::Vector3d direction)
+{
+    ElementFingerprint::Source source;
+    source.locus = kind;
+    source.key = key;
+    source.direction = direction;
+    return source;
+}
+
+}  // namespace
+
+TEST(ElementFingerprint, sourcesRoundTrip)
+{
+    // Decision 218: version 8's seventeenth field, the chain's placement sources and loci, sorted
+    // as the record keeps them: sources by key, then loci
+    ElementFingerprint face;
+    face.type = 'F';
+    face.kind = "Plane";
+    face.size = 4;
+    face.center = Base::Vector3d(1, 1, 10);
+    face.direction = Base::Vector3d(0, 0, 1);
+    face.extentMin = Base::Vector3d(0, 0, 10);
+    face.extentMax = Base::Vector3d(2, 2, 10);
+    face.sources = {
+        placed("12", Base::Placement(Base::Vector3d(0, 0, 5), Base::Rotation())),
+        placed("7@Other", Base::Placement()),
+        locus('L', "3", Base::Vector3d(0, 0, 1)),
+        locus('P', "4", Base::Vector3d(0, 1, 0))
+    };
+    const std::string text = face.toString();
+    EXPECT_EQ(
+        text,
+        "8|F|Plane|4|1,1,10|0,0,1|_|_|0,0,10,2,2,10|_|_|_|_|_|_|_|"
+        "12:0,0,5,0,0,0,1/7@Other:0,0,0,0,0,0,1/L3:0,0,0,0,0,1/P4:0,0,0,0,1,0"
+    );
+    const auto parsed = ElementFingerprint::fromString(text);
+    ASSERT_TRUE(parsed.isValid());
+    EXPECT_EQ(parsed, face);
+    //   a key without a number, a document name that isn't one, a locus of five numbers or one
+    //   without a unit direction: no fingerprint
+    const std::string fields = "8|F|Plane|4|1,1,10|0,0,1|_|_|0,0,10,2,2,10|_|_|_|_|_|_|_|";
+    EXPECT_FALSE(ElementFingerprint::fromString(fields + "x:0,0,0,0,0,0,1").isValid());
+    EXPECT_FALSE(ElementFingerprint::fromString(fields + "7@1doc:0,0,0,0,0,0,1").isValid());
+    EXPECT_FALSE(ElementFingerprint::fromString(fields + "L3:0,0,0,0,0").isValid());
+    EXPECT_FALSE(ElementFingerprint::fromString(fields + "L3:0,0,0,0,0,2").isValid());
+    //   a mirror plane's locus reads back as one
+    const auto mirrored = ElementFingerprint::fromString(fields + "M4:0,0,0,0,1,0");
+    ASSERT_TRUE(mirrored.isValid());
+    ASSERT_EQ(mirrored.sources.size(), 1U);
+    EXPECT_EQ(mirrored.sources.front().locus, 'M');
+    EXPECT_EQ(ElementFingerprint::fromString(mirrored.toString()), mirrored);
+    //   a vector input reads back with its property; one without a property, with a name that
+    //   isn't one, or of two numbers doesn't
+    const auto vectors = ElementFingerprint::fromString(fields + "V5.Direction:0,0,1/V5@Other.Axis:1,0,0");
+    ASSERT_TRUE(vectors.isValid());
+    ASSERT_EQ(vectors.sources.size(), 2U);
+    EXPECT_EQ(vectors.sources.front().locus, 'V');
+    EXPECT_EQ(vectors.sources.front().key, "5.Direction");
+    EXPECT_EQ(vectors.sources.back().key, "5@Other.Axis");
+    EXPECT_TRUE(vectors.sources.front().point.IsEqual(Base::Vector3d(0, 0, 1), 1e-12));
+    EXPECT_EQ(ElementFingerprint::fromString(vectors.toString()), vectors);
+    EXPECT_FALSE(ElementFingerprint::fromString(fields + "V5:0,0,1").isValid());
+    EXPECT_FALSE(ElementFingerprint::fromString(fields + "V5.Dir-x:0,0,1").isValid());
+    EXPECT_FALSE(ElementFingerprint::fromString(fields + "V5.Direction:0,1").isValid());
+    //   moved to another frame, the sources go with the frame
+    EXPECT_TRUE(face.transformed(Base::Placement(), 1e-6).sources.empty());
+}
+
+TEST(ElementFingerprint, rigidMotion)
+{
+    // Decision 218: one motion takes every source to its place now. Two sketches turned 180
+    // degrees about (10, 5, 0) together
+    const double tolerance = 1e-7;
+    const double angle = 1e-6;
+    const Base::Placement turn = Base::Placement(Base::Vector3d(10, 5, 0), Base::Rotation())
+        * Base::Placement(Base::Vector3d(), Base::Rotation(Base::Vector3d(0, 0, 1), std::numbers::pi))
+        * Base::Placement(Base::Vector3d(-10, -5, 0), Base::Rotation());
+    const Base::Placement base(Base::Vector3d(0, 0, 0), Base::Rotation());
+    const Base::Placement holes(Base::Vector3d(0, 0, 10), Base::Rotation());
+    const std::vector<ElementFingerprint::Source> saved {placed("1", base), placed("2", holes)};
+    const std::vector<ElementFingerprint::Source> turned {
+        placed("1", turn * base),
+        placed("2", turn * holes)
+    };
+    const auto motion = ElementFingerprint::rigidMotion(saved, turned, tolerance, angle);
+    ASSERT_TRUE(motion.has_value());
+    EXPECT_TRUE(motion->getPosition().IsEqual(turn.getPosition(), 1e-9));
+    EXPECT_TRUE(motion->getRotation().isSame(turn.getRotation(), 1e-9));
+
+    //   nothing moved: the identity
+    const auto still = ElementFingerprint::rigidMotion(saved, saved, tolerance, angle);
+    ASSERT_TRUE(still.has_value());
+    EXPECT_TRUE(still->getPosition().IsEqual(Base::Vector3d(), 1e-12));
+
+    //   one left behind (the tool fixed in the body), a source added: not one piece
+    const std::vector<ElementFingerprint::Source> behind {placed("1", turn * base), placed("2", holes)};
+    EXPECT_FALSE(ElementFingerprint::rigidMotion(saved, behind, tolerance, angle).has_value());
+    auto added = turned;
+    added.push_back(placed("3", Base::Placement()));
+    EXPECT_FALSE(ElementFingerprint::rigidMotion(saved, added, tolerance, angle).has_value());
+
+    //   a locus the motion maps onto itself (a line along z through the turn's centre) keeps it
+    //   rigid; one it moves (the Body's z axis, a revolve's axis) doesn't (11.9 F1)
+    auto through = locus('L', "9", Base::Vector3d(0, 0, 1));
+    through.point = Base::Vector3d(10, 5, 0);
+    auto savedThrough = saved;
+    savedThrough.push_back(through);
+    auto turnedThrough = turned;
+    turnedThrough.push_back(through);
+    EXPECT_TRUE(
+        ElementFingerprint::rigidMotion(savedThrough, turnedThrough, tolerance, angle).has_value()
+    );
+    auto origin = locus('L', "9", Base::Vector3d(0, 0, 1));
+    auto savedOrigin = saved;
+    savedOrigin.push_back(origin);
+    auto turnedOrigin = turned;
+    turnedOrigin.push_back(origin);
+    EXPECT_FALSE(
+        ElementFingerprint::rigidMotion(savedOrigin, turnedOrigin, tolerance, angle).has_value()
+    );
+    //   a plane turned in itself stays: the XY plane under the turn about z
+    auto plane = locus('P', "8", Base::Vector3d(0, 0, 1));
+    auto savedPlane = saved;
+    savedPlane.push_back(plane);
+    auto turnedPlane = turned;
+    turnedPlane.push_back(plane);
+    EXPECT_TRUE(ElementFingerprint::rigidMotion(savedPlane, turnedPlane, tolerance, angle).has_value());
+
+    //   a half turn about x maps the z axis onto itself reversed: a revolve or a draft's pull
+    //   reads the sense, not rigid (ReviewQuarterRevolveFlipped); the XY plane as a mirror plane
+    //   has no sense and stays, as a pull's plane it doesn't
+    const Base::Placement flip(
+        Base::Vector3d(),
+        Base::Rotation(Base::Vector3d(1, 0, 0), std::numbers::pi)
+    );
+    const std::vector<ElementFingerprint::Source> flipped {
+        placed("1", flip * base),
+        placed("2", flip * holes)
+    };
+    auto with = [](std::vector<ElementFingerprint::Source> sources,
+                   const ElementFingerprint::Source& extra) {
+        sources.push_back(extra);
+        return sources;
+    };
+    const auto axis = locus('L', "9", Base::Vector3d(0, 0, 1));
+    const auto mirror = locus('M', "8", Base::Vector3d(0, 0, 1));
+    ASSERT_TRUE(ElementFingerprint::rigidMotion(saved, flipped, tolerance, angle).has_value());
+    const auto axisFlipped =
+        ElementFingerprint::rigidMotion(with(saved, axis), with(flipped, axis), tolerance, angle);
+    EXPECT_FALSE(axisFlipped.has_value());
+    const auto planeFlipped =
+        ElementFingerprint::rigidMotion(with(saved, plane), with(flipped, plane), tolerance, angle);
+    EXPECT_FALSE(planeFlipped.has_value());
+    const auto mirrorFlipped =
+        ElementFingerprint::rigidMotion(with(saved, mirror), with(flipped, mirror), tolerance, angle);
+    EXPECT_TRUE(mirrorFlipped.has_value());
+
+    //   a vector input turns with the part as a direction: a pad's direction turned with its
+    //   sketch keeps it rigid; a custom direction left in the body under the flip doesn't
+    //   (ReviewPadCustomDirectionFlipped), nor under a half turn about a line through its tip
+    //   (ReviewPadCustomDirectionFlippedAtZ1: as a point it would stay)
+    auto vectorInput = [](const std::string& key, const Base::Vector3d& value) {
+        ElementFingerprint::Source source;
+        source.key = key;
+        source.locus = 'V';
+        source.point = value;
+        return source;
+    };
+    const Base::Vector3d up(0, 0, 1);
+    const auto padSaved = vectorInput("2.Direction", up);
+    EXPECT_TRUE(ElementFingerprint::rigidMotion(
+                    with(saved, padSaved),
+                    with(flipped, vectorInput("2.Direction", flip.getRotation().multVec(up))),
+                    tolerance,
+                    angle
+    )
+                    .has_value());
+    EXPECT_FALSE(ElementFingerprint::rigidMotion(with(saved, padSaved), with(flipped, padSaved), tolerance, angle)
+                     .has_value());
+    const Base::Placement flipAtZ1 = Base::Placement(Base::Vector3d(0, 0, 1), Base::Rotation())
+        * flip * Base::Placement(Base::Vector3d(0, 0, -1), Base::Rotation());
+    const std::vector<ElementFingerprint::Source> flippedAtZ1 {
+        placed("1", flipAtZ1 * base),
+        placed("2", flipAtZ1 * holes)
+    };
+    EXPECT_FALSE(
+        ElementFingerprint::rigidMotion(with(saved, padSaved), with(flippedAtZ1, padSaved), tolerance, angle)
+            .has_value()
+    );
+    //   a direction the turn maps onto itself stays rigid when it stays (z under the turn about z)
+    EXPECT_TRUE(ElementFingerprint::rigidMotion(with(saved, padSaved), with(turned, padSaved), tolerance, angle)
+                    .has_value());
+}
+
+TEST(ElementFingerprint, digestRoundTrip)
+{
+    // Decision 231: an object's other inputs as a digest in version 8's sources, `D<key>:` and
+    // 16 hex digits, sorted before the loci
+    ElementFingerprint face;
+    face.type = 'F';
+    face.kind = "Plane";
+    face.size = 4;
+    face.center = Base::Vector3d(1, 1, 10);
+    face.direction = Base::Vector3d(0, 0, 1);
+    face.extentMin = Base::Vector3d(0, 0, 10);
+    face.extentMax = Base::Vector3d(2, 2, 10);
+    ElementFingerprint::Source pad;
+    pad.locus = 'D';
+    pad.key = "12";
+    pad.digest = 0x0123456789abcdefULL;
+    ElementFingerprint::Source other;
+    other.locus = 'D';
+    other.key = "7@Other";
+    other.digest = 0xf;
+    face.sources = {placed("12", Base::Placement()), pad, other};
+    const std::string text = face.toString();
+    EXPECT_EQ(
+        text,
+        "8|F|Plane|4|1,1,10|0,0,1|_|_|0,0,10,2,2,10|_|_|_|_|_|_|_|"
+        "12:0,0,0,0,0,0,1/D12:0123456789abcdef/D7@Other:000000000000000f"
+    );
+    const auto parsed = ElementFingerprint::fromString(text);
+    ASSERT_TRUE(parsed.isValid());
+    EXPECT_EQ(parsed, face);
+    auto changed = face;
+    changed.sources[1].digest ^= 1;
+    EXPECT_FALSE(changed == face);
+    //   15 or 17 digits, a capital, a digit that isn't hex: no fingerprint
+    const std::string fields = "8|F|Plane|4|1,1,10|0,0,1|_|_|0,0,10,2,2,10|_|_|_|_|_|_|_|";
+    EXPECT_FALSE(ElementFingerprint::fromString(fields + "D12:0123456789abcde").isValid());
+    EXPECT_FALSE(ElementFingerprint::fromString(fields + "D12:0123456789abcdef0").isValid());
+    EXPECT_FALSE(ElementFingerprint::fromString(fields + "D12:0123456789ABCDEF").isValid());
+    EXPECT_FALSE(ElementFingerprint::fromString(fields + "D12:0123456789abcdeg").isValid());
+    EXPECT_FALSE(ElementFingerprint::fromString(fields + "Dx:0123456789abcdef").isValid());
+}
+
+TEST(ElementFingerprint, foldDigest)
+{
+    // Decision 231: the saved form of an input folded into a digest. The same text gives the same
+    // digest; any other text another
+    auto digestOf = [](std::string_view text) {
+        std::uint64_t digest = ElementFingerprint::DigestSeed;
+        ElementFingerprint::foldDigest(digest, text);
+        return digest;
+    };
+    const std::string pad = R"(<Float value="10"/><Bool value="false"/>)";
+    EXPECT_EQ(digestOf(pad), digestOf(pad));
+    EXPECT_NE(digestOf(pad), digestOf(R"(<Float value="10.5"/><Bool value="false"/>)"));
+    EXPECT_NE(digestOf(pad), digestOf(R"(<Float value="10"/><Bool value="true"/>)"));
+    EXPECT_NE(digestOf("Edge12"), digestOf("Edge13"));
+    EXPECT_NE(digestOf("ab"), digestOf("ba"));
+    //   a number is folded as the record writes it: the last digits of a solve, noise and -0
+    //   change nothing, and neither does how the platform writes the exponent
+    EXPECT_EQ(digestOf(R"(<Line x="10.000000000000002" y="-0.0"/>)"), digestOf(R"(<Line x="10.0" y="0.0"/>)"));
+    EXPECT_EQ(digestOf(R"(x="1e-13")"), digestOf(R"(x="0.0")"));
+    EXPECT_EQ(digestOf(R"(x="1.5e+002")"), digestOf(R"(x="150.0")"));
+    EXPECT_EQ(digestOf(R"(x="2.5000000000004")"), digestOf(R"(x="2.5")"));
+    EXPECT_NE(digestOf(R"(x="2.50000000004")"), digestOf(R"(x="2.5")"));
+    //   a digit inside a name, or in a version, is text
+    EXPECT_NE(digestOf("Face1.5"), digestOf("Face1.50"));
+    EXPECT_NE(digestOf("v1.2.3"), digestOf("v1.2.30"));
+    //   an integer is text as written
+    EXPECT_NE(digestOf(R"(<Integer value="7"/>)"), digestOf(R"(<Integer value="07"/>)"));
+    //   a sign at the end of the text is text
+    EXPECT_NE(digestOf("a-"), digestOf("a+"));
+}
+
+TEST(ElementFingerprint, rigidMotionNothingElseChanged)
+{
+    // Decision 231: a turn is one piece only if nothing else changed, every object's digest as
+    // it was (R2: a pad's Reversed ticked during a flip; F-A: a revolve's axis line redrawn)
+    const double tolerance = 1e-7;
+    const double angle = 1e-6;
+    const Base::Placement turn(
+        Base::Vector3d(),
+        Base::Rotation(Base::Vector3d(1, 0, 0), std::numbers::pi)
+    );
+    const Base::Placement base;
+    auto digest = [](const std::string& key, std::uint64_t value) {
+        ElementFingerprint::Source source;
+        source.locus = 'D';
+        source.key = key;
+        source.digest = value;
+        return source;
+    };
+    const std::vector<ElementFingerprint::Source> saved {
+        placed("1", base),
+        digest("1", 0x11),
+        digest("2", 0x22)
+    };
+    std::vector<ElementFingerprint::Source> turned {
+        placed("1", turn * base),
+        digest("1", 0x11),
+        digest("2", 0x22)
+    };
+    const auto motion = ElementFingerprint::rigidMotion(saved, turned, tolerance, angle);
+    ASSERT_TRUE(motion.has_value());
+    EXPECT_TRUE(motion->getRotation().isSame(turn.getRotation(), 1e-9));
+    //   the pad's inputs changed with the turn: not one piece
+    turned[2].digest = 0x23;
+    EXPECT_FALSE(ElementFingerprint::rigidMotion(saved, turned, tolerance, angle).has_value());
+    //   an object's digest gone, or one added: not one piece
+    turned.pop_back();
+    EXPECT_FALSE(ElementFingerprint::rigidMotion(saved, turned, tolerance, angle).has_value());
+    turned.push_back(digest("2", 0x22));
+    turned.push_back(digest("3", 0x33));
+    EXPECT_FALSE(ElementFingerprint::rigidMotion(saved, turned, tolerance, angle).has_value());
+    //   nothing moved and an input changed: not the identity (the caller then reads no motion)
+    auto edited = saved;
+    edited[1].digest = 0x12;
+    EXPECT_FALSE(ElementFingerprint::rigidMotion(saved, edited, tolerance, angle).has_value());
+}
+
+TEST(ElementFingerprint, pieceMotion)
+{
+    // Decision 234: one piece and nothing else changed are read apart (10.11.2)
+    const double tolerance = 1e-7;
+    const double angle = 1e-6;
+    const Base::Placement turn(
+        Base::Vector3d(),
+        Base::Rotation(Base::Vector3d(0, 0, 1), std::numbers::pi)
+    );
+    const Base::Placement spine(Base::Vector3d(2, 0, 0), Base::Rotation());
+    const Base::Placement profile(Base::Vector3d(0, 3, 0), Base::Rotation());
+    auto digest = [](const std::string& key, std::uint64_t value) {
+        ElementFingerprint::Source source;
+        source.locus = 'D';
+        source.key = key;
+        source.digest = value;
+        return source;
+    };
+    const std::vector<ElementFingerprint::Source> saved {
+        placed("1", spine),
+        placed("2", profile),
+        digest("1", 0x11),
+        digest("2", 0x22)
+    };
+    //   two sources turned 180 degrees, the spine's lines drawn anew: one piece, changed
+    std::vector<ElementFingerprint::Source> turned {
+        placed("1", turn * spine),
+        placed("2", turn * profile),
+        digest("1", 0x12),
+        digest("2", 0x22)
+    };
+    auto piece = ElementFingerprint::pieceMotion(saved, turned, tolerance, angle);
+    ASSERT_TRUE(piece.has_value());
+    EXPECT_TRUE(piece->changed);
+    EXPECT_TRUE(piece->motion.getRotation().isSame(turn.getRotation(), 1e-9));
+    EXPECT_FALSE(ElementFingerprint::rigidMotion(saved, turned, tolerance, angle).has_value());
+    //   the same turn with nothing else changed: one piece, unchanged, as rigidMotion() reads it
+    turned[2].digest = 0x11;
+    piece = ElementFingerprint::pieceMotion(saved, turned, tolerance, angle);
+    ASSERT_TRUE(piece.has_value());
+    EXPECT_FALSE(piece->changed);
+    EXPECT_TRUE(ElementFingerprint::rigidMotion(saved, turned, tolerance, angle).has_value());
+    //   a key in one list only is another edit; the shared ones still agree on the turn
+    auto added = turned;
+    added.push_back(digest("3", 0x33));
+    piece = ElementFingerprint::pieceMotion(saved, added, tolerance, angle);
+    ASSERT_TRUE(piece.has_value());
+    EXPECT_TRUE(piece->changed);
+    EXPECT_TRUE(piece->motion.getRotation().isSame(turn.getRotation(), 1e-9));
+    //   a source left behind, the digests equal: not one piece
+    auto behind = turned;
+    behind[1] = placed("2", profile);
+    EXPECT_FALSE(ElementFingerprint::pieceMotion(saved, behind, tolerance, angle).has_value());
+    //   nothing moved, a digest changed: the identity, changed (an ordinary edit)
+    auto edited = saved;
+    edited[2].digest = 0x12;
+    piece = ElementFingerprint::pieceMotion(saved, edited, tolerance, angle);
+    ASSERT_TRUE(piece.has_value());
+    EXPECT_TRUE(piece->changed);
+    EXPECT_TRUE(piece->motion.isIdentity());
 }
