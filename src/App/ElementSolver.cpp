@@ -312,9 +312,28 @@ struct SourceSection
     std::vector<std::string> ids;
 };
 
-// The known innermost source sections of \a name: those with a tag and a reference ID. A source
-// without either is unknown and left out, so that one such source doesn't hide the others (PR
-// 149's review).
+// The reference IDs of a source section. A history-less producer's element named by its MLN id
+// (FreeCAD-CH, ops#502: `_;_;<tag>;MLN;<id>;<type>;0;_;_`) has none: its id stands for one, as
+// an IDX section's index does (`Face6`), written `MLN<id>` (decision 248 T2: ops#526's rules see
+// a primitive's element so).
+std::vector<std::string> sourceIdsOf(const DecodedMappedSection& section)
+{
+    std::vector<std::string> ids;
+    for (const auto& id : section.referenceIDs) {
+        if (!id.empty() && id != Data::EMPTY_VALUE) {
+            ids.push_back(id);
+        }
+    }
+    if (ids.empty() && section.opCode == "MLN" && !section.hasMapperFlag(MAPPER_FLAG_INDEX)
+        && !section.index.empty() && section.index != Data::EMPTY_VALUE) {
+        ids.push_back("MLN" + section.index);
+    }
+    return ids;
+}
+
+// The known innermost source sections of \a name: those with a tag and a reference ID
+// (sourceIdsOf()). A source without either is unknown and left out, so that one such source
+// doesn't hide the others (PR 149's review).
 std::vector<SourceSection> knownSourcesOf(std::string_view name)
 {
     std::vector<SourceSection> sources;
@@ -322,12 +341,7 @@ std::vector<SourceSection> knownSourcesOf(std::string_view name)
         if (!source || !hasTag(section)) {
             return false;
         }
-        std::vector<std::string> ids;
-        for (const auto& id : section.referenceIDs) {
-            if (!id.empty() && id != Data::EMPTY_VALUE) {
-                ids.push_back(id);
-            }
-        }
+        auto ids = sourceIdsOf(section);
         if (!ids.empty()) {
             sources.push_back({section.iterationTag, section.elementType, std::move(ids)});
         }
@@ -1033,6 +1047,29 @@ std::string_view matchSource(std::string_view name)
         return {};
     }
     return sections.front();
+}
+
+// The name a pick hands out for an element named \a names: its first, or on an element that holds
+// an MLN name beside the IDX aliases P-beta gives (decision 247), its first that isn't one of them.
+// The aliases are dropped at the producer's next naming, so a reference written with one would
+// break then (review r3 T-C; resolutionName() in ElementSolverBatch.cpp the same for the batch).
+std::string handedOutName(const std::vector<std::string>& names)
+{
+    if (names.empty()) {
+        return {};
+    }
+    if (!indexSection(names.front())
+        || std::none_of(names.begin(), names.end(), [](const std::string& name) {
+               return !matchSource(name).empty();
+           })) {
+        return names.front();
+    }
+    for (const auto& name : names) {
+        if (!indexSection(name)) {
+            return name;
+        }
+    }
+    return names.front();
 }
 
 }  // namespace
@@ -3359,7 +3396,7 @@ std::optional<long> tagNumber(std::string_view tag)
 }
 
 // The innermost source sections of \a name (walkLineage()) with a tag, their reference IDs
-// whether or not they have any (knownSourcesOf() leaves the ID-less out).
+// (sourceIdsOf()) whether or not they have any (knownSourcesOf() leaves the ID-less out).
 std::vector<SourceSection> taggedSourcesOf(std::string_view name)
 {
     std::vector<SourceSection> sources;
@@ -3367,16 +3404,21 @@ std::vector<SourceSection> taggedSourcesOf(std::string_view name)
         if (!source || !hasTag(section)) {
             return false;
         }
-        std::vector<std::string> ids;
-        for (const auto& id : section.referenceIDs) {
-            if (!id.empty() && id != Data::EMPTY_VALUE) {
-                ids.push_back(id);
-            }
-        }
-        sources.push_back({section.iterationTag, section.elementType, std::move(ids)});
+        sources.push_back({section.iterationTag, section.elementType, sourceIdsOf(section)});
         return false;
     });
     return sources;
+}
+
+// True if \a name was made from a history-less producer's element alone: from its index (IDX, a
+// map-less shape's element, `Edge10;_;<Box1>;MKR;...;IDX`) or from the id its producer gave it
+// (MLN, matchSource(): FreeCAD-CH's C2 names a primitive's or a script shape's elements so,
+// `_;_;<Box1>;MLN;18;E;0;_;_`, ops#502), or a piece of one. Its object is its only source, and
+// neither the index nor the id says anything of geometry: placeVerdict() judges both by the
+// object (decision 248 T2).
+bool madeByObjectAlone(std::string_view name)
+{
+    return !NameAncestry::indexSource(name).empty() || !matchSource(name).empty();
 }
 
 }  // namespace
@@ -3404,10 +3446,12 @@ PlaceVerdict placeVerdict(const ElementFingerprint& saved,
     // with IDs, so T1''s test never sees it lost; its object is its source, and the pick's object
     // judges it by the marks (9.2's own example, design 9.5: box 2 moved onto box 1's vacated
     // place was there, BoxMovedIntoAVacatedPlaceThick, K8FusePinRemovedNeighbourMoved; ops#526
-    // D2d). Judged that way only to break: any other verdict keeps D1's lines.
+    // D2d). Judged that way only to break: any other verdict keeps D1's lines. An old name made
+    // from a producer's MLN id is judged the same (madeByObjectAlone(), decision 248 T2): C2 names
+    // the boxes so.
     // A closure too large has the suppressed objects' marks alone (ops#549, decision 216): as
     // without marks (an object it doesn't list isn't gone)
-    const bool byIndex = !NameAncestry::indexSource(oldName).empty();
+    const bool byIndex = madeByObjectAlone(oldName);
     if ((!lostSource && !byIndex) || saved.marks.empty() || saved.marksPartial || oldName.empty()) {
         return say(PlaceVerdict::Unjudged, {});
     }
@@ -3464,8 +3508,9 @@ PlaceVerdict placeVerdict(const ElementFingerprint& saved,
         // lineage: its source is the target's own element by number, which tells neither
         // "drawn again" nor "was there" (attack set's BRing|reversed, the ring's faces renamed by
         // index after its spine line was reversed). Such a pick is unjudged by the marks, unless
-        // the old name was made from an index too: then its object is what tells.
-        const bool indexMade = !NameAncestry::indexSource(name).empty();
+        // the old name was made from an index too: then its object is what tells. A name made
+        // from an MLN id the same (madeByObjectAlone()).
+        const bool indexMade = madeByObjectAlone(name);
         if (!byIndex && indexMade) {
             continue;
         }
@@ -3636,7 +3681,7 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
     }
 
     auto firstName = [](const SolveInput::Element& element) {
-        return element.names.empty() ? std::string() : element.names.front();
+        return handedOutName(element.names);
     };
 
     // The pool elements' current fingerprints, measured on first use.
@@ -4973,7 +5018,7 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
             const auto& element = state.pool->elements[k];
             state.outcome.candidates.push_back(element.index);
             state.outcome.candidateNames.push_back(
-                element.names.empty() ? std::string() : element.names.front()
+                handedOutName(element.names)
             );
             state.outcome.candidateRoles.emplace_back(role                       ? role
                                                       : isPiece(k)               ? "piece"
@@ -5008,7 +5053,7 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
                 const auto& element = state.pool->elements[k];
                 state.outcome.candidates.push_back(element.index);
                 state.outcome.candidateNames.push_back(
-                    element.names.empty() ? std::string() : element.names.front()
+                    handedOutName(element.names)
                 );
                 state.outcome.candidateRoles.emplace_back(role);
                 state.outcome.candidateDistances.push_back(distance);
@@ -7138,7 +7183,7 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
                         const auto& candidate = state.pool->elements[position];
                         state.outcome.candidates.push_back(candidate.index);
                         state.outcome.candidateNames.push_back(
-                            candidate.names.empty() ? std::string() : candidate.names.front()
+                            handedOutName(candidate.names)
                         );
                         state.outcome.candidateRoles.emplace_back(role);
                         state.outcome.candidateDistances.push_back(distanceOf(position));
