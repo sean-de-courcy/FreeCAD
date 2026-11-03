@@ -436,7 +436,8 @@ names it.
 | `fix/524-departed-moved` | fix | ops#524 | - | `integration` `69d13a2c51` | `c734dca553` (fork PR 403), 2026-11-03 | never (fork fix) |
 | `fix/475-migration-place` | fix | ops#475, ops#544 | - | `integration` `c734dca553` | `4e02f72cfd` (fork PR 405), 2026-11-03 | never (fork fix) |
 | `fix/564-refresh-gating` | fix | ops#564 | - | `integration` `4e02f72cfd` | `647c95d8ec` (fork PR 411), 2026-11-03 | never (fork fix) |
-| `fix/557-frame-place` | fix | ops#557 | - | `integration` `4e02f72cfd` (stacked on fork PR 411) | (fork PR 412) | never (fork fix) |
+| `fix/557-frame-place` | fix | ops#557 | - | `integration` `4e02f72cfd` (stacked on fork PR 411) | `25fdd9b427` (fork PR 412), 2026-11-03 | never (fork fix) |
+| `fix/546-rigid-spine` | fix | ops#546 | - | `integration` `25fdd9b427` | (fork PR 413) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 
