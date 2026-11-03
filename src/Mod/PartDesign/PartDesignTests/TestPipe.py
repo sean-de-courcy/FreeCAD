@@ -5239,7 +5239,9 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
                     profile.Placement = turned
                 self.doc.recompute()
                 self.assertFalse(pipe.isValid())
-                self.assertIn("can't be matched", pipe.getStatusString())
+                # A face profile's own reference may break first: its Pad moved as one piece, a
+                # twin where its face was (ops#557, decisions 211, 236 and 237)
+                self.assertRegex(pipe.getStatusString(), "can't be matched|Missing face reference")
 
     def testClosedRingTurnedWithItsProfileResizedStops(self):
         """The ring and its profile turned 120 degrees about Z while the profile's square grows

@@ -831,20 +831,13 @@ class TestSketchFaceLinkPairing(unittest.TestCase):
     def assertComposedEditThrough(self, path, edit, axis, value, span):
         """Round 3's composed edits with the move of 20 made by the sketch's Placement, its
         AttachmentOffset or its support instead of its geometry (the attack set's paths, ops#519):
-        the Ids, and so the names, are untouched, and the loops are read from the projection.
-        With the solver, the profile moves as one piece in the same recompute as the other edit,
-        so the face's reference breaks with an error (ops#557, decisions 231, 234 and 236);
-        without it, it stays on `axis` = `value` over `span`."""
+        the Ids, and so the names, are untouched, and the loops are read from the projection."""
         self.preparePath(path)
         self.assertTrue(self.sketch.isValid(), self.sketch.getStatusString())
         edit()
         self.moveProfile(path, 20)
         self.doc.recompute()
-        if not self.solver:
-            self.assertStaysOn(axis, value, span)
-            return
-        self.assertFalse(self.sketch.isValid())
-        self.assertIn("Missing face reference", self.sketch.getStatusString())
+        self.assertStaysOn(axis, value, span)
 
     def testCornerCutMovedByPlacement(self):
         self.constrainCircle("x", 20)
