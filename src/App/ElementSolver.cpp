@@ -4754,6 +4754,10 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
                 );
             }
         }
+        // As at a moved hit's old place, no other entry of the owner takes them (review
+        // pr390-r2j T2): a later pocket's corner 0.17 away took the lone crossing's place at
+        // tier 3, silently, where `integration` held it by its name.
+        pools[entry.type].exact.insert(outcome.candidates.begin(), outcome.candidates.end());
         listTwins();
     }
 
@@ -6582,7 +6586,26 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
                     if (placeBreaks(pick, agree, "geometric", &placeClause)) {
                         continue;
                     }
-                    const bool redrawn = !placeClause.empty();
+                    // D2's verdict, as `integration` reads it (takenOnIntegration())
+                    const bool drawnAgain = !placeClause.empty();
+                    bool redrawn = drawnAgain;
+                    // Not drawn again while another element still holds the old name's sources
+                    // (review pr390-r2js): the old circle moved off, its crossings named anew,
+                    // and a new circle drawn where it was. D2 calls the new crossing at the place
+                    // drawn again, and XP took it, silently; T1''s test now breaks it.
+                    if (redrawn && !oldSources.empty()) {
+                        for (std::size_t k = 0; k < pool.elements.size() && redrawn; ++k) {
+                            if (static_cast<int>(k) == pick) {
+                                continue;
+                            }
+                            for (const auto& n : pool.elements[k].names) {
+                                if (!knownSourcesOf(n).empty() && !lostASource({n}, oldSources)) {
+                                    redrawn = false;
+                                    break;
+                                }
+                            }
+                        }
+                    }
                     const char* lacks = nullptr;
                     if (twinClause) {
                         lacks = otherOrigin(pool.elements[pick], oldName);
@@ -6605,7 +6628,7 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
                         : orderBreaks(pick);
                     if (!why.empty()) {
                         state.decided = true;
-                        if (takenOnIntegration(pick, false, redrawn, nearest.index < 0)) {
+                        if (takenOnIntegration(pick, false, drawnAgain, nearest.index < 0)) {
                             state.contested = pick;
                         }
                         state.outcome.evidence = (nearest.index >= 0

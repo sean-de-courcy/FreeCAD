@@ -5658,6 +5658,27 @@ TEST(SolveOwner, goneClosedEdgeTwinBreaks)
     EXPECT_EQ(outcome.candidateRoles, (std::vector<std::string> {"place", "twin"}));
 }
 
+TEST(SolveOwner, closedTwinGoneReservesItsPlace)
+{
+    // Review pr390-r2j T2: the gone twin's place holds the +y arc, its candidate. Another
+    // reference of the owner, a later feature's edge saved one degree round from it with no
+    // structural candidate now, took that arc at tier 3, silently; the place is reserved as at a
+    // moved hit's old place, and it breaks.
+    auto input = turnedRim({"MOD", "ORD", "CLS"}, false);
+    input.pool["Edge"] = {
+        element("Edge3", {rimTwin(0, {"MOD", "ORD", "CLS"}, 3)}),
+        element("Edge10", {rimTwin(1, {"MOD", "ORD", "CLS"}, 3)}),
+    };
+    input.entries = {missing(rimTwin(0, {"MOD", "ORD", "CLS"}), "Edge"),
+                     missing(section({}, {sketchEdge(4, 12)}, 13, "XTR", 0, 'E', {"PRJ"}), "Edge")};
+    input.entries[0].fingerprint = arcOf(10, 55, 125, Base::Vector3d(0, 0, 20));
+    input.entries[1].fingerprint = arcOf(10, 56, 126, Base::Vector3d(0, 0, 20));
+    auto outcomes = Data::solveOwner(input);
+    ASSERT_EQ(outcomes.size(), 2U);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken) << describe(outcomes[0]);
+    EXPECT_EQ(outcomes[1].status, SolveStatus::Broken) << describe(outcomes[1]);
+}
+
 namespace
 {
 
@@ -10780,6 +10801,31 @@ TEST(SolveOwner, redrawnAtThePlaceIsQuiet)
     const auto copy = piece(b.redrawn, 9, "CPY", 1, 'E');
     EXPECT_EQ(Data::placeVerdict(boardRecord(), now, {copy}, b.oldEdge, true, {}),
               Data::PlaceVerdict::Unjudged);
+}
+
+TEST(SolveOwner, drawnAgainWhileTheOldSourceLivesOnBreaks)
+{
+    // Review pr390-r2js: the redraw above, but the old line g1 still gives another element (a
+    // later feature's edge, 500 mm off). The new line at the place is not the old one drawn again:
+    // the old circle moved off its crossings, named anew, and a new circle drawn where it was
+    // gave a crossing D2 called drawn again, taken silently. T1''s test breaks it, the pick first.
+    LongBoard b;
+    auto input = b.input(LongBoard::edgeAt(0), LongBoard::edgeAt(45));
+    const auto later = section({}, {sketchEdge(1)}, 8, "XTR", 0, 'E', {"PRJ"});
+    input.pool["Edge"].push_back(element("Edge4", {later}));
+    input.entries[0].fingerprint = boardRecord();
+    auto now = boardRecord();
+    now.marks.clear();
+    measure(input,
+            {{"Edge2", now}, {"Edge3", LongBoard::edgeAt(45)}, {"Edge4", LongBoard::edgeAt(500)}},
+            nullptr);
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken) << outcome.evidence;
+    EXPECT_NE(outcome.evidence.find("; the pick Edge2 has another source element"),
+              std::string::npos)
+        << outcome.evidence;
+    ASSERT_FALSE(outcome.candidates.empty());
+    EXPECT_EQ(outcome.candidates.front(), "Edge2");
 }
 
 TEST(SolveOwner, drawnAgainPickOfASavedTwinHasAnotherSource)
