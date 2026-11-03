@@ -11472,3 +11472,48 @@ TEST(PassThroughWorldSwitched, theRecordsSuppressedSetAgainstTheChain)
     EXPECT_TRUE(Data::passThroughWorldSwitched(partial, {{3, false}, {5, false}}));
     EXPECT_TRUE(Data::passThroughWorldSwitched(partial, {{3, true}, {5, true}}));
 }
+
+TEST(IndexMadeOnly, aBetaFilesNamesOfMaplessInputs)
+{
+    // FreeCAD-CH, ops#502, PLAN decision 247's P-beta 2: a name made from indices only (a map-less
+    // input's elements, as files saved before MLN names hold them) is no name in a migration
+    const std::string edge1 = section({"Edge1"}, {}, 3088, "CUT", 0, 'E', {"IDX", "SRC"});
+    const std::string edge4 = section({"Edge4"}, {}, 3087, "MKR", 0, 'E', {"IDX", "SRC"});
+    EXPECT_TRUE(App::indexMadeOnly(edge1));
+    //   IndexToldGroups' CornerBall: a Cut's vertex made from two boxes' IDX edges
+    const std::string vertex = section({}, {edge1, edge4}, 1260, "CUT", 0, 'V', {"UPP"});
+    EXPECT_TRUE(App::indexMadeOnly(vertex));
+    //   ... and a face made from that vertex and an IDX edge
+    EXPECT_TRUE(App::indexMadeOnly(section({}, {vertex, edge1}, 1261, "FUS", 0, 'F', {"GEN"})));
+}
+
+TEST(IndexMadeOnly, anyOtherSourceKeepsTodaysRules)
+{
+    const std::string edge1 = section({"Edge1"}, {}, 3088, "CUT", 0, 'E', {"IDX", "SRC"});
+    const std::string mln = section({}, {}, 4572, "MLN", 46, 'F', {});
+    //   a sketch's geometry among the linked names
+    EXPECT_FALSE(App::indexMadeOnly(section({}, {edge1, sketchEdge(1)}, 1260, "CUT", 0, 'V', {"UPP"})));
+    //   an MLN id, alone or linked
+    EXPECT_FALSE(App::indexMadeOnly(mln));
+    EXPECT_FALSE(App::indexMadeOnly(section({}, {edge1, mln}, 1260, "CUT", 0, 'V', {"UPP"})));
+    //   an op section's own reference ID, and an op section made from no name
+    EXPECT_FALSE(App::indexMadeOnly(section({"g1"}, {edge1}, 1260, "CUT", 0, 'V', {"UPP"})));
+    EXPECT_FALSE(App::indexMadeOnly(section({}, {}, 1260, "CUT", 0, 'V', {"UPP"})));
+    //   a connected element that isn't index-made
+    EXPECT_FALSE(App::indexMadeOnly(section({"Edge2"}, {}, 3088, "CUT", 0, 'E', {"IDX"}, {sketchEdge(2)})));
+    EXPECT_FALSE(App::indexMadeOnly(sketchEdge(1)));
+    EXPECT_FALSE(App::indexMadeOnly(""));
+}
+
+TEST(IndexMadeOnly, theRecursionFailsClosed)
+{
+    // A chain of op sections over an IDX edge: within the depth, index-made; past it, today's rules
+    std::string name = section({"Edge1"}, {}, 3088, "CUT", 0, 'E', {"IDX", "SRC"});
+    for (int level = 1; level < 8; ++level) {
+        name = section({}, {name}, 1260 + level, "CUT", 0, 'E', {"MOD"});
+    }
+    EXPECT_TRUE(App::indexMadeOnly(name));
+    name = section({}, {name}, 1300, "CUT", 0, 'E', {"MOD"});
+    EXPECT_FALSE(App::indexMadeOnly(name));
+    EXPECT_TRUE(App::indexMadeOnly(name, 9));
+}

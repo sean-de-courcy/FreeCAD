@@ -349,6 +349,15 @@ AppExport void placementSources(
 /// empty string.
 AppExport std::string bareMappedName(const std::string& newStyleName);
 
+/** Whether the bare mapped name \a name is index-made all the way down (FreeCAD-CH, ops#502, PLAN
+ * decision 247's P-beta 2): every section has the IDX flag, or is an op section made from linked
+ * names that all are, recursively, with no other source (no reference ID such as a sketch's
+ * geometry, no MLN id). Such a name says nothing of its element's identity beyond indices: a
+ * naming migration takes it for no name. False past \a depth levels (a malformed name), and for
+ * an empty one.
+ */
+AppExport bool indexMadeOnly(const std::string& name, int depth = 8);
+
 /// What a reverse update (an element map version change, e.g. a naming migration: ops#103) did
 /// to one reference: kept on its name's element, moved to the element its old geometry gives,
 /// or broken.
