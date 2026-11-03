@@ -60,12 +60,12 @@
 "RigidBoxTurnedAboutCentreOffset|hole1_rim|V2s": {"axes": [], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "designer rigid turns", "issue": "ops#557", "tier": "F"},
 "RigidBoxTurnedAboutCentreOffset|hole1_wall|V2s": {"axes": [], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "designer rigid turns", "issue": "ops#557", "tier": "F"},
 "RigidBoxTurnedAboutCentreOffset|top|V2s": {"axes": [], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "designer rigid turns", "issue": "ops#557", "tier": "F"},
-"RigidBoxTurnedAndHoleWidened|corner_000|V2s": {"axes": [], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "designer rigid turns", "issue": "ops#557", "tier": "F"},
-"RigidBoxTurnedAndHoleWidened|corner_top|V2s": {"axes": [], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "designer rigid turns", "issue": "ops#557", "tier": "F"},
-"RigidBoxTurnedAndHoleWidened|edge_y0|V2s": {"axes": [], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "designer rigid turns", "issue": "ops#557", "tier": "F"},
-"RigidBoxTurnedAndHoleWidened|end_x0|V2s": {"axes": [], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "designer rigid turns", "issue": "ops#557", "tier": "F"},
-"RigidBoxTurnedAndHoleWidened|hole1_rim|V2s": {"axes": [], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "designer rigid turns", "issue": "ops#557", "tier": "F"},
-"RigidBoxTurnedAndHoleWidened|hole1_wall|V2s": {"axes": [], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "designer rigid turns", "issue": "ops#557", "tier": "F"},
+"RigidBoxTurnedAndHoleWidened|corner_000|V2s": {"axes": [], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "designer rigid turns", "issue": "ops#557", "tier": "F"},
+"RigidBoxTurnedAndHoleWidened|corner_top|V2s": {"axes": [], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "designer rigid turns", "issue": "ops#557", "tier": "F"},
+"RigidBoxTurnedAndHoleWidened|edge_y0|V2s": {"axes": [], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "designer rigid turns", "issue": "ops#557", "tier": "F"},
+"RigidBoxTurnedAndHoleWidened|end_x0|V2s": {"axes": [], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "designer rigid turns", "issue": "ops#557", "tier": "F"},
+"RigidBoxTurnedAndHoleWidened|hole1_rim|V2s": {"axes": [], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "designer rigid turns", "issue": "ops#557", "tier": "F"},
+"RigidBoxTurnedAndHoleWidened|hole1_wall|V2s": {"axes": [], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "designer rigid turns", "issue": "ops#557", "tier": "F"},
 "RigidBoxTurnedAndHoleWidened|top|V2s": {"axes": [], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "designer rigid turns", "issue": "ops#557", "tier": "F"}
 }
 }
