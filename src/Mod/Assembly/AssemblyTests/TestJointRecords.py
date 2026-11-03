@@ -24,7 +24,7 @@
 (FreeCAD-CH, ops#504 E2): the swap of Reference1 and Reference2 during a solve (swapJCS) and
 the re-rooting of a parent assembly's joints when an AssemblyLink turns rigid or flexible. On
 designed models in documents with ReferenceSolver on, where redrawing a pad's profile makes the
-joint's edge reference a geometric guess."""
+joint's edge reference a tier 3 guess."""
 
 import unittest
 
@@ -71,13 +71,10 @@ class TestJointRecords(unittest.TestCase):
 
     def redraw(self, doc):
         """Deletes the profile's lines and draws the rectangle again from its right back corner,
-        the other way round (TestNamingSolver.redraw) and 0.5 mm wider: new geometry IDs, so the
-        joint's edge is found again by geometry alone, off its place: a warned guess. Not where
-        it was: an element drawn again at the saved place is judged by the record's marks, which
-        the recompute before the solve took after the redraw, so it breaks (ops#526 D2, review
-        prd2dopus-r3 R3-1)."""
+        the other way round (TestNamingSolver.redraw): the same geometry, new geometry IDs, so
+        the joint's edge is found again by geometry alone (tier 3)."""
         doc.Profile.deleteAllGeometry()
-        doc.Profile.addGeometry(models.polygon([(20.5, 10), (20.5, 0), (0, 0), (0, 10)]), False)
+        doc.Profile.addGeometry(models.polygon([(20, 10), (20, 0), (0, 0), (0, 10)]), False)
         doc.recompute()
 
     def records(self, joint):
@@ -97,7 +94,7 @@ class TestJointRecords(unittest.TestCase):
 
     def testSwappedReferencesKeepTheirGuess(self):
         """A Distance joint from a cylinder's bottom circle (Reference1) to the pad's vertical
-        edge at (20, 0) (Reference2). The redraw makes the edge reference a geometric guess. The
+        edge at (20, 0) (Reference2). The redraw makes the edge reference a tier 3 guess. The
         solve puts the line first (swapJCS from getDistanceType): the edge reference moves to
         Reference1 and takes its guess record with it; the circle, now Reference2, has none."""
         # Arrange
@@ -116,9 +113,9 @@ class TestJointRecords(unittest.TestCase):
         doc.recompute()
         self.redraw(doc)
         #   the setup: the edge reference is a warned guess, and the circle is still first
-        self.assertEqual(self.records(joint), [("Reference2", 0, "guessed", "geometric")])
+        self.assertEqual(self.records(joint), [("Reference2", 0, "resolved", "tier3")])
         self.assertIn("Warning", joint.State)
-        guessed = (body, edge("line", direction=Z, through=(20.5, 0, 0)).one(body.Shape))
+        guessed = (body, corner.one(body.Shape))
         self.assertEqual(joint.Reference2, guessed)
         self.assertEqual(joint.Reference1, (cylinder, circle))
 
@@ -131,11 +128,11 @@ class TestJointRecords(unittest.TestCase):
         self.assertEqual(joint.Reference1, guessed)
         self.assertEqual(joint.Reference2, (cylinder, circle))
         #   the guess went with the edge reference
-        self.assertEqual(self.records(joint), [("Reference1", 0, "guessed", "geometric")])
+        self.assertEqual(self.records(joint), [("Reference1", 0, "resolved", "tier3")])
 
         #   and a recompute keeps it
         doc.recompute()
-        self.assertEqual(self.records(joint), [("Reference1", 0, "guessed", "geometric")])
+        self.assertEqual(self.records(joint), [("Reference1", 0, "resolved", "tier3")])
 
     def subAssemblyJoint(self, rigid):
         """A parent assembly with a grounded box and an AssemblyLink (`rigid` or flexible) to a
@@ -171,7 +168,7 @@ class TestJointRecords(unittest.TestCase):
         return doc, assemblyLink, link, joint
 
     def testRigidToggleKeepsTheGuess(self):
-        """The joint's edge reference through the AssemblyLink, a geometric guess after the redraw.
+        """The joint's edge reference through the AssemblyLink, a tier 3 guess after the redraw.
         Turning the AssemblyLink flexible re-roots the reference from (AssemblyLink,
         "Link.EdgeN") to (Link, "EdgeN"), turning it rigid re-roots it back
         (AssemblyLink::updateParentJoints): either way the reference keeps its guess record."""
@@ -183,7 +180,7 @@ class TestJointRecords(unittest.TestCase):
                 self.assertEqual(joint.Reference2[0], root)
                 self.redraw(doc)
                 #   the setup: the edge reference is a warned guess
-                self.assertEqual(self.records(joint), [("Reference2", 0, "guessed", "geometric")])
+                self.assertEqual(self.records(joint), [("Reference2", 0, "resolved", "tier3")])
                 self.assertIn("Warning", joint.State)
                 [sub] = joint.Reference2[1]
 
@@ -197,8 +194,8 @@ class TestJointRecords(unittest.TestCase):
                 else:
                     self.assertEqual(joint.Reference2, (assemblyLink, [f"{link.Name}.{sub}"]))
                 #   the guess stayed with it
-                self.assertEqual(self.records(joint), [("Reference2", 0, "guessed", "geometric")])
+                self.assertEqual(self.records(joint), [("Reference2", 0, "resolved", "tier3")])
 
                 #   a recompute that changes nothing keeps it
                 doc.recompute()
-                self.assertEqual(self.records(joint), [("Reference2", 0, "guessed", "geometric")])
+                self.assertEqual(self.records(joint), [("Reference2", 0, "resolved", "tier3")])

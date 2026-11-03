@@ -1,0 +1,16 @@
+{
+"entries": {
+"CrossDocBinderSetter|binder|V2s": {"axes": ["M1", "E4", "E5", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr564son-r2", "issue": "ops#564", "tier": "F"},
+"FailedPadSiblingSlid|chamfer|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr564son-r2", "issue": "ops#564", "tier": "F"},
+"FailedPadThenRedrawn|chamfer|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "quiet", "found_by": "review pr564son-r2", "issue": "ops#564", "tier": "F"},
+"PartialSketchOnlyThenSlide|chamfer|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "quiet", "found_by": "review pr564son-r2", "issue": "ops#564", "tier": "F"},
+"RedrawPartialThroughPadNoSetter|chamfer|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "quiet", "found_by": "review pr564son-r2", "issue": "ops#564", "tier": "F"},
+"RedrawSetBasePartialThroughPad|chamfer|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "quiet", "found_by": "review pr564son-r2", "issue": "ops#564", "tier": "F"},
+"RedrawSetBaseRecursiveSingle|chamfer|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "quiet", "found_by": "review pr564son-r2", "issue": "ops#564", "tier": "F"},
+"RedrawSetBaseSketchSingle|chamfer|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr564son-r2", "issue": "ops#564", "tier": "F"},
+"RedrawSetBaseSpareSingleTwoSteps|chamfer|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "quiet", "found_by": "review pr564son-r2", "issue": "ops#564", "tier": "F"},
+"RedrawSetBaseUnrelatedSingle|chamfer|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "quiet", "found_by": "review pr564son-r2", "issue": "ops#564", "tier": "F"},
+"RedrawSketchSingleNoSetter|chamfer|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "quiet", "found_by": "review pr564son-r2", "issue": "ops#564", "tier": "F"},
+"SiblingThenSpareSingle|chamfer|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr564son-r2", "issue": "ops#564", "tier": "F"}
+}
+}

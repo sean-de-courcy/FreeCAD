@@ -1,0 +1,11 @@
+{
+"entries": {
+"ShapedFailSiblingSlidFixedThin|external|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr564opus-r3", "issue": "ops#564", "tier": "F"},
+"ShapedFailSiblingSlidFixed|external|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr564opus-r3", "issue": "ops#564", "tier": "F"},
+"ShapedFailSiblingSlidThin|external|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "BROKEN", "expected": "wrong", "found_by": "review pr564opus-r3", "issue": "ops#564", "tier": "F"},
+"ShapedFailSiblingSlid|external|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "BROKEN", "expected": "wrong", "found_by": "review pr564opus-r3", "issue": "ops#564", "tier": "F"},
+"ShapedFailThenSlidTwoSteps|external|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "BROKEN", "expected": "wrong", "found_by": "review pr564opus-r3", "issue": "ops#564", "tier": "F"},
+"ShapedSiblingSlidControl|external|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr564opus-r3", "issue": "ops#564", "tier": "F"},
+"ShapedSiblingSlidThinControl|external|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr564opus-r3", "issue": "ops#564", "tier": "F"}
+}
+}

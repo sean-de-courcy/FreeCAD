@@ -1,0 +1,7 @@
+{
+"entries": {
+"StaleWorldAttachedSuppressed|corner_point|V2s": {"axes": ["M1", "E4", "E5", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr564opus-r5", "issue": "ops#564", "tier": "F"},
+"StaleWorldCornerCut|corner_point|V2s": {"axes": ["M1", "E4", "E5", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr564opus-r5", "issue": "ops#564", "tier": "F"},
+"StaleWorldTaller|corner_point|V2s": {"axes": ["M1", "E4", "E5", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr564opus-r5", "issue": "ops#564", "tier": "F"}
+}
+}

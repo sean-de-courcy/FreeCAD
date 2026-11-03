@@ -434,7 +434,8 @@ names it.
 | `fix/549-pass-through-veto` | fix | ops#549 | - | fork PR 408 (D2), then `integration` | `69d13a2c51` (fork PR 410), 2026-11-02 | never (fork fix) |
 | `fix/396-macos-pipe` | fix | ops#396 | - | `integration` `69d13a2c51` | `4b7856c4bc` (fork PR 404), 2026-11-02 | a multisection Pipe's section within 1e-8 mm of perpendicular to the one before (as that one was turned) is turned 1e-9 mm towards it (in the sections' order along the spine), so OCCT's vertex pairing ties no more and turns it with the spine on every system; right angles out of one plane stop the pipe (decision 228) |
 | `fix/524-departed-moved` | fix | ops#524 | - | `integration` `69d13a2c51` | `c734dca553` (fork PR 403), 2026-11-03 | never (fork fix) |
-| `fix/475-migration-place` | fix | ops#475, ops#544 | - | `integration` `c734dca553` | (fork PR 405) | never (fork fix) |
+| `fix/475-migration-place` | fix | ops#475, ops#544 | - | `integration` `c734dca553` | `4e02f72cfd` (fork PR 405), 2026-11-03 | never (fork fix) |
+| `fix/564-refresh-gating` | fix | ops#564 | - | `integration` `4e02f72cfd` | (fork PR 411) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 

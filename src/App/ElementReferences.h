@@ -31,4 +31,14 @@ void resolveReregisteredReferences();
  */
 void queueReferencesIntoOtherDocuments(const Document* doc);
 
+/** Takes again the records that a refresh held back while their target was still to be
+ * recomputed (ops#564), at the end of \a doc's recompute: those whose target the recompute made,
+ * of every document but one whose own recompute is still running. With \a doc null, after the
+ * recompute of \a recomputed alone, outside a document's (it leaves the feature touched), the
+ * held records whose closure holds it. Called by Document::recompute() and
+ * Document::recomputeFeature(); defined in PropertyLinks.cpp.
+ */
+void updateHeldElementFingerprints(const Document* doc,
+                                   const DocumentObject* recomputed = nullptr);
+
 }  // namespace App

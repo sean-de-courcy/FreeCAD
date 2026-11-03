@@ -1,0 +1,10 @@
+{
+"entries": {
+"MultiSubAloneBack|slab_top_cap|V2s": {"axes": ["M1", "E4"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr564son-r5b", "issue": "ops#564", "tier": "F"},
+"MultiSubAloneBlockFirst|slab_top_cap|V2s": {"axes": ["M1", "E4"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr564son-r5b", "issue": "ops#564", "tier": "F"},
+"MultiSubAlone|slab_top_cap|V2s": {"axes": ["M1", "E4"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr564son-r5b", "issue": "ops#564", "tier": "F"},
+"MultiSubControl|slab_top_cap|V2s": {"axes": ["M1", "E4"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr564son-r5b", "issue": "ops#564", "tier": "F"},
+"MultiSubPartialThenBlock|slab_top_cap|V2s": {"axes": ["M1", "E4"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr564son-r5b", "issue": "ops#564", "tier": "F"},
+"MultiSubSingle|slab_top_cap|V2s": {"axes": ["M1", "E4"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr564son-r5b", "issue": "ops#564", "tier": "F"}
+}
+}

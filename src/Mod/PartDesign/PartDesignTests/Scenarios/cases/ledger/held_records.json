@@ -1,0 +1,11 @@
+{
+"entries": {
+"CrossDocRimRedrawnInPlace|binder|V2s": {"axes": ["M1", "E4", "E5", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "quiet", "found_by": "review pr564opus-r1", "issue": "ops#564", "tier": "F"},
+"CrossDocSiblingSlidAfterBothRecomputes|binder|V2s": {"axes": ["M1", "E4", "E5", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr564opus-r1", "issue": "ops#564", "tier": "F"},
+"CrossDocSiblingSlidAfterItsRecompute|binder|V2s": {"axes": ["M1", "E4", "E5", "X4:600"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr564opus-r1", "issue": "ops#564", "tier": "F"},
+"SiblingSlidAfterFeatureRecomputes|inner|V2s": {"axes": ["M1", "E4", "E5", "X4:600"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr564opus-r1", "issue": "ops#564", "tier": "F"},
+"SiblingSlidAfterFeatureRecomputes|plane|V2s": {"axes": ["M1", "E4", "E5", "X4:600"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr564opus-r1", "issue": "ops#564", "tier": "F"},
+"SiblingSlidAfterRecursiveRecompute|inner|V2s": {"axes": ["M1", "E4", "E5", "X4:600"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr564opus-r1", "issue": "ops#564", "tier": "F"},
+"SiblingSlidAfterRecursiveRecompute|plane|V2s": {"axes": ["M1", "E4", "E5", "X4:600"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr564opus-r1", "issue": "ops#564", "tier": "F"}
+}
+}
