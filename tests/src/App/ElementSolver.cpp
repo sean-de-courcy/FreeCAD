@@ -11162,27 +11162,25 @@ TEST(SolveOwner, matchMadeSourcesAreKnown)
     EXPECT_EQ(why, "its source 22;MLN6 was in the model before");
 }
 
-TEST(SolveOwner, indexAndMatchNamesOfOneObjectAreShared)
+TEST(SolveOwner, indexAndMatchNamesOfOneObjectStayApart)
 {
-    // Review r3f N1, BetaScriptSetAgainDownstream|cut_a_top: a beta file's Cut face derived from
-    // the script compound's IDX names; the script sets the compound again, its elements named by
-    // match, and the Cut's face now derives from their MLN ids. The object's index and its id are
-    // named apart: no source lost, no source "was there", D1's lines (as round 3, as the beta).
+    // Reviews r3f N1 and r3g R1: a beta file's Cut face derived from the script compound's IDX
+    // names; the script sets the compound again, its elements named by match, and the Cut's face
+    // now derives from their MLN ids. A name can't tell whether MLN 22 is the element Edge12 was
+    // (BetaScriptSetAgainDownstream|cut_a_top, set again unchanged) or a traded twin's
+    // (WallsSlabAMirroredIntoB|cw0): the sources are lost and the marks judge the pick, which
+    // breaks (decision 150 (1): loud, never a wrong pick).
     auto face = [](const std::string& a, const std::string& b) {
         return section({}, {a, b}, 30, "CUT", 0, 'F', {"LOW"});
     };
     const auto oldFace = face(indexed("Edge12", 20, "MKR", 'E'), indexed("Edge6", 20, "MKR", 'E'));
     const auto newFace = face(section({}, {}, 20, "MLN", 22, 'E', {}),
                               section({}, {}, 20, "MLN", 28, 'E', {}));
-    EXPECT_FALSE(Data::lostOldSources({newFace}, oldFace));
+    EXPECT_TRUE(Data::lostOldSources({newFace}, oldFace));
     ElementFingerprint record = LongBoard::edgeAt(0);
     record.marks = {{20, -1}, {30, -1}};
     EXPECT_EQ(Data::placeVerdict(record, LongBoard::edgeAt(0), {newFace}, oldFace, true, {}),
-              Data::PlaceVerdict::Unjudged);
-    //   another object's MLN ids are still another source
-    const auto otherFace = face(section({}, {}, 21, "MLN", 22, 'E', {}),
-                                section({}, {}, 21, "MLN", 28, 'E', {}));
-    EXPECT_TRUE(Data::lostOldSources({otherFace}, oldFace));
+              Data::PlaceVerdict::WasThere);
 }
 
 TEST(SolveOwner, indexMadeOldNameNegativeTagKeepsMark)
