@@ -23,6 +23,10 @@ import FreeCAD as App
 from PartDesignTests.TestNamingDump import _freecadCmd
 
 FIXTURE = os.path.join(os.path.dirname(__file__), "Fixtures", "BetaMapless.FCStd")
+# The Compat corpus model IndexToldGroups (Compat/models_partdesign.py), saved by make_generation on
+# a build of the beta's naming (revision 15): CornerBall, a sphere attached to a vertex of a Cut of
+# two boxes' compound, holds a vertex name made from the boxes' IDX edge names
+CORNER_FIXTURE = os.path.join(os.path.dirname(__file__), "Fixtures", "BetaIndexToldGroups.FCStd")
 
 MIGRATION = re.compile(
     r"(\d+) element references re-derived from their geometry after a naming change: "
@@ -95,8 +99,16 @@ def record(doc):
 
 try:
     doc = App.openDocument(os.environ["BETA_MAPLESS_FILE"])
-    result = {"opened": record(doc), "steps": []}
+    result = {"opened": record(doc) if doc.getObject("DatumTop") else None, "steps": []}
     for step in os.environ["BETA_MAPLESS_STEPS"].split(","):
+        if step == "corner":
+            for obj in doc.Objects:
+                obj.touch()
+            doc.recompute()
+            ball = doc.getObject("CornerBall")
+            result["steps"].append({"valid": ball.isValid(), "status": ball.getStatusString(),
+                                    "base": list(ball.Placement.Base)})
+            continue
         if step == "touch":
             for obj in doc.Objects:
                 obj.touch()
@@ -127,10 +139,10 @@ class TestBetaMapless(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.folder, ignore_errors=True)
 
-    def run_child(self, steps):
+    def run_child(self, steps, fixture=FIXTURE):
         """The child's record and the migration lines' (total, moved, broken)."""
         path = os.path.join(self.folder, "beta.FCStd")
-        shutil.copyfile(FIXTURE, path)
+        shutil.copyfile(fixture, path)
         script = os.path.join(self.folder, "child.py")
         with open(script, "w", encoding="utf-8") as fh:
             fh.write(_CHILD)
@@ -287,6 +299,21 @@ class TestBetaMapless(unittest.TestCase):
         self.assertBroken(dropped["DatumPlateB"])
         self.assertFace(dropped["DatumTop"], (5, 10, 30))
         self.assertFace(dropped["DatumCutTop"], centreOfTop(15, 15))
+
+    def testIndexMadeVertexNameIsKeptQuietly(self):
+        """P-beta 2, recursive (decision 247): CornerBall's saved name is a Cut's vertex made from
+        the boxes' IDX edges, index-made all the way down though its own section isn't IDX. The
+        migration keeps it by its place with no warning, none moved back. (Without the rule: kept
+        by its place with "Index reference: Vertex1 kept by its place after a naming migration",
+        1 moved back.)"""
+        # Act
+        result, migration, log = self.run_child("corner", CORNER_FIXTURE)
+
+        # Assert
+        ball = result["steps"][0]
+        self.assertTrue(ball["valid"], ball)
+        self.assertEqual(ball["status"], "Valid")
+        self.assertMigratedCleanly(migration, log)
 
     def testEditedBeforeTheFirstRecomputeIsRightOrLoud(self):
         """Edited before anything was recomputed: the migration and the edit in one recompute.
