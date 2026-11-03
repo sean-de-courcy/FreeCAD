@@ -32,9 +32,6 @@ with an unmoved survivor. The right point and the right line's fillet keep the s
 not move: a correct reference holds it); the left point's vertex is gone, so it must break.
 From the record alone this edit looks like twin_crossings' edge form (a shrunk twin group, the
 survivor renumbered into the vanished twin's name): only the edit's own motion tells them apart.
-Fork PR 390 round 2k (decision 241): the right point breaks, loudly (decision 120 (4)). An unmoved
-crossing saved among twins whose count changed may be a lone crossing that took its gone twin's
-role exactly at its place (review390r2d's R2dLoneAt...PlaceFlipped).
 Ported from the class D design's section 1.5 (`corpus/predicted/D.json`: pad_shortened)."""
 
 import math
