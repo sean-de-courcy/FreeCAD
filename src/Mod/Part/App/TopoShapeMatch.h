@@ -79,12 +79,24 @@ constexpr const char* matchOpCode = "MLN";
  */
 PartExport long matchedId(const TopoShape& shape, const char* element);
 
+/** Whether every name of \a shape's map is one section with the IDX flag: an element named by its
+ * index in a map-less input, which says nothing of its identity (a script builder's map, and a
+ * history-less result as files saved before MLN names hold it). False for a shape without a map.
+ */
+PartExport bool indexNamesOnly(const TopoShape& shape);
+
 /** Names every element of \a shape, a result without an element map, by its id: the id of the
  * element of \a previous it matches (matchElements()), or a fresh one from \a counter, which only
  * grows. If \a previous carries no ids (null, unnamed, or named otherwise), every element takes a
  * fresh id, in index order. A name is one section `_;_;<tag>;MLN;<id>;<type>;0;_;_` (no IDX flag:
  * the match was verified), with \a tag the shape's new Tag. \a counter is raised past every id of
  * \a previous too.
+ *
+ * A \a previous whose names are all IDX sections (indexNamesOnly(): a file saved before MLN
+ * names, PLAN decision 247's P-beta) is matched all the same: an element it matches takes a fresh
+ * id and keeps the names of its old element after its MLN name, as aliases, so that references
+ * holding those names find it until they take its MLN name. An element the match leaves (the
+ * class C ruling's retirements included) has no alias.
  */
 PartExport void nameByMatch(
     TopoShape& shape,

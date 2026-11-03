@@ -3589,4 +3589,9 @@ class TestNamingSolver(unittest.TestCase):
             rows = App.getReferenceReport(owner)
             self.assertFalse(owner.isValid(), (owner.Name, owner.AttachmentSupport, rows))
             self.assertIn("broken", [e["status"] for e in rows], rows)
-            self.assertIn("nearer where it was", rows[0].get("evidence") or "", rows)
+            # the plate is a script's shell: with its faces named by MLN ids (ops#502) the traded
+            # pair reads as ambiguous, broken all the same
+            evidence = rows[0].get("evidence") or ""
+            self.assertTrue(
+                "nearer where it was" in evidence or evidence == "ambiguous", rows
+            )

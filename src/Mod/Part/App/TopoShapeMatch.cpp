@@ -1581,6 +1581,24 @@ long matchedId(const TopoShape& shape, const char* element)
     return idOf(shape, Data::IndexedName(element, shape.getElementTypes()));
 }
 
+bool indexNamesOnly(const TopoShape& shape)
+{
+    if (shape.getElementMapSize() == 0) {
+        return false;
+    }
+    for (const auto& mapped : shape.getElementMap()) {
+        const std::string name = mapped.name.toString();
+        if (name.find(Data::MAPPER_FLAG_INDEX) == std::string::npos) {
+            return false;  // a history name, not decoded
+        }
+        const auto& sections = Data::MappedName::getDecodedMappedName(name);
+        if (sections.size() != 1 || !sections.front().hasMapperFlag(Data::MAPPER_FLAG_INDEX)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 void nameByMatch(TopoShape& shape, const TopoShape& previous, long tag, long& counter, bool fixedOrder)
 {
     const std::array<TopAbs_ShapeEnum, 3> types {TopAbs_VERTEX, TopAbs_EDGE, TopAbs_FACE};
@@ -1596,8 +1614,11 @@ void nameByMatch(TopoShape& shape, const TopoShape& previous, long tag, long& co
         }
     }
     counter = std::max(counter, 1L);
+    // A value saved before MLN names (P-beta, PLAN decision 247): matched all the same, for the
+    // aliases its references need
+    const bool aliased = !named && !previous.isNull() && indexNamesOnly(previous);
     ElementMatches matches;
-    if (named) {
+    if (named || aliased) {
         // A match that fails leaves every element a fresh id: loud, never a guess
         try {
             matches = matchElements(previous.getShape(), shape.getShape(), fixedOrder);
@@ -1642,11 +1663,17 @@ void nameByMatch(TopoShape& shape, const TopoShape& previous, long tag, long& co
                 {},
                 noNames
             );
-            shape.setElementName(
-                Data::IndexedName::fromConst(typeName.c_str(), i),
-                Data::MappedName(section),
-                tag
-            );
+            const auto element = Data::IndexedName::fromConst(typeName.c_str(), i);
+            shape.setElementName(element, Data::MappedName(section), tag);
+            if (aliased && match != byType[t]->end()) {
+                // The old element's IDX names, after the MLN name: the name set first is the one
+                // given out, and a reference that finds the element by an alias takes it
+                // (PropertyLinks' takeMatchName())
+                const auto old = Data::IndexedName::fromConst(typeName.c_str(), match->second);
+                for (const auto& alias : previous.getElementMappedNames(old)) {
+                    shape.setElementName(element, alias.first, tag);
+                }
+            }
         }
     }
 }

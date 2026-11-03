@@ -635,6 +635,22 @@ void resolutionFor(const SolverEntry& entry,
     }
 }
 
+// Whether \a name is made only of sections with the IDX flag (FreeCAD-CH, ops#502, PLAN decision
+// 247's P-beta 2): an element named by its index in a map-less input, which says nothing of its
+// identity. A file saved before MLN names holds such names for the elements of a history-less
+// result and its descendants, which MLN names now.
+bool indexMadeOnly(const std::string& name)
+{
+    if (name.find(Data::MAPPER_FLAG_INDEX) == std::string::npos) {
+        return false;
+    }
+    const auto& sections = Data::MappedName::getDecodedMappedName(name);
+    return !sections.empty()
+        && std::all_of(sections.begin(), sections.end(), [](const auto& section) {
+               return section.hasMapperFlag(Data::MAPPER_FLAG_INDEX);
+           });
+}
+
 // An exact reference that breaks (Task 2 PR 7): its missing form, as _updateElementReference()
 // leaves a reference whose element is gone. The shadow keeps the name it held.
 void brokenFor(const SolverEntry& entry, SolverResolution& resolution)
@@ -1950,6 +1966,20 @@ bool solveElementReferences(DocumentObject* feature,
                 }
                 ReferenceReport::Entry item;
                 const std::string& oldName = entry->exactName;
+                if (!pick.empty() && entry->guess.empty() && indexMadeOnly(oldName)) {
+                    // P-beta 2 (decision 247): a name made only of IDX sections is no name, so it
+                    // can't have moved: kept by its place, with no record or warning
+                    SolverResolution resolution;
+                    resolutionFor(*entry, pick, nameAt(pick), resolution);
+                    resolutions[entry->prop].push_back(resolution);
+                    FC_LOG(
+                        referenceName(entry->prop)
+                        << "[" << entry->index << "]: " << oldName << " -> " << pick
+                        << " (migration: an index-made name, kept by its place)"
+                    );
+                    countReferenceMigration(entry->owner, MigrationOutcome::Kept);
+                    continue;
+                }
                 if (!pick.empty()) {
                     SolverResolution resolution;
                     resolutionFor(*entry, pick, nameAt(pick), resolution);
@@ -2093,6 +2123,28 @@ bool solveElementReferences(DocumentObject* feature,
                 const bool refused = !refusal.empty();
                 if (refused) {
                     pick.clear();
+                }
+                if ((!pick.empty() || carried) && entry->guess.empty()
+                    && indexMadeOnly(entry->oldName)) {
+                    // P-beta 2 (decision 247): a name made only of IDX sections is no name, so
+                    // the reference isn't missing it: kept by its place, or at its index when its
+                    // fingerprint agrees there, with no record or warning
+                    SolverResolution resolution;
+                    if (!pick.empty()) {
+                        resolutionFor(*entry, pick, nameAt(pick), resolution);
+                    }
+                    else {
+                        resolutionFor(*entry, index, mapForm(name), resolution);
+                    }
+                    resolutions[entry->prop].push_back(resolution);
+                    FC_LOG(
+                        referenceName(entry->prop)
+                        << "[" << entry->index << "]: " << entry->oldName << " -> "
+                        << (pick.empty() ? index : pick)
+                        << " (migration: an index-made name, kept by its place)"
+                    );
+                    countReferenceMigration(entry->owner, MigrationOutcome::Kept);
+                    continue;
                 }
                 if (!pick.empty()) {
                     countReferenceMigration(entry->owner, MigrationOutcome::Moved);
