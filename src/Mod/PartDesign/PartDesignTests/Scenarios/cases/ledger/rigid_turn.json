@@ -66,6 +66,15 @@
 "RigidBoxTurnedAndHoleWidened|end_x0|V2s": {"axes": [], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "designer rigid turns", "issue": "ops#557", "tier": "F"},
 "RigidBoxTurnedAndHoleWidened|hole1_rim|V2s": {"axes": [], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "designer rigid turns", "issue": "ops#557", "tier": "F"},
 "RigidBoxTurnedAndHoleWidened|hole1_wall|V2s": {"axes": [], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "designer rigid turns", "issue": "ops#557", "tier": "F"},
-"RigidBoxTurnedAndHoleWidened|top|V2s": {"axes": [], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "designer rigid turns", "issue": "ops#557", "tier": "F"}
+"RigidBoxTurnedAndHoleWidened|top|V2s": {"axes": [], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "designer rigid turns", "issue": "ops#557", "tier": "F"},
+"Rv2dPrimOffCentreBaseTurned|prim_corner|V2s": {"axes": ["E5"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr557o-r2d", "issue": "ops#557", "tier": "F"},
+"Rv2dPrimOffCentreBaseTurned|prim_edge_y3|V2s": {"axes": ["E5"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr557o-r2d", "issue": "ops#557", "tier": "F"},
+"Rv2dPrimOffCentreBaseTurned|prim_xm|V2s": {"axes": ["E5"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr557o-r2d", "issue": "ops#557", "tier": "F"},
+"Rv2dPrimTargetBaseTurnedOffset|prim_corner|V2s": {"axes": ["E5"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr557o-r2d", "issue": "ops#557", "tier": "F"},
+"Rv2dPrimTargetBaseTurnedOffset|prim_edge_y3|V2s": {"axes": ["E5"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr557o-r2d", "issue": "ops#557", "tier": "F"},
+"Rv2dPrimTargetBaseTurnedOffset|prim_xm|V2s": {"axes": ["E5"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr557o-r2d", "issue": "ops#557", "tier": "F"},
+"Rv2dPrimTargetBaseTurned|prim_corner|V2s": {"axes": ["E5"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr557o-r2d", "issue": "ops#557", "tier": "F"},
+"Rv2dPrimTargetBaseTurned|prim_edge_y3|V2s": {"axes": ["E5"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr557o-r2d", "issue": "ops#557", "tier": "F"},
+"Rv2dPrimTargetBaseTurned|prim_xm|V2s": {"axes": ["E5"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr557o-r2d", "issue": "ops#557", "tier": "F"}
 }
 }
