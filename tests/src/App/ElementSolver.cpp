@@ -5640,6 +5640,37 @@ TEST(Moved, crossingsMovedTogetherKeepTheirNames)
               "exact Vertex1 0 [] ");
 }
 
+TEST(Moved, unmovedLoneCrossingHitBreaks)
+{
+    // PR 390 round 2k (decision 241): the pad's front line drawn the other way and the circle
+    // moved along the edge by the crossings' spacing, in one edit: the right crossing leaves the
+    // edge, and the left one, alone, lands exactly where the right one was with the role `out`
+    // its gone twin had. The exact hit holds the old place: without the stop the name stood,
+    // silently, on the wrong crossing.
+    auto outcome =
+        Data::solveOwner(crossingsNow({{crossing("out"), Base::Vector3d(10.866, 0, 5)}}, 2))[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken);
+    EXPECT_EQ(outcome.candidates, (std::vector<std::string> {"Vertex1"}));
+    EXPECT_NE(outcome.evidence.find("2 saved, 1 now"), std::string::npos) << outcome.evidence;
+}
+
+TEST(Moved, unmovedCrossingsKeepTheirNames)
+{
+    // Both crossings where they were, their count kept: the name stands.
+    EXPECT_EQ(describe(Data::solveOwner(crossingsNow(
+                  {{crossing("out"), Base::Vector3d(10.866, 0, 5)},
+                   {crossing("in"), Base::Vector3d(9.134, 0, 5)}},
+                  2
+              ))[0]),
+              "exact Vertex1 0 [] ");
+    // Saved alone, where it was: a flip gives it the other role, so no other crossing holds its
+    // name there.
+    EXPECT_EQ(describe(Data::solveOwner(
+                  crossingsNow({{crossing("out"), Base::Vector3d(10.866, 0, 5)}}, 1)
+              )[0]),
+              "exact Vertex1 0 [] ");
+}
+
 TEST(SolveOwner, goneClosedEdgeTwinBreaks)
 {
     // The rim's twins counted three after an edit: `0of2` is gone. The +y arc, unchanged at the

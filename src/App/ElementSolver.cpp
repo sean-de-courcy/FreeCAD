@@ -3708,8 +3708,20 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
                                    input.continuationDistance);
             };
             const ElementFingerprint& now = fingerprintOfIndex(hit);
-            if (hitPosition < 0 || !now.isValid() || here(now)) {
-                continue;  // unmoved, or nothing to compare
+            if (hitPosition < 0 || !now.isValid()) {
+                continue;  // nothing to compare
+            }
+            // Unmoved, the name stands, unless it is a crossing told apart by its role and saved
+            // among two twins or more (PR 390 round 2k, decision 241: the literal stop, the fourth
+            // silent find in round 2d's path). An edit that draws the edge the other way and moves
+            // the circle can set the lone crossing left exactly where its gone twin was, with the
+            // twin's role: the count stop below decides, as for a moved hit.
+            const std::string& hitName = entry.exactName.empty()
+                ? firstName(pool.elements[hitPosition])
+                : entry.exactName;
+            const bool unmoved = here(now);
+            if (unmoved && !(saved.twinCount >= 2 && endsInRole(hitName))) {
+                continue;  // unmoved
             }
             // The elements there: a cheap hint first rules most out, so that only the rest are
             // fingerprinted.
@@ -3721,9 +3733,6 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
                     place.push_back(static_cast<int>(k));
                 }
             }
-            const std::string& hitName = entry.exactName.empty()
-                ? firstName(pool.elements[hitPosition])
-                : entry.exactName;
             // A twin on a closed edge (decision 206) that moved breaks, whatever sits at its old
             // place: its place among its twins counts from the edge's seam, and an edit that turns
             // the seam past them gives its name to another twin, which may sit anywhere, the old
@@ -4125,6 +4134,9 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
             }
             const bool countChanged = twinsNow == 1
                 || (twinsNow > 1 && saved.twinCount > 0 && twinsNow != saved.twinCount);
+            if (unmoved && !countChanged) {
+                continue;  // unmoved, its twins as many as were saved
+            }
             if (place.empty() && !departed && !closedTwin && !countChanged) {
                 continue;  // moved alone
             }
@@ -4216,9 +4228,11 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
                                      : "; " + there + sit + " where it was");
             }
             else if (countChanged) {
-                outcome.evidence = movedBy() + "; a twin, " + std::to_string(saved.twinCount)
-                    + " saved, " + std::to_string(twinsNow)
-                    + " now: its name may be a twin's, and nothing sits where it was";
+                outcome.evidence = (unmoved ? std::string("where it was") : movedBy())
+                    + "; a twin, " + std::to_string(saved.twinCount) + " saved, "
+                    + std::to_string(twinsNow)
+                    + " now: its name may be a twin's"
+                    + (unmoved ? "" : ", and nothing sits where it was");
             }
             else if (departed) {
                 outcome.evidence = movedBy()

@@ -10,7 +10,9 @@ at (bx, 0.5) from another sketch and Pocket or from A's sketch; datum points on 
 Model S (the seam tests'): a pad 20 x 10 x 5, a through pocket of a circle of radius 1 at
 (10, 0.5), its sketch turned by `turn`, the centre moved onto the edge, so the crossing on the
 seam's side becomes the seam vertex; points on both crossings, a Fillet on one front vertical
-line. Each expectation is the element at its place on the edited model, else BROKEN."""
+line. Each expectation is the element at its place on the edited model, else BROKEN. Round 2k (decision 241): an unmoved crossing saved among two
+twins or more whose count changed breaks, as a moved one does, so the R2dLoneAt...PlaceFlipped
+cases' crossing that lands exactly where its gone twin was, with its role, breaks."""
 
 import math
 
