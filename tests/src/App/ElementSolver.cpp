@@ -11162,6 +11162,29 @@ TEST(SolveOwner, matchMadeSourcesAreKnown)
     EXPECT_EQ(why, "its source 22;MLN6 was in the model before");
 }
 
+TEST(SolveOwner, indexAndMatchNamesOfOneObjectAreShared)
+{
+    // Review r3f N1, BetaScriptSetAgainDownstream|cut_a_top: a beta file's Cut face derived from
+    // the script compound's IDX names; the script sets the compound again, its elements named by
+    // match, and the Cut's face now derives from their MLN ids. The object's index and its id are
+    // named apart: no source lost, no source "was there", D1's lines (as round 3, as the beta).
+    auto face = [](const std::string& a, const std::string& b) {
+        return section({}, {a, b}, 30, "CUT", 0, 'F', {"LOW"});
+    };
+    const auto oldFace = face(indexed("Edge12", 20, "MKR", 'E'), indexed("Edge6", 20, "MKR", 'E'));
+    const auto newFace = face(section({}, {}, 20, "MLN", 22, 'E', {}),
+                              section({}, {}, 20, "MLN", 28, 'E', {}));
+    EXPECT_FALSE(Data::lostOldSources({newFace}, oldFace));
+    ElementFingerprint record = LongBoard::edgeAt(0);
+    record.marks = {{20, -1}, {30, -1}};
+    EXPECT_EQ(Data::placeVerdict(record, LongBoard::edgeAt(0), {newFace}, oldFace, true, {}),
+              Data::PlaceVerdict::Unjudged);
+    //   another object's MLN ids are still another source
+    const auto otherFace = face(section({}, {}, 21, "MLN", 22, 'E', {}),
+                                section({}, {}, 21, "MLN", 28, 'E', {}));
+    EXPECT_TRUE(Data::lostOldSources({otherFace}, oldFace));
+}
+
 TEST(SolveOwner, indexMadeOldNameNegativeTagKeepsMark)
 {
     // Review prd2eson-r5 F1: a Body's second box names its elements with its tag negated
