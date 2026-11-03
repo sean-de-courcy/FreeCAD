@@ -6181,7 +6181,9 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
         // is nearest the saved offset; else the entry breaks (a pick with no group too, round
         // 2e). An old element's twin is twinBreaks()'s. The callers run the twin clause's source
         // checks first.
-        auto orderBreaks = [&](int position) -> std::string {
+        // \a noTwin, if given, is set where the break is round 2e's stop below, which
+        // `integration` lacks.
+        auto orderBreaks = [&](int position, bool* noTwin = nullptr) -> std::string {
             if (!saved || saved->twinCount < 2 || !saved->center || !saved->twinCentroid
                 || twinPick(position) != TwinPick::NotTwin) {
                 return {};
@@ -6205,6 +6207,9 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
                 // own, a nearest pick by geometry alone while the twins' count changed (a far
                 // edge's crossings, one left on the piece, the other's name taken by a corner
                 // 0.28 away). It breaks.
+                if (noTwin) {
+                    *noTwin = true;
+                }
                 return pool.elements[position].index + " is no twin of the old element ("
                     + std::to_string(saved->twinCount) + " twins saved)";
             }
@@ -6243,6 +6248,55 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
         auto atPlaceText = [&](int position) {
             return otherOrigin(pool.elements[position], oldName) ? std::string(", another source")
                                                                  : std::string();
+        };
+        // What an index-only reference's pick at the place lacks, or nullptr: it has no origin to
+        // share, so it breaks there, as at tier 3's gap
+        auto indexOnlyLacks = [&](int position) -> const char* {
+            const char* lacks = otherOrigin(pool.elements[position], oldName);
+            const auto oldCopies = copyContexts(oldName);
+            const auto& names = pool.elements[position].names;
+            if (!lacks && !oldName.empty() && !names.empty()
+                && std::none_of(names.begin(), names.end(), [&](const auto& n) {
+                       return copyContexts(n) == oldCopies;
+                   })) {
+                lacks = "copy";
+            }
+            return lacks;
+        };
+        // Whether `integration`'s rule took the pick at \a position that this PR's twin checks
+        // break (reviews pr390-r2i, Opus T2 and Sonnet T1): only such a pick contests its element
+        // in the matching (review pr390-r2h). A pick `integration` broke as well had no entry
+        // there, and a contender it never had forced another entry with candidates {X, Y} onto Y
+        // silently (SolveOwner.twinSurvivorBreakDoesNotContestItsPick). Its tests as `integration`
+        // runs them: the origin and T1''s source test under a twin survivor only, D2's redraw
+        // exempt from the latter, the index-only ones at the place, the order's trade (not round
+        // 2e's stop) and the twin-pick rule's; at G2's wide reach (\a reach), the origin outside
+        // GuessAnySource and D2's verdict at the place. \a redrawn: D2's verdict; \a gap: tier 3
+        // found no nearest.
+        auto takenOnIntegration = [&](int position, bool reach, bool redrawn, bool gap) {
+            const bool survivor = state.twinSurvivor >= 0;
+            if ((reach ? !input.guessAnySource || survivor : survivor)
+                && otherOrigin(pool.elements[position], oldName)) {
+                return false;
+            }
+            if ((reach ? survivor : !redrawn && (survivor || gap)) && lostOldSource(position)) {
+                return false;
+            }
+            if (!reach && gap && input.sameSource && indexOnlyLacks(position)) {
+                return false;
+            }
+            bool noTwin = false;
+            if (!orderBreaks(position, &noTwin).empty() && !noTwin) {
+                return false;
+            }
+            if (twinPick(position) == TwinPick::Trade) {
+                return false;
+            }
+            std::string why;
+            const PlaceVerdict verdict = verdictAt(position, why);
+            return !reach
+                || (verdict != PlaceVerdict::OtherSide && verdict != PlaceVerdict::WasThere
+                    && verdict != PlaceVerdict::SourceGone);
         };
         // The guess rules (N2 section 5): never against a failed target (N10), never without a
         // saved fingerprint (N8).
@@ -6544,24 +6598,14 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
                         lacks = "source element";
                     }
                     if (!lacks && nearest.index < 0 && input.sameSource) {
-                        // An index-only reference (no old name) has no origin to share: it breaks
-                        // here, as at tier 3's gap
-                        lacks = otherOrigin(pool.elements[pick], oldName);
-                        const auto oldCopies = copyContexts(oldName);
-                        const auto& names = pool.elements[pick].names;
-                        if (!lacks && !oldName.empty() && !names.empty()
-                            && std::none_of(names.begin(), names.end(), [&](const auto& n) {
-                                return copyContexts(n) == oldCopies;
-                            })) {
-                            lacks = "copy";
-                        }
+                        lacks = indexOnlyLacks(pick);
                     }
                     const std::string why = lacks
                         ? pool.elements[pick].index + " has another " + lacks
                         : orderBreaks(pick);
                     if (!why.empty()) {
                         state.decided = true;
-                        if (twinClause) {
+                        if (takenOnIntegration(pick, false, redrawn, nearest.index < 0)) {
                             state.contested = pick;
                         }
                         state.outcome.evidence = (nearest.index >= 0
@@ -6628,7 +6672,7 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
                         if (lacks) {
                             otherSource = "; the wide reach's " + picked.index + " has another "
                                 + lacks;
-                            if (twinClause) {
+                            if (takenOnIntegration(agree[wide.index], true, false, false)) {
                                 state.contested = agree[wide.index];
                             }
                             wide = Nearest();
@@ -6638,7 +6682,9 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
                         const std::string order = orderBreaks(agree[wide.index]);
                         if (!order.empty()) {
                             otherSource = "; the wide reach's " + order;
-                            state.contested = agree[wide.index];
+                            if (takenOnIntegration(agree[wide.index], true, false, false)) {
+                                state.contested = agree[wide.index];
+                            }
                             wide = Nearest();
                         }
                     }

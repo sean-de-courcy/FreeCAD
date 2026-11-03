@@ -10258,6 +10258,67 @@ TEST(SolveOwner, twinSurvivorGoesToGeometry)
         << outcome.evidence;
 }
 
+TEST(SolveOwner, twinClauseBreakContestsItsPick)
+{
+    // Review pr390-r2h's fix at the solver: the pick round 2e's literal stop breaks above (the
+    // seam vertex, no twin of the old element) was `integration`'s, so it still contests its
+    // element (reviews pr390-r2i: under a twin survivor too). Another reference of the owner whose
+    // one name match is the seam vertex stays ambiguous, as on `integration`, where both wanted
+    // it; without the contest it held it unopposed, silently.
+    CrossedEdge c;
+    auto input = c.input(c.hole1);
+    input.pool["Edge"].push_back(element("Edge3", {c.edge1}));
+    input.pool["Vertex"].push_back(element("Vertex11", {c.right}));
+    input.entries[0].fingerprint = CrossedEdge::saved(2);
+    input.entries.push_back(missing(generated({c.x0, c.seam}, 11, "CUT", 'V'), "Vertex", {c.seamNow}));
+    measure(input, {{"Vertex10", CrossedEdge::at(11)}, {"Vertex11", CrossedEdge::at(9)}}, nullptr);
+    auto outcomes = Data::solveOwner(input);
+    ASSERT_EQ(outcomes.size(), 2U);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken) << outcomes[0].evidence;
+    EXPECT_NE(outcomes[0].evidence.find("the pick Vertex10 is no twin of the old element"),
+              std::string::npos)
+        << outcomes[0].evidence;
+    EXPECT_EQ(outcomes[1].status, SolveStatus::Broken) << describe(outcomes[1]);
+    EXPECT_EQ(outcomes[1].evidence, "ambiguous");
+}
+
+TEST(SolveOwner, twinSurvivorBreakDoesNotContestItsPick)
+{
+    // Reviews pr390-r2i (Opus T2, Sonnet T1): a pick `integration` broke as well contests nothing.
+    // Tier 1's one survivor is the old element's twin (Vertex11), and tier 3's nearest is a
+    // vertex of a later feature (Vertex15), of another source: the entry breaks, on `integration`
+    // too, which left that pick out of the matching. Another reference of the owner whose name
+    // matches are Vertex15 and Vertex16, with no fingerprint to tell them apart, is ambiguous
+    // there. A contender `integration` never had took Vertex15 from it, and it held Vertex16
+    // silently.
+    CrossedEdge c;
+    auto input = c.input(c.hole1);
+    input.pool["Edge"].push_back(element("Edge3", {c.edge1}));
+    input.pool["Vertex"].push_back(element("Vertex11", {c.right}));
+    const auto later = HoledBend::other();
+    const auto beside = generated({sketchVertex({"g2v1", "g9v1"}, 8)}, 13, "XTR", 'V');
+    input.pool["Vertex"].push_back(later);
+    input.pool["Vertex"].push_back(element("Vertex16", {beside}));
+    input.entries[0].fingerprint = CrossedEdge::saved(0);
+    input.entries.push_back(missing(generated({sketchVertex({"g1v1", "g2v1"}, 8)}, 13, "XTR", 'V'),
+                                    "Vertex",
+                                    {later.names.front(), beside}));
+    measure(input,
+            {{"Vertex10", CrossedEdge::at(14)},
+             {"Vertex11", CrossedEdge::at(9)},
+             {"Vertex15", CrossedEdge::at(11)},
+             {"Vertex16", CrossedEdge::at(30)}},
+            nullptr);
+    auto outcomes = Data::solveOwner(input);
+    ASSERT_EQ(outcomes.size(), 2U);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken) << outcomes[0].evidence;
+    EXPECT_NE(outcomes[0].evidence.find("the pick Vertex15 has another source"), std::string::npos)
+        << outcomes[0].evidence;
+    EXPECT_EQ(outcomes[1].status, SolveStatus::Broken) << describe(outcomes[1]);
+    EXPECT_EQ(outcomes[1].evidence, "ambiguous");
+    EXPECT_EQ(outcomes[1].candidates, (std::vector<std::string> {"Vertex15", "Vertex16"}));
+}
+
 TEST(SolveOwner, twinSurvivorThenASiblingCirclesCrossingBreaks)
 {
     // PR 379 round 2's cloud review (F1): another circle of the hole's sketch (g2 of sketch 7),
