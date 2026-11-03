@@ -184,15 +184,13 @@ public:
             // F6: the Body copies its Tip, which passed through
             return App::AfterInputFailure::Run;
         }
-        if (!bodyOf(dependant)) {
-            // F5: outside every Body, as upstream
-            return App::AfterInputFailure::Skip;
-        }
-        if (dependant->isDerivedFrom<Feature>()) {
+        if (bodyOf(dependant) && dependant->isDerivedFrom<Feature>()) {
             // F3 runs in Feature::recompute, and afterFailure() passes through
             return App::AfterInputFailure::Run;
         }
-        // F4: a sketch, datum, binder... in a Body
+        // F4: a sketch, datum, binder... in a Body; and outside every Body, as F4 (ops#579; F5
+        // left it out of the recompute, Valid on the old output): an element of the failed
+        // feature is judged on its pass-through, any other link fails it
         return inputInError(dependant, why) ? App::AfterInputFailure::Fail
                                             : App::AfterInputFailure::Run;
     }

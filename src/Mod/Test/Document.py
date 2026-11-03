@@ -778,14 +778,14 @@ class DocumentBasicCases(unittest.TestCase):
         c2.touch()
         self.Doc.recompute()
         # ops#349: the recompute reports the cycle as a link's error; the other link depends on
-        # it, so it is left touched (not recomputed), as after any failed dependency
-        failed = [link for link in (c1, c2) if "Invalid" in link.State]
-        self.assertTrue(failed, (c1.State, c2.State))
+        # it, so it fails without running, naming that link (ops#579), and stays touched
+        cyclic = [link for link in (c1, c2) if "Cyclic link" in link.getStatusString()]
+        self.assertTrue(cyclic, (c1.getStatusString(), c2.getStatusString()))
         for link in (c1, c2):
-            if link in failed:
-                self.assertFalse(link.isValid(), link.Name)
-                self.assertIn("Cyclic link", link.getStatusString(), link.Name)
-            else:
+            self.assertFalse(link.isValid(), link.Name)
+            if link not in cyclic:
+                other = c2 if link is c1 else c1
+                self.assertIn(f"links to '{other.Label}'", link.getStatusString(), link.Name)
                 self.assertIn("Touched", link.State, link.Name)
         # the open document still refuses a new cycle
         c3 = self.Doc.addObject("App::Link", "C3")

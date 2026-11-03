@@ -799,6 +799,41 @@ void enforcePathReadersPastHeld(const DocumentObject* obj, const RecomputeContin
         FC_ERR("Path readers of " << obj->getFullName() << " not found");
     }
 }
+
+// FreeCAD-CH (ops#579): @p dependant links to @p input, which is in error and which no rule
+// claims: the text it fails with, naming the property that links it (ops#126's F4 text), else
+// the expression's. False when only a hidden link or a container's Group holds it: a container
+// computes nothing from its members, so it isn't a dependant
+bool failedInputText(const DocumentObject* dependant, const DocumentObject* input, std::string& why)
+{
+    auto group = dependant->getExtensionByType<GroupExtension>(true);
+    std::vector<Property*> props;
+    dependant->getPropertyList(props);
+    bool byExpression = false;
+    std::vector<DocumentObject*> links;
+    for (auto prop : props) {
+        auto link = freecad_cast<PropertyLinkBase*>(prop);
+        if (!link || link->getScope() == LinkScope::Hidden || (group && prop == &group->Group)) {
+            continue;
+        }
+        links.clear();
+        link->getLinks(links);
+        if (std::ranges::find(links, input) == links.end()) {
+            continue;
+        }
+        if (prop == &dependant->ExpressionEngine) {
+            byExpression = true;
+            continue;
+        }
+        why = std::string(prop->getName()) + " links to '" + input->Label.getValue()
+            + "', which has an error";
+        return true;
+    }
+    if (byExpression) {
+        why = std::string("'") + input->Label.getValue() + "' has an error";
+    }
+    return byExpression;
+}
 }  // namespace
 
 namespace App
@@ -4094,6 +4129,28 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
 
     tracker.checkpoint("pre-recompute & topo sort");
 
+    // FreeCAD-CH (ops#579): 'failed' failed and no rule claims it. Its dependants are touched; one
+    // this recompute won't come to (in another document, or outside a partial recompute) fails
+    // now, unless the rule holds it, in its own document's log, which its tree icon and status
+    // read
+    auto failDependantsOutside = [&continuation](DocumentObject* failed) {
+        for (auto inObj : failed->getInList()) {
+            if (!inObj || !inObj->isAttachedToDocument()) {
+                continue;
+            }
+            std::string why;
+            if (!inObj->testStatus(ObjectStatus::PendingRecompute)
+                && !(continuation && continuation->holds(inObj))
+                && failedInputText(inObj, failed, why)) {
+                auto doc = inObj->getDocument();
+                doc->clearWarning(inObj);
+                ReferenceReport::forgetPrintedWarning(inObj);
+                doc->d->addRecomputeLog(why, inObj);
+            }
+            inObj->enforceRecompute();
+        }
+    };
+
     try {
         std::set<DocumentObject*> filter;
         // Objects the continuation rule holds (ops#127): not run, left touched
@@ -4123,46 +4180,48 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
                 }
                 // ask the object if it should be recomputed
                 bool doRecompute = false;
+                // In error before it runs (ops#579): its dependants failed naming it
+                bool wasError = false;
                 if (obj->mustRecompute()) {
                     doRecompute = true;
+                    wasError = obj->isError();
                     int res = 0;
-                    if (continuation) {
-                        // An input that the rule's failure left in error, in this recompute or
-                        // before: run this object, fail it or skip it (ops#126)
-                        auto verdict = AfterInputFailure::Run;
-                        std::string why;
-                        for (auto in : obj->getOutList()) {
-                            if (!in->isError() || !continuation->continuesAfter(in)) {
-                                continue;
-                            }
-                            verdict = continuation->decide(in, obj, why);
-                            if (verdict != AfterInputFailure::Run) {
-                                break;
-                            }
-                        }
-                        if (verdict == AfterInputFailure::Skip) {
-                            obj->getInListEx(filter, true);
-                            filter.insert(obj);
+                    // An input in error, from this recompute or before: the rule decides for an
+                    // input it claims (ops#126); any other fails this object without running it,
+                    // naming that input (ops#579)
+                    auto verdict = AfterInputFailure::Run;
+                    std::string why;
+                    for (auto in : obj->getOutList()) {
+                        if (!in->isError()) {
                             continue;
                         }
-                        if (verdict == AfterInputFailure::Fail) {
-                            // It doesn't run: its warning from the last recompute goes (ops#127,
-                            // N1 4.9), and prints again if it comes back (ops#391)
-                            clearWarning(obj);
-                            ReferenceReport::forgetPrintedWarning(obj);
-                            d->addRecomputeLog(why, obj);
-                            res = 1;
+                        if (continuation && continuation->continuesAfter(in)) {
+                            verdict = continuation->decide(in, obj, why);
                         }
-                        else if (continuation->blocked(obj, why)) {
-                            // A reference set aside by a reorder (ops#127): it doesn't run
-                            // either, so its warning goes too
-                            clearWarning(obj);
-                            ReferenceReport::forgetPrintedWarning(obj);
-                            d->addRecomputeLog(why, obj);
-                            res = 1;
+                        else if (failedInputText(obj, in, why)) {
+                            verdict = AfterInputFailure::Fail;
+                        }
+                        if (verdict != AfterInputFailure::Run) {
+                            break;
                         }
                     }
-                    // Counted when it runs or fails, not when it is skipped
+                    if (verdict == AfterInputFailure::Fail) {
+                        // It doesn't run: its warning from the last recompute goes (ops#127,
+                        // N1 4.9), and prints again if it comes back (ops#391)
+                        clearWarning(obj);
+                        ReferenceReport::forgetPrintedWarning(obj);
+                        d->addRecomputeLog(why, obj);
+                        res = 1;
+                    }
+                    else if (continuation && continuation->blocked(obj, why)) {
+                        // A reference set aside by a reorder (ops#127): it doesn't run either, so
+                        // its warning goes too
+                        clearWarning(obj);
+                        ReferenceReport::forgetPrintedWarning(obj);
+                        d->addRecomputeLog(why, obj);
+                        res = 1;
+                    }
+                    // Counted when it runs or fails
                     ++objectCount;
                     if (res == 0) {
                         res = _recomputeFeature(obj);
@@ -4188,10 +4247,16 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
                             enforcePathReadersPastHeld(obj, *continuation);
                             continue;
                         }
-                        // if something happened filter all object in its
-                        // inListRecursive from the queue then proceed
-                        obj->getInListEx(filter, true);
+                        // FreeCAD-CH (ops#579): its dependants don't leave the queue, as upstream
+                        // had them, Valid on its old output: they come up touched and fail above,
+                        // naming it. One outside this recompute (in another document) fails now,
+                        // in its own document's log, and its document's next recompute judges it
+                        // again. It stays out of the "still touched" check below
                         filter.insert(obj);
+                        failDependantsOutside(obj);
+                        if (continuation) {
+                            enforcePathReadersPastHeld(obj, *continuation);
+                        }
                         continue;
                     }
                 }
@@ -4224,6 +4289,14 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
                         // set all dependent objects touched to force recompute
                         for (auto inObjIt : obj->getInList()) {
                             inObjIt->enforceRecompute();
+                        }
+                    }
+                    if (wasError) {
+                        // FreeCAD-CH (ops#579): it computes again, so every dependant that
+                        // failed naming it runs, also one reading a property that didn't change
+                        // (the fine-grained enforce above skips those)
+                        for (auto inObj : obj->getInList()) {
+                            inObj->enforceRecompute();
                         }
                     }
                     if (continuation) {
