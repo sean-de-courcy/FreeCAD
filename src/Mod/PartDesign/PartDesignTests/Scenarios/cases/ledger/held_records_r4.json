@@ -1,10 +1,10 @@
 {
 "entries": {
-"ExtrusionFailRedrawnSetter|plane|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr564opus-r4", "issue": "ops#564", "tier": "F"},
-"ExtrusionFailSiblingSlidSetter|plane|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr564opus-r4", "issue": "ops#564", "tier": "F"},
+"ExtrusionFailRedrawnSetter|plane|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr564opus-r4", "issue": "ops#564", "tier": "F"},
+"ExtrusionFailSiblingSlidSetter|plane|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "BROKEN", "expected": "wrong", "found_by": "review pr564opus-r4", "issue": "ops#564", "tier": "F"},
 "ExtrusionSiblingSlidControl|plane|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr564opus-r4", "issue": "ops#564", "tier": "F"},
-"ShapedFailDrawnThenRedrawSlide|external|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr564opus-r4", "issue": "ops#564", "tier": "F"},
-"ShapedFailRedrawnInPlace|external|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "quiet", "found_by": "review pr564opus-r4", "issue": "ops#564", "tier": "F"},
+"ShapedFailDrawnThenRedrawSlide|external|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "BROKEN", "expected": "wrong", "found_by": "review pr564opus-r4", "issue": "ops#564", "tier": "F"},
+"ShapedFailRedrawnInPlace|external|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr564opus-r4", "issue": "ops#564", "tier": "F"},
 "SwitchBarBackRedrawn|chamfer|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "quiet", "found_by": "review pr564opus-r4", "issue": "ops#564", "tier": "F"},
 "SwitchBarBackSlid|chamfer|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "BROKEN", "expected": "wrong", "found_by": "review pr564opus-r4", "issue": "ops#564", "tier": "F"},
 "SwitchBarBack|chamfer|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr564opus-r4", "issue": "ops#564", "tier": "F"},
