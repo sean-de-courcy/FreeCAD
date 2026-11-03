@@ -11067,6 +11067,101 @@ TEST(SolveOwner, indexMadeOldNameIsJudgedByItsObject)
               Data::PlaceVerdict::Unjudged);
 }
 
+TEST(SolveOwner, matchMadeOldNameIsJudgedByItsObject)
+{
+    // Decision 248 T2: C2 names the boxes' elements by their producers' MLN ids
+    // (`_;_;<Box1>;MLN;18;E;0;_;_`, ops#502), which carry no reference ID. Judged by the object as
+    // an index-made name is: box 1 deleted and box 2 moved onto its place, box 2's edge was there
+    // (BoxMovedIntoAVacatedPlaceThick, K8FusePinRemovedNeighbourMoved).
+    auto mln = [](int tag, int id) {
+        return section({}, {}, tag, "MLN", id, 'E', {});
+    };
+    const auto oldEdge = mln(10, 18);
+    ElementFingerprint record = LongBoard::edgeAt(0);
+    record.marks = {{10, -1}, {11, -1}, {12, -1}};
+    const auto now = LongBoard::edgeAt(0);
+    std::string why;
+    EXPECT_EQ(Data::placeVerdict(record, now, {mln(11, 18)}, oldEdge, false, {}, &why),
+              Data::PlaceVerdict::WasThere);
+    EXPECT_EQ(why, "its source 11 was in the model before");
+    //   another producer's index-made element the same
+    EXPECT_EQ(Data::placeVerdict(record, now, {indexed("Edge10", 11, "MKR")}, oldEdge, false, {}),
+              Data::PlaceVerdict::WasThere);
+    //   a piece of the old element's producer's (a cut box face): shared, D1's lines
+    EXPECT_EQ(Data::placeVerdict(record, now, {piece(mln(10, 7), 12, "CUT", 1, 'E')}, oldEdge,
+                                 false, {}),
+              Data::PlaceVerdict::Unjudged);
+    //   an object the record has no mark of (made since): D1's lines
+    EXPECT_EQ(Data::placeVerdict(record, now, {mln(13, 18)}, oldEdge, false, {}),
+              Data::PlaceVerdict::Unjudged);
+    //   a record without the old name's object, a piece of it too (K8OffsetHoleRemovedNeighbourMoved)
+    ElementFingerprint refreshed = LongBoard::edgeAt(0);
+    refreshed.marks = {{11, -1}, {12, -1}};
+    EXPECT_EQ(Data::placeVerdict(refreshed, now, {mln(11, 6)}, oldEdge, false, {}, &why),
+              Data::PlaceVerdict::SourceGone);
+    EXPECT_EQ(why, "its old source 10 had left the model");
+    EXPECT_EQ(Data::placeVerdict(refreshed,
+                                 now,
+                                 {mln(11, 6)},
+                                 piece(oldEdge, 12, "CUT", 1, 'E'),
+                                 false,
+                                 {}),
+              Data::PlaceVerdict::SourceGone);
+    //   the other way: an MLN pick under an old name with a lineage is unjudged by the marks,
+    //   as an index-made pick is (its id is no geometry)
+    const auto mapped = section({"Edge10"}, {}, 10, "XTR", 0, 'E', {"SRC"});
+    EXPECT_EQ(Data::placeVerdict(record, now, {mln(11, 18)}, mapped, true, {}),
+              Data::PlaceVerdict::Unjudged);
+}
+
+TEST(SolveOwner, aliasNeverHandedOut)
+{
+    // Review r3 T-C: an element of a beta file's script result named by match holds its MLN name
+    // and, until its producer's next naming, the beta's IDX names as aliases (decision 247). The
+    // pool sorts the alias first; a pick writes the MLN name, which the next naming keeps.
+    const auto alias = indexed("Face12", 4, "MKR");
+    const auto mln = section({}, {}, 4, "MLN", 18, 'F', {});
+    const auto other = indexed("Face3", 4, "MKR");
+    SolveInput input;
+    input.pool["Face"] = {element("Face2", {alias, mln}), element("Face3", {other})};
+    input.entries = {exact("Face2"), exact("Face3")};
+
+    auto outcomes = Data::solveOwner(input);
+
+    ASSERT_EQ(outcomes.size(), 2U);
+    EXPECT_EQ(outcomes[0].name, mln);
+    //   an element with IDX names alone (a beta shape no naming has matched) keeps its first
+    EXPECT_EQ(outcomes[1].name, other);
+}
+
+TEST(SolveOwner, matchMadeSourcesAreKnown)
+{
+    // Decision 248 T2, K8OffsetHoleRemovedNeighbourMoved: a hole's rim cut from the block's face
+    // and tool 0's, both MLN-named (`<{Block};MLN;26>,<{Tool0};MLN;6>;{Cut};CUT;E;GEN`). Tool 0
+    // taken out and tool 1 moved onto its place: the rim there lost tool 0, as T1''s test sees
+    // an IDX-made rim lose `Face6` of tool 0.
+    auto mlnFace = [](int tag, int id) {
+        return section({}, {}, tag, "MLN", id, 'F', {});
+    };
+    auto rim = [&](int tool) {
+        return section({}, {mlnFace(20, 26), mlnFace(tool, 6)}, 30, "CUT", 0, 'E', {"GEN"});
+    };
+    EXPECT_TRUE(Data::lostOldSources({rim(22)}, rim(21)));
+    //   the same tool's rim keeps them, its id the same
+    EXPECT_FALSE(Data::lostOldSources({rim(21)}, rim(21)));
+    //   another face of tool 0 (another id) is another source
+    const auto other =
+        section({}, {mlnFace(20, 26), mlnFace(21, 7)}, 30, "CUT", 0, 'E', {"GEN"});
+    EXPECT_TRUE(Data::lostOldSources({other}, rim(21)));
+    //   and the marks judge the rim at the place: tool 1 was there
+    ElementFingerprint record = LongBoard::edgeAt(0);
+    record.marks = {{20, -1}, {21, -1}, {22, -1}, {30, -1}};
+    std::string why;
+    EXPECT_EQ(Data::placeVerdict(record, LongBoard::edgeAt(0), {rim(22)}, rim(21), true, {}, &why),
+              Data::PlaceVerdict::WasThere);
+    EXPECT_EQ(why, "its source 22;MLN6 was in the model before");
+}
+
 TEST(SolveOwner, indexMadeOldNameNegativeTagKeepsMark)
 {
     // Review prd2eson-r5 F1: a Body's second box names its elements with its tag negated
