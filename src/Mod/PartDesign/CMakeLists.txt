@@ -114,6 +114,7 @@ set(PartDesign_TestFixtures
     PartDesignTests/Fixtures/InvoluteGear_v0-20.FCStd
     PartDesignTests/Fixtures/InternalInvoluteGear_v0-20.FCStd
     PartDesignTests/Fixtures/BetaMapless.FCStd
+    PartDesignTests/Fixtures/BetaIndexToldGroups.FCStd
 )
 
 # The naming scenarios (TestNamingScenarios; the model helpers are shared with TestNamingDump)

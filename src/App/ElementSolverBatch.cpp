@@ -200,6 +200,37 @@ std::string bareMappedName(const std::string& newStyleName)
     return name;
 }
 
+// P-beta 2 (decision 247): see the header
+bool indexMadeOnly(const std::string& name, int depth)
+{
+    // (no text test for the flag first: a linked name may be interned, `~<ID>`)
+    if (depth <= 0 || name.empty()) {
+        return false;
+    }
+    const auto& sections = Data::MappedName::getDecodedMappedName(name);
+    auto real = [](const std::string& value) {
+        return !value.empty() && value != Data::EMPTY_VALUE;
+    };
+    auto allIndexMade = [&](const std::vector<std::string>& names) {
+        return std::all_of(names.begin(), names.end(), [&](const std::string& linked) {
+            return !real(linked) || indexMadeOnly(linked, depth - 1);
+        });
+    };
+    return !sections.empty()
+        && std::all_of(sections.begin(), sections.end(), [&](const auto& section) {
+               if (section.opCode == "MLN" || !allIndexMade(section.connectedElements)) {
+                   return false;
+               }
+               if (section.hasMapperFlag(Data::MAPPER_FLAG_INDEX)) {
+                   return allIndexMade(section.linkedNames);
+               }
+               const auto& ids = section.referenceIDs;
+               return std::none_of(ids.begin(), ids.end(), real)
+                   && std::any_of(section.linkedNames.begin(), section.linkedNames.end(), real)
+                   && allIndexMade(section.linkedNames);
+           });
+}
+
 void placementSources(const GeoFeature* geo, std::vector<Data::ElementFingerprint::Source>& sources)
 {
     sources.clear();
@@ -635,20 +666,24 @@ void resolutionFor(const SolverEntry& entry,
     }
 }
 
-// Whether \a name is made only of sections with the IDX flag (FreeCAD-CH, ops#502, PLAN decision
-// 247's P-beta 2): an element named by its index in a map-less input, which says nothing of its
-// identity. A file saved before MLN names holds such names for the elements of a history-less
-// result and its descendants, which MLN names now.
-bool indexMadeOnly(const std::string& name)
+// The name of an element a resolution writes: the least of its names, as index carry takes it,
+// leaving out the IDX aliases P-beta gives beside an MLN name (decision 247): they are dropped at
+// the producer's next naming, so a reference holding one would break then
+std::string resolutionName(const std::vector<std::string>& names)
 {
-    if (name.find(Data::MAPPER_FLAG_INDEX) == std::string::npos) {
-        return false;
+    if (names.empty()) {
+        return {};
     }
-    const auto& sections = Data::MappedName::getDecodedMappedName(name);
-    return !sections.empty()
-        && std::all_of(sections.begin(), sections.end(), [](const auto& section) {
-               return section.hasMapperFlag(Data::MAPPER_FLAG_INDEX);
-           });
+    const bool matched = std::any_of(names.begin(), names.end(), [](const std::string& name) {
+        return name.find(";MLN;") != std::string::npos;
+    });
+    std::string least;
+    for (const auto& name : names) {
+        if ((least.empty() || name < least) && !(matched && indexMadeOnly(name))) {
+            least = name;
+        }
+    }
+    return least;
 }
 
 // An exact reference that breaks (Task 2 PR 7): its missing form, as _updateElementReference()
@@ -1469,7 +1504,7 @@ bool solveElementReferences(DocumentObject* feature,
         std::string name;
         for (const auto& element : pool(indexType(index))) {
             if (element.index == index && !element.names.empty()) {
-                name = *std::min_element(element.names.begin(), element.names.end());
+                name = resolutionName(element.names);
             }
         }
         return mapForm(name);
@@ -2076,7 +2111,7 @@ bool solveElementReferences(DocumentObject* feature,
                 std::string name;
                 for (const auto& element : pool(indexType(index))) {
                     if (element.index == index && !element.names.empty()) {
-                        name = *std::min_element(element.names.begin(), element.names.end());
+                        name = resolutionName(element.names);
                     }
                 }
                 // A part moved as one piece with another edit breaks (decisions 234 and 236);
