@@ -8,7 +8,9 @@
 #include <cstdint>
 #include <cstring>
 #include <functional>
+#include <iomanip>
 #include <limits>
+#include <locale>
 #include <map>
 #include <memory>
 #include <optional>
@@ -18,6 +20,7 @@
 #include <Base/Console.h>
 #include <Base/Exception.h>
 #include <Base/Parameter.h>
+#include <Base/Writer.h>
 
 #include "Application.h"
 #include "ComplexGeoData.h"
@@ -28,9 +31,11 @@
 #include "ElementNamingUtils.h"
 #include "ElementSolver.h"
 #include "ElementSolverEdits.h"
+#include "Expression.h"
 #include "GeoFeature.h"
 #include "NameTable.h"
 #include "MappedElement.h"
+#include "PropertyExpressionEngine.h"
 #include "PropertyGeo.h"
 #include "RecomputeContinuation.h"
 #include "ReferenceReport.h"
@@ -259,8 +264,10 @@ void placementSources(const GeoFeature* geo, std::vector<Data::ElementFingerprin
             // A vector input (a pad's custom direction, a pipe's binormal, kept in body
             // coordinates): it must turn with the part (decision 150: a second silent in the
             // closure, ReviewPadCustomDirectionFlipped, takes every input, not a list of names).
-            // A read-only or output vector (a revolve's axis, a pad's own direction) is made from
-            // what the closure holds
+            // A vector read-only by its type or an output (a revolve's Base and Axis, made from its
+            // reference axis) is made from what the closure holds. isReadOnly() reads the type
+            // only, so a pad's own Direction (read-only in the editor alone) is kept, and turns
+            // with the part as a direction
             if (auto value = dynamic_cast<PropertyVector*>(property); value && name) {
                 if (object->isReadOnly(property)
                     || (object->getPropertyType(property) & Prop_Output) != 0) {
@@ -294,6 +301,7 @@ void placementSources(const GeoFeature* geo, std::vector<Data::ElementFingerprin
         }
     }
     std::set<const DocumentObject*> seen;
+    std::set<const DocumentObject*> placed;  // the objects whose Placement is a source
     for (const DocumentObject* object : chain) {
         auto feature = dynamic_cast<const GeoFeature*>(object);
         if (!feature || !feature->isAttachedToDocument() || !seen.insert(object).second) {
@@ -307,6 +315,7 @@ void placementSources(const GeoFeature* geo, std::vector<Data::ElementFingerprin
             source.key = keyOf(object);
             source.placement = feature->Placement.getValue();
             sources.push_back(std::move(source));
+            placed.insert(object);
         }
     }
     // The origin lines and planes named as geometry: loci
@@ -326,6 +335,93 @@ void placementSources(const GeoFeature* geo, std::vector<Data::ElementFingerprin
         sources.push_back(std::move(source));
     }
     sources.insert(sources.end(), vectors.begin(), vectors.end());
+    // Nothing else changed (decision 231: input by input didn't converge, five silents): each
+    // object of the chain and the target folds its other inputs into a digest. Not its Placement
+    // and AttachmentOffset (the sources), its vectors (the inputs above, or made from the
+    // closure), its geometry (what the record measures), its outputs and transient properties
+    // (made by the recompute). A Placement is left out only where the record has it otherwise: a
+    // source's, a PartDesign feature's (made from its sources), the Body's (the frame of every
+    // record); an App::Link's is folded. A link folds the objects and the elements it names (its
+    // saved form carries the records), the expression engine its expressions, any other property
+    // its saved form
+    auto digestOf = [&](const DocumentObject* object) {
+        const bool source = placed.count(object) > 0;
+        const bool derived = source || isA(object, featureType) || isA(object, bodyType);
+        std::uint64_t digest = Data::ElementFingerprint::DigestSeed;
+        auto fold = [&digest](std::string_view text) {
+            Data::ElementFingerprint::foldDigest(digest, text);
+            Data::ElementFingerprint::foldDigest(digest, std::string_view("\0", 1));
+        };
+        std::vector<Property*> properties;
+        object->getPropertyList(properties);
+        auto nameOf = [](const Property* property) {
+            const char* name = property->getName();
+            return std::string_view(name ? name : "");
+        };
+        std::sort(properties.begin(), properties.end(), [&nameOf](const auto* a, const auto* b) {
+            return nameOf(a) < nameOf(b);
+        });
+        for (Property* property : properties) {
+            const std::string_view name = nameOf(property);
+            if (name.empty() || (derived && name == "Placement")
+                || (source && name == "AttachmentOffset")
+                || dynamic_cast<PropertyVector*>(property)
+                || dynamic_cast<PropertyComplexGeoData*>(property)
+                || (object->getPropertyType(property) & (Prop_Output | Prop_Transient)) != 0
+                || property->testStatus(Property::Output)
+                || property->testStatus(Property::Transient)) {
+                continue;
+            }
+            fold(name);
+            if (auto engine = dynamic_cast<PropertyExpressionEngine*>(property)) {
+                for (const auto& [path, expression] : engine->getExpressions()) {
+                    fold(path.toString());
+                    fold(expression ? expression->toString(true) : std::string());
+                }
+            }
+            else if (auto link = dynamic_cast<PropertyLinkBase*>(property)) {
+                std::vector<DocumentObject*> linked;
+                std::vector<std::string> subs;
+                link->getLinks(linked, true, &subs, false);
+                for (const DocumentObject* target : linked) {
+                    fold(target && target->isAttachedToDocument() ? keyOf(target) : std::string());
+                }
+                fold("|");
+                for (const std::string& sub : subs) {
+                    fold(sub);
+                }
+            }
+            else {
+                Base::StringWriter writer;
+                writer.Stream().imbue(std::locale::classic());
+                writer.Stream() << std::setprecision(std::numeric_limits<double>::max_digits10);
+                try {
+                    property->Save(writer);
+                    fold(writer.getString());
+                }
+                catch (const Base::Exception&) {
+                    fold("?");
+                }
+                catch (const std::exception&) {
+                    fold("?");
+                }
+            }
+        }
+        return digest;
+    };
+    // Only beside sources: a record without them never reads rigid, and keeps its form
+    std::set<const DocumentObject*> digested;
+    for (const DocumentObject* object : namers) {
+        if (sources.empty() || !object || !object->isAttachedToDocument()
+            || !digested.insert(object).second) {
+            continue;
+        }
+        Data::ElementFingerprint::Source source;
+        source.key = keyOf(object);
+        source.locus = 'D';
+        source.digest = digestOf(object);
+        sources.push_back(std::move(source));
+    }
     std::sort(sources.begin(), sources.end(), [](const auto& a, const auto& b) {
         return a.locus != b.locus ? a.locus < b.locus : a.key < b.key;
     });

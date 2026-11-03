@@ -1204,3 +1204,122 @@ TEST(ElementFingerprint, rigidMotion)
     EXPECT_TRUE(ElementFingerprint::rigidMotion(with(saved, padSaved), with(turned, padSaved), tolerance, angle)
                     .has_value());
 }
+
+TEST(ElementFingerprint, digestRoundTrip)
+{
+    // Decision 231: an object's other inputs as a digest in version 8's sources, `D<key>:` and
+    // 16 hex digits, sorted before the loci
+    ElementFingerprint face;
+    face.type = 'F';
+    face.kind = "Plane";
+    face.size = 4;
+    face.center = Base::Vector3d(1, 1, 10);
+    face.direction = Base::Vector3d(0, 0, 1);
+    face.extentMin = Base::Vector3d(0, 0, 10);
+    face.extentMax = Base::Vector3d(2, 2, 10);
+    ElementFingerprint::Source pad;
+    pad.locus = 'D';
+    pad.key = "12";
+    pad.digest = 0x0123456789abcdefULL;
+    ElementFingerprint::Source other;
+    other.locus = 'D';
+    other.key = "7@Other";
+    other.digest = 0xf;
+    face.sources = {placed("12", Base::Placement()), pad, other};
+    const std::string text = face.toString();
+    EXPECT_EQ(
+        text,
+        "8|F|Plane|4|1,1,10|0,0,1|_|_|0,0,10,2,2,10|_|_|_|_|_|_|_|"
+        "12:0,0,0,0,0,0,1/D12:0123456789abcdef/D7@Other:000000000000000f"
+    );
+    const auto parsed = ElementFingerprint::fromString(text);
+    ASSERT_TRUE(parsed.isValid());
+    EXPECT_EQ(parsed, face);
+    auto changed = face;
+    changed.sources[1].digest ^= 1;
+    EXPECT_FALSE(changed == face);
+    //   15 or 17 digits, a capital, a digit that isn't hex: no fingerprint
+    const std::string fields = "8|F|Plane|4|1,1,10|0,0,1|_|_|0,0,10,2,2,10|_|_|_|_|_|_|_|";
+    EXPECT_FALSE(ElementFingerprint::fromString(fields + "D12:0123456789abcde").isValid());
+    EXPECT_FALSE(ElementFingerprint::fromString(fields + "D12:0123456789abcdef0").isValid());
+    EXPECT_FALSE(ElementFingerprint::fromString(fields + "D12:0123456789ABCDEF").isValid());
+    EXPECT_FALSE(ElementFingerprint::fromString(fields + "D12:0123456789abcdeg").isValid());
+    EXPECT_FALSE(ElementFingerprint::fromString(fields + "Dx:0123456789abcdef").isValid());
+}
+
+TEST(ElementFingerprint, foldDigest)
+{
+    // Decision 231: the saved form of an input folded into a digest. The same text gives the same
+    // digest; any other text another
+    auto digestOf = [](std::string_view text) {
+        std::uint64_t digest = ElementFingerprint::DigestSeed;
+        ElementFingerprint::foldDigest(digest, text);
+        return digest;
+    };
+    const std::string pad = R"(<Float value="10"/><Bool value="false"/>)";
+    EXPECT_EQ(digestOf(pad), digestOf(pad));
+    EXPECT_NE(digestOf(pad), digestOf(R"(<Float value="10.5"/><Bool value="false"/>)"));
+    EXPECT_NE(digestOf(pad), digestOf(R"(<Float value="10"/><Bool value="true"/>)"));
+    EXPECT_NE(digestOf("Edge12"), digestOf("Edge13"));
+    EXPECT_NE(digestOf("ab"), digestOf("ba"));
+    //   a number is folded as the record writes it: the last digits of a solve, noise and -0
+    //   change nothing, and neither does how the platform writes the exponent
+    EXPECT_EQ(digestOf(R"(<Line x="10.000000000000002" y="-0.0"/>)"), digestOf(R"(<Line x="10.0" y="0.0"/>)"));
+    EXPECT_EQ(digestOf(R"(x="1e-13")"), digestOf(R"(x="0.0")"));
+    EXPECT_EQ(digestOf(R"(x="1.5e+002")"), digestOf(R"(x="150.0")"));
+    EXPECT_EQ(digestOf(R"(x="2.5000000000004")"), digestOf(R"(x="2.5")"));
+    EXPECT_NE(digestOf(R"(x="2.50000000004")"), digestOf(R"(x="2.5")"));
+    //   a digit inside a name, or in a version, is text
+    EXPECT_NE(digestOf("Face1.5"), digestOf("Face1.50"));
+    EXPECT_NE(digestOf("v1.2.3"), digestOf("v1.2.30"));
+    //   an integer is text as written
+    EXPECT_NE(digestOf(R"(<Integer value="7"/>)"), digestOf(R"(<Integer value="07"/>)"));
+    //   a sign at the end of the text is text
+    EXPECT_NE(digestOf("a-"), digestOf("a+"));
+}
+
+TEST(ElementFingerprint, rigidMotionNothingElseChanged)
+{
+    // Decision 231: a turn is one piece only if nothing else changed, every object's digest as
+    // it was (R2: a pad's Reversed ticked during a flip; F-A: a revolve's axis line redrawn)
+    const double tolerance = 1e-7;
+    const double angle = 1e-6;
+    const Base::Placement turn(
+        Base::Vector3d(),
+        Base::Rotation(Base::Vector3d(1, 0, 0), std::numbers::pi)
+    );
+    const Base::Placement base;
+    auto digest = [](const std::string& key, std::uint64_t value) {
+        ElementFingerprint::Source source;
+        source.locus = 'D';
+        source.key = key;
+        source.digest = value;
+        return source;
+    };
+    const std::vector<ElementFingerprint::Source> saved {
+        placed("1", base),
+        digest("1", 0x11),
+        digest("2", 0x22)
+    };
+    std::vector<ElementFingerprint::Source> turned {
+        placed("1", turn * base),
+        digest("1", 0x11),
+        digest("2", 0x22)
+    };
+    const auto motion = ElementFingerprint::rigidMotion(saved, turned, tolerance, angle);
+    ASSERT_TRUE(motion.has_value());
+    EXPECT_TRUE(motion->getRotation().isSame(turn.getRotation(), 1e-9));
+    //   the pad's inputs changed with the turn: not one piece
+    turned[2].digest = 0x23;
+    EXPECT_FALSE(ElementFingerprint::rigidMotion(saved, turned, tolerance, angle).has_value());
+    //   an object's digest gone, or one added: not one piece
+    turned.pop_back();
+    EXPECT_FALSE(ElementFingerprint::rigidMotion(saved, turned, tolerance, angle).has_value());
+    turned.push_back(digest("2", 0x22));
+    turned.push_back(digest("3", 0x33));
+    EXPECT_FALSE(ElementFingerprint::rigidMotion(saved, turned, tolerance, angle).has_value());
+    //   nothing moved and an input changed: not the identity (the caller then reads no motion)
+    auto edited = saved;
+    edited[1].digest = 0x12;
+    EXPECT_FALSE(ElementFingerprint::rigidMotion(saved, edited, tolerance, angle).has_value());
+}

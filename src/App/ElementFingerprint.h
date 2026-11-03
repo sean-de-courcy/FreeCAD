@@ -4,6 +4,7 @@
 
 #include <FCConfig.h>
 
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -145,9 +146,12 @@ namespace Data
  *   geometry), a point and its direction or normal (`M<key>:...` a plane named only as a mirror
  *   plane, whose normal has no sense); `V<key>.<property>:<x>,<y>,<z>` for a vector input of the
  *   chain or the target (a vector property neither read-only nor an output: a pad's custom
- *   direction, a pipe's binormal), its value. The key is the object's ID, with `@<document>` for
- *   another document's. The part moved as one piece when one motion takes every source to its
- *   place now, leaves every locus where it is, and turns every vector input with it as a
+ *   direction, a pipe's binormal), its value; `D<key>:<16 hex digits>` for every object of the
+ *   chain and the target, a digest of its other inputs (decision 231: every property but its
+ *   Placement, its AttachmentOffset, its vectors, its geometry, its outputs and transient ones).
+ *   The key is the object's ID, with `@<document>` for another document's. The part moved as one
+ *   piece when nothing else changed (every digest as it was), one motion takes every source to
+ *   its place now, leaves every locus where it is, and turns every vector input with it as a
  *   direction.
  *
  * Numbers have 12 significant digits, in the classic locale, so the text is the same on every
@@ -289,18 +293,21 @@ struct AppExport ElementFingerprint
         /// The object's ID, with `@<document>` for an object of another document.
         std::string key;
         /// 0 for a placement source; `L` for a line locus, `P` for a plane locus, `M` for a mirror
-        /// plane's; `V` for a vector input (its key `<ID>.<property>`, its value in  point).
+        /// plane's; `V` for a vector input (its key `<ID>.<property>`, its value in `point`); `D`
+        /// for an object's other inputs (decision 231), their digest in `digest`.
         char locus = 0;
         /// A placement source's Placement, in body coordinates.
         Base::Placement placement;
         /// A locus's point, and its direction (a line) or normal (a plane), in body coordinates.
         Base::Vector3d point;
         Base::Vector3d direction;
+        /// An object's other inputs, folded by foldDigest().
+        std::uint64_t digest = 0;
 
         friend bool operator==(const Source& a, const Source& b)
         {
             return a.key == b.key && a.locus == b.locus && a.placement == b.placement
-                && a.point == b.point && a.direction == b.direction;
+                && a.point == b.point && a.direction == b.direction && a.digest == b.digest;
         }
     };
     /// The target's placement sources and loci (version 8), sorted by locus and key: only a
@@ -309,11 +316,22 @@ struct AppExport ElementFingerprint
     /// At most this many sources: the reader takes more as a malformed field.
     static constexpr std::size_t MaxSources = 4096;
 
+    /// A digest before anything is folded into it: 64-bit FNV-1a's offset basis.
+    static constexpr std::uint64_t DigestSeed = 14695981039346656037ULL;
+
+    /** Folds \a text, the saved form of an input, into \a digest (64-bit FNV-1a; decision 231).
+     * A number with a fraction or an exponent is folded as formatNumber() writes it, so the last
+     * digits a solve leaves and the platform's formatting change nothing; a digit inside a name
+     * (`Edge12`) is text.
+     */
+    static void foldDigest(std::uint64_t& digest, std::string_view text);
+
     /** The one rigid motion that took the chain from \a saved to \a now (decision 218,
-     * `notes\naming-class-D.md` 11.2), in body coordinates: the same keys, one motion M taking
-     * every saved placement to its current one (positions within \a distance, rotations within
-     * \a angle), and every locus as it was and mapped onto itself by M. The identity when nothing
-     * moved; none when the keys differ, a source moved otherwise, or a locus doesn't stay.
+     * `notes\naming-class-D.md` 11.2), in body coordinates: the same keys, every digest as it was
+     * (decision 231: nothing else changed), one motion M taking every saved placement to its
+     * current one (positions within \a distance, rotations within \a angle), and every locus as it
+     * was and mapped onto itself by M. The identity when nothing moved; none when the keys or a
+     * digest differ, a source moved otherwise, or a locus doesn't stay.
      */
     static std::optional<Base::Placement> rigidMotion(
         const std::vector<Source>& saved,
