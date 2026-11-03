@@ -1,0 +1,30 @@
+{
+"entries": {
+"CapAcrossThenTip|L|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr403-r4", "issue": "ops#524", "tier": "F"},
+"CapAcrossThenTip|M|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr403-r4", "issue": "ops#524", "tier": "F"},
+"CapSlideHoleGrows|L|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr403-r4", "issue": "ops#524", "tier": "F"},
+"CapSlideHoleGrows|M|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr403-r4", "issue": "ops#524", "tier": "F"},
+"CapSlideHoleMoves|L|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr403-r4", "issue": "ops#524", "tier": "F"},
+"CapSlideHoleMoves|M|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr403-r4", "issue": "ops#524", "tier": "F"},
+"CapSlideShellReordered|L|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr403-r4", "issue": "ops#524", "tier": "F"},
+"CapSlideShellReordered|M|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken-", "found_by": "review pr403-r4", "issue": "ops#524", "tier": "F"},
+"CapSlideThenTip|L|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr403-r4", "issue": "ops#524", "tier": "F"},
+"CapSlideThenTip|M|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr403-r4", "issue": "ops#524", "tier": "F"},
+"CircleMovedBeyondTwins|D|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr403-r4", "issue": "ops#524", "tier": "F"},
+"CircleMovedBeyondTwins|U|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr403-r4", "issue": "ops#524", "tier": "F"},
+"CircleMovedOnPlate|D|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr403-r4", "issue": "ops#524", "tier": "F"},
+"CircleMovedOnPlate|U|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr403-r4", "issue": "ops#524", "tier": "F"},
+"EdgeAcrossHoleBroken|B|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr403-r4", "issue": "ops#524", "tier": "F"},
+"EdgeAcrossHoleBroken|S|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr403-r4", "issue": "ops#524", "tier": "F"},
+"EdgeSplitsAtHole|B|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr403-r4", "issue": "ops#524", "tier": "F"},
+"EdgeSplitsAtHole|S|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr403-r4", "issue": "ops#524", "tier": "F"},
+"FusedCircleArcsMovedFar|DN|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr403-r4", "issue": "ops#524", "tier": "F"},
+"FusedCircleArcsMovedFar|LEFT|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr403-r4", "issue": "ops#524", "tier": "F"},
+"FusedCircleArcsMovedFar|UP|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr403-r4", "issue": "ops#524", "tier": "F"},
+"FusedCircleArcsMoved|DN|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr403-r4", "issue": "ops#524", "tier": "F"},
+"FusedCircleArcsMoved|LEFT|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr403-r4", "issue": "ops#524", "tier": "F"},
+"FusedCircleArcsMoved|UP|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr403-r4", "issue": "ops#524", "tier": "F"},
+"SwapRects|A|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr403-r4", "issue": "ops#524", "tier": "F"},
+"SwapRects|B|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr403-r4", "issue": "ops#524", "tier": "F"}
+}
+}

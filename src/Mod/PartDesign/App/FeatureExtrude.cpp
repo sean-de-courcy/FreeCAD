@@ -30,7 +30,11 @@
 #include <optional>
 #include <Mod/Part/App/FCBRepAlgoAPI_Fuse.h>
 #include <BRep_Builder.hxx>
+#include <BRep_Tool.hxx>
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepAlgoAPI_Section.hxx>
+#include <BRepBuilderAPI_MakeFace.hxx>
+#include <gp_Pnt2d.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepGProp.hxx>
@@ -59,6 +63,7 @@
 #include <App/Datums.h>
 #include <App/Document.h>
 #include <App/ElementNamingUtils.h>
+#include <App/ElementSolver.h>
 #include <App/ElementSolverBatch.h>
 #include <App/ObjectIdentifier.h>
 #include <Base/Converter.h>
@@ -214,16 +219,58 @@ bool sideReachesPlane(
     return box.CornerMax().Z() > -Precision::Confusion();
 }
 
-// The direction a Pad or Pocket swept its profile along, for the reference solver (PR 366 round
-// 6): Direction holds the one computeDirection() last used, in the body's frame. Turned into the
-// feature's own frame, without its placement, where its elements' fingerprints are measured.
-bool sweepDirection(const App::GeoFeature* geo, Base::Vector3d& direction)
+// The extrusion that made the far piece or element named `name`, for the reference solver
+// (ops#524, PLAN decision 182, N2): the feature its projection's tag names (Data::projectionTag()),
+// when that is `geo` or a feature before it on its BaseFeature chain; `geo` itself without a name.
+// A later feature (a Pocket, a dress-up, a primitive as the Tip) passes the Pad's pieces on with
+// their names, and has no up-to faces or sweep of its own.
+const FeatureExtrude* makerOf(const App::GeoFeature* geo, const char* name)
 {
-    const auto extrude = dynamic_cast<const FeatureExtrude*>(geo);
-    if (!extrude) {
+    if (!name || !name[0]) {
+        return dynamic_cast<const FeatureExtrude*>(geo);
+    }
+    const long tag = Data::projectionTag(name);
+    if (tag <= 0) {
+        return nullptr;
+    }
+    // The chain is short; the bound only guards against a cycle
+    const App::DocumentObject* feature = geo;
+    for (int steps = 0; feature && steps < 10000; ++steps) {
+        if (feature->getID() == tag) {
+            return dynamic_cast<const FeatureExtrude*>(feature);
+        }
+        const auto partDesign = dynamic_cast<const PartDesign::Feature*>(feature);
+        feature = partDesign ? partDesign->getBaseObject(true) : nullptr;
+    }
+    return nullptr;
+}
+
+// Whether `geo`'s shape may be read with its current placement for the piece made by `extrude`:
+// each shape was made under the placement it has now (ops#522's window, review prA1b-r1, for the
+// extrusion; ops#524 for a later feature).
+bool madeUnderPlacements(const App::GeoFeature* geo, const FeatureExtrude* extrude)
+{
+    if (!extrude->shapeMadeUnderPlacement()) {
         return false;
     }
-    direction = extrude->Placement.getValue().getRotation().inverse().multVec(
+    if (geo == extrude) {
+        return true;
+    }
+    const auto later = dynamic_cast<const PartDesign::Feature*>(geo);
+    return later && !placedAheadOfShape(later);
+}
+
+// The direction a Pad or Pocket swept its profile along, for the reference solver (PR 366 round
+// 6): Direction holds the one computeDirection() last used, in the body's frame. Turned into the
+// target's own frame, without its placement, where its elements' fingerprints are measured. The
+// target is the extrusion, or a later feature passing its pieces on (ops#524, N2).
+bool sweepDirection(const App::GeoFeature* geo, const char* name, Base::Vector3d& direction)
+{
+    const auto extrude = makerOf(geo, name);
+    if (!extrude || (extrude != geo && !madeUnderPlacements(geo, extrude))) {
+        return false;
+    }
+    direction = geo->Placement.getValue().getRotation().inverse().multVec(
         extrude->Direction.getValue()
     );
     return direction.Length() > Precision::Confusion();
@@ -231,19 +278,126 @@ bool sweepDirection(const App::GeoFeature* geo, Base::Vector3d& direction)
 
 const bool sweepDirectionRegistered = (App::setElementSweepDirectionFunction(&sweepDirection), true);
 
+// What the up-to hooks below read: the extrusion that made the piece, its up-to objects with the
+// face each names (none: all of its faces), its direction and the target's placement (the point's
+// frame). False when it can't be told (upToFaces()).
+struct UpToContext
+{
+    const FeatureExtrude* extrude = nullptr;
+    std::vector<std::pair<const App::DocumentObject*, std::string>> refs;
+    Base::Vector3d along;
+    Base::Placement placement;
+};
+
+bool upToContext(const App::GeoFeature* geo, const char* name, UpToContext& context)
+{
+    const auto extrude = makerOf(geo, name);
+    if (!extrude || std::strcmp(extrude->SideType.getValueAsString(), "One side") != 0
+        || !madeUnderPlacements(geo, extrude)) {
+        return false;
+    }
+    context.extrude = extrude;
+    const std::string method = extrude->Type.getValueAsString();
+    if (method == "UpToFace") {
+        const auto& subs = extrude->UpToFace.getSubValues();
+        if (subs.size() > 1) {
+            return false;
+        }
+        context.refs.emplace_back(extrude->UpToFace.getValue(), subs.empty() ? std::string() : subs[0]);
+    }
+    else if (method == "UpToShape") {
+        for (const auto& [ref, subs] : extrude->UpToShape.getSubListValues()) {
+            if (subs.empty() || (subs.size() == 1 && subs[0].empty())) {
+                context.refs.emplace_back(ref, std::string());
+            }
+            for (const auto& sub : subs) {
+                if (!sub.empty()) {
+                    context.refs.emplace_back(ref, sub);
+                }
+            }
+        }
+    }
+    context.along = extrude->Direction.getValue();
+    context.placement = geo->Placement.getValue();
+    if (context.refs.empty() || context.along.Length() <= Precision::Confusion()) {
+        return false;
+    }
+    for (const auto& ref : context.refs) {
+        if (!ref.first || !ref.first->getNameInDocument() || ref.first->isDerivedFrom<App::Plane>()
+            || ref.first->isDerivedFrom<Part::Datum>()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// An up-to object's faces (the one it names, or all) in its own frame, and the line through `at`
+// (the target's point carried to the body's frame) along the sweep, in that frame too
+bool upToFacesOf(
+    const UpToContext& context,
+    const App::DocumentObject* ref,
+    const std::string& sub,
+    const Base::Vector3d& at,
+    std::vector<TopoShape>& faces,
+    gp_Lin& line
+)
+{
+    // The owner's placement, as Part::Feature::getTopoShape() applies it (Transform)
+    Base::Matrix4D matrix;
+    ref->getSubObject(nullptr, nullptr, &matrix);
+    const Base::Placement inverse = Base::Placement(matrix).inverse();
+    const TopoShape shape = Part::Feature::getTopoShape(
+        ref,
+        Part::ShapeOption::NeedSubElement | Part::ShapeOption::ResolveLink,
+        sub.empty() ? nullptr : sub.c_str()
+    );
+    if (shape.isNull() || !shape.hasSubShape(TopAbs_FACE)) {
+        return false;
+    }
+    Base::Vector3d origin;
+    Base::Vector3d direction;
+    inverse.multVec(at, origin);
+    inverse.getRotation().multVec(context.along, direction);
+    line = gp_Lin(gp_Pnt(origin.x, origin.y, origin.z), gp_Dir(direction.x, direction.y, direction.z));
+    faces = shape.getSubTopoShapes(TopAbs_FACE);
+    return true;
+}
+
+// Where `line` meets `face` nearest its origin, inside the face or on its boundary, with the
+// state there; none when it doesn't
+std::optional<std::pair<gp_Pnt2d, TopAbs_State>> meeting(const TopoDS_Face& face, const gp_Lin& line)
+{
+    BRepIntCurveSurface_Inter hits;
+    hits.Init(face, line, Precision::Confusion());
+    std::optional<std::pair<gp_Pnt2d, TopAbs_State>> nearest;
+    double distance = 0.0;
+    for (; hits.More(); hits.Next()) {
+        if ((hits.State() == TopAbs_IN || hits.State() == TopAbs_ON)
+            && (!nearest || std::abs(hits.W()) < distance)) {
+            nearest = std::make_pair(gp_Pnt2d(hits.U(), hits.V()), hits.State());
+            distance = std::abs(hits.W());
+        }
+    }
+    return nearest;
+}
+
 // The up-to faces under a far piece's point, for the reference solver (ops#522, PLAN decision
-// 168; App::ElementUpToFacesFunction): the faces of a one-sided Pad's or Pocket's UpToFace or
-// UpToShape, as generateSingleExtrusionSide() takes them, that the line through the point along
-// the sweep meets, inside them or on their boundary. The point comes in the feature's own frame
-// and goes to the frame the up-to shapes are taken in (with their placements) by the feature's
-// current placement, so it moves with a profile moved by placement; then into each face owner's
-// own frame, where the face's box, area, normal and outer wire are measured, so a plate moved by
-// its owner's placement is the same plate. With `all`, every up-to face too (its normal: none). A datum plane or another unbounded face, UpToFirst and UpToLast
-// (the base's faces), an empty shape list (the base), two sides, a face whose normal can't be
-// taken at the point, and a shape not made under the current Placement (between a recompute's
-// positionByPrevious() and its new shape: review prA1b-r1) can't be told.
+// 168; App::ElementUpToFacesFunction): the faces of the one-sided Pad's or Pocket's UpToFace or
+// UpToShape that made the piece (makerOf(): the target, or a feature before it, ops#524), as
+// generateSingleExtrusionSide() takes them, that the line through the point along the sweep
+// meets, inside them or on their boundary. The point comes in the target's own frame and goes to
+// the frame the up-to shapes are taken in (with their placements) by the target's current
+// placement, so it moves with a profile moved by placement; then into each face owner's own frame,
+// where the face's box, area, normal, outer wire and the foot (where the line meets it, ops#524)
+// are measured, so a plate moved by its owner's placement is the same plate. With `all`, every
+// up-to face too (its normal and foot: none). A datum plane or another unbounded face, UpToFirst
+// and UpToLast (the base's faces), an empty shape list (the base), two sides, a face whose normal
+// can't be taken at the point, and a shape not made under the current Placement (between a
+// recompute's positionByPrevious() and its new shape: review prA1b-r1; a later feature's too,
+// ops#524) can't be told.
 bool upToFaces(
     const App::GeoFeature* geo,
+    const char* name,
     const Base::Vector3d& point,
     std::vector<Data::ElementFingerprint::UpToFace>& faces,
     std::vector<Data::ElementFingerprint::UpToFace>* all
@@ -253,67 +407,20 @@ bool upToFaces(
     if (all) {
         all->clear();
     }
-    const auto extrude = dynamic_cast<const FeatureExtrude*>(geo);
-    if (!extrude || std::strcmp(extrude->SideType.getValueAsString(), "One side") != 0
-        || !extrude->shapeMadeUnderPlacement()) {
+    UpToContext context;
+    if (!upToContext(geo, name, context)) {
         return false;
     }
-    // Each up-to object with the face it names, or none for all of its faces
-    std::vector<std::pair<const App::DocumentObject*, std::string>> refs;
-    const std::string method = extrude->Type.getValueAsString();
-    if (method == "UpToFace") {
-        const auto& subs = extrude->UpToFace.getSubValues();
-        if (subs.size() > 1) {
-            return false;
-        }
-        refs.emplace_back(extrude->UpToFace.getValue(), subs.empty() ? std::string() : subs[0]);
-    }
-    else if (method == "UpToShape") {
-        for (const auto& [ref, subs] : extrude->UpToShape.getSubListValues()) {
-            if (subs.empty() || (subs.size() == 1 && subs[0].empty())) {
-                refs.emplace_back(ref, std::string());
-            }
-            for (const auto& sub : subs) {
-                if (!sub.empty()) {
-                    refs.emplace_back(ref, sub);
-                }
-            }
-        }
-    }
-    const Base::Vector3d along = extrude->Direction.getValue();
-    if (refs.empty() || along.Length() <= Precision::Confusion()) {
-        return false;
-    }
-    const Base::Placement placement = extrude->Placement.getValue();
     Base::Vector3d at;
-    placement.multVec(point, at);
+    context.placement.multVec(point, at);
     try {
-        for (const auto& [ref, sub] : refs) {
-            if (!ref || !ref->getNameInDocument() || ref->isDerivedFrom<App::Plane>()
-                || ref->isDerivedFrom<Part::Datum>()) {
+        for (const auto& [ref, sub] : context.refs) {
+            std::vector<TopoShape> shapeFaces;
+            gp_Lin line;
+            if (!upToFacesOf(context, ref, sub, at, shapeFaces, line)) {
                 return false;
             }
-            // The owner's placement, as Part::Feature::getTopoShape() applies it (Transform)
-            Base::Matrix4D matrix;
-            ref->getSubObject(nullptr, nullptr, &matrix);
-            const Base::Placement inverse = Base::Placement(matrix).inverse();
-            const TopoShape shape = Part::Feature::getTopoShape(
-                ref,
-                Part::ShapeOption::NeedSubElement | Part::ShapeOption::ResolveLink,
-                sub.empty() ? nullptr : sub.c_str()
-            );
-            if (shape.isNull() || !shape.hasSubShape(TopAbs_FACE)) {
-                return false;
-            }
-            Base::Vector3d origin;
-            Base::Vector3d direction;
-            inverse.multVec(at, origin);
-            inverse.getRotation().multVec(along, direction);
-            const gp_Lin line(
-                gp_Pnt(origin.x, origin.y, origin.z),
-                gp_Dir(direction.x, direction.y, direction.z)
-            );
-            for (const auto& face : shape.getSubTopoShapes(TopAbs_FACE)) {
+            for (const auto& face : shapeFaces) {
                 const TopoDS_Face& topoFace = TopoDS::Face(face.getShape());
                 Bnd_Box box;
                 BRepBndLib::AddOptimal(topoFace, box, false, false);
@@ -351,30 +458,21 @@ bool upToFaces(
                     all->push_back(upTo);
                 }
                 // The meeting nearest to the point
-                BRepIntCurveSurface_Inter hits;
-                hits.Init(topoFace, line, Precision::Confusion());
-                std::optional<std::pair<double, double>> uv;
-                double nearest = 0.0;
-                for (; hits.More(); hits.Next()) {
-                    if ((hits.State() == TopAbs_IN || hits.State() == TopAbs_ON)
-                        && (!uv || std::abs(hits.W()) < nearest)) {
-                        uv = std::make_pair(hits.U(), hits.V());
-                        nearest = std::abs(hits.W());
-                    }
-                }
-                if (!uv) {
+                const auto met = meeting(topoFace, line);
+                if (!met) {
                     continue;
                 }
                 BRepAdaptor_Surface surface(topoFace);
                 gp_Pnt on;
                 gp_Vec du;
                 gp_Vec dv;
-                surface.D1(uv->first, uv->second, on, du, dv);
+                surface.D1(met->first.X(), met->first.Y(), on, du, dv);
                 const gp_Vec normal = du.Crossed(dv);
                 if (normal.Magnitude() <= gp::Resolution()) {
                     return false;
                 }
                 upTo.normal = Base::Vector3d(normal.X(), normal.Y(), normal.Z()).Normalize();
+                upTo.foot = Base::Vector3d(on.X(), on.Y(), on.Z());
                 faces.push_back(std::move(upTo));
             }
         }
@@ -389,6 +487,130 @@ bool upToFaces(
 }
 
 const bool upToFacesRegistered = (App::setElementUpToFacesFunction(&upToFaces), true);
+
+// Whether a lone far piece slid within its up-to face, for the reference solver (ops#524, PLAN
+// decisions 182 and 199 (3); App::ElementUpToPathFunction). In the saved face's owner's own frame:
+// the line along the sweep through the piece's point now (carried as upToFaces() carries it) meets
+// exactly one of that owner's up-to faces, inside it and not on its boundary, and so does the line
+// through the saved foot, on the same face; then the path stays on the face when no boundary edge
+// of it (its holes' included) meets the strip that the segment between the two meetings spans
+// along the sweep: an exact section, no sampling. A piece moved along the sweep alone stays at its
+// place. A seam edge met, and nothing else, can't be told (the path may go round a periodic face
+// through it); nor can the rest that isn't one meeting inside the face at each end.
+std::optional<bool> upToPath(
+    const App::GeoFeature* geo,
+    const char* name,
+    const Data::ElementFingerprint::UpToFace& saved,
+    const Base::Vector3d& point
+)
+{
+    UpToContext context;
+    if (!saved.foot || !upToContext(geo, name, context)) {
+        return std::nullopt;
+    }
+    Base::Vector3d at;
+    context.placement.multVec(point, at);
+    try {
+        std::optional<TopoDS_Face> under;
+        gp_Pnt now;
+        gp_Dir along;
+        for (const auto& [ref, sub] : context.refs) {
+            if (saved.owner != ref->getNameInDocument()) {
+                continue;
+            }
+            std::vector<TopoShape> shapeFaces;
+            gp_Lin line;
+            if (!upToFacesOf(context, ref, sub, at, shapeFaces, line)) {
+                return std::nullopt;
+            }
+            along = line.Direction();
+            for (const auto& face : shapeFaces) {
+                const TopoDS_Face& topoFace = TopoDS::Face(face.getShape());
+                const auto met = meeting(topoFace, line);
+                if (!met) {
+                    continue;
+                }
+                if (under || met->second != TopAbs_IN) {
+                    return std::nullopt;  // two faces, or on the boundary
+                }
+                under = topoFace;
+                now = BRepAdaptor_Surface(topoFace).Value(met->first.X(), met->first.Y());
+            }
+        }
+        if (!under) {
+            return std::nullopt;
+        }
+        const gp_Pnt foot(saved.foot->x, saved.foot->y, saved.foot->z);
+        const auto old = meeting(*under, gp_Lin(foot, along));
+        if (!old || old->second != TopAbs_IN) {
+            return std::nullopt;
+        }
+        const gp_Pnt from = BRepAdaptor_Surface(*under).Value(old->first.X(), old->first.Y());
+        // The segment's part across the sweep; none: the piece stayed where it was, seen along it
+        gp_Vec across(from, now);
+        across -= gp_Vec(along) * across.Dot(gp_Vec(along));
+        const double length = across.Magnitude();
+        if (length <= Precision::Confusion()) {
+            return true;
+        }
+        // The strip: from `from` across to `now`, and far along the sweep both ways, past the face
+        Bnd_Box box;
+        BRepBndLib::AddOptimal(*under, box, false, false);
+        if (box.IsVoid() || box.IsOpen()) {
+            return std::nullopt;
+        }
+        const double reach = std::sqrt(box.SquareExtent())
+            + from.Distance(box.CornerMin()) + from.Distance(box.CornerMax()) + 1.0;
+        const gp_Dir x(across);
+        const gp_Ax3 frame(from, x.Crossed(along), x);  // its Y axis is the sweep
+        BRepBuilderAPI_MakeFace strip(gp_Pln(frame), 0.0, length, -reach, reach);
+        if (!strip.IsDone()) {
+            return std::nullopt;
+        }
+        // Whether the strip meets any of `edges`; empty when the section fails
+        auto meets = [&](const TopoDS_Compound& edges) -> std::optional<bool> {
+            BRepAlgoAPI_Section section(strip.Face(), edges, false);
+            section.Build();
+            if (!section.IsDone()) {
+                return std::nullopt;
+            }
+            const TopoDS_Shape& met = section.Shape();
+            return TopExp_Explorer(met, TopAbs_VERTEX).More()
+                || TopExp_Explorer(met, TopAbs_EDGE).More();
+        };
+        TopoDS_Compound boundary;
+        TopoDS_Compound seams;
+        BRep_Builder builder;
+        builder.MakeCompound(boundary);
+        builder.MakeCompound(seams);
+        bool anySeam = false;
+        for (TopExp_Explorer edges(*under, TopAbs_EDGE); edges.More(); edges.Next()) {
+            const TopoDS_Edge& edge = TopoDS::Edge(edges.Current());
+            const bool seam = BRep_Tool::IsClosed(edge, *under);
+            builder.Add(seam ? seams : boundary, edge);
+            anySeam = anySeam || seam;
+        }
+        const auto crosses = meets(boundary);
+        if (!crosses || *crosses) {
+            return crosses ? std::optional<bool>(false) : std::nullopt;
+        }
+        if (anySeam) {
+            const auto throughSeam = meets(seams);
+            if (!throughSeam || *throughSeam) {
+                return std::nullopt;
+            }
+        }
+        return true;
+    }
+    catch (const Standard_Failure&) {
+        return std::nullopt;
+    }
+    catch (const Base::Exception&) {
+        return std::nullopt;
+    }
+}
+
+const bool upToPathRegistered = (App::setElementUpToPathFunction(&upToPath), true);
 }  // namespace
 
 FeatureExtrude::FeatureExtrude()

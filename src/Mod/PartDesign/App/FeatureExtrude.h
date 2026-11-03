@@ -143,6 +143,14 @@ protected:
     std::optional<Base::Placement> madeUnder;
 };
 
+/** True if \a feature's Placement was set during its recompute and the shape made under it hasn't
+ * come yet (ops#524, PLAN decision 182): its shape is the old one under the new placement, and
+ * the reference solver, which runs in between, can't carry a point by that placement. The
+ * extrusion's own is shapeMadeUnderPlacement(); this one serves a later feature that passes an
+ * extrusion's far pieces on. Kept in Feature.cpp, by Feature::onChanged().
+ */
+PartDesignExport bool placedAheadOfShape(const Feature* feature);
+
 }  // namespace PartDesign
 
 ENABLE_BITMASK_OPERATORS(PartDesign::FeatureExtrude::ExtrudeOption)

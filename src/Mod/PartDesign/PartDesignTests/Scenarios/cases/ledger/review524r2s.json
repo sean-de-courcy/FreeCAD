@@ -1,0 +1,20 @@
+{
+"entries": {
+"ResizeLeft|A|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prA1e-r2", "issue": "ops#524", "tier": "F"},
+"ResizeRightBigHole|A|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prA1e-r2", "issue": "ops#524", "tier": "F"},
+"ResizeRightPlus2|A|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prA1e-r2", "issue": "ops#524", "tier": "F"},
+"ResizeRightScale4m|A|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prA1e-r2", "issue": "ops#524", "tier": "F"},
+"ResizeRight|A|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prA1e-r2", "issue": "ops#524", "tier": "F"},
+"ResizeUp|A|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prA1e-r2", "issue": "ops#524", "tier": "F"},
+"SlideA|A|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prA1e-r2", "issue": "ops#524", "tier": "F"},
+"SlideC|A|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prA1e-r2", "issue": "ops#524", "tier": "F"},
+"SlideD|A|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prA1e-r2", "issue": "ops#524", "tier": "F"},
+"SlideF|A|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review prA1e-r2", "issue": "ops#524", "tier": "F"},
+"SlideG|A|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prA1e-r2", "issue": "ops#524", "tier": "F"},
+"SlideH|A|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prA1e-r2", "issue": "ops#524", "tier": "F"},
+"SlideSqB|A|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prA1e-r2", "issue": "ops#524", "tier": "F"},
+"SlideSq|A|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prA1e-r2", "issue": "ops#524", "tier": "F"},
+"SlideTwoB|A|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prA1e-r2", "issue": "ops#524", "tier": "F"},
+"SlideTwo|A|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review prA1e-r2", "issue": "ops#524", "tier": "F"}
+}
+}

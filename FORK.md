@@ -432,7 +432,8 @@ names it.
 | `fix/526-vacated-place` | fix | ops#526 | - | `integration` `434a64bda7` | `6fd04a6c64` (fork PR 408), 2026-11-02 | never (fork fix) |
 | `infra/564-accept-229` | corpus | ops#564 | - | `fix/526-vacated-place` `74d6586162` (fork PR 408) | `97f6bae32c` (fork PR 409), 2026-11-02 | never (fork corpus) |
 | `fix/549-pass-through-veto` | fix | ops#549 | - | fork PR 408 (D2), then `integration` | `69d13a2c51` (fork PR 410), 2026-11-02 | never (fork fix) |
-| `fix/396-macos-pipe` | fix | ops#396 | - | `integration` `69d13a2c51` | (fork PR 404) | a multisection Pipe's section within 1e-8 mm of perpendicular to the one before (as that one was turned) is turned 1e-9 mm towards it (in the sections' order along the spine), so OCCT's vertex pairing ties no more and turns it with the spine on every system; right angles out of one plane stop the pipe (decision 228) |
+| `fix/396-macos-pipe` | fix | ops#396 | - | `integration` `69d13a2c51` | `4b7856c4bc` (fork PR 404), 2026-11-02 | a multisection Pipe's section within 1e-8 mm of perpendicular to the one before (as that one was turned) is turned 1e-9 mm towards it (in the sections' order along the spine), so OCCT's vertex pairing ties no more and turns it with the spine on every system; right angles out of one plane stop the pipe (decision 228) |
+| `fix/524-departed-moved` | fix | ops#524 | - | `integration` `69d13a2c51` | (fork PR 403) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 
