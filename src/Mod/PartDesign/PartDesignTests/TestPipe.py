@@ -5285,7 +5285,9 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
                     profile.Placement = turned
                 self.doc.recompute()
                 self.assertFalse(pipe.isValid())
-                self.assertIn("can't be matched", pipe.getStatusString())
+                # A face profile's own reference breaks first: the part moved as one piece with
+                # another edit (ops#557, decisions 231, 234 and 236)
+                self.assertRegex(pipe.getStatusString(), "can't be matched|Missing face reference")
 
     def testClosedRingTurnedWithAnotherEditStops(self):
         """The ring and its profile (at the bottom left corner) turned about Z while something
@@ -5377,7 +5379,10 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
                 self.doc.recompute()
                 if angle:
                     self.assertFalse(pipe.isValid())
-                    self.assertIn("can't be matched", pipe.getStatusString())
+                    # A face profile's own reference breaks first (ops#557, decisions 231, 234, 236)
+                    self.assertRegex(
+                        pipe.getStatusString(), "can't be matched|Missing face reference"
+                    )
                     continue
                 self.assertTrue(pipe.isValid(), pipe.getStatusString())
                 self.assertLess((V(pipe.SpineStart[0]) - rotation.multVec(start)).Length, 1e-6)
