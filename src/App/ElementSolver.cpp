@@ -6951,14 +6951,16 @@ bool overlapsMappedPlace(
 // before, and its pick must lie at or overlap the old place when anything does; else it breaks
 // the same way.
 //
-// A part moved as one piece with another edit (decision 234, 10.11.2) is read at two places: where
-// the element is if it went with the part (FOLLOWED, the entry's fingerprint) and where it was
-// (OLD). Nothing at OLD: the part left its old place, and the entry is solved on the followed
-// record. The hit alone at OLD and also at or overlapping FOLLOWED (an element the turn maps onto
-// itself), or for a missing entry one element there that is also at FOLLOWED and is the pick: the
-// two readings agree, solved on the followed record. Anything else breaks, the elements at
-// FOLLOWED listed first (role `turned`), those at OLD second (`frame`), the hit third (`name`).
-// 211's keep of the element where it was never runs on such a turn.
+// The keep where it was, and a missing entry's pick there, also need the place the element would
+// be at had it moved with its frame (FOLLOWED, the record as it is) to be empty or to hold it
+// (decision 236): anything else there breaks, listed first (role `turned`). A part turned onto
+// itself by its own symmetry has a twin where each element was, whatever the closure read.
+//
+// A part moved as one piece with another edit (decisions 234 and 236, 10.11's literal stop)
+// breaks: the elements where it is if it went with the part (FOLLOWED, the entry's fingerprint)
+// listed first (`turned`), those where it was (OLD) second (`frame`), the hit third (`name`).
+// 211's keep never runs on such a turn. A record without sources breaks only where something
+// sits where it was.
 std::vector<SolveOutcome> solveOwner(const SolveInput& input)
 {
     const bool framed = std::any_of(input.entries.begin(), input.entries.end(), [](const auto& e) {
@@ -7090,65 +7092,41 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         outcome.evidence = std::string(piece ? "the part moved as one piece by "
                                              : "the target's frame moved by ")
             + formatDistance(motion.getPosition().Length()) + " mm / " + formatDistance(turn)
-            + (piece ? " deg with another edit; " : " deg; ") + judge.place.front()
-            + (judge.at > 0 ? " is where" : " overlaps where") + " the element was";
+            + (piece ? " deg with another edit" : " deg");
+        if (!judge.place.empty()) {
+            outcome.evidence += "; " + judge.place.front()
+                + (judge.at > 0 ? " is where" : " overlaps where") + " the element was";
+        }
+        else if (!judge.followed.empty()) {
+            outcome.evidence += "; " + judge.followed.front() + " is where it went";
+        }
         return outcome;
     };
     for (std::size_t i = 0; i < input.entries.size(); ++i) {
         const auto& entry = input.entries[i];
         local.entries[i].turned.reset();
         if (entry.turned && entry.fingerprint.isValid() && entry.turned->oldPlace.isValid()) {
-            // A part moved as one piece with another edit (decision 234, 10.11.2)
+            // A part moved as one piece with another edit (decisions 234 and 236): broken
             const auto& turn = *entry.turned;
             local.entries[i].frame.reset();
             Judged judge;
             judge.turned = true;
             judge.mapped = turn.oldPlace;
             scan(entry, turn.oldPlace, turn.oldBoxDropped, judge);
-            if (judge.place.empty()) {
-                // (1) Nothing where it was: the part left its old place, solved where it went
-                continue;
-            }
-            // Where it went: the elements at or overlapping the followed record
-            Judged there;
             if (turn.followed) {
+                Judged there;
                 scan(entry, entry.fingerprint, turn.followedBoxDropped, there);
+                judge.followed = there.place;
             }
-            judge.followed = there.place;
-            auto atFollowed = [&](const std::string& index) {
-                return std::find(there.place.begin(), there.place.end(), index) != there.place.end();
-            };
-            if (!entry.exact) {
-                // (2) One element where it was, also where it went: the tiers' pick must be it
-                if (judge.place.size() == 1 && atFollowed(judge.place.front())) {
-                    judged.emplace(i, std::move(judge));
-                    continue;
-                }
-                // (3) The old place is the ambiguity itself: no tiers run
-                decided.emplace(i, frameBreak(i, judge, {}));
-                local.entries[i].fingerprint = ElementFingerprint();
+            else if (judge.place.empty()) {
+                // No sources: nothing where it was, so the part moved with its frame
                 continue;
             }
-            const std::string& hit = entry.exactElement;
-            std::vector<std::string> others;
-            for (const auto& index : judge.place) {
-                if (index != hit) {
-                    others.push_back(index);
-                }
+            std::vector<std::string> named;
+            if (entry.exact) {
+                named.push_back(entry.exactElement);
             }
-            const bool equivalent = entry.policy == SolvePolicy::Equivalent && entry.equivalent
-                && std::all_of(others.begin(), others.end(), [&](const std::string& index) {
-                                        return entry.equivalent(hit, index);
-                                    });
-            if ((others.empty() || equivalent) && atFollowed(hit)) {
-                // (2) Both readings name it (the turn maps it onto itself): the followed record
-                // judges it, and a split's pick must be it
-                judge.place.push_back(hit);
-                judged.emplace(i, std::move(judge));
-                continue;
-            }
-            // (3) Another element where it was, or the hit there but not where it went
-            decided.emplace(i, frameBreak(i, judge, {hit}));
+            decided.emplace(i, frameBreak(i, judge, named));
             local.entries[i].fingerprint = ElementFingerprint();
             continue;
         }
@@ -7166,6 +7144,10 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             local.entries[i].frame.reset();
             continue;
         }
+        // Where it would be had it moved with its frame: the record as it is (decision 236)
+        Judged there;
+        scan(entry, entry.fingerprint, false, there);
+        judge.followed = there.place;
         if (!entry.exact) {
             judged.emplace(i, std::move(judge));
             continue;
@@ -7183,7 +7165,18 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             && std::all_of(others.begin(), others.end(), [&](const std::string& index) {
                                     return entry.equivalent(hit, index);
                                 });
-        if (others.empty() || equivalent) {
+        // Another element where it would be had it moved with its frame: a twin may sit where
+        // it was (decision 236)
+        const bool followedOther = std::any_of(
+            judge.followed.begin(),
+            judge.followed.end(),
+            [&](const std::string& index) {
+                return index != hit
+                    && !(entry.policy == SolvePolicy::Equivalent && entry.equivalent
+                         && entry.equivalent(hit, index));
+            }
+        );
+        if ((others.empty() || equivalent) && !followedOther) {
             // The element where it was (10.2 (1)), or a piece of it (10.9 F2): judged by the
             // mapped record, which finds it unmoved, or within the old element
             local.entries[i].fingerprint = judge.mapped;
@@ -7217,7 +7210,13 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             && std::all_of(picks.begin(), picks.end(), [&](const auto& k) {
                    return std::find(judge.place.begin(), judge.place.end(), k) != judge.place.end();
                });
-        if (!there) {
+        // Nothing but the pick where it would be had it moved with its frame (decision 236)
+        const bool followedClear = std::all_of(
+            judge.followed.begin(),
+            judge.followed.end(),
+            [&](const auto& k) { return std::find(picks.begin(), picks.end(), k) != picks.end(); }
+        );
+        if (!there || !followedClear) {
             outcome = frameBreak(i, judge, picks);
         }
     }

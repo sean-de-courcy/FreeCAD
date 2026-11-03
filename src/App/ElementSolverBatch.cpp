@@ -1908,9 +1908,8 @@ bool solveElementReferences(DocumentObject* feature,
                 }
                 const bool agrees
                     = hitAgrees(*entry, saved, now, diagonal, tolerances, continuationDistance);
-                // A part moved as one piece with another edit (decision 234): read where it was
-                // too. Another element there, or the hit there but not where it went, breaks
-                // with what sits there (without a followed reading, anything there)
+                // A part moved as one piece with another edit breaks (decisions 234 and 236),
+                // with what sits where it was; without sources, only where anything sits there
                 std::optional<std::vector<std::string>> oldPlaces;
                 bool twoPlaces = false;
                 if (entry->turned) {
@@ -1919,8 +1918,7 @@ bool solveElementReferences(DocumentObject* feature,
                     oldPlaces = elementsAt(old, hit, false);
                     const bool hitThere
                         = Data::atSamePlace(old, now, diagonal, tolerances, continuationDistance);
-                    twoPlaces = !oldPlaces || !oldPlaces->empty()
-                        || (hitThere && (!entry->turnFollowed || !agrees));
+                    twoPlaces = entry->turnFollowed || !oldPlaces || !oldPlaces->empty() || hitThere;
                 }
                 if (agrees && !twoPlaces) {
                     countReferenceMigration(entry->owner, MigrationOutcome::Kept);
@@ -2043,15 +2041,15 @@ bool solveElementReferences(DocumentObject* feature,
                         name = *std::min_element(element.names.begin(), element.names.end());
                     }
                 }
-                // A part moved as one piece with another edit (decision 234): another element
-                // where it was (without a followed reading, anything there) breaks
+                // A part moved as one piece with another edit breaks (decisions 234 and 236);
+                // without sources, only where anything sits where it was
                 bool turnedThere = false;
                 if (entry->turned && saved.isValid()) {
                     const auto old = Data::ElementFingerprint::fromString(entry->oldFingerprint)
                                          .transformed(*entry->turned, tolerances.angle);
                     const auto others = elementsAt(old, index, true);
-                    turnedThere = !others || !others->empty()
-                        || (!entry->turnFollowed && exists
+                    turnedThere = entry->turnFollowed || !others || !others->empty()
+                        || (exists
                             && Data::atSamePlace(old, place.now, diagonal, tolerances, continuationDistance));
                 }
                 ReferenceReport::Entry item;
