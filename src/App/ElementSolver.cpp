@@ -6950,10 +6950,19 @@ bool overlapsMappedPlace(
 // the old element) is solved with the mapped record (10.9 F2). A missing entry is solved as
 // before, and its pick must lie at or overlap the old place when anything does; else it breaks
 // the same way.
+//
+// A part moved as one piece with another edit (decision 234, 10.11.2) is read at two places: where
+// the element is if it went with the part (FOLLOWED, the entry's fingerprint) and where it was
+// (OLD). Nothing at OLD: the part left its old place, and the entry is solved on the followed
+// record. The hit alone at OLD and also at or overlapping FOLLOWED (an element the turn maps onto
+// itself), or for a missing entry one element there that is also at FOLLOWED and is the pick: the
+// two readings agree, solved on the followed record. Anything else breaks, the elements at
+// FOLLOWED listed first (role `turned`), those at OLD second (`frame`), the hit third (`name`).
+// 211's keep of the element where it was never runs on such a turn.
 std::vector<SolveOutcome> solveOwner(const SolveInput& input)
 {
     const bool framed = std::any_of(input.entries.begin(), input.entries.end(), [](const auto& e) {
-        return e.frame && e.fingerprint.isValid();
+        return (e.frame || e.turned) && e.fingerprint.isValid();
     });
     if (!framed) {
         return solveOwnerInFrame(input);
@@ -6993,6 +7002,41 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         // At the old place, then overlapping it
         std::vector<std::string> place;
         std::size_t at = 0;
+        // A one-piece turn's (decision 234): at or overlapping the followed place
+        bool turned = false;
+        std::vector<std::string> followed;
+    };
+    // The elements of the entry's type at \a mapped, then those overlapping it: the cheap hint
+    // first (its kind, direction and radii), so that only the rest are fingerprinted
+    auto scan = [&](const SolveInput::Entry& entry,
+                    const ElementFingerprint& mapped,
+                    bool boxDropped,
+                    Judged& judge) {
+        std::vector<std::string> over;
+        for (const auto& [index, names] : elementsOf[entry.type]) {
+            if (std::find(entry.excluded.begin(), entry.excluded.end(), index)
+                != entry.excluded.end()) {
+                continue;
+            }
+            ElementFingerprint intrinsic;
+            std::optional<Base::Vector3d> anchor;
+            if (input.hintOf && input.hintOf(index, intrinsic, anchor)
+                && !intrinsicAgrees(mapped, intrinsic, input.tolerances)) {
+                continue;
+            }
+            const ElementFingerprint& fp = fingerprintOf(index);
+            if (!fp.isValid()) {
+                continue;
+            }
+            if (atMappedPlace(mapped, fp, boxDropped, input)) {
+                judge.place.push_back(index);
+            }
+            else if (overlapsMappedPlace(mapped, fp, input)) {
+                over.push_back(index);
+            }
+        }
+        judge.at = judge.place.size();
+        judge.place.insert(judge.place.end(), over.begin(), over.end());
     };
     std::map<std::size_t, Judged> judged;
     std::map<std::size_t, SolveOutcome> decided;
@@ -7016,28 +7060,98 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                                                  : std::numeric_limits<double>::quiet_NaN()
             );
         };
+        auto listed = [&](const std::string& index) {
+            return std::find(outcome.candidates.begin(), outcome.candidates.end(), index)
+                != outcome.candidates.end();
+        };
+        // A one-piece turn's: where it is if it went with the part first (decision 234)
+        for (const auto& index : judge.followed) {
+            list(index, "turned");
+        }
         for (const auto& index : judge.place) {
-            list(index, "frame");
+            if (!listed(index)) {
+                list(index, "frame");
+            }
         }
         for (const auto& index : named) {
-            if (std::find(judge.place.begin(), judge.place.end(), index) == judge.place.end()) {
+            if (!listed(index)) {
                 list(index, "name");
             }
         }
+        const Base::Placement& motion = judge.turned ? entry.turned->motion : *entry.frame;
+        // (a record without sources only knows its frame moved)
+        const bool piece = judge.turned && entry.turned->followed;
         double q0 = 0.0;
         double q1 = 0.0;
         double q2 = 0.0;
         double q3 = 1.0;
-        entry.frame->getRotation().getValue(q0, q1, q2, q3);
+        motion.getRotation().getValue(q0, q1, q2, q3);
         const double turn = 2.0 * std::acos(std::min(1.0, std::abs(q3))) * 180.0 / std::numbers::pi;
-        outcome.evidence = "the target's frame moved by "
-            + formatDistance(entry.frame->getPosition().Length()) + " mm / " + formatDistance(turn)
-            + " deg; " + judge.place.front() + (judge.at > 0 ? " is where" : " overlaps where")
-            + " the element was";
+        outcome.evidence = std::string(piece ? "the part moved as one piece by "
+                                             : "the target's frame moved by ")
+            + formatDistance(motion.getPosition().Length()) + " mm / " + formatDistance(turn)
+            + (piece ? " deg with another edit; " : " deg; ") + judge.place.front()
+            + (judge.at > 0 ? " is where" : " overlaps where") + " the element was";
         return outcome;
     };
     for (std::size_t i = 0; i < input.entries.size(); ++i) {
         const auto& entry = input.entries[i];
+        local.entries[i].turned.reset();
+        if (entry.turned && entry.fingerprint.isValid() && entry.turned->oldPlace.isValid()) {
+            // A part moved as one piece with another edit (decision 234, 10.11.2)
+            const auto& turn = *entry.turned;
+            local.entries[i].frame.reset();
+            Judged judge;
+            judge.turned = true;
+            judge.mapped = turn.oldPlace;
+            scan(entry, turn.oldPlace, turn.oldBoxDropped, judge);
+            if (judge.place.empty()) {
+                // (1) Nothing where it was: the part left its old place, solved where it went
+                continue;
+            }
+            // Where it went: the elements at or overlapping the followed record
+            Judged there;
+            if (turn.followed) {
+                scan(entry, entry.fingerprint, turn.followedBoxDropped, there);
+            }
+            judge.followed = there.place;
+            auto atFollowed = [&](const std::string& index) {
+                return std::find(there.place.begin(), there.place.end(), index) != there.place.end();
+            };
+            if (!entry.exact) {
+                // (2) One element where it was, also where it went: the tiers' pick must be it
+                if (judge.place.size() == 1 && atFollowed(judge.place.front())) {
+                    judged.emplace(i, std::move(judge));
+                    continue;
+                }
+                // (3) The old place is the ambiguity itself: no tiers run
+                decided.emplace(i, frameBreak(i, judge, {}));
+                local.entries[i].fingerprint = ElementFingerprint();
+                continue;
+            }
+            const std::string& hit = entry.exactElement;
+            std::vector<std::string> others;
+            for (const auto& index : judge.place) {
+                if (index != hit) {
+                    others.push_back(index);
+                }
+            }
+            const bool equivalent = entry.policy == SolvePolicy::Equivalent && entry.equivalent
+                && std::all_of(others.begin(), others.end(), [&](const std::string& index) {
+                                        return entry.equivalent(hit, index);
+                                    });
+            if ((others.empty() || equivalent) && atFollowed(hit)) {
+                // (2) Both readings name it (the turn maps it onto itself): the followed record
+                // judges it, and a split's pick must be it
+                judge.place.push_back(hit);
+                judged.emplace(i, std::move(judge));
+                continue;
+            }
+            // (3) Another element where it was, or the hit there but not where it went
+            decided.emplace(i, frameBreak(i, judge, {hit}));
+            local.entries[i].fingerprint = ElementFingerprint();
+            continue;
+        }
         if (!entry.frame || !entry.fingerprint.isValid()) {
             local.entries[i].frame.reset();
             continue;
@@ -7045,33 +7159,8 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         Judged judge;
         judge.mapped = entry.fingerprint.transformed(*entry.frame, input.tolerances.angle);
         const bool boxDropped = entry.fingerprint.extentMin && !judge.mapped.extentMin;
-        // The elements of its type there: the cheap hint first (its kind, direction and radii), so
-        // that only the rest are fingerprinted
-        std::vector<std::string> over;
-        for (const auto& [index, names] : elementsOf[entry.type]) {
-            if (std::find(entry.excluded.begin(), entry.excluded.end(), index)
-                != entry.excluded.end()) {
-                continue;
-            }
-            ElementFingerprint intrinsic;
-            std::optional<Base::Vector3d> anchor;
-            if (input.hintOf && input.hintOf(index, intrinsic, anchor)
-                && !intrinsicAgrees(judge.mapped, intrinsic, input.tolerances)) {
-                continue;
-            }
-            const ElementFingerprint& fp = fingerprintOf(index);
-            if (!fp.isValid()) {
-                continue;
-            }
-            if (atMappedPlace(judge.mapped, fp, boxDropped, input)) {
-                judge.place.push_back(index);
-            }
-            else if (overlapsMappedPlace(judge.mapped, fp, input)) {
-                over.push_back(index);
-            }
-        }
-        judge.at = judge.place.size();
-        judge.place.insert(judge.place.end(), over.begin(), over.end());
+        // The elements of its type there
+        scan(entry, judge.mapped, boxDropped, judge);
         if (judge.place.empty()) {
             // Nothing where it was: the part moved with its frame (10.2 (3))
             local.entries[i].frame.reset();

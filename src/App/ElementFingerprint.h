@@ -340,6 +340,27 @@ struct AppExport ElementFingerprint
         double angle
     );
 
+    /// The chain's motion read in two parts (decision 234, `notes\naming-class-D.md` 10.11.2).
+    struct PieceMotion
+    {
+        /// The one motion M of the sources, loci and vectors both lists have (the identity when
+        /// nothing moved).
+        Base::Placement motion;
+        /// Something else changed: a digest, or a key in one list only.
+        bool changed = false;
+    };
+    /** One piece (decision 234): the shared keys (both lists' sources by key and locus, the `D`
+     * entries aside) agree on one motion as rigidMotion() tests them, and \a changed says whether
+     * anything else changed. None when a shared source moved otherwise or a shared locus or
+     * vector doesn't go with the motion. rigidMotion() is this with nothing else changed.
+     */
+    static std::optional<PieceMotion> pieceMotion(
+        const std::vector<Source>& saved,
+        const std::vector<Source>& now,
+        double distance,
+        double angle
+    );
+
     /** This fingerprint moved by \a motion (ops#557): the old global place in the current frame
      * when \a motion is P_now.inverse() * P_saved. Points, directions and the sides' directions are
      * moved; axes and line directions are sign-normalized again as the producer does, a plane's

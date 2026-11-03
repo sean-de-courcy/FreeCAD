@@ -86,6 +86,15 @@ struct AppExport SolverEntry
     /// and \a frame stays empty. Empty when the chain didn't move as one piece, or the mapping is
     /// the identity.
     std::optional<Base::Placement> rigid;
+    /// The chain moved as one piece with another edit (decision 234, `notes\naming-class-D.md`
+    /// 10.11.2): T = P_now.inverse() * P_saved, the identity where the frame stayed, which takes
+    /// the record to the element's old global place, while \a rigid reads it where the element is
+    /// if it went with the part. solveOwner() reads both; \a frame stays empty. Also set where the
+    /// frame moved for a record without sources, with no followed reading (\a turnFollowed false).
+    std::optional<Base::Placement> turned;
+    /// The turn's motion M in body coordinates (T without sources), for the evidence.
+    Base::Placement turnMotion;
+    bool turnFollowed = true;
 };
 
 /// What pass 1 gathers for one update of one feature.

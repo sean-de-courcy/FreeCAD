@@ -908,14 +908,42 @@ std::optional<Base::Placement> ElementFingerprint::rigidMotion(
     double angle
 )
 {
-    if (saved.size() != now.size()) {
+    // Nothing else changed (decision 231): a turn made with another edit isn't rigid
+    const auto piece = pieceMotion(saved, now, distance, angle);
+    if (!piece || piece->changed) {
         return std::nullopt;
     }
-    for (std::size_t i = 0; i < saved.size(); ++i) {
-        // Nothing else changed (decision 231): a turn made with another edit isn't one piece
-        if (saved[i].key != now[i].key || saved[i].locus != now[i].locus
-            || saved[i].digest != now[i].digest) {
-            return std::nullopt;
+    return piece->motion;
+}
+
+std::optional<ElementFingerprint::PieceMotion> ElementFingerprint::pieceMotion(
+    const std::vector<Source>& saved,
+    const std::vector<Source>& now,
+    double distance,
+    double angle
+)
+{
+    // The keys both lists have, paired in their order (by locus, then key); a key in one list
+    // only, or a digest that differs, is another edit (decision 234)
+    PieceMotion result;
+    std::vector<std::pair<const Source*, const Source*>> shared;
+    auto precedes = [](const Source& a, const Source& b) {
+        return a.locus != b.locus ? a.locus < b.locus : a.key < b.key;
+    };
+    for (std::size_t i = 0, j = 0; i < saved.size() || j < now.size();) {
+        if (j == now.size() || (i < saved.size() && precedes(saved[i], now[j]))) {
+            result.changed = true;
+            ++i;
+        }
+        else if (i == saved.size() || precedes(now[j], saved[i])) {
+            result.changed = true;
+            ++j;
+        }
+        else {
+            result.changed = result.changed || saved[i].digest != now[j].digest;
+            shared.emplace_back(&saved[i], &now[j]);
+            ++i;
+            ++j;
         }
     }
     // The rotation between two placements, as an angle
@@ -933,9 +961,9 @@ std::optional<Base::Placement> ElementFingerprint::rigidMotion(
     };
     // The motion from the first source that moved
     Base::Placement motion;
-    for (std::size_t i = 0; i < saved.size(); ++i) {
-        if (!saved[i].locus && !same(saved[i].placement, now[i].placement)) {
-            motion = now[i].placement * saved[i].placement.inverse();
+    for (const auto& [was, is] : shared) {
+        if (!was->locus && !same(was->placement, is->placement)) {
+            motion = is->placement * was->placement.inverse();
             break;
         }
     }
@@ -946,9 +974,9 @@ std::optional<Base::Placement> ElementFingerprint::rigidMotion(
         const double along = a * b;
         return std::atan2((a % b).Length(), sense ? along : std::abs(along)) <= angle;
     };
-    for (std::size_t i = 0; i < saved.size(); ++i) {
-        const Source& before = saved[i];
-        const Source& after = now[i];
+    for (const auto& [was, is] : shared) {
+        const Source& before = *was;
+        const Source& after = *is;
         if (before.locus == 'D') {
             continue;
         }
@@ -987,7 +1015,8 @@ std::optional<Base::Placement> ElementFingerprint::rigidMotion(
             return std::nullopt;
         }
     }
-    return motion;
+    result.motion = motion;
+    return result;
 }
 
 std::vector<Base::Vector3d> ElementFingerprint::convexOutline(

@@ -1323,3 +1323,65 @@ TEST(ElementFingerprint, rigidMotionNothingElseChanged)
     edited[1].digest = 0x12;
     EXPECT_FALSE(ElementFingerprint::rigidMotion(saved, edited, tolerance, angle).has_value());
 }
+
+TEST(ElementFingerprint, pieceMotion)
+{
+    // Decision 234: one piece and nothing else changed are read apart (10.11.2)
+    const double tolerance = 1e-7;
+    const double angle = 1e-6;
+    const Base::Placement turn(
+        Base::Vector3d(),
+        Base::Rotation(Base::Vector3d(0, 0, 1), std::numbers::pi)
+    );
+    const Base::Placement spine(Base::Vector3d(2, 0, 0), Base::Rotation());
+    const Base::Placement profile(Base::Vector3d(0, 3, 0), Base::Rotation());
+    auto digest = [](const std::string& key, std::uint64_t value) {
+        ElementFingerprint::Source source;
+        source.locus = 'D';
+        source.key = key;
+        source.digest = value;
+        return source;
+    };
+    const std::vector<ElementFingerprint::Source> saved {
+        placed("1", spine),
+        placed("2", profile),
+        digest("1", 0x11),
+        digest("2", 0x22)
+    };
+    //   two sources turned 180 degrees, the spine's lines drawn anew: one piece, changed
+    std::vector<ElementFingerprint::Source> turned {
+        placed("1", turn * spine),
+        placed("2", turn * profile),
+        digest("1", 0x12),
+        digest("2", 0x22)
+    };
+    auto piece = ElementFingerprint::pieceMotion(saved, turned, tolerance, angle);
+    ASSERT_TRUE(piece.has_value());
+    EXPECT_TRUE(piece->changed);
+    EXPECT_TRUE(piece->motion.getRotation().isSame(turn.getRotation(), 1e-9));
+    EXPECT_FALSE(ElementFingerprint::rigidMotion(saved, turned, tolerance, angle).has_value());
+    //   the same turn with nothing else changed: one piece, unchanged, as rigidMotion() reads it
+    turned[2].digest = 0x11;
+    piece = ElementFingerprint::pieceMotion(saved, turned, tolerance, angle);
+    ASSERT_TRUE(piece.has_value());
+    EXPECT_FALSE(piece->changed);
+    EXPECT_TRUE(ElementFingerprint::rigidMotion(saved, turned, tolerance, angle).has_value());
+    //   a key in one list only is another edit; the shared ones still agree on the turn
+    auto added = turned;
+    added.push_back(digest("3", 0x33));
+    piece = ElementFingerprint::pieceMotion(saved, added, tolerance, angle);
+    ASSERT_TRUE(piece.has_value());
+    EXPECT_TRUE(piece->changed);
+    EXPECT_TRUE(piece->motion.getRotation().isSame(turn.getRotation(), 1e-9));
+    //   a source left behind, the digests equal: not one piece
+    auto behind = turned;
+    behind[1] = placed("2", profile);
+    EXPECT_FALSE(ElementFingerprint::pieceMotion(saved, behind, tolerance, angle).has_value());
+    //   nothing moved, a digest changed: the identity, changed (an ordinary edit)
+    auto edited = saved;
+    edited[2].digest = 0x12;
+    piece = ElementFingerprint::pieceMotion(saved, edited, tolerance, angle);
+    ASSERT_TRUE(piece.has_value());
+    EXPECT_TRUE(piece->changed);
+    EXPECT_TRUE(piece->motion.isIdentity());
+}

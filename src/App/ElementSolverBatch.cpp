@@ -318,6 +318,15 @@ void placementSources(const GeoFeature* geo, std::vector<Data::ElementFingerprin
             placed.insert(object);
         }
     }
+    // A primitive target's Placement is its own, not made from its base (Rv2dPrimTarget): a
+    // source as in the chain
+    if (isA(geo, primitiveType) && seen.insert(geo).second) {
+        Data::ElementFingerprint::Source source;
+        source.key = keyOf(geo);
+        source.placement = geo->Placement.getValue();
+        sources.push_back(std::move(source));
+        placed.insert(geo);
+    }
     // The origin lines and planes named as geometry: loci
     for (const auto& [object, mirror] : named) {
         auto datum = dynamic_cast<const DatumElement*>(object);
@@ -392,7 +401,10 @@ void placementSources(const GeoFeature* geo, std::vector<Data::ElementFingerprin
                 }
             }
             else {
+                // Inline: a list saved to a file otherwise writes only the file's name (a
+                // pattern's Spacings, a polygon's Nodes)
                 Base::StringWriter writer;
+                writer.setForceXML(true);
                 writer.Stream().imbue(std::locale::classic());
                 writer.Stream() << std::setprecision(std::numeric_limits<double>::max_digits10);
                 try {
@@ -687,8 +699,9 @@ bool exactNeedsSolving(const SolverEntry& entry,
     }
     // The target's frame moved since the record (ops#557): the local shape and its names can be
     // as they were while the elements traded places globally. solveOwner() judges the hit against
-    // the old global place.
-    if (entry.frame) {
+    // the old global place, and a part moved as one piece with another edit at both places
+    // (decision 234).
+    if (entry.frame || entry.turned) {
         return true;
     }
     const std::string type = indexType(entry.oldIndex);
@@ -1205,13 +1218,13 @@ bool solveElementReferences(DocumentObject* feature,
                 // the element is now, and the frame's check (211) is skipped. A feature-held
                 // record maps by its frames, a Body-held one (body coordinates) by the motion
                 const auto saved = Data::ElementFingerprint::fromString(record);
-                std::optional<Base::Placement> motion;
+                std::optional<Data::ElementFingerprint::PieceMotion> piece;
                 if (saved.isValid() && !saved.sources.empty() && (saved.frame || targetIsBody)) {
                     if (!sourcesRead) {
                         sourcesRead = true;
                         placementSources(geo, sourcesNow);
                     }
-                    motion = Data::ElementFingerprint::rigidMotion(
+                    piece = Data::ElementFingerprint::pieceMotion(
                         saved.sources,
                         sourcesNow,
                         frameDistance * std::max(1.0, frameDiagonal),
@@ -1221,26 +1234,43 @@ bool solveElementReferences(DocumentObject* feature,
                 auto moves = [&](const Base::Placement& placement) {
                     return movesFrame(placement, frameDiagonal, frameTolerances.angle, frameDistance);
                 };
-                if (motion && moves(*motion)) {
+                if (piece && moves(piece->motion)) {
                     const Base::Placement mapped = saved.frame
-                        ? frameNow->inverse() * *motion * *saved.frame
-                        : *motion;
+                        ? frameNow->inverse() * piece->motion * *saved.frame
+                        : piece->motion;
                     if (moves(mapped)) {
                         entry.rigid = mapped;
+                    }
+                    // With another edit (decision 234): read where it went and where it was. The
+                    // old global place is the record itself where the frame stayed
+                    if (piece->changed) {
+                        entry.turned = saved.frame ? frameNow->inverse() * *saved.frame
+                                                   : Base::Placement();
+                        entry.turnMotion = piece->motion;
                     }
                 }
                 else if (saved.isValid() && saved.frame) {
                     const Base::Placement turned = frameNow->inverse() * *saved.frame;
                     if (moves(turned)) {
-                        entry.frame = turned;
+                        if (saved.sources.empty()) {
+                            // No sources (a link cycle at the write, a Body without a Tip,
+                            // 10.11.7 F5): anything where it was breaks, no keep (decision 150)
+                            entry.turned = turned;
+                            entry.turnMotion = turned;
+                            entry.turnFollowed = false;
+                        }
+                        else {
+                            entry.frame = turned;
+                        }
                     }
                 }
             }
             // The old shape under the new frame: the update after the shape is made judges the
             // move, with the record as it was (its refresh is skipped too)
-            if ((entry.frame || entry.rigid) && shapeAwaitsFrame(geo)) {
+            if ((entry.frame || entry.rigid || entry.turned) && shapeAwaitsFrame(geo)) {
                 entry.frame.reset();
                 entry.rigid.reset();
+                entry.turned.reset();
                 continue;
             }
         }
@@ -1714,6 +1744,11 @@ bool solveElementReferences(DocumentObject* feature,
                     back = entry->guess.origFingerprint.empty() && entry->guess.kind != "piece"
                         && passThroughOf(*entry) == PassThrough::None;
                 }
+                else if (entry->turned) {
+                    // A part moved as one piece with another edit (decision 234): the element
+                    // held is judged at both places as the entry of its own; no snap-back
+                    back = false;
+                }
                 else {
                     // The target's frame moved (ops#557): the original as saved is the record
                     // mapped to where it was globally; the name's element after a hidden turn
@@ -1871,23 +1906,39 @@ bool solveElementReferences(DocumentObject* feature,
                     countReferenceMigration(entry->owner, MigrationOutcome::Kept);
                     continue;
                 }
-                if (hitAgrees(*entry, saved, now, diagonal, tolerances, continuationDistance)) {
+                const bool agrees
+                    = hitAgrees(*entry, saved, now, diagonal, tolerances, continuationDistance);
+                // A part moved as one piece with another edit (decision 234): read where it was
+                // too. Another element there, or the hit there but not where it went, breaks
+                // with what sits there (without a followed reading, anything there)
+                std::optional<std::vector<std::string>> oldPlaces;
+                bool twoPlaces = false;
+                if (entry->turned) {
+                    const auto old = Data::ElementFingerprint::fromString(entry->oldFingerprint)
+                                         .transformed(*entry->turned, tolerances.angle);
+                    oldPlaces = elementsAt(old, hit, false);
+                    const bool hitThere
+                        = Data::atSamePlace(old, now, diagonal, tolerances, continuationDistance);
+                    twoPlaces = !oldPlaces || !oldPlaces->empty()
+                        || (hitThere && (!entry->turnFollowed || !agrees));
+                }
+                if (agrees && !twoPlaces) {
                     countReferenceMigration(entry->owner, MigrationOutcome::Kept);
                     continue;
                 }
                 const std::string& stored = entry->storedIndex;
-                auto places = elementsAt(saved, hit, false);
-                if (hit == stored && (!places || places->empty())) {
+                auto places = twoPlaces ? oldPlaces : elementsAt(saved, hit, false);
+                if (!twoPlaces && hit == stored && (!places || places->empty())) {
                     // The name didn't move and nothing sits where its element was: it moved
                     // alone (an edit before the migration), kept as ops#105 and rule 1 keep it
                     countReferenceMigration(entry->owner, MigrationOutcome::Kept);
                     continue;
                 }
                 std::string pick;
-                if (places && places->size() == 1) {
+                if (!twoPlaces && places && places->size() == 1) {
                     pick = places->front();
                 }
-                else if (places && places->size() > 1
+                else if (!twoPlaces && places && places->size() > 1
                          && std::find(places->begin(), places->end(), stored) != places->end()) {
                     pick = stored;  // rule 2: among coincident elements, the stored index
                 }
@@ -1992,16 +2043,31 @@ bool solveElementReferences(DocumentObject* feature,
                         name = *std::min_element(element.names.begin(), element.names.end());
                     }
                 }
+                // A part moved as one piece with another edit (decision 234): another element
+                // where it was (without a followed reading, anything there) breaks
+                bool turnedThere = false;
+                if (entry->turned && saved.isValid()) {
+                    const auto old = Data::ElementFingerprint::fromString(entry->oldFingerprint)
+                                         .transformed(*entry->turned, tolerances.angle);
+                    const auto others = elementsAt(old, index, true);
+                    turnedThere = !others || !others->empty()
+                        || (!entry->turnFollowed && exists
+                            && Data::atSamePlace(old, place.now, diagonal, tolerances, continuationDistance));
+                }
                 ReferenceReport::Entry item;
-                const bool carried = place.carried;
+                const bool carried = place.carried && !turnedThere;
                 const std::string carryEvidence = !saved.isValid() ? "index carry, no fingerprint"
-                    : !exists ? "index carry, no such element"
-                              : "index carry, fingerprint differs";
+                    : !exists      ? "index carry, no such element"
+                    : turnedThere ? "index carry, the part moved as one piece with another edit"
+                                  : "index carry, fingerprint differs";
                 std::string pick = place.one();
                 // Why the one element at the place isn't taken (decision 217), else empty
                 std::string refusal;
                 if (!pick.empty()) {
-                    if (entry->owner && entry->owner->getDocument() != feature->getDocument()) {
+                    if (turnedThere) {
+                        refusal = "but the part moved as one piece with another edit";
+                    }
+                    else if (entry->owner && entry->owner->getDocument() != feature->getDocument()) {
                         // The consumer pass: the feature's file may have had its own edits
                         refusal = "but it is another document's";
                     }
@@ -2212,6 +2278,19 @@ bool solveElementReferences(DocumentObject* feature,
             }
             item.fingerprint = recordOf(*entry, entry->oldFingerprint, tolerances.angle);
             item.frame = entry->frame;
+            if (entry->turned) {
+                // Where it was: the stored record mapped by T, beside the followed one
+                const auto stored = Data::ElementFingerprint::fromString(entry->oldFingerprint);
+                Data::SolveInput::Entry::Turn turn;
+                turn.oldPlace = stored.isValid()
+                    ? stored.transformed(*entry->turned, tolerances.angle)
+                    : Data::ElementFingerprint();
+                turn.oldBoxDropped = stored.extentMin && !turn.oldPlace.extentMin;
+                turn.followedBoxDropped = stored.extentMin && !item.fingerprint.extentMin;
+                turn.motion = entry->turnMotion;
+                turn.followed = entry->turnFollowed;
+                item.turned = std::move(turn);
+            }
             if (item.policy == Data::SolvePolicy::Equivalent) {
                 item.equivalent = equivalenceOf(*entry);
             }
