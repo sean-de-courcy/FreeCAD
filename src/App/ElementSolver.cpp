@@ -6956,8 +6956,8 @@ bool overlapsMappedPlace(
 // (decision 236): anything else there breaks, listed first (role `turned`). A part turned onto
 // itself by its own symmetry has a twin where each element was, whatever the closure read.
 //
-// A part moved as one piece with another edit (decisions 234 and 236, 10.11's literal stop)
-// breaks: the elements where it is if it went with the part (FOLLOWED, the entry's fingerprint)
+// A part moved as one piece breaks (decisions 234 and 236, 10.11's literal stop; with the rigid
+// follow off for the beta, decision 237, without another edit too): the elements where it is if it went with the part (FOLLOWED, the entry's fingerprint)
 // listed first (`turned`), those where it was (OLD) second (`frame`), the hit third (`name`).
 // 211's keep never runs on such a turn. A record without sources breaks only where something
 // sits where it was.
@@ -7092,7 +7092,7 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         outcome.evidence = std::string(piece ? "the part moved as one piece by "
                                              : "the target's frame moved by ")
             + formatDistance(motion.getPosition().Length()) + " mm / " + formatDistance(turn)
-            + (piece ? " deg with another edit" : " deg");
+            + " deg";
         if (!judge.place.empty()) {
             outcome.evidence += "; " + judge.place.front()
                 + (judge.at > 0 ? " is where" : " overlaps where") + " the element was";
@@ -7106,7 +7106,7 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         const auto& entry = input.entries[i];
         local.entries[i].turned.reset();
         if (entry.turned && entry.fingerprint.isValid() && entry.turned->oldPlace.isValid()) {
-            // A part moved as one piece with another edit (decisions 234 and 236): broken
+            // A part moved as one piece (decisions 234, 236 and 237): broken
             const auto& turn = *entry.turned;
             local.entries[i].frame.reset();
             Judged judge;

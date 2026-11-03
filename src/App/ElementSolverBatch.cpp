@@ -1241,13 +1241,14 @@ bool solveElementReferences(DocumentObject* feature,
                     if (moves(mapped)) {
                         entry.rigid = mapped;
                     }
-                    // With another edit (decision 234): read where it went and where it was. The
-                    // old global place is the record itself where the frame stayed
-                    if (piece->changed) {
-                        entry.turned = saved.frame ? frameNow->inverse() * *saved.frame
-                                                   : Base::Placement();
-                        entry.turnMotion = piece->motion;
-                    }
+                    // The rigid follow is off for the beta (decision 237, after the closure's
+                    // eighth silent: a record taken early, its sources from the edited model, read
+                    // "nothing else changed"): a part moved as one piece breaks, with another edit
+                    // or without (decisions 234 and 236), where it went listed first. The old global
+                    // place is the record itself where the frame stayed
+                    entry.turned = saved.frame ? frameNow->inverse() * *saved.frame
+                                               : Base::Placement();
+                    entry.turnMotion = piece->motion;
                 }
                 else if (saved.isValid() && saved.frame) {
                     const Base::Placement turned = frameNow->inverse() * *saved.frame;
