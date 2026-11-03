@@ -453,6 +453,71 @@ def UpToFace(make):
     }
 
 
+def lobedHoleShell(z, lobes):
+    """A shell of two B-spline faces at height z: the rectangle x -10..20, y -10..10 with a hole
+    of `lobes` lobes about (3, 3) (radius 2 + 0.8 cos(lobes t), one closed B-spline edge), and the
+    hole's fill (as TestPad's lobedHoleShell)."""
+    points = []
+    for k in range(60):
+        t = 2 * math.pi * k / 60
+        r = 2 + 0.8 * math.cos(lobes * t)
+        points.append(V(3 + r * math.cos(t), 3 + r * math.sin(t), z))
+    curve = Part.BSplineCurve()
+    curve.interpolate(points, PeriodicFlag=True)
+    edge = curve.toShape()
+    outer = [V(-10, -10, z), V(20, -10, z), V(20, 10, z), V(-10, 10, z)]
+    plate = Part.Face(
+        Part.Plane(V(0, 0, z), TOP), [Part.makePolygon(outer + outer[:1]), Part.Wire([edge])]
+    )
+    fill = Part.Face(Part.Wire([edge]))
+    return Part.Shell([plate.toNurbs().Faces[0], fill.toNurbs().Faces[0]])
+
+
+def UpToTwins(make):
+    """A Pad up to a shell whose far cap is split into identical twins, with a datum on one twin
+    (PLAN decision 121 (3), ops#422/ops#423: what a twin reference computes at the beta).
+
+    A Part feature's shell at z = 10: a plate x -10..20, y -10..10 with a four-lobed hole about
+    (3, 3) (radius 2 + 0.8 cos 4t: tips 2.8 on the axes, valleys 1.2 on the diagonals) and the
+    hole's fill, both B-spline faces. Body: a SubShapeBinder of both faces; a disc, radius 2.3,
+    at (3, 3) on the XY plane padded up to the binder's faces (UpToShape). The disc crosses the
+    hole between the tips, so the far cap is five pieces: one on the fill and four twins on the
+    plate, one in each valley. A datum point at the centre of the twin in the valley at 45
+    degrees."""
+    doc = make("UpToTwins")
+    shell = doc.addObject("Part::Feature", "LobedShell")
+    shell.Shape = lobedHoleShell(10, 4)
+    body = newBody(doc, "Body")
+    binder = body.newObject("PartDesign::SubShapeBinder", "ShellBinder")
+    binder.Support = [(shell, ("Face1", "Face2"))]
+    pad = body.newObject("PartDesign::Pad", "TwinPad")
+    pad.Profile = attachedSketch(body, "DiscSketch", plane(body, "XY_Plane"), [m.circle(3, 3, 2.3)])
+    pad.Type = "UpToShape"
+    pad.UpToShape = (binder, ["Face1", "Face2"])
+    pad.Refine = False
+    doc.recompute()
+
+    def farCap(f):
+        return abs(f.BoundBox.ZMin - 10) < 1e-6 and abs(f.BoundBox.ZMax - 10) < 1e-6
+
+    caps = [f for f in pad.Shape.Faces if farCap(f)]
+    if len(caps) != 5:
+        raise AssertionError(f"TwinPad has {len(caps)} far caps, expected five")
+    valley = V(3 + 1.75 * math.cos(math.pi / 4), 3 + 1.75 * math.sin(math.pi / 4), 10)
+    twin = faceWhere(pad.Shape, lambda f: farCap(f) and f.isInside(valley, 1e-6, True))
+    point = body.newObject("PartDesign::Point", "TwinPoint")
+    point.AttachmentSupport = [(pad, twin)]
+    point.MapMode = "CenterOfMass"
+    body.Tip = pad
+    doc.recompute()
+    # The volume is pi 2.3^2 10, but OCCT integrates the trimmed B-spline caps only to about
+    # 1e-6 (166.19004 against 166.19025): checked here at 1e-5, not as an exact stated volume.
+    volume = math.pi * 2.3 * 2.3 * 10
+    if abs(pad.Shape.Volume - volume) > 1e-5 * volume:
+        raise AssertionError(f"TwinPad volume {pad.Shape.Volume}, expected {volume}")
+    return {"volumes": {}}
+
+
 def BodyFromFeature(make):
     """A Body based on another Body's feature, and a Boolean of two Bodies.
 
@@ -630,6 +695,7 @@ MODELS = [
     PipeCorners,
     HoleFeature,
     UpToFace,
+    UpToTwins,
     BodyFromFeature,
     Binders,
     IndexToldGroups,
