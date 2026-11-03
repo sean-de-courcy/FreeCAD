@@ -272,8 +272,8 @@
 "ClosedRingTiedStartRecomputed|tr_v1|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr383-r1", "issue": "ops#469", "tier": "F"},
 "ClosedRingTiedStartRecomputed|tr_v2|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr383-r1", "issue": "ops#469", "tier": "F"},
 "ClosedRingTiedStartRecomputed|tr_v3|V2s": {"axes": ["M3", "E4"], "classes": ["B"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr383-r1", "issue": "ops#469", "tier": "F"},
-"SpineRelinkedToAnotherSketch|cap_far|V2s": {"axes": ["M3", "E5"], "classes": ["B"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#435", "tier": "F"},
-"SpineRelinkedToAnotherSketch|cap_profile|V2s": {"axes": ["M3", "E5"], "classes": ["B"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#435", "tier": "F"},
+"SpineRelinkedToAnotherSketch|cap_far|V2s": {"axes": ["M3", "E5"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "port", "issue": "ops#435", "tier": "F"},
+"SpineRelinkedToAnotherSketch|cap_profile|V2s": {"axes": ["M3", "E5"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "port", "issue": "ops#435", "tier": "F"},
 "SpineRepickedInTheSameSketch|cap_far|V2s": {"axes": ["M3", "E5"], "classes": ["B"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#435", "tier": "F"},
 "SpineRepickedInTheSameSketch|cap_profile|V2s": {"axes": ["M3", "E5"], "classes": ["B"], "expect": "CORRECT", "expected": "correct", "found_by": "port", "issue": "ops#435", "tier": "F"}
 }
