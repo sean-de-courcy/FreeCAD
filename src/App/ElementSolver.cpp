@@ -304,35 +304,16 @@ bool markedPiecesOfOne(std::string_view a, std::string_view b)
     return marked;
 }
 
-// An innermost source section (walkLineage()): its tag, element type and reference IDs, and how
-// the IDs were made: `I` an IDX section's index, `M` an MLN id (sourceIdsOf()), `G` otherwise.
+// An innermost source section (walkLineage()): its tag, element type and reference IDs.
+// A beta file's object named by its IDX index in a consumer's name and by its MLN id in the
+// element's shares no ID with it: lost (review r3g R1: counting them shared let a traded twin's
+// wall be picked; review r3f N1's right -> loud is the price, decision 150 (1)).
 struct SourceSection
 {
     std::string tag;
     char type;
     std::vector<std::string> ids;
-    char origin = 'G';
 };
-
-// The origin of a source section's IDs (SourceSection::origin)
-char sourceOrigin(const DecodedMappedSection& section)
-{
-    if (section.hasMapperFlag(MAPPER_FLAG_INDEX)) {
-        return 'I';
-    }
-    return section.opCode == "MLN" ? 'M' : 'G';
-}
-
-// True if \a a and \a b are one object's element type named apart: one by its index (IDX), the
-// other by its MLN id. That is a beta file's history-less object before and after its first
-// naming by match (decision 247): its index tells nothing of its id, so neither lost nor shares
-// the other's IDs; both count as shared, as the beta's names compared by index did (review
-// r3f N1: a consumer's name derived from the beta's IDX names, its element now from MLN names).
-bool namedApart(const SourceSection& a, const SourceSection& b)
-{
-    return a.tag == b.tag && a.type == b.type
-        && ((a.origin == 'I' && b.origin == 'M') || (a.origin == 'M' && b.origin == 'I'));
-}
 
 // The reference IDs of a source section. A history-less producer's element named by its MLN id
 // (FreeCAD-CH, ops#502: `_;_;<tag>;MLN;<id>;<type>;0;_;_`) has none: its id stands for one, as
@@ -365,8 +346,7 @@ std::vector<SourceSection> knownSourcesOf(std::string_view name)
         }
         auto ids = sourceIdsOf(section);
         if (!ids.empty()) {
-            sources.push_back(
-                {section.iterationTag, section.elementType, std::move(ids), sourceOrigin(section)});
+            sources.push_back({section.iterationTag, section.elementType, std::move(ids)});
         }
         return false;
     });
@@ -411,11 +391,10 @@ bool lostASource(const std::vector<std::string>& names, const std::vector<Source
         return false;
     }
     auto sharesAnId = [](const SourceSection& a, const SourceSection& b) {
-        return namedApart(a, b)
-            || (a.tag == b.tag && a.type == b.type
-                && std::any_of(a.ids.begin(), a.ids.end(), [&](const auto& id) {
-                       return std::find(b.ids.begin(), b.ids.end(), id) != b.ids.end();
-                   }));
+        return a.tag == b.tag && a.type == b.type
+            && std::any_of(a.ids.begin(), a.ids.end(), [&](const auto& id) {
+                   return std::find(b.ids.begin(), b.ids.end(), id) != b.ids.end();
+               });
     };
     return std::none_of(names.begin(), names.end(), [&](const auto& name) {
         const auto sources = knownSourcesOf(name);
@@ -3428,8 +3407,7 @@ std::vector<SourceSection> taggedSourcesOf(std::string_view name)
         if (!source || !hasTag(section)) {
             return false;
         }
-        sources.push_back(
-            {section.iterationTag, section.elementType, sourceIdsOf(section), sourceOrigin(section)});
+        sources.push_back({section.iterationTag, section.elementType, sourceIdsOf(section)});
         return false;
     });
     return sources;
@@ -3517,15 +3495,11 @@ PlaceVerdict placeVerdict(const ElementFingerprint& saved,
         const auto x = tagNumber(a);
         return x ? x == tagNumber(b) : a == b;
     };
-    // An object's IDX index and its MLN id are named apart (namedApart()): shared
     auto shared = [&](const SourceSection& section, const std::string* id) {
         return std::any_of(old.begin(), old.end(), [&](const SourceSection& o) {
-            SourceSection same = o;
-            same.tag = section.tag;
             return sameTag(o.tag, section.tag)
                 && (id ? o.type == section.type
-                             && (namedApart(same, section)
-                                 || std::find(o.ids.begin(), o.ids.end(), *id) != o.ids.end())
+                             && std::find(o.ids.begin(), o.ids.end(), *id) != o.ids.end()
                        : true);
         });
     };
