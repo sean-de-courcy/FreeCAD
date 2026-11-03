@@ -9,10 +9,19 @@ import FreeCAD as App
 import Part
 import Sketcher
 
-from PartDesignTests.Scenarios.harness import Attached, Scenario, edge, face, vertex
+from PartDesignTests.Scenarios.harness import (
+    Attached,
+    OwnOrBroken,
+    Scenario,
+    edge,
+    face,
+    vertex,
+)
+from PartDesignTests.Scenarios import models as m
 
 V = App.Vector
 X = V(1, 0, 0)
+Y = V(0, 1, 0)
 Z = V(0, 0, 1)
 
 
@@ -1176,3 +1185,282 @@ class RevRevolveOwnAxisLineRedrawnFlipped(RevRevolveAxisLineRedrawnBothFlippedAt
         self.profile.moveGeometry(self.lineId, 2, V(0, -15, 0))
         doc.recompute()
         self.check()
+
+
+class OffsetRigid(Scenario):
+    """ops#557's sixth silent by the offset route (decision 234, `notes\naming-class-D.md`
+    10.11.1): the spine sketch attached FlatFace to the Body's XZ plane and the profile to its XY
+    plane, so the chain's frame never moves (decision 211 never applies); the whole model turned
+    by the two AttachmentOffsets, one motion of both placement sources. A ring 30 x 20 swept by a
+    square 4 x 4; references on the four legs and the start corner."""
+
+    abstract = True
+    area = "rigid-review"
+    CLASSES = ("B",)
+    AXES = ("M3", "E7", "E2")
+    ISSUE = "ops#557"
+    FOUND_BY = "designer s67af"
+    TIER = "F"
+    SIZE = 60
+    SCALE = 1.0
+    half = 2
+    verts0 = ((0, 0), (0, 20), (30, 20), (30, 0))
+    pivot = (15, 0, 10)
+    axis = Y
+    degrees = 0
+    verts = None
+    REFS = ("leg0", "leg1", "leg2", "leg3", "start_pt")
+
+    A = property(lambda self: self.s(self.half))
+
+    def P(self):
+        if self.verts is None:
+            self.verts = [tuple(self.s(c) for c in p) for p in self.verts0]
+        return self.verts
+
+    def T(self):
+        rot = App.Rotation(self.axis, self.degrees)
+        c = V(*(self.s(v) for v in self.pivot))
+        return App.Placement(c - rot.multVec(c), rot)
+
+    def at(self, x, y, z):
+        return self.T().multVec(V(x, y, z))
+
+    def along(self, d):
+        return self.T().Rotation.multVec(d)
+
+    def legFace(self, i):
+        def predicate():
+            P = self.P()
+            n = len(P)
+            (x0, z0), (x1, z1) = P[i % n], P[(i + 1) % n]
+            dx, dz = x1 - x0, z1 - z0
+            L = math.hypot(dx, dz)
+            nx, nz = -dz / L, dx / L
+            mx, mz = (x0 + x1) / 2 + nx * self.A, (z0 + z1) / 2 + nz * self.A
+            return face("plane", normal=self.along(V(nx, 0, nz)), contains=self.at(mx, 0, mz))
+
+        return predicate
+
+    def startPoint(self):
+        a = self.A
+        return vertex(self.at(-a, -a, -a))
+
+    def spinePlacement(self):
+        return self.T().multiply(App.Placement(V(), App.Rotation(X, 90)))
+
+    def profilePlacement(self):
+        return self.T()
+
+    def place(self):
+        # FlatFace: Placement = support.Placement * AttachmentOffset
+        self.spine.AttachmentOffset = self.xz.Placement.inverse().multiply(self.spinePlacement())
+        self.profile.AttachmentOffset = self.xy.Placement.inverse().multiply(self.profilePlacement())
+
+    def build(self, doc):
+        body = m.body(doc)
+        self.xz = originFeature(body, "XZ_Plane")
+        self.xy = originFeature(body, "XY_Plane")
+        P = self.P()
+        self.spine = m.sketch(doc, "Spine", m.polygon(P), body)
+        self.spine.AttachmentSupport = [(self.xz, "")]
+        self.spine.MapMode = "FlatFace"
+        a = self.A
+        self.profile = m.sketch(doc, "Square", m.rectangle(-a, -a, a, a), body)
+        self.profile.AttachmentSupport = [(self.xy, "")]
+        self.profile.MapMode = "FlatFace"
+        self.place()
+        doc.recompute()
+        if not self.spine.Placement.isSame(self.spinePlacement(), 1e-9):
+            raise RuntimeError(f"spine placed {self.spine.Placement}, wanted {self.spinePlacement()}")
+        pipe = body.newObject("PartDesign::AdditivePipe", "Pipe")
+        pipe.Profile = self.profile
+        pipe.Spine = (self.spine, [])
+        pipe.Transition = "Right corner"
+        pipe.Refine = False
+        doc.recompute()
+        if not pipe.isValid():
+            raise RuntimeError(f"the pipe is invalid: {pipe.getStatusString()}")
+        self.pipe = pipe
+        made = {}
+        n = len(P)
+        for name in self.REFS:
+            if name.startswith("leg"):
+                i = int(name[3:])
+                if i >= n:
+                    continue
+                predicate = self.legFace(i)
+                obj = body.newObject("PartDesign::Plane", name)
+                obj.MapMode = "FlatFace"
+            else:
+                predicate = self.startPoint
+                obj = body.newObject("PartDesign::Point", name)
+                obj.MapMode = "Vertex"
+            obj.AttachmentSupport = [(pipe, self.names(pipe, predicate()))]
+            made[name] = (obj, predicate)
+        doc.recompute()
+        for name, (obj, predicate) in made.items():
+            self.ref(name, obj, "AttachmentSupport", predicate, Attached())
+
+    def redrawAll(self):
+        P = self.P()
+        n = len(P)
+        g = self.spine.Geometry
+        for i in range(n):
+            p, q = P[i], P[(i + 1) % n]
+            g[i] = Part.LineSegment(V(p[0], p[1], 0), V(q[0], q[1], 0))
+        self.spine.Geometry = g
+
+    def turn(self, degrees):
+        self.degrees = degrees
+        self.place()
+
+
+class OffsetRectTurned180AboutNormalAllRedrawn(OffsetRigid):
+    """The offset-route twin of RectTurned180AboutNormalAllRedrawn: the whole model turned 180
+    about the ring's normal through its centre by the sketches' AttachmentOffsets (the frame
+    stays), every spine line drawn anew in the same recompute. Every reference follows the turn."""
+
+    def edit(self, doc):
+        self.redrawAll()
+        self.turn(180)
+        doc.recompute()
+
+
+class OffsetRectTurned180AboutNormal(OffsetRigid):
+    """Control: the same turn alone (rigid, nothing else changed)."""
+
+    def edit(self, doc):
+        self.turn(180)
+        doc.recompute()
+
+
+# 180 degrees about the pattern box's centre (20, 5)
+PATTERN_TURN = App.Placement(V(40, 10, 0), App.Rotation(Z, 180))
+
+
+class R2dPatternBase(Scenario):
+    """Round e's review (pr557s-r2d, D1): a list saved to a file folds into the digest by its
+    values (setForceXML), not by the file's name. A box x 0..40, y 0..10, z 0..10 (base sketch on the XY plane, AttachmentOffset), a Pocket of
+    a hole of radius 1.5 at local (8, 5) from a sketch ObjectXY on the base sketch (it turns with
+    the part), and a LinearPattern of it along the sketch's H axis in the Spacing mode (Offset 8,
+    4 occurrences): holes at x = 8, 16, 24, 32 (the box is symmetric about x = 20, so the half turn
+    maps the pattern onto itself). References: the rims of instances 1 and 2 (arc edges). The edit
+    turns the part 180 about its centre (the instance k's place follows the part: x = 40 - local)
+    and the case's `spacings` change in the same recompute."""
+
+    abstract = True
+    area = "rigid-review"
+    CLASSES = ("D",)
+    AXES = ("E5",)
+    ISSUE = "ops#557"
+    FOUND_BY = "review pr557s-r2d"
+    TIER = "F"
+    REFS = ("rim1", "rim2")
+    LOCAL = {"rim1": 1, "rim2": 2}  # the instance of each reference
+    spacings = None  # the edit's Spacings, or None
+    turn = True
+
+    def localX(self, k):
+        steps = [8.0] * 3
+        if self.stepName and self.spacings is not None:
+            steps = [8.0 if s < 0 else s for s in self.spacings]
+        return 8.0 + sum(steps[:k])
+
+    def globalX(self, k):
+        x = self.localX(k)
+        return 40.0 - x if (self.stepName and self.turn) else x
+
+    def expect(self, name):
+        k = self.LOCAL[name]
+        return edge(curve="circle", contains=V(self.globalX(k), 6.5, 10))
+
+    def check(self, name):
+        return self.expect(name)
+
+    def build(self, doc):
+        self.body = body = doc.addObject("PartDesign::Body", "Body")
+        self.base = doc.addObject("Sketcher::SketchObject", "Base")
+        body.addObject(self.base)
+        xy = [f for f in body.Origin.OriginFeatures if "XY_Plane" in (getattr(f, "Role", ""), f.Name)][0]
+        self.base.AttachmentSupport = [(xy, "")]
+        self.base.MapMode = "FlatFace"
+        pts = [V(0, 0, 0), V(40, 0, 0), V(40, 10, 0), V(0, 10, 0), V(0, 0, 0)]
+        for i in range(4):
+            self.base.addGeometry(Part.LineSegment(pts[i], pts[i + 1]), False)
+        self.block = body.newObject("PartDesign::Pad", "Block")
+        self.block.Profile = self.base
+        self.block.Length = 10
+        doc.recompute()
+        self.holes = doc.addObject("Sketcher::SketchObject", "Holes")
+        body.addObject(self.holes)
+        self.holes.addGeometry(Part.Circle(V(8, 5, 0), Z, 1.5), False)
+        self.holes.addGeometry(Part.LineSegment(V(0, 5, 0), V(1, 5, 0)), True)
+        self.holes.AttachmentSupport = [(self.base, "")]
+        self.holes.MapMode = "ObjectXY"
+        self.holes.AttachmentOffset = App.Placement(V(0, 0, 10), App.Rotation())
+        self.pocket = body.newObject("PartDesign::Pocket", "Pocket")
+        self.pocket.Profile = self.holes
+        self.pocket.Type = 1
+        doc.recompute()
+        self.pattern = body.newObject("PartDesign::LinearPattern", "Pattern")
+        self.pattern.Originals = [self.pocket]
+        self.pattern.Direction = (self.holes, ["H_Axis"])
+        self.pattern.Mode = "Spacing"
+        self.pattern.Offset = 8
+        self.pattern.Occurrences = 4
+        body.Tip = self.pattern
+        doc.recompute()
+        assert self.pattern.isValid(), self.pattern.getStatusString()
+        for name in self.REFS:
+            element = self.names(self.pattern, self.expect(name))[0]
+            owner = body.newObject("PartDesign::Point", name)
+            owner.AttachmentSupport = [(self.pattern, element)]
+            owner.MapMode = "CenterOfMass"
+            doc.recompute()
+            self.ref(name, owner, "AttachmentSupport", (lambda n=name: self.check(n)), None)
+
+    def edit(self, doc):
+        if self.turn:
+            self.base.AttachmentOffset = PATTERN_TURN
+        if self.spacings is not None:
+            self.pattern.Spacings = list(self.spacings)
+        doc.recompute()
+        assert self.pattern.isValid(), self.pattern.getStatusString()
+
+
+class R2dPatternSpacingsAndTurn(R2dPatternBase):
+    """The turn, and Spacings [4, 4, 8] in the same recompute: instance k at local x 8, 12, 16, 24
+    (global 32, 28, 24, 16). Instance 1 goes to x = 28, where nothing was; the place the turn gives
+    it, x = 24, holds instance 2 now."""
+
+    spacings = [4.0, 4.0, 8.0]
+
+
+class R2dPatternTurnOnly(R2dPatternBase):
+    """Control: the turn alone (the pattern maps onto itself; each instance follows its index)."""
+
+
+class R2dPatternSpacingsOnly(R2dPatternBase):
+    """Control: Spacings [4, 4, 8] alone, no turn."""
+
+    spacings = [4.0, 4.0, 8.0]
+    turn = False
+
+
+class R2dPatternStepZero(R2dPatternBase):
+    """The turn, and Spacings [8, 0, 8] in the same recompute: instance 2 sits on instance 1 (local
+    x 16, global 24) and instance 3 at local 24 (global 16). Instance 2's hole is instance 1's now:
+    its reference holds that hole or breaks. The place the turn gives instance 2 (x = 16) holds
+    instance 3's hole."""
+
+    spacings = [8.0, 0.0, 8.0]
+
+    def check(self, name):
+        return OwnOrBroken(self.expect(name)) if name == "rim2" else self.expect(name)
+
+
+class R2dPatternStepZeroOnly(R2dPatternStepZero):
+    """Control: the same Spacings, no turn."""
+
+    turn = False

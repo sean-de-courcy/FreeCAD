@@ -288,3 +288,73 @@ class ReviewFixedHolesSwapped(RigidBox):
         g[0].Center = V(15, 5, 0)
         g[1].Center = V(5, 5, 0)
         self.holes.Geometry = g
+
+
+# 180 degrees about the plate's centre (10, 5): the 20 x 10 plate lands on itself
+TURN180_CENTRE = App.Placement(V(20, 10, 0), App.Rotation(Z, 180))
+
+
+class Rv2dPrimTargetBaseTurned(RigidBox):
+    """Round e's review (pr557o-r2d): a PartDesign primitive as the target, its Placement its own
+    and so a placement source. A plate 20 x 10 x 10 (sketch Base, unattached; Pad Block) and on it an AdditiveBox 4 x 4 x 4
+    (Prim), unattached, its own Placement (8, 3, 10): the box spans x 8..12, y 3..7, z 10..14.
+    References on the primitive (the target is Prim: a sketch on its -x face, datum points on its
+    corner and its y=3 top edge). The edit turns the base sketch's Placement 180 degrees about the
+    plate's centre: the plate lands on itself, the primitive (fixed in the body) doesn't move. The
+    model is unchanged and every reference stays where it was."""
+    FOUND_BY = "review pr557o-r2d"
+    AXES = ("E5",)
+    baseOn = "placement"
+    motion = TURN180_CENTRE
+    follow = False
+    REFS = ("prim_xm", "prim_corner", "prim_edge_y3")
+    ELEMENTS = {
+        "prim_xm": ("plane", (8, 5, 12)),
+        "prim_corner": ("vertex", (8, 3, 14)),
+        "prim_edge_y3": ("line", (10, 3, 14)),
+    }
+    primPlacement = App.Placement(V(8, 3, 10), App.Rotation())
+
+    def model(self, doc, body):
+        self.base = doc.addObject("Sketcher::SketchObject", "Base")
+        body.addObject(self.base)
+        pts = [V(0, 0, 0), V(20, 0, 0), V(20, 10, 0), V(0, 10, 0), V(0, 0, 0)]
+        for i in range(4):
+            self.base.addGeometry(Part.LineSegment(pts[i], pts[i + 1]), False)
+        self.block = body.newObject("PartDesign::Pad", "Block")
+        self.block.Profile = self.base
+        self.block.Length = 10
+        doc.recompute()
+        self.prim = body.newObject("PartDesign::AdditiveBox", "Prim")
+        self.prim.Length = 4
+        self.prim.Width = 4
+        self.prim.Height = 4
+        self.prim.Placement = self.primPlacement
+        doc.recompute()
+        return self.prim
+
+
+class Rv2dPrimTargetBaseTurnedOffset(Rv2dPrimTargetBaseTurned):
+    """As Rv2dPrimTargetBaseTurned, the base sketch attached FlatFace to XY_Plane and turned by its
+    AttachmentOffset."""
+    baseOn = "offset"
+
+    def model(self, doc, body):
+        last = Rv2dPrimTargetBaseTurned.model(self, doc, body)
+        xy = [f for f in body.Origin.OriginFeatures if "XY_Plane" in (getattr(f, "Role", ""), f.Name)][0]
+        self.base.AttachmentSupport = [(xy, "")]
+        self.base.MapMode = "FlatFace"
+        doc.recompute()
+        return last
+
+
+class Rv2dPrimOffCentreBaseTurned(Rv2dPrimTargetBaseTurned):
+    """As Rv2dPrimTargetBaseTurned, the primitive off the plate's centre at (2, 3, 10) (x 2..6):
+    the turned record's place (x 14..18) holds nothing. The model is unchanged; every reference
+    stays."""
+    primPlacement = App.Placement(V(2, 3, 10), App.Rotation())
+    ELEMENTS = {
+        "prim_xm": ("plane", (2, 5, 12)),
+        "prim_corner": ("vertex", (2, 3, 14)),
+        "prim_edge_y3": ("line", (4, 3, 14)),
+    }
