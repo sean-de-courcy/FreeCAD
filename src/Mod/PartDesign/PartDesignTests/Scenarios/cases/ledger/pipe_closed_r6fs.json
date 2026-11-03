@@ -42,10 +42,10 @@
 "TradedLegsTurnedWidened|fillet_top_front|V2s": {"axes": ["M3", "E7", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6fs", "issue": "ops#469", "tier": "F"},
 "TradedLegsTurnedWidened|point_top_right|V2s": {"axes": ["M3", "E7", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6fs", "issue": "ops#469", "tier": "F"},
 "TradedLegsTurnedWidened|sketch_bottom_inner|V2s": {"axes": ["M3", "E7", "E2", "E3"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6fs", "issue": "ops#469", "tier": "F"},
-"TurnThenWidenFar|datum_left_outer|V2s": {"axes": ["M3", "E7", "E2"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6fs", "issue": "ops#469", "tier": "F"},
-"TurnThenWidenFar|datum_top_outer|V2s": {"axes": ["M3", "E7", "E2"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6fs", "issue": "ops#469", "tier": "F"},
-"TurnThenWidenFar|fillet_top_front|V2s": {"axes": ["M3", "E7", "E2"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6fs", "issue": "ops#469", "tier": "F"},
-"TurnThenWidenFar|point_bottom_left|V2s": {"axes": ["M3", "E7", "E2"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6fs", "issue": "ops#469", "tier": "F"},
-"TurnThenWidenFar|sketch_bottom_inner|V2s": {"axes": ["M3", "E7", "E2"], "classes": ["B"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr383-r6fs", "issue": "ops#469", "tier": "F"}
+"TurnThenWidenFar|datum_left_outer|V2s": {"axes": ["M3", "E7", "E2"], "classes": ["B"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr383-r6fs", "issue": "ops#469", "tier": "F"},
+"TurnThenWidenFar|datum_top_outer|V2s": {"axes": ["M3", "E7", "E2"], "classes": ["B"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr383-r6fs", "issue": "ops#469", "tier": "F"},
+"TurnThenWidenFar|fillet_top_front|V2s": {"axes": ["M3", "E7", "E2"], "classes": ["B"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr383-r6fs", "issue": "ops#469", "tier": "F"},
+"TurnThenWidenFar|point_bottom_left|V2s": {"axes": ["M3", "E7", "E2"], "classes": ["B"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr383-r6fs", "issue": "ops#469", "tier": "F"},
+"TurnThenWidenFar|sketch_bottom_inner|V2s": {"axes": ["M3", "E7", "E2"], "classes": ["B"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr383-r6fs", "issue": "ops#469", "tier": "F"}
 }
 }
