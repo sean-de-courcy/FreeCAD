@@ -137,6 +137,16 @@ class FailurePassThroughBase:
             self.assertIn(word, message)
         return message
 
+    def assertStopped(self, obj, *words):
+        """Failed and left touched: a failure no rule claims, or its dependant (ops#579)."""
+        self.assertFalse(obj.isValid(), f"{obj.Name} stays valid")
+        self.assertIn("Invalid", obj.State)
+        self.assertIn("Touched", obj.State)
+        message = obj.getStatusString()
+        for word in words:
+            self.assertIn(word, message)
+        return message
+
     def assertVolume(self, obj, volume):
         self.assertAlmostEqual(obj.Shape.Volume, volume, delta=1e-4)
 
@@ -362,8 +372,9 @@ class FailurePassThroughBase:
     # -- T5 ------------------------------------------------------------------------------------
 
     def testConsumersOutsideTheBody(self):
-        """A compound of the failed hole, outside the Body, is skipped as upstream does (it keeps
-        its shape and stays touched); a compound of the Body gets the end result (T5, F5)."""
+        """A compound of the failed hole, outside the Body, fails naming it and keeps its shape
+        (F4 for every dependant, ops#579; F5 left it Valid on that shape); a compound of the Body
+        gets the end result (T5). Repaired, both compute."""
         self.block()
         hole = self.hole()
         ofHole = self.doc.addObject("Part::Compound", "OfHole")
@@ -376,15 +387,19 @@ class FailurePassThroughBase:
         hole.Length = 0
         self.recompute()
         self.assertFailed(hole)
-        self.assertIn("Touched", ofHole.State)
-        self.assertNotIn("Invalid", ofHole.State)
+        self.assertStopped(ofHole, "Links links to", f"'{hole.Label}'")
         self.assertVolume(ofHole, BLOCK - HOLE)
         self.assertValid(ofBody)
         self.assertVolume(ofBody, BLOCK)
 
-    def testPartFeatureOutsideABodyKeepsUpstreamBehaviour(self):
-        """Outside a Body nothing changes: a failed Part box stays touched and its dependant
-        isn't run (F7)."""
+        hole.Length = 3
+        self.recompute()
+        self.assertValid(hole, ofHole, ofBody)
+        self.assertVolume(ofHole, BLOCK - HOLE)
+
+    def testPartFeatureOutsideABodyFailsItsDependant(self):
+        """Outside a Body a failed Part box stays touched, and its dependant fails naming it,
+        keeps its shape and stays touched (ops#579; F7 left it Valid on that shape)."""
         box = models.box(self.doc, "PlainBox", (2, 3, 4))
         compound = self.doc.addObject("Part::Compound", "OfPlainBox")
         compound.Links = [box]
@@ -393,11 +408,177 @@ class FailurePassThroughBase:
 
         box.Length = 0
         self.recompute()
-        self.assertFalse(box.isValid())
-        self.assertIn("Touched", box.State)
-        self.assertNotIn("Invalid", compound.State)
+        self.assertStopped(box)
+        self.assertStopped(compound, "Links links to", f"'{box.Label}'")
         self.assertVolume(compound, 24)
-        self.assertEqual(self.doc.recompute(), 1)  # the box again, not the compound
+        self.assertEqual(self.doc.recompute(), 2)  # the box again, and the compound judged
+
+        box.Length = 2
+        self.recompute()
+        self.assertValid(box, compound)
+        self.assertNotIn("Touched", compound.State)
+
+    # -- ops#579: the dependants of a failure no rule claims -------------------------------------
+
+    def freeProfile(self, doc=None, name="FreeProfile"):
+        """A sketch outside the Body: a circle of radius 3 at (10, 10), its radius constrained."""
+        sketch = models.sketch(doc or self.doc, name, [models.circle(10, 10, 3)])
+        sketch.addConstraint(Sketcher.Constraint("Radius", 0, 3))
+        return sketch
+
+    @staticmethod
+    def breakProfile(sketch):
+        """A second radius, in conflict: the sketch fails by itself."""
+        sketch.addConstraint(Sketcher.Constraint("Radius", 0, 4))
+
+    @staticmethod
+    def repairProfile(sketch):
+        sketch.delConstraint(1)
+
+    @staticmethod
+    def prism(doc, base, name="Prism"):
+        """A solid 5 mm extrusion of `base`'s circle: 45 pi mm^3."""
+        prism = doc.addObject("Part::Extrusion", name)
+        prism.Base = base
+        prism.DirMode = "Custom"
+        prism.Dir = V(0, 0, 1)
+        prism.LengthFwd = 5
+        prism.Solid = True
+        return prism
+
+    def testDependantsOfAFreeSketchFailNamingTheirInput(self):
+        """A free sketch fails (conflicting constraints). Each dependant fails without running,
+        naming its direct input, keeps its shape and stays touched: a sketch with the circle as
+        external geometry, a Part extrusion of it, a plane attached to the extrusion's top and a
+        sketch on that plane. The folder holding them isn't failed. The failure persists over a
+        second recompute; repaired, everything computes (ops#579)."""
+        profile = self.freeProfile()
+        self.recompute()
+        rim = models.sketch(self.doc, "Rim", [])
+        rim.addExternal(profile.Name, "Edge1")
+        prism = self.prism(self.doc, profile)
+        self.recompute()
+        top = elementWhere(prism.Shape, "Face", lambda f: abs(f.CenterOfMass.z - 5) < TOL)
+        lid = self.doc.addObject("Part::Plane", "Lid")
+        lid.Length = lid.Width = 2
+        lid.AttachmentSupport = [(prism, top)]
+        lid.MapMode = "FlatFace"
+        onLid = models.sketch(self.doc, "OnLid", models.rectangle(0, 0, 1, 1))
+        onLid.AttachmentSupport = [(lid, "Face1")]
+        onLid.MapMode = "FlatFace"
+        folder = self.doc.addObject("App::DocumentObjectGroup", "Folder")
+        folder.addObjects([profile, prism])
+        self.recompute()
+        everything = (profile, rim, prism, lid, onLid, folder)
+        self.assertValid(*everything)
+        self.assertVolume(prism, 45 * math.pi)
+
+        self.breakProfile(profile)
+        for _ in range(2):
+            self.recompute()
+            self.assertStopped(profile)
+            self.assertStopped(rim, "links to", f"'{profile.Label}'")
+            self.assertStopped(prism, "Base links to", f"'{profile.Label}'")
+            self.assertStopped(lid, "AttachmentSupport links to", f"'{prism.Label}'")
+            self.assertStopped(onLid, "AttachmentSupport links to", f"'{lid.Label}'")
+            self.assertVolume(prism, 45 * math.pi)
+            self.assertValid(folder)
+
+        self.repairProfile(profile)
+        self.recompute()
+        self.assertValid(*everything)
+        self.assertEqual([o.Name for o in everything if "Touched" in o.State], [])
+        self.assertVolume(prism, 45 * math.pi)
+
+    def testBodyMemberOfAFailureOutsideItPassesThrough(self):
+        """The hole's depth is an expression on a Part box outside the Body. The box fails (length
+        zero): the hole fails naming it, passes the block through, and the boss after it computes
+        (the Body's rule, unchanged). Repaired, the hole is back (ops#579)."""
+        self.block()
+        gauge = models.box(self.doc, "Gauge", (2, 2, 3))
+        hole = self.hole()
+        hole.setExpression("Length", f"{gauge.Name}.Height")
+        boss = self.boss(hole)
+        self.recompute()
+        self.assertBody(BLOCK - HOLE + BOSS)
+
+        gauge.Length = 0
+        self.recompute()
+        self.assertStopped(gauge)
+        self.assertFailed(hole, f"'{gauge.Label}' has an error")
+        self.assertVolume(hole, BLOCK)
+        self.assertValid(boss)
+        self.assertBody(BLOCK + BOSS)
+
+        gauge.Length = 2
+        self.recompute()
+        self.assertValid(gauge, hole, boss)
+        self.assertBody(BLOCK - HOLE + BOSS)
+
+    def twoDocuments(self):
+        """Document B holds the free sketch; document A a binder of its circle and an extrusion
+        of the binder. Both saved, as a link across documents needs."""
+        folder = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, folder, True)
+        docB = models.newDocument("FailurePassThroughB")
+        docB.saveAs(os.path.join(folder, "B.FCStd"))
+        profile = self.freeProfile(docB, "Profile")
+        docB.recompute()
+        docA = models.newDocument("FailurePassThroughA")
+        docA.saveAs(os.path.join(folder, "A.FCStd"))
+        binder = docA.addObject("PartDesign::SubShapeBinder", "Binder")
+        binder.Support = [(profile, ("Edge1",))]
+        prism = self.prism(docA, binder)
+        docA.recompute()
+        self.assertValid(profile, binder, prism)
+        return docA, docB, profile, binder, prism
+
+    def testDependantInAnotherDocumentFailsAtOnce(self):
+        """B alone recomputes after its sketch fails: A's binder fails at once, in A, naming the
+        sketch, and is left touched; the extrusion after it is judged by A's recompute, which
+        fails it naming the binder. Repaired in B, A's recompute brings both back (ops#579)."""
+        docA, docB, profile, binder, prism = self.twoDocuments()
+
+        self.breakProfile(profile)
+        docB.recompute()
+        self.assertFalse(profile.isValid())
+        self.assertStopped(binder, "Support links to", f"'{profile.Label}'")
+        self.assertValid(prism)
+
+        docA.recompute()
+        self.assertStopped(binder, "Support links to", f"'{profile.Label}'")
+        self.assertStopped(prism, "Base links to", f"'{binder.Label}'")
+
+        self.repairProfile(profile)
+        docB.recompute()
+        self.assertTrue(profile.isValid())
+        self.assertIn("Touched", binder.State)
+        docA.recompute()
+        self.assertValid(binder, prism)
+        self.assertVolume(prism, 45 * math.pi)
+
+    def testDependantsDocumentAloneOrBothFail(self):
+        """A alone recomputes after B's sketch fails (the sketch runs in A's recompute): the binder
+        and the extrusion fail. Then B and A both recompute: they stay failed. Repaired, A's
+        recompute alone brings them back (ops#579)."""
+        docA, docB, profile, binder, prism = self.twoDocuments()
+
+        self.breakProfile(profile)
+        docA.recompute()
+        self.assertFalse(profile.isValid())
+        self.assertStopped(binder, "Support links to", f"'{profile.Label}'")
+        self.assertStopped(prism, "Base links to", f"'{binder.Label}'")
+
+        docB.recompute()
+        docA.recompute()
+        self.assertStopped(binder, "Support links to", f"'{profile.Label}'")
+        self.assertStopped(prism, "Base links to", f"'{binder.Label}'")
+
+        self.repairProfile(profile)
+        docA.recompute()
+        self.assertTrue(profile.isValid())
+        self.assertValid(binder, prism)
+        self.assertVolume(prism, 45 * math.pi)
 
     # -- T6 ------------------------------------------------------------------------------------
 
