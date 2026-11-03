@@ -72,6 +72,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestNamingSolver.py
     PartDesignTests/TestNamingRewrite.py
     PartDesignTests/TestMaplessNames.py
+    PartDesignTests/TestBetaMapless.py
     PartDesignTests/TestNamingGate.py
     PartDesignTests/TestNamingConsumerPass.py
     PartDesignTests/TestFailurePassThrough.py
@@ -112,6 +113,7 @@ endif(BUILD_GUI)
 set(PartDesign_TestFixtures
     PartDesignTests/Fixtures/InvoluteGear_v0-20.FCStd
     PartDesignTests/Fixtures/InternalInvoluteGear_v0-20.FCStd
+    PartDesignTests/Fixtures/BetaMapless.FCStd
 )
 
 # The naming scenarios (TestNamingScenarios; the model helpers are shared with TestNamingDump)
