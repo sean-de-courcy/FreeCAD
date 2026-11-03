@@ -1,0 +1,14 @@
+{
+"entries": {
+"R2gbMovedClearNewCircleAtPlace|first|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr390-r2g", "issue": "ops#468", "tier": "F"},
+"R2gbMovedClearNewCircleAtPlace|second|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr390-r2g", "issue": "ops#468", "tier": "F"},
+"R2gbMovedOffNewCircleAtPlace|first|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "review pr390-r2g", "issue": "ops#468", "tier": "F"},
+"R2gbMovedOffNewCircleAtPlace|second|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr390-r2g", "issue": "ops#468", "tier": "F"},
+"R2gbRedrawnInPlaceBesideSibling|first|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr390-r2g", "issue": "ops#468", "tier": "F"},
+"R2gbRedrawnInPlaceBesideSibling|second|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr390-r2g", "issue": "ops#468", "tier": "F"},
+"R2gbRedrawnLargerTangent|first|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr390-r2g", "issue": "ops#468", "tier": "F"},
+"R2gbRedrawnLargerTangent|second|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "review pr390-r2g", "issue": "ops#468", "tier": "F"},
+"R2gbRedrawnOntoOtherCrossing|first|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "review pr390-r2g", "issue": "ops#468", "tier": "F"},
+"R2gbRedrawnOntoOtherCrossing|second|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "review pr390-r2g", "issue": "ops#468", "tier": "F"}
+}
+}

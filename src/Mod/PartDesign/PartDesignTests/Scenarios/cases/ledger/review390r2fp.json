@@ -1,0 +1,24 @@
+{
+"entries": {
+"R2fPFarLineRedrawnFarMove|first|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r2f", "issue": "ops#468", "tier": "F"},
+"R2fPFarLineRedrawnFarMove|second|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r2f", "issue": "ops#468", "tier": "F"},
+"R2fPFarLineRedrawnSmallMove|first|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r2f", "issue": "ops#468", "tier": "F"},
+"R2fPFarLineRedrawnSmallMove|second|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r2f", "issue": "ops#468", "tier": "F"},
+"R2fPMovedFarControl|first|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r2f", "issue": "ops#468", "tier": "F"},
+"R2fPMovedFarControl|second|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr390-r2f", "issue": "ops#468", "tier": "F"},
+"R2fPRedrawnFarMove|first|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr390-r2f", "issue": "ops#468", "tier": "F"},
+"R2fPRedrawnFarMove|second|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr390-r2f", "issue": "ops#468", "tier": "F"},
+"R2fPRedrawnSmallMove|first|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr390-r2f", "issue": "ops#468", "tier": "F"},
+"R2fPRedrawnSmallMove|second|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr390-r2f", "issue": "ops#468", "tier": "F"},
+"R2fPSiblingIntoVacatedFar|first|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr390-r2f", "issue": "ops#468", "tier": "F"},
+"R2fPSiblingIntoVacatedFar|second|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr390-r2f", "issue": "ops#468", "tier": "F"},
+"R2fPSiblingIntoVacated|first|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr390-r2f", "issue": "ops#468", "tier": "F"},
+"R2fPSiblingIntoVacated|second|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr390-r2f", "issue": "ops#468", "tier": "F"},
+"R2fPThinCrossingsToNearEdgeRedrawn|first|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr390-r2f", "issue": "ops#468", "tier": "F"},
+"R2fPThinCrossingsToNearEdgeRedrawn|second|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr390-r2f", "issue": "ops#468", "tier": "F"},
+"R2fPThinCrossingsToNearEdge|first|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr390-r2f", "issue": "ops#468", "tier": "F"},
+"R2fPThinCrossingsToNearEdge|second|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr390-r2f", "issue": "ops#468", "tier": "F"},
+"R2fPThinSiblingOnNearEdge|first|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr390-r2f", "issue": "ops#468", "tier": "F"},
+"R2fPThinSiblingOnNearEdge|second|V2s": {"axes": ["M5", "E1"], "classes": ["A"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr390-r2f", "issue": "ops#468", "tier": "F"}
+}
+}

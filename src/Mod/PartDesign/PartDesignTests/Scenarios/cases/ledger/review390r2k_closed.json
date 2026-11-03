@@ -1,0 +1,18 @@
+{
+"entries": {
+"R2kClosedOntoGoneTwinNearSwapped|c_m|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "review pr390-r2k", "issue": "ops#468", "tier": "F"},
+"R2kClosedOntoGoneTwinNearSwapped|c_p|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "review pr390-r2k", "issue": "ops#468", "tier": "F"},
+"R2kClosedOntoGoneTwinNear|c_m|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "review pr390-r2k", "issue": "ops#468", "tier": "F"},
+"R2kClosedOntoGoneTwinNear|c_p|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "review pr390-r2k", "issue": "ops#468", "tier": "F"},
+"R2kClosedOntoGoneTwinSwapped|c_m|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "review pr390-r2k", "issue": "ops#468", "tier": "F"},
+"R2kClosedOntoGoneTwinSwapped|c_p|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "review pr390-r2k", "issue": "ops#468", "tier": "F"},
+"R2kClosedOntoGoneTwinTwoOwners|c_m|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "review pr390-r2k", "issue": "ops#468", "tier": "F"},
+"R2kClosedOntoGoneTwinTwoOwners|c_p|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "review pr390-r2k", "issue": "ops#468", "tier": "F"},
+"R2kClosedOntoGoneTwin|c_m|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "review pr390-r2k", "issue": "ops#468", "tier": "F"},
+"R2kClosedOntoGoneTwin|c_p|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "review pr390-r2k", "issue": "ops#468", "tier": "F"},
+"R2kClosedStayTwinGoneSwapped|c_m|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "review pr390-r2k", "issue": "ops#468", "tier": "F"},
+"R2kClosedStayTwinGoneSwapped|c_p|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "review pr390-r2k", "issue": "ops#468", "tier": "F"},
+"R2kClosedStayTwinGone|c_m|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "review pr390-r2k", "issue": "ops#468", "tier": "F"},
+"R2kClosedStayTwinGone|c_p|V2s": {"axes": ["M3", "E1"], "classes": ["A"], "expect": "OWN-OR-BROKEN", "expected": "broken", "found_by": "review pr390-r2k", "issue": "ops#468", "tier": "F"}
+}
+}
