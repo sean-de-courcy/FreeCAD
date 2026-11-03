@@ -1744,20 +1744,16 @@ bool solveElementReferences(DocumentObject* feature,
                     back = entry->guess.origFingerprint.empty() && entry->guess.kind != "piece"
                         && passThroughOf(*entry) == PassThrough::None;
                 }
-                else if (entry->turned) {
-                    // A part moved as one piece with another edit (decision 234): the element
-                    // held is judged at both places as the entry of its own; no snap-back
+                else if (entry->turned || entry->frame) {
+                    // The target's frame moved, or the part moved as one piece with another edit
+                    // (ops#557): no snap-back. Where it was, a part turned onto itself has the
+                    // original's twin under its name (review pr557o-r2f); the element held is
+                    // judged as an entry of its own, with 211's guard or the break
                     back = false;
                 }
                 else {
-                    // The target's frame moved (ops#557): the original as saved is the record
-                    // mapped to where it was globally; the name's element after a hidden turn
-                    // isn't it
                     const auto& now = fingerprintOf(entry->oldIndex);
-                    const auto expected = entry->frame
-                        ? original.transformed(*entry->frame, tolerances.angle)
-                        : original;
-                    back = now.isValid() && fingerprintsAgree(expected, now, diagonal);
+                    back = now.isValid() && fingerprintsAgree(original, now, diagonal);
                 }
                 if (!back) {
                     FC_LOG(
