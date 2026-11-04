@@ -1173,6 +1173,7 @@ public:
 
     void run()
     {
+        placed = reachByFaces();
         retirePermutedTwins();
         confirmByFaces();
         retireMovedPieces();
@@ -1526,76 +1527,155 @@ private:
         return ranks;
     }
 
-    // P1b at its widest stop (decision 260 (1), `work/s3339/c2-platebthin-ruling.md` 3.3, taken
-    // after review pr399-r4's further silents in this path): a piece changed and matched at another
-    // member's order position is read two ways, as that member changed in place (the place
-    // reading) and as its own order position's member changed and moved there (the order reading).
-    // A whole twin of either standing elsewhere, or none, makes both readings consistent, so no
-    // corroboration is asked: the piece takes fresh ids, and the old piece's ids go to nothing.
-    // Positions count only the pieces with faces, as index names do: a line or a wire in the
-    // compound, moved, added or deleted, moves no position. A piece changed at its own position
-    // keeps the place reading, as every changed piece does.
+    // The correspondence of pieces by place, from the matched faces alone: for each new piece the
+    // old pieces its matched faces came from. A matched vertex or edge links no pieces: a changed
+    // piece whose end stands on an old neighbour's corners holds that neighbour's corner ids by
+    // place without standing at its place (review pr399-r4b, T1 and F-R1)
+    std::map<int, std::set<int>> reachByFaces() const
+    {
+        std::map<int, std::set<int>> reached;
+        const auto oldOwner = pieceOf(oldPieces, 2, before.faceVertexes.size());
+        const auto newOwner = pieceOf(newPieces, 2, after.faceVertexes.size());
+        for (const auto& [i, j] : result.faces) {
+            const int n = newOwner[i - 1];
+            const int k = oldOwner[j - 1];
+            if (n >= 0 && k >= 0) {
+                reached[n].insert(k);
+            }
+        }
+        return reached;
+    }
+
+    // P1b (decision 260, its widest stop 269, and the class C ruling of 2026-11-04, decision 272,
+    // `work/sf785/c2-p1b-path-ruling.md`): a compound's members are read two ways, by place (a new
+    // piece at an old piece's place is that member: the matcher's reading, the design's) and by the
+    // producer's order. The order is evidence only to refuse (the ruling of 10-28, 9.2). Where the
+    // place correspondence is in order up to insertions and deletions (a shift), the two readings
+    // name the same members and nothing is refused. Where it is not, the edit reordered the list,
+    // or moved a member onto another's place, and a changed piece there is read as that member
+    // changed in place as well as as its own member moved and changed: no reading is verified, so
+    // it takes fresh ids and the old piece's ids go to nothing. A whole piece there is read as
+    // that member as well as as a twin of it moved there: when a displaced old piece is such a
+    // twin (the trade partner, the rest of a cycle, a twin list swap an in-place change took out
+    // of P1's class), it takes fresh ids too. Every retirement only withdraws matches.
+    //
+    // The pairs are (new piece, old piece) by faces; two pairs are inverted when their order
+    // positions are reversed. A shift makes no inversion; a reorder makes one for every piece it
+    // moves, with whatever shift it comes with (a trade behind a slab inserted in front puts the
+    // changed piece at its old partner's own position, which a bare position test passes: the
+    // ruling's F8). Positions count only the pieces with faces, as index names do (review pr399-r4,
+    // T2). A new piece whose faces come from two old pieces (a span: B lengthened over C's and D's
+    // places) is changed with respect to each; one whose old pieces are both at its own position
+    // (two parts merged back in place) is kept.
+    //
+    // The pairs are the matcher's, read before P1 and R2' withdraw anything (`placed`, filled at
+    // the start of run()): a trade behind a twin inserted in front has P1 retire the whole pieces
+    // first, and the changed piece left alone at its partner's position would pass (the ruling's
+    // F8 with a twin). Retiring a piece P1 retired is a no-op.
     void retireAmbiguousChanged()
     {
         const auto oldRanks = facedRanks(oldPieces);
         const auto newRanks = facedRanks(newPieces);
-        std::map<int, std::set<int>> reached;  // new piece -> old pieces
-        std::map<int, std::set<int>> reachedBy;  // old piece -> new pieces
-        reach(reached, reachedBy);
-        std::set<int> given;  // old pieces whose ids go to nothing
-        std::vector<int> changed;  // the new pieces retired here
+        const auto& reached = placed;  // new piece -> old pieces, by faces
+        std::vector<std::pair<int, int>> pairs;  // new piece, old piece
         for (const auto& [n, olds] : reached) {
-            if (olds.size() != 1 || oldRanks[*olds.begin()] == newRanks[n]) {
+            for (const int k : olds) {
+                pairs.emplace_back(n, k);
+            }
+        }
+        std::set<std::pair<int, int>> inverted;
+        for (std::size_t a = 0; a < pairs.size(); ++a) {
+            for (std::size_t b = a + 1; b < pairs.size(); ++b) {
+                const auto [n1, k1] = pairs[a];
+                const auto [n2, k2] = pairs[b];
+                if (n1 != n2 && (newRanks[n1] - newRanks[n2]) * (oldRanks[k1] - oldRanks[k2]) < 0) {
+                    inverted.insert(pairs[a]);
+                    inverted.insert(pairs[b]);
+                }
+            }
+        }
+        std::vector<std::optional<Congruence>> oldShapes(oldPieces.size());
+        std::vector<std::optional<Congruence>> newShapes(newPieces.size());
+        auto oldShape = [&](int k) -> const Congruence& {
+            if (!oldShapes[k]) {
+                oldShapes[k].emplace(before, oldPieces[k].elements);
+            }
+            return *oldShapes[k];
+        };
+        auto newShape = [&](int n) -> const Congruence& {
+            if (!newShapes[n]) {
+                newShapes[n].emplace(after, newPieces[n].elements);
+            }
+            return *newShapes[n];
+        };
+        std::set<int> given;  // old pieces whose ids go to nothing
+        std::set<int> displaced;  // old pieces of an inverted pair, or given
+        for (const auto& [n, k] : inverted) {
+            displaced.insert(k);
+        }
+        // Changed pieces: at another position, or in an inversion
+        for (const auto& [n, olds] : reached) {
+            if (olds.size() > 1) {
+                bool atOwn = false;
+                bool inverse = false;
+                for (const int k : olds) {
+                    atOwn = atOwn || oldRanks[k] == newRanks[n];
+                    inverse = inverse || inverted.count({n, k});
+                }
+                if (!atOwn || inverse) {
+                    retire(newPieces[n]);
+                    given.insert(olds.begin(), olds.end());
+                    displaced.insert(olds.begin(), olds.end());
+                }
                 continue;
             }
             const int k = *olds.begin();
-            if (!Congruence(before, oldPieces[k].elements).same(Congruence(after, newPieces[n].elements))) {
-                retire(newPieces[n]);
-                given.insert(k);
-                changed.push_back(n);
-            }
-        }
-        // A trade (review pr399-r4, T1): the changed piece's place reading has the pieces at the
-        // positions it passes through each matched at the next one's place, back to its own
-        // position. That cycle is the order reading's permutation of the same edit (B changed
-        // onto C's place and C whole onto B's, or C changed in place with the two listed
-        // swapped), so its whole pieces take fresh ids too. A deletion or insertion breaks the
-        // chain: the pieces it shifts keep the place reading.
-        std::map<int, int> newAtRank;
-        for (int m = 0; m < static_cast<int>(newPieces.size()); ++m) {
-            if (newRanks[m] >= 0) {
-                newAtRank[newRanks[m]] = m;
-            }
-        }
-        for (const int n : changed) {
-            std::vector<std::pair<int, int>> cycle;  // new piece, the old piece it is matched to
-            int at = *reached[n].begin();
-            while (cycle.size() < newPieces.size()) {
-                const auto w = newAtRank.find(oldRanks[at]);
-                if (w == newAtRank.end() || reached[w->second].size() != 1) {
-                    cycle.clear();
-                    break;
-                }
-                at = *reached[w->second].begin();
-                cycle.emplace_back(w->second, at);
-                if (oldRanks[at] == newRanks[n]) {
-                    break;
-                }
-            }
-            if (cycle.empty() || oldRanks[cycle.back().second] != newRanks[n]) {
+            if (oldShape(k).same(newShape(n))) {
                 continue;
             }
-            for (const auto& [w, k] : cycle) {
-                retire(newPieces[w]);
+            if (oldRanks[k] != newRanks[n] || inverted.count({n, k})) {
+                retire(newPieces[n]);
+                given.insert(k);
+                displaced.insert(k);
+            }
+        }
+        // Whole pieces in an inversion, with a displaced twin of their old piece
+        for (const auto& [n, olds] : reached) {
+            if (olds.size() != 1 || !inverted.count({n, *olds.begin()})) {
+                continue;
+            }
+            const int k = *olds.begin();
+            if (!oldShape(k).same(newShape(n))) {
+                continue;
+            }
+            const bool twinDisplaced = std::any_of(displaced.begin(), displaced.end(), [&](int k2) {
+                return k2 != k && oldShape(k2).same(oldShape(k));
+            });
+            if (twinDisplaced) {
+                retire(newPieces[n]);
                 given.insert(k);
             }
         }
-        for (const int k : given) {
-            for (std::size_t t = 0; t < 3; ++t) {
+        // A given old piece's ids are withdrawn from the pieces of the reorder; a piece outside it
+        // keeps what it holds by place (the near half of a piece split in place, at its own
+        // position, and a neighbour on the corners: review pr399-r4b's T2 and F-L1)
+        std::set<int> reordered;
+        for (const auto& [n, k] : inverted) {
+            reordered.insert(n);
+        }
+        const std::array<std::size_t, 3> newCounts {
+            after.points.size(),
+            after.edgeVertexes.size(),
+            after.faceVertexes.size()
+        };
+        for (std::size_t t = 0; t < 3; ++t) {
+            const auto newOwner = pieceOf(newPieces, t, newCounts[t]);
+            for (const int k : given) {
                 const std::set<int> own(oldPieces[k].elements[t].begin(), oldPieces[k].elements[t].end());
                 auto& matches = matchesOf(t);
                 for (auto it = matches.begin(); it != matches.end();) {
-                    it = own.count(it->second - 1) ? matches.erase(it) : std::next(it);
+                    const bool withdraw = own.count(it->second - 1) && reordered.count(newOwner[it->first - 1]);
+                    it = withdraw ? matches.erase(it) : std::next(it);
                 }
             }
         }
@@ -1608,6 +1688,7 @@ private:
     double tolerance;
     std::vector<Piece> oldPieces;
     std::vector<Piece> newPieces;
+    std::map<int, std::set<int>> placed;  // new piece -> the old pieces its matched faces came from
 };
 
 long idOf(const TopoShape& shape, const Data::IndexedName& element)
