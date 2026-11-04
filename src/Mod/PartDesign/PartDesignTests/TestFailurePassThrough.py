@@ -998,6 +998,180 @@ class FailurePassThroughBase:
         chamfer.Size = 1
         self.assertFirstFeatureOfAnyKindStops(chamfer)
 
+    # -- the chain rule (decision 262) -----------------------------------------------------------
+
+    def topBoss(self, name, x, base=None):
+        """A 5 mm cube on the block's top at x .. x + 5, y 1 .. 6: its sketch is placed, not
+        attached, so it reads nothing of the Body."""
+        sketch = models.sketch(
+            self.doc, f"{name}Sketch", models.rectangle(x, 1, x + 5, 6), self.body, z=10
+        )
+        return models.pad(self.body, sketch, 5, name)
+
+    def testClaimDoesNotFlipWhenAnOffChainMemberRecovers(self):
+        """An orphan pad far off (BaseFeature None, from Python) sits between the boss and the
+        cap, whose base is the boss. The orphan fails; in the next edit it is repaired and the
+        boss fails. The boss's claim reads only its own chain (the block, Valid), so the orphan
+        recomputing Valid in between can't change it: the boss passes the block through and the
+        cap and the Body compute on it in the same recompute (review pr579-r4h T-R4H-1: a
+        Body-wide test read the orphan, and the cap ran on the boss's last shape). The orphan is
+        after the boss in the Body, then before it."""
+        self.orphanFlip(orphanFirst=False)
+        self.tearDown()
+        self.setUp()
+        self.orphanFlip(orphanFirst=True)
+
+    def orphanFlip(self, orphanFirst):
+        def orphanPad():
+            sketch = models.sketch(
+                self.doc, "OrphanSketch", models.rectangle(100, 0, 105, 5), self.body
+            )
+            return models.pad(self.body, sketch, 5, "Orphan")
+
+        block = self.block()
+        orphan = orphanPad() if orphanFirst else None
+        boss = self.topBoss("Boss", 1)
+        orphan = orphan or orphanPad()
+        cap = self.topBoss("Cap", 13)
+        orphan.BaseFeature = None
+        boss.BaseFeature = block
+        cap.BaseFeature = boss
+        self.recompute()
+        self.assertBody(BLOCK + 2 * BOSS)
+
+        orphan.Length = 0
+        self.recompute()
+        self.assertStopped(orphan)
+        self.assertBody(BLOCK + 2 * BOSS)
+
+        orphan.Length = 5
+        boss.Length = 0
+        self.recompute()
+        self.assertValid(orphan, cap)
+        self.assertFailed(boss)
+        self.assertVolume(boss, BLOCK)
+        self.assertBody(BLOCK + BOSS)
+
+    def testAStaleSuccessorDoesNotStopTheBody(self):
+        """Two bosses are added while the block is broken: each fails naming its input without
+        running, its shape null. Then the block is repaired and the first boss fails in the same
+        edit: its base is the block, Valid, so it passes the block through and the second boss
+        computes on it. Its successor's state from before isn't read (review pr579-r4h T-R4H-2:
+        the Body stayed stopped)."""
+        block = self.block()
+        self.recompute()
+        block.Length = 0
+        bossA = self.topBoss("BossA", 1)
+        bossB = self.topBoss("BossB", 13)
+        self.recompute()
+        self.assertStopped(block)
+        self.assertStopped(bossA, f"'{block.Label}', which has an error")
+        self.assertStopped(bossB, f"'{bossA.Label}', which has an error")
+
+        block.Length = 10
+        bossA.Length = 0
+        self.recompute()
+        self.assertFailed(bossA)
+        self.assertVolume(bossA, BLOCK)
+        self.assertValid(block, bossB)
+        self.assertBody(BLOCK + BOSS)
+        self.recompute()
+        self.assertBody(BLOCK + BOSS)
+
+    def testTwoFailuresInAChainBothPassThrough(self):
+        """T10 (decision 262 (3)): Pad2 takes its length from a Part box outside the Body, and
+        Pad3 after it fails on its own in the same edit. Pad2 fails naming the box and passes the
+        block through; Pad3's base is Pad2, a claimed failure whose shape is that pass-through, so
+        Pad3 passes it on, and Pad4 and the Body compute on the block, both failures red with
+        their own texts. Repaired, everything is back."""
+        gauge = models.box(self.doc, "Gauge", (2, 2, 5), at=(100, 0, 0))
+        self.block()
+        pad2 = self.topBoss("Pad2", 1)
+        pad2.setExpression("Length", f"{gauge.Name}.Height")
+        pad3 = self.topBoss("Pad3", 7.5)
+        pad4 = self.topBoss("Pad4", 14)
+        self.recompute()
+        self.assertBody(BLOCK + 3 * BOSS)
+
+        gauge.Length = 0
+        pad3.Length = 0
+        self.recompute()
+        self.assertStopped(gauge)
+        self.assertFailed(pad2, f"'{gauge.Label}' has an error")
+        text = self.assertFailed(pad3)
+        self.assertNotIn("which has an error", text)
+        for obj in (pad2, pad3):
+            self.assertVolume(obj, BLOCK)
+        self.assertValid(pad4)
+        self.assertBody(BLOCK + BOSS)
+
+        gauge.Length = 2
+        pad3.Length = 5
+        self.recompute()
+        self.assertValid(gauge, pad2, pad3, pad4)
+        self.assertBody(BLOCK + 3 * BOSS)
+
+    def testAFailureOnAStoppedBaseStaysStopped(self):
+        """The block and Pad2 after it both fail on their own in one edit. The block has no base,
+        so it isn't passed through and keeps its last shape. Pad2's base holds a solid, but one
+        no recompute made: the block's stale output. So Pad2 isn't claimed either: Pad2, Pad3,
+        Pad4 and the Body fail naming their direct inputs and keep their shapes (the chain rule's
+        "current" half: a claim that asked only whether the base holds a solid would compute
+        Pad3 on the stale block). Repaired, everything computes."""
+        block = self.block()
+        pad2 = self.topBoss("Pad2", 1)
+        pad3 = self.topBoss("Pad3", 7.5)
+        pad4 = self.topBoss("Pad4", 14)
+        self.recompute()
+        self.assertBody(BLOCK + 3 * BOSS)
+
+        block.Length = 0
+        pad2.Length = 0
+        self.recompute()
+        self.assertStopped(block)
+        self.assertStopped(pad2, f"'{block.Label}', which has an error")
+        self.assertStopped(pad3, f"'{pad2.Label}', which has an error")
+        self.assertStopped(pad4, f"'{pad3.Label}', which has an error")
+        self.assertStopped(self.body)
+        for obj in (pad4, self.body):
+            self.assertVolume(obj, BLOCK + 3 * BOSS)
+
+        block.Length = 10
+        pad2.Length = 5
+        self.recompute()
+        self.assertValid(block, pad2, pad3, pad4)
+        self.assertBody(BLOCK + 3 * BOSS)
+
+    def testAMemberStoppedByAnOutsideInputStaysTouchedAndItsPadPassesThrough(self):
+        """The boss's sketch in the Body takes a dimension from a Part box outside it. The box
+        fails: the sketch fails naming it and, its input an unclaimed failure, stays touched; the
+        boss fails naming the sketch, and its base, the block, is Valid, so it passes the block
+        through and the Body continues (decision 262 (2): before, the sketch was claimed and left
+        alone). Repaired, everything computes."""
+        gauge = models.box(self.doc, "Gauge", (2, 5, 2), at=(100, 0, 0))
+        self.block()
+        boss = self.topBoss("Boss", 1)
+        sketch = boss.Profile[0]
+        width = sketch.addConstraint(Sketcher.Constraint("DistanceX", 0, 1, 0, 2, 5))
+        sketch.renameConstraint(width, "Width")
+        sketch.setExpression(".Constraints.Width", f"{gauge.Name}.Width")
+        self.recompute()
+        self.assertValid(sketch, boss)
+        self.assertBody(BLOCK + BOSS)
+
+        gauge.Length = 0
+        self.recompute()
+        self.assertStopped(gauge)
+        self.assertStopped(sketch, f"'{gauge.Label}' has an error")
+        self.assertFailed(boss, f"'{sketch.Label}', which has an error")
+        self.assertVolume(boss, BLOCK)
+        self.assertBody(BLOCK)
+
+        gauge.Length = 2
+        self.recompute()
+        self.assertValid(gauge, sketch, boss)
+        self.assertBody(BLOCK + BOSS)
+
     # -- T9 ------------------------------------------------------------------------------------
 
     def testExpressionInErrorPassesThrough(self):
