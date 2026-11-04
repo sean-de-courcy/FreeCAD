@@ -354,6 +354,55 @@ class TestMultiTransform(unittest.TestCase):
         self.assertAlmostEqual(2 * low.YMin - scaledLow.YMin, spans / 2, delta=1e-4)
         self.assertAlmostEqual(2 * low.ZMin - scaledLow.ZMin, 5, delta=1e-4)
 
+    def testConvertingATransformKeepsTheChain(self):
+        """A Mirrored of a boss, a cap after it; the Mirrored is converted to a MultiTransform as
+        the command does (the Tip back to the boss, the MultiTransform added, its Originals, mode
+        and BaseFeature set, the Mirrored made its step, the Tip back). The MultiTransform's base
+        is the boss and the Mirrored's isn't the MultiTransform: no cycle, everything Valid, as
+        upstream (review pr579-r5 T-R5-1: linking the base when Originals is set rerouted the
+        Mirrored onto the MultiTransform, and setting its BaseFeature closed the cycle)."""
+
+        def boxSketch(name, x0, y0, x1, y1, z):
+            sketch = body.newObject("Sketcher::SketchObject", name)
+            sketch.Placement = App.Placement(App.Vector(0, 0, z), App.Rotation())
+            TestSketcherApp.CreateRectangleSketch(sketch, (x0, y0), (x1 - x0, y1 - y0))
+            return sketch
+
+        def pad(name, sketch, length):
+            feature = body.newObject("PartDesign::Pad", name)
+            feature.Profile = sketch
+            feature.Length = length
+            return feature
+
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        pad("Block", boxSketch("BlockSketch", -10, -10, 10, 10, 0), 10)
+        boss = pad("Boss", boxSketch("BossSketch", 3, 1, 8, 6, 10), 5)
+        self.Doc.recompute()
+        mirrored = body.newObject("PartDesign::Mirrored", "Mirrored")
+        mirrored.Originals = [boss]
+        mirrored.MirrorPlane = (body.Origin.OriginFeatures[4], [""])  # the YZ plane
+        body.Tip = mirrored
+        self.Doc.recompute()
+        cap = pad("Cap", boxSketch("CapSketch", -2, -2, 2, 2, 10), 2)
+        self.Doc.recompute()
+        self.assertAlmostEqual(body.Shape.Volume, 4000 + 2 * 125 + 32, places=6)
+
+        body.Tip = boss
+        multi = body.newObject("PartDesign::MultiTransform", "MultiTransform")
+        multi.Originals = mirrored.Originals
+        multi.TransformMode = mirrored.TransformMode
+        multi.BaseFeature = mirrored.BaseFeature
+        multi.Transformations = [mirrored]
+        mirrored.Originals = []
+        self.Doc.recompute()
+        body.Tip = cap
+        self.Doc.recompute()
+        self.assertEqual(multi.BaseFeature, boss)
+        self.assertNotEqual(mirrored.BaseFeature, multi)
+        for feature in (multi, mirrored, cap, body):
+            self.assertTrue(feature.isValid(), f"{feature.Name}: {feature.getStatusString()}")
+            self.assertNotIn("Touched", feature.State)
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("PartDesignTestMultiTransform")
