@@ -20,10 +20,11 @@
 # *                                                                         *
 # ***************************************************************************
 
-"""Runs `make_generation.main()` inside FreeCADCmd for regen_gen0.sh (FreeCAD-CH ops#418).
+"""Runs `make_generation.main()` inside FreeCADCmd (FreeCAD-CH ops#418): a release's generation from
+its own package, and the macOS half in CI (sub_buildPixi.yml).
 
 make_generation.py does nothing when FreeCADCmd runs it as a file (its main() sits under
-`if __name__ == "__main__"`), so regen_gen0.sh runs this wrapper instead. Environment:
+`if __name__ == "__main__"`), so the generation steps run this wrapper instead. Environment:
 
     FREECAD_COMPAT_OUT      the generation's folder (gen<k>), as make_generation.py reads it
     FREECAD_COMPAT_MODELS   optional, the models to build (space separated); empty: all of them
@@ -77,7 +78,7 @@ def _run():
         if unknown:
             raise RuntimeError(
                 f"this build has no model {unknown}: the build is older than the checkout's "
-                f"gen0, or the name is misspelt"
+                f"models.py, or the name is misspelt"
             )
         make_generation.main()
         text = "OK\n"

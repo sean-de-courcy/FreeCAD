@@ -33,10 +33,11 @@ on:
   workflow_dispatch:
     inputs:
       # ops#538: the compat generation whose macOS half the run saves and uploads
-      # (compat-gen<k>-macos). 0: gen0-macos from gen0's models; the beta's gen1 is
-      # `gh workflow run CI_macos.yml --ref <tag> -f compat_generation=1`, every model.
+      # (compat-gen<k>-macos), from every model: a release's generation is
+      # `gh workflow run CI_macos.yml --ref <tag> -f compat_generation=<k>`. 0: none (gen0 went
+      # with the beta, ops#323 PR D).
       compat_generation:
-        description: "Compat generation to save on macOS (0 = gen0's models; k > 0 = every model)"
+        description: "Compat generation to save on macOS (0 = none; k > 0 = gen<k>-macos, every model)"
         default: "0"
         required: false
         type: string

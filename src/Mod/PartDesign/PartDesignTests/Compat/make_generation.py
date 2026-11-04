@@ -56,8 +56,7 @@ from PartDesignTests.Scenarios import models as m
 
 FORMAT = 1
 # The halves of a generation: the folder's suffix and the platform (`sys.platform`) that saves it.
-# TestCompatCorpus, regen_gen0.sh, check_release_gen0.py and the ops repo's compat_guard.sh read
-# the same names.
+# TestCompatCorpus, check_release_gen0.py and the ops repo's compat_guard.sh read the same names.
 HALVES = {"": "win32", "-macos": "darwin"}
 FOLDER = re.compile(r"gen(\d+)(-macos)?")
 VOLUME_TOLERANCE = 1e-7  # relative: the stated volumes are exact

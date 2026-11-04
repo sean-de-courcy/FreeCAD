@@ -1,49 +1,68 @@
 #!/usr/bin/env python
 # SPDX-License-Identifier: LGPL-2.1-or-later
 
-"""FreeCAD-CH release check (ops#460): the compat corpus is current for the build's naming revision.
+"""FreeCAD-CH release check (ops#460, ops#482): the compat corpus holds the previous release's generation.
 
-TestCompatCorpus reads a generation whose MANIFEST `namingRevision` is below the build's as a
-user's older file, and then does not compare element names. Naming PRs no longer regenerate gen0
-(PLAN decision 120 (1)); the coordinator does it once per merge batch. A release built from a batch
-whose gen0 is still older would ship with the name check off, so it is refused here, before the
-draft release exists. The newest generation in `src/Mod/PartDesign/PartDesignTests/Compat/gen<k>`
-must carry the same `namingRevision` as `ForkNamingRevision` in `src/App/Document.cpp`, in both of
-its halves: `gen<k>` saved on Windows and `gen<k>-macos` saved on macOS (ops#538); a missing half
-is an error.
+After the beta, each release's generation is saved after its tag, from that release's own build
+(notes/beta-compatibility.md 3.9): fork-0.7.0's build saved gen1. A release is therefore checked
+against the release before it: the newest generation in
+`src/Mod/PartDesign/PartDesignTests/Compat/gen<k>` must carry the `namingRevision` of the previous
+`fork-*` release (`ForkNamingRevision` in that tag's `src/App/Document.cpp`; the tag is
+`git describe --tags --abbrev=0 --match 'fork-*' HEAD^`, so a tag already on HEAD is not its own
+previous release), in both of its halves: `gen<k>` saved on Windows and `gen<k>-macos` saved on
+macOS (ops#538); a missing half is an error.
+- Lower: the previous release's generation never landed, and TestCompatCorpus would read the files
+  it promised to open as an older generation's. Refused.
+- Higher than this source's `ForkNamingRevision`: no build of this source wrote it. Refused.
+- Higher than the previous release's, up to this source's: saved by a later build than the
+  release's, so it isn't the record of what that release wrote. Refused.
 
-    check_release_gen0.py --source .                    refuse (exit 1) when gen0 is older
+    check_release_gen0.py --source .                    refuse (exit 1) unless it holds
     check_release_gen0.py --source . --warn-only        report it, exit 0 (a dry run)
 
-Exit codes: 0 current (or --warn-only), 1 refused, 2 can't read the revision or a MANIFEST.
-To fix a refusal: merge the batch into integration, build it, run
-`src/Mod/PartDesign/PartDesignTests/Compat/regen_gen0.sh --install` from that checkout (the macOS
-half: `--install --from` the compat-gen0-macos artifact of integration's macOS run), land the
-result as a PR, and cut the release from the commit after it (notes/beta-compatibility.md 3.9).
+Exit codes: 0 current (or --warn-only), 1 refused, 2 can't read a revision, a MANIFEST or the
+previous tag. To fix a refusal: save gen<k> with the previous release's own build (its Windows
+package running `regen_gen0_drive.py`, the macOS half from a `CI_macos.yml` run on its tag with
+`-f compat_generation=<k>`), land both halves as one PR, and release from the commit after it
+(notes/beta-compatibility.md 3.9). The source must be a git checkout with the tags (the release
+workflow fetches full history).
 """
 
 import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 
 COMPAT = os.path.join("src", "Mod", "PartDesign", "PartDesignTests", "Compat")
 DOCUMENT = os.path.join("src", "App", "Document.cpp")
 # A generation's halves, by folder suffix (make_generation.HALVES): Windows, macOS.
 HALVES = ("", "-macos")
+REVISION_LINE = re.compile(r"^constexpr int ForkNamingRevision = (\d+);", re.MULTILINE)
 
-HOW_TO_FIX = (
-    "Merge the batch into integration, build it, run "
-    "src/Mod/PartDesign/PartDesignTests/Compat/regen_gen0.sh --install from that checkout "
-    "(the macOS half: --install --from the compat-gen0-macos artifact of integration's macOS "
-    "run), land both halves as one PR, and release from the commit after it "
-    "(notes/beta-compatibility.md 3.9)."
-)
+
+def how_to_fix(name, tag):
+    """The refusal's remedy for generation folder `name` (gen<k> or gen<k>-macos)."""
+    k = re.match(r"gen(\d+)", name).group(1)
+    return (
+        f"Land gen{k} from {tag}'s build first: its Windows package running "
+        f"src/Mod/PartDesign/PartDesignTests/Compat/regen_gen0_drive.py, and gen{k}-macos from "
+        f"`gh workflow run CI_macos.yml --ref {tag} -f compat_generation={k}`, as one PR; then "
+        f"release from the commit after it (notes/beta-compatibility.md 3.9)."
+    )
 
 
 class CheckError(Exception):
     """Something the check needs is missing or unreadable (exit 2)."""
+
+
+def revision_in(text, where):
+    """ForkNamingRevision in the text of a Document.cpp."""
+    m = REVISION_LINE.search(text)
+    if not m:
+        raise CheckError(f"no `constexpr int ForkNamingRevision = N;` line in {where}")
+    return int(m.group(1))
 
 
 def build_revision(source):
@@ -54,10 +73,27 @@ def build_revision(source):
             text = document.read()
     except OSError as error:
         raise CheckError(f"can't read {path}: {error}")
-    m = re.search(r"^constexpr int ForkNamingRevision = (\d+);", text, re.MULTILINE)
-    if not m:
-        raise CheckError(f"no `constexpr int ForkNamingRevision = N;` line in {path}")
-    return int(m.group(1))
+    return revision_in(text, path)
+
+
+def git(source, *args):
+    """stdout of a git command in the source tree."""
+    try:
+        done = subprocess.run(
+            ["git", "-C", source, *args], capture_output=True, text=True, encoding="utf-8"
+        )
+    except OSError as error:
+        raise CheckError(f"can't run git: {error}")
+    if done.returncode != 0:
+        raise CheckError(f"git {' '.join(args)} failed in {source}: {done.stderr.strip()}")
+    return done.stdout
+
+
+def previous_release(source):
+    """(tag, ForkNamingRevision) of the newest fork-* tag before HEAD."""
+    tag = git(source, "describe", "--tags", "--abbrev=0", "--match", "fork-*", "HEAD^").strip()
+    where = f"{tag}:{DOCUMENT.replace(os.sep, '/')}"
+    return tag, revision_in(git(source, "show", where), where)
 
 
 def newest_generation(source):
@@ -101,24 +137,33 @@ def check(source):
     """(ok, message) for a source tree."""
     revision = build_revision(source)
     halves = newest_generation(source)
-    stale = []
+    tag, previous = previous_release(source)
+    stale, fix = [], ""
     for name, generation, built in halves:
-        if generation == revision:
+        if generation == previous and generation <= revision:
             continue
         built = f" (made by a build of {built[0][:10]})" if built else ""
-        relation = "older than" if generation < revision else "newer than"
-        stale.append(
-            f"{name} has naming revision {generation}{built}, {relation} this source's "
-            f"ForkNamingRevision {revision}"
-        )
+        if generation > revision:
+            why = f"newer than this source's ForkNamingRevision {revision}: no build of it wrote that"
+        elif generation < previous:
+            why = (
+                f"older than {tag}'s ForkNamingRevision {previous}: {tag}'s generation never landed, "
+                f"so TestCompatCorpus would read the files {tag} wrote as an older release's"
+            )
+        else:
+            why = (
+                f"newer than {tag}'s ForkNamingRevision {previous}: a later build saved it, so it "
+                f"isn't the record of what {tag} wrote"
+            )
+        stale.append(f"{name} has naming revision {generation}{built}, {why}")
+        fix = fix or how_to_fix(name, tag)
     names = " and ".join(name for name, _, _ in halves)
     if not stale:
-        return True, f"Compat corpus: {names} are current (naming revision {revision})."
-    return False, (
-        f"Compat corpus: {'; '.join(stale)}. TestCompatCorpus reads such a generation as an older file and does not compare element "
-        f"names, so a release from this commit would ship with the name check off (ops#460). "
-        f"{HOW_TO_FIX}"
-    )
+        return True, (
+            f"Compat corpus: {names} hold {tag}'s generation (naming revision {previous}; "
+            f"this source's is {revision})."
+        )
+    return False, f"Compat corpus: {'; '.join(stale)} (ops#482). {fix}"
 
 
 def main():
@@ -136,7 +181,7 @@ def main():
     try:
         ok, message = check(args.source)
     except CheckError as error:
-        message = f"Release check (gen0): {error}"
+        message = f"Release check (compat generation): {error}"
         summarize("**Refused:** " + message)
         print(message, file=sys.stderr)
         sys.exit(2)
