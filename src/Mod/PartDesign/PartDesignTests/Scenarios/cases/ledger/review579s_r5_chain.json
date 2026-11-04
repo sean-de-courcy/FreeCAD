@@ -1,0 +1,7 @@
+{
+"entries": {
+"MtStepOnFailedGauge|front|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579s-r5", "issue": "ops#579", "tier": "F"},
+"PatternChainOneStep|front|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr579s-r5", "issue": "ops#579", "tier": "F"},
+"PatternChain|front|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr579s-r5", "issue": "ops#579", "tier": "F"}
+}
+}
