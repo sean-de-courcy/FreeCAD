@@ -168,12 +168,24 @@ void passThroughBase(Feature& feature)
     feature.Shape.setValue(pass);
 }
 
+/// The Body's FeatureBase (its first member, standing for the BaseFeature outside it) is in error,
+/// whatever made it fail. Its pass-through is the empty shape, and the features after it would
+/// compute on nothing, Valid: the Body doesn't continue then, and every member fails naming its
+/// input (ops#579, decision 254)
+bool baseInError(const Body& body)
+{
+    const auto& members = body.Group.getValues();
+    return !members.empty() && members.front() && members.front()->isDerivedFrom<FeatureBase>()
+        && members.front()->isError();
+}
+
 class BodyFailureContinuation: public App::RecomputeContinuation
 {
 public:
     bool continuesAfter(const App::DocumentObject* failed) const override
     {
-        return bodyOf(failed) != nullptr;
+        auto body = bodyOf(failed);
+        return body && !baseInError(*body);
     }
 
     App::AfterInputFailure decide(const App::DocumentObject* /*failed*/,
