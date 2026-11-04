@@ -4264,9 +4264,10 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
         }
     };
 
-    // The objects in error whose shape this recompute didn't make: failed without running, or
-    // ran and failed with no rule claiming it (ops#579, decision 256). The records of the
-    // references into them are taken at its end, as a setter's
+    // The objects in error that this recompute didn't make: failed without running (a claimed one
+    // too: its output is its pass-through, or its last), or ran and failed with no rule claiming
+    // it (ops#579, decision 256). The records of the references into them are taken at its end,
+    // as a setter's (review pr579-r4 R4-2: a claimed one taken too comes out right)
     std::vector<DocumentObject*> unmade;
 
     try {
