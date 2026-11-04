@@ -121,8 +121,9 @@ class CheckReleaseGen0(unittest.TestCase):
         self.assertIsInstance(code, str)
         self.assertIn("gen0 has naming revision 12", code)
         self.assertIn("older than fork-0.7.0's ForkNamingRevision 15", code)
-        self.assertIn("Land gen0 from fork-0.7.0's build first", code)
-        self.assertIn("compat_generation=0", code)
+        self.assertIn("fork-0.7.0's generation is gen1, not landed yet", code)
+        self.assertIn("Save gen1 and gen1-macos with fork-0.7.0's own build", code)
+        self.assertIn("compat_generation=1", code)
         self.assertIn("Refusing to build the release", code)
 
     def test_a_generation_above_the_source_is_refused(self):
@@ -143,6 +144,8 @@ class CheckReleaseGen0(unittest.TestCase):
         code, _, _ = self.run_main()
         self.assertIn("gen1-macos has naming revision 14", code)
         self.assertNotIn("gen1 has", code)
+        # only that half is saved again, not a next generation
+        self.assertIn("Save gen1-macos with fork-0.7.0's own build", code)
         self.fresh_root()
         make_source(self.root, 15, {1: 14}, macos={1: 15})
         code, _, _ = self.run_main()
@@ -178,6 +181,24 @@ class CheckReleaseGen0(unittest.TestCase):
         code, out, _ = self.run_main()
         self.assertIsNone(code)
         self.assertIn("fork-0.7.0's generation", out)
+
+    def test_a_release_tagged_on_a_merged_branch_counts(self):
+        # fork-0.6.1's way: a hotfix branch from the release, tagged there and merged into
+        # integration; the merge's first parent alone would give the tag before it
+        make_source(self.root, 15, {1: 15})
+        git(self.root, "checkout", "-q", "-b", "hotfix", "fork-0.7.0")
+        write_document(self.root, 16)
+        git(self.root, "commit", "-q", "-am", "hotfix with a naming bump")
+        git(self.root, "tag", "fork-0.7.1")
+        git(self.root, "checkout", "-q", "main")
+        git(self.root, "merge", "-q", "--no-edit", "hotfix")
+        code, _, _ = self.run_main()
+        self.assertIn("older than fork-0.7.1's ForkNamingRevision 16", code)
+        self.assertIn("fork-0.7.1's generation is gen2, not landed yet", code)
+        # the same with the next release's tag on the merge commit
+        git(self.root, "tag", "fork-0.8.0")
+        code, _, _ = self.run_main()
+        self.assertIn("older than fork-0.7.1's ForkNamingRevision 16", code)
 
     def test_other_tags_dont_count(self):
         make_source(self.root, 17, {1: 15}, previous=15)
@@ -219,7 +240,7 @@ class CheckReleaseGen0(unittest.TestCase):
 
     def test_no_previous_release_is_exit_2(self):
         make_source(self.root, 15, {1: 15}, tag=None)
-        self.assert_exit_2("git describe --tags --abbrev=0 --match fork-* HEAD^ failed")
+        self.assert_exit_2("git describe --tags --abbrev=0 --match fork-* HEAD failed")
         # a tag from before the revision line
         self.fresh_root()
         make_source(self.root, 15, {1: 15}, previous=None)
@@ -228,7 +249,7 @@ class CheckReleaseGen0(unittest.TestCase):
         self.fresh_root()
         make_source(self.root, 15, {1: 15})
         os.rename(os.path.join(self.root, ".git"), os.path.join(self.root, "not-git"))
-        self.assert_exit_2("git describe")
+        self.assert_exit_2("not a git repository")
 
     def test_newest_folder_without_manifest_does_not_fall_back(self):
         make_source(self.root, 15, {1: 15})

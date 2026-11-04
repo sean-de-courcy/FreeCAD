@@ -8,8 +8,9 @@ After the beta, each release's generation is saved after its tag, from that rele
 against the release before it: the newest generation in
 `src/Mod/PartDesign/PartDesignTests/Compat/gen<k>` must carry the `namingRevision` of the previous
 `fork-*` release (`ForkNamingRevision` in that tag's `src/App/Document.cpp`; the tag is
-`git describe --tags --abbrev=0 --match 'fork-*' HEAD^`, so a tag already on HEAD is not its own
-previous release), in both of its halves: `gen<k>` saved on Windows and `gen<k>-macos` saved on
+`git describe --tags --abbrev=0 --match 'fork-*' HEAD` with HEAD's own `fork-*` tags excluded, so a
+tag already on HEAD is not its own previous release, and a merge commit counts a release tagged on
+its merged branch), in both of its halves: `gen<k>` saved on Windows and `gen<k>-macos` saved on
 macOS (ops#538); a missing half is an error.
 - Lower: the previous release's generation never landed, and TestCompatCorpus would read the files
   it promised to open as an older generation's. Refused.
@@ -42,14 +43,13 @@ HALVES = ("", "-macos")
 REVISION_LINE = re.compile(r"^constexpr int ForkNamingRevision = (\d+);", re.MULTILINE)
 
 
-def how_to_fix(name, tag):
-    """The refusal's remedy for generation folder `name` (gen<k> or gen<k>-macos)."""
-    k = re.match(r"gen(\d+)", name).group(1)
+def how_to_fix(tag, k, names):
+    """The refusal's remedy: generation `k`'s folders `names`, saved by `tag`'s own build."""
     return (
-        f"Land gen{k} from {tag}'s build first: its Windows package running "
-        f"src/Mod/PartDesign/PartDesignTests/Compat/regen_gen0_drive.py, and gen{k}-macos from "
-        f"`gh workflow run CI_macos.yml --ref {tag} -f compat_generation={k}`, as one PR; then "
-        f"release from the commit after it (notes/beta-compatibility.md 3.9)."
+        f"Save {' and '.join(names)} with {tag}'s own build (its Windows package running "
+        f"src/Mod/PartDesign/PartDesignTests/Compat/regen_gen0_drive.py for gen{k}, "
+        f"`gh workflow run CI_macos.yml --ref {tag} -f compat_generation={k}` for gen{k}-macos), "
+        f"land them as one PR, and release from the commit after it (notes/beta-compatibility.md 3.9)."
     )
 
 
@@ -90,8 +90,15 @@ def git(source, *args):
 
 
 def previous_release(source):
-    """(tag, ForkNamingRevision) of the newest fork-* tag before HEAD."""
-    tag = git(source, "describe", "--tags", "--abbrev=0", "--match", "fork-*", "HEAD^").strip()
+    """(tag, ForkNamingRevision) of the newest fork-* tag before HEAD.
+
+    Not `HEAD^`: that is the first parent only, so a merge of a hotfix branch tagged fork-X would
+    take the tag before fork-X (fork-0.6.1 reached integration that way)."""
+    own = git(source, "tag", "--points-at", "HEAD", "--list", "fork-*").split()
+    excluded = [arg for name in own for arg in ("--exclude", name)]
+    tag = git(
+        source, "describe", "--tags", "--abbrev=0", "--match", "fork-*", *excluded, "HEAD"
+    ).strip()
     where = f"{tag}:{DOCUMENT.replace(os.sep, '/')}"
     return tag, revision_in(git(source, "show", where), where)
 
@@ -138,7 +145,7 @@ def check(source):
     revision = build_revision(source)
     halves = newest_generation(source)
     tag, previous = previous_release(source)
-    stale, fix = [], ""
+    stale, wrong = [], []
     for name, generation, built in halves:
         if generation == previous and generation <= revision:
             continue
@@ -156,13 +163,22 @@ def check(source):
                 f"isn't the record of what {tag} wrote"
             )
         stale.append(f"{name} has naming revision {generation}{built}, {why}")
-        fix = fix or how_to_fix(name, tag)
-    names = " and ".join(name for name, _, _ in halves)
+        wrong.append(name)
     if not stale:
+        names = " and ".join(name for name, _, _ in halves)
         return True, (
             f"Compat corpus: {names} hold {tag}'s generation (naming revision {previous}; "
             f"this source's is {revision})."
         )
+    k = int(re.match(r"gen(\d+)", halves[0][0]).group(1))
+    if all(generation < previous for _, generation, _ in halves):
+        # the release's generation never landed: it is the next number
+        fix = f"{tag}'s generation is gen{k + 1}, not landed yet. " + how_to_fix(
+            tag, k + 1, [f"gen{k + 1}", f"gen{k + 1}-macos"]
+        )
+    else:
+        # a half that isn't the release's record is saved again
+        fix = how_to_fix(tag, k, wrong)
     return False, f"Compat corpus: {'; '.join(stale)} (ops#482). {fix}"
 
 
