@@ -1184,6 +1184,7 @@ class Scenario:
                 self.stepName = "edit"
                 self.edit(self.doc)  # may close and reopen the documents (self.doc)
                 self.doc.recompute()
+                self._subsBefore = {name: r.record["subs"] for name, r in before.items()}
                 after = {name: self.judge(ref, "edit") for name, ref in self.refs.items()}
                 for name, result in after.items():
                     result.record["names_before"] = before[name].record["names"]
@@ -1196,6 +1197,7 @@ class Scenario:
                 self.stepName = step
                 getattr(self, step)(self.doc)  # may close and reopen the documents (self.doc)
                 self.doc.recompute()
+                self._subsBefore = {name: r.record["subs"] for name, r in previous.items()}
                 judged = {name: self.judge(ref, step) for name, ref in self.refs.items()}
                 for name, result in judged.items():
                     result.record["names_before"] = previous[name].record["names"]
@@ -1359,6 +1361,19 @@ class Scenario:
             if warnedExpected and result.verdict == "correct" and not warned:
                 # the right element, silently: the record it should keep is gone
                 result.verdict, detail = "wrong", f"{owner.Name} has no warning"
+        if (
+            stopped
+            and not owner.isValid()
+            and not misplaced
+            and subs == getattr(self, "_subsBefore", {}).get(ref.name)
+        ):
+            # An invalid owner on a stopped target whose subs are the previous step's: no solve
+            # ran, the owner fails with its input's error (ops#579, decision 250 (4)). It breaks,
+            # loudly, whatever its subs still find on the target's old shape (decision 186's
+            # intent; not decision 188 (2)'s retired rule, which scored pass-through holds)
+            result.verdict = "broken"
+            stoppedOn = f"{owner.Name} stopped on {target.Name}: {owner.getStatusString()}"
+            detail = "; ".join(d for d in (detail, stoppedOn) if d)
         if misplaced and result.verdict not in ("wrong", "guessed-wrong"):
             # On another object than the one it must be on: wrong whatever the consumer computes
             # there (the review of fork PR 256, High 1); later edits act on that object
