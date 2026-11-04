@@ -969,10 +969,9 @@ class FailurePassThroughBase:
         self.assertFalse(top.isValid(), "the front face re-bound to the slid rim's")
 
     def assertFirstFeatureOfAnyKindStops(self, first):
-        """`first`, the Body's first solid feature, is in error: the Body doesn't continue past
-        it, whatever kind it is (decision 255 (1); a kind exempted once, decision 257, hid a
-        failed first Pad after it, review pr579-r4 R4-1): the block after it fails naming it.
-        Removed, the block computes."""
+        """`first`, the Body's first solid feature, is in error and of a kind whose result on
+        nothing isn't known to be nothing: the Body doesn't continue past it (decision 255 (1)):
+        the block after it fails naming it. Removed, the block computes."""
         block = self.block()
         self.recompute()
         self.assertStopped(first)
@@ -1031,15 +1030,72 @@ class FailurePassThroughBase:
         self.recompute()
         self.assertALeadThatMakesNothingHidesNoFailure(self.body.Group[0])
 
-    def testFailedSubtractiveFirstFeatureStopsTheBody(self):
-        """The Body's first solid feature is a pocket, with nothing to cut."""
-        self.assertFirstFeatureOfAnyKindStops(self.hole())
+    def assertALeadThatFailsOnNothingPassesNothing(self, lead):
+        """`lead`, the Body's first solid feature, is of a kind whose result on nothing is
+        nothing, and it fails there. Its empty pass-through is exactly that result, so it is
+        claimed, and the block and the boss compute below it (ops#591, ops#127's park; decision
+        262 (1); since ops#579 the Body stopped). The block takes its length from a Part box
+        outside the Body; the box fails: the block's own pass-through would be the empty shape,
+        so the Body stops (the claimed lead hides no failed first Pad, review pr579-r4 R4-1).
+        Repaired, the Body computes below the lead again; the lead removed, the same."""
+        gauge = models.box(self.doc, "Gauge", (2, 2, 10), at=(100, 0, 0))
+        block = self.block()
+        block.setExpression("Length", f"{gauge.Name}.Height")
+        boss = self.boss(block)
+        mirror = self.mirrorOf(boss)
+        self.recompute()
+        self.assertFailed(lead)
+        self.assertTrue(lead.Shape.isNull())
+        self.assertValid(block, boss, mirror)
+        self.assertBody(BLOCK + BOSS)
+        self.assertVolume(mirror, BLOCK + BOSS)
 
-    def testFailedDressUpFirstFeatureStopsTheBody(self):
-        """The Body's first solid feature is a chamfer, with nothing to chamfer."""
+        gauge.Length = 0
+        self.recompute()
+        self.assertFirstFeatureStopped(block, boss, mirror, f"'{gauge.Label}' has an error")
+
+        gauge.Length = 2
+        self.recompute()
+        self.assertFailed(lead)
+        self.assertValid(block, boss, mirror)
+        self.assertBody(BLOCK + BOSS)
+
+        self.body.removeObject(lead)
+        self.doc.removeObject(lead.Name)
+        self.recompute()
+        self.assertValid(block, boss)
+        self.assertBody(BLOCK + BOSS)
+
+    def testFailedSubtractiveLeadPassesNothing(self):
+        """The lead is a pocket, with nothing to cut: a hole a reorder left at the top."""
+        self.assertALeadThatFailsOnNothingPassesNothing(self.hole())
+
+    def testFailedSubtractivePrimitiveLeadPassesNothing(self):
+        """The lead is a subtractive box, without a base feature."""
+        box = self.body.newObject("PartDesign::SubtractiveBox", "Cut")
+        box.Placement.Base = V(2, 2, 7)
+        self.assertALeadThatFailsOnNothingPassesNothing(box)
+
+    def testFailedDressUpLeadPassesNothing(self):
+        """The lead is a chamfer, with nothing to chamfer."""
         chamfer = self.body.newObject("PartDesign::Chamfer", "Chamfer")
         chamfer.Size = 1
-        self.assertFirstFeatureOfAnyKindStops(chamfer)
+        self.assertALeadThatFailsOnNothingPassesNothing(chamfer)
+
+    def testFailedScriptedSubtractiveLeadStopsTheBody(self):
+        """The lead is a scripted subtractive feature whose execute() fails: its result on
+        nothing is its script's, not known to be nothing, so it isn't claimed (ops#591)."""
+
+        class Failing:
+            def __init__(self, obj):
+                obj.Proxy = self
+
+            def execute(self, obj):
+                raise RuntimeError("the script fails")
+
+        lead = self.body.newObject("PartDesign::FeatureSubtractivePython", "Scripted")
+        Failing(lead)
+        self.assertFirstFeatureOfAnyKindStops(lead)
 
     # -- the chain rule (decision 262) -----------------------------------------------------------
 
