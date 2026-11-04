@@ -27,6 +27,10 @@ FIXTURE = os.path.join(os.path.dirname(__file__), "Fixtures", "BetaMapless.FCStd
 # a build of the beta's naming (revision 15): CornerBall, a sphere attached to a vertex of a Cut of
 # two boxes' compound, holds a vertex name made from the boxes' IDX edge names
 CORNER_FIXTURE = os.path.join(os.path.dirname(__file__), "Fixtures", "BetaIndexToldGroups.FCStd")
+# A script's compound of three slabs A, B, C and a Cut of it, saved by a build of the beta's naming
+# with `Fixtures/make_beta_plate_abc.py` (review pr399-r3g's G1; decision 260); its docstring
+# describes the designed geometry
+PLATE_FIXTURE = os.path.join(os.path.dirname(__file__), "Fixtures", "BetaPlateABC.FCStd")
 
 MIGRATION = re.compile(
     r"(\d+) element references re-derived from their geometry after a naming change: "
@@ -63,6 +67,11 @@ def dropBSlotted(doc):
         a = a.cut(Part.makeBox(2, 20, 7, V(x, 5, -1)))
     doc.getObject("Plate").Shape = Part.makeCompound([a])
 
+def bThinToCPlace(doc):
+    # the script runs again: B 3 high on C's place, C moved on to x = 300 (review pr399-r3g)
+    doc.getObject("Plate").Shape = Part.makeCompound(
+        [Part.makeBox(40, 30, 5), Part.makeBox(40, 30, 3, V(120, 0, 0)), Part.makeBox(40, 30, 5, V(300, 0, 0))])
+
 def solverOff(doc):
     # the reference solver off (the corpus's V2 column): the name match alone
     doc.ReferenceSolver = False
@@ -96,6 +105,12 @@ def element(link):
 
 def record(doc):
     result = {}
+    if doc.getObject("DatumPlateC"):
+        for name in ("DatumPlateA", "DatumPlateB", "DatumPlateC", "DatumCutA", "DatumCutB", "DatumCutC"):
+            datum = doc.getObject(name)
+            result[name] = dict(element(datum.AttachmentSupport[0]), valid=datum.isValid(),
+                                status=datum.getStatusString())
+        return result
     for name in ("DatumTop", "DatumPlateB", "DatumCutTop"):
         datum = doc.getObject(name)
         result[name] = dict(element(datum.AttachmentSupport[0]), valid=datum.isValid(),
@@ -113,7 +128,8 @@ def record(doc):
 
 try:
     doc = App.openDocument(os.environ["BETA_MAPLESS_FILE"])
-    result = {"opened": record(doc) if doc.getObject("DatumTop") else None, "steps": []}
+    opened = doc.getObject("DatumTop") or doc.getObject("DatumPlateC")
+    result = {"opened": record(doc) if opened else None, "steps": []}
     for step in os.environ["BETA_MAPLESS_STEPS"].split(","):
         if step == "corner":
             for obj in doc.Objects:
@@ -130,7 +146,7 @@ try:
             doc = reopen(doc)
         else:
             {"same": same, "edit": edit, "dropB": dropB, "dropBSlotted": dropBSlotted,
-             "solverOff": solverOff}[step](doc)
+             "solverOff": solverOff, "bThinToCPlace": bThinToCPlace}[step](doc)
         doc.recompute()
         result["steps"].append(record(doc))
     saved = os.path.join(os.path.dirname(out), "saved.FCStd")
@@ -344,6 +360,31 @@ class TestBetaMapless(unittest.TestCase):
         self.assertEqual(ball["status"], "Valid")
         self.assertMigratedCleanly(migration, log)
 
+    def testMemberChangedOntoAnothersPlaceIsLoud(self):
+        """P1b (decision 260) on a beta file: recomputed (the migration), then the script sets B 3 high
+        on C's place and C at x = 300. "B thinned and moved, C moved on" and "C thinned in place, B
+        deleted, a slab appended" make the same compound, so the references to B and C break, in the
+        plate and in the cut, and C's never takes the thin slab by its beta IDX name (C2 before P1b
+        matched the thin slab to C by place: silent). A's stay on A's top."""
+        # Act
+        result, migration, log = self.run_child("touch,bThinToCPlace", PLATE_FIXTURE)
+
+        # Assert
+        touched, edited = result["steps"]
+        for opened in (result["opened"], touched):
+            self.assertFace(opened["DatumPlateA"], (20, 15, 5))
+            self.assertFace(opened["DatumPlateB"], (80, 15, 5))
+            self.assertFace(opened["DatumPlateC"], (140, 15, 5))
+            self.assertFace(opened["DatumCutA"], centreOfNotchedTop())
+            self.assertFace(opened["DatumCutB"], (80, 15, 5))
+            self.assertFace(opened["DatumCutC"], (140, 15, 5))
+        self.assertMigratedCleanly(migration, log)
+        self.assertFace(edited["DatumPlateA"], (20, 15, 5))
+        self.assertFace(edited["DatumCutA"], centreOfNotchedTop())
+        for name in ("DatumPlateB", "DatumPlateC", "DatumCutB", "DatumCutC"):
+            with self.subTest(name=name):
+                self.assertBroken(edited[name])
+
     def testEditedBeforeTheFirstRecomputeIsRightOrLoud(self):
         """Edited before anything was recomputed: the migration and the edit in one recompute.
         Each reference is on its element or its owner breaks, never on another element."""
@@ -369,6 +410,12 @@ def centreOfTop(x, y):
 
     area = 900 - math.pi * 25
     return ((15 * 900 - x * math.pi * 25) / area, (15 * 900 - y * math.pi * 25) / area, 10)
+
+
+def centreOfNotchedTop():
+    """The centre of mass of slab A's top face (40 x 30 at z = 5) less the notch's 5 x 5 corner."""
+    area = 1200 - 25
+    return ((20 * 1200 - 2.5 * 25) / area, (15 * 1200 - 2.5 * 25) / area, 5)
 
 
 if __name__ == "__main__":
