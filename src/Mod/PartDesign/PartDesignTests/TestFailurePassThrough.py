@@ -590,6 +590,114 @@ class FailurePassThroughBase:
         self.assertValid(spare, base, boss, self.body, mirror)
         self.assertBody(BLOCK + 1 + BOSS)
 
+    def testClaimedFailureKeepsItsTextWhenItsBodyStops(self):
+        """A sketch in the Body has conflicting constraints: the Body's rule claims it, and it
+        isn't re-run while nothing it reads changes. Then the BaseFeature fails and the Body stops
+        (decision 254): the sketch keeps its own error text through that recompute and the repair,
+        not a bare "Error" (review pr579-r3 T-R3-2, decision 255 (3))."""
+        stock = models.box(self.doc, "Stock", (20, 20, 10))
+        base, boss, mirror = self.bossOnBase(stock, BLOCK)
+        sketch = models.sketch(self.doc, "Note", [models.circle(15, 15, 1)], self.body, z=10)
+        sketch.addConstraint(Sketcher.Constraint("Radius", 0, 1))
+        sketch.addConstraint(Sketcher.Constraint("Radius", 0, 2))
+        self.recompute()
+        text = self.assertFailed(sketch)
+        self.assertNotEqual(text, "Error")
+        self.assertValid(boss)
+
+        stock.Length = 0
+        self.recompute()
+        self.assertBodyStopped(base, boss, mirror, BLOCK, f"'{stock.Label}', which has an error")
+        self.assertEqual(sketch.getStatusString(), text)
+
+        stock.Length = 20
+        self.recompute()
+        self.assertValid(base, boss, mirror)
+        self.assertEqual(sketch.getStatusString(), text)
+
+    def mirrorOf(self, source):
+        mirror = self.doc.addObject("Part::Mirroring", f"Mirrored{source.Name}")
+        mirror.Source = source
+        mirror.Normal = V(1, 0, 0)
+        return mirror
+
+    def assertFirstFeatureStopped(self, block, boss, mirror, *words):
+        """The Body doesn't continue past its failed first solid feature (decision 255 (1)): the
+        block fails naming its input, the boss's sketch (attached to the block) and the boss after
+        it and the Body fail naming theirs, and all keep their shapes, the mirror of the boss
+        outside too."""
+        self.assertStopped(block, *words)
+        self.assertStopped(boss.Profile[0], f"'{block.Label}', which has an error")
+        self.assertStopped(boss, f"'{boss.Profile[0].Label}', which has an error")
+        self.assertStopped(self.body)
+        self.assertStopped(mirror, f"'{boss.Label}', which has an error")
+        for obj in (boss, self.body, mirror):
+            self.assertVolume(obj, BLOCK + BOSS)
+
+    def testFirstFeatureOfAFailureOutsideDoesNotContinue(self):
+        """The block, the Body's first solid feature (no BaseFeature), takes its length from an
+        expression on a Part box outside the Body. The box fails (length zero): the block fails
+        naming it, and the Body doesn't continue: the boss after it doesn't compute alone on the
+        empty pass-through, nor a Part::Mirroring of it or a second Body on the Body (ops#579,
+        review pr579-r3 T-R3-1, decision 255 (1)). Repaired, everything computes."""
+        gauge = models.box(self.doc, "Gauge", (2, 2, 10), at=(100, 0, 0))
+        block = self.block()
+        block.setExpression("Length", f"{gauge.Name}.Height")
+        boss = self.boss(block)
+        mirror = self.mirrorOf(boss)
+        second = self.doc.addObject("PartDesign::Body", "Second")
+        second.BaseFeature = self.body
+        self.recompute()
+        self.assertValid(block, boss, self.body, mirror, second)
+        self.assertBody(BLOCK + BOSS)
+
+        gauge.Length = 0
+        self.recompute()
+        self.assertStopped(gauge)
+        self.assertFirstFeatureStopped(block, boss, mirror, f"'{gauge.Label}' has an error")
+        self.assertStopped(second.Group[0], f"'{self.body.Label}', which has an error")
+        self.assertStopped(second)
+        self.assertVolume(second, BLOCK + BOSS)
+
+        gauge.Length = 2
+        self.recompute()
+        self.assertValid(gauge, block, boss, self.body, mirror, second, second.Group[0])
+        self.assertBody(BLOCK + BOSS)
+        self.assertVolume(second, BLOCK + BOSS)
+
+    def testFirstFeatureOnABinderOfAFailureDoesNotContinue(self):
+        """The block is padded from a SubShapeBinder in the Body of the top face of a Part box
+        outside it. The box fails (length zero): the binder fails naming it, the block fails
+        naming the binder, and the Body doesn't continue (review pr579-r3 T-R3-1, decision 255
+        (1)). Repaired, everything computes."""
+        plate = models.box(self.doc, "Plate", (20, 20, 1), at=(0, 0, -1))
+        self.recompute()
+        top = elementWhere(plate.Shape, "Face", lambda f: abs(f.CenterOfMass.z) < TOL)
+        binder = self.body.newObject("PartDesign::SubShapeBinder", "Binder")
+        binder.Support = [(plate, (top,))]
+        block = models.pad(self.body, binder, 10, "Block")
+        boss = self.boss(block)
+        mirror = self.mirrorOf(boss)
+        self.recompute()
+        self.assertValid(binder, block, boss, self.body, mirror)
+        self.assertBody(BLOCK + BOSS)
+
+        plate.Length = 0
+        self.recompute()
+        self.assertStopped(plate)
+        self.assertFalse(binder.isValid())
+        self.assertIn(f"'{plate.Label}'", binder.getStatusString())
+        self.assertFirstFeatureStopped(block, boss, mirror, f"'{binder.Label}'")
+
+        # Nothing changed: the same state, settled
+        self.recompute()
+        self.assertFirstFeatureStopped(block, boss, mirror, f"'{binder.Label}'")
+
+        plate.Length = 20
+        self.recompute()
+        self.assertValid(plate, binder, block, boss, self.body, mirror)
+        self.assertBody(BLOCK + BOSS)
+
     def testBodyMemberOfAFailureOutsideItPassesThrough(self):
         """The hole's depth is an expression on a Part box outside the Body. The box fails (length
         zero): the hole fails naming it, passes the block through, and the boss after it computes
@@ -744,18 +852,36 @@ class FailurePassThroughBase:
     # -- T8 ------------------------------------------------------------------------------------
 
     def testFirstFeatureFails(self):
-        """The only pad fails: the Body is valid and empty; a later pad computes alone (T8, F6)."""
+        """The first pad fails (length zero). Its pass-through would be the empty shape, so the
+        Body doesn't continue (decision 255 (1); T8 and F6 passed it through, and a later pad
+        computed alone on nothing): the pad keeps its last output, the Body and a Part::Mirroring
+        of it outside fail, and so does a pad added after it, naming it. Repaired, everything
+        computes."""
         block = self.block()
+        mirror = self.mirrorOf(self.body)
+        self.recompute()
+        self.assertBody(BLOCK)
+
         block.Length = 0
         self.recompute()
-        self.assertFailed(block, "zero")
-        self.assertValid(self.body)
-        self.assertTrue(self.body.Shape.isNull() or self.body.Shape.Volume < TOL)
+        self.assertStopped(block, "zero")
+        self.assertStopped(self.body)
+        self.assertStopped(mirror, f"'{self.body.Label}', which has an error")
+        for obj in (block, self.body, mirror):
+            self.assertVolume(obj, BLOCK)
 
-        sketch = models.sketch(self.doc, "PostSketch", models.rectangle(0, 0, 2, 3), self.body)
-        models.pad(self.body, sketch, 4, "Post")
+        sketch = models.sketch(self.doc, "PostSketch", models.rectangle(30, 0, 32, 3), self.body)
+        post = models.pad(self.body, sketch, 4, "Post")
         self.recompute()
-        self.assertBody(24)
+        self.assertStopped(post, f"'{block.Label}', which has an error")
+        self.assertStopped(self.body)
+        self.assertVolume(self.body, BLOCK)
+
+        block.Length = 10
+        self.recompute()
+        self.assertValid(block, post, self.body, mirror)
+        self.assertBody(BLOCK + 24)
+        self.assertVolume(mirror, BLOCK + 24)
 
     # -- T9 ------------------------------------------------------------------------------------
 
