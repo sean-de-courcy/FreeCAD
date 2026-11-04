@@ -1,0 +1,20 @@
+{
+"entries": {
+"TakeMoveBossControl|side|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr579s-r5", "issue": "ops#579", "tier": "F"},
+"TakeMoveBossDown|side|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579s-r5", "issue": "ops#579", "tier": "F"},
+"TakeMovePieceAtFix|side|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579s-r5", "issue": "ops#579", "tier": "F"},
+"TakeMovePieceControl|side|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr579s-r5", "issue": "ops#579", "tier": "F"},
+"TakeMovePieceDown|side|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579s-r5", "issue": "ops#579", "tier": "F"},
+"TakeMovePieceWithStop|side|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579s-r5", "issue": "ops#579", "tier": "F"},
+"TakeMoveTwiceDown|side|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579s-r5", "issue": "ops#579", "tier": "F"},
+"TakeOwnMoveControl|front|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr579s-r5", "issue": "ops#579", "tier": "F"},
+"TakeOwnMoveDown|front|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579s-r5", "issue": "ops#579", "tier": "F"},
+"TakeOwnTurnControl|front|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr579s-r5", "issue": "ops#579", "tier": "F"},
+"TakeOwnTurnDown|front|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579s-r5", "issue": "ops#579", "tier": "F"},
+"TakeOwnTurnWithStop|front|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579s-r5", "issue": "ops#579", "tier": "F"},
+"TakeSlideBossLinesControl|side|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr579s-r5", "issue": "ops#579", "tier": "F"},
+"TakeSlideBossLinesDown|side|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579s-r5", "issue": "ops#579", "tier": "F"},
+"TakeTurnControl|side|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr579s-r5", "issue": "ops#579", "tier": "F"},
+"TakeTurnDown|side|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579s-r5", "issue": "ops#579", "tier": "F"}
+}
+}
