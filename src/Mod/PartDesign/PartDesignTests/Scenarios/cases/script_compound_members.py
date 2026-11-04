@@ -32,10 +32,12 @@ box notching A's corner; a sketch on each slab's top in the plate (`pA`, `pB`, `
 
 "B thinned and moved onto C's place, C moved on" and "C thinned in place, B deleted, a slab
 appended" make the same compound in the same order, so no rule over the shapes can be right for
-both: P1b retires the changed slab matched at another member's place when the old member has a
-whole twin standing free, and the references to both slabs break (loud). Without the free twin
-the place reading stands, as for every changed piece (the uncorroborated order/place ambiguity,
-listed in the ruling's 5: right under the place reading, which these cases expect)."""
+both: P1b retires the changed slab matched at another member's order position, and the
+references to both slabs break (loud). Round 4's P1b asked a whole twin of the old member standing
+free; review pr399-r4 found the ambiguity silent without it, so P1b takes the ruling's widest stop
+(its 3.3, decision 260 (1)): no corroboration is asked, and the uncorroborated variants the ruling
+listed in its 5 break too. A trade of places with a changed member breaks as a whole (decision 269).
+A piece changed at its own order position keeps the place reading."""
 
 import FreeCAD as App
 import Part
@@ -115,23 +117,27 @@ class PlateInsertFrontBThickerDropC(_Plate):
 
 
 class PlateBThinToCPlaceCDropped(_Plate):
-    """B 3 high onto C's place, C deleted. No whole twin of C stands free, so the place reading
-    stands (the uncorroborated order/place ambiguity, the ruling's 5, listed): the thin slab keeps
-    C's ids and C's references follow it. Under the order reading C's references would break and
-    B's take the thin slab; integration answers by index, the mirror image."""
+    """B 3 high onto C's place, C deleted. No whole twin of C stands free, but "C thinned in place,
+    B deleted" makes the same compound (the uncorroborated order/place ambiguity, the ruling's 5):
+    the widest stop retires the thin slab, and C's references break (right -> loud, decision 260
+    (1)). Under the place reading they would follow it, under the order reading B's would;
+    integration answers by index."""
 
     FOUND_BY = "design s3339"
+    ACCEPTED = {f"{r}|{c}": "decision 260 (1)" for r in ("pC", "cC") for c in ("V2", "V2s")}
     slabs = ((0, 5), (120, 3))
     where = {"A": (0, 5), "B": None, "C": (120, 3)}
 
 
 class PlateBThinCThickTraded(_Plate):
-    """B 3 high moves to C's place (120) and C 8 high to B's (60): nothing is left unmatched, so the
-    place reading stands (the uncorroborated order/place ambiguity, listed): the slab at 60 keeps
-    B's ids, the one at 120 C's. Under the order reading they trade; integration answers by index,
-    the mirror image."""
+    """B 3 high moves to C's place (120) and C 8 high to B's (60): under the place reading the slab
+    at 60 keeps B's ids and the one at 120 C's, under the order reading they trade (the
+    uncorroborated order/place ambiguity, the ruling's 5). Both are changed at another order
+    position: the widest stop retires both, and the references to B and C break (right -> loud,
+    decision 260 (1)); integration answers by index."""
 
     FOUND_BY = "design s3339"
+    ACCEPTED = {f"{r}|{c}": "decision 260 (1)" for r in ("pB", "cB", "pC", "cC") for c in ("V2", "V2s")}
     slabs = ((0, 5), (120, 3), (60, 8))
     where = {"A": (0, 5), "B": (60, 8), "C": (120, 3)}
 
