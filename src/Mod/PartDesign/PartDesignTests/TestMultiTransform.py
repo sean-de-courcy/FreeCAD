@@ -403,6 +403,141 @@ class TestMultiTransform(unittest.TestCase):
             self.assertTrue(feature.isValid(), f"{feature.Name}: {feature.getStatusString()}")
             self.assertNotIn("Touched", feature.State)
 
+    def bossedBlock(self):
+        """A 20 x 20 x 10 block, a 5 x 5 x 5 boss on its top at x 3..8, y -8..-3, and a 4 x 4 x 2
+        cap at x -2..2, y -2..2 after it: the Body, the boss and the cap."""
+
+        def pad(name, x0, y0, x1, y1, z, length):
+            sketch = body.newObject("Sketcher::SketchObject", name + "Sketch")
+            sketch.Placement = App.Placement(App.Vector(0, 0, z), App.Rotation())
+            TestSketcherApp.CreateRectangleSketch(sketch, (x0, y0), (x1 - x0, y1 - y0))
+            feature = body.newObject("PartDesign::Pad", name)
+            feature.Profile = sketch
+            feature.Length = length
+            return feature
+
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        pad("Block", -10, -10, 10, 10, 0, 10)
+        boss = pad("Boss", 3, -8, 8, -3, 10, 5)
+        cap = pad("Cap", -2, -2, 2, 2, 10, 2)
+        self.Doc.recompute()
+        self.assertAlmostEqual(body.Shape.Volume, 4000 + 125 + 32, places=6)
+        return body, boss, cap
+
+    def assertChainValid(self, body, features):
+        for feature in features + [body]:
+            self.assertTrue(feature.isValid(), f"{feature.Name}: {feature.getStatusString()}")
+            self.assertNotIn("Touched", feature.State)
+
+    def testTwoTransformsInsertedMidBodyBeforeOneRecompute(self):
+        """A LinearPattern and a Mirrored of the boss are added before the cap from Python, one
+        after the other with no recompute in between, and the Tip goes back to the cap: the
+        chain is boss, pattern, Mirrored, cap, and the Body has the boss's three copies (ops#590:
+        both waited for execute(), the pattern's linked the Mirrored onto it, and the Mirrored's
+        then didn't reroute the cap, which stayed on the boss: the copies were missing, Valid)."""
+        body, boss, cap = self.bossedBlock()
+        body.Tip = boss
+        pattern = body.newObject("PartDesign::LinearPattern", "LinearPattern")
+        pattern.Originals = [boss]
+        pattern.Direction = (self.Doc.Y_Axis, [""])
+        pattern.Length = 10
+        pattern.Occurrences = 2
+        body.Tip = pattern
+        mirrored = body.newObject("PartDesign::Mirrored", "Mirrored")
+        mirrored.Originals = [boss]
+        mirrored.MirrorPlane = (self.Doc.YZ_Plane, [""])
+        body.Tip = mirrored
+        body.Tip = cap
+        self.Doc.recompute()
+        self.assertEqual(pattern.BaseFeature, boss)
+        self.assertEqual(mirrored.BaseFeature, pattern)
+        self.assertEqual(cap.BaseFeature, mirrored)
+        self.assertChainValid(body, [pattern, mirrored, cap])
+        # the boss, its copy at y 2..7 and its mirror at x -8..-3
+        self.assertAlmostEqual(body.Shape.Volume, 4000 + 3 * 125 + 32, places=6)
+
+    def testConvertingATransformWithASolidAfterFollowsEdits(self):
+        """A Mirrored of the boss with the cap after it is converted to a MultiTransform as the
+        command does (the Tip back to the boss, the MultiTransform added, its Originals, mode and
+        BaseFeature set, the Mirrored made its step, the Tip back to the cap), then the boss is
+        made 8 high: the cap builds on the MultiTransform, and the Body has the taller boss and its
+        mirror (ops#590: the cap stayed on the Mirrored, a step whose execute() returns at once,
+        and built on its stale shape: the edit didn't reach the Body, Valid)."""
+        body, boss, cap = self.bossedBlock()
+        body.Tip = boss
+        mirrored = body.newObject("PartDesign::Mirrored", "Mirrored")
+        mirrored.Originals = [boss]
+        mirrored.MirrorPlane = (self.Doc.YZ_Plane, [""])
+        body.Tip = cap
+        self.Doc.recompute()
+        self.assertEqual(cap.BaseFeature, mirrored)
+        self.assertAlmostEqual(body.Shape.Volume, 4000 + 2 * 125 + 32, places=6)
+
+        body.Tip = boss
+        multi = body.newObject("PartDesign::MultiTransform", "MultiTransform")
+        multi.Originals = mirrored.Originals
+        multi.TransformMode = mirrored.TransformMode
+        multi.BaseFeature = mirrored.BaseFeature
+        multi.Transformations = [mirrored]
+        mirrored.Originals = []
+        self.Doc.recompute()
+        body.Tip = cap
+        self.Doc.recompute()
+        self.assertEqual(multi.BaseFeature, boss)
+        self.assertEqual(cap.BaseFeature, multi)
+        self.assertChainValid(body, [multi, mirrored, cap])
+        self.assertAlmostEqual(body.Shape.Volume, 4000 + 2 * 125 + 32, places=6)
+
+        boss.Length = 8
+        self.Doc.recompute()
+        self.assertChainValid(body, [multi, mirrored, cap])
+        self.assertAlmostEqual(body.Shape.Volume, 4000 + 2 * 200 + 32, places=6)
+
+    def testConvertingAWholeShapeTransformMakesItAStep(self):
+        """A whole-shape Mirrored with the cap after it, converted as the command does, then a
+        second step added: the Mirrored is the MultiTransform's step (Features, no Originals, no
+        base) and out of the chain, the cap builds on the MultiTransform, and the Body has both
+        steps' copies (ops#590: emptying its Originals left a whole-shape Mirrored a solid
+        feature, the cap on it, so the MultiTransform's steps never reached the Body)."""
+        body, boss, cap = self.bossedBlock()
+        body.Tip = boss
+        mirrored = body.newObject("PartDesign::Mirrored", "Mirrored")
+        mirrored.TransformMode = "Whole shape"
+        mirrored.MirrorPlane = (self.Doc.YZ_Plane, [""])
+        body.Tip = cap
+        self.Doc.recompute()
+        self.assertEqual(cap.BaseFeature, mirrored)
+        # the block is symmetric: the boss and its mirror at x -8..-3
+        self.assertAlmostEqual(body.Shape.Volume, 4000 + 2 * 125 + 32, places=6)
+
+        body.Tip = boss
+        multi = body.newObject("PartDesign::MultiTransform", "MultiTransform")
+        multi.Originals = mirrored.Originals
+        multi.TransformMode = mirrored.TransformMode
+        multi.BaseFeature = mirrored.BaseFeature
+        multi.Transformations = [mirrored]
+        mirrored.Originals = []
+        self.Doc.recompute()
+        body.Tip = cap
+        self.Doc.recompute()
+        self.assertEqual(mirrored.TransformMode, "Features")
+        self.assertEqual(mirrored.Originals, [])
+        self.assertIsNone(mirrored.BaseFeature)
+        self.assertEqual(multi.BaseFeature, boss)
+        self.assertEqual(cap.BaseFeature, multi)
+        self.assertChainValid(body, [multi, mirrored, cap])
+        self.assertAlmostEqual(body.Shape.Volume, 4000 + 2 * 125 + 32, places=6)
+
+        body.Tip = multi
+        mirror2 = body.newObject("PartDesign::Mirrored", "Mirrored001")  # a step: before the cap
+        mirror2.MirrorPlane = (self.Doc.XZ_Plane, [""])
+        multi.Transformations = [mirrored, mirror2]
+        body.Tip = cap
+        self.Doc.recompute()
+        self.assertChainValid(body, [multi, mirrored, mirror2, cap])
+        # the boss and its three images across the YZ and XZ planes
+        self.assertAlmostEqual(body.Shape.Volume, 4000 + 4 * 125 + 32, places=6)
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("PartDesignTestMultiTransform")

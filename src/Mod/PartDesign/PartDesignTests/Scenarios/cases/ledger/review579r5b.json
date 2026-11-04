@@ -1,0 +1,10 @@
+{
+"entries": {
+"ConvertWithCapThenGrow|front|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr579-r5b", "issue": "ops#590", "tier": "F"},
+"LastThenSolidBefore|front|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr579-r5b", "issue": "ops#590", "tier": "F"},
+"MidBodyNewBase|front|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr579-r5b", "issue": "ops#590", "tier": "F"},
+"ReorderPatternToTopBackEnd|front|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579-r5b", "issue": "ops#590", "tier": "F"},
+"ReorderPatternToTopBackMid|front|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579-r5b", "issue": "ops#590", "tier": "F"},
+"TwoTransformsMidBody|front|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr579-r5b", "issue": "ops#590", "tier": "F"}
+}
+}

@@ -1,0 +1,18 @@
+{
+"entries": {
+"ConvertFilletWhole|copy_edge|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "quiet", "found_by": "review pr590-r1", "issue": "ops#590", "tier": "F"},
+"ConvertFillet|copy_edge|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "quiet", "found_by": "review pr590-r1", "issue": "ops#590", "tier": "F"},
+"ConvertUndoRedo|copy_edge|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "quiet", "found_by": "review pr590-r1", "issue": "ops#590", "tier": "F"},
+"DeleteOnlyOriginalCap|front|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr590-r1", "issue": "ops#590", "tier": "F"},
+"DeleteOnlyOriginalLast|front|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "wrong", "found_by": "review pr590-r1", "issue": "ops#590", "tier": "F"},
+"DeleteOnlyOriginalUndoRedo|front|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr590-r1", "issue": "ops#590", "tier": "F"},
+"DeleteOnlyOriginalUndo|front|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr590-r1", "issue": "ops#590", "tier": "F"},
+"ExpressionModeOff|front|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr590-r1", "issue": "ops#590", "tier": "F"},
+"ModeRoundTrip|copy_edge|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr590-r1", "issue": "ops#590", "tier": "F"},
+"ReorderCapBeforePattern|front|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr590-r1", "issue": "ops#590", "tier": "F"},
+"ReorderPatternPastCap|front|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr590-r1", "issue": "ops#590", "tier": "F"},
+"SwapRoundTrip|copy_edge|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr590-r1", "issue": "ops#590", "tier": "F"},
+"TwoTransformsFillet|copy_edge|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr590-r1", "issue": "ops#590", "tier": "F"},
+"UndoEmpty|copy_edge|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr590-r1", "issue": "ops#590", "tier": "F"}
+}
+}

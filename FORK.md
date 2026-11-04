@@ -442,7 +442,8 @@ names it.
 | `infra/gen0-2026-11-03` | infra | ops#323, ops#580, ops#400 | - | `integration` `e2f5215902` | `781a96fc40` (fork PR 414), 2026-11-03 | never |
 | `infra/323-gen1` | infra | ops#323, ops#482 | - | `integration` `781a96fc40` | `af1daa45c6` (fork PR 415), 2026-11-04 | never |
 | `fix/579-judging` | corpus | ops#579 | - | `integration` `af1daa45c6` | `a2f1f04ae7` (fork PR 416), 2026-11-04 | never (fork fix) |
-| `fix/579-failed-input` | fix | ops#579, ops#585 | - | `integration` `af1daa45c6` (stacked on fork PR 416, `fix/579-judging`) | (fork PR 417) | never (fork fix) |
+| `fix/579-failed-input` | fix | ops#579, ops#585 | - | `integration` `af1daa45c6` (stacked on fork PR 416, `fix/579-judging`) | `51775afc1e` (fork PR 417), 2026-11-04 | never (fork fix) |
+| `fix/590-transform-base` | fix | ops#590 | - | `integration` `51775afc1e` | (fork PR 418) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 

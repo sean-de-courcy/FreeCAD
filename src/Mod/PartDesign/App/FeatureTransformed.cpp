@@ -52,6 +52,7 @@
 #include "FeatureLinearPattern.h"
 #include "FeaturePolarPattern.h"
 #include "FeatureSketchBased.h"
+#include "Retarget.h"
 #include "Mod/Part/App/TopoShapeOpCode.h"
 
 
@@ -366,23 +367,71 @@ void Transformed::onChanged(const App::Property* prop)
         auto const mode = static_cast<Mode>(TransformMode.getValue());
         Originals.setStatus(App::Property::Status::Hidden, mode == Mode::WholeShape);
     }
-    // FreeCAD-CH (ops#579): a new transform counts as a MultiTransform step until its Originals or
-    // mode are set, so its Body doesn't link its base when it is added. Linked here, not first in
-    // execute(): the base is then in its out-list before the recompute, which runs the base first.
-    // Linked in execute(), a transform and its base made in one recompute ran in the wrong order,
-    // and the transform failed on the base's null shape (upstream's second pass re-ran it; a failure
-    // whose pass-through is empty isn't re-run since decision 259). Only for the Body's last solid
-    // feature, so nothing after it is rerouted: a transform added before another one is linked in
-    // execute(), as upstream does. Converting a pattern to a MultiTransform adds the MultiTransform
-    // before the pattern and then sets its BaseFeature and makes the pattern its step; rerouted here,
-    // the pattern's base became the MultiTransform, a cycle (review pr579-r5 T-R5-1)
-    if ((prop == &Originals || prop == &TransformMode) && !isRestoring() && !BaseFeature.getValue()
-        && !isMultiTransformChild()) {
+    // FreeCAD-CH (ops#579, ops#590): a transform is a solid feature of its Body only while its
+    // Originals or mode are set; a new one counts as a MultiTransform step, so its Body doesn't
+    // link its base when it is added. The chain follows here when that changes, in any position:
+    // linked first in execute(), a transform and its base made in one recompute ran in the wrong
+    // order (ops#579), and of two transforms added before a solid before one recompute, the first
+    // linked the second, which then didn't reroute the solid (ops#590)
+    auto multi = freecad_cast<MultiTransform*>(this);
+    const App::Property* steps = multi ? &multi->Transformations : nullptr;
+    if ((prop == &Originals || prop == &TransformMode || prop == &BaseFeature || prop == steps)
+        && !isRestoring() && !testStatus(App::ObjectStatus::Remove)) {
         auto doc = getDocument();
         auto body = getFeatureBody();
         if (doc && body && !doc->isPerformingTransaction() && body->hasObject(this)
-            && !body->getNextSolidFeature(this)) {
-            body->setBaseProperty(this);
+            && !reorderWriting()) {
+            if (prop == steps) {
+                // A MultiTransform's steps are steps: it gives them their originals and mode, and
+                // a transform listed here with its own (converting a pattern; a whole-shape one
+                // keeps its mode) would stay a solid feature, its base this MultiTransform: a
+                // cycle (ops#590). Emptied, each leaves the chain (below)
+                for (auto obj : multi->Transformations.getValues()) {
+                    auto step = freecad_cast<Transformed*>(obj);
+                    if (!step || freecad_cast<MultiTransform*>(step)) {
+                        continue;
+                    }
+                    if (!step->Originals.getValues().empty()) {
+                        step->Originals.setValues({});
+                    }
+                    if (step->TransformMode.getValue() != static_cast<long>(Mode::Features)) {
+                        step->TransformMode.setValue(static_cast<long>(Mode::Features));
+                    }
+                }
+            }
+            else if (prop == &BaseFeature) {
+                // A base copied from a neighbour the link below rerouted onto this one:
+                // converting a pattern to a MultiTransform sets the MultiTransform's Originals and
+                // mode, which reroutes the pattern onto it, then copies the pattern's BaseFeature.
+                // The base before it in the chain, where a solid's base always is (review pr579-r5
+                // T-R5-1)
+                if (BaseFeature.getValue() == this) {
+                    BaseFeature.setValue(
+                        Body::isSolidFeature(this) ? body->getPrevSolidFeature(this) : nullptr
+                    );
+                }
+            }
+            else if (Body::isSolidFeature(this)) {
+                // Into the chain: its base is the solid before it, and the solid after it builds
+                // on it
+                if (!BaseFeature.getValue()) {
+                    body->setBaseProperty(this);
+                }
+            }
+            else {
+                // Out of the chain (a MultiTransform's step, or a pattern of nothing): the solid
+                // after it builds on the one before it, as when it is removed (this one no longer
+                // counts as a solid there), and it has no base, as a step made in a MultiTransform
+                // has none. Converting a pattern makes it the MultiTransform's step after the
+                // MultiTransform's link rerouted it onto it: its base would be a cycle (ops#590)
+                auto next = freecad_cast<PartDesign::Feature*>(body->getNextSolidFeature(this));
+                if (next && next->BaseFeature.getValue() == this) {
+                    body->setBaseProperty(next);
+                }
+                if (BaseFeature.getValue()) {
+                    BaseFeature.setValue(nullptr);
+                }
+            }
         }
     }
 
