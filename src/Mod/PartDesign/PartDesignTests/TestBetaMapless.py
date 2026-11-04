@@ -365,7 +365,9 @@ class TestBetaMapless(unittest.TestCase):
         on C's place and C at x = 300. "B thinned and moved, C moved on" and "C thinned in place, B
         deleted, a slab appended" make the same compound, so the references to B and C break, in the
         plate and in the cut, and C's never takes the thin slab by its beta IDX name (C2 before P1b
-        matched the thin slab to C by place: silent). A's stay on A's top."""
+        matched the thin slab to C by place: silent). A's plate reference stays on A's top; the cut's,
+        a face the beta named from the plate's IDX edges, is right or loud (an IDX index and an MLN id
+        share no source: N1 stays loud, decision 252 (1), ops#583)."""
         # Act
         result, migration, log = self.run_child("touch,bThinToCPlace", PLATE_FIXTURE)
 
@@ -380,7 +382,7 @@ class TestBetaMapless(unittest.TestCase):
             self.assertFace(opened["DatumCutC"], (140, 15, 5))
         self.assertMigratedCleanly(migration, log)
         self.assertFace(edited["DatumPlateA"], (20, 15, 5))
-        self.assertFace(edited["DatumCutA"], centreOfNotchedTop())
+        self.assertRightOrLoud(edited["DatumCutA"], self.assertFace, centreOfNotchedTop())
         for name in ("DatumPlateB", "DatumPlateC", "DatumCutB", "DatumCutC"):
             with self.subTest(name=name):
                 self.assertBroken(edited[name])
