@@ -942,6 +942,41 @@ class FailurePassThroughBase:
         self.assertValid(block)
         self.assertBody(BLOCK)
 
+    def assertALeadThatMakesNothingHidesNoFailure(self, lead):
+        """`lead`, the Body's first solid feature, is valid and makes nothing; the block after it
+        takes its length from an expression on a Part box outside the Body. The box fails: the
+        block's pass-through would be the empty shape, so the Body doesn't continue (decision
+        255 (1): a claimed failure whose pass-through is empty; review pr579-r4f T-R4F-1: the
+        boss computed on nothing, Valid). Repaired, everything computes."""
+        gauge = models.box(self.doc, "Gauge", (2, 2, 10), at=(100, 0, 0))
+        block = self.block()
+        block.setExpression("Length", f"{gauge.Name}.Height")
+        boss = self.boss(block)
+        mirror = self.mirrorOf(boss)
+        self.recompute()
+        self.assertValid(lead, block, boss, self.body, mirror)
+        self.assertBody(BLOCK + BOSS)
+
+        gauge.Length = 0
+        self.recompute()
+        self.assertFirstFeatureStopped(block, boss, mirror, f"'{gauge.Label}' has an error")
+
+        gauge.Length = 2
+        self.recompute()
+        self.assertValid(lead, block, boss, self.body, mirror)
+        self.assertBody(BLOCK + BOSS)
+
+    def testSuppressedLeadDoesNotHideAFailedFirstPad(self):
+        """The lead is a pocket a reorder left at the top, suppressed to get the Body back."""
+        hole = self.hole()
+        hole.Suppressed = True
+        self.assertALeadThatMakesNothingHidesNoFailure(hole)
+
+    def testEmptyBooleanLeadDoesNotHideAFailedFirstPad(self):
+        """The lead is a Boolean without a tool: valid, on the empty shape."""
+        lead = self.body.newObject("PartDesign::Boolean", "Empty")
+        self.assertALeadThatMakesNothingHidesNoFailure(lead)
+
     def testFailedSubtractiveFirstFeatureStopsTheBody(self):
         """The Body's first solid feature is a pocket, with nothing to cut."""
         self.assertFirstFeatureOfAnyKindStops(self.hole())
