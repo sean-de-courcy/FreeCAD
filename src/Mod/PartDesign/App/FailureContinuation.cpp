@@ -15,6 +15,7 @@
 #include <App/DocumentObject.h>
 #include <App/GroupExtension.h>
 #include <App/PropertyLinks.h>
+#include <App/PropertyPythonObject.h>
 #include <App/RecomputeContinuation.h>
 #include <Base/Console.h>
 #include <Base/Placement.h>
@@ -23,7 +24,10 @@
 
 #include "Body.h"
 #include "Feature.h"
+#include "FeatureAddSub.h"
 #include "FeatureBase.h"
+#include "FeatureDressUp.h"
+#include "FeatureTransformed.h"
 #include "Retarget.h"
 #include "ShapeBinder.h"
 
@@ -155,6 +159,25 @@ bool passThroughIsEmpty(const Feature& feature)
     return passThroughSource(feature).isNull();
 }
 
+/// Whether the feature's result on an empty base is exactly the empty shape: a subtractive feature
+/// cuts from nothing, and a dress-up or a pattern changes a base that isn't there. So when it fails
+/// there, its empty pass-through is what it would have made (ops#591, ops#127's park; decision 262
+/// (1), design work\s9347\base-stop-design.md 5 (c)). Not a Python kind, whose result is its own
+/// execute()'s, and not a Boolean, whose tools make material on nothing
+bool emptyOnEmpty(const Feature& feature)
+{
+    if (freecad_cast<const App::PropertyPythonObject*>(feature.getPropertyByName("Proxy"))) {
+        return false;
+    }
+    if (feature.isDerivedFrom<DressUp>() || feature.isDerivedFrom<Transformed>()) {
+        return true;
+    }
+    // getAddSubType() only reads the type
+    auto addSub = freecad_cast<const FeatureAddSub*>(&feature);
+    return addSub
+        && const_cast<FeatureAddSub*>(addSub)->getAddSubType() == FeatureAddSub::Type::Subtractive;
+}
+
 void passThroughBase(Feature& feature)
 {
     Part::TopoShape base = passThroughSource(feature);
@@ -221,7 +244,9 @@ public:
      * a real, current result (ops#579, decision 262; design work\s9347\base-stop-design.md)
      *
      * (S) A solid feature: its pass-through isn't the empty shape (decision 259), and its base is
-     * Valid or itself a claimed failure, up the BaseFeature chain. (N) Any other member passes
+     * Valid or itself a claimed failure, up the BaseFeature chain. A subtractive feature, a
+     * dress-up or a pattern on no base, or on a current one without a solid, passes the empty
+     * shape, exactly its result there (ops#591, ops#127's park). (N) Any other member passes
      * nothing on: it is claimed when none of its inputs is an unclaimed failure.
      *
      * Only what is upstream of `failed` is read. Document::recompute runs the topological order, so
@@ -380,16 +405,31 @@ private:
 
     /// (S), up the base chain: each base real (so non-null), and Valid or a claimed failure, whose
     /// shape is its own pass-through, made from its base by this same test. Every base in error on
-    /// the way has the same answer
+    /// the way has the same answer. An empty pass-through is real only for a kind that makes
+    /// nothing on nothing (emptyOnEmpty()), on no base or a current one: a pocket parked above the
+    /// first Pad is claimed, and the Body computes below it (ops#591). The Pad after it decides its
+    /// own claim on its own pass-through, so a failed first Pad there still stops the Body (review
+    /// pr579-r4 R4-1)
     bool solidClaimed(const Feature* feature, Claims& claims) const
     {
         std::vector<const Feature*> chain;
         bool result = false;
         while (true) {
             if (passThroughIsEmpty(*feature)) {
-                break;
+                if (!emptyOnEmpty(*feature)) {
+                    break;
+                }
+                if (!feature->BaseFeature.getValue()) {
+                    result = true;
+                    break;
+                }
+                // A base that holds no solid: current, or not, as any other
             }
             const Part::Feature* baseObject = feature->getBaseObject(true);
+            if (!baseObject) {
+                // A BaseFeature that isn't a Part feature
+                break;
+            }
             if (!baseObject->isError()) {
                 result = true;
                 break;
