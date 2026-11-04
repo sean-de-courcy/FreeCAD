@@ -18,6 +18,7 @@
 #include <memory>
 #include <string>
 #include <optional>
+#include <set>
 #include <vector>
 
 #include <BRep_Builder.hxx>
@@ -40,8 +41,10 @@
 #include <gp_Trsf.hxx>
 #include <gp_Vec.hxx>
 #include <TopExp.hxx>
+#include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Compound.hxx>
+#include <TopoDS_Iterator.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 
 namespace
@@ -446,6 +449,114 @@ TEST(TopoShapeMatch, reorderedPiecesThatDifferKeepTheirIds)
     EXPECT_EQ(matches.edges.size(), 24);
     EXPECT_EQ(matches.vertexes.size(), 16);
     EXPECT_EQ(matches.vertexes.at(vertexAt(after, gp_Pnt(30, 10, 20))), vertexAt(before, gp_Pnt(30, 10, 20)));
+}
+
+namespace
+{
+
+// A slab 40 x 30 x \a height at x
+TopoDS_Shape slab(double x, double height = 5)
+{
+    return BRepPrimAPI_MakeBox(gp_Pnt(x, 0, 0), 40, 30, height).Shape();
+}
+
+// The indexes (from 1) in \a shape's face map of the faces of its piece \a piece (from 0)
+std::set<int> facesOfPiece(const TopoDS_Shape& shape, int piece)
+{
+    const auto map = elements(shape, TopAbs_FACE);
+    TopoDS_Iterator it(shape);
+    for (int k = 0; k < piece; ++k) {
+        it.Next();
+    }
+    std::set<int> faces;
+    for (TopExp_Explorer face(it.Value(), TopAbs_FACE); face.More(); face.Next()) {
+        faces.insert(map.FindIndex(face.Current()));
+    }
+    return faces;
+}
+
+// Whether every face of new piece \a now is matched to a face of old piece \a old, and only those
+bool pieceKeeps(const Part::ElementMatches& matches,
+                const TopoDS_Shape& before,
+                int old,
+                const TopoDS_Shape& after,
+                int now)
+{
+    const auto olds = facesOfPiece(before, old);
+    for (const int f : facesOfPiece(after, now)) {
+        const auto found = matches.faces.find(f);
+        if (found == matches.faces.end() || !olds.count(found->second)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Whether no face of new piece \a now is matched
+bool pieceIsFresh(const Part::ElementMatches& matches, const TopoDS_Shape& after, int now)
+{
+    for (const int f : facesOfPiece(after, now)) {
+        if (matches.faces.count(f)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+}  // namespace
+
+// P1b (decision 260): B thinned and moved onto C's place while C moves on, and C thinned in place
+// with B deleted and a slab appended, make the same compound. The thin slab is matched to C by
+// place, but C's whole twin stands free and B unmatched: neither reading is verified, so the thin
+// slab takes fresh ids and C's go to nothing. A keeps its ids
+TEST(TopoShapeMatch, changedPieceAtAMembersPlaceWithAFreeTwinTakesFreshIds)
+{
+    const TopoDS_Shape before = compound({slab(0), slab(60), slab(120)});
+    const TopoDS_Shape after = compound({slab(0), slab(120, 3), slab(300)});
+    const auto matches = Part::matchElements(before, after, false);
+    EXPECT_TRUE(pieceKeeps(matches, before, 0, after, 0));
+    EXPECT_TRUE(pieceIsFresh(matches, after, 1));
+    EXPECT_TRUE(pieceIsFresh(matches, after, 2));
+    EXPECT_EQ(matches.faces.size(), 6);
+    for (const auto& [now, old] : matches.vertexes) {
+        EXPECT_LE(pointOf(before, old).X(), 40 + tolerance);
+    }
+}
+
+// P1b doesn't fire without a free whole twin (C deleted): the place reading stands, as for every
+// changed piece (the uncorroborated order/place ambiguity, listed in the ruling's 5)
+TEST(TopoShapeMatch, changedPieceAtAMembersPlaceWithoutAFreeTwinKeepsItsIds)
+{
+    const TopoDS_Shape before = compound({slab(0), slab(60), slab(120)});
+    const TopoDS_Shape after = compound({slab(0), slab(120, 3)});
+    const auto matches = Part::matchElements(before, after, false);
+    EXPECT_TRUE(pieceKeeps(matches, before, 0, after, 0));
+    EXPECT_TRUE(pieceKeeps(matches, before, 2, after, 1));
+}
+
+// P1b doesn't fire where the order agrees: a piece changed in place keeps its ids
+TEST(TopoShapeMatch, changedPieceInPlaceKeepsItsIds)
+{
+    const TopoDS_Shape before = compound({slab(0), slab(60), slab(120)});
+    const TopoDS_Shape after = compound({slab(0), slab(60, 8), slab(120)});
+    const auto matches = Part::matchElements(before, after, false);
+    for (int k = 0; k < 3; ++k) {
+        EXPECT_TRUE(pieceKeeps(matches, before, k, after, k));
+    }
+}
+
+// P1b reads the matcher's pairing before P1: a slab inserted in front with B thickened has P1
+// retire A, C and the new slab (the class's counts are equal once B leaves it), and B+ keeps B's
+// ids, since every old piece was placed
+TEST(TopoShapeMatch, insertedFirstWithAChangedPieceKeepsTheChangedOne)
+{
+    const TopoDS_Shape before = compound({slab(0), slab(60), slab(120)});
+    const TopoDS_Shape after = compound({slab(-100), slab(0), slab(60, 8), slab(120)});
+    const auto matches = Part::matchElements(before, after, false);
+    EXPECT_TRUE(pieceIsFresh(matches, after, 0));
+    EXPECT_TRUE(pieceIsFresh(matches, after, 1));
+    EXPECT_TRUE(pieceKeeps(matches, before, 1, after, 2));
+    EXPECT_TRUE(pieceIsFresh(matches, after, 3));
 }
 
 // P1 doesn't fire on a twin moved to a free place: the other keeps its ids
