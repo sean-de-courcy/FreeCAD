@@ -6398,6 +6398,16 @@ void App::forgetElementReferencesTo(const DocumentObject* feature)
     DocInfo::forgetFeature(feature);
 }
 
+// An object's ID to its mark, the highest where two share an ID (objects of two documents), as a
+// record keeps it (sortMarks())
+static void addMark(std::map<long, long>& marks, long tag, long mark)
+{
+    auto [it, added] = marks.emplace(tag, mark);
+    if (!added) {
+        it->second = std::max(it->second, mark);
+    }
+}
+
 // Whether every record of `prop` holds `marks` (an object's ID to its mark), its target's closure's
 // marks now, and nothing else
 static bool recordsHoldMarks(const PropertyLinkBase* prop, const std::map<long, long>& marks)
@@ -6414,7 +6424,7 @@ static bool recordsHoldMarks(const PropertyLinkBase* prop, const std::map<long, 
         }
         held.clear();
         for (const auto& mark : record.marks) {
-            held[mark.tag] = mark.mark;
+            addMark(held, mark.tag, mark.mark);
         }
         if (held != marks) {
             return false;
@@ -6439,7 +6449,7 @@ void App::holdElementReferencesInto(DocumentObject* target)
         closure.push_back(target);
         for (auto object : closure) {
             if (object && object->isAttachedToDocument()) {
-                marks[object->getID()] = std::max(object->elementIdMark(), -1L);
+                addMark(marks, object->getID(), std::max(object->elementIdMark(), -1L));
             }
         }
     }
