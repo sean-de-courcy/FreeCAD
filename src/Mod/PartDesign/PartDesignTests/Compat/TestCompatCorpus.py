@@ -979,17 +979,19 @@ class TestCompatCorpus(unittest.TestCase):
         work = os.path.realpath(tempfile.mkdtemp(prefix="compat-aged-"))
         self.addCleanup(shutil.rmtree, work, True)
         corpus = subsetCorpus(work, models, tamper, files)
+        # the subset keeps the first generation's folder name (gen0 before the beta, gen1 since)
+        aged = [os.path.basename(next(iter(generations().values())))]
         kinds = ("gate", "rehearsal") if rehearsal else ("gate",)
         results = runChildren(corpus, kinds, work, offset=1)
         result = results["gate"]
         self.assertNotIn("ERROR", result, result.get("ERROR"))
         self.assertIn("FREECAD_TEST_NAMING_REVISION_OFFSET=1", result["fullLog"])
-        self.assertEqual(result["older"], ["gen0"])
+        self.assertEqual(result["older"], aged)
         if rehearsal:
             again = results["rehearsal"]
             self.assertNotIn("ERROR", again, again.get("ERROR"))
             self.assertIn("FREECAD_TEST_NAMING_REVISION_OFFSET=2", again["fullLog"])
-            self.assertEqual(sorted(again["skipped"]), ["gen0"])
+            self.assertEqual(sorted(again["skipped"]), aged)
             self.assertEqual(again["steps"], {})
         return result
 
@@ -1015,7 +1017,7 @@ class TestCompatCorpus(unittest.TestCase):
         nothing. The rehearsal skips it."""
         result = self.agedRun(rehearsal=True)
         self.assertEqual(self.agedProblems(result), {})
-        problems, (migrated, _) = migrationProblems(result["console"], ["gen0"])
+        problems, (migrated, _) = migrationProblems(result["console"], result["older"])
         self.assertEqual(problems, [], "\n".join(problems))
         self.assertGreater(migrated, 0)
 
@@ -1041,7 +1043,7 @@ class TestCompatCorpus(unittest.TestCase):
             files=self.rewriteFillet(("shadow",)), models=self.FILLET_MODEL, rehearsal=True
         )
         self.assertEqual(self.agedProblems(result), {})
-        problems, (migrated, moved) = migrationProblems(result["console"], ["gen0"])
+        problems, (migrated, moved) = migrationProblems(result["console"], result["older"])
         self.assertEqual(problems, [], "\n".join(problems))
         self.assertEqual(moved, 1, "the rewritten name is the only one that moved back")
 
@@ -1060,7 +1062,7 @@ class TestCompatCorpus(unittest.TestCase):
             ),
             lines,
         )
-        problems, (_, moved) = migrationProblems(result["console"], ["gen0"])
+        problems, (_, moved) = migrationProblems(result["console"], result["older"])
         self.assertEqual((problems, moved), ([], 1))
 
     def testAgedGenerationStillCatchesRegressions(self):
