@@ -20,7 +20,10 @@
 
 #include "Body.h"
 #include "Feature.h"
+#include "FeatureAddSub.h"
 #include "FeatureBase.h"
+#include "FeatureDressUp.h"
+#include "FeatureTransformed.h"
 #include "Retarget.h"
 #include "ShapeBinder.h"
 
@@ -168,16 +171,35 @@ void passThroughBase(Feature& feature)
     feature.Shape.setValue(pass);
 }
 
+/// Whether a feature's result on an empty base is exactly nothing: a subtractive feature, a
+/// dress-up or a pattern (decision 257). As a Body's first solid feature its empty pass-through is
+/// then what it would make, and the features after it compute as they would: a hole or a chamfer
+/// a reorder put above the first Pad (ops#127). Not a Python feature, nor any kind not named here
+bool makesNothingOnNothing(const App::DocumentObject* feature)
+{
+    if (feature->isDerivedFrom<FeatureAddSubPython>()) {
+        return false;
+    }
+    // Before the add/sub type: a dress-up is a FeatureAddSub, additive by default
+    if (feature->isDerivedFrom<DressUp>() || feature->isDerivedFrom<Transformed>()) {
+        return true;
+    }
+    auto addSub = freecad_cast<FeatureAddSub*>(const_cast<App::DocumentObject*>(feature));
+    return addSub && addSub->getAddSubType() == FeatureAddSub::Type::Subtractive;
+}
+
 /// The Body's base is in error, whatever made it fail: its FeatureBase (its first member, standing
-/// for the BaseFeature outside it) or, without one, its first solid feature. Its pass-through is
-/// the empty shape, and the features after it would compute on nothing, Valid: the Body doesn't
-/// continue then, and every member fails naming its input (ops#579, decisions 254 and 255 (1))
+/// for the BaseFeature outside it) or, without one, its first solid feature, unless that makes
+/// nothing on nothing. Its pass-through is the empty shape, and the features after it would
+/// compute on nothing, Valid: the Body doesn't continue then, and every member fails naming its
+/// input (ops#579, decisions 254, 255 (1) and 257)
 bool baseInError(const Body& body)
 {
     for (auto member : body.Group.getValues()) {
         // The FeatureBase is a solid feature, and always the first member
         if (Body::isSolidFeature(member)) {
-            return member->isError();
+            return member->isError()
+                && (member->isDerivedFrom<FeatureBase>() || !makesNothingOnNothing(member));
         }
     }
     return false;

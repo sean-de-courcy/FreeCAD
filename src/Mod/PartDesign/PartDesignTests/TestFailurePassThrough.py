@@ -883,6 +883,32 @@ class FailurePassThroughBase:
         self.assertBody(BLOCK + 24)
         self.assertVolume(mirror, BLOCK + 24)
 
+    def testFailedSubtractiveFirstFeatureLetsThePadAfterItCompute(self):
+        """The Body's first solid feature is the pocket, with nothing to cut: it fails, and its
+        empty pass-through is what it would make. The Body continues: the block after it computes
+        as the block alone, and the Body is valid (decision 257: a subtractive feature makes
+        nothing on nothing; a Pad there stops the Body, testFirstFeatureFails)."""
+        hole = self.hole()
+        block = self.block()
+        self.recompute()
+        self.assertFailed(hole)
+        self.assertValid(block)
+        self.assertVolume(block, BLOCK)
+        self.assertBody(BLOCK)
+
+    def testFailedDressUpFirstFeatureLetsThePadAfterItCompute(self):
+        """The Body's first solid feature is a chamfer with nothing to chamfer: it fails, and its
+        empty pass-through is what it would make. The Body continues: the block after it computes
+        as the block alone (decision 257: a dress-up makes nothing on nothing)."""
+        chamfer = self.body.newObject("PartDesign::Chamfer", "Chamfer")
+        chamfer.Size = 1
+        block = self.block()
+        self.recompute()
+        self.assertFailed(chamfer)
+        self.assertValid(block)
+        self.assertVolume(block, BLOCK)
+        self.assertBody(BLOCK)
+
     # -- T9 ------------------------------------------------------------------------------------
 
     def testExpressionInErrorPassesThrough(self):
