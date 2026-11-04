@@ -157,14 +157,26 @@ class TestCrossBody(unittest.TestCase):
     def testBindersThroughEachOthersBodiesFailAsACycle(self):
         """T2: bound through the Bodies, each Body depends on the other's binder: a cycle. It
         failed nothing and left objects touched after every recompute; both binders now fail on
-        every recompute and say why. Bound to the feature instead, one binder breaks the cycle,
-        and everything settles."""
+        every recompute and say why: one names the cycle, and the other the Body it reads, whose
+        first Pad the cycle failed, so the Body doesn't continue (ops#579, decisions 255 (1) and
+        257). Bound to the feature instead, one binder breaks the cycle, and everything settles."""
         bindTop, bindB = self.interleaved(viaBody=True)
         for _ in range(2):
             self.doc.recompute()
+            texts = [binder.getStatusString() for binder in (bindTop, bindB)]
             for binder in (bindTop, bindB):
                 self.assertFalse(binder.isValid())
-                self.assertIn("Cyclic dependency", binder.getStatusString())
+            self.assertTrue(any("Cyclic dependency" in text for text in texts), texts)
+            # The other names its input: the Body it reads ("which has an error"), or the Body's
+            # failed member ("and 'PadB' in it has an error"), as the cycle is entered from
+            # either side (the Windows CI run took the second)
+            for text in texts:
+                self.assertTrue(
+                    "Cyclic dependency" in text
+                    or "which has an error" in text
+                    or "in it has an error" in text,
+                    texts,
+                )
             # The cycle has no order, so its objects stay touched; each carries an error (a
             # Body shows none of its own: its Tip, PadB, has one)
             for obj in self.doc.Objects:
@@ -577,14 +589,29 @@ class TestCrossBody(unittest.TestCase):
     def testFeatureFailingOnAProfileInAnotherBodySettles(self):
         """R2-2: a Pad of length zero on a sketch in another Body placed alike fails for its own
         reason, and the next recompute has nothing to do. Any failed feature that read another
-        Body was run on every recompute."""
+        Body was run on every recompute. As its Body's first solid feature, the Body doesn't
+        continue past it (ops#579, decisions 255 (1) and 257): unclaimed, it stays touched and
+        fails again for its own reason on every recompute."""
         source = self.body("Source")
         sketch = self.sketch(source, "Sk", self.onXY(source), (0, 0, 5, 5))
-        pad = self.pad(self.body("Body"), "Pad", sketch, 0)
+        body = self.body("Body")
+        blockSketch = self.sketch(body, "BlockSk", self.onXY(body), (10, 0, 15, 5))
+        block = self.pad(body, "Block", blockSketch, 5)
+        pad = self.pad(body, "Pad", sketch, 0)
         self.doc.recompute()
+        self.assertTrue(block.isValid(), block.getStatusString())
         self.assertFalse(pad.isValid())
         self.assertNotIn("placed elsewhere", pad.getStatusString())
         self.assertEqual(self.doc.recompute(), 0)
+
+        first = self.pad(self.body("Other"), "First", sketch, 0)
+        self.doc.recompute()
+        for _ in range(2):
+            self.assertFalse(first.isValid())
+            self.assertNotIn("placed elsewhere", first.getStatusString())
+            self.assertIn("Touched", first.State)
+            self.assertFalse(self.doc.Other.isValid())
+            self.doc.recompute()
 
     def testFirstSubtractiveFeatureFails(self):
         """F8: a Body's first Pocket, with nothing to cut, returned its tool as material (a first

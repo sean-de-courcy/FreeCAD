@@ -1,0 +1,9 @@
+{
+"entries": {
+"OrphanFlipBossFirstSettled|front|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr579-r4h", "issue": "ops#579", "tier": "F"},
+"OrphanFlipBossFirst|front|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr579-r4h", "issue": "ops#579", "tier": "F"},
+"OrphanFlipOrphanFirst|front|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr579-r4h", "issue": "ops#579", "tier": "F"},
+"StaleNullSuccessorControl|front|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr579-r4h", "issue": "ops#579", "tier": "F"},
+"StaleNullSuccessorOutsideSketch|front|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr579-r4h", "issue": "ops#579", "tier": "F"}
+}
+}

@@ -1,0 +1,8 @@
+{
+"entries": {
+"ClaimedS1BreakDrawSlideFixed|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr579-r4", "issue": "ops#579", "tier": "F"},
+"ClaimedS1BreakSlideWhileDown|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr579-r4", "issue": "ops#579", "tier": "F"},
+"ClaimedS1Control|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr579-r4", "issue": "ops#579", "tier": "F"},
+"ClaimedS1DrawBreakSlideFixed|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr579-r4", "issue": "ops#579", "tier": "F"}
+}
+}

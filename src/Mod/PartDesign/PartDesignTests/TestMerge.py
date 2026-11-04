@@ -234,15 +234,21 @@ class TestMerge(unittest.TestCase):
 
     def testFailedMergedFeature(self):
         """M-t3: PanelPad fails (its sketch opened, one edge deleted): the Merge is red, naming
-        it, and passes the bracket through (16000)."""
+        it, and passes the bracket through (16000). PanelPad is its Body's first solid feature,
+        so the Panel doesn't continue past it, and the Bracket, which reads it through the Merge,
+        fails too, keeping its last shape (ops#579, decisions 255 (1) and 257)."""
         self.model()
         merge = self.merge()
+        self.assertAlmostEqual(self.bracket.Shape.Volume, 22000, places=6)
         self.panelSk.delGeometry(3)
         self.doc.recompute()
         self.assertFalse(self.panelPad.isValid())
         self.assertFalse(merge.isValid())
         self.assertIn("PanelPad", merge.getStatusString())
-        self.assertAlmostEqual(self.bracket.Shape.Volume, 16000, places=6)
+        self.assertAlmostEqual(merge.Shape.Volume, 16000, places=6)
+        self.assertFalse(self.bracket.isValid())
+        self.assertIn("PanelPad", self.bracket.getStatusString())
+        self.assertAlmostEqual(self.bracket.Shape.Volume, 22000, places=6)
 
     def testAbsorbedBodyDeleted(self):
         """M-t4: the panel deleted from Python: the Merge is red, its part gone, and passes the

@@ -41,4 +41,14 @@ void queueReferencesIntoOtherDocuments(const Document* doc);
 void updateHeldElementFingerprints(const Document* doc,
                                    const DocumentObject* recomputed = nullptr);
 
+/** Holds the records of the references into \a target, an object in error that a recompute left
+ * unmade (it failed without running, or ran and failed with no rule claiming it): the next
+ * updateHeldElementFingerprints() takes them as a setter's, with the marks of the model as it is
+ * then (ops#579, decision 256). Its shape is its last one, so the element resolves by its name;
+ * the marks are what changes: a line drawn while the target was down reads as there before, and
+ * one slid onto a vacated place later breaks, as without the failure (ops#585). Defined in
+ * PropertyLinks.cpp.
+ */
+void holdElementReferencesInto(DocumentObject* target);
+
 }  // namespace App

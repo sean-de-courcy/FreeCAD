@@ -224,13 +224,22 @@ class TestSiblings(unittest.TestCase):
         self.assertEqual(sibling.UpToFace, self.pocket.UpToFace)
 
     def testSiblingComputesWhenThePrimaryFails(self):
-        """R-t8: the lid's plate fails (length 0), and the primary with it: the sibling still
-        cuts the enclosure. SiblingOf is no dependency, and the expressions don't fail it."""
+        """R-t8: the lid's plate fails (length 0), and the primary with it. SiblingOf is no
+        dependency, but the plate is the lid's first solid feature: the lid doesn't continue past
+        it, and the primary fails without running, so the sibling, whose expressions read it,
+        fails naming it and passes the enclosure's base through (ops#579, decisions 255 (1) and
+        257). Repaired, the sibling cuts the enclosure again."""
         self.model()
         sibling = self.sibling()
         self.plate.Length = 0
         self.doc.recompute()
         self.assertFalse(self.pocket.isValid())
+        self.assertFalse(sibling.isValid())
+        self.assertIn(f"'{self.pocket.Label}' has an error", sibling.getStatusString())
+        self.assertAlmostEqual(self.enclosure.Shape.Volume, 16000, places=6)
+
+        self.plate.Length = 5
+        self.doc.recompute()
         self.assertTrue(sibling.isValid(), sibling.getStatusString())
         self.assertAlmostEqual(self.enclosure.Shape.Volume, 16000 - HOLES * 10, places=6)
 

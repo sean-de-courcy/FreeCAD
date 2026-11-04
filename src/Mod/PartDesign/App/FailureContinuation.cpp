@@ -2,6 +2,8 @@
 
 #include "FailureContinuation.h"
 
+#include <map>
+#include <optional>
 #include <set>
 #include <utility>
 #include <vector>
@@ -11,6 +13,7 @@
 #include <TopLoc_Location.hxx>
 
 #include <App/DocumentObject.h>
+#include <App/GroupExtension.h>
 #include <App/PropertyLinks.h>
 #include <App/RecomputeContinuation.h>
 #include <Base/Console.h>
@@ -132,13 +135,29 @@ void collectLinks(const App::Property* prop, std::vector<InputLink>& links)
  * unattached primitive, a Boolean, a feature that never ran), so the world geometry is the
  * base's and the Placement is kept.
  */
+/// What a failed solid feature's pass-through is made from: its base, null when the base holds no
+/// solid (getBaseTopoShape(true)). FeatureBase's base is outside the Body: it passes the empty
+/// shape through
+Part::TopoShape passThroughSource(const Feature& feature)
+{
+    if (feature.isDerivedFrom<FeatureBase>()) {
+        return {};
+    }
+    return feature.getBaseTopoShape(true);
+}
+
+/// Whether a failed solid feature's pass-through is the empty shape. passThroughBase() writes it
+/// from passThroughSource(), so the claim and the stop can't disagree with what it writes
+/// (decision 259: the stop tested its own idea of empty, and a lead without a solid hid a failure,
+/// review pr579-r4g T-R4G-1)
+bool passThroughIsEmpty(const Feature& feature)
+{
+    return passThroughSource(feature).isNull();
+}
+
 void passThroughBase(Feature& feature)
 {
-    Part::TopoShape base;
-    if (!feature.isDerivedFrom<FeatureBase>()) {
-        // FeatureBase's base is outside the Body: it passes the empty shape through
-        base = feature.getBaseTopoShape(true);
-    }
+    Part::TopoShape base = passThroughSource(feature);
 
     Part::TopoShape pass;
     if (!base.isNull()) {
@@ -168,12 +187,55 @@ void passThroughBase(Feature& feature)
     feature.Shape.setValue(pass);
 }
 
+/// The link properties of `owner` that are its inputs, passed to `use` with their links: not a
+/// hidden link (a sibling's SiblingOf, whose primary may fail alone, ops#325) or a feature's _Body;
+/// with `skipGroup`, not a container's Group either (a container computes nothing from its members,
+/// as failedInputText() in Document.cpp has it; but a PartDesign::Boolean's tools are its Group).
+/// ExpressionEngine is passed too: each caller decides about it
+template<typename Use>
+void forEachInput(const App::DocumentObject* owner, bool skipGroup, Use use)
+{
+    auto group = skipGroup ? owner->getExtensionByType<App::GroupExtension>(true) : nullptr;
+    auto feature = freecad_cast<const Feature*>(owner);
+    std::vector<App::Property*> props;
+    owner->getPropertyList(props);
+    std::vector<InputLink> links;
+    for (auto prop : props) {
+        auto link = freecad_cast<const App::PropertyLinkBase*>(prop);
+        if (!link || link->getScope() == App::LinkScope::Hidden
+            || (feature && prop == &feature->_Body) || (group && prop == &group->Group)) {
+            continue;
+        }
+        links.clear();
+        collectLinks(prop, links);
+        if (use(prop, links)) {
+            return;
+        }
+    }
+}
+
 class BodyFailureContinuation: public App::RecomputeContinuation
 {
 public:
+    /** A failed member is claimed, and its Body continues past it, only when what it passes on is
+     * a real, current result (ops#579, decision 262; design work\s9347\base-stop-design.md)
+     *
+     * (S) A solid feature: its pass-through isn't the empty shape (decision 259), and its base is
+     * Valid or itself a claimed failure, up the BaseFeature chain. (N) Any other member passes
+     * nothing on: it is claimed when none of its inputs is an unclaimed failure.
+     *
+     * Only what is upstream of `failed` is read. Document::recompute runs the topological order, so
+     * all of it has run, or stands untouched, before `failed` runs, and nothing upstream is written
+     * again before its dependants are judged: every site that asks gets the same answer. The Body
+     * stop of decisions 254 and 255 (1) follows from it: a member whose chain runs through an
+     * unclaimed failure fails at S1 naming its input, and is unclaimed too. The Body-wide walk that
+     * stood for it read members off the chain, whose state changes during the recompute (reviews
+     * pr579-r4h T-R4H-1 and T-R4H-2)
+     */
     bool continuesAfter(const App::DocumentObject* failed) const override
     {
-        return bodyOf(failed) != nullptr;
+        Claims claims;
+        return claimed(failed, claims);
     }
 
     App::AfterInputFailure decide(const App::DocumentObject* /*failed*/,
@@ -184,15 +246,13 @@ public:
             // F6: the Body copies its Tip, which passed through
             return App::AfterInputFailure::Run;
         }
-        if (!bodyOf(dependant)) {
-            // F5: outside every Body, as upstream
-            return App::AfterInputFailure::Skip;
-        }
-        if (dependant->isDerivedFrom<Feature>()) {
+        if (bodyOf(dependant) && dependant->isDerivedFrom<Feature>()) {
             // F3 runs in Feature::recompute, and afterFailure() passes through
             return App::AfterInputFailure::Run;
         }
-        // F4: a sketch, datum, binder... in a Body
+        // F4: a sketch, datum, binder... in a Body; and outside every Body, as F4 (ops#579; F5
+        // left it out of the recompute, Valid on the old output): an element of the failed
+        // feature is judged on its pass-through, any other link fails it
         return inputInError(dependant, why) ? App::AfterInputFailure::Fail
                                             : App::AfterInputFailure::Run;
     }
@@ -296,36 +356,98 @@ public:
             }
         }
     }
+
+private:
+    /// What one continuesAfter() found: each answer, and nullopt while one is being asked further
+    /// down, so a cycle, which can't reach a recompute, ends unclaimed
+    using Claims = std::map<const App::DocumentObject*, std::optional<bool>>;
+
+    bool claimed(const App::DocumentObject* failed, Claims& claims) const
+    {
+        if (auto it = claims.find(failed); it != claims.end()) {
+            return it->second.value_or(false);
+        }
+        if (!bodyOf(failed)) {
+            return false;
+        }
+        claims[failed] = std::nullopt;
+        bool result = Body::isSolidFeature(failed)
+            ? solidClaimed(static_cast<const Feature*>(failed), claims)
+            : inputsCurrent(failed, claims);
+        claims[failed] = result;
+        return result;
+    }
+
+    /// (S), up the base chain: each base real (so non-null), and Valid or a claimed failure, whose
+    /// shape is its own pass-through, made from its base by this same test. Every base in error on
+    /// the way has the same answer
+    bool solidClaimed(const Feature* feature, Claims& claims) const
+    {
+        std::vector<const Feature*> chain;
+        bool result = false;
+        while (true) {
+            if (passThroughIsEmpty(*feature)) {
+                break;
+            }
+            const Part::Feature* baseObject = feature->getBaseObject(true);
+            if (!baseObject->isError()) {
+                result = true;
+                break;
+            }
+            // In error and not a solid feature of a Body (a Part feature set as BaseFeature from
+            // Python): no rule claims it
+            auto base = freecad_cast<const Feature*>(baseObject);
+            if (!base || !Body::isSolidFeature(base) || !bodyOf(base)) {
+                break;
+            }
+            if (auto it = claims.find(base); it != claims.end()) {
+                result = it->second.value_or(false);
+                break;
+            }
+            claims[base] = std::nullopt;
+            chain.push_back(base);
+            feature = base;
+        }
+        for (auto base : chain) {
+            claims[base] = result;
+        }
+        return result;
+    }
+
+    /// (N): a sketch, datum, binder or a MultiTransform's sub-feature passes nothing on. One
+    /// stopped by an unclaimed failure stays touched, and its readers elsewhere are marked at once
+    /// (decision 250 (1)-(2)); one that failed for its own reason, or on a claimed input, is judged
+    /// by decide(). Expressions count
+    bool inputsCurrent(const App::DocumentObject* member, Claims& claims) const
+    {
+        bool current = true;
+        forEachInput(member, true, [&](const App::Property*, const std::vector<InputLink>& links) {
+            for (const auto& link : links) {
+                if (link.object != member && link.object->isError()
+                    && !claimed(link.object, claims)) {
+                    current = false;
+                    return true;
+                }
+            }
+            return false;
+        });
+        return current;
+    }
 };
 
 }  // namespace
 
 bool inputInError(const App::DocumentObject* owner, std::string& why)
 {
-    std::vector<App::Property*> props;
-    owner->getPropertyList(props);
-    bool isFeature = owner->isDerivedFrom<Feature>();
-    std::vector<InputLink> links;
-    for (auto prop : props) {
-        if (!prop->isDerivedFrom<App::PropertyLinkBase>() || prop == &owner->ExpressionEngine) {
-            continue;
+    auto feature = freecad_cast<const Feature*>(owner);
+    bool inError = false;
+    // A Boolean's tools are its Group: a failed one fails it (TestMerge.testFailedMergedFeature)
+    forEachInput(owner, false, [&](const App::Property* prop, const std::vector<InputLink>& links) {
+        if (prop == &owner->ExpressionEngine
+            || (feature && prop == &feature->BaseFeature
+                && Body::isSolidFeature(feature->BaseFeature.getValue()))) {
+            return false;
         }
-        // No dependency: a sibling's SiblingOf, whose primary may fail alone (ops#325)
-        if (static_cast<App::PropertyLinkBase*>(prop)->getScope() == App::LinkScope::Hidden) {
-            continue;
-        }
-        if (isFeature) {
-            auto feature = static_cast<const Feature*>(owner);
-            if (prop == &feature->_Body) {
-                continue;
-            }
-            if (prop == &feature->BaseFeature
-                && Body::isSolidFeature(feature->BaseFeature.getValue())) {
-                continue;
-            }
-        }
-        links.clear();
-        collectLinks(prop, links);
         for (const auto& link : links) {
             if (link.object == owner || !link.object->isError()) {
                 continue;
@@ -336,10 +458,12 @@ bool inputInError(const App::DocumentObject* owner, std::string& why)
             }
             why = std::string(prop->getName()) + " links to '" + link.object->Label.getValue()
                 + "', which has an error";
+            inError = true;
             return true;
         }
-    }
-    return false;
+        return false;
+    });
+    return inError;
 }
 
 void registerFailureContinuation()

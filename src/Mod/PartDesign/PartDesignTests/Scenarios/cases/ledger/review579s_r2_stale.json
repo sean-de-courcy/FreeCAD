@@ -1,0 +1,12 @@
+{
+"entries": {
+"CtrCompTouchSlidFixed|external|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579s-r2", "issue": "ops#579", "tier": "F"},
+"CtrResolveTopSlidFixed|external|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579s-r2", "issue": "ops#579", "tier": "F"},
+"DirectCompNoFailControl|external|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr579s-r2", "issue": "ops#579", "tier": "F"},
+"DirectCompResolveTopSlidFixed|external|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579s-r2", "issue": "ops#579", "tier": "F"},
+"DirectCompSlidFixed|external|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579s-r2", "issue": "ops#579", "tier": "F"},
+"DirectCompTouchSlidFixed|external|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579s-r2", "issue": "ops#579", "tier": "F"},
+"DirectCompTouchSlidStill|external|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579s-r2", "issue": "ops#579", "tier": "F"},
+"FolderCompTouchSlidFixed|external|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579s-r2", "issue": "ops#579", "tier": "F"}
+}
+}

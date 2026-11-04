@@ -1,9 +1,9 @@
 {
 "entries": {
 "XControlNoFail|binder|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr564son-r4", "issue": "ops#564", "tier": "F"},
-"XFailARecomputeBoth|binder|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr564son-r4", "issue": "ops#564", "tier": "F"},
-"XFailARecompute|binder|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr564son-r4", "issue": "ops#564", "tier": "F"},
-"XFailBRecompute|binder|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr564son-r4", "issue": "ops#564", "tier": "F"},
-"XFailStaysFailing|binder|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "BROKEN", "expected": "wrong", "found_by": "review pr564son-r4", "issue": "ops#564", "tier": "F"}
+"XFailARecomputeBoth|binder|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr564son-r4", "issue": "ops#564", "tier": "F"},
+"XFailARecompute|binder|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr564son-r4", "issue": "ops#564", "tier": "F"},
+"XFailBRecompute|binder|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr564son-r4", "issue": "ops#564", "tier": "F"},
+"XFailStaysFailing|binder|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr564son-r4", "issue": "ops#564", "tier": "F"}
 }
 }

@@ -137,6 +137,16 @@ class FailurePassThroughBase:
             self.assertIn(word, message)
         return message
 
+    def assertStopped(self, obj, *words):
+        """Failed and left touched: a failure no rule claims, or its dependant (ops#579)."""
+        self.assertFalse(obj.isValid(), f"{obj.Name} stays valid")
+        self.assertIn("Invalid", obj.State)
+        self.assertIn("Touched", obj.State)
+        message = obj.getStatusString()
+        for word in words:
+            self.assertIn(word, message)
+        return message
+
     def assertVolume(self, obj, volume):
         self.assertAlmostEqual(obj.Shape.Volume, volume, delta=1e-4)
 
@@ -362,8 +372,9 @@ class FailurePassThroughBase:
     # -- T5 ------------------------------------------------------------------------------------
 
     def testConsumersOutsideTheBody(self):
-        """A compound of the failed hole, outside the Body, is skipped as upstream does (it keeps
-        its shape and stays touched); a compound of the Body gets the end result (T5, F5)."""
+        """A compound of the failed hole, outside the Body, fails naming it and keeps its shape
+        (F4 for every dependant, ops#579; F5 left it Valid on that shape); a compound of the Body
+        gets the end result (T5). Repaired, both compute."""
         self.block()
         hole = self.hole()
         ofHole = self.doc.addObject("Part::Compound", "OfHole")
@@ -376,15 +387,19 @@ class FailurePassThroughBase:
         hole.Length = 0
         self.recompute()
         self.assertFailed(hole)
-        self.assertIn("Touched", ofHole.State)
-        self.assertNotIn("Invalid", ofHole.State)
+        self.assertStopped(ofHole, "Links links to", f"'{hole.Label}'")
         self.assertVolume(ofHole, BLOCK - HOLE)
         self.assertValid(ofBody)
         self.assertVolume(ofBody, BLOCK)
 
-    def testPartFeatureOutsideABodyKeepsUpstreamBehaviour(self):
-        """Outside a Body nothing changes: a failed Part box stays touched and its dependant
-        isn't run (F7)."""
+        hole.Length = 3
+        self.recompute()
+        self.assertValid(hole, ofHole, ofBody)
+        self.assertVolume(ofHole, BLOCK - HOLE)
+
+    def testPartFeatureOutsideABodyFailsItsDependant(self):
+        """Outside a Body a failed Part box stays touched, and its dependant fails naming it,
+        keeps its shape and stays touched (ops#579; F7 left it Valid on that shape)."""
         box = models.box(self.doc, "PlainBox", (2, 3, 4))
         compound = self.doc.addObject("Part::Compound", "OfPlainBox")
         compound.Links = [box]
@@ -393,11 +408,385 @@ class FailurePassThroughBase:
 
         box.Length = 0
         self.recompute()
-        self.assertFalse(box.isValid())
-        self.assertIn("Touched", box.State)
-        self.assertNotIn("Invalid", compound.State)
+        self.assertStopped(box)
+        self.assertStopped(compound, "Links links to", f"'{box.Label}'")
         self.assertVolume(compound, 24)
-        self.assertEqual(self.doc.recompute(), 1)  # the box again, not the compound
+        self.assertEqual(self.doc.recompute(), 2)  # the box again, and the compound judged
+
+        box.Length = 2
+        self.recompute()
+        self.assertValid(box, compound)
+        self.assertNotIn("Touched", compound.State)
+
+    # -- ops#579: the dependants of a failure no rule claims -------------------------------------
+
+    def freeProfile(self, doc=None, name="FreeProfile"):
+        """A sketch outside the Body: a circle of radius 3 at (10, 10), its radius constrained."""
+        sketch = models.sketch(doc or self.doc, name, [models.circle(10, 10, 3)])
+        sketch.addConstraint(Sketcher.Constraint("Radius", 0, 3))
+        return sketch
+
+    @staticmethod
+    def breakProfile(sketch):
+        """A second radius, in conflict: the sketch fails by itself."""
+        sketch.addConstraint(Sketcher.Constraint("Radius", 0, 4))
+
+    @staticmethod
+    def repairProfile(sketch):
+        sketch.delConstraint(1)
+
+    @staticmethod
+    def prism(doc, base, name="Prism"):
+        """A solid 5 mm extrusion of `base`'s circle: 45 pi mm^3."""
+        prism = doc.addObject("Part::Extrusion", name)
+        prism.Base = base
+        prism.DirMode = "Custom"
+        prism.Dir = V(0, 0, 1)
+        prism.LengthFwd = 5
+        prism.Solid = True
+        return prism
+
+    def testDependantsOfAFreeSketchFailNamingTheirInput(self):
+        """A free sketch fails (conflicting constraints). Each dependant fails without running,
+        naming its direct input, keeps its shape and stays touched: a sketch with the circle as
+        external geometry, a Part extrusion of it, a plane attached to the extrusion's top and a
+        sketch on that plane. The folder holding them isn't failed. The failure persists over a
+        second recompute; repaired, everything computes (ops#579)."""
+        profile = self.freeProfile()
+        self.recompute()
+        rim = models.sketch(self.doc, "Rim", [])
+        rim.addExternal(profile.Name, "Edge1")
+        prism = self.prism(self.doc, profile)
+        self.recompute()
+        top = elementWhere(prism.Shape, "Face", lambda f: abs(f.CenterOfMass.z - 5) < TOL)
+        lid = self.doc.addObject("Part::Plane", "Lid")
+        lid.Length = lid.Width = 2
+        lid.AttachmentSupport = [(prism, top)]
+        lid.MapMode = "FlatFace"
+        onLid = models.sketch(self.doc, "OnLid", models.rectangle(0, 0, 1, 1))
+        onLid.AttachmentSupport = [(lid, "Face1")]
+        onLid.MapMode = "FlatFace"
+        folder = self.doc.addObject("App::DocumentObjectGroup", "Folder")
+        folder.addObjects([profile, prism])
+        self.recompute()
+        everything = (profile, rim, prism, lid, onLid, folder)
+        self.assertValid(*everything)
+        self.assertVolume(prism, 45 * math.pi)
+
+        self.breakProfile(profile)
+        for _ in range(2):
+            self.recompute()
+            self.assertStopped(profile)
+            self.assertStopped(rim, "links to", f"'{profile.Label}'")
+            self.assertStopped(prism, "Base links to", f"'{profile.Label}'")
+            self.assertStopped(lid, "AttachmentSupport links to", f"'{prism.Label}'")
+            self.assertStopped(onLid, "AttachmentSupport links to", f"'{lid.Label}'")
+            self.assertVolume(prism, 45 * math.pi)
+            self.assertValid(folder)
+
+        self.repairProfile(profile)
+        self.recompute()
+        self.assertValid(*everything)
+        self.assertEqual([o.Name for o in everything if "Touched" in o.State], [])
+        self.assertVolume(prism, 45 * math.pi)
+
+    def testReadersOfAContainerOfAFailureFail(self):
+        """An App::Part holds a 2 x 3 x 4 box. A compound of the Part, a binder of the box's top
+        face through the Part's subname path, and a Link to the Part each read the box. The box
+        fails (length zero) and keeps its shape: each reader fails naming the box and keeps its
+        shape, and the Part itself isn't failed. Repaired, everything computes (decision 253)."""
+        assy = self.doc.addObject("App::Part", "Assy")
+        box = models.box(self.doc, "Crate", (2, 3, 4))
+        assy.addObject(box)
+        self.recompute()
+        top = elementWhere(box.Shape, "Face", lambda f: abs(f.CenterOfMass.z - 4) < TOL)
+        compound = self.doc.addObject("Part::Compound", "OfAssy")
+        compound.Links = [assy]
+        binder = self.doc.addObject("PartDesign::SubShapeBinder", "TopBinder")
+        binder.Support = [(assy, (f"{box.Name}.{top}",))]
+        link = self.doc.addObject("App::Link", "AssyLink")
+        link.LinkedObject = assy
+        self.recompute()
+        readers = (compound, binder, link)
+        self.assertValid(assy, box, *readers)
+        self.assertVolume(compound, 24)
+
+        box.Length = 0
+        self.recompute()
+        self.assertStopped(box)
+        self.assertValid(assy)
+        for reader in readers:
+            self.assertStopped(reader, f"'{assy.Label}', and '{box.Label}' in it has an error")
+        self.assertVolume(compound, 24)
+
+        box.Length = 2
+        self.recompute()
+        self.assertValid(assy, box, *readers)
+        self.assertEqual([o.Name for o in readers if "Touched" in o.State], [])
+
+    def bossOnBase(self, base, volume):
+        """The Body on `base` (its BaseFeature; `volume` mm^3) with the 5 mm boss on its top at
+        z = 10, and a Part::Mirroring of the boss's Pad outside the Body."""
+        self.body.BaseFeature = base
+        sketch = models.sketch(self.doc, "BossSketch", models.rectangle(0, 0, 5, 5), self.body, z=10)
+        boss = models.pad(self.body, sketch, 5, "Boss")
+        mirror = self.doc.addObject("Part::Mirroring", "MirroredBoss")
+        mirror.Source = boss
+        mirror.Normal = V(1, 0, 0)
+        self.recompute()
+        self.assertValid(self.body, boss, mirror)
+        self.assertBody(volume + BOSS)
+        self.assertVolume(mirror, volume + BOSS)
+        return self.body.Group[0], boss, mirror
+
+    def assertBodyStopped(self, base, boss, mirror, volume, *words):
+        """The Body doesn't continue past its failed FeatureBase (decision 254): the boss and the
+        Body fail naming their inputs and keep their shapes, and so does the mirror outside."""
+        self.assertStopped(base, *words)
+        self.assertStopped(boss, f"'{base.Label}', which has an error")
+        self.assertStopped(self.body)
+        self.assertStopped(mirror, f"'{boss.Label}', which has an error")
+        self.assertVolume(boss, volume + BOSS)
+        self.assertVolume(mirror, volume + BOSS)
+
+    def testBodyOnAFailedBaseFeatureDoesNotContinue(self):
+        """The Body's BaseFeature is a Part box outside it. The box fails (length zero): the
+        FeatureBase fails naming it, and the Body doesn't continue: the boss after it doesn't
+        compute on the empty pass-through (ops#579, decision 254). Repaired, everything computes."""
+        stock = models.box(self.doc, "Stock", (20, 20, 10))
+        base, boss, mirror = self.bossOnBase(stock, BLOCK)
+
+        stock.Length = 0
+        self.recompute()
+        self.assertStopped(stock)
+        self.assertBodyStopped(base, boss, mirror, BLOCK, f"'{stock.Label}', which has an error")
+
+        stock.Length = 20
+        self.recompute()
+        self.assertValid(stock, base, boss, self.body, mirror)
+        self.assertBody(BLOCK + BOSS)
+        self.assertVolume(mirror, BLOCK + BOSS)
+
+    def testBodyOnAContainerWithAFailedMemberDoesNotContinue(self):
+        """The Body's BaseFeature is an App::Part holding the block and a spare 1 mm cube far off.
+        The spare fails (length zero): the FeatureBase fails naming it through the Part, and the
+        Body doesn't continue (decision 254). Repaired, everything computes."""
+        lib = self.doc.addObject("App::Part", "Lib")
+        lib.addObject(models.box(self.doc, "Stock", (20, 20, 10)))
+        spare = models.box(self.doc, "Spare", (1, 1, 1), at=(100, 0, 0))
+        lib.addObject(spare)
+        base, boss, mirror = self.bossOnBase(lib, BLOCK + 1)
+
+        spare.Length = 0
+        self.recompute()
+        self.assertStopped(spare)
+        self.assertValid(lib)
+        self.assertBodyStopped(
+            base, boss, mirror, BLOCK + 1, f"'{lib.Label}', and '{spare.Label}' in it has an error"
+        )
+
+        spare.Length = 1
+        self.recompute()
+        self.assertValid(spare, base, boss, self.body, mirror)
+        self.assertBody(BLOCK + 1 + BOSS)
+
+    def testClaimedFailureKeepsItsTextWhenItsBodyStops(self):
+        """A sketch in the Body has conflicting constraints: the Body's rule claims it, and it
+        isn't re-run while nothing it reads changes. Then the BaseFeature fails and the Body stops
+        (decision 254): the sketch keeps its own error text through that recompute and the repair,
+        not a bare "Error" (review pr579-r3 T-R3-2, decision 255 (3))."""
+        stock = models.box(self.doc, "Stock", (20, 20, 10))
+        base, boss, mirror = self.bossOnBase(stock, BLOCK)
+        sketch = models.sketch(self.doc, "Note", [models.circle(15, 15, 1)], self.body, z=10)
+        sketch.addConstraint(Sketcher.Constraint("Radius", 0, 1))
+        sketch.addConstraint(Sketcher.Constraint("Radius", 0, 2))
+        self.recompute()
+        text = self.assertFailed(sketch)
+        self.assertNotEqual(text, "Error")
+        self.assertValid(boss)
+
+        stock.Length = 0
+        self.recompute()
+        self.assertBodyStopped(base, boss, mirror, BLOCK, f"'{stock.Label}', which has an error")
+        self.assertEqual(sketch.getStatusString(), text)
+
+        stock.Length = 20
+        self.recompute()
+        self.assertValid(base, boss, mirror)
+        self.assertEqual(sketch.getStatusString(), text)
+
+    def mirrorOf(self, source):
+        mirror = self.doc.addObject("Part::Mirroring", f"Mirrored{source.Name}")
+        mirror.Source = source
+        mirror.Normal = V(1, 0, 0)
+        return mirror
+
+    def assertFirstFeatureStopped(self, block, boss, mirror, *words):
+        """The Body doesn't continue past its failed first solid feature (decision 255 (1)): the
+        block fails naming its input, the boss's sketch (attached to the block) and the boss after
+        it and the Body fail naming theirs, and all keep their shapes, the mirror of the boss
+        outside too."""
+        self.assertStopped(block, *words)
+        self.assertStopped(boss.Profile[0], f"'{block.Label}', which has an error")
+        self.assertStopped(boss, f"'{boss.Profile[0].Label}', which has an error")
+        self.assertStopped(self.body)
+        self.assertStopped(mirror, f"'{boss.Label}', which has an error")
+        for obj in (boss, self.body, mirror):
+            self.assertVolume(obj, BLOCK + BOSS)
+
+    def testFirstFeatureOfAFailureOutsideDoesNotContinue(self):
+        """The block, the Body's first solid feature (no BaseFeature), takes its length from an
+        expression on a Part box outside the Body. The box fails (length zero): the block fails
+        naming it, and the Body doesn't continue: the boss after it doesn't compute alone on the
+        empty pass-through, nor a Part::Mirroring of it or a second Body on the Body (ops#579,
+        review pr579-r3 T-R3-1, decision 255 (1)). Repaired, everything computes."""
+        gauge = models.box(self.doc, "Gauge", (2, 2, 10), at=(100, 0, 0))
+        block = self.block()
+        block.setExpression("Length", f"{gauge.Name}.Height")
+        boss = self.boss(block)
+        mirror = self.mirrorOf(boss)
+        second = self.doc.addObject("PartDesign::Body", "Second")
+        second.BaseFeature = self.body
+        self.recompute()
+        self.assertValid(block, boss, self.body, mirror, second)
+        self.assertBody(BLOCK + BOSS)
+
+        gauge.Length = 0
+        self.recompute()
+        self.assertStopped(gauge)
+        self.assertFirstFeatureStopped(block, boss, mirror, f"'{gauge.Label}' has an error")
+        self.assertStopped(second.Group[0], f"'{self.body.Label}', which has an error")
+        self.assertStopped(second)
+        self.assertVolume(second, BLOCK + BOSS)
+
+        gauge.Length = 2
+        self.recompute()
+        self.assertValid(gauge, block, boss, self.body, mirror, second, second.Group[0])
+        self.assertBody(BLOCK + BOSS)
+        self.assertVolume(second, BLOCK + BOSS)
+
+    def testFirstFeatureOnABinderOfAFailureDoesNotContinue(self):
+        """The block is padded from a SubShapeBinder in the Body of the top face of a Part box
+        outside it. The box fails (length zero): the binder fails naming it, the block fails
+        naming the binder, and the Body doesn't continue (review pr579-r3 T-R3-1, decision 255
+        (1)). Repaired, everything computes."""
+        plate = models.box(self.doc, "Plate", (20, 20, 1), at=(0, 0, -1))
+        self.recompute()
+        top = elementWhere(plate.Shape, "Face", lambda f: abs(f.CenterOfMass.z) < TOL)
+        binder = self.body.newObject("PartDesign::SubShapeBinder", "Binder")
+        binder.Support = [(plate, (top,))]
+        block = models.pad(self.body, binder, 10, "Block")
+        boss = self.boss(block)
+        mirror = self.mirrorOf(boss)
+        self.recompute()
+        self.assertValid(binder, block, boss, self.body, mirror)
+        self.assertBody(BLOCK + BOSS)
+
+        plate.Length = 0
+        self.recompute()
+        self.assertStopped(plate)
+        self.assertFalse(binder.isValid())
+        self.assertIn(f"'{plate.Label}'", binder.getStatusString())
+        self.assertFirstFeatureStopped(block, boss, mirror, f"'{binder.Label}'")
+
+        # Nothing changed: the same state, settled
+        self.recompute()
+        self.assertFirstFeatureStopped(block, boss, mirror, f"'{binder.Label}'")
+
+        plate.Length = 20
+        self.recompute()
+        self.assertValid(plate, binder, block, boss, self.body, mirror)
+        self.assertBody(BLOCK + BOSS)
+
+    def testBodyMemberOfAFailureOutsideItPassesThrough(self):
+        """The hole's depth is an expression on a Part box outside the Body. The box fails (length
+        zero): the hole fails naming it, passes the block through, and the boss after it computes
+        (the Body's rule, unchanged). Repaired, the hole is back (ops#579)."""
+        self.block()
+        gauge = models.box(self.doc, "Gauge", (2, 2, 3))
+        hole = self.hole()
+        hole.setExpression("Length", f"{gauge.Name}.Height")
+        boss = self.boss(hole)
+        self.recompute()
+        self.assertBody(BLOCK - HOLE + BOSS)
+
+        gauge.Length = 0
+        self.recompute()
+        self.assertStopped(gauge)
+        self.assertFailed(hole, f"'{gauge.Label}' has an error")
+        self.assertVolume(hole, BLOCK)
+        self.assertValid(boss)
+        self.assertBody(BLOCK + BOSS)
+
+        gauge.Length = 2
+        self.recompute()
+        self.assertValid(gauge, hole, boss)
+        self.assertBody(BLOCK - HOLE + BOSS)
+
+    def twoDocuments(self):
+        """Document B holds the free sketch; document A a binder of its circle and an extrusion
+        of the binder. Both saved, as a link across documents needs."""
+        folder = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, folder, True)
+        docB = models.newDocument("FailurePassThroughB")
+        docB.saveAs(os.path.join(folder, "B.FCStd"))
+        profile = self.freeProfile(docB, "Profile")
+        docB.recompute()
+        docA = models.newDocument("FailurePassThroughA")
+        docA.saveAs(os.path.join(folder, "A.FCStd"))
+        binder = docA.addObject("PartDesign::SubShapeBinder", "Binder")
+        binder.Support = [(profile, ("Edge1",))]
+        prism = self.prism(docA, binder)
+        docA.recompute()
+        self.assertValid(profile, binder, prism)
+        return docA, docB, profile, binder, prism
+
+    def testDependantInAnotherDocumentFailsAtOnce(self):
+        """B alone recomputes after its sketch fails: A's binder fails at once, in A, naming the
+        sketch, and is left touched; the extrusion after it is judged by A's recompute, which
+        fails it naming the binder. Repaired in B, A's recompute brings both back (ops#579)."""
+        docA, docB, profile, binder, prism = self.twoDocuments()
+
+        self.breakProfile(profile)
+        docB.recompute()
+        self.assertFalse(profile.isValid())
+        self.assertStopped(binder, "Support links to", f"'{profile.Label}'")
+        self.assertValid(prism)
+
+        docA.recompute()
+        self.assertStopped(binder, "Support links to", f"'{profile.Label}'")
+        self.assertStopped(prism, "Base links to", f"'{binder.Label}'")
+
+        self.repairProfile(profile)
+        docB.recompute()
+        self.assertTrue(profile.isValid())
+        self.assertIn("Touched", binder.State)
+        docA.recompute()
+        self.assertValid(binder, prism)
+        self.assertVolume(prism, 45 * math.pi)
+
+    def testDependantsDocumentAloneOrBothFail(self):
+        """A alone recomputes after B's sketch fails (the sketch runs in A's recompute): the binder
+        and the extrusion fail. Then B and A both recompute: they stay failed. Repaired, A's
+        recompute alone brings them back (ops#579)."""
+        docA, docB, profile, binder, prism = self.twoDocuments()
+
+        self.breakProfile(profile)
+        docA.recompute()
+        self.assertFalse(profile.isValid())
+        self.assertStopped(binder, "Support links to", f"'{profile.Label}'")
+        self.assertStopped(prism, "Base links to", f"'{binder.Label}'")
+
+        docB.recompute()
+        docA.recompute()
+        self.assertStopped(binder, "Support links to", f"'{profile.Label}'")
+        self.assertStopped(prism, "Base links to", f"'{binder.Label}'")
+
+        self.repairProfile(profile)
+        docA.recompute()
+        self.assertTrue(profile.isValid())
+        self.assertValid(binder, prism)
+        self.assertVolume(prism, 45 * math.pi)
 
     # -- T6 ------------------------------------------------------------------------------------
 
@@ -463,18 +852,368 @@ class FailurePassThroughBase:
     # -- T8 ------------------------------------------------------------------------------------
 
     def testFirstFeatureFails(self):
-        """The only pad fails: the Body is valid and empty; a later pad computes alone (T8, F6)."""
+        """The first pad fails (length zero). Its pass-through would be the empty shape, so the
+        Body doesn't continue (decision 255 (1); T8 and F6 passed it through, and a later pad
+        computed alone on nothing): the pad keeps its last output, the Body and a Part::Mirroring
+        of it outside fail, and so does a pad added after it, naming it. Repaired, everything
+        computes."""
         block = self.block()
+        mirror = self.mirrorOf(self.body)
+        self.recompute()
+        self.assertBody(BLOCK)
+
         block.Length = 0
         self.recompute()
-        self.assertFailed(block, "zero")
-        self.assertValid(self.body)
-        self.assertTrue(self.body.Shape.isNull() or self.body.Shape.Volume < TOL)
+        self.assertStopped(block, "zero")
+        self.assertStopped(self.body)
+        self.assertStopped(mirror, f"'{self.body.Label}', which has an error")
+        for obj in (block, self.body, mirror):
+            self.assertVolume(obj, BLOCK)
 
-        sketch = models.sketch(self.doc, "PostSketch", models.rectangle(0, 0, 2, 3), self.body)
-        models.pad(self.body, sketch, 4, "Post")
+        sketch = models.sketch(self.doc, "PostSketch", models.rectangle(30, 0, 32, 3), self.body)
+        post = models.pad(self.body, sketch, 4, "Post")
         self.recompute()
-        self.assertBody(24)
+        self.assertStopped(post, f"'{block.Label}', which has an error")
+        self.assertStopped(self.body)
+        self.assertVolume(self.body, BLOCK)
+
+        block.Length = 10
+        self.recompute()
+        self.assertValid(block, post, self.body, mirror)
+        self.assertBody(BLOCK + 24)
+        self.assertVolume(mirror, BLOCK + 24)
+
+    def testReferenceIntoAStoppedFeatureBreaksAtTheFixAfterASlide(self):
+        """Body1 is built on a Body whose only Pad then fails, so Body1's FeatureBase fails and
+        Body1 stops (decision 254): its rim Pad doesn't run, and a sketch attached to the rim's
+        front face (y = 0) fails naming it. In that edit a second rim is drawn at y = 20. Then
+        the first rim is deleted, the second slid onto y = 0, and the base repaired: the front
+        face is a face the second rim made, which was in the model while the Pad was down, so
+        the sketch breaks, as it does without the failure. The record of the reference into the
+        Pad is taken at the end of the recompute that left it unmade (ops#579, decision 256;
+        before, it kept the build's record and re-bound in place, silently)."""
+        ground = models.sketch(self.doc, "Ground", models.rectangle(100, 50, 110, 60), self.body)
+        groundPad = models.pad(self.body, ground, 5, "GroundPad")
+        self.recompute()
+        body1 = self.doc.addObject("PartDesign::Body", "Body1")
+        body1.BaseFeature = self.body
+        self.recompute()
+        profile = models.sketch(self.doc, "Profile", models.rectangle(0, 0, 40, 2), body1)
+        rim = models.pad(body1, profile, 10, "Rim")
+        self.recompute()
+        front = elementWhere(
+            rim.Shape,
+            "Face",
+            lambda f: abs(f.CenterOfMass.y) < TOL and abs(f.normalAt(0, 0).y + 1) < TOL,
+        )
+        top = body1.newObject("Sketcher::SketchObject", "Top")
+        top.AttachmentSupport = [(rim, front)]
+        top.MapMode = "FlatFace"
+        self.recompute()
+        self.assertValid(rim, top)
+
+        profile.addGeometry(models.rectangle(0, 20, 40, 22), False)
+        groundPad.Length = 0
+        self.recompute()
+        self.assertStopped(rim)
+        self.assertStopped(top, f"'{rim.Label}', which has an error")
+
+        models.moveRectangle(profile, 0, 0, 40, 2, first=4)
+        profile.delGeometries([0, 1, 2, 3])
+        groundPad.Length = 5
+        self.recompute()
+        self.assertValid(groundPad, rim)
+        self.assertFalse(top.isValid(), "the front face re-bound to the slid rim's")
+
+    def testReferenceIntoAStoppedFeatureTakesWhatIsDrawnInALaterEdit(self):
+        """The model above. The base fails first, and nothing else changes for a recompute: the
+        records into the Pad aren't taken again while its closure's marks are as they hold them
+        (decision 263). Then, in a later edit while it is still down, the second rim is drawn: the
+        marks changed, so the records are taken, and the slide onto y = 0 with the repair breaks
+        the sketch, as in one edit."""
+        ground = models.sketch(self.doc, "Ground", models.rectangle(100, 50, 110, 60), self.body)
+        groundPad = models.pad(self.body, ground, 5, "GroundPad")
+        self.recompute()
+        body1 = self.doc.addObject("PartDesign::Body", "Body1")
+        body1.BaseFeature = self.body
+        self.recompute()
+        profile = models.sketch(self.doc, "Profile", models.rectangle(0, 0, 40, 2), body1)
+        rim = models.pad(body1, profile, 10, "Rim")
+        self.recompute()
+        front = elementWhere(
+            rim.Shape,
+            "Face",
+            lambda f: abs(f.CenterOfMass.y) < TOL and abs(f.normalAt(0, 0).y + 1) < TOL,
+        )
+        top = body1.newObject("Sketcher::SketchObject", "Top")
+        top.AttachmentSupport = [(rim, front)]
+        top.MapMode = "FlatFace"
+        self.recompute()
+        self.assertValid(rim, top)
+
+        groundPad.Length = 0
+        self.recompute()
+        self.recompute()
+        self.assertStopped(rim)
+        self.assertStopped(top, f"'{rim.Label}', which has an error")
+
+        profile.addGeometry(models.rectangle(0, 20, 40, 22), False)
+        self.recompute()
+        self.assertStopped(top, f"'{rim.Label}', which has an error")
+
+        models.moveRectangle(profile, 0, 0, 40, 2, first=4)
+        profile.delGeometries([0, 1, 2, 3])
+        groundPad.Length = 5
+        self.recompute()
+        self.assertValid(groundPad, rim)
+        self.assertFalse(top.isValid(), "the front face re-bound to the slid rim's")
+
+    def assertFirstFeatureOfAnyKindStops(self, first):
+        """`first`, the Body's first solid feature, is in error: the Body doesn't continue past
+        it, whatever kind it is (decision 255 (1); a kind exempted once, decision 257, hid a
+        failed first Pad after it, review pr579-r4 R4-1): the block after it fails naming it.
+        Removed, the block computes."""
+        block = self.block()
+        self.recompute()
+        self.assertStopped(first)
+        self.assertStopped(block, f"'{first.Label}', which has an error")
+        self.assertStopped(self.body)
+
+        self.body.removeObject(first)
+        self.doc.removeObject(first.Name)
+        self.recompute()
+        self.assertValid(block)
+        self.assertBody(BLOCK)
+
+    def assertALeadThatMakesNothingHidesNoFailure(self, lead):
+        """`lead`, the Body's first solid feature, is valid and makes nothing; the block after it
+        takes its length from an expression on a Part box outside the Body. The box fails: the
+        block's pass-through would be the empty shape, so the Body doesn't continue (decision
+        255 (1): a claimed failure whose pass-through is empty; review pr579-r4f T-R4F-1: the
+        boss computed on nothing, Valid). Repaired, everything computes."""
+        gauge = models.box(self.doc, "Gauge", (2, 2, 10), at=(100, 0, 0))
+        block = self.block()
+        block.setExpression("Length", f"{gauge.Name}.Height")
+        boss = self.boss(block)
+        mirror = self.mirrorOf(boss)
+        self.recompute()
+        self.assertValid(lead, block, boss, self.body, mirror)
+        self.assertBody(BLOCK + BOSS)
+
+        gauge.Length = 0
+        self.recompute()
+        self.assertFirstFeatureStopped(block, boss, mirror, f"'{gauge.Label}' has an error")
+
+        gauge.Length = 2
+        self.recompute()
+        self.assertValid(lead, block, boss, self.body, mirror)
+        self.assertBody(BLOCK + BOSS)
+
+    def testSuppressedLeadDoesNotHideAFailedFirstPad(self):
+        """The lead is a pocket a reorder left at the top, suppressed to get the Body back."""
+        hole = self.hole()
+        hole.Suppressed = True
+        self.assertALeadThatMakesNothingHidesNoFailure(hole)
+
+    def testEmptyBooleanLeadDoesNotHideAFailedFirstPad(self):
+        """The lead is a Boolean without a tool: valid, on the empty shape."""
+        lead = self.body.newObject("PartDesign::Boolean", "Empty")
+        self.assertALeadThatMakesNothingHidesNoFailure(lead)
+
+    def testSolidlessBaseFeatureDoesNotHideAFailedFirstPad(self):
+        """The lead is the FeatureBase of a Part::Plane: valid, a face, no solid, so a pass-through
+        after it is the empty shape as for a null lead (decision 259: the stop asks the
+        pass-through's own question; review pr579-r4g T-R4G-1)."""
+        plane = self.doc.addObject("Part::Plane", "Sheet")
+        plane.Length = plane.Width = 50
+        plane.Placement.Base = V(200, 0, 0)
+        self.body.BaseFeature = plane
+        self.recompute()
+        self.assertALeadThatMakesNothingHidesNoFailure(self.body.Group[0])
+
+    def testFailedSubtractiveFirstFeatureStopsTheBody(self):
+        """The Body's first solid feature is a pocket, with nothing to cut."""
+        self.assertFirstFeatureOfAnyKindStops(self.hole())
+
+    def testFailedDressUpFirstFeatureStopsTheBody(self):
+        """The Body's first solid feature is a chamfer, with nothing to chamfer."""
+        chamfer = self.body.newObject("PartDesign::Chamfer", "Chamfer")
+        chamfer.Size = 1
+        self.assertFirstFeatureOfAnyKindStops(chamfer)
+
+    # -- the chain rule (decision 262) -----------------------------------------------------------
+
+    def topBoss(self, name, x, base=None):
+        """A 5 mm cube on the block's top at x .. x + 5, y 1 .. 6: its sketch is placed, not
+        attached, so it reads nothing of the Body."""
+        sketch = models.sketch(
+            self.doc, f"{name}Sketch", models.rectangle(x, 1, x + 5, 6), self.body, z=10
+        )
+        return models.pad(self.body, sketch, 5, name)
+
+    def testClaimDoesNotFlipWhenAnOffChainMemberRecovers(self):
+        """An orphan pad far off (BaseFeature None, from Python) sits between the boss and the
+        cap, whose base is the boss. The orphan fails; in the next edit it is repaired and the
+        boss fails. The boss's claim reads only its own chain (the block, Valid), so the orphan
+        recomputing Valid in between can't change it: the boss passes the block through and the
+        cap and the Body compute on it in the same recompute (review pr579-r4h T-R4H-1: a
+        Body-wide test read the orphan, and the cap ran on the boss's last shape). The orphan is
+        after the boss in the Body, then before it."""
+        self.orphanFlip(orphanFirst=False)
+        self.tearDown()
+        self.setUp()
+        self.orphanFlip(orphanFirst=True)
+
+    def orphanFlip(self, orphanFirst):
+        def orphanPad():
+            sketch = models.sketch(
+                self.doc, "OrphanSketch", models.rectangle(100, 0, 105, 5), self.body
+            )
+            return models.pad(self.body, sketch, 5, "Orphan")
+
+        block = self.block()
+        orphan = orphanPad() if orphanFirst else None
+        boss = self.topBoss("Boss", 1)
+        orphan = orphan or orphanPad()
+        cap = self.topBoss("Cap", 13)
+        orphan.BaseFeature = None
+        boss.BaseFeature = block
+        cap.BaseFeature = boss
+        self.recompute()
+        self.assertBody(BLOCK + 2 * BOSS)
+
+        orphan.Length = 0
+        self.recompute()
+        self.assertStopped(orphan)
+        self.assertBody(BLOCK + 2 * BOSS)
+
+        orphan.Length = 5
+        boss.Length = 0
+        self.recompute()
+        self.assertValid(orphan, cap)
+        self.assertFailed(boss)
+        self.assertVolume(boss, BLOCK)
+        self.assertBody(BLOCK + BOSS)
+
+    def testAStaleSuccessorDoesNotStopTheBody(self):
+        """Two bosses are added while the block is broken: each fails naming its input without
+        running, its shape null. Then the block is repaired and the first boss fails in the same
+        edit: its base is the block, Valid, so it passes the block through and the second boss
+        computes on it. Its successor's state from before isn't read (review pr579-r4h T-R4H-2:
+        the Body stayed stopped)."""
+        block = self.block()
+        self.recompute()
+        block.Length = 0
+        bossA = self.topBoss("BossA", 1)
+        bossB = self.topBoss("BossB", 13)
+        self.recompute()
+        self.assertStopped(block)
+        self.assertStopped(bossA, f"'{block.Label}', which has an error")
+        self.assertStopped(bossB, f"'{bossA.Label}', which has an error")
+
+        block.Length = 10
+        bossA.Length = 0
+        self.recompute()
+        self.assertFailed(bossA)
+        self.assertVolume(bossA, BLOCK)
+        self.assertValid(block, bossB)
+        self.assertBody(BLOCK + BOSS)
+        self.recompute()
+        self.assertBody(BLOCK + BOSS)
+
+    def testTwoFailuresInAChainBothPassThrough(self):
+        """T10 (decision 262 (3)): Pad2 takes its length from a Part box outside the Body, and
+        Pad3 after it fails on its own in the same edit. Pad2 fails naming the box and passes the
+        block through; Pad3's base is Pad2, a claimed failure whose shape is that pass-through, so
+        Pad3 passes it on, and Pad4 and the Body compute on the block, both failures red with
+        their own texts. Repaired, everything is back."""
+        gauge = models.box(self.doc, "Gauge", (2, 2, 5), at=(100, 0, 0))
+        self.block()
+        pad2 = self.topBoss("Pad2", 1)
+        pad2.setExpression("Length", f"{gauge.Name}.Height")
+        pad3 = self.topBoss("Pad3", 7.5)
+        pad4 = self.topBoss("Pad4", 14)
+        self.recompute()
+        self.assertBody(BLOCK + 3 * BOSS)
+
+        gauge.Length = 0
+        pad3.Length = 0
+        self.recompute()
+        self.assertStopped(gauge)
+        self.assertFailed(pad2, f"'{gauge.Label}' has an error")
+        text = self.assertFailed(pad3)
+        self.assertNotIn("which has an error", text)
+        for obj in (pad2, pad3):
+            self.assertVolume(obj, BLOCK)
+        self.assertValid(pad4)
+        self.assertBody(BLOCK + BOSS)
+
+        gauge.Length = 2
+        pad3.Length = 5
+        self.recompute()
+        self.assertValid(gauge, pad2, pad3, pad4)
+        self.assertBody(BLOCK + 3 * BOSS)
+
+    def testAFailureOnAStoppedBaseStaysStopped(self):
+        """The block and Pad2 after it both fail on their own in one edit. The block has no base,
+        so it isn't passed through and keeps its last shape. Pad2's base holds a solid, but one
+        no recompute made: the block's stale output. So Pad2 isn't claimed either: Pad2, Pad3,
+        Pad4 and the Body fail naming their direct inputs and keep their shapes (the chain rule's
+        "current" half: a claim that asked only whether the base holds a solid would compute
+        Pad3 on the stale block). Repaired, everything computes."""
+        block = self.block()
+        pad2 = self.topBoss("Pad2", 1)
+        pad3 = self.topBoss("Pad3", 7.5)
+        pad4 = self.topBoss("Pad4", 14)
+        self.recompute()
+        self.assertBody(BLOCK + 3 * BOSS)
+
+        block.Length = 0
+        pad2.Length = 0
+        self.recompute()
+        self.assertStopped(block)
+        self.assertStopped(pad2, f"'{block.Label}', which has an error")
+        self.assertStopped(pad3, f"'{pad2.Label}', which has an error")
+        self.assertStopped(pad4, f"'{pad3.Label}', which has an error")
+        self.assertStopped(self.body)
+        for obj in (pad4, self.body):
+            self.assertVolume(obj, BLOCK + 3 * BOSS)
+
+        block.Length = 10
+        pad2.Length = 5
+        self.recompute()
+        self.assertValid(block, pad2, pad3, pad4)
+        self.assertBody(BLOCK + 3 * BOSS)
+
+    def testAMemberStoppedByAnOutsideInputStaysTouchedAndItsPadPassesThrough(self):
+        """The boss's sketch in the Body takes a dimension from a Part box outside it. The box
+        fails: the sketch fails naming it and, its input an unclaimed failure, stays touched; the
+        boss fails naming the sketch, and its base, the block, is Valid, so it passes the block
+        through and the Body continues (decision 262 (2): before, the sketch was claimed and left
+        alone). Repaired, everything computes."""
+        gauge = models.box(self.doc, "Gauge", (2, 5, 2), at=(100, 0, 0))
+        self.block()
+        boss = self.topBoss("Boss", 1)
+        sketch = boss.Profile[0]
+        width = sketch.addConstraint(Sketcher.Constraint("DistanceX", 0, 1, 0, 2, 5))
+        sketch.renameConstraint(width, "Width")
+        sketch.setExpression(".Constraints.Width", f"{gauge.Name}.Width")
+        self.recompute()
+        self.assertValid(sketch, boss)
+        self.assertBody(BLOCK + BOSS)
+
+        gauge.Length = 0
+        self.recompute()
+        self.assertStopped(gauge)
+        self.assertStopped(sketch, f"'{gauge.Label}' has an error")
+        self.assertFailed(boss, f"'{sketch.Label}', which has an error")
+        self.assertVolume(boss, BLOCK)
+        self.assertBody(BLOCK)
+
+        gauge.Length = 2
+        self.recompute()
+        self.assertValid(gauge, sketch, boss)
+        self.assertBody(BLOCK + BOSS)
 
     # -- T9 ------------------------------------------------------------------------------------
 

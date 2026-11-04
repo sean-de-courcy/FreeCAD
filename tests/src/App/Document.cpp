@@ -17,7 +17,11 @@
 
 #include "App/Application.h"
 #include "App/Document.h"
+#include "App/DocumentObjectGroup.h"
+#include "App/Expression.h"
 #include "App/FeatureTest.h"
+#include "App/Link.h"
+#include "App/ObjectIdentifier.h"
 #include "App/ForkRelease.h"
 #include "App/NamingRevision.h"
 #include "App/MergeDocuments.h"
@@ -463,7 +467,8 @@ bool startsWith(const App::DocumentObject* obj, const char* prefix)
 }
 
 /// Continues after objects named Member* and Fail*; decides by the dependant's name: Fail* fails
-/// with "Failed by rule", Skip* is skipped, anything else runs. Counts afterFailure() per object.
+/// with "Failed by rule", anything else runs. Holds objects named Held*. Counts afterFailure() per
+/// object.
 class NameRule: public App::RecomputeContinuation
 {
 public:
@@ -480,10 +485,12 @@ public:
             why = "Failed by rule";
             return App::AfterInputFailure::Fail;
         }
-        if (startsWith(dependant, "Skip")) {
-            return App::AfterInputFailure::Skip;
-        }
         return App::AfterInputFailure::Run;
+    }
+
+    bool holds(const App::DocumentObject* obj) const override
+    {
+        return startsWith(obj, "Held");
     }
 
     void afterFailure(App::DocumentObject* failed) const override
@@ -739,23 +746,31 @@ private:
     std::shared_ptr<NameRule> _rule;
 };
 
-TEST_F(RecomputeContinuationTest, withoutRuleAFailureSkipsItsDependants)
+TEST_F(RecomputeContinuationTest, withoutRuleAFailureFailsItsDependantsNamingTheirInput)
 {
     // Arrange
     auto member = addFailing("Member");
     auto dependant = add("Dependant", member);
+    auto later = add("Later", dependant);
 
     // Act
-    doc()->recompute();
+    int count = doc()->recompute();
 
-    // Assert: upstream's filter
+    // Assert: none runs; each fails naming its direct input and stays touched (ops#579)
+    EXPECT_EQ(count, 3);
     EXPECT_TRUE(member->isError());
     EXPECT_TRUE(member->isTouched());
-    EXPECT_EQ(dependant->ExecCount.getValue(), 0);
-    EXPECT_TRUE(dependant->isTouched());
+    for (auto [obj, text] : {std::pair {dependant, "Source1 links to 'Member', which has an error"},
+                             std::pair {later, "Source1 links to 'Dependant', which has an error"}}) {
+        EXPECT_EQ(obj->ExecCount.getValue(), 0);
+        EXPECT_TRUE(obj->isError());
+        EXPECT_TRUE(obj->isTouched());
+        ASSERT_NE(doc()->getErrorDescription(obj), nullptr);
+        EXPECT_STREQ(doc()->getErrorDescription(obj), text);
+    }
 }
 
-TEST_F(RecomputeContinuationTest, anUnclaimedFailureSkipsItsDependants)
+TEST_F(RecomputeContinuationTest, anUnclaimedFailureFailsItsDependants)
 {
     // Arrange
     installRule();
@@ -765,11 +780,256 @@ TEST_F(RecomputeContinuationTest, anUnclaimedFailureSkipsItsDependants)
     // Act
     doc()->recompute();
 
-    // Assert: the rule doesn't claim Other, so upstream's filter applies
+    // Assert: the rule doesn't claim Other, so its dependant fails naming it (ops#579)
     EXPECT_TRUE(other->isError());
     EXPECT_TRUE(other->isTouched());
     EXPECT_EQ(dependant->ExecCount.getValue(), 0);
+    EXPECT_TRUE(dependant->isError());
+    EXPECT_TRUE(dependant->isTouched());
+    ASSERT_NE(doc()->getErrorDescription(dependant), nullptr);
+    EXPECT_STREQ(doc()->getErrorDescription(dependant),
+                 "Source1 links to 'Other', which has an error");
     EXPECT_EQ(rule().afterFailures.count("Other"), 0U);
+    EXPECT_EQ(rule().afterFailures.count("Dependant"), 0U);
+}
+
+TEST_F(RecomputeContinuationTest, aFailedDependantStaysFailedThenRecoversWithItsInput)
+{
+    // Arrange
+    auto other = addFailing("Other");
+    auto dependant = add("Dependant", other);
+    doc()->recompute();
+
+    // Act: nothing changed
+    doc()->recompute();
+
+    // Assert: the input fails again, and so does the dependant, without running
+    EXPECT_TRUE(dependant->isError());
+    EXPECT_EQ(dependant->ExecCount.getValue(), 0);
+
+    // Act: the input is repaired
+    other->ExceptionType.setValue(0);
+    doc()->recompute();
+
+    // Assert: the dependant runs and its error goes
+    EXPECT_TRUE(other->isValid());
+    EXPECT_TRUE(dependant->isValid());
+    EXPECT_FALSE(dependant->isTouched());
+    EXPECT_EQ(dependant->ExecCount.getValue(), 1);
+    EXPECT_EQ(doc()->getErrorDescription(dependant), nullptr);
+}
+
+TEST_F(RecomputeContinuationTest, anExpressionOnAFailureNamesTheObject)
+{
+    // Arrange
+    auto other = addFailing("Other");
+    auto dependant = add("Dependant");
+    dependant->setExpression(
+        App::ObjectIdentifier(dependant->Integer),
+        std::shared_ptr<App::Expression>(App::Expression::parse(dependant, "Other.Integer")));
+
+    // Act
+    doc()->recompute();
+
+    // Assert
+    EXPECT_TRUE(other->isError());
+    EXPECT_EQ(dependant->ExecCount.getValue(), 0);
+    EXPECT_TRUE(dependant->isError());
+    ASSERT_NE(doc()->getErrorDescription(dependant), nullptr);
+    EXPECT_STREQ(doc()->getErrorDescription(dependant), "'Other' has an error");
+
+    // Act: repaired, with the property the expression reads unchanged
+    other->ExceptionType.setValue(0);
+    doc()->recompute();
+
+    // Assert: it runs all the same (a fine-grained recompute enforces by changed property only)
+    EXPECT_TRUE(other->isValid());
+    EXPECT_TRUE(dependant->isValid());
+    EXPECT_EQ(dependant->ExecCount.getValue(), 1);
+}
+
+TEST_F(RecomputeContinuationTest, aContainerOfAFailureIsNotFailed)
+{
+    // Arrange
+    auto other = addFailing("Other");
+    auto folder = static_cast<App::DocumentObjectGroup*>(
+        doc()->addObject("App::DocumentObjectGroup", "Folder"));
+    folder->addObject(other);
+
+    // Act
+    doc()->recompute();
+
+    // Assert: its Group isn't an input (ops#579)
+    EXPECT_TRUE(other->isError());
+    EXPECT_FALSE(folder->isError());
+    EXPECT_EQ(doc()->getErrorDescription(folder), nullptr);
+}
+
+TEST_F(RecomputeContinuationTest, aReaderOfAContainerOfAFailureFailsNamingIt)
+{
+    // Arrange: readers of a folder holding the failure: whole, through a subname path, through a
+    // Link to the folder
+    installRule();
+    auto other = addFailing("Other");
+    auto folder = static_cast<App::DocumentObjectGroup*>(
+        doc()->addObject("App::DocumentObjectGroup", "Folder"));
+    folder->addObject(other);
+    auto whole = add("Whole", folder);
+    auto path = add("Path");
+    path->LinkSub.setValue(folder, std::vector<std::string> {"Other."});
+    auto link = static_cast<App::Link*>(doc()->addObject("App::Link", "FolderLink"));
+    link->LinkedObject.setValue(folder);
+    auto viaLink = add("ViaLink", link);
+
+    // Act
+    doc()->recompute();
+
+    // Assert: the folder itself isn't failed (decision 250 (5)); every reader is (decision 253)
+    EXPECT_FALSE(folder->isError());
+    for (auto [obj, text] :
+         {std::pair<App::DocumentObject*, const char*> {
+              whole, "Source1 links to 'Folder', and 'Other' in it has an error"},
+          {path, "LinkSub links to 'Folder', and 'Other' in it has an error"},
+          // A Link to a group lists its children itself (_ChildCache): a direct input
+          {link, "_ChildCache links to 'Other', which has an error"},
+          {viaLink, "Source1 links to 'FolderLink', which has an error"}}) {
+        EXPECT_TRUE(obj->isError()) << obj->getNameInDocument();
+        ASSERT_NE(doc()->getErrorDescription(obj), nullptr) << obj->getNameInDocument();
+        EXPECT_STREQ(doc()->getErrorDescription(obj), text);
+    }
+    EXPECT_EQ(whole->ExecCount.getValue(), 0);
+
+    // Act: repaired
+    other->ExceptionType.setValue(0);
+    doc()->recompute();
+
+    // Assert
+    for (App::DocumentObject* obj : {static_cast<App::DocumentObject*>(whole),
+                                     static_cast<App::DocumentObject*>(path),
+                                     static_cast<App::DocumentObject*>(link),
+                                     static_cast<App::DocumentObject*>(viaLink)}) {
+        EXPECT_TRUE(obj->isValid()) << obj->getNameInDocument();
+    }
+    EXPECT_EQ(whole->ExecCount.getValue(), 1);
+}
+
+TEST_F(RecomputeContinuationTest, aReaderInAnotherDocumentOfAContainerOfAFailureFailsAtOnce)
+{
+    // Arrange
+    auto& app = App::GetApplication();
+    const std::string otherName = app.getUniqueDocumentName("OtherDocument");
+    App::Document* other = app.newDocument(otherName.c_str(), "testUser");
+    const std::string path = App::Application::getTempFileName() + ".FCStd";
+    const std::string otherPath = App::Application::getTempFileName() + ".FCStd";
+    ASSERT_TRUE(doc()->saveAs(path.c_str()));
+    ASSERT_TRUE(other->saveAs(otherPath.c_str()));
+    auto input = add("Input");
+    auto folder = static_cast<App::DocumentObjectGroup*>(
+        doc()->addObject("App::DocumentObjectGroup", "Folder"));
+    folder->addObject(input);
+    // An App::Link refuses a group in another document (its _ChildCache): a plain XLink reads it
+    auto link = other->addObject("App::FeatureTest", "Reader");
+    auto watched = static_cast<App::PropertyXLink*>(
+        link->addDynamicProperty("App::PropertyXLink", "Watched"));
+    watched->setValue(folder);
+    doc()->recompute();
+    other->recompute();
+    ASSERT_TRUE(link->isValid());
+
+    // Act: only the input's document recomputes
+    input->ExceptionType.setValue(2);
+    doc()->recompute();
+
+    // Assert: the folder isn't failed; the Link reading it fails at once in its own document
+    EXPECT_FALSE(folder->isError());
+    EXPECT_TRUE(link->isError());
+    EXPECT_TRUE(link->isTouched());
+    ASSERT_NE(other->getErrorDescription(link), nullptr);
+    EXPECT_STREQ(other->getErrorDescription(link),
+                 "Watched links to 'Folder', and 'Input' in it has an error");
+
+    // Act: repaired, then the other document recomputes
+    input->ExceptionType.setValue(0);
+    doc()->recompute();
+    other->recompute();
+
+    // Assert
+    EXPECT_TRUE(link->isValid());
+    EXPECT_EQ(other->getErrorDescription(link), nullptr);
+
+    app.closeDocument(otherName.c_str());
+    std::remove(path.c_str());
+    std::remove(otherPath.c_str());
+}
+
+TEST_F(RecomputeContinuationTest, aHeldDependantOfAFailureIsNotFailed)
+{
+    // Arrange
+    installRule();
+    auto other = addFailing("Other");
+    auto held = add("HeldDependant", other);
+
+    // Act
+    doc()->recompute();
+
+    // Assert: held, so neither run nor judged
+    EXPECT_TRUE(other->isError());
+    EXPECT_EQ(held->ExecCount.getValue(), 0);
+    EXPECT_FALSE(held->isError());
+    EXPECT_TRUE(held->isTouched());
+}
+
+TEST_F(RecomputeContinuationTest, aDependantInAnotherDocumentFailsAtOnceAndRecovers)
+{
+    // Arrange: a Link in another document to a failing object; both documents saved, as a link
+    // across documents needs
+    auto& app = App::GetApplication();
+    const std::string otherName = app.getUniqueDocumentName("OtherDocument");
+    App::Document* other = app.newDocument(otherName.c_str(), "testUser");
+    const std::string path = App::Application::getTempFileName() + ".FCStd";
+    const std::string otherPath = App::Application::getTempFileName() + ".FCStd";
+    ASSERT_TRUE(doc()->saveAs(path.c_str()));
+    ASSERT_TRUE(other->saveAs(otherPath.c_str()));
+    auto input = add("Input");
+    auto link = static_cast<App::Link*>(other->addObject("App::Link", "Reader"));
+    link->LinkedObject.setValue(input);
+    doc()->recompute();
+    other->recompute();
+    ASSERT_TRUE(link->isValid());
+
+    // Act: only the input's document recomputes
+    input->ExceptionType.setValue(2);
+    doc()->recompute();
+
+    // Assert: the Link fails at once, in its own document, and is left touched for its document
+    EXPECT_TRUE(input->isError());
+    EXPECT_TRUE(link->isError());
+    EXPECT_TRUE(link->isTouched());
+    ASSERT_NE(other->getErrorDescription(link), nullptr);
+    EXPECT_STREQ(other->getErrorDescription(link),
+                 "LinkedObject links to 'Input', which has an error");
+
+    // Act: its document recomputes, the input still failing
+    other->recompute();
+
+    // Assert: judged again, it still fails
+    EXPECT_TRUE(link->isError());
+    ASSERT_NE(other->getErrorDescription(link), nullptr);
+
+    // Act: the input is repaired in its document, then the other recomputes
+    input->ExceptionType.setValue(0);
+    doc()->recompute();
+    EXPECT_TRUE(link->isTouched());
+    other->recompute();
+
+    // Assert
+    EXPECT_TRUE(input->isValid());
+    EXPECT_TRUE(link->isValid());
+    EXPECT_EQ(other->getErrorDescription(link), nullptr);
+
+    app.closeDocument(otherName.c_str());
+    std::remove(path.c_str());
+    std::remove(otherPath.c_str());
 }
 
 TEST_F(RecomputeContinuationTest, aClaimedFailureRunsItsDependants)
@@ -811,25 +1071,6 @@ TEST_F(RecomputeContinuationTest, aFailVerdictFailsTheDependantWithoutRunningIt)
     EXPECT_STREQ(doc()->getErrorDescription(failed), "Failed by rule");
     EXPECT_EQ(rule().afterFailures["FailDependant"], 1);
     EXPECT_EQ(later->ExecCount.getValue(), 1);
-}
-
-TEST_F(RecomputeContinuationTest, aSkipVerdictSkipsTheDependantAndItsInList)
-{
-    // Arrange
-    installRule();
-    auto member = addFailing("Member");
-    auto skipped = add("SkipDependant", member);
-    auto later = add("Later", skipped);
-
-    // Act
-    doc()->recompute();
-
-    // Assert: as upstream's filter, for this dependant only
-    EXPECT_EQ(skipped->ExecCount.getValue(), 0);
-    EXPECT_TRUE(skipped->isTouched());
-    EXPECT_FALSE(skipped->isError());
-    EXPECT_EQ(later->ExecCount.getValue(), 0);
-    EXPECT_TRUE(later->isTouched());
 }
 
 TEST_F(RecomputeContinuationTest, aContinuedFailureIsNotRerunAndKeepsItsText)

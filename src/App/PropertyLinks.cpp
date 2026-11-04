@@ -23,6 +23,7 @@
  ***************************************************************************/
 
 #include <algorithm>
+#include <map>
 #include <optional>
 
 #include <QDir>
@@ -6395,6 +6396,78 @@ public:
 void App::forgetElementReferencesTo(const DocumentObject* feature)
 {
     DocInfo::forgetFeature(feature);
+}
+
+// An object's ID to its mark, the highest where two share an ID (objects of two documents), as a
+// record keeps it (sortMarks())
+static void addMark(std::map<long, long>& marks, long tag, long mark)
+{
+    auto [it, added] = marks.emplace(tag, mark);
+    if (!added) {
+        it->second = std::max(it->second, mark);
+    }
+}
+
+// Whether every record of `prop` holds `marks` (an object's ID to its mark), its target's closure's
+// marks now, and nothing else
+static bool recordsHoldMarks(const PropertyLinkBase* prop, const std::map<long, long>& marks)
+{
+    const auto records = prop->getElementFingerprints();
+    if (records.empty()) {
+        return false;
+    }
+    std::map<long, long> held;
+    for (const auto& text : records) {
+        const auto record = Data::ElementFingerprint::fromString(text);
+        if (!record.isValid() || record.marksPartial) {
+            return false;
+        }
+        held.clear();
+        for (const auto& mark : record.marks) {
+            addMark(held, mark.tag, mark.mark);
+        }
+        if (held != marks) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void App::holdElementReferencesInto(DocumentObject* target)
+{
+    const auto& references = PropertyLinkBase::getElementReferences(target);
+    if (references.empty()) {
+        return;
+    }
+    // A record whose marks are its target's closure's now is what a take would give it: the
+    // element is measured on the target's last shape, which it still has. Only the others are
+    // taken, so a stopped Body costs nothing per recompute while nothing is drawn (decision 263:
+    // each recompute took every record into it again, 0.8 s with 160 references)
+    std::map<long, long> marks;
+    try {
+        auto closure = target->getOutListRecursive();
+        closure.push_back(target);
+        for (auto object : closure) {
+            if (object && object->isAttachedToDocument()) {
+                addMark(marks, object->getID(), std::max(object->elementIdMark(), -1L));
+            }
+        }
+    }
+    catch (const Base::Exception&) {
+        // A dependency cycle: the records have no marks to compare, so all are taken
+        marks.clear();
+    }
+    std::size_t taken = 0;
+    for (auto prop : references) {
+        if (marks.empty() || !recordsHoldMarks(prop, marks)) {
+            _HeldFingerprints.insert(prop);
+            ++taken;
+        }
+    }
+    if (taken) {
+        FC_LOG(taken << " records into " << target->getFullName()
+                     << " held: in error, its shape not made");
+    }
 }
 
 void App::resolveReregisteredReferences()

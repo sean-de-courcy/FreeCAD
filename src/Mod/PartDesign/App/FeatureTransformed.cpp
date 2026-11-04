@@ -37,6 +37,7 @@
 #include <unordered_map>
 #include <algorithm>
 
+#include <App/Document.h>
 #include <Base/Console.h>
 #include <Base/Exception.h>
 #include <Base/Reader.h>
@@ -364,6 +365,25 @@ void Transformed::onChanged(const App::Property* prop)
     if (prop == &TransformMode) {
         auto const mode = static_cast<Mode>(TransformMode.getValue());
         Originals.setStatus(App::Property::Status::Hidden, mode == Mode::WholeShape);
+    }
+    // FreeCAD-CH (ops#579): a new transform counts as a MultiTransform step until its Originals or
+    // mode are set, so its Body doesn't link its base when it is added. Linked here, not first in
+    // execute(): the base is then in its out-list before the recompute, which runs the base first.
+    // Linked in execute(), a transform and its base made in one recompute ran in the wrong order,
+    // and the transform failed on the base's null shape (upstream's second pass re-ran it; a failure
+    // whose pass-through is empty isn't re-run since decision 259). Only for the Body's last solid
+    // feature, so nothing after it is rerouted: a transform added before another one is linked in
+    // execute(), as upstream does. Converting a pattern to a MultiTransform adds the MultiTransform
+    // before the pattern and then sets its BaseFeature and makes the pattern its step; rerouted here,
+    // the pattern's base became the MultiTransform, a cycle (review pr579-r5 T-R5-1)
+    if ((prop == &Originals || prop == &TransformMode) && !isRestoring() && !BaseFeature.getValue()
+        && !isMultiTransformChild()) {
+        auto doc = getDocument();
+        auto body = getFeatureBody();
+        if (doc && body && !doc->isPerformingTransaction() && body->hasObject(this)
+            && !body->getNextSolidFeature(this)) {
+            body->setBaseProperty(this);
+        }
     }
 
     FeatureRefine::onChanged(prop);

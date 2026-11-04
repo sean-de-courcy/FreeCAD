@@ -1,0 +1,6 @@
+{
+"entries": {
+"ChainStaleBase|front|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "design s9347", "issue": "ops#579", "tier": "F"},
+"ChainTwoFailures|front|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "design s9347", "issue": "ops#579", "tier": "F"}
+}
+}
