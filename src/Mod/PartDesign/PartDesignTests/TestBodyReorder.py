@@ -204,6 +204,16 @@ class BodyReorderBase:
         self.assertTrue(self.body.isValid(), self.body.getStatusString())
         self.assertAlmostEqual(self.body.Shape.Volume, volume, delta=1e-4)
 
+    def assertStoppedBelow(self, first, *members):
+        """The Body's first solid feature is in error, and the Body doesn't continue past it,
+        whatever kind it is (ops#579, decision 255 (1)): each member after it fails naming its
+        input, keeping its last shape, and so does the Body."""
+        self.assertFalse(first.isValid())
+        for obj in members:
+            self.assertFalse(obj.isValid(), obj.Name)
+            self.assertIn("which has an error", obj.getStatusString())
+        self.assertFalse(self.body.isValid())
+
     def assertTouched(self, *objects):
         for obj in objects:
             self.assertIn("Touched", obj.State, obj.Name)
@@ -651,8 +661,9 @@ class BodyReorderBase:
     def testDressUpOfTheFirstSolidMovedAboveIt(self):
         """The block moved below the chamfer on its edge: the chamfer is now the first solid, with
         no base to move its edge to. Its Base is cleared rather than left on the block now after
-        it (a dependency cycle), so the chamfer fails and the block computes (fork PR 270 review,
-        M1)."""
+        it (a dependency cycle), so the chamfer fails (fork PR 270 review, M1). As the Body's
+        first solid feature in error, the Body doesn't continue past it: the block fails naming
+        it (ops#579, decision 255 (1)). Undone, both compute."""
         block = self.block()
         self.recompute()
         chamfer = self.body.newObject("PartDesign::Chamfer", "Chamfer")
@@ -668,10 +679,8 @@ class BodyReorderBase:
         self.assertIsNone(chamfer.Base)
         self.assertNotIn(block, chamfer.OutList)
         self.recompute()
-        self.assertFalse(chamfer.isValid())
-        self.assertValid(block)
-        self.assertNotTouched(chamfer, block)
-        self.assertBody(BLOCK)
+        self.assertStoppedBelow(chamfer, block)
+        self.assertIn(f"'{chamfer.Label}'", block.getStatusString())
 
         self.doc.undo()
         self.assertChain(block, chamfer)
@@ -947,8 +956,9 @@ class BodyReorderBase:
 
     def assertParkedState(self, block, pad2, sketch, hole, before, counts):
         """RO11b's oracles: the link set aside, the geometry kept in place with its Id and its
-        constraints, one extgeo line naming Pad2; the hole and its sketch fail, the rest
-        computes."""
+        constraints, one extgeo line naming Pad2; the hole and its sketch fail, and the Body
+        doesn't continue past the hole, its first solid feature: Block and Pad2 fail naming their
+        inputs (ops#579, decision 255 (1))."""
         self.assertChain(hole, block, pad2)
         self.assertEqual(sketch.ExternalGeometry, [])
         self.assertEqual(list(sketch.ExternalTypes), [])
@@ -966,8 +976,8 @@ class BodyReorderBase:
         self.assertIn("projects 'Pad2'", sketch.getStatusString())
         self.assertIn("now comes after 'ProjectedHole'", sketch.getStatusString())
         self.assertIn("Projecting", hole.getStatusString())
-        self.assertValid(block, pad2)
-        self.assertBody(BLOCK + PAD2)
+        self.assertStoppedBelow(hole, block, pad2)
+        self.assertIn(f"'{hole.Label}'", block.getStatusString())
         self.assertEqual((len(sketch.ExternalGeo), len(sketch.Constraints)), counts)
         self.assertSameProjection(sketch, (before[0], "", before[2]))
 
@@ -994,7 +1004,8 @@ class BodyReorderBase:
 
     def testTopDropParksProjection(self):
         """RO11b: the hole moved to the very top while its sketch projects Pad2's edge. Allowed:
-        the projection is parked in place, the hole and the sketch fail, Block and Pad2 compute."""
+        the projection is parked in place, the hole and the sketch fail, and the Body stops below
+        the hole (decision 255 (1))."""
         block, pad2, sketch, hole = self.projecting()
         before = self.projection(sketch)
         counts = (len(sketch.ExternalGeo), len(sketch.Constraints))
@@ -1061,7 +1072,9 @@ class BodyReorderBase:
 
     def testProjectedEdgeMovedWhileParked(self):
         """RO11e: Pad2 moves 2 in y while the projection is parked; moved back, the projection is
-        on the moved edge (the same name) and the circle followed it: centre y = 12."""
+        on the moved edge (the same name) and the circle followed it: centre y = 12. While parked
+        the Body stops below the hole (decision 255 (1)), so Pad2 computes the move only once the
+        hole is back."""
         block, pad2, sketch, hole = self.projecting()
         before = self.projection(sketch)
         counts = (len(sketch.ExternalGeo), len(sketch.Constraints))
@@ -1070,7 +1083,7 @@ class BodyReorderBase:
         self.recompute()
         pad2.Profile[0].Placement = App.Placement(V(0, 2, 10), App.Rotation())
         self.recompute()
-        self.assertValid(pad2)
+        self.assertStoppedBelow(hole, block, pad2)
         self.assertSameProjection(sketch, (before[0], "", before[2]))
 
         self.body.reorderObject([hole], pad2, True)
@@ -2178,7 +2191,8 @@ class BodyReorderBase:
         )
         self.assertNotEqual((pad2.Name, pad2.ID), (source[3].Name, source[3].ID))
         self.recompute()
-        self.assertValid(block, pad2)
+        # Still parked: the copy's Body stops below the hole (decision 255 (1))
+        self.assertStoppedBelow(hole, block, pad2)
         lines = self.parked(sketch)
         self.assertEqual(len(lines), 1)
         self.assertTrue(
