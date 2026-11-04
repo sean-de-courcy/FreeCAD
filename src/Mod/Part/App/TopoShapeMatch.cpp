@@ -6,6 +6,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <iterator>
 #include <memory>
 #include <optional>
 #include <set>
@@ -1172,9 +1173,14 @@ public:
 
     void run()
     {
+        // P1b reads the matcher's own pairing: a piece P1 refuses is still accounted for by place
+        std::set<int> oldsMatched;
+        std::set<int> newsMatched;
+        piecesWithMatchedFaces(oldsMatched, newsMatched);
         retirePermutedTwins();
         confirmByFaces();
         retireMovedPieces();
+        retireAmbiguousChanged(oldsMatched, newsMatched);
     }
 
 private:
@@ -1443,6 +1449,20 @@ private:
         return {vertexes, edges};
     }
 
+    // For each element of a type (from 0), the piece it is in, -1 if none
+    static std::vector<int> pieceOf(const std::vector<Piece>& pieces, std::size_t type, std::size_t count)
+    {
+        std::vector<int> owner(count, -1);
+        for (int k = 0; k < static_cast<int>(pieces.size()); ++k) {
+            for (const int i : pieces[k].elements[type]) {
+                if (owner[i] < 0) {
+                    owner[i] = k;
+                }
+            }
+        }
+        return owner;
+    }
+
     // R2' (decision 169, in place of the ruling's 2b): a piece that moved as a whole keeps no
     // element by place. A periodic piece slid by its pitch (a comb of teeth, a square-wave wire)
     // puts each tooth's elements on the next tooth's old places, every match verified. The new
@@ -1452,17 +1472,6 @@ private:
     // from (reached), and for each old piece the new pieces its elements went to (reachedBy)
     void reach(std::map<int, std::set<int>>& reached, std::map<int, std::set<int>>& reachedBy)
     {
-        auto pieceOf = [](const std::vector<Piece>& pieces, std::size_t type, std::size_t count) {
-            std::vector<int> owner(count, -1);
-            for (int k = 0; k < static_cast<int>(pieces.size()); ++k) {
-                for (const int i : pieces[k].elements[type]) {
-                    if (owner[i] < 0) {
-                        owner[i] = k;
-                    }
-                }
-            }
-            return owner;
-        };
         const std::array<std::size_t, 3> oldCounts {
             before.points.size(),
             before.edgeVertexes.size(),
@@ -1505,6 +1514,73 @@ private:
             }
             if (Congruence(before, oldPiece.elements).same(Congruence(after, newPiece.elements))) {
                 retire(newPiece);
+            }
+        }
+    }
+
+    // The old and the new pieces a matched face links
+    void piecesWithMatchedFaces(std::set<int>& olds, std::set<int>& news) const
+    {
+        const auto oldOwner = pieceOf(oldPieces, 2, before.faceVertexes.size());
+        const auto newOwner = pieceOf(newPieces, 2, after.faceVertexes.size());
+        for (const auto& [i, j] : result.faces) {
+            if (newOwner[i - 1] >= 0) {
+                news.insert(newOwner[i - 1]);
+            }
+            if (oldOwner[j - 1] >= 0) {
+                olds.insert(oldOwner[j - 1]);
+            }
+        }
+    }
+
+    // P1b (decision 260, `work/s3339/c2-platebthin-ruling.md` 4): a piece changed and matched at
+    // another member's place is read two ways when an old piece stands unmatched (an origin the
+    // place reading doesn't account for) and an unmatched new piece is a whole twin of the old one
+    // (where the order reading has it moved). The two edits make the same shapes in the same
+    // order, so neither reading is verified: the piece takes fresh ids, and the old piece's ids go
+    // to nothing. Without the free twin, the place reading stands, as for every changed piece.
+    // Both conditions read the matcher's pairing (\a oldsMatched, \a newsMatched), before P1.
+    void retireAmbiguousChanged(const std::set<int>& oldsMatched, const std::set<int>& newsMatched)
+    {
+        if (oldsMatched.size() >= oldPieces.size()) {
+            return;
+        }
+        std::vector<Congruence> unmatched;  // the new pieces the matcher left unmatched
+        for (int m = 0; m < static_cast<int>(newPieces.size()); ++m) {
+            if (!newsMatched.count(m)) {
+                unmatched.emplace_back(after, newPieces[m].elements);
+            }
+        }
+        if (unmatched.empty()) {
+            return;
+        }
+        std::map<int, std::set<int>> reached;  // new piece -> old pieces
+        std::map<int, std::set<int>> reachedBy;  // old piece -> new pieces
+        reach(reached, reachedBy);
+        std::set<int> given;  // old pieces whose ids go to nothing
+        for (const auto& [n, olds] : reached) {
+            if (olds.size() != 1 || *olds.begin() == n) {
+                continue;
+            }
+            const int k = *olds.begin();
+            const Congruence was(before, oldPieces[k].elements);
+            if (was.same(Congruence(after, newPieces[n].elements))) {
+                continue;
+            }
+            if (std::any_of(unmatched.begin(), unmatched.end(), [&](const Congruence& c) {
+                    return was.same(c);
+                })) {
+                retire(newPieces[n]);
+                given.insert(k);
+            }
+        }
+        for (const int k : given) {
+            for (std::size_t t = 0; t < 3; ++t) {
+                const std::set<int> own(oldPieces[k].elements[t].begin(), oldPieces[k].elements[t].end());
+                auto& matches = matchesOf(t);
+                for (auto it = matches.begin(); it != matches.end();) {
+                    it = own.count(it->second - 1) ? matches.erase(it) : std::next(it);
+                }
             }
         }
     }
