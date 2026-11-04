@@ -1082,6 +1082,77 @@ class FailurePassThroughBase:
         chamfer.Size = 1
         self.assertALeadThatFailsOnNothingPassesNothing(chamfer)
 
+    def testDressUpLeadOnAFailedOutsideBaseStopsTheBody(self):
+        """The Body's first solid feature is a fillet whose Base, set from Python, is an edge of a
+        scripted solid outside the Body (its BaseFeature stays None, so its base is that solid).
+        The boss after it is on the fillet. The solid fails and clears its shape: the fillet's
+        pass-through is empty, but its base isn't absent, it is an unclaimed failure, so the boss
+        and the Body stop instead of computing on nothing (review pr591-r1 T1; decision 268).
+        Repaired, everything computes."""
+
+        class EmptyingStock:
+            """A 20 x 20 x 10 block, or with Size 0 no shape and an error."""
+
+            def __init__(self, obj):
+                obj.addProperty("App::PropertyLength", "Size")
+                obj.Proxy = self
+
+            def execute(self, obj):
+                if obj.Size.Value <= 0:
+                    obj.Shape = Part.Shape()
+                    raise RuntimeError("no stock")
+                obj.Shape = Part.makeBox(20, 20, 10)
+
+        stock = self.doc.addObject("Part::FeaturePython", "Stock")
+        EmptyingStock(stock)
+        stock.Size = 20
+        self.recompute()
+        upright = elementWhere(
+            stock.Shape,
+            "Edge",
+            lambda e: abs(e.CenterOfMass.x) < TOL and abs(e.CenterOfMass.y) < TOL,
+        )
+        fillet = self.body.newObject("PartDesign::Fillet", "Lead")
+        fillet.Base = (stock, [upright])
+        fillet.Radius = 1
+        boss = self.topBoss("Boss", 1)
+        self.recompute()
+        self.assertIsNone(fillet.BaseFeature)
+        self.assertValid(fillet, boss)
+        rounded = BLOCK - (1 - math.pi / 4) * 10
+        self.assertBody(rounded + BOSS)
+
+        stock.Size = 0
+        self.recompute()
+        self.assertStopped(fillet)
+        self.assertStopped(boss, f"'{fillet.Label}', which has an error")
+        self.assertStopped(self.body)
+        self.assertVolume(self.body, rounded + BOSS)
+
+        stock.Size = 20
+        self.recompute()
+        self.assertValid(fillet, boss)
+        self.assertBody(rounded + BOSS)
+
+    def testAPocketWithoutABaseAfterTheBlockStopsTheBody(self):
+        """A pocket after the block has its BaseFeature cleared from Python, and the boss after it
+        is on the pocket. The pocket fails with nothing to cut. A solid comes before it, so its
+        empty pass-through isn't its result on the Body: it isn't claimed, and the boss and the
+        Body stop instead of computing on nothing (review pr591s-r1: a transform added before
+        another solid is linked only in its execute())."""
+        block = self.block()
+        hole = self.hole()
+        boss = self.topBoss("Boss", 1)
+        self.recompute()
+        self.assertBody(BLOCK - math.pi * 27 + BOSS)
+
+        hole.BaseFeature = None
+        self.recompute()
+        self.assertStopped(hole)
+        self.assertStopped(boss, f"'{hole.Label}', which has an error")
+        self.assertStopped(self.body)
+        self.assertValid(block)
+
     def testFailedScriptedSubtractiveLeadStopsTheBody(self):
         """The lead is a scripted subtractive feature whose execute() fails: its result on
         nothing is its script's, not known to be nothing, so it isn't claimed (ops#591)."""

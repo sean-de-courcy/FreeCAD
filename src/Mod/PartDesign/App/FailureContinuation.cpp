@@ -164,6 +164,24 @@ bool passThroughIsEmpty(const Feature& feature)
 /// there, its empty pass-through is what it would have made (ops#591, ops#127's park; decision 262
 /// (1), design work\s9347\base-stop-design.md 5 (c)). Not a Python kind, whose result is its own
 /// execute()'s, and not a Boolean, whose tools make material on nothing
+/// Whether no solid feature comes before `feature` in its Body's Group
+bool isFirstSolid(const Feature* feature)
+{
+    auto body = bodyOf(feature);
+    if (!body) {
+        return false;
+    }
+    for (auto obj : body->Group.getValues()) {
+        if (obj == feature) {
+            return true;
+        }
+        if (Body::isSolidFeature(obj)) {
+            return false;
+        }
+    }
+    return false;
+}
+
 bool emptyOnEmpty(const Feature& feature)
 {
     if (freecad_cast<const App::PropertyPythonObject*>(feature.getPropertyByName("Proxy"))) {
@@ -245,8 +263,9 @@ public:
      *
      * (S) A solid feature: its pass-through isn't the empty shape (decision 259), and its base is
      * Valid or itself a claimed failure, up the BaseFeature chain. A subtractive feature, a
-     * dress-up or a pattern on no base, or on a current one without a solid, passes the empty
-     * shape, exactly its result there (ops#591, ops#127's park). (N) Any other member passes
+     * dress-up or a pattern first in its Body with no base at all, or on a linked current one
+     * without a solid, passes the empty shape, exactly its result there (ops#591, ops#127's park;
+     * decision 268). (N) Any other member passes
      * nothing on: it is claimed when none of its inputs is an unclaimed failure.
      *
      * Only what is upstream of `failed` is read. Document::recompute runs the topological order, so
@@ -406,10 +425,10 @@ private:
     /// (S), up the base chain: each base real (so non-null), and Valid or a claimed failure, whose
     /// shape is its own pass-through, made from its base by this same test. Every base in error on
     /// the way has the same answer. An empty pass-through is real only for a kind that makes
-    /// nothing on nothing (emptyOnEmpty()), on no base or a current one: a pocket parked above the
-    /// first Pad is claimed, and the Body computes below it (ops#591). The Pad after it decides its
-    /// own claim on its own pass-through, so a failed first Pad there still stops the Body (review
-    /// pr579-r4 R4-1)
+    /// nothing on nothing (emptyOnEmpty()), on no base at all or a current one: a pocket parked
+    /// above the first Pad is claimed, and the Body computes below it (ops#591). The Pad after it
+    /// decides its own claim on its own pass-through, so a failed first Pad there still stops the
+    /// Body (review pr579-r4 R4-1)
     bool solidClaimed(const Feature* feature, Claims& claims) const
     {
         std::vector<const Feature*> chain;
@@ -420,10 +439,14 @@ private:
                     break;
                 }
                 if (!feature->BaseFeature.getValue()) {
-                    result = true;
+                    // No base at all: none linked, none to fall back on (a dress-up's Base, a
+                    // pattern's first original: review pr591-r1 T1, a fillet on a failed outside
+                    // solid), and no solid before it (a transform added before another solid is
+                    // linked to its base in its first execute(): review pr591s-r1). Decision 268
+                    result = !feature->getBaseObject(true) && isFirstSolid(feature);
                     break;
                 }
-                // A base that holds no solid: current, or not, as any other
+                // A linked base that holds no solid: current, or not, as any other
             }
             const Part::Feature* baseObject = feature->getBaseObject(true);
             if (!baseObject) {
