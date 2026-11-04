@@ -547,13 +547,37 @@ TEST(TopoShapeMatch, changedPieceAtAMembersPlaceWithAChangedTwinTakesFreshIds)
 }
 
 // A trade with one member changed (review pr399-r4, Opus's T1 and Sonnet's Rev_AllThree): the thin
-// slab at C's place takes fresh ids
+// slab at C's place and the whole slab at B's place take fresh ids, since "B thinned onto C's
+// place, C onto B's" and "C thinned in place, the two listed swapped" make the same compound
 TEST(TopoShapeMatch, changedPieceTradedWithAWholeTwinTakesFreshIds)
 {
     const TopoDS_Shape before = compound({slab(0), slab(60), slab(120)});
     const TopoDS_Shape after = compound({slab(0), slab(120, 3), slab(60)});
     const auto matches = Part::matchElements(before, after, false);
     EXPECT_TRUE(pieceKeeps(matches, before, 0, after, 0));
+    EXPECT_TRUE(pieceIsFresh(matches, after, 1));
+    EXPECT_TRUE(pieceIsFresh(matches, after, 2));
+}
+
+// The same around three places: A thinned onto B's, B onto C's, C onto A's
+TEST(TopoShapeMatch, changedPieceInACycleOfPlacesTakesFreshIds)
+{
+    const TopoDS_Shape before = compound({slab(0), slab(60), slab(120)});
+    const TopoDS_Shape after = compound({slab(60, 3), slab(120), slab(0)});
+    const auto matches = Part::matchElements(before, after, false);
+    for (int k = 0; k < 3; ++k) {
+        EXPECT_TRUE(pieceIsFresh(matches, after, k));
+    }
+}
+
+// A deletion breaks the cycle: A deleted and C thickened, the shifted B keeps its ids (C+, changed
+// at another order position, is the widest stop's named cost)
+TEST(TopoShapeMatch, deletedFirstWithAChangedPieceKeepsTheShiftedOne)
+{
+    const TopoDS_Shape before = compound({slab(0), slab(60), slab(120)});
+    const TopoDS_Shape after = compound({slab(60), slab(120, 8)});
+    const auto matches = Part::matchElements(before, after, false);
+    EXPECT_TRUE(pieceKeeps(matches, before, 1, after, 0));
     EXPECT_TRUE(pieceIsFresh(matches, after, 1));
 }
 

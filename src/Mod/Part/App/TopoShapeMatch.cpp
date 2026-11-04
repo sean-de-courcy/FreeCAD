@@ -1543,6 +1543,7 @@ private:
         std::map<int, std::set<int>> reachedBy;  // old piece -> new pieces
         reach(reached, reachedBy);
         std::set<int> given;  // old pieces whose ids go to nothing
+        std::vector<int> changed;  // the new pieces retired here
         for (const auto& [n, olds] : reached) {
             if (olds.size() != 1 || oldRanks[*olds.begin()] == newRanks[n]) {
                 continue;
@@ -1550,6 +1551,42 @@ private:
             const int k = *olds.begin();
             if (!Congruence(before, oldPieces[k].elements).same(Congruence(after, newPieces[n].elements))) {
                 retire(newPieces[n]);
+                given.insert(k);
+                changed.push_back(n);
+            }
+        }
+        // A trade (review pr399-r4, T1): the changed piece's place reading has the pieces at the
+        // positions it passes through each matched at the next one's place, back to its own
+        // position. That cycle is the order reading's permutation of the same edit (B changed
+        // onto C's place and C whole onto B's, or C changed in place with the two listed
+        // swapped), so its whole pieces take fresh ids too. A deletion or insertion breaks the
+        // chain: the pieces it shifts keep the place reading.
+        std::map<int, int> newAtRank;
+        for (int m = 0; m < static_cast<int>(newPieces.size()); ++m) {
+            if (newRanks[m] >= 0) {
+                newAtRank[newRanks[m]] = m;
+            }
+        }
+        for (const int n : changed) {
+            std::vector<std::pair<int, int>> cycle;  // new piece, the old piece it is matched to
+            int at = *reached[n].begin();
+            while (cycle.size() < newPieces.size()) {
+                const auto w = newAtRank.find(oldRanks[at]);
+                if (w == newAtRank.end() || reached[w->second].size() != 1) {
+                    cycle.clear();
+                    break;
+                }
+                at = *reached[w->second].begin();
+                cycle.emplace_back(w->second, at);
+                if (oldRanks[at] == newRanks[n]) {
+                    break;
+                }
+            }
+            if (cycle.empty() || oldRanks[cycle.back().second] != newRanks[n]) {
+                continue;
+            }
+            for (const auto& [w, k] : cycle) {
+                retire(newPieces[w]);
                 given.insert(k);
             }
         }
