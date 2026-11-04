@@ -1,0 +1,16 @@
+{
+"entries": {
+"BodyBaseBreakDrawFixSlide|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579s-r3", "issue": "ops#579", "tier": "F"},
+"BodyBaseBreakDrawSlideFixed|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579s-r3", "issue": "ops#579", "tier": "F"},
+"BodyBaseBreakDrawSlide|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579s-r3", "issue": "ops#579", "tier": "F"},
+"BodyBaseControl|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr579s-r3", "issue": "ops#579", "tier": "F"},
+"BodyBaseDrawBreakSlideFixed|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579s-r3", "issue": "ops#579", "tier": "F"},
+"BodyBaseDrawBreakSlide|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579s-r3", "issue": "ops#579", "tier": "F"},
+"SlabBaseBreakDrawFixSlide|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579s-r3", "issue": "ops#579", "tier": "F"},
+"SlabBaseBreakDrawSlideFixed|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579s-r3", "issue": "ops#579", "tier": "F"},
+"SlabBaseBreakDrawSlide|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579s-r3", "issue": "ops#579", "tier": "F"},
+"SlabBaseControl|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr579s-r3", "issue": "ops#579", "tier": "F"},
+"SlabBaseDrawBreakSlideFixed|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579s-r3", "issue": "ops#579", "tier": "F"},
+"SlabBaseDrawBreakSlide|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579s-r3", "issue": "ops#579", "tier": "F"}
+}
+}

@@ -1,0 +1,6 @@
+{
+"entries": {
+"ExtOwnControl|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "designer pr579 record-take", "issue": "ops#579", "tier": "F"},
+"ExtOwnFailSlidFixed|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "designer pr579 record-take", "issue": "ops#579", "tier": "F"}
+}
+}

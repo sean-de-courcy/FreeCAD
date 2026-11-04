@@ -1,0 +1,9 @@
+{
+"entries": {
+"XCtrControlNoFail|binder|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr579s-r2", "issue": "ops#579", "tier": "F"},
+"XCtrFailARecompute|binder|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579s-r2", "issue": "ops#579", "tier": "F"},
+"XCtrFailBRecompute|binder|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579s-r2", "issue": "ops#579", "tier": "F"},
+"XCtrFailStaysFailing|binder|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579s-r2", "issue": "ops#579", "tier": "F"},
+"XFolderFailBRecompute|binder|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579s-r2", "issue": "ops#579", "tier": "F"}
+}
+}

@@ -1,0 +1,28 @@
+{
+"entries": {
+"GaugeBothFacesControl|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr579s-r4", "issue": "ops#579", "tier": "F"},
+"GaugeBothFacesControl|rear|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr579s-r4", "issue": "ops#579", "tier": "F"},
+"GaugeBothFaces|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579s-r4", "issue": "ops#579", "tier": "F"},
+"GaugeBothFaces|rear|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579s-r4", "issue": "ops#579", "tier": "F"},
+"GaugeBreakDrawSlideFixed|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579s-r4", "issue": "ops#579", "tier": "F"},
+"GaugeControl|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr579s-r4", "issue": "ops#579", "tier": "F"},
+"GaugeDownReopen|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579s-r4", "issue": "ops#579", "tier": "F"},
+"GaugeDrawBreakSlideFixed|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579s-r4", "issue": "ops#579", "tier": "F"},
+"GaugeDrawElsewhereDeleteFixed|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr579s-r4", "issue": "ops#579", "tier": "F"},
+"GaugeMoveThenDrawSlide|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579s-r4", "issue": "ops#579", "tier": "F"},
+"GaugeMovedWhileDownControl|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr579s-r4", "issue": "ops#579", "tier": "F"},
+"GaugeMovedWhileDown|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579s-r4", "issue": "ops#579", "tier": "F"},
+"OwnFailBreakDrawSlideFixed|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579s-r4", "issue": "ops#579", "tier": "F"},
+"OwnFailDownReopen|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579s-r4", "issue": "ops#579", "tier": "F"},
+"OwnFailDrawBreakSlideFixed|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579s-r4", "issue": "ops#579", "tier": "F"},
+"OwnFailMovedWhileDown|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579s-r4", "issue": "ops#579", "tier": "F"},
+"Pad2GaugeControl|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr579s-r4", "issue": "ops#589", "tier": "F"},
+"Pad2GaugeDrawBreakSlideFixed|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "BROKEN", "expected": "wrong", "found_by": "review pr579s-r4", "issue": "ops#589", "tier": "F"},
+"Pad2OwnFailDrawBreakSlideFixed|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "BROKEN", "expected": "wrong", "found_by": "review pr579s-r4", "issue": "ops#589", "tier": "F"},
+"ParkedControl|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr579s-r4", "issue": "ops#579", "tier": "F"},
+"Parked|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579s-r4", "issue": "ops#579", "tier": "F"},
+"ThroughPad2Control|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr579s-r4", "issue": "ops#579", "tier": "F"},
+"ThroughPad2DrawBreakSlideFixed|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr579s-r4", "issue": "ops#579", "tier": "F"},
+"ThroughPad2DrawSlideWhileDown|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr579s-r4", "issue": "ops#579", "tier": "F"}
+}
+}

@@ -1,0 +1,10 @@
+{
+"entries": {
+"DeleteLeadAndFailGaugeInOneEdit|fillet_edge|V2s": {"axes": ["M1", "E4", "E5", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579-r4g", "issue": "ops#579", "tier": "F"},
+"DisjointCommonLeadExprOnFailedGauge|fillet_edge|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579-r4g", "issue": "ops#579", "tier": "F"},
+"EmptyCompoundBaseFeatureExprOnFailedGauge|fillet_edge|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579-r4g", "issue": "ops#579", "tier": "F"},
+"FaceBaseFeatureExprOnFailedGauge|fillet_edge|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579-r4g", "issue": "ops#579", "tier": "F"},
+"SolidlessLeadControl|fillet_edge|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr579-r4g", "issue": "ops#579", "tier": "F"},
+"SuppressLeadAndFailGaugeInOneEdit|fillet_edge|V2s": {"axes": ["M1", "E4", "E5", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579-r4g", "issue": "ops#579", "tier": "F"}
+}
+}

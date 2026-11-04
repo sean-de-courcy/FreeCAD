@@ -1,0 +1,13 @@
+{
+"entries": {
+"BoxRimBreakDrawSlideFixed|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579s-r3", "issue": "ops#579", "tier": "F"},
+"BoxRimControl|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr579s-r3", "issue": "ops#579", "tier": "F"},
+"BoxRimDrawBreakSlideFixed|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579s-r3", "issue": "ops#579", "tier": "F"},
+"OwnRimBreakDrawFixSlide|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579s-r3", "issue": "ops#579", "tier": "F"},
+"OwnRimBreakDrawSlideFixed|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579s-r3", "issue": "ops#579", "tier": "F"},
+"OwnRimControl|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr579s-r3", "issue": "ops#579", "tier": "F"},
+"OwnRimDrawBreakSlideFixed|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579s-r3", "issue": "ops#579", "tier": "F"},
+"OwnRimDrawBreakSlide|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579s-r3", "issue": "ops#579", "tier": "F"},
+"OwnRimRedrawWhileDown|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "designer pr579 record-take", "issue": "ops#579", "tier": "F"}
+}
+}
