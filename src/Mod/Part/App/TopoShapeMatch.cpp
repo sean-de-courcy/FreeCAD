@@ -1173,14 +1173,10 @@ public:
 
     void run()
     {
-        // P1b reads the matcher's own pairing: a piece P1 refuses is still accounted for by place
-        std::set<int> oldsMatched;
-        std::set<int> newsMatched;
-        piecesWithMatchedFaces(oldsMatched, newsMatched);
         retirePermutedTwins();
         confirmByFaces();
         retireMovedPieces();
-        retireAmbiguousChanged(oldsMatched, newsMatched);
+        retireAmbiguousChanged();
     }
 
 private:
@@ -1518,58 +1514,41 @@ private:
         }
     }
 
-    // The old and the new pieces a matched face links
-    void piecesWithMatchedFaces(std::set<int>& olds, std::set<int>& news) const
+    // Each piece's order position among the pieces with faces, -1 for a piece without (a line or
+    // a wire in the compound): the order index names read, since such a piece takes no face index
+    static std::vector<int> facedRanks(const std::vector<Piece>& pieces)
     {
-        const auto oldOwner = pieceOf(oldPieces, 2, before.faceVertexes.size());
-        const auto newOwner = pieceOf(newPieces, 2, after.faceVertexes.size());
-        for (const auto& [i, j] : result.faces) {
-            if (newOwner[i - 1] >= 0) {
-                news.insert(newOwner[i - 1]);
-            }
-            if (oldOwner[j - 1] >= 0) {
-                olds.insert(oldOwner[j - 1]);
-            }
+        std::vector<int> ranks;
+        int rank = 0;
+        for (const auto& piece : pieces) {
+            ranks.push_back(piece.elements[2].empty() ? -1 : rank++);
         }
+        return ranks;
     }
 
-    // P1b (decision 260, `work/s3339/c2-platebthin-ruling.md` 4): a piece changed and matched at
-    // another member's place is read two ways when an old piece stands unmatched (an origin the
-    // place reading doesn't account for) and an unmatched new piece is a whole twin of the old one
-    // (where the order reading has it moved). The two edits make the same shapes in the same
-    // order, so neither reading is verified: the piece takes fresh ids, and the old piece's ids go
-    // to nothing. Without the free twin, the place reading stands, as for every changed piece.
-    // Both conditions read the matcher's pairing (\a oldsMatched, \a newsMatched), before P1.
-    void retireAmbiguousChanged(const std::set<int>& oldsMatched, const std::set<int>& newsMatched)
+    // P1b at its widest stop (decision 260 (1), `work/s3339/c2-platebthin-ruling.md` 3.3, taken
+    // after review pr399-r4's further silents in this path): a piece changed and matched at another
+    // member's order position is read two ways, as that member changed in place (the place
+    // reading) and as its own order position's member changed and moved there (the order reading).
+    // A whole twin of either standing elsewhere, or none, makes both readings consistent, so no
+    // corroboration is asked: the piece takes fresh ids, and the old piece's ids go to nothing.
+    // Positions count only the pieces with faces, as index names do: a line or a wire in the
+    // compound, moved, added or deleted, moves no position. A piece changed at its own position
+    // keeps the place reading, as every changed piece does.
+    void retireAmbiguousChanged()
     {
-        if (oldsMatched.size() >= oldPieces.size()) {
-            return;
-        }
-        std::vector<Congruence> unmatched;  // the new pieces the matcher left unmatched
-        for (int m = 0; m < static_cast<int>(newPieces.size()); ++m) {
-            if (!newsMatched.count(m)) {
-                unmatched.emplace_back(after, newPieces[m].elements);
-            }
-        }
-        if (unmatched.empty()) {
-            return;
-        }
+        const auto oldRanks = facedRanks(oldPieces);
+        const auto newRanks = facedRanks(newPieces);
         std::map<int, std::set<int>> reached;  // new piece -> old pieces
         std::map<int, std::set<int>> reachedBy;  // old piece -> new pieces
         reach(reached, reachedBy);
         std::set<int> given;  // old pieces whose ids go to nothing
         for (const auto& [n, olds] : reached) {
-            if (olds.size() != 1 || *olds.begin() == n) {
+            if (olds.size() != 1 || oldRanks[*olds.begin()] == newRanks[n]) {
                 continue;
             }
             const int k = *olds.begin();
-            const Congruence was(before, oldPieces[k].elements);
-            if (was.same(Congruence(after, newPieces[n].elements))) {
-                continue;
-            }
-            if (std::any_of(unmatched.begin(), unmatched.end(), [&](const Congruence& c) {
-                    return was.same(c);
-                })) {
+            if (!Congruence(before, oldPieces[k].elements).same(Congruence(after, newPieces[n].elements))) {
                 retire(newPieces[n]);
                 given.insert(k);
             }

@@ -523,15 +523,38 @@ TEST(TopoShapeMatch, changedPieceAtAMembersPlaceWithAFreeTwinTakesFreshIds)
     }
 }
 
-// P1b doesn't fire without a free whole twin (C deleted): the place reading stands, as for every
-// changed piece (the uncorroborated order/place ambiguity, listed in the ruling's 5)
-TEST(TopoShapeMatch, changedPieceAtAMembersPlaceWithoutAFreeTwinKeepsItsIds)
+// P1b's widest stop (decision 260 (1)) asks no free whole twin: with C deleted, "B thinned onto
+// C's place" and "C thinned in place" still make the same compound, so the thin slab takes fresh ids
+TEST(TopoShapeMatch, changedPieceAtAMembersPlaceWithoutAFreeTwinTakesFreshIds)
 {
     const TopoDS_Shape before = compound({slab(0), slab(60), slab(120)});
     const TopoDS_Shape after = compound({slab(0), slab(120, 3)});
     const auto matches = Part::matchElements(before, after, false);
     EXPECT_TRUE(pieceKeeps(matches, before, 0, after, 0));
-    EXPECT_TRUE(pieceKeeps(matches, before, 2, after, 1));
+    EXPECT_TRUE(pieceIsFresh(matches, after, 1));
+}
+
+// Nor a whole twin (review pr399-r4, Sonnet's Rev_TwinNudged): with C changed too and moved on,
+// the thin slab at C's place takes fresh ids, and so does the changed C
+TEST(TopoShapeMatch, changedPieceAtAMembersPlaceWithAChangedTwinTakesFreshIds)
+{
+    const TopoDS_Shape before = compound({slab(0), slab(60), slab(120)});
+    const TopoDS_Shape after = compound({slab(0), slab(120, 3), slab(300, 6)});
+    const auto matches = Part::matchElements(before, after, false);
+    EXPECT_TRUE(pieceKeeps(matches, before, 0, after, 0));
+    EXPECT_TRUE(pieceIsFresh(matches, after, 1));
+    EXPECT_TRUE(pieceIsFresh(matches, after, 2));
+}
+
+// A trade with one member changed (review pr399-r4, Opus's T1 and Sonnet's Rev_AllThree): the thin
+// slab at C's place takes fresh ids
+TEST(TopoShapeMatch, changedPieceTradedWithAWholeTwinTakesFreshIds)
+{
+    const TopoDS_Shape before = compound({slab(0), slab(60), slab(120)});
+    const TopoDS_Shape after = compound({slab(0), slab(120, 3), slab(60)});
+    const auto matches = Part::matchElements(before, after, false);
+    EXPECT_TRUE(pieceKeeps(matches, before, 0, after, 0));
+    EXPECT_TRUE(pieceIsFresh(matches, after, 1));
 }
 
 // P1b doesn't fire where the order agrees: a piece changed in place keeps its ids
@@ -545,18 +568,39 @@ TEST(TopoShapeMatch, changedPieceInPlaceKeepsItsIds)
     }
 }
 
-// P1b reads the matcher's pairing before P1: a slab inserted in front with B thickened has P1
-// retire A, C and the new slab (the class's counts are equal once B leaves it), and B+ keeps B's
-// ids, since every old piece was placed
-TEST(TopoShapeMatch, insertedFirstWithAChangedPieceKeepsTheChangedOne)
+// The widest stop's named cost (the ruling's 3.3): a slab inserted in front with B thickened has
+// P1 retire A, C and the new slab (the class's counts are equal once B leaves it), and B+, changed
+// at another order position, takes fresh ids too
+TEST(TopoShapeMatch, insertedFirstWithAChangedPieceRetiresTheChangedOne)
 {
     const TopoDS_Shape before = compound({slab(0), slab(60), slab(120)});
     const TopoDS_Shape after = compound({slab(-100), slab(0), slab(60, 8), slab(120)});
     const auto matches = Part::matchElements(before, after, false);
-    EXPECT_TRUE(pieceIsFresh(matches, after, 0));
-    EXPECT_TRUE(pieceIsFresh(matches, after, 1));
+    for (int k = 0; k < 4; ++k) {
+        EXPECT_TRUE(pieceIsFresh(matches, after, k));
+    }
+}
+
+// P1b counts positions among the pieces with faces (review pr399-r4, T2): a line of the compound,
+// faceless, moved to the front shifts no slab's position. B thickened in place, with a whole twin
+// of B appended, keeps its ids
+TEST(TopoShapeMatch, lineMovedFirstWithAChangedPieceKeepsItsIds)
+{
+    const TopoDS_Shape line = polyline({gp_Pnt(0, 40, 0), gp_Pnt(160, 40, 0)});
+    const TopoDS_Shape before = compound({slab(0, 6), slab(60), slab(120, 6), line});
+    const TopoDS_Shape after = compound({line, slab(0, 6), slab(60, 8), slab(120, 6), slab(300)});
+    const auto matches = Part::matchElements(before, after, false);
     EXPECT_TRUE(pieceKeeps(matches, before, 1, after, 2));
-    EXPECT_TRUE(pieceIsFresh(matches, after, 3));
+}
+
+// The same with a line in front of B deleted: B's position among the slabs is unchanged
+TEST(TopoShapeMatch, lineDeletedWithAChangedPieceKeepsItsIds)
+{
+    const TopoDS_Shape line = polyline({gp_Pnt(0, 40, 0), gp_Pnt(160, 40, 0)});
+    const TopoDS_Shape before = compound({slab(0, 6), line, slab(60), slab(120, 6)});
+    const TopoDS_Shape after = compound({slab(0, 6), slab(60, 8), slab(120, 6), slab(300)});
+    const auto matches = Part::matchElements(before, after, false);
+    EXPECT_TRUE(pieceKeeps(matches, before, 2, after, 1));
 }
 
 // P1 doesn't fire on a twin moved to a free place: the other keeps its ids
@@ -724,13 +768,15 @@ TEST(TopoShapeMatch, squareWaveSlidByItsPeriodTakesFreshIds)
 
 // R2 against a split: a loose shell's second plate becomes two. The matcher reads the far piece as
 // the plate with its near side moved (rung 2 on the corners, rung 3) and the near piece as new;
-// R2 doesn't fire (the unmatched elements differ), so the first plate keeps its id
+// R2 doesn't fire (the unmatched elements differ), so the first plate keeps its id. The far piece,
+// changed at the near piece's order position, is P1b's widest stop (decision 260 (1)): read by
+// order, the near piece is the plate changed, so the far one takes fresh ids
 TEST(TopoShapeMatch, shellWithASplitPlateKeepsTheOtherPlates)
 {
     const TopoDS_Shape before = compound({square(0, 10), square(10, 30)});
     const TopoDS_Shape after = compound({square(0, 10), square(10, 18), square(18, 30)});
     const auto matches = Part::matchElements(before, after, false);
-    EXPECT_EQ(matches.faces.size(), 2);
+    EXPECT_EQ(matches.faces.size(), 1);
     EXPECT_EQ(matches.faces.at(1), 1);
 }
 
