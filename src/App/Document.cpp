@@ -4264,6 +4264,11 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
         }
     };
 
+    // The objects in error whose shape this recompute didn't make: failed without running, or
+    // ran and failed with no rule claiming it (ops#579, decision 256). The records of the
+    // references into them are taken at its end, as a setter's
+    std::vector<DocumentObject*> unmade;
+
     try {
         std::set<DocumentObject*> filter;
         // Objects the continuation rule holds (ops#127): not run, left touched
@@ -4329,6 +4334,7 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
                         clearWarning(obj);
                         ReferenceReport::forgetPrintedWarning(obj);
                         d->addRecomputeLog(why, obj);
+                        unmade.push_back(obj);
                         res = 1;
                     }
                     else if (continuation && continuation->blocked(obj, why)) {
@@ -4337,6 +4343,7 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
                         clearWarning(obj);
                         ReferenceReport::forgetPrintedWarning(obj);
                         d->addRecomputeLog(why, obj);
+                        unmade.push_back(obj);
                         res = 1;
                     }
                     // Counted when it runs or fails
@@ -4371,6 +4378,9 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
                         // in its own document's log, and its document's next recompute judges it
                         // again. It stays out of the "still touched" check below
                         filter.insert(obj);
+                        if (std::find(unmade.begin(), unmade.end(), obj) == unmade.end()) {
+                            unmade.push_back(obj);
+                        }
                         failDependantsOutside(obj);
                         if (continuation) {
                             enforcePathReadersPastHeld(obj, *continuation);
@@ -4469,7 +4479,13 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
     }
     carried.clear();
 
-    // The records held back while their targets were still to be recomputed (ops#564)
+    // The records held back while their targets were still to be recomputed (ops#564), and those
+    // into the objects it left unmade (decision 256)
+    for (auto obj : unmade) {
+        if (obj->isAttachedToDocument()) {
+            holdElementReferencesInto(obj);
+        }
+    }
     updateHeldElementFingerprints(this);
 
     for (auto obj : topoSortedObjects) {
@@ -4887,6 +4903,10 @@ bool Document::recomputeFeature(DocumentObject* feature, bool recursive)
         // A failure the rule continues after writes its output as in a recompute (ops#126)
         if (continuation && continuation->continuesAfter(feature)) {
             continuation->afterFailure(feature);
+        }
+        else if (!isRecomputingOnThisThread()) {
+            // Its shape not made: the records into it are taken below (decision 256)
+            holdElementReferencesInto(feature);
         }
     }
     signalRecomputedObject(*feature);

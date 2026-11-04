@@ -883,6 +883,48 @@ class FailurePassThroughBase:
         self.assertBody(BLOCK + 24)
         self.assertVolume(mirror, BLOCK + 24)
 
+    def testReferenceIntoAStoppedFeatureBreaksAtTheFixAfterASlide(self):
+        """Body1 is built on a Body whose only Pad then fails, so Body1's FeatureBase fails and
+        Body1 stops (decision 254): its rim Pad doesn't run, and a sketch attached to the rim's
+        front face (y = 0) fails naming it. In that edit a second rim is drawn at y = 20. Then
+        the first rim is deleted, the second slid onto y = 0, and the base repaired: the front
+        face is a face the second rim made, which was in the model while the Pad was down, so
+        the sketch breaks, as it does without the failure. The record of the reference into the
+        Pad is taken at the end of the recompute that left it unmade (ops#579, decision 256;
+        before, it kept the build's record and re-bound in place, silently)."""
+        ground = models.sketch(self.doc, "Ground", models.rectangle(100, 50, 110, 60), self.body)
+        groundPad = models.pad(self.body, ground, 5, "GroundPad")
+        self.recompute()
+        body1 = self.doc.addObject("PartDesign::Body", "Body1")
+        body1.BaseFeature = self.body
+        self.recompute()
+        profile = models.sketch(self.doc, "Profile", models.rectangle(0, 0, 40, 2), body1)
+        rim = models.pad(body1, profile, 10, "Rim")
+        self.recompute()
+        front = elementWhere(
+            rim.Shape,
+            "Face",
+            lambda f: abs(f.CenterOfMass.y) < TOL and abs(f.normalAt(0, 0).y + 1) < TOL,
+        )
+        top = body1.newObject("Sketcher::SketchObject", "Top")
+        top.AttachmentSupport = [(rim, front)]
+        top.MapMode = "FlatFace"
+        self.recompute()
+        self.assertValid(rim, top)
+
+        profile.addGeometry(models.rectangle(0, 20, 40, 22), False)
+        groundPad.Length = 0
+        self.recompute()
+        self.assertStopped(rim)
+        self.assertStopped(top, f"'{rim.Label}', which has an error")
+
+        models.moveRectangle(profile, 0, 0, 40, 2, first=4)
+        profile.delGeometries([0, 1, 2, 3])
+        groundPad.Length = 5
+        self.recompute()
+        self.assertValid(groundPad, rim)
+        self.assertFalse(top.isValid(), "the front face re-bound to the slid rim's")
+
     def testFailedSubtractiveFirstFeatureLetsThePadAfterItCompute(self):
         """The Body's first solid feature is the pocket, with nothing to cut: it fails, and its
         empty pass-through is what it would make. The Body continues: the block after it computes

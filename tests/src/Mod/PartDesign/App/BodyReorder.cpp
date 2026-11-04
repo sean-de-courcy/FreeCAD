@@ -634,6 +634,52 @@ TEST_F(RecordRefreshChain, theTargetsRecomputeTakesTheRecordOnlyAtItsEnd)
     EXPECT_GT(markOf(record(link), sketchOf(p(4))), markOf(before, sketchOf(p(4))));
 }
 
+TEST_F(RecordRefreshChain, aReferenceIntoAnObjectLeftUnmadeTakesItsRecordAtTheEnd)
+{
+    // Arrange
+    auto link = holder();
+    const auto before = record(link);
+    const auto mark = markOf(before, sketchOf(p(4)));
+    ASSERT_GE(mark, 0);
+
+    // Act: P4's square drawn again, and P0, the Body's first solid feature, failing in the same
+    // edit (length zero)
+    redrawBoss(4);
+    static_cast<PartDesign::Pad*>(p(0))->Length.setValue(0.0);
+    _doc->recompute();
+
+    // Assert: the Body isn't made (it doesn't continue past its failed base), and the record of
+    // the reference into it is taken at the end all the same, the redraw included (ops#579,
+    // decision 256): a line slid later onto a place one was removed from breaks, as it does
+    // without the failure
+    EXPECT_TRUE(p(0)->isError());
+    EXPECT_TRUE(_body->isError());
+    EXPECT_GT(markOf(record(link), sketchOf(p(4))), mark);
+}
+
+TEST_F(RecordRefreshChain, aFeatureFailingAloneTakesTheRecordsIntoIt)
+{
+    // Arrange: a holder of P0's own front bottom edge
+    auto link = _doc->addObject<App::FeatureTest>("Holder");
+    link->LinkSub.setValue(p(0), {frontBottomEdge(p(0))});
+    _doc->recompute();
+    const auto before = record(link);
+    auto sketch = static_cast<Sketcher::SketchObject*>(sketchOf(p(0)));
+    const auto mark = markOf(before, sketch);
+    ASSERT_GE(mark, 0);
+
+    // Act: a line drawn in P0's sketch, P0 failing (length zero), and P0 recomputed alone
+    Part::GeomLineSegment line;
+    line.setPoints(Base::Vector3d(30, 30, 0), Base::Vector3d(35, 30, 0));
+    sketch->addGeometry(&line, false);
+    static_cast<PartDesign::Pad*>(p(0))->Length.setValue(0.0);
+    _doc->recomputeFeature(p(0));
+
+    // Assert: P0 didn't make its shape, and the record into it is taken (decision 256)
+    EXPECT_TRUE(p(0)->isError());
+    EXPECT_GT(markOf(record(link), sketch), mark);
+}
+
 TEST_F(RecordRefreshChain, anObjectLeftTouchedDoesntHoldTheRecordPastTheRecompute)
 {
     // Arrange: a second Body, rolled back after Q0, its Q1 changed and held by the bar (left
