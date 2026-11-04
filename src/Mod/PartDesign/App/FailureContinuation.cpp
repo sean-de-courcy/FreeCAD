@@ -132,13 +132,29 @@ void collectLinks(const App::Property* prop, std::vector<InputLink>& links)
  * unattached primitive, a Boolean, a feature that never ran), so the world geometry is the
  * base's and the Placement is kept.
  */
+/// What a failed solid feature's pass-through is made from: its base, null when the base holds no
+/// solid (getBaseTopoShape(true)). FeatureBase's base is outside the Body: it passes the empty
+/// shape through
+Part::TopoShape passThroughSource(const Feature& feature)
+{
+    if (feature.isDerivedFrom<FeatureBase>()) {
+        return {};
+    }
+    return feature.getBaseTopoShape(true);
+}
+
+/// Whether a failed solid feature's pass-through is the empty shape. passThroughBase() writes it
+/// from passThroughSource(), so the claim and the stop can't disagree with what it writes
+/// (decision 259: the stop tested its own idea of empty, and a lead without a solid hid a failure,
+/// review pr579-r4g T-R4G-1)
+bool passThroughIsEmpty(const Feature& feature)
+{
+    return passThroughSource(feature).isNull();
+}
+
 void passThroughBase(Feature& feature)
 {
-    Part::TopoShape base;
-    if (!feature.isDerivedFrom<FeatureBase>()) {
-        // FeatureBase's base is outside the Body: it passes the empty shape through
-        base = feature.getBaseTopoShape(true);
-    }
+    Part::TopoShape base = passThroughSource(feature);
 
     Part::TopoShape pass;
     if (!base.isNull()) {
@@ -168,26 +184,18 @@ void passThroughBase(Feature& feature)
     feature.Shape.setValue(pass);
 }
 
-/// The Body's base is in error, whatever made it fail: its FeatureBase (its first member, standing
-/// for the BaseFeature outside it) or, without one, its first solid feature, or the first one after
-/// solid features that made nothing (suppressed, or a Boolean without a tool). Its pass-through is
-/// the empty shape, and the features after it would compute on nothing, Valid: the Body doesn't
-/// continue then, and every member fails naming its input (ops#579, decisions 254 and 255 (1);
-/// review pr579-r4f T-R4F-1: a suppressed lead hid a failed first Pad)
+/// The Body's base is in error: one of its solid features is in error, whatever made it fail, and
+/// its pass-through is the empty shape (its FeatureBase; its first solid feature; one after solid
+/// features that made nothing, suppressed, a Boolean without a tool or a shape without a solid).
+/// The features after it would compute on nothing, Valid: the Body doesn't continue then, and
+/// every member fails naming its input (ops#579, decisions 254, 255 (1) and 259; reviews pr579-r4f
+/// T-R4F-1, pr579-r4g T-R4G-1)
 bool baseInError(const Body& body)
 {
-    // In Group order, the order of the chain: each solid's base is the one before it, recomputed
-    // before it. The FeatureBase is a solid feature, and always the first member
     for (auto member : body.Group.getValues()) {
-        if (!Body::isSolidFeature(member)) {
-            continue;
-        }
-        if (member->isError()) {
+        if (Body::isSolidFeature(member) && member->isError()
+            && passThroughIsEmpty(*static_cast<const Feature*>(member))) {
             return true;
-        }
-        if (!static_cast<const Feature*>(member)->Shape.getShape().isNull()) {
-            // A base that isn't empty: a failure after it passes something through
-            return false;
         }
     }
     return false;
@@ -199,7 +207,12 @@ public:
     bool continuesAfter(const App::DocumentObject* failed) const override
     {
         auto body = bodyOf(failed);
-        return body && !baseInError(*body);
+        if (!body || baseInError(*body)) {
+            return false;
+        }
+        // The claim itself never passes the empty shape through (decision 259)
+        auto feature = dynamic_cast<const Feature*>(failed);
+        return !(feature && Body::isSolidFeature(failed) && passThroughIsEmpty(*feature));
     }
 
     App::AfterInputFailure decide(const App::DocumentObject* /*failed*/,

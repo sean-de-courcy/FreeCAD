@@ -977,6 +977,17 @@ class FailurePassThroughBase:
         lead = self.body.newObject("PartDesign::Boolean", "Empty")
         self.assertALeadThatMakesNothingHidesNoFailure(lead)
 
+    def testSolidlessBaseFeatureDoesNotHideAFailedFirstPad(self):
+        """The lead is the FeatureBase of a Part::Plane: valid, a face, no solid, so a pass-through
+        after it is the empty shape as for a null lead (decision 259: the stop asks the
+        pass-through's own question; review pr579-r4g T-R4G-1)."""
+        plane = self.doc.addObject("Part::Plane", "Sheet")
+        plane.Length = plane.Width = 50
+        plane.Placement.Base = V(200, 0, 0)
+        self.body.BaseFeature = plane
+        self.recompute()
+        self.assertALeadThatMakesNothingHidesNoFailure(self.body.Group[0])
+
     def testFailedSubtractiveFirstFeatureStopsTheBody(self):
         """The Body's first solid feature is a pocket, with nothing to cut."""
         self.assertFirstFeatureOfAnyKindStops(self.hole())
