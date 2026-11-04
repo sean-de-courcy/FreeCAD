@@ -925,6 +925,49 @@ class FailurePassThroughBase:
         self.assertValid(groundPad, rim)
         self.assertFalse(top.isValid(), "the front face re-bound to the slid rim's")
 
+    def testReferenceIntoAStoppedFeatureTakesWhatIsDrawnInALaterEdit(self):
+        """The model above. The base fails first, and nothing else changes for a recompute: the
+        records into the Pad aren't taken again while its closure's marks are as they hold them
+        (decision 263). Then, in a later edit while it is still down, the second rim is drawn: the
+        marks changed, so the records are taken, and the slide onto y = 0 with the repair breaks
+        the sketch, as in one edit."""
+        ground = models.sketch(self.doc, "Ground", models.rectangle(100, 50, 110, 60), self.body)
+        groundPad = models.pad(self.body, ground, 5, "GroundPad")
+        self.recompute()
+        body1 = self.doc.addObject("PartDesign::Body", "Body1")
+        body1.BaseFeature = self.body
+        self.recompute()
+        profile = models.sketch(self.doc, "Profile", models.rectangle(0, 0, 40, 2), body1)
+        rim = models.pad(body1, profile, 10, "Rim")
+        self.recompute()
+        front = elementWhere(
+            rim.Shape,
+            "Face",
+            lambda f: abs(f.CenterOfMass.y) < TOL and abs(f.normalAt(0, 0).y + 1) < TOL,
+        )
+        top = body1.newObject("Sketcher::SketchObject", "Top")
+        top.AttachmentSupport = [(rim, front)]
+        top.MapMode = "FlatFace"
+        self.recompute()
+        self.assertValid(rim, top)
+
+        groundPad.Length = 0
+        self.recompute()
+        self.recompute()
+        self.assertStopped(rim)
+        self.assertStopped(top, f"'{rim.Label}', which has an error")
+
+        profile.addGeometry(models.rectangle(0, 20, 40, 22), False)
+        self.recompute()
+        self.assertStopped(top, f"'{rim.Label}', which has an error")
+
+        models.moveRectangle(profile, 0, 0, 40, 2, first=4)
+        profile.delGeometries([0, 1, 2, 3])
+        groundPad.Length = 5
+        self.recompute()
+        self.assertValid(groundPad, rim)
+        self.assertFalse(top.isValid(), "the front face re-bound to the slid rim's")
+
     def assertFirstFeatureOfAnyKindStops(self, first):
         """`first`, the Body's first solid feature, is in error: the Body doesn't continue past
         it, whatever kind it is (decision 255 (1); a kind exempted once, decision 257, hid a
