@@ -167,9 +167,15 @@ class TestCrossBody(unittest.TestCase):
             for binder in (bindTop, bindB):
                 self.assertFalse(binder.isValid())
             self.assertTrue(any("Cyclic dependency" in text for text in texts), texts)
+            # The other names its input: the Body it reads ("which has an error"), or the Body's
+            # failed member ("and 'PadB' in it has an error"), as the cycle is entered from
+            # either side (the Windows CI run took the second)
             for text in texts:
                 self.assertTrue(
-                    "Cyclic dependency" in text or "which has an error" in text, texts
+                    "Cyclic dependency" in text
+                    or "which has an error" in text
+                    or "in it has an error" in text,
+                    texts,
                 )
             # The cycle has no order, so its objects stay touched; each carries an error (a
             # Body shows none of its own: its Tip, PadB, has one)
