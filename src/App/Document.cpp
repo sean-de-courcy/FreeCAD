@@ -4451,17 +4451,18 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
 
     tracker.checkpoint("Recompute");
 
-    // The objects that failed in this recompute; then the carried texts of the rule's failures
-    // that weren't re-run go back, so the tooltip and the saved file keep them (ops#126)
+    // The objects that failed in this recompute; then the carried texts of the failures that
+    // weren't re-run go back, so the tooltip and the saved file keep them (ops#126). Whatever the
+    // rule claims now: a failure it claimed when it was logged keeps its text once its Body stops
+    // (ops#579, review pr579-r3 T-R3-2)
     std::set<const DocumentObject*> failedNow;
     for (const auto& entry : d->_RecomputeLog) {
         failedNow.insert(entry.first);
     }
-    if (continuation && !carried.empty()) {
+    if (!carried.empty()) {
         std::set<const DocumentObject*> present(d->objectArray.begin(), d->objectArray.end());
         for (auto& [object, entry] : carried) {
-            if (present.contains(object) && !failedNow.contains(object) && object->isError()
-                && continuation->continuesAfter(object)) {
+            if (present.contains(object) && !failedNow.contains(object) && object->isError()) {
                 d->_RecomputeLog.emplace(object, std::move(entry));
             }
         }
