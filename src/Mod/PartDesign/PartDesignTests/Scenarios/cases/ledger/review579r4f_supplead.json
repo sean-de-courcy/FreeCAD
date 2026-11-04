@@ -1,0 +1,10 @@
+{
+"entries": {
+"EmptyBooleanLeadExprOnFailedGauge|fillet_edge|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579-r4f", "issue": "ops#579", "tier": "F"},
+"ReorderedPocketSuppressedExprOnFailedGauge|fillet_edge|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579-r4f", "issue": "ops#579", "tier": "F"},
+"SuppLeadControl|fillet_edge|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr579-r4f", "issue": "ops#579", "tier": "F"},
+"SuppPadExprOnFailedGauge|fillet_edge|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579-r4f", "issue": "ops#579", "tier": "F"},
+"SuppPocketExprOnFailedGauge|fillet_edge|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579-r4f", "issue": "ops#579", "tier": "F"},
+"SuppPocketOnBinderOfFailedPlate|fillet_edge|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579-r4f", "issue": "ops#579", "tier": "F"}
+}
+}

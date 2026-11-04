@@ -4,11 +4,11 @@
 "BodyTopFailSiblingSlid|external|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579-r1", "issue": "ops#579", "tier": "F"},
 "BodyTopFailThenSlidTwoSteps|external|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579-r1", "issue": "ops#579", "tier": "F"},
 "CtrBoxFails|top|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr579-r1", "issue": "ops#579", "tier": "F"},
-"CtrFailSiblingSlidFixed|external|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "BROKEN", "expected": "wrong", "found_by": "review pr579-r1", "issue": "ops#579", "tier": "F"},
+"CtrFailSiblingSlidFixed|external|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579-r1", "issue": "ops#579", "tier": "F"},
 "CtrFailSiblingSlid|external|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579-r1", "issue": "ops#579", "tier": "F"},
 "CtrFailThenSlidTwoSteps|external|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579-r1", "issue": "ops#579", "tier": "F"},
 "CtrSiblingSlidControl|external|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr579-r1", "issue": "ops#579", "tier": "F"},
-"FolderFailSiblingSlidFixed|external|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "BROKEN", "expected": "wrong", "found_by": "review pr579-r1", "issue": "ops#579", "tier": "F"},
+"FolderFailSiblingSlidFixed|external|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579-r1", "issue": "ops#579", "tier": "F"},
 "FolderFailSiblingSlid|external|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579-r1", "issue": "ops#579", "tier": "F"},
 "OutsideOnFailedPocket|floor|V2s": {"axes": ["M1", "E4", "E5", "X4:600"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr579-r1", "issue": "ops#579", "tier": "F"}
 }

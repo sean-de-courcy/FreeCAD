@@ -1,0 +1,14 @@
+{
+"entries": {
+"BodyPocketBesideFailedMember|floor|V2s": {"axes": ["M1", "E4", "E5", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579-r2", "issue": "ops#579", "tier": "F"},
+"BodyPocketBesideFailedMember|top|V2s": {"axes": ["M1", "E4", "E5", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr579-r2", "issue": "ops#579", "tier": "F"},
+"ChainFailSiblingSlidFixed|ref|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579-r2", "issue": "ops#579", "tier": "F"},
+"ChainFailSiblingSlid|ref|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579-r2", "issue": "ops#579", "tier": "F"},
+"ChainSiblingSlidControl|ref|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr579-r2", "issue": "ops#579", "tier": "F"},
+"CtrPlaneFailSiblingSlidFixedSetter|ref|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579-r2", "issue": "ops#579", "tier": "F"},
+"CtrPlaneFailSiblingSlidFixed|ref|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579-r2", "issue": "ops#579", "tier": "F"},
+"LinkCtrFailSiblingSlidFixed|ref|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579-r2", "issue": "ops#579", "tier": "F"},
+"LinkCtrFailSiblingSlid|ref|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579-r2", "issue": "ops#579", "tier": "F"},
+"NestedCtrFailSiblingSlid|ref|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579-r2", "issue": "ops#579", "tier": "F"}
+}
+}
