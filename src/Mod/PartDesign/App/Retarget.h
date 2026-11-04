@@ -41,6 +41,10 @@ bool parkedReason(const App::DocumentObject* obj, std::string& why);
 /// parked is still a solid feature of its Body, not a MultiTransform's step
 bool hasParkedOriginals(const App::DocumentObject* obj);
 
+/// A reorder is writing its plan (reorderBody() step 6): its bases, re-targets and parks are set
+/// one by one, and the Body's chain is the plan's only when they are all written
+bool reorderWriting();
+
 /// Lets the sketch editor name what a parked projection was projected from (ops#131 PR B):
 /// Sketcher::parkedReference() reads the sketch's parking record through it
 void registerParkedReferenceProvider();

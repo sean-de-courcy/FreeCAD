@@ -1722,7 +1722,15 @@ struct Plan
     }
 };
 
+/// The reorders writing their plan on this thread (reorderWriting())
+thread_local int reorderWrites = 0;
+
 }  // namespace
+
+bool reorderWriting()
+{
+    return reorderWrites > 0;
+}
 
 void reorderBody(Body& body,
                  const std::vector<App::DocumentObject*>& objs,
@@ -1887,7 +1895,22 @@ void reorderBody(Body& body,
     }
 
     // 6. Write: Group once, then each changed base in the new chain order (the reroute of N1
-    // 2.2), then the rule's re-targets, parks and restores
+    // 2.2), then the rule's re-targets, parks and restores. A pattern's Originals are emptied
+    // before its parking record is written, so it looks like a MultiTransform step in between:
+    // Transformed::onChanged() leaves the chain to the plan meanwhile (ops#590)
+    struct Writing
+    {
+        Writing()
+        {
+            ++reorderWrites;
+        }
+        ~Writing()
+        {
+            --reorderWrites;
+        }
+        Writing(const Writing&) = delete;
+        Writing& operator=(const Writing&) = delete;
+    } writing;
     body.Group.setValues(plan.group);
     for (const auto& [feature, base] : plan.changes) {
         reroute(feature, base);
