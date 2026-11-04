@@ -169,15 +169,25 @@ void passThroughBase(Feature& feature)
 }
 
 /// The Body's base is in error, whatever made it fail: its FeatureBase (its first member, standing
-/// for the BaseFeature outside it) or, without one, its first solid feature. Its pass-through is
+/// for the BaseFeature outside it) or, without one, its first solid feature, or the first one after
+/// solid features that made nothing (suppressed, or a Boolean without a tool). Its pass-through is
 /// the empty shape, and the features after it would compute on nothing, Valid: the Body doesn't
-/// continue then, and every member fails naming its input (ops#579, decisions 254 and 255 (1))
+/// continue then, and every member fails naming its input (ops#579, decisions 254 and 255 (1);
+/// review pr579-r4f T-R4F-1: a suppressed lead hid a failed first Pad)
 bool baseInError(const Body& body)
 {
+    // In Group order, the order of the chain: each solid's base is the one before it, recomputed
+    // before it. The FeatureBase is a solid feature, and always the first member
     for (auto member : body.Group.getValues()) {
-        // The FeatureBase is a solid feature, and always the first member
-        if (Body::isSolidFeature(member)) {
-            return member->isError();
+        if (!Body::isSolidFeature(member)) {
+            continue;
+        }
+        if (member->isError()) {
+            return true;
+        }
+        if (!static_cast<const Feature*>(member)->Shape.getShape().isNull()) {
+            // A base that isn't empty: a failure after it passes something through
+            return false;
         }
     }
     return false;
