@@ -6397,6 +6397,18 @@ void App::forgetElementReferencesTo(const DocumentObject* feature)
     DocInfo::forgetFeature(feature);
 }
 
+void App::holdElementReferencesInto(DocumentObject* target)
+{
+    const auto& references = PropertyLinkBase::getElementReferences(target);
+    if (references.empty()) {
+        return;
+    }
+    FC_LOG("records into " << target->getFullName() << " held: in error, its shape not made");
+    for (auto prop : references) {
+        _HeldFingerprints.insert(prop);
+    }
+}
+
 void App::resolveReregisteredReferences()
 {
     // One at a time: resolving one can destroy a later one (an owner's touch() runs handlers),
