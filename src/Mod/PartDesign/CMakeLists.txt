@@ -294,6 +294,8 @@ set(PartDesign_CompatGen0
     PartDesignTests/Compat/gen0/ReorderBar.oracle.json
     PartDesignTests/Compat/gen0/RevolutionGroove.FCStd
     PartDesignTests/Compat/gen0/RevolutionGroove.oracle.json
+    PartDesignTests/Compat/gen0/ScriptCompound.FCStd
+    PartDesignTests/Compat/gen0/ScriptCompound.oracle.json
     PartDesignTests/Compat/gen0/SiblingCuts.FCStd
     PartDesignTests/Compat/gen0/SiblingCuts.oracle.json
     PartDesignTests/Compat/gen0/SidedVariants.FCStd
@@ -317,6 +319,8 @@ set(PartDesign_CompatGen0
     PartDesignTests/Compat/gen0/TwoDocumentsPart.FCStd
     PartDesignTests/Compat/gen0/UpToFace.FCStd
     PartDesignTests/Compat/gen0/UpToFace.oracle.json
+    PartDesignTests/Compat/gen0/UpToTwins.FCStd
+    PartDesignTests/Compat/gen0/UpToTwins.oracle.json
     PartDesignTests/Compat/gen0/VarSetDriven.FCStd
     PartDesignTests/Compat/gen0/VarSetDriven.oracle.json
 )
@@ -378,6 +382,8 @@ set(PartDesign_CompatGen0Macos
     PartDesignTests/Compat/gen0-macos/ReorderBar.oracle.json
     PartDesignTests/Compat/gen0-macos/RevolutionGroove.FCStd
     PartDesignTests/Compat/gen0-macos/RevolutionGroove.oracle.json
+    PartDesignTests/Compat/gen0-macos/ScriptCompound.FCStd
+    PartDesignTests/Compat/gen0-macos/ScriptCompound.oracle.json
     PartDesignTests/Compat/gen0-macos/SiblingCuts.FCStd
     PartDesignTests/Compat/gen0-macos/SiblingCuts.oracle.json
     PartDesignTests/Compat/gen0-macos/SidedVariants.FCStd
@@ -401,6 +407,8 @@ set(PartDesign_CompatGen0Macos
     PartDesignTests/Compat/gen0-macos/TwoDocumentsPart.FCStd
     PartDesignTests/Compat/gen0-macos/UpToFace.FCStd
     PartDesignTests/Compat/gen0-macos/UpToFace.oracle.json
+    PartDesignTests/Compat/gen0-macos/UpToTwins.FCStd
+    PartDesignTests/Compat/gen0-macos/UpToTwins.oracle.json
     PartDesignTests/Compat/gen0-macos/VarSetDriven.FCStd
     PartDesignTests/Compat/gen0-macos/VarSetDriven.oracle.json
 )

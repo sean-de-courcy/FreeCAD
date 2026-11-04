@@ -259,4 +259,43 @@ def PartLoftSweep(make):
     }
 
 
-MODELS = [PartPrimitives, PartBooleans, PartProfiles, PartFilletChamfer, PartLoftSweep]
+def ScriptCompound(make):
+    """A compound set by script, with a reference into it (PLAN decision 247: the case C2, ops#502,
+    must port after the beta).
+
+    A Part feature whose Shape is set to Part.makeCompound of three disjoint shapes made with no
+    element map: a box 10 x 10 x 10 (0..10), a cylinder, radius 3, height 10, about (20, 5), and a
+    box 5 x 5 x 5 at (0, 20, 0). A sketch outside any Body attached by name to the first box's top
+    face (z = 10, centre (5, 5))."""
+    doc = make("ScriptCompound")
+    compound = doc.addObject("Part::Feature", "Compound")
+    compound.Shape = Part.makeCompound(
+        [
+            Part.makeBox(10, 10, 10),
+            Part.makeCylinder(3, 10, V(20, 5, 0)),
+            Part.makeBox(5, 5, 5, V(0, 20, 0)),
+        ]
+    )
+    doc.recompute()
+    top = faceWhere(
+        compound.Shape,
+        lambda f: planeFacing(TOP, V(0, 0, 10))(f) and (f.CenterOfMass - V(5, 5, 10)).Length < 1e-6,
+    )
+    sketch = doc.addObject("Sketcher::SketchObject", "TopSketch")
+    sketch.AttachmentSupport = [(compound, top)]
+    sketch.MapMode = "FlatFace"
+    doc.recompute()
+    normal = sketch.Placement.Rotation.multVec(TOP)
+    if abs(sketch.Placement.Base.z - 10) > 1e-9 or (normal - TOP).Length > 1e-9:
+        raise AssertionError(f"TopSketch is at {sketch.Placement}, expected on z = 10 facing up")
+    return {"volumes": {"Compound": 1000 + math.pi * 9 * 10 + 125}}
+
+
+MODELS = [
+    PartPrimitives,
+    PartBooleans,
+    PartProfiles,
+    PartFilletChamfer,
+    PartLoftSweep,
+    ScriptCompound,
+]

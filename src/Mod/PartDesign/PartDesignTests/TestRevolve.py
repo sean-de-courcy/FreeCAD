@@ -3739,7 +3739,7 @@ class TestRevolve(unittest.TestCase):
         self.Doc.recompute()
         self.assertTrue(revolution.isValid(), revolution.getStatusString())
         shape = revolution.Shape
-        box = shape.optimalBoundingBox()
+        box = shape.optimalBoundingBox(False, False)  # not the GUI's mesh (ops#259)
         self.assertAlmostEqual(box.XMin, 0, places=6)
         self.assertAlmostEqual(box.XMax, 23, places=3)
         self.assertAlmostEqual(box.YMax, 23, places=3)

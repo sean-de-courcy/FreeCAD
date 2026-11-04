@@ -1345,7 +1345,7 @@ class TestVariablesImportGui(unittest.TestCase):
 
     def test_skip_refused(self):
         """A refused variable gets a Skip box; skipping it imports the rest (review 317, 5)."""
-        path = writeExport(self.folder, "Mixed", [("NUMBER", "Bad", "round(2.5)"),
+        path = writeExport(self.folder, "Mixed", [("NUMBER", "Bad", "round(2.5, 1)"),
                                                   ("LENGTH", "Good", "5 mm")])
         self.open([path])
         self.assertFalse(self.find(QtWidgets.QPushButton, "import").isEnabled())
