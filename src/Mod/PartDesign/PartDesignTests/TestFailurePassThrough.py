@@ -524,6 +524,72 @@ class FailurePassThroughBase:
         self.assertValid(assy, box, *readers)
         self.assertEqual([o.Name for o in readers if "Touched" in o.State], [])
 
+    def bossOnBase(self, base, volume):
+        """The Body on `base` (its BaseFeature; `volume` mm^3) with the 5 mm boss on its top at
+        z = 10, and a Part::Mirroring of the boss's Pad outside the Body."""
+        self.body.BaseFeature = base
+        sketch = models.sketch(self.doc, "BossSketch", models.rectangle(0, 0, 5, 5), self.body, z=10)
+        boss = models.pad(self.body, sketch, 5, "Boss")
+        mirror = self.doc.addObject("Part::Mirroring", "MirroredBoss")
+        mirror.Source = boss
+        mirror.Normal = V(1, 0, 0)
+        self.recompute()
+        self.assertValid(self.body, boss, mirror)
+        self.assertBody(volume + BOSS)
+        self.assertVolume(mirror, volume + BOSS)
+        return self.body.Group[0], boss, mirror
+
+    def assertBodyStopped(self, base, boss, mirror, volume, *words):
+        """The Body doesn't continue past its failed FeatureBase (decision 254): the boss and the
+        Body fail naming their inputs and keep their shapes, and so does the mirror outside."""
+        self.assertStopped(base, *words)
+        self.assertStopped(boss, f"'{base.Label}', which has an error")
+        self.assertStopped(self.body)
+        self.assertStopped(mirror, f"'{boss.Label}', which has an error")
+        self.assertVolume(boss, volume + BOSS)
+        self.assertVolume(mirror, volume + BOSS)
+
+    def testBodyOnAFailedBaseFeatureDoesNotContinue(self):
+        """The Body's BaseFeature is a Part box outside it. The box fails (length zero): the
+        FeatureBase fails naming it, and the Body doesn't continue: the boss after it doesn't
+        compute on the empty pass-through (ops#579, decision 254). Repaired, everything computes."""
+        stock = models.box(self.doc, "Stock", (20, 20, 10))
+        base, boss, mirror = self.bossOnBase(stock, BLOCK)
+
+        stock.Length = 0
+        self.recompute()
+        self.assertStopped(stock)
+        self.assertBodyStopped(base, boss, mirror, BLOCK, f"'{stock.Label}', which has an error")
+
+        stock.Length = 20
+        self.recompute()
+        self.assertValid(stock, base, boss, self.body, mirror)
+        self.assertBody(BLOCK + BOSS)
+        self.assertVolume(mirror, BLOCK + BOSS)
+
+    def testBodyOnAContainerWithAFailedMemberDoesNotContinue(self):
+        """The Body's BaseFeature is an App::Part holding the block and a spare 1 mm cube far off.
+        The spare fails (length zero): the FeatureBase fails naming it through the Part, and the
+        Body doesn't continue (decision 254). Repaired, everything computes."""
+        lib = self.doc.addObject("App::Part", "Lib")
+        lib.addObject(models.box(self.doc, "Stock", (20, 20, 10)))
+        spare = models.box(self.doc, "Spare", (1, 1, 1), at=(100, 0, 0))
+        lib.addObject(spare)
+        base, boss, mirror = self.bossOnBase(lib, BLOCK + 1)
+
+        spare.Length = 0
+        self.recompute()
+        self.assertStopped(spare)
+        self.assertValid(lib)
+        self.assertBodyStopped(
+            base, boss, mirror, BLOCK + 1, f"'{lib.Label}', and '{spare.Label}' in it has an error"
+        )
+
+        spare.Length = 1
+        self.recompute()
+        self.assertValid(spare, base, boss, self.body, mirror)
+        self.assertBody(BLOCK + 1 + BOSS)
+
     def testBodyMemberOfAFailureOutsideItPassesThrough(self):
         """The hole's depth is an expression on a Part box outside the Body. The box fails (length
         zero): the hole fails naming it, passes the block through, and the boss after it computes
