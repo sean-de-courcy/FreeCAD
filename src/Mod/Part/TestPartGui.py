@@ -1164,3 +1164,132 @@ class PartGuiPickEdgeTestCases(unittest.TestCase):
             if not names <= through:
                 wrong.append((tuple(vertex.Point), sorted(names - through)))
         self.assertEqual(wrong, [])
+
+
+class PartGuiSeamEdgeTestCases(unittest.TestCase):
+    """A seam (an edge closed on its own face: a cylinder's) gets no line in 3D, as in Onshape
+    (ops#600); the edges keep their numbers, and the line colours follow their edges. The
+    parameter Mod/Part/View/HideSeamEdges set false draws it again."""
+
+    PARAM = "User parameter:BaseApp/Preferences/Mod/Part/View"
+
+    def setUp(self):
+        self.Doc = FreeCAD.newDocument("PartGuiSeamEdge")
+        self.param = FreeCAD.ParamGet(self.PARAM)
+        self.hadParam = "HideSeamEdges" in self.param.GetBools()
+        self.oldParam = self.param.GetBool("HideSeamEdges", True)
+
+    def tearDown(self):
+        if self.hadParam:
+            self.param.SetBool("HideSeamEdges", self.oldParam)
+        else:
+            self.param.RemBool("HideSeamEdges")
+        FreeCAD.closeDocument(self.Doc.Name)
+
+    def _edgeSets(self, vp):
+        """[(line count, edge set, its parent)] of the SoBrepEdgeSets under the view provider's
+        root, taken while the search's paths live."""
+        from pivy import coin
+
+        search = coin.SoSearchAction()
+        search.setType(coin.SoType.fromName("SoBrepEdgeSet"))
+        search.setInterest(coin.SoSearchAction.ALL)
+        search.setSearchingAll(True)
+        search.apply(vp.RootNode)
+        result = []
+        for path in search.getPaths():
+            lineset = path.getTail()
+            indices = lineset.coordIndex.getValues()
+            result.append((sum(1 for i in indices if i < 0), lineset, path.getNodeFromTail(1)))
+        return result
+
+    def _lineCount(self, vp):
+        """The line count shared by every edge set that has lines (a preview's too)."""
+        counts = {count for count, _, _ in self._edgeSets(vp) if count}
+        self.assertEqual(len(counts), 1, counts)
+        return counts.pop()
+
+    def _feature(self, shape):
+        feature = self.Doc.addObject("Part::Feature", "Shape")
+        feature.Shape = shape
+        self.Doc.recompute()
+        FreeCADGui.updateGui()
+        return feature
+
+    def _seams(self, shape):
+        """Indices (from 1) of the edges a single face holds: the seams of a closed solid."""
+        return [
+            i
+            for i, edge in enumerate(shape.Edges, 1)
+            if len(shape.ancestorsOfType(edge, Part.Face)) == 1
+        ]
+
+    def testCylinderHasNoSeamLine(self):
+        cylinder = Part.makeCylinder(5, 10)
+        self.assertEqual(len(self._seams(cylinder)), 1)
+        feature = self._feature(cylinder)
+        self.assertEqual(self._lineCount(feature.ViewObject), 2)
+
+    def testPadOfACircleHasNoSeamLine(self):
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        sketch = body.newObject("Sketcher::SketchObject", "Sketch")
+        sketch.addGeometry(Part.Circle(FreeCAD.Vector(), FreeCAD.Vector(0, 0, 1), 5))
+        pad = body.newObject("PartDesign::Pad", "Pad")
+        pad.Profile = sketch
+        pad.Length = 10
+        self.Doc.recompute()
+        FreeCADGui.updateGui()
+        self.assertEqual(len(pad.Shape.Edges), 3)
+        self.assertEqual(self._lineCount(pad.ViewObject), 2)
+
+    def testSeamShownWithTheParameterOff(self):
+        self.param.SetBool("HideSeamEdges", False)
+        feature = self._feature(Part.makeCylinder(5, 10))
+        self.assertEqual(self._lineCount(feature.ViewObject), 3)
+
+    def testBoxKeepsEveryLine(self):
+        feature = self._feature(Part.makeBox(4, 5, 6))
+        self.assertEqual(self._lineCount(feature.ViewObject), 12)
+
+    def testPickNamesTheEdgesAfterTheSeam(self):
+        # The edges keep their numbers: a pick on each circle names that circle's edge.
+        cylinder = Part.makeCylinder(5, 10)
+        feature = self._feature(cylinder)
+        seams = self._seams(cylinder)
+        direction = FreeCAD.Vector(0.3, 0.5, 0.8)
+        direction.normalize()
+        wrong = []
+        for i, edge in enumerate(cylinder.Edges, 1):
+            if i in seams:
+                continue
+            middle = edge.valueAt(0.5 * (edge.FirstParameter + edge.LastParameter))
+            names = PartGuiPickEdgeTestCases._pickedEdges(
+                self, feature.ViewObject, middle, direction
+            )
+            if names != {"Edge" + str(i)}:
+                wrong.append(("Edge" + str(i), sorted(names)))
+        self.assertEqual(wrong, [])
+
+    def testLineColoursFollowTheirEdges(self):
+        # One colour per edge: each line takes its own edge's, not the one at its line index.
+        from pivy import coin
+
+        cylinder = Part.makeCylinder(5, 10)
+        feature = self._feature(cylinder)
+        colours = [(1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)]
+        feature.ViewObject.LineColorArray = colours
+        FreeCADGui.updateGui()
+        seams = self._seams(cylinder)
+        expected = [colours[i - 1] for i in range(1, 4) if i not in seams]
+        group = [parent for count, _, parent in self._edgeSets(feature.ViewObject) if count][0]
+        materials = [
+            group.getChild(k)
+            for k in range(group.getNumChildren())
+            if group.getChild(k).isOfType(coin.SoMaterial.getClassTypeId())
+        ]
+        self.assertEqual(len(materials), 1)
+        shown = [
+            tuple(round(c, 3) for c in colour.getValue())
+            for colour in materials[0].diffuseColor.getValues()
+        ]
+        self.assertEqual(shown, expected)

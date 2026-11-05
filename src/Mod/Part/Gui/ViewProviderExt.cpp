@@ -48,6 +48,8 @@
 #include <TopoDS_Vertex.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 
+#include <algorithm>
+
 #include <QAction>
 #include <QMenu>
 #include <sstream>
@@ -882,20 +884,19 @@ void ViewProviderPartExt::setHighlightedEdges(const std::vector<Base::Color>& co
     if (size > 1) {
         // Although indexed lineset is used the material binding must be PER_FACE!
         pcLineBind->value = SoMaterialBinding::PER_FACE;
+        // FreeCAD-CH (ops#600): one colour per line, taken from the line's edge. Lines and edges
+        // needn't match one to one: a seam, or an edge without a polyline, has no line.
         const int32_t* cindices = this->lineset->coordIndex.getValues(0);
         int numindices = this->lineset->coordIndex.getNum();
-        pcLineMaterial->diffuseColor.setNum(size);
+        auto ends = std::count_if(cindices, cindices + numindices, [](int32_t i) { return i < 0; });
+        int numlines = std::max(static_cast<int>(ends), 1);
+        pcLineMaterial->diffuseColor.setNum(numlines);
         SbColor* ca = pcLineMaterial->diffuseColor.startEditing();
-        int linecount = 0;
-
-        for (int i = 0; i < numindices; ++i) {
-            if (cindices[i] < 0) {
-                ca[linecount].setValue(colors[linecount].r, colors[linecount].g, colors[linecount].b);
-                linecount++;
-                if (linecount >= size) {
-                    break;
-                }
-            }
+        for (int line = 0; line < numlines; ++line) {
+            int edge = this->lineset->edgeIndexFromLine(line);
+            Base::Color color = edge >= 1 && edge <= size ? colors[edge - 1]
+                                                          : LineColor.getValue();
+            ca[line].setValue(color.r, color.g, color.b);
         }
 
         pcLineMaterial->diffuseColor.finishEditing();
@@ -1152,6 +1153,12 @@ void ViewProviderPartExt::setupCoinGeometry(
     std::set<int> edgeIdxSet;
     std::set<int> edgeFailed;
     std::vector<int32_t> edgeVector;
+    // FreeCAD-CH (ops#600): seam edges are left out of the lineset; the edge numbering is kept.
+    const bool hideSeams = App::GetApplication()
+                               .GetParameterGroupByPath(
+                                   "User parameter:BaseApp/Preferences/Mod/Part/View"
+                               )
+                               ->GetBool("HideSeamEdges", true);
 
     // count and index the edges
     for (int i = 1; i <= edgeMap.Extent(); i++) {
@@ -1320,6 +1327,11 @@ void ViewProviderPartExt::setupCoinGeometry(
             // get the overall index of this edge
             int edgeIndex = edgeMap.FindIndex(curEdge);
             edgeVector.push_back((int32_t)edgeIndex - 1);
+            // FreeCAD-CH (ops#600): a seam (closed on this face: a cylinder's, a sphere's) gets
+            // no line here, as in Onshape; another face it bounds as an ordinary edge draws it.
+            if (hideSeams && BRep_Tool::IsClosed(curEdge, actFace)) {
+                continue;
+            }
             // already processed this index ?
             if (edgeIdxSet.find(edgeIndex) != edgeIdxSet.end()) {
 
