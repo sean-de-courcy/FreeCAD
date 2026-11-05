@@ -520,6 +520,28 @@ class TestProblemNavigationGui(unittest.TestCase):
         self.search("")
         self.assertEqual(self.search(":errors"), ["Pocket"])
 
+    def testBodyOwnErrorListedBesideFailedMember(self):
+        """A Body with an error of its own (its Tip set to a sketch from Python) is listed, though
+        a member is in error too: a binder of a failed box outside, which the Body holds by its
+        Group alone, so the recompute doesn't fail the Body through it (review ops607-r1 T1).
+        The binder comes before the sketch: nothing is after the Tip, so nothing is held."""
+        doc = self.doc
+        body = doc.addObject("PartDesign::Body", "OwnBody")
+        crate = doc.addObject("Part::Box", "Crate")
+        crate.Placement.Base = App.Vector(40, 0, 0)
+        binder = body.newObject("PartDesign::SubShapeBinder", "Binder")
+        binder.Support = [(crate, ("",))]
+        profile = models.sketch(doc, "Profile", models.rectangle(0, 0, 10, 10), body)
+        doc.recompute()
+        crate.Length = 0
+        body.Tip = profile
+        doc.recompute()
+        pump()
+        for obj in (body, binder, crate):
+            self.assertIn("Invalid", obj.State, obj.Name)
+        self.assertIn("not a PartDesign feature", body.getStatusString())
+        self.assertEqual(self.search(":errors"), ["Binder", "Crate", "OwnBody"])
+
     def testWarningsToken(self):
         self.model()
         self.assertEqual(self.search(":warnings"), ["Fillet"])
