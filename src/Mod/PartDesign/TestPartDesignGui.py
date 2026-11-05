@@ -520,8 +520,8 @@ class TestDressUpPanelAfterInsert(unittest.TestCase):
     chamfer's BaseFeature is the boss. Since ops#127 the insert reroutes Base onto the boss with
     the same edge (TestChamfer); before, Base still named the block and opening the panel moved it.
     Either way the panel shows, highlights and selects on the boss, and OK used to write the
-    block's index names onto the boss (another edge, silently). A block without an element map
-    keeps Base on the block."""
+    block's index names onto the boss (another edge, silently). A primitive block (an AdditiveBox)
+    has an element map since C2 (fork PR 399) and follows the insert the same way (ops#625)."""
 
     BACK_TOP = ((0, 10, 10), (20, 10, 10))
 
@@ -560,11 +560,11 @@ class TestDressUpPanelAfterInsert(unittest.TestCase):
         self.Doc.recompute()
         return pad
 
-    def build(self, mapless=False):
-        """The block (a pad, or an AdditiveBox, which has no element map), the chamfer and the
-        inserted boss. Returns (block, boss, chamfer)."""
+    def build(self, primitive=False):
+        """The block (a pad, or an AdditiveBox), the chamfer and the inserted boss. Returns
+        (block, boss, chamfer)."""
         body = self.Doc.addObject("PartDesign::Body", "Body")
-        if mapless:
+        if primitive:
             block = body.newObject("PartDesign::AdditiveBox", "Block")
             block.Length, block.Width, block.Height = 20, 10, 10
             self.Doc.recompute()
@@ -579,13 +579,8 @@ class TestDressUpPanelAfterInsert(unittest.TestCase):
         body.Tip = chamfer
         self.Doc.recompute()
         self.assertEqual(chamfer.BaseFeature, boss)
-        if mapless:
-            self.assertEqual(chamfer.Base[0], block)
-        else:
-            # The insert reroutes Base onto the boss, with the same edge (ops#127)
-            self.assertEqual(
-                chamfer.Base, (boss, [self.edgeName(boss.Shape, *self.BACK_TOP)])
-            )
+        # The insert reroutes Base onto the boss, with the same edge (ops#127)
+        self.assertEqual(chamfer.Base, (boss, [self.edgeName(boss.Shape, *self.BACK_TOP)]))
         return block, boss, chamfer
 
     def expectedVolume(self, boss):
@@ -630,16 +625,23 @@ class TestDressUpPanelAfterInsert(unittest.TestCase):
         self.assertTrue(chamfer.isValid(), chamfer.getStatusString())
         self.assertAlmostEqual(chamfer.Shape.Volume, volume, places=6)
 
-    def testUnmappedBaseLeftAlone(self):
-        # The block's edge has no mapped name: no guess, Base stays on the block, and OK keeps it
-        block, boss, chamfer = self.build(mapless=True)
+    def testPrimitiveBaseFollowsTheInsert(self):
+        # The box's edges are named since C2 (MLN): the insert moves Base onto the boss with the
+        # same edge, as for a pad (and as Onshape keeps a chamfer on its edge), and OK keeps it
+        # (ops#625)
+        block, boss, chamfer = self.build(primitive=True)
+        volume = self.expectedVolume(boss)
+        self.assertAlmostEqual(chamfer.Shape.Volume, volume, places=6)
         base = chamfer.Base
         dialog = self.openPanel(chamfer)
         self.assertEqual(chamfer.Base, base)
         dialog.accept()
         FreeCADGui.updateGui()
+        self.Doc.recompute()
         self.assertEqual(chamfer.Base, base)
         self.assertEqual(chamfer.BaseFeature, boss)
+        self.assertTrue(chamfer.isValid(), chamfer.getStatusString())
+        self.assertAlmostEqual(chamfer.Shape.Volume, volume, places=6)
 
 
 class TestDressUpPanelBrokenReference(unittest.TestCase):
