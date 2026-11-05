@@ -84,6 +84,8 @@ def commands(tb):
 class TestSketchToolbarGui(SketcherGuiTestCase):
     def setUp(self):
         super().setUp()
+        # leaving a workbench saves its toolbars' visibility: leave first, then forget what was saved
+        FreeCADGui.activateWorkbench("PartWorkbench")
         self.saved_toolbars = {}
         group = FreeCAD.ParamGet(TOOLBARS)
         for name in group.GetBools():
@@ -104,8 +106,7 @@ class TestSketchToolbarGui(SketcherGuiTestCase):
         )
         self.doc.recompute()
         FreeCADGui.getMainWindow().show()
-        # Workbench toolbars are built on activation: leave and come back to build them anew
-        FreeCADGui.activateWorkbench("PartWorkbench")
+        # Workbench toolbars are built on activation
         FreeCADGui.activateWorkbench("SketcherWorkbench")
         self.flush_gui(100)
 

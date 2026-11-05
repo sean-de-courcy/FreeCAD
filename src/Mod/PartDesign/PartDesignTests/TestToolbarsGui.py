@@ -150,7 +150,7 @@ def clear_toolbar_settings():
     """Forget the saved visibility of every toolbar this test reads, as on a fresh settings folder;
     returns what to put back."""
     group = App.ParamGet(TOOLBARS)
-    saved = group.GetBools()
+    saved = {name: group.GetBool(name) for name in group.GetBools()}
     for name in saved:
         group.RemBool(name)
     return saved
@@ -166,10 +166,11 @@ def restore_toolbar_settings(saved):
 
 class TestToolbarsGui(unittest.TestCase):
     def setUp(self):
-        self.saved = clear_toolbar_settings()
         Gui.getMainWindow().show()
-        # Workbench toolbars are built on activation: leave and come back to build them anew
+        # Workbench toolbars are built on activation: leave (which saves the toolbars' visibility),
+        # forget what was saved, and come back to build them anew
         Gui.activateWorkbench("PartWorkbench")
+        self.saved = clear_toolbar_settings()
         Gui.activateWorkbench("PartDesignWorkbench")
         QtGui.QApplication.processEvents()
 
@@ -199,8 +200,9 @@ class TestToolbarsGui(unittest.TestCase):
                 )
 
     def test_a_stock_toolbar_the_user_showed_stays_shown(self):
-        App.ParamGet(TOOLBARS).SetBool("Part Design Dress-Up Features", True)
+        # leaving a workbench saves the toolbars' visibility: set the user's choice after that
         Gui.activateWorkbench("PartWorkbench")
+        App.ParamGet(TOOLBARS).SetBool("Part Design Dress-Up Features", True)
         Gui.activateWorkbench("PartDesignWorkbench")
         QtGui.QApplication.processEvents()
         self.assertFalse(toolbar("Part Design Dress-Up Features").isHidden())
