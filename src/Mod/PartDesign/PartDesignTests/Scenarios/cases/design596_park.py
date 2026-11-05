@@ -11,6 +11,7 @@ face (OnTop), taken before the park. The edit makes Pad1 150 higher; OnTop must 
 import FreeCAD as App
 
 from PartDesignTests.Scenarios.harness import (
+    BROKEN,
     Attached,
     Filleted,
     Reopens,
@@ -182,15 +183,20 @@ class ParkedPadFilletBelow(Park596):
 
 
 class ParkedPadOwnEdge(Park596):
-    """A fillet r 10 on the boss's top back edge (y = 200, z = 350); the boss parked: the edge
+    """A fillet r 10 on the boss's top back edge (y = 200, z = 350); the boss then parked: the edge
     isn't there while it is, so the fillet breaks (design 6.3); moved back below Pad1, it is."""
 
     REFS = ("fillet_edge",)
-    steps = ("taller", "moveBack")
+    steps = ("parkIt", "taller", "moveBack")
     radius = 10
+    park = False
+    parked = False
 
     def topBackEdge(self):
         return edge("line", direction=X, through=self.s(300, 200, self.height + 50))
+
+    def expectation(self):
+        return BROKEN if self.parked else self.topBackEdge()
 
     def extra(self, doc, body):
         fillet = body.newObject("PartDesign::Fillet", "Fillet")
@@ -198,7 +204,12 @@ class ParkedPadOwnEdge(Park596):
         fillet.Radius = self.s(self.radius)
 
     def addRefs(self, doc):
-        self.ref("fillet_edge", doc.Fillet, "Base", self.topBackEdge, Filleted(self.s(self.radius)))
+        self.ref("fillet_edge", doc.Fillet, "Base", self.expectation, Filleted(self.s(self.radius)))
+
+    def parkIt(self, doc):
+        self.parkBoss(doc)
+        self.parked = True
 
     def moveBack(self, doc):
         doc.Body.reorderObject([doc.Pad2], doc.Pad1, True)
+        self.parked = False

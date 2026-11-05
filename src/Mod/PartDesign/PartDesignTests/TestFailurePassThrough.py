@@ -1330,6 +1330,26 @@ class FailurePassThroughBase:
         self.assertValid(boss.Profile[0], boss, block, hole)
         self.assertBody(BLOCK - HOLE + BOSS)
 
+    def testAStockReadingAParkedSketchStopsTheBody(self):
+        """The boss parked above the block; the block is then given the parked boss sketch's
+        normal as its direction (the GUI's "Select reference..."). The block fails naming the
+        sketch, whose record refers to the block itself: the block wasn't moved and the hole was
+        built on it, so it isn't parked and the Body stops (review pr596-r1
+        StockReadsParkedSketch). The link removed, the Body computes below the boss."""
+        block, hole, boss = self.parkedBoss()
+        block.ReferenceAxis = (boss.Profile[0], ["N_Axis"])
+        self.recompute()
+        self.assertParked(boss)
+        self.assertStopped(block, f"'{boss.Profile[0].Label}', which has an error")
+        self.assertStopped(hole, f"'{block.Label}', which has an error")
+        self.assertStopped(self.body)
+
+        block.ReferenceAxis = None
+        self.recompute()
+        self.assertParked(boss)
+        self.assertValid(block, hole)
+        self.assertBody(BLOCK - HOLE)
+
     def testParkedPadWhoseSketchIsOnADatumPassesNothing(self):
         """The boss's sketch sits on a datum plane on the block's x = 20 face. The boss moved above
         the block takes the plane and the sketch with it, and the plane's attachment is set aside:
