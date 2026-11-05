@@ -1373,16 +1373,20 @@ bool hiddenAbove(const QTreeWidgetItem* item)
 // an input in error that is one of its members, that the recompute rule doesn't claim (a claimed
 // one lets it run, so its error is then its own), and that a link other than its Group or a
 // hidden one holds (the Tip, BaseFeature, an expression), as failedInputText in App/Document.cpp
-// reads it: a member held by the Group alone doesn't fail it (review ops607-r1 T1)
+// reads it: a member held by the Group alone doesn't fail it (review ops607-r1 T1). A container the
+// rule holds (a rolled-back Body) isn't run, so its error is its own (review ops607-r1b T-R1B-1)
 bool failedThroughMember(const App::DocumentObject* obj)
 {
     auto group = obj->getExtensionByType<App::GroupExtension>(true);
     if (!group) {
         return false;
     }
+    auto rule = App::recomputeContinuation();
+    if (rule && rule->holds(obj)) {
+        return false;
+    }
     std::vector<App::Property*> props;
     obj->getPropertyList(props);
-    auto rule = App::recomputeContinuation();
     std::vector<App::DocumentObject*> links;
     for (auto prop : props) {
         auto link = freecad_cast<App::PropertyLinkBase*>(prop);

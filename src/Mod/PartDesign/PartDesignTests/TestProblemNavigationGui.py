@@ -542,6 +542,33 @@ class TestProblemNavigationGui(unittest.TestCase):
         self.assertIn("not a PartDesign feature", body.getStatusString())
         self.assertEqual(self.search(":errors"), ["Binder", "Crate", "OwnBody"])
 
+    def testRolledBackBodyOwnErrorListedBesideFailedTip(self):
+        """A rolled-back Body (its Tip a sketch, a Pad after it) is held, not run, so its error is
+        its own ("not a PartDesign feature"), though its Tip then fails on the failed Pad it is
+        attached to: it is listed (review ops607-r1b T-R1B-1)."""
+        doc = self.doc
+        body = models.body(doc)
+        profile = models.sketch(doc, "Profile", models.rectangle(0, 0, 60, 30), body)
+        pad = models.pad(body, profile, 20)
+        doc.recompute()
+        top = body.newObject("Sketcher::SketchObject", "Top")
+        top.AttachmentSupport = [(pad, "")]
+        top.MapMode = "ObjectXY"
+        doc.recompute()
+        body.Tip = top
+        doc.recompute()
+        self.assertIn("not a PartDesign feature", body.getStatusString())
+        models.pad(body, top, 5, "Pad001")
+        body.Tip = top
+        doc.recompute()
+        pad.Length = 0
+        doc.recompute()
+        pump()
+        for obj in (body, pad, top):
+            self.assertIn("Invalid", obj.State, obj.Name)
+        self.assertIn("not a PartDesign feature", body.getStatusString())
+        self.assertEqual(self.search(":errors"), ["Body", "Pad", "Top"])
+
     def testWarningsToken(self):
         self.model()
         self.assertEqual(self.search(":warnings"), ["Fillet"])
