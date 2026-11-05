@@ -54,10 +54,10 @@ QDialogButtonBox* TaskEditControl::standardButtons() const
     return buttonBox;
 }
 
-void TaskEditControl::decorateButtons(bool defaultOk)
+void TaskEditControl::decorateButtons(bool enterOk)
 {
     // The words become tooltips. A button the dialog renamed (Create, Run Check, Delete) keeps
-    // its words, gets no icon and isn't made the default. With defaultOk the checked OK is the
+    // its words and gets no icon, and Enter doesn't click it. With enterOk the checked OK is the
     // default button, so Enter in a field of the panel accepts it (TaskView::keyPressEvent),
     // unless the dialog made a button of its own the default (FEM's Apply)
     const auto decorate = [this](QDialogButtonBox::StandardButton which, const char* icon) {
@@ -84,7 +84,8 @@ void TaskEditControl::decorateButtons(bool defaultOk)
         auto* push = qobject_cast<QPushButton*>(button);
         return push && push->isDefault();
     });
-    if (checked && defaultOk && !ownDefault) {
+    this->enterOk = checked && enterOk && !ownDefault;
+    if (this->enterOk) {
         buttonBox->button(QDialogButtonBox::Ok)->setDefault(true);
     }
 }

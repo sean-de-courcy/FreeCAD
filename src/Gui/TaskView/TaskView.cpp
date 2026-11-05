@@ -564,8 +564,10 @@ void TaskView::keyPressEvent(QKeyEvent* ke)
                 }
                 return;
             }
-            // The box's own default OK (ops#605 2a) accepts only from a field the user types in, as
-            // Onshape's Enter after a value: a list's Enter opens its item, a check box's does nothing
+            // The box's OK (ops#605 2a) accepts only from a field the user types in, as Onshape's
+            // Enter after a value: a list's Enter opens its item, a check box's does nothing. Not
+            // in the sketch editor, nor a renamed OK (Delete, Run Check): Qt makes the box's first
+            // accept button the default when it shows, so its default flag doesn't tell
             QWidget* typed = QApplication::focusWidget();
             const bool fromField = qobject_cast<QAbstractSpinBox*>(typed)
                 || qobject_cast<QLineEdit*>(typed);
@@ -574,7 +576,7 @@ void TaskView::keyPressEvent(QKeyEvent* ke)
             QList<QPushButton*> list = this->findChildren<QPushButton*>();
             for (auto pb : list) {
                 if (pb->isDefault() && pb->isVisible()) {
-                    if (pb == boxOk && !fromField) {
+                    if (pb == boxOk && (!fromField || !active->ActiveCtrl->okTakesEnter())) {
                         return;
                     }
                     if (pb->isEnabled()) {

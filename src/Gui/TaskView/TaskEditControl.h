@@ -51,13 +51,21 @@ public:
     explicit TaskEditControl(QWidget* parent = nullptr);
     ~TaskEditControl() override;
     QDialogButtonBox* standardButtons() const;
-    /// Onshape's check and cross on OK and Cancel, OK the default button if defaultOk (ops#605 2a)
-    void decorateButtons(bool defaultOk);
+    /// Onshape's check and cross on OK and Cancel (ops#605 2a); with enterOk, Enter in a field
+    /// of the panel accepts the checked OK
+    void decorateButtons(bool enterOk);
+    /// Whether Enter may click the box's OK (TaskView::keyPressEvent). Qt makes the box's first
+    /// accept button the default whenever the box shows, so the default flag can't say it
+    bool okTakesEnter() const
+    {
+        return enterOk;
+    }
     friend class TaskView;
 
 protected:
     QHBoxLayout* hboxLayout;
     QDialogButtonBox* buttonBox;
+    bool enterOk = false;
 };
 
 }  // namespace TaskView

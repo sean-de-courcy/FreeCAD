@@ -62,6 +62,8 @@ def report():
     style = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/View").GetString("NavigationStyle")
     with open(os.environ["FC_ONSHAPE_PROBE_OUT"], "w", encoding="utf-8") as out:
         out.write("style=" + style + "\n")
+        toolbars = FreeCAD.ParamGet("User parameter:BaseApp/Workbench/PartDesignWorkbench/Toolbar")
+        out.write("toolbar=%d\n" % toolbars.HasGroup("Custom_FreeCAD-CH_Onshape"))
     if os.name == "nt":
         import ctypes
         from ctypes import wintypes
@@ -136,6 +138,32 @@ def freecadExecutable():
     return path if os.path.isfile(path) else None
 
 
+class RenamedOkPanel:
+    """A task panel with a line edit whose OK the dialog renames, as Mesh's Delete panel."""
+
+    def __init__(self):
+        self.form = QtWidgets.QWidget()
+        self.field = QtWidgets.QLineEdit(self.form)
+        layout = QtWidgets.QVBoxLayout(self.form)
+        layout.addWidget(self.field)
+        self.accepted = False
+
+    def getStandardButtons(self):
+        return QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
+
+    def modifyStandardButtons(self, box):
+        box.button(QtWidgets.QDialogButtonBox.Ok).setText("Delete")
+
+    def accept(self):
+        self.accepted = True
+        Gui.Control.closeDialog()
+        return True
+
+    def reject(self):
+        Gui.Control.closeDialog()
+        return True
+
+
 class TestOnshapeStudioGui(unittest.TestCase):
     def setUp(self):
         self.docs = []
@@ -167,8 +195,10 @@ class TestOnshapeStudioGui(unittest.TestCase):
         return App.getDocument(added[0])
 
     def originVisibility(self, body):
-        """The visibility of the Origin's planes, axes and point, by role."""
-        return {f.Role: f.ViewObject.Visibility for f in body.Origin.OriginFeatures}
+        """Whether the Origin's planes, axes and point are drawn, by role: each one's own
+        Visibility under the Origin's (a new Body's elements are all on, under a hidden Origin)."""
+        shown = body.Origin.ViewObject.Visibility
+        return {f.Role: shown and f.ViewObject.Visibility for f in body.Origin.OriginFeatures}
 
     def assertStudioPlanes(self, body, shown):
         visibility = self.originVisibility(body)
@@ -239,9 +269,10 @@ class TestOnshapeStudioGui(unittest.TestCase):
         self.assertEqual([o.Name for o in doc.Objects if o.isDerivedFrom("PartDesign::Pad")], [])
 
     def testEnterInTheSketchEditorKeepsItOpen(self):
-        """The sketch editor's OK is a check but not the default: Enter on a list of its panel,
-        and the keypad's Enter in a tool's parameter field (the tool widget filters only Return),
-        leave the sketch in edit."""
+        """The sketch editor's OK is a check that Enter doesn't click: Enter on a list of its
+        panel, and the keypad's Enter in a field of the panel (as in a tool's parameter field,
+        whose widget filters only Return), leave the sketch in edit. The tool's own fields are
+        hidden off screen, so the field is a line edit put into the panel."""
         doc = models.newDocument("OnshapeSketchEnter")
         self.docs.append(doc.Name)
         body = models.body(doc)
@@ -256,7 +287,6 @@ class TestOnshapeStudioGui(unittest.TestCase):
         self.assertTrue(Gui.ActiveDocument.getInEdit(), "the sketch isn't in edit")
         ok = taskButton(QtWidgets.QDialogButtonBox.Ok)
         self.assertIsNotNone(ok)
-        self.assertFalse(ok.isDefault())
         self.assertFalse(ok.icon().isNull())
         lists = [
             w
@@ -275,21 +305,41 @@ class TestOnshapeStudioGui(unittest.TestCase):
         pump(0.3)
         self.assertTrue(Gui.ActiveDocument.getInEdit(), "Enter closed the sketch")
 
-        Gui.runCommand("Sketcher_CreateRectangle")
-        pump(0.5)
-        fields = [
-            w
-            for w in Gui.getMainWindow().findChildren(QtWidgets.QAbstractSpinBox)
-            if w.isVisible() and w.isEnabled() and taskViewHolds(w)
-        ]
-        self.assertTrue(fields, "no parameter field for the rectangle tool")
-        fields[0].setFocus(QtCore.Qt.OtherFocusReason)
+        field = QtWidgets.QLineEdit(lists[0].parentWidget())
+        field.show()
         pump(0.2)
-        QtTest.QTest.keyClick(fields[0], QtCore.Qt.Key_Enter, QtCore.Qt.KeypadModifier)
+        self.assertTrue(field.isVisible() and taskViewHolds(field))
+        field.setFocus(QtCore.Qt.OtherFocusReason)
+        pump(0.2)
+        QtTest.QTest.keyClick(field, QtCore.Qt.Key_Enter, QtCore.Qt.KeypadModifier)
         pump(0.5)
-        self.assertTrue(Gui.ActiveDocument.getInEdit(), "keypad Enter closed the sketch")
+        self.assertTrue(Gui.ActiveDocument.getInEdit(), "keypad Enter in a field closed the sketch")
+        field.deleteLater()
         Gui.ActiveDocument.resetEdit()
         pump(0.5)
+
+    def testEnterInARenamedOkPanelDoesNothing(self):
+        """A panel whose OK the dialog renamed ("Delete", as Mesh's) keeps the words, gets no
+        check, and Enter in its field doesn't click it (Qt makes it the default when it shows)."""
+        doc = models.newDocument("OnshapeRenamed")
+        self.docs.append(doc.Name)
+        App.setActiveDocument(doc.Name)
+        Gui.setActiveDocument(doc.Name)
+        Gui.activateView("Gui::View3DInventor", True)
+        pump(0.5)
+        panel = RenamedOkPanel()
+        Gui.Control.showDialog(panel)
+        pump(0.5)
+        ok = taskButton(QtWidgets.QDialogButtonBox.Ok)
+        self.assertIsNotNone(ok)
+        self.assertEqual(ok.text(), "Delete")
+        self.assertTrue(ok.icon().isNull())
+        panel.field.setFocus(QtCore.Qt.OtherFocusReason)
+        pump(0.2)
+        QtTest.QTest.keyClick(panel.field, QtCore.Qt.Key_Return)
+        pump(0.5)
+        self.assertFalse(panel.accepted, "Enter clicked the renamed OK")
+        self.assertTrue(Gui.Control.activeDialog())
 
     # -- 2f: a new document in PartDesign is a part studio ----------------------------------------
 
@@ -338,7 +388,8 @@ class TestOnshapeStudioGui(unittest.TestCase):
 
     def runOnNewHome(self, userCfg=None, script=False):
         """FreeCAD.exe on a new settings folder holding the probe (and `userCfg` as user.cfg),
-        started with no file or with an empty script. Returns the navigation style it reports."""
+        started with no file or with an empty script. Returns the navigation style it reports and
+        whether the pack's Features toolbar exists."""
         exe = freecadExecutable()
         if exe is None:
             self.skipTest("no FreeCAD executable beside the build")
@@ -368,17 +419,20 @@ class TestOnshapeStudioGui(unittest.TestCase):
         self.assertTrue(os.path.isfile(out), "the probe didn't report")
         with open(out, encoding="utf-8") as f:
             lines = dict(line.rstrip("\n").split("=", 1) for line in f if "=" in line)
-        return lines.get("style")
+        return lines.get("style"), lines.get("toolbar") == "1"
 
     def testFirstStartAppliesTheOnshapePack(self):
         """A settings folder with no user.cfg starts with the pack's TinkerCAD navigation style."""
-        self.assertEqual(self.runOnNewHome(), TINKERCAD)
+        self.assertEqual(self.runOnNewHome(), (TINKERCAD, True))
 
     def testFirstStartLeavesAnExistingUserCfgAlone(self):
         """A settings folder with a user.cfg keeps its own navigation style."""
-        self.assertEqual(self.runOnNewHome(userCfg=USER_CFG), "Gui::CADNavigationStyle")
+        self.assertEqual(self.runOnNewHome(userCfg=USER_CFG), ("Gui::CADNavigationStyle", False))
 
     def testFirstStartSkipsARunWithAScript(self):
         """A run started with a script (as the test runners start FreeCAD) keeps the code
-        defaults on a new folder: no navigation style is written."""
-        self.assertEqual(self.runOnNewHome(script=True), "")
+        defaults on a new folder: no pack toolbar, and not the pack's navigation style (the view
+        writes its own default)."""
+        style, toolbar = self.runOnNewHome(script=True)
+        self.assertNotEqual(style, TINKERCAD)
+        self.assertFalse(toolbar)
