@@ -345,6 +345,9 @@ public:
     const std::vector<SbVec2s>& getPolygon(SelectionRole* role = nullptr) const;
     void setSelectionEnabled(bool enable);
     bool isSelectionEnabled() const;
+    /// FreeCAD-CH (ops#634): clicks add to the selection as with Ctrl (SoFCUnifiedSelection)
+    void setSelectionAdditive(bool additive);
+    bool isSelectionAdditive() const;
     //@}
 
     /// Returns the screen coordinates of the origin of the path's tail object

@@ -16,6 +16,7 @@ from SketcherTests.TestSketchCopyElementsGui import TestMergeExternalPairingGui
 from SketcherTests.TestSketchExternalTypes import TestSketchExternalTypesGui
 from SketcherTests.TestSketchCommandsGui import TestSketchCommandsGui
 from SketcherTests.TestSketchToolbarGui import TestSketchToolbarGui  # FreeCAD-CH, ops#605
+from SketcherTests.TestSketchModelPicksGui import TestSketchModelPicksGui  # FreeCAD-CH, ops#634
 
 # Use the module so that code checkers don't complain (flake8)
 (
@@ -36,5 +37,6 @@ from SketcherTests.TestSketchToolbarGui import TestSketchToolbarGui  # FreeCAD-C
     and TestMergeExternalPairingGui
     and TestSketchCommandsGui
     and TestSketchToolbarGui
+    and TestSketchModelPicksGui
     else False
 )

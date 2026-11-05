@@ -1337,6 +1337,139 @@ int addProjectedExternalReference(Sketcher::SketchObject* sketch,
     tryAutoRecomputeIfNotSolve(sketch);
     return findExternalReference(sketch, source, subName);
 }
+
+// FreeCAD-CH (ops#634): the name the sketch selects an external geometry by: a point (a model
+// vertex) is one of the sketch's vertices, anything else an ExternalEdge
+std::string externalSelectionName(Sketcher::SketchObject* sketch, int geoId)
+{
+    const Part::Geometry* geometry = sketch->getGeometry(geoId);
+    if (geometry && geometry->is<Part::GeomPoint>()) {
+        const int vertex = sketch->getVertexIndexGeoPos(geoId, Sketcher::PointPos::start);
+        return vertex < 0 ? std::string() : "Vertex" + std::to_string(vertex + 1);
+    }
+    return "ExternalEdge" + std::to_string(GeoEnum::RefExt + 1 - geoId);
+}
+
+/* FreeCAD-CH (ops#634): model edges and vertices picked before a constraint command (plain edit
+ * mode's ModelPickSelection) become external geometry of the sketch in edit, and the selection
+ * names them as the sketch's, in pick order, so the command reads them as it reads any external
+ * geometry. The links are added in a transaction booked with a temporary name: the command's own
+ * openCommand renames it (Document::setActiveTransaction), so the pick and the constraint are one
+ * undo step, as in Onshape. A command that makes no constraint leaves the booking temporary, and
+ * the destructor aborts it with the links it added.
+ */
+class ModelPickBooking
+{
+public:
+    ModelPickBooking()
+    {
+        auto* guiDocument = Gui::Application::Instance->activeDocument();
+        auto* vp = guiDocument ? dynamic_cast<ViewProviderSketch*>(guiDocument->getInEdit()) : nullptr;
+        if (!vp) {
+            return;
+        }
+        Sketcher::SketchObject* sketch = vp->getSketchObject();
+        App::Document* sketchDocument = sketch->getDocument();
+
+        struct Pick
+        {
+            App::DocumentObject* object;
+            std::string subName;
+        };
+        std::vector<Pick> picks;
+        bool modelPicks = false;
+        for (const auto& sel : Gui::Selection().getSelection(sketchDocument->getName())) {
+            if (!sel.pObject || !sel.SubName) {
+                continue;
+            }
+            picks.push_back({sel.pObject, sel.SubName});
+            if (sel.pObject != sketch) {
+                modelPicks = true;
+            }
+        }
+        if (!modelPicks) {
+            return;
+        }
+
+        tid = Gui::Command::openActiveDocumentCommand(
+            App::TransactionName {.name = QT_TRANSLATE_NOOP("Command", "Add external geometry"),
+                                  .temporary = true});
+        document = tid ? sketchDocument : nullptr;
+
+        std::vector<std::string> names;
+        bool failed = false;
+        for (const auto& pick : picks) {
+            if (pick.object == sketch) {
+                names.push_back(pick.subName);
+                continue;
+            }
+            const std::string_view element(pick.subName);
+            if (!(element.starts_with("Edge") && element.size() > 4)
+                && !(element.starts_with("Vertex") && element.size() > 6)) {
+                continue;
+            }
+            int geoId = GeoEnum::GeoUndef;
+            bool linked = false;
+            try {
+                geoId = findExternalReference(sketch, pick.object, pick.subName, &linked);
+                if (geoId == GeoEnum::GeoUndef && !linked) {
+                    geoId = addProjectedExternalReference(sketch, pick.object, pick.subName);
+                }
+            }
+            catch (const Base::Exception&) {
+                geoId = GeoEnum::GeoUndef;
+            }
+            const std::string name =
+                geoId == GeoEnum::GeoUndef ? std::string() : externalSelectionName(sketch, geoId);
+            if (name.empty()) {
+                failed = true;
+                continue;
+            }
+            names.push_back(name);
+            added.push_back({pick.object, pick.subName, geoId});
+        }
+        if (failed) {
+            Gui::NotifyError(sketch,
+                             QT_TRANSLATE_NOOP("Notifications", "Error"),
+                             QT_TRANSLATE_NOOP("Notifications", "Failed to add external geometry"));
+        }
+
+        Gui::Selection().clearSelection();
+        for (const auto& name : names) {
+            vp->addSelection2(name);
+        }
+    }
+
+    ~ModelPickBooking()
+    {
+        // The command made nothing (a "Wrong selection", or the continuous tool started instead)
+        if (document && document->getBookedTransactionID() == tid
+            && App::GetApplication().transactionTmpName(tid)) {
+            document->abortTransaction();
+        }
+    }
+
+    ModelPickBooking(const ModelPickBooking&) = delete;
+    ModelPickBooking& operator=(const ModelPickBooking&) = delete;
+
+    struct Reference
+    {
+        App::DocumentObject* source;
+        std::string subName;
+        int geoId;
+    };
+    /// the model picks and their external geometries (the Dimension tool restores them after it
+    /// aborts its transaction for another constraint type)
+    const std::vector<Reference>& references() const
+    {
+        return added;
+    }
+
+private:
+    App::Document* document {nullptr};
+    int tid {0};
+    std::vector<Reference> added;
+};
 }// namespace SketcherGui
 
 /**
@@ -1425,6 +1558,7 @@ public:
 
     void deactivated() override
     {
+        abortExternalBooking();
         Gui::MDIView* mdi = Gui::Application::Instance->activeDocument()->getActiveView();
         if (auto* viewer = dynamic_cast<Gui::View3DInventor*>(mdi)) {
             viewer->getViewer()->setSelectionEnabled(false);
@@ -1960,14 +2094,36 @@ protected:
     unsigned int allowedSelTypes = 0;
     Base::Vector2d lastOnSketchPos;
     bool skipReleaseAfterExternalSelection = false;
+    /// FreeCAD-CH (ops#634): the temporary booking holding the model picks' links
+    int externalBooking = 0;
 
     /// indices of currently ongoing sequences in cmd->allowedSequences
     std::set<int> ongoingSequences, _tempOnSequences;
     /// Index within the selection sequences active
     unsigned int seqIndex;
 
+    void bookExternal()
+    {
+        externalBooking = Gui::Command::openActiveDocumentCommand(
+            App::TransactionName {.name = QT_TRANSLATE_NOOP("Command", "Add external geometry"),
+                                  .temporary = true});
+    }
+
+    /// The links of picks no constraint took (the sequence starts over, or the tool ends). After
+    /// a constraint the booking is renamed and committed: nothing to do
+    void abortExternalBooking()
+    {
+        App::Document* document = sketchgui->getSketchObject()->getDocument();
+        if (externalBooking && document->getBookedTransactionID() == externalBooking
+            && App::GetApplication().transactionTmpName(externalBooking)) {
+            document->abortTransaction();
+        }
+        externalBooking = 0;
+    }
+
     void resetOngoingSequences()
     {
+        abortExternalBooking();
         ongoingSequences.clear();
         for (unsigned int i = 0; i < cmd->allowedSelSequences.size(); i++) {
             ongoingSequences.insert(i);
@@ -2036,19 +2192,29 @@ protected:
 
         // FreeCAD-CH (PR 228 review): a link that gives none or several geometries is refused,
         // not added again (that changed its type); a new link that does is undone
+        // FreeCAD-CH (ops#634): booked with a temporary name, not committed: the constraint's own
+        // command renames the booking, so the pick and the constraint are one undo step. A tool
+        // left without a constraint aborts it (abortExternalBooking). A failed link is removed
+        // alone, as the Dimension tool does: an abort would take an earlier pick's link with it
         if (!linked) {
+            Sketcher::SketchObject* sketch = sketchgui->getSketchObject();
+            const int links = sketch->ExternalGeometry.getSize();
+            int externalGeoId = GeoEnum::GeoUndef;
             try {
-                openCommand(QT_TRANSLATE_NOOP("Command", "Add external geometry"));
-                const int externalGeoId =
-                    addProjectedExternalReference(sketchgui->getSketchObject(), source, subName);
-                if (externalGeoId != GeoEnum::GeoUndef) {
-                    commitCommand();
-                    return externalGeoId;
-                }
-                abortCommand();
+                bookExternal();
+                externalGeoId = addProjectedExternalReference(sketch, source, subName);
             }
             catch (const Base::Exception&) {
-                abortCommand();
+                externalGeoId = GeoEnum::GeoUndef;
+            }
+            if (externalGeoId != GeoEnum::GeoUndef) {
+                return externalGeoId;
+            }
+            if (sketch->ExternalGeometry.getSize() > links) {
+                const std::vector<int> geoIds = externalGeoIdsOfLink(sketch, links);
+                if (!geoIds.empty()) {
+                    sketch->delExternal(geoIds);
+                }
             }
         }
 
@@ -2253,7 +2419,8 @@ public:
     static constexpr const char* PICK_POINT_OR_EDGE = "%1 pick point/edge";
     static constexpr const char* PICK_SECOND_POINT_OR_EDGE_OR_CLICK_TO_FINISH =
         "%1 pick next point/edge, or empty space to finish";
-    explicit DrawSketchHandlerDimension(std::vector<std::string> SubNames)
+    explicit DrawSketchHandlerDimension(std::vector<std::string> SubNames,
+                                        const std::vector<ModelPickBooking::Reference>& modelPicks = {})
         : specialConstraint(SpecialConstraint::None)
         , availableConstraint(AvailableConstraint::FIRST)
         , previousOnSketchPos(Base::Vector2d(0.f, 0.f))
@@ -2266,6 +2433,11 @@ public:
         , cstrIndexes({})
         , singleCircleReverseOrder(false)
     {
+        // FreeCAD-CH (ops#634): model picks made before the tool, already linked by
+        // ModelPickBooking in the booking this tool's "Dimension" transaction takes over
+        for (const auto& pick : modelPicks) {
+            externalReferences.push_back({pick.source, pick.subName, pick.geoId});
+        }
     }
     ~DrawSketchHandlerDimension() override
     {
@@ -4157,6 +4329,7 @@ void CmdSketcherDimension::activated(int iMsg)
     Q_UNUSED(iMsg);
 
     // get the selection
+    ModelPickBooking modelPicks;  // FreeCAD-CH (ops#634)
     std::vector<Gui::SelectionObject> selection = getSelection().getSelectionEx();
     std::vector<std::string> SubNames = {};
 
@@ -4165,7 +4338,8 @@ void CmdSketcherDimension::activated(int iMsg)
         SubNames = selection[0].getSubNames();
     }
 
-    ActivateHandler(getActiveGuiDocument(), std::make_unique<DrawSketchHandlerDimension>(SubNames));
+    ActivateHandler(getActiveGuiDocument(),
+                    std::make_unique<DrawSketchHandlerDimension>(SubNames, modelPicks.references()));
 }
 
 void CmdSketcherDimension::updateAction(int mode)
@@ -4261,6 +4435,7 @@ bool canHorVerBlock(Sketcher::SketchObject* Obj, int geoId)
 void horVerActivated(CmdSketcherConstraint* cmd, std::string type)
 {
     // get the selection
+    ModelPickBooking modelPicks;  // FreeCAD-CH (ops#634)
     std::vector<Gui::SelectionObject> selection = Gui::Command::getSelection().getSelectionEx();
 
     // only one sketch with its subelements are allowed to be selected
@@ -5287,6 +5462,7 @@ void CmdSketcherConstrainCoincidentUnified::onActivated(CoincicenceType type)
     }
 
     // get the selection
+    ModelPickBooking modelPicks;  // FreeCAD-CH (ops#634)
     std::vector<Gui::SelectionObject> selection = getSelection().getSelectionEx();
 
     // only one sketch with its subelements are allowed to be selected
@@ -5791,6 +5967,7 @@ void CmdSketcherConstrainDistance::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
     // get the selection
+    ModelPickBooking modelPicks;  // FreeCAD-CH (ops#634)
     std::vector<Gui::SelectionObject> selection = getSelection().getSelectionEx();
 
     // only one sketch with its subelements are allowed to be selected
@@ -6442,6 +6619,7 @@ void CmdSketcherConstrainDistanceX::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
     // get the selection
+    ModelPickBooking modelPicks;  // FreeCAD-CH (ops#634)
     std::vector<Gui::SelectionObject> selection = getSelection().getSelectionEx();
 
     // only one sketch with its subelements are allowed to be selected
@@ -6743,6 +6921,7 @@ void CmdSketcherConstrainDistanceY::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
     // get the selection
+    ModelPickBooking modelPicks;  // FreeCAD-CH (ops#634)
     std::vector<Gui::SelectionObject> selection = getSelection().getSelectionEx();
 
     // only one sketch with its subelements are allowed to be selected
@@ -7039,6 +7218,7 @@ void CmdSketcherConstrainParallel::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
     // get the selection
+    ModelPickBooking modelPicks;  // FreeCAD-CH (ops#634)
     std::vector<Gui::SelectionObject> selection = getSelection().getSelectionEx();
 
     // only one sketch with its subelements are allowed to be selected
@@ -7212,6 +7392,7 @@ void CmdSketcherConstrainPerpendicular::activated(int iMsg)
     Q_UNUSED(iMsg);
 
     // get the selection
+    ModelPickBooking modelPicks;  // FreeCAD-CH (ops#634)
     std::vector<Gui::SelectionObject> selection = getSelection().getSelectionEx();
 
     // only one sketch with its subelements are allowed to be selected
@@ -8068,6 +8249,7 @@ void CmdSketcherConstrainTangent::activated(int iMsg)
     Q_UNUSED(iMsg);
 
     // get the selection
+    ModelPickBooking modelPicks;  // FreeCAD-CH (ops#634)
     std::vector<Gui::SelectionObject> selection = getSelection().getSelectionEx();
 
     // only one sketch with its subelements are allowed to be selected
@@ -8902,6 +9084,7 @@ void CmdSketcherConstrainRadius::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
     // get the selection
+    ModelPickBooking modelPicks;  // FreeCAD-CH (ops#634)
     std::vector<Gui::SelectionObject> selection = getSelection().getSelectionEx();
 
     // only one sketch with its subelements are allowed to be selected
@@ -9265,6 +9448,7 @@ void CmdSketcherConstrainDiameter::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
     // get the selection
+    ModelPickBooking modelPicks;  // FreeCAD-CH (ops#634)
     std::vector<Gui::SelectionObject> selection = getSelection().getSelectionEx();
 
     // only one sketch with its subelements are allowed to be selected
@@ -9583,6 +9767,7 @@ void CmdSketcherConstrainRadiam::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
     // get the selection
+    ModelPickBooking modelPicks;  // FreeCAD-CH (ops#634)
     std::vector<Gui::SelectionObject> selection = getSelection().getSelectionEx();
 
     // only one sketch with its subelements are allowed to be selected
@@ -10128,6 +10313,7 @@ void CmdSketcherConstrainAngle::activated(int iMsg)
     Q_UNUSED(iMsg);
     // TODO: comprehensive messages, like in CmdSketcherConstrainTangent
     //  get the selection
+    ModelPickBooking modelPicks;  // FreeCAD-CH (ops#634)
     std::vector<Gui::SelectionObject> selection = getSelection().getSelectionEx();
 
     // only one sketch with its subelements are allowed to be selected
@@ -10602,6 +10788,7 @@ void CmdSketcherConstrainEqual::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
     // get the selection
+    ModelPickBooking modelPicks;  // FreeCAD-CH (ops#634)
     std::vector<Gui::SelectionObject> selection = getSelection().getSelectionEx();
 
     // only one sketch with its subelements are allowed to be selected
@@ -10861,6 +11048,7 @@ void CmdSketcherConstrainSymmetric::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
     // get the selection
+    ModelPickBooking modelPicks;  // FreeCAD-CH (ops#634)
     std::vector<Gui::SelectionObject> selection = getSelection().getSelectionEx();
 
     // only one sketch with its subelements are allowed to be selected

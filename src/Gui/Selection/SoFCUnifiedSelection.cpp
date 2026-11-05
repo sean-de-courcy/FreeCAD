@@ -197,6 +197,7 @@ SoFCUnifiedSelection::SoFCUnifiedSelection()
     SO_NODE_ADD_FIELD(preselectionMode, (AUTO));
     SO_NODE_ADD_FIELD(selectionMode, (ON));
     SO_NODE_ADD_FIELD(selectionEnabled, (true));
+    SO_NODE_ADD_FIELD(selectionAdditive, (false));
     SO_NODE_ADD_FIELD(useNewSelection, (true));
 
     SO_NODE_DEFINE_ENUM_VALUE(PreselectionModes, AUTO);
@@ -1031,7 +1032,8 @@ void SoFCUnifiedSelection::handleEvent(SoHandleEventAction* action)
             bool greedySel = Gui::Selection().getSelectionStyle()
                 == Gui::SelectionSingleton::SelectionStyle::GreedySelection;
             greedySel = greedySel || event->wasCtrlDown();
-            if (setSelection(infos, greedySel) || greedySel) {
+            const bool additive = greedySel || selectionAdditive.getValue();
+            if (setSelection(infos, additive) || greedySel) {
                 action->setHandled();
             }
         }  // mouse release
