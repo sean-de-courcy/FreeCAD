@@ -60,6 +60,9 @@ public:
                       // hidden, visibility toggle action is disabled by default (it is unavailable
                       // to the UI). Upon being forced to be available, these toolbars default to
                       // visible.
+        UnavailableHidden,  // FreeCAD-CH (ops#605): as Unavailable, but when forced to be
+                            // available the toolbar stays hidden until the user shows it from the
+                            // toolbar menu.
     };
 
     ToolBarItem();

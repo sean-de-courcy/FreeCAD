@@ -1534,7 +1534,7 @@ CmdPartDesignPad::CmdPartDesignPad()
 {
     sAppModule = "PartDesign";
     sGroup = QT_TR_NOOP("PartDesign");
-    sMenuText = QT_TR_NOOP("Pad");
+    sMenuText = QT_TR_NOOP("Extrude");  // FreeCAD-CH (ops#605): Onshape's word
     sToolTipText = QT_TR_NOOP("Extrudes the selected sketch or profile and adds it to the body");
     sWhatsThis = "PartDesign_Pad";
     sStatusTip = sToolTipText;
@@ -1565,7 +1565,7 @@ CmdPartDesignPocket::CmdPartDesignPocket()
 {
     sAppModule = "PartDesign";
     sGroup = QT_TR_NOOP("PartDesign");
-    sMenuText = QT_TR_NOOP("Pocket");
+    sMenuText = QT_TR_NOOP("Extrude (remove)");  // FreeCAD-CH (ops#605): Onshape's word
     sToolTipText = QT_TR_NOOP("Extrudes the selected sketch or profile and removes it from the body");
     sWhatsThis = "PartDesign_Pocket";
     sStatusTip = sToolTipText;
@@ -2506,8 +2506,8 @@ CmdPartDesignThickness::CmdPartDesignThickness()
 {
     sAppModule = "PartDesign";
     sGroup = QT_TR_NOOP("PartDesign");
-    sMenuText = QT_TR_NOOP("Thickness");
-    sToolTipText = QT_TR_NOOP("Applies thickness and removes the selected faces");
+    sMenuText = QT_TR_NOOP("Shell");  // FreeCAD-CH (ops#605): Onshape's word
+    sToolTipText = QT_TR_NOOP("Shells the body: applies thickness and removes the selected faces");
     sWhatsThis = "PartDesign_Thickness";
     sStatusTip = sToolTipText;
     sPixmap = "PartDesign_Thickness";
@@ -2714,7 +2714,7 @@ CmdPartDesignLinearPattern::CmdPartDesignLinearPattern()
 {
     sAppModule = "PartDesign";
     sGroup = QT_TR_NOOP("PartDesign");
-    sMenuText = QT_TR_NOOP("Linear Pattern");
+    sMenuText = QT_TR_NOOP("Linear pattern");  // FreeCAD-CH (ops#605): Onshape's word
     sToolTipText = QT_TR_NOOP(
         "Duplicates the selected features or the active body in a linear pattern"
     );
@@ -2788,7 +2788,7 @@ CmdPartDesignPolarPattern::CmdPartDesignPolarPattern()
 {
     sAppModule = "PartDesign";
     sGroup = QT_TR_NOOP("PartDesign");
-    sMenuText = QT_TR_NOOP("Polar Pattern");
+    sMenuText = QT_TR_NOOP("Circular pattern");  // FreeCAD-CH (ops#605): Onshape's word
     sToolTipText = QT_TR_NOOP(
         "Duplicates the selected features or the active body in a circular pattern"
     );

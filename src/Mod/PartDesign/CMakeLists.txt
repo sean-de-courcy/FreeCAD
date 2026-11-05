@@ -109,6 +109,7 @@ if(BUILD_GUI)
         PartDesignTests/TestForkKeymapGui.py
         PartDesignTests/TestTaskStatusGui.py
         PartDesignTests/TestProblemNavigationGui.py
+        PartDesignTests/TestToolbarsGui.py
     )
 endif(BUILD_GUI)
 

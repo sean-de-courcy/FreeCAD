@@ -736,7 +736,8 @@ void ToolBarManager::setup(ToolBarItem* toolBarItems)
         // toggleViewAction to control its visibility is not visible either.
         //
         // Both are managed under the responsibility of the client code
-        if (it->visibilityPolicy != ToolBarItem::DefaultVisibility::Unavailable) {
+        if (it->visibilityPolicy != ToolBarItem::DefaultVisibility::Unavailable
+            && it->visibilityPolicy != ToolBarItem::DefaultVisibility::UnavailableHidden) {
             bool defaultvisibility = it->visibilityPolicy == ToolBarItem::DefaultVisibility::Visible;
 
             visible = hPref->GetBool(toolbarName.c_str(), defaultvisibility);
@@ -883,7 +884,9 @@ void ToolBarManager::restoreState() const
         QToolBar* toolbar = findToolBar(toolbars, it);
         if (toolbar) {
             QByteArray toolbarName = toolbar->objectName().toUtf8();
-            if (getToolbarPolicy(toolbar) != ToolBarItem::DefaultVisibility::Unavailable) {
+            auto policy = getToolbarPolicy(toolbar);
+            if (policy != ToolBarItem::DefaultVisibility::Unavailable
+                && policy != ToolBarItem::DefaultVisibility::UnavailableHidden) {
                 toolbar->setVisible(hPref->GetBool(toolbarName.constData(), toolbar->isVisible()));
             }
 
@@ -1308,7 +1311,8 @@ void ToolBarManager::setState(const QString& name, State state)
         auto policy = getToolbarPolicy(tb);
 
         if (state == State::RestoreDefault) {
-            if (policy == ToolBarItem::DefaultVisibility::Unavailable) {
+            if (policy == ToolBarItem::DefaultVisibility::Unavailable
+                || policy == ToolBarItem::DefaultVisibility::UnavailableHidden) {
                 tb->hide();
                 tb->toggleViewAction()->setVisible(false);
             }

@@ -37,7 +37,7 @@
     </preferencepack>
     <preferencepack>
       <name>FreeCAD-CH Onshape</name>
-      <description>Works like Onshape: right-drag turns the view; one Features toolbar in Onshape's order, with File, Edit and View in the menu bar and no workbench switcher (View > Workbench); three Sketcher toolbars and no grid in new sketches; the feature dialog over the left of the 3D view; no Start page; a shorter workbench list; three decimals; autosave every 5 minutes. Leaves the theme and colours as they are.</description>
+      <description>Works like Onshape: right-drag turns the view; File, Edit and View in the menu bar and no workbench switcher (View > Workbench); only the Features toolbar (built in, in Onshape's order) and, in a sketch, the Sketch toolbar; no grid in new sketches; the feature dialog over the left of the 3D view; no Start page; a shorter workbench list; three decimals; autosave every 5 minutes. Leaves the theme and colours as they are.</description>
       <version>1.0.0</version>
       <tag>built-in</tag>
       <tag>FreeCAD-CH</tag>

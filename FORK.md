@@ -453,7 +453,8 @@ names it.
 | `feat/600-hide-seams` | feat | ops#600 | - | `integration` `f93f763f99` | `071e855676` (fork PR 423), 2026-11-05 | never (fork feature) |
 | `corpus/596-accept-r4-take` | feature | ops#596 | - | `integration` `f93f763f99` | `3576ea7ca5` (fork PR 425), 2026-11-05 | never (fork tests) |
 | `fix/607-gui-units` | fix | ops#607 | - | `integration` `79cb14308a` | `a0499e4155` (fork PR 426), 2026-11-05 | never (fork fix) |
-| `fix/596-park-skip` | fix | ops#596 | - | `integration` `3576ea7ca5` | (fork PR 427) | never (fork fix) |
+| `fix/596-park-skip` | fix | ops#596 | - | `integration` `3576ea7ca5` | `9ebe600eca` (fork PR 427), 2026-11-05 | never (fork fix) |
+| `feat/605-toolbars-words` | feat | ops#605 | - | `integration` `3576ea7ca5` | (fork PR 428) | never (fork feature: Onshape toolbars and words) |
 
 ## Fork-only commits in carried topics
 
