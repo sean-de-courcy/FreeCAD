@@ -1576,6 +1576,24 @@ bool roundsAnalytically(const TopoDS_Shape& base, const TopTools_IndexedMapOfSha
         if (planes == 0) {
             return false;
         }
+        // A band running on across a smooth edge onto the next face (a floor ending in a round)
+        // leaves OCCT's analytic cases: its round there is a B-spline, and right
+        for (int k = 1; k <= 2; ++k) {
+            const TopoDS_Face& face = TopoDS::Face(faces(k));
+            for (TopExp_Explorer it(face, TopAbs_EDGE); it.More(); it.Next()) {
+                const TopoDS_Edge& next = TopoDS::Edge(it.Current());
+                const int at = facesOfEdges.FindIndex(next);
+                if (at == 0 || chain.Contains(next) || BRep_Tool::Degenerated(next)) {
+                    continue;
+                }
+                for (const auto& other : facesOfEdges(at)) {
+                    if (!other.IsSame(face)
+                        && ChFi3d::IsTangentFaces(next, face, TopoDS::Face(other))) {
+                        return false;
+                    }
+                }
+            }
+        }
         for (TopExp_Explorer it(edge, TopAbs_VERTEX); it.More(); it.Next()) {
             const TopoDS_Vertex& vertex = TopoDS::Vertex(it.Current());
             const gp_Vec tangent = tangentAt(edge, vertex);
@@ -1757,6 +1775,12 @@ std::string lostMaterial(
                 if (!distance.IsDone() || distance.Value() <= reach
                     || liesOnAny(point, resultFaces)) {
                     continue;
+                }
+                // A base that isn't valid passes its defects on, as in filledPocket(): the
+                // repair drops a fin inside a solid, or a void outside it. Checked only for a
+                // result that would fail
+                if (!BRepCheck_Analyzer(dressed).IsValid()) {
+                    return {};
                 }
                 const int index = base.findShape(face);
                 const std::string name = index == 0
