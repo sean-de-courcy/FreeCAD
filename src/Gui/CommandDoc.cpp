@@ -1690,6 +1690,7 @@ void StdCmdDelete::activated(int iMsg)
             std::vector<std::string> subNames;
         };
         std::vector<HandedToEdited> handed;
+        bool elementEditor = false;
         for (auto& editDoc : editDocs) {
             // getEditViewProvider(), not getInEdit(): that is null while another view of the
             // document is active (ops#164)
@@ -1697,6 +1698,7 @@ void StdCmdDelete::activated(int iMsg)
 
             // In practice, no ViewProviderDocumentObject accepts deletion in edit - 2025-06-17
             if (vpedit && !vpedit->acceptDeletionsInEdit() && handsSubElementsToEdited(vpedit)) {
+                elementEditor = true;
                 for (auto& sel : Selection().getSelectionEx(editDoc->getDocument()->getName())) {
                     if (sel.getObject() == vpedit->getObject()) {
                         if (!sel.getSubNames().empty()) {
@@ -1706,6 +1708,17 @@ void StdCmdDelete::activated(int iMsg)
                     }
                 }
             }
+        }
+        // FreeCAD-CH (ops#634): an element of another object picked while such an editor is open
+        // (a model edge picked in the sketch editor, for a constraint) is a reference, never a
+        // request to delete its object
+        if (elementEditor) {
+            std::erase_if(sels, [&handed](const auto& sel) {
+                return !sel.getSubNames().empty()
+                    && std::ranges::none_of(handed, [&sel](const HandedToEdited& entry) {
+                           return entry.obj == sel.getObject();
+                       });
+            });
         }
         for (auto& [vpedit, edited, subNames] : handed) {
             manageDocCommand(edited->getDocument());

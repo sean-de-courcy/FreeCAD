@@ -563,6 +563,9 @@ public:
     void purgeHandler();
     //@}
 
+    /// FreeCAD-CH (ops#634): a sketch element (point, curve, axis, constraint) is under the cursor
+    bool hasSketchPreselection() const;
+
     bool isConstructionMode() const;
 
     // set the current GeometryCreationMode mode
@@ -810,6 +813,10 @@ protected:
     //@{
     /// purges the DrawHandler if existing and tidies up
     void deactivateHandler();
+    /// FreeCAD-CH (ops#634): model edges and vertices selectable in plain edit mode (no handler)
+    void setModelPicking(Gui::View3DInventorViewer* viewer, bool on);
+    /// the viewer the sketch is edited in, or null
+    Gui::View3DInventorViewer* getEditViewer() const;
     /// get called if a subelement is double clicked while editing
     void editDoubleClicked();
     /// get called when an edge is double clicked to select/unselect the whole wire

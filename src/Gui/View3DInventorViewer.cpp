@@ -2716,6 +2716,16 @@ bool View3DInventorViewer::isSelectionEnabled() const
     return this->selectionRoot->selectionEnabled.getValue();  // NOLINT
 }
 
+void View3DInventorViewer::setSelectionAdditive(bool additive)
+{
+    this->selectionRoot->selectionAdditive.setValue(additive);  // NOLINT
+}
+
+bool View3DInventorViewer::isSelectionAdditive() const
+{
+    return this->selectionRoot->selectionAdditive.getValue();  // NOLINT
+}
+
 SbVec2f View3DInventorViewer::screenCoordsOfPath(SoPath* path) const
 {
     // Generate a matrix (well, a SoGetMatrixAction) that

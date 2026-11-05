@@ -104,6 +104,9 @@ public:
     SoSFEnum preselectionMode;
     SoSFEnum selectionMode;
     SoSFBool selectionEnabled;
+    // FreeCAD-CH (ops#634): a click adds to the selection (or removes a selected element) as with
+    // Ctrl, and an empty click is left to the editing view provider (the sketch editor's model picks)
+    SoSFBool selectionAdditive;
     SoSFBool useNewSelection;
 
     void doAction(SoAction* action) override;

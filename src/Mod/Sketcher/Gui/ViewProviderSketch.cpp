@@ -93,6 +93,7 @@
 
 #include "DrawSketchHandler.h"
 #include "DrawSketchHandlerDragAutoConstraint.h"
+#include "DrawSketchHandlerExternal.h"  // FreeCAD-CH (ops#634): ModelPickSelection
 #include "EditDatumDialog.h"
 #include "EditTextDialog.h"
 #include "EditModeCoinManager.h"
@@ -799,6 +800,9 @@ void ViewProviderSketch::activateHandler(std::unique_ptr<DrawSketchHandler> newH
 
     sketchHandler = std::move(newHandler);
     setSketchMode(STATUS_SKETCH_UseHandler);
+    // FreeCAD-CH (ops#634): a handler takes the model picks it wants itself (a constraint tool
+    // turns selection on with its own gate); a drawing tool must get every click
+    setModelPicking(getEditViewer(), false);
     sketchHandler->activate(this);
 
     // make sure receiver has focus so immediately pressing Escape will be handled by
@@ -813,8 +817,48 @@ void ViewProviderSketch::deactivateHandler()
     if (sketchHandler) {
         sketchHandler->deactivate();
         sketchHandler = nullptr;
+        setModelPicking(getEditViewer(), true);
     }
     setSketchMode(STATUS_NONE);
+}
+
+bool ViewProviderSketch::hasSketchPreselection() const
+{
+    return isInEditMode()
+        && (preselection.isPreselectPointValid() || preselection.isPreselectCurveValid()
+            || preselection.isCrossPreselected() || !preselection.PreselectConstraintSet.empty());
+}
+
+Gui::View3DInventorViewer* ViewProviderSketch::getEditViewer() const
+{
+    auto editDoc = Gui::Application::Instance->editDocument([this](Gui::Document* editdoc) {
+        return editdoc->getEditViewProvider() == this;
+    });
+    if (!editDoc) {
+        return nullptr;
+    }
+    auto* view = dynamic_cast<Gui::View3DInventor*>(editDoc->getActiveView());
+    if (!view || view->getViewer()->getEditingViewProvider() != this) {
+        // the edit is ending: unsetEditViewer ran before unsetEdit's deactivateHandler
+        return nullptr;
+    }
+    return view->getViewer();
+}
+
+void ViewProviderSketch::setModelPicking(Gui::View3DInventorViewer* viewer, bool on)
+{
+    if (!viewer) {
+        return;
+    }
+    viewer->setSelectionEnabled(on);
+    viewer->setSelectionAdditive(on);
+    auto* document = getObject()->getDocument();
+    if (on) {
+        Gui::Selection().addSelectionGate(new ModelPickSelection(getObject()));
+    }
+    else if (dynamic_cast<const ModelPickSelection*>(Gui::Selection().getSelectionGate(document))) {
+        Gui::Selection().rmvSelectionGate();
+    }
 }
 
 /// removes the active handler
@@ -835,7 +879,8 @@ void ViewProviderSketch::purgeHandler()
     if(view) {
         Gui::View3DInventorViewer* viewer;
         viewer = static_cast<Gui::View3DInventor*>(view)->getViewer();
-        viewer->setSelectionEnabled(false);
+        // FreeCAD-CH (ops#634): sketch selection plus the model picks of plain edit mode
+        setModelPicking(viewer, true);
     }
 
     // Give back the focus to the MDI to make sure VPSketch receive keyboard events.
@@ -2883,6 +2928,14 @@ void ViewProviderSketch::onSelectionChanged(const Gui::SelectionChanges& msg)
             return;
         }
 
+        // FreeCAD-CH (ops#634): a model edge or vertex picked in plain edit mode. The press found
+        // no sketch element and readied a rubber band, whose release would clear the selection
+        // just made: the click is the model pick's
+        if (msg.Type == Gui::SelectionChanges::AddSelection && Mode == STATUS_SKETCH_StartRubberBand
+            && msg.Object.getSubObject() != getObject()) {
+            setSketchMode(STATUS_NONE);
+        }
+
         std::string temp;
         if (msg.Type == Gui::SelectionChanges::ClrSelection) {
             // if something selected in this object?
@@ -4850,7 +4903,8 @@ void ViewProviderSketch::setEditViewer(Gui::View3DInventorViewer* viewer, int Mo
     }
 
     viewer->setEditing(true);
-    viewer->setSelectionEnabled(false);
+    // FreeCAD-CH (ops#634): model edges and vertices can be picked before a constraint command
+    setModelPicking(viewer, true);
 
     viewer->addGraphicsItem(rubberband.get());
     rubberband->setViewer(viewer);
@@ -4895,6 +4949,7 @@ void ViewProviderSketch::unsetEditViewer(Gui::View3DInventorViewer* viewer)
 
     viewer->removeGraphicsItem(rubberband.get());
     viewer->setEditing(false);
+    setModelPicking(viewer, false);
     viewer->setSelectionEnabled(true);
 
     blockContextMenu = false;
