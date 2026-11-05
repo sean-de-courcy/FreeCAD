@@ -703,6 +703,40 @@ class TestRollBackBarGui(unittest.TestCase):
             self.doc.recompute()
             self.assertTrue(self.body.isValid(), obj.Name)
 
+    def testDropWithTheOriginSelectedMovesOnlyTheFeature(self):
+        """Boss B dragged together with the Origin row, below hole C: boss B moves, the Origin
+        stays where it is (Body.reorderObject refuses the Origin since ops#597; the drop leaves it
+        out, as before; review pr597-r1 L1)."""
+        block, a, b, c = self.chain()
+        self.waitForRows(["Origin", "Block", "BossA", "BossB", "HoleC", "|"])
+        self.select(self.body.Origin, b)
+        rect = self.rowRect("HoleC")
+        self.closeModalSoon()
+        self.drop(QtCore.QPoint(rect.center().x(), rect.bottom() - 1))
+        self.assertEqual(self.modal, [])
+        self.assertEqual(self.solids(), ["Block", "BossA", "HoleC", "BossB"])
+        self.assertIs(b.BaseFeature, c)
+        self.assertNotIn(self.body.Origin, self.body.Group)
+        self.waitForRows(["Origin", "Block", "BossA", "HoleC", "BossB", "|"])
+
+    def testMoveFeatureAfterWithAnOriginPlaneSelected(self):
+        """PartDesign_MoveFeatureInTree with boss B and the XY plane selected, after hole C: boss B
+        moves, the plane stays in the Origin, and no error is shown (review pr597-r1 L1)."""
+        block, a, b, c = self.chain()
+        plane = models.originFeature(self.body, "XY_Plane")
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.doc.Name, b.Name)
+        Gui.Selection.addSelection(self.doc.Name, plane.Name)
+        self.modal = []
+        self.answerListSoon("HoleC")
+        Gui.runCommand("PartDesign_MoveFeatureInTree")
+        processEvents(0.5)
+        self.closing = False
+        self.assertEqual(len(self.modal), 1, self.modal)  # the list dialog only
+        self.assertEqual(self.solids(), ["Block", "BossA", "HoleC", "BossB"])
+        self.assertIn(plane, self.body.Origin.OriginFeatures)
+        self.assertNotIn(plane, self.body.Group)
+
     def cornerEdge(self, feature):
         """The feature's vertical edge at (20, 0), the block's corner."""
         for i, edge in enumerate(feature.Shape.Edges, 1):

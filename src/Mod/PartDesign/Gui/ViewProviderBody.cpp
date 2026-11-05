@@ -817,18 +817,28 @@ void ViewProviderBody::recomputeEditTail(App::DocumentObject* member)
     recomputeReporting(doc, {body});
 }
 
-bool ViewProviderBody::reorderObjects(const std::vector<App::DocumentObject*>& objs,
+bool ViewProviderBody::reorderObjects(const std::vector<App::DocumentObject*>& dropped,
                                       App::DocumentObject* target,
                                       bool after)
 {
     auto body = getObject<PartDesign::Body>();
-    if (!body || objs.empty()) {
+    if (!body || dropped.empty()) {
         return false;
     }
-    for (auto obj : objs) {
+    // The Origin and its features (hasObject() counts them) have no place in the Group, which
+    // Body.reorderObject refuses (ops#597): dragged along with features, they stay where they are
+    const auto& members = body->Group.getValues();
+    std::vector<App::DocumentObject*> objs;
+    for (auto obj : dropped) {
         if (!body->hasObject(obj)) {
             return false;
         }
+        if (std::ranges::find(members, obj) != members.end()) {
+            objs.push_back(obj);
+        }
+    }
+    if (objs.empty()) {
+        return true;  // nothing to move
     }
     // canDropObject() refuses the drag first; the drop's transaction has committed the edit's
     if (isEditLocked(body->getDocument())) {
@@ -859,7 +869,7 @@ bool ViewProviderBody::reorderObjects(const std::vector<App::DocumentObject*>& o
         target = *last;
         after = true;
     }
-    else if (std::ranges::find(body->Group.getValues(), target) == body->Group.getValues().end()) {
+    else if (std::ranges::find(members, target) == members.end()) {
         // A row that isn't in the Group (the Origin, which hasObject() counts, ops#597) is above
         // every feature: the start
         target = nullptr;

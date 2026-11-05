@@ -1456,9 +1456,11 @@ void CmdPartDesignMoveFeatureInTree::activated(int iMsg)
     // One step through the Body (ops#127): the chain, the references that follow a feature's base,
     // the re-target rule and the Tip are the Body's; a refused order (a dependency cycle) changes
     // nothing
+    // The Origin and its features, selected along, have no place in the Group, which
+    // Body.reorderObject refuses (ops#597): they stay where they are
     std::vector<App::DocumentObject*> moved;
     for (auto feat : features) {
-        if (feat != target) {
+        if (feat != target && std::ranges::find(model, feat) != model.end()) {
             moved.push_back(feat);
         }
     }
