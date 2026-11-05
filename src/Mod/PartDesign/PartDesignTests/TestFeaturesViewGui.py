@@ -66,8 +66,9 @@ class TestFeaturesViewGui(unittest.TestCase):
         Gui.Selection.clearSelection()
         self.param = App.ParamGet("User parameter:BaseApp/Preferences/Mod/PartDesign")
         self.savedTree = self.param.GetBool("ShowModelTree", False)
-        self.param.SetBool("ShowModelTree", False)
         Gui.activateWorkbench("PartDesignWorkbench")
+        # The list in place of the tree (the other GUI tests run with the tree: PartDesignTests)
+        self.showTree(False)
         model = Gui.getMainWindow().findChild(QtWidgets.QDockWidget, "Model")
         if model is not None:
             model.show()
@@ -87,8 +88,13 @@ class TestFeaturesViewGui(unittest.TestCase):
             pump()
         Gui.Selection.clearSelection()
         App.closeDocument(self.doc.Name)
-        self.param.SetBool("ShowModelTree", self.savedTree)
+        Gui.activateWorkbench("PartDesignWorkbench")
+        self.showTree(self.savedTree)
         pump()
+
+    def showTree(self, tree):
+        if self.param.GetBool("ShowModelTree", False) != tree:
+            Gui.runCommand("PartDesign_ToggleModelTree")
 
     def view(self):
         return Gui.getMainWindow().findChild(QtWidgets.QWidget, "FeaturesView")
