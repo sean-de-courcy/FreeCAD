@@ -67,6 +67,7 @@ public:
     }
 
     void newEmptyFile();
+    void newDocument();
     void newPartDesignFile();
     void openExistingFile();
     void newAssemblyFile();

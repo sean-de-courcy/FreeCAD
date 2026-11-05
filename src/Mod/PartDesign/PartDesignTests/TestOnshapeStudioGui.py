@@ -1,0 +1,302 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+
+# ***************************************************************************
+# *                                                                         *
+# *   This file is part of FreeCAD.                                         *
+# *                                                                         *
+# *   FreeCAD is free software: you can redistribute it and/or modify it    *
+# *   under the terms of the GNU Lesser General Public License as           *
+# *   published by the Free Software Foundation, either version 2.1 of the  *
+# *   License, or (at your option) any later version.                       *
+# *                                                                         *
+# *   FreeCAD is distributed in the hope that it will be useful, but        *
+# *   WITHOUT ANY WARRANTY; without even the implied warranty of            *
+# *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU      *
+# *   Lesser General Public License for more details.                       *
+# *                                                                         *
+# *   You should have received a copy of the GNU Lesser General Public      *
+# *   License along with FreeCAD. If not, see                               *
+# *   <https://www.gnu.org/licenses/>.                                      *
+# *                                                                         *
+# ***************************************************************************
+
+"""Onshape's defaults for a new user and a new document (FreeCAD-CH, ops#605 Tier 1, 2a, 2f).
+
+- The task box's OK and Cancel are a check and a cross, and OK is the default button: Enter in a
+  feature's panel accepts it, as in Onshape.
+- Std_New in PartDesign makes a part studio: one Body, its Origin's three planes shown until its
+  first sketch. Std_New with 1 (the Start page's cards) is an empty document.
+- A new settings folder starts with the "FreeCAD-CH Onshape" preference pack; an existing user.cfg,
+  and a run started with a script (the test runners), keep their settings.
+
+Designed model: a 10 x 20 rectangle sketch in a Body, padded 5 (volume 1000). The first-start
+cases run FreeCAD.exe on new settings folders, with a probe add-on that reports one setting."""
+
+import os
+import shutil
+import subprocess
+import tempfile
+import time
+import unittest
+
+import FreeCAD as App
+import FreeCADGui as Gui
+
+from PySide import QtCore, QtWidgets
+from PySide6 import QtTest
+
+from PartDesignTests.Scenarios import models
+
+TINKERCAD = "Gui::TinkerCADNavigationStyle"
+
+# The probe: an add-on in the settings folder whose InitGui.py, once the event loop runs (after
+# the start-up steps, the first-start apply among them), writes the navigation style and exits
+# hard, so nothing is saved and no prompt is shown
+PROBE = r'''
+import os
+import FreeCAD
+from PySide import QtCore
+
+
+def report():
+    style = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/View").GetString("NavigationStyle")
+    with open(os.environ["FC_ONSHAPE_PROBE_OUT"], "w", encoding="utf-8") as out:
+        out.write("style=" + style + "\n")
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.windll.kernel32
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.TerminateProcess.argtypes = (wintypes.HANDLE, wintypes.UINT)
+        kernel32.TerminateProcess(kernel32.GetCurrentProcess(), 0)
+    os._exit(0)
+
+
+QtCore.QTimer.singleShot(0, report)
+'''
+
+# A user.cfg of an existing settings folder, with one setting of its own
+USER_CFG = """<?xml version="1.0" encoding="utf-8" standalone="no" ?>
+<FCParameters>
+  <FCParamGroup Name="Root">
+    <FCParamGroup Name="BaseApp">
+      <FCParamGroup Name="Preferences">
+        <FCParamGroup Name="View">
+          <FCText Name="NavigationStyle">Gui::CADNavigationStyle</FCText>
+        </FCParamGroup>
+      </FCParamGroup>
+    </FCParamGroup>
+  </FCParamGroup>
+</FCParameters>
+"""
+
+
+def pump(seconds=0.3):
+    app = QtWidgets.QApplication.instance()
+    end = time.time() + seconds
+    while time.time() < end:
+        app.processEvents()
+        time.sleep(0.01)
+
+
+def taskButton(which):
+    """The task panel's OK or Cancel button."""
+    for box in Gui.getMainWindow().findChildren(QtWidgets.QDialogButtonBox):
+        button = box.button(which)
+        if button is None or not button.isVisible():
+            continue
+        parent = box.parentWidget()
+        while parent is not None:
+            if parent.metaObject().className() == "Gui::TaskView::TaskView":
+                return button
+            parent = parent.parentWidget()
+    return None
+
+
+def visibleChild(name):
+    for widget in Gui.getMainWindow().findChildren(QtWidgets.QWidget, name):
+        if widget.isVisible():
+            return widget
+    return None
+
+
+def freecadExecutable():
+    name = "FreeCAD.exe" if os.name == "nt" else "FreeCAD"
+    path = os.path.join(App.getHomePath(), "bin", name)
+    return path if os.path.isfile(path) else None
+
+
+class TestOnshapeStudioGui(unittest.TestCase):
+    def setUp(self):
+        self.docs = []
+        self.homes = []
+        Gui.activateWorkbench("PartDesignWorkbench")
+
+    def tearDown(self):
+        if Gui.Control.activeDialog():
+            Gui.Control.closeDialog()
+            pump(0.2)
+        for name in self.docs:
+            if name in App.listDocuments():
+                App.closeDocument(name)
+        for home in self.homes:
+            shutil.rmtree(home, ignore_errors=True)
+        pump(0.2)
+
+    def newDocument(self, iMsg=None):
+        """The document Std_New makes (with iMsg, if given)."""
+        before = set(App.listDocuments())
+        if iMsg is None:
+            Gui.runCommand("Std_New")
+        else:
+            Gui.runCommand("Std_New", iMsg)
+        pump(0.3)
+        added = [name for name in App.listDocuments() if name not in before]
+        self.assertEqual(len(added), 1, added)
+        self.docs.append(added[0])
+        return App.getDocument(added[0])
+
+    def originVisibility(self, body):
+        """The visibility of the Origin's planes, axes and point, by role."""
+        return {f.Role: f.ViewObject.Visibility for f in body.Origin.OriginFeatures}
+
+    def assertStudioPlanes(self, body, shown):
+        visibility = self.originVisibility(body)
+        for role in ("XY_Plane", "XZ_Plane", "YZ_Plane"):
+            self.assertEqual(visibility[role], shown, (role, visibility))
+        for role in ("X_Axis", "Y_Axis", "Z_Axis", "Origin"):
+            self.assertFalse(visibility[role], (role, visibility))
+
+    # -- 2a: the check and cross, Enter accepts ---------------------------------------------------
+
+    def testEnterInThePadPanelAcceptsIt(self):
+        """A Pad panel on a 10 x 20 sketch, length 5: Enter in the length field closes the panel
+        and keeps the Pad (volume 1000). OK is a check icon with no words and the default button;
+        Cancel is a cross."""
+        doc = models.newDocument("OnshapeEnter")
+        self.docs.append(doc.Name)
+        body = models.body(doc)
+        profile = models.sketch(doc, "Profile", models.rectangle(0, 0, 10, 20), body)
+        doc.recompute()
+        App.setActiveDocument(doc.Name)
+        Gui.setActiveDocument(doc.Name)
+        Gui.activateView("Gui::View3DInventor", True)
+        Gui.ActiveDocument.ActiveView.setActiveObject("pdbody", body)
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(doc.Name, profile.Name)
+        Gui.runCommand("PartDesign_Pad")
+        pump(0.5)
+        self.assertTrue(Gui.Control.activeDialog(), "no Pad panel")
+
+        ok = taskButton(QtWidgets.QDialogButtonBox.Ok)
+        cancel = taskButton(QtWidgets.QDialogButtonBox.Cancel)
+        self.assertIsNotNone(ok)
+        self.assertIsNotNone(cancel)
+        self.assertTrue(ok.isDefault())
+        self.assertEqual(ok.text(), "")
+        self.assertFalse(ok.icon().isNull())
+        self.assertEqual(cancel.text(), "")
+        self.assertFalse(cancel.icon().isNull())
+
+        length = visibleChild("lengthEdit")
+        self.assertIsNotNone(length, "no length field")
+        length.setProperty("rawValue", 5.0)
+        pump(0.3)
+        QtTest.QTest.keyClick(length, QtCore.Qt.Key_Return)
+        pump(0.5)
+
+        self.assertFalse(Gui.Control.activeDialog(), "Enter left the Pad panel open")
+        pads = [o for o in doc.Objects if o.isDerivedFrom("PartDesign::Pad")]
+        self.assertEqual(len(pads), 1)
+        self.assertAlmostEqual(pads[0].Shape.Volume, 1000.0, places=6)
+
+    # -- 2f: a new document in PartDesign is a part studio ----------------------------------------
+
+    def testNewDocumentInPartDesignIsAPartStudio(self):
+        """Std_New in PartDesign: one Body, active, its three planes shown, its axes and point
+        not. A cancelled first sketch leaves them shown; a sketch on the XY plane hides them."""
+        doc = self.newDocument()
+        bodies = [o for o in doc.Objects if o.isDerivedFrom("PartDesign::Body")]
+        self.assertEqual(len(bodies), 1, [o.Name for o in doc.Objects])
+        body = bodies[0]
+        active = Gui.ActiveDocument.ActiveView.getActiveObject("pdbody")
+        self.assertEqual(active.Name if active else None, body.Name)
+        self.assertStudioPlanes(body, True)
+
+        # New Sketch with nothing selected opens the attachment dialog; Cancel removes the sketch
+        Gui.Selection.clearSelection()
+        Gui.runCommand("PartDesign_NewSketch")
+        pump(0.5)
+        self.assertTrue(Gui.Control.activeDialog(), "no attachment dialog")
+        taskButton(QtWidgets.QDialogButtonBox.Cancel).click()
+        pump(0.5)
+        self.assertFalse(Gui.Control.activeDialog())
+        self.assertEqual([o for o in body.Group if o.isDerivedFrom("Sketcher::SketchObject")], [])
+        self.assertStudioPlanes(body, True)
+
+        # A sketch on the selected XY plane: the planes go
+        plane = models.originFeature(body, "XY_Plane")
+        Gui.Selection.addSelection(doc.Name, body.Name, body.Origin.Name + "." + plane.Name + ".")
+        Gui.runCommand("PartDesign_NewSketch")
+        pump(0.5)
+        sketches = [o for o in body.Group if o.isDerivedFrom("Sketcher::SketchObject")]
+        self.assertEqual(len(sketches), 1, [o.Name for o in body.Group])
+        if Gui.ActiveDocument.getInEdit():
+            Gui.ActiveDocument.resetEdit()
+            pump(0.3)
+        self.assertStudioPlanes(body, False)
+
+    def testNewDocumentWithOneIsEmpty(self):
+        """Std_New with 1, as the Start page's cards run it: an empty document in PartDesign too."""
+        doc = self.newDocument(1)
+        self.assertEqual([o.Name for o in doc.Objects], [])
+
+    # -- Tier 1: the first-start apply ------------------------------------------------------------
+
+    def runOnNewHome(self, userCfg=None, script=False):
+        """FreeCAD.exe on a new settings folder holding the probe (and `userCfg` as user.cfg),
+        started with no file or with an empty script. Returns the navigation style it reports."""
+        exe = freecadExecutable()
+        if exe is None:
+            self.skipTest("no FreeCAD executable beside the build")
+        home = tempfile.mkdtemp(prefix="onshape-first-start-")
+        self.homes.append(home)
+        probeDir = os.path.join(home, "Mod", "OnshapeProbe")
+        os.makedirs(probeDir)
+        with open(os.path.join(probeDir, "InitGui.py"), "w", encoding="utf-8") as f:
+            f.write(PROBE)
+        if userCfg is not None:
+            with open(os.path.join(home, "user.cfg"), "w", encoding="utf-8") as f:
+                f.write(userCfg)
+        out = os.path.join(home, "probe.txt")
+        env = dict(os.environ)
+        env["FREECAD_USER_HOME"] = home
+        env["FC_ONSHAPE_PROBE_OUT"] = out
+        env.setdefault("QT_QPA_PLATFORM", "offscreen")
+        args = [exe]
+        if script:
+            empty = os.path.join(home, "empty.py")
+            with open(empty, "w", encoding="utf-8") as f:
+                f.write("# nothing\n")
+            args.append(empty)
+        subprocess.run(
+            args, env=env, timeout=240, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+        self.assertTrue(os.path.isfile(out), "the probe didn't report")
+        with open(out, encoding="utf-8") as f:
+            lines = dict(line.rstrip("\n").split("=", 1) for line in f if "=" in line)
+        return lines.get("style")
+
+    def testFirstStartAppliesTheOnshapePack(self):
+        """A settings folder with no user.cfg starts with the pack's TinkerCAD navigation style."""
+        self.assertEqual(self.runOnNewHome(), TINKERCAD)
+
+    def testFirstStartLeavesAnExistingUserCfgAlone(self):
+        """A settings folder with a user.cfg keeps its own navigation style."""
+        self.assertEqual(self.runOnNewHome(userCfg=USER_CFG), "Gui::CADNavigationStyle")
+
+    def testFirstStartSkipsARunWithAScript(self):
+        """A run started with a script (as the test runners start FreeCAD) keeps the code
+        defaults on a new folder: no navigation style is written."""
+        self.assertEqual(self.runOnNewHome(script=True), "")

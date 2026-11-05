@@ -806,6 +806,7 @@ bool TaskView::showDialog(TaskDialog* dlg, App::Document* doc)
     // first create the control element, set it up and wire it:
     outInfo.ActiveCtrl = new TaskEditControl(this);
     outInfo.ActiveCtrl->buttonBox->setStandardButtons(dlg->getStandardButtons());
+    outInfo.ActiveCtrl->decorateButtons();
     TaskDialogAttorney::setButtonBox(dlg, outInfo.ActiveCtrl->buttonBox);
 
     const std::vector<QWidget*>& cont = dlg->getDialogContent();

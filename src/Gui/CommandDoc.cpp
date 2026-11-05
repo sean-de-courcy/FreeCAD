@@ -41,12 +41,14 @@
 #include <App/GeoFeature.h>
 #include <App/GeoFeatureGroupExtension.h>
 #include <App/GroupExtension.h>
+#include <App/OriginGroupExtension.h>
 #include <Base/Exception.h>
 #include <Base/FileInfo.h>
 #include <Base/Stream.h>
 #include <Base/Tools.h>
 
 #include "Action.h"
+#include "ActiveObjectList.h"
 #include "Application.h"
 #include "BitmapFactory.h"
 #include "Command.h"
@@ -69,7 +71,10 @@
 #include "View3DInventor.h"
 #include "View3DInventorViewer.h"
 #include "ViewProvider.h"
+#include "ViewProviderCoordinateSystem.h"
 #include "WaitCursor.h"
+#include "Workbench.h"
+#include "WorkbenchManager.h"
 
 FC_LOG_LEVEL_INIT("Command", false)
 
@@ -803,7 +808,6 @@ StdCmdNew::StdCmdNew()
 
 void StdCmdNew::activated(int iMsg)
 {
-    Q_UNUSED(iMsg);
     QString cmd;
     cmd = QStringLiteral("App.newDocument()");
     runCommand(Command::Doc, cmd.toUtf8());
@@ -814,6 +818,26 @@ void StdCmdNew::activated(int iMsg)
     );
     if (hViewGrp->GetBool("ShowAxisCross")) {
         doCommand(Command::Gui, "Gui.ActiveDocument.ActiveView.setAxisCross(True)");
+    }
+
+    // In PartDesign a new document is a part studio, as in Onshape (ops#605 2f): one Body, its
+    // Origin's planes shown until its first sketch (the new-sketch workflow resets the temporary
+    // visibility). iMsg 1 asks for an empty document whatever the workbench (the Start page's cards)
+    Workbench* workbench = WorkbenchManager::instance()->active();
+    if (iMsg != 1 && workbench && workbench->name() == "PartDesignWorkbench") {
+        Application::Instance->commandManager().runCommandByName("PartDesign_Body");
+        MDIView* view = Application::Instance->activeView();
+        auto* body = view ? view->getActiveObject<App::DocumentObject*>(PDBODYKEY) : nullptr;
+        auto* group = body ? body->getExtensionByType<App::OriginGroupExtension>(true) : nullptr;
+        App::DocumentObject* origin = group ? group->Origin.getValue() : nullptr;
+        auto* vpo = origin ? freecad_cast<ViewProviderCoordinateSystem*>(
+                                 Application::Instance->getViewProvider(origin)
+                             )
+                           : nullptr;
+        if (vpo) {
+            vpo->setTemporaryVisibility(DatumElement::Planes);
+            vpo->setPlaneLabelVisibility(true);
+        }
     }
 }
 

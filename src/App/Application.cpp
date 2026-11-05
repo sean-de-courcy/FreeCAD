@@ -3555,7 +3555,12 @@ void Application::LoadParameters()
     }
 
     try {
-        if (_pcUserParamMngr->LoadOrCreateDocument() && mConfig["Verbose"] != "Strict") {
+        const bool userParameterCreated = _pcUserParamMngr->LoadOrCreateDocument();
+        if (userParameterCreated) {
+            // A new settings folder: the GUI applies the fork's first-start pack (ops#605)
+            mConfig["UserParameterCreated"] = "1";
+        }
+        if (userParameterCreated && mConfig["Verbose"] != "Strict") {
             // The user parameter file doesn't exist. When an alternative parameter file is offered
             // this will be used.
             const auto it = mConfig.find("UserParameterTemplate");

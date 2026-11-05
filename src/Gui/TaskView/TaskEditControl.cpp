@@ -24,6 +24,9 @@
 
 #include <QDialogButtonBox>
 #include <QHBoxLayout>
+#include <QPushButton>
+
+#include <Gui/BitmapFactory.h>
 
 #include "TaskEditControl.h"
 
@@ -36,7 +39,8 @@ TaskEditControl::TaskEditControl(QWidget* parent)
     hboxLayout = new QHBoxLayout(this);
     buttonBox = new QDialogButtonBox(this);
     buttonBox->setStandardButtons(QDialogButtonBox::Cancel | QDialogButtonBox::Ok);
-    buttonBox->setCenterButtons(true);
+    // At the right of the box's top, as Onshape's check and cross (ops#605 2a)
+    buttonBox->setCenterButtons(false);
 
     hboxLayout->addWidget(buttonBox);
 }
@@ -46,6 +50,27 @@ TaskEditControl::~TaskEditControl() = default;
 QDialogButtonBox* TaskEditControl::standardButtons() const
 {
     return buttonBox;
+}
+
+void TaskEditControl::decorateButtons()
+{
+    // The words become tooltips; a dialog that renames a button later keeps its icon too.
+    // OK is the default button: Enter in the panel accepts it (TaskView::keyPressEvent)
+    const auto decorate = [this](QDialogButtonBox::StandardButton which, const char* icon) {
+        QPushButton* button = buttonBox->button(which);
+        if (!button) {
+            return button;
+        }
+        button->setIcon(BitmapFactory().iconFromTheme(icon));
+        button->setToolTip(button->text().remove(QLatin1Char('&')));
+        button->setAccessibleName(button->toolTip());
+        button->setText(QString());
+        return button;
+    };
+    if (QPushButton* ok = decorate(QDialogButtonBox::Ok, "edit_OK")) {
+        ok->setDefault(true);
+    }
+    decorate(QDialogButtonBox::Cancel, "edit_Cancel");
 }
 
 #include "moc_TaskEditControl.cpp"

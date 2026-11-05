@@ -69,6 +69,7 @@ private:
     void setCursorFlashing();
     void setQtStyle();
     void migrateOldTheme(const std::string& style);
+    void applyFirstStartPack();
     void checkOpenGL();
     void loadOpenInventor();
     void setBranding();

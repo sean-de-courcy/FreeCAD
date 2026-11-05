@@ -222,6 +222,7 @@ void StartupPostProcess::setLoadFromPythonModule(bool value)
 void StartupPostProcess::execute()
 {
     setWindowTitle();
+    applyFirstStartPack();
     setProcessMessages();
     setAutoSaving();
     checkQtSvgImageFormatSupport();
@@ -339,6 +340,43 @@ void StartupPostProcess::migrateOldTheme(const std::string& style)
     }
     else if (style == "FreeCAD Dark.qss") {
         prefPackManager->apply("FreeCAD Dark");
+    }
+}
+
+void StartupPostProcess::applyFirstStartPack()
+{
+    // A new settings folder starts with the fork's Onshape-like settings (ops#605 Tier 1): the
+    // "FreeCAD-CH Onshape" pack, applied once, as the user would from Preferences > General. An
+    // existing user.cfg is never touched. Runs that start tests (-t) or a script or macro from the
+    // command line keep the code defaults, so test runs on a fresh folder see what they always saw.
+    const auto& config = App::Application::Config();
+    if (!config.contains("UserParameterCreated")) {
+        return;
+    }
+    const auto mode = config.find("RunMode");
+    if (mode != config.end() && mode->second == "Internal") {
+        return;
+    }
+    const auto count = config.find("OpenFileCount");
+    const int files = count != config.end() ? std::atoi(count->second.c_str()) : 0;
+    for (int i = 0; i < files; ++i) {
+        const auto file = config.find("OpenFile" + std::to_string(i));
+        if (file == config.end()) {
+            continue;
+        }
+        const QString ext = QFileInfo(QString::fromStdString(file->second)).suffix().toLower();
+        if (ext == QLatin1String("py") || ext == QLatin1String("fcmacro")) {
+            return;
+        }
+    }
+
+    try {
+        if (!Application::Instance->prefPackManager()->apply("FreeCAD-CH Onshape")) {
+            Base::Console().warning("First start: the FreeCAD-CH Onshape pack was not applied\n");
+        }
+    }
+    catch (const std::exception& e) {
+        Base::Console().warning("First start: %s\n", e.what());
     }
 }
 

@@ -88,6 +88,39 @@ struct MissingPlanesException
 {
 };
 
+// A new part studio (Std_New in PartDesign, ops#605 2f) shows its Origin's planes, through the
+// origin's temporary visibility, until its first sketch
+Gui::ViewProviderCoordinateSystem* originViewProvider(PartDesign::Body* body)
+{
+    App::DocumentObject* origin = body ? body->getOrigin() : nullptr;
+    return origin ? dynamic_cast<Gui::ViewProviderCoordinateSystem*>(
+                        Gui::Application::Instance->getViewProvider(origin)
+                    )
+                  : nullptr;
+}
+
+bool studioPlanesShown(PartDesign::Body* body)
+{
+    auto* vpo = originViewProvider(body);
+    return vpo && vpo->isTemporaryVisibility();
+}
+
+void showStudioPlanes(PartDesign::Body* body)
+{
+    if (auto* vpo = originViewProvider(body)) {
+        vpo->setTemporaryVisibility(Gui::DatumElement::Planes);
+        vpo->setPlaneLabelVisibility(true);
+    }
+}
+
+void endStudioPlanes(PartDesign::Body* body)
+{
+    if (auto* vpo = originViewProvider(body); vpo && vpo->isTemporaryVisibility()) {
+        vpo->resetTemporaryVisibility();
+        vpo->setPlaneLabelVisibility(false);
+    }
+}
+
 // The copy's element under the picked face's name isn't that face (PR 223 review N1)
 struct CopyMismatchException
 {
@@ -297,6 +330,7 @@ public:
             );
         }
         Gui::Command::updateActive();
+        endStudioPlanes(activeBody);
         PartDesignGui::setEdit(Feat, activeBody);
     }
 
@@ -656,6 +690,9 @@ private:
 
     void createSketchAndShowAttachment()
     {
+        // A new part studio shows its planes until its first sketch (Std_New, ops#605 2f): a
+        // cancelled first sketch shows them again
+        const bool studioPlanes = studioPlanesShown(activeBody);
         setOriginTemporaryVisibility();
 
         // Capture selection before clearing it to pre-populate the attachment dialog.
@@ -711,9 +748,12 @@ private:
                 PartDesignGui::setEdit(sketchObj, partDesignBody);
             }
         };
-        auto onReject = [bodyRef = App::DocumentObjectT(activeBody)]() {
+        auto onReject = [bodyRef = App::DocumentObjectT(activeBody), studioPlanes]() {
             if (auto* partDesignBody = bodyRef.getObjectAs<PartDesign::Body>()) {
                 resetOriginVisibility(partDesignBody);
+                if (studioPlanes) {
+                    showStudioPlanes(partDesignBody);
+                }
             }
         };
 
