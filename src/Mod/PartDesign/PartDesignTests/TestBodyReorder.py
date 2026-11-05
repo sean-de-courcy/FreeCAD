@@ -485,7 +485,8 @@ class BodyReorderBase:
             self.assertIs(self.body.Tip, c)
         sketch = self.doc.addObject("Sketcher::SketchObject", "Stray")
         for target in (origin, plane):
-            with self.assertRaises(ValueError):
+            # insertObject reports every Base::Exception as SystemError (BodyPyImp.cpp)
+            with self.assertRaises(SystemError):
                 self.body.insertObject(sketch, target, True)
             self.assertEqual(list(self.body.Group), group)
         self.recompute()
