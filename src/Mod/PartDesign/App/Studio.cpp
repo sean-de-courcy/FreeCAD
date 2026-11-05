@@ -3,6 +3,7 @@
 #include "Studio.h"
 
 #include <algorithm>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -12,17 +13,12 @@
 #include <App/DocumentObject.h>
 #include <App/GroupExtension.h>
 #include <App/Part.h>
+#include <App/PropertyExpressionEngine.h>
+#include <App/PropertyLinks.h>
 #include <Base/Exception.h>
 
 #include "Body.h"
 #include "FeatureMultiTransform.h"
-
-namespace App
-{
-// Declared in DocumentObject.cpp (FreeCAD-CH ops#325), as Body.cpp does
-AppExport std::vector<DocumentObject*> subnamePathReaders(const DocumentObject* obj,
-                                                          std::vector<DocumentObject*>* links = nullptr);
-}  // namespace App
 
 namespace PartDesign
 {
@@ -42,6 +38,39 @@ bool isMultiTransformStep(const App::DocumentObject* obj)
         return multi && std::ranges::find(multi->Transformations.getValues(), obj)
             != multi->Transformations.getValues().end();
     });
+}
+
+/// The object at the end of each subname path reader holds: Support = (Studio, "A.BossA.Face3")
+/// reads BossA, though only Studio is in its out-list (App's pathReads() also lists the containers
+/// on the way, A here, which would read all of A). Expressions are in the out-list already
+std::vector<App::DocumentObject*> pathLeaves(const App::DocumentObject* reader)
+{
+    std::vector<App::DocumentObject*> leaves;
+    std::vector<App::Property*> props;
+    reader->getPropertyList(props);
+    for (auto prop : props) {
+        auto link = freecad_cast<App::PropertyLinkBase*>(prop);
+        if (!link || prop->isDerivedFrom<App::PropertyExpressionContainer>()) {
+            continue;
+        }
+        std::vector<App::DocumentObject*> objs;
+        std::vector<std::string> subs;
+        link->getLinks(objs, true, &subs, false);
+        // One object with all its subnames (PropertyLinkSub, PropertyXLink), or one per subname
+        bool single = prop->isDerivedFrom<App::PropertyLinkSub>() || prop->isDerivedFrom<App::PropertyXLink>();
+        for (std::size_t i = 0; i < subs.size(); ++i) {
+            auto top = single ? (objs.size() == 1 ? objs[0] : nullptr)
+                              : (objs.size() == subs.size() ? objs[i] : nullptr);
+            if (!top || subs[i].find('.') == std::string::npos) {
+                continue;
+            }
+            auto path = top->getSubObjectList(subs[i].c_str());
+            if (!path.empty() && path.back() && path.back() != top) {
+                leaves.push_back(path.back());
+            }
+        }
+    }
+    return leaves;
 }
 
 /// The rows of body: its Group without the MultiTransform steps
@@ -79,10 +108,8 @@ std::vector<App::DocumentObject*> studioSequence(App::Document* doc, App::Part* 
     const auto bodies = studioBodies(doc, studio);
     std::vector<std::vector<App::DocumentObject*>> lanes;
     std::unordered_map<const App::DocumentObject*, std::size_t> laneOf;
-    std::unordered_map<const App::DocumentObject*, std::size_t> bodyIndex;
     std::size_t total = 0;
     for (std::size_t i = 0; i < bodies.size(); ++i) {
-        bodyIndex.emplace(bodies[i], i);
         lanes.push_back(rowsOf(bodies[i]));
         for (auto obj : lanes.back()) {
             laneOf.emplace(obj, i);
@@ -90,85 +117,66 @@ std::vector<App::DocumentObject*> studioSequence(App::Document* doc, App::Part* 
         total += lanes.back().size();
     }
 
-    // What reads a member through a subname path ((Studio, "Body1.Pad.Face1")) has the container
-    // in its out-list, not the member: these readers, found from the member's side
-    std::unordered_map<const App::DocumentObject*, std::vector<App::DocumentObject*>> pathReads;
-    for (const auto& lane : lanes) {
-        for (auto obj : lane) {
-            for (auto reader : App::subnamePathReaders(obj)) {
-                pathReads[reader].push_back(obj);
-            }
-        }
-    }
-
-    // deps[m]: the members of other Bodies that m reads. The Group order covers its own Body's
-    // (a link to a later member of its own Body, from Python, is left to the Group order)
+    // deps[m]: the members of other Bodies that m reads, directly or through other objects (a
+    // spreadsheet, a Part feature, a link, a MultiTransform's step, another studio's Body). The
+    // Group order covers its own Body's (a link to a later member of its own Body, from Python, is
+    // left to the Group order)
     std::unordered_map<const App::DocumentObject*, std::unordered_set<App::DocumentObject*>> deps;
     for (std::size_t lane = 0; lane < lanes.size(); ++lane) {
         for (auto member : lanes[lane]) {
             auto& found = deps[member];
-            auto add = [&](App::DocumentObject* obj) {
-                auto it = laneOf.find(obj);
-                if (it != laneOf.end() && it->second != lane) {
-                    found.insert(obj);
-                }
-            };
             std::unordered_set<const App::DocumentObject*> seen {member};
             std::vector<App::DocumentObject*> readers {member};
             while (!readers.empty()) {
                 auto reader = readers.back();
                 readers.pop_back();
-                auto paths = pathReads.find(reader);
-                if (paths != pathReads.end()) {
-                    std::ranges::for_each(paths->second, add);
-                }
-                for (auto obj : reader->getOutList()) {
+                // A subname path ((Studio, "Body1.Pad.Face1"), (C, "PadC1.Face3")) reads its last
+                // object; its top (a container, a Body) is in the out-list
+                const auto leaves = pathLeaves(reader);
+                auto visit = [&](App::DocumentObject* obj) {
                     if (!obj || !seen.insert(obj).second) {
-                        continue;
+                        return;
                     }
-                    if (laneOf.count(obj)) {
-                        add(obj);
-                        continue;
+                    if (auto it = laneOf.find(obj); it != laneOf.end()) {
+                        if (it->second != lane) {
+                            found.insert(obj);
+                        }
+                        return;
                     }
-                    if (auto body = bodyIndex.find(obj); body != bodyIndex.end()) {
+                    if (auto body = freecad_cast<Body*>(obj)) {
                         // A whole Body (a Boolean's tool, a binder of the Body) reads its last
-                        // solid feature, unless the link is a subname path into it, read above
-                        bool viaPath = paths != pathReads.end()
-                            && std::ranges::any_of(paths->second, [&](App::DocumentObject* read) {
-                                   return laneOf.at(read) == body->second;
-                               });
-                        if (body->second != lane && !viaPath) {
-                            if (auto last = bodies[body->second]->lastSolidFeature()) {
-                                add(last);
+                        // solid feature, in this studio or another (review props602-r1 T1);
+                        // not when the link is a subname path into it, whose end is read
+                        bool viaPath = std::ranges::any_of(leaves, [body](App::DocumentObject* leaf) {
+                            return Part::BodyBase::findBodyOf(leaf) == body;
+                        });
+                        auto last = viaPath ? nullptr : body->lastSolidFeature();
+                        if (!last) {
+                            return;
+                        }
+                        if (auto it = laneOf.find(last); it != laneOf.end()) {
+                            if (it->second != lane) {
+                                found.insert(last);
                             }
                         }
-                        continue;
-                    }
-                    // A MultiTransform's step is no row: what it reads, its MultiTransform reads
-                    if (isMultiTransformStep(obj)) {
-                        readers.push_back(obj);
-                        continue;
-                    }
-                    // Another studio's Body read whole is read through its last solid feature, as
-                    // this studio's are (a member reading a Body that reads this studio's Body
-                    // comes after it: review props602-r1 T1)
-                    if (auto other = freecad_cast<Body*>(obj)) {
-                        auto last = other->lastSolidFeature();
-                        if (last && seen.insert(last).second) {
+                        else if (seen.insert(last).second) {
                             readers.push_back(last);
                         }
-                        continue;
+                        return;
                     }
                     // Containers (an App::Part, a group, an Origin) and origin features carry no
-                    // geometry of a member; another object (a spreadsheet, a Part feature, a link,
-                    // a feature of another studio's Body) is read through
-                    if (obj->hasExtension(App::GroupExtension::getExtensionClassTypeId())
-                        || obj->isDerivedFrom<App::DatumElement>()
-                        || obj->isDerivedFrom<Part::BodyBase>()) {
-                        continue;
+                    // geometry of their own; a MultiTransform's step (no row: what it reads, its
+                    // MultiTransform reads) and any other object are read through
+                    if (!isMultiTransformStep(obj)
+                        && (obj->hasExtension(App::GroupExtension::getExtensionClassTypeId())
+                            || obj->isDerivedFrom<App::DatumElement>()
+                            || obj->isDerivedFrom<Part::BodyBase>())) {
+                        return;
                     }
                     readers.push_back(obj);
-                }
+                };
+                std::ranges::for_each(leaves, visit);
+                std::ranges::for_each(reader->getOutList(), visit);
             }
         }
     }

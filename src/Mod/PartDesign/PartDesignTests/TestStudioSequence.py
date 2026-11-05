@@ -190,6 +190,57 @@ class TestStudioSequence(unittest.TestCase):
         self.assertEqual(self.names(PartDesign.studioSequence(self.doc)), ["SkB", "PadB", "SkA", "PadA"])
         self.assertEqual(self.names(PartDesign.studioSequence(part)), ["SkC", "PadC"])
 
+    def subnameModel(self, viaPart):
+        """Review props602-r1fix R1: Body A's binder reads one face of PadC1, a feature of Body C
+        in another studio (the App::Part P), by a subname: (C, "PadC1.FaceN"), or (P,
+        "C.PadC1.FaceN") with viaPart. C's later Pad sits on Body D's, and D's first sketch is
+        moved onto A's Pad last. A reads PadC1 only, so A comes before D."""
+        bodyD = self.doc.addObject("PartDesign::Body", "D")
+        skD1 = sketch(bodyD, "SkD1", (0, 0, 10, 10))
+        padD1 = bodyD.newObject("PartDesign::Pad", "PadD1")
+        padD1.Profile = skD1
+        padD1.Length = 1
+        skD2 = sketch(bodyD, "SkD2", (0, 0, 10, 10), z=1)
+        padD2 = bodyD.newObject("PartDesign::Pad", "PadD2")
+        padD2.Profile = skD2
+        padD2.Length = 1
+        part = self.doc.addObject("App::Part", "P")
+        bodyC = self.doc.addObject("PartDesign::Body", "C")
+        part.addObject(bodyC)
+        padC1 = bodyC.newObject("PartDesign::AdditiveBox", "PadC1")
+        padC1.Length = padC1.Width = 4
+        padC1.Height = 3
+        self.doc.recompute()
+        bodyA = self.doc.addObject("PartDesign::Body", "A")
+        binder = bodyA.newObject("PartDesign::SubShapeBinder", "BinA")
+        face = faceAt(padC1, 3)
+        binder.Support = [(part, (f"C.PadC1.{face}",))] if viaPart else [(bodyC, (f"PadC1.{face}",))]
+        skA2 = sketch(bodyA, "SkA2", (20, 0, 24, 4))
+        padA2 = bodyA.newObject("PartDesign::Pad", "PadA2")
+        padA2.Profile = skA2
+        padA2.Length = 2
+        self.doc.recompute()
+        skC2 = sketch(bodyC, "SkC2", (0, 0, 2, 2), support=[(padD2, faceAt(padD2, 2))])
+        padC2 = bodyC.newObject("PartDesign::Pad", "PadC2")
+        padC2.Profile = skC2
+        padC2.Length = 1
+        self.doc.recompute()
+        skD1.AttachmentSupport = [(padA2, faceAt(padA2, 2))]
+        self.doc.recompute()
+        self.assertEqual(
+            self.names(PartDesign.studioSequence(self.doc)),
+            ["BinA", "SkA2", "PadA2", "SkD1", "PadD1", "SkD2", "PadD2"],
+        )
+        # The bar after A's Pad holds all of D and none of A
+        PartDesign.rollStudioTo(self.doc, padA2)
+        self.assertEqual(self.names((bodyA.Tip, bodyD.Tip)), ["PadA2", None])
+
+    def testSubnameIntoAnotherStudiosBody(self):
+        self.subnameModel(viaPart=False)
+
+    def testSubnameThroughAnotherStudio(self):
+        self.subnameModel(viaPart=True)
+
     def testALoopListsEveryMemberOnce(self):
         """Sketches that read each other's Body crosswise (from Python): no order satisfies both
         Bodies, and every member is still listed once, each Body's in its Group order."""

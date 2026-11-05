@@ -20,6 +20,7 @@ import unittest
 import FreeCAD as App
 import FreeCADGui as Gui
 from PySide import QtCore, QtGui, QtWidgets
+from PySide6.QtTest import QTest
 
 from PartDesignTests.TestStudioSequence import faceAt, sketch
 
@@ -45,7 +46,7 @@ def waitFor(condition, timeout=5.0):
     return bool(condition())
 
 
-def mouse(widget, kind, pos, buttons):
+def mouse(widget, kind, pos, buttons, modifiers=QtCore.Qt.NoModifier):
     button = QtCore.Qt.LeftButton if kind != QtCore.QEvent.MouseMove else QtCore.Qt.NoButton
     event = QtGui.QMouseEvent(
         kind,
@@ -53,7 +54,7 @@ def mouse(widget, kind, pos, buttons):
         QtCore.QPointF(widget.mapToGlobal(pos)),
         button,
         buttons,
-        QtCore.Qt.NoModifier,
+        modifiers,
     )
     QtWidgets.QApplication.sendEvent(widget, event)
 
@@ -292,6 +293,24 @@ class TestFeaturesViewGui(unittest.TestCase):
         mouse(viewport, QtCore.QEvent.MouseButtonRelease, rect.center(), QtCore.Qt.NoButton)
         self.assertTrue(waitFor(lambda: not self.parts.selectedItems()))
         self.assertEqual([o.Name for o in Gui.Selection.getSelection()], ["Box"])
+
+    def testShiftSelectionShrinks(self):
+        """Review props602-r1fix R2: the rows follow the app's selection without committing a
+        Shift range, so a second Shift+click shrinks it."""
+        viewport = self.list.viewport()
+
+        def click(label, modifiers=QtCore.Qt.NoModifier):
+            # QTest sets the application's modifiers, which a Shift range reads
+            QTest.mouseClick(viewport, QtCore.Qt.LeftButton, modifiers, self.rowRect(label).center())
+            pump(0.1)
+
+        click("SkA")
+        click("Pocket1", QtCore.Qt.ShiftModifier)
+        click("Box", QtCore.Qt.ShiftModifier)
+        self.assertEqual([i.text() for i in self.list.selectedItems()], ["SkA", "PadA", "Box"])
+        self.assertEqual(
+            sorted(o.Name for o in Gui.Selection.getSelection()), ["Box", "PadA", "SkA"]
+        )
 
     def testEmptyStudioHasNoBar(self):
         """Review props602s-r1, finding 2: a document with no Body shows no bar row."""

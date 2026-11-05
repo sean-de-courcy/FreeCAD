@@ -114,6 +114,8 @@ protected:
 private:
     void scheduleRebuild();
     void rebuild();
+    /// Rebuilds the rows even when what they show is unchanged (after a cancelled or refused drag)
+    void forceRebuild();
     void rebuildFeatures();
     void rebuildParts();
     void syncSelectionFromApp();
@@ -141,6 +143,13 @@ private:
     QTimer* selectionTimer = nullptr;
     bool dirty = true;
     bool syncing = false;
+    /// What the rows show (name, label, status), to leave unchanged rows alone: a rebuild drops the
+    /// rows' selection anchor, so a Shift+click after it would start over
+    std::vector<std::string> featureRows;
+    std::vector<std::string> partRows;
+    /// The rows' object names (the bar as "|"): unchanged, a changed row is updated in place
+    std::vector<std::string> featureNames;
+    std::vector<std::string> partNames;
 
     /// The shown document and studio, by name (an App::Part's, or empty for the top level)
     std::string documentName;

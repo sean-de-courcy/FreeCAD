@@ -143,6 +143,21 @@ bool isSuppressed(const App::DocumentObject* obj)
     return suppressible && suppressible->Suppressed.getValue();
 }
 
+/// What a row shows of obj: its name, label and status (statusIcon(), statusFont())
+std::string rowKey(const App::DocumentObject* obj, bool held, const std::string& extra = {})
+{
+    std::string key = obj->getNameInDocument();
+    key += '\x1f';
+    key += obj->Label.getValue();
+    key += '\x1f';
+    key += obj->isError() ? 'e' : obj->isWarning() ? 'w' : '-';
+    key += held ? 'h' : '-';
+    key += obj->isTouched() || obj->mustExecute() == 1 ? 't' : '-';
+    key += isSuppressed(obj) ? 's' : '-';
+    key += extra;
+    return key;
+}
+
 /// The studio's parts: its Bodies, and the other solids at its level (an imported shape, a Part
 /// workbench feature) that no other shape reads
 std::vector<App::DocumentObject*> studioParts(App::Document* doc, App::Part* studio)
@@ -344,7 +359,7 @@ FeaturesView::FeaturesView(QWidget* parent)
     connect(selectionTimer, &QTimer::timeout, this, &FeaturesView::syncSelectionFromApp);
 
     connect(features, &FeatureList::barDropped, this, &FeaturesView::onBarDropped);
-    connect(features, &FeatureList::barDragCancelled, this, &FeaturesView::rebuild);
+    connect(features, &FeatureList::barDragCancelled, this, &FeaturesView::forceRebuild);
     connect(features, &QListWidget::customContextMenuRequested, this, &FeaturesView::onFeatureMenu);
     connect(features, &QListWidget::itemDoubleClicked, this, &FeaturesView::onFeatureDoubleClicked);
     connect(features, &QListWidget::itemSelectionChanged, this, [this]() {
@@ -498,6 +513,10 @@ void FeaturesView::onDeleteDocument(const Gui::Document& gdoc)
         syncing = true;
         features->clear();
         parts->clear();
+        featureRows.clear();
+        partRows.clear();
+        featureNames.clear();
+        partNames.clear();
         syncing = false;
     }
 }
@@ -625,12 +644,22 @@ void FeaturesView::rebuild()
     syncSelectionFromApp();
 }
 
+void FeaturesView::forceRebuild()
+{
+    featureRows.clear();
+    partRows.clear();
+    featureNames.clear();
+    partNames.clear();
+    rebuild();
+}
+
 void FeaturesView::rebuildFeatures()
 {
-    int scroll = features->verticalScrollBar() ? features->verticalScrollBar()->value() : 0;
-    features->clear();
     auto doc = document();
     if (!doc) {
+        features->clear();
+        featureRows.clear();
+        featureNames.clear();
         return;
     }
     const auto sequence = PartDesign::studioSequence(doc, studio());
@@ -641,33 +670,77 @@ void FeaturesView::rebuildFeatures()
     if (after) {
         barRow = static_cast<std::size_t>(std::ranges::find(sequence, after) - sequence.begin()) + 1;
     }
-    auto addBar = [this]() {
-        auto bar = new QListWidgetItem(features, FeatureList::BarType);
-        bar->setFlags(Qt::ItemIsEnabled);
-        bar->setSizeHint(QSize(0, 9));
-        bar->setToolTip(tr("Roll-back bar: drag it to roll every body of the part studio back"));
-    };
+    // The rows in list order: a member's index in sequence, or -1 for the bar (none in an empty
+    // studio)
+    std::vector<int> order;
+    std::vector<bool> held;
+    std::vector<std::string> rows;
+    std::vector<std::string> names;
     for (std::size_t i = 0; i < sequence.size(); ++i) {
         if (i == barRow) {
-            addBar();
+            order.push_back(-1);
         }
-        auto obj = sequence[i];
+        order.push_back(static_cast<int>(i));
+    }
+    if (barRow >= sequence.size() && !sequence.empty()) {
+        order.push_back(-1);
+    }
+    for (std::size_t i = 0; i < sequence.size(); ++i) {
+        auto body = PartDesign::Body::findBodyOf(sequence[i]);
+        held.push_back(body && body->holds(sequence[i]));
+    }
+    for (int index : order) {
+        if (index < 0) {
+            rows.emplace_back("|");
+            names.emplace_back("|");
+            continue;
+        }
+        auto obj = sequence[index];
         auto body = PartDesign::Body::findBodyOf(obj);
-        bool held = body && body->holds(obj);
-        auto item = new QListWidgetItem(QString::fromUtf8(obj->Label.getValue()), features);
+        rows.push_back(rowKey(obj, held[index], body ? body->Label.getValue() : ""));
+        names.emplace_back(obj->getNameInDocument());
+    }
+    // Unchanged: the rows (and the user's selection anchor in them) stay
+    if (rows == featureRows && features->count() == static_cast<int>(rows.size())) {
+        return;
+    }
+    // The same rows in the same order (a status or a label changed): updated in place, so a
+    // selection and its Shift anchor survive (review props602-r1fix R2)
+    bool inPlace = names == featureNames && features->count() == static_cast<int>(names.size());
+    featureRows = rows;
+    featureNames = names;
+    auto decorate = [this](QListWidgetItem* item, App::DocumentObject* obj, bool isHeld) {
+        auto body = PartDesign::Body::findBodyOf(obj);
+        item->setText(QString::fromUtf8(obj->Label.getValue()));
         item->setData(Qt::UserRole, QByteArray(obj->getNameInDocument()));
-        item->setIcon(statusIcon(obj, held));
-        item->setFont(statusFont(item->font(), obj, held));
+        item->setIcon(statusIcon(obj, isHeld));
+        item->setFont(statusFont(features->font(), obj, isHeld));
         if (body) {
             item->setToolTip(tr("%1 (%2)").arg(
                 QString::fromUtf8(obj->Label.getValue()),
                 QString::fromUtf8(body->Label.getValue())
             ));
         }
+    };
+    if (inPlace) {
+        for (std::size_t r = 0; r < order.size(); ++r) {
+            if (order[r] >= 0) {
+                decorate(features->item(static_cast<int>(r)), sequence[order[r]], held[order[r]]);
+            }
+        }
+        return;
     }
-    // No bar in an empty studio
-    if (barRow >= sequence.size() && !sequence.empty()) {
-        addBar();
+    int scroll = features->verticalScrollBar() ? features->verticalScrollBar()->value() : 0;
+    features->clear();
+    for (int index : order) {
+        if (index < 0) {
+            auto bar = new QListWidgetItem(features, FeatureList::BarType);
+            bar->setFlags(Qt::ItemIsEnabled);
+            bar->setSizeHint(QSize(0, 9));
+            bar->setToolTip(tr("Roll-back bar: drag it to roll every body of the part studio back"));
+            continue;
+        }
+        decorate(new QListWidgetItem(features), sequence[index], held[index]);
     }
     if (auto bar = features->verticalScrollBar()) {
         bar->setValue(scroll);
@@ -676,21 +749,43 @@ void FeaturesView::rebuildFeatures()
 
 void FeaturesView::rebuildParts()
 {
-    parts->clear();
     auto doc = document();
     if (!doc) {
+        parts->clear();
+        partRows.clear();
+        partNames.clear();
         return;
     }
+    const auto objs = studioParts(doc, studio());
+    std::vector<std::string> rows;
+    std::vector<std::string> names;
+    for (auto obj : objs) {
+        auto body = freecad_cast<PartDesign::Body*>(obj);
+        auto vp = viewProviderOf(obj);
+        std::string eye = !vp || !vp->canToggleVisibility() ? "" : vp->isShow() ? "v" : "i";
+        rows.push_back(rowKey(obj, body && body->isRolledBack(), eye));
+        names.emplace_back(obj->getNameInDocument());
+    }
+    if (rows == partRows && parts->topLevelItemCount() == static_cast<int>(rows.size())) {
+        return;
+    }
+    bool inPlace = names == partNames && parts->topLevelItemCount() == static_cast<int>(names.size());
+    partRows = rows;
+    partNames = names;
     QIcon visible(Gui::BitmapFactory().pixmap("TreeItemVisible"));
     QIcon invisible(Gui::BitmapFactory().pixmap("TreeItemInvisible"));
-    for (auto obj : studioParts(doc, studio())) {
+    if (!inPlace) {
+        parts->clear();
+    }
+    for (std::size_t i = 0; i < objs.size(); ++i) {
+        auto obj = objs[i];
         auto body = freecad_cast<PartDesign::Body*>(obj);
         bool held = body && body->isRolledBack();
-        auto item = new QTreeWidgetItem(parts);
+        auto item = inPlace ? parts->topLevelItem(static_cast<int>(i)) : new QTreeWidgetItem(parts);
         item->setText(0, QString::fromUtf8(obj->Label.getValue()));
         item->setData(0, Qt::UserRole, QByteArray(obj->getNameInDocument()));
         item->setIcon(0, statusIcon(obj, held));
-        item->setFont(0, statusFont(item->font(0), obj, held));
+        item->setFont(0, statusFont(parts->font(), obj, held));
         auto vp = viewProviderOf(obj);
         if (vp && vp->canToggleVisibility()) {
             item->setIcon(1, vp->isShow() ? visible : invisible);
@@ -769,16 +864,22 @@ void FeaturesView::syncSelectionFromApp()
             selected.insert(sel.pObject->getNameInDocument());
         }
     }
+    // Only the rows that differ: setSelected() on a row commits the range a Shift+click is still
+    // building, so the next Shift+click couldn't shrink it (review props602-r1fix R2)
     syncing = true;
     for (int i = 0; i < features->count(); ++i) {
         auto item = features->item(i);
-        if (item->type() != FeatureList::BarType) {
-            item->setSelected(selected.count(item->data(Qt::UserRole).toByteArray().toStdString()) > 0);
+        bool want = selected.count(item->data(Qt::UserRole).toByteArray().toStdString()) > 0;
+        if (item->type() != FeatureList::BarType && item->isSelected() != want) {
+            item->setSelected(want);
         }
     }
     for (int i = 0; i < parts->topLevelItemCount(); ++i) {
         auto item = parts->topLevelItem(i);
-        item->setSelected(selected.count(item->data(0, Qt::UserRole).toByteArray().toStdString()) > 0);
+        bool want = selected.count(item->data(0, Qt::UserRole).toByteArray().toStdString()) > 0;
+        if (item->isSelected() != want) {
+            item->setSelected(want);
+        }
     }
     syncing = false;
 }
@@ -864,7 +965,8 @@ void FeaturesView::onBarDropped(int row)
     catch (const Base::Exception& e) {
         Gui::getMainWindow()->showMessage(QString::fromUtf8(e.what()), 5000);
     }
-    rebuild();
+    // The dragged bar row moved without the signature knowing
+    forceRebuild();
 }
 
 void FeaturesView::rollFromMenu(App::DocumentObject* member, bool toEnd)
