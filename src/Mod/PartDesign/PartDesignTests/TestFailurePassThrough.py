@@ -1129,7 +1129,11 @@ class FailurePassThroughBase:
         self.assertStopped(self.body)
         self.assertVolume(self.body, rounded + BOSS)
 
+        # The edge is picked again: a reference into a history-less scripted solid doesn't survive
+        # its failure under C2's naming (ops#624)
         stock.Size = 20
+        self.recompute()
+        fillet.Base = (stock, [upright])
         self.recompute()
         self.assertValid(fillet, boss)
         self.assertBody(rounded + BOSS)
