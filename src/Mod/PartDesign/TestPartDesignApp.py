@@ -123,6 +123,7 @@ from PartDesignTests.TestBodyReorder import (  # FreeCAD-CH, ops#127
     TestBodyReorderV2s,
 )
 from PartDesignTests.TestStudio import TestStudio  # FreeCAD-CH, ops#325
+from PartDesignTests.TestStudioSequence import TestStudioSequence  # FreeCAD-CH, ops#602
 from PartDesignTests.TestNewPart import TestMapOrigin, TestNewPart  # FreeCAD-CH, ops#311
 from PartDesignTests.TestSiblings import TestSiblings  # FreeCAD-CH, ops#325
 from PartDesignTests.TestMerge import TestMerge  # FreeCAD-CH, ops#325

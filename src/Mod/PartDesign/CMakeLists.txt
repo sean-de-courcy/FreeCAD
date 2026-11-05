@@ -84,6 +84,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestSketch.py
     PartDesignTests/TestSplit.py
     PartDesignTests/TestStudio.py
+    PartDesignTests/TestStudioSequence.py
 )
 
 if(BUILD_GUI)
@@ -96,6 +97,7 @@ if(BUILD_GUI)
         PartDesignTests/TestCrossBodyGui.py
         PartDesignTests/TestNewSketchDialogGui.py
         PartDesignTests/TestRollBackBarGui.py
+    PartDesignTests/TestFeaturesViewGui.py
         PartDesignTests/TestParkedMarkingGui.py
         PartDesignTests/TestSelectionFilterGui.py
         PartDesignTests/TestExpressionFieldsGui.py

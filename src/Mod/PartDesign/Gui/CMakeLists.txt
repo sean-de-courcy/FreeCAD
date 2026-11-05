@@ -59,6 +59,8 @@ SET(PartDesignGuiViewProvider_SRCS
     ViewProvider.cpp
     ViewProvider.h
     ViewProviderBody.cpp
+    FeaturesView.cpp
+    FeaturesView.h
     ViewProviderBody.h
     ViewProviderSketchBased.cpp
     ViewProviderSketchBased.h
