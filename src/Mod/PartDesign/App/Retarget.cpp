@@ -2011,6 +2011,11 @@ bool parkedReason(const App::DocumentObject* obj, std::string& why)
     return true;
 }
 
+bool hasParkedReferences(const App::DocumentObject* obj)
+{
+    return !parkedLines(obj).empty();
+}
+
 bool hasParkedOriginals(const App::DocumentObject* obj)
 {
     for (const auto& line : parkedLines(obj)) {

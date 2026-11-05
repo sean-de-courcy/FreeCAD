@@ -28,9 +28,11 @@ PartDesignExport bool inputInError(const App::DocumentObject* owner, std::string
 /// Install PartDesign's rule for failures inside a Body (App::setRecomputeContinuation): a failed
 /// member whose result would be real and current is claimed, and a claimed solid feature passes its
 /// base shape through, so the Body continues past it. A solid feature is claimed when its base holds
-/// a solid and is Valid or a claimed failure, up its BaseFeature chain (a subtractive feature,
-/// dress-up or pattern first with no base at all too, passing the empty shape, ops#591); any
-/// other member when none of its inputs is an unclaimed failure (ops#579, decision 262).
+/// a solid and is Valid or a claimed failure, up its BaseFeature chain. A subtractive feature,
+/// dress-up or pattern, or a feature whose failure is the park's (a reorder set a reference of it
+/// aside), first naming no base or on a current base without a solid, passes the empty shape
+/// (ops#591, ops#596); any other member when none of its inputs is an unclaimed failure (ops#579,
+/// decision 262).
 void registerFailureContinuation();
 
 }  // namespace PartDesign
