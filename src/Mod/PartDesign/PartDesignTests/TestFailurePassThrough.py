@@ -1211,17 +1211,28 @@ class FailurePassThroughBase:
         self.assertBody(rounded + BOSS)
 
     def testPatternLeadWhoseOriginalIsNotAPartObjectStopsTheBody(self):
-        """The Body's first solid feature is a pattern whose Originals, set from Python, hold an
-        App::Link to an outside box: the pattern fails with its base resolving to nothing, but it
-        names one, so the boss after it and the Body stop (design notes\\park-design.md 5 (N), the
-        pattern form of review pr591s-r1b)."""
+        """A pattern of the boss, moved above it (its Originals parked: claimed, the boss
+        computes). Its Originals are then set from Python to an App::Link to an outside box: the
+        pattern's base resolves to nothing, but it names one, so the boss after it and the Body
+        stop (design notes\\park-design.md 5 (N), the pattern form of review pr591s-r1b). A
+        pattern given only the Link from the start isn't a solid feature, so it can't come first."""
         stock, link, upright = self.linkedStock()
+        boss = self.topBoss("Boss", 1)
+        self.recompute()
         pattern = self.body.newObject("PartDesign::LinearPattern", "Lead")
         pattern.Direction = (models.originFeature(self.body, "X_Axis"), [""])
         pattern.Length = 30
         pattern.Occurrences = 2
+        pattern.Originals = [boss]
+        self.recompute()
+        self.body.reorderObject([pattern], None, True)
+        self.recompute()
+        self.assertEqual(boss.BaseFeature, pattern)
+        self.assertFailed(pattern, "Originals refers to")
+        self.assertValid(boss)
+        self.assertBody(BOSS)
+
         pattern.Originals = [link]
-        boss = self.topBoss("Boss", 1)
         self.recompute()
         self.assertFalse(pattern.isValid())
         self.assertStopped(boss, f"'{pattern.Label}', which has an error")

@@ -144,11 +144,12 @@ class LeadPocketSketchOnADatumPlane(Case591):
 
 
 class PatternLeadOriginalIsALink(Case591):
-    """The Body's first solid feature is a linear pattern with no Originals: it fails with nothing
-    to pattern and is claimed, and the block, the boss and the fillet compute. In one edit its
-    Originals (set from Python) take an App::Link to Stock, an outside 600 x 300 x 300 box: the
-    pattern fails with its base resolving to nothing, but it names one (design se47b's (N), the
-    pattern form of FilletLeadRelinkedToALink), so the Body stops. Then they are emptied again."""
+    """A linear pattern of Pad1 moved to the top of the Body (its Originals parked: claimed, the
+    Body computes below it). In one edit its Originals (set from Python) take an App::Link to
+    Stock, an outside 600 x 300 x 300 box: the pattern's base resolves to nothing, but it names one
+    (design se47b's (N), the pattern form of FilletLeadRelinkedToALink), so the Body stops. Then
+    they are emptied. A pattern given only the Link from the start isn't a solid feature (it isn't
+    first: the Body puts the next solid before it), so the lead is made by the park."""
 
     FOUND_BY = "design se47b"
     steps = ("link", "empty")
@@ -163,11 +164,15 @@ class PatternLeadOriginalIsALink(Case591):
         link.LinkedObject = stock
         doc.recompute()
         body = m.body(doc)
+        pad1 = self.block(doc, body)
+        doc.recompute()
         lead = body.newObject("PartDesign::LinearPattern", "Lead")
         lead.Direction = (m.originFeature(body, "X_Axis"), [""])
         lead.Length = self.s(700)
         lead.Occurrences = 2
-        self.block(doc, body)
+        lead.Originals = [pad1]
+        doc.recompute()
+        body.reorderObject([lead], None, True)
         doc.recompute()
         self.bossAndFillet(doc, body, self.expectation)
 
