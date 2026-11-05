@@ -307,7 +307,13 @@ App::DocumentObjectExecReturn* Transformed::recomputePreview()
 {
     const auto mode = static_cast<Mode>(TransformMode.getValue());
 
-    const Part::Feature* supportFeature = getBaseObject();
+    // A pattern of nothing is out of the chain, with no base (ops#590): nothing to preview, and
+    // its edit must still open so that originals can be picked (ops#607)
+    const Part::Feature* supportFeature = getBaseObject(/* silent = */ true);
+    if (!supportFeature) {
+        PreviewShape.setValue(TopoDS_Shape());
+        return App::DocumentObject::StdReturn;
+    }
     const Part::TopoShape supportShape = supportFeature->Shape.getShape();
 
     if (supportShape.isNull()) {

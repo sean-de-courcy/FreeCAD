@@ -2413,7 +2413,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         if not transformBody and not originals:
             pattern.TransformMode = "Features"
         self.doc.recompute()
-        if originals:
+        if originals or transformBody:
             self.assertIsNotNone(pattern.BaseFeature)
         else:
             self.assertIsNone(pattern.BaseFeature)
