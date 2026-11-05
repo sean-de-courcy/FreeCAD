@@ -56,6 +56,9 @@ from PartDesignTests.TestForkKeymapGui import TestForkKeymapGui
 from PartDesignTests.TestTaskStatusGui import TestTaskStatusGui
 from PartDesignTests.TestProblemNavigationGui import TestProblemNavigationGui
 from PartDesignTests.TestCrossBodyGui import TestCrossBodyGui
+from PartDesignTests.TestCrossBodyGui import TestResultBoxGui  # FreeCAD-CH, ops#630
+from PartDesignTests.TestCrossBodyGui import TestSiblingsGui  # FreeCAD-CH, ops#630
+from PartDesignTests.TestCrossBodyGui import TestMergeGui  # FreeCAD-CH, ops#630
 from PartDesignTests.TestNewSketchDialogGui import TestNewSketchDialogGui
 from PartDesignTests.TestToolbarsGui import TestToolbarsGui  # FreeCAD-CH, ops#605
 from PartDesignTests.TestOnshapeStudioGui import TestOnshapeStudioGui
