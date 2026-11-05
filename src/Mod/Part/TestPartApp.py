@@ -41,6 +41,7 @@ from parttests.FilletFallbackTest import (
     BaseToleranceTest,
     BridgedRecessTest,
     DroppedBasePartsTest,
+    DressUpCheckLimitsTest,
     FilledRecessTest,
     FilletFallbackTest,
     InvalidDressUpTest,

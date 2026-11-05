@@ -168,14 +168,17 @@ PartExport std::string lostMaterial(
  *   cylinders (OCCT's analytic cases);
  * - the chain's edges meet only tangentially (no two- or three-edge corner, whose corner patches
  *   OCCT may build as B-splines);
- * - the radius is constant (\a constantRadius).
- * Then a face of the result whose surface is no base face's, and not a plane, cylinder, cone,
- * sphere or torus, fails the check.
+ * - the radius is constant (\a radius > 0);
+ * - no face at the chain joins another across a smooth edge (the band would run on onto it), and
+ *   no face of the base within the round's reach of the chain (lostMaterial()'s reach) is other
+ *   than analytic: after a repair, which copies the geometry, it couldn't be told from a bridge.
+ * Then a face of the result within that reach, whose surface is no base face's, and not a plane,
+ * cylinder, cone, sphere or torus, fails the check.
  *
  * @param shape The fillet's result (its solids are checked)
  * @param base The shape that was filleted
  * @param edges The edges of \a base that were filleted
- * @param constantRadius Whether every edge has one radius along it
+ * @param radius The fillet's radius, or 0 if the edges don't all have one radius along them
  * @return what the result bridges, naming the base face with the hole (e.g. "'s band crosses a
  * hole or pocket on Face3; a round that rolls through it is not built yet"), or an empty string
  */
@@ -183,7 +186,7 @@ PartExport std::string bridgedRecess(
     const TopoShape& shape,
     const TopoShape& base,
     const std::vector<TopoShape>& edges,
-    bool constantRadius
+    double radius
 );
 
 }  // namespace Part

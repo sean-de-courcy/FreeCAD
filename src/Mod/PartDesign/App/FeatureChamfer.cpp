@@ -23,7 +23,6 @@
  ***************************************************************************/
 
 #include <algorithm>
-#include <cmath>
 #include <limits>
 
 #include <BRepFilletAPI_MakeChamfer.hxx>
@@ -157,13 +156,15 @@ App::DocumentObjectExecReturn* Chamfer::execute()
 
     this->positionByBaseFeature();
 
-    // The chamfer's largest distance along a face, for the check of what it drops (ops#603)
+    // The chamfer's largest distance along a face, for the check of what it drops (ops#603). By
+    // distance and angle, the distance on the other face grows without bound as the angle and the
+    // edge's opening near 180 degrees: unknown, so that check doesn't run (PR review r1, T2)
     double reach = std::max(size, size2);
     if (static_cast<Part::ChamferType>(chamferType) == Part::ChamferType::equalDistance) {
         reach = size;
     }
     if (static_cast<Part::ChamferType>(chamferType) == Part::ChamferType::distanceAngle) {
-        reach = std::max(size, size * std::abs(std::tan(Base::toRadians(angle))));
+        reach = 0.0;
         size2 = angle;
     }
     try {

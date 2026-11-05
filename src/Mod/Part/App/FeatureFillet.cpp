@@ -183,7 +183,7 @@ App::DocumentObjectExecReturn* Fillet::execute()
             return r.first == r.second;
         });
         const std::string bridged
-            = Part::bridgedRecess(res, baseTopoShape, edgeShapes, constantRadius);
+            = Part::bridgedRecess(res, baseTopoShape, edgeShapes, constantRadius ? largest : 0.0);
         if (!bridged.empty()) {
             return new App::DocumentObjectExecReturn("The fillet" + bridged);
         }

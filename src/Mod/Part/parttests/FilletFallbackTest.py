@@ -1794,3 +1794,128 @@ class BaseToleranceTest(unittest.TestCase):
         second = self.dressUp("Chamfer", base, [2 - 1e-5] * 2)
         self.assertEqual(tolerances(base.Shape), before)
         self.assertEqual(tolerances(second.Shape), tolerances(first.Shape))
+
+
+def finned_block(spline_back):
+    """FilletFallbackTest's fin cube (a square face hanging inward at 45 degrees from the front
+    bottom edge: invalid) made from the yz-profile extruded 10 along x, its back side a line or a
+    B-spline through (y, z) = (11, 5), the same topology either way. Returns (the solid without the
+    fin, the finned shape) (PR review r1, T1)"""
+    if spline_back:
+        curve = Part.BSplineCurve()
+        curve.interpolate([V(0, 10, 0), V(0, 11, 5), V(0, 10, 10)])
+        back = curve.toShape()
+    else:
+        back = Part.makeLine(V(0, 10, 0), V(0, 10, 10))
+    wire = Part.Wire(
+        [
+            Part.makeLine(V(0, 0, 0), V(0, 10, 0)),
+            back,
+            Part.makeLine(V(0, 10, 10), V(0, 0, 10)),
+            Part.makeLine(V(0, 0, 10), V(0, 0, 0)),
+        ]
+    )
+    solid = Part.Solid(Part.Shell(Part.Face(wire).extrude(V(10, 0, 0)).Faces))
+    if solid.Volume < 0:
+        solid.reverse()
+    hinge = next(
+        e
+        for e in solid.Edges
+        if all(abs(v.Point.y) < 1e-9 and abs(v.Point.z) < 1e-9 for v in e.Vertexes)
+    )
+    fin = Part.Face(
+        Part.Wire(
+            [
+                hinge,
+                Part.makeLine(V(10, 0, 0), V(10, 5, 5)),
+                Part.makeLine(V(10, 5, 5), V(0, 5, 5)),
+                Part.makeLine(V(0, 5, 5), V(0, 0, 0)),
+            ]
+        )
+    )
+    bottom = next(
+        f for f in solid.Faces if isinstance(f.Surface, Part.Plane) and abs(f.BoundBox.ZMax) < 1e-9
+    )
+    new_bottom = Part.Face(bottom.Surface, bottom.OuterWire)
+    if bottom.Orientation == "Reversed":
+        new_bottom = new_bottom.reversed()
+    return solid, solid.replaceShape([(bottom, Part.Compound([new_bottom, fin]))])
+
+
+def hexagonal_prism_with_pockets():
+    """A hexagonal prism (circumradius 40, 20 high: its vertical edges are 120 degree corners), with
+    a pocket 0.4 deep in each side face at the vertex (40, 0), 22.5 to 24.5 from its edge along the
+    face, z 5 to 15. Returns the shape, the vertex's edge, and the two faces' directions from it
+    (PR review r1, T2)"""
+    corners = [
+        V(40 * math.cos(math.radians(60 * k)), 40 * math.sin(math.radians(60 * k)), 0)
+        for k in range(6)
+    ]
+    prism = Part.Face(Part.makePolygon(corners + [corners[0]])).extrude(V(0, 0, 20))
+    corner = V(40, 0, 0)
+    sides = []
+    for sign in (1, -1):
+        along = V(-0.5, sign * math.sqrt(3) / 2, 0)
+        outward = V(math.sqrt(3) / 2, sign * 0.5, 0)
+        sides.append(along)
+        a = corner + along * 22.5 + V(0, 0, 5)
+        b = corner + along * 24.5 + V(0, 0, 5)
+        inward = outward * -0.4
+        quad = [a + outward, b + outward, b + inward, a + inward]
+        prism = prism.cut(Part.Face(Part.makePolygon(quad + [quad[0]])).extrude(V(0, 0, 10)))
+    edge = next(
+        e
+        for e in prism.Edges
+        if all(abs(v.Point.x - 40) < 1e-9 and abs(v.Point.y) < 1e-9 for v in e.Vertexes)
+    )
+    return prism, edge, sides
+
+
+class DressUpCheckLimitsTest(unittest.TestCase):
+    """What the result checks of ops#603 and ops#604 leave alone (PR review r1): a repaired result
+    (its geometry copied) whose base has a B-spline face away from the round, and a distance-angle
+    chamfer on an obtuse edge, whose far side lies beyond any reach taken from its size alone.
+    """
+
+    setUp = InvalidDressUpTest.setUp
+    tearDown = InvalidDressUpTest.tearDown
+
+    def testRepairedResultBesideASplineFace(self):
+        # T1: the fin cube's repair copies the geometry, so no result face shares a base surface;
+        # the B-spline back side is no bridge
+        plain, finned = finned_block(True)
+        fillet = filleted_in_a_body(self.doc, finned, front_top, 1)
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        right = plain.makeFillet(1, front_top(plain))
+        self.assertLess(symmetric_difference(fillet.Shape, right), 1e-6)
+
+    def testDistanceAngleChamferOnAnObtuseEdge(self):
+        # T2: Size 10, Angle 45 on the 120 degree edge: 10 along one face and
+        # 10 sin 45 / sin 165 = 27.32 along the other, which removes that face's pocket whole
+        shape, edge, sides = hexagonal_prism_with_pockets()
+        base = self.doc.addObject("Part::Feature", "Base")
+        base.Shape = shape
+        body = self.doc.addObject("PartDesign::Body", "Body")
+        body.BaseFeature = base
+        self.doc.recompute()
+        stored = base.Shape
+        name = next(
+            "Edge%d" % i
+            for i, e in enumerate(stored.Edges, 1)
+            if all(abs(v.Point.x - 40) < 1e-9 and abs(v.Point.y) < 1e-9 for v in e.Vertexes)
+        )
+        chamfer = body.newObject("PartDesign::Chamfer", "Chamfer")
+        chamfer.Base = (body.BaseFeature, [name])
+        chamfer.ChamferType = "Distance and Angle"
+        chamfer.Size = 10
+        chamfer.Angle = 45
+        self.doc.recompute()
+        self.assertTrue(chamfer.isValid(), chamfer.getStatusString())
+        far = 10 * math.sin(math.radians(45)) / math.sin(math.radians(165))
+        corner = V(40, 0, -1)
+        rights = []
+        for one, other in ((sides[0], sides[1]), (sides[1], sides[0])):
+            points = [corner, corner + one * 10, corner + other * far]
+            wedge = Part.Face(Part.makePolygon(points + [points[0]])).extrude(V(0, 0, 22))
+            rights.append(shape.cut(wedge))
+        self.assertLess(min(symmetric_difference(chamfer.Shape, right) for right in rights), 1e-6)

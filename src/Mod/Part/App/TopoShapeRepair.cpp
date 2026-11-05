@@ -1803,12 +1803,12 @@ std::string bridgedRecess(
     const TopoShape& shape,
     const TopoShape& base,
     const std::vector<TopoShape>& edges,
-    bool constantRadius
+    double radius
 )
 {
     const TopoDS_Compound result = solidsIn(shape.getShape());
     const TopoDS_Compound before = solidsIn(base.getShape());
-    if (!constantRadius || edges.empty() || !TopoDS_Iterator(result).More()
+    if (!(radius > 0.0) || edges.empty() || !TopoDS_Iterator(result).More()
         || !TopoDS_Iterator(before).More()) {
         return {};
     }
@@ -1818,14 +1818,35 @@ std::string bridgedRecess(
         if (chain.Extent() == 0 || !roundsAnalytically(before, chain)) {
             return {};
         }
+        // OCCT's bridge lies in the band, within the round's reach of its edges (lostMaterial())
+        const double reach = reachOf(before, chain, radius);
+        if (reach < 0.0) {
+            return {};
+        }
+        BRep_Builder builder;
+        TopoDS_Compound chainEdges;
+        builder.MakeCompound(chainEdges);
+        for (int i = 1; i <= chain.Extent(); ++i) {
+            builder.Add(chainEdges, chain(i));
+        }
+        const auto inReach = [&](const TopoDS_Shape& face) {
+            BRepExtrema_DistShapeShape distance(face, chainEdges);
+            return !distance.IsDone() || distance.Value() <= reach;
+        };
+        // A face of the base that isn't analytic there can't be told from the bridge once a repair
+        // has copied the geometry (PR review r1, T1): the check doesn't run
         std::unordered_set<const Geom_Surface*> baseSurfaces;
         for (TopExp_Explorer it(before, TopAbs_FACE); it.More(); it.Next()) {
             baseSurfaces.insert(surfaceOf(it.Current()));
+            if (!isAnalytic(BRepAdaptor_Surface(TopoDS::Face(it.Current())).GetType())
+                && inReach(it.Current())) {
+                return {};
+            }
         }
         for (TopExp_Explorer it(result, TopAbs_FACE); it.More(); it.Next()) {
             const TopoDS_Face& face = TopoDS::Face(it.Current());
             if (baseSurfaces.count(surfaceOf(face)) != 0
-                || isAnalytic(BRepAdaptor_Surface(face).GetType())) {
+                || isAnalytic(BRepAdaptor_Surface(face).GetType()) || !inReach(face)) {
                 continue;
             }
             return "'s band crosses a hole or pocket on " + recessFace(base, chain, face)
