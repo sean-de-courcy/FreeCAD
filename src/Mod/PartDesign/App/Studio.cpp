@@ -144,6 +144,11 @@ std::vector<App::DocumentObject*> studioSequence(App::Document* doc, App::Part* 
                         }
                         continue;
                     }
+                    // A MultiTransform's step is no row: what it reads, its MultiTransform reads
+                    if (isMultiTransformStep(obj)) {
+                        readers.push_back(obj);
+                        continue;
+                    }
                     // Containers (an App::Part, a group, an Origin) and origin features carry no
                     // geometry of a member, and another studio's Bodies are none of its rows;
                     // another object (a spreadsheet, a Part feature, a link) is read through
