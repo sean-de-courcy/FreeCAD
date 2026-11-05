@@ -2389,9 +2389,9 @@ class TestReferenceFieldGui(unittest.TestCase):
 
     def pattern(self, typeName, originals, transformBody=False):
         """A pattern of the bumps, as the Pattern model places its copies. It joins the body with
-        its Originals set: a pattern of the tool shapes with none counts as a MultiTransform's
-        step and gets no base feature, so an empty one joins as a pattern of the whole body and
-        is switched back."""
+        its Originals set. An empty one joins as a pattern of the whole body and is switched back:
+        a pattern of nothing then leaves the Body's chain and its base is cleared (ops#590), as
+        Onshape builds the next feature on the one before a pattern with nothing to pattern."""
         pattern = self.doc.addObject(typeName, typeName.split("::")[1])
         if typeName == "PartDesign::LinearPattern":
             pattern.Direction = (models.originFeature(self.body, "X_Axis"), [""])
@@ -2413,7 +2413,10 @@ class TestReferenceFieldGui(unittest.TestCase):
         if not transformBody and not originals:
             pattern.TransformMode = "Features"
         self.doc.recompute()
-        self.assertIsNotNone(pattern.BaseFeature)
+        if originals:
+            self.assertIsNotNone(pattern.BaseFeature)
+        else:
+            self.assertIsNone(pattern.BaseFeature)
         return pattern
 
     def names(self, field):
@@ -2448,6 +2451,8 @@ class TestReferenceFieldGui(unittest.TestCase):
         after.Placement = App.Placement(App.Vector(-3, 3, 10), App.Rotation())
         self.doc.recompute()
         self.assertEqual(self.body.Group.index(after), self.body.Group.index(pattern) + 1)
+        # Out of the chain while it patterns nothing (ops#590): the box builds on the bump before
+        self.assertEqual(after.BaseFeature, second)
         self.assertAlmostEqual(after.Shape.Volume, 1003, places=6)
         [field] = self.edit(pattern)
         self.assertTrue(self.body.holds(after), "the feature after the pattern isn't held")
@@ -2462,6 +2467,9 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertEqual(self.names(field), [first.Name])
         self.assertEqual(texts(field), ["Bump"])
         self.assertTrue(armed(field))
+        # With an original it joins the chain, and the box after it follows it (ops#590)
+        self.assertEqual(pattern.BaseFeature, second)
+        self.assertEqual(after.BaseFeature, pattern)
         self.assertVolume(pattern, 1003)
         self.assertTrue(self.body.holds(after), "the pick released the feature after the pattern")
         self.assertFalse(self.body.holds(pattern))

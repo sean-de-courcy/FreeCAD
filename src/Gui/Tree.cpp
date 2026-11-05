@@ -1365,6 +1365,24 @@ bool hiddenAbove(const QTreeWidgetItem* item)
     }
     return false;
 }
+
+// A container in error only because a member is: a Body stopped by a failed first feature fails
+// naming it (ops#579). The member is the problem, as Onshape shows the failed feature red and
+// doesn't list the part as one (ops#607). The recompute fails a container so without running it:
+// an input in error that is one of its members and that the recompute rule doesn't claim (a
+// claimed one lets it run, so its error is then its own)
+bool failedThroughMember(const App::DocumentObject* obj)
+{
+    auto group = obj->getExtensionByType<App::GroupExtension>(true);
+    if (!group) {
+        return false;
+    }
+    auto rule = App::recomputeContinuation();
+    return std::ranges::any_of(obj->getOutList(), [&](const App::DocumentObject* in) {
+        return in && in->isError() && group->hasObject(in, true)
+            && !(rule && rule->continuesAfter(in));
+    });
+}
 }  // namespace
 
 void TreeWidget::flushStatusUpdate()
@@ -1454,6 +1472,9 @@ std::vector<TreeWidget::ProblemItem> TreeWidget::problemItems(
     for (auto obj : docItem->document()->getDocument()->getObjects()) {
         bool error = obj->isError();
         if (!(error ? errors : warnings && obj->isWarning())) {
+            continue;
+        }
+        if (error && failedThroughMember(obj)) {
             continue;
         }
         // A same-place warning whose marker the tree hides (ops#391)
