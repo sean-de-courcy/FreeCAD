@@ -20,7 +20,7 @@
 "Pad2GaugeDrawBreakSlideFixed|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "BROKEN", "expected": "wrong", "found_by": "review pr579s-r4", "issue": "ops#589", "tier": "F"},
 "Pad2OwnFailDrawBreakSlideFixed|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "BROKEN", "expected": "wrong", "found_by": "review pr579s-r4", "issue": "ops#589", "tier": "F"},
 "ParkedControl|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr579s-r4", "issue": "ops#579", "tier": "F"},
-"Parked|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579s-r4", "issue": "ops#579", "tier": "F"},
+"Parked|front|V2s": {"accepted": "decision 276", "axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr579s-r4", "issue": "ops#579", "tier": "F"},
 "ThroughPad2Control|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr579s-r4", "issue": "ops#579", "tier": "F"},
 "ThroughPad2DrawBreakSlideFixed|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr579s-r4", "issue": "ops#579", "tier": "F"},
 "ThroughPad2DrawSlideWhileDown|front|V2s": {"axes": ["M1", "E4", "E5", "X4:4000"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr579s-r4", "issue": "ops#579", "tier": "F"}

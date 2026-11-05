@@ -326,6 +326,11 @@ class Parked(Scenario):
     length, thickness, height = 3600, 45, 300
     edited = False
     steps = ("drawAndPark", "unparkAndSlide")
+    # The park (ops#596) lets BasePad compute: Pad's output while parked is the empty shape, and
+    # the move back with the slide re-finds the front face on the slid rim (the solver's re-find
+    # of a reference broken in an earlier recompute, wrong on every build in two steps: ops#621).
+    # Rare: accepted (decision 289, under decision 276)
+    ACCEPTED = {"front|V2s": "decision 276"}
 
     def frontFace(self):
         return face("plane", normal=(0, -1, 0), through=(0, self.s(100), self.s(100)))
@@ -365,6 +370,7 @@ class Parked(Scenario):
 
 
 class ParkedControl(Parked):
+    ACCEPTED = {}
     steps = ("draw", "slide")
 
     def draw(self, doc):
