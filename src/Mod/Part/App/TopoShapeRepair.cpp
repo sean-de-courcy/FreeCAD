@@ -34,6 +34,8 @@
 #include <BRepTools.hxx>
 #include <BRepTopAdaptor_FClass2d.hxx>
 #include <ChFi3d.hxx>
+#include <GeomAbs_CurveType.hxx>
+#include <GeomAbs_SurfaceType.hxx>
 #include <Geom_Surface.hxx>
 #include <GProp_GProps.hxx>
 #include <gp.hxx>
@@ -54,6 +56,7 @@
 #include <TopoDS_Iterator.hxx>
 #include <TopoDS_Solid.hxx>
 #include <TopoDS_Vertex.hxx>
+#include <TopoDS_Wire.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopTools_ListOfShape.hxx>
@@ -1531,6 +1534,118 @@ bool liesOnAny(const gp_Pnt& point, const std::vector<std::pair<TopoDS_Face, Bnd
     return false;
 }
 
+// The surfaces a round of constant radius along lines and circles between planes and cylinders,
+// and the faces it ends on, are made of (bridgedRecess())
+bool isAnalytic(GeomAbs_SurfaceType type)
+{
+    return type == GeomAbs_Plane || type == GeomAbs_Cylinder || type == GeomAbs_Cone
+        || type == GeomAbs_Sphere || type == GeomAbs_Torus;
+}
+
+// Whether OCCT builds the chain's round from analytic surfaces: each edge a line or a circle
+// between a plane and a plane or a cylinder, and the edges meeting only tangentially (no corner)
+bool roundsAnalytically(const TopoDS_Shape& base, const TopTools_IndexedMapOfShape& chain)
+{
+    TopTools_IndexedDataMapOfShapeListOfShape facesOfEdges;
+    TopExp::MapShapesAndAncestors(base, TopAbs_EDGE, TopAbs_FACE, facesOfEdges);
+    for (int i = 1; i <= chain.Extent(); ++i) {
+        const TopoDS_Edge& edge = TopoDS::Edge(chain(i));
+        const int index = facesOfEdges.FindIndex(edge);
+        if (index == 0 || BRep_Tool::Degenerated(edge)) {
+            return false;
+        }
+        const GeomAbs_CurveType curve = BRepAdaptor_Curve(edge).GetType();
+        if (curve != GeomAbs_Line && curve != GeomAbs_Circle) {
+            return false;
+        }
+        TopTools_IndexedMapOfShape faces;
+        for (const auto& face : facesOfEdges(index)) {
+            faces.Add(face);
+        }
+        if (faces.Extent() != 2) {
+            return false;
+        }
+        int planes = 0;
+        for (int k = 1; k <= 2; ++k) {
+            const GeomAbs_SurfaceType type = BRepAdaptor_Surface(TopoDS::Face(faces(k))).GetType();
+            if (type != GeomAbs_Plane && type != GeomAbs_Cylinder) {
+                return false;
+            }
+            planes += type == GeomAbs_Plane ? 1 : 0;
+        }
+        if (planes == 0) {
+            return false;
+        }
+        for (TopExp_Explorer it(edge, TopAbs_VERTEX); it.More(); it.Next()) {
+            const TopoDS_Vertex& vertex = TopoDS::Vertex(it.Current());
+            const gp_Vec tangent = tangentAt(edge, vertex);
+            for (int j = 1; j <= chain.Extent(); ++j) {
+                const TopoDS_Edge& other = TopoDS::Edge(chain(j));
+                if (j == i
+                    || (!TopExp::FirstVertex(other).IsSame(vertex)
+                        && !TopExp::LastVertex(other).IsSame(vertex))) {
+                    continue;
+                }
+                const gp_Vec along = tangentAt(other, vertex);
+                if (tangent.Magnitude() <= gp::Resolution() || along.Magnitude() <= gp::Resolution()
+                    || !tangent.IsParallel(along, chainAngle)) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+// The face at the chain whose hole or pocket the piece bridges, by its name in the base: the one
+// with an inner wire nearest to it, else the face nearest to it
+std::string recessFace(
+    const TopoShape& base,
+    const TopTools_IndexedMapOfShape& chain,
+    const TopoDS_Shape& piece
+)
+{
+    TopTools_IndexedDataMapOfShapeListOfShape facesOfEdges;
+    TopExp::MapShapesAndAncestors(base.getShape(), TopAbs_EDGE, TopAbs_FACE, facesOfEdges);
+    TopTools_IndexedMapOfShape faces;
+    for (int i = 1; i <= chain.Extent(); ++i) {
+        const int index = facesOfEdges.FindIndex(chain(i));
+        if (index != 0) {
+            for (const auto& face : facesOfEdges(index)) {
+                faces.Add(face);
+            }
+        }
+    }
+    TopoDS_Shape nearest;
+    double least = 0.0;
+    bool byWire = false;
+    for (int i = 1; i <= faces.Extent(); ++i) {
+        const TopoDS_Face& face = TopoDS::Face(faces(i));
+        const TopoDS_Wire outer = BRepTools::OuterWire(face);
+        for (TopExp_Explorer it(face, TopAbs_WIRE); it.More(); it.Next()) {
+            const bool inner = !it.Current().IsSame(outer);
+            if (byWire && !inner) {
+                continue;
+            }
+            BRepExtrema_DistShapeShape distance(piece, inner ? it.Current() : face);
+            if (!distance.IsDone()) {
+                continue;
+            }
+            if (inner && !byWire) {
+                byWire = true;
+                nearest.Nullify();
+            }
+            if (nearest.IsNull() || distance.Value() < least) {
+                nearest = face;
+                least = distance.Value();
+            }
+        }
+    }
+    const int index = nearest.IsNull() ? 0 : base.findShape(nearest);
+    return index == 0 ? std::string("a face next to its edges")
+                      : TopoShape::shapeName(TopAbs_FACE) + std::to_string(index);
+}
+
 }  // namespace
 
 bool checkDressUp(TopoShape& shape, const TopoShape& base, LooseParts looseParts)
@@ -1656,6 +1771,45 @@ std::string lostMaterial(
         FC_WARN(
             "Dress-up result not checked for a lost part of the base: " << e.GetMessageString()
         );
+    }
+    return {};
+}
+
+std::string bridgedRecess(
+    const TopoShape& shape,
+    const TopoShape& base,
+    const std::vector<TopoShape>& edges,
+    bool constantRadius
+)
+{
+    const TopoDS_Compound result = solidsIn(shape.getShape());
+    const TopoDS_Compound before = solidsIn(base.getShape());
+    if (!constantRadius || edges.empty() || !TopoDS_Iterator(result).More()
+        || !TopoDS_Iterator(before).More()) {
+        return {};
+    }
+    // As filledPocket() does: if the analysis throws, the check is skipped with a warning
+    try {
+        const auto chain = chainOf(before, edges);
+        if (chain.Extent() == 0 || !roundsAnalytically(before, chain)) {
+            return {};
+        }
+        std::unordered_set<const Geom_Surface*> baseSurfaces;
+        for (TopExp_Explorer it(before, TopAbs_FACE); it.More(); it.Next()) {
+            baseSurfaces.insert(surfaceOf(it.Current()));
+        }
+        for (TopExp_Explorer it(result, TopAbs_FACE); it.More(); it.Next()) {
+            const TopoDS_Face& face = TopoDS::Face(it.Current());
+            if (baseSurfaces.count(surfaceOf(face)) != 0
+                || isAnalytic(BRepAdaptor_Surface(face).GetType())) {
+                continue;
+            }
+            return "'s band crosses a hole or pocket on " + recessFace(base, chain, face)
+                + "; a round that rolls through it is not built yet";
+        }
+    }
+    catch (const Standard_Failure& e) {
+        FC_WARN("Fillet result not checked for a bridged hole: " << e.GetMessageString());
     }
     return {};
 }

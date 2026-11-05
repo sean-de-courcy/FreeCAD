@@ -155,4 +155,35 @@ PartExport std::string lostMaterial(
     double size
 );
 
+/** Why a fillet's result bridges a hole or pocket its band crosses, or an empty string
+ * (FreeCAD-CH, ops#604 gap 3a, decision 283).
+ *
+ * Where a round's band crosses a hole, a slot or a round boss in a face next to its edge, OCCT
+ * builds a B-spline bridge over the gap instead of the round cut by it: a valid solid, slightly
+ * wrong (0.75 mm3 on a 2 mm round over a hole's 4.5 mm chord). A round of constant radius along
+ * lines and circles between planes and cylinders, with no corner, is a cylinder or a torus, ending
+ * on the faces at its ends: any other new face is the bridge. The check runs only when:
+ * - every edge of the chain (the selected edges and their tangent continuations, as filledPocket()
+ *   takes them) is a line or a circle between two faces, each a plane or a cylinder, not both
+ *   cylinders (OCCT's analytic cases);
+ * - the chain's edges meet only tangentially (no two- or three-edge corner, whose corner patches
+ *   OCCT may build as B-splines);
+ * - the radius is constant (\a constantRadius).
+ * Then a face of the result whose surface is no base face's, and not a plane, cylinder, cone,
+ * sphere or torus, fails the check.
+ *
+ * @param shape The fillet's result (its solids are checked)
+ * @param base The shape that was filleted
+ * @param edges The edges of \a base that were filleted
+ * @param constantRadius Whether every edge has one radius along it
+ * @return what the result bridges, naming the base face with the hole (e.g. "'s band crosses a
+ * hole or pocket on Face3; a round that rolls through it is not built yet"), or an empty string
+ */
+PartExport std::string bridgedRecess(
+    const TopoShape& shape,
+    const TopoShape& base,
+    const std::vector<TopoShape>& edges,
+    bool constantRadius
+);
+
 }  // namespace Part

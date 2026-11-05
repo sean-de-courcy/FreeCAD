@@ -1541,6 +1541,169 @@ class LostStepTest(unittest.TestCase):
                     self.assertIn("runs off its face", status)
 
 
+def front_top(shape):
+    """The block's front top edges (y = 0, z = 10): one, or its pieces where a feature splits it"""
+    return [
+        e
+        for e in shape.Edges
+        if e.Curve.TypeId == "Part::GeomLine"
+        and all(abs(v.Point.y) < 1e-9 and abs(v.Point.z - 10) < 1e-9 for v in e.Vertexes)
+    ]
+
+
+def filleted_in_a_body(doc, shape, select, radius):
+    """A PartDesign Body whose BaseFeature is the shape, and a Fillet of the radius on the edges
+    select() picks of the BaseFeature's shape"""
+    base = doc.addObject("Part::Feature", "Base")
+    base.Shape = shape
+    body = doc.addObject("PartDesign::Body", "Body")
+    body.BaseFeature = base
+    doc.recompute()
+    fillet = body.newObject("PartDesign::Fillet", "Fillet")
+    shape = base.Shape
+    fillet.Base = (
+        body.BaseFeature,
+        [
+            "Edge%d" % next(i for i, e in enumerate(shape.Edges, 1) if e.isSame(edge))
+            for edge in select(shape)
+        ],
+    )
+    fillet.Radius = radius
+    doc.recompute()
+    return fillet
+
+
+def symmetric_difference(a, b):
+    return a.cut(b).Volume + b.cut(a).Volume
+
+
+class BridgedRecessTest(unittest.TestCase):
+    """Where a round's band crosses a hole, a slot or a round boss in the face next to its edge,
+    OCCT builds a B-spline bridge over the gap: a valid solid, slightly wrong (ops#604 gap 3a,
+    decision 283). The fillet fails instead, naming the face. The block 30 x 20 x 10, its front top
+    edge r 2; the right result is the plain block's round with the feature applied afterwards.
+    """
+
+    setUp = InvalidDressUpTest.setUp
+    tearDown = InvalidDressUpTest.tearDown
+
+    def assertBridgeFails(self, shape, top_face=True):
+        fillet = filleted_in_a_body(self.doc, shape, front_top, 2)
+        self.assertFalse(fillet.isValid())
+        status = fillet.getStatusString()
+        self.assertTrue(
+            status.startswith("The fillet's band crosses a hole or pocket on Face"), status
+        )
+        self.assertTrue(status.endswith("; a round that rolls through it is not built yet"), status)
+        if top_face:
+            # The hole is in the top face
+            top = next(
+                i
+                for i, f in enumerate(shape.Faces, 1)
+                if f.Surface.TypeId == "Part::GeomPlane"
+                and abs(f.BoundBox.ZMin - 10) < 1e-9
+                and abs(f.BoundBox.ZMax - 10) < 1e-9
+            )
+            self.assertIn("on Face%d;" % top, status)
+
+    def assertRight(self, shape, right):
+        fillet = filleted_in_a_body(self.doc, shape, front_top, 2)
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        self.assertLess(symmetric_difference(fillet.Shape, right), 1e-6)
+
+    def rounded(self):
+        block = Part.makeBox(30, 20, 10)
+        return block.makeFillet(2, front_top(block))
+
+    def testThroughHoleAcrossTheBand(self):
+        # O1: the hole's rim 1 and 0.5 mm from the edge; OCCT's bridge is 0.75 and 1.34 mm3 off
+        for y in (4.0, 3.5):
+            with self.subTest(y=y):
+                self.assertBridgeFails(
+                    Part.makeBox(30, 20, 10).cut(Part.makeCylinder(3, 10, V(15, y, 0)))
+                )
+
+    def testBlindHoleAcrossTheBand(self):
+        # O2: 4 deep
+        self.assertBridgeFails(Part.makeBox(30, 20, 10).cut(Part.makeCylinder(3, 4, V(15, 4, 6))))
+
+    def testSlotAcrossTheBand(self):
+        # O4: a stadium 3 deep, 1 mm from the edge
+        slot = (
+            Part.makeBox(8, 4, 3, V(11, 1, 7))
+            .fuse([Part.makeCylinder(2, 3, V(11, 3, 7)), Part.makeCylinder(2, 3, V(19, 3, 7))])
+            .removeSplitter()
+        )
+        self.assertBridgeFails(Part.makeBox(30, 20, 10).cut(slot))
+
+    def testRoundBossAcrossTheBand(self):
+        # O5: its wall 1 mm from the edge. The boss's foot is an inner wire of the top face
+        boss = Part.makeBox(30, 20, 10).fuse(Part.makeCylinder(3, 4, V(15, 4, 10))).removeSplitter()
+        self.assertBridgeFails(boss)
+
+    def testHoleBreakingTheEdgeStillBuilds(self):
+        # O1 with the hole through the front face: the edge's two pieces end at the hole's wall
+        hole = Part.makeCylinder(3, 10, V(15, 2.5, 0))
+        shape = Part.makeBox(30, 20, 10).cut(hole)
+        self.assertEqual(len(front_top(shape)), 2)
+        self.assertRight(shape, self.rounded().cut(hole))
+
+    def testRibAcrossTheEdgeStillBuilds(self):
+        # O7 and O8: a rib 5 or 1 high across the edge; the oracle has the rib to the bottom
+        for height in (5, 1):
+            with self.subTest(height=height):
+                shape = (
+                    Part.makeBox(30, 20, 10)
+                    .fuse(Part.makeBox(4, 20, height, V(13, 0, 10)))
+                    .removeSplitter()
+                )
+                rib = Part.makeBox(4, 20, 10 + height, V(13, 0, 0))
+                self.assertRight(shape, self.rounded().fuse(rib).removeSplitter())
+
+    def testCornersAndSpaceCurvesAreNotChecked(self):
+        # 1.11: the D plate's top loop, a line meeting an arc at an angle (a corner: OCCT's torus
+        # patch); 1.13: the pipe T's junction, a space curve between two cylinders (its round is a
+        # B-spline). Both build
+        plate = (
+            Part.makeBox(20, 20, 4).fuse(Part.makeCylinder(12, 4, V(20, 10, 0))).removeSplitter()
+        )
+
+        def top(shape):
+            return [e for e in shape.Edges if all(abs(v.Point.z - 4) < 1e-9 for v in e.Vertexes)]
+
+        tee = (
+            Part.makeCylinder(5, 30, V(0, 0, 0), V(1, 0, 0))
+            .fuse(Part.makeCylinder(4, 15, V(15, 0, 0), V(0, 0, 1)))
+            .removeSplitter()
+        )
+
+        def junction(shape):
+            return [
+                e
+                for e in shape.Edges
+                if e.Curve.TypeId not in ("Part::GeomLine", "Part::GeomCircle")
+            ]
+
+        self.assertTrue(junction(tee))
+        for name, shape, edges in (("D plate", plate, top), ("pipe T", tee, junction)):
+            with self.subTest(name=name):
+                fillet = filleted_in_a_body(self.doc, shape, edges, 1)
+                self.assertTrue(fillet.isValid(), fillet.getStatusString())
+                self.assertTrue(fillet.Shape.isValid())
+
+    def testPartFilletAcrossAHole(self):
+        # Part::Fillet with one radius fails the same; a variable radius isn't checked
+        shape = Part.makeBox(30, 20, 10).cut(Part.makeCylinder(3, 10, V(15, 4, 0)))
+        feature = InvalidDressUpTest.dressUp(self, "Fillet", shape, front_top(shape), [(2, 2)])
+        self.assertFalse(feature.isValid())
+        self.assertTrue(
+            feature.getStatusString().startswith(
+                "The fillet's band crosses a hole or pocket on Face"
+            ),
+            feature.getStatusString(),
+        )
+
+
 def tolerances(shape):
     return [s.Tolerance for s in shape.Vertexes + shape.Edges + shape.Faces]
 

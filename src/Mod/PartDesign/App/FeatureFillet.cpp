@@ -148,6 +148,11 @@ App::DocumentObjectExecReturn* Fillet::execute()
         if (!lost.empty()) {
             return new App::DocumentObjectExecReturn("The fillet " + lost);
         }
+        // OCCT bridges a hole or pocket the band crosses with a B-spline (ops#604 gap 3a)
+        const std::string bridged = Part::bridgedRecess(shape, baseShape, edges, true);
+        if (!bridged.empty()) {
+            return new App::DocumentObjectExecReturn("The fillet" + bridged);
+        }
         // store shape before refinement
         this->rawShape = shape;
         shape = refineShapeIfActive(shape);

@@ -178,6 +178,15 @@ App::DocumentObjectExecReturn* Fillet::execute()
         if (!lost.empty()) {
             return new App::DocumentObjectExecReturn("The fillet " + lost);
         }
+        // OCCT bridges a hole or pocket the band crosses with a B-spline (ops#604 gap 3a)
+        const bool constantRadius = std::all_of(radii.begin(), radii.end(), [](const auto& r) {
+            return r.first == r.second;
+        });
+        const std::string bridged
+            = Part::bridgedRecess(res, baseTopoShape, edgeShapes, constantRadius);
+        if (!bridged.empty()) {
+            return new App::DocumentObjectExecReturn("The fillet" + bridged);
+        }
         // Where OCCT failed, the exact construction built it (ops#300, decision 54)
         recorder.report(Label.getValue());
         this->Shape.setValue(res);
