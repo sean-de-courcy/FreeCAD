@@ -1,0 +1,12 @@
+{
+"entries": {
+"ParkedPadControl|sketch_top|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "design s7fc8", "issue": "ops#596", "tier": "F"},
+"ParkedPadFilletBelow|fillet_edge|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "design s7fc8", "issue": "ops#596", "tier": "F"},
+"ParkedPadOnDatum|sketch_top|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "design s7fc8", "issue": "ops#596", "tier": "F"},
+"ParkedPadOwnEdge|fillet_edge|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "design s7fc8", "issue": "ops#596", "tier": "F"},
+"ParkedPadReopened|sketch_top|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "design s7fc8", "issue": "ops#596", "tier": "F"},
+"ParkedPadTaller|sketch_top|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "design s7fc8", "issue": "ops#596", "tier": "F"},
+"ParkedPadThenFail|sketch_top|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "design s7fc8", "issue": "ops#596", "tier": "F"},
+"ParkedPadUndo|sketch_top|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "design s7fc8", "issue": "ops#596", "tier": "F"}
+}
+}

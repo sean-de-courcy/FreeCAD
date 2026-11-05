@@ -1,0 +1,11 @@
+{
+"entries": {
+"ComposedParkAndFail|fillet_edge|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr591-r1", "issue": "ops#591", "tier": "F"},
+"DressUpLeadOnOutsideBase|fillet_edge|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "wrong", "found_by": "review pr591-r1", "issue": "ops#591", "tier": "F"},
+"ParkedPocketReopened|fillet_edge|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr591-r1", "issue": "ops#591", "tier": "F"},
+"ReorderedChamferLead|fillet_edge|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr591-r1", "issue": "ops#591", "tier": "F"},
+"ReorderedPatternLead|fillet_edge|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr591-r1", "issue": "ops#591", "tier": "F"},
+"SuppressedPadThenFailedPocket|fillet_edge|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr591-r1", "issue": "ops#591", "tier": "F"},
+"TwoLeads|fillet_edge|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr591-r1", "issue": "ops#591", "tier": "F"}
+}
+}

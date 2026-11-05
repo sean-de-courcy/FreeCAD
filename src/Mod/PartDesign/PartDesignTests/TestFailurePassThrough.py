@@ -969,10 +969,9 @@ class FailurePassThroughBase:
         self.assertFalse(top.isValid(), "the front face re-bound to the slid rim's")
 
     def assertFirstFeatureOfAnyKindStops(self, first):
-        """`first`, the Body's first solid feature, is in error: the Body doesn't continue past
-        it, whatever kind it is (decision 255 (1); a kind exempted once, decision 257, hid a
-        failed first Pad after it, review pr579-r4 R4-1): the block after it fails naming it.
-        Removed, the block computes."""
+        """`first`, the Body's first solid feature, is in error and of a kind whose result on
+        nothing isn't known to be nothing: the Body doesn't continue past it (decision 255 (1)):
+        the block after it fails naming it. Removed, the block computes."""
         block = self.block()
         self.recompute()
         self.assertStopped(first)
@@ -1031,15 +1030,577 @@ class FailurePassThroughBase:
         self.recompute()
         self.assertALeadThatMakesNothingHidesNoFailure(self.body.Group[0])
 
-    def testFailedSubtractiveFirstFeatureStopsTheBody(self):
-        """The Body's first solid feature is a pocket, with nothing to cut."""
-        self.assertFirstFeatureOfAnyKindStops(self.hole())
+    def assertALeadThatFailsOnNothingPassesNothing(self, lead):
+        """`lead`, the Body's first solid feature, is of a kind whose result on nothing is
+        nothing, and it fails there. Its empty pass-through is exactly that result, so it is
+        claimed, and the block and the boss compute below it (ops#591, ops#127's park; decision
+        262 (1); since ops#579 the Body stopped). The block takes its length from a Part box
+        outside the Body; the box fails: the block's own pass-through would be the empty shape,
+        so the Body stops (the claimed lead hides no failed first Pad, review pr579-r4 R4-1).
+        Repaired, the Body computes below the lead again; the lead removed, the same."""
+        gauge = models.box(self.doc, "Gauge", (2, 2, 10), at=(100, 0, 0))
+        block = self.block()
+        block.setExpression("Length", f"{gauge.Name}.Height")
+        boss = self.boss(block)
+        mirror = self.mirrorOf(boss)
+        self.recompute()
+        self.assertFailed(lead)
+        self.assertTrue(lead.Shape.isNull())
+        self.assertValid(block, boss, mirror)
+        self.assertBody(BLOCK + BOSS)
+        self.assertVolume(mirror, BLOCK + BOSS)
 
-    def testFailedDressUpFirstFeatureStopsTheBody(self):
-        """The Body's first solid feature is a chamfer, with nothing to chamfer."""
+        gauge.Length = 0
+        self.recompute()
+        self.assertFirstFeatureStopped(block, boss, mirror, f"'{gauge.Label}' has an error")
+
+        gauge.Length = 2
+        self.recompute()
+        self.assertFailed(lead)
+        self.assertValid(block, boss, mirror)
+        self.assertBody(BLOCK + BOSS)
+
+        self.body.removeObject(lead)
+        self.doc.removeObject(lead.Name)
+        self.recompute()
+        self.assertValid(block, boss)
+        self.assertBody(BLOCK + BOSS)
+
+    def testFailedSubtractiveLeadPassesNothing(self):
+        """The lead is a pocket, with nothing to cut: a hole a reorder left at the top."""
+        self.assertALeadThatFailsOnNothingPassesNothing(self.hole())
+
+    def testFailedSubtractivePrimitiveLeadPassesNothing(self):
+        """The lead is a subtractive box, without a base feature."""
+        box = self.body.newObject("PartDesign::SubtractiveBox", "Cut")
+        box.Placement.Base = V(2, 2, 7)
+        self.assertALeadThatFailsOnNothingPassesNothing(box)
+
+    def testFailedDressUpLeadPassesNothing(self):
+        """The lead is a chamfer, with nothing to chamfer."""
         chamfer = self.body.newObject("PartDesign::Chamfer", "Chamfer")
         chamfer.Size = 1
-        self.assertFirstFeatureOfAnyKindStops(chamfer)
+        self.assertALeadThatFailsOnNothingPassesNothing(chamfer)
+
+    def testDressUpLeadOnAFailedOutsideBaseStopsTheBody(self):
+        """The Body's first solid feature is a fillet whose Base, set from Python, is an edge of a
+        scripted solid outside the Body (its BaseFeature stays None, so its base is that solid).
+        The boss after it is on the fillet. The solid fails and clears its shape: the fillet's
+        pass-through is empty, but its base isn't absent, it is an unclaimed failure, so the boss
+        and the Body stop instead of computing on nothing (review pr591-r1 T1; decision 268).
+        Repaired, everything computes."""
+
+        class EmptyingStock:
+            """A 20 x 20 x 10 block, or with Size 0 no shape and an error."""
+
+            def __init__(self, obj):
+                obj.addProperty("App::PropertyLength", "Size")
+                obj.Proxy = self
+
+            def execute(self, obj):
+                if obj.Size.Value <= 0:
+                    obj.Shape = Part.Shape()
+                    raise RuntimeError("no stock")
+                obj.Shape = Part.makeBox(20, 20, 10)
+
+        stock = self.doc.addObject("Part::FeaturePython", "Stock")
+        EmptyingStock(stock)
+        stock.Size = 20
+        self.recompute()
+        upright = elementWhere(
+            stock.Shape,
+            "Edge",
+            lambda e: abs(e.CenterOfMass.x) < TOL and abs(e.CenterOfMass.y) < TOL,
+        )
+        fillet = self.body.newObject("PartDesign::Fillet", "Lead")
+        fillet.Base = (stock, [upright])
+        fillet.Radius = 1
+        boss = self.topBoss("Boss", 1)
+        self.recompute()
+        self.assertIsNone(fillet.BaseFeature)
+        self.assertValid(fillet, boss)
+        rounded = BLOCK - (1 - math.pi / 4) * 10
+        self.assertBody(rounded + BOSS)
+
+        stock.Size = 0
+        self.recompute()
+        self.assertStopped(fillet)
+        self.assertStopped(boss, f"'{fillet.Label}', which has an error")
+        self.assertStopped(self.body)
+        self.assertVolume(self.body, rounded + BOSS)
+
+        # The edge is picked again: a reference into a history-less scripted solid doesn't survive
+        # its failure under C2's naming (ops#624)
+        stock.Size = 20
+        self.recompute()
+        fillet.Base = (stock, [upright])
+        self.recompute()
+        self.assertValid(fillet, boss)
+        self.assertBody(rounded + BOSS)
+
+    def testAPocketWithoutABaseAfterTheBlockStopsTheBody(self):
+        """A pocket after the block has its BaseFeature cleared from Python, and the boss after it
+        is on the pocket. The pocket fails with nothing to cut. A solid comes before it, so its
+        empty pass-through isn't its result on the Body: it isn't claimed, and the boss and the
+        Body stop instead of computing on nothing (review pr591s-r1: a transform added before
+        another solid is linked only in its execute())."""
+        block = self.block()
+        hole = self.hole()
+        boss = self.topBoss("Boss", 1)
+        self.recompute()
+        self.assertBody(BLOCK - math.pi * 27 + BOSS)
+
+        hole.BaseFeature = None
+        self.recompute()
+        self.assertStopped(hole)
+        self.assertStopped(boss, f"'{hole.Label}', which has an error")
+        self.assertStopped(self.body)
+        self.assertValid(block)
+
+    def testFailedScriptedSubtractiveLeadStopsTheBody(self):
+        """The lead is a scripted subtractive feature whose execute() fails: its result on
+        nothing is its script's, not known to be nothing, so it isn't claimed (ops#591)."""
+
+        class Failing:
+            def __init__(self, obj):
+                obj.Proxy = self
+
+            def execute(self, obj):
+                raise RuntimeError("the script fails")
+
+        lead = self.body.newObject("PartDesign::FeatureSubtractivePython", "Scripted")
+        Failing(lead)
+        self.assertFirstFeatureOfAnyKindStops(lead)
+
+    def linkedStock(self):
+        """A 20 x 20 x 10 Part box outside the Body, an App::Link to it, and the name of the box's
+        vertical edge at x = y = 0."""
+        stock = models.box(self.doc, "Stock", (20, 20, 10))
+        link = self.doc.addObject("App::Link", "StockLink")
+        link.LinkedObject = stock
+        self.recompute()
+        upright = elementWhere(
+            stock.Shape,
+            "Edge",
+            lambda e: abs(e.CenterOfMass.x) < TOL and abs(e.CenterOfMass.y) < TOL,
+        )
+        return stock, link, upright
+
+    def testDressUpLeadOnABaseThroughALinkStopsTheBody(self):
+        """The Body's first solid feature is a fillet on an outside box's edge (Base set from
+        Python), the boss after it. Its Base is then pointed at the same edge through an App::Link
+        to the box: the fillet fails ("not a Part object"), and its base resolves to nothing, but
+        it names one, so the boss and the Body stop instead of computing on nothing (review
+        pr591s-r1b; design notes\\park-design.md 5 (N)). Pointed back, everything computes."""
+        stock, link, upright = self.linkedStock()
+        fillet = self.body.newObject("PartDesign::Fillet", "Lead")
+        fillet.Base = (stock, [upright])
+        fillet.Radius = 1
+        boss = self.topBoss("Boss", 1)
+        self.recompute()
+        self.assertValid(fillet, boss)
+        rounded = BLOCK - ROUND
+        self.assertBody(rounded + BOSS)
+
+        fillet.Base = (link, [upright])
+        self.recompute()
+        self.assertFalse(fillet.isValid())
+        self.assertStopped(boss, f"'{fillet.Label}', which has an error")
+        self.assertStopped(self.body)
+        self.assertVolume(self.body, rounded + BOSS)
+
+        fillet.Base = (stock, [upright])
+        self.recompute()
+        self.assertValid(fillet, boss)
+        self.assertBody(rounded + BOSS)
+
+    def testPatternLeadWhoseOriginalIsNotAPartObjectStopsTheBody(self):
+        """A pattern of the boss, moved above it (its Originals parked: claimed, the boss
+        computes). Its Originals are then set from Python to an App::Link to an outside box: the
+        pattern's base resolves to nothing, but it names one, so the boss after it and the Body
+        stop (design notes\\park-design.md 5 (N), the pattern form of review pr591s-r1b). A
+        pattern given only the Link from the start isn't a solid feature, so it can't come first."""
+        stock, link, upright = self.linkedStock()
+        boss = self.topBoss("Boss", 1)
+        self.recompute()
+        pattern = self.body.newObject("PartDesign::LinearPattern", "Lead")
+        pattern.Direction = (models.originFeature(self.body, "X_Axis"), [""])
+        pattern.Length = 30
+        pattern.Occurrences = 2
+        pattern.Originals = [boss]
+        self.recompute()
+        self.body.reorderObject([pattern], None, True)
+        self.recompute()
+        self.assertEqual(boss.BaseFeature, pattern)
+        self.assertFailed(pattern, "Originals refers to")
+        self.assertValid(boss)
+        self.assertBody(BOSS)
+
+        pattern.Originals = [link]
+        self.recompute()
+        self.assertFalse(pattern.isValid())
+        self.assertStopped(boss, f"'{pattern.Label}', which has an error")
+        self.assertStopped(self.body)
+
+    def testTwoLeadsBothPassNothing(self):
+        """A subtractive box, then a pocket on it, both before the block: each fails with nothing
+        to cut. The pocket's base is the box, a claimed failure whose output is the empty shape,
+        so the pocket is claimed too, and the block computes (design notes\\park-design.md 5
+        (B1))."""
+        box = self.body.newObject("PartDesign::SubtractiveBox", "Cut")
+        box.Placement.Base = V(2, 2, 7)
+        hole = self.hole()
+        block = self.block()
+        self.recompute()
+        self.assertEqual(hole.BaseFeature, box)
+        self.assertFailed(box)
+        self.assertFailed(hole)
+        self.assertValid(block)
+        self.assertBody(BLOCK)
+
+    def testPocketAfterASuppressedLeadPassesNothing(self):
+        """A suppressed boss, then a pocket on it, before the block: the pocket fails with nothing
+        to cut on a Valid base without a solid, so it passes the empty shape on and the block
+        computes (design notes\\park-design.md 5 (B1); decision 258)."""
+        lead = self.topBoss("Lead", 1)
+        lead.Suppressed = True
+        hole = self.hole()
+        block = self.block()
+        self.recompute()
+        self.assertEqual(hole.BaseFeature, lead)
+        self.assertFailed(hole)
+        self.assertValid(lead, block)
+        self.assertBody(BLOCK)
+
+    # -- the park (ops#596, decisions 275 (2), 276, 281) -----------------------------------------
+
+    def parkedBoss(self):
+        """The block, the hole in its top, then the boss on its x = 20 face (its sketch attached
+        to the block: W16's model), moved to the top of the Body: the reorder sets the sketch's
+        attachment aside (ops#127)."""
+        block = self.block()
+        hole = self.hole()
+        boss = self.boss(block)
+        self.recompute()
+        self.assertBody(BLOCK - HOLE + BOSS)
+        self.body.reorderObject([boss], None, True)
+        self.recompute()
+        self.assertEqual(block.BaseFeature, boss)
+        return block, hole, boss
+
+    def assertParked(self, boss):
+        """The boss's sketch fails naming the park, the boss naming its sketch, and the boss
+        passes the empty shape on (claimed: not touched)."""
+        sketch = boss.Profile[0]
+        self.assertEqual(sketch.AttachmentSupport, [])
+        self.assertFailed(sketch, "AttachmentSupport refers to", "which now comes after")
+        self.assertFailed(boss, f"'{sketch.Label}', which has an error")
+        self.assertTrue(boss.Shape.isNull())
+
+    def testParkedPadPassesNothing(self):
+        """W16: a boss whose sketch sits on the block's face is moved above the block. Its failure
+        is the park's, so it passes the empty shape on: the block computes as the Body's first
+        solid and the hole cuts it (Onshape fails only the moved feature: ops#596, decisions 275
+        (2) and 276). The block then fails through an outside input: it isn't parked and passes
+        the empty shape, so the Body stops (decision 281; review pr579-r4 R4-1), the boss still
+        parked. Repaired, the Body computes below the boss; moved back, the boss's attachment is
+        put back and everything computes."""
+        gauge = models.box(self.doc, "Gauge", (2, 2, 10), at=(100, 0, 0))
+        block, hole, boss = self.parkedBoss()
+        block.setExpression("Length", f"{gauge.Name}.Height")
+        self.recompute()
+        self.assertIsNone(boss.BaseFeature)
+        self.assertParked(boss)
+        self.assertValid(block, hole)
+        self.assertBody(BLOCK - HOLE)
+
+        gauge.Length = 0
+        self.recompute()
+        self.assertParked(boss)
+        self.assertStopped(block, f"'{gauge.Label}' has an error")
+        self.assertStopped(hole, f"'{block.Label}', which has an error")
+        self.assertStopped(self.body)
+
+        gauge.Length = 2
+        self.recompute()
+        self.assertParked(boss)
+        self.assertValid(block, hole)
+        self.assertBody(BLOCK - HOLE)
+
+        self.body.reorderObject([boss], hole, True)
+        self.recompute()
+        self.assertEqual(boss.BaseFeature, hole)
+        self.assertEqual(boss.Profile[0].AttachmentSupport[0][0], block)
+        self.assertValid(boss.Profile[0], boss, block, hole)
+        self.assertBody(BLOCK - HOLE + BOSS)
+
+    def testAStockReadingAParkedSketchStopsTheBody(self):
+        """The boss parked above the block; the block is then given the parked boss sketch's
+        normal as its direction (the GUI's "Select reference..."). The block fails naming the
+        sketch, whose record refers to the block itself: the block wasn't moved and the hole was
+        built on it, so it isn't parked and the Body stops (review pr596-r1
+        StockReadsParkedSketch). The link removed, the Body computes below the boss."""
+        block, hole, boss = self.parkedBoss()
+        block.ReferenceAxis = (boss.Profile[0], ["N_Axis"])
+        self.recompute()
+        self.assertParked(boss)
+        self.assertStopped(block, f"'{boss.Profile[0].Label}', which has an error")
+        self.assertStopped(hole, f"'{block.Label}', which has an error")
+        self.assertStopped(self.body)
+
+        block.ReferenceAxis = None
+        self.recompute()
+        self.assertParked(boss)
+        self.assertValid(block, hole)
+        self.assertBody(BLOCK - HOLE)
+
+    def testAStockReadingASketchParkedPastItStopsTheBody(self):
+        """The same with the boss's sketch on the x = 20 face of a riser after the block, so the
+        sketch's record refers to a feature after the block: the block still isn't parked, the boss
+        reads the sketch first (review pr596s-r1). The Body stops; the link removed, it computes."""
+        block = self.block()
+        self.hole()
+        riser = self.topBoss("Riser", 1)
+        boss = self.boss(riser)
+        self.recompute()
+        self.assertBody(BLOCK - HOLE + 2 * BOSS)
+        self.body.reorderObject([boss], None, True)
+        self.recompute()
+        self.assertParked(boss)
+        self.assertValid(block, riser)
+        self.assertBody(BLOCK - HOLE + BOSS)
+
+        block.ReferenceAxis = (boss.Profile[0], ["N_Axis"])
+        self.recompute()
+        self.assertStopped(block, f"'{boss.Profile[0].Label}', which has an error")
+        self.assertStopped(riser)
+        self.assertStopped(self.body)
+
+        block.ReferenceAxis = None
+        self.recompute()
+        self.assertValid(block, riser)
+        self.assertBody(BLOCK - HOLE + BOSS)
+
+    def testParkedPadWhoseSketchIsOnADatumPassesNothing(self):
+        """The boss's sketch sits on a datum plane on the block's x = 20 face. The boss moved above
+        the block takes the plane and the sketch with it, and the plane's attachment is set aside:
+        the boss's failure is the park's through its sketch and the plane (design
+        notes\\park-design.md 5 (P)), so the block computes. Moved back, everything computes."""
+        block = self.block()
+        hole = self.hole()
+        self.recompute()
+        face = elementWhere(
+            block.Shape,
+            "Face",
+            lambda f: abs(f.CenterOfMass.x - 20) < TOL and abs(abs(f.normalAt(0, 0).x) - 1) < TOL,
+        )
+        plane = self.body.newObject("PartDesign::Plane", "BossPlane")
+        plane.AttachmentSupport = [(block, face)]
+        plane.MapMode = "FlatFace"
+        sketch = models.sketch(self.doc, "BossSketch", models.rectangle(-2.5, -2.5, 2.5, 2.5))
+        self.body.addObject(sketch)
+        sketch.AttachmentSupport = [(plane, "")]
+        sketch.MapMode = "FlatFace"
+        boss = models.pad(self.body, sketch, 5, "Boss")
+        self.recompute()
+        self.assertBody(BLOCK - HOLE + BOSS)
+
+        self.body.reorderObject([boss], None, True)
+        self.recompute()
+        self.assertEqual(plane.AttachmentSupport, [])
+        self.assertFailed(plane, "which now comes after")
+        self.assertFailed(sketch, f"'{plane.Label}', which has an error")
+        self.assertFailed(boss, f"'{sketch.Label}', which has an error")
+        self.assertValid(block, hole)
+        self.assertBody(BLOCK - HOLE)
+
+        self.body.reorderObject([boss], hole, True)
+        self.recompute()
+        self.assertValid(plane, sketch, boss, block, hole)
+        self.assertBody(BLOCK - HOLE + BOSS)
+
+    def testReferencesBelowAParkedPadFollowAnEdit(self):
+        """A sketch on the block's top face, taken before the boss is parked above the block: the
+        block made taller, the sketch follows. The parked boss passes the empty shape and is no
+        shape input of anything (design notes\\park-design.md 5 (R), decision 275 (4))."""
+        block = self.block()
+        self.hole()
+        top = self.topSketch(block)
+        boss = self.boss(block)
+        self.recompute()
+        self.body.reorderObject([boss], None, True)
+        self.recompute()
+        self.assertParked(boss)
+        self.assertAt(top, 10)
+
+        block.Length = 12
+        self.recompute()
+        self.assertValid(block)
+        self.assertAt(top, 12)
+
+    def testReferencesBelowAParkedLeadFollowAnEdit(self):
+        """The same with the hole parked above the block, its sketch on the block's top face."""
+        block = self.block()
+        top = self.topSketch(block)
+        hole = models.pocket(self.body, self.topSketch(block, "HoleSketch"), 1, "Hole")
+        self.recompute()
+        self.assertValid(hole)
+        self.body.reorderObject([hole], None, True)
+        self.recompute()
+        self.assertFailed(hole)
+        self.assertBody(BLOCK)
+        self.assertAt(top, 10)
+
+        block.Length = 12
+        self.recompute()
+        self.assertAt(top, 12)
+        self.assertBody(BLOCK * 1.2)
+
+    def testFilletBelowAParkedPocketHoldsAtThePark(self):
+        """A fillet on the boss's vertical edge; the hole then parked above the block: the fillet
+        keeps its edge and the Body computes without the hole (design notes\\park-design.md 5
+        (R); ParkedPocketReopened's park step)."""
+        self.block()
+        hole = self.hole()
+        boss = self.topBoss("Boss", 1)
+        self.recompute()
+        edge = elementWhere(boss.Shape, "Edge", lambda e: isVerticalLineAt(e, 1, 1) and e.Length > 4)
+        fillet = self.body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (boss, [edge])
+        fillet.Radius = 1
+        self.recompute()
+        self.assertBody(BLOCK - HOLE + BOSS - ROUND / 2)
+
+        self.body.reorderObject([hole], None, True)
+        self.recompute()
+        self.assertFailed(hole)
+        self.assertValid(boss, fillet)
+        self.assertBody(BLOCK + BOSS - ROUND / 2)
+
+    def testFilletOnAParkedPadsEdgeBreaks(self):
+        """A fillet on the boss's edge after it, the boss then parked above the block: the edge
+        isn't there while the boss is parked, so the fillet fails, and the Body computes below it
+        (design notes\\park-design.md 6.3). Moved back, the fillet computes."""
+        block = self.block()
+        hole = self.hole()
+        boss = self.boss(block)
+        self.recompute()
+        # The boss's outer edge along z with the largest y
+        outer = [
+            (e.CenterOfMass.y, f"Edge{i + 1}")
+            for i, e in enumerate(boss.Shape.Edges)
+            if isinstance(e.Curve, Part.Line)
+            and abs(e.CenterOfMass.x - 25) < TOL
+            and abs(abs(e.Curve.Direction.z) - 1) < TOL
+        ]
+        edge = max(outer)[1]
+        fillet = self.body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (boss, [edge])
+        fillet.Radius = 1
+        self.recompute()
+        self.assertBody(BLOCK - HOLE + BOSS - ROUND / 2)
+
+        self.body.reorderObject([boss], None, True)
+        self.recompute()
+        self.assertParked(boss)
+        self.assertFalse(fillet.isValid())
+        self.assertValid(block, hole)
+        self.assertVolume(hole, BLOCK - HOLE)
+
+        self.body.reorderObject([boss], hole, True)
+        self.recompute()
+        self.assertValid(boss, fillet)
+        self.assertBody(BLOCK - HOLE + BOSS - ROUND / 2)
+
+    def testTwoParkedAboveTheStockBothPassNothing(self):
+        """The boss parked above the block, then the hole moved above the block too: first above
+        the boss (the boss on the hole's empty pass-through, (P) on (B1)), then between the boss
+        and the block (the hole on the boss's, (K) on (B1)). Both fail, the block computes."""
+        block, hole, boss = self.parkedBoss()
+        self.body.reorderObject([hole], None, True)
+        self.recompute()
+        self.assertEqual(boss.BaseFeature, hole)
+        self.assertFailed(hole)
+        self.assertParked(boss)
+        self.assertValid(block)
+        self.assertBody(BLOCK)
+
+        self.body.reorderObject([hole], boss, True)
+        self.recompute()
+        self.assertEqual(hole.BaseFeature, boss)
+        self.assertEqual(block.BaseFeature, hole)
+        self.assertFailed(hole)
+        self.assertParked(boss)
+        self.assertValid(block)
+        self.assertBody(BLOCK)
+
+    def testParkedPadReopened(self):
+        """Saved and reopened while the boss is parked: the same state, and moved back, everything
+        computes (the claim reads only restored links and records)."""
+        self.parkedBoss()
+        folder = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, folder, True)
+        path = os.path.join(folder, "parked.FCStd")
+        self.doc.saveAs(path)
+        App.closeDocument(self.doc.Name)
+        self.doc = App.openDocument(path)
+        name = self.doc.Name
+        self.addCleanup(lambda: name in App.listDocuments() and App.closeDocument(name))
+        self.body = self.doc.getObject("Body")
+        block, hole, boss = (self.doc.getObject(n) for n in ("Block", "Hole", "Boss"))
+        self.recompute()
+        self.assertParked(boss)
+        self.assertValid(block, hole)
+        self.assertBody(BLOCK - HOLE)
+
+        self.body.reorderObject([boss], hole, True)
+        self.recompute()
+        self.assertValid(boss, block, hole)
+        self.assertBody(BLOCK - HOLE + BOSS)
+
+    def testParkedHoleOnADatumSketchPassesNothing(self):
+        """The hole moved above the block, then its sketch attached to a datum plane on the Body's
+        XY plane at the top: the plane holds no solid, so the hole names no base and stays claimed
+        (decision 275 (3); review pr591s-r1b LeadPocketSketchOnADatumPlane went loud on it)."""
+        block = self.block()
+        hole = self.hole()
+        self.recompute()
+        self.body.reorderObject([hole], None, True)
+        self.recompute()
+        plane = self.body.newObject("PartDesign::Plane", "Datum")
+        plane.AttachmentSupport = [(models.originFeature(self.body, "XY_Plane"), [""])]
+        plane.MapMode = "FlatFace"
+        plane.AttachmentOffset = App.Placement(V(0, 0, 10), App.Rotation())
+        self.recompute()
+        sketch = hole.Profile[0]
+        sketch.AttachmentSupport = [(plane, [""])]
+        sketch.MapMode = "FlatFace"
+        self.recompute()
+        self.assertValid(plane, sketch, block)
+        self.assertFailed(hole)
+        self.assertBody(BLOCK)
+
+    def testParkedHoleWhoseSketchIsStoppedByAnOutsideInputPassesNothing(self):
+        """The hole moved above the block; its sketch's placement then reads an outside box that
+        fails: the sketch stays stopped (decision 262 (2)), the hole fails naming it, and it is
+        still the Body's first solid with nothing to cut: claimed, and the block computes."""
+        gauge = models.box(self.doc, "Gauge", (2, 2, 10), at=(100, 0, 0))
+        block = self.block()
+        hole = self.hole()
+        self.recompute()
+        self.body.reorderObject([hole], None, True)
+        sketch = hole.Profile[0]
+        sketch.setExpression("Placement.Base.z", f"{gauge.Name}.Height")
+        self.recompute()
+        self.assertFailed(hole)
+        self.assertBody(BLOCK)
+
+        gauge.Length = 0
+        self.recompute()
+        self.assertStopped(sketch, f"'{gauge.Label}' has an error")
+        self.assertFailed(hole, f"'{sketch.Label}', which has an error")
+        self.assertValid(block)
+        self.assertBody(BLOCK)
 
     # -- the chain rule (decision 262) -----------------------------------------------------------
 

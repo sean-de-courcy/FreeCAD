@@ -15,15 +15,21 @@
 #include <App/DocumentObject.h>
 #include <App/GroupExtension.h>
 #include <App/PropertyLinks.h>
+#include <App/PropertyPythonObject.h>
 #include <App/RecomputeContinuation.h>
 #include <Base/Console.h>
 #include <Base/Placement.h>
 #include <Base/Tools.h>
+#include <Mod/Part/App/Part2DObject.h>
 #include <Mod/Part/App/TopoShape.h>
 
 #include "Body.h"
 #include "Feature.h"
+#include "FeatureAddSub.h"
 #include "FeatureBase.h"
+#include "FeatureDressUp.h"
+#include "FeatureSketchBased.h"
+#include "FeatureTransformed.h"
 #include "Retarget.h"
 #include "ShapeBinder.h"
 
@@ -155,6 +161,43 @@ bool passThroughIsEmpty(const Feature& feature)
     return passThroughSource(feature).isNull();
 }
 
+/// Whether no solid feature comes before `feature` in its Body's Group
+bool isFirstSolid(const Feature* feature)
+{
+    auto body = bodyOf(feature);
+    if (!body) {
+        return false;
+    }
+    for (auto obj : body->Group.getValues()) {
+        if (obj == feature) {
+            return true;
+        }
+        if (Body::isSolidFeature(obj)) {
+            return false;
+        }
+    }
+    return false;
+}
+
+/// Whether the feature's result on an empty base is exactly the empty shape: a subtractive feature
+/// cuts from nothing, and a dress-up or a pattern changes a base that isn't there. So when it fails
+/// there, its empty pass-through is what it would have made (ops#591, ops#127's park; decision 262
+/// (1), design work\s9347\base-stop-design.md 5 (c)). Not a Python kind, whose result is its own
+/// execute()'s, and not a Boolean, whose tools make material on nothing
+bool emptyOnEmpty(const Feature& feature)
+{
+    if (freecad_cast<const App::PropertyPythonObject*>(feature.getPropertyByName("Proxy"))) {
+        return false;
+    }
+    if (feature.isDerivedFrom<DressUp>() || feature.isDerivedFrom<Transformed>()) {
+        return true;
+    }
+    // getAddSubType() only reads the type
+    auto addSub = freecad_cast<const FeatureAddSub*>(&feature);
+    return addSub
+        && const_cast<FeatureAddSub*>(addSub)->getAddSubType() == FeatureAddSub::Type::Subtractive;
+}
+
 void passThroughBase(Feature& feature)
 {
     Part::TopoShape base = passThroughSource(feature);
@@ -214,6 +257,92 @@ void forEachInput(const App::DocumentObject* owner, bool skipGroup, Use use)
     }
 }
 
+/// What the feature's kind would take as its base with BaseFeature null, as its links name it, not
+/// as it resolves: a base through an App::Link resolves to nothing and is still a base (review
+/// pr591s-r1b). A dress-up's Base, a pattern's first original, a profile's object or its sketch's
+/// support, under ProfileBased::getBaseObject()'s filter (a Body or another Body's member is
+/// never an implicit base: ops#308)
+const App::DocumentObject* namedFallbackBase(const Feature& feature)
+{
+    if (auto dressUp = freecad_cast<const DressUp*>(&feature)) {
+        return dressUp->Base.getValue();
+    }
+    if (auto transformed = freecad_cast<const Transformed*>(&feature)) {
+        const auto& originals = transformed->Originals.getValues();
+        return originals.empty() ? nullptr : originals.front();
+    }
+    auto profiled = freecad_cast<const ProfileBased*>(&feature);
+    if (!profiled) {
+        return nullptr;
+    }
+    auto body = bodyOf(&feature);
+    auto implicit = [body](const App::DocumentObject* obj) -> const App::DocumentObject* {
+        if (!obj || obj->isDerivedFrom<Body>()) {
+            return nullptr;
+        }
+        auto other = bodyOf(obj);
+        return other && other != body ? nullptr : obj;
+    };
+    auto profile = profiled->Profile.getValue();
+    if (!profile || !profile->isDerivedFrom<Part::Part2DObject>()) {
+        return implicit(profile);
+    }
+    return implicit(static_cast<const Part::Part2DObject*>(profile)->AttachmentSupport.getValue());
+}
+
+/// The feature brings no solid of its own (design notes\park-design.md 5 (N)): BaseFeature null,
+/// and nothing named, or something whose shape never holds a solid
+bool baseless(const Feature& feature)
+{
+    if (feature.BaseFeature.getValue()) {
+        return false;
+    }
+    auto named = namedFallbackBase(feature);
+    return !named || Feature::isDatum(named) || named->isDerivedFrom<Part::Part2DObject>()
+        || named->isDerivedFrom<ShapeBinder>() || named->isDerivedFrom<SubShapeBinder>();
+}
+
+/** The feature's failure is the park's (design notes\park-design.md 5 (P), decision 275 (2)): it,
+ * or a member in error reached from it through its Body's non-solid members (a sketch, a datum,
+ * a binder, a MultiTransform's step; never a solid feature, never out of the Body), holds a
+ * parking record: a reorder set a reference of it aside (ops#127), so it fails without running
+ * (blocked()), and what it feeds fails naming it. A record counts only when its reference is to a
+ * member after the feature and the feature is the earliest solid that reads its holder
+ * (parkedAbove()): the feature was moved above what it needs with the inputs only it uses, and
+ * what follows it was built without it. A feature that reads a member another feature's park
+ * left red (the stock given a parked boss sketch's normal as its direction) isn't parked: it
+ * stops the Body (reviews pr596-r1 and pr596s-r1, StockReadsParkedSketch). Read from links,
+ * records and the Group, which only edits, the reorder, the undo and the import write, outside
+ * recomputes; and the members reached are upstream of the feature, so their error is final when
+ * it is asked
+ */
+bool parkedFailure(const Feature& feature)
+{
+    auto body = bodyOf(&feature);
+    std::set<const App::DocumentObject*> seen;
+    std::vector<const App::DocumentObject*> queue {&feature};
+    std::vector<const App::DocumentObject*> holders;
+    for (std::size_t i = 0; i < queue.size(); ++i) {
+        const App::DocumentObject* obj = queue[i];
+        if (!seen.insert(obj).second) {
+            continue;
+        }
+        // The feature itself is asked as it fails, before its error is written
+        if ((i == 0 || obj->isError()) && hasParkedReferences(obj)) {
+            holders.push_back(obj);
+        }
+        forEachInput(obj, true, [&](const App::Property*, const std::vector<InputLink>& links) {
+            for (const auto& link : links) {
+                if (!Body::isSolidFeature(link.object) && bodyOf(link.object) == body) {
+                    queue.push_back(link.object);
+                }
+            }
+            return false;
+        });
+    }
+    return !holders.empty() && parkedAbove(&feature, holders);
+}
+
 class BodyFailureContinuation: public App::RecomputeContinuation
 {
 public:
@@ -221,8 +350,15 @@ public:
      * a real, current result (ops#579, decision 262; design work\s9347\base-stop-design.md)
      *
      * (S) A solid feature: its pass-through isn't the empty shape (decision 259), and its base is
-     * Valid or itself a claimed failure, up the BaseFeature chain. (N) Any other member passes
-     * nothing on: it is claimed when none of its inputs is an unclaimed failure.
+     * Valid or itself a claimed failure, up the BaseFeature chain. One that passes the empty
+     * shape is claimed when it makes nothing on nothing (a subtractive feature, a dress-up, a
+     * pattern) or its failure is the park's (a reorder set a reference of it aside: a boss moved
+     * above the Pad its sketch sits on), and it is first in its Body naming no base of its own,
+     * or on a current base without a solid: the Body computes below it, as Onshape skips a
+     * feature dragged above what it needs (ops#596, decisions 275 (2), 276, 281; design
+     * notes\park-design.md). A FeatureBase, and a Pad failing for another reason, stop the Body.
+     * (N) Any other member passes nothing on: it is claimed when none of its inputs is an
+     * unclaimed failure.
      *
      * Only what is upstream of `failed` is read. Document::recompute runs the topological order, so
      * all of it has run, or stands untouched, before `failed` runs, and nothing upstream is written
@@ -329,9 +465,13 @@ public:
                 const bool claimed = bodyOf(feature) != nullptr;
                 if (claimed || suppressed) {
                     // Failed while its output is the failure's pass-through: the error alone
-                    // stays set while the recompute that fixes it writes its own shape
+                    // stays set while the recompute that fixes it writes its own shape. One that
+                    // passes the empty shape (a parked lead) is no shape input of anything, and
+                    // the references below it are judged as in a Body without it (design
+                    // notes\park-design.md 5 (R), decision 275 (4))
                     out.push_back({feature,
-                                   claimed && feature->isError() && feature->failurePassedThrough(),
+                                   claimed && feature->isError() && feature->failurePassedThrough()
+                                       && !feature->Shape.getShape().isNull(),
                                    suppressed});
                 }
                 std::vector<App::Property*> props;
@@ -380,16 +520,42 @@ private:
 
     /// (S), up the base chain: each base real (so non-null), and Valid or a claimed failure, whose
     /// shape is its own pass-through, made from its base by this same test. Every base in error on
-    /// the way has the same answer
+    /// the way has the same answer. An empty pass-through is real only for a kind that makes
+    /// nothing on nothing (emptyOnEmpty()) or a parked feature (parkedFailure()), first in its
+    /// Body naming no base (baseless()) or on a current base: a pocket or a boss parked above the
+    /// first Pad is claimed, and the Body computes below it (ops#591, ops#596). The Pad after it
+    /// decides its own claim on its own pass-through, so a failed first Pad there still stops the
+    /// Body (review pr579-r4 R4-1)
     bool solidClaimed(const Feature* feature, Claims& claims) const
     {
         std::vector<const Feature*> chain;
         bool result = false;
         while (true) {
             if (passThroughIsEmpty(*feature)) {
-                break;
+                // (F): a FeatureBase's base is the outside object the Body itself names, and a
+                // Body on a failed one stops (ops#579 find 1). (K) or (P): it makes nothing on
+                // nothing, or its failure is the park's. A Pad that fails for any other reason
+                // stops the Body, as Onshape fails the "Add" extrudes merged with a part that
+                // vanished (decision 281)
+                if (feature->isDerivedFrom<FeatureBase>()
+                    || !(emptyOnEmpty(*feature) || parkedFailure(*feature))) {
+                    break;
+                }
+                if (!feature->BaseFeature.getValue()) {
+                    // (L) no solid before it (a transform added before another solid is linked
+                    // to its base in its first execute(): review pr591s-r1), and (N) no base
+                    // named in its links, which resolve or not (a fillet on a failed outside
+                    // solid, or on one through a Link: reviews pr591-r1 T1 and pr591s-r1b)
+                    result = isFirstSolid(feature) && baseless(*feature);
+                    break;
+                }
+                // A linked base that holds no solid: current, or not, as any other
             }
             const Part::Feature* baseObject = feature->getBaseObject(true);
+            if (!baseObject) {
+                // A BaseFeature that isn't a Part feature
+                break;
+            }
             if (!baseObject->isError()) {
                 result = true;
                 break;

@@ -1,0 +1,11 @@
+{
+"entries": {
+"FlushBossFrontSketch|sketch_front|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr596-r1", "issue": "ops#596", "tier": "F"},
+"FlushBossTopEdgeFillet|fillet_edge|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr596-r1", "issue": "ops#596", "tier": "F"},
+"SketchOnFusedTop|sketch_top|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr596-r1", "issue": "ops#596", "tier": "F"},
+"SketchOnParkedBossTop|sketch_boss|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr596-r1", "issue": "ops#596", "tier": "F"},
+"StockReadsParkedSketch|fillet_edge|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr596-r1", "issue": "ops#596", "tier": "F"},
+"TwinBossTopSketch|sketch_a|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr596-r1", "issue": "ops#596", "tier": "F"},
+"ZeroLengthWhileParked|fillet_edge|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr596-r1", "issue": "ops#596", "tier": "F"}
+}
+}

@@ -1,0 +1,10 @@
+{
+"entries": {
+"LeadSubBoxTaller|sketch_top|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr591s-r1", "issue": "ops#591", "tier": "F"},
+"NoLeadTaller|sketch_top|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr591s-r1", "issue": "ops#591", "tier": "F"},
+"ParkedFilletTaller|sketch_top|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr591s-r1", "issue": "ops#591", "tier": "F"},
+"ParkedPatternTaller|sketch_top|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr591s-r1", "issue": "ops#591", "tier": "F"},
+"ParkedPocketTallerSuppressed|sketch_top|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr591s-r1", "issue": "ops#591", "tier": "F"},
+"ParkedPocketTaller|sketch_top|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr591s-r1", "issue": "ops#591", "tier": "F"}
+}
+}
