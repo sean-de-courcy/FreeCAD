@@ -66,7 +66,7 @@ bool inPartDesign()
 /// the Combo view is turned off
 QSplitter* modelSplitter()
 {
-    QWidget* combo = Gui::DockWindowManager::instance()->getDockWindow("Std_ComboView");
+    QWidget* combo = Gui::DockWindowManager::instance()->findRegisteredDockWindow("Std_ComboView");
     return combo ? combo->findChild<QSplitter*>(QString(), Qt::FindDirectChildrenOnly) : nullptr;
 }
 
@@ -317,6 +317,7 @@ FeaturesView::FeaturesView(QWidget* parent)
     features->setObjectName(QStringLiteral("featureList"));
     features->setItemDelegate(new FeatureBarDelegate(features));
     features->setSelectionMode(QAbstractItemView::ExtendedSelection);
+    features->setIconSize(QSize(16, 16));
     features->setContextMenuPolicy(Qt::CustomContextMenu);
     featuresLayout->addWidget(features);
 
@@ -325,6 +326,7 @@ FeaturesView::FeaturesView(QWidget* parent)
     parts->setColumnCount(2);
     parts->setHeaderLabels({tr("Parts"), QString()});
     parts->setRootIsDecorated(false);
+    parts->setIconSize(QSize(16, 16));
     parts->setSelectionMode(QAbstractItemView::ExtendedSelection);
     parts->header()->setStretchLastSection(false);
     parts->header()->setSectionResizeMode(0, QHeaderView::Stretch);
@@ -893,7 +895,7 @@ void FeaturesView::onFeatureMenu(const QPoint& pos)
     }
     QPointer<FeaturesView> self(this);
     std::string name = obj->getNameInDocument();
-    auto runCommand = [](const char* command) {
+    auto runByName = [](const char* command) {
         Gui::Application::Instance->commandManager().runCommandByName(command);
     };
     QMenu menu(this);
@@ -923,14 +925,14 @@ void FeaturesView::onFeatureMenu(const QPoint& pos)
     end->setObjectName(QStringLiteral("featureRollToEnd"));
     end->setEnabled(!locked);
     menu.addSeparator();
-    auto show = menu.addAction(tr("Show/Hide"), [runCommand]() { runCommand("Std_ToggleVisibility"); });
+    auto show = menu.addAction(tr("Show/Hide"), [runByName]() { runByName("Std_ToggleVisibility"); });
     show->setObjectName(QStringLiteral("featureToggleVisibility"));
     auto suppress = menu.addAction(
         isSuppressed(obj) ? tr("Unsuppress") : tr("Suppress"),
-        [runCommand]() { runCommand("Std_ToggleSuppress"); }
+        [runByName]() { runByName("Std_ToggleSuppress"); }
     );
     suppress->setObjectName(QStringLiteral("featureToggleSuppress"));
-    auto remove = menu.addAction(tr("Delete"), [runCommand]() { runCommand("Std_Delete"); });
+    auto remove = menu.addAction(tr("Delete"), [runByName]() { runByName("Std_Delete"); });
     remove->setObjectName(QStringLiteral("featureDelete"));
     menu.exec(features->viewport()->mapToGlobal(pos));
 }
