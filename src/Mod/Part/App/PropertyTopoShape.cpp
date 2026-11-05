@@ -260,6 +260,54 @@ bool toDocumentForm(TopoShape& shape, bool interned, bool restored = false)
     }
     return true;
 }
+
+/** Names in \a named \a shape, a shape without a map that \a property's owner sets while its
+ * document opens (a datum point's, rebuilt on restore), by \a restored, the restored value it
+ * replaces, with ids from \a nextId: only if each of its elements matches one of that value's.
+ * Returns whether it did (ops#633).
+ */
+bool nameByRestoredMap(
+    const TopoShape& shape,
+    TopoShape& named,
+    const App::Property& property,
+    const TopoShape& restored,
+    long& nextId
+)
+{
+    // An open only, not an import: an imported object's map holds its file's tags, and its first
+    // recompute names it (ops#502). The restored map is read by then: Property::afterRestore()
+    // runs before any object's onDocumentRestored(), and RestoreDocFile() takes the map out
+    // while it reads the shape
+    auto owner = freecad_cast<Part::Feature*>(property.getContainer());
+    if (!owner || !owner->isAttachedToDocument() || owner->getPropertyOfGeometry() != &property
+        || owner->getSelectedHistoryAlgorithm() != App::HistoryAlgorithm::V2 || shape.isNull()
+        || shape.getElementMapSize() > 0 || restored.getElementMapSize() == 0
+        || !owner->getDocument()->testStatus(App::Document::Restoring)
+        || owner->getDocument()->testStatus(App::Document::Importing)) {
+        return false;
+    }
+    // Its elements keep the ids they were saved with. All of them or none: an id given now would
+    // be another at every open, so the shape is then set without names, as before, and named at
+    // its recompute
+    TopoShape result(shape);
+    long counter = nextId;
+    int freshIds = 0;
+    Part::nameByMatch(
+        result,
+        restored,
+        owner->getID(),
+        counter,
+        owner->isDerivedFrom<Part::Primitive>(),
+        &freshIds
+    );
+    if (freshIds > 0 || result.getElementMapSize() == 0) {
+        return false;
+    }
+    nextId = counter;
+    named = result;
+    return true;
+}
+
 }  // namespace
 
 PropertyPartShape::PropertyPartShape() = default;
@@ -297,6 +345,11 @@ void PropertyPartShape::setValue(const TopoShape& sh)
             return;
         }
         // Nothing to name (an empty compound): set as it is, not through the match again
+    }
+    else if (TopoShape named; nameByRestoredMap(sh, named, *this, _Shape, _NextElementId)) {
+        // Rebuilt while the document opens (a datum point's shape): named as it was saved
+        setValue(named);
+        return;
     }
     aboutToSetValue();
     _Shape = sh;
@@ -364,6 +417,12 @@ void PropertyPartShape::setValue(const TopoDS_Shape& sh, bool resetElementMap)
         // Named by a match, not by index: even a map kept for the same topology (a Box's) would
         // be attached by index (ops#502)
         setValue(shape);
+        return;
+    }
+    // A shape that keeps the map (by index) keeps its names already
+    if (TopoShape named; resetElementMap
+        && nameByRestoredMap(TopoShape {sh}, named, *this, _Shape, _NextElementId)) {
+        setValue(named);
         return;
     }
     aboutToSetValue();

@@ -97,13 +97,16 @@ PartExport bool indexNamesOnly(const TopoShape& shape);
  * id and keeps the names of its old element after its MLN name, as aliases, so that references
  * holding those names find it until they take its MLN name. An element the match leaves (the
  * class C ruling's retirements included) has no alias.
+ *
+ * @param freshIds If given, set to the number of elements that took a fresh id
  */
 PartExport void nameByMatch(
     TopoShape& shape,
     const TopoShape& previous,
     long tag,
     long& counter,
-    bool fixedOrder
+    bool fixedOrder,
+    int* freshIds = nullptr
 );
 
 }  // namespace Part

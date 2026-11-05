@@ -1443,6 +1443,22 @@ private:
                 vertexes.insert(v);
             }
         }
+        // A vertex at no edge stands alone, as an edge with no adjacent edge does, where its old
+        // vertex stood alone too (a datum point's, ops#633): a corner a removed solid left at
+        // its place isn't taken for it
+        std::set<int> boundBefore;
+        for (const auto& ends : before.edgeVertexes) {
+            boundBefore.insert(ends.begin(), ends.end());
+        }
+        for (const auto& corners : before.faceVertexes) {
+            boundBefore.insert(corners.begin(), corners.end());
+        }
+        for (const auto& [i, j] : result.vertexes) {
+            const int v = i - 1;
+            if (facesAtVertex[v].empty() && edgesAtVertex[v].empty() && !boundBefore.count(j - 1)) {
+                vertexes.insert(v);
+            }
+        }
         return {vertexes, edges};
     }
 
@@ -1789,8 +1805,18 @@ bool indexNamesOnly(const TopoShape& shape)
     return true;
 }
 
-void nameByMatch(TopoShape& shape, const TopoShape& previous, long tag, long& counter, bool fixedOrder)
+void nameByMatch(
+    TopoShape& shape,
+    const TopoShape& previous,
+    long tag,
+    long& counter,
+    bool fixedOrder,
+    int* freshIds
+)
 {
+    if (freshIds) {
+        *freshIds = 0;
+    }
     const std::array<TopAbs_ShapeEnum, 3> types {TopAbs_VERTEX, TopAbs_EDGE, TopAbs_FACE};
     std::array<std::vector<long>, 3> oldIds;
     bool named = false;
@@ -1841,6 +1867,9 @@ void nameByMatch(TopoShape& shape, const TopoShape& previous, long tag, long& co
             }
             if (id <= 0) {
                 id = counter++;
+                if (freshIds) {
+                    ++*freshIds;
+                }
             }
             const std::string section = Data::MappedName::makeEncodedSection(
                 {},

@@ -253,3 +253,137 @@ class TestMaplessNames(unittest.TestCase):
         # Assert
         for entry in App.getReferenceReport(sketch):
             self.assertFalse(entry["evidence"].startswith("retired:"), entry["evidence"])
+
+    def attachToVertex(self, doc, target, vertex):
+        sketch = doc.addObject("Sketcher::SketchObject", "At" + vertex)
+        sketch.AttachmentSupport = [(target, vertex)]
+        sketch.MapMode = "Translate"
+        doc.recompute()
+        self.assertTrue(sketch.isValid(), sketch.getStatusString())
+        return sketch
+
+    def testLoneVertexKeepsItsId(self):
+        """ops#633: a script feature's shape, a lone vertex (no edge, no face), set again at the
+        same place keeps its id, as an edge with no adjacent edge does: a sketch on it stays
+        there. Before, the match never confirmed such a vertex, so every value gave it a fresh
+        id and the sketch broke."""
+        # Arrange
+        doc = self.newDocument()
+        target = models.feature(doc, "Spot", Part.Vertex(V(5, 2, 1)))
+        doc.recompute()
+        names = list(target.Shape.ElementMap)
+        self.assertEqual(len(names), 1)
+        self.assertIn(";MLN;", names[0])
+        sketch = self.attachToVertex(doc, target, "Vertex1")
+
+        # Act
+        target.Shape = Part.Vertex(V(5, 2, 1))
+        doc.recompute()
+
+        # Assert
+        self.assertEqual(list(target.Shape.ElementMap), names)
+        self.assertTrue(sketch.isValid(), sketch.getStatusString())
+        self.assertAlmostEqual((sketch.Placement.Base - V(5, 2, 1)).Length, 0)
+
+    def testCornerOfARemovedSolidIsNotALoneVertex(self):
+        """ops#633's bound: a box's corner and, after the edit, a lone vertex at that corner's
+        place are other elements (the vertex stood at no edge before only if its old partner
+        did too): a sketch on the corner breaks, never moves to the lone vertex quietly."""
+        # Arrange
+        doc = self.newDocument()
+        target = models.feature(doc, "Corner", boxes([0]))
+        doc.recompute()
+        corner = [
+            "Vertex%d" % i
+            for i, v in enumerate(target.Shape.Vertexes, 1)
+            if v.Point.distanceToPoint(V(0, 0, 0)) < 1e-9
+        ][0]
+        sketch = self.attachToVertex(doc, target, corner)
+
+        # Act
+        target.Shape = Part.Vertex(V(0, 0, 0))
+        doc.recompute()
+
+        # Assert
+        self.assertFalse(sketch.isValid())
+
+
+class TestDatumNamesAfterReopen(unittest.TestCase):
+    """ops#633: a datum point's shape is rebuilt when its document opens (the restored one has the
+    old placement in it). Its element names after the open, and after a recompute, are the ones it
+    was saved with, so a reference to its vertex holds across any number of save and reopen cycles
+    (Onshape keeps references to points). Before, the rebuilt shape came without names and the
+    recompute gave the vertex a fresh id at every open: the reference broke at the first."""
+
+    def setUp(self):
+        self.documents = []
+        self.folder = tempfile.mkdtemp(prefix="DatumNames")
+
+    def tearDown(self):
+        for name in self.documents:
+            if name in App.listDocuments():
+                App.closeDocument(name)
+        shutil.rmtree(self.folder, ignore_errors=True)
+
+    def build(self):
+        """A 10 mm box in a body, a datum point at its top face's centre and a second one
+        attached to the first one's vertex, 5 mm above it."""
+        doc = models.newDocument("DatumNames")
+        doc.HistoryAlgorithm = "V2"
+        doc.ReferenceSolver = True
+        self.documents.append(doc.Name)
+        body = doc.addObject("PartDesign::Body", "Body")
+        box = body.newObject("PartDesign::AdditiveBox", "Box")
+        box.Length = box.Width = box.Height = 10
+        doc.recompute()
+        top = [
+            "Face%d" % i
+            for i, f in enumerate(box.Shape.Faces, 1)
+            if abs(f.CenterOfMass.z - 10) < 1e-6 and f.normalAt(0, 0).z > 0.5
+        ][0]
+        point = body.newObject("PartDesign::Point", "Mid")
+        point.AttachmentSupport = [(box, top)]
+        point.MapMode = "CenterOfMass"
+        doc.recompute()
+        above = body.newObject("PartDesign::Point", "Above")
+        above.AttachmentSupport = [(point, "Vertex1")]
+        above.MapMode = "Vertex"
+        above.AttachmentOffset = App.Placement(V(0, 0, 5), App.Rotation())
+        doc.recompute()
+        self.assertTrue(above.isValid(), above.getStatusString())
+        return doc
+
+    def reopen(self, doc):
+        path = doc.FileName
+        doc.save()
+        App.closeDocument(doc.Name)
+        doc = App.openDocument(path)
+        self.documents.append(doc.Name)
+        return doc
+
+    def testPointReferenceAcrossTwoReopens(self):
+        # Arrange
+        doc = self.build()
+        doc.saveAs(os.path.join(self.folder, "points.FCStd"))
+        names = dict(doc.getObject("Mid").Shape.ElementMap)
+        # an MLN name, the case of ops#633: the point's shape was named by a match
+        self.assertEqual(len(names), 1)
+        self.assertIn(";MLN;", next(iter(names)))
+        where = V(5, 5, 15)
+        self.assertAlmostEqual((doc.getObject("Above").Placement.Base - where).Length, 0)
+
+        for cycle in (1, 2):
+            # Act
+            doc = self.reopen(doc)
+            opened = dict(doc.getObject("Mid").Shape.ElementMap)
+            for obj in doc.Objects:
+                obj.touch()
+            doc.recompute()
+
+            # Assert
+            self.assertEqual(opened, names, f"open {cycle}")
+            self.assertEqual(dict(doc.getObject("Mid").Shape.ElementMap), names, f"recompute {cycle}")
+            above = doc.getObject("Above")
+            self.assertTrue(above.isValid(), f"open {cycle}: {above.getStatusString()}")
+            self.assertEqual(above.AttachmentSupport[0][1], ("Vertex1",))
+            self.assertAlmostEqual((above.Placement.Base - where).Length, 0)
