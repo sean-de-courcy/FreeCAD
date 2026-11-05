@@ -1443,20 +1443,17 @@ private:
                 vertexes.insert(v);
             }
         }
-        // A vertex at no edge stands alone, as an edge with no adjacent edge does, where its old
-        // vertex stood alone too (a datum point's, ops#633): a corner a removed solid left at
-        // its place isn't taken for it
-        std::set<int> boundBefore;
-        for (const auto& ends : before.edgeVertexes) {
-            boundBefore.insert(ends.begin(), ends.end());
-        }
-        for (const auto& corners : before.faceVertexes) {
-            boundBefore.insert(corners.begin(), corners.end());
-        }
-        for (const auto& [i, j] : result.vertexes) {
-            const int v = i - 1;
-            if (facesAtVertex[v].empty() && edgesAtVertex[v].empty() && !boundBefore.count(j - 1)) {
-                vertexes.insert(v);
+        // A shape that is one vertex and nothing else (a datum point's, a Part::Vertex): its
+        // vertex counts where the old shape was one vertex alone too (ops#633). Lone vertices
+        // among others are left unconfirmed: a place match can't tell them apart, so a point
+        // dropped with another slid onto its place breaks (review pr431-r1)
+        auto oneVertex = [](const Topology& shape) {
+            return shape.points.size() == 1 && shape.edgeVertexes.empty()
+                && shape.faceVertexes.empty();
+        };
+        if (oneVertex(after) && oneVertex(before)) {
+            for (const auto& [i, j] : result.vertexes) {
+                vertexes.insert(i - 1);
             }
         }
         return {vertexes, edges};

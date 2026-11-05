@@ -73,6 +73,33 @@ Line::Line()
 
 Line::~Line() = default;
 
+void Line::onDocumentRestored()
+{
+    // The infinite edge isn't written to the file, so the shape comes back null and nothing
+    // rebuilt it: a reference to the line's edge broke at the first recompute after an open
+    // (FreeCAD-CH, ops#633). Rebuilt at the restored placement, as a datum point's shape is
+    if (Shape.getShape().isNull()) {
+        BRepBuilderAPI_MakeEdge builder(gp_Lin(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)));
+        if (builder.IsDone()) {
+            TopoDS_Shape edge = builder.Shape();
+            edge.Infinite(Standard_True);
+            Part::TopoShape shape(edge);
+            shape.setPlacement(Placement.getValue());
+            // With the names it was saved with (a line moved by its placement has them): the
+            // file keeps them though the edge is lost, and the line is one edge, Edge1 in both
+            Part::TopoShape restored(Shape.getShape());
+            if (restored.getElementMapSize() > 0) {
+                shape.Tag = restored.Tag;
+                shape.Hasher = restored.Hasher;
+                shape.setHistoryAlgorithm(restored.getHistoryAlgorithm());
+                shape.resetElementMap(restored.resetElementMap());
+            }
+            Shape.setValue(shape);
+        }
+    }
+    Datum::onDocumentRestored();
+}
+
 Base::Vector3d Line::getDirection() const
 {
     Base::Rotation rot = Placement.getValue().getRotation();

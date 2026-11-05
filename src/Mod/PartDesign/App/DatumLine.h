@@ -44,6 +44,7 @@ public:
     App::PropertyEnumeration ResizeMode;
     App::PropertyLength Length;
     void onChanged(const App::Property* prop) override;
+    void onDocumentRestored() override;
 
     const char* getViewProviderName() const override
     {

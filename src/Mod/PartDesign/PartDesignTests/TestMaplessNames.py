@@ -307,6 +307,31 @@ class TestMaplessNames(unittest.TestCase):
         # Assert
         self.assertFalse(sketch.isValid())
 
+    def testDroppedLonePointWithTheRestSlidBreaks(self):
+        """Review pr431-r1's round (`LonePointsFirstDeletedRestSlid`): a script compound of lone
+        points at x = 0, 20, 40, the first dropped and the other two slid onto the places before
+        them. A place match can't tell lone points apart, so only a shape that is one vertex
+        keeps its id: the sketches on the first two points break, never sit on the wrong point
+        quietly."""
+        # Arrange
+        doc = self.newDocument()
+
+        def points(places):
+            return Part.makeCompound([Part.Vertex(V(x, 0, 0)) for x in places])
+
+        target = models.feature(doc, "Points", points([0, 20, 40]))
+        doc.recompute()
+        first = self.attachToVertex(doc, target, "Vertex1")
+        second = self.attachToVertex(doc, target, "Vertex2")
+
+        # Act
+        target.Shape = points([0, 20])
+        doc.recompute()
+
+        # Assert
+        self.assertFalse(first.isValid())
+        self.assertFalse(second.isValid())
+
 
 class TestDatumNamesAfterReopen(unittest.TestCase):
     """ops#633: a datum point's shape is rebuilt when its document opens (the restored one has the
@@ -387,3 +412,39 @@ class TestDatumNamesAfterReopen(unittest.TestCase):
             self.assertTrue(above.isValid(), f"open {cycle}: {above.getStatusString()}")
             self.assertEqual(above.AttachmentSupport[0][1], ("Vertex1",))
             self.assertAlmostEqual((above.Placement.Base - where).Length, 0)
+
+    def testLineReferenceAcrossTwoReopens(self):
+        """A datum line's infinite edge isn't written to the file: the reopened line had a null
+        shape until it was rebuilt, so a sketch normal to its edge broke at the first recompute.
+        It is rebuilt at the open, at its own placement (here set directly, not attached)."""
+        # Arrange
+        doc = models.newDocument("DatumLine")
+        doc.HistoryAlgorithm = "V2"
+        doc.ReferenceSolver = True
+        self.documents.append(doc.Name)
+        body = doc.addObject("PartDesign::Body", "Body")
+        line = body.newObject("PartDesign::Line", "Axis")
+        line.Placement = App.Placement(V(3, 4, 0), App.Rotation(V(1, 0, 0), 30))
+        doc.recompute()
+        sketch = body.newObject("Sketcher::SketchObject", "Across")
+        sketch.AttachmentSupport = [(line, "Edge1")]
+        sketch.MapMode = "NormalToEdge"
+        doc.recompute()
+        self.assertTrue(sketch.isValid(), sketch.getStatusString())
+        doc.saveAs(os.path.join(self.folder, "line.FCStd"))
+        placed, where = line.Placement, sketch.Placement
+
+        for cycle in (1, 2):
+            # Act
+            doc = self.reopen(doc)
+            opened = doc.getObject("Axis").Shape
+            for obj in doc.Objects:
+                obj.touch()
+            doc.recompute()
+
+            # Assert
+            self.assertEqual(len(opened.Edges), 1, f"open {cycle}: the line has no edge")
+            self.assertTrue(doc.getObject("Axis").Placement.isSame(placed, 1e-9), f"open {cycle}")
+            sketch = doc.getObject("Across")
+            self.assertTrue(sketch.isValid(), f"open {cycle}: {sketch.getStatusString()}")
+            self.assertTrue(sketch.Placement.isSame(where, 1e-9), f"open {cycle}")
