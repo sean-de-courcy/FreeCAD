@@ -88,3 +88,35 @@ def newPartFrom(feature: DocumentObject, /) -> DocumentObject:
     Its Profile sketch moves along when nothing else uses it. No recompute; returns the new Body.
     """
     ...
+
+def studioSequence(studio: Document | DocumentObject, /) -> list[DocumentObject]:
+    """Return the features of every Body of the studio in history order (ops#602).
+
+    studio is a document (its top level) or an App::Part. A feature comes after what it reads in
+    other Bodies and after its Body's earlier members; the oldest comes first where that leaves a
+    choice.
+    """
+    ...
+
+def rollStudioTo(studio: Document | DocumentObject, feature: DocumentObject | None, /) -> None:
+    """Move every Body's bar after its last solid feature at or above feature (None: the top).
+
+    No transaction, no recompute.
+    """
+    ...
+
+def rollStudioToEnd(studio: Document | DocumentObject, /) -> None:
+    """Move every Body's bar of the studio to its end."""
+    ...
+
+def isStudioRolledBack(studio: Document | DocumentObject, /) -> bool:
+    """Return whether some Body of the studio is rolled back."""
+    ...
+
+def studioBarAfter(studio: Document | DocumentObject, *hint: DocumentObject | None) -> DocumentObject | None:
+    """Return the feature of studioSequence the studio's bar follows (None: the top).
+
+    hint, the feature (None: the top) the bar was last moved after, is kept when only sketches and
+    datums lie between it and the first held feature.
+    """
+    ...

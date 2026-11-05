@@ -24,6 +24,7 @@
 
 
 #include <App/Document.h>
+#include <App/DocumentPy.h>
 #include <App/DocumentObjectPy.h>
 #include <App/Part.h>
 #include <Base/GeometryPyCXX.h>
@@ -36,6 +37,7 @@
 #include "FeatureBoolean.h"
 #include "FeatureSketchBased.h"
 #include "FeatureSplit.h"
+#include "Studio.h"
 
 
 namespace PartDesign
@@ -113,6 +115,37 @@ public:
             &Module::studioOriginFeature,
             "studioOriginFeature(owner, feature) -- owner's own origin feature standing for "
             "feature, an origin feature of another Body of the studio, or None."
+        );
+        add_varargs_method(
+            "studioSequence",
+            &Module::studioSequence,
+            "studioSequence(studio) -- The features of every Body of the studio (a document: its "
+            "top level, or an App::Part) in history order: after what they read in other Bodies "
+            "and after their Body's earlier members, the oldest first where that leaves a choice."
+        );
+        add_varargs_method(
+            "rollStudioTo",
+            &Module::rollStudioTo,
+            "rollStudioTo(studio, feature) -- Moves the bar of every Body of the studio after its "
+            "last solid feature at or above feature in studioSequence (None: to its top). No "
+            "transaction, no recompute."
+        );
+        add_varargs_method(
+            "rollStudioToEnd",
+            &Module::rollStudioToEnd,
+            "rollStudioToEnd(studio) -- Moves the bar of every Body of the studio to its end."
+        );
+        add_varargs_method(
+            "isStudioRolledBack",
+            &Module::isStudioRolledBack,
+            "isStudioRolledBack(studio) -- Whether some Body of the studio is rolled back."
+        );
+        add_varargs_method(
+            "studioBarAfter",
+            &Module::studioBarAfter,
+            "studioBarAfter(studio[, hint]) -- The feature of studioSequence the studio's bar "
+            "follows (None: the top). hint, the feature (None: the top) the bar was last moved "
+            "after, is kept when only sketches and datums lie between."
         );
         initialize("This module is the PartDesign module.");  // register with Python
     }
@@ -370,6 +403,121 @@ private:
             return Py::None();
         }
         return Py::asObject(feature->getPyObject());
+    }
+
+    // FreeCAD-CH (ops#602): the studio's feature list and bar. The studio is a document (its
+    // top level) or an App::Part
+    static void studioArg(PyObject* obj, App::Document*& doc, App::Part*& studio)
+    {
+        studio = nullptr;
+        if (PyObject_TypeCheck(obj, &(App::DocumentPy::Type))) {
+            doc = static_cast<App::DocumentPy*>(obj)->getDocumentPtr();
+            if (!doc) {
+                PyErr_SetString(PyExc_ReferenceError, "The document is closed");
+                throw Py::Exception();
+            }
+            return;
+        }
+        if (PyObject_TypeCheck(obj, &(App::DocumentObjectPy::Type))) {
+            studio = freecad_cast<App::Part*>(objectArg(obj));
+            if (studio) {
+                doc = studio->getDocument();
+                return;
+            }
+        }
+        PyErr_SetString(PyExc_TypeError, "Expected a document or an App::Part");
+        throw Py::Exception();
+    }
+
+    Py::Object studioSequence(const Py::Tuple& args)
+    {
+        PyObject* pStudio;
+        if (!PyArg_ParseTuple(args.ptr(), "O", &pStudio)) {
+            throw Py::Exception();
+        }
+        App::Document* doc = nullptr;
+        App::Part* studio = nullptr;
+        studioArg(pStudio, doc, studio);
+        return objectList(PartDesign::studioSequence(doc, studio));
+    }
+
+    Py::Object rollStudioTo(const Py::Tuple& args)
+    {
+        PyObject* pStudio;
+        PyObject* pObj;
+        if (!PyArg_ParseTuple(args.ptr(), "OO", &pStudio, &pObj)) {
+            throw Py::Exception();
+        }
+        App::Document* doc = nullptr;
+        App::Part* studio = nullptr;
+        studioArg(pStudio, doc, studio);
+        App::DocumentObject* member = nullptr;
+        if (pObj != Py_None) {
+            if (!PyObject_TypeCheck(pObj, &(App::DocumentObjectPy::Type))) {
+                PyErr_SetString(PyExc_TypeError, "Expected a feature or None");
+                throw Py::Exception();
+            }
+            member = objectArg(pObj);
+        }
+        try {
+            PartDesign::rollStudioTo(doc, studio, member);
+        }
+        catch (const Base::Exception& e) {
+            e.setPyException();
+            throw Py::Exception();
+        }
+        return Py::None();
+    }
+
+    Py::Object rollStudioToEnd(const Py::Tuple& args)
+    {
+        PyObject* pStudio;
+        if (!PyArg_ParseTuple(args.ptr(), "O", &pStudio)) {
+            throw Py::Exception();
+        }
+        App::Document* doc = nullptr;
+        App::Part* studio = nullptr;
+        studioArg(pStudio, doc, studio);
+        PartDesign::rollStudioToEnd(doc, studio);
+        return Py::None();
+    }
+
+    Py::Object isStudioRolledBack(const Py::Tuple& args)
+    {
+        PyObject* pStudio;
+        if (!PyArg_ParseTuple(args.ptr(), "O", &pStudio)) {
+            throw Py::Exception();
+        }
+        App::Document* doc = nullptr;
+        App::Part* studio = nullptr;
+        studioArg(pStudio, doc, studio);
+        return Py::Boolean(PartDesign::isStudioRolledBack(doc, studio));
+    }
+
+    Py::Object studioBarAfter(const Py::Tuple& args)
+    {
+        PyObject* pStudio;
+        PyObject* pHint = nullptr;
+        if (!PyArg_ParseTuple(args.ptr(), "O|O", &pStudio, &pHint)) {
+            throw Py::Exception();
+        }
+        App::Document* doc = nullptr;
+        App::Part* studio = nullptr;
+        studioArg(pStudio, doc, studio);
+        App::DocumentObject* hint = nullptr;
+        if (pHint && pHint != Py_None) {
+            if (!PyObject_TypeCheck(pHint, &(App::DocumentObjectPy::Type))) {
+                PyErr_SetString(PyExc_TypeError, "Expected a feature or None");
+                throw Py::Exception();
+            }
+            hint = objectArg(pHint);
+        }
+        auto after =
+            PartDesign::studioBarAfter(PartDesign::studioSequence(doc, studio), pHint != nullptr, hint);
+        if (!after) {
+            return Py::None();
+        }
+        return Py::asObject(after->getPyObject());
     }
 
     Py::Object makeFilletArc(const Py::Tuple& args)

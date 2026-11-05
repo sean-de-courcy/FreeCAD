@@ -82,6 +82,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestSketch.py
     PartDesignTests/TestSplit.py
     PartDesignTests/TestStudio.py
+    PartDesignTests/TestStudioSequence.py
 )
 
 if(BUILD_GUI)
