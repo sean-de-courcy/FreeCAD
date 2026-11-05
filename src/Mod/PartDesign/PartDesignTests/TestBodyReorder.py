@@ -459,6 +459,39 @@ class BodyReorderBase:
             self.assertEqual(list(self.body.Group), group)
             self.assertChain(block, a, b, c)
 
+    def testOriginIsNoPlaceInTheOrder(self):
+        """The Origin and its features belong to the Body (hasObject) but have no place in its
+        Group: a move next to one of them, or of one of them, is refused and changes nothing, and
+        so is an insert next to one. Before ops#597 the move next to the Origin wrote past the end
+        of the new Group (the drop at the Origin row's edge, a heap corruption) or went to the end."""
+        block, a, b, c = self.chain()
+        group = list(self.body.Group)
+        origin = self.body.Origin
+        plane = models.originFeature(self.body, "XY_Plane")
+        self.assertTrue(self.body.hasObject(origin))
+        self.assertNotIn(origin, group)
+        for objects, target, after in (
+            ([b], origin, True),
+            ([b], origin, False),
+            ([b], plane, True),
+            ([a, b], origin, True),
+            ([origin], a, True),
+            ([plane], None, True),
+        ):
+            with self.assertRaises(ValueError):
+                self.body.reorderObject(objects, target, after)
+            self.assertEqual(list(self.body.Group), group)
+            self.assertChain(block, a, b, c)
+            self.assertIs(self.body.Tip, c)
+        sketch = self.doc.addObject("Sketcher::SketchObject", "Stray")
+        for target in (origin, plane):
+            # insertObject reports every Base::Exception as SystemError (BodyPyImp.cpp)
+            with self.assertRaises(SystemError):
+                self.body.insertObject(sketch, target, True)
+            self.assertEqual(list(self.body.Group), group)
+        self.recompute()
+        self.assertBody(BLOCK + 2 * BOSS - HOLE)
+
     def testDatumAfterItsSketchIsCarried(self):
         """B's sketch sits on a datum plane that comes after the sketch in the Group: B moved below
         C carries both its sketch and the datum (review M3)."""

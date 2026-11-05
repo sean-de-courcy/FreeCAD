@@ -444,7 +444,8 @@ names it.
 | `fix/579-judging` | corpus | ops#579 | - | `integration` `af1daa45c6` | `a2f1f04ae7` (fork PR 416), 2026-11-04 | never (fork fix) |
 | `fix/579-failed-input` | fix | ops#579, ops#585 | - | `integration` `af1daa45c6` (stacked on fork PR 416, `fix/579-judging`) | `51775afc1e` (fork PR 417), 2026-11-04 | never (fork fix) |
 | `fix/590-transform-base` | fix | ops#590 | - | `integration` `51775afc1e` | `8047bdb58b` (fork PR 418), 2026-11-04 | never (fork fix) |
-| `infra/605-onshape-pack` | infra | ops#605 | - | `integration` `8047bdb58b` | (fork PR 419) | never (fork feature); refit when upstream renames a toolbar or command named in the pack, or changes the overlay or preference-pack parameters |
+| `infra/605-onshape-pack` | infra | ops#605 | - | `integration` `8047bdb58b` | `ba8bd2c925` (fork PR 419), 2026-11-04 | never (fork feature); refit when upstream renames a toolbar or command named in the pack, or changes the overlay or preference-pack parameters |
+| `fix/597-reorder-crash` | fix | ops#597 | - | `integration` `8047bdb58b` | (fork PR 420) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 
