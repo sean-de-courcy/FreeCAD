@@ -19,6 +19,7 @@ import unittest
 
 import FreeCAD as App
 import FreeCADGui as Gui
+import PartDesign
 from PySide import QtCore, QtGui, QtWidgets
 from PySide6.QtTest import QTest
 
@@ -433,3 +434,41 @@ class TestFeaturesViewGui(unittest.TestCase):
         mouse(viewport, QtCore.QEvent.MouseButtonRelease, point, QtCore.Qt.NoButton)
         pump()
         self.assertEqual([item.text() for item in self.list.selectedItems()], ["Box"])
+
+    def partRows(self):
+        return [self.parts.topLevelItem(i).text(0) for i in range(self.parts.topLevelItemCount())]
+
+    def testPartFollowsTheHistory(self):
+        """ops#635 (report 10): a Body is a part only while a solid feature above its bar makes it.
+        Its new-part Pad deleted from the list, it leaves the Parts list and keeps its sketch; undo
+        brings it back; the bar at the top leaves no part, as in Onshape."""
+        self.assertTrue(waitFor(lambda: self.partRows() == ["Body1", "Body2"]))
+        self.doc.openTransaction("New part")
+        skC = sketch(self.body1, "SkC", (40, 0, 50, 10))
+        padC = self.body1.newObject("PartDesign::Pad", "PadC")
+        padC.Profile = skC
+        padC.Length = 4
+        body3 = PartDesign.newPartFrom(padC)
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        self.assertEqual([o.Name for o in body3.Group], ["SkC", "PadC"])
+        self.assertTrue(waitFor(lambda: self.partRows() == ["Body1", "Body2", body3.Label]))
+
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.doc.Name, padC.Name)
+        self.assertEqual(self.menuAction("PadC", "featureDelete"), [True])
+        self.doc.recompute()
+        self.assertIsNone(self.doc.getObject("PadC"))
+        self.assertEqual([o.Name for o in body3.Group], ["SkC"])
+        self.assertTrue(waitFor(lambda: self.partRows() == ["Body1", "Body2"]), self.partRows())
+        self.assertIn("SkC", self.rows())
+
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertTrue(waitFor(lambda: self.partRows() == ["Body1", "Body2", body3.Label]))
+
+        # The bar at the top: no part exists yet; at the end, all three again
+        self.dragBarAfter("SkA")
+        self.assertTrue(waitFor(lambda: self.partRows() == []), self.partRows())
+        self.assertEqual(self.menuAction("SkA", "featureRollToEnd"), [True])
+        self.assertTrue(waitFor(lambda: self.partRows() == ["Body1", "Body2", body3.Label]))

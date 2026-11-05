@@ -192,13 +192,17 @@ std::string rowKey(const App::DocumentObject* obj, bool held, const std::string&
     return key;
 }
 
-/// The studio's parts: its Bodies, and the other solids at its level (an imported shape, a Part
-/// workbench feature) that no other shape reads
+/// The studio's parts: its Bodies with a solid feature at or above their bar, and the other solids
+/// at its level (an imported shape, a Part workbench feature) that no other shape reads. A part
+/// exists only while the history makes it, as in Onshape (ops#635): a Body whose new-part feature
+/// was deleted, or whose bar is at its top, isn't one; it keeps its sketches, and shows nothing
 std::vector<App::DocumentObject*> studioParts(App::Document* doc, App::Part* studio)
 {
     std::vector<App::DocumentObject*> parts;
     for (auto body : PartDesign::studioBodies(doc, studio)) {
-        parts.push_back(body);
+        if (body->Tip.getValue()) {
+            parts.push_back(body);
+        }
     }
     std::vector<App::DocumentObject*> candidates;
     if (studio) {
