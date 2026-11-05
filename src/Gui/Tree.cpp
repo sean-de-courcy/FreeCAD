@@ -57,6 +57,7 @@
 #include <App/AutoTransaction.h>
 #include <App/GeoFeatureGroupExtension.h>
 #include <App/Link.h>
+#include <App/PropertyLinks.h>
 #include <App/RecomputeContinuation.h>
 #include <App/ReferenceReport.h>
 #include <App/SuppressibleExtension.h>
@@ -1365,6 +1366,44 @@ bool hiddenAbove(const QTreeWidgetItem* item)
     }
     return false;
 }
+
+// A container in error only because a member is: a Body stopped by a failed first feature fails
+// naming it (ops#579). The member is the problem, as Onshape shows the failed feature red and
+// doesn't list the part as one (ops#607). The recompute fails a container so without running it:
+// an input in error that is one of its members, that the recompute rule doesn't claim (a claimed
+// one lets it run, so its error is then its own), and that a link other than its Group or a
+// hidden one holds (the Tip, BaseFeature, an expression), as failedInputText in App/Document.cpp
+// reads it: a member held by the Group alone doesn't fail it (review ops607-r1 T1). A container the
+// rule holds (a rolled-back Body) isn't run, so its error is its own (review ops607-r1b T-R1B-1)
+bool failedThroughMember(const App::DocumentObject* obj)
+{
+    auto group = obj->getExtensionByType<App::GroupExtension>(true);
+    if (!group) {
+        return false;
+    }
+    auto rule = App::recomputeContinuation();
+    if (rule && rule->holds(obj)) {
+        return false;
+    }
+    std::vector<App::Property*> props;
+    obj->getPropertyList(props);
+    std::vector<App::DocumentObject*> links;
+    for (auto prop : props) {
+        auto link = freecad_cast<App::PropertyLinkBase*>(prop);
+        if (!link || link->getScope() == App::LinkScope::Hidden || prop == &group->Group) {
+            continue;
+        }
+        links.clear();
+        link->getLinks(links);
+        if (std::ranges::any_of(links, [&](const App::DocumentObject* in) {
+                return in && in->isError() && group->hasObject(in, true)
+                    && !(rule && rule->continuesAfter(in));
+            })) {
+            return true;
+        }
+    }
+    return false;
+}
 }  // namespace
 
 void TreeWidget::flushStatusUpdate()
@@ -1454,6 +1493,9 @@ std::vector<TreeWidget::ProblemItem> TreeWidget::problemItems(
     for (auto obj : docItem->document()->getDocument()->getObjects()) {
         bool error = obj->isError();
         if (!(error ? errors : warnings && obj->isWarning())) {
+            continue;
+        }
+        if (error && failedThroughMember(obj)) {
             continue;
         }
         // A same-place warning whose marker the tree hides (ops#391)

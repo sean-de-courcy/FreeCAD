@@ -451,7 +451,8 @@ names it.
 | `fix/502-c2-mln` | fix | ops#502 | - | `integration` `51775afc1e` | `60b1a145f2` (fork PR 399), 2026-11-05 | never (fork naming) |
 | `feat/602-features-dock` | feat | ops#602 | - | `integration` `79cb14308a` | `aab7c6ec6d` (fork PR 424), 2026-11-05 | never (fork feature). Upstream edits to the Combo view's layout (`src/Gui/ComboView.cpp`) or to `DockWindowManager::findRegisteredDockWindow` will conflict |
 | `feat/600-hide-seams` | feat | ops#600 | - | `integration` `f93f763f99` | `071e855676` (fork PR 423), 2026-11-05 | never (fork feature) |
-| `corpus/596-accept-r4-take` | feature | ops#596 | - | `integration` `f93f763f99` | (fork PR 425) | never (fork tests) |
+| `corpus/596-accept-r4-take` | feature | ops#596 | - | `integration` `f93f763f99` | `3576ea7ca5` (fork PR 425), 2026-11-05 | never (fork tests) |
+| `fix/607-gui-units` | fix | ops#607 | - | `integration` `79cb14308a` | (fork PR 426) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 

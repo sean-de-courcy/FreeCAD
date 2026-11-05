@@ -30,6 +30,8 @@
 - Both skip an object hidden from the tree (ShowInTree off, or under a hidden parent) while the
   document's "Show hidden" is off, and un-hide no row (review M1). A failing sketch nested under
   its Pad counts too: the Pad's or the Body's row may be the hidden one (ops#208).
+- A Body in error only through a failed member (stopped at a failed first feature, ops#579)
+  doesn't count: the member does, as Onshape lists the failed feature and not its part (ops#607).
 
 Designed model, built by the test (the reference solver on, V2):
 - Body: a 20 x 10 rectangle padded 10 ("Pad"), a fillet of radius 1 on its vertical edge at
@@ -37,7 +39,7 @@ Designed model, built by the test (the reference solver on, V2):
   ("Pocket"). The rectangle is then drawn again the other way round: the fillet finds its edge
   by geometry only and computes with a warning; the pocket fails.
 - Body001: a 10 x 10 rectangle at x = 40 padded "To last" as its first feature ("Pad001"): there
-  is no solid to reach, so it fails.
+  is no solid to reach, so it fails, and Body001 stops there, in error too (ops#579).
 Tree order: Body (Pad, with Profile under it, Fillet, Pocket, with Square under it), then Body001
 (Pad001, with Profile001 under it). The problems in order: Fillet (warning), Pocket (error), Pad001
 (error).
@@ -169,6 +171,9 @@ class TestProblemNavigationGui(unittest.TestCase):
         self.assertNotIn("Invalid", fillet.State)
         self.assertIn("Invalid", pocket.State)
         self.assertIn("Invalid", pad2.State)
+        # Body001 stops at its failed first Pad (ops#579); Body passes the Pocket's base through
+        self.assertIn("Invalid", body2.State)
+        self.assertNotIn("Invalid", body.State)
         for obj in (pad, profile, square, profile2):
             self.assertNotIn("Invalid", obj.State)
             self.assertNotIn("Warning", obj.State)
@@ -422,18 +427,22 @@ class TestProblemNavigationGui(unittest.TestCase):
         pad.ViewObject.ShowInTree = False
         outer.ViewObject.ShowInTree = False
         pump()
-        # Not recomputed after their failing sketch: they only need a recompute, which doesn't
-        # count
+        # Each fails naming its input in error (ops#579), as an Onshape feature on a failed
+        # sketch is red too. The sketch comes first in the document, so its rows are made down
+        # the chain before the Extrusions' are looked for
         for extrusion in (inner, outer, outerB):
-            self.assertNotIn("Invalid", extrusion.State)
+            self.assertIn("Invalid", extrusion.State)
         rows = visibleRows()
         self.assertIn("OuterB", rows)
         self.assertEqual({"BadPad", "Outer", "BadExtrude", "BadSketch"} & rows, set())
-        self.assertEqual(self.step(), ["BadSketch"])
-        self.assertEqual(self.step(), ["BadSketch"], "the only shown problem: wraps to itself")
+        self.assertEqual(self.search(":e"), ["BadExtrude", "BadSketch", "OuterB"])
         rows = visibleRows()
         self.assertTrue({"OuterB", "BadExtrude", "BadSketch"} <= rows)
         self.assertTrue({"BadPad", "Outer"}.isdisjoint(rows))
+        self.assertEqual(self.step(), ["OuterB"])
+        self.assertEqual(self.step(), ["BadExtrude"])
+        self.assertEqual(self.step(), ["BadSketch"])
+        self.assertEqual(self.step(), ["OuterB"], "wraps")
 
     def testSharedSketchUnderTwoHiddenPadsIsSkipped(self):
         """Both rows have a hidden row above: no problem is left."""
@@ -493,6 +502,72 @@ class TestProblemNavigationGui(unittest.TestCase):
         self.assertEqual(self.search(":errors"), ["Pad001", "Pocket"])
         self.assertEqual(self.search(":errors", enter=True), ["Pad001", "Pocket"])
         self.assertEqual(sorted(selectedNames()), ["Pad001", "Pocket"])
+
+    def testStoppedBodyIsNotAProblem(self):
+        """Body001 is in error itself, stopped at its failed first Pad, but only through Pad001,
+        which is listed. Onshape shows the failed feature red and doesn't list the part as a
+        problem (ops#607); the Body's own state stays as ops#579 sets it. Repaired, neither is."""
+        self.model()
+        body2 = self.doc.getObject("Body001")
+        self.assertEqual(self.search(":errors"), ["Pad001", "Pocket"])
+        self.assertIn("Invalid", body2.State)
+        pad2 = self.doc.getObject("Pad001")
+        pad2.Type = "Length"
+        self.doc.recompute()
+        pump()
+        self.assertNotIn("Invalid", body2.State)
+        self.assertNotIn("Invalid", pad2.State)
+        self.search("")
+        self.assertEqual(self.search(":errors"), ["Pocket"])
+
+    def testBodyOwnErrorListedBesideFailedMember(self):
+        """A Body with an error of its own (its Tip set to a sketch from Python) is listed, though
+        a member is in error too: a binder of a failed box outside, which the Body holds by its
+        Group alone, so the recompute doesn't fail the Body through it (review ops607-r1 T1).
+        The binder comes before the sketch: nothing is after the Tip, so nothing is held."""
+        doc = self.doc
+        body = doc.addObject("PartDesign::Body", "OwnBody")
+        crate = doc.addObject("Part::Box", "Crate")
+        crate.Placement.Base = App.Vector(40, 0, 0)
+        binder = body.newObject("PartDesign::SubShapeBinder", "Binder")
+        binder.Support = [(crate, ("",))]
+        profile = models.sketch(doc, "Profile", models.rectangle(0, 0, 10, 10), body)
+        doc.recompute()
+        crate.Length = 0
+        body.Tip = profile
+        doc.recompute()
+        pump()
+        for obj in (body, binder, crate):
+            self.assertIn("Invalid", obj.State, obj.Name)
+        self.assertIn("not a PartDesign feature", body.getStatusString())
+        self.assertEqual(self.search(":errors"), ["Binder", "Crate", "OwnBody"])
+
+    def testRolledBackBodyOwnErrorListedBesideFailedTip(self):
+        """A rolled-back Body (its Tip a sketch, a Pad after it) is held, not run, so its error is
+        its own ("not a PartDesign feature"), though its Tip then fails on the failed Pad it is
+        attached to: it is listed (review ops607-r1b T-R1B-1)."""
+        doc = self.doc
+        body = models.body(doc)
+        profile = models.sketch(doc, "Profile", models.rectangle(0, 0, 60, 30), body)
+        pad = models.pad(body, profile, 20)
+        doc.recompute()
+        top = body.newObject("Sketcher::SketchObject", "Top")
+        top.AttachmentSupport = [(pad, "")]
+        top.MapMode = "ObjectXY"
+        doc.recompute()
+        body.Tip = top
+        doc.recompute()
+        self.assertIn("not a PartDesign feature", body.getStatusString())
+        models.pad(body, top, 5, "Pad001")
+        body.Tip = top
+        doc.recompute()
+        pad.Length = 0
+        doc.recompute()
+        pump()
+        for obj in (body, pad, top):
+            self.assertIn("Invalid", obj.State, obj.Name)
+        self.assertIn("not a PartDesign feature", body.getStatusString())
+        self.assertEqual(self.search(":errors"), ["Body", "Pad", "Top"])
 
     def testWarningsToken(self):
         self.model()
