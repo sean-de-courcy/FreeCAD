@@ -31,7 +31,10 @@
 #include <BRepLib.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <Geom2d_Curve.hxx>
+#include <Geom_ElementarySurface.hxx>
+#include <Geom_RectangularTrimmedSurface.hxx>
 #include <Geom_Surface.hxx>
+#include <Geom_SurfaceOfRevolution.hxx>
 #include <gp_Pnt2d.hxx>
 #include <gp_Trsf.hxx>
 #include <Precision.hxx>
@@ -110,34 +113,50 @@ namespace
 
 // FreeCAD-CH (ops#600): whether the face meets itself smoothly (G1) across this seam, as Onshape's
 // faces always do: there a closed face that isn't smooth (a B-spline that closes at a corner) is
-// split, and the crease is drawn as an edge. A surface periodic across the seam is smooth; any
-// other closed one is checked by its continuity across the seam.
+// split, and the crease is drawn as an edge. An elementary surface (a cylinder, cone, sphere or
+// torus) is smooth across its seams, and so is a revolution across its rotation seam; any other
+// closed surface, a periodic B-spline included (a knot of full multiplicity makes it C0), is
+// checked by its continuity across the seam. Should the check fail, the seam is drawn.
 bool isSmoothSeam(const TopoDS_Edge& edge, const TopoDS_Face& face)
 {
     if (!BRep_Tool::IsClosed(edge, face)) {
         return false;
     }
-    TopLoc_Location location;
-    Handle(Geom_Surface) surface = BRep_Tool::Surface(face, location);
-    Standard_Real first {};
-    Standard_Real last {};
-    Handle(Geom2d_Curve) side1 = BRep_Tool::CurveOnSurface(edge, face, first, last);
-    Handle(Geom2d_Curve) side2
-        = BRep_Tool::CurveOnSurface(TopoDS::Edge(edge.Reversed()), face, first, last);
-    if (surface.IsNull() || side1.IsNull() || side2.IsNull() || Precision::IsInfinite(first)
-        || Precision::IsInfinite(last)) {
+    try {
+        TopLoc_Location location;
+        Handle(Geom_Surface) surface = BRep_Tool::Surface(face, location);
+        Standard_Real first {};
+        Standard_Real last {};
+        Handle(Geom2d_Curve) side1 = BRep_Tool::CurveOnSurface(edge, face, first, last);
+        Handle(Geom2d_Curve) side2
+            = BRep_Tool::CurveOnSurface(TopoDS::Edge(edge.Reversed()), face, first, last);
+        if (surface.IsNull() || side1.IsNull() || side2.IsNull() || Precision::IsInfinite(first)
+            || Precision::IsInfinite(last)) {
+            return false;
+        }
+        Handle(Geom_Surface) basis = surface;
+        if (auto trimmed = Handle(Geom_RectangularTrimmedSurface)::DownCast(surface)) {
+            basis = trimmed->BasisSurface();
+        }
+        if (basis->IsKind(STANDARD_TYPE(Geom_ElementarySurface))) {
+            return true;
+        }
+        if (basis->IsKind(STANDARD_TYPE(Geom_SurfaceOfRevolution))) {
+            // The rotation seam is a constant-U line: its two sides differ in U.
+            const gp_Pnt2d middle1 = side1->Value(0.5 * (first + last));
+            const gp_Pnt2d middle2 = side2->Value(0.5 * (first + last));
+            if (std::abs(middle1.X() - middle2.X()) > std::abs(middle1.Y() - middle2.Y())) {
+                return true;
+            }
+        }
+        // The test BRepLib::EncodeRegularity makes, without writing its result into the shape. A
+        // crease below this angle can't be seen; a sketch's tangent closure is far below it.
+        constexpr double maxAngle = 1e-3;
+        return BRepLib::ContinuityOfFaces(edge, face, face, maxAngle) >= GeomAbs_G1;
+    }
+    catch (const Standard_Failure&) {
         return false;
     }
-    const gp_Pnt2d middle1 = side1->Value(0.5 * (first + last));
-    const gp_Pnt2d middle2 = side2->Value(0.5 * (first + last));
-    const bool acrossU = std::abs(middle1.X() - middle2.X()) >= std::abs(middle1.Y() - middle2.Y());
-    if (acrossU ? surface->IsUPeriodic() : surface->IsVPeriodic()) {
-        return true;
-    }
-    // The test BRepLib::EncodeRegularity makes, without writing its result into the shape. A
-    // crease below this angle can't be seen; a sketch's tangent closure is far below it.
-    constexpr double maxAngle = 1e-3;
-    return BRepLib::ContinuityOfFaces(edge, face, face, maxAngle) >= GeomAbs_G1;
 }
 
 }  // namespace

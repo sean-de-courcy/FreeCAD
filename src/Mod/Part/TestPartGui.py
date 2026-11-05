@@ -1325,6 +1325,35 @@ class PartGuiSeamEdgeTestCases(unittest.TestCase):
         feature = self._feature(prism)
         self.assertEqual(self._lineCount(feature.ViewObject), 2)
 
+    def testCreasedSeamOfAPeriodicBSplineKeepsItsLine(self):
+        # A periodic B-spline whose first knot has full multiplicity is only C0 there: a Sketcher
+        # periodic B-spline with that knot raised to 3 and a pole dragged. Periodic isn't smooth:
+        # its seam is a crease, and Onshape draws it.
+        curve = Part.BSplineCurve()
+        curve.buildFromPoles(
+            [
+                FreeCAD.Vector(x, y, 0)
+                for x, y in [(10, 0), (7, 7), (0, 10), (-7, 7), (-10, 0), (-7, -7), (0, -10), (7, -7)]
+            ],
+            True,
+            3,
+        )
+        curve.increaseMultiplicity(1, 3)
+        start = curve.value(curve.FirstParameter)
+        poles = curve.getPoles()
+        onCurve = [i for i, pole in enumerate(poles) if (pole - start).Length < 1e-9]
+        self.assertEqual(len(onCurve), 1)
+        after = (onCurve[0] + 1) % len(poles)
+        moved = poles[after] * 1.3 + FreeCAD.Vector(0, 2, 0)
+        curve.setPole(after + 1, moved)
+        prism = Part.Face(Part.Wire(curve.toShape())).extrude(FreeCAD.Vector(0, 0, 10))
+        lateral = [f for f in prism.Faces if f.Surface.TypeId != "Part::GeomPlane"]
+        self.assertEqual(len(lateral), 1)
+        self.assertTrue(lateral[0].Surface.isUPeriodic())
+        self.assertEqual(len(self._seams(prism)), 1)
+        feature = self._feature(prism)
+        self.assertEqual(self._lineCount(feature.ViewObject), 3)
+
     def testSelectingASeamLightsNothing(self):
         # A seam selected by name (a task panel's reference, the tree, Python) has no line to
         # light, and lights nothing else either: its element box is empty, as when the 3D view
