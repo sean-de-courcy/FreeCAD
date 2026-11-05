@@ -142,6 +142,12 @@ App::DocumentObjectExecReturn* Fillet::execute()
         if (!filled.empty()) {
             return new App::DocumentObjectExecReturn("The fillet " + filled);
         }
+        // OCCT stopping a hair short of a step drops the step's upper part, in a valid solid
+        // (ops#603)
+        const std::string lost = Part::lostMaterial(shape, baseShape, edges, radius);
+        if (!lost.empty()) {
+            return new App::DocumentObjectExecReturn("The fillet " + lost);
+        }
         // store shape before refinement
         this->rawShape = shape;
         shape = refineShapeIfActive(shape);

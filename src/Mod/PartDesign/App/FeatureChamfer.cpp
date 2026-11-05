@@ -22,6 +22,8 @@
  *                                                                         *
  ***************************************************************************/
 
+#include <algorithm>
+#include <cmath>
 #include <limits>
 
 #include <BRepFilletAPI_MakeChamfer.hxx>
@@ -155,7 +157,13 @@ App::DocumentObjectExecReturn* Chamfer::execute()
 
     this->positionByBaseFeature();
 
+    // The chamfer's largest distance along a face, for the check of what it drops (ops#603)
+    double reach = std::max(size, size2);
+    if (static_cast<Part::ChamferType>(chamferType) == Part::ChamferType::equalDistance) {
+        reach = size;
+    }
     if (static_cast<Part::ChamferType>(chamferType) == Part::ChamferType::distanceAngle) {
+        reach = std::max(size, size * std::abs(std::tan(Base::toRadians(angle))));
         size2 = angle;
     }
     try {
@@ -190,6 +198,12 @@ App::DocumentObjectExecReturn* Chamfer::execute()
         const std::string filled = Part::filledPocket(shape, TopShape, edges);
         if (!filled.empty()) {
             return new App::DocumentObjectExecReturn("The chamfer " + filled);
+        }
+        // OCCT stopping a hair short of a step drops the step's upper part, in a valid solid
+        // (ops#603)
+        const std::string lost = Part::lostMaterial(shape, TopShape, edges, reach);
+        if (!lost.empty()) {
+            return new App::DocumentObjectExecReturn("The chamfer " + lost);
         }
         // store shape before refinement
         this->rawShape = shape;

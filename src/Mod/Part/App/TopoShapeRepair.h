@@ -122,4 +122,37 @@ PartExport std::string filledPocket(
     const std::vector<TopoShape>& edges
 );
 
+/** Why a fillet's or chamfer's result has lost a part of the base its band can't reach, or an
+ * empty string (FreeCAD-CH, ops#603).
+ *
+ * OCCT's fillet and chamfer stopping a hair (1e-9 to 5e-7 mm) short of a step return a valid
+ * solid without the step's upper part: a boss on a plate is gone, and nothing else is wrong. A
+ * dress-up changes the base only near its edges: the material it removes or adds lies within
+ * reach of them. The check:
+ * - runs only if a face of the base that holds no vertex of the dressed edges changed, as
+ *   filledPocket() does (the same gate and the same chain of edges);
+ * - takes the reach: the size times 1 + 1 / cos(a / 2), where a is the largest angle between the
+ *   two faces' normals along the chain's edges. The band's far side lies within size * tan(a / 2)
+ *   of its edge, a rolling ball's centre within size / cos(a / 2); the margin covers curved faces.
+ *   A chain edge without two faces, or nearly a knife's edge, leaves the reach unknown, and the
+ *   check passes;
+ * - samples each changed face of the base (a grid inside it): a point farther than the reach from
+ *   every chain edge must lie on a face of the result.
+ *
+ * @param shape The dress-up's result (its solids are checked)
+ * @param base The shape that was dressed up
+ * @param edges The edges of \a base that were dressed up
+ * @param size The dress-up's largest size: a fillet's largest radius, a chamfer's largest
+ * distance along a face
+ * @return what the result lost, naming the base's face and the edge nearest to it (e.g. "drops a
+ * part of the base: Face12 is gone far from Edge3, beyond the band's reach"), or an empty string
+ * if the result is right
+ */
+PartExport std::string lostMaterial(
+    const TopoShape& shape,
+    const TopoShape& base,
+    const std::vector<TopoShape>& edges,
+    double size
+);
+
 }  // namespace Part

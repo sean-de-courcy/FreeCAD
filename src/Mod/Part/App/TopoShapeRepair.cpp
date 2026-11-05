@@ -15,27 +15,35 @@
 #include <tuple>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include <Bnd_Box.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <BRepAdaptor_Curve.hxx>
+#include <BRepAdaptor_Curve2d.hxx>
+#include <BRepAdaptor_Surface.hxx>
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepBndLib.hxx>
+#include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
+#include <BRepTools.hxx>
+#include <BRepTopAdaptor_FClass2d.hxx>
 #include <ChFi3d.hxx>
 #include <Geom_Surface.hxx>
 #include <GProp_GProps.hxx>
 #include <gp.hxx>
 #include <gp_Pnt.hxx>
+#include <gp_Pnt2d.hxx>
 #include <gp_Vec.hxx>
 #include <Precision.hxx>
 #include <Standard_Failure.hxx>
 #include <TopAbs_ShapeEnum.hxx>
+#include <TopAbs_State.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopLoc_Location.hxx>
@@ -1396,6 +1404,133 @@ std::string whatItAdds(const Prepared& prepared, const TopoShape& base, const st
     return {};
 }
 
+// How near a face of the result, beyond the face's tolerance, a point of the base out of the
+// dress-up's reach must lie (lostMaterial())
+constexpr double boundaryGap = 1e-4;
+// The points per edge where its faces' angle is taken, and per direction of a face's parameters
+// where it is sampled
+constexpr int bendSamples = 4;
+constexpr int faceSamples = 3;
+// Below it, cos(a / 2) leaves the reach unknown: the chain holds nearly a knife's edge
+constexpr double leastHalfCosine = 0.01;
+
+// The face's outward normal at the edge's parameter, or a null vector where it has none
+gp_Vec normalAt(const TopoDS_Edge& edge, const TopoDS_Face& face, double parameter)
+{
+    const gp_Pnt2d uv = BRepAdaptor_Curve2d(edge, face).Value(parameter);
+    gp_Pnt point;
+    gp_Vec du;
+    gp_Vec dv;
+    BRepAdaptor_Surface(face).D1(uv.X(), uv.Y(), point, du, dv);
+    gp_Vec normal = du.Crossed(dv);
+    if (normal.Magnitude() <= gp::Resolution()) {
+        return {};
+    }
+    if (face.Orientation() == TopAbs_REVERSED) {
+        normal.Reverse();
+    }
+    return normal;
+}
+
+// How far from its chain a dress-up of the size changes the base (lostMaterial()), or a negative
+// value if that can't be bounded
+double reachOf(const TopoDS_Shape& base, const TopTools_IndexedMapOfShape& chain, double size)
+{
+    TopTools_IndexedDataMapOfShapeListOfShape facesOfEdges;
+    TopExp::MapShapesAndAncestors(base, TopAbs_EDGE, TopAbs_FACE, facesOfEdges);
+    double largest = 0.0;
+    double tolerance = 0.0;
+    for (int i = 1; i <= chain.Extent(); ++i) {
+        const TopoDS_Edge& edge = TopoDS::Edge(chain(i));
+        const int index = facesOfEdges.FindIndex(edge);
+        if (index == 0 || BRep_Tool::Degenerated(edge)) {
+            return -1.0;
+        }
+        TopTools_IndexedMapOfShape faces;
+        for (const auto& face : facesOfEdges(index)) {
+            faces.Add(face);
+        }
+        tolerance = std::max(tolerance, BRep_Tool::Tolerance(edge));
+        // A seam: its face is smooth across it
+        if (faces.Extent() == 1 && BRep_Tool::IsClosed(edge, TopoDS::Face(faces(1)))) {
+            continue;
+        }
+        if (faces.Extent() != 2) {
+            return -1.0;
+        }
+        double first = 0.0;
+        double last = 0.0;
+        BRep_Tool::Range(edge, first, last);
+        for (int k = 0; k <= bendSamples; ++k) {
+            const double parameter = first + (last - first) * k / bendSamples;
+            const gp_Vec one = normalAt(edge, TopoDS::Face(faces(1)), parameter);
+            const gp_Vec other = normalAt(edge, TopoDS::Face(faces(2)), parameter);
+            if (one.Magnitude() <= gp::Resolution() || other.Magnitude() <= gp::Resolution()) {
+                return -1.0;
+            }
+            largest = std::max(largest, one.Angle(other));
+        }
+    }
+    const double halfCosine = std::cos(largest / 2);
+    if (halfCosine < leastHalfCosine) {
+        return -1.0;
+    }
+    return size * (1.0 + 1.0 / halfCosine) + tolerance;
+}
+
+// Points inside the face, on a grid of its parameters
+std::vector<gp_Pnt> samplesOf(const TopoDS_Face& face)
+{
+    double u0 = 0.0;
+    double u1 = 0.0;
+    double v0 = 0.0;
+    double v1 = 0.0;
+    BRepTools::UVBounds(face, u0, u1, v0, v1);
+    const BRepAdaptor_Surface surface(face);
+    BRepTopAdaptor_FClass2d inside(face, Precision::PConfusion());
+    std::vector<gp_Pnt> points;
+    for (int i = 0; i < faceSamples; ++i) {
+        for (int j = 0; j < faceSamples; ++j) {
+            const double u = u0 + (u1 - u0) * (i + 0.5) / faceSamples;
+            const double v = v0 + (v1 - v0) * (j + 0.5) / faceSamples;
+            if (inside.Perform(gp_Pnt2d(u, v)) == TopAbs_IN) {
+                points.push_back(surface.Value(u, v));
+            }
+        }
+    }
+    return points;
+}
+
+// The faces of the shape, each with its bounds enlarged by how near a point must lie to it
+std::vector<std::pair<TopoDS_Face, Bnd_Box>> boundedFaces(const TopoDS_Shape& shape)
+{
+    std::vector<std::pair<TopoDS_Face, Bnd_Box>> faces;
+    for (TopExp_Explorer it(shape, TopAbs_FACE); it.More(); it.Next()) {
+        const TopoDS_Face& face = TopoDS::Face(it.Current());
+        Bnd_Box bounds = boundsOf(face);
+        bounds.Enlarge(boundaryGap + BRep_Tool::Tolerance(face));
+        faces.emplace_back(face, bounds);
+    }
+    return faces;
+}
+
+// Whether the point lies on one of the faces. If a distance can't be computed, it counts as
+// lying there: the check passes
+bool liesOnAny(const gp_Pnt& point, const std::vector<std::pair<TopoDS_Face, Bnd_Box>>& faces)
+{
+    const TopoDS_Vertex vertex = BRepBuilderAPI_MakeVertex(point);
+    for (const auto& [face, bounds] : faces) {
+        if (bounds.IsOut(point)) {
+            continue;
+        }
+        BRepExtrema_DistShapeShape distance(vertex, face);
+        if (!distance.IsDone() || distance.Value() <= boundaryGap + BRep_Tool::Tolerance(face)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 }  // namespace
 
 bool checkDressUp(TopoShape& shape, const TopoShape& base, LooseParts looseParts)
@@ -1455,6 +1590,74 @@ std::string filledPocket(const TopoShape& shape, const TopoShape& base, const st
         return {};
     }
     return why;
+}
+
+std::string lostMaterial(
+    const TopoShape& shape,
+    const TopoShape& base,
+    const std::vector<TopoShape>& edges,
+    double size
+)
+{
+    const TopoDS_Compound result = solidsIn(shape.getShape());
+    const TopoDS_Compound before = solidsIn(base.getShape());
+    if (edges.empty() || !(size > 0.0) || !TopoDS_Iterator(result).More()
+        || !TopoDS_Iterator(before).More()) {
+        return {};
+    }
+    // As filledPocket() does: if the analysis throws, the check is skipped with a warning
+    try {
+        const auto chain = chainOf(before, edges);
+        const TopoDS_Compound dressed = dressedSolids(before, chain);
+        if (!TopoDS_Iterator(dressed).More()) {
+            return {};
+        }
+        // The gate: only a result that changed a face away from its edges can have lost a part
+        Bnd_Box dressedBounds = boundsOf(dressed);
+        dressedBounds.Enlarge(Precision::Confusion());
+        const TopoDS_Compound images = solidsMeeting(result, dressedBounds);
+        TopTools_IndexedDataMapOfShapeListOfShape facesAtVertices;
+        TopExp::MapShapesAndAncestors(dressed, TopAbs_VERTEX, TopAbs_FACE, facesAtVertices);
+        const Changes changes = changesOf(images, dressed, facesAt(facesAtVertices, chain));
+        if (!changes.away) {
+            return {};
+        }
+        const double reach = reachOf(dressed, chain, size);
+        if (reach < 0.0) {
+            FC_LOG("Dress-up result not checked for a lost part of the base: its reach is unknown");
+            return {};
+        }
+        BRep_Builder builder;
+        TopoDS_Compound chainEdges;
+        builder.MakeCompound(chainEdges);
+        for (int i = 1; i <= chain.Extent(); ++i) {
+            builder.Add(chainEdges, chain(i));
+        }
+        const auto resultFaces = boundedFaces(images);
+        for (int i = 1; i <= changes.changed.Extent(); ++i) {
+            const TopoDS_Face& face = TopoDS::Face(changes.changed(i));
+            for (const gp_Pnt& point : samplesOf(face)) {
+                const TopoDS_Vertex vertex = BRepBuilderAPI_MakeVertex(point);
+                BRepExtrema_DistShapeShape distance(vertex, chainEdges);
+                if (!distance.IsDone() || distance.Value() <= reach
+                    || liesOnAny(point, resultFaces)) {
+                    continue;
+                }
+                const int index = base.findShape(face);
+                const std::string name = index == 0
+                    ? std::string("a face")
+                    : TopoShape::shapeName(TopAbs_FACE) + std::to_string(index);
+                return "drops a part of the base: " + name + " is gone far from "
+                    + nearestEdge(base, edges, vertex) + ", beyond the band's reach";
+            }
+        }
+    }
+    catch (const Standard_Failure& e) {
+        FC_WARN(
+            "Dress-up result not checked for a lost part of the base: " << e.GetMessageString()
+        );
+    }
+    return {};
 }
 
 }  // namespace Part

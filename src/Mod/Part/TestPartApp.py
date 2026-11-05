@@ -43,6 +43,7 @@ from parttests.FilletFallbackTest import (
     FilledRecessTest,
     FilletFallbackTest,
     InvalidDressUpTest,
+    LostStepTest,
 )
 from parttests.ReferenceFingerprintTest import ReferenceFingerprintTest, ReferenceSolverDefaultTest
 from parttests.InternNamesTest import InternNamesTest, InternNamesDefaultTest

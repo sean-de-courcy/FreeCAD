@@ -1352,6 +1352,195 @@ class FilledRecessTest(unittest.TestCase):
         self.assertAlmostEqual(feature.Shape.Volume, 1000 - 4.5 * 10, delta=1e-6)
 
 
+def sketched_rectangle(body, support, x0, y0, x1, y1, z):
+    """A sketch of the rectangle (global x0..x1, y0..y1 at height z) on the support, a plane or a
+    (feature, face) pair"""
+    import Sketcher
+
+    sketch = body.newObject("Sketcher::SketchObject", "Sketch")
+    sketch.AttachmentSupport = support
+    sketch.MapMode = "FlatFace"
+    body.Document.recompute()
+    local = sketch.Placement.inverse()
+    a = local.multVec(V(x0, y0, z))
+    b = local.multVec(V(x1, y1, z))
+    lo = V(min(a.x, b.x), min(a.y, b.y), 0)
+    hi = V(max(a.x, b.x), max(a.y, b.y), 0)
+    corners = [lo, V(hi.x, lo.y, 0), hi, V(lo.x, hi.y, 0)]
+    for i in range(4):
+        sketch.addGeometry(Part.LineSegment(corners[i], corners[(i + 1) % 4]))
+    for i in range(4):
+        sketch.addConstraint(Sketcher.Constraint("Coincident", i, 2, (i + 1) % 4, 1))
+    return sketch
+
+
+def on_outline(p):
+    """Whether the point lies on the 40 x 40 outline of a stepped body's Pad1"""
+    return min(abs(p.x), abs(p.x - 40), abs(p.y), abs(p.y - 40)) < 1e-9
+
+
+def top_outer_edges(shape, which, height):
+    """Pad1's four top outer edges, or the one at y = 0"""
+    return [
+        e
+        for e in shape.Edges
+        if all(abs(v.Point.z - height) < 1e-9 for v in e.Vertexes)
+        and on_outline(e.CenterOfMass)
+        and (which == "four" or abs(e.CenterOfMass.y) < 1e-9)
+    ]
+
+
+def stepped_body(doc, kind, size, inset, which="four", height=10.0):
+    """A PartDesign Body of two Pads from sketches: Pad1 40 x 40 x height, and Pad2 10 high on its
+    top face, a rectangle whose walls lie inset from Pad1's outline (with one edge, only the wall
+    facing it, y = inset; the others at 5). A Fillet or Chamfer of the size on Pad1's four top outer
+    edges, or on the one at y = 0. Returns the feature and its base's shape (ops#603)"""
+    body = doc.addObject("PartDesign::Body", "Body")
+    lower = sketched_rectangle(body, (body.Origin.OriginFeatures[3], [""]), 0, 0, 40, 40, 0)
+    pad1 = body.newObject("PartDesign::Pad", "Pad1")
+    pad1.Profile = lower
+    pad1.Length = height
+    doc.recompute()
+    top = next(
+        i for i, f in enumerate(pad1.Shape.Faces, 1) if abs(f.CenterOfMass.z - height) < 1e-9
+    )
+    walls = (inset, inset, 40 - inset, 40 - inset) if which == "four" else (5, inset, 35, 35)
+    upper = sketched_rectangle(body, (pad1, ["Face%d" % top]), *walls, height)
+    pad2 = body.newObject("PartDesign::Pad", "Pad2")
+    pad2.Profile = upper
+    pad2.Length = 10
+    doc.recompute()
+    base = pad2.Shape
+    names = [
+        "Edge%d" % next(i for i, e in enumerate(base.Edges, 1) if e.isSame(edge))
+        for edge in top_outer_edges(base, which, height)
+    ]
+    dressed = body.newObject("PartDesign::" + kind, kind)
+    dressed.Base = (pad2, names)
+    if kind == "Fillet":
+        dressed.Radius = size
+    else:
+        dressed.Size = size
+    doc.recompute()
+    return dressed, base
+
+
+def stepped_expected(kind, size, which, base, height=10.0):
+    """The step's dress-up: the base without what the same dress-up removes from Pad1 alone, which
+    the step doesn't reach"""
+    block = Part.makeBox(40, 40, height)
+    edges = top_outer_edges(block, which, height)
+    dressed = block.makeFillet(size, edges) if kind == "Fillet" else block.makeChamfer(size, edges)
+    return base.Volume - (block.Volume - dressed.Volume)
+
+
+class LostStepTest(unittest.TestCase):
+    """OCCT's fillet and chamfer stopping a hair (1e-9 to 5e-7 mm) short of a step return a valid
+    solid without the step's upper Pad (ops#603). The result must keep it, or the feature fails
+    saying it drops a part of the base. The error of a dress-up the exact construction refused says
+    why (ops#601).
+    """
+
+    def setUp(self):
+        self.doc = FreeCAD.newDocument("LostStepTest")
+
+    def tearDown(self):
+        FreeCAD.closeDocument(self.doc.Name)
+
+    dressUp = InvalidDressUpTest.dressUp
+
+    def assertKeptOrFails(self, feature, expected):
+        kind = feature.TypeId.split("::")[1].lower()
+        if feature.isValid():
+            self.assertTrue(feature.Shape.isValid())
+            self.assertAlmostEqual(feature.Shape.Volume, expected, delta=1e-4)
+            return
+        self.assertTrue(
+            feature.getStatusString().startswith("The %s drops a part of the base: Face" % kind),
+            feature.getStatusString(),
+        )
+
+    def assertStepKeptOrFails(self, kind, inset, which, height=10.0):
+        feature, base = stepped_body(self.doc, kind, 5, inset, which, height)
+        self.assertKeptOrFails(feature, stepped_expected(kind, 5, which, base, height))
+
+    def assertBuilds(self, kind, inset, which, height=10.0):
+        feature, base = stepped_body(self.doc, kind, 5, inset, which, height)
+        self.assertTrue(feature.isValid(), feature.getStatusString())
+        self.assertTrue(feature.Shape.isValid())
+        self.assertAlmostEqual(
+            feature.Shape.Volume, stepped_expected(kind, 5, which, base, height), delta=1e-4
+        )
+
+    def testFourEdgesAHairShortOfTheStep(self):
+        # OCCT returned Pad1 dressed alone: fillet 15189.53 for 24189.53, chamfer 14166.67 for
+        # 23166.67
+        for kind in ("Fillet", "Chamfer"):
+            for d in (1e-9, 1e-8, 1e-7, 5e-7):
+                with self.subTest(kind=kind, d=d):
+                    self.assertStepKeptOrFails(kind, 5 + d, "four")
+
+    def testOneEdgeAHairShortOfTheStep(self):
+        # One edge with the wall facing it 5 + d in: on the 10 mm block (15785.40 for 24785.40
+        # with all four walls in), and on the 25 mm one (39785.40 for 48785.40, chamfer 39500 for
+        # 48500)
+        for kind in ("Fillet", "Chamfer"):
+            for d in (1e-9, 5e-7):
+                for height in (10.0, 25.0):
+                    with self.subTest(kind=kind, d=d, height=height):
+                        self.assertStepKeptOrFails(kind, 5 + d, "one", height)
+
+    def testAtAndNearTheStepStillBuild(self):
+        # The exact step (the exact construction builds the limit shape), the round stopping 1e-6
+        # or 1e-5 short (OCCT leaves a sliver of the ring) and well short (1 mm)
+        for kind in ("Fillet", "Chamfer"):
+            for which in ("four", "one"):
+                for d in (0, 1e-6, 1e-5, 1):
+                    with self.subTest(kind=kind, which=which, d=d):
+                        self.assertBuilds(kind, 5 + d, which)
+            with self.subTest(kind=kind, height=25):
+                self.assertBuilds(kind, 5, "one", 25.0)
+
+    def testPartFeaturesAHairShortOfTheStep(self):
+        # Part::Fillet and Part::Chamfer on the Body's shape, with one size (the exact
+        # construction's route) and with a size per edge (OCCT's maker alone)
+        d = 1e-7
+        _, shape = stepped_body(self.doc, "Fillet", 5, 5 + d, "four")
+        edges = top_outer_edges(shape, "four", 10.0)
+        self.assertEqual(len(edges), 4)
+        boss = Part.makeBox(30 - 2 * d, 30 - 2 * d, 10, V(5 + d, 5 + d, 10))
+        for kind in ("Fillet", "Chamfer"):
+            for sizes in ([(5, 5)] * 4, [(5, 5)] * 3 + [(4.5, 4.5)]):
+                with self.subTest(kind=kind, last=sizes[-1][0]):
+                    feature = self.dressUp(kind, shape, edges, sizes)
+                    if not feature.isValid():
+                        self.assertKeptOrFails(feature, None)
+                        continue
+                    # The dress-up doesn't reach the boss: all of it is kept
+                    self.assertTrue(feature.Shape.isValid())
+                    self.assertAlmostEqual(
+                        feature.Shape.common(boss).Volume, boss.Volume, delta=1e-4
+                    )
+
+    def testErrorSaysWhyTheConstructionRefused(self):
+        # r = 5.01 at the exact step: OCCT fails, and the exact construction refuses because the
+        # round would climb the step's wall (ops#601)
+        for kind in ("Fillet", "Chamfer"):
+            for which in ("four", "one"):
+                with self.subTest(kind=kind, which=which):
+                    feature, _ = stepped_body(self.doc, kind, 5.01, 5, which)
+                    self.assertFalse(feature.isValid())
+                    status = feature.getStatusString()
+                    self.assertTrue(
+                        status.startswith(
+                            "BRep_API: command not done (exact construction refused: "
+                        ),
+                        status,
+                    )
+                    self.assertTrue(status.endswith(")"), status)
+                    self.assertIn("runs off its face", status)
+
+
 def tolerances(shape):
     return [s.Tolerance for s in shape.Vertexes + shape.Edges + shape.Faces]
 

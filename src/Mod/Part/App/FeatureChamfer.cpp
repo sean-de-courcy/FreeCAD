@@ -162,6 +162,16 @@ App::DocumentObjectExecReturn* Chamfer::execute()
         if (!filled.empty()) {
             return new App::DocumentObjectExecReturn("The chamfer " + filled);
         }
+        // OCCT stopping a hair short of a step drops the step's upper part, in a valid solid
+        // (ops#603)
+        double largest = 0.0;
+        for (const auto& [size1, size2] : sizes) {
+            largest = std::max({largest, size1, size2});
+        }
+        const std::string lost = Part::lostMaterial(res, baseTopoShape, edgeShapes, largest);
+        if (!lost.empty()) {
+            return new App::DocumentObjectExecReturn("The chamfer " + lost);
+        }
         // Where OCCT failed, the exact construction built it (ops#300, decision 54)
         recorder.report(Label.getValue());
         this->Shape.setValue(res);

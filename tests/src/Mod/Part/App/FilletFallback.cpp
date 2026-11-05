@@ -1995,15 +1995,27 @@ TEST_F(FilletFallbackTest, occtsResultWhereOcctWorks)
 
 // Refusals: the original OCCT error stands.
 
-/// The public function throws OCCT's StdFail_NotDone, with its message
-testing::AssertionResult throwsOcctsError(const std::function<void()>& run)
+/// The public function throws OCCT's StdFail_NotDone, with its message and why the exact
+/// construction refused (ops#601): "BRep_API: command not done (exact construction refused:
+/// <reason>)", the reason holding \a expected if given
+testing::AssertionResult throwsOcctsError(
+    const std::function<void()>& run,
+    const char* expected = nullptr
+)
 {
+    const std::string occts = "BRep_API: command not done";
+    const std::string refused = " (exact construction refused: ";
     try {
         run();
     }
     catch (const StdFail_NotDone& e) {
-        if (std::string(e.GetMessageString()) != "BRep_API: command not done") {
-            return testing::AssertionFailure() << "message " << e.GetMessageString();
+        const std::string message = e.GetMessageString();
+        if (message.rfind(occts + refused, 0) != 0 || message.back() != ')'
+            || message.size() == occts.size() + refused.size() + 1) {
+            return testing::AssertionFailure() << "message " << message;
+        }
+        if (expected && message.find(expected, occts.size()) == std::string::npos) {
+            return testing::AssertionFailure() << "message without the reason: " << message;
         }
         return testing::AssertionSuccess();
     }
@@ -2025,7 +2037,7 @@ testing::AssertionResult refusedFor(
     if (!occtFails(base, edges, request)) {
         return testing::AssertionFailure() << "OCCT builds it";
     }
-    auto raised = throwsOcctsError([&] { dressUp(base, edges, request); });
+    auto raised = throwsOcctsError([&] { dressUp(base, edges, request); }, expected);
     if (!raised) {
         return raised;
     }
