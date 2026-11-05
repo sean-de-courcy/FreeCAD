@@ -1443,6 +1443,19 @@ private:
                 vertexes.insert(v);
             }
         }
+        // A shape that is one vertex and nothing else (a datum point's, a Part::Vertex): its
+        // vertex counts where the old shape was one vertex alone too (ops#633). Lone vertices
+        // among others are left unconfirmed: a place match can't tell them apart, so a point
+        // dropped with another slid onto its place breaks (review pr431-r1)
+        auto oneVertex = [](const Topology& shape) {
+            return shape.points.size() == 1 && shape.edgeVertexes.empty()
+                && shape.faceVertexes.empty();
+        };
+        if (oneVertex(after) && oneVertex(before)) {
+            for (const auto& [i, j] : result.vertexes) {
+                vertexes.insert(i - 1);
+            }
+        }
         return {vertexes, edges};
     }
 
@@ -1789,8 +1802,18 @@ bool indexNamesOnly(const TopoShape& shape)
     return true;
 }
 
-void nameByMatch(TopoShape& shape, const TopoShape& previous, long tag, long& counter, bool fixedOrder)
+void nameByMatch(
+    TopoShape& shape,
+    const TopoShape& previous,
+    long tag,
+    long& counter,
+    bool fixedOrder,
+    int* freshIds
+)
 {
+    if (freshIds) {
+        *freshIds = 0;
+    }
     const std::array<TopAbs_ShapeEnum, 3> types {TopAbs_VERTEX, TopAbs_EDGE, TopAbs_FACE};
     std::array<std::vector<long>, 3> oldIds;
     bool named = false;
@@ -1841,6 +1864,9 @@ void nameByMatch(TopoShape& shape, const TopoShape& previous, long tag, long& co
             }
             if (id <= 0) {
                 id = counter++;
+                if (freshIds) {
+                    ++*freshIds;
+                }
             }
             const std::string section = Data::MappedName::makeEncodedSection(
                 {},

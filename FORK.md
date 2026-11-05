@@ -456,7 +456,8 @@ names it.
 | `fix/596-park-skip` | fix | ops#596 | - | `integration` `3576ea7ca5` | `9ebe600eca` (fork PR 427), 2026-11-05 | never (fork fix) |
 | `feat/605-toolbars-words` | feat | ops#605 | - | `integration` `3576ea7ca5` | `8a5743e8ad` (fork PR 428), 2026-11-05 | never (fork feature: Onshape toolbars and words) |
 | `fix/625-test-expectations` | fix | ops#625 | - | `integration` `9ebe600eca` | `8b10fb8ccf` (fork PR 429), 2026-11-05 | never (fork fix) |
-| `feat/605-tier1-taskbox` | feat | ops#605 | - | `integration` `8a5743e8ad` | (fork PR 430) | never (fork feature); refit when upstream changes the task box's buttons or `TaskView::keyPressEvent`, `Std_New`, the start-up order in `Application::runApplication`, or the origin's temporary visibility |
+| `feat/605-tier1-taskbox` | feat | ops#605 | - | `integration` `8a5743e8ad` | `e5aebe7c8f` (fork PR 430), 2026-11-05 | never (fork feature); refit when upstream changes the task box's buttons or `TaskView::keyPressEvent`, `Std_New`, the start-up order in `Application::runApplication`, or the origin's temporary visibility |
+| `fix/633-point-names` | fix | ops#633 | - | `integration` `e5aebe7c8f` | (fork PR 431) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 

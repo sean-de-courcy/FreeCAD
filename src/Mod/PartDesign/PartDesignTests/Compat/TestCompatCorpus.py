@@ -59,6 +59,10 @@ every reference and shape must stay the same (names aren't compared there). It s
 that is already older than the build (a `COMPAT-REHEARSAL` line says so): the gate pass migrates
 that one for real, and a name that moved there is what a real naming change produces, which the
 rehearsal, with no real change, would fail; with only older generations nothing is rehearsed.
+Then (every committed generation older than the build) a **fresh generation** stands in for one
+at the build's own revision (ops#633): every model saved by this build in a temporary folder
+(`make_generation`, which refuses a model whose reopened file differs from the saved document),
+and the gate's passes run over it with names compared.
 
 The passes run in two child FreeCADCmd processes (the gate and the rehearsal, in parallel), so
 their console lines can be read: the child marks each step on stderr (`@@COMPAT <label>`), where
@@ -453,6 +457,18 @@ except Exception:
 os._exit(0)
 """
 
+# Saves every model into FREECAD_COMPAT_FRESH, a fresh generation (TestCompatCorpus.testFresh...)
+FRESH_SCRIPT = """\
+import os, traceback
+try:
+    from PartDesignTests.Compat import make_generation
+    make_generation.generate(os.environ["FREECAD_COMPAT_FRESH"])
+except Exception:
+    with open(os.environ["FREECAD_COMPAT_FRESH"] + ".error", "w") as fh:
+        fh.write(traceback.format_exc())
+os._exit(0)
+"""
+
 
 # ---------------------------------------------------------------------------------------------
 # The parent: starts the children, reads their results and logs
@@ -553,6 +569,39 @@ def runChildren(corpus, kinds, work, offset=0):
         result["fullLog"] = text
         found[kind] = result
     return found
+
+
+def freshCorpus(work):
+    """(corpus folder, None) of a fresh generation of every model saved by this build in `work`
+    (FRESH_SCRIPT, in a child FreeCADCmd), or (None, why) if it saved none."""
+    script = os.path.join(work, "fresh.py")
+    with open(script, "w", encoding="utf-8") as fh:
+        fh.write(FRESH_SCRIPT)
+    # not named gen<k> while it is saved: make_generation would check the platform of its half
+    folder = os.path.join(work, "fresh")
+    env = dict(os.environ)
+    env.pop("FREECAD_TEST_NAMING_REVISION_OFFSET", None)
+    env["FREECAD_COMPAT_FRESH"] = folder
+    logPath = os.path.join(work, "fresh.log")
+    with open(logPath, "w") as log:
+        proc = subprocess.Popen(
+            [_freecadCmd(), script], env=env, stdout=log, stderr=subprocess.STDOUT, cwd=work
+        )
+        try:
+            proc.wait(timeout=CHILD_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            return None, f"timed out after {CHILD_TIMEOUT} s (log {logPath})"
+    if os.path.isfile(folder + ".error"):
+        with open(folder + ".error", encoding="utf-8", errors="replace") as fh:
+            return None, fh.read()
+    if not os.path.isfile(os.path.join(folder, "MANIFEST")):
+        return None, f"crashed (exit {proc.returncode}): no MANIFEST (log {logPath})"
+    corpus = os.path.join(work, "corpus")
+    os.makedirs(corpus)
+    os.rename(folder, os.path.join(corpus, "gen0"))
+    return corpus, None
 
 
 _work = None
@@ -1100,6 +1149,35 @@ class TestCompatCorpus(unittest.TestCase):
             any("HoleSketch.AttachmentSupport[0]" in l for l in linesOf("PadPocket")), found
         )
         self.assertTrue(any("Fillet.guesses" in l for l in linesOf("GuessRecord")), found)
+
+    def testFreshGeneration(self):
+        """With every committed generation older than this build, nothing else saves and reopens
+        a file at this build's own naming revision (the rehearsal skips them, and the gate
+        compares no names for them): a restore defect of this revision went unseen until a
+        release saved its generation (ops#633). So every model is saved by this build into a
+        fresh generation, which refuses a model whose reopened file differs from the saved
+        document, and the gate's passes run over it with names compared."""
+        work = os.path.realpath(tempfile.mkdtemp(prefix="compat-fresh-"))
+        own = buildNamingRevision(work)
+        current = sorted(
+            gen
+            for gen, folder in generations().items()
+            if manifest(folder).get("namingRevision") == own
+        )
+        if current:
+            shutil.rmtree(work, ignore_errors=True)
+            print(f"COMPAT-FRESH {current} at this build's naming revision: no fresh generation")
+            return
+        corpus, why = freshCorpus(work)
+        self.assertIsNone(why, f"the fresh generation (in {work}): {why}")
+        result = runChildren(corpus, ("gate",), work)["gate"]
+        self.assertNotIn("ERROR", result, result.get("ERROR"))
+        self.assertEqual(result["namesSkipped"], [])
+        self.assertTrue(result["steps"], f"the gate ran no model of the fresh generation ({work})")
+        found = self.agedProblems(result)
+        self.assertEqual(found, {}, f"the fresh generation's passes (in {work}): {found}")
+        print(f"COMPAT-FRESH every generation is older: {len(result['steps'])} fresh steps pass")
+        shutil.rmtree(work, ignore_errors=True)
 
     def testTimings(self):
         """Not a check: prints the passes' times (3.7) as COMPAT-TIME lines."""
