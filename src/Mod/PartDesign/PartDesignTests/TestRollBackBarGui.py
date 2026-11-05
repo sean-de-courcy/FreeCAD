@@ -609,9 +609,10 @@ class TestRollBackBarGui(unittest.TestCase):
     def testDropAboveWhatItsSketchSitsOn(self):
         """The W16 check: Pad2, whose sketch sits on the block's top face, dropped above the block
         (at the Origin row's lower edge). Pad2 and its sketch go to the start, the sketch fails
-        naming the block, which now comes after it, Pad2 fails naming its sketch, and the block
-        and the Body don't continue past it (ops#579). Dropped back below the block, everything
-        computes again: the block and a 3 mm round boss 5 high on its top."""
+        naming the block, which now comes after it, and Pad2 fails naming its sketch; Pad2 is
+        parked, so the block computes as the Body's first solid and the Body shows it alone
+        (ops#596, decision 275 (2): Onshape fails only the moved feature). Dropped back below the
+        block, everything computes again: the block and a 3 mm round boss 5 high on its top."""
         block = self.block()
         self.doc.recompute()
         top = faceName(block.Shape, lambda f: isPlaneFacing(f, V(0, 0, 1), V(0, 0, 10)))
@@ -636,9 +637,9 @@ class TestRollBackBarGui(unittest.TestCase):
         self.assertIn("'Block', which now comes after 'Pad2'", sketch.getStatusString())
         self.assertFalse(pad2.isValid())
         self.assertIn("'TopSketch', which has an error", pad2.getStatusString())
-        self.assertFalse(block.isValid())
-        self.assertIn("'Pad2', which has an error", block.getStatusString())
-        self.assertFalse(self.body.isValid())
+        self.assertTrue(block.isValid(), block.getStatusString())
+        self.assertTrue(self.body.isValid(), self.body.getStatusString())
+        self.assertAlmostEqual(self.body.Shape.Volume, 4000, delta=1e-4)
         self.waitForRows(["Origin", "Pad2", "Block", "|"])
 
         self.select(pad2)
