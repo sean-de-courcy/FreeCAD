@@ -7,6 +7,7 @@ SET(PreferencePacks_Directories
         "Dark behave"
         "FreeCAD Light"
         "FreeCAD Dark"
+        "FreeCAD-CH Onshape"
 )
 
 ADD_CUSTOM_TARGET(PreferencePacks_data ALL

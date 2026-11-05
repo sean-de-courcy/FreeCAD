@@ -443,7 +443,8 @@ names it.
 | `infra/323-gen1` | infra | ops#323, ops#482 | - | `integration` `781a96fc40` | `af1daa45c6` (fork PR 415), 2026-11-04 | never |
 | `fix/579-judging` | corpus | ops#579 | - | `integration` `af1daa45c6` | `a2f1f04ae7` (fork PR 416), 2026-11-04 | never (fork fix) |
 | `fix/579-failed-input` | fix | ops#579, ops#585 | - | `integration` `af1daa45c6` (stacked on fork PR 416, `fix/579-judging`) | `51775afc1e` (fork PR 417), 2026-11-04 | never (fork fix) |
-| `fix/590-transform-base` | fix | ops#590 | - | `integration` `51775afc1e` | (fork PR 418) | never (fork fix) |
+| `fix/590-transform-base` | fix | ops#590 | - | `integration` `51775afc1e` | `8047bdb58b` (fork PR 418), 2026-11-04 | never (fork fix) |
+| `infra/605-onshape-pack` | infra | ops#605 | - | `integration` `8047bdb58b` | (fork PR 419) | never (fork feature); refit when upstream renames a toolbar or command named in the pack, or changes the overlay or preference-pack parameters |
 
 ## Fork-only commits in carried topics
 
