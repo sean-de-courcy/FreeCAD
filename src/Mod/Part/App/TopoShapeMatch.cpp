@@ -1864,6 +1864,20 @@ void nameByMatch(TopoShape& shape, const TopoShape& previous, long tag, long& co
                     shape.setElementName(element, alias.first, tag);
                 }
             }
+            else if (named && match != byType[t]->end()) {
+                // An object that came in under a new ID (Merge project, ops#502 round 4d): the old
+                // element's MLN name under its file's tag, kept once as an alias, the same way
+                const auto old = Data::IndexedName::fromConst(typeName.c_str(), match->second);
+                for (const auto& [name, sids] : previous.getElementMappedNames(old)) {
+                    const auto& sections = name.getDecodedMappedName();
+                    if (sections.size() == 1 && sections.front().opCode == matchOpCode) {
+                        if (sections.front().iterationTag != std::to_string(tag)) {
+                            shape.setElementName(element, name, tag);
+                        }
+                        break;
+                    }
+                }
+            }
         }
     }
 }

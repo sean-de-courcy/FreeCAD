@@ -1424,7 +1424,7 @@ static void takeMatchName(const GeoFeature* geo, ElementNamePair& name)
     }
     const char* element = Data::findElementName(name.newName.c_str());
     const char* mapped = element ? Data::isMappedElement(element) : nullptr;
-    if (!mapped || !strstr(mapped, Data::MAPPER_FLAG_INDEX)) {
+    if (!mapped || (!strstr(mapped, Data::MAPPER_FLAG_INDEX) && !strstr(mapped, ";MLN;"))) {
         return;
     }
     std::string bare(mapped);
@@ -1435,7 +1435,16 @@ static void takeMatchName(const GeoFeature* geo, ElementNamePair& name)
     const std::string index = bare.substr(dot + 1);
     bare.resize(dot);
     const auto& sections = Data::MappedName::getDecodedMappedName(bare);
-    if (sections.size() != 1 || !sections.front().hasMapperFlag(Data::MAPPER_FLAG_INDEX)) {
+    if (sections.size() != 1) {
+        return;
+    }
+    // Or the MLN name an object had under its file's ID (Merge project, ops#502 round 4d), which
+    // nameByMatch() keeps once as an alias of the same id under the owner's ID
+    const std::string ownTag = std::to_string(geo->getID());
+    const bool indexAlias = sections.front().hasMapperFlag(Data::MAPPER_FLAG_INDEX);
+    const bool tagAlias = !indexAlias && sections.front().opCode == "MLN"
+        && sections.front().iterationTag != ownTag;
+    if (!indexAlias && !tagAlias) {
         return;
     }
     auto prop = geo->getPropertyOfGeometry();
@@ -1454,7 +1463,11 @@ static void takeMatchName(const GeoFeature* geo, ElementNamePair& name)
         }
         const auto& decoded = Data::MappedName::getDecodedMappedName(candidate);
         if (decoded.size() == 1 && decoded.front().opCode == "MLN"
-            && !decoded.front().hasMapperFlag(Data::MAPPER_FLAG_INDEX)) {
+            && !decoded.front().hasMapperFlag(Data::MAPPER_FLAG_INDEX)
+            && (!tagAlias
+                || (decoded.front().iterationTag == ownTag
+                    && decoded.front().index == sections.front().index
+                    && decoded.front().elementType == sections.front().elementType))) {
             match = candidate;
         }
     }
