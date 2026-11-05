@@ -1,0 +1,14 @@
+{
+"entries": {
+"MoveBackOverATakenEdge|ref|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr596s-r1", "issue": "ops#596", "tier": "F"},
+"ParkedBossFilletOnBlockRedrawn|ref|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr596s-r1", "issue": "ops#596", "tier": "F"},
+"ParkedBossFilletRedrawnControl|ref|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr596s-r1", "issue": "ops#596", "tier": "F"},
+"ParkedFaceProfileBoss|ref|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr596s-r1", "issue": "ops#596", "tier": "F"},
+"PatternOfParkedBoss|ref|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr596s-r1", "issue": "ops#596", "tier": "F"},
+"SuppressedWhileParked|ref|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr596s-r1", "issue": "ops#596", "tier": "F"},
+"ThickFlushBossBackEdge|ref|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr596s-r1", "issue": "ops#596", "tier": "F"},
+"ThinFlushBossBackEdge|ref|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "BROKEN", "expected": "wrong", "found_by": "review pr596s-r1", "issue": "ops#596", "tier": "F"},
+"ThinFullBossFrontEdge|ref|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "BROKEN", "expected": "wrong", "found_by": "review pr596s-r1", "issue": "ops#596", "tier": "F"},
+"ThinFullBossTopSketch|ref|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr596s-r1", "issue": "ops#596", "tier": "F"}
+}
+}

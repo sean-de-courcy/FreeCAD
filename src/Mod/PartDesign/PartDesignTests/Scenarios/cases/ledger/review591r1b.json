@@ -1,0 +1,10 @@
+{
+"entries": {
+"DatumSketchPocketParked|fillet_edge|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr591-r1b", "issue": "ops#591", "tier": "F"},
+"FaceSketchPocketParked|fillet_edge|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr591-r1b", "issue": "ops#591", "tier": "F"},
+"ParkedMultiTransformLead|fillet_edge|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr591-r1b", "issue": "ops#591", "tier": "F"},
+"ParkedPocketInPart|fillet_edge|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr591-r1b", "issue": "ops#591", "tier": "F"},
+"PatternOfSuppressedOriginal|fillet_edge|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "wrong", "found_by": "review pr591-r1b", "issue": "ops#591", "tier": "F"},
+"WholeShapePatternLead|fillet_edge|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr591-r1b", "issue": "ops#591", "tier": "F"}
+}
+}

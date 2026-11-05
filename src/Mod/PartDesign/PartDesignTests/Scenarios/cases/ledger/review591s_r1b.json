@@ -1,0 +1,7 @@
+{
+"entries": {
+"FilletLeadRelinkedToALink|fillet_edge|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr591s-r1b", "issue": "ops#591", "tier": "F"},
+"LeadPocketSketchOnADatumPlane|fillet_edge|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr591s-r1b", "issue": "ops#591", "tier": "F"},
+"PatternLeadOriginalIsALink|fillet_edge|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "design se47b", "issue": "ops#591", "tier": "F"}
+}
+}
