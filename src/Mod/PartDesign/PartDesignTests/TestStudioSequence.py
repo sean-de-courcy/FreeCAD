@@ -241,6 +241,56 @@ class TestStudioSequence(unittest.TestCase):
     def testSubnameThroughAnotherStudio(self):
         self.subnameModel(viaPart=True)
 
+    def wholeAndSubnameModel(self, whole):
+        """Review props602-r2fix N1: Body A (made first) has a binder of one face of PadC1, in
+        Body C of another studio, and also reads all of C: by an expression (whole="expression")
+        or by a second entry linking an App::Link to C (whole="link"); whole=None reads PadC1
+        only. C's later Pad sits on Body D's, so reading all of C puts A after D."""
+        bodyA = self.doc.addObject("PartDesign::Body", "A")
+        binder = bodyA.newObject("PartDesign::SubShapeBinder", "BinA")
+        skA2 = sketch(bodyA, "SkA2", (20, 0, 24, 4))
+        padA2 = bodyA.newObject("PartDesign::Pad", "PadA2")
+        padA2.Profile = skA2
+        padA2.Length = 2
+        bodyD = self.doc.addObject("PartDesign::Body", "D")
+        skD = sketch(bodyD, "SkD", (0, 0, 10, 10))
+        padD = bodyD.newObject("PartDesign::Pad", "PadD")
+        padD.Profile = skD
+        padD.Length = 1
+        part = self.doc.addObject("App::Part", "P")
+        bodyC = self.doc.addObject("PartDesign::Body", "C")
+        part.addObject(bodyC)
+        padC1 = bodyC.newObject("PartDesign::AdditiveBox", "PadC1")
+        padC1.Length = padC1.Width = 4
+        padC1.Height = 3
+        self.doc.recompute()
+        skC2 = sketch(bodyC, "SkC2", (0, 0, 2, 2), support=[(padD, faceAt(padD, 1))])
+        padC2 = bodyC.newObject("PartDesign::Pad", "PadC2")
+        padC2.Profile = skC2
+        padC2.Length = 1
+        self.doc.recompute()
+        support = [(bodyC, (f"PadC1.{faceAt(padC1, 3)}",))]
+        if whole == "link":
+            link = self.doc.addObject("App::Link", "LnkC")
+            link.LinkedObject = bodyC
+            support.append((link, ("",)))
+        binder.Support = support
+        if whole == "expression":
+            binder.addProperty("App::PropertyFloat", "Probe")
+            binder.setExpression("Probe", "C.Shape.BoundBox.XMax")
+        return self.names(PartDesign.studioSequence(self.doc))
+
+    def testSubnameOnlyReadsThatFeature(self):
+        self.assertEqual(self.wholeAndSubnameModel(None), ["BinA", "SkA2", "PadA2", "SkD", "PadD"])
+
+    def testSubnameAndExpressionOfTheWholeBody(self):
+        self.assertEqual(
+            self.wholeAndSubnameModel("expression"), ["SkD", "PadD", "BinA", "SkA2", "PadA2"]
+        )
+
+    def testSubnameAndLinkToTheWholeBody(self):
+        self.assertEqual(self.wholeAndSubnameModel("link"), ["SkD", "PadD", "BinA", "SkA2", "PadA2"])
+
     def testALoopListsEveryMemberOnce(self):
         """Sketches that read each other's Body crosswise (from Python): no order satisfies both
         Bodies, and every member is still listed once, each Body's in its Group order."""

@@ -40,37 +40,50 @@ bool isMultiTransformStep(const App::DocumentObject* obj)
     });
 }
 
-/// The object at the end of each subname path reader holds: Support = (Studio, "A.BossA.Face3")
-/// reads BossA, though only Studio is in its out-list (App's pathReads() also lists the containers
-/// on the way, A here, which would read all of A). Expressions are in the out-list already
-std::vector<App::DocumentObject*> pathLeaves(const App::DocumentObject* reader)
+/// What reader reads, link entry by link entry (design section 3): an entry with a subname path
+/// reads the path's last object (Support = (Studio, "A.BossA.Face3") reads BossA, not Studio nor all
+/// of A); an entry without one (a face of the object, or none) and an expression read the object
+/// itself. The links the out-list leaves out (hidden scope: a feature's _Body) are left out too
+std::vector<App::DocumentObject*> linkReads(const App::DocumentObject* reader)
 {
-    std::vector<App::DocumentObject*> leaves;
+    std::vector<App::DocumentObject*> reads;
     std::vector<App::Property*> props;
     reader->getPropertyList(props);
     for (auto prop : props) {
         auto link = freecad_cast<App::PropertyLinkBase*>(prop);
-        if (!link || prop->isDerivedFrom<App::PropertyExpressionContainer>()) {
+        if (!link) {
             continue;
         }
         std::vector<App::DocumentObject*> objs;
         std::vector<std::string> subs;
-        link->getLinks(objs, true, &subs, false);
+        if (prop->isDerivedFrom<App::PropertyExpressionContainer>()) {
+            link->getLinks(objs);
+            reads.insert(reads.end(), objs.begin(), objs.end());
+            continue;
+        }
+        link->getLinks(objs, false, &subs, false);
         // One object with all its subnames (PropertyLinkSub, PropertyXLink), or one per subname
+        // (the lists); without subnames, or when they don't pair up, every object is read whole
         bool single = prop->isDerivedFrom<App::PropertyLinkSub>() || prop->isDerivedFrom<App::PropertyXLink>();
+        bool paired = single ? objs.size() == 1 && !subs.empty() : !subs.empty() && objs.size() == subs.size();
+        if (!paired) {
+            reads.insert(reads.end(), objs.begin(), objs.end());
+            continue;
+        }
         for (std::size_t i = 0; i < subs.size(); ++i) {
-            auto top = single ? (objs.size() == 1 ? objs[0] : nullptr)
-                              : (objs.size() == subs.size() ? objs[i] : nullptr);
-            if (!top || subs[i].find('.') == std::string::npos) {
+            auto top = single ? objs[0] : objs[i];
+            if (!top) {
+                continue;
+            }
+            if (subs[i].find('.') == std::string::npos) {
+                reads.push_back(top);
                 continue;
             }
             auto path = top->getSubObjectList(subs[i].c_str());
-            if (!path.empty() && path.back() && path.back() != top) {
-                leaves.push_back(path.back());
-            }
+            reads.push_back(!path.empty() && path.back() ? path.back() : top);
         }
     }
-    return leaves;
+    return reads;
 }
 
 /// The rows of body: its Group without the MultiTransform steps
@@ -130,9 +143,9 @@ std::vector<App::DocumentObject*> studioSequence(App::Document* doc, App::Part* 
             while (!readers.empty()) {
                 auto reader = readers.back();
                 readers.pop_back();
-                // A subname path ((Studio, "Body1.Pad.Face1"), (C, "PadC1.Face3")) reads its last
-                // object; its top (a container, a Body) is in the out-list
-                const auto leaves = pathLeaves(reader);
+                // Entry by entry: a subname path ((Studio, "Body1.Pad.Face1"), (C, "PadC1.Face3"))
+                // reads its last object, never its top (a container, a Body) whole (reviews
+                // props602-r1fix R1, props602-r2fix N1)
                 auto visit = [&](App::DocumentObject* obj) {
                     if (!obj || !seen.insert(obj).second) {
                         return;
@@ -144,13 +157,10 @@ std::vector<App::DocumentObject*> studioSequence(App::Document* doc, App::Part* 
                         return;
                     }
                     if (auto body = freecad_cast<Body*>(obj)) {
-                        // A whole Body (a Boolean's tool, a binder of the Body) reads its last
-                        // solid feature, in this studio or another (review props602-r1 T1);
-                        // not when the link is a subname path into it, whose end is read
-                        bool viaPath = std::ranges::any_of(leaves, [body](App::DocumentObject* leaf) {
-                            return Part::BodyBase::findBodyOf(leaf) == body;
-                        });
-                        auto last = viaPath ? nullptr : body->lastSolidFeature();
+                        // A whole Body (a Boolean's tool, a binder of the Body, a link to it, an
+                        // expression of its shape) reads its last solid feature, in this studio or
+                        // another (review props602-r1 T1)
+                        auto last = body->lastSolidFeature();
                         if (!last) {
                             return;
                         }
@@ -175,8 +185,7 @@ std::vector<App::DocumentObject*> studioSequence(App::Document* doc, App::Part* 
                     }
                     readers.push_back(obj);
                 };
-                std::ranges::for_each(leaves, visit);
-                std::ranges::for_each(reader->getOutList(), visit);
+                std::ranges::for_each(linkReads(reader), visit);
             }
         }
     }
