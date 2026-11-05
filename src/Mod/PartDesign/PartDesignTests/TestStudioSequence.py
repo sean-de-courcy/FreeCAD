@@ -277,7 +277,7 @@ class TestStudioSequence(unittest.TestCase):
         binder.Support = support
         if whole == "expression":
             binder.addProperty("App::PropertyFloat", "Probe")
-            binder.setExpression("Probe", "C.Shape.BoundBox.XMax")
+            binder.setExpression("Probe", "<<C>>.Shape.BoundBox.XMax")  # C alone is a unit
         return self.names(PartDesign.studioSequence(self.doc))
 
     def testSubnameOnlyReadsThatFeature(self):
