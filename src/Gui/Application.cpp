@@ -2708,6 +2708,7 @@ void Application::runApplication()
     process.execute();
 
     Application app(true);
+    StartupProcess::applyFirstStartPack();
     MainWindow mw;
     mw.setProperty("QuitOnClosed", true);
 

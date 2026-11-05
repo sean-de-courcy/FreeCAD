@@ -311,15 +311,23 @@ void StartView::configureCustomFolderListWidget(QListView* customFolderListWidge
 }
 
 
+void StartView::newDocument()
+{
+    // An empty document whatever the workbench: Std_New makes a Body in PartDesign (ops#605 2f)
+    if (auto* cmd = Gui::Application::Instance->commandManager().getCommandByName("Std_New")) {
+        cmd->invoke(1);
+    }
+}
+
 void StartView::newEmptyFile()
 {
-    Gui::Application::Instance->commandManager().runCommandByName("Std_New");
+    newDocument();
     postStart(PostStartBehavior::switchWorkbench);
 }
 
 void StartView::newPartDesignFile()
 {
-    Gui::Application::Instance->commandManager().runCommandByName("Std_New");
+    newDocument();
     Gui::Application::Instance->activateWorkbench("PartDesignWorkbench");
     Gui::Application::Instance->commandManager().runCommandByName("PartDesign_Body");
     postStart(PostStartBehavior::doNotSwitchWorkbench);
@@ -339,7 +347,7 @@ void StartView::openExistingFile()
 
 void StartView::newAssemblyFile()
 {
-    Gui::Application::Instance->commandManager().runCommandByName("Std_New");
+    newDocument();
     Gui::Application::Instance->activateWorkbench("AssemblyWorkbench");
     Gui::Application::Instance->commandManager().runCommandByName("Assembly_CreateAssembly");
     Gui::Application::Instance->commandManager().runCommandByName("Std_Refresh");
@@ -348,7 +356,7 @@ void StartView::newAssemblyFile()
 
 void StartView::newDraftFile()
 {
-    Gui::Application::Instance->commandManager().runCommandByName("Std_New");
+    newDocument();
     Gui::Application::Instance->activateWorkbench("DraftWorkbench");
     Gui::Application::Instance->commandManager().runCommandByName("Std_ViewTop");
     postStart(PostStartBehavior::doNotSwitchWorkbench);
@@ -356,7 +364,7 @@ void StartView::newDraftFile()
 
 void StartView::newArchFile()
 {
-    Gui::Application::Instance->commandManager().runCommandByName("Std_New");
+    newDocument();
     try {
         Gui::Application::Instance->activateWorkbench("BIMWorkbench");
     }

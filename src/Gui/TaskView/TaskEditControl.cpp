@@ -22,8 +22,13 @@
  ***************************************************************************/
 
 
+#include <algorithm>
+
 #include <QDialogButtonBox>
 #include <QHBoxLayout>
+#include <QPushButton>
+
+#include <Gui/BitmapFactory.h>
 
 #include "TaskEditControl.h"
 
@@ -36,7 +41,8 @@ TaskEditControl::TaskEditControl(QWidget* parent)
     hboxLayout = new QHBoxLayout(this);
     buttonBox = new QDialogButtonBox(this);
     buttonBox->setStandardButtons(QDialogButtonBox::Cancel | QDialogButtonBox::Ok);
-    buttonBox->setCenterButtons(true);
+    // At the right of the box's top, as Onshape's check and cross (ops#605 2a)
+    buttonBox->setCenterButtons(false);
 
     hboxLayout->addWidget(buttonBox);
 }
@@ -46,6 +52,42 @@ TaskEditControl::~TaskEditControl() = default;
 QDialogButtonBox* TaskEditControl::standardButtons() const
 {
     return buttonBox;
+}
+
+void TaskEditControl::decorateButtons(bool enterOk)
+{
+    // The words become tooltips. A button the dialog renamed (Create, Run Check, Delete) keeps
+    // its words and gets no icon, and Enter doesn't click it. With enterOk the checked OK is the
+    // default button, so Enter in a field of the panel accepts it (TaskView::keyPressEvent),
+    // unless the dialog made a button of its own the default (FEM's Apply)
+    const auto decorate = [this](QDialogButtonBox::StandardButton which, const char* icon) {
+        QPushButton* button = buttonBox->button(which);
+        if (!button) {
+            return false;
+        }
+        QDialogButtonBox standard;
+        standard.setStandardButtons(which);
+        if (button->text() != standard.button(which)->text()) {
+            return false;
+        }
+        button->setIcon(BitmapFactory().iconFromTheme(icon));
+        button->setToolTip(button->text().remove(QLatin1Char('&')));
+        button->setAccessibleName(button->toolTip());
+        button->setText(QString());
+        return true;
+    };
+    const bool checked = decorate(QDialogButtonBox::Ok, "edit_OK");
+    decorate(QDialogButtonBox::Cancel, "edit_Cancel");
+
+    const QList<QAbstractButton*> buttons = buttonBox->buttons();
+    const bool ownDefault = std::ranges::any_of(buttons, [](QAbstractButton* button) {
+        auto* push = qobject_cast<QPushButton*>(button);
+        return push && push->isDefault();
+    });
+    this->enterOk = checked && enterOk && !ownDefault;
+    if (this->enterOk) {
+        buttonBox->button(QDialogButtonBox::Ok)->setDefault(true);
+    }
 }
 
 #include "moc_TaskEditControl.cpp"

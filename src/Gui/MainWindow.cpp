@@ -1932,7 +1932,10 @@ void MainWindow::delayedStartup()
     ParameterGrp::handle hGrp = WindowParameter::getDefaultParameter()->GetGroup("Document");
     if (hGrp->GetBool("CreateNewDoc", false)) {
         if (App::GetApplication().getDocuments().empty()) {
-            Application::Instance->commandManager().runCommandByName("Std_New");
+            // An empty document whatever the workbench (Std_New's 1, ops#605 2f)
+            if (auto* cmd = Application::Instance->commandManager().getCommandByName("Std_New")) {
+                cmd->invoke(1);
+            }
             // This document is autoCreated
             App::Document* newDoc = App::GetApplication().getActiveDocument();
             newDoc->setAutoCreated(true);

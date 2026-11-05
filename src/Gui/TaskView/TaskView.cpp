@@ -555,10 +555,30 @@ void TaskView::keyPressEvent(QKeyEvent* ke)
     std::optional<TaskInfo> active = currentTaskInfo();
     if (active) {
         if (ke->key() == Qt::Key_Return || ke->key() == Qt::Key_Enter) {
+            // A push button with the focus takes Enter itself, as in a dialog: OK is the default
+            // button (ops#605 2a), and a focused Cancel or Apply must not accept the dialog
+            auto* focused = qobject_cast<QPushButton*>(QApplication::focusWidget());
+            if (focused && isAncestorOf(focused) && focused->isVisible()) {
+                if (focused->isEnabled()) {
+                    focused->click();
+                }
+                return;
+            }
+            // The box's OK (ops#605 2a) accepts only from a field the user types in, as Onshape's
+            // Enter after a value: a list's Enter opens its item, a check box's does nothing. Not
+            // in the sketch editor, nor a renamed OK (Delete, Run Check): Qt makes the box's first
+            // accept button the default when it shows, so its default flag doesn't tell
+            QWidget* typed = QApplication::focusWidget();
+            const bool fromField = qobject_cast<QAbstractSpinBox*>(typed)
+                || qobject_cast<QLineEdit*>(typed);
+            QPushButton* boxOk = active->ActiveCtrl->standardButtons()->button(QDialogButtonBox::Ok);
             // get all buttons of the complete task dialog
             QList<QPushButton*> list = this->findChildren<QPushButton*>();
             for (auto pb : list) {
                 if (pb->isDefault() && pb->isVisible()) {
+                    if (pb == boxOk && (!fromField || !active->ActiveCtrl->okTakesEnter())) {
+                        return;
+                    }
                     if (pb->isEnabled()) {
 #if defined(FC_OS_MACOSX)
                         // #0001354: Crash on using Enter-Key for confirmation of chamfer or fillet
@@ -812,6 +832,8 @@ bool TaskView::showDialog(TaskDialog* dlg, App::Document* doc)
 
     // give to task dialog to customize the button box
     dlg->modifyStandardButtons(outInfo.ActiveCtrl->buttonBox);
+    // Not in the sketch editor: Enter there commits a value or a list item, never the sketch
+    outInfo.ActiveCtrl->decorateButtons(!dlg->inherits("SketcherGui::TaskDlgEditSketch"));
 
     outInfo.taskPanel = new TaskPanel(this);
     // The edited object's error or warning, above the dialog (ops#151). Not in the sketch editor:

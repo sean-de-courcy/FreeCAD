@@ -40,6 +40,8 @@ class GuiExport StartupProcess
 public:
     StartupProcess();
     static void setupApplication();
+    /// The fork's first-start pack on a new settings folder, before the main window exists
+    static void applyFirstStartPack();
     void execute();
 
 private:
