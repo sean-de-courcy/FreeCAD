@@ -114,6 +114,15 @@ def taskButton(which):
     return None
 
 
+def taskViewHolds(widget):
+    parent = widget.parentWidget()
+    while parent is not None:
+        if parent.metaObject().className() == "Gui::TaskView::TaskView":
+            return True
+        parent = parent.parentWidget()
+    return False
+
+
 def visibleChild(name):
     for widget in Gui.getMainWindow().findChildren(QtWidgets.QWidget, name):
         if widget.isVisible():
@@ -230,8 +239,9 @@ class TestOnshapeStudioGui(unittest.TestCase):
         self.assertEqual([o.Name for o in doc.Objects if o.isDerivedFrom("PartDesign::Pad")], [])
 
     def testEnterInTheSketchEditorKeepsItOpen(self):
-        """The sketch editor's OK is a check but not the default: Enter on its constraint list
-        (a list of the panel) leaves the sketch in edit."""
+        """The sketch editor's OK is a check but not the default: Enter on a list of its panel,
+        and the keypad's Enter in a tool's parameter field (the tool widget filters only Return),
+        leave the sketch in edit."""
         doc = models.newDocument("OnshapeSketchEnter")
         self.docs.append(doc.Name)
         body = models.body(doc)
@@ -264,6 +274,20 @@ class TestOnshapeStudioGui(unittest.TestCase):
                 widget.reject()
         pump(0.3)
         self.assertTrue(Gui.ActiveDocument.getInEdit(), "Enter closed the sketch")
+
+        Gui.runCommand("Sketcher_CreateRectangle")
+        pump(0.5)
+        fields = [
+            w
+            for w in Gui.getMainWindow().findChildren(QtWidgets.QAbstractSpinBox)
+            if w.isVisible() and w.isEnabled() and taskViewHolds(w)
+        ]
+        self.assertTrue(fields, "no parameter field for the rectangle tool")
+        fields[0].setFocus(QtCore.Qt.OtherFocusReason)
+        pump(0.2)
+        QtTest.QTest.keyClick(fields[0], QtCore.Qt.Key_Enter, QtCore.Qt.KeypadModifier)
+        pump(0.5)
+        self.assertTrue(Gui.ActiveDocument.getInEdit(), "keypad Enter closed the sketch")
         Gui.ActiveDocument.resetEdit()
         pump(0.5)
 

@@ -22,6 +22,8 @@
  ***************************************************************************/
 
 
+#include <algorithm>
+
 #include <QDialogButtonBox>
 #include <QHBoxLayout>
 #include <QPushButton>
@@ -54,30 +56,37 @@ QDialogButtonBox* TaskEditControl::standardButtons() const
 
 void TaskEditControl::decorateButtons(bool defaultOk)
 {
-    // The words become tooltips. A button the dialog renamed (Create, Run Check) keeps its words
-    // and gets no icon. OK is the default button with defaultOk: Enter in a field of the panel
-    // accepts it (TaskView::keyPressEvent)
+    // The words become tooltips. A button the dialog renamed (Create, Run Check, Delete) keeps
+    // its words, gets no icon and isn't made the default. With defaultOk the checked OK is the
+    // default button, so Enter in a field of the panel accepts it (TaskView::keyPressEvent),
+    // unless the dialog made a button of its own the default (FEM's Apply)
     const auto decorate = [this](QDialogButtonBox::StandardButton which, const char* icon) {
         QPushButton* button = buttonBox->button(which);
         if (!button) {
-            return button;
+            return false;
         }
         QDialogButtonBox standard;
         standard.setStandardButtons(which);
         if (button->text() != standard.button(which)->text()) {
-            return button;
+            return false;
         }
         button->setIcon(BitmapFactory().iconFromTheme(icon));
         button->setToolTip(button->text().remove(QLatin1Char('&')));
         button->setAccessibleName(button->toolTip());
         button->setText(QString());
-        return button;
+        return true;
     };
-    QPushButton* ok = decorate(QDialogButtonBox::Ok, "edit_OK");
-    if (ok && defaultOk) {
-        ok->setDefault(true);
-    }
+    const bool checked = decorate(QDialogButtonBox::Ok, "edit_OK");
     decorate(QDialogButtonBox::Cancel, "edit_Cancel");
+
+    const QList<QAbstractButton*> buttons = buttonBox->buttons();
+    const bool ownDefault = std::ranges::any_of(buttons, [](QAbstractButton* button) {
+        auto* push = qobject_cast<QPushButton*>(button);
+        return push && push->isDefault();
+    });
+    if (checked && defaultOk && !ownDefault) {
+        buttonBox->button(QDialogButtonBox::Ok)->setDefault(true);
+    }
 }
 
 #include "moc_TaskEditControl.cpp"
