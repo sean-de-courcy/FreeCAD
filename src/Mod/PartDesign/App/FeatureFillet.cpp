@@ -142,6 +142,17 @@ App::DocumentObjectExecReturn* Fillet::execute()
         if (!filled.empty()) {
             return new App::DocumentObjectExecReturn("The fillet " + filled);
         }
+        // OCCT stopping a hair short of a step drops the step's upper part, in a valid solid
+        // (ops#603)
+        const std::string lost = Part::lostMaterial(shape, baseShape, edges, radius);
+        if (!lost.empty()) {
+            return new App::DocumentObjectExecReturn("The fillet " + lost);
+        }
+        // OCCT bridges a hole or pocket the band crosses with a B-spline (ops#604 gap 3a)
+        const std::string bridged = Part::bridgedRecess(shape, baseShape, edges, radius);
+        if (!bridged.empty()) {
+            return new App::DocumentObjectExecReturn("The fillet" + bridged);
+        }
         // store shape before refinement
         this->rawShape = shape;
         shape = refineShapeIfActive(shape);

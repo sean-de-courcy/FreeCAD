@@ -7388,19 +7388,35 @@ bool builtInvalid(BRepFilletAPI_LocalOperation& maker)
 }
 
 /** Raises OCCT's error for a maker that failed, as before the exact construction: what it threw,
- * or StdFail_NotDone. The maker must not be built again: ChFi3d crashes on a second build after a
- * failed one.
+ * or StdFail_NotDone, with why the exact construction refused appended (ops#601): "BRep_API:
+ * command not done (exact construction refused: <reason>)". The maker must not be built again:
+ * ChFi3d crashes on a second build after a failed one.
  */
 [[noreturn]] void raiseDressUpError(
     const BRepBuilderAPI_MakeShape& maker,
-    const std::exception_ptr& error
+    const std::exception_ptr& error,
+    const std::string& reason
 )
 {
-    if (error) {
-        std::rethrow_exception(error);
+    std::string message = "BRep_API: command not done";
+    try {
+        if (error) {
+            std::rethrow_exception(error);
+        }
+        maker.Check();
     }
-    maker.Check();
-    throw StdFail_NotDone("BRep_API: command not done");
+    catch (const StdFail_NotDone& e) {
+        if (reason.empty()) {
+            throw;
+        }
+        if (e.GetMessageString() && *e.GetMessageString()) {
+            message = e.GetMessageString();
+        }
+    }
+    if (!reason.empty()) {
+        message += " (exact construction refused: " + reason + ")";
+    }
+    throw StdFail_NotDone(message.c_str());
 }
 
 /** Whether OCCT built the dress-up with a face of zero width (ops#298): the face it consumes whole,
@@ -7472,7 +7488,7 @@ TopoShape& TopoShape::makeElementFillet(
             return *this;
         }
         if (failed) {
-            raiseDressUpError(mkFillet, occtError);
+            raiseDressUpError(mkFillet, occtError, reason);
         }
         if (thin) {
             raiseThinFaceError("The fillet", reason);
@@ -7563,7 +7579,7 @@ TopoShape& TopoShape::makeElementChamfer(
             return *this;
         }
         if (failed) {
-            raiseDressUpError(mkChamfer, occtError);
+            raiseDressUpError(mkChamfer, occtError, reason);
         }
         if (thin) {
             raiseThinFaceError("The chamfer", reason);

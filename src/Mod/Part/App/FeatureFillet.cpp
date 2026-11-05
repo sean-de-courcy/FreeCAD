@@ -168,6 +168,25 @@ App::DocumentObjectExecReturn* Fillet::execute()
         if (!filled.empty()) {
             return new App::DocumentObjectExecReturn("The fillet " + filled);
         }
+        // OCCT stopping a hair short of a step drops the step's upper part, in a valid solid
+        // (ops#603)
+        double largest = 0.0;
+        for (const auto& [radius1, radius2] : radii) {
+            largest = std::max({largest, radius1, radius2});
+        }
+        const std::string lost = Part::lostMaterial(res, baseTopoShape, edgeShapes, largest);
+        if (!lost.empty()) {
+            return new App::DocumentObjectExecReturn("The fillet " + lost);
+        }
+        // OCCT bridges a hole or pocket the band crosses with a B-spline (ops#604 gap 3a)
+        const bool constantRadius = std::all_of(radii.begin(), radii.end(), [](const auto& r) {
+            return r.first == r.second;
+        });
+        const std::string bridged
+            = Part::bridgedRecess(res, baseTopoShape, edgeShapes, constantRadius ? largest : 0.0);
+        if (!bridged.empty()) {
+            return new App::DocumentObjectExecReturn("The fillet" + bridged);
+        }
         // Where OCCT failed, the exact construction built it (ops#300, decision 54)
         recorder.report(Label.getValue());
         this->Shape.setValue(res);

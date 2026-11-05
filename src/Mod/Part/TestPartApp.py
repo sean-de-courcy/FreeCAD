@@ -39,10 +39,13 @@ from parttests.TopoShapeTest import TopoShapeTest
 from parttests.ElementReferenceTest import ElementReferenceTest, ElementReferenceTestV2i
 from parttests.FilletFallbackTest import (
     BaseToleranceTest,
+    BridgedRecessTest,
     DroppedBasePartsTest,
+    DressUpCheckLimitsTest,
     FilledRecessTest,
     FilletFallbackTest,
     InvalidDressUpTest,
+    LostStepTest,
 )
 from parttests.ReferenceFingerprintTest import ReferenceFingerprintTest, ReferenceSolverDefaultTest
 from parttests.InternNamesTest import InternNamesTest, InternNamesDefaultTest
