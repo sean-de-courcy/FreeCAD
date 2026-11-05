@@ -71,6 +71,8 @@ set(PartDesign_TestScripts
     PartDesignTests/TestCorpusGate.py
     PartDesignTests/TestNamingSolver.py
     PartDesignTests/TestNamingRewrite.py
+    PartDesignTests/TestMaplessNames.py
+    PartDesignTests/TestBetaMapless.py
     PartDesignTests/TestNamingGate.py
     PartDesignTests/TestNamingConsumerPass.py
     PartDesignTests/TestFailurePassThrough.py
@@ -111,12 +113,16 @@ endif(BUILD_GUI)
 set(PartDesign_TestFixtures
     PartDesignTests/Fixtures/InvoluteGear_v0-20.FCStd
     PartDesignTests/Fixtures/InternalInvoluteGear_v0-20.FCStd
+    PartDesignTests/Fixtures/BetaMapless.FCStd
+    PartDesignTests/Fixtures/BetaIndexToldGroups.FCStd
+    PartDesignTests/Fixtures/BetaPlateABC.FCStd
 )
 
 # The naming scenarios (TestNamingScenarios; the model helpers are shared with TestNamingDump)
 set(PartDesign_TestScenarios
     PartDesignTests/Scenarios/__init__.py
     PartDesignTests/Scenarios/ambiguous.py
+    PartDesignTests/Scenarios/audit.py
     PartDesignTests/Scenarios/booleans.py
     PartDesignTests/Scenarios/consumers.py
     PartDesignTests/Scenarios/corpus.py

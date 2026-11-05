@@ -200,6 +200,37 @@ std::string bareMappedName(const std::string& newStyleName)
     return name;
 }
 
+// P-beta 2 (decision 247): see the header
+bool indexMadeOnly(const std::string& name, int depth)
+{
+    // (no text test for the flag first: a linked name may be interned, `~<ID>`)
+    if (depth <= 0 || name.empty()) {
+        return false;
+    }
+    const auto& sections = Data::MappedName::getDecodedMappedName(name);
+    auto real = [](const std::string& value) {
+        return !value.empty() && value != Data::EMPTY_VALUE;
+    };
+    auto allIndexMade = [&](const std::vector<std::string>& names) {
+        return std::all_of(names.begin(), names.end(), [&](const std::string& linked) {
+            return !real(linked) || indexMadeOnly(linked, depth - 1);
+        });
+    };
+    return !sections.empty()
+        && std::all_of(sections.begin(), sections.end(), [&](const auto& section) {
+               if (section.opCode == "MLN" || !allIndexMade(section.connectedElements)) {
+                   return false;
+               }
+               if (section.hasMapperFlag(Data::MAPPER_FLAG_INDEX)) {
+                   return allIndexMade(section.linkedNames);
+               }
+               const auto& ids = section.referenceIDs;
+               return std::none_of(ids.begin(), ids.end(), real)
+                   && std::any_of(section.linkedNames.begin(), section.linkedNames.end(), real)
+                   && allIndexMade(section.linkedNames);
+           });
+}
+
 void placementSources(const GeoFeature* geo, std::vector<Data::ElementFingerprint::Source>& sources)
 {
     sources.clear();
@@ -633,6 +664,26 @@ void resolutionFor(const SolverEntry& entry,
     else {
         resolution.sub = resolution.shadow.oldName;
     }
+}
+
+// The name of an element a resolution writes: the least of its names, as index carry takes it,
+// leaving out the IDX aliases P-beta gives beside an MLN name (decision 247): they are dropped at
+// the producer's next naming, so a reference holding one would break then
+std::string resolutionName(const std::vector<std::string>& names)
+{
+    if (names.empty()) {
+        return {};
+    }
+    const bool matched = std::any_of(names.begin(), names.end(), [](const std::string& name) {
+        return name.find(";MLN;") != std::string::npos;
+    });
+    std::string least;
+    for (const auto& name : names) {
+        if ((least.empty() || name < least) && !(matched && indexMadeOnly(name))) {
+            least = name;
+        }
+    }
+    return least;
 }
 
 // An exact reference that breaks (Task 2 PR 7): its missing form, as _updateElementReference()
@@ -1453,7 +1504,7 @@ bool solveElementReferences(DocumentObject* feature,
         std::string name;
         for (const auto& element : pool(indexType(index))) {
             if (element.index == index && !element.names.empty()) {
-                name = *std::min_element(element.names.begin(), element.names.end());
+                name = resolutionName(element.names);
             }
         }
         return mapForm(name);
@@ -1950,6 +2001,20 @@ bool solveElementReferences(DocumentObject* feature,
                 }
                 ReferenceReport::Entry item;
                 const std::string& oldName = entry->exactName;
+                if (!pick.empty() && entry->guess.empty() && indexMadeOnly(oldName)) {
+                    // P-beta 2 (decision 247): a name made only of IDX sections is no name, so it
+                    // can't have moved: kept by its place, with no record or warning
+                    SolverResolution resolution;
+                    resolutionFor(*entry, pick, nameAt(pick), resolution);
+                    resolutions[entry->prop].push_back(resolution);
+                    FC_LOG(
+                        referenceName(entry->prop)
+                        << "[" << entry->index << "]: " << oldName << " -> " << pick
+                        << " (migration: an index-made name, kept by its place)"
+                    );
+                    countReferenceMigration(entry->owner, MigrationOutcome::Kept);
+                    continue;
+                }
                 if (!pick.empty()) {
                     SolverResolution resolution;
                     resolutionFor(*entry, pick, nameAt(pick), resolution);
@@ -2046,7 +2111,7 @@ bool solveElementReferences(DocumentObject* feature,
                 std::string name;
                 for (const auto& element : pool(indexType(index))) {
                     if (element.index == index && !element.names.empty()) {
-                        name = *std::min_element(element.names.begin(), element.names.end());
+                        name = resolutionName(element.names);
                     }
                 }
                 // A part moved as one piece with another edit breaks (decisions 234 and 236);
@@ -2093,6 +2158,28 @@ bool solveElementReferences(DocumentObject* feature,
                 const bool refused = !refusal.empty();
                 if (refused) {
                     pick.clear();
+                }
+                if ((!pick.empty() || carried) && entry->guess.empty()
+                    && indexMadeOnly(entry->oldName)) {
+                    // P-beta 2 (decision 247): a name made only of IDX sections is no name, so
+                    // the reference isn't missing it: kept by its place, or at its index when its
+                    // fingerprint agrees there, with no record or warning
+                    SolverResolution resolution;
+                    if (!pick.empty()) {
+                        resolutionFor(*entry, pick, nameAt(pick), resolution);
+                    }
+                    else {
+                        resolutionFor(*entry, index, mapForm(name), resolution);
+                    }
+                    resolutions[entry->prop].push_back(resolution);
+                    FC_LOG(
+                        referenceName(entry->prop)
+                        << "[" << entry->index << "]: " << entry->oldName << " -> "
+                        << (pick.empty() ? index : pick)
+                        << " (migration: an index-made name, kept by its place)"
+                    );
+                    countReferenceMigration(entry->owner, MigrationOutcome::Kept);
+                    continue;
                 }
                 if (!pick.empty()) {
                     countReferenceMigration(entry->owner, MigrationOutcome::Moved);

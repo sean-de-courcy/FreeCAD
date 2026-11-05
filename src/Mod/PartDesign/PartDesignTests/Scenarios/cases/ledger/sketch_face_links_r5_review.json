@@ -20,11 +20,11 @@
 "ReviewRationalHoleMovedCut|circles_on_geometry|V2s": {"axes": ["M8", "E5", "E2"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r5", "issue": "ops#264", "tier": "F"},
 "ReviewRationalSideCut|circles_on_geometry|V2s": {"axes": ["M8", "E5", "E2"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r5", "issue": "ops#264", "tier": "F"},
 "ReviewRationalSideMovedCut|circles_on_geometry|V2s": {"axes": ["M8", "E5", "E2"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r5", "issue": "ops#264", "tier": "F"},
-"ReviewUnmappedBsplineHoleCut|circles_on_geometry|V2s": {"axes": ["M8", "E5", "E2"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r5", "issue": "ops#264", "tier": "F"},
-"ReviewUnmappedParabolaHoleCut|circles_on_geometry|V2s": {"axes": ["M8", "E5", "E2"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r5", "issue": "ops#264", "tier": "F"},
-"ReviewUnmappedParabolaHoleMoved|circles_on_geometry|V2s": {"axes": ["M8", "E5", "E2"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r5", "issue": "ops#264", "tier": "F"},
-"ReviewUnmappedRationalHoleCut|circles_on_geometry|V2s": {"axes": ["M8", "E5", "E2"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r5", "issue": "ops#264", "tier": "F"},
-"ReviewUnmappedRationalHoleMoved|circles_on_geometry|V2s": {"axes": ["M8", "E5", "E2"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r5", "issue": "ops#264", "tier": "F"},
-"ReviewUnmappedRationalSideCut|circles_on_geometry|V2s": {"axes": ["M8", "E5", "E2"], "classes": ["E"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr384-r5", "issue": "ops#264", "tier": "F"}
+"ReviewUnmappedBsplineHoleCut|circles_on_geometry|V2s": {"axes": ["M8", "E5", "E2"], "classes": ["E"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr384-r5", "issue": "ops#264", "tier": "F"},
+"ReviewUnmappedParabolaHoleCut|circles_on_geometry|V2s": {"axes": ["M8", "E5", "E2"], "classes": ["E"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr384-r5", "issue": "ops#264", "tier": "F"},
+"ReviewUnmappedParabolaHoleMoved|circles_on_geometry|V2s": {"axes": ["M8", "E5", "E2"], "classes": ["E"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr384-r5", "issue": "ops#264", "tier": "F"},
+"ReviewUnmappedRationalHoleCut|circles_on_geometry|V2s": {"axes": ["M8", "E5", "E2"], "classes": ["E"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr384-r5", "issue": "ops#264", "tier": "F"},
+"ReviewUnmappedRationalHoleMoved|circles_on_geometry|V2s": {"axes": ["M8", "E5", "E2"], "classes": ["E"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr384-r5", "issue": "ops#264", "tier": "F"},
+"ReviewUnmappedRationalSideCut|circles_on_geometry|V2s": {"axes": ["M8", "E5", "E2"], "classes": ["E"], "expect": "CORRECT", "expected": "broken", "found_by": "review pr384-r5", "issue": "ops#264", "tier": "F"}
 }
 }

@@ -3589,4 +3589,60 @@ class TestNamingSolver(unittest.TestCase):
             rows = App.getReferenceReport(owner)
             self.assertFalse(owner.isValid(), (owner.Name, owner.AttachmentSupport, rows))
             self.assertIn("broken", [e["status"] for e in rows], rows)
-            self.assertIn("nearer where it was", rows[0].get("evidence") or "", rows)
+            # the plate is a script's shell: with its faces named by MLN ids (ops#502) the traded
+            # pair reads as ambiguous, broken all the same
+            evidence = rows[0].get("evidence") or ""
+            self.assertTrue(
+                "nearer where it was" in evidence or evidence == "ambiguous", rows
+            )
+
+    def testMergedBoxKeepsItsDressUps(self):
+        """ops#502 round 4d: File > Merge project gives a Part Box and the Fillet and Chamfer on
+        its top edges new object IDs; the Box's names carry its ID in the file, and its recompute
+        names it under the new one. The dress-ups recompute valid, the same shapes, and keep their
+        edges through the next edit of the Box (the old names are an alias at that one naming
+        only). Fails before the fix: both Invalid, "Ambiguous edge reference: Edge6 moved and
+        Edge6 sits where it was"."""
+        doc = self.newDocument()
+        box = doc.addObject("Part::Box", "Box")
+        doc.recompute()
+        top = [i + 1 for i, e in enumerate(box.Shape.Edges) if e.BoundBox.ZMin > 10 - 1e-7]
+        self.assertEqual(len(top), 4)
+        dressUps = {}
+        for kind in ("Fillet", "Chamfer"):
+            feature = doc.addObject("Part::" + kind, kind)
+            feature.Base = box
+            feature.Edges = [(i, 1.0, 1.0) for i in top[:3]]
+            dressUps[kind] = feature
+        doc.recompute()
+        volumes = {kind: f.Shape.Volume for kind, f in dressUps.items()}
+        for feature in dressUps.values():
+            self.assertTrue(feature.isValid(), feature.getStatusString())
+        folder = tempfile.mkdtemp(prefix="NamingSolver")
+        self.addCleanup(shutil.rmtree, folder, True)
+        path = os.path.join(folder, "MergedBox.FCStd")
+        doc.saveAs(path)
+        savedId = box.ID
+        App.closeDocument(doc.Name)
+
+        merged = self.newDocument()
+        merged.mergeProject(path)
+        box = merged.getObject("Box")
+        self.assertNotEqual(box.ID, savedId)  # the premise: a new ID
+        for obj in merged.Objects:
+            obj.touch()
+        merged.recompute()
+        for kind, feature in ((k, merged.getObject(k)) for k in dressUps):
+            self.assertTrue(feature.isValid(), (kind, feature.getStatusString()))
+            self.assertAlmostEqual(feature.Shape.Volume, volumes[kind], places=6)
+            self.assertEqual(feature.EdgeLinks[1], ["Edge%d" % i for i in top[:3]])
+
+        box.Height = 12
+        merged.recompute()
+        # Only its own names now: 8 vertexes, 12 edges, 6 faces
+        self.assertEqual(box.Shape.ElementMapSize, 26)
+        for kind in dressUps:
+            feature = merged.getObject(kind)
+            self.assertTrue(feature.isValid(), (kind, feature.getStatusString()))
+            self.assertEqual(feature.EdgeLinks[1], ["Edge%d" % i for i in top[:3]])
+            self.assertAlmostEqual(feature.Shape.BoundBox.ZMax, 12, places=6)

@@ -447,7 +447,8 @@ names it.
 | `infra/605-onshape-pack` | infra | ops#605 | - | `integration` `8047bdb58b` | `ba8bd2c925` (fork PR 419), 2026-11-04 | never (fork feature); refit when upstream renames a toolbar or command named in the pack, or changes the overlay or preference-pack parameters |
 | `fix/597-reorder-crash` | fix | ops#597 | - | `integration` `8047bdb58b` | `79cb14308a` (fork PR 420), 2026-11-04 | never (fork fix) |
 | `feat/599-variables-recompute` | feat | ops#599 | - | `integration` `8047bdb58b` | `f93f763f99` (fork PR 421), 2026-11-04 | never (fork feature: the Variables panel) |
-| `fix/603-fillet-checks` | fix | ops#603, ops#601, ops#604 | - | `integration` `8047bdb58b` | (fork PR 422) | never (fork fix) |
+| `fix/603-fillet-checks` | fix | ops#603, ops#601, ops#604 | - | `integration` `8047bdb58b` | `bf35dee66b` (fork PR 422), 2026-11-05 | never (fork fix) |
+| `fix/502-c2-mln` | fix | ops#502 | - | `integration` `51775afc1e` | (fork PR 399) | never (fork naming) |
 
 ## Fork-only commits in carried topics
 

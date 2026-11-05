@@ -338,6 +338,15 @@ std::string missingText(const ReferenceReport::Slot& slot, const ReferenceReport
     if (entry && !entry->headline.empty()) {
         ss << entry->headline;
     }
+    else if (entry && entry->evidence.rfind("retired:", 0) == 0) {
+        // An id no element of the target holds (I-C5, ops#502): its producer's match couldn't
+        // verify which new element is the old one, or a later feature removed the element. The
+        // element at the same place may be it or a neighbour that took its place (decision
+        // 172), so the text claims neither
+        ss << "Missing " << (type.empty() ? "element" : type) << " reference: " << element
+           << ", no element holds its id: the producer couldn't tell it from its neighbours, "
+              "or a later feature removed it";
+    }
     else if (guess.kind == "rejected" && guess.origIndex.empty() && guess.origName.empty()) {
         // Mark broken on a record that lost its original (ops#268): the missing link holds the
         // rejected pick, and "Missing edge reference: Edge3, rejected: Edge3" read as a
