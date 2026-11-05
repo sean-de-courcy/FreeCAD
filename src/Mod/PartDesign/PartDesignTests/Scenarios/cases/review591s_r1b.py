@@ -141,3 +141,40 @@ class LeadPocketSketchOnADatumPlane(Case591):
 
     def fix(self, doc):
         doc.Gauge.Length = self.s(10)
+
+
+class PatternLeadOriginalIsALink(Case591):
+    """The Body's first solid feature is a linear pattern with no Originals: it fails with nothing
+    to pattern and is claimed, and the block, the boss and the fillet compute. In one edit its
+    Originals (set from Python) take an App::Link to Stock, an outside 600 x 300 x 300 box: the
+    pattern fails with its base resolving to nothing, but it names one (design se47b's (N), the
+    pattern form of FilletLeadRelinkedToALink), so the Body stops. Then they are emptied again."""
+
+    FOUND_BY = "design se47b"
+    steps = ("link", "empty")
+    linked = False
+
+    def expectation(self):
+        return BROKEN if self.linked else self.topBackEdge()
+
+    def build(self, doc):
+        stock = m.box(doc, "Stock", self.s(600, 300, 300), at=self.s(0, 1000, 0))
+        link = doc.addObject("App::Link", "StockLink")
+        link.LinkedObject = stock
+        doc.recompute()
+        body = m.body(doc)
+        lead = body.newObject("PartDesign::LinearPattern", "Lead")
+        lead.Direction = (m.originFeature(body, "X_Axis"), [""])
+        lead.Length = self.s(700)
+        lead.Occurrences = 2
+        self.block(doc, body)
+        doc.recompute()
+        self.bossAndFillet(doc, body, self.expectation)
+
+    def link(self, doc):
+        doc.Lead.Originals = [doc.StockLink]
+        self.linked = True
+
+    def empty(self, doc):
+        doc.Lead.Originals = []
+        self.linked = False

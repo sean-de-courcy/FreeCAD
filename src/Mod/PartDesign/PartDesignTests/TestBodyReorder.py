@@ -827,6 +827,108 @@ class BodyReorderBase:
         self.body.reorderObject([hole], pad2, True)
         self.assertEqual(sketch.AttachmentSupport, [(block, (top,))])
 
+    def bossOnTheBlock(self, onDatum=False):
+        """W16's model (ops#596, ops#597): the block, a 4 x 4 x 5 boss at (2, 2) to (6, 6) whose
+        sketch sits on the block's top face (or on a datum plane on it), and a hole after it whose
+        sketch sits on the block's top face too."""
+        block = self.block()
+        self.recompute()
+        top = faceWhere(block.Shape, lambda f: isPlaneFacing(f, V(0, 0, 1), V(0, 0, 10)))
+        support, plane = (block, top), None
+        if onDatum:
+            plane = self.body.newObject("PartDesign::Plane", "BossPlane")
+            plane.AttachmentSupport = [(block, top)]
+            plane.MapMode = "FlatFace"
+            self.recompute()
+            support = (plane, "")
+        sketch = self.doc.addObject("Sketcher::SketchObject", "BossSketch")
+        self.body.addObject(sketch)
+        sketch.AttachmentSupport = [support]
+        sketch.MapMode = "FlatFace"
+        self.recompute()
+        local = sketch.getGlobalPlacement().inverse()
+        a, b = (local.multVec(V(x, y, 10)) for x, y in ((2, 2), (6, 6)))
+        sketch.addGeometry(
+            models.rectangle(min(a.x, b.x), min(a.y, b.y), max(a.x, b.x), max(a.y, b.y)), False
+        )
+        boss = models.pad(self.body, sketch, 5, "Boss")
+        hole = models.pocket(
+            self.body, self.sketchOn("HoleSketch", block, top, V(10, 10, 10), 2), 3, "Hole"
+        )
+        self.recompute()
+        self.assertValid(sketch, boss, hole)
+        self.assertBody(BLOCK + BOSS - HOLE)
+        return block, plane, sketch, boss, hole
+
+    def testPadMovedAboveThePadItsSketchSitsOn(self):
+        """W16: the boss moved above the block its sketch sits on. The sketch's attachment is set
+        aside; the boss and its sketch fail and pass nothing on, and the block and the hole compute
+        (ops#596, decision 275 (2)). The block made taller, the hole follows. Undone, the model is
+        as before the move; redone, parked again; moved back, the attachment is put back."""
+        block, _, sketch, boss, hole = self.bossOnTheBlock()
+        self.doc.UndoMode = 1
+        self.doc.openTransaction("Move")
+        self.body.reorderObject([boss], None, True)
+        self.recompute()
+        self.doc.commitTransaction()
+        self.assertChain(boss, block, hole)
+        self.assertEqual(sketch.AttachmentSupport, [])
+        self.assertEqual(len(self.parked(sketch)), 1)
+        self.assertFalse(sketch.isValid())
+        self.assertFalse(boss.isValid())
+        self.assertValid(block, hole)
+        self.assertNotTouched(sketch, boss, block, hole)
+        self.assertBody(BLOCK - HOLE)
+
+        self.doc.openTransaction("Taller")
+        block.Length = 12
+        self.recompute()
+        self.doc.commitTransaction()
+        self.assertAlmostEqual(hole.Profile[0].Placement.Base.z, 12, delta=1e-6)
+        self.assertBody(BLOCK * 1.2 - HOLE)
+
+        self.doc.undo()
+        self.recompute()
+        self.assertBody(BLOCK - HOLE)
+        self.doc.undo()
+        self.recompute()
+        self.assertChain(block, boss, hole)
+        self.assertIs(sketch.AttachmentSupport[0][0], block)
+        self.assertBody(BLOCK + BOSS - HOLE)
+        self.doc.redo()
+        self.recompute()
+        self.assertChain(boss, block, hole)
+        self.assertBody(BLOCK - HOLE)
+
+        self.body.reorderObject([boss], block, True)
+        self.recompute()
+        self.assertChain(block, boss, hole)
+        self.assertIs(sketch.AttachmentSupport[0][0], block)
+        self.assertEqual(self.parked(sketch), [])
+        self.assertValid(sketch, boss, hole)
+        self.assertBody(BLOCK + BOSS - HOLE)
+
+    def testPadOnADatumMovedAboveThePadTheDatumSitsOn(self):
+        """The same with the boss's sketch on a datum plane on the block's top face: the plane
+        moves with the boss and its attachment is set aside; the boss fails through its sketch
+        and the plane, and the block and the hole compute. Moved back, everything computes."""
+        block, plane, sketch, boss, hole = self.bossOnTheBlock(onDatum=True)
+        self.body.reorderObject([boss], None, True)
+        self.recompute()
+        self.assertChain(boss, block, hole)
+        self.assertEqual(len(self.parked(plane)), 1)
+        self.assertFalse(plane.isValid())
+        self.assertFalse(sketch.isValid())
+        self.assertFalse(boss.isValid())
+        self.assertValid(block, hole)
+        self.assertBody(BLOCK - HOLE)
+
+        self.body.reorderObject([boss], block, True)
+        self.recompute()
+        self.assertChain(block, boss, hole)
+        self.assertValid(plane, sketch, boss, hole)
+        self.assertBody(BLOCK + BOSS - HOLE)
+
     def testUndoTheMove(self):
         """One transaction: the move, its re-target and the recompute; undo gives the model as it
         was (no record), redo the moved one with its record (RO16)."""
