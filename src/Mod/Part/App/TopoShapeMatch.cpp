@@ -1565,8 +1565,9 @@ private:
     // changed piece at its old partner's own position, which a bare position test passes: the
     // ruling's F8). Positions count only the pieces with faces, as index names do (review pr399-r4,
     // T2). A new piece whose faces come from two old pieces (a span: B lengthened over C's and D's
-    // places) is changed with respect to each; one whose old pieces are both at its own position
-    // (two parts merged back in place) is kept.
+    // places) is changed with respect to each. Where a member changed and the correspondence is
+    // not in order, every piece takes fresh ids (decision 274, below); the rules after it read
+    // only the in-order edits and the reorders of whole pieces.
     //
     // The pairs are the matcher's, read before P1 and R2' withdraw anything (`placed`, filled at
     // the start of run()): a trade behind a twin inserted in front has P1 retire the whole pieces
@@ -1608,6 +1609,33 @@ private:
             }
             return *newShapes[n];
         };
+        // The widest stop (decision 274): a member changed in a correspondence that is not in order
+        // (an inverted pair, or a span over an old piece at another position) gives every piece of
+        // the compound fresh ids. Reading which members such an edit kept took one bound per site
+        // and left a silent at each (review pr399-r4c: a neighbour on a given piece's corners, a
+        // piece lengthened over a moved member's place), so none is read. A span is itself a change;
+        // the congruences are compared only when the order is out (review pr399-r4c, Sonnet: their
+        // cost on a large single piece)
+        bool outOfOrder = !inverted.empty();
+        bool spans = false;
+        for (const auto& [n, olds] : reached) {
+            if (olds.size() > 1) {
+                spans = true;
+                for (const int k : olds) {
+                    outOfOrder = outOfOrder || oldRanks[k] != newRanks[n];
+                }
+            }
+        }
+        const bool changed = outOfOrder
+            && (spans || std::any_of(reached.begin(), reached.end(), [&](const auto& entry) {
+                    return !oldShape(*entry.second.begin()).same(newShape(entry.first));
+                }));
+        if (changed) {
+            for (const auto& piece : newPieces) {
+                retire(piece);
+            }
+            return;
+        }
         std::set<int> given;  // old pieces whose ids go to nothing
         std::set<int> displaced;  // old pieces of an inverted pair, or given
         for (const auto& [n, k] : inverted) {
@@ -1616,24 +1644,13 @@ private:
         // Changed pieces: at another position, or in an inversion
         for (const auto& [n, olds] : reached) {
             if (olds.size() > 1) {
-                bool atOwn = false;
-                bool inverse = false;
-                for (const int k : olds) {
-                    atOwn = atOwn || oldRanks[k] == newRanks[n];
-                    inverse = inverse || inverted.count({n, k});
-                }
-                if (!atOwn || inverse) {
-                    retire(newPieces[n]);
-                    given.insert(olds.begin(), olds.end());
-                    displaced.insert(olds.begin(), olds.end());
-                }
-                continue;
+                continue;  // a span covers an old piece at another position: the stop above took it
             }
             const int k = *olds.begin();
-            if (oldShape(k).same(newShape(n))) {
+            if (oldRanks[k] == newRanks[n] && !inverted.count({n, k})) {
                 continue;
             }
-            if (oldRanks[k] != newRanks[n] || inverted.count({n, k})) {
+            if (!oldShape(k).same(newShape(n))) {
                 retire(newPieces[n]);
                 given.insert(k);
                 displaced.insert(k);

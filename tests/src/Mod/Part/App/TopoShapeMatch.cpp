@@ -546,15 +546,15 @@ TEST(TopoShapeMatch, changedPieceAtAMembersPlaceWithAChangedTwinTakesFreshIds)
     EXPECT_TRUE(pieceIsFresh(matches, after, 2));
 }
 
-// A trade with one member changed (review pr399-r4, Opus's T1 and Sonnet's Rev_AllThree): the thin
-// slab at C's place and the whole slab at B's place take fresh ids, since "B thinned onto C's
-// place, C onto B's" and "C thinned in place, the two listed swapped" make the same compound
+// A trade with one member changed (review pr399-r4, Opus's T1 and Sonnet's Rev_AllThree): "B
+// thinned onto C's place, C onto B's" and "C thinned in place, the two listed swapped" make the
+// same compound. A member changed out of order gives every piece fresh ids (decision 274), A too
 TEST(TopoShapeMatch, changedPieceTradedWithAWholeTwinTakesFreshIds)
 {
     const TopoDS_Shape before = compound({slab(0), slab(60), slab(120)});
     const TopoDS_Shape after = compound({slab(0), slab(120, 3), slab(60)});
     const auto matches = Part::matchElements(before, after, false);
-    EXPECT_TRUE(pieceKeeps(matches, before, 0, after, 0));
+    EXPECT_TRUE(pieceIsFresh(matches, after, 0));
     EXPECT_TRUE(pieceIsFresh(matches, after, 1));
     EXPECT_TRUE(pieceIsFresh(matches, after, 2));
 }
@@ -588,7 +588,7 @@ TEST(TopoShapeMatch, changedPieceTouchingATradedPlaceTakesFreshIds)
     const TopoDS_Shape before = compound({slab(0), slab(60), slab(120)});
     const TopoDS_Shape after = compound({slab(0), slab(120, 3), BRepPrimAPI_MakeBox(gp_Pnt(60, 0, 0), 60, 30, 5).Shape()});
     const auto matches = Part::matchElements(before, after, false);
-    EXPECT_TRUE(pieceKeeps(matches, before, 0, after, 0));
+    EXPECT_TRUE(pieceIsFresh(matches, after, 0));
     EXPECT_TRUE(pieceIsFresh(matches, after, 1));
     EXPECT_TRUE(pieceIsFresh(matches, after, 2));
 }
@@ -599,7 +599,7 @@ TEST(TopoShapeMatch, changedPieceOverTwoPlacesTakesFreshIds)
     const TopoDS_Shape before = compound({slab(0), slab(60), slab(120), slab(180)});
     const TopoDS_Shape after = compound({slab(0), BRepPrimAPI_MakeBox(gp_Pnt(120, 0, 0), 100, 30, 5).Shape(), slab(60), slab(300)});
     const auto matches = Part::matchElements(before, after, false);
-    EXPECT_TRUE(pieceKeeps(matches, before, 0, after, 0));
+    EXPECT_TRUE(pieceIsFresh(matches, after, 0));
     EXPECT_TRUE(pieceIsFresh(matches, after, 1));
     EXPECT_TRUE(pieceIsFresh(matches, after, 2));
 }
@@ -610,19 +610,19 @@ TEST(TopoShapeMatch, changedPieceTradedAcrossAnInsertedMemberTakesFreshIds)
     const TopoDS_Shape before = compound({slab(0), slab(60), slab(120)});
     const TopoDS_Shape after = compound({slab(0), slab(120, 3), slab(300, 8), slab(60)});
     const auto matches = Part::matchElements(before, after, false);
-    EXPECT_TRUE(pieceKeeps(matches, before, 0, after, 0));
+    EXPECT_TRUE(pieceIsFresh(matches, after, 0));
     EXPECT_TRUE(pieceIsFresh(matches, after, 1));
     EXPECT_TRUE(pieceIsFresh(matches, after, 3));
 }
 
 // A trade behind a non-twin inserted in front (the ruling's F8): the thin slab stands at C's own
-// position, but its pair is inverted. A, shifted, keeps its ids
+// position, but its pair is inverted. A, shifted, takes fresh ids with the rest (decision 274)
 TEST(TopoShapeMatch, tradeBehindAnInsertedMemberTakesFreshIds)
 {
     const TopoDS_Shape before = compound({slab(0), slab(60), slab(120)});
     const TopoDS_Shape after = compound({slab(-100, 8), slab(0), slab(120, 3), slab(60)});
     const auto matches = Part::matchElements(before, after, false);
-    EXPECT_TRUE(pieceKeeps(matches, before, 0, after, 1));
+    EXPECT_TRUE(pieceIsFresh(matches, after, 1));
     EXPECT_TRUE(pieceIsFresh(matches, after, 2));
     EXPECT_TRUE(pieceIsFresh(matches, after, 3));
 }
@@ -664,16 +664,48 @@ TEST(TopoShapeMatch, solidSplitInPlaceKeepsTheNearHalf)
     EXPECT_TRUE(pieceKeeps(matches, before, 2, after, 3));
 }
 
-// A whole piece in a reorder keeps its ids when no displaced old piece is its twin (review
-// pr399-r4b, F-L2): distinct A 5, B 8, C 3 high re-listed [B, A thickened, C]
-TEST(TopoShapeMatch, reorderedDistinctPieceWithAChangedOneKeepsItsIds)
+// Distinct A 5, B 8, C 3 high re-listed [B, A thickened, C] (review pr399-r4b, F-L2): a member
+// changed in a reorder gives every piece fresh ids, the whole ones too (decision 274's named cost)
+TEST(TopoShapeMatch, reorderedDistinctPiecesWithAChangedOneTakeFreshIds)
 {
     const TopoDS_Shape before = compound({slab(0), slab(60, 8), slab(120, 3)});
     const TopoDS_Shape after = compound({slab(60, 8), slab(0, 6), slab(120, 3)});
     const auto matches = Part::matchElements(before, after, false);
-    EXPECT_TRUE(pieceKeeps(matches, before, 1, after, 0));
-    EXPECT_TRUE(pieceIsFresh(matches, after, 1));
-    EXPECT_TRUE(pieceKeeps(matches, before, 2, after, 2));
+    EXPECT_TRUE(matches.vertexes.empty());
+    EXPECT_TRUE(matches.edges.empty());
+    EXPECT_TRUE(matches.faces.empty());
+}
+
+// The widest stop (decision 274; review pr399-r4c, T1): B thinned onto C's place, C whole onto B's,
+// D lengthened back onto C's old +X corners. D, changed at its own position and in no inversion,
+// held C's corner vertexes and their edge by place; now no element keeps an id
+TEST(TopoShapeMatch, neighbourOnATradedPiecesCornersTakesNoneOfItsIds)
+{
+    const TopoDS_Shape before = compound({slab(0), slab(60), slab(120), slab(180)});
+    const TopoDS_Shape after = compound({slab(0),
+                                         slab(120, 3),
+                                         slab(60),
+                                         BRepPrimAPI_MakeBox(gp_Pnt(160, 0, 0), 60, 30, 5).Shape()});
+    const auto matches = Part::matchElements(before, after, false);
+    EXPECT_TRUE(matches.vertexes.empty());
+    EXPECT_TRUE(matches.edges.empty());
+    EXPECT_TRUE(matches.faces.empty());
+}
+
+// The widest stop (decision 274; review pr399-r4c, T2): C moved whole away, D lengthened back over
+// C's place. D's -X wall is C's old one, so D spans C and D with D at its own position, and no pair
+// is inverted; the span over an old piece at another position gives every piece fresh ids
+TEST(TopoShapeMatch, pieceLengthenedOverAMovedMembersPlaceTakesFreshIds)
+{
+    const TopoDS_Shape before = compound({slab(0), slab(60), slab(120), slab(180)});
+    const TopoDS_Shape after = compound({slab(0),
+                                         slab(60),
+                                         slab(300),
+                                         BRepPrimAPI_MakeBox(gp_Pnt(120, 0, 0), 100, 30, 5).Shape()});
+    const auto matches = Part::matchElements(before, after, false);
+    EXPECT_TRUE(matches.vertexes.empty());
+    EXPECT_TRUE(matches.edges.empty());
+    EXPECT_TRUE(matches.faces.empty());
 }
 
 // Whole twins listed swapped with A deleted: P1's class counts are unequal, but the pairs are
