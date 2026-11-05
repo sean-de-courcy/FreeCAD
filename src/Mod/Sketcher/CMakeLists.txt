@@ -51,6 +51,7 @@ if(BUILD_GUI)
           SketcherTests/TestAutoConstraintsGui.py
           SketcherTests/TestSketchCopyElementsGui.py
           SketcherTests/TestSketchCommandsGui.py
+          SketcherTests/TestSketchToolbarGui.py
     )
 endif(BUILD_GUI)
 

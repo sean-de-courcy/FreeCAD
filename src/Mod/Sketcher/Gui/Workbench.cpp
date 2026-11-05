@@ -40,6 +40,7 @@ using namespace SketcherGui;
     qApp->translate("Workbench", "Sketcher");
     qApp->translate("Workbench", "Edit Mode");
 
+    qApp->translate("Workbench", "Sketch");
     qApp->translate("Workbench", "Geometries");
     qApp->translate("Workbench", "Constraints");
     qApp->translate("Workbench", "Sketcher Helpers");
@@ -117,28 +118,25 @@ Gui::ToolBarItem* Workbench::setupToolBars() const
     sketcherEditMode->setCommand("Edit Mode");
     addSketcherWorkbenchSketchEditModeActions(*sketcherEditMode);
 
-    Gui::ToolBarItem* geom
+    // FreeCAD-CH (ops#605): one "Sketch" toolbar in Onshape's order in place of Geometries and
+    // Constraints; the other three stay available inside a sketch but start hidden.
+    Gui::ToolBarItem* sketchTools
         = new Gui::ToolBarItem(root, Gui::ToolBarItem::DefaultVisibility::Unavailable);
-    geom->setCommand("Geometries");
-    addSketcherWorkbenchGeometries(*geom);
-
-    Gui::ToolBarItem* cons
-        = new Gui::ToolBarItem(root, Gui::ToolBarItem::DefaultVisibility::Unavailable);
-    cons->setCommand("Constraints");
-    addSketcherWorkbenchConstraints(*cons);
+    sketchTools->setCommand("Sketch");
+    addSketcherWorkbenchSketchTools(*sketchTools);
 
     Gui::ToolBarItem* consaccel
-        = new Gui::ToolBarItem(root, Gui::ToolBarItem::DefaultVisibility::Unavailable);
+        = new Gui::ToolBarItem(root, Gui::ToolBarItem::DefaultVisibility::UnavailableHidden);
     consaccel->setCommand("Sketcher Tools");
     addSketcherWorkbenchTools(*consaccel);
 
     Gui::ToolBarItem* bspline
-        = new Gui::ToolBarItem(root, Gui::ToolBarItem::DefaultVisibility::Unavailable);
+        = new Gui::ToolBarItem(root, Gui::ToolBarItem::DefaultVisibility::UnavailableHidden);
     bspline->setCommand("B-Spline Tools");
     addSketcherWorkbenchBSplines(*bspline);
 
     Gui::ToolBarItem* visual
-        = new Gui::ToolBarItem(root, Gui::ToolBarItem::DefaultVisibility::Unavailable);
+        = new Gui::ToolBarItem(root, Gui::ToolBarItem::DefaultVisibility::UnavailableHidden);
     visual->setCommand("Visual Helpers");
     addSketcherWorkbenchVisual(*visual);
 
@@ -159,8 +157,7 @@ inline const QStringList editModeToolbarNames()
 {
     return QStringList {
         QStringLiteral("Edit Mode"),
-        QStringLiteral("Geometries"),
-        QStringLiteral("Constraints"),
+        QStringLiteral("Sketch"),
         QStringLiteral("Sketcher Tools"),
         QStringLiteral("B-Spline Tools"),
         QStringLiteral("Visual Helpers"),
@@ -664,6 +661,62 @@ inline void SketcherAddWorkbenchVisual<Gui::ToolBarItem>(Gui::ToolBarItem& visua
            << "Sketcher_CompBSplineShowHideGeometryInformation"
            << "Sketcher_RestoreInternalAlignmentGeometry"
            << "Sketcher_SwitchVirtualSpace";
+}
+
+// FreeCAD-CH (ops#605): Onshape's sketch toolbar, drawn from the same groups and settings as
+// the Geometries and Constraints toolbars it replaces.
+void addSketcherWorkbenchSketchTools(Gui::ToolBarItem& sketch)
+{
+    SketcherAddWorkspaceLines(sketch);
+    SketcherAddWorkspaceRectangles(sketch);
+    sketch << "Sketcher_CompCreateConic";
+    sketch << "Sketcher_CompCreateArc";
+    SketcherAddWorkspaceRegularPolygon(sketch);
+    sketch << "Sketcher_CompSlot"
+           << "Sketcher_CompCreateBSpline"
+           << "Sketcher_CreatePoint"
+           << "Sketcher_CreateText";
+    SketcherAddWorkspaceFillets(sketch);
+    sketch << "Sketcher_CompCurveEdition"
+           << "Sketcher_Offset"
+           << "Sketcher_Symmetry"
+           << "Sketcher_CompExternal"
+           << "Sketcher_ToggleConstruction"
+           << "Separator";
+
+    ParameterGrp::handle hGrp = App::GetApplication().GetParameterGroupByPath(
+        "User parameter:BaseApp/Preferences/Mod/Sketcher/dimensioning"
+    );
+    if (hGrp->GetBool("SeparatedDimensioningTools", false)) {
+        sketch << "Sketcher_Dimension";
+    }
+    else {
+        sketch << "Sketcher_CompDimensionTools";
+    }
+
+    hGrp = App::GetApplication().GetParameterGroupByPath(
+        "User parameter:BaseApp/Preferences/Mod/Sketcher/Constraints"
+    );
+    if (hGrp->GetBool("UnifiedCoincident", true)) {
+        sketch << "Sketcher_ConstrainCoincidentUnified";
+    }
+    else {
+        sketch << "Sketcher_ConstrainCoincident"
+               << "Sketcher_ConstrainPointOnObject";
+    }
+    if (hGrp->GetBool("AutoHorVer", true)) {
+        sketch << "Sketcher_CompHorVer";
+    }
+    else {
+        sketch << "Sketcher_ConstrainHorizontal"
+               << "Sketcher_ConstrainVertical";
+    }
+    sketch << "Sketcher_ConstrainParallel"
+           << "Sketcher_ConstrainPerpendicular"
+           << "Sketcher_ConstrainTangent"
+           << "Sketcher_ConstrainEqual"
+           << "Sketcher_ConstrainSymmetric"
+           << "Sketcher_ConstrainBlock";
 }
 
 void addSketcherWorkbenchSketchActions(Gui::MenuItem& sketch)

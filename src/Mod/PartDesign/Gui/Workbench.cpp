@@ -534,18 +534,58 @@ Gui::MenuItem* Workbench::setupMenuBar() const
 Gui::ToolBarItem* Workbench::setupToolBars() const
 {
     Gui::ToolBarItem* root = StdWorkbench::setupToolBars();
+
+    // FreeCAD-CH (ops#605): one toolbar in Onshape's order. Pocket, Groove and the subtractive
+    // Pipe and Loft stay beside their additive twins: a Pad has no "Remove from" here. The four
+    // stock toolbars are kept for those who show them from the toolbar menu.
     Gui::ToolBarItem* part = new Gui::ToolBarItem(root);
+    part->setCommand("Features");
+
+    *part << "PartDesign_NewSketch"
+          << "PartDesign_Pad"
+          << "PartDesign_Pocket"
+          << "PartDesign_Revolution"
+          << "PartDesign_Groove"
+          << "PartDesign_AdditivePipe"
+          << "PartDesign_SubtractivePipe"
+          << "PartDesign_AdditiveLoft"
+          << "PartDesign_SubtractiveLoft"
+          << "Separator"
+          << "PartDesign_Fillet"
+          << "PartDesign_Chamfer"
+          << "PartDesign_Draft"
+          << "PartDesign_Thickness"
+          << "PartDesign_Hole"
+          << "Separator"
+          << "PartDesign_Mirrored"
+          << "PartDesign_LinearPattern"
+          << "PartDesign_PolarPattern"
+          << "PartDesign_MultiTransform"
+          << "Separator"
+          << "PartDesign_Boolean"
+          << "PartDesign_Split"
+          << "PartDesign_MergeParts"
+          << "Separator"
+          << "PartDesign_CompDatums"
+          << "PartDesign_AdditiveHelix"
+          << "PartDesign_SubShapeBinder"
+          << "PartDesign_Body"
+          << "PartDesign_CompPrimitiveAdditive"
+          << "Sketcher_ValidateSketch";
+
+    const auto hidden = Gui::ToolBarItem::DefaultVisibility::Hidden;
+
+    part = new Gui::ToolBarItem(root, hidden);
     part->setCommand("Part Design Helper Features");
 
     *part << "PartDesign_Body"
-          << "PartDesign_ToggleModelTree"
           << "PartDesign_CompSketches"
           << "Sketcher_ValidateSketch"
           << "Part_CheckGeometry"
           << "PartDesign_SubShapeBinder"
           << "PartDesign_Clone";
 
-    part = new Gui::ToolBarItem(root);
+    part = new Gui::ToolBarItem(root, hidden);
     part->setCommand("Part Design Modeling Features");
 
     *part << "PartDesign_Pad"
@@ -565,7 +605,7 @@ Gui::ToolBarItem* Workbench::setupToolBars() const
           << "Separator"
           << "PartDesign_Boolean";
 
-    part = new Gui::ToolBarItem(root);
+    part = new Gui::ToolBarItem(root, hidden);
 
     part->setCommand("Part Design Dress-Up Features");
     *part << "PartDesign_Fillet"
@@ -574,7 +614,7 @@ Gui::ToolBarItem* Workbench::setupToolBars() const
           << "PartDesign_Thickness"
           << "PartDesign_Defeaturing";
 
-    part = new Gui::ToolBarItem(root);
+    part = new Gui::ToolBarItem(root, hidden);
     part->setCommand("Part Design Transformation Features");
 
     *part << "PartDesign_Mirrored"
