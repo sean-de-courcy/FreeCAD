@@ -80,6 +80,13 @@ PartDesignExport bool moveInStudio(App::Document* doc,
                                    bool hinted = false,
                                    App::DocumentObject* bar = nullptr);
 
+/** What member, a member of a Body, reads of the other Bodies (ops#635): their members, and those
+ * Bodies whole (a Boolean's tool, a binder of a Body), by studioSequence()'s rule for a link entry,
+ * directly, through objects outside the Bodies, and through the non-solid members of its own Body
+ * (its sketch's support and external geometry, a datum, a binder). Not through another member.
+ */
+PartDesignExport std::vector<App::DocumentObject*> readsOfOtherBodies(const App::DocumentObject* member);
+
 /** Moves every Body's bar after its last solid feature at or above member in studioSequence(),
  * or to its top when it has none; member null: every Body to its top. Throws Base::ValueError
  * for a member not in the sequence. Opens no transaction and doesn't recompute.

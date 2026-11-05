@@ -47,6 +47,7 @@
 #include "FeatureLoft.h"
 #include "FeatureMirrored.h"
 #include "FeatureSplit.h"
+#include "FeatureDeletePart.h"
 #include "FeatureMultiTransform.h"
 #include "FeaturePad.h"
 #include "FeaturePipe.h"
@@ -152,6 +153,7 @@ PyMOD_INIT_FUNC(_PartDesign)
     PartDesign::CoordinateSystem            ::init();
     PartDesign::Boolean                     ::init();
     PartDesign::Split                       ::init();
+    PartDesign::DeletePart                  ::init();
     PartDesign::FeaturePrimitive            ::init();
     PartDesign::Box                         ::init();
     PartDesign::AdditiveBox                 ::init();

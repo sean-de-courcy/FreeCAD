@@ -672,6 +672,51 @@ bool moveInStudio(App::Document* doc,
     return changed || body->Tip.getValue() != oldTip;
 }
 
+std::vector<App::DocumentObject*> readsOfOtherBodies(const App::DocumentObject* member)
+{
+    std::vector<App::DocumentObject*> found;
+    const Body* own = member ? Body::findBodyOf(member) : nullptr;
+    if (!own) {
+        return found;
+    }
+    std::unordered_set<const App::DocumentObject*> seen {member};
+    std::vector<const App::DocumentObject*> readers {member};
+    while (!readers.empty()) {
+        auto reader = readers.back();
+        readers.pop_back();
+        for (auto obj : linkReads(reader)) {
+            if (!obj || !seen.insert(obj).second) {
+                continue;
+            }
+            if (auto body = freecad_cast<Body*>(obj)) {
+                if (body != own) {
+                    found.push_back(body);
+                }
+                continue;
+            }
+            if (auto body = Body::findBodyOf(obj)) {
+                if (body != own) {
+                    found.push_back(obj);
+                }
+                // Its own Body's sketch, datum or binder is read through; a solid feature's own
+                // inputs are its own
+                else if (!Body::isSolidFeature(obj)) {
+                    readers.push_back(obj);
+                }
+                continue;
+            }
+            // Containers (an App::Part, a group, an Origin) and origin features carry no geometry
+            // of their own (studioSequence's rule)
+            if (obj->hasExtension(App::GroupExtension::getExtensionClassTypeId())
+                || obj->isDerivedFrom<App::DatumElement>() || obj->isDerivedFrom<Part::BodyBase>()) {
+                continue;
+            }
+            readers.push_back(obj);
+        }
+    }
+    return found;
+}
+
 void rollStudioTo(App::Document* doc, App::Part* studio, App::DocumentObject* member)
 {
     const auto sequence = studioSequence(doc, studio);

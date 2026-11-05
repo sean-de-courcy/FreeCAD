@@ -35,6 +35,7 @@
 
 #include "Body.h"
 #include "FeatureBoolean.h"
+#include "FeatureDeletePart.h"
 #include "FeatureSketchBased.h"
 #include "FeatureSplit.h"
 #include "Studio.h"
@@ -73,6 +74,13 @@ public:
             "newPartFrom(feature) -- Moves feature, its Body's Tip that nothing else uses, and its "
             "Profile sketch if nothing else uses it, into a new Body placed as the old one, in the "
             "same container. Returns the new Body; no recompute."
+        );
+        add_varargs_method(
+            "deletePart",
+            &Module::deletePart,
+            "deletePart(body) -- Deletes the part body from its bar on, as Onshape's Delete part: a "
+            "DeletePart feature at the bar, its Tip, whose shape is empty. Its features stay; "
+            "rolling above it, or deleting it, brings the part back. Returns it; no recompute."
         );
         add_varargs_method(
             "makeSiblings",
@@ -223,6 +231,27 @@ private:
         }
         try {
             return Py::asObject(Body::newPartFrom(objectArg(pObj))->getPyObject());
+        }
+        catch (const Base::Exception& e) {
+            e.setPyException();
+            throw Py::Exception();
+        }
+    }
+
+    // FreeCAD-CH (ops#635): Delete part
+    Py::Object deletePart(const Py::Tuple& args)
+    {
+        PyObject* pObj;
+        if (!PyArg_ParseTuple(args.ptr(), "O!", &(App::DocumentObjectPy::Type), &pObj)) {
+            throw Py::Exception();
+        }
+        auto body = freecad_cast<Body*>(objectArg(pObj));
+        if (!body) {
+            PyErr_SetString(PyExc_TypeError, "Expected a PartDesign Body");
+            throw Py::Exception();
+        }
+        try {
+            return Py::asObject(DeletePart::deletePart(body)->getPyObject());
         }
         catch (const Base::Exception& e) {
             e.setPyException();

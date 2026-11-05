@@ -472,3 +472,30 @@ class TestFeaturesViewGui(unittest.TestCase):
         self.assertTrue(waitFor(lambda: self.partRows() == []), self.partRows())
         self.assertEqual(self.menuAction("SkA", "featureRollToEnd"), [True])
         self.assertTrue(waitFor(lambda: self.partRows() == ["Body1", "Body2", body3.Label]))
+
+    def testDeletePart(self):
+        """ops#635 (report 11): Delete on a part makes a Delete part feature at the bar; the Body and
+        its features stay; undo brings the part back."""
+        skC = sketch(self.body1, "SkC", (40, 0, 50, 10))
+        padC = self.body1.newObject("PartDesign::Pad", "PadC")
+        padC.Profile = skC
+        padC.Length = 4
+        body3 = PartDesign.newPartFrom(padC)
+        self.doc.recompute()
+        self.assertTrue(waitFor(lambda: self.partRows() == ["Body1", "Body2", body3.Label]))
+
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.doc.Name, body3.Name)
+        Gui.runCommand("Std_Delete")
+        self.doc.recompute()
+        self.assertIsNotNone(self.doc.getObject(body3.Name))
+        self.assertEqual(body3.Tip.TypeId, "PartDesign::DeletePart")
+        self.assertEqual([o.Name for o in body3.Group][:2], ["SkC", "PadC"])
+        self.assertTrue(body3.Shape.isNull())
+        self.assertTrue(waitFor(lambda: self.partRows() == ["Body1", "Body2"]), self.partRows())
+        self.assertIn(body3.Tip.Label, self.rows())
+
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertIs(body3.Tip, padC)
+        self.assertTrue(waitFor(lambda: self.partRows() == ["Body1", "Body2", body3.Label]))

@@ -61,6 +61,7 @@
 #include "FeaturePy.h"
 #include "Body.h"
 #include "FeatureBoolean.h"
+#include "FeatureDeletePart.h"
 #include "FeatureExtrude.h"
 #include "ShapeBinder.h"
 
@@ -282,6 +283,10 @@ App::DocumentObjectExecReturn* Feature::recompute()
     // 2.6): it doesn't reach the Merge. Checked here, as every path that adds or moves a solid
     // (a command, Python, a reorder, undo) ends here
     if (std::string why = Boolean::mergeLock(this); !why.empty()) {
+        return new App::DocumentObjectExecReturn(why, this);
+    }
+    // After a Delete part in its Body, or reading a part deleted before it (ops#635)
+    if (std::string why = DeletePart::deleteLock(this); !why.empty()) {
         return new App::DocumentObjectExecReturn(why, this);
     }
 

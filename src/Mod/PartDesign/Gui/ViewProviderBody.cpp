@@ -49,6 +49,7 @@
 #include <Gui/ViewProviderDatum.h>
 #include <Mod/Part/App/PropertyTopoShape.h>
 #include <Mod/PartDesign/App/Body.h>
+#include <Mod/PartDesign/App/FeatureDeletePart.h>
 #include <Mod/PartDesign/App/FeatureSketchBased.h>
 #include <Mod/PartDesign/App/FeatureBase.h>
 #include <Mod/PartDesign/App/FeatureMultiTransform.h>
@@ -360,7 +361,24 @@ bool ViewProviderBody::doubleClicked()
 
 bool ViewProviderBody::onDelete(const std::vector<std::string>&)
 {
-    // TODO May be do it conditionally? (2015-09-05, Fat-Zer)
+    // A part of a studio: deleting it is a feature in its history, Onshape's Delete part (ops#635,
+    // notes/part-history-design.md 3.2). Its features stay; rolling above the feature, deleting it
+    // or undo brings the part back. A part deleted already stays as it is. A Body in no studio (an
+    // Assembly's), or one that is no part (no solid feature above its bar), is deleted with its
+    // features
+    auto body = getObject<PartDesign::Body>();
+    App::Part* studio = nullptr;
+    if (body && Part::BodyBase::studioOf(body, studio) && body->Tip.getValue()) {
+        if (!PartDesign::DeletePart::deleterOf(body)) {
+            Gui::Command::doCommand(Gui::Command::Doc, "import PartDesign");
+            Gui::Command::doCommand(
+                Gui::Command::Doc,
+                "PartDesign.deletePart(%s)",
+                Gui::Command::getObjectCmd(body).c_str()
+            );
+        }
+        return false;
+    }
     FCMD_OBJ_CMD(getObject(), "removeObjectsFromDocument()");
     return true;
 }
