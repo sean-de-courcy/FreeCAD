@@ -95,6 +95,7 @@ if(BUILD_GUI)
         PartDesignTests/TestCrossBodyGui.py
         PartDesignTests/TestNewSketchDialogGui.py
         PartDesignTests/TestRollBackBarGui.py
+    PartDesignTests/TestFeaturesViewGui.py
         PartDesignTests/TestParkedMarkingGui.py
         PartDesignTests/TestSelectionFilterGui.py
         PartDesignTests/TestExpressionFieldsGui.py
