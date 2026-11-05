@@ -2011,9 +2011,26 @@ bool parkedReason(const App::DocumentObject* obj, std::string& why)
     return true;
 }
 
-bool hasParkedReferences(const App::DocumentObject* obj)
+bool parkedPast(const App::DocumentObject* owner, const App::DocumentObject* feature)
 {
-    return !parkedLines(obj).empty();
+    auto body = Body::findBodyOf(feature);
+    auto doc = owner->getDocument();
+    if (!body || !doc) {
+        return false;
+    }
+    const auto& group = body->Group.getValues();
+    auto place = std::find(group.begin(), group.end(), feature);
+    if (place == group.end()) {
+        return false;
+    }
+    for (const auto& line : parkedLines(owner)) {
+        auto item = ParkedItem::parse(line);
+        auto target = item ? parkedTarget(doc, *item) : nullptr;
+        if (target && std::find(place + 1, group.end(), target) != group.end()) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool hasParkedOriginals(const App::DocumentObject* obj)

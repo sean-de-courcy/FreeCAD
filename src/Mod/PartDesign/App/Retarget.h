@@ -37,9 +37,11 @@ void reorderBody(Body& body,
 /// it has none
 bool parkedReason(const App::DocumentObject* obj, std::string& why);
 
-/// A reorder set a reference of obj aside (N1 3.4 b): it holds a parking record, which is what
-/// parkedReason() reads (ops#596: a feature failing on it is parked)
-bool hasParkedReferences(const App::DocumentObject* obj);
+/// A reorder set a reference of owner aside (N1 3.4 b) that refers to a member of feature's Body
+/// after feature: feature stands where the reference can't be met yet (ops#596: a feature failing
+/// on it is parked). A record on what feature reads that refers to feature itself, or to a member
+/// before it, doesn't count (review pr596-r1 StockReadsParkedSketch)
+bool parkedPast(const App::DocumentObject* owner, const App::DocumentObject* feature);
 
 /// A reorder parked entries of obj's Originals (N1 3.4 b): a pattern whose Originals are all
 /// parked is still a solid feature of its Body, not a MultiTransform's step

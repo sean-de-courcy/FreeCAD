@@ -306,9 +306,14 @@ bool baseless(const Feature& feature)
  * or a member in error reached from it through its Body's non-solid members (a sketch, a datum,
  * a binder, a MultiTransform's step; never a solid feature, never out of the Body), holds a
  * parking record: a reorder set a reference of it aside (ops#127), so it fails without running
- * (blocked()), and what it feeds fails naming it. Read from links and records, which only edits,
- * the reorder, the undo and the import write, outside recomputes; and the members reached are
- * upstream of the feature, so their error is final when it is asked
+ * (blocked()), and what it feeds fails naming it. Only a record whose reference is to a member
+ * after the feature counts: the feature stands above what it needs, and what follows it was
+ * built without it. A feature that reads a parked member whose reference is to the feature
+ * itself or to what comes before it (the stock given a parked boss sketch's normal as its
+ * direction) isn't parked: it stops the Body (review pr596-r1 StockReadsParkedSketch). Read from
+ * links, records and the Group, which only edits, the reorder, the undo and the import write,
+ * outside recomputes; and the members reached are upstream of the feature, so their error is
+ * final when it is asked
  */
 bool parkedFailure(const Feature& feature)
 {
@@ -321,7 +326,7 @@ bool parkedFailure(const Feature& feature)
             continue;
         }
         // The feature itself is asked as it fails, before its error is written
-        if ((i == 0 || obj->isError()) && hasParkedReferences(obj)) {
+        if ((i == 0 || obj->isError()) && parkedPast(obj, &feature)) {
             return true;
         }
         forEachInput(obj, true, [&](const App::Property*, const std::vector<InputLink>& links) {
