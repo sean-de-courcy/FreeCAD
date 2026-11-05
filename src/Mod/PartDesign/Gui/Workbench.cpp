@@ -571,7 +571,8 @@ Gui::ToolBarItem* Workbench::setupToolBars() const
           << "PartDesign_SubShapeBinder"
           << "PartDesign_Body"
           << "PartDesign_CompPrimitiveAdditive"
-          << "Sketcher_ValidateSketch";
+          << "Sketcher_ValidateSketch"
+          << "PartDesign_ToggleModelTree";  // brings the model tree back (ops#602)
 
     const auto hidden = Gui::ToolBarItem::DefaultVisibility::Hidden;
 
@@ -579,6 +580,7 @@ Gui::ToolBarItem* Workbench::setupToolBars() const
     part->setCommand("Part Design Helper Features");
 
     *part << "PartDesign_Body"
+          << "PartDesign_ToggleModelTree"
           << "PartDesign_CompSketches"
           << "Sketcher_ValidateSketch"
           << "Part_CheckGeometry"

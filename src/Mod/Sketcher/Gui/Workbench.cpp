@@ -687,11 +687,18 @@ void addSketcherWorkbenchSketchTools(Gui::ToolBarItem& sketch)
     ParameterGrp::handle hGrp = App::GetApplication().GetParameterGroupByPath(
         "User parameter:BaseApp/Preferences/Mod/Sketcher/dimensioning"
     );
-    if (hGrp->GetBool("SeparatedDimensioningTools", false)) {
-        sketch << "Sketcher_Dimension";
+    // the three modes of Preferences > Sketcher > Dimensioning tools, as the Constraints toolbar has them
+    const bool separated = hGrp->GetBool("SeparatedDimensioningTools", false);
+    if (hGrp->GetBool("SingleDimensioningTool", true)) {
+        sketch << (separated ? "Sketcher_Dimension" : "Sketcher_CompDimensionTools");
     }
-    else {
-        sketch << "Sketcher_CompDimensionTools";
+    if (separated) {
+        sketch << "Sketcher_ConstrainDistanceX"
+               << "Sketcher_ConstrainDistanceY"
+               << "Sketcher_ConstrainDistance"
+               << "Sketcher_CompConstrainRadDia"
+               << "Sketcher_ConstrainAngle"
+               << "Sketcher_ConstrainLock";
     }
 
     hGrp = App::GetApplication().GetParameterGroupByPath(

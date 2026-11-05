@@ -15,7 +15,7 @@ import FreeCAD
 import FreeCADGui
 import Part
 
-from PySide import QtWidgets
+from PySide import QtCore, QtWidgets
 
 from SketcherTests.GuiTestCase import SketcherGuiTestCase
 
@@ -58,13 +58,30 @@ EDIT_MODE = ["Sketcher_LeaveSketch", "Sketcher_ViewSketch", "Sketcher_ViewSectio
 # Kept, hidden by default, listed in the toolbar menu while a sketch is open
 HIDDEN_IN_SKETCH = ["Sketcher Tools", "B-Spline Tools", "Visual Helpers"]
 
+# Preferences > Sketcher > Dimensioning tools: the dimension part of the Sketch toolbar, which
+# follows the same two flags as the Constraints toolbar it replaces (single tool, separated tools,
+# both)
+SEPARATE_DIMENSIONS = [
+    "Sketcher_ConstrainDistanceX",
+    "Sketcher_ConstrainDistanceY",
+    "Sketcher_ConstrainDistance",
+    "Sketcher_CompConstrainRadDia",
+    "Sketcher_ConstrainAngle",
+    "Sketcher_ConstrainLock",
+]
+DIMENSION_MODES = {
+    "single": (True, False, ["Sketcher_CompDimensionTools"]),
+    "separated": (False, True, SEPARATE_DIMENSIONS),
+    "both": (True, True, ["Sketcher_Dimension"] + SEPARATE_DIMENSIONS),
+}
+
 # The toolbars this one replaces
 REPLACED = ["Geometries", "Constraints"]
 
 # The toolbar preferences that decide the lists above; their defaults are what the oracle assumes
 DEFAULTS = {
     "Commands": ["UnifiedLineCommands"],
-    "dimensioning": ["SeparatedDimensioningTools"],
+    "dimensioning": ["SingleDimensioningTool", "SeparatedDimensioningTools"],
     "Constraints": ["UnifiedCoincident", "AutoHorVer"],
 }
 
@@ -79,6 +96,16 @@ def toolbar(name):
 
 def commands(tb):
     return [SEP if a.isSeparator() else a.objectName() for a in tb.actions()]
+
+
+def drop_toolbar(name):
+    """The preferences are read when a toolbar is built, at the start of a session, and a rebuilt
+    toolbar keeps the order of its old actions: delete it so that it is built anew."""
+    old = toolbar(name)
+    if old is not None:
+        old.setParent(None)
+        old.deleteLater()
+        QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
 
 
 class TestSketchToolbarGui(SketcherGuiTestCase):
@@ -107,6 +134,7 @@ class TestSketchToolbarGui(SketcherGuiTestCase):
         self.doc.recompute()
         FreeCADGui.getMainWindow().show()
         # Workbench toolbars are built on activation
+        drop_toolbar("Sketch")
         FreeCADGui.activateWorkbench("SketcherWorkbench")
         self.flush_gui(100)
 
@@ -120,6 +148,11 @@ class TestSketchToolbarGui(SketcherGuiTestCase):
                 group.RemBool(name)
             for name, value in self.saved_toolbars.items():
                 group.SetBool(name, value)
+            for sub, names in DEFAULTS.items():
+                group = FreeCAD.ParamGet(f"{SKETCHER}/{sub}")
+                for name in names:
+                    if name in group.GetBools():
+                        group.RemBool(name)
             for sub, name, value in self.saved_prefs:
                 FreeCAD.ParamGet(f"{SKETCHER}/{sub}").SetBool(name, value)
 
@@ -134,6 +167,23 @@ class TestSketchToolbarGui(SketcherGuiTestCase):
         self.assertIsNotNone(tb, "Expected a toolbar named Sketch in a sketch")
         self.assertEqual(commands(tb), SKETCH)
         self.assertFalse(tb.isHidden(), "Expected the Sketch toolbar shown in a sketch")
+
+    def test_the_dimensioning_tools_preference_is_honoured(self):
+        start = SKETCH.index("Sketcher_CompDimensionTools")
+        for mode, (single, separated, tools) in DIMENSION_MODES.items():
+            with self.subTest(mode):
+                FreeCADGui.activateWorkbench("PartWorkbench")
+                drop_toolbar("Sketch")
+                group = FreeCAD.ParamGet(f"{SKETCHER}/dimensioning")
+                group.SetBool("SingleDimensioningTool", single)
+                group.SetBool("SeparatedDimensioningTools", separated)
+                FreeCADGui.activateWorkbench("SketcherWorkbench")
+                self.flush_gui(100)
+                self.edit()
+                expected = SKETCH[:start] + tools + SKETCH[start + 1 :]
+                self.assertEqual(commands(toolbar("Sketch")), expected)
+                FreeCADGui.ActiveDocument.resetEdit()
+                self.flush_gui(300)
 
     def test_the_edit_mode_toolbar_stays(self):
         self.edit()

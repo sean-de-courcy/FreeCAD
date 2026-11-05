@@ -78,12 +78,14 @@ FEATURES = [
     "PartDesign_Body",
     "PartDesign_CompPrimitiveAdditive",
     "Sketcher_ValidateSketch",
+    "PartDesign_ToggleModelTree",  # brings the model tree back (ops#602, decision 279)
 ]
 
 # The four stock toolbars, kept but hidden by default
 STOCK = {
     "Part Design Helper Features": [
         "PartDesign_Body",
+        "PartDesign_ToggleModelTree",
         "PartDesign_CompSketches",
         "Sketcher_ValidateSketch",
         "Part_CheckGeometry",
