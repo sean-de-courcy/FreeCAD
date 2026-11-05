@@ -65,6 +65,7 @@
 #include <Mod/PartDesign/App/PartDesignParameter.h>
 #include <Mod/PartDesign/App/ShapeBinder.h>
 
+#include "FeaturesView.h"
 #include "TaskFeaturePick.h"
 #include "Utils.h"
 #include "ViewProviderBody.h"
@@ -943,6 +944,33 @@ bool CmdPartDesignMoveTip::isActive()
 }
 
 //===========================================================================
+// PartDesign_ToggleModelTree (ops#602)
+//===========================================================================
+
+DEF_STD_CMD(CmdPartDesignToggleModelTree)
+
+CmdPartDesignToggleModelTree::CmdPartDesignToggleModelTree()
+    : Command("PartDesign_ToggleModelTree")
+{
+    sAppModule = "PartDesign";
+    sGroup = QT_TR_NOOP("PartDesign");
+    sMenuText = QT_TR_NOOP("Model Tree");
+    sToolTipText = QT_TR_NOOP(
+        "Shows the model tree in place of the Features and Parts lists, or the lists again. "
+        "PartDesign remembers the choice"
+    );
+    sWhatsThis = "PartDesign_ToggleModelTree";
+    sStatusTip = sToolTipText;
+    eType = ForEdit | NoTransaction;
+}
+
+void CmdPartDesignToggleModelTree::activated(int iMsg)
+{
+    Q_UNUSED(iMsg);
+    PartDesignGui::FeaturesView::toggleModelTree();
+}
+
+//===========================================================================
 // PartDesign_RollTo, PartDesign_RollToEnd (ops#127)
 //===========================================================================
 
@@ -1513,6 +1541,7 @@ void CreatePartDesignBodyCommands()
     rcCmdMgr.addCommand(new CmdPartDesignMoveTip());
     rcCmdMgr.addCommand(new CmdPartDesignRollTo());
     rcCmdMgr.addCommand(new CmdPartDesignRollToEnd());
+    rcCmdMgr.addCommand(new CmdPartDesignToggleModelTree());
 
     rcCmdMgr.addCommand(new CmdPartDesignDuplicateSelection());
     rcCmdMgr.addCommand(new CmdPartDesignMoveFeature());

@@ -32,6 +32,7 @@
 #include <Mod/PartDesign/App/Body.h>
 #include <Mod/PartDesign/App/FeatureMultiTransform.h>
 
+#include "FeaturesView.h"
 #include "TaskReferences.h"
 #include "Utils.h"
 #include "Workbench.h"
@@ -394,10 +395,14 @@ void Workbench::activated()
             ->GetBool("SwitchToTask", true)) {
         Gui::Control().showTaskView();
     }
+    // FreeCAD-CH (ops#602): the Features and Parts lists in place of the Model panel's tree
+    FeaturesView::enterPartDesign();
 }
 
 void Workbench::deactivated()
 {
+    // FreeCAD-CH (ops#602): the Model panel's tree comes back
+    FeaturesView::leavePartDesign();
     removeTaskWatcher();
     // reset the active Body
     Gui::Command::doCommand(Gui::Command::Doc, "import PartDesignGui");
@@ -409,6 +414,17 @@ Gui::MenuItem* Workbench::setupMenuBar() const
 {
     Gui::MenuItem* root = StdWorkbench::setupMenuBar();
     Gui::MenuItem* item = root->findItem("&Windows");
+
+    // FreeCAD-CH (ops#602): the model tree in place of the Features list, after View > Panels
+    if (Gui::MenuItem* view = root->findItem("&View")) {
+        auto tree = new Gui::MenuItem;
+        tree->setCommand("PartDesign_ToggleModelTree");
+        Gui::MenuItem* panels = view->findItem("Std_DockViewMenu");
+        Gui::MenuItem* next = panels ? view->afterItem(panels) : nullptr;
+        if (!next || !view->insertItem(next, tree)) {
+            view->appendItem(tree);
+        }
+    }
 
     // add another top level menu left besides the Part Design menu for the Sketcher commands
     Gui::MenuItem* sketch = new Gui::MenuItem;
@@ -522,6 +538,7 @@ Gui::ToolBarItem* Workbench::setupToolBars() const
     part->setCommand("Part Design Helper Features");
 
     *part << "PartDesign_Body"
+          << "PartDesign_ToggleModelTree"
           << "PartDesign_CompSketches"
           << "Sketcher_ValidateSketch"
           << "Part_CheckGeometry"
