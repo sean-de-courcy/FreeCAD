@@ -62,8 +62,8 @@ def report():
     style = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/View").GetString("NavigationStyle")
     with open(os.environ["FC_ONSHAPE_PROBE_OUT"], "w", encoding="utf-8") as out:
         out.write("style=" + style + "\n")
-        toolbars = FreeCAD.ParamGet("User parameter:BaseApp/Workbench/PartDesignWorkbench/Toolbar")
-        out.write("toolbar=%d\n" % toolbars.HasGroup("Custom_FreeCAD-CH_Onshape"))
+        units = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/Units")
+        out.write("decimals=%d\n" % units.GetInt("Decimals", -1))
     if os.name == "nt":
         import ctypes
         from ctypes import wintypes
@@ -389,7 +389,7 @@ class TestOnshapeStudioGui(unittest.TestCase):
     def runOnNewHome(self, userCfg=None, script=False):
         """FreeCAD.exe on a new settings folder holding the probe (and `userCfg` as user.cfg),
         started with no file or with an empty script. Returns the navigation style it reports and
-        whether the pack's Features toolbar exists."""
+        whether it has the pack's three decimals (a key nothing else writes on start)."""
         exe = freecadExecutable()
         if exe is None:
             self.skipTest("no FreeCAD executable beside the build")
@@ -419,7 +419,7 @@ class TestOnshapeStudioGui(unittest.TestCase):
         self.assertTrue(os.path.isfile(out), "the probe didn't report")
         with open(out, encoding="utf-8") as f:
             lines = dict(line.rstrip("\n").split("=", 1) for line in f if "=" in line)
-        return lines.get("style"), lines.get("toolbar") == "1"
+        return lines.get("style"), lines.get("decimals") == "3"
 
     def testFirstStartAppliesTheOnshapePack(self):
         """A settings folder with no user.cfg starts with the pack's TinkerCAD navigation style."""
@@ -431,8 +431,8 @@ class TestOnshapeStudioGui(unittest.TestCase):
 
     def testFirstStartSkipsARunWithAScript(self):
         """A run started with a script (as the test runners start FreeCAD) keeps the code
-        defaults on a new folder: no pack toolbar, and not the pack's navigation style (the view
+        defaults on a new folder: not the pack's decimals, nor its navigation style (the view
         writes its own default)."""
-        style, toolbar = self.runOnNewHome(script=True)
+        style, decimals = self.runOnNewHome(script=True)
         self.assertNotEqual(style, TINKERCAD)
-        self.assertFalse(toolbar)
+        self.assertFalse(decimals)
