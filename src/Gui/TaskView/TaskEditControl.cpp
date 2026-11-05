@@ -52,13 +52,19 @@ QDialogButtonBox* TaskEditControl::standardButtons() const
     return buttonBox;
 }
 
-void TaskEditControl::decorateButtons()
+void TaskEditControl::decorateButtons(bool defaultOk)
 {
-    // The words become tooltips; a dialog that renames a button later keeps its icon too.
-    // OK is the default button: Enter in the panel accepts it (TaskView::keyPressEvent)
+    // The words become tooltips. A button the dialog renamed (Create, Run Check) keeps its words
+    // and gets no icon. OK is the default button with defaultOk: Enter in a field of the panel
+    // accepts it (TaskView::keyPressEvent)
     const auto decorate = [this](QDialogButtonBox::StandardButton which, const char* icon) {
         QPushButton* button = buttonBox->button(which);
         if (!button) {
+            return button;
+        }
+        QDialogButtonBox standard;
+        standard.setStandardButtons(which);
+        if (button->text() != standard.button(which)->text()) {
             return button;
         }
         button->setIcon(BitmapFactory().iconFromTheme(icon));
@@ -67,7 +73,8 @@ void TaskEditControl::decorateButtons()
         button->setText(QString());
         return button;
     };
-    if (QPushButton* ok = decorate(QDialogButtonBox::Ok, "edit_OK")) {
+    QPushButton* ok = decorate(QDialogButtonBox::Ok, "edit_OK");
+    if (ok && defaultOk) {
         ok->setDefault(true);
     }
     decorate(QDialogButtonBox::Cancel, "edit_Cancel");

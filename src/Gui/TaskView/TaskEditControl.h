@@ -51,8 +51,8 @@ public:
     explicit TaskEditControl(QWidget* parent = nullptr);
     ~TaskEditControl() override;
     QDialogButtonBox* standardButtons() const;
-    /// Onshape's check and cross on OK and Cancel, OK the default button (ops#605 2a)
-    void decorateButtons();
+    /// Onshape's check and cross on OK and Cancel, OK the default button if defaultOk (ops#605 2a)
+    void decorateButtons(bool defaultOk);
     friend class TaskView;
 
 protected:

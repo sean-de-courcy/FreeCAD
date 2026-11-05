@@ -170,10 +170,8 @@ class TestOnshapeStudioGui(unittest.TestCase):
 
     # -- 2a: the check and cross, Enter accepts ---------------------------------------------------
 
-    def testEnterInThePadPanelAcceptsIt(self):
-        """A Pad panel on a 10 x 20 sketch, length 5: Enter in the length field closes the panel
-        and keeps the Pad (volume 1000). OK is a check icon with no words and the default button;
-        Cancel is a cross."""
+    def openPadPanel(self):
+        """A Pad panel on a 10 x 20 rectangle sketch in a Body. Returns the document."""
         doc = models.newDocument("OnshapeEnter")
         self.docs.append(doc.Name)
         body = models.body(doc)
@@ -188,6 +186,13 @@ class TestOnshapeStudioGui(unittest.TestCase):
         Gui.runCommand("PartDesign_Pad")
         pump(0.5)
         self.assertTrue(Gui.Control.activeDialog(), "no Pad panel")
+        return doc
+
+    def testEnterInThePadPanelAcceptsIt(self):
+        """A Pad panel on a 10 x 20 sketch, length 5: Enter in the length field closes the panel
+        and keeps the Pad (volume 1000). OK is a check icon with no words and the default button;
+        Cancel is a cross."""
+        doc = self.openPadPanel()
 
         ok = taskButton(QtWidgets.QDialogButtonBox.Ok)
         cancel = taskButton(QtWidgets.QDialogButtonBox.Cancel)
@@ -202,6 +207,7 @@ class TestOnshapeStudioGui(unittest.TestCase):
         length = visibleChild("lengthEdit")
         self.assertIsNotNone(length, "no length field")
         length.setProperty("rawValue", 5.0)
+        length.setFocus(QtCore.Qt.OtherFocusReason)
         pump(0.3)
         QtTest.QTest.keyClick(length, QtCore.Qt.Key_Return)
         pump(0.5)
@@ -210,6 +216,56 @@ class TestOnshapeStudioGui(unittest.TestCase):
         pads = [o for o in doc.Objects if o.isDerivedFrom("PartDesign::Pad")]
         self.assertEqual(len(pads), 1)
         self.assertAlmostEqual(pads[0].Shape.Volume, 1000.0, places=6)
+
+    def testEnterOnAFocusedCancelCancels(self):
+        """Enter on Cancel with the focus is Cancel, not the default OK: the panel closes and no
+        Pad is left."""
+        doc = self.openPadPanel()
+        cancel = taskButton(QtWidgets.QDialogButtonBox.Cancel)
+        cancel.setFocus(QtCore.Qt.OtherFocusReason)
+        pump(0.3)
+        QtTest.QTest.keyClick(cancel, QtCore.Qt.Key_Return)
+        pump(0.5)
+        self.assertFalse(Gui.Control.activeDialog(), "Enter on Cancel left the panel open")
+        self.assertEqual([o.Name for o in doc.Objects if o.isDerivedFrom("PartDesign::Pad")], [])
+
+    def testEnterInTheSketchEditorKeepsItOpen(self):
+        """The sketch editor's OK is a check but not the default: Enter on its constraint list
+        (a list of the panel) leaves the sketch in edit."""
+        doc = models.newDocument("OnshapeSketchEnter")
+        self.docs.append(doc.Name)
+        body = models.body(doc)
+        sketch = models.sketch(doc, "Profile", models.rectangle(0, 0, 10, 20), body)
+        doc.recompute()
+        App.setActiveDocument(doc.Name)
+        Gui.setActiveDocument(doc.Name)
+        Gui.activateView("Gui::View3DInventor", True)
+        Gui.ActiveDocument.ActiveView.setActiveObject("pdbody", body)
+        Gui.ActiveDocument.setEdit(sketch.Name)
+        pump(1.0)
+        self.assertTrue(Gui.ActiveDocument.getInEdit(), "the sketch isn't in edit")
+        ok = taskButton(QtWidgets.QDialogButtonBox.Ok)
+        self.assertIsNotNone(ok)
+        self.assertFalse(ok.isDefault())
+        self.assertFalse(ok.icon().isNull())
+        lists = [
+            w
+            for w in Gui.getMainWindow().findChildren(QtWidgets.QListWidget)
+            if w.isVisible() and w.count() > 0
+        ]
+        self.assertTrue(lists, "no list with items in the sketch editor")
+        lists[0].setCurrentRow(0)
+        lists[0].setFocus(QtCore.Qt.OtherFocusReason)
+        pump(0.2)
+        QtTest.QTest.keyClick(lists[0], QtCore.Qt.Key_Enter)
+        pump(0.5)
+        for widget in QtWidgets.QApplication.topLevelWidgets():
+            if isinstance(widget, QtWidgets.QDialog) and widget.isVisible():
+                widget.reject()
+        pump(0.3)
+        self.assertTrue(Gui.ActiveDocument.getInEdit(), "Enter closed the sketch")
+        Gui.ActiveDocument.resetEdit()
+        pump(0.5)
 
     # -- 2f: a new document in PartDesign is a part studio ----------------------------------------
 
@@ -246,6 +302,8 @@ class TestOnshapeStudioGui(unittest.TestCase):
             Gui.ActiveDocument.resetEdit()
             pump(0.3)
         self.assertStudioPlanes(body, False)
+        # The cancelled attachment dialog's own temporary visibility didn't leave the Origin on
+        self.assertFalse(body.Origin.ViewObject.Visibility)
 
     def testNewDocumentWithOneIsEmpty(self):
         """Std_New with 1, as the Start page's cards run it: an empty document in PartDesign too."""

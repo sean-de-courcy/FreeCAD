@@ -151,8 +151,11 @@ void ViewProviderCoordinateSystem::setTemporaryVisibility(DatumElements elements
         Base::Console().error("%s\n", ex.what());
     }
 
-    // Remember & Set self visibility
-    tempVisMap[this] = isVisible();
+    // Remember & Set self visibility. A nested call (a dialog's over a new part studio's planes,
+    // ops#605) keeps the first call's saved state, as for the elements above
+    if (saveState) {
+        tempVisMap[this] = isVisible();
+    }
     setVisible(true);
 }
 
