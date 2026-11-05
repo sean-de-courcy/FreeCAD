@@ -35,5 +35,14 @@
       <tag>background</tag>
       <tag>dark</tag>
     </preferencepack>
+    <preferencepack>
+      <name>FreeCAD-CH Onshape</name>
+      <description>Works like Onshape: right-drag turns the view, one Features toolbar in Onshape's order, three Sketcher toolbars, the feature dialog over the left of the 3D view, no Start page, three decimals, autosave every 5 minutes. Leaves the theme as it is.</description>
+      <version>1.0.0</version>
+      <tag>built-in</tag>
+      <tag>FreeCAD-CH</tag>
+      <tag>Onshape</tag>
+      <tag>layout</tag>
+    </preferencepack>
   </content>
 </package>
