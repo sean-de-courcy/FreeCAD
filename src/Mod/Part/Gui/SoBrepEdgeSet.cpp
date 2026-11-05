@@ -845,3 +845,24 @@ int SoBrepEdgeSet::lineIndexFromEdge(int edge) const
     // The mapping exists and does not contain this edge: it has no rendered line.
     return InvalidLine;
 }
+
+void SoBrepEdgeSet::selectEdges(SoPath* path, const std::vector<int>& edges, const SbColor& color)
+{
+    Gui::SoSelectionElementAction action(Gui::SoSelectionElementAction::Append);
+    action.setColor(color);
+    SoLineDetail detail;
+    action.setElement(&detail);
+    for (int edge : edges) {
+        const int line = lineIndexFromEdge(edge);
+        if (line == InvalidLine) {
+            continue;
+        }
+        detail.setLineIndex(line);
+        action.apply(path);
+    }
+}
+
+std::set<int> SoBrepEdgeSet::selectedLines() const
+{
+    return selContext ? selContext->selectionIndex : std::set<int> {};
+}

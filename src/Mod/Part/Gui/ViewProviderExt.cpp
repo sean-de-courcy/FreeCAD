@@ -28,7 +28,14 @@
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
+#include <BRepLib.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
+#include <Geom2d_Curve.hxx>
+#include <Geom_ElementarySurface.hxx>
+#include <Geom_RectangularTrimmedSurface.hxx>
+#include <Geom_Surface.hxx>
+#include <Geom_SurfaceOfRevolution.hxx>
+#include <gp_Pnt2d.hxx>
 #include <gp_Trsf.hxx>
 #include <Precision.hxx>
 #include <Poly_Array1OfTriangle.hxx>
@@ -47,6 +54,9 @@
 #include <TopoDS_Shape.hxx>
 #include <TopoDS_Vertex.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
+
+#include <algorithm>
+#include <cmath>
 
 #include <QAction>
 #include <QMenu>
@@ -97,6 +107,59 @@
 FC_LOG_LEVEL_INIT("Part", true, true)
 
 using namespace PartGui;
+
+namespace
+{
+
+// FreeCAD-CH (ops#600): whether the face meets itself smoothly (G1) across this seam, as Onshape's
+// faces always do: there a closed face that isn't smooth (a B-spline that closes at a corner) is
+// split, and the crease is drawn as an edge. An elementary surface (a cylinder, cone, sphere or
+// torus) is smooth across its seams, and so is a revolution across its rotation seam; any other
+// closed surface, a periodic B-spline included (a knot of full multiplicity makes it C0), is
+// checked by its continuity across the seam. Should the check fail, the seam is drawn.
+bool isSmoothSeam(const TopoDS_Edge& edge, const TopoDS_Face& face)
+{
+    if (!BRep_Tool::IsClosed(edge, face)) {
+        return false;
+    }
+    try {
+        TopLoc_Location location;
+        Handle(Geom_Surface) surface = BRep_Tool::Surface(face, location);
+        Standard_Real first {};
+        Standard_Real last {};
+        Handle(Geom2d_Curve) side1 = BRep_Tool::CurveOnSurface(edge, face, first, last);
+        Handle(Geom2d_Curve) side2
+            = BRep_Tool::CurveOnSurface(TopoDS::Edge(edge.Reversed()), face, first, last);
+        if (surface.IsNull() || side1.IsNull() || side2.IsNull() || Precision::IsInfinite(first)
+            || Precision::IsInfinite(last)) {
+            return false;
+        }
+        Handle(Geom_Surface) basis = surface;
+        if (auto trimmed = Handle(Geom_RectangularTrimmedSurface)::DownCast(surface)) {
+            basis = trimmed->BasisSurface();
+        }
+        if (basis->IsKind(STANDARD_TYPE(Geom_ElementarySurface))) {
+            return true;
+        }
+        if (basis->IsKind(STANDARD_TYPE(Geom_SurfaceOfRevolution))) {
+            // The rotation seam is a constant-U line: its two sides differ in U.
+            const gp_Pnt2d middle1 = side1->Value(0.5 * (first + last));
+            const gp_Pnt2d middle2 = side2->Value(0.5 * (first + last));
+            if (std::abs(middle1.X() - middle2.X()) > std::abs(middle1.Y() - middle2.Y())) {
+                return true;
+            }
+        }
+        // The test BRepLib::EncodeRegularity makes, without writing its result into the shape. A
+        // crease below this angle can't be seen; a sketch's tangent closure is far below it.
+        constexpr double maxAngle = 1e-3;
+        return BRepLib::ContinuityOfFaces(edge, face, face, maxAngle) >= GeomAbs_G1;
+    }
+    catch (const Standard_Failure&) {
+        return false;
+    }
+}
+
+}  // namespace
 
 PROPERTY_SOURCE(PartGui::ViewProviderPartExt, Gui::ViewProviderGeometryObject)
 
@@ -882,20 +945,19 @@ void ViewProviderPartExt::setHighlightedEdges(const std::vector<Base::Color>& co
     if (size > 1) {
         // Although indexed lineset is used the material binding must be PER_FACE!
         pcLineBind->value = SoMaterialBinding::PER_FACE;
+        // FreeCAD-CH (ops#600): one colour per line, taken from the line's edge. Lines and edges
+        // needn't match one to one: a seam, or an edge without a polyline, has no line.
         const int32_t* cindices = this->lineset->coordIndex.getValues(0);
         int numindices = this->lineset->coordIndex.getNum();
-        pcLineMaterial->diffuseColor.setNum(size);
+        auto ends = std::count_if(cindices, cindices + numindices, [](int32_t i) { return i < 0; });
+        int numlines = std::max(static_cast<int>(ends), 1);
+        pcLineMaterial->diffuseColor.setNum(numlines);
         SbColor* ca = pcLineMaterial->diffuseColor.startEditing();
-        int linecount = 0;
-
-        for (int i = 0; i < numindices; ++i) {
-            if (cindices[i] < 0) {
-                ca[linecount].setValue(colors[linecount].r, colors[linecount].g, colors[linecount].b);
-                linecount++;
-                if (linecount >= size) {
-                    break;
-                }
-            }
+        for (int line = 0; line < numlines; ++line) {
+            int edge = this->lineset->edgeIndexFromLine(line);
+            Base::Color color = edge >= 1 && edge <= size ? colors[edge - 1]
+                                                          : LineColor.getValue();
+            ca[line].setValue(color.r, color.g, color.b);
         }
 
         pcLineMaterial->diffuseColor.finishEditing();
@@ -1152,6 +1214,12 @@ void ViewProviderPartExt::setupCoinGeometry(
     std::set<int> edgeIdxSet;
     std::set<int> edgeFailed;
     std::vector<int32_t> edgeVector;
+    // FreeCAD-CH (ops#600): seam edges are left out of the lineset; the edge numbering is kept.
+    const bool hideSeams = App::GetApplication()
+                               .GetParameterGroupByPath(
+                                   "User parameter:BaseApp/Preferences/Mod/Part/View"
+                               )
+                               ->GetBool("HideSeamEdges", true);
 
     // count and index the edges
     for (int i = 1; i <= edgeMap.Extent(); i++) {
@@ -1320,6 +1388,11 @@ void ViewProviderPartExt::setupCoinGeometry(
             // get the overall index of this edge
             int edgeIndex = edgeMap.FindIndex(curEdge);
             edgeVector.push_back((int32_t)edgeIndex - 1);
+            // FreeCAD-CH (ops#600): a smooth seam (a cylinder's, a sphere's) gets no line here,
+            // as in Onshape; another face it bounds as an ordinary edge draws it.
+            if (hideSeams && isSmoothSeam(curEdge, actFace)) {
+                continue;
+            }
             // already processed this index ?
             if (edgeIdxSet.find(edgeIndex) != edgeIdxSet.end()) {
 

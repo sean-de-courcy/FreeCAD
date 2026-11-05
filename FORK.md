@@ -449,7 +449,8 @@ names it.
 | `feat/599-variables-recompute` | feat | ops#599 | - | `integration` `8047bdb58b` | `f93f763f99` (fork PR 421), 2026-11-04 | never (fork feature: the Variables panel) |
 | `fix/603-fillet-checks` | fix | ops#603, ops#601, ops#604 | - | `integration` `8047bdb58b` | `bf35dee66b` (fork PR 422), 2026-11-05 | never (fork fix) |
 | `fix/502-c2-mln` | fix | ops#502 | - | `integration` `51775afc1e` | `60b1a145f2` (fork PR 399), 2026-11-05 | never (fork naming) |
-| `feat/602-features-dock` | feat | ops#602 | - | `integration` `79cb14308a` | (fork PR 424) | never (fork feature). Upstream edits to the Combo view's layout (`src/Gui/ComboView.cpp`) or to `DockWindowManager::findRegisteredDockWindow` will conflict |
+| `feat/602-features-dock` | feat | ops#602 | - | `integration` `79cb14308a` | `aab7c6ec6d` (fork PR 424), 2026-11-05 | never (fork feature). Upstream edits to the Combo view's layout (`src/Gui/ComboView.cpp`) or to `DockWindowManager::findRegisteredDockWindow` will conflict |
+| `feat/600-hide-seams` | feat | ops#600 | - | `integration` `f93f763f99` | (fork PR 423) | never (fork feature) |
 
 ## Fork-only commits in carried topics
 
