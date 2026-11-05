@@ -2011,23 +2011,38 @@ bool parkedReason(const App::DocumentObject* obj, std::string& why)
     return true;
 }
 
-bool parkedPast(const App::DocumentObject* owner, const App::DocumentObject* feature)
+bool hasParkedReferences(const App::DocumentObject* obj)
+{
+    return !parkedLines(obj).empty();
+}
+
+bool parkedAbove(const App::DocumentObject* feature,
+                 const std::vector<const App::DocumentObject*>& holders)
 {
     auto body = Body::findBodyOf(feature);
-    auto doc = owner->getDocument();
+    auto doc = feature->getDocument();
     if (!body || !doc) {
         return false;
     }
-    const auto& group = body->Group.getValues();
+    Objects group = body->Group.getValues();
     auto place = std::find(group.begin(), group.end(), feature);
     if (place == group.end()) {
         return false;
     }
-    for (const auto& line : parkedLines(owner)) {
-        auto item = ParkedItem::parse(line);
-        auto target = item ? parkedTarget(doc, *item) : nullptr;
-        if (target && std::find(place + 1, group.end(), target) != group.end()) {
-            return true;
+    std::map<App::DocumentObject*, App::DocumentObject*> none;
+    Rule rule(*body, group, none);
+    for (auto holder : holders) {
+        // Moved with the feature: no solid before it reads the holder (the reorder moves the
+        // inputs only its objects use)
+        if (rule.earliestUser(holder) != feature) {
+            continue;
+        }
+        for (const auto& line : parkedLines(holder)) {
+            auto item = ParkedItem::parse(line);
+            auto target = item ? parkedTarget(doc, *item) : nullptr;
+            if (target && std::find(place + 1, group.end(), target) != group.end()) {
+                return true;
+            }
         }
     }
     return false;

@@ -306,28 +306,30 @@ bool baseless(const Feature& feature)
  * or a member in error reached from it through its Body's non-solid members (a sketch, a datum,
  * a binder, a MultiTransform's step; never a solid feature, never out of the Body), holds a
  * parking record: a reorder set a reference of it aside (ops#127), so it fails without running
- * (blocked()), and what it feeds fails naming it. Only a record whose reference is to a member
- * after the feature counts: the feature stands above what it needs, and what follows it was
- * built without it. A feature that reads a parked member whose reference is to the feature
- * itself or to what comes before it (the stock given a parked boss sketch's normal as its
- * direction) isn't parked: it stops the Body (review pr596-r1 StockReadsParkedSketch). Read from
- * links, records and the Group, which only edits, the reorder, the undo and the import write,
- * outside recomputes; and the members reached are upstream of the feature, so their error is
- * final when it is asked
+ * (blocked()), and what it feeds fails naming it. A record counts only when its reference is to a
+ * member after the feature and the feature is the earliest solid that reads its holder
+ * (parkedAbove()): the feature was moved above what it needs with the inputs only it uses, and
+ * what follows it was built without it. A feature that reads a member another feature's park
+ * left red (the stock given a parked boss sketch's normal as its direction) isn't parked: it
+ * stops the Body (reviews pr596-r1 and pr596s-r1, StockReadsParkedSketch). Read from links,
+ * records and the Group, which only edits, the reorder, the undo and the import write, outside
+ * recomputes; and the members reached are upstream of the feature, so their error is final when
+ * it is asked
  */
 bool parkedFailure(const Feature& feature)
 {
     auto body = bodyOf(&feature);
     std::set<const App::DocumentObject*> seen;
     std::vector<const App::DocumentObject*> queue {&feature};
+    std::vector<const App::DocumentObject*> holders;
     for (std::size_t i = 0; i < queue.size(); ++i) {
         const App::DocumentObject* obj = queue[i];
         if (!seen.insert(obj).second) {
             continue;
         }
         // The feature itself is asked as it fails, before its error is written
-        if ((i == 0 || obj->isError()) && parkedPast(obj, &feature)) {
-            return true;
+        if ((i == 0 || obj->isError()) && hasParkedReferences(obj)) {
+            holders.push_back(obj);
         }
         forEachInput(obj, true, [&](const App::Property*, const std::vector<InputLink>& links) {
             for (const auto& link : links) {
@@ -338,7 +340,7 @@ bool parkedFailure(const Feature& feature)
             return false;
         });
     }
-    return false;
+    return !holders.empty() && parkedAbove(&feature, holders);
 }
 
 class BodyFailureContinuation: public App::RecomputeContinuation
