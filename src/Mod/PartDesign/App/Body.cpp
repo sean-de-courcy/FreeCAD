@@ -586,7 +586,9 @@ std::vector<App::DocumentObject*> Body::addObjects(std::vector<App::DocumentObje
 
 void Body::insertObject(App::DocumentObject* feature, App::DocumentObject* target, bool after)
 {
-    if (target && !hasObject(target)) {
+    // In the Group: hasObject() also counts the Origin and its features, which have no place in
+    // it, so an insert next to them went past its end (FreeCAD-CH ops#597)
+    if (target && std::ranges::find(Group.getValues(), target) == Group.getValues().end()) {
         throw Base::ValueError(
             "Body: the feature we should insert relative to is not part of that body"
         );

@@ -1743,13 +1743,18 @@ void reorderBody(Body& body,
         return static_cast<std::size_t>(std::find(group.begin(), group.end(), obj) - group.begin());
     };
 
-    // 1. Checks: nothing is changed before they pass
+    // 1. Checks: nothing is changed before they pass. Members are the Group's: hasObject() also
+    // counts the Origin and its features, which have no place in it, so a move next to them
+    // inserted past the Group's end (ops#597)
     if (objs.empty()) {
         return;
     }
+    auto inGroup = [&](const App::DocumentObject* obj) {
+        return obj && position(obj) < group.size();
+    };
     std::set<App::DocumentObject*> requested;
     for (auto obj : objs) {
-        if (!obj || !body.hasObject(obj)) {
+        if (!inGroup(obj)) {
             throw Base::ValueError("Body: only members of this body can be moved in it");
         }
         if (isFeatureBase(obj)) {
@@ -1757,7 +1762,7 @@ void reorderBody(Body& body,
         }
         requested.insert(obj);
     }
-    if (target && !body.hasObject(target)) {
+    if (target && !inGroup(target)) {
         throw Base::ValueError("Body: the target of a move must be a member of this body");
     }
     if (target && requested.count(target)) {

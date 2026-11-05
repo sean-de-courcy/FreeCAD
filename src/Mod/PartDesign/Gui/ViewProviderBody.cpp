@@ -859,8 +859,9 @@ bool ViewProviderBody::reorderObjects(const std::vector<App::DocumentObject*>& o
         target = *last;
         after = true;
     }
-    else if (!body->hasObject(target)) {
-        // A row that isn't a member (the Origin) is above every feature: the start
+    else if (std::ranges::find(body->Group.getValues(), target) == body->Group.getValues().end()) {
+        // A row that isn't in the Group (the Origin, which hasObject() counts, ops#597) is above
+        // every feature: the start
         target = nullptr;
         after = true;
     }

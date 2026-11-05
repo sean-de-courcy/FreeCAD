@@ -11,6 +11,7 @@ dropping a feature among its siblings, a refused drop, and the held items' itali
 Every model is designed here: a 20 x 20 x 10 block, 4 x 4 x 5 bosses on its top and a hole in it,
 as in TestBodyReorder. Off screen: QT_QPA_PLATFORM=offscreen (notes/build.md)."""
 
+import math
 import time
 import unittest
 
@@ -584,6 +585,131 @@ class TestRollBackBarGui(unittest.TestCase):
         self.assertIs(self.body.Tip, c)
         self.waitForRows(["Origin", "Block", "FreeSketch", "BossA", "BossB", "HoleC", "|"])
         self.assertEqual(self.doc.UndoCount, undo + 1)
+
+    # -- drops at the Origin row's edges (ops#597) --------------------------------------------------
+
+    def originEdge(self, edge):
+        """A point on the Origin row's top or bottom edge: a drop there goes to the start of the
+        Body. The Origin belongs to the Body (hasObject) but has no place in its Group; before
+        ops#597 the bottom edge wrote past the end of the new Group (a heap corruption in a real
+        drag, an access violation here) and the top edge moved the feature to the end."""
+        rect = self.rowRect("Origin")
+        return QtCore.QPoint(rect.center().x(), rect.top() + 1 if edge == "top" else rect.bottom() - 1)
+
+    def dropAtTheStart(self, obj, edge="bottom"):
+        """obj dropped at the Origin row's edge, in one undo step."""
+        undo = self.doc.UndoCount
+        self.select(obj)
+        self.drop(self.originEdge(edge))
+        self.assertEqual(self.doc.UndoCount, undo + 1)
+
+    def solids(self):
+        return [o.Name for o in self.body.Group if o.isDerivedFrom("PartDesign::Feature")]
+
+    def testDropAboveWhatItsSketchSitsOn(self):
+        """The W16 check: Pad2, whose sketch sits on the block's top face, dropped above the block
+        (at the Origin row's lower edge). Pad2 and its sketch go to the start, the sketch fails
+        naming the block, which now comes after it, Pad2 fails naming its sketch, and the block
+        and the Body don't continue past it (ops#579). Dropped back below the block, everything
+        computes again: the block and a 3 mm round boss 5 high on its top."""
+        block = self.block()
+        self.doc.recompute()
+        top = faceName(block.Shape, lambda f: isPlaneFacing(f, V(0, 0, 1), V(0, 0, 10)))
+        sketch = self.sketchOn("TopSketch", block, top, V(10, 10, 10), 3)
+        pad2 = models.pad(self.body, sketch, 5, "Pad2")
+        self.doc.recompute()
+        volume = 4000 + math.pi * 3**2 * 5
+        self.assertTrue(pad2.isValid())
+        self.assertAlmostEqual(self.body.Shape.Volume, volume, delta=1e-4)
+        self.waitForRows(["Origin", "Block", "Pad2", "|"])
+
+        self.dropAtTheStart(pad2)
+        group = [o.Name for o in self.body.Group]
+        self.assertLess(group.index("TopSketch"), group.index("Pad2"))
+        self.assertLess(group.index("Pad2"), group.index("BlockSketch"))
+        self.assertEqual(self.solids(), ["Pad2", "Block"])
+        self.assertIsNone(pad2.BaseFeature)
+        self.assertIs(block.BaseFeature, pad2)
+        self.assertIs(self.body.Tip, block)
+        self.doc.recompute()
+        self.assertFalse(sketch.isValid())
+        self.assertIn("'Block', which now comes after 'Pad2'", sketch.getStatusString())
+        self.assertFalse(pad2.isValid())
+        self.assertIn("'TopSketch', which has an error", pad2.getStatusString())
+        self.assertFalse(block.isValid())
+        self.assertIn("'Pad2', which has an error", block.getStatusString())
+        self.assertFalse(self.body.isValid())
+        self.waitForRows(["Origin", "Pad2", "Block", "|"])
+
+        self.select(pad2)
+        rect = self.rowRect("Block")
+        self.drop(QtCore.QPoint(rect.center().x(), rect.bottom() - 1))
+        self.assertEqual(self.solids(), ["Block", "Pad2"])
+        self.assertIs(pad2.BaseFeature, block)
+        self.doc.recompute()
+        self.assertTrue(sketch.isValid(), sketch.getStatusString())
+        target, subs = sketch.AttachmentSupport[0]
+        self.assertIs(target, block)
+        self.assertTrue(isPlaneFacing(block.Shape.getElement(subs[0]), V(0, 0, 1), V(0, 0, 10)))
+        self.assertTrue(pad2.isValid(), pad2.getStatusString())
+        self.assertTrue(self.body.isValid())
+        self.assertAlmostEqual(self.body.Shape.Volume, volume, delta=1e-4)
+        self.waitForRows(["Origin", "Block", "Pad2", "|"])
+
+    def testDropAtTheOriginRowTopGoesToTheStart(self):
+        """Boss B dropped at the Origin row's upper edge goes to the start, not to the end; the
+        boss on nothing, then the block fused under it, give the same solid."""
+        block, a, b, c = self.chain()
+        self.waitForRows(["Origin", "Block", "BossA", "BossB", "HoleC", "|"])
+        self.dropAtTheStart(b, "top")
+        self.assertEqual(self.solids(), ["BossB", "Block", "BossA", "HoleC"])
+        self.assertIsNone(b.BaseFeature)
+        self.assertIs(block.BaseFeature, b)
+        self.assertIs(a.BaseFeature, block)
+        self.assertIs(self.body.Tip, c)
+        self.doc.recompute()
+        self.assertTrue(self.body.isValid())
+        self.assertAlmostEqual(self.body.Shape.Volume, 4000 + 2 * 80 - math.pi * 4 * 3, delta=1e-4)
+
+    def testPocketSketchAndDressUpDropAtTheStart(self):
+        """The neighbouring drops at the Origin row's lower edge, each undone after: the hole (a
+        Pocket, with its sketch), a sketch of its own and a fillet go to the start of the Body;
+        the solids' chain follows the new order."""
+        block, a, b, c = self.chain()
+        self.freeSketch()
+        fillet = self.body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (c, [self.cornerEdge(c)])
+        fillet.Radius = 1
+        self.body.Tip = fillet
+        self.doc.recompute()
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        group = list(self.body.Group)
+        free = self.doc.getObject("FreeSketch")
+        self.waitForRows(["Origin", "Block", "BossA", "BossB", "HoleC", "FreeSketch", "Fillet", "|"])
+        for obj, solids in (
+            (c, ["HoleC", "Block", "BossA", "BossB", "Fillet"]),
+            (free, ["Block", "BossA", "BossB", "HoleC", "Fillet"]),
+            (fillet, ["Fillet", "Block", "BossA", "BossB", "HoleC"]),
+        ):
+            self.dropAtTheStart(obj)
+            names = [o.Name for o in self.body.Group]
+            self.assertEqual(self.solids(), solids, obj.Name)
+            self.assertLess(names.index(obj.Name), names.index("BlockSketch"), obj.Name)
+            self.assertIsNone(self.doc.getObject(solids[0]).BaseFeature, obj.Name)
+            self.doc.recompute()
+            self.doc.undo()
+            processEvents()
+            self.assertEqual(list(self.body.Group), group, obj.Name)
+            self.doc.recompute()
+            self.assertTrue(self.body.isValid(), obj.Name)
+
+    def cornerEdge(self, feature):
+        """The feature's vertical edge at (20, 0), the block's corner."""
+        for i, edge in enumerate(feature.Shape.Edges, 1):
+            p, q = edge.Vertexes[0].Point, edge.Vertexes[-1].Point
+            if all(abs(v.x - 20) < 1e-6 and abs(v.y) < 1e-6 for v in (p, q)) and abs(p.z - q.z) > 1:
+                return f"Edge{i}"
+        self.fail("no corner edge")
 
     def testRefusedDropShowsWhyAndChangesNothing(self):
         """The hole's sketch sits on a binder outside the Body that binds Pad2's top: dropped
