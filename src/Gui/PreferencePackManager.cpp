@@ -36,6 +36,7 @@
 #include "Base/Interpreter.h"
 #include "Base/Console.h"
 #include "DockWindowManager.h"
+#include "MainWindow.h"
 #include "ToolBarManager.h"
 
 #include <Application.h>
@@ -376,7 +377,8 @@ bool PreferencePackManager::apply(const std::string& preferencePackName) const
         preferencePack != _preferencePacks.end()) {
         BackupCurrentConfig();
         bool wasApplied = preferencePack->second.apply();
-        if (wasApplied) {
+        // Without a main window (the first-start pack, ops#605) the window reads the state itself
+        if (wasApplied && getMainWindow()) {
             // If the visibility state of the dock windows was changed we have to manually reload
             // their state
             Gui::DockWindowManager* pDockMgr = Gui::DockWindowManager::instance();

@@ -222,7 +222,6 @@ void StartupPostProcess::setLoadFromPythonModule(bool value)
 void StartupPostProcess::execute()
 {
     setWindowTitle();
-    applyFirstStartPack();
     setProcessMessages();
     setAutoSaving();
     checkQtSvgImageFormatSupport();
@@ -343,12 +342,14 @@ void StartupPostProcess::migrateOldTheme(const std::string& style)
     }
 }
 
-void StartupPostProcess::applyFirstStartPack()
+void StartupProcess::applyFirstStartPack()
 {
     // A new settings folder starts with the fork's Onshape-like settings (ops#605 Tier 1): the
     // "FreeCAD-CH Onshape" pack, applied once, as the user would from Preferences > General. An
     // existing user.cfg is never touched. Runs that start tests (-t) or a script or macro from the
     // command line keep the code defaults, so test runs on a fresh folder see what they always saw.
+    // It runs before the main window exists, which then starts from the pack's values: applied
+    // later, the overlays' own parameter observers wrote their current width over the pack's.
     const auto& config = App::Application::Config();
     if (!config.contains("UserParameterCreated")) {
         return;

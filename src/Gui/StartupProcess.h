@@ -40,6 +40,8 @@ class GuiExport StartupProcess
 public:
     StartupProcess();
     static void setupApplication();
+    /// The fork's first-start pack on a new settings folder, before the main window exists
+    static void applyFirstStartPack();
     void execute();
 
 private:
@@ -69,7 +71,6 @@ private:
     void setCursorFlashing();
     void setQtStyle();
     void migrateOldTheme(const std::string& style);
-    void applyFirstStartPack();
     void checkOpenGL();
     void loadOpenInventor();
     void setBranding();
