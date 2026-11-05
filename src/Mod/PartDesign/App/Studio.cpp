@@ -149,12 +149,22 @@ std::vector<App::DocumentObject*> studioSequence(App::Document* doc, App::Part* 
                         readers.push_back(obj);
                         continue;
                     }
+                    // Another studio's Body read whole is read through its last solid feature, as
+                    // this studio's are (a member reading a Body that reads this studio's Body
+                    // comes after it: review props602-r1 T1)
+                    if (auto other = freecad_cast<Body*>(obj)) {
+                        auto last = other->lastSolidFeature();
+                        if (last && seen.insert(last).second) {
+                            readers.push_back(last);
+                        }
+                        continue;
+                    }
                     // Containers (an App::Part, a group, an Origin) and origin features carry no
-                    // geometry of a member, and another studio's Bodies are none of its rows;
-                    // another object (a spreadsheet, a Part feature, a link) is read through
+                    // geometry of a member; another object (a spreadsheet, a Part feature, a link,
+                    // a feature of another studio's Body) is read through
                     if (obj->hasExtension(App::GroupExtension::getExtensionClassTypeId())
                         || obj->isDerivedFrom<App::DatumElement>()
-                        || obj->isDerivedFrom<Part::BodyBase>() || Part::BodyBase::findBodyOf(obj)) {
+                        || obj->isDerivedFrom<Part::BodyBase>()) {
                         continue;
                     }
                     readers.push_back(obj);
@@ -259,11 +269,13 @@ App::DocumentObject* studioBarAfter(const std::vector<App::DocumentObject*>& seq
     }
     if (hinted) {
         // The top: before the first row
-        auto it = hint ? std::find(sequence.begin(), sequence.begin() + first, hint) : sequence.begin();
-        auto from = hint ? it + 1 : it;
-        if ((!hint || it != sequence.begin() + first)
-            && std::none_of(from, sequence.begin() + first, Body::isSolidFeature)) {
-            return hint;
+        auto end = sequence.begin() + first;
+        auto it = hint ? std::find(sequence.begin(), end, hint) : sequence.begin();
+        if (!hint || it != end) {
+            auto from = hint ? it + 1 : it;
+            if (std::none_of(from, end, Body::isSolidFeature)) {
+                return hint;
+            }
         }
     }
     return first == 0 ? nullptr : sequence[first - 1];

@@ -162,6 +162,34 @@ class TestStudioSequence(unittest.TestCase):
         # The hole still goes through Body1, now 20x10x5 plus 6x10x2
         self.assertAlmostEqual(self.body1.Shape.Volume, (200 - 24) * 5 + 120, places=3)
 
+    def testReadThroughAnotherStudio(self):
+        """Review props602-r1 T1: A's sketch sits on a Body C of another studio (an App::Part)
+        whose sketch sits on B's Pad. A, made first, comes after B's Pad all the same."""
+        bodyA = self.doc.addObject("PartDesign::Body", "A")
+        skA = sketch(bodyA, "SkA", (0, 0, 2, 2))
+        padA = bodyA.newObject("PartDesign::Pad", "PadA")
+        padA.Profile = skA
+        padA.Length = 1
+        bodyB = self.doc.addObject("PartDesign::Body", "B")
+        skB = sketch(bodyB, "SkB", (0, 0, 10, 10))
+        padB = bodyB.newObject("PartDesign::Pad", "PadB")
+        padB.Profile = skB
+        padB.Length = 5
+        self.doc.recompute()
+        part = self.doc.addObject("App::Part", "P")
+        bodyC = self.doc.addObject("PartDesign::Body", "C")
+        part.addObject(bodyC)
+        skC = sketch(bodyC, "SkC", (0, 0, 4, 4), support=[(padB, faceAt(padB, 5))])
+        padC = bodyC.newObject("PartDesign::Pad", "PadC")
+        padC.Profile = skC
+        padC.Length = 2
+        self.doc.recompute()
+        self.assertEqual(self.names(PartDesign.studioSequence(self.doc)), ["SkA", "PadA", "SkB", "PadB"])
+        skA.AttachmentSupport = [(padC, faceAt(padC, 7))]
+        self.doc.recompute()
+        self.assertEqual(self.names(PartDesign.studioSequence(self.doc)), ["SkB", "PadB", "SkA", "PadA"])
+        self.assertEqual(self.names(PartDesign.studioSequence(part)), ["SkC", "PadC"])
+
     def testALoopListsEveryMemberOnce(self):
         """Sketches that read each other's Body crosswise (from Python): no order satisfies both
         Bodies, and every member is still listed once, each Body's in its Group order."""

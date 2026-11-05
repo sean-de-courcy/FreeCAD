@@ -665,7 +665,8 @@ void FeaturesView::rebuildFeatures()
             ));
         }
     }
-    if (barRow >= sequence.size()) {
+    // No bar in an empty studio
+    if (barRow >= sequence.size() && !sequence.empty()) {
         addBar();
     }
     if (auto bar = features->verticalScrollBar()) {
@@ -739,6 +740,8 @@ void FeaturesView::pushSelection(const std::vector<App::DocumentObject*>& objs)
         }
     }
     syncing = false;
+    // The other list follows (review props602s-r1, finding 1: a Parts row stayed selected)
+    selectionTimer->start();
 }
 
 void FeaturesView::onSelectionChanged(const Gui::SelectionChanges& msg)

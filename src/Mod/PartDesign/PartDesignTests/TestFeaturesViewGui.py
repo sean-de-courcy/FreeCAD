@@ -277,6 +277,33 @@ class TestFeaturesViewGui(unittest.TestCase):
             waitFor(lambda: [i.text() for i in self.list.selectedItems()] == ["Pocket1"])
         )
 
+    def testSelectionAcrossLists(self):
+        """Review props602s-r1, finding 1: a click in one list deselects the other's rows."""
+        self.assertTrue(waitFor(lambda: self.parts.topLevelItemCount() == 2))
+        rect = self.parts.visualItemRect(self.parts.topLevelItem(0))
+        viewport = self.parts.viewport()
+        mouse(viewport, QtCore.QEvent.MouseButtonPress, rect.center(), QtCore.Qt.LeftButton)
+        mouse(viewport, QtCore.QEvent.MouseButtonRelease, rect.center(), QtCore.Qt.NoButton)
+        pump(0.1)
+        self.assertEqual([o.Name for o in Gui.Selection.getSelection()], ["Body1"])
+        rect = self.rowRect("Box")
+        viewport = self.list.viewport()
+        mouse(viewport, QtCore.QEvent.MouseButtonPress, rect.center(), QtCore.Qt.LeftButton)
+        mouse(viewport, QtCore.QEvent.MouseButtonRelease, rect.center(), QtCore.Qt.NoButton)
+        self.assertTrue(waitFor(lambda: not self.parts.selectedItems()))
+        self.assertEqual([o.Name for o in Gui.Selection.getSelection()], ["Box"])
+
+    def testEmptyStudioHasNoBar(self):
+        """Review props602s-r1, finding 2: a document with no Body shows no bar row."""
+        other = App.newDocument("FeaturesViewEmpty")
+        try:
+            Gui.getDocument(other.Name)
+            App.setActiveDocument(other.Name)
+            Gui.ActiveDocument = Gui.getDocument(other.Name)
+            self.assertTrue(waitFor(lambda: self.list.count() == 0))
+        finally:
+            App.closeDocument(other.Name)
+
     # ---------------------------------------------------------------------------- the parts
 
     def testPartsList(self):
