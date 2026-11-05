@@ -28,6 +28,7 @@
 #include <Inventor/fields/SoSFColor.h>
 #include <Inventor/nodes/SoIndexedLineSet.h>
 #include <memory>
+#include <set>
 #include <vector>
 #include <Gui/Selection/SoFCSelectionContext.h>
 #include <Mod/Part/PartGlobal.h>
@@ -77,6 +78,16 @@ public:
      *  edge has no rendered line. Falls back to edge - 1 when no mapping exists yet.
      */
     int lineIndexFromEdge(int edge) const;
+
+    /*! Append the lines of these 1-based topological edges to the selection along path, which
+     *  ends at this node. An edge with no line (a seam, ops#600) adds nothing.
+     */
+    void selectEdges(SoPath* path, const std::vector<int>& edges, const SbColor& color);
+
+    /*! Lines selected in this node's own context, the one an action uses when no
+     *  SoFCSelectionRoot is above the node (a unit test's); -1 means all.
+     */
+    std::set<int> selectedLines() const;
 
     SoMFInt32 highlightCoordIndex;
     SoMFInt32 selectionCoordIndex;

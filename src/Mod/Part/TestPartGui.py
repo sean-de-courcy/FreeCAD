@@ -1293,3 +1293,54 @@ class PartGuiSeamEdgeTestCases(unittest.TestCase):
             for colour in materials[0].diffuseColor.getValues()
         ]
         self.assertEqual(shown, expected)
+
+    @staticmethod
+    def _closedBSplinePrism(poles):
+        """A prism 10 high on a closed, non-periodic cubic B-spline through `poles` (first ==
+        last): one lateral face, closed at the first pole, where its seam is."""
+        curve = Part.BSplineCurve()
+        curve.buildFromPoles([FreeCAD.Vector(x, y, 0) for x, y in poles], False, 3)
+        face = Part.Face(Part.Wire(curve.toShape()))
+        return face.extrude(FreeCAD.Vector(0, 0, 10))
+
+    def testCreasedSeamKeepsItsLine(self):
+        # A B-spline that closes at a corner (a Pad of a Sketcher B-spline with one) creases at
+        # its seam: Onshape splits the face there and draws the edge, and so does the fork.
+        prism = self._closedBSplinePrism(
+            [(0, 10), (4, 4), (5, -3), (0, -6), (-5, -3), (-4, 4), (0, 10)]
+        )
+        self.assertEqual(len(self._seams(prism)), 1)
+        feature = self._feature(prism)
+        self.assertEqual(self._lineCount(feature.ViewObject), 3)
+
+    def testSmoothSeamOfAClosedBSplineHasNoLine(self):
+        # The same B-spline closing tangentially (both end segments horizontal): no crease, no line.
+        prism = self._closedBSplinePrism(
+            [(0, 10), (4, 10), (6, 0), (0, -6), (-6, 0), (-4, 10), (0, 10)]
+        )
+        lateral = [f for f in prism.Faces if f.Surface.TypeId != "Part::GeomPlane"]
+        self.assertEqual(len(lateral), 1)
+        self.assertFalse(lateral[0].Surface.isUPeriodic())
+        self.assertEqual(len(self._seams(prism)), 1)
+        feature = self._feature(prism)
+        self.assertEqual(self._lineCount(feature.ViewObject), 2)
+
+    def testSelectingASeamLightsNothing(self):
+        # A seam selected by name (a task panel's reference, the tree, Python) has no line to
+        # light, and lights nothing else either: its element box is empty, as when the 3D view
+        # finds no detail path for it, where the whole object would light with a path and no detail.
+        cylinder = Part.makeCylinder(5, 10)
+        feature = self._feature(cylinder)
+        seam = self._seams(cylinder)[0]
+        view = FreeCADGui.getDocument(self.Doc.Name).ActiveView
+        self.assertFalse(feature.ViewObject.getBoundingBox("Edge" + str(seam), view=view).isValid())
+        circle = 1 if seam != 1 else 3
+        self.assertTrue(feature.ViewObject.getBoundingBox("Edge" + str(circle), view=view).isValid())
+        FreeCADGui.Selection.clearSelection()
+        FreeCADGui.Selection.addSelection(self.Doc.Name, feature.Name, "Edge" + str(seam))
+        FreeCADGui.updateGui()
+        self.assertEqual(
+            [list(s.SubElementNames) for s in FreeCADGui.Selection.getSelectionEx(self.Doc.Name)],
+            [["Edge" + str(seam)]],
+        )
+        FreeCADGui.Selection.clearSelection()

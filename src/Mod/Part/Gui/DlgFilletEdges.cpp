@@ -449,13 +449,8 @@ void DlgFilletEdges::onHighlightEdges()
                 Gui::SoSelectionElementAction clear(Gui::SoSelectionElementAction::None);
                 clear.apply(selectionPath);
 
-                Gui::SoSelectionElementAction action(Gui::SoSelectionElementAction::Append);
-                action.setColor(selectionColor);
-                action.apply(selectionPath);
-
                 QAbstractItemModel* model = ui->treeView->model();
-                SoLineDetail detail;
-                action.setElement(&detail);
+                std::vector<int> edges;
                 for (int i = 0; i < model->rowCount(); ++i) {
                     QVariant value = model->index(i, 0).data(Qt::CheckStateRole);
                     Qt::CheckState checkState = static_cast<Qt::CheckState>(value.toInt());
@@ -463,11 +458,13 @@ void DlgFilletEdges::onHighlightEdges()
                     // is item checked
                     if (checkState & Qt::Checked) {
                         // the index value of the edge
-                        int id = model->index(i, 0).data(Qt::UserRole).toInt();
-                        detail.setLineIndex(id - 1);
-                        action.apply(selectionPath);
+                        edges.push_back(model->index(i, 0).data(Qt::UserRole).toInt());
                     }
                 }
+                // FreeCAD-CH (ops#600): by the edge's own line; a seam has none, so lines and
+                // edge numbers differ after it.
+                auto edgeSet = static_cast<PartGui::SoBrepEdgeSet*>(selectionPath->getTail());
+                edgeSet->selectEdges(selectionPath, edges, selectionColor);
             }
         }
     }

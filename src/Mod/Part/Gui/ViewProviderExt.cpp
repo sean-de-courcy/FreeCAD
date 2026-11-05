@@ -28,7 +28,11 @@
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
+#include <BRepLib.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
+#include <Geom2d_Curve.hxx>
+#include <Geom_Surface.hxx>
+#include <gp_Pnt2d.hxx>
 #include <gp_Trsf.hxx>
 #include <Precision.hxx>
 #include <Poly_Array1OfTriangle.hxx>
@@ -49,6 +53,7 @@
 #include <TopTools_IndexedMapOfShape.hxx>
 
 #include <algorithm>
+#include <cmath>
 
 #include <QAction>
 #include <QMenu>
@@ -99,6 +104,43 @@
 FC_LOG_LEVEL_INIT("Part", true, true)
 
 using namespace PartGui;
+
+namespace
+{
+
+// FreeCAD-CH (ops#600): whether the face meets itself smoothly (G1) across this seam, as Onshape's
+// faces always do: there a closed face that isn't smooth (a B-spline that closes at a corner) is
+// split, and the crease is drawn as an edge. A surface periodic across the seam is smooth; any
+// other closed one is checked by its continuity across the seam.
+bool isSmoothSeam(const TopoDS_Edge& edge, const TopoDS_Face& face)
+{
+    if (!BRep_Tool::IsClosed(edge, face)) {
+        return false;
+    }
+    TopLoc_Location location;
+    Handle(Geom_Surface) surface = BRep_Tool::Surface(face, location);
+    Standard_Real first {};
+    Standard_Real last {};
+    Handle(Geom2d_Curve) side1 = BRep_Tool::CurveOnSurface(edge, face, first, last);
+    Handle(Geom2d_Curve) side2
+        = BRep_Tool::CurveOnSurface(TopoDS::Edge(edge.Reversed()), face, first, last);
+    if (surface.IsNull() || side1.IsNull() || side2.IsNull() || Precision::IsInfinite(first)
+        || Precision::IsInfinite(last)) {
+        return false;
+    }
+    const gp_Pnt2d middle1 = side1->Value(0.5 * (first + last));
+    const gp_Pnt2d middle2 = side2->Value(0.5 * (first + last));
+    const bool acrossU = std::abs(middle1.X() - middle2.X()) >= std::abs(middle1.Y() - middle2.Y());
+    if (acrossU ? surface->IsUPeriodic() : surface->IsVPeriodic()) {
+        return true;
+    }
+    // The test BRepLib::EncodeRegularity makes, without writing its result into the shape. A
+    // crease below this angle can't be seen; a sketch's tangent closure is far below it.
+    constexpr double maxAngle = 1e-3;
+    return BRepLib::ContinuityOfFaces(edge, face, face, maxAngle) >= GeomAbs_G1;
+}
+
+}  // namespace
 
 PROPERTY_SOURCE(PartGui::ViewProviderPartExt, Gui::ViewProviderGeometryObject)
 
@@ -1327,9 +1369,9 @@ void ViewProviderPartExt::setupCoinGeometry(
             // get the overall index of this edge
             int edgeIndex = edgeMap.FindIndex(curEdge);
             edgeVector.push_back((int32_t)edgeIndex - 1);
-            // FreeCAD-CH (ops#600): a seam (closed on this face: a cylinder's, a sphere's) gets
-            // no line here, as in Onshape; another face it bounds as an ordinary edge draws it.
-            if (hideSeams && BRep_Tool::IsClosed(curEdge, actFace)) {
+            // FreeCAD-CH (ops#600): a smooth seam (a cylinder's, a sphere's) gets no line here,
+            // as in Onshape; another face it bounds as an ordinary edge draws it.
+            if (hideSeams && isSmoothSeam(curEdge, actFace)) {
                 continue;
             }
             // already processed this index ?

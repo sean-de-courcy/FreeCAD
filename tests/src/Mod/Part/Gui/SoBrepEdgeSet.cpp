@@ -3,6 +3,9 @@
 #include <gtest/gtest.h>
 
 #include <Inventor/SoDB.h>
+#include <Inventor/SoPath.h>
+
+#include <Gui/Selection/SoFCUnifiedSelection.h>
 
 #include <Mod/Part/Gui/SoBrepEdgeSet.h>
 
@@ -15,6 +18,9 @@ protected:
         SoDB::init();
         if (PartGui::SoBrepEdgeSet::getClassTypeId().isBad()) {
             PartGui::SoBrepEdgeSet::initClass();
+        }
+        if (Gui::SoSelectionElementAction::getClassTypeId().isBad()) {
+            Gui::SoSelectionElementAction::initClass();
         }
     }
 
@@ -114,4 +120,25 @@ TEST_F(SoBrepEdgeSetMappingTest, remappingReplacesThePreviousMapping)
     EXPECT_EQ(edgeSet->lineIndexFromEdge(3), 1);
     EXPECT_EQ(edgeSet->lineIndexFromEdge(1), PartGui::SoBrepEdgeSet::InvalidLine);
     EXPECT_EQ(edgeSet->lineIndexFromEdge(4), PartGui::SoBrepEdgeSet::InvalidLine);
+}
+
+TEST_F(SoBrepEdgeSetMappingTest, selectEdgesSelectsEachEdgesOwnLine)
+{
+    // FreeCAD-CH (ops#600): a cylinder's edges, Edge2 its seam with no line. Line 1 is Edge3's,
+    // so selecting Edge3 (the Fillet dialog's ticked edge) selects line 1, not line 2.
+    edgeSet->coordIndex.setValues(0, 6, std::vector<int32_t> {0, 1, -1, 2, 3, -1}.data());
+    edgeSet->setEdgeMapping({1, 3});
+    SoPath* path = new SoPath(edgeSet);
+    path->ref();
+
+    edgeSet->selectEdges(path, {3}, SbColor(0.1F, 0.8F, 0.1F));
+    EXPECT_EQ(edgeSet->selectedLines(), std::set<int> {1});
+
+    // The seam has no line: selecting it adds nothing.
+    edgeSet->selectEdges(path, {2}, SbColor(0.1F, 0.8F, 0.1F));
+    EXPECT_EQ(edgeSet->selectedLines(), std::set<int> {1});
+
+    edgeSet->selectEdges(path, {1}, SbColor(0.1F, 0.8F, 0.1F));
+    EXPECT_EQ(edgeSet->selectedLines(), (std::set<int> {0, 1}));
+    path->unref();
 }
