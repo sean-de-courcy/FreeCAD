@@ -21,6 +21,7 @@
  *                                                                          *
  ****************************************************************************/
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -60,6 +61,7 @@
 #include <App/VarSet.h>
 #include <App/VarSetCopy.h>
 #include <App/VariableLookup.h>
+#include <Base/Console.h>
 #include <Base/Interpreter.h>
 #include <Base/Quantity.h>
 #include <Base/Tools.h>
@@ -224,8 +226,48 @@ bool isNumeric(const App::Property* prop)
         || freecad_cast<const App::PropertyInteger*>(prop);
 }
 
-/// Runs @a commands as one transaction named @a name on @a doc; false and @a error on failure,
-/// with the transaction aborted. A transaction already booked (a task dialog's) takes the edit.
+/// Recomputes @a doc after an edit, inside the edit's transaction (one undo step), as the property
+/// editor does: FreeCAD-CH ops#599, Onshape regenerates as soon as a variable changes. Not while
+/// the document is recomputing or loading; a failure is reported, and the edit stands.
+/// Not while any document has an object in edit either, whichever view is active: the document
+/// stays touched until the edit closes. A sketch's Cancel restores it from its backup and
+/// untouches it, so what a recompute had built from the sketch being edited would stay, silently
+/// (reviews pr599-r1 R1-1 and r1b: the sketch's own document or another, through a link or a
+/// cross-document expression). An edit document whose edit was refused has none (r1c R1c-a).
+void recomputeAfterEdit(App::Document* doc)
+{
+    if (!doc || !doc->isTouched() || doc->testStatus(App::Document::Recomputing)
+        || doc->testStatus(App::Document::Restoring)) {
+        return;
+    }
+    if (std::ranges::any_of(Application::Instance->editDocuments(), [](Gui::Document* editing) {
+            return editing->getEditViewProvider() != nullptr;
+        })) {
+        return;
+    }
+    try {
+        doc->recompute();
+    }
+    catch (const Base::Exception& e) {
+        e.reportException();
+    }
+    catch (const std::exception& e) {
+        Base::Console().error(
+            "Unhandled std::exception caught in the Variables panel's recompute.\n"
+            "The error message is: %s\n",
+            e.what()
+        );
+    }
+    catch (...) {
+        Base::Console().error(
+            "Unhandled unknown exception caught in the Variables panel's recompute.\n"
+        );
+    }
+}
+
+/// Runs @a commands as one transaction named @a name on @a doc, and recomputes it; false and
+/// @a error on failure, with the transaction aborted. A transaction already booked (a task
+/// dialog's) takes the edit.
 bool runEdit(
     App::Document* doc,
     const std::string& name,
@@ -250,6 +292,7 @@ bool runEdit(
         Gui::PropertyEditor::closePropertyTransaction(tid, false);
         throw;
     }
+    recomputeAfterEdit(doc);
     Gui::PropertyEditor::closePropertyTransaction(tid);
     return true;
 }
@@ -1630,6 +1673,7 @@ bool VariablesView::addFromDialog(
         fail({});
         throw;
     }
+    recomputeAfterEdit(doc);
     Gui::PropertyEditor::closePropertyTransaction(tid);
     return true;
 }
@@ -1800,8 +1844,8 @@ void VariablesView::deleteVariable()
     else {
         uses = usesText(current, &count);
         commands.push_back(pyObject(obj) + ".removeProperty(" + pyString(name) + ")");
-        // Its users, the VarSet itself included, fail at the next recompute (D4): touch them, as
-        // nothing else would.
+        // Its users, the VarSet itself included, fail at the edit's recompute (D4, ops#599): touch
+        // them, as nothing else would.
         std::set<const App::DocumentObject*> users;
         if (App::Property* prop = VariablesModel::property(current)) {
             for (const auto& use : App::VariableLookup::uses(prop)) {
@@ -1816,7 +1860,7 @@ void VariablesView::deleteVariable()
         QMessageBox box(
             QMessageBox::Warning,
             tr("Delete variable"),
-            tr("%n expression(s) use #%1. They will fail at the next recompute.\n\n%2\n\n"
+            tr("%n expression(s) use #%1. They will fail.\n\n%2\n\n"
                "Delete #%1?",
                nullptr,
                count)

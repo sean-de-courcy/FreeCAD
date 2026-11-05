@@ -9,6 +9,7 @@ of the design note; since ops#317 PR B the Type and Description columns and the 
 dialog (G-1 to G-3 of notes/variables-studio.md). Each test builds its own document."""
 
 import json
+import math
 import os
 import shutil
 import tempfile
@@ -326,8 +327,8 @@ class TestVariablesPanelGui(unittest.TestCase):
         self.assertAlmostEqual(self.box.Length.Value, 40)
 
     def test_delete_with_uses(self):
-        """G5. Delete lists the uses (T10's set), deletes on OK, and the Box fails at recompute;
-        Undo restores the variable and the Box is valid at 40 mm."""
+        """G5. Delete lists the uses (T10's set), deletes on OK, and the Box fails at once
+        (ops#599); Undo restores the variable and the Box is valid at 40 mm."""
         doc = self.standardDocument()
         self.sheet.set("B1", "=VarSet.Width")
         doc.recompute()
@@ -343,7 +344,6 @@ class TestVariablesPanelGui(unittest.TestCase):
         self.assertNotIn("Width", self.varSet.PropertiesList)
         self.assertEqual(doc.UndoCount, undoCount + 1)
         self.assertEqual(doc.UndoNames[0], "Delete Width")
-        doc.recompute()
         self.assertIn("Invalid", self.box.State)
 
         doc.undo()
@@ -830,12 +830,11 @@ class TestVariablesPanelGui(unittest.TestCase):
         self.assertNotIn("Width", self.varSet.PropertiesList)
         self.assertEqual(doc.UndoCount, undoCount + 1)
         self.assertEqual(doc.UndoNames[0], "Delete Width")
-        doc.recompute()
         self.assertIn("Invalid", self.box.State)
 
     def test_delete_own_use(self):
         """`Depth = .Width * 2` in the VarSet itself: Delete lists VarSet.Depth, and the VarSet
-        fails at the next recompute."""
+        fails at once (ops#599)."""
         doc = self.standardDocument()
         self.box.clearExpression("Length")
         self.varSet.addProperty("App::PropertyLength", "Depth")
@@ -850,7 +849,6 @@ class TestVariablesPanelGui(unittest.TestCase):
         self.assertEqual(len(texts), 1)
         self.assertIn("VarSet.Depth", texts[0].split("\n"))
         self.assertNotIn("Width", self.varSet.PropertiesList)
-        doc.recompute()
         self.assertIn("Invalid", self.varSet.State)
 
     def test_text_values(self):
@@ -919,8 +917,192 @@ class TestVariablesPanelGui(unittest.TestCase):
         self.commit("VarSet", "Width", EXPRESSION, "30 mm")
         doc.commitTransaction()
         self.assertAlmostEqual(self.varSet.Width.Value, 30)
+        self.assertAlmostEqual(self.box.Length.Value, 60)  # recomputed in the booking (ops#599)
         self.assertEqual(doc.UndoCount, undoCount + 1)
         self.assertEqual(doc.UndoNames[0], "Outer")
+
+    def padDocument(self):
+        """VarSet `VarSet` (Size = 10 mm, Base = 15 mm) and a Pad of a 5 mm circle, Length
+        `#Size`."""
+        import Part
+        import Sketcher
+
+        doc = self.newDocument()
+        self.varSet = doc.addObject("App::VarSet", "VarSet")
+        self.varSet.addProperty("App::PropertyLength", "Size")
+        self.varSet.Size = 10
+        self.varSet.addProperty("App::PropertyLength", "Base")
+        self.varSet.Base = 15
+        body = doc.addObject("PartDesign::Body", "Body")
+        sketch = body.newObject("Sketcher::SketchObject", "Sketch")
+        sketch.addGeometry(Part.Circle(App.Vector(0, 0, 0), App.Vector(0, 0, 1), 5))
+        self.sketch = sketch
+        self.pad = body.newObject("PartDesign::Pad", "Pad")
+        self.pad.Profile = sketch
+        self.pad.setExpression("Length", "#Size")
+        doc.recompute()
+        self.assertAlmostEqual(self.pad.Shape.Volume, math.pi * 25 * 10, places=6)
+        self.doc = doc
+        self.showPanel()
+        return doc
+
+    def assertRegenerated(self, length):
+        """The Pad follows the edit at once, with no recompute of the test's own."""
+        self.assertEqual([o.Name for o in self.doc.Objects if "Touched" in o.State], [])
+        self.assertAlmostEqual(self.pad.Length.Value, length)
+        self.assertAlmostEqual(self.pad.Shape.Volume, math.pi * 25 * length, places=6)
+
+    def test_value_edit_regenerates(self):
+        """ops#599 (Onshape): a value set in the panel regenerates the Pad that uses it, in the
+        edit's one undo step; one Undo gives back the length and the shape."""
+        doc = self.padDocument()
+        undoCount = doc.UndoCount
+        self.commit("VarSet", "Size", EXPRESSION, "20 mm")
+        self.assertRegenerated(20)
+        self.assertEqual(doc.UndoCount, undoCount + 1)
+        self.assertEqual(doc.UndoNames[0], "Set Size")
+        doc.undo()
+        self.assertAlmostEqual(self.varSet.Size.Value, 10)
+        self.assertAlmostEqual(self.pad.Length.Value, 10)
+        self.assertAlmostEqual(self.pad.Shape.Volume, math.pi * 25 * 10, places=6)
+
+    def radiusDocument(self):
+        """padDocument, and the sketch circle's radius `#Radius` (5 mm)."""
+        import Sketcher
+
+        doc = self.padDocument()
+        self.varSet.addProperty("App::PropertyLength", "Radius")
+        self.varSet.Radius = 5
+        self.sketch.addConstraint(Sketcher.Constraint("Radius", 0, 5))
+        self.sketch.setExpression("Constraints[0]", "#Radius")
+        doc.recompute()
+        return doc
+
+    def assertCancelledThenRight(self, doc):
+        """After the panel edit (Radius 8 mm) during the sketch's edit: nothing recomputed, the
+        sketch's Cancel, then a recompute builds both at 8 mm."""
+        self.assertIn("Touched", self.varSet.State)
+        self.assertAlmostEqual(self.pad.Shape.Volume, math.pi * 25 * 10, places=6)
+        # The sketch's Cancel acts in the editing view: the only view of its document.
+        Gui.setActiveDocument(doc.Name)
+        pump(0.3)
+        Gui.runCommand("Sketcher_CancelSketch")
+        pump(0.3)
+        self.assertIsNone(Gui.getDocument(doc.Name).getInEdit())
+        doc.recompute()
+        self.assertAlmostEqual(self.sketch.Geometry[0].Radius, 8)
+        self.assertAlmostEqual(self.pad.Shape.Volume, math.pi * 64 * 10, places=6)
+
+    def test_edit_during_sketch_edit(self):
+        """Review pr599-r1 R1-1: while a sketch is in edit, a panel edit doesn't recompute and
+        the document stays touched. The sketch's Cancel restores it from its backup and untouches
+        everything; a recompute there would have left the Pad built from the cancelled sketch."""
+        doc = self.radiusDocument()
+        Gui.ActiveDocument.setEdit(self.sketch.Name)
+        pump(0.3)
+        self.commit("VarSet", "Radius", EXPRESSION, "8 mm")
+        self.assertIn("Touched", self.varSet.State)
+        self.assertAlmostEqual(self.pad.Shape.Volume, math.pi * 25 * 10, places=6)
+        Gui.runCommand("Sketcher_CancelSketch")
+        pump(0.3)
+        self.assertIsNone(Gui.ActiveDocument.getInEdit())
+        doc.recompute()
+        self.assertAlmostEqual(self.sketch.Geometry[0].Radius, 8)
+        self.assertAlmostEqual(self.pad.Shape.Volume, math.pi * 64 * 10, places=6)
+
+    def test_edit_during_sketch_edit_second_view(self):
+        """Review pr599-r1b R1b-1: the same with another view of the document active (the
+        editing view isn't, so its getInEdit() is empty)."""
+        doc = self.radiusDocument()
+        Gui.ActiveDocument.setEdit(self.sketch.Name)
+        pump(0.3)
+        Gui.runCommand("Std_ViewCreate")
+        pump(0.5)
+        second = Gui.getMainWindow().findChild(QtWidgets.QMdiArea).activeSubWindow()
+        self.assertIsNone(Gui.ActiveDocument.getInEdit())
+        self.commit("VarSet", "Radius", EXPRESSION, "8 mm")
+        second.close()
+        pump(0.3)
+        self.assertCancelledThenRight(doc)
+
+    def test_edit_during_other_document_sketch_edit(self):
+        """Review pr599-r1b R1b-3: a sketch in another document, its radius the variable across
+        documents, in edit there: the panel edit doesn't recompute, and that document's Cancel
+        leaves nothing silently stale."""
+        import Part
+        import Sketcher
+
+        folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, folder, True)
+        doc = self.padDocument()
+        self.varSet.addProperty("App::PropertyLength", "Radius")
+        self.varSet.Radius = 5
+        doc.recompute()
+        doc.saveAs(os.path.join(folder, "a.FCStd"))
+        other = self.newDocument("TestVariablesPanelOther")
+        other.saveAs(os.path.join(folder, "b.FCStd"))
+        body = other.addObject("PartDesign::Body", "Body")
+        self.sketch = body.newObject("Sketcher::SketchObject", "Sketch")
+        self.sketch.addGeometry(Part.Circle(App.Vector(0, 0, 0), App.Vector(0, 0, 1), 5))
+        self.sketch.addConstraint(Sketcher.Constraint("Radius", 0, 5))
+        self.sketch.setExpression("Constraints[0]", doc.Name + "#VarSet.Radius")
+        self.pad = body.newObject("PartDesign::Pad", "Pad")
+        self.pad.Profile = self.sketch
+        self.pad.Length = 10
+        other.recompute()
+        Gui.getDocument(other.Name).setEdit(self.sketch.Name)
+        pump(0.3)
+        Gui.setActiveDocument(doc.Name)
+        pump(0.3)
+        self.commit("VarSet", "Radius", EXPRESSION, "8 mm")
+        self.assertCancelledThenRight(other)
+
+    def test_edit_after_refused_edit(self):
+        """Review pr599-r1c R1c-a: an edit the view provider refuses (a frozen sketch, "a dialog
+        is already open") leaves its document among the edit documents with nothing in edit; the
+        panel still regenerates at once."""
+
+        class Refuses:
+            def __init__(self, vobj):
+                vobj.Proxy = self
+
+            def attach(self, vobj):
+                pass
+
+            def setEdit(self, vobj, mode=0):
+                return False
+
+            def unsetEdit(self, vobj, mode=0):
+                return True
+
+            def dumps(self):
+                return None
+
+            def loads(self, state):
+                return None
+
+        doc = self.padDocument()
+        refuser = doc.addObject("App::FeaturePython", "Refuser")
+        Refuses(refuser.ViewObject)
+        doc.recompute()
+        Gui.getDocument(doc.Name).setEdit(refuser.Name)
+        pump(0.3)
+        self.assertIsNone(Gui.ActiveDocument.getInEdit())
+        self.commit("VarSet", "Size", EXPRESSION, "20 mm")
+        self.assertRegenerated(20)
+
+    def test_expression_edit_regenerates(self):
+        """ops#599: the same for an expression: `#Base * 2` makes the Pad 30 mm long at once."""
+        doc = self.padDocument()
+        undoCount = doc.UndoCount
+        self.commit("VarSet", "Size", EXPRESSION, "#Base * 2")
+        self.assertEqual(expressionText(self.varSet, "Size"), "Base * 2")  # its own VarSet
+        self.assertRegenerated(30)
+        self.assertEqual(doc.UndoCount, undoCount + 1)
+        doc.undo()
+        self.assertIsNone(expressionText(self.varSet, "Size"))
+        self.assertAlmostEqual(self.pad.Length.Value, 10)
+        self.assertAlmostEqual(self.pad.Shape.Volume, math.pi * 25 * 10, places=6)
 
     def test_failed_commit_on_leaving(self):
         """A failed commit made by leaving the editor (another row made current) shows the message
