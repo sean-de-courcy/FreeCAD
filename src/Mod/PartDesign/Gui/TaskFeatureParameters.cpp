@@ -435,13 +435,6 @@ void moveBack(const App::DocumentObjectT& featureT)
             run(cmd(from) + ".insertObject(" + cmd(sketch) + ", " + target + ", True)");
         }
         run(cmd(from) + ".addObject(" + cmd(feature) + ")");
-        // the feature is the Body's shown solid again, as the command made it (finishFeature)
-        auto solid = freecad_cast<PartDesign::Feature*>(feature);
-        if (solid && solid->Visibility.getValue()) {
-            if (App::DocumentObject* base = solid->getBaseObject(/*silent=*/true)) {
-                Gui::cmdAppObjectHide(base);
-            }
-        }
         // the new Body, empty now, goes with its origin
         if (part->Group.getValues().empty()) {
             run(
