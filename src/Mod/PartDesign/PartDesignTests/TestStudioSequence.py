@@ -9,6 +9,8 @@ both (notes/features-dock-design.md). Every model is designed: the expected shap
 volumes.
 """
 
+import os
+import tempfile
 import unittest
 
 import FreeCAD as App
@@ -416,3 +418,225 @@ class TestStudioSequence(unittest.TestCase):
         with self.assertRaises(TypeError):
             PartDesign.studioSequence(stray)
         self.assertEqual(self.names((self.body1.Tip, self.body2.Tip)), ["Pocket1", "PocketB"])
+
+
+class TestHistoryOrder(unittest.TestCase):
+    """ops#632 (notes/part-history-design.md 3.3): the saved history order and the drop.
+
+    PartDesign.moveInStudio drags features of one Body in the studio's history; an insert at a
+    rolled-back bar is listed at the bar. Both save the order (HistoryRank). Designed blocks: the
+    expected shapes come from volumes."""
+
+    def setUp(self):
+        self.doc = App.newDocument("TestHistoryOrder")
+        self.doc.UndoMode = 1
+        self.reopened = None
+
+    def tearDown(self):
+        App.closeDocument((self.reopened or self.doc).Name)
+
+    def names(self, objs):
+        return [o.Name if o else None for o in objs]
+
+    def order(self, doc=None):
+        return self.names(PartDesign.studioSequence(doc or self.doc))
+
+    def ranked(self):
+        return sorted(o.Name for o in self.doc.Objects if "HistoryRank" in o.PropertiesList)
+
+    def pad(self, body, name, profile, length):
+        pad = body.newObject("PartDesign::Pad", name)
+        pad.Profile = profile
+        pad.Length = length
+        return pad
+
+    def twoParts(self):
+        """Made in this order: Body1's sketch and Pad (a 10x10x5 block at the origin); Body2's
+        sketch and Pad (a 10x10x4 block at x = 20); Body1's sketch at z = 5 and Pad (a 4x4x2 boss
+        on the first block). No feature reads another Body."""
+        doc = self.doc
+        self.body1 = doc.addObject("PartDesign::Body", "Body1")
+        self.body2 = doc.addObject("PartDesign::Body", "Body2")
+        self.skA = sketch(self.body1, "SkA", (0, 0, 10, 10))
+        self.padA = self.pad(self.body1, "PadA", self.skA, 5)
+        self.skC = sketch(self.body2, "SkC", (20, 0, 30, 10))
+        self.padC = self.pad(self.body2, "PadC", self.skC, 4)
+        self.skA2 = sketch(self.body1, "SkA2", (2, 2, 6, 6), z=5)
+        self.padA2 = self.pad(self.body1, "PadA2", self.skA2, 2)
+        doc.recompute()
+        self.assertEqual(self.order(), ["SkA", "PadA", "SkC", "PadC", "SkA2", "PadA2"])
+        self.checkVolumes(500 + 32, 400)
+
+    def checkVolumes(self, v1, v2):
+        self.doc.recompute()
+        self.assertEqual([o.Name for o in self.doc.Objects if not o.isValid()], [])
+        self.assertAlmostEqual(self.body1.Shape.Volume, v1, places=3)
+        self.assertAlmostEqual(self.body2.Shape.Volume, v2, places=3)
+
+    # --------------------------------------------------------------------- insert at the bar
+
+    def testInsertAtTheBarIsListedAboveTheHeldRows(self):
+        """Design 2.3: rolled back after PadA, a sketch and Pad added to Body1 are listed at the
+        bar, above Body2's held Pad (before: after it, the oldest first), with Body1's sketch made
+        before them; the order is saved with the file."""
+        self.twoParts()
+        PartDesign.rollStudioTo(self.doc, self.padA)
+        self.doc.recompute()
+        self.assertEqual(self.names((self.body1.Tip, self.body2.Tip)), ["PadA", None])
+        skN = sketch(self.body1, "SkN", (7, 7, 9, 9), z=5)
+        padN = self.pad(self.body1, "PadN", skN, 1)
+        self.doc.recompute()
+        expected = ["SkA", "PadA", "SkC", "SkA2", "SkN", "PadN", "PadC", "PadA2"]
+        self.assertEqual(self.order(), expected)
+        self.assertEqual(PartDesign.studioBarAfter(self.doc).Name, "PadN")
+        self.assertEqual(self.body1.Tip, padN)
+        # Rolled to the end: both parts, the new boss on the first block
+        PartDesign.rollStudioToEnd(self.doc)
+        self.checkVolumes(500 + 32 + 4, 400)
+        self.assertEqual(self.order(), expected)
+        # Saved and opened again: the same order
+        path = os.path.join(tempfile.mkdtemp(), "HistoryOrder.FCStd")
+        self.doc.saveAs(path)
+        App.closeDocument(self.doc.Name)
+        self.reopened = App.openDocument(path)
+        self.assertEqual(self.order(self.reopened), expected)
+
+    def testInsertAtTheEndSavesNothing(self):
+        """Not rolled back: an insert is the newest and listed last, as before; no order is
+        saved."""
+        self.twoParts()
+        skN = sketch(self.body2, "SkN", (22, 2, 24, 4), z=4)
+        self.pad(self.body2, "PadN", skN, 1)
+        self.doc.recompute()
+        self.assertEqual(self.order()[-2:], ["SkN", "PadN"])
+        self.assertEqual(self.ranked(), [])
+
+    # ------------------------------------------------------------------------------ the drop
+
+    def testDropAcrossBodies(self):
+        """Body2's rows dragged to the top, then Body1's boss dragged between Body2's sketch and
+        Pad: the list is the dropped order, the Groups don't change, and the shapes are the
+        same."""
+        self.twoParts()
+        self.assertTrue(PartDesign.moveInStudio(self.doc, [self.skC, self.padC], None))
+        self.assertEqual(self.order(), ["SkC", "PadC", "SkA", "PadA", "SkA2", "PadA2"])
+        self.assertTrue(PartDesign.moveInStudio(self.doc, [self.skA2, self.padA2], self.skC))
+        self.assertEqual(self.order(), ["SkC", "SkA2", "PadA2", "PadC", "SkA", "PadA"])
+        # Inside Body1 the boss went above the block: the reorder's path
+        self.assertEqual(self.names(self.body1.Group), ["SkA2", "PadA2", "SkA", "PadA"])
+        self.assertEqual(self.names(self.body2.Group), ["SkC", "PadC"])
+        self.checkVolumes(500 + 32, 400)
+
+    def testDropInsideABodyCarriesTheSketch(self):
+        """Body1's boss Pad dragged to the top: Body1's Group puts it first, with its sketch (the
+        reorder carries the inputs only it uses), and the list is the dropped order."""
+        self.twoParts()
+        self.assertTrue(PartDesign.moveInStudio(self.doc, self.padA2, None))
+        self.assertEqual(self.names(self.body1.Group), ["SkA2", "PadA2", "SkA", "PadA"])
+        self.assertEqual(self.order(), ["SkA2", "PadA2", "SkA", "PadA", "SkC", "PadC"])
+        self.assertEqual(self.body1.Tip, self.padA)
+        self.checkVolumes(500 + 32, 400)
+
+    def testDropNextToItsSketch(self):
+        """Body1's boss Pad dragged to after Body1's block, above Body2: its sketch comes along
+        and Body1's Group stays as it is."""
+        self.twoParts()
+        self.assertTrue(PartDesign.moveInStudio(self.doc, self.padA2, self.padA))
+        self.assertEqual(self.names(self.body1.Group), ["SkA", "PadA", "SkA2", "PadA2"])
+        self.assertEqual(self.order(), ["SkA", "PadA", "SkA2", "PadA2", "SkC", "PadC"])
+        self.checkVolumes(500 + 32, 400)
+
+    def testDropInPlaceChangesNothing(self):
+        self.twoParts()
+        self.assertFalse(PartDesign.moveInStudio(self.doc, self.padC, self.skC))
+        self.assertEqual(self.ranked(), [])
+
+    def testOneUndoStep(self):
+        """A drop in one transaction is one undo step: the order, the Group and the saved ranks
+        go back."""
+        self.twoParts()
+        count = self.doc.UndoCount
+        self.doc.openTransaction("Reorder")
+        PartDesign.moveInStudio(self.doc, self.padA2, None)
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        self.assertEqual(self.doc.UndoCount, count + 1)
+        self.assertNotEqual(self.ranked(), [])
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertEqual(self.names(self.body1.Group), ["SkA", "PadA", "SkA2", "PadA2"])
+        self.assertEqual(self.order(), ["SkA", "PadA", "SkC", "PadC", "SkA2", "PadA2"])
+        self.assertEqual(self.ranked(), [])
+        self.checkVolumes(500 + 32, 400)
+
+    # ------------------------------------------------------------------------------ the bar
+
+    def testDropAboveTheBarComputes(self):
+        """Rolled back after PadA, Body1's held boss dropped above the bar (the bar after it, as
+        the list shows it) computes; Body2 stays held."""
+        self.twoParts()
+        PartDesign.rollStudioTo(self.doc, self.padA)
+        self.doc.recompute()
+        PartDesign.moveInStudio(self.doc, [self.skA2, self.padA2], self.padA, self.padA2)
+        self.assertEqual(self.order(), ["SkA", "PadA", "SkA2", "PadA2", "SkC", "PadC"])
+        self.assertEqual(self.names((self.body1.Tip, self.body2.Tip)), ["PadA2", None])
+        self.doc.recompute()
+        self.assertAlmostEqual(self.body1.Shape.Volume, 500 + 32, places=3)
+
+    def testDropBelowTheBarIsHeld(self):
+        """Rolled back after PadA, PadA dropped below the bar (after Body2's Pad): Body1 is
+        rolled back to its top, so PadA and the boss are held."""
+        self.twoParts()
+        PartDesign.rollStudioTo(self.doc, self.padA)
+        self.doc.recompute()
+        PartDesign.moveInStudio(self.doc, self.padA, self.padC, self.skA)
+        self.assertEqual(self.order(), ["SkA", "SkC", "PadC", "PadA", "SkA2", "PadA2"])
+        self.assertEqual(self.names((self.body1.Tip, self.body2.Tip)), [None, None])
+        self.assertTrue(PartDesign.isStudioRolledBack(self.doc))
+        PartDesign.rollStudioToEnd(self.doc)
+        self.checkVolumes(500 + 32, 400)
+
+    def testTheBarStaysAfterItsRow(self):
+        """Without a bar given, it stays after the row it followed: rows dropped right after that
+        row are below it, and held."""
+        self.twoParts()
+        PartDesign.rollStudioTo(self.doc, self.padA)
+        self.doc.recompute()
+        self.assertEqual(PartDesign.studioBarAfter(self.doc).Name, "SkC")
+        PartDesign.moveInStudio(self.doc, [self.skA2, self.padA2], self.skC)
+        self.assertEqual(self.order(), ["SkA", "PadA", "SkC", "SkA2", "PadA2", "PadC"])
+        self.assertEqual(self.names((self.body1.Tip, self.body2.Tip)), ["PadA", None])
+
+    # --------------------------------------------------------------------------- refusals
+
+    def testDropAboveWhatItReadsIsRefused(self):
+        """In TestStudioSequence's interleaved model Pocket1 (Body1) reads Body2's sketch SkB and
+        Box (Body2) sits on Body1's PadA. Drops that would put a reader above what it reads, or
+        what is read below its reader, are refused, naming both, and nothing changes."""
+        model = TestStudioSequence("testInterleavedOrder")
+        model.doc = self.doc
+        model.interleaved()
+        before = self.order()
+        with self.assertRaisesRegex(ValueError, "'Pocket1' uses 'SkB' of 'Body2'"):
+            PartDesign.moveInStudio(self.doc, model.pocket1, model.padA)
+        with self.assertRaisesRegex(ValueError, "'Box' uses 'PadA' of 'Body1'"):
+            PartDesign.moveInStudio(self.doc, model.box, None)
+        with self.assertRaisesRegex(ValueError, "'Box' of 'Body2' uses 'PadA'"):
+            PartDesign.moveInStudio(self.doc, model.padA, model.box)
+        self.assertEqual(self.order(), before)
+        self.assertEqual(self.names(model.body1.Group), ["SkA", "PadA", "Pocket1"])
+        self.assertEqual(self.ranked(), [])
+        model.checkEnd()
+
+    def testRefusals(self):
+        self.twoParts()
+        with self.assertRaisesRegex(ValueError, "one part at a time"):
+            PartDesign.moveInStudio(self.doc, [self.padA2, self.padC], None)
+        with self.assertRaises(ValueError):
+            PartDesign.moveInStudio(self.doc, self.body1.Origin.OriginFeatures[0], None)
+        stray = self.doc.addObject("Part::Box", "Stray")
+        with self.assertRaises(ValueError):
+            PartDesign.moveInStudio(self.doc, self.padC, stray)
+        with self.assertRaises(TypeError):
+            PartDesign.moveInStudio(self.doc, 3, None)
+        self.assertEqual(self.ranked(), [])

@@ -46,6 +46,7 @@
 #include "FeatureTransformed.h"
 #include "Retarget.h"
 #include "ShapeBinder.h"
+#include "Studio.h"
 
 namespace App
 {
@@ -544,6 +545,19 @@ std::vector<App::DocumentObject*> Body::addObject(App::DocumentObject* feature)
     }
 
 
+    // An insert at the studio's rolled-back bar is listed right after the bar, above what it holds
+    // (FreeCAD-CH ops#632, notes/part-history-design.md 3.3): the order before it, and its bar
+    App::Part* studio = nullptr;
+    auto doc = getDocument();
+    bool atStudioBar = doc && !doc->isPerformingTransaction() && !isRestoring()
+        && studioOf(this, studio) && isStudioRolledBack(doc, studio);
+    std::vector<App::DocumentObject*> history;
+    App::DocumentObject* studioBar = nullptr;
+    if (atStudioBar) {
+        history = studioSequence(doc, studio);
+        studioBar = studioBarAfter(history);
+    }
+
     App::DocumentObject* next = nullptr;
     if (Tip.getValue()) {
         next = getNextSolidFeature();
@@ -555,6 +569,9 @@ std::vector<App::DocumentObject*> Body::addObject(App::DocumentObject* feature)
         next = it == features.end() ? nullptr : *it;
     }
     insertObject(feature, next, /*after = */ false);
+    if (atStudioBar) {
+        saveInsertAtBar(doc, studio, history, studioBar, feature);
+    }
     // Move the Tip if we added a solid
     if (isSolidFeature(feature)) {
         Tip.setValue(feature);

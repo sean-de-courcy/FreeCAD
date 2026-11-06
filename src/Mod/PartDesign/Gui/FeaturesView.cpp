@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <set>
 
+#include <QApplication>
 #include <QHeaderView>
 #include <QKeyEvent>
 #include <QLabel>
@@ -54,6 +55,12 @@ constexpr const char* paramPath = "User parameter:BaseApp/Preferences/Mod/PartDe
 constexpr const char* editLockedMessage = QT_TRANSLATE_NOOP(
     "Exception",
     "The bodies can't roll back while a dialog or an edit is open"
+);
+
+/// Why the features don't move during an edit (design 3.3, the bar's rule)
+constexpr const char* reorderLockedMessage = QT_TRANSLATE_NOOP(
+    "Exception",
+    "The features can't be reordered while a dialog or an edit is open"
 );
 
 bool inPartDesign()
@@ -143,6 +150,33 @@ bool isSuppressed(const App::DocumentObject* obj)
     return suppressible && suppressible->Suppressed.getValue();
 }
 
+/// For each of bodies whose Tip isn't its old one, as the tree's bar does: shows the feature the
+/// bar follows (which hides the Body's other features), or none at the very top. False when no
+/// Tip moved
+bool showMovedTips(const std::vector<PartDesign::Body*>& bodies, const std::vector<App::DocumentObject*>& oldTips)
+{
+    bool changed = false;
+    for (std::size_t i = 0; i < bodies.size(); ++i) {
+        auto body = bodies[i];
+        App::DocumentObject* tip = body->Tip.getValue();
+        if (tip == oldTips[i]) {
+            continue;
+        }
+        changed = true;
+        if (tip) {
+            FCMD_OBJ_SHOW(tip);
+        }
+        else {
+            for (auto obj : body->Group.getValues()) {
+                if (PartDesign::Body::isSolidFeature(obj) && obj->Visibility.getValue()) {
+                    FCMD_OBJ_HIDE(obj);
+                }
+            }
+        }
+    }
+    return changed;
+}
+
 /// What a row shows of obj: its name, label and status (statusIcon(), statusFont())
 std::string rowKey(const App::DocumentObject* obj, bool held, const std::string& extra = {})
 {
@@ -217,20 +251,66 @@ QListWidgetItem* FeatureList::barItem() const
     return nullptr;
 }
 
+int FeatureList::dropRowAt(const QPoint& pos) const
+{
+    // Before the row under the cursor, or after it in the row's lower half
+    if (auto target = itemAt(pos)) {
+        return row(target) + (pos.y() > visualItemRect(target).center().y() ? 1 : 0);
+    }
+    return pos.y() < 0 ? 0 : count();
+}
+
+void FeatureList::endRowDrag()
+{
+    rowPressed = false;
+    rowDragging = false;
+    pressDeferred = false;
+    dropRow = -1;
+    unsetCursor();
+    viewport()->update();
+}
+
 void FeatureList::mousePressEvent(QMouseEvent* event)
 {
-    auto pressed = itemAt(event->position().toPoint());
+    QPoint pos = event->position().toPoint();
+    auto pressed = itemAt(pos);
     if (event->button() == Qt::LeftButton && pressed && pressed->type() == BarType) {
         dragging = true;
         setCursor(Qt::ClosedHandCursor);
         event->accept();
         return;
     }
+    // A plain press on a row may start a drag of the selected rows (ops#632). On a row of a
+    // selection of several it keeps the selection until the release, as Qt does with drags on
+    if (event->button() == Qt::LeftButton && pressed && event->modifiers() == Qt::NoModifier) {
+        rowPressed = true;
+        pressPos = pos;
+        if (pressed->isSelected() && selectedItems().size() > 1) {
+            pressDeferred = true;
+            event->accept();
+            return;
+        }
+    }
     QListWidget::mousePressEvent(event);
 }
 
 void FeatureList::mouseMoveEvent(QMouseEvent* event)
 {
+    if (rowPressed) {
+        QPoint pos = event->position().toPoint();
+        if (!rowDragging && (event->buttons() & Qt::LeftButton)
+            && (pos - pressPos).manhattanLength() >= QApplication::startDragDistance()) {
+            rowDragging = true;
+            setCursor(Qt::ClosedHandCursor);
+        }
+        if (rowDragging) {
+            dropRow = dropRowAt(pos);
+            viewport()->update();
+        }
+        // Not the list's own drag selection: the press is a drag's
+        event->accept();
+        return;
+    }
     auto bar = barItem();
     if (!dragging || !bar) {
         QListWidget::mouseMoveEvent(event);
@@ -258,6 +338,28 @@ void FeatureList::mouseMoveEvent(QMouseEvent* event)
 
 void FeatureList::mouseReleaseEvent(QMouseEvent* event)
 {
+    if (rowDragging) {
+        int before = dropRow;
+        endRowDrag();
+        event->accept();
+        Q_EMIT rowsDropped(before);
+        return;
+    }
+    if (pressDeferred) {
+        // A click on a row of the selection, without a drag: the press it held back
+        QMouseEvent press(
+            QEvent::MouseButtonPress,
+            event->position(),
+            event->globalPosition(),
+            Qt::LeftButton,
+            Qt::LeftButton,
+            Qt::NoModifier
+        );
+        QListWidget::mousePressEvent(&press);
+    }
+    if (rowPressed) {
+        endRowDrag();
+    }
     if (!dragging) {
         QListWidget::mouseReleaseEvent(event);
         return;
@@ -272,6 +374,11 @@ void FeatureList::mouseReleaseEvent(QMouseEvent* event)
 
 void FeatureList::keyPressEvent(QKeyEvent* event)
 {
+    if (rowDragging && event->key() == Qt::Key_Escape) {
+        endRowDrag();
+        event->accept();
+        return;
+    }
     if (dragging && event->key() == Qt::Key_Escape) {
         dragging = false;
         unsetCursor();
@@ -280,6 +387,20 @@ void FeatureList::keyPressEvent(QKeyEvent* event)
         return;
     }
     QListWidget::keyPressEvent(event);
+}
+
+void FeatureList::paintEvent(QPaintEvent* event)
+{
+    QListWidget::paintEvent(event);
+    if (!rowDragging || dropRow < 0 || count() == 0) {
+        return;
+    }
+    // Where the dragged rows go: a line in the highlight colour
+    int y = dropRow < count() ? visualItemRect(item(dropRow)).top()
+                              : visualItemRect(item(count() - 1)).bottom() + 1;
+    QPainter painter(viewport());
+    painter.setPen(QPen(palette().color(QPalette::Highlight), 2));
+    painter.drawLine(0, y, viewport()->width(), y);
 }
 
 void FeatureBarDelegate::paint(QPainter* painter, const QStyleOptionViewItem& option, const QModelIndex& index) const
@@ -360,6 +481,7 @@ FeaturesView::FeaturesView(QWidget* parent)
 
     connect(features, &FeatureList::barDropped, this, &FeaturesView::onBarDropped);
     connect(features, &FeatureList::barDragCancelled, this, &FeaturesView::forceRebuild);
+    connect(features, &FeatureList::rowsDropped, this, &FeaturesView::onRowsDropped);
     connect(features, &QListWidget::customContextMenuRequested, this, &FeaturesView::onFeatureMenu);
     connect(features, &QListWidget::itemDoubleClicked, this, &FeaturesView::onFeatureDoubleClicked);
     connect(features, &QListWidget::itemSelectionChanged, this, [this]() {
@@ -565,12 +687,13 @@ void FeaturesView::onChangedObject(const App::DocumentObject& obj, const App::Pr
     if (!obj.getDocument() || documentName != obj.getDocument()->getName()) {
         return;
     }
-    // The order follows the links; the rows show Label, the held look the Tip, the status
-    // Suppressed, the Parts list's eye Visibility
+    // The order follows the links and the saved ranks; the rows show Label, the held look the
+    // Tip, the status Suppressed, the Parts list's eye Visibility
     const char* name = prop.getName();
     bool shown = name
         && (strcmp(name, "Group") == 0 || strcmp(name, "Tip") == 0 || strcmp(name, "Label") == 0
-            || strcmp(name, "Suppressed") == 0 || strcmp(name, "Visibility") == 0);
+            || strcmp(name, "Suppressed") == 0 || strcmp(name, "Visibility") == 0
+            || strcmp(name, "HistoryRank") == 0);
     if (shown || prop.isDerivedFrom<App::PropertyLinkBase>()) {
         scheduleRebuild();
     }
@@ -630,8 +753,8 @@ void FeaturesView::rebuild()
         dirty = true;
         return;
     }
-    // Not under the user's hand: a bar drag ends with its own rebuild
-    if (features->isDraggingBar()) {
+    // Not under the user's hand: a drag ends with its own rebuild
+    if (features->isDraggingBar() || features->isDraggingRows()) {
         rebuildTimer->start();
         return;
     }
@@ -917,28 +1040,7 @@ void FeaturesView::rollStudio(App::Document* doc, App::Part* studio, App::Docume
                 memberCmd.c_str()
             );
         }
-        bool changed = false;
-        for (std::size_t i = 0; i < bodies.size(); ++i) {
-            auto body = bodies[i];
-            App::DocumentObject* tip = body->Tip.getValue();
-            if (tip == oldTips[i]) {
-                continue;
-            }
-            changed = true;
-            // As the tree's bar: show the feature the bar follows (which hides the Body's other
-            // features), or none at the very top
-            if (tip) {
-                FCMD_OBJ_SHOW(tip);
-            }
-            else {
-                for (auto obj : body->Group.getValues()) {
-                    if (PartDesign::Body::isSolidFeature(obj) && obj->Visibility.getValue()) {
-                        FCMD_OBJ_HIDE(obj);
-                    }
-                }
-            }
-        }
-        if (!changed) {
+        if (!showMovedTips(bodies, oldTips)) {
             App::GetApplication().abortTransaction(tid);
             return;
         }
@@ -967,6 +1069,134 @@ void FeaturesView::onBarDropped(int row)
     }
     // The dragged bar row moved without the signature knowing
     forceRebuild();
+}
+
+void FeaturesView::onRowsDropped(int row)
+{
+    auto doc = document();
+    if (!doc || row < 0) {
+        return;
+    }
+    // The dragged rows (the selected ones), and the list as dropped: the other rows and the bar,
+    // with the dragged rows before row
+    std::vector<App::DocumentObject*> rows;
+    std::set<int> dragged;
+    for (int i = 0; i < features->count(); ++i) {
+        auto item = features->item(i);
+        if (item->isSelected() && item->type() != FeatureList::BarType) {
+            if (auto obj = objectOf(item)) {
+                rows.push_back(obj);
+                dragged.insert(i);
+            }
+        }
+    }
+    if (rows.empty()) {
+        return;
+    }
+    std::vector<App::DocumentObject*> listed;  // the bar as null
+    std::size_t dropAt = 0;
+    int barAt = -1;
+    for (int i = 0; i <= features->count(); ++i) {
+        if (i == row) {
+            dropAt = listed.size();
+            listed.insert(listed.end(), rows.begin(), rows.end());
+        }
+        if (i == features->count()) {
+            break;
+        }
+        if (dragged.count(i)) {
+            continue;
+        }
+        auto item = features->item(i);
+        if (item->type() == FeatureList::BarType) {
+            barAt = static_cast<int>(listed.size());
+            listed.push_back(nullptr);
+            continue;
+        }
+        listed.push_back(objectOf(item));
+    }
+    // What each goes after: the last row above it (null: the top)
+    auto rowBefore = [&listed](std::size_t end) -> App::DocumentObject* {
+        for (std::size_t i = end; i-- > 0;) {
+            if (listed[i]) {
+                return listed[i];
+            }
+        }
+        return nullptr;
+    };
+    App::DocumentObject* after = rowBefore(dropAt);
+    App::DocumentObject* bar = barAt >= 0 ? rowBefore(static_cast<std::size_t>(barAt)) : nullptr;
+    std::string barName = bar ? bar->getNameInDocument() : "";
+    bool rolledBack = PartDesign::isStudioRolledBack(doc, studio());
+    try {
+        moveRows(doc, studio(), rows, after, barAt >= 0, bar);
+        // Rolled back, the bar stays where the list showed it as dropped (at the end it stays
+        // at the end)
+        if (rolledBack && barAt >= 0) {
+            barHinted = true;
+            barHint = barName;
+        }
+    }
+    catch (const Base::Exception& e) {
+        Gui::getMainWindow()->showMessage(QString::fromUtf8(e.what()), 5000);
+    }
+    forceRebuild();
+}
+
+void FeaturesView::moveRows(App::Document* doc,
+                            App::Part* studio,
+                            const std::vector<App::DocumentObject*>& rows,
+                            App::DocumentObject* after,
+                            bool hinted,
+                            App::DocumentObject* bar)
+{
+    if (!doc || rows.empty()) {
+        return;
+    }
+    // Its transaction would commit an open edit's, as the bar's
+    if (ViewProviderBody::isEditLocked(doc)) {
+        throw Base::RuntimeError(reorderLockedMessage);
+    }
+    const auto bodies = PartDesign::studioBodies(doc, studio);
+    std::vector<App::DocumentObject*> oldTips;
+    for (auto body : bodies) {
+        oldTips.push_back(body->Tip.getValue());
+    }
+    const auto oldSequence = PartDesign::studioSequence(doc, studio);
+    auto objCmd = [](App::DocumentObject* obj) {
+        return obj ? Gui::Command::getObjectCmd(obj) : std::string("None");
+    };
+    std::string studioCmd = studio ? Gui::Command::getObjectCmd(studio)
+                                   : std::string("App.getDocument('") + doc->getName() + "')";
+    std::string rowsCmd = "[";
+    for (auto obj : rows) {
+        rowsCmd += (rowsCmd.size() > 1 ? ", " : "") + objCmd(obj);
+    }
+    rowsCmd += "]";
+    std::string barCmd = hinted ? ", " + objCmd(bar) : std::string();
+    int tid = doc->openTransaction(QT_TRANSLATE_NOOP("Command", "Reorder"));
+    try {
+        Gui::Command::doCommand(Gui::Command::Doc, "import PartDesign");
+        Gui::Command::doCommand(
+            Gui::Command::Doc,
+            "PartDesign.moveInStudio(%s, %s, %s%s)",
+            studioCmd.c_str(),
+            rowsCmd.c_str(),
+            objCmd(after).c_str(),
+            barCmd.c_str()
+        );
+        bool tipsMoved = showMovedTips(bodies, oldTips);
+        if (!tipsMoved && PartDesign::studioSequence(doc, studio) == oldSequence) {
+            App::GetApplication().abortTransaction(tid);
+            return;
+        }
+        Gui::Command::updateActive();
+        App::GetApplication().commitTransaction(tid);
+    }
+    catch (const Base::Exception&) {
+        App::GetApplication().abortTransaction(tid);
+        throw;
+    }
 }
 
 void FeaturesView::rollFromMenu(App::DocumentObject* member, bool toEnd)
