@@ -4923,6 +4923,14 @@ class TestPad(unittest.TestCase):
         self.assertEqual(len(pad.Shape.Solids), 2)
         self.assertAlmostEqual(pad.Shape.Volume, 2 * 9 * math.pi * 5, places=3)
 
+    def testOpenCurvesLineBetweenTwoCircleSeams(self):
+        """Two circles of r 3 joined by a line between their seam points (3, 0) and (13, 0):
+        one circle and the line make one open wire. The line joins two loops and is on none."""
+        pad = self.openCurvePad(circles=[(0, 0, 3), (16, 0, 3)], lines=[((3, 0), (13, 0))])
+        self.assertTrue(pad.isValid(), pad.getStatusString())
+        self.assertEqual(len(pad.Shape.Solids), 2)
+        self.assertAlmostEqual(pad.Shape.Volume, 2 * 9 * math.pi * 5, places=3)
+
     def testOpenCurvesKeepTheHoles(self):
         """A circle of r 10 around one of r 4, and a stray line: the ring, as without the line."""
         pad = self.openCurvePad(circles=[(0, 0, 10), (0, 0, 4)], lines=[((-20, 12), (20, 12))])

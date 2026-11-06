@@ -562,88 +562,101 @@ TopoShape ProfileBased::withoutOpenCurves(const TopoShape& shape)
     if (std::ranges::all_of(wires, [](const TopoShape& wire) { return wire.isClosed(); })) {
         return shape;
     }
+    // All the wires' edges as one graph: its nodes are the edges' end points, merged within
+    // their tolerances, so that a loop split across wires, or closed by an open wire against a
+    // closed one, is still a loop. An edge is on a loop unless it is a bridge (Tarjan); an edge
+    // closed on itself (a circle) is a loop of its own. A closed wire's edges are on its loop.
+    struct Link
+    {
+        int edge;
+        int next;
+    };
+    std::vector<TopoShape> edges;
+    std::vector<size_t> wireOf;
+    for (size_t i = 0; i < wires.size(); ++i) {
+        for (auto& edge : wires[i].getSubTopoShapes(TopAbs_EDGE)) {
+            edges.push_back(edge);
+            wireOf.push_back(i);
+        }
+    }
+    std::vector<TopoDS_Vertex> nodes;
+    auto nodeOf = [&nodes](const TopoDS_Vertex& vertex) {
+        gp_Pnt point = BRep_Tool::Pnt(vertex);
+        for (size_t i = 0; i < nodes.size(); ++i) {
+            if (nodes[i].IsSame(vertex)
+                || point.Distance(BRep_Tool::Pnt(nodes[i]))
+                    <= BRep_Tool::Tolerance(nodes[i]) + BRep_Tool::Tolerance(vertex)) {
+                return static_cast<int>(i);
+            }
+        }
+        nodes.push_back(vertex);
+        return static_cast<int>(nodes.size() - 1);
+    };
+    std::vector<std::vector<Link>> links;
+    for (size_t i = 0; i < edges.size(); ++i) {
+        TopoDS_Vertex first, last;
+        TopExp::Vertices(TopoDS::Edge(edges[i].getShape()), first, last);
+        if (first.IsNull() || last.IsNull()) {
+            continue;
+        }
+        int from = nodeOf(first);
+        int to = nodeOf(last);
+        links.resize(nodes.size());
+        if (from != to) {
+            links[from].push_back({static_cast<int>(i), to});
+            links[to].push_back({static_cast<int>(i), from});
+        }
+    }
+    std::vector<bool> onLoop(edges.size(), true);
+    std::vector<int> order(nodes.size(), 0);
+    std::vector<int> low(nodes.size(), 0);
+    int count = 0;
+    auto visit = [&](auto&& self, int node, int via) -> void {
+        order[node] = low[node] = ++count;
+        for (const auto& link : links[node]) {
+            if (link.edge == via) {
+                continue;
+            }
+            if (order[link.next]) {
+                low[node] = std::min(low[node], order[link.next]);
+            }
+            else {
+                self(self, link.next, link.edge);
+                low[node] = std::min(low[node], low[link.next]);
+                if (low[link.next] > order[node]) {
+                    onLoop[link.edge] = false;
+                }
+            }
+        }
+    };
+    for (size_t node = 0; node < nodes.size(); ++node) {
+        if (!order[node]) {
+            visit(visit, static_cast<int>(node), -1);
+        }
+    }
+    if (std::ranges::all_of(onLoop, [](bool loop) { return loop; })) {
+        // Open wires whose edges all lie on loops (two loops through one point): the face
+        // maker refuses them, as before
+        return shape;
+    }
+    // The closed wires as they are; the open wires' edges on loops, joined again
     std::vector<TopoShape> kept;
+    std::vector<TopoShape> loopEdges;
     for (const auto& wire : wires) {
         if (wire.isClosed()) {
             kept.push_back(wire);
-            continue;
         }
-        // The open wire as a graph: its nodes are the edges' end points, merged within their
-        // tolerances. An edge is on a loop unless it is a bridge (Tarjan); an edge closed on
-        // itself (a circle) is a loop of its own.
-        auto edges = wire.getSubTopoShapes(TopAbs_EDGE);
-        std::vector<TopoDS_Vertex> nodes;
-        auto nodeOf = [&nodes](const TopoDS_Vertex& vertex) {
-            gp_Pnt point = BRep_Tool::Pnt(vertex);
-            for (size_t i = 0; i < nodes.size(); ++i) {
-                if (nodes[i].IsSame(vertex)
-                    || point.Distance(BRep_Tool::Pnt(nodes[i]))
-                        <= BRep_Tool::Tolerance(nodes[i]) + BRep_Tool::Tolerance(vertex)) {
-                    return static_cast<int>(i);
-                }
-            }
-            nodes.push_back(vertex);
-            return static_cast<int>(nodes.size() - 1);
-        };
-        std::vector<std::vector<std::pair<int, int>>> links;  // per node: (next node, edge)
-        for (size_t i = 0; i < edges.size(); ++i) {
-            TopoDS_Vertex first, last;
-            TopExp::Vertices(TopoDS::Edge(edges[i].getShape()), first, last);
-            if (first.IsNull() || last.IsNull()) {
-                continue;
-            }
-            int from = nodeOf(first);
-            int to = nodeOf(last);
-            links.resize(nodes.size());
-            if (from != to) {
-                links[from].emplace_back(to, static_cast<int>(i));
-                links[to].emplace_back(from, static_cast<int>(i));
-            }
+    }
+    for (size_t i = 0; i < edges.size(); ++i) {
+        if (onLoop[i] && !wires[wireOf[i]].isClosed()) {
+            loopEdges.push_back(edges[i]);
         }
-        std::vector<bool> onLoop(edges.size(), true);
-        std::vector<int> order(nodes.size(), 0);
-        std::vector<int> low(nodes.size(), 0);
-        int count = 0;
-        auto visit = [&](auto&& self, int node, int via) -> void {
-            order[node] = low[node] = ++count;
-            for (auto [next, edge] : links[node]) {
-                if (edge == via) {
-                    continue;
-                }
-                if (order[next]) {
-                    low[node] = std::min(low[node], order[next]);
-                }
-                else {
-                    self(self, next, edge);
-                    low[node] = std::min(low[node], low[next]);
-                    if (low[next] > order[node]) {
-                        onLoop[edge] = false;
-                    }
-                }
-            }
-        };
-        for (size_t node = 0; node < nodes.size(); ++node) {
-            if (!order[node]) {
-                visit(visit, static_cast<int>(node), -1);
-            }
-        }
-        std::vector<TopoShape> loopEdges;
-        for (size_t i = 0; i < edges.size(); ++i) {
-            if (onLoop[i]) {
-                loopEdges.push_back(edges[i]);
-            }
-        }
-        if (loopEdges.size() == edges.size()) {
-            // Loops that make no closed wire (two through one point): the face maker refuses
-            // the wire, as before
-            kept.push_back(wire);
-        }
-        else if (!loopEdges.empty()) {
-            TopoShape loops(shape);
-            loops.makeElementWires(loopEdges);
-            auto loopWires = loops.getSubTopoShapes(TopAbs_WIRE);
-            kept.insert(kept.end(), loopWires.begin(), loopWires.end());
-        }
+    }
+    if (!loopEdges.empty()) {
+        TopoShape loops(shape);
+        loops.makeElementWires(loopEdges);
+        auto loopWires = loops.getSubTopoShapes(TopAbs_WIRE);
+        kept.insert(kept.end(), loopWires.begin(), loopWires.end());
     }
     if (kept.empty()) {
         return {};
