@@ -501,10 +501,11 @@ class TestFeaturesViewGui(unittest.TestCase):
         self.assertIs(body3.Tip, padC)
         self.assertTrue(waitFor(lambda: self.partRows() == ["Body1", "Body2", body3.Label]))
 
-    def testDeletePartForcedWithAnother(self):
-        """Review prs464e2-r2, R2-1: Std_Delete of two parts, one read whole by a binder; its
-        "might break" dialog answered Yes removes every selected object, so both go with their
-        features (as before), and no feature is left outside a Body."""
+    def testDeletePartForcedWithAnother(self, readFirst=False):
+        """Reviews prs464e2-r2 R2-1, r3 R3-1: Std_Delete of two parts, one read whole by a binder;
+        its "might break" dialog answered Yes removes that one with its features (as before), the
+        other gets a Delete part, in either selection order, and no feature is left outside a
+        Body."""
         skC = sketch(self.body1, "SkC", (40, 0, 50, 10))
         padC = self.body1.newObject("PartDesign::Pad", "PadC")
         padC.Profile = skC
@@ -524,13 +525,15 @@ class TestFeaturesViewGui(unittest.TestCase):
 
         QtCore.QTimer.singleShot(50, answer)
         Gui.Selection.clearSelection()
-        Gui.Selection.addSelection(self.doc.Name, body3.Name)
-        Gui.Selection.addSelection(self.doc.Name, self.body2.Name)
+        order = (self.body2.Name, body3.Name) if readFirst else names
+        for name in order:
+            Gui.Selection.addSelection(self.doc.Name, name)
         Gui.runCommand("Std_Delete")
         pump(0.3)
         self.doc.recompute()
-        for name in names:
-            self.assertIsNone(self.doc.getObject(name))
+        self.assertIsNone(self.doc.getObject(names[1]))
+        self.assertIs(self.doc.getObject(names[0]), body3)
+        self.assertEqual(body3.Tip.TypeId, "PartDesign::DeletePart")
         stray = [
             o.Name
             for o in self.doc.Objects
@@ -538,4 +541,7 @@ class TestFeaturesViewGui(unittest.TestCase):
             and not (o.getParentGeoFeatureGroup() or o).isDerivedFrom("PartDesign::Body")
         ]
         self.assertEqual(stray, [])
-        self.assertEqual(self.doc.findObjects("PartDesign::DeletePart"), [])
+
+    def testDeletePartForcedWithAnotherFirst(self):
+        """The same, the binder's Body selected first (review prs464e2-r3, R3-1)."""
+        self.testDeletePartForcedWithAnother(readFirst=True)

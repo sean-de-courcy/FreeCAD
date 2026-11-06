@@ -371,21 +371,19 @@ bool ViewProviderBody::onDelete(const std::vector<std::string>&)
     // features
     auto body = getObject<PartDesign::Body>();
     App::Part* studio = nullptr;
-    // Std_Delete asked "the referencing objects might break" for one of the objects it deletes
-    // (a binder or link reads it whole, an expression reads it): it removes every one of them
-    // whatever this returns (forceDeletion), so the Body's features go with it, as before; a
-    // Delete part there would be left in no Body (reviews prs464e2-r1 T2/T5, r2 R2-1)
+    // Std_Delete asked "the referencing objects might break" about this Body (a binder or link
+    // reads it whole, an expression reads it): its Yes removes the Body whatever this returns, so
+    // the Body's features go with it, as before; a Delete part there would be left in no Body
+    // (reviews prs464e2-r1 T2/T5, r2 R2-1, r3 R3-1). Its test: a parent not being deleted (not
+    // selected; one deleted already has left the in-list) whose view provider refuses
     auto selected = Gui::Selection().getObjectsOfType(App::DocumentObject::getClassTypeId());
     std::set<const App::DocumentObject*> deleting(selected.begin(), selected.end());
-    deleting.insert(body);
-    bool forced = std::ranges::any_of(deleting, [&deleting](const App::DocumentObject* obj) {
-        return obj && std::ranges::any_of(obj->getInList(), [&](App::DocumentObject* parent) {
-            if (!parent || deleting.count(parent) != 0) {
-                return false;
-            }
-            auto vp = Gui::Application::Instance->getViewProvider(parent);
-            return vp && !vp->canDelete(const_cast<App::DocumentObject*>(obj));
-        });
+    bool forced = body && std::ranges::any_of(body->getInList(), [&](App::DocumentObject* parent) {
+        if (!parent || deleting.count(parent) != 0) {
+            return false;
+        }
+        auto vp = Gui::Application::Instance->getViewProvider(parent);
+        return vp && !vp->canDelete(body);
     });
     if (body && !forced && Part::BodyBase::studioOf(body, studio) && body->Tip.getValue()
         && !PartDesign::Boolean::mergeOf(body)) {
