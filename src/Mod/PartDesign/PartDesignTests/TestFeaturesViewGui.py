@@ -542,6 +542,50 @@ class TestFeaturesViewGui(unittest.TestCase):
         ]
         self.assertEqual(stray, [])
 
+    def newPart(self):
+        skC = sketch(self.body1, "SkC", (40, 0, 50, 10))
+        padC = self.body1.newObject("PartDesign::Pad", "PadC")
+        padC.Profile = skC
+        padC.Length = 4
+        body3 = PartDesign.newPartFrom(padC)
+        self.doc.recompute()
+        return body3
+
+    def testDeletePartWithAllItsFeatures(self, bodyFirst=True):
+        """Review s33e2 F1: a Body selected with every one of its features (a range in the tree)
+        is deleted outright, in either selection order: no Body or Delete part is left."""
+        body3 = self.newPart()
+        name = body3.Name
+        members = [o.Name for o in body3.Group]
+        Gui.Selection.clearSelection()
+        order = [name] + members if bodyFirst else members + [name]
+        for obj in order:
+            Gui.Selection.addSelection(self.doc.Name, obj)
+        Gui.runCommand("Std_Delete")
+        pump(0.2)
+        self.doc.recompute()
+        self.assertIsNone(self.doc.getObject(name))
+        for obj in members:
+            self.assertIsNone(self.doc.getObject(obj))
+        self.assertEqual(self.doc.findObjects("PartDesign::DeletePart"), [])
+
+    def testDeletePartWithAllItsFeaturesBodyLast(self):
+        self.testDeletePartWithAllItsFeatures(bodyFirst=False)
+
+    def testDeleteADeletedPartAgain(self):
+        """Review s33e2 F2: Delete on a part deleted already removes the Body with its features."""
+        body3 = self.newPart()
+        name = body3.Name
+        for _ in range(2):
+            Gui.Selection.clearSelection()
+            Gui.Selection.addSelection(self.doc.Name, name)
+            Gui.runCommand("Std_Delete")
+            pump(0.2)
+        self.doc.recompute()
+        self.assertIsNone(self.doc.getObject(name))
+        self.assertIsNone(self.doc.getObject("PadC"))
+        self.assertEqual(self.doc.findObjects("PartDesign::DeletePart"), [])
+
     def testDeletePartForcedWithAnotherFirst(self):
         """The same, the binder's Body selected first (review prs464e2-r3, R3-1)."""
         self.testDeletePartForcedWithAnother(readFirst=True)

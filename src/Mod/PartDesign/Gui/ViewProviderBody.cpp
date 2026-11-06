@@ -53,6 +53,7 @@
 #include <Mod/PartDesign/App/Body.h>
 #include <Mod/PartDesign/App/FeatureBoolean.h>
 #include <Mod/PartDesign/App/FeatureDeletePart.h>
+#include <Mod/PartDesign/App/FeatureTransformed.h>
 #include <Mod/PartDesign/App/FeatureSketchBased.h>
 #include <Mod/PartDesign/App/FeatureBase.h>
 #include <Mod/PartDesign/App/FeatureMultiTransform.h>
@@ -366,9 +367,8 @@ bool ViewProviderBody::onDelete(const std::vector<std::string>&)
 {
     // A part of a studio: deleting it is a feature in its history, Onshape's Delete part (ops#635,
     // notes/part-history-design.md 3.2). Its features stay; rolling above the feature, deleting it
-    // or undo brings the part back. A part deleted already stays as it is. A Body in no studio (an
-    // Assembly's), or one that is no part (no solid feature above its bar), is deleted with its
-    // features
+    // or undo brings the part back. A Body in no studio (an Assembly's), one that is no part (no
+    // solid feature above its bar), or one deleted as a part already, is deleted with its features
     auto body = getObject<PartDesign::Body>();
     App::Part* studio = nullptr;
     // Std_Delete asked "the referencing objects might break" about this Body (a binder or link
@@ -385,22 +385,29 @@ bool ViewProviderBody::onDelete(const std::vector<std::string>&)
         auto vp = Gui::Application::Instance->getViewProvider(parent);
         return vp && !vp->canDelete(body);
     });
-    if (body && !forced && Part::BodyBase::studioOf(body, studio) && body->Tip.getValue()
-        && !PartDesign::Boolean::mergeOf(body)) {
-        if (!PartDesign::DeletePart::deleterOf(body)) {
-            Gui::Command::doCommand(Gui::Command::Doc, "import PartDesign");
-            Gui::Command::doCommand(
-                Gui::Command::Doc,
-                "PartDesign.deletePart(%s)",
-                Gui::Command::getObjectCmd(body).c_str()
-            );
-            // Std_Delete recomputes only where it removed something
-            Gui::Command::doCommand(
-                Gui::Command::Doc,
-                "App.getDocument('%s').recompute()",
-                body->getDocument()->getName()
-            );
-        }
+    // Every feature of the Body is deleted with it (a range in the tree, Ctrl+A): nothing is left
+    // for a Delete part to keep, so the Body goes too, in either selection order (review s33e2
+    // F1). A MultiTransform's steps go with their MultiTransform
+    bool everyMember = body && std::ranges::all_of(body->Group.getValues(), [&](App::DocumentObject* obj) {
+        auto step = freecad_cast<PartDesign::Transformed*>(obj);
+        return !obj || deleting.count(obj) != 0 || (step && step->isMultiTransformChild());
+    });
+    // A part deleted already, deleted again: the Body goes with its features (review s33e2 F2)
+    bool deleted = body && PartDesign::DeletePart::deleterOf(body);
+    if (body && !forced && !everyMember && !deleted && Part::BodyBase::studioOf(body, studio)
+        && body->Tip.getValue() && !PartDesign::Boolean::mergeOf(body)) {
+        Gui::Command::doCommand(Gui::Command::Doc, "import PartDesign");
+        Gui::Command::doCommand(
+            Gui::Command::Doc,
+            "PartDesign.deletePart(%s)",
+            Gui::Command::getObjectCmd(body).c_str()
+        );
+        // Std_Delete recomputes only where it removed something
+        Gui::Command::doCommand(
+            Gui::Command::Doc,
+            "App.getDocument('%s').recompute()",
+            body->getDocument()->getName()
+        );
         return false;
     }
     FCMD_OBJ_CMD(getObject(), "removeObjectsFromDocument()");
