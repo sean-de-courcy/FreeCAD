@@ -1598,10 +1598,15 @@ namespace
 // sub-elements take the general path, which keeps the object and says so, and the rest of the
 // selection is still deleted (ops#160, ops#164). Looked up by name: Gui links neither PartGui nor
 // SketcherGui, whose sketch is a Part shape too.
-bool handsSubElementsToEdited(const ViewProviderDocumentObject* vpedit)
+bool isSketch(const ViewProviderDocumentObject* vpedit)
 {
     const Base::Type sketch = Base::Type::fromName("SketcherGui::ViewProviderSketch");
-    if (!sketch.isBad() && vpedit->isDerivedFrom(sketch)) {
+    return !sketch.isBad() && vpedit->isDerivedFrom(sketch);
+}
+
+bool handsSubElementsToEdited(const ViewProviderDocumentObject* vpedit)
+{
+    if (isSketch(vpedit)) {
         return true;
     }
     const Base::Type partShape = Base::Type::fromName("PartGui::ViewProviderPartExt");
@@ -1690,7 +1695,7 @@ void StdCmdDelete::activated(int iMsg)
             std::vector<std::string> subNames;
         };
         std::vector<HandedToEdited> handed;
-        bool elementEditor = false;
+        QStringList pickingSketches;
         for (auto& editDoc : editDocs) {
             // getEditViewProvider(), not getInEdit(): that is null while another view of the
             // document is active (ops#164)
@@ -1698,7 +1703,9 @@ void StdCmdDelete::activated(int iMsg)
 
             // In practice, no ViewProviderDocumentObject accepts deletion in edit - 2025-06-17
             if (vpedit && !vpedit->acceptDeletionsInEdit() && handsSubElementsToEdited(vpedit)) {
-                elementEditor = true;
+                if (isSketch(vpedit)) {
+                    pickingSketches << QString::fromUtf8(vpedit->getObject()->Label.getValue());
+                }
                 for (auto& sel : Selection().getSelectionEx(editDoc->getDocument()->getName())) {
                     if (sel.getObject() == vpedit->getObject()) {
                         if (!sel.getSubNames().empty()) {
@@ -1709,16 +1716,26 @@ void StdCmdDelete::activated(int iMsg)
                 }
             }
         }
-        // FreeCAD-CH (ops#634): an element of another object picked while such an editor is open
-        // (a model edge picked in the sketch editor, for a constraint) is a reference, never a
-        // request to delete its object
-        if (elementEditor) {
-            std::erase_if(sels, [&handed](const auto& sel) {
-                return !sel.getSubNames().empty()
+        // FreeCAD-CH (ops#634): an element of another object picked while a sketch is edited (a
+        // model edge picked for a constraint) is a reference, never a request to delete its object
+        QStringList pickedLabels;
+        if (!pickingSketches.isEmpty()) {
+            std::erase_if(sels, [&handed, &pickedLabels](const auto& sel) {
+                const bool picked = !sel.getSubNames().empty()
                     && std::ranges::none_of(handed, [&sel](const HandedToEdited& entry) {
                            return entry.obj == sel.getObject();
                        });
+                if (picked && sel.getObject()) {
+                    const QString label = QString::fromUtf8(sel.getObject()->Label.getValue());
+                    if (!pickedLabels.contains(label)) {
+                        pickedLabels << label;
+                    }
+                }
+                return picked;
             });
+            if (handed.empty()) {
+                warnNotDeleted(pickingSketches, pickedLabels);
+            }
         }
         for (auto& [vpedit, edited, subNames] : handed) {
             manageDocCommand(edited->getDocument());
@@ -1738,7 +1755,7 @@ void StdCmdDelete::activated(int iMsg)
                     return entry.obj == obj;
                 });
             };
-            QStringList keptLabels;
+            QStringList keptLabels = pickedLabels;
             for (const auto& sel : sels) {
                 const App::DocumentObject* obj = sel.getObject();
                 if (obj && !isHanded(obj)) {

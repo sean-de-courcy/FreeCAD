@@ -172,10 +172,21 @@ class TestSketchModelPicksGui(SketcherGuiTestCase):
     def mouse_at(self, point):
         self.move(self.viewport, self.screen_point(point))
 
-    def click_at(self, point):
+    def click_at(self, point, modifiers=QtCore.Qt.NoModifier):
+        """A left click where the world point shows, with the modifiers held."""
         at = self.screen_point(point)
-        self.move(self.viewport, at)
-        self.click(self.viewport, at)
+        left, none = QtCore.Qt.LeftButton, QtCore.Qt.NoButton
+        for kind, button, buttons in (
+            (QtCore.QEvent.MouseMove, none, none),
+            (QtCore.QEvent.MouseButtonPress, left, left),
+            (QtCore.QEvent.MouseButtonRelease, left, none),
+        ):
+            event = QtGui.QMouseEvent(
+                kind, at, self.viewport.mapToGlobal(at), button, buttons, modifiers
+            )
+            QtGui.QApplication.sendEvent(self.viewport, event)
+            self.pump(80)
+        self.pump(80)
 
     def drag(self, start, end):
         """A box drawn with the left button from one world point to another."""
@@ -248,18 +259,57 @@ class TestSketchModelPicksGui(SketcherGuiTestCase):
         self.assertEqual(self.doc.UndoCount, self.undo_start + 1)
 
     def test_a_refused_selection_leaves_no_link(self):
-        """Two model edges (both fixed) for Coincident: no constraint, no link, no undo step."""
+        """Two model edges (both fixed) for Coincident: no constraint, no link, no undo step, and
+        the two edges stay selected as picked (review prsd154-r1 (Opus) T2: the aborted links'
+        ExternalEdge names were left selected, and the next command refused)."""
         self.start_edit()
-        self.select(
-            (self.pad, self.edge_between(self.pad, V(0, 0, 5), V(20, 0, 5))),
-            (self.pad, self.edge_between(self.pad, V(20, 0, 5), V(20, 10, 5))),
-        )
+        picks = {
+            ("Pad", self.edge_between(self.pad, V(0, 0, 5), V(20, 0, 5))),
+            ("Pad", self.edge_between(self.pad, V(20, 0, 5), V(20, 10, 5))),
+        }
+        self.select(*[(self.pad, sub) for _, sub in sorted(picks)])
         self.answer_modals()
         self.run_command("Sketcher_ConstrainCoincidentUnified")
 
         self.assertEqual(len(self.sketch.Constraints), 0)
         self.assertEqual(len(self.sketch.ExternalGeometry), 0)
         self.assertEqual(self.doc.UndoCount, self.undo_start)
+        self.assertEqual(self.selected(), picks)
+
+    def test_a_pick_that_cant_be_linked_books_nothing(self):
+        """Review prsd154-r1 (Opus) T1: the line and the Body's origin point (a whole object, no
+        element), then Distance: the origin isn't dropped to make the line's length; no link,
+        no Distance, as before."""
+        self.start_edit()
+        origin_point = [f for f in self.body.Origin.OriginFeatures if f.Role == "Origin"][0]
+        self.select((self.sketch, "Edge1"), (origin_point, ""))
+        self.answer_modals()
+        self.run_command("Sketcher_ConstrainDistance")
+        self.key_click(self.viewport, QtCore.Qt.Key_Escape)
+        self.flush_gui(100)
+
+        self.assertEqual(self.constraints_of("Distance"), [])
+        self.assertEqual(len(self.sketch.ExternalGeometry), 0)
+
+    def test_another_document_s_picks_pass_the_gate(self):
+        """Review prsd154-r1 (Opus) T4: the gate is global; a face of a box in another document
+        can still be selected while the sketch is edited."""
+        # hidden: no view of its own, so this document's view stays the active one
+        other = FreeCAD.newDocument("TestSketchModelPicksOther", hidden=True)
+        try:
+            other.addObject("Part::Box", "Box")
+            other.recompute()
+            FreeCAD.setActiveDocument(self.doc.Name)
+            self.start_edit()
+            FreeCADGui.Selection.addSelection(other.Name, "Box", "Face1")
+            names = [
+                sub for sel in FreeCADGui.Selection.getSelectionEx(other.Name)
+                for sub in sel.SubElementNames
+            ]
+            self.assertEqual(names, ["Face1"])
+        finally:
+            FreeCADGui.Selection.clearSelection()
+            FreeCAD.closeDocument(other.Name)
 
     def test_a_constraint_tool_left_after_a_model_pick_leaves_no_link(self):
         """The Coincident tool, a model vertex picked (it waits for a second pick), then Esc: the
@@ -300,7 +350,39 @@ class TestSketchModelPicksGui(SketcherGuiTestCase):
         self.select((box, "Edge1"), (far, "Edge1"))
         self.assertEqual(self.selected(), {("SiblingBox", "Edge1")})
 
-    # Clicks (skipped where the off-screen view doesn't pick) -----------------------------------
+    # Clicks on the sketch's own elements (off screen too) --------------------------------------
+
+    def test_ctrl_click_adds_a_sketch_element(self):
+        """Review prsd154-r1 (Sonnet) F1: with the 3D view's selection on in plain edit mode, a
+        Ctrl+click on a second sketch line still adds it (its release reaches the sketch)."""
+        self.sketch.addGeometry(Part.LineSegment(V(2, 6, 0), V(8, 6, 0)))
+        self.doc.recompute()
+        self.start_edit()
+        FreeCADGui.Selection.clearSelection()
+        self.click_at(V(5, 2, 5))
+        self.assertEqual(self.selected(), {("Sketch", "Edge1")})
+        self.click_at(V(5, 6, 5), QtCore.Qt.ControlModifier)
+        self.assertEqual(self.selected(), {("Sketch", "Edge1"), ("Sketch", "Edge2")})
+
+    def test_an_empty_click_clears_the_sketch_selection(self):
+        """A click on no sketch element (only the box's top face, refused) clears it."""
+        self.start_edit()
+        FreeCADGui.Selection.clearSelection()
+        self.click_at(V(5, 2, 5))
+        self.assertEqual(self.selected(), {("Sketch", "Edge1")})
+        self.click_at(V(14, 6, 5))
+        self.assertEqual(self.selected(), set())
+
+    def test_box_selection_stays_sketch_only(self):
+        """A box from the box's top face around the sketch line selects sketch elements only."""
+        self.start_edit()
+        FreeCADGui.Selection.clearSelection()
+        self.drag(V(1, 6, 5), V(9, 1, 5))
+        picked = self.selected()
+        self.assertIn(("Sketch", "Edge1"), picked)
+        self.assertEqual({name for name, _ in picked}, {"Sketch"}, picked)
+
+    # Clicks on model elements (skipped where the off-screen view doesn't pick) -----------------
 
     def test_hover_and_click_pick_a_model_edge_beside_the_sketch_selection(self):
         """Hover on the box's top front edge preselects it; a click adds it to the selected line
@@ -336,16 +418,6 @@ class TestSketchModelPicksGui(SketcherGuiTestCase):
         self.click_at(V(10, 10, 5))
         self.assertEqual(self.selected(), {("Sketch", "Edge2")})
 
-    def test_box_selection_stays_sketch_only(self):
-        """A box from the box's top face around the sketch line selects sketch elements only."""
-        self.require_picking()
-        self.start_edit()
-        FreeCADGui.Selection.clearSelection()
-        self.drag(V(1, 6, 5), V(9, 1, 5))
-        picked = self.selected()
-        self.assertIn(("Sketch", "Edge1"), picked)
-        self.assertEqual({name for name, _ in picked}, {"Sketch"}, picked)
-
     def test_an_empty_click_clears_a_model_pick(self):
         """A model edge picked, then a click where only the box's top face (refused) lies: the
         selection is cleared, as for the sketch's own picks."""
@@ -356,3 +428,17 @@ class TestSketchModelPicksGui(SketcherGuiTestCase):
         self.assertEqual(len(self.selected()), 1)
         self.click_at(V(14, 6, 5))
         self.assertEqual(self.selected(), set())
+
+    def test_a_second_click_on_a_model_pick_removes_it_with_no_rubber_band(self):
+        """Review prsd154-r1 (Sonnet) F2: a click on a selected model edge removes it; the next
+        click on the sketch line selects the line alone (no box left following the cursor)."""
+        self.require_picking()
+        self.start_edit()
+        FreeCADGui.Selection.clearSelection()
+        self.click_at(V(15, 0, 5))
+        self.assertEqual(len(self.selected()), 1)
+        self.click_at(V(15, 0, 5))
+        self.assertEqual(self.selected(), set())
+        self.mouse_at(V(10, 5, 5))
+        self.click_at(V(5, 2, 5))
+        self.assertEqual(self.selected(), {("Sketch", "Edge1")})

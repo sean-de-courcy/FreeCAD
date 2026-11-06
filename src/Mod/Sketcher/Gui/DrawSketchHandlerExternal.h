@@ -140,7 +140,9 @@ public:
     bool allow(App::Document* document, App::DocumentObject* object, const char* subName) override
     {
         this->notAllowedReason = "";
-        if (object == sketch || Base::Tools::isNullOrEmpty(subName)) {
+        // The gate is global: another document's picks are that document's business
+        if (object == sketch || Base::Tools::isNullOrEmpty(subName)
+            || document != sketch->getDocument()) {
             return true;
         }
         const std::string_view element(subName);
@@ -148,9 +150,10 @@ public:
             && !(element.starts_with("Vertex") && element.size() > 6)) {
             return false;
         }
-        // A click on a sketch element in front of (or behind) a model edge is the sketch's
+        // A click on a sketch element in front of (or behind) a model edge is the sketch's, and
+        // so is the release of a drag or a box
         auto* vp = freecad_cast<ViewProviderSketch*>(Gui::Application::Instance->getViewProvider(sketch));
-        if (vp && vp->hasSketchPreselection()) {
+        if (vp && !vp->takesModelPick()) {
             return false;
         }
         return ExternalSelection::allow(document, object, subName);
