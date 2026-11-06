@@ -68,8 +68,12 @@ class TestDeletePart(unittest.TestCase):
         feature = self.delete()
         PartDesign.rollStudioTo(self.doc, self.boss)
         self.doc.recompute()
+        # The bar shows the part at its Tip; the rolled-back Body itself is held and keeps its
+        # last shape for what reads it (R7, as for any bar move)
         self.assertIs(self.body.Tip, self.pad)
-        self.assertAlmostEqual(self.body.Shape.Volume, 1000, places=6)
+        self.assertTrue(self.body.holds(feature))
+        self.assertTrue(self.pad.isValid())
+        self.assertAlmostEqual(self.pad.Shape.Volume, 1000, places=6)
         PartDesign.rollStudioToEnd(self.doc)
         self.doc.recompute()
         self.assertIs(self.body.Tip, feature)
