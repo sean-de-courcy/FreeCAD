@@ -672,6 +672,61 @@ bool moveInStudio(App::Document* doc,
     return changed || body->Tip.getValue() != oldTip;
 }
 
+std::vector<App::DocumentObject*> readsOfOtherBodies(const App::DocumentObject* member,
+                                                     std::vector<const App::DocumentObject*>* via)
+{
+    std::vector<App::DocumentObject*> found;
+    const Body* own = member ? Body::findBodyOf(member) : nullptr;
+    if (!own) {
+        return found;
+    }
+    auto add = [&](App::DocumentObject* obj, const App::DocumentObject* by) {
+        found.push_back(obj);
+        if (via) {
+            via->push_back(by);
+        }
+    };
+    std::unordered_set<const App::DocumentObject*> seen {member};
+    // (reader, the member of own that reads through it)
+    std::vector<std::pair<const App::DocumentObject*, const App::DocumentObject*>> readers {
+        {member, member}
+    };
+    while (!readers.empty()) {
+        auto [reader, by] = readers.back();
+        readers.pop_back();
+        for (auto obj : linkReads(reader)) {
+            if (!obj || !seen.insert(obj).second) {
+                continue;
+            }
+            if (auto body = freecad_cast<Body*>(obj)) {
+                if (body != own) {
+                    add(body, by);
+                }
+                continue;
+            }
+            if (auto body = Body::findBodyOf(obj)) {
+                if (body != own) {
+                    add(obj, by);
+                }
+                // Its own Body's sketch, datum or binder is read through; a solid feature's own
+                // inputs are its own
+                else if (!Body::isSolidFeature(obj)) {
+                    readers.emplace_back(obj, obj);
+                }
+                continue;
+            }
+            // Containers (an App::Part, a group, an Origin) and origin features carry no geometry
+            // of their own (studioSequence's rule)
+            if (obj->hasExtension(App::GroupExtension::getExtensionClassTypeId())
+                || obj->isDerivedFrom<App::DatumElement>() || obj->isDerivedFrom<Part::BodyBase>()) {
+                continue;
+            }
+            readers.emplace_back(obj, by);
+        }
+    }
+    return found;
+}
+
 void rollStudioTo(App::Document* doc, App::Part* studio, App::DocumentObject* member)
 {
     const auto sequence = studioSequence(doc, studio);

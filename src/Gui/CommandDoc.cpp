@@ -1801,6 +1801,11 @@ void StdCmdDelete::activated(int iMsg)
             }
             bool autoDeletion = true;
             bool forceDeletion = false;
+            // The objects a parent outside the deletion refuses to lose: the dialog's Yes removes
+            // these whatever their view provider's onDelete() returns, and only these (FreeCAD-CH
+            // ops#635: a Body whose onDelete() records a Delete part instead was removed too,
+            // leaving its features in no Body)
+            std::set<const App::DocumentObject*> referenced;
             for (auto& sel : sels) {
                 auto obj = sel.getObject();
                 if (!obj) {
@@ -1815,6 +1820,11 @@ void StdCmdDelete::activated(int iMsg)
                         ViewProvider* vp = Application::Instance->getViewProvider(parent);
                         if (vp && !vp->canDelete(obj)) {
                             autoDeletion = false;
+                            referenced.insert(obj);
+                            if (affectedLabels.size() >= 10) {
+                                more = true;
+                                continue;
+                            }
                             QString label;
                             if (parent->getDocument() != obj->getDocument()) {
                                 label = QLatin1String(parent->getFullName().c_str());
@@ -1828,15 +1838,8 @@ void StdCmdDelete::activated(int iMsg)
                                 );
                             }
                             affectedLabels.insert(label);
-                            if (affectedLabels.size() >= 10) {
-                                more = true;
-                                break;
-                            }
                         }
                     }
-                }
-                if (more) {
-                    break;
                 }
             }
 
@@ -1875,7 +1878,8 @@ void StdCmdDelete::activated(int iMsg)
                         manageDocCommand(obj->getDocument());
                         // ask the ViewProvider if it wants to do some clean up
                         // skip if user explicitly confirmed deletion of objects with dependencies
-                        if (vp->onDelete(sel.getSubNames()) || forceDeletion) {
+                        if (vp->onDelete(sel.getSubNames())
+                            || (forceDeletion && referenced.count(obj) != 0)) {
                             docs.insert(obj->getDocument());
                             FCMD_OBJ_DOC_CMD(obj, "removeObject('" << obj->getNameInDocument() << "')");
                         }

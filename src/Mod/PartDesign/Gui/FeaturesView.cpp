@@ -38,6 +38,7 @@
 #include <Gui/WorkbenchManager.h>
 #include <Mod/Part/App/PartFeature.h>
 #include <Mod/PartDesign/App/Body.h>
+#include <Mod/PartDesign/App/FeatureDeletePart.h>
 #include <Mod/PartDesign/App/Studio.h>
 
 #include "ViewProviderBody.h"
@@ -195,12 +196,13 @@ std::string rowKey(const App::DocumentObject* obj, bool held, const std::string&
 /// The studio's parts: its Bodies with a solid feature at or above their bar, and the other solids
 /// at its level (an imported shape, a Part workbench feature) that no other shape reads. A part
 /// exists only while the history makes it, as in Onshape (ops#635): a Body whose new-part feature
-/// was deleted, or whose bar is at its top, isn't one; it keeps its sketches, and shows nothing
+/// was deleted, whose bar is at its top, or that a Delete part deleted, isn't one; it keeps its
+/// sketches, and shows nothing
 std::vector<App::DocumentObject*> studioParts(App::Document* doc, App::Part* studio)
 {
     std::vector<App::DocumentObject*> parts;
     for (auto body : PartDesign::studioBodies(doc, studio)) {
-        if (body->Tip.getValue()) {
+        if (body->Tip.getValue() && !PartDesign::DeletePart::deleterOf(body)) {
             parts.push_back(body);
         }
     }

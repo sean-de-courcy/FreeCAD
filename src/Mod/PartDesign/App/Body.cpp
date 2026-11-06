@@ -41,6 +41,7 @@
 #include "Body.h"
 #include "BodyPy.h"
 #include "FeatureBase.h"
+#include "FeatureDeletePart.h"
 #include "FeatureSketchBased.h"
 #include "FeatureSolid.h"
 #include "FeatureTransformed.h"
@@ -779,9 +780,9 @@ App::DocumentObjectExecReturn* Body::execute()
         tipShape = static_cast<Part::Feature*>(tip)->Shape.getShape();
 
         if (tipShape.getShape().IsNull()) {
-            if (tip->isError()) {
-                // A failed first feature passed an empty base through: the Body is empty and
-                // valid (ops#126)
+            if (tip->isError() || tip->isDerivedFrom<DeletePart>() || DeletePart::deleterOf(this)) {
+                // A failed first feature passed an empty base through, or the part is deleted
+                // (ops#635): the Body is empty and valid (ops#126)
                 lastTipShape = Part::TopoShape();
                 Shape.setValue(Part::TopoShape());
                 return App::DocumentObject::StdReturn;

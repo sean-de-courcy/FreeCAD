@@ -472,3 +472,120 @@ class TestFeaturesViewGui(unittest.TestCase):
         self.assertTrue(waitFor(lambda: self.partRows() == []), self.partRows())
         self.assertEqual(self.menuAction("SkA", "featureRollToEnd"), [True])
         self.assertTrue(waitFor(lambda: self.partRows() == ["Body1", "Body2", body3.Label]))
+
+    def testDeletePart(self):
+        """ops#635 (report 11): Delete on a part makes a Delete part feature at the bar; the Body and
+        its features stay; undo brings the part back."""
+        skC = sketch(self.body1, "SkC", (40, 0, 50, 10))
+        padC = self.body1.newObject("PartDesign::Pad", "PadC")
+        padC.Profile = skC
+        padC.Length = 4
+        body3 = PartDesign.newPartFrom(padC)
+        self.doc.recompute()
+        self.assertTrue(waitFor(lambda: self.partRows() == ["Body1", "Body2", body3.Label]))
+
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.doc.Name, body3.Name)
+        Gui.runCommand("Std_Delete")
+        # The command recomputes (review prs464e2-r1, Sonnet T4, Opus T3)
+        self.assertTrue(waitFor(lambda: body3.Shape.isNull() and "Touched" not in body3.State))
+        self.assertIsNotNone(self.doc.getObject(body3.Name))
+        self.assertEqual(body3.Tip.TypeId, "PartDesign::DeletePart")
+        self.assertEqual([o.Name for o in body3.Group][:2], ["SkC", "PadC"])
+        self.assertTrue(body3.Shape.isNull())
+        self.assertTrue(waitFor(lambda: self.partRows() == ["Body1", "Body2"]), self.partRows())
+        self.assertIn(body3.Tip.Label, self.rows())
+
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertIs(body3.Tip, padC)
+        self.assertTrue(waitFor(lambda: self.partRows() == ["Body1", "Body2", body3.Label]))
+
+    def testDeletePartForcedWithAnother(self, readFirst=False):
+        """Reviews prs464e2-r2 R2-1, r3 R3-1: Std_Delete of two parts, one read whole by a binder;
+        its "might break" dialog answered Yes removes that one with its features (as before), the
+        other gets a Delete part, in either selection order, and no feature is left outside a
+        Body."""
+        skC = sketch(self.body1, "SkC", (40, 0, 50, 10))
+        padC = self.body1.newObject("PartDesign::Pad", "PadC")
+        padC.Profile = skC
+        padC.Length = 4
+        body3 = PartDesign.newPartFrom(padC)
+        binder = self.doc.addObject("PartDesign::SubShapeBinder", "Binder")
+        binder.Support = [(self.body2, "")]
+        self.doc.recompute()
+        names = (body3.Name, self.body2.Name)
+
+        def answer():
+            box = QtWidgets.QApplication.activeModalWidget()
+            if not isinstance(box, QtWidgets.QMessageBox):
+                QtCore.QTimer.singleShot(50, answer)
+                return
+            box.button(QtWidgets.QMessageBox.Yes).click()
+
+        QtCore.QTimer.singleShot(50, answer)
+        Gui.Selection.clearSelection()
+        order = (self.body2.Name, body3.Name) if readFirst else names
+        for name in order:
+            Gui.Selection.addSelection(self.doc.Name, name)
+        Gui.runCommand("Std_Delete")
+        pump(0.3)
+        self.doc.recompute()
+        self.assertIsNone(self.doc.getObject(names[1]))
+        self.assertIs(self.doc.getObject(names[0]), body3)
+        self.assertEqual(body3.Tip.TypeId, "PartDesign::DeletePart")
+        stray = [
+            o.Name
+            for o in self.doc.Objects
+            if o.isDerivedFrom("PartDesign::Feature")
+            and not (o.getParentGeoFeatureGroup() or o).isDerivedFrom("PartDesign::Body")
+        ]
+        self.assertEqual(stray, [])
+
+    def newPart(self):
+        skC = sketch(self.body1, "SkC", (40, 0, 50, 10))
+        padC = self.body1.newObject("PartDesign::Pad", "PadC")
+        padC.Profile = skC
+        padC.Length = 4
+        body3 = PartDesign.newPartFrom(padC)
+        self.doc.recompute()
+        return body3
+
+    def testDeletePartWithAllItsFeatures(self, bodyFirst=True):
+        """Review s33e2 F1: a Body selected with every one of its features (a range in the tree)
+        is deleted outright, in either selection order: no Body or Delete part is left."""
+        body3 = self.newPart()
+        name = body3.Name
+        members = [o.Name for o in body3.Group]
+        Gui.Selection.clearSelection()
+        order = [name] + members if bodyFirst else members + [name]
+        for obj in order:
+            Gui.Selection.addSelection(self.doc.Name, obj)
+        Gui.runCommand("Std_Delete")
+        pump(0.2)
+        self.doc.recompute()
+        self.assertIsNone(self.doc.getObject(name))
+        for obj in members:
+            self.assertIsNone(self.doc.getObject(obj))
+        self.assertEqual(self.doc.findObjects("PartDesign::DeletePart"), [])
+
+    def testDeletePartWithAllItsFeaturesBodyLast(self):
+        self.testDeletePartWithAllItsFeatures(bodyFirst=False)
+
+    def testDeleteADeletedPartAgain(self):
+        """Review s33e2 F2: Delete on a part deleted already removes the Body with its features."""
+        body3 = self.newPart()
+        name = body3.Name
+        for _ in range(2):
+            Gui.Selection.clearSelection()
+            Gui.Selection.addSelection(self.doc.Name, name)
+            Gui.runCommand("Std_Delete")
+            pump(0.2)
+        self.doc.recompute()
+        self.assertIsNone(self.doc.getObject(name))
+        self.assertIsNone(self.doc.getObject("PadC"))
+        self.assertEqual(self.doc.findObjects("PartDesign::DeletePart"), [])
+
+    def testDeletePartForcedWithAnotherFirst(self):
+        """The same, the binder's Body selected first (review prs464e2-r3, R3-1)."""
+        self.testDeletePartForcedWithAnother(readFirst=True)
