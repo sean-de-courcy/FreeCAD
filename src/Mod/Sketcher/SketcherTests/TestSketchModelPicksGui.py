@@ -150,6 +150,58 @@ class TestSketchModelPicksGui(SketcherGuiTestCase):
     def constraints_of(self, kind):
         return [c for c in self.sketch.Constraints if c.Type == kind]
 
+    # Clicks in the 3D view ---------------------------------------------------------------------
+
+    def require_picking(self):
+        """Skips unless a click in the 3D view picks here (off screen it often doesn't): a click
+        on the box's top front edge, before the editor opens."""
+        FreeCADGui.getMainWindow().show()
+        view = FreeCADGui.ActiveDocument.ActiveView
+        view.viewTop()
+        view.fitAll()
+        self.flush_gui(200)
+        viewport = view.graphicsView().viewport()
+        at = self.viewport_to_qpoint(view, viewport, view.getPointOnScreen(V(15, 0, 5)))
+        FreeCADGui.Selection.clearSelection()
+        self.click(viewport, at)
+        picked = self.selected()
+        FreeCADGui.Selection.clearSelection()
+        if not picked:
+            self.skipTest("the 3D view doesn't pick here (off screen without OpenGL)")
+
+    def mouse_at(self, point):
+        self.move(self.viewport, self.screen_point(point))
+
+    def click_at(self, point):
+        at = self.screen_point(point)
+        self.move(self.viewport, at)
+        self.click(self.viewport, at)
+
+    def drag(self, start, end):
+        """A box drawn with the left button from one world point to another."""
+        a, b = self.screen_point(start), self.screen_point(end)
+        self.move(self.viewport, a)
+        self.send_mouse(
+            self.viewport, QtCore.QEvent.MouseButtonPress, a, QtCore.Qt.LeftButton, QtCore.Qt.LeftButton
+        )
+        self.pump(60)
+        for i in range(1, 6):
+            step = QtCore.QPoint(a.x() + (b.x() - a.x()) * i // 5, a.y() + (b.y() - a.y()) * i // 5)
+            self.send_mouse(
+                self.viewport, QtCore.QEvent.MouseMove, step, QtCore.Qt.NoButton, QtCore.Qt.LeftButton
+            )
+            self.pump(40)
+        self.send_mouse(
+            self.viewport, QtCore.QEvent.MouseButtonRelease, b, QtCore.Qt.LeftButton, QtCore.Qt.NoButton
+        )
+        self.pump(120)
+
+    def preselected(self):
+        pre = FreeCADGui.Selection.getPreselection()
+        if pre is None or not pre.ObjectName:
+            return None
+        return (pre.ObjectName, pre.SubElementNames[0] if pre.SubElementNames else "")
+
     # Tests -------------------------------------------------------------------------------------
 
     def test_plain_edit_takes_model_edges_and_vertices_not_faces(self):
@@ -247,3 +299,60 @@ class TestSketchModelPicksGui(SketcherGuiTestCase):
         self.start_edit()
         self.select((box, "Edge1"), (far, "Edge1"))
         self.assertEqual(self.selected(), {("SiblingBox", "Edge1")})
+
+    # Clicks (skipped where the off-screen view doesn't pick) -----------------------------------
+
+    def test_hover_and_click_pick_a_model_edge_beside_the_sketch_selection(self):
+        """Hover on the box's top front edge preselects it; a click adds it to the selected line
+        end; a later click on the sketch line adds the line (no rubber band after the pick)."""
+        self.require_picking()
+        self.start_edit()
+        edge = self.edge_between(self.pad, V(0, 0, 5), V(20, 0, 5))
+        self.select((self.sketch, "Vertex1"))
+
+        self.mouse_at(V(15, 0, 5))
+        self.assertEqual(self.preselected(), ("Pad", edge))
+        self.click_at(V(15, 0, 5))
+        self.assertEqual(self.selected(), {("Sketch", "Vertex1"), ("Pad", edge)})
+
+        self.mouse_at(V(10, 5, 5))
+        self.click_at(V(5, 2, 5))
+        self.assertEqual(
+            self.selected(), {("Sketch", "Vertex1"), ("Pad", edge), ("Sketch", "Edge1")}
+        )
+
+    def test_a_click_on_a_sketch_line_over_a_model_edge_is_the_sketch_s(self):
+        """A sketch line on the box's top back edge (y 10): hover and click take the line, not
+        the edge behind it."""
+        self.sketch.addGeometry(Part.LineSegment(V(4, 10, 0), V(16, 10, 0)))
+        self.doc.recompute()
+        self.require_picking()
+        self.start_edit()
+        FreeCADGui.Selection.clearSelection()
+
+        self.mouse_at(V(10, 10, 5))
+        pre = self.preselected()
+        self.assertTrue(pre is None or pre[0] != "Pad", pre)
+        self.click_at(V(10, 10, 5))
+        self.assertEqual(self.selected(), {("Sketch", "Edge2")})
+
+    def test_box_selection_stays_sketch_only(self):
+        """A box from the box's top face around the sketch line selects sketch elements only."""
+        self.require_picking()
+        self.start_edit()
+        FreeCADGui.Selection.clearSelection()
+        self.drag(V(1, 6, 5), V(9, 1, 5))
+        picked = self.selected()
+        self.assertIn(("Sketch", "Edge1"), picked)
+        self.assertEqual({name for name, _ in picked}, {"Sketch"}, picked)
+
+    def test_an_empty_click_clears_a_model_pick(self):
+        """A model edge picked, then a click where only the box's top face (refused) lies: the
+        selection is cleared, as for the sketch's own picks."""
+        self.require_picking()
+        self.start_edit()
+        FreeCADGui.Selection.clearSelection()
+        self.click_at(V(15, 0, 5))
+        self.assertEqual(len(self.selected()), 1)
+        self.click_at(V(14, 6, 5))
+        self.assertEqual(self.selected(), set())
