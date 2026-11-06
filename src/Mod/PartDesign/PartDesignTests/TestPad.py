@@ -26,11 +26,15 @@ import unittest
 
 import FreeCAD
 import Part
+import Sketcher
 from FreeCAD import Base
 import TestSketcherApp
 
 from PartDesignTests import TestNamingDump as dump
 
+
+# The stop of a whole-sketch profile whose open curves touch or close its regions (ops#631)
+OPEN_CURVES_STOP = "Open curves of the sketch touch or close its regions"
 
 # A Pad made from two regions of a sketch (ops#125): a 30 x 20 x 2 plate, and two bosses of
 # radius 2 and height 5 from a sketch at z = 2, each with a 0.5 fillet on its top edge.
@@ -4860,6 +4864,241 @@ class TestPad(unittest.TestCase):
         z = 10 + 0.002 * (-3.5 - 0.5) ** 2
         below = Part.makeBox(1, 1, 1, V(-4, spans / 2, z - 1.5))
         self.assertAlmostEqual(convex.Shape.common(below).Volume, 1, places=6)
+
+    # ops#631: a whole sketch with open curves (a reference line left solid) makes its features
+    # from the closed loops and ignores the open curves, as Onshape does. The tests fail without
+    # the fix with "Wire is not closed." (or, for the loft and the pipe, a section count error).
+
+    def openCurveSketch(self, body, name, circles=(), lines=(), tangent=False, z=0):
+        """A sketch on XY at height z: circles as (x, y, r), lines as ((x1, y1), (x2, y2)), all
+        solid. With tangent, the first line is held tangent to the first circle."""
+        V = FreeCAD.Vector
+        xy = [f for f in body.Origin.OriginFeatures if f.Role == "XY_Plane"][0]
+        sketch = body.newObject("Sketcher::SketchObject", name)
+        sketch.AttachmentSupport = [(xy, "")]
+        sketch.MapMode = "FlatFace"
+        sketch.AttachmentOffset = FreeCAD.Placement(V(0, 0, z), FreeCAD.Rotation())
+        for x, y, r in circles:
+            sketch.addGeometry(Part.Circle(V(x, y, 0), V(0, 0, 1), r), False)
+        for (x1, y1), (x2, y2) in lines:
+            sketch.addGeometry(Part.LineSegment(V(x1, y1, 0), V(x2, y2, 0)), False)
+        if tangent:
+            sketch.addConstraint(Sketcher.Constraint("Tangent", 0, len(circles)))
+        self.Doc.recompute()
+        return sketch
+
+    def openCurvePad(self, length=5, **sketch):
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        pad = body.newObject("PartDesign::Pad", "Pad")
+        pad.Profile = self.openCurveSketch(body, "Sketch", **sketch)
+        pad.Length = length
+        self.Doc.recompute()
+        return pad
+
+    def assertSolidVolume(self, feature, volume):
+        self.assertTrue(feature.isValid(), feature.getStatusString())
+        self.assertTrue(feature.Shape.isValid())
+        self.assertEqual(len(feature.Shape.Solids), 1)
+        self.assertAlmostEqual(feature.Shape.Volume, volume, places=3)
+
+    def testOpenCurvesTangentLineSpanningPastTheCircle(self):
+        """The user's case (beta report 7): a circle of r 10 and a solid line tangent at its top,
+        both ends outside it. The pad is the disk's."""
+        pad = self.openCurvePad(circles=[(0, 0, 10)], lines=[((-20, 10), (20, 10))], tangent=True)
+        self.assertSolidVolume(pad, 500 * math.pi)
+        self.assertAlmostEqual(pad.Shape.BoundBox.YMax, 10, places=6)
+
+    def testOpenCurvesLineEndingOnTheCircle(self):
+        """The line's end at the tangent point."""
+        pad = self.openCurvePad(circles=[(0, 0, 10)], lines=[((0, 10), (20, 10))], tangent=True)
+        self.assertSolidVolume(pad, 500 * math.pi)
+
+    def testOpenCurvesLineFromALoopStops(self):
+        """Review pro631s-r1fix: a line drawn from a loop's vertex shares the loop's wire (a radius
+        line to a circle's seam point (10, 0); two circles joined between their seam points). The
+        loop would have to be rebuilt from its edges, which renames the faces and reorders a
+        loft's wires: the pad stops with the reason, as it failed before."""
+        for circles, lines in (
+            ([(0, 0, 10)], [((0, 0), (10, 0))]),
+            ([(0, 0, 3), (16, 0, 3)], [((3, 0), (13, 0))]),
+        ):
+            pad = self.openCurvePad(circles=circles, lines=lines)
+            self.assertFalse(pad.isValid())
+            self.assertIn(OPEN_CURVES_STOP, pad.getStatusString())
+
+    def testOpenCurvesTwoCirclesAndAStrayLine(self):
+        """Two circles of r 3 and a line between them touching neither: two cylinders."""
+        pad = self.openCurvePad(circles=[(-10, 0, 3), (10, 0, 3)], lines=[((-5, 8), (5, 8))])
+        self.assertTrue(pad.isValid(), pad.getStatusString())
+        self.assertEqual(len(pad.Shape.Solids), 2)
+        self.assertAlmostEqual(pad.Shape.Volume, 2 * 9 * math.pi * 5, places=3)
+
+    def testOpenCurvesKeepTheFaceNames(self):
+        """A stray line made solid and back: the pad's element names stay the same."""
+        pad = self.openCurvePad(circles=[(-10, 0, 3), (10, 0, 3)], lines=[((-5, 8), (5, 8))])
+        sketch = pad.Profile[0]
+        names = sorted(pad.Shape.ElementReverseMap.items())
+        sketch.toggleConstruction(2)
+        self.Doc.recompute()
+        self.assertTrue(pad.isValid(), pad.getStatusString())
+        self.assertEqual(sorted(pad.Shape.ElementReverseMap.items()), names)
+        sketch.toggleConstruction(2)
+        self.Doc.recompute()
+        self.assertEqual(sorted(pad.Shape.ElementReverseMap.items()), names)
+
+    def testOpenCurvesChordThroughTheCircle(self):
+        """A solid centre line through a circle of r 10, both ends outside: the line divides
+        the disk and closes nothing outside it, so the pad is the disk (Onshape: both halves)."""
+        pad = self.openCurvePad(circles=[(0, 0, 10)], lines=[((-15, 0), (15, 0))])
+        self.assertSolidVolume(pad, 500 * math.pi)
+
+    def testOpenCurvesClosingARegionStop(self):
+        """Review pro631-r1 R2: a 20 x 20 square and a U whose ends lie on its top side (not at
+        its corners). The U closes a 10 x 10 tab that Onshape would add; the pad stops, as
+        before, with the reason, rather than leave the tab out. With the U's ends crossing the
+        side, the same."""
+        U = [((5, 20), (5, 30)), ((5, 30), (15, 30)), ((15, 30), (15, 20))]
+        square = [((0, 0), (20, 0)), ((20, 0), (20, 20)), ((20, 20), (0, 20)), ((0, 20), (0, 0))]
+        crossing = [((5, 15), (5, 30)), ((5, 30), (15, 30)), ((15, 30), (15, 15))]
+        for lines in (square + U, square + crossing):
+            pad = self.openCurvePad(lines=lines)
+            self.assertFalse(pad.isValid())
+            self.assertIn(OPEN_CURVES_STOP, pad.getStatusString())
+
+    def testOpenCurvesLoftKeepsTheSectionOrder(self):
+        """Review pro631-r1 R1: a loft between two pairs of 10 x 10 squares 40 apart, the
+        section with a stray line beside its first square: each square lofts to the one above
+        it, two prisms. With the line drawn from that square's corner (one wire with it, the
+        sketch's wire order changed), the loft stops (pro631s-r1fix)."""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+
+        def squares(x):
+            return [
+                ((x, -5), (x + 10, -5)),
+                ((x + 10, -5), (x + 10, 5)),
+                ((x + 10, 5), (x, 5)),
+                ((x, 5), (x, -5)),
+            ]
+
+        for stray, valid in ((((-45, -15), (-40, -15)), True), (((-30, -5), (-40, -15)), False)):
+            loft = body.newObject("PartDesign::AdditiveLoft", "Loft")
+            loft.Profile = self.openCurveSketch(
+                body, "Profile", lines=[stray] + squares(-30) + squares(20)
+            )
+            loft.Sections = [
+                self.openCurveSketch(body, "Section", lines=squares(-30) + squares(20), z=40)
+            ]
+            self.Doc.recompute()
+            if not valid:
+                self.assertFalse(loft.isValid())
+                self.assertIn(OPEN_CURVES_STOP, loft.getStatusString())
+                continue
+            self.assertTrue(loft.isValid(), loft.getStatusString())
+            self.assertEqual(len(loft.Shape.Solids), 2)
+            self.assertAlmostEqual(loft.Shape.Volume, 2 * 10 * 10 * 40, places=3)
+            for solid in loft.Shape.Solids:
+                self.assertAlmostEqual(solid.BoundBox.XLength, 10, places=6)
+            body.removeObject(loft)
+            self.Doc.removeObject(loft.Name)
+
+    def testOpenCurvesHelix(self):
+        """Review pro631-r1 T3: a helix of a circle of r 1 at x = 5 about the sketch's V axis,
+        with a stray line: the same solid as without the line."""
+        volumes = []
+        for lines in ([], [((7, -3), (7, 3))]):
+            body = self.Doc.addObject("PartDesign::Body", "Body")
+            sketch = self.openCurveSketch(body, "Sketch", circles=[(5, 0, 1)], lines=lines)
+            helix = body.newObject("PartDesign::AdditiveHelix", "Helix")
+            helix.Profile = sketch
+            helix.ReferenceAxis = (sketch, ["V_Axis"])
+            helix.Pitch = 5
+            helix.Height = 10
+            self.Doc.recompute()
+            self.assertTrue(helix.isValid(), helix.getStatusString())
+            volumes.append(helix.Shape.Volume)
+        self.assertGreater(volumes[0], 0)
+        self.assertAlmostEqual(volumes[1], volumes[0], places=6)
+
+    def testOpenCurvesKeepTheHoles(self):
+        """A circle of r 10 around one of r 4, and a stray line: the ring, as without the line."""
+        pad = self.openCurvePad(circles=[(0, 0, 10), (0, 0, 4)], lines=[((-20, 12), (20, 12))])
+        self.assertSolidVolume(pad, (100 - 16) * math.pi * 5)
+
+    def testOpenCurvesOnlyStillFail(self):
+        """Only open curves: the pad stops, naming the reason."""
+        pad = self.openCurvePad(lines=[((0, 0), (10, 0)), ((0, 5), (10, 8))])
+        self.assertFalse(pad.isValid())
+        self.assertIn("The sketch has no closed region", pad.getStatusString())
+
+    def testOpenCurvesPocket(self):
+        """A 30 x 30 x 10 block under XY, pocketed 5 deep by the circle with its tangent line."""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        block = body.newObject("PartDesign::Pad", "Block")
+        block.Profile = self.openCurveSketch(
+            body,
+            "BlockSketch",
+            lines=[
+                ((-15, -15), (15, -15)),
+                ((15, -15), (15, 15)),
+                ((15, 15), (-15, 15)),
+                ((-15, 15), (-15, -15)),
+            ],
+        )
+        block.Length = 10
+        block.Reversed = True
+        self.Doc.recompute()
+        self.assertSolidVolume(block, 9000)
+        pocket = body.newObject("PartDesign::Pocket", "Pocket")
+        pocket.Profile = self.openCurveSketch(
+            body, "PocketSketch", circles=[(0, 0, 10)], lines=[((-20, 10), (20, 10))], tangent=True
+        )
+        pocket.Length = 5
+        self.Doc.recompute()
+        self.assertSolidVolume(pocket, 9000 - 500 * math.pi)
+
+    def testOpenCurvesRevolution(self):
+        """A circle of r 2 at x = 10 with a line tangent at its top, turned about the sketch's
+        V axis: the torus, 2 pi^2 R r^2."""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        sketch = self.openCurveSketch(
+            body, "Sketch", circles=[(10, 0, 2)], lines=[((5, 2), (15, 2))], tangent=True
+        )
+        revolution = body.newObject("PartDesign::Revolution", "Revolution")
+        revolution.Profile = sketch
+        revolution.ReferenceAxis = (sketch, ["V_Axis"])
+        revolution.Angle = 360
+        self.Doc.recompute()
+        self.assertSolidVolume(revolution, 2 * math.pi**2 * 10 * 4)
+
+    def testOpenCurvesLoft(self):
+        """A loft from a circle of r 5 with a stray line to a circle of r 5 10 above: the
+        cylinder."""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        loft = body.newObject("PartDesign::AdditiveLoft", "Loft")
+        loft.Profile = self.openCurveSketch(
+            body, "Profile", circles=[(0, 0, 5)], lines=[((7, -3), (7, 3))]
+        )
+        loft.Sections = [self.openCurveSketch(body, "Section", circles=[(0, 0, 5)], z=10)]
+        self.Doc.recompute()
+        self.assertSolidVolume(loft, 250 * math.pi)
+
+    def testOpenCurvesPipe(self):
+        """A circle of r 2 with a stray line, swept 10 up a line: the cylinder."""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        profile = self.openCurveSketch(
+            body, "Profile", circles=[(0, 0, 2)], lines=[((3, 0), (6, 0))]
+        )
+        xz = [f for f in body.Origin.OriginFeatures if f.Role == "XZ_Plane"][0]
+        spine = body.newObject("Sketcher::SketchObject", "Spine")
+        spine.AttachmentSupport = [(xz, "")]
+        spine.MapMode = "FlatFace"
+        spine.addGeometry(Part.LineSegment(FreeCAD.Vector(0, 0, 0), FreeCAD.Vector(0, 10, 0)))
+        pipe = body.newObject("PartDesign::AdditivePipe", "Pipe")
+        pipe.Profile = profile
+        pipe.Spine = (spine, [])
+        self.Doc.recompute()
+        self.assertSolidVolume(pipe, 40 * math.pi)
+        self.assertAlmostEqual(pipe.Shape.BoundBox.ZLength, 10, places=6)
 
     def tearDown(self):
         # closing doc

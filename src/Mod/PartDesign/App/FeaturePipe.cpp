@@ -4771,7 +4771,11 @@ App::DocumentObjectExecReturn* Pipe::execute()
         // only take the entire shape when we have a sketch selected, but
         // not a point of the sketch
         if (feature->isDerivedFrom<Part::Part2DObject>() && subName.compare(0, 6, "Vertex") != 0) {
-            return static_cast<Part::Part2DObject*>(feature)->Shape.getShape();
+            // Its closed loops; open curves are ignored, as in Onshape (ops#631). With no loop
+            // left, the open wires stay, and the pipe refuses them as before.
+            const auto& shape = static_cast<Part::Part2DObject*>(feature)->Shape.getShape();
+            auto loops = withoutOpenCurves(shape);
+            return loops.isNull() ? shape : loops;
         }
         else {
             if (subName.empty()) {

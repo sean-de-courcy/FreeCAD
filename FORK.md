@@ -458,7 +458,8 @@ names it.
 | `fix/625-test-expectations` | fix | ops#625 | - | `integration` `9ebe600eca` | `8b10fb8ccf` (fork PR 429), 2026-11-05 | never (fork fix) |
 | `feat/605-tier1-taskbox` | feat | ops#605 | - | `integration` `8a5743e8ad` | `e5aebe7c8f` (fork PR 430), 2026-11-05 | never (fork feature); refit when upstream changes the task box's buttons or `TaskView::keyPressEvent`, `Std_New`, the start-up order in `Application::runApplication`, or the origin's temporary visibility |
 | `fix/633-point-names` | fix | ops#633 | - | `integration` `e5aebe7c8f` | `14d68c7433` (fork PR 431), 2026-11-05 | never (fork fix) |
-| `fix/630-newpart-visibility` | fix | ops#630 | - | `integration` `e5aebe7c8f` | (fork PR 432) | never (fork fix) |
+| `fix/630-newpart-visibility` | fix | ops#630 | - | `integration` `e5aebe7c8f` | `dab7fc90bc` (fork PR 432), 2026-11-05 | never (fork fix) |
+| `fix/631-open-wires` | fix | ops#631 | - | `integration` `e5aebe7c8f` | (fork PR 435) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 

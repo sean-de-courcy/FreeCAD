@@ -134,6 +134,13 @@ std::vector<Part::TopoShape> Loft::getSectionShape(
                             "",
                             TopoShape::SingleShapeCompoundCreationPolicy::returnShape
                         );
+    // A whole sketch gives its closed loops; open curves are ignored, as in Onshape (ops#631).
+    // With no loop left, the open wires stay, and the loft refuses them as before.
+    if (useEntireSketch) {
+        if (auto loops = withoutOpenCurves(compound); !loops.isNull()) {
+            compound = loops;
+        }
+    }
     auto wires = compound.getSubTopoShapes(TopAbs_WIRE);
     auto edges = compound.getSubTopoShapes(TopAbs_EDGE, TopAbs_WIRE);  // get free edges and make
                                                                        // wires from it
