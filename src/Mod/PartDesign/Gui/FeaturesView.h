@@ -52,21 +52,41 @@ public:
     {
         return dragging;
     }
+    /// The selected rows are being dragged (ops#632)
+    bool isDraggingRows() const
+    {
+        return rowDragging;
+    }
 
 Q_SIGNALS:
     /// The bar was dropped after row (-1: the top)
     void barDropped(int row);
     /// A bar drag was cancelled (Escape): the rows go back
     void barDragCancelled();
+    /// The selected rows were dropped before row (count(): after the last)
+    void rowsDropped(int row);
 
 protected:
     void mousePressEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
     void keyPressEvent(QKeyEvent* event) override;
+    void paintEvent(QPaintEvent* event) override;
 
 private:
+    /// The row a drop at pos goes before
+    int dropRowAt(const QPoint& pos) const;
+    void endRowDrag();
+
     bool dragging = false;
+    /// A plain press on a row: a drag of the selected rows starts when the mouse moves far enough
+    bool rowPressed = false;
+    bool rowDragging = false;
+    /// The press was on a row of a selection of several, and kept it for a drag: a click without
+    /// a drag selects the row alone on the release
+    bool pressDeferred = false;
+    QPoint pressPos;
+    int dropRow = -1;
 };
 
 /// Paints the bar row as the tree's bar: a thick line with a grip at its start
@@ -106,6 +126,15 @@ public:
     /// Rolls every Body of the studio after member (null: the top; toEnd: to the end) in one undo
     /// step, as the tree's bar does (ViewProviderBody::rollBar()); throws Base::Exception
     static void rollStudio(App::Document* doc, App::Part* studio, App::DocumentObject* member, bool toEnd);
+    /// Drags rows to after the row after (null: the top) in one undo step "Reorder", the bar
+    /// after bar (hinted), and recomputes (PartDesign.moveInStudio, ops#632); a drop that changes
+    /// nothing leaves no step. Throws Base::Exception (a refusal, or a dialog open)
+    static void moveRows(App::Document* doc,
+                         App::Part* studio,
+                         const std::vector<App::DocumentObject*>& rows,
+                         App::DocumentObject* after,
+                         bool hinted,
+                         App::DocumentObject* bar);
 
 protected:
     void onSelectionChanged(const Gui::SelectionChanges& msg) override;
@@ -126,6 +155,7 @@ private:
     void findStudio();
 
     void onBarDropped(int row);
+    void onRowsDropped(int row);
     void onFeatureMenu(const QPoint& pos);
     void onFeatureDoubleClicked(QListWidgetItem* item);
     void onPartClicked(QTreeWidgetItem* item, int column);

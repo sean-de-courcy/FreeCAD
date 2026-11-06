@@ -18,3 +18,4 @@ rollStudioTo = _PartDesign.rollStudioTo
 rollStudioToEnd = _PartDesign.rollStudioToEnd
 isStudioRolledBack = _PartDesign.isStudioRolledBack
 studioBarAfter = _PartDesign.studioBarAfter
+moveInStudio = _PartDesign.moveInStudio

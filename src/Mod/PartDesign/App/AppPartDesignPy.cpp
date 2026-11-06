@@ -147,6 +147,16 @@ public:
             "follows (None: the top). hint, the feature (None: the top) the bar was last moved "
             "after, is kept when only sketches and datums lie between."
         );
+        add_varargs_method(
+            "moveInStudio",
+            &Module::moveInStudio,
+            "moveInStudio(studio, features, after[, bar]) -- Drags features (one, or several of "
+            "one Body) to after the feature after (None: the top) in the studio's history and "
+            "saves the order: inside their Body through reorderObject (the park), across Bodies "
+            "refused where a read between Bodies would break. With the studio rolled back, the bar "
+            "stays after bar (None: the top; default: the feature it follows). Returns whether "
+            "anything changed. No transaction, no recompute."
+        );
         initialize("This module is the PartDesign module.");  // register with Python
     }
 
@@ -518,6 +528,60 @@ private:
             return Py::None();
         }
         return Py::asObject(after->getPyObject());
+    }
+
+    // A feature, None, or (with none) a missing argument
+    static App::DocumentObject* featureOrNone(PyObject* obj)
+    {
+        if (!obj || obj == Py_None) {
+            return nullptr;
+        }
+        if (!PyObject_TypeCheck(obj, &(App::DocumentObjectPy::Type))) {
+            PyErr_SetString(PyExc_TypeError, "Expected a feature or None");
+            throw Py::Exception();
+        }
+        return objectArg(obj);
+    }
+
+    Py::Object moveInStudio(const Py::Tuple& args)
+    {
+        PyObject* pStudio;
+        PyObject* pRows;
+        PyObject* pAfter;
+        PyObject* pBar = nullptr;
+        if (!PyArg_ParseTuple(args.ptr(), "OOO|O", &pStudio, &pRows, &pAfter, &pBar)) {
+            throw Py::Exception();
+        }
+        App::Document* doc = nullptr;
+        App::Part* studio = nullptr;
+        studioArg(pStudio, doc, studio);
+        std::vector<App::DocumentObject*> rows;
+        if (PyObject_TypeCheck(pRows, &(App::DocumentObjectPy::Type))) {
+            rows.push_back(objectArg(pRows));
+        }
+        else if (PySequence_Check(pRows)) {
+            Py::Sequence sequence(pRows);
+            for (Py::Sequence::iterator it = sequence.begin(); it != sequence.end(); ++it) {
+                if (!PyObject_TypeCheck((*it).ptr(), &(App::DocumentObjectPy::Type))) {
+                    PyErr_SetString(PyExc_TypeError, "Expected a feature or a sequence of features");
+                    throw Py::Exception();
+                }
+                rows.push_back(objectArg((*it).ptr()));
+            }
+        }
+        else {
+            PyErr_SetString(PyExc_TypeError, "Expected a feature or a sequence of features");
+            throw Py::Exception();
+        }
+        App::DocumentObject* after = featureOrNone(pAfter);
+        App::DocumentObject* bar = featureOrNone(pBar);
+        try {
+            return Py::Boolean(PartDesign::moveInStudio(doc, studio, rows, after, pBar != nullptr, bar));
+        }
+        catch (const Base::Exception& e) {
+            e.setPyException();
+            throw Py::Exception();
+        }
     }
 
     Py::Object makeFilletArc(const Py::Tuple& args)

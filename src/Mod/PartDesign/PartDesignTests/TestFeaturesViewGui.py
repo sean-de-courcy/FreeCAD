@@ -355,3 +355,81 @@ class TestFeaturesViewGui(unittest.TestCase):
         mouse(viewport, QtCore.QEvent.MouseButtonPress, eye, QtCore.Qt.LeftButton)
         mouse(viewport, QtCore.QEvent.MouseButtonRelease, eye, QtCore.Qt.NoButton)
         self.assertTrue(waitFor(lambda: not self.body1.Visibility))
+
+    # ------------------------------------------------------------------- dragging rows (ops#632)
+
+    def dragRowTo(self, label, target, below):
+        """Drags the row label onto target's lower (below) or upper half."""
+        viewport = self.list.viewport()
+        start = self.rowRect(label).center()
+        rect = self.rowRect(target)
+        end = QtCore.QPoint(rect.center().x(), rect.bottom() - 1 if below else rect.top() + 1)
+        far = QtCore.QPoint(start.x(), start.y() + QtWidgets.QApplication.startDragDistance() + 2)
+        mouse(viewport, QtCore.QEvent.MouseButtonPress, start, QtCore.Qt.LeftButton)
+        mouse(viewport, QtCore.QEvent.MouseMove, far, QtCore.Qt.LeftButton)
+        mouse(viewport, QtCore.QEvent.MouseMove, end, QtCore.Qt.LeftButton)
+        mouse(viewport, QtCore.QEvent.MouseButtonRelease, end, QtCore.Qt.NoButton)
+        pump(0.3)
+
+    def message(self):
+        """The status bar's text: MainWindow::showMessage writes to a label in it."""
+        bar = Gui.getMainWindow().statusBar()
+        return " ".join([bar.currentMessage()] + [l.text() for l in bar.findChildren(QtWidgets.QLabel)])
+
+    def testDragARow(self):
+        """Body2's Pocket dragged above Body1's: the list is the dropped order, in one undo step,
+        and the shapes are unchanged."""
+        undo = self.doc.UndoCount
+        self.dragRowTo("PocketB", "Pocket1", below=False)
+        moved = ["SkA", "PadA", "Box", "SkB", "PocketB", "Pocket1", "|"]
+        self.assertTrue(waitFor(lambda: self.rows() == moved))
+        self.assertEqual(self.doc.UndoCount, undo + 1)
+        self.assertEqual([o.Name for o in self.doc.Objects if not o.isValid()], [])
+        self.assertAlmostEqual(self.body1.Shape.Volume, (200 - 24) * 5, places=3)
+        self.assertAlmostEqual(self.body2.Shape.Volume, 108 - 24, places=3)
+        self.doc.undo()
+        self.assertTrue(waitFor(lambda: self.rows() == self.expected))
+
+    def testDragARowBelowTheBar(self):
+        """Rolled back after Box: Body2's sketch dragged above the bar is listed there, and its
+        Pocket dragged below the bar is held there."""
+        self.dragBarAfter("Box")
+        self.assertEqual(self.tips(), ["PadA", "Box"])
+        self.dragRowTo("SkB", "Box", below=True)
+        self.assertTrue(
+            waitFor(lambda: self.rows() == ["SkA", "PadA", "Box", "SkB", "|", "Pocket1", "PocketB"])
+        )
+        # Dropped below the bar: held, where it was dropped
+        self.dragRowTo("PocketB", "Pocket1", below=False)
+        self.assertTrue(
+            waitFor(lambda: self.rows() == ["SkA", "PadA", "Box", "SkB", "|", "PocketB", "Pocket1"])
+        )
+        self.assertEqual(self.tips(), ["PadA", "Box"])
+
+    def testRefusedDropLeavesTheRows(self):
+        """Body1's Pocket reads Body2's sketch: dragged to the top it is refused with a message
+        naming both, and nothing changes."""
+        undo = self.doc.UndoCount
+        self.dragRowTo("Pocket1", "SkA", below=False)
+        self.assertTrue(waitFor(lambda: "'Pocket1' uses 'SkB'" in self.message()))
+        self.assertEqual(self.rows(), self.expected)
+        self.assertEqual(self.doc.UndoCount, undo)
+
+    def testDragSeveralRows(self):
+        """Two selected rows dragged together: a click on one of them keeps the selection for the
+        drag; rows of two Bodies are refused."""
+        self.list.item(1).setSelected(True)  # PadA
+        self.list.item(2).setSelected(True)  # Box
+        pump()
+        undo = self.doc.UndoCount
+        self.dragRowTo("Box", "SkA", below=False)
+        self.assertTrue(waitFor(lambda: "one part at a time" in self.message()))
+        self.assertEqual(self.rows(), self.expected)
+        self.assertEqual(self.doc.UndoCount, undo)
+        # A click without a drag on a row of the selection selects it alone
+        viewport = self.list.viewport()
+        point = self.rowRect("Box").center()
+        mouse(viewport, QtCore.QEvent.MouseButtonPress, point, QtCore.Qt.LeftButton)
+        mouse(viewport, QtCore.QEvent.MouseButtonRelease, point, QtCore.Qt.NoButton)
+        pump()
+        self.assertEqual([item.text() for item in self.list.selectedItems()], ["Box"])
