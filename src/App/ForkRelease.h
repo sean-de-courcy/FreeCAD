@@ -27,11 +27,11 @@ class Document;
  */
 
 /** This build's fork release: the count of fork releases, the next one included. fork-0.1.0 to
- * fork-0.6.1 are 1 to 7, fork-0.7.0 (the beta) is 8. The release routine bumps it in the first
- * commit on `integration` after each release tag, so a release build carries its own number and
- * every later build a higher one.
+ * fork-0.6.1 are 1 to 7, fork-0.7.0 is 8, fork-0.8.1 is 9 (as was fork-0.8.0, superseded before
+ * it was handed off). The release routine bumps it in the first commit on `integration` after each
+ * release tag, so a release build carries its own number and every later build a higher one.
  */
-constexpr int ForkRelease = 9;
+constexpr int ForkRelease = 10;
 
 /// The `ForkRelease` \a doc was opened from, 0 for a file without one; this build's for a new
 /// document and after a save to the document's own file.
