@@ -1033,7 +1033,10 @@ void SoFCUnifiedSelection::handleEvent(SoHandleEventAction* action)
                 == Gui::SelectionSingleton::SelectionStyle::GreedySelection;
             greedySel = greedySel || event->wasCtrlDown();
             const bool additive = greedySel || selectionAdditive.getValue();
-            if (setSelection(infos, additive) || greedySel) {
+            // FreeCAD-CH (ops#634): with additive picks (the sketch editor) a release that
+            // selected nothing goes on to the editing view provider, Ctrl or not: its own
+            // elements' Ctrl+click and empty click are handled there
+            if (setSelection(infos, additive) || (greedySel && !selectionAdditive.getValue())) {
                 action->setHandled();
             }
         }  // mouse release

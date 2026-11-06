@@ -822,11 +822,16 @@ void ViewProviderSketch::deactivateHandler()
     setSketchMode(STATUS_NONE);
 }
 
-bool ViewProviderSketch::hasSketchPreselection() const
+bool ViewProviderSketch::takesModelPick() const
 {
-    return isInEditMode()
-        && (preselection.isPreselectPointValid() || preselection.isPreselectCurveValid()
-            || preselection.isCrossPreselected() || !preselection.PreselectConstraintSet.empty());
+    // Only while idle or between a press on no sketch element and its release: a drag of sketch
+    // geometry or a box released over a model edge stays the sketch's
+    if (Mode != STATUS_NONE && Mode != STATUS_SKETCH_StartRubberBand) {
+        return false;
+    }
+    return !isInEditMode()
+        || !(preselection.isPreselectPointValid() || preselection.isPreselectCurveValid()
+             || preselection.isCrossPreselected() || !preselection.PreselectConstraintSet.empty());
 }
 
 Gui::View3DInventorViewer* ViewProviderSketch::getEditViewer() const
@@ -837,12 +842,15 @@ Gui::View3DInventorViewer* ViewProviderSketch::getEditViewer() const
     if (!editDoc) {
         return nullptr;
     }
-    auto* view = dynamic_cast<Gui::View3DInventor*>(editDoc->getActiveView());
-    if (!view || view->getViewer()->getEditingViewProvider() != this) {
-        // the edit is ending: unsetEditViewer ran before unsetEdit's deactivateHandler
-        return nullptr;
+    // The view the sketch is edited in, active or not. None while the edit is ending:
+    // unsetEditViewer ran before unsetEdit's deactivateHandler
+    for (auto* mdi : editDoc->getMDIViewsOfType(Gui::View3DInventor::getClassTypeId())) {
+        auto* viewer = static_cast<Gui::View3DInventor*>(mdi)->getViewer();
+        if (viewer->getEditingViewProvider() == this) {
+            return viewer;
+        }
     }
-    return view->getViewer();
+    return nullptr;
 }
 
 void ViewProviderSketch::setModelPicking(Gui::View3DInventorViewer* viewer, bool on)
@@ -867,21 +875,9 @@ void ViewProviderSketch::purgeHandler()
     deactivateHandler();
     Gui::Selection().clearSelection();
 
-    // ensure that we are in sketch only selection mode
-    auto editDoc = Gui::Application::Instance->editDocument([this](Gui::Document* editdoc) {
-        return editdoc->getEditViewProvider() == this;
-    });
-    Gui::View3DInventor* view = nullptr;
-    if (editDoc) {
-        view = dynamic_cast<Gui::View3DInventor*>(editDoc->getActiveView());
-    }
-
-    if(view) {
-        Gui::View3DInventorViewer* viewer;
-        viewer = static_cast<Gui::View3DInventor*>(view)->getViewer();
-        // FreeCAD-CH (ops#634): sketch selection plus the model picks of plain edit mode
-        setModelPicking(viewer, true);
-    }
+    // FreeCAD-CH (ops#634): sketch selection plus the model picks of plain edit mode, in the view
+    // the sketch is edited in (not another view that happens to be active)
+    setModelPicking(getEditViewer(), true);
 
     // Give back the focus to the MDI to make sure VPSketch receive keyboard events.
     ensureFocus();
@@ -2942,9 +2938,11 @@ void ViewProviderSketch::onSelectionChanged(const Gui::SelectionChanges& msg)
 
         // FreeCAD-CH (ops#634): a model edge or vertex picked in plain edit mode. The press found
         // no sketch element and readied a rubber band, whose release would clear the selection
-        // just made: the click is the model pick's, and its release is taken without a clear
-        if (msg.Type == Gui::SelectionChanges::AddSelection && Mode == STATUS_SKETCH_StartRubberBand
-            && msg.Object.getSubObject() != getObject()) {
+        // just made: the click is the model pick's, and its release is taken without a clear.
+        // So is a click that removes a selected model pick (the 3D view takes its release too)
+        if ((msg.Type == Gui::SelectionChanges::AddSelection
+             || msg.Type == Gui::SelectionChanges::RmvSelection)
+            && Mode == STATUS_SKETCH_StartRubberBand && msg.Object.getSubObject() != getObject()) {
             modelPickedInClick = true;
         }
 

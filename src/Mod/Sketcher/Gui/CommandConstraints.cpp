@@ -1356,7 +1356,9 @@ std::string externalSelectionName(Sketcher::SketchObject* sketch, int geoId)
  * geometry. The links are added in a transaction booked with a temporary name: the command's own
  * openCommand renames it (Document::setActiveTransaction), so the pick and the constraint are one
  * undo step, as in Onshape. A command that makes no constraint leaves the booking temporary, and
- * the destructor aborts it with the links it added.
+ * the destructor aborts it with the links it added and gives back the selection as picked. A pick
+ * that can't be linked (a whole object, the origin, a link that fails) books nothing: the command
+ * reads the selection as picked and refuses it, as before.
  */
 class ModelPickBooking
 {
@@ -1383,9 +1385,15 @@ public:
                 continue;
             }
             picks.push_back({sel.pObject, sel.SubName});
-            if (sel.pObject != sketch) {
-                modelPicks = true;
+            if (sel.pObject == sketch) {
+                continue;
             }
+            const std::string_view element(sel.SubName);
+            if (!(element.starts_with("Edge") && element.size() > 4)
+                && !(element.starts_with("Vertex") && element.size() > 6)) {
+                return;
+            }
+            modelPicks = true;
         }
         if (!modelPicks) {
             return;
@@ -1394,18 +1402,16 @@ public:
         tid = Gui::Command::openActiveDocumentCommand(
             App::TransactionName {.name = QT_TRANSLATE_NOOP("Command", "Add external geometry"),
                                   .temporary = true});
-        document = tid ? sketchDocument : nullptr;
+        if (!tid) {
+            return;
+        }
+        document = sketchDocument;
+        sketchName = sketch->getNameInDocument();
 
         std::vector<std::string> names;
-        bool failed = false;
         for (const auto& pick : picks) {
             if (pick.object == sketch) {
                 names.push_back(pick.subName);
-                continue;
-            }
-            const std::string_view element(pick.subName);
-            if (!(element.starts_with("Edge") && element.size() > 4)
-                && !(element.starts_with("Vertex") && element.size() > 6)) {
                 continue;
             }
             int geoId = GeoEnum::GeoUndef;
@@ -1422,18 +1428,20 @@ public:
             const std::string name =
                 geoId == GeoEnum::GeoUndef ? std::string() : externalSelectionName(sketch, geoId);
             if (name.empty()) {
-                failed = true;
-                continue;
+                // No constraint on the other picks alone: the links go, the selection stays
+                Gui::NotifyError(sketch,
+                                 QT_TRANSLATE_NOOP("Notifications", "Error"),
+                                 QT_TRANSLATE_NOOP("Notifications", "Failed to add external geometry"));
+                abort();
+                return;
             }
             names.push_back(name);
             added.push_back({pick.object, pick.subName, geoId});
         }
-        if (failed) {
-            Gui::NotifyError(sketch,
-                             QT_TRANSLATE_NOOP("Notifications", "Error"),
-                             QT_TRANSLATE_NOOP("Notifications", "Failed to add external geometry"));
-        }
 
+        for (const auto& pick : picks) {
+            picked.push_back({pick.object->getNameInDocument(), pick.subName});
+        }
         Gui::Selection().clearSelection();
         for (const auto& name : names) {
             vp->addSelection2(name);
@@ -1443,9 +1451,8 @@ public:
     ~ModelPickBooking()
     {
         // The command made nothing (a "Wrong selection", or the continuous tool started instead)
-        if (document && document->getBookedTransactionID() == tid
-            && App::GetApplication().transactionTmpName(tid)) {
-            document->abortTransaction();
+        if (abort()) {
+            restoreSelection();
         }
     }
 
@@ -1466,9 +1473,39 @@ public:
     }
 
 private:
+    /// aborts the booking while it is still this one and temporary
+    bool abort()
+    {
+        if (document && document->getBookedTransactionID() == tid
+            && App::GetApplication().transactionTmpName(tid)) {
+            document->abortTransaction();
+            added.clear();
+            return true;
+        }
+        return false;
+    }
+
+    /// the picks selected again after an abort, as Onshape keeps a refused constraint's selection;
+    /// not while a tool runs (the continuous tool started instead would take them as its picks)
+    void restoreSelection()
+    {
+        auto* guiDocument = Gui::Application::Instance->getDocument(document);
+        auto* vp = guiDocument ? dynamic_cast<ViewProviderSketch*>(guiDocument->getInEdit()) : nullptr;
+        if (!vp || picked.empty() || vp->getSketchObject()->getNameInDocument() != sketchName
+            || vp->getSketchMode() == ViewProviderSketch::STATUS_SKETCH_UseHandler) {
+            return;
+        }
+        Gui::Selection().clearSelection();
+        for (const auto& [objectName, subName] : picked) {
+            Gui::Selection().addSelection(document->getName(), objectName.c_str(), subName.c_str());
+        }
+    }
+
     App::Document* document {nullptr};
     int tid {0};
+    std::string sketchName;
     std::vector<Reference> added;
+    std::vector<std::pair<std::string, std::string>> picked;
 };
 }// namespace SketcherGui
 

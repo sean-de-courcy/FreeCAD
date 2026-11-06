@@ -563,8 +563,9 @@ public:
     void purgeHandler();
     //@}
 
-    /// FreeCAD-CH (ops#634): a sketch element (point, curve, axis, constraint) is under the cursor
-    bool hasSketchPreselection() const;
+    /// FreeCAD-CH (ops#634): a click may pick a model element now: no sketch element (point,
+    /// curve, axis, constraint) is under the cursor, and no drag or box selection is under way
+    bool takesModelPick() const;
 
     bool isConstructionMode() const;
 
