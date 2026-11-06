@@ -460,7 +460,8 @@ names it.
 | `fix/633-point-names` | fix | ops#633 | - | `integration` `e5aebe7c8f` | `14d68c7433` (fork PR 431), 2026-11-05 | never (fork fix) |
 | `fix/630-newpart-visibility` | fix | ops#630 | - | `integration` `e5aebe7c8f` | `dab7fc90bc` (fork PR 432), 2026-11-05 | never (fork fix) |
 | `fix/631-open-wires` | fix | ops#631 | - | `integration` `e5aebe7c8f` | `b582e2b663` (fork PR 435), 2026-11-05 | never (fork fix) |
-| `feat/632-features-reorder` | feat | ops#632 | - | `integration` `14d68c7433` | (fork PR 433) | never (fork feature); refit when upstream changes `Body::addObject`, `Body::reorderObject`, or the Features list (fork) |
+| `feat/632-features-reorder` | feat | ops#632 | - | `integration` `14d68c7433` | `89a3998065` (fork PR 433), 2026-11-05 | never (fork feature); refit when upstream changes `Body::addObject`, `Body::reorderObject`, or the Features list (fork) |
+| `feat/635-part-lifetime` | feat | ops#635 | - | `integration` `14d68c7433` | (fork PR 434) | never (fork feature) |
 
 ## Fork-only commits in carried topics
 
