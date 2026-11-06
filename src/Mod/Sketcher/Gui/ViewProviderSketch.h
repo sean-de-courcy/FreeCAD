@@ -815,6 +815,8 @@ protected:
     void deactivateHandler();
     /// FreeCAD-CH (ops#634): model edges and vertices selectable in plain edit mode (no handler)
     void setModelPicking(Gui::View3DInventorViewer* viewer, bool on);
+    /// the click under way picked a model element: its release keeps the selection
+    bool modelPickedInClick = false;
     /// the viewer the sketch is edited in, or null
     Gui::View3DInventorViewer* getEditViewer() const;
     /// get called if a subelement is double clicked while editing

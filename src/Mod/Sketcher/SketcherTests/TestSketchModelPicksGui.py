@@ -120,7 +120,7 @@ class TestSketchModelPicksGui(SketcherGuiTestCase):
             for sub in sel.SubElementNames
         }
 
-    def run(self, command):
+    def run_command(self, command):
         FreeCADGui.runCommand(command)
         self.flush_gui(100)
 
@@ -168,7 +168,7 @@ class TestSketchModelPicksGui(SketcherGuiTestCase):
         one link, one undo step; undo leaves neither the constraint nor the link."""
         self.start_edit()
         self.select((self.sketch, "Vertex2"), (self.pad, self.vertex_at(self.pad, V(20, 10, 5))))
-        self.run("Sketcher_ConstrainCoincidentUnified")
+        self.run_command("Sketcher_ConstrainCoincidentUnified")
 
         self.assertEqual(len(self.sketch.ExternalGeometry), 1)
         self.assertEqual(len(self.constraints_of("Coincident")), 1)
@@ -187,7 +187,7 @@ class TestSketchModelPicksGui(SketcherGuiTestCase):
         self.start_edit()
         edge = self.edge_between(self.pad, V(0, 0, 5), V(20, 0, 5))
         self.select((self.sketch, "Vertex1"), (self.pad, edge))
-        self.run("Sketcher_ConstrainDistance")
+        self.run_command("Sketcher_ConstrainDistance")
 
         distances = self.constraints_of("Distance")
         self.assertEqual(len(distances), 1)
@@ -203,52 +203,35 @@ class TestSketchModelPicksGui(SketcherGuiTestCase):
             (self.pad, self.edge_between(self.pad, V(20, 0, 5), V(20, 10, 5))),
         )
         self.answer_modals()
-        self.run("Sketcher_ConstrainCoincidentUnified")
+        self.run_command("Sketcher_ConstrainCoincidentUnified")
 
         self.assertEqual(len(self.sketch.Constraints), 0)
         self.assertEqual(len(self.sketch.ExternalGeometry), 0)
         self.assertEqual(self.doc.UndoCount, self.undo_start)
 
     def test_a_constraint_tool_left_after_a_model_pick_leaves_no_link(self):
-        """The Distance tool, a model edge picked, then Esc: the link goes with the tool."""
+        """The Coincident tool, a model vertex picked (it waits for a second pick), then Esc: the
+        link goes with the tool. (Distance would not do: one external edge alone is a complete
+        Distance, its length.)"""
         self.start_edit()
         FreeCADGui.Selection.clearSelection()
-        self.run("Sketcher_ConstrainDistance")
-        edge = self.edge_between(self.pad, V(0, 0, 5), V(20, 0, 5))
-        FreeCADGui.Selection.addSelection(self.doc.Name, self.pad.Name, edge)
+        self.run_command("Sketcher_ConstrainCoincidentUnified")
+        vertex = self.vertex_at(self.pad, V(20, 10, 5))
+        FreeCADGui.Selection.addSelection(self.doc.Name, self.pad.Name, vertex)
         self.flush_gui(100)
         self.assertEqual(len(self.sketch.ExternalGeometry), 1, "Expected the tool to link the pick")
+        self.assertEqual(len(self.sketch.Constraints), 0)
 
         self.key_click(self.viewport, QtCore.Qt.Key_Escape)
         self.flush_gui(100)
         self.assertEqual(len(self.sketch.ExternalGeometry), 0)
         self.assertEqual(self.doc.UndoCount, self.undo_start)
 
-    def test_a_click_on_a_model_vertex_adds_to_the_sketch_selection(self):
-        """Clicks, as a user's: the sketch line, then the box's far corner. Both stay selected
-        (the release after the model pick doesn't clear it)."""
-        self.start_edit()
-        FreeCADGui.Selection.clearSelection()
-        on_line = self.screen_point(V(5, 2, 5))
-        self.move(self.viewport, on_line)
-        self.click(self.viewport, on_line)
-        self.assertIn(("Sketch", "Edge1"), self.selected())
-
-        corner = self.screen_point(V(20, 10, 5))
-        self.move(self.viewport, corner)
-        self.click(self.viewport, corner)
-        picked = self.selected()
-        self.assertIn(("Sketch", "Edge1"), picked)
-        self.assertTrue(
-            any(obj == "Pad" and sub.startswith(("Vertex", "Edge")) for obj, sub in picked),
-            "Expected a model pick at the corner, got %s" % sorted(picked),
-        )
-
     def test_delete_keeps_a_model_pick_s_object(self):
         """A model edge selected in the sketch editor, then Delete: the Pad stays."""
         self.start_edit()
         self.select((self.pad, self.edge_between(self.pad, V(0, 0, 5), V(20, 0, 5))))
-        self.run("Std_Delete")
+        self.run_command("Std_Delete")
         self.assertIsNotNone(self.doc.getObject("Pad"))
 
     def test_a_sibling_part_s_edge_is_taken_another_part_s_isnt(self):

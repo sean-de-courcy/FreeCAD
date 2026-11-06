@@ -1495,6 +1495,7 @@ bool ViewProviderSketch::mouseButtonPressed(int Button, bool pressed, const SbVe
                     // Double click events variables
                     float dci = (float)QApplication::doubleClickInterval() / 1000.0F;
 
+                    modelPickedInClick = false;  // FreeCAD-CH (ops#634)
                     if (done
                         && SbVec2f(cursorPos - DoubleClick::prvClickPos).length() < dblClickRadius
                         && (SbTime::getTimeOfDay() - DoubleClick::prvClickTime).getValue() < dci) {
@@ -1641,7 +1642,11 @@ bool ViewProviderSketch::mouseButtonPressed(int Button, bool pressed, const SbVe
                 }
                 case STATUS_SKETCH_StartRubberBand:// a single click happened, so clear selection
                                                    // unless user hold control.
-                    if (!(QApplication::keyboardModifiers() & Qt::ControlModifier)) {
+                    // FreeCAD-CH (ops#634): unless the click picked a model element
+                    if (modelPickedInClick) {
+                        modelPickedInClick = false;
+                    }
+                    else if (!(QApplication::keyboardModifiers() & Qt::ControlModifier)) {
                         Gui::Selection().clearSelection();
                     }
                     setSketchMode(STATUS_NONE);
@@ -2104,6 +2109,13 @@ bool ViewProviderSketch::mouseMove(const SbVec2s& cursorPos, Gui::View3DInventor
             }
             return true;
         case STATUS_SKETCH_StartRubberBand: {
+            // FreeCAD-CH (ops#634): the click picked a model element and the 3D view's selection
+            // took its release: no button is down, no rubber band
+            if (modelPickedInClick) {
+                modelPickedInClick = false;
+                setSketchMode(STATUS_NONE);
+                return false;
+            }
             setSketchMode(STATUS_SKETCH_UseRubberBand);
             rubberband->setWorking(true);
             return true;
@@ -2930,10 +2942,10 @@ void ViewProviderSketch::onSelectionChanged(const Gui::SelectionChanges& msg)
 
         // FreeCAD-CH (ops#634): a model edge or vertex picked in plain edit mode. The press found
         // no sketch element and readied a rubber band, whose release would clear the selection
-        // just made: the click is the model pick's
+        // just made: the click is the model pick's, and its release is taken without a clear
         if (msg.Type == Gui::SelectionChanges::AddSelection && Mode == STATUS_SKETCH_StartRubberBand
             && msg.Object.getSubObject() != getObject()) {
-            setSketchMode(STATUS_NONE);
+            modelPickedInClick = true;
         }
 
         std::string temp;
