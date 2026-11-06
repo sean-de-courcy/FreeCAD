@@ -47,7 +47,7 @@ from PySide6 import QtTest
 
 from PartDesignTests.Scenarios import models
 
-TINKERCAD = "Gui::TinkerCADNavigationStyle"
+ONSHAPE = "Gui::OnshapeNavigationStyle"  # the pack's and the code's default since ops#640
 
 # The probe: an add-on in the settings folder whose InitGui.py, once the event loop runs (after
 # the start-up steps, the first-start apply among them), writes the navigation style and exits
@@ -422,8 +422,8 @@ class TestOnshapeStudioGui(unittest.TestCase):
         return lines.get("style"), lines.get("decimals") == "3"
 
     def testFirstStartAppliesTheOnshapePack(self):
-        """A settings folder with no user.cfg starts with the pack's TinkerCAD navigation style."""
-        self.assertEqual(self.runOnNewHome(), (TINKERCAD, True))
+        """A settings folder with no user.cfg starts with the pack's Onshape navigation style."""
+        self.assertEqual(self.runOnNewHome(), (ONSHAPE, True))
 
     def testFirstStartLeavesAnExistingUserCfgAlone(self):
         """A settings folder with a user.cfg keeps its own navigation style."""
@@ -431,8 +431,8 @@ class TestOnshapeStudioGui(unittest.TestCase):
 
     def testFirstStartSkipsARunWithAScript(self):
         """A run started with a script (as the test runners start FreeCAD) keeps the code
-        defaults on a new folder: not the pack's decimals, nor its navigation style (the view
-        writes its own default)."""
+        defaults on a new folder: not the pack's decimals. (The navigation style no longer tells
+        the two apart: the code default is the pack's Onshape style too since ops#640.)"""
         style, decimals = self.runOnNewHome(script=True)
-        self.assertNotEqual(style, TINKERCAD)
+        self.assertEqual(style, ONSHAPE)
         self.assertFalse(decimals)

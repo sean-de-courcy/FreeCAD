@@ -23,11 +23,15 @@
  ***************************************************************************/
 
 
+#include <string_view>
+#include <vector>
+
 #include <App/Document.h>
 #include <Gui/Application.h>
 #include <Gui/Command.h>
 #include <Gui/Control.h>
 #include <Gui/MDIView.h>
+#include <Gui/Selection/Selection.h>
 #include <Mod/Sketcher/Gui/Workbench.h>
 #include <Mod/PartDesign/App/Body.h>
 #include <Mod/PartDesign/App/FeatureMultiTransform.h>
@@ -78,9 +82,46 @@ Workbench::~Workbench()
     WorkflowManager::destruct();
 }
 
+namespace
+{
+
+/// "Face" or "Edge" when every selected sub-element is one of that kind, on one object; else ""
+std::string_view subElementKind(const std::vector<Gui::SelectionSingleton::SelObj>& selection)
+{
+    std::string_view kind;
+    for (const auto& sel : selection) {
+        std::string_view sub = sel.SubName ? sel.SubName : "";
+        std::string_view thisKind;
+        if (sub.starts_with("Face")) {
+            thisKind = "Face";
+        }
+        else if (sub.starts_with("Edge")) {
+            thisKind = "Edge";
+        }
+        if (thisKind.empty() || sel.pObject != selection.front().pObject
+            || (!kind.empty() && thisKind != kind)) {
+            return {};
+        }
+        kind = thisKind;
+    }
+    return kind;
+}
+
+}  // namespace
+
 void Workbench::setupContextMenu(const char* recipient, Gui::MenuItem* item) const
 {
     auto selection = Gui::Selection().getSelection();
+    // FreeCAD-CH (ops#640): in the 3D view, Onshape's menu: the body's own entries (Move tip,
+    // the roll-back bar) go under a More submenu, which Gui::StdWorkbench fills and puts last
+    const bool inView = strcmp(recipient, "View") == 0;
+    Gui::MenuItem* more = nullptr;
+    Gui::MenuItem* bodyItem = item;
+    if (inView) {
+        more = new Gui::MenuItem;
+        more->setCommand("More");
+        bodyItem = more;
+    }
     // Add move Tip Command
     if (!selection.empty()) {
         App::DocumentObject* feature = selection.front().pObject;
@@ -92,17 +133,29 @@ void Workbench::setupContextMenu(const char* recipient, Gui::MenuItem* item) con
             && (feature->isDerivedFrom<PartDesign::Feature>()
                 || (feature->isDerivedFrom<Part::Feature>()
                     && body->BaseFeature.getValue() == feature))) {
-            *item << "PartDesign_MoveTip";
+            *bodyItem << "PartDesign_MoveTip";
         }
         // The roll-back bar (ops#127): on a feature, sketch or datum of a body, and to the end
         // while the body is rolled back
         if (selection.size() == 1 && feature && body && body->hasObject(feature)) {
-            *item << "PartDesign_RollTo";
+            *bodyItem << "PartDesign_RollTo";
         }
         // A selected Body is its own (getBodyFor finds no Body containing it)
         auto rollBody = body ? body : freecad_cast<PartDesign::Body*>(feature);
         if (selection.size() == 1 && rollBody && rollBody->isRolledBack()) {
-            *item << "PartDesign_RollToEnd";
+            *bodyItem << "PartDesign_RollToEnd";
+        }
+
+        if (inView) {
+            // Onshape's first entries: Sketch on face (one face), Fillet and Chamfer (faces or
+            // edges of one object)
+            const std::string_view kind = subElementKind(selection);
+            if (kind == "Face" && selection.size() == 1) {
+                *item << "PartDesign_NewSketch";
+            }
+            if (!kind.empty()) {
+                *item << "PartDesign_Fillet" << "PartDesign_Chamfer";
+            }
         }
 
         if (strcmp(recipient, "Tree") == 0) {
@@ -155,6 +208,14 @@ void Workbench::setupContextMenu(const char* recipient, Gui::MenuItem* item) con
 
     if (item->hasItems()) {
         *item << "Separator";
+    }
+    if (more) {
+        if (more->hasItems()) {
+            *item << more;
+        }
+        else {
+            delete more;
+        }
     }
     Gui::StdWorkbench::setupContextMenu(recipient, item);
 }
