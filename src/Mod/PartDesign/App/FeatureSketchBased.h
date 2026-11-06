@@ -196,6 +196,12 @@ protected:
         bool sketchVertices = false
     );
 
+    /// The wires of `shape` without its open curves (ops#631), as Onshape's extrude ignores the
+    /// open curves of a sketch: the edges on no closed loop (a reference line, a line from a
+    /// loop to nowhere or from one loop to another) are left out. Returns `shape` itself when
+    /// all its wires are closed, and a null shape when no loop remains.
+    static TopoShape withoutOpenCurves(const TopoShape& shape);
+
     /// Extract a face from a given LinkSub
     static void getFaceFromLinkSub(TopoDS_Face& upToFace, const App::PropertyLinkSub& refFace);
 
