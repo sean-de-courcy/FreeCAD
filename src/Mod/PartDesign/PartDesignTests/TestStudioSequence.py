@@ -628,6 +628,36 @@ class TestHistoryOrder(unittest.TestCase):
         self.assertEqual(self.ranked(), [])
         model.checkEnd()
 
+    def testDropBelowAWholeBodyReaderIsRefused(self):
+        """Review prlocal632-r1 T1: Body2's binder reads Body1 whole, as its last solid. Body1's
+        block dropped below the binder would become Body1's last solid, read by the binder above
+        it: refused, naming both (before: accepted, and the list put the block back)."""
+        self.twoParts()
+        binder = self.body2.newObject("PartDesign::SubShapeBinder", "Binder")
+        binder.Support = [(self.body1, "")]
+        self.doc.recompute()
+        self.assertEqual(self.order()[-1], "Binder")
+        with self.assertRaisesRegex(ValueError, "'Binder' of 'Body2' uses 'PadA'"):
+            PartDesign.moveInStudio(self.doc, self.padA, binder)
+        self.assertEqual(self.names(self.body1.Group), ["SkA", "PadA", "SkA2", "PadA2"])
+        self.assertEqual(self.ranked(), [])
+        # Below the binder as its last solid, Body1's boss can't go either; above it, it can
+        with self.assertRaisesRegex(ValueError, "'Binder' of 'Body2' uses 'PadA2'"):
+            PartDesign.moveInStudio(self.doc, [self.skA2, self.padA2], binder)
+        self.assertTrue(PartDesign.moveInStudio(self.doc, [self.skC, self.padC], None))
+
+    def testCopyIsListedAsTheNewest(self):
+        """Reviews prlocal632-r1 T3 and r1s 1: a copied Body's features don't keep their sources'
+        saved places: they are listed after every row, as the newest."""
+        self.twoParts()
+        PartDesign.moveInStudio(self.doc, [self.skC, self.padC], None)
+        dragged = self.order()
+        copy = self.doc.copyObject(self.body1, True)
+        self.doc.recompute()
+        self.assertEqual(self.order()[: len(dragged)], dragged)
+        self.assertEqual(self.order()[len(dragged):], self.names(copy.Group))
+        self.assertTrue(all("HistoryRank" not in o.PropertiesList for o in copy.Group))
+
     def testRefusals(self):
         self.twoParts()
         with self.assertRaisesRegex(ValueError, "one part at a time"):

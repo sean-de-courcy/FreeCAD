@@ -9,6 +9,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include <App/Application.h>
 #include <App/Datums.h>
 #include <App/Document.h>
 #include <App/DocumentObject.h>
@@ -152,6 +153,8 @@ struct History
     std::vector<std::vector<App::DocumentObject*>> lanes;
     std::unordered_map<const App::DocumentObject*, std::size_t> laneOf;
     std::unordered_map<const App::DocumentObject*, std::unordered_set<App::DocumentObject*>> deps;
+    /// The lanes of the Bodies each member reads whole (in deps as their last solid feature)
+    std::unordered_map<const App::DocumentObject*, std::unordered_set<std::size_t>> wholeReads;
     std::vector<App::DocumentObject*> sequence;
 };
 
@@ -208,6 +211,7 @@ History readHistory(App::Document* doc, App::Part* studio)
                         if (auto it = laneOf.find(last); it != laneOf.end()) {
                             if (it->second != lane) {
                                 found.insert(last);
+                                history.wholeReads[member].insert(it->second);
                             }
                         }
                         else if (seen.insert(last).second) {
@@ -302,6 +306,28 @@ void saveHistoryOrder(const std::vector<App::DocumentObject*>& order)
             rank->setValue(static_cast<double>(i));
         }
     }
+}
+
+void registerHistoryImport()
+{
+    // A copy, a paste or a merged file is new to its studio: listed as the newest, not at its
+    // source's place (reviews prlocal632-r1 T3, prlocal632-r1s 1)
+    auto forget = [](const std::vector<App::DocumentObject*>& objs, Base::XMLReader& /*reader*/) {
+        for (auto obj : objs) {
+            if (obj && obj->getDynamicPropertyByName(historyRankName)) {
+                obj->removeDynamicProperty(historyRankName);
+            }
+        }
+    };
+    auto watch = [forget](App::Document& doc) {
+        doc.signalImportObjects.connect(forget);
+    };
+    for (auto doc : App::GetApplication().getDocuments()) {
+        watch(*doc);
+    }
+    App::GetApplication().signalNewDocument.connect([watch](const App::Document& doc, bool) {
+        watch(const_cast<App::Document&>(doc));
+    });
 }
 
 void saveInsertAtBar(App::Document* doc,
@@ -411,10 +437,14 @@ std::string labelOf(const App::DocumentObject* obj)
 }
 
 /// The first read between Bodies that order breaks and history's sequence kept (a loop's broken
-/// reads stay broken), as the refusal's text, or empty
+/// reads stay broken), as the refusal's text, or empty. A Body read whole is read as its last solid
+/// feature in the planned Groups: the lane ownLane's rows become ownPlan (review prlocal632-r1 T1:
+/// a solid dropped below a binder of its Body became its last solid, and the list put it back)
 std::string brokenRead(const History& history,
                        const std::vector<App::DocumentObject*>& order,
-                       const std::unordered_set<const App::DocumentObject*>& moved)
+                       const std::unordered_set<const App::DocumentObject*>& moved,
+                       std::size_t ownLane,
+                       const std::vector<App::DocumentObject*>& ownPlan)
 {
     std::unordered_map<const App::DocumentObject*, std::size_t> before;
     std::unordered_map<const App::DocumentObject*, std::size_t> now;
@@ -424,12 +454,26 @@ std::string brokenRead(const History& history,
     for (std::size_t i = 0; i < order.size(); ++i) {
         now.emplace(order[i], i);
     }
+    auto lastSolid = [&](std::size_t lane) -> App::DocumentObject* {
+        const auto& rows = lane == ownLane ? ownPlan : history.lanes[lane];
+        auto it = std::find_if(rows.rbegin(), rows.rend(), Body::isSolidFeature);
+        return it == rows.rend() ? nullptr : *it;
+    };
     for (auto reader : order) {
-        auto deps = history.deps.find(reader);
-        if (deps == history.deps.end()) {
-            continue;
+        std::vector<App::DocumentObject*> reads;
+        if (auto deps = history.deps.find(reader); deps != history.deps.end()) {
+            reads.assign(deps->second.begin(), deps->second.end());
         }
-        for (auto read : deps->second) {
+        if (auto whole = history.wholeReads.find(reader); whole != history.wholeReads.end()) {
+            for (auto lane : whole->second) {
+                if (auto last = lastSolid(lane)) {
+                    reads.push_back(last);
+                }
+            }
+        }
+        // The read listed first is named, whatever the order of the sets
+        std::ranges::sort(reads, [&now](auto a, auto b) { return now.at(a) < now.at(b); });
+        for (auto read : reads) {
             if (now.at(read) < now.at(reader) || before.at(read) > before.at(reader)) {
                 continue;
             }
@@ -573,7 +617,7 @@ bool moveInStudio(App::Document* doc,
     auto order = dropped(sequence, moved, block, at);
 
     // 3. Across Bodies: no read between them is broken
-    auto broken = brokenRead(history, order, moved);
+    auto broken = brokenRead(history, order, moved, lane, lanePlan);
     if (!broken.empty()) {
         throw Base::ValueError(broken);
     }

@@ -42,6 +42,10 @@ PartDesignExport std::vector<App::DocumentObject*> studioSequence(App::Document*
  */
 PartDesignExport void saveHistoryOrder(const std::vector<App::DocumentObject*>& order);
 
+/// Imported objects (a copy, a paste, a merged file) lose their saved HistoryRank: they are listed
+/// as the newest members. Watches every document's signalImportObjects
+PartDesignExport void registerHistoryImport();
+
 /** Body::addObject()'s insert at a rolled-back bar (design 3.3): history is the studio's sequence
  * before the insert and bar the row its bar followed then (studioBarAfter() of it). feature, now
  * in its Body's Group, goes right after bar (before its Body's member after it, if that comes
