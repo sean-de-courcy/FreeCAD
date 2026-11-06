@@ -341,6 +341,19 @@ void restartEdit(const App::DocumentObjectT& featureT, const std::function<void(
     }
 }
 
+// Shows the Body's Tip when none of its solid features is shown, so the part isn't left empty
+// (ViewProvider::unsetEdit's rule, ops#212)
+void showTipIfNoneShown(const PartDesign::Body* body)
+{
+    App::DocumentObject* tip = body->Tip.getValue();
+    bool shown = std::ranges::any_of(body->Group.getValues(), [](App::DocumentObject* obj) {
+        return obj->isDerivedFrom<PartDesign::Feature>() && obj->Visibility.getValue();
+    });
+    if (tip && !shown) {
+        Gui::cmdAppObjectShow(tip);
+    }
+}
+
 void moveToNewPart(const App::DocumentObjectT& featureT)
 {
     restartEdit(featureT, [&featureT]() {
@@ -385,6 +398,9 @@ void moveToNewPart(const App::DocumentObjectT& featureT)
         // The part it left shows its own result now; OK purges the document's touched objects
         // (accept()), so the part would keep the feature's solid until its next recompute
         from->recomputeFeature(/*recursive=*/true);
+        // ...and stays shown, as Onshape's other parts do (ops#630): the command hid its Tip for
+        // the feature, which has left. A feature the user shows instead stays the shown one
+        showTipIfNoneShown(from);
     });
 }
 

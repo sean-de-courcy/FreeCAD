@@ -201,6 +201,11 @@ def globalBox(feature):
     return feature.AddSubShape.transformed(feature.getGlobalPlacement().toMatrix()).BoundBox
 
 
+def shownFeatures(body):
+    """The names of the Body's shown solid features (ViewProviderBody::getShownFeature's test)."""
+    return [o.Name for o in body.Group if o.isDerivedFrom("PartDesign::Feature") and o.Visibility]
+
+
 class ResultBoxGuiCase(unittest.TestCase):
     """The fixture and helpers of the Result box tests: a document with undo, the PartDesign
     workbench, the panel's widgets."""
@@ -530,6 +535,54 @@ class TestResultBoxGui(ResultBoxGuiCase):
         self.assertIs(lid.getParentGeoFeatureGroup(), part)
         self.assertAlmostEqual(part.Shape.Volume, 9000, places=3)
         self.assertAlmostEqual(self.body.Shape.Volume, 16000, places=3)
+        # ops#630: the enclosure shows its new tip, not nothing
+        self.assertEqual(shownFeatures(self.body), ["Base"])
+
+    def testNewPartKeepsTheEnclosureShown(self):
+        """ops#630, Onshape's New part: the parts the feature leaves stay shown. The Pad command
+        hides the enclosure's tip for the pad; New part takes the pad away, and the enclosure
+        shows its tip again, while the panel is open and after OK. The new Body shows the pad."""
+        self.enclosure()
+        self.assertEqual(shownFeatures(self.body), ["Base"])
+        lid = self.lidPad()
+        self.choose("New part")
+        self.assertEqual(shownFeatures(self.body), ["Base"])
+        self.close(ok=True)
+        part = lid.getParentGeoFeatureGroup()
+        self.assertEqual(shownFeatures(self.body), ["Base"])
+        self.assertEqual(shownFeatures(part), [lid.Name])
+        self.assertTrue(self.body.Visibility)
+        self.assertTrue(part.Visibility)
+
+    def testAddToShowsWhatThePadPanelShowed(self):
+        """ops#630: New part, then Add to Enclosure: the enclosure shows what the Pad's panel
+        showed before the move (the edit's own choice), and after OK the pad alone."""
+        self.enclosure()
+        lid = self.lidPad()
+        inPanel = shownFeatures(self.body)
+        self.choose("New part")
+        self.choose("Add to Enclosure")
+        self.assertEqual(shownFeatures(self.body), inPanel)
+        self.close(ok=True)
+        self.assertEqual(shownFeatures(self.body), [lid.Name])
+
+    def testCancelAfterNewPartOfAnUnusedTip(self):
+        """ops#630: an existing lid pad, the enclosure's shown tip, edited; New part shows the
+        base in the enclosure, and Cancel puts the pad back as the shown feature, the base
+        hidden, as before the edit."""
+        self.enclosure()
+        lid = pad(self.body, "Lid", self.lidSk, 10)
+        self.doc.recompute()
+        lid.Visibility = True
+        self.assertEqual(shownFeatures(self.body), ["Lid"])
+        lid.ViewObject.doubleClicked()
+        self.waitForPanel()
+        self.choose("New part")
+        self.assertEqual(shownFeatures(self.body), ["Base"])
+        self.close(ok=False)
+        self.doc.recompute()
+        self.assertIs(lid.getParentGeoFeatureGroup(), self.body)
+        self.assertEqual(shownFeatures(self.body), ["Lid"])
 
     def testRevolutionPanelNewPart(self):
         """PR 303 round 1, the panels the 2b tests didn't open: Revolution shows the box, and New
