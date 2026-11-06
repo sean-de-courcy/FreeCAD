@@ -463,7 +463,8 @@ names it.
 | `feat/632-features-reorder` | feat | ops#632 | - | `integration` `14d68c7433` | `89a3998065` (fork PR 433), 2026-11-05 | never (fork feature); refit when upstream changes `Body::addObject`, `Body::reorderObject`, or the Features list (fork) |
 | `feat/635-part-lifetime` | feat | ops#635 | - | `integration` `14d68c7433` | `16365e3172` (fork PR 434), 2026-11-05 | never (fork feature) |
 | `feat/635-delete-part` | feat | ops#635 | - | `integration` `16365e3172` | `76a3cc24b7` (fork PR 436), 2026-11-06 | never (fork feature) |
-| `infra/628-superseded-tag` | infra | ops#628 | - | `integration` `76a3cc24b7` | (fork PR 437) | never |
+| `infra/628-superseded-tag` | infra | ops#628 | - | `integration` `76a3cc24b7` | `0c4c64265d` (fork PR 437), 2026-11-06 | never |
+| `infra/628-gen2` | infra | ops#628 | - | `integration` `0c4c64265d` | (fork PR 438) | never |
 
 ## Fork-only commits in carried topics
 

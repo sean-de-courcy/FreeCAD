@@ -95,7 +95,7 @@ import CompatRecord
 
 # Size budget of the committed corpus (3.1): raising it is the coordinator's call.
 GENERATION_BUDGET = 3 * 1024 * 1024
-CORPUS_BUDGET = 10 * 1024 * 1024
+CORPUS_BUDGET = 16 * 1024 * 1024  # 10 MB until gen2 (decision 292, ops#628)
 
 # Console lines that say a reference or a link was lost.
 BAD_LINES = (
@@ -869,7 +869,7 @@ class TestCompatCorpus(unittest.TestCase):
         self.assertEqual(found["gen0/A/ordered/recompute"], [])
 
     def testSizeBudget(self):
-        """A generation stays under 3 MB, the corpus under 10 MB (3.1)."""
+        """A generation stays under 3 MB, the corpus under 16 MB (3.1, decision 292)."""
         total = 0
         for gen, folder in generations().items():
             size = sum(os.path.getsize(os.path.join(folder, f)) for f in os.listdir(folder))
