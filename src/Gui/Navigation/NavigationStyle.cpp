@@ -490,9 +490,10 @@ void NavigationStyle::initialize()
     this->zoomStep = App::GetApplication()
                          .GetParameterGroupByPath("User parameter:BaseApp/Preferences/View")
                          ->GetFloat("ZoomStep", 0.2f);
+    // FreeCAD-CH (ops#640): the default turns about the point under the cursor, as Onshape does
     long mode = App::GetApplication()
                     .GetParameterGroupByPath("User parameter:BaseApp/Preferences/View")
-                    ->GetInt("RotationMode", 0);
+                    ->GetInt("RotationMode", 1);
     if (mode == 0) {
         setRotationCenterMode(NavigationStyle::RotationCenterMode::WindowCenter);
     }

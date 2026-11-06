@@ -948,6 +948,7 @@ SET(Navigation_CPP_SRCS
     Navigation/OpenCascadeNavigationStyle.cpp
     Navigation/OpenSCADNavigationStyle.cpp
     Navigation/TinkerCADNavigationStyle.cpp
+    Navigation/OnshapeNavigationStyle.cpp
     Navigation/TouchpadNavigationStyle.cpp
     Navigation/GestureNavigationStyle.cpp
     Navigation/NavigationAnimator.cpp

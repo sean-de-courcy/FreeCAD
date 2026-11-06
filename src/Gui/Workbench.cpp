@@ -611,6 +611,8 @@ std::list<std::string> Workbench::listCommandbars() const
     qApp->translate("Workbench", "Special Ops");
     // needed for Structure toolbar
     qApp->translate("Workbench", "Link Actions");
+    // the 3D view's context menu (FreeCAD-CH, ops#640)
+    qApp->translate("Workbench", "More");
 #endif
 
 #if 0  // needed for the application menu on OSX
@@ -634,11 +636,16 @@ StdWorkbench::~StdWorkbench() = default;
 void StdWorkbench::setupContextMenu(const char* recipient, MenuItem* item) const
 {
     auto sels = Gui::Selection().getSelection();
+    // where the one object's Transform and Placement go (the 3D view: its More submenu)
+    MenuItem* placementItem = item;
+    // the 3D view's More submenu, appended last
+    MenuItem* more = nullptr;
 
     if (strcmp(recipient, "View") == 0) {
-        createLinkMenu(item);
-        *item << "Separator";
-
+        // FreeCAD-CH (ops#640): Onshape's context menu of the 3D view. The entries a workbench
+        // put first (PartDesign's Sketch on face, Fillet, Chamfer) stay first; the rest of
+        // FreeCAD's menu goes under a More submenu, which a workbench may have started
+        // (PartDesign's Move tip and roll-back entries) and which goes to the end here.
         auto StdViews = new MenuItem;
         StdViews->setCommand("Standard Views");
 
@@ -647,15 +654,38 @@ void StdWorkbench::setupContextMenu(const char* recipient, MenuItem* item) const
                   << "Std_ViewRear" << "Std_ViewBottom" << "Std_ViewLeft"
                   << "Separator" << "Std_ViewRotateLeft" << "Std_ViewRotateRight";
 
-        *item << "Std_ViewFitAll" << "Std_ViewFitSelection" << "Std_AlignToSelection"
-              << "Std_DrawStyle" << StdViews << "Separator"
-              << "Std_ViewDockUndockFullscreen";
+        more = item->findItem("More");
+        if (more) {
+            item->removeItem(more);
+            *more << "Separator";
+        }
+        else {
+            more = new MenuItem;
+            more->setCommand("More");
+        }
+        placementItem = more;
 
-        if (!sels.empty()) {
-            *item << "Separator" << "Std_ToggleVisibility"
-                  << "Std_ToggleSelectability" << "Std_TreeSelection"
-                  << "Std_RandomColor" << "Std_ToggleTransparency" << "Separator" << "Std_Delete"
-                  << "Std_SendToPythonConsole";
+        createLinkMenu(more);
+        if (more->hasItems()) {
+            *more << "Separator";
+        }
+
+        if (sels.empty()) {
+            // On empty space
+            *item << "Std_ViewFitAll" << "Std_ViewIsometric" << StdViews << "Separator"
+                  << "Std_ShowObjects" << "Separator";
+            *more << "Std_DrawStyle" << "Std_ViewDockUndockFullscreen";
+        }
+        else {
+            // On a face, an edge, a vertex or a whole object
+            *item << "Std_ViewNormal" << "Std_ViewFitSelection" << "Separator"
+                  << "Std_HideSelection" << "Std_Isolate" << "Std_ToggleTransparency"
+                  << "Std_SetAppearance" << "Separator" << "Std_SelectOther" << "Std_Delete"
+                  << "Separator";
+            *more << "Std_ViewFitAll" << "Std_AlignToSelection" << "Std_DrawStyle" << StdViews
+                  << "Separator" << "Std_ViewDockUndockFullscreen" << "Separator"
+                  << "Std_ToggleVisibility" << "Std_ToggleSelectability" << "Std_TreeSelection"
+                  << "Std_RandomColor" << "Std_SendToPythonConsole";
         }
     }
     else if (strcmp(recipient, "Tree") == 0) {
@@ -687,8 +717,12 @@ void StdWorkbench::setupContextMenu(const char* recipient, MenuItem* item) const
     if (sels.size() == 1) {
         App::DocumentObject* obj = sels[0].pObject;
         if (obj->getPlacementProperty() && !obj->getPlacementProperty()->isReadOnly()) {
-            *item << "Std_TransformManip" << "Std_Placement";
+            *placementItem << "Std_TransformManip" << "Std_Placement";
         }
+    }
+
+    if (more) {
+        *item << more;
     }
 }
 
