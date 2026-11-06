@@ -35,6 +35,7 @@
 #include <App/Document.h>
 #include <App/GeoFeature.h>
 #include <App/Origin.h>
+#include <App/GroupExtension.h>
 #include <App/Part.h>
 #include <App/VarSet.h>
 #include <Base/Console.h>
@@ -49,6 +50,7 @@
 #include <Gui/ViewProviderDatum.h>
 #include <Mod/Part/App/PropertyTopoShape.h>
 #include <Mod/PartDesign/App/Body.h>
+#include <Mod/PartDesign/App/FeatureBoolean.h>
 #include <Mod/PartDesign/App/FeatureDeletePart.h>
 #include <Mod/PartDesign/App/FeatureSketchBased.h>
 #include <Mod/PartDesign/App/FeatureBase.h>
@@ -368,13 +370,27 @@ bool ViewProviderBody::onDelete(const std::vector<std::string>&)
     // features
     auto body = getObject<PartDesign::Body>();
     App::Part* studio = nullptr;
-    if (body && Part::BodyBase::studioOf(body, studio) && body->Tip.getValue()) {
+    // Something outside the Body that reads it whole (a binder, a link, an expression): Std_Delete
+    // asked "the referencing objects might break" and removes the Body whatever this returns, so
+    // its features go with it, as before (a Delete part there would be left in no Body)
+    bool readWhole = body && std::ranges::any_of(body->getInList(), [body](App::DocumentObject* in) {
+        return in && PartDesign::Body::findBodyOf(in) != body
+            && !in->hasExtension(App::GroupExtension::getExtensionClassTypeId());
+    });
+    if (body && !readWhole && Part::BodyBase::studioOf(body, studio) && body->Tip.getValue()
+        && !PartDesign::Boolean::mergeOf(body)) {
         if (!PartDesign::DeletePart::deleterOf(body)) {
             Gui::Command::doCommand(Gui::Command::Doc, "import PartDesign");
             Gui::Command::doCommand(
                 Gui::Command::Doc,
                 "PartDesign.deletePart(%s)",
                 Gui::Command::getObjectCmd(body).c_str()
+            );
+            // Std_Delete recomputes only where it removed something
+            Gui::Command::doCommand(
+                Gui::Command::Doc,
+                "App.getDocument('%s').recompute()",
+                body->getDocument()->getName()
             );
         }
         return false;

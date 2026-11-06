@@ -246,6 +246,7 @@ bool Feature::placerElsewhereThan(const Body* body, const char** property, std::
 App::DocumentObjectExecReturn* Feature::recompute()
 {
     failedElsewhere = false;
+    DeletePart::setLocked(this, false);
     booleanInputsValid = false;
     vouchedShape.Nullify();
     // Held by the Body's roll-back bar (ops#127): not run on any path (also obj.recompute()); it
@@ -286,8 +287,10 @@ App::DocumentObjectExecReturn* Feature::recompute()
         return new App::DocumentObjectExecReturn(why, this);
     }
     // After a Delete part in its Body, or reading a part deleted before it (ops#635)
-    if (std::string why = DeletePart::deleteLock(this); !why.empty()) {
-        return new App::DocumentObjectExecReturn(why, this);
+    std::string lock = DeletePart::deleteLock(this);
+    DeletePart::setLocked(this, !lock.empty());
+    if (!lock.empty()) {
+        return new App::DocumentObjectExecReturn(lock, this);
     }
 
     const char* placer = nullptr;
@@ -393,6 +396,27 @@ short Feature::mustExecute() const
             return 1;
         }
     }
+    // A Delete part dragged across Bodies, rolled past, deleted or suppressed touches neither
+    // this feature nor what it reads: run when its lock comes or goes (ops#635), as above
+    if (!Suppressed.getValue()) {
+        auto relocked = [this] {
+            auto body = getFeatureBody();
+            if (!body || body->holds(this)) {
+                return false;
+            }
+            return DeletePart::deleteLock(this).empty() == (DeletePart::wasLocked(this) && isError());
+        };
+        bool run = false;
+        if (App::isRecomputingOnThisThread() || App::isRecomputeWorkerThread()) {
+            run = relocked();
+        }
+        else {
+            App::runWhileRecomputeWorkerIdle([&] { run = relocked(); });
+        }
+        if (run) {
+            return 1;
+        }
+    }
     return Part::Feature::mustExecute();
 }
 
@@ -401,6 +425,7 @@ void Feature::onDocumentRestored()
     // The error and its text are restored with the document, before this
     const char* why = isError() ? getDocument()->getErrorDescription(this) : nullptr;
     failedElsewhere = why && std::strstr(why, placedElsewhere);
+    DeletePart::setLocked(this, DeletePart::isDeleteLock(why));
     Part::Feature::onDocumentRestored();
 }
 

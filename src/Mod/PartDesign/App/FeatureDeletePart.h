@@ -26,6 +26,7 @@ class PartDesignExport DeletePart: public PartDesign::Feature
 
 public:
     DeletePart();
+    ~DeletePart() override;
 
     App::DocumentObjectExecReturn* execute() override;
 
@@ -34,13 +35,23 @@ public:
     /// deleted there. Opens no transaction and doesn't recompute.
     static DeletePart* deletePart(Body* body);
 
-    /// The DeletePart that is @p body's Tip (the part is deleted at the bar), or null
+    /// The DeletePart, not suppressed, at or before @p body's Tip in its Group (the part is
+    /// deleted at the bar), or null
     static DeletePart* deleterOf(const Body* body);
 
     /// Why @p feature can't compute: it is a solid feature after a DeletePart in its Body, or it
     /// reads a part (a member of another Body, or that Body whole) that a DeletePart deleted
     /// before it in the studio's history. Empty when neither
     static std::string deleteLock(const App::DocumentObject* feature);
+
+    /// @p why (an error's text) is deleteLock()'s: the feature failed on a deleted part
+    static bool isDeleteLock(const char* why);
+
+    /// Whether @p feature's last recompute failed on deleteLock() (a recompute clears the error
+    /// texts before it asks mustExecute(), so the verdict is kept here, as the placer check keeps
+    /// its own); set by Feature::recompute() and on restore
+    static void setLocked(const App::DocumentObject* feature, bool locked);
+    static bool wasLocked(const App::DocumentObject* feature);
 };
 
 }  // namespace PartDesign
