@@ -571,6 +571,10 @@ std::string ProfileBased::missingElements(
 namespace
 {
 
+const char* const openCurvesMessage =
+    "Open curves of the sketch touch or close its regions: select the regions to use, or make "
+    "the curves construction geometry";
+
 /// Which edges lie on a loop of the graph they make (Tarjan's bridges). The graph's nodes are
 /// the edges' end points, merged within their tolerances; an edge closed on itself (a circle)
 /// is a loop of its own.
@@ -769,7 +773,7 @@ TopoShape ProfileBased::withoutOpenCurves(const TopoShape& shape)
         return shape;
     }
     // All the wires' edges as one graph, so that a loop split across wires, or closed by an
-    // open wire against a closed one, is still a loop. A closed wire's edges are on its loop.
+    // open wire against a closed one, is still seen. A closed wire's edges are on its loop.
     std::vector<TopoShape> edges;
     std::vector<TopoDS_Edge> occEdges;
     std::vector<size_t> wireOf;
@@ -786,54 +790,26 @@ TopoShape ProfileBased::withoutOpenCurves(const TopoShape& shape)
         // maker refuses them, as before
         return shape;
     }
-    // The closed wires as they are, and the open wires' edges on loops joined again, each loop
-    // where the first wire of its edges was: a loft or a pipe pairs its sections' wires in order
-    std::vector<std::pair<size_t, TopoShape>> kept;
-    std::vector<TopoShape> loopEdges;
-    for (size_t i = 0; i < wires.size(); ++i) {
-        if (wires[i].isClosed()) {
-            kept.emplace_back(i, wires[i]);
-        }
-    }
-    size_t firstOpen = wires.size();
+    // An open wire with an edge on a loop is a loop and a curve in one wire (a line drawn from a
+    // corner or a circle's seam point). Rebuilding the loop from its edges reorders the section
+    // wires a loft pairs and renames the faces (reviews pro631-r1 and pro631s-r1fix): it stops,
+    // as before ops#631, with the reason
     for (size_t i = 0; i < edges.size(); ++i) {
         if (onLoop[i] && !wires[wireOf[i]].isClosed()) {
-            loopEdges.push_back(edges[i]);
-            firstOpen = std::min(firstOpen, wireOf[i]);
+            throw Base::CADKernelError(openCurvesMessage);
         }
     }
-    if (!loopEdges.empty()) {
-        TopoShape loops(shape);
-        loops.makeElementWires(loopEdges);
-        for (const auto& loop : loops.getSubTopoShapes(TopAbs_WIRE)) {
-            size_t place = firstOpen;
-            for (TopExp_Explorer explorer(loop.getShape(), TopAbs_EDGE); explorer.More();
-                 explorer.Next()) {
-                for (size_t i = 0; i < occEdges.size(); ++i) {
-                    if (onLoop[i] && occEdges[i].IsSame(explorer.Current())) {
-                        place = std::min(place, wireOf[i]);
-                    }
-                }
-            }
-            kept.emplace_back(place, loop);
-        }
-    }
-    std::ranges::stable_sort(kept, {}, &std::pair<size_t, TopoShape>::first);
+    // The closed wires as they are, in their order; the open wires are left out
     std::vector<TopoShape> keptWires;
-    std::vector<TopoShape> closedLoops;
-    for (const auto& [place, wire] : kept) {
-        keptWires.push_back(wire);
+    for (const auto& wire : wires) {
         if (wire.isClosed()) {
-            closedLoops.push_back(wire);
+            keptWires.push_back(wire);
         }
     }
     std::vector<bool> dropped(onLoop.size());
     std::ranges::transform(onLoop, dropped.begin(), [](bool loop) { return !loop; });
-    if (droppedCurvesCloseARegion(occEdges, dropped, closedLoops)) {
-        throw Base::CADKernelError(
-            "Open curves of the sketch close a region: select the regions to use, or make the "
-            "curves construction geometry"
-        );
+    if (droppedCurvesCloseARegion(occEdges, dropped, keptWires)) {
+        throw Base::CADKernelError(openCurvesMessage);
     }
     if (keptWires.empty()) {
         return {};

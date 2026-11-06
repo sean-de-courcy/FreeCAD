@@ -33,6 +33,9 @@ import TestSketcherApp
 from PartDesignTests import TestNamingDump as dump
 
 
+# The stop of a whole-sketch profile whose open curves touch or close its regions (ops#631)
+OPEN_CURVES_STOP = "Open curves of the sketch touch or close its regions"
+
 # A Pad made from two regions of a sketch (ops#125): a 30 x 20 x 2 plate, and two bosses of
 # radius 2 and height 5 from a sketch at z = 2, each with a 0.5 fillet on its top edge.
 REGIONS = ["InternalFace1", "InternalFace2"]
@@ -4910,11 +4913,18 @@ class TestPad(unittest.TestCase):
         pad = self.openCurvePad(circles=[(0, 0, 10)], lines=[((0, 10), (20, 10))], tangent=True)
         self.assertSolidVolume(pad, 500 * math.pi)
 
-    def testOpenCurvesLineFromTheCircleSeam(self):
-        """A radius line from the centre to the circle's seam point (10, 0): the sketch joins
-        the circle and the line in one open wire. The line is on no loop and is left out."""
-        pad = self.openCurvePad(circles=[(0, 0, 10)], lines=[((0, 0), (10, 0))])
-        self.assertSolidVolume(pad, 500 * math.pi)
+    def testOpenCurvesLineFromALoopStops(self):
+        """Review pro631s-r1fix: a line drawn from a loop's vertex shares the loop's wire (a radius
+        line to a circle's seam point (10, 0); two circles joined between their seam points). The
+        loop would have to be rebuilt from its edges, which renames the faces and reorders a
+        loft's wires: the pad stops with the reason, as it failed before."""
+        for circles, lines in (
+            ([(0, 0, 10)], [((0, 0), (10, 0))]),
+            ([(0, 0, 3), (16, 0, 3)], [((3, 0), (13, 0))]),
+        ):
+            pad = self.openCurvePad(circles=circles, lines=lines)
+            self.assertFalse(pad.isValid())
+            self.assertIn(OPEN_CURVES_STOP, pad.getStatusString())
 
     def testOpenCurvesTwoCirclesAndAStrayLine(self):
         """Two circles of r 3 and a line between them touching neither: two cylinders."""
@@ -4923,13 +4933,18 @@ class TestPad(unittest.TestCase):
         self.assertEqual(len(pad.Shape.Solids), 2)
         self.assertAlmostEqual(pad.Shape.Volume, 2 * 9 * math.pi * 5, places=3)
 
-    def testOpenCurvesLineBetweenTwoCircleSeams(self):
-        """Two circles of r 3 joined by a line between their seam points (3, 0) and (13, 0):
-        one circle and the line make one open wire. The line joins two loops and is on none."""
-        pad = self.openCurvePad(circles=[(0, 0, 3), (16, 0, 3)], lines=[((3, 0), (13, 0))])
+    def testOpenCurvesKeepTheFaceNames(self):
+        """A stray line made solid and back: the pad's element names stay the same."""
+        pad = self.openCurvePad(circles=[(-10, 0, 3), (10, 0, 3)], lines=[((-5, 8), (5, 8))])
+        sketch = pad.Profile[0]
+        names = sorted(pad.Shape.ElementReverseMap.items())
+        sketch.toggleConstruction(2)
+        self.Doc.recompute()
         self.assertTrue(pad.isValid(), pad.getStatusString())
-        self.assertEqual(len(pad.Shape.Solids), 2)
-        self.assertAlmostEqual(pad.Shape.Volume, 2 * 9 * math.pi * 5, places=3)
+        self.assertEqual(sorted(pad.Shape.ElementReverseMap.items()), names)
+        sketch.toggleConstruction(2)
+        self.Doc.recompute()
+        self.assertEqual(sorted(pad.Shape.ElementReverseMap.items()), names)
 
     def testOpenCurvesChordThroughTheCircle(self):
         """A solid centre line through a circle of r 10, both ends outside: the line divides
@@ -4948,12 +4963,13 @@ class TestPad(unittest.TestCase):
         for lines in (square + U, square + crossing):
             pad = self.openCurvePad(lines=lines)
             self.assertFalse(pad.isValid())
-            self.assertIn("Open curves of the sketch close a region", pad.getStatusString())
+            self.assertIn(OPEN_CURVES_STOP, pad.getStatusString())
 
     def testOpenCurvesLoftKeepsTheSectionOrder(self):
         """Review pro631-r1 R1: a loft between two pairs of 10 x 10 squares 40 apart, the
-        section's first square with a solid line from its corner. Each square lofts to the one
-        above it: two prisms."""
+        section with a stray line beside its first square: each square lofts to the one above
+        it, two prisms. With the line drawn from that square's corner (one wire with it, the
+        sketch's wire order changed), the loft stops (pro631s-r1fix)."""
         body = self.Doc.addObject("PartDesign::Body", "Body")
 
         def squares(x):
@@ -4964,20 +4980,26 @@ class TestPad(unittest.TestCase):
                 ((x, 5), (x, -5)),
             ]
 
-        loft = body.newObject("PartDesign::AdditiveLoft", "Loft")
-        loft.Profile = self.openCurveSketch(body, "Profile", lines=squares(-30) + squares(20))
-        loft.Sections = [
-            self.openCurveSketch(
-                body, "Section", lines=squares(-30) + squares(20) + [((-30, -5), (-40, -15))], z=40
+        for stray, valid in ((((-45, -15), (-40, -15)), True), (((-30, -5), (-40, -15)), False)):
+            loft = body.newObject("PartDesign::AdditiveLoft", "Loft")
+            loft.Profile = self.openCurveSketch(
+                body, "Profile", lines=[stray] + squares(-30) + squares(20)
             )
-        ]
-        self.Doc.recompute()
-        self.assertTrue(loft.isValid(), loft.getStatusString())
-        self.assertEqual(len(loft.Shape.Solids), 2)
-        self.assertAlmostEqual(loft.Shape.Volume, 2 * 10 * 10 * 40, places=3)
-        for solid in loft.Shape.Solids:
-            box = solid.BoundBox
-            self.assertAlmostEqual(box.XLength, 10, places=6)
+            loft.Sections = [
+                self.openCurveSketch(body, "Section", lines=squares(-30) + squares(20), z=40)
+            ]
+            self.Doc.recompute()
+            if not valid:
+                self.assertFalse(loft.isValid())
+                self.assertIn(OPEN_CURVES_STOP, loft.getStatusString())
+                continue
+            self.assertTrue(loft.isValid(), loft.getStatusString())
+            self.assertEqual(len(loft.Shape.Solids), 2)
+            self.assertAlmostEqual(loft.Shape.Volume, 2 * 10 * 10 * 40, places=3)
+            for solid in loft.Shape.Solids:
+                self.assertAlmostEqual(solid.BoundBox.XLength, 10, places=6)
+            body.removeObject(loft)
+            self.Doc.removeObject(loft.Name)
 
     def testOpenCurvesHelix(self):
         """Review pro631-r1 T3: a helix of a circle of r 1 at x = 5 about the sketch's V axis,
