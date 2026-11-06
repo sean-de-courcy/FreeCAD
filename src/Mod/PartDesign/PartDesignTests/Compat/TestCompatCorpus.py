@@ -95,7 +95,7 @@ import CompatRecord
 
 # Size budget of the committed corpus (3.1): raising it is the coordinator's call.
 GENERATION_BUDGET = 3 * 1024 * 1024
-CORPUS_BUDGET = 10 * 1024 * 1024
+CORPUS_BUDGET = 16 * 1024 * 1024  # 10 MB until gen2 (decision 292, ops#628)
 
 # Console lines that say a reference or a link was lost.
 BAD_LINES = (
