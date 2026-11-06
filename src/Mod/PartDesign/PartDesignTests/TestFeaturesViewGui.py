@@ -500,3 +500,42 @@ class TestFeaturesViewGui(unittest.TestCase):
         self.doc.recompute()
         self.assertIs(body3.Tip, padC)
         self.assertTrue(waitFor(lambda: self.partRows() == ["Body1", "Body2", body3.Label]))
+
+    def testDeletePartForcedWithAnother(self):
+        """Review prs464e2-r2, R2-1: Std_Delete of two parts, one read whole by a binder; its
+        "might break" dialog answered Yes removes every selected object, so both go with their
+        features (as before), and no feature is left outside a Body."""
+        skC = sketch(self.body1, "SkC", (40, 0, 50, 10))
+        padC = self.body1.newObject("PartDesign::Pad", "PadC")
+        padC.Profile = skC
+        padC.Length = 4
+        body3 = PartDesign.newPartFrom(padC)
+        binder = self.doc.addObject("PartDesign::SubShapeBinder", "Binder")
+        binder.Support = [(self.body2, "")]
+        self.doc.recompute()
+        names = (body3.Name, self.body2.Name)
+
+        def answer():
+            box = QtWidgets.QApplication.activeModalWidget()
+            if not isinstance(box, QtWidgets.QMessageBox):
+                QtCore.QTimer.singleShot(50, answer)
+                return
+            box.button(QtWidgets.QMessageBox.Yes).click()
+
+        QtCore.QTimer.singleShot(50, answer)
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.doc.Name, body3.Name)
+        Gui.Selection.addSelection(self.doc.Name, self.body2.Name)
+        Gui.runCommand("Std_Delete")
+        pump(0.3)
+        self.doc.recompute()
+        for name in names:
+            self.assertIsNone(self.doc.getObject(name))
+        stray = [
+            o.Name
+            for o in self.doc.Objects
+            if o.isDerivedFrom("PartDesign::Feature")
+            and not (o.getParentGeoFeatureGroup() or o).isDerivedFrom("PartDesign::Body")
+        ]
+        self.assertEqual(stray, [])
+        self.assertEqual(self.doc.findObjects("PartDesign::DeletePart"), [])

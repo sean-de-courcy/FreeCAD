@@ -780,7 +780,7 @@ App::DocumentObjectExecReturn* Body::execute()
         tipShape = static_cast<Part::Feature*>(tip)->Shape.getShape();
 
         if (tipShape.getShape().IsNull()) {
-            if (tip->isError() || tip->isDerivedFrom<DeletePart>()) {
+            if (tip->isError() || tip->isDerivedFrom<DeletePart>() || DeletePart::deleterOf(this)) {
                 // A failed first feature passed an empty base through, or the part is deleted
                 // (ops#635): the Body is empty and valid (ops#126)
                 lastTipShape = Part::TopoShape();

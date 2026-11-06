@@ -24,6 +24,7 @@
 
 
 #include <algorithm>
+#include <set>
 #include <sstream>
 #include <unordered_map>
 
@@ -370,14 +371,23 @@ bool ViewProviderBody::onDelete(const std::vector<std::string>&)
     // features
     auto body = getObject<PartDesign::Body>();
     App::Part* studio = nullptr;
-    // Something outside the Body that reads it whole (a binder, a link, an expression): Std_Delete
-    // asked "the referencing objects might break" and removes the Body whatever this returns, so
-    // its features go with it, as before (a Delete part there would be left in no Body)
-    bool readWhole = body && std::ranges::any_of(body->getInList(), [body](App::DocumentObject* in) {
-        return in && PartDesign::Body::findBodyOf(in) != body
-            && !in->hasExtension(App::GroupExtension::getExtensionClassTypeId());
+    // Std_Delete asked "the referencing objects might break" for one of the objects it deletes
+    // (a binder or link reads it whole, an expression reads it): it removes every one of them
+    // whatever this returns (forceDeletion), so the Body's features go with it, as before; a
+    // Delete part there would be left in no Body (reviews prs464e2-r1 T2/T5, r2 R2-1)
+    auto selected = Gui::Selection().getObjectsOfType(App::DocumentObject::getClassTypeId());
+    std::set<const App::DocumentObject*> deleting(selected.begin(), selected.end());
+    deleting.insert(body);
+    bool forced = std::ranges::any_of(deleting, [&deleting](const App::DocumentObject* obj) {
+        return obj && std::ranges::any_of(obj->getInList(), [&](App::DocumentObject* parent) {
+            if (!parent || deleting.count(parent) != 0) {
+                return false;
+            }
+            auto vp = Gui::Application::Instance->getViewProvider(parent);
+            return vp && !vp->canDelete(const_cast<App::DocumentObject*>(obj));
+        });
     });
-    if (body && !readWhole && Part::BodyBase::studioOf(body, studio) && body->Tip.getValue()
+    if (body && !forced && Part::BodyBase::studioOf(body, studio) && body->Tip.getValue()
         && !PartDesign::Boolean::mergeOf(body)) {
         if (!PartDesign::DeletePart::deleterOf(body)) {
             Gui::Command::doCommand(Gui::Command::Doc, "import PartDesign");
