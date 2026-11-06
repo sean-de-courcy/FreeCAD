@@ -4931,6 +4931,72 @@ class TestPad(unittest.TestCase):
         self.assertEqual(len(pad.Shape.Solids), 2)
         self.assertAlmostEqual(pad.Shape.Volume, 2 * 9 * math.pi * 5, places=3)
 
+    def testOpenCurvesChordThroughTheCircle(self):
+        """A solid centre line through a circle of r 10, both ends outside: the line divides
+        the disk and closes nothing outside it, so the pad is the disk (Onshape: both halves)."""
+        pad = self.openCurvePad(circles=[(0, 0, 10)], lines=[((-15, 0), (15, 0))])
+        self.assertSolidVolume(pad, 500 * math.pi)
+
+    def testOpenCurvesClosingARegionStop(self):
+        """Review pro631-r1 R2: a 20 x 20 square and a U whose ends lie on its top side (not at
+        its corners). The U closes a 10 x 10 tab that Onshape would add; the pad stops, as
+        before, with the reason, rather than leave the tab out. With the U's ends crossing the
+        side, the same."""
+        U = [((5, 20), (5, 30)), ((5, 30), (15, 30)), ((15, 30), (15, 20))]
+        square = [((0, 0), (20, 0)), ((20, 0), (20, 20)), ((20, 20), (0, 20)), ((0, 20), (0, 0))]
+        crossing = [((5, 15), (5, 30)), ((5, 30), (15, 30)), ((15, 30), (15, 15))]
+        for lines in (square + U, square + crossing):
+            pad = self.openCurvePad(lines=lines)
+            self.assertFalse(pad.isValid())
+            self.assertIn("Open curves of the sketch close a region", pad.getStatusString())
+
+    def testOpenCurvesLoftKeepsTheSectionOrder(self):
+        """Review pro631-r1 R1: a loft between two pairs of 10 x 10 squares 40 apart, the
+        section's first square with a solid line from its corner. Each square lofts to the one
+        above it: two prisms."""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+
+        def squares(x):
+            return [
+                ((x, -5), (x + 10, -5)),
+                ((x + 10, -5), (x + 10, 5)),
+                ((x + 10, 5), (x, 5)),
+                ((x, 5), (x, -5)),
+            ]
+
+        loft = body.newObject("PartDesign::AdditiveLoft", "Loft")
+        loft.Profile = self.openCurveSketch(body, "Profile", lines=squares(-30) + squares(20))
+        loft.Sections = [
+            self.openCurveSketch(
+                body, "Section", lines=squares(-30) + squares(20) + [((-30, -5), (-40, -15))], z=40
+            )
+        ]
+        self.Doc.recompute()
+        self.assertTrue(loft.isValid(), loft.getStatusString())
+        self.assertEqual(len(loft.Shape.Solids), 2)
+        self.assertAlmostEqual(loft.Shape.Volume, 2 * 10 * 10 * 40, places=3)
+        for solid in loft.Shape.Solids:
+            box = solid.BoundBox
+            self.assertAlmostEqual(box.XLength, 10, places=6)
+
+    def testOpenCurvesHelix(self):
+        """Review pro631-r1 T3: a helix of a circle of r 1 at x = 5 about the sketch's V axis,
+        with a stray line: the same solid as without the line."""
+        volumes = []
+        for lines in ([], [((7, -3), (7, 3))]):
+            body = self.Doc.addObject("PartDesign::Body", "Body")
+            sketch = self.openCurveSketch(body, "Sketch", circles=[(5, 0, 1)], lines=lines)
+            helix = body.newObject("PartDesign::AdditiveHelix", "Helix")
+            helix.Profile = sketch
+            helix.ReferenceAxis = (sketch, ["V_Axis"])
+            helix.Pitch = 5
+            helix.Height = 10
+            self.Doc.recompute()
+            self.assertTrue(helix.isValid(), helix.getStatusString())
+            volumes.append(helix.Shape.Volume)
+        self.assertGreater(volumes[0], 0)
+        self.assertAlmostEqual(volumes[1], volumes[0], places=6)
+
     def testOpenCurvesKeepTheHoles(self):
         """A circle of r 10 around one of r 4, and a stray line: the ring, as without the line."""
         pad = self.openCurvePad(circles=[(0, 0, 10), (0, 0, 4)], lines=[((-20, 12), (20, 12))])

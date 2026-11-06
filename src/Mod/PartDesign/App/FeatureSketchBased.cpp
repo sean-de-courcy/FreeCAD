@@ -26,6 +26,7 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <map>
 #include <numbers>
 #include <optional>
 #include <ranges>
@@ -34,12 +35,14 @@
 #include <Bnd_Box.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
+#include <BRepAlgoAPI_BuilderAlgo.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepClass_FaceClassifier.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepGProp.hxx>
 #include <BRepGProp_Face.hxx>
@@ -62,6 +65,7 @@
 #include <TopoDS_Wire.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
+#include <TopTools_ListOfShape.hxx>
 
 
 #include <App/Document.h>
@@ -465,7 +469,15 @@ TopoDS_Shape ProfileBased::getVerifiedFace(bool silent) const
                         shape = shape.makeWires();
                     }
                     if (shape.hasSubShape(TopAbs_WIRE)) {
-                        shape = shape.makeFace(nullptr, "Part::FaceMakerBullseye");
+                        // Open curves are ignored, as in getTopoShapeVerifiedFace (ops#631:
+                        // the Helix's centre and pitch come from here)
+                        shape = withoutOpenCurves(shape);
+                        if (shape.isNull()) {
+                            err = "The sketch has no closed region";
+                        }
+                        else {
+                            shape = shape.makeFace(nullptr, "Part::FaceMakerBullseye");
+                        }
                     }
                     else {
                         err = "Cannot make face from profile";
@@ -556,114 +568,279 @@ std::string ProfileBased::missingElements(
     return missing;
 }
 
-TopoShape ProfileBased::withoutOpenCurves(const TopoShape& shape)
+namespace
 {
-    auto wires = shape.getSubTopoShapes(TopAbs_WIRE);
-    if (std::ranges::all_of(wires, [](const TopoShape& wire) { return wire.isClosed(); })) {
-        return shape;
-    }
-    // All the wires' edges as one graph: its nodes are the edges' end points, merged within
-    // their tolerances, so that a loop split across wires, or closed by an open wire against a
-    // closed one, is still a loop. An edge is on a loop unless it is a bridge (Tarjan); an edge
-    // closed on itself (a circle) is a loop of its own. A closed wire's edges are on its loop.
+
+/// Which edges lie on a loop of the graph they make (Tarjan's bridges). The graph's nodes are
+/// the edges' end points, merged within their tolerances; an edge closed on itself (a circle)
+/// is a loop of its own.
+std::vector<bool> edgesOnLoops(const std::vector<TopoDS_Edge>& edges)
+{
     struct Link
     {
         int edge;
         int next;
     };
-    std::vector<TopoShape> edges;
-    std::vector<size_t> wireOf;
-    for (size_t i = 0; i < wires.size(); ++i) {
-        for (auto& edge : wires[i].getSubTopoShapes(TopAbs_EDGE)) {
-            edges.push_back(edge);
-            wireOf.push_back(i);
+    // The nodes, found through a grid of cells twice the largest vertex tolerance wide: two
+    // end points within their tolerances lie in the same or neighbouring cells
+    std::vector<std::array<TopoDS_Vertex, 2>> ends(edges.size());
+    double tolerance = Precision::Confusion();
+    for (size_t i = 0; i < edges.size(); ++i) {
+        TopExp::Vertices(edges[i], ends[i][0], ends[i][1]);
+        for (const auto& vertex : ends[i]) {
+            if (!vertex.IsNull()) {
+                tolerance = std::max(tolerance, BRep_Tool::Tolerance(vertex));
+            }
         }
     }
+    const double cellSize = 2 * tolerance;
+    using Cell = std::array<long long, 3>;
+    auto cellOf = [cellSize](const gp_Pnt& point) {
+        return Cell {
+            static_cast<long long>(std::floor(point.X() / cellSize)),
+            static_cast<long long>(std::floor(point.Y() / cellSize)),
+            static_cast<long long>(std::floor(point.Z() / cellSize)),
+        };
+    };
+    std::map<Cell, std::vector<int>> grid;
     std::vector<TopoDS_Vertex> nodes;
-    auto nodeOf = [&nodes](const TopoDS_Vertex& vertex) {
+    auto nodeOf = [&](const TopoDS_Vertex& vertex) {
         gp_Pnt point = BRep_Tool::Pnt(vertex);
-        for (size_t i = 0; i < nodes.size(); ++i) {
-            if (nodes[i].IsSame(vertex)
-                || point.Distance(BRep_Tool::Pnt(nodes[i]))
-                    <= BRep_Tool::Tolerance(nodes[i]) + BRep_Tool::Tolerance(vertex)) {
-                return static_cast<int>(i);
+        Cell cell = cellOf(point);
+        for (long long dx = -1; dx <= 1; ++dx) {
+            for (long long dy = -1; dy <= 1; ++dy) {
+                for (long long dz = -1; dz <= 1; ++dz) {
+                    auto found = grid.find({cell[0] + dx, cell[1] + dy, cell[2] + dz});
+                    if (found == grid.end()) {
+                        continue;
+                    }
+                    for (int i : found->second) {
+                        if (nodes[i].IsSame(vertex)
+                            || point.Distance(BRep_Tool::Pnt(nodes[i]))
+                                <= BRep_Tool::Tolerance(nodes[i]) + BRep_Tool::Tolerance(vertex)) {
+                            return i;
+                        }
+                    }
+                }
             }
         }
         nodes.push_back(vertex);
+        grid[cell].push_back(static_cast<int>(nodes.size() - 1));
         return static_cast<int>(nodes.size() - 1);
     };
     std::vector<std::vector<Link>> links;
     for (size_t i = 0; i < edges.size(); ++i) {
-        TopoDS_Vertex first, last;
-        TopExp::Vertices(TopoDS::Edge(edges[i].getShape()), first, last);
-        if (first.IsNull() || last.IsNull()) {
+        if (ends[i][0].IsNull() || ends[i][1].IsNull()) {
             continue;
         }
-        int from = nodeOf(first);
-        int to = nodeOf(last);
+        int from = nodeOf(ends[i][0]);
+        int to = nodeOf(ends[i][1]);
         links.resize(nodes.size());
         if (from != to) {
             links[from].push_back({static_cast<int>(i), to});
             links[to].push_back({static_cast<int>(i), from});
         }
     }
+    // Tarjan's bridges, iterative: a sketch's open wire can have tens of thousands of edges
     std::vector<bool> onLoop(edges.size(), true);
     std::vector<int> order(nodes.size(), 0);
     std::vector<int> low(nodes.size(), 0);
+    struct Frame
+    {
+        int node;
+        int via;
+        size_t link;
+    };
+    std::vector<Frame> stack;
     int count = 0;
-    auto visit = [&](auto&& self, int node, int via) -> void {
-        order[node] = low[node] = ++count;
-        for (const auto& link : links[node]) {
-            if (link.edge == via) {
+    for (size_t root = 0; root < nodes.size(); ++root) {
+        if (order[root]) {
+            continue;
+        }
+        order[root] = low[root] = ++count;
+        stack.push_back({static_cast<int>(root), -1, 0});
+        while (!stack.empty()) {
+            Frame& frame = stack.back();
+            if (frame.link < links[frame.node].size()) {
+                const Link link = links[frame.node][frame.link++];
+                if (link.edge == frame.via) {
+                    continue;
+                }
+                if (order[link.next]) {
+                    low[frame.node] = std::min(low[frame.node], order[link.next]);
+                }
+                else {
+                    order[link.next] = low[link.next] = ++count;
+                    stack.push_back({link.next, link.edge, 0});
+                }
                 continue;
             }
-            if (order[link.next]) {
-                low[node] = std::min(low[node], order[link.next]);
-            }
-            else {
-                self(self, link.next, link.edge);
-                low[node] = std::min(low[node], low[link.next]);
-                if (low[link.next] > order[node]) {
-                    onLoop[link.edge] = false;
+            const Frame done = frame;
+            stack.pop_back();
+            if (!stack.empty()) {
+                int parent = stack.back().node;
+                low[parent] = std::min(low[parent], low[done.node]);
+                if (low[done.node] > order[parent]) {
+                    onLoop[done.via] = false;
                 }
             }
         }
-    };
-    for (size_t node = 0; node < nodes.size(); ++node) {
-        if (!order[node]) {
-            visit(visit, static_cast<int>(node), -1);
+    }
+    return onLoop;
+}
+
+/// Whether the open curves left out (`dropped`) close a region outside the loops kept
+/// (`loops`, closed wires): an open curve that ends on another edge's side or crosses it meets
+/// it at no shared vertex. All edges are split where they meet (a general fuse); a piece of a
+/// dropped curve that then lies on a loop bounds a region. Each piece touches the others only
+/// at its ends, so it lies wholly inside or outside each kept loop: its middle tells which. A
+/// piece inside the material (an odd number of kept loops around it, as the face makers nest
+/// them) only divides it, as a chord does; any other piece closes a region of its own, which
+/// Onshape would add.
+bool droppedCurvesCloseARegion(
+    const std::vector<TopoDS_Edge>& edges,
+    const std::vector<bool>& dropped,
+    const std::vector<Part::TopoShape>& loops
+)
+{
+    BRepAlgoAPI_BuilderAlgo fuse;
+    TopTools_ListOfShape arguments;
+    for (const auto& edge : edges) {
+        arguments.Append(edge);
+    }
+    fuse.SetArguments(arguments);
+    fuse.SetNonDestructive(Standard_True);
+    fuse.Build();
+    if (!fuse.IsDone()) {
+        return true;
+    }
+    std::vector<TopoDS_Edge> pieces;
+    std::vector<bool> fromDropped;
+    for (size_t i = 0; i < edges.size(); ++i) {
+        const TopTools_ListOfShape& images = fuse.Modified(edges[i]);
+        if (images.IsEmpty()) {
+            pieces.push_back(edges[i]);
+            fromDropped.push_back(dropped[i]);
+            continue;
+        }
+        for (TopTools_ListIteratorOfListOfShape it(images); it.More(); it.Next()) {
+            for (TopExp_Explorer explorer(it.Value(), TopAbs_EDGE); explorer.More(); explorer.Next()) {
+                pieces.push_back(TopoDS::Edge(explorer.Current()));
+                fromDropped.push_back(dropped[i]);
+            }
         }
     }
+    auto onLoop = edgesOnLoops(pieces);
+    std::vector<TopoDS_Face> faces;
+    for (const auto& loop : loops) {
+        BRepBuilderAPI_MakeFace face(TopoDS::Wire(loop.getShape()), Standard_True);
+        if (!face.IsDone()) {
+            return true;
+        }
+        faces.push_back(face.Face());
+    }
+    for (size_t i = 0; i < pieces.size(); ++i) {
+        if (!fromDropped[i] || !onLoop[i]) {
+            continue;
+        }
+        BRepAdaptor_Curve curve(pieces[i]);
+        gp_Pnt middle = curve.Value((curve.FirstParameter() + curve.LastParameter()) / 2);
+        int around = 0;
+        for (const auto& face : faces) {
+            BRepClass_FaceClassifier classifier(face, middle, Precision::Confusion());
+            if (classifier.State() == TopAbs_ON) {
+                return true;
+            }
+            around += classifier.State() == TopAbs_IN ? 1 : 0;
+        }
+        if (around % 2 == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+}  // namespace
+
+TopoShape ProfileBased::withoutOpenCurves(const TopoShape& shape)
+{
+    auto wires = shape.getSubTopoShapes(TopAbs_WIRE);
+    if (std::ranges::all_of(wires, [](const TopoShape& wire) { return wire.isClosed(); })) {
+        return shape;
+    }
+    // All the wires' edges as one graph, so that a loop split across wires, or closed by an
+    // open wire against a closed one, is still a loop. A closed wire's edges are on its loop.
+    std::vector<TopoShape> edges;
+    std::vector<TopoDS_Edge> occEdges;
+    std::vector<size_t> wireOf;
+    for (size_t i = 0; i < wires.size(); ++i) {
+        for (auto& edge : wires[i].getSubTopoShapes(TopAbs_EDGE)) {
+            edges.push_back(edge);
+            occEdges.push_back(TopoDS::Edge(edge.getShape()));
+            wireOf.push_back(i);
+        }
+    }
+    auto onLoop = edgesOnLoops(occEdges);
     if (std::ranges::all_of(onLoop, [](bool loop) { return loop; })) {
         // Open wires whose edges all lie on loops (two loops through one point): the face
         // maker refuses them, as before
         return shape;
     }
-    // The closed wires as they are; the open wires' edges on loops, joined again
-    std::vector<TopoShape> kept;
+    // The closed wires as they are, and the open wires' edges on loops joined again, each loop
+    // where the first wire of its edges was: a loft or a pipe pairs its sections' wires in order
+    std::vector<std::pair<size_t, TopoShape>> kept;
     std::vector<TopoShape> loopEdges;
-    for (const auto& wire : wires) {
-        if (wire.isClosed()) {
-            kept.push_back(wire);
+    for (size_t i = 0; i < wires.size(); ++i) {
+        if (wires[i].isClosed()) {
+            kept.emplace_back(i, wires[i]);
         }
     }
+    size_t firstOpen = wires.size();
     for (size_t i = 0; i < edges.size(); ++i) {
         if (onLoop[i] && !wires[wireOf[i]].isClosed()) {
             loopEdges.push_back(edges[i]);
+            firstOpen = std::min(firstOpen, wireOf[i]);
         }
     }
     if (!loopEdges.empty()) {
         TopoShape loops(shape);
         loops.makeElementWires(loopEdges);
-        auto loopWires = loops.getSubTopoShapes(TopAbs_WIRE);
-        kept.insert(kept.end(), loopWires.begin(), loopWires.end());
+        for (const auto& loop : loops.getSubTopoShapes(TopAbs_WIRE)) {
+            size_t place = firstOpen;
+            for (TopExp_Explorer explorer(loop.getShape(), TopAbs_EDGE); explorer.More();
+                 explorer.Next()) {
+                for (size_t i = 0; i < occEdges.size(); ++i) {
+                    if (onLoop[i] && occEdges[i].IsSame(explorer.Current())) {
+                        place = std::min(place, wireOf[i]);
+                    }
+                }
+            }
+            kept.emplace_back(place, loop);
+        }
     }
-    if (kept.empty()) {
+    std::ranges::stable_sort(kept, {}, &std::pair<size_t, TopoShape>::first);
+    std::vector<TopoShape> keptWires;
+    std::vector<TopoShape> closedLoops;
+    for (const auto& [place, wire] : kept) {
+        keptWires.push_back(wire);
+        if (wire.isClosed()) {
+            closedLoops.push_back(wire);
+        }
+    }
+    std::vector<bool> dropped(onLoop.size());
+    std::ranges::transform(onLoop, dropped.begin(), [](bool loop) { return !loop; });
+    if (droppedCurvesCloseARegion(occEdges, dropped, closedLoops)) {
+        throw Base::CADKernelError(
+            "Open curves of the sketch close a region: select the regions to use, or make the "
+            "curves construction geometry"
+        );
+    }
+    if (keptWires.empty()) {
         return {};
     }
     TopoShape result(shape);
     result.makeElementCompound(
-        kept,
+        keptWires,
         nullptr,
         TopoShape::SingleShapeCompoundCreationPolicy::returnShape
     );
