@@ -8,9 +8,10 @@ After the beta, each release's generation is saved after its tag, from that rele
 against the release before it: the newest generation in
 `src/Mod/PartDesign/PartDesignTests/Compat/gen<k>` must carry the `namingRevision` of the previous
 `fork-*` release (`ForkNamingRevision` in that tag's `src/App/Document.cpp`; the tag is
-`git describe --tags --abbrev=0 --match 'fork-*' HEAD` with HEAD's own `fork-*` tags excluded, so a
-tag already on HEAD is not its own previous release, and a merge commit counts a release tagged on
-its merged branch), in both of its halves: `gen<k>` saved on Windows and `gen<k>-macos` saved on
+`git describe --tags --abbrev=0 --match 'fork-*' HEAD` with HEAD's own `fork-*` tags and the
+`SUPERSEDED` ones excluded, so a tag already on HEAD is not its own previous release, a release
+replaced before it was handed off has no generation to wait for, and a merge commit counts a release
+tagged on its merged branch), in both of its halves: `gen<k>` saved on Windows and `gen<k>-macos` saved on
 macOS (ops#538); a missing half is an error.
 - Lower: the previous release's generation never landed, and TestCompatCorpus would read the files
   it promised to open as an older generation's. Refused.
@@ -40,6 +41,10 @@ COMPAT = os.path.join("src", "Mod", "PartDesign", "PartDesignTests", "Compat")
 DOCUMENT = os.path.join("src", "App", "Document.cpp")
 # A generation's halves, by folder suffix (make_generation.HALVES): Windows, macOS.
 HALVES = ("", "-macos")
+# Tagged releases replaced before they were handed off, never a previous release: their own build
+# couldn't save their generation. fork-0.8.0: a datum point's names were lost at a reopen (ops#633),
+# so its gen2 can't be saved; fork-0.8.1 replaced it (decision 296, ops#628).
+SUPERSEDED = ("fork-0.8.0",)
 REVISION_LINE = re.compile(r"^constexpr int ForkNamingRevision = (\d+);", re.MULTILINE)
 
 
@@ -95,7 +100,7 @@ def previous_release(source):
     Not `HEAD^`: that is the first parent only, so a merge of a hotfix branch tagged fork-X would
     take the tag before fork-X (fork-0.6.1 reached integration that way)."""
     own = git(source, "tag", "--points-at", "HEAD", "--list", "fork-*").split()
-    excluded = [arg for name in own for arg in ("--exclude", name)]
+    excluded = [arg for name in (*own, *SUPERSEDED) for arg in ("--exclude", name)]
     tag = git(
         source, "describe", "--tags", "--abbrev=0", "--match", "fork-*", *excluded, "HEAD"
     ).strip()

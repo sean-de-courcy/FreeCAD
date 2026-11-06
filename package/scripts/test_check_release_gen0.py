@@ -200,6 +200,44 @@ class CheckReleaseGen0(unittest.TestCase):
         code, _, _ = self.run_main()
         self.assertIn("older than fork-0.7.1's ForkNamingRevision 16", code)
 
+    def test_a_superseded_release_is_skipped(self):
+        # fork-0.8.1's release run: fork-0.8.0 (revision 16) was replaced before its gen2 landed,
+        # so fork-0.7.0's gen1 (revision 15) is still the record to hold
+        make_source(self.root, 16, {1: 15}, previous=15)
+        git(self.root, "tag", "fork-0.8.0")
+        git(self.root, "commit", "-q", "--allow-empty", "-m", "fix after fork-0.8.0")
+        code, out, _ = self.run_main()
+        self.assertIsNone(code)
+        self.assertIn("gen1 and gen1-macos hold fork-0.7.0's generation (naming revision 15", out)
+        # without the skip, fork-0.8.0 would be the previous release
+        old, gen0check.SUPERSEDED = gen0check.SUPERSEDED, ()
+        try:
+            code, _, _ = self.run_main()
+        finally:
+            gen0check.SUPERSEDED = old
+        self.assertIn("fork-0.8.0's generation is gen2, not landed yet", code)
+
+    def test_a_superseded_release_before_the_previous_is_ignored(self):
+        # after fork-0.8.1: it is the previous release, and fork-0.8.0 behind it changes nothing
+        make_source(self.root, 16, {1: 15}, previous=15)
+        git(self.root, "tag", "fork-0.8.0")
+        git(self.root, "commit", "-q", "--allow-empty", "-m", "fix after fork-0.8.0")
+        git(self.root, "tag", "fork-0.8.1")
+        git(self.root, "commit", "-q", "--allow-empty", "-m", "after fork-0.8.1")
+        code, _, _ = self.run_main()
+        self.assertIn("older than fork-0.8.1's ForkNamingRevision 16", code)
+        self.assertIn("fork-0.8.1's generation is gen2, not landed yet", code)
+        # fork-0.8.1's gen2 landed: current
+        self.fresh_root()
+        make_source(self.root, 16, {1: 15, 2: 16}, previous=15)
+        git(self.root, "tag", "fork-0.8.0")
+        git(self.root, "commit", "-q", "--allow-empty", "-m", "fix after fork-0.8.0")
+        git(self.root, "tag", "fork-0.8.1")
+        git(self.root, "commit", "-q", "--allow-empty", "-m", "after fork-0.8.1")
+        code, out, _ = self.run_main()
+        self.assertIsNone(code)
+        self.assertIn("hold fork-0.8.1's generation (naming revision 16", out)
+
     def test_other_tags_dont_count(self):
         make_source(self.root, 17, {1: 15}, previous=15)
         git(self.root, "tag", "weekly-2026.11.04", "HEAD^")
@@ -240,7 +278,7 @@ class CheckReleaseGen0(unittest.TestCase):
 
     def test_no_previous_release_is_exit_2(self):
         make_source(self.root, 15, {1: 15}, tag=None)
-        self.assert_exit_2("git describe --tags --abbrev=0 --match fork-* HEAD failed")
+        self.assert_exit_2("git describe --tags --abbrev=0 --match fork-* --exclude fork-0.8.0 HEAD failed")
         # a tag from before the revision line
         self.fresh_root()
         make_source(self.root, 15, {1: 15}, previous=None)
