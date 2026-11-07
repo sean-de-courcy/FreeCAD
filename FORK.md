@@ -464,7 +464,8 @@ names it.
 | `feat/635-part-lifetime` | feat | ops#635 | - | `integration` `14d68c7433` | `16365e3172` (fork PR 434), 2026-11-05 | never (fork feature) |
 | `feat/635-delete-part` | feat | ops#635 | - | `integration` `16365e3172` | `76a3cc24b7` (fork PR 436), 2026-11-06 | never (fork feature) |
 | `infra/628-superseded-tag` | infra | ops#628 | - | `integration` `76a3cc24b7` | `0c4c64265d` (fork PR 437), 2026-11-06 | never |
-| `infra/628-gen2` | infra | ops#628 | - | `integration` `0c4c64265d` | (fork PR 438) | never |
+| `infra/628-gen2` | infra | ops#628 | - | `integration` `0c4c64265d` | `43f1c1ba26` (fork PR 438), 2026-11-06 | never |
+| `fix/629-merge-sketches-mln` | fix | ops#629 | - | `integration` `43f1c1ba26` | (fork PR 439) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 

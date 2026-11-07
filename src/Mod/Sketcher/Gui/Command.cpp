@@ -1158,19 +1158,11 @@ namespace {
             Base::Console().warning(msg.toUtf8().constData());
         };
 
-        // helper: get refName-style subNames from srcSketch (without old suffixes)
-        auto getExtSubs =
-            [&](const Sketcher::SketchObject* srcSketch) -> std::vector<std::string> {
-            auto newSubs = srcSketch->ExternalGeometry.getSubValues(true);
-            const auto& oldSubs = srcSketch->ExternalGeometry.getSubValues(false);
-            const size_t count = std::min(newSubs.size(), oldSubs.size());
-            for (size_t i = 0; i < count; ++i) {
-                std::string suffix = std::string(".") + oldSubs[i];
-                if (newSubs[i].ends_with(suffix)) {
-                    newSubs[i].erase(newSubs[i].size() - suffix.size());
-                }
-            }
-            return newSubs;
+        // helper: srcSketch's subNames, a mapped name with its element (FreeCAD-CH, ops#629): the
+        // mapped name alone (the old suffix stripped) gave the add a missing reference, so every
+        // link to a named element, a Part primitive's (C2's MLN names) or a feature's, was lost
+        auto getExtSubs = [](const Sketcher::SketchObject* srcSketch) {
+            return srcSketch->ExternalGeometry.getSubValues(true);
         };
 
         // helper: the Ids of dstSketch's external geometries (not the axes)
