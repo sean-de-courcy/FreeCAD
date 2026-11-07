@@ -1428,11 +1428,12 @@ public:
             const std::string name =
                 geoId == GeoEnum::GeoUndef ? std::string() : externalSelectionName(sketch, geoId);
             if (name.empty()) {
-                // No constraint on the other picks alone: the links go, the selection stays
+                // No constraint on the other picks alone: the links go, the selection stays (it
+                // names none of them yet: review prs3220-r3s T2)
                 Gui::NotifyError(sketch,
                                  QT_TRANSLATE_NOOP("Notifications", "Error"),
                                  QT_TRANSLATE_NOOP("Notifications", "Failed to add external geometry"));
-                abort();
+                abort(false);
                 return;
             }
             names.push_back(name);
@@ -1475,13 +1476,15 @@ public:
 
 private:
     /// aborts the booking while it is still this one and temporary
-    bool abort()
+    bool abort(bool selectionNamesLinks = true)
     {
         if (document && document->getBookedTransactionID() == tid
             && App::GetApplication().transactionTmpName(tid)) {
             // The selection names the links: cleared while they exist, and the edit view redrawn
             // once they're gone (an abort doesn't redraw it, as an undo does: review prs3220-r2 L2)
-            Gui::Selection().clearSelection();
+            if (selectionNamesLinks) {
+                Gui::Selection().clearSelection();
+            }
             document->abortTransaction();
             added.clear();
             redraw();
@@ -1518,10 +1521,12 @@ private:
                         : nullptr;
     }
 
+    /// a solve, which redraws the edit view; never the auto-removal of redundant constraints,
+    /// which would stay outside any transaction (review prs3220-r3s R1)
     void redraw()
     {
         if (auto* sketch = this->sketch()) {
-            tryAutoRecomputeIfNotSolve(sketch);
+            sketch->solve();
         }
     }
 
@@ -2195,10 +2200,16 @@ protected:
         if (externalBooking && document->getBookedTransactionID() == externalBooking
             && App::GetApplication().transactionTmpName(externalBooking)) {
             // As ModelPickBooking::abort (review prs3220-r2 L2): no selection naming the links
-            // while they go, and the edit view redrawn after
+            // while they go, and the edit view redrawn after (a solve: prs3220-r3s R1)
             Gui::Selection().clearSelection();
             document->abortTransaction();
-            tryAutoRecomputeIfNotSolve(sketchgui->getSketchObject());
+            sketchgui->getSketchObject()->solve();
+        }
+        else if (externalBooking) {
+            // The constraint's command renamed the booking, then committed it or aborted it itself
+            // (Coincident with nothing to constrain): the edit view is redrawn before the
+            // selection, which may name the aborted links, is cleared (review prs3220-r3s T1)
+            sketchgui->getSketchObject()->solve();
         }
         externalBooking = 0;
     }

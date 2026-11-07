@@ -443,6 +443,78 @@ class TestSketchModelPicksGui(SketcherGuiTestCase):
         self.run_command("Sketcher_ConstrainParallel")
         self.assertEqual(len(self.constraints_of("Parallel")), 1)
 
+    def test_a_refused_model_pick_command_keeps_a_redundant_constraint(self):
+        """Review prs3220-r3s R1: with redundant constraints removed automatically, two model
+        edges refused by Coincident: the sketch's two Horizontal constraints on its line both stay
+        (the abort's redraw is a solve, with no removal outside a transaction), and no undo step."""
+        self.sketch.addConstraint(Sketcher.Constraint("Horizontal", 0))
+        self.sketch.addConstraint(Sketcher.Constraint("Horizontal", 0))
+        self.doc.recompute()
+        had = "AutoRemoveRedundants" in self.params.GetBools()
+        old = self.params.GetBool("AutoRemoveRedundants", False)
+        self.params.SetBool("AutoRemoveRedundants", True)
+        try:
+            self.start_edit()
+            self.select(
+                (self.pad, self.edge_between(self.pad, V(0, 0, 5), V(20, 0, 5))),
+                (self.pad, self.edge_between(self.pad, V(20, 0, 5), V(20, 10, 5))),
+            )
+            self.answer_modals()
+            self.run_command("Sketcher_ConstrainCoincidentUnified")
+            self.assertEqual(len(self.constraints_of("Horizontal")), 2)
+            self.assertEqual(self.doc.UndoCount, self.undo_start)
+        finally:
+            if had:
+                self.params.SetBool("AutoRemoveRedundants", old)
+            else:
+                self.params.RemBool("AutoRemoveRedundants")
+
+    def test_the_constraint_tool_whose_command_aborts_reports_no_access_violation(self):
+        """Review prs3220-r3s T1: the Coincident tool, a model vertex, then a model edge (both
+        fixed: the command aborts its own transaction): no link left, nothing reported."""
+        self.start_edit()
+        FreeCADGui.Selection.clearSelection()
+        self.answer_modals()
+        self.run_command("Sketcher_ConstrainCoincidentUnified")
+        vertex = self.vertex_at(self.pad, V(20, 10, 5))
+        edge = self.edge_between(self.pad, V(0, 0, 5), V(20, 0, 5))
+
+        def picks():
+            FreeCADGui.Selection.addSelection(self.doc.Name, self.pad.Name, vertex)
+            self.flush_gui(100)
+            FreeCADGui.Selection.addSelection(self.doc.Name, self.pad.Name, edge)
+            self.flush_gui(150)
+            FreeCADGui.Selection.clearSelection()
+
+        self.assertNoIllegalAccess(picks)
+        self.assertEqual(len(self.sketch.Constraints), 0)
+        self.assertEqual(len(self.sketch.ExternalGeometry), 0)
+
+    def test_a_pick_whose_link_fails_leaves_the_selection(self):
+        """Review prs3220-r3s T2: the line, a model edge and an edge the Pad hasn't (no link):
+        Coincident fails to link, and the picks stay selected. (In continuous mode, the default,
+        Coincident then starts its tool on a selection that isn't the sketch's alone, and the tool
+        clears it, as on integration.)"""
+        had = "ContinuousConstraintMode" in self.params.GetBools()
+        old = self.params.GetBool("ContinuousConstraintMode", True)
+        self.params.SetBool("ContinuousConstraintMode", False)
+        try:
+            self.start_edit()
+            edge = self.edge_between(self.pad, V(0, 0, 5), V(20, 0, 5))
+            self.select((self.sketch, "Edge1"), (self.pad, edge), (self.pad, "Edge99"))
+            self.answer_modals()
+            self.assertNoIllegalAccess(
+                lambda: self.run_command("Sketcher_ConstrainCoincidentUnified")
+            )
+            self.assertLessEqual({("Sketch", "Edge1"), ("Pad", edge)}, self.selected())
+        finally:
+            if had:
+                self.params.SetBool("ContinuousConstraintMode", old)
+            else:
+                self.params.RemBool("ContinuousConstraintMode")
+        self.assertEqual(len(self.sketch.ExternalGeometry), 0)
+        self.assertEqual(len(self.sketch.Constraints), 0)
+
     def test_a_drag_of_a_sketch_line_moves_it(self):
         """Review prs3220-r2 (Sonnet) F1: the 3D view's preselection of the box's face under the
         cursor removed the sketch's own on the first move, so a drag of the line did nothing. The
