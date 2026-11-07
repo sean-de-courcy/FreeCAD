@@ -17,6 +17,16 @@ from SketcherTests.TestSketchExternalTypes import TestSketchExternalTypesGui
 from SketcherTests.TestSketchCommandsGui import TestSketchCommandsGui
 from SketcherTests.TestSketchToolbarGui import TestSketchToolbarGui  # FreeCAD-CH, ops#605
 from SketcherTests.TestSketchModelPicksGui import TestSketchModelPicksGui  # FreeCAD-CH, ops#634
+from SketcherTests.TestSketchOnshapeGui import (  # FreeCAD-CH, ops#640
+    TestSketchEscapeGui,
+    TestSketchMidpointGui,
+    TestSketchOverdefiningDimensionGui,
+    TestSketchDeleteGui,
+    TestSketchShiftInferenceGui,
+    TestSketchColoursGui,
+    TestSketchClosestMatchGui,
+)
+from SketcherTests.TestSketchHelpersGui import TestSketchHelpersGui  # FreeCAD-CH, ops#634
 
 # Use the module so that code checkers don't complain (flake8)
 (
@@ -38,5 +48,13 @@ from SketcherTests.TestSketchModelPicksGui import TestSketchModelPicksGui  # Fre
     and TestSketchCommandsGui
     and TestSketchToolbarGui
     and TestSketchModelPicksGui
+    and TestSketchEscapeGui
+    and TestSketchMidpointGui
+    and TestSketchOverdefiningDimensionGui
+    and TestSketchDeleteGui
+    and TestSketchShiftInferenceGui
+    and TestSketchColoursGui
+    and TestSketchClosestMatchGui
+    and TestSketchHelpersGui
     else False
 )

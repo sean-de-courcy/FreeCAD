@@ -154,6 +154,9 @@ class SketcherGuiExport EditModeCoinManager
         void updateWidth(int& width, const std::string& parametername, int def);
         void updatePattern(unsigned int& pattern, const std::string& pname, unsigned int def);
         void updateColor(SbColor& sbcolor, const std::string& parametername);
+        /// FreeCAD-CH (ops#640): the parameter's colour, else Onshape's for a fully constrained
+        /// sketch: black on a light 3D view background, white on a dark one
+        void updateConstrainedColor(SbColor& sbcolor, const std::string& parametername);
         void updateSketcherGridColor(SbColor& sbcolor, const std::string& parametername);
         void updateUnit(const std::string& parametername);
 

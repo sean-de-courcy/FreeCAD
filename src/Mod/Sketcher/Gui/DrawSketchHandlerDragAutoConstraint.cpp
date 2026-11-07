@@ -29,6 +29,7 @@
 #include <memory>
 #include <numbers>
 
+#include <QGuiApplication>
 #include <QTimer>
 #include <QWidget>
 
@@ -72,8 +73,10 @@ DrawSketchHandlerDragAutoConstraint::DrawSketchHandlerDragAutoConstraint()
 
 bool DrawSketchHandlerDragAutoConstraint::canSuggestFor(const std::vector<GeoElementId>& dragged) const
 {
+    // FreeCAD-CH (ops#640): Shift held suppresses the inferences, as in Onshape
     return sketchgui && sketchgui->Autoconstraints.getValue() && dragged.size() == 1
-        && dragged.front().Pos != PointPos::none;
+        && dragged.front().Pos != PointPos::none
+        && !(QGuiApplication::keyboardModifiers() & Qt::ShiftModifier);
 }
 
 void DrawSketchHandlerDragAutoConstraint::initDragging(const std::vector<GeoElementId>& dragged)

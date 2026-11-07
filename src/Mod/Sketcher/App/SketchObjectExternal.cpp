@@ -1298,7 +1298,11 @@ struct AddingSubShapes
 };
 }  // namespace
 
-int SketchObject::addExternal(App::DocumentObject* Obj, const char* SubName, bool defining, bool intersection)
+int SketchObject::addExternal(App::DocumentObject* Obj,
+                              const char* SubName,
+                              bool defining,
+                              bool intersection,
+                              bool implicit)
 {
     // no need to check input data validity as this is an sketchobject managed operation.
     Base::StateLocker lock(managedoperation, true);
@@ -1371,7 +1375,8 @@ int SketchObject::addExternal(App::DocumentObject* Obj, const char* SubName, boo
             element += std::to_string(idx);
             {
                 AddingSubShapes adding;
-                added = addExternal(Obj, element.c_str(), defining, intersection) >= 0 || added;
+                added = addExternal(Obj, element.c_str(), defining, intersection, implicit) >= 0
+                    || added;
             }
             element.resize(elementNameSize);
         }
@@ -1428,9 +1433,14 @@ int SketchObject::addExternal(App::DocumentObject* Obj, const char* SubName, boo
         if (!(Objects[i] == Obj && std::string(SubName) == SubElements[i])) {
             continue;
         }
-        if (Types[i] == static_cast<int>(ExtType::Both)
-            || (Types[i] == static_cast<int>(ExtType::Projection) && !intersection)
-            || (Types[i] == static_cast<int>(ExtType::Intersection) && intersection)) {
+        const long kind = externalKind(Types[i]);
+        if (kind == static_cast<int>(ExtType::Both)
+            || (kind == static_cast<int>(ExtType::Projection) && !intersection)
+            || (kind == static_cast<int>(ExtType::Intersection) && intersection)) {
+            // FreeCAD-CH (ops#634): the user's add of a constraint's helper keeps it
+            if (isImplicitType(Types[i]) && !implicit) {
+                return keepImplicitExternal(static_cast<int>(i), defining, intersection);
+            }
             Base::Console().error("Link to %s already exists in this sketch.\n", SubName);
             return -1;
         }
@@ -1455,8 +1465,10 @@ int SketchObject::addExternal(App::DocumentObject* Obj, const char* SubName, boo
         }
         // Case where projections are already there when adding intersections, or the reverse:
         // the rebuild keeps the existing geometry's Ids on it (ops#260)
+        // a helper keeps its mark only when another helper's add gives it the kind (ops#634)
         add = false;
-        Types[i] = static_cast<int>(ExtType::Both);
+        Types[i] = static_cast<long>(ExtType::Both)
+            | (implicit && isImplicitType(Types[i]) ? implicitExternalMark : 0);
         // the user's choice: a link waiting for its type no longer does, and its geometry is no
         // longer flagged as guessed (PR 277 review L5); a failed add below puts the key back
         if (i < externalGeoRef.size() && undecidedTypeKeys.erase(externalGeoRef[i]) != 0) {
@@ -1467,7 +1479,8 @@ int SketchObject::addExternal(App::DocumentObject* Obj, const char* SubName, boo
         // add the new ones
         Objects.push_back(Obj);
         SubElements.emplace_back(SubName);
-        Types.push_back(static_cast<int>(intersection ? ExtType::Intersection : ExtType::Projection));
+        Types.push_back(static_cast<long>(intersection ? ExtType::Intersection : ExtType::Projection)
+                        | (implicit ? implicitExternalMark : 0));
 
         // set the Link list.
         setExternalLinksAndTypes(Objects, SubElements, Types);
@@ -4680,6 +4693,17 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
     for (const auto& [index, type] : relinkedTypes) {
         Types[index] = type;
     }
+    // FreeCAD-CH (ops#634): the types alone below; the links' implicit marks go back where the
+    // types are written
+    std::vector<bool> implicitLinks(Types.size(), false);
+    for (std::size_t index = 0; index < Types.size(); ++index) {
+        implicitLinks[index] = isImplicitType(Types[index]);
+        Types[index] = externalKind(Types[index]);
+    }
+    auto withMark = [&implicitLinks](std::size_t index, long type) {
+        return index < implicitLinks.size() && implicitLinks[index] ? type | implicitExternalMark
+                                                                     : type;
+    };
 
     std::set<std::string> refSet;
     // We use a vector here to keep the order (roughly) the same as ExternalGeometry
@@ -5271,11 +5295,15 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
                 }
             }
             Types.resize(linkCount);
+            std::vector<long> savedTypes;
+            for (std::size_t index = 0; index < linkCount; ++index) {
+                savedTypes.push_back(withMark(index, Types[index]));
+            }
             externalTypeRepairPending = undecided;
             if (undecided) {
-                Types.push_back(pendingTypeRepairMark);
+                savedTypes.push_back(pendingTypeRepairMark);
             }
-            ExternalTypes.setValues(Types);
+            ExternalTypes.setValues(savedTypes);
         }
         if (!savedKinds.empty() || !savedUndecided.empty() || !savedAbsent.empty()
             || !savedDecided.empty()) {
@@ -5735,7 +5763,7 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
             linksChanged = linksChanged || !isLink;
             newObjects.push_back(Objects[index]);
             newSubElements.push_back(SubElements[index]);
-            newTypes.push_back(Types[index]);
+            newTypes.push_back(withMark(index, Types[index]));
         }
         if (typesRepaired) {
             // the mark goes with the last undecided link
@@ -6001,6 +6029,95 @@ int SketchObject::externalType(int entry) const
         return static_cast<int>(ExtType::Projection);
     }
     return static_cast<int>(types[entry]);
+}
+
+bool SketchObject::isImplicitExternal(int entry) const
+{
+    return entry >= 0 && entry < ExternalGeometry.getSize() && isImplicitType(externalType(entry));
+}
+
+// FreeCAD-CH (ops#634): Onshape projects nothing for a constraint on model geometry, so nothing
+// stays when the constraint goes. Here the constraint needs the helper link: it goes once nothing
+// uses it, no constraint on any of its geometries and none of them defining (made part of the
+// profile since). A constraint list flagged invalid (checked against other geometry, e.g. during a
+// restore) can't tell: nothing goes
+std::vector<int> SketchObject::unusedImplicitExternals() const
+{
+    std::vector<int> unused;
+    if (Constraints.hasInvalidGeometry()) {
+        return unused;
+    }
+    std::set<int> used;
+    for (const auto* constraint : Constraints.getValues()) {
+        // every element, not only First/Second/Third: a group constraint has more
+        for (std::size_t n = 0; n < constraint->getElementsSize(); ++n) {
+            used.insert(constraint->getElement(n).GeoId);
+        }
+    }
+    for (int entry = 0; entry < ExternalGeometry.getSize(); ++entry) {
+        if (!isImplicitExternal(entry)) {
+            continue;
+        }
+        const auto ids = externalGeometryIds(entry);
+        // a link without geometry stays: nothing shows it, and it has no geometry to go by
+        const bool inUse = ids.empty() || std::ranges::any_of(ids, [&](long id) {
+            auto it = externalGeoMap.find(id);
+            if (it == externalGeoMap.end()) {
+                return false;
+            }
+            // ExternalGeo[k] has GeoId -1 - k
+            return used.count(-it->second - 1) != 0
+                || ExternalGeometryFacade::getFacade(ExternalGeo[it->second])
+                       ->testFlag(ExternalGeometryExtension::Defining);
+        });
+        if (!inUse) {
+            unused.push_back(entry);
+        }
+    }
+    return unused;
+}
+
+int SketchObject::delUnusedImplicitExternals()
+{
+    const auto entries = unusedImplicitExternals();
+    std::set<long> ids;
+    for (int entry : entries) {
+        const auto entryIds = externalGeometryIds(entry);
+        ids.insert(entryIds.begin(), entryIds.end());
+    }
+    if (ids.empty()) {
+        return 0;
+    }
+    delExternalPrivate(ids, true);
+    return static_cast<int>(entries.size());
+}
+
+int SketchObject::keepImplicitExternal(int entry, bool defining, bool intersection)
+{
+    // the link, its geometry, their Ids and constraints stay; the mark goes, and the geometry of
+    // the kind added takes the defining flag asked for, as a new link's would
+    auto types = ExternalTypes.getValues();
+    types[entry] = externalKind(types[entry]);
+    ExternalTypes.setValues(types);
+    const int kind = intersection ? 0 : 1;  // externalGeometryKind's
+    for (long id : externalGeometryIds(entry)) {
+        auto it = externalGeoMap.find(id);
+        const int geometryKind = externalGeometryKind(id);
+        if (it == externalGeoMap.end() || (geometryKind != kind && geometryKind != -1)) {
+            continue;
+        }
+        if (ExternalGeometryFacade::getFacade(ExternalGeo[it->second])
+                ->testFlag(ExternalGeometryExtension::Defining)
+            == defining) {
+            continue;
+        }
+        std::unique_ptr<Part::Geometry> geo(ExternalGeo[it->second]->clone());
+        ExternalGeometryFacade::getFacade(geo.get())
+            ->setFlag(ExternalGeometryExtension::Defining, defining);
+        ExternalGeo.set1Value(it->second, std::move(geo));
+    }
+    solverNeedsUpdate = true;
+    return entry;
 }
 
 bool SketchObject::externalTypeUndecided(int entry) const
@@ -6277,7 +6394,7 @@ int SketchObject::unparkExternalGeometry(App::DocumentObject* obj,
     // FreeCAD-CH (ops#278): kept geometry without a kind (also parked before ops#264, when parking
     // kept none) splits a Both entry's Ids between its projection and its intersections by
     // position: a split that moved while the entry was parked moves constraints
-    if (type == static_cast<int>(ExtType::Both)) {
+    if (externalKind(type) == static_cast<int>(ExtType::Both)) {
         bool kindless = false;
         for (std::size_t n = 0; n < refs.size() && !kindless; ++n) {
             if (!kept[n]) {

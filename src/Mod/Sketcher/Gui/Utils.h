@@ -38,6 +38,7 @@
 namespace App
 {
 class DocumentObject;
+struct ReferenceRow;
 }
 
 namespace Gui
@@ -105,6 +106,11 @@ void closeAndRecompute(int& tid, bool abort, Sketcher::SketchObject* Obj);
 bool ReleaseHandler(Gui::Document* doc);
 
 std::string getStrippedPythonExceptionString(const Base::Exception&);
+
+/// FreeCAD-CH (ops#644): the sketch's references that have a closest match to take, as Onshape's
+/// repair proposes it: a guessed one (accepted as it stands) or a missing one with candidates (it
+/// takes the first, the closest). App::ReferenceRow is in App/ReferenceRepair.h.
+std::vector<App::ReferenceRow> referencesToMatch(const Sketcher::SketchObject* obj);
 
 void getIdsFromName(
     const std::string& name,

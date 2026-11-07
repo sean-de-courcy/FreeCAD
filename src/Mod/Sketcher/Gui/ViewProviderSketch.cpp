@@ -62,6 +62,7 @@
 #include <App/Document.h>
 #include <App/ElementNamingUtils.h>
 #include <App/ObjectIdentifier.h>  // FreeCAD-CH (ops#152)
+#include <App/ReferenceRepair.h>   // FreeCAD-CH (ops#644)
 #include <Base/BaseClass.h>
 #include <Base/Console.h>
 #include <Base/Converter.h>
@@ -270,7 +271,8 @@ void ViewProviderSketch::ParameterObserver::updateEscapeKeyBehaviour(const std::
     ParameterGrp::handle hSketch = App::GetApplication().GetParameterGroupByPath(
         "User parameter:BaseApp/Preferences/Mod/Sketcher");
     Client.viewProviderParameters.handleEscapeButton =
-        !hSketch->GetBool("LeaveSketchWithEscape", true);
+        // FreeCAD-CH (ops#640): off by default, as in Onshape, where Esc leaves the running tool only
+        !hSketch->GetBool("LeaveSketchWithEscape", false);
 }
 
 void ViewProviderSketch::ParameterObserver::updateAutoRecompute(const std::string& string,
@@ -4712,6 +4714,15 @@ void ViewProviderSketch::UpdateSolverInformation()
         getSketchObject()->ExternalGeo.getSize() <= 2) { // X- and Y-Axis
         signalSetUp(QStringLiteral("empty"), tr("Empty sketch"), QString(), QString());
     }
+    // FreeCAD-CH (ops#644): a missing reference with a closest match, offered as Onshape's repair
+    // does (the error colour of an over-constrained sketch)
+    else if (std::size_t matches = referencesToMatch(getSketchObject()).size(); matches > 0) {
+        signalSetUp(QStringLiteral("conflicting_constraints"),
+                    tr("Missing references: %n", "", static_cast<int>(matches))
+                        + QLatin1String(" "),
+                    QStringLiteral("#closestmatches"),
+                    tr("Use the closest match"));
+    }
     else if (dofs < 0 || hasConflicts) {// over-constrained sketch
         signalSetUp(
             QStringLiteral("conflicting_constraints"),
@@ -5166,6 +5177,28 @@ bool ViewProviderSketch::onDelete(const std::vector<std::string>& subList)
             }
         }
 
+        // FreeCAD-CH (ops#640): a constraint on the deleted geometries alone (a line's own length
+        // or horizontal distance) goes with them, as in Onshape. delGeometries would move it onto
+        // the coincident neighbours' points, a dimension the user believes deleted (blind test F14).
+        for (int i = 0; i < static_cast<int>(constraints.size()); ++i) {
+            const Sketcher::Constraint* constraint = constraints[i];
+            if (constraint->Type == Sketcher::InternalAlignment) {
+                continue;
+            }
+            bool onDeleted = false;
+            bool onOthers = false;
+            for (std::size_t j = 0; constraint->hasElement(j); ++j) {
+                int geoId = constraint->getGeoId(j);
+                if (geoId == GeoEnum::GeoUndef) {
+                    continue;
+                }
+                (delInternalGeometries.count(geoId) ? onDeleted : onOthers) = true;
+            }
+            if (onDeleted && !onOthers) {
+                delConstraints.insert(i);
+            }
+        }
+
         // We stored the vertices, but is there really a coincident constraint? Check
         const std::vector<Sketcher::Constraint*>& vals = getSketchObject()->Constraints.getValues();
 
@@ -5244,6 +5277,17 @@ bool ViewProviderSketch::onDelete(const std::vector<std::string>& subList)
 
             try {
                 Gui::cmdAppObjectArgs(getObject(), "delExternals([%s])", stream.str().c_str());
+            }
+            catch (const Base::Exception& e) {
+                Base::Console().developerError("ViewProviderSketch", "%s\n", e.what());
+            }
+        }
+
+        // FreeCAD-CH (ops#634): a constraint's helper (a model pick's link) goes with its last
+        // constraint, in the deletion's transaction, as in Onshape, where nothing is left
+        if (!getSketchObject()->unusedImplicitExternals().empty()) {
+            try {
+                Gui::cmdAppObjectArgs(getObject(), "delUnusedImplicitExternals()");
             }
             catch (const Base::Exception& e) {
                 Base::Console().developerError("ViewProviderSketch", "%s\n", e.what());
@@ -5811,6 +5855,9 @@ void ViewProviderSketch::generateContextMenu(const Gui::View3DInventorViewer* vi
                     menu << "Sketcher_ConstrainPerpendicular"
                          << "Sketcher_ConstrainTangent"
                          << "Sketcher_ConstrainSymmetric";
+                    if (selectedLines == 1) {
+                        menu << "Sketcher_ConstrainMidpoint";  // FreeCAD-CH (ops#645)
+                    }
                 }
             }
             else {
@@ -5836,7 +5883,8 @@ void ViewProviderSketch::generateContextMenu(const Gui::View3DInventorViewer* vi
                 }
             }
             if (selectedPoints == 3) {
-                menu << "Sketcher_ConstrainSymmetric";
+                menu << "Sketcher_ConstrainSymmetric"
+                     << "Sketcher_ConstrainMidpoint";  // FreeCAD-CH (ops#645)
             }
         }
         else if (selectedLines >= 1 && selectedPoints >= 1 && !onlyOrigin) {
@@ -5860,7 +5908,8 @@ void ViewProviderSketch::generateContextMenu(const Gui::View3DInventorViewer* vi
             }
 
             if (selectedLines == 1 && selectedPoints == 1) {
-                menu << "Sketcher_ConstrainSymmetric";
+                menu << "Sketcher_ConstrainSymmetric"
+                     << "Sketcher_ConstrainMidpoint";  // FreeCAD-CH (ops#645)
             }
         }
 

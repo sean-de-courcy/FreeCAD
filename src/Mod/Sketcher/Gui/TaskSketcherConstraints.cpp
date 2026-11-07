@@ -1248,12 +1248,25 @@ void TaskSketcherConstraints::onListWidgetConstraintsEmitShowSelection3DVisibili
     changeFilteredVisibility(true, ActionTarget::Selected);
 }
 
+namespace
+{
+// FreeCAD-CH (ops#634): a constraint's helper (a model pick's link) goes with its last
+// constraint, in the deletion's transaction, as in Onshape, where nothing is left
+void deleteUnusedHelpers(const Sketcher::SketchObject* sketch)
+{
+    if (!sketch->unusedImplicitExternals().empty()) {
+        Gui::cmdAppObjectArgs(sketch, "delUnusedImplicitExternals()");
+    }
+}
+}  // namespace
+
 void TaskSketcherConstraints::onDeleteAllConstraints()
 {
     const Sketcher::SketchObject* sketch = sketchView->getSketchObject();
     sketchView->getDocument()->openCommand(QT_TRANSLATE_NOOP("Command", "Delete all constraints"));
     try {
         Gui::cmdAppObjectArgs(sketch, "deleteAllConstraints()");
+        deleteUnusedHelpers(sketch);
         sketchView->getDocument()->commitCommand();
     }
     catch (const Base::Exception&) {
@@ -1272,6 +1285,7 @@ void TaskSketcherConstraints::onDeleteConstraints(const QList<int>& ids)
     sketchView->getDocument()->openCommand(QT_TRANSLATE_NOOP("Command", "Delete constraints"));
     try {
         Gui::cmdAppObjectArgs(sketch, "delConstraints(%s)", idList.c_str());
+        deleteUnusedHelpers(sketch);
         sketchView->getDocument()->commitCommand();
     }
     catch (const Base::Exception&) {

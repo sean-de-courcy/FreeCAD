@@ -44,6 +44,7 @@
 
 #include <App/DocumentObjectGroup.h>
 #include <App/Datums.h>
+#include <App/ReferenceRepair.h>
 #include <Base/Tools.h>
 #include <Gui/Action.h>
 #include <Gui/Application.h>
@@ -945,6 +946,67 @@ bool CmdSketcherViewSketch::isActive()
     return isSketchInEdit(getActiveGuiDocument());
 }
 
+// FreeCAD-CH (ops#644): Onshape's repair of a missing sketch reference from inside the sketch: each
+// reference with a closest match takes it (a missing one its first candidate, a guessed one is
+// accepted), in one undo step. The References dialog (Repair References in the tree's menu) still
+// lists every candidate.
+DEF_STD_CMD_A(CmdSketcherUseClosestReferenceMatches)
+
+CmdSketcherUseClosestReferenceMatches::CmdSketcherUseClosestReferenceMatches()
+    : Command("Sketcher_UseClosestReferenceMatches")
+{
+    sAppModule = "Sketcher";
+    sGroup = "Sketcher";
+    sMenuText = QT_TR_NOOP("Use Closest Reference Matches");
+    sToolTipText = QT_TR_NOOP("Each missing reference of the sketch takes its closest match, and "
+                              "a guessed one is accepted as it stands");
+    sWhatsThis = "Sketcher_UseClosestReferenceMatches";
+    sStatusTip = sToolTipText;
+    eType = ForEdit;
+}
+
+void CmdSketcherUseClosestReferenceMatches::activated(int iMsg)
+{
+    Q_UNUSED(iMsg);
+    auto* vp = dynamic_cast<ViewProviderSketch*>(getActiveGuiDocument()->getInEdit());
+    if (!vp) {
+        return;
+    }
+    Sketcher::SketchObject* sketch = vp->getSketchObject();
+    std::vector<App::ReferenceRow> rows = referencesToMatch(sketch);
+    if (rows.empty()) {
+        return;
+    }
+
+    openCommand(QT_TRANSLATE_NOOP("Command", "Use closest reference matches"));
+    try {
+        for (const App::ReferenceRow& row : rows) {
+            // the rows name the sketch's own properties
+            auto* prop = const_cast<App::PropertyLinkBase*>(row.prop);
+            if (row.status == "guessed") {
+                App::acceptReference(prop, row.localIndex);
+            }
+            else {
+                App::repairReference(prop, row.localIndex, row.candidates.front().index);
+            }
+        }
+    }
+    catch (const Base::Exception& e) {
+        abortCommand();
+        Gui::TranslatedUserError(sketch,
+                                 QObject::tr("Reference not repaired"),
+                                 QString::fromStdString(e.what()));
+        return;
+    }
+    commitCommand();
+    doCommand(Gui, "App.activeDocument().recompute()");
+}
+
+bool CmdSketcherUseClosestReferenceMatches::isActive()
+{
+    return isSketchInEdit(getActiveGuiDocument());
+}
+
 DEF_STD_CMD_A(CmdSketcherValidateSketch)
 
 CmdSketcherValidateSketch::CmdSketcherValidateSketch()
@@ -1214,7 +1276,9 @@ namespace {
                     continue;
                 }
 
-                int type = srcSketch->externalType(static_cast<int>(i));
+                // the kind alone: a merged link is the user's (ops#634)
+                const long type = Sketcher::SketchObject::externalKind(
+                    srcSketch->externalType(static_cast<int>(i)));
                 bool projection = type != static_cast<int>(Sketcher::ExtType::Intersection);
                 bool intersection = type != static_cast<int>(Sketcher::ExtType::Projection);
                 auto it = std::ranges::find_if(links, [&](const Link& link) {
@@ -1289,7 +1353,8 @@ namespace {
                     continue;
                 }
                 const auto& link = links[entryLinks[s][i]];
-                int type = srcSketch->externalType(static_cast<int>(i));
+                const long type = Sketcher::SketchObject::externalKind(
+                    srcSketch->externalType(static_cast<int>(i)));
                 Candidates candidates {&link,
                                        type != static_cast<int>(Sketcher::ExtType::Intersection),
                                        type != static_cast<int>(Sketcher::ExtType::Projection)};
@@ -2525,6 +2590,7 @@ void CreateSketcherCommands()
     rcCmdMgr.addCommand(new CmdSketcherReorientSketch());
     rcCmdMgr.addCommand(new CmdSketcherMapSketch());
     rcCmdMgr.addCommand(new CmdSketcherViewSketch());
+    rcCmdMgr.addCommand(new CmdSketcherUseClosestReferenceMatches());  // FreeCAD-CH (ops#644)
     rcCmdMgr.addCommand(new CmdSketcherValidateSketch());
     rcCmdMgr.addCommand(new CmdSketcherMirrorSketch());
     rcCmdMgr.addCommand(new CmdSketcherMergeSketches());

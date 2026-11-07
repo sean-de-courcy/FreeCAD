@@ -484,6 +484,7 @@ inline void SketcherAddWorkbenchConstraints<Gui::MenuItem>(Gui::MenuItem& cons)
          << "Sketcher_ConstrainPerpendicular"
          << "Sketcher_ConstrainTangent"
          << "Sketcher_ConstrainEqual"
+         << "Sketcher_ConstrainMidpoint"
          << "Sketcher_ConstrainSymmetric"
          << "Sketcher_ConstrainBlock"
          << "Sketcher_ConstrainGroup"
@@ -552,6 +553,7 @@ inline void SketcherAddWorkbenchConstraints<Gui::ToolBarItem>(Gui::ToolBarItem& 
          << "Sketcher_ConstrainPerpendicular"
          << "Sketcher_ConstrainTangent"
          << "Sketcher_ConstrainEqual"
+         << "Sketcher_ConstrainMidpoint"
          << "Sketcher_ConstrainSymmetric"
          << "Sketcher_ConstrainBlock"
          << "Sketcher_ConstrainGroup";
@@ -722,6 +724,7 @@ void addSketcherWorkbenchSketchTools(Gui::ToolBarItem& sketch)
            << "Sketcher_ConstrainPerpendicular"
            << "Sketcher_ConstrainTangent"
            << "Sketcher_ConstrainEqual"
+           << "Sketcher_ConstrainMidpoint"
            << "Sketcher_ConstrainSymmetric"
            << "Sketcher_ConstrainBlock";
 }

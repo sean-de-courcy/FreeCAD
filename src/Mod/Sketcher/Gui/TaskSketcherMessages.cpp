@@ -73,6 +73,11 @@ void TaskSketcherMessages::updateToolTip(const QString& link)
     else if (link == QStringLiteral("#malformed")) {
         setLinkTooltip(tr("Selects these malformed constraints"));
     }
+    else if (link == QStringLiteral("#closestmatches")) {  // FreeCAD-CH (ops#644)
+        setLinkTooltip(tr("Each missing reference takes its closest match, in one undo step. "
+                          "Repair References, in the sketch's menu in the tree, lists every "
+                          "candidate."));
+    }
     else if (link == QStringLiteral("#partiallyredundant")) {
         setLinkTooltip(
             tr("Some constraints in combination are partially redundant. Selects these "
@@ -93,6 +98,9 @@ void TaskSketcherMessages::onLabelStatusLinkClicked(const QString& str)
     }
     else if (str == QStringLiteral("#malformed")) {
         Gui::Application::Instance->commandManager().runCommandByName("Sketcher_SelectMalformedConstraints");
+    }
+    else if (str == QStringLiteral("#closestmatches")) {  // FreeCAD-CH (ops#644)
+        Gui::Application::Instance->commandManager().runCommandByName("Sketcher_UseClosestReferenceMatches");
     }
     else if (str == QStringLiteral("#partiallyredundant")) {
         Gui::Application::Instance->commandManager().runCommandByName("Sketcher_SelectPartiallyRedundantConstraints");

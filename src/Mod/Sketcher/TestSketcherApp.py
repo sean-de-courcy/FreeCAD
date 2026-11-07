@@ -42,6 +42,7 @@ from SketcherTests.TestSketchMissingExternal import (
     TestSketchFaceLinkPairing4m,
 )
 from SketcherTests.TestSketchExternalTypes import TestSketchExternalTypes
+from SketcherTests.TestSketchExternalTypes import TestSketchImplicitExternals  # ops#634
 from SketcherTests.TestSketchCarbonCopyElements import TestSketchCarbonCopyElements
 from SketcherTests.TestSketchCarbonCopyElements import TestCarbonCopySelfReference
 from SketcherTests.TestSketchCarbonCopyElements import TestCarbonCopyFlipped

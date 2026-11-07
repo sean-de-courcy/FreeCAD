@@ -1299,6 +1299,11 @@ int DrawSketchHandler::seekAutoConstraint(
         return 0;  // If Autoconstraints property is not set quit
     }
 
+    // FreeCAD-CH (ops#640): Shift held suppresses the inferences for this placement, as in Onshape
+    if (QGuiApplication::keyboardModifiers() & Qt::ShiftModifier) {
+        return 0;
+    }
+
     updateParallelPerpendicularEndpointHint();
 
     // Reference line hover-selection detection
@@ -2101,7 +2106,8 @@ bool DrawSketchHandler::snapToParallelPerpendicularHint(Base::Vector2d& point)
 {
     parallelPerpendicularActiveHintLine = -1;
 
-    if (!sketchgui->Autoconstraints.getValue()) {
+    if (!sketchgui->Autoconstraints.getValue()
+        || (QGuiApplication::keyboardModifiers() & Qt::ShiftModifier)) {  // FreeCAD-CH (ops#640)
         return false;
     }
 

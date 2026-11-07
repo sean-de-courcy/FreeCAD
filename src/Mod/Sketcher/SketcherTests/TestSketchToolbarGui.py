@@ -49,6 +49,7 @@ SKETCH = [
     "Sketcher_ConstrainPerpendicular",
     "Sketcher_ConstrainTangent",
     "Sketcher_ConstrainEqual",
+    "Sketcher_ConstrainMidpoint",
     "Sketcher_ConstrainSymmetric",
     "Sketcher_ConstrainBlock",
 ]

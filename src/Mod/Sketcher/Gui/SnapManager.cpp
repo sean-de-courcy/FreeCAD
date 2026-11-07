@@ -198,7 +198,10 @@ Base::Vector2d SnapManager::snap(Base::Vector2d inputPos, SnapType mask)
     bool snappedToObject = false;
     if ((static_cast<int>(mask)
          & (static_cast<int>(SnapType::Point) | static_cast<int>(SnapType::Edge)))
-        && snapToObjectsRequested) {
+        && snapToObjectsRequested
+        // FreeCAD-CH (ops#640): Shift held suppresses the inferences, the snap onto a point or
+        // curve with them, as in Onshape (DrawSketchHandler::seekAutoConstraint)
+        && !(QApplication::keyboardModifiers() & Qt::ShiftModifier)) {
         snappedToObject = snapToObject(inputPos, snapPos, mask);
         if (snappedToObject) {
             return snapPos;  // Full snap (point or curve) - done

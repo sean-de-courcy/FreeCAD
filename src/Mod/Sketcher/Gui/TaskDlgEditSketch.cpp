@@ -54,7 +54,8 @@ TaskDlgEditSketch::TaskDlgEditSketch(ViewProviderSketch* sketchView)
     ParameterGrp::handle hGrp = App::GetApplication().GetParameterGroupByPath(
         "User parameter:BaseApp/Preferences/Mod/Sketcher"
     );
-    setEscapeButtonEnabled(hGrp->GetBool("LeaveSketchWithEscape", true));
+    // FreeCAD-CH (ops#640): Esc with no tool running keeps the sketch open, as in Onshape
+    setEscapeButtonEnabled(hGrp->GetBool("LeaveSketchWithEscape", false));
     setAutoCloseOnResetEdit(true);
 
     Content.push_back(Messages);
