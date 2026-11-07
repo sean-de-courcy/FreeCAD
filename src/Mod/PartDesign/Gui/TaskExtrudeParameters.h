@@ -108,6 +108,9 @@ public:
         ToFirst,
         ToFace,
         ToShape,
+        // The other class's end type, appended to Type's list (ops#640): Through all on a Pad,
+        // To last on a Pocket. UI index 5, Type index 6 (the UI skips "?TwoLengths").
+        Appended,
     };
 
     enum class StartMode

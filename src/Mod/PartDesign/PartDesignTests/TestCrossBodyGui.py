@@ -1155,6 +1155,21 @@ class TestOperationRowGui(ResultBoxGuiCase):
     def previewColour(self, obj):
         return tuple(round(c, 3) for c in obj.ViewObject.PreviewColor[:3])
 
+    def modeCombo(self):
+        """The open panel's end type box (side 1)."""
+        box = self.visible(QtWidgets.QComboBox, "changeMode")
+        self.assertIsNotNone(box, "no end type box")
+        return box
+
+    def chooseMode(self, text):
+        """Chooses `text` in the end type box as a user does; the panel sets Type and
+        recomputes."""
+        box = self.modeCombo()
+        index = self.items(box).index(text)
+        box.setCurrentIndex(index)
+        self.assertTrue(waitFor(lambda: self.modeCombo().currentText() == text))
+        pump(0.3)
+
     def testAnAddPadBecomesAHole(self):
         """F11: the lid pad, 10 up (25000), edited: on Add to Enclosure; Remove from Enclosure
         makes it a cut through the enclosure, the same feature reversed (7000). One undo step
@@ -1374,6 +1389,88 @@ class TestOperationRowGui(ResultBoxGuiCase):
         self.assertAlmostEqual(self.body.Shape.Volume, 11500, places=3)
         self.assertTrue(self.body.Shape.isInside(V(15, 15, 7.5), 1e-6, True))
         self.assertFalse(self.body.Shape.isInside(V(15, 15, 2.5), 1e-6, True))
+
+    def testAPadThroughAllCutsThroughWhenRemoving(self):
+        """D1 of the review: one end-type list for Pad and Pocket, Onshape's. The lid pad, 5 up
+        (20500), edited: its end type box offers Through all after Up to shape; chosen, Type is
+        ThroughAll. Remove from Enclosure flips it and it cuts through the enclosure (7000; 5 deep
+        it would leave 11500). The restarted panel shows Through all again."""
+        self.enclosure()
+        lid = self.editLid(length=5)
+        self.assertEqual(
+            self.items(self.modeCombo()),
+            ["Dimension", "To last", "To first", "Up to face", "Up to shape", "Through all"],
+        )
+        self.chooseMode("Through all")
+        self.assertEqual(lid.Type, "ThroughAll")
+        self.choose("Remove from Enclosure")
+        self.assertEqual(lid.Operation, "Subtraction")
+        self.assertEqual(lid.Type, "ThroughAll")
+        self.assertTrue(lid.Reversed)
+        self.assertEqual(self.modeCombo().currentText(), "Through all")
+        self.close(ok=True)
+        self.assertEqual(lid.Type, "ThroughAll")
+        self.assertTrue(lid.isValid(), lid.getStatusString())
+        self.assertAlmostEqual(self.body.Shape.Volume, 7000, places=3)
+        self.assertFalse(self.body.Shape.isInside(V(15, 15, 0.5), 1e-6, True))
+
+    def testAPocketToLastAddsUpToTheLastFace(self):
+        """D1 of the review: a Pocket's end type box offers To last after Up to shape. A pocket, 2
+        deep (14200), of a 30 x 30 square sketched 5 up inside the enclosure (testToLastFlipsToo's
+        profile, its centre strictly inside the footprint): To last cuts down to the bottom face,
+        the lower 5 under the square (11500). Add to Enclosure flips it: it adds up to the top
+        face, adding nothing (16000), and the material under the sketch is back. The restarted
+        panel shows To last again."""
+        self.enclosure()
+        midSk = sketch(self.body, "MidSk", xyPlane(self.body), (0, 0, 30, 30), z=5)
+        pocket = self.body.newObject("PartDesign::Pocket", "Pocket")
+        pocket.Profile = midSk
+        pocket.Length = 2
+        self.doc.recompute()
+        self.assertTrue(pocket.isValid(), pocket.getStatusString())
+        self.assertAlmostEqual(self.body.Shape.Volume, 14200, places=3)
+        self.openEdit(pocket)
+        self.assertEqual(
+            self.items(self.modeCombo()),
+            ["Dimension", "Through all", "To first", "Up to face", "Up to shape", "To last"],
+        )
+        self.chooseMode("To last")
+        self.assertEqual(pocket.Type, "UpToLast")
+        self.assertAlmostEqual(self.body.Shape.Volume, 11500, places=3)
+        self.assertTrue(self.body.Shape.isInside(V(15, 15, 7.5), 1e-6, True))
+        self.assertFalse(self.body.Shape.isInside(V(15, 15, 2.5), 1e-6, True))
+        self.choose("Add to Enclosure")
+        self.assertEqual(pocket.Operation, "Union")
+        self.assertEqual(pocket.Type, "UpToLast")
+        self.assertTrue(pocket.Reversed)
+        self.assertEqual(self.modeCombo().currentText(), "To last")
+        self.close(ok=True)
+        self.assertEqual(pocket.Type, "UpToLast")
+        self.assertTrue(pocket.isValid(), pocket.getStatusString())
+        self.assertAlmostEqual(self.body.Shape.Volume, 16000, places=3)
+        self.assertTrue(self.body.Shape.isInside(V(15, 15, 7.5), 1e-6, True))
+        self.assertTrue(self.body.Shape.isInside(V(15, 15, 2.5), 1e-6, True))
+
+    def testAPadThroughAllOpensOnThroughAll(self):
+        """A Pad whose Type is ThroughAll (Type index 6), cutting through the enclosure (7000),
+        opens with its end type box on Through all and the taper shown, as a Pocket's Through
+        all; OK writes it back unchanged."""
+        self.enclosure()
+        lid = pad(self.body, "Lid", self.lidSk, 10)
+        lid.Type = "ThroughAll"
+        lid.Operation = "Subtraction"
+        lid.Reversed = True
+        self.doc.recompute()
+        self.assertTrue(lid.isValid(), lid.getStatusString())
+        self.assertAlmostEqual(self.body.Shape.Volume, 7000, places=3)
+        self.openEdit(lid)
+        self.assertEqual(self.modeCombo().currentText(), "Through all")
+        self.assertIsNotNone(self.visible(QtWidgets.QWidget, "taperEdit"), "no taper")
+        self.assertIsNone(self.visible(QtWidgets.QWidget, "lengthEdit"))
+        self.assertIsNone(self.visible(QtWidgets.QWidget, "offsetEdit"))
+        self.close(ok=True)
+        self.assertEqual(lid.Type, "ThroughAll")
+        self.assertAlmostEqual(self.body.Shape.Volume, 7000, places=3)
 
     def testThePreviewColourFollowsTheOperation(self):
         """D5 of the review (gui-3): the preview takes the colour of what the feature does now. The

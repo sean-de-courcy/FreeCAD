@@ -75,6 +75,8 @@ void TaskPadParameters::translateModeList(QComboBox* box, int index)
     box->addItem(tr("To first"));
     box->addItem(tr("Up to face"));
     box->addItem(tr("Up to shape"));
+    // Mode::Appended (ops#640): the end type a Pocket offers too
+    box->addItem(tr("Through all"));
     box->setCurrentIndex(index);
 }
 
@@ -118,6 +120,9 @@ void TaskPadParameters::onModeChanged(int index, Side side)
             break;
         case Mode::ToShape:
             sideCtrl.Type->setValue("UpToShape");
+            break;
+        case Mode::Appended:
+            sideCtrl.Type->setValue("ThroughAll");
             break;
     }
 
