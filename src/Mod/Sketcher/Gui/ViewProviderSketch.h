@@ -563,6 +563,10 @@ public:
     void purgeHandler();
     //@}
 
+    /// FreeCAD-CH (ops#634): a click may pick a model element now: no sketch element (point,
+    /// curve, axis, constraint) is under the cursor, and no drag or box selection is under way
+    bool takesModelPick() const;
+
     bool isConstructionMode() const;
 
     // set the current GeometryCreationMode mode
@@ -810,6 +814,12 @@ protected:
     //@{
     /// purges the DrawHandler if existing and tidies up
     void deactivateHandler();
+    /// FreeCAD-CH (ops#634): model edges and vertices selectable in plain edit mode (no handler)
+    void setModelPicking(Gui::View3DInventorViewer* viewer, bool on);
+    /// the click under way picked a model element: its release keeps the selection
+    bool modelPickedInClick = false;
+    /// the viewer the sketch is edited in, or null
+    Gui::View3DInventorViewer* getEditViewer() const;
     /// get called if a subelement is double clicked while editing
     void editDoubleClicked();
     /// get called when an edge is double clicked to select/unselect the whole wire

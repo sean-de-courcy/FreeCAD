@@ -27,6 +27,7 @@
 #include <App/Datums.h>
 #include <Mod/Part/App/DatumFeature.h>
 
+#include <Gui/Application.h>
 #include <Gui/Notifications.h>
 #include <Gui/Selection/SelectionFilter.h>
 #include <Gui/Command.h>
@@ -119,6 +120,43 @@ public:
         }
 
         return false;
+    }
+};
+
+// FreeCAD-CH (ops#634): the gate of plain edit mode. A model edge or vertex the sketch may link is
+// selectable, so it can be picked before a constraint command (Onshape's order); the command turns
+// it into external geometry (takeModelSelection). The sketch's own elements and whole objects (the
+// tree) pass as before; other model elements (faces) don't.
+class ModelPickSelection: public ExternalSelection
+{
+    App::DocumentObject* sketch;
+
+public:
+    explicit ModelPickSelection(App::DocumentObject* obj)
+        : ExternalSelection(obj)
+        , sketch(obj)
+    {}
+
+    bool allow(App::Document* document, App::DocumentObject* object, const char* subName) override
+    {
+        this->notAllowedReason = "";
+        // The gate is global: another document's picks are that document's business
+        if (object == sketch || Base::Tools::isNullOrEmpty(subName)
+            || document != sketch->getDocument()) {
+            return true;
+        }
+        const std::string_view element(subName);
+        if (!(element.starts_with("Edge") && element.size() > 4)
+            && !(element.starts_with("Vertex") && element.size() > 6)) {
+            return false;
+        }
+        // A click on a sketch element in front of (or behind) a model edge is the sketch's, and
+        // so is the release of a drag or a box
+        auto* vp = freecad_cast<ViewProviderSketch*>(Gui::Application::Instance->getViewProvider(sketch));
+        if (vp && !vp->takesModelPick()) {
+            return false;
+        }
+        return ExternalSelection::allow(document, object, subName);
     }
 };
 

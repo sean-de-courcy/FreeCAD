@@ -52,6 +52,7 @@ if(BUILD_GUI)
           SketcherTests/TestSketchCopyElementsGui.py
           SketcherTests/TestSketchCommandsGui.py
           SketcherTests/TestSketchToolbarGui.py
+          SketcherTests/TestSketchModelPicksGui.py
     )
 endif(BUILD_GUI)
 
