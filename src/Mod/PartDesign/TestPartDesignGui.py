@@ -60,6 +60,7 @@ from PartDesignTests.TestCrossBodyGui import TestResultBoxGui  # FreeCAD-CH, ops
 from PartDesignTests.TestCrossBodyGui import TestSiblingsGui  # FreeCAD-CH, ops#630
 from PartDesignTests.TestCrossBodyGui import TestMergeGui  # FreeCAD-CH, ops#630
 from PartDesignTests.TestCrossBodyGui import TestSplitGui  # FreeCAD-CH, ops#630
+from PartDesignTests.TestCrossBodyGui import TestStudioPicksGui  # FreeCAD-CH, ops#634
 from PartDesignTests.TestNewSketchDialogGui import TestNewSketchDialogGui
 from PartDesignTests.TestToolbarsGui import TestToolbarsGui  # FreeCAD-CH, ops#605
 from PartDesignTests.TestOnshapeStudioGui import TestOnshapeStudioGui

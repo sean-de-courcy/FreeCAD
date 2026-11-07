@@ -8,6 +8,7 @@ import unittest
 
 import FreeCAD as App
 import FreeCADGui as Gui
+import Part
 import PartDesign
 from PySide import QtCore, QtWidgets
 
@@ -1073,6 +1074,230 @@ class TestSplitGui(ResultBoxGuiCase):
         sides = self.visible(QtWidgets.QLabel, "labelSides")
         self.assertIn("Flip it in Shroud's Split", sides.text())
         self.close(ok=True)
+
+
+def positions(hole):
+    """The hole's Profile, its empty names left out."""
+    obj, subs = hole.Profile
+    return obj, [s for s in subs if s]
+
+
+class TestStudioPicksGui(ResultBoxGuiCase):
+    """A datum, a Pipe and a Hole take another part's picks directly inside one part studio
+    (ops#634 slice 3, notes/direct-references-design.md 2), as Onshape's Plane, Sweep and Hole
+    take any part's entity: OK asks no copy question and the link is the pick itself. Across two
+    App::Parts (two part studios) the datum and the Pipe still ask, and the Hole refuses the
+    pick. Designed geometry: Body This and Body Sibling at the origin, at the document's top level
+    (one studio) or each in its own App::Part (apart)."""
+
+    def setUp(self):
+        super().setUp()
+        self.modals = []
+        self.answering = False
+
+    def tearDown(self):
+        self.answering = False
+        guiDoc = Gui.getDocument(self.doc.Name)
+        if guiDoc.getInEdit():
+            guiDoc.resetEdit()
+            pump()
+        super().tearDown()
+
+    def twoBodies(self, apart):
+        this = self.doc.addObject("PartDesign::Body", "This")
+        sibling = self.doc.addObject("PartDesign::Body", "Sibling")
+        if apart:
+            for name, body in (("ThisPart", this), ("SiblingPart", sibling)):
+                self.doc.addObject("App::Part", name).addObject(body)
+        return this, sibling
+
+    def answerModals(self, choice="radioIndependent"):
+        """Until self.answering is False: answers the copy dialog (DlgReference) with `choice` and
+        closes any message box; records each in self.modals."""
+        self.answering = True
+
+        def poll():
+            if not self.answering:
+                return
+            widget = QtWidgets.QApplication.activeModalWidget()
+            if widget is not None:
+                radio = widget.findChild(QtWidgets.QRadioButton, choice)
+                if radio is not None:
+                    self.modals.append("DlgReference")
+                    radio.setChecked(True)
+                    widget.accept()
+                elif isinstance(widget, QtWidgets.QMessageBox):
+                    self.modals.append("QMessageBox: " + widget.text())
+                    widget.accept()
+            QtCore.QTimer.singleShot(50, poll)
+
+        QtCore.QTimer.singleShot(50, poll)
+
+    def edit(self, obj):
+        self.doc.openTransaction("Edit " + obj.Name)
+        Gui.getDocument(self.doc.Name).setEdit(obj.Name)
+        self.waitForPanel()
+
+    def okAnswered(self, obj):
+        """OK on obj's panel, the copy dialog answered Make independent copy."""
+        self.edit(obj)
+        self.answerModals()
+        self.close(ok=True)
+        self.answering = False
+
+    def copies(self):
+        return [o.Name for o in self.doc.Objects if o.Name.startswith(("Copy", "Reference"))]
+
+    # -- D1: a datum plane on another part's face ------------------------------------------------
+
+    def datumOnASiblingsTop(self, apart):
+        """A datum plane in This on the top face (z = 5) of a 20 x 10 x 5 pad in Sibling, then OK
+        answered; returns the datum and the pad's top."""
+        this, sibling = self.twoBodies(apart)
+        self.body = this
+        sk = models.sketch(self.doc, "SiblingSk", models.rectangle(0, 0, 20, 10), sibling)
+        sibPad = models.pad(sibling, sk, 5)
+        self.doc.recompute()
+        top = faceAt(sibPad, 5)
+        datum = this.newObject("PartDesign::Plane", "Datum")
+        datum.AttachmentSupport = [(sibPad, top)]
+        datum.MapMode = "FlatFace"
+        self.doc.recompute()
+        self.assertTrue(datum.isValid(), datum.getStatusString())
+        self.okAnswered(datum)
+        self.doc.recompute()
+        self.assertTrue(datum.isValid(), datum.getStatusString())
+        placement = datum.getGlobalPlacement()
+        self.assertAlmostEqual(abs(placement.Rotation.multVec(V(0, 0, 1)).z), 1, places=6)
+        self.assertAlmostEqual(placement.Base.z, 5, places=6)
+        return datum, sibPad, top
+
+    def testDatumOnASiblingsFaceLinksDirectly(self):
+        """D1: one studio: OK asks nothing, and the datum is on the sibling's face itself; no copy
+        is made."""
+        datum, sibPad, top = self.datumOnASiblingsTop(apart=False)
+        self.assertEqual(self.modals, [])
+        self.assertEqual(datum.AttachmentSupport, [(sibPad, (top,))])
+        self.assertEqual(self.copies(), [])
+
+    def testDatumOnAFaceInAnotherPartAsks(self):
+        """D1, two App::Parts: OK asks the copy question, as before; the datum goes on the copy,
+        in This."""
+        datum, sibPad, _ = self.datumOnASiblingsTop(apart=True)
+        self.assertEqual(self.modals, ["DlgReference"])
+        [(copy, _)] = datum.AttachmentSupport
+        self.assertIsNot(copy, sibPad)
+        self.assertTrue(self.body.hasObject(copy))
+
+    # -- D2: a Pipe along another part's sketch ----------------------------------------------------
+
+    def pipeAlongASiblingsSketch(self, apart):
+        """A Pipe in This: a 2 x 2 square at z = 0 swept along a 10 mm line along Z in a sketch of
+        Sibling (on XZ), then OK answered; returns the pipe and the sibling's sketch. V = 40."""
+        this, sibling = self.twoBodies(apart)
+        self.body = this
+        profile = models.sketch(self.doc, "Profile", models.rectangle(-1, -1, 1, 1), this)
+        xz = App.Placement(V(0, 0, 0), App.Rotation(V(1, 0, 0), 90))  # sketch y -> global z
+        line = Part.LineSegment(V(0, 0, 0), V(0, 10, 0))
+        spine = models.sketch(self.doc, "SiblingSpine", [line], sibling, placement=xz)
+        self.doc.recompute()
+        pipe = this.newObject("PartDesign::AdditivePipe", "Pipe")
+        pipe.Profile = profile
+        pipe.Spine = (spine, ["Edge1"])
+        self.doc.recompute()
+        self.okAnswered(pipe)
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        self.assertAlmostEqual(pipe.Shape.Volume, 40, places=3)
+        return pipe, spine
+
+    def testPipeAlongASiblingsSketchLinksDirectly(self):
+        """D2: one studio: OK asks nothing, and the spine is the sibling's sketch itself; no copy
+        is made."""
+        pipe, spine = self.pipeAlongASiblingsSketch(apart=False)
+        self.assertEqual(self.modals, [])
+        self.assertEqual(pipe.Spine, (spine, ["Edge1"]))
+        self.assertEqual(self.copies(), [])
+
+    def testPipeAlongASketchInAnotherPartAsks(self):
+        """D2, two App::Parts: OK asks the copy question, as before; the spine is the copy, in
+        This."""
+        pipe, spine = self.pipeAlongASiblingsSketch(apart=True)
+        self.assertEqual(self.modals, ["DlgReference"])
+        self.assertIsNot(pipe.Spine[0], spine)
+        self.assertTrue(self.body.hasObject(pipe.Spine[0]))
+
+    # -- D4: Hole positions on another part's sketch -----------------------------------------------
+
+    def plateAndASiblingsCircle(self, apart):
+        """In This a 20 x 20 x 10 box and a hole through all, diameter 2, on its own sketch's
+        circle r = 1 at (5, 5) on the top; in Sibling a sketch on the top with a circle r = 1 at
+        (15, 5). Each hole removes 10 pi. Returns the hole, the box and the sibling's sketch, with
+        the hole's panel open and its positions field armed."""
+        this, sibling = self.twoBodies(apart)
+        self.body = this
+        box = this.newObject("PartDesign::AdditiveBox", "Box")
+        box.Length = 20
+        box.Width = 20
+        box.Height = 10
+        own = models.sketch(self.doc, "Holes", [models.circle(5, 5, 1)], this, z=10)
+        other = models.sketch(self.doc, "SiblingHoles", [models.circle(15, 5, 1)], sibling, z=10)
+        self.doc.recompute()
+        hole = this.newObject("PartDesign::Hole", "Hole")
+        hole.Profile = (own, [])
+        hole.Diameter = 2
+        hole.DepthType = "ThroughAll"
+        hole.BaseProfileType = 6
+        self.doc.recompute()
+        self.assertTrue(hole.isValid(), hole.getStatusString())
+        self.edit(hole)
+        QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+        field = Gui.getMainWindow().findChild(QtWidgets.QWidget, "fieldProfile")
+        self.assertIsNotNone(field, "no positions field")
+        field.setProperty("armed", True)
+        pump(0.1)
+        self.assertTrue(waitFor(lambda: bool(field.property("armed"))), "the field isn't armed")
+        return hole, box, other
+
+    def removedAt(self, hole, box):
+        """The volume the hole removes from the box, and whether it drills at (5, 5) and at
+        (15, 5)."""
+        self.doc.recompute()
+        self.assertTrue(hole.isValid(), hole.getStatusString())
+        drilled = [
+            not hole.Shape.isInside(V(x, 5, 5), 1e-6, True) for x in (5, 15)
+        ]
+        return box.Shape.Volume - hole.Shape.Volume, drilled
+
+    def testHoleOnASiblingsSketchLinksDirectly(self):
+        """D4: one studio: the sibling's circle is taken as the positions (the pick starts the
+        list on its sketch), and OK keeps it: the hole drills at (15, 5) alone, 10 pi."""
+        hole, box, other = self.plateAndASiblingsCircle(apart=False)
+        Gui.Selection.addSelection(self.doc.Name, other.Name, "Edge1")
+        pump(0.2)
+        self.assertEqual(positions(hole), (other, ["Edge1"]))
+        self.close(ok=True)
+        self.assertEqual(positions(hole), (other, ["Edge1"]))
+        removed, drilled = self.removedAt(hole, box)
+        self.assertAlmostEqual(removed, 10 * math.pi, places=3)
+        self.assertEqual(drilled, [False, True])
+
+    def testHoleOnASketchInAnotherPartIsRefused(self):
+        """D4, two App::Parts: the pick is refused, saying why, and the hole stays on its own
+        circle at (5, 5). Onshape takes no sketch of another part studio either (a Derived
+        feature first)."""
+        from PartDesignTests.TestReferenceFieldGui import statusText
+
+        hole, box, other = self.plateAndASiblingsCircle(apart=True)
+        Gui.Selection.addSelection(self.doc.Name, other.Name, "Edge1")
+        text = statusText()
+        pump(0.2)
+        self.assertIn("part studio", text)
+        self.assertEqual(hole.Profile[0], self.doc.getObject("Holes"))
+        self.close(ok=True)
+        removed, drilled = self.removedAt(hole, box)
+        self.assertAlmostEqual(removed, 10 * math.pi, places=3)
+        self.assertEqual(drilled, [True, False])
 
 
 if __name__ == "__main__":

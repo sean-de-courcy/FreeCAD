@@ -1709,7 +1709,7 @@ class TestPanelFixesGui(unittest.TestCase):
         the pipe sweeps along it. Model: a base box 20 x 20 x 10 and a box 10 x 10 x 20, both at
         the origin; the spine is the fused shape's vertical edge at x = 20, y = 0 (z 0..10), which
         the box alone hasn't; the profile is a 2 x 2 square around its foot."""
-        other = models.body(self.doc)
+        other = self.otherBody()
         base = other.newObject("PartDesign::AdditiveBox", "Base")
         base.Length = 20
         base.Width = 20
@@ -1773,7 +1773,7 @@ class TestPanelFixesGui(unittest.TestCase):
         round), so the pipe warns. OK copies it (a ShapeBinder of the pad's shape): the copied
         entry is written by its index name and keeps its guess, so the warning and the report
         entry stay. 2 x 2 at z = 0 to 4 x 4 at z = 10, ruled: a frustum, V = 280 / 3."""
-        other = models.body(self.doc)
+        other = self.otherBody()
         base = models.sketch(self.doc, "Base", models.rectangle(-2, -2, 2, 2), other)
         pad = models.pad(other, base, 10)
         self.body = models.body(self.doc)
@@ -3148,8 +3148,9 @@ class TestPanelFixesGui(unittest.TestCase):
         point at (1, 2, 3) in another body (if placed, turned 90 degrees about Z and moved by
         (5, 0, 0): globally (3, 1, 3)). makeCopy's datum branch made an abstract Part::Datum
         (nothing) and dereferenced it. The copy is a datum point in this body, and the datum is
-        where the point is."""
-        other = models.body(self.doc)
+        where the point is. Unplaced, the other body is in its own App::Part (otherBody): at the top
+        level it would be this body's studio sibling, linked directly (ops#634)."""
+        other = models.body(self.doc) if placed else self.otherBody()
         point = other.newObject("PartDesign::Point", "Point")
         point.Placement.Base = V(1, 2, 3)
         self.body = models.body(self.doc)
@@ -3209,7 +3210,7 @@ class TestPanelFixesGui(unittest.TestCase):
         """ops#244 P2: a datum plane attached to the top face (z = 10, not Face1) of a 10 mm box
         in another body, Make independent copy. The datum's sub on the copy was empty: it lost
         the picked face. It is the picked face on the copy."""
-        other = models.body(self.doc)
+        other = self.otherBody()
         box = other.newObject("PartDesign::AdditiveBox", "Box")
         self.body = models.body(self.doc)
         self.doc.recompute()
@@ -3227,7 +3228,7 @@ class TestPanelFixesGui(unittest.TestCase):
     def testDatumOnAFaceOfACopiedPad(self):
         """ops#244 P2: as testDatumOnAFaceOfACopiedBox on the top face of a 20 x 20 x 10 pad,
         whose copy is a shape binder of that face alone: the datum is on its Face1."""
-        other = models.body(self.doc)
+        other = self.otherBody()
         sketch = models.sketch(self.doc, "Base", models.rectangle(0, 0, 20, 20), other)
         pad = other.newObject("PartDesign::Pad", "Pad")
         pad.Profile = sketch
@@ -3287,7 +3288,7 @@ class TestPanelFixesGui(unittest.TestCase):
         edge is another line on the sketch's copy, recomputed in makeCopy. OK stops with a
         message, the panel stays, and no copy is left. (A stale box no longer stops: its copy is
         a shape binder of the shape shown, ops#244 P5.)"""
-        other = models.body(self.doc)
+        other = self.otherBody()
         axis = models.sketch(self.doc, "Axis", [line(10, 0, 10, 10)], other, placement=XZ)
         self.body = models.body(self.doc)
         datum = self.body.newObject("PartDesign::Plane", "Datum")
@@ -3668,7 +3669,7 @@ class TestPanelFixesGui(unittest.TestCase):
     def testDatumOnALegacyCoordinateSystemStops(self):
         """PR 227 review L1: a datum plane attached to a (legacy) PartDesign coordinate system in
         another body, Make independent copy: OK stops with makeCopy's message; no copy is left."""
-        other = models.body(self.doc)
+        other = self.otherBody()
         cs = other.newObject("PartDesign::CoordinateSystem", "CS")
         self.body = models.body(self.doc)
         datum = self.body.newObject("PartDesign::Plane", "Datum")
