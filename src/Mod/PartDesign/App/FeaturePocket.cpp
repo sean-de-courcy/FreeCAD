@@ -43,8 +43,12 @@ using namespace PartDesign;
 // because the files store the enum index. So it is not possible to migrate files if the
 // enum entry is removed (see #23612). In the distant future, when all files are reasonably
 // migrated we can drop this.
+// One end-type list for Pad and Pocket (FreeCAD-CH ops#640: an Extrude switches between Add,
+// Remove and Intersect): the other class's name is appended at the END, never inserted, since
+// Type and Type2 are restored by index. Pad has ThroughAll at 6, Pocket UpToLast at 6.
 const char* Pocket::TypeEnums[]
-    = {"Length", "ThroughAll", "UpToFirst", "UpToFace", "?TwoLengths", "UpToShape", nullptr};
+    = {"Length", "ThroughAll", "UpToFirst", "UpToFace", "?TwoLengths", "UpToShape", "UpToLast",
+       nullptr};
 
 PROPERTY_SOURCE(PartDesign::Pocket, PartDesign::FeatureExtrude)
 

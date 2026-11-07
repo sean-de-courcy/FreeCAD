@@ -83,6 +83,12 @@ public:
             "the studio's history has it, and removes the empty Body. Returns body; no recompute."
         );
         add_varargs_method(
+            "addToPartRefusal",
+            &Module::addToPartRefusal,
+            "addToPartRefusal(feature, body) -- Why addToPart(feature, body) would refuse, or '' "
+            "when it is allowed."
+        );
+        add_varargs_method(
             "deletePart",
             &Module::deletePart,
             "deletePart(body) -- Deletes the part body from its bar on, as Onshape's Delete part: a "
@@ -267,6 +273,35 @@ private:
         }
         try {
             return Py::asObject(Body::addToPart(objectArg(pObj), body)->getPyObject());
+        }
+        catch (const Base::Exception& e) {
+            e.setPyException();
+            throw Py::Exception();
+        }
+    }
+
+    // FreeCAD-CH (ops#640): addToPart's rule, for the dialog's rows and the tests
+    Py::Object addToPartRefusal(const Py::Tuple& args)
+    {
+        PyObject* pObj;
+        PyObject* pBody;
+        if (!PyArg_ParseTuple(
+                args.ptr(),
+                "O!O!",
+                &(App::DocumentObjectPy::Type),
+                &pObj,
+                &(App::DocumentObjectPy::Type),
+                &pBody
+            )) {
+            throw Py::Exception();
+        }
+        auto body = freecad_cast<Body*>(objectArg(pBody));
+        if (!body) {
+            PyErr_SetString(PyExc_TypeError, "Expected a PartDesign Body");
+            throw Py::Exception();
+        }
+        try {
+            return Py::String(Body::addToPartRefusal(objectArg(pObj), body));
         }
         catch (const Base::Exception& e) {
             e.setPyException();

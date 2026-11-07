@@ -366,6 +366,62 @@ class ResultBoxGuiCase(unittest.TestCase):
         pump(0.3)
         self.doc = doc
 
+    def part(self, name, rect, z):
+        """A part `name`: a 10 thick pad of `rect` on its XY plane, raised by z."""
+        body = self.doc.addObject("PartDesign::Body", name)
+        body.Label = name
+        pad(body, name + "Pad", sketch(body, name + "Sk", xyPlane(body), rect, z=z), 10)
+        self.doc.recompute()
+        return body
+
+    def visible(self, cls, name):
+        QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+        found = [w for w in Gui.getMainWindow().findChildren(cls, name) if w.isVisible()]
+        return found[0] if found else None
+
+    def partsList(self):
+        return self.visible(QtWidgets.QListWidget, "partsList")
+
+    def partItems(self):
+        """(text, ticked, enabled) of each row of the parts list"""
+        rows = self.partsList()
+        self.assertIsNotNone(rows, "no parts list")
+        return [
+            (
+                rows.item(i).text(),
+                rows.item(i).checkState() == QtCore.Qt.Checked,
+                bool(rows.item(i).flags() & QtCore.Qt.ItemIsEnabled),
+            )
+            for i in range(rows.count())
+        ]
+
+    def modalsDuring(self, action):
+        """Runs action; every message box that opens meanwhile is recorded and closed (left open,
+        it would hold the test until the run's timeout)."""
+        modals = []
+        answering = [True]
+
+        def poll():
+            if not answering[0]:
+                return
+            widget = QtWidgets.QApplication.activeModalWidget()
+            if isinstance(widget, QtWidgets.QMessageBox):
+                modals.append(widget.text())
+                widget.accept()
+            QtCore.QTimer.singleShot(50, poll)
+
+        QtCore.QTimer.singleShot(0, poll)
+        try:
+            action()
+        finally:
+            answering[0] = False
+        return modals
+
+    def lengthField(self):
+        field = self.visible(QtWidgets.QWidget, "lengthEdit")
+        self.assertIsNotNone(field, "no length field")
+        return field
+
 
 class TestResultBoxGui(ResultBoxGuiCase):
     """The panel's Result box (ops#325, B+ Stage 1 session 2b; notes/bplus-stage1-design.md 2.3):
@@ -502,8 +558,8 @@ class TestResultBoxGui(ResultBoxGuiCase):
 
     def testIntersectWith(self):
         """Subtractive, in a studio with another part: a pocket of the lid sketch (5 deep by
-        default) offers Remove from and Intersect with Enclosure. Intersect with: Operation
-        Common, and the enclosure is the 30 x 30 x 5 that the tool and it share (4500; removing
+        default) lists the four rows (ROWS) and opens on Remove from Enclosure. Intersect with:
+        Operation Common, and the enclosure is the 30 x 30 x 5 that the tool and it share (4500; removing
         left 11500)."""
         self.enclosure()
         other = self.doc.addObject("PartDesign::Body", "Other")
@@ -715,43 +771,10 @@ class TestSiblingsGui(ResultBoxGuiCase):
     with its lid sketch (30 x 30 on its top), a part "Below" (40 x 40 x 10 under the enclosure)
     and a part "Far" (100 away)."""
 
-    def part(self, name, rect, z):
-        body = self.doc.addObject("PartDesign::Body", name)
-        body.Label = name
-        pad(body, name + "Pad", sketch(body, name + "Sk", xyPlane(body), rect, z=z), 10)
-        self.doc.recompute()
-        return body
-
     def parts(self):
         self.enclosure()
         self.below = self.part("Below", (0, 0, 40, 40), -10)
         self.far = self.part("Far", (100, 0, 140, 40), 0)
-
-    def partsList(self):
-        QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
-        found = [
-            w
-            for w in Gui.getMainWindow().findChildren(QtWidgets.QListWidget, "partsList")
-            if w.isVisible()
-        ]
-        return found[0] if found else None
-
-    def partItems(self):
-        """(text, ticked, enabled) of each row of the parts list"""
-        rows = self.partsList()
-        self.assertIsNotNone(rows, "no parts list")
-        return [
-            (
-                rows.item(i).text(),
-                rows.item(i).checkState() == QtCore.Qt.Checked,
-                bool(rows.item(i).flags() & QtCore.Qt.ItemIsEnabled),
-            )
-            for i in range(rows.count())
-        ]
-
-    def visible(self, cls, name):
-        found = [w for w in Gui.getMainWindow().findChildren(cls, name) if w.isVisible()]
-        return found[0] if found else None
 
     def throughAll(self):
         """A pocket of the lid sketch through all, and its sibling in Below, from Python."""
@@ -865,22 +888,10 @@ class TestMergeGui(ResultBoxGuiCase):
     (30 x 30 on its top; the pad's default length is 10), a part "Panel" 40 x 30 x 10 from
     (20, 0, 10), which the lid pad overlaps in 10 x 30 x 10, and a part "Far" (100 away)."""
 
-    def part(self, name, rect, z):
-        body = self.doc.addObject("PartDesign::Body", name)
-        body.Label = name
-        pad(body, name + "Pad", sketch(body, name + "Sk", xyPlane(body), rect, z=z), 10)
-        self.doc.recompute()
-        return body
-
     def parts(self):
         self.enclosure()
         self.panel = self.part("Panel", (20, 0, 60, 30), 10)
         self.far = self.part("Far", (100, 0, 140, 40), 0)
-
-    def visible(self, cls, name):
-        QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
-        found = [w for w in Gui.getMainWindow().findChildren(cls, name) if w.isVisible()]
-        return found[0] if found else None
 
     def mergeItems(self):
         rows = self.visible(QtWidgets.QListWidget, "mergeList")
@@ -1018,11 +1029,6 @@ class TestSplitGui(ResultBoxGuiCase):
         self.assertAlmostEqual(body.Shape.Volume, 592, places=6)
         self.body, self.plane = body, plane
 
-    def visible(self, cls, name):
-        QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
-        found = [w for w in Gui.getMainWindow().findChildren(cls, name) if w.isVisible()]
-        return found[0] if found else None
-
     def newParts(self):
         return [o for o in self.doc.Objects if o.TypeId == "PartDesign::Body" and o != self.body]
 
@@ -1104,29 +1110,50 @@ class TestSplitGui(ResultBoxGuiCase):
         self.close(ok=True)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestOperationRowGui(ResultBoxGuiCase):
     """One Extrude, Onshape's (ops#640, ops#646; the blind findings F1, F11, F12 and the user's
     report 15): a Pad's or a Pocket's Result box offers New part, Add, Remove and Intersect at its
     creation and at every edit, and a change keeps the feature. Between adding and cutting the
     tool flips into the material or out of it. Designed geometry: the enclosure 40 x 40 x 10
-    (16000) with its lid sketch, 30 x 30 on its top face."""
+    (16000) with its lid sketch, 30 x 30 on its top face; in a studio, TestSiblingsGui's Below
+    (40 x 40 x 10 under the enclosure) and Far (100 away)."""
+
+    def openEdit(self, feature):
+        """Opens feature's edit as a double click does. self.undos is the undo count before it: with
+        the edit open, its pending transaction is listed first (Document::getAvailableUndoNames),
+        so a count taken then is one too high."""
+        self.assertFalse(self.doc.HasPendingTransaction)
+        self.undos = len(self.doc.UndoNames)
+        feature.ViewObject.doubleClicked()
+        self.waitForPanel()
 
     def editLid(self, length=10):
         lid = pad(self.body, "Lid", self.lidSk, length)
         self.doc.recompute()
-        lid.ViewObject.doubleClicked()
-        self.waitForPanel()
+        self.openEdit(lid)
         return lid
 
-    def assertOneUndoStep(self, before, volume):
-        self.assertEqual(len(self.doc.UndoNames), before + 1, self.doc.UndoNames)
+    def assertOneUndoStep(self, volume):
+        """The dialog closed: its work is one undo step (counted from self.undos), and undoing it
+        gives the enclosure `volume`."""
+        self.assertFalse(self.doc.HasPendingTransaction)
+        self.assertEqual(len(self.doc.UndoNames), self.undos + 1, self.doc.UndoNames)
         self.doc.undo()
         self.doc.recompute()
         self.assertAlmostEqual(self.body.Shape.Volume, volume, places=3)
+
+    def assertValid(self):
+        self.assertEqual(
+            [(o.Name, o.getStatusString()) for o in self.doc.Objects if not o.isValid()], []
+        )
+
+    def studio(self):
+        self.enclosure()
+        self.below = self.part("Below", (0, 0, 40, 40), -10)
+        self.far = self.part("Far", (100, 0, 140, 40), 0)
+
+    def previewColour(self, obj):
+        return tuple(round(c, 3) for c in obj.ViewObject.PreviewColor[:3])
 
     def testAnAddPadBecomesAHole(self):
         """F11: the lid pad, 10 up (25000), edited: on Add to Enclosure; Remove from Enclosure
@@ -1134,7 +1161,6 @@ class TestOperationRowGui(ResultBoxGuiCase):
         brings the boss back."""
         self.enclosure()
         lid = self.editLid()
-        undos = len(self.doc.UndoNames)
         self.assertEqual(self.items(self.combo()), ROWS)
         self.assertEqual(self.combo().currentText(), "Add to Enclosure")
         self.choose("Remove from Enclosure")
@@ -1145,24 +1171,24 @@ class TestOperationRowGui(ResultBoxGuiCase):
         self.assertIn(lid, self.body.Group)
         self.assertIs(self.body.Tip, lid)
         self.assertAlmostEqual(self.body.Shape.Volume, 7000, places=3)
-        self.assertOneUndoStep(undos, 25000)
+        self.assertOneUndoStep(25000)
         self.assertEqual(lid.Operation, "Union")
         self.assertFalse(lid.Reversed)
 
     def testAPocketBecomesABoss(self):
-        """A pocket of the lid sketch, 5 deep (11500), edited: Add to Enclosure puts the 30 x 30 x
-        5 plate on top instead (20500)."""
+        """A pocket of the lid sketch, 5 deep (11500), edited: Add to Enclosure flips it out of the
+        material and puts the 30 x 30 x 5 plate on top instead (20500)."""
         self.enclosure()
         pocket = self.body.newObject("PartDesign::Pocket", "Pocket")
         pocket.Profile = self.lidSk
         pocket.Length = 5
         self.doc.recompute()
         self.assertAlmostEqual(self.body.Shape.Volume, 11500, places=3)
-        pocket.ViewObject.doubleClicked()
-        self.waitForPanel()
+        self.openEdit(pocket)
         self.assertEqual(self.combo().currentText(), "Remove from Enclosure")
         self.choose("Add to Enclosure")
         self.assertEqual(pocket.Operation, "Union")
+        self.assertTrue(pocket.Reversed)
         self.close(ok=True)
         self.assertAlmostEqual(self.body.Shape.Volume, 20500, places=3)
         self.assertAlmostEqual(self.body.Shape.BoundBox.ZMax, 15, places=6)
@@ -1179,14 +1205,20 @@ class TestOperationRowGui(ResultBoxGuiCase):
 
     def testThePadsCommandOffersEveryRow(self):
         """At creation too: the Pad command's box has the four rows on Add to Enclosure, and
-        Remove from Enclosure, then OK, cuts (7000)."""
+        Remove from Enclosure flips the tool and, after OK, cuts (7000). One undo step removes
+        the pad (16000)."""
         self.enclosure()
+        before = sorted(o.Name for o in self.doc.Objects)
+        self.undos = len(self.doc.UndoNames)
         lid = self.lidPad()
         self.assertEqual(self.items(self.combo()), ROWS)
         self.choose("Remove from Enclosure")
+        self.assertTrue(lid.Reversed)
         self.close(ok=True)
         self.assertEqual(lid.Operation, "Subtraction")
         self.assertAlmostEqual(self.body.Shape.Volume, 7000, places=3)
+        self.assertOneUndoStep(16000)
+        self.assertEqual(sorted(o.Name for o in self.doc.Objects), before)
 
     def testANewPartGoesBackToAdd(self):
         """F12 and report 15: the lid pad made a new part and committed. Its edit is on New part,
@@ -1200,9 +1232,7 @@ class TestOperationRowGui(ResultBoxGuiCase):
         part = lid.getParentGeoFeatureGroup()
         self.assertNotEqual(part, self.body)
         partName = part.Name
-        lid.ViewObject.doubleClicked()
-        self.waitForPanel()
-        undos = len(self.doc.UndoNames)
+        self.openEdit(lid)
         combo = self.combo()
         self.assertEqual(self.items(combo), ROWS)
         self.assertEqual(combo.currentText(), "New part")
@@ -1214,23 +1244,20 @@ class TestOperationRowGui(ResultBoxGuiCase):
         self.assertEqual(self.body.Group, group + [lid])
         self.assertIs(self.body.Tip, lid)
         self.assertAlmostEqual(self.body.Shape.Volume, 25000, places=3)
-        self.assertEqual([o.Name for o in self.doc.Objects if not o.isValid()], [])
-        self.assertEqual(len(self.doc.UndoNames), undos + 1, self.doc.UndoNames)
-        self.doc.undo()
-        self.doc.recompute()
+        self.assertValid()
+        self.assertOneUndoStep(16000)
         self.assertIsNotNone(self.doc.getObject(partName))
         self.assertAlmostEqual(self.doc.getObject(partName).Shape.Volume, 9000, places=3)
-        self.assertAlmostEqual(self.body.Shape.Volume, 16000, places=3)
 
     def testCancelLeavesTheNewPart(self):
-        """The same move, then Cancel: the new part is as it was (9000), the enclosure 16000."""
+        """The same move, then Cancel: the new part is as it was (9000), the enclosure 16000, and
+        no undo step."""
         self.enclosure()
         lid = self.lidPad()
         self.choose("New part")
         self.close(ok=True)
         part = lid.getParentGeoFeatureGroup()
-        lid.ViewObject.doubleClicked()
-        self.waitForPanel()
+        self.openEdit(lid)
         self.choose("Add to Enclosure")
         self.close(ok=False)
         self.doc.recompute()
@@ -1238,26 +1265,335 @@ class TestOperationRowGui(ResultBoxGuiCase):
         self.assertIs(lid.getParentGeoFeatureGroup(), part)
         self.assertAlmostEqual(part.Shape.Volume, 9000, places=3)
         self.assertAlmostEqual(self.body.Shape.Volume, 16000, places=3)
+        self.assertEqual(len(self.doc.UndoNames), self.undos, self.doc.UndoNames)
 
     def testANewPartBecomesAHole(self):
         """The lid as a new part, edited: Remove from Enclosure moves it into the enclosure as a
-        cut through it (7000), and the new Body goes."""
+        cut through it (7000), the tool flipped, and the new Body goes."""
         self.enclosure()
         lid = self.lidPad()
         self.choose("New part")
         self.close(ok=True)
-        lid.ViewObject.doubleClicked()
-        self.waitForPanel()
+        self.openEdit(lid)
         self.choose("Remove from Enclosure")
         self.close(ok=True)
         self.assertEqual(self.bodies(), ["Enclosure"])
         self.assertEqual(lid.Operation, "Subtraction")
+        self.assertTrue(lid.Reversed)
         self.assertAlmostEqual(self.body.Shape.Volume, 7000, places=3)
 
-    def visible(self, cls, name):
-        QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
-        found = [w for w in Gui.getMainWindow().findChildren(cls, name) if w.isVisible()]
-        return found[0] if found else None
+    def testCancelAfterASwitchRestoresTheBoss(self):
+        """The dialog's transaction holds the switch too (extrude-design.md): the lid pad (25000)
+        edited, Remove from Enclosure (Operation, Reversed and a restart of the edit), then
+        Cancel: Union, not reversed, 25000 again, and no undo step."""
+        self.enclosure()
+        lid = self.editLid()
+        self.choose("Remove from Enclosure")
+        self.assertEqual(lid.Operation, "Subtraction")
+        self.assertTrue(lid.Reversed)
+        self.close(ok=False)
+        self.doc.recompute()
+        self.assertEqual(lid.Operation, "Union")
+        self.assertFalse(lid.Reversed)
+        self.assertIs(self.body.Tip, lid)
+        self.assertAlmostEqual(self.body.Shape.Volume, 25000, places=3)
+        self.assertValid()
+        self.assertFalse(self.doc.HasPendingTransaction)
+        self.assertEqual(len(self.doc.UndoNames), self.undos, self.doc.UndoNames)
+
+    def testASecondSwitchMakesItANewPart(self):
+        """Two switches in one dialog: the lid pad edited, Remove from Enclosure (reversed), then
+        New part: adding again, so the tool flips back, and the pad and its sketch go to a new
+        Body, the dialog on it. OK: the lid alone (9000), the enclosure 16000; one undo step
+        takes it all back (25000, one part)."""
+        self.enclosure()
+        lid = self.editLid()
+        self.choose("Remove from Enclosure")
+        self.assertTrue(lid.Reversed)
+        self.choose("New part")
+        self.assertEqual(lid.Operation, "Union")
+        self.assertFalse(lid.Reversed)
+        part = lid.getParentGeoFeatureGroup()
+        self.assertNotEqual(part, self.body)
+        self.assertEqual(part.Group, [self.lidSk, lid])
+        self.assertIs(Gui.getDocument(self.doc.Name).getInEdit().Object, lid)
+        self.assertEqual(self.combo().currentText(), "New part")
+        self.close(ok=True)
+        partName = part.Name
+        self.assertAlmostEqual(part.Shape.Volume, 9000, places=3)
+        self.assertIs(self.body.Tip, self.base)
+        self.assertAlmostEqual(self.body.Shape.Volume, 16000, places=3)
+        self.assertValid()
+        self.assertOneUndoStep(25000)
+        self.assertIsNone(self.doc.getObject(partName))
+        self.assertEqual(self.bodies(), ["Enclosure"])
+        self.assertEqual(lid.Operation, "Union")
+
+    def testNewPartThenRemoveInTheSameDialog(self):
+        """The creation dialog: New part, then Remove from Enclosure takes this dialog's move back
+        and cuts: the pad and its sketch are in the enclosure again, the tool flipped. OK: 7000;
+        one undo step removes the pad (16000)."""
+        self.enclosure()
+        before = sorted(o.Name for o in self.doc.Objects)
+        self.undos = len(self.doc.UndoNames)
+        lid = self.lidPad()
+        self.choose("New part")
+        self.assertEqual(len(self.bodies()), 2)
+        self.choose("Remove from Enclosure")
+        self.assertEqual(self.bodies(), ["Enclosure"])
+        self.assertIn(lid, self.body.Group)
+        self.assertIn(self.lidSk, self.body.Group)
+        self.assertEqual(lid.Operation, "Subtraction")
+        self.assertTrue(lid.Reversed)
+        self.close(ok=True)
+        self.assertAlmostEqual(self.body.Shape.Volume, 7000, places=3)
+        self.assertValid()
+        self.assertOneUndoStep(16000)
+        self.assertEqual(sorted(o.Name for o in self.doc.Objects), before)
+
+    def testToLastFlipsToo(self):
+        """D2 of the review (gui-1): every end bound to the direction flips, a Pad's To last too.
+        A pad of a 30 x 30 square sketched 5 up inside the enclosure, To last: up to the top face,
+        adding nothing (16000). Remove from Enclosure flips it: it cuts down to the bottom face,
+        the lower 5 (11500), and the material above the sketch stays. Unflipped it cut the upper
+        5."""
+        self.enclosure()
+        midSk = sketch(self.body, "MidSk", xyPlane(self.body), (0, 0, 30, 30), z=5)
+        lid = pad(self.body, "Lid", midSk, 10)
+        lid.Type = "UpToLast"
+        self.doc.recompute()
+        self.assertTrue(lid.isValid(), lid.getStatusString())
+        self.assertAlmostEqual(self.body.Shape.Volume, 16000, places=3)
+        self.openEdit(lid)
+        self.choose("Remove from Enclosure")
+        self.assertEqual(lid.Operation, "Subtraction")
+        self.assertEqual(lid.Type, "UpToLast")
+        self.assertTrue(lid.Reversed)
+        self.close(ok=True)
+        self.assertTrue(lid.isValid(), lid.getStatusString())
+        self.assertAlmostEqual(self.body.Shape.Volume, 11500, places=3)
+        self.assertTrue(self.body.Shape.isInside(V(15, 15, 7.5), 1e-6, True))
+        self.assertFalse(self.body.Shape.isInside(V(15, 15, 2.5), 1e-6, True))
+
+    def testThePreviewColourFollowsTheOperation(self):
+        """D5 of the review (gui-3): the preview takes the colour of what the feature does now. The
+        lid pad previews in the adding colour (a Pad's); Remove from Enclosure: in the cutting
+        colour (a Pocket's); Add to Enclosure: the adding colour again. It was set once, from the
+        class, when the view provider attached."""
+        self.enclosure()
+        reference = self.doc.addObject("PartDesign::Pocket", "ReferencePocket")
+        cutting = self.previewColour(reference)
+        self.doc.removeObject(reference.Name)
+        lid = self.editLid()
+        adding = self.previewColour(lid)
+        self.assertNotEqual(adding, cutting)
+        self.choose("Remove from Enclosure")
+        self.assertEqual(self.previewColour(lid), cutting)
+        self.choose("Add to Enclosure")
+        self.assertEqual(self.previewColour(lid), adding)
+        self.close(ok=True)
+        self.assertAlmostEqual(self.body.Shape.Volume, 25000, places=3)
+
+    def testLeavingACutDropsItsSiblings(self):
+        """In a studio: a pocket of the lid sketch, 20 deep, removes from the enclosure and, by a
+        sibling, from Below (7000 each). Edited, Add to Enclosure: the sibling goes and Below is
+        whole (16000), the box shows Merge with instead of the parts list, and the tool, flipped,
+        puts a 30 x 30 x 20 block on top (16000 + 18000). One undo step brings the cut and its
+        sibling back."""
+        self.studio()
+        pocket = self.body.newObject("PartDesign::Pocket", "Pocket")
+        pocket.Profile = self.lidSk
+        pocket.Length = 20
+        self.doc.recompute()
+        [sibling] = PartDesign.makeSiblings(pocket, [self.below])
+        self.doc.recompute()
+        siblingName = sibling.Name
+        self.assertAlmostEqual(self.body.Shape.Volume, 7000, places=3)
+        self.assertAlmostEqual(self.below.Shape.Volume, 7000, places=3)
+        self.openEdit(pocket)
+        self.assertIsNotNone(self.partsList(), "no parts list")
+        self.choose("Add to Enclosure")
+        self.assertEqual(pocket.Operation, "Union")
+        self.assertTrue(pocket.Reversed)
+        self.assertEqual(PartDesign.siblingsOf(pocket), [])
+        self.assertIsNone(self.doc.getObject(siblingName))
+        self.assertIsNone(self.partsList())
+        self.assertIsNotNone(self.visible(QtWidgets.QListWidget, "mergeList"), "no Merge with")
+        self.close(ok=True)
+        self.assertAlmostEqual(self.below.Shape.Volume, 16000, places=3)
+        self.assertAlmostEqual(self.body.Shape.Volume, 34000, places=3)
+        self.assertValid()
+        self.assertOneUndoStep(7000)
+        self.assertIsNotNone(self.doc.getObject(siblingName))
+        self.assertAlmostEqual(self.below.Shape.Volume, 7000, places=3)
+
+    def testRemoveInAStudioListsTheParts(self):
+        """In a studio: the lid pad's edit shows Merge with; Remove from Enclosure rebuilds the box
+        with the parts list, the enclosure ticked and fixed, Below and Far unticked. OK: the
+        enclosure is cut (7000), Below untouched (16000), no sibling made."""
+        self.studio()
+        lid = self.editLid()
+        self.assertIsNotNone(self.visible(QtWidgets.QListWidget, "mergeList"), "no Merge with")
+        self.assertIsNone(self.partsList())
+        self.choose("Remove from Enclosure")
+        self.assertIsNone(self.visible(QtWidgets.QListWidget, "mergeList"))
+        items = self.partItems()
+        self.assertEqual(items[0], ("Enclosure", True, False))
+        names = [text.split(" (")[0] for text, _, _ in items]
+        self.assertEqual(names, ["Enclosure", "Below", "Far"])
+        self.assertEqual([ticked for _, ticked, _ in items], [True, False, False])
+        self.close(ok=True)
+        self.assertAlmostEqual(self.body.Shape.Volume, 7000, places=3)
+        self.assertAlmostEqual(self.below.Shape.Volume, 16000, places=3)
+        self.assertEqual(PartDesign.siblingsOf(lid), [])
+
+
+class TestOperationRefusalGui(ResultBoxGuiCase):
+    """The rows the Result box refuses (ops#640, review finding tests-4): each greyed, with its
+    reason as the tooltip. Onshape greys none (it does the moves FreeCAD-CH refuses), so the
+    refusal and its reason are what the user sees; a refused row that came back enabled would make
+    the switch throw inside the edit's restart, a silent no-op. Designed geometry: the enclosure
+    (16000) with its lid sketch; Panel (40 x 30 x 10 from (20, 0, 10), overlapping the lid pad)
+    and Below (under the enclosure)."""
+
+    def newLid(self):
+        """The lid pad, 10 up, made a part of its own from Python: (the pad, its part)."""
+        lid = pad(self.body, "Lid", self.lidSk, 10)
+        self.doc.recompute()
+        part = PartDesign.newPartFrom(lid)
+        self.doc.recompute()
+        self.assertAlmostEqual(part.Shape.Volume, 9000, places=3)
+        return lid, part
+
+    def openEdit(self, feature):
+        feature.ViewObject.doubleClicked()
+        self.waitForPanel()
+        combo = self.combo()
+        self.assertIsNotNone(combo, "no Result box")
+        self.assertEqual(self.items(combo), ROWS)
+        return combo
+
+    def rows(self, combo):
+        """(enabled, tooltip) of each row"""
+        model = combo.model()
+        return [
+            (
+                bool(model.flags(model.index(i, 0)) & QtCore.Qt.ItemIsEnabled),
+                combo.itemData(i, QtCore.Qt.ToolTipRole) or "",
+            )
+            for i in range(combo.count())
+        ]
+
+    def assertAddRowsRefused(self, lid, why):
+        """The new part's edit, on New part: Add, Remove and Intersect greyed, each with a tooltip
+        that holds `why`, compared in lower case: the box shows PartDesign.addToPart's own reason
+        (Body::addToPartRefusal, its first letter raised), so the two can't drift."""
+        combo = self.openEdit(lid)
+        self.assertEqual(combo.currentText(), "New part")
+        rows = self.rows(combo)
+        for enabled, tip in rows[1:]:
+            self.assertFalse(enabled, rows)
+            self.assertTrue(tip, rows)
+            self.assertIn(why, tip.lower(), rows)
+        self.close(ok=False)
+
+    def testANewPartThatSomethingUses(self):
+        """A sketch on the new part's top uses the lid pad: it can't go into the enclosure."""
+        self.enclosure()
+        lid, part = self.newLid()
+        topSk = part.newObject("Sketcher::SketchObject", "TopSk")
+        topSk.AttachmentSupport = [(lid, faceAt(lid, 20))]
+        topSk.MapMode = "FlatFace"
+        rect(topSk, 0, 0, 10, 10)
+        self.doc.recompute()
+        self.assertAddRowsRefused(lid, "'topsk' uses 'lid'")
+
+    def testANewPartWithMoreFeatures(self):
+        """A second sketch in the new part, on its own plane: the part holds more than the pad
+        and its sketch, so it is merged, not taken apart."""
+        self.enclosure()
+        lid, part = self.newLid()
+        sketch(part, "LooseSk", xyPlane(part), (0, 0, 5, 5))
+        self.doc.recompute()
+        self.assertAddRowsRefused(lid, "merge it instead")
+
+    def testARolledBackTarget(self):
+        """The enclosure rolled back to its base (a corner cut after it): the lid can't go in
+        until the enclosure is rolled to its end."""
+        self.enclosure()
+        lid, part = self.newLid()
+        cornerSk = sketch(self.body, "CornerSk", xyPlane(self.body), (35, 35, 40, 40))
+        corner = self.body.newObject("PartDesign::Pocket", "Corner")
+        corner.Profile = cornerSk
+        corner.Type = "ThroughAll"
+        corner.Reversed = True
+        self.doc.recompute()
+        self.body.Tip = self.base
+        self.doc.recompute()
+        self.assertAddRowsRefused(lid, "roll 'enclosure' to the end first")
+
+    def testANewPartABooleanUses(self):
+        """D6 of the review: a Boolean in the enclosure fuses the lid's part (its tool is that
+        Body). Add would delete the Body under the Boolean, which would then go red: refused,
+        with a reason."""
+        self.enclosure()
+        lid, part = self.newLid()
+        fuse = self.doc.addObject("PartDesign::Boolean", "Fuse")
+        self.body.addObject(fuse)
+        fuse.setObjects([part])
+        self.doc.recompute()
+        self.assertTrue(fuse.isValid(), fuse.getStatusString())
+        self.assertAddRowsRefused(lid, "which add to part would remove")
+
+    def testAMergeAfterTheFeature(self):
+        """The lid pad merged with Panel (the Merge right after it): Remove and Intersect are
+        refused until the Merge goes; New part too (the pad isn't the tip any more)."""
+        self.enclosure()
+        lid = pad(self.body, "Lid", self.lidSk, 10)
+        self.doc.recompute()
+        panel = self.part("Panel", (20, 0, 60, 30), 10)
+        merge = PartDesign.makeMerge(lid, [panel])
+        self.doc.recompute()
+        self.assertTrue(merge.isValid(), merge.getStatusString())
+        combo = self.openEdit(lid)
+        self.assertEqual(combo.currentText(), "Add to Enclosure")
+        rows = self.rows(combo)
+        self.assertFalse(rows[0][0], rows)
+        self.assertIn("tip that nothing uses", rows[0][1])
+        self.assertTrue(rows[1][0], rows)
+        for enabled, tip in rows[2:]:
+            self.assertFalse(enabled, rows)
+            self.assertEqual(tip, "Merged with Panel: delete the Merge first")
+
+    def testACutWithSiblings(self):
+        """A pocket of the lid sketch, 20 deep, with a sibling in Below: New part is refused (it
+        cuts other parts too), Add is offered. A sketch on the sibling's cut face uses it: Add is
+        refused too, naming the user."""
+        self.enclosure()
+        below = self.part("Below", (0, 0, 40, 40), -10)
+        pocket = self.body.newObject("PartDesign::Pocket", "Pocket")
+        pocket.Profile = self.lidSk
+        pocket.Length = 20
+        self.doc.recompute()
+        [sibling] = PartDesign.makeSiblings(pocket, [below])
+        self.doc.recompute()
+        combo = self.openEdit(pocket)
+        self.assertEqual(combo.currentText(), "Remove from Enclosure")
+        rows = self.rows(combo)
+        self.assertFalse(rows[0][0], rows)
+        self.assertEqual(rows[0][1], "Cuts other parts too: untick them first")
+        self.assertTrue(rows[1][0], rows)
+        self.close(ok=False)
+        userSk = below.newObject("Sketcher::SketchObject", "UserSk")
+        userSk.AttachmentSupport = [(sibling, faceAt(sibling, 0))]
+        userSk.MapMode = "FlatFace"
+        rect(userSk, 32, 32, 38, 38)
+        self.doc.recompute()
+        self.assertTrue(userSk.isValid(), userSk.getStatusString())
+        combo = self.openEdit(pocket)
+        rows = self.rows(combo)
+        self.assertFalse(rows[1][0], rows)
+        self.assertIn("is used by UserSk", rows[1][1])
 
 
 class TestOkInErrorGui(ResultBoxGuiCase):
@@ -1267,33 +1603,25 @@ class TestOkInErrorGui(ResultBoxGuiCase):
 
     def testOkCommitsAPadInError(self):
         """The Pad command on the lid sketch, its length set to 0 (no pad of length zero): OK
-        closes the dialog, the pad stays, in error, and the enclosure keeps its 16000 (the failed
-        pad passes its base through). One undo step removes it; editing it again and setting 10
-        repairs it (25000)."""
+        closes the dialog with no message box, the pad stays, in error, saying why, and the
+        enclosure keeps its 16000 (the failed pad passes its base through). One undo step removes
+        it; editing it again and setting 10 repairs it (25000)."""
         self.enclosure()
         undos = len(self.doc.UndoNames)
         lid = self.lidPad()
-        field = [
-            w
-            for w in Gui.getMainWindow().findChildren(QtWidgets.QWidget, "lengthEdit")
-            if w.isVisible()
-        ][0]
-        field.setProperty("rawValue", 0.0)
+        self.lengthField().setProperty("rawValue", 0.0)
         pump(0.3)
         self.assertFalse(lid.isValid())
-        self.close(ok=True)
+        self.assertEqual(self.modalsDuring(lambda: self.close(ok=True)), [])
         self.assertIn(lid, self.body.Group)
         self.assertFalse(lid.isValid())
+        self.assertIn("length of zero", lid.getStatusString())
+        self.assertAlmostEqual(lid.Shape.Volume, 16000, places=3)
         self.assertAlmostEqual(self.body.Shape.Volume, 16000, places=3)
         self.assertEqual(len(self.doc.UndoNames), undos + 1, self.doc.UndoNames)
         lid.ViewObject.doubleClicked()
         self.waitForPanel()
-        field = [
-            w
-            for w in Gui.getMainWindow().findChildren(QtWidgets.QWidget, "lengthEdit")
-            if w.isVisible()
-        ][0]
-        field.setProperty("rawValue", 10.0)
+        self.lengthField().setProperty("rawValue", 10.0)
         pump(0.3)
         self.close(ok=True)
         self.assertTrue(lid.isValid(), lid.getStatusString())
@@ -1315,6 +1643,9 @@ class TestRevolveAxisGui(ResultBoxGuiCase):
         return found[0] if found else None
 
     def assertWaitsForTheAxis(self, feature):
+        """No axis, the row armed, the feature saying what it needs, and OK disabled with the
+        same words as its tooltip (D4 of the review: Onshape greys its check mark while a
+        required selection is missing; OK commits in error only a complete feature, F7)."""
         self.assertIsNone(feature.ReferenceAxis)
         self.assertTrue(
             waitFor(lambda: self.axisField() is not None and self.axisField().property("armed")),
@@ -1322,6 +1653,9 @@ class TestRevolveAxisGui(ResultBoxGuiCase):
         )
         self.assertFalse(feature.isValid())
         self.assertIn("pick a line or an edge", feature.getStatusString())
+        ok = QtWidgets.QDialogButtonBox.Ok
+        self.assertTrue(waitFor(lambda: not taskButton(ok).isEnabled()), "OK is enabled")
+        self.assertIn("pick a line or an edge", taskButton(ok).toolTip().lower())
 
     def testRevolutionWaitsForItsAxis(self):
         """The Revolution command on the lid sketch: no axis, the row armed, and the feature says
@@ -1331,12 +1665,60 @@ class TestRevolveAxisGui(ResultBoxGuiCase):
         self.assertWaitsForTheAxis(revolution)
         self.chooseAxis("Vertical sketch axis")
         self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        self.assertTrue(
+            waitFor(lambda: taskButton(QtWidgets.QDialogButtonBox.Ok).isEnabled()),
+            "OK stays disabled with the axis picked",
+        )
         self.close(ok=True)
         self.assertEqual(revolution.ReferenceAxis, (self.lidSk, ["V_Axis"]))
         self.assertTrue(revolution.isValid(), revolution.getStatusString())
 
     def testGrooveWaitsForItsAxis(self):
+        """The Groove command, the same (a second part makes the subtractive box show, as in
+        TestResultBoxGui). Then the pick and OK (tests-8 of the review): the sketch's V axis
+        chosen, OK enabled, and the full turn cuts the enclosure. The axis is the line x 0, z 10
+        along Y, so the square sweeps a cylinder of radius 30 over y 0..30; inside the 40 x 40 x
+        10 base it removes 30 times the area of x >= 0, z 0..10, x^2 + (z - 10)^2 <= 900, that
+        is 30 (5 sqrt(800) + 450 asin(1/3)), about 8830."""
         self.enclosure()
         self.otherPart()
         groove = self.featurePanel("PartDesign_Groove")
         self.assertWaitsForTheAxis(groove)
+        self.chooseAxis("Vertical sketch axis")
+        self.assertTrue(groove.isValid(), groove.getStatusString())
+        self.assertTrue(
+            waitFor(lambda: taskButton(QtWidgets.QDialogButtonBox.Ok).isEnabled()),
+            "OK stays disabled with the axis picked",
+        )
+        self.close(ok=True)
+        self.assertEqual(groove.ReferenceAxis, (self.lidSk, ["V_Axis"]))
+        self.assertTrue(groove.isValid(), groove.getStatusString())
+        removed = 30 * (5 * math.sqrt(800) + 450 * math.asin(1 / 3))
+        self.assertAlmostEqual(self.body.Shape.Volume, 16000 - removed, places=1)
+
+    def testARevolutionWithItsAxisIsNotWaiting(self):
+        """The axis row is required now, but only an empty one waits: a Revolution of the lid
+        sketch, a quarter turn about its V axis, made from Python, opens with the axis row not
+        armed, and OK keeps the axis. Onshape's Revolve dialog on a finished revolve waits for
+        nothing."""
+        self.enclosure()
+        revolution = self.body.newObject("PartDesign::Revolution", "Revolution")
+        revolution.Profile = self.lidSk
+        revolution.ReferenceAxis = (self.lidSk, ["V_Axis"])
+        revolution.Angle = 90
+        self.doc.recompute()
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        revolution.ViewObject.doubleClicked()
+        self.waitForPanel()
+        field = self.axisField()
+        self.assertIsNotNone(field, "no axis row")
+        self.assertFalse(field.property("armed"))
+        pump(0.1)
+        self.assertTrue(taskButton(QtWidgets.QDialogButtonBox.Ok).isEnabled(), "OK is disabled")
+        self.close(ok=True)
+        self.assertEqual(revolution.ReferenceAxis, (self.lidSk, ["V_Axis"]))
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+
+
+if __name__ == "__main__":
+    unittest.main()

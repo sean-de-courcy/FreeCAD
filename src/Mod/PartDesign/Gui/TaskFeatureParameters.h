@@ -28,6 +28,8 @@
 #include <functional>
 #include <memory>
 #include <type_traits>
+#include <QPointer>
+#include <fastsignals/connection.h>
 #include <App/DocumentObserver.h>
 #include <Gui/TaskView/TaskDialog.h>
 #include <Gui/TaskView/TaskView.h>
@@ -36,7 +38,9 @@
 #include "ViewProvider.h"
 
 class QComboBox;
+class QDialogButtonBox;
 class QLabel;
+class QPushButton;
 class QListWidget;
 class QTimer;
 
@@ -255,6 +259,8 @@ public:
     bool reject() override;
     /// The panels are in place: their reference fields join the group (ops#150).
     void open() override;
+    /// Keeps the box's OK, disabled while a required selection is missing (missingRequired).
+    void modifyStandardButtons(QDialogButtonBox* box) override;
 
     template<typename T = PartDesignGui::ViewProvider>
     T* getViewObject() const
@@ -286,6 +292,15 @@ protected:
     /// The Result box (ops#325), when the feature has one: the dialogs of additive and
     /// subtractive features add it before the preview box
     void addResultBox();
+    /// What a required selection still lacks, or empty: OK stays disabled until it is made, as
+    /// Onshape's check is greyed while a required field is empty (a Revolve's axis, ops#643).
+    /// A geometric failure of a complete feature isn't one: OK commits it in error (F7).
+    virtual QString missingRequired() const
+    {
+        return {};
+    }
+    /// OK enabled or not, as missingRequired() says; called when the feature changes.
+    void updateOkButton();
 
     PartDesignGui::TaskPreviewParameters* preview;
     /// The feature's guessed, partly resolved or broken references, at the top; null if none
@@ -299,6 +314,10 @@ private:
     void forEachParameters(const std::function<void(TaskFeatureParameters*)>& fn);
 
     PartDesignGui::ViewProvider* vp;
+    /// The box's OK, and its tooltip when nothing is missing
+    QPointer<QPushButton> okButton;
+    QString okToolTip;
+    fastsignals::scoped_connection requiredConnection;
 };
 
 }  // namespace PartDesignGui

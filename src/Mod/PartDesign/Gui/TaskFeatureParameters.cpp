@@ -673,7 +673,9 @@ PartDesign::Body* operationTarget(PartDesign::FeatureAddSub* feature)
     return nullptr;
 }
 
-// Why a new part's feature can't go to target (PartDesign.addToPart's rule), or empty
+// Why a new part's feature can't go to target, or empty: PartDesign.addToPart's own rule
+// (Body::addToPartRefusal, ops#640), after the dialog's: a move this dialog made is taken back,
+// and the move needs the dialog's transaction, which Cancel aborts
 QString addToPartRefusal(PartDesign::FeatureAddSub* feature, PartDesign::Body* target)
 {
     if (TaskResultParameters::movedFrom(feature)) {
@@ -685,32 +687,11 @@ QString addToPartRefusal(PartDesign::FeatureAddSub* feature, PartDesign::Body* t
     if (!hasOpenTransaction(feature->getDocument())) {
         return QObject::tr("Needs a dialog that Cancel can undo");
     }
-    if (target->isRolledBack()) {
-        return QObject::tr("Roll %1 to the end first").arg(partLabel(target));
+    QString why = QString::fromStdString(PartDesign::Body::addToPartRefusal(feature, target));
+    if (!why.isEmpty()) {
+        why[0] = why[0].toUpper();
     }
-    PartDesign::Body* body = PartDesign::Body::findBodyOf(feature);
-    bool used = std::ranges::any_of(feature->getInList(), [body](App::DocumentObject* user) {
-        return user != body;
-    });
-    if (used) {
-        return QObject::tr("Something else uses this feature");
-    }
-    auto profileBased = freecad_cast<PartDesign::ProfileBased*>(feature);
-    App::DocumentObject* sketch = profileBased ? profileBased->Profile.getValue() : nullptr;
-    // the sketch goes along when only the feature uses it
-    auto alongOnly = [&](App::DocumentObject* member) {
-        return member == sketch
-            && std::ranges::all_of(member->getInList(), [&](App::DocumentObject* user) {
-                   return user == body || user == feature;
-               });
-    };
-    bool more = std::ranges::any_of(body->Group.getValues(), [&](App::DocumentObject* member) {
-        return member != feature && !alongOnly(member);
-    });
-    if (more) {
-        return QObject::tr("%1 has more features: merge it instead").arg(partLabel(body));
-    }
-    return {};
+    return why;
 }
 
 // The Merge right after the feature (makeMerge's place), or null
@@ -724,8 +705,9 @@ PartDesign::Boolean* mergeAfter(PartDesign::FeatureAddSub* feature)
 
 // Puts the feature on the row `key`, inside a restart of the edit, so the box shows the parts
 // list or the merge list that goes with it. Leaving a cut drops its siblings; a new part's
-// feature goes to its target first; the tool flips between adding and cutting when its length,
-// not a face, ends it (Onshape flips the arrow for Remove: the tool goes into the material)
+// feature goes to its target first; the tool flips between adding and cutting when its
+// direction, not a face, ends it (Onshape flips the arrow for Remove: the tool goes into the
+// material)
 void switchOperation(const App::DocumentObjectT& featureT, const QString& key)
 {
     restartEdit(featureT, [&featureT, &key]() {
@@ -755,8 +737,12 @@ void switchOperation(const App::DocumentObjectT& featureT, const QString& key)
         if (operation != feature->Operation.getValueAsString()) {
             run(obj + ".Operation = '" + operation + "'");
         }
+        // every end bound to the direction flips (Onshape: Blind, Through all, Up to next); a face
+        // or a shape fixes the side itself. Intersect flips as Remove does
         const std::string type = feature->Type.getValueAsString();
-        if (isSubtractive(was) != isSubtractive(key) && (type == "Length" || type == "ThroughAll")) {
+        const bool directionBound = type == "Length" || type == "ThroughAll" || type == "UpToLast"
+            || type == "UpToFirst";
+        if (isSubtractive(was) != isSubtractive(key) && directionBound) {
             run(obj + ".Reversed = " + (feature->Reversed.getValue() ? "False" : "True"));
         }
         if (key == QStringLiteral("new") && was != QStringLiteral("new")) {
@@ -1267,6 +1253,46 @@ void TaskDlgFeatureParameters::open()
     }
 }
 
+void TaskDlgFeatureParameters::modifyStandardButtons(QDialogButtonBox* box)
+{
+    okButton = box->button(QDialogButtonBox::Ok);
+    App::DocumentObject* feature = getObject();
+    if (!okButton || !feature || !feature->getDocument()) {
+        return;
+    }
+    // A pick or a choice writes the feature: OK follows, after the change is done
+    App::DocumentObjectT featureT(feature);
+    requiredConnection = feature->getDocument()->signalChangedObject.connect(
+        [this, featureT](const App::DocumentObject& obj, const App::Property&) {
+            if (&obj == featureT.getObject()) {
+                QTimer::singleShot(0, this, [this]() { updateOkButton(); });
+            }
+        }
+    );
+    // Once the box is decorated: TaskEditControl::decorateButtons sets its tooltip after this call
+    QTimer::singleShot(0, this, [this]() { updateOkButton(); });
+}
+
+void TaskDlgFeatureParameters::updateOkButton()
+{
+    if (!okButton || !getObject()) {
+        return;
+    }
+    const QString missing = missingRequired();
+    if (missing.isEmpty()) {
+        if (!okButton->isEnabled()) {
+            okButton->setEnabled(true);
+            okButton->setToolTip(okToolTip);
+        }
+        return;
+    }
+    if (okButton->isEnabled()) {
+        okToolTip = okButton->toolTip();
+        okButton->setEnabled(false);
+    }
+    okButton->setToolTip(missing);
+}
+
 std::vector<ReferenceField*> TaskDlgFeatureParameters::panelFields()
 {
     std::vector<ReferenceField*> fields;
@@ -1308,6 +1334,16 @@ void TaskDlgFeatureParameters::forEachParameters(const std::function<void(TaskFe
 bool TaskDlgFeatureParameters::accept()
 {
     App::DocumentObject* feature = getObject();
+    // A required selection still missing: the dialog stays, as its disabled OK says (a call
+    // from Python or a shortcut that doesn't look at the button, ops#643)
+    if (const QString missing = missingRequired(); !missing.isEmpty()) {
+        Base::Console().warning(
+            "%s: %s\n",
+            feature->Label.getValue(),
+            missing.toUtf8().constData()
+        );
+        return false;
+    }
     bool isUpdateBlocked = false;
     fieldGroup->disarm();
     if (references) {

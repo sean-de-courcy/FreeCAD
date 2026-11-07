@@ -886,6 +886,30 @@ TaskDlgRevolutionParameters::TaskDlgRevolutionParameters(ViewProviderRevolution*
     Content.push_back(preview);
 }
 
+namespace
+{
+QString missingAxis(const App::DocumentObject* feature)
+{
+    auto axis = feature
+        ? dynamic_cast<const App::PropertyLinkSub*>(feature->getPropertyByName("ReferenceAxis"))
+        : nullptr;
+    if (!axis || axis->getValue()) {
+        return {};
+    }
+    return QObject::tr("Pick a line or an edge to revolve about");
+}
+}  // namespace
+
+QString TaskDlgRevolutionParameters::missingRequired() const
+{
+    return missingAxis(getObject());
+}
+
+QString TaskDlgGrooveParameters::missingRequired() const
+{
+    return missingAxis(getObject());
+}
+
 TaskDlgGrooveParameters::TaskDlgGrooveParameters(ViewProviderGroove* GrooveView)
     : TaskDlgSketchBasedParameters(GrooveView)
 {

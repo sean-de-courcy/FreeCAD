@@ -34,6 +34,7 @@
 #include <TopoDS_Face.hxx>
 
 
+#include <App/Document.h>
 #include <App/DocumentObserver.h>
 #include <App/Expression.h>
 #include <App/ObjectIdentifier.h>
@@ -1491,6 +1492,33 @@ void finishProfileBased(const Gui::Command* cmd, const Part::Feature* sketch, Ap
     finishFeature(cmd, Feat);
 }
 
+// The creation recompute of a Revolution or Groove still waiting for its axis: its "No axis"
+// isn't printed as an error while the dialog opens asking for the pick, as Onshape's Revolve
+// waits without one (FreeCAD-CH ops#643, review MISS); the feature keeps its error and message
+// (the tree's mark and the dialog's banner say what it needs)
+static void finishWaitingForAxis(
+    const Gui::Command* cmd,
+    const Part::Feature* sketch,
+    App::DocumentObject* feature
+)
+{
+    auto axis = dynamic_cast<App::PropertyLinkSub*>(feature->getPropertyByName("ReferenceAxis"));
+    App::Document* doc = feature->getDocument();
+    if (!axis || axis->getValue() || doc->testStatus(App::Document::IgnoreErrorOnRecompute)) {
+        finishProfileBased(cmd, sketch, feature);
+        return;
+    }
+    doc->setStatus(App::Document::IgnoreErrorOnRecompute, true);
+    try {
+        finishProfileBased(cmd, sketch, feature);
+    }
+    catch (...) {
+        doc->setStatus(App::Document::IgnoreErrorOnRecompute, false);
+        throw;
+    }
+    doc->setStatus(App::Document::IgnoreErrorOnRecompute, false);
+}
+
 void prepareProfileBased(Gui::Command* cmd, const std::string& which, double length)
 {
     PartDesign::Body* pcActiveBody = PartDesignGui::getBody(true);
@@ -1671,7 +1699,7 @@ void CmdPartDesignRevolution::activated(int iMsg)
         // (TaskRevolutionParameters::writeAxis)
         FCMD_OBJ_CMD(Feat, "Angle = 360.0");
 
-        finishProfileBased(cmd, sketch, Feat);
+        finishWaitingForAxis(cmd, sketch, Feat);
     };
 
     prepareProfileBased(pcActiveBody, this, "Revolution", worker);
@@ -1720,7 +1748,7 @@ void CmdPartDesignGroove::activated(int iMsg)
         // No axis yet, as for a Revolution (FreeCAD-CH ops#643)
         FCMD_OBJ_CMD(Feat, "Angle = 360.0");
 
-        finishProfileBased(cmd, sketch, Feat);
+        finishWaitingForAxis(cmd, sketch, Feat);
     };
 
     prepareProfileBased(pcActiveBody, this, "Groove", worker);

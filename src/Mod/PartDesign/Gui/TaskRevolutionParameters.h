@@ -211,6 +211,10 @@ class TaskDlgRevolutionParameters: public TaskDlgSketchBasedParameters
 
 public:
     explicit TaskDlgRevolutionParameters(PartDesignGui::ViewProviderRevolution* RevolutionView);
+
+protected:
+    /// No axis yet: OK waits for its pick (ops#643)
+    QString missingRequired() const override;
 };
 
 class TaskDlgGrooveParameters: public TaskDlgSketchBasedParameters
@@ -219,6 +223,10 @@ class TaskDlgGrooveParameters: public TaskDlgSketchBasedParameters
 
 public:
     explicit TaskDlgGrooveParameters(PartDesignGui::ViewProviderGroove* GrooveView);
+
+protected:
+    /// No axis yet: OK waits for its pick (ops#643)
+    QString missingRequired() const override;
 };
 
 }  // namespace PartDesignGui

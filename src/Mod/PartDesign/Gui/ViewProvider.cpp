@@ -76,19 +76,30 @@ void ViewProvider::beforeDelete()
     ViewProviderPart::beforeDelete();
 }
 
+namespace
+{
+// The preview's colour: the operation's, adding or cutting. An Extrude's operation can change in
+// its dialog (New part / Add / Remove / Intersect, ops#640), so it is read again at each preview
+// update, not only once at attach (review gui-3)
+void setPreviewColor(App::PropertyColor& color, PartDesign::FeatureAddSub* feature)
+{
+    auto* styleParameterManager = Base::provideService<Gui::StyleParameters::ParameterManager>();
+    const bool isAdditive = feature->getAddSubType() == PartDesign::FeatureAddSub::Type::Additive;
+    const Base::Color wanted = isAdditive
+        ? styleParameterManager->resolve(PartDesignGui::StyleParameters::PreviewAdditiveColor)
+        : styleParameterManager->resolve(PartDesignGui::StyleParameters::PreviewSubtractiveColor);
+    if (color.getValue() != wanted) {
+        color.setValue(wanted);
+    }
+}
+}  // namespace
+
 void ViewProvider::attach(App::DocumentObject* pcObject)
 {
     ViewProviderPart::attach(pcObject);
 
-    auto* styleParameterManager = Base::provideService<Gui::StyleParameters::ParameterManager>();
-
     if (auto addSubFeature = getObject<PartDesign::FeatureAddSub>()) {
-        bool isAdditive = addSubFeature->getAddSubType() == PartDesign::FeatureAddSub::Type::Additive;
-
-        PreviewColor.setValue(
-            isAdditive ? styleParameterManager->resolve(StyleParameters::PreviewAdditiveColor)
-                       : styleParameterManager->resolve(StyleParameters::PreviewSubtractiveColor)
-        );
+        setPreviewColor(PreviewColor, addSubFeature);
     }
 }
 
@@ -311,6 +322,8 @@ void ViewProvider::updatePreview()
     ViewProviderPreviewExtension::updatePreview();
 
     if (auto* addSubFeature = getObject<PartDesign::FeatureAddSub>()) {
+        setPreviewColor(PreviewColor, addSubFeature);
+
         // we only want to show the additional tool preview for subtractive features
         if (addSubFeature->getAddSubType() != PartDesign::FeatureAddSub::Type::Subtractive) {
             return;
