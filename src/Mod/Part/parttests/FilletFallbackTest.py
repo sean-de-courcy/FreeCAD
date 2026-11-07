@@ -1919,3 +1919,54 @@ class DressUpCheckLimitsTest(unittest.TestCase):
             wedge = Part.Face(Part.makePolygon(points + [points[0]])).extrude(V(0, 0, 22))
             rights.append(shape.cut(wedge))
         self.assertLess(min(symmetric_difference(chamfer.Shape, right) for right in rights), 1e-6)
+
+
+def t_block():
+    """A slab 24 x 10 x 6 with a riser 8 x 10 x 12 on its middle"""
+    slab = Part.makeBox(24, 10, 6)
+    return slab.fuse(Part.makeBox(8, 10, 12, V(8, 0, 6))).removeSplitter()
+
+
+class GroupedContoursTest(unittest.TestCase):
+    """OCCT fails on a dress-up of contours that don't touch, one of them ending at a vertex of
+    mixed convexity, although each builds alone (ops#604 gap 2): the T's end edge and its back top
+    edge that ends at the riser. makeElementFillet / makeElementChamfer build the contours one group
+    after the other; the features keep the result, whose volume is the base's with each edge's own
+    change.
+    """
+
+    setUp = InvalidDressUpTest.setUp
+    tearDown = InvalidDressUpTest.tearDown
+
+    ENDS = (((24, 10, 6), (24, 0, 6)), ((0, 10, 6), (8, 10, 6)))
+
+    def additive(self, kind, shape, size):
+        expected = shape.Volume
+        for ends in self.ENDS:
+            edge = edge_between(shape, *ends)
+            if kind == "Fillet":
+                alone = shape.makeFillet(size, [edge])
+            else:
+                alone = shape.makeChamfer(size, [edge])
+            expected += alone.Volume - shape.Volume
+        return expected
+
+    def testDisjointContoursInTheFeatures(self):
+        shape = t_block()
+        for kind in ("Fillet", "Chamfer"):
+            with self.subTest(kind=kind):
+                feature, _ = dressed_in_a_body(
+                    self.doc, kind, shape, self.ENDS[0], 0.77, self.ENDS[1]
+                )
+                self.assertTrue(feature.isValid(), feature.getStatusString())
+                self.assertTrue(feature.Shape.isValid())
+                self.assertEqual(len(feature.Shape.Solids), 1)
+                expected = self.additive(kind, shape, 0.77)
+                self.assertAlmostEqual(feature.Shape.Volume, expected, delta=1e-9)
+
+    def testDisjointContoursThroughTheShapeApi(self):
+        shape = t_block()
+        edges = [edge_between(shape, *ends) for ends in self.ENDS]
+        dressed = shape.makeFillet(0.77, edges)
+        self.assertTrue(dressed.isValid())
+        self.assertAlmostEqual(dressed.Volume, self.additive("Fillet", shape, 0.77), delta=1e-9)

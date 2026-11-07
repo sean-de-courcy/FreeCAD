@@ -20,6 +20,9 @@
 #include <BRepBuilderAPI_MakePolygon.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepCheck_Analyzer.hxx>
+#include <BRepExtrema_DistShapeShape.hxx>
+#include <BRepFilletAPI_MakeChamfer.hxx>
+#include <BRepFilletAPI_MakeFillet.hxx>
 #include <BRepGProp.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
@@ -64,6 +67,7 @@
 
 #include <Base/Console.h>
 #include <Base/Exception.h>
+#include <Base/Tools.h>
 
 #include "FilletFallback.h"
 #include "MassProperties.h"
@@ -2332,6 +2336,472 @@ TopoDS_Face thinFace(const TopoDS_Shape& result, const TopoDS_Shape& base)
     return {};
 }
 
+namespace
+{
+
+// The dress-up in groups of contours (ops#604 gap 2)
+
+/// The groups' result's volume must equal the base's plus their own changes to this, relative to
+/// the changes' sum (measured: 1e-13)
+constexpr double groupVolumeTolerance = 1e-9;
+/// Two contours interact if they come within this times the sum of their bands' reach
+constexpr double reachMargin = 1.1;
+
+void addUnique(std::vector<TopoDS_Shape>& shapes, const TopoDS_Shape& shape)
+{
+    if (std::none_of(shapes.begin(), shapes.end(), [&](const TopoDS_Shape& s) {
+            return s.IsSame(shape);
+        })) {
+        shapes.push_back(shape);
+    }
+}
+
+/// OCCT's maker for the dress-up of the edges on the shape; a chamfer's distance is on the face
+/// given for its edge
+std::unique_ptr<BRepFilletAPI_LocalOperation> dressUpMaker(
+    const Request& request,
+    const TopoDS_Shape& shape,
+    const std::vector<TopoDS_Shape>& edges,
+    const std::vector<TopoDS_Shape>& faces
+)
+{
+    if (request.kind == Kind::Fillet) {
+        auto maker = std::make_unique<BRepFilletAPI_MakeFillet>(shape);
+        for (const auto& edge : edges) {
+            maker->Add(request.size1, request.size2, TopoDS::Edge(edge));
+        }
+        return maker;
+    }
+    auto maker = std::make_unique<BRepFilletAPI_MakeChamfer>(shape);
+    for (size_t i = 0; i < edges.size(); ++i) {
+        const auto& edge = TopoDS::Edge(edges[i]);
+        const auto& face = TopoDS::Face(faces[i]);
+        switch (request.chamferType) {
+            case ChamferType::equalDistance:
+                maker->Add(request.size1, request.size1, edge, face);
+                break;
+            case ChamferType::twoDistances:
+                maker->Add(request.size1, request.size2, edge, face);
+                break;
+            case ChamferType::distanceAngle:
+                maker->AddDA(request.size1, Base::toRadians(request.size2), edge, face);
+                break;
+        }
+    }
+    return maker;
+}
+
+/// One OCCT dress-up of some of the selected edges, and the elements of its result
+struct Pass
+{
+    std::unique_ptr<BRepFilletAPI_LocalOperation> maker;
+    TopoDS_Shape result;
+    TopTools_IndexedMapOfShape present;  // the vertices, edges and faces of the result
+
+    /// What the pass turns an element of its input into: its modified images in the result, or
+    /// itself if the result has it
+    std::vector<TopoDS_Shape> images(const TopoDS_Shape& shape) const
+    {
+        std::vector<TopoDS_Shape> found;
+        for (const auto& modified : maker->Modified(shape)) {
+            if (present.Contains(modified)) {
+                addUnique(found, modified);
+            }
+        }
+        if (found.empty() && present.Contains(shape)) {
+            found.push_back(shape);
+        }
+        return found;
+    }
+
+    /// The elements of the result the pass generated from an element of its input
+    std::vector<TopoDS_Shape> generated(const TopoDS_Shape& shape) const
+    {
+        std::vector<TopoDS_Shape> found;
+        for (const auto& image : maker->Generated(shape)) {
+            if (present.Contains(image)) {
+                addUnique(found, image);
+            }
+        }
+        return found;
+    }
+};
+
+/// Builds the edges' dress-up on the shape by OCCT: refuses unless it is one valid solid without a
+/// face of zero width
+Pass runPass(
+    const Request& request,
+    const TopoDS_Shape& shape,
+    const std::vector<TopoDS_Shape>& edges,
+    const std::vector<TopoDS_Shape>& faces,
+    const std::string& what
+)
+{
+    Pass pass;
+    pass.maker = dressUpMaker(request, shape, edges, faces);
+    try {
+        pass.maker->Build();
+    }
+    catch (const Standard_Failure&) {
+        refuse(what + " fails");
+    }
+    if (!pass.maker->IsDone()) {
+        refuse(what + " fails");
+    }
+    pass.result = pass.maker->Shape();
+    if (countSolids(pass.result) != 1 || !BRepCheck_Analyzer(pass.result).IsValid()) {
+        refuse(what + " is not one valid solid");
+    }
+    if (!thinFace(pass.result, shape).IsNull()) {
+        refuse(what + " leaves a face of zero width");
+    }
+    TopExp::MapShapes(pass.result, TopAbs_VERTEX, pass.present);
+    TopExp::MapShapes(pass.result, TopAbs_EDGE, pass.present);
+    TopExp::MapShapes(pass.result, TopAbs_FACE, pass.present);
+    return pass;
+}
+
+/// The same sub-shapes of a copy made by makerInput(), which keeps their order
+std::vector<TopoDS_Shape> inCopy(
+    const TopoShape& copy,
+    const TopoShape& base,
+    const std::vector<TopoDS_Shape>& shapes
+)
+{
+    std::vector<TopoDS_Shape> result;
+    for (const auto& shape : shapes) {
+        result.push_back(copy.getSubShape(shape.ShapeType(), base.findShape(shape)));
+    }
+    return result;
+}
+
+/// One of OCCT's contours: the selected edges in it, and what its band does on the base alone
+struct GroupContour
+{
+    std::vector<size_t> selected;  // indices of the selected edges
+    TopoDS_Compound edges;         // its edges, the tangent chain included
+    TopTools_IndexedMapOfShape vertices;
+    /// The farthest point of its band (the vertices and edges its dress-up alone makes) from its
+    /// edges
+    double reach = 0.0;
+    double volume = 0.0;  // the base's after its dress-up alone
+};
+
+double distanceBetween(const TopoDS_Shape& a, const TopoDS_Shape& b)
+{
+    BRepExtrema_DistShapeShape distance(a, b);
+    if (!distance.IsDone()) {
+        refuse("the distance between two contours could not be measured");
+    }
+    return distance.Value();
+}
+
+/// The farthest point of the band the pass made from the contour's edges in its input: the new
+/// vertices, and points along the new edges
+double reachOf(const Pass& pass, const TopoDS_Shape& input, const TopoDS_Shape& contourEdges)
+{
+    TopTools_IndexedMapOfShape old;
+    TopExp::MapShapes(input, TopAbs_VERTEX, old);
+    TopExp::MapShapes(input, TopAbs_EDGE, old);
+    double reach = 0.0;
+    BRep_Builder builder;
+    for (int i = 1; i <= pass.present.Extent(); ++i) {
+        const TopoDS_Shape& shape = pass.present(i);
+        if (old.Contains(shape)) {
+            continue;
+        }
+        if (shape.ShapeType() == TopAbs_VERTEX) {
+            reach = std::max(reach, distanceBetween(shape, contourEdges));
+        }
+        else if (shape.ShapeType() == TopAbs_EDGE && !BRep_Tool::Degenerated(TopoDS::Edge(shape))) {
+            BRepAdaptor_Curve curve(TopoDS::Edge(shape));
+            for (double t : {0.25, 0.5, 0.75}) {
+                double parameter = curve.FirstParameter()
+                    + t * (curve.LastParameter() - curve.FirstParameter());
+                TopoDS_Vertex point;
+                builder.MakeVertex(point, curve.Value(parameter), linearTolerance);
+                reach = std::max(reach, distanceBetween(point, contourEdges));
+            }
+        }
+    }
+    return reach;
+}
+
+int findRoot(std::vector<int>& parent, int i)
+{
+    while (parent[i] != i) {
+        i = parent[i] = parent[parent[i]];
+    }
+    return i;
+}
+
+TopoDS_Shape groupsOf(
+    TopoShape& result,
+    const TopoShape& base,
+    const std::vector<TopoShape>& edges,
+    const Request& request,
+    const char* op,
+    int& groupCount
+)
+{
+    if (base.countSubShapes(TopAbs_SOLID) != 1) {
+        refuse("the base is not one solid");
+    }
+    // The passes run on a copy of the base, as OCCT's maker does (makerInput()); its selected
+    // edges, and a chamfer's faces as makeElementChamfer() takes them
+    std::vector<TopoShape> inputEdges = edges;
+    const TopoShape input = makerInput(base, inputEdges);
+    std::vector<TopoDS_Shape> selected;
+    std::vector<TopoDS_Shape> faces;
+    for (const auto& edge : inputEdges) {
+        selected.push_back(edge.getShape());
+        if (request.kind == Kind::Chamfer) {
+            TopoDS_Shape face;
+            if (request.flipDirection == Flip::flip) {
+                const auto ancestors = input.findAncestorsShapes(edge.getShape(), TopAbs_FACE);
+                if (!ancestors.empty()) {
+                    face = ancestors.back();
+                }
+            }
+            else {
+                face = input.findAncestorShape(edge.getShape(), TopAbs_FACE);
+            }
+            if (face.IsNull()) {
+                refuse("a chamfer edge has no adjacent face");
+            }
+            faces.push_back(face);
+        }
+        else {
+            faces.emplace_back();
+        }
+    }
+
+    // OCCT's contours, as its maker makes them from the selection (not built)
+    std::vector<GroupContour> contours;
+    {
+        auto reader = dressUpMaker(request, input.getShape(), selected, faces);
+        contours.resize(reader->NbContours());
+        BRep_Builder builder;
+        for (int i = 1; i <= reader->NbContours(); ++i) {
+            auto& contour = contours[i - 1];
+            builder.MakeCompound(contour.edges);
+            for (int j = 1; j <= reader->NbEdges(i); ++j) {
+                builder.Add(contour.edges, reader->Edge(i, j));
+                TopExp::MapShapes(reader->Edge(i, j), TopAbs_VERTEX, contour.vertices);
+            }
+        }
+        for (size_t k = 0; k < selected.size(); ++k) {
+            int index = reader->Contour(TopoDS::Edge(selected[k]));
+            if (index < 1 || index > static_cast<int>(contours.size())) {
+                refuse("a selected edge is in none of OCCT's contours");
+            }
+            contours[index - 1].selected.push_back(k);
+        }
+    }
+    if (contours.size() < 2) {
+        refuse("one contour");
+    }
+    auto pick = [](const std::vector<TopoDS_Shape>& shapes, const std::vector<size_t>& indices) {
+        std::vector<TopoDS_Shape> picked;
+        for (size_t k : indices) {
+            picked.push_back(shapes[k]);
+        }
+        return picked;
+    };
+    // Each contour alone, on another copy of the base (the maker raises its input's tolerances)
+    auto alone = [&](const std::vector<size_t>& indices, const std::string& what, GroupContour* c) {
+        std::vector<TopoShape> unused;
+        const TopoShape copy = makerInput(base, unused);
+        Pass pass = runPass(
+            request,
+            copy.getShape(),
+            inCopy(copy, input, pick(selected, indices)),
+            request.kind == Kind::Chamfer ? inCopy(copy, input, pick(faces, indices))
+                                          : pick(faces, indices),
+            what
+        );
+        if (c) {
+            std::vector<TopoDS_Shape> contourEdges;
+            for (TopoDS_Iterator it(c->edges); it.More(); it.Next()) {
+                contourEdges.push_back(it.Value());
+            }
+            TopoDS_Compound copied;
+            BRep_Builder builder;
+            builder.MakeCompound(copied);
+            for (const auto& edge : inCopy(copy, input, contourEdges)) {
+                builder.Add(copied, edge);
+            }
+            c->reach = reachOf(pass, copy.getShape(), copied);
+        }
+        return volumeOf(pass.result);
+    };
+    for (size_t i = 0; i < contours.size(); ++i) {
+        auto& contour = contours[i];
+        if (contour.selected.empty()) {
+            refuse("a contour without a selected edge");
+        }
+        contour.volume
+            = alone(contour.selected, "contour " + std::to_string(i + 1) + " alone", &contour);
+    }
+
+    // Contours interact if they share a vertex or their bands may reach each other
+    std::vector<int> parent(contours.size());
+    for (size_t i = 0; i < contours.size(); ++i) {
+        parent[i] = static_cast<int>(i);
+    }
+    for (size_t i = 0; i < contours.size(); ++i) {
+        for (size_t j = i + 1; j < contours.size(); ++j) {
+            bool interact = false;
+            for (int k = 1; k <= contours[i].vertices.Extent() && !interact; ++k) {
+                interact = contours[j].vertices.Contains(contours[i].vertices(k));
+            }
+            if (!interact) {
+                double gap = distanceBetween(contours[i].edges, contours[j].edges);
+                interact = gap <= reachMargin * (contours[i].reach + contours[j].reach)
+                        + linearTolerance;
+            }
+            if (interact) {
+                const int root = findRoot(parent, static_cast<int>(i));
+                parent[root] = findRoot(parent, static_cast<int>(j));
+            }
+        }
+    }
+    // The groups (their selected edges, and their contours), in the order of their first
+    // selected edge
+    std::vector<std::vector<size_t>> groups;
+    std::vector<std::vector<size_t>> groupContours;
+    std::vector<int> groupOf(contours.size(), -1);
+    for (size_t k = 0; k < selected.size(); ++k) {
+        for (size_t i = 0; i < contours.size(); ++i) {
+            const auto& indices = contours[i].selected;
+            if (std::find(indices.begin(), indices.end(), k) == indices.end()) {
+                continue;
+            }
+            int root = findRoot(parent, static_cast<int>(i));
+            if (groupOf[root] < 0) {
+                groupOf[root] = static_cast<int>(groups.size());
+                groups.emplace_back();
+                groupContours.emplace_back();
+            }
+            groups[groupOf[root]].push_back(k);
+            auto& members = groupContours[groupOf[root]];
+            if (std::find(members.begin(), members.end(), i) == members.end()) {
+                members.push_back(i);
+            }
+        }
+    }
+    if (groups.size() < 2) {
+        refuse("the contours meet or their bands may reach each other");
+    }
+
+    // Each group's own change of the base's volume: a group of one contour's was measured
+    const double baseVolume = volumeOf(base.getShape());
+    double expected = baseVolume;
+    double changes = 0.0;
+    for (size_t g = 0; g < groups.size(); ++g) {
+        double volume = groupContours[g].size() == 1
+            ? contours[groupContours[g].front()].volume
+            : alone(groups[g], "group " + std::to_string(g + 1) + " alone", nullptr);
+        expected += volume - baseVolume;
+        changes += std::abs(volume - baseVolume);
+    }
+
+    // The groups one after the other, each on the previous result
+    std::vector<Pass> passes;
+    auto imagesOf = [&](const TopoDS_Shape& shape) {
+        std::vector<TopoDS_Shape> current = {shape};
+        for (const auto& pass : passes) {
+            std::vector<TopoDS_Shape> next;
+            for (const auto& s : current) {
+                for (const auto& image : pass.images(s)) {
+                    addUnique(next, image);
+                }
+            }
+            current = std::move(next);
+        }
+        return current;
+    };
+    TopoDS_Shape shape = input.getShape();
+    for (size_t g = 0; g < groups.size(); ++g) {
+        std::vector<TopoDS_Shape> groupEdges;
+        std::vector<TopoDS_Shape> groupFaces;
+        for (size_t k : groups[g]) {
+            auto images = imagesOf(selected[k]);
+            if (images.size() != 1 || images.front().ShapeType() != TopAbs_EDGE) {
+                refuse("a selected edge is not one edge after the groups before it");
+            }
+            groupEdges.push_back(images.front());
+            if (request.kind == Kind::Chamfer) {
+                images = imagesOf(faces[k]);
+                if (images.size() != 1 || images.front().ShapeType() != TopAbs_FACE) {
+                    refuse("a chamfer's face is not one face after the groups before it");
+                }
+                groupFaces.push_back(images.front());
+            }
+            else {
+                groupFaces.emplace_back();
+            }
+        }
+        passes.push_back(
+            runPass(request, shape, groupEdges, groupFaces, "group " + std::to_string(g + 1))
+        );
+        shape = passes.back().result;
+    }
+    const double measured = volumeOf(shape);
+    if (std::abs(measured - expected) > groupVolumeTolerance * changes) {
+        refuse("the groups' result's volume " + describe(measured)
+               + " differs from the base's with each group's own change " + describe(expected));
+    }
+
+    // The dress-up's history, composed from the passes': what each pass makes of the base's
+    // elements' images is modified from them, what it makes of anything generated is generated
+    ShapeMapper mapper;
+    for (auto type : {TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX}) {
+        TopTools_IndexedMapOfShape elements;
+        TopExp::MapShapes(input.getShape(), type, elements);
+        for (int i = 1; i <= elements.Extent(); ++i) {
+            const TopoDS_Shape& element = elements(i);
+            std::vector<TopoDS_Shape> modified = {element};
+            std::vector<TopoDS_Shape> generated;
+            for (const auto& pass : passes) {
+                std::vector<TopoDS_Shape> nextModified;
+                std::vector<TopoDS_Shape> nextGenerated;
+                for (const auto& s : modified) {
+                    for (const auto& image : pass.images(s)) {
+                        addUnique(nextModified, image);
+                    }
+                    for (const auto& image : pass.generated(s)) {
+                        addUnique(nextGenerated, image);
+                    }
+                }
+                for (const auto& s : generated) {
+                    for (const auto& image : pass.images(s)) {
+                        addUnique(nextGenerated, image);
+                    }
+                    for (const auto& image : pass.generated(s)) {
+                        addUnique(nextGenerated, image);
+                    }
+                }
+                modified = std::move(nextModified);
+                generated = std::move(nextGenerated);
+            }
+            if (!(modified.size() == 1 && modified.front().IsSame(element))) {
+                for (const auto& image : modified) {
+                    mapper.insert(MappingStatus::Modified, element, image);
+                }
+            }
+            for (const auto& image : generated) {
+                mapper.insert(MappingStatus::Generated, element, image);
+            }
+        }
+    }
+    result.makeShapeWithElementMap(shape, mapper, {input}, op);
+    groupCount = static_cast<int>(groups.size());
+    return shape;
+}
+
+}  // namespace
+
 Recorder::Recorder()
     : outer(innermostRecorder)
 {
@@ -2352,17 +2822,36 @@ void Recorder::add(int edges, int corners)
     }
 }
 
+void Recorder::addGroups(int groups)
+{
+    if (Recorder* recorder = innermostRecorder) {
+        ++recorder->groupBuilds;
+        recorder->groups += groups;
+    }
+}
+
 std::string Recorder::report(const std::string& name) const
 {
-    if (builds == 0) {
-        return {};
+    std::vector<std::string> lines;
+    if (builds > 0) {
+        std::ostringstream line;
+        line << name << ": built by the exact construction where OCCT failed: " << edges
+             << (edges == 1 ? " edge, " : " edges, ") << corners
+             << (corners == 1 ? " corner" : " corners");
+        lines.push_back(line.str());
     }
-    std::ostringstream line;
-    line << name << ": built by the exact construction where OCCT failed: " << edges
-         << (edges == 1 ? " edge, " : " edges, ") << corners
-         << (corners == 1 ? " corner" : " corners");
-    Base::Console().message("%s\n", line.str().c_str());
-    return line.str();
+    if (groupBuilds > 0) {
+        lines.push_back(
+            name + ": built in " + std::to_string(groups)
+            + " groups where OCCT failed on all at once"
+        );
+    }
+    std::string text;
+    for (const auto& line : lines) {
+        Base::Console().message("%s\n", line.c_str());
+        text += (text.empty() ? "" : "\n") + line;
+    }
+    return text;
 }
 
 bool build(
@@ -2405,6 +2894,52 @@ bool build(
         why = "an unknown exception";
     }
     FC_LOG("exact construction refused: " << why);
+    if (reason) {
+        *reason = why;
+    }
+    return false;
+}
+
+bool buildInGroups(
+    TopoShape& result,
+    const TopoShape& base,
+    const std::vector<TopoShape>& edges,
+    const Request& request,
+    const char* op,
+    std::string* reason,
+    int* groups
+)
+{
+    std::string why;
+    try {
+        // A copy keeps the result's tag, hasher and history algorithm, which name the elements
+        TopoShape built(result);
+        int count = 0;
+        groupsOf(built, base, edges, request, op, count);
+        result = built;
+        FC_LOG("built in " << count << " groups");
+        Recorder::addGroups(count);
+        if (groups) {
+            *groups = count;
+        }
+        return true;
+    }
+    catch (const Refusal& refusal) {
+        why = refusal.reason;
+    }
+    catch (const Standard_Failure& e) {
+        why = std::string("OCCT: ") + e.GetMessageString();
+    }
+    catch (const Base::Exception& e) {
+        why = e.what();
+    }
+    catch (const std::exception& e) {
+        why = e.what();
+    }
+    catch (...) {
+        why = "an unknown exception";
+    }
+    FC_LOG("groups refused: " << why);
     if (reason) {
         *reason = why;
     }

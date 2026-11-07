@@ -44,6 +44,7 @@ from parttests.FilletFallbackTest import (
     DressUpCheckLimitsTest,
     FilledRecessTest,
     FilletFallbackTest,
+    GroupedContoursTest,
     InvalidDressUpTest,
     LostStepTest,
 )

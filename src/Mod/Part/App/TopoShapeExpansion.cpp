@@ -7483,6 +7483,10 @@ TopoShape& TopoShape::makeElementFillet(
         request.kind = FilletFallback::Kind::Fillet;
         request.size1 = radius1;
         request.size2 = radius2;
+        // Contours that don't interact, built one group after the other (ops#604 gap 2)
+        if (failed && FilletFallback::buildInGroups(*this, shape, edges, request, op)) {
+            return *this;
+        }
         std::string reason;
         if (FilletFallback::build(*this, input, inputEdges, request, op, &reason)) {
             return *this;
@@ -7574,6 +7578,10 @@ TopoShape& TopoShape::makeElementChamfer(
         request.size2 = radius2;
         request.chamferType = chamferType;
         request.flipDirection = flipDirection;
+        // Contours that don't interact, built one group after the other (ops#604 gap 2)
+        if (failed && FilletFallback::buildInGroups(*this, shape, edges, request, op)) {
+            return *this;
+        }
         std::string reason;
         if (FilletFallback::build(*this, input, inputEdges, request, op, &reason)) {
             return *this;

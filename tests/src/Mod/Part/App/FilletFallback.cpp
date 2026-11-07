@@ -2635,4 +2635,278 @@ TEST_F(FilletFallbackTest, recorderReportsWhatTheConstructionBuilt)
     );
 }
 
+// ops#604 gap 2: OCCT's multi-contour builder fails on contours that don't touch, one of them
+// ending at a vertex of mixed convexity, although each builds alone (class B of the design note's
+// random selections, notes/fillet-parity.md 2.4). The groups build them one after the other.
+
+namespace
+{
+
+/// The fused boxes (x, y, z, dx, dy, dz), their coplanar faces merged
+TopoShape polycube(const std::vector<std::array<double, 6>>& cells)
+{
+    auto cell = [](const std::array<double, 6>& c) {
+        return box(c[3], c[4], c[5], {c[0], c[1], c[2]});
+    };
+    TopoDS_Shape shape = cell(cells[0]);
+    for (size_t i = 1; i < cells.size(); ++i) {
+        shape = BRepAlgoAPI_Fuse(shape, cell(cells[i])).Shape();
+    }
+    ShapeUpgrade_UnifySameDomain unify(shape);
+    unify.Build();
+    return TopoShape(unify.Shape(), 1L);
+}
+
+/// A slab 24 x 10 x 6 with a riser 8 x 10 x 12 on its middle
+TopoShape tBlock()
+{
+    return polycube({{0, 0, 0, 24, 10, 6}, {8, 0, 6, 8, 10, 12}});
+}
+
+/// Two crossing arms 24 x 8 x 6
+TopoShape plusBlock()
+{
+    return polycube({{0, 8, 0, 24, 8, 6}, {8, 0, 0, 8, 24, 6}});
+}
+
+/// Three slabs 4 high, each smaller one on the middle of the one below
+TopoShape steppedBlock()
+{
+    return polycube({{0, 0, 0, 24, 16, 4}, {4, 4, 4, 16, 8, 4}, {8, 6, 8, 8, 4, 4}});
+}
+
+/// A block 20 x 10 x 10 with a block 8 x 10 x 10 on its end
+TopoShape lStep()
+{
+    return polycube({{0, 0, 0, 20, 10, 10}, {0, 0, 10, 8, 10, 10}});
+}
+
+/// The design note's six class B pairs (p6_seq.py): OCCT fails on each pair as a fillet of the
+/// size, and builds each edge alone
+struct DisjointPair
+{
+    const char* name;
+    TopoShape (*block)();
+    double size;
+    std::array<gp_Pnt, 4> ends;  // the two edges' end points
+};
+
+const std::vector<DisjointPair>& classBPairs()
+{
+    static const std::vector<DisjointPair> pairs {
+        {"T 0.77: end edge x = 24, back top edge x 0..8", tBlock, 0.77,
+         {gp_Pnt(24, 10, 6), gp_Pnt(24, 0, 6), gp_Pnt(0, 10, 6), gp_Pnt(8, 10, 6)}},
+        {"T 1.53: end edge x = 0, back top edge x 16..24", tBlock, 1.53,
+         {gp_Pnt(0, 10, 6), gp_Pnt(0, 0, 6), gp_Pnt(16, 10, 6), gp_Pnt(24, 10, 6)}},
+        {"plus 1.8: arm tip vertical at (8, 0), top edge x = 8, y 16..24", plusBlock, 1.8,
+         {gp_Pnt(8, 0, 6), gp_Pnt(8, 0, 0), gp_Pnt(8, 16, 6), gp_Pnt(8, 24, 6)}},
+        {"plus 0.93: arm tip vertical at (16, 0), bottom edge x = 16, y 16..24", plusBlock, 0.93,
+         {gp_Pnt(16, 0, 6), gp_Pnt(16, 0, 0), gp_Pnt(16, 16, 0), gp_Pnt(16, 24, 0)}},
+        {"stepped 1.76: vertical at (20, 4), the top slab's concave base edge", steppedBlock, 1.76,
+         {gp_Pnt(20, 4, 4), gp_Pnt(20, 4, 8), gp_Pnt(8, 6, 8), gp_Pnt(16, 6, 8)}},
+        {"stepped 1.74: concave vertical at (4, 4), the top slab's concave base edge", steppedBlock,
+         1.74, {gp_Pnt(4, 4, 4), gp_Pnt(4, 4, 8), gp_Pnt(8, 6, 8), gp_Pnt(16, 6, 8)}},
+    };
+    return pairs;
+}
+
+/// The base's volume with each edge's own change: what separate bands add up to
+double additiveVolume(
+    const TopoShape& base,
+    const std::vector<TopoShape>& edges,
+    const FF::Request& request
+)
+{
+    const double v = volume(base.getShape());
+    double expected = v;
+    for (const auto& edge : edges) {
+        expected += volume(dressUp(base, {edge}, request).getShape()) - v;
+    }
+    return expected;
+}
+
+/// One valid solid of the volume, to 1e-9 of the base's change
+testing::AssertionResult additive(const TopoShape& result, const TopoShape& base, double expected)
+{
+    const auto& shape = result.getShape();
+    if (shape.IsNull()) {
+        return testing::AssertionFailure() << "null result";
+    }
+    if (!BRepCheck_Analyzer(shape).IsValid() || count(shape, TopAbs_SOLID) != 1) {
+        return testing::AssertionFailure() << "not one valid solid";
+    }
+    double v = volume(shape);
+    double change = std::abs(volume(base.getShape()) - expected);
+    if (std::abs(v - expected) > 1e-9 * change) {
+        return testing::AssertionFailure() << "volume " << v << ", expected " << expected;
+    }
+    return testing::AssertionSuccess();
+}
+
+/// The dress-up in groups, forced
+TopoShape grouped(
+    const TopoShape& base,
+    const std::vector<TopoShape>& edges,
+    const FF::Request& request,
+    int expectedGroups
+)
+{
+    TopoShape result(2L);
+    std::string why;
+    int groups = 0;
+    bool built = FF::buildInGroups(
+        result,
+        base,
+        edges,
+        request,
+        request.kind == FF::Kind::Fillet ? OpCodes::Fillet : OpCodes::Chamfer,
+        &why,
+        &groups
+    );
+    EXPECT_TRUE(built) << why;
+    EXPECT_EQ(groups, expectedGroups);
+    return built ? result : TopoShape();
+}
+
+}  // namespace
+
+// Each pair builds, as a fillet and as a chamfer of the size: one valid solid whose volume is the
+// base's with each edge's own change (measured 1e-13 apart); where OCCT fails on the pair, in two
+// groups
+TEST_F(FilletFallbackTest, disjointContoursBuildInGroups)
+{
+    for (const auto& pair : classBPairs()) {
+        for (const auto& request : {fillet(pair.size), chamfer(pair.size)}) {
+            const bool isFillet = request.kind == FF::Kind::Fillet;
+            SCOPED_TRACE(std::string(pair.name) + (isFillet ? ", fillet" : ", chamfer"));
+            TopoShape base = pair.block();
+            std::vector<TopoShape> edges {
+                edgeBetween(base, pair.ends[0], pair.ends[1]),
+                edgeBetween(base, pair.ends[2], pair.ends[3])
+            };
+            const bool occtFailed = occtFails(base, edges, request);
+            if (isFillet) {
+                EXPECT_TRUE(occtFailed);
+            }
+            const double expected = additiveVolume(base, edges, request);
+            FF::Recorder recorder;
+            TopoShape result;
+            try {
+                result = dressUp(base, edges, request);
+            }
+            catch (const Standard_Failure& e) {
+                ADD_FAILURE() << "OCCT: " << e.GetMessageString();
+                continue;
+            }
+            catch (const Base::Exception& e) {
+                ADD_FAILURE() << e.what();
+                continue;
+            }
+            EXPECT_TRUE(additive(result, base, expected));
+            if (occtFailed) {
+                EXPECT_EQ(
+                    recorder.report(isFillet ? "Fillet" : "Chamfer"),
+                    std::string(isFillet ? "Fillet" : "Chamfer")
+                        + ": built in 2 groups where OCCT failed on all at once"
+                );
+            }
+        }
+    }
+}
+
+// Class A (a concave edge with the convex edges meeting it at both ends) is one group: OCCT's
+// corner, which fails, and the dress-up stays an error (gap 1)
+TEST_F(FilletFallbackTest, contoursThatMeetAreNotSplit)
+{
+    TopoShape base = lStep();
+    std::vector<TopoShape> edges {
+        edgeBetween(base, {8, 0, 10}, {8, 10, 10}),
+        edgeBetween(base, {8, 0, 10}, {8, 0, 20}),
+        edgeBetween(base, {8, 10, 10}, {8, 10, 20})
+    };
+    ASSERT_TRUE(occtFails(base, edges, fillet(1)));
+    TopoShape result(2L);
+    std::string why;
+    EXPECT_FALSE(FF::buildInGroups(result, base, edges, fillet(1), OpCodes::Fillet, &why));
+    EXPECT_EQ(why, "the contours meet or their bands may reach each other");
+    EXPECT_TRUE(result.isNull());
+    EXPECT_ANY_THROW(dressUp(base, edges, fillet(1)));
+}
+
+// Bands that may reach each other are one group: the rib's two top edges, 4 apart, at r 1.9 (the
+// bands' reach is 1.9 each) are not split; at r 1 they are, and give OCCT's own result
+TEST_F(FilletFallbackTest, bandsThatMayMeetAreNotSplit)
+{
+    TopoShape rib(box(30, 4, 20), 1L);
+    std::vector<TopoShape> pair {
+        edgeBetween(rib, {0, 0, 20}, {30, 0, 20}),
+        edgeBetween(rib, {0, 4, 20}, {30, 4, 20})
+    };
+    TopoShape result(2L);
+    std::string why;
+    EXPECT_FALSE(FF::buildInGroups(result, rib, pair, fillet(1.9), OpCodes::Fillet, &why));
+    EXPECT_EQ(why, "the contours meet or their bands may reach each other");
+    EXPECT_TRUE(sameAs(grouped(rib, pair, fillet(1), 2), dressUp(rib, pair, fillet(1))));
+}
+
+// Where OCCT builds the dress-up, the groups forced give its result, named the same, element for
+// element: the names come from the passes' composed histories as from OCCT's one history
+TEST_F(FilletFallbackTest, groupsNameAsOcct)
+{
+    // Two edges trimming the same top face, as a fillet and as chamfers of two distances (the
+    // distances on each edge's own face)
+    TopoShape slab(box(30, 20, 10), 1L);
+    std::vector<TopoShape> sides {
+        edgeBetween(slab, {0, 0, 10}, {30, 0, 10}),
+        edgeBetween(slab, {0, 20, 10}, {30, 20, 10})
+    };
+    EXPECT_TRUE(sameAs(grouped(slab, sides, fillet(2), 2), dressUp(slab, sides, fillet(2))));
+    auto twoDistances = chamfer(1, 2, ChamferType::twoDistances);
+    EXPECT_TRUE(sameAs(grouped(slab, sides, twoDistances, 2), dressUp(slab, sides, twoDistances)));
+    auto flipped = chamfer(1, 2, ChamferType::twoDistances, Flip::flip);
+    EXPECT_TRUE(sameAs(grouped(slab, sides, flipped, 2), dressUp(slab, sides, flipped)));
+
+    // Three groups on the T, one of them two edges meeting at a corner
+    TopoShape t = tBlock();
+    std::vector<TopoShape> three {
+        edgeBetween(t, {0, 0, 6}, {0, 10, 6}),
+        edgeBetween(t, {24, 0, 6}, {24, 10, 6}),
+        edgeBetween(t, {8, 0, 18}, {16, 0, 18}),
+        edgeBetween(t, {16, 0, 18}, {16, 10, 18})
+    };
+    EXPECT_TRUE(sameAs(grouped(t, three, fillet(1), 3), dressUp(t, three, fillet(1))));
+    EXPECT_TRUE(sameAs(grouped(t, three, chamfer(1), 3), dressUp(t, three, chamfer(1))));
+
+    // A round boss's top rim (one closed edge) and a plate edge
+    BRepAlgoAPI_Fuse fuse(
+        box(30, 30, 5),
+        BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(15, 15, 5), gp::DZ()), 5, 5).Shape()
+    );
+    ShapeUpgrade_UnifySameDomain unify(fuse.Shape());
+    unify.Build();
+    TopoShape boss(unify.Shape(), 1L);
+    auto rim = edgesWhere(boss, atHeight(10), true);
+    ASSERT_EQ(rim.size(), 1);
+    std::vector<TopoShape> mixed {rim.front(), edgeBetween(boss, {0, 0, 5}, {30, 0, 5})};
+    EXPECT_TRUE(sameAs(grouped(boss, mixed, fillet(1), 2), dressUp(boss, mixed, fillet(1))));
+}
+
+// The feature's Report-view line for a dress-up built in groups
+TEST_F(FilletFallbackTest, recorderReportsTheGroups)
+{
+    const auto& pair = classBPairs().front();
+    TopoShape base = pair.block();
+    std::vector<TopoShape> edges {
+        edgeBetween(base, pair.ends[0], pair.ends[1]),
+        edgeBetween(base, pair.ends[2], pair.ends[3])
+    };
+    FF::Recorder recorder;
+    dressUp(base, edges, fillet(pair.size));
+    EXPECT_TRUE(recorder.built());
+    EXPECT_EQ(
+        recorder.report("Fillet"),
+        "Fillet: built in 2 groups where OCCT failed on all at once"
+    );
+}
+
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)

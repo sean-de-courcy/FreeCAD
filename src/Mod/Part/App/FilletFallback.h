@@ -122,6 +122,39 @@ PartExport bool build(
     std::string* reason = nullptr
 );
 
+/** Builds a dress-up that OCCT fails on as a whole in groups of its contours, one group after
+ * the other (ops#604 gap 2): OCCT's multi-contour builder can fail on a set of contours that
+ * don't touch, one of them ending at a vertex of mixed convexity, although each builds alone.
+ *
+ * OCCT's contours (the selected edges with their tangent chains) are grouped: two interact if they
+ * share a vertex, or if they come within the sum of their bands' reach (1.1 times the farthest
+ * point of the band each builds alone on the base, from its edges). With two groups or more, each
+ * group is built by OCCT on the base, then the groups one after the other, each on the previous
+ * result. It succeeds only if every build is one valid solid without a face of zero width and the
+ * result's volume is the base's plus each group's own change, to 1e-9 of their sum: separate bands
+ * add up exactly, overlapping ones don't. The result is named through the builds' composed
+ * histories, as one dress-up by OCCT names it.
+ *
+ * @param result Receives the shape and its element map (named with op) when it succeeds;
+ *               untouched otherwise
+ * @param base The shape being dressed up, as the caller has it: the builds run on copies
+ * @param edges The selected edges of the base
+ * @param request The kind and sizes; its contour and limitOnly are not used
+ * @param op The op code to name with (Part::OpCodes::Fillet / Chamfer)
+ * @param reason If not null, receives why it refused
+ * @param groups If not null, receives the number of groups it built in
+ * @return Whether it succeeded and passed every check
+ */
+PartExport bool buildInGroups(
+    TopoShape& result,
+    const TopoShape& base,
+    const std::vector<TopoShape>& edges,
+    const Request& request,
+    const char* op,
+    std::string* reason = nullptr,
+    int* groups = nullptr
+);
+
 /** The first face of a dress-up's result, not a face of its base, that is too thin to be one: what
  * OCCT leaves of a face the dress-up consumes whole (the stadium's top, area 0, ops#298), or a
  * sliver near that limit narrower than its own tolerance. Its width, that of the rectangle with
@@ -145,15 +178,19 @@ public:
     /// Adds one construction's result to the innermost recorder, if there is one
     static void add(int edges, int corners);
 
-    /// Whether the construction built a result while this recorder collected
+    /// Adds one dress-up built in groups (buildInGroups()) to the innermost recorder, if any
+    static void addGroups(int groups);
+
+    /// Whether the construction or the groups built a result while this recorder collected
     bool built() const
     {
-        return builds > 0;
+        return builds > 0 || groupBuilds > 0;
     }
 
-    /// Prints the Report-view line if it did, and returns it (else empty):
+    /// Prints the Report-view lines if they did, and returns them (else empty), one per line:
     /// "<name>: built by the exact construction where OCCT failed: N edges, M corners" (OCCT
-    /// refused, or left a face of zero width or an invalid result)
+    /// refused, or left a face of zero width or an invalid result), and
+    /// "<name>: built in N groups where OCCT failed on all at once"
     std::string report(const std::string& name) const;
 
 private:
@@ -161,6 +198,8 @@ private:
     int builds = 0;
     int edges = 0;
     int corners = 0;
+    int groupBuilds = 0;
+    int groups = 0;
 };
 
 }  // namespace Part::FilletFallback
