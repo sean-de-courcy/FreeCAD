@@ -2159,6 +2159,10 @@ void CmdSketcherDeleteAllGeometry::activated(int iMsg)
         try {
             openCommand(QT_TRANSLATE_NOOP("Command", "Delete all geometry"));
             Gui::cmdAppObjectArgs(Obj, "deleteAllGeometry()");
+            // FreeCAD-CH (ops#634): constraints' helpers (model picks' links) go with them
+            if (!Obj->unusedImplicitExternals().empty()) {
+                Gui::cmdAppObjectArgs(Obj, "delUnusedImplicitExternals()");
+            }
             commitCommand();
         }
         catch (const Base::Exception& e) {
@@ -2223,6 +2227,10 @@ void CmdSketcherDeleteAllConstraints::activated(int iMsg)
         try {
             openCommand(QT_TRANSLATE_NOOP("Command", "Delete all constraints"));
             Gui::cmdAppObjectArgs(Obj, "deleteAllConstraints()");
+            // FreeCAD-CH (ops#634): constraints' helpers (model picks' links) go with them
+            if (!Obj->unusedImplicitExternals().empty()) {
+                Gui::cmdAppObjectArgs(Obj, "delUnusedImplicitExternals()");
+            }
             commitCommand();
         }
         catch (const Base::Exception& e) {

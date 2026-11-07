@@ -628,21 +628,25 @@ PyObject* SketchObjectPy::addExternal(PyObject* args)
     char* SubName = nullptr;
     PyObject* defining = Py_False;
     PyObject* intersection = Py_False;
+    PyObject* implicit = Py_False;
     if (!PyArg_ParseTuple(
             args,
-            "ss|O!O!",
+            "ss|O!O!O!",
             &ObjectName,
             &SubName,
             &PyBool_Type,
             &defining,
             &PyBool_Type,
-            &intersection
+            &intersection,
+            &PyBool_Type,
+            &implicit
         )) {
         return nullptr;
     }
 
     bool isDefining = Base::asBoolean(defining);
     bool isIntersection = Base::asBoolean(intersection);
+    bool isImplicit = Base::asBoolean(implicit);
 
     // get the target object for the external link
     Sketcher::SketchObject* skObj = this->getSketchObjectPtr();
@@ -662,7 +666,7 @@ PyObject* SketchObjectPy::addExternal(PyObject* args)
     }
 
     // add the external
-    if (skObj->addExternal(Obj, SubName, isDefining, isIntersection) < 0) {
+    if (skObj->addExternal(Obj, SubName, isDefining, isIntersection, isImplicit) < 0) {
         std::stringstream str;
         str << "Not able to add external shape element " << SubName;
         PyErr_SetString(PyExc_ValueError, str.str().c_str());
@@ -670,6 +674,15 @@ PyObject* SketchObjectPy::addExternal(PyObject* args)
     }
 
     Py_Return;
+}
+
+PyObject* SketchObjectPy::delUnusedImplicitExternals(PyObject* args)
+{
+    if (!PyArg_ParseTuple(args, "")) {
+        return nullptr;
+    }
+    return Py::new_reference_to(
+        Py::Long(this->getSketchObjectPtr()->delUnusedImplicitExternals()));
 }
 
 PyObject* SketchObjectPy::delExternal(PyObject* args)

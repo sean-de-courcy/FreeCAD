@@ -326,12 +326,19 @@ class SketchObject(Part2DObject):
         ...
 
     def addExternal(
-        self, objName: str, subName: str, defining: bool = False, intersection: bool = False, /
+        self,
+        objName: str,
+        subName: str,
+        defining: bool = False,
+        intersection: bool = False,
+        implicit: bool = False,
+        /,
     ) -> None:
         """
         Add a link to an external geometry.
 
-        addExternal(objName:str, subName:str, defining:bool=False, intersection:bool=False)
+        addExternal(objName:str, subName:str, defining:bool=False, intersection:bool=False,
+                    implicit:bool=False)
 
             Args:
                 objName: The name of the document object to reference.
@@ -339,6 +346,21 @@ class SketchObject(Part2DObject):
                     "external geometry".
                 defining: Should the external edges be defining or construction?
                 intersection: Should the external edges be projections or intersections?
+                implicit: Is the link a constraint's helper (a model pick), which goes with
+                    its last constraint (delUnusedImplicitExternals)? An add that isn't
+                    implicit of a helper's kind keeps the helper as a link of its own.
+        """
+        ...
+
+    def delUnusedImplicitExternals(self) -> int:
+        """
+        Delete the external links added as a constraint's helper (addExternal's implicit)
+        that nothing uses any more: no constraint on their geometry, none of it defining.
+
+        delUnusedImplicitExternals() -> int
+
+            Returns:
+                The number of links deleted.
         """
         ...
 

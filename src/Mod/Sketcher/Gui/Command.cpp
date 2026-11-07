@@ -1214,7 +1214,9 @@ namespace {
                     continue;
                 }
 
-                int type = srcSketch->externalType(static_cast<int>(i));
+                // the kind alone: a merged link is the user's (ops#634)
+                const long type = Sketcher::SketchObject::externalKind(
+                    srcSketch->externalType(static_cast<int>(i)));
                 bool projection = type != static_cast<int>(Sketcher::ExtType::Intersection);
                 bool intersection = type != static_cast<int>(Sketcher::ExtType::Projection);
                 auto it = std::ranges::find_if(links, [&](const Link& link) {
@@ -1289,7 +1291,8 @@ namespace {
                     continue;
                 }
                 const auto& link = links[entryLinks[s][i]];
-                int type = srcSketch->externalType(static_cast<int>(i));
+                const long type = Sketcher::SketchObject::externalKind(
+                    srcSketch->externalType(static_cast<int>(i)));
                 Candidates candidates {&link,
                                        type != static_cast<int>(Sketcher::ExtType::Intersection),
                                        type != static_cast<int>(Sketcher::ExtType::Projection)};

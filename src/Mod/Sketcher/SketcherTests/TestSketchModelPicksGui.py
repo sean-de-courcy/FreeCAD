@@ -23,11 +23,13 @@ TOL = 1e-6
 SKETCHER_PARAMS = "User parameter:BaseApp/Preferences/Mod/Sketcher"
 
 
-class TestSketchModelPicksGui(SketcherGuiTestCase):
+class ModelPicksGuiCase(SketcherGuiTestCase):
+    """The designed model and the editor's helpers (TestSketchHelpersGui uses them too)."""
+
     def setUp(self):
         super().setUp()
         FreeCADGui.activateWorkbench("PartDesignWorkbench")
-        self.doc = FreeCAD.newDocument("TestSketchModelPicksGui")
+        self.doc = FreeCAD.newDocument(type(self).__name__)
         self.body = self.doc.addObject("PartDesign::Body", "Body")
         xy = self.body.Origin.OriginFeatures[3]
 
@@ -277,8 +279,8 @@ class TestSketchModelPicksGui(SketcherGuiTestCase):
             return None
         return (pre.ObjectName, pre.SubElementNames[0] if pre.SubElementNames else "")
 
-    # Tests -------------------------------------------------------------------------------------
 
+class TestSketchModelPicksGui(ModelPicksGuiCase):
     def test_plain_edit_takes_model_edges_and_vertices_not_faces(self):
         """In plain edit mode a model edge and vertex can be selected beside a sketch element;
         a model face can't (the gate)."""

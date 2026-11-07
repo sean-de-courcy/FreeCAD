@@ -1326,12 +1326,14 @@ int findExternalReference(Sketcher::SketchObject* sketch,
     return GeoEnum::GeoUndef;
 }
 
+// A model pick's link is the constraint's helper (FreeCAD-CH ops#634): marked implicit, it goes
+// with its last constraint, as in Onshape, where nothing is projected
 int addProjectedExternalReference(Sketcher::SketchObject* sketch,
                                   App::DocumentObject* source,
                                   const std::string& subName)
 {
     Gui::cmdAppObjectArgs(sketch,
-                          "addExternal(\"%s\",\"%s\", False, False)",
+                          "addExternal(\"%s\",\"%s\", False, False, True)",
                           source->getNameInDocument(),
                           subName.c_str());
     tryAutoRecomputeIfNotSolve(sketch);
