@@ -26,12 +26,18 @@
 #include <string_view>
 #include <vector>
 
+#include <Standard_Failure.hxx>
+
 #include <App/Document.h>
 #include <Gui/Application.h>
 #include <Gui/Command.h>
 #include <Gui/Control.h>
+#include <Gui/ForkKeymap.h>
 #include <Gui/MDIView.h>
 #include <Gui/Selection/Selection.h>
+#include <Mod/Part/App/Attacher.h>
+#include <Mod/Part/App/PartFeature.h>
+#include <Mod/Part/App/TopoShape.h>
 #include <Mod/Sketcher/Gui/Workbench.h>
 #include <Mod/PartDesign/App/Body.h>
 #include <Mod/PartDesign/App/FeatureMultiTransform.h>
@@ -107,17 +113,78 @@ std::string_view subElementKind(const std::vector<Gui::SelectionSingleton::SelOb
     return kind;
 }
 
+/// The Body PartDesign's commands act in: the active Body or, with none active, the document's
+/// only Body, which they activate themselves (PartDesignGui::getBody with autoActivate); nullptr
+/// where they would ask instead (a dialog)
+PartDesign::Body* commandBody()
+{
+    if (PartDesign::Body* active = PartDesignGui::getBody(false, false)) {
+        return active;
+    }
+    Gui::MDIView* view = Gui::Application::Instance->activeView();
+    App::Document* doc = view ? view->getAppDocument() : nullptr;
+    if (!doc) {
+        return nullptr;
+    }
+    const auto bodies = doc->getObjectsOfType<PartDesign::Body>();
+    return bodies.size() == 1 ? bodies.front() : nullptr;
+}
+
+/// Whether sub names a planar face of obj's shape: Sketch on face (PartDesign_NewSketch) refuses
+/// the others
+bool isPlanarFace(App::DocumentObject* obj, const char* sub)
+{
+    auto feature = freecad_cast<Part::Feature*>(obj);
+    if (!feature || !sub || !*sub) {
+        return false;
+    }
+    try {
+        const Part::TopoShape face(feature->Shape.getShape().getSubShape(sub, /*silent=*/true));
+        return !face.isNull() && face.isPlanar(Attacher::AttachEnginePlane::planarPrecision());
+    }
+    catch (const Base::Exception&) {
+        return false;
+    }
+    catch (const Standard_Failure&) {
+        return false;
+    }
+}
+
+/// Whether every selected object is a Body or one of its features, all of one Body: Onshape's
+/// Delete part deletes that Body (the fork's Delete part feature, ops#635)
+bool selectionIsInOnePart(const std::vector<Gui::SelectionSingleton::SelObj>& selection)
+{
+    PartDesign::Body* part = nullptr;
+    for (const auto& sel : selection) {
+        App::DocumentObject* obj = sel.pObject;
+        auto body = freecad_cast<PartDesign::Body*>(obj);
+        if (!body) {
+            body = PartDesignGui::getBodyFor(obj, false, false, true);
+            if (!body || !body->hasObject(obj)) {
+                return false;
+            }
+        }
+        if (part && part != body) {
+            return false;
+        }
+        part = body;
+    }
+    return part != nullptr;
+}
+
 }  // namespace
 
 void Workbench::setupContextMenu(const char* recipient, Gui::MenuItem* item) const
 {
     auto selection = Gui::Selection().getSelection();
-    // FreeCAD-CH (ops#640): in the 3D view, Onshape's menu: the body's own entries (Move tip,
-    // the roll-back bar) go under a More submenu, which Gui::StdWorkbench fills and puts last
+    // FreeCAD-CH (ops#640): in the 3D view, under the fork's keymap, Onshape's menu: the body's
+    // own entries (Move tip, the roll-back bar) go under a More submenu, which Gui::StdWorkbench
+    // fills and puts last. Without the keymap the menu is FreeCAD's.
     const bool inView = strcmp(recipient, "View") == 0;
+    const bool onshape = inView && Gui::ForkKeymap::isOnshape();
     Gui::MenuItem* more = nullptr;
     Gui::MenuItem* bodyItem = item;
-    if (inView) {
+    if (onshape) {
         more = new Gui::MenuItem;
         more->setCommand("More");
         bodyItem = more;
@@ -146,14 +213,24 @@ void Workbench::setupContextMenu(const char* recipient, Gui::MenuItem* item) con
             *bodyItem << "PartDesign_RollToEnd";
         }
 
-        if (inView) {
-            // Onshape's first entries: Sketch on face (one face), Fillet and Chamfer (faces or
-            // edges of one object)
+        if (onshape && feature && Gui::Selection().hasPreselection()) {
+            // Onshape's first entries, on an entity under the cursor (no preselection is empty
+            // space) and only where the commands take the pick: Sketch on face on one planar
+            // face, Fillet and Chamfer on faces or edges of a solid feature of the Body the
+            // commands act in (dressupGetSelected refuses the others with a message; a sketch's
+            // edges would make a failing Fillet)
             const std::string_view kind = subElementKind(selection);
-            if (kind == "Face" && selection.size() == 1) {
+            PartDesign::Body* target = kind.empty() ? nullptr : commandBody();
+            // the sketch goes into target without a dialog: it holds the face's feature, or
+            // (ops#325) the feature is a sibling part's of its studio
+            if (kind == "Face" && selection.size() == 1 && target
+                && (target->hasObject(feature) || PartDesignGui::isStudioSelection(target, feature))
+                && isPlanarFace(feature, selection.front().SubName)) {
                 *item << "PartDesign_NewSketch";
             }
-            if (!kind.empty()) {
+            if (!kind.empty() && target && target->hasObject(feature)
+                && (feature->isDerivedFrom<PartDesign::Feature>()
+                    || target->BaseFeature.getValue() == feature)) {
                 *item << "PartDesign_Fillet" << "PartDesign_Chamfer";
             }
         }
@@ -218,6 +295,18 @@ void Workbench::setupContextMenu(const char* recipient, Gui::MenuItem* item) con
         }
     }
     Gui::StdWorkbench::setupContextMenu(recipient, item);
+
+    // Onshape's Delete part on a Body or its features: Std_DeletePart deletes the part (Std_Delete
+    // on the Body, which ViewProviderBody::onDelete makes a Delete part feature of its history,
+    // ops#635); the feature's own Delete stays under More
+    if (onshape && !selection.empty() && selectionIsInOnePart(selection)) {
+        if (Gui::MenuItem* deleteItem = item->findItem("Std_Delete")) {
+            deleteItem->setCommand("Std_DeletePart");
+            if (Gui::MenuItem* moreItem = item->findItem("More")) {
+                *moreItem << "Std_Delete";
+            }
+        }
+    }
 }
 
 void Workbench::activated()

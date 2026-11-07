@@ -83,7 +83,7 @@ void ProgramInformation::getNavigationStyleInformation(std::stringstream& str)
     str << "Navigation Style/Orbit Style/Rotation Mode: "
         << navStyle.substr(pLen, navStyle.length() - sLen - pLen) << "/"
         << orbitStyle[hGrp->GetInt("OrbitStyle", 4)] << "/"
-        << rotMode[hGrp->GetInt("RotationMode", 0)] << "\n";
+        << rotMode[hGrp->GetInt("RotationMode", 1)] << "\n";  // FreeCAD-CH (ops#640): default 1
 }
 
 void ProgramInformation::getDpiInformation(std::stringstream& str)

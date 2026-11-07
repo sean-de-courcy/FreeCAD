@@ -81,6 +81,8 @@ def RePopulateIcons():
     a10.setIcon(QtGui.QIcon(":/icons/NavigationSolidWorks_" + StyleSheetType + ".svg"))
     a11.setIcon(QtGui.QIcon(":/icons/NavigationTinkerCAD_" + StyleSheetType + ".svg"))
     a12.setIcon(QtGui.QIcon(":/icons/NavigationTouchpad_" + StyleSheetType + ".svg"))
+    # FreeCAD-CH (ops#640): Onshape's mouse is TinkerCAD's with a dead zone and a fit; its icon too
+    a13.setIcon(QtGui.QIcon(":/icons/NavigationTinkerCAD_" + StyleSheetType + ".svg"))
 
 
 def retranslateUi():
@@ -96,6 +98,8 @@ def retranslateUi():
     text08 = translate("NavigationIndicator", "Rotation focus")
     text09 = translate("NavigationIndicator", "Middle mouse button or H key.")
     text10 = translate("NavigationIndicator", "Middle mouse button.")
+    text11 = translate("NavigationIndicator", "Fit")
+    text12 = translate("NavigationIndicator", "Double-click middle mouse button.")
 
     global t0
     t0 = translate("NavigationIndicator", "Navigation style not recognized.")
@@ -651,6 +655,45 @@ def retranslateUi():
         + "</p>"
     )
 
+    # FreeCAD-CH (ops#640): Onshape's mouse
+    global t13
+    t13 = (
+        "<p align='center'><b>Onshape</b> "
+        + text06
+        + """</p>
+    <table>
+     <tr>
+      <th><small>"""
+        + text01
+        + """</small></th>
+      <th><small>"""
+        + text02
+        + """</small></th>
+      <th><small>"""
+        + text03
+        + """</small></th>
+      <th><small>"""
+        + text04
+        + """</small></th>
+      <th><small>"""
+        + text04
+        + """</small></th>
+     </tr>
+     <tr>
+      <td align='center'><img src=':/icons/Navigation_Mouse_Left.svg'></td>
+      <td align='center'><img src=':/icons/Navigation_Mouse_Scroll.svg'></td>
+      <td align='center'><img src=':/icons/Navigation_Mouse_Right.svg'></td>
+      <td align='center'><img src=':/icons/Navigation_Mouse_Middle.svg'></td>
+      <td align='center'><img src=':/icons/Navigation_Mouse_CtrlRight.svg'></td>
+     </tr>
+    </table>
+    <p><small><b>"""
+        + text11
+        + ":</b> "
+        + text12
+        + "</small></p>"
+    )
+
     menuSettings.setTitle(translate("NavigationIndicator", "Settings"))
     menuOrbit.setTitle(translate("NavigationIndicator", "Orbit style"))
     aCompact.setText(translate("NavigationIndicator", "Compact"))
@@ -781,6 +824,12 @@ a12.setText("Touchpad  ")
 a12.setData("Gui::TouchpadNavigationStyle")
 a12.setObjectName("Indicator_NavigationTouchpad")
 
+# FreeCAD-CH (ops#640): the fork's default style
+a13 = QtGui.QAction(gStyle)
+a13.setText("Onshape  ")
+a13.setData("Gui::OnshapeNavigationStyle")
+a13.setObjectName("Indicator_NavigationOnshape")
+
 for action in gStyle.actions():
     action.setCheckable(True)
 
@@ -793,6 +842,7 @@ menu.addAction(a1)
 menu.addAction(a2)
 menu.addAction(a3)
 menu.addAction(a4)
+menu.addAction(a13)
 menu.addAction(a5)
 menu.addAction(a6)
 menu.addAction(a7)
@@ -843,6 +893,7 @@ def onTooltip():
         a10.setToolTip(t10)
         a11.setToolTip(t11)
         a12.setToolTip(t12)
+        a13.setToolTip(t13)
         p.SetBool("Tooltip", 1)
     else:
         for i in gStyle.actions():
@@ -919,6 +970,16 @@ def onMenu(action):
     setCurrent()
 
 
+def showStyle(action):
+    """Show action as the current style."""
+
+    action.setChecked(True)
+    setCompact(action)
+    menu.setDefaultAction(action)
+    indicator.setIcon(action.icon())
+    indicator.setToolTip(action.toolTip())
+
+
 def setCurrent():
     """Set navigation style on start and on interval."""
     gStyle.blockSignals(True)
@@ -931,27 +992,22 @@ def setCurrent():
         for i in actions:
             if i.data() == current:
                 s = True
-                i.setChecked(True)
-                setCompact(i)
-                menu.setDefaultAction(i)
-                indicator.setIcon(i.icon())
-                indicator.setToolTip(i.toolTip())
+                showStyle(i)
             else:
                 pass
     else:
+        # FreeCAD-CH (ops#640): an unset style is the code's default, Onshape; show it without
+        # writing the parameter, so the C++ default stays in force
         s = True
-        pView.SetString("NavigationStyle", a2.data())
+        showStyle(a13)
 
     if s:
         a0.setVisible(False)
     else:
+        # an unknown style: shown, not selectable (its data is no style)
         a0.setVisible(True)
-        a0.setEnabled(True)
-        a0.setChecked(True)
-        setCompact(a0)
-        menu.setDefaultAction(a0)
-        indicator.setIcon(a0.icon())
-        indicator.setToolTip(a0.toolTip())
+        a0.setEnabled(False)
+        showStyle(a0)
 
     gStyle.blockSignals(False)
 

@@ -2597,7 +2597,17 @@ void NavigationStyle::openPopupMenu(const SbVec2s& position)
     MenuManager::getInstance()->setupContextMenu(&view, *contextMenu);
     contextMenu->setAttribute(Qt::WA_DeleteOnClose);
 
-    auto posAction = !contextMenu->actions().empty() ? contextMenu->actions().front() : nullptr;
+    // Where the entity's own entries and Clarify Selection go: before the menu's first entry; or,
+    // with the fork's Onshape menu, whose last entry is its More submenu (FreeCAD-CH, ops#640),
+    // before that submenu, so that Onshape's entries come first
+    const QList<QAction*> actions = contextMenu->actions();
+    QAction* posAction = actions.empty() ? nullptr : actions.front();
+    const QList<MenuItem*> items = view.getItems();
+    const bool beforeMore = !actions.empty() && !items.empty()
+        && items.last()->command() == "More" && actions.last()->menu() != nullptr;
+    if (beforeMore) {
+        posAction = actions.last();
+    }
 
     QMenu* objectMenu = nullptr;
     QList<QAction*> objectActions;
@@ -2615,7 +2625,10 @@ void NavigationStyle::openPopupMenu(const SbVec2s& position)
             preselectedViewProvider->setupContextMenu(objectMenu, receiver, SLOT(startEditing()));
             objectActions = objectMenu->actions();
             if (!objectActions.empty()) {
-                contextMenu->setDefaultAction(objectActions.front());
+                if (!beforeMore) {
+                    // Onshape's menu has no bold entry
+                    contextMenu->setDefaultAction(objectActions.front());
+                }
 
                 for (auto* action : objectActions) {
                     if (posAction) {
@@ -2686,7 +2699,15 @@ void NavigationStyle::openPopupMenu(const SbVec2s& position)
 
     contextMenu->popup(QCursor::pos());
 
-    rightClickPosition.reset();
+    // The position stays while the menu lives, for the entries that act where the click was
+    // (Select Other, Clarify Selection; FreeCAD-CH ops#640): popup() returns at once, and
+    // WA_DeleteOnClose deletes the menu after its triggered signal. The viewer is the context,
+    // so a view that closed gets no call, and a style the viewer replaced meanwhile is left alone
+    QObject::connect(contextMenu, &QObject::destroyed, viewer, [this, v = viewer]() {
+        if (v->navigationStyle() == this) {
+            rightClickPosition.reset();
+        }
+    });
 }
 
 PyObject* NavigationStyle::getPyObject()

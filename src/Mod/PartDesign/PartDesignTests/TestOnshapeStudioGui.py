@@ -60,8 +60,17 @@ from PySide import QtCore
 
 def report():
     style = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/View").GetString("NavigationStyle")
+    # the style a new 3D view runs: the parameter where it is set, else the code default
+    try:
+        import FreeCADGui
+
+        FreeCAD.newDocument("Probe")
+        viewStyle = FreeCADGui.ActiveDocument.ActiveView.getNavigationType()
+    except Exception as error:  # noqa: BLE001  reported, not raised: the probe must exit
+        viewStyle = "error: %s" % error
     with open(os.environ["FC_ONSHAPE_PROBE_OUT"], "w", encoding="utf-8") as out:
         out.write("style=" + style + "\n")
+        out.write("viewStyle=" + viewStyle + "\n")
         units = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/Units")
         out.write("decimals=%d\n" % units.GetInt("Decimals", -1))
     if os.name == "nt":
@@ -388,8 +397,9 @@ class TestOnshapeStudioGui(unittest.TestCase):
 
     def runOnNewHome(self, userCfg=None, script=False):
         """FreeCAD.exe on a new settings folder holding the probe (and `userCfg` as user.cfg),
-        started with no file or with an empty script. Returns the navigation style it reports and
-        whether it has the pack's three decimals (a key nothing else writes on start)."""
+        started with no file or with an empty script. Returns the navigation style parameter it
+        reports, the style a new 3D view runs there, and whether it has the pack's three decimals
+        (a key nothing else writes on start)."""
         exe = freecadExecutable()
         if exe is None:
             self.skipTest("no FreeCAD executable beside the build")
@@ -419,20 +429,24 @@ class TestOnshapeStudioGui(unittest.TestCase):
         self.assertTrue(os.path.isfile(out), "the probe didn't report")
         with open(out, encoding="utf-8") as f:
             lines = dict(line.rstrip("\n").split("=", 1) for line in f if "=" in line)
-        return lines.get("style"), lines.get("decimals") == "3"
+        return lines.get("style"), lines.get("viewStyle"), lines.get("decimals") == "3"
 
     def testFirstStartAppliesTheOnshapePack(self):
         """A settings folder with no user.cfg starts with the pack's Onshape navigation style."""
-        self.assertEqual(self.runOnNewHome(), (ONSHAPE, True))
+        style, _, decimals = self.runOnNewHome()
+        self.assertEqual((style, decimals), (ONSHAPE, True))
 
     def testFirstStartLeavesAnExistingUserCfgAlone(self):
         """A settings folder with a user.cfg keeps its own navigation style."""
-        self.assertEqual(self.runOnNewHome(userCfg=USER_CFG), ("Gui::CADNavigationStyle", False))
+        style, _, decimals = self.runOnNewHome(userCfg=USER_CFG)
+        self.assertEqual((style, decimals), ("Gui::CADNavigationStyle", False))
 
     def testFirstStartSkipsARunWithAScript(self):
         """A run started with a script (as the test runners start FreeCAD) keeps the code
-        defaults on a new folder: not the pack's decimals. (The navigation style no longer tells
-        the two apart: the code default is the pack's Onshape style too since ops#640.)"""
-        style, decimals = self.runOnNewHome(script=True)
-        self.assertEqual(style, ONSHAPE)
+        defaults on a new folder: not the pack's decimals, and no navigation style written (the
+        pack is skipped; the status bar's indicator writes none when the key is unset, ops#640),
+        so a new 3D view runs the code default, the Onshape style."""
+        style, viewStyle, decimals = self.runOnNewHome(script=True)
+        self.assertIn(style, ("", ONSHAPE))
+        self.assertEqual(viewStyle, ONSHAPE)
         self.assertFalse(decimals)

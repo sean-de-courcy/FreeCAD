@@ -187,7 +187,9 @@ void DlgSettingsNavigation::loadSettings()
     orbitStyle = Base::clamp(orbitStyle, 0, ui->comboOrbitStyle->count() - 1);
     ui->comboOrbitStyle->setCurrentIndex(ui->comboOrbitStyle->findData(orbitStyle));
 
-    index = hGrp->GetInt("RotationMode", 0);
+    // FreeCAD-CH (ops#640): 1, Drag at cursor, as NavigationStyle::initialize() and
+    // View3DSettings default it
+    index = hGrp->GetInt("RotationMode", 1);
     ui->comboRotationMode->setCurrentIndex(index);
 
     bool showNaviCube = hGrp->GetBool("ShowNaviCube", true);

@@ -21,15 +21,17 @@
  *                                                                         *
  ***************************************************************************/
 
-// FreeCAD-CH (ops#640): Onshape's mouse: right-drag turns, middle or Ctrl+right pans, the wheel
-// zooms at the cursor, a double middle click fits the model, and a right click without a drag
-// selects the entity under the cursor before it opens the context menu.
+// FreeCAD-CH (ops#640): Onshape's mouse: right-drag turns about the point under the cursor,
+// middle or Ctrl+right pans, the wheel zooms at the cursor, a double middle click fits the model,
+// Shift+right does nothing, and a right click (a jitter within the dead zone allowed) selects
+// the entity under the cursor before it opens the context menu, under the fork's keymap.
 
 #include <Inventor/nodes/SoCamera.h>
 #include <QApplication>
 
 #include <string>
 
+#include "ForkKeymap.h"
 #include "Navigation/NavigationStyle.h"
 #include "Selection.h"
 #include "View3DInventorViewer.h"
@@ -186,26 +188,41 @@ SbBool OnshapeNavigationStyle::processSoEvent(const SoEvent* const ev)
                 // to pass the event to the base class.
                 this->button2down = press;
 
-                // About to start rotating, or panning with Ctrl
+                // About to turn (once the cursor leaves the dead zone), to pan with Ctrl, or
+                // nothing with Shift
                 if (!viewer->isEditing() && press && (curmode == NavigationStyle::IDLE)) {
-                    // Use this variable to spot move events
-                    saveCursorPosition(ev);
                     this->centerTime = ev->getTime();
-                    if (this->ctrldown) {
-                        setupPanningPlane(getCamera());
+                    if (this->ctrldown || this->shiftdown) {
+                        // the press position only: a pan has no turn centre to pick
+                        this->localPos = pos;
+                        if (this->ctrldown) {
+                            setupPanningPlane(getCamera());
+                        }
+                    }
+                    else {
+                        // the press position, and the point under it as the turn's centre
+                        saveCursorPosition(ev);
                     }
                     processed = true;
                 }
-                // Don't show the context menu after dragging, panning or zooming
+                // Don't show the context menu after dragging, panning or zooming; the gesture
+                // ends with the button even while its modifier is still held
                 else if (!press && (hasDragged || hasPanned || hasZoomed)) {
+                    newmode = NavigationStyle::IDLE;
                     processed = true;
                 }
                 else if (!press) {
                     newmode = NavigationStyle::IDLE;
                     if (!viewer->isEditing()) {
+                        // a click: not a Ctrl+right (a pan), not a Shift+right (nothing), and not
+                        // a flick that left the dead zone with too few motion events to spin
                         if (this->currentmode != NavigationStyle::ZOOMING
-                            && this->currentmode != NavigationStyle::PANNING) {
-                            selectPreselected();
+                            && this->currentmode != NavigationStyle::PANNING
+                            && this->currentmode != NavigationStyle::DRAGGING
+                            && !this->shiftdown) {
+                            if (ForkKeymap::isOnshape()) {
+                                selectPreselected();
+                            }
                             if (this->isPopupMenuEnabled()) {
                                 this->openPopupMenu(event->getPosition());
                             }
@@ -223,17 +240,23 @@ SbBool OnshapeNavigationStyle::processSoEvent(const SoEvent* const ev)
                     processed = true;
                     break;
                 }
-                this->button3down = press;
-                if (press) {
-                    this->centerTime = ev->getTime();
-                    setupPanningPlane(getCamera());
-                }
-                else {
-                    // a click (no pan) may be the first half of a double click
-                    this->lastMiddleClickTime = hasPanned ? SbTime::zero() : ev->getTime();
-                    if (curmode == NavigationStyle::PANNING) {
-                        newmode = NavigationStyle::IDLE;
-                        processed = true;
+                {
+                    // the release of a double click's second press (never recorded as down) is
+                    // no click of its own: a third press within the interval starts a pan, no fit
+                    const bool wasDown = this->button3down;
+                    this->button3down = press;
+                    if (press) {
+                        this->centerTime = ev->getTime();
+                        setupPanningPlane(getCamera());
+                    }
+                    else {
+                        // a click (no pan) may be the first half of a double click
+                        this->lastMiddleClickTime =
+                            (wasDown && !hasPanned) ? ev->getTime() : SbTime::zero();
+                        if (curmode == NavigationStyle::PANNING) {
+                            newmode = NavigationStyle::IDLE;
+                            processed = true;
+                        }
                     }
                 }
                 break;
@@ -302,13 +325,18 @@ SbBool OnshapeNavigationStyle::processSoEvent(const SoEvent* const ev)
                 newmode = NavigationStyle::SELECTION;
             }
             break;
-        case BUTTON2DOWN:
-        case SHIFTDOWN | BUTTON2DOWN:
-            if (newmode != NavigationStyle::DRAGGING) {
-                saveCursorPosition(ev);
+        case BUTTON2DOWN: {
+            // A right click may jitter a few pixels and still be a click: the turn (with its
+            // cursor and rotation-centre marker) starts once the cursor has left the dead zone
+            // around the press position, which saveCursorPosition kept in localPos.
+            // Shift+right (SHIFTDOWN | BUTTON2DOWN) is no gesture: it falls to default.
+            const SbVec2f movedBy(pos - this->localPos);
+            if (curmode == NavigationStyle::DRAGGING
+                || movedBy.length() > float(selectionMoveThreshold())) {
+                newmode = NavigationStyle::DRAGGING;
             }
-            newmode = NavigationStyle::DRAGGING;
             break;
+        }
         case CTRLDOWN | BUTTON2DOWN:
         case BUTTON3DOWN:
             newmode = NavigationStyle::PANNING;
