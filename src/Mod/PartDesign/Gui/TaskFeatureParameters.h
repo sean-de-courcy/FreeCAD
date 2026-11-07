@@ -210,6 +210,11 @@ public:
     /// The primary that @p feature follows, or null (ops#325 3a)
     static App::DocumentObject* primaryOf(App::DocumentObject* feature);
 
+    /// The user flipped @p feature's direction (Reversed) in its open dialog: from then on a
+    /// switch between Add and Remove or Intersect keeps the user's direction, until the dialog
+    /// closes; before it, the switch flips it (Onshape's Extrude, hands-on check R5, ops#640 H4)
+    static void noteReversedTouched(App::DocumentObject* feature);
+
     /// The touch tests done, by the two shapes: the distance is slow on B-splines (design 2.3)
     struct TouchCache;
 
@@ -259,7 +264,8 @@ public:
     bool reject() override;
     /// The panels are in place: their reference fields join the group (ops#150).
     void open() override;
-    /// Keeps the box's OK, disabled while a required selection is missing (missingRequired).
+    /// Keeps the box's OK, whose tooltip says what a required selection still lacks
+    /// (missingRequired); OK stays enabled (ops#640 H1).
     void modifyStandardButtons(QDialogButtonBox* box) override;
 
     template<typename T = PartDesignGui::ViewProvider>
@@ -292,14 +298,14 @@ protected:
     /// The Result box (ops#325), when the feature has one: the dialogs of additive and
     /// subtractive features add it before the preview box
     void addResultBox();
-    /// What a required selection still lacks, or empty: OK stays disabled until it is made, as
-    /// Onshape's check is greyed while a required field is empty (a Revolve's axis, ops#643).
-    /// A geometric failure of a complete feature isn't one: OK commits it in error (F7).
+    /// What a required selection still lacks, or empty: OK's tooltip says it, a hint, not a
+    /// block. Onshape's check stays enabled while a required field is empty, and OK commits the
+    /// feature in error, as for a geometric failure (a Revolve's axis: ops#643, ops#640 H1, F7).
     virtual QString missingRequired() const
     {
         return {};
     }
-    /// OK enabled or not, as missingRequired() says; called when the feature changes.
+    /// OK's tooltip, as missingRequired() says; called when the feature changes.
     void updateOkButton();
 
     PartDesignGui::TaskPreviewParameters* preview;
@@ -317,6 +323,8 @@ private:
     /// The box's OK, and its tooltip when nothing is missing
     QPointer<QPushButton> okButton;
     QString okToolTip;
+    /// OK's tooltip is missingRequired()'s hint
+    bool showingHint = false;
     fastsignals::scoped_connection requiredConnection;
 };
 

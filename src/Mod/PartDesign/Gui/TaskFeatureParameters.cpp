@@ -238,6 +238,21 @@ struct NewPartMove
 };
 // One per feature: each document can have its dialog open (PR 303 round 1)
 std::vector<NewPartMove> newPartMoves;
+// The features whose direction the user flipped in their open dialog (ops#640 H4): the dialog's
+// session, kept across its restarts as the moves are, forgotten when it closes
+std::vector<App::DocumentObjectT> reversedTouched;
+
+bool isReversedTouched(const App::DocumentObject* feature)
+{
+    return feature && std::ranges::any_of(reversedTouched, [feature](const auto& touched) {
+        return touched.getObject() == feature;
+    });
+}
+
+void forgetReversedTouched(const App::DocumentObjectT& featureT)
+{
+    std::erase(reversedTouched, featureT);
+}
 // The edit restarts: the box that goes keeps the move for the box that comes
 bool restartingEdit = false;
 
@@ -339,6 +354,7 @@ void restartEdit(const App::DocumentObjectT& featureT, const std::function<void(
     // No panel came back, so no box takes the move over (PR 303 round 2)
     if (!Gui::Control().activeDialog(doc)) {
         forgetMove(featureT);
+        forgetReversedTouched(featureT);
     }
 }
 
@@ -546,9 +562,19 @@ TaskResultParameters::TaskResultParameters(PartDesignGui::ViewProvider* vp, QWid
 
 TaskResultParameters::~TaskResultParameters()
 {
-    // OK, Cancel or another close: the move is final, or aborted with the transaction
+    // OK, Cancel or another close: the move is final, or aborted with the transaction; the
+    // dialog's session ends with the user's direction (ops#640 H4)
     if (!restartingEdit) {
         forgetMove(featureT);
+        forgetReversedTouched(featureT);
+    }
+}
+
+void TaskResultParameters::noteReversedTouched(App::DocumentObject* feature)
+{
+    // Only an Extrude's dialog has the switch, and its Result box forgets the note when it closes
+    if (hasOperationRow(feature) && !isReversedTouched(feature)) {
+        reversedTouched.emplace_back(feature);
     }
 }
 
@@ -675,14 +701,14 @@ PartDesign::Body* operationTarget(PartDesign::FeatureAddSub* feature)
 
 // Why a new part's feature can't go to target, or empty: PartDesign.addToPart's own rule
 // (Body::addToPartRefusal, ops#640), after the dialog's: a move this dialog made is taken back,
-// and the move needs the dialog's transaction, which Cancel aborts
+// and the move needs the dialog's transaction, which Cancel aborts. No target moves nothing:
+// Add keeps a new part, as Onshape's Add that touches nothing makes one (hands-on check R8,
+// ops#640 H2). Remove and Intersect with no target are refused by the caller, not here
+// (cutsNothingRefusal)
 QString addToPartRefusal(PartDesign::FeatureAddSub* feature, PartDesign::Body* target)
 {
-    if (TaskResultParameters::movedFrom(feature)) {
-        return {};  // this dialog's move, taken back
-    }
-    if (!target) {
-        return QObject::tr("Touches no other part");
+    if (TaskResultParameters::movedFrom(feature) || !target) {
+        return {};  // this dialog's move, taken back; or no move
     }
     if (!hasOpenTransaction(feature->getDocument())) {
         return QObject::tr("Needs a dialog that Cancel can undo");
@@ -692,6 +718,19 @@ QString addToPartRefusal(PartDesign::FeatureAddSub* feature, PartDesign::Body* t
         why[0] = why[0].toUpper();
     }
     return why;
+}
+
+// Why a new part's feature can't become a Remove or an Intersect of nothing, or empty. With no
+// part it touches there is nothing before it to cut, and FeatureAddSub::recompute fails such a
+// cut, "Nothing to cut" (ops#308 F8, which the failure-continuation design rests on). Onshape
+// keeps that row healthy (hands-on check R7(b)); until the hub settles F8 for it (ops#640 H3),
+// the row doesn't offer a path to an error Onshape doesn't give
+QString cutsNothingRefusal(PartDesign::FeatureAddSub* feature, PartDesign::Body* target)
+{
+    if (TaskResultParameters::movedFrom(feature) || target) {
+        return {};
+    }
+    return QObject::tr("Touches no other part: nothing to cut");
 }
 
 // The Merge right after the feature (makeMerge's place), or null
@@ -738,11 +777,13 @@ void switchOperation(const App::DocumentObjectT& featureT, const QString& key)
             run(obj + ".Operation = '" + operation + "'");
         }
         // every end bound to the direction flips (Onshape: Blind, Through all, Up to next); a face
-        // or a shape fixes the side itself. Intersect flips as Remove does
+        // or a shape fixes the side itself. Intersect flips as Remove does. Not once the user
+        // flipped it in this dialog: Onshape then keeps the user's direction (R5, ops#640 H4)
         const std::string type = feature->Type.getValueAsString();
         const bool directionBound = type == "Length" || type == "ThroughAll" || type == "UpToLast"
             || type == "UpToFirst";
-        if (isSubtractive(was) != isSubtractive(key) && directionBound) {
+        if (isSubtractive(was) != isSubtractive(key) && directionBound
+            && !isReversedTouched(feature)) {
             run(obj + ".Reversed = " + (feature->Reversed.getValue() ? "False" : "True"));
         }
         if (key == QStringLiteral("new") && was != QStringLiteral("new")) {
@@ -793,8 +834,10 @@ void TaskResultParameters::addOperationRow()
     }
     if (isNew) {
         const QString why = addToPartRefusal(feature, target);
-        for (const char* key : {"add", "Subtraction", "Common"}) {
-            refuse(QString::fromLatin1(key), why);
+        const QString cutWhy = why.isEmpty() ? cutsNothingRefusal(feature, target) : why;
+        refuse(QStringLiteral("add"), why);
+        for (const char* key : {"Subtraction", "Common"}) {
+            refuse(QString::fromLatin1(key), cutWhy);
         }
         return;  // a new part merges nothing (Onshape's New has no merge scope)
     }
@@ -1087,6 +1130,17 @@ void TaskResultParameters::onResultChanged(int index)
         if (what == operation) {
             return;
         }
+        // Add, a new part's feature touching no other part: it stays its own part, as Onshape's
+        // Add (Merge with all) that touches nothing makes a new part, healthy, with a note
+        // (hands-on check R8, ops#640 H2). Nothing changes, so the edit doesn't restart
+        if (operation == QStringLiteral("new") && what == QStringLiteral("add")
+            && !isMoved(feature) && !operationTarget(feature)) {
+            Gui::getMainWindow()->showMessage(
+                tr("Touches no other part: added as a new part"),
+                8000
+            );
+            return;
+        }
         // The edit restarts, which closes this dialog: after the signal, from the event loop
         combo->setEnabled(false);
         App::DocumentObjectT target(feature);
@@ -1278,17 +1332,19 @@ void TaskDlgFeatureParameters::updateOkButton()
     if (!okButton || !getObject()) {
         return;
     }
+    // A hint, not a block: Onshape's check stays enabled with a required selection missing, and
+    // Enter or OK commits the feature in error (hands-on check R6, ops#640 H1; F7's path)
     const QString missing = missingRequired();
     if (missing.isEmpty()) {
-        if (!okButton->isEnabled()) {
-            okButton->setEnabled(true);
+        if (showingHint) {
             okButton->setToolTip(okToolTip);
+            showingHint = false;
         }
         return;
     }
-    if (okButton->isEnabled()) {
+    if (!showingHint) {
         okToolTip = okButton->toolTip();
-        okButton->setEnabled(false);
+        showingHint = true;
     }
     okButton->setToolTip(missing);
 }
@@ -1334,16 +1390,8 @@ void TaskDlgFeatureParameters::forEachParameters(const std::function<void(TaskFe
 bool TaskDlgFeatureParameters::accept()
 {
     App::DocumentObject* feature = getObject();
-    // A required selection still missing: the dialog stays, as its disabled OK says (a call
-    // from Python or a shortcut that doesn't look at the button, ops#643)
-    if (const QString missing = missingRequired(); !missing.isEmpty()) {
-        Base::Console().warning(
-            "%s: %s\n",
-            feature->Label.getValue(),
-            missing.toUtf8().constData()
-        );
-        return false;
-    }
+    // A required selection still missing doesn't hold the dialog: the feature is committed in
+    // error below, as Onshape's check commits a Revolve with no axis (ops#640 H1)
     bool isUpdateBlocked = false;
     fieldGroup->disarm();
     if (references) {

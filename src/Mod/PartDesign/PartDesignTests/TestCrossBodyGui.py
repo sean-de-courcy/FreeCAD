@@ -10,6 +10,7 @@ import FreeCAD as App
 import FreeCADGui as Gui
 import PartDesign
 from PySide import QtCore, QtWidgets
+from PySide6 import QtTest
 
 from PartDesignTests.Scenarios import models
 from PartDesignTests.TestExpressionFieldsGui import pump, taskButton, waitFor
@@ -200,6 +201,9 @@ def globalBox(feature):
     notes/studio-gates.md, PR 302 round 1)."""
     return feature.AddSubShape.transformed(feature.getGlobalPlacement().toMatrix()).BoundBox
 
+
+# A Revolve's error with no axis, Onshape's words (hands-on check R6, ops#640 H1)
+AXIS_MISSING = "Select the axis to revolve around"
 
 # A Pad's or a Pocket's rows in the enclosure (ops#640)
 ROWS = ["New part", "Add to Enclosure", "Remove from Enclosure", "Intersect with Enclosure"]
@@ -523,8 +527,10 @@ class TestResultBoxGui(ResultBoxGuiCase):
     def testNewPartIsRefusedForAUsedFeature(self):
         """F1 (ops#640): the lid pad, which a pad on its top uses, edited with no other part in
         the document: the box is there, on Add to Enclosure, with New part disabled and the reason
-        as its tooltip. The base, the enclosure's first solid, is on New part, with nothing to add
-        to."""
+        as its tooltip. The base, the enclosure's first solid, is on New part, touching no other
+        part: Add is offered (ops#640 H2, hands-on check R8: Onshape's Add that touches nothing
+        makes a new part); Remove and Intersect are refused, "Touches no other part: nothing to
+        cut", since with nothing before them they fail (ops#308 F8, kept; ops#640 H3)."""
         self.enclosure()
         lid = pad(self.body, "Lid", self.lidSk, 5)
         self.doc.recompute()
@@ -552,9 +558,15 @@ class TestResultBoxGui(ResultBoxGuiCase):
         model = combo.model()
         self.assertEqual(self.items(combo), ["New part", "Add", "Remove", "Intersect"])
         self.assertEqual(combo.currentText(), "New part")
-        for row in (1, 2, 3):
-            self.assertFalse(model.flags(model.index(row, 0)) & QtCore.Qt.ItemIsEnabled)
-            self.assertEqual(combo.itemData(row, QtCore.Qt.ToolTipRole), "Touches no other part")
+        self.assertTrue(model.flags(model.index(1, 0)) & QtCore.Qt.ItemIsEnabled)
+        self.assertFalse(combo.itemData(1, QtCore.Qt.ToolTipRole))
+        for row in (2, 3):
+            self.assertFalse(model.flags(model.index(row, 0)) & QtCore.Qt.ItemIsEnabled, row)
+            self.assertEqual(
+                combo.itemData(row, QtCore.Qt.ToolTipRole),
+                "Touches no other part: nothing to cut",
+                row,
+            )
 
     def testIntersectWith(self):
         """Subtractive, in a studio with another part: a pocket of the lid sketch (5 deep by
@@ -1491,6 +1503,117 @@ class TestOperationRowGui(ResultBoxGuiCase):
         self.close(ok=True)
         self.assertAlmostEqual(self.body.Shape.Volume, 25000, places=3)
 
+    def statusMessage(self):
+        return Gui.getMainWindow().statusBar().currentMessage()
+
+    def testAnAddThatTouchesNothingStaysANewPart(self):
+        """ops#640 H2 (hands-on check R8): Onshape's Add with Merge with all that touches nothing
+        makes a new part, with an info, no error. Far, a part of its own 100 away from the
+        enclosure, edited: on New part; Add is offered and, chosen, leaves Far's pad where it is,
+        its own part, with the status-bar note; no edit restart, no move. OK: Far still holds
+        its 16000, the enclosure its 16000, both valid, one Body each."""
+        self.studio()
+        farPad = self.doc.getObject("FarPad")
+        self.openEdit(farPad)
+        combo = self.combo()
+        self.assertEqual(combo.currentText(), "New part")
+        model = combo.model()
+        self.assertTrue(model.flags(model.index(1, 0)) & QtCore.Qt.ItemIsEnabled)
+        Gui.getMainWindow().statusBar().clearMessage()
+        self.choose("Add")
+        self.assertIn("Touches no other part: added as a new part", self.statusMessage())
+        self.assertIs(farPad.getParentGeoFeatureGroup(), self.far)
+        self.assertEqual(farPad.Operation, "Union")
+        self.assertFalse(farPad.Reversed)
+        self.close(ok=True)
+        self.assertIs(farPad.getParentGeoFeatureGroup(), self.far)
+        self.assertAlmostEqual(self.far.Shape.Volume, 16000, places=3)
+        self.assertAlmostEqual(self.body.Shape.Volume, 16000, places=3)
+        self.assertEqual(self.bodies(), ["Below", "Enclosure", "Far"])
+        self.assertValid()
+
+    def testARemoveOfNothingIsNotOffered(self):
+        """ops#640 H3: a new part's feature touching no other part has nothing before it to cut,
+        and such a cut fails, "Nothing to cut" (ops#308 F8, kept). Onshape keeps that row healthy
+        (hands-on check R7(b)), so the dialog offers no path to the error: Far's pad, its part's
+        first solid, edited: Add offered, Remove and Intersect disabled with the reason. Cancel:
+        Far unchanged, 16000, valid."""
+        self.studio()
+        farPad = self.doc.getObject("FarPad")
+        self.openEdit(farPad)
+        combo = self.combo()
+        self.assertEqual(combo.currentText(), "New part")
+        model = combo.model()
+        self.assertTrue(model.flags(model.index(1, 0)) & QtCore.Qt.ItemIsEnabled)
+        for row in (2, 3):
+            self.assertFalse(model.flags(model.index(row, 0)) & QtCore.Qt.ItemIsEnabled, row)
+            self.assertEqual(
+                combo.itemData(row, QtCore.Qt.ToolTipRole),
+                "Touches no other part: nothing to cut",
+                row,
+            )
+        self.close(ok=False)
+        self.assertEqual(farPad.Operation, "Union")
+        self.assertAlmostEqual(self.far.Shape.Volume, 16000, places=3)
+        self.assertValid()
+
+    def testAPocketThatMissesKeepsThePart(self):
+        """ops#640 H3 (hands-on checks R5 and R7): Onshape's Remove or Intersect that touches
+        nothing is healthy, with the info "Selected tools and targets do not intersect", and
+        changes no geometry. A pocket of a 10 x 10 square at x 100, beside the enclosure, 5 deep
+        from z 10, edited: Remove from Enclosure, valid, with the note, the enclosure 16000;
+        Intersect with Enclosure the same (an empty common failed before H3)."""
+        self.enclosure()
+        farSk = sketch(self.body, "FarSk", xyPlane(self.body), (100, 0, 110, 10), z=10)
+        miss = self.body.newObject("PartDesign::Pocket", "Miss")
+        miss.Profile = farSk
+        miss.Length = 5
+        self.doc.recompute()
+        self.openEdit(miss)
+        self.assertEqual(self.combo().currentText(), "Remove from Enclosure")
+        self.assertTrue(miss.isValid(), miss.getStatusString())
+        self.assertIn("Selected tools and targets do not intersect", miss.getStatusString())
+        self.choose("Intersect with Enclosure")
+        self.assertEqual(miss.Operation, "Common")
+        self.close(ok=True)
+        self.assertTrue(miss.isValid(), miss.getStatusString())
+        self.assertIn("Selected tools and targets do not intersect", miss.getStatusString())
+        self.assertAlmostEqual(self.body.Shape.Volume, 16000, places=3)
+
+    def reversedBox(self):
+        box = self.visible(QtWidgets.QCheckBox, "checkBoxReversed")
+        self.assertIsNotNone(box, "no Reversed box")
+        return box
+
+    def testTheUsersFlipWinsOverTheSwitch(self):
+        """ops#640 H4 (hands-on check R5): a switch between Add and Remove flips the direction
+        only while the user hasn't flipped it in the dialog; after, every switch keeps the user's.
+        The lid pad edited: Remove flips it (Reversed), Add flips it back; the user flips it
+        (Reversed), Remove keeps it, the user flips it back, Add keeps it. The memory is the
+        dialog's: OK, a new edit, and Remove flips again."""
+        self.enclosure()
+        lid = self.editLid()
+        self.choose("Remove from Enclosure")
+        self.assertTrue(lid.Reversed)
+        self.choose("Add to Enclosure")
+        self.assertFalse(lid.Reversed)
+        self.reversedBox().click()
+        pump(0.3)
+        self.assertTrue(lid.Reversed)
+        self.choose("Remove from Enclosure")
+        self.assertTrue(lid.Reversed, "the switch flipped the user's direction")
+        self.reversedBox().click()
+        pump(0.3)
+        self.assertFalse(lid.Reversed)
+        self.choose("Add to Enclosure")
+        self.assertFalse(lid.Reversed, "the switch flipped the user's direction")
+        self.assertTrue(self.reversedBox().isChecked() == lid.Reversed)
+        self.close(ok=True)
+        self.openEdit(lid)
+        self.choose("Remove from Enclosure")
+        self.assertTrue(lid.Reversed, "a new dialog keeps the last one's memory")
+        self.close(ok=False)
+
     def testLeavingACutDropsItsSiblings(self):
         """In a studio: a pocket of the lid sketch, 20 deep, removes from the enclosure and, by a
         sibling, from Below (7000 each). Edited, Add to Enclosure: the sibling goes and Below is
@@ -1727,8 +1850,10 @@ class TestOkInErrorGui(ResultBoxGuiCase):
 
 class TestRevolveAxisGui(ResultBoxGuiCase):
     """Report 12 (ops#643): Revolve and Groove open waiting for their axis, as Onshape's Revolve
-    does: no axis is set, the axis row shows armed, and the feature says what it needs. Designed
-    geometry: the enclosure and its lid sketch, the square from x 0 to 30."""
+    does: no axis is set, the axis row shows armed and red, and the feature says what it needs, in
+    Onshape's words. OK stays enabled, and Enter or OK commits the feature in error (hands-on check
+    R6, ops#640 H1). Designed geometry: the enclosure and its lid sketch, the square from x 0 to
+    30."""
 
     def axisField(self):
         QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
@@ -1740,19 +1865,23 @@ class TestRevolveAxisGui(ResultBoxGuiCase):
         return found[0] if found else None
 
     def assertWaitsForTheAxis(self, feature):
-        """No axis, the row armed, the feature saying what it needs, and OK disabled with the
-        same words as its tooltip (D4 of the review: Onshape greys its check mark while a
-        required selection is missing; OK commits in error only a complete feature, F7)."""
+        """No axis, the row armed and shown missing (red), the feature in error with Onshape's
+        words, and OK enabled with a hint as its tooltip (hands-on check R6, ops#640 H1: Onshape's
+        check mark stays enabled with the axis field empty; round 1's D4 disabled OK)."""
         self.assertIsNone(feature.ReferenceAxis)
         self.assertTrue(
             waitFor(lambda: self.axisField() is not None and self.axisField().property("armed")),
             "the axis row isn't armed",
         )
+        self.assertTrue(self.axisField().property("missing"), "the axis row isn't shown missing")
         self.assertFalse(feature.isValid())
-        self.assertIn("pick a line or an edge", feature.getStatusString())
+        self.assertIn(AXIS_MISSING, feature.getStatusString())
         ok = QtWidgets.QDialogButtonBox.Ok
-        self.assertTrue(waitFor(lambda: not taskButton(ok).isEnabled()), "OK is enabled")
-        self.assertIn("pick a line or an edge", taskButton(ok).toolTip().lower())
+        self.assertTrue(
+            waitFor(lambda: "pick a line or an edge" in taskButton(ok).toolTip().lower()),
+            "OK's tooltip gives no hint",
+        )
+        self.assertTrue(taskButton(ok).isEnabled(), "OK is disabled")
 
     def testRevolutionWaitsForItsAxis(self):
         """The Revolution command on the lid sketch: no axis, the row armed, and the feature says
@@ -1762,9 +1891,11 @@ class TestRevolveAxisGui(ResultBoxGuiCase):
         self.assertWaitsForTheAxis(revolution)
         self.chooseAxis("Vertical sketch axis")
         self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        self.assertFalse(self.axisField().property("missing"))
+        ok = QtWidgets.QDialogButtonBox.Ok
         self.assertTrue(
-            waitFor(lambda: taskButton(QtWidgets.QDialogButtonBox.Ok).isEnabled()),
-            "OK stays disabled with the axis picked",
+            waitFor(lambda: "pick a line or an edge" not in taskButton(ok).toolTip().lower()),
+            "OK's hint stays with the axis picked",
         )
         self.close(ok=True)
         self.assertEqual(revolution.ReferenceAxis, (self.lidSk, ["V_Axis"]))
@@ -1783,15 +1914,59 @@ class TestRevolveAxisGui(ResultBoxGuiCase):
         self.assertWaitsForTheAxis(groove)
         self.chooseAxis("Vertical sketch axis")
         self.assertTrue(groove.isValid(), groove.getStatusString())
-        self.assertTrue(
-            waitFor(lambda: taskButton(QtWidgets.QDialogButtonBox.Ok).isEnabled()),
-            "OK stays disabled with the axis picked",
-        )
         self.close(ok=True)
         self.assertEqual(groove.ReferenceAxis, (self.lidSk, ["V_Axis"]))
         self.assertTrue(groove.isValid(), groove.getStatusString())
         removed = 30 * (5 * math.sqrt(800) + 450 * math.asin(1 / 3))
         self.assertAlmostEqual(self.body.Shape.Volume, 16000 - removed, places=1)
+
+    def testEnterAcceptsARevolutionWithNoAxis(self):
+        """Hands-on check R6 (ops#640 H1): the Revolution command on the lid sketch, no axis
+        picked; Enter in the angle field closes the dialog, as Onshape's Enter does. The
+        Revolution stays, in error with Onshape's words, the enclosure keeps its 16000 (the failed
+        feature passes its base through), the sketch is hidden as for any accepted feature, and
+        the whole is one undo step. Edited again, the dialog opens with the axis row armed and
+        red; the V axis picked and OK repair it."""
+        self.enclosure()
+        undos = len(self.doc.UndoNames)
+        revolution = self.featurePanel("PartDesign_Revolution")
+        self.assertWaitsForTheAxis(revolution)
+        angle = self.visible(QtWidgets.QWidget, "revolveAngle")
+        self.assertIsNotNone(angle, "no angle field")
+        angle.setFocus(QtCore.Qt.OtherFocusReason)
+        pump(0.3)
+        modals = self.modalsDuring(lambda: QtTest.QTest.keyClick(angle, QtCore.Qt.Key_Return))
+        self.assertEqual(modals, [])
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "the dialog stays")
+        pump(0.2)
+        self.assertIn(revolution, self.body.Group)
+        self.assertFalse(revolution.isValid())
+        self.assertIn(AXIS_MISSING, revolution.getStatusString())
+        self.assertAlmostEqual(self.body.Shape.Volume, 16000, places=3)
+        self.assertFalse(self.lidSk.Visibility, "the sketch stays shown")
+        self.assertFalse(self.doc.HasPendingTransaction)
+        self.assertEqual(len(self.doc.UndoNames), undos + 1, self.doc.UndoNames)
+        revolution.ViewObject.doubleClicked()
+        self.waitForPanel()
+        self.assertWaitsForTheAxis(revolution)
+        self.chooseAxis("Vertical sketch axis")
+        self.close(ok=True)
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        self.assertEqual(revolution.ReferenceAxis, (self.lidSk, ["V_Axis"]))
+
+    def testOkAcceptsAGrooveWithNoAxis(self):
+        """The same with the check (OK) on a Groove: it closes the dialog with no message box,
+        the Groove stays in error with Onshape's words, and the enclosure keeps its 16000."""
+        self.enclosure()
+        self.otherPart()
+        groove = self.featurePanel("PartDesign_Groove")
+        self.assertWaitsForTheAxis(groove)
+        self.assertEqual(self.modalsDuring(lambda: self.close(ok=True)), [])
+        self.assertIn(groove, self.body.Group)
+        self.assertFalse(groove.isValid())
+        self.assertIn(AXIS_MISSING, groove.getStatusString())
+        self.assertAlmostEqual(self.body.Shape.Volume, 16000, places=3)
+        self.assertFalse(self.lidSk.Visibility, "the sketch stays shown")
 
     def testARevolutionWithItsAxisIsNotWaiting(self):
         """The axis row is required now, but only an empty one waits: a Revolution of the lid

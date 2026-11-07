@@ -2466,7 +2466,11 @@ void ReferenceField::updateLook()
     font.setBold(armed);
     label->setFont(font);
     const QString st = state();
-    if (st == QLatin1String("broken")) {
+    // A required field still empty (a new Revolve's axis): red, as Onshape outlines its empty
+    // required field, while OK still commits the feature in error (FreeCAD-CH ops#640 H1)
+    const bool missing = options.required && entryList->count() == 0;
+    setProperty("missing", missing);
+    if (st == QLatin1String("broken") || missing) {
         label->setStyleSheet(QStringLiteral("color: red;"));
     }
     else if (st == QLatin1String("guessed")) {
@@ -2476,8 +2480,9 @@ void ReferenceField::updateLook()
         label->setStyleSheet(QString());
     }
     entryList->setStyleSheet(
-        armed ? QStringLiteral("QListWidget#entries { border: 2px solid palette(highlight); }")
-              : QString()
+        armed     ? QStringLiteral("QListWidget#entries { border: 2px solid palette(highlight); }")
+        : missing ? QStringLiteral("QListWidget#entries { border: 2px solid red; }")
+                  : QString()
     );
 
     if (armed) {

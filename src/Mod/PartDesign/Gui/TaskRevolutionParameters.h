@@ -213,7 +213,7 @@ public:
     explicit TaskDlgRevolutionParameters(PartDesignGui::ViewProviderRevolution* RevolutionView);
 
 protected:
-    /// No axis yet: OK waits for its pick (ops#643)
+    /// No axis yet: OK's tooltip says to pick one; OK commits the feature in error (ops#640 H1)
     QString missingRequired() const override;
 };
 
@@ -225,7 +225,7 @@ public:
     explicit TaskDlgGrooveParameters(PartDesignGui::ViewProviderGroove* GrooveView);
 
 protected:
-    /// No axis yet: OK waits for its pick (ops#643)
+    /// No axis yet: OK's tooltip says to pick one; OK commits the feature in error (ops#640 H1)
     QString missingRequired() const override;
 };
 
