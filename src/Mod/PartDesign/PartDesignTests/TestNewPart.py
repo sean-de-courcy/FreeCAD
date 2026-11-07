@@ -2,7 +2,8 @@
 # FreeCAD-CH (ops#325, B+ Stage 1 session 2a; ops#311)
 
 """The origin of a FlatFace attachment on a face of a solid feature (MapOrigin, ops#311 option
-(a)), and New part (PartDesign.newPartFrom). Designed geometry: notes/bplus-stage1-design.md 2.2
+(a)), New part (PartDesign.newPartFrom), and the four operations of a Pad or Pocket with Add to
+part (PartDesign.addToPart, ops#640). Designed geometry: notes/bplus-stage1-design.md 2.2
 (O-t1-t6) and 2.3 (N-t1-t6). Oracles are placements, volumes and bounding boxes."""
 
 import os
@@ -403,3 +404,194 @@ class TestNewPart(unittest.TestCase):
             PartDesign.newPartFrom(lidSk)
         self.assertEqual(sorted(o.Name for o in self.doc.Objects), names)
         self.assertIs(body.Tip, lid)
+
+
+class TestOperations(unittest.TestCase):
+    """Onshape's New / Add / Remove / Intersect on one Pad or Pocket (FreeCAD-CH ops#640): a Pad can
+    cut and a Pocket can add, each sweeping to its class's side, and Add to part, New part the other
+    way (PartDesign.addToPart). Designed geometry: A1's enclosure, 40 x 40 x 10 (16000), and its lid
+    sketch, 30 x 30 on the top face."""
+
+    def setUp(self):
+        self.doc = App.newDocument("TestOperations")
+
+    def tearDown(self):
+        App.closeDocument(self.doc.Name)
+
+    def enclosure(self):
+        body = self.doc.addObject("PartDesign::Body", "Enclosure")
+        base = pad(body, "Base", sketch(body, "BaseSk", xyPlane(body), (0, 0, 40, 40)), 10)
+        self.doc.recompute()
+        lidSk = body.newObject("Sketcher::SketchObject", "LidSk")
+        lidSk.AttachmentSupport = [(base, faceAt(base, 10))]
+        lidSk.MapMode = "FlatFace"
+        rect(lidSk, 0, 0, 30, 30)
+        self.body, self.base, self.lidSk = body, base, lidSk
+        return body
+
+    def assertValid(self):
+        self.assertEqual(
+            [(o.Name, o.getStatusString()) for o in self.doc.Objects if not o.isValid()], []
+        )
+
+    def testPadAndPocketTakeEveryOperation(self):
+        body = self.enclosure()
+        lid = pad(body, "Lid", self.lidSk, 10)
+        pocket = self.doc.addObject("PartDesign::Pocket", "Loose")
+        for feature in (lid, pocket):
+            self.assertEqual(
+                feature.getEnumerationsOfProperty("Operation"), ["Union", "Subtraction", "Common"]
+            )
+        self.assertEqual(lid.Operation, "Union")
+        self.assertEqual(pocket.Operation, "Subtraction")
+
+    def testPadCuts(self):
+        """The lid pad, 10 up (25000), set to Subtraction and reversed: the 30 x 30 x 10 goes
+        through the enclosure (7000); Common: the shared 30 x 30 x 10 (9000)."""
+        body = self.enclosure()
+        lid = pad(body, "Lid", self.lidSk, 10)
+        self.doc.recompute()
+        self.assertAlmostEqual(body.Shape.Volume, 25000, places=3)
+        lid.Operation = "Subtraction"
+        lid.Reversed = True
+        self.doc.recompute()
+        self.assertValid()
+        self.assertAlmostEqual(body.Shape.Volume, 7000, places=3)
+        lid.Operation = "Common"
+        self.doc.recompute()
+        self.assertValid()
+        self.assertAlmostEqual(body.Shape.Volume, 9000, places=3)
+
+    def testPocketAdds(self):
+        """A pocket of the lid sketch, 5 deep (11500), set to Union and reversed: the 30 x 30 x 5
+        plate on top (20500)."""
+        body = self.enclosure()
+        pocket = body.newObject("PartDesign::Pocket", "Pocket")
+        pocket.Profile = self.lidSk
+        pocket.Length = 5
+        self.doc.recompute()
+        self.assertAlmostEqual(body.Shape.Volume, 11500, places=3)
+        pocket.Operation = "Union"
+        pocket.Reversed = True
+        self.doc.recompute()
+        self.assertValid()
+        self.assertAlmostEqual(body.Shape.Volume, 20500, places=3)
+        self.assertAlmostEqual(body.Shape.BoundBox.ZMax, 15, places=6)
+
+    def testReferenceAxisSideIsTheClasss(self):
+        """Along the lid sketch's normal as its ReferenceAxis, a Pad set to Subtraction keeps the
+        Pad's side, so reversed it cuts (7000). The side followed the Operation before: it went up
+        and cut nothing (16000)."""
+        body = self.enclosure()
+        lid = pad(body, "Lid", self.lidSk, 10)
+        lid.ReferenceAxis = (self.lidSk, ["N_Axis"])
+        self.doc.recompute()
+        self.assertAlmostEqual(body.Shape.Volume, 25000, places=3)
+        lid.Operation = "Subtraction"
+        lid.Reversed = True
+        self.doc.recompute()
+        self.assertValid()
+        self.assertAlmostEqual(body.Shape.Volume, 7000, places=3)
+
+    def testASavedOneOperationListComesBackWhole(self):
+        """A Pad saved with the list of a build before ops#640 (["Union"]) reads back with all
+        three, its value kept, and nothing touched."""
+        body = self.enclosure()
+        lid = pad(body, "Lid", self.lidSk, 10)
+        self.doc.recompute()
+        lid.Operation = ["Union"]
+        self.assertEqual(lid.getEnumerationsOfProperty("Operation"), ["Union"])
+        self.doc.recompute()
+        path = os.path.join(tempfile.mkdtemp(), "OldOperation.FCStd")
+        self.doc.saveAs(path)
+        App.closeDocument(self.doc.Name)
+        self.doc = App.openDocument(path)
+        lid = self.doc.getObject("Lid")
+        self.assertEqual(lid.getEnumerationsOfProperty("Operation"), ["Union", "Subtraction", "Common"])
+        self.assertEqual(lid.Operation, "Union")
+        self.assertEqual([o.Name for o in self.doc.Objects if o.isTouched()], [])
+        lid.Operation = "Subtraction"
+        lid.Reversed = True
+        self.doc.recompute()
+        self.assertAlmostEqual(self.doc.getObject("Enclosure").Shape.Volume, 7000, places=3)
+
+    def testAddToPartTakesNewPartBack(self):
+        """The lid pad (5) made a new part, then added to the enclosure: the enclosure holds the
+        sketch and the pad where they were, the pad is its Tip on the base (20500), and the new
+        Body is gone with its origin."""
+        body = self.enclosure()
+        lid = pad(body, "Lid", self.lidSk, 5)
+        self.doc.recompute()
+        group = body.Group
+        part = PartDesign.newPartFrom(lid)
+        self.doc.recompute()
+        partName, originName = part.Name, part.Origin.Name
+        self.assertIs(PartDesign.addToPart(lid, body), body)
+        self.doc.recompute()
+        self.assertEqual(body.Group, group)
+        self.assertIs(body.Tip, lid)
+        self.assertIs(lid.BaseFeature, self.base)
+        self.assertIsNone(self.doc.getObject(partName))
+        self.assertIsNone(self.doc.getObject(originName))
+        self.assertAlmostEqual(body.Shape.Volume, 20500, places=3)
+        self.assertValid()
+
+    def testAddToPartGoesWhereTheHistoryHasIt(self):
+        """The lid (5) a new part, then a corner cut in the enclosure, through all upward over
+        25..40 x 25..40 (13750). Added to the enclosure, the lid goes between the base and the
+        cut, which now also cuts the lid's 5 x 5 x 5 corner: 13750 + 4500 - 125 = 18125; the cut
+        stays the Tip."""
+        body = self.enclosure()
+        lid = pad(body, "Lid", self.lidSk, 5)
+        self.doc.recompute()
+        PartDesign.newPartFrom(lid)
+        self.doc.recompute()
+        cornerSk = sketch(body, "CornerSk", xyPlane(body), (25, 25, 40, 40))
+        corner = body.newObject("PartDesign::Pocket", "Corner")
+        corner.Profile = cornerSk
+        corner.Type = "ThroughAll"
+        corner.Reversed = True
+        self.doc.recompute()
+        self.assertAlmostEqual(body.Shape.Volume, 13750, places=3)
+        PartDesign.addToPart(lid, body)
+        self.doc.recompute()
+        self.assertEqual(
+            [o.Name for o in body.Group], ["BaseSk", "Base", "LidSk", "Lid", "CornerSk", "Corner"]
+        )
+        self.assertIs(body.Tip, corner)
+        self.assertIs(corner.BaseFeature, lid)
+        self.assertFalse(lid.Visibility)
+        self.assertAlmostEqual(body.Shape.Volume, 18125, places=3)
+        self.assertValid()
+
+    def testAddToPartRefusesWhatItCantTakeBack(self):
+        """Refused, with nothing changed: a target in another studio, a rolled-back target, a
+        part with a second feature."""
+        body = self.enclosure()
+        lid = pad(body, "Lid", self.lidSk, 5)
+        self.doc.recompute()
+        part = PartDesign.newPartFrom(lid)
+        self.doc.recompute()
+
+        def assertRefused(target):
+            names = sorted(o.Name for o in self.doc.Objects)
+            with self.assertRaises(ValueError):
+                PartDesign.addToPart(lid, target)
+            self.assertEqual(sorted(o.Name for o in self.doc.Objects), names)
+            self.assertIs(lid.getParentGeoFeatureGroup(), part)
+
+        studio = self.doc.addObject("App::Part", "Studio")
+        elsewhere = self.doc.addObject("PartDesign::Body", "Elsewhere")
+        studio.addObject(elsewhere)
+        assertRefused(elsewhere)
+        body.Tip = None
+        assertRefused(body)
+        body.Tip = self.base
+        topSk = part.newObject("Sketcher::SketchObject", "TopSk")
+        topSk.AttachmentSupport = [(lid, faceAt(lid, 15))]
+        topSk.MapMode = "FlatFace"
+        rect(topSk, 0, 0, 10, 10)
+        top = pad(part, "Top", topSk, 5)
+        self.doc.recompute()
+        assertRefused(body)
+        self.assertIs(part.Tip, top)

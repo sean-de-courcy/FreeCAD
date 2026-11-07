@@ -201,6 +201,10 @@ def globalBox(feature):
     return feature.AddSubShape.transformed(feature.getGlobalPlacement().toMatrix()).BoundBox
 
 
+# A Pad's or a Pocket's rows in the enclosure (ops#640)
+ROWS = ["New part", "Add to Enclosure", "Remove from Enclosure", "Intersect with Enclosure"]
+
+
 def shownFeatures(body):
     """The names of the Body's shown solid features (ViewProviderBody::getShownFeature's test)."""
     return [o.Name for o in body.Group if o.isDerivedFrom("PartDesign::Feature") and o.Visibility]
@@ -366,13 +370,13 @@ class TestResultBoxGui(ResultBoxGuiCase):
         self.enclosure()
         before = sorted(o.Name for o in self.doc.Objects)
         lid = self.lidPad()
-        self.assertEqual(self.items(self.combo()), ["Add to Enclosure", "New part"])
+        self.assertEqual(self.items(self.combo()), ROWS)
         self.choose("New part")
         [part] = [b for b in self.doc.Objects if b.TypeId == "PartDesign::Body" and b != self.body]
         self.assertEqual(part.Group, [self.lidSk, lid])
         self.assertIs(Gui.getDocument(self.doc.Name).getInEdit().Object, lid)
         self.assertTrue(self.doc.HasPendingTransaction, "the restart committed the command")
-        self.assertEqual(self.items(self.combo()), ["Add to Enclosure", "New part"])
+        self.assertEqual(self.items(self.combo()), ROWS)
         # the enclosure shows its own result while the panel is open
         self.assertAlmostEqual(self.body.Shape.Volume, 16000, places=3)
         self.close(ok=True)
@@ -449,27 +453,40 @@ class TestResultBoxGui(ResultBoxGuiCase):
         self.assertAlmostEqual(part.Shape.Volume, 9000, places=3)
 
     def testNewPartIsRefusedForAUsedFeature(self):
-        """In a studio with another part, the base's panel (a feature the lid uses) shows the box
-        with New part disabled and the reason as its tooltip; outside a studio it has no box."""
+        """F1 (ops#640): the lid pad, which a pad on its top uses, edited with no other part in
+        the document: the box is there, on Add to Enclosure, with New part disabled and the reason
+        as its tooltip. The base, the enclosure's first solid, is on New part, with nothing to add
+        to."""
         self.enclosure()
-        pad(self.body, "Lid", self.lidSk, 5)
+        lid = pad(self.body, "Lid", self.lidSk, 5)
         self.doc.recompute()
-        self.doc.openTransaction("Edit Base")
-        Gui.getDocument(self.doc.Name).setEdit(self.base.Name)
+        topSk = self.body.newObject("Sketcher::SketchObject", "TopSk")
+        topSk.AttachmentSupport = [(lid, faceAt(lid, 15))]
+        topSk.MapMode = "FlatFace"
+        rect(topSk, 0, 0, 10, 10)
+        pad(self.body, "Top", topSk, 5)
+        self.doc.recompute()
+        self.doc.openTransaction("Edit Lid")
+        Gui.getDocument(self.doc.Name).setEdit(lid.Name)
         self.waitForPanel()
-        self.assertIsNone(self.combo())
+        combo = self.combo()
+        self.assertIsNotNone(combo, "no Result box")
+        self.assertEqual(self.items(combo), ROWS)
+        self.assertEqual(combo.currentText(), "Add to Enclosure")
+        model = combo.model()
+        self.assertFalse(model.flags(model.index(0, 0)) & QtCore.Qt.ItemIsEnabled)
+        self.assertIn("tip that nothing uses", combo.itemData(0, QtCore.Qt.ToolTipRole))
         self.close(ok=False)
-        other = self.doc.addObject("PartDesign::Body", "Other")
-        pad(other, "Cube", sketch(other, "CubeSk", xyPlane(other), (50, 0, 60, 10)), 10)
-        self.doc.recompute()
         self.doc.openTransaction("Edit Base")
         Gui.getDocument(self.doc.Name).setEdit(self.base.Name)
         self.waitForPanel()
         combo = self.combo()
-        self.assertEqual(self.items(combo), ["Add to Enclosure", "New part"])
         model = combo.model()
-        self.assertFalse(model.flags(model.index(1, 0)) & QtCore.Qt.ItemIsEnabled)
-        self.assertIn("tip that nothing uses", combo.itemData(1, QtCore.Qt.ToolTipRole))
+        self.assertEqual(self.items(combo), ["New part", "Add", "Remove", "Intersect"])
+        self.assertEqual(combo.currentText(), "New part")
+        for row in (1, 2, 3):
+            self.assertFalse(model.flags(model.index(row, 0)) & QtCore.Qt.ItemIsEnabled)
+            self.assertEqual(combo.itemData(row, QtCore.Qt.ToolTipRole), "Touches no other part")
 
     def testIntersectWith(self):
         """Subtractive, in a studio with another part: a pocket of the lid sketch (5 deep by
@@ -485,12 +502,11 @@ class TestResultBoxGui(ResultBoxGuiCase):
         [pocket] = [
             o for o in self.doc.Objects if o.Name not in before and o.TypeId == "PartDesign::Pocket"
         ]
-        self.assertEqual(
-            self.items(self.combo()), ["Remove from Enclosure", "Intersect with Enclosure"]
-        )
-        self.combo().setCurrentIndex(1)
-        pump(0.2)
+        self.assertEqual(self.items(self.combo()), ROWS)
+        self.assertEqual(self.combo().currentText(), "Remove from Enclosure")
+        self.choose("Intersect with Enclosure")
         self.assertEqual(pocket.Operation, "Common")
+        self.assertFalse(pocket.Reversed)  # both cut: the tool stays in the material
         self.close(ok=True)
         self.assertEqual(pocket.Operation, "Common")
         self.assertEqual(pocket.Length.Value, 5)
@@ -527,7 +543,7 @@ class TestResultBoxGui(ResultBoxGuiCase):
         self.waitForPanel()
         combo = self.combo()
         model = combo.model()
-        self.assertTrue(model.flags(model.index(1, 0)) & QtCore.Qt.ItemIsEnabled)
+        self.assertTrue(model.flags(model.index(0, 0)) & QtCore.Qt.ItemIsEnabled)
         self.choose("New part")
         part = lid.getParentGeoFeatureGroup()
         self.assertNotEqual(part, self.body)
@@ -664,7 +680,7 @@ class TestResultBoxGui(ResultBoxGuiCase):
         self.enclosure()
         before = sorted(o.Name for o in self.doc.Objects)
         lid = self.lidPad()
-        self.combo().setCurrentIndex(1)
+        self.combo().setCurrentIndex(self.combo().findText("New part"))
         taskButton(QtWidgets.QDialogButtonBox.Ok).click()
         pump(1.0)
         self.assertFalse(Gui.Control.activeDialog())
@@ -1077,3 +1093,155 @@ class TestSplitGui(ResultBoxGuiCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestOperationRowGui(ResultBoxGuiCase):
+    """One Extrude, Onshape's (ops#640, ops#646; the blind findings F1, F11, F12 and the user's
+    report 15): a Pad's or a Pocket's Result box offers New part, Add, Remove and Intersect at its
+    creation and at every edit, and a change keeps the feature. Between adding and cutting the
+    tool flips into the material or out of it. Designed geometry: the enclosure 40 x 40 x 10
+    (16000) with its lid sketch, 30 x 30 on its top face."""
+
+    def editLid(self, length=10):
+        lid = pad(self.body, "Lid", self.lidSk, length)
+        self.doc.recompute()
+        lid.ViewObject.doubleClicked()
+        self.waitForPanel()
+        return lid
+
+    def assertOneUndoStep(self, before, volume):
+        self.assertEqual(len(self.doc.UndoNames), before + 1, self.doc.UndoNames)
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertAlmostEqual(self.body.Shape.Volume, volume, places=3)
+
+    def testAnAddPadBecomesAHole(self):
+        """F11: the lid pad, 10 up (25000), edited: on Add to Enclosure; Remove from Enclosure
+        makes it a cut through the enclosure, the same feature reversed (7000). One undo step
+        brings the boss back."""
+        self.enclosure()
+        lid = self.editLid()
+        undos = len(self.doc.UndoNames)
+        self.assertEqual(self.items(self.combo()), ROWS)
+        self.assertEqual(self.combo().currentText(), "Add to Enclosure")
+        self.choose("Remove from Enclosure")
+        self.assertEqual(lid.Operation, "Subtraction")
+        self.assertTrue(lid.Reversed)
+        self.assertIs(Gui.getDocument(self.doc.Name).getInEdit().Object, lid)
+        self.close(ok=True)
+        self.assertIn(lid, self.body.Group)
+        self.assertIs(self.body.Tip, lid)
+        self.assertAlmostEqual(self.body.Shape.Volume, 7000, places=3)
+        self.assertOneUndoStep(undos, 25000)
+        self.assertEqual(lid.Operation, "Union")
+        self.assertFalse(lid.Reversed)
+
+    def testAPocketBecomesABoss(self):
+        """A pocket of the lid sketch, 5 deep (11500), edited: Add to Enclosure puts the 30 x 30 x
+        5 plate on top instead (20500)."""
+        self.enclosure()
+        pocket = self.body.newObject("PartDesign::Pocket", "Pocket")
+        pocket.Profile = self.lidSk
+        pocket.Length = 5
+        self.doc.recompute()
+        self.assertAlmostEqual(self.body.Shape.Volume, 11500, places=3)
+        pocket.ViewObject.doubleClicked()
+        self.waitForPanel()
+        self.assertEqual(self.combo().currentText(), "Remove from Enclosure")
+        self.choose("Add to Enclosure")
+        self.assertEqual(pocket.Operation, "Union")
+        self.close(ok=True)
+        self.assertAlmostEqual(self.body.Shape.Volume, 20500, places=3)
+        self.assertAlmostEqual(self.body.Shape.BoundBox.ZMax, 15, places=6)
+
+    def testIntersectKeepsWhatTheyShare(self):
+        """The lid pad, Intersect with Enclosure: the tool goes into the enclosure, which keeps
+        the 30 x 30 x 10 they share (9000)."""
+        self.enclosure()
+        lid = self.editLid()
+        self.choose("Intersect with Enclosure")
+        self.assertEqual(lid.Operation, "Common")
+        self.close(ok=True)
+        self.assertAlmostEqual(self.body.Shape.Volume, 9000, places=3)
+
+    def testThePadsCommandOffersEveryRow(self):
+        """At creation too: the Pad command's box has the four rows on Add to Enclosure, and
+        Remove from Enclosure, then OK, cuts (7000)."""
+        self.enclosure()
+        lid = self.lidPad()
+        self.assertEqual(self.items(self.combo()), ROWS)
+        self.choose("Remove from Enclosure")
+        self.close(ok=True)
+        self.assertEqual(lid.Operation, "Subtraction")
+        self.assertAlmostEqual(self.body.Shape.Volume, 7000, places=3)
+
+    def testANewPartGoesBackToAdd(self):
+        """F12 and report 15: the lid pad made a new part and committed. Its edit is on New part,
+        and Add to Enclosure (the part it touches) moves the pad and its sketch into the
+        enclosure, where they were, and the new Body goes: one part, 25000, in one undo step."""
+        self.enclosure()
+        group = self.body.Group
+        lid = self.lidPad()
+        self.choose("New part")
+        self.close(ok=True)
+        part = lid.getParentGeoFeatureGroup()
+        self.assertNotEqual(part, self.body)
+        partName = part.Name
+        lid.ViewObject.doubleClicked()
+        self.waitForPanel()
+        undos = len(self.doc.UndoNames)
+        combo = self.combo()
+        self.assertEqual(self.items(combo), ROWS)
+        self.assertEqual(combo.currentText(), "New part")
+        self.assertIsNone(self.visible(QtWidgets.QListWidget, "mergeList"))
+        self.choose("Add to Enclosure")
+        self.assertEqual(self.bodies(), ["Enclosure"])
+        self.assertEqual(self.combo().currentText(), "Add to Enclosure")
+        self.close(ok=True)
+        self.assertEqual(self.body.Group, group + [lid])
+        self.assertIs(self.body.Tip, lid)
+        self.assertAlmostEqual(self.body.Shape.Volume, 25000, places=3)
+        self.assertEqual([o.Name for o in self.doc.Objects if not o.isValid()], [])
+        self.assertEqual(len(self.doc.UndoNames), undos + 1, self.doc.UndoNames)
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertIsNotNone(self.doc.getObject(partName))
+        self.assertAlmostEqual(self.doc.getObject(partName).Shape.Volume, 9000, places=3)
+        self.assertAlmostEqual(self.body.Shape.Volume, 16000, places=3)
+
+    def testCancelLeavesTheNewPart(self):
+        """The same move, then Cancel: the new part is as it was (9000), the enclosure 16000."""
+        self.enclosure()
+        lid = self.lidPad()
+        self.choose("New part")
+        self.close(ok=True)
+        part = lid.getParentGeoFeatureGroup()
+        lid.ViewObject.doubleClicked()
+        self.waitForPanel()
+        self.choose("Add to Enclosure")
+        self.close(ok=False)
+        self.doc.recompute()
+        self.assertEqual(sorted(self.bodies()), sorted(["Enclosure", part.Name]))
+        self.assertIs(lid.getParentGeoFeatureGroup(), part)
+        self.assertAlmostEqual(part.Shape.Volume, 9000, places=3)
+        self.assertAlmostEqual(self.body.Shape.Volume, 16000, places=3)
+
+    def testANewPartBecomesAHole(self):
+        """The lid as a new part, edited: Remove from Enclosure moves it into the enclosure as a
+        cut through it (7000), and the new Body goes."""
+        self.enclosure()
+        lid = self.lidPad()
+        self.choose("New part")
+        self.close(ok=True)
+        lid.ViewObject.doubleClicked()
+        self.waitForPanel()
+        self.choose("Remove from Enclosure")
+        self.close(ok=True)
+        self.assertEqual(self.bodies(), ["Enclosure"])
+        self.assertEqual(lid.Operation, "Subtraction")
+        self.assertAlmostEqual(self.body.Shape.Volume, 7000, places=3)
+
+    def visible(self, cls, name):
+        QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+        found = [w for w in Gui.getMainWindow().findChildren(cls, name) if w.isVisible()]
+        return found[0] if found else None

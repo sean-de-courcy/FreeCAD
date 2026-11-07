@@ -94,6 +94,12 @@ public:
 
 protected:
     void onDocumentRestored() override;
+    /// Whether the class sweeps its profile against the profile's normal (a Pocket), whatever its
+    /// Operation: Pads and Pockets take every operation (FreeCAD-CH ops#640)
+    virtual bool sweepsAgainstNormal() const
+    {
+        return false;
+    }
     Base::Vector3d computeDirection(const Base::Vector3d& sketchVector, bool inverse);
     bool hasTaperedAngle() const;
     void onChanged(const App::Property* prop) override;

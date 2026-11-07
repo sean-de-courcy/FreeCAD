@@ -211,6 +211,8 @@ public:
 
 private:
     void onResultChanged(int index);
+    /// A Pad's or a Pocket's rows: New part, Add, Remove, Intersect (ops#640)
+    void addOperationRow();
     void addPartsList();
     void addMergeList();
     /// The plain line for touching parts left out and the banner for the ticked ones
@@ -233,6 +235,8 @@ private:
     std::shared_ptr<TouchCache> touchCache;
     /// The feature, still named when it is deleted (Cancel of a new one)
     App::DocumentObjectT featureT;
+    /// The operation row's current row (new, add, Subtraction, Common), when it has one
+    QString operation;
 };
 
 /// A common base for sketch based, dressup and other solid parameters dialogs

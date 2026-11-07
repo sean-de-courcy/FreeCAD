@@ -104,8 +104,14 @@ protected:
     BooleanOperation booleanOperation {BooleanOperation::Union};
     void defineAdditive();
     void defineSubtractive();
+    /// Operation takes Union, Subtraction and Common, whatever the class defined, keeping its
+    /// value: Onshape's New / Add / Remove / Intersect on one feature (FreeCAD-CH ops#640). Again
+    /// after a restore, which brings back the list a file saved
+    void allowAllOperations();
+    void onDocumentRestored() override;
 
 private:
+    bool allOperations {false};
     /// Why this sibling's copied links or bound values aren't its primary's, or empty
     std::string outOfStep() const;
     /// Warns when this sibling's tool doesn't touch its part

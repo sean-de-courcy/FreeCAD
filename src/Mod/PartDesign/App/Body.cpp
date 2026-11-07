@@ -530,6 +530,95 @@ Body* Body::newPartFrom(App::DocumentObject* feature)
     return part;
 }
 
+Body* Body::addToPart(App::DocumentObject* feature, Body* target)
+{
+    Body* body = findBodyOf(feature);
+    if (!body || !isSolidFeature(feature)) {
+        throw Base::ValueError("Add to part: the object isn't a solid feature of a body");
+    }
+    if (!target || target == body || !areStudioSiblings(body, target)) {
+        throw Base::ValueError("Add to part: the target isn't another part of the feature's studio");
+    }
+    if (target->isRolledBack()) {
+        throw Base::ValueError(
+            std::string("Add to part: roll ") + target->Label.getValue() + " to the end first"
+        );
+    }
+    // newPartFrom's rule the other way: a feature that something uses would make its users' links
+    // cross into the target, and later features of its part would need moving with their element
+    // references (the Onshape experiment, ops#640: refused, not guessed)
+    if (!usedOnlyBy(feature, body, {})) {
+        throw Base::ValueError("Add to part: something else uses the feature");
+    }
+    App::DocumentObject* sketch = nullptr;
+    if (auto profileBased = freecad_cast<ProfileBased*>(feature)) {
+        App::DocumentObject* profile = profileBased->Profile.getValue();
+        if (profile && profile->isDerivedFrom<Part::Part2DObject>() && body->hasObject(profile)
+            && usedOnlyBy(profile, body, {feature})) {
+            sketch = profile;
+        }
+    }
+    for (App::DocumentObject* member : body->Group.getValues()) {
+        if (member != feature && member != sketch) {
+            throw Base::ValueError(
+                std::string("Add to part: ") + body->Label.getValue()
+                + " holds more than this feature; merge it instead"
+            );
+        }
+    }
+
+    // Where the history has it: after the target's last member that comes before it in the
+    // studio's sequence (the sketch before the feature)
+    App::Document* doc = feature->getDocument();
+    App::Part* studio = nullptr;
+    studioOf(target, studio);
+    const std::vector<App::DocumentObject*> sequence = studioSequence(doc, studio);
+    const App::DocumentObject* first = sketch ? sketch : feature;
+    const std::vector<App::DocumentObject*>& group = target->Group.getValues();
+    App::DocumentObject* after = nullptr;
+    for (App::DocumentObject* obj : sequence) {
+        if (obj == first) {
+            break;
+        }
+        if (std::ranges::find(group, obj) != group.end()) {
+            after = obj;
+        }
+    }
+    // The target's last solid comes before it: it is the new Tip, else it goes in mid-history
+    auto afterIt = after ? std::ranges::find(group, after) : group.begin();
+    if (after) {
+        ++afterIt;
+    }
+    const bool last = std::none_of(afterIt, group.end(), isSolidFeature);
+
+    body->removeObject(feature);
+    if (sketch) {
+        body->removeObject(sketch);
+        // relinked to the target's origin, as moveBack's insert does
+        target->insertObject(sketch, after, /*after = */ true);
+        after = sketch;
+    }
+    target->insertObject(feature, after, /*after = */ true);
+    if (last) {
+        target->Tip.setValue(feature);
+        // the part shows its new Tip alone, as Body::addObject() does
+        for (App::DocumentObject* obj : target->Group.getValues()) {
+            if (obj != feature && obj->isDerivedFrom<PartDesign::Feature>()
+                && obj->Visibility.getValue()) {
+                obj->Visibility.setValue(false);
+            }
+        }
+        feature->Visibility.setValue(true);
+    }
+    else {
+        feature->Visibility.setValue(false);
+    }
+    saveHistoryOrder(sequence);
+    // The Body it left is empty now: it goes, with its origin
+    doc->removeObject(body->getNameInDocument());
+    return target;
+}
+
 
 std::vector<App::DocumentObject*> Body::addObject(App::DocumentObject* feature)
 {

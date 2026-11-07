@@ -169,6 +169,17 @@ public:
      */
     static Body* newPartFrom(App::DocumentObject* feature);
 
+    /**
+     * Add to part (FreeCAD-CH ops#640, the Onshape experiment): newPartFrom() the other way. Moves
+     * `feature`, the only member of its Body besides its Profile sketch (which moves along when
+     * nothing else uses it) and that nothing else uses, into `target`, a studio sibling not rolled
+     * back, where the studio's history has it: after target's last member that comes before it,
+     * as target's Tip when no solid of target follows. The Body it leaves, empty, is removed. Runs
+     * in the caller's transaction and doesn't recompute. Returns target; throws Base::ValueError,
+     * before anything is written, for any other case.
+     */
+    static Body* addToPart(App::DocumentObject* feature, Body* target);
+
     PyObject* getPyObject() override;
 
     std::vector<std::string> getSubObjects(int reason = 0) const override;

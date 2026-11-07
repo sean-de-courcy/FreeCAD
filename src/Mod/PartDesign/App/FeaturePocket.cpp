@@ -51,6 +51,8 @@ PROPERTY_SOURCE(PartDesign::Pocket, PartDesign::FeatureExtrude)
 Pocket::Pocket()
 {
     defineSubtractive();
+    // New / Add / Remove / Intersect on one feature (FreeCAD-CH ops#640)
+    allowAllOperations();
 
     ADD_PROPERTY_TYPE(SideType, (0L), "Pocket", App::Prop_None, "Type of sides definition");
     ADD_PROPERTY_TYPE(Type, ((long)0), "Side1", App::Prop_None, "Pocket type");

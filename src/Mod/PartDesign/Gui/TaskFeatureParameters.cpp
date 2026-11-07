@@ -55,6 +55,7 @@
 #include <Mod/PartDesign/App/Feature.h>
 #include <Mod/PartDesign/App/FeatureAddSub.h>
 #include <Mod/PartDesign/App/FeatureBoolean.h>
+#include <Mod/PartDesign/App/FeatureExtrude.h>
 #include <Mod/PartDesign/App/FeatureSketchBased.h>
 #include <Mod/PartDesign/App/Body.h>
 
@@ -354,95 +355,103 @@ void showTipIfNoneShown(const PartDesign::Body* body)
     }
 }
 
+// New part's move, inside a restart of the edit (restartEdit)
+void newPartMove(const App::DocumentObjectT& featureT)
+{
+    App::DocumentObject* feature = featureT.getObject();
+    PartDesign::Body* from = PartDesign::Body::findBodyOf(feature);
+    if (!from) {
+        return;
+    }
+    App::DocumentObject* sketch = nullptr;
+    App::DocumentObject* sketchAfter = nullptr;
+    if (auto profileBased = freecad_cast<PartDesign::ProfileBased*>(feature)) {
+        sketch = profileBased->Profile.getValue();
+        const auto& group = from->Group.getValues();
+        auto it = std::ranges::find(group, sketch);
+        if (it != group.end() && it != group.begin()) {
+            sketchAfter = *(it - 1);
+        }
+    }
+    Gui::Command::doCommand(Gui::Command::Doc, "import PartDesign");
+    Gui::Command::doCommand(
+        Gui::Command::Doc,
+        "PartDesign.newPartFrom(%s)",
+        Gui::Command::getObjectCmd(feature).c_str()
+    );
+    PartDesign::Body* part = PartDesign::Body::findBodyOf(feature);
+    if (!part || part == from) {
+        return;
+    }
+    NewPartMove move {
+        .feature = featureT,
+        .from = App::DocumentObjectT(from),
+        .part = App::DocumentObjectT(part),
+        .sketch = {},
+        .sketchAfter = {},
+    };
+    if (sketch && part->hasObject(sketch)) {
+        move.sketch = sketch;
+        move.sketchAfter = sketchAfter;
+    }
+    forgetMove(featureT);
+    newPartMoves.push_back(move);
+    // The part it left shows its own result now; OK purges the document's touched objects
+    // (accept()), so the part would keep the feature's solid until its next recompute
+    from->recomputeFeature(/*recursive=*/true);
+    // ...and stays shown, as Onshape's other parts do (ops#630): the command hid its Tip for
+    // the feature, which has left. A feature the user shows instead stays the shown one
+    showTipIfNoneShown(from);
+}
+
+// Add to's move back of what this dialog's New part moved, inside a restart of the edit
+void backMove(const App::DocumentObjectT& featureT)
+{
+    NewPartMove* found = findMove(featureT.getObject());
+    if (!found) {
+        return;
+    }
+    NewPartMove move = *found;
+    forgetMove(featureT);
+    App::DocumentObject* feature = move.feature.getObject();
+    auto from = freecad_cast<PartDesign::Body*>(move.from.getObject());
+    auto part = freecad_cast<PartDesign::Body*>(move.part.getObject());
+    if (!from || !part || !part->hasObject(feature)) {
+        return;
+    }
+    auto cmd = [](const App::DocumentObject* obj) {
+        return Gui::Command::getObjectCmd(obj);
+    };
+    auto run = [](const std::string& line) {
+        Gui::Command::doCommand(Gui::Command::Doc, "%s", line.c_str());
+    };
+    run(cmd(part) + ".removeObject(" + cmd(feature) + ")");
+    App::DocumentObject* sketch = move.sketch.getObject();
+    if (sketch && part->hasObject(sketch)) {
+        run(cmd(part) + ".removeObject(" + cmd(sketch) + ")");
+        // where it was (relinked to this Body's origin on insert)
+        App::DocumentObject* after = move.sketchAfter.getObject();
+        std::string target = after && from->hasObject(after) ? cmd(after) : "None";
+        run(cmd(from) + ".insertObject(" + cmd(sketch) + ", " + target + ", True)");
+    }
+    run(cmd(from) + ".addObject(" + cmd(feature) + ")");
+    // the new Body, empty now, goes with its origin
+    if (part->Group.getValues().empty()) {
+        run(
+            std::string("App.getDocument('") + part->getDocument()->getName()
+            + "').removeObject('" + part->getNameInDocument() + "')"
+        );
+    }
+}
+
 void moveToNewPart(const App::DocumentObjectT& featureT)
 {
-    restartEdit(featureT, [&featureT]() {
-        App::DocumentObject* feature = featureT.getObject();
-        PartDesign::Body* from = PartDesign::Body::findBodyOf(feature);
-        if (!from) {
-            return;
-        }
-        App::DocumentObject* sketch = nullptr;
-        App::DocumentObject* sketchAfter = nullptr;
-        if (auto profileBased = freecad_cast<PartDesign::ProfileBased*>(feature)) {
-            sketch = profileBased->Profile.getValue();
-            const auto& group = from->Group.getValues();
-            auto it = std::ranges::find(group, sketch);
-            if (it != group.end() && it != group.begin()) {
-                sketchAfter = *(it - 1);
-            }
-        }
-        Gui::Command::doCommand(Gui::Command::Doc, "import PartDesign");
-        Gui::Command::doCommand(
-            Gui::Command::Doc,
-            "PartDesign.newPartFrom(%s)",
-            Gui::Command::getObjectCmd(feature).c_str()
-        );
-        PartDesign::Body* part = PartDesign::Body::findBodyOf(feature);
-        if (!part || part == from) {
-            return;
-        }
-        NewPartMove move {
-            .feature = featureT,
-            .from = App::DocumentObjectT(from),
-            .part = App::DocumentObjectT(part),
-            .sketch = {},
-            .sketchAfter = {},
-        };
-        if (sketch && part->hasObject(sketch)) {
-            move.sketch = sketch;
-            move.sketchAfter = sketchAfter;
-        }
-        forgetMove(featureT);
-        newPartMoves.push_back(move);
-        // The part it left shows its own result now; OK purges the document's touched objects
-        // (accept()), so the part would keep the feature's solid until its next recompute
-        from->recomputeFeature(/*recursive=*/true);
-        // ...and stays shown, as Onshape's other parts do (ops#630): the command hid its Tip for
-        // the feature, which has left. A feature the user shows instead stays the shown one
-        showTipIfNoneShown(from);
-    });
+    restartEdit(featureT, [&featureT]() { newPartMove(featureT); });
 }
 
 void moveBack(const App::DocumentObjectT& featureT)
 {
-    restartEdit(featureT, [&featureT]() {
-        NewPartMove* found = findMove(featureT.getObject());
-        if (!found) {
-            return;
-        }
-        NewPartMove move = *found;
-        forgetMove(featureT);
-        App::DocumentObject* feature = move.feature.getObject();
-        auto from = freecad_cast<PartDesign::Body*>(move.from.getObject());
-        auto part = freecad_cast<PartDesign::Body*>(move.part.getObject());
-        if (!from || !part || !part->hasObject(feature)) {
-            return;
-        }
-        auto cmd = [](const App::DocumentObject* obj) {
-            return Gui::Command::getObjectCmd(obj);
-        };
-        auto run = [](const std::string& line) {
-            Gui::Command::doCommand(Gui::Command::Doc, "%s", line.c_str());
-        };
-        run(cmd(part) + ".removeObject(" + cmd(feature) + ")");
-        App::DocumentObject* sketch = move.sketch.getObject();
-        if (sketch && part->hasObject(sketch)) {
-            run(cmd(part) + ".removeObject(" + cmd(sketch) + ")");
-            // where it was (relinked to this Body's origin on insert)
-            App::DocumentObject* after = move.sketchAfter.getObject();
-            std::string target = after && from->hasObject(after) ? cmd(after) : "None";
-            run(cmd(from) + ".insertObject(" + cmd(sketch) + ", " + target + ", True)");
-        }
-        run(cmd(from) + ".addObject(" + cmd(feature) + ")");
-        // the new Body, empty now, goes with its origin
-        if (part->Group.getValues().empty()) {
-            run(
-                std::string("App.getDocument('") + part->getDocument()->getName()
-                + "').removeObject('" + part->getNameInDocument() + "')"
-            );
-        }
-    });
+    restartEdit(featureT, [&featureT]() { backMove(featureT); });
 }
 
 // Whether `box` is still in the open dialog of the feature's document, under the dialog's
@@ -465,6 +474,14 @@ QString partLabel(const App::DocumentObject* body)
 {
     return body ? QString::fromUtf8(body->Label.getValue()) : QString();
 }
+
+// A Pad or a Pocket in a body: the operation row, New part / Add / Remove / Intersect, at its
+// creation and at every edit, as Onshape's Extrude (FreeCAD-CH ops#640)
+bool hasOperationRow(const App::DocumentObject* feature)
+{
+    return feature && feature->isDerivedFrom<PartDesign::FeatureExtrude>()
+        && PartDesign::Body::findBodyOf(feature);
+}
 }  // namespace
 
 TaskResultParameters::TaskResultParameters(PartDesignGui::ViewProvider* vp, QWidget* parent)
@@ -483,7 +500,10 @@ TaskResultParameters::TaskResultParameters(PartDesignGui::ViewProvider* vp, QWid
 
     auto feature = getObject<PartDesign::FeatureAddSub>();
     PartDesign::Body* body = PartDesign::Body::findBodyOf(feature);
-    if (feature->getAddSubType() == PartDesign::FeatureAddSub::Type::Additive) {
+    if (hasOperationRow(feature)) {
+        addOperationRow();
+    }
+    else if (feature->getAddSubType() == PartDesign::FeatureAddSub::Type::Additive) {
         App::DocumentObject* from = movedFrom(feature);
         combo->addItem(tr("Add to %1").arg(partLabel(from ? from : body)), QStringLiteral("add"));
         combo->addItem(tr("New part"), QStringLiteral("new"));
@@ -538,6 +558,9 @@ bool TaskResultParameters::hasRows(App::DocumentObject* feature)
     PartDesign::Body* body = PartDesign::Body::findBodyOf(feature);
     if (!addSub || !body) {
         return false;
+    }
+    if (hasOperationRow(feature)) {
+        return true;  // New part, Add, Remove, Intersect: always (ops#640)
     }
     if (isMoved(feature) || hasStudioSiblings(body)) {
         return true;
@@ -601,7 +624,229 @@ QString touchText(const PartDesign::Body* part, bool touches)
     return touches ? partLabel(part)
                    : QObject::tr("%1 (doesn't touch)").arg(partLabel(part));
 }
+
+bool isSubtractive(const QString& key)
+{
+    return key == QStringLiteral("Subtraction") || key == QStringLiteral("Common");
+}
+
+// A part's own first solid, adding: the feature that made the part (Onshape's New)
+bool isNewPart(PartDesign::FeatureAddSub* feature)
+{
+    PartDesign::Body* body = PartDesign::Body::findBodyOf(feature);
+    return body
+        && feature->getBooleanOperation() == PartDesign::FeatureAddSub::BooleanOperation::Union
+        && !body->BaseFeature.getValue() && !body->getPrevSolidFeature(feature);
+}
+
+// The row the feature is on: new, add, Subtraction or Common
+QString operationKey(PartDesign::FeatureAddSub* feature)
+{
+    if (isMoved(feature) || isNewPart(feature)) {
+        return QStringLiteral("new");
+    }
+    if (feature->getBooleanOperation() == PartDesign::FeatureAddSub::BooleanOperation::Union) {
+        return QStringLiteral("add");
+    }
+    return QString::fromLatin1(feature->Operation.getValueAsString());
+}
+
+// The part a new part's feature goes to for Add, Remove or Intersect: the one this dialog moved it
+// from, else the first studio part its tool touches (Onshape merges with the one part touched)
+PartDesign::Body* operationTarget(PartDesign::FeatureAddSub* feature)
+{
+    if (auto from = freecad_cast<PartDesign::Body*>(TaskResultParameters::movedFrom(feature))) {
+        return from;
+    }
+    PartDesign::Body* body = PartDesign::Body::findBodyOf(feature);
+    if (!body) {
+        return nullptr;
+    }
+    TaskResultParameters::TouchCache cache;
+    for (auto obj : feature->getDocument()->getObjectsOfType(PartDesign::Body::getClassTypeId())) {
+        auto other = static_cast<PartDesign::Body*>(obj);
+        if (other != body && Part::BodyBase::areStudioSiblings(body, other)
+            && !PartDesign::Boolean::mergeOf(other) && toolTouches(feature, other, cache)) {
+            return other;
+        }
+    }
+    return nullptr;
+}
+
+// Why a new part's feature can't go to target (PartDesign.addToPart's rule), or empty
+QString addToPartRefusal(PartDesign::FeatureAddSub* feature, PartDesign::Body* target)
+{
+    if (TaskResultParameters::movedFrom(feature)) {
+        return {};  // this dialog's move, taken back
+    }
+    if (!target) {
+        return QObject::tr("Touches no other part");
+    }
+    if (!hasOpenTransaction(feature->getDocument())) {
+        return QObject::tr("Needs a dialog that Cancel can undo");
+    }
+    if (target->isRolledBack()) {
+        return QObject::tr("Roll %1 to the end first").arg(partLabel(target));
+    }
+    PartDesign::Body* body = PartDesign::Body::findBodyOf(feature);
+    bool used = std::ranges::any_of(feature->getInList(), [body](App::DocumentObject* user) {
+        return user != body;
+    });
+    if (used) {
+        return QObject::tr("Something else uses this feature");
+    }
+    auto profileBased = freecad_cast<PartDesign::ProfileBased*>(feature);
+    App::DocumentObject* sketch = profileBased ? profileBased->Profile.getValue() : nullptr;
+    // the sketch goes along when only the feature uses it
+    auto alongOnly = [&](App::DocumentObject* member) {
+        return member == sketch
+            && std::ranges::all_of(member->getInList(), [&](App::DocumentObject* user) {
+                   return user == body || user == feature;
+               });
+    };
+    bool more = std::ranges::any_of(body->Group.getValues(), [&](App::DocumentObject* member) {
+        return member != feature && !alongOnly(member);
+    });
+    if (more) {
+        return QObject::tr("%1 has more features: merge it instead").arg(partLabel(body));
+    }
+    return {};
+}
+
+// The Merge right after the feature (makeMerge's place), or null
+PartDesign::Boolean* mergeAfter(PartDesign::FeatureAddSub* feature)
+{
+    PartDesign::Body* body = PartDesign::Body::findBodyOf(feature);
+    auto next = body ? freecad_cast<PartDesign::Boolean*>(body->getNextSolidFeature(feature))
+                     : nullptr;
+    return next && next->isMerge() && next->BaseFeature.getValue() == feature ? next : nullptr;
+}
+
+// Puts the feature on the row `key`, inside a restart of the edit, so the box shows the parts
+// list or the merge list that goes with it. Leaving a cut drops its siblings; a new part's
+// feature goes to its target first; the tool flips between adding and cutting when its length,
+// not a face, ends it (Onshape flips the arrow for Remove: the tool goes into the material)
+void switchOperation(const App::DocumentObjectT& featureT, const QString& key)
+{
+    restartEdit(featureT, [&featureT, &key]() {
+        auto feature = freecad_cast<PartDesign::FeatureExtrude*>(featureT.getObject());
+        if (!feature) {
+            return;
+        }
+        const QString was = operationKey(feature);
+        auto run = [](const std::string& line) {
+            Gui::Command::doCommand(Gui::Command::Doc, "%s", line.c_str());
+        };
+        const std::string obj = Gui::Command::getObjectCmd(feature);
+        run("import PartDesign");
+        if (isSubtractive(was) && !isSubtractive(key) && !feature->getSiblings().empty()) {
+            run("PartDesign.makeSiblings(" + obj + ", [])");
+        }
+        if (was == QStringLiteral("new") && key != QStringLiteral("new")) {
+            if (isMoved(feature)) {
+                backMove(featureT);
+            }
+            else if (PartDesign::Body* target = operationTarget(feature)) {
+                run("PartDesign.addToPart(" + obj + ", " + Gui::Command::getObjectCmd(target) + ")");
+            }
+        }
+        const std::string operation =
+            isSubtractive(key) ? std::string(key.toLatin1().constData()) : std::string("Union");
+        if (operation != feature->Operation.getValueAsString()) {
+            run(obj + ".Operation = '" + operation + "'");
+        }
+        const std::string type = feature->Type.getValueAsString();
+        if (isSubtractive(was) != isSubtractive(key) && (type == "Length" || type == "ThroughAll")) {
+            run(obj + ".Reversed = " + (feature->Reversed.getValue() ? "False" : "True"));
+        }
+        if (key == QStringLiteral("new") && was != QStringLiteral("new")) {
+            newPartMove(featureT);
+        }
+        feature->recomputeFeature();
+    });
+}
 }  // namespace
+
+void TaskResultParameters::addOperationRow()
+{
+    auto feature = getObject<PartDesign::FeatureAddSub>();
+    PartDesign::Body* body = PartDesign::Body::findBodyOf(feature);
+    operation = operationKey(feature);
+    const bool isNew = operation == QStringLiteral("new");
+    // A new part's feature names the part it would go to; the others their own
+    PartDesign::Body* target = isNew ? operationTarget(feature) : body;
+    combo->addItem(tr("New part"), QStringLiteral("new"));
+    combo->addItem(
+        target ? tr("Add to %1").arg(partLabel(target)) : tr("Add"),
+        QStringLiteral("add")
+    );
+    combo->addItem(
+        target ? tr("Remove from %1").arg(partLabel(target)) : tr("Remove"),
+        QStringLiteral("Subtraction")
+    );
+    combo->addItem(
+        target ? tr("Intersect with %1").arg(partLabel(target)) : tr("Intersect"),
+        QStringLiteral("Common")
+    );
+    combo->setCurrentIndex(combo->findData(operation));
+
+    auto refuse = [this](const QString& key, const QString& why) {
+        const int index = combo->findData(key);
+        if (why.isEmpty() || index < 0 || index == combo->currentIndex()) {
+            return;
+        }
+        if (auto model = qobject_cast<QStandardItemModel*>(combo->model())) {
+            model->item(index)->setEnabled(false);
+        }
+        combo->setItemData(index, why, Qt::ToolTipRole);
+    };
+    if (App::DocumentObject* primary = primaryOf(feature)) {
+        combo->setEnabled(false);  // bound to the primary's
+        addFollowsNote(primary);
+        return;
+    }
+    if (isNew) {
+        const QString why = addToPartRefusal(feature, target);
+        for (const char* key : {"add", "Subtraction", "Common"}) {
+            refuse(QString::fromLatin1(key), why);
+        }
+        return;  // a new part merges nothing (Onshape's New has no merge scope)
+    }
+    // New part: newPartFrom's rule; a cut through other parts drops them first
+    refuse(
+        QStringLiteral("new"),
+        feature->getSiblings().empty() ? newPartRefusal(feature)
+                                       : tr("Cuts other parts too: untick them first")
+    );
+    if (PartDesign::Boolean* merge = mergeAfter(feature)) {
+        QStringList merged;
+        for (App::DocumentObject* part : merge->mergedBodies()) {
+            merged << partLabel(part);
+        }
+        const QString why =
+            tr("Merged with %1: delete the Merge first").arg(merged.join(QStringLiteral(", ")));
+        refuse(QStringLiteral("Subtraction"), why);
+        refuse(QStringLiteral("Common"), why);
+    }
+    for (PartDesign::FeatureAddSub* sibling : feature->getSiblings()) {
+        if (App::DocumentObject* user = PartDesign::FeatureAddSub::siblingUser(sibling)) {
+            refuse(
+                QStringLiteral("add"),
+                tr("Its cut %1 is used by %2").arg(partLabel(sibling), partLabel(user))
+            );
+        }
+    }
+    if (!body || !hasStudioSiblings(body)) {
+        return;
+    }
+    if (isSubtractive(operation)) {
+        addPartsList();
+    }
+    else if (!PartDesign::Boolean::mergeOf(body)) {
+        addMergeList();
+    }
+}
+
 
 void TaskResultParameters::addPartsList()
 {
@@ -852,6 +1097,28 @@ void TaskResultParameters::onResultChanged(int index)
         return;
     }
     const QString what = combo->itemData(index).toString();
+    if (hasOperationRow(feature)) {
+        if (what == operation) {
+            return;
+        }
+        // The edit restarts, which closes this dialog: after the signal, from the event loop
+        combo->setEnabled(false);
+        App::DocumentObjectT target(feature);
+        QPointer<TaskResultParameters> box(this);
+        const QString was = operation;
+        QTimer::singleShot(0, qApp, [box, target, what, was]() {
+            if (!isEditing(box.data(), target)) {
+                if (box) {
+                    QSignalBlocker block(box->combo);
+                    box->combo->setCurrentIndex(box->combo->findData(was));
+                    box->combo->setEnabled(true);
+                }
+                return;
+            }
+            switchOperation(target, what);
+        });
+        return;
+    }
     if (feature->getAddSubType() == PartDesign::FeatureAddSub::Type::Subtractive) {
         feature->Operation.setValue(what.toLatin1().constData());
         recomputeFeature();
@@ -890,7 +1157,7 @@ void TaskResultParameters::apply()
     auto feature = getObject<PartDesign::FeatureAddSub>();
     // New part is done (PartDesign.newPartFrom, in the macro too); a sibling's Operation is bound
     if (feature && feature->getAddSubType() == PartDesign::FeatureAddSub::Type::Subtractive
-        && !primaryOf(feature)) {
+        && !primaryOf(feature) && !hasOperationRow(feature)) {
         FCMD_OBJ_CMD(feature, "Operation = '" << feature->Operation.getValueAsString() << "'");
     }
     // The ticked parts merged into this one, right after the feature (design 2.5). A part merged
