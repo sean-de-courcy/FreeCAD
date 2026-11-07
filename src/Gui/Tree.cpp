@@ -2854,6 +2854,12 @@ void TreeWidget::mouseDoubleClickEvent(QMouseEvent* event)
             std::ostringstream ss;
             ss << Command::getObjectCmd(vp->getObject()) << ".ViewObject.doubleClicked()";
 
+            // FreeCAD-CH (ops#640): a double-click beside another feature's open dialog accepts
+            // it first (Onshape); when it stays, nothing happens (the status message says why)
+            if (!guidoc->acceptOpenStep()) {
+                return;
+            }
+
             const char* commandText = vp->getTransactionText();
             if (commandText) {
                 appdoc->openTransaction(commandText);
@@ -3973,6 +3979,14 @@ void TreeWidget::dropEvent(QDropEvent* event)
 
     TargetItemInfo targetInfo = getTargetInfo(event);
     if (!targetInfo.targetItem) {
+        return;
+    }
+
+    // FreeCAD-CH (ops#640): no drop beside an open feature dialog: its openTransaction would be
+    // refused and the drop's commit or abort of transaction 0 would close the dialog's own step
+    if (Command::stepLockedDocument()) {
+        getMainWindow()->showMessage(tr("Finish the open dialog first"), 5000);
+        event->ignore();
         return;
     }
 
@@ -7569,6 +7583,14 @@ void DocumentObjectItem::setData(int column, int role, const QVariant& value)
         // Explicitly open and commit a transaction since this is a single change here
         // For more details: https://forum.freecad.org/viewtopic.php?f=3&t=72351
         App::Document* doc = obj->getDocument();
+        // FreeCAD-CH (ops#640): beside an open feature dialog the rename is refused and the text
+        // reverts: its openTransaction is refused, and commitTransaction() would commit the
+        // dialog's own step
+        if (doc->isStepLocked()) {
+            getMainWindow()->showMessage(TreeWidget::tr("Finish the open dialog first"), 5000);
+            QTreeWidgetItem::setData(column, role, QString::fromUtf8(label.getValue()));
+            return;
+        }
         doc->openTransaction(str.str().c_str());
         label.setValue(value.toString().toUtf8().constData());
         doc->commitTransaction();

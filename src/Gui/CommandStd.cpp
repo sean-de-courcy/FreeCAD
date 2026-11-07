@@ -908,7 +908,8 @@ StdCmdUserEditMode::StdCmdUserEditMode()
     sStatusTip = sToolTipText;
     sWhatsThis = "Std_UserEditMode";
     sPixmap = "Std_UserEditModeDefault";
-    eType = ForEdit;
+    // FreeCAD-CH (ops#640): a setting, no transaction: allowed beside an open feature dialog
+    eType = ForEdit | NoTransaction;
 
     this->getGuiApplication()->signalUserEditModeChanged.connect([this](int mode) {
         this->updateIcon(mode);

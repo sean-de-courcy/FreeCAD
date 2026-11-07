@@ -86,6 +86,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestDeletePart.py
     PartDesignTests/TestStudio.py
     PartDesignTests/TestStudioSequence.py
+    PartDesignTests/TestRegenerate.py
 )
 
 if(BUILD_GUI)
@@ -113,6 +114,7 @@ if(BUILD_GUI)
         PartDesignTests/TestProblemNavigationGui.py
         PartDesignTests/TestToolbarsGui.py
         PartDesignTests/TestContextMenuGui.py
+        PartDesignTests/TestRegenerateGui.py
     )
 endif(BUILD_GUI)
 

@@ -482,12 +482,13 @@ bool View3DInventor::onHasMsg(const char* pMsg) const
         return true;
     }
     else if (strcmp("Undo", pMsg) == 0) {
+        // FreeCAD-CH (ops#640): nothing to undo while a feature dialog holds the step
         App::Document* doc = getAppDocument();
-        return doc && doc->getAvailableUndos() > 0;
+        return doc && !doc->isStepLocked() && doc->getAvailableUndos() > 0;
     }
     else if (strcmp("Redo", pMsg) == 0) {
         App::Document* doc = getAppDocument();
-        return doc && doc->getAvailableRedos() > 0;
+        return doc && !doc->isStepLocked() && doc->getAvailableRedos() > 0;
     }
     else if (strcmp("Print", pMsg) == 0) {
         return true;

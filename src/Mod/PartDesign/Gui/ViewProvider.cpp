@@ -96,13 +96,23 @@ bool ViewProvider::doubleClicked()
 {
     try {
         QString text = QObject::tr("Edit %1").arg(QString::fromUtf8(getObject()->Label.getValue()));
-        getDocument()->openCommand(text.toUtf8());
+        // FreeCAD-CH (ops#640): 0 under the step lock means the open dialog stayed (its accept
+        // failed and showed why): stop here, or trySetEdit would try the accept a second time
+        if (getDocument()->openCommand(text.toUtf8()) == 0
+            && getDocument()->getDocument()->isStepLocked()) {
+            return true;
+        }
         Gui::cmdSetEdit(pcObject, Gui::Application::Instance->getUserEditMode());
     }
     catch (const Base::Exception&) {
         getDocument()->abortCommand();
     }
     return true;
+}
+
+bool ViewProvider::editHoldsOneStep(int ModNum) const
+{
+    return ModNum == ViewProvider::Default;
 }
 
 void ViewProvider::setupContextMenu(QMenu* menu, QObject* receiver, const char* member)

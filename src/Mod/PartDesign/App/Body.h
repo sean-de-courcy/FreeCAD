@@ -159,6 +159,17 @@ public:
      */
     static Body* findBodyOf(const App::DocumentObject* feature);
 
+    /** FreeCAD-CH (ops#640, F37): the recompute stopped this Body without running it (a Fail
+     * verdict on its Tip's unclaimed failure, decisions 254-259, or blocked()). It shows no part,
+     * as Onshape shows none when the feature that makes it fails (a failed feature contributes
+     * nothing): Shape becomes the empty shape, written as execute() writes it (the Placement
+     * kept), and its error stays. The failure rule's afterStop() calls it. A Body whose own
+     * execute() fails ("Tip shape is empty") isn't stopped this way and keeps its last Shape.
+     * In "Through" display the members' own shapes would still show, so ViewProviderBody shows
+     * the Body's (empty) Shape while it is stopped (ViewProviderBody::isStopped)
+     */
+    void writeStoppedShape();
+
     /**
      * New part (FreeCAD-CH ops#325, B+ Stage 1 2.3): moves `feature`, its Body's Tip that nothing
      * else uses (the feature being created), into a new Body at identity placement, in the

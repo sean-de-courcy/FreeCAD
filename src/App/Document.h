@@ -943,6 +943,40 @@ public:
 
     bool transacting() const;
 
+    /** @name The step lock (FreeCAD-CH, ops#640)
+     *
+     * While a feature dialog is open its transaction is one step in progress, which only the
+     * dialog's own commit or abort ends (Onshape: Ctrl+Z with a dialog open does nothing). While
+     * step-locked, undo() and redo() refuse (false), and so do setActiveTransaction() for an id
+     * other than the booked one, openTransaction() and _openTransaction() for a transaction other
+     * than the booked one (0): nothing commits the step behind the dialog or opens a transaction
+     * beside it. The explicit closes pass: commitTransaction(), abortTransaction() and
+     * Application::closeActiveTransaction(). Unlike lockTransaction() (TransactionLocker), which
+     * refuses those closes too. A counter; not saved.
+     * @{
+     */
+    void lockStep();
+    void unlockStep();
+    bool isStepLocked() const;
+    /// @}
+
+    /** @name Regeneration on commit (FreeCAD-CH, ops#640)
+     *
+     * When on, the document regenerates (recompute() of what is touched and its dependants,
+     * synchronously, opening no transaction, so the Redo stack is kept) when a transaction it
+     * takes part in is closed explicitly (Application::closeActiveTransaction(), commit or
+     * abort) and at the end of undo() and redo(), where the objects the step changed and their
+     * dependants are enforced first. Off by default (FreeCADCmd scripts recompute themselves);
+     * Gui::Document turns it on. Not saved.
+     * @{
+     */
+    void setRegenerateOnCommit(bool on);
+    bool regeneratesOnCommit() const;
+    /// Recompute now if regeneration on commit is on, the document needs it and it may run (not
+    /// recomputing, restoring, transacting or partial). Returns whether it recomputed.
+    bool regenerateAfterTransaction();
+    /// @}
+
     int getBookedTransactionID() const;
 
     /**
@@ -1539,6 +1573,11 @@ private:
     void changePropertyOfObject(TransactionalObject* obj, const Property* prop,
                                 const std::function<void()>& changeFunc);
     [[nodiscard]] Base::ScopeGuard setDefiningTransaction();
+    /// FreeCAD-CH (ops#640): enforce the recompute of @a changed (those still in the document)
+    /// and their in-lists, after an undo or redo (Transaction::inputChangedObjects())
+    void enforceChangedForRegeneration(const std::vector<DocumentObject*>& changed);
+    /// FreeCAD-CH (ops#640): whether another document holds a transaction with this id
+    bool transactionSharedElsewhere(int id) const;
 
 private:
     // # Data Member of the document

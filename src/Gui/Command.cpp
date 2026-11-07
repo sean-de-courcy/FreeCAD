@@ -446,7 +446,76 @@ void Command::invoke(int i, TriggerSource trigger)
     Base::Console().log("CmdG: %s\n", sName);
 #endif
 
+    // FreeCAD-CH (ops#640, regen-design section 3): with a feature dialog open its step is
+    // locked; a command that would alter the document accepts the dialog first (Onshape: another
+    // feature tool accepts the open dialog) or is refused visibly, never run with a silent 0
+    // from a refused openTransaction. Checked here, before isActive(), so the run-by-name paths
+    // (Gui.runCommand, the dock's row menu) get the same answer and the message as a click.
+    if (App::Document* locked = stepLockedDocument()) {
+        if ((eType & AcceptsOpenDialog) != 0) {
+            if (!acceptOpenDialog(locked)) {
+                getMainWindow()->showMessage(
+                    QCoreApplication::translate(
+                        "Gui::Command",
+                        "The open dialog could not be accepted: finish or cancel it first"
+                    ),
+                    5000
+                );
+                return;
+            }
+        }
+        else if (refusedByStepLock(locked)) {
+            getMainWindow()->showMessage(
+                QCoreApplication::translate("Gui::Command", "Finish the open dialog first"),
+                5000
+            );
+            return;
+        }
+    }
+
     _invoke(i, bCanLog && !_busy);
+}
+
+App::Document* Command::stepLockedDocument()
+{
+    if (App::Document* doc = App::GetApplication().getActiveDocument()) {
+        if (doc->isStepLocked()) {
+            return doc;
+        }
+    }
+    if (!Gui::Application::Instance) {
+        return nullptr;
+    }
+    for (Gui::Document* guiDoc : Gui::Application::Instance->editDocuments()) {
+        App::Document* doc = guiDoc ? guiDoc->getDocument() : nullptr;
+        if (doc && doc->isStepLocked()) {
+            return doc;
+        }
+    }
+    return nullptr;
+}
+
+bool Command::refusedByStepLock(App::Document* locked) const
+{
+    if (!locked || (eType & NoTransaction) != 0) {
+        return false;  // Std_Undo/Redo (greyed by isActive), Std_Refresh, file commands: allowed
+    }
+    // view and selection commands; a GroupCommand (eType 0) runs its child's invoke(), which
+    // decides. A PythonGroupCommand keeps the default AlterDoc and is refused as a whole
+    return (eType & (AlterDoc | ForEdit)) != 0;
+}
+
+bool Command::acceptOpenDialog(App::Document* locked) const
+{
+    if (!locked) {
+        return true;
+    }
+    if (Gui::Control().activeDialog(locked)) {
+        Gui::Control().accept(locked);
+    }
+    // the dialog's OK commits its step and resets the edit, which releases the lock; a failed
+    // accept (the dialog shows its own message) leaves both
+    return !locked->isStepLocked();
 }
 
 void Command::_invoke(int id, bool disablelog)
@@ -550,7 +619,17 @@ void Command::testActive()
         return;
     }
 
-    if (!(eType & ForEdit)) {  // special case for commands which are only in some edit modes active
+    // FreeCAD-CH (ops#640): the commands the open dialog's step lock refuses read disabled
+    App::Document* locked = stepLockedDocument();
+    if (locked && !(eType & AcceptsOpenDialog) && refusedByStepLock(locked)) {
+        _pcAction->setEnabled(false);
+        return;
+    }
+
+    // FreeCAD-CH (ops#640): a command that accepts the open dialog first stays enabled beside
+    // a step-locked dialog that bars altering the document; its isActive() decides
+    bool acceptsDialog = locked && (eType & AcceptsOpenDialog);
+    if (!(eType & ForEdit) && !acceptsDialog) {  // special case for commands which are only in some edit modes active
 
         App::Document* doc = getDocument();
         if ((!Gui::Control().isAllowedAlterDocument(doc) && eType & AlterDoc)
@@ -1448,6 +1527,9 @@ PythonCommand::PythonCommand(const char* name, PyObject* pcPyCommand, const char
         }
         if (cmdType.find("NoTransaction") != std::string::npos) {
             type += int(NoTransaction);
+        }
+        if (cmdType.find("AcceptsOpenDialog") != std::string::npos) {  // FreeCAD-CH (ops#640)
+            type += int(AcceptsOpenDialog);
         }
         eType = type;
     }

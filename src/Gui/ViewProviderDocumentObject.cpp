@@ -289,6 +289,11 @@ void ViewProviderDocumentObject::startDefaultEditMode()
 {
     Gui::Document* document = this->getDocument();
     if (document) {
+        // FreeCAD-CH (ops#640): beside another feature's open dialog, accept it first; when
+        // it stays, edit nothing (the status message says why)
+        if (!document->acceptOpenStep()) {
+            return;
+        }
         QString text = QObject::tr("Edit %1").arg(QString::fromUtf8(getObject()->Label.getValue()));
         document->openCommand(text.toUtf8());  // Command is opened here and individual dialogs have
                                                // to close it

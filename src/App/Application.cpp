@@ -884,7 +884,11 @@ bool Application::isAsyncRecomputeEnabled()
     static const ParameterGrp::handle hGrp = GetParameterGroupByPath(
         "User parameter:BaseApp/Preferences/Document"
     );
-    bool enableAsyncRecompute = hGrp->GetBool("EnableAsyncRecompute", true);
+    // FreeCAD-CH (ops#640, F5): one regeneration at a time, on the GUI thread: the worker is off
+    // unless AsyncRecomputeWorker is set (the async tests set it themselves). A new key: the old
+    // EnableAsyncRecompute was written true by every OK of the preferences (its checkbox's
+    // default), so a stored value says nothing of a choice and is ignored
+    bool enableAsyncRecompute = hGrp->GetBool("AsyncRecomputeWorker", false);
     return enableAsyncRecompute;
 }
 
@@ -1557,6 +1561,11 @@ Application::TransactionSignaller::TransactionSignaller(bool abort, bool signal)
         _TransSignalled = true;
         GetApplication().signalBeforeCloseTransaction(abort);
     }
+}
+
+bool Application::TransactionSignaller::isActive()
+{
+    return _TransSignalCount > 0;
 }
 
 Application::TransactionSignaller::~TransactionSignaller() {

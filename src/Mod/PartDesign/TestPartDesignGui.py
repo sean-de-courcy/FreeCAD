@@ -64,6 +64,7 @@ from PartDesignTests.TestNewSketchDialogGui import TestNewSketchDialogGui
 from PartDesignTests.TestToolbarsGui import TestToolbarsGui  # FreeCAD-CH, ops#605
 from PartDesignTests.TestContextMenuGui import TestContextMenuGui  # FreeCAD-CH, ops#640
 from PartDesignTests.TestOnshapeStudioGui import TestOnshapeStudioGui
+from PartDesignTests.TestRegenerateGui import TestRegenerateGui  # FreeCAD-CH, ops#640
 
 
 # timer runs this class in order to access modal dialog

@@ -78,6 +78,13 @@ public:
     /// Return true if this feature is a child of a MultiTransform
     bool isMultiTransformChild() const;
 
+    /** FreeCAD-CH (ops#640, F3): not a solid feature of its Body: a MultiTransform's step, or a
+     * new pattern with nothing picked yet (isMultiTransformChild() and no BaseFeature). A pattern
+     * in the chain whose Originals went (the original deleted) stays in it and fails with
+     * "Select features to pattern", so its base passes through
+     */
+    bool isOutOfChain() const;
+
     /// Get the list of transformations describing the members of the pattern
     // Note: Only the Scaled feature requires the originals
     virtual const std::list<gp_Trsf> getTransformations(const std::vector<App::DocumentObject*> /*originals*/)
@@ -142,6 +149,9 @@ protected:
     static TopoDS_Shape getRemainingSolids(const TopoDS_Shape&);
 
 private:
+    /// Out of its Body's chain (a step, or a new pattern of nothing): the solid after it builds on
+    /// the one before it, and its BaseFeature is cleared
+    void leaveChain(Body* body);
 };
 
 }  // namespace PartDesign

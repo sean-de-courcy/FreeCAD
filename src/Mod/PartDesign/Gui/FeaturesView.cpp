@@ -1032,6 +1032,11 @@ void FeaturesView::rollStudio(App::Document* doc, App::Part* studio, App::Docume
     int tid = doc->openTransaction(
         toEnd ? QT_TRANSLATE_NOOP("Command", "Roll to end") : QT_TRANSLATE_NOOP("Command", "Roll to here")
     );
+    // FreeCAD-CH (ops#640): refused beside an open dialog's held step; commitTransaction(0)
+    // would commit that step behind the dialog
+    if (tid == 0 && doc->isStepLocked()) {
+        throw Base::RuntimeError("Finish the open dialog first");
+    }
     try {
         Gui::Command::doCommand(Gui::Command::Doc, "import PartDesign");
         if (toEnd) {
@@ -1181,6 +1186,11 @@ void FeaturesView::moveRows(App::Document* doc,
     rowsCmd += "]";
     std::string barCmd = hinted ? ", " + objCmd(bar) : std::string();
     int tid = doc->openTransaction(QT_TRANSLATE_NOOP("Command", "Reorder"));
+    // FreeCAD-CH (ops#640): refused beside an open dialog's held step; commitTransaction(0)
+    // would commit that step behind the dialog
+    if (tid == 0 && doc->isStepLocked()) {
+        throw Base::RuntimeError("Finish the open dialog first");
+    }
     try {
         Gui::Command::doCommand(Gui::Command::Doc, "import PartDesign");
         Gui::Command::doCommand(

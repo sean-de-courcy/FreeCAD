@@ -497,6 +497,13 @@ public:
     static void updateActive();
     /// Checks if the active object of the active document is valid
     static bool isActiveObjectValid();
+    /** FreeCAD-CH (ops#640): the document whose open feature dialog holds its step lock
+     * (App::Document::isStepLocked(), taken by Gui::Document::setEdit), the active document
+     * first, then the documents in edit; nullptr when no step is locked. While it is locked,
+     * a command that alters the document is refused with a status message unless it carries
+     * AcceptsOpenDialog, which accepts the dialog first (regen-design section 3).
+     */
+    static App::Document* stepLockedDocument();
     /// Translate command
     void languageChange() override;
     /// Updates the QAction with respect to the passed mode.
@@ -703,6 +710,10 @@ public:
 
 private:
     void _invoke(int, bool disablelog);
+    /// FreeCAD-CH (ops#640): whether the step lock refuses this command (see stepLockedDocument)
+    bool refusedByStepLock(App::Document* locked) const;
+    /// FreeCAD-CH (ops#640): accept the dialog holding @a locked's step; false if it stays open
+    bool acceptOpenDialog(App::Document* locked) const;
 
 protected:
     enum CmdType
@@ -713,6 +724,10 @@ protected:
         AlterSelection = 4, /**< Command change the Selection */
         ForEdit = 8,        /**< Command is in a special edit mode active */
         NoTransaction = 16, /**< Do not setup auto transaction */
+        /** FreeCAD-CH (ops#640): with a feature dialog open (the step locked), invoking the
+         * command accepts the dialog first, then runs (Onshape: another feature tool accepts the
+         * open dialog and opens); without the bit such a command is refused visibly */
+        AcceptsOpenDialog = 32,
     };
 
     /** @name Attributes

@@ -138,6 +138,13 @@ void ViewProviderBody::attach(App::DocumentObject* pcFeat)
                 this->afterRecompute(doc, recomputedObjs);
             }
         );
+        // After the step's regeneration (ops#640: App::Document regenerates before it signals)
+        m_UndoConn = doc->signalUndo.connect([this](const App::Document& doc) {
+            this->afterUndoRedo(doc);
+        });
+        m_RedoConn = doc->signalRedo.connect([this](const App::Document& doc) {
+            this->afterUndoRedo(doc);
+        });
     }
     m_ChangedConn = Gui::Application::Instance->signalChangedObject.connect(
         [this](const Gui::ViewProvider& vp, const App::Property& prop) {
@@ -152,6 +159,41 @@ void ViewProviderBody::attach(App::DocumentObject* pcFeat)
     m_ResetEditConn = Gui::Application::Instance->signalResetEdit.connect(
         [this](const Gui::ViewProviderDocumentObject& vp) { this->onResetEdit(vp); }
     );
+}
+
+void ViewProviderBody::afterUndoRedo(const App::Document& doc)
+{
+    // FreeCAD-CH (ops#640, F35): an undo or a redo restores the features' Visibility as the step
+    // recorded it: a Body that then shows none of its features shows its Tip, so no step leaves
+    // the view empty (as showTipIfNoneShown() at a dialog's close, ops#212). Not while an edit
+    // owns the display, nor for a hidden Body or one rolled back to the top (no Tip). Only when
+    // the step changed what the Body shows (its Group, Tip or a member's Visibility): an
+    // unrelated undo doesn't show a Tip the user hid, as Onshape's undo doesn't touch hide/show
+    bool changedShown = undoChangedShown;
+    undoChangedShown = false;
+    auto body = getObject<PartDesign::Body>();
+    if (!body || !body->isAttachedToDocument() || body->getDocument() != &doc) {
+        return;
+    }
+    // The step's regeneration may have stopped or repaired the Body (F37)
+    updateStoppedDisplay();
+    if (!changedShown || !body->Visibility.getValue()) {
+        return;
+    }
+    auto gdoc = Gui::Application::Instance->getDocument(body->getDocument());
+    if (gdoc && gdoc->getInEdit()) {
+        return;
+    }
+    App::DocumentObject* tip = body->Tip.getValue();
+    if (!tip || !body->hasObject(tip)) {
+        return;
+    }
+    bool shown = std::ranges::any_of(body->Group.getValues(), [](App::DocumentObject* obj) {
+        return obj && obj->isDerivedFrom<PartDesign::Feature>() && obj->Visibility.getValue();
+    });
+    if (!shown) {
+        tip->Visibility.setValue(true);
+    }
 }
 
 void ViewProviderBody::onChangedObject(const Gui::ViewProvider& vp, const App::Property& prop)
@@ -178,13 +220,41 @@ void ViewProviderBody::onChangedObject(const Gui::ViewProvider& vp, const App::P
         || (std::ranges::find(features, changedObj) != features.end());
 
     if (isRelevantChange) {
+        if (body->getDocument() && body->getDocument()->isPerformingTransaction()) {
+            undoChangedShown = true;
+        }
         refreshOverlays();
     }
 }
 
 void ViewProviderBody::afterRecompute(const App::Document& /* doc */, const std::vector<App::DocumentObject*>& /* recomputedObjs */)
 {
+    updateStoppedDisplay();
     refreshOverlays();
+}
+
+bool ViewProviderBody::isStopped() const
+{
+    // F37 (ops#640): stopped by the recompute, the Body has written the empty Shape and is in
+    // error (Body::writeStoppedShape). Not while rolled back (the bar's feature shows, Through)
+    // nor while a member's dialog or edit is open: the edit's display and preview stay
+    auto body = getObject<PartDesign::Body>();
+    return body && !editedMember && body->isError() && body->Shape.getShape().isNull()
+        && !body->isRolledBack();
+}
+
+void ViewProviderBody::updateStoppedDisplay()
+{
+    if (!isRestoring() && showsThrough() != displayedThrough) {
+        applyBodyDisplay();
+    }
+}
+
+void ViewProviderBody::finishRestoring()
+{
+    PartGui::ViewProviderPart::finishRestoring();
+    // A file saved with a stopped Body (its error and empty Shape saved) opens showing nothing
+    updateStoppedDisplay();
 }
 
 void ViewProviderBody::refreshOverlays()
@@ -390,7 +460,7 @@ bool ViewProviderBody::onDelete(const std::vector<std::string>&)
     // F1). A MultiTransform's steps go with their MultiTransform
     bool everyMember = body && std::ranges::all_of(body->Group.getValues(), [&](App::DocumentObject* obj) {
         auto step = freecad_cast<PartDesign::Transformed*>(obj);
-        return !obj || deleting.count(obj) != 0 || (step && step->isMultiTransformChild());
+        return !obj || deleting.count(obj) != 0 || (step && step->isOutOfChain());
     });
     // A part deleted already, deleted again: the Body goes with its features (review s33e2 F2)
     bool deleted = body && PartDesign::DeletePart::deleterOf(body);
@@ -427,6 +497,15 @@ void ViewProviderBody::updateData(const App::Property* prop)
     if ((prop == &body->Tip || prop == &body->Group) && !isRestoring()
         && showsThrough() != displayedThrough) {
         applyBodyDisplay();
+    }
+    // F37 (ops#640): a repair writes the Body's Shape again; show its members at once
+    if (prop == &body->Shape) {
+        updateStoppedDisplay();
+    }
+    // An undo or a redo that restores or removes a member, or moves the Tip (afterUndoRedo)
+    if ((prop == &body->Tip || prop == &body->Group) && body->getDocument()
+        && body->getDocument()->isPerformingTransaction()) {
+        undoChangedShown = true;
     }
 
     if (prop == &body->Tip) {
@@ -509,11 +588,13 @@ void ViewProviderBody::applyBodyDisplay()
 
 bool ViewProviderBody::showsThrough() const
 {
-    if (DisplayModeBody.getValue() == 0) {
+    auto body = getObject<PartDesign::Body>();
+    if (body && body->isRolledBack()) {
         return true;
     }
-    auto body = getObject<PartDesign::Body>();
-    return body && body->isRolledBack();
+    // F37 (ops#640): a stopped Body shows its own Shape, the empty one, in place of its members,
+    // whose last shapes would show a part the model no longer makes (Onshape shows none)
+    return DisplayModeBody.getValue() == 0 && !isStopped();
 }
 
 bool ViewProviderBody::isEditLocked(App::Document* doc)
@@ -789,6 +870,8 @@ void ViewProviderBody::onInEdit(const Gui::ViewProviderDocumentObject& vp)
                .GetParameterGroupByPath("User parameter:BaseApp/Preferences/Mod/PartDesign/Preview")
                ->GetBool("ShowFinal", false);
     setEditRoll(editFinal ? finalPointFor(obj) : editRollPointFor(body, obj));
+    // A stopped Body shows its members again while the edit is open (isStopped)
+    updateStoppedDisplay();
 }
 
 void ViewProviderBody::onResetEdit(const Gui::ViewProviderDocumentObject& vp)
@@ -801,6 +884,7 @@ void ViewProviderBody::onResetEdit(const Gui::ViewProviderDocumentObject& vp)
     editedMember = nullptr;
     editFinal = false;
     setEditRoll(nullptr);
+    updateStoppedDisplay();
 
     // What the edit touched after the point computes now, in the edit's transaction (_resetEdit
     // commits after this signal). A sketch has committed its own "Sketch recompute" step by

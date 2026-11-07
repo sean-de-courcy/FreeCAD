@@ -78,7 +78,7 @@ CmdPrimtiveCompAdditive::CmdPrimtiveCompAdditive()
     sToolTipText = QT_TR_NOOP("Creates an additive primitive");
     sWhatsThis = "PartDesign_CompPrimitiveAdditive";
     sStatusTip = sToolTipText;
-    eType = ForEdit;
+    eType = ForEdit | AcceptsOpenDialog;  // FreeCAD-CH (ops#640): accepts an open feature dialog first
 }
 
 void CmdPrimtiveCompAdditive::activated(int iMsg)
@@ -272,7 +272,8 @@ void CmdPrimtiveCompAdditive::languageChange()
 
 bool CmdPrimtiveCompAdditive::isActive()
 {
-    return (hasActiveDocument() && !Gui::Control().activeDialog());
+    // FreeCAD-CH (ops#640): beside a feature dialog holding its step, the tool accepts it first
+    return (hasActiveDocument() && (!Gui::Control().activeDialog() || stepLockedDocument()));
 }
 
 DEF_STD_CMD_ACL(CmdPrimtiveCompSubtractive)
@@ -286,7 +287,7 @@ CmdPrimtiveCompSubtractive::CmdPrimtiveCompSubtractive()
     sToolTipText = QT_TR_NOOP("Creates a subtractive primitive");
     sWhatsThis = "PartDesign_CompPrimitiveSubtractive";
     sStatusTip = sToolTipText;
-    eType = ForEdit;
+    eType = ForEdit | AcceptsOpenDialog;  // FreeCAD-CH (ops#640): accepts an open feature dialog first
 }
 
 void CmdPrimtiveCompSubtractive::activated(int iMsg)
@@ -457,7 +458,8 @@ void CmdPrimtiveCompSubtractive::languageChange()
 
 bool CmdPrimtiveCompSubtractive::isActive()
 {
-    return (hasActiveDocument() && !Gui::Control().activeDialog());
+    // FreeCAD-CH (ops#640): beside a feature dialog holding its step, the tool accepts it first
+    return (hasActiveDocument() && (!Gui::Control().activeDialog() || stepLockedDocument()));
 }
 
 //===========================================================================

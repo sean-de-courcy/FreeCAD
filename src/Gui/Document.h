@@ -311,6 +311,11 @@ public:
     //@{
     /// Open a new Undo transaction on the document
     int openCommand(const char* sName = nullptr);
+    /** FreeCAD-CH (ops#640): before another edit or transaction beside the step that this
+     * document's open dialog holds, accept that dialog first (Onshape: another feature accepts
+     * the open dialog). True when no step is held afterwards; false, with a status message,
+     * when the dialog stays (its accept failed) or the dialog's own OK or Cancel is running. */
+    bool acceptOpenStep();
     /// Commit the Undo transaction on the document
     void commitCommand();
     /// Abort the Undo transaction on the document
@@ -355,6 +360,11 @@ protected:
 private:
     bool trySetEdit(Gui::ViewProvider* p, int ModNum, const char* subname);
     void resetIfEditing();
+    /// FreeCAD-CH (ops#640): take or release the App document's step lock for the edit
+    void holdEditStep(int ModNum);
+    void releaseEditStep();
+    /// true while the open dialog's own OK or Cancel runs (TaskView::accept/reject)
+    bool dialogClosingStep() const;
     // handles the scene graph nodes to correctly group child and parents
     void handleChildren3D(ViewProvider* viewProvider, bool deleting = false);
 

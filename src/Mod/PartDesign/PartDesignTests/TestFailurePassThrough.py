@@ -154,6 +154,12 @@ class FailurePassThroughBase:
         self.assertValid(self.body)
         self.assertVolume(self.body, volume)
 
+    def assertBodyShowsNothing(self):
+        """A stopped Body writes an empty Shape and keeps its error (ops#640, regen item 6, F37):
+        it shows nothing rather than its last result."""
+        self.assertFalse(self.body.isValid())
+        self.assertTrue(self.body.Shape.isNull(), "the stopped Body kept its last shape")
+
     # -- T1 ------------------------------------------------------------------------------------
 
     def testChainContinuesAfterAFailure(self):
@@ -541,7 +547,8 @@ class FailurePassThroughBase:
 
     def assertBodyStopped(self, base, boss, mirror, volume, *words):
         """The Body doesn't continue past its failed FeatureBase (decision 254): the boss and the
-        Body fail naming their inputs and keep their shapes, and so does the mirror outside."""
+        Body fail naming their inputs, the boss and the mirror outside keep their shapes, and the
+        Body shows nothing (regen item 6)."""
         self.assertStopped(base, *words)
         self.assertStopped(boss, f"'{base.Label}', which has an error")
         self.assertStopped(self.body)
@@ -624,15 +631,16 @@ class FailurePassThroughBase:
     def assertFirstFeatureStopped(self, block, boss, mirror, *words):
         """The Body doesn't continue past its failed first solid feature (decision 255 (1)): the
         block fails naming its input, the boss's sketch (attached to the block) and the boss after
-        it and the Body fail naming theirs, and all keep their shapes, the mirror of the boss
-        outside too."""
+        it and the Body fail naming theirs. The boss and the mirror of the boss outside keep their
+        shapes; the Body shows nothing (regen item 6)."""
         self.assertStopped(block, *words)
         self.assertStopped(boss.Profile[0], f"'{block.Label}', which has an error")
         self.assertStopped(boss, f"'{boss.Profile[0].Label}', which has an error")
         self.assertStopped(self.body)
         self.assertStopped(mirror, f"'{boss.Label}', which has an error")
-        for obj in (boss, self.body, mirror):
+        for obj in (boss, mirror):
             self.assertVolume(obj, BLOCK + BOSS)
+        self.assertBodyShowsNothing()
 
     def testFirstFeatureOfAFailureOutsideDoesNotContinue(self):
         """The block, the Body's first solid feature (no BaseFeature), takes its length from an
@@ -855,8 +863,9 @@ class FailurePassThroughBase:
         """The first pad fails (length zero). Its pass-through would be the empty shape, so the
         Body doesn't continue (decision 255 (1); T8 and F6 passed it through, and a later pad
         computed alone on nothing): the pad keeps its last output, the Body and a Part::Mirroring
-        of it outside fail, and so does a pad added after it, naming it. Repaired, everything
-        computes."""
+        of it outside fail, and so does a pad added after it, naming it. The stopped Body shows
+        nothing (regen item 6); the mirror, which doesn't run, keeps its last shape. Repaired,
+        everything computes."""
         block = self.block()
         mirror = self.mirrorOf(self.body)
         self.recompute()
@@ -867,15 +876,16 @@ class FailurePassThroughBase:
         self.assertStopped(block, "zero")
         self.assertStopped(self.body)
         self.assertStopped(mirror, f"'{self.body.Label}', which has an error")
-        for obj in (block, self.body, mirror):
+        for obj in (block, mirror):
             self.assertVolume(obj, BLOCK)
+        self.assertBodyShowsNothing()
 
         sketch = models.sketch(self.doc, "PostSketch", models.rectangle(30, 0, 32, 3), self.body)
         post = models.pad(self.body, sketch, 4, "Post")
         self.recompute()
         self.assertStopped(post, f"'{block.Label}', which has an error")
         self.assertStopped(self.body)
-        self.assertVolume(self.body, BLOCK)
+        self.assertBodyShowsNothing()
 
         block.Length = 10
         self.recompute()
@@ -1127,7 +1137,7 @@ class FailurePassThroughBase:
         self.assertStopped(fillet)
         self.assertStopped(boss, f"'{fillet.Label}', which has an error")
         self.assertStopped(self.body)
-        self.assertVolume(self.body, rounded + BOSS)
+        self.assertBodyShowsNothing()
 
         # The edge is picked again: a reference into a history-less scripted solid doesn't survive
         # its failure under C2's naming (ops#624)
@@ -1207,7 +1217,7 @@ class FailurePassThroughBase:
         self.assertFalse(fillet.isValid())
         self.assertStopped(boss, f"'{fillet.Label}', which has an error")
         self.assertStopped(self.body)
-        self.assertVolume(self.body, rounded + BOSS)
+        self.assertBodyShowsNothing()
 
         fillet.Base = (stock, [upright])
         self.recompute()
@@ -1719,9 +1729,10 @@ class FailurePassThroughBase:
         """The block and Pad2 after it both fail on their own in one edit. The block has no base,
         so it isn't passed through and keeps its last shape. Pad2's base holds a solid, but one
         no recompute made: the block's stale output. So Pad2 isn't claimed either: Pad2, Pad3,
-        Pad4 and the Body fail naming their direct inputs and keep their shapes (the chain rule's
-        "current" half: a claim that asked only whether the base holds a solid would compute
-        Pad3 on the stale block). Repaired, everything computes."""
+        Pad4 and the Body fail naming their direct inputs (the chain rule's "current" half: a
+        claim that asked only whether the base holds a solid would compute Pad3 on the stale
+        block). The features keep their shapes, and the Body shows nothing (regen item 6).
+        Repaired, everything computes."""
         block = self.block()
         pad2 = self.topBoss("Pad2", 1)
         pad3 = self.topBoss("Pad3", 7.5)
@@ -1737,8 +1748,8 @@ class FailurePassThroughBase:
         self.assertStopped(pad3, f"'{pad2.Label}', which has an error")
         self.assertStopped(pad4, f"'{pad3.Label}', which has an error")
         self.assertStopped(self.body)
-        for obj in (pad4, self.body):
-            self.assertVolume(obj, BLOCK + 3 * BOSS)
+        self.assertVolume(pad4, BLOCK + 3 * BOSS)
+        self.assertBodyShowsNothing()
 
         block.Length = 10
         pad2.Length = 5

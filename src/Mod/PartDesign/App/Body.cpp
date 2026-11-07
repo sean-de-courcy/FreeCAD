@@ -37,6 +37,7 @@
 #include <App/VarSet.h>
 #include <App/Origin.h>
 #include <Base/Placement.h>
+#include <Base/Tools.h>
 
 #include "Body.h"
 #include "BodyPy.h"
@@ -425,9 +426,10 @@ bool Body::isSolidFeature(const App::DocumentObject* obj)
             return false;
         }
         if (auto transFeature = freecad_cast<PartDesign::Transformed*>(obj)) {
-            // Transformed Features inside a MultiTransform are not solid features; a pattern
-            // whose Originals a reorder parked still is (ops#127)
-            return !transFeature->isMultiTransformChild() || hasParkedOriginals(obj);
+            // Transformed Features inside a MultiTransform are not solid features, nor is a new
+            // pattern with nothing picked; a pattern whose Originals a reorder parked still is
+            // (ops#127), and so is one in the chain whose original was deleted (ops#640, F3)
+            return !transFeature->isOutOfChain() || hasParkedOriginals(obj);
         }
         return true;
     }
@@ -809,6 +811,20 @@ App::DocumentObjectExecReturn* Body::execute()
 
     Shape.setValue(tipShape);
     return App::DocumentObject::StdReturn;
+}
+
+void Body::writeStoppedShape()
+{
+    // The next run copies its Tip again (execute() compares with the last copy)
+    lastTipShape = Part::TopoShape();
+    if (Shape.getShape().isNull()) {
+        // Stopped already: nothing is written, so nothing re-solves a reference into it
+        return;
+    }
+    // Inside the Recompute status, as execute() writes it: Part::Feature::onChanged doesn't take
+    // the empty shape's identity location for the Placement
+    Base::ObjectStatusLocker<App::ObjectStatus, App::DocumentObject> exe(App::Recompute, this);
+    Shape.setValue(Part::TopoShape());
 }
 
 void Body::onSettingDocument()

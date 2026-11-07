@@ -98,6 +98,10 @@ struct DocumentP
     bool _changeViewTouchDocument;
     bool _editWantsRestore;
     bool _editWantsRestorePrevious;
+    /// FreeCAD-CH (ops#640): this edit holds the App document's step lock (one lockStep())
+    bool _editHoldsStep = false;
+    /// FreeCAD-CH (ops#640): acceptOpenStep() is accepting the dialog (no re-entry)
+    bool _acceptingStep = false;
     int _editMode;
     int _editModePrevious;
     ViewProvider* _editViewProvider;
@@ -604,6 +608,10 @@ Document::Document(App::Document* pcDocument, Application* app)
     );
 
     d->_pcDocument->setMaxUndoStackSize(hGrp->GetInt("MaxUndoSize", 20));
+    // FreeCAD-CH (ops#640, regen-design section 1): a document shown in the GUI regenerates on the
+    // close of each transaction and after undo/redo, as Onshape regenerates the Part Studio after
+    // every action; FreeCADCmd documents keep their explicit recompute()s (the flag is off in App)
+    d->_pcDocument->setRegenerateOnCommit(true);
     d->_changeViewTouchDocument = hGrp->GetBool("ChangeViewProviderTouchDocument", true);
 }
 
@@ -720,6 +728,13 @@ bool Document::trySetEdit(Gui::ViewProvider* p, int ModNum, const char* subname)
 {
     auto vp = DocumentP::throwIfCastFails(p);
 
+    // FreeCAD-CH (ops#640): another edit beside the held step accepts the open dialog first;
+    // resetIfEditing() below would otherwise commit the dialog's step without its accept()'s
+    // validation and start the next edit with no transaction (its openCommand was refused)
+    if (d->_editHoldsStep && !acceptOpenStep()) {
+        return false;
+    }
+
     auto obj = DocumentP::tryGetObject(vp);
 
     std::string _subname = subname ? subname : "";
@@ -754,6 +769,11 @@ bool Document::trySetEdit(Gui::ViewProvider* p, int ModNum, const char* subname)
     }
 
     d->setDocumentNameOfTaskDialog(getDocument());
+
+    // FreeCAD-CH (ops#640, regen-design section 3): after the edit started (its "Edit X" or
+    // "Make X" transaction was opened before), the open dialog's step is locked until the edit
+    // resets: no undo, redo, implicit commit or other transaction behind the dialog
+    holdEditStep(ModNum);
 
     auto view3d = openEditingView3D(vp);
     d->setEditingViewerIfPossible(view3d, ModNum);
@@ -792,8 +812,64 @@ void Document::resetEdit()
     }
 }
 
+void Document::holdEditStep(int ModNum)
+{
+    if (d->_editHoldsStep || !d->_editViewProvider
+        || !d->_editViewProvider->editHoldsOneStep(ModNum)) {
+        return;
+    }
+    getDocument()->lockStep();
+    d->_editHoldsStep = true;
+}
+
+void Document::releaseEditStep()
+{
+    if (!d->_editHoldsStep) {
+        return;
+    }
+    d->_editHoldsStep = false;
+    getDocument()->unlockStep();
+}
+
+bool Document::dialogClosingStep() const
+{
+    TaskView::TaskDialog* dlg = Gui::Control().activeDialog(getDocument());
+    return dlg && dlg->property("taskview_accept_or_reject").isValid();
+}
+
+bool Document::acceptOpenStep()
+{
+    App::Document* doc = getDocument();
+    if (!doc->isStepLocked()) {
+        return true;
+    }
+    bool inOwnClose = d->_acceptingStep || dialogClosingStep();
+    if (d->_editHoldsStep && !inOwnClose && Gui::Control().activeDialog(doc)) {
+        Base::FlagToggler<> accepting(d->_acceptingStep);
+        // the dialog's OK commits its step and resets the edit (releaseEditStep); a failed
+        // accept shows the dialog's own message and leaves both
+        Gui::Control().accept(doc);
+    }
+    if (!doc->isStepLocked()) {
+        return true;
+    }
+    if (!inOwnClose) {
+        getMainWindow()->showMessage(
+            QObject::tr("The open dialog could not be accepted: finish or cancel it first"),
+            5000
+        );
+    }
+    return false;
+}
+
 void Document::_resetEdit()
 {
+    // FreeCAD-CH (ops#640): the step lock goes first, before the commit below and before
+    // finishEditing() (whose unsetEdit may recompute); the step lock never refuses the explicit
+    // commit or abort of the dialog itself, and restartEdit's TransactionLocker still makes the
+    // commit below a no-op
+    releaseEditStep();
+
     if (d->_editViewProvider) {
         for (auto* v : d->baseViews) {
             auto activeView = dynamic_cast<View3DInventor*>(v);
@@ -3041,16 +3117,36 @@ Gui::MDIView* Document::getEditingViewOfViewProvider(Gui::ViewProvider* vp) cons
  */
 int Document::openCommand(const char* sName)
 {
+    // FreeCAD-CH (ops#640): a transaction beside the open dialog's held step (double-click on
+    // another feature, the row menu's or the context menu's Edit, Accept Merge) accepts the
+    // dialog first, as in Onshape; refused (0) when the dialog stays
+    if (d->_editHoldsStep && !acceptOpenStep()) {
+        FC_LOG("Step held by the open dialog, ignore new command '" << (sName ? sName : "")
+                                                                    << "'");
+        return 0;
+    }
     return getDocument()->openTransaction(App::TransactionName {.name = sName, .temporary = false});
 }
 
 void Document::commitCommand()
 {
+    // FreeCAD-CH (ops#640): beside the held step only the open dialog's own OK or Cancel
+    // closes it. Any other commit belongs to an openCommand the lock refused, and
+    // App::Document::commitTransaction() would commit the dialog's step behind the dialog
+    if (d->_editHoldsStep && getDocument()->isStepLocked() && !dialogClosingStep()) {
+        FC_LOG("Step held by the open dialog, ignore commitCommand()");
+        return;
+    }
     getDocument()->commitTransaction();
 }
 
 void Document::abortCommand()
 {
+    // FreeCAD-CH (ops#640): as commitCommand(); an abort would revert the dialog's step
+    if (d->_editHoldsStep && getDocument()->isStepLocked() && !dialogClosingStep()) {
+        FC_LOG("Step held by the open dialog, ignore abortCommand()");
+        return;
+    }
     getDocument()->abortTransaction();
 }
 
@@ -3162,6 +3258,11 @@ bool Document::isPerformingTransaction() const
 /// Will UNDO one or more steps
 void Document::undo(int iSteps)
 {
+    // FreeCAD-CH (ops#640): with a feature dialog open, Ctrl+Z does nothing (Onshape; App's
+    // undo() refuses too, this only spares checkTransactionID's prompt)
+    if (getDocument()->isStepLocked()) {
+        return;
+    }
     Base::FlagToggler<> flag(d->_isTransacting);
 
     if (!checkTransactionID(true, iSteps)) {
@@ -3177,6 +3278,9 @@ void Document::undo(int iSteps)
 /// Will REDO one or more steps
 void Document::redo(int iSteps)
 {
+    if (getDocument()->isStepLocked()) {  // FreeCAD-CH (ops#640): as undo()
+        return;
+    }
     Base::FlagToggler<> flag(d->_isTransacting);
 
     if (!checkTransactionID(false, iSteps)) {

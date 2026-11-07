@@ -224,6 +224,7 @@ CmdPartDesignPlane::CmdPartDesignPlane()
     sWhatsThis = "PartDesign_Plane";
     sStatusTip = sToolTipText;
     sPixmap = "PartDesign_Plane";
+    eType |= AcceptsOpenDialog;  // FreeCAD-CH (ops#640): accepts an open feature dialog first
 }
 
 void CmdPartDesignPlane::activated(int iMsg)
@@ -254,6 +255,7 @@ CmdPartDesignLine::CmdPartDesignLine()
     sWhatsThis = "PartDesign_Line";
     sStatusTip = sToolTipText;
     sPixmap = "PartDesign_Line";
+    eType |= AcceptsOpenDialog;  // FreeCAD-CH (ops#640): accepts an open feature dialog first
 }
 
 void CmdPartDesignLine::activated(int iMsg)
@@ -284,6 +286,7 @@ CmdPartDesignPoint::CmdPartDesignPoint()
     sWhatsThis = "PartDesign_Point";
     sStatusTip = sToolTipText;
     sPixmap = "PartDesign_Point";
+    eType |= AcceptsOpenDialog;  // FreeCAD-CH (ops#640): accepts an open feature dialog first
 }
 
 void CmdPartDesignPoint::activated(int iMsg)
@@ -314,6 +317,7 @@ CmdPartDesignCS::CmdPartDesignCS()
     sWhatsThis = "PartDesign_CoordinateSystem";
     sStatusTip = sToolTipText;
     sPixmap = "PartDesign_CoordinateSystem";
+    eType |= AcceptsOpenDialog;  // FreeCAD-CH (ops#640): accepts an open feature dialog first
 }
 
 void CmdPartDesignCS::activated(int iMsg)
@@ -348,6 +352,7 @@ CmdPartDesignShapeBinder::CmdPartDesignShapeBinder()
     sWhatsThis = "PartDesign_ShapeBinder";
     sStatusTip = sToolTipText;
     sPixmap = "PartDesign_ShapeBinder";
+    eType |= AcceptsOpenDialog;  // FreeCAD-CH (ops#640): accepts an open feature dialog first
 }
 
 void CmdPartDesignShapeBinder::activated(int iMsg)
@@ -492,6 +497,7 @@ CmdPartDesignSubShapeBinder::CmdPartDesignSubShapeBinder()
     sWhatsThis = "PartDesign_SubShapeBinder";
     sStatusTip = sToolTipText;
     sPixmap = "PartDesign_SubShapeBinder";
+    eType |= AcceptsOpenDialog;  // FreeCAD-CH (ops#640): accepts an open feature dialog first
 }
 
 void CmdPartDesignSubShapeBinder::activated(int iMsg)
@@ -594,6 +600,7 @@ CmdPartDesignClone::CmdPartDesignClone()
     sWhatsThis = "PartDesign_Clone";
     sStatusTip = sToolTipText;
     sPixmap = "PartDesign_Clone";
+    eType |= AcceptsOpenDialog;  // FreeCAD-CH (ops#640): accepts an open feature dialog first
 }
 
 void CmdPartDesignClone::activated(int iMsg)
@@ -675,6 +682,7 @@ CmdPartDesignNewSketch::CmdPartDesignNewSketch()
     sWhatsThis = "PartDesign_NewSketch";
     sStatusTip = sToolTipText;
     sPixmap = "Sketcher_NewSketch";
+    eType |= AcceptsOpenDialog;  // FreeCAD-CH (ops#640): accepts an open feature dialog first
 }
 
 
@@ -1459,10 +1467,12 @@ static Sketcher::SketchObject* sketchInEdit()
 }
 
 // What Command::testActive() checks for a command that isn't ForEdit, but a sketch in edit passes
-// under the fork's keymap (FreeCAD's keeps upstream's: disabled in the sketch)
+// under the fork's keymap (FreeCAD's keeps upstream's: disabled in the sketch), and so does an
+// open feature dialog holding its step (ops#640: the tool accepts that dialog first)
 static bool allowedOrSketchInEdit(App::Document* doc)
 {
     return (Gui::ForkKeymap::isOnshape() && sketchInEdit())
+        || Gui::Command::stepLockedDocument() != nullptr
         || (Gui::Control().isAllowedAlterDocument(doc) && Gui::Control().isAllowedAlterView(doc)
             && Gui::Control().isAllowedAlterSelection(doc));
 }
@@ -1540,6 +1550,7 @@ CmdPartDesignPad::CmdPartDesignPad()
     sStatusTip = sToolTipText;
     sPixmap = "PartDesign_Pad";
     eType |= ForEdit;  // FreeCAD-CH (ops#194): from a sketch in edit; isActive() checks the dialog
+    eType |= AcceptsOpenDialog;  // FreeCAD-CH (ops#640): accepts an open feature dialog first
 }
 
 void CmdPartDesignPad::activated(int iMsg)
@@ -1570,6 +1581,7 @@ CmdPartDesignPocket::CmdPartDesignPocket()
     sWhatsThis = "PartDesign_Pocket";
     sStatusTip = sToolTipText;
     sPixmap = "PartDesign_Pocket";
+    eType |= AcceptsOpenDialog;  // FreeCAD-CH (ops#640): accepts an open feature dialog first
 }
 
 void CmdPartDesignPocket::activated(int iMsg)
@@ -1600,6 +1612,7 @@ CmdPartDesignHole::CmdPartDesignHole()
     sWhatsThis = "PartDesign_Hole";
     sStatusTip = sToolTipText;
     sPixmap = "PartDesign_Hole";
+    eType |= AcceptsOpenDialog;  // FreeCAD-CH (ops#640): accepts an open feature dialog first
 }
 
 void CmdPartDesignHole::activated(int iMsg)
@@ -1647,6 +1660,7 @@ CmdPartDesignRevolution::CmdPartDesignRevolution()
     sStatusTip = sToolTipText;
     sPixmap = "PartDesign_Revolution";
     eType |= ForEdit;  // FreeCAD-CH (ops#194): as PartDesign_Pad
+    eType |= AcceptsOpenDialog;  // FreeCAD-CH (ops#640): accepts an open feature dialog first
 }
 
 void CmdPartDesignRevolution::activated(int iMsg)
@@ -1710,6 +1724,7 @@ CmdPartDesignGroove::CmdPartDesignGroove()
     sWhatsThis = "PartDesign_Groove";
     sStatusTip = sToolTipText;
     sPixmap = "PartDesign_Groove";
+    eType |= AcceptsOpenDialog;  // FreeCAD-CH (ops#640): accepts an open feature dialog first
 }
 
 void CmdPartDesignGroove::activated(int iMsg)
@@ -1780,6 +1795,7 @@ CmdPartDesignAdditivePipe::CmdPartDesignAdditivePipe()
     sWhatsThis = "PartDesign_AdditivePipe";
     sStatusTip = sToolTipText;
     sPixmap = "PartDesign_AdditivePipe";
+    eType |= AcceptsOpenDialog;  // FreeCAD-CH (ops#640): accepts an open feature dialog first
 }
 
 void CmdPartDesignAdditivePipe::activated(int iMsg)
@@ -1830,6 +1846,7 @@ CmdPartDesignSubtractivePipe::CmdPartDesignSubtractivePipe()
     sWhatsThis = "PartDesign_SubtractivePipe";
     sStatusTip = sToolTipText;
     sPixmap = "PartDesign_SubtractivePipe";
+    eType |= AcceptsOpenDialog;  // FreeCAD-CH (ops#640): accepts an open feature dialog first
 }
 
 void CmdPartDesignSubtractivePipe::activated(int iMsg)
@@ -1880,6 +1897,7 @@ CmdPartDesignAdditiveLoft::CmdPartDesignAdditiveLoft()
     sWhatsThis = "PartDesign_AdditiveLoft";
     sStatusTip = sToolTipText;
     sPixmap = "PartDesign_AdditiveLoft";
+    eType |= AcceptsOpenDialog;  // FreeCAD-CH (ops#640): accepts an open feature dialog first
 }
 
 void CmdPartDesignAdditiveLoft::activated(int iMsg)
@@ -1929,6 +1947,7 @@ CmdPartDesignSubtractiveLoft::CmdPartDesignSubtractiveLoft()
     sWhatsThis = "PartDesign_SubtractiveLoft";
     sStatusTip = sToolTipText;
     sPixmap = "PartDesign_SubtractiveLoft";
+    eType |= AcceptsOpenDialog;  // FreeCAD-CH (ops#640): accepts an open feature dialog first
 }
 
 void CmdPartDesignSubtractiveLoft::activated(int iMsg)
@@ -1978,6 +1997,7 @@ CmdPartDesignAdditiveHelix::CmdPartDesignAdditiveHelix()
     sWhatsThis = "PartDesign_AdditiveHelix";
     sStatusTip = sToolTipText;
     sPixmap = "PartDesign_AdditiveHelix";
+    eType |= AcceptsOpenDialog;  // FreeCAD-CH (ops#640): accepts an open feature dialog first
 }
 
 void CmdPartDesignAdditiveHelix::activated(int iMsg)
@@ -2062,6 +2082,7 @@ CmdPartDesignSubtractiveHelix::CmdPartDesignSubtractiveHelix()
     sWhatsThis = "PartDesign_SubtractiveHelix";
     sStatusTip = sToolTipText;
     sPixmap = "PartDesign_SubtractiveHelix";
+    eType |= AcceptsOpenDialog;  // FreeCAD-CH (ops#640): accepts an open feature dialog first
 }
 
 void CmdPartDesignSubtractiveHelix::activated(int iMsg)
@@ -2294,6 +2315,7 @@ CmdPartDesignFillet::CmdPartDesignFillet()
     sWhatsThis = "PartDesign_Fillet";
     sStatusTip = sToolTipText;
     sPixmap = "PartDesign_Fillet";
+    eType |= AcceptsOpenDialog;  // FreeCAD-CH (ops#640): accepts an open feature dialog first
 }
 
 void CmdPartDesignFillet::activated(int iMsg)
@@ -2322,6 +2344,7 @@ CmdPartDesignChamfer::CmdPartDesignChamfer()
     sWhatsThis = "PartDesign_Chamfer";
     sStatusTip = sToolTipText;
     sPixmap = "PartDesign_Chamfer";
+    eType |= AcceptsOpenDialog;  // FreeCAD-CH (ops#640): accepts an open feature dialog first
 }
 
 void CmdPartDesignChamfer::activated(int iMsg)
@@ -2411,6 +2434,7 @@ CmdPartDesignDefeaturing::CmdPartDesignDefeaturing()
     sWhatsThis = "PartDesign_Defeaturing";
     sStatusTip = sToolTipText;
     sPixmap = "PartDesign_Defeaturing";
+    eType |= AcceptsOpenDialog;  // FreeCAD-CH (ops#640): accepts an open feature dialog first
 }
 
 void CmdPartDesignDefeaturing::activated(int iMsg)
@@ -2439,6 +2463,7 @@ CmdPartDesignDraft::CmdPartDesignDraft()
     sWhatsThis = "PartDesign_Draft";
     sStatusTip = sToolTipText;
     sPixmap = "PartDesign_Draft";
+    eType |= AcceptsOpenDialog;  // FreeCAD-CH (ops#640): accepts an open feature dialog first
 }
 
 void CmdPartDesignDraft::activated(int iMsg)
@@ -2511,6 +2536,7 @@ CmdPartDesignThickness::CmdPartDesignThickness()
     sWhatsThis = "PartDesign_Thickness";
     sStatusTip = sToolTipText;
     sPixmap = "PartDesign_Thickness";
+    eType |= AcceptsOpenDialog;  // FreeCAD-CH (ops#640): accepts an open feature dialog first
 }
 
 void CmdPartDesignThickness::activated(int iMsg)
@@ -2662,6 +2688,7 @@ CmdPartDesignMirrored::CmdPartDesignMirrored()
     sWhatsThis = "PartDesign_Mirrored";
     sStatusTip = sToolTipText;
     sPixmap = "PartDesign_Mirrored";
+    eType |= AcceptsOpenDialog;  // FreeCAD-CH (ops#640): accepts an open feature dialog first
 }
 
 void CmdPartDesignMirrored::activated(int iMsg)
@@ -2721,6 +2748,7 @@ CmdPartDesignLinearPattern::CmdPartDesignLinearPattern()
     sWhatsThis = "PartDesign_LinearPattern";
     sStatusTip = sToolTipText;
     sPixmap = "PartDesign_LinearPattern";
+    eType |= AcceptsOpenDialog;  // FreeCAD-CH (ops#640): accepts an open feature dialog first
 }
 
 void CmdPartDesignLinearPattern::activated(int iMsg)
@@ -2795,6 +2823,7 @@ CmdPartDesignPolarPattern::CmdPartDesignPolarPattern()
     sWhatsThis = "PartDesign_PolarPattern";
     sStatusTip = sToolTipText;
     sPixmap = "PartDesign_PolarPattern";
+    eType |= AcceptsOpenDialog;  // FreeCAD-CH (ops#640): accepts an open feature dialog first
 }
 
 void CmdPartDesignPolarPattern::activated(int iMsg)
@@ -2855,6 +2884,7 @@ CmdPartDesignScaled::CmdPartDesignScaled()
     sWhatsThis = "PartDesign_Scaled";
     sStatusTip = sToolTipText;
     sPixmap = "PartDesign_Scaled";
+    eType |= AcceptsOpenDialog;  // FreeCAD-CH (ops#640): accepts an open feature dialog first
 }
 
 void CmdPartDesignScaled::activated(int iMsg)
@@ -2900,6 +2930,7 @@ CmdPartDesignMultiTransform::CmdPartDesignMultiTransform()
     sWhatsThis = "PartDesign_MultiTransform";
     sStatusTip = sToolTipText;
     sPixmap = "PartDesign_MultiTransform";
+    eType |= AcceptsOpenDialog;  // FreeCAD-CH (ops#640): accepts an open feature dialog first
 }
 
 void CmdPartDesignMultiTransform::activated(int iMsg)
@@ -3031,6 +3062,7 @@ CmdPartDesignBoolean::CmdPartDesignBoolean()
     sWhatsThis = "PartDesign_Boolean";
     sStatusTip = sToolTipText;
     sPixmap = "PartDesign_Boolean";
+    eType |= AcceptsOpenDialog;  // FreeCAD-CH (ops#640): accepts an open feature dialog first
 }
 
 
@@ -3100,6 +3132,7 @@ CmdPartDesignMergeParts::CmdPartDesignMergeParts()
     sWhatsThis = "PartDesign_MergeParts";
     sStatusTip = sToolTipText;
     sPixmap = "PartDesign_Boolean";
+    eType |= AcceptsOpenDialog;  // FreeCAD-CH (ops#640): accepts an open feature dialog first
 }
 
 void CmdPartDesignMergeParts::activated(int iMsg)
@@ -3176,6 +3209,7 @@ CmdPartDesignSplit::CmdPartDesignSplit()
     sWhatsThis = "PartDesign_Split";
     sStatusTip = sToolTipText;
     sPixmap = "PartDesign_Boolean";
+    eType |= AcceptsOpenDialog;  // FreeCAD-CH (ops#640): accepts an open feature dialog first
 }
 
 void CmdPartDesignSplit::activated(int iMsg)
@@ -3266,7 +3300,8 @@ public:
         sToolTipText = QT_TR_NOOP("Creates a datum object or local coordinate system");
         sWhatsThis = "PartDesign_CompDatums";
         sStatusTip = sToolTipText;
-        eType = ForEdit;
+        // FreeCAD-CH (ops#640): beside a feature dialog holding its step, the tool accepts it first
+        eType = ForEdit | AcceptsOpenDialog;
 
         setCheckable(false);
 
@@ -3283,7 +3318,8 @@ public:
 
     bool isActive() override
     {
-        return (hasActiveDocument() && !Gui::Control().activeDialog());
+        // FreeCAD-CH (ops#640): stays enabled beside a step-locked dialog (accept-first)
+        return (hasActiveDocument() && (!Gui::Control().activeDialog() || stepLockedDocument()));
     }
 };
 
@@ -3301,7 +3337,8 @@ public:
         sToolTipText = QT_TR_NOOP("Creates a datum object or local coordinate system");
         sWhatsThis = "PartDesign_CompDatums";
         sStatusTip = sToolTipText;
-        eType = ForEdit;
+        // FreeCAD-CH (ops#640): beside a feature dialog holding its step, the tool accepts it first
+        eType = ForEdit | AcceptsOpenDialog;
 
         setCheckable(false);
         setRememberLast(false);
@@ -3318,7 +3355,8 @@ public:
 
     bool isActive() override
     {
-        return (hasActiveDocument() && !Gui::Control().activeDialog());
+        // FreeCAD-CH (ops#640): stays enabled beside a step-locked dialog (accept-first)
+        return (hasActiveDocument() && (!Gui::Control().activeDialog() || stepLockedDocument()));
     }
 };
 

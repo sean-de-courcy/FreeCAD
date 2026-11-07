@@ -106,10 +106,10 @@
          <string>Enables async document recomputation</string>
         </property>
         <property name="checked">
-         <bool>true</bool>
+         <bool>false</bool>
         </property>
         <property name="prefEntry" stdset="0">
-         <cstring>EnableAsyncRecompute</cstring>
+         <cstring>AsyncRecomputeWorker</cstring>
         </property>
         <property name="prefPath" stdset="0">
          <cstring>Document</cstring>

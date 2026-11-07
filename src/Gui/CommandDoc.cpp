@@ -1260,6 +1260,11 @@ void StdCmdUndo::activated(int iMsg)
 
 bool StdCmdUndo::isActive()
 {
+    // FreeCAD-CH (ops#640): with a feature dialog open Ctrl+Z does nothing and the arrow reads
+    // disabled (Onshape); Ctrl+Z in a field of the dialog stays the field's own text undo
+    if (stepLockedDocument()) {
+        return false;
+    }
     return getGuiApplication()->sendHasMsgToActiveView("Undo");
 }
 
@@ -1305,6 +1310,9 @@ void StdCmdRedo::activated(int iMsg)
 
 bool StdCmdRedo::isActive()
 {
+    if (stepLockedDocument()) {  // FreeCAD-CH (ops#640): as Std_Undo
+        return false;
+    }
     return getGuiApplication()->sendHasMsgToActiveView("Redo");
 }
 
@@ -1966,6 +1974,11 @@ void StdCmdDelete::activated(int iMsg)
 
 bool StdCmdDelete::isActive()
 {
+    // FreeCAD-CH (ops#640): no Delete beside an open feature dialog (its step is locked; the
+    // sketch session isn't, so deleting sketch geometry stays); invoke() says why on a click
+    if (stepLockedDocument()) {
+        return false;
+    }
     return !Selection().getCompleteSelection().empty();
 }
 
