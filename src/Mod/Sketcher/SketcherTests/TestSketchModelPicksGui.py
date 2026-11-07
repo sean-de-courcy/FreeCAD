@@ -207,6 +207,70 @@ class TestSketchModelPicksGui(SketcherGuiTestCase):
         )
         self.pump(120)
 
+    def report_text(self):
+        """The Report view's text, or None without one."""
+        for widget in FreeCADGui.getMainWindow().findChildren(QtGui.QTextEdit):
+            if widget.metaObject().className() == "Gui::DockWnd::ReportOutput":
+                return widget.toPlainText()
+        return None
+
+    def assertNoIllegalAccess(self, action):
+        """Review prs3220-r2 (Opus) L2: a selection observer's access violation is caught and
+        reported ("Illegal storage access"), not raised: read the Report view around the action."""
+        before = self.report_text()
+        if before is None:
+            self.skipTest("no Report view to read")
+        action()
+        self.flush_gui(100)
+        self.assertNotIn("Illegal storage access", self.report_text()[len(before) :])
+
+    # Mouse events through the scene graph (review prs3220-r2 (Sonnet) F1). They reach the 3D view's
+    # selection node before the sketch's event callback, as a real mouse's do, with no OpenGL: off
+    # screen fitAll leaves the camera below the box's top, so the camera is put back above it
+
+    def raise_camera(self):
+        camera = self.view.getCameraNode()
+        x, y, _ = camera.position.getValue().getValue()
+        camera.position.setValue(x, y, 40.0)
+        camera.nearDistance.setValue(0.0)
+        camera.farDistance.setValue(100.0)
+        self.pump(50)
+
+    def coin_event(self, kind, point):
+        from pivy import coin
+
+        width, height = self.view.getSize()
+        region = coin.SbViewportRegion(width, height)
+        camera = self.view.getCameraNode()
+        volume = camera.getViewVolume(region.getViewportAspectRatio())
+        screen = volume.projectToScreen(coin.SbVec3f(point.x, point.y, point.z))
+        if kind == "move":
+            event = coin.SoLocation2Event()
+        else:
+            event = coin.SoMouseButtonEvent()
+            event.setButton(coin.SoMouseButtonEvent.BUTTON1)
+            event.setState(coin.SoButtonEvent.DOWN if kind == "down" else coin.SoButtonEvent.UP)
+        event.setPosition(coin.SbVec2s(int(screen[0] * width), int(screen[1] * height)))
+        event.setTime(coin.SbTime.getTimeOfDay())
+        root = coin.SoSeparator()
+        root.ref()
+        root.addChild(camera)
+        root.addChild(self.view.getSceneGraph())
+        action = coin.SoHandleEventAction(region)
+        action.setEvent(event)
+        action.apply(root)
+        root.unref()
+        self.pump(30)
+
+    def coin_drag(self, start, end, steps=6):
+        """The left button pressed at one world point, moved in steps and released at another."""
+        self.coin_event("move", start)
+        self.coin_event("down", start)
+        for i in range(1, steps + 1):
+            self.coin_event("move", start + (end - start) * (i / steps))
+        self.coin_event("up", end)
+        self.flush_gui(100)
+
     def preselected(self):
         pre = FreeCADGui.Selection.getPreselection()
         if pre is None or not pre.ObjectName:
@@ -269,7 +333,7 @@ class TestSketchModelPicksGui(SketcherGuiTestCase):
         }
         self.select(*[(self.pad, sub) for _, sub in sorted(picks)])
         self.answer_modals()
-        self.run_command("Sketcher_ConstrainCoincidentUnified")
+        self.assertNoIllegalAccess(lambda: self.run_command("Sketcher_ConstrainCoincidentUnified"))
 
         self.assertEqual(len(self.sketch.Constraints), 0)
         self.assertEqual(len(self.sketch.ExternalGeometry), 0)
@@ -335,6 +399,72 @@ class TestSketchModelPicksGui(SketcherGuiTestCase):
         self.select((self.pad, self.edge_between(self.pad, V(0, 0, 5), V(20, 0, 5))))
         self.run_command("Std_Delete")
         self.assertIsNotNone(self.doc.getObject("Pad"))
+
+    def test_delete_in_another_document_is_unaffected_by_the_sketch_edit(self):
+        """Review prs3220-r2 (Opus) L1: with the sketch edited here, a box's face selected in
+        another (active) document, then Delete: the box goes, as with no sketch in edit."""
+        other = FreeCAD.newDocument("TestSketchModelPicksOther", hidden=True)
+        try:
+            other.addObject("Part::Box", "Box")
+            other.recompute()
+            FreeCAD.setActiveDocument(self.doc.Name)
+            self.start_edit()
+            FreeCAD.setActiveDocument(other.Name)
+            FreeCADGui.Selection.clearSelection()
+            FreeCADGui.Selection.addSelection(other.Name, "Box", "Face1")
+            self.run_command("Std_Delete")
+            self.assertIsNone(other.getObject("Box"))
+        finally:
+            FreeCADGui.Selection.clearSelection()
+            FreeCAD.setActiveDocument(self.doc.Name)
+            FreeCAD.closeDocument(other.Name)
+
+    def test_a_command_that_aborts_its_own_transaction_restores_the_picks(self):
+        """Review prs3220-r2 (Opus) L3: a model vertex and a model edge (both fixed) for
+        Coincident, whose point-on-object branch opens its own transaction and aborts it: no link
+        is left, the picks are selected again, and two sketch lines then take Parallel."""
+        self.sketch.addGeometry(Part.LineSegment(V(2, 6, 0), V(8, 7, 0)))
+        self.doc.recompute()
+        self.start_edit()
+        picks = {
+            ("Pad", self.vertex_at(self.pad, V(20, 10, 5))),
+            ("Pad", self.edge_between(self.pad, V(0, 0, 5), V(20, 0, 5))),
+        }
+        self.select(*[(self.pad, sub) for _, sub in sorted(picks)])
+        self.answer_modals()
+        self.assertNoIllegalAccess(lambda: self.run_command("Sketcher_ConstrainCoincidentUnified"))
+
+        self.assertEqual(len(self.sketch.Constraints), 0)
+        self.assertEqual(len(self.sketch.ExternalGeometry), 0)
+        self.assertEqual(self.doc.UndoCount, self.undo_start)
+        self.assertEqual(self.selected(), picks)
+
+        self.select((self.sketch, "Edge1"), (self.sketch, "Edge2"))
+        self.run_command("Sketcher_ConstrainParallel")
+        self.assertEqual(len(self.constraints_of("Parallel")), 1)
+
+    def test_a_drag_of_a_sketch_line_moves_it(self):
+        """Review prs3220-r2 (Sonnet) F1: the 3D view's preselection of the box's face under the
+        cursor removed the sketch's own on the first move, so a drag of the line did nothing. The
+        line follows the drag, in one undo step, and nothing is selected after it."""
+        self.start_edit()
+        self.raise_camera()
+        FreeCADGui.Selection.clearSelection()
+        before = self.line_point(1)
+        self.coin_drag(V(5, 2, 5), V(12, 4, 5))
+        self.assertGreater((self.line_point(1) - before).Length, 1.0, "Expected the line to move")
+        self.assertEqual(self.doc.UndoCount, self.undo_start + 1)
+
+    def test_a_drag_of_a_line_end_released_over_a_model_edge_picks_nothing(self):
+        """The line's end dragged onto the box's right top edge: the end moves there, and the edge
+        under the release isn't picked (no model pick during a drag)."""
+        self.start_edit()
+        self.raise_camera()
+        FreeCADGui.Selection.clearSelection()
+        self.coin_drag(V(8, 2, 5), V(20, 5, 5))
+        end = self.line_point(2)
+        self.assertGreater((end - V(8, 2, 0)).Length, 1.0, "Expected the line's end to move")
+        self.assertEqual({name for name, _ in self.selected()} - {"Sketch"}, set())
 
     def test_a_sibling_part_s_edge_is_taken_another_part_s_isnt(self):
         """A Body beside this one (one studio) can be picked; a Body in an App::Part can't."""

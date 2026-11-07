@@ -1696,6 +1696,7 @@ void StdCmdDelete::activated(int iMsg)
         };
         std::vector<HandedToEdited> handed;
         QStringList pickingSketches;
+        std::vector<const App::Document*> pickingDocuments;
         for (auto& editDoc : editDocs) {
             // getEditViewProvider(), not getInEdit(): that is null while another view of the
             // document is active (ops#164)
@@ -1705,6 +1706,7 @@ void StdCmdDelete::activated(int iMsg)
             if (vpedit && !vpedit->acceptDeletionsInEdit() && handsSubElementsToEdited(vpedit)) {
                 if (isSketch(vpedit)) {
                     pickingSketches << QString::fromUtf8(vpedit->getObject()->Label.getValue());
+                    pickingDocuments.push_back(editDoc->getDocument());
                 }
                 for (auto& sel : Selection().getSelectionEx(editDoc->getDocument()->getName())) {
                     if (sel.getObject() == vpedit->getObject()) {
@@ -1720,8 +1722,11 @@ void StdCmdDelete::activated(int iMsg)
         // model edge picked for a constraint) is a reference, never a request to delete its object
         QStringList pickedLabels;
         if (!pickingSketches.isEmpty()) {
-            std::erase_if(sels, [&handed, &pickedLabels](const auto& sel) {
-                const bool picked = !sel.getSubNames().empty()
+            // in the edited sketch's document only (review prs3220-r2 L1)
+            std::erase_if(sels, [&handed, &pickedLabels, &pickingDocuments](const auto& sel) {
+                const bool picked = !sel.getSubNames().empty() && sel.getObject()
+                    && std::ranges::find(pickingDocuments, sel.getObject()->getDocument())
+                        != pickingDocuments.end()
                     && std::ranges::none_of(handed, [&sel](const HandedToEdited& entry) {
                            return entry.obj == sel.getObject();
                        });

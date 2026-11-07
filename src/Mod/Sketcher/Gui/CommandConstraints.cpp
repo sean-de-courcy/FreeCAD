@@ -1450,8 +1450,9 @@ public:
 
     ~ModelPickBooking()
     {
-        // The command made nothing (a "Wrong selection", or the continuous tool started instead)
-        if (abort()) {
+        // The command made nothing (a "Wrong selection", or the continuous tool started instead),
+        // or it renamed the booking with its own openCommand and aborted that itself
+        if (abort() || linksAborted()) {
             restoreSelection();
         }
     }
@@ -1478,11 +1479,50 @@ private:
     {
         if (document && document->getBookedTransactionID() == tid
             && App::GetApplication().transactionTmpName(tid)) {
+            // The selection names the links: cleared while they exist, and the edit view redrawn
+            // once they're gone (an abort doesn't redraw it, as an undo does: review prs3220-r2 L2)
+            Gui::Selection().clearSelection();
             document->abortTransaction();
             added.clear();
+            redraw();
             return true;
         }
         return false;
+    }
+
+    /// the command aborted its own transaction, which held the links (review prs3220-r2 L3:
+    /// Coincident with nothing to constrain): the selection names geometry that is gone
+    bool linksAborted()
+    {
+        auto* sketch = this->sketch();
+        if (!sketch || added.empty() || document->getBookedTransactionID() != 0) {
+            return false;
+        }
+        const bool gone = std::ranges::any_of(added, [sketch](const Reference& reference) {
+            bool linked = false;
+            return findExternalReference(sketch, reference.source, reference.subName, &linked)
+                == GeoEnum::GeoUndef
+                && !linked;
+        });
+        if (!gone) {
+            return false;
+        }
+        added.clear();
+        redraw();
+        return true;
+    }
+
+    Sketcher::SketchObject* sketch() const
+    {
+        return document ? dynamic_cast<Sketcher::SketchObject*>(document->getObject(sketchName.c_str()))
+                        : nullptr;
+    }
+
+    void redraw()
+    {
+        if (auto* sketch = this->sketch()) {
+            tryAutoRecomputeIfNotSolve(sketch);
+        }
     }
 
     /// the picks selected again after an abort, as Onshape keeps a refused constraint's selection;
@@ -1493,6 +1533,7 @@ private:
         auto* vp = guiDocument ? dynamic_cast<ViewProviderSketch*>(guiDocument->getInEdit()) : nullptr;
         if (!vp || picked.empty() || vp->getSketchObject()->getNameInDocument() != sketchName
             || vp->getSketchMode() == ViewProviderSketch::STATUS_SKETCH_UseHandler) {
+            Gui::Selection().clearSelection();
             return;
         }
         Gui::Selection().clearSelection();
@@ -2153,7 +2194,11 @@ protected:
         App::Document* document = sketchgui->getSketchObject()->getDocument();
         if (externalBooking && document->getBookedTransactionID() == externalBooking
             && App::GetApplication().transactionTmpName(externalBooking)) {
+            // As ModelPickBooking::abort (review prs3220-r2 L2): no selection naming the links
+            // while they go, and the edit view redrawn after
+            Gui::Selection().clearSelection();
             document->abortTransaction();
+            tryAutoRecomputeIfNotSolve(sketchgui->getSketchObject());
         }
         externalBooking = 0;
     }

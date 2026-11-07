@@ -3095,7 +3095,16 @@ void ViewProviderSketch::onSelectionChanged(const Gui::SelectionChanges& msg)
             }
         }
         else if (msg.Type == Gui::SelectionChanges::RmvPreselect) {
-            resetPreselectPoint();
+            // FreeCAD-CH (ops#634): with the 3D view's selection on in plain edit mode, its
+            // preselection of what lies under the cursor (a refused face too) first removes the
+            // sketch's own (SelectionSingleton::setPreselect). Between a press on a sketch element
+            // and its release or the move that starts its drag, that preselection is what the
+            // click selects or the drag moves: it stays
+            if (Mode != STATUS_SELECT_Point && Mode != STATUS_SELECT_Edge
+                && Mode != STATUS_SELECT_Constraint && Mode != STATUS_SELECT_Cross
+                && Mode != STATUS_SELECT_Wire) {
+                resetPreselectPoint();
+            }
         }
     }
 }
