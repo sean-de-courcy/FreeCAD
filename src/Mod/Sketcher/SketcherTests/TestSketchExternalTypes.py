@@ -1207,18 +1207,29 @@ class TestSketchImplicitExternals(unittest.TestCase):
     def links(self):
         return [(obj.Name, sub) for obj, subs in self.sketch.ExternalGeometry for sub in subs]
 
+    def externalIds(self):
+        """The Ids of the external geometry after the axes (its facade's: a Part geometry has no
+        Id; lines only, as a Part.Point read from ExternalGeo loses its extensions)."""
+        return [
+            Sketcher.ExternalGeometryFacade(g).Id
+            for g in list(self.sketch.ExternalGeo)[2:]
+            if not isinstance(g, Part.Point)
+        ]
+
     def railY(self):
         lines = [g for g in list(self.sketch.ExternalGeo)[2:] if isinstance(g, Part.LineSegment)]
         self.assertEqual(len(lines), 1)
         return lines[0].StartPoint.y
 
     def testAHelperIsMarkedAndKeepsTheMarkThroughARebuild(self):
-        """The rail linked as a helper, then moved: its geometry follows, the mark stays."""
+        """The rail linked as a helper, then moved: its geometry follows, the mark stays. Moved
+        by its Placement, so its edge keeps its name; a new Shape from a script would be named
+        afresh (I-C5, ops#502) and break the link."""
         self.sketch.addExternal(self.rail.Name, "Edge1", False, False, True)
         self.doc.recompute()
         self.assertEqual(list(self.sketch.ExternalTypes), [PROJECTION | IMPLICIT])
         self.assertAlmostEqual(self.railY(), 20, places=6)
-        self.rail.Shape = Part.makeLine(V(-20, 25, 0), V(20, 25, 0))
+        self.rail.Placement = App.Placement(V(0, 5, 0), App.Rotation())
         self.doc.recompute()
         self.assertAlmostEqual(self.railY(), 25, places=6)
         self.assertEqual(list(self.sketch.ExternalTypes), [PROJECTION | IMPLICIT])
@@ -1237,12 +1248,13 @@ class TestSketchImplicitExternals(unittest.TestCase):
         tool): no error, the same link and geometry Id, no mark."""
         self.sketch.addExternal(self.rail.Name, "Edge1", False, False, True)
         self.doc.recompute()
-        ids = [g.Id for g in list(self.sketch.ExternalGeo)[2:]]
+        ids = self.externalIds()
+        self.assertEqual(len(ids), 1)
         self.sketch.addExternal(self.rail.Name, "Edge1")
         self.doc.recompute()
         self.assertEqual(self.links(), [("Rail", "Edge1")])
         self.assertEqual(list(self.sketch.ExternalTypes), [PROJECTION])
-        self.assertEqual([g.Id for g in list(self.sketch.ExternalGeo)[2:]], ids)
+        self.assertEqual(self.externalIds(), ids)
 
     def testTheUsersOtherKindOfAHelperMakesItBothUnmarked(self):
         """A helper's projection of the ring, then the user's intersection: Both, no mark; a
