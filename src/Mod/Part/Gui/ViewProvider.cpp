@@ -32,6 +32,7 @@
 #include <Gui/CommandT.h>
 #include <Gui/Inventor/Draggers/Gizmo.h>
 #include <Gui/View3DInventorViewer.h>
+#include <Mod/Part/App/BodyBase.h>
 
 #include "ViewProvider.h"
 
@@ -46,6 +47,14 @@ PROPERTY_SOURCE(PartGui::ViewProviderPart, PartGui::ViewProviderPartExt)  // NOL
 ViewProviderPart::ViewProviderPart() = default;
 
 ViewProviderPart::~ViewProviderPart() = default;
+
+bool ViewProviderPart::canDelete(App::DocumentObject* obj) const
+{
+    if (obj && getObject() && Part::BodyBase::findBodyOf(getObject()) && Part::BodyBase::findBodyOf(obj)) {
+        return true;
+    }
+    return ViewProviderPartExt::canDelete(obj);
+}
 
 bool ViewProviderPart::doubleClicked()
 {

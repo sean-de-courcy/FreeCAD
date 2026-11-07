@@ -5,15 +5,21 @@
 #include <algorithm>
 #include <set>
 
+#include <QAction>
 #include <QApplication>
+#include <QHBoxLayout>
 #include <QHeaderView>
 #include <QKeyEvent>
 #include <QLabel>
+#include <QLineEdit>
 #include <QMenu>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QScopedValueRollback>
 #include <QScrollBar>
+#include <QSignalBlocker>
 #include <QSplitter>
+#include <QToolButton>
 #include <QVBoxLayout>
 
 #include <App/Application.h>
@@ -36,8 +42,10 @@
 #include <Gui/ViewProviderDocumentObject.h>
 #include <Gui/Workbench.h>
 #include <Gui/WorkbenchManager.h>
+#include <Mod/Part/App/Part2DObject.h>
 #include <Mod/Part/App/PartFeature.h>
 #include <Mod/PartDesign/App/Body.h>
+#include <Mod/PartDesign/App/FeatureBoolean.h>
 #include <Mod/PartDesign/App/FeatureDeletePart.h>
 #include <Mod/PartDesign/App/Studio.h>
 
@@ -68,6 +76,27 @@ bool inPartDesign()
 {
     auto wb = Gui::WorkbenchManager::instance()->active();
     return wb && wb->name() == "PartDesignWorkbench";
+}
+
+/// A sketch of a Body is in edit: its EditingWorkbench (the Sketcher's) was activated for it
+/// (ViewProviderSketch::setEdit), and the edit is set before that (Gui::Document::setEdit)
+bool editingBodySketch()
+{
+    auto gdoc = Gui::Application::Instance->editDocument();
+    auto vp = gdoc ? freecad_cast<Gui::ViewProviderDocumentObject*>(gdoc->getEditViewProvider()) : nullptr;
+    auto obj = vp ? vp->getObject() : nullptr;
+    return obj && obj->isDerivedFrom<Part::Part2DObject>() && PartDesign::Body::findBodyOf(obj);
+}
+
+/// The lists stay in the Model panel: in PartDesign, and in the workbench a Body's sketch opened
+/// for its edit, as Onshape keeps its Feature list while a sketch is edited (ops#640)
+bool listsBelong()
+{
+    if (inPartDesign()) {
+        return true;
+    }
+    auto wb = Gui::WorkbenchManager::instance()->active();
+    return wb && wb->name() == "SketcherWorkbench" && editingBodySketch();
 }
 
 /// The Model panel's splitter (the Combo view: the tree above the Properties panel), or null when
@@ -178,7 +207,8 @@ bool showMovedTips(const std::vector<PartDesign::Body*>& bodies, const std::vect
     return changed;
 }
 
-/// What a row shows of obj: its name, label and status (statusIcon(), statusFont())
+/// What a row shows of obj: its name, label and status (statusIcon(), statusFont(), and the
+/// message of an error or a warning, rowToolTip())
 std::string rowKey(const App::DocumentObject* obj, bool held, const std::string& extra = {})
 {
     std::string key = obj->getNameInDocument();
@@ -189,8 +219,74 @@ std::string rowKey(const App::DocumentObject* obj, bool held, const std::string&
     key += held ? 'h' : '-';
     key += obj->isTouched() || obj->mustExecute() == 1 ? 't' : '-';
     key += isSuppressed(obj) ? 's' : '-';
+    if (obj->isError() || obj->isWarning()) {
+        key += obj->getStatusString();
+    }
     key += extra;
     return key;
+}
+
+/// Where obj's error comes from: the first object in error it reads, directly or through others
+/// in error, that reads none in error itself (a pocket failing on its sketch's missing face: the
+/// sketch); null when obj's error is its own. The message of a failure passed on names a link
+/// property ("ReferenceAxis links to 'Square', which has an error", blind test F45); the cause's
+/// says what to fix
+const App::DocumentObject* errorCause(const App::DocumentObject* obj)
+{
+    std::set<const App::DocumentObject*> seen {obj};
+    const App::DocumentObject* cause = nullptr;
+    for (const App::DocumentObject* at = obj; at;) {
+        const App::DocumentObject* next = nullptr;
+        // Not through a container (a Body in error names its Tip, a later feature); the out-list
+        // leaves the hidden links (a feature's _Body) out
+        for (auto in : at->getOutList()) {
+            if (in && in->isError() && !in->hasExtension(App::GroupExtension::getExtensionClassTypeId())
+                && seen.insert(in).second) {
+                next = in;
+                break;
+            }
+        }
+        if (next) {
+            cause = next;
+        }
+        at = next;
+    }
+    return cause;
+}
+
+/// The row's tooltip: its name and Body, the message of an error or a warning, and where an error
+/// comes from (errorCause()), as Onshape's hover over a failed feature (blind test F38)
+QString rowToolTip(const App::DocumentObject* obj, const App::DocumentObject* body)
+{
+    QString tip = QString::fromUtf8(obj->Label.getValue());
+    if (body && body != obj) {
+        tip = QObject::tr("%1 (%2)").arg(tip, QString::fromUtf8(body->Label.getValue()));
+    }
+    if (!obj->isError() && !obj->isWarning()) {
+        return tip;
+    }
+    tip += QStringLiteral("\n") + QString::fromUtf8(obj->getStatusString());
+    if (auto cause = obj->isError() ? errorCause(obj) : nullptr) {
+        tip += QStringLiteral("\n")
+            + QObject::tr("Caused by '%1': %2").arg(
+                QString::fromUtf8(cause->Label.getValue()),
+                QString::fromUtf8(cause->getStatusString())
+            );
+    }
+    return tip;
+}
+
+/// An error row's text is red, a warning's orange, as Onshape's (blind test F38); other rows keep
+/// the palette's
+QVariant statusForeground(const App::DocumentObject* obj)
+{
+    if (obj->isError()) {
+        return QBrush(QColor(0xd0, 0x30, 0x30));
+    }
+    if (obj->isWarning()) {
+        return QBrush(QColor(0xc8, 0x78, 0x00));
+    }
+    return {};
 }
 
 /// The studio's parts: its Bodies with a solid feature at or above their bar, and the other solids
@@ -200,9 +296,25 @@ std::string rowKey(const App::DocumentObject* obj, bool held, const std::string&
 /// sketches, and shows nothing
 std::vector<App::DocumentObject*> studioParts(App::Document* doc, App::Part* studio)
 {
+    // A part exists at the bar while one of its solid features above it makes a solid, and no
+    // Merge above its own bar absorbed it, as Onshape lists no part whose features all fail or that
+    // an Add merged away (blind test F37, F26; report 10)
+    auto exists = [](PartDesign::Body* body) {
+        if (auto merge = PartDesign::Boolean::mergeOf(body)) {
+            auto into = PartDesign::Body::findBodyOf(merge);
+            if (!isSuppressed(merge) && !(into && into->holds(merge))) {
+                return false;
+            }
+        }
+        return std::ranges::any_of(body->Group.getValues(), [body](App::DocumentObject* obj) {
+            auto feature = freecad_cast<Part::Feature*>(obj);
+            return feature && PartDesign::Body::isSolidFeature(obj) && !body->holds(obj) && !obj->isError()
+                && !isSuppressed(obj) && !feature->Shape.getShape().isNull();
+        });
+    };
     std::vector<App::DocumentObject*> parts;
     for (auto body : PartDesign::studioBodies(doc, studio)) {
-        if (body->Tip.getValue() && !PartDesign::DeletePart::deleterOf(body)) {
+        if (body->Tip.getValue() && !PartDesign::DeletePart::deleterOf(body) && exists(body)) {
             parts.push_back(body);
         }
     }
@@ -282,6 +394,7 @@ void FeatureList::mousePressEvent(QMouseEvent* event)
     auto pressed = itemAt(pos);
     if (event->button() == Qt::LeftButton && pressed && pressed->type() == BarType) {
         dragging = true;
+        barMoved = false;
         setCursor(Qt::ClosedHandCursor);
         event->accept();
         return;
@@ -338,6 +451,7 @@ void FeatureList::mouseMoveEvent(QMouseEvent* event)
     if (to != from) {
         takeItem(from);
         insertItem(to, bar);
+        barMoved = true;
     }
     event->accept();
 }
@@ -373,7 +487,15 @@ void FeatureList::mouseReleaseEvent(QMouseEvent* event)
     dragging = false;
     unsetCursor();
     event->accept();
-    if (auto bar = barItem()) {
+    auto bar = barItem();
+    if (bar && !barMoved) {
+        // A click: the bar is selected, for the arrow keys (Onshape)
+        clearSelection();
+        setCurrentItem(bar);
+        bar->setSelected(true);
+        return;
+    }
+    if (bar) {
         Q_EMIT barDropped(row(bar) - 1);
     }
 }
@@ -390,6 +512,14 @@ void FeatureList::keyPressEvent(QKeyEvent* event)
         unsetCursor();
         event->accept();
         Q_EMIT barDragCancelled();
+        return;
+    }
+    // With the bar selected, Up and Down step it one row (Onshape, ref-D 3.11)
+    auto bar = barItem();
+    if (bar && bar->isSelected() && currentItem() == bar && event->modifiers() == Qt::NoModifier
+        && (event->key() == Qt::Key_Up || event->key() == Qt::Key_Down)) {
+        event->accept();
+        Q_EMIT barStepped(event->key() == Qt::Key_Up ? -1 : 1);
         return;
     }
     QListWidget::keyPressEvent(event);
@@ -451,16 +581,30 @@ FeaturesView::FeaturesView(QWidget* parent)
     auto featuresLayout = new QVBoxLayout(featuresBox);
     featuresLayout->setContentsMargins(0, 0, 0, 0);
     featuresLayout->setSpacing(2);
-    auto title = new QLabel(tr("Features"), featuresBox);
+    // The header: Onshape's error icon (the count on hover, a click shows only the failed rows;
+    // ref-D #24), then "Features (n)"
+    auto header = new QHBoxLayout();
+    header->setContentsMargins(4, 2, 4, 0);
+    header->setSpacing(4);
+    errorsButton = new QToolButton(featuresBox);
+    errorsButton->setObjectName(QStringLiteral("featuresErrors"));
+    errorsButton->setIcon(QIcon(Gui::BitmapFactory().pixmapFromSvg("overlay_error", QSize(16, 16))));
+    errorsButton->setAutoRaise(true);
+    errorsButton->setCheckable(true);
+    errorsButton->hide();
+    header->addWidget(errorsButton);
+    title = new QLabel(tr("Features"), featuresBox);
     title->setObjectName(QStringLiteral("featuresTitle"));
-    title->setContentsMargins(4, 2, 4, 0);
-    featuresLayout->addWidget(title);
+    header->addWidget(title, 1);
+    featuresLayout->addLayout(header);
     features = new FeatureList(featuresBox);
     features->setObjectName(QStringLiteral("featureList"));
     features->setItemDelegate(new FeatureBarDelegate(features));
     features->setSelectionMode(QAbstractItemView::ExtendedSelection);
     features->setIconSize(QSize(16, 16));
     features->setContextMenuPolicy(Qt::CustomContextMenu);
+    // Rename by F2 or Onshape's Shift+N (ref-D #17), never by a click: a double-click edits
+    features->setEditTriggers(QAbstractItemView::NoEditTriggers);
     featuresLayout->addWidget(features);
 
     parts = new QTreeWidget(splitter);
@@ -473,8 +617,19 @@ FeaturesView::FeaturesView(QWidget* parent)
     parts->header()->setStretchLastSection(false);
     parts->header()->setSectionResizeMode(0, QHeaderView::Stretch);
     parts->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    parts->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    parts->setContextMenuPolicy(Qt::CustomContextMenu);
     splitter->setStretchFactor(0, 3);
     splitter->setStretchFactor(1, 1);
+
+    for (QAbstractItemView* view : {static_cast<QAbstractItemView*>(features), static_cast<QAbstractItemView*>(parts)}) {
+        auto rename = new QAction(tr("Rename"), view);
+        rename->setObjectName(QStringLiteral("renameAction"));
+        rename->setShortcuts({QKeySequence(Qt::Key_F2), QKeySequence(Qt::SHIFT | Qt::Key_N)});
+        rename->setShortcutContext(Qt::WidgetShortcut);
+        connect(rename, &QAction::triggered, this, [this, view]() { renameCurrent(view); });
+        view->addAction(rename);
+    }
 
     rebuildTimer = new QTimer(this);
     rebuildTimer->setSingleShot(true);
@@ -488,12 +643,26 @@ FeaturesView::FeaturesView(QWidget* parent)
     connect(features, &FeatureList::barDropped, this, &FeaturesView::onBarDropped);
     connect(features, &FeatureList::barDragCancelled, this, &FeaturesView::forceRebuild);
     connect(features, &FeatureList::rowsDropped, this, &FeaturesView::onRowsDropped);
+    connect(features, &FeatureList::barStepped, this, &FeaturesView::stepBar);
     connect(features, &QListWidget::customContextMenuRequested, this, &FeaturesView::onFeatureMenu);
     connect(features, &QListWidget::itemDoubleClicked, this, &FeaturesView::onFeatureDoubleClicked);
     connect(features, &QListWidget::itemSelectionChanged, this, [this]() {
         if (syncing) {
             return;
         }
+        // Show dependencies' marks last until the user selects again
+        if (!dependencyParents.empty() || !dependencyChildren.empty()) {
+            dependencyParents.clear();
+            dependencyChildren.clear();
+            markDependencies();
+        }
+        // The bar is selected alone (a click on it), never in a range of rows
+        auto bar = features->barItem();
+        if (bar && bar->isSelected() && features->selectedItems().size() > 1) {
+            QScopedValueRollback<bool> quiet(syncing, true);
+            bar->setSelected(false);
+        }
+        barSelected = bar && bar->isSelected();
         std::vector<App::DocumentObject*> objs;
         for (auto item : features->selectedItems()) {
             if (auto obj = objectOf(item)) {
@@ -502,6 +671,20 @@ FeaturesView::FeaturesView(QWidget* parent)
         }
         pushSelection(objs);
     });
+    connect(errorsButton, &QToolButton::toggled, this, &FeaturesView::applyErrorFilter);
+    connect(features->itemDelegate(), &QAbstractItemDelegate::closeEditor, this, &FeaturesView::endRename);
+    connect(parts->itemDelegate(), &QAbstractItemDelegate::closeEditor, this, &FeaturesView::endRename);
+    connect(features, &QListWidget::itemChanged, this, [this](QListWidgetItem* item) {
+        if (!syncing) {
+            rename(objectOf(item), item->text());
+        }
+    });
+    connect(parts, &QTreeWidget::itemChanged, this, [this](QTreeWidgetItem* item, int column) {
+        if (!syncing && column == 0) {
+            rename(objectOf(item), item->text(0));
+        }
+    });
+    connect(parts, &QTreeWidget::customContextMenuRequested, this, &FeaturesView::onPartMenu);
     connect(parts, &QTreeWidget::itemClicked, this, &FeaturesView::onPartClicked);
     connect(parts, &QTreeWidget::itemDoubleClicked, this, &FeaturesView::onPartDoubleClicked);
     connect(parts, &QTreeWidget::itemSelectionChanged, this, [this]() {
@@ -541,6 +724,13 @@ FeaturesView::FeaturesView(QWidget* parent)
     connections.emplace_back(Gui::Application::Instance->signalDeleteDocument.connect(
         [this](const Gui::Document& gdoc) { onDeleteDocument(gdoc); }
     ));
+    // Kept through a sketch's edit (leavePartDesign()), the lists leave with the next workbench
+    // that isn't the sketch's, as PartDesign's own deactivation would
+    connections.emplace_back(Gui::Application::Instance->signalActivateWorkbench.connect([](const char*) {
+        if (!listsBelong()) {
+            showLists(false);
+        }
+    }));
     if (auto gdoc = Gui::Application::Instance->activeDocument()) {
         onActiveDocument(*gdoc);
     }
@@ -589,7 +779,11 @@ void FeaturesView::enterPartDesign()
 
 void FeaturesView::leavePartDesign()
 {
-    showLists(false);
+    // The workbench activated now (it activates before the old one is deactivated): a Body's
+    // sketch opened in the Sketcher keeps the lists
+    if (!listsBelong()) {
+        showLists(false);
+    }
 }
 
 void FeaturesView::toggleModelTree()
@@ -759,8 +953,8 @@ void FeaturesView::rebuild()
         dirty = true;
         return;
     }
-    // Not under the user's hand: a drag ends with its own rebuild
-    if (features->isDraggingBar() || features->isDraggingRows()) {
+    // Not under the user's hand: a drag ends with its own rebuild, a rename with its commit
+    if (features->isDraggingBar() || features->isDraggingRows() || renaming) {
         rebuildTimer->start();
         return;
     }
@@ -769,6 +963,11 @@ void FeaturesView::rebuild()
     syncing = true;
     rebuildFeatures();
     rebuildParts();
+    // A selected bar stays selected through a rebuild (its row is new after a move)
+    if (auto bar = barSelected ? features->barItem() : nullptr) {
+        features->setCurrentItem(bar);
+        bar->setSelected(true);
+    }
     syncing = false;
     syncSelectionFromApp();
 }
@@ -792,6 +991,15 @@ void FeaturesView::rebuildFeatures()
         return;
     }
     const auto sequence = PartDesign::studioSequence(doc, studio());
+    // The header: the count, and the error icon while some row fails
+    int errors = static_cast<int>(std::ranges::count_if(sequence, [](auto obj) { return obj->isError(); }));
+    title->setText(tr("Features (%1)").arg(sequence.size()));
+    errorsButton->setVisible(errors > 0);
+    errorsButton->setToolTip(tr("%n feature(s) in error: click to show only them", "", errors));
+    if (errors == 0 && errorsButton->isChecked()) {
+        QSignalBlocker block(errorsButton);
+        errorsButton->setChecked(false);
+    }
     App::DocumentObject* hint = barHint.empty() ? nullptr : doc->getObject(barHint.c_str());
     bool hinted = barHinted && (barHint.empty() || hint);
     App::DocumentObject* after = PartDesign::studioBarAfter(sequence, hinted, hint);
@@ -831,6 +1039,7 @@ void FeaturesView::rebuildFeatures()
     }
     // Unchanged: the rows (and the user's selection anchor in them) stay
     if (rows == featureRows && features->count() == static_cast<int>(rows.size())) {
+        applyErrorFilter();
         return;
     }
     // The same rows in the same order (a status or a label changed): updated in place, so a
@@ -840,16 +1049,13 @@ void FeaturesView::rebuildFeatures()
     featureNames = names;
     auto decorate = [this](QListWidgetItem* item, App::DocumentObject* obj, bool isHeld) {
         auto body = PartDesign::Body::findBodyOf(obj);
+        item->setFlags(item->flags() | Qt::ItemIsEditable);
         item->setText(QString::fromUtf8(obj->Label.getValue()));
         item->setData(Qt::UserRole, QByteArray(obj->getNameInDocument()));
         item->setIcon(statusIcon(obj, isHeld));
         item->setFont(statusFont(features->font(), obj, isHeld));
-        if (body) {
-            item->setToolTip(tr("%1 (%2)").arg(
-                QString::fromUtf8(obj->Label.getValue()),
-                QString::fromUtf8(body->Label.getValue())
-            ));
-        }
+        item->setData(Qt::ForegroundRole, statusForeground(obj));
+        item->setToolTip(rowToolTip(obj, body));
     };
     if (inPlace) {
         for (std::size_t r = 0; r < order.size(); ++r) {
@@ -857,6 +1063,7 @@ void FeaturesView::rebuildFeatures()
                 decorate(features->item(static_cast<int>(r)), sequence[order[r]], held[order[r]]);
             }
         }
+        applyErrorFilter();
         return;
     }
     int scroll = features->verticalScrollBar() ? features->verticalScrollBar()->value() : 0;
@@ -864,15 +1071,27 @@ void FeaturesView::rebuildFeatures()
     for (int index : order) {
         if (index < 0) {
             auto bar = new QListWidgetItem(features, FeatureList::BarType);
-            bar->setFlags(Qt::ItemIsEnabled);
+            bar->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable);
             bar->setSizeHint(QSize(0, 9));
             bar->setToolTip(tr("Roll-back bar: drag it to roll every body of the part studio back"));
             continue;
         }
         decorate(new QListWidgetItem(features), sequence[index], held[index]);
     }
+    markDependencies();
+    applyErrorFilter();
     if (auto bar = features->verticalScrollBar()) {
         bar->setValue(scroll);
+    }
+}
+
+void FeaturesView::applyErrorFilter()
+{
+    bool only = errorsButton->isChecked();
+    for (int i = 0; i < features->count(); ++i) {
+        auto item = features->item(i);
+        auto obj = objectOf(item);
+        item->setHidden(only && !(obj && obj->isError()));
     }
 }
 
@@ -886,6 +1105,7 @@ void FeaturesView::rebuildParts()
         return;
     }
     const auto objs = studioParts(doc, studio());
+    parts->headerItem()->setText(0, tr("Parts (%1)").arg(objs.size()));
     std::vector<std::string> rows;
     std::vector<std::string> names;
     for (auto obj : objs) {
@@ -911,10 +1131,13 @@ void FeaturesView::rebuildParts()
         auto body = freecad_cast<PartDesign::Body*>(obj);
         bool held = body && body->isRolledBack();
         auto item = inPlace ? parts->topLevelItem(static_cast<int>(i)) : new QTreeWidgetItem(parts);
+        item->setFlags(item->flags() | Qt::ItemIsEditable);
         item->setText(0, QString::fromUtf8(obj->Label.getValue()));
         item->setData(0, Qt::UserRole, QByteArray(obj->getNameInDocument()));
         item->setIcon(0, statusIcon(obj, held));
         item->setFont(0, statusFont(parts->font(), obj, held));
+        item->setData(0, Qt::ForegroundRole, statusForeground(obj));
+        item->setToolTip(0, rowToolTip(obj, nullptr));
         auto vp = viewProviderOf(obj);
         if (vp && vp->canToggleVisibility()) {
             item->setIcon(1, vp->isShow() ? visible : invisible);
@@ -996,6 +1219,11 @@ void FeaturesView::syncSelectionFromApp()
     // Only the rows that differ: setSelected() on a row commits the range a Shift+click is still
     // building, so the next Shift+click couldn't shrink it (review props602-r1fix R2)
     syncing = true;
+    // Something selected elsewhere: the bar isn't any more
+    if (auto bar = features->barItem(); bar && bar->isSelected() && !selected.empty()) {
+        bar->setSelected(false);
+        barSelected = false;
+    }
     for (int i = 0; i < features->count(); ++i) {
         auto item = features->item(i);
         bool want = selected.count(item->data(Qt::UserRole).toByteArray().toStdString()) > 0;
@@ -1075,6 +1303,42 @@ void FeaturesView::onBarDropped(int row)
     }
     // The dragged bar row moved without the signature knowing
     forceRebuild();
+}
+
+void FeaturesView::stepBar(int delta)
+{
+    auto bar = features->barItem();
+    if (!bar) {
+        return;
+    }
+    int at = features->row(bar);
+    // Up: after the row two above (the top when only one is); Down: after the row below
+    App::DocumentObject* member = nullptr;
+    bool toEnd = false;
+    if (delta < 0) {
+        if (at == 0) {
+            return;
+        }
+        member = at >= 2 ? objectOf(features->item(at - 2)) : nullptr;
+    }
+    else {
+        if (at + 1 >= features->count()) {
+            return;
+        }
+        member = objectOf(features->item(at + 1));
+        toEnd = at + 1 == features->count() - 1;
+    }
+    barHinted = !toEnd;
+    barHint = member && !toEnd ? member->getNameInDocument() : "";
+    try {
+        rollStudio(document(), studio(), member, toEnd);
+    }
+    catch (const Base::Exception& e) {
+        Gui::getMainWindow()->showMessage(QString::fromUtf8(e.what()), 5000);
+    }
+    // The bar stays selected for the next step
+    barSelected = true;
+    rebuild();
 }
 
 void FeaturesView::onRowsDropped(int row)
@@ -1231,10 +1495,24 @@ void FeaturesView::onFeatureMenu(const QPoint& pos)
 {
     auto item = features->itemAt(pos);
     App::DocumentObject* obj = objectOf(item);
+    QPointer<FeaturesView> self(this);
+    bool locked = ViewProviderBody::isEditLocked(document());
     if (!obj) {
+        // The bar's row and the empty space below the rows: Onshape's Roll to end (ref-D 3.11)
+        if (!document() || features->count() == 0) {
+            return;
+        }
+        QMenu menu(this);
+        auto end = menu.addAction(tr("Roll to end"), [self]() {
+            if (self) {
+                self->rollFromMenu(nullptr, true);
+            }
+        });
+        end->setObjectName(QStringLiteral("featureRollToEnd"));
+        end->setEnabled(!locked);
+        menu.exec(features->viewport()->mapToGlobal(pos));
         return;
     }
-    QPointer<FeaturesView> self(this);
     std::string name = obj->getNameInDocument();
     auto runByName = [](const char* command) {
         Gui::Application::Instance->commandManager().runCommandByName(command);
@@ -1248,8 +1526,15 @@ void FeaturesView::onFeatureMenu(const QPoint& pos)
         }
     });
     edit->setObjectName(QStringLiteral("featureEdit"));
+    // One feature is edited at a time
+    edit->setEnabled(features->selectedItems().size() <= 1);
+    auto rename = menu.addAction(tr("Rename"), [self]() {
+        if (self) {
+            self->renameCurrent(self->features);
+        }
+    });
+    rename->setObjectName(QStringLiteral("featureRename"));
     menu.addSeparator();
-    bool locked = ViewProviderBody::isEditLocked(document());
     auto here = menu.addAction(tr("Roll to here"), [self, name]() {
         auto doc = self ? self->document() : nullptr;
         if (auto target = doc ? doc->getObject(name.c_str()) : nullptr) {
@@ -1273,9 +1558,96 @@ void FeaturesView::onFeatureMenu(const QPoint& pos)
         [runByName]() { runByName("Std_ToggleSuppress"); }
     );
     suppress->setObjectName(QStringLiteral("featureToggleSuppress"));
+    auto dependencies = menu.addAction(tr("Show dependencies"), [self, name]() {
+        auto doc = self ? self->document() : nullptr;
+        if (auto target = doc ? doc->getObject(name.c_str()) : nullptr) {
+            self->showDependencies(target);
+        }
+    });
+    dependencies->setObjectName(QStringLiteral("featureDependencies"));
+    auto fit = menu.addAction(tr("Zoom to selection"), [runByName]() { runByName("Std_ViewFitSelection"); });
+    fit->setObjectName(QStringLiteral("featureZoom"));
+    menu.addSeparator();
     auto remove = menu.addAction(tr("Delete"), [runByName]() { runByName("Std_Delete"); });
     remove->setObjectName(QStringLiteral("featureDelete"));
     menu.exec(features->viewport()->mapToGlobal(pos));
+}
+
+void FeaturesView::showDependencies(App::DocumentObject* obj)
+{
+    // Onshape's Show dependencies: the feature's parents (what it uses) and children (what uses
+    // it), marked in the list until the selection changes. The base a feature is merged with is
+    // the history's order, not a parent, as Onshape's merge scope
+    auto reads = [](const App::DocumentObject* reader) {
+        std::vector<App::DocumentObject*> found;
+        std::vector<App::Property*> props;
+        reader->getPropertyList(props);
+        for (auto prop : props) {
+            auto link = freecad_cast<App::PropertyLinkBase*>(prop);
+            const char* name = prop->getName();
+            if (!link || !name || strcmp(name, "BaseFeature") == 0) {
+                continue;
+            }
+            std::vector<App::DocumentObject*> objs;
+            link->getLinks(objs);
+            found.insert(found.end(), objs.begin(), objs.end());
+        }
+        return found;
+    };
+    dependencyParents.clear();
+    dependencyChildren.clear();
+    QStringList parentLabels;
+    QStringList childLabels;
+    auto doc = document();
+    const auto sequence = doc ? PartDesign::studioSequence(doc, studio()) : std::vector<App::DocumentObject*>();
+    auto member = [&sequence](const App::DocumentObject* other) {
+        return std::ranges::find(sequence, other) != sequence.end();
+    };
+    for (auto parent : reads(obj)) {
+        if (parent != obj && member(parent) && dependencyParents.insert(parent->getNameInDocument()).second) {
+            parentLabels << QString::fromUtf8(parent->Label.getValue());
+        }
+    }
+    for (auto other : sequence) {
+        auto in = reads(other);
+        if (other != obj && std::ranges::find(in, obj) != in.end()) {
+            dependencyChildren.insert(other->getNameInDocument());
+            childLabels << QString::fromUtf8(other->Label.getValue());
+        }
+    }
+    QString none = tr("none");
+    Gui::getMainWindow()->showMessage(
+        tr("'%1': parents: %2; children: %3")
+            .arg(
+                QString::fromUtf8(obj->Label.getValue()),
+                parentLabels.isEmpty() ? none : parentLabels.join(QStringLiteral(", ")),
+                childLabels.isEmpty() ? none : childLabels.join(QStringLiteral(", "))
+            ),
+        10000
+    );
+    markDependencies();
+}
+
+void FeaturesView::markDependencies()
+{
+    QColor parent = palette().color(QPalette::Highlight);
+    parent.setAlpha(60);
+    QColor child(0xc8, 0x78, 0x00, 60);
+    // Not a rename: the rows' data changes
+    QScopedValueRollback<bool> quiet(syncing, true);
+    for (int i = 0; i < features->count(); ++i) {
+        auto item = features->item(i);
+        std::string name = item->data(Qt::UserRole).toByteArray().toStdString();
+        QVariant background;
+        if (dependencyParents.count(name)) {
+            background = QBrush(parent);
+        }
+        else if (dependencyChildren.count(name)) {
+            background = QBrush(child);
+        }
+        item->setData(Qt::BackgroundRole, background);
+        item->setData(DependencyRole, dependencyParents.count(name) ? 1 : dependencyChildren.count(name) ? 2 : 0);
+    }
 }
 
 void FeaturesView::onPartClicked(QTreeWidgetItem* item, int column)
@@ -1302,6 +1674,126 @@ void FeaturesView::onPartDoubleClicked(QTreeWidgetItem* item, int column)
             vp->doubleClicked();
         }
     }
+}
+
+void FeaturesView::renameCurrent(QAbstractItemView* view)
+{
+    // The row the user acts on: the current one, if selected, else the first selected
+    if (view == features) {
+        auto item = features->currentItem();
+        if (!item || !item->isSelected()) {
+            auto selected = features->selectedItems();
+            item = selected.isEmpty() ? nullptr : selected.front();
+        }
+        if (item && objectOf(item)) {
+            features->setCurrentItem(item);
+            renaming = true;
+            features->editItem(item);
+            // No editor opened: rebuilds mustn't wait for a commit that won't come (review
+            // sff13-r1 Opus)
+            renaming = features->viewport()->findChild<QLineEdit*>() != nullptr;
+        }
+        return;
+    }
+    auto item = parts->currentItem();
+    if (!item || !item->isSelected()) {
+        auto selected = parts->selectedItems();
+        item = selected.isEmpty() ? nullptr : selected.front();
+    }
+    if (item && objectOf(item)) {
+        parts->setCurrentItem(item, 0);
+        renaming = true;
+        parts->editItem(item, 0);
+        renaming = parts->viewport()->findChild<QLineEdit*>() != nullptr;
+    }
+}
+
+void FeaturesView::rename(App::DocumentObject* obj, const QString& text)
+{
+    renaming = false;
+    // An empty name, or none changed: the row shows the label again
+    QByteArray label = text.trimmed().toUtf8();
+    if (obj && !label.isEmpty() && label != obj->Label.getValue()) {
+        auto doc = obj->getDocument();
+        int tid = doc->openTransaction(QT_TRANSLATE_NOOP("Command", "Rename"));
+        obj->Label.setValue(label.constData());
+        App::GetApplication().commitTransaction(tid);
+    }
+    // On the timer: the editor that committed the text is still open (closeEditor follows);
+    // the row shows the label again even when the rows' keys didn't change
+    featureRows.clear();
+    partRows.clear();
+    scheduleRebuild();
+}
+
+void FeaturesView::endRename()
+{
+    // The editor closed without a change (Escape, or the same text): no itemChanged
+    if (renaming) {
+        renaming = false;
+        scheduleRebuild();
+    }
+}
+
+void FeaturesView::onPartMenu(const QPoint& pos)
+{
+    auto item = parts->itemAt(pos);
+    App::DocumentObject* obj = objectOf(item);
+    if (!obj) {
+        return;
+    }
+    // The menu acts on the selection: a right-click outside it selects the row alone first
+    if (!item->isSelected()) {
+        parts->clearSelection();
+        item->setSelected(true);
+    }
+    parts->setCurrentItem(item, 0);
+    QPointer<FeaturesView> self(this);
+    auto runByName = [](const char* command) {
+        Gui::Application::Instance->commandManager().runCommandByName(command);
+    };
+    QMenu menu(this);
+    auto rename = menu.addAction(tr("Rename"), [self]() {
+        if (self) {
+            self->renameCurrent(self->parts);
+        }
+    });
+    rename->setObjectName(QStringLiteral("partRename"));
+    menu.addSeparator();
+    auto show = menu.addAction(tr("Show/Hide"), [runByName]() { runByName("Std_ToggleVisibility"); });
+    show->setObjectName(QStringLiteral("partToggleVisibility"));
+    auto isolate = menu.addAction(tr("Isolate"), [runByName]() { runByName("Std_Isolate"); });
+    isolate->setObjectName(QStringLiteral("partIsolate"));
+    // Onshape's Hide other parts: every other part of the list, not the sketches or planes
+    std::vector<std::string> keep;
+    for (auto selected : parts->selectedItems()) {
+        if (auto part = objectOf(selected)) {
+            keep.emplace_back(part->getNameInDocument());
+        }
+    }
+    auto others = menu.addAction(tr("Hide other parts"), [self, keep]() {
+        if (!self) {
+            return;
+        }
+        for (int i = 0; i < self->parts->topLevelItemCount(); ++i) {
+            auto part = self->objectOf(self->parts->topLevelItem(i));
+            auto vp = part ? viewProviderOf(part) : nullptr;
+            if (vp && vp->isShow() && std::ranges::find(keep, part->getNameInDocument()) == keep.end()) {
+                vp->hide();
+            }
+        }
+        self->scheduleRebuild();
+    });
+    others->setObjectName(QStringLiteral("partHideOthers"));
+    auto appearance = menu.addAction(tr("Edit appearance..."), [runByName]() { runByName("Std_SetAppearance"); });
+    appearance->setObjectName(QStringLiteral("partAppearance"));
+    auto fit = menu.addAction(tr("Zoom to selection"), [runByName]() { runByName("Std_ViewFitSelection"); });
+    fit->setObjectName(QStringLiteral("partZoom"));
+    menu.addSeparator();
+    // A Body's delete is a Delete part feature at the bar (ops#635)
+    auto remove = menu.addAction(tr("Delete"), [runByName]() { runByName("Std_Delete"); });
+    remove->setObjectName(QStringLiteral("partDelete"));
+    menu.exec(parts->viewport()->mapToGlobal(pos));
 }
 
 #include "moc_FeaturesView.cpp"
