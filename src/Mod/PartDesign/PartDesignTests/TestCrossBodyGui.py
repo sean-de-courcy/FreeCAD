@@ -287,6 +287,18 @@ class ResultBoxGuiCase(unittest.TestCase):
     def items(self, combo):
         return [combo.itemText(i) for i in range(combo.count())]
 
+    def chooseAxis(self, text):
+        """The axis box's entry chosen as a user does (ReferenceCombo takes activated)."""
+        QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+        [box] = [
+            c for c in Gui.getMainWindow().findChildren(QtWidgets.QComboBox, "axis") if c.isVisible()
+        ]
+        index = box.findText(text)
+        self.assertGreaterEqual(index, 0, [box.itemText(i) for i in range(box.count())])
+        box.setCurrentIndex(index)
+        box.activated.emit(index)
+        pump(0.3)
+
     def choose(self, text):
         """Chooses `text` in the Result box; when that moves the feature, waits until the edit
         has restarted on it."""
@@ -605,6 +617,7 @@ class TestResultBoxGui(ResultBoxGuiCase):
         part works there. The lid square (sketch x 0 to 30) turned about the sketch's V axis is a
         cylinder of radius 30 and height 30, alone in the new Body; the enclosure is 16000."""
         revolution = self.assertAdditiveBox("PartDesign_Revolution")
+        self.chooseAxis("Vertical sketch axis")
         self.choose("New part")
         self.close(ok=True)
         part = revolution.getParentGeoFeatureGroup()
@@ -1285,3 +1298,45 @@ class TestOkInErrorGui(ResultBoxGuiCase):
         self.close(ok=True)
         self.assertTrue(lid.isValid(), lid.getStatusString())
         self.assertAlmostEqual(self.body.Shape.Volume, 25000, places=3)
+
+
+class TestRevolveAxisGui(ResultBoxGuiCase):
+    """Report 12 (ops#643): Revolve and Groove open waiting for their axis, as Onshape's Revolve
+    does: no axis is set, the axis row shows armed, and the feature says what it needs. Designed
+    geometry: the enclosure and its lid sketch, the square from x 0 to 30."""
+
+    def axisField(self):
+        QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+        found = [
+            w
+            for w in Gui.getMainWindow().findChildren(QtWidgets.QWidget, "fieldReferenceAxis")
+            if w.isVisible()
+        ]
+        return found[0] if found else None
+
+    def assertWaitsForTheAxis(self, feature):
+        self.assertIsNone(feature.ReferenceAxis)
+        self.assertTrue(
+            waitFor(lambda: self.axisField() is not None and self.axisField().property("armed")),
+            "the axis row isn't armed",
+        )
+        self.assertFalse(feature.isValid())
+        self.assertIn("pick a line or an edge", feature.getStatusString())
+
+    def testRevolutionWaitsForItsAxis(self):
+        """The Revolution command on the lid sketch: no axis, the row armed, and the feature says
+        what it needs. The sketch's V axis chosen: valid, and OK keeps the axis."""
+        self.enclosure()
+        revolution = self.featurePanel("PartDesign_Revolution")
+        self.assertWaitsForTheAxis(revolution)
+        self.chooseAxis("Vertical sketch axis")
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        self.close(ok=True)
+        self.assertEqual(revolution.ReferenceAxis, (self.lidSk, ["V_Axis"]))
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+
+    def testGrooveWaitsForItsAxis(self):
+        self.enclosure()
+        self.otherPart()
+        groove = self.featurePanel("PartDesign_Groove")
+        self.assertWaitsForTheAxis(groove)

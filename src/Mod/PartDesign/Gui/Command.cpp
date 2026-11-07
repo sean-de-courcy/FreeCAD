@@ -1661,26 +1661,15 @@ void CmdPartDesignRevolution::activated(int iMsg)
     }
 
     Gui::Command* cmd = this;
-    auto worker = [cmd, &pcActiveBody](Part::Feature* sketch, App::DocumentObject* Feat) {
+    auto worker = [cmd](Part::Feature* sketch, App::DocumentObject* Feat) {
         if (!Feat) {
             return;
         }
 
-        if (sketch->isDerivedFrom<Part::Part2DObject>()) {
-            FCMD_OBJ_CMD(Feat, "ReferenceAxis = (" << getObjectCmd(sketch) << ",['V_Axis'])");
-        }
-        else {
-            FCMD_OBJ_CMD(
-                Feat,
-                "ReferenceAxis = (" << getObjectCmd(pcActiveBody->getOrigin()->getY()) << ",[''])"
-            );
-        }
-
+        // No axis yet: the dialog waits for its pick, as Onshape's Revolve does (FreeCAD-CH
+        // ops#643, the user's report 12); the pick turns it the way the axis suggests
+        // (TaskRevolutionParameters::writeAxis)
         FCMD_OBJ_CMD(Feat, "Angle = 360.0");
-        PartDesign::Revolution* pcRevolution = dynamic_cast<PartDesign::Revolution*>(Feat);
-        if (pcRevolution && pcRevolution->suggestReversed()) {
-            FCMD_OBJ_CMD(Feat, "Reversed = 1");
-        }
 
         finishProfileBased(cmd, sketch, Feat);
     };
@@ -1723,34 +1712,13 @@ void CmdPartDesignGroove::activated(int iMsg)
     }
 
     Gui::Command* cmd = this;
-    auto worker = [cmd, &pcActiveBody](Part::Feature* sketch, App::DocumentObject* Feat) {
+    auto worker = [cmd](Part::Feature* sketch, App::DocumentObject* Feat) {
         if (!Feat) {
             return;
         }
 
-        if (sketch->isDerivedFrom<Part::Part2DObject>()) {
-            FCMD_OBJ_CMD(Feat, "ReferenceAxis = (" << getObjectCmd(sketch) << ",['V_Axis'])");
-        }
-        else {
-            FCMD_OBJ_CMD(
-                Feat,
-                "ReferenceAxis = (" << getObjectCmd(pcActiveBody->getOrigin()->getY()) << ",[''])"
-            );
-        }
-
+        // No axis yet, as for a Revolution (FreeCAD-CH ops#643)
         FCMD_OBJ_CMD(Feat, "Angle = 360.0");
-
-        try {
-            // This raises as exception if line is perpendicular to sketch/support face.
-            // Here we should continue to give the user a chance to change the default values.
-            PartDesign::Groove* pcGroove = dynamic_cast<PartDesign::Groove*>(Feat);
-            if (pcGroove && pcGroove->suggestReversed()) {
-                FCMD_OBJ_CMD(Feat, "Reversed = 1");
-            }
-        }
-        catch (const Base::Exception& e) {
-            e.reportException();
-        }
 
         finishProfileBased(cmd, sketch, Feat);
     };

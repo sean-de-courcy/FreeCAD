@@ -198,7 +198,9 @@ void TaskRevolutionParameters::createFields()
     axis.kind = ReferenceField::Kind::SingleElement;
     axis.flags = AllowSelection::EDGE | AllowSelection::PLANAR | AllowSelection::CIRCLE;
     axis.target = baseSolid;
-    axis.required = false;
+    // Required: a new Revolve has none, and its dialog opens waiting for the pick, Onshape's way
+    // (FreeCAD-CH ops#643): the first empty required field is armed (armFirstEmpty)
+    axis.required = true;
     axis.removable = false;
     axis.once = true;
     axis.label = tr("Picked axis");
