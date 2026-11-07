@@ -761,3 +761,58 @@ class TestHistoryOrder(unittest.TestCase):
         self.assertIs(skE.AttachmentSupport[0][0], self.fillet)
         self.assertIs(self.skF.AttachmentSupport[0][0], self.fillet)
         self.assertEqual(self.ranked(), [])
+
+    def testAPatternCopysFaceIsRefused(self):
+        """Review sff13-r1 (Opus T1): a pattern copy's top face lies in the original's plane but
+        elsewhere; it has no earlier version. Body2's datum point at its centre, dragged above the
+        pattern, is refused (before: it went to the original's face, 20 mm away, silently)."""
+        doc = self.doc
+        self.body1 = doc.addObject("PartDesign::Body", "Body1")
+        self.body2 = doc.addObject("PartDesign::Body", "Body2")
+        plate = self.pad(self.body1, "Plate", sketch(self.body1, "SkPlate", (0, 0, 30, 10)), 2)
+        boss = self.pad(self.body1, "Boss", sketch(self.body1, "SkBoss", (0, 2, 10, 8), z=2), 3)
+        doc.recompute()
+        pattern = self.body1.newObject("PartDesign::LinearPattern", "Pattern")
+        pattern.Originals = [boss]
+        pattern.Direction = (self.body1.Origin.OriginFeatures[0], [""])
+        pattern.Mode = "Spacing"
+        pattern.Offset = 20
+        pattern.Occurrences = 2
+        self.body1.Tip = pattern
+        doc.recompute()
+        self.assertTrue(pattern.isValid())
+        copyTop = next(
+            f"Face{i}"
+            for i, f in enumerate(pattern.Shape.Faces, 1)
+            if abs(f.CenterOfMass.z - 5) < 1e-9 and abs(f.CenterOfMass.x - 25) < 1e-9
+        )
+        point = self.body2.newObject("PartDesign::Point", "PointCopy")
+        point.AttachmentSupport = [(pattern, copyTop)]
+        point.MapMode = "CenterOfMass"
+        doc.recompute()
+        self.assertAlmostEqual(point.Placement.Base.x, 25, places=6)
+        with self.assertRaisesRegex(ValueError, "'PointCopy' uses 'Pattern' of 'Body1'"):
+            PartDesign.moveInStudio(doc, point, boss)
+        self.assertIs(point.AttachmentSupport[0][0], pattern)
+        self.assertEqual(self.ranked(), [])
+        self.assertIsNotNone(plate)
+
+    def testAnEdgeTheFilletTrimmedIsStillRefused(self):
+        """Review sff13-r1 (Sonnet rl1): the top edge at x = 0 runs y = 0..10 on the Pad and
+        y = 1..10 after the Fillet, on the same line. A sketch normal to it starts at its first
+        point, so on the Pad's edge it would move by 1: the drop is refused, writing nothing."""
+        self.filletedBlock()
+        trimmed = next(
+            f"Edge{i}"
+            for i, e in enumerate(self.fillet.Shape.Edges, 1)
+            if all(abs(v.Point.z - 5) < 1e-9 and abs(v.Point.x) < 1e-9 for v in e.Vertexes)
+            and abs(e.Length - 9) < 1e-9
+        )
+        skT = sketch(self.body2, "SkT", (0, 0, 1, 1), support=[(self.fillet, trimmed)])
+        skT.MapMode = "NormalToEdge"
+        self.doc.recompute()
+        self.assertTrue(skT.isValid())
+        with self.assertRaisesRegex(ValueError, "'SkT' uses 'Fillet' of 'Body1'"):
+            PartDesign.moveInStudio(self.doc, skT, self.padA)
+        self.assertIs(skT.AttachmentSupport[0][0], self.fillet)
+        self.assertEqual(self.ranked(), [])

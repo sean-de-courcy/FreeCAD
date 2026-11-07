@@ -11,6 +11,7 @@
 #include <QHeaderView>
 #include <QKeyEvent>
 #include <QLabel>
+#include <QLineEdit>
 #include <QMenu>
 #include <QMouseEvent>
 #include <QPainter>
@@ -1688,6 +1689,9 @@ void FeaturesView::renameCurrent(QAbstractItemView* view)
             features->setCurrentItem(item);
             renaming = true;
             features->editItem(item);
+            // No editor opened: rebuilds mustn't wait for a commit that won't come (review
+            // sff13-r1 Opus)
+            renaming = features->viewport()->findChild<QLineEdit*>() != nullptr;
         }
         return;
     }
@@ -1700,6 +1704,7 @@ void FeaturesView::renameCurrent(QAbstractItemView* view)
         parts->setCurrentItem(item, 0);
         renaming = true;
         parts->editItem(item, 0);
+        renaming = parts->viewport()->findChild<QLineEdit*>() != nullptr;
     }
 }
 

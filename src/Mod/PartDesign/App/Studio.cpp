@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <iterator>
 #include <string>
 #include <unordered_map>
@@ -25,10 +26,14 @@
 
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepClass_FaceClassifier.hxx>
 #include <BRep_Tool.hxx>
+#include <Precision.hxx>
 #include <Standard_Failure.hxx>
+#include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
 #include <gp_Circ.hxx>
+#include <gp_Dir.hxx>
 #include <gp_Lin.hxx>
 #include <gp_Pln.hxx>
 
@@ -533,17 +538,21 @@ BrokenRead brokenRead(const History& history,
     return {};
 }
 
-/// a and b, two elements, lie on the same carrier: one plane, one line, one circle, one point. A
-/// face an operation trimmed keeps its plane; an element an operation generated from another (a
-/// fillet's edge from the sharp edge) doesn't share its carrier, and isn't traced back to it.
-/// Other surfaces and curves aren't compared: false
+/// a and b, two elements, are the same for what a reference reads of them: a face on the same
+/// plane facing the same way (a face an operation trimmed or holed keeps its plane), an edge with
+/// the same ends on the same line or circle (a trimmed edge is shorter: an attachment to it, by
+/// its start or its length, would move; review sff13-r1 Sonnet rl1), the same point. An element an
+/// operation generated from another (a fillet's edge from the sharp edge) is none of these, and
+/// isn't traced back to it. Other surfaces and curves aren't compared: false
 bool sameCarrier(const TopoDS_Shape& a, const TopoDS_Shape& b)
 {
-    constexpr double tolerance = 1e-7;
     constexpr double angular = 1e-9;
     if (a.IsNull() || b.IsNull() || a.ShapeType() != b.ShapeType()) {
         return false;
     }
+    // The shapes' own tolerances, at least the modelling one (review sff13-r1 Opus T3: a fixed
+    // 1e-7 refused at 4 m where the shapes agree within their tolerance)
+    double tolerance = std::max(Precision::Confusion(), std::max(BRep_Tool::MaxTolerance(a, TopAbs_VERTEX), BRep_Tool::MaxTolerance(b, TopAbs_VERTEX)));
     switch (a.ShapeType()) {
         case TopAbs_FACE: {
             BRepAdaptor_Surface sa(TopoDS::Face(a));
@@ -553,23 +562,58 @@ bool sameCarrier(const TopoDS_Shape& a, const TopoDS_Shape& b)
             }
             gp_Pln pa = sa.Plane();
             gp_Pln pb = sb.Plane();
-            return pa.Axis().IsParallel(pb.Axis(), angular) && pa.Distance(pb.Location()) < tolerance;
+            // The faces' own normals: a FlatFace attachment takes its direction from them
+            gp_Dir na = pa.Axis().Direction();
+            gp_Dir nb = pb.Axis().Direction();
+            if (a.Orientation() == TopAbs_REVERSED) {
+                na.Reverse();
+            }
+            if (b.Orientation() == TopAbs_REVERSED) {
+                nb.Reverse();
+            }
+            if (!na.IsEqual(nb, angular) || pa.Distance(pb.Location()) >= tolerance) {
+                return false;
+            }
+            // a lies within b: every corner of a is on b (a face trimmed or holed by a later
+            // feature is part of the earlier one; a pattern's or a mirror's copy on the same
+            // plane is elsewhere: review sff13-r1 Opus T1)
+            for (TopExp_Explorer it(a, TopAbs_VERTEX); it.More(); it.Next()) {
+                BRepClass_FaceClassifier classifier(
+                    TopoDS::Face(b),
+                    BRep_Tool::Pnt(TopoDS::Vertex(it.Current())),
+                    tolerance
+                );
+                if (classifier.State() != TopAbs_IN && classifier.State() != TopAbs_ON) {
+                    return false;
+                }
+            }
+            return true;
         }
         case TopAbs_EDGE: {
             BRepAdaptor_Curve ca(TopoDS::Edge(a));
             BRepAdaptor_Curve cb(TopoDS::Edge(b));
+            // The same ends, in either direction
+            gp_Pnt a0 = ca.Value(ca.FirstParameter());
+            gp_Pnt a1 = ca.Value(ca.LastParameter());
+            gp_Pnt b0 = cb.Value(cb.FirstParameter());
+            gp_Pnt b1 = cb.Value(cb.LastParameter());
+            bool ends = (a0.Distance(b0) < tolerance && a1.Distance(b1) < tolerance)
+                || (a0.Distance(b1) < tolerance && a1.Distance(b0) < tolerance);
+            if (!ends) {
+                return false;
+            }
             if (ca.GetType() == GeomAbs_Line && cb.GetType() == GeomAbs_Line) {
-                gp_Lin la = ca.Line();
-                gp_Lin lb = cb.Line();
-                return la.Direction().IsParallel(lb.Direction(), angular)
-                    && la.Distance(lb.Location()) < tolerance;
+                return true;
             }
             if (ca.GetType() == GeomAbs_Circle && cb.GetType() == GeomAbs_Circle) {
                 gp_Circ ra = ca.Circle();
                 gp_Circ rb = cb.Circle();
+                // With the same ends, the arcs' middles tell an arc from the rest of its circle
+                gp_Pnt am = ca.Value((ca.FirstParameter() + ca.LastParameter()) / 2);
+                gp_Pnt bm = cb.Value((cb.FirstParameter() + cb.LastParameter()) / 2);
                 return ra.Location().Distance(rb.Location()) < tolerance
                     && std::abs(ra.Radius() - rb.Radius()) < tolerance
-                    && ra.Axis().IsParallel(rb.Axis(), angular);
+                    && ra.Axis().IsParallel(rb.Axis(), angular) && am.Distance(bm) < tolerance;
             }
             return false;
         }
@@ -620,7 +664,12 @@ std::vector<Retrace> retraceRead(App::DocumentObject* reader,
 {
     std::vector<Retrace> plan;
     const Body* readBody = Body::findBodyOf(read);
-    if (!readBody) {
+    // Traced on computed shapes only: a touched reader or read could re-pin its other entries to
+    // stale elements when the property is written again (review sff13-r1 Sonnet 4)
+    auto stale = [](const App::DocumentObject* obj) {
+        return obj->isTouched() || obj->mustExecute() == 1 || obj->isError();
+    };
+    if (!readBody || stale(reader) || stale(read)) {
         return {};
     }
     // The element, read from read's shape, comes from: a member made before reader, where it lies
@@ -685,7 +734,12 @@ std::vector<Retrace> retraceRead(App::DocumentObject* reader,
             }
             ++reads;
             std::string element = dot == std::string::npos ? sub : sub.substr(dot + 1);
-            if ((!single && !list) || records || element.empty()) {
+            // A sketch's projections are keyed by their object (Sketcher::SketchObject's
+            // ExternalGeometry): a plain write would leave the keys and their constraints behind
+            // (review sff13-r1 Opus T4), so a projection isn't traced
+            bool projection = strcmp(prop->getName(), "ExternalGeometry") == 0
+                || strcmp(prop->getName(), "ExternalGeo") == 0;
+            if ((!single && !list) || records || element.empty() || projection) {
                 return {};
             }
             std::string index;
@@ -717,6 +771,15 @@ std::vector<Retrace> retraceRead(App::DocumentObject* reader,
     auto direct = static_cast<std::size_t>(std::ranges::count(linkReads(reader), read));
     if (plan.size() != reads || direct != reads) {
         return {};
+    }
+    // A single-object property (PropertyLinkSub) holds one object: its entries traced to two
+    // members can't be written (review sff13-r1 Sonnet rl2)
+    for (const auto& a : plan) {
+        for (const auto& b : plan) {
+            if (a.prop == b.prop && a.prop->isDerivedFrom<App::PropertyLinkSub>() && a.top != b.top) {
+                return {};
+            }
+        }
     }
     return plan;
 }
