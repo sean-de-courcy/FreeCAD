@@ -207,7 +207,7 @@ bool showMovedTips(const std::vector<PartDesign::Body*>& bodies, const std::vect
 }
 
 /// What a row shows of obj: its name, label and status (statusIcon(), statusFont(), and the
-/// message of an error or a warning, statusTip())
+/// message of an error or a warning, rowToolTip())
 std::string rowKey(const App::DocumentObject* obj, bool held, const std::string& extra = {})
 {
     std::string key = obj->getNameInDocument();
@@ -255,7 +255,7 @@ const App::DocumentObject* errorCause(const App::DocumentObject* obj)
 
 /// The row's tooltip: its name and Body, the message of an error or a warning, and where an error
 /// comes from (errorCause()), as Onshape's hover over a failed feature (blind test F38)
-QString statusTip(const App::DocumentObject* obj, const App::DocumentObject* body)
+QString rowToolTip(const App::DocumentObject* obj, const App::DocumentObject* body)
 {
     QString tip = QString::fromUtf8(obj->Label.getValue());
     if (body && body != obj) {
@@ -1054,7 +1054,7 @@ void FeaturesView::rebuildFeatures()
         item->setIcon(statusIcon(obj, isHeld));
         item->setFont(statusFont(features->font(), obj, isHeld));
         item->setData(Qt::ForegroundRole, statusForeground(obj));
-        item->setToolTip(statusTip(obj, body));
+        item->setToolTip(rowToolTip(obj, body));
     };
     if (inPlace) {
         for (std::size_t r = 0; r < order.size(); ++r) {
@@ -1136,7 +1136,7 @@ void FeaturesView::rebuildParts()
         item->setIcon(0, statusIcon(obj, held));
         item->setFont(0, statusFont(parts->font(), obj, held));
         item->setData(0, Qt::ForegroundRole, statusForeground(obj));
-        item->setToolTip(0, statusTip(obj, nullptr));
+        item->setToolTip(0, rowToolTip(obj, nullptr));
         auto vp = viewProviderOf(obj);
         if (vp && vp->canToggleVisibility()) {
             item->setIcon(1, vp->isShow() ? visible : invisible);
