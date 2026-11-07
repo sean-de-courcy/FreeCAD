@@ -387,10 +387,15 @@ bool ViewProviderBody::onDelete(const std::vector<std::string>&)
     });
     // Every feature of the Body is deleted with it (a range in the tree, Ctrl+A): nothing is left
     // for a Delete part to keep, so the Body goes too, in either selection order (review s33e2
-    // F1). A MultiTransform's steps go with their MultiTransform
+    // F1). Only its solid features count: a Shift range in the tree leaves out the sketches
+    // collapsed under their features, and the Body left holding them is no part, which Delete
+    // removes with them, as in the order with the Body last (fork PR 436 R5-1, ops#641; Onshape:
+    // deleting every feature of a part deletes the part). A MultiTransform's steps go with their
+    // MultiTransform
     bool everyMember = body && std::ranges::all_of(body->Group.getValues(), [&](App::DocumentObject* obj) {
         auto step = freecad_cast<PartDesign::Transformed*>(obj);
-        return !obj || deleting.count(obj) != 0 || (step && step->isMultiTransformChild());
+        return !PartDesign::Body::isSolidFeature(obj) || deleting.count(obj) != 0
+            || (step && step->isMultiTransformChild());
     });
     // A part deleted already, deleted again: the Body goes with its features (review s33e2 F2)
     bool deleted = body && PartDesign::DeletePart::deleterOf(body);

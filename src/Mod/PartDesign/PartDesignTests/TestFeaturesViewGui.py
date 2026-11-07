@@ -572,6 +572,38 @@ class TestFeaturesViewGui(unittest.TestCase):
     def testDeletePartWithAllItsFeaturesBodyLast(self):
         self.testDeletePartWithAllItsFeatures(bodyFirst=False)
 
+    def testDeletePartWithItsSolidFeatures(self, bodyFirst=True):
+        """ops#641 (fork PR 436 R5-1): a Shift range in the tree from a Body to its last feature
+        leaves out the sketches collapsed under its Pads. The Body selected with every solid
+        feature, not the sketches, is deleted outright with them, in either selection order: no
+        Body without a solid feature, or Delete part, is left (Onshape: deleting every feature of
+        a part deletes the part)."""
+        body3 = self.newPart()
+        skD = sketch(body3, "SkD", (42, 2, 48, 8), z=4)
+        padD = body3.newObject("PartDesign::Pad", "PadD")
+        padD.Profile = skD
+        padD.Length = 2
+        self.doc.recompute()
+        self.assertTrue(padD.isValid(), padD.getStatusString())
+        name = body3.Name
+        members = [o.Name for o in body3.Group]
+        self.assertEqual(members, ["SkC", "PadC", "SkD", "PadD"])
+        Gui.Selection.clearSelection()
+        order = [name, "PadC", "PadD"] if bodyFirst else ["PadC", "PadD", name]
+        for obj in order:
+            Gui.Selection.addSelection(self.doc.Name, obj)
+        Gui.runCommand("Std_Delete")
+        pump(0.2)
+        self.doc.recompute()
+        self.assertIsNone(self.doc.getObject(name))
+        for obj in members:
+            self.assertIsNone(self.doc.getObject(obj), obj)
+        self.assertEqual(self.doc.findObjects("PartDesign::DeletePart"), [])
+        self.assertTrue(waitFor(lambda: self.partRows() == ["Body1", "Body2"]), self.partRows())
+
+    def testDeletePartWithItsSolidFeaturesBodyLast(self):
+        self.testDeletePartWithItsSolidFeatures(bodyFirst=False)
+
     def testDeleteADeletedPartAgain(self):
         """Review s33e2 F2: Delete on a part deleted already removes the Body with its features."""
         body3 = self.newPart()
