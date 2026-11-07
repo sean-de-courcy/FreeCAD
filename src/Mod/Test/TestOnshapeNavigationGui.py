@@ -22,7 +22,7 @@ import FreeCADGui as Gui
 
 from PySide import QtCore, QtGui, QtWidgets
 from PySide6 import QtTest
-from pivy import coin  # noqa: F401  registers Coin's SWIG types before getCameraNode() returns one
+from pivy import coin  # also registers Coin's SWIG types before getCameraNode() returns one
 
 ONSHAPE = "Gui::OnshapeNavigationStyle"
 VIEW = "User parameter:BaseApp/Preferences/View"
@@ -172,9 +172,19 @@ class TestOnshapeNavigationGui(unittest.TestCase):
         self.mouse(RELEASE, last, button, NO_BUTTON)
 
     def wheel(self, pos, delta=120):
+        """A wheel notch at pos (a viewport point), delivered to the Quarter widget as a real
+        wheel is. A real wheel over the viewport is spontaneous: Qt propagates it from the
+        viewport up to the QuarterWidget, whose event filter turns it into the SoMouseWheelEvent
+        the navigation style zooms on (Quarter/EventFilter.cpp, Quarter/Mouse.cpp). A synthetic
+        wheel from sendEvent is not spontaneous, and QApplication::notify delivers those to
+        their receiver only: sent to the viewport it is dropped there, unseen by the style
+        (verified off screen under the Onshape and CAD styles, round 2). Mouse events
+        propagate either way, so mouse() keeps the viewport as its target."""
+        quarter = self.view.graphicsView()
+        quarterPos = self.viewport.mapTo(quarter, pos)
         event = QtGui.QWheelEvent(
-            QtCore.QPointF(pos),
-            QtCore.QPointF(self.viewport.mapToGlobal(pos)),
+            QtCore.QPointF(quarterPos),
+            QtCore.QPointF(quarter.mapToGlobal(quarterPos)),
             QtCore.QPoint(),
             QtCore.QPoint(0, delta),
             NO_BUTTON,
@@ -182,7 +192,7 @@ class TestOnshapeNavigationGui(unittest.TestCase):
             QtCore.Qt.ScrollPhase.NoScrollPhase,
             False,
         )
-        QtWidgets.QApplication.sendEvent(self.viewport, event)
+        QtWidgets.QApplication.sendEvent(quarter, event)
         pump(100)
 
     def orientation(self):
@@ -206,6 +216,21 @@ class TestOnshapeNavigationGui(unittest.TestCase):
         x = int(round(viewportPixel[0] / scale))
         y = int(round((height - viewportPixel[1] - 1) / scale))
         return QtCore.QPoint(x, y)
+
+    def projectToViewport(self, point):
+        """The viewport pixel (device pixels, floats, origin bottom left) a 3D point renders at.
+        The camera's view volume as rendered: Coin's ADJUST_CAMERA mapping scales the volume by
+        1/aspect when the viewport is taller than wide (SoCamera::getViewVolume with a viewport
+        region), as panCamera does (NavigationStyle.cpp). View.getPointOnViewport leaves that
+        scaling out, so in a portrait viewport (the off-screen window is one) it misplaces
+        off-centre points by (1 - aspect) of their offset from the centre."""
+        width, height = self.view.getSize()
+        aspect = width / height
+        volume = self.view.getCameraNode().getViewVolume(aspect)
+        if aspect < 1.0:
+            volume.scale(1.0 / aspect)
+        screen = volume.projectToScreen(coin.SbVec3f(point.x, point.y, point.z))
+        return (screen[0] * width, screen[1] * height)
 
     def focalPlanePoint(self, right, up):
         """The point of the camera's focal plane right mm to the right and up mm up from the
@@ -489,17 +514,28 @@ class TestOnshapeNavigationGui(unittest.TestCase):
     # tests: the wheel
 
     def testWheelZooms(self):
-        """The wheel changes the zoom."""
+        """One wheel notch zooms by the View/ZoomStep factor (exp(step) on the orthographic
+        camera's height; in the direction View/InvertZoom chooses, both at their defaults in
+        the test's fresh user home)."""
+        view = App.ParamGet(VIEW)
+        step = view.GetFloat("ZoomStep", 0.2)
+        if view.GetBool("InvertZoom", True):
+            step = -step
         before = self.zoomMeasure()
         self.wheel(self.center())
-        self.assertGreater(abs(self.zoomMeasure() - before), 1e-6, "the wheel didn't zoom")
+        after = self.zoomMeasure()
+        self.assertGreater(abs(after - before), 1e-6, "the wheel didn't zoom")
+        if self.view.getCameraType() == "Orthographic":
+            self.assertAlmostEqual(
+                after / before, math.exp(step), places=4, msg="the wheel zoomed by another factor"
+            )
 
     def testWheelZoomsAtCursor(self):
         """nav-8: the wheel at an off-centre point keeps that point under the cursor (the
         focal-plane point 3 mm right and 2 mm up of the focal point, projected before and
-        after)."""
+        after; 2 px covers the rounding of the wheel's pixel)."""
         point = self.focalPlanePoint(3.0, 2.0)
-        before = self.view.getPointOnViewport(point)
+        before = self.projectToViewport(point)
         pos = self.toQPoint(before)
         self.assertGreater(
             distance((pos.x(), pos.y()), (self.center().x(), self.center().y())),
@@ -509,7 +545,7 @@ class TestOnshapeNavigationGui(unittest.TestCase):
         measure = self.zoomMeasure()
         self.wheel(pos)
         self.assertGreater(abs(self.zoomMeasure() - measure), 1e-6, "the wheel didn't zoom")
-        after = self.view.getPointOnViewport(point)
+        after = self.projectToViewport(point)
         self.assertLessEqual(
             distance(before, after), 2.0, "the point under the cursor moved while zooming"
         )

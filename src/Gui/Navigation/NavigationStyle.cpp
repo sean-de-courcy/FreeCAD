@@ -2594,6 +2594,7 @@ void NavigationStyle::openPopupMenu(const SbVec2s& position)
     Gui::Application::Instance->setupContextMenu("View", &view);
 
     auto contextMenu = new QMenu(viewer->getGLWidget());
+    contextMenu->setObjectName(QStringLiteral("View3DContextMenu"));
     MenuManager::getInstance()->setupContextMenu(&view, *contextMenu);
     contextMenu->setAttribute(Qt::WA_DeleteOnClose);
 
@@ -2702,11 +2703,25 @@ void NavigationStyle::openPopupMenu(const SbVec2s& position)
     // The position stays while the menu lives, for the entries that act where the click was
     // (Select Other, Clarify Selection; FreeCAD-CH ops#640): popup() returns at once, and
     // WA_DeleteOnClose deletes the menu after its triggered signal. The viewer is the context,
-    // so a view that closed gets no call, and a style the viewer replaced meanwhile is left alone
-    QObject::connect(contextMenu, &QObject::destroyed, viewer, [this, v = viewer]() {
-        if (v->navigationStyle() == this) {
-            rightClickPosition.reset();
+    // so a view that closed gets no call, and a style the viewer replaced meanwhile is left alone.
+    // A newer menu of this view may be open when an older one is deleted (a right click that
+    // dismisses a menu is replayed to the view on Windows, and the dismissed menu's deletion is
+    // pending while the new one stores its position): the position is the newest menu's, and
+    // only its deletion resets it
+    QObject::connect(contextMenu, &QObject::destroyed, viewer, [this, v = viewer](QObject* gone) {
+        if (v->navigationStyle() != this) {
+            return;
         }
+        const QList<QMenu*> menus = v->getGLWidget()->findChildren<QMenu*>(
+            QStringLiteral("View3DContextMenu"),
+            Qt::FindDirectChildrenOnly
+        );
+        for (QMenu* menu : menus) {
+            if (menu != gone) {
+                return;
+            }
+        }
+        rightClickPosition.reset();
     });
 }
 

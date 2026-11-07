@@ -44,8 +44,26 @@ elements on the same path (the Onshape style keeps a selection its preselected e
 menu is opened by a synthetic right click on the 3D view with the Onshape navigation style, whose
 plain right click selects the preselected entity and opens the menu; the TinkerCAD style, which
 opens the menu without selecting, serves the cases where the selection comes from elsewhere (the
-tree). Off screen (QT_QPA_PLATFORM=offscreen) a popup opens as on screen; where the platform opens
-none at all the tests skip."""
+tree). The right click goes where the view shows the picked entity, for realism: the middle of
+the view in the one-body top view (the pad's top face), else a pixel found by the view's own pick
+(pixelOn). With the pick set by API the click's position does not decide the menu (the Onshape
+style's right click selects the preselection, whatever is under the pointer); the one test that
+sets no pick by API, testHoverSetsThePreselectionTheMenuFollows, drives the preselection by the
+pointer's motion over the view (hover), so there the position is what decides. Off screen
+(QT_QPA_PLATFORM=offscreen) a popup opens as on screen; where the platform opens none at all the
+tests skip.
+
+Two things the harness has to respect: Qt's Enter event to a widget outside the 3D view (the menu
+as it opens, the widget under the pointer as it closes) makes OverlayManager drop the preselection,
+so a pick is set only after the previous menu is closed; and the pointer is moved
+(QCursor.setPos, which the offscreen platform turns into a mouse move) only where a user's pointer
+would be: at the right click before the menu opens, at the entry before it is clicked.
+
+Off screen in a fresh user home, the first right click of the session with the pointer over the
+view makes two context menus: the pointer lies over a transparent overlay region in the first
+layout, and OverlayManager's mouse-through re-sends the synthetic click to the view while the
+original is delivered too (a real click goes to the overlay only). openMenu takes the active one;
+closePopups closes the rest."""
 
 import time
 import unittest
@@ -226,7 +244,10 @@ class TestContextMenuGui(unittest.TestCase):
         pad.Profile = sketch
         pad.Length = 5
         self.doc.recompute()
-        pump(0.1)
+        # both bodies in view, the cylinder's curved face seen (the top view shows its rim only)
+        self.view.viewIsometric()
+        self.view.fitAll()
+        pump(0.2)
         return body, pad
 
     @staticmethod
@@ -238,16 +259,66 @@ class TestContextMenuGui(unittest.TestCase):
             kind.append("Face%d" % (i + 1))
         return curved, planar
 
+    @staticmethod
+    def topFace(feature):
+        """The planar face whose centre is highest: a pad's end face."""
+        _, planar = TestContextMenuGui.faces(feature)
+        return max(planar, key=lambda f: feature.Shape.Faces[int(f[4:]) - 1].CenterOfMass.z)
+
     def activate(self, body):
         self.view.setActiveObject(PDBODY, body)
         pump(0.1)
 
     # --- the pick and the menu
 
+    def coinPixel(self, point):
+        """A widget QPoint as the view's pixel (device pixels, origin bottom left), the
+        coordinates getObjectInfo and the right click's position use."""
+        _, height = self.view.getSize()
+        scale = self.view.graphicsView().viewport().devicePixelRatioF()
+        return (int(round(point.x() * scale)), int(round(height - point.y() * scale - 1)))
+
+    def toQPoint(self, pixel):
+        """The view's pixel as the widget's QPoint (TestOnshapeNavigationGui.toQPoint)."""
+        _, height = self.view.getSize()
+        scale = self.view.graphicsView().viewport().devicePixelRatioF()
+        return QtCore.QPoint(int(round(pixel[0] / scale)), int(round((height - pixel[1] - 1) / scale)))
+
+    def hit(self, pixel):
+        """What the view's pick finds at the pixel: (object name, element), or None."""
+        info = self.view.getObjectInfo(pixel)
+        return None if info is None else (info["Object"], info["Component"])
+
+    def assertHit(self, point, feature, element):
+        """The pick at the widget point names the feature's element (what a right click there
+        acts on)."""
+        self.assertEqual(self.hit(self.coinPixel(point)), (feature.Name, element))
+
+    def pixelOn(self, feature, element, step=10):
+        """A widget point where the view shows the feature's element: the middle of the pixels
+        whose pick names it, on a grid over the view (the pick is the right click's own; the
+        view's projection, getPointOnViewport, does not match the pick in a viewport taller
+        than wide). Asserts the pick at that point names the element."""
+        width, height = self.view.getSize()
+        hits = [
+            (x, y)
+            for y in range(step // 2, height, step)
+            for x in range(step // 2, width, step)
+            if self.hit((x, y)) == (feature.Name, element)
+        ]
+        self.assertTrue(hits, "%s.%s is not seen in the view" % (feature.Name, element))
+        point = self.toQPoint((sum(h[0] for h in hits) // len(hits), sum(h[1] for h in hits) // len(hits)))
+        self.assertHit(point, feature, element)
+        return point
+
     def pick(self, *subs, feature=None):
         """Sets the pick as a right click finds it: on the feature's path through its body,
         (Body, 'Pad.Face6'), the preselection of the first sub and the selection of every sub;
-        a feature in no body (a Part::Box) is its own path."""
+        a feature in no body (a Part::Box) is its own path. An open menu is closed first, as
+        a real hover comes after the menu: Qt's Enter event to the widget under the pointer as
+        the menu closes makes OverlayManager drop the preselection (OverlayManager.cpp,
+        eventFilter, QEvent::Enter)."""
+        self.closePopups()
         feature = feature or self.pad
         group = feature.getParentGeoFeatureGroup()
         top = group if group is not None else feature
@@ -257,6 +328,45 @@ class TestContextMenuGui(unittest.TestCase):
             Gui.Selection.addSelection(self.doc.Name, top.Name, prefix + sub)
         Gui.Selection.setPreselection(top, prefix + subs[0])
         pump(0.1)
+
+    def assertSelected(self, feature, element):
+        """The Onshape style's right click selected the hit: the feature's element alone."""
+        selected = [(s.Object.Name, s.SubElementNames) for s in Gui.Selection.getSelectionEx()]
+        self.assertEqual(selected, [(feature.Name, (element,))])
+
+    def hover(self, point):
+        """Moves the pointer over the view to the widget point, as the motion event a real
+        pointer sends: the view's hover pick sets the preselection (SoFCUnifiedSelection), no
+        API call. An open menu is closed first, as for pick()."""
+        self.closePopups()
+        viewport = self.view.graphicsView().viewport()
+        event = QtGui.QMouseEvent(
+            QtCore.QEvent.MouseMove,
+            QtCore.QPointF(point),
+            QtCore.QPointF(viewport.mapToGlobal(point)),
+            QtCore.Qt.NoButton,
+            QtCore.Qt.NoButton,
+            QtCore.Qt.NoModifier,
+        )
+        QtWidgets.QApplication.sendEvent(viewport, event)
+        pump(0.1)
+
+    def preselected(self):
+        """The preselection as (object name, element name), or None: the hover pick stores the
+        path through the body, (Body, 'Pad.<mapped>.Face6'), so the element is the last part."""
+        sel = Gui.Selection.getPreselection()
+        if not sel.ObjectName:
+            return None
+        return (sel.ObjectName, sel.SubElementNames[0].split(".")[-1])
+
+    def emptyPoint(self, step=10):
+        """A widget point where the view's pick finds nothing."""
+        width, height = self.view.getSize()
+        for y in range(step // 2, height, step):
+            for x in range(step // 2, width, step):
+                if self.hit((x, y)) is None:
+                    return self.toQPoint((x, y))
+        self.fail("no empty space in the view")
 
     def closePopups(self):
         for _ in range(5):
@@ -293,14 +403,16 @@ class TestContextMenuGui(unittest.TestCase):
             )
             QtWidgets.QApplication.sendEvent(widget, event)
 
-    def openMenu(self, style=ONSHAPE):
-        """Right-clicks the middle of the 3D view with the navigation style; returns the context
-        menu's actions (the menu is self.menu)."""
+    def openMenu(self, style=ONSHAPE, at=None):
+        """Right-clicks the 3D view at the widget point (the middle by default) with the
+        navigation style; returns the context menu's actions (the menu is self.menu). The menu
+        is built from the preselection at the click; the preselection itself is gone once the
+        menu is up (Qt's Enter event to the menu, OverlayManager drops it), as on screen."""
         self.closePopups()
         self.view.setNavigationType(style)
         pump(0.1)
         viewport = self.view.graphicsView().viewport()
-        self.rightClick(viewport, viewport.rect().center())
+        self.rightClick(viewport, at if at is not None else viewport.rect().center())
         QTest.qWait(300)
         popup = QtWidgets.QApplication.activePopupWidget()
         if popup is None:
@@ -312,10 +424,21 @@ class TestContextMenuGui(unittest.TestCase):
         return popup.actions()
 
     def trigger(self, actions, name):
-        """Triggers the menu's entry of the command, as a click on it would."""
+        """Triggers the menu's entry of the command, the menu left open."""
         action = actionNamed(actions, menuText(name))
         self.assertIsNotNone(action, "%s is not in the menu: %s" % (name, texts(actions)))
         action.trigger()
+        pump(0.3)
+
+    def clickEntry(self, actions, name):
+        """Clicks the menu's entry of the command: as on screen, the menu closes (and is
+        deleted, WA_DeleteOnClose) before the command runs. self.menu is gone afterwards."""
+        action = actionNamed(actions, menuText(name))
+        self.assertIsNotNone(action, "%s is not in the menu: %s" % (name, texts(actions)))
+        QTest.mouseClick(
+            self.menu, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier, self.menu.actionGeometry(action).center()
+        )
+        self.menu = None
         pump(0.3)
 
     def assertMenu(self, actions, expectedCommands, firstCommands=()):
@@ -501,12 +624,20 @@ class TestContextMenuGui(unittest.TestCase):
         self.activate(body)
         curved, planar = self.faces(pad)
         self.assertTrue(curved and planar, (curved, planar))
+        # the right click goes where the view shows the face, for realism: the pick is set by
+        # API, and the menu follows it wherever the click lands (the hover test covers the hit)
+        at = self.pixelOn(pad, curved[0])
         self.pick(curved[0], feature=pad)
-        actions = self.openMenu()
+        actions = self.openMenu(at=at)
+        self.assertSelected(pad, curved[0])
         self.assertMenu(actions, ON_FACE, FIRST_ON_EDGE)
         self.assertNotIn(menuText("PartDesign_NewSketch"), texts(actions))
-        self.pick(planar[0], feature=pad)
-        self.assertMenu(self.openMenu(), ON_FACE, FIRST_ON_FACE)
+        top = self.topFace(pad)
+        at = self.pixelOn(pad, top)
+        self.pick(top, feature=pad)
+        actions = self.openMenu(at=at)
+        self.assertSelected(pad, top)
+        self.assertMenu(actions, ON_FACE, FIRST_ON_FACE)
 
     def testFilletNeedsTheBodyTheCommandsUse(self):
         """ctx-5: with two bodies, Fillet and Chamfer are offered on the active body's faces
@@ -514,20 +645,59 @@ class TestContextMenuGui(unittest.TestCase):
         (the commands would ask for a body); Sketch on face is offered on a sibling part's face
         (ops#325: the sketch goes into the active body, no dialog)."""
         body, _ = self.cylinderBody()
+        # with both bodies in view the middle is empty space: the click goes to the pad's top,
+        # for realism (the pick is set by API; see testHoverSetsThePreselectionTheMenuFollows)
+        at = self.pixelOn(self.pad, "Face6")
         self.pick("Face6")
-        actions = self.openMenu()
+        actions = self.openMenu(at=at)
+        self.assertSelected(self.pad, "Face6")
         self.assertMenu(actions, ON_FACE)
         for name in FIRST_ON_FACE:
             self.assertNotIn(menuText(name), texts(actions))
         self.activate(body)
         self.pick("Face6")
-        actions = self.openMenu()
+        actions = self.openMenu(at=at)
+        self.assertSelected(self.pad, "Face6")
         self.assertMenu(actions, ON_FACE, ("PartDesign_NewSketch",))
         for name in FIRST_ON_EDGE:
             self.assertNotIn(menuText(name), texts(actions))
         self.activate(self.body)
         self.pick("Face6")
-        self.assertMenu(self.openMenu(), ON_FACE, FIRST_ON_FACE)
+        actions = self.openMenu(at=at)
+        self.assertSelected(self.pad, "Face6")
+        self.assertMenu(actions, ON_FACE, FIRST_ON_FACE)
+
+    def testHoverSetsThePreselectionTheMenuFollows(self):
+        """The on-screen chain with no pick set by API: the pointer's motion over the view
+        preselects what is under it (the hover pick), the Onshape style's right click selects
+        that, and the menu follows it; so the pointer's position decides. Two bodies, the
+        cylinder active: its curved face gets Fillet and Chamfer without Sketch on face, the
+        first body's top face Sketch on face only (a sibling part's face, ops#325), and empty
+        space the view menu with the selection left alone (ctx-1)."""
+        body, pad = self.cylinderBody()
+        self.activate(body)
+        curved, _ = self.faces(pad)
+        Gui.Selection.clearSelection()
+        Gui.Selection.clearPreselection()
+        at = self.pixelOn(pad, curved[0])
+        self.hover(at)
+        self.assertEqual(self.preselected(), (body.Name, curved[0]))
+        actions = self.openMenu(at=at)
+        self.assertSelected(pad, curved[0])
+        self.assertMenu(actions, ON_FACE, FIRST_ON_EDGE)
+        self.assertNotIn(menuText("PartDesign_NewSketch"), texts(actions))
+        at = self.pixelOn(self.pad, "Face6")
+        self.hover(at)
+        self.assertEqual(self.preselected(), (self.body.Name, "Face6"))
+        actions = self.openMenu(at=at)
+        self.assertSelected(self.pad, "Face6")
+        self.assertMenu(actions, ON_FACE, ("PartDesign_NewSketch",))
+        at = self.emptyPoint()
+        self.hover(at)
+        self.assertIsNone(self.preselected())
+        actions = self.openMenu(at=at)
+        self.assertEmptySpaceMenu(actions)
+        self.assertSelected(self.pad, "Face6")
 
     def testNoFilletOnASketchEdge(self):
         """ctx-5: a sketch's edge picked in the 3D view gets no Fillet or Chamfer (a Fillet on
@@ -594,30 +764,64 @@ class TestContextMenuGui(unittest.TestCase):
         self.assertFalse(sketch.Visibility, "the tip's sketch")
         self.assertEqual([o.Visibility for o in origins], originsShown, "the origin")
 
+    def movePointer(self, globalPoint):
+        """Moves the pointer (the platform turns it into a mouse move for the popup)."""
+        QtGui.QCursor.setPos(globalPoint)
+        pump(0.2)
+
+    def activeList(self):
+        """The Select other list when it is the active popup, else None."""
+        popup = QtWidgets.QApplication.activePopupWidget()
+        if popup is None or popup.objectName() != "SelectOtherMenu":
+            return None
+        return popup
+
     def testSelectOtherFromTheMenuListsTheRightClickPoint(self):
-        """ctx-3: Select other from the menu lists what lay under the right click, with the
-        cursor elsewhere (over a menu entry on screen)."""
+        """ctx-3, as on screen: the pointer right-clicks the view's middle, moves to the Select
+        other entry and clicks it; the list opens at the right click (not under the pointer, as
+        from the key) and lists what lay there, nearest first. It stays while the pointer is
+        away or approaches, and closes once the pointer has been at it and leaves (the list
+        the key opens is under the pointer from the start, so there leaving closes it)."""
         viewport = self.view.graphicsView().viewport()
         center = viewport.rect().center()
-        # the element the right click hits, in the view's own coordinates (y from the bottom)
-        info = self.view.getObjectInfo((center.x(), viewport.height() - center.y() - 1))
-        self.assertIsNotNone(info, "nothing under the middle of the view")
-        self.pick("Face6")
-        actions = self.openMenu()
+        rightClick = viewport.mapToGlobal(center)
+        self.assertHit(center, self.pad, "Face6")
         cursor = QtGui.QCursor.pos()
         try:
-            QtGui.QCursor.setPos(viewport.mapToGlobal(QtCore.QPoint(-40, -40)))
-            self.trigger(actions, "Std_SelectOther")
-            popup = QtWidgets.QApplication.activePopupWidget()
+            self.movePointer(rightClick)
+            self.pick("Face6")
+            actions = self.openMenu()
+            action = actionNamed(actions, menuText("Std_SelectOther"))
+            self.assertIsNotNone(action, texts(actions))
+            entry = self.menu.mapToGlobal(self.menu.actionGeometry(action).center())
+            self.movePointer(entry)
+            self.assertIs(QtWidgets.QApplication.activePopupWidget(), self.menu)
+            self.clickEntry(actions, "Std_SelectOther")
+            popup = self.activeList()
             self.assertIsNotNone(popup, "Select other opened no list")
-            self.assertIsNot(popup, self.menu, "Select other opened no list")
             listed = texts(popup.actions())
+            # at the right click, when the list fits the screen there (QMenu shifts it otherwise)
+            if QtWidgets.QApplication.primaryScreen().availableGeometry().contains(
+                QtCore.QRect(rightClick, popup.size())
+            ):
+                opened = popup.pos() - rightClick
+                self.assertLessEqual(opened.manhattanLength(), 4, "the list is not at the right click")
+            # the pointer (at the entry) is outside the list's reach (SelectOtherMenu's margin)
+            reach = popup.geometry().adjusted(-16, -16, 16, 16)
+            self.assertFalse(reach.contains(entry), (entry, popup.geometry()))
+            # the user's first motion, far from the list: the list stays
+            self.movePointer(entry + QtCore.QPoint(2, 0))
+            self.assertIs(self.activeList(), popup, "the list closed on the pointer's first move")
+            # the pointer reaches the list, then leaves it: the list closes
+            self.movePointer(popup.geometry().center())
+            self.assertIs(self.activeList(), popup, "the list closed as the pointer reached it")
+            self.movePointer(viewport.mapToGlobal(QtCore.QPoint(20, 20)))
+            self.assertIsNone(self.activeList(), "the list stayed after the pointer left it")
         finally:
             QtGui.QCursor.setPos(cursor)
             self.closePopups()
-        # the list names the element ("Face6 · Pad"); the hit may come as 'Pad.Face6' on the body
-        element = info["Component"].rsplit(".", 1)[-1]
-        self.assertTrue(any(t.startswith(element + " ") for t in listed), (element, listed))
+        # the list names the element nearest first ("Face6 · Pad")
+        self.assertTrue(listed and listed[0].startswith("Face6 "), listed)
 
 
 if __name__ == "__main__":

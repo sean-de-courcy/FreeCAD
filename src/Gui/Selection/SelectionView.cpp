@@ -23,6 +23,7 @@
 
 #include <QCheckBox>
 #include <QCoreApplication>
+#include <QCursor>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
@@ -1244,6 +1245,18 @@ bool isForwards(const QKeyEvent* ev)
         || (ev->key() == Qt::Key_Down && isPlainArrow(ev));
 }
 
+/// The list and a few pixels around it: where the pointer counts as at the list
+QRect reachOf(const QMenu* list)
+{
+    constexpr int margin = 16;
+    return list->geometry().adjusted(-margin, -margin, margin, margin);
+}
+
+/// Whether the pointer has been at the list since it opened (a dynamic property: the list
+/// that the 3D view's menu opens, at the right click, starts with the pointer at the clicked
+/// entry, away from it; FreeCAD-CH ops#640)
+const char* const pointerReached = "pointerReached";
+
 }  // namespace
 
 void Gui::addSelectOtherEditPicker(SelectOtherEditPicker picker)
@@ -1301,6 +1314,10 @@ void SelectOtherMenu::open(const std::vector<PickData>& list, const QPoint& pos)
     // the preselected entry shows over the others in the 3D view (as Clarify's menu does)
     Gui::Selection().setClarifySelectionActive(true);
     popup(pos);
+    // From the key the list opens under the pointer; from the 3D view's menu it opens at the
+    // right click while the pointer is at the clicked entry: then the pointer's leaving cancels
+    // the list only once it has arrived (mouseMoveEvent)
+    setProperty(pointerReached, reachOf(this).contains(QCursor::pos()));
     if (!actions().isEmpty()) {
         setActiveAction(actions().first());
         preselect(actions().first());
@@ -1356,10 +1373,13 @@ void SelectOtherMenu::keyPressEvent(QKeyEvent* ev)
 
 void SelectOtherMenu::mouseMoveEvent(QMouseEvent* ev)
 {
-    // the mouse leaving the list, by more than a few pixels, cancels it
-    constexpr int margin = 16;
-    const QRect reach = geometry().adjusted(-margin, -margin, margin, margin);
-    if (!reach.contains(ev->globalPosition().toPoint())) {
+    // the mouse leaving the list, by more than a few pixels, cancels it; a list that opened away
+    // from the pointer (from the 3D view's menu) waits for the pointer to arrive first, and stays
+    // until then (a pick or a click elsewhere closes it, as a popup)
+    if (reachOf(this).contains(ev->globalPosition().toPoint())) {
+        setProperty(pointerReached, true);
+    }
+    else if (property(pointerReached).toBool()) {
         close();
         return;
     }
