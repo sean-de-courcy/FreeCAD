@@ -1245,3 +1245,43 @@ class TestOperationRowGui(ResultBoxGuiCase):
         QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
         found = [w for w in Gui.getMainWindow().findChildren(cls, name) if w.isVisible()]
         return found[0] if found else None
+
+
+class TestOkInErrorGui(ResultBoxGuiCase):
+    """F7 of the blind test (ops#640): OK commits a feature in error, as Onshape's check does; it
+    stays in error, to be repaired later. Designed geometry: the enclosure (16000) and its lid
+    sketch."""
+
+    def testOkCommitsAPadInError(self):
+        """The Pad command on the lid sketch, its length set to 0 (no pad of length zero): OK
+        closes the dialog, the pad stays, in error, and the enclosure keeps its 16000 (the failed
+        pad passes its base through). One undo step removes it; editing it again and setting 10
+        repairs it (25000)."""
+        self.enclosure()
+        undos = len(self.doc.UndoNames)
+        lid = self.lidPad()
+        field = [
+            w
+            for w in Gui.getMainWindow().findChildren(QtWidgets.QWidget, "lengthEdit")
+            if w.isVisible()
+        ][0]
+        field.setProperty("rawValue", 0.0)
+        pump(0.3)
+        self.assertFalse(lid.isValid())
+        self.close(ok=True)
+        self.assertIn(lid, self.body.Group)
+        self.assertFalse(lid.isValid())
+        self.assertAlmostEqual(self.body.Shape.Volume, 16000, places=3)
+        self.assertEqual(len(self.doc.UndoNames), undos + 1, self.doc.UndoNames)
+        lid.ViewObject.doubleClicked()
+        self.waitForPanel()
+        field = [
+            w
+            for w in Gui.getMainWindow().findChildren(QtWidgets.QWidget, "lengthEdit")
+            if w.isVisible()
+        ][0]
+        field.setProperty("rawValue", 10.0)
+        pump(0.3)
+        self.close(ok=True)
+        self.assertTrue(lid.isValid(), lid.getStatusString())
+        self.assertAlmostEqual(self.body.Shape.Volume, 25000, places=3)

@@ -1338,10 +1338,6 @@ bool TaskDlgFeatureParameters::accept()
             // object was already computed, nothing more to do with it...
             Gui::cmdAppDocument(feature, "purgeTouched()");
 
-            if (!feature->isValid()) {
-                throw Base::RuntimeError(getObject()->getStatusString());
-            }
-
             // ...but touch parents to signal the change...
             for (auto obj : feature->getInList()) {
                 obj->touch();
@@ -1350,8 +1346,16 @@ bool TaskDlgFeatureParameters::accept()
             Gui::cmdAppDocument(feature->getDocument(), "recompute()");
         }
 
+        // A feature in error is committed as it is, as Onshape's check does: it stays red in
+        // the lists, with its message, to be repaired later (F7 of the blind test, ops#640). A
+        // failed solid passes its base through (registerFailureContinuation), so its part keeps
+        // showing what it had
         if (!feature->isValid()) {
-            throw Base::RuntimeError(getObject()->getStatusString());
+            Base::Console().warning(
+                "%s: %s\n",
+                feature->Label.getValue(),
+                feature->getStatusString()
+            );
         }
 
         App::DocumentObject* previous = static_cast<PartDesign::Feature*>(feature)->getBaseObject(
