@@ -4906,7 +4906,10 @@ class TestPad(unittest.TestCase):
         both ends outside it. The pad is the disk's."""
         pad = self.openCurvePad(circles=[(0, 0, 10)], lines=[((-20, 10), (20, 10))], tangent=True)
         self.assertSolidVolume(pad, 500 * math.pi)
-        self.assertAlmostEqual(pad.Shape.BoundBox.YMax, 10, places=6)
+        # The exact box: in the GUI the view provider meshes the shape, and BoundBox then reads
+        # the mesh (9.985 at the circle's top; ops#642)
+        box = pad.Shape.optimalBoundingBox(False, False)
+        self.assertAlmostEqual(box.YMax, 10, places=6)
 
     def testOpenCurvesLineEndingOnTheCircle(self):
         """The line's end at the tangent point."""
