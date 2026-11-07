@@ -11634,6 +11634,30 @@ void CmdSketcherConstrainMidpoint::wrongSelection(Sketcher::SketchObject* Obj, c
     Gui::TranslatedUserWarning(Obj, QObject::tr("Wrong selection"), message);
 }
 
+// Moves a point (PosId none: the whole geometry; relative: by the vector) with the solver, inside
+// the open command. A refused move (the sketch conflicts or is overconstrained: moveGeometry
+// raises, and cmdAppObjectArgs rethrows it after its developer error) is no error here: the
+// constraint is added anyway and the solver places things as it can.
+static void placePointForMidpoint(Sketcher::SketchObject* Obj,
+                                  int geoId,
+                                  Sketcher::PointPos posId,
+                                  const Base::Vector3d& to,
+                                  bool relative)
+{
+    try {
+        Gui::cmdAppObjectArgs(Obj,
+                              "moveGeometry(%d,%d,App.Vector(%.10g,%.10g,0),%d)",
+                              geoId,
+                              static_cast<int>(posId),
+                              to.x,
+                              to.y,
+                              relative ? 1 : 0);
+    }
+    catch (const Base::Exception& e) {
+        Base::Console().log("Midpoint: the point is left to the solver (%s)\n", e.what());
+    }
+}
+
 void CmdSketcherConstrainMidpoint::addMidpoint(Sketcher::SketchObject* Obj, std::vector<SelIdPair> picks)
 {
     const QString usage = QObject::tr("Select a point and a line, or two points and then the point "
@@ -11665,6 +11689,24 @@ void CmdSketcherConstrainMidpoint::addMidpoint(Sketcher::SketchObject* Obj, std:
             return;
         }
         openCommand(QT_TRANSLATE_NOOP("Command", "Add midpoint constraint"));
+        // The point goes to the line's middle and the line stays, as in Onshape. The solver
+        // alone would share the move out between the point and the line's two ends (the line
+        // (0,0)-(10,4) and the point (3,7) met at (4.39, 3.52)): place the point first, by the
+        // solver with the sketch's other constraints kept, then the constraint has nothing to
+        // move. A fixed point (external, the origin) cannot go: the line is slid onto it.
+        const Base::Vector3d middle = (Obj->getPoint(line.GeoId, Sketcher::PointPos::start)
+                                       + Obj->getPoint(line.GeoId, Sketcher::PointPos::end))
+            * 0.5;
+        if (!isPointOrSegmentFixed(Obj, point.GeoId)) {
+            placePointForMidpoint(Obj, point.GeoId, point.PosId, middle, false);
+        }
+        else if (!isPointOrSegmentFixed(Obj, line.GeoId)) {
+            placePointForMidpoint(Obj,
+                                  line.GeoId,
+                                  Sketcher::PointPos::none,
+                                  Obj->getPoint(point.GeoId, point.PosId) - middle,
+                                  true);
+        }
         Gui::cmdAppObjectArgs(Obj,
                               "addConstraint(Sketcher.Constraint('Symmetric',%d,%d,%d,%d,%d,%d))",
                               line.GeoId,
@@ -11686,6 +11728,16 @@ void CmdSketcherConstrainMidpoint::addMidpoint(Sketcher::SketchObject* Obj, std:
             return;
         }
         openCommand(QT_TRANSLATE_NOOP("Command", "Add midpoint constraint"));
+        // the third point goes to the middle of the first two (as above; a fixed one stays)
+        if (!isPointOrSegmentFixed(Obj, picks[2].GeoId)) {
+            placePointForMidpoint(Obj,
+                                  picks[2].GeoId,
+                                  picks[2].PosId,
+                                  (Obj->getPoint(picks[0].GeoId, picks[0].PosId)
+                                   + Obj->getPoint(picks[1].GeoId, picks[1].PosId))
+                                      * 0.5,
+                                  false);
+        }
         Gui::cmdAppObjectArgs(Obj,
                               "addConstraint(Sketcher.Constraint('Symmetric',%d,%d,%d,%d,%d,%d))",
                               picks[0].GeoId,

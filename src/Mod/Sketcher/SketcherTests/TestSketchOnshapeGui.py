@@ -14,7 +14,7 @@ import FreeCAD
 import Part
 import Sketcher
 
-from SketcherTests.GuiTestCase import FreeCADGui, QtCore, SketcherGuiTestCase
+from SketcherTests.GuiTestCase import FreeCADGui, QtCore, QtGui, SketcherGuiTestCase
 
 V = FreeCAD.Vector
 SKETCHER = "User parameter:BaseApp/Preferences/Mod/Sketcher"
@@ -34,6 +34,7 @@ class SketchOnshapeTestCase(SketcherGuiTestCase):
         super().tearDown()
 
     def edit(self):
+        FreeCADGui.getMainWindow().show()  # as the first GUI test of a process too
         FreeCADGui.ActiveDocument.setEdit(self.sketch.Name)
         self.flush_gui(100)
         self.assertIsNotNone(FreeCADGui.ActiveDocument.getInEdit())
@@ -109,7 +110,7 @@ class TestSketchMidpointGui(SketchOnshapeTestCase):
 
     def test_the_point_stays_at_the_middle_when_the_line_moves(self):
         self.run_midpoint("Vertex3", "Edge1")
-        self.sketch.movePoint(0, 2, V(20, 10, 0))
+        self.sketch.moveGeometry(0, 2, V(20, 10, 0), False)  # the line's end, by the solver
         self.assertEqual(self.sketch.solve(), 0)
         point = self.sketch.getPoint(1, 1)
         line = self.sketch.Geometry[0]
@@ -257,8 +258,6 @@ class TestSketchShiftInferenceGui(SketcherGuiTestCase):
 
     def setUp(self):
         super().setUp()
-        from PySide import QtGui
-
         if not QtGui.QFontDatabase.families():
             self.skipTest("Qt has no fonts; off screen, set QT_QPA_FONTDIR")
         self.params = []
@@ -271,8 +270,10 @@ class TestSketchShiftInferenceGui(SketcherGuiTestCase):
         self.doc.recompute()
 
     def tearDown(self):
-        from PySide import QtTest
+        from PySide6 import QtTest
 
+        # a release without modifiers clears the application's modifier state, which a QTest press
+        # with a modifier leaves "held" for every later test of the process (notes/build.md)
         QtTest.QTest.keyRelease(FreeCADGui.getMainWindow().windowHandle(), QtCore.Qt.Key_Shift)
         FreeCADGui.Selection.clearSelection()
         try:
@@ -337,10 +338,19 @@ class TestSketchShiftInferenceGui(SketcherGuiTestCase):
         self.assertIn("Horizontal", self.types())
 
     def test_shift_held_suppresses_the_inferences(self):
-        from PySide import QtTest
+        """Shift is held through the whole line: the Sketcher reads the application's modifier
+        state (QGuiApplication.keyboardModifiers), which a QTest press of Shift with the Shift
+        modifier sets off screen too; the synthetic mouse events carry no modifier."""
+        from PySide6 import QtTest
 
         self.start_edit()
-        QtTest.QTest.keyPress(FreeCADGui.getMainWindow().windowHandle(), QtCore.Qt.Key_Shift)
+        QtTest.QTest.keyPress(
+            FreeCADGui.getMainWindow().windowHandle(), QtCore.Qt.Key_Shift, QtCore.Qt.ShiftModifier
+        )
+        self.assertTrue(
+            QtGui.QGuiApplication.keyboardModifiers() & QtCore.Qt.ShiftModifier,
+            "Expected the application to see Shift held",
+        )
         self.draw_line([(4, 2), (9, 2.05)])
         self.assertEqual(self.types(), [])
 
