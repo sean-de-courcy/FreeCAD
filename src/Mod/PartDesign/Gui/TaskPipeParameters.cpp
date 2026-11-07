@@ -774,8 +774,15 @@ bool TaskPipeParameters::accept()
         // again with plain names it would lose its guess record and warning (ops#127).
 
         Gui::cmdAppDocument(pipe, "recompute()");
-        if (!getObject()->isValid()) {
-            throw Base::RuntimeError(getObject()->getStatusString());
+        // A sweep in error is committed as it is, as Onshape's check does and as the other
+        // feature dialogs' OK does (F7, ops#640): it stays red, to be repaired later. A required
+        // selection left empty (no profile or no path) still refuses: Onshape's check is greyed
+        // until it is made (D4)
+        if (!pipe->isValid()) {
+            if (!pipe->Profile.getValue() || !pipe->Spine.getValue()) {
+                throw Base::RuntimeError(pipe->getStatusString());
+            }
+            Base::Console().warning("%s: %s\n", pipe->Label.getValue(), pipe->getStatusString());
         }
     }
     catch (const Base::Exception& e) {

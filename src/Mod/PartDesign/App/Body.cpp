@@ -41,6 +41,7 @@
 #include "Body.h"
 #include "BodyPy.h"
 #include "FeatureBase.h"
+#include "FeatureBoolean.h"
 #include "FeatureDeletePart.h"
 #include "FeatureSketchBased.h"
 #include "FeatureSolid.h"
@@ -469,6 +470,25 @@ Body* Body::findBodyOf(const App::DocumentObject* feature)
 
 namespace
 {
+// The first object besides `self`'s Body and the objects in `allowed` that links to `self`, or
+// null. A reader through a subname path of a container (SubShapeBinder Support = (Studio,
+// "Body001.Pad.Face3")) is a user too, as holds() counts it (ops#325)
+const App::DocumentObject* otherUser(
+    const App::DocumentObject* self,
+    const Body* body,
+    std::initializer_list<const App::DocumentObject*> allowed
+)
+{
+    std::vector<App::DocumentObject*> users = self->getInList();
+    const std::vector<App::DocumentObject*> pathReaders = App::subnamePathReaders(self);
+    users.insert(users.end(), pathReaders.begin(), pathReaders.end());
+    auto it = std::ranges::find_if(users, [&](const App::DocumentObject* user) {
+        return user && user != self && user != body
+            && std::ranges::find(allowed, user) == allowed.end();
+    });
+    return it == users.end() ? nullptr : *it;
+}
+
 // Whether nothing but `self`'s Body and the objects in `allowed` links to `self`
 bool usedOnlyBy(
     const App::DocumentObject* self,
@@ -476,11 +496,147 @@ bool usedOnlyBy(
     std::initializer_list<const App::DocumentObject*> allowed
 )
 {
-    return std::ranges::all_of(self->getInList(), [&](const App::DocumentObject* user) {
-        return user == body || std::ranges::find(allowed, user) != allowed.end();
-    });
+    return !otherUser(self, body, allowed);
+}
+
+// The Profile sketch that goes along with `feature` out of `body`: a sketch of `body` that
+// nothing but the feature uses, or null
+App::DocumentObject* sketchAlong(const App::DocumentObject* feature, const Body* body)
+{
+    auto profileBased = freecad_cast<const ProfileBased*>(feature);
+    App::DocumentObject* profile = profileBased ? profileBased->Profile.getValue() : nullptr;
+    if (profile && profile->isDerivedFrom<Part::Part2DObject>() && body->hasObject(profile)
+        && usedOnlyBy(profile, body, {feature})) {
+        return profile;
+    }
+    return nullptr;
+}
+
+std::string quotedLabel(const App::DocumentObject* obj)
+{
+    return std::string("'") + (obj ? obj->Label.getValue() : "?") + "'";
+}
+
+// The first user of the Body `body` (or of its origin) that the Body's removal would break: not a
+// container holding it, not its origin, not `feature` or `sketch` (moved, and relinked to the
+// target's origin by insertObject), or null. `viaOrigin` says whether the user links the origin.
+// A container is a group that holds the Body and is not a PartDesign feature: a Boolean's Group
+// is its tool list (FeatureBoolean.cpp setObjects), so a Boolean holding the Body uses it
+const App::DocumentObject* bodyUser(
+    const Body* body,
+    const App::DocumentObject* feature,
+    const App::DocumentObject* sketch,
+    bool& viaOrigin
+)
+{
+    viaOrigin = false;
+    auto harmless = [&](const App::DocumentObject* user) {
+        if (!user || user == body || user == feature || (sketch && user == sketch)) {
+            return true;
+        }
+        if (user->isDerivedFrom<PartDesign::Feature>()) {
+            return false;
+        }
+        auto group = user->getExtensionByType<App::GroupExtension>(true);
+        return group && group->hasObject(body);
+    };
+    std::vector<App::DocumentObject*> users = body->getInList();
+    const std::vector<App::DocumentObject*> pathReaders = App::subnamePathReaders(body);
+    users.insert(users.end(), pathReaders.begin(), pathReaders.end());
+    for (const App::DocumentObject* user : users) {
+        if (!harmless(user)) {
+            return user;
+        }
+    }
+    // Its origin goes with it: a link into it from elsewhere would dangle
+    auto origin = freecad_cast<App::Origin*>(body->Origin.getValue());
+    if (!origin) {
+        return nullptr;
+    }
+    const std::vector<App::DocumentObject*> datums = origin->OriginFeatures.getValues();
+    auto own = [&](const App::DocumentObject* user) {
+        return user == origin || std::ranges::find(datums, user) != datums.end();
+    };
+    std::vector<App::DocumentObject*> originUsers = origin->getInList();
+    for (const App::DocumentObject* datum : datums) {
+        const std::vector<App::DocumentObject*> datumUsers = datum->getInList();
+        originUsers.insert(originUsers.end(), datumUsers.begin(), datumUsers.end());
+    }
+    for (const App::DocumentObject* user : originUsers) {
+        if (!harmless(user) && !own(user)) {
+            viaOrigin = true;
+            return user;
+        }
+    }
+    return nullptr;
 }
 }  // namespace
+
+std::string Body::addToPartRefusal(const App::DocumentObject* feature, const Body* target)
+{
+    const Body* body = findBodyOf(feature);
+    if (!body || !isSolidFeature(feature)) {
+        return "the object isn't a solid feature of a body";
+    }
+    if (!target || target == body) {
+        return "no other part to add it to";
+    }
+    App::Part* bodyStudio = nullptr;
+    App::Part* targetStudio = nullptr;
+    if (body->getDocument() != target->getDocument() || !studioOf(body, bodyStudio)
+        || !studioOf(target, targetStudio) || bodyStudio != targetStudio) {
+        return quotedLabel(target) + " isn't a part of the feature's studio";
+    }
+    if (!areStudioSiblings(body, target)) {
+        return quotedLabel(target) + " is placed apart from " + quotedLabel(body)
+            + " (not one origin), or shown through a link";
+    }
+    if (target->isRolledBack()) {
+        return "roll " + quotedLabel(target) + " to the end first";
+    }
+    // newPartFrom's rule the other way: a feature that something uses would make its users' links
+    // cross into the target, and later features of its part would need moving with their element
+    // references (the Onshape experiment, ops#640: refused, not guessed)
+    if (auto user = otherUser(feature, body, {})) {
+        auto merge = freecad_cast<const Boolean*>(user);
+        if (merge && merge->isMerge()) {
+            return quotedLabel(body) + " is merged by " + quotedLabel(merge)
+                + "; delete the Merge first";
+        }
+        return quotedLabel(user) + " uses " + quotedLabel(feature);
+    }
+    App::DocumentObject* sketch = sketchAlong(feature, body);
+    auto profileBased = freecad_cast<const ProfileBased*>(feature);
+    App::DocumentObject* profile = profileBased ? profileBased->Profile.getValue() : nullptr;
+    for (App::DocumentObject* member : body->Group.getValues()) {
+        if (member == feature || member == sketch) {
+            continue;
+        }
+        if (member == profile) {
+            if (auto user = otherUser(member, body, {feature})) {
+                return "its sketch " + quotedLabel(member) + " is used by " + quotedLabel(user)
+                    + ", which stays behind";
+            }
+            if (!member->isDerivedFrom<Part::Part2DObject>()) {
+                return "its profile " + quotedLabel(member)
+                    + " isn't a sketch, so it stays behind; merge the part instead";
+            }
+        }
+        return quotedLabel(body) + " holds more than this feature; merge it instead";
+    }
+    // The Body it leaves is removed: nothing else may use it (a Merge in another part consuming
+    // it, as Delete part refuses; a Boolean's tool, a binder, a link, an expression)
+    if (auto merge = Boolean::mergeOf(body)) {
+        return quotedLabel(body) + " is merged by " + quotedLabel(merge)
+            + "; delete the Merge first";
+    }
+    bool viaOrigin = false;
+    if (auto user = bodyUser(body, feature, sketch, viaOrigin)) {
+        return quotedLabel(user) + (viaOrigin ? " uses the origin of " : " uses ")
+            + quotedLabel(body) + ", which Add to part would remove";
+    }
+    return {};
+}
 
 Body* Body::newPartFrom(App::DocumentObject* feature)
 {
@@ -496,14 +652,7 @@ Body* Body::newPartFrom(App::DocumentObject* feature)
             "to a new part"
         );
     }
-    App::DocumentObject* sketch = nullptr;
-    if (auto profileBased = freecad_cast<ProfileBased*>(feature)) {
-        App::DocumentObject* profile = profileBased->Profile.getValue();
-        if (profile && profile->isDerivedFrom<Part::Part2DObject>() && body->hasObject(profile)
-            && usedOnlyBy(profile, body, {feature})) {
-            sketch = profile;
-        }
-    }
+    App::DocumentObject* sketch = sketchAlong(feature, body);
 
     App::Document* doc = feature->getDocument();
     auto part = static_cast<Body*>(doc->addObject("PartDesign::Body", "Body"));
@@ -528,6 +677,69 @@ Body* Body::newPartFrom(App::DocumentObject* feature)
     }
     part->addObject(feature);
     return part;
+}
+
+Body* Body::addToPart(App::DocumentObject* feature, Body* target)
+{
+    // Every refusal before anything is written (addToPartRefusal, which the dialog's rows read)
+    const std::string why = addToPartRefusal(feature, target);
+    if (!why.empty()) {
+        throw Base::ValueError("Add to part: " + why);
+    }
+    Body* body = findBodyOf(feature);
+    App::DocumentObject* sketch = sketchAlong(feature, body);
+
+    // Where the history has it: after the target's last member that comes before the feature in
+    // the studio's sequence, the sketch then the feature. The feature's place, not the sketch's:
+    // a sketch drawn before the target's rows would put the feature before them (review MISS)
+    App::Document* doc = feature->getDocument();
+    App::Part* studio = nullptr;
+    studioOf(target, studio);
+    const std::vector<App::DocumentObject*> sequence = studioSequence(doc, studio);
+    const App::DocumentObject* first = feature;
+    const std::vector<App::DocumentObject*>& group = target->Group.getValues();
+    App::DocumentObject* after = nullptr;
+    for (App::DocumentObject* obj : sequence) {
+        if (obj == first) {
+            break;
+        }
+        if (std::ranges::find(group, obj) != group.end()) {
+            after = obj;
+        }
+    }
+    // The target's last solid comes before it: it is the new Tip, else it goes in mid-history
+    auto afterIt = after ? std::ranges::find(group, after) : group.begin();
+    if (after) {
+        ++afterIt;
+    }
+    const bool last = std::none_of(afterIt, group.end(), isSolidFeature);
+
+    body->removeObject(feature);
+    if (sketch) {
+        body->removeObject(sketch);
+        // relinked to the target's origin, as moveBack's insert does
+        target->insertObject(sketch, after, /*after = */ true);
+        after = sketch;
+    }
+    target->insertObject(feature, after, /*after = */ true);
+    if (last) {
+        target->Tip.setValue(feature);
+        // the part shows its new Tip alone, as Body::addObject() does
+        for (App::DocumentObject* obj : target->Group.getValues()) {
+            if (obj != feature && obj->isDerivedFrom<PartDesign::Feature>()
+                && obj->Visibility.getValue()) {
+                obj->Visibility.setValue(false);
+            }
+        }
+        feature->Visibility.setValue(true);
+    }
+    else {
+        feature->Visibility.setValue(false);
+    }
+    saveHistoryOrder(sequence);
+    // The Body it left is empty now: it goes, with its origin
+    doc->removeObject(body->getNameInDocument());
+    return target;
 }
 
 

@@ -169,6 +169,26 @@ public:
      */
     static Body* newPartFrom(App::DocumentObject* feature);
 
+    /**
+     * Add to part (FreeCAD-CH ops#640, the Onshape experiment): newPartFrom() the other way. Moves
+     * `feature`, the only member of its Body besides its Profile sketch (which moves along when
+     * nothing else uses it) and that nothing else uses, into `target`, a studio sibling not rolled
+     * back, where the studio's history has it: after target's last member that comes before it,
+     * as target's Tip when no solid of target follows. The Body it leaves, empty, is removed. Runs
+     * in the caller's transaction and doesn't recompute. Returns target; throws Base::ValueError,
+     * before anything is written, for any other case.
+     */
+    static Body* addToPart(App::DocumentObject* feature, Body* target);
+
+    /**
+     * Why addToPart(feature, target) would refuse, without the "Add to part: " prefix; empty when
+     * it is allowed (FreeCAD-CH ops#640: the one rule, which the dialog's Add rows read). Besides
+     * the rules above, the Body the feature leaves must have no other user, as it is removed: a
+     * Merge consuming it, a Boolean's tool, a binder, a link or an expression, or a link into its
+     * origin from elsewhere.
+     */
+    static std::string addToPartRefusal(const App::DocumentObject* feature, const Body* target);
+
     PyObject* getPyObject() override;
 
     std::vector<std::string> getSubObjects(int reason = 0) const override;

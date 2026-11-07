@@ -109,6 +109,24 @@ void FeatureAddSub::defineSubtractive()
     Operation.setValue("Subtraction");
 }
 
+void FeatureAddSub::allowAllOperations()
+{
+    allOperations = true;
+    Operation.setStatus(App::Property::Status::Hidden, false);
+    // setEnums keeps the value by name
+    Operation.setEnums({"Union", "Subtraction", "Common"});
+}
+
+void FeatureAddSub::onDocumentRestored()
+{
+    // The file's own list came back with the value (a custom enumeration is saved with its list);
+    // the restore's purge clears what this touches
+    if (allOperations && Operation.getEnum().maxValue() != 2) {
+        allowAllOperations();
+    }
+    FeatureRefine::onDocumentRestored();
+}
+
 const char* FeatureAddSub::getBooleanMaker() const
 {
     switch (booleanOperation) {

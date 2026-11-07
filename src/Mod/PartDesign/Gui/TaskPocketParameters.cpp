@@ -79,6 +79,8 @@ void TaskPocketParameters::translateModeList(QComboBox* box, int index)
     box->addItem(tr("To first"));
     box->addItem(tr("Up to face"));
     box->addItem(tr("Up to shape"));
+    // Mode::Appended (ops#640): the end type a Pad offers too
+    box->addItem(tr("To last"));
     box->setCurrentIndex(index);
 }
 
@@ -126,6 +128,9 @@ void TaskPocketParameters::onModeChanged(int index, Side side)
             break;
         case Mode::ToShape:
             sideCtrl.Type->setValue("UpToShape");
+            break;
+        case Mode::Appended:
+            sideCtrl.Type->setValue("UpToLast");
             break;
     }
 

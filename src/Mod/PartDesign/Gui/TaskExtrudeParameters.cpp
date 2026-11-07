@@ -956,10 +956,14 @@ void TaskExtrudeParameters::updateSideUI(
             QMetaObject::invokeMethod(s.lengthEdit, "setFocus", Qt::QueuedConnection);
         }
     }
-    else if (sideMode == Mode::ThroughAll && featureType == Type::Pocket) {
+    else if ((sideMode == Mode::ThroughAll && featureType == Type::Pocket)
+             || (sideMode == Mode::Appended && featureType == Type::Pad)) {
+        // Through all
         isTaperVisible = true;
     }
-    else if (sideMode == Mode::ToLast && featureType == Type::Pad) {
+    else if ((sideMode == Mode::ToLast && featureType == Type::Pad)
+             || (sideMode == Mode::Appended && featureType == Type::Pocket)) {
+        // To last
         isOffsetVisible = true;
     }
     else if (sideMode == Mode::ToFirst) {
@@ -1353,13 +1357,14 @@ void TaskExtrudeParameters::applyParameters()
             && (prop.getSubValues(false) == subs || prop.getSubValues(true) == subs);
     };
 
-    // Handle deprecated 'TwoLength' mode.
+    // Handle deprecated 'TwoLength' mode: the UI skips it, so the modes from ToShape on are
+    // one index below their Type (Appended is Type index 6, ops#640).
     int type1 = getMode();
-    if (static_cast<Mode>(type1) == Mode::ToShape) {
+    if (type1 >= static_cast<int>(Mode::ToShape)) {
         type1++;
     }
     int type2 = getMode2();
-    if (static_cast<Mode>(type2) == Mode::ToShape) {
+    if (type2 >= static_cast<int>(Mode::ToShape)) {
         type2++;
     }
 

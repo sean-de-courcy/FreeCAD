@@ -198,7 +198,9 @@ void TaskRevolutionParameters::createFields()
     axis.kind = ReferenceField::Kind::SingleElement;
     axis.flags = AllowSelection::EDGE | AllowSelection::PLANAR | AllowSelection::CIRCLE;
     axis.target = baseSolid;
-    axis.required = false;
+    // Required: a new Revolve has none, and its dialog opens waiting for the pick, Onshape's way
+    // (FreeCAD-CH ops#643): the first empty required field is armed (armFirstEmpty)
+    axis.required = true;
     axis.removable = false;
     axis.once = true;
     axis.label = tr("Picked axis");
@@ -882,6 +884,30 @@ TaskDlgRevolutionParameters::TaskDlgRevolutionParameters(ViewProviderRevolution*
     );
     addResultBox();
     Content.push_back(preview);
+}
+
+namespace
+{
+QString missingAxis(const App::DocumentObject* feature)
+{
+    auto axis = feature
+        ? dynamic_cast<const App::PropertyLinkSub*>(feature->getPropertyByName("ReferenceAxis"))
+        : nullptr;
+    if (!axis || axis->getValue()) {
+        return {};
+    }
+    return QObject::tr("Pick a line or an edge to revolve about");
+}
+}  // namespace
+
+QString TaskDlgRevolutionParameters::missingRequired() const
+{
+    return missingAxis(getObject());
+}
+
+QString TaskDlgGrooveParameters::missingRequired() const
+{
+    return missingAxis(getObject());
 }
 
 TaskDlgGrooveParameters::TaskDlgGrooveParameters(ViewProviderGroove* GrooveView)

@@ -2509,8 +2509,11 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
     // get revolve axis
     const Base::Vector3d v = Axis.getValue();
     if (v.IsNull()) {
+        // A new Revolve waits for its axis (FreeCAD-CH ops#643): say what to do
         return new App::DocumentObjectExecReturn(
-            QT_TRANSLATE_NOOP("Exception", "Reference axis is invalid")
+            ReferenceAxis.getValue()
+                ? QT_TRANSLATE_NOOP("Exception", "Reference axis is invalid")
+                : QT_TRANSLATE_NOOP("Exception", "No axis: pick a line or an edge to revolve about")
         );
     }
 
