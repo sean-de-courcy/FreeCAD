@@ -30,6 +30,7 @@
 #include <QFileInfo>
 
 #include <App/Application.h>
+#include <App/ReferenceRepair.h>
 #include <App/Transactions.h>
 #include <Base/Quantity.h>
 #include <Base/UnitsApi.h>
@@ -193,6 +194,17 @@ std::string SketcherGui::getStrippedPythonExceptionString(const Base::Exception&
     else {
         return msg;
     }
+}
+
+std::vector<App::ReferenceRow> SketcherGui::referencesToMatch(const Sketcher::SketchObject* obj)
+{
+    std::vector<App::ReferenceRow> rows;
+    for (App::ReferenceRow& row : App::referenceRows(obj)) {
+        if (row.status == "guessed" || (row.status == "broken" && !row.candidates.empty())) {
+            rows.push_back(std::move(row));
+        }
+    }
+    return rows;
 }
 
 bool SketcherGui::ReleaseHandler(Gui::Document* doc)

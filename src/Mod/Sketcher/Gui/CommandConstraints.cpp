@@ -2067,6 +2067,19 @@ private:
             .selectionStep = 2,
             .hints = {{QObject::tr(PICK_SYMMETRY_LINE), {Gui::InputHint::UserInput::MouseLeft}}}},
 
+            // Midpoint (FreeCAD-CH, ops#645)
+            {.commandName = "Sketcher_ConstrainMidpoint",
+            .selectionStep = 0,
+            .hints = {{QObject::tr(PICK_POINT_OR_EDGE), {Gui::InputHint::UserInput::MouseLeft}}}},
+
+            {.commandName = "Sketcher_ConstrainMidpoint",
+            .selectionStep = 1,
+            .hints = {{QObject::tr(PICK_SECOND_POINT_OR_EDGE), {Gui::InputHint::UserInput::MouseLeft}}}},
+
+            {.commandName = "Sketcher_ConstrainMidpoint",
+            .selectionStep = 2,
+            .hints = {{QObject::tr(PICK_POINT), {Gui::InputHint::UserInput::MouseLeft}}}},
+
             // Tangent
             {.commandName = "Sketcher_ConstrainTangent",
             .selectionStep = 0,
@@ -11570,6 +11583,171 @@ void CmdSketcherConstrainSymmetric::applyConstraint(std::vector<SelIdPair>& selS
 
 // ======================================================================================
 
+// FreeCAD-CH (ops#645): Onshape's Midpoint: a point and a line, either order, or a line's start
+// point, its end point and then the point between them. It writes Sketcher's Symmetric
+// constraint, which keeps a point at the middle of two points. The midpoint of an arc is refused:
+// Symmetric would put the point at the middle of the arc's chord, not on the arc.
+class CmdSketcherConstrainMidpoint: public CmdSketcherConstraint
+{
+public:
+    CmdSketcherConstrainMidpoint();
+    ~CmdSketcherConstrainMidpoint() override
+    {}
+    const char* className() const override
+    {
+        return "CmdSketcherConstrainMidpoint";
+    }
+
+protected:
+    void activated(int iMsg) override;
+    void applyConstraint(std::vector<SelIdPair>& selSeq, int seqIndex) override;
+
+private:
+    // the point is the middle of the line's two ends, or of the first two points
+    void addMidpoint(Sketcher::SketchObject* Obj, std::vector<SelIdPair> picks);
+    void wrongSelection(Sketcher::SketchObject* Obj, const QString& message);
+};
+
+CmdSketcherConstrainMidpoint::CmdSketcherConstrainMidpoint()
+    : CmdSketcherConstraint("Sketcher_ConstrainMidpoint")
+{
+    sAppModule = "Sketcher";
+    sGroup = "Sketcher";
+    sMenuText = QT_TR_NOOP("Midpoint Constraint");
+    sToolTipText = QT_TR_NOOP("Constrains a point to the midpoint of a line, or of two points: "
+                              "select a point and a line, or the two points and then the midpoint");
+    sWhatsThis = "Sketcher_ConstrainMidpoint";
+    sStatusTip = sToolTipText;
+    sPixmap = "Constraint_PointOnMidPoint";
+    sAccel = "";
+    eType = ForEdit;
+
+    allowedSelSequences = {{SelVertexOrRoot, SelEdge},
+                           {SelVertex, SelExternalEdge},
+                           {SelEdge, SelVertexOrRoot},
+                           {SelExternalEdge, SelVertex},
+                           {SelVertexOrRoot, SelVertexOrRoot, SelVertexOrRoot}};
+}
+
+void CmdSketcherConstrainMidpoint::wrongSelection(Sketcher::SketchObject* Obj, const QString& message)
+{
+    Gui::TranslatedUserWarning(Obj, QObject::tr("Wrong selection"), message);
+}
+
+void CmdSketcherConstrainMidpoint::addMidpoint(Sketcher::SketchObject* Obj, std::vector<SelIdPair> picks)
+{
+    const QString usage = QObject::tr("Select a point and a line, or two points and then the point "
+                                      "to keep at their midpoint.");
+    if (picks.size() == 2) {
+        // the point first, then the line
+        if (isEdge(picks[0].GeoId, picks[0].PosId)) {
+            std::swap(picks[0], picks[1]);
+        }
+        const SelIdPair& point = picks[0];
+        const SelIdPair& line = picks[1];
+        if (!isVertex(point.GeoId, point.PosId) || !isEdge(line.GeoId, line.PosId)) {
+            wrongSelection(Obj, usage);
+            return;
+        }
+        const Part::Geometry* geom = Obj->getGeometry(line.GeoId);
+        if (!geom || !isLineSegment(*geom)) {
+            wrongSelection(Obj,
+                           QObject::tr("The midpoint can only be taken of a line. Select a point "
+                                       "and a line, or two points and then the midpoint."));
+            return;
+        }
+        if (point.GeoId == line.GeoId) {
+            wrongSelection(Obj, QObject::tr("A line's own point cannot be kept at its midpoint."));
+            return;
+        }
+        if (areBothPointsOrSegmentsFixed(Obj, point.GeoId, line.GeoId)) {
+            showNoConstraintBetweenFixedGeometry(Obj);
+            return;
+        }
+        openCommand(QT_TRANSLATE_NOOP("Command", "Add midpoint constraint"));
+        Gui::cmdAppObjectArgs(Obj,
+                              "addConstraint(Sketcher.Constraint('Symmetric',%d,%d,%d,%d,%d,%d))",
+                              line.GeoId,
+                              static_cast<int>(Sketcher::PointPos::start),
+                              line.GeoId,
+                              static_cast<int>(Sketcher::PointPos::end),
+                              point.GeoId,
+                              static_cast<int>(point.PosId));
+    }
+    else if (picks.size() == 3) {
+        for (const SelIdPair& pick : picks) {
+            if (!isVertex(pick.GeoId, pick.PosId)) {
+                wrongSelection(Obj, usage);
+                return;
+            }
+        }
+        if (areAllPointsOrSegmentsFixed(Obj, picks[0].GeoId, picks[1].GeoId, picks[2].GeoId)) {
+            showNoConstraintBetweenFixedGeometry(Obj);
+            return;
+        }
+        openCommand(QT_TRANSLATE_NOOP("Command", "Add midpoint constraint"));
+        Gui::cmdAppObjectArgs(Obj,
+                              "addConstraint(Sketcher.Constraint('Symmetric',%d,%d,%d,%d,%d,%d))",
+                              picks[0].GeoId,
+                              static_cast<int>(picks[0].PosId),
+                              picks[1].GeoId,
+                              static_cast<int>(picks[1].PosId),
+                              picks[2].GeoId,
+                              static_cast<int>(picks[2].PosId));
+    }
+    else {
+        wrongSelection(Obj, usage);
+        return;
+    }
+
+    commitCommand();
+    tryAutoRecompute(Obj);
+    getSelection().clearSelection();
+}
+
+void CmdSketcherConstrainMidpoint::activated(int iMsg)
+{
+    Q_UNUSED(iMsg);
+    ModelPickBooking modelPicks;  // FreeCAD-CH (ops#634)
+    std::vector<Gui::SelectionObject> selection = getSelection().getSelectionEx();
+
+    // only one sketch with its subelements are allowed to be selected
+    if (selection.size() != 1
+        || !selection[0].isObjectTypeOf(Sketcher::SketchObject::getClassTypeId())) {
+        ParameterGrp::handle hGrp = App::GetApplication().GetParameterGroupByPath(
+            "User parameter:BaseApp/Preferences/Mod/Sketcher");
+        if (hGrp->GetBool("ContinuousConstraintMode", true)) {
+            ActivateHandler(getActiveGuiDocument(), std::make_unique<DrawSketchHandlerGenConstraint>(this));
+            getSelection().clearSelection();
+        }
+        else {
+            Gui::TranslatedUserWarning(getActiveGuiDocument()->getDocument(),
+                                       QObject::tr("Wrong selection"),
+                                       QObject::tr("Select a point and a line, or two points and "
+                                                   "then the point to keep at their midpoint."));
+        }
+        return;
+    }
+
+    auto* Obj = static_cast<Sketcher::SketchObject*>(selection[0].getObject());
+    std::vector<SelIdPair> picks;
+    for (const std::string& name : selection[0].getSubNames()) {
+        SelIdPair pick {GeoEnum::GeoUndef, Sketcher::PointPos::none};
+        getIdsFromName(name, Obj, pick.GeoId, pick.PosId);
+        picks.push_back(pick);
+    }
+    addMidpoint(Obj, std::move(picks));
+}
+
+void CmdSketcherConstrainMidpoint::applyConstraint(std::vector<SelIdPair>& selSeq, int seqIndex)
+{
+    Q_UNUSED(seqIndex);
+    auto* sketchgui = static_cast<SketcherGui::ViewProviderSketch*>(getActiveGuiDocument()->getInEdit());
+    addMidpoint(sketchgui->getSketchObject(), selSeq);
+}
+
+// ======================================================================================
+
 DEF_STD_CMD_A(CmdSketcherConstrainSnellsLaw)
 
 CmdSketcherConstrainSnellsLaw::CmdSketcherConstrainSnellsLaw()
@@ -12329,6 +12507,7 @@ void CreateSketcherCommandsConstraints()
     rcCmdMgr.addCommand(new CmdSketcherConstrainEqual());
     rcCmdMgr.addCommand(new CmdSketcherConstrainPointOnObject());
     rcCmdMgr.addCommand(new CmdSketcherConstrainSymmetric());
+    rcCmdMgr.addCommand(new CmdSketcherConstrainMidpoint());  // FreeCAD-CH (ops#645)
     rcCmdMgr.addCommand(new CmdSketcherConstrainSnellsLaw());
     rcCmdMgr.addCommand(new CmdSketcherConstrainGroup());
     rcCmdMgr.addCommand(new CmdSketcherChangeDimensionConstraint());
