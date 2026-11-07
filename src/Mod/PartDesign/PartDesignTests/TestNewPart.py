@@ -25,6 +25,15 @@ def assertVector(test, got, expected, msg=None):
     test.assertLess((got - V(*expected)).Length, 1e-6, msg or f"{got} != {expected}")
 
 
+# Onshape's info on a Remove or an Intersect that reaches nothing (hands-on check R7, ops#640 H3)
+NO_INTERSECTION = "Selected tools and targets do not intersect"
+
+
+def volume(shape):
+    """A shape's volume, 0 for the empty shape."""
+    return 0 if shape.isNull() else shape.Volume
+
+
 def globalBox(feature):
     """The bounding box of an additive feature's own solid (its AddSubShape, in the feature's
     frame) in the document's frame"""
@@ -477,6 +486,105 @@ class TestOperations(unittest.TestCase):
         self.assertValid()
         self.assertAlmostEqual(body.Shape.Volume, 20500, places=3)
         self.assertAlmostEqual(body.Shape.BoundBox.ZMax, 15, places=6)
+
+    def testACutWithNothingBeforeItMakesNothing(self):
+        """A regression guard, not H3's proof: this passed before ops#640 H3 too (ops#308 F8 failed
+        the feature and passThroughBase wrote the empty base into Shape; review app-1). A Remove
+        or an Intersect with nothing before it never makes its tool material. A Pad of a 30 x 30
+        square, 10 up, its Body's first solid (9000), set to Subtraction: an empty shape, not the
+        9000 tool, and in error, "Nothing to cut" (F8, kept; the dialog doesn't offer this on a
+        new part touching nothing, ops#640 H3); Common the same; a Refine-only change keeps it
+        empty. Union again: the 9000 block, valid."""
+        body = self.doc.addObject("PartDesign::Body", "Body")
+        block = pad(body, "Block", sketch(body, "BlockSk", xyPlane(body), (0, 0, 30, 30)), 10)
+        self.doc.recompute()
+        self.assertAlmostEqual(body.Shape.Volume, 9000, places=3)
+        for operation in ("Subtraction", "Common"):
+            block.Operation = operation
+            self.doc.recompute()
+            self.assertFalse(block.isValid(), operation)
+            self.assertIn("Nothing to cut", block.getStatusString(), operation)
+            self.assertEqual(volume(block.Shape), 0, operation)
+            self.assertEqual(volume(body.Shape), 0, operation)
+            block.Refine = not block.Refine
+            self.doc.recompute()
+            self.assertEqual(volume(block.Shape), 0, operation + ", Refine changed")
+        block.Operation = "Union"
+        self.doc.recompute()
+        self.assertValid()
+        self.assertAlmostEqual(body.Shape.Volume, 9000, places=3)
+
+    def testACutThatMissesLeavesThePart(self):
+        """ops#640 H3: a pocket of a 10 x 10 square at x 100, beside the enclosure (16000), 5 deep
+        from z 10: valid, the enclosure unchanged (16000), with the note. Intersect the same (it
+        failed before H3: an empty common). The lid pocket, which cuts, has no note (11500)."""
+        body = self.enclosure()
+        self.doc.recompute()
+        farSk = sketch(body, "FarSk", xyPlane(body), (100, 0, 110, 10), z=10)
+        miss = body.newObject("PartDesign::Pocket", "Miss")
+        miss.Profile = farSk
+        miss.Length = 5
+        self.doc.recompute()
+        for operation in ("Subtraction", "Common"):
+            miss.Operation = operation
+            self.doc.recompute()
+            self.assertValid()
+            self.assertIn("Warning", miss.State, operation)
+            self.assertIn(NO_INTERSECTION, miss.getStatusString(), operation)
+            self.assertAlmostEqual(body.Shape.Volume, 16000, places=3)
+        miss.Operation = "Subtraction"
+        hit = body.newObject("PartDesign::Pocket", "Hit")
+        hit.Profile = self.lidSk
+        hit.Length = 5
+        self.doc.recompute()
+        self.assertValid()
+        self.assertNotIn("Warning", hit.State)
+        self.assertAlmostEqual(body.Shape.Volume, 11500, places=3)
+
+    def testAnIntersectThatMissesStaysTheBaseWhenRefined(self):
+        """ops#640 H3: an Intersect that misses keeps its base as Shape, and keeps no raw result
+        (the prism) for a Refine-only change: FeatureRefine::onlyHaveRefined would put the
+        refined prism, a 10 x 10 x 5 positive solid (500), into Shape, valid and with no note.
+        The pocket beside the enclosure on Common, its Refine toggled (both ways): 16000, valid,
+        with the note."""
+        body = self.enclosure()
+        self.doc.recompute()
+        farSk = sketch(body, "FarSk", xyPlane(body), (100, 0, 110, 10), z=10)
+        miss = body.newObject("PartDesign::Pocket", "Miss")
+        miss.Profile = farSk
+        miss.Length = 5
+        miss.Operation = "Common"
+        self.doc.recompute()
+        self.assertAlmostEqual(body.Shape.Volume, 16000, places=3)
+        for _ in range(2):
+            miss.Refine = not miss.Refine
+            self.doc.recompute()
+            self.assertValid()
+            self.assertAlmostEqual(volume(miss.Shape), 16000, places=3)
+            self.assertAlmostEqual(body.Shape.Volume, 16000, places=3)
+            self.assertIn(NO_INTERSECTION, miss.getStatusString())
+
+    def testARemoveOutOfTheTopFaceMisses(self):
+        """ops#640 H3, hands-on check R5's case: a sketch on the part's top face, Remove pointing
+        out of the part. Onshape: "Selected tools and targets do not intersect", healthy. The tool
+        shares the top face (distance 0), so the miss is judged by volume, not contact. The lid
+        pad, 5, set to Subtraction, not reversed (a Pad keeps its side: up, out of the part):
+        valid, 16000, with the note. Reversed: it cuts the 30 x 30 x 5 (11500), and the note goes
+        (DocumentObject::recompute clears it)."""
+        body = self.enclosure()
+        lid = pad(body, "Lid", self.lidSk, 5)
+        lid.Operation = "Subtraction"
+        self.doc.recompute()
+        self.assertValid()
+        self.assertAlmostEqual(body.Shape.Volume, 16000, places=3)
+        self.assertIn("Warning", lid.State)
+        self.assertIn(NO_INTERSECTION, lid.getStatusString())
+        lid.Reversed = True
+        self.doc.recompute()
+        self.assertValid()
+        self.assertAlmostEqual(body.Shape.Volume, 11500, places=3)
+        self.assertNotIn("Warning", lid.State)
+        self.assertNotIn(NO_INTERSECTION, lid.getStatusString())
 
     def testReferenceAxisSideIsTheClasss(self):
         """Along the lid sketch's normal as its ReferenceAxis, a Pad set to Subtraction keeps the

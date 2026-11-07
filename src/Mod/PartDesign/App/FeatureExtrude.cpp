@@ -968,6 +968,56 @@ double FeatureExtrude::getStartOffset() const
     );
 }
 
+void FeatureExtrude::noteReachesNothing()
+{
+    // Onshape's words (hands-on check R7, ops#640): an info, the feature stays valid
+    static const std::string text = "Selected tools and targets do not intersect";
+    // A sibling says it in its own words: "doesn't touch <part>" (warnIfMissing, ops#325)
+    if (SiblingOf.getValue()) {
+        return;
+    }
+    if (auto doc = getDocument()) {
+        const char* previous = doc->getWarningDescription(this);
+        doc->setWarning(this, previous && *previous ? std::string(previous) + "\n" + text : text);
+    }
+}
+
+namespace
+{
+// Whether the boxes of a Remove's or an Intersect's tool and of its base are apart (ops#640 H3)
+bool boxesApart(const TopoShape& tool, const TopoShape& base)
+{
+    Bnd_Box toolBox;
+    Bnd_Box baseBox;
+    BRepBndLib::Add(tool.getShape(), toolBox, /*useTriangulation=*/false);
+    BRepBndLib::Add(base.getShape(), baseBox, /*useTriangulation=*/false);
+    toolBox.Enlarge(Precision::Confusion());
+    return toolBox.IsOut(baseBox);
+}
+
+double volumeOf(const TopoShape& shape)
+{
+    GProp_GProps props;
+    BRepGProp::VolumeProperties(shape.getShape(), props);
+    return props.Mass();
+}
+
+// Whether a Remove's tool missed its base (ops#640 H3), the cut done: judged by volume, not by
+// contact, so a tool that only shares a face with the base (a sketch on the top face, the cut
+// pointing out of the part: hands-on check R5) counts as a miss. The tolerance scales with the
+// tool (a real cut removes a fair part of it) plus the base's own rounding
+bool cutMissed(const TopoShape& tool, const TopoShape& base, const TopoShape& result)
+{
+    if (result.isNull() || !result.hasSubShape(TopAbs_SOLID)) {
+        return false;
+    }
+    const double baseVolume = volumeOf(base);
+    const double removed = baseVolume - volumeOf(result);
+    const double tolerance = 1e-6 * std::fabs(volumeOf(tool)) + 1e-9 * std::fabs(baseVolume);
+    return std::fabs(removed) <= tolerance;
+}
+}  // namespace
+
 App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions options)
 {
     if (onlyHaveRefined()) {
@@ -1458,8 +1508,37 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
         // set the additive shape property for later usage in e.g. pattern
         this->AddSubShape.setValue(prism);
 
+        // Remove or Intersect (FreeCAD-CH ops#640 H3): one that misses its base changes no
+        // geometry and stays healthy, with Onshape's info "Selected tools and targets do not
+        // intersect" (below). With no solid before it, it makes nothing, never its tool as
+        // material (the last branch below), and FeatureAddSub::recompute fails it: "Nothing to
+        // cut" (ops#308 F8), its empty base passed through. A base of no solid that isn't empty
+        // (a BaseFeature's face) goes on as before
+        const bool cuts = fuse && booleanOperation != BooleanOperation::Union;
+        if (cuts && base.isNull()) {
+            madeUnder = Placement.getValue();
+            // no raw result: a Refine-only change recomputes fully (FeatureRefine::onlyHaveRefined)
+            this->rawShape = TopoShape();
+            this->Shape.setValue(TopoShape());
+            updateProperties();
+            return App::DocumentObject::StdReturn;
+        }
+
         if (base.shapeType(true) <= TopAbs_SOLID && fuse) {
             prism.Tag = -this->getID();
+
+            const bool apart = cuts && boxesApart(prism, base);
+            if (apart && booleanOperation == BooleanOperation::Common) {
+                // they share nothing: the base as it was, not an empty common (ops#640 H3). No
+                // raw result is kept: onlyHaveRefined would otherwise refine the prism into Shape
+                // on a Refine-only change (a positive solid), and a full recompute keeps the note
+                noteReachesNothing();
+                madeUnder = Placement.getValue();
+                this->rawShape = TopoShape();
+                this->Shape.setValue(base);
+                updateProperties();
+                return App::DocumentObject::StdReturn;
+            }
 
             // Let's call algorithm computing a fuse operation:
             TopoShape result = makeTopoShape();
@@ -1479,6 +1558,23 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
                     QT_TRANSLATE_NOOP("Exception", "Fusion with base feature failed")
                 );
             }
+            if (cuts && booleanOperation == BooleanOperation::Common
+                && (result.isNull() || !result.hasSubShape(TopAbs_SOLID))) {
+                // boxes that overlap with solids that don't: the base as it was (ops#640 H3), no
+                // raw result kept (as above)
+                noteReachesNothing();
+                madeUnder = Placement.getValue();
+                this->rawShape = TopoShape();
+                this->Shape.setValue(base);
+                updateProperties();
+                return App::DocumentObject::StdReturn;
+            }
+            const bool cutMisses = cuts && booleanOperation == BooleanOperation::Subtraction
+                && (apart || cutMissed(prism, base, result));
+            if (cutMisses) {
+                // a cut that misses computes its base unchanged: kept as computed, with the note
+                noteReachesNothing();
+            }
             // we have to get the solids (fuse sometimes creates compounds)
             auto solRes = this->getSolid(result);
             // lets check if the result is a solid
@@ -1488,8 +1584,9 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
                 );
             }
 
-            // store shape before refinement
-            this->rawShape = result;
+            // store shape before refinement; none for a cut that missed, so that a Refine-only
+            // change recomputes fully and keeps the note (DocumentObject::recompute clears it)
+            this->rawShape = cutMisses ? TopoShape() : result;
             solRes = refineShapeIfActive(result);
 
             if (!isSingleSolidRuleSatisfied(solRes.getShape())) {

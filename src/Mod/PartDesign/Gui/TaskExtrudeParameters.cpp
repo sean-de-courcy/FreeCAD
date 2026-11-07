@@ -1192,6 +1192,8 @@ void TaskExtrudeParameters::setDirectionMode(int index)
 void TaskExtrudeParameters::onReversedChanged(bool on)
 {
     if (auto extrude = getObject<PartDesign::FeatureExtrude>()) {
+        // the user's direction: an operation switch keeps it now (FreeCAD-CH ops#640 H4)
+        TaskResultParameters::noteReversedTouched(extrude);
         extrude->Reversed.setValue(on);
         // update the direction
         tryRecomputeFeature();
