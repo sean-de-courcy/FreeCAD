@@ -1203,6 +1203,14 @@ class TestSketchExternalTypesGui(unittest.TestCase):
     # an arrowhead, its notch at (0, 1): the line v = 0 crosses its two arms apart
     DART = [(-5, -5), (0, 5), (5, -5), (0, 1)]
 
+    @staticmethod
+    def repickFace(sketch, name):
+        """C2 (ops#502): a script's face given another outline gets a fresh id (I-C5) and the
+        sketch's links to it break, loud; App.repairReference picks it again"""
+        for k, (obj, sub) in enumerate(sketch.ExternalGeometry):
+            if obj.Name == name:
+                App.repairReference(sketch, "ExternalGeometry", k, "Face1", True)
+
     def testLegacyBothLinkWhoseSplitMovedWarnsInsteadOfGivingKinds(self):
         """PR 251 review M1: a file saved before ops#264 (no kinds) with the tilted pentagon face
         linked Both: five projected lines and one section line. The face made the dart before the
@@ -1232,7 +1240,9 @@ class TestSketchExternalTypesGui(unittest.TestCase):
         self.assertIn("its type no longer gives the same geometries", new)
         sketch = self.doc.getObject("TiltedSketch")
         self.assertEqual(self.lineKinds(sketch), [""] * 6)
-        # the case is the one meant: the dart gives six lines, two of them sections
+        # the case is the one meant: the dart gives six lines, two of them sections. The dart is
+        # named afresh (I-C5, ops#502), so the link is picked again first, as reshape() does
+        self.repickFace(sketch, "Face")
         sketch.touch()
         self.doc.recompute()
         section, projections = self.sectionAndProjections(sketch)
@@ -1277,6 +1287,9 @@ class TestSketchExternalTypesGui(unittest.TestCase):
             list(sketch.ExternalTypes), [PROJECTION, INTERSECTION, PROJECTION, PENDING]
         )
         self.doc.getObject("Ball").Shape = Part.makePlane(4, 4, V(-2, -2, 5))
+        # the face back is named afresh (I-C5, ops#502): picked again, as in
+        # testUndecidedTypeRepairedWhenTheElementComesBack
+        App.repairReference(sketch, "ExternalGeometry", 2, "Face1", True)
         before = len(reportText())
         self.doc.recompute()
         new = reportText()[before:]
@@ -1337,6 +1350,8 @@ class TestSketchExternalTypesGui(unittest.TestCase):
         self.assertIn("its type no longer gives the same geometries", new)
         sketch = self.doc.getObject("TiltedSketch")
         self.assertEqual(len(sketch.ExternalGeo), 6)
+        # the pentagon is named afresh (I-C5, ops#502): the link is picked again first
+        self.repickFace(sketch, "Face")
         sketch.touch()
         before = len(reportText())
         self.doc.recompute()

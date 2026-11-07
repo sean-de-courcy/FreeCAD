@@ -780,6 +780,117 @@ class TestMergeExternalPairingGui(SketcherGuiTestCase):
             merged.ExternalGeo[2].StartPoint.y, -5 * math.tan(math.radians(60)), places=6
         )
 
+    # --- ops#629: links to named elements survive the merge ---
+
+    @staticmethod
+    def top_face(target):
+        """The face z = 10 of a 10 mm cube at the origin"""
+        return next(
+            "Face%d" % (i + 1)
+            for i, f in enumerate(target.Shape.Faces)
+            if (f.CenterOfMass - V(5, 5, 10)).Length < 1e-6
+        )
+
+    @staticmethod
+    def external_line_at(sketch, y):
+        """The GeoId of the sketch's external line y = `y` from x = 0 to 10, or None"""
+        for k, g in enumerate(sketch.ExternalGeo):
+            if (
+                k >= 2
+                and isinstance(g, Part.LineSegment)
+                and abs(g.StartPoint.y - y) < 1e-6
+                and abs(g.EndPoint.y - y) < 1e-6
+                and abs(abs(g.StartPoint.x - g.EndPoint.x) - 10) < 1e-6
+                and abs(min(g.StartPoint.x, g.EndPoint.x)) < 1e-6
+            ):
+                return -k - 1
+        return None
+
+    def merge_link_to_top_face(self, target, container=None):
+        """S8 in z = 20 projects the cube `target`'s top face (four lines) and holds a line from
+        (3, 0) to (3, -5) whose start is on the projected edge y = 0, perpendicular to it. S9, merged
+        first, has a line of its own. The merged sketch has S8's link, its four lines, and both
+        constraints on the merged copy of that edge; the report names no lost link."""
+        def make(name):
+            sketch = (
+                container.newObject("Sketcher::SketchObject", name)
+                if container
+                else self.doc.addObject("Sketcher::SketchObject", name)
+            )
+            sketch.Placement = FreeCAD.Placement(V(0, 0, 20), FreeCAD.Rotation())
+            return sketch
+
+        face = self.top_face(target)
+        s8 = make("S8")
+        s8.addExternal(target.Name, face)
+        s8.addGeometry(Part.LineSegment(V(3, 0, 0), V(3, -5, 0)), False)
+        self.doc.recompute()
+        self.assertEqual(len(s8.ExternalGeo), 2 + 4)
+        edge = self.external_line_at(s8, 0)
+        self.assertIsNotNone(edge)
+        s8.addConstraint(Sketcher.Constraint("PointOnObject", 0, 1, edge))
+        s8.addConstraint(Sketcher.Constraint("Perpendicular", 0, edge))
+        s9 = make("S9")
+        s9.addGeometry(Part.LineSegment(V(20, 0, 0), V(30, 0, 0)), False)
+        self.doc.recompute()
+        self.assertTrue(s8.isValid(), s8.getStatusString())
+
+        before = len(reportText())
+        merged = self.merge(s9, s8)
+        new = reportText()[before:]
+        self.assertNotIn("has no match in the merged sketch", new)
+        self.assertNotIn("missing reference", new)
+        self.assertTrue(merged.isValid(), merged.getStatusString())
+        self.assertEqual(merged.ExternalGeometry, [(target, (face,))])
+        self.assertEqual(len(merged.ExternalGeo), 2 + 4)
+        by_type = {c.Type: c for c in merged.Constraints}
+        for kind in ("PointOnObject", "Perpendicular"):
+            self.assertIn(kind, by_type)
+        self.assertEqual(by_type["PointOnObject"].Second, self.external_line_at(merged, 0))
+        self.assertEqual(by_type["Perpendicular"].Second, self.external_line_at(merged, 0))
+        return merged
+
+    def assert_merged_link_follows(self, target, merged):
+        """The merged link is live: the cube moved 2 mm along y moves the merged edge the
+        constraints are on"""
+        target.Placement = FreeCAD.Placement(V(0, 2, 0), FreeCAD.Rotation())
+        self.doc.recompute()
+        self.assertTrue(merged.isValid(), merged.getStatusString())
+        on_object = [c for c in merged.Constraints if c.Type == "PointOnObject"]
+        self.assertEqual(len(on_object), 1)
+        self.assertEqual(on_object[0].Second, self.external_line_at(merged, 2))
+
+    def test_merge_keeps_a_link_to_a_face_of_a_part_primitive(self):
+        """A Part Box's faces have C2's MLN names (ops#502). The merge gave the merged sketch the
+        name without its element, which no element resolves: the link and its constraints were
+        lost, with a warning."""
+        cube = self.doc.addObject("Part::Box", "Cube")
+        self.doc.recompute()
+        merged = self.merge_link_to_top_face(cube)
+        self.assert_merged_link_follows(cube, merged)
+
+    def test_merge_keeps_a_link_to_a_face_of_a_shape_without_history(self):
+        """The same with a Part Feature whose Shape a script sets, as an import does: MLN names
+        too"""
+        cube = self.doc.addObject("Part::Feature", "Imported")
+        cube.Shape = Part.makeBox(10, 10, 10)
+        self.doc.recompute()
+        merged = self.merge_link_to_top_face(cube)
+        self.assert_merged_link_follows(cube, merged)
+
+    def test_merge_keeps_a_link_to_a_face_of_a_feature_in_its_body(self):
+        """The same with a Pad's face in a Body, named by its history: the merge lost those links
+        the same way"""
+        body = self.doc.addObject("PartDesign::Body", "Body")
+        profile = body.newObject("Sketcher::SketchObject", "Profile")
+        for start, end in SQUARE:
+            profile.addGeometry(Part.LineSegment(V(*start, 0), V(*end, 0)), False)
+        pad = body.newObject("PartDesign::Pad", "Pad")
+        pad.Profile = profile
+        pad.Length = 10
+        self.doc.recompute()
+        self.merge_link_to_top_face(pad, body)
+
 
 def freeze_externals(document_xml, sketch_name):
     """Sets the Frozen flag (2) of every external geometry of the object `sketch_name` in a
