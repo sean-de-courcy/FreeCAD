@@ -5283,6 +5283,17 @@ bool ViewProviderSketch::onDelete(const std::vector<std::string>& subList)
             }
         }
 
+        // FreeCAD-CH (ops#634): a constraint's helper (a model pick's link) goes with its last
+        // constraint, in the deletion's transaction, as in Onshape, where nothing is left
+        if (!getSketchObject()->unusedImplicitExternals().empty()) {
+            try {
+                Gui::cmdAppObjectArgs(getObject(), "delUnusedImplicitExternals()");
+            }
+            catch (const Base::Exception& e) {
+                Base::Console().developerError("ViewProviderSketch", "%s\n", e.what());
+            }
+        }
+
         int ret = getSketchObject()->solve();
 
         if (ret != 0) {

@@ -257,13 +257,24 @@ public:
 
     /// Carbon copy another sketch geometry and constraints
     int carbonCopy(App::DocumentObject* pObj, bool construction = true);
-    /// add an external geometry reference
+    /** add an external geometry reference
+     *  implicit: the link is a constraint's helper (a model pick, FreeCAD-CH ops#634), marked in
+     *  ExternalTypes so that it goes with its last constraint (delUnusedImplicitExternals). An
+     *  add that isn't implicit on a marked link of that kind keeps the link: the mark goes (the
+     *  External geometry tool takes it), with the defining flag asked for
+     */
     int addExternal(
         App::DocumentObject* Obj,
         const char* SubName,
         bool defining = false,
-        bool intersection = false
+        bool intersection = false,
+        bool implicit = false
     );
+    /// FreeCAD-CH (ops#634): the links marked implicit that nothing uses (no constraint on any of
+    /// their geometries, none of them defining), by index in ExternalGeometry
+    std::vector<int> unusedImplicitExternals() const;
+    /// FreeCAD-CH (ops#634): deletes the links unusedImplicitExternals() gives; returns how many
+    int delUnusedImplicitExternals();
     /** delete external
      *  ExtGeoId >= 0 with 0 corresponding to the first user defined
      *  external geometry
@@ -279,8 +290,23 @@ public:
     /// intersection, -1 none recorded (saved before ops#264, or both flags set)
     int externalGeometryKind(long id) const;
     /// The type of ExternalGeometry's entry `entry` as the projection uses it (0 projection,
-    /// 1 intersection, 2 both)
+    /// 1 intersection, 2 both), with the implicit mark if it has it: paths that keep the link
+    /// keep the mark; externalKind() gives the type alone
     int externalType(int entry) const;
+    /// FreeCAD-CH (ops#634): the bit of an ExternalTypes entry that marks an implicit link (a
+    /// constraint's helper, addExternal). A build before reads such an entry as no known type
+    static constexpr long implicitExternalMark = 0x100;
+    /// an ExternalTypes entry without the implicit mark (the repair mark, negative, as it is)
+    static constexpr long externalKind(long type)
+    {
+        return type < 0 ? type : type & ~implicitExternalMark;
+    }
+    static constexpr bool isImplicitType(long type)
+    {
+        return type >= 0 && (type & implicitExternalMark) != 0;
+    }
+    /// whether ExternalGeometry's entry `entry` is marked implicit
+    bool isImplicitExternal(int entry) const;
     /// The reference of the external geometry with Id `id`: empty when it has no link (a parked
     /// projection), none when the sketch has no external geometry with that Id
     std::optional<std::string> externalGeometryRefOf(long id) const;
@@ -1338,6 +1364,9 @@ private:
     // The entry that marks a type list whose repair on open couldn't tell every link's type: the
     // next open repairs only the links that are still undecided (ops#140). No type has this value.
     static constexpr long pendingTypeRepairMark = -1;
+    // FreeCAD-CH (ops#634): addExternal's add, not implicit, of a link marked implicit whose kind
+    // it already has: the link stays without the mark; returns its index
+    int keepImplicitExternal(int entry, bool defining, bool intersection);
     bool externalTypeRepairPending = false;
     // the keys of the links whose type the open couldn't tell: a full rebuild matches them with
     // their saved geometry once their element is back (ops#140)

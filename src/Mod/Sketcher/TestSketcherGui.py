@@ -26,6 +26,7 @@ from SketcherTests.TestSketchOnshapeGui import (  # FreeCAD-CH, ops#640
     TestSketchColoursGui,
     TestSketchClosestMatchGui,
 )
+from SketcherTests.TestSketchHelpersGui import TestSketchHelpersGui  # FreeCAD-CH, ops#634
 
 # Use the module so that code checkers don't complain (flake8)
 (
@@ -54,5 +55,6 @@ from SketcherTests.TestSketchOnshapeGui import (  # FreeCAD-CH, ops#640
     and TestSketchShiftInferenceGui
     and TestSketchColoursGui
     and TestSketchClosestMatchGui
+    and TestSketchHelpersGui
     else False
 )
