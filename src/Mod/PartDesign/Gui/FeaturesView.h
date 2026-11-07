@@ -6,11 +6,14 @@
 // features in history order with one roll-back bar, and the Parts list, shown in PartDesign in the
 // Model panel (the Combo view) in place of its tree, above its Properties panel
 
+#include <set>
 #include <string>
 #include <vector>
 
+#include <QLabel>
 #include <QListWidget>
 #include <QPointer>
+#include <QToolButton>
 #include <QStyledItemDelegate>
 #include <QTimer>
 #include <QTreeWidget>
@@ -65,6 +68,8 @@ Q_SIGNALS:
     void barDragCancelled();
     /// The selected rows were dropped before row (count(): after the last)
     void rowsDropped(int row);
+    /// The selected bar is to move one row up (-1) or down (1): the arrow keys
+    void barStepped(int delta);
 
 protected:
     void mousePressEvent(QMouseEvent* event) override;
@@ -79,6 +84,8 @@ private:
     void endRowDrag();
 
     bool dragging = false;
+    /// The bar row moved during its drag: a press and release without a move selects it
+    bool barMoved = false;
     /// A plain press on a row: a drag of the selected rows starts when the mouse moves far enough
     bool rowPressed = false;
     bool rowDragging = false;
@@ -119,6 +126,9 @@ public:
     /// The user chose the tree in PartDesign
     static bool prefersModelTree();
 
+    /// A Features row's mark from Show dependencies: 1 a parent, 2 a child, 0 none
+    static constexpr int DependencyRole = Qt::UserRole + 1;
+
     /// The shown document (null: none) and studio (null: its top level)
     App::Document* document() const;
     App::Part* studio() const;
@@ -156,11 +166,24 @@ private:
 
     void onBarDropped(int row);
     void onRowsDropped(int row);
+    /// The selected bar one row up (-1) or down (1), in one undo step
+    void stepBar(int delta);
     void onFeatureMenu(const QPoint& pos);
     void onFeatureDoubleClicked(QListWidgetItem* item);
     void onPartClicked(QTreeWidgetItem* item, int column);
     void onPartDoubleClicked(QTreeWidgetItem* item, int column);
+    void onPartMenu(const QPoint& pos);
     void rollFromMenu(App::DocumentObject* member, bool toEnd);
+    /// Only the failed rows while the header's error icon is down (Onshape's error filter)
+    void applyErrorFilter();
+    /// Opens the editor on view's current row (F2, Shift+N, the menus' Rename)
+    void renameCurrent(QAbstractItemView* view);
+    /// The editor's text as obj's Label, in one undo step "Rename"
+    void rename(App::DocumentObject* obj, const QString& text);
+    void endRename();
+    /// Marks obj's parents and children in the Features list (the menu's Show dependencies)
+    void showDependencies(App::DocumentObject* obj);
+    void markDependencies();
 
     void onChangedObject(const App::DocumentObject& obj, const App::Property& prop);
     void onObject(const App::DocumentObject& obj);
@@ -169,6 +192,15 @@ private:
 
     FeatureList* features = nullptr;
     QTreeWidget* parts = nullptr;
+    QLabel* title = nullptr;
+    QToolButton* errorsButton = nullptr;
+    /// A row's name is being edited: rebuilds wait for its commit
+    bool renaming = false;
+    /// The bar row is selected (for the arrow keys)
+    bool barSelected = false;
+    /// The rows Show dependencies marked, by object name
+    std::set<std::string> dependencyParents;
+    std::set<std::string> dependencyChildren;
     QTimer* rebuildTimer = nullptr;
     QTimer* selectionTimer = nullptr;
     bool dirty = true;

@@ -3,6 +3,7 @@
 #include "Studio.h"
 
 #include <algorithm>
+#include <cmath>
 #include <iterator>
 #include <string>
 #include <unordered_map>
@@ -18,7 +19,18 @@
 #include <App/PropertyExpressionEngine.h>
 #include <App/PropertyLinks.h>
 #include <App/PropertyStandard.h>
+#include <App/MappedElement.h>
 #include <Base/Exception.h>
+#include <Mod/Part/App/PartFeature.h>
+
+#include <BRepAdaptor_Curve.hxx>
+#include <BRepAdaptor_Surface.hxx>
+#include <BRep_Tool.hxx>
+#include <Standard_Failure.hxx>
+#include <TopoDS.hxx>
+#include <gp_Circ.hxx>
+#include <gp_Lin.hxx>
+#include <gp_Pln.hxx>
 
 #include "Body.h"
 #include "FeatureBase.h"
@@ -158,6 +170,77 @@ struct History
     std::vector<App::DocumentObject*> sequence;
 };
 
+/// history.deps[member] and history.wholeReads[member] (readHistory()): the members of other
+/// Bodies that member, a row of lane, reads, directly or through other objects (a spreadsheet, a
+/// Part feature, a link, a MultiTransform's step, another studio's Body), first its reads first
+/// (linkReads(member), or what a drop plans it to read). The Group order covers its own Body's (a
+/// link to a later member of its own Body, from Python, is left to the Group order)
+void readMember(History& history,
+                std::size_t lane,
+                App::DocumentObject* member,
+                const std::vector<App::DocumentObject*>& first)
+{
+    const auto& laneOf = history.laneOf;
+    auto& found = history.deps[member];
+    found.clear();
+    history.wholeReads.erase(member);
+    std::unordered_set<const App::DocumentObject*> seen {member};
+    std::vector<App::DocumentObject*> readers;
+    bool top = true;
+    while (top || !readers.empty()) {
+        App::DocumentObject* reader = top ? member : readers.back();
+        if (!top) {
+            readers.pop_back();
+        }
+        // Entry by entry: a subname path ((Studio, "Body1.Pad.Face1"), (C, "PadC1.Face3"))
+        // reads its last object, never its top (a container, a Body) whole (reviews
+        // props602-r1fix R1, props602-r2fix N1)
+        auto visit = [&](App::DocumentObject* obj) {
+            if (!obj || !seen.insert(obj).second) {
+                return;
+            }
+            if (auto it = laneOf.find(obj); it != laneOf.end()) {
+                if (it->second != lane) {
+                    found.insert(obj);
+                }
+                return;
+            }
+            if (auto body = freecad_cast<Body*>(obj)) {
+                // A whole Body (a Boolean's tool, a binder of the Body, a link to it, an
+                // expression of its shape) reads its last solid feature, in this studio or
+                // another (review props602-r1 T1)
+                auto last = body->lastSolidFeature();
+                if (!last) {
+                    return;
+                }
+                if (auto it = laneOf.find(last); it != laneOf.end()) {
+                    if (it->second != lane) {
+                        found.insert(last);
+                        history.wholeReads[member].insert(it->second);
+                    }
+                }
+                else if (seen.insert(last).second) {
+                    readers.push_back(last);
+                }
+                return;
+            }
+            // Containers (an App::Part, a group, an Origin) and origin features carry no
+            // geometry of their own; a MultiTransform's step (no row: what it reads, its
+            // MultiTransform reads) and any other object are read through
+            if (!isMultiTransformStep(obj)
+                && (obj->hasExtension(App::GroupExtension::getExtensionClassTypeId())
+                    || obj->isDerivedFrom<App::DatumElement>()
+                    || obj->isDerivedFrom<Part::BodyBase>())) {
+                return;
+            }
+            readers.push_back(obj);
+        };
+
+        std::ranges::for_each(top ? first : linkReads(reader), visit);
+        top = false;
+    }
+}
+
 History readHistory(App::Document* doc, App::Part* studio)
 {
     History history;
@@ -174,66 +257,12 @@ History readHistory(App::Document* doc, App::Part* studio)
         total += lanes.back().size();
     }
 
-    // deps[m]: the members of other Bodies that m reads, directly or through other objects (a
-    // spreadsheet, a Part feature, a link, a MultiTransform's step, another studio's Body). The
-    // Group order covers its own Body's (a link to a later member of its own Body, from Python, is
-    // left to the Group order)
-    auto& deps = history.deps;
     for (std::size_t lane = 0; lane < lanes.size(); ++lane) {
         for (auto member : lanes[lane]) {
-            auto& found = deps[member];
-            std::unordered_set<const App::DocumentObject*> seen {member};
-            std::vector<App::DocumentObject*> readers {member};
-            while (!readers.empty()) {
-                auto reader = readers.back();
-                readers.pop_back();
-                // Entry by entry: a subname path ((Studio, "Body1.Pad.Face1"), (C, "PadC1.Face3"))
-                // reads its last object, never its top (a container, a Body) whole (reviews
-                // props602-r1fix R1, props602-r2fix N1)
-                auto visit = [&](App::DocumentObject* obj) {
-                    if (!obj || !seen.insert(obj).second) {
-                        return;
-                    }
-                    if (auto it = laneOf.find(obj); it != laneOf.end()) {
-                        if (it->second != lane) {
-                            found.insert(obj);
-                        }
-                        return;
-                    }
-                    if (auto body = freecad_cast<Body*>(obj)) {
-                        // A whole Body (a Boolean's tool, a binder of the Body, a link to it, an
-                        // expression of its shape) reads its last solid feature, in this studio or
-                        // another (review props602-r1 T1)
-                        auto last = body->lastSolidFeature();
-                        if (!last) {
-                            return;
-                        }
-                        if (auto it = laneOf.find(last); it != laneOf.end()) {
-                            if (it->second != lane) {
-                                found.insert(last);
-                                history.wholeReads[member].insert(it->second);
-                            }
-                        }
-                        else if (seen.insert(last).second) {
-                            readers.push_back(last);
-                        }
-                        return;
-                    }
-                    // Containers (an App::Part, a group, an Origin) and origin features carry no
-                    // geometry of their own; a MultiTransform's step (no row: what it reads, its
-                    // MultiTransform reads) and any other object are read through
-                    if (!isMultiTransformStep(obj)
-                        && (obj->hasExtension(App::GroupExtension::getExtensionClassTypeId())
-                            || obj->isDerivedFrom<App::DatumElement>()
-                            || obj->isDerivedFrom<Part::BodyBase>())) {
-                        return;
-                    }
-                    readers.push_back(obj);
-                };
-                std::ranges::for_each(linkReads(reader), visit);
-            }
+            readMember(history, lane, member, linkReads(member));
         }
     }
+    const auto& deps = history.deps;
 
     // Kahn's algorithm over the lanes' heads: the smallest history key among the ready ones
     std::unordered_map<const App::DocumentObject*, std::size_t> remaining;
@@ -436,15 +465,24 @@ std::string labelOf(const App::DocumentObject* obj)
     return obj ? obj->Label.getValue() : "";
 }
 
+/// A read between Bodies that a drop breaks: reader would read read, a later member
+struct BrokenRead
+{
+    App::DocumentObject* reader = nullptr;
+    App::DocumentObject* read = nullptr;
+    /// The refusal's text; empty: nothing is broken
+    std::string text;
+};
+
 /// The first read between Bodies that order breaks and history's sequence kept (a loop's broken
-/// reads stay broken), as the refusal's text, or empty. A Body read whole is read as its last solid
+/// reads stay broken), with the refusal's text, or none. A Body read whole is read as its last solid
 /// feature in the planned Groups: the lane ownLane's rows become ownPlan (review prlocal632-r1 T1:
 /// a solid dropped below a binder of its Body became its last solid, and the list put it back)
-std::string brokenRead(const History& history,
-                       const std::vector<App::DocumentObject*>& order,
-                       const std::unordered_set<const App::DocumentObject*>& moved,
-                       std::size_t ownLane,
-                       const std::vector<App::DocumentObject*>& ownPlan)
+BrokenRead brokenRead(const History& history,
+                      const std::vector<App::DocumentObject*>& order,
+                      const std::unordered_set<const App::DocumentObject*>& moved,
+                      std::size_t ownLane,
+                      const std::vector<App::DocumentObject*>& ownPlan)
 {
     std::unordered_map<const App::DocumentObject*, std::size_t> before;
     std::unordered_map<const App::DocumentObject*, std::size_t> now;
@@ -481,14 +519,243 @@ std::string brokenRead(const History& history,
                 return labelOf(history.bodies[history.laneOf.at(obj)]);
             };
             if (moved.count(reader)) {
-                return "'" + labelOf(reader) + "' uses '" + labelOf(read) + "' of '" + bodyOf(read)
-                    + "': it can't go above it";
+                return {reader,
+                        read,
+                        "'" + labelOf(reader) + "' uses '" + labelOf(read) + "' of '" + bodyOf(read)
+                            + "': it can't go above it"};
             }
-            return "'" + labelOf(reader) + "' of '" + bodyOf(reader) + "' uses '" + labelOf(read)
-                + "': it can't go below it";
+            return {reader,
+                    read,
+                    "'" + labelOf(reader) + "' of '" + bodyOf(reader) + "' uses '" + labelOf(read)
+                        + "': it can't go below it"};
         }
     }
     return {};
+}
+
+/// a and b, two elements, lie on the same carrier: one plane, one line, one circle, one point. A
+/// face an operation trimmed keeps its plane; an element an operation generated from another (a
+/// fillet's edge from the sharp edge) doesn't share its carrier, and isn't traced back to it.
+/// Other surfaces and curves aren't compared: false
+bool sameCarrier(const TopoDS_Shape& a, const TopoDS_Shape& b)
+{
+    constexpr double tolerance = 1e-7;
+    constexpr double angular = 1e-9;
+    if (a.IsNull() || b.IsNull() || a.ShapeType() != b.ShapeType()) {
+        return false;
+    }
+    switch (a.ShapeType()) {
+        case TopAbs_FACE: {
+            BRepAdaptor_Surface sa(TopoDS::Face(a));
+            BRepAdaptor_Surface sb(TopoDS::Face(b));
+            if (sa.GetType() != GeomAbs_Plane || sb.GetType() != GeomAbs_Plane) {
+                return false;
+            }
+            gp_Pln pa = sa.Plane();
+            gp_Pln pb = sb.Plane();
+            return pa.Axis().IsParallel(pb.Axis(), angular) && pa.Distance(pb.Location()) < tolerance;
+        }
+        case TopAbs_EDGE: {
+            BRepAdaptor_Curve ca(TopoDS::Edge(a));
+            BRepAdaptor_Curve cb(TopoDS::Edge(b));
+            if (ca.GetType() == GeomAbs_Line && cb.GetType() == GeomAbs_Line) {
+                gp_Lin la = ca.Line();
+                gp_Lin lb = cb.Line();
+                return la.Direction().IsParallel(lb.Direction(), angular)
+                    && la.Distance(lb.Location()) < tolerance;
+            }
+            if (ca.GetType() == GeomAbs_Circle && cb.GetType() == GeomAbs_Circle) {
+                gp_Circ ra = ca.Circle();
+                gp_Circ rb = cb.Circle();
+                return ra.Location().Distance(rb.Location()) < tolerance
+                    && std::abs(ra.Radius() - rb.Radius()) < tolerance
+                    && ra.Axis().IsParallel(rb.Axis(), angular);
+            }
+            return false;
+        }
+        case TopAbs_VERTEX:
+            return BRep_Tool::Pnt(TopoDS::Vertex(a)).Distance(BRep_Tool::Pnt(TopoDS::Vertex(b))) < tolerance;
+        default:
+            return false;
+    }
+}
+
+/// The element of obj's shape, placed as the document shows it, or a null shape
+TopoDS_Shape elementOf(const App::DocumentObject* obj, const std::string& element)
+{
+    try {
+        auto shape = Part::Feature::getTopoShape(obj, Part::ShapeOption::ResolveLink | Part::ShapeOption::Transform);
+        return shape.isNull() ? TopoDS_Shape() : shape.getSubShape(element.c_str(), true);
+    }
+    catch (const Base::Exception&) {
+        return {};
+    }
+    catch (const Standard_Failure&) {
+        return {};
+    }
+}
+
+/// One element entry of a link property, read from another object (retraceRead())
+struct Retrace
+{
+    App::PropertyLinkBase* prop = nullptr;
+    std::size_t entry = 0;
+    App::DocumentObject* top = nullptr;
+    std::string sub;
+};
+
+/** The element entries of reader that name read, each read instead from the latest member of
+ * read's Body in earlier (the rows above reader) that its element comes from (report 16, ops#647):
+ * a sketch on a pad's top face that a fillet trimmed is on the pad's face, as Onshape traces a
+ * reference to the feature that made it. The trace is the element's own history, faces to faces
+ * (Part::Feature::getElementHistory); a member is a solid feature of that Body. Empty when an
+ * entry has no such origin, when reader reads read otherwise (a whole object, a list without
+ * subnames, an expression), or when the property keeps a re-target or a guess record on any
+ * entry: the drop is then refused as before. Only AttachmentSupport-like properties
+ * (PropertyLinkSub, PropertyLinkSubList) are rewritten
+ */
+std::vector<Retrace> retraceRead(App::DocumentObject* reader,
+                                 App::DocumentObject* read,
+                                 const std::unordered_set<const App::DocumentObject*>& earlier)
+{
+    std::vector<Retrace> plan;
+    const Body* readBody = Body::findBodyOf(read);
+    if (!readBody) {
+        return {};
+    }
+    // The element, read from read's shape, comes from: a member made before reader, where it lies
+    // on the same carrier (sameCarrier())
+    auto origin = [&](const std::string& element, std::string& found) -> App::DocumentObject* {
+        TopoDS_Shape now = elementOf(read, element);
+        for (const auto& item : Part::Feature::getElementHistory(read, element.c_str(), true, true)) {
+            if (item.obj == read || !item.obj || !earlier.count(item.obj)
+                || Body::findBodyOf(item.obj) != readBody || !Body::isSolidFeature(item.obj)) {
+                continue;
+            }
+            Data::IndexedName index = item.index;
+            if (!index) {
+                index = Part::Feature::getTopoShape(item.obj, Part::ShapeOption::NeedSubElement)
+                            .getIndexedName(item.element);
+            }
+            if (index && sameCarrier(now, elementOf(item.obj, index.toString()))) {
+                found = index.toString();
+                return item.obj;
+            }
+        }
+        return nullptr;
+    };
+    std::size_t reads = 0;
+    std::vector<App::Property*> props;
+    reader->getPropertyList(props);
+    for (auto prop : props) {
+        auto link = freecad_cast<App::PropertyLinkBase*>(prop);
+        if (!link || prop->isDerivedFrom<App::PropertyExpressionContainer>()) {
+            continue;
+        }
+        std::vector<App::DocumentObject*> objs;
+        std::vector<std::string> subs;
+        link->getLinks(objs, false, &subs, false);
+        bool single = prop->isDerivedFrom<App::PropertyLinkSub>();
+        bool list = prop->isDerivedFrom<App::PropertyLinkSubList>();
+        auto anyRecord = [](const auto& records) {
+            return std::ranges::any_of(records, [](const auto& record) { return !record.empty(); });
+        };
+        bool records = false;
+        if (auto sub = freecad_cast<App::PropertyLinkSub*>(prop)) {
+            records = anyRecord(sub->getRetargets()) || anyRecord(sub->getElementGuesses());
+        }
+        else if (auto subList = freecad_cast<App::PropertyLinkSubList*>(prop)) {
+            records = anyRecord(subList->getRetargets()) || anyRecord(subList->getElementGuesses());
+        }
+        for (std::size_t i = 0; i < subs.size() || (subs.empty() && i < objs.size()); ++i) {
+            auto top = single ? (objs.empty() ? nullptr : objs[0]) : (i < objs.size() ? objs[i] : nullptr);
+            std::string sub = i < subs.size() ? subs[i] : std::string();
+            if (!top) {
+                continue;
+            }
+            // The entry's last object, as linkReads() reads it
+            auto dot = sub.rfind('.');
+            App::DocumentObject* last = top;
+            if (dot != std::string::npos) {
+                auto path = top->getSubObjectList(sub.c_str());
+                last = !path.empty() && path.back() ? path.back() : top;
+            }
+            if (last != read) {
+                continue;
+            }
+            ++reads;
+            std::string element = dot == std::string::npos ? sub : sub.substr(dot + 1);
+            if ((!single && !list) || records || element.empty()) {
+                return {};
+            }
+            std::string index;
+            auto from = origin(element, index);
+            if (!from) {
+                return {};
+            }
+            // The same path, its last object and element replaced: (Pad, "Face3"), or
+            // (Studio, "Body.Pad.Face3") for (Studio, "Body.Fillet.Face6")
+            Retrace retrace {link, i, top, index};
+            if (dot != std::string::npos) {
+                if (dot == 0) {
+                    return {};
+                }
+                auto objDot = sub.rfind('.', dot - 1);
+                std::string prefix = objDot == std::string::npos ? std::string() : sub.substr(0, objDot + 1);
+                if (top == read) {
+                    return {};
+                }
+                retrace.sub = prefix + from->getNameInDocument() + "." + index;
+            }
+            else {
+                retrace.top = from;
+            }
+            plan.push_back(std::move(retrace));
+        }
+    }
+    // Every entry that reads read is traced, and nothing else of reader reads it directly
+    auto direct = static_cast<std::size_t>(std::ranges::count(linkReads(reader), read));
+    if (plan.size() != reads || direct != reads) {
+        return {};
+    }
+    return plan;
+}
+
+/// Writes the entries retraceRead() planned, each property once, the other entries as they are
+void writeRetraces(const std::vector<Retrace>& plan)
+{
+    std::vector<App::PropertyLinkBase*> props;
+    for (const auto& retrace : plan) {
+        if (std::ranges::find(props, retrace.prop) == props.end()) {
+            props.push_back(retrace.prop);
+        }
+    }
+    for (auto prop : props) {
+        if (auto single = freecad_cast<App::PropertyLinkSub*>(prop)) {
+            auto subs = single->getSubValues();
+            App::DocumentObject* top = single->getValue();
+            for (const auto& retrace : plan) {
+                if (retrace.prop == prop && retrace.entry < subs.size()) {
+                    top = retrace.top;
+                    subs[retrace.entry] = retrace.sub;
+                }
+            }
+            single->setValue(top, subs);
+            continue;
+        }
+        // Without shadows: every entry's is taken again from its object's shape (the other
+        // entries' unchanged, the new one's from the earlier member)
+        auto list = static_cast<App::PropertyLinkSubList*>(prop);
+        auto objs = list->getValues();
+        auto subs = list->getSubValues(false);
+        for (const auto& retrace : plan) {
+            if (retrace.prop == prop && retrace.entry < objs.size() && retrace.entry < subs.size()) {
+                objs[retrace.entry] = retrace.top;
+                subs[retrace.entry] = retrace.sub;
+            }
+        }
+        list->setValues(std::move(objs), std::move(subs));
+    }
 }
 
 /// order with the rows of moved taken out and put back, in their order, after the last other row
@@ -522,7 +789,8 @@ bool moveInStudio(App::Document* doc,
                   bool hinted,
                   App::DocumentObject* bar)
 {
-    const History history = readHistory(doc, studio);
+    // Not const: a traced read changes what its reader reads (step 3)
+    History history = readHistory(doc, studio);
     const auto& sequence = history.sequence;
     if (rows.empty()) {
         return false;
@@ -616,10 +884,50 @@ bool moveInStudio(App::Document* doc,
     std::ranges::copy_if(own, std::back_inserter(block), [&moved](auto obj) { return moved.count(obj) > 0; });
     auto order = dropped(sequence, moved, block, at);
 
-    // 3. Across Bodies: no read between them is broken
-    auto broken = brokenRead(history, order, moved, lane, lanePlan);
-    if (!broken.empty()) {
-        throw Base::ValueError(broken);
+    // 3. Across Bodies: no read between them is broken. A face, edge or vertex of a later member
+    // that an earlier one made (a pad's top face a later fillet trimmed) is read from that one
+    // instead, as Onshape traces a reference to the feature that made it (report 16, ops#647);
+    // any other broken read refuses the drop. Planned on the history, written in step 5
+    std::unordered_set<const App::DocumentObject*> earlier;
+    std::vector<Retrace> retraces;
+    std::unordered_map<App::DocumentObject*, std::vector<App::DocumentObject*>> plannedReads;
+    for (;;) {
+        auto broken = brokenRead(history, order, moved, lane, lanePlan);
+        if (broken.text.empty()) {
+            break;
+        }
+        earlier.clear();
+        for (auto obj : order) {
+            if (obj == broken.reader) {
+                break;
+            }
+            earlier.insert(obj);
+        }
+        auto plan = retraceRead(broken.reader, broken.read, earlier);
+        if (plan.empty() || std::ranges::any_of(retraces, [&broken](const Retrace& done) {
+                return done.prop->getContainer() == broken.reader;
+            })) {
+            throw Base::ValueError(broken.text);
+        }
+        // What it reads once traced: its reads with read replaced by the earlier members
+        auto& reads = plannedReads[broken.reader];
+        reads = linkReads(broken.reader);
+        for (const auto& retrace : plan) {
+            auto it = std::ranges::find(reads, broken.read);
+            if (it != reads.end()) {
+                reads.erase(it);
+            }
+            auto path = retrace.sub.find('.') == std::string::npos
+                ? std::vector<App::DocumentObject*>()
+                : retrace.top->getSubObjectList(retrace.sub.c_str());
+            reads.push_back(!path.empty() && path.back() ? path.back() : retrace.top);
+        }
+        readMember(history, history.laneOf.at(broken.reader), broken.reader, reads);
+        // Still read another way (through a datum, a spreadsheet): refused
+        if (history.deps[broken.reader].count(broken.read)) {
+            throw Base::ValueError(broken.text);
+        }
+        retraces.insert(retraces.end(), plan.begin(), plan.end());
     }
 
     // 4. The bar: the rows above it in the list as dropped (only requested rows move there)
@@ -648,7 +956,8 @@ bool moveInStudio(App::Document* doc,
         }
     }
 
-    // 5. Written: the Group, the order, the bar
+    // 5. Written: the traced reads, the Group, the order, the bar
+    writeRetraces(retraces);
     App::DocumentObject* oldTip = body->Tip.getValue();
     if (groupMoves) {
         body->reorderObject(objs, target, targetAfter);

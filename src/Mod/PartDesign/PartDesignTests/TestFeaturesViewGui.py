@@ -589,3 +589,294 @@ class TestFeaturesViewGui(unittest.TestCase):
     def testDeletePartForcedWithAnotherFirst(self):
         """The same, the binder's Body selected first (review prs464e2-r3, R3-1)."""
         self.testDeletePartForcedWithAnother(readFirst=True)
+
+    # ------------------------------------------------- the Onshape experiment (ops#640, sff13)
+
+    def watchModals(self):
+        """Closes (No) every modal box that opens from now on, and returns their texts."""
+        seen = []
+
+        def close():
+            box = QtWidgets.QApplication.activeModalWidget()
+            if isinstance(box, QtWidgets.QMessageBox):
+                seen.append(box.text())
+                box.button(QtWidgets.QMessageBox.No).click()
+            if self._watching:
+                QtCore.QTimer.singleShot(50, close)
+
+        self._watching = True
+        self.addCleanup(setattr, self, "_watching", False)
+        QtCore.QTimer.singleShot(50, close)
+        return seen
+
+    def popupAction(self, widget, pos, name):
+        """Sends a context-menu request at pos to widget (a list) and triggers the action name;
+        returns the menu's action names."""
+        names = []
+
+        def answer():
+            menu = QtWidgets.QApplication.activePopupWidget()
+            if menu is None:
+                QtCore.QTimer.singleShot(50, answer)
+                return
+            for action in menu.actions():
+                names.append(action.objectName())
+            for action in menu.actions():
+                if action.objectName() == name:
+                    action.trigger()
+            menu.close()
+
+        QtCore.QTimer.singleShot(50, answer)
+        widget.customContextMenuRequested.emit(pos)
+        pump(0.2)
+        return names
+
+    def partRect(self, label):
+        for i in range(self.parts.topLevelItemCount()):
+            item = self.parts.topLevelItem(i)
+            if item.text(0) == label:
+                return self.parts.visualItemRect(item)
+        raise AssertionError(f"no part {label}")
+
+    def item(self, label):
+        for i in range(self.list.count()):
+            if self.list.item(i).type() != BAR and self.list.item(i).text() == label:
+                return self.list.item(i)
+        raise AssertionError(f"no row {label}")
+
+    def testListsStayWhileASketchIsEdited(self):
+        """Onshape keeps its Feature list while a sketch is edited: opening a Body's sketch (the
+        Sketcher workbench) keeps the lists in place of the tree; another workbench during the
+        edit brings the tree back, and closing the sketch brings the lists again (survey 35)."""
+        tree = self.treePanel()
+        guiDoc = Gui.getDocument(self.doc.Name)
+        guiDoc.setEdit(self.skA)
+        self.assertTrue(waitFor(lambda: Gui.activeWorkbench().name() == "SketcherWorkbench"))
+        pump(0.2)
+        self.assertTrue(self.view().isVisible())
+        self.assertFalse(tree.isVisible())
+        self.assertEqual(self.rows(), self.expected)
+        Gui.activateWorkbench("PartWorkbench")
+        self.assertTrue(waitFor(lambda: tree.isVisible() and not self.view().isVisible()))
+        Gui.activateWorkbench("SketcherWorkbench")
+        self.assertTrue(waitFor(lambda: self.view().isVisible() and not tree.isVisible()))
+        guiDoc.resetEdit()
+        self.assertTrue(waitFor(lambda: Gui.activeWorkbench().name() == "PartDesignWorkbench"))
+        self.assertTrue(waitFor(lambda: self.view().isVisible() and not tree.isVisible()))
+
+    def testHeaderCounts(self):
+        """Onshape's 'Features (n)' and the Parts section's count (ref-D #14, #30)."""
+        title = self.view().findChild(QtWidgets.QLabel, "featuresTitle")
+        self.assertTrue(waitFor(lambda: title.text() == "Features (6)"))
+        self.assertEqual(self.parts.headerItem().text(0), "Parts (2)")
+        self.doc.removeObject(self.pocketB.Name)
+        self.doc.recompute()
+        self.assertTrue(waitFor(lambda: title.text() == "Features (5)"))
+
+    def testErrorRows(self):
+        """A failed row's name is red and its hover gives the message, with the failure it comes
+        from; the header's error icon counts the failed rows and, pressed, shows only them
+        (blind test F38, F45; ref-D #24)."""
+        errors = self.view().findChild(QtWidgets.QToolButton, "featuresErrors")
+        self.assertFalse(errors.isVisible())
+        normal = self.item("SkA").foreground().color()
+        # The base pad fails on its own (no length); the box on its face fails through it
+        self.padA.Length = 0
+        self.doc.recompute()
+        self.assertIn("Invalid", self.padA.State)
+        self.assertIn("Invalid", self.box.State)
+        failed = [o.Label for o in self.doc.Objects if "Invalid" in o.State and o.Label in self.expected]
+        self.assertTrue(waitFor(lambda: errors.isVisible()))
+        self.assertIn(str(len(failed)), errors.toolTip())
+        pad = self.item("PadA")
+        self.assertEqual(pad.foreground().color(), QtGui.QColor(0xD0, 0x30, 0x30))
+        self.assertNotEqual(normal, pad.foreground().color())
+        self.assertIn(self.padA.getStatusString(), pad.toolTip())
+        self.assertIn("Caused by 'PadA'", self.item("Box").toolTip())
+        self.assertNotIn("Caused by", self.item("SkA").toolTip())
+        # Pressed: only the failed rows
+        errors.click()
+        pump()
+        shown = [self.list.item(i).text() for i in range(self.list.count()) if not self.list.item(i).isHidden()]
+        self.assertEqual(sorted(shown), sorted(failed))
+        errors.click()
+        pump()
+        self.assertTrue(all(not self.list.item(i).isHidden() for i in range(self.list.count())))
+        # Repaired: the icon goes, the text is the palette's again
+        self.padA.Length = 5
+        self.doc.recompute()
+        self.assertTrue(waitFor(lambda: not errors.isVisible()))
+        self.assertEqual(self.item("PadA").foreground().color(), normal)
+
+    def rename(self, view, oldLabel, newLabel):
+        """Renames the current row of view through its F2 / Shift+N action."""
+        action = view.findChild(QtGui.QAction, "renameAction")
+        self.assertIsNotNone(action)
+        keys = [s.toString() for s in action.shortcuts()]
+        self.assertIn("F2", keys)
+        self.assertIn("Shift+N", keys)
+        action.trigger()
+        pump()
+        editor = view.viewport().findChild(QtWidgets.QLineEdit)
+        self.assertIsNotNone(editor)
+        self.assertEqual(editor.text(), oldLabel)
+        editor.setText(newLabel)
+        QTest.keyClick(editor, QtCore.Qt.Key_Return)
+        pump(0.2)
+
+    def testRenameInTheLists(self):
+        """Onshape's Rename (Shift+N, or F2 as in the tree) in both lists, one undo step each
+        (survey 36, ref-D #17)."""
+        self.list.setCurrentItem(self.item("PadA"))
+        self.item("PadA").setSelected(True)
+        undo = self.doc.UndoCount
+        self.rename(self.list, "PadA", "Base pad")
+        self.assertTrue(waitFor(lambda: self.padA.Label == "Base pad"))
+        self.assertEqual(self.doc.UndoCount, undo + 1)
+        self.assertEqual(self.doc.UndoNames[0], "Rename")
+        self.assertTrue(waitFor(lambda: "Base pad" in self.rows()))
+        # A double-click still edits the feature, it doesn't rename
+        self.assertEqual(self.list.editTriggers(), QtWidgets.QAbstractItemView.NoEditTriggers)
+        # The Parts list
+        for i in range(self.parts.topLevelItemCount()):
+            if self.parts.topLevelItem(i).text(0) == "Body2":
+                self.parts.setCurrentItem(self.parts.topLevelItem(i), 0)
+        self.rename(self.parts, "Body2", "Bracket")
+        self.assertTrue(waitFor(lambda: self.body2.Label == "Bracket"))
+        self.assertTrue(waitFor(lambda: "Bracket" in self.partRows()))
+        self.doc.undo()
+        self.doc.undo()
+        self.assertEqual((self.padA.Label, self.body2.Label), ("PadA", "Body2"))
+        self.assertTrue(waitFor(lambda: self.rows() == self.expected))
+
+    def testDeleteAsksNothing(self):
+        """Onshape deletes a feature others use without a question: they stay and fail on the
+        missing reference (ref-D #29; blind test F27, F28). A reader outside the Bodies (a
+        spreadsheet) is still asked about."""
+        seen = self.watchModals()
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.doc.Name, self.body1.Name, "SkA.")
+        Gui.runCommand("Std_Delete")
+        pump(0.3)
+        self.assertEqual(seen, [])
+        self.assertIsNone(self.doc.getObject("SkA"))
+        self.assertIn("Invalid", self.padA.State)
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertIsNotNone(self.doc.getObject("SkA"))
+        # Deleting the box under Body2's pocket: nothing breaks, nothing asked (F28)
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.doc.Name, self.body2.Name, "Box.")
+        Gui.runCommand("Std_Delete")
+        pump(0.3)
+        self.assertEqual(seen, [])
+        self.assertIsNone(self.doc.getObject("Box"))
+        self.doc.undo()
+        self.doc.recompute()
+        # A spreadsheet reading the pad: asked (answered No), nothing deleted
+        sheet = self.doc.addObject("Spreadsheet::Sheet", "Sheet")
+        sheet.set("A1", "=PadA.Length")
+        self.doc.recompute()
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.doc.Name, self.body1.Name, "PadA.")
+        Gui.runCommand("Std_Delete")
+        pump(0.3)
+        self.assertEqual(len(seen), 1)
+        self.assertIsNotNone(self.doc.getObject("PadA"))
+
+    def testFeatureMenu(self):
+        """The row menu has Onshape's Rename, Show dependencies and Zoom to; Show dependencies
+        marks the parents and children (not the base it merges with); the bar row and the empty
+        space below the rows offer Roll to end (survey 37, ref-D #16 and 3.11)."""
+        names = self.popupAction(self.list, self.rowRect("Box").center(), "featureDependencies")
+        for name in ("featureEdit", "featureRename", "featureRollTo", "featureDependencies", "featureZoom", "featureDelete"):
+            self.assertIn(name, names)
+        role = QtCore.Qt.UserRole + 1  # FeaturesView::DependencyRole
+        marks = {self.list.item(i).text(): self.list.item(i).data(role) for i in range(self.list.count()) if self.list.item(i).type() != BAR}
+        self.assertEqual(marks["PadA"], 1)  # the box sits on its face
+        self.assertEqual(marks["SkA"], 0)
+        # Pocket1: its profile is a parent, the pad it is merged with isn't
+        self.popupAction(self.list, self.rowRect("Pocket1").center(), "featureDependencies")
+        marks = {self.list.item(i).text(): self.list.item(i).data(role) for i in range(self.list.count()) if self.list.item(i).type() != BAR}
+        self.assertEqual(marks["SkB"], 1)
+        self.assertEqual(marks["PadA"], 0)
+        # SkB: two children
+        self.popupAction(self.list, self.rowRect("SkB").center(), "featureDependencies")
+        marks = {self.list.item(i).text(): self.list.item(i).data(role) for i in range(self.list.count()) if self.list.item(i).type() != BAR}
+        self.assertEqual((marks["Pocket1"], marks["PocketB"]), (2, 2))
+        # A selection change clears the marks
+        self.list.clearSelection()
+        self.item("SkA").setSelected(True)
+        pump()
+        self.assertTrue(all(not self.list.item(i).data(role) for i in range(self.list.count()) if self.list.item(i).type() != BAR))
+        # The bar row: Roll to end
+        self.dragBarAfter("PadA")
+        self.assertNotEqual(self.tips(), ["Pocket1", "PocketB"])
+        names = self.popupAction(self.list, self.barRect().center(), "featureRollToEnd")
+        self.assertEqual(names, ["featureRollToEnd"])
+        self.assertEqual(self.tips(), ["Pocket1", "PocketB"])
+
+    def testPartsListShowsOnlyExistingParts(self):
+        """Onshape lists a part only while its features make it: Body2 with its box suppressed
+        makes nothing and isn't listed (blind test F37, report 10); merged into Body1 it isn't
+        either, until the merge is undone (F26)."""
+        self.assertTrue(waitFor(lambda: self.partRows() == ["Body1", "Body2"]))
+        self.box.Suppressed = True
+        self.doc.recompute()
+        self.assertTrue(waitFor(lambda: self.partRows() == ["Body1"]), self.partRows())
+        self.box.Suppressed = False
+        self.doc.recompute()
+        self.assertTrue(waitFor(lambda: self.partRows() == ["Body1", "Body2"]))
+        self.doc.openTransaction("Merge")
+        PartDesign.makeMerge(self.pocket1, [self.body2])
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        self.assertTrue(waitFor(lambda: self.partRows() == ["Body1"]), self.partRows())
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertTrue(waitFor(lambda: self.partRows() == ["Body1", "Body2"]))
+
+    def testBarByKeyboard(self):
+        """Onshape: a click selects the bar, and Up and Down step it one row, one undo step each
+        (ref-D 3.11; survey 42)."""
+        viewport = self.list.viewport()
+        point = self.barRect().center()
+        mouse(viewport, QtCore.QEvent.MouseButtonPress, point, QtCore.Qt.LeftButton)
+        mouse(viewport, QtCore.QEvent.MouseButtonRelease, point, QtCore.Qt.NoButton)
+        pump()
+        bar = self.list.item(self.rows().index("|"))
+        self.assertTrue(bar.isSelected())
+        self.assertEqual(self.tips(), ["Pocket1", "PocketB"])
+        undo = self.doc.UndoCount
+        QTest.keyClick(self.list, QtCore.Qt.Key_Up)
+        pump(0.2)
+        self.assertTrue(waitFor(lambda: self.rows().index("|") == 5))
+        self.assertEqual(self.tips(), ["Pocket1", "Box"])
+        self.assertEqual(self.doc.UndoCount, undo + 1)
+        QTest.keyClick(self.list, QtCore.Qt.Key_Up)
+        pump(0.2)
+        self.assertTrue(waitFor(lambda: self.rows().index("|") == 4))
+        self.assertEqual(self.tips(), ["PadA", "Box"])
+        QTest.keyClick(self.list, QtCore.Qt.Key_Down)
+        QTest.keyClick(self.list, QtCore.Qt.Key_Down)
+        pump(0.2)
+        self.assertTrue(waitFor(lambda: self.rows() == self.expected))
+        self.assertEqual(self.tips(), ["Pocket1", "PocketB"])
+        # A row clicked: the bar isn't selected, the arrows move the selection again
+        point = self.rowRect("PadA").center()
+        mouse(viewport, QtCore.QEvent.MouseButtonPress, point, QtCore.Qt.LeftButton)
+        mouse(viewport, QtCore.QEvent.MouseButtonRelease, point, QtCore.Qt.NoButton)
+        pump()
+        self.assertFalse(self.list.item(self.rows().index("|")).isSelected())
+
+    def testPartsMenu(self):
+        """A right-click on a part opens Onshape's part menu; Hide other parts hides every other
+        part and nothing else (survey 38, blind test F47)."""
+        self.assertTrue(waitFor(lambda: self.partRows() == ["Body1", "Body2"]))
+        names = self.popupAction(self.parts, self.partRect("Body2").center(), "partHideOthers")
+        for name in ("partRename", "partToggleVisibility", "partIsolate", "partHideOthers", "partAppearance", "partZoom", "partDelete"):
+            self.assertIn(name, names)
+        self.assertTrue(waitFor(lambda: not self.body1.Visibility))
+        self.assertTrue(self.body2.Visibility)
+        # The right-clicked row became the selection
+        self.assertEqual([i.text(0) for i in self.parts.selectedItems()], ["Body2"])

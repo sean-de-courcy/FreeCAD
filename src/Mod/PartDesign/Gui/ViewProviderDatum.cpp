@@ -152,6 +152,14 @@ void ViewProviderDatum::attach(App::DocumentObject* obj)
     addDisplayMaskMode(sep, "Base");
 }
 
+bool ViewProviderDatum::canDelete(App::DocumentObject* obj) const
+{
+    if (obj && getObject() && PartDesign::Body::findBodyOf(getObject()) && Part::BodyBase::findBodyOf(obj)) {
+        return true;
+    }
+    return Gui::ViewProviderGeometryObject::canDelete(obj);
+}
+
 bool ViewProviderDatum::onDelete(const std::vector<std::string>&)
 {
     // TODO: Ask user what to do about dependent objects, e.g. Sketches that have this feature as
