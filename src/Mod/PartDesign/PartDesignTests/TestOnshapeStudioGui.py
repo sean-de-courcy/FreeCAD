@@ -24,8 +24,9 @@
 
 - The task box's OK and Cancel are a check and a cross, and OK is the default button: Enter in a
   feature's panel accepts it, as in Onshape.
-- Std_New in PartDesign makes a part studio: one Body, its Origin's three planes shown until its
-  first sketch. Std_New with 1 (the Start page's cards) is an empty document.
+- Std_New in PartDesign makes a part studio: one Body, its Origin's three planes shown; they stay
+  shown after its first sketch, as Onshape's default planes do (ops#626). Std_New with 1 (the
+  Start page's cards) is an empty document.
 - A new settings folder starts with the "FreeCAD-CH Onshape" preference pack; an existing user.cfg,
   and a run started with a script (the test runners), keep their settings.
 
@@ -358,7 +359,9 @@ class TestOnshapeStudioGui(unittest.TestCase):
 
     def testNewDocumentInPartDesignIsAPartStudio(self):
         """Std_New in PartDesign: one Body, active, its three planes shown, its axes and point
-        not. A cancelled first sketch leaves them shown; a sketch on the XY plane hides them."""
+        not. New Sketch with nothing selected opens a sketch with no plane in the sketch editor
+        (ops#640 rank 2, hands-on C-1: its Sketch plane field armed); the planes stay shown after
+        it and after a sketch on the selected XY plane (ops#626)."""
         doc = self.newDocument()
         bodies = [o for o in doc.Objects if o.isDerivedFrom("PartDesign::Body")]
         self.assertEqual(len(bodies), 1, [o.Name for o in doc.Objects])
@@ -367,30 +370,31 @@ class TestOnshapeStudioGui(unittest.TestCase):
         self.assertEqual(active.Name if active else None, body.Name)
         self.assertStudioPlanes(body, True)
 
-        # New Sketch with nothing selected opens the attachment dialog; Cancel removes the sketch
+        # New Sketch with nothing selected opens a sketch with no plane in the sketch editor
+        plane = models.originFeature(body, "XY_Plane")
         Gui.Selection.clearSelection()
         Gui.runCommand("PartDesign_NewSketch")
         pump(0.5)
-        self.assertTrue(Gui.Control.activeDialog(), "no attachment dialog")
-        taskButton(QtWidgets.QDialogButtonBox.Cancel).click()
-        pump(0.5)
-        self.assertFalse(Gui.Control.activeDialog())
-        self.assertEqual([o for o in body.Group if o.isDerivedFrom("Sketcher::SketchObject")], [])
+        self.assertTrue(Gui.ActiveDocument.getInEdit(), "the new sketch isn't in edit")
+        sketches = [o for o in body.Group if o.isDerivedFrom("Sketcher::SketchObject")]
+        self.assertEqual(len(sketches), 1, [o.Name for o in body.Group])
+        self.assertEqual(sketches[0].AttachmentSupport, [])
+        self.assertEqual(sketches[0].MapMode, "Deactivated")
+        self.assertStudioPlanes(body, True)
+        Gui.ActiveDocument.resetEdit()
+        pump(0.3)
         self.assertStudioPlanes(body, True)
 
-        # A sketch on the selected XY plane: the planes go
-        plane = models.originFeature(body, "XY_Plane")
+        # A sketch on the selected XY plane: the planes stay
         Gui.Selection.addSelection(doc.Name, body.Name, body.Origin.Name + "." + plane.Name + ".")
         Gui.runCommand("PartDesign_NewSketch")
         pump(0.5)
         sketches = [o for o in body.Group if o.isDerivedFrom("Sketcher::SketchObject")]
-        self.assertEqual(len(sketches), 1, [o.Name for o in body.Group])
+        self.assertEqual(len(sketches), 2, [o.Name for o in body.Group])
         if Gui.ActiveDocument.getInEdit():
             Gui.ActiveDocument.resetEdit()
             pump(0.3)
-        self.assertStudioPlanes(body, False)
-        # The cancelled attachment dialog's own temporary visibility didn't leave the Origin on
-        self.assertFalse(body.Origin.ViewObject.Visibility)
+        self.assertStudioPlanes(body, True)
 
     def testNewDocumentWithOneIsEmpty(self):
         """Std_New with 1, as the Start page's cards run it: an empty document in PartDesign too."""

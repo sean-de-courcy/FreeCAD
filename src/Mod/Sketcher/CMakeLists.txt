@@ -28,6 +28,7 @@ set(Sketcher_TestScripts
     SketcherTests/TestSketchMissingExternal.py
     SketcherTests/TestSketchExternalTypes.py
     SketcherTests/TestSketchCarbonCopyElements.py
+    SketcherTests/TestSketchCornerSteps.py
 )
 
 if(BUILD_GUI)
@@ -55,6 +56,7 @@ if(BUILD_GUI)
           SketcherTests/TestSketchModelPicksGui.py
           SketcherTests/TestSketchOnshapeGui.py
           SketcherTests/TestSketchHelpersGui.py
+          SketcherTests/TestSketchOnshapeToolsGui.py
     )
 endif(BUILD_GUI)
 

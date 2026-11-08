@@ -35,6 +35,7 @@
 #include "SketchWorkflow.h"
 #include "DlgActiveBody.h"
 #include "TaskFeaturePick.h"
+#include "TaskSketchPlane.h"
 #include "Utils.h"
 #include "ViewProviderBody.h"
 #include "WorkflowManager.h"
@@ -59,6 +60,7 @@
 #include <Gui/Command.h>
 #include <Gui/Control.h>
 #include <Gui/Document.h>
+#include <Gui/ForkKeymap.h>
 #include <Gui/MainWindow.h>
 #include <Gui/ViewParams.h>
 #include <Gui/ViewProviderPlane.h>
@@ -89,7 +91,8 @@ struct MissingPlanesException
 };
 
 // A new part studio (Std_New in PartDesign, ops#605 2f) shows its Origin's planes, through the
-// origin's temporary visibility, until its first sketch
+// origin's temporary visibility. They stay shown after the first sketch, as Onshape's default
+// planes do (ops#626, rank 52)
 Gui::ViewProviderCoordinateSystem* originViewProvider(PartDesign::Body* body)
 {
     App::DocumentObject* origin = body ? body->getOrigin() : nullptr;
@@ -110,14 +113,6 @@ void showStudioPlanes(PartDesign::Body* body)
     if (auto* vpo = originViewProvider(body)) {
         vpo->setTemporaryVisibility(Gui::DatumElement::Planes);
         vpo->setPlaneLabelVisibility(true);
-    }
-}
-
-void endStudioPlanes(PartDesign::Body* body)
-{
-    if (auto* vpo = originViewProvider(body); vpo && vpo->isTemporaryVisibility()) {
-        vpo->resetTemporaryVisibility();
-        vpo->setPlaneLabelVisibility(false);
     }
 }
 
@@ -330,7 +325,6 @@ public:
             );
         }
         Gui::Command::updateActive();
-        endStudioPlanes(activeBody);
         PartDesignGui::setEdit(Feat, activeBody);
     }
 
@@ -690,8 +684,8 @@ private:
 
     void createSketchAndShowAttachment()
     {
-        // A new part studio shows its planes until its first sketch (Std_New, ops#605 2f): a
-        // cancelled first sketch shows them again
+        // A new part studio shows its planes (Std_New, ops#605 2f): the dialog's own temporary
+        // visibility ends with it, so they are shown again after it (ops#626)
         const bool studioPlanes = studioPlanesShown(activeBody);
         setOriginTemporaryVisibility();
 
@@ -734,13 +728,18 @@ private:
         // The attachment dialog can outlive the body and sketch (e.g. they are deleted while it
         // is open), so the callbacks look them up by name instead of holding raw pointers.
         auto onAccept = [bodyRef = App::DocumentObjectT(activeBody),
-                         sketchRef = App::DocumentObjectT(sketch)]() {
+                         sketchRef = App::DocumentObjectT(sketch),
+                         studioPlanes]() {
             auto* partDesignBody = bodyRef.getObjectAs<PartDesign::Body>();
             if (!partDesignBody) {
                 return;
             }
 
             resetOriginVisibility(partDesignBody);
+            // The studio's planes stay (ops#626)
+            if (studioPlanes) {
+                showStudioPlanes(partDesignBody);
+            }
 
             Gui::Selection().clearSelection();
 
@@ -947,6 +946,48 @@ private:
     PartDesign::Body* activeBody;
 };
 
+// FreeCAD-CH (ops#640, rank 2): New Sketch with no plane to take, in Onshape's way (hands-on C-1).
+// The sketch opens with no plane, its Sketch plane field armed under a "Select a sketch plane"
+// banner, and the Body's planes shown; a sketch tool started before a pick is cancelled, so
+// nothing is drawn before the plane is picked. No attachment dialog, no list of planes.
+void createSketchToPickPlane(Gui::Document* guidocument, PartDesign::Body* activeBody)
+{
+    App::Document* appdocument = guidocument->getDocument();
+    // Undo takes the Body made for it too
+    guidocument->openCommand(QT_TRANSLATE_NOOP("Command", "New Sketch"));
+    if (!activeBody) {
+        activeBody = PartDesignGui::makeBody(appdocument);
+        if (!activeBody) {
+            guidocument->abortCommand();
+            return;
+        }
+        if (App::Part* activePart = PartDesignGui::getActivePart()) {
+            activePart->addObject(activeBody);
+        }
+    }
+    std::string FeatName = appdocument->getUniqueObjectName("Sketch");
+    FCMD_OBJ_CMD(activeBody, "newObject('Sketcher::SketchObject','" << FeatName << "')");
+    auto sketch = appdocument->getObject(FeatName.c_str());
+    if (!sketch) {
+        guidocument->abortCommand();
+        return;
+    }
+    FCMD_OBJ_CMD(sketch, "Label = 'Sketch'");
+    // No plane yet: the first pick in the Sketch plane field gives it one
+    FCMD_OBJ_CMD(
+        sketch,
+        "MapMode = '" << Attacher::AttachEngine::getModeName(Attacher::mmDeactivated) << "'"
+    );
+    Gui::Command::updateActive();
+    Gui::Selection().clearSelection();
+    PartDesignGui::setEdit(sketch, activeBody);
+    // The box shows the Body's planes for the pick, for the dialog's life when they weren't shown
+    // (a new part studio's stay shown, ops#626)
+    if (TaskSketchPlane* box = TaskSketchPlane::ofActiveDialog()) {
+        box->awaitPlane();
+    }
+}
+
 }  // namespace
 
 SketchWorkflow::SketchWorkflow(Gui::Document* document)
@@ -1035,6 +1076,15 @@ void SketchWorkflow::tryCreateSketch()
         catch (const SupportNotPlanarException&) {
             // Fall through to attachment dialog
         }
+    }
+
+    // FreeCAD-CH (ops#640, rank 2): with Onshape's keymap, anything but a single planar face or
+    // plane (nothing, a curved face, a sketch, several references) opens the sketch with no plane
+    // and its Sketch plane field armed (hands-on C-1). Shift and the preference still give the
+    // attachment dialog.
+    if (!useAttachment && !shiftHeld && Gui::ForkKeymap::isOnshape()) {
+        createSketchToPickPlane(guidocument, activeBody);
+        return;
     }
 
     SketchRequestSelection requestSelection {guidocument, activeBody};

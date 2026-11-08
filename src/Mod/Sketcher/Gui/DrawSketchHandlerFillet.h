@@ -24,6 +24,13 @@
 
 #pragma once
 
+#include <cmath>
+#include <numbers>
+
+#include <Precision.hxx>
+
+#include <App/Application.h>
+#include <Base/Tools.h>
 #include <Gui/Notifications.h>
 #include <Gui/Selection/SelectionFilter.h>
 #include <Gui/Command.h>
@@ -114,7 +121,7 @@ using DSHFilletController = DrawSketchDefaultWidgetController<
     StateMachines::TwoSeekEnd,
     /*PAutoConstraintSize =*/0,
     /*OnViewParametersT =*/OnViewParameters<0, 0>,  // NOLINT
-    /*WidgetParametersT =*/WidgetParameters<0, 0>,  // NOLINT
+    /*WidgetParametersT =*/WidgetParameters<1, 2>,  // NOLINT (FreeCAD-CH: the sizes)
     /*WidgetCheckboxesT =*/WidgetCheckboxes<1, 1>,  // NOLINT
     /*WidgetComboboxesT =*/WidgetComboboxes<1, 1>,  // NOLINT
     /*WidgetLineEditsT =*/WidgetLineEdits<0, 0>,
@@ -139,10 +146,27 @@ public:
         , vtId(-1)
         , geoId1(GeoEnum::GeoUndef)
         , geoId2(GeoEnum::GeoUndef)
-    {}
+    {
+        // FreeCAD-CH (ops#640, rank 42): the sizes last typed are the defaults
+        ParameterGrp::handle hGrp = sizesGroup();
+        filletRadius = std::max(0.0, hGrp->GetFloat("FilletRadius", defaultSize));
+        chamferDistance = std::max(0.0, hGrp->GetFloat("ChamferDistance", defaultSize));
+        chamferAngle = hGrp->GetFloat("ChamferAngle", defaultChamferAngle);
+        if (chamferAngle <= 0.0 || chamferAngle >= 180.0) {  // NOLINT
+            chamferAngle = defaultChamferAngle;
+        }
+    }
     ~DrawSketchHandlerFillet() override
     {
         Gui::Selection().rmvSelectionGate();
+    }
+
+    /// FreeCAD-CH (ops#640, rank 42): where the fillet and chamfer sizes typed are kept
+    static ParameterGrp::handle sizesGroup()
+    {
+        return App::GetApplication().GetParameterGroupByPath(
+            "User parameter:BaseApp/Preferences/Mod/Sketcher/Tools"
+        );
     }
 
 private:
@@ -163,12 +187,301 @@ private:
         }
     }
 
+    /** FreeCAD-CH (ops#640, rank 42): the corner of two lines: the point where they meet and,
+     * from it, the unit direction along each line toward the part of the line that stays.
+     */
+    struct LineCorner
+    {
+        Base::Vector3d vertex;
+        Base::Vector3d dir1;
+        Base::Vector3d dir2;
+        /// How far each line runs from the vertex along its direction: the most a fillet or a
+        /// chamfer may take of it
+        double reach1 = 0;
+        double reach2 = 0;
+        bool valid = false;
+    };
+
+    /// How far \a line runs from \a vertex along \a dir (to its farther end)
+    static double reachAlong(
+        const Part::GeomLineSegment* line,
+        const Base::Vector3d& vertex,
+        const Base::Vector3d& dir
+    )
+    {
+        return std::max((line->getStartPoint() - vertex) * dir, (line->getEndPoint() - vertex) * dir);
+    }
+
+    /// The corner at the two lines' coincident ends \a pos1 and \a pos2
+    static LineCorner cornerAtEnds(
+        const Part::GeomLineSegment* line1,
+        PointPos pos1,
+        const Part::GeomLineSegment* line2,
+        PointPos pos2
+    )
+    {
+        LineCorner corner;
+        Base::Vector3d dir1 = line1->getEndPoint() - line1->getStartPoint();
+        Base::Vector3d dir2 = line2->getEndPoint() - line2->getStartPoint();
+        if (dir1.Length() < Precision::Confusion() || dir2.Length() < Precision::Confusion()) {
+            return corner;
+        }
+        if (pos1 == PointPos::end) {
+            dir1 = -dir1;
+        }
+        if (pos2 == PointPos::end) {
+            dir2 = -dir2;
+        }
+        corner.vertex = pos1 == PointPos::end ? line1->getEndPoint() : line1->getStartPoint();
+        corner.dir1 = dir1.Normalize();
+        corner.dir2 = dir2.Normalize();
+        corner.reach1 = reachAlong(line1, corner.vertex, corner.dir1);
+        corner.reach2 = reachAlong(line2, corner.vertex, corner.dir2);
+        corner.valid = true;
+        return corner;
+    }
+
+    /// The corner where the two lines' extensions meet, on the sides of \a ref1 and \a ref2
+    static LineCorner cornerBetween(
+        const Part::GeomLineSegment* line1,
+        const Base::Vector3d& ref1,
+        const Part::GeomLineSegment* line2,
+        const Base::Vector3d& ref2
+    )
+    {
+        LineCorner corner;
+        const Base::Vector3d start1 = line1->getStartPoint();
+        const Base::Vector3d start2 = line2->getStartPoint();
+        Base::Vector3d dir1 = line1->getEndPoint() - start1;
+        Base::Vector3d dir2 = line2->getEndPoint() - start2;
+        const double cross = dir1.x * dir2.y - dir1.y * dir2.x;
+        if (std::abs(cross) <= Precision::Confusion() * dir1.Length() * dir2.Length()) {
+            return corner;  // parallel (or a line of zero length)
+        }
+        const Base::Vector3d offset = start2 - start1;
+        const double along1 = (offset.x * dir2.y - offset.y * dir2.x) / cross;
+        corner.vertex = start1 + dir1 * along1;
+        dir1.Normalize();
+        dir2.Normalize();
+        if ((ref1 - corner.vertex) * dir1 < 0) {
+            dir1 = -dir1;
+        }
+        if ((ref2 - corner.vertex) * dir2 < 0) {
+            dir2 = -dir2;
+        }
+        corner.dir1 = dir1;
+        corner.dir2 = dir2;
+        corner.reach1 = reachAlong(line1, corner.vertex, dir1);
+        corner.reach2 = reachAlong(line2, corner.vertex, dir2);
+        corner.valid = true;
+        return corner;
+    }
+
+    /** The fillet radius whose arc meets both lines at \a distance from the corner, and the
+     * distance along the second line at which a chamfer \a angleDeg off the first line meets it
+     * (in the triangle the chamfer cuts off, the corner's own angle is at the vertex and
+     * \a angleDeg at the first line). False where the angle doesn't fit the corner.
+     */
+    static bool chamferSizes(
+        const LineCorner& corner,
+        double distance,
+        double angleDeg,
+        double& radius,
+        double& secondDistance
+    )
+    {
+        const double alpha = corner.dir1.GetAngle(corner.dir2);
+        const double phi = Base::toRadians(angleDeg);
+        const double pi = std::numbers::pi;
+        if (alpha < Precision::Angular() || alpha > pi - Precision::Angular() || phi <= 0.0
+            || alpha + phi >= pi - Precision::Angular()) {
+            return false;
+        }
+        radius = distance * std::tan(alpha / 2);
+        secondDistance = distance * std::sin(phi) / std::sin(alpha + phi);
+        return true;
+    }
+
+    /** The sizes the fields give for this corner: the fillet's radius, or the chamfer's (as the
+     * radius of the fillet whose ends it joins) and, for a chamfer that isn't even, the distance
+     * along the second line (else -1). A field at 0 keeps the size from the click (upstream's).
+     * A size too large for the corner's lines keeps the size from the click too, with a message
+     * (fillet() would fail on it). False, with a message, where the chamfer's angle doesn't fit
+     * the corner.
+     */
+    bool sizesFromFields(const LineCorner& corner, bool isChamfer, double& radius, double& secondDistance)
+    {
+        secondDistance = -1;
+        if (!isChamfer) {
+            if (filletRadius <= Precision::Confusion()) {
+                return true;
+            }
+            const double alpha = corner.valid ? corner.dir1.GetAngle(corner.dir2) : 0.0;
+            // The arc meets each line at r / tan(alpha/2) from the corner
+            if (alpha > Precision::Angular()) {
+                const double tangentAt = filletRadius / std::tan(alpha / 2);
+                if (tangentAt > std::min(corner.reach1, corner.reach2) + Precision::Confusion()) {
+                    warnTooLarge(tr("Fillet"));
+                    return true;
+                }
+            }
+            radius = filletRadius;
+            return true;
+        }
+        if (chamferDistance <= Precision::Confusion() || !corner.valid) {
+            return true;
+        }
+        double chamferRadius = 0;
+        double distance2 = 0;
+        if (!chamferSizes(corner, chamferDistance, chamferAngle, chamferRadius, distance2)) {
+            Gui::TranslatedUserWarning(
+                sketchgui->getSketchObject(),
+                tr("Chamfer"),
+                tr("The chamfer's angle does not fit this corner: the angle and the corner's own "
+                   "angle must add up to less than 180 degrees.")
+            );
+            return false;
+        }
+        if (chamferDistance > corner.reach1 + Precision::Confusion()
+            || distance2 > corner.reach2 + Precision::Confusion()) {
+            warnTooLarge(tr("Chamfer"));
+            return true;
+        }
+        radius = chamferRadius;
+        if (std::abs(distance2 - chamferDistance) > Precision::Confusion()) {
+            secondDistance = distance2;
+        }
+        return true;
+    }
+
+    void warnTooLarge(const QString& caption) const
+    {
+        Gui::TranslatedUserWarning(
+            sketchgui->getSketchObject(),
+            caption,
+            tr("The size in the tool's fields is too large for the lines at this corner: the size "
+               "from the click is used.")
+        );
+    }
+
+    /// The end of \a geoId nearest \a point
+    static PointPos nearestEnd(SketchObject* obj, int geoId, const Base::Vector3d& point)
+    {
+        const double toStart = (obj->getPoint(geoId, PointPos::start) - point).Length();
+        const double toEnd = (obj->getPoint(geoId, PointPos::end) - point).Length();
+        return toStart <= toEnd ? PointPos::start : PointPos::end;
+    }
+
+    /** An uneven chamfer (FreeCAD-CH, ops#640, rank 42): fillet() made it even, at the first
+     * distance on both lines, its ends held by the construction arc. The arc goes; the chamfer
+     * line is tied to the two lines' ends, and the second line's end is moved to
+     * \a secondDistance from the corner by the solver (the chamfer's end goes with it).
+     */
+    void makeChamferUneven(
+        SketchObject* obj,
+        int arcId,
+        int chamferLineId,
+        const LineCorner& corner,
+        int line1,
+        int line2,
+        double secondDistance
+    )
+    {
+        const Base::Vector3d onFirst = corner.vertex + corner.dir1 * chamferDistance;
+        const Base::Vector3d onSecond = corner.vertex + corner.dir2 * secondDistance;
+
+        Gui::cmdAppObjectArgs(obj, "delGeometry(%d)", arcId);
+        const int chamferId = chamferLineId - 1;  // after the arc, so one down
+
+        const PointPos chamferAtFirst = nearestEnd(obj, chamferId, onFirst);
+        const PointPos chamferAtSecond = chamferAtFirst == PointPos::start ? PointPos::end
+                                                                           : PointPos::start;
+        const PointPos firstEnd = nearestEnd(obj, line1, corner.vertex);
+        const PointPos secondEnd = nearestEnd(obj, line2, corner.vertex);
+
+        Gui::cmdAppObjectArgs(
+            obj,
+            "addConstraint(Sketcher.Constraint('Coincident',%d,%d,%d,%d))",
+            line1,
+            static_cast<int>(firstEnd),
+            chamferId,
+            static_cast<int>(chamferAtFirst)
+        );
+        Gui::cmdAppObjectArgs(
+            obj,
+            "addConstraint(Sketcher.Constraint('Coincident',%d,%d,%d,%d))",
+            line2,
+            static_cast<int>(secondEnd),
+            chamferId,
+            static_cast<int>(chamferAtSecond)
+        );
+        try {
+            Gui::cmdAppObjectArgs(
+                obj,
+                "moveGeometry(%d,%d,App.Vector(%.12g,%.12g,0),0)",
+                line2,
+                static_cast<int>(secondEnd),
+                onSecond.x,
+                onSecond.y
+            );
+        }
+        catch (const Base::Exception& e) {
+            // a sketch the solver can't move: the chamfer stays even, still joined
+            Base::Console().log("Chamfer: the second distance is left to the solver (%s)\n", e.what());
+        }
+    }
+
+    /** After fillet(), inside its transaction (FreeCAD-CH, ops#640, rank 42): the fillet gets
+     * its radius dimension, as in Onshape; an uneven chamfer is made; construction lines give
+     * construction (the arc fillet() adds first is at \a highestBefore + 1, a chamfer's line is
+     * the last geometry).
+     */
+    void finishCorner(
+        SketchObject* obj,
+        int highestBefore,
+        bool isChamfer,
+        bool construction,
+        const LineCorner& corner,
+        int line1,
+        int line2,
+        double secondDistance
+    )
+    {
+        const int arcId = highestBefore + 1;
+        if (isChamfer) {
+            int chamferLineId = getHighestCurveIndex();
+            if (secondDistance > 0 && corner.valid && line1 >= 0 && line2 >= 0
+                && chamferLineId > arcId) {
+                makeChamferUneven(obj, arcId, chamferLineId, corner, line1, line2, secondDistance);
+                chamferLineId = getHighestCurveIndex();
+            }
+            if (construction) {
+                Gui::cmdAppObjectArgs(obj, "toggleConstruction(%d) ", chamferLineId);
+            }
+            return;
+        }
+
+        if (construction) {
+            Gui::cmdAppObjectArgs(obj, "toggleConstruction(%d) ", arcId);
+        }
+        const Part::Geometry* arc = obj->getGeometry(arcId);
+        if (arc && isArcOfCircle(*arc)) {
+            Gui::cmdAppObjectArgs(
+                obj,
+                "addConstraint(Sketcher.Constraint('Radius',%d,%.12g))",
+                arcId,
+                static_cast<const Part::GeomArcOfCircle*>(arc)->getRadius()
+            );
+        }
+    }
+
     void executeCommands() override
     {
         SketchObject* obj = sketchgui->getSketchObject();
 
         bool construction = false;
         bool isChamfer = constructionMethod() == ConstructionMethod::Chamfer;
+        const int highestBefore = getHighestCurveIndex();
 
         if (vtId != -1) {
             int GeoId;
@@ -178,6 +491,9 @@ private:
 
                 // guess fillet radius
                 double radius = -1;
+                LineCorner corner;
+                int line1 = GeoEnum::GeoUndef;
+                int line2 = GeoEnum::GeoUndef;
                 std::vector<int> GeoIdList;
                 std::vector<Sketcher::PointPos> PosIdList;
                 obj->getDirectlyCoincidentPoints(GeoId, PosId, GeoIdList, PosIdList);
@@ -190,10 +506,10 @@ private:
                         && GeometryFacade::getConstruction(geo2);
 
                     if (isLineSegment(*geo1) && isLineSegment(*geo2)) {
-                        auto* line1 = static_cast<const Part::GeomLineSegment*>(geo1);
-                        auto* line2 = static_cast<const Part::GeomLineSegment*>(geo2);
-                        Base::Vector3d dir1 = line1->getEndPoint() - line1->getStartPoint();
-                        Base::Vector3d dir2 = line2->getEndPoint() - line2->getStartPoint();
+                        auto* lineSeg1 = static_cast<const Part::GeomLineSegment*>(geo1);
+                        auto* lineSeg2 = static_cast<const Part::GeomLineSegment*>(geo2);
+                        Base::Vector3d dir1 = lineSeg1->getEndPoint() - lineSeg1->getStartPoint();
+                        Base::Vector3d dir2 = lineSeg2->getEndPoint() - lineSeg2->getStartPoint();
                         if (PosIdList[0] == PointPos::end) {
                             dir1 *= -1;
                         }
@@ -204,19 +520,27 @@ private:
                         double l2 = dir2.Length();
                         double angle = dir1.GetAngle(dir2);
                         radius = (l1 < l2 ? l1 : l2) * 0.2 * sin(angle / 2);
+
+                        corner = cornerAtEnds(lineSeg1, PosIdList[0], lineSeg2, PosIdList[1]);
+                        line1 = GeoIdList[0];
+                        line2 = GeoIdList[1];
                     }
                 }
                 if (radius < 0) {
                     return;
                 }
 
-                int filletGeoId = getHighestCurveIndex() + (isChamfer ? 2 : 1);
+                double secondDistance = -1;
+                if (!sizesFromFields(corner, isChamfer, radius, secondDistance)) {
+                    return;
+                }
+
                 // create fillet at point
                 try {
                     openCommand(QT_TRANSLATE_NOOP("Command", "Create fillet"));
                     Gui::cmdAppObjectArgs(
                         obj,
-                        "fillet(%d,%d,%f,%s,%s,%s)",
+                        "fillet(%d,%d,%.12g,%s,%s,%s)",
                         GeoId,
                         static_cast<int>(PosId),
                         radius,
@@ -225,9 +549,16 @@ private:
                         isChamfer ? "True" : "False"
                     );
 
-                    if (construction) {
-                        Gui::cmdAppObjectArgs(obj, "toggleConstruction(%d) ", filletGeoId);
-                    }
+                    finishCorner(
+                        obj,
+                        highestBefore,
+                        isChamfer,
+                        construction,
+                        corner,
+                        line1,
+                        line2,
+                        secondDistance
+                    );
 
                     commitCommand();
                 }
@@ -254,6 +585,7 @@ private:
                 && GeometryFacade::getConstruction(geo2);
 
             double radius = 0;
+            LineCorner corner;
 
             if (isLineSegment(*geo1) && isLineSegment(*geo2)) {
                 // guess fillet radius
@@ -265,16 +597,22 @@ private:
                 if (radius < 0) {
                     return;
                 }
+
+                corner = cornerBetween(line1, refPnt1, line2, refPnt2);
             }
 
-            int filletGeoId = getHighestCurveIndex() + (isChamfer ? 2 : 1);
+            double secondDistance = -1;
+            if (!sizesFromFields(corner, isChamfer, radius, secondDistance)) {
+                Gui::Selection().clearSelection();
+                return;
+            }
 
             // create fillet between lines
             try {
                 openCommand(QT_TRANSLATE_NOOP("Command", "Create fillet"));
                 Gui::cmdAppObjectArgs(
                     obj,
-                    "fillet(%d,%d,App.Vector(%f,%f,0),App.Vector(%f,%f,0),%f,%s,%s,%s)",
+                    "fillet(%d,%d,App.Vector(%f,%f,0),App.Vector(%f,%f,0),%.12g,%s,%s,%s)",
                     geoId1,
                     geoId2,
                     firstPos.x,
@@ -285,6 +623,16 @@ private:
                     "True",
                     preserveCorner ? "True" : "False",
                     isChamfer ? "True" : "False"
+                );
+                finishCorner(
+                    obj,
+                    highestBefore,
+                    isChamfer,
+                    construction,
+                    corner,
+                    geoId1,
+                    geoId2,
+                    secondDistance
                 );
                 commitCommand();
             }
@@ -304,13 +652,18 @@ private:
                 Gui::Selection().clearSelection();
                 abortCommand();
             }
-
-            tryAutoRecompute(obj);
-
-            if (construction) {
-                Gui::cmdAppObjectArgs(obj, "toggleConstruction(%d) ", filletGeoId);
+            catch (const Base::Exception& e) {
+                // FreeCAD-CH: the Python error fillet() raises (a radius too large for the lines)
+                Gui::NotifyUserError(
+                    obj,
+                    QT_TRANSLATE_NOOP("Notifications", "Failed to create fillet"),
+                    e.what()
+                );
+                Gui::Selection().clearSelection();
+                abortCommand();
             }
 
+            tryAutoRecompute(obj);
 
             Gui::Selection().clearSelection();
         }
@@ -426,6 +779,15 @@ private:
     int vtId, geoId1, geoId2;
     Base::Vector2d firstPos, secondPos;
 
+    // FreeCAD-CH (ops#640, rank 42): the fields' sizes (0: the size from the click, upstream's).
+    // Before a size is typed: Onshape's fillet opens at 0.25 in (hands-on C-4); in millimetres,
+    // the pack's unit, a round 5 mm [guess]; the chamfer the same, at 45 degrees.
+    static constexpr double defaultSize = 5.0;           // mm
+    static constexpr double defaultChamferAngle = 45.0;  // degrees
+    double filletRadius = defaultSize;
+    double chamferDistance = defaultSize;
+    double chamferAngle = defaultChamferAngle;  // degrees, from the first line
+
 public:
     std::list<Gui::InputHint> getToolHints() const override
     {
@@ -494,6 +856,66 @@ void DSHFilletController::configureToolWidget()
         );
     }
     syncCheckboxToHandler(WCheckbox::FirstBox, handler->preserveCorner);
+
+    // FreeCAD-CH (ops#640, rank 42): Onshape's fields, the last size typed as the default. The
+    // fillet's radius; the chamfer's distance from the corner along the first line (the first
+    // pick, or the first of a vertex's two lines) and its angle to that line, 45 degrees.
+    if (handler->constructionMethod() == ConstructionMethods::FilletConstructionMethod::Fillet) {
+        toolWidget->setParameterLabel(
+            WParameter::First,
+            QApplication::translate("TaskSketcherTool_p1_fillet", "Radius")
+        );
+        toolWidget->configureParameterUnit(WParameter::First, Base::Unit::Length);
+        toolWidget->configureParameterMin(WParameter::First, 0.0);
+        toolWidget->configureParameterInitialValue(WParameter::First, handler->filletRadius);
+    }
+    else {
+        toolWidget->setParameterLabel(
+            WParameter::First,
+            QApplication::translate("TaskSketcherTool_p1_fillet", "Distance")
+        );
+        toolWidget->configureParameterUnit(WParameter::First, Base::Unit::Length);
+        toolWidget->configureParameterMin(WParameter::First, 0.0);
+        toolWidget->configureParameterInitialValue(WParameter::First, handler->chamferDistance);
+
+        toolWidget->setParameterLabel(
+            WParameter::Second,
+            QApplication::translate("TaskSketcherTool_p2_fillet", "Angle")
+        );
+        toolWidget->configureParameterUnit(WParameter::Second, Base::Unit::Angle);
+        toolWidget->configureParameterMin(WParameter::Second, 0.0);
+        toolWidget->configureParameterMax(WParameter::Second, 180.0);  // NOLINT
+        toolWidget->configureParameterInitialValue(WParameter::Second, handler->chamferAngle);
+    }
+}
+
+template<>
+void DSHFilletController::adaptDrawingToParameterChange(int parameterindex, double value)
+{
+    // FreeCAD-CH (ops#640, rank 42): a size typed is the default from now on
+    ParameterGrp::handle hGrp = DrawSketchHandlerFillet::sizesGroup();
+    const bool isChamfer = handler->constructionMethod()
+        == ConstructionMethods::FilletConstructionMethod::Chamfer;
+    switch (parameterindex) {
+        case WParameter::First:
+            if (isChamfer) {
+                handler->chamferDistance = std::max(0.0, value);
+                hGrp->SetFloat("ChamferDistance", handler->chamferDistance);
+            }
+            else {
+                handler->filletRadius = std::max(0.0, value);
+                hGrp->SetFloat("FilletRadius", handler->filletRadius);
+            }
+            break;
+        case WParameter::Second:
+            if (isChamfer && value > 0.0 && value < 180.0) {  // NOLINT
+                handler->chamferAngle = value;
+                hGrp->SetFloat("ChamferAngle", handler->chamferAngle);
+            }
+            break;
+        default:
+            break;
+    }
 }
 
 template<>

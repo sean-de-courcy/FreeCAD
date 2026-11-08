@@ -141,6 +141,8 @@ SET(PartDesignGuiTaskDlgs_SRCS
     ReferenceActions.h
     ReferenceField.cpp
     ReferenceField.h
+    RollbackView.cpp
+    RollbackView.h
     TaskReferences.cpp
     TaskReferences.h
     TaskSketchBasedParameters.cpp
@@ -230,6 +232,8 @@ SET(PartDesignGuiModule_SRCS
     PreCompiled.h
     SketchWorkflow.cpp
     SketchWorkflow.h
+    TaskSketchPlane.cpp
+    TaskSketchPlane.h
     StyleParameters.h
     Utils.cpp
     Utils.h

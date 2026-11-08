@@ -4173,6 +4173,18 @@ protected:
         bool isInDistanceZone = ((onSketchPos.y < minY || onSketchPos.y > maxY) && (onSketchPos.x < minX || onSketchPos.x > maxX))
             || (onSketchPos.y > minY && onSketchPos.y < maxY && onSketchPos.x > minX && onSketchPos.x < maxX);
 
+        // FreeCAD-CH (ops#640, rank 43): Onshape's dimension on a single line is its aligned
+        // length wherever the cursor goes (hands-on C-2). Upstream's zones gave a sloped line's
+        // horizontal or vertical projection when the label was placed just beside it. A
+        // horizontal or vertical line keeps its DistanceX or DistanceY (that is its length). Two
+        // points keep the zones, as Onshape's two endpoints do (above or below: horizontal; left
+        // or right: vertical; across the line: aligned), so a projection comes from the two ends.
+        if (selLine.size() == 1 && selPoints.empty() && !isHorizontal && !isVertical) {
+            isInDistanceXZone = false;
+            isInDistanceYZone = false;
+            isInDistanceZone = true;
+        }
+
         if ((isHorizontal || isInDistanceXZone) && type != Sketcher::DistanceX) {
             restartCommand(QT_TRANSLATE_NOOP("Command", "Add DistanceX constraint"));
             specialConstraint = SpecialConstraint::LineOr2PointsDistance;
@@ -12382,20 +12394,21 @@ void CmdSketcherToggleDrivingConstraint::activated(int iMsg)
     }
 
     if (modeChange) {
-        // Here starts the code for mode change
-        Gui::CommandManager& rcCmdMgr = Gui::Application::Instance->commandManager();
-
-        if (constraintCreationMode == Driving) {
-            constraintCreationMode = Reference;
+        // FreeCAD-CH (ops#640, rank 46): Onshape has no driving/driven mode: "Change to driven"
+        // acts on the selected dimensions only, and a new dimension is always driving. With no
+        // constraint selected the command used to switch every later dimension to a reference,
+        // across sketches, after one stray click: now it says what to select and changes nothing.
+        Gui::Document* guiDoc = getActiveGuiDocument();
+        if (guiDoc) {
+            Gui::TranslatedUserWarning(guiDoc->getDocument(),
+                                       QObject::tr("Wrong selection"),
+                                       QObject::tr("Select the dimensions to change between "
+                                                   "driving and driven."));
         }
-        else {
-            constraintCreationMode = Driving;
-        }
-
-        rcCmdMgr.updateCommands("ToggleDrivingConstraint",
-                                static_cast<int>(constraintCreationMode));
+        return;
     }
-    else// toggle the selected constraint(s)
+
+    // toggle the selected constraint(s)
     {
         Sketcher::SketchObject* Obj =
             static_cast<Sketcher::SketchObject*>(selection[0].getObject());
