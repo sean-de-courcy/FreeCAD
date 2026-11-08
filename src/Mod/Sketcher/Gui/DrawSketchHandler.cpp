@@ -53,6 +53,7 @@
 
 #include "CommandConstraints.h"
 #include "DrawSketchHandler.h"
+#include "ModelSnap.h"  // FreeCAD-CH (ops#640, rank 18)
 #include "Utils.h"
 #include "ViewProviderSketch.h"
 
@@ -685,6 +686,50 @@ void DrawSketchHandler::seekPreselectionAutoConstraint(
             suggestedConstraints.push_back(constr);
         }
     }
+}
+
+void DrawSketchHandler::seekModelAutoConstraint(
+    std::vector<AutoConstraint>& suggestedConstraints,
+    const Base::Vector2d& Pos,
+    AutoConstraint::TargetType type
+)
+{
+    // FreeCAD-CH (ops#640, rank 18): the model vertex or edge the cursor snapped to (SnapManager),
+    // found again at the snapped position: a vertex gives Coincident, an edge Point on object. A
+    // curve passing through a model vertex gets the vertex on it; a curve on a model edge nothing
+    // (first slice)
+    auto hit = findModelSnap(sketchgui->getSketchObject(), Pos, modelSnapTolerance(*sketchgui));
+    if (!hit) {
+        return;
+    }
+    AutoConstraint constr;
+    constr.GeoId = GeoEnum::GeoUndef;
+    constr.ModelObject = hit->object;
+    constr.ModelSubName = hit->subName;
+    if (hit->isVertex) {
+        constr.PosId = PointPos::start;
+        constr.Type = type == AutoConstraint::CURVE ? Sketcher::PointOnObject : Sketcher::Coincident;
+    }
+    else if (type != AutoConstraint::CURVE) {
+        constr.PosId = PointPos::none;
+        constr.Type = Sketcher::PointOnObject;
+    }
+    else {
+        return;
+    }
+    suggestedConstraints.push_back(constr);
+}
+
+int DrawSketchHandler::resolveModelAutoConstraint(const AutoConstraint& autoConstraint)
+{
+    if (!autoConstraint.ModelObject) {
+        return autoConstraint.GeoId;
+    }
+    return linkModelSnap(
+        sketchgui->getSketchObject(),
+        autoConstraint.ModelObject,
+        autoConstraint.ModelSubName
+    );
 }
 
 double DrawSketchHandler::getAutoConstraintSearchDistance() const
@@ -1324,6 +1369,9 @@ int DrawSketchHandler::seekAutoConstraint(
     }
 
     seekPreselectionAutoConstraint(suggestedConstraints, Pos, Dir, type);
+    if (preselection.geoId == GeoEnum::GeoUndef) {
+        seekModelAutoConstraint(suggestedConstraints, Pos, type);  // FreeCAD-CH (ops#640, rank 18)
+    }
     seekLineExtensionAutoConstraint(suggestedConstraints, Pos, type);
 
     if (Dir.Length() > 1e-8 && type != AutoConstraint::CURVE) {
@@ -1349,7 +1397,12 @@ bool DrawSketchHandler::generateOneAutoConstraintFromSuggestion(
     std::vector<std::unique_ptr<Sketcher::Constraint>>& autoConstraints
 )
 {
-    int geoId2 = ac.GeoId;
+    // FreeCAD-CH (ops#640, rank 18): a model element is linked now; one that can't be gets no
+    // constraint, and the others are still made
+    int geoId2 = resolveModelAutoConstraint(ac);
+    if (geoId2 == GeoEnum::GeoUndef && ac.ModelObject) {
+        return true;
+    }
     Sketcher::PointPos posId2 = ac.PosId;
 
     static const auto isStartOrEnd = [](const Sketcher::PointPos posId) {
@@ -1737,7 +1790,11 @@ void DrawSketchHandler::createAutoConstraints(
 
     // Iterate through constraints
     for (auto& cstr : autoConstrs) {
-        int geoId2 = cstr.GeoId;
+        // FreeCAD-CH (ops#640, rank 18): a model element is linked now, in this command
+        int geoId2 = resolveModelAutoConstraint(cstr);
+        if (geoId2 == GeoEnum::GeoUndef && cstr.ModelObject) {
+            continue;
+        }
 
         switch (cstr.Type) {
             case Sketcher::Coincident: {
@@ -1751,7 +1808,7 @@ void DrawSketchHandler::createAutoConstraints(
                     "addConstraint(Sketcher.Constraint('Coincident',%d,%d,%d,%d)) ",
                     geoId1,
                     static_cast<int>(posId1),
-                    cstr.GeoId,
+                    geoId2,
                     static_cast<int>(cstr.PosId)
                 );
             } break;

@@ -160,6 +160,8 @@ SET(SketcherGui_SRCS
     SketchRectangularArrayDialog.cpp
     SketcherRegularPolygonDialog.h
     SketcherRegularPolygonDialog.cpp
+    ModelSnap.cpp
+    ModelSnap.h
     SnapManager.cpp
     SnapManager.h
     StyleParameters.h
