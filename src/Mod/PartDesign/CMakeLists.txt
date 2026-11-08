@@ -89,6 +89,10 @@ set(PartDesign_TestScripts
     PartDesignTests/TestMergeScope.py
     PartDesignTests/TestResultRules.py
     PartDesignTests/TestDatumPlanePoint.py
+    PartDesignTests/TestFlipKeepsTheSketch.py
+    PartDesignTests/TestFilletDeleteKeepsTheSketch.py
+    PartDesignTests/TestBooleanRules.py
+    PartDesignTests/TestSplitParts.py
 )
 
 if(BUILD_GUI)
@@ -120,6 +124,7 @@ if(BUILD_GUI)
         PartDesignTests/TestPickFirstGui.py
         PartDesignTests/TestEscCancelsGui.py
         PartDesignTests/TestSketchPlaneGui.py
+        PartDesignTests/TestBooleanDialogGui.py
     )
 endif(BUILD_GUI)
 

@@ -137,6 +137,12 @@ from PartDesignTests.TestSplit import TestSplit  # FreeCAD-CH, ops#325
 from PartDesignTests.TestMergeScope import TestMergeScope  # FreeCAD-CH, ops#640
 from PartDesignTests.TestResultRules import TestResultRules  # FreeCAD-CH, ops#640
 from PartDesignTests.TestDatumPlanePoint import TestDatumPlanePoint  # FreeCAD-CH, ops#640
+from PartDesignTests.TestFlipKeepsTheSketch import TestFlipKeepsTheSketch  # FreeCAD-CH, ops#640
+from PartDesignTests.TestFilletDeleteKeepsTheSketch import (  # FreeCAD-CH, ops#640
+    TestFilletDeleteKeepsTheSketch,
+)
+from PartDesignTests.TestBooleanRules import TestBooleanRules  # FreeCAD-CH, ops#640
+from PartDesignTests.TestSplitParts import TestSplitParts  # FreeCAD-CH, ops#640
 
 # The CI reopen gate (FreeCAD-CH, ops#323)
 from PartDesignTests.Compat.TestCompatCorpus import TestCompatCorpus
