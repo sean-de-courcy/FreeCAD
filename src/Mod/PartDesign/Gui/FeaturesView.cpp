@@ -1300,9 +1300,17 @@ void FeaturesView::rebuildFeatures()
         folded.push_back(isFoldedMerge(obj) || isFoldedDerived(obj));
     }
     const auto shown = static_cast<int>(std::ranges::count(folded, false));
-    // The header: the count, and the error icon while some row fails
+    App::DocumentObject* hint = barHint.empty() ? nullptr : doc->getObject(barHint.c_str());
+    bool hinted = barHinted && (barHint.empty() || hint);
+    App::DocumentObject* after = PartDesign::studioBarAfter(sequence, hinted, hint);
+    std::size_t barRow = 0;
+    if (after) {
+        barRow = static_cast<std::size_t>(std::ranges::find(sequence, after) - sequence.begin()) + 1;
+    }
+    // The header: the count, and the error icon while some row above the bar fails (the rows
+    // below it are grey, not evaluated: review R6-5)
     int errors = 0;
-    for (std::size_t i = 0; i < sequence.size(); ++i) {
+    for (std::size_t i = 0; i < sequence.size() && i < barRow; ++i) {
         errors += !folded[i] && statusObject(sequence[i])->isError() ? 1 : 0;
     }
     title->setText(tr("Features (%1)").arg(shown));
@@ -1311,13 +1319,6 @@ void FeaturesView::rebuildFeatures()
     if (errors == 0 && errorsButton->isChecked()) {
         QSignalBlocker block(errorsButton);
         errorsButton->setChecked(false);
-    }
-    App::DocumentObject* hint = barHint.empty() ? nullptr : doc->getObject(barHint.c_str());
-    bool hinted = barHinted && (barHint.empty() || hint);
-    App::DocumentObject* after = PartDesign::studioBarAfter(sequence, hinted, hint);
-    std::size_t barRow = 0;
-    if (after) {
-        barRow = static_cast<std::size_t>(std::ranges::find(sequence, after) - sequence.begin()) + 1;
     }
     // The rows in list order: a member's index in sequence, or -1 for the bar (none in an empty
     // studio)
@@ -1486,16 +1487,19 @@ void FeaturesView::applyErrorFilter()
     bool only = errorsButton->isChecked();
     const QString filter = filterBox ? filterBox->text() : QString();
     const bool filtering = only || !filter.trimmed().isEmpty();
+    // The error icon shows the failed rows above the bar, the ones it counts (review R6-5)
+    bool belowBar = false;
     for (int i = 0; i < features->count(); ++i) {
         auto item = features->item(i);
         auto obj = objectOf(item);
         if (!obj) {
             // The bar: only in the whole list
             item->setHidden(filtering);
+            belowBar = true;
             continue;
         }
         const App::DocumentObject* status = item->data(FeatureList::DefaultRole).toBool() ? obj : statusObject(obj);
-        item->setHidden((only && !status->isError()) || !matchesFilter(obj, status, filter));
+        item->setHidden((only && (belowBar || !status->isError())) || !matchesFilter(obj, status, filter));
     }
 }
 

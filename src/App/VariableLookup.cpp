@@ -181,6 +181,17 @@ std::string VariableLookup::checkVariableName(const DocumentObject* holder, cons
     return {};
 }
 
+namespace
+{
+/// The copy holding imported variables: an App::VarSetCopy still attached to its source. A
+/// detached one is a set of the document's own, a local one (review R6-6)
+const VarSetCopy* importedSet(const DocumentObject* holder)
+{
+    auto copy = freecad_cast<const VarSetCopy*>(holder);
+    return copy && copy->isAttached() ? copy : nullptr;
+}
+}  // namespace
+
 const DocumentObject* App::chosenVariableHolder(const std::vector<VariableRef>& refs)
 {
     // FreeCAD-CH (ops#640, decision 317): VariableChoice.h has the rule.
@@ -188,9 +199,9 @@ const DocumentObject* App::chosenVariableHolder(const std::vector<VariableRef>& 
         return nullptr;
     }
     std::string chosen;
-    int others = 0;  // the sets among refs that aren't copies
+    int others = 0;  // the sets among refs that aren't (attached) copies
     for (const auto& ref : refs) {
-        auto copy = freecad_cast<const VarSetCopy*>(ref.holder);
+        auto copy = importedSet(ref.holder);
         if (!copy) {
             ++others;
             continue;
@@ -210,7 +221,7 @@ const DocumentObject* App::chosenVariableHolder(const std::vector<VariableRef>& 
         if (ref.path() != chosen) {
             continue;
         }
-        const bool isCopy = freecad_cast<const VarSetCopy*>(ref.holder) != nullptr;
+        const bool isCopy = importedSet(ref.holder) != nullptr;
         // The chosen local set is the only other one; a chosen copy was chosen over one at most.
         if (isCopy ? others <= 1 : others == 1) {
             return ref.holder;

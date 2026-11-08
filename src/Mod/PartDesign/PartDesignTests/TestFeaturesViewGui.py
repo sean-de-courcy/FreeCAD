@@ -1039,6 +1039,27 @@ class TestFeaturesViewGui(unittest.TestCase):
             item = self.parts.topLevelItem(i)
             self.assertFalse(item.font(0).italic(), item.text(0))
 
+    def testErrorButtonIgnoresRowsBelowTheBar(self):
+        """Review R6-5: Pocket1 failing (no length) shows the header's error icon; rolled back
+        above it, its row is grey and the icon goes (it counts the rows above the bar only);
+        rolled to the end again, the icon is back."""
+        errors = self.view().findChild(QtWidgets.QToolButton, "featuresErrors")
+        grey = self.list.palette().color(QtGui.QPalette.Disabled, QtGui.QPalette.Text)
+        self.pocket1.Type = "Length"
+        self.pocket1.Length = 0
+        self.doc.recompute()
+        self.assertIn("Invalid", self.pocket1.State)
+        self.assertTrue(waitFor(lambda: errors.isVisible()))
+        PartDesign.rollStudioTo(self.doc, self.box)
+        self.doc.recompute()
+        self.assertTrue(waitFor(lambda: self.item("Pocket1").foreground().color() == grey))
+        self.assertIn("Invalid", self.pocket1.State)
+        self.assertTrue(waitFor(lambda: not errors.isVisible()), errors.toolTip())
+        PartDesign.rollStudioToEnd(self.doc)
+        self.doc.recompute()
+        self.assertTrue(waitFor(lambda: errors.isVisible()))
+        self.assertIn("1 feature", errors.toolTip())
+
     def testDefaultGeometryRows(self):
         """Rank 33: Onshape's default geometry at the top (Origin, Top, Front, Right): not in the
         history (a bar dropped among them is at the top), not renamed; the eye of the Top plane

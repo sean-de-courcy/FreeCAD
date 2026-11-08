@@ -128,7 +128,8 @@ def derivedStudios(doc: Document, /) -> list[Document | DocumentObject]:
     ...
 
 def studioLabel(studio: Document | DocumentObject, /) -> str:
-    """Return a studio's name: an App::Part's Label, "Part Studio 1" for a document."""
+    """Return a studio's name: an App::Part's Label, the implicit studio's label for a document
+    ("Part Studio 1" by default)."""
     ...
 
 def derivableParts(studio: Document | DocumentObject, /) -> list[DocumentObject]:

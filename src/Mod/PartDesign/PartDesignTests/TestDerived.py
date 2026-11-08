@@ -259,6 +259,118 @@ class TestDerived(unittest.TestCase):
             PartDesign.makeDerived(studio3, [self.box, self.bodyOf(lead)])
         self.assertEqual(len(self.doc.Objects), count)
 
+    def studio3(self):
+        studio = self.doc.addObject("App::Part", "Studio3")
+        studio.Label = "Part Studio 3"
+        return studio
+
+    def testDeriveBackIsRefused(self):
+        """Review R6-1: Part Studio 2 derives Box; deriving Part Studio 2's copy back into Part
+        Studio 1 is refused naming what it depends on (Onshape refuses a circular reference
+        [guess]), before anything is written."""
+        lead = self.derive(self.box)
+        copy = self.bodyOf(lead)
+        count = len(self.doc.Objects)
+        with self.assertRaises(ValueError) as caught:
+            PartDesign.makeDerived(self.doc, [copy])
+        self.assertIn("circular reference", str(caught.exception))
+        self.assertIn("Part Studio 1", str(caught.exception))
+        self.assertEqual(len(self.doc.Objects), count)
+        # Through a third studio as well: 3 derives 2's copy; 1 can't derive 3's
+        studio3 = self.studio3()
+        third = PartDesign.makeDerived(studio3, [copy])
+        self.doc.recompute()
+        count = len(self.doc.Objects)
+        with self.assertRaises(ValueError):
+            PartDesign.makeDerived(self.doc, [self.bodyOf(third)])
+        self.assertEqual(len(self.doc.Objects), count)
+        # A part of Part Studio 2 that reads nothing of Part Studio 1 is fine
+        plate, _ = boxBody(self.doc, "Plate", 5)
+        self.studio2.addObject(plate)
+        self.doc.recompute()
+        back = PartDesign.makeDerived(self.doc, [plate])
+        self.doc.recompute()
+        self.assertTrue(back.isValid(), back.getStatusString())
+
+    def testEditCannotMakeACycle(self):
+        """Review R6-1: Part Studio 2 derives Box (Derived 1); Part Studio 3 holds Z, a box whose
+        length reads Part Studio 2's copy. Editing Derived 1 to bring in Z from Part Studio 3 is
+        refused naming it (Z reads Part Studio 2), and Derived 1 is left as it was."""
+        lead = self.derive(self.box)
+        copy = self.bodyOf(lead)
+        studio3 = self.studio3()
+        z, zBox = boxBody(self.doc, "Z", 10)
+        studio3.addObject(z)
+        zBox.setExpression("Length", f"{copy.Name}.Shape.BoundBox.XLength")
+        self.doc.recompute()
+        self.assertAlmostEqual(z.Shape.Volume, 1000, places=6)
+        names = sorted(o.Name for o in self.doc.Objects)
+        with self.assertRaises(ValueError) as caught:
+            PartDesign.editDerived(lead, [z])
+        self.assertIn("circular reference", str(caught.exception))
+        self.assertIn("Z (Part Studio 3)", str(caught.exception))
+        self.assertEqual(sorted(o.Name for o in self.doc.Objects), names)
+        self.assertIs(PartDesign.derivedSource(lead), self.box)
+
+    def testStudioPlacementDoesNotMoveTheCopy(self):
+        """Review R6-2: Onshape's derived part keeps its place in its studio (the source's
+        coordinates in its own studio). Here the copy keeps the source's place in the document,
+        so studios placed differently are refused or fail naming both, never shift the copy
+        silently: Part Studio 2 at x = 100, Derived of Box is refused; with Part Studio 2 and
+        Part Studio 3 both at x = 100 the copy has the source's bounding box in its studio; Part
+        Studio 2 moved again to y = 50 after the Derived: the copy fails naming both studios, and
+        is right again once moved back."""
+        self.studio2.Placement.Base = V(100, 0, 0)
+        self.doc.recompute()
+        count = len(self.doc.Objects)
+        with self.assertRaises(ValueError) as caught:
+            PartDesign.makeDerived(self.studio2, [self.box])
+        self.assertIn("Part Studio 1 and Part Studio 2 are placed differently", str(caught.exception))
+        self.assertEqual(len(self.doc.Objects), count)
+        studio3 = self.studio3()
+        studio3.Placement.Base = V(100, 0, 0)
+        self.studio2.addObject(self.bar)
+        self.doc.recompute()
+        lead = PartDesign.makeDerived(studio3, [self.bar])
+        self.doc.recompute()
+        body = self.bodyOf(lead)
+        self.assertTrue(lead.isValid(), lead.getStatusString())
+        self.assertAlmostEqual(body.Shape.Volume, 3000, places=6)
+        sameBox(self, body.Shape.BoundBox, self.bar.Shape.BoundBox)
+        studio3.Placement.Base = V(100, 50, 0)
+        self.doc.recompute()
+        self.assertFalse(lead.isValid())
+        self.assertIn("Part Studio 2 and Part Studio 3 are placed differently", lead.getStatusString())
+        studio3.Placement.Base = V(100, 0, 0)
+        self.doc.recompute()
+        self.assertTrue(lead.isValid(), lead.getStatusString())
+        sameBox(self, body.Shape.BoundBox, self.bar.Shape.BoundBox)
+
+    def testEditKeepsTheRowsPlace(self):
+        """Review R6-4: Derived 1 of Box, then a Plate made in Part Studio 2 after it; an edit
+        that brings in Bar instead (the lead's part unticked) keeps the row "Derived 1" before the
+        Plate in the studio's history, also after a save and reopen."""
+        lead = self.derive(self.box)
+        plate, plateBox = boxBody(self.doc, "Plate", 5)
+        self.studio2.addObject(plate)
+        self.doc.recompute()
+        sequence = PartDesign.studioSequence(self.studio2)
+        self.assertLess(sequence.index(lead), sequence.index(plateBox))
+        lead = PartDesign.editDerived(lead, [self.bar])
+        self.doc.recompute()
+        self.assertEqual(lead.Label, "Derived 1")
+        self.assertIs(PartDesign.derivedSource(lead), self.bar)
+        sequence = PartDesign.studioSequence(self.studio2)
+        self.assertLess(sequence.index(lead), sequence.index(plateBox), [o.Name for o in sequence])
+        name = lead.Name
+        path = os.path.join(tempfile.mkdtemp(), "derived-edit.FCStd")
+        self.doc.saveAs(path)
+        App.closeDocument(self.doc.Name)
+        self.doc = App.openDocument(path)
+        studio2 = self.doc.getObject("Studio2")
+        sequence = PartDesign.studioSequence(studio2)
+        self.assertLess(sequence.index(self.doc.getObject(name)), sequence.index(self.doc.getObject("PlateBox")))
+
     def testTheStudios(self):
         """derivedStudios lists the top level (it has parts) and Part Studio 2 once it has one;
         derivableParts the parts; studioLabel names them."""

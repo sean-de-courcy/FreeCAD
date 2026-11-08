@@ -33,8 +33,18 @@ class FeatureBase;
 /// one, then the App::Parts that are studios, in the document's order
 PartDesignExport std::vector<App::Part*> derivedStudios(App::Document* doc);
 
-/// The studio's name: its Label, "Part Studio 1" for the document's top level
-PartDesignExport std::string studioLabel(const App::Part* studio);
+/// The name of doc's studio: its Label, the implicit studio's label for the document's top level
+/// (App::DocumentTabs::implicitLabel(), "Part Studio 1" by default)
+PartDesignExport std::string studioLabel(const App::Document* doc, const App::Part* studio);
+
+/** Why a Derived feature can't bring parts from studio from into studio to (null: the top level):
+ * the two are placed differently (their Placement and their containers'), so the copy, which keeps
+ * the source's place in the document, would not keep its place in its studio as Onshape's does
+ * (review R6-2). Empty when they are placed alike.
+ */
+PartDesignExport std::string derivedPlacementProblem(const App::Document* doc,
+                                                     const App::Part* from,
+                                                     const App::Part* to);
 
 /// The parts of studio a Derived feature can bring in: its Bodies with a shape that no Delete part
 /// deleted, in the document's order
@@ -60,14 +70,17 @@ PartDesignExport App::DocumentObject* derivedSource(const FeatureBase* member);
  * other studio of doc: per source a binder and a Body in studio, the Body labelled as its source.
  * The lead's label is "Derived N", the lowest N free in the document. A studio rolled back gets
  * the members at its bar (Body::addObject). Throws Base::ValueError, before anything is written,
- * for no source, a source that isn't a part of another studio, or sources of several studios.
+ * for no source, a source that isn't a part of another studio, sources of several studios, a
+ * source studio placed differently (derivedPlacementProblem()), or a source that depends on an
+ * object of studio (a circular reference: the studios would read each other).
  * Opens no transaction and doesn't recompute the document. Returns the lead.
  */
 PartDesignExport FeatureBase* makeDerived(App::Document* doc, App::Part* studio, const std::vector<Body*>& sources);
 
 /** Makes lead's Derived feature bring in sources instead (of any other studio): members whose
  * source stays are kept, the others removed as deleteDerivedParts() removes them, new ones made
- * for the new sources. When lead goes, the last member left becomes the lead with its label.
+ * for the new sources. When lead goes, the last member kept (else the last one made) becomes the
+ * lead with its label and its place in the studio's history (its HistoryRank).
  * Same refusals as makeDerived(). Returns the lead after the edit.
  */
 PartDesignExport FeatureBase* editDerived(FeatureBase* lead, const std::vector<Body*>& sources);

@@ -3,15 +3,22 @@
 // Onshape's Derived feature inside one document (FreeCAD-CH ops#640 round 6): Derived.h
 
 #include <algorithm>
+#include <cmath>
 #include <set>
 #include <string>
 #include <vector>
 
+#include <Precision.hxx>
+
+#include <App/Datums.h>
 #include <App/Document.h>
+#include <App/DocumentTabs.h>
 #include <App/GeoFeatureGroupExtension.h>
 #include <App/GroupExtension.h>
 #include <App/Part.h>
+#include <App/PropertyStandard.h>
 #include <Base/Exception.h>
+#include <Base/Placement.h>
 #include <Mod/Part/App/BodyBase.h>
 #include <Mod/Part/App/PartFeature.h>
 
@@ -59,6 +66,89 @@ App::Part* studioOfBody(const Body* body)
     return studio;
 }
 
+/// Whether obj is of studio's geometry: one of its Bodies, a Body's feature or origin, or, in an
+/// App::Part studio, a shape it holds outside its Bodies (a Derived feature's binder). Containers,
+/// origins and what isn't a shape (a VarSet, a sheet: usable from every studio) are of none
+bool ofStudio(const App::DocumentObject* obj, const App::Part* studio)
+{
+    if (auto body = Part::BodyBase::bodyOfObject(obj)) {
+        App::Part* part = nullptr;
+        return Part::BodyBase::studioOf(body, part) && part == studio;
+    }
+    return studio && obj->isDerivedFrom<App::GeoFeature>()
+        && !obj->hasExtension(App::GroupExtension::getExtensionClassTypeId())
+        && !obj->isDerivedFrom<App::DatumElement>() && studio->hasObject(obj, true);
+}
+
+/// Where studio lies in the document: its Placement and its containers' (the top level: none)
+Base::Placement studioPlacement(const App::Part* studio)
+{
+    Base::Placement placement;
+    std::vector<const App::DocumentObject*> seen;
+    for (const App::DocumentObject* frame = studio;
+         frame && seen.size() < 100 && std::ranges::find(seen, frame) == seen.end();
+         frame = App::GeoFeatureGroupExtension::getGroupOfObject(frame)) {
+        seen.push_back(frame);
+        if (auto geo = freecad_cast<const App::GeoFeature*>(frame)) {
+            placement = geo->Placement.getValue() * placement;
+        }
+    }
+    return placement;
+}
+
+/// Whether two placements are the same: positions within Precision::Confusion(), rotations by
+/// their quaternions within 1e-12, either sign (as FeatureBase compares a source's frame)
+bool samePlacement(const Base::Placement& a, const Base::Placement& b)
+{
+    if ((a.getPosition() - b.getPosition()).Length() > Precision::Confusion()) {
+        return false;
+    }
+    double p[4];
+    double q[4];
+    a.getRotation().getValue(p[0], p[1], p[2], p[3]);
+    b.getRotation().getValue(q[0], q[1], q[2], q[3]);
+    auto within = [&](double sign) {
+        for (int i = 0; i < 4; ++i) {
+            if (std::abs(p[i] - sign * q[i]) > 1e-12) {
+                return false;
+            }
+        }
+        return true;
+    };
+    return within(1.0) || within(-1.0);
+}
+
+constexpr const char* historyRankName = "HistoryRank";
+
+/// A member's history key, as studioSequence() reads it (Studio.cpp): its saved HistoryRank, else
+/// its object id
+double historyKey(const App::DocumentObject* obj)
+{
+    if (auto rank = freecad_cast<App::PropertyFloat*>(obj->getPropertyByName(historyRankName))) {
+        return rank->getValue();
+    }
+    return static_cast<double>(obj->getID());
+}
+
+/// Gives obj the history key key, as saveHistoryOrder() saves one (Studio.cpp)
+void setHistoryKey(App::DocumentObject* obj, double key)
+{
+    auto rank = freecad_cast<App::PropertyFloat*>(obj->getPropertyByName(historyRankName));
+    if (!rank) {
+        rank = static_cast<App::PropertyFloat*>(obj->addDynamicProperty(
+            "App::PropertyFloat",
+            historyRankName,
+            "Base",
+            "The place in its part studio's history, saved by a drag in the Features list or "
+            "an insert at the bar (ops#632)",
+            App::Prop_Output | App::Prop_Hidden
+        ));
+    }
+    if (rank->getValue() != key) {
+        rank->setValue(key);
+    }
+}
+
 /// The refusals of makeDerived() and editDerived(), before anything is written
 void checkSources(App::Document* doc, App::Part* studio, const std::vector<Body*>& sources)
 {
@@ -81,6 +171,23 @@ void checkSources(App::Document* doc, App::Part* studio, const std::vector<Body*
         from = sourceStudio;
         if (std::count(sources.begin(), sources.end(), source) > 1) {
             throw Base::ValueError("Derived: a part is chosen twice");
+        }
+    }
+    const std::string problem = derivedPlacementProblem(doc, from, studio);
+    if (!problem.empty()) {
+        throw Base::ValueError(problem);
+    }
+    // A source that reads this studio would make the two studios read each other (review R6-1;
+    // Onshape refuses a circular reference [guess])
+    for (Body* source : sources) {
+        for (App::DocumentObject* dep : source->getOutListRecursive()) {
+            if (dep && dep != source && ofStudio(dep, studio)) {
+                throw Base::ValueError(
+                    "Derived: " + derivedDescription(source) + " depends on "
+                    + dep->Label.getValue() + " of " + studioLabel(doc, studio)
+                    + ": deriving it here would make a circular reference"
+                );
+            }
         }
     }
 }
@@ -162,9 +269,19 @@ std::vector<App::Part*> derivedStudios(App::Document* doc)
     return studios;
 }
 
-std::string studioLabel(const App::Part* studio)
+std::string studioLabel(const App::Document* doc, const App::Part* studio)
 {
-    return studio ? std::string(studio->Label.getValue()) : std::string("Part Studio 1");
+    return studio ? std::string(studio->Label.getValue()) : App::DocumentTabs::implicitLabel(doc);
+}
+
+std::string derivedPlacementProblem(const App::Document* doc, const App::Part* from, const App::Part* to)
+{
+    if (from == to || samePlacement(studioPlacement(from), studioPlacement(to))) {
+        return {};
+    }
+    return "Derived: " + studioLabel(doc, from) + " and " + studioLabel(doc, to)
+        + " are placed differently (their Placement): a derived part would not keep its place in "
+          "its part studio. Give both the same Placement";
 }
 
 std::vector<Body*> derivableParts(App::Document* doc, App::Part* studio)
@@ -185,7 +302,8 @@ std::string derivedDescription(const App::DocumentObject* source)
     }
     App::Part* studio = nullptr;
     Part::BodyBase::studioOf(Part::BodyBase::bodyOfObject(source), studio);
-    return std::string(source->Label.getValue()) + " (" + studioLabel(studio) + ")";
+    return std::string(source->Label.getValue()) + " ("
+        + studioLabel(source->getDocument(), studio) + ")";
 }
 
 bool isDerived(const App::DocumentObject* obj)
@@ -296,14 +414,21 @@ FeatureBase* editDerived(FeatureBase* lead, const std::vector<Body*>& sources)
     if (dropped.empty() && kept.size() == sources.size()) {
         return lead;
     }
+    const std::size_t keptCount = kept.size();
     for (Body* source : sources) {
         if (std::ranges::find(covered, source) == covered.end()) {
             kept.push_back(addMember(doc, studio, source, label + " (" + source->Label.getValue() + ")"));
         }
     }
-    // The lead stays the lead while it keeps its part; else the last member left takes over, after
-    // the old one is gone (its label is free then)
-    FeatureBase* newLead = std::ranges::find(kept, lead) != kept.end() ? lead : kept.back();
+    // The lead stays the lead while it keeps its part; else the last member kept takes over (the
+    // last one made when none is), after the old one is gone (its label is free then), at the old
+    // one's place in the studio's history, so the feature's row doesn't move (review R6-4). The
+    // key is read after the members are made: one made at a rolled-back bar saves the order
+    FeatureBase* newLead = lead;
+    if (std::ranges::find(kept, lead) == kept.end()) {
+        newLead = keptCount > 0 ? kept[keptCount - 1] : kept.back();
+        setHistoryKey(newLead, historyKey(lead));
+    }
     std::vector<App::DocumentObject*> others;
     for (FeatureBase* member : kept) {
         if (member != newLead) {

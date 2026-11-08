@@ -733,13 +733,20 @@ def _defines(obj, name: str) -> bool:
     return name in obj.PropertiesList and _usable(name, obj.TypeId)
 
 
+def is_imported(obj) -> bool:
+    """Whether @a obj's variables are imported ones: a copy still attached to its source. A
+    detached copy (SourceKind "None") is a plain set of the document's own, a local one, as
+    App's choice of what `#name` means takes it (App/VariableChoice.h; review R6-6)."""
+    return obj.TypeId == COPY_TYPE and obj.SourceKind != DETACHED
+
+
 def local_holders(doc, name: str) -> List[str]:
-    """The paths of @a doc's variables named @a name that aren't a copy's, as `#name` finds
-    them: a plain VarSet's (a local variable) or a sheet's alias."""
+    """The paths of @a doc's variables named @a name that aren't imported, as `#name` finds
+    them: a plain VarSet's or a detached copy's (a local variable) or a sheet's alias."""
     found = []
     for obj in doc.Objects:
         if obj.isDerivedFrom("App::VarSet"):
-            if obj.TypeId != COPY_TYPE and _defines(obj, name):
+            if not is_imported(obj) and _defines(obj, name):
                 found.append(f"{obj.Name}.{name}")
         elif obj.TypeId == "Spreadsheet::Sheet" and obj.getCellFromAlias(name):
             found.append(f"{obj.Name}.{name}")
@@ -747,11 +754,12 @@ def local_holders(doc, name: str) -> List[str]:
 
 
 def copies_defining(doc, name: str, exclude: Iterable[str] = ()) -> list:
-    """The copies of @a doc (attached or detached) that define a variable @a name, but those
-    whose internal names are in @a exclude."""
+    """The attached copies of @a doc (is_imported()) that define a variable @a name, but those
+    whose internal names are in @a exclude: where the choice of what `#name` means is recorded
+    (a detached copy's variables are local ones)."""
     exclude = set(exclude)
     return [obj for obj in doc.findObjects(COPY_TYPE)
-            if obj.Name not in exclude and _defines(obj, name)]
+            if obj.Name not in exclude and is_imported(obj) and _defines(obj, name)]
 
 
 def _record(objs, name: str, path: str):

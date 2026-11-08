@@ -119,7 +119,7 @@ TaskDlgDerived::TaskDlgDerived(App::Document* doc, App::Part* studio, PartDesign
         if (fromKnown && other == from) {
             current = studios->count();
         }
-        studios->addItem(QString::fromUtf8(PartDesign::studioLabel(other).c_str()));
+        studios->addItem(QString::fromUtf8(PartDesign::studioLabel(doc, other).c_str()));
         sourceNames.emplace_back(other ? other->getNameInDocument() : "");
     }
     studios->setCurrentIndex(current);
