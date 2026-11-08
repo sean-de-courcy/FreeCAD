@@ -194,8 +194,15 @@ bool emptyOnEmpty(const Feature& feature)
     }
     // getAddSubType() only reads the type
     auto addSub = freecad_cast<const FeatureAddSub*>(&feature);
-    return addSub
-        && const_cast<FeatureAddSub*>(addSub)->getAddSubType() == FeatureAddSub::Type::Subtractive;
+    if (!addSub) {
+        return false;
+    }
+    // An Add with an empty merge scope fails "No merge scope selected" and makes no part, as
+    // Onshape's red Add adds nothing (ops#640 rank 3a, R7(a)): its part computes without it
+    if (addSub->EmptyMergeScope.getValue() && !addSub->MergeWithAll.getValue()) {
+        return true;
+    }
+    return const_cast<FeatureAddSub*>(addSub)->getAddSubType() == FeatureAddSub::Type::Subtractive;
 }
 
 void passThroughBase(Feature& feature)
