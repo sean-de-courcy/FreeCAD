@@ -26,7 +26,10 @@
 #include <algorithm>
 #include <set>
 #include <sstream>
+#include <map>
+#include <memory>
 #include <unordered_map>
+#include <unordered_set>
 
 #include <Inventor/actions/SoGetBoundingBoxAction.h>
 #include <QApplication>
@@ -58,8 +61,10 @@
 #include <Mod/PartDesign/App/FeatureBase.h>
 #include <Mod/PartDesign/App/FeatureMultiTransform.h>
 #include <Mod/PartDesign/App/ShapeBinder.h>
+#include <Mod/PartDesign/App/Studio.h>
 
 #include "ViewProviderBody.h"
+#include "RollbackView.h"
 #include "Utils.h"
 #include "ViewProvider.h"
 
@@ -108,6 +113,97 @@ constexpr const char* editLockedMessage =
 constexpr const char* dragAloneMessage =
     QT_TRANSLATE_NOOP("Exception", "Drag the feature alone, without Ctrl, to reorder it");
 
+/** FreeCAD-CH (ops#640 rank 32, lists plan 8): while member, a member of another Body of other's
+ * part studio, is edited, other is rolled back to it as Onshape rolls every part back to the
+ * feature edited: the edit roll point after other's last solid feature at or above member in the
+ * studio's history (studioSequence(), as rollStudioTo() puts the bar), or at its top the member
+ * just before its first solid feature. Null when that holds nothing its bar doesn't hold already
+ * (never forward: a held feature may not be computed), or it can't be held (other's first member
+ * is a solid feature), or other isn't in member's studio
+ */
+App::DocumentObject* studioEditPointFor(const PartDesign::Body* other, const App::DocumentObject* member)
+{
+    auto body = member ? PartDesign::Body::findBodyOf(member) : nullptr;
+    if (!other || !body || body == other || body->getDocument() != other->getDocument()) {
+        return nullptr;
+    }
+    App::Part* studio = nullptr;
+    App::Part* otherStudio = nullptr;
+    if (!Part::BodyBase::studioOf(body, studio) || !Part::BodyBase::studioOf(other, otherStudio)
+        || studio != otherStudio) {
+        return nullptr;
+    }
+    const auto sequence = PartDesign::studioSequence(body->getDocument(), studio);
+    auto at = std::ranges::find(sequence, member);
+    if (at == sequence.end()) {
+        return nullptr;
+    }
+    const std::unordered_set<const App::DocumentObject*> above(sequence.begin(), at);
+    const auto& group = other->Group.getValues();
+    auto indexOf = [&group](const App::DocumentObject* obj) {
+        return static_cast<std::size_t>(std::ranges::find(group, obj) - group.begin());
+    };
+    App::DocumentObject* point = nullptr;
+    for (auto obj : group) {
+        if (above.count(obj) && PartDesign::Body::isSolidFeature(obj)) {
+            point = obj;
+        }
+    }
+    if (point && point == other->lastSolidFeature()) {
+        return nullptr;
+    }
+    if (!point) {
+        auto first = std::ranges::find_if(group, PartDesign::Body::isSolidFeature);
+        if (first == group.begin() || first == group.end()) {
+            return nullptr;
+        }
+        point = *(first - 1);
+    }
+    // Rolled back already at or above the point: the saved bar holds as much
+    if (other->isRolledBack()) {
+        App::DocumentObject* tip = other->Tip.getValue();
+        if (!tip || indexOf(tip) <= indexOf(point)) {
+            return nullptr;
+        }
+    }
+    return point;
+}
+
+/// The scene of each Body rolled back with its studio's edit (studioEditPointFor()), by its view
+/// provider; never destroyed (a view at exit would restore view providers already gone)
+std::map<const PartDesignGui::ViewProviderBody*, std::unique_ptr<PartDesignGui::RollbackView>>& studioRollbacks()
+{
+    static auto* views =
+        new std::map<const PartDesignGui::ViewProviderBody*, std::unique_ptr<PartDesignGui::RollbackView>>();
+    return *views;
+}
+
+/// Shows body at its edit roll point in the scene (RollbackView::showBodyAt()): the point's solid,
+/// or nothing of it at its top
+void showStudioRollback(const PartDesignGui::ViewProviderBody* vpb, PartDesign::Body* body)
+{
+    App::DocumentObject* point = body->getEditRollPoint();
+    if (!point || !vpb->isShow()) {
+        studioRollbacks().erase(vpb);
+        return;
+    }
+    auto& view = studioRollbacks()[vpb];
+    if (!view) {
+        view = std::make_unique<PartDesignGui::RollbackView>();
+    }
+    view->showBodyAt(body, PartDesign::Body::isSolidFeature(point) ? point : nullptr);
+}
+
+/// A dialog of a solid feature starts in Final as its preview group's parameter says
+/// (TaskPreviewParameters, ViewProviderBody::onInEdit())
+bool editStartsFinal(const App::DocumentObject* obj)
+{
+    return PartDesign::Body::isSolidFeature(obj)
+        && App::GetApplication()
+               .GetParameterGroupByPath("User parameter:BaseApp/Preferences/Mod/PartDesign/Preview")
+               ->GetBool("ShowFinal", false);
+}
+
 }  // namespace
 
 PROPERTY_SOURCE_WITH_EXTENSIONS(PartDesignGui::ViewProviderBody, PartGui::ViewProviderPart)
@@ -122,7 +218,16 @@ ViewProviderBody::ViewProviderBody()
     Gui::ViewProviderOriginGroupExtension::initExtension(this);
 }
 
-ViewProviderBody::~ViewProviderBody() = default;
+ViewProviderBody::~ViewProviderBody()
+{
+    // A studio roll-back of this Body's scene goes with it, putting nothing back: the view
+    // providers it would restore may be gone already (ops#640 rank 32)
+    auto& views = studioRollbacks();
+    if (auto it = views.find(this); it != views.end()) {
+        static_cast<void>(it->second.release());
+        views.erase(it);
+    }
+}
 
 void ViewProviderBody::attach(App::DocumentObject* pcFeat)
 {
@@ -770,7 +875,7 @@ void ViewProviderBody::onInEdit(const Gui::ViewProviderDocumentObject& vp)
 {
     auto body = getObject<PartDesign::Body>();
     auto obj = vp.getObject();
-    if (!body || !obj || obj == body || !body->hasObject(obj)) {
+    if (!body || !obj || obj == body) {
         return;
     }
     // A dialog's edit, not a transform (forwarded to the Body) or the face colours
@@ -781,20 +886,50 @@ void ViewProviderBody::onInEdit(const Gui::ViewProviderDocumentObject& vp)
     if (mode != Gui::ViewProvider::Default) {
         return;
     }
+    if (!body->hasObject(obj)) {
+        // FreeCAD-CH (ops#640 rank 32, lists plan 8): a member of another Body of this Body's
+        // part studio is edited; this Body rolls back to it too, unless the dialog starts in Final
+        if (!editStartsFinal(obj)) {
+            if (auto point = studioEditPointFor(body, obj)) {
+                setEditRoll(point);
+                showStudioRollback(this, body);
+            }
+        }
+        return;
+    }
     editedMember = obj;
     // A feature's dialog starts with its preview group's "Show final result" as this parameter
     // says (TaskPreviewParameters)
-    editFinal = PartDesign::Body::isSolidFeature(obj)
-        && App::GetApplication()
-               .GetParameterGroupByPath("User parameter:BaseApp/Preferences/Mod/PartDesign/Preview")
-               ->GetBool("ShowFinal", false);
+    editFinal = editStartsFinal(obj);
     setEditRoll(editFinal ? finalPointFor(obj) : editRollPointFor(body, obj));
 }
 
 void ViewProviderBody::onResetEdit(const Gui::ViewProviderDocumentObject& vp)
 {
     auto body = getObject<PartDesign::Body>();
-    if (!body || !editedMember || vp.getObject() != editedMember) {
+    if (!body) {
+        return;
+    }
+    // Rolled back with another Body's edit (ops#640 rank 32): only this Body has an edit roll
+    // point without a member of its own in edit
+    if (!editedMember && body->getEditRollPoint()) {
+        studioRollbacks().erase(this);
+        setEditRoll(nullptr);
+        App::Document* doc = body->getDocument();
+        if (!doc || doc->isPerformingTransaction() || doc->testStatus(App::Document::Recomputing)
+            || doc->testStatus(App::Document::Restoring) || body->isRemoving()) {
+            return;
+        }
+        // What was held and touched computes now, as for the edited Body below
+        auto touched = [](const App::DocumentObject* obj) {
+            return obj->isTouched() || obj->mustRecompute();
+        };
+        if (touched(body) || std::ranges::any_of(body->Group.getValues(), touched)) {
+            recomputeReporting(doc);
+        }
+        return;
+    }
+    if (!editedMember || vp.getObject() != editedMember) {
         return;
     }
     App::DocumentObject* member = editedMember;
@@ -832,6 +967,22 @@ void ViewProviderBody::setEditFinal(App::DocumentObject* member, bool final)
     }
     vpb->editFinal = final;
     vpb->setEditRoll(final ? vpb->finalPointFor(member) : editRollPointFor(body, member));
+    // The studio's other Bodies follow (ops#640 rank 32): Final shows every part's end result,
+    // and leaving it rolls them back to member again
+    App::Part* studio = nullptr;
+    if (Part::BodyBase::studioOf(body, studio)) {
+        for (auto other : PartDesign::studioBodies(body->getDocument(), studio)) {
+            auto ovpb = other == body ? nullptr
+                                      : freecad_cast<ViewProviderBody*>(
+                                            Gui::Application::Instance->getViewProvider(other)
+                                        );
+            if (!ovpb || ovpb->editedMember) {
+                continue;
+            }
+            ovpb->setEditRoll(final ? nullptr : studioEditPointFor(other, member));
+            showStudioRollback(ovpb, other);
+        }
+    }
     if (!final || body->getEditRollPoint()) {
         return;
     }
