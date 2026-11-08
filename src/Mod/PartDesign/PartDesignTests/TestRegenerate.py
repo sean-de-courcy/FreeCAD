@@ -612,12 +612,14 @@ class TestPatternWithoutOriginals(unittest.TestCase):
         self.assertFailsOnTheBase(self.hole, 4000 - self.HOLE)
 
     def testNewPatternWithoutOriginalsStaysOut(self):
-        """A pattern just made, nothing picked yet (no BaseFeature): out of the chain and not in
-        error, the Body unchanged (ops#579/590's exemption, unchanged)."""
+        """A pattern just made, nothing picked yet (no BaseFeature): out of the chain, red in
+        Onshape's words as Onshape shows an empty pattern (the hub's rule for the first build:
+        ops#579/590's exemption from the error went), the Body unchanged."""
         fresh = self.body.newObject("PartDesign::LinearPattern", "Fresh")
         self.doc.recompute()
         self.assertIsNone(fresh.BaseFeature)
-        self.assertTrue(fresh.isValid(), fresh.getStatusString())
+        self.assertFalse(fresh.isValid(), "the empty pattern stays valid")
+        self.assertIn("Select features to pattern", fresh.getStatusString())
         self.assertTrue(self.body.isValid(), self.body.getStatusString())
         self.assertAlmostEqual(self.body.Shape.Volume, 4000 - 3 * self.HOLE, delta=1e-4)
 
