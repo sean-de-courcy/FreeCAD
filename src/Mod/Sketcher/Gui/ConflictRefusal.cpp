@@ -50,8 +50,9 @@ using namespace SketcherGui;
 namespace
 {
 
-/// a line or arc shorter than this (sketch units) has collapsed
-constexpr double collapsedSize = 1e-6;
+/// a line or arc shorter than this (sketch units) has collapsed. The solver stops near zero, not
+/// at it: two Horizontal lines 10 long made Perpendicular end about 8e-5 long
+constexpr double collapsedSize = 1e-3;
 
 struct Pending
 {
