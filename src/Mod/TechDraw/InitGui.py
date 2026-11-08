@@ -59,6 +59,12 @@ class TechDrawWorkbench(Workbench):
 
 Gui.addWorkbench(TechDrawWorkbench())
 
+# FreeCAD-CH (ops#640, rank 62): Create drawing, callable by name from any workbench
+try:
+    import TechDrawCreateDrawing  # noqa: F401
+except ImportError as err:
+    FreeCAD.Console.PrintError("TechDraw_CreateDrawing cannot be loaded. {}\n".format(err))
+
 # Append the export handler
 FreeCAD.addExportType("Technical Drawing (*.svg *.dxf *.pdf)", "TechDrawGui")
 
