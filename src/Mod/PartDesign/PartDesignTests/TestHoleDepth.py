@@ -50,6 +50,13 @@ class TestHoleDepth(unittest.TestCase):
         hole.Tapered = False
         return hole
 
+    def tool(self, hole):
+        """The hole's tool (AddSubShape) in the body's frame: the property holds it in the
+        hole's own frame, which is its base feature's Placement (positionByPrevious)."""
+        shape = hole.AddSubShape.copy()
+        shape.Placement = hole.Placement.multiply(shape.Placement)
+        return shape.BoundBox
+
     def removed(self, hole, before):
         self.assertTrue(hole.isValid(), hole.getStatusString())
         return before - hole.Shape.Volume
@@ -84,8 +91,8 @@ class TestHoleDepth(unittest.TestCase):
         hole.Depth = 4
         self.doc.recompute()
         self.assertAlmostEqual(self.removed(hole, 1000), math.pi * 4, delta=TOL)
-        self.assertAlmostEqual(hole.AddSubShape.BoundBox.ZMin, 3, delta=TOL)
-        self.assertAlmostEqual(hole.AddSubShape.BoundBox.ZMax, 7, delta=TOL)
+        self.assertAlmostEqual(self.tool(hole).ZMin, 3, delta=TOL)
+        self.assertAlmostEqual(self.tool(hole).ZMax, 7, delta=TOL)
         hole.StartType = "Profile plane"
         self.doc.recompute()
         self.assertAlmostEqual(self.removed(hole, 1000), math.pi * 1, delta=TOL)
@@ -98,8 +105,8 @@ class TestHoleDepth(unittest.TestCase):
         hole.Depth = 4
         self.doc.recompute()
         self.assertAlmostEqual(self.removed(hole, 1000), math.pi * 4, delta=TOL)
-        self.assertAlmostEqual(hole.AddSubShape.BoundBox.ZMin, 0, delta=TOL)
-        self.assertAlmostEqual(hole.AddSubShape.BoundBox.ZMax, 4, delta=TOL)
+        self.assertAlmostEqual(self.tool(hole).ZMin, 0, delta=TOL)
+        self.assertAlmostEqual(self.tool(hole).ZMax, 4, delta=TOL)
 
     def testStartFromPartNeverBehindThePlane(self):
         """The hole Reversed: from the sketch on the box's bottom face it runs down, away from the
@@ -113,8 +120,8 @@ class TestHoleDepth(unittest.TestCase):
             return
         self.assertAlmostEqual(hole.Shape.Volume, 1000, delta=TOL)
         # the tool runs -4..0, below the box
-        self.assertAlmostEqual(hole.AddSubShape.BoundBox.ZMax, 0, delta=TOL)
-        self.assertAlmostEqual(hole.AddSubShape.BoundBox.ZMin, -4, delta=TOL)
+        self.assertAlmostEqual(self.tool(hole).ZMax, 0, delta=TOL)
+        self.assertAlmostEqual(self.tool(hole).ZMin, -4, delta=TOL)
 
     def slot(self):
         """A slot through the box along x, y 3..7, z 3..6: the hole's axis crosses material 0..3,
@@ -158,7 +165,7 @@ class TestHoleDepth(unittest.TestCase):
         hole.UpToFace = (plane, [""])
         self.doc.recompute()
         self.assertAlmostEqual(self.removed(hole, 1000), math.pi * 7, delta=TOL)
-        self.assertAlmostEqual(hole.AddSubShape.BoundBox.ZMax, 7, delta=TOL)
+        self.assertAlmostEqual(self.tool(hole).ZMax, 7, delta=TOL)
 
     def testUpToEntityFace(self):
         """Up to the slot's ceiling (z = 6), a face of the solid before."""
@@ -175,7 +182,7 @@ class TestHoleDepth(unittest.TestCase):
         self.doc.recompute()
         # 0..6: material 0..3, the slot's air 3..6
         self.assertAlmostEqual(self.removed(hole, 880), math.pi * 3, delta=TOL)
-        self.assertAlmostEqual(hole.AddSubShape.BoundBox.ZMax, 6, delta=TOL)
+        self.assertAlmostEqual(self.tool(hole).ZMax, 6, delta=TOL)
 
     def testUpToEntityNeedsOne(self):
         """Up to entity with nothing picked: red, with the message."""

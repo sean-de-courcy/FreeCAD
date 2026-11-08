@@ -86,9 +86,9 @@ class TestBooleanRules(unittest.TestCase):
         self.assertIsNone(PartDesign.consumerOf(tool))
         self.assertAlmostEqual(tool.Shape.Volume, 1000, places=6)
         # SeparateTools is written during the compute, as an output: the Boolean is left clean
-        self.assertFalse(fuse.isTouched())
+        self.assertNotIn("Touched", fuse.State)
         self.doc.recompute()
-        self.assertFalse(fuse.isTouched())
+        self.assertNotIn("Touched", fuse.State)
         self.assertEqual(fuse.SeparateTools, [tool])
 
     def testAUnionFusesWhatTouchesThroughAnotherTool(self):
