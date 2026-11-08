@@ -1915,6 +1915,27 @@ void FeaturesView::onPartMenu(const QPoint& pos)
     appearance->setObjectName(QStringLiteral("partAppearance"));
     auto fit = menu.addAction(tr("Zoom to selection"), [runByName]() { runByName("Std_ViewFitSelection"); });
     fit->setObjectName(QStringLiteral("partZoom"));
+    // Onshape's Create drawing of <part> (ops#640 rank 62): TechDraw's command, registered at the
+    // GUI's start, draws the one selected object, so the part is selected alone first
+    menu.addSeparator();
+    const std::string partName = obj->getNameInDocument();
+    auto drawing = menu.addAction(
+        tr("Create drawing of %1...").arg(QString::fromUtf8(obj->Label.getValue())),
+        [self, partName, runByName]() {
+            auto doc = self ? self->document() : nullptr;
+            auto part = doc ? doc->getObject(partName.c_str()) : nullptr;
+            if (!part) {
+                return;
+            }
+            self->pushSelection({part});
+            runByName("TechDraw_CreateDrawing");
+        }
+    );
+    drawing->setObjectName(QStringLiteral("partCreateDrawing"));
+    drawing->setEnabled(
+        Gui::Application::Instance->commandManager().getCommandByName("TechDraw_CreateDrawing")
+        != nullptr
+    );
     menu.addSeparator();
     // A Body's delete is a Delete part feature at the bar (ops#635)
     auto remove = menu.addAction(tr("Delete"), [runByName]() { runByName("Std_Delete"); });

@@ -3031,7 +3031,11 @@ void CmdPartDesignLinearPattern::activated(int iMsg)
                         << Gui::Command::getObjectCmd(pcActiveBody->getOrigin()->getY()) << ",[''])"
                 );
             }
-            FCMD_OBJ_CMD(Feat, "Length = 100");
+            // Onshape's defaults (ops#640 rank 8, B3-6): Distance is the spacing between
+            // neighbouring instances, so a count change keeps it; count 2; Centered and Skip off
+            // (the properties' defaults)
+            FCMD_OBJ_CMD(Feat, "Mode = 'Spacing'");
+            FCMD_OBJ_CMD(Feat, "Offset = 25");
             FCMD_OBJ_CMD(Feat, "Occurrences = 2");
 
             finishTransformed(cmd, Feat);
@@ -3093,8 +3097,11 @@ void CmdPartDesignPolarPattern::activated(int iMsg)
             );
         }
 
+        // Onshape's defaults (ops#640 rank 8, B3-6): 360 deg, count 4, Equal spacing on
+        // (Extent), Centered and Skip off
+        FCMD_OBJ_CMD(Feat, "Mode = 'Extent'");
         FCMD_OBJ_CMD(Feat, "Angle = 360");
-        FCMD_OBJ_CMD(Feat, "Occurrences = 2");
+        FCMD_OBJ_CMD(Feat, "Occurrences = 4");
 
         finishTransformed(cmd, Feat);
     };

@@ -22,6 +22,8 @@
  ***************************************************************************/
 
 
+# include <cctype>
+# include <cstring>
 # include <sstream>
 # include <QFile>
 
@@ -86,6 +88,15 @@ void DrawSVGTemplate::onChanged(const App::Property* prop)
         if (getTemplateDocument(PageResult.getValue(), templateDocument)) {
             extractTemplateAttributes(templateDocument);
         }
+        // The pages on this template take its projection (rank 11)
+        if (const char* angle = projectionAngle()) {
+            for (App::DocumentObject* parent : getInList()) {
+                auto* page = freecad_cast<DrawPage*>(parent);
+                if (page && page->Template.getValue() == this) {
+                    page->ProjectionType.setValue(angle);
+                }
+            }
+        }
     }
 
     TechDraw::DrawTemplate::onChanged(prop);
@@ -116,6 +127,39 @@ void DrawSVGTemplate::slotDeletedObject(const App::DocumentObject& obj)
         return;
     }
     EditableTexts.touch();
+}
+
+const char* DrawSVGTemplate::projectionAngle() const
+{
+    // A standard's name where a word starts (after a separator or a digit, not inside a word:
+    // PROVISION is not ISO); ISO also not followed by a letter (ISOMETRIC), ANSI may be (ANSIA)
+    auto names = [](const std::string& name, const char* key, bool wholeWord) {
+        const std::size_t length = std::strlen(key);
+        for (std::size_t at = name.find(key); at != std::string::npos; at = name.find(key, at + 1)) {
+            const bool starts = at == 0 || !std::isalpha(static_cast<unsigned char>(name[at - 1]));
+            const bool ends = !wholeWord || at + length == name.size()
+                || !std::isalpha(static_cast<unsigned char>(name[at + length]));
+            if (starts && ends) {
+                return true;
+            }
+        }
+        return false;
+    };
+    // The file name first (ISO_A4.svg, ANSIA_Landscape.svg), then its folder (Templates/ISO,
+    // Templates/ASME)
+    Base::FileInfo file(Template.getValue());
+    for (std::string name : {file.fileNamePure(), Base::FileInfo(file.dirPath()).fileName()}) {
+        for (char& c : name) {
+            c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        }
+        if (names(name, "ISO", true)) {
+            return "First angle";
+        }
+        if (names(name, "ANSI", false) || names(name, "ASME", false)) {
+            return "Third angle";
+        }
+    }
+    return nullptr;
 }
 
 //parse the Svg code, inserting current EditableTexts values, and return the result as a QString.

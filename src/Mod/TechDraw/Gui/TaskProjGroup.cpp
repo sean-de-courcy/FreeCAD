@@ -135,7 +135,8 @@ void TaskProjGroup::initializeUi()
         ui->sbXSpacing->setValue(multiView->spacingX.getValue());
         ui->sbYSpacing->setValue(multiView->spacingY.getValue());
     } else {
-        ui->projection->setCurrentIndex(Preferences::projectionAngle());
+        // a new group follows its page (and so its template, rank 11)
+        ui->projection->setCurrentIndex((int)DrawProjGroup::ViewProjectionConvention::Page);
         ui->cbAutoDistribute->setChecked(Preferences::groupAutoDistribute());
         ui->sbXSpacing->setValue(Preferences::groupSpaceX());
         ui->sbYSpacing->setValue(Preferences::groupSpaceY());
@@ -320,7 +321,7 @@ void TaskProjGroup::turnViewToProjGroup()
     multiView->Y.setValue(viewPart->Y.getValue());
     multiView->Scale.setValue(viewPart->Scale.getValue());
     multiView->ScaleType.setValue(viewPart->ScaleType.getValue());
-    multiView->ProjectionType.setValue(Preferences::projectionAngle());
+    multiView->ProjectionType.setValue((long)DrawProjGroup::ViewProjectionConvention::Page);
 
     multiView->addView(viewPart);
     multiView->Anchor.setValue(viewPart);
@@ -682,7 +683,8 @@ bool TaskProjGroup::useThirdAngle()
     }
 
    if (!multiView) {
-        return Preferences::projectionAngle();
+        // the group to come follows its page (rank 11)
+        return page->ProjectionType.getValue() == (long)DrawPage::PageProjectionConvention::ThirdAngle;
     }
 
     if (multiView->ProjectionType.getValue() == (long)DrawProjGroup::ViewProjectionConvention::ThirdAngle) {

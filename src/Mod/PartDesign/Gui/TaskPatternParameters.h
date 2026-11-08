@@ -79,6 +79,8 @@ private:
     void updateSpacingLabels();
 
     void bindProperties();
+    /// Onshape's Centered and Skip instances fields (FreeCAD-CH ops#640 rank 8)
+    void addOnshapeOptions(QWidget* widget);
 
     // Task-specific logic remains
     void showOriginAxes(bool show);

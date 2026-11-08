@@ -33,7 +33,8 @@ Designed models, each built by the test:
 - Disc: a circle r 5 at the origin padded 10: a cylinder, 250 pi. Its side face is curved, its
   top (z = 10) is planar; a Pad of the top face, 10 long, makes the cylinder 20 high: 500 pi.
 - Cube: a 10 x 10 x 10 additive box at the origin. Mirrored in the XY plane it adds the box
-  z -10..0: 2000. A linear pattern along X, 100 long, 2 occurrences, adds a copy at x 100: 2000.
+  z -10..0: 2000. A new linear pattern along X (spacing 25, 2 occurrences) adds a copy at x 25,
+  kept since the cube is a part of its own: 2000.
 """
 
 import math
@@ -372,7 +373,7 @@ class TestPickFirstGui(unittest.TestCase):
 
     def testLinearPatternWithNothingSelectedArmsItsFeatures(self):
         """Linear pattern with nothing selected: Features mode, its Features field armed. The
-        cube picked: a copy at x 100, 2000."""
+        cube picked: a copy at x 25, 2000."""
         self.cube()
         self.runTool("PartDesign_LinearPattern")
         pattern = self.only("PartDesign::LinearPattern")

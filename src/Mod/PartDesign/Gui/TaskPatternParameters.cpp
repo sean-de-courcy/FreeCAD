@@ -22,7 +22,10 @@
  *                                                                            *
  ******************************************************************************/
 
+#include <QCheckBox>
+#include <QLineEdit>
 #include <QMessageBox>
+#include <QRegularExpression>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <Bnd_Box.hxx>
@@ -64,6 +67,49 @@
 
 using namespace PartDesignGui;
 using namespace Gui;
+
+namespace
+{
+
+/// The Python list SkippedInstances is written with from the "Instances to skip" field's text:
+/// its whole numbers in order ("(1, 0), (2, 0)" gives [1, 0, 2, 0]); for a linear pattern only
+/// whole pairs (FreeCAD-CH ops#640 rank 8)
+std::string skippedPython(const QString& text, bool pairs)
+{
+    std::vector<long> values;
+    static const QRegularExpression number(QStringLiteral("-?\\d+"));
+    auto it = number.globalMatch(text);
+    while (it.hasNext()) {
+        values.push_back(it.next().captured().toLong());
+    }
+    if (pairs && values.size() % 2 != 0) {
+        values.pop_back();
+    }
+    std::string list = "[";
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        list += (i ? ", " : "") + std::to_string(values[i]);
+    }
+    return list + "]";
+}
+
+/// The field's text for SkippedInstances: "(1, 0), (2, 0)" for pairs, "1, 2" otherwise
+QString skippedText(const std::vector<long>& values, bool pairs)
+{
+    QStringList items;
+    if (pairs) {
+        for (std::size_t i = 0; i + 1 < values.size(); i += 2) {
+            items << QStringLiteral("(%1, %2)").arg(values[i]).arg(values[i + 1]);
+        }
+    }
+    else {
+        for (long value : values) {
+            items << QString::number(value);
+        }
+    }
+    return items.join(QStringLiteral(", "));
+}
+
+}  // namespace
 
 /* TRANSLATOR PartDesignGui::TaskPatternParameters */
 
@@ -150,6 +196,7 @@ void TaskPatternParameters::setupParameterUI(QWidget* widget)
     }
 
     bindProperties();
+    addOnshapeOptions(widget);
 
     // --- Task Specific Setup ---
     showOriginAxes(true);  // Show origin helper axes
@@ -158,6 +205,79 @@ void TaskPatternParameters::setupParameterUI(QWidget* widget)
     updateViewTimer->setSingleShot(true);
     updateViewTimer->setInterval(getUpdateViewTimeout());
     connect(updateViewTimer, &QTimer::timeout, this, &TaskPatternParameters::onUpdateViewTimer);
+}
+
+void TaskPatternParameters::addOnshapeOptions(QWidget* widget)
+{
+    // FreeCAD-CH (ops#640 rank 8, B3-6, E-1): Onshape's Centered and Skip instances. Skip is a
+    // list field ("Instances to skip", Onshape's (i, j) pairs for a linear pattern), not yet a
+    // click on an instance's marker
+    auto pattern = getObject();
+    auto centeredProp = pattern
+        ? freecad_cast<App::PropertyBool*>(pattern->getPropertyByName("Centered"))
+        : nullptr;
+    auto skippedProp = pattern
+        ? freecad_cast<App::PropertyIntegerList*>(pattern->getPropertyByName("SkippedInstances"))
+        : nullptr;
+    if (!centeredProp || !skippedProp) {
+        return;
+    }
+    const bool pairs = pattern->isDerivedFrom<PartDesign::LinearPattern>();
+
+    auto* centered = new QCheckBox(tr("Centered"), widget);
+    centered->setObjectName(QStringLiteral("checkCentered"));
+    centered->setChecked(centeredProp->getValue());
+    ui->verticalLayout->insertWidget(1, centered);
+    connect(centered, &QCheckBox::toggled, this, [this](bool on) {
+        if (blockUpdate || !getObject()) {
+            return;
+        }
+        setupTransaction();
+        FCMD_OBJ_CMD(getObject(), "Centered = " << (on ? "True" : "False"));
+        kickUpdateViewTimer();
+    });
+    // A MultiTransform's step: the MultiTransform makes the instances and skips none of a step's,
+    // so a step offers no Skip
+    if (getTopTransformedObject() != pattern) {
+        return;
+    }
+
+    auto* skip = new QCheckBox(tr("Skip instances"), widget);
+    skip->setObjectName(QStringLiteral("checkSkip"));
+    auto* skipped = new QLineEdit(widget);
+    skipped->setObjectName(QStringLiteral("editSkipped"));
+    skipped->setPlaceholderText(
+        pairs ? tr("Instances to skip, e.g. (1, 0), (2, 0)") : tr("Instances to skip, e.g. 1, 2")
+    );
+    skipped->setText(skippedText(skippedProp->getValues(), pairs));
+    skip->setChecked(!skippedProp->getValues().empty());
+    skipped->setVisible(skip->isChecked());
+    ui->verticalLayout->addWidget(skip);
+    ui->verticalLayout->addWidget(skipped);
+
+    connect(skip, &QCheckBox::toggled, this, [this, skipped](bool on) {
+        skipped->setVisible(on);
+        if (on) {
+            skipped->setFocus();
+            return;
+        }
+        // Off, nothing is skipped
+        skipped->clear();
+        if (blockUpdate || !getObject()) {
+            return;
+        }
+        setupTransaction();
+        FCMD_OBJ_CMD(getObject(), "SkippedInstances = []");
+        kickUpdateViewTimer();
+    });
+    connect(skipped, &QLineEdit::editingFinished, this, [this, skipped, pairs]() {
+        if (blockUpdate || !getObject()) {
+            return;
+        }
+        setupTransaction();
+        FCMD_OBJ_CMD(getObject(), "SkippedInstances = " << skippedPython(skipped->text(), pairs));
+        kickUpdateViewTimer();
+    });
 }
 
 void TaskPatternParameters::bindProperties()
@@ -239,11 +359,23 @@ void TaskPatternParameters::showOriginAxes(bool show)
             auto vpOrigin = static_cast<ViewProviderCoordinateSystem*>(
                 Gui::Application::Instance->getViewProvider(origin)
             );
+            // FreeCAD-CH (ops#640, rank 52): a new part studio's planes are shown through the same
+            // temporary visibility; they stay shown with the axes, and after the dialog
             if (show) {
-                vpOrigin->setTemporaryVisibility(Gui::DatumElement::Axes);
+                const bool studioPlanes = vpOrigin->isTemporaryVisibility();
+                setProperty("studioPlanes", studioPlanes);
+                Gui::DatumElements elements(Gui::DatumElement::Axes);
+                if (studioPlanes) {
+                    elements.setFlag(Gui::DatumElement::Planes);
+                }
+                vpOrigin->setTemporaryVisibility(elements);
             }
             else {
                 vpOrigin->resetTemporaryVisibility();
+                if (property("studioPlanes").toBool()) {
+                    vpOrigin->setTemporaryVisibility(Gui::DatumElement::Planes);
+                    vpOrigin->setPlaneLabelVisibility(true);
+                }
             }
         }
         catch (const Base::Exception& ex) {
@@ -265,9 +397,14 @@ void TaskPatternParameters::enterReferenceSelectionMode()
     bool isPolar = getObject<PartDesign::PolarPattern>();
 
     AllowSelectionFlags commonReferences = AllowSelection::EDGE | AllowSelection::PLANAR;
-    addReferenceSelectionGate(
-        commonReferences | (isPolar ? AllowSelection::CIRCLE : AllowSelection::FACE)
-    );
+    if (isPolar) {
+        addReferenceSelectionGate(commonReferences | AllowSelection::CIRCLE);
+    }
+    else {
+        // A straight edge, a planar face (its normal) or a cylindrical face (its axis), as
+        // Onshape's Direction takes them (FreeCAD-CH ops#640 rank 27, E-2)
+        addDirectionSelectionGate(commonReferences | AllowSelection::FACE);
+    }
     Gui::getMainWindow()->showMessage(
         tr("Select a direction reference (edge, face, datum line)")
     );  // User feedback
@@ -447,6 +584,17 @@ void TaskPatternParameters::apply()
         parametersWidget2->applyQuantitySpinboxes();
 
         FCMD_OBJ_CMD(pattern, "SpacingPattern2 = " << parametersWidget2->getSpacingPatternsAsString());
+    }
+
+    // The instances to skip, as typed (ops#640 rank 8)
+    if (auto skipped = findChild<QLineEdit*>(QStringLiteral("editSkipped"))) {
+        auto skippedProp = freecad_cast<App::PropertyIntegerList*>(
+            pattern->getPropertyByName("SkippedInstances")
+        );
+        const std::string list = skippedPython(skipped->text(), isLinear);
+        if (skippedProp && list != skippedPython(skippedText(skippedProp->getValues(), isLinear), isLinear)) {
+            FCMD_OBJ_CMD(pattern, "SkippedInstances = " << list);
+        }
     }
 
     // The user may have changed a value and immediately hit 'OK' or Enter.

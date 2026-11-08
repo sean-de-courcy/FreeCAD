@@ -96,6 +96,7 @@
 #include <Mod/PartDesign/App/Body.h>
 #include <Mod/PartDesign/App/FeatureAddSub.h>
 #include <Mod/PartDesign/App/FeatureExtrude.h>
+#include <Mod/PartDesign/App/FeatureHole.h>
 #include <Mod/PartDesign/App/FeatureRevolved.h>
 #include <Mod/PartDesign/App/FeatureSketchBased.h>
 #include <Mod/PartDesign/App/ShapeBinder.h>
@@ -1458,8 +1459,12 @@ App::DocumentObject* ReferenceField::featureOfElement(App::DocumentObject* shape
         if (!role.starts_with("UpTo")) {
             return true;  // a loft's or pipe's Sections, a pipe's Spine
         }
-        // Read by a pad, pocket, revolution or groove only (a hole or pipe has the properties
-        // too); the second side's in two sides only, and a revolution or groove reads no shape
+        // A hole reads its up-to face in Up to entity only (ops#640 rank 23)
+        if (obj->isDerivedFrom<PartDesign::Hole>()) {
+            return role == "UpToFace" && is("DepthType", "UpToFace");
+        }
+        // Read by a pad, pocket, revolution or groove only (a pipe has the properties too); the
+        // second side's in two sides only, and a revolution or groove reads no shape
         const bool revolved = obj->isDerivedFrom<PartDesign::Revolved>();
         if (!revolved && !obj->isDerivedFrom<PartDesign::FeatureExtrude>()) {
             return false;

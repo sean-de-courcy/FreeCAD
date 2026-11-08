@@ -102,6 +102,15 @@ public:
         return {};
     }
 
+    /** The positions in the list getTransformations() returned whose instances are not made:
+     * Onshape's Skip instances (FreeCAD-CH ops#640 rank 8). Never 0, the original. The others
+     * keep their instance numbers. None by default. Valid after getTransformations().
+     */
+    virtual std::vector<std::size_t> getSkippedPositions() const
+    {
+        return {};
+    }
+
     /** @name methods override feature */
     //@{
     /** Recalculate the feature
@@ -140,6 +149,26 @@ protected:
 
     virtual void positionBySupport();
     static TopoDS_Shape getRemainingSolids(const TopoDS_Shape&);
+
+    /** Onshape's Centered (FreeCAD-CH ops#640 rank 8) on a list of rows x columns transformations
+     * (position = row * columns + column; the original at 0): with centerRows, the instances run
+     * both ways from the original along the rows' step, the original the middle one (with an even
+     * count, one more on the positive side); centerColumns the same along the columns' step. The
+     * original stays at position 0: the rows (columns) at index 0 and at the middle swap places.
+     */
+    static std::list<gp_Trsf> centerInstances(
+        const std::list<gp_Trsf>& transformations,
+        int rows,
+        int columns,
+        bool centerRows,
+        bool centerColumns
+    );
+    /// The index the row (column) at geometric index k has in centerInstances()'s list, middle
+    /// being the original's geometric index: 0 and middle swap
+    static int centeredIndex(int k, int middle)
+    {
+        return k == middle ? 0 : (k == 0 ? middle : k);
+    }
 
 private:
 };
