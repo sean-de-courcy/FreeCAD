@@ -13,6 +13,11 @@
 - Rank 24 (F2), with regeneration round 1 merged (Document.isStepLocked): another tool started
   with a dialog open commits it when it has any input, even in error, and drops an empty one.
 - Rank 52: a new part studio's planes stay shown after the primitive and feature-pick dialogs.
+- Round 6 (the journeys' small items): under the Onshape keymap a new part is "Part N", the lowest
+  N free (J22); the operation row reads New / Add / Remove / Intersect, its part in the tooltip,
+  in a box on top of the Extrude dialog, which takes the feature's name as its title (J2, J9); a
+  preview failure's status message goes with its dialog (J2); no "Start Part" box in the Tasks
+  panel under the Onshape keymap (J2); a pattern's dialog title is its name, red in error (J16).
 
 Designed geometry: the Enclosure 40 x 40 x 10 at the origin (16000) with its lid sketch (30 x 30 on
 its top; a pad's default length is 10: 9000 more), and a part "Panel" 20 x 20 x 10 at x 60..80
@@ -88,7 +93,7 @@ class TestOpeningOperationGui(DialogFlowCase):
         bodies = self.bodyNames()
         lid = self.newPad(self.lidSk)
         self.assertIs(lid.getParentGeoFeatureGroup(), self.body)
-        self.assertEqual(self.combo().currentText(), "Add to Enclosure")
+        self.assertEqual(self.combo().currentText(), "Add")
         self.close(ok=True)
         self.assertEqual(self.newBodies(bodies), [])
         self.assertAlmostEqual(self.body.Shape.Volume, LID, places=3)
@@ -103,7 +108,7 @@ class TestOpeningOperationGui(DialogFlowCase):
         made = self.newPad(planeSk)
         self.assertIs(made.getParentGeoFeatureGroup(), self.panel)
         self.assertIs(planeSk.getParentGeoFeatureGroup(), self.panel)
-        self.assertEqual(self.combo().currentText(), "Add to Panel")
+        self.assertEqual(self.combo().currentText(), "Add")
         self.close(ok=True)
         self.assertEqual(self.newBodies(bodies), [])
         self.assertTrue(made.isValid(), made.getStatusString())
@@ -119,7 +124,7 @@ class TestOpeningOperationGui(DialogFlowCase):
         made = self.newPad(planeSk)
         [part] = self.newBodies(bodies)
         self.assertIs(made.getParentGeoFeatureGroup(), part)
-        self.assertEqual(self.combo().currentText(), "New part")
+        self.assertEqual(self.combo().currentText(), "New")
         self.close(ok=True)
         self.assertAlmostEqual(part.Shape.Volume, 4000, places=3)
         self.assertAlmostEqual(self.body.Shape.Volume, ENCLOSURE, places=3)
@@ -133,7 +138,7 @@ class TestOpeningOperationGui(DialogFlowCase):
         made = self.newPad(planeSk)
         [part] = self.newBodies(bodies)
         self.assertIs(made.getParentGeoFeatureGroup(), part)
-        self.assertEqual(self.combo().currentText(), "New part")
+        self.assertEqual(self.combo().currentText(), "New")
         self.close(ok=True)
         self.assertAlmostEqual(part.Shape.Volume, 1000, places=3)
         self.assertAlmostEqual(self.body.Shape.Volume, ENCLOSURE, places=3)
@@ -171,7 +176,7 @@ class TestOpeningOperationGui(DialogFlowCase):
         self.waitForPanel()
         self.assertTrue(
             waitFor(lambda: self.combo() is not None
-                    and self.combo().currentText() == "Add to Panel"),
+                    and self.combo().currentText() == "Add"),
             "the edit didn't restart on the moved pad",
         )
         self.close(ok=True)
@@ -324,6 +329,144 @@ class TestAnotherToolGui(DialogFlowCase):
         self.assertIsNotNone(self.doc.getObject(lid.Name))
         self.assertTrue(lid.isValid(), lid.getStatusString())
         self.assertAlmostEqual(lid.Shape.Volume, LID, places=3)
+
+
+KEYMAP = "User parameter:BaseApp/Preferences/General"  # the preference Keymap (ForkKeymap)
+PREVIEW_FAILURE = "Failure while computing removed volume preview: Resulting shape is empty."
+
+
+class TestRound6PolishGui(DialogFlowCase):
+    """Round 6: the journeys' small open items (ops#640)."""
+
+    def setKeymap(self, name):
+        group = App.ParamGet(KEYMAP)
+        saved = group.GetString("Keymap") if "Keymap" in group.GetStrings() else None
+        if name is None:
+            group.RemString("Keymap")
+        else:
+            group.SetString("Keymap", name)
+        pump(0.1)
+        return saved
+
+    def newBody(self):
+        """PartDesign_Body with nothing selected; the new Body."""
+        before = self.bodyNames()
+        Gui.Selection.clearSelection()
+        Gui.runCommand("PartDesign_Body")
+        pump(0.3)
+        [made] = self.newBodies(before)
+        return made
+
+    def testNewPartsAreNamedPartN(self):
+        """J22: the Body command makes "Part 1", then "Part 2"; a pad touching nothing, New,
+        makes "Part 3" (the lowest N free); with "Part 1" renamed, the next one is "Part 1"
+        again. FreeCAD's keymap keeps "Body"."""
+        self.enclosure()
+        self.assertEqual(self.newBody().Label, "Part 1")
+        second = self.newBody()
+        self.assertEqual(second.Label, "Part 2")
+        planeSk = self.planeSketch((100, 0, 110, 10))
+        bodies = self.bodyNames()
+        self.newPad(planeSk)
+        [part] = self.newBodies(bodies)
+        self.assertEqual(part.Label, "Part 3")
+        self.close(ok=True)
+        self.assertEqual(part.Label, "Part 3")
+        [first] = [o for o in self.doc.Objects if o.Label == "Part 1"]
+        first.Label = "Bracket"
+        self.assertEqual(self.newBody().Label, "Part 1")
+        saved = self.setKeymap("FreeCAD")
+        try:
+            self.assertEqual(self.newBody().Label, "Body")
+        finally:
+            self.setKeymap(saved)
+
+    def testTheOperationRowReadsOnshapesWordsOnTop(self):
+        """J2/J9: the lid pad's and the lid pocket's operation rows read New, Add, Remove,
+        Intersect, the part they act on in the tooltips; the row is in the first box, above the
+        length field, and that box's title is the feature's name."""
+        self.enclosure()
+        for command in ("PartDesign_Pad", "PartDesign_Pocket"):
+            before = {o.Name for o in self.doc.Objects}
+            self.runCommand(command, self.lidSk)
+            [feature] = [o for o in self.doc.Objects if o.Name not in before]
+            combo = self.combo()
+            self.assertIsNotNone(combo, command)
+            self.assertEqual(self.items(combo), ["New", "Add", "Remove", "Intersect"], command)
+            self.assertEqual(combo.itemData(1, QtCore.Qt.ToolTipRole), "Add to Enclosure")
+            self.assertEqual(combo.itemData(2, QtCore.Qt.ToolTipRole), "Remove from Enclosure")
+            self.assertEqual(combo.itemData(3, QtCore.Qt.ToolTipRole), "Intersect with Enclosure")
+            length = self.visible(QtWidgets.QWidget, "lengthEdit")
+            self.assertIsNotNone(length, command)
+            top = lambda w: w.mapToGlobal(QtCore.QPoint(0, 0)).y()
+            self.assertLess(top(combo), top(length), command)
+            title = self.titleButton(feature)
+            self.assertIsNotNone(title, command)
+            self.assertLess(top(title), top(combo), command)
+            self.close(ok=False)
+
+    def testAPreviewFailureMessageGoesWithItsDialog(self):
+        """J2: the preview failure's warning, which the status bar shows as the feature's
+        preview gives it (a translated user warning), is cleared when its dialog closes."""
+        self.enclosure()
+        bar = Gui.getMainWindow().statusBar()
+        self.runCommand("PartDesign_Pad", self.lidSk)
+        # A status shown in the last 5 s holds the bar (MainWindow::showStatus): its timeout's end
+        QtCore.QMetaObject.invokeMethod(Gui.getMainWindow(), "clearStatus")
+        App.Console.PrintTranslatedUserWarning("Preview", PREVIEW_FAILURE + "\n")
+        self.assertTrue(
+            waitFor(lambda: bar.currentMessage().startswith(PREVIEW_FAILURE[:40])),
+            bar.currentMessage(),
+        )
+        pump(0.3)
+        self.assertTrue(bar.currentMessage().startswith(PREVIEW_FAILURE[:40]), "it went by itself")
+        self.close(ok=False)
+        pump(0.2)
+        self.assertEqual(bar.currentMessage(), "")
+
+    def startPartShown(self):
+        Gui.Selection.addSelection(self.doc.Name, self.body.Name)
+        pump(0.2)
+        Gui.Selection.clearSelection()
+        pump(0.3)
+        return any(
+            b.isVisible() and b.text() == "Start Part"
+            for b in Gui.getMainWindow().findChildren(QtWidgets.QToolButton)
+        )
+
+    def testNoStartPartBoxUnderTheOnshapeKeymap(self):
+        """J2: after a dialog, nothing selected, the Tasks panel has no "Start Part" box under
+        the Onshape keymap; FreeCAD's keymap keeps it."""
+        self.enclosure()
+        self.runCommand("PartDesign_Pad", self.lidSk)
+        self.close(ok=False)
+        Gui.Control.showTaskView()
+        self.assertFalse(self.startPartShown())
+        saved = self.setKeymap("FreeCAD")
+        try:
+            self.assertTrue(self.startPartShown())
+        finally:
+            self.setKeymap(saved)
+        self.assertFalse(self.startPartShown())
+
+    def testThePatternDialogsTitleIsItsNameRedInError(self):
+        """J16 N1: a pattern of the base pad: its dialog's title is its name, not red; a pattern
+        with nothing to pattern: its name, red."""
+        self.enclosure()
+        before = {o.Name for o in self.doc.Objects}
+        self.runCommand("PartDesign_LinearPattern", self.base)
+        [pattern] = [o for o in self.doc.Objects if o.Name not in before]
+        self.assertTrue(waitFor(lambda: self.titleButton(pattern) is not None), "no title")
+        self.assertFalse(self.titleButton(pattern).property("featureInError"))
+        self.close(ok=True)
+        before = {o.Name for o in self.doc.Objects}
+        self.runCommand("PartDesign_LinearPattern")
+        [empty] = [o for o in self.doc.Objects if o.Name not in before]
+        self.assertTrue(waitFor(lambda: self.titleButton(empty) is not None), "no title")
+        self.assertTrue(
+            waitFor(lambda: bool(self.titleButton(empty).property("featureInError"))),
+            "the title of a pattern in error isn't red",
+        )
 
 
 class TestStudioPlanesStayGui(unittest.TestCase):

@@ -145,7 +145,7 @@ class TestMergeScopeGui(ResultBoxGuiCase):
         self.parts()
         farPad = self.doc.getObject("FarPad")
         self.openEdit(farPad)
-        self.assertEqual(self.combo().currentText(), "New part")
+        self.assertEqual(self.combo().currentText(), "New")
         self.choose("Add")
         self.assertTrue(farPad.EmptyMergeScope)
         self.assertFalse(farPad.isValid())
@@ -186,7 +186,7 @@ class TestMergeScopeGui(ResultBoxGuiCase):
         right = self.part("Right", (40, 0, 80, 40), 0)
         panelPad = self.doc.getObject("PanelPad")
         self.openEdit(panelPad)
-        self.assertEqual(self.combo().currentText(), "New part")
+        self.assertEqual(self.combo().currentText(), "New")
         self.assertEqual(self.items(self.combo())[1], "Add")
         self.choose("Add")
         self.assertFalse(panelPad.isValid())
@@ -211,7 +211,7 @@ class TestMergeScopeGui(ResultBoxGuiCase):
         rows.item(names.index("Enclosure")).setCheckState(QtCore.Qt.Checked)
         self.assertTrue(
             waitFor(lambda: self.combo() is not None
-                    and self.combo().currentText() == "Add to Enclosure"),
+                    and self.combo().currentText() == "Add"),
             "the edit doesn't restart in the enclosure",
         )
         self.waitForPanel()

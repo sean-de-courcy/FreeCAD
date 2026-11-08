@@ -172,6 +172,9 @@ public:
         /// or a hole's positions (circles, arcs, points) has no regions to make, and the menu
         /// and messages speak of edges or positions.
         ProfileUse use = ProfileUse::Profile;
+        /// SingleElement: an element reads in Onshape's words, "Face of Pad", not "Pad:Face6"
+        /// (the Sketch plane field, ops#640 round 6).
+        bool elementWords = false;
     };
     /// Writes the property: the target and the subs, in the stored style.
     using Writer =

@@ -222,6 +222,11 @@ class TestSketchPlaneGui(unittest.TestCase):
         self.assertEqual(sketch.MapMode, "FlatFace")
         self.assertEqual(sketch.MapOrigin, "Body")
         self.assertFalse(field.property("armed"), "the field stayed armed after the pick")
+        # Onshape's words for the face (ops#640 round 6, J10), not "Pad:Face6"
+        entries = field.findChild(QtWidgets.QListWidget, "entries")
+        pump(0.3)
+        self.assertEqual(entries.count(), 1)
+        self.assertEqual(entries.item(0).text(), "Face of %s" % pad.Label)
 
         self.assertAlmostEqual(sketch.Placement.Base.z, 5.0, places=9)
         normal = sketch.Placement.Rotation.multVec(V(0, 0, 1))

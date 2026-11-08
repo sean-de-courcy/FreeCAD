@@ -107,6 +107,8 @@ TaskSketchPlane::TaskSketchPlane(SketcherGui::ViewProviderSketch* sketchView)
     options.removable = false;
     // Disarmed after the pick, so the next click draws
     options.once = true;
+    // "Face of Pad", as Onshape's Sketch plane field (ops#640 round 6, J10)
+    options.elementWords = true;
     // Not a face of what this sketch makes (a cycle)
     options.noDependents = true;
     const App::DocumentObjectT owner = sketchT;

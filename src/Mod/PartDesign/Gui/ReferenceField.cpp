@@ -129,6 +129,22 @@ std::string bareElement(const std::string& sub)
     return name;
 }
 
+// Onshape's words for an element of an object: "Face of Pad" for Pad's `Face6`; another kind of
+// element keeps FreeCAD's form, `Pad:Wire1` (ops#640 round 6, J10)
+QString elementInWords(const std::string& element, const QString& name)
+{
+    if (element.starts_with("Face")) {
+        return ReferenceField::tr("Face of %1").arg(name);
+    }
+    if (element.starts_with("Edge")) {
+        return ReferenceField::tr("Edge of %1").arg(name);
+    }
+    if (element.starts_with("Vertex")) {
+        return ReferenceField::tr("Vertex of %1").arg(name);
+    }
+    return QStringLiteral("%1:%2").arg(name, QString::fromStdString(element));
+}
+
 QString distanceText(double distance)
 {
     if (std::isnan(distance)) {
@@ -1209,7 +1225,10 @@ void ReferenceField::reload()
         if ((isSingle() || isProfile()) && slot.obj) {
             // The object varies: `Pad:Face6`, or `DatumPlane` alone; a profile's `Sketch (whole)`
             const QString name = QString::fromUtf8(slot.obj->Label.getValue());
-            if (!element.empty()) {
+            if (!element.empty() && options.elementWords) {
+                text = elementInWords(element, name);
+            }
+            else if (!element.empty()) {
                 text = QStringLiteral("%1:%2").arg(name, text);
             }
             else {
