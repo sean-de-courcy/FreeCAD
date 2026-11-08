@@ -48,6 +48,7 @@ from SketcherTests.TestSketchRound4Gui import (  # FreeCAD-CH, ops#640 (sketch r
     TestSketchMirrorToolFirstGui,
     TestSketchOtherPartSnapGui,
 )
+from SketcherTests.TestSketchCancelGui import TestSketchCancelGui  # FreeCAD-CH, ops#640 (round 5)
 
 # Use the module so that code checkers don't complain (flake8)
 (
@@ -92,5 +93,6 @@ from SketcherTests.TestSketchRound4Gui import (  # FreeCAD-CH, ops#640 (sketch r
     and TestSketchToolbarFeaturesGui
     and TestSketchMirrorToolFirstGui
     and TestSketchOtherPartSnapGui
+    and TestSketchCancelGui
     else False
 )

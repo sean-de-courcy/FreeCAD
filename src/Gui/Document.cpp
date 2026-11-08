@@ -93,6 +93,8 @@ void updateRegenerationHold(const App::Document* closingStep = nullptr);
 bool hasUndoStep(const Document* doc, bool undo);
 /// FreeCAD-CH (ops#640): defined below; PartDesign's TaskFeatureParameters.cpp declares it
 GuiExport bool editStartedUnchanged(const App::Document* doc);
+/// FreeCAD-CH (ops#640, hands-on B5-5): defined below; Sketcher's ViewProviderSketch.cpp declares it
+GuiExport int undoOpenSketchSession(const App::Document* doc);
 
 // Pimpl class
 struct DocumentP
@@ -673,7 +675,7 @@ private:
 namespace
 {
 /// FreeCAD-CH (ops#640): each Gui document's pimpl, for hasUndoStep() (no header names it)
-std::map<const Document*, const DocumentP*> stepDocuments;  // NOLINT
+std::map<const Document*, DocumentP*> stepDocuments;  // NOLINT
 }  // namespace
 
 }  // namespace Gui
@@ -3523,6 +3525,83 @@ bool Gui::editStartedUnchanged(const App::Document* doc)
                                                          : nullptr;
     auto it = guiDoc ? stepDocuments.find(guiDoc) : stepDocuments.end();
     return it != stepDocuments.end() && it->second->_editStartedUnchanged;
+}
+
+/** FreeCAD-CH (ops#640, hands-on B5-5): a sketch's Cancel leaves no step, as in Onshape (no
+ * history entry; Ctrl+Z then undoes the step before the edit). Called while the sketch session
+ * is still open (ViewProviderSketch::unsetEdit): undoes the session's own transactions, all of
+ * them at the top of App's undo stack (a pending one first), down to the session's start, and
+ * takes the session's transactions off the Redo stack. The Redo stack before the edit is gone
+ * once the session committed a change (a commit clears it); an edit that committed nothing keeps
+ * it. Returns the number of transactions undone, or -1 when that can't be done exactly, with
+ * nothing done: no session open, the document closing, the step locked, no undo stack (the limit 0, which drops every
+ * transaction), the session's opener (a "New Sketch", a re-edit's "Double click" that changed
+ * something) pending or on the stack, one of its transactions below another's, or one shared with
+ * another document. The caller then restores the sketch its own way. Exported and declared where
+ * it is called, not in Document.h. */
+int Gui::undoOpenSketchSession(const App::Document* doc)
+{
+    Gui::Document* guiDoc = doc && Application::Instance ? Application::Instance->getDocument(doc)
+                                                         : nullptr;
+    auto it = guiDoc ? stepDocuments.find(guiDoc) : stepDocuments.end();
+    if (it == stepDocuments.end()) {
+        return -1;
+    }
+    DocumentP* d = it->second;
+    App::Document* appDoc = guiDoc->getDocument();
+    if (d->_session == 0 || d->_isClosing || App::GetApplication().isClosingAll()
+        || d->_undoSteps == 0 || appDoc->getMaxUndoStackSize() == 0 || appDoc->isStepLocked()
+        || appDoc->isPerformingTransaction()) {
+        return -1;
+    }
+    auto own = [d](int id) {
+        return id != 0 && d->_sessionIds.contains(id);
+    };
+    // The session's own transactions, newest first; below them, nothing of the session's
+    std::vector<int> ids;
+    unsigned pos = 0;
+    for (; own(appDoc->getTransactionID(true, pos)); ++pos) {
+        ids.push_back(appDoc->getTransactionID(true, pos));
+    }
+    for (int id = appDoc->getTransactionID(true, pos); id != 0;
+         id = appDoc->getTransactionID(true, ++pos)) {
+        if (own(id) || id == d->_sessionOpener) {
+            return -1;
+        }
+    }
+    for (App::Document* other : App::GetApplication().getDocuments()) {
+        if (other == appDoc) {
+            continue;
+        }
+        for (int id : ids) {
+            if (other->getAvailableUndos(id) != 0) {
+                return -1;
+            }
+        }
+    }
+
+    if (!ids.empty()) {
+        Base::FlagToggler<> flag(d->_isTransacting);
+        // One undo down to the oldest (App's undo(id)), as Gui::Document::undo() does
+        appDoc->undo(ids.back());
+        App::GetApplication().signalUndo();
+    }
+    // Off the Redo stack: an empty transaction opened at once clears it, and its abort leaves no
+    // step (as Sketcher's ConflictRefusal does)
+    bool sessionRedo = false;
+    for (unsigned redo = 0; !sessionRedo; ++redo) {
+        const int id = appDoc->getTransactionID(false, redo);
+        if (id == 0) {
+            break;
+        }
+        sessionRedo = own(id);
+    }
+    if (sessionRedo && !appDoc->hasPendingTransaction()
+        && appDoc->openTransaction("Cancel sketch editing") != 0) {
+        App::Transaction::openPendingTransaction(*appDoc);
+        appDoc->abortTransaction();
+    }
+    return static_cast<int>(ids.size());
 }
 
 /// Get a string vector with the 'Undo' actions
