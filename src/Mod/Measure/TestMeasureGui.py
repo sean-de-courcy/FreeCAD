@@ -502,3 +502,86 @@ class TestQuickMeasureGui(unittest.TestCase):
         text, tip = self.select(("P", "Vertex1"))
         self.assertEqual(text, "")
         self.assertIn("X: " + self.length(20), tip)
+
+
+class TestMassPropertiesNoMaterial(unittest.TestCase):
+    """Rank 16 (ops#640, hands-on D-3): a part with no material is not weighed as water.
+
+    Onshape's mass properties with a part that has no material show the volume and the surface
+    area, leave mass, centre of mass and inertia blank, and say "One or more parts do not have a
+    material defined". The panel does the same: no mass, density, centre of gravity or inertia,
+    the note above the physical properties, the volume and the centre of volume as before.
+
+    Model: box S 10 x 10 x 10 at the origin in Steel (Generic), box N 20 x 10 x 10 at (20, 0, 0)
+    with no material (the "Default" one). Both: volume 3000 mm^3, the centre of volume at
+    x = (1000 * 5 + 2000 * 30) / 3000 = 21.667 mm. S alone: mass = Steel's density * 1000 mm^3.
+    """
+
+    STEEL = "3eeccaf6-847b-46b0-aff8-5ffe08b7fdb7"  # Steel (Generic), Machining library
+
+    def setUp(self):
+        if not App.GuiUp:
+            self.skipTest("needs the GUI")
+        import Materials
+
+        self.doc = App.newDocument("MassPropertiesNoMaterial")
+        steel = self.doc.addObject("Part::Box", "S")
+        none = self.doc.addObject("Part::Box", "N")
+        none.Length = 20
+        none.Placement.Base = App.Vector(20, 0, 0)
+        self.material = Materials.MaterialManager().getMaterial(self.STEEL)
+        steel.ShapeMaterial = self.material
+        self.doc.recompute()
+        Gui.Selection.clearSelection()
+        TestMassPropertiesRemoveItem.pump()
+        Gui.runCommand("Std_MassProperties")
+        TestMassPropertiesRemoveItem.pump(20)
+
+    def tearDown(self):
+        if not App.GuiUp:
+            return
+        Gui.Selection.clearSelection()
+        Gui.Control.closeDialog()
+        TestMassPropertiesRemoveItem.pump()
+        App.closeDocument(self.doc.Name)
+        TestMassPropertiesRemoveItem.pump()
+
+    def field(self, name):
+        edits = [w for w in Gui.getMainWindow().findChildren(QtWidgets.QLineEdit) if w.objectName() == name]
+        self.assertEqual(len(edits), 1, "the panel's field " + name)
+        return edits[0].text()
+
+    def note(self):
+        """The note's text where it is shown, else None."""
+        for label in Gui.getMainWindow().findChildren(QtWidgets.QLabel):
+            if label.objectName() == "materialNote" and label.isVisibleTo(label.window()):
+                return label.text()
+        return None
+
+    def measure(self, *names):
+        for name in names:
+            Gui.Selection.addSelection(self.doc.Name, name)
+            TestMassPropertiesRemoveItem.pump(10)
+        TestMassPropertiesRemoveItem.pump(20)
+
+    @staticmethod
+    def value(text, unit):
+        return App.Units.Quantity(text.split(" (")[0]).getValueAs(unit).Value
+
+    def testAPartWithoutMaterialBlanksTheMass(self):
+        self.measure("S", "N")
+        self.assertEqual(self.note(), "One or more parts do not have a material defined")
+        self.assertAlmostEqual(self.value(self.field("volumeEdit"), "mm^3"), 3000, delta=0.5)
+        self.assertAlmostEqual(self.value(self.field("surfaceAreaEdit"), "mm^2"), 600 + 1000, delta=0.5)
+        for name in ("massEdit", "densityEdit", "cogXText", "inertiaJoxText", "inertiaJxText"):
+            self.assertEqual(self.field(name), "", name + " shows a figure without a material")
+        self.assertAlmostEqual(self.value(self.field("covXText"), "mm"), 65000 / 3000, delta=0.01)
+
+    def testAllPartsWithMaterialAreWeighed(self):
+        self.measure("S")
+        self.assertIsNone(self.note(), "the note shows with every part's material set")
+        density = self.material.getPhysicalValue("Density").getValueAs("kg/mm^3").Value
+        self.assertGreater(density, 0)
+        mass = self.value(self.field("massEdit"), "kg")
+        self.assertAlmostEqual(mass, density * 1000, delta=density * 1000 * 0.01)
+        self.assertAlmostEqual(self.value(self.field("cogXText"), "mm"), 5, delta=0.01)
