@@ -639,11 +639,11 @@ class TestContextMenuGui(unittest.TestCase):
         self.assertSelected(pad, top)
         self.assertMenu(actions, ON_FACE, FIRST_ON_FACE)
 
-    def testFilletNeedsTheBodyTheCommandsUse(self):
-        """ctx-5: with two bodies, Fillet and Chamfer are offered on the active body's faces
-        only (the commands refuse the others); with none active neither they nor Sketch on face
-        (the commands would ask for a body); Sketch on face is offered on a sibling part's face
-        (ops#325: the sketch goes into the active body, no dialog)."""
+    def testFilletOnAnyPartsFace(self):
+        """ctx-5, ops#640 rank 14: with two bodies, Fillet and Chamfer are offered on a face of
+        either, the active one or not, and with none active (the dress-up goes into the face's
+        Body); Sketch on face needs a body to put the sketch in: not with none active, and on a
+        sibling part's face it goes into the active body (ops#325, no dialog)."""
         body, _ = self.cylinderBody()
         # with both bodies in view the middle is empty space: the click goes to the pad's top,
         # for realism (the pick is set by API; see testHoverSetsThePreselectionTheMenuFollows)
@@ -651,16 +651,13 @@ class TestContextMenuGui(unittest.TestCase):
         self.pick("Face6")
         actions = self.openMenu(at=at)
         self.assertSelected(self.pad, "Face6")
-        self.assertMenu(actions, ON_FACE)
-        for name in FIRST_ON_FACE:
-            self.assertNotIn(menuText(name), texts(actions))
+        self.assertMenu(actions, ON_FACE, FIRST_ON_EDGE)
+        self.assertNotIn(menuText("PartDesign_NewSketch"), texts(actions))
         self.activate(body)
         self.pick("Face6")
         actions = self.openMenu(at=at)
         self.assertSelected(self.pad, "Face6")
-        self.assertMenu(actions, ON_FACE, ("PartDesign_NewSketch",))
-        for name in FIRST_ON_EDGE:
-            self.assertNotIn(menuText(name), texts(actions))
+        self.assertMenu(actions, ON_FACE, FIRST_ON_FACE)
         self.activate(self.body)
         self.pick("Face6")
         actions = self.openMenu(at=at)
@@ -672,8 +669,9 @@ class TestContextMenuGui(unittest.TestCase):
         preselects what is under it (the hover pick), the Onshape style's right click selects
         that, and the menu follows it; so the pointer's position decides. Two bodies, the
         cylinder active: its curved face gets Fillet and Chamfer without Sketch on face, the
-        first body's top face Sketch on face only (a sibling part's face, ops#325), and empty
-        space the view menu with the selection left alone (ctx-1)."""
+        first body's top face Sketch on face (a sibling part's face, ops#325), Fillet and
+        Chamfer (any part's, ops#640 rank 14), and empty space the view menu with the selection
+        left alone (ctx-1)."""
         body, pad = self.cylinderBody()
         self.activate(body)
         curved, _ = self.faces(pad)
@@ -691,13 +689,39 @@ class TestContextMenuGui(unittest.TestCase):
         self.assertEqual(self.preselected(), (self.body.Name, "Face6"))
         actions = self.openMenu(at=at)
         self.assertSelected(self.pad, "Face6")
-        self.assertMenu(actions, ON_FACE, ("PartDesign_NewSketch",))
+        self.assertMenu(actions, ON_FACE, FIRST_ON_FACE)
         at = self.emptyPoint()
         self.hover(at)
         self.assertIsNone(self.preselected())
         actions = self.openMenu(at=at)
         self.assertEmptySpaceMenu(actions)
         self.assertSelected(self.pad, "Face6")
+
+    def testFilletOnAnotherPartsEdge(self):
+        """ops#640 rank 14: an edge of the second body's pad gets Fillet and Chamfer with the
+        first body active, and with none active (Onshape has no active part); the entry makes the
+        fillet in the edge's Body, with no question for a body."""
+        body, pad = self.cylinderBody()
+        edge = "Edge1"
+        self.assertTrue(pad.Shape.Edges[0].Length > 0)
+        for active in (self.body, None):
+            self.activate(active)
+            self.pick(edge, feature=pad)
+            actions = self.openMenu()
+            self.assertMenu(actions, ON_OTHER, FIRST_ON_EDGE)
+        self.clickEntry(actions, "PartDesign_Fillet")
+        try:
+            self.assertTrue(Gui.Control.activeDialog(), "the Fillet's dialog did not open")
+            QtWidgets.QApplication.processEvents()
+            self.assertIsNone(QtWidgets.QApplication.activeModalWidget(), "a modal opened")
+            [fillet] = [o for o in self.doc.Objects if o.TypeId == "PartDesign::Fillet"]
+            self.assertTrue(body.hasObject(fillet))
+            self.assertEqual((fillet.Base[0], list(fillet.Base[1])), (pad, [edge]))
+        finally:
+            dialog = Gui.Control.activeTaskDialog()
+            if dialog is not None:
+                dialog.reject()
+                pump(0.2)
 
     def testNoFilletOnASketchEdge(self):
         """ctx-5: a sketch's edge picked in the 3D view gets no Fillet or Chamfer (a Fillet on
