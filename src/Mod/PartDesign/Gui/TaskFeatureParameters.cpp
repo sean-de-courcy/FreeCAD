@@ -525,7 +525,10 @@ bool holdsValue(const App::Property& live, const App::Property& recorded)
             noEmpty(subsNow);
             noEmpty(subsBefore);
         }
-        return objsNow == objsBefore && subsNow == subsBefore;
+        // and by the naming solver's guesses: an accepted guess (the field's Accept guess, Mark
+        // broken) names the same element and drops or changes only the record (ops#640)
+        return objsNow == objsBefore && subsNow == subsBefore
+            && link->getElementGuesses() == before->getElementGuesses();
     }
     return now->isSame(recorded);
 }
