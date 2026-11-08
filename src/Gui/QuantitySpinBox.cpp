@@ -94,6 +94,25 @@ bool hasVariableRef(const QString& text)
     return false;
 }
 
+/// Whether @a text ends with a '#' that starts a variable's name being typed: not after a word
+/// (`#` alone, or `2 * #`). The validator takes it as Intermediate, else the key that begins
+/// `#Width` was refused and the name went into the number
+bool endsWithVariableStart(const QString& text)
+{
+    if (!text.endsWith(u'#')) {
+        return false;
+    }
+    qsizetype i = text.size() - 2;
+    while (i >= 0 && (text[i] == u' ' || text[i] == u'\t')) {
+        --i;
+    }
+    if (i < 0) {
+        return true;
+    }
+    const QChar c = text[i];
+    return !(c == u'_' || c == u'@' || c.isLetterOrNumber() || c.isMark());
+}
+
 /// "New variable..." from a field: the Variables panel's Add dialog with the typed name and the
 /// field's value, after the event that asked for it (Std_AddVariable, VariablesView.cpp, reads
 /// them from this application property).
@@ -1417,6 +1436,14 @@ void QuantitySpinBox::focusOutEvent(QFocusEvent* event)
             return;
         }
     }
+    // The `#` list opening on a lone `#` takes the focus too (a popup): the `#` begun stays, not
+    // validated back to the last value (the next keys went into the number)
+    if (event->reason() == Qt::PopupFocusReason && isBound() && !hasExpression()
+        && endsWithVariableStart(lineEdit()->text())) {
+        QToolTip::hideText();
+        QAbstractSpinBox::focusOutEvent(event);
+        return;
+    }
 
     validateInput();
 
@@ -1478,8 +1505,9 @@ QValidator::State QuantitySpinBox::validate(QString& text, int& pos) const
     Q_UNUSED(pos)
 
     // FreeCAD-CH (ops#640, V23): a text using a variable is judged by userInput, whatever value
-    // it has: a value outside the range must not refuse the key that completes `#name`
-    if (isBound() && !hasExpression() && hasVariableRef(text)) {
+    // it has: a value outside the range must not refuse the key that completes `#name`, nor
+    // the '#' that begins it
+    if (isBound() && !hasExpression() && (hasVariableRef(text) || endsWithVariableStart(text))) {
         return QValidator::Intermediate;
     }
 
