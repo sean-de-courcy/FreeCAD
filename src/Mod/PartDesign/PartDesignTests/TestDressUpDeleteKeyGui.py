@@ -314,11 +314,13 @@ class TestDressUpDeleteKeyGui(unittest.TestCase):
             modalGuard.stop()
         self.assertEqual(modals, [], "Std_Delete asked")
 
-    def testARefusedEditLeavesNoUndoStep(self):
-        """Journey J7: the box deleted, its fillet is broken; a double click on the fillet says
-        it can't be edited and opens nothing. The "Edit Fillet" command it opened was left open
-        and became an undo step, so the first Undo after the delete did nothing visible. Now the
-        undo stack is as after the delete, and one Undo brings the box back."""
+    def testABrokenEditLeavesNoUndoStep(self):
+        """Journey J7: the box deleted, its fillet is broken. Its "Edit Fillet" command was left
+        open by a refused edit and became an undo step, so the first Undo after the delete did
+        nothing visible. A broken fillet's dialog now opens, with no modal (ops#640 rank 12, F19);
+        its Cancel leaves the undo stack as after the delete, and one Undo brings the box back."""
+        from PartDesignTests.TestExpressionFieldsGui import taskButton, waitFor
+
         fillet = self.makeDressUp("PartDesign::Fillet", Radius=1)
         self.doc.openTransaction("Delete")
         self.doc.removeObject(self.box.Name)
@@ -339,9 +341,16 @@ class TestDressUpDeleteKeyGui(unittest.TestCase):
         try:
             fillet.ViewObject.doubleClicked()
             pump(0.3)
+            self.assertEqual(modals, [])
+            self.assertIsNotNone(Gui.getDocument(self.doc.Name).getInEdit())
+            Gui.Control.showTaskView()
+            self.assertTrue(waitFor(lambda: taskButton(QtWidgets.QDialogButtonBox.Cancel) is not None))
+            taskButton(QtWidgets.QDialogButtonBox.Cancel).click()
+            self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()))
+            pump(0.3)
         finally:
             guard.stop()
-        self.assertEqual(len(modals), 1, "the broken fillet's refusal")
+        self.assertEqual(modals, [])
         self.assertIsNone(Gui.getDocument(self.doc.Name).getInEdit())
         self.assertFalse(self.doc.HasPendingTransaction)
         self.assertEqual(self.doc.UndoNames, names)
