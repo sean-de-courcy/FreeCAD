@@ -783,7 +783,7 @@ App::DocumentObject* chainBaseOf(App::DocumentObject* obj)
         return nullptr;
     }
     const auto& shadows = dressUp->Base.getShadowSubs();
-    if (shadows.size() != dressUp->Base.getSubValues(false).size()
+    if (shadows.size() != dressUp->Base.getSubValues().size()
         || std::ranges::any_of(shadows, [](const auto& shadow) { return shadow.newName.empty(); })) {
         return nullptr;
     }
@@ -792,7 +792,7 @@ App::DocumentObject* chainBaseOf(App::DocumentObject* obj)
     for (App::Property* prop : props) {
         auto link = freecad_cast<App::PropertyLinkBase*>(prop);
         if (!link || prop == &dressUp->Base || prop == &dressUp->BaseFeature
-            || prop == &dressUp->_Body) {
+            || prop == &dressUp->_Body || prop == &dressUp->ExpressionEngine) {
             continue;
         }
         std::vector<App::DocumentObject*> targets;
