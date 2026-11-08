@@ -108,6 +108,13 @@ public:
     bool isRolledBack() const;
     /// Is obj held by the bar (obj is this Body or one of its members)?
     bool holds(const App::DocumentObject* obj) const;
+    /** FreeCAD-CH (ops#640 rank 34): is obj a member that waits below the bar with the features
+     * it is made for? A sketch, datum or other non-solid member after the effective bar, not held
+     * itself (the first solid after the bar comes later), with users that are all held: Onshape
+     * lists it below the bar, rolled back with them (the studio's bar goes above it, and a new
+     * feature is inserted before it). One with no users (made at the bar just now) is live.
+     */
+    bool waitsBelowBar(const App::DocumentObject* obj) const;
     /// The transient edit roll-back point (not saved, not undone), or null
     App::DocumentObject* getEditRollPoint() const;
     /// Sets the edit roll-back point (null clears it); touches nothing

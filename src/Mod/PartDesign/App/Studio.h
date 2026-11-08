@@ -106,9 +106,12 @@ PartDesignExport bool isStudioRolledBack(App::Document* doc, App::Part* studio);
 
 /** The row the studio's bar follows in sequence (studioSequence()): the row before the first one
  * its Body holds (Body::holds()), null when that is the first row, the last row when none is
- * held. With hinted, hint (the row the bar was last moved after, null: the top) is returned
- * instead when it lies before that row with no solid feature between them: what lies between is
- * a sketch or datum its Body doesn't hold either way.
+ * held. Without a hint, the row before the first one that is held or waits below the bar
+ * (Body::waitsBelowBar(): a sketch or datum after its Body's bar whose users are all held), when
+ * no solid lies between that one and the first held row (ops#640 rank 34). With hinted, hint
+ * (the row the bar was last moved after, null: the top) is returned instead when it lies before
+ * that row with no solid feature between them: what lies between is a sketch or datum its Body
+ * doesn't hold either way.
  */
 PartDesignExport App::DocumentObject* studioBarAfter(const std::vector<App::DocumentObject*>& sequence,
                                                      bool hinted = false,

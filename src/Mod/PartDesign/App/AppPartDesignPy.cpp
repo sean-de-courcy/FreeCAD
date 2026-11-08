@@ -185,8 +185,10 @@ public:
             "studioBarAfter",
             &Module::studioBarAfter,
             "studioBarAfter(studio[, hint]) -- The feature of studioSequence the studio's bar "
-            "follows (None: the top). hint, the feature (None: the top) the bar was last moved "
-            "after, is kept when only sketches and datums lie between."
+            "follows (None: the top): the row before the first one that is held or waits below "
+            "the bar (a sketch or datum after its Body's bar whose users are all held). hint, "
+            "the feature (None: the top) the bar was last moved after, is kept when only "
+            "sketches and datums lie between."
         );
         add_varargs_method(
             "moveInStudio",
