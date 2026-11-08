@@ -1061,8 +1061,9 @@ void TaskRevolutionParameters::dropUpToFaceOfOtherKind(Side side, Mode mode)
     App::DocumentObject* named = sub.empty() || !obj->getDocument()
         ? nullptr
         : obj->getDocument()->getObject(sub.c_str());
+    // an origin point is linked whole (no LCS sub): a vertex too
     const bool isVertex = sub.starts_with("Vertex") || obj->isDerivedFrom<PartDesign::Point>()
-        || (named && named->isDerivedFrom<App::Point>());
+        || obj->isDerivedFrom<App::Point>() || (named && named->isDerivedFrom<App::Point>());
     // a part is linked whole; a face or a plane by its element, or a datum or origin plane whole
     const bool isPart = !isVertex && sub.empty() && !PartDesign::Feature::isDatum(obj);
     const Mode kind = isVertex ? Mode::ToVertex : isPart ? Mode::ToShape : Mode::ToFace;

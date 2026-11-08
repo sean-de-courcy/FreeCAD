@@ -194,6 +194,42 @@ class TestDressUpAnyPartGui(ResultBoxGuiCase):
         self.assertAlmostEqual(b.Shape.Volume, 980, places=4)
         self.assertAlmostEqual(a.Shape.Volume, 1000, places=6)
 
+    def testAnActiveBodyWithNoSolidGivesWay(self):
+        """Review (hub 5) 1: an active Body with no solid yet (a new, empty part) made the tool
+        say it needs a part with a solid. The fillet starts in the first part with one (A) and
+        the first pick, B's edge, takes it to B."""
+        a, b, padA, padB = self.twoParts()
+        empty = self.doc.addObject("PartDesign::Body", "Empty")
+        fillet = self.toolFirst("PartDesign_Fillet", empty)
+        self.assertFalse(empty.hasObject(fillet))
+        edge = verticalEdge(padB, 30, 10)
+        self.click(padB, edge)
+        self.placedIn(fillet, b)
+        self.close(ok=False)
+        self.watching = False
+        self.assertEqual(self.modals, [])
+
+    def testAnEarlierFeatureOfAnotherPartIsRefused(self):
+        """Review (hub 5) 2: B's pad is no longer B's Tip (a box after it). A pick on the pad,
+        shown, would make the fillet B's Tip on the pad and drop the box's material: refused;
+        the fillet waits in A and B is unchanged."""
+        a, b, padA, padB = self.twoParts()
+        box = b.newObject("PartDesign::AdditiveBox", "Later")
+        box.Placement.Base = padB.Shape.BoundBox.Center + App.Vector(0, 0, 4)
+        self.doc.recompute()
+        self.assertIs(b.Tip, box)
+        volume = b.Shape.Volume
+        padB.ViewObject.Visibility = True
+        fillet = self.toolFirst("PartDesign_Fillet", a)
+        self.click(padB, verticalEdge(padB, 30, 10))
+        pump(0.5)
+        self.assertTrue(a.hasObject(fillet), "the fillet moved to an earlier feature of B")
+        self.assertIs(b.Tip, box)
+        self.close(ok=False)
+        self.watching = False
+        self.doc.recompute()
+        self.assertAlmostEqual(b.Shape.Volume, volume, places=6)
+
     def testAPickInAnotherStudioIsRefused(self):
         """A and B each in its own App::Part (two part studios): B's edge is refused (Onshape
         needs a Derived feature); the fillet waits in A."""

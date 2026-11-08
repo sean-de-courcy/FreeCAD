@@ -131,6 +131,13 @@ App::DocumentObject* placingTarget(
                                 "The part is in another part studio.");
         return nullptr;
     }
+    // Another part's element: of its current shape (its Tip). An earlier feature shown would
+    // make the dress-up the part's Tip on that feature, and the later material would vanish
+    if (body != PartDesign::Body::findBodyOf(own) && body->Tip.getValue() != obj) {
+        why = QT_TRANSLATE_NOOP("PartDesignGui::TaskDressUpParameters",
+                                "Pick an element of the part's current shape.");
+        return nullptr;
+    }
     const auto users = own->getInListRecursive();
     if (std::ranges::find(users, obj) != users.end()) {
         why = QT_TRANSLATE_NOOP("PartDesignGui::TaskDressUpParameters",

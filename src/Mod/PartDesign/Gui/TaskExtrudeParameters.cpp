@@ -992,8 +992,9 @@ void TaskExtrudeParameters::dropUpToFaceOfOtherKind(Side side, Mode mode)
     App::DocumentObject* named = sub.empty() || !obj->getDocument()
         ? nullptr
         : obj->getDocument()->getObject(sub.c_str());
+    // an origin point is linked whole (no LCS sub): a vertex too
     const bool isVertex = sub.starts_with("Vertex") || obj->isDerivedFrom<PartDesign::Point>()
-        || (named && named->isDerivedFrom<App::Point>());
+        || obj->isDerivedFrom<App::Point>() || (named && named->isDerivedFrom<App::Point>());
     if (isVertex != (mode == Mode::ToVertex)) {
         link->setValue(nullptr);
     }

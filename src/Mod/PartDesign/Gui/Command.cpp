@@ -2744,7 +2744,13 @@ void finishDressupFeature(
 // pick, which moves it to the picked part (TaskDressUpParameters::notePlacedByFirstPick)
 static PartDesign::Body* toolFirstBody()
 {
-    if (PartDesign::Body* active = PartDesignGui::getBody(/*messageIfNot = */ false)) {
+    auto hasSolid = [](const PartDesign::Body* body) {
+        auto tip = body ? freecad_cast<Part::Feature*>(body->Tip.getValue()) : nullptr;
+        return tip && !tip->Shape.getShape().isNull();
+    };
+    // An active Body with no solid yet (new, or a sketch only) gives way to a part that has one
+    if (PartDesign::Body* active = PartDesignGui::getBody(/*messageIfNot = */ false);
+        hasSolid(active)) {
         return active;
     }
     App::Document* doc = App::GetApplication().getActiveDocument();
@@ -2752,8 +2758,7 @@ static PartDesign::Body* toolFirstBody()
         return nullptr;
     }
     for (PartDesign::Body* body : doc->getObjectsOfType<PartDesign::Body>()) {
-        auto tip = freecad_cast<Part::Feature*>(body->Tip.getValue());
-        if (tip && !tip->Shape.getShape().isNull()) {
+        if (hasSolid(body)) {
             return body;
         }
     }
