@@ -108,6 +108,9 @@ if(BUILD_GUI)
         PartDesignTests/TestProfileLinkDialog.py
         PartDesignTests/TestReferencePickerGui.py
         PartDesignTests/TestCrossBodyGui.py
+        PartDesignTests/TestStudioPicksGui.py
+        PartDesignTests/TestOpeningScopeGui.py
+        PartDesignTests/TestExtrudeFieldsGui.py
         PartDesignTests/TestNewSketchDialogGui.py
         PartDesignTests/TestOnshapeStudioGui.py
         PartDesignTests/TestRollBackBarGui.py

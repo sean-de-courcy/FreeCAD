@@ -365,6 +365,8 @@ void TaskRevolutionParameters::createProfileField()
         fillAxisCombo(true);
         recomputeFeature();
         setGizmoPositions();
+        // A new Revolve's first tool decides where it opens (FreeCAD-CH ops#640, round 3)
+        TaskResultParameters::profileTaken(getObject());
     };
     profileField = new ReferenceField(getObject(), "Profile", profile, write, proxy);
     *self = profileField;
@@ -931,6 +933,8 @@ void TaskRevolutionParameters::writeAxis(
 
         recomputeFeature();
         setGizmoPositions();
+        // the axis may make its first tool: it decides where it opens (ops#640, round 3)
+        TaskResultParameters::profileTaken(getObject());
     }
     catch (const Base::Exception& e) {
         e.reportException();

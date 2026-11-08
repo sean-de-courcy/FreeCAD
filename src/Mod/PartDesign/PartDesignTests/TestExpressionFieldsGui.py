@@ -373,6 +373,11 @@ class TestExpressionFieldsGui(unittest.TestCase):
         self.openPanel(self.pad)
         pump(0.3)
         Gui.Control.showTaskView()  # the last dialog's late switch to the Model tab hides it
+        # the taper shows with Onshape's Draft ticked (ops#640, rank 22)
+        draft = Gui.getMainWindow().findChild(QtWidgets.QCheckBox, "checkBoxDraft")
+        if draft is not None and not draft.isChecked():
+            draft.setChecked(True)
+            pump(0.2)
         taper = self.field("taperEdit")
         self.assertTrue(taper.isVisible() and taper.isEnabled(), "the Taper field")
         self.focus(taper)

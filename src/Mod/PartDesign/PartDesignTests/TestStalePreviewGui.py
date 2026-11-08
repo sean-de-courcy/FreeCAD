@@ -193,12 +193,12 @@ class TestStalePreviewGui(unittest.TestCase):
         self.edit(pad)
         self.assertGreater(drawn(previewNodes(pad)[0]), 0)
 
-        for label in ("To last", "To first", "Up to face", "Up to shape"):
+        for label in ("Up to last", "Up to next", "Up to face", "Up to part"):
             with self.subTest(label):
                 self.setMode(label)
                 self.assertIn("Invalid", pad.State)
                 self.assertEqual(drawn(previewNodes(pad)[0]), 0, "the last good preview stays")
-                self.setMode("Dimension")
+                self.setMode("Blind")
                 self.assertNotIn("Invalid", pad.State)
                 self.assertGreater(drawn(previewNodes(pad)[0]), 0)
 
@@ -215,12 +215,12 @@ class TestStalePreviewGui(unittest.TestCase):
         self.assertGreater(drawn(shape), 0)
         self.assertGreater(drawn(tool), 0)
 
-        for label in ("Up to face", "Up to shape"):
+        for label in ("Up to face", "Up to part"):
             with self.subTest(label):
                 self.setMode(label)
                 self.assertIn("Invalid", pocket.State)
                 self.assertEqual((drawn(shape), drawn(tool)), (0, 0), "the last good preview stays")
-                self.setMode("Dimension")
+                self.setMode("Blind")
                 self.assertNotIn("Invalid", pocket.State)
                 self.assertGreater(drawn(shape), 0)
                 self.assertGreater(drawn(tool), 0)

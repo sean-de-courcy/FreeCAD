@@ -26,13 +26,18 @@
 #include <memory>
 #include <sstream>
 
+#include <cmath>
+#include <initializer_list>
 #include <QAction>
 #include <QAbstractButton>
+#include <QCheckBox>
+#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QPushButton>
 #include <QPointer>
 #include <QSignalBlocker>
 #include <QTimer>
+#include <Precision.hxx>
 #include <Standard_Failure.hxx>
 
 
@@ -51,6 +56,7 @@
 #include <Mod/Part/App/TopoShape.h>
 #include <Mod/PartDesign/App/Body.h>
 #include <Mod/PartDesign/App/FeatureExtrude.h>
+#include <Mod/PartDesign/App/FeaturePocket.h>
 #include <Mod/Part/App/GizmoHelper.h>
 #include <Mod/Sketcher/Gui/ViewProviderSketch.h>
 
@@ -228,6 +234,7 @@ void TaskExtrudeParameters::setupDialog()
     translateSidesList(extrude->SideType.getValue());
 
     connectSlots();
+    createOnshapeFields();  // FreeCAD-CH (ops#640, rank 22)
 
     this->propReferenceAxis = &(extrude->ReferenceAxis);
     updateStartUI();
@@ -594,6 +601,200 @@ void TaskExtrudeParameters::updateStartUI()
     if (!hasReference) {
         startField->setArmed(false);
     }
+    updateOnshapeUI();
+}
+
+void TaskExtrudeParameters::createOnshapeFields()
+{
+    QGridLayout* grid = ui->gridLayout;
+    auto extrude = getObject<PartDesign::FeatureExtrude>();
+    if (!grid || !extrude) {
+        return;
+    }
+    // The Sides box goes (its index is still what is written); Symmetric, Draft and Second end
+    // position come between the first end and the second, as in Onshape's dialog
+    grid->removeWidget(ui->sidesLabel);
+    grid->removeWidget(ui->sidesMode);
+    ui->sidesLabel->hide();
+    ui->sidesMode->hide();
+    constexpr int firstSide2Row = 12;
+    constexpr int shift = 4;
+    struct Moved
+    {
+        QLayoutItem* item;
+        int row;
+        int column;
+        int rowSpan;
+        int columnSpan;
+    };
+    std::vector<Moved> moved;
+    int row = 0;
+    int column = 0;
+    int rowSpan = 0;
+    int columnSpan = 0;
+    for (int index = grid->count() - 1; index >= 0; --index) {
+        grid->getItemPosition(index, &row, &column, &rowSpan, &columnSpan);
+        if (row < firstSide2Row) {
+            continue;
+        }
+        if (QLayoutItem* item = grid->takeAt(index)) {
+            moved.push_back({item, row, column, rowSpan, columnSpan});
+        }
+    }
+    for (const Moved& entry : moved) {
+        if (QLayout* layout = entry.item->layout()) {
+            if (layout->parent()) {
+                layout->setParent(nullptr);
+            }
+            grid->addLayout(layout, entry.row + shift, entry.column, entry.rowSpan, entry.columnSpan);
+        }
+        else {
+            grid->addItem(entry.item, entry.row + shift, entry.column, entry.rowSpan, entry.columnSpan);
+        }
+    }
+    // The draft angle under its checkbox
+    grid->removeWidget(ui->labelTaperAngle);
+    grid->removeWidget(ui->taperEdit);
+    symmetric = new QCheckBox(tr("Symmetric"), proxy);
+    symmetric->setObjectName(QStringLiteral("checkBoxSymmetric"));
+    grid->addWidget(symmetric, firstSide2Row, 0, 1, 2);
+    draft = new QCheckBox(tr("Draft"), proxy);
+    draft->setObjectName(QStringLiteral("checkBoxDraft"));
+    grid->addWidget(draft, firstSide2Row + 1, 0, 1, 2);
+    grid->addWidget(ui->labelTaperAngle, firstSide2Row + 2, 0);
+    grid->addWidget(ui->taperEdit, firstSide2Row + 2, 1);
+    secondEnd = new QCheckBox(tr("Second end position"), proxy);
+    secondEnd->setObjectName(QStringLiteral("checkBoxSecondEnd"));
+    grid->addWidget(secondEnd, firstSide2Row + 3, 0, 1, 2);
+    // Starting offset in the Start box's empty row, above its depth
+    startingOffset = new QCheckBox(tr("Starting offset"), proxy);
+    startingOffset->setObjectName(QStringLiteral("checkBoxStartingOffset"));
+    grid->addWidget(startingOffset, 2, 0, 1, 2);
+    // Recompute on change: always (Onshape has no such box)
+    ui->checkBoxUpdateView->hide();
+
+    draft->setChecked(
+        std::abs(extrude->TaperAngle.getValue()) > Precision::Angular()
+        || std::abs(extrude->TaperAngle2.getValue()) > Precision::Angular()
+    );
+    setOnshapeWords();
+
+    connect(symmetric, &QCheckBox::toggled, this, [this](bool on) {
+        setSides(on ? SidesMode::Symmetric : SidesMode::OneSide);
+    });
+    connect(secondEnd, &QCheckBox::toggled, this, [this](bool on) {
+        setSides(on ? SidesMode::TwoSides : SidesMode::OneSide);
+    });
+    connect(startingOffset, &QCheckBox::toggled, this, [this](bool on) {
+        // The Start box's own signal writes StartType and updates the fields
+        ui->startMode->setCurrentIndex(
+            static_cast<int>(on ? StartMode::Offset : StartMode::ProfilePlane)
+        );
+    });
+    connect(draft, &QCheckBox::toggled, this, [this](bool on) {
+        if (!on) {
+            // No draft: no taper on either end
+            {
+                QSignalBlocker block(ui->taperEdit);
+                QSignalBlocker block2(ui->taperEdit2);
+                ui->taperEdit->setValue(0.0);
+                ui->taperEdit2->setValue(0.0);
+            }
+            if (auto extrude = getObject<PartDesign::FeatureExtrude>()) {
+                // an expression on either angle would put it back at the next recompute
+                extrude->clearExpression(App::ObjectIdentifier(extrude->TaperAngle));
+                extrude->clearExpression(App::ObjectIdentifier(extrude->TaperAngle2));
+                extrude->TaperAngle.setValue(0.0);
+                extrude->TaperAngle2.setValue(0.0);
+            }
+            tryRecomputeFeature();
+        }
+        updateUI(Side::First);
+        setGizmoPositions();
+    });
+}
+
+void TaskExtrudeParameters::setSides(SidesMode mode)
+{
+    // The Sides box's own signal writes SideType, updates the fields and recomputes
+    ui->sidesMode->setCurrentIndex(static_cast<int>(mode));
+}
+
+void TaskExtrudeParameters::setOnshapeWords()
+{
+    if (!draft) {
+        return;
+    }
+    ui->textLabel1->setText(tr("End type"));
+    ui->typeLabel2->setText(tr("End type"));
+    ui->labelLength->setText(tr("Depth"));
+    ui->labelLength2->setText(tr("Depth"));
+    ui->labelTaperAngle->setText(tr("Draft angle"));
+    ui->labelTaperAngle2->setText(tr("Draft angle"));
+    ui->labelStartOffset->setText(tr("Starting offset depth"));
+    symmetric->setText(tr("Symmetric"));
+    draft->setText(tr("Draft"));
+    secondEnd->setText(tr("Second end position"));
+    startingOffset->setText(tr("Starting offset"));
+}
+
+void TaskExtrudeParameters::updateOnshapeUI()
+{
+    if (!draft) {
+        return;
+    }
+    const auto sidesMode = static_cast<SidesMode>(ui->sidesMode->currentIndex());
+    {
+        QSignalBlocker block(symmetric);
+        symmetric->setChecked(sidesMode == SidesMode::Symmetric);
+    }
+    {
+        QSignalBlocker block(secondEnd);
+        secondEnd->setChecked(sidesMode == SidesMode::TwoSides);
+    }
+    ui->sidesLabel->hide();
+    ui->sidesMode->hide();
+    // Symmetric and Second end position exclude each other, as in Onshape's dialog; the first
+    // side's header shows only with a second end
+    symmetric->setVisible(sidesMode != SidesMode::TwoSides);
+    secondEnd->setVisible(sidesMode != SidesMode::Symmetric);
+    ui->side1Label->hide();
+    ui->line1->hide();
+    ui->side2Label->hide();
+    ui->line2->hide();
+
+    // Draft: where an end takes a taper (Blind, Through all), the angle only when ticked
+    const bool pocket = getObject() && getObject()->isDerivedFrom<PartDesign::Pocket>();
+    const auto taperOffered = [pocket](int index) {
+        const auto mode = static_cast<Mode>(index);
+        return mode == Mode::Dimension || (pocket ? mode == Mode::ThroughAll : mode == Mode::Appended);
+    };
+    const bool twoSides = sidesMode == SidesMode::TwoSides;
+    const bool offered = taperOffered(ui->changeMode->currentIndex())
+        || (twoSides && taperOffered(ui->changeMode2->currentIndex()));
+    draft->setVisible(offered);
+    if (!draft->isChecked()) {
+        for (QWidget* widget : std::initializer_list<QWidget*> {
+                 ui->labelTaperAngle,
+                 ui->taperEdit,
+                 ui->labelTaperAngle2,
+                 ui->taperEdit2,
+             }) {
+            widget->hide();
+            widget->setEnabled(false);
+        }
+    }
+
+    // Start: Starting offset stands for the Offset start; the box shows only for a reference
+    const auto start = static_cast<StartMode>(ui->startMode->currentIndex());
+    {
+        QSignalBlocker block(startingOffset);
+        startingOffset->setChecked(start == StartMode::Offset);
+    }
+    const bool reference = start == StartMode::Reference;
+    startingOffset->setVisible(!reference);
+    ui->labelStart->setVisible(reference);
+    ui->startMode->setVisible(reference);
 }
 
 void TaskExtrudeParameters::createSideControllers()
@@ -965,6 +1166,7 @@ void TaskExtrudeParameters::updateWholeUI(Type type, Side side)
     updateSideUI(m_side2, type, mode2, isSide2GroupVisible, (side == Side::Second));
 
     ui->checkBoxReversed->setEnabled(sidesMode != SidesMode::Symmetric || mode1 != Mode::Dimension);
+    updateOnshapeUI();
 }
 
 void TaskExtrudeParameters::updateSideUI(
@@ -1365,6 +1567,8 @@ void TaskExtrudeParameters::changeEvent(QEvent* e)
         translateModeList(ui->changeMode, ui->changeMode->currentIndex());
         translateModeList(ui->changeMode2, ui->changeMode2->currentIndex());
         translateSidesList(ui->sidesMode->currentIndex());
+        setOnshapeWords();
+        updateOnshapeUI();
     }
 }
 
@@ -1560,11 +1764,13 @@ void TaskExtrudeParameters::setGizmoPositions()
     lengthGizmo1->Gizmo::setDraggerPlacement(center1, direction);
     lengthGizmo1->setVisibility(extrudeType == "Length");
     taperAngleGizmo1->placeOverLinearGizmo(lengthGizmo1);
-    taperAngleGizmo1->setVisibility(extrudeType == "Length");
+    // the draft angle's handle only with Draft ticked (FreeCAD-CH ops#640, rank 22)
+    const bool drafted = !draft || draft->isChecked();
+    taperAngleGizmo1->setVisibility(drafted && extrudeType == "Length");
     lengthGizmo2->Gizmo::setDraggerPlacement(center2, -direction);
     lengthGizmo2->setVisibility(sideType == "Two sides" && extrudeType2 == "Length");
     taperAngleGizmo2->placeOverLinearGizmo(lengthGizmo2);
-    taperAngleGizmo2->setVisibility(sideType == "Two sides" && extrudeType2 == "Length");
+    taperAngleGizmo2->setVisibility(drafted && sideType == "Two sides" && extrudeType2 == "Length");
 
     Base::Vector3d padDir = extrude->Direction.getValue().Normalized();
     Base::Vector3d sketchDir = extrude->getProfileNormal().Normalized();

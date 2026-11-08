@@ -852,13 +852,14 @@ class TestSiblingsGui(ResultBoxGuiCase):
         self.assertIsNotNone(note, "no note")
         self.assertIn("Follows Pocket", note.text())
         self.assertFalse(self.combo().isEnabled())
-        self.assertFalse(self.visible(QtWidgets.QComboBox, "sidesMode").isEnabled())
+        # the Sides box is Onshape's Symmetric checkbox (rank 22)
+        self.assertFalse(self.visible(QtWidgets.QCheckBox, "checkBoxSymmetric").isEnabled())
         self.visible(QtWidgets.QPushButton, "unlinkButton").click()
         self.assertTrue(
             waitFor(
                 lambda: self.visible(QtWidgets.QLabel, "followsNote") is None
-                and self.visible(QtWidgets.QComboBox, "sidesMode") is not None
-                and self.visible(QtWidgets.QComboBox, "sidesMode").isEnabled()
+                and self.visible(QtWidgets.QCheckBox, "checkBoxSymmetric") is not None
+                and self.visible(QtWidgets.QCheckBox, "checkBoxSymmetric").isEnabled()
             ),
             "the panel stays read-only",
         )
@@ -1414,7 +1415,8 @@ class TestOperationRowGui(ResultBoxGuiCase):
         lid = self.editLid(length=5)
         self.assertEqual(
             self.items(self.modeCombo()),
-            ["Dimension", "To last", "To first", "Up to face", "Up to shape", "Through all"],
+            # Onshape's words (rank 22); Up to last stays in the box, hidden
+            ["Blind", "Up to last", "Up to next", "Up to face", "Up to part", "Through all"],
         )
         self.chooseMode("Through all")
         self.assertEqual(lid.Type, "ThroughAll")
@@ -1447,9 +1449,9 @@ class TestOperationRowGui(ResultBoxGuiCase):
         self.openEdit(pocket)
         self.assertEqual(
             self.items(self.modeCombo()),
-            ["Dimension", "Through all", "To first", "Up to face", "Up to shape", "To last"],
+            ["Blind", "Through all", "Up to next", "Up to face", "Up to part", "Up to last"],
         )
-        self.chooseMode("To last")
+        self.chooseMode("Up to last")
         self.assertEqual(pocket.Type, "UpToLast")
         # The panel recomputes the feature alone: during the edit the Body's Shape is the one of
         # the last document recompute, and the result is the tip's, the pocket's own Shape
@@ -1460,7 +1462,7 @@ class TestOperationRowGui(ResultBoxGuiCase):
         self.assertEqual(pocket.Operation, "Union")
         self.assertEqual(pocket.Type, "UpToLast")
         self.assertTrue(pocket.Reversed)
-        self.assertEqual(self.modeCombo().currentText(), "To last")
+        self.assertEqual(self.modeCombo().currentText(), "Up to last")
         self.close(ok=True)
         self.assertEqual(pocket.Type, "UpToLast")
         self.assertTrue(pocket.isValid(), pocket.getStatusString())
@@ -1482,6 +1484,11 @@ class TestOperationRowGui(ResultBoxGuiCase):
         self.assertAlmostEqual(self.body.Shape.Volume, 7000, places=3)
         self.openEdit(lid)
         self.assertEqual(self.modeCombo().currentText(), "Through all")
+        # the taper is Onshape's Draft: offered, its angle shown once ticked (rank 22)
+        draft = self.visible(QtWidgets.QCheckBox, "checkBoxDraft")
+        self.assertIsNotNone(draft, "no Draft box")
+        draft.setChecked(True)
+        pump(0.2)
         self.assertIsNotNone(self.visible(QtWidgets.QWidget, "taperEdit"), "no taper")
         self.assertIsNone(self.visible(QtWidgets.QWidget, "lengthEdit"))
         self.assertIsNone(self.visible(QtWidgets.QWidget, "offsetEdit"))
