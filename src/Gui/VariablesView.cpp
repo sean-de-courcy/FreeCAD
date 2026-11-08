@@ -28,6 +28,7 @@
 #include <map>
 #include <set>
 #include <sstream>
+#include <utility>
 #include <vector>
 
 #include <QAction>
@@ -36,6 +37,7 @@
 #include <QCoreApplication>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QFileInfo>
 #include <QFormLayout>
 #include <QGuiApplication>
 #include <QHeaderView>
@@ -516,6 +518,7 @@ struct PendingVariable
     std::string type;
     QString text;
     QString description;
+    std::string clashChoice;  // askNameClash's answer
 };
 
 std::vector<PendingVariable>& pendingVariables()
@@ -539,6 +542,127 @@ std::vector<PendingVariable> takePendingVariables(const std::string& docName)
         }
     }
     return taken;
+}
+
+/// FreeCAD-CH (ops#640, decision 317): askNameClash's answer for the add that follows: "local",
+/// the path of the imported variable, or empty (no clash). addFromDialog takes it once.
+std::string& pendingClashChoice()
+{
+    static std::string choice;
+    return choice;
+}
+
+/// FreeCAD-CH (ops#640, decision 317): before a local variable @a name is made in the set
+/// @a holderName (empty: a new "Variables" set), when an imported copy defines that name too:
+/// asks which variable `#name` means in new expressions, "Use <the copy's source>" (one copy),
+/// "Use local", "Pick..." (between all of them) or Cancel. False when cancelled; @a choice gets
+/// "local", the imported variable's path, or stays empty (no clash, or a name the add refuses
+/// anyway). Existing expressions keep the variables they use (the message says so).
+bool askNameClash(
+    QWidget* parent,
+    App::Document* doc,
+    const std::string& holderName,
+    const std::string& name,
+    std::string& choice
+)
+{
+    choice.clear();
+    if (!doc || name.empty()) {
+        return true;
+    }
+    App::DocumentObject* target = holderName.empty() ? nullptr : doc->getObject(holderName.c_str());
+    if (!App::VariableLookup::checkVariableName(target, name).empty()) {
+        return true;  // refused by the add, with its reason
+    }
+    std::vector<const App::VarSetCopy*> found;
+    for (const auto& ref : App::VariableLookup::find(doc, name)) {
+        auto copy = freecad_cast<const App::VarSetCopy*>(ref.holder);
+        if (!copy) {
+            // Another local set (or a sheet alias) has the name: `#name` is ambiguous among the
+            // document's own, and no choice of a copy's can settle that.
+            return true;
+        }
+        if (copy != target) {
+            found.push_back(copy);
+        }
+    }
+    if (found.empty()) {
+        return true;
+    }
+    auto source = [](const App::VarSetCopy* copy) {
+        QString file = QFileInfo(QString::fromUtf8(copy->SourcePath.getValue())).fileName();
+        return file.isEmpty() ? QString::fromUtf8(copy->Label.getValue()) : file;
+    };
+    const QString qname = QString::fromStdString(name);
+    QStringList where;
+    for (auto copy : found) {
+        where << VariablesView::tr("%1 (%2)")
+                     .arg(QString::fromUtf8(copy->Label.getValue()), source(copy));
+    }
+    QMessageBox box(
+        QMessageBox::Warning,
+        VariablesView::tr("Name already imported"),
+        VariablesView::tr(
+            "#%1 is already imported: %2 defines it.\n\nWhich variable should #%1 mean in new "
+            "expressions? Existing expressions keep the variable they use."
+        )
+            .arg(qname, where.join(QStringLiteral(", "))),
+        QMessageBox::NoButton,
+        parent
+    );
+    box.setObjectName(QStringLiteral("nameClash"));
+    QPushButton* useImport = nullptr;
+    if (found.size() == 1) {
+        useImport = box.addButton(
+            VariablesView::tr("Use %1").arg(source(found.front())),
+            QMessageBox::AcceptRole
+        );
+        useImport->setObjectName(QStringLiteral("useImport"));
+    }
+    QPushButton* useLocal = box.addButton(VariablesView::tr("Use local"), QMessageBox::AcceptRole);
+    useLocal->setObjectName(QStringLiteral("useLocal"));
+    QPushButton* pick = box.addButton(VariablesView::tr("Pick..."), QMessageBox::ActionRole);
+    pick->setObjectName(QStringLiteral("pick"));
+    QPushButton* cancel = box.addButton(QMessageBox::Cancel);
+    box.setEscapeButton(cancel);
+    box.exec();
+    QAbstractButton* clicked = box.clickedButton();
+    auto pathOf = [&name](const App::VarSetCopy* copy) {
+        return App::VariableRef {copy, name}.path();
+    };
+    if (useImport && clicked == useImport) {
+        choice = pathOf(found.front());
+        return true;
+    }
+    if (clicked == useLocal) {
+        choice = "local";
+        return true;
+    }
+    if (clicked != pick) {
+        return false;
+    }
+    QStringList items;
+    items << VariablesView::tr("%1 (the new local variable)").arg(qname);
+    for (auto copy : found) {
+        items << VariablesView::tr("%1.%2 (%3)")
+                     .arg(QString::fromUtf8(copy->Label.getValue()), qname, source(copy));
+    }
+    bool ok = false;
+    QString item = QInputDialog::getItem(
+        parent,
+        VariablesView::tr("Pick"),
+        VariablesView::tr("#%1 means:").arg(qname),
+        items,
+        0,
+        false,
+        &ok
+    );
+    int index = ok ? static_cast<int>(items.indexOf(item)) : -1;
+    if (index < 0) {
+        return false;
+    }
+    choice = index == 0 ? std::string("local") : pathOf(found[index - 1]);
+    return true;
 }
 
 /// FreeCAD-CH (ops#640, rank 15): Onshape's Variable tool, on Part Design's Features toolbar:
@@ -1467,6 +1591,7 @@ VariablesView::VariablesView(Gui::Document* doc, QWidget* parent)
                     continue;  // not taken back
                 }
                 QString error;
+                pendingClashChoice() = var.clashChoice;
                 if (!addFromDialog(
                         var.docName,
                         holderName,
@@ -1880,6 +2005,25 @@ void VariablesView::addVariable()
         }
         QByteArray type = typeBox->currentData().toByteArray();
         QString error;
+        // FreeCAD-CH (ops#640, decision 317): a name an imported copy has: asked before anything
+        // is made; Cancel keeps the dialog as it is.
+        std::string clashChoice;
+        App::Document* addDoc = App::GetApplication().getDocument(docName.c_str());
+        if (addDoc
+            && !askNameClash(
+                dialog,
+                addDoc,
+                setBox->currentData().toString().toStdString(),
+                nameEdit->text().trimmed().toStdString(),
+                clashChoice
+            )) {
+            return;
+        }
+        if (!view) {
+            dialog->reject();
+            return;
+        }
+        pendingClashChoice() = clashChoice;
         if (view->addFromDialog(
                 docName,
                 setBox->currentData().toString().toStdString(),
@@ -1964,6 +2108,8 @@ bool VariablesView::addFromDialog(
         return false;
     }
     std::string varName = name.toStdString();
+    // FreeCAD-CH (ops#640, decision 317): the answer to the name clash question, taken once.
+    const std::string clashChoice = std::exchange(pendingClashChoice(), std::string());
 
     // Checked before anything is made: the name, and a plain value's unit against the type.
     std::string reason = App::VariableLookup::checkVariableName(target, varName);
@@ -2087,6 +2233,18 @@ bool VariablesView::addFromDialog(
                 }
             }
         }
+        if (!clashChoice.empty()) {
+            // Recorded on the copies that define the name, in this add's undo step.
+            const std::string path = clashChoice == "local"
+                ? App::VariableRef {target, varName}.path()
+                : clashChoice;
+            Gui::Command::runCommand(
+                Gui::Command::Doc,
+                ("__import__('freecad.variables.copies', fromlist=['choose']).choose(App.getDocument('"
+                 + docName + "'), " + pyString(varName) + ", " + pyString(path) + ")")
+                    .c_str()
+            );
+        }
     }
     catch (const Base::Exception& e) {
         return fail(QString::fromUtf8(e.what()));
@@ -2100,7 +2258,9 @@ bool VariablesView::addFromDialog(
     Gui::PropertyEditor::closePropertyTransaction(tid);
     if (tid == 0 && booked) {
         // FreeCAD-CH (ops#640, D-1): joined a dialog's booking; made again if that is cancelled.
-        pendingVariables().push_back({docName, holderName, name, typeName, text, description});
+        pendingVariables().push_back(
+            {docName, holderName, name, typeName, text, description, clashChoice}
+        );
     }
     return true;
 }

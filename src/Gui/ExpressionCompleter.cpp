@@ -44,6 +44,7 @@
 #include <App/Property.h>
 #include <App/PropertyStandard.h>  // FreeCAD-CH (ops#152)
 #include <App/PropertyUnits.h>     // FreeCAD-CH (ops#152)
+#include <App/VariableChoice.h>    // FreeCAD-CH (ops#640, decision 317)
 #include <App/VariableLookup.h>    // FreeCAD-CH (ops#152)
 #include <Gui/Application.h>
 #include <Gui/Command.h>  // FreeCAD-CH (ops#640)
@@ -1147,7 +1148,10 @@ private:
             }
             const QString name = QString::fromStdString(variable.name);
             Candidate candidate;
+            // FreeCAD-CH (ops#640, decision 317): the one the user chose completes to `#name`.
             candidate.completion = holdersPerName[variable.name] > 1
+                    && App::chosenVariableHolder(App::VariableLookup::find(doc, variable.name))
+                        != variable.holder
                 ? QString::fromStdString(variable.path())
                 : u'#' + name;
             candidate.searchText = name.toLower();
