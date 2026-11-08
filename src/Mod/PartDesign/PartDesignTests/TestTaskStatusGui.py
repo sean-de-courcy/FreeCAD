@@ -141,18 +141,18 @@ class TestTaskStatusGui(unittest.TestCase):
         banner = self.banner()
         self.assertFalse(banner.isVisible())
 
-        self.setMode("To last")
+        self.setMode("Up to last")
         self.assertIn("Invalid", pad.State)
         self.checkShowsError(pad)
         # It shows the error without taking the focus from the panel's fields
         self.assertEqual(banner.focusPolicy(), QtCore.Qt.NoFocus)
 
-        self.setMode("Dimension")
+        self.setMode("Blind")
         self.assertNotIn("Invalid", pad.State)
         self.assertTrue(waitFor(lambda: not banner.isVisible()), "the error stays")
         self.assertEqual(banner.text(), "")
 
-        self.setMode("To last")
+        self.setMode("Up to last")
         self.checkShowsError(pad)
 
     def testOpenedInError(self):
@@ -164,7 +164,7 @@ class TestTaskStatusGui(unittest.TestCase):
         self.assertIn("Invalid", pad.State)
         self.edit(pad)
         self.checkShowsError(pad)
-        self.setMode("Dimension")
+        self.setMode("Blind")
         self.assertTrue(waitFor(lambda: not self.banner().isVisible()), "the error stays")
 
     def testPocketUpToNoFace(self):
@@ -280,11 +280,11 @@ class TestTaskStatusGui(unittest.TestCase):
         self.edit(pad)
         banner = self.banner()
         combo = Gui.getMainWindow().findChild(QtWidgets.QComboBox, "changeMode")
-        combo.setCurrentIndex(combo.findText("To last"))
+        combo.setCurrentIndex(combo.findText("Up to last"))
         QtWidgets.QApplication.processEvents()
         self.assertIn("Invalid", pad.State)
         shown = banner.isVisible()
-        combo.setCurrentIndex(combo.findText("Dimension"))
+        combo.setCurrentIndex(combo.findText("Blind"))
         for _ in range(40):
             pump(0.02)
             shown = shown or banner.isVisible()

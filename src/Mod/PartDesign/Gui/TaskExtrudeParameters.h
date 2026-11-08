@@ -249,6 +249,21 @@ private:
     void createSideControllers();
     void updateStartUI();
 
+    /// FreeCAD-CH (ops#640, rank 22): Onshape's fields. Symmetric and Second end position as
+    /// checkboxes for the Sides box (hidden, still what is written), Starting offset as a checkbox
+    /// for the Start box (shown only for a start reference), a Draft checkbox for the taper, and
+    /// Onshape's words; no Recompute on change.
+    void createOnshapeFields();
+    /// The checkboxes follow the boxes they stand for; the taper shows only with Draft ticked.
+    void updateOnshapeUI();
+    /// Onshape's words on the labels (again after a retranslation).
+    void setOnshapeWords();
+    void setSides(SidesMode mode);
+    QCheckBox* symmetric = nullptr;
+    QCheckBox* secondEnd = nullptr;
+    QCheckBox* startingOffset = nullptr;
+    QCheckBox* draft = nullptr;
+
     /// The reference fields, in place of the `.ui` placeholders (ops#150).
     void createFields();
     /// The profile and its regions (ops#150 W3).

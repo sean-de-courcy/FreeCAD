@@ -23,6 +23,9 @@
  ***************************************************************************/
 
 #include <Precision.hxx>
+#include <QComboBox>
+#include <QListView>
+#include <QStandardItemModel>
 
 
 #include <Mod/PartDesign/App/FeaturePocket.h>
@@ -71,16 +74,36 @@ TaskPocketParameters::TaskPocketParameters(ViewProviderPocket* PocketView, QWidg
 
 TaskPocketParameters::~TaskPocketParameters() = default;
 
+namespace
+{
+// Onshape has no Up to last (FreeCAD-CH ops#640, rank 22): its entry stays in the end type box,
+// hidden and unpickable, unless the feature already ends so (an older file)
+void offerOnlyIfChosen(QComboBox* box, int row, int index)
+{
+    const bool hide = index != row;
+    if (auto view = qobject_cast<QListView*>(box->view())) {
+        view->setRowHidden(row, hide);
+    }
+    if (auto model = qobject_cast<QStandardItemModel*>(box->model())) {
+        if (QStandardItem* item = model->item(row)) {
+            item->setEnabled(!hide);
+        }
+    }
+}
+}  // namespace
+
 void TaskPocketParameters::translateModeList(QComboBox* box, int index)
 {
+    // Onshape's words (FreeCAD-CH ops#640, rank 22); the indices stay the Mode values
     box->clear();
-    box->addItem(tr("Dimension"));
+    box->addItem(tr("Blind"));
     box->addItem(tr("Through all"));
-    box->addItem(tr("To first"));
+    box->addItem(tr("Up to next"));
     box->addItem(tr("Up to face"));
-    box->addItem(tr("Up to shape"));
+    box->addItem(tr("Up to part"));
     // Mode::Appended (ops#640): the end type a Pad offers too
-    box->addItem(tr("To last"));
+    box->addItem(tr("Up to last"));
+    offerOnlyIfChosen(box, static_cast<int>(Mode::Appended), index);
     box->setCurrentIndex(index);
 }
 
