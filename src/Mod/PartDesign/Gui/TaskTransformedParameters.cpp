@@ -27,6 +27,9 @@
 #include <QListWidget>
 #include <QTimer>
 
+#include <BRepAdaptor_Surface.hxx>
+#include <TopoDS.hxx>
+
 
 #include <App/Application.h>
 #include <App/Document.h>
@@ -43,6 +46,7 @@
 #include <Mod/PartDesign/App/Body.h>
 #include <Mod/PartDesign/App/FeatureAddSub.h>
 #include <Mod/PartDesign/App/FeatureTransformed.h>
+#include <Mod/Part/App/PartFeature.h>
 
 #include "ui_TaskTransformedParameters.h"
 #include "TaskTransformedParameters.h"
@@ -465,6 +469,55 @@ void TaskTransformedParameters::addReferenceSelectionGate(AllowSelectionFlags al
     std::unique_ptr<Gui::SelectionFilterGate> gateRefPtr(
         new ReferenceSelection(getBaseObject(), allow)
     );
+    std::unique_ptr<Gui::SelectionFilterGate> gateDepPtr(
+        new NoDependentsSelection(getTopTransformedObject())
+    );
+    Gui::Selection().addSelectionGate(new CombineSelectionFilterGates(gateRefPtr, gateDepPtr));
+}
+
+namespace
+{
+
+/// What a ReferenceSelection with `allow` takes, or a cylindrical face it would take as a face of
+/// any kind (FreeCAD-CH ops#640 rank 27)
+class DirectionSelection: public Gui::SelectionFilterGate
+{
+    ReferenceSelection references;
+    ReferenceSelection faces;
+
+public:
+    DirectionSelection(const App::DocumentObject* support, AllowSelectionFlags allow)
+        : Gui::SelectionFilterGate(nullPointer())
+        , references(support, allow)
+        , faces(support, AllowSelection::FACE)
+    {}
+
+    bool allow(App::Document* pDoc, App::DocumentObject* pObj, const char* sSubName) override
+    {
+        if (references.allow(pDoc, pObj, sSubName)) {
+            return true;
+        }
+        if (!pObj || !sSubName || !faces.allow(pDoc, pObj, sSubName)) {
+            return false;
+        }
+        const Part::TopoShape shape = Part::Feature::getTopoShape(
+            pObj,
+            Part::ShapeOption::NeedSubElement | Part::ShapeOption::ResolveLink,
+            sSubName
+        );
+        if (shape.isNull() || shape.shapeType(true) != TopAbs_FACE) {
+            return false;
+        }
+        BRepAdaptor_Surface adapt(TopoDS::Face(shape.getShape()));
+        return adapt.GetType() == GeomAbs_Cylinder;
+    }
+};
+
+}  // namespace
+
+void TaskTransformedParameters::addDirectionSelectionGate(AllowSelectionFlags allow)
+{
+    std::unique_ptr<Gui::SelectionFilterGate> gateRefPtr(new DirectionSelection(getBaseObject(), allow));
     std::unique_ptr<Gui::SelectionFilterGate> gateDepPtr(
         new NoDependentsSelection(getTopTransformedObject())
     );

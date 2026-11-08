@@ -73,6 +73,7 @@ from PartDesignTests.TestMirrored import TestMirrored
 from PartDesignTests.TestLinearPattern import TestLinearPattern
 from PartDesignTests.TestPolarPattern import TestPolarPattern
 from PartDesignTests.TestMultiTransform import TestMultiTransform
+from PartDesignTests.TestPatternRules import TestPatternRules  # FreeCAD-CH, ops#640
 from PartDesignTests.TestDraftRules import TestDraftNeedsNeutralPlane  # FreeCAD-CH, ops#640
 from PartDesignTests.TestHoleDepth import TestHoleDepth  # FreeCAD-CH, ops#640
 from PartDesignTests.TestBoolean import TestBoolean

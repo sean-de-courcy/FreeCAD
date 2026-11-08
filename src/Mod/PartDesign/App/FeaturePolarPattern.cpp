@@ -51,6 +51,21 @@ PROPERTY_SOURCE_WITH_EXTENSIONS(PartDesign::PolarPattern, PartDesign::Transforme
 PolarPattern::PolarPattern()
 {
     Part::PolarPatternExtension::initExtension(this);
+
+    ADD_PROPERTY_TYPE(
+        Centered,
+        (false),
+        "PolarPattern",
+        App::Prop_None,
+        "The instances run both ways from the original, which is the middle one"
+    );
+    ADD_PROPERTY_TYPE(
+        SkippedInstances,
+        (),
+        "Skip",
+        App::Prop_None,
+        "Instances not made: indexes counted from 0 at the first instance"
+    );
 }
 
 gp_Ax2 PolarPattern::getRotation() const
@@ -83,7 +98,25 @@ gp_Ax2 PolarPattern::getRotation() const
 
 const std::list<gp_Trsf> PolarPattern::getTransformations(const std::vector<App::DocumentObject*>)
 {
-    return calculateTransformations();
+    const int count = std::max(static_cast<int>(Occurrences.getValue()), 1);
+    return centerInstances(calculateTransformations(), count, 1, Centered.getValue(), false);
+}
+
+std::vector<std::size_t> PolarPattern::getSkippedPositions() const
+{
+    const int count = std::max(static_cast<int>(Occurrences.getValue()), 1);
+    const int middle = Centered.getValue() ? (count - 1) / 2 : 0;
+    std::vector<std::size_t> positions;
+    for (long index : SkippedInstances.getValues()) {
+        if (index < 0 || index >= count) {
+            continue;
+        }
+        const auto position = static_cast<std::size_t>(centeredIndex(static_cast<int>(index), middle));
+        if (position != 0) {
+            positions.push_back(position);
+        }
+    }
+    return positions;
 }
 
 void PolarPattern::handleChangedPropertyType(

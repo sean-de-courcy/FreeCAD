@@ -55,6 +55,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestLinearPattern.py
     PartDesignTests/TestPolarPattern.py
     PartDesignTests/TestMultiTransform.py
+    PartDesignTests/TestPatternRules.py
     PartDesignTests/TestDraftRules.py
     PartDesignTests/TestHoleDepth.py
     PartDesignTests/TestBoolean.py
@@ -122,6 +123,7 @@ if(BUILD_GUI)
         PartDesignTests/TestPickFirstGui.py
         PartDesignTests/TestEscCancelsGui.py
         PartDesignTests/TestSketchPlaneGui.py
+        PartDesignTests/TestPatternDefaultsGui.py
     )
 endif(BUILD_GUI)
 

@@ -54,6 +54,29 @@ PROPERTY_SOURCE_WITH_EXTENSIONS(PartDesign::LinearPattern, PartDesign::Transform
 LinearPattern::LinearPattern()
 {
     Part::LinearPatternExtension::initExtension(this);
+
+    ADD_PROPERTY_TYPE(
+        Centered,
+        (false),
+        "Direction 1",
+        App::Prop_None,
+        "The instances run both ways from the original, which is the middle one"
+    );
+    ADD_PROPERTY_TYPE(
+        Centered2,
+        (false),
+        "Direction 2",
+        App::Prop_None,
+        "The instances run both ways from the original in the second direction"
+    );
+    ADD_PROPERTY_TYPE(
+        SkippedInstances,
+        (),
+        "Skip",
+        App::Prop_None,
+        "Instances not made: (i, j) index pairs, flattened, counted from 0 at the negative end of "
+        "each direction"
+    );
 }
 
 gp_Dir LinearPattern::getDirectionFromProperty(const App::PropertyLinkSub& dirProp) const
@@ -80,12 +103,61 @@ gp_Dir LinearPattern::getDirectionFromProperty(const App::PropertyLinkSub& dirPr
         return Base::convertTo<gp_Vec>(dir);
     }
 
+    // FreeCAD-CH (ops#640 rank 27, E-2): a cylindrical face steps along its axis, as Onshape's
+    // Direction field takes it; the extension takes straight edges and planar faces
+    if (auto* feature = freecad_cast<Part::Feature*>(refObject)) {
+        const auto& subs = dirProp.getSubValues();
+        if (!subs.empty() && subs[0].compare(0, 4, "Face") == 0) {
+            TopoDS_Shape ref = feature->Shape.getShape().getSubShape(subs[0].c_str(), /*silent=*/true);
+            if (!ref.IsNull() && ref.ShapeType() == TopAbs_FACE) {
+                BRepAdaptor_Surface adapt(TopoDS::Face(ref));
+                if (adapt.GetType() == GeomAbs_Cylinder) {
+                    gp_Dir dir = adapt.Cylinder().Axis().Direction();
+                    dir.Transform(this->getLocation().Inverted().Transformation());
+                    return dir;
+                }
+            }
+        }
+    }
+
     return Part::LinearPatternExtension::getDirectionFromProperty(dirProp);
 }
 
 const std::list<gp_Trsf> LinearPattern::getTransformations(const std::vector<App::DocumentObject*>)
 {
-    return calculateTransformations();
+    const int first = std::max(static_cast<int>(Occurrences.getValue()), 1);
+    const int second = std::max(static_cast<int>(Occurrences2.getValue()), 1);
+    return centerInstances(
+        calculateTransformations(),
+        first,
+        second,
+        Centered.getValue(),
+        Centered2.getValue()
+    );
+}
+
+std::vector<std::size_t> LinearPattern::getSkippedPositions() const
+{
+    const int first = std::max(static_cast<int>(Occurrences.getValue()), 1);
+    const int second = std::max(static_cast<int>(Occurrences2.getValue()), 1);
+    const int middle = Centered.getValue() ? (first - 1) / 2 : 0;
+    const int middle2 = Centered2.getValue() ? (second - 1) / 2 : 0;
+    const auto& pairs = SkippedInstances.getValues();
+    std::vector<std::size_t> positions;
+    for (std::size_t k = 0; k + 1 < pairs.size(); k += 2) {
+        const long i = pairs[k];
+        const long j = pairs[k + 1];
+        if (i < 0 || i >= first || j < 0 || j >= second) {
+            continue;
+        }
+        const auto position = static_cast<std::size_t>(centeredIndex(static_cast<int>(i), middle))
+                * static_cast<std::size_t>(second)
+            + static_cast<std::size_t>(centeredIndex(static_cast<int>(j), middle2));
+        if (position != 0) {
+            positions.push_back(position);
+        }
+    }
+    return positions;
 }
 
 std::vector<Transformed::Step> LinearPattern::getTransformationSteps() const

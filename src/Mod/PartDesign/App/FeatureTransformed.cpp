@@ -101,6 +101,77 @@ std::vector<std::string> instanceNumbers(std::vector<Transformed::Step> steps, s
     return numbers;
 }
 
+/* FreeCAD-CH (ops#640, B3-3b, A-2' d): the copies (indexes into shapes, from 1; shapes[0] is the
+ * support) that the fuse of shapes left in solids touching nothing of the support. Onshape's
+ * feature pattern and mirror (Reapply features off) drop such an instance silently; a copy that
+ * reaches the part, even partly, merges. Cheap in the usual case: only a fuse that left more
+ * solids than the support had is looked at. Two copies off the part that touch each other are in
+ * one loose solid, and both are dropped. Touching is shapesTouch(): a copy that meets the part only
+ * along an edge or at a vertex touches it and is kept (a lump on the part, as the fuse leaves it).
+ * Not caught: a copy bridging two of the support's solids while another floats leaves the solid
+ * count unchanged, and the floating copy is kept.
+ */
+std::vector<std::size_t> floatingCopies(
+    const Part::TopoShape& fused,
+    const Part::TopoShape& support,
+    const std::vector<Part::TopoShape>& shapes
+)
+{
+    std::vector<std::size_t> floating;
+    if (fused.isNull() || support.isNull()
+        || fused.countSubShapes(TopAbs_SOLID) <= support.countSubShapes(TopAbs_SOLID)) {
+        return floating;
+    }
+    std::vector<TopoDS_Shape> loose;
+    for (TopExp_Explorer xp(fused.getShape(), TopAbs_SOLID); xp.More(); xp.Next()) {
+        if (!FeatureAddSub::shapesTouch(xp.Current(), support.getShape())) {
+            loose.push_back(xp.Current());
+        }
+    }
+    if (loose.empty()) {
+        return floating;
+    }
+    for (std::size_t i = 1; i < shapes.size(); ++i) {
+        for (const auto& solid : loose) {
+            if (FeatureAddSub::shapesTouch(shapes[i].getShape(), solid)) {
+                floating.push_back(i);
+                break;
+            }
+        }
+    }
+    return floating;
+}
+
+/* Whether the original's tool (in the support's frame) touches nothing of the original's own base:
+ * the original made a part of its own (Onshape's New, or an Add touching nothing). Its copies are
+ * new parts too then, and none is dropped. A first feature has no base: its tool is the part.
+ */
+bool makesItsOwnPart(const FeatureAddSub& original, const Part::TopoShape& tool, const gp_Trsf& trsfInv)
+{
+    const Part::TopoShape base = original.getBaseTopoShape(/*silent=*/true);
+    if (base.isNull() || base.countSubShapes(TopAbs_SOLID) == 0) {
+        return true;
+    }
+    TopoDS_Shape moved = base.getShape().Moved(TopLoc_Location(trsfInv));
+    return !FeatureAddSub::shapesTouch(tool.getShape(), moved);
+}
+
+/// Whether obj is a step of a MultiTransform: listed in one's Transformations
+bool isListedStep(const Transformed& obj)
+{
+    for (auto const* user : obj.getInList()) {
+        auto multi = freecad_cast<const MultiTransform*>(user);
+        if (!multi) {
+            continue;
+        }
+        const auto& steps = multi->Transformations.getValues();
+        if (std::ranges::find(steps, &obj) != steps.end()) {
+            return true;
+        }
+    }
+    return false;
+}
+
 }  // namespace
 
 namespace PartDesign
@@ -447,6 +518,27 @@ void Transformed::onChanged(const App::Property* prop)
 App::DocumentObjectExecReturn* Transformed::execute()
 {
     if (isMultiTransformChild()) {
+        // FreeCAD-CH (ops#640): a MultiTransform's step computes nothing of its own. A pattern or
+        // mirror of nothing is red, as Onshape's is, and stays out of the chain: it contributes
+        // nothing (a reorder's parked Originals have their own message, before this runs)
+        if (isListedStep(*this) || hasParkedOriginals(this)) {
+            return App::DocumentObject::StdReturn;
+        }
+        if (freecad_cast<const Mirrored*>(this)) {
+            return new App::DocumentObjectExecReturn(
+                QT_TRANSLATE_NOOP("Exception", "Select features to mirror.")
+            );
+        }
+        if (freecad_cast<const LinearPattern*>(this) || freecad_cast<const PolarPattern*>(this)) {
+            return new App::DocumentObjectExecReturn(
+                QT_TRANSLATE_NOOP("Exception", "Select features to pattern.")
+            );
+        }
+        if (freecad_cast<const MultiTransform*>(this)) {
+            return new App::DocumentObjectExecReturn(
+                QT_TRANSLATE_NOOP("Exception", "Select features to transform.")
+            );
+        }
         return App::DocumentObject::StdReturn;
     }
 
@@ -516,6 +608,11 @@ App::DocumentObjectExecReturn* Transformed::execute()
     const auto numbers = nameInstances
         ? instanceNumbers(getTransformationSteps(), transformations.size())
         : std::vector<std::string>();
+    // Onshape's Skip instances (ops#640 rank 8): by position in the list
+    const auto skipped = getSkippedPositions();
+    // The copies of fused originals tried, and those made: none made fails (ops#640, A-2' d)
+    std::size_t copiesTried = 0;
+    std::size_t copiesMade = 0;
     auto getTransformedCompShape = [&](const auto& supportShape, const auto& origShape) {
         std::vector<TopoShape> shapes = {supportShape};
         int instance = 1;
@@ -527,6 +624,9 @@ App::DocumentObjectExecReturn* Transformed::execute()
             }
             auto opName = nameInstances ? std::string() : Data::indexSuffix(instance);
             ++instance;
+            if (std::ranges::find(skipped, static_cast<std::size_t>(instance - 1)) != skipped.end()) {
+                continue;
+            }
             shapes.emplace_back(makeResultShape(origShape)
                                     .makeElementTransform(origShape, *transformIter, opName.c_str()));
             if (nameInstances) {
@@ -579,7 +679,7 @@ App::DocumentObjectExecReturn* Transformed::execute()
                     if (Base::Sequencer().wasCanceled()) {
                         return new App::DocumentObjectExecReturn("User aborted");
                     }
-                    supportShape = makeResultShape(supportShape).makeElementBoolean(
+                    auto fused = makeResultShape(supportShape).makeElementBoolean(
                         Part::OpCodes::Fuse,
                         shapes,
                         nullptr,
@@ -588,6 +688,38 @@ App::DocumentObjectExecReturn* Transformed::execute()
                         inputCheck,
                         &booleanInputsValid
                     );
+                    copiesTried += shapes.size() - 1;
+                    // FreeCAD-CH (ops#640, B3-3b): a copy entirely off the part is dropped, with
+                    // no message and no lump: the fuse is made again without it. The others keep
+                    // their instance numbers
+                    auto floating = floatingCopies(fused, supportShape, shapes);
+                    if (!floating.empty() && !makesItsOwnPart(*feature, fuseShape, trsfInv)) {
+                        std::vector<Part::TopoShape> kept;
+                        for (std::size_t i = 0; i < shapes.size(); ++i) {
+                            if (std::ranges::find(floating, i) == floating.end()) {
+                                kept.push_back(shapes[i]);
+                            }
+                        }
+                        if (kept.size() > 1) {
+                            fused = makeResultShape(supportShape).makeElementBoolean(
+                                Part::OpCodes::Fuse,
+                                kept,
+                                nullptr,
+                                -1.0,
+                                Part::ElementMapPolicy::Propagate,
+                                inputCheck,
+                                &booleanInputsValid
+                            );
+                        }
+                        else {
+                            fused = supportShape;
+                        }
+                        copiesMade += kept.size() - 1;
+                    }
+                    else {
+                        copiesMade += shapes.size() - 1;
+                    }
+                    supportShape = fused;
                     inputCheck = ownResultCheck();
                 }
                 if (!cutShape.isNull()) {
@@ -595,6 +727,9 @@ App::DocumentObjectExecReturn* Transformed::execute()
                     if (Base::Sequencer().wasCanceled()) {
                         return new App::DocumentObjectExecReturn("User aborted");
                     }
+                    // A copy that cuts nothing changes nothing: never dropped, it counts as made
+                    copiesTried += shapes.size() - 1;
+                    copiesMade += shapes.size() - 1;
                     supportShape = makeResultShape(supportShape).makeElementBoolean(
                         Part::OpCodes::Cut,
                         shapes,
@@ -606,6 +741,15 @@ App::DocumentObjectExecReturn* Transformed::execute()
                     );
                     inputCheck = ownResultCheck();
                 }
+            }
+            // FreeCAD-CH (ops#640, A-2' d): no copy reached the part. Onshape's mirror of a
+            // feature whose image is entirely off the part is red with this message (its second
+            // sentence, "Try selecting "Reapply features" option.", names an option this
+            // feature doesn't have); the failure rule passes the base through: no lump
+            if (copiesTried > 0 && copiesMade == 0) {
+                return new App::DocumentObjectExecReturn(
+                    QT_TRANSLATE_NOOP("Exception", "Could not create all instances as entered.")
+                );
             }
             break;
         case Mode::WholeShape: {
@@ -637,6 +781,35 @@ App::DocumentObjectExecReturn* Transformed::execute()
     }
 
     return App::DocumentObject::StdReturn;
+}
+
+std::list<gp_Trsf> Transformed::centerInstances(
+    const std::list<gp_Trsf>& transformations,
+    int rows,
+    int columns,
+    bool centerRows,
+    bool centerColumns
+)
+{
+    const int middleRow = centerRows ? (rows - 1) / 2 : 0;
+    const int middleColumn = centerColumns ? (columns - 1) / 2 : 0;
+    if (rows < 1 || columns < 1 || static_cast<std::size_t>(rows) * columns != transformations.size()
+        || (middleRow == 0 && middleColumn == 0)) {
+        return transformations;
+    }
+    std::vector<gp_Trsf> list(transformations.begin(), transformations.end());
+    // Relative to the instance at the middle: it becomes the original, untransformed
+    const gp_Trsf toMiddle = list[static_cast<std::size_t>(middleRow) * columns + middleColumn].Inverted();
+    std::vector<gp_Trsf> centered(list.size());
+    for (int row = 0; row < rows; ++row) {
+        for (int column = 0; column < columns; ++column) {
+            const auto from = static_cast<std::size_t>(row) * columns + column;
+            const auto to = static_cast<std::size_t>(centeredIndex(row, middleRow)) * columns
+                + centeredIndex(column, middleColumn);
+            centered[to] = toMiddle.Multiplied(list[from]);
+        }
+    }
+    return {centered.begin(), centered.end()};
 }
 
 TopoDS_Shape Transformed::getRemainingSolids(const TopoDS_Shape& shape)

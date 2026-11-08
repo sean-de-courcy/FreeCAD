@@ -96,6 +96,9 @@ void TaskMirroredParameters::setupParameterUI(QWidget* widget)
             auto vpOrigin = static_cast<ViewProviderCoordinateSystem*>(
                 Gui::Application::Instance->getViewProvider(origin)
             );
+            // FreeCAD-CH (ops#640, rank 52): a new part studio's planes are shown through the same
+            // temporary visibility; they are shown again when the dialog closes
+            setProperty("studioPlanes", vpOrigin->isTemporaryVisibility());
             vpOrigin->setTemporaryVisibility(Gui::DatumElement::Planes);
         }
         catch (const Base::Exception& ex) {
@@ -260,6 +263,11 @@ TaskMirroredParameters::~TaskMirroredParameters()
                 Gui::Application::Instance->getViewProvider(origin)
             );
             vpOrigin->resetTemporaryVisibility();
+            // The studio's planes stay (ops#640, rank 52)
+            if (property("studioPlanes").toBool()) {
+                vpOrigin->setTemporaryVisibility(Gui::DatumElement::Planes);
+                vpOrigin->setPlaneLabelVisibility(true);
+            }
         }
     }
     catch (const Base::Exception& ex) {
