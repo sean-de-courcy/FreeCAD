@@ -156,5 +156,114 @@ class TestSeveralAssemblies(AssembliesBase):
         self.assertPlacement(self.doc.getObject("A1"), self.target1, "Assembly 1 after the undo")
 
 
+class TestJointErrors(AssembliesBase):
+    """Joints in trouble are reported, not dropped silently (gaps A10, A11; Onshape: a mate in
+    trouble turns red, a mate whose face is gone is red). Designed model: a Body with a 10 mm box
+    notched by a 4 mm cube at its origin corner; the notch's inner face at x = 4 is picked, then
+    the notch is deleted, so the face is gone."""
+
+    def notchedBody(self, asm):
+        body = asm.newObject("PartDesign::Body", "Body")
+        box = body.newObject("PartDesign::AdditiveBox", "Box")
+        box.Length = box.Width = box.Height = 10
+        notch = body.newObject("PartDesign::SubtractiveBox", "Notch")
+        notch.Length = notch.Width = notch.Height = 4
+        self.doc.recompute()
+        self.assertAlmostEqual(body.Shape.Volume, 1000 - 64, 6)
+        faces = [
+            i
+            for i, f in enumerate(body.Shape.Faces, 1)
+            if f.Area < 20 and abs(f.CenterOfMass.x - 4) < 1e-6
+        ]
+        self.assertEqual(len(faces), 1, faces)
+        return body, box, notch, f"Face{faces[0]}"
+
+    def testMissingReferenceIsAnError(self):
+        """The notch deleted: the joint is in error, its message says the reference is missing,
+        the assembly lists it in ErrorJoints and the solve leaves it out (the other cube stays)."""
+        asm = self.assembly("Assembly")
+        body, box, notch, face = self.notchedBody(asm)
+        other_plc = App.Placement(App.Vector(40, 0, 0), App.Rotation())
+        other = self.cube(asm, "Other", other_plc)
+        self.doc.recompute()
+        joint = self.jointGroup(asm).newObject("App::FeaturePython", "Fixed")
+        JointObject.Joint(joint, 0)
+        joint.Proxy.setJointConnectors(joint, [[other, ["Face6", "Vertex7"]], [body, [face, face]]])
+        self.doc.recompute()
+        self.assertTrue(joint.isValid(), joint.getStatusString())
+        self.assertEqual(asm.ErrorJoints, [])
+
+        body.Tip = box
+        self.doc.removeObject(notch.Name)
+        self.doc.recompute()
+        self.assertFalse(joint.isValid(), "a joint whose face is gone is not in error")
+        self.assertIn("Missing", joint.getStatusString())
+        self.assertEqual(asm.ErrorJoints, [joint.Name])
+        moved = other.Placement
+        asm.solve()
+        self.assertTrue(other.Placement.isSame(moved, 1e-9), "the joint in error moved a part")
+        # Suppressed, it is no longer reported
+        joint.Suppressed = True
+        self.assertEqual(asm.ErrorJoints, [])
+
+    def testMalformedJointIsReported(self):
+        """A joint with both picks on one cube is malformed: the solve leaves it out and lists it
+        in MalformedJoints (before: the panel's "Malformed joints" line could never show)."""
+        asm = self.assembly("Assembly")
+        a = self.cube(asm, "A", App.Placement())
+        b = self.cube(asm, "B", App.Placement(App.Vector(40, 0, 0), App.Rotation()))
+        self.doc.recompute()
+        good = self.fixedJoint(asm, a, b, "Good")
+        bad = self.jointGroup(asm).newObject("App::FeaturePython", "Bad")
+        JointObject.Joint(bad, 0)
+        bad.Reference1 = [a, ["Face6", "Vertex7"]]
+        bad.Reference2 = [a, ["Face1", "Vertex1"]]
+        self.assertEqual(asm.solve(), 0)
+        self.assertEqual(asm.MalformedJoints, [bad.Name])
+        self.assertPlacement(a, b.Placement, "the good joint still holds")
+        self.doc.removeObject(bad.Name)
+        self.assertEqual(asm.solve(), 0)
+        self.assertEqual(asm.MalformedJoints, [])
+        self.assertTrue(good.isValid())
+
+
+class TestStudioParts(AssembliesBase):
+    """The implicit Part Studio's parts, as Insert's whole-studio row inserts them (gap A16)."""
+
+    def testImplicitStudioParts(self):
+        """Two Bodies, a sketch, a Cut of two Part boxes at the top level and a Body in an
+        App::Part studio: the implicit studio's parts are the two Bodies and the Cut (not the
+        sketch, the Cut's inputs or the other studio's Body); an empty Body is no part."""
+        import UtilsAssembly
+
+        doc = self.doc
+        bodies = []
+        for name, x in (("Body", 0), ("Body001", 20)):
+            body = doc.addObject("PartDesign::Body", name)
+            box = body.newObject("PartDesign::AdditiveBox", name + "Box")
+            box.Length = box.Width = box.Height = 10
+            body.Placement.Base = App.Vector(x, 0, 0)
+            bodies.append(body)
+        doc.addObject("PartDesign::Body", "Empty")
+        doc.addObject("Sketcher::SketchObject", "Sketch")
+        tool = doc.addObject("Part::Box", "Tool")
+        base = doc.addObject("Part::Box", "Base")
+        base.Placement.Base = App.Vector(0, 40, 0)
+        tool.Placement.Base = App.Vector(5, 45, 5)
+        cut = doc.addObject("Part::Cut", "Cut")
+        cut.Base, cut.Tool = base, tool
+        studio = doc.addObject("App::Part", "Part")
+        studio.Label = "Part Studio 2"
+        inner = doc.addObject("PartDesign::Body", "Inner")
+        studio.addObject(inner)
+        inner.newObject("PartDesign::AdditiveBox", "InnerBox")
+        asm = self.assembly("Assembly")
+        doc.recompute()
+        parts = UtilsAssembly.implicitStudioParts(doc)
+        self.assertEqual([p.Name for p in parts], ["Body", "Body001", "Cut"])
+        self.assertAlmostEqual(cut.Shape.Volume, 1000 - 125, 6)
+        self.assertNotIn(asm, parts)
+
+
 if __name__ == "__main__":
     unittest.main()

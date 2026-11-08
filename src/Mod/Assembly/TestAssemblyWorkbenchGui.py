@@ -8,6 +8,12 @@ from AssemblyTests.TestOnshapeJointsGui import TestOnshapeJointsGui  # ops#640, 
 # Use the modules so that code checkers don't complain (flake8)
 True if TestOnshapeJointsGui else False
 
-from AssemblyTests.TestOnshapeAssembliesGui import TestSeveralAssembliesGui  # ops#640, ops#651
+from AssemblyTests.TestOnshapeAssembliesGui import (  # ops#640, ops#651
+    TestSeveralAssembliesGui,
+    TestJointErrorsGui,
+    TestInsertStudioGui,
+)
 
 True if TestSeveralAssembliesGui else False
+True if TestJointErrorsGui else False
+True if TestInsertStudioGui else False

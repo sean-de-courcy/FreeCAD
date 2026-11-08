@@ -131,6 +131,36 @@ def isLinkGroup(obj):
     return obj.TypeId == "App::Link" and obj.ElementCount > 0
 
 
+# FreeCAD-CH (ops#640 round 7, gap A16): the implicit Part Studio's tab name (App::DocumentTabs)
+IMPLICIT_STUDIO = "*"
+
+
+def implicitStudioParts(doc):
+    """The implicit Part Studio's parts, in document order: its top-level Bodies and other solids
+    that no other object of the studio uses (a Box a Cut consumed is not a part), not merged into
+    another part; sketches, datums and empty Bodies are not parts."""
+    parts = []
+    for obj in doc.Objects:
+        if App.DocumentTabs.tabOf(obj) != IMPLICIT_STUDIO or obj.getParentGeoFeatureGroup():
+            continue
+        if not obj.isDerivedFrom("Part::Feature") or obj.isDerivedFrom("Part::Part2DObject"):
+            continue
+        if isMergedPart(obj):
+            continue
+        shape = getattr(obj, "Shape", None)
+        if shape is None or shape.isNull() or not shape.Solids:
+            continue
+        if not obj.isDerivedFrom("PartDesign::Body") and any(
+            user.isDerivedFrom("Part::Feature")
+            and not user.isDerivedFrom("PartDesign::Body")
+            and App.DocumentTabs.tabOf(user) == IMPLICIT_STUDIO
+            for user in obj.InList
+        ):
+            continue
+        parts.append(obj)
+    return parts
+
+
 def isMergedPart(obj):
     """FreeCAD-CH (ops#325, design 2.6): whether obj is a part merged into another, a Body whose
     MergedInto names a Merge in a part (as PartDesign's Boolean.mergeOf). A link counts as the
