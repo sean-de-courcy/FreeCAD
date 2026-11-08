@@ -86,6 +86,9 @@ set(PartDesign_TestScripts
     PartDesignTests/TestDeletePart.py
     PartDesignTests/TestStudio.py
     PartDesignTests/TestStudioSequence.py
+    PartDesignTests/TestMergeScope.py
+    PartDesignTests/TestResultRules.py
+    PartDesignTests/TestDatumPlanePoint.py
 )
 
 if(BUILD_GUI)
@@ -113,6 +116,7 @@ if(BUILD_GUI)
         PartDesignTests/TestProblemNavigationGui.py
         PartDesignTests/TestToolbarsGui.py
         PartDesignTests/TestContextMenuGui.py
+        PartDesignTests/TestMergeScopeGui.py
     )
 endif(BUILD_GUI)
 

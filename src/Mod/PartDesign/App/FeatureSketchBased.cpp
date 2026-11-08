@@ -83,6 +83,7 @@
 #include <Mod/Part/App/TopoShapeOpCode.h>
 
 #include "Body.h"
+#include "FeatureExtrude.h"
 #include "FeatureSketchBased.h"
 #include "DatumLine.h"
 #include "DatumPlane.h"
@@ -217,13 +218,25 @@ void ProfileBased::transformPlacement(const Base::Placement& transform)
     positionByPrevious();
 }
 
+namespace
+{
+// What a profile feature with no profile says. An Extrude says it in Onshape's words (hands-on
+// check R3, ops#640: "Select face or sketch region to extrude"); the other profile features keep
+// their own until Onshape's words for them are seen
+const char* noProfileMessage(const ProfileBased* feature, const char* otherwise)
+{
+    return feature->isDerivedFrom<FeatureExtrude>() ? "Select face or sketch region to extrude"
+                                                    : otherwise;
+}
+}  // namespace
+
 Part::Part2DObject* ProfileBased::getVerifiedSketch(bool silent) const
 {
     App::DocumentObject* result = Profile.getValue();
     const char* err = nullptr;
 
     if (!result) {
-        err = "No profile linked at all";
+        err = noProfileMessage(this, "No profile linked at all");
     }
     else {
         if (!result->isDerivedFrom<Part::Part2DObject>()) {
@@ -246,7 +259,7 @@ Part::Feature* ProfileBased::getVerifiedObject(bool silent) const
     const char* err = nullptr;
 
     if (!result) {
-        err = "No object linked";
+        err = noProfileMessage(this, "No object linked");
     }
     else {
         if (!result->isDerivedFrom<Part::Feature>()) {
@@ -272,7 +285,9 @@ TopoShape ProfileBased::getTopoShapeVerifiedFace(
         if (silent) {
             return makeTopoShape();
         }
-        throw Base::ValueError("No profile linked");
+        throw Base::ValueError(
+            profile ? "No profile linked" : noProfileMessage(this, "No profile linked")
+        );
     }
     const auto& subs = profile ? _subs : Profile.getSubValues();
     try {
@@ -454,7 +469,7 @@ TopoDS_Shape ProfileBased::getVerifiedFace(bool silent) const
     std::string _err;
 
     if (!result) {
-        err = "No profile linked";
+        err = noProfileMessage(this, "No profile linked");
     }
     else if (AllowMultiFace.getValue()) {
         try {

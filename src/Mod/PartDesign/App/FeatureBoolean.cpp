@@ -42,6 +42,7 @@
 
 #include "FeatureBoolean.h"
 #include "Body.h"
+#include "FeatureSketchBased.h"
 
 FC_LOG_LEVEL_INIT("PartDesign", true, true);
 
@@ -468,28 +469,19 @@ std::vector<App::DocumentObject*> Boolean::mergedBodies() const
     return bodies;
 }
 
-Boolean* Boolean::makeMerge(App::DocumentObject* at, const std::vector<App::DocumentObject*>& bodies)
+namespace
 {
-    auto survivor = freecad_cast<Body*>(at);
-    App::DocumentObject* after = nullptr;
-    if (survivor) {
-        after = lastSolid(survivor);
-    }
-    else if ((survivor = Body::findBodyOf(at)) && Body::isSolidFeature(at)) {
-        after = at;
-    }
-    if (!survivor || !after) {
-        throw Base::ValueError(
-            "Merge: " + label(at) + " is neither a solid feature in a part nor a part with a solid"
-        );
-    }
-    if (Boolean* merge = mergeOf(survivor)) {
-        throw Base::ValueError(
-            "Merge: " + label(survivor) + " is merged into " + label(Body::findBodyOf(merge))
-            + "; merge into that part"
-        );
-    }
-    std::vector<Body*> absorbed;
+// The merged features for a Merge of `bodies` in `survivor`, right after `after`: each Body's last
+// solid feature, in `absorbed` the Bodies. Refused, with the reason, before anything changes; a
+// Body that `self` merges already may stay (setMergeScope)
+std::vector<App::DocumentObject*> mergeTools(
+    Body* survivor,
+    App::DocumentObject* after,
+    const std::vector<App::DocumentObject*>& bodies,
+    std::vector<Body*>& absorbed,
+    const Boolean* self
+)
+{
     std::vector<App::DocumentObject*> tools;
     for (auto obj : bodies) {
         auto body = freecad_cast<Body*>(obj);
@@ -508,17 +500,30 @@ Boolean* Boolean::makeMerge(App::DocumentObject* at, const std::vector<App::Docu
                 + "'s studio (one container, placed alike)"
             );
         }
-        if (Boolean* merge = mergeOf(body)) {
+        if (Boolean* merge = Boolean::mergeOf(body); merge && merge != self) {
             throw Base::ValueError(
                 "Merge: " + label(body) + " is merged into "
                 + label(Body::findBodyOf(merge)) + " already"
             );
         }
+        // A part merged here already keeps its merged feature: one added to it later is locked
+        // (mergeLock), not merged
+        App::DocumentObject* merged = nullptr;
+        if (self && Boolean::mergeOf(body) == self) {
+            for (auto tool : self->Group.getValues()) {
+                if (Body::findBodyOf(tool) == body) {
+                    merged = tool;
+                    break;
+                }
+            }
+        }
         // A held feature would merge a frozen shape (design 2.6)
-        if (body->isRolledBack()) {
+        if (!merged && body->isRolledBack()) {
             throw Base::ValueError("Merge: Roll " + label(body) + " to the end first");
         }
-        App::DocumentObject* merged = lastSolid(body);
+        if (!merged) {
+            merged = lastSolid(body);
+        }
         if (!merged) {
             throw Base::ValueError("Merge: " + label(body) + " has no solid to merge");
         }
@@ -550,6 +555,34 @@ Boolean* Boolean::makeMerge(App::DocumentObject* at, const std::vector<App::Docu
             + label(dependency) + ", or change " + label(merged)
         );
     }
+
+    return tools;
+}
+}  // namespace
+
+Boolean* Boolean::makeMerge(App::DocumentObject* at, const std::vector<App::DocumentObject*>& bodies)
+{
+    auto survivor = freecad_cast<Body*>(at);
+    App::DocumentObject* after = nullptr;
+    if (survivor) {
+        after = lastSolid(survivor);
+    }
+    else if ((survivor = Body::findBodyOf(at)) && Body::isSolidFeature(at)) {
+        after = at;
+    }
+    if (!survivor || !after) {
+        throw Base::ValueError(
+            "Merge: " + label(at) + " is neither a solid feature in a part nor a part with a solid"
+        );
+    }
+    if (Boolean* merge = mergeOf(survivor)) {
+        throw Base::ValueError(
+            "Merge: " + label(survivor) + " is merged into " + label(Body::findBodyOf(merge))
+            + "; merge into that part"
+        );
+    }
+    std::vector<Body*> absorbed;
+    std::vector<App::DocumentObject*> tools = mergeTools(survivor, after, bodies, absorbed, nullptr);
 
     App::Document* doc = survivor->getDocument();
     const bool atTip = survivor->Tip.getValue() == after;
@@ -589,6 +622,90 @@ Boolean* Boolean::makeMerge(App::DocumentObject* at, const std::vector<App::Docu
         }
         link->setValue(merge);
         body->Visibility.setValue(false);
+    }
+    return merge;
+}
+
+Boolean* Boolean::mergeAfter(const App::DocumentObject* feature)
+{
+    Body* body = Body::findBodyOf(feature);
+    if (!body || !Body::isSolidFeature(feature)) {
+        return nullptr;
+    }
+    auto next = freecad_cast<Boolean*>(
+        body->getNextSolidFeature(const_cast<App::DocumentObject*>(feature))
+    );
+    return next && next->isMerge() && next->BaseFeature.getValue() == feature ? next : nullptr;
+}
+
+Boolean* Boolean::scopeMerge(const App::DocumentObject* feature)
+{
+    auto profileBased = freecad_cast<const ProfileBased*>(feature);
+    if (!profileBased
+        || const_cast<ProfileBased*>(profileBased)->getAddSubType() != FeatureAddSub::Type::Additive) {
+        return nullptr;
+    }
+    Boolean* merge = mergeAfter(feature);
+    auto accepted = merge ? freecad_cast<App::PropertyBool*>(merge->getPropertyByName(mergeAccepted))
+                          : nullptr;
+    return accepted && accepted->getValue() ? merge : nullptr;
+}
+
+Boolean* Boolean::setMergeScope(App::DocumentObject* feature, const std::vector<App::DocumentObject*>& bodies)
+{
+    Body* survivor = Body::findBodyOf(feature);
+    if (!survivor || !Body::isSolidFeature(feature)) {
+        throw Base::ValueError("Merge scope: " + label(feature) + " isn't a solid feature in a part");
+    }
+    Boolean* merge = mergeAfter(feature);
+    if (bodies.empty()) {
+        // Every part unticked: the Merge goes, and its parts are parts again (Body::onChanged
+        // shows them when their MergedInto link breaks)
+        if (merge) {
+            App::Document* doc = merge->getDocument();
+            const std::string name = merge->getNameInDocument();
+            survivor->removeObject(merge);
+            doc->removeObject(name.c_str());
+        }
+        return nullptr;
+    }
+    if (!merge) {
+        merge = makeMerge(feature, bodies);
+    }
+    else {
+        // In place, so what reads the Merge (the next feature, a sketch on its faces) keeps it
+        std::vector<Body*> absorbed;
+        std::vector<App::DocumentObject*> tools = mergeTools(survivor, feature, bodies, absorbed, merge);
+        for (auto obj : merge->mergedBodies()) {
+            if (std::ranges::find(absorbed, obj) == absorbed.end()) {
+                if (auto link = freecad_cast<App::PropertyLinkHidden*>(obj->getPropertyByName(mergedInto))) {
+                    link->setValue(nullptr);
+                }
+            }
+        }
+        merge->setObjects(tools);
+        for (Body* body : absorbed) {
+            auto link = freecad_cast<App::PropertyLinkHidden*>(body->getPropertyByName(mergedInto));
+            if (!link) {
+                link = static_cast<App::PropertyLinkHidden*>(body->addDynamicProperty(
+                    "App::PropertyLinkHidden",
+                    mergedInto,
+                    "Merge",
+                    "The Merge this part is merged into",
+                    App::Prop_Hidden
+                ));
+            }
+            if (link->getValue() != merge) {
+                link->setValue(merge);
+                body->Visibility.setValue(false);
+            }
+        }
+    }
+    // A merge picked in the feature's own dialog is a plain feature: no Warning (P50)
+    if (auto accepted = freecad_cast<App::PropertyBool*>(merge->getPropertyByName(mergeAccepted))) {
+        if (!accepted->getValue()) {
+            accepted->setValue(true);
+        }
     }
     return merge;
 }

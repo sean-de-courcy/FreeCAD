@@ -180,6 +180,42 @@ bool isSuppressed(const App::DocumentObject* obj)
     return suppressible && suppressible->Suppressed.getValue();
 }
 
+/// The Merge folded into obj's row: its merge scope, the accepted one right after an Add (Onshape
+/// lists no merge of its own, ops#640 rank 1); or null. A Merge Parts made and not accepted yet, or
+/// one after a cut, keeps its own row, where its panel and Accept are
+const PartDesign::Boolean* foldedMerge(const App::DocumentObject* obj)
+{
+    return obj ? PartDesign::Boolean::scopeMerge(obj) : nullptr;
+}
+
+/// obj, or the Merge folded into its row: the bar and a drop after the row go after the Merge
+App::DocumentObject* pastMerge(App::DocumentObject* obj)
+{
+    auto merge = foldedMerge(obj);
+    return merge ? const_cast<PartDesign::Boolean*>(merge) : obj;
+}
+
+/// Whether obj is a Merge folded into its feature's row
+bool isFoldedMerge(const App::DocumentObject* obj)
+{
+    auto merge = freecad_cast<const PartDesign::Boolean*>(obj);
+    return merge && merge->isMerge() && foldedMerge(merge->BaseFeature.getValue()) == merge;
+}
+
+/// What a row's status shows: a folded Merge's failure, warning or pending compute when its
+/// feature has none of its own, else the feature's
+const App::DocumentObject* statusObject(const App::DocumentObject* obj)
+{
+    const PartDesign::Boolean* merge = foldedMerge(obj);
+    if (!merge || obj->isError()) {
+        return obj;
+    }
+    if (merge->isError() || (!obj->isWarning() && merge->isWarning())) {
+        return merge;
+    }
+    return obj;
+}
+
 /// For each of bodies whose Tip isn't its old one, as the tree's bar does: shows the feature the
 /// bar follows (which hides the Body's other features), or none at the very top. False when no
 /// Tip moved
@@ -991,9 +1027,19 @@ void FeaturesView::rebuildFeatures()
         return;
     }
     const auto sequence = PartDesign::studioSequence(doc, studio());
+    // A Merge its feature's merge scope made has no row: its status shows on the feature's
+    // (ops#640 rank 1)
+    std::vector<bool> folded;
+    for (auto obj : sequence) {
+        folded.push_back(isFoldedMerge(obj));
+    }
+    const auto shown = static_cast<int>(std::ranges::count(folded, false));
     // The header: the count, and the error icon while some row fails
-    int errors = static_cast<int>(std::ranges::count_if(sequence, [](auto obj) { return obj->isError(); }));
-    title->setText(tr("Features (%1)").arg(sequence.size()));
+    int errors = 0;
+    for (std::size_t i = 0; i < sequence.size(); ++i) {
+        errors += !folded[i] && statusObject(sequence[i])->isError() ? 1 : 0;
+    }
+    title->setText(tr("Features (%1)").arg(shown));
     errorsButton->setVisible(errors > 0);
     errorsButton->setToolTip(tr("%n feature(s) in error: click to show only them", "", errors));
     if (errors == 0 && errorsButton->isChecked()) {
@@ -1017,7 +1063,9 @@ void FeaturesView::rebuildFeatures()
         if (i == barRow) {
             order.push_back(-1);
         }
-        order.push_back(static_cast<int>(i));
+        if (!folded[i]) {
+            order.push_back(static_cast<int>(i));
+        }
     }
     if (barRow >= sequence.size() && !sequence.empty()) {
         order.push_back(-1);
@@ -1034,7 +1082,11 @@ void FeaturesView::rebuildFeatures()
         }
         auto obj = sequence[index];
         auto body = PartDesign::Body::findBodyOf(obj);
-        rows.push_back(rowKey(obj, held[index], body ? body->Label.getValue() : ""));
+        std::string extra = body ? body->Label.getValue() : "";
+        if (auto merge = foldedMerge(obj)) {
+            extra += '\x1e' + rowKey(merge, body && body->holds(merge));
+        }
+        rows.push_back(rowKey(obj, held[index], extra));
         names.emplace_back(obj->getNameInDocument());
     }
     // Unchanged: the rows (and the user's selection anchor in them) stay
@@ -1049,13 +1101,32 @@ void FeaturesView::rebuildFeatures()
     featureNames = names;
     auto decorate = [this](QListWidgetItem* item, App::DocumentObject* obj, bool isHeld) {
         auto body = PartDesign::Body::findBodyOf(obj);
+        // A folded Merge's status shows here, its icon the feature's (ops#640 rank 1)
+        const App::DocumentObject* status = statusObject(obj);
         item->setFlags(item->flags() | Qt::ItemIsEditable);
         item->setText(QString::fromUtf8(obj->Label.getValue()));
         item->setData(Qt::UserRole, QByteArray(obj->getNameInDocument()));
-        item->setIcon(statusIcon(obj, isHeld));
+        QIcon icon = statusIcon(obj, isHeld);
+        if (status != obj) {
+            const char* overlay = status->isError() ? "overlay_error"
+                : status->isWarning()               ? "overlay_warning"
+                                                    : "overlay_recompute";
+            auto vp = viewProviderOf(obj);
+            QPixmap px = Gui::BitmapFactory().pixmapFromSvg(overlay, QSize(10, 10));
+            icon = QIcon(Gui::BitmapFactory().merge(
+                (vp ? vp->getIcon() : QIcon()).pixmap(16, 16),
+                px,
+                Gui::BitmapFactoryInst::TopRight
+            ));
+        }
+        item->setIcon(icon);
         item->setFont(statusFont(features->font(), obj, isHeld));
-        item->setData(Qt::ForegroundRole, statusForeground(obj));
-        item->setToolTip(rowToolTip(obj, body));
+        item->setData(Qt::ForegroundRole, statusForeground(status));
+        QString tip = rowToolTip(obj, body);
+        if (status != obj) {
+            tip += QStringLiteral("\n") + QString::fromUtf8(status->getStatusString());
+        }
+        item->setToolTip(tip);
     };
     if (inPlace) {
         for (std::size_t r = 0; r < order.size(); ++r) {
@@ -1091,7 +1162,7 @@ void FeaturesView::applyErrorFilter()
     for (int i = 0; i < features->count(); ++i) {
         auto item = features->item(i);
         auto obj = objectOf(item);
-        item->setHidden(only && !(obj && obj->isError()));
+        item->setHidden(only && !(obj && statusObject(obj)->isError()));
     }
 }
 
@@ -1250,6 +1321,8 @@ void FeaturesView::rollStudio(App::Document* doc, App::Part* studio, App::Docume
     if (ViewProviderBody::isEditLocked(doc)) {
         throw Base::RuntimeError(editLockedMessage);
     }
+    // The bar after a row is after its folded Merge (ops#640 rank 1)
+    member = pastMerge(member);
     const auto bodies = PartDesign::studioBodies(doc, studio);
     std::vector<App::DocumentObject*> oldTips;
     for (auto body : bodies) {
@@ -1357,6 +1430,10 @@ void FeaturesView::onRowsDropped(int row)
             if (auto obj = objectOf(item)) {
                 rows.push_back(obj);
                 dragged.insert(i);
+                // Its folded Merge goes with it (ops#640 rank 1)
+                if (auto merge = foldedMerge(obj)) {
+                    rows.push_back(const_cast<PartDesign::Boolean*>(merge));
+                }
             }
         }
     }
@@ -1394,8 +1471,10 @@ void FeaturesView::onRowsDropped(int row)
         }
         return nullptr;
     };
-    App::DocumentObject* after = rowBefore(dropAt);
-    App::DocumentObject* bar = barAt >= 0 ? rowBefore(static_cast<std::size_t>(barAt)) : nullptr;
+    // After a row is after its folded Merge
+    App::DocumentObject* after = pastMerge(rowBefore(dropAt));
+    App::DocumentObject* bar =
+        barAt >= 0 ? pastMerge(rowBefore(static_cast<std::size_t>(barAt))) : nullptr;
     std::string barName = bar ? bar->getNameInDocument() : "";
     bool rolledBack = PartDesign::isStudioRolledBack(doc, studio());
     try {

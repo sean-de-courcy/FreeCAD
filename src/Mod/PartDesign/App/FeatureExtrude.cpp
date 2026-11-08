@@ -1066,6 +1066,20 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
         obj = getVerifiedObject();
         if (makeface) {
             sketchshape = getTopoShapeVerifiedFace();
+            // A solid extrude takes planar faces only: Onshape refuses a curved face at pick
+            // (hands-on check B3-4, ops#640). A feature that holds one anyway (an older file, a
+            // script) fails, and the part stays as it was (the failure's pass-through, ops#126)
+            if (!obj->isDerivedFrom<Part::Part2DObject>()) {
+                for (const auto& face : sketchshape.getSubTopoShapes(TopAbs_FACE)) {
+                    if (!face.isPlanarFace()) {
+                        return new App::DocumentObjectExecReturn(QT_TRANSLATE_NOOP(
+                            "Exception",
+                            "The face to extrude isn't planar: select a planar face or a sketch "
+                            "region"
+                        ));
+                    }
+                }
+            }
         }
         else {
             std::vector<TopoShape> shapes;

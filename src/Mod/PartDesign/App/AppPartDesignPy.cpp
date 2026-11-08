@@ -123,6 +123,20 @@ public:
             "hidden. Returns the Merge; no recompute."
         );
         add_varargs_method(
+            "setMergeScope",
+            &Module::setMergeScope,
+            "setMergeScope(feature, bodies) -- The merge scope of the solid feature (Onshape's "
+            "Extrude): bodies, other parts of the studio, are merged right after it, and the parts "
+            "it merged that aren't in bodies are parts again. Changes the Merge after it in place, "
+            "makes one, or with no bodies deletes it; the Merge is accepted. Returns the Merge or "
+            "None; no recompute."
+        );
+        add_varargs_method(
+            "mergeAfter",
+            &Module::mergeAfter,
+            "mergeAfter(feature) -- The Merge right after the solid feature, based on it, or None."
+        );
+        add_varargs_method(
             "split",
             &Module::split,
             "split(body, tool, side='Front') -- Splits the part body by the plane tool: an origin "
@@ -400,6 +414,36 @@ private:
             e.setPyException();
             throw Py::Exception();
         }
+    }
+
+    // FreeCAD-CH (ops#640 rank 1): the merge scope
+    Py::Object setMergeScope(const Py::Tuple& args)
+    {
+        PyObject* pObj;
+        PyObject* pBodies;
+        if (!PyArg_ParseTuple(args.ptr(), "O!O", &(App::DocumentObjectPy::Type), &pObj, &pBodies)) {
+            throw Py::Exception();
+        }
+        App::DocumentObject* feature = objectArg(pObj);
+        std::vector<App::DocumentObject*> bodies = objectsArg(pBodies);
+        try {
+            Boolean* merge = Boolean::setMergeScope(feature, bodies);
+            return merge ? Py::asObject(merge->getPyObject()) : Py::None();
+        }
+        catch (const Base::Exception& e) {
+            e.setPyException();
+            throw Py::Exception();
+        }
+    }
+
+    Py::Object mergeAfter(const Py::Tuple& args)
+    {
+        PyObject* pObj;
+        if (!PyArg_ParseTuple(args.ptr(), "O!", &(App::DocumentObjectPy::Type), &pObj)) {
+            throw Py::Exception();
+        }
+        Boolean* merge = Boolean::mergeAfter(objectArg(pObj));
+        return merge ? Py::asObject(merge->getPyObject()) : Py::None();
     }
 
     // FreeCAD-CH (ops#325 4): Split

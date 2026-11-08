@@ -528,9 +528,9 @@ class TestResultBoxGui(ResultBoxGuiCase):
         """F1 (ops#640): the lid pad, which a pad on its top uses, edited with no other part in
         the document: the box is there, on Add to Enclosure, with New part disabled and the reason
         as its tooltip. The base, the enclosure's first solid, is on New part, touching no other
-        part: Add is offered (ops#640 H2, hands-on check R8: Onshape's Add that touches nothing
-        makes a new part); Remove and Intersect are refused, "Touches no other part: nothing to
-        cut", since with nothing before them they fail (ops#308 F8, kept; ops#640 H3)."""
+        part: Add, Remove and Intersect are all offered, with no reason; chosen, each has an
+        empty merge scope and goes red, "No merge scope selected", as Onshape's (ops#640 rank 3a,
+        hands-on checks R7(a) and R8; TestMergeScopeGui covers the red row)."""
         self.enclosure()
         lid = pad(self.body, "Lid", self.lidSk, 5)
         self.doc.recompute()
@@ -561,12 +561,8 @@ class TestResultBoxGui(ResultBoxGuiCase):
         self.assertTrue(model.flags(model.index(1, 0)) & QtCore.Qt.ItemIsEnabled)
         self.assertFalse(combo.itemData(1, QtCore.Qt.ToolTipRole))
         for row in (2, 3):
-            self.assertFalse(model.flags(model.index(row, 0)) & QtCore.Qt.ItemIsEnabled, row)
-            self.assertEqual(
-                combo.itemData(row, QtCore.Qt.ToolTipRole),
-                "Touches no other part: nothing to cut",
-                row,
-            )
+            self.assertTrue(model.flags(model.index(row, 0)) & QtCore.Qt.ItemIsEnabled, row)
+            self.assertFalse(combo.itemData(row, QtCore.Qt.ToolTipRole), row)
 
     def testIntersectWith(self):
         """Subtractive, in a studio with another part: a pocket of the lid sketch (5 deep by
@@ -922,10 +918,11 @@ class TestMergeGui(ResultBoxGuiCase):
 
     def testMergeFromTheResultBox(self):
         """M-t1 in the panel: Pad on the lid sketch lists Panel (touched) and Far, unticked, with
-        the plain line "Touches Panel (not merged)" and no banner. Panel ticked: the banner says
-        what merging does, the line goes. OK: a Merge right after the pad, the Enclosure's Tip,
-        fuses Panel's pad (16000 + 9000 + 12000 - 3000 = 34000); Panel is hidden and merged, and
-        the Merge warns. One undo step removes the pad and the Merge."""
+        the plain line "Touches Panel (not merged)". Panel ticked: the line goes (no banner:
+        Onshape's merge is a plain feature, ops#640 rank 1). OK: a Merge right after the pad, the
+        Enclosure's Tip, fuses Panel's pad (16000 + 9000 + 12000 - 3000 = 34000); Panel is hidden
+        and merged, and the Merge is accepted, with no Warning (P50). One undo step removes the
+        pad and the Merge."""
         self.parts()
         before = sorted(o.Name for o in self.doc.Objects)
         lid = self.featurePanel("PartDesign_Pad")
@@ -933,11 +930,7 @@ class TestMergeGui(ResultBoxGuiCase):
         note = self.visible(QtWidgets.QLabel, "mergeNote")
         self.assertIsNotNone(note, "no plain line")
         self.assertEqual(note.text(), "Touches Panel (not merged)")
-        self.assertIsNone(self.visible(QtWidgets.QLabel, "mergeBanner"))
         self.visible(QtWidgets.QListWidget, "mergeList").item(0).setCheckState(QtCore.Qt.Checked)
-        banner = self.visible(QtWidgets.QLabel, "mergeBanner")
-        self.assertIsNotNone(banner, "no banner")
-        self.assertTrue(banner.text().startswith("Merges Panel into Enclosure. Panel stops"))
         self.assertIsNone(self.visible(QtWidgets.QLabel, "mergeNote"))
         self.close(ok=True)
         merge = self.panel.MergedInto
@@ -946,7 +939,8 @@ class TestMergeGui(ResultBoxGuiCase):
         self.assertEqual(group.index(merge), group.index(lid) + 1)
         self.assertIs(self.body.Tip, merge)
         self.assertFalse(self.panel.Visibility)
-        self.assertIn("Merged Panel into Enclosure", merge.getStatusString())
+        self.assertTrue(merge.MergeAccepted)
+        self.assertNotIn("Warning", merge.State)
         self.assertAlmostEqual(self.body.Shape.Volume, 34000, places=3)
         self.doc.undo()
         self.doc.recompute()
@@ -1509,11 +1503,12 @@ class TestOperationRowGui(ResultBoxGuiCase):
         return Gui.getMainWindow().statusBar().currentMessage()
 
     def testAnAddThatTouchesNothingStaysANewPart(self):
-        """ops#640 H2 (hands-on check R8): Onshape's Add with Merge with all that touches nothing
-        makes a new part, with an info, no error. Far, a part of its own 100 away from the
-        enclosure, edited: on New part; Add is offered and, chosen, leaves Far's pad where it is,
-        its own part, with the status-bar note; no edit restart, no move. OK: Far still holds
-        its 16000, the enclosure its 16000, both valid, one Body each."""
+        """ops#640 H2 and rank 3a (hands-on checks R7(a) and R8): Onshape's Add that touches
+        nothing has an empty merge scope, red, "No merge scope selected", until Merge with all,
+        which makes it a new part, healthy. Far, a part of its own 100 away from the enclosure,
+        edited: on New part; Add is offered and, chosen, leaves Far's pad where it is, red; Merge
+        with all ticked: valid. OK: Far still holds its 16000, the enclosure its 16000, both
+        valid, one Body each, Far's pad MergeWithAll."""
         self.studio()
         farPad = self.doc.getObject("FarPad")
         self.openEdit(farPad)
@@ -1521,13 +1516,19 @@ class TestOperationRowGui(ResultBoxGuiCase):
         self.assertEqual(combo.currentText(), "New part")
         model = combo.model()
         self.assertTrue(model.flags(model.index(1, 0)) & QtCore.Qt.ItemIsEnabled)
-        Gui.getMainWindow().statusBar().clearMessage()
         self.choose("Add")
-        self.assertIn("Touches no other part: added as a new part", self.statusMessage())
+        self.assertTrue(farPad.EmptyMergeScope)
+        self.assertFalse(farPad.isValid())
+        self.assertIn("No merge scope selected", farPad.getStatusString())
         self.assertIs(farPad.getParentGeoFeatureGroup(), self.far)
         self.assertEqual(farPad.Operation, "Union")
         self.assertFalse(farPad.Reversed)
+        box = self.visible(QtWidgets.QCheckBox, "mergeWithAll")
+        self.assertIsNotNone(box, "no Merge with all")
+        box.click()
+        self.assertTrue(waitFor(lambda: farPad.isValid()), farPad.getStatusString())
         self.close(ok=True)
+        self.assertTrue(farPad.MergeWithAll)
         self.assertIs(farPad.getParentGeoFeatureGroup(), self.far)
         self.assertAlmostEqual(self.far.Shape.Volume, 16000, places=3)
         self.assertAlmostEqual(self.body.Shape.Volume, 16000, places=3)
@@ -1535,11 +1536,11 @@ class TestOperationRowGui(ResultBoxGuiCase):
         self.assertValid()
 
     def testARemoveOfNothingIsNotOffered(self):
-        """ops#640 H3: a new part's feature touching no other part has nothing before it to cut,
-        and such a cut fails, "Nothing to cut" (ops#308 F8, kept). Onshape keeps that row healthy
-        (hands-on check R7(b)), so the dialog offers no path to the error: Far's pad, its part's
-        first solid, edited: Add offered, Remove and Intersect disabled with the reason. Cancel:
-        Far unchanged, 16000, valid."""
+        """ops#640 rank 3a (hands-on checks R7(a) and R8): a new part's feature touching no other
+        part may become a Remove or an Intersect, as in Onshape, where its empty merge scope makes
+        it red, "No merge scope selected"
+        (TestMergeScopeGui.testARemoveFromNewTouchingNothingIsRed). Far's pad, its part's first solid, edited: Add, Remove and Intersect offered, with no
+        reason. Cancel: Far unchanged, 16000, valid. (The name is from before rank 3a.)"""
         self.studio()
         farPad = self.doc.getObject("FarPad")
         self.openEdit(farPad)
@@ -1548,12 +1549,8 @@ class TestOperationRowGui(ResultBoxGuiCase):
         model = combo.model()
         self.assertTrue(model.flags(model.index(1, 0)) & QtCore.Qt.ItemIsEnabled)
         for row in (2, 3):
-            self.assertFalse(model.flags(model.index(row, 0)) & QtCore.Qt.ItemIsEnabled, row)
-            self.assertEqual(
-                combo.itemData(row, QtCore.Qt.ToolTipRole),
-                "Touches no other part: nothing to cut",
-                row,
-            )
+            self.assertTrue(model.flags(model.index(row, 0)) & QtCore.Qt.ItemIsEnabled, row)
+            self.assertFalse(combo.itemData(row, QtCore.Qt.ToolTipRole), row)
         self.close(ok=False)
         self.assertEqual(farPad.Operation, "Union")
         self.assertAlmostEqual(self.far.Shape.Volume, 16000, places=3)

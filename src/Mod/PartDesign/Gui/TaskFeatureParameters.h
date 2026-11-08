@@ -37,6 +37,7 @@
 
 #include "ViewProvider.h"
 
+class QCheckBox;
 class QComboBox;
 class QDialogButtonBox;
 class QLabel;
@@ -186,10 +187,13 @@ private:
  *   Row 2 lists the studio's other parts, those the tool touches first, one tick each; OK makes
  *   the ticked ones' siblings (PartDesign.makeSiblings, 2.4, session 3a). In a sibling's panel
  *   the box says whom it follows, offers Unlink, and the other boxes are read-only.
- * - Additive, in a studio with other parts: Merge with lists them, those the tool touches first,
- *   unticked (decision 59). A touching part left unticked gets a plain line; a ticked one the
- *   yellow banner of what merging does. OK merges the ticked ones (PartDesign.makeMerge, 2.5 and
- *   2.6, session 3b).
+ * - Additive: the merge scope (Onshape's Extrude, ops#640 rank 1). Merge with all (MergeWithAll),
+ *   and, while it is off, the Merge scope list of the studio's other parts, those the tool touches
+ *   first, a part this feature merges already ticked. A touching part left out gets a plain line.
+ *   OK sets the scope (PartDesign.setMergeScope): the ticked parts, or with Merge with all every
+ *   part the tool touches, merged right after the feature in an accepted Merge; an unticked part
+ *   is unmerged. On an Add, Remove or Intersect that is its part's first solid (its scope empty),
+ *   ticking a part moves the feature into it (PartDesign.addToPart), as Add from New does.
  */
 class TaskResultParameters: public TaskFeatureParameters
 {
@@ -224,8 +228,12 @@ private:
     void addOperationRow();
     void addPartsList();
     void addMergeList();
-    /// The plain line for touching parts left out and the banner for the ticked ones
+    /// The plain line for touching parts left out of the merge scope
     void updateMergeNotes();
+    /// Merge with all ticked or unticked: the feature follows at once, the list hides or shows
+    void onMergeWithAll(bool checked);
+    /// A part ticked in the scope of a first solid: the feature moves into it (addToPart)
+    void onScopePicked(const QString& part);
     void addFollowsNote(App::DocumentObject* primary);
     void onUnlink();
     /// Marks the parts the tool doesn't touch (debounced; the distance is cached per shape)
@@ -238,8 +246,13 @@ private:
     QListWidget* parts = nullptr;
     /// Row 2 of an additive feature: the studio's other parts to merge, one tick each (3b)
     QListWidget* mergeParts = nullptr;
+    QLabel* mergeLabel = nullptr;
     QLabel* mergeNote = nullptr;
-    QLabel* mergeBanner = nullptr;
+    /// Onshape's Merge with all (ops#640 rank 1), and its value when the box opened
+    QCheckBox* mergeWithAll = nullptr;
+    bool mergeWithAllWas = false;
+    /// The scope list of a first solid: a tick moves the feature into the part (ops#640)
+    bool scopePickMoves = false;
     QTimer* touchTimer = nullptr;
     std::shared_ptr<TouchCache> touchCache;
     /// The feature, still named when it is deleted (Cancel of a new one)
