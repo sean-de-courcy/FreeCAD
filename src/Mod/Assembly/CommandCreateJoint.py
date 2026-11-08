@@ -49,12 +49,15 @@ def isCreateJointActive():
     return UtilsAssembly.assembly_has_at_least_n_parts(1) and noOtherTaskActive()
 
 
-def activateJoint(index):
+def activateJoint(index, label=None):
     if JointObject.activeTask:
         JointObject.activeTask.reject()
 
     Gui.addModule("JointObject")  # NOLINT
-    Gui.doCommand(f"panel = JointObject.TaskAssemblyCreateJoint({index})")
+    if label:
+        Gui.doCommand(f"panel = JointObject.TaskAssemblyCreateJoint({index}, jointLabel={label!r})")
+    else:
+        Gui.doCommand(f"panel = JointObject.TaskAssemblyCreateJoint({index})")
     Gui.doCommandGui("dialog = Gui.Control.showDialog(panel)")
     dialog = Gui.doCommandEval("dialog")
     if dialog is not None:
@@ -208,6 +211,35 @@ class CommandCreateJointDistance:
 
     def Activated(self):
         activateJoint(5)
+
+
+class CommandCreateJointPlanar:
+    """FreeCAD-CH (ops#640, rank 60): Onshape's Planar mate by its name. It is the Distance joint
+    between two planar faces (the solver's planar joint: the faces stay coplanar, the part slides
+    in the plane and turns about its normal); its Distance field is the offset along the normal."""
+
+    def __init__(self):
+        pass
+
+    def GetResources(self):
+        return {
+            "Pixmap": "Assembly_CreateJointPlanar",
+            "MenuText": QT_TRANSLATE_NOOP("Assembly_CreateJointPlanar", "Planar Joint"),
+            "ToolTip": QT_TRANSLATE_NOOP(
+                "Assembly_CreateJointPlanar",
+                "<p>Creates a planar joint between two planar faces: they stay coplanar, at the "
+                "offset given, and the part slides in the plane and turns about its normal</p>"
+                "<p>It is a Distance joint: other picks than two planes make the Distance joint "
+                "those picks give</p>",
+            ),
+            "CmdType": "ForEdit",
+        }
+
+    def IsActive(self):
+        return isCreateJointActive()
+
+    def Activated(self):
+        activateJoint(5, "Planar")
 
 
 class CommandCreateJointParallel:
@@ -582,6 +614,7 @@ if App.GuiUp:
     Gui.addCommand("Assembly_CreateJointSlider", CommandCreateJointSlider())
     Gui.addCommand("Assembly_CreateJointBall", CommandCreateJointBall())
     Gui.addCommand("Assembly_CreateJointDistance", CommandCreateJointDistance())
+    Gui.addCommand("Assembly_CreateJointPlanar", CommandCreateJointPlanar())  # FreeCAD-CH
     Gui.addCommand("Assembly_CreateJointParallel", CommandCreateJointParallel())
     Gui.addCommand("Assembly_CreateJointPerpendicular", CommandCreateJointPerpendicular())
     Gui.addCommand("Assembly_CreateJointAngle", CommandCreateJointAngle())
