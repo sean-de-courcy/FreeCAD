@@ -922,10 +922,14 @@ class TestMergeGui(ResultBoxGuiCase):
         Onshape's merge is a plain feature, ops#640 rank 1). OK: a Merge right after the pad, the
         Enclosure's Tip, fuses Panel's pad (16000 + 9000 + 12000 - 3000 = 34000); Panel is hidden
         and merged, and the Merge is accepted, with no Warning (P50). One undo step removes the
-        pad and the Merge."""
+        Merge. The lid pad is edited: made by the command it would open as New, as it touches the
+        Enclosure and Panel (hands-on check A-1)."""
         self.parts()
+        lid = pad(self.body, "Lid", self.lidSk, 10)
+        self.doc.recompute()
         before = sorted(o.Name for o in self.doc.Objects)
-        lid = self.featurePanel("PartDesign_Pad")
+        lid.ViewObject.doubleClicked()
+        self.waitForPanel()
         self.assertEqual(self.mergeItems(), [("Panel", False), ("Far (doesn't touch)", False)])
         note = self.visible(QtWidgets.QLabel, "mergeNote")
         self.assertIsNotNone(note, "no plain line")
@@ -1921,7 +1925,8 @@ class TestRevolveAxisGui(ResultBoxGuiCase):
 
     def testEnterAcceptsARevolutionWithNoAxis(self):
         """Hands-on check R6 (ops#640 H1): the Revolution command on the lid sketch, no axis
-        picked; Enter in the angle field closes the dialog, as Onshape's Enter does. The
+        picked; Enter in the graphics area closes the dialog, as Onshape's Enter does (in the
+        angle field Enter only commits the value, ops#640 rank 38). The
         Revolution stays, in error with Onshape's words, the enclosure keeps its 16000 (the failed
         feature passes its base through), the sketch is hidden as for any accepted feature, and
         the whole is one undo step. Edited again, the dialog opens with the axis row armed and
@@ -1934,7 +1939,13 @@ class TestRevolveAxisGui(ResultBoxGuiCase):
         self.assertIsNotNone(angle, "no angle field")
         angle.setFocus(QtCore.Qt.OtherFocusReason)
         pump(0.3)
-        modals = self.modalsDuring(lambda: QtTest.QTest.keyClick(angle, QtCore.Qt.Key_Return))
+        QtTest.QTest.keyClick(angle, QtCore.Qt.Key_Return)
+        pump(0.3)
+        self.assertTrue(Gui.Control.activeDialog(), "Enter in the angle field closed the dialog")
+        viewport = Gui.ActiveDocument.ActiveView.graphicsView().viewport()
+        viewport.setFocus(QtCore.Qt.OtherFocusReason)
+        pump(0.3)
+        modals = self.modalsDuring(lambda: QtTest.QTest.keyClick(viewport, QtCore.Qt.Key_Return))
         self.assertEqual(modals, [])
         self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "the dialog stays")
         pump(0.2)

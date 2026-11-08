@@ -373,6 +373,8 @@ void TaskExtrudeParameters::createProfileField()
         if (axesInList.empty()) {
             fillDirectionCombo();
         }
+        // A new Extrude's first profile decides where it opens, Add or New (hands-on check A-1)
+        TaskResultParameters::profileTaken(getObject());
     };
     profileField = new ReferenceField(getObject(), "Profile", profile, write, proxy);
     *self = profileField;

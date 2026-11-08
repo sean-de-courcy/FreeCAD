@@ -518,6 +518,22 @@ App::DocumentObjectExecReturn* Helix::execute()
             booleanInputCheck(),
             &booleanInputsValid
         );
+        // An Intersect that shares no volume with its base leaves the base as it was, healthy, with
+        // Onshape's info, as a Revolve's and an Extrude's (hands-on R7, ops#640 rank 20, H3)
+        if (getBooleanOperation() == BooleanOperation::Common
+            && (boolOp.isNull() || !boolOp.hasSubShape(TopAbs_SOLID))) {
+            if (auto doc = getDocument(); doc && !SiblingOf.getValue()) {
+                static const std::string text = "Selected tools and targets do not intersect";
+                const char* previous = doc->getWarningDescription(this);
+                doc->setWarning(
+                    this,
+                    previous && *previous ? std::string(previous) + "\n" + text : text
+                );
+            }
+            this->rawShape = TopoShape();
+            Shape.setValue(base);
+            return App::DocumentObject::StdReturn;
+        }
 
         if (!isSingleSolidRuleSatisfied(boolOp.getShape())) {
             return new App::DocumentObjectExecReturn(QT_TRANSLATE_NOOP(
@@ -834,8 +850,13 @@ void Helix::onChanged(const App::Property* prop)
     }
 
     // Reflect Operation property value to deprectated Outside
-    if (prop == &Operation && addSubType == Type::Subtractive) {
-        Outside.setValue(strcmp(Operation.getValueAsString(), "Common") == 0);
+    // by the new value: with every operation allowed (ops#640 rank 20) an Add set straight to
+    // Intersect was still additive here, and the restore made it a Remove
+    if (prop == &Operation) {
+        const char* operation = Operation.getValueAsString();
+        if (operation && strcmp(operation, "Union") != 0) {
+            Outside.setValue(strcmp(operation, "Common") == 0);
+        }
     }
 
     ProfileBased::onChanged(prop);
@@ -908,10 +929,13 @@ PROPERTY_SOURCE(PartDesign::AdditiveHelix, PartDesign::Helix)
 AdditiveHelix::AdditiveHelix()
 {
     defineAdditive();
+    // New / Add / Remove / Intersect on one Helix (FreeCAD-CH ops#640 rank 20)
+    allowAllOperations();
 }
 
 PROPERTY_SOURCE(PartDesign::SubtractiveHelix, PartDesign::Helix)
 SubtractiveHelix::SubtractiveHelix()
 {
     defineSubtractive();
+    allowAllOperations();
 }

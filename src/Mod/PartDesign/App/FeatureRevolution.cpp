@@ -46,6 +46,9 @@ PROPERTY_SOURCE(PartDesign::Revolution, PartDesign::Revolved)
 Revolution::Revolution()
 {
     defineAdditive();
+    // New / Add / Remove / Intersect on one Revolve, as on an Extrude (FreeCAD-CH ops#640 rank
+    // 20): the end types stay the class's (index 1 is Up to last here, Through all on a Groove)
+    allowAllOperations();
     const double fullAngle = 360.0;
     const double emptyAngle = 0.0;
 
@@ -114,11 +117,13 @@ TopoShape Revolution::makeShape(const TopoShape& base, const TopoShape& revolve)
     // In 1.0 there was a bug that caused the order of operations to be reversed.
     // Changing the order may impact geometry order and the results of refine operation,
     // hence we need to support both ways to ensure compatibility.
-    if (FuseOrder.getValue() == FeatureFirst) {
+    const bool fuses = booleanOperation == BooleanOperation::Union;
+    if (fuses && FuseOrder.getValue() == FeatureFirst) {
         return makeTopoShape(false).makeElementFuse({revolve, base});
     }
+    // Remove and Intersect take the Operation's maker (ops#640 rank 20); Add fuses as before
     return makeTopoShape(false).makeElementBoolean(
-        Part::OpCodes::Fuse,
+        fuses ? Part::OpCodes::Fuse : getBooleanMaker(),
         {base, revolve},
         nullptr,
         -1.0,

@@ -349,6 +349,14 @@ App::DocumentObjectExecReturn* Loft::execute()
         }
 
         if (base.isNull()) {
+            // A Remove or an Intersect with nothing before it makes nothing, never its tool as
+            // material, as an Extrude's (ops#640 rank 20, H3): FeatureAddSub::recompute fails it,
+            // "Nothing to cut"
+            if (getAddSubType() == FeatureAddSub::Type::Subtractive) {
+                this->rawShape = TopoShape();  // a Refine-only change recomputes fully
+                Shape.setValue(TopoShape());
+                return App::DocumentObject::StdReturn;
+            }
             if (!isSingleSolidRuleSatisfied(result.getShape())) {
                 return new App::DocumentObjectExecReturn(QT_TRANSLATE_NOOP(
                     "Exception",
@@ -377,6 +385,22 @@ App::DocumentObjectExecReturn* Loft::execute()
             return new App::DocumentObjectExecReturn(
                 QT_TRANSLATE_NOOP("Exception", "Failed to perform boolean operation")
             );
+        }
+        // An Intersect that shares no volume with its base leaves the base as it was, healthy, with
+        // Onshape's info, as a Revolve's and an Extrude's (hands-on R7, ops#640 rank 20, H3)
+        if (getBooleanOperation() == BooleanOperation::Common
+            && (boolOp.isNull() || !boolOp.hasSubShape(TopAbs_SOLID))) {
+            if (auto doc = getDocument(); doc && !SiblingOf.getValue()) {
+                static const std::string text = "Selected tools and targets do not intersect";
+                const char* previous = doc->getWarningDescription(this);
+                doc->setWarning(
+                    this,
+                    previous && *previous ? std::string(previous) + "\n" + text : text
+                );
+            }
+            this->rawShape = TopoShape();
+            Shape.setValue(base);
+            return App::DocumentObject::StdReturn;
         }
         TopoShape solid = getSolid(boolOp);
         // lets check if the result is a solid
@@ -415,12 +439,15 @@ PROPERTY_SOURCE(PartDesign::AdditiveLoft, PartDesign::Loft)
 AdditiveLoft::AdditiveLoft()
 {
     defineAdditive();
+    // New / Add / Remove / Intersect on one Loft (FreeCAD-CH ops#640 rank 20)
+    allowAllOperations();
 }
 
 PROPERTY_SOURCE(PartDesign::SubtractiveLoft, PartDesign::Loft)
 SubtractiveLoft::SubtractiveLoft()
 {
     defineSubtractive();
+    allowAllOperations();
 }
 
 void Loft::handleChangedPropertyType(Base::XMLReader& reader, const char* TypeName, App::Property* prop)

@@ -75,6 +75,12 @@ from PartDesignTests.TestEscCancelsGui import TestEscCancelsGui  # FreeCAD-CH, o
 from PartDesignTests.TestSketchPlaneGui import TestSketchPlaneGui  # FreeCAD-CH, ops#640
 from PartDesignTests.TestBooleanDialogGui import TestBooleanDialogGui  # FreeCAD-CH, ops#640
 from PartDesignTests.TestBooleanDialogGui import TestPartsListGui  # FreeCAD-CH, ops#640
+from PartDesignTests.TestDialogFlowGui import TestOpeningOperationGui  # FreeCAD-CH, ops#640
+from PartDesignTests.TestDialogFlowGui import TestDialogKeysGui  # FreeCAD-CH, ops#640
+from PartDesignTests.TestDialogFlowGui import TestAnotherToolGui  # FreeCAD-CH, ops#640
+from PartDesignTests.TestDialogFlowGui import TestStudioPlanesStayGui  # FreeCAD-CH, ops#640
+from PartDesignTests.TestRevolveFieldsGui import TestRevolveFieldsGui  # FreeCAD-CH, ops#640 ranks 20, 21, 52
+from PartDesignTests.TestRevolveFieldsGui import TestOperationRowGui  # FreeCAD-CH, ops#640 rank 20
 
 
 # timer runs this class in order to access modal dialog

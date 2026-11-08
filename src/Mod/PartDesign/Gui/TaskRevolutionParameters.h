@@ -31,6 +31,7 @@
 
 class Ui_TaskRevolutionParameters;
 class QAbstractButton;
+class QCheckBox;
 class QComboBox;
 class QLabel;
 class QLineEdit;
@@ -73,7 +74,8 @@ public:
     void onReferencesRepaired() override;
     /// The fields disarm through their group; the panel has no pick mode of its own (B15).
     void onReferenceSelectionTaken() override;
-    /// The start reference, each side's up-to-face and the picked axis (ops#150 W6).
+    /// The profile, the start reference, each side's up-to-face and the picked axis (ops#150
+    /// W6, ops#640 rank 21).
     std::vector<ReferenceField*> referenceFields() const override;
 
     /**
@@ -166,6 +168,26 @@ private:
 private:
     void createSideControllers();
     void createFields();
+    /// The Profile field on top: a sketch, its regions, or planar faces of the solid before
+    /// (ops#640 rank 21, as an Extrude's)
+    void createProfileField();
+    /** @name Onshape's Revolve fields (ops#640 rank 21, hands-on B-5)
+     * Full revolve (on by default); unticked, the end type (Blind, Up to next, Up to face), the
+     * angle (30 deg), Flip, Symmetric and Second end position with its own end. They drive the
+     * Sides box, which stays hidden, so the properties and apply() are as before.
+     */
+    //@{
+    void createOnshapeFields();
+    void updateOnshapeUI();
+    bool isFullRevolve() const;
+    void onFullRevolveToggled(bool on);
+    void onSymmetricToggled(bool on);
+    void onSecondEndToggled(bool on);
+    /// Writes SideType and shows it in the hidden Sides box, without its signal
+    void setSides(SidesMode mode);
+    /// Writes an angle and shows it in its box, without its signal
+    void setAngle(Side side, double angle);
+    //@}
     /// Writes a picked or chosen axis, and Reversed as the axis suggests.
     void writeAxis(App::DocumentObject* obj, const std::vector<std::string>& subs);
     /// Arms \a field once its mode's widgets show (a mode chosen with the field empty).
@@ -194,6 +216,14 @@ private:
 
     /// The start reference (ops#150 W6)
     ReferenceField* startField = nullptr;
+    /// The profile (ops#640 rank 21)
+    ReferenceField* profileField = nullptr;
+    QCheckBox* fullRevolve = nullptr;
+    QCheckBox* symmetric = nullptr;
+    QCheckBox* secondEnd = nullptr;
+    /// A new part studio's planes were shown when the dialog opened: they stay shown while it is
+    /// open and after it (ops#626, rank 52), as Onshape's default planes do
+    bool studioPlanes = false;
     /// The axis box and its picked axis's row (ops#150 W6)
     ReferenceCombo* axisCombo = nullptr;
 

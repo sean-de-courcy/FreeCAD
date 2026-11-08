@@ -24,6 +24,7 @@
 #include <QAbstractSpinBox>
 #include <QActionEvent>
 #include <QApplication>
+#include <QCheckBox>
 #include <QCursor>
 #include <QCoreApplication>
 #include <QDockWidget>
@@ -31,6 +32,7 @@
 #include <QLineEdit>
 #include <QPointer>
 #include <QPushButton>
+#include <QRadioButton>
 #include <QTimer>
 #include <QVBoxLayout>
 
@@ -42,6 +44,7 @@
 #include <Gui/Application.h>
 #include <Gui/Document.h>
 #include <Gui/MainWindow.h>
+#include <Gui/View3DInventor.h>
 #include <Gui/ViewProviderDocumentObject.h>
 #include <Gui/OverlayManager.h>
 
@@ -60,6 +63,65 @@ namespace sp = std::placeholders;
 
 namespace
 {
+// FreeCAD-CH (ops#640, rank 38): the Enter TaskView::keyPressEvent handles came from the graphics
+// area (GraphicsEnterFilter), wherever the focus is
+bool enterFromGraphics = false;
+
+// FreeCAD-CH (ops#640, rank 38): whether `widget` is in a 3D view (the graphics area)
+bool isInGraphics(const QWidget* widget)
+{
+    for (const QWidget* w = widget; w; w = w->parentWidget()) {
+        if (qobject_cast<const Gui::View3DInventor*>(w)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/** FreeCAD-CH (ops#640, rank 38): Enter in the graphics area with a dialog open goes to the task
+ * view, which accepts the dialog as Onshape's Enter does there (hands-on R6). A field shown in the
+ * view keeps its Enter, which commits its value. Installed on the application once.
+ */
+class GraphicsEnterFilter: public QObject
+{
+public:
+    using QObject::QObject;
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override
+    {
+        if (event->type() != QEvent::KeyPress) {
+            return false;
+        }
+        auto ke = static_cast<QKeyEvent*>(event);  // NOLINT
+        if ((ke->key() != Qt::Key_Return && ke->key() != Qt::Key_Enter) || ke->isAutoRepeat()) {
+            return false;
+        }
+        auto widget = qobject_cast<QWidget*>(watched);
+        if (!widget || qobject_cast<QAbstractSpinBox*>(widget) || qobject_cast<QLineEdit*>(widget)
+            || !isInGraphics(widget)) {
+            return false;
+        }
+        Gui::TaskView::TaskView* view = Gui::Control().taskPanel();
+        std::optional<Gui::TaskView::TaskInfo> active = view ? view->currentTaskInfo() : std::nullopt;
+        if (!active || !active->ActiveCtrl || !active->ActiveCtrl->okTakesEnter()) {
+            return false;  // no dialog, the sketch editor, a renamed OK: the view's own Enter
+        }
+        // Only when the Enter clicks the OK: a disabled or hidden OK, or another default
+        // button, leaves the view its own Enter (TaskView::keyPressEvent would do nothing)
+        QPushButton* ok = active->ActiveCtrl->standardButtons()->button(QDialogButtonBox::Ok);
+        if (!ok || !ok->isDefault() || !ok->isVisible() || !ok->isEnabled()) {
+            return false;
+        }
+        QKeyEvent copy(QEvent::KeyPress, ke->key(), ke->modifiers(), ke->text());
+        const bool was = enterFromGraphics;
+        enterFromGraphics = true;
+        QCoreApplication::sendEvent(view, &copy);
+        enterFromGraphics = was;
+        return true;
+    }
+};
+
 /** The edited object's error or warning, at the top of its dialog's panel (ops#151)
  *
  * Shows the text the tree's tooltip shows: the recompute error, or the warning of a recompute
@@ -467,6 +529,13 @@ TaskView::TaskView(QWidget* parent)
     );
     // NOLINTEND
 
+    // FreeCAD-CH (ops#640, rank 38): Enter in the graphics area accepts the open dialog
+    static QPointer<GraphicsEnterFilter> graphicsEnter;
+    if (!graphicsEnter && qApp) {
+        graphicsEnter = new GraphicsEnterFilter(qApp);
+        qApp->installEventFilter(graphicsEnter);
+    }
+
     setShowTaskWatcher(hGrp->GetBool("ShowTaskWatcher", true));
     connectShowTaskWatcherSetting = hGrp->Manager()->signalParamChanged.connect(
         [this](ParameterGrp* Param, ParameterGrp::ParamType Type, const char* name, const char* value) {
@@ -564,19 +633,21 @@ void TaskView::keyPressEvent(QKeyEvent* ke)
                 }
                 return;
             }
-            // The box's OK (ops#605 2a) accepts only from a field the user types in, as Onshape's
-            // Enter after a value: a list's Enter opens its item, a check box's does nothing. Not
-            // in the sketch editor, nor a renamed OK (Delete, Run Check): Qt makes the box's first
-            // accept button the default when it shows, so its default flag doesn't tell
-            QWidget* typed = QApplication::focusWidget();
-            const bool fromField = qobject_cast<QAbstractSpinBox*>(typed)
-                || qobject_cast<QLineEdit*>(typed);
+            // The box's OK (ops#605 2a) accepts as Onshape's Enter does (ops#640, rank 38): from a
+            // check box or a radio button (hands-on B-1) and from the graphics area (R6, through
+            // GraphicsEnterFilter). In a value field Enter only commits the value, which the field
+            // did already; a list's Enter opens its item. Not in the sketch editor, nor a renamed
+            // OK (Delete, Run Check): Qt makes the box's first accept button the default when it
+            // shows, so its default flag doesn't tell
+            QWidget* focus = QApplication::focusWidget();
+            const bool accepts = qobject_cast<QCheckBox*>(focus)
+                || qobject_cast<QRadioButton*>(focus) || enterFromGraphics || isInGraphics(focus);
             QPushButton* boxOk = active->ActiveCtrl->standardButtons()->button(QDialogButtonBox::Ok);
             // get all buttons of the complete task dialog
             QList<QPushButton*> list = this->findChildren<QPushButton*>();
             for (auto pb : list) {
                 if (pb->isDefault() && pb->isVisible()) {
-                    if (pb == boxOk && (!fromField || !active->ActiveCtrl->okTakesEnter())) {
+                    if (pb == boxOk && (!accepts || !active->ActiveCtrl->okTakesEnter())) {
                         return;
                     }
                     if (pb->isEnabled()) {

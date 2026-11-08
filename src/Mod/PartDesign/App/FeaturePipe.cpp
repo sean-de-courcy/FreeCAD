@@ -6383,6 +6383,24 @@ App::DocumentObjectExecReturn* Pipe::execute()
             booleanInputCheck(),
             &booleanInputsValid
         );
+        // An Intersect that shares no volume with its base leaves the base as it was, healthy, with
+        // Onshape's info, as a Revolve's and an Extrude's (hands-on R7, ops#640 rank 20, H3)
+        if (getBooleanOperation() == BooleanOperation::Common
+            && (boolOp.isNull() || !boolOp.hasSubShape(TopAbs_SOLID))) {
+            if (auto doc = getDocument(); doc && !SiblingOf.getValue()) {
+                static const std::string text = "Selected tools and targets do not intersect";
+                const char* previous = doc->getWarningDescription(this);
+                doc->setWarning(
+                    this,
+                    previous && *previous ? std::string(previous) + "\n" + text : text
+                );
+            }
+            this->rawShape = TopoShape();
+            Shape.setValue(base);
+            storeSpineEnds();  // the sweep itself is good
+            warnIfLoose();
+            return App::DocumentObject::StdReturn;
+        }
 
         if (!isSingleSolidRuleSatisfied(boolOp.getShape())) {
             return new App::DocumentObjectExecReturn(QT_TRANSLATE_NOOP(
@@ -6594,12 +6612,15 @@ PROPERTY_SOURCE(PartDesign::AdditivePipe, PartDesign::Pipe)
 AdditivePipe::AdditivePipe()
 {
     defineAdditive();
+    // New / Add / Remove / Intersect on one Sweep (FreeCAD-CH ops#640 rank 20)
+    allowAllOperations();
 }
 
 PROPERTY_SOURCE(PartDesign::SubtractivePipe, PartDesign::Pipe)
 SubtractivePipe::SubtractivePipe()
 {
     defineSubtractive();
+    allowAllOperations();
 }
 
 void Pipe::handleChangedPropertyType(Base::XMLReader& reader, const char* TypeName, App::Property* prop)

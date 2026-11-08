@@ -22,8 +22,9 @@
 
 """Onshape's defaults for a new user and a new document (FreeCAD-CH, ops#605 Tier 1, 2a, 2f).
 
-- The task box's OK and Cancel are a check and a cross, and OK is the default button: Enter in a
-  feature's panel accepts it, as in Onshape.
+- The task box's OK and Cancel are a check and a cross, and OK is the default button: Enter in the
+  graphics area or on a check box accepts a feature's panel, as in Onshape; Enter in a value field
+  only commits the value (ops#640 rank 38).
 - Std_New in PartDesign makes a part studio: one Body, its Origin's three planes shown; they stay
   shown after its first sketch, as Onshape's default planes do (ops#626). Std_New with 1 (the
   Start page's cards) is an empty document.
@@ -244,9 +245,10 @@ class TestOnshapeStudioGui(unittest.TestCase):
         return doc
 
     def testEnterInThePadPanelAcceptsIt(self):
-        """A Pad panel on a 10 x 20 sketch, length 5: Enter in the length field closes the panel
-        and keeps the Pad (volume 1000). OK is a check icon with no words and the default button;
-        Cancel is a cross."""
+        """A Pad panel on a 10 x 20 sketch, length 5: Enter in the length field commits the value
+        and leaves the panel open (ops#640 rank 38, the hands-on notes); Enter in the graphics area
+        then closes the panel and keeps the Pad (volume 1000). OK is a check icon with no words and
+        the default button; Cancel is a cross."""
         doc = self.openPadPanel()
 
         ok = taskButton(QtWidgets.QDialogButtonBox.Ok)
@@ -266,8 +268,15 @@ class TestOnshapeStudioGui(unittest.TestCase):
         pump(0.3)
         QtTest.QTest.keyClick(length, QtCore.Qt.Key_Return)
         pump(0.5)
+        self.assertTrue(Gui.Control.activeDialog(), "Enter in the length field closed the panel")
 
-        self.assertFalse(Gui.Control.activeDialog(), "Enter left the Pad panel open")
+        viewport = Gui.ActiveDocument.ActiveView.graphicsView().viewport()
+        viewport.setFocus(QtCore.Qt.OtherFocusReason)
+        pump(0.3)
+        QtTest.QTest.keyClick(viewport, QtCore.Qt.Key_Return)
+        pump(0.5)
+
+        self.assertFalse(Gui.Control.activeDialog(), "Enter in the graphics left the Pad panel open")
         pads = [o for o in doc.Objects if o.isDerivedFrom("PartDesign::Pad")]
         self.assertEqual(len(pads), 1)
         self.assertAlmostEqual(pads[0].Shape.Volume, 1000.0, places=6)

@@ -80,6 +80,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestInvoluteGear.py
     PartDesignTests/TestMerge.py
     PartDesignTests/TestNewPart.py
+    PartDesignTests/TestRevolveOperations.py
     PartDesignTests/TestSiblings.py
     PartDesignTests/TestSketch.py
     PartDesignTests/TestSplit.py
@@ -125,6 +126,8 @@ if(BUILD_GUI)
         PartDesignTests/TestEscCancelsGui.py
         PartDesignTests/TestSketchPlaneGui.py
         PartDesignTests/TestBooleanDialogGui.py
+        PartDesignTests/TestDialogFlowGui.py
+        PartDesignTests/TestRevolveFieldsGui.py
     )
 endif(BUILD_GUI)
 
