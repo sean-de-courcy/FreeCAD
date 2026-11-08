@@ -33,6 +33,7 @@
 #include <QPointer>
 #include <QSignalBlocker>
 #include <QTimer>
+#include <Standard_Failure.hxx>
 
 
 #include <App/Datums.h>
@@ -45,7 +46,9 @@
 #include <Gui/Inventor/Draggers/Gizmo.h>
 #include <Gui/Inventor/Draggers/SoLinearDragger.h>
 #include <Gui/Inventor/Draggers/SoRotationDragger.h>
+#include <Mod/Part/App/Attacher.h>
 #include <Mod/Part/App/Part2DObject.h>
+#include <Mod/Part/App/TopoShape.h>
 #include <Mod/PartDesign/App/Body.h>
 #include <Mod/PartDesign/App/FeatureExtrude.h>
 #include <Mod/Part/App/GizmoHelper.h>
@@ -63,6 +66,28 @@ using namespace Gui;
 
 namespace
 {
+// A face of a solid that isn't planar (FreeCAD-CH ops#640, rank 5): the profile's gate refuses it
+// at pick time, as Onshape's Extrude field does (B3-4: no highlight, nothing selected)
+bool isCurvedFace(App::DocumentObject* obj, const std::string& sub)
+{
+    auto feature = freecad_cast<Part::Feature*>(obj);
+    if (!feature || sub.rfind("Face", 0) != 0) {
+        return false;
+    }
+    try {
+        const Part::TopoShape face(
+            feature->Shape.getShape().getSubShape(sub.c_str(), /*silent=*/true)
+        );
+        return !face.isNull() && !face.isPlanar(Attacher::AttachEnginePlane::planarPrecision());
+    }
+    catch (const Base::Exception&) {
+        return false;
+    }
+    catch (const Standard_Failure&) {
+        return false;
+    }
+}
+
 // What the profile takes (ops#125): a sketch or other 2D object of the body, whole or by its
 // edges and regions, or faces and edges of the solid before the feature. \a why: the refusal.
 bool acceptProfile(const App::DocumentObject* feature,
@@ -83,6 +108,10 @@ bool acceptProfile(const App::DocumentObject* feature,
         return element.rfind(prefix, 0) == 0;
     };
     if (obj == base) {
+        if (startsWith("Face") && isCurvedFace(obj, element)) {
+            why = QT_TR_NOOP("Pick a planar face.");
+            return false;
+        }
         if (startsWith("Face") || startsWith("Edge")) {
             return true;
         }
@@ -95,6 +124,10 @@ bool acceptProfile(const App::DocumentObject* feature,
     const bool inStudio = otherBody && Part::BodyBase::isInOneStudio(feature, obj);
     if (inStudio && !obj->isDerivedFrom<Part::Part2DObject>()
         && obj->isDerivedFrom<Part::Feature>() && (startsWith("Face") || startsWith("Edge"))) {
+        if (startsWith("Face") && isCurvedFace(obj, element)) {
+            why = QT_TR_NOOP("Pick a planar face.");
+            return false;
+        }
         if (PartDesign::ProfileBased::isStudioProfile(feature, obj, sub)) {
             return true;
         }
