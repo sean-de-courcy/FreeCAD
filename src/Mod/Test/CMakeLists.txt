@@ -45,6 +45,7 @@ SET(Test_SRCS
     TestPropertyEditorGui.py
     TestVariablesGui.py
     TestVariableFieldsGui.py
+    TestModeToolBarGui.py
 )
 
 SET(TestData_SRCS

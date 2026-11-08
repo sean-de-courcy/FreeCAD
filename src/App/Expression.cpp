@@ -2991,9 +2991,40 @@ Py::Object VariableExpression::_getPyValue() const {
     return var.getPyValue(true);
 }
 
+namespace
+{
+// FreeCAD-CH (ops#640, rank 54): true while the parser runs. The lexer has one buffer, so
+// nothing may scan another string meanwhile (ExpressionParser::parse and parseUnit set it).
+bool parserRunning = false;
+
+/// @a text, a variable's path as written, with a '.' in front when it is a property of the owner
+/// alone whose name the lexer reads as a unit or a constant (a VarSet variable `t` used by
+/// another variable of the same set). `.t` is the grammar's own form for a property of the
+/// owner, and reads back as the property (afterDotLex), where `t` would be the unit.
+std::string ownPropertyPath(std::string text)
+{
+    // no unit or constant name is longer than 5 characters (`uTorr`, `False`): most names skip
+    // the four lexer scans below
+    if (parserRunning || text.empty() || text.size() > 5) {
+        return text;
+    }
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        char c = text[i];
+        bool letter = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
+        if (!letter && (i == 0 || c < '0' || c > '9')) {
+            return text;  // not a plain name: a path, a sub-path or an index
+        }
+    }
+    if (ExpressionParser::isTokenAUnit(text) || ExpressionParser::isTokenAConstant(text)) {
+        text.insert(0, 1, '.');
+    }
+    return text;
+}
+}  // namespace
+
 void VariableExpression::_toString(std::ostream &ss, bool persistent,int) const {
     if(persistent)
-        ss << var.toPersistentString();
+        ss << ownPropertyPath(var.toPersistentString());
     else {
         // FreeCAD-CH (ops#152): inside a VariableDisplayScope, a variable is written as #Name.
         if (auto scope = VariableDisplayScope::current()) {
@@ -3003,7 +3034,7 @@ void VariableExpression::_toString(std::ostream &ss, bool persistent,int) const 
                 return;
             }
         }
-        ss << var.toString();
+        ss << ownPropertyPath(var.toString());
     }
 }
 
@@ -3670,8 +3701,10 @@ static void noteUnmatched(const char* text, std::size_t len)
 #define ECHO noteUnmatched(yytext, static_cast<std::size_t>(yyleng))
 
 // show the parser the lexer method
-#define yylex ExpressionParserlex
 int ExpressionParserlex();
+// FreeCAD-CH (ops#640, rank 54): through afterDotLex(), defined after the lexer
+static int afterDotLex();
+#define yylex afterDotLex
 
 #if defined(__clang__)
 # pragma clang diagnostic push
@@ -3686,11 +3719,79 @@ int ExpressionParserlex();
 // Parser, defined in Expression.y
 # define YYTOKENTYPE
 #include "Expression.tab.c"
+#undef yylex  // the lexer defines it as ExpressionParserlex
 
 #ifndef DOXYGEN_SHOULD_SKIP_THIS
 // Scanner, defined in Expression.l
 #include "Expression.lex.c"
 #endif // DOXYGEN_SHOULD_SKIP_THIS
+
+/// FreeCAD-CH (ops#640, rank 54): the tokens afterDotLex() gave last and the one before; 0 when
+/// a parse starts.
+static int lastLexToken = 0;
+static int prevLexToken = 0;
+
+/// Whether @a text is an ASCII name: a letter or _, then letters, digits and _.
+static bool isAsciiName(const char* text)
+{
+    auto isLetter = [](char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
+    };
+    if (!text || !isLetter(text[0])) {
+        return false;
+    }
+    for (const char* c = text + 1; *c != '\0'; ++c) {
+        if (!isLetter(*c) && !(*c >= '0' && *c <= '9')) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// Whether @a name is a variable of the expression's owner, a VarSet: a sibling, which an
+/// expression of the set may name alone (the Onshape import writes `t * 3` for `#t * 3`). The
+/// boolean and None constants stay constants alone (checkVariableName refuses them as names).
+static bool isOwnVariable(const char* name)
+{
+    for (const char* reserved : {"True", "true", "False", "false", "None"}) {
+        if (std::strcmp(name, reserved) == 0) {
+            return false;
+        }
+    }
+    const App::DocumentObject* owner = App::ExpressionParser::DocumentObject;
+    if (!owner || !owner->getTypeId().isDerivedFrom(Base::Type::fromName("App::VarSet"))) {
+        return false;
+    }
+    const App::Property* prop = owner->getPropertyByName(name);
+    return prop && prop->testStatus(App::Property::PropDynamic);
+}
+
+/// The lexer's next token for the parser, except that a unit or constant name is a name (a
+/// variable may be called `t`, `h`, `W`, `N`, `m`, `e` or `pi`, as in Onshape):
+/// - right after '.': the last part of a property path (`Variables.t`, which `#t` becomes, or
+///   `.t`), where the grammar takes no unit or constant;
+/// - alone, when the owner is a VarSet with a variable of that name, and the token doesn't follow
+///   a number, a ')' or a unit, where it would be the number's unit (`2 t` stays two tonnes),
+///   nor a '*' or '/' after a unit (`5 m/s` and `kg*m` stay units with variables `s` and `m`).
+///   Known limit: `1/s` or `2 * s` there read `s` as the variable.
+/// A unit or constant anywhere else is read as before.
+static int afterDotLex()
+{
+    int token = ExpressionParserlex();
+    if ((token == UNIT || token == USUNIT || token == CONSTANT) && isAsciiName(yytext)) {
+        bool afterQuantity = lastLexToken == NUM || lastLexToken == ONE || lastLexToken == INTEGER
+            || lastLexToken == ')' || lastLexToken == UNIT || lastLexToken == USUNIT
+            || ((lastLexToken == '*' || lastLexToken == '/')
+                && (prevLexToken == UNIT || prevLexToken == USUNIT));
+        if (lastLexToken == '.' || (!afterQuantity && isOwnVariable(yytext))) {
+            yylval.string = yytext;
+            token = IDENTIFIER;
+        }
+    }
+    prevLexToken = lastLexToken;
+    lastLexToken = token;
+    return token;
+}
 
 class StringBufferCleaner
 {
@@ -3731,6 +3832,8 @@ static void initParser(const App::DocumentObject *owner)
 
     ScanResult.reset();
     App::ExpressionParser::DocumentObject = owner;
+    App::ExpressionParser::lastLexToken = 0;
+    App::ExpressionParser::prevLexToken = 0;
     labels = std::stack<std::string>();
     column = 0;
     unitExpression = valueExpression = false;
@@ -4223,7 +4326,11 @@ ExpressionPtr App::ExpressionParser::parse(const App::DocumentObject* owner, con
     initParser(owner);
 
     // run the parser
-    int result = ExpressionParser::ExpressionParser_yyparse ();
+    int result = 0;
+    {
+        Base::FlagToggler<bool> running(parserRunning, false);  // FreeCAD-CH (rank 54)
+        result = ExpressionParser::ExpressionParser_yyparse ();
+    }
 
     if (!unmatchedChar.empty()) {
         ScanResult.reset();
@@ -4257,7 +4364,11 @@ std::unique_ptr<UnitExpression> ExpressionParser::parseUnit(
     initParser(owner);
 
     // run the parser
-    int result = ExpressionParser::ExpressionParser_yyparse ();
+    int result = 0;
+    {
+        Base::FlagToggler<bool> running(parserRunning, false);  // FreeCAD-CH (rank 54)
+        result = ExpressionParser::ExpressionParser_yyparse ();
+    }
 
     if (!unmatchedChar.empty()) {
         ScanResult.reset();

@@ -604,7 +604,7 @@ class TestVariablesPanelGui(unittest.TestCase):
         dialog = self.openPanelAddDialog()
         error = dialog.findChild(QtWidgets.QLabel, "error")
         cases = [
-            ("t", "Length", "2 mm", "is a unit"),
+            ("2t", "Length", "2 mm", "isn't a name"),
             ("pow", "Number", "2", "is a function"),
             ("Label", "Number", "2", "property of every"),
             ("Ratio", "Number", "2 mm", "no unit"),
@@ -1432,21 +1432,25 @@ class TestVariablesImportGui(unittest.TestCase):
         self.assertAlmostEqual(copyA.Width.Value, 8)
 
     def test_names(self):
-        """Names FreeCAD can't use are listed with their proposals, editable: t -> tt by hand,
-        H -> H_ as proposed; a name FreeCAD refuses (pi) disables Import."""
+        """Names FreeCAD can't use are listed with their proposals, editable: Label -> Lbl by
+        hand; a name FreeCAD refuses (cos) disables Import. Unit names (t, H) aren't listed:
+        they are usable as they are (ops#640, rank 54)."""
         path = writeExport(self.folder, "Units", [("LENGTH", "t", "2 mm"),
-                                                   ("LENGTH", "H", "#t * 3")])
+                                                   ("LENGTH", "H", "#t * 3"),
+                                                   ("LENGTH", "Label", "3 mm"),
+                                                   ("LENGTH", "Wall", "#Label * 4")])
         self.open([path])
         names = self.find(QtWidgets.QTableWidget, "names")
         table = {names.item(r, 0).text(): names.item(r, 1) for r in range(names.rowCount())}
-        self.assertEqual({k: v.text() for k, v in table.items()}, {"H": "H_", "t": "t_"})
-        table["t"].setText("pi")
+        self.assertEqual({k: v.text() for k, v in table.items()}, {"Label": "Label_"})
+        table["Label"].setText("cos")
         pump(0.05)
         self.assertFalse(self.find(QtWidgets.QPushButton, "import").isEnabled())
-        table["t"].setText("tt")
+        table["Label"].setText("Lbl")
         copy = self.importNow().copies[0]
-        self.assertEqual(copy.NameMap, {"t": "tt", "H": "H_"})
-        self.assertAlmostEqual(copy.H_.Value, 6)
+        self.assertEqual(copy.NameMap, {"Label": "Lbl"})
+        self.assertAlmostEqual(copy.H.Value, 6)
+        self.assertAlmostEqual(copy.Wall.Value, 12)
 
     def test_file_import_type(self):
         """File > Import knows "Onshape variables (*.json)"; its module opens the dialog."""
@@ -1570,23 +1574,24 @@ class TestVariablesImportGui(unittest.TestCase):
         self.assertNotIn("z", copyB.PropertiesList)
 
     def test_value_for_unit_name(self):
-        """A value for #t, a name FreeCAD can't use: the names table proposes t_, editable, as
-        for a copy's variable (review 317, 6)."""
-        path = writeExport(self.folder, "Thin", [("LENGTH", "Width", "#t * 2")])
+        """A value for #Label, a name FreeCAD can't use (every set has a Label): the names table
+        proposes Label_, editable, as for a copy's variable (review 317, 6). (#t, a unit name,
+        is usable since ops#640 rank 54.)"""
+        path = writeExport(self.folder, "Thin", [("LENGTH", "Width", "#Label * 2")])
         self.open([path])
-        self.choose(self.find(QtWidgets.QComboBox, "choice_t"), "value")
-        self.choose(self.find(QtWidgets.QComboBox, "type_t"), "LENGTH")
-        self.find(QtWidgets.QLineEdit, "value_t").setText("3 mm")
+        self.choose(self.find(QtWidgets.QComboBox, "choice_Label"), "value")
+        self.choose(self.find(QtWidgets.QComboBox, "type_Label"), "LENGTH")
+        self.find(QtWidgets.QLineEdit, "value_Label").setText("3 mm")
         pump(0.05)
         names = self.find(QtWidgets.QTableWidget, "names")
         self.assertTrue(names.isVisibleTo(self.dialog))
         table = {names.item(r, 0).text(): names.item(r, 1) for r in range(names.rowCount())}
-        self.assertEqual({k: v.text() for k, v in table.items()}, {"t": "t_"})
-        table["t"].setText("Thick")
+        self.assertEqual({k: v.text() for k, v in table.items()}, {"Label": "Label_"})
+        table["Label"].setText("Thick")
         pump(0.05)
         copy = self.importNow().copies[0]
         self.assertAlmostEqual(self.doc.getObject("Variables").Thick.Value, 3)
-        self.assertEqual(copy.Bindings, {"t": "Variables.Thick"})
+        self.assertEqual(copy.Bindings, {"Label": "Variables.Thick"})
         self.assertAlmostEqual(copy.Width.Value, 6)
 
     def test_dialog_freed(self):

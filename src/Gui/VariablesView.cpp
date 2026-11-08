@@ -404,12 +404,15 @@ public:
     }
 };
 
-/// Whether @a name may name a variable: an identifier that isn't a unit, a constant or a cell.
-bool isValidName(const std::string& name)
+/// Whether @a name may name a variable: an identifier that isn't a cell address. A sheet alias
+/// can't be a unit or a constant either; a VarSet variable can (FreeCAD-CH, ops#640, rank 54:
+/// `#t` reads as the variable, App's checkVariableName).
+bool isValidName(const std::string& name, bool sheet)
 {
+    if (App::ExpressionParser::isTokenAUnit(name) || App::ExpressionParser::isTokenAConstant(name)) {
+        return !sheet && App::VariableLookup::checkVariableName(nullptr, name).empty();
+    }
     return App::ExpressionParser::isTokenAnIndentifier(name)
-        && !App::ExpressionParser::isTokenAUnit(name)
-        && !App::ExpressionParser::isTokenAConstant(name)
         && !App::stringToAddress(name.c_str(), true).isValid();
 }
 
@@ -425,6 +428,43 @@ bool isEditableSet(const App::DocumentObject* obj)
 /// variable..." hands the Add dialog the typed name and the field's value (a QStringList; set
 /// around a run of Std_AddVariable by QuantitySpinBox.cpp and ExpressionCompleter.cpp).
 constexpr const char* newVariableProperty = "FreeCADCH_NewVariable";
+
+/// FreeCAD-CH (ops#640, hands-on D-1): a variable the Add dialog made inside a transaction that
+/// another dialog had booked (a field's "New variable..." in a feature dialog). Onshape keeps such
+/// a variable when the feature is cancelled: the abort takes it back with the feature, so it is
+/// made again from this record, as its own undo step. A commit of the document drops the record.
+struct PendingVariable
+{
+    std::string docName;
+    std::string holderName;  // empty: the "Variables" set was made with it
+    QString name;
+    std::string type;
+    QString text;
+    QString description;
+};
+
+std::vector<PendingVariable>& pendingVariables()
+{
+    static std::vector<PendingVariable> pending;
+    return pending;
+}
+
+/// The records of @a docName, in the order they were made, taken out of the list.
+std::vector<PendingVariable> takePendingVariables(const std::string& docName)
+{
+    std::vector<PendingVariable> taken;
+    auto& pending = pendingVariables();
+    for (auto it = pending.begin(); it != pending.end();) {
+        if (it->docName == docName) {
+            taken.push_back(std::move(*it));
+            it = pending.erase(it);
+        }
+        else {
+            ++it;
+        }
+    }
+    return taken;
+}
 
 /// FreeCAD-CH (ops#640, rank 15): Onshape's Variable tool, on Part Design's Features toolbar:
 /// the Variables panel shown, and its Add dialog. A dialog's open transaction takes the add.
@@ -727,10 +767,14 @@ bool VariablesModel::rename(const QModelIndex& index, const QString& newName)
     if (name == oldName) {
         return true;
     }
-    if (!isValidName(name)) {
-        error = tr("'%1' is not a valid name: use a name that isn't a unit, a constant or a cell "
-                   "address.")
-                    .arg(newName);
+    if (!isValidName(name, isSheet(obj))) {
+        error = isSheet(obj)
+            ? tr("'%1' is not a valid name: use a name that isn't a unit, a constant or a cell "
+                 "address.")
+                  .arg(newName)
+            : tr("'%1' is not a valid name: use letters, digits and _, and no cell address or "
+                 "function name.")
+                  .arg(newName);
         return false;
     }
     if (App::VariableLookup::isVariable(obj, name)
@@ -1187,6 +1231,57 @@ VariablesView::VariablesView(Gui::Document* doc, QWidget* parent)
     }));
     connections.emplace_back(app.signalRecomputed.connect([this](const App::Document&) {
         scheduleRebuild();
+    }));
+    // FreeCAD-CH (ops#640, hands-on D-1): a variable made inside a dialog's transaction stays when
+    // the dialog is cancelled, as in Onshape. The abort took it back: it is made again, in its own
+    // transaction, after the abort (the signal comes while the document is rolling back).
+    connections.emplace_back(app.signalAbortTransaction.connect([this](const App::Document& doc) {
+        std::vector<PendingVariable> pending = takePendingVariables(doc.getName());
+        if (pending.empty()) {
+            return;
+        }
+        QTimer::singleShot(0, this, [this, pending] {
+            for (const auto& var : pending) {
+                App::Document* document = App::GetApplication().getDocument(var.docName.c_str());
+                if (!document) {
+                    continue;
+                }
+                std::string holderName = var.holderName;
+                App::DocumentObject* holder = holderName.empty()
+                    ? nullptr
+                    : document->getObject(holderName.c_str());
+                if (!holder) {
+                    // The set went with the abort (or was made with the variable): the
+                    // "Variables" set, if one is left, else a new one.
+                    holder = document->getObject("Variables");
+                    holderName = isEditableSet(holder) ? holder->getNameInDocument() : "";
+                    if (holderName.empty()) {
+                        holder = nullptr;
+                    }
+                }
+                if (holder && holder->getPropertyByName(var.name.toStdString().c_str())) {
+                    continue;  // not taken back
+                }
+                QString error;
+                if (!addFromDialog(
+                        var.docName,
+                        holderName,
+                        var.name,
+                        var.type.c_str(),
+                        var.text,
+                        var.description,
+                        error
+                    )) {
+                    showMessage(error, true);
+                }
+            }
+        });
+    }));
+    connections.emplace_back(app.signalCommitTransaction.connect([](const App::Document& doc) {
+        takePendingVariables(doc.getName());  // committed with the dialog's step
+    }));
+    connections.emplace_back(app.signalDeleteDocument.connect([](const App::Document& doc) {
+        takePendingVariables(doc.getName());  // a later document of the same name isn't this one
     }));
     connections.emplace_back(Application::Instance->signalActiveDocument.connect(
         std::bind(&VariablesView::onActiveDocument, this, sp::_1)
@@ -1685,6 +1780,9 @@ bool VariablesView::addFromDialog(
 
     // One transaction for the whole add, the "Variables" VarSet included. A transaction already
     // booked (a task dialog's) takes it instead, and what was made is taken back on a failure.
+    // FreeCAD-CH (ops#640, D-1): a dialog's booking, which the add joins when tid is 0 (0 also
+    // comes when the document's transactions are locked or busy, and there is nothing to redo).
+    const bool booked = doc->getBookedTransactionID() != 0;
     int tid = Gui::PropertyEditor::openPropertyTransaction(doc, ("Add " + varName).c_str());
     bool created = false;
     bool added = false;
@@ -1785,6 +1883,10 @@ bool VariablesView::addFromDialog(
     }
     recomputeAfterEdit(doc);
     Gui::PropertyEditor::closePropertyTransaction(tid);
+    if (tid == 0 && booked) {
+        // FreeCAD-CH (ops#640, D-1): joined a dialog's booking; made again if that is cancelled.
+        pendingVariables().push_back({docName, holderName, name, typeName, text, description});
+    }
     return true;
 }
 

@@ -26,8 +26,9 @@
   `#Width * 1 mm`.
 - Rank 55 (hands-on F10): an unknown `#name` keeps the field red, as typed, and nothing is
   committed; the `#` list offers "New variable...", which opens the Add dialog with the name and
-  the field's value. (Onshape keeps such a variable when the feature is cancelled, hands-on D-1;
-  here an open dialog's transaction takes it: not checked.)
+  the field's value.
+- Hands-on D-1: a variable made that way while a dialog's transaction is open stays when the
+  dialog is cancelled, as its own undo step; when the dialog is accepted, it is in the dialog's.
 - Rank 15: Std_AddVariable, the Variable tool, opens the same dialog.
 - Rank 56: `3/4 in` typed is three quarters of an inch.
 
@@ -229,6 +230,89 @@ class TestVariableFieldsGui(unittest.TestCase):
         self.assertEqual(expressionText(self.box, "Length"), "Variables.Depth")
         self.doc.recompute()
         self.assertAlmostEqual(self.box.Length.Value, 10.0, places=6)
+
+    def makeDepthFromTheField(self):
+        """`#Depth` typed into the field, then "New variable..." and OK in the Add dialog."""
+        spin = self.field()
+        self.type(spin, "#Depth")
+        completer = spin.findChild(QtWidgets.QCompleter)
+        self.assertIsNotNone(completer, "no # completion on the field")
+        model = completer.completionModel()
+        rows = [model.data(model.index(row, 0)) for row in range(model.rowCount())]
+        self.assertTrue(rows, "the # list is empty")
+        self.assertEqual(rows[-1], "New variable...")
+        completer.activated[QtCore.QModelIndex].emit(model.index(len(rows) - 1, 0))
+        dialog = waitFor(addDialog)
+        self.assertIsNotNone(dialog, "New variable... opened no Add dialog")
+        dialog.findChild(QtWidgets.QDialogButtonBox).button(
+            QtWidgets.QDialogButtonBox.Ok
+        ).click()
+        pump()
+        self.assertIsNone(addDialog())
+        self.assertIn("Depth", self.varSet.PropertiesList)
+
+    def test_new_variable_stays_when_the_dialog_is_cancelled(self):
+        """Hands-on D-1: the feature dialog's transaction (booked, with its new feature in it)
+        takes the variable; cancelling the dialog aborts it, and the variable is made again as
+        its own undo step, "Add Depth", with the field's value."""
+        undoCount = self.doc.UndoCount
+        self.doc.openTransaction("Insert feature")
+        self.assertNotEqual(self.doc.getBookedTransactionID(), 0)
+        self.doc.addObject("Part::Box", "Feature")
+        self.makeDepthFromTheField()
+        self.doc.abortTransaction()
+        self.assertIsNone(self.doc.getObject("Feature"))
+        self.assertTrue(
+            waitFor(lambda: "Depth" in self.varSet.PropertiesList, 2.0),
+            "the variable went with the cancelled dialog",
+        )
+        self.assertAlmostEqual(self.varSet.Depth.Value, 10.0, places=6)
+        self.assertEqual(self.doc.UndoCount, undoCount + 1)
+        self.assertEqual(self.doc.UndoNames[0], "Add Depth")
+        # One set: the variable went back into "Variables", no new set
+        self.assertEqual([o.Name for o in self.doc.findObjects("App::VarSet")], ["Variables"])
+
+    def test_new_variable_is_in_the_accepted_dialogs_step(self):
+        """Hands-on D-1's other half: accepted, the dialog's step holds the variable, and
+        nothing is made again later."""
+        undoCount = self.doc.UndoCount
+        self.doc.openTransaction("Insert feature")
+        self.doc.addObject("Part::Box", "Feature")
+        self.makeDepthFromTheField()
+        self.doc.commitTransaction()
+        pump()
+        self.assertIsNotNone(self.doc.getObject("Feature"))
+        self.assertIn("Depth", self.varSet.PropertiesList)
+        self.assertEqual(self.doc.UndoCount, undoCount + 1)
+        self.assertEqual(self.doc.UndoNames[0], "Insert feature")
+        # A later cancelled dialog doesn't bring a record back
+        self.doc.openTransaction("Other")
+        self.doc.addObject("Part::Box", "Other")
+        self.doc.abortTransaction()
+        pump()
+        self.assertEqual(self.doc.UndoCount, undoCount + 1)
+
+    def test_unit_named_variable_binds(self):
+        """Hands-on D-2 (rank 54): a variable named t (a unit name) works as `#t`: the field
+        isn't red, Enter binds it, and the value follows; "New variable..." is offered for `#h`."""
+        self.varSet.addProperty("App::PropertyDistance", "t")
+        self.varSet.t = "0.75 in"
+        self.doc.recompute()
+        spin = self.field()
+        edit = self.type(spin, "#t")
+        self.assertFalse(self.isRed(edit))
+        QTest.keyClick(spin, QtCore.Qt.Key_Return)
+        pump()
+        self.assertEqual(expressionText(self.box, "Length"), "Variables.t")
+        self.doc.recompute()
+        self.assertAlmostEqual(self.box.Length.Value, 19.05, places=9)
+        other = self.field()
+        self.type(other, "#h")
+        completer = other.findChild(QtWidgets.QCompleter)
+        self.assertIsNotNone(completer)
+        model = completer.completionModel()
+        rows = [model.data(model.index(row, 0)) for row in range(model.rowCount())]
+        self.assertIn("New variable...", rows)
 
     def test_known_name_offers_no_new_variable(self):
         spin = self.field()
