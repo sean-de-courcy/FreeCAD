@@ -17,8 +17,13 @@ from PartDesignTests.TestExpressionFieldsGui import pump, waitFor
 
 
 class TestExtrudeFieldsGui(ResultBoxGuiCase):
-    def plate(self, **values):
+    def plate(self, base=False, **values):
+        """The square padded 10, its dialog open; with `base`, on a 20 x 20 x 20 block around it
+        (z 0..20), for the end types that need a solid to end at."""
         self.body = models.body(self.doc)
+        if base:
+            block = models.sketch(self.doc, "Block", models.rectangle(-5, -5, 15, 15), self.body)
+            models.pad(self.body, block, 20, "BlockPad")
         profile = models.sketch(self.doc, "Profile", models.rectangle(0, 0, 10, 10), self.body)
         pad = models.pad(self.body, profile, 10)
         for name, value in values.items():
@@ -51,8 +56,9 @@ class TestExtrudeFieldsGui(ResultBoxGuiCase):
         self.assertFalse(combo.view().isRowHidden(5))
 
     def testAnOlderUpToLastStaysShown(self):
-        """A pad that ends Up to last (an older file) shows it, and keeps it on OK."""
-        pad = self.plate(Type="UpToLast")
+        """A pad that ends Up to last (an older file) shows it, and keeps it on OK. On the block:
+        Up to last needs a solid to end at."""
+        pad = self.plate(base=True, Type="UpToLast")
         combo = self.box(QtWidgets.QComboBox, "changeMode")
         self.assertEqual(combo.currentText(), "Up to last")
         self.assertFalse(combo.view().isRowHidden(1))
