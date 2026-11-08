@@ -1321,6 +1321,31 @@ class DocumentRecomputeCases(unittest.TestCase):
         self.Doc.removeObject(L7.Name)
         self.Doc.removeObject(L8.Name)
 
+    def testRecomputeAloneKeepsTheFailedInputsError(self):
+        """FreeCAD-CH ops#640 rank 29 (F20): Bad fails; Uses links to it (Source1), so the
+        document's recompute fails Uses without running it, naming the link (ops#579). Uses'
+        own recompute, as a dialog's, gives the same: it doesn't run, and its error and text stay
+        (it ran and cleared them). Bad mended, both compute."""
+        bad = self.Doc.addObject("App::FeatureTest", "Bad")
+        bad.ExceptionType = 2
+        uses = self.Doc.addObject("App::FeatureTest", "Uses")
+        uses.Source1 = bad
+        self.Doc.recompute()
+        self.assertFalse(bad.isValid())
+        self.assertFalse(uses.isValid())
+        text = f"Source1 links to '{bad.Label}', which has an error"
+        self.assertIn(text, uses.getStatusString())
+        runs = uses.ExecCount
+        self.assertFalse(uses.recompute())
+        self.assertEqual(uses.ExecCount, runs, "Uses ran on its failed input")
+        self.assertFalse(uses.isValid())
+        self.assertIn(text, uses.getStatusString())
+        bad.ExceptionType = 0
+        self.Doc.recompute()
+        self.assertTrue(bad.isValid(), bad.getStatusString())
+        self.assertTrue(uses.isValid(), uses.getStatusString())
+        self.assertEqual(uses.ExecCount, runs + 1)
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("RecomputeTests")
