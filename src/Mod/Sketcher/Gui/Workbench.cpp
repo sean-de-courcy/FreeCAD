@@ -380,6 +380,7 @@ inline void SketcherAddWorkspaceRectangles<Gui::MenuItem>(Gui::MenuItem& geom)
 {
     geom << "Sketcher_CreateRectangle"
          << "Sketcher_CreateRectangle_Center"
+         << "Sketcher_CreateRectangle_Aligned"  // FreeCAD-CH (ops#640, rank 49)
          << "Sketcher_CreateOblong";
 }
 
@@ -483,6 +484,7 @@ inline void SketcherAddWorkbenchConstraints<Gui::MenuItem>(Gui::MenuItem& cons)
          << "Sketcher_ConstrainVertical"
          << "Sketcher_ConstrainParallel"
          << "Sketcher_ConstrainPerpendicular"
+         << "Sketcher_ConstrainNormal"  // FreeCAD-CH (ops#640, rank 44)
          << "Sketcher_ConstrainTangent"
          << "Sketcher_ConstrainEqual"
          << "Sketcher_ConstrainMidpoint"

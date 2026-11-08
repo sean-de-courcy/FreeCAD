@@ -96,6 +96,7 @@
 #include "DrawSketchHandlerDragAutoConstraint.h"
 #include "DrawSketchHandlerExternal.h"  // FreeCAD-CH (ops#634): ModelPickSelection
 #include "SketchEnterTarget.h"  // FreeCAD-CH (ops#640): the Fillet tool's Enter
+#include "ConflictRefusal.h"  // FreeCAD-CH (ops#640, rank 45)
 #include "EditDatumDialog.h"
 #include "EditTextDialog.h"
 #include "EditModeCoinManager.h"
@@ -4130,6 +4131,9 @@ void ViewProviderSketch::slotSolverUpdate()
         return;
     }
 
+    // FreeCAD-CH (ops#640, rank 45): a constraint that conflicts is refused, not shown collapsed
+    checkAddedConstraint(*this);
+
     // At this point, we do not need to solve the Sketch
     // If we are adding geometry an update can be triggered before the sketch is actually
     // solved. Because a solve is mandatory to any addition (at least to update the DoF of the
@@ -4168,6 +4172,8 @@ void ViewProviderSketch::slotConstraintAdded(Sketcher::Constraint* constraint)
     if (!constraint) {
         return;
     }
+
+    noteConstraintAdded(*this, *constraint);  // FreeCAD-CH (ops#640, rank 45)
 
     // Auto-scale label distance for dimensional constraints
     if (constraint->Type == Distance || constraint->Type == DistanceX || constraint->Type == DistanceY) {
@@ -4794,6 +4800,7 @@ void ViewProviderSketch::unsetEdit(int ModNum)
     if (dragAutoConstraintHandler) {
         dragAutoConstraintHandler->clear();
     }
+    forgetAddedConstraint(*this);  // FreeCAD-CH (ops#640, rank 45)
 
     setGridEnabled(nullptr);
     auto gridnode = getGridNode();

@@ -29,6 +29,7 @@
 #include <QApplication>
 #include <QClipboard>
 #include <QMessageBox>
+#include <QTimer>
 
 #include <Inventor/SbString.h>
 
@@ -41,6 +42,7 @@
 #include <Gui/BitmapFactory.h>
 #include <Gui/CommandT.h>
 #include <Gui/Document.h>
+#include <Gui/ForkKeymap.h>
 #include <Gui/MainWindow.h>
 #include <Gui/Notifications.h>
 #include <Gui/View3DInventor.h>
@@ -2400,6 +2402,68 @@ CmdSketcherOffset::CmdSketcherOffset()
     eType = ForEdit;
 }
 
+namespace
+{
+/// the geometry Offset takes: not points, B-splines, conics other than circles, internal geometry
+bool offsetTakes(const Sketcher::SketchObject* obj, int geoId)
+{
+    const Part::Geometry* geo = obj->getGeometry(geoId);
+    // Currently ellipse/parabola/hyperbola/bspline are not handled correctly.
+    // Occ engine gives offset of those as set of lines and arcs and does not seem to work
+    // consistently.
+    return geo && !isPoint(*geo) && !isBSplineCurve(*geo) && !isEllipse(*geo)
+        && !isArcOfEllipse(*geo) && !isArcOfHyperbola(*geo) && !isArcOfParabola(*geo)
+        && !GeometryFacade::isInternalAligned(geo);
+}
+
+/* FreeCAD-CH (ops#640, rank 47): Onshape's Offset starts with nothing selected
+ * (H/Sketch/offset.htm; gap S21): this tool waits for a click on a curve of the sketch (a
+ * projected model edge too), then hands it to the Offset tool, which sets the side and distance.
+ */
+class DrawSketchHandlerOffsetPick: public DrawSketchHandler
+{
+public:
+    void mouseMove(SnapManager::SnapHandle /*snapHandle*/) override
+    {}
+
+    bool pressButton(Base::Vector2d /*pos*/) override
+    {
+        return true;
+    }
+
+    bool releaseButton(Base::Vector2d /*pos*/) override
+    {
+        const int geoId = getPreselectCurve();
+        const bool curve = geoId >= 0 || geoId <= Sketcher::GeoEnum::RefExt;
+        Sketcher::SketchObject* obj = sketchgui->getSketchObject();
+        if (!curve || !offsetTakes(obj, geoId)) {
+            return true;
+        }
+        // The Offset tool replaces this one once this click is done with it
+        const std::string documentName = obj->getDocument()->getName();
+        QTimer::singleShot(0, [documentName, geoId]() {
+            if (auto* document = Gui::Application::Instance->getDocument(documentName.c_str())) {
+                ActivateHandler(document,
+                                std::make_unique<DrawSketchHandlerOffset>(std::vector<int> {geoId}));
+            }
+        });
+        return true;
+    }
+
+    std::list<Gui::InputHint> getToolHints() const override
+    {
+        using enum Gui::InputHint::UserInput;
+        return {{QObject::tr("%1 pick a curve to offset", "Sketcher Offset: hint"), {MouseLeft}}};
+    }
+
+private:
+    std::string getToolName() const override
+    {
+        return "DSH_OffsetPick";
+    }
+};
+}  // namespace
+
 void CmdSketcherOffset::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
@@ -2408,6 +2472,15 @@ void CmdSketcherOffset::activated(int iMsg)
     // get the selection
     std::vector<Gui::SelectionObject> selection;
     selection = getSelection().getSelectionEx(0, Sketcher::SketchObject::getClassTypeId());
+
+    // FreeCAD-CH (ops#640, rank 47): Onshape's Offset with nothing of the sketch selected waits
+    // for a curve
+    if (Gui::ForkKeymap::isOnshape()
+        && (selection.empty() || (selection.size() == 1 && selection[0].getSubNames().empty()))) {
+        getSelection().clearSelection();
+        ActivateHandler(getActiveGuiDocument(), std::make_unique<DrawSketchHandlerOffsetPick>());
+        return;
+    }
 
     // only one sketch with its subelements are allowed to be selected
     if (selection.size() != 1) {
@@ -2434,16 +2507,7 @@ void CmdSketcherOffset::activated(int iMsg)
                 continue;
             }
 
-            const Part::Geometry* geo = Obj->getGeometry(geoId);
-            if (!isPoint(*geo)
-                && !isBSplineCurve(*geo)
-                && !isEllipse(*geo)
-                && !isArcOfEllipse(*geo)
-                && !isArcOfHyperbola(*geo)
-                && !isArcOfParabola(*geo)
-                && !GeometryFacade::isInternalAligned(geo)) {
-                // Currently ellipse/parabola/hyperbola/bspline are not handled correctly.
-                // Occ engine gives offset of those as set of lines and arcs and does not seem to work consistently.
+            if (offsetTakes(Obj, geoId)) {
                 listOfGeoIds.push_back(geoId);
             }
         }
@@ -2462,6 +2526,10 @@ void CmdSketcherOffset::activated(int iMsg)
 
 bool CmdSketcherOffset::isActive()
 {
+    // FreeCAD-CH (ops#640, rank 47): under Onshape's keymap the tool starts without a selection
+    if (Gui::ForkKeymap::isOnshape()) {
+        return isCommandActive(getActiveGuiDocument());
+    }
     return isCommandNeedingGeometryActive(getActiveGuiDocument());
 }
 

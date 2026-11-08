@@ -370,11 +370,13 @@ public:
             // we set up a transition from the neighbouring segment.
             // (peviousCurve, previousPosId, dirVec, TransitionMode)
             for (unsigned int i = 0; i < sugConstr1.size(); i++) {
-                if (sugConstr1[i].Type == Sketcher::Coincident) {
+                // FreeCAD-CH (ops#640): a model vertex's suggestion has no sketch geometry
+                if (sugConstr1[i].Type == Sketcher::Coincident && !sugConstr1[i].ModelObject) {
                     const Part::Geometry* geom = sketchgui->getSketchObject()->getGeometry(
                         sugConstr1[i].GeoId
                     );
-                    if ((geom->is<Part::GeomLineSegment>() || geom->is<Part::GeomArcOfCircle>())
+                    if (geom
+                        && (geom->is<Part::GeomLineSegment>() || geom->is<Part::GeomArcOfCircle>())
                         && (sugConstr1[i].PosId == Sketcher::PointPos::start
                             || sugConstr1[i].PosId == Sketcher::PointPos::end)) {
                         previousCurve = sugConstr1[i].GeoId;
