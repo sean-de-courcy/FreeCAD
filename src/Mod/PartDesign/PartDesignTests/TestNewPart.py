@@ -687,8 +687,9 @@ class TestOperations(unittest.TestCase):
         for prop in ("Type", "Type2"):
             self.assertEqual(
                 lid.getEnumerationsOfProperty(prop),
+                # Up to vertex appended after (ops#640 rank 22): none moves
                 ["Length", "UpToLast", "UpToFirst", "UpToFace", "?TwoLengths", "UpToShape",
-                 "ThroughAll"],
+                 "ThroughAll", "UpToVertex"],
             )
         lid.Operation = "Subtraction"
         lid.Reversed = True
@@ -714,8 +715,9 @@ class TestOperations(unittest.TestCase):
         for prop in ("Type", "Type2"):
             self.assertEqual(
                 pocket.getEnumerationsOfProperty(prop),
+                # Up to vertex appended after (ops#640 rank 22): none moves
                 ["Length", "ThroughAll", "UpToFirst", "UpToFace", "?TwoLengths", "UpToShape",
-                 "UpToLast"],
+                 "UpToLast", "UpToVertex"],
             )
         pocket.Operation = "Union"
         pocket.Type = "UpToLast"
