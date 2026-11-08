@@ -86,7 +86,7 @@ namespace Gui
 
 /// FreeCAD-CH (ops#640): no document regenerates on commit while an object is in edit (defined
 /// and explained in Gui/Application.cpp; not in Application.h, which hundreds of files include)
-void updateRegenerationHold();
+void updateRegenerationHold(const App::Document* closingStep = nullptr);
 
 // Pimpl class
 struct DocumentP
@@ -728,6 +728,41 @@ View3DInventor* Document::openEditingView3D(const App::DocumentObject* obj)
     return nullptr;
 }
 
+namespace
+{
+bool bookEditStep(
+    Gui::Document* gdoc,
+    App::DocumentObject* obj,
+    const std::string& subname,
+    int ModNum
+)
+{
+    // FreeCAD-CH (ops#640): an edit opened with no transaction (Gui.ActiveDocument.setEdit from a
+    // script or macro; the tree's double-click, Std_Edit and the feature commands open one first)
+    // gets its step here, before its dialog opens, named as the double-click names it, so that
+    // the dialog's changes from its start (the sketches it shows) are in it, as from the
+    // double-click: under the lock the panels' own fallback, "Edit X" opened at their first
+    // change when none is booked (setupTransaction), is refused, and the dialog's changes were
+    // recorded nowhere (its Cancel restored nothing, its OK left no step). An unchanged accept
+    // still leaves none (the commit's no-op rule).
+    App::Document* doc = gdoc->getDocument();
+    if (!obj || doc->getBookedTransactionID() != App::NullTransaction
+        || doc->hasPendingTransaction() || doc->isTransactionLocked() || doc->transacting()) {
+        return false;
+    }
+    App::DocumentObject* target = subname.empty() ? obj : obj->getSubObject(subname.c_str());
+    auto vp = target ? freecad_cast<Gui::ViewProviderDocumentObject*>(
+                           Gui::Application::Instance->getViewProvider(target)
+                       )
+                     : nullptr;
+    if (!vp || vp->getDocument() != gdoc || !vp->editHoldsOneStep(ModNum)) {
+        return false;
+    }
+    const QString text = QObject::tr("Edit %1").arg(QString::fromUtf8(target->Label.getValue()));
+    return doc->openTransaction(text.toUtf8().constData()) != App::NullTransaction;
+}
+}  // namespace
+
 bool Document::trySetEdit(Gui::ViewProvider* p, int ModNum, const char* subname)
 {
     auto vp = DocumentP::throwIfCastFails(p);
@@ -765,9 +800,16 @@ bool Document::trySetEdit(Gui::ViewProvider* p, int ModNum, const char* subname)
 
     d->throwIfNotInMap(obj, getDocument());
 
+    // FreeCAD-CH (ops#640): an edit that holds its step, opened with no transaction, books it
+    // before the dialog opens (bookEditStep)
+    const bool bookedHere = bookEditStep(this, obj, _subname, ModNum);
+
     Application::Instance->setEditDocument(this);
 
     if (!d->tryStartEditing(vp, obj, _subname.c_str(), ModNum)) {
+        if (bookedHere) {
+            getDocument()->abortTransaction();
+        }
         d->setDocumentNameOfTaskDialog(getDocument());
         return false;
     }
@@ -824,7 +866,18 @@ void Document::holdEditStep(int ModNum)
         || !d->_editViewProvider->editHoldsOneStep(ModNum)) {
         return;
     }
-    getDocument()->lockStep();
+    // FreeCAD-CH (ops#640): the edit whose step bookEditStep couldn't book before it started
+    // (its target found only by the edit itself) books it now, from its first change on
+    App::Document* doc = getDocument();
+    auto vpd = freecad_cast<ViewProviderDocumentObject*>(d->_editViewProvider);
+    if (vpd && vpd->getObject() && doc->getBookedTransactionID() == App::NullTransaction
+        && !doc->hasPendingTransaction() && !doc->isTransactionLocked() && !doc->transacting()) {
+        const QString text = QObject::tr("Edit %1").arg(
+            QString::fromUtf8(vpd->getObject()->Label.getValue())
+        );
+        doc->openTransaction(text.toUtf8().constData());
+    }
+    doc->lockStep();
     d->_editHoldsStep = true;
 }
 
@@ -874,6 +927,9 @@ void Document::_resetEdit()
     // finishEditing() (whose unsetEdit may recompute); the step lock never refuses the explicit
     // commit or abort of the dialog itself, and restartEdit's TransactionLocker still makes the
     // commit below a no-op
+    // FreeCAD-CH (ops#640): a dialog that held its step commits it below and regenerates, even
+    // while another document holds the regeneration (updateRegenerationHold)
+    const bool heldStep = d->_editHoldsStep;
     releaseEditStep();
 
     if (d->_editViewProvider) {
@@ -902,8 +958,9 @@ void Document::_resetEdit()
         }
         d->_editViewProvider = nullptr;
         // FreeCAD-CH (ops#640): the hold on regeneration ends before the edit's own commit
-        // below, so the dialog's OK regenerates (unless another document is in edit)
-        updateRegenerationHold();
+        // below, so the dialog's OK regenerates: a feature dialog's always, a sketch's unless
+        // another document is in a sketch's edit (then at that edit's end)
+        updateRegenerationHold(heldStep ? getDocument() : nullptr);
 
         // The logic below is not necessary anymore, because this method is
         // changed into a private one,  _resetEdit(). And the exposed

@@ -572,7 +572,9 @@ class TestRegenerateGui(RegenerateModel, unittest.TestCase):
         """A sketch in edit (an edit that holds no step) holds the regeneration on commit of every
         Gui document until it ends, as the Variables panel's recompute (ops#599 R1-1, R1b-3): its
         Cancel restores the sketch from a backup, and a model regenerated meanwhile would be built
-        from the cancelled sketch. The other document's commit leaves it touched."""
+        from the cancelled sketch. The other document's commit leaves it touched, and so does a
+        commit in the sketch's own document; the edit's end regenerates both (the hold's release
+        left them touched: a silent stale model)."""
         other = models.newDocument("RegenerateGuiOther")
         try:
             other.UndoMode = 1
@@ -588,16 +590,58 @@ class TestRegenerateGui(RegenerateModel, unittest.TestCase):
             box.Length = 12
             other.commitTransaction()
             self.assertIn("Touched", box.State)
+            self.doc.openTransaction("Boss")
+            self.boss.Length = 8
+            self.doc.commitTransaction()
+            self.assertTrue(self.doc.mustExecute(), "a commit regenerated during the sketch edit")
+            self.assertVolume(self.body, total())
             Gui.getDocument(self.doc.Name).resetEdit()
             pump()
             self.assertTrue(self.doc.RegenerateOnCommit)
             self.assertTrue(other.RegenerateOnCommit)
+            # the held commits regenerated at the edit's end
+            self.assertNotIn("Touched", box.State)
+            self.assertAlmostEqual(box.Shape.Volume, 12 * 10 * 10, places=6)
+            self.assertRegenerated(total(boss=8))
             other.openTransaction("Length")
             box.Length = 14
             other.commitTransaction()
             self.assertNotIn("Touched", box.State)
             self.assertAlmostEqual(box.Shape.Volume, 14 * 10 * 10, places=6)
         finally:
+            App.closeDocument(other.Name)
+
+    def testFeatureDialogOkRegeneratesBesideASketchEdit(self):
+        """A sketch in edit in another document holds the regeneration of the documents, but not
+        of one whose feature dialog is open (its step lock): the block's dialog OK, while the
+        other document's sketch is in edit, regenerates the model at once (it was held, and OK
+        left the Body touched at the old length). The hold takes the document again after the
+        dialog and lets it go with the sketch's edit."""
+        import Sketcher  # noqa: F401  (the sketch's type)
+
+        other = models.newDocument("RegenerateGuiOtherSketch")
+        try:
+            sketch = other.addObject("Sketcher::SketchObject", "Sketch")
+            other.recompute()
+            Gui.getDocument(other.Name).setEdit(sketch.Name)
+            pump()
+            self.assertIsNotNone(Gui.getDocument(other.Name).getInEdit(), "no sketch edit")
+            self.assertFalse(self.doc.RegenerateOnCommit)
+            self.activate()
+            self.openDialog(self.block)
+            self.assertTrue(self.doc.RegenerateOnCommit, "the dialog's document is held")
+            self.setLength(self.block, 15)
+            self.close(OK)
+            self.assertEqual(self.doc.UndoNames, ["Edit Block", "Make Fillet"])
+            self.assertRegenerated(total(length=15))
+            self.assertFalse(self.doc.RegenerateOnCommit, "the sketch edit no longer holds")
+            Gui.getDocument(other.Name).resetEdit()
+            pump()
+            self.assertTrue(self.doc.RegenerateOnCommit)
+        finally:
+            if Gui.getDocument(other.Name).getInEdit():
+                Gui.getDocument(other.Name).resetEdit()
+                pump()
             App.closeDocument(other.Name)
 
     def testCloseWithAViewProviderChangePending(self):

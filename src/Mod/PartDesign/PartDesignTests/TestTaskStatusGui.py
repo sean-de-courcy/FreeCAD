@@ -360,28 +360,34 @@ class TestTaskStatusGui(unittest.TestCase):
         self.assertTrue(hidden, f"the label showed {looked:.3f} s after the second failure")
         self.assertTrue(waitFor(banner.isVisible), "the error isn't shown")
 
-    def testLabelFollowsUndoAndRedo(self):
-        """The edited feature failing in a transaction of its own: after undo (and a recompute)
-        the label is gone, after redo (and a recompute) it is back. Undo and redo alone change
-        no status bit, only the recompute does, so this checks the label against the document,
-        not the undo and redo signals (which Python can't isolate)."""
+    def testLabelStaysThroughARefusedUndo(self):
+        """The edited feature failing in its panel, then the document's undo and redo with the
+        panel open: both refused (ops#640, the step lock; Onshape's Ctrl+Z inside a dialog steps
+        back through the dialog's own edits, which the fork doesn't have yet), so the feature
+        still fails and the label still shows its error; Cancel takes the failure back. (Before
+        the step lock the failure was a transaction of its own under the panel, and the label
+        followed its undo and redo.)"""
         pad = self.plate()
         self.edit(pad)
         banner = self.banner()
-        self.doc.openTransaction("Fail")
         pad.Type = "UpToLast"
-        self.doc.commitTransaction()
         self.doc.recompute()
         self.assertIn("Invalid", pad.State)
         self.checkShowsError(pad)
 
-        self.doc.undo()
+        self.assertFalse(self.doc.undo(), "the document's undo ran under the panel")
         self.doc.recompute()
+        self.assertEqual(pad.Type, "UpToLast")
+        self.assertIn("Invalid", pad.State)
+        self.checkShowsError(pad)
+        self.assertFalse(self.doc.redo(), "the document's redo ran under the panel")
+        self.assertIn("Invalid", pad.State)
+        self.checkShowsError(pad)
+
+        cancel = taskButton(QtWidgets.QDialogButtonBox.Cancel)
+        self.assertIsNotNone(cancel, "no Cancel button")
+        cancel.click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "Cancel didn't close")
+        self.doc.recompute()
+        self.assertEqual(pad.Type, "Length")
         self.assertNotIn("Invalid", pad.State)
-        self.assertTrue(waitFor(lambda: not banner.isVisible()), "the error stays after undo")
-        self.assertEqual(banner.text(), "")
-
-        self.doc.redo()
-        self.doc.recompute()
-        self.assertIn("Invalid", pad.State)
-        self.checkShowsError(pad)

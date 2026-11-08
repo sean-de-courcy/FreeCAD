@@ -197,12 +197,15 @@ void requireMainThread(const char* api)
 }
 
 // FreeCAD-CH (ops#640): defined below; Gui/Document.cpp declares it too
-void updateRegenerationHold();
+void updateRegenerationHold(const App::Document* closingStep = nullptr);
 
 namespace
 {
 /// FreeCAD-CH (ops#640): the documents whose regeneration on commit an open edit holds
 std::vector<App::Document*> regenerationHeldDocs;  // NOLINT
+/// FreeCAD-CH (ops#640): the document being closed (slotDeleteDocument): a release of the hold
+/// meanwhile (its edit reset by beforeDelete) doesn't regenerate it
+const App::Document* regenerationClosingDoc = nullptr;  // NOLINT
 
 void forgetRegenerationHold(const App::Document& doc)
 {
@@ -1138,6 +1141,13 @@ void Application::slotDeleteDocument(const App::Document& Doc)
         return;
     }
 
+    // FreeCAD-CH (ops#640): cleared after forgetRegenerationHold below
+    const App::Document* closingBefore = regenerationClosingDoc;
+    regenerationClosingDoc = &Doc;
+    Base::ScopeGuard closingDone([closingBefore]() {
+        regenerationClosingDoc = closingBefore;
+    });
+
     // Inside beforeDelete() a view provider may finish editing mode
     // and therefore can alter the selection.
     doc->second->beforeDelete();
@@ -1651,18 +1661,32 @@ void Application::setEditDocument(Gui::Document* pcDocument)
 }
 
 /** FreeCAD-CH (ops#640): hold or release the regeneration on commit (App::Document::
- * setRegenerateOnCommit()) of every GUI document while any document has an object in an edit
+ * setRegenerateOnCommit()) of the GUI documents while any document has an object in an edit
  * that doesn't hold its step (a sketch's: ViewProvider::editHoldsOneStep() false). A commit
  * then (a sketch's stroke, a Variables panel edit, a property edit in another document)
  * leaves its document touched until the edit closes, as the Variables panel's own recompute
  * does (ops#599 reviews pr599-r1 R1-1 and r1b R1b-3): a regeneration during a sketch's edit
  * builds from the sketch that its Cancel then restores from a backup, leaving the result
- * silently stale. Gui::Document::_resetEdit releases it before the edit's own commit, so the
- * dialog's OK still regenerates. Only the documents it turned off are turned on again. Called
- * when an edit starts or ends and when a document is made; declared where it is called (not in
- * Application.h, which hundreds of files include).
+ * silently stale. The sketch's own document is held too: its commits during the edit would
+ * regenerate from the sketch in edit.
+ *
+ * Not held: a document whose feature dialog holds its step (App::Document::isStepLocked()),
+ * and closingStep, the document whose step-holding dialog is closing (Gui::Document::_resetEdit
+ * passes it before the dialog's commit, after the step lock went): the dialog's OK commits its
+ * step and must regenerate then, even while another document is in a sketch's edit (some
+ * dialogs commit before resetEdit, TaskDlgAttacher::accept for a datum: the step lock covers
+ * them).
+ *
+ * A document released from the hold regenerates at once if it needs it, in its own
+ * regeneration (App::Document::regenerateAfterTransaction()): what was committed during the
+ * edit stays touched otherwise. Unless a transaction is booked in it: its close regenerates it
+ * (App::Application::closeActiveTransaction(), the edit's own commit in _resetEdit for the
+ * sketch's document), after the transaction, not inside it. Not the document being closed.
+ * Only the documents the hold turned off are turned on again. Called when an edit starts or
+ * ends and when a document is made; declared where it is called (not in Application.h, which
+ * hundreds of files include).
  */
-void Gui::updateRegenerationHold()
+void Gui::updateRegenerationHold(const App::Document* closingStep)
 {
     Application* app = Application::Instance;
     if (!app) {
@@ -1670,27 +1694,47 @@ void Gui::updateRegenerationHold()
     }
     // An edit document whose edit was refused has no view provider in edit (ops#599 r1c R1c-a).
     // An edit that holds its step (a feature dialog, the step lock) needs no hold: its document
-    // commits nothing else while it is open, and its own OK commits before resetEdit in some
-    // dialogs (TaskDlgAttacher::accept for a datum) and must regenerate then.
+    // commits nothing else while it is open.
     const auto editing = app->editDocuments();
     const bool held = std::ranges::any_of(editing, [](Gui::Document* doc) {
         return doc->getEditViewProvider() != nullptr && !doc->getDocument()->isStepLocked();
     });
+    auto holds = [&](App::Document* doc) {
+        return held && app->getDocument(doc) && doc != closingStep && !doc->isStepLocked();
+    };
+
+    // Release first: what no longer holds
+    std::vector<App::Document*> released;
+    std::erase_if(regenerationHeldDocs, [&](App::Document* doc) {
+        if (holds(doc)) {
+            return false;
+        }
+        released.push_back(doc);
+        return true;
+    });
+    for (App::Document* doc : released) {
+        if (app->getDocument(doc)) {
+            doc->setRegenerateOnCommit(true);
+        }
+    }
+    // Then hold what now holds
     if (held) {
         for (App::Document* doc : App::GetApplication().getDocuments()) {
-            if (app->getDocument(doc) && doc->regeneratesOnCommit()) {
+            if (holds(doc) && doc->regeneratesOnCommit()) {
                 doc->setRegenerateOnCommit(false);
                 regenerationHeldDocs.push_back(doc);
             }
         }
-        return;
     }
-    std::vector<App::Document*> docs;
-    std::swap(docs, regenerationHeldDocs);
-    for (App::Document* doc : docs) {
-        if (app->getDocument(doc)) {
-            doc->setRegenerateOnCommit(true);
+    // And regenerate what was released, once every flag is set. The list of documents is read
+    // again for each: a regeneration runs Python (feature code), which may close a document.
+    for (App::Document* doc : released) {
+        const auto docs = App::GetApplication().getDocuments();
+        if (std::ranges::find(docs, doc) == docs.end() || doc == regenerationClosingDoc
+            || !app->getDocument(doc) || doc->getBookedTransactionID() != 0) {
+            continue;
         }
+        doc->regenerateAfterTransaction();
     }
 }
 

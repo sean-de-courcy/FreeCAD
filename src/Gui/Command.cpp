@@ -486,9 +486,15 @@ App::Document* Command::stepLockedDocument()
     if (!Gui::Application::Instance) {
         return nullptr;
     }
+    // Another document's open dialog only when a command can reach it: through the active view
+    // (its document is the active Gui document) or the selection. Each document keeps its own
+    // dialog (PR 303): a command in another document is neither refused by it nor accepts it (a
+    // Pad in document B accepted document A's dialog, unasked).
+    Gui::Document* active = Gui::Application::Instance->activeDocument();
     for (Gui::Document* guiDoc : Gui::Application::Instance->editDocuments()) {
         App::Document* doc = guiDoc ? guiDoc->getDocument() : nullptr;
-        if (doc && doc->isStepLocked()) {
+        if (doc && doc->isStepLocked()
+            && (guiDoc == active || Selection().hasSelection(doc->getName()))) {
             return doc;
         }
     }
