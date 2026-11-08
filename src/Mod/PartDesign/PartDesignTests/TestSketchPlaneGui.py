@@ -396,7 +396,7 @@ class TestSketchPlaneGui(unittest.TestCase):
     def testTheEditHidesEveryLaterSolidOnAFaceSketch(self):
         """The circle sketch on Pad's top face (z = 5), then Pad2 from another sketch after it,
         Pad2 shown: opening the sketch shows Pad (its support, by the sketch's own automation)
-        and Pad2 isn't drawn, its Visibility unchanged; closing the sketch draws Pad2 again."""
+        and Pad2 isn't drawn; closing the sketch draws Pad2 again, every Visibility as before."""
         pad = self.padModel()
         sketch = models.sketch(self.doc, "OnFace", [models.circle(3, 4, 2)], self.body)
         sketch.AttachmentSupport = [(pad, "Face%d" % topFace(pad.Shape, 5.0))]
@@ -413,10 +413,13 @@ class TestSketchPlaneGui(unittest.TestCase):
         self.openSketch(sketch)
         self.assertTrue(pad.ViewObject.isVisible(), "the model before the sketch isn't shown")
         self.assertFalse(pad2.ViewObject.isVisible(), "a solid after the sketch is shown")
-        self.assertTrue(pad2.ViewObject.Visibility, "the roll-back changed a Visibility")
+        # The sketch's own automation shows its support for the edit (TempoVis), and the Body,
+        # one solid shown, hides Pad2's Visibility meanwhile; both come back with the edit's end
 
         Gui.ActiveDocument.resetEdit()
         pump(0.5)
+        self.assertTrue(pad2.ViewObject.Visibility, "the edit left a Visibility changed")
+        self.assertFalse(pad.ViewObject.Visibility, "the edit left a Visibility changed")
         self.assertTrue(pad2.ViewObject.isVisible())
 
     def testAttachSketchTakesTheSelectedPlaneWithoutLists(self):
