@@ -54,6 +54,7 @@
 #include "Command.h"
 #include "Control.h"
 #include "DockWindowManager.h"
+#include "DocumentTabBar.h"
 #include "FileDialog.h"
 #include "MainWindow.h"
 #include "Selection.h"
@@ -817,6 +818,11 @@ void StdCmdNew::activated(int iMsg)
     QString cmd;
     cmd = QStringLiteral("App.newDocument()");
     runCommand(Command::Doc, cmd.toUtf8());
+    // FreeCAD-CH (ops#640, rank 59): under the Onshape keymap a new document starts with its
+    // first Part Studio, an App::Part (not for iMsg 1, the Start page's empty document)
+    if (iMsg != 1) {
+        DocumentTabs::newDocumentStudio(App::GetApplication().getActiveDocument());
+    }
     doCommand(Command::Gui, "Gui.activeDocument().activeView().viewDefaultOrientation()");
 
     ParameterGrp::handle hViewGrp = App::GetApplication().GetParameterGroupByPath(

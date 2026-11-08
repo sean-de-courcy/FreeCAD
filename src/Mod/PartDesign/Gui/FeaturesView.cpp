@@ -31,6 +31,7 @@
 #include <App/Application.h>
 #include <App/Datums.h>
 #include <App/Document.h>
+#include <App/DocumentTabs.h>
 #include <App/DocumentObject.h>
 #include <App/GeoFeatureGroupExtension.h>
 #include <App/GroupExtension.h>
@@ -46,6 +47,7 @@
 #include <Gui/Command.h>
 #include <Gui/Document.h>
 #include <Gui/DockWindowManager.h>
+#include <Gui/DocumentTabBar.h>
 #include <Gui/MainWindow.h>
 #include <Gui/MDIView.h>
 #include <Gui/ViewProviderDocumentObject.h>
@@ -962,6 +964,15 @@ FeaturesView::FeaturesView(QWidget* parent)
     connections.emplace_back(Gui::Application::Instance->signalDeleteDocument.connect(
         [this](const Gui::Document& gdoc) { onDeleteDocument(gdoc); }
     ));
+    // FreeCAD-CH (ops#640, rank 59): the lists follow the typed tab, its own view
+    connections.emplace_back(Gui::Application::Instance->signalActivateView.connect(
+        [this](const Gui::MDIView* view) {
+            App::Document* doc = view ? view->getAppDocument() : nullptr;
+            if (doc && documentName == doc->getName()) {
+                scheduleRebuild();
+            }
+        }
+    ));
     // Kept through a sketch's edit (leavePartDesign()), the lists leave with the next workbench
     // that isn't the sketch's, as PartDesign's own deactivation would
     connections.emplace_back(Gui::Application::Instance->signalActivateWorkbench.connect([](const char*) {
@@ -1169,6 +1180,18 @@ void FeaturesView::findStudio()
     PartDesign::Body* body = nullptr;
     auto gdoc = Gui::Application::Instance->getDocument(doc);
     if (auto view = gdoc ? gdoc->getActiveView() : nullptr) {
+        // FreeCAD-CH (ops#640, rank 59): a typed tab's view lists its own Part Studio
+        const std::string tab = Gui::DocumentTabs::tabOfView(view);
+        App::DocumentTabs::Kind kind {};
+        App::DocumentObject* tabObject = tab.empty() ? nullptr : doc->getObject(tab.c_str());
+        if (tab == App::DocumentTabs::implicitName()) {
+            return;
+        }
+        if (tabObject && App::DocumentTabs::isTabObject(tabObject, &kind)
+            && kind == App::DocumentTabs::Kind::PartStudio) {
+            studioName = tab;
+            return;
+        }
         body = view->getActiveObject<PartDesign::Body*>(PDBODYKEY);
     }
     App::Part* part = nullptr;
