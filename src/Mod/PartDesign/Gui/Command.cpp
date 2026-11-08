@@ -113,6 +113,35 @@ static void copyPlacementExpressions(App::DocumentObject* target, const App::Doc
     }
 }
 
+/** The Body a command adds its feature to (FreeCAD-CH ops#640, rank 14): Onshape's features
+ * take any part's entities with no part to activate first. With no Body active, the Body of the
+ * first selected object that is in one, with no question; with  pickOwns (a Hole drills the
+ * part its sketch is on), also when the selection is in another Body of the active one's studio.
+ * Otherwise the active Body, asked for as before.
+ */
+static PartDesign::Body* commandBody(Gui::Command* cmd, bool pickOwns = false)
+{
+    PartDesign::Body* active = PartDesignGui::getBody(/*messageIfNot = */ false);
+    if (!active || pickOwns) {
+        for (auto& sel : cmd->getSelection().getSelectionEx()) {
+            App::DocumentObject* obj = sel.getObject();
+            // a Body picked whole (in the tree) is its own part
+            PartDesign::Body* owner = freecad_cast<PartDesign::Body*>(obj);
+            if (!owner && obj) {
+                owner = PartDesign::Body::findBodyOf(obj);
+            }
+            if (!owner || owner == active) {
+                break;
+            }
+            if (!active || PartDesignGui::isStudioSelection(active, obj)) {
+                return owner;
+            }
+            break;
+        }
+    }
+    return PartDesignGui::getBody(/*messageIfNot = */ true);
+}
+
 //===========================================================================
 // PartDesign_Datum
 //===========================================================================
@@ -139,7 +168,8 @@ void UnifiedDatumCommand(Gui::Command& cmd, Base::Type type, std::string name)
             }
         }
 
-        PartDesign::Body* pcActiveBody = PartDesignGui::getBody(/*messageIfNot = */ true);
+        // FreeCAD-CH (ops#640, rank 14): with no Body active, the picked part's
+        PartDesign::Body* pcActiveBody = commandBody(&cmd);
 
         if (bEditSelected) {
             pcActiveBody->getDocument()->openTransaction(
@@ -1882,7 +1912,8 @@ void CmdPartDesignHole::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
 
-    PartDesign::Body* pcActiveBody = PartDesignGui::getBody(true);
+    // FreeCAD-CH (ops#640, rank 14): the Hole goes in the part its sketch is on, active or not
+    PartDesign::Body* pcActiveBody = commandBody(this, /*pickOwns = */ true);
 
     if (!pcActiveBody) {
         return;
@@ -2030,7 +2061,8 @@ void CmdPartDesignAdditivePipe::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
 
-    PartDesign::Body* pcActiveBody = PartDesignGui::getBody(true);
+    // FreeCAD-CH (ops#640, rank 14): with no Body active, the picked part's
+    PartDesign::Body* pcActiveBody = commandBody(this);
 
     if (!pcActiveBody) {
         return;
@@ -2080,7 +2112,8 @@ void CmdPartDesignSubtractivePipe::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
 
-    PartDesign::Body* pcActiveBody = PartDesignGui::getBody(true);
+    // FreeCAD-CH (ops#640, rank 14): with no Body active, the picked part's
+    PartDesign::Body* pcActiveBody = commandBody(this);
 
     if (!pcActiveBody) {
         return;
@@ -2364,89 +2397,128 @@ bool CmdPartDesignSubtractiveHelix::isActive()
 // Common utility functions for Dressup features
 //===========================================================================
 
+// What a dress-up command takes of one part (FreeCAD-CH ops#640, rank 14): the feature whose
+// shape was picked, its picked elements, and whether they are all its edges (the whole part)
+struct DressUpPick
+{
+    Part::Feature* base = nullptr;
+    std::vector<std::string> subs;
+    bool useAllEdges = false;
+};
+
+/** The dress-up's picks, one per part. FreeCAD-CH (ops#640, rank 14; ops#634 slice 4): the picks
+ * may be on any part of the active part's studio, the active Body or not ("Selection is not in the
+ * active body" goes), as Onshape's Fillet takes edges of any part and rounds each owner; each part
+ * gets its own dress-up. A part picked whole (the Body, or its feature with no element) stands for
+ * all its edges (Fillet, Chamfer). Picks of two studios are refused, as before. With nothing
+ * selected \a noSelection is set and \a picks is empty: the active Body's Tip is the base.
+ */
 bool dressupGetSelected(
     Gui::Command* cmd,
     const std::string& which,
-    Gui::SelectionObject& selected,
-    bool& useAllEdges,
+    std::vector<DressUpPick>& picks,
     bool& noSelection
 )
 {
-    PartDesign::Body* pcActiveBody = PartDesignGui::getBody(true);
-
-    if (!pcActiveBody) {
-        return false;
-    }
-
     std::vector<Gui::SelectionObject> selection = cmd->getSelection().getSelectionEx();
 
     if (selection.empty()) {
+        if (!PartDesignGui::getBody(true)) {
+            return false;
+        }
         noSelection = true;
         return true;
     }
-    else if (selection.size() != 1) {
-        QMessageBox::warning(
-            Gui::getMainWindow(),
-            QObject::tr("Wrong selection"),
-            QObject::tr("Select an edge, face, or body from a single body.")
-        );
-        return false;
+
+    const bool allEdgesIfWhole = which == "Fillet" || which == "Chamfer";
+    PartDesign::Body* firstOwner = nullptr;
+    for (auto& it : selection) {
+        App::DocumentObject* obj = it.getObject();
+        if (!obj) {
+            continue;
+        }
+        // a Body picked whole stands for its Tip, whose shape it shows
+        PartDesign::Body* owner = freecad_cast<PartDesign::Body*>(obj);
+        if (owner) {
+            obj = owner->Tip.getValue();
+        }
+        else {
+            owner = PartDesign::Body::findBodyOf(obj);
+        }
+        auto base = freecad_cast<Part::Feature*>(obj);
+        if (!owner || !base) {
+            QMessageBox::warning(
+                Gui::getMainWindow(),
+                QObject::tr("Wrong object type"),
+                QObject::tr("%1 works only on parts.").arg(QString::fromStdString(which))
+            );
+            return false;
+        }
+        if (!firstOwner) {
+            firstOwner = owner;
+        }
+        else if (owner != firstOwner && !PartDesignGui::isStudioSelection(firstOwner, base)) {
+            QMessageBox::warning(
+                Gui::getMainWindow(),
+                QObject::tr("Wrong selection"),
+                QObject::tr("Select edges, faces or parts of one part studio.")
+            );
+            return false;
+        }
+
+        const Part::TopoShape& shape = base->Shape.getShape();
+        if (shape.getShape().IsNull()) {
+            QMessageBox::warning(
+                Gui::getMainWindow(),
+                QObject::tr("Wrong selection"),
+                QObject::tr("Shape of the selected part is empty")
+            );
+            return false;
+        }
+
+        auto group = std::ranges::find_if(picks, [owner](const DressUpPick& pick) {
+            return PartDesign::Body::findBodyOf(pick.base) == owner;
+        });
+        if (group != picks.end() && group->base != base) {
+            QMessageBox::warning(
+                Gui::getMainWindow(),
+                QObject::tr("Wrong selection"),
+                QObject::tr("Select an edge, face, or body from a single body.")
+            );
+            return false;
+        }
+        if (group == picks.end()) {
+            picks.push_back(DressUpPick {base, {}, false});
+            group = picks.end() - 1;
+        }
+
+        const std::vector<std::string>& subs = it.getSubNames();
+        if (subs.empty() || freecad_cast<PartDesign::Body*>(it.getObject())) {
+            // the part whole: for Fillet and Chamfer all its edges (not for Draft or Thickness)
+            if (allEdgesIfWhole && !group->useAllEdges) {
+                group->useAllEdges = true;
+                group->subs.clear();
+                const std::string edge = Part::TopoShape::shapeName(TopAbs_EDGE);
+                const int count = shape.countSubElements(edge.c_str());
+                for (int index = 1; index <= count; ++index) {
+                    group->subs.push_back(edge + std::to_string(index));
+                }
+            }
+            continue;
+        }
+        if (!group->useAllEdges) {
+            for (const auto& sub : subs) {
+                if (std::ranges::find(group->subs, sub) == group->subs.end()) {
+                    group->subs.push_back(sub);
+                }
+            }
+        }
     }
-    else if (pcActiveBody != PartDesignGui::getBodyFor(selection[0].getObject(), false)) {
-        QMessageBox::warning(
-            Gui::getMainWindow(),
-            QObject::tr("Selection is not in the active body"),
-            QObject::tr("Select an edge, face, or body from an active body.")
-        );
+    if (picks.empty()) {
         return false;
     }
 
     Gui::Selection().clearSelection();
-
-    // set the
-    selected = selection[0];
-
-    if (!selected.isObjectTypeOf(Part::Feature::getClassTypeId())) {
-        QMessageBox::warning(
-            Gui::getMainWindow(),
-            QObject::tr("Wrong object type"),
-            QObject::tr("%1 works only on parts.").arg(QString::fromStdString(which))
-        );
-        return false;
-    }
-
-    Part::Feature* base = static_cast<Part::Feature*>(selected.getObject());
-
-    const Part::TopoShape& TopShape = base->Shape.getShape();
-
-    if (TopShape.getShape().IsNull()) {
-        QMessageBox::warning(
-            Gui::getMainWindow(),
-            QObject::tr("Wrong selection"),
-            QObject::tr("Shape of the selected part is empty")
-        );
-        return false;
-    }
-
-    // if 1 Part::Feature object selected, but no subobjects, select all edges for the user
-    // but only for fillet and chamfer (not for draft or thickness)
-    if (selection[0].getSubNames().empty()
-        && (which.compare("Fillet") == 0 || which.compare("Chamfer") == 0)) {
-        useAllEdges = true;
-        std::string edgeTypeName = Part::TopoShape::shapeName(TopAbs_EDGE);  //"Edge"
-        int count = TopShape.countSubElements(edgeTypeName.c_str());
-        std::string docName = App::GetApplication().getDocumentName(base->getDocument());
-        std::string objName = base->getNameInDocument();
-        for (int ii = 0; ii < count; ii++) {
-            std::ostringstream edgeName;
-            edgeName << edgeTypeName << ii + 1;
-            Gui::Selection().addSelection(docName.c_str(), objName.c_str(), edgeName.str().c_str());
-        }
-        selection = cmd->getSelection().getSelectionEx();
-        if (selection.size() == 1) {
-            selected = selection[0];
-        }
-    }
     return true;
 }
 
@@ -2468,13 +2540,35 @@ static void reportDroppedPicks(const char* which, const QString& takes, const st
     );
 }
 
-void finishDressupFeature(
+// The parameters a dress-up made on another part follows from the first, by expression
+// (FreeCAD-CH ops#640, rank 14): one dialog sets them for every part, as Onshape's one feature
+// has one setting for all its parts: the sizes, and the types and toggles too (an enumeration or
+// a bool follows by its index or value). Not UseAllEdges: each part's edges are its own
+static std::vector<const char*> followedParameters(const std::string& which)
+{
+    if (which == "Fillet") {
+        return {"Radius"};
+    }
+    if (which == "Chamfer") {
+        return {"ChamferType", "Size", "Size2", "Angle", "FlipDirection"};
+    }
+    if (which == "Draft") {
+        return {"Angle", "Reversed"};
+    }
+    if (which == "Thickness") {
+        return {"Value", "Reversed", "Mode", "Join", "Intersection"};
+    }
+    return {};
+}
+
+// Makes the dress-up `which` on `base` in its Body, in the open transaction; its name
+static std::string makeDressUp(
     Gui::Command* cmd,
     const std::string& which,
     Part::Feature* base,
     const std::vector<std::string>& SubNames,
     const bool useAllEdges,
-    const bool updateDocument = true
+    PartDesign::Body* body
 )
 {
     std::ostringstream str;
@@ -2485,17 +2579,64 @@ void finishDressupFeature(
     str << "])";
 
     std::string FeatName = cmd->getUniqueObjectName(which.c_str(), base);
+    FCMD_OBJ_CMD(body, "newObject('PartDesign::" << which << "','" << FeatName << "')");
+    auto Feat = body->getDocument()->getObject(FeatName.c_str());
+    if (!Feat) {
+        return {};
+    }
+    FCMD_OBJ_CMD(Feat, "Base = " << str.str());
+    if (useAllEdges && (which.compare("Fillet") == 0 || which.compare("Chamfer") == 0)) {
+        FCMD_OBJ_CMD(Feat, "UseAllEdges = True");
+    }
+    return FeatName;
+}
 
+void finishDressupFeature(
+    Gui::Command* cmd,
+    const std::string& which,
+    Part::Feature* base,
+    const std::vector<std::string>& SubNames,
+    const bool useAllEdges,
+    const bool updateDocument = true,
+    const std::vector<DressUpPick>& otherParts = {}
+)
+{
     auto body = PartDesignGui::getBodyFor(base, false);
     if (!body) {
         return;
     }
     cmd->openCommand(std::string("Make ") + which);
-    FCMD_OBJ_CMD(body, "newObject('PartDesign::" << which << "','" << FeatName << "')");
+    const std::string FeatName = makeDressUp(cmd, which, base, SubNames, useAllEdges, body);
     auto Feat = body->getDocument()->getObject(FeatName.c_str());
-    FCMD_OBJ_CMD(Feat, "Base = " << str.str());
-    if (useAllEdges && (which.compare("Fillet") == 0 || which.compare("Chamfer") == 0)) {
-        FCMD_OBJ_CMD(Feat, "UseAllEdges = True");
+    if (!Feat) {
+        cmd->abortCommand();
+        return;
+    }
+    // FreeCAD-CH (ops#640, rank 14): the other parts' picks make a dress-up in each of their
+    // Bodies, in this transaction (Cancel takes them too), its parameters following this one's
+    for (const DressUpPick& other : otherParts) {
+        auto otherBody = PartDesign::Body::findBodyOf(other.base);
+        if (!otherBody || otherBody == body) {
+            continue;
+        }
+        const std::string otherName
+            = makeDressUp(cmd, which, other.base, other.subs, other.useAllEdges, otherBody);
+        auto otherFeat = otherBody->getDocument()->getObject(otherName.c_str());
+        if (!otherFeat) {
+            continue;
+        }
+        for (const char* parameter : followedParameters(which)) {
+            FCMD_OBJ_CMD(
+                otherFeat,
+                "setExpression('" << parameter << "', '" << FeatName << "." << parameter << "')"
+            );
+        }
+        FCMD_OBJ_HIDE(other.base);
+        cmd->copyVisual(otherFeat, "ShapeAppearance", other.base);
+        cmd->copyVisual(otherFeat, "LineColor", other.base);
+        cmd->copyVisual(otherFeat, "PointColor", other.base);
+        cmd->copyVisual(otherFeat, "Transparency", other.base);
+        cmd->copyVisual(otherFeat, "DisplayMode", other.base);
     }
     Gui::Command::doCommand(cmd->Gui, "Gui.Selection.clearSelection()");
     finishFeature(cmd, Feat, base, /* hidePreviousSolid = */ true, updateDocument);
@@ -2513,26 +2654,52 @@ void finishDressupFeature(
     }
 }
 
-void makeChamferOrFillet(Gui::Command* cmd, const std::string& which)
+// Makes `which` on the picks: the first part's dress-up opens its dialog, the others follow it
+// (FreeCAD-CH ops#640, rank 14). `filter` drops the elements the dress-up doesn't take, into
+// `dropped`; a part left with nothing makes no dress-up
+static void makeDressUps(
+    Gui::Command* cmd,
+    const std::string& which,
+    const std::function<void(DressUpPick&, std::vector<std::string>&)>& filter,
+    std::vector<std::string>& dropped
+)
 {
-    bool useAllEdges = false;
+    std::vector<DressUpPick> picks;
     bool noSelection = false;
-    Gui::SelectionObject selected;
-    if (!dressupGetSelected(cmd, which, selected, useAllEdges, noSelection)) {
+    if (!dressupGetSelected(cmd, which, picks, noSelection)) {
         return;
     }
-
-    Part::Feature* base;
-    std::vector<std::string> SubNames;
     if (noSelection) {
-        base = static_cast<Part::Feature*>(PartDesignGui::getBody(true)->Tip.getValue());
+        auto base = freecad_cast<Part::Feature*>(PartDesignGui::getBody(true)->Tip.getValue());
+        if (!base) {
+            return;
+        }
+        // Fillet and Chamfer: nothing to recompute before the dialog (as before)
+        const bool chamferOrFillet = which == "Fillet" || which == "Chamfer";
+        finishDressupFeature(cmd, which, base, {}, false, !chamferOrFillet);
+        return;
     }
-    else {
-        base = static_cast<Part::Feature*>(selected.getObject());
-        SubNames = std::vector<std::string>(selected.getSubNames());
+    if (filter) {
+        for (auto& pick : picks) {
+            filter(pick, dropped);
+        }
+        // a part whose picks all went makes no dress-up, unless it is the only one
+        if (picks.size() > 1) {
+            std::erase_if(picks, [](const DressUpPick& pick) { return pick.subs.empty(); });
+            if (picks.empty()) {
+                return;
+            }
+        }
     }
+    const DressUpPick first = picks.front();
+    const std::vector<DressUpPick> others(picks.begin() + 1, picks.end());
+    finishDressupFeature(cmd, which, first.base, first.subs, first.useAllEdges, true, others);
+}
 
-    finishDressupFeature(cmd, which, base, SubNames, useAllEdges, !noSelection);
+void makeChamferOrFillet(Gui::Command* cmd, const std::string& which)
+{
+    std::vector<std::string> dropped;
+    makeDressUps(cmd, which, nullptr, dropped);
 }
 
 //===========================================================================
@@ -2700,28 +2867,26 @@ CmdPartDesignDraft::CmdPartDesignDraft()
 void CmdPartDesignDraft::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
-    Gui::SelectionObject selected;
-    bool useAllEdges = false;
-    bool noSelection = false;
-    if (!dressupGetSelected(this, "Draft", selected, useAllEdges, noSelection)) {
-        return;
-    }
-
-    Part::Feature* base;
-    std::vector<std::string> SubNames;
     std::vector<std::string> dropped;
-    if (noSelection) {
-        base = static_cast<Part::Feature*>(PartDesignGui::getBody(true)->Tip.getValue());
-    }
-    else {
-        base = static_cast<Part::Feature*>(selected.getObject());
-        SubNames = std::vector<std::string>(selected.getSubNames());
-
-        const Part::TopoShape& TopShape = base->Shape.getShape();
+    // Draft takes the faces of one part (its neutral plane and pull direction are the part's):
+    // another part's picks are left out and said (FreeCAD-CH ops#640, rank 14)
+    const Part::Feature* firstBase = nullptr;
+    auto filter = [&firstBase](DressUpPick& pick, std::vector<std::string>& out) {
+        if (!firstBase) {
+            firstBase = pick.base;
+        }
+        else if (pick.base != firstBase) {
+            for (const auto& sub : pick.subs) {
+                out.push_back(std::string(pick.base->Label.getValue()) + "." + sub);
+            }
+            pick.subs.clear();
+            return;
+        }
+        const Part::TopoShape& TopShape = pick.base->Shape.getShape();
 
         // filter out the edges, each one (the erase in the loop skipped the pick after it,
         // ops#252)
-        std::erase_if(SubNames, [&](const std::string& aSubName) {
+        std::erase_if(pick.subs, [&](const std::string& aSubName) {
             bool keep = false;
             if (aSubName.compare(0, 4, "Face") == 0) {
                 // Check for valid face types
@@ -2731,17 +2896,16 @@ void CmdPartDesignDraft::activated(int iMsg)
                     || sf.GetType() == GeomAbs_Cone;
             }
             if (!keep) {
-                dropped.push_back(aSubName);
+                out.push_back(aSubName);
             }
             return !keep;
         });
-    }
-
-    finishDressupFeature(this, "Draft", base, SubNames, useAllEdges);
+    };
+    makeDressUps(this, "Draft", filter, dropped);
     // after the panel opens, which would replace the message
     reportDroppedPicks(
         QT_TRANSLATE_NOOP("QObject", "Draft"),
-        QObject::tr("planar, cylindrical and conical faces"),
+        QObject::tr("planar, cylindrical and conical faces of one part"),
         dropped
     );
 }
@@ -2772,35 +2936,19 @@ CmdPartDesignThickness::CmdPartDesignThickness()
 void CmdPartDesignThickness::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
-    Gui::SelectionObject selected;
-    bool useAllEdges = false;
-    bool noSelection = false;
-    if (!dressupGetSelected(this, "Thickness", selected, useAllEdges, noSelection)) {
-        return;
-    }
-
-
-    Part::Feature* base;
-    std::vector<std::string> SubNames;
     std::vector<std::string> dropped;
-    if (noSelection) {
-        base = static_cast<Part::Feature*>(PartDesignGui::getBody(true)->Tip.getValue());
-    }
-    else {
-        base = static_cast<Part::Feature*>(selected.getObject());
-        SubNames = std::vector<std::string>(selected.getSubNames());
-
-        // filter out the edges, each one (ops#252, as Draft)
-        std::erase_if(SubNames, [&](const std::string& aSubName) {
+    // filter out the edges, each one (ops#252, as Draft); each part picked gets its Shell
+    // (FreeCAD-CH ops#640, rank 14)
+    auto filter = [](DressUpPick& pick, std::vector<std::string>& out) {
+        std::erase_if(pick.subs, [&out](const std::string& aSubName) {
             const bool keep = aSubName.compare(0, 4, "Face") == 0;
             if (!keep) {
-                dropped.push_back(aSubName);
+                out.push_back(aSubName);
             }
             return !keep;
         });
-    }
-
-    finishDressupFeature(this, "Thickness", base, SubNames, useAllEdges);
+    };
+    makeDressUps(this, "Thickness", filter, dropped);
     reportDroppedPicks(QT_TRANSLATE_NOOP("QObject", "Thickness"), QObject::tr("faces"), dropped);
 }
 

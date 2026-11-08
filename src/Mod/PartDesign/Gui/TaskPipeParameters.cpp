@@ -625,9 +625,12 @@ bool TaskPipeParameters::accept()
     App::DocumentObject* spine = pipe->Spine.getValue();
     App::DocumentObject* auxSpine = pipe->AuxiliarySpine.getValue();
 
-    // Outside the body and its origin; a missing link isn't (ops#170)
-    auto outside = [pcActiveBody](App::DocumentObject* obj) {
-        return obj && !pcActiveBody->hasObject(obj) && !pcActiveBody->getOrigin()->hasObject(obj);
+    // Outside the body and its origin; a missing link isn't (ops#170). FreeCAD-CH (ops#634 D2):
+    // nor is another Body of the same studio, linked directly as Onshape's Sweep takes any part's
+    // path or profile; another App::Part still asks
+    auto outside = [pcActiveBody, pipe](App::DocumentObject* obj) {
+        return obj && !pcActiveBody->hasObject(obj) && !pcActiveBody->getOrigin()->hasObject(obj)
+            && !Part::BodyBase::isInOneStudio(pipe, obj);
     };
     if (outside(spine) || outside(auxSpine)) {
         extReference = true;

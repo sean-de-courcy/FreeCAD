@@ -144,8 +144,11 @@ bool acceptPosition(const App::DocumentObjectT& holeT,
     }
     auto hole = freecad_cast<PartDesign::Hole*>(holeT.getObject());
     PartDesign::Body* body = hole ? PartDesign::Body::findBodyOf(hole) : nullptr;
-    if (body && PartDesign::Body::findBodyOf(obj) != body) {
-        why = QT_TR_NOOP("Pick the positions in the hole's body.");
+    // FreeCAD-CH (ops#634 D4): or in another Body of the same studio, linked directly, as
+    // Onshape's Hole takes the points of any sketch of the part studio
+    if (body && PartDesign::Body::findBodyOf(obj) != body
+        && !Part::BodyBase::isInOneStudio(hole, obj)) {
+        why = QT_TR_NOOP("Pick the positions in the hole's part studio.");
         return false;
     }
     const bool sketch = obj->isDerivedFrom<Part::Part2DObject>();
