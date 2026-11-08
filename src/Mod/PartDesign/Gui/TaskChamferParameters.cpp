@@ -74,8 +74,9 @@ TaskChamferParameters::TaskChamferParameters(ViewProviderDressUp* DressUpView, Q
     bool useAllEdges = pcChamfer->UseAllEdges.getValue();
     ui->checkBoxUseAllEdges->setChecked(useAllEdges);
     baseField->setEnabled(!useAllEdges);
-    // A new chamfer's edges field takes the focus when the dialog opens (Q2)
-    if (!pcChamfer->Base.getSubValues().empty()) {
+    // A new chamfer's edges field takes the focus when the dialog opens (Q2), and keeps it
+    // after its first pick placed it (ops#640 rank 14)
+    if (!pcChamfer->Base.getSubValues().empty() && !armsBaseOnOpen()) {
         QMetaObject::invokeMethod(ui->chamferSize, "setFocus", Qt::QueuedConnection);
     }
 

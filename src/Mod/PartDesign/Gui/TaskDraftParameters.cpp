@@ -75,8 +75,9 @@ TaskDraftParameters::TaskDraftParameters(ViewProviderDressUp* DressUpView, QWidg
     ui->draftAngle->setMaximum(pcDraft->Angle.getMaximum());
     ui->draftAngle->setValue(a);
     ui->draftAngle->selectAll();
-    // A new draft's faces field takes the focus when the dialog opens (Q2)
-    if (!pcDraft->Base.getSubValues().empty()) {
+    // A new draft's faces field takes the focus when the dialog opens (Q2), and keeps it
+    // after its first pick placed it (ops#640 rank 14)
+    if (!pcDraft->Base.getSubValues().empty() && !armsBaseOnOpen()) {
         QMetaObject::invokeMethod(ui->draftAngle, "setFocus", Qt::QueuedConnection);
     }
 

@@ -75,6 +75,7 @@
 #include "ReferenceField.h"
 #include "ReferenceSelection.h"
 #include "SketchWorkflow.h"
+#include "TaskDressUpParameters.h"
 #include "TaskFeatureParameters.h"
 #include "TaskFeaturePick.h"
 #include "TaskShapeBinder.h"
@@ -2490,7 +2491,8 @@ struct DressUpPick
  * active body" goes), as Onshape's Fillet takes edges of any part and rounds each owner; each part
  * gets its own dress-up. A part picked whole (the Body, or its feature with no element) stands for
  * all its edges (Fillet, Chamfer). Picks of two studios are refused, as before. With nothing
- * selected \a noSelection is set and \a picks is empty: the active Body's Tip is the base.
+ * selected \a noSelection is set and \a picks is empty, with no question for an active Body
+ * (ops#640 rank 14): the dialog's first pick decides the part (toolFirstBody()).
  */
 bool dressupGetSelected(
     Gui::Command* cmd,
@@ -2502,9 +2504,6 @@ bool dressupGetSelected(
     std::vector<Gui::SelectionObject> selection = cmd->getSelection().getSelectionEx();
 
     if (selection.empty()) {
-        if (!PartDesignGui::getBody(true)) {
-            return false;
-        }
         noSelection = true;
         return true;
     }
@@ -2677,7 +2676,8 @@ void finishDressupFeature(
     const std::vector<std::string>& SubNames,
     const bool useAllEdges,
     const bool updateDocument = true,
-    const std::vector<DressUpPick>& otherParts = {}
+    const std::vector<DressUpPick>& otherParts = {},
+    const bool placedByFirstPick = false
 )
 {
     auto body = PartDesignGui::getBodyFor(base, false);
@@ -2690,6 +2690,11 @@ void finishDressupFeature(
     if (!Feat) {
         cmd->abortCommand();
         return;
+    }
+    // FreeCAD-CH (ops#640 rank 14): made with nothing selected, its dialog's first pick decides
+    // its part (the dialog opens in finishFeature below)
+    if (placedByFirstPick) {
+        PartDesignGui::TaskDressUpParameters::notePlacedByFirstPick(Feat);
     }
     // FreeCAD-CH (ops#640, rank 14): the other parts' picks make a dress-up in each of their
     // Bodies, in this transaction (Cancel takes them too), its parameters following this one's
@@ -2733,6 +2738,28 @@ void finishDressupFeature(
     }
 }
 
+// The Body a dress-up made with nothing selected starts in (FreeCAD-CH ops#640 rank 14): the
+// active Body, else the first one with a solid, with no question for an active Body. Onshape's
+// Fillet opens with no part at all; here the dress-up waits in this Body for its dialog's first
+// pick, which moves it to the picked part (TaskDressUpParameters::notePlacedByFirstPick)
+static PartDesign::Body* toolFirstBody()
+{
+    if (PartDesign::Body* active = PartDesignGui::getBody(/*messageIfNot = */ false)) {
+        return active;
+    }
+    App::Document* doc = App::GetApplication().getActiveDocument();
+    if (!doc) {
+        return nullptr;
+    }
+    for (PartDesign::Body* body : doc->getObjectsOfType<PartDesign::Body>()) {
+        auto tip = freecad_cast<Part::Feature*>(body->Tip.getValue());
+        if (tip && !tip->Shape.getShape().isNull()) {
+            return body;
+        }
+    }
+    return nullptr;
+}
+
 // Makes `which` on the picks: the first part's dress-up opens its dialog, the others follow it
 // (FreeCAD-CH ops#640, rank 14). `filter` drops the elements the dress-up doesn't take, into
 // `dropped`; a part left with nothing makes no dress-up
@@ -2749,13 +2776,18 @@ static void makeDressUps(
         return;
     }
     if (noSelection) {
-        auto base = freecad_cast<Part::Feature*>(PartDesignGui::getBody(true)->Tip.getValue());
+        PartDesign::Body* body = toolFirstBody();
+        auto base = body ? freecad_cast<Part::Feature*>(body->Tip.getValue()) : nullptr;
         if (!base) {
+            Gui::getMainWindow()->showMessage(
+                QObject::tr("%1 needs a part with a solid").arg(QObject::tr(which.c_str())),
+                10000
+            );
             return;
         }
         // Fillet and Chamfer: nothing to recompute before the dialog (as before)
         const bool chamferOrFillet = which == "Fillet" || which == "Chamfer";
-        finishDressupFeature(cmd, which, base, {}, false, !chamferOrFillet);
+        finishDressupFeature(cmd, which, base, {}, false, !chamferOrFillet, {}, true);
         return;
     }
     if (filter) {
