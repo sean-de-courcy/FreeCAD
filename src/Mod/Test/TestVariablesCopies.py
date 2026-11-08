@@ -268,17 +268,17 @@ class TestVariablesCopies(unittest.TestCase):
         self.assertEqual(self.doc.Objects, [])
 
     def test_missing_studio_value_names(self):
-        """A value for a name FreeCAD can't use as a variable (#t, a unit; #Gap, which
-        "Variables" has already) gets a proposal, as a copy's variable does (review 317, 6), and
-        name_map gives another name."""
+        """A value for a name FreeCAD can't use as a variable (#Gap, which "Variables" has
+        already) gets a proposal, as a copy's variable does (review 317, 6), and name_map gives
+        another name. #t, a unit name, is usable as it is (ops#640, rank 54)."""
         self.documentVariables()
         a = self.export("Studio A", [entry(variable("LENGTH", "Width", "#t * 2"),
                                            variable("LENGTH", "Depth", "#Gap * 3"))])
         values = {"t": ("LENGTH", "3 mm"), "Gap": ("LENGTH", "4 mm")}
         plan = copies.plan_import(self.doc, [a], values=values)
         self.assertTrue(plan.ok, plan.report())
-        self.assertEqual(plan.input_renames, {"Gap": "Gap_", "t": "t_"})
-        self.assertIn("The value of #t becomes Variables.t_", plan.report())
+        self.assertEqual(plan.input_renames, {"Gap": "Gap_"})
+        self.assertIn("The value of #Gap becomes Variables.Gap_", plan.report())
         copy = copies.import_studios(self.doc, [a], values=values,
                                      name_map={"t": "Thick"}).copies[0]
         variables = self.doc.getObject("Variables")
@@ -293,8 +293,8 @@ class TestVariablesCopies(unittest.TestCase):
         self.assertNotIn("Gap_", variables.PropertiesList)
         # a name given that FreeCAD can't use either is a problem, nothing made
         with self.assertRaises(ImportBlocked) as blocked:
-            copies.import_studios(self.doc, [a], values=values, name_map={"t": "pi"})
-        self.assertIn("#t can't be the input variable pi", str(blocked.exception))
+            copies.import_studios(self.doc, [a], values=values, name_map={"t": "cos"})
+        self.assertIn("#t can't be the input variable cos", str(blocked.exception))
 
     def test_fem_json_opens_through_fem(self):
         """A FEM mesh .json still opens through FEM when nothing says which module reads it:
@@ -482,54 +482,55 @@ class TestVariablesCopies(unittest.TestCase):
     # I-5
 
     def test_unit_names(self):
-        """I-5. Names t and H (units in FreeCAD): the plan proposes t_ and H_, NameMap records
-        them, the expressions use them, and planning again with NameMap gives the same names
-        (as Refresh will)."""
+        """I-5, after ops#640 rank 54. Names t and H (units in FreeCAD) are kept, as Onshape has
+        them: no renames, the sibling written `t * 3` reads as the copy's own t (stored `.t`),
+        and the value follows t."""
         path = self.export("Studio A", [entry(
             variable("LENGTH", "t", "2 mm"),
             variable("LENGTH", "H", "#t * 3"),
         )])
         plan = copies.plan_import(self.doc, [path])
         self.assertTrue(plan.ok, plan.problems)
-        self.assertEqual(plan.renames, {"t": "t_", "H": "H_"})
+        self.assertEqual(plan.renames, {})
         copy = copies.import_studios(self.doc, [path]).copies[0]
-        self.assertEqual(copy.NameMap, {"t": "t_", "H": "H_"})
-        self.assertNotIn("t", copy.PropertiesList)
-        self.assertAlmostEqual(copy.H_.Value, 6)
-        self.assertEqual(expression(copy, "H_").replace(" ", "").replace("(", "")[:2], "t_")
+        self.assertEqual(copy.NameMap, {})
+        self.assertIn("t", copy.PropertiesList)
+        self.assertAlmostEqual(copy.H.Value, 6)
+        self.assertEqual(expression(copy, "H").replace(" ", "").replace("(", "")[:2], ".t")
         again = copies.plan_import(self.doc, [path], name_map=dict(copy.NameMap))
-        self.assertEqual(again.renames, dict(copy.NameMap))
+        self.assertEqual(again.renames, {})
 
     def test_names_freecad_cant_use(self):
-        """The translator's FreeCAD names are checked (review 309's note): constants, a unit, a
-        function, a property every copy has. Each gets a usable proposal; a name_map that names
-        an unusable one is refused. A cell address's shape (`W2`) is a usable name: the copy's
-        `#W2 * 2` computes."""
-        names = ["pi", "e", "mm", "cos", "Label", "SourcePath", "Count_", "W2"]
+        """The translator's FreeCAD names are checked (review 309's note): a function, a property
+        every copy has. Each gets a usable proposal; a name_map that names an unusable one is
+        refused. Constants and a unit (`pi`, `e`, `mm`) are usable since ops#640 rank 54, and so
+        is a cell address's shape (`W2`): the copy's `#W2 * 2` computes."""
+        names = ["cos", "Label", "SourcePath", "pi", "e", "mm", "Count_", "W2"]
         path = self.export("Studio A", [entry(
             *[variable("NUMBER", name, str(i + 1)) for i, name in enumerate(names)],
             variable("NUMBER", "Twice", "#W2 * 2"))])
         plan = copies.plan_import(self.doc, [path])
         self.assertTrue(plan.ok, plan.problems)
-        for name in names[:-2]:
+        for name in names[:3]:
             with self.subTest(name=name):
                 self.assertIn(name, plan.renames)
                 self.assertEqual(App.checkVariableName(plan.renames[name], "App::VarSetCopy"),
                                  "")
-        self.assertNotIn("Count_", plan.renames)
-        self.assertNotIn("W2", plan.renames)
+        for name in names[3:]:
+            self.assertNotIn(name, plan.renames)
         copy = copies.import_studios(self.doc, [path]).copies[0]
         for i, name in enumerate(names):
             self.assertEqual(value(copy, plan.renames.get(name, name)), i + 1)
         self.assertEqual(copy.Twice, 16)
-        bad = copies.plan_import(self.doc, [path], name_map={"pi": "e"})
+        bad = copies.plan_import(self.doc, [path], name_map={"pi": "sin"})
         self.assertFalse(bad.ok)
-        self.assertTrue(any("pi can't become e" in p for p in bad.problems), bad.problems)
+        self.assertTrue(any("pi can't become sin" in p for p in bad.problems), bad.problems)
 
     def test_check_variable_name(self):
         """FreeCAD.checkVariableName, the rules of section 1.3 for Python (PR B's question)."""
-        self.assertIn("unit", App.checkVariableName("t"))
-        self.assertIn("constant", App.checkVariableName("pi"))
+        # ops#640 rank 54: unit and constant names are usable, as in Onshape
+        self.assertEqual(App.checkVariableName("t"), "")
+        self.assertEqual(App.checkVariableName("pi"), "")
         self.assertIn("function", App.checkVariableName("cos"))
         self.assertEqual(App.checkVariableName("Width_2"), "")
         self.assertIn("property of every", App.checkVariableName("Label", "App::VarSet"))

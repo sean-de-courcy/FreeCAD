@@ -133,13 +133,17 @@ std::string VariableLookup::checkVariableName(const DocumentObject* holder, cons
         return quoted
             + " isn't a name: use letters, digits and _, and start with a letter or _.";
     }
-    // the parser's own lists, as PropertySheet::isValidAlias uses
-    if (ExpressionParser::isTokenAUnit(name)) {
-        return quoted + " is a unit in expressions, so no expression could use the variable.";
+    // FreeCAD-CH (ops#640, rank 54): a unit or constant name (`t`, `W`, `m`, `e`, `pi`) is
+    // taken, as in Onshape: `#t` becomes `Variables.t`, and the parser reads a unit or constant
+    // name right after '.' as a name (Expression.cpp, afterDotLex). Written alone, `t` is still
+    // the unit. The boolean and None constants stay reserved words, as Onshape keeps its own.
+    for (const char* reserved : {"True", "true", "False", "false", "None"}) {
+        if (name == reserved) {
+            return quoted + " is a constant in expressions; choose another name.";
+        }
     }
-    if (ExpressionParser::isTokenAConstant(name)) {
-        return quoted + " is a constant in expressions, so no expression could use the variable.";
-    }
+    const bool unitOrConstant
+        = ExpressionParser::isTokenAUnit(name) || ExpressionParser::isTokenAConstant(name);
     // The lexer reads any `letter...(` as a call, and only an unknown name fails with "Unknown
     // function"; a known one with another number of arguments (pow, atan2, vector) fails with an
     // argument error, and is a function all the same. A name starting with _ is never one.
@@ -159,7 +163,7 @@ std::string VariableLookup::checkVariableName(const DocumentObject* holder, cons
     if (isFunction) {
         return quoted + " is a function in expressions; choose another name.";
     }
-    if (!ExpressionParser::isTokenAnIndentifier(name)) {
+    if (!unitOrConstant && !ExpressionParser::isTokenAnIndentifier(name)) {
         return quoted + " isn't read as a name in expressions; choose another name.";
     }
     if (holder) {

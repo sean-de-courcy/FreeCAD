@@ -404,12 +404,15 @@ public:
     }
 };
 
-/// Whether @a name may name a variable: an identifier that isn't a unit, a constant or a cell.
-bool isValidName(const std::string& name)
+/// Whether @a name may name a variable: an identifier that isn't a cell address. A sheet alias
+/// can't be a unit or a constant either; a VarSet variable can (FreeCAD-CH, ops#640, rank 54:
+/// `#t` reads as the variable, App's checkVariableName).
+bool isValidName(const std::string& name, bool sheet)
 {
+    if (App::ExpressionParser::isTokenAUnit(name) || App::ExpressionParser::isTokenAConstant(name)) {
+        return !sheet && App::VariableLookup::checkVariableName(nullptr, name).empty();
+    }
     return App::ExpressionParser::isTokenAnIndentifier(name)
-        && !App::ExpressionParser::isTokenAUnit(name)
-        && !App::ExpressionParser::isTokenAConstant(name)
         && !App::stringToAddress(name.c_str(), true).isValid();
 }
 
@@ -724,10 +727,14 @@ bool VariablesModel::rename(const QModelIndex& index, const QString& newName)
     if (name == oldName) {
         return true;
     }
-    if (!isValidName(name)) {
-        error = tr("'%1' is not a valid name: use a name that isn't a unit, a constant or a cell "
-                   "address.")
-                    .arg(newName);
+    if (!isValidName(name, isSheet(obj))) {
+        error = isSheet(obj)
+            ? tr("'%1' is not a valid name: use a name that isn't a unit, a constant or a cell "
+                 "address.")
+                  .arg(newName)
+            : tr("'%1' is not a valid name: use letters, digits and _, and no cell address or "
+                 "function name.")
+                  .arg(newName);
         return false;
     }
     if (App::VariableLookup::isVariable(obj, name)

@@ -1010,8 +1010,8 @@ def translate_export(entries: Sequence[StudioEntry], *,
 
     Each entry becomes its own copy, named by @a containers (default `Studio1`, `Studio2`, ...):
     a reference to a sibling is written as its bare FreeCAD name, one to another entry's variable
-    as `Container.Name`. @a name_map renames variables (Onshape name -> FreeCAD name; unit names
-    such as `t` need it, checked by the import). @a bindings resolve names no entry defines,
+    as `Container.Name`. @a name_map renames variables (Onshape name -> FreeCAD name; a unit name
+    such as `t` needs none since rank 54: a bare sibling `t` reads as the copy's own t). @a bindings resolve names no entry defines,
     @a providers pick the entry that provides a name several entries define. Whatever stays
     unresolved is listed, and the variables that need it carry it in `needs` and aren't
     translated: nothing is guessed.
