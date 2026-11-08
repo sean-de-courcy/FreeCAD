@@ -91,6 +91,19 @@ Workbench::~Workbench()
 namespace
 {
 
+/// The Tasks panel's "Start Part: New Body" with nothing selected: not under the Onshape keymap,
+/// which has no such panel (ops#640 round 6, J2); asked each time, so a keymap change applies
+class StartPartWatcher: public Gui::TaskView::TaskWatcherCommandsEmptySelection
+{
+public:
+    using TaskWatcherCommandsEmptySelection::TaskWatcherCommandsEmptySelection;
+
+    bool shouldShow() override
+    {
+        return !Gui::ForkKeymap::isOnshape() && TaskWatcherCommandsEmptySelection::shouldShow();
+    }
+};
+
 /// "Face" or "Edge" when every selected sub-element is one of that kind, on one object; else ""
 std::string_view subElementKind(const std::vector<Gui::SelectionSingleton::SelObj>& selection)
 {
@@ -433,7 +446,7 @@ void Workbench::activated()
 
     const char* NoSel[] = {"PartDesign_Body", nullptr};
     Watcher.push_back(
-        new Gui::TaskView::TaskWatcherCommandsEmptySelection(NoSel, "Start Part", "Part_Box_Parametric")
+        new StartPartWatcher(NoSel, "Start Part", "Part_Box_Parametric")
     );
 
     const char* Faces[] = {
