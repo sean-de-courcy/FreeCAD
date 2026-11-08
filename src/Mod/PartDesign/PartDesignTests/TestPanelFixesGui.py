@@ -3435,6 +3435,12 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertTrue(self.body.hasObject(copy))
         return pad, copy
 
+    @unittest.skip(
+        "ops#640 ranks 13 and 21: no command opens the pick dialog's list any more (every profile "
+        "feature opens with its Profile field armed), and a selected sketch outside the active "
+        "body is left out of the selection with a note: the copy choices this checks are reached "
+        "by no path"
+    )
     def testPadOfASketchCopiedIntoARotatedBody(self):
         """ops#245: Pad with nothing selected, and in its pick dialog a sketch outside any body
         (a 10 x 10 square at (2, 3, 5), turned 15 degrees about Z), Make independent copy, into a
@@ -3460,6 +3466,12 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertTrue(pad.isValid(), pad.getStatusString())
         self.assertAlmostEqual(pad.Shape.Volume, 1000, places=3)
 
+    @unittest.skip(
+        "ops#640 ranks 13 and 21: no command opens the pick dialog's list any more (every profile "
+        "feature opens with its Profile field armed), and a selected sketch outside the active "
+        "body is left out of the selection with a note: the copy choices this checks are reached "
+        "by no path"
+    )
     def testPadOfAnXZSketchCopiedIntoABody(self):
         """ops#244 L6: a 10 x 10 square sketch outside any body on XZ, moved by (2, 3, 5) and
         turned in its plane, Pad through the pick dialog, Make independent copy: the copy is

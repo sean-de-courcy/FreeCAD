@@ -794,6 +794,11 @@ FeaturesView::FeaturesView(QWidget* parent)
         if (!listsBelong()) {
             showLists(false);
         }
+        else if (registered && !inPartDesign() && !prefersModelTree()) {
+            // Back in the Sketcher while a Body's sketch is still edited (another workbench went
+            // in between): the lists come back, as they stayed when the edit opened it
+            showLists(true);
+        }
     }));
     if (auto gdoc = Gui::Application::Instance->activeDocument()) {
         onActiveDocument(*gdoc);

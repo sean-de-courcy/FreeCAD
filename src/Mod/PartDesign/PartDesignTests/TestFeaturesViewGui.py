@@ -655,7 +655,9 @@ class TestFeaturesViewGui(unittest.TestCase):
         pump(0.2)
         self.assertTrue(self.view().isVisible())
         self.assertFalse(tree.isVisible())
-        self.assertEqual(self.rows(), self.expected)
+        # The edit rolls the studio back to the sketch, as Onshape's does: what comes after it is
+        # held, and the bar stands right below the edited row
+        self.assertEqual(self.rows(), ["SkA", "|", "PadA", "Box", "SkB", "Pocket1", "PocketB"])
         Gui.activateWorkbench("PartWorkbench")
         self.assertTrue(waitFor(lambda: tree.isVisible() and not self.view().isVisible()))
         Gui.activateWorkbench("SketcherWorkbench")
@@ -663,6 +665,7 @@ class TestFeaturesViewGui(unittest.TestCase):
         guiDoc.resetEdit()
         self.assertTrue(waitFor(lambda: Gui.activeWorkbench().name() == "PartDesignWorkbench"))
         self.assertTrue(waitFor(lambda: self.view().isVisible() and not tree.isVisible()))
+        self.assertTrue(waitFor(lambda: self.rows() == self.expected), self.rows())
 
     def testHeaderCounts(self):
         """Onshape's 'Features (n)' and the Parts section's count (ref-D #14, #30)."""
