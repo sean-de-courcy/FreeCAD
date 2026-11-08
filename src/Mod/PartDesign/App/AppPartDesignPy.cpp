@@ -223,8 +223,8 @@ public:
         add_varargs_method(
             "studioLabel",
             &Module::studioLabel,
-            "studioLabel(studio) -- A studio's name: an App::Part's Label, Part Studio 1 for a "
-            "document (its top level)."
+            "studioLabel(studio) -- A studio's name: an App::Part's Label, the implicit studio's "
+            "label for a document (its top level; Part Studio 1 by default)."
         );
         add_varargs_method(
             "derivableParts",
@@ -894,7 +894,7 @@ private:
         App::Document* doc = nullptr;
         App::Part* studio = nullptr;
         studioArg(pStudio, doc, studio);
-        return Py::String(PartDesign::studioLabel(studio));
+        return Py::String(PartDesign::studioLabel(doc, studio));
     }
 
     Py::Object derivableParts(const Py::Tuple& args)

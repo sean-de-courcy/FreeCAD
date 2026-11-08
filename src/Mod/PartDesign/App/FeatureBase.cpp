@@ -242,6 +242,17 @@ App::DocumentObjectExecReturn* FeatureBase::execute()
         if (!source) {
             return new App::DocumentObjectExecReturn("Missing source part: " + DerivedFrom.getStrValue());
         }
+        // A studio moved since: the copy keeps the source's place in the document, not in its
+        // studio as Onshape's does, so it fails naming both rather than shift silently (review
+        // R6-2)
+        App::Part* from = nullptr;
+        App::Part* to = nullptr;
+        Part::BodyBase::studioOf(Part::BodyBase::bodyOfObject(source), from);
+        Part::BodyBase::studioOf(getFeatureBody(), to);
+        const std::string problem = derivedPlacementProblem(getDocument(), from, to);
+        if (!problem.empty()) {
+            return new App::DocumentObjectExecReturn(problem);
+        }
     }
 
     if (!BaseFeature.getValue()) {
