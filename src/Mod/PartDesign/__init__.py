@@ -8,6 +8,7 @@ isStudioPick = _PartDesign.isStudioPick
 isStudioProfile = _PartDesign.isStudioProfile
 studioOriginFeature = _PartDesign.studioOriginFeature
 newPartFrom = _PartDesign.newPartFrom
+newPartRefusal = _PartDesign.newPartRefusal  # FreeCAD-CH, ops#640 round 5
 addToPart = _PartDesign.addToPart
 addToPartRefusal = _PartDesign.addToPartRefusal
 deletePart = _PartDesign.deletePart

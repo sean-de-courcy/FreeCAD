@@ -43,6 +43,9 @@
 
 namespace PartDesign
 {
+// FreeCAD-CH (ops#640 round 5): Body.cpp's New part rule (no header names it)
+PartDesignExport std::string newPartRefusal(const App::DocumentObject* feature, bool ignoreMerge);
+
 class Module: public Py::ExtensionModule<Module>
 {
 public:
@@ -71,9 +74,17 @@ public:
         add_varargs_method(
             "newPartFrom",
             &Module::newPartFrom,
-            "newPartFrom(feature) -- Moves feature, its Body's Tip that nothing else uses, and its "
-            "Profile sketch if nothing else uses it, into a new Body placed as the old one, in the "
-            "same container. Returns the new Body; no recompute."
+            "newPartFrom(feature) -- Moves feature, its Profile sketch if nothing that stays uses "
+            "it, and the later features of its Body that work on its own material (in order), into "
+            "a new Body placed as the old one, in the same container; its Merge goes first. The "
+            "features that stay close their chain over it. Refused (newPartRefusal) when a feature "
+            "can't be told apart. Returns the new Body; no recompute."
+        );
+        add_varargs_method(
+            "newPartRefusal",
+            &Module::newPartRefusal,
+            "newPartRefusal(feature, ignoreMerge=False) -- Why newPartFrom(feature) would refuse, or "
+            "'' when it is allowed. With ignoreMerge, the feature's Merge counts as gone."
         );
         add_varargs_method(
             "addToPart",
@@ -266,6 +277,30 @@ private:
         }
         try {
             return Py::asObject(Body::newPartFrom(objectArg(pObj))->getPyObject());
+        }
+        catch (const Base::Exception& e) {
+            e.setPyException();
+            throw Py::Exception();
+        }
+    }
+
+    // FreeCAD-CH (ops#640 round 5): newPartFrom's rule, for the dialog's rows and the tests
+    Py::Object newPartRefusal(const Py::Tuple& args)
+    {
+        PyObject* pObj;
+        PyObject* pIgnore = Py_False;
+        if (!PyArg_ParseTuple(
+                args.ptr(),
+                "O!|O!",
+                &(App::DocumentObjectPy::Type),
+                &pObj,
+                &PyBool_Type,
+                &pIgnore
+            )) {
+            throw Py::Exception();
+        }
+        try {
+            return Py::String(PartDesign::newPartRefusal(objectArg(pObj), pIgnore == Py_True));
         }
         catch (const Base::Exception& e) {
             e.setPyException();

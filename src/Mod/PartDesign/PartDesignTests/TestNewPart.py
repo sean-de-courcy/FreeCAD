@@ -6,6 +6,7 @@
 part (PartDesign.addToPart, ops#640). Designed geometry: notes/bplus-stage1-design.md 2.2
 (O-t1-t6) and 2.3 (N-t1-t6). Oracles are placements, volumes and bounding boxes."""
 
+import math
 import os
 import re
 import tempfile
@@ -413,6 +414,106 @@ class TestNewPart(unittest.TestCase):
             PartDesign.newPartFrom(lidSk)
         self.assertEqual(sorted(o.Name for o in self.doc.Objects), names)
         self.assertIs(body.Tip, lid)
+
+    def bossWithFillet(self):
+        """ops#640 round 5 (hands-on B5-3): the enclosure, a boss 20 x 20 x 5 on its top from
+        (10, 10) and a fillet r = 1 on the boss's four top edges; returns (body, base, boss
+        sketch, boss, fillet). The fillet removes 20 (1 - pi/4) per edge less 5/3 - pi/2 at each
+        corner, where two edges' grooves meet in a mitre."""
+        body, base, lidSk = self.enclosure()
+        bossSk = body.newObject("Sketcher::SketchObject", "BossSk")
+        bossSk.AttachmentSupport = [(base, faceAt(base, 10))]
+        bossSk.MapMode = "FlatFace"
+        rect(bossSk, 10, 10, 30, 30)
+        boss = pad(body, "Boss", bossSk, 5)
+        self.doc.recompute()
+        edges = [
+            f"Edge{i}"
+            for i, edge in enumerate(boss.Shape.Edges, 1)
+            if all(abs(v.Point.z - 15) < 1e-6 for v in edge.Vertexes)
+        ]
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (boss, edges)
+        fillet.Radius = 1
+        self.doc.recompute()
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        return body, base, bossSk, boss, fillet
+
+    FILLET = 4 * 20 * (1 - math.pi / 4) - 4 * (5 / 3 - math.pi / 2)
+
+    def testNewPartTakesTheFilletAlong(self):
+        """B5-3: New part of the boss, the fillet on its edges: the boss, its sketch and the
+        fillet go to the new part in order; the enclosure is 16000 again, its Tip the base; the
+        new part is the filleted boss (2000 - FILLET)."""
+        body, base, bossSk, boss, fillet = self.bossWithFillet()
+        self.assertEqual(PartDesign.newPartRefusal(boss), "")
+        part = PartDesign.newPartFrom(boss)
+        self.doc.recompute()
+        self.assertEqual(part.Group, [bossSk, boss, fillet])
+        self.assertIs(part.Tip, fillet)
+        self.assertIs(body.Tip, base)
+        self.assertIs(fillet.BaseFeature, boss)
+        self.assertEqual([o.Name for o in self.doc.Objects if not o.isValid()], [])
+        self.assertAlmostEqual(body.Shape.Volume, 16000, places=3)
+        self.assertAlmostEqual(part.Shape.Volume, 2000 - self.FILLET, places=3)
+
+    def testNewPartRefusesWhatCantBeToldApart(self):
+        """A pad on the fillet's top (its sketch on that face) would stay with the enclosure and
+        change: refused, naming the sketch, and nothing changes. A first solid with features after
+        it is refused too."""
+        body, base, bossSk, boss, fillet = self.bossWithFillet()
+        topSk = body.newObject("Sketcher::SketchObject", "TopSk")
+        topSk.AttachmentSupport = [(fillet, faceAt(fillet, 15))]
+        topSk.MapMode = "FlatFace"
+        rect(topSk, 15, 15, 25, 25)
+        top = pad(body, "Top", topSk, 5)
+        self.doc.recompute()
+        self.assertTrue(top.isValid(), top.getStatusString())
+        why = "'TopSk' uses 'Fillet', which would go to the new part"
+        self.assertEqual(PartDesign.newPartRefusal(boss), why)
+        names = sorted(o.Name for o in self.doc.Objects)
+        with self.assertRaises(ValueError) as caught:
+            PartDesign.newPartFrom(boss)
+        self.assertIn(why, str(caught.exception))
+        self.assertEqual(sorted(o.Name for o in self.doc.Objects), names)
+        self.assertIs(body.Tip, top)
+        self.assertIn("is the first solid of", PartDesign.newPartRefusal(base))
+
+    def testNewPartDropsItsMerge(self):
+        """B5-4's New: the lid pad merged with a part beside it, nothing after the Merge: New part
+        drops the Merge (the part is a part again, 16000) and takes the pad (4500 for 30 x 30 x 5).
+        With a pocket after the Merge, refused, naming it, unless the Merge counts as gone
+        (ignoreMerge: the dialog's whole scope unticked)."""
+        body, base, lidSk = self.enclosure()
+        lid = pad(body, "Lid", lidSk, 5)
+        self.doc.recompute()
+        right = self.doc.addObject("PartDesign::Body", "Right")
+        pad(right, "RightPad", sketch(right, "RightSk", xyPlane(right), (30, 0, 70, 40), z=10), 10)
+        self.doc.recompute()
+        merge = PartDesign.setMergeScope(lid, [right])
+        self.doc.recompute()
+        self.assertTrue(merge.isValid(), merge.getStatusString())
+        cornerSk = sketch(body, "CornerSk", xyPlane(body), (35, 35, 40, 40), z=10)
+        corner = body.newObject("PartDesign::Pocket", "Corner")
+        corner.Profile = cornerSk
+        corner.Length = 5
+        self.doc.recompute()
+        self.assertTrue(corner.isValid(), corner.getStatusString())
+        self.assertIn("'Corner' builds on 'Merge'", PartDesign.newPartRefusal(lid))
+        self.assertEqual(PartDesign.newPartRefusal(lid, True), "")
+        body.removeObject(corner)
+        self.doc.removeObject(corner.Name)
+        self.doc.recompute()
+        self.assertEqual(PartDesign.newPartRefusal(lid), "")
+        mergeName = merge.Name
+        part = PartDesign.newPartFrom(lid)
+        self.doc.recompute()
+        self.assertIsNone(self.doc.getObject(mergeName))
+        self.assertIsNone(right.MergedInto)
+        self.assertEqual(part.Group, [lidSk, lid])
+        self.assertAlmostEqual(right.Shape.Volume, 16000, places=3)
+        self.assertAlmostEqual(part.Shape.Volume, 4500, places=3)
+        self.assertAlmostEqual(body.Shape.Volume, 16000, places=3)
 
 
 class TestOperations(unittest.TestCase):
