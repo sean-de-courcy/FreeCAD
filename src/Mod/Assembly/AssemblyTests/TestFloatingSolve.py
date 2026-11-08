@@ -16,6 +16,12 @@ from AssemblyTests.TestCore import AssemblyTestBase
 
 
 class TestFloatingSolve(AssemblyTestBase):
+    def setUp(self):
+        super().setUp()
+        # An assembly as Assembly_CreateAssembly makes it: without the Type, the joint code takes
+        # it for a Part (no solve on joint creation, the second pick pre-solved onto the first)
+        self.assembly.Type = "Assembly"
+
     def cube(self, name, placement):
         box = self.assembly.newObject("Part::Box", name)
         box.Length = box.Width = box.Height = 10
