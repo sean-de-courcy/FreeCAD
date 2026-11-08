@@ -252,7 +252,10 @@ ASSEMBLY_KEYS = {
 
 # Pairs that share a key in upstream FreeCAD too, outside the keymap's commands: the tree's
 # "Recompute Object" and Std_Recompute (Ctrl+Shift+R; the tree's action works on its selection)
-UPSTREAM_CLASHES = [("Recompute Object", "Std_Recompute")]
+# The tree's "Rename" (F2, an action of its context menu only: the tree's own F2 is its edit
+# trigger) and the Features and Parts lists' renameAction (F2 and Shift+N, widget shortcuts of the
+# lists, ops#640 rank 36): neither is a window key, so they never meet
+UPSTREAM_CLASHES = [("Recompute Object", "Std_Recompute"), ("Rename", "renameAction")]
 
 # Sub-actions that aren't commands: the draw styles, and the workbenches' W, 1..9
 DRAW_STYLES = {"Std_DrawStyleAsIs": "V,1", "Std_DrawStyleShaded": "V,6"}

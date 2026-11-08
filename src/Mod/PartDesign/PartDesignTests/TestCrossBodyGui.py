@@ -351,18 +351,23 @@ class ResultBoxGuiCase(unittest.TestCase):
         self.doc.recompute()
 
     def assertAdditiveBox(self, command):
+        """Since ops#640 rank 20 a Revolve, Loft, Sweep and Helix have an Extrude's four rows."""
         self.enclosure()
         feature = self.featurePanel(command)
-        self.assertEqual(self.items(self.combo()), ["Add to Enclosure", "New part"])
+        self.assertEqual(self.items(self.combo()), ROWS)
         return feature
 
     def assertSubtractiveBox(self, command):
+        """A Groove has the four rows too (rank 20); a Hole is still a cut, with its two."""
         self.enclosure()
         self.otherPart()
         self.featurePanel(command)
-        self.assertEqual(
-            self.items(self.combo()), ["Remove from Enclosure", "Intersect with Enclosure"]
+        expected = (
+            ["Remove from Enclosure", "Intersect with Enclosure"]
+            if command == "PartDesign_Hole"
+            else ROWS
         )
+        self.assertEqual(self.items(self.combo()), expected)
 
     def activate(self, doc):
         App.setActiveDocument(doc.Name)

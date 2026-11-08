@@ -309,6 +309,10 @@ class TestOperationRowGui(RevolveCase):
             feature = self.model()
         else:
             self.model()
+            # As the Features list's delete: the Body lets it go first and moves its Tip back to
+            # Base; a bare removeObject left the Tip empty, and the new feature went first in
+            # the Body, before Base, with the Body still showing the Revolution
+            self.body.removeObject(self.feature)
             self.doc.removeObject(self.feature.Name)
             if kind == "AdditiveLoft":
                 feature = self.body.newObject("PartDesign::AdditiveLoft", kind)
@@ -336,10 +340,20 @@ class TestOperationRowGui(RevolveCase):
                 feature.Pitch = 5
                 feature.Height = 5
                 feature.Angle = 0
+                # One made and edited before: a first edit of a Helix that never was proposes
+                # its pitch and height from the profile (proposeParameters), 3 turns here
+                feature.HasBeenEdited = True
             self.doc.recompute()
             self.feature = feature
         self.assertTrue(feature.isValid(), feature.getStatusString())
         return feature
+
+    def edit(self, feature):
+        """As a user opens it, a double-click: that opens the edit's transaction, which the Result
+        row's switch needs (isEditing); a bare setEdit has none, and the switch went back"""
+        feature.ViewObject.doubleClicked()
+        self.assertTrue(waitFor(lambda: Gui.Control.activeDialog()), "no task dialog")
+        pump(0.3)
 
     def resultCombo(self):
         return widget(QtWidgets.QComboBox, "resultCombo")
@@ -377,9 +391,8 @@ class TestOperationRowGui(RevolveCase):
         self.choose(feature, "Subtraction")
         self.assertEqual(feature.Operation, "Subtraction", kind)
         self.assertEqual(feature.Reversed, reversed0 != flips, f"{kind}: direction on Remove")
-        self.assertAlmostEqual(
-            self.body.Shape.Volume, expected["Subtraction"], delta=0.1, msg=kind
-        )
+        # The feature's own result: the Body isn't recomputed while its panel is open
+        self.assertAlmostEqual(feature.Shape.Volume, expected["Subtraction"], delta=0.1, msg=kind)
         self.choose(feature, "Common")
         self.assertEqual(feature.Operation, "Common", kind)
         self.assertEqual(feature.Reversed, reversed0 != flips, f"{kind}: direction on Intersect")
