@@ -131,6 +131,7 @@ from PartDesignTests.TestStudioSequence import TestHistoryOrder  # FreeCAD-CH, o
 from PartDesignTests.TestDeletePart import TestDeletePart  # FreeCAD-CH, ops#635
 from PartDesignTests.TestNewPart import TestMapOrigin, TestNewPart  # FreeCAD-CH, ops#311
 from PartDesignTests.TestNewPart import TestOperations  # FreeCAD-CH, ops#640
+from PartDesignTests.TestRevolveOperations import TestRevolveOperations  # FreeCAD-CH, ops#640 rank 20
 from PartDesignTests.TestSiblings import TestSiblings  # FreeCAD-CH, ops#325
 from PartDesignTests.TestMerge import TestMerge  # FreeCAD-CH, ops#325
 from PartDesignTests.TestSplit import TestSplit  # FreeCAD-CH, ops#325

@@ -2811,9 +2811,34 @@ void Revolved::setResult(const TopoShape& base, const TopoShape& revolved, bool 
     // set the additive shape property for later usage in e.g. pattern
     this->AddSubShape.setValue(result);
 
+    // A Remove or an Intersect with nothing before it makes nothing, never its tool as material,
+    // as an Extrude's (ops#640 rank 20, H3); FeatureAddSub::recompute fails it, "Nothing to cut".
+    // No raw result: a Refine-only change recomputes fully (FeatureRefine::onlyHaveRefined)
+    if (base.isNull() && getAddSubType() == FeatureAddSub::Type::Subtractive) {
+        this->rawShape = TopoShape();
+        this->Shape.setValue(TopoShape());
+        return;
+    }
+
     if (!base.isNull()) {
         const TopoShape tool = result;
         result = makeShape(base, result);
+        // An Intersect that shares no volume with its base leaves the base as it was, healthy,
+        // with Onshape's info (hands-on R7, ops#640 H3, as an Extrude's); no raw result is kept
+        if (getBooleanOperation() == BooleanOperation::Common
+            && (result.isNull() || !result.hasSubShape(TopAbs_SOLID))) {
+            if (auto doc = getDocument(); doc && !SiblingOf.getValue()) {
+                static const std::string text = "Selected tools and targets do not intersect";
+                const char* previous = doc->getWarningDescription(this);
+                doc->setWarning(
+                    this,
+                    previous && *previous ? std::string(previous) + "\n" + text : text
+                );
+            }
+            this->rawShape = TopoShape();
+            this->Shape.setValue(base);
+            return;
+        }
         // A correct fuse holds at least the larger of the two and at most both; a correct cut at
         // least the base less the tool and at most the base
         if (checkVolume) {
@@ -2826,7 +2851,13 @@ void Revolved::setResult(const TopoShape& base, const TopoShape& revolved, bool 
                 && volume <= baseVolume + toolVolume + slack;
             const bool cut = volume >= baseVolume - toolVolume - slack
                 && volume <= baseVolume + slack;
-            if (!(getAddSubType() == FeatureAddSub::Type::Additive ? fuse : cut)) {
+            // an Intersect holds at most the smaller of the two (ops#640 rank 20)
+            const bool common = volume >= -slack
+                && volume <= std::min(baseVolume, toolVolume) + slack;
+            const bool intersects = getBooleanOperation() == BooleanOperation::Common;
+            if (!(getAddSubType() == FeatureAddSub::Type::Additive ? fuse
+                      : intersects                                 ? common
+                                                                   : cut)) {
                 throw Base::RuntimeError(QT_TRANSLATE_NOOP(
                     "Exception",
                     "Could not combine the revolution with the base: the result's volume is wrong"

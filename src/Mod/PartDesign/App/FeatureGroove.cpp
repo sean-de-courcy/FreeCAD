@@ -42,6 +42,9 @@ PROPERTY_SOURCE(PartDesign::Groove, PartDesign::Revolved)
 Groove::Groove()
 {
     defineSubtractive();
+    // New / Add / Remove / Intersect on one Revolve, as on an Extrude (FreeCAD-CH ops#640 rank
+    // 20): makeShape takes the Operation's maker; the end types stay the class's
+    allowAllOperations();
     const double fullAngle = 360.0;
     const double emptyAngle = 0.0;
 

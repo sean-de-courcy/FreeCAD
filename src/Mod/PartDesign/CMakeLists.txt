@@ -80,6 +80,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestInvoluteGear.py
     PartDesignTests/TestMerge.py
     PartDesignTests/TestNewPart.py
+    PartDesignTests/TestRevolveOperations.py
     PartDesignTests/TestSiblings.py
     PartDesignTests/TestSketch.py
     PartDesignTests/TestSplit.py
