@@ -145,6 +145,7 @@ const Entry table[] = {
     {"Sketcher_ConstrainSymmetric", "Shift+Q"},
     {"Sketcher_ConstrainMidpoint", "Shift+M"},  // ops#645
     {"Sketcher_ConstrainBlock", "Shift+J"},
+    {"Sketcher_ConstrainConcentric", "Shift+O"},  // ops#640, rank 44 (C-5)
     {"Sketcher_ConstrainCoincident", ""},
     {"Sketcher_ConstrainPointOnObject", ""},
     {"Sketcher_ConstrainDistanceX", ""},

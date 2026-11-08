@@ -149,6 +149,7 @@ ONSHAPE = {
     "Sketcher_ConstrainSymmetric": "Shift+Q",
     "Sketcher_ConstrainMidpoint": "Shift+M",
     "Sketcher_ConstrainBlock": "Shift+J",
+    "Sketcher_ConstrainConcentric": "Shift+O",
     "Sketcher_ConstrainCoincident": "",
     "Sketcher_ConstrainPointOnObject": "",
     "Sketcher_ConstrainDistanceX": "",

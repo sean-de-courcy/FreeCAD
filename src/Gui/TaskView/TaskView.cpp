@@ -28,6 +28,7 @@
 #include <QCursor>
 #include <QCoreApplication>
 #include <QDockWidget>
+#include <QEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPointer>
@@ -78,6 +79,53 @@ bool isInGraphics(const QWidget* widget)
     return false;
 }
 
+// FreeCAD-CH (ops#640, hands-on C-4): whether a sketch is in edit. Its editor takes Enter in the
+// graphics area itself (ViewProviderSketch::keyPressed, as the Fillet tool's previewed corner
+// does), so Enter there never accepts a dialog. By type name: Gui doesn't link the Sketcher
+bool sketchInEdit()
+{
+    Gui::Document* doc = Gui::Application::Instance ? Gui::Application::Instance->editDocument()
+                                                    : nullptr;
+    Gui::ViewProvider* vp = doc ? doc->getInEdit() : nullptr;
+    if (!vp) {
+        return false;
+    }
+    const Base::Type sketchType = Base::Type::fromName("SketcherGui::ViewProviderSketch");
+    return !sketchType.isBad() && vp->isDerivedFrom(sketchType);
+}
+
+// FreeCAD-CH (ops#640, hands-on F10): a field of the open dialog showing an unresolved #name
+// (QuantitySpinBox's `unresolvedVariable`) disables the dialog's OK, as Onshape's check is
+// disabled until the name resolves, and Enter in the graphics area does nothing meanwhile. The
+// OK carries this mark while the rule holds it, so the rule enables only an OK it disabled
+constexpr const char* unresolvedBlocksOk = "unresolvedBlocksOk";
+
+void updateUnresolvedBlock()
+{
+    Gui::TaskView::TaskView* view = Gui::Control().taskPanel();
+    std::optional<Gui::TaskView::TaskInfo> active = view ? view->currentTaskInfo() : std::nullopt;
+    if (!active || !active->ActiveCtrl || !active->taskPanel) {
+        return;
+    }
+    QPushButton* ok = active->ActiveCtrl->standardButtons()->button(QDialogButtonBox::Ok);
+    if (!ok) {
+        return;
+    }
+    const QList<QWidget*> widgets = active->taskPanel->findChildren<QWidget*>();
+    const bool unresolved = std::ranges::any_of(widgets, [](const QWidget* widget) {
+        return widget->property("unresolvedVariable").toBool();
+    });
+    const bool blocked = ok->property(unresolvedBlocksOk).toBool();
+    if (unresolved && !blocked && ok->isEnabled()) {
+        ok->setProperty(unresolvedBlocksOk, true);
+        ok->setEnabled(false);
+    }
+    else if (!unresolved && blocked) {
+        ok->setProperty(unresolvedBlocksOk, false);
+        ok->setEnabled(true);
+    }
+}
+
 /** FreeCAD-CH (ops#640, rank 38): Enter in the graphics area with a dialog open goes to the task
  * view, which accepts the dialog as Onshape's Enter does there (hands-on R6). A field shown in the
  * view keeps its Enter, which commits its value. Installed on the application once.
@@ -90,6 +138,18 @@ public:
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override
     {
+        if (event->type() == QEvent::DynamicPropertyChange) {
+            // A field of the task view resolved or lost its #name (hands-on F10)
+            auto change = static_cast<QDynamicPropertyChangeEvent*>(event);  // NOLINT
+            if (change->propertyName() == "unresolvedVariable") {
+                auto widget = qobject_cast<QWidget*>(watched);
+                Gui::TaskView::TaskView* view = Gui::Control().taskPanel();
+                if (widget && view && view->isAncestorOf(widget)) {
+                    updateUnresolvedBlock();
+                }
+            }
+            return false;
+        }
         if (event->type() != QEvent::KeyPress) {
             return false;
         }
@@ -99,8 +159,8 @@ protected:
         }
         auto widget = qobject_cast<QWidget*>(watched);
         if (!widget || qobject_cast<QAbstractSpinBox*>(widget) || qobject_cast<QLineEdit*>(widget)
-            || !isInGraphics(widget)) {
-            return false;
+            || !isInGraphics(widget) || sketchInEdit()) {
+            return false;  // a field's own Enter; the sketch editor's (a tool's, C-4)
         }
         Gui::TaskView::TaskView* view = Gui::Control().taskPanel();
         std::optional<Gui::TaskView::TaskInfo> active = view ? view->currentTaskInfo() : std::nullopt;
@@ -110,6 +170,9 @@ protected:
         // Only when the Enter clicks the OK: a disabled or hidden OK, or another default
         // button, leaves the view its own Enter (TaskView::keyPressEvent would do nothing)
         QPushButton* ok = active->ActiveCtrl->standardButtons()->button(QDialogButtonBox::Ok);
+        if (ok && ok->property(unresolvedBlocksOk).toBool()) {
+            return true;  // an unresolved #name in a field: nothing until it resolves (F10)
+        }
         if (!ok || !ok->isDefault() || !ok->isVisible() || !ok->isEnabled()) {
             return false;
         }
@@ -638,10 +701,12 @@ void TaskView::keyPressEvent(QKeyEvent* ke)
             // GraphicsEnterFilter). In a value field Enter only commits the value, which the field
             // did already; a list's Enter opens its item. Not in the sketch editor, nor a renamed
             // OK (Delete, Run Check): Qt makes the box's first accept button the default when it
-            // shows, so its default flag doesn't tell
+            // shows, so its default flag doesn't tell. The graphics area's Enter is the sketch
+            // editor's while a sketch is in edit (hands-on C-4: a tool's, as the Fillet preview's)
             QWidget* focus = QApplication::focusWidget();
+            const bool fromGraphics = (enterFromGraphics || isInGraphics(focus)) && !sketchInEdit();
             const bool accepts = qobject_cast<QCheckBox*>(focus)
-                || qobject_cast<QRadioButton*>(focus) || enterFromGraphics || isInGraphics(focus);
+                || qobject_cast<QRadioButton*>(focus) || fromGraphics;
             QPushButton* boxOk = active->ActiveCtrl->standardButtons()->button(QDialogButtonBox::Ok);
             // get all buttons of the complete task dialog
             QList<QPushButton*> list = this->findChildren<QPushButton*>();

@@ -240,10 +240,15 @@ class AttachedWithBodyVolume(Attached):
 
     def check(self, scenario, consumer, target, expectation):
         body = scenario.doc.Body
-        bad = [o.Name for o in body.Group + [body] if "Touched" in o.State or (
-            o.isDerivedFrom("PartDesign::Feature") and not o.isValid())]
+        # A transform of nothing is red, as Onshape's is (ops#640): the scenario names it
+        red = set(scenario.redTransforms())
+        bad = [o.Name for o in body.Group + [body] if o.Name not in red and (
+            "Touched" in o.State or (o.isDerivedFrom("PartDesign::Feature") and not o.isValid()))]
         if bad:
             return "broken", f"in error or touched after the recompute: {bad}"
+        notRed = sorted(n for n in red if scenario.doc.getObject(n).isValid())
+        if notRed:
+            return "wrong", f"valid, expected red (a transform of nothing, ops#640): {notRed}"
         return super().check(scenario, consumer, target, expectation)
 
     def compare(self, scenario, consumer, target, expectation):
@@ -260,7 +265,8 @@ class AttachedWithBodyVolume(Attached):
 class DeleteOnlyOriginal(Scenario):
     """The block, boss A, a LinearPattern of A (X, 400, 3) and, unless `last`, a 100 x 80 x 20 cap
     at x -50..50, y 60..140 after it. A is deleted as the GUI does it (Body.removeObject, then the
-    document's): the Body is the block (and the cap). Judged by a sketch outside the Body on the
+    document's): the Body is the block (and the cap), and the pattern of nothing is red ('Select
+    features to pattern.', Onshape's rule, ops#640). Judged by a sketch outside the Body on the
     block's front face and the Body's volume."""
 
     abstract = True
@@ -277,6 +283,10 @@ class DeleteOnlyOriginal(Scenario):
 
     def front(self):
         return face("plane", normal=-Y, through=self.s(0, -150, 50))
+
+    def redTransforms(self):
+        """The pattern, once A is deleted: a pattern of nothing is red (ops#640)."""
+        return ("LP",) if self.bosses == 0 else ()
 
     def bodyVolume(self):
         import math
@@ -412,10 +422,14 @@ class ReorderCapBeforePattern(DeleteOnlyOriginal):
 class ExpressionModeOff(DeleteOnlyOriginal):
     """A whole-shape Mirrored (YZ) of the block and A in place of the pattern, the cap after it,
     its mode bound to a VarSet's integer (1, Whole shape); the integer set to 0 (Features, no
-    Originals: the mirror off), then back to 1. Each change applied by a recompute."""
+    Originals: the mirror off, and red, 'Select features to mirror.', ops#640), then back to 1.
+    Each change applied by a recompute."""
 
     steps = ("off", "on")
     bosses = 2
+
+    def redTransforms(self):
+        return ("Mirrored",) if self.bosses == 1 else ()
 
     def build(self, doc):
         body = m.body(doc)

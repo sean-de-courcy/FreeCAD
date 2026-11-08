@@ -1630,7 +1630,8 @@ bool isInputProperty(const App::Property* prop)
 }
 
 // A property's value against its copy from the dialog's opening. Links compare by their targets
-// and old-style subnames: PropertyLinkBase::isSame says no whenever both are links
+// and old-style subnames, whatever their scope: PropertyLinkBase::isSame also compares scopes, and
+// the opening's Copy() keeps none (a Global or Child link's copy is Local)
 bool sameValue(const App::Property& now, const App::Property& then)
 {
     auto nowLink = dynamic_cast<const App::PropertyLinkBase*>(&now);

@@ -637,22 +637,21 @@ bool PropertyLinkBase::isSame(const Property& other) const
     if (&other == this) {
         return true;
     }
-    if (other.isDerivedFrom<PropertyLinkBase>()
-        || getScope() != static_cast<const PropertyLinkBase*>(&other)->getScope()) {
+    // FreeCAD-CH (ops#640): a link is the same as another link of the same scope with the same
+    // targets and subnames. The test was inverted (every link differed from every other, and a
+    // property that isn't a link was cast to one), and the two sides' subnames were taken in
+    // different styles
+    auto otherLink = freecad_cast<const PropertyLinkBase*>(&other);
+    if (!otherLink || getScope() != otherLink->getScope()) {
         return false;
     }
 
-    static std::vector<App::DocumentObject*> ret;
-    static std::vector<std::string> subs;
-    static std::vector<App::DocumentObject*> ret2;
-    static std::vector<std::string> subs2;
-
-    ret.clear();
-    subs.clear();
-    ret2.clear();
-    subs2.clear();
+    std::vector<App::DocumentObject*> ret;
+    std::vector<std::string> subs;
+    std::vector<App::DocumentObject*> ret2;
+    std::vector<std::string> subs2;
     getLinks(ret, true, &subs, false);
-    static_cast<const PropertyLinkBase*>(&other)->getLinks(ret2, true, &subs2, true);
+    otherLink->getLinks(ret2, true, &subs2, false);
 
     return ret == ret2 && subs == subs2;
 }
