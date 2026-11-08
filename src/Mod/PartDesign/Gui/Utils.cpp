@@ -35,8 +35,10 @@
 #include <App/GroupExtension.h>
 #include <App/Link.h>
 #include <App/Part.h>
+#include <Base/Tools.h>
 #include <Gui/Application.h>
 #include <Gui/CommandT.h>
+#include <Gui/ForkKeymap.h>
 #include <Gui/MainWindow.h>
 #include <Gui/MDIView.h>
 #include <Gui/Selection/Selection.h>
@@ -260,6 +262,49 @@ void needActiveBodyError()
     );
 }
 
+// FreeCAD-CH (ops#640 round 6, J22): under the Onshape keymap a new part is "Part N", the lowest
+// N free in its studio, as Onshape names parts. Labels are unique in a document unless the
+// preference allows duplicates, so then N is also free in the document. Declared where it is used
+// (no header names it)
+void nameNewPart(PartDesign::Body* body, App::Part* studioHint);
+void nameNewPart(PartDesign::Body* body, App::Part* studioHint)
+{
+    if (!body || !body->isAttachedToDocument() || !Gui::ForkKeymap::isOnshape()) {
+        return;
+    }
+    App::Document* doc = body->getDocument();
+    App::Part* studio = App::Part::getPartOfObject(body, /*recursive=*/true);
+    if (!studio) {
+        studio = studioHint;
+    }
+    const bool unique = !App::GetApplication()
+                             .GetParameterGroupByPath("User parameter:BaseApp/Preferences/Document")
+                             ->GetBool("DuplicateLabels", false);
+    std::set<std::string> taken;
+    for (App::DocumentObject* obj : doc->getObjects()) {
+        if (obj == body) {
+            continue;
+        }
+        if (unique
+            || (obj->isDerivedFrom<PartDesign::Body>()
+                && App::Part::getPartOfObject(obj, /*recursive=*/true) == studio)) {
+            taken.insert(obj->Label.getValue());
+        }
+    }
+    std::string label;
+    for (int n = 1;; ++n) {
+        label = QObject::tr("Part %1").arg(n).toUtf8().toStdString();
+        if (!taken.contains(label)) {
+            break;
+        }
+    }
+    if (label == body->Label.getValue()) {
+        return;
+    }
+    label = Base::Tools::escapeEncodeString(label);
+    Gui::cmdAppObjectArgs(body, "Label = '%s'", label.c_str());
+}
+
 PartDesign::Body* makeBody(App::Document* doc)
 {
     bool allowCompound = PartDesign::PartDesignParameter::instance()->getAllowCompoundDefault();
@@ -283,6 +328,8 @@ PartDesign::Body* makeBody(App::Document* doc)
 
     auto body = dynamic_cast<PartDesign::Body*>(doc->getObject(bodyName.c_str()));
     if (body) {
+        // The callers put it in the active studio
+        nameNewPart(body, getActivePart());
         makeBodyActive(body, doc);
     }
     return body;
