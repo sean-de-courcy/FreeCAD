@@ -71,6 +71,12 @@
 #include "Utils.h"
 #include "ViewProviderBody.h"
 
+namespace Gui
+{
+/// FreeCAD-CH (ops#640): defined and explained in Gui/Document.cpp (not in Document.h)
+GuiExport bool editStartedUnchanged(const App::Document* doc);
+}  // namespace Gui
+
 using namespace PartDesignGui;
 using namespace Gui;
 
@@ -334,6 +340,14 @@ public:
     QPointer<QWidget> typingWidget;
     bool restoring = false;
     bool restartPending = false;
+    /** The dialog's net change, for an OK that changed nothing (leftUnchanged()): the first value
+     * of each input of the step, as App's no-op rule reads inputs, whatever changed it (a field,
+     * a pick, a recompute, the history itself). Known only while pristine: the step had nothing
+     * when the edit started (an edit's booked step, not a new feature's:
+     * Gui::editStartedUnchanged()), and no object came or went. */
+    std::vector<Change> originals;
+    bool pristine = true;
+    bool linkChanged = false;  // a link among the originals: App's no-op rule keeps the step
     QPointer<Gui::TaskView::TaskDialog> dialog;
     QPointer<QAction> undoAction;
     QPointer<QAction> redoAction;
@@ -346,6 +360,9 @@ public:
     }
 
     void record(const App::DocumentObject& obj, const App::Property& prop);
+    void track(const App::DocumentObject& obj, const App::Property& prop);
+    bool leftUnchanged() const;
+    bool restartable() const;
     void seal();
     void clear();
     bool undo();
@@ -415,6 +432,146 @@ bool isDialogInput(const App::Property& prop)
     return partShape.isBad() || !prop.getTypeId().isDerivedFrom(partShape);
 }
 
+// A result in App's no-op rule (Transactions.cpp isResult): not an input of the step
+bool isStepResult(const App::Property& prop)
+{
+    using App::Property;
+    if (prop.testStatus(Property::NoModify) || prop.testStatus(Property::Transient)
+        || prop.testStatus(Property::PropTransient)) {
+        return true;
+    }
+    const bool output = prop.testStatus(Property::Output) || prop.testStatus(Property::PropOutput);
+    const bool readOnly = prop.testStatus(Property::ReadOnly)
+        || prop.testStatus(Property::PropReadOnly);
+    static const Base::Type partShape = Base::Type::fromName("Part::PropertyPartShape");
+    return (output && readOnly) || (!partShape.isBad() && prop.getTypeId().isDerivedFrom(partShape));
+}
+
+/** Whether the live property holds the value `recorded` (a Copy() of it): values by isSame() on
+ * two copies (as App's no-op rule compares), links by what they name (the objects and the
+ * subnames, which App's rule doesn't compare: it keeps every recorded link as a change). Not an
+ * expression container (its links don't tell two expressions apart), nor geometry data. */
+bool holdsValue(const App::Property& live, const App::Property& recorded)
+{
+    static const Base::Type geoData = Base::Type::fromName("App::PropertyComplexGeoData");
+    if (!geoData.isBad() && live.getTypeId().isDerivedFrom(geoData)) {
+        return false;
+    }
+    if (live.isDerivedFrom<App::PropertyXLinkContainer>()) {
+        return false;
+    }
+    std::unique_ptr<App::Property> now(live.Copy());
+    if (!now || now->getTypeId() != recorded.getTypeId()) {
+        return false;
+    }
+    if (auto link = dynamic_cast<const App::PropertyLinkBase*>(now.get())) {
+        auto before = dynamic_cast<const App::PropertyLinkBase*>(&recorded);
+        if (!before) {
+            return false;
+        }
+        std::vector<App::DocumentObject*> objsNow;
+        std::vector<App::DocumentObject*> objsBefore;
+        std::vector<std::string> subsNow;
+        std::vector<std::string> subsBefore;
+        link->getLinks(objsNow, true, &subsNow, false);
+        before->getLinks(objsBefore, true, &subsBefore, false);
+        // a single link to a whole object, written with no subname or with an empty one
+        auto noEmpty = [](std::vector<std::string>& subs) {
+            std::erase_if(subs, [](const std::string& sub) {
+                return sub.empty();
+            });
+        };
+        if (objsNow.size() == 1 && objsBefore.size() == 1) {
+            noEmpty(subsNow);
+            noEmpty(subsBefore);
+        }
+        return objsNow == objsBefore && subsNow == subsBefore;
+    }
+    return now->isSame(recorded);
+}
+
+// The dialog's net change (originals), from any change of the step's inputs
+void DialogHistory::track(const App::DocumentObject& obj, const App::Property& prop)
+{
+    App::Document* doc = document();
+    if (!pristine || !dialog || !doc || doc->isPerformingTransaction() || isStepResult(prop)) {
+        return;
+    }
+    const char* objName = obj.getNameInDocument();
+    const char* propName = prop.getName();
+    if (!objName || !propName || prop.getContainer() != &obj) {
+        return;
+    }
+    const bool known = std::ranges::any_of(originals, [&](const Change& change) {
+        return change.object == objName && change.property == propName;
+    });
+    if (known) {
+        return;
+    }
+    try {
+        std::unique_ptr<App::Property> before(prop.Copy());
+        if (!before) {
+            pristine = false;
+            return;
+        }
+        linkChanged = linkChanged || prop.isDerivedFrom<App::PropertyLinkBase>();
+        originals.push_back(
+            Change {.object = objName, .property = propName, .value = std::move(before)}
+        );
+    }
+    catch (...) {
+        pristine = false;
+    }
+}
+
+/** FreeCAD-CH (ops#640, the rule "an unchanged accept leaves no step"): whether the dialog's OK
+ * would commit a step that changes nothing App's no-op rule can tell: a link picked and then
+ * undone or picked back (App keeps every recorded link as a change, deliberately: Transactions.cpp
+ * holdsRecorded). Only for a pristine step whose every input holds its first value, with a link
+ * among them, and no other document in the step (its changes aren't seen here); the OK then
+ * aborts the step instead of committing it (TaskDlgFeatureParameters::accept), as Cancel does,
+ * which keeps the Redo stack. */
+bool DialogHistory::leftUnchanged() const
+{
+    App::Document* doc = document();
+    if (!doc || !pristine || !linkChanged) {
+        return false;
+    }
+    const int id = currentStep(doc);
+    for (App::Document* other : App::GetApplication().getDocuments()) {
+        if (other != doc && other->hasPendingTransaction()
+            && other->getTransactionID(true, 0) == id) {
+            return false;
+        }
+    }
+    return std::ranges::all_of(originals, [doc](const Change& change) {
+        App::DocumentObject* obj = doc->getObject(change.object.c_str());
+        App::Property* live = obj ? obj->getPropertyByName(change.property.c_str()) : nullptr;
+        try {
+            return live && holdsValue(*live, *change.value);
+        }
+        catch (...) {
+            return false;
+        }
+    });
+}
+
+/** Whether an undo or redo can rebuild the panels (refresh(), restartEdit): the dialog is still
+ * the document's, edited on the history's feature. If it can't, the history doesn't move: the
+ * panels would keep the values from before, and the next OK would apply() them over the undone
+ * ones. */
+bool DialogHistory::restartable() const
+{
+    App::Document* doc = document();
+    Gui::Document* guiDoc = doc ? Gui::Application::Instance->getDocument(doc) : nullptr;
+    auto vp = guiDoc
+        ? freecad_cast<Gui::ViewProviderDocumentObject*>(guiDoc->getEditViewProvider())
+        : nullptr;
+    App::DocumentObject* obj = vp ? vp->getObject() : nullptr;
+    return obj && obj->getNameInDocument() && feature == obj->getNameInDocument() && dialog
+        && Gui::Control().activeDialog(doc) == dialog.data();
+}
+
 bool DialogHistory::watches() const
 {
     App::Document* doc = document();
@@ -424,6 +581,7 @@ bool DialogHistory::watches() const
 
 void DialogHistory::record(const App::DocumentObject& obj, const App::Property& prop)
 {
+    track(obj, prop);
     if (!watches() || obj.isRecomputing() || !isDialogInput(prop)) {
         return;
     }
@@ -586,7 +744,7 @@ void DialogHistory::swap(Step& step, bool backwards)
 bool DialogHistory::undo()
 {
     seal();
-    if (undos.empty() || !watches()) {
+    if (undos.empty() || !watches() || !restartable()) {
         return false;
     }
     Step last = std::move(undos.back());
@@ -600,7 +758,7 @@ bool DialogHistory::undo()
 bool DialogHistory::redo()
 {
     seal();
-    if (redos.empty() || !watches()) {
+    if (redos.empty() || !watches() || !restartable()) {
         return false;
     }
     Step last = std::move(redos.back());
@@ -687,6 +845,8 @@ void attachDialogHistory(Gui::TaskView::TaskDialog* dlg, App::DocumentObject* fe
     if (!history || history->feature != feature->getNameInDocument() || history->step == 0
         || history->step != currentStep(doc)) {
         history = std::make_unique<DialogHistory>(name, feature->getNameInDocument());
+        // a new feature's step (or a move's) holds changes from before the edit
+        history->pristine = Gui::editStartedUnchanged(doc);
     }
     history->open = false;
     history->typingStep = false;
@@ -724,8 +884,11 @@ void attachDialogHistory(Gui::TaskView::TaskDialog* dlg, App::DocumentObject* fe
     auto structural = [name](const App::DocumentObject&) {
         DialogHistory* found = findHistory(name);
         App::Document* doc = found ? found->document() : nullptr;
-        if (found && found->dialog && doc && doc->isStepLocked() && !doc->isPerformingTransaction()) {
-            found->clear();
+        if (found && found->dialog && doc && !doc->isPerformingTransaction()) {
+            found->pristine = false;
+            if (doc->isStepLocked()) {
+                found->clear();
+            }
         }
     };
     history->connections.emplace_back(doc->signalNewObject.connect(structural));
@@ -733,19 +896,36 @@ void attachDialogHistory(Gui::TaskView::TaskDialog* dlg, App::DocumentObject* fe
     history->updateActions();
 }
 
-// The dialog goes: its history stops listening (a restart's next dialog takes it again)
+// The dialog goes: its history stops listening, and ends unless the history's own restart
+// rebuilds the dialog (the next dialog takes it again). A dialog closed any other way than its OK
+// or Cancel (its document closed, the application quit, an OK that failed after its resetEdit)
+// ends it here: kept in the map, its copies of properties (Property::Copy()) were destroyed only
+// at the static destruction, after App and Python, too late for a Python object's or a link's.
 void detachDialogHistory(const Gui::TaskView::TaskDialog* dlg)
 {
-    for (auto& [name, history] : dialogHistories) {
-        (void)name;
-        if (history && history->dialog == dlg) {
-            history->connections.clear();
-            if (history->open) {
-                history->seal();
-            }
-            history->dialog = nullptr;
+    std::erase_if(dialogHistories, [dlg](auto& entry) {
+        DialogHistory* history = entry.second.get();
+        if (!history || history->dialog != dlg) {
+            return false;
         }
+        history->connections.clear();
+        if (history->open) {
+            history->seal();
+        }
+        history->dialog = nullptr;
+        return !historyRestart;
+    });
+}
+
+// Whether the dialog's OK would commit a step that changes nothing (DialogHistory::leftUnchanged)
+bool dialogLeftUnchanged(const App::Document* doc)
+{
+    DialogHistory* history = doc ? findHistory(doc->getName()) : nullptr;
+    if (!history) {
+        return false;
     }
+    history->seal();
+    return history->leftUnchanged();
 }
 
 // The dialog's OK or Cancel: its history ends
@@ -1597,6 +1777,17 @@ bool TaskDlgFeatureParameters::accept()
             if (param) {
                 param->detachSelection();
             }
+        }
+
+        // FreeCAD-CH (ops#640): an OK that changed nothing leaves no step, as Cancel (Onshape),
+        // also when App's no-op rule can't tell (a link picked and undone)
+        if (dialogLeftUnchanged(feature->getDocument())) {
+            App::Document* document = feature->getDocument();
+            endDialogHistory(document);
+            document->abortTransaction();
+            Gui::cmdAppDocument(document, "recompute()");
+            Gui::cmdGuiDocument(document, "resetEdit()");
+            return true;
         }
 
         Gui::cmdGuiDocument(feature, "resetEdit()");

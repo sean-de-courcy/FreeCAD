@@ -1633,13 +1633,16 @@ bool Document::_commitTransaction(const bool notify)
             else {
                 mUndoTransactions.push_back(d->activeUndoTransaction);
                 d->activeUndoTransaction = nullptr;
-            }
 
-            // check the stack for the limits
-            if (mUndoTransactions.size() > d->UndoMaxStackSize) {
-                mUndoMap.erase(mUndoTransactions.front()->getID());
-                delete mUndoTransactions.front();
-                mUndoTransactions.pop_front();
+                // check the stack for the limits. FreeCAD-CH (ops#640): after a push only, and
+                // down to the limit: the Gui sets it before each commit so that the trim takes
+                // whole steps (a closed sketch session is several transactions; Gui::Document's
+                // DocumentP::updateUndoLimit)
+                while (mUndoTransactions.size() > d->UndoMaxStackSize) {
+                    mUndoMap.erase(mUndoTransactions.front()->getID());
+                    delete mUndoTransactions.front();
+                    mUndoTransactions.pop_front();
+                }
             }
             signalCommitTransaction(*this);
 

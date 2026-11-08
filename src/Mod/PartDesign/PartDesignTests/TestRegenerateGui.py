@@ -425,6 +425,154 @@ class TestRegenerateGui(RegenerateModel, unittest.TestCase):
         self.assertEqual(self.doc.UndoNames, names)
         self.assertVolume(self.body, total())
 
+    def testLinkPickedBackLeavesNoStep(self):
+        """The block's dialog, its Profile switched to another sketch of the same square and the
+        switch undone in the dialog (Std_Undo), then OK: no step, and the Redo entry made before
+        the dialog stays (an unchanged accept leaves no step; App's no-op rule keeps any recorded
+        link as a change). The same with the Profile switched and switched back by hand."""
+        self.doc.openTransaction("Make AltSketch")
+        alt = models.sketch(self.doc, "AltSketch", models.rectangle(0, 0, 20, 20), self.body)
+        # the direction a Pad made in the Gui has (the panel's "Sketch normal"), which its OK
+        # writes over an empty one
+        self.block.ReferenceAxis = (self.blockSketch, ["N_Axis"])
+        self.doc.commitTransaction()
+        self.doc.openTransaction("Boss length")
+        self.boss.Length = 6
+        self.doc.commitTransaction()
+        self.assertTrue(self.doc.undo())
+        names = self.doc.UndoNames
+        self.assertEqual(names, ["Make AltSketch", "Make Fillet"])
+        self.assertEqual(self.doc.RedoNames, ["Boss length"])
+        self.assertRegenerated(total())
+        profile = self.block.Profile
+
+        self.openDialog(self.block)
+        self.block.Profile = (alt, [""])
+        pump(0.2)
+        self.assertIs(self.block.Profile[0], alt)
+        self.assertTrue(self.isActive("Std_Undo"), "the Profile switch is no edit of the dialog")
+        self.runFromView("Std_Undo")
+        pump(0.2)
+        self.assertTrue(Gui.Control.activeDialog(), "the dialog closed")
+        self.assertIs(self.block.Profile[0], self.blockSketch)
+        self.close(OK)
+        self.assertEqual(self.doc.UndoNames, names, "the OK left a step")
+        self.assertEqual(self.doc.RedoNames, ["Boss length"], "the OK cleared the Redo stack")
+        self.assertIs(self.block.Profile[0], self.blockSketch)
+        self.assertRegenerated(total())
+
+        self.openDialog(self.block)
+        self.block.Profile = (alt, [""])
+        pump(0.2)
+        self.block.Profile = profile  # as it was, no subname
+        pump(0.2)
+        self.close(OK)
+        self.assertEqual(self.doc.UndoNames, names, "the OK left a step")
+        self.assertEqual(self.doc.RedoNames, ["Boss length"], "the OK cleared the Redo stack")
+        self.assertRegenerated(total())
+
+        # A real switch still is a step
+        self.openDialog(self.block)
+        self.block.Profile = (alt, [""])
+        pump(0.2)
+        self.close(OK)
+        self.assertEqual(self.doc.UndoNames, ["Edit Block"] + names)
+        self.assertIs(self.block.Profile[0], alt)
+
+    def patternOfTheBoss(self):
+        """A linear pattern of the boss, two copies 10 mm apart along x (the second at x 11..15,
+        clear of the hole), its own step."""
+        self.doc.openTransaction("Make Pattern")
+        pattern = self.body.newObject("PartDesign::LinearPattern", "Pattern")
+        pattern.Direction = (models.originFeature(self.body, "X_Axis"), [""])
+        pattern.Length = 10
+        pattern.Occurrences = 2
+        pattern.Originals = [self.boss]
+        self.body.Tip = pattern  # newObject leaves a pattern past the roll-back bar
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        self.assertVolume(self.body, total() + 16 * 5)
+        return pattern
+
+    def testPatternDialogUndoStepsItsEdits(self):
+        """The pattern's dialog: Occurrences 2 -> 3, then Length 10 -> 4 (each its own edit);
+        Std_Undo gives Length 10 and then Occurrences 2 with the dialog open, rebuilt (the
+        occurrences field reads 2), a third does nothing; Std_Redo gives 3 again (field and
+        feature). Cancel: back at 2, no step, nothing to redo (hands-on R1 on a pattern)."""
+        pattern = self.patternOfTheBoss()
+        names = self.doc.UndoNames
+        self.openDialog(pattern)
+        pattern.Occurrences = 3
+        pump(0.2)
+        pattern.Length = 4
+        pump(0.2)
+        self.runFromView("Std_Undo")
+        pump(0.3)
+        self.assertTrue(Gui.Control.activeDialog(), "the dialog closed")
+        self.assertAlmostEqual(pattern.Length.Value, 10, places=6)
+        self.assertEqual(pattern.Occurrences, 3)
+        self.runFromView("Std_Undo")
+        pump(0.3)
+        self.assertEqual(pattern.Occurrences, 2)
+        field = visible(QtWidgets.QSpinBox, "spinOccurrences")
+        self.assertIsNotNone(field, "no occurrences field")
+        # a Gui::UIntSpinBox: QSpinBox::value() is shifted (the unsigned range), the text is not
+        self.assertEqual(field.cleanText(), "2", "the rebuilt dialog shows the old count")
+        self.assertFalse(self.isActive("Std_Undo"), "Std_Undo past the dialog's start")
+        self.runFromView("Std_Undo")
+        pump(0.2)
+        self.assertIsNotNone(self.doc.getObject("Pattern"), "an undo past the dialog's start")
+        self.runFromView("Std_Redo")
+        pump(0.3)
+        self.assertEqual(pattern.Occurrences, 3)
+        self.assertEqual(visible(QtWidgets.QSpinBox, "spinOccurrences").cleanText(), "3")
+        self.close(CANCEL)
+        self.assertEqual(pattern.Occurrences, 2)
+        self.assertAlmostEqual(pattern.Length.Value, 10, places=6)
+        self.assertEqual(self.doc.UndoNames, names)
+        self.assertEqual(self.doc.RedoCount, 0)
+        self.assertRegenerated(total() + 16 * 5)
+
+    def testHoleDialogUndoStepsItsEdits(self):
+        """A 2 mm hole 4 deep on the block's top at (5, 15), its own step; its dialog: Depth
+        4 -> 6; Std_Undo gives 4 with the dialog open and its Depth field at 4; Std_Redo 6, and
+        the field too; Cancel: the hole at 4, no step (hands-on R1 on a hole). Not OK: the Hole
+        panel's OK writes its thread fields (CosmeticThread, ThreadFit) over a hole made in
+        Python, a step of its own."""
+        self.doc.openTransaction("Make Drill")
+        sketch = self.sketchOnTop("DrillSketch", [models.circle(5, 15, 1)])
+        hole = self.body.newObject("PartDesign::Hole", "Drill")
+        hole.Profile = sketch
+        hole.Diameter = 2
+        hole.DepthType = "Dimension"
+        hole.Depth = 4
+        hole.DrillPoint = "Flat"
+        self.body.Tip = hole
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        self.assertTrue(hole.isValid(), hole.getStatusString())
+        names = self.doc.UndoNames
+        self.openDialog(hole)
+        hole.Depth = 6
+        pump(0.2)
+        self.assertTrue(self.isActive("Std_Undo"))
+        self.runFromView("Std_Undo")
+        pump(0.3)
+        self.assertTrue(Gui.Control.activeDialog(), "the dialog closed")
+        self.assertAlmostEqual(hole.Depth.Value, 4, places=6)
+        field = visible(QtWidgets.QWidget, "Depth")
+        self.assertIsNotNone(field, "no depth field")
+        self.assertAlmostEqual(field.property("rawValue"), 4, places=6)
+        self.runFromView("Std_Redo")
+        pump(0.3)
+        self.assertAlmostEqual(hole.Depth.Value, 6, places=6)
+        self.assertAlmostEqual(visible(QtWidgets.QWidget, "Depth").property("rawValue"), 6, places=6)
+        self.close(CANCEL)
+        self.assertEqual(self.doc.UndoNames, names)
+        self.assertEqual(self.doc.RedoCount, 0)
+        self.assertAlmostEqual(hole.Depth.Value, 4, places=6)
+        self.assertFalse(self.doc.mustExecute())
+
     # -- item 7: the sketch session is one step (hands-on R9, R14) --------------------------------
 
     def addLines(self, sketch, points):
@@ -518,6 +666,56 @@ class TestRegenerateGui(RegenerateModel, unittest.TestCase):
         self.assertEqual(len(sketch.Geometry), 1, "one undo left a line")
         self.assertEqual(self.doc.UndoNames, names)
         self.assertIsNotNone(self.doc.getObject("FreeSketch"))
+
+    def testSketchOfMoreStrokesThanTheUndoLimitIsOneStep(self):
+        """A new sketch of 25 lines, each its own transaction, more than the undo limit (20 steps
+        by default, the MaxUndoSize preference): closed, one Std_Undo removes the whole sketch
+        and leaves the step before it, one Std_Redo brings it back with its 25 lines (hands-on
+        R9). Counted by transactions, the limit took the "New Sketch" opener and the first lines
+        off the stack, and the undo left the sketch with them. Then 20 small steps: the sketch's
+        step is pushed off whole, the "New Sketch" opener with it, and no line of it is left to
+        undo on its own."""
+        import Sketcher  # noqa: F401  (the sketch's type)
+
+        limit = App.ParamGet(DOCUMENT_PREFS).GetInt("MaxUndoSize", 20)
+        self.assertEqual(limit, 20, "the test's home has another undo limit")
+        names = self.doc.UndoNames
+        self.doc.openTransaction("New Sketch")
+        sketch = self.body.newObject("Sketcher::SketchObject", "LongSketch")
+        sketch.AttachmentSupport = [(self.block, topFace(self.block, 10))]
+        sketch.MapMode = "FlatFace"
+        self.doc.recompute()
+        guiDoc = Gui.getDocument(self.doc.Name)
+        self.activate()
+        guiDoc.setEdit(sketch.Name)
+        pump(0.3)
+        self.assertIsNotNone(guiDoc.getInEdit(), "no sketch edit")
+        points = [(1 + 0.5 * i, 7 + (i % 2)) for i in range(26)]
+        self.addLines(sketch, points)
+        self.assertEqual(len(sketch.Geometry), 25)
+        guiDoc.resetEdit()
+        pump(0.3)
+        self.assertIsNone(guiDoc.getInEdit())
+        self.assertEqual(self.doc.UndoNames[-len(names) :], names, "the steps before were lost")
+
+        self.runFromView("Std_Undo")
+        pump(0.2)
+        self.assertIsNone(self.doc.getObject("LongSketch"), "one undo left part of the sketch")
+        self.assertEqual(self.doc.UndoNames, names)
+        self.assertIsNotNone(self.doc.getObject("Fillet"))
+        self.runFromView("Std_Redo")
+        pump(0.2)
+        sketch = self.doc.getObject("LongSketch")
+        self.assertIsNotNone(sketch, "one redo didn't bring the sketch back")
+        self.assertEqual(len(sketch.Geometry), 25)
+
+        for i in range(20):
+            self.doc.openTransaction(f"Boss {i}")
+            self.boss.Length = 5 + 0.01 * (i + 1)
+            self.doc.commitTransaction()
+        self.assertEqual(len(self.doc.UndoNames), 20, self.doc.UndoNames)
+        self.assertNotIn("New Sketch", self.doc.UndoNames)
+        self.assertNotIn("Add sketch line", self.doc.UndoNames, "a stroke left alone")
 
     def testDeleteOfAnotherRowIsRefused(self):
         """The block's dialog open, the fillet selected: Std_Delete is greyed, and neither it nor
@@ -829,6 +1027,60 @@ class TestRegenerateGui(RegenerateModel, unittest.TestCase):
             Gui.getDocument(other.Name).resetEdit()
             pump()
             self.assertTrue(self.doc.RegenerateOnCommit)
+        finally:
+            if Gui.getDocument(other.Name).getInEdit():
+                Gui.getDocument(other.Name).resetEdit()
+                pump()
+            App.closeDocument(other.Name)
+
+    def testUndoOfADeleteInAHeldDocumentHealsAtTheRelease(self):
+        """The block deleted (its sketches lose their face, the boss becomes the first solid),
+        then a sketch in another document in edit, which holds this document's regeneration, and
+        the delete undone here: nothing regenerates yet; the sketch's edit ends and the release
+        regenerates the whole model, every dependant valid (F34's heal: the undo's enforce of
+        what it changed, which App skips while the regeneration is held, was missing, and the
+        release, which regenerates what must execute, found nothing to do)."""
+        import Sketcher  # noqa: F401  (the sketch's type)
+
+        self.doc.openTransaction("Delete")
+        self.body.removeObject(self.block)
+        self.doc.removeObject(self.block.Name)
+        self.doc.commitTransaction()
+        self.assertIsNone(self.doc.getObject("Block"))
+        other = models.newDocument("RegenerateGuiHeldUndo")
+        try:
+            sketch = other.addObject("Sketcher::SketchObject", "Sketch")
+            other.recompute()
+            Gui.getDocument(other.Name).setEdit(sketch.Name)
+            pump()
+            self.assertIsNotNone(Gui.getDocument(other.Name).getInEdit(), "no sketch edit")
+            self.assertFalse(self.doc.RegenerateOnCommit, "the sketch edit doesn't hold")
+            self.assertTrue(self.doc.undo())
+            self.block = self.doc.getObject("Block")
+            self.assertIsNotNone(self.block)
+            Gui.getDocument(other.Name).resetEdit()
+            pump()
+            self.assertTrue(self.doc.RegenerateOnCommit)
+            self.assertRegenerated(total(), "the release left the undo's dependants stale")
+            self.assertIs(self.body.Tip, self.fillet)
+
+            # The unsuppress (J13): suppressed and unsuppressed, then held, undone (suppressed)
+            # and redone (unsuppressed)
+            for state in (True, False):
+                self.doc.openTransaction("Toggle suppress")
+                self.block.Suppressed = state
+                self.doc.commitTransaction()
+            self.assertRegenerated(total())
+            Gui.getDocument(other.Name).setEdit(sketch.Name)
+            pump()
+            self.assertFalse(self.doc.RegenerateOnCommit, "the sketch edit doesn't hold")
+            self.assertTrue(self.doc.undo())
+            self.assertTrue(self.block.Suppressed)
+            self.assertTrue(self.doc.redo())
+            self.assertFalse(self.block.Suppressed)
+            Gui.getDocument(other.Name).resetEdit()
+            pump()
+            self.assertRegenerated(total(), "the release left the redo's dependants stale")
         finally:
             if Gui.getDocument(other.Name).getInEdit():
                 Gui.getDocument(other.Name).resetEdit()

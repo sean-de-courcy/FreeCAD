@@ -80,6 +80,12 @@ FC_LOG_LEVEL_INIT("Command", false)
 
 using namespace Gui;
 
+namespace Gui
+{
+/// FreeCAD-CH (ops#640): defined and explained in Gui/Document.cpp (not in Document.h)
+bool hasUndoStep(const Gui::Document* doc, bool undo);
+}  // namespace Gui
+
 DEF_STD_CMD_C(StdCmdOpenGroup)
 
 StdCmdOpenGroup::StdCmdOpenGroup()
@@ -1272,8 +1278,7 @@ bool StdCmdUndo::isActive()
     // dialog has edits, and Ctrl+Z steps back through them (Gui::Document::undo()); Ctrl+Z in
     // a field of the dialog stays the field's own text undo
     if (App::Document* locked = stepLockedDocument()) {
-        Gui::Document* guiDoc = getGuiApplication()->getDocument(locked);
-        return guiDoc && !guiDoc->getUndoVector().empty();
+        return hasUndoStep(getGuiApplication()->getDocument(locked), true);
     }
     return getGuiApplication()->sendHasMsgToActiveView("Undo");
 }
@@ -1327,8 +1332,7 @@ void StdCmdRedo::activated(int iMsg)
 bool StdCmdRedo::isActive()
 {
     if (App::Document* locked = stepLockedDocument()) {  // FreeCAD-CH (ops#640): as Std_Undo
-        Gui::Document* guiDoc = getGuiApplication()->getDocument(locked);
-        return guiDoc && !guiDoc->getRedoVector().empty();
+        return hasUndoStep(getGuiApplication()->getDocument(locked), false);
     }
     return getGuiApplication()->sendHasMsgToActiveView("Redo");
 }

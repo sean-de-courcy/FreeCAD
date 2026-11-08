@@ -21,6 +21,7 @@
  ***************************************************************************/
 
 #include <tuple>
+#include <algorithm>
 #include <memory>
 #include <list>
 #include <string>
@@ -88,6 +89,10 @@ namespace Gui
 /// FreeCAD-CH (ops#640): no document regenerates on commit while an object is in edit (defined
 /// and explained in Gui/Application.cpp; not in Application.h, which hundreds of files include)
 void updateRegenerationHold(const App::Document* closingStep = nullptr);
+/// FreeCAD-CH (ops#640): defined below; Gui/CommandDoc.cpp and Gui/View3DInventor.cpp declare it
+bool hasUndoStep(const Document* doc, bool undo);
+/// FreeCAD-CH (ops#640): defined below; PartDesign's TaskFeatureParameters.cpp declares it
+GuiExport bool editStartedUnchanged(const App::Document* doc);
 
 // Pimpl class
 struct DocumentP
@@ -126,6 +131,15 @@ struct DocumentP
     int _sessionOpener = 0;
     std::string _sessionLabel;
     std::set<int> _sessionIds;
+    /** FreeCAD-CH (ops#640): the user's undo limit (the MaxUndoSize preference) counts steps,
+     * not App's transactions: App's limit is set before each commit (updateUndoLimit) so that its
+     * trim leaves the newest steps whole, a closed sketch session with all its transactions.
+     * Counted by transactions, a sketch of more strokes than the limit lost its oldest ones, the
+     * "New Sketch" opener first, and one Ctrl+Z after the close left the sketch with its first
+     * elements. */
+    unsigned _undoSteps = 20;
+    /// FreeCAD-CH (ops#640): the edit started with no change in its step (editStartedUnchanged())
+    bool _editStartedUnchanged = false;
     int _editMode;
     int _editModePrevious;
     ViewProvider* _editViewProvider;
@@ -271,10 +285,59 @@ struct DocumentP
         }
     }
 
+    /** App's undo limit for the commit of the transaction just opened (pending: App's position
+     * 0): the newest _undoSteps steps stay whole, counted as the grouped steps they are once
+     * the session closes (the open session's transactions as one). The pending transaction
+     * either joins the newest step (a stroke of the open session) or starts one. App's trim
+     * (_commitTransaction) pops from the oldest end, so what it pops is whole steps. With no
+     * session ever grouped here, the user's limit stands, as set at the document's start. */
+    void updateUndoLimit()
+    {
+        if (_stepGroupOf.empty()) {
+            return;
+        }
+        if (_undoSteps == 0) {
+            _pcDocument->setMaxUndoStackSize(0);
+            return;
+        }
+        const int group = groupOf(_pcDocument->getTransactionID(true, 0));
+        const bool joins = group != 0 && group == groupOf(_pcDocument->getTransactionID(true, 1));
+        const unsigned steps = joins ? _undoSteps : _undoSteps - 1;
+        unsigned pos = 1;
+        for (unsigned i = 0; i < steps; ++i) {
+            const int size = groupSize(true, pos);
+            if (size == 0) {
+                break;
+            }
+            pos += static_cast<unsigned>(size);
+        }
+        // pos - 1 transactions kept on the stack, and the pending one
+        _pcDocument->setMaxUndoStackSize(pos);
+    }
+
     int groupOf(int id) const
     {
         auto it = _stepGroupOf.find(id);
         return it == _stepGroupOf.end() ? 0 : it->second;
+    }
+
+    /// The number of App transactions from App's position pos with the group of the one there:
+    /// one when it has none
+    int groupSize(bool undo, unsigned pos) const
+    {
+        const int id = _pcDocument->getTransactionID(undo, pos);
+        if (id == 0) {
+            return 0;
+        }
+        const int group = groupOf(id);
+        if (group == 0) {
+            return 1;
+        }
+        int size = 1;
+        while (groupOf(_pcDocument->getTransactionID(undo, pos + size)) == group) {
+            ++size;
+        }
+        return size;
     }
 
     /// The number of App transactions, from App's position pos (getTransactionID()), that make
@@ -289,15 +352,7 @@ struct DocumentP
         if (group == 0 || group == _session) {
             return 1;
         }
-        int size = 1;
-        for (;;) {
-            const int next = _pcDocument->getTransactionID(undo, pos + size);
-            if (next == 0 || groupOf(next) != group) {
-                break;
-            }
-            ++size;
-        }
-        return size;
+        return groupSize(undo, pos);
     }
 
     /// Whether the transaction at App's position pos is a step here: inside an open session,
@@ -615,6 +670,12 @@ private:
     std::string subname;
 };
 
+namespace
+{
+/// FreeCAD-CH (ops#640): each Gui document's pimpl, for hasUndoStep() (no header names it)
+std::map<const Document*, const DocumentP*> stepDocuments;  // NOLINT
+}  // namespace
+
 }  // namespace Gui
 
 /* TRANSLATOR Gui::Document */
@@ -626,6 +687,7 @@ int Document::_iDocCount = 0;
 Document::Document(App::Document* pcDocument, Application* app)
 {
     d = new DocumentP;
+    stepDocuments[this] = d;  // FreeCAD-CH (ops#640)
     d->_iWinCount = 1;
     // new instance
     d->_iDocId = (++_iDocCount);
@@ -728,6 +790,7 @@ Document::Document(App::Document* pcDocument, Application* app)
     d->connectOpenTransaction = pcDocument->signalOpenTransaction.connect(
         [this](const App::Document& doc, const std::string&) {
             d->slotOpenTransaction(doc);
+            d->updateUndoLimit();
         }
     );
     // NOLINTEND
@@ -771,7 +834,9 @@ Document::Document(App::Document* pcDocument, Application* app)
         "User parameter:BaseApp/Preferences/Document"
     );
 
-    d->_pcDocument->setMaxUndoStackSize(hGrp->GetInt("MaxUndoSize", 20));
+    // FreeCAD-CH (ops#640): kept as a number of steps (DocumentP::updateUndoLimit)
+    d->_undoSteps = static_cast<unsigned>(std::max<long>(0, hGrp->GetInt("MaxUndoSize", 20)));
+    d->_pcDocument->setMaxUndoStackSize(d->_undoSteps);
     // FreeCAD-CH (ops#640, regen-design section 1): a document shown in the GUI regenerates on the
     // close of each transaction and after undo/redo, as Onshape regenerates the Part Studio after
     // every action; FreeCADCmd documents keep their explicit recompute()s (the flag is off in App)
@@ -781,6 +846,7 @@ Document::Document(App::Document* pcDocument, Application* app)
 
 Document::~Document()
 {
+    stepDocuments.erase(this);  // FreeCAD-CH (ops#640)
     // disconnect everything to avoid to be double-deleted
     // in case an exception is raised somewhere
     Data::NameRefCollector::removeSource(d->nameRefSource);
@@ -964,6 +1030,8 @@ bool Document::trySetEdit(Gui::ViewProvider* p, int ModNum, const char* subname)
     // FreeCAD-CH (ops#640): an edit that holds its step, opened with no transaction, books it
     // before the dialog opens (bookEditStep)
     const bool bookedHere = bookEditStep(this, obj, _subname, ModNum);
+    // FreeCAD-CH (ops#640): whether the edit's step holds nothing yet (editStartedUnchanged())
+    d->_editStartedUnchanged = !getDocument()->hasPendingTransaction();
 
     Application::Instance->setEditDocument(this);
 
@@ -3422,6 +3490,40 @@ std::vector<std::string> dialogHistoryNames(App::Document* doc, bool undo)
     return names;
 }
 }  // namespace
+
+/** FreeCAD-CH (ops#640): whether getUndoVector() (getRedoVector() for !undo) is not empty, read
+ * without building it: Std_Undo's and Std_Redo's isActive() and the 3D view's onHasMsg() ask on
+ * every refresh of the actions, and the list costs O(n^2) in App's positions. Declared where it
+ * is called (not in Document.h, which hundreds of files include). */
+bool Gui::hasUndoStep(const Gui::Document* doc, bool undo)
+{
+    if (!doc || !doc->getDocument()) {
+        return false;
+    }
+    App::Document* appDoc = doc->getDocument();
+    if (appDoc->isStepLocked()) {
+        QAction* action = dialogHistoryAction(appDoc, undo);
+        return action && action->isEnabled();
+    }
+    auto it = stepDocuments.find(doc);
+    if (it == stepDocuments.end()) {
+        return undo ? !doc->getUndoVector().empty() : !doc->getRedoVector().empty();
+    }
+    return it->second->isStep(undo, 0);
+}
+
+/** FreeCAD-CH (ops#640): whether the document's current edit started with nothing in its step:
+ * an edit's booked "Edit X", not a new feature's "Make X" that already made the feature, nor a
+ * restart's step with a move in it. Changes the edit then makes (Visibility, the panels) aren't
+ * counted. PartDesign's dialog history reads it (an OK that changed nothing aborts the step, which
+ * would remove a new feature). Exported and declared where it is called, not in Document.h. */
+bool Gui::editStartedUnchanged(const App::Document* doc)
+{
+    Gui::Document* guiDoc = doc && Application::Instance ? Application::Instance->getDocument(doc)
+                                                         : nullptr;
+    auto it = guiDoc ? stepDocuments.find(guiDoc) : stepDocuments.end();
+    return it != stepDocuments.end() && it->second->_editStartedUnchanged;
+}
 
 /// Get a string vector with the 'Undo' actions
 std::vector<std::string> Document::getUndoVector() const

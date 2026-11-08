@@ -82,6 +82,12 @@
 
 using namespace Gui;
 
+namespace Gui
+{
+/// FreeCAD-CH (ops#640): defined and explained in Gui/Document.cpp (not in Document.h)
+bool hasUndoStep(const Gui::Document* doc, bool undo);
+}  // namespace Gui
+
 void GLOverlayWidget::paintEvent(QPaintEvent*)
 {
     QPainter paint(this);
@@ -484,12 +490,10 @@ bool View3DInventor::onHasMsg(const char* pMsg) const
     else if (strcmp("Undo", pMsg) == 0) {
         // FreeCAD-CH (ops#640): a step to undo: an open feature dialog's own edit, a closed
         // sketch session, inside an open one its own action (Gui::Document::getUndoVector())
-        Gui::Document* doc = getGuiDocument();
-        return doc && !doc->getUndoVector().empty();
+        return hasUndoStep(getGuiDocument(), true);
     }
     else if (strcmp("Redo", pMsg) == 0) {
-        Gui::Document* doc = getGuiDocument();
-        return doc && !doc->getRedoVector().empty();
+        return hasUndoStep(getGuiDocument(), false);
     }
     else if (strcmp("Print", pMsg) == 0) {
         return true;
