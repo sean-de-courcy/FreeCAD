@@ -41,7 +41,9 @@
 #include <QListWidget>
 #include <QMenu>
 #include <QMouseEvent>
+#include <QPainter>
 #include <QSignalBlocker>
+#include <QStyledItemDelegate>
 #include <QTimer>
 #include <QVBoxLayout>
 
@@ -140,6 +142,63 @@ bool matchesRedo(QKeyEvent* ke)
     return ke->matches(QKeySequence::Redo)
         || Gui::QtTools::matches(ke, QKeySequence(QStringLiteral("Ctrl+Y")));
 }
+
+// The x of an entry, as Onshape's beside each pick (FreeCAD-CH ops#640, rank 26): the square at
+// the right end of the entry's row; a click there removes the entry.
+QRect closeRect(const QRect& row)
+{
+    const int side = row.height();
+    return {row.right() - side + 1, row.top(), side, side};
+}
+
+// Draws each removable entry with its x after the text, which elides before it.
+class EntryDelegate: public QStyledItemDelegate
+{
+public:
+    EntryDelegate(std::function<bool(const QModelIndex&)> removable, QObject* parent)
+        : QStyledItemDelegate(parent)
+        , removable(std::move(removable))
+    {}
+
+    void paint(QPainter* painter,
+               const QStyleOptionViewItem& option,
+               const QModelIndex& index) const override
+    {
+        if (!(option.state & QStyle::State_Enabled) || !removable || !removable(index)) {
+            QStyledItemDelegate::paint(painter, option, index);
+            return;
+        }
+        const QRect box = closeRect(option.rect);
+        QStyleOptionViewItem rest(option);
+        rest.rect.setRight(box.left() - 1);
+        QStyledItemDelegate::paint(painter, rest, index);
+
+        painter->save();
+        painter->setRenderHint(QPainter::Antialiasing);
+        QPen pen(option.palette.color(
+                     (option.state & QStyle::State_Selected) ? QPalette::HighlightedText
+                                                              : QPalette::Text
+                 ),
+                 1.5);
+        pen.setCapStyle(Qt::RoundCap);
+        painter->setPen(pen);
+        const qreal half = box.height() * 0.18;
+        const QPointF centre = QRectF(box).center();
+        painter->drawLine(centre + QPointF(-half, -half), centre + QPointF(half, half));
+        painter->drawLine(centre + QPointF(-half, half), centre + QPointF(half, -half));
+        painter->restore();
+    }
+
+    QSize sizeHint(const QStyleOptionViewItem& option, const QModelIndex& index) const override
+    {
+        QSize size = QStyledItemDelegate::sizeHint(option, index);
+        size.rwidth() += size.height();
+        return size;
+    }
+
+private:
+    std::function<bool(const QModelIndex&)> removable;
+};
 
 /// The field's gate: elements of the field's target and kind, in the owner's document. Tells the
 /// field when it goes, whoever removed it (TaskReferences' PickGate pattern).
@@ -691,6 +750,14 @@ ReferenceField::ReferenceField(App::DocumentObject* owner,
                 this,
                 &ReferenceField::sectionsDragged);
     }
+    // An x beside each removable pick; the pointer over an entry preselects it in the 3D view
+    // (ops#640 rank 26): the viewport's moves come without a button pressed
+    entryList->setItemDelegate(new EntryDelegate(
+        [this](const QModelIndex& index) { return isRemovable(index.data(IndexRole).toInt()); },
+        entryList
+    ));
+    entryList->setMouseTracking(true);
+    entryList->viewport()->setMouseTracking(true);
     entryList->installEventFilter(this);
     entryList->viewport()->installEventFilter(this);
     connect(entryList, &QListWidget::customContextMenuRequested, this, &ReferenceField::showMenu);
@@ -748,6 +815,7 @@ ReferenceField::~ReferenceField()
         armedFieldPtr = nullptr;
     }
     try {
+        hoverEntry(nullptr);
         if (own && Gui::Selection().getSelectionGate(nullptr) == own) {
             Gui::Selection().rmvSelectionGate();
         }
@@ -2047,7 +2115,7 @@ void ReferenceField::moveCurrent(int step)
     }
 }
 
-bool ReferenceField::refusesLastElement(const std::vector<std::string>& stored)
+bool ReferenceField::keepsLastElement(const std::vector<std::string>& stored) const
 {
     App::DocumentObject* linked = isProfile() ? linkedObject() : nullptr;
     if (!linked || !stored.empty() || linked->isDerivedFrom<Part::Part2DObject>()) {
@@ -2066,6 +2134,14 @@ bool ReferenceField::refusesLastElement(const std::vector<std::string>& stored)
         }
         catch (const Base::Exception&) {
         }
+    }
+    return true;
+}
+
+bool ReferenceField::refusesLastElement(const std::vector<std::string>& stored)
+{
+    if (!keepsLastElement(stored)) {
+        return false;
     }
     switch (options.use) {
         case ProfileUse::Path:
@@ -2382,6 +2458,37 @@ void ReferenceField::removeSelected()
     if (indexes.empty() && entryList->currentItem()) {
         indexes.push_back(entryList->currentItem()->data(role).toInt());
     }
+    removeEntries(std::move(indexes));
+}
+
+void ReferenceField::setNote(const QString& text)
+{
+    message = text;
+    updateLook();
+}
+
+bool ReferenceField::isRemovable(int index) const
+{
+    // What removeEntries() takes out: not a required profile's whole object, nor a single
+    // reference that can't be empty (an axis)
+    if (!isEnabled()) {
+        return false;
+    }
+    if (isProfile()) {
+        if (index < 0) {
+            return !options.required;
+        }
+        // The last element of a solid's faces stays (refusesLastElement()): no x on it
+        return storedSubs().size() > 1 || !keepsLastElement({});
+    }
+    if (isSingle()) {
+        return options.removable;
+    }
+    return true;
+}
+
+void ReferenceField::removeEntries(std::vector<int> indexes)
+{
     // A profile's whole object isn't removed while the profile is required; an optional one
     // (an auxiliary path) is cleared
     if (isProfile() && !options.required && std::ranges::any_of(indexes, [](int index) {
@@ -2434,6 +2541,88 @@ void ReferenceField::removeSelected()
         return;
     }
     write(stored);
+}
+
+bool ReferenceField::entryElement(const QListWidgetItem* item,
+                                  App::DocumentObject*& obj,
+                                  std::string& sub) const
+{
+    obj = nullptr;
+    sub.clear();
+    if (!item) {
+        return false;
+    }
+    const std::string stored = item->data(SubRole).toString().toStdString();
+    const int index = item->data(IndexRole).toInt();
+    if (isObjects()) {
+        // A feature whole (SubRole is its name)
+        const std::vector<App::DocumentObject*> objs = linkedObjects();
+        if (index >= 0 && index < static_cast<int>(objs.size())) {
+            obj = objs[index];
+        }
+        return obj != nullptr;
+    }
+    if (Data::hasMissingElement(stored.c_str())) {
+        return false;
+    }
+    if (isSections()) {
+        // A section's object, whole or at its first element
+        if (auto list = freecad_cast<App::PropertyLinkSubList*>(property())) {
+            const std::vector<App::DocumentObject*>& objs = list->getValues();
+            if (index >= 0 && index < static_cast<int>(objs.size())) {
+                obj = objs[index];
+            }
+        }
+    }
+    else {
+        obj = (isSingle() || isProfile()) ? linkedObject() : listObject();
+    }
+    if (!obj) {
+        return false;
+    }
+    sub = bareElement(stored);
+    return true;
+}
+
+void ReferenceField::hoverEntry(const QListWidgetItem* item)
+{
+    App::DocumentObject* obj = nullptr;
+    std::string sub;
+    if (!entryElement(item, obj, sub) || !obj->isAttachedToDocument()) {
+        obj = nullptr;
+    }
+    if (obj && hovering && hoverObject.getObject() == obj && hoverSub == sub) {
+        return;
+    }
+    if (hovering) {
+        // Only this field's preselection goes: the 3D view's may have taken its place
+        hovering = false;
+        const Gui::SelectionChanges& now = Gui::Selection().getPreselection();
+        auto text = [](const char* str) {
+            return std::string(str ? str : "");
+        };
+        if (text(now.pDocName) == hoverObject.getDocumentName()
+            && text(now.pObjectName) == hoverObject.getObjectName()
+            && text(now.pSubName) == hoverSub) {
+            Gui::Selection().rmvPreselect();
+        }
+    }
+    if (!obj) {
+        return;
+    }
+    hoverObject = obj;
+    hoverSub = sub;
+    // Internal: past the gates (the armed field's, or another field's while this one isn't),
+    // which would refuse with a message in the status bar; the 3D view highlights it as the
+    // tree's hover does
+    hovering = Gui::Selection().setPreselect(obj->getDocument()->getName(),
+                                             obj->getNameInDocument(),
+                                             sub.c_str(),
+                                             0,
+                                             0,
+                                             0,
+                                             Gui::SelectionChanges::MsgSource::Internal)
+        != 0;
 }
 
 bool ReferenceField::undo()
@@ -3001,9 +3190,43 @@ void ReferenceField::startRepick(int index)
 bool ReferenceField::eventFilter(QObject* watched, QEvent* event)
 {
     if (watched == entryList->viewport()) {
-        if (event->type() == QEvent::MouseButtonPress
-            && static_cast<QMouseEvent*>(event)->button() == Qt::LeftButton) {  // NOLINT
-            setArmed(true);
+        switch (event->type()) {
+            case QEvent::MouseButtonPress:
+            case QEvent::MouseButtonDblClick: {
+                auto me = static_cast<QMouseEvent*>(event);  // NOLINT
+                if (me->button() != Qt::LeftButton) {
+                    break;
+                }
+                const bool press = event->type() == QEvent::MouseButtonPress;
+                if (press) {
+                    setArmed(true);
+                }
+                // A click on an entry's x removes that entry alone (ops#640 rank 26); its double
+                // click opens nothing
+                const QPoint pos = me->position().toPoint();
+                QListWidgetItem* item = entryList->itemAt(pos);
+                if (item && closeRect(entryList->visualItemRect(item)).contains(pos)
+                    && isRemovable(item->data(IndexRole).toInt())) {
+                    if (press) {
+                        const int role = isSections() ? SectionRole : IndexRole;
+                        const int index = item->data(role).toInt();
+                        hoverEntry(nullptr);
+                        removeEntries({index});
+                    }
+                    return true;
+                }
+                break;
+            }
+            case QEvent::MouseMove: {
+                auto me = static_cast<QMouseEvent*>(event);  // NOLINT
+                hoverEntry(entryList->itemAt(me->position().toPoint()));
+                break;
+            }
+            case QEvent::Leave:
+                hoverEntry(nullptr);
+                break;
+            default:
+                break;
         }
         return false;
     }
@@ -3020,11 +3243,12 @@ bool ReferenceField::eventFilter(QObject* watched, QEvent* event)
             break;
         }
         case QEvent::ShortcutOverride: {
-            // The field's keys before the window's shortcuts (Std_Delete, Std_Undo, ...)
+            // The field's keys before the window's shortcuts (Std_Delete, Std_Undo, ...). Not
+            // Esc: armed or not, it goes to the task view and cancels the dialog at once, as
+            // Onshape's (ops#640 rank 25, R1; reverses decision 23 Q1 (a))
             auto ke = static_cast<QKeyEvent*>(event);  // NOLINT
             bool own = Gui::QtTools::matches(ke, QKeySequence(Gui::QtTools::deleteKeySequence()))
-                || ke->matches(QKeySequence::Undo) || matchesRedo(ke)
-                || (armed && ke->key() == Qt::Key_Escape) || isSectionMove(ke);
+                || ke->matches(QKeySequence::Undo) || matchesRedo(ke) || isSectionMove(ke);
             for (const auto& action : menuActions) {
                 own = own || (action && Gui::QtTools::matches(ke, action->shortcut()));
             }
@@ -3046,10 +3270,6 @@ bool ReferenceField::eventFilter(QObject* watched, QEvent* event)
             }
             if (matchesRedo(ke)) {
                 redo();
-                return true;
-            }
-            if (armed && ke->key() == Qt::Key_Escape) {
-                setArmed(false);
                 return true;
             }
             if (isSectionMove(ke)) {
@@ -3286,7 +3506,7 @@ ReferenceCombo::ReferenceCombo(QComboBox* combo,
     , writer(std::move(write))
 {
     connect(combo, qOverload<int>(&QComboBox::activated), this, &ReferenceCombo::onActivated);
-    // Disarmed (a pick made, Esc, another input): the box shows the property again
+    // Disarmed (a pick made, another input): the box shows the property again
     connect(field, &ReferenceField::armedChanged, this, [this](bool on) {
         if (!on) {
             refresh();

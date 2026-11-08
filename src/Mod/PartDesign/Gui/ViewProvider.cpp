@@ -128,16 +128,9 @@ void ViewProvider::setupContextMenu(QMenu* menu, QObject* receiver, const char* 
 
 bool ViewProvider::keyPressed(bool pressed, int key)
 {
-    // Esc there is posted to the task view and resets the edit; with a field armed, the first Esc
-    // only ends the picking (Q1)
-    if (key == SoKeyboardEvent::ESCAPE) {
-        if (ReferenceField* field = ReferenceField::armedField()) {
-            if (!pressed) {
-                field->setArmed(false);
-            }
-            return true;
-        }
-    }
+    // Esc there is posted to the task view and resets the edit, a reference field armed or not:
+    // one Esc cancels the dialog, as Onshape's (ops#640 rank 25, R1; decision 23 Q1 (a) had the
+    // first Esc only end the picking)
     return PartGui::ViewProviderPart::keyPressed(pressed, key);
 }
 
