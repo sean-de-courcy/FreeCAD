@@ -1199,6 +1199,8 @@ public:
 
     bool allow(App::Document* document, App::DocumentObject* pObj, const char* sSubName) override
     {
+        // FreeCAD-CH (ops#640): no earlier refusal's reason shows for this one
+        this->notAllowedReason = "";
         if (pObj != sketch) {
             if (Base::Tools::isNullOrEmpty(sSubName)) {
                 return false;
@@ -1209,6 +1211,13 @@ public:
                  && allowedSelTypes & (SelExternalEdge | SelExternalArc))
                 || (element.starts_with("Vertex") && element.size() > 6
                     && allowedSelTypes & SelVertex)) {
+                return ExternalSelection::allow(document, pObj, sSubName);
+            }
+            // FreeCAD-CH (ops#640, rank 19): a planar face perpendicular to the sketch plane is
+            // its trace on the plane, a line. Another face is refused without a reason: Onshape's
+            // words are the Dimension tool's (DimensionExternalSelection)
+            if (isFaceElement(sSubName) && allowedSelTypes & SelExternalEdge
+                && isFaceTakenBySketch(static_cast<Sketcher::SketchObject*>(sketch), pObj, sSubName)) {
                 return ExternalSelection::allow(document, pObj, sSubName);
             }
             return false;
@@ -1251,6 +1260,8 @@ public:
 
     bool allow(App::Document* document, App::DocumentObject* object, const char* subName) override
     {
+        // FreeCAD-CH (ops#640): no earlier refusal's reason shows for this one
+        this->notAllowedReason = "";
         if (object == sketch) {
             if (Base::Tools::isNullOrEmpty(subName)) {
                 return false;
@@ -1268,8 +1279,16 @@ public:
         }
 
         const std::string element(subName);
-        if ((!element.starts_with("Edge") || element.size() <= 4)
-            && (!element.starts_with("Vertex") || element.size() <= 6)) {
+        // FreeCAD-CH (ops#640, rank 19): a planar face perpendicular to the sketch plane, as
+        // Onshape's Dimension takes it (F4); a parallel one is refused with Onshape's words (C-6)
+        if (isFaceElement(subName)) {
+            if (!isFaceTakenBySketch(static_cast<Sketcher::SketchObject*>(sketch), object, subName)) {
+                this->notAllowedReason = refusedFaceReason();
+                return false;
+            }
+        }
+        else if ((!element.starts_with("Edge") || element.size() <= 4)
+                 && (!element.starts_with("Vertex") || element.size() <= 6)) {
             return false;
         }
 
@@ -1391,8 +1410,11 @@ public:
                 continue;
             }
             const std::string_view element(sel.SubName);
+            // FreeCAD-CH (ops#640, rank 19): plain edit mode's gate let a face through only when
+            // the sketch takes it (perpendicular to its plane)
             if (!(element.starts_with("Edge") && element.size() > 4)
-                && !(element.starts_with("Vertex") && element.size() > 6)) {
+                && !(element.starts_with("Vertex") && element.size() > 6)
+                && !isFaceTakenBySketch(sketch, sel.pObject, sel.SubName)) {
                 return;
             }
             modelPicks = true;
@@ -1673,7 +1695,9 @@ public:
         }
 
         const std::string subName(msg.pSubName);
-        const bool isEdge = subName.starts_with("Edge") && subName.size() > 4;
+        // FreeCAD-CH (ops#640, rank 19): a face the gate let through is its trace, a line: an edge
+        const bool isEdge = (subName.starts_with("Edge") && subName.size() > 4)
+            || isFaceElement(msg.pSubName);
         const bool isVertex = subName.starts_with("Vertex") && subName.size() > 6;
         if (!isEdge && !isVertex) {
             return false;
@@ -2714,7 +2738,9 @@ public:
         }
 
         const std::string subName(msg.pSubName);
-        const bool isEdge = subName.starts_with("Edge") && subName.size() > 4;
+        // FreeCAD-CH (ops#640, rank 19): a face the gate let through is its trace, a line: an edge
+        const bool isEdge = (subName.starts_with("Edge") && subName.size() > 4)
+            || isFaceElement(msg.pSubName);
         const bool isVertex = subName.starts_with("Vertex") && subName.size() > 6;
         if (!isEdge && !isVertex) {
             return false;
