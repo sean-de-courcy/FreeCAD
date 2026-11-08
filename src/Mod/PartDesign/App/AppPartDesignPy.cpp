@@ -137,6 +137,12 @@ public:
             "mergeAfter(feature) -- The Merge right after the solid feature, based on it, or None."
         );
         add_varargs_method(
+            "consumerOf",
+            &Module::consumerOf,
+            "consumerOf(body) -- The Boolean that consumes the part body, one of its tools (Keep "
+            "tools off, in effect, not a Merge, the tool not one a Union left separate), or None."
+        );
+        add_varargs_method(
             "split",
             &Module::split,
             "split(body, tool, side='Front') -- Splits the part body by the plane tool: an origin "
@@ -444,6 +450,17 @@ private:
         }
         Boolean* merge = Boolean::mergeAfter(objectArg(pObj));
         return merge ? Py::asObject(merge->getPyObject()) : Py::None();
+    }
+
+    // FreeCAD-CH (ops#640 rank 28): a part a Boolean consumed
+    Py::Object consumerOf(const Py::Tuple& args)
+    {
+        PyObject* pObj;
+        if (!PyArg_ParseTuple(args.ptr(), "O!", &(App::DocumentObjectPy::Type), &pObj)) {
+            throw Py::Exception();
+        }
+        Boolean* boolean = Boolean::consumerOf(objectArg(pObj));
+        return boolean ? Py::asObject(boolean->getPyObject()) : Py::None();
     }
 
     // FreeCAD-CH (ops#325 4): Split

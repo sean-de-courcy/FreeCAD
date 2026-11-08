@@ -29,13 +29,27 @@
 #include <Standard_Failure.hxx>
 
 #include <algorithm>
+#include <cmath>
 
+#include <BRepBndLib.hxx>
+#include <BRepClass3d_SolidClassifier.hxx>
+#include <BRepExtrema_DistShapeShape.hxx>
+#include <BRepGProp.hxx>
+#include <BRep_Builder.hxx>
+#include <BRep_Tool.hxx>
+#include <Bnd_Box.hxx>
+#include <GProp_GProps.hxx>
 #include <Precision.hxx>
+#include <TopExp_Explorer.hxx>
+#include <TopoDS.hxx>
+#include <TopoDS_Compound.hxx>
+#include <gp_Pnt.hxx>
 
 #include <App/Application.h>
 #include <App/Document.h>
 #include <App/DocumentObject.h>
 #include <App/PropertyLinks.h>
+#include <App/SuppressibleExtension.h>
 #include <Base/Tools.h>
 #include <Mod/Part/App/modelRefine.h>
 #include <Mod/Part/App/TopoShapeOpCode.h>
@@ -67,6 +81,26 @@ Boolean::Boolean()
         App::Prop_Hidden,
         "Use legacy PartDesign Boolean body placement handling"
     );
+    // The last Keep tools the dialog accepted (FreeCAD-CH ops#640 rank 28, hands-on A-5); a
+    // restored Boolean reads its own, and one saved without it reads false
+    const bool keepTools = !App::GetApplication().isRestoring()
+        && App::GetApplication()
+               .GetParameterGroupByPath("User parameter:BaseApp/Preferences/Mod/PartDesign")
+               ->GetBool("BooleanKeepTools", false);
+    ADD_PROPERTY_TYPE(
+        KeepTools,
+        (keepTools),
+        "Boolean",
+        App::Prop_None,
+        "Keep the tool parts: off, the Boolean consumes them (Onshape's Keep tools)"
+    );
+    ADD_PROPERTY_TYPE(
+        SeparateTools,
+        (nullptr),
+        "Boolean",
+        static_cast<App::PropertyType>(App::Prop_Output | App::Prop_Hidden),
+        "The tools a Union left as they were: they touch nothing it fuses, and stay parts"
+    );
 
     App::GeoFeatureGroupExtension::initExtension(this);
     // Boolean tools are references, not owned coordinate-system children.
@@ -77,11 +111,66 @@ namespace
 {
 // A Merge's saved toolFrames() from its last compute (FreeCAD-CH ops#325, PR 305 round 1)
 constexpr const char* mergeFrames = "MergeFrames";
+
+// Whether two shapes share a point: in contact, or one inside the other (FreeCAD-CH ops#640
+// rank 3b: a Union fuses what touches)
+bool shapesTouch(const TopoShape& one, const TopoShape& other)
+{
+    Bnd_Box oneBox;
+    Bnd_Box otherBox;
+    BRepBndLib::Add(one.getShape(), oneBox, /*useTriangulation=*/false);
+    BRepBndLib::Add(other.getShape(), otherBox, /*useTriangulation=*/false);
+    oneBox.Enlarge(Precision::Confusion());
+    if (oneBox.IsOut(otherBox)) {
+        return false;
+    }
+    BRepExtrema_DistShapeShape distance(one.getShape(), other.getShape());
+    if (distance.IsDone() && distance.Value() <= Precision::Confusion()) {
+        return true;
+    }
+    // Surfaces apart: one solid may still hold the other whole
+    auto inside = [](const TopoShape& inner, const TopoShape& outer) {
+        TopExp_Explorer vertex(inner.getShape(), TopAbs_VERTEX);
+        if (!vertex.More()) {
+            return false;
+        }
+        const gp_Pnt point = BRep_Tool::Pnt(TopoDS::Vertex(vertex.Current()));
+        for (TopExp_Explorer solid(outer.getShape(), TopAbs_SOLID); solid.More(); solid.Next()) {
+            BRepClass3d_SolidClassifier classifier(solid.Current(), point, Precision::Confusion());
+            if (classifier.State() == TopAbs_IN) {
+                return true;
+            }
+        }
+        return false;
+    };
+    return inside(one, other) || inside(other, one);
+}
+
+double volumeOf(const TopoShape& shape)
+{
+    GProp_GProps props;
+    BRepGProp::VolumeProperties(shape.getShape(), props);
+    return props.Mass();
+}
+
+// Whether the tools left the base's volume as it was: judged by volume, as an Extrude's Remove
+// that misses (FeatureExtrude's cutMissed), so a tool that only shares a face with the base
+// counts. The tolerance scales with the tools plus the base's own rounding
+bool unchangedBy(const TopoShape& base, const std::vector<TopoShape>& tools, const TopoShape& result)
+{
+    double toolVolume = 0.0;
+    for (const auto& tool : tools) {
+        toolVolume += std::fabs(volumeOf(tool));
+    }
+    const double baseVolume = volumeOf(base);
+    const double tolerance = 1e-6 * toolVolume + 1e-9 * std::fabs(baseVolume);
+    return std::fabs(volumeOf(result) - baseVolume) <= tolerance;
+}
 }  // namespace
 
 short Boolean::mustExecute() const
 {
-    if (Group.isTouched() || UseLegacyBodyPlacement.isTouched()) {
+    if (Group.isTouched() || UseLegacyBodyPlacement.isTouched() || KeepTools.isTouched()) {
         return 1;
     }
     // A merged part moved: nothing it links changed, and the Body isn't linked (FreeCAD-CH
@@ -266,9 +355,63 @@ App::DocumentObjectExecReturn* Boolean::execute()
         }
         shapes.push_back(shape);
     }
+
+    // Onshape's Union, Subtract and Intersect (FreeCAD-CH ops#640 rank 3b): a Merge keeps its own
+    // rules (ops#325)
+    const bool plain = !isMerge();
+    const bool hadTools = !tools.empty();
+    std::vector<App::DocumentObject*> separate;
+    if (plain && type == "Fuse" && hadTools) {
+        // A Union fuses what touches the base, directly or through another tool it fuses; a tool
+        // apart from all of it stays a part of its own (hands-on A-2' b)
+        std::vector<bool> joined(tools.size(), false);
+        {
+            std::vector<const TopoShape*> fused {&shapes.front()};
+            for (bool grew = true; grew;) {
+                grew = false;
+                for (std::size_t i = 0; i < tools.size(); ++i) {
+                    const TopoShape& tool = shapes[i + 1];
+                    if (!joined[i] && std::ranges::any_of(fused, [&tool](const TopoShape* shape) {
+                            return shapesTouch(tool, *shape);
+                        })) {
+                        joined[i] = true;
+                        fused.push_back(&tool);
+                        grew = true;
+                    }
+                }
+            }
+        }
+        std::vector<TopoShape> joinedShapes {shapes.front()};
+        std::vector<App::DocumentObject*> joinedTools;
+        for (std::size_t i = 0; i < tools.size(); ++i) {
+            if (joined[i]) {
+                joinedShapes.push_back(shapes[i + 1]);
+                joinedTools.push_back(tools[i]);
+            }
+            else {
+                separate.push_back(tools[i]);
+            }
+        }
+        shapes = std::move(joinedShapes);
+        tools = std::move(joinedTools);
+    }
+    if (SeparateTools.getValues() != separate) {
+        SeparateTools.setValues(separate);
+    }
+    // A Subtract or an Intersect whose tools are all apart from the base changes nothing; the
+    // boolean isn't run (B3-3a, A-2' c)
+    bool apart = false;
+    if (plain && hadTools && (type == "Cut" || type == "Common")) {
+        auto touchesBase = [&shapes](const TopoShape& tool) {
+            return shapesTouch(tool, shapes.front());
+        };
+        apart = type == "Cut" ? std::none_of(shapes.begin() + 1, shapes.end(), touchesBase)
+                              : !std::all_of(shapes.begin() + 1, shapes.end(), touchesBase);
+    }
+
     TopoShape result(baseTopShape);
 
-    if (!tools.empty()) {
+    if (!tools.empty() && !apart) {
         const char* op = nullptr;
 
         if (type == "Fuse") {
@@ -314,6 +457,33 @@ App::DocumentObjectExecReturn* Boolean::execute()
         }
     }
 
+    // What Onshape says, or leaves, when a Boolean changes nothing (ops#640 rank 3b)
+    std::string note;
+    if (plain && hadTools) {
+        std::vector<TopoShape> toolShapes(shapes.begin() + 1, shapes.end());
+        if (type == "Common" && (apart || result.countSubShapes(TopAbs_SOLID) == 0)) {
+            // An Intersect that misses leaves nothing, with no message (hands-on A-2' c); with Keep
+            // tools, the part as it was
+            if (!KeepTools.getValue()) {
+                TopoDS_Compound empty;
+                BRep_Builder builder;
+                builder.MakeCompound(empty);
+                this->Shape.setValue(makeTopoShape(empty));
+                return StdReturn;
+            }
+            result = baseTopShape;
+        }
+        else if (type == "Cut" && (apart || unchangedBy(baseTopShape, toolShapes, result))) {
+            // The target as it was, the tools consumed: an info, the row healthy (B3-3a)
+            note = "Selected tools and targets do not intersect.";
+        }
+        else if (type == "Fuse" && (tools.empty() || unchangedBy(baseTopShape, toolShapes, result))) {
+            // Nothing touched, or every tool inside the base (A-2' b)
+            note = "Boolean resulted in no geometry change. The parts either do not intersect or "
+                   "are totally contained.";
+        }
+    }
+
     result = refineShapeIfActive(result);
 
     if (!isSingleSolidRuleSatisfied(result.getShape())) {
@@ -325,6 +495,12 @@ App::DocumentObjectExecReturn* Boolean::execute()
 
     this->Shape.setValue(getSolid(result));
     warnMerged();
+    if (!note.empty()) {
+        if (App::Document* doc = getDocument()) {
+            const char* previous = doc->getWarningDescription(this);
+            doc->setWarning(this, previous && *previous ? std::string(previous) + "\n" + note : note);
+        }
+    }
 
     return StdReturn;
 }
@@ -790,6 +966,41 @@ std::string Boolean::mergeLock(const App::DocumentObject* feature)
         }
     }
     return {};
+}
+
+Boolean* Boolean::consumerOf(const App::DocumentObject* body)
+{
+    auto part = freecad_cast<const Body*>(body);
+    App::Document* doc = part ? part->getDocument() : nullptr;
+    if (!doc) {
+        return nullptr;
+    }
+    for (auto obj : doc->getObjectsOfType(Boolean::getClassTypeId())) {
+        auto boolean = static_cast<Boolean*>(obj);
+        if (boolean->isMerge() || boolean->KeepTools.getValue() || boolean->isError()) {
+            continue;
+        }
+        auto suppressible = boolean->getExtensionByType<App::SuppressibleExtension>(true);
+        if (suppressible && suppressible->Suppressed.getValue()) {
+            continue;
+        }
+        // Rolled back past it, the history doesn't reach it yet: its tools are parts
+        Body* own = Body::findBodyOf(boolean);
+        if (!own || own == part || own->holds(boolean)) {
+            continue;
+        }
+        const std::vector<App::DocumentObject*> separate = boolean->SeparateTools.getValues();
+        for (auto tool : boolean->Group.getValues()) {
+            const Body* toolBody = freecad_cast<const Body*>(tool);
+            if (!toolBody) {
+                toolBody = Body::findBodyOf(tool);
+            }
+            if (toolBody == part && std::ranges::find(separate, tool) == separate.end()) {
+                return boolean;
+            }
+        }
+    }
+    return nullptr;
 }
 
 }  // namespace PartDesign

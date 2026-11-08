@@ -51,6 +51,16 @@ public:
      * in restored documents. New Boolean features use Body-local linked geometry.
      */
     App::PropertyBool UseLegacyBodyPlacement;
+    /** Onshape's Keep tools (FreeCAD-CH ops#640 rank 28): on, the tool parts stay parts; off, the
+     * Boolean consumes them, and they leave the Parts list (consumerOf). A new Boolean takes the
+     * value its dialog last accepted (the user parameter BooleanKeepTools); old files read false.
+     * An Intersect that misses keeps its part as it was with Keep tools on (hands-on A-2' c)
+     */
+    App::PropertyBool KeepTools;
+    /** The tools a Union left as they were (ops#640 rank 3b, hands-on A-2' b): they touch nothing
+     * it fuses, so it doesn't fuse them, and they stay parts. Set at each compute
+     */
+    App::PropertyLinkListHidden SeparateTools;
 
     /** @name methods override feature */
     //@{
@@ -117,6 +127,13 @@ public:
         const std::vector<App::DocumentObject*>& bodies
     );
     //@}
+
+    /** The Boolean that consumes @p body, a part one of its tools is in, or null (FreeCAD-CH
+     * ops#640 rank 28, B3-3a): a Boolean in effect (not a Merge, not suppressed or failed, not
+     * after its part's bar) with Keep tools off, the tool not one a Union left separate. A
+     * consumed part isn't a part any more: Onshape's Boolean deletes its tools
+     */
+    static Boolean* consumerOf(const App::DocumentObject* body);
 
 protected:
     void handleChangedPropertyName(
