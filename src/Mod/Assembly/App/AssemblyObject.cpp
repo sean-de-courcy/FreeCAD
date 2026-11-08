@@ -427,6 +427,29 @@ void AssemblyObject::updateSolveStatus()
     lastRedundantJoints.clear();
     lastHasRedundancies = false;
 
+    // FreeCAD-CH (ops#640 round 7, gap A10): a joint whose two picks are both made but don't name
+    // two different parts (both on one part, or a pick naming no part) is malformed. The solve
+    // leaves it out (getJoints); it is reported instead of being dropped silently. A joint still
+    // being picked (a reference empty) is not.
+    lastMalformedJoints.clear();
+    if (JointGroup* jointGroup = getJointGroup()) {
+        for (auto* joint : jointGroup->getObjects()) {
+            auto* suppressed = dynamic_cast<App::PropertyBool*>(joint->getPropertyByName("Suppressed"));
+            auto* ref1 = dynamic_cast<App::PropertyXLinkSub*>(joint->getPropertyByName("Reference1"));
+            auto* ref2 = dynamic_cast<App::PropertyXLinkSub*>(joint->getPropertyByName("Reference2"));
+            if (!suppressed || suppressed->getValue() || !ref1 || !ref2 || joint->isError()
+                || !ref1->getValue() || !ref2->getValue()) {
+                continue;
+            }
+            auto* part1 = getMovingPartFromRef(joint, "Reference1");
+            auto* part2 = getMovingPartFromRef(joint, "Reference2");
+            if (!part1 || !part2 || part1->getFullName() == part2->getFullName()) {
+                lastMalformedJoints.emplace_back(joint->getNameInDocument());
+            }
+        }
+    }
+    lastHasMalformedConstraints = !lastMalformedJoints.empty();
+
     int numberOfSolverBodies = numberOfComponents();
     if (!objectPartMap.empty()) {
         std::unordered_set<MbD::ASMTPart*> uniqueParts;

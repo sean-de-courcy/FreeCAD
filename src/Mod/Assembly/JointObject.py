@@ -826,24 +826,16 @@ class Joint:
             solveIfAllowed(self.getAssembly(joint))
 
     def execute(self, joint):
-        errStr = joint.Label + ": " + QT_TRANSLATE_NOOP("Assembly", "Broken link in: ")
-        if (
-            hasattr(joint, "Reference1")
-            and joint.Reference1 is not None
-            and len(joint.Reference1) == 2
-            and len(joint.Reference1[1]) != 0
-            and (joint.Reference1[1][0].find("?") != -1)
+        # FreeCAD-CH (ops#640 round 7, gap A11): a pick whose face or edge is gone puts the joint
+        # in error, as Onshape's mate turns red, and the message names what is missing; the solve
+        # leaves the joint out (AssemblyObject::getJoints) and the solver panel lists it
+        for propName, which in (
+            ("Reference1", translate("Assembly", "first pick")),
+            ("Reference2", translate("Assembly", "second pick")),
         ):
-            raise Exception(errStr + "Reference1")
-
-        if (
-            hasattr(joint, "Reference2")
-            and joint.Reference2 is not None
-            and len(joint.Reference2) == 2
-            and len(joint.Reference2[1]) != 0
-            and (joint.Reference2[1][0].find("?") != -1)
-        ):
-            raise Exception(errStr + "Reference2")
+            ref = getattr(joint, propName, None)
+            if ref is not None and len(ref) == 2 and len(ref[1]) != 0 and ref[1][0].find("?") != -1:
+                raise Exception(missingReferenceMessage(joint, ref, which))
 
         self.updateJCSPlacements(joint)
 
@@ -1100,6 +1092,25 @@ class Joint:
         globalJcsPlc2 = UtilsAssembly.getJcsGlobalPlc(joint.Placement2, joint.Reference2)
 
         return UtilsAssembly.arePlacementZParallel(globalJcsPlc1, globalJcsPlc2)
+
+
+def missingReferenceMessage(joint, ref, which):
+    """'<joint>: Missing reference: Face6 of <part> (first pick) is gone' (FreeCAD-CH, ops#640)."""
+    sub = ref[1][0]
+    element = sub.split(".")[-1].lstrip("?")
+    owner = ref[0].Label if ref[0] is not None else ""
+    names = [n for n in sub.split(".")[:-1] if n]
+    if names and ref[0] is not None and ref[0].Document.getObject(names[-1]):
+        owner = ref[0].Document.getObject(names[-1]).Label
+    what = element or sub
+    if owner:
+        what = translate("Assembly", "{element} of {part}").format(element=what, part=owner)
+    return "{}: {}".format(
+        joint.Label,
+        translate("Assembly", "Missing reference: {what} ({which}) is gone").format(
+            what=what, which=which
+        ),
+    )
 
 
 def jointIsRedundant(joint):

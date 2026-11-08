@@ -7487,8 +7487,14 @@ void DocumentObjectItem::testStatus(bool resetStatus, QIcon& icon1, QIcon& icon2
         // to black which will lead to unreadable text if the system background
         // hss already a dark color.
         // However, it works if we set the appropriate role to an empty QVariant().
+        // FreeCAD-CH (ops#640 round 7, gap A10): under the Onshape keymap an object in error reads
+        // red, as Onshape's list shows a failed feature or a mate in trouble (the Features list's
+        // colour, PartDesignGui::FeaturesView)
+        const QVariant foreground = ForkKeymap::isOnshape() && pObject->isError()
+            ? QVariant(QBrush(QColor(0xd0, 0x30, 0x30)))
+            : QVariant();
         for (int column = 0; column < this->columnCount(); ++column) {
-            this->setData(column, Qt::ForegroundRole, QVariant());
+            this->setData(column, Qt::ForegroundRole, foreground);
         }
     }
     else {  // invisible
@@ -7497,8 +7503,12 @@ void DocumentObjectItem::testStatus(bool resetStatus, QIcon& icon1, QIcon& icon2
         if (this->treeWidget()) {
             opt.initFrom(this->treeWidget());
         }
+        // An object in error reads red when hidden too (a joint is hidden), FreeCAD-CH (above)
+        const QColor color = ForkKeymap::isOnshape() && pObject->isError()
+            ? QColor(0xd0, 0x30, 0x30)
+            : opt.palette.color(QPalette::Disabled, QPalette::Text);
         for (int column = 0; column < this->columnCount(); ++column) {
-            this->setForeground(column, opt.palette.color(QPalette::Disabled, QPalette::Text));
+            this->setForeground(column, color);
         }
         mode = QIcon::Disabled;
     }

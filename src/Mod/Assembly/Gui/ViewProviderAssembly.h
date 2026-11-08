@@ -25,6 +25,7 @@
 
 #include <QCoreApplication>
 #include <QMetaObject>
+#include <QPointer>
 #include <fastsignals/signal.h>
 
 #include <Mod/Assembly/AssemblyGlobal.h>
@@ -297,9 +298,11 @@ private:
         std::set<App::DocumentObject*>& visited
     );
 
-    TaskAssemblyMessages* taskSolver {nullptr};
+    // A QPointer: the task panel deletes its contextual panels when its dialog closes (ops#640)
+    QPointer<TaskAssemblyMessages> taskSolver;
 
     QMetaObject::Connection workbenchConnection;
+    QMetaObject::Connection taskViewConnection;
     fastsignals::connection connectActivatedVP;
     fastsignals::connection connectSolverUpdate;
     fastsignals::scoped_connection m_preTransactionConn;
