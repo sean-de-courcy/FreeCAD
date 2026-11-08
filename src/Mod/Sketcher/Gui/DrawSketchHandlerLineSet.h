@@ -29,6 +29,7 @@
 #include <Inventor/events/SoKeyboardEvent.h>
 #include <boost/math/special_functions/fpclassify.hpp>
 
+#include <App/Application.h>
 #include <Gui/BitmapFactory.h>
 #include <Gui/Notifications.h>
 #include <Gui/Command.h>
@@ -106,6 +107,22 @@ public:
 
     void registerPressedKey(bool pressed, int key) override
     {
+        // FreeCAD-CH (ops#640, rank 41): Shift+A, Onshape's key for a tangent arc from the last
+        // segment's end; again goes back to a line. (A alone starts the Arc tool, a shortcut,
+        // so only Shift+A gets here.)
+        const Qt::KeyboardModifiers modifiers = QApplication::keyboardModifiers();
+        if (Mode == STATUS_SEEK_Second && key == SoKeyboardEvent::A && pressed
+            && previousCurve != -1 && modifiers.testFlag(Qt::ShiftModifier)
+            && !modifiers.testFlag(Qt::ControlModifier) && !modifiers.testFlag(Qt::AltModifier)) {
+            Base::Vector2d onSketchPos = SegmentMode == SEGMENT_MODE_Line
+                ? EditCurve[EditCurve.size() - 1]
+                : EditCurve[29];
+            toggleTangentArc();
+            auto snapHandle = std::make_unique<SnapManager::SnapHandle>(nullptr, onSketchPos);
+            mouseMove(*snapHandle);  // trigger an update of EditCurve
+            return;
+        }
+
         // FreeCAD-CH (ops#194 PR D): Ctrl+M under the fork's keymap
         if (Mode == STATUS_SEEK_Second && key == SoKeyboardEvent::M && pressed
             && previousCurve != -1 && isToolKey(pressed, key)) {
@@ -207,6 +224,7 @@ public:
             seekAndRenderAutoConstraint(sugConstr1, onSketchPos, Base::Vector2d(0.f, 0.f));
         }
         else if (Mode == STATUS_SEEK_Second) {
+            updateTangentArcGesture(onSketchPos);  // FreeCAD-CH (ops#640, rank 41)
             if (SegmentMode == SEGMENT_MODE_Line) {
                 EditCurve[EditCurve.size() - 1] = onSketchPos;
                 if (TransitionMode == TRANSITION_MODE_Tangent) {
@@ -389,6 +407,18 @@ public:
             Mode = STATUS_SEEK_Second;
         }
         else if (Mode == STATUS_SEEK_Second) {
+            // FreeCAD-CH (ops#640, rank 41): a press on the last segment's end may start Onshape's
+            // click-drag from the end, which makes a tangent arc. releaseButton() decides: dragged
+            // away, the arc ends where released; released where pressed, the press counts as
+            // before (on the end exactly, it finishes the polyline).
+            if (previousCurve != -1 && !tangentArcDragReplay && isAtLastEnd(onSketchPos)) {
+                tangentArcDrag = true;
+                tangentArcDragSwitched = false;
+                tangentArcDragPress = onSketchPos;
+                return true;
+            }
+            tangentArcDragReplay = false;
+
             // exit on clicking exactly at the same position (e.g. double click)
             if (onSketchPos == EditCurve[0]) {
                 unsetCursor();
@@ -456,6 +486,20 @@ public:
 
     bool releaseButton(Base::Vector2d onSketchPos) override
     {
+        // FreeCAD-CH (ops#640, rank 41): the end of a press on the last segment's end
+        if (tangentArcDrag) {
+            tangentArcDrag = false;
+            const bool dragged = tangentArcDragSwitched;
+            tangentArcDragSwitched = false;
+            // dragged: a press at the release point (the arc's end); else the press as it was
+            const Base::Vector2d pressAt = dragged ? onSketchPos : tangentArcDragPress;
+            tangentArcDragReplay = true;
+            if (pressAt == EditCurve[0]) {
+                return pressButton(pressAt);  // finishes the polyline; may delete this handler
+            }
+            pressButton(pressAt);  // STATUS_Do or STATUS_Close
+        }
+
         if (Mode == STATUS_Do || Mode == STATUS_Close) {
             bool addedGeometry = true;
             if (SegmentMode == SEGMENT_MODE_Line) {
@@ -787,6 +831,96 @@ public:
     }
 
 private:
+    // FreeCAD-CH (ops#640, rank 41): the gestures' sizes, from the sketcher's view scale (as
+    // DrawSketchHandler's pick sizes): a few pixels on the end, and away from it
+    double tangentArcBackRadius() const
+    {
+        return 0.25 * sketchgui->getScaleFactor();  // NOLINT
+    }
+    double tangentArcAwayRadius() const
+    {
+        return 0.75 * sketchgui->getScaleFactor();  // NOLINT
+    }
+    bool isAtLastEnd(Base::Vector2d onSketchPos) const
+    {
+        return !EditCurve.empty() && (onSketchPos - EditCurve[0]).Length() < tangentArcBackRadius();
+    }
+
+    /** FreeCAD-CH (ops#640, rank 41): the next segment becomes a tangent arc from the last
+     * segment's end, or (from an arc segment) a line again: tangent after an arc, free after a
+     * line, as the M cycle has them. EditCurve is sized for it; the caller redraws.
+     */
+    void toggleTangentArc()
+    {
+        SnapMode = SNAP_MODE_Free;
+        if (SegmentMode == SEGMENT_MODE_Line) {
+            SegmentMode = SEGMENT_MODE_Arc;
+            TransitionMode = TRANSITION_MODE_Tangent;
+            EditCurve.resize(32);
+            return;
+        }
+        const Part::Geometry* geom = sketchgui->getSketchObject()->getGeometry(previousCurve);
+        SegmentMode = SEGMENT_MODE_Line;
+        TransitionMode = geom && geom->is<Part::GeomArcOfCircle>() ? TRANSITION_MODE_Tangent
+                                                                   : TRANSITION_MODE_Free;
+        EditCurve.resize(TransitionMode == TRANSITION_MODE_Free ? 2 : 3);
+    }
+
+    /** FreeCAD-CH (ops#640, rank 41): Onshape's Line makes a tangent arc from the end of the
+     * last segment: by hovering the end (here: back on the end and away again; each return and
+     * leave switches between a line and a tangent arc, and the cursor must first leave the end
+     * it was just clicked at), by a click-drag from the end, or by Shift+A. Hands-on C-3 did not
+     * settle the gesture; its documented forms are all here. The hover form is off unless the
+     * preference Mod/Sketcher/Tools/TangentArcByHover is on: an ordinary move back past the last
+     * end would set it off.
+     */
+    void updateTangentArcGesture(Base::Vector2d onSketchPos)
+    {
+        if (previousCurve == -1 || EditCurve.empty()) {
+            return;
+        }
+        const Base::Vector2d end = EditCurve[0];
+        if (!(end == tangentArcGestureEnd)) {
+            tangentArcGestureEnd = end;
+            tangentArcGesture = TangentArcGesture::Leaving;
+        }
+        const double distance = (onSketchPos - end).Length();
+        if (tangentArcDrag) {
+            // the click-drag from the end: once away from it, the segment is a tangent arc
+            if (!tangentArcDragSwitched && distance > tangentArcAwayRadius()) {
+                if (SegmentMode == SEGMENT_MODE_Line) {
+                    toggleTangentArc();
+                }
+                tangentArcDragSwitched = true;
+                tangentArcGesture = TangentArcGesture::Away;
+            }
+            return;
+        }
+        if (!tangentArcHover) {
+            return;
+        }
+        const double backRadius = tangentArcBackRadius();
+        const double awayRadius = tangentArcAwayRadius();
+        switch (tangentArcGesture) {
+            case TangentArcGesture::Leaving:
+                if (distance > awayRadius) {
+                    tangentArcGesture = TangentArcGesture::Away;
+                }
+                break;
+            case TangentArcGesture::Away:
+                if (distance < backRadius) {
+                    tangentArcGesture = TangentArcGesture::Back;
+                }
+                break;
+            case TangentArcGesture::Back:
+                if (distance > awayRadius) {
+                    toggleTangentArc();
+                    tangentArcGesture = TangentArcGesture::Away;
+                }
+                break;
+        }
+    }
+
     QString getCrosshairCursorSVGName() const override
     {
         return QStringLiteral("Sketcher_Pointer_Create_Lineset");
@@ -811,6 +945,7 @@ private:
                          {tr("%1 pick next point"), {MouseLeft}},
                          {tr("%1 finish"), {MouseRight}},
                          {tr("%1 switch mode"), {toolKey(KeyM)}},
+                         {tr("%1 tangent arc"), {{ModifierShift, KeyA}}},
                      }},
             });
         // clang-format on
@@ -822,6 +957,27 @@ protected:
     TRANSITION_MODE TransitionMode;
     SNAP_MODE SnapMode;
     bool suppressTransition;
+
+    // FreeCAD-CH (ops#640, rank 41): the back-to-the-end gesture (updateTangentArcGesture())
+    enum class TangentArcGesture
+    {
+        Leaving,  // still at the end just clicked
+        Away,
+        Back  // back on the end: leaving it switches line and tangent arc
+    };
+    TangentArcGesture tangentArcGesture = TangentArcGesture::Leaving;
+    Base::Vector2d tangentArcGestureEnd;
+    // the click-drag from the end (pressButton(), releaseButton())
+    bool tangentArcDrag = false;
+    bool tangentArcDragSwitched = false;
+    bool tangentArcDragReplay = false;  // releaseButton() replays the press
+    Base::Vector2d tangentArcDragPress;
+    // the hover form, a guess (C-3): off by default
+    bool tangentArcHover = App::GetApplication()
+                               .GetParameterGroupByPath(
+                                   "User parameter:BaseApp/Preferences/Mod/Sketcher/Tools"
+                               )
+                               ->GetBool("TangentArcByHover", false);
 
     std::vector<Base::Vector2d> EditCurve;
     int firstCurve;

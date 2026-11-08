@@ -48,6 +48,7 @@ from SketcherTests.TestSketchCarbonCopyElements import TestCarbonCopySelfReferen
 from SketcherTests.TestSketchCarbonCopyElements import TestCarbonCopyFlipped
 from SketcherTests.TestSketchCarbonCopyElements import TestCarbonCopyFlippedInAMovedSketch
 from SketcherTests.TestSketchCarbonCopyElements import TestCarbonCopyFlippedInATiltedSketch
+from SketcherTests.TestSketchCornerSteps import TestSketchCornerSteps  # FreeCAD-CH, ops#640
 
 # Path and PartDesign tests use these functions that used to live here
 # but moved to SketcherTests/TestSketcherSolver.py
