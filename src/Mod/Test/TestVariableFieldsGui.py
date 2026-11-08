@@ -121,15 +121,15 @@ class TestVariableFieldsGui(unittest.TestCase):
         pump(0.2)
         App.closeDocument(self.doc.Name)
 
-    def field(self):
-        """A QuantitySpinBox bound to Box.Length, in mm, focused."""
+    def field(self, prop="Length"):
+        """A QuantitySpinBox bound to Box.Length (or `prop`), in mm, focused."""
         spin = Gui.UiLoader().createWidget("Gui::QuantitySpinBox")
         self.widgets.append(spin)
         spin.setProperty("unit", "mm")
         # The value a task panel would load from Box.Length (binding loads none)
         spin.setProperty("rawValue", 10.0)
         binding = Gui.ExpressionBinding(spin)
-        binding.bind(self.box, "Length")
+        binding.bind(self.box, prop)
         self.binding = binding
         spin.show()
         spin.activateWindow()
@@ -306,7 +306,8 @@ class TestVariableFieldsGui(unittest.TestCase):
         self.assertEqual(expressionText(self.box, "Length"), "Variables.t")
         self.doc.recompute()
         self.assertAlmostEqual(self.box.Length.Value, 19.05, places=9)
-        other = self.field()
+        # another property: Length is bound now, and its field read-only
+        other = self.field("Width")
         self.type(other, "#h")
         completer = other.findChild(QtWidgets.QCompleter)
         self.assertIsNotNone(completer)
