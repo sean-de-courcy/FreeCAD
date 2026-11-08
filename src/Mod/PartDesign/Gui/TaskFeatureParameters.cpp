@@ -761,7 +761,22 @@ void switchOperation(const App::DocumentObjectT& featureT, const QString& key)
         const std::string obj = Gui::Command::getObjectCmd(feature);
         run("import PartDesign");
         if (isSubtractive(was) && !isSubtractive(key) && !feature->getSiblings().empty()) {
+            std::vector<App::DocumentObjectT> parts;
+            for (PartDesign::FeatureAddSub* sibling : feature->getSiblings()) {
+                if (PartDesign::Body* part = PartDesign::Body::findBodyOf(sibling)) {
+                    parts.emplace_back(part);
+                }
+            }
             run("PartDesign.makeSiblings(" + obj + ", [])");
+            // Each part a sibling left shows its own result now: OK purges the document's touched
+            // objects (accept()), so it would keep the cut until its next recompute (newPartMove's
+            // rule). It stays shown, its Tip taking over from the sibling
+            for (const App::DocumentObjectT& partT : parts) {
+                if (auto part = freecad_cast<PartDesign::Body*>(partT.getObject())) {
+                    part->recomputeFeature(/*recursive=*/true);
+                    showTipIfNoneShown(part);
+                }
+            }
         }
         if (was == QStringLiteral("new") && key != QStringLiteral("new")) {
             if (isMoved(feature)) {
