@@ -136,6 +136,16 @@ class Round3GuiCase(SketcherGuiTestCase):
         self.flush_gui(100)
         self.viewport = self.view.graphicsView().viewport()
 
+    def click_tolerance(self):
+        """How far a click can land from the world point aimed at: a click is on a whole pixel
+        (1.5 pixels of the view in model units)."""
+        a = self.view.getPointOnFocalPlane((100, 100))
+        size = max(
+            (self.view.getPointOnFocalPlane((101, 100)) - a).Length,
+            (self.view.getPointOnFocalPlane((100, 101)) - a).Length,
+        )
+        return 1.5 * size
+
     def screen_point(self, x, y):
         """The viewport point of world (x, y) in the top view, corrected as
         TestAutoConstraintsGui's screen_point is."""
@@ -307,7 +317,15 @@ class TestSketchOverdefinedRedGui(Round3GuiCase):
     Line 0 carries two Horizontal constraints (one redundant); lines 1 and 2 are free."""
 
     RED = (0.87, 0.12, 0.12)
-    BLUE = (0.24, 0.55, 1.0)
+
+    @staticmethod
+    def edge_colour():
+        """An under-constrained edge's colour: the preferences' (a theme pack, as the first start
+        applies, sets one), else the default blue (0.24, 0.55, 1.0)."""
+        packed = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/View").GetUnsigned(
+            "EditedEdgeColor", 0x3D8CFFFF
+        )
+        return tuple(((packed >> shift) & 0xFF) / 255.0 for shift in (24, 16, 8))
 
     def setUp(self):
         super().setUp()
@@ -339,7 +357,7 @@ class TestSketchOverdefinedRedGui(Round3GuiCase):
     def test_only_the_redundant_line_is_red(self):
         colours = self.curve_colours()
         self.assertEqual(sum(self.near(c, self.RED) for c in colours), 1, colours)
-        self.assertEqual(sum(self.near(c, self.BLUE) for c in colours), 2, colours)
+        self.assertEqual(sum(self.near(c, self.edge_colour()) for c in colours), 2, colours)
 
 
 class TestSketchOnshapeConstraintsGui(Round3GuiCase):
@@ -432,8 +450,9 @@ class TestSketchOnshapeShapesGui(Round3GuiCase):
             b = lines[(i + 1) % 4].EndPoint - lines[(i + 1) % 4].StartPoint
             self.assertLess(abs(a.dot(b)) / (a.Length * b.Length), 1e-6, self.describe())
         self.assertIn("Perpendicular", [c.Type for c in self.sketch.Constraints])
-        # the first side is the two clicks
-        self.assertLess((self.world(lines[0].StartPoint) - V(1, 1, 5)).Length, 1e-6)
+        # the first side is the two clicks (to the pixel)
+        start = self.world(lines[0].StartPoint)
+        self.assertLess((start - V(1, 1, 5)).Length, self.click_tolerance(), start)
 
     def test_arc_length_from_the_two_ends_and_the_arc(self):
         import math
@@ -466,8 +485,9 @@ class TestSketchOnshapeShapesGui(Round3GuiCase):
     def check_one_sided_offset(self, y=3.0):
         lines = self.offset_lines()
         self.assertEqual(len(lines), 1, self.describe())
-        for end in (lines[0].StartPoint, lines[0].EndPoint):
-            self.assertAlmostEqual(end.y, y, places=5)
+        # the distance is the click's (to the pixel); both ends at it: one-sided and parallel
+        self.assertAlmostEqual(lines[0].StartPoint.y, lines[0].EndPoint.y, places=6)
+        self.assertAlmostEqual(lines[0].StartPoint.y, y, delta=self.click_tolerance())
 
     def test_offset_of_a_selected_open_line_is_one_sided(self):
         self.sketch.addGeometry(Part.LineSegment(V(0, 0, 0), V(10, 0, 0)))

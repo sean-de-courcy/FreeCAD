@@ -419,10 +419,14 @@ class TestSketchFilletFieldsGui(SketchToolsTestCase):
             for box in window.findChildren(QtGui.QAbstractSpinBox, name):
                 if not box.isVisible():
                     continue
-                # the label beside it, in the same tool widget (SketcherToolDefaultWidget.ui)
+                # the label beside it, in the same tool widget (SketcherToolDefaultWidget.ui).
+                # The tool widget's wrapper is held while its labels are used: a temporary one
+                # takes the labels' wrappers with it when it goes ("Internal C++ object (QLabel)
+                # already deleted")
+                tool_widget = box.parentWidget()
                 labels = [
                     label
-                    for label in box.parentWidget().findChildren(QtGui.QLabel, label_name)
+                    for label in tool_widget.findChildren(QtGui.QLabel, label_name)
                     if label.isVisible()
                 ]
                 boxes[labels[0].text() if labels else name] = box
