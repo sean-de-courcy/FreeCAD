@@ -48,6 +48,7 @@
 #include <Gui/Application.h>
 #include <Gui/BitmapFactory.h>
 #include <Gui/CommandT.h>
+#include <Gui/ForkKeymap.h>  // FreeCAD-CH (ops#640, rank 44)
 #include <Gui/Dialogs/DlgCheckableMessageBox.h>
 #include <Gui/Document.h>
 #include <Gui/MainWindow.h>
@@ -1819,7 +1820,10 @@ public:
     }
 
     std::list<Gui::InputHint> getToolHints() const override {
-    const std::string commandName = cmd->getName();
+    // FreeCAD-CH (ops#640, rank 44): Normal is Perpendicular under another name: its hints
+    const std::string commandName = std::string(cmd->getName()) == "Sketcher_ConstrainNormal"
+        ? std::string("Sketcher_ConstrainPerpendicular")
+        : std::string(cmd->getName());
     const int selectionStep = seqIndex;
 
     // Special case for Sketcher_ConstrainPointOnObject to generate dynamic step hint
@@ -3322,6 +3326,8 @@ protected:
             else if (selection.has3MorePoints1Line()) { makeCts_3MorePoint1Line(selAllowed, onSketchPos, selection.s_pts); }
             else if (selection.has1Point1Circle()) { makeCts_1Point1Circle(selAllowed, onSketchPos); }
             else if (selection.has1MorePoint1Ellipse()) { makeCts_1MorePoint1Ellipse(selAllowed); }
+            // FreeCAD-CH (ops#640, rank 49)
+            else if (isArcEndsAndArc()) { makeCts_ArcLengthByEnds(selAllowed, onSketchPos); }
         }
         else if (selection.hasLines()) {
             if (selection.has1Line()) { makeCts_1Line(selAllowed, onSketchPos); }
@@ -3342,6 +3348,38 @@ protected:
             else if (selection.has2MoreEllipses()) { makeCts_2MoreEllipse(selAllowed, selection.s_ell); }
         }
         return selAllowed;
+    }
+
+    /** FreeCAD-CH (ops#640, rank 49): Onshape's arc length: the arc's two ends, then the arc
+     * (H/Sketch/dimension.htm; gap S11), under Onshape's keymap. A picked point counts as an end
+     * where it lies on one (a line's end coincident with it too).
+     */
+    bool isArcEndsAndArc() const
+    {
+        if (!Gui::ForkKeymap::isOnshape() || selPoints.size() != 2 || selCircleArc.size() != 1
+            || !selLine.empty() || !selEllipseAndCo.empty() || !selSplineAndCo.empty()) {
+            return false;
+        }
+        const Part::Geometry* geometry = Obj->getGeometry(selCircleArc[0].GeoId);
+        if (!geometry || !isArcOfCircle(*geometry)) {
+            return false;
+        }
+        const auto* arc = static_cast<const Part::GeomArcOfCircle*>(geometry);
+        const Base::Vector3d start = arc->getStartPoint(/*emulateCCW=*/true);
+        const Base::Vector3d end = arc->getEndPoint(/*emulateCCW=*/true);
+        const Base::Vector3d first = Obj->getPoint(selPoints[0].GeoId, selPoints[0].PosId);
+        const Base::Vector3d second = Obj->getPoint(selPoints[1].GeoId, selPoints[1].PosId);
+        auto same = [](const Base::Vector3d& a, const Base::Vector3d& b) {
+            return (a - b).Length() < Precision::Confusion();
+        };
+        return (same(first, start) && same(second, end)) || (same(first, end) && same(second, start));
+    }
+
+    void makeCts_ArcLengthByEnds(bool& selAllowed, Base::Vector2d onSketchPos)
+    {
+        restartCommand(QT_TRANSLATE_NOOP("Command", "Add arc length constraint"));
+        createArcLengthConstrain(selCircleArc[0].GeoId, onSketchPos);
+        selAllowed = true;
     }
 
     void makeCts_1Point(bool& selAllowed, Base::Vector2d onSketchPos)
@@ -5270,9 +5308,49 @@ CmdSketcherConstrainBlock::CmdSketcherConstrainBlock()
     allowedSelSequences = {{SelEdge}};
 }
 
+namespace
+{
+/* FreeCAD-CH (ops#640, rank 44): Onshape's Fix (Shift+J) takes any entity (H/Sketch/fix.htm; gap
+ * S7), a vertex too. A sketch point is blocked as an edge is; the end or centre of a curve can't
+ * be blocked alone, so it gets the Lock tool's two distances from the origin, one undo step.
+ */
+void fixVertex(SketchObject* obj, int geoId, Sketcher::PointPos posId)
+{
+    const Part::Geometry* geometry = obj->getGeometry(geoId);
+    const int tid = Gui::Command::openActiveDocumentCommand(
+        std::string(QT_TRANSLATE_NOOP("Command", "Add fixed constraint")));
+    if (geometry && geometry->is<Part::GeomPoint>()) {
+        Gui::cmdAppObjectArgs(obj, "addConstraint(Sketcher.Constraint('Block',%d))", geoId);
+    }
+    else {
+        const Base::Vector3d point = obj->getPoint(geoId, posId);
+        Gui::cmdAppObjectArgs(obj,
+                              "addConstraint(Sketcher.Constraint('DistanceX', %d, %d, %.8g))",
+                              geoId,
+                              static_cast<int>(posId),
+                              point.x);
+        Gui::cmdAppObjectArgs(obj,
+                              "addConstraint(Sketcher.Constraint('DistanceY', %d, %d, %.8g))",
+                              geoId,
+                              static_cast<int>(posId),
+                              point.y);
+    }
+    Gui::Command::commitCommand(tid);
+    tryAutoRecompute(obj);
+}
+}  // namespace
+
 void CmdSketcherConstrainBlock::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
+
+    // FreeCAD-CH (ops#640, rank 44): under Onshape's keymap the tool takes a vertex too
+    if (Gui::ForkKeymap::isOnshape()) {
+        allowedSelSequences = {{SelEdge}, {SelVertex}};
+    }
+    else {
+        allowedSelSequences = {{SelEdge}};
+    }
 
     // get the selection
     std::vector<Gui::SelectionObject> selection = getSelection().getSelectionEx();
@@ -5314,6 +5392,26 @@ void CmdSketcherConstrainBlock::activated(int iMsg)
 
     std::vector<int> GeoId;
     const std::vector<Sketcher::Constraint*>& vals = Obj->Constraints.getValues();
+
+    // FreeCAD-CH (ops#640, rank 44): Onshape's Fix on vertices of the sketch, one at a time
+    if (Gui::ForkKeymap::isOnshape()) {
+        std::vector<std::pair<int, Sketcher::PointPos>> vertices;
+        for (auto& subname : SubNames) {
+            int GeoIdt;
+            Sketcher::PointPos PosIdt;
+            getIdsFromName(subname, Obj, GeoIdt, PosIdt);
+            if (isVertex(GeoIdt, PosIdt) && GeoIdt >= 0) {
+                vertices.emplace_back(GeoIdt, PosIdt);
+            }
+        }
+        if (!vertices.empty() && vertices.size() == SubNames.size()) {
+            for (const auto& [vertexGeoId, vertexPosId] : vertices) {
+                fixVertex(Obj, vertexGeoId, vertexPosId);
+            }
+            getSelection().clearSelection();
+            return;
+        }
+    }
 
     for (auto& subname : SubNames) {
         int GeoIdt;
@@ -5413,6 +5511,15 @@ void CmdSketcherConstrainBlock::applyConstraint(std::vector<SelIdPair>& selSeq, 
 
             commitCommand();
             tryAutoRecompute(Obj);
+        } break;
+        case 1:  // {Vertex}: FreeCAD-CH (ops#640, rank 44), Onshape's Fix on a vertex
+        {
+            auto* sketchgui =
+                static_cast<SketcherGui::ViewProviderSketch*>(getActiveGuiDocument()->getInEdit());
+            if (selSeq.empty() || selSeq.front().GeoId < 0) {
+                return;
+            }
+            fixVertex(sketchgui->getSketchObject(), selSeq.front().GeoId, selSeq.front().PosId);
         } break;
         default:
             break;
@@ -7722,7 +7829,8 @@ void CmdSketcherConstrainParallel::applyConstraint(std::vector<SelIdPair>& selSe
 class CmdSketcherConstrainPerpendicular: public CmdSketcherConstraint
 {
 public:
-    CmdSketcherConstrainPerpendicular();
+    // FreeCAD-CH (ops#640, rank 44): the name, for Onshape's Normal (the same constraint)
+    explicit CmdSketcherConstrainPerpendicular(const char* initName = "Sketcher_ConstrainPerpendicular");
     ~CmdSketcherConstrainPerpendicular() override
     {}
     const char* className() const override
@@ -7735,8 +7843,8 @@ protected:
     void applyConstraint(std::vector<SelIdPair>& selSeq, int seqIndex) override;
 };
 
-CmdSketcherConstrainPerpendicular::CmdSketcherConstrainPerpendicular()
-    : CmdSketcherConstraint("Sketcher_ConstrainPerpendicular")
+CmdSketcherConstrainPerpendicular::CmdSketcherConstrainPerpendicular(const char* initName)
+    : CmdSketcherConstraint(initName)
 {
     sAppModule = "Sketcher";
     sGroup = "Sketcher";
@@ -7763,6 +7871,29 @@ CmdSketcherConstrainPerpendicular::CmdSketcherConstrainPerpendicular()
                            {SelExternalEdge, SelVertexOrRoot, SelEdge}};
     ;
 }
+
+/* FreeCAD-CH (ops#640, rank 44): Onshape's Normal (Shift+K, H/Sketch/normal.htm): a line normal
+ * to a curve, through its centre for a circle or an arc. Sketcher's Perpendicular of a line and a
+ * curve is that constraint, so Normal is Perpendicular under Onshape's name and key (gap S30).
+ */
+class CmdSketcherConstrainNormal: public CmdSketcherConstrainPerpendicular
+{
+public:
+    CmdSketcherConstrainNormal()
+        : CmdSketcherConstrainPerpendicular("Sketcher_ConstrainNormal")
+    {
+        sMenuText = QT_TR_NOOP("Normal Constraint");
+        sToolTipText = QT_TR_NOOP("Constrains the selected line to be normal to the selected "
+                                  "curve (through the centre of a circle or an arc)");
+        sWhatsThis = "Sketcher_ConstrainNormal";
+        sStatusTip = sToolTipText;
+        sAccel = "Shift+K";  // Onshape's key; no FreeCAD command has it
+    }
+    const char* className() const override
+    {
+        return "CmdSketcherConstrainNormal";
+    }
+};
 
 void CmdSketcherConstrainPerpendicular::activated(int iMsg)
 {
@@ -11385,6 +11516,8 @@ protected:
     void applyConstraint(std::vector<SelIdPair>& selSeq, int seqIndex) override;
 
 private:
+    static std::vector<std::vector<SelType>> symmetricSequences(bool onshape);
+
     bool hasEndpoints(const Part::Geometry& geom)
     {
         return isLineSegment(geom) || isArcOfCircle(geom) || isArcOfEllipse(geom)
@@ -11406,24 +11539,141 @@ CmdSketcherConstrainSymmetric::CmdSketcherConstrainSymmetric()
     sAccel = "S";
     eType = ForEdit;
 
-    allowedSelSequences = {{SelEdge, SelVertexOrRoot},
-                           {SelExternalEdge, SelVertex},
-                           {SelVertexOrRoot, SelEdge, SelVertexOrRoot},
-                           {SelVertexOrRoot, SelExternalEdge, SelVertexOrRoot},
-                           {SelVertex, SelEdgeOrAxis, SelVertex},
-                           {SelVertexOrRoot, SelVertexOrRoot, SelEdge},
-                           {SelVertexOrRoot, SelVertexOrRoot, SelExternalEdge},
-                           {SelVertex, SelVertex, SelEdgeOrAxis},
-                           {SelVertexOrRoot, SelVertexOrRoot, SelVertexOrRoot},
-                           {SelEdge, SelEdgeOrAxis},
-                           {SelEdge, SelExternalEdge},
-                           {SelExternalEdge, SelEdge},
-                           {SelEdgeOrAxis, SelEdge}};
+    allowedSelSequences = symmetricSequences(false);
 }
+
+/* FreeCAD-CH (ops#640, rank 44): Onshape's Symmetric picks the axis first, then two points, two
+ * lines or two circles or arcs (H/Sketch/symmetric.htm; gaps S5, S6). Under Onshape's keymap the
+ * two-pick sequences that complete before the second element (an element about a point, a line
+ * about a line) are off ({SelUnknown} never matches, so the other indices keep their meaning), and
+ * sequences 13-16 take the axis first. Under the other keymaps 13-16 are off ({SelUnknown}), so
+ * their Symmetric works as before (an axis, then a vertex, then a vertex is still refused).
+ */
+std::vector<std::vector<SelType>> CmdSketcherConstrainSymmetric::symmetricSequences(bool onshape)
+{
+    std::vector<std::vector<SelType>> sequences = {
+        {SelEdge, SelVertexOrRoot},
+        {SelExternalEdge, SelVertex},
+        {SelVertexOrRoot, SelEdge, SelVertexOrRoot},
+        {SelVertexOrRoot, SelExternalEdge, SelVertexOrRoot},
+        {SelVertex, SelEdgeOrAxis, SelVertex},
+        {SelVertexOrRoot, SelVertexOrRoot, SelEdge},
+        {SelVertexOrRoot, SelVertexOrRoot, SelExternalEdge},
+        {SelVertex, SelVertex, SelEdgeOrAxis},
+        {SelVertexOrRoot, SelVertexOrRoot, SelVertexOrRoot},
+        {SelEdge, SelEdgeOrAxis},
+        {SelEdge, SelExternalEdge},
+        {SelExternalEdge, SelEdge},
+        {SelEdgeOrAxis, SelEdge},
+        {SelEdgeOrAxis, SelVertexOrRoot, SelVertexOrRoot},   // 13: axis, two points
+        {SelExternalEdge, SelVertexOrRoot, SelVertexOrRoot},  // 14
+        {SelEdgeOrAxis, SelEdge, SelEdge},                    // 15: axis, two lines or circles
+        {SelExternalEdge, SelEdge, SelEdge}};                 // 16
+    for (int index : onshape ? std::vector<int> {0, 1, 9, 10, 11, 12}
+                             : std::vector<int> {13, 14, 15, 16}) {
+        sequences[index] = {SelUnknown};
+    }
+    return sequences;
+}
+
+namespace
+{
+/// FreeCAD-CH (ops#640, rank 44): the axis of an Onshape Symmetric: a line, or the sketch's axes
+bool isSymmetryAxis(SketchObject* obj, int geoId)
+{
+    if (geoId == Sketcher::GeoEnum::HAxis || geoId == Sketcher::GeoEnum::VAxis) {
+        return true;
+    }
+    const Part::Geometry* geometry = obj->getGeometry(geoId);
+    return geometry && geometry->is<Part::GeomLineSegment>();
+}
+
+/** FreeCAD-CH (ops#640, rank 44): Onshape's Symmetric of two lines, two circles or two arcs about
+ * an axis: the second the mirror image of the first. Lines: each end of the first symmetric with
+ * the end of the second nearest its mirror image. Circles: the centres symmetric and the radii
+ * equal. Arcs: the ends symmetric crosswise (a mirror reverses the arc) and the radii equal. One
+ * undo step; false (with a warning) when the elements aren't such a pair.
+ */
+bool addSymmetricPair(SketchObject* obj, int axis, int first, int second)
+{
+    const Part::Geometry* geometry1 = obj->getGeometry(first);
+    const Part::Geometry* geometry2 = obj->getGeometry(second);
+    const Part::Geometry* axisGeometry = obj->getGeometry(axis);
+    auto wrong = [obj]() {
+        Gui::TranslatedUserWarning(
+            obj,
+            QObject::tr("Wrong selection"),
+            QObject::tr("Select the symmetry line first, then two points, two lines, two circles "
+                        "or two arcs."));
+        return false;
+    };
+    if (!geometry1 || !geometry2 || !axisGeometry || first == second || first == axis
+        || second == axis || !isSymmetryAxis(obj, axis)) {
+        return wrong();
+    }
+
+    std::vector<std::string> constraints;
+    auto symmetric = [axis](int geo1, Sketcher::PointPos pos1, int geo2, Sketcher::PointPos pos2) {
+        return "Sketcher.Constraint('Symmetric'," + std::to_string(geo1) + ","
+            + std::to_string(static_cast<int>(pos1)) + "," + std::to_string(geo2) + ","
+            + std::to_string(static_cast<int>(pos2)) + "," + std::to_string(axis) + ")";
+    };
+    const auto start = Sketcher::PointPos::start;
+    const auto end = Sketcher::PointPos::end;
+    const auto mid = Sketcher::PointPos::mid;
+    if (geometry1->is<Part::GeomLineSegment>() && geometry2->is<Part::GeomLineSegment>()) {
+        // the first's start mirrored, and the second's end nearer to it than its start: crosswise
+        const auto* line = static_cast<const Part::GeomLineSegment*>(axisGeometry);
+        const Base::Vector3d base = line->getStartPoint();
+        Base::Vector3d direction = line->getEndPoint() - base;
+        if (direction.Length() < Precision::Confusion()) {
+            return wrong();
+        }
+        direction.Normalize();
+        const Base::Vector3d point = obj->getPoint(first, start);
+        const Base::Vector3d foot = base + direction * ((point - base) * direction);
+        const Base::Vector3d mirrored = foot * 2.0 - point;
+        const bool crosswise = (obj->getPoint(second, end) - mirrored).Length()
+            < (obj->getPoint(second, start) - mirrored).Length();
+        constraints.push_back(symmetric(first, start, second, crosswise ? end : start));
+        constraints.push_back(symmetric(first, end, second, crosswise ? start : end));
+    }
+    else if (geometry1->is<Part::GeomCircle>() && geometry2->is<Part::GeomCircle>()) {
+        constraints.push_back(symmetric(first, mid, second, mid));
+        constraints.push_back("Sketcher.Constraint('Equal'," + std::to_string(first) + ","
+                              + std::to_string(second) + ")");
+    }
+    else if (geometry1->is<Part::GeomArcOfCircle>() && geometry2->is<Part::GeomArcOfCircle>()) {
+        constraints.push_back(symmetric(first, start, second, end));
+        constraints.push_back(symmetric(first, end, second, start));
+        constraints.push_back("Sketcher.Constraint('Equal'," + std::to_string(first) + ","
+                              + std::to_string(second) + ")");
+    }
+    else {
+        return wrong();
+    }
+
+    const int tid = Gui::Command::openActiveDocumentCommand(
+        std::string(QT_TRANSLATE_NOOP("Command", "Add symmetric constraint")));
+    try {
+        for (const auto& constraint : constraints) {
+            Gui::cmdAppObjectArgs(obj, "addConstraint(%s)", constraint.c_str());
+        }
+    }
+    catch (const Base::Exception&) {
+        Gui::Command::abortCommand(tid);
+        return wrong();
+    }
+    Gui::Command::commitCommand(tid);
+    tryAutoRecompute(obj);
+    return true;
+}
+}  // namespace
 
 void CmdSketcherConstrainSymmetric::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
+    allowedSelSequences = symmetricSequences(Gui::ForkKeymap::isOnshape());  // FreeCAD-CH (ops#640)
     // get the selection
     ModelPickBooking modelPicks;  // FreeCAD-CH (ops#634)
     std::vector<Gui::SelectionObject> selection = getSelection().getSelectionEx();
@@ -11551,6 +11801,24 @@ void CmdSketcherConstrainSymmetric::activated(int iMsg)
     }
 
     getIdsFromName(SubNames[2], Obj, GeoId3, PosId3);
+
+    // FreeCAD-CH (ops#640, rank 44): Onshape's axis and two lines, circles or arcs. The axis is
+    // the one line among circles or arcs, else the first pick (Onshape's order)
+    if (Gui::ForkKeymap::isOnshape() && isEdge(GeoId1, PosId1) && isEdge(GeoId2, PosId2)
+        && isEdge(GeoId3, PosId3)) {
+        const bool line2 = isSymmetryAxis(Obj, GeoId2);
+        const bool line3 = isSymmetryAxis(Obj, GeoId3);
+        if (!isSymmetryAxis(Obj, GeoId1) && line2 && !line3) {
+            std::swap(GeoId1, GeoId2);
+        }
+        else if (!isSymmetryAxis(Obj, GeoId1) && line3 && !line2) {
+            std::swap(GeoId1, GeoId3);
+        }
+        if (addSymmetricPair(Obj, GeoId1, GeoId2, GeoId3)) {
+            getSelection().clearSelection();
+        }
+        return;
+    }
 
     if (isEdge(GeoId1, PosId1) && isVertex(GeoId3, PosId3)) {
         std::swap(GeoId1, GeoId3);
@@ -11827,6 +12095,44 @@ void CmdSketcherConstrainSymmetric::applyConstraint(std::vector<SelIdPair>& selS
             }
             break;
         }
+        case 13:  // {SelEdgeOrAxis, SelVertexOrRoot, SelVertexOrRoot}: FreeCAD-CH (ops#640)
+        case 14:  // {SelExternalEdge, SelVertexOrRoot, SelVertexOrRoot}
+        {
+            GeoId3 = selSeq.at(0).GeoId;
+            GeoId1 = selSeq.at(1).GeoId;
+            PosId1 = selSeq.at(1).PosId;
+            GeoId2 = selSeq.at(2).GeoId;
+            PosId2 = selSeq.at(2).PosId;
+            if (!isSymmetryAxis(Obj, GeoId3)) {
+                Gui::TranslatedUserWarning(
+                    Obj,
+                    QObject::tr("Wrong selection"),
+                    QObject::tr("Select the symmetry line first, then two points, two lines, two "
+                                "circles or two arcs."));
+                return;
+            }
+            if (areAllPointsOrSegmentsFixed(Obj, GeoId1, GeoId2, GeoId3)) {
+                showNoConstraintBetweenFixedGeometry(Obj);
+                return;
+            }
+            openCommand(QT_TRANSLATE_NOOP("Command", "Add symmetric constraint"));
+            Gui::cmdAppObjectArgs(Obj,
+                                  "addConstraint(Sketcher.Constraint('Symmetric',%d,%d,%d,%d,%d))",
+                                  GeoId1,
+                                  static_cast<int>(PosId1),
+                                  GeoId2,
+                                  static_cast<int>(PosId2),
+                                  GeoId3);
+            commitCommand();
+            tryAutoRecompute(Obj);
+            getSelection().clearSelection();
+            return;
+        }
+        case 15:  // {SelEdgeOrAxis, SelEdge, SelEdge}: FreeCAD-CH (ops#640)
+        case 16:  // {SelExternalEdge, SelEdge, SelEdge}
+            addSymmetricPair(Obj, selSeq.at(0).GeoId, selSeq.at(1).GeoId, selSeq.at(2).GeoId);
+            getSelection().clearSelection();
+            return;
         default:
             break;
     }
@@ -12820,6 +13126,7 @@ void CreateSketcherCommandsConstraints()
     rcCmdMgr.addCommand(new CmdSketcherDimension());
     rcCmdMgr.addCommand(new CmdSketcherConstrainParallel());
     rcCmdMgr.addCommand(new CmdSketcherConstrainPerpendicular());
+    rcCmdMgr.addCommand(new CmdSketcherConstrainNormal());  // FreeCAD-CH (ops#640, rank 44)
     rcCmdMgr.addCommand(new CmdSketcherConstrainTangent());
     rcCmdMgr.addCommand(new CmdSketcherConstrainDistance());
     rcCmdMgr.addCommand(new CmdSketcherConstrainDistanceX());

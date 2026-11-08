@@ -52,6 +52,7 @@
 #include <Gui/Notifications.h>
 #include <Gui/Command.h>
 #include <Gui/CommandT.h>
+#include <Gui/ForkKeymap.h>
 
 #include <Mod/Sketcher/App/SketchObject.h>
 
@@ -366,9 +367,17 @@ private:
         }
     }
 
+    /// FreeCAD-CH (ops#640, rank 47): Onshape offsets an open curve on one side, the cursor's
+    /// (its arrow; a negative distance flips it), not into a loop around it (gap S21) [guess: the
+    /// arrow implies one side]
+    static bool openCurvesOneSide()
+    {
+        return Gui::ForkKeymap::isOnshape();
+    }
+
     void getOffsetGeos(std::vector<Part::Geometry*>& geometriesToAdd, std::vector<int>& listOfOffsetGeoIds)
     {
-        TopoDS_Shape offsetShape = makeOffsetShape();
+        TopoDS_Shape offsetShape = makeOffsetShape(openCurvesOneSide());
         if (offsetShape.IsNull()) {
             return;
         }
@@ -1006,6 +1015,7 @@ private:
     void findOffsetLength()
     {
         double newOffsetLength = std::numeric_limits<double>::max();
+        bool nearestIsOpen = false;  // FreeCAD-CH (ops#640, rank 47)
 
         BRepBuilderAPI_MakeVertex mkVertex({endpoint.x, endpoint.y, 0.0});
         TopoDS_Vertex vertex = mkVertex.Vertex();
@@ -1015,6 +1025,7 @@ private:
                 double distance = distTool.Value();
                 if (distance == std::min(distance, newOffsetLength)) {
                     newOffsetLength = distance;
+                    nearestIsOpen = !BRep_Tool::IsClosed(wire);
 
                     gp_Pnt pnt = distTool.PointOnShape1(1);
                     pointOnSourceWire = Base::Vector2d(pnt.X(), pnt.Y());
@@ -1037,6 +1048,32 @@ private:
 
         if (newOffsetLength != std::numeric_limits<double>::max()) {
             offsetLength = newOffsetLength;
+        }
+
+        // FreeCAD-CH (ops#640, rank 47): an open curve is offset on the cursor's side: of the two
+        // one-sided offsets, the one nearer the cursor
+        if (openCurvesOneSide() && nearestIsOpen && offsetLength > Precision::Confusion()) {
+            const double length = offsetLength;
+            auto distanceToCursor = [&](double signedLength) {
+                offsetLength = signedLength;
+                try {
+                    TopoDS_Shape shape = makeOffsetShape(true);
+                    if (!shape.IsNull()) {
+                        BRepExtrema_DistShapeShape distTool(shape, vertex);
+                        if (distTool.IsDone()) {
+                            return distTool.Value();
+                        }
+                    }
+                }
+                catch (const Standard_Failure&) {
+                }
+                catch (const Base::Exception&) {
+                }
+                return std::numeric_limits<double>::max();
+            };
+            const double plus = distanceToCursor(length);
+            const double minus = distanceToCursor(-length);
+            offsetLength = minus < plus ? -length : length;
         }
     }
 
@@ -1214,6 +1251,13 @@ void DSHOffsetController::configureToolWidget()
 
             )
         );
+
+        // FreeCAD-CH (ops#640, rank 47): Onshape's offset keeps its distance as a dimension (gap
+        // S21) [guess: the reference doesn't say], so the box starts ticked
+        if (Gui::ForkKeymap::isOnshape()) {
+            handler->offsetConstraint = true;
+            syncCheckboxToHandler(WCheckbox::SecondBox, true);
+        }
     }
 
     onViewParameters[OnViewParameter::First]->setLabelType(

@@ -33,6 +33,7 @@
 #include <Gui/Notifications.h>
 #include <Gui/Command.h>
 #include <Gui/CommandT.h>
+#include <Gui/ForkKeymap.h>
 #include <Gui/InputHint.h>
 #include <Mod/Sketcher/App/SketchObject.h>
 
@@ -395,6 +396,17 @@ private:
                 else if (constructionMethod() == ConstructionMethod::ThreePoints) {
                     corner2 = corner2Initial;
                     corner3 = onSketchPos;
+                    // FreeCAD-CH (ops#640, rank 49): Onshape's aligned rectangle stays a
+                    // rectangle (gap S26): the third corner goes square off the first side, at
+                    // the cursor's distance from it (a parallelogram under the other keymaps)
+                    if (Gui::ForkKeymap::isOnshape()) {
+                        const Base::Vector2d side12 = corner2 - corner1;
+                        if (side12.Length() > Precision::Confusion()) {
+                            const Base::Vector2d normal =
+                                Base::Vector2d(-side12.y, side12.x) / side12.Length();
+                            corner3 = corner2 + normal * ((onSketchPos - corner2) * normal);
+                        }
+                    }
                     if (side == getPointSideOfVector(corner3, corner2 - corner1, corner1)) {
                         corner4 = corner1 + (corner3 - corner2);
                         cornersReversed = false;

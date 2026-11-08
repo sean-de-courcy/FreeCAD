@@ -29,6 +29,7 @@
 #include <QString>
 
 #include <App/Datums.h>
+#include <Gui/ForkKeymap.h>
 #include <Gui/Action.h>
 #include <Gui/Application.h>
 #include <Gui/BitmapFactory.h>
@@ -853,6 +854,41 @@ bool CmdSketcherCreateRectangleCenter::isActive()
     return isCommandActive(getActiveGuiDocument());
 }
 
+// FreeCAD-CH (ops#640, rank 49): Onshape's aligned rectangle, a tool of its own: a side by two
+// clicks, then the width square off it (the 3-corner method, kept square under Onshape's keymap)
+DEF_STD_CMD_AU(CmdSketcherCreateRectangleAligned)
+
+CmdSketcherCreateRectangleAligned::CmdSketcherCreateRectangleAligned()
+    : Command("Sketcher_CreateRectangle_Aligned")
+{
+    sAppModule = "Sketcher";
+    sGroup = "Sketcher";
+    sMenuText = QT_TR_NOOP("Aligned Rectangle");
+    sToolTipText = QT_TR_NOOP("Creates a rectangle from one side, then its width");
+    sWhatsThis = "Sketcher_CreateRectangle_Aligned";
+    sStatusTip = sToolTipText;
+    sPixmap = "Sketcher_CreateRectangle";
+    eType = ForEdit;
+}
+
+CONSTRUCTION_UPDATE_ACTION(CmdSketcherCreateRectangleAligned, "Sketcher_CreateRectangle")
+
+void CmdSketcherCreateRectangleAligned::activated(int iMsg)
+{
+    Q_UNUSED(iMsg);
+    ActivateHandler(
+        getActiveGuiDocument(),
+        std::make_unique<DrawSketchHandlerRectangle>(
+            ConstructionMethods::RectangleConstructionMethod::ThreePoints
+        )
+    );
+}
+
+bool CmdSketcherCreateRectangleAligned::isActive()
+{
+    return isCommandActive(getActiveGuiDocument());
+}
+
 
 // Rounded rectangle ===============================================================
 
@@ -1174,6 +1210,19 @@ CONSTRUCTION_UPDATE_ACTION(CmdSketcherCreateRegularPolygon, "Sketcher_CreateRegu
 void CmdSketcherCreateRegularPolygon::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
+
+    // FreeCAD-CH (ops#640, rank 49): Onshape's polygon opens no window (gap S28): the tool's
+    // Sides field sets the count while drawing, starting from the last one used [guess: 6 when
+    // none was, Onshape's hexagon]
+    if (Gui::ForkKeymap::isOnshape()) {
+        const int sides = static_cast<int>(
+            App::GetApplication()
+                .GetParameterGroupByPath("User parameter:BaseApp/Preferences/Mod/Sketcher")
+                ->GetInt("DefaultRegularPolygonSides", 6));
+        ActivateHandler(getActiveGuiDocument(),
+                        std::make_unique<DrawSketchHandlerPolygon>(std::max(3, sides)));
+        return;
+    }
 
     // Pop-up asking for values
     SketcherRegularPolygonDialog srpd;
@@ -1989,6 +2038,7 @@ void CreateSketcherCommandsCreateGeo()
     rcCmdMgr.addCommand(new CmdSketcherCreatePolylineLegacy());
     rcCmdMgr.addCommand(new CmdSketcherCreateRectangle());
     rcCmdMgr.addCommand(new CmdSketcherCreateRectangleCenter());
+    rcCmdMgr.addCommand(new CmdSketcherCreateRectangleAligned());  // FreeCAD-CH (ops#640)
     rcCmdMgr.addCommand(new CmdSketcherCreateOblong());
     rcCmdMgr.addCommand(new CmdSketcherCreateTriangle());
     rcCmdMgr.addCommand(new CmdSketcherCreateSquare());
