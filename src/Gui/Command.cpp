@@ -31,6 +31,7 @@
 #include <QDir>
 #include <QKeySequence>
 #include <QMessageBox>
+#include <QMetaObject>
 
 #include <boost/algorithm/string/replace.hpp>
 
@@ -516,11 +517,30 @@ bool Command::acceptOpenDialog(App::Document* locked) const
     if (!locked) {
         return true;
     }
-    if (Gui::Control().activeDialog(locked)) {
-        Gui::Control().accept(locked);
+    if (Gui::TaskView::TaskDialog* dialog = Gui::Control().activeDialog(locked)) {
+        // FreeCAD-CH (ops#640 rank 24, hands-on F2): Onshape's next tool commits a dialog with
+        // any input, even in error, and drops an empty new one silently. A dialog that can tell
+        // (PartDesign's TaskDlgFeatureParameters::hasInput, invoked by name: no PartDesign header
+        // here) and has none is cancelled, as its Cancel does; any other dialog is accepted
+        bool hasInput = true;
+        if (dialog->metaObject()->indexOfMethod("hasInput()") >= 0) {
+            QMetaObject::invokeMethod(
+                dialog,
+                "hasInput",
+                Qt::DirectConnection,
+                Q_RETURN_ARG(bool, hasInput)
+            );
+        }
+        if (hasInput) {
+            Gui::Control().accept(locked);
+        }
+        else {
+            Gui::Control().reject(locked);
+        }
     }
-    // the dialog's OK commits its step and resets the edit, which releases the lock; a failed
-    // accept (the dialog shows its own message) leaves both
+    // the dialog's OK (a feature in error is committed as it is) or Cancel ends its step and
+    // resets the edit, which releases the lock; a failed accept (the dialog shows its own
+    // message) leaves both
     return !locked->isStepLocked();
 }
 
