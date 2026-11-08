@@ -194,7 +194,11 @@ class TestVariablesPanelGui(unittest.TestCase):
             "Keymap", "Onshape"
         )
         if keymap != "FreeCAD":
-            self.assertTrue(dock.isVisible())
+            # Shown once at the start (the one-time marker); whether it still shows depends on
+            # the classes run before this one (TestVariablesImportGui comes first and its panel
+            # is closed after), so the oracle is the marker and the side
+            marker = App.ParamGet("User parameter:BaseApp/Preferences/DockWindows/VariablesView")
+            self.assertTrue(marker.GetBool("ShownByKeymap", False))
             self.assertEqual(
                 Gui.getMainWindow().dockWidgetArea(dock), QtCore.Qt.RightDockWidgetArea
             )

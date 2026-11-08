@@ -456,7 +456,10 @@ protected:
     void activated(int iMsg) override
     {
         Q_UNUSED(iMsg);
-        QWidget* view = DockWindowManager::instance()->getDockWindow("Std_VariablesView");
+        // By its registered name: getDockWindow() matches the dock's object name, which is the
+        // panel's own ("Variables"), so it found none and the tool did nothing
+        QWidget* view =
+            DockWindowManager::instance()->findRegisteredDockWindow("Std_VariablesView");
         if (!view) {
             return;
         }
@@ -1268,6 +1271,10 @@ void VariablesView::onActiveDocument(const Gui::Document& doc)
         showMessage(QString(), false);
         scheduleRebuild();
     }
+    // FreeCAD-CH (ops#640, rank 15): Add follows the document now, also while the panel is hidden
+    // and its rebuild waits: the Variable tool shows the panel and triggers Add at once, which a
+    // hidden panel's stale state left disabled (no Add dialog)
+    updateActions();
 }
 
 void VariablesView::onDeleteDocument(const Gui::Document& doc)
