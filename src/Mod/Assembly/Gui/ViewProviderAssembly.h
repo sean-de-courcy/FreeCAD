@@ -25,6 +25,7 @@
 
 #include <QCoreApplication>
 #include <QMetaObject>
+#include <QPointer>
 #include <fastsignals/signal.h>
 
 #include <Mod/Assembly/AssemblyGlobal.h>
@@ -287,6 +288,8 @@ private:
 
     void highlightJointElements(App::DocumentObject* joint);
     void clearJointElementHighlight();
+    /// Drops the connections setEdit() makes (FreeCAD-CH, ops#651)
+    void disconnectEditSignals();
 
     void applyIsolationRecursively(
         App::DocumentObject* current,
@@ -295,9 +298,11 @@ private:
         std::set<App::DocumentObject*>& visited
     );
 
-    TaskAssemblyMessages* taskSolver {nullptr};
+    // A QPointer: the task panel deletes its contextual panels when its dialog closes (ops#640)
+    QPointer<TaskAssemblyMessages> taskSolver;
 
     QMetaObject::Connection workbenchConnection;
+    QMetaObject::Connection taskViewConnection;
     fastsignals::connection connectActivatedVP;
     fastsignals::connection connectSolverUpdate;
     fastsignals::scoped_connection m_preTransactionConn;

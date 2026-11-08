@@ -58,6 +58,9 @@
 #include <Gui/BitmapFactory.h>
 #include <Gui/CommandT.h>
 #include <Gui/Control.h>
+#include <Gui/TaskView/TaskView.h>
+#include <Gui/Workbench.h>
+#include <Gui/WorkbenchManager.h>
 #include <Gui/Inventor/Draggers/SoTransformDragger.h>
 #include <Gui/MDIView.h>
 #include <Gui/MainWindow.h>
@@ -129,7 +132,7 @@ ViewProviderAssembly::ViewProviderAssembly()
 ViewProviderAssembly::~ViewProviderAssembly()
 {
     m_preTransactionConn.disconnect();
-    QObject::disconnect(workbenchConnection);
+    disconnectEditSignals();
 
     updateTaskPanel(false);
 };
@@ -302,6 +305,12 @@ bool ViewProviderAssembly::setEdit(int mode)
 
         updateTaskPanel(true);
 
+        // FreeCAD-CH (ops#651): an assembly enters edit again each time its tab is activated, and
+        // a document may hold several. A connection left from an earlier edit would outlive this
+        // view provider and call it after its document is closed ("Illegal storage access" at the
+        // next workbench switch), so the edit's connections are always made afresh
+        disconnectEditSignals();
+
         auto* assembly = getObject<AssemblyObject>();
         connectSolverUpdate = assembly->signalSolverUpdate.connect([this] {
             UpdateSolverInformation();
@@ -322,6 +331,21 @@ bool ViewProviderAssembly::setEdit(int mode)
             [this](const QString& name) { this->onWorkbenchActivated(name); }
         );
 
+        // FreeCAD-CH (ops#640 round 7, gap A10): the "Solver messages" panel can only join a task
+        // dialog, so it is added again each time one opens during the edit (a joint's, Insert's)
+        if (auto* taskView = Gui::Control().taskPanel()) {
+            taskViewConnection = QObject::connect(
+                taskView,
+                &Gui::TaskView::TaskView::taskUpdate,
+                [this]() {
+                    auto* workbench = Gui::WorkbenchManager::instance()->active();
+                    if (isInEditMode() && workbench && workbench->name() == "AssemblyWorkbench") {
+                        updateTaskPanel(true);
+                    }
+                }
+            );
+        }
+
         assembly->recomputeFeature(true);
 
         return true;
@@ -338,6 +362,9 @@ void ViewProviderAssembly::unsetEdit(int mode)
 
         unsetDragger();
         detachSelection();
+
+        // Before the early return below: a document being closed has no active view (ops#651)
+        disconnectEditSignals();
 
         // Check if the view is still active before trying to deactivate the assembly.
         auto activeView = getDocument()->getActiveView();
@@ -358,12 +385,19 @@ void ViewProviderAssembly::unsetEdit(int mode)
 
         updateTaskPanel(false);
 
-        connectSolverUpdate.disconnect();
-        connectActivatedVP.disconnect();
-
         return;
     }
     ViewProviderPart::unsetEdit(mode);
+}
+
+void ViewProviderAssembly::disconnectEditSignals()
+{
+    QObject::disconnect(workbenchConnection);
+    workbenchConnection = {};
+    QObject::disconnect(taskViewConnection);
+    taskViewConnection = {};
+    connectSolverUpdate.disconnect();
+    connectActivatedVP.disconnect();
 }
 
 void ViewProviderAssembly::slotActivatedVP(const Gui::ViewProviderDocumentObject* vp, const char* name)
@@ -1822,8 +1856,29 @@ void ViewProviderAssembly::UpdateSolverInformation()
         }
     }
 
+    // FreeCAD-CH (ops#640 round 7, gaps A10, A11): the joints in error (a pick whose face is gone)
+    // first, as Onshape's red mates: the solve leaves them out, so they are named here, never
+    // dropped silently; the link selects them in the tree
+    std::vector<std::string> errorJoints;
+    if (auto* jointGroup = assembly->getJointGroup()) {
+        for (auto* joint : jointGroup->getObjects()) {
+            auto* suppressed = dynamic_cast<App::PropertyBool*>(joint->getPropertyByName("Suppressed"));
+            if (joint->isError() && !(suppressed && suppressed->getValue())) {
+                errorJoints.emplace_back(joint->getNameInDocument());
+            }
+        }
+    }
+
     if (assembly->isEmpty()) {
         signalSetUp(QStringLiteral("empty"), tr("Empty Assembly"), QString(), QString());
+    }
+    else if (!errorJoints.empty()) {
+        signalSetUp(
+            QStringLiteral("joints_in_error"),
+            tr("Joints in error:") + QLatin1String(" "),
+            QStringLiteral("#errors"),
+            QStringLiteral("(%1)").arg(objListHelper(assembly, errorJoints))
+        );
     }
     else if (dofs < 0 || /*hasConflicts*/ hasRedundancies) {  // over-constrained
         // Currently the solver does not distinguish between conflicts and redundancies.
@@ -1899,13 +1954,19 @@ void ViewProviderAssembly::updateTaskPanel(bool show)
         return;
     }
 
+    // FreeCAD-CH (ops#640 round 7): the panel joins the document's task dialog when there is one;
+    // made while none is open it would never be shown, so it is made only when it can join
+    App::Document* doc = this->getObject()->getDocument();
     if (show && !taskSolver) {
+        if (!Gui::Control().activeDialog(doc)) {
+            return;
+        }
         taskSolver = new TaskAssemblyMessages(this);
-        taskView->addContextualPanel(taskSolver, this->getObject()->getDocument());
+        taskView->addContextualPanel(taskSolver, doc);
         UpdateSolverInformation();
     }
     else if (!show && taskSolver) {
-        taskView->removeContextualPanel(taskSolver, this->getObject()->getDocument());
+        taskView->removeContextualPanel(taskSolver, doc);
         taskSolver = nullptr;
     }
 }

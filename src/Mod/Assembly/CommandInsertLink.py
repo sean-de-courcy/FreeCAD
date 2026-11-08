@@ -51,6 +51,23 @@ tooltip = QT_TRANSLATE_NOOP(
     "</ul>",
 )
 
+# FreeCAD-CH (ops#640 round 7, gap A16): the implicit Part Studio's tab name (App::DocumentTabs)
+IMPLICIT_STUDIO = UtilsAssembly.IMPLICIT_STUDIO
+implicitStudioParts = UtilsAssembly.implicitStudioParts
+
+
+def typedTabsOn():
+    """Whether the typed tabs are on (the Onshape keymap, Gui::DocumentTabs::isOn)."""
+    return hasattr(Gui, "DocumentTabs") and Gui.DocumentTabs.isOn() and hasattr(App, "DocumentTabs")
+
+
+class ImplicitStudio:
+    """The insert list's row for the implicit Part Studio (the document's top level)."""
+
+    def __init__(self, doc, label):
+        self.Document = doc
+        self.Label = label
+
 
 class CommandGroupInsert:
     def GetCommands(self):
@@ -206,11 +223,17 @@ class TaskAssemblyInsertLink(QtCore.QObject):
         self.form.partList.clear()
         self.doc_item_map.clear()
 
-        docList = App.listDocuments().values()
+        docList = list(App.listDocuments().values())
         if len(docList) > 20:
             collapse = True
         else:
             collapse = False
+
+        # FreeCAD-CH (ops#640 round 7, gap A16): with the typed tabs, this document first
+        studioTabs = typedTabsOn()
+        if studioTabs and self.doc in docList:
+            docList.remove(self.doc)
+            docList.insert(0, self.doc)
 
         for doc in docList:
             # Create a new tree item for the document
@@ -286,13 +309,46 @@ class TaskAssemblyInsertLink(QtCore.QObject):
                             process_objects(obj.ViewObject.claimChildren(), objItem)
 
             guiDoc = Gui.getDocument(doc.Name)
-            process_objects(guiDoc.TreeRootObjects, docItem)
+            if studioTabs and doc == self.doc:
+                self.addStudioItems(doc, docItem, guiDoc.TreeRootObjects, process_objects)
+            else:
+                process_objects(guiDoc.TreeRootObjects, docItem)
             if collapse:
                 self.form.partList.collapseAll()
             else:
                 self.form.partList.expandToDepth(0)
 
         self.adjustTreeWidgetSize()
+
+    def addStudioItems(self, doc, docItem, rootObjects, process_objects):
+        """FreeCAD-CH (ops#640 round 7, gap A16): this document's Part Studios first, by tab name
+        and in tab order, each a row that inserts the whole studio (Onshape's "Insert entire Part
+        Studio"), its parts below it; then the other root objects (assemblies...) as before.
+
+        A studio that is an App::Part inserts as one link, which follows the studio. The implicit
+        studio (the top level, "Part Studio 1") inserts a link per part, held together by a rigid
+        group [guess: one rigid instance, as near as it gets without a container; a part added
+        to the studio later is not added to the instance]."""
+        listed = set()
+        for name, kind, label in App.DocumentTabs.tabs(doc):
+            if kind != "PartStudio":
+                continue
+            studioItem = QtGui.QTreeWidgetItem(docItem)
+            studioItem.setText(0, label)
+            if name == IMPLICIT_STUDIO:
+                members = [obj for obj in rootObjects if App.DocumentTabs.tabOf(obj) == name]
+                studioItem.setIcon(0, QIcon(":/icons/PartDesign_Body.svg"))
+                if implicitStudioParts(doc):
+                    studioItem.setData(0, QtCore.Qt.UserRole, ImplicitStudio(doc, label))
+                process_objects(members, studioItem)
+                listed.update(obj.Name for obj in members)
+            else:
+                studio = doc.getObject(name)
+                studioItem.setIcon(0, studio.ViewObject.Icon)
+                studioItem.setData(0, QtCore.Qt.UserRole, studio)
+                process_objects(studio.ViewObject.claimChildren(), studioItem)
+                listed.add(name)
+        process_objects([obj for obj in rootObjects if obj.Name not in listed], docItem)
 
     def adjustTreeWidgetSize(self):
         # Adjust the height of the part list based on item count
@@ -407,6 +463,36 @@ class TaskAssemblyInsertLink(QtCore.QObject):
                 print(selectedPart.Document.Name)
                 documentItem.setText(0, f"{newDocName}.FCStd")"""
 
+        if isinstance(selectedPart, ImplicitStudio):
+            self.insertImplicitStudio(selectedPart, item)
+            return
+        self.insertLink(selectedPart, item)
+
+    def insertImplicitStudio(self, studio, item):
+        """FreeCAD-CH (ops#640 round 7, gap A16): the implicit Part Studio as one rigid instance:
+        a link per part, each keeping its pose in the studio relative to the first (the studio's
+        origin goes where a single part's would), all in one rigid group named after the studio.
+        Cancel or a right click on the row takes them out, as for a single insert."""
+        parts = implicitStudioParts(studio.Document)
+        if not parts:
+            return
+        first = self.insertLink(parts[0], item)
+        base = App.Placement(first.Placement.Base, App.Rotation())
+        first.Placement = base.multiply(parts[0].Placement)
+        links = [first]
+        for part in parts[1:]:
+            links.append(self.insertLink(part, item, base.multiply(part.Placement)))
+        if len(links) > 1:
+            group = CommandCreateJoint.createJointRigidGroupJoint(links)
+            if group is not None:
+                group.Label = studio.Label
+        Gui.Selection.clearSelection()
+        for link in links:
+            Gui.Selection.addSelection(self.doc.Name, link.Name, "")
+
+    def insertLink(self, selectedPart, item, placement=None):
+        """Inserts a link to selectedPart for the list's row item and returns it. A placement
+        given (a studio's later parts) places it there, with no offset of its own."""
         if selectedPart.isDerivedFrom("Assembly::AssemblyObject"):
             objType = "Assembly::AssemblyLink"
         else:
@@ -429,6 +515,12 @@ class TaskAssemblyInsertLink(QtCore.QObject):
         insertionDict["addedObject"] = addedObject
         self.insertionStack.append(insertionDict)
         self.increment_counter(item)
+
+        if placement is not None:
+            insertionDict["translation"] = App.Vector()
+            addedObject.Placement = placement
+            item.setSelected(False)
+            return addedObject
 
         translation = App.Vector()
         resetThreshold = (screenCorner - screenCenter).Length * 0.1
@@ -467,6 +559,8 @@ class TaskAssemblyInsertLink(QtCore.QObject):
 
         if len(self.insertionStack) == 1 and not UtilsAssembly.isAssemblyGrounded():
             self.handleFirstInsertion()
+
+        return addedObject
 
     def handleFirstInsertion(self):
         # FreeCAD-CH (ops#640, rank 60; Onshape hands-on E4): the first instance is not fixed and
