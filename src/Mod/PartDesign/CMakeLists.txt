@@ -88,6 +88,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestStudioSequence.py
     PartDesignTests/TestMergeScope.py
     PartDesignTests/TestResultRules.py
+    PartDesignTests/TestDatumPlanePoint.py
 )
 
 if(BUILD_GUI)
