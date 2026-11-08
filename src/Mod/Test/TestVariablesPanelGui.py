@@ -312,7 +312,8 @@ class TestVariablesPanelGui(unittest.TestCase):
 
     def test_rename(self):
         """G4. Renaming Width to BoxWidth in place: the Box and a sheet cell follow, the value
-        stays, one undo step; Undo brings the name and the texts back. Bad names change nothing."""
+        stays, one undo step; Undo brings the name and the texts back. Bad names change nothing
+        (a unit name such as mm is a good one since rank 54, as Onshape takes t)."""
         doc = self.standardDocument()
         self.sheet.set("B1", "=VarSet.Width")
         doc.recompute()
@@ -327,7 +328,7 @@ class TestVariablesPanelGui(unittest.TestCase):
         self.assertAlmostEqual(self.box.Length.Value, 40)
         self.assertIn(("VarSet", "BoxWidth"), self.rows())
 
-        for bad in ("mm", "Height", "A1"):
+        for bad in ("2w", "Height", "A1"):
             self.commit("VarSet", "BoxWidth", NAME, bad)
             self.assertEqual(doc.UndoCount, undoCount + 1, bad)
             self.assertTrue(self.message.isVisible(), bad)
