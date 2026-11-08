@@ -172,9 +172,21 @@ def selected(doc):
     return [(s.ObjectName, list(s.SubElementNames)) for s in Gui.Selection.getSelectionEx(doc.Name)]
 
 
+_viewParents = []
+
+
 def views3D():
+    """The 3D views. Their MDI area's and subwindows' wrappers are kept until the next call: a
+    temporary one took its children's wrappers with it when it went, and the view's wrapper
+    then answered "Internal C++ object (QMainWindow) already deleted"."""
     mdi = Gui.getMainWindow().findChild(QtWidgets.QMdiArea)
-    return [w.widget() for w in mdi.subWindowList() if w.widget().metaObject().className() == "Gui::View3DInventor"]
+    subWindows = mdi.subWindowList()
+    _viewParents[:] = [mdi] + list(subWindows)
+    return [
+        w.widget()
+        for w in subWindows
+        if w.widget().metaObject().className() == "Gui::View3DInventor"
+    ]
 
 
 def sendRepeats(kinds):
