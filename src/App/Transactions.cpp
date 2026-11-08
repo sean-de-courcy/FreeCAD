@@ -26,6 +26,7 @@
 #include <cassert>
 
 #include <atomic>
+#include <memory>
 #include <Base/Console.h>
 #include <Base/Reader.h>
 #include <Base/Writer.h>
@@ -36,6 +37,7 @@
 #include "DocumentObject.h"
 #include "Property.h"
 #include "PropertyGeo.h"
+#include "PropertyLinks.h"
 
 
 FC_LOG_LEVEL_INIT("App", true, true)
@@ -1180,6 +1182,27 @@ bool isComparable(const Property& prop)
 {
     return !prop.isDerivedFrom<PropertyComplexGeoData>();
 }
+
+// Whether the live property holds the value its transaction copy recorded. The copy isn't
+// always of the live property's type (PropertyFloat::Copy() makes a PropertyFloat of a
+// PropertyLength, and isSame() checks the type), so a copy of the live property is compared with
+// it: both come from the same Copy(). A link recorded is a change (as PropertyLinkBase::isSame()
+// answers for every link): what it names doesn't hold all it saves (the naming solver's records
+// of a reference: a guess accepted changes no name, TestNamingSolver), and an expression
+// container's links don't tell two expressions on one object apart, while a
+// rename of what they name rewrites them in place before the record (VarSet's renameProperty in
+// another document), so the step that clears the stale Redo stack stays
+bool holdsRecorded(const Property& live, const Property& recorded)
+{
+    if (live.isDerivedFrom<PropertyLinkBase>()) {
+        return false;
+    }
+    std::unique_ptr<Property> now(live.Copy());
+    if (!now || now->getTypeId() != recorded.getTypeId()) {
+        return false;
+    }
+    return now->isSame(recorded);
+}
 }  // namespace
 
 bool TransactionObject::changesInputs(const TransactionalObject* pcObj, InputCheck check) const
@@ -1220,7 +1243,7 @@ bool TransactionObject::changesInputs(const TransactionalObject* pcObj, InputChe
             return true;
         }
         try {
-            if (!data.property->isSame(*data.propertyOrig)) {
+            if (!holdsRecorded(*data.propertyOrig, *data.property)) {
                 return true;
             }
         }

@@ -154,11 +154,12 @@ class FailurePassThroughBase:
         self.assertValid(self.body)
         self.assertVolume(self.body, volume)
 
-    def assertBodyShowsNothing(self):
+    def assertBodyShowsNothing(self, body=None):
         """A stopped Body writes an empty Shape and keeps its error (ops#640, regen item 6, F37):
         it shows nothing rather than its last result."""
-        self.assertFalse(self.body.isValid())
-        self.assertTrue(self.body.Shape.isNull(), "the stopped Body kept its last shape")
+        body = body or self.body
+        self.assertFalse(body.isValid())
+        self.assertTrue(body.Shape.isNull(), f"the stopped {body.Name} kept its last shape")
 
     # -- T1 ------------------------------------------------------------------------------------
 
@@ -647,7 +648,8 @@ class FailurePassThroughBase:
         expression on a Part box outside the Body. The box fails (length zero): the block fails
         naming it, and the Body doesn't continue: the boss after it doesn't compute alone on the
         empty pass-through, nor a Part::Mirroring of it or a second Body on the Body (ops#579,
-        review pr579-r3 T-R3-1, decision 255 (1)). Repaired, everything computes."""
+        review pr579-r3 T-R3-1, decision 255 (1)); both Bodies show nothing (regen item 6).
+        Repaired, everything computes."""
         gauge = models.box(self.doc, "Gauge", (2, 2, 10), at=(100, 0, 0))
         block = self.block()
         block.setExpression("Length", f"{gauge.Name}.Height")
@@ -665,7 +667,9 @@ class FailurePassThroughBase:
         self.assertFirstFeatureStopped(block, boss, mirror, f"'{gauge.Label}' has an error")
         self.assertStopped(second.Group[0], f"'{self.body.Label}', which has an error")
         self.assertStopped(second)
-        self.assertVolume(second, BLOCK + BOSS)
+        # Its Tip, the base feature of the stopped Body, is an unclaimed failure: it shows
+        # nothing either (regen item 6)
+        self.assertBodyShowsNothing(second)
 
         gauge.Length = 2
         self.recompute()

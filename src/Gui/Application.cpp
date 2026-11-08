@@ -196,6 +196,20 @@ void requireMainThread(const char* api)
     );
 }
 
+// FreeCAD-CH (ops#640): defined below; Gui/Document.cpp declares it too
+void updateRegenerationHold();
+
+namespace
+{
+/// FreeCAD-CH (ops#640): the documents whose regeneration on commit an open edit holds
+std::vector<App::Document*> regenerationHeldDocs;  // NOLINT
+
+void forgetRegenerationHold(const App::Document& doc)
+{
+    std::erase(regenerationHeldDocs, &doc);
+}
+}  // namespace
+
 class ViewProviderMap
 {
     std::unordered_map<const App::DocumentObject*, ViewProvider*> map;
@@ -1080,6 +1094,9 @@ void Application::slotNewDocument(const App::Document& Doc, bool isMainDoc)
     pDoc->signalResetEdit.connect(std::bind(&Gui::Application::slotResetEdit, this, sp::_1));
     // NOLINTEND
 
+    // FreeCAD-CH (ops#640): a document made while an object is in edit is held as the others
+    updateRegenerationHold();
+
     signalNewDocument(*pDoc, isMainDoc);
     if (isMainDoc) {
         pDoc->createView(View3DInventor::getClassTypeId());
@@ -1131,6 +1148,23 @@ void Application::slotDeleteDocument(const App::Document& Doc)
     Gui::Selection().clearCompleteSelection();
     doc->second->signalDeleteDocument(*doc->second);
     signalDeleteDocument(*doc->second);
+
+    // FreeCAD-CH (ops#640): the App document's undo steps go now: after its task dialogs are
+    // removed (TaskView::slotDeletedDocument, above), before its view providers are deleted
+    // (below). Its destructor would commit the open transaction (clearUndos) after they are
+    // gone, and the commit's no-op test (App::Transaction::changesInputs) reads the view
+    // providers recorded in the transaction: a document closed with a transaction open (a
+    // sketch made and its dialog closed, an edit's) crashed FreeCAD.
+    forgetRegenerationHold(Doc);
+    try {
+        const_cast<App::Document&>(Doc).clearUndos();
+    }
+    catch (const Base::Exception& e) {
+        e.reportException();
+    }
+    catch (...) {
+        Base::Console().error("Unknown exception clearing the undo steps of %s\n", Doc.getName());
+    }
 
     // If the active document gets destructed we must set it to 0. If there are further existing
     // documents then the view that becomes active sets the active document again. So, we needn't
@@ -1614,6 +1648,50 @@ void Application::setEditDocument(Gui::Document* pcDocument)
     d->editDocuments.push_back(pcDocument);
 
     updateActions();
+}
+
+/** FreeCAD-CH (ops#640): hold or release the regeneration on commit (App::Document::
+ * setRegenerateOnCommit()) of every GUI document while any document has an object in an edit
+ * that doesn't hold its step (a sketch's: ViewProvider::editHoldsOneStep() false). A commit
+ * then (a sketch's stroke, a Variables panel edit, a property edit in another document)
+ * leaves its document touched until the edit closes, as the Variables panel's own recompute
+ * does (ops#599 reviews pr599-r1 R1-1 and r1b R1b-3): a regeneration during a sketch's edit
+ * builds from the sketch that its Cancel then restores from a backup, leaving the result
+ * silently stale. Gui::Document::_resetEdit releases it before the edit's own commit, so the
+ * dialog's OK still regenerates. Only the documents it turned off are turned on again. Called
+ * when an edit starts or ends and when a document is made; declared where it is called (not in
+ * Application.h, which hundreds of files include).
+ */
+void Gui::updateRegenerationHold()
+{
+    Application* app = Application::Instance;
+    if (!app) {
+        return;
+    }
+    // An edit document whose edit was refused has no view provider in edit (ops#599 r1c R1c-a).
+    // An edit that holds its step (a feature dialog, the step lock) needs no hold: its document
+    // commits nothing else while it is open, and its own OK commits before resetEdit in some
+    // dialogs (TaskDlgAttacher::accept for a datum) and must regenerate then.
+    const auto editing = app->editDocuments();
+    const bool held = std::ranges::any_of(editing, [](Gui::Document* doc) {
+        return doc->getEditViewProvider() != nullptr && !doc->getDocument()->isStepLocked();
+    });
+    if (held) {
+        for (App::Document* doc : App::GetApplication().getDocuments()) {
+            if (app->getDocument(doc) && doc->regeneratesOnCommit()) {
+                doc->setRegenerateOnCommit(false);
+                regenerationHeldDocs.push_back(doc);
+            }
+        }
+        return;
+    }
+    std::vector<App::Document*> docs;
+    std::swap(docs, regenerationHeldDocs);
+    for (App::Document* doc : docs) {
+        if (app->getDocument(doc)) {
+            doc->setRegenerateOnCommit(true);
+        }
+    }
 }
 
 void Application::setActiveDocument(Gui::Document* pcDocument)

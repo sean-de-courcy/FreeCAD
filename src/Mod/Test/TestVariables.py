@@ -510,6 +510,11 @@ class TestSaveAndRename(VariablesBase):
         self.assertEqual(other.RedoCount, 0)
         self.assertEqual(len(other.Objects), 0)
         self.assertAlmostEqual(varSet.BoxWidth.Value, 20)
+        # FreeCAD-CH (ops#640): no step there records the freed boxes (the Redo stack, cleared at a
+        # step's commit, freed them under the rename's step, whose undo read freed memory)
+        other.undo()
+        other.redo()
+        self.assertEqual(len(other.Objects), 0)
 
     def test_rename_unchanged_object_redo_holds_keeps_redo(self):
         """The same, for an object in the redo stack that doesn't use the variable: nothing

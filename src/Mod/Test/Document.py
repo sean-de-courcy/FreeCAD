@@ -1499,27 +1499,31 @@ class UndoRedoCases(unittest.TestCase):
         self.assertEqual(self.Doc.RedoCount, 3)
 
         # new transaction eight
+        # FreeCAD-CH (ops#640): only a transaction committed as a step clears the Redo stack, so
+        # an open transaction leaves it, and its abort (a dialog's Cancel) keeps it
+        redos = ["Transaction2", "Transaction3", "Transaction4"]
         self.Doc.openTransaction("Transaction8")
         self.Doc.getObject("test1").Integer = 8
         self.assertEqual(self.Doc.UndoNames, ["Transaction8", "Transaction1"])
         self.assertEqual(self.Doc.UndoCount, 2)
-        self.assertEqual(self.Doc.RedoNames, [])
-        self.assertEqual(self.Doc.RedoCount, 0)
+        self.assertEqual(self.Doc.RedoNames, redos)
+        self.assertEqual(self.Doc.RedoCount, 3)
         self.Doc.abortTransaction()
         self.assertEqual(self.Doc.UndoNames, ["Transaction1"])
         self.assertEqual(self.Doc.UndoCount, 1)
-        self.assertEqual(self.Doc.RedoNames, [])
-        self.assertEqual(self.Doc.RedoCount, 0)
+        self.assertEqual(self.Doc.RedoNames, redos)
+        self.assertEqual(self.Doc.RedoCount, 3)
 
         # again new transaction eight
         self.Doc.openTransaction("Transaction8")
         self.Doc.getObject("test1").Integer = 8
         self.assertEqual(self.Doc.UndoNames, ["Transaction8", "Transaction1"])
         self.assertEqual(self.Doc.UndoCount, 2)
-        self.assertEqual(self.Doc.RedoNames, [])
-        self.assertEqual(self.Doc.RedoCount, 0)
+        self.assertEqual(self.Doc.RedoNames, redos)
+        self.assertEqual(self.Doc.RedoCount, 3)
 
-        # again new transaction nine
+        # again new transaction nine: it commits transaction eight, a step, which clears the
+        # Redo stack
         self.Doc.openTransaction("Transaction9")
         self.Doc.getObject("test1").Integer = 9
         self.assertEqual(self.Doc.UndoNames, ["Transaction9", "Transaction8", "Transaction1"])

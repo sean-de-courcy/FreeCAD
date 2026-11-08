@@ -484,13 +484,17 @@ class TestRegenerate(RegenerateModel, unittest.TestCase):
 
     def testTipOnlyChangeIsAStep(self):
         """A transaction that changes only the Body's Tip (the bar's move, an Output property but
-        an input) is a step, and its undo puts the Tip back (S6; Transactions.cpp isResult)."""
+        an input) is a step, and its undo puts the Tip back (S6; Transactions.cpp isResult).
+        Rolled back, the Body keeps its last complete shape for what reads it and the bar's
+        feature holds the rolled state (the fork's rule R7, ops#127)."""
         self.assertIs(self.body.Tip, self.fillet)
         count = self.doc.UndoCount
         self.edit("Move Bar", lambda: setattr(self.body, "Tip", self.boss))
         self.assertEqual(self.doc.UndoCount, count + 1)
         self.assertEqual(self.doc.UndoNames[0], "Move Bar")
-        self.assertVolume(self.body, total(withHole=False, withFillet=False))
+        self.assertFalse(self.doc.mustExecute())
+        self.assertVolume(self.boss, total(withHole=False, withFillet=False))
+        self.assertVolume(self.body, total())
         self.doc.undo()
         self.assertIs(self.body.Tip, self.fillet)
         self.assertRegenerated(total())
@@ -505,6 +509,18 @@ class TestRegenerate(RegenerateModel, unittest.TestCase):
         self.doc.undo()
         self.assertEqual(self.boss.Label, "Boss")
         self.assertRegenerated(total())
+
+    def testExpressionChangeIsAStep(self):
+        """An expression set is a step (an expression engine recorded is always a change: its
+        links don't tell two expressions on one object apart), and its undo takes it away. (Not
+        asserted: the Length the expression wrote in the regeneration after the commit, outside
+        the step, stays 8 after the undo, as upstream's Refresh after the commit left it.)"""
+        self.edit("Edit Boss", lambda: self.boss.setExpression("Length", "4 + 4"))
+        self.assertEqual(self.doc.UndoNames, ["Edit Boss"])
+        self.assertRegenerated(total(boss=8))
+        self.doc.undo()
+        self.assertEqual(self.boss.ExpressionEngine, [])
+        self.assertFalse(self.doc.mustExecute())
 
     def testPlainShapeChangeIsAStep(self):
         """A plain Part::Feature's Shape is its input (an import's, a script's): replacing it is a
@@ -652,7 +668,8 @@ class TestStoppedBody(unittest.TestCase):
         self.assertFalse(self.block.isValid(), "the pad on an open wire stays valid")
         self.assertFalse(self.body.isValid(), "the Body isn't in error")
         self.assertIn("Invalid", self.body.State)
-        self.assertTrue(self.body.Shape.isNull(), f"the Body keeps a shape: {self.body.Shape.Volume}")
+        shape = self.body.Shape
+        self.assertTrue(shape.isNull(), shape.isNull() or f"the Body keeps a shape: {shape.Volume}")
 
         self.sketch.addGeometry(side, False)
         self.doc.recompute()

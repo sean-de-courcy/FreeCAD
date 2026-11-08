@@ -84,6 +84,10 @@ namespace sp = std::placeholders;
 namespace Gui
 {
 
+/// FreeCAD-CH (ops#640): no document regenerates on commit while an object is in edit (defined
+/// and explained in Gui/Application.cpp; not in Application.h, which hundreds of files include)
+void updateRegenerationHold();
+
 // Pimpl class
 struct DocumentP
 {
@@ -774,6 +778,8 @@ bool Document::trySetEdit(Gui::ViewProvider* p, int ModNum, const char* subname)
     // "Make X" transaction was opened before), the open dialog's step is locked until the edit
     // resets: no undo, redo, implicit commit or other transaction behind the dialog
     holdEditStep(ModNum);
+    // FreeCAD-CH (ops#640): and no document regenerates on commit until the edit ends
+    updateRegenerationHold();
 
     auto view3d = openEditingView3D(vp);
     d->setEditingViewerIfPossible(view3d, ModNum);
@@ -895,6 +901,9 @@ void Document::_resetEdit()
             vpd->getDocument()->signalResetEdit(*vpd);
         }
         d->_editViewProvider = nullptr;
+        // FreeCAD-CH (ops#640): the hold on regeneration ends before the edit's own commit
+        // below, so the dialog's OK regenerates (unless another document is in edit)
+        updateRegenerationHold();
 
         // The logic below is not necessary anymore, because this method is
         // changed into a private one,  _resetEdit(). And the exposed
@@ -908,6 +917,7 @@ void Document::_resetEdit()
     d->_editObjs.clear();
     d->_editingObject = nullptr;
     Application::Instance->unsetEditDocument(this);
+    updateRegenerationHold();  // FreeCAD-CH (ops#640): as above
 }
 
 ViewProvider* Document::getInEdit(

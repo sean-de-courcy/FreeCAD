@@ -567,3 +567,48 @@ class TestRegenerateGui(RegenerateModel, unittest.TestCase):
         self.close(CANCEL)
         self.assertLess(time.monotonic() - started, 60)
         self.assertRegenerated(total(withFillet=False))
+
+    def testSketchEditHoldsRegeneration(self):
+        """A sketch in edit (an edit that holds no step) holds the regeneration on commit of every
+        Gui document until it ends, as the Variables panel's recompute (ops#599 R1-1, R1b-3): its
+        Cancel restores the sketch from a backup, and a model regenerated meanwhile would be built
+        from the cancelled sketch. The other document's commit leaves it touched."""
+        other = models.newDocument("RegenerateGuiOther")
+        try:
+            other.UndoMode = 1
+            box = other.addObject("Part::Box", "Box")
+            other.recompute()
+            self.assertTrue(other.RegenerateOnCommit)
+            Gui.getDocument(self.doc.Name).setEdit(self.holeSketch.Name)
+            pump()
+            self.assertIsNotNone(Gui.getDocument(self.doc.Name).getInEdit(), "no sketch edit")
+            self.assertFalse(self.doc.RegenerateOnCommit)
+            self.assertFalse(other.RegenerateOnCommit)
+            other.openTransaction("Length")
+            box.Length = 12
+            other.commitTransaction()
+            self.assertIn("Touched", box.State)
+            Gui.getDocument(self.doc.Name).resetEdit()
+            pump()
+            self.assertTrue(self.doc.RegenerateOnCommit)
+            self.assertTrue(other.RegenerateOnCommit)
+            other.openTransaction("Length")
+            box.Length = 14
+            other.commitTransaction()
+            self.assertNotIn("Touched", box.State)
+            self.assertAlmostEqual(box.Shape.Volume, 14 * 10 * 10, places=6)
+        finally:
+            App.closeDocument(other.Name)
+
+    def testCloseWithAViewProviderChangePending(self):
+        """A document closed while its open transaction holds a view provider's change: closing
+        doesn't read the deleted view provider (the commit's no-op test did, and crashed FreeCAD
+        when a sketch's attachment dialog was closed without OK or Cancel: testPDCreateSketch)."""
+        self.doc.openTransaction("Line width")
+        Gui.getDocument(self.doc.Name).getObject(self.fillet.Name).LineWidth = 3
+        self.assertTrue(self.doc.HasPendingTransaction)
+        name = self.doc.Name
+        App.closeDocument(name)
+        pump()
+        self.assertNotIn(name, App.listDocuments())
+        self.doc = models.newDocument("RegenerateGui")  # for tearDown

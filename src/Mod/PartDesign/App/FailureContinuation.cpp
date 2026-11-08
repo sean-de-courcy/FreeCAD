@@ -426,6 +426,14 @@ public:
         if (!body) {
             return;
         }
+        // Only a Body whose Tip is an unclaimed failure (design D:1, F37: its part is gone, a
+        // first feature with nothing to pass through). A Body stopped through another input with
+        // a claimed or valid Tip (the Bracket that reads a stopped Panel through its Merge,
+        // decision 257) keeps its last shape, as before
+        const App::DocumentObject* tip = body->Tip.getValue();
+        if (!tip || !tip->isError() || continuesAfter(tip)) {
+            return;
+        }
         try {
             body->writeStoppedShape();
         }

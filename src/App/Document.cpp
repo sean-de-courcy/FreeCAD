@@ -1494,6 +1494,14 @@ void Transaction::openPendingTransaction(Document& doc)
 {
     if (!doc.d->rollback && !globalIsRelabeling && !doc.d->definingTransaction) {
         doc._checkTransaction(nullptr, nullptr, __LINE__);
+        // FreeCAD-CH (ops#640): a step's commit clears the Redo stack now, not the open
+        // (_commitTransaction). The change coming is to an object an undo or redo transaction
+        // holds, so the transaction is a step: cleared at its commit, the Redo stack would free an
+        // object the step records, and its undo would read freed memory. Cleared here, as the
+        // open did before, a redo-held object goes first and its change is skipped (the caller)
+        if (doc.d->activeUndoTransaction) {
+            doc._clearRedos();
+        }
     }
 }
 
@@ -1605,7 +1613,7 @@ bool Document::_commitTransaction(const bool notify)
         // feature dialog, whose live preview rewrote only the shapes) is no undo step, as in
         // Onshape. Kept when another document shares its id: it marks a change there. Only a
         // step clears the Redo stack (before the committing flag, which _clearRedos refuses).
-        const bool isStep = d->activeUndoTransaction->changesInputs()
+        const bool isStep = d->clearingUndos || d->activeUndoTransaction->changesInputs()
             || transactionSharedElsewhere(d->activeUndoTransaction->getID());
         if (isStep) {
             _clearRedos();
@@ -1796,6 +1804,9 @@ void Document::clearUndos()
     }
 
     if (d->activeUndoTransaction) {
+        // FreeCAD-CH (ops#640): no no-op test for a transaction about to be discarded; it may
+        // record view providers that are being deleted.
+        Base::FlagToggler<> clearing(d->clearingUndos);
         _commitTransaction(true);
     }
 

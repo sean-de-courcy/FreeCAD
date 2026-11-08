@@ -89,6 +89,7 @@ struct DocumentP
     bool rollback {false};
     bool undoing {false};  ///< document in the middle of undo or redo
     bool committing {false};
+    bool clearingUndos {false};  ///< FreeCAD-CH (ops#640): clearUndos commits its open transaction
     bool definingTransaction {false};
     bool opentransaction {false};
     std::bitset<32> StatusBits;
