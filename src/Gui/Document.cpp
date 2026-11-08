@@ -133,6 +133,10 @@ struct DocumentP
     int _sessionOpener = 0;
     std::string _sessionLabel;
     std::set<int> _sessionIds;
+    /** FreeCAD-CH (ops#640): the session's transactions that changed an object other than the
+     * one in edit outside a recompute (a Variables panel edit during the sketch's edit): the
+     * Cancel's undo (undoOpenSketchSession) leaves them alone and restores the sketch instead */
+    std::set<int> _sessionForeignIds;
     /** FreeCAD-CH (ops#640): the user's undo limit (the MaxUndoSize preference) counts steps,
      * not App's transactions: App's limit is set before each commit (updateUndoLimit) so that its
      * trim leaves the newest steps whole, a closed sketch session with all its transactions.
@@ -234,6 +238,7 @@ struct DocumentP
         endSession();
         _session = ++_stepGroupCount;
         _sessionIds.clear();
+        _sessionForeignIds.clear();
         // the transaction that made the sketch, still open or booked when the edit starts
         // (SketchWorkflow, Sketcher_NewSketch): the session's step takes it along, so that one
         // Ctrl+Z after the close removes the new sketch. A re-edit's opener, if any, holds only
@@ -272,6 +277,7 @@ struct DocumentP
         _session = 0;
         _sessionOpener = 0;
         _sessionIds.clear();
+        _sessionForeignIds.clear();
     }
 
     /// A transaction opened in the document: one of the open session's
@@ -1551,6 +1557,15 @@ void Document::beforeDelete()
 
 void Document::slotChangedObject(const App::DocumentObject& Obj, const App::Property& Prop)
 {
+    // FreeCAD-CH (ops#640): a change of another object in one of the open sketch session's
+    // transactions, not a recompute's (_sessionForeignIds)
+    if (d->_session != 0 && &Obj != d->_editingObject && d->_pcDocument->hasPendingTransaction()
+        && !d->_pcDocument->testStatus(App::Document::Recomputing)) {
+        const int id = d->_pcDocument->getTransactionID(true, 0);
+        if (d->_sessionIds.contains(id)) {
+            d->_sessionForeignIds.insert(id);
+        }
+    }
     ViewProvider* viewProvider = getViewProvider(&Obj);
     if (viewProvider) {
         try {
@@ -3557,10 +3572,14 @@ int Gui::undoOpenSketchSession(const App::Document* doc)
     auto own = [d](int id) {
         return id != 0 && d->_sessionIds.contains(id);
     };
-    // The session's own transactions, newest first; below them, nothing of the session's
+    // The session's own transactions, newest first; below them, nothing of the session's. One
+    // that changed another object (a Variables panel edit) isn't the sketch's to undo.
     std::vector<int> ids;
     unsigned pos = 0;
     for (; own(appDoc->getTransactionID(true, pos)); ++pos) {
+        if (d->_sessionForeignIds.contains(appDoc->getTransactionID(true, pos))) {
+            return -1;
+        }
         ids.push_back(appDoc->getTransactionID(true, pos));
     }
     for (int id = appDoc->getTransactionID(true, pos); id != 0;

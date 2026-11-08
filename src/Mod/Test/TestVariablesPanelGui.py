@@ -1041,6 +1041,18 @@ class TestVariablesPanelGui(unittest.TestCase):
         pump(0.3)
         self.assertCancelledThenRight(doc)
 
+    def test_toolbar_does_not_widen_the_panel(self):
+        """ops#640 round 5: the toolbar's text actions (Copy from FreeCAD file..., Refresh...)
+        don't set the panel's width: a dock 441 px wide took 185 px from the 3D view (and moved
+        the 3D view's centre under the Tasks overlay). What doesn't fit goes to the toolbar's
+        overflow button, and the list's context menu has every action."""
+        toolBar = self.panel.findChild(QtWidgets.QToolBar)
+        self.assertIsNotNone(toolBar)
+        self.assertLess(self.panel.sizeHint().width(), toolBar.sizeHint().width())
+        names = {action.objectName() for action in self.tree.actions()}
+        for name in ("copyFromFreeCAD", "refreshCopy", "locateSource"):
+            self.assertIn(name, names)
+
     def test_edit_during_other_document_sketch_edit(self):
         """Review pr599-r1b R1b-3: a sketch in another document, its radius the variable across
         documents, in edit there: the panel edit doesn't recompute, and that document's Cancel

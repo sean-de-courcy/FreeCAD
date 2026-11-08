@@ -1294,6 +1294,10 @@ VariablesView::VariablesView(Gui::Document* doc, QWidget* parent)
             runGui(copyCall("locate", copy));
         }
     });
+    // FreeCAD-CH (ops#640): the toolbar's text actions don't set the panel's width (a dock 441 px
+    // wide took 185 px from the 3D view in round 5): what doesn't fit goes to its overflow button,
+    // and every action is in the list's context menu too
+    toolBar->setSizePolicy(QSizePolicy::Ignored, toolBar->sizePolicy().verticalPolicy());
     layout->addWidget(toolBar);
     // In the context menu only
     describeAction = new QAction(tr("Edit description..."), this);
