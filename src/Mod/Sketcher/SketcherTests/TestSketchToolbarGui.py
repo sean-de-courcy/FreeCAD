@@ -44,6 +44,7 @@ SKETCH = [
     SEP,
     "Sketcher_CompDimensionTools",
     "Sketcher_ConstrainCoincidentUnified",
+    "Sketcher_ConstrainConcentric",  # ops#640, rank 44
     "Sketcher_CompHorVer",
     "Sketcher_ConstrainParallel",
     "Sketcher_ConstrainPerpendicular",

@@ -18,6 +18,7 @@ from SketcherTests.TestSketchCommandsGui import TestSketchCommandsGui
 from SketcherTests.TestSketchToolbarGui import TestSketchToolbarGui  # FreeCAD-CH, ops#605
 from SketcherTests.TestSketchModelPicksGui import TestSketchModelPicksGui  # FreeCAD-CH, ops#634
 from SketcherTests.TestSketchModelFacesGui import TestSketchModelFacesGui  # FreeCAD-CH, ops#640
+from SketcherTests.TestSketchConstraintToolsGui import TestSketchConstraintToolsGui  # FreeCAD-CH, ops#640
 from SketcherTests.TestSketchOnshapeGui import (  # FreeCAD-CH, ops#640
     TestSketchEscapeGui,
     TestSketchMidpointGui,
@@ -68,5 +69,6 @@ from SketcherTests.TestSketchOnshapeToolsGui import (  # FreeCAD-CH, ops#640 (C-
     and TestSketchTangentArcGui
     and TestSketchFilletFieldsGui
     and TestSketchModelFacesGui
+    and TestSketchConstraintToolsGui
     else False
 )
