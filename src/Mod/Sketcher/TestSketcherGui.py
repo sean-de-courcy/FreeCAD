@@ -43,6 +43,10 @@ from SketcherTests.TestSketchRound3Gui import (  # FreeCAD-CH, ops#640 (sketch r
     TestSketchOnshapeConstraintsGui,
     TestSketchOnshapeShapesGui,
 )
+from SketcherTests.TestSketchRound4Gui import (  # FreeCAD-CH, ops#640 (sketch round 4)
+    TestSketchToolbarFeaturesGui,
+    TestSketchMirrorToolFirstGui,
+)
 
 # Use the module so that code checkers don't complain (flake8)
 (
@@ -84,5 +88,7 @@ from SketcherTests.TestSketchRound3Gui import (  # FreeCAD-CH, ops#640 (sketch r
     and TestSketchOverdefinedRedGui
     and TestSketchOnshapeConstraintsGui
     and TestSketchOnshapeShapesGui
+    and TestSketchToolbarFeaturesGui
+    and TestSketchMirrorToolFirstGui
     else False
 )
