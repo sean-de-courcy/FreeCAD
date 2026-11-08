@@ -1223,6 +1223,17 @@ bool hasOperationRow(const App::DocumentObject* feature)
 }
 }  // namespace
 
+// FreeCAD-CH (ops#640 rank 14): restartEdit for a tool-first dress-up's move to the part of its
+// dialog's first pick (TaskDressUpParameters.cpp declares it too: no header names it)
+namespace PartDesignGui
+{
+void restartFeatureEdit(const App::DocumentObjectT& featureT, const std::function<void()>& change);
+void restartFeatureEdit(const App::DocumentObjectT& featureT, const std::function<void()>& change)
+{
+    restartEdit(featureT, change);
+}
+}  // namespace PartDesignGui
+
 TaskResultParameters::TaskResultParameters(PartDesignGui::ViewProvider* vp, QWidget* parent)
     : TaskFeatureParameters(vp, parent, "PartDesign_Body", tr("Result"))
     , combo(nullptr)

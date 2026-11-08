@@ -72,8 +72,9 @@ void TaskThicknessParameters::initControls()
     ui->Value->setMinimum(0.0);
     ui->Value->setValue(a);
     ui->Value->selectAll();
-    // A new thickness's faces field takes the focus when the dialog opens (Q2)
-    if (!thickness->Base.getSubValues().empty()) {
+    // A new thickness's faces field takes the focus when the dialog opens (Q2), and keeps it
+    // after its first pick placed it (ops#640 rank 14)
+    if (!thickness->Base.getSubValues().empty() && !armsBaseOnOpen()) {
         QMetaObject::invokeMethod(ui->Value, "setFocus", Qt::QueuedConnection);
     }
 

@@ -216,9 +216,9 @@ void Workbench::setupContextMenu(const char* recipient, Gui::MenuItem* item) con
         if (onshape && feature && Gui::Selection().hasPreselection()) {
             // Onshape's first entries, on an entity under the cursor (no preselection is empty
             // space) and only where the commands take the pick: Sketch on face on one planar
-            // face, Fillet and Chamfer on faces or edges of a solid feature of the Body the
-            // commands act in (dressupGetSelected refuses the others with a message; a sketch's
-            // edges would make a failing Fillet)
+            // face, Fillet and Chamfer on faces or edges of a solid feature of any part, the
+            // active Body or not (ops#640 rank 14: the dress-up goes into the pick's Body; a
+            // sketch's edges would make a failing Fillet)
             const std::string_view kind = subElementKind(selection);
             PartDesign::Body* target = kind.empty() ? nullptr : commandBody();
             // the sketch goes into target without a dialog: it holds the face's feature, or
@@ -228,9 +228,10 @@ void Workbench::setupContextMenu(const char* recipient, Gui::MenuItem* item) con
                 && isPlanarFace(feature, selection.front().SubName)) {
                 *item << "PartDesign_NewSketch";
             }
-            if (!kind.empty() && target && target->hasObject(feature)
+            // body: the active Body when it holds the feature, else the feature's own
+            if (!kind.empty() && body && body->hasObject(feature)
                 && (feature->isDerivedFrom<PartDesign::Feature>()
-                    || target->BaseFeature.getValue() == feature)) {
+                    || body->BaseFeature.getValue() == feature)) {
                 *item << "PartDesign_Fillet" << "PartDesign_Chamfer";
             }
         }

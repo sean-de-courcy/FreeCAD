@@ -139,6 +139,7 @@ if(BUILD_GUI)
         PartDesignTests/TestRevolveFieldsGui.py
         PartDesignTests/TestPatternDefaultsGui.py
         PartDesignTests/TestRegenerateGui.py
+        PartDesignTests/TestDressUpAnyPartGui.py
     )
 endif(BUILD_GUI)
 
