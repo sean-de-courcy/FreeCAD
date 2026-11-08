@@ -80,6 +80,23 @@ FeatureAddSub::FeatureAddSub()
         App::Prop_None,
         "The cut this one follows: its parameters by expression, its links by copy (ops#325)"
     );
+    // Hidden: the Result box sets them; hidden ones are each feature's own, never bound to a
+    // primary's (isOwn)
+    ADD_PROPERTY_TYPE(
+        MergeWithAll,
+        (false),
+        "Part Design",
+        App::Prop_Hidden,
+        "Merge with all: the dialog merges every part the tool touches (ops#640)"
+    );
+    ADD_PROPERTY_TYPE(
+        EmptyMergeScope,
+        (false),
+        "Part Design",
+        App::Prop_Hidden,
+        "An Add with no merge scope: with nothing before it in its part and Merge with all off, "
+        "it fails 'No merge scope selected' (ops#640)"
+    );
 }
 
 
@@ -202,13 +219,24 @@ App::DocumentObjectExecReturn* FeatureAddSub::recompute()
     // longer takes as a base). Checked after the run, so an input's error is reported first; the
     // failure passes the (empty) base through. Not when suppressed or held: those pass their
     // base through already.
-    if (result == StdReturn && addSubType == Type::Subtractive && !Suppressed.getValue()
-        && !(body && body->holds(this)) && getBaseTopoShape(true).isNull()) {
-        return new App::DocumentObjectExecReturn(
-            "Nothing to cut: a subtractive feature needs a solid before it in its Body, or a "
-            "BaseFeature",
-            this
-        );
+    // An Add, Remove or Intersect with an empty merge scope and Merge with all off fails, as
+    // Onshape's does: "No merge scope selected" (ops#640 rank 3a, hands-on checks R7(a) and R8).
+    // A cut's scope is empty when nothing comes before it; an Add's only when it says so
+    // (EmptyMergeScope), as otherwise it is a new part. The cut keeps F8's words after Onshape's.
+    const bool emptyAdd = EmptyMergeScope.getValue() && !MergeWithAll.getValue();
+    if (result == StdReturn && runs && (addSubType == Type::Subtractive || emptyAdd)
+        && getBaseTopoShape(true).isNull()) {
+        constexpr const char* noScope = "No merge scope selected";
+        if (addSubType == Type::Subtractive) {
+            const std::string nothing =
+                "Nothing to cut: a subtractive feature needs a solid before it in its Body, or a "
+                "BaseFeature";
+            return new App::DocumentObjectExecReturn(
+                MergeWithAll.getValue() ? nothing : std::string(noScope) + ". " + nothing,
+                this
+            );
+        }
+        return new App::DocumentObjectExecReturn(noScope, this);
     }
     if (result != StdReturn || booleanOperation != BooleanOperation::Common || Suppressed.getValue()
         || (body && body->holds(this))) {

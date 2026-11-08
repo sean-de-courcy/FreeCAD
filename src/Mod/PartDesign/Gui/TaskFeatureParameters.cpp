@@ -29,6 +29,7 @@
 #include <vector>
 
 #include <QApplication>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -656,13 +657,25 @@ bool isSubtractive(const QString& key)
     return key == QStringLiteral("Subtraction") || key == QStringLiteral("Common");
 }
 
-// A part's own first solid, adding: the feature that made the part (Onshape's New)
-bool isNewPart(PartDesign::FeatureAddSub* feature)
+// Merge with all on a new Add (ops#640 rank 1): Onshape's help says on; the hands-on checks R5, R8
+// and A-1 found it off (a sketch on a face: the face's part as the scope; Add from New: the one
+// part the tool touches, or none). This line switches it
+constexpr bool mergeWithAllByDefault = false;
+
+// Nothing before the feature in its part: its merge scope holds no part of its own (ops#640)
+bool isFirstSolid(PartDesign::FeatureAddSub* feature)
 {
     PartDesign::Body* body = PartDesign::Body::findBodyOf(feature);
-    return body
+    return body && !body->BaseFeature.getValue() && !body->getPrevSolidFeature(feature);
+}
+
+// A part's own first solid, adding: the feature that made the part (Onshape's New). Not an Add
+// whose merge scope is empty, or that merges with all (ops#640 rank 1)
+bool isNewPart(PartDesign::FeatureAddSub* feature)
+{
+    return isFirstSolid(feature)
         && feature->getBooleanOperation() == PartDesign::FeatureAddSub::BooleanOperation::Union
-        && !body->BaseFeature.getValue() && !body->getPrevSolidFeature(feature);
+        && !feature->EmptyMergeScope.getValue() && !feature->MergeWithAll.getValue();
 }
 
 // The row the feature is on: new, add, Subtraction or Common
@@ -678,7 +691,8 @@ QString operationKey(PartDesign::FeatureAddSub* feature)
 }
 
 // The part a new part's feature goes to for Add, Remove or Intersect: the one this dialog moved it
-// from, else the first studio part its tool touches (Onshape merges with the one part touched)
+// from, else the one studio part its tool touches. Touching two or more, none: Onshape's Add then
+// has an empty scope, red, and merges neither (hands-on check A-1 (b), (c); ops#640 rank 1)
 PartDesign::Body* operationTarget(PartDesign::FeatureAddSub* feature)
 {
     if (auto from = freecad_cast<PartDesign::Body*>(TaskResultParameters::movedFrom(feature))) {
@@ -689,22 +703,25 @@ PartDesign::Body* operationTarget(PartDesign::FeatureAddSub* feature)
         return nullptr;
     }
     TaskResultParameters::TouchCache cache;
+    PartDesign::Body* touched = nullptr;
     for (auto obj : feature->getDocument()->getObjectsOfType(PartDesign::Body::getClassTypeId())) {
         auto other = static_cast<PartDesign::Body*>(obj);
         if (other != body && Part::BodyBase::areStudioSiblings(body, other)
             && !PartDesign::Boolean::mergeOf(other) && toolTouches(feature, other, cache)) {
-            return other;
+            if (touched) {
+                return nullptr;
+            }
+            touched = other;
         }
     }
-    return nullptr;
+    return touched;
 }
 
 // Why a new part's feature can't go to target, or empty: PartDesign.addToPart's own rule
 // (Body::addToPartRefusal, ops#640), after the dialog's: a move this dialog made is taken back,
 // and the move needs the dialog's transaction, which Cancel aborts. No target moves nothing:
-// Add keeps a new part, as Onshape's Add that touches nothing makes one (hands-on check R8,
-// ops#640 H2). Remove and Intersect with no target are refused by the caller, not here
-// (cutsNothingRefusal)
+// the feature stays its part's first solid, with an empty merge scope ('No merge scope
+// selected', ops#640 rank 3a) unless an Add merges with all
 QString addToPartRefusal(PartDesign::FeatureAddSub* feature, PartDesign::Body* target)
 {
     if (TaskResultParameters::movedFrom(feature) || !target) {
@@ -720,26 +737,14 @@ QString addToPartRefusal(PartDesign::FeatureAddSub* feature, PartDesign::Body* t
     return why;
 }
 
-// Why a new part's feature can't become a Remove or an Intersect of nothing, or empty. With no
-// part it touches there is nothing before it to cut, and FeatureAddSub::recompute fails such a
-// cut, "Nothing to cut" (ops#308 F8, which the failure-continuation design rests on). Onshape
-// keeps that row healthy (hands-on check R7(b)); until the hub settles F8 for it (ops#640 H3),
-// the row doesn't offer a path to an error Onshape doesn't give
-QString cutsNothingRefusal(PartDesign::FeatureAddSub* feature, PartDesign::Body* target)
-{
-    if (TaskResultParameters::movedFrom(feature) || target) {
-        return {};
-    }
-    return QObject::tr("Touches no other part: nothing to cut");
-}
+// A new part's feature touching no other part may become a Remove or an Intersect: its merge
+// scope is empty, and it fails red, "No merge scope selected", as Onshape's does (hands-on checks
+// R7(a) and R8, ops#640 rank 3a; FeatureAddSub::recompute). The scope list then picks its part
 
 // The Merge right after the feature (makeMerge's place), or null
 PartDesign::Boolean* mergeAfter(PartDesign::FeatureAddSub* feature)
 {
-    PartDesign::Body* body = PartDesign::Body::findBodyOf(feature);
-    auto next = body ? freecad_cast<PartDesign::Boolean*>(body->getNextSolidFeature(feature))
-                     : nullptr;
-    return next && next->isMerge() && next->BaseFeature.getValue() == feature ? next : nullptr;
+    return PartDesign::Boolean::mergeAfter(feature);
 }
 
 // Puts the feature on the row `key`, inside a restart of the edit, so the box shows the parts
@@ -783,7 +788,16 @@ void switchOperation(const App::DocumentObjectT& featureT, const QString& key)
                 backMove(featureT);
             }
             else if (PartDesign::Body* target = operationTarget(feature)) {
+                // The one part the tool touches is the scope (R8), as for a sketch on its face
                 run("PartDesign.addToPart(" + obj + ", " + Gui::Command::getObjectCmd(target) + ")");
+            }
+            else if (key == QStringLiteral("add") && mergeWithAllByDefault) {
+                // Merge with all, touching nothing: a new part, healthy (R8, ops#640 H2)
+                run(obj + ".MergeWithAll = True");
+                Gui::getMainWindow()->showMessage(
+                    QObject::tr("Touches no other part: added as a new part"),
+                    8000
+                );
             }
         }
         const std::string operation =
@@ -801,8 +815,25 @@ void switchOperation(const App::DocumentObjectT& featureT, const QString& key)
             && !isReversedTouched(feature)) {
             run(obj + ".Reversed = " + (feature->Reversed.getValue() ? "False" : "True"));
         }
+        // Its part's first solid: New is the same feature with no scope; an Add, a Remove or an
+        // Intersect has an empty scope, red until a part is picked (ops#640 rank 3a)
+        const bool first = isFirstSolid(feature);
         if (key == QStringLiteral("new") && was != QStringLiteral("new")) {
-            newPartMove(featureT);
+            if (!first) {
+                newPartMove(featureT);
+            }
+            else {
+                if (feature->EmptyMergeScope.getValue()) {
+                    run(obj + ".EmptyMergeScope = False");
+                }
+                if (feature->MergeWithAll.getValue()) {
+                    run(obj + ".MergeWithAll = False");
+                }
+            }
+        }
+        else if (key != QStringLiteral("new") && first && !feature->EmptyMergeScope.getValue()
+                 && !feature->MergeWithAll.getValue()) {
+            run(obj + ".EmptyMergeScope = True");
         }
         feature->recomputeFeature();
     });
@@ -815,8 +846,10 @@ void TaskResultParameters::addOperationRow()
     PartDesign::Body* body = PartDesign::Body::findBodyOf(feature);
     operation = operationKey(feature);
     const bool isNew = operation == QStringLiteral("new");
+    // Its part's first solid, not New: its merge scope is empty (or Merge with all), so no part
+    const bool firstWithScope = !isNew && isFirstSolid(feature);
     // A new part's feature names the part it would go to; the others their own
-    PartDesign::Body* target = isNew ? operationTarget(feature) : body;
+    PartDesign::Body* target = isNew ? operationTarget(feature) : firstWithScope ? nullptr : body;
     combo->addItem(tr("New part"), QStringLiteral("new"));
     combo->addItem(
         target ? tr("Add to %1").arg(partLabel(target)) : tr("Add"),
@@ -849,19 +882,20 @@ void TaskResultParameters::addOperationRow()
     }
     if (isNew) {
         const QString why = addToPartRefusal(feature, target);
-        const QString cutWhy = why.isEmpty() ? cutsNothingRefusal(feature, target) : why;
-        refuse(QStringLiteral("add"), why);
-        for (const char* key : {"Subtraction", "Common"}) {
-            refuse(QString::fromLatin1(key), cutWhy);
+        for (const char* key : {"add", "Subtraction", "Common"}) {
+            refuse(QString::fromLatin1(key), why);
         }
         return;  // a new part merges nothing (Onshape's New has no merge scope)
     }
-    // New part: newPartFrom's rule; a cut through other parts drops them first
-    refuse(
-        QStringLiteral("new"),
-        feature->getSiblings().empty() ? newPartRefusal(feature)
-                                       : tr("Cuts other parts too: untick them first")
-    );
+    // New part: newPartFrom's rule; a cut through other parts drops them first. A first solid
+    // stays where it is
+    if (!firstWithScope) {
+        refuse(
+            QStringLiteral("new"),
+            feature->getSiblings().empty() ? newPartRefusal(feature)
+                                           : tr("Cuts other parts too: untick them first")
+        );
+    }
     if (PartDesign::Boolean* merge = mergeAfter(feature)) {
         QStringList merged;
         for (App::DocumentObject* part : merge->mergedBodies()) {
@@ -880,14 +914,17 @@ void TaskResultParameters::addOperationRow()
             );
         }
     }
-    if (!body || !hasStudioSiblings(body)) {
+    if (!body || PartDesign::Boolean::mergeOf(body)) {
         return;
     }
-    if (isSubtractive(operation)) {
-        addPartsList();
-    }
-    else if (!PartDesign::Boolean::mergeOf(body)) {
+    // Onshape's Add always has its merge scope (Merge with all, at least); a first solid's cut
+    // picks its part there; another cut has the parts list, in a studio
+    if (!isSubtractive(operation) || firstWithScope) {
+        scopePickMoves = firstWithScope;
         addMergeList();
+    }
+    else if (hasStudioSiblings(body)) {
+        addPartsList();
     }
 }
 
@@ -953,12 +990,27 @@ void TaskResultParameters::addMergeList()
     auto feature = getObject<PartDesign::FeatureAddSub>();
     PartDesign::Body* body = PartDesign::Body::findBodyOf(feature);
     touchCache = std::make_shared<TouchCache>();
-    // The studio's other parts, those the tool touches first; a part merged already isn't one
+    PartDesign::Boolean* merge = mergeAfter(feature);
+    const bool adding =
+        feature->getBooleanOperation() == PartDesign::FeatureAddSub::BooleanOperation::Union;
+    // Onshape's Merge with all (ops#640 rank 1): an Add's, stored on the feature
+    if (adding) {
+        mergeWithAll = new QCheckBox(tr("Merge with all"), this);
+        mergeWithAll->setObjectName(QStringLiteral("mergeWithAll"));
+        mergeWithAll->setToolTip(tr("Merges every part the tool touches, as they are at OK"));
+        mergeWithAllWas = feature->MergeWithAll.getValue();
+        mergeWithAll->setChecked(mergeWithAllWas);
+        groupLayout()->addWidget(mergeWithAll);
+        connect(mergeWithAll, &QCheckBox::toggled, this, &TaskResultParameters::onMergeWithAll);
+    }
+    // The studio's other parts, those the tool touches first; a part merged elsewhere isn't one,
+    // one this feature merges is, ticked (unticked, OK unmerges it)
     std::vector<std::pair<PartDesign::Body*, bool>> others;
     for (auto obj : feature->getDocument()->getObjectsOfType(PartDesign::Body::getClassTypeId())) {
         auto other = static_cast<PartDesign::Body*>(obj);
+        PartDesign::Boolean* mergedBy = PartDesign::Boolean::mergeOf(other);
         if (other != body && Part::BodyBase::areStudioSiblings(body, other)
-            && !PartDesign::Boolean::mergeOf(other)) {
+            && (!mergedBy || (merge && mergedBy == merge))) {
             others.emplace_back(other, toolTouches(feature, other, *touchCache));
         }
     }
@@ -967,18 +1019,27 @@ void TaskResultParameters::addMergeList()
     }
     std::ranges::stable_partition(others, [](const auto& other) { return other.second; });
 
-    groupLayout()->addWidget(new QLabel(tr("Merge with:"), this));
+    mergeLabel = new QLabel(tr("Merge scope:"), this);
+    groupLayout()->addWidget(mergeLabel);
     mergeParts = new QListWidget(this);
     mergeParts->setObjectName(QStringLiteral("mergeList"));
     for (const auto& [other, touches] : others) {
         auto item = new QListWidgetItem(touchText(other, touches), mergeParts);
         item->setData(Qt::UserRole, QString::fromLatin1(other->getNameInDocument()));
         item->setData(Qt::UserRole + 1, touches);
-        item->setCheckState(Qt::Unchecked);  // two overlapping parts by default (decision 59)
+        const bool merged = merge && PartDesign::Boolean::mergeOf(other) == merge;
+        item->setCheckState(merged ? Qt::Checked : Qt::Unchecked);
         Qt::ItemFlags flags = Qt::ItemIsUserCheckable | Qt::ItemIsEnabled;
-        if (other->isRolledBack()) {
-            flags &= ~Qt::ItemIsEnabled;  // a held feature would merge a frozen shape (2.6)
-            item->setToolTip(tr("Roll %1 to the end first").arg(partLabel(other)));
+        QString why;
+        if (scopePickMoves && !merged) {
+            why = addToPartRefusal(feature, other);  // the tick moves the feature there
+        }
+        else if (!merged && other->isRolledBack()) {
+            why = tr("Roll %1 to the end first").arg(partLabel(other));  // a frozen shape (2.6)
+        }
+        if (!why.isEmpty()) {
+            flags &= ~Qt::ItemIsEnabled;
+            item->setToolTip(why);
         }
         item->setFlags(flags);
     }
@@ -987,16 +1048,24 @@ void TaskResultParameters::addMergeList()
     mergeNote->setObjectName(QStringLiteral("mergeNote"));
     mergeNote->setWordWrap(true);
     groupLayout()->addWidget(mergeNote);
-    mergeBanner = new QLabel(this);
-    mergeBanner->setObjectName(QStringLiteral("mergeBanner"));
-    mergeBanner->setWordWrap(true);
-    // The look of the task view's warning banner (Gui/TaskView/TaskView.cpp)
-    mergeBanner->setStyleSheet(QStringLiteral(
-        "QLabel#mergeBanner { background-color: rgba(230, 160, 0, 45);"
-        " border: 1px solid rgba(200, 140, 0, 170); border-radius: 3px; padding: 2px; }"
-    ));
-    groupLayout()->addWidget(mergeBanner);
-    connect(mergeParts, &QListWidget::itemChanged, this, [this]() { updateMergeNotes(); });
+    connect(mergeParts, &QListWidget::itemChanged, this, [this](QListWidgetItem* item) {
+        // A first solid's tick moves it into the part: its scope is that part (Add from New)
+        auto feature = getObject<PartDesign::FeatureAddSub>();
+        if (scopePickMoves && item && feature && item->checkState() == Qt::Checked) {
+            auto merge = mergeAfter(feature);
+            App::DocumentObject* other =
+                feature->getDocument()->getObject(item->data(Qt::UserRole).toString().toLatin1());
+            if (other && !(merge && PartDesign::Boolean::mergeOf(other) == merge)) {
+                onScopePicked(item->data(Qt::UserRole).toString());
+                return;
+            }
+        }
+        updateMergeNotes();
+    });
+    // Onshape shows the scope only while Merge with all is off
+    const bool all = mergeWithAll && mergeWithAll->isChecked();
+    mergeLabel->setVisible(!all);
+    mergeParts->setVisible(!all);
     updateMergeNotes();
 
     if (!touchTimer) {
@@ -1009,47 +1078,89 @@ void TaskResultParameters::addMergeList()
 
 void TaskResultParameters::updateMergeNotes()
 {
-    if (!mergeParts) {
+    if (!mergeParts || !mergeNote) {
         return;
     }
-    QStringList ticked;
+    // With Merge with all, every touching part merges: no line
+    const bool all = mergeWithAll && mergeWithAll->isChecked();
     QStringList touching;
-    for (int i = 0; i < mergeParts->count(); ++i) {
+    for (int i = 0; i < mergeParts->count() && !all; ++i) {
         QListWidgetItem* item = mergeParts->item(i);
         App::DocumentObject* other =
             getObject()->getDocument()->getObject(item->data(Qt::UserRole).toString().toLatin1());
-        if (!other) {
-            continue;
-        }
-        if (item->checkState() == Qt::Checked) {
-            ticked << partLabel(other);
-        }
-        else if (item->data(Qt::UserRole + 1).toBool()) {
+        if (other && item->checkState() != Qt::Checked && item->data(Qt::UserRole + 1).toBool()) {
             touching << partLabel(other);
         }
     }
-    const QString comma = QStringLiteral(", ");
-    // Overlapping parts are a normal state while modelling: a plain line, no warning (2.5)
+    // Overlapping parts are a normal state while modelling: a plain line, no warning (2.5); a
+    // merge is a plain feature, so no banner either (P50, ops#640 rank 1)
     mergeNote->setText(
-        touching.isEmpty() ? QString() : tr("Touches %1 (not merged)").arg(touching.join(comma))
+        touching.isEmpty()
+            ? QString()
+            : tr("Touches %1 (not merged)").arg(touching.join(QStringLiteral(", ")))
     );
     mergeNote->setVisible(!touching.isEmpty());
-    const QString into = partLabel(PartDesign::Body::findBodyOf(getObject()));
-    if (ticked.size() == 1) {
-        mergeBanner->setText(
-            tr("Merges %1 into %2. %1 stops being a separate part: it is hidden, its shape "
-               "becomes part of %2, and features added to %1 after this point fail.")
-                .arg(ticked.front(), into)
-        );
+}
+
+void TaskResultParameters::onMergeWithAll(bool checked)
+{
+    auto feature = getObject<PartDesign::FeatureAddSub>();
+    if (!feature) {
+        return;
     }
-    else if (!ticked.isEmpty()) {
-        mergeBanner->setText(
-            tr("Merges %1 into %2. They stop being separate parts: they are hidden, their shapes "
-               "become part of %2, and features added to them after this point fail.")
-                .arg(ticked.join(comma), into)
-        );
+    if (mergeLabel) {
+        mergeLabel->setVisible(!checked);
     }
-    mergeBanner->setVisible(!ticked.isEmpty());
+    if (mergeParts) {
+        mergeParts->setVisible(!checked);
+    }
+    updateMergeNotes();
+    // At once, as Onshape's: an Add whose scope is empty is healthy with it (a new part, R8) and
+    // red without it (OK writes it again, for the macro)
+    if (feature->MergeWithAll.getValue() != checked) {
+        feature->MergeWithAll.setValue(checked);
+        // Unticked on its part's first solid, an Add keeps its empty scope: not New (rank 3a)
+        if (!checked && hasOperationRow(feature) && isFirstSolid(feature)
+            && !feature->EmptyMergeScope.getValue()) {
+            feature->EmptyMergeScope.setValue(true);
+        }
+        recomputeFeature();
+    }
+}
+
+void TaskResultParameters::onScopePicked(const QString& part)
+{
+    if (mergeParts) {
+        mergeParts->setEnabled(false);
+    }
+    // The edit restarts, which closes this dialog: after the signal, from the event loop
+    App::DocumentObjectT target(getObject());
+    QPointer<TaskResultParameters> box(this);
+    QTimer::singleShot(0, qApp, [box, target, part]() {
+        if (!isEditing(box.data(), target)) {
+            return;
+        }
+        restartEdit(target, [&target, &part]() {
+            auto feature = freecad_cast<PartDesign::FeatureAddSub*>(target.getObject());
+            App::DocumentObject* other =
+                feature ? feature->getDocument()->getObject(part.toLatin1().constData()) : nullptr;
+            if (!feature || !other) {
+                return;
+            }
+            const std::string obj = Gui::Command::getObjectCmd(feature);
+            Gui::Command::doCommand(Gui::Command::Doc, "import PartDesign");
+            Gui::Command::doCommand(
+                Gui::Command::Doc,
+                "PartDesign.addToPart(%s, %s)",
+                obj.c_str(),
+                Gui::Command::getObjectCmd(other).c_str()
+            );
+            if (feature->EmptyMergeScope.getValue()) {
+                Gui::Command::doCommand(Gui::Command::Doc, "%s.EmptyMergeScope = False", obj.c_str());
+            }
+            feature->recomputeFeature();
+        });
+    });
 }
 
 void TaskResultParameters::updateTouches()
@@ -1145,17 +1256,9 @@ void TaskResultParameters::onResultChanged(int index)
         if (what == operation) {
             return;
         }
-        // Add, a new part's feature touching no other part: it stays its own part, as Onshape's
-        // Add (Merge with all) that touches nothing makes a new part, healthy, with a note
-        // (hands-on check R8, ops#640 H2). Nothing changes, so the edit doesn't restart
-        if (operation == QStringLiteral("new") && what == QStringLiteral("add")
-            && !isMoved(feature) && !operationTarget(feature)) {
-            Gui::getMainWindow()->showMessage(
-                tr("Touches no other part: added as a new part"),
-                8000
-            );
-            return;
-        }
+        // Add, a new part's feature touching no other part: its merge scope is empty, red, unless
+        // Merge with all, which keeps it a new part (hands-on check R8; ops#640 H2 and rank 3a).
+        // The restart shows the scope either way (switchOperation)
         // The edit restarts, which closes this dialog: after the signal, from the event loop
         combo->setEnabled(false);
         App::DocumentObjectT target(feature);
@@ -1215,28 +1318,66 @@ void TaskResultParameters::apply()
         && !primaryOf(feature) && !hasOperationRow(feature)) {
         FCMD_OBJ_CMD(feature, "Operation = '" << feature->Operation.getValueAsString() << "'");
     }
-    // The ticked parts merged into this one, right after the feature (design 2.5). A part merged
-    // already (an OK that failed, tried again) is left out
+    // Merge with all, as the box has it (set at once while editing; here for the macro)
+    const bool all = mergeWithAll && mergeWithAll->isChecked();
+    if (feature && mergeWithAll && all != mergeWithAllWas) {
+        FCMD_OBJ_CMD(feature, "MergeWithAll = " << (all ? "True" : "False"));
+        // Unticked on a first solid, onMergeWithAll left its scope empty: the macro says so too
+        if (!all && feature->EmptyMergeScope.getValue()) {
+            FCMD_OBJ_CMD(feature, "EmptyMergeScope = True");
+        }
+    }
+    // The merge scope (ops#640 rank 1): the ticked parts, or with Merge with all every part the
+    // tool touches now (a snapshot), merged right after the feature (design 2.5); a part it
+    // merged and is left out is a part again. Nothing is written when the scope is as it was
     if (feature && mergeParts) {
         App::Document* doc = feature->getDocument();
+        PartDesign::Boolean* merge = mergeAfter(feature);
+        std::vector<App::DocumentObject*> before;
+        if (merge) {
+            before = merge->mergedBodies();
+        }
+        std::vector<App::DocumentObject*> scope;
         std::string ticked;
         for (int i = 0; i < mergeParts->count(); ++i) {
             QListWidgetItem* item = mergeParts->item(i);
-            App::DocumentObject* other =
-                doc->getObject(item->data(Qt::UserRole).toString().toLatin1());
-            if (other && item->checkState() == Qt::Checked
-                && !PartDesign::Boolean::mergeOf(other)) {
+            auto other = freecad_cast<PartDesign::Body*>(
+                doc->getObject(item->data(Qt::UserRole).toString().toLatin1())
+            );
+            if (!other) {
+                continue;
+            }
+            const bool here = merge && PartDesign::Boolean::mergeOf(other) == merge;
+            // A part merged elsewhere meanwhile (an OK that failed, tried again) is left out, as
+            // is a rolled-back one that Merge with all would take
+            if (PartDesign::Boolean::mergeOf(other) && !here) {
+                continue;
+            }
+            const bool in = all
+                ? (here || (!other->isRolledBack() && toolTouches(feature, other, *touchCache)))
+                : item->checkState() == Qt::Checked;
+            if (in) {
+                scope.push_back(other);
                 ticked += (ticked.empty() ? "" : ", ") + Gui::Command::getObjectCmd(other);
             }
         }
-        if (!ticked.empty()) {
+        auto same = [](std::vector<App::DocumentObject*> one, std::vector<App::DocumentObject*> other) {
+            std::ranges::sort(one);
+            std::ranges::sort(other);
+            return one == other;
+        };
+        if (!same(scope, before)) {
             Gui::Command::doCommand(Gui::Command::Doc, "import PartDesign");
             Gui::Command::doCommand(
                 Gui::Command::Doc,
-                "PartDesign.makeMerge(%s, [%s])",
+                "PartDesign.setMergeScope(%s, [%s])",
                 Gui::Command::getObjectCmd(feature).c_str(),
                 ticked.c_str()
             );
+            // The merged material shows: the Merge, the feature's result with the merged parts
+            if (PartDesign::Boolean* made = mergeAfter(feature)) {
+                Gui::cmdAppObjectShow(made);
+            }
             // The Merge computes now: OK purges the document's touched objects (accept())
             Gui::cmdAppDocument(feature, "recompute()");
         }

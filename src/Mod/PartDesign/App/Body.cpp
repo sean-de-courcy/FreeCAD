@@ -676,6 +676,15 @@ Body* Body::newPartFrom(App::DocumentObject* feature)
         part->addObject(sketch);
     }
     part->addObject(feature);
+    // Onshape's New has no merge scope (ops#640 rank 1): the feature is its new part's first solid
+    if (auto addSub = freecad_cast<FeatureAddSub*>(feature)) {
+        if (addSub->EmptyMergeScope.getValue()) {
+            addSub->EmptyMergeScope.setValue(false);
+        }
+        if (addSub->MergeWithAll.getValue()) {
+            addSub->MergeWithAll.setValue(false);
+        }
+    }
     return part;
 }
 
@@ -893,6 +902,20 @@ void Body::setBaseProperty(App::DocumentObject* feature)
 std::vector<App::DocumentObject*> Body::removeObject(App::DocumentObject* feature)
 {
     // This method must be called BEFORE the feature is removed from the Document!
+
+    // The Merge that is the feature's merge scope goes with it, so its parts are parts again, as
+    // when an Onshape Extrude is deleted (ops#640 rank 1; Boolean::scopeMerge). First, so the
+    // chain below is rerouted past both. A move out of the Body (newPartFrom, addToPart) is
+    // refused before it gets here while the Merge uses the feature
+    if (hasObject(feature)) {
+        if (Boolean* merge = Boolean::scopeMerge(feature); merge && hasObject(merge)) {
+            if (App::Document* doc = merge->getDocument()) {
+                const std::string name = merge->getNameInDocument();
+                removeObject(merge);
+                doc->removeObject(name.c_str());
+            }
+        }
+    }
 
     App::DocumentObject* nextSolidFeature = getNextSolidFeature(feature);
     App::DocumentObject* prevSolidFeature = getPrevSolidFeature(feature);
