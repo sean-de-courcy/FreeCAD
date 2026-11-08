@@ -2735,6 +2735,16 @@ bool TaskDlgFeatureParameters::accept()
         }
 
         Gui::cmdGuiDocument(feature, "resetEdit()");
+        // FreeCAD-CH (ops#640, journey J18, F4): the edit's end shows the feature it edited,
+        // which hid its Merge again, so a merged part vanished from the view while the merging
+        // extrude was the last feature. The part's result is the Merge when it is the tip
+        if (PartDesign::Boolean* merge = PartDesign::Boolean::scopeMerge(feature)) {
+            PartDesign::Body* body = PartDesign::Body::findBodyOf(merge);
+            if (body && body->Tip.getValue() == merge) {
+                Gui::cmdAppObjectShow(merge);
+                Gui::cmdAppObjectHide(feature);  // as a new tip hides the feature before it
+            }
+        }
         feature->getDocument()->commitTransaction();
         endDialogHistory(feature->getDocument());  // FreeCAD-CH (ops#640)
     }

@@ -101,6 +101,24 @@ class TestMergeScopeGui(ResultBoxGuiCase):
         self.assertFalse(lid.MergeWithAll)
         self.assertAlmostEqual(self.body.Shape.Volume, MERGED, places=3)
 
+    def testTheMergedPartShowsAfterOk(self):
+        """Journey J18 (F4): Panel ticked, OK, the lid pad the last feature: the part shown is the
+        Merge (the lid pad with Panel, MERGED), not the lid pad alone, whose edit's end showed it
+        over the hidden Merge (Panel's material vanished from the view)."""
+        self.parts()
+        lid = pad(self.body, "Lid", self.lidSk, 10)
+        self.doc.recompute()
+        self.openEdit(lid)
+        self.mergeList().item(0).setCheckState(QtCore.Qt.Checked)
+        self.close(ok=True)
+        merge = PartDesign.mergeAfter(lid)
+        self.assertIsNotNone(merge)
+        self.assertIs(self.body.Tip, merge)
+        self.assertTrue(merge.Visibility, "the Merge, the part's result, is hidden")
+        self.assertFalse(lid.Visibility, "the lid pad is drawn over the Merge")
+        self.assertFalse(self.panel.Visibility)
+        self.assertAlmostEqual(merge.Shape.Volume, MERGED, places=3)
+
     def testUntickUnmerges(self):
         """The lid pad with Panel in its scope, edited: Panel is listed ticked. Unticked, OK: the
         Merge is gone, Panel is a part again (shown, 12000), the enclosure LID."""
