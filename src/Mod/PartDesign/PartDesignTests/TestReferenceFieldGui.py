@@ -2617,8 +2617,10 @@ class TestReferenceFieldGui(unittest.TestCase):
     def pattern(self, typeName, originals, transformBody=False):
         """A pattern of the bumps, as the Pattern model places its copies. It joins the body with
         its Originals set. An empty one joins as a pattern of the whole body and is switched back:
-        a pattern of nothing then leaves the Body's chain and its base is cleared (ops#590), as
-        Onshape builds the next feature on the one before a pattern with nothing to pattern."""
+        a pattern in the chain left with nothing to pattern stays in it, red, and passes its base
+        through (ops#640, regen F3 and the hub's decision), as Onshape builds the next feature on
+        the one before a pattern with nothing to pattern. (A new pattern made with nothing picked
+        stays out of the chain, with no base: ops#590.)"""
         pattern = self.doc.addObject(typeName, typeName.split("::")[1])
         if typeName == "PartDesign::LinearPattern":
             pattern.Direction = (models.originFeature(self.body, "X_Axis"), [""])
@@ -2640,10 +2642,10 @@ class TestReferenceFieldGui(unittest.TestCase):
         if not transformBody and not originals:
             pattern.TransformMode = "Features"
         self.doc.recompute()
-        if originals or transformBody:
-            self.assertIsNotNone(pattern.BaseFeature)
-        else:
-            self.assertIsNone(pattern.BaseFeature)
+        self.assertIsNotNone(pattern.BaseFeature)
+        if not originals and not transformBody:
+            self.assertFalse(pattern.isValid())
+            self.assertIn("Select features to pattern.", pattern.getStatusString())
         return pattern
 
     def names(self, field):
@@ -2668,7 +2670,9 @@ class TestReferenceFieldGui(unittest.TestCase):
         Remove buttons); a pick of a bump in the tree adds it, and the pattern computes during
         the edit (ops#182: the edit's roll-back point took it for a MultiTransform's step and
         held it until the edit ended). A bump made after the pattern stays held during the edit,
-        and the pattern doesn't (ops#212)."""
+        and the pattern doesn't (ops#212). Since ops#640 (regen F3, the hub's decision) the empty
+        pattern stays in the chain, red, and passes its base through: the box after it builds on
+        it, with the bump before's shape."""
         first, second = self.bumps()
         pattern = self.pattern("PartDesign::LinearPattern", [])
         after = self.doc.addObject("PartDesign::AdditiveBox", "After")
@@ -2678,8 +2682,12 @@ class TestReferenceFieldGui(unittest.TestCase):
         after.Placement = App.Placement(App.Vector(-3, 3, 10), App.Rotation())
         self.doc.recompute()
         self.assertEqual(self.body.Group.index(after), self.body.Group.index(pattern) + 1)
-        # Out of the chain while it patterns nothing (ops#590): the box builds on the bump before
-        self.assertEqual(after.BaseFeature, second)
+        # In the chain while it patterns nothing, red, its base passed through (ops#640, F3): the
+        # box builds on the pattern, which hands on the bump before's shape
+        self.assertEqual(pattern.BaseFeature, second)
+        self.assertFalse(pattern.isValid())
+        self.assertEqual(after.BaseFeature, pattern)
+        self.assertTrue(after.isValid(), after.getStatusString())
         self.assertAlmostEqual(after.Shape.Volume, 1003, places=6)
         [field] = self.edit(pattern)
         self.assertTrue(self.body.holds(after), "the feature after the pattern isn't held")
@@ -2694,7 +2702,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertEqual(self.names(field), [first.Name])
         self.assertEqual(texts(field), ["Bump"])
         self.assertTrue(armed(field))
-        # With an original it joins the chain, and the box after it follows it (ops#590)
+        # With an original it computes in its place, and the box after it follows it (ops#590)
         self.assertEqual(pattern.BaseFeature, second)
         self.assertEqual(after.BaseFeature, pattern)
         self.assertVolume(pattern, 1003)
