@@ -109,4 +109,5 @@ FreeCAD.__unit_test__ += [
     "TestViewProviderLink",
     "TestPropertyEditorGui",
     "TestVariablesGui",
+    "TestVariableFieldsGui",
 ]

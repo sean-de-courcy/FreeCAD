@@ -25,6 +25,7 @@
 #include <array>
 #include <cmath>
 #include <limits>
+#include <locale>
 #include <numbers>
 #include <sstream>
 #include <string>
@@ -606,8 +607,178 @@ private:
 # pragma GCC diagnostic pop
 #endif
 
-Quantity Quantity::parse(const std::string& string)
+namespace
 {
+
+// FreeCAD-CH (ops#640, rank 56): a literal fraction in front of a unit is one quantity, as Onshape
+// reads it: `3/4 in` is three quarters of an inch (0.75 in), as in expressions (App's
+// rewriteLiteralFractions in Expression.cpp). `NUM / NUM UNIT` becomes the quotient's value and
+// the unit, when the numerator starts an operand (at the start or after `(`, `+`, `-` or `*`).
+
+// The length of the number literal at s[i] as Quantity.l reads one, or 0.
+std::size_t fractionNumberLength(const std::string& s, std::size_t i)
+{
+    auto digit = [&s](std::size_t k) {
+        return k < s.size() && s[k] >= '0' && s[k] <= '9';
+    };
+    std::size_t j = i;
+    while (digit(j)) {
+        ++j;
+    }
+    if (j < s.size() && (s[j] == '.' || s[j] == ',') && (j > i || digit(j + 1))) {
+        ++j;
+        while (digit(j)) {
+            ++j;
+        }
+    }
+    if (j == i) {
+        return 0;
+    }
+    if (j < s.size() && (s[j] == 'e' || s[j] == 'E')) {
+        std::size_t k = j + 1;
+        if (k < s.size() && (s[k] == '+' || s[k] == '-')) {
+            ++k;
+        }
+        if (digit(k)) {
+            while (digit(k)) {
+                ++k;
+            }
+            j = k;
+        }
+    }
+    return j - i;
+}
+
+std::size_t fractionSkipBlanks(const std::string& s, std::size_t i)
+{
+    while (i < s.size() && (s[i] == ' ' || s[i] == '\t')) {
+        ++i;
+    }
+    return i;
+}
+
+bool isFractionChar(char c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || static_cast<unsigned char>(c) >= 0x80;
+}
+
+// The end of the unit starting at s[i] (letters, `"` or `'`, and a `^ [-]n` after them), or npos.
+std::size_t fractionUnitEnd(const std::string& s, std::size_t i)
+{
+    std::size_t j = i;
+    if (i < s.size() && (s[i] == '"' || s[i] == '\'')) {
+        j = i + 1;
+    }
+    else {
+        while (j < s.size() && isFractionChar(s[j])) {
+            ++j;
+        }
+    }
+    if (j == i) {
+        return std::string::npos;
+    }
+    try {
+        if (Quantity::parse("1 " + s.substr(i, j - i)).isDimensionless()) {
+            return std::string::npos;
+        }
+    }
+    catch (const Base::Exception&) {
+        return std::string::npos;
+    }
+    std::size_t k = fractionSkipBlanks(s, j);
+    if (k < s.size() && s[k] == '^') {
+        k = fractionSkipBlanks(s, k + 1);
+        if (k < s.size() && s[k] == '-') {
+            ++k;
+        }
+        std::size_t n = k;
+        while (n < s.size() && s[n] >= '0' && s[n] <= '9') {
+            ++n;
+        }
+        if (n > k) {
+            j = n;
+        }
+    }
+    return j;
+}
+
+double fractionValue(std::string text)
+{
+    for (auto& c : text) {
+        if (c == ',') {
+            c = '.';
+        }
+    }
+    std::istringstream in(text);
+    in.imbue(std::locale::classic());
+    double value = 0.0;
+    in >> value;
+    return value;
+}
+
+std::string rewriteLiteralFractions(const std::string& s)
+{
+    if (s.find('/') == std::string::npos) {
+        return s;
+    }
+    std::string out;
+    out.reserve(s.size());
+    bool operandStart = true;
+    std::size_t i = 0;
+    while (i < s.size()) {
+        char c = s[i];
+        if (c == ' ' || c == '\t') {
+            out += c;
+            ++i;
+            continue;
+        }
+        if (std::size_t n = fractionNumberLength(s, i); n > 0) {
+            if (operandStart) {
+                std::size_t slash = fractionSkipBlanks(s, i + n);
+                if (slash < s.size() && s[slash] == '/') {
+                    std::size_t den = fractionSkipBlanks(s, slash + 1);
+                    std::size_t m = fractionNumberLength(s, den);
+                    if (m > 0) {
+                        std::size_t unit = fractionSkipBlanks(s, den + m);
+                        std::size_t end = fractionUnitEnd(s, unit);
+                        double denominator = fractionValue(s.substr(den, m));
+                        if (end != std::string::npos && denominator != 0.0) {
+                            out += fmt::format("{}", fractionValue(s.substr(i, n)) / denominator);
+                            out += ' ';
+                            out.append(s, unit, end - unit);
+                            operandStart = false;
+                            i = end;
+                            continue;
+                        }
+                    }
+                }
+            }
+            out.append(s, i, n);
+            operandStart = false;
+            i += n;
+            continue;
+        }
+        if (isFractionChar(c)) {
+            while (i < s.size() && isFractionChar(s[i])) {
+                out += s[i];
+                ++i;
+            }
+            operandStart = false;
+            continue;
+        }
+        out += c;
+        operandStart = c == '(' || c == '+' || c == '-' || c == '*';
+        ++i;
+    }
+    return out;
+}
+
+}  // namespace
+
+Quantity Quantity::parse(const std::string& input)
+{
+    // FreeCAD-CH (ops#640, rank 56): `3/4 in` is 0.75 in
+    const std::string string = rewriteLiteralFractions(input);
     // parse from buffer
     QuantityParser::YY_BUFFER_STATE my_string_buffer = QuantityParser::yy_scan_string(string.c_str());
     QuantityParser::StringBufferCleaner cleaner(my_string_buffer);

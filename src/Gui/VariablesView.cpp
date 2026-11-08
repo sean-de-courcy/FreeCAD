@@ -70,6 +70,8 @@
 #include "Application.h"
 #include "BitmapFactory.h"
 #include "Command.h"
+#include "DockWindowManager.h"
+#include "ForkKeymap.h"
 #include "Document.h"
 #include "ExpressionCompleter.h"
 #include "MainWindow.h"
@@ -418,6 +420,58 @@ bool isEditableSet(const App::DocumentObject* obj)
     auto copy = freecad_cast<const App::VarSetCopy*>(obj);
     return obj && obj->isDerivedFrom<App::VarSet>() && !(copy && copy->isAttached());
 }
+
+/// FreeCAD-CH (ops#640, rank 55): the application property through which a field's "New
+/// variable..." hands the Add dialog the typed name and the field's value (a QStringList; set
+/// around a run of Std_AddVariable by QuantitySpinBox.cpp and ExpressionCompleter.cpp).
+constexpr const char* newVariableProperty = "FreeCADCH_NewVariable";
+
+/// FreeCAD-CH (ops#640, rank 15): Onshape's Variable tool, on Part Design's Features toolbar:
+/// the Variables panel shown, and its Add dialog. A dialog's open transaction takes the add.
+class StdCmdAddVariable: public Gui::Command
+{
+public:
+    StdCmdAddVariable()
+        : Command("Std_AddVariable")
+    {
+        sGroup = "Edit";
+        sMenuText = QT_TR_NOOP("Variable");
+        sToolTipText = QT_TR_NOOP("Adds a variable, to use as #name in any field");
+        sWhatsThis = "Std_AddVariable";
+        sStatusTip = sToolTipText;
+        sPixmap = "VarSet";
+    }
+    StdCmdAddVariable(const StdCmdAddVariable&) = delete;
+    StdCmdAddVariable(StdCmdAddVariable&&) = delete;
+    StdCmdAddVariable& operator=(const StdCmdAddVariable&) = delete;
+    StdCmdAddVariable& operator=(StdCmdAddVariable&&) = delete;
+    ~StdCmdAddVariable() override = default;
+
+    const char* className() const override
+    {
+        return "StdCmdAddVariable";
+    }
+
+protected:
+    void activated(int iMsg) override
+    {
+        Q_UNUSED(iMsg);
+        QWidget* view = DockWindowManager::instance()->getDockWindow("Std_VariablesView");
+        if (!view) {
+            return;
+        }
+        // through the dock's view action, which also brings it out of an overlay panel
+        DockWindowManager::instance()->activate(view);
+        if (auto action = view->findChild<QAction*>(QStringLiteral("addVariable"))) {
+            action->trigger();
+        }
+    }
+
+    bool isActive() override
+    {
+        return hasActiveDocument();
+    }
+};
 
 }  // namespace
 
@@ -1142,6 +1196,25 @@ VariablesView::VariablesView(Gui::Document* doc, QWidget* parent)
         documentName = active->getDocument()->getName();
     }
     rebuild();
+
+    // FreeCAD-CH (ops#640, rank 15): the Variable tool, made with the panel it opens
+    CommandManager& commands = Application::Instance->commandManager();
+    if (!commands.getCommandByName("Std_AddVariable")) {
+        commands.addCommand(new StdCmdAddVariable());
+    }
+    // Under the Onshape keymap the panel is shown on the right, as Onshape's variable table is
+    // (F13), once: the dock windows' saved state keeps it closed when the user closes it.
+    if (ForkKeymap::isOnshape()) {
+        auto marker = App::GetApplication().GetParameterGroupByPath(
+            "User parameter:BaseApp/Preferences/DockWindows/VariablesView"
+        );
+        if (!marker->GetBool("ShownByKeymap", false)) {
+            marker->SetBool("ShownByKeymap", true);
+            App::GetApplication()
+                .GetParameterGroupByPath("User parameter:BaseApp/MainWindow/DockWindows")
+                ->SetBool("Std_VariablesView", true);
+        }
+    }
 }
 
 VariablesView::~VariablesView() = default;
@@ -1435,6 +1508,30 @@ void VariablesView::addVariable()
         valueEdit->setDocumentObject(doc->getObjects().front());
     }
 
+    // FreeCAD-CH (ops#640, rank 55): from a field's "New variable...": its name, its value as
+    // the variable's, and the type that value has. Onshape fills in the name the same way.
+    const QStringList fromField = qApp->property(newVariableProperty).toStringList();
+    qApp->setProperty(newVariableProperty, QVariant());
+    if (!fromField.isEmpty()) {
+        nameEdit->setText(fromField.front());
+        if (fromField.size() > 1) {
+            valueEdit->setText(fromField.at(1));
+            try {
+                Base::Quantity quantity = Base::Quantity::parse(fromField.at(1).toStdString());
+                const char* type = quantity.getUnit() == Base::Unit::Angle ? "App::PropertyAngle"
+                    : quantity.isDimensionless()                           ? "App::PropertyFloat"
+                                                 : "App::PropertyDistance";
+                int index = typeBox->findData(QByteArray(type));
+                if (index >= 0) {
+                    typeBox->setCurrentIndex(index);
+                }
+            }
+            catch (const Base::Exception&) {
+                // not a plain value: the type stays Length
+            }
+        }
+    }
+
     auto errorLabel = new QLabel(dialog);
     errorLabel->setObjectName(QStringLiteral("error"));
     errorLabel->setWordWrap(true);
@@ -1514,7 +1611,13 @@ void VariablesView::addVariable()
     dialog->show();
     dialog->raise();
     dialog->activateWindow();
-    nameEdit->setFocus();
+    if (fromField.isEmpty()) {
+        nameEdit->setFocus();
+    }
+    else {
+        valueEdit->setFocus();
+        valueEdit->selectAll();
+    }
 }
 
 bool VariablesView::addFromDialog(

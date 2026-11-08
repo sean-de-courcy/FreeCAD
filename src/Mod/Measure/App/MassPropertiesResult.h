@@ -61,6 +61,12 @@ struct MeasureExport MassPropertiesData
     Base::Vector3d principalAxis3 {0.0, 0.0, 0.0};
 
     double axisInertia = 0.0;
+
+    /** FreeCAD-CH (ops#640, rank 16; hands-on D-3): how many measured parts have no material
+     * (the "Default" one, or one without a density). Where any has none, the figures that need a
+     * density (mass, density, centre of gravity, inertia) are left at zero, as Onshape leaves
+     * them blank; volume, surface area and the centre of volume stay. */
+    int partsWithoutMaterial = 0;
 };
 
 struct MeasureExport MassPropertiesAxisReference

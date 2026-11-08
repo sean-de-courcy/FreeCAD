@@ -85,8 +85,10 @@
 #include "SoFCUnifiedSelection.h"
 #include "SelectionColors.h"
 #include "Application.h"
+#include "Control.h"
 #include "Document.h"
 #include "DocumentObserver.h"
+#include "ForkKeymap.h"
 #include "MainWindow.h"
 #include "SoFCInteractiveElement.h"
 #include "SoFCSelectionAction.h"
@@ -1032,7 +1034,13 @@ void SoFCUnifiedSelection::handleEvent(SoHandleEventAction* action)
             bool greedySel = Gui::Selection().getSelectionStyle()
                 == Gui::SelectionSingleton::SelectionStyle::GreedySelection;
             greedySel = greedySel || event->wasCtrlDown();
-            const bool additive = greedySel || selectionAdditive.getValue();
+            // FreeCAD-CH (ops#640, rank 53): under the fork's keymap clicks accumulate without a
+            // modifier, as in Onshape (a click on a selected entity deselects it), and a click on
+            // empty space clears the selection: that release is not handled here, so the
+            // navigation style's empty-click clear runs (not with Ctrl, as before). Not while a
+            // task dialog is open: its pick fields (and the sketch editor) keep their own rules.
+            const bool additive = greedySel || selectionAdditive.getValue()
+                || (ForkKeymap::isOnshape() && !Gui::Control().activeDialog());
             // FreeCAD-CH (ops#634): with additive picks (the sketch editor) a release that
             // selected nothing goes on to the editing view provider, Ctrl or not: its own
             // elements' Ctrl+click and empty click are handled there

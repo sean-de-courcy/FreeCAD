@@ -185,10 +185,21 @@ class TestVariablesPanelGui(unittest.TestCase):
     # G18 first: the dock as a fresh FREECAD_USER_HOME has it
 
     def test_a_dock_hidden_by_default(self):
-        """G18. The "Variables" dock exists and is hidden; its toggle action is in View > Panels,
-        and triggering it shows the dock."""
+        """G18. The "Variables" dock exists; under the Onshape keymap (the fork's default) it is
+        shown on the right from the start, as Onshape's variable table is (ops#640, rank 15, F13),
+        else hidden. Its toggle action is in View > Panels, and triggering it shows the dock."""
         dock = dockOf(self.panel)
         self.assertIsNotNone(dock)
+        keymap = App.ParamGet("User parameter:BaseApp/Preferences/General").GetString(
+            "Keymap", "Onshape"
+        )
+        if keymap != "FreeCAD":
+            self.assertTrue(dock.isVisible())
+            self.assertEqual(
+                Gui.getMainWindow().dockWidgetArea(dock), QtCore.Qt.RightDockWidgetArea
+            )
+            dock.hide()
+            pump(0.1)
         self.assertFalse(dock.isVisible())
         # The Panels menu has no parent widget: reach it through the menu bar's actions.
         panels = []

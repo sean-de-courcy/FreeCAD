@@ -300,6 +300,44 @@ class TestOnshapeNavigationGui(unittest.TestCase):
         self.drag(RIGHT, start, start + QtCore.QPoint(80, 0))
         self.assertFalse(sameRotation(before, self.orientation()), "a right-drag didn't turn")
 
+    def screenZ(self):
+        """The world Z axis in the camera's frame: (right, up, toward the eye) on screen."""
+        return self.orientation().inverted().multVec(App.Vector(0, 0, 1))
+
+    def diagonalTurn(self, modifiers=NO_MODIFIER):
+        """A diagonal right-drag of (+80, +40) px from the centre under the free orbit
+        (View/OrbitStyle 4, the pack's); returns the world Z axis on screen after it. Starts
+        isometric, where Z is vertical on screen (its screen x is 0)."""
+        view = App.ParamGet(VIEW)
+        saved = view.GetInt("OrbitStyle", -1) if "OrbitStyle" in view.GetInts() else None
+        view.SetInt("OrbitStyle", 4)
+        pump()
+        try:
+            self.assertAlmostEqual(self.screenZ().x, 0.0, places=5, msg="Z starts tilted")
+            before = self.orientation()
+            start = self.center()
+            self.drag(RIGHT, start, start + QtCore.QPoint(80, 40), modifiers, steps=8)
+            self.assertFalse(sameRotation(before, self.orientation()), "the drag didn't turn")
+            return self.screenZ()
+        finally:
+            if saved is None:
+                view.RemInt("OrbitStyle")
+            else:
+                view.SetInt("OrbitStyle", saved)
+            pump()
+
+    def testPlainRightDragIsAFreeTrackball(self):
+        """Rank 90 (hands-on R12b): a plain diagonal right-drag rolls the model, as Onshape's
+        default: the Z axis leaves the screen's vertical (its screen x is no longer 0)."""
+        z = self.diagonalTurn()
+        self.assertGreater(abs(z.x), 0.01, "a diagonal right-drag kept Z vertical (a turntable)")
+
+    def testAltRightDragKeepsZVertical(self):
+        """Rank 90 (hands-on R12b): Alt+right-drag is Onshape's constrained rotate: after a
+        diagonal drag the Z axis is still vertical on screen (screen x 0), the model turned."""
+        z = self.diagonalTurn(QtCore.Qt.KeyboardModifier.AltModifier)
+        self.assertAlmostEqual(z.x, 0.0, places=4, msg="Alt+right-drag tilted the Z axis")
+
     def testRightDragOpensNoMenuAndSelectsNothing(self):
         """nav-8: a right-drag of 80 px opens no context menu and selects nothing, with an
         entity preselected under the press."""
@@ -439,6 +477,179 @@ class TestOnshapeNavigationGui(unittest.TestCase):
         self.assertNoPopup("a Shift+right click opened the context menu")
         self.assertEqual(self.selectedNames(), [], "a Shift+right click selected")
         self.assertTrue(sameRotation(orientation, self.orientation()), "a Shift+right click turned")
+
+    # tests: click selection (rank 53)
+
+    def faceCentre(self, point):
+        """The widget point a 3D point of the box renders at."""
+        return self.toQPoint(self.projectToViewport(point))
+
+    def leftClick(self, pos):
+        """A left click at pos, then a wait past the double-click interval (two quick clicks
+        would be a double click)."""
+        self.mouse(MOVE, pos, NO_BUTTON, NO_BUTTON)
+        pump(20)
+        self.click(LEFT, pos)
+        QtTest.QTest.qWait(QtWidgets.QApplication.doubleClickInterval() + 100)
+        pump()
+
+    def selectedSubs(self):
+        return sorted(
+            sub for sel in Gui.Selection.getSelectionEx() for sub in sel.SubElementNames
+        )
+
+    def topAndRight(self):
+        """Clicks the box's top face (the centre of z = 10) and its right face (x = 10), both
+        seen in the isometric view; returns their names as picked."""
+        self.leftClick(self.faceCentre(App.Vector(5, 5, 10)))
+        first = self.selectedSubs()
+        self.assertEqual(len(first), 1, "a click on the top face selected %s" % first)
+        self.leftClick(self.faceCentre(App.Vector(10, 5, 5)))
+        return first
+
+    def testClicksAccumulate(self):
+        """Rank 53: under the fork's keymap a second click adds to the selection (no modifier),
+        as in Onshape; a click on a selected face deselects it."""
+        first = self.topAndRight()
+        both = self.selectedSubs()
+        self.assertEqual(len(both), 2, "the second click replaced the selection: %s" % both)
+        self.assertIn(first[0], both)
+        self.leftClick(self.faceCentre(App.Vector(5, 5, 10)))
+        self.assertEqual(len(self.selectedSubs()), 1, "a click on a selected face kept it")
+        self.assertNotIn(first[0], self.selectedSubs())
+
+    def testEmptyClickClears(self):
+        """Rank 53: a click on empty space clears the accumulated selection."""
+        self.topAndRight()
+        self.assertEqual(len(self.selectedSubs()), 2)
+        self.leftClick(QtCore.QPoint(5, 5))
+        self.assertEqual(self.selectedNames(), [], "a click on empty space kept the selection")
+
+    def testEscClearsWithNoDialog(self):
+        """Rank 53: Esc in the 3D view with no task dialog open clears the selection."""
+        self.topAndRight()
+        self.assertEqual(len(self.selectedSubs()), 2)
+        self.assertFalse(Gui.Control.activeDialog(), "a task dialog is open")
+        for _ in range(20):
+            self.viewport.window().activateWindow()
+            self.viewport.setFocus(QtCore.Qt.FocusReason.OtherFocusReason)
+            pump(50)
+            focused = QtWidgets.QApplication.focusWidget()
+            if focused is not None and (
+                focused is self.viewport or self.viewport.isAncestorOf(focused)
+            ):
+                break
+        else:
+            self.skipTest("the 3D view doesn't take the focus here")
+        QtTest.QTest.keyClick(Gui.getMainWindow().windowHandle(), QtCore.Qt.Key.Key_Escape)
+        pump(100)
+        self.assertEqual(self.selectedNames(), [], "Esc kept the selection")
+
+    def testClickReplacesWithoutTheForkKeymap(self):
+        """Decision 1: under General/Keymap = FreeCAD a second click replaces the selection,
+        as before."""
+        saved = savedString(KEYMAP, "Keymap")
+        App.ParamGet(KEYMAP).SetString("Keymap", "FreeCAD")
+        pump(100)
+        try:
+            self.topAndRight()
+            self.assertEqual(len(self.selectedSubs()), 1, "clicks accumulated under FreeCAD")
+        finally:
+            restoreString(KEYMAP, "Keymap", saved)
+            pump(100)
+
+    def testClickReplacesWithATaskDialogOpen(self):
+        """Rank 53 stops at task dialogs: with one open, a second click replaces the selection
+        as before (the dialog's pick fields keep their own rules)."""
+
+        class Panel:
+            def __init__(self):
+                self.form = QtWidgets.QWidget()
+
+        Gui.Control.showDialog(Panel())
+        pump(100)
+        try:
+            self.assertTrue(Gui.Control.activeDialog())
+            self.topAndRight()
+            self.assertEqual(len(self.selectedSubs()), 1, "clicks accumulated in a dialog")
+        finally:
+            Gui.Control.closeDialog()
+            pump(100)
+
+    # tests: Zoom to fit (rank 85, hands-on D-4)
+
+    def freeSpan(self):
+        """The fractions (left, right) of the view's width that no visible overlay panel docked
+        left or right covers, as the viewer's fit finds them (View3DInventorViewer.cpp,
+        freeFitSpan): the left and right panels (OverlayLeft, OverlayRight, as getDockArea()
+        tells them there) cut the span; top and bottom ones don't; (0, 1) where the panels
+        would leave less than a third."""
+        viewRect = QtCore.QRect(self.viewport.mapToGlobal(QtCore.QPoint(0, 0)), self.viewport.size())
+        x0, x1 = viewRect.left(), viewRect.left() + viewRect.width()
+        for panel in Gui.getMainWindow().findChildren(QtWidgets.QTabWidget):
+            if panel.metaObject().className() != "Gui::OverlayTabWidget":
+                continue
+            if not panel.isVisible() or panel.count() == 0:
+                continue
+            rect = QtCore.QRect(panel.mapToGlobal(QtCore.QPoint(0, 0)), panel.size())
+            if not rect.intersects(viewRect):
+                continue
+            if panel.objectName() == "OverlayLeft":
+                x0 = max(x0, rect.left() + rect.width())
+            elif panel.objectName() == "OverlayRight":
+                x1 = min(x1, rect.left())
+        if 3 * (x1 - x0) < viewRect.width():
+            return 0.0, 1.0
+        width = float(viewRect.width())
+        return (x0 - viewRect.left()) / width, (x1 - viewRect.left()) / width
+
+    def fittedFront(self):
+        """The 10 mm box seen from the front, orthographic, after View Fit: its projected extent
+        (a 10 x 10 square) as fractions of the view's width and height, and its centre's
+        fractions from the left and the bottom."""
+        self.view.setCameraType("Orthographic")
+        self.view.viewFront()
+        pump()
+        Gui.SendMsgToActiveView("ViewFit")
+        pump(100)
+        width, height = self.view.getSize()
+        corners = [
+            self.projectToViewport(App.Vector(x, y, z))
+            for x in (0, 10)
+            for y in (0, 10)
+            for z in (0, 10)
+        ]
+        xs = [c[0] for c in corners]
+        ys = [c[1] for c in corners]
+        return (
+            (max(xs) - min(xs)) / width,
+            (max(ys) - min(ys)) / height,
+            (max(xs) + min(xs)) / 2 / width,
+            (max(ys) + min(ys)) / 2 / height,
+        )
+
+    def testFitLeavesOnshapesMargin(self):
+        """Rank 85 (hands-on D-4): View Fit makes the model's projected extent fill 95 % of the
+        free graphics area's limiting dimension (2.5 % each side), centred in it; Coin's fit
+        framed the bounding sphere, 10 / (10 * sqrt(3)) = 58 % for a cube seen square-on."""
+        left, right = self.freeSpan()
+        fillX, fillY, centreX, centreY = self.fittedFront()
+        self.assertAlmostEqual(max(fillX / (right - left), fillY), 0.95, delta=0.005)
+        self.assertAlmostEqual(centreX, (left + right) / 2, delta=0.005)
+        self.assertAlmostEqual(centreY, 0.5, delta=0.005)
+
+    def testFitWithoutTheForkKeymapFramesTheSphere(self):
+        """Under General/Keymap = FreeCAD, View Fit is Coin's as before: the cube seen
+        square-on fills well under 95 % (its bounding sphere is framed)."""
+        saved = savedString(KEYMAP, "Keymap")
+        App.ParamGet(KEYMAP).SetString("Keymap", "FreeCAD")
+        pump(100)
+        try:
+            fillX, fillY, _, _ = self.fittedFront()
+            self.assertLess(max(fillX, fillY), 0.8, "the fit under the FreeCAD keymap is tight")
+        finally:
+            restoreString(KEYMAP, "Keymap", saved)
+            pump(100)
 
     # tests: the middle button
 

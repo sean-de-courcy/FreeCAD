@@ -75,6 +75,8 @@ def report():
         out.write("viewStyle=" + viewStyle + "\n")
         units = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/Units")
         out.write("decimals=%d\n" % units.GetInt("Decimals", -1))
+        view = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/View")
+        out.write("orbit=%d\n" % view.GetInt("OrbitStyle", -1))
     if os.name == "nt":
         import ctypes
         from ctypes import wintypes
@@ -437,12 +439,16 @@ class TestOnshapeStudioGui(unittest.TestCase):
         self.assertTrue(os.path.isfile(out), "the probe didn't report")
         with open(out, encoding="utf-8") as f:
             lines = dict(line.rstrip("\n").split("=", 1) for line in f if "=" in line)
+        self.probe = lines  # every key the probe reported, for checks beyond the three
         return lines.get("style"), lines.get("viewStyle"), lines.get("decimals") == "3"
 
     def testFirstStartAppliesTheOnshapePack(self):
         """A settings folder with no user.cfg starts with the pack's Onshape navigation style."""
         style, _, decimals = self.runOnNewHome()
         self.assertEqual((style, decimals), (ONSHAPE, True))
+        # rank 90 (hands-on R12b): Onshape's plain right-drag is a free trackball, so the pack
+        # sets the free orbit (4, RoundedArcball) over a turntable; Alt+right-drag keeps Z up
+        self.assertEqual(self.probe.get("orbit"), "4", "the pack's orbit is not the free one")
 
     def testFirstStartLeavesAnExistingUserCfgAlone(self):
         """A settings folder with a user.cfg keeps its own navigation style."""
