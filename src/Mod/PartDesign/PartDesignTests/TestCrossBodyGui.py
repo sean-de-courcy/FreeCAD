@@ -1416,7 +1416,15 @@ class TestOperationRowGui(ResultBoxGuiCase):
         self.assertEqual(
             self.items(self.modeCombo()),
             # Onshape's words (rank 22); Up to last stays in the box, hidden
-            ["Blind", "Up to last", "Up to next", "Up to face", "Up to part", "Through all"],
+            [
+                "Blind",
+                "Up to last",
+                "Up to next",
+                "Up to face",
+                "Up to part",
+                "Up to vertex",
+                "Through all",
+            ],
         )
         self.chooseMode("Through all")
         self.assertEqual(lid.Type, "ThroughAll")
@@ -1449,7 +1457,16 @@ class TestOperationRowGui(ResultBoxGuiCase):
         self.openEdit(pocket)
         self.assertEqual(
             self.items(self.modeCombo()),
-            ["Blind", "Through all", "Up to next", "Up to face", "Up to part", "Up to last"],
+            # Onshape's order (rank 22): Up to last, which it hasn't, at the end
+            [
+                "Blind",
+                "Up to next",
+                "Up to face",
+                "Up to part",
+                "Up to vertex",
+                "Through all",
+                "Up to last",
+            ],
         )
         self.chooseMode("Up to last")
         self.assertEqual(pocket.Type, "UpToLast")

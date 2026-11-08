@@ -37,6 +37,7 @@
 #include <QPointer>
 #include <QSignalBlocker>
 #include <QTimer>
+#include <QVBoxLayout>
 #include <Precision.hxx>
 #include <Standard_Failure.hxx>
 
@@ -55,6 +56,7 @@
 #include <Mod/Part/App/Part2DObject.h>
 #include <Mod/Part/App/TopoShape.h>
 #include <Mod/PartDesign/App/Body.h>
+#include <Mod/PartDesign/App/DatumPoint.h>
 #include <Mod/PartDesign/App/FeatureExtrude.h>
 #include <Mod/PartDesign/App/FeaturePocket.h>
 #include <Mod/Part/App/GizmoHelper.h>
@@ -287,10 +289,50 @@ void TaskExtrudeParameters::createSideFields(SideController& side, Side which)
     QWidget* facesPlaceholder =
         first ? ui->shapeFacesFieldPlaceholder : ui->shapeFacesFieldPlaceholder2;
 
-    side.faceField = createFaceField(facePlaceholder,
-                                     first ? "UpToFace" : "UpToFace2",
-                                     tr("Face"),
-                                     /*refuseWholeSketch=*/true);
+    // The face's and the vertex's fields share the face's row (ops#640 rank 22): a holder in
+    // the placeholder's place, the fields one under the other
+    auto holder = new QWidget(proxy);
+    holder->setObjectName(first ? QStringLiteral("upToFaceOrVertex")
+                                : QStringLiteral("upToFaceOrVertex2"));
+    auto holderLayout = new QVBoxLayout(holder);
+    holderLayout->setContentsMargins(0, 0, 0, 0);
+    auto faceSlot = new QWidget(holder);
+    auto vertexSlot = new QWidget(holder);
+    holderLayout->addWidget(faceSlot);
+    holderLayout->addWidget(vertexSlot);
+    if (QWidget* parent = facePlaceholder->parentWidget(); parent && parent->layout()) {
+        delete parent->layout()->replaceWidget(facePlaceholder, holder, Qt::FindChildrenRecursively);
+    }
+    facePlaceholder->hide();
+    facePlaceholder->deleteLater();
+
+    const char* faceProperty = first ? "UpToFace" : "UpToFace2";
+    side.faceField = createFaceField(faceSlot, faceProperty, tr("Face"), /*refuseWholeSketch=*/true);
+
+    // Up to vertex: a vertex of a part or a sketch, or a datum point, in the same UpToFace
+    {
+        ReferenceField::Options vertex = faceFieldOptions(
+            tr("Vertex"),
+            [this]() -> App::DocumentObject* { return baseSolid(); },
+            /*refuseWholeSketch=*/false
+        );
+        vertex.flags = AllowSelection::POINT;
+        vertex.kinds = tr("A vertex or a point");
+        auto vertexSelf = std::make_shared<QPointer<ReferenceField>>();
+        auto writeVertex = [this, vertexSelf](App::DocumentObject* obj,
+                                              const std::vector<std::string>& subs) {
+            if (*vertexSelf) {
+                (*vertexSelf)->assign(obj, subs);
+            }
+            tryRecomputeFeature();
+            setGizmoPositions();
+        };
+        side.vertexField = new ReferenceField(getObject(), faceProperty, vertex, writeVertex, proxy);
+        *vertexSelf = side.vertexField;
+        side.vertexField->setObjectName(first ? QStringLiteral("fieldUpToVertex")
+                                              : QStringLiteral("fieldUpToVertex2"));
+        side.vertexField->takePlaceOf(vertexSlot);
+    }
 
     // The up-to-shape: a whole shape; a pick of another one takes all its faces
     QCheckBox* allFaces = side.checkBoxAllFaces;
@@ -528,9 +570,11 @@ std::vector<ReferenceField*> TaskExtrudeParameters::referenceFields() const
                                   m_side1.faceField,
                                   m_side1.shapeField,
                                   m_side1.shapeFacesField,
+                                  m_side1.vertexField,
                                   m_side2.faceField,
                                   m_side2.shapeField,
                                   m_side2.shapeFacesField,
+                                  m_side2.vertexField,
                                   axisField}) {
         if (field) {
             fields.push_back(field);
@@ -770,8 +814,7 @@ void TaskExtrudeParameters::updateOnshapeUI()
         return mode == Mode::Dimension || (pocket ? mode == Mode::ThroughAll : mode == Mode::Appended);
     };
     const bool twoSides = sidesMode == SidesMode::TwoSides;
-    const bool offered = taperOffered(ui->changeMode->currentIndex())
-        || (twoSides && taperOffered(ui->changeMode2->currentIndex()));
+    const bool offered = taperOffered(getMode()) || (twoSides && taperOffered(getMode2()));
     draft->setVisible(offered);
     if (!draft->isChecked()) {
         for (QWidget* widget : std::initializer_list<QWidget*> {
@@ -919,16 +962,41 @@ void TaskExtrudeParameters::connectSlots()
     // clang-format on
 }
 
-void TaskExtrudeParameters::onModeChanged_Side1(int index)
+void TaskExtrudeParameters::onModeChanged_Side1(int)
 {
-    onModeChanged(index, Side::First);
+    // the row's mode, not the row (ops#640 rank 22)
+    dropUpToFaceOfOtherKind(Side::First, static_cast<Mode>(getMode()));
+    onModeChanged(getMode(), Side::First);
     setGizmoPositions();
 }
 
-void TaskExtrudeParameters::onModeChanged_Side2(int index)
+void TaskExtrudeParameters::onModeChanged_Side2(int)
 {
-    onModeChanged(index, Side::Second);
+    dropUpToFaceOfOtherKind(Side::Second, static_cast<Mode>(getMode2()));
+    onModeChanged(getMode2(), Side::Second);
     setGizmoPositions();
+}
+
+void TaskExtrudeParameters::dropUpToFaceOfOtherKind(Side side, Mode mode)
+{
+    if (mode != Mode::ToFace && mode != Mode::ToVertex) {
+        return;  // the link stays until OK (applyParameters() drops it), as before
+    }
+    App::PropertyLinkSub* link = getSideController(side).UpToFace;
+    App::DocumentObject* obj = link ? link->getValue() : nullptr;
+    if (!obj) {
+        return;
+    }
+    const std::vector<std::string> subs = link->getSubValues();
+    const std::string sub = subs.empty() ? std::string() : subs.front();
+    App::DocumentObject* named = sub.empty() || !obj->getDocument()
+        ? nullptr
+        : obj->getDocument()->getObject(sub.c_str());
+    const bool isVertex = sub.starts_with("Vertex") || obj->isDerivedFrom<PartDesign::Point>()
+        || (named && named->isDerivedFrom<App::Point>());
+    if (isVertex != (mode == Mode::ToVertex)) {
+        link->setValue(nullptr);
+    }
 }
 
 void TaskExtrudeParameters::tryRecomputeFeature()
@@ -1147,8 +1215,8 @@ void TaskExtrudeParameters::addAxisToCombo(
 void TaskExtrudeParameters::updateWholeUI(Type type, Side side)
 {
     SidesMode sidesMode = static_cast<SidesMode>(ui->sidesMode->currentIndex());
-    Mode mode1 = static_cast<Mode>(ui->changeMode->currentIndex());
-    Mode mode2 = static_cast<Mode>(ui->changeMode2->currentIndex());
+    Mode mode1 = static_cast<Mode>(getMode());
+    Mode mode2 = static_cast<Mode>(getMode2());
 
     // --- Global UI visibility based on SidesMode ---
     const bool isSide2GroupVisible = (sidesMode == SidesMode::TwoSides);
@@ -1183,6 +1251,7 @@ void TaskExtrudeParameters::updateSideUI(
     bool isTaperVisible = false;
     bool isFaceVisible = false;
     bool isShapeVisible = false;
+    bool isVertexVisible = false;
 
     // This logic block is a direct translation of the original 'if/else if' chain
     if (sideMode == Mode::Dimension) {
@@ -1220,6 +1289,14 @@ void TaskExtrudeParameters::updateSideUI(
             armField(s.shapeFacesField);
         }
     }
+    else if (sideMode == Mode::ToVertex) {
+        // Up to vertex (ops#640 rank 22): its field arms while it is empty, as the face's
+        isOffsetVisible = true;
+        isVertexVisible = true;
+        if (setFocus && s.vertexField->entries().empty()) {
+            armField(s.vertexField);
+        }
+    }
 
     // Apply visibility based on the logic above AND the parent visibility.
     // This single 'isParentVisible' check correctly hides all of Side 2's UI at once.
@@ -1244,6 +1321,15 @@ void TaskExtrudeParameters::updateSideUI(
     s.faceField->setRequired(faceShown);
     if (!faceShown) {
         s.faceField->setArmed(false);
+    }
+    const bool vertexShown = isParentVisible && isVertexVisible;
+    s.vertexField->setVisible(vertexShown);
+    s.vertexField->setRequired(vertexShown);
+    if (!vertexShown) {
+        s.vertexField->setArmed(false);
+    }
+    if (QWidget* holder = s.faceField->parentWidget()) {
+        holder->setVisible(faceShown || vertexShown);
     }
 
     const bool shapeShown = isParentVisible && isShapeVisible;
@@ -1513,14 +1599,29 @@ bool TaskExtrudeParameters::getReversed() const
     return ui->checkBoxReversed->isChecked();
 }
 
+namespace
+{
+// The end type box's rows carry their Mode (ops#640 rank 22: Onshape's order, not the Modes')
+int modeOfRow(const QComboBox* box)
+{
+    const QVariant data = box->currentData();
+    return data.isValid() ? data.toInt() : box->currentIndex();
+}
+}  // namespace
+
 int TaskExtrudeParameters::getMode() const
 {
-    return ui->changeMode->currentIndex();
+    return modeOfRow(ui->changeMode);
 }
 
 int TaskExtrudeParameters::getMode2() const
 {
-    return ui->changeMode2->currentIndex();
+    return modeOfRow(ui->changeMode2);
+}
+
+int TaskExtrudeParameters::rowOfMode(const QComboBox* box, Mode mode)
+{
+    return box->findData(static_cast<int>(mode));
 }
 
 int TaskExtrudeParameters::getSidesMode() const
@@ -1564,8 +1665,8 @@ void TaskExtrudeParameters::changeEvent(QEvent* e)
         ui->directionCB->setCurrentIndex(index);
 
         // Translate mode items
-        translateModeList(ui->changeMode, ui->changeMode->currentIndex());
-        translateModeList(ui->changeMode2, ui->changeMode2->currentIndex());
+        translateModeList(ui->changeMode, getMode());
+        translateModeList(ui->changeMode2, getMode2());
         translateSidesList(ui->sidesMode->currentIndex());
         setOnshapeWords();
         updateOnshapeUI();
@@ -1599,7 +1700,7 @@ void TaskExtrudeParameters::applyParameters()
     };
 
     // Handle deprecated 'TwoLength' mode: the UI skips it, so the modes from ToShape on are
-    // one index below their Type (Appended is Type index 6, ops#640).
+    // one index below their Type (Appended is Type index 6, ops#640; ToVertex 7, rank 22).
     int type1 = getMode();
     if (type1 >= static_cast<int>(Mode::ToShape)) {
         type1++;
@@ -1633,10 +1734,14 @@ void TaskExtrudeParameters::applyParameters()
     FCMD_OBJ_CMD(obj, "Type2 = " << type2);
     // The faces and the start reference are written by their fields as they are picked
     // (ops#150); a side that doesn't go up to a face drops its face
-    if (extrude && static_cast<Mode>(getMode()) != Mode::ToFace && extrude->UpToFace.getValue()) {
+    // (or a vertex: Up to vertex holds it in UpToFace, ops#640 rank 22)
+    auto upToFaceKept = [](int mode) {
+        return static_cast<Mode>(mode) == Mode::ToFace || static_cast<Mode>(mode) == Mode::ToVertex;
+    };
+    if (extrude && !upToFaceKept(getMode()) && extrude->UpToFace.getValue()) {
         FCMD_OBJ_CMD(obj, "UpToFace = None");
     }
-    if (extrude && static_cast<Mode>(getMode2()) != Mode::ToFace && extrude->UpToFace2.getValue()) {
+    if (extrude && !upToFaceKept(getMode2()) && extrude->UpToFace2.getValue()) {
         FCMD_OBJ_CMD(obj, "UpToFace2 = None");
     }
     FCMD_OBJ_CMD(obj, "Reversed = " << (getReversed() ? 1 : 0));

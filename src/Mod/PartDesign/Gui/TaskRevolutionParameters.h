@@ -132,6 +132,10 @@ protected:
         ToFirst,
         ToFace,
         TwoAngles,
+        // Onshape's Up to vertex and Up to part (ops#640 rank 21), appended to Type: the end
+        // type box lists the modes in Onshape's order, each row's data its mode (getMode())
+        ToVertex,
+        ToShape,
     };
 
 private:
@@ -142,6 +146,9 @@ private:
         Gui::QuantitySpinBox* angleEdit = nullptr;
         /// The up-to-face (ops#150 W6)
         ReferenceField* faceField = nullptr;
+        /// Up to vertex's vertex and Up to part's part, in UpToFace too (ops#640 rank 21)
+        ReferenceField* vertexField = nullptr;
+        ReferenceField* partField = nullptr;
 
         App::PropertyEnumeration* Type = nullptr;
         App::PropertyAngle* Angle = nullptr;
@@ -201,6 +208,9 @@ private:
     void translateModeList(QComboBox* box, int index);
     void translateSidesList(int index);
     void onModeChanged(int index, Side side);
+    /// Up to face, vertex and part share UpToFace: a switch among them drops a link of another
+    /// kind (ops#640 rank 21)
+    void dropUpToFaceOfOtherKind(Side side, Mode mode);
     Gui::ViewProviderCoordinateSystem* getOriginView() const;
 
 private:
