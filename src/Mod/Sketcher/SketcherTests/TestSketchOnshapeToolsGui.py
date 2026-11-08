@@ -286,8 +286,24 @@ class TestSketchTangentArcGui(SketchToolsTestCase):
         )
 
     def finish_chain(self):
+        """A right-click ends the chain; a second leaves the tool. With continuous creation off
+        (setUp) the first one already leaves it, and the second opens the sketch's context menu,
+        whose exec() blocks the test: a popup that opens is closed."""
         point = self.screen_point(9, 9)
         self.right_click(self.viewport, point)
+        self.flush_gui(60)
+        state = {"waited": 0}
+
+        def closePopup():
+            popup = QtGui.QApplication.activePopupWidget()
+            if popup is not None:
+                popup.close()
+                return
+            state["waited"] += 50
+            if state["waited"] < 2000:
+                QtCore.QTimer.singleShot(50, closePopup)
+
+        QtCore.QTimer.singleShot(50, closePopup)
         self.right_click(self.viewport, point)
         self.flush_gui(150)
 

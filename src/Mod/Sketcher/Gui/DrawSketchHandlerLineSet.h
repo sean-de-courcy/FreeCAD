@@ -1421,8 +1421,10 @@ private:
             return;
         }
 
+        // FreeCAD-CH (ops#640): setState() finishes the polyline itself (onModeChanged()), and
+        // with continuous creation off that deletes this handler: a finish() after it ran on the
+        // deleted handler ("Illegal storage access" on the right-click that ends a polyline)
         setState(SelectMode::End);
-        finish();
     }
 
     void rightButtonOrEsc() override
